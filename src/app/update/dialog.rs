@@ -359,6 +359,7 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
     /// one new block in the active drawing. Returns the new block's name, or an
     /// error message. Nested block definitions are imported first so nested
     /// INSERTs render (AutoCAD's "inserting a drawing imports its block defs").
+    #[cfg(not(target_arch = "wasm32"))]
     fn import_file_as_block(&mut self, path: std::path::PathBuf) -> Result<String, String> {
         let doc = crate::io::load_file(&path).map_err(|e| e.to_string())?;
         let stem = path
@@ -366,6 +367,15 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Block".to_string());
         self.import_document_as_block(doc, stem)
+    }
+
+    /// Path-based file loading does not exist in the web build (the browser
+    /// has no file paths); the picker flow never produces a `PathBuf` there.
+    #[cfg(target_arch = "wasm32")]
+    fn import_file_as_block(&mut self, _path: std::path::PathBuf) -> Result<String, String> {
+        Err(String::from(
+            "importing a file as a block is not available in the web build",
+        ))
     }
 
     /// Define one block in the active drawing from a loaded `CadDocument`'s

@@ -104,7 +104,7 @@ pub fn general_section(entity: &EntityType) -> PropSection {
 }
 
 /// The "P&ID" group: the published identity a `.pid` import wrote into the
-/// entity's XDATA (see `crate::io::pid::PID_SEMANTICS_XDATA_APP`).
+/// entity's XDATA (see `crate::io::PID_SEMANTICS_XDATA_APP`).
 ///
 /// Present only when the drawing shipped a `_Data.xml` and the entity's
 /// record joined to it — an entity without the XDATA record simply has no
@@ -114,7 +114,7 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
     let record = entity
         .common()
         .extended_data
-        .get_record(crate::io::pid::PID_SEMANTICS_XDATA_APP)?;
+        .get_record(crate::io::PID_SEMANTICS_XDATA_APP)?;
 
     let mut class = None;
     let mut label = None;

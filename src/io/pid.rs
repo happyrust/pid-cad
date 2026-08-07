@@ -94,7 +94,7 @@ const SHEET_MARGIN_MM: f64 = 100.0;
 // (`class=…`, `label=…`, `oid=…`, `resolved=…` string pairs). Written only
 // when a `<stem>_Data.xml` sits beside the drawing; the properties panel
 // shows a "P&ID" group for entities that carry it and no group otherwise.
-pub(crate) const PID_SEMANTICS_XDATA_APP: &str = "PID_SEMANTICS";
+pub(crate) use super::PID_SEMANTICS_XDATA_APP;
 
 const LAYER_GEOMETRY: &str = "PID-GEOMETRY";
 const LAYER_TEXT: &str = "PID-TEXT";

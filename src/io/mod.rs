@@ -9,6 +9,13 @@ pub mod edit_lock;
 pub mod obj;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pid;
+
+/// XDATA application name under which a `.pid` import publishes an entity's
+/// P&ID identity (`class=…`, `label=…`, … string pairs). Lives outside the
+/// native-only [`pid`] module: the web build never imports `.pid`, but it can
+/// open a DWG that already carries these records and must still read them
+/// (see `scene::cache::properties::pid_semantics_section`).
+pub(crate) const PID_SEMANTICS_XDATA_APP: &str = "PID_SEMANTICS";
 #[cfg(not(target_arch = "wasm32"))]
 pub mod single_instance;
 pub mod pdf_export;
