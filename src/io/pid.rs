@@ -361,6 +361,28 @@ fn report_import(
         log::debug!("{}: {warning}", path.display());
     }
 
+    // Content the vendor's own graphic predicate says should draw, which
+    // pid-parse has no decoder for, is a named warning rather than a debug
+    // line: an igDimension / igBalloon / igLeader class silently vanishing
+    // is exactly the failure a reader cannot notice on their own. Kept
+    // separate from the inferred-or-probe-only aggregate below so the drop
+    // is called by name (Phase 38 S2).
+    for dropped in &geometry.dropped_graphic_records {
+        let class_name = dropped
+            .rad_class_name
+            .as_deref()
+            .map(|name| format!(" ({name})"))
+            .unwrap_or_default();
+        log::warn!(
+            "{}: {} record(s) of graphic type 0x{:04X}{} in {} have no decoder; that content is missing from the drawing",
+            path.display(),
+            dropped.count,
+            dropped.type_code,
+            class_name,
+            dropped.stream_path
+        );
+    }
+
     // The headline number a thin-looking sheet is read against: how much of
     // the file reached the drawing, and how much the parser saw but could not
     // place. Counting the evidence rather than the entities keeps it
