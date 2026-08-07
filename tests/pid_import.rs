@@ -366,6 +366,84 @@ fn geometry_extremes(entity: &EntityType) -> Vec<(f64, f64)> {
     }
 }
 
+/// With the published `_Data.xml` beside the drawing, imported entities
+/// carry their published identity in XDATA: class, tag / line number, the
+/// published GraphicOID, and which hop of pid-parse's two-hop join found
+/// them. The properties panel renders these as the read-only "P&ID" group.
+#[test]
+fn published_semantics_land_on_entities_when_the_xml_sits_beside() {
+    let Some(doc) = import("export-test/publish-data/DWG-0202GP06-01/DWG-0202GP06-01.pid") else {
+        return;
+    };
+
+    let mut tagged = 0usize;
+    let mut classes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut labelled = 0usize;
+    let mut via_dependency = 0usize;
+    for entity in doc.entities() {
+        let Some(record) = entity.common().extended_data.get_record("PID_SEMANTICS") else {
+            continue;
+        };
+        tagged += 1;
+        for value in &record.values {
+            let acadrust::xdata::XDataValue::String(text) = value else {
+                continue;
+            };
+            if let Some(class) = text.strip_prefix("class=") {
+                classes.insert(class.to_string());
+            }
+            if text.starts_with("label=") {
+                labelled += 1;
+            }
+            if text.starts_with("resolved=dependency:") {
+                via_dependency += 1;
+            }
+        }
+    }
+
+    assert!(
+        tagged > 0,
+        "the publish pair ships a _Data.xml; some drawn entities must carry PID_SEMANTICS"
+    );
+    assert!(
+        labelled > 0,
+        "at least one published object carries an ItemTag / Name to show"
+    );
+    assert!(
+        via_dependency > 0,
+        "the S1 aggregates resolve their line work one dependency hop out; none arrived"
+    );
+    assert!(
+        !classes.is_empty(),
+        "every PID_SEMANTICS record carries its owning class"
+    );
+}
+
+/// Without a `_Data.xml` beside the drawing nothing changes: no entity
+/// carries the semantics record, so the properties panel never shows the
+/// "P&ID" group. The XML is an enrichment, never a prerequisite.
+#[test]
+fn a_drawing_without_published_xml_carries_no_semantics() {
+    for name in [
+        "DWG-0201GP06-01.pid",
+        "DWG-0202GP06-01.pid",
+        "D06.pid",
+        "工艺管道及仪表流程-1.pid",
+    ] {
+        let Some(doc) = import(name) else {
+            continue;
+        };
+        assert!(
+            doc.entities().all(|e| e
+                .common()
+                .extended_data
+                .get_record("PID_SEMANTICS")
+                .is_none()),
+            "{name}: no _Data.xml sits beside this fixture, so no entity may carry PID_SEMANTICS"
+        );
+    }
+}
+
 /// Both fixtures import, and the drawing lands on the layers that open
 /// visible rather than only on the diagnostic ones.
 #[test]

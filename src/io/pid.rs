@@ -27,7 +27,7 @@ use pid_parse::style_link::{LineStyleIndex, ResolvedLineStyle};
 use pid_parse::symbol_library::{SymbolLibrary, SymbolPrimitive};
 use pid_parse::{
     build_normalized_geometry, NormalizedPidGeometry, PidDrawingUnits, PidGeometryConfidence,
-    PidGraphicKind, PidParser, PidPoint,
+    PidGraphicKind, PidParser, PidPoint, PidSemanticHit, PidSemanticIndex,
 };
 
 // Millimetres in a metre, which is the unit a `.pid`'s decoded coordinates
@@ -87,6 +87,12 @@ const CONNECTIVITY_MIN_MM: f64 = 0.1;
 // off the border, narrow enough to reject the metres-off strays that framing
 // and the connectivity filter exist to keep out.
 const SHEET_MARGIN_MM: f64 = 100.0;
+
+// XDATA application name carrying an entity's published P&ID identity
+// (`class=…`, `label=…`, `oid=…`, `resolved=…` string pairs). Written only
+// when a `<stem>_Data.xml` sits beside the drawing; the properties panel
+// shows a "P&ID" group for entities that carry it and no group otherwise.
+pub(crate) const PID_SEMANTICS_XDATA_APP: &str = "PID_SEMANTICS";
 
 const LAYER_GEOMETRY: &str = "PID-GEOMETRY";
 const LAYER_TEXT: &str = "PID-TEXT";
@@ -153,6 +159,21 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     // to be 1/8 inch, so `TEXT_HEIGHT_MM` was reading a quarter too small.
     // Records whose height does not resolve keep that fallback.
     let text_heights = pid_parse::style_link::text_heights_for_file(path).unwrap_or_default();
+    // The published semantic model, when the drawing ships one: SmartPlant
+    // publishes `<stem>_Data.xml` beside the `.pid`, and pid-parse joins its
+    // GraphicOIDs onto the decoded records (two-hop rule, see pid-parse's
+    // `docs/analysis/2026-08-07-graphic-oid-is-the-semantic-join.md`). A
+    // drawing without one imports exactly as before -- the XML is an
+    // enrichment, never a prerequisite.
+    let semantics = PidSemanticIndex::load_beside(path, &parsed);
+    // The DWG writer skips XDATA whose application is not in the APPID
+    // table, so without this registration the identities would survive the
+    // session and silently vanish on save (see `set_entity_xdata`).
+    if semantics.is_some() && !doc.app_ids.contains(PID_SEMANTICS_XDATA_APP) {
+        let mut app = acadrust::tables::AppId::new(PID_SEMANTICS_XDATA_APP);
+        app.handle = doc.allocate_handle();
+        let _ = doc.app_ids.add(app);
+    }
 
     let page_mm = geometry.page_dimensions_mm;
     let projection = Projection::for_geometry(&geometry, path);
@@ -180,12 +201,20 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         drawn += built.len();
         let symbology = style_for(&styles, entity);
         let height_mm = height_for(&text_heights, entity).map(|h| projection.mm(h.height_m));
+        let semantic_hit = semantics.as_ref().and_then(|index| {
+            entity
+                .graphic_oid
+                .and_then(|graphic_oid| index.resolve(graphic_oid))
+        });
         for mut one in built {
             if let Some(style) = symbology {
                 apply_symbology(&mut one, style);
             }
             if let Some(mm) = height_mm {
                 apply_text_height(&mut one, mm);
+            }
+            if let Some(hit) = &semantic_hit {
+                attach_semantics(&mut one, hit);
             }
             let _ = doc.add_entity(one);
         }
@@ -420,6 +449,44 @@ fn report_import(
         library.roots(),
         missing.iter().take(3).copied().collect::<Vec<_>>().join(", ")
     );
+}
+
+/// Write an entity's published P&ID identity into its XDATA, under
+/// [`PID_SEMANTICS_XDATA_APP`] as self-describing `key=value` strings.
+///
+/// The values come from the drawing's own published `_Data.xml`, joined by
+/// `pid-parse`'s semantic index: `class` is the owning object's XML element
+/// name (`PIDPipeline`, `PIDProcessVessel`, …), `label` its `ItemTag` /
+/// `Name`, `oid` the published `GraphicOID`, and `resolved` says which hop
+/// found it (`direct`, or `dependency:<aggregate oid>`). No new layer is
+/// involved: identity is data about an entity, not a place to put one.
+fn attach_semantics(entity: &mut EntityType, hit: &PidSemanticHit<'_>) {
+    use acadrust::xdata::{ExtendedDataRecord, XDataValue};
+
+    fn push_pair(record: &mut ExtendedDataRecord, key: &str, value: &str) {
+        if !value.is_empty() {
+            record.add_value(XDataValue::String(format!("{key}={value}")));
+        }
+    }
+
+    let object = hit.object();
+    let mut record = ExtendedDataRecord::new(PID_SEMANTICS_XDATA_APP);
+    push_pair(&mut record, "class", &object.class);
+    if let Some(label) = object.label() {
+        push_pair(&mut record, "label", label);
+    }
+    push_pair(&mut record, "oid", &object.graphic_oid.to_string());
+    match hit {
+        PidSemanticHit::Direct(_) => push_pair(&mut record, "resolved", "direct"),
+        PidSemanticHit::ViaDependency { dependency_oid, .. } => {
+            push_pair(
+                &mut record,
+                "resolved",
+                &format!("dependency:{dependency_oid}"),
+            );
+        }
+    }
+    entity.common_mut().extended_data.add_record(record);
 }
 
 /// The style table's entry for one normalized entity, if it has one.

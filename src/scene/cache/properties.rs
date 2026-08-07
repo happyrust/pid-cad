@@ -103,6 +103,72 @@ pub fn general_section(entity: &EntityType) -> PropSection {
     section
 }
 
+/// The "P&ID" group: the published identity a `.pid` import wrote into the
+/// entity's XDATA (see `crate::io::pid::PID_SEMANTICS_XDATA_APP`).
+///
+/// Present only when the drawing shipped a `_Data.xml` and the entity's
+/// record joined to it — an entity without the XDATA record simply has no
+/// group, which is exactly the no-published-model case. Every row is
+/// read-only: this is the drawing's own statement about itself.
+pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
+    let record = entity
+        .common()
+        .extended_data
+        .get_record(crate::io::pid::PID_SEMANTICS_XDATA_APP)?;
+
+    let mut class = None;
+    let mut label = None;
+    let mut resolved = None;
+    for value in &record.values {
+        let acadrust::xdata::XDataValue::String(text) = value else {
+            continue;
+        };
+        let Some((key, val)) = text.split_once('=') else {
+            continue;
+        };
+        match key {
+            "class" => class = Some(val.to_string()),
+            "label" => label = Some(val.to_string()),
+            "resolved" => resolved = Some(val.to_string()),
+            _ => {}
+        }
+    }
+
+    let class = class?;
+    // A pipe's identifier is its line number; everything else carries an
+    // item tag. Same value, the caption the reader expects.
+    let label_caption = if matches!(class.as_str(), "PIDPipeline" | "PIDPipingConnector") {
+        t!("Line number")
+    } else {
+        t!("Item tag")
+    };
+
+    let mut props = vec![Property {
+        label: t!("Type").into_owned(),
+        field: "pid_class",
+        value: PropValue::ReadOnly(class),
+    }];
+    if let Some(label_value) = label {
+        props.push(Property {
+            label: label_caption.into_owned(),
+            field: "pid_label",
+            value: PropValue::ReadOnly(label_value),
+        });
+    }
+    if let Some(resolved_value) = resolved {
+        props.push(Property {
+            label: t!("Matched by").into_owned(),
+            field: "pid_resolved",
+            value: PropValue::ReadOnly(resolved_value),
+        });
+    }
+
+    Some(PropSection {
+        title: "P&ID".to_string(),
+        props,
+    })
+}
+
 /// The "3D Visualization" group (Material), common to every graphical object.
 /// Material source is flag-based; a custom material handle is shown as "Custom"
 /// (name resolution needs the doc).

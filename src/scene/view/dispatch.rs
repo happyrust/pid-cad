@@ -71,6 +71,9 @@ pub fn properties_sectioned(
     text_style_names: &[String],
 ) -> Vec<PropSection> {
     let mut sections = vec![properties::general_section(entity)];
+    if let Some(pid) = properties::pid_semantics_section(entity) {
+        sections.push(pid);
+    }
     if let Some(viz) = properties::visualization_section(entity) {
         sections.push(viz);
     }
