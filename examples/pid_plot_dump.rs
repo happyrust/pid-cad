@@ -13,11 +13,14 @@
 //!
 //! A row that draws with its own width and colour rather than the layer's
 //! carries a trailing `@RRGGBB:WW` token, `WW` being the line weight in
-//! hundredths of a millimetre the way DXF stores it. It goes last, and it is
-//! the only non-numeric field a `poly` can have, so a reader that only wants
-//! geometry drops it without needing to know the row's arity. Without it the
-//! dump cannot show what the style table is for: a 0.13mm instrument line and
-//! a 0.7mm process header have the same coordinates either way.
+//! hundredths of a millimetre the way DXF stores it. A line that also draws
+//! dashed appends its linetype name to the same token, `@RRGGBB:WW:LT`, so a
+//! plot can tell a dashed line from a solid one. The token still goes last and
+//! is still the only non-numeric field a `poly` can have, so a reader that
+//! only wants geometry drops it without needing to know the row's arity.
+//! Without it the dump cannot show what the style table is for: a 0.13mm solid
+//! instrument line and a 0.7mm dashed process header have the same coordinates
+//! either way.
 //!
 //! Arcs are emitted as sampled polylines rather than as their own row, which
 //! keeps the plotter from having to know this crate's angle convention.
@@ -111,12 +114,13 @@ fn main() {
     }
 }
 
-/// The width and colour an entity draws with, as a trailing `@RRGGBB:WW`
-/// token, or nothing where it draws `ByLayer`.
+/// The width, colour and dashed linetype an entity draws with, as a trailing
+/// `@RRGGBB:WW` or `@RRGGBB:WW:LT` token, or nothing where it draws `ByLayer`.
 ///
 /// `ByLayer` is what a symbol body and the diagnostic layers keep, so an
 /// absent token is a statement rather than a gap: the style table had nothing
-/// to say about that row.
+/// to say about that row. The `:LT` suffix appears only for a line drawing a
+/// real linetype -- `Continuous` / `ByLayer` draw solid and add nothing.
 fn style_token(entity: &EntityType) -> String {
     let common = entity.common();
     let Color::Rgb { r, g, b } = common.color else {
@@ -125,7 +129,11 @@ fn style_token(entity: &EntityType) -> String {
     let LineWeight::Value(weight) = common.line_weight else {
         return String::new();
     };
-    format!(",@{r:02X}{g:02X}{b:02X}:{weight}")
+    let dash = match common.linetype.as_str() {
+        "" | "Continuous" | "ByLayer" | "ByBlock" => String::new(),
+        name => format!(":{name}"),
+    };
+    format!(",@{r:02X}{g:02X}{b:02X}:{weight}{dash}")
 }
 
 fn layer_of(entity: &EntityType) -> Option<&str> {
