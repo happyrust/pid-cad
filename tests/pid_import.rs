@@ -104,6 +104,75 @@ fn line_work_carries_the_width_and_colour_the_drawing_states() {
     assert_eq!(palette, expected);
 }
 
+/// Dashed line work comes in as a named linetype the renderer can dash.
+///
+/// `style.dll` stores a line's dash as a `JStyleSimpleDashType` reference, and
+/// until `pid-parse` decoded `0x002F` every line drew solid. The import now
+/// pools each distinct decoded pattern into a `PID-DASH-<n>` document linetype
+/// and names the line to it, so the ordinary dash shader draws it. A
+/// regression shows up as line work back on `Continuous`, which is invisible
+/// in an entity count.
+#[test]
+fn dashed_line_work_carries_a_linetype_matching_the_decoded_pattern() {
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
+        return;
+    };
+
+    // Every PID-DASH linetype an entity names, and how many entities name it.
+    let mut used: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for layer in ["PID-GEOMETRY", "PID-POINT"] {
+        for entity in on_layer(&doc, layer) {
+            let name = entity.common().linetype.as_str();
+            if name.starts_with("PID-DASH-") {
+                *used.entry(name.to_string()).or_default() += 1;
+            }
+        }
+    }
+
+    assert!(
+        !used.is_empty(),
+        "0x002F is decoded, so some of DWG-0201's line work must draw dashed"
+    );
+
+    // The two patterns DWG-0201 uses, as segment magnitudes in micrometres: a
+    // 3.5 / 1.75mm metric dash and a 0.075" / 0.05" imperial one.
+    let metric = vec![3500_i64, 1750];
+    let imperial = vec![1905_i64, 1270];
+    let mut seen: std::collections::BTreeSet<Vec<i64>> = std::collections::BTreeSet::new();
+
+    for name in used.keys() {
+        let lt = doc
+            .line_types
+            .get(name.as_str())
+            .unwrap_or_else(|| panic!("{name} is named by an entity but absent from the table"));
+        assert!(
+            !lt.elements.is_empty(),
+            "{name} is dashed, so it must carry pattern elements"
+        );
+        // "A"-type layout: the first element is drawn -- a dash, or a dot at
+        // length zero -- never a bare gap, so element 0's length is >= 0.
+        assert!(
+            lt.elements[0].length >= 0.0,
+            "{name} starts on a gap; the A-type layout starts drawn"
+        );
+        let magnitudes: Vec<i64> = lt
+            .elements
+            .iter()
+            .map(|e| (e.length.abs() * 1000.0).round() as i64)
+            .collect();
+        seen.insert(magnitudes);
+    }
+
+    assert!(
+        seen.contains(&metric),
+        "the 3.5/1.75mm dash is DWG-0201's commonest pattern; got {seen:?}"
+    );
+    assert!(
+        seen.iter().all(|m| *m == metric || *m == imperial),
+        "an unexpected dash pattern reached the drawing: {seen:?}"
+    );
+}
+
 /// Lettering comes in at the height the drawing's character style states.
 ///
 /// It used to be a flat ISO 2.5mm for every label, because the height was not

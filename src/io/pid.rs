@@ -18,12 +18,14 @@
 // `igPoint2d` is the only point family the format has, and all of it
 // decodes. `ProbeOnly` evidence has no position at all.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use acadrust::entities::{Circle, Line, LwPolyline, Point, Text};
+use acadrust::tables::linetype::{LineType, LineTypeElement};
 use acadrust::types::{Color, LineWeight, Vector2, Vector3};
-use acadrust::{CadDocument, EntityType};
-use pid_parse::style_link::{LineStyleIndex, ResolvedLineStyle};
+use acadrust::{CadDocument, EntityType, TableEntry};
+use pid_parse::style_link::{DashPattern, LineStyleIndex, ResolvedLineStyle};
 use pid_parse::symbol_library::{SymbolLibrary, SymbolPrimitive};
 use pid_parse::{
     build_normalized_geometry, NormalizedPidGeometry, PidDrawingUnits, PidGeometryConfidence,
@@ -159,6 +161,13 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     // to be 1/8 inch, so `TEXT_HEIGHT_MM` was reading a quarter too small.
     // Records whose height does not resolve keep that fallback.
     let text_heights = pid_parse::style_link::text_heights_for_file(path).unwrap_or_default();
+    // A line's dash pattern comes from the same style table, one reference
+    // further along: a JStyleSimpleLine names a JStyleSimpleDashType, and
+    // style_link hands the decoded segments back. Pool the distinct patterns
+    // into named document linetypes now, so `apply_symbology` can name each
+    // dashed line to one and the renderer dashes it like any other linetype.
+    // See pid-parse's `docs/analysis/2026-08-07-jstyle-simple-dash-type-linetype.md`.
+    let dash_linetypes = register_dash_linetypes(&mut doc, &styles);
     // The published semantic model, when the drawing ships one: SmartPlant
     // publishes `<stem>_Data.xml` beside the `.pid`, and pid-parse joins its
     // GraphicOIDs onto the decoded records (two-hop rule, see pid-parse's
@@ -208,7 +217,7 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         });
         for mut one in built {
             if let Some(style) = symbology {
-                apply_symbology(&mut one, style);
+                apply_symbology(&mut one, style, &dash_linetypes);
             }
             if let Some(mm) = height_mm {
                 apply_text_height(&mut one, mm);
@@ -537,7 +546,11 @@ fn apply_text_height(entity: &mut EntityType, height_mm: f64) {
 /// `PID-UNRESOLVED` and `PID-CONNECTIVITY` are diagnostics whose layer colour
 /// *is* the diagnosis, and repainting them in the drawing's palette would
 /// hide the thing they exist to show.
-fn apply_symbology(entity: &mut EntityType, style: &ResolvedLineStyle) {
+fn apply_symbology(
+    entity: &mut EntityType,
+    style: &ResolvedLineStyle,
+    dash_linetypes: &HashMap<Vec<i64>, String>,
+) {
     let common = entity.common_mut();
     if common.layer != LAYER_GEOMETRY && common.layer != LAYER_POINT {
         return;
@@ -552,6 +565,93 @@ fn apply_symbology(entity: &mut EntityType, style: &ResolvedLineStyle) {
     if (0.0..=211.0).contains(&hundredths) {
         common.line_weight = LineWeight::Value(hundredths as i16);
     }
+    // The dashed linetype the line draws with, resolved through the same table
+    // as every other linetype so the renderer dashes it with no special case.
+    // A solid line names none and keeps the layer's Continuous default.
+    if let Some(dash) = style.dash.as_ref() {
+        if let Some(name) = dash_linetypes.get(&dash_key(dash)) {
+            common.linetype = name.clone();
+        }
+    }
+}
+
+/// A dedup key for a dash pattern: its segment magnitudes, in micrometres.
+///
+/// Two patterns that differ only in sign render identically — see
+/// [`build_dash_linetype`] — so the key is built from magnitudes, and the
+/// micrometre rounding folds together patterns that agree to within a
+/// nanometre of float noise.
+fn dash_key(dash: &DashPattern) -> Vec<i64> {
+    dash.segments_mm()
+        .iter()
+        .map(|mm| (mm.abs() * 1_000.0).round() as i64)
+        .collect()
+}
+
+/// Register one document linetype per distinct decoded dash pattern, returning
+/// the map from a pattern's [`dash_key`] to the linetype name it was given.
+///
+/// A `.pid` carries only a handful of distinct patterns, so pooling them into
+/// named entries in the same table [`crate::io::linetypes::populate_document`]
+/// fills lets [`apply_symbology`] name a line to one and the renderer dash it
+/// through its ordinary `resolve_pattern` path — no differently from a linetype
+/// a DWG shipped. The names are assigned over a `BTreeMap`, so they are stable
+/// for a given file.
+fn register_dash_linetypes(
+    doc: &mut CadDocument,
+    styles: &LineStyleIndex,
+) -> HashMap<Vec<i64>, String> {
+    let mut names: HashMap<Vec<i64>, String> = HashMap::new();
+    for style in styles.values() {
+        let Some(dash) = style.dash.as_ref() else {
+            continue;
+        };
+        let key = dash_key(dash);
+        if key.is_empty() || names.contains_key(&key) {
+            continue;
+        }
+        let name = format!("PID-DASH-{}", names.len() + 1);
+        if !doc.line_types.contains(&name) {
+            let mut lt = build_dash_linetype(&name, dash);
+            lt.set_handle(doc.allocate_handle());
+            let _ = doc.line_types.add(lt);
+        }
+        names.insert(key, name);
+    }
+    names
+}
+
+/// Build a document linetype from a decoded dash pattern.
+///
+/// The segment lengths are the drawing's own, in millimetres — the unit the
+/// geometry is projected into — so a 3.5 mm dash is 3.5 mm on the sheet. The
+/// elements are laid out the way every AutoCAD "A"-type linetype is: drawn and
+/// gap alternate, the first is drawn, and a zero-length element is a dot.
+///
+/// **The format's own sign is not the dash/gap flag.** It does not read
+/// consistently as one across the corpus (see pid-parse's
+/// `docs/analysis/2026-08-07-jstyle-simple-dash-type-linetype.md` §3.1), so
+/// only the magnitudes carry over and the alternation is the linetype
+/// convention rather than the file's. That is the one interpretive step
+/// between the decode and the screen.
+fn build_dash_linetype(name: &str, dash: &DashPattern) -> LineType {
+    let mut lt = LineType::new(name);
+    lt.description = format!("P&ID dash pattern ({} segments)", dash.len());
+    let mut pattern_length = 0.0;
+    for (i, mm) in dash.segments_mm().iter().enumerate() {
+        let len = mm.abs();
+        pattern_length += len;
+        let element = if len < 1e-9 {
+            LineTypeElement::dot()
+        } else if i % 2 == 0 {
+            LineTypeElement::dash(len)
+        } else {
+            LineTypeElement::space(len)
+        };
+        lt.add_element(element);
+    }
+    lt.pattern_length = pattern_length;
+    lt
 }
 
 fn build_entities(
