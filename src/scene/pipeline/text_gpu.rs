@@ -278,7 +278,7 @@ pub fn create_pipelines(
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[TextVertex::layout()],
+                buffers: &[Some(TextVertex::layout())],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {

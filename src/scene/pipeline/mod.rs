@@ -667,7 +667,7 @@ impl Pipeline {
             vertex: wgpu::VertexState {
                 module: &wire_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wire_mode.layout()],
+                buffers: &[Some(wire_mode.layout())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             primitive: wgpu::PrimitiveState {
@@ -723,7 +723,7 @@ impl Pipeline {
             vertex: wgpu::VertexState {
                 module: &clip_mask_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: 8,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[wgpu::VertexAttribute {
@@ -731,7 +731,7 @@ impl Pipeline {
                         shader_location: 0,
                         format: wgpu::VertexFormat::Float32x2,
                     }],
-                }],
+                })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             primitive: wgpu::PrimitiveState {
@@ -788,7 +788,7 @@ impl Pipeline {
             vertex: wgpu::VertexState {
                 module: &wire_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wire_mode.layout()],
+                buffers: &[Some(wire_mode.layout())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             primitive: wgpu::PrimitiveState {
@@ -831,7 +831,7 @@ impl Pipeline {
             vertex: wgpu::VertexState {
                 module: &wire_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wire_mode.layout()],
+                buffers: &[Some(wire_mode.layout())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             primitive: wgpu::PrimitiveState {
@@ -910,7 +910,7 @@ impl Pipeline {
             vertex: wgpu::VertexState {
                 module: &wipeout_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wipeout_gpu::HatchVertex::layout()],
+                buffers: &[Some(wipeout_gpu::HatchVertex::layout())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             primitive: wgpu::PrimitiveState {
@@ -1294,7 +1294,7 @@ impl Pipeline {
             vertex: wgpu::VertexState {
                 module: &shadow_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[mesh_gpu::MeshVertex::layout()],
+                buffers: &[Some(mesh_gpu::MeshVertex::layout())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             primitive: wgpu::PrimitiveState {
@@ -1325,7 +1325,7 @@ impl Pipeline {
             vertex: wgpu::VertexState {
                 module: &mesh_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[mesh_gpu::MeshVertex::layout()],
+                buffers: &[Some(mesh_gpu::MeshVertex::layout())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             primitive: wgpu::PrimitiveState {
@@ -1374,7 +1374,7 @@ impl Pipeline {
                 vertex: wgpu::VertexState {
                     module: &mesh_shader,
                     entry_point: Some("vs_main"),
-                    buffers: &[mesh_gpu::MeshVertex::layout()],
+                    buffers: &[Some(mesh_gpu::MeshVertex::layout())],
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 },
                 primitive: wgpu::PrimitiveState {
@@ -1422,7 +1422,7 @@ impl Pipeline {
                     vertex: wgpu::VertexState {
                         module: &mesh_shader,
                         entry_point: Some("vs_main"),
-                        buffers: &[mesh_gpu::MeshVertex::layout()],
+                        buffers: &[Some(mesh_gpu::MeshVertex::layout())],
                         compilation_options: wgpu::PipelineCompilationOptions::default(),
                     },
                     primitive: wgpu::PrimitiveState {
@@ -1477,7 +1477,7 @@ impl Pipeline {
                 vertex: wgpu::VertexState {
                     module: &mesh_shader,
                     entry_point: Some("vs_edge"),
-                    buffers: &[mesh_gpu::MeshVertex::edge_layout()],
+                    buffers: &[Some(mesh_gpu::MeshVertex::edge_layout())],
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 },
                 primitive: wgpu::PrimitiveState {
@@ -1524,7 +1524,7 @@ impl Pipeline {
             vertex: wgpu::VertexState {
                 module: &mesh_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[mesh_gpu::MeshVertex::layout()],
+                buffers: &[Some(mesh_gpu::MeshVertex::layout())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             primitive: wgpu::PrimitiveState {
@@ -1582,7 +1582,7 @@ impl Pipeline {
             vertex: wgpu::VertexState {
                 module: &face3d_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[face3d_gpu::Face3DVertex::layout()],
+                buffers: &[Some(face3d_gpu::Face3DVertex::layout())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             primitive: wgpu::PrimitiveState {
@@ -1629,7 +1629,7 @@ impl Pipeline {
             vertex: wgpu::VertexState {
                 module: &face3d_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[face3d_gpu::Face3DVertex::layout()],
+                buffers: &[Some(face3d_gpu::Face3DVertex::layout())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             primitive: wgpu::PrimitiveState {
@@ -1723,7 +1723,7 @@ impl Pipeline {
             vertex: wgpu::VertexState {
                 module: &image_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[image_gpu::ImageVertex::layout()],
+                buffers: &[Some(image_gpu::ImageVertex::layout())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             primitive: wgpu::PrimitiveState {

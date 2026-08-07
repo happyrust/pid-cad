@@ -444,7 +444,7 @@ impl ViewCubeText {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[TextVertex::desc()],
+                buffers: &[Some(TextVertex::desc())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             primitive: wgpu::PrimitiveState {
@@ -1180,7 +1180,7 @@ impl ViewCubePipeline {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[CubeVertex::desc()],
+                buffers: &[Some(CubeVertex::desc())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             primitive: wgpu::PrimitiveState {
@@ -1219,7 +1219,7 @@ impl ViewCubePipeline {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("line_vs_main"),
-                buffers: &[LineVertex::desc()],
+                buffers: &[Some(LineVertex::desc())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             primitive: wgpu::PrimitiveState {

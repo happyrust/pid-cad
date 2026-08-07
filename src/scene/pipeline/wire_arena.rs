@@ -270,7 +270,8 @@ fn alloc_inst_initialized(
         let bytes = bytemuck::cast_slice(data);
         let mut mapped = buffer
             .slice(..bytes.len() as u64)
-            .get_mapped_range_mut();
+            .get_mapped_range_mut()
+            .expect("map staging buffer");
         mapped.copy_from_slice(bytes);
         drop(mapped);
     }
@@ -293,7 +294,8 @@ fn alloc_const_initialized(
         let bytes = bytemuck::cast_slice(data);
         let mut mapped = buffer
             .slice(..bytes.len() as u64)
-            .get_mapped_range_mut();
+            .get_mapped_range_mut()
+            .expect("map staging buffer");
         mapped.copy_from_slice(bytes);
         drop(mapped);
     }
@@ -949,7 +951,8 @@ fn alloc_packed_initialized(
         let bytes = bytemuck::cast_slice(data);
         let mut mapped = buffer
             .slice(..bytes.len() as u64)
-            .get_mapped_range_mut();
+            .get_mapped_range_mut()
+            .expect("map staging buffer");
         mapped.copy_from_slice(bytes);
         drop(mapped);
     }

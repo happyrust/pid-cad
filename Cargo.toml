@@ -24,8 +24,9 @@ serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 semver = "1"
 lzma-sys = { version = "0.1", features = ["static"], optional = true }
-iced = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39", features = ["image", "svg", "advanced", "canvas", "smol", "markdown"] }
-iced_core = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+# wgpu-30 port: local fork of iced-rs/iced @ 23604ff (branch wgpu-30-port)
+iced = { path = "../iced", features = ["image", "svg", "advanced", "canvas", "smol", "markdown"] }
+iced_core = { path = "../iced/core" }
 iced_aw = { git = "https://github.com/HakanSeven12/iced_aw.git", branch = "agent/fix-iced-fonts", features = ["menu", "context_menu", "color_picker", "drop_down"] }
 bytemuck = { version = "1.25", features = ["derive"] }
 glam = { version = "0.33", features = ["bytemuck"] }
@@ -56,7 +57,7 @@ lyon_tessellation = "1.0.20"
 cavalier_contours = "=0.7.0"
 
 [dev-dependencies]
-naga = { version = "27", features = ["wgsl-in"] }
+naga = { version = "30", features = ["wgsl-in"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Com", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_Foundation"] }
@@ -66,8 +67,8 @@ ashpd = { version = "0.13.13", default-features = false, features = ["async-io",
 
 [patch.crates-io]
 acadrust = { git = "https://github.com/OpenAEC-Foundation/acadifc.git", rev = "41149d7" }
-iced_core = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
-iced_widget = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+iced_core = { path = "../iced/core" }
+iced_widget = { path = "../iced/widget" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ocs_plugin_api = { path = "crates/ocs_plugin_api", features = ["host"] }
@@ -94,7 +95,9 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 bincode = "1.3"
-web-sys = { version = "=0.3.85", features = [
+# =0.3.92: wgpu 30's vendored WebGPU bindings need the wasm-bindgen 0.2.115
+# generation (see docs/wgpu-30-fork.md).
+web-sys = { version = "=0.3.92", features = [
     "Window",
     "Storage",
     "StorageManager",
@@ -127,7 +130,7 @@ web-sys = { version = "=0.3.85", features = [
     "Node",
     "HtmlElement",
 ] }
-iced = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39", features = ["webgl", "fira-sans"] }
+iced = { path = "../iced", features = ["webgl", "fira-sans"] }
 
 [profile.release]
 strip = true

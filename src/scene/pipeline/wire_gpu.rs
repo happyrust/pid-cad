@@ -49,7 +49,10 @@ fn instance_buffer_mapped<T: bytemuck::Pod>(
         mapped_at_creation: true,
     });
     {
-        let mut view = buf.slice(..).get_mapped_range_mut();
+        let mut view = buf
+            .slice(..)
+            .get_mapped_range_mut()
+            .expect("map staging buffer");
         if !bytes.is_empty() {
             view.slice(..bytes.len()).copy_from_slice(bytes);
         }
