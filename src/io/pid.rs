@@ -456,6 +456,28 @@ fn report_import(
         );
     }
 
+    // The other way content goes missing, and on the reference corpus the
+    // larger one: a record whose type pid-parse does decode, in a shape its
+    // decoder refuses. Refusing beats guessing -- a decoder that read an
+    // unknown framing would draw fiction -- but the reader still has a
+    // drawing with strokes missing, so it is named the same way. Worded
+    // apart from the no-decoder case because the two ask for different work.
+    for refused in &geometry.refused_graphic_records {
+        let class_name = refused
+            .rad_class_name
+            .as_deref()
+            .map(|name| format!(" ({name})"))
+            .unwrap_or_default();
+        log::warn!(
+            "{}: {} record(s) of graphic type 0x{:04X}{} in {} are a shape pid-parse's decoder for that type refuses; that content is missing from the drawing",
+            path.display(),
+            refused.count,
+            refused.type_code,
+            class_name,
+            refused.stream_path
+        );
+    }
+
     // The headline number a thin-looking sheet is read against: how much of
     // the file reached the drawing, and how much the parser saw but could not
     // place. Counting the evidence rather than the entities keeps it
