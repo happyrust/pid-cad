@@ -232,6 +232,11 @@ pub struct ViewportData {
     /// Normalized form lets `render()` derive the physical sub-clip from
     /// the surface clip without needing the scale factor.
     pub(in crate::scene) screen_rect: Rectangle,
+    /// Camera mirror for the embedded Bevy renderer (bevy3d M1 POC).
+    /// `Some` only for shaded render modes with `OCS_BEVY3D=1`; `prepare`
+    /// pumps Bevy for exactly these viewports on frames that re-render.
+    #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+    pub(in crate::scene) bevy_cam: Option<crate::scene::pipeline::bevy_bridge::BevyCamData>,
 }
 
 #[derive(Debug)]
@@ -352,6 +357,33 @@ impl shader::Primitive for Primitive {
         let slots = pipeline.resolve_slots(device, queue, &instance_ids);
 
         for (i, vp) in self.viewports.iter().enumerate() {
+            // Pump the embedded Bevy renderer (bevy3d) before borrowing this
+            // slot's inner pipeline — the bridge lives on the MultiPipeline.
+            // The gate mirrors the scene-render-cache `skip` computed below,
+            // so cached frames (and 2D-only viewports, which carry no
+            // `bevy_cam`) never pump Bevy.
+            #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+            let bevy_frame = {
+                let clip_size = Size::new(
+                    (vp.screen_rect.width * bounds.width * scale).ceil().max(1.0) as u32,
+                    (vp.screen_rect.height * bounds.height * scale).ceil().max(1.0) as u32,
+                );
+                let slot_inner = &pipeline.inners[slots[i]];
+                let will_render = slot_inner.slot_id != vp.instance_id
+                    || slot_inner.render_sig == u64::MAX
+                    || render_signature(vp, clip_size.width, clip_size.height)
+                        != slot_inner.render_sig;
+                match (&vp.bevy_cam, will_render) {
+                    (Some(cam), true) => pipeline.bevy_sync_pump(
+                        device,
+                        queue,
+                        vp.instance_id,
+                        clip_size,
+                        cam,
+                    ),
+                    _ => None,
+                }
+            };
             let inner = &mut pipeline.inners[slots[i]];
             // Pipeline slots are addressed by list index, but off-canvas
             // viewports are dropped from the list — so a slot can be reused by a
@@ -432,6 +464,15 @@ impl shader::Primitive for Primitive {
             let skip = inner.render_sig != u64::MAX && sig == inner.render_sig;
             inner.render_sig = sig;
             inner.skip_geometry = skip;
+            // Bind the Bevy frame pumped above; on skipped (cached) frames
+            // the previous composite already lives in the resolve texture.
+            #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+            if let Some(frame) = &bevy_frame {
+                inner.set_bevy_composite(device, frame);
+                inner.bevy_active = true;
+            } else if !skip {
+                inner.bevy_active = false;
+            }
             // Interaction LOD: skip the hatch draw this frame while navigating.
             inner.skip_hatch_frame = vp.skip_hatch;
             if skip {
@@ -3551,6 +3592,27 @@ impl Scene {
         } else {
             Arc::new(vec![])
         };
+        // Camera mirror for the embedded Bevy renderer: shaded modes only
+        // (wireframe / paper sheets never pump Bevy), same visible-sub-rect
+        // crop as the in-house projection, wrapped in the reversed-z flip.
+        #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+        let bevy_cam = if flags.mesh_fill
+            && !inst.paper_sheet
+            && crate::scene::pipeline::bevy_bridge::runtime_enabled()
+        {
+            use crate::scene::pipeline::bevy_bridge;
+            let (proj, far) = inst.camera.proj_wgpu(full_bounds);
+            Some(bevy_bridge::BevyCamData {
+                eye: inst.camera.eye(),
+                rotation: inst.camera.rotation,
+                target: inst.camera.target,
+                distance: inst.camera.distance,
+                clip_from_view: bevy_bridge::reverse_z(crop_view_proj(proj, uo, vo, us, vs)),
+                far,
+            })
+        } else {
+            None
+        };
         Some(ViewportData {
             instance_id,
             wires: Arc::downgrade(&all_wires),
@@ -3603,6 +3665,8 @@ impl Scene {
             selection_generation: self.selection_generation,
             selected_sig: self.selected_set_sig(),
             screen_rect,
+            #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+            bevy_cam,
         })
     }
 

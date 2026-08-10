@@ -80,6 +80,22 @@ signatures, `enable wgpu_binding_array`.
      variant returns an error string, as path-based loading cannot exist
      in the browser.
 
+## M1 additions to the iced fork (2026-08-10)
+
+Two additive changes carried on `wgpu-30-port`, made for the Bevy embed POC
+(M1 of `docs/bevy-viewport-integration.md`); both must survive rebases:
+
+1. **`iced_wgpu::external` (new module)** — the compositor stores clones of
+   its `Instance`/`Adapter`/`Device`/`Queue` in a process-wide `OnceLock`
+   right after device creation; `gpu_handles()` exposes them (native only).
+   Bevy's `RenderCreation::Manual` needs the instance + adapter, which the
+   `shader::Primitive` API doesn't carry. Re-exported as
+   `iced::wgpu_external`.
+2. **`max_bind_groups` limit raised 2 → 4** in the compositor's device
+   request. iced's own pipelines use 2, but Bevy's PBR pipelines bind
+   groups 0..=3. 4 is the WebGPU/downlevel default, supported everywhere
+   (including WebGL2), so this costs nothing on any tier.
+
 ## Rebase procedure (when picking up new upstream iced)
 
 1. `git -C ../iced fetch origin && git rebase origin/master wgpu-30-port`

@@ -1,6 +1,7 @@
 # Embedding Bevy as the 3D shaded-solid renderer
 
-Status: **planned, not started.** Feasibility review and integration plan for
+Status: **in progress — M0 done, M1 implemented (visual verification
+pending), M2–M4 not started.** Feasibility review and integration plan for
 handing the 3D *shaded-solid* rendering layer to an embedded Bevy renderer
 while iced stays the application host and every CAD-grade pipeline (wide
 lines, linetypes, hatches, wipeout, SDF text, snapping) stays in-house.
@@ -234,6 +235,36 @@ OCS `Camera`.
 *Accept:* orbit a test solid with the in-house wireframe overlay occluding
 correctly; zero CPU copies per frame; survives viewport resize and pane
 splits; 2D-only drawings never pump Bevy.
+
+*Status 2026-08-10:* implemented behind the `bevy3d` cargo feature +
+`OCS_BEVY3D=1` env opt-in; native `cargo check` passes with and without the
+feature. Architecture as planned, with the details settled during
+implementation:
+
+- **Bridge** (`src/scene/pipeline/bevy_bridge.rs`): one windowless Bevy app
+  per `MultiPipeline` (no winit — the `bevy_winit` feature is simply off),
+  booted via `RenderCreation::Manual` from the GPU handles the iced fork now
+  publishes (`iced::wgpu_external`, see `wgpu-30-fork.md`). Pumped from
+  `Primitive::prepare`, gated on the scene-render-cache signature, so only
+  shaded 3D viewports on frames that actually re-render touch Bevy.
+- **Targets**: per-slot OCS-created color texture registered through
+  `ManualTextureViews` (Bevy renders straight into it); Bevy's own depth
+  texture is fetched from the render world after each pump
+  (`Camera3d::depth_texture_usages` += `TEXTURE_BINDING`). Zero CPU copies.
+- **Camera**: `Projection::custom` mirrors the exact OCS projection
+  (including the off-canvas sub-rect crop) wrapped in an NDC z-flip
+  (`z' = w − z`), because Bevy is reversed-z. Bevy depth is therefore
+  exactly `1 − z_ocs`.
+- **Composite** (`src/shaders/bevy_composite.wgsl`): fullscreen pass between
+  the background/hatch pass and the solid/wire passes, `textureLoad`s Bevy
+  color + depth, discards uncovered pixels (reversed-z clear = 0), writes
+  `frag_depth = 1 − d`. Every later overlay pass depth-tests against the
+  solids with no pipeline changes.
+- The M1 test solid is hardcoded in the bridge: a cube at the camera target
+  sized from the fitted distance, headlight + per-camera ambient.
+
+Remaining for the accept gate: the human-eyes runtime pass (orbit + overlay
+occlusion + resize + pane splits) on a real drawing.
 
 ### M2 — mirror layer
 

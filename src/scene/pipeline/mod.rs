@@ -1,3 +1,8 @@
+/// Embedded Bevy renderer bridge (M1 POC, desktop only): a windowless Bevy
+/// app on iced's own wgpu device renders the shaded-solid layer offscreen;
+/// a composite pass folds its color + depth under the in-house overlays.
+#[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+pub mod bevy_bridge;
 mod device_capabilities;
 pub mod face3d_gpu;
 pub mod hatch_gpu;
@@ -197,6 +202,20 @@ pub struct Pipeline {
     /// partially off-canvas viewport still composites the right portion of
     /// its resolve texture to the visible portion of the surface.
     blit_uniform_buffer: wgpu::Buffer,
+    /// Folds the embedded Bevy renderer's offscreen color + reversed-z depth
+    /// into this slot's MSAA color + depth right after the background/hatch
+    /// pass, so every later overlay pass depth-tests against the solids.
+    #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+    bevy_composite_pipeline: wgpu::RenderPipeline,
+    #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+    bevy_composite_bgl: wgpu::BindGroupLayout,
+    /// Rebuilt on every Bevy pump (the bridge may recreate its textures on
+    /// resize); `None` until the first pump.
+    #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+    bevy_composite_bind_group: Option<wgpu::BindGroup>,
+    /// Whether this slot's viewport composites a Bevy frame this render.
+    #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+    pub(crate) bevy_active: bool,
     /// Cached texture format (needed to recreate MSAA / depth textures on resize).
     surface_format: wgpu::TextureFormat,
     /// The resident wire batches, shared by `std::sync::Arc` with every other
@@ -1897,6 +1916,94 @@ impl Pipeline {
             ],
         });
 
+        // ── Bevy composite (bevy3d) ────────────────────────────────────────
+        // Fullscreen pass folding the embedded renderer's offscreen frame
+        // into this slot's MSAA buffers: color replaced, depth rewritten as
+        // `1 - bevy_depth` (the exact OCS complement of Bevy's reversed z),
+        // uncovered pixels discarded. Runs between the background/hatch pass
+        // and the solid/wire passes, so linework occludes correctly.
+        #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+        let (bevy_composite_pipeline, bevy_composite_bgl) = {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("bevy_composite.shader"),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
+                    "../../shaders/bevy_composite.wgsl"
+                ))),
+            });
+            let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bevy_composite.bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("bevy_composite.pipeline_layout"),
+                bind_group_layouts: &[Some(&bgl)],
+                immediate_size: 0,
+            });
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("bevy_composite.pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth24PlusStencil8,
+                    depth_write_enabled: Some(true),
+                    // Same rule as the in-house solids: 2D fills drawn by the
+                    // hatch pass keep pixels whose draw-order depth is closer.
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: content_stencil.clone(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: MSAA_SAMPLES,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+            (pipeline, bgl)
+        };
+
         Self {
             background_pipeline,
             shadow_pipeline,
@@ -1968,6 +2075,14 @@ impl Pipeline {
             blit_sampler,
             blit_bind_group,
             blit_uniform_buffer,
+            #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+            bevy_composite_pipeline,
+            #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+            bevy_composite_bgl,
+            #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+            bevy_composite_bind_group: None,
+            #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+            bevy_active: false,
             surface_format: format,
             gpu_wires: std::sync::Arc::new(vec![]),
             wire_arena: None,
@@ -3407,6 +3522,44 @@ impl Pipeline {
             }
         }
 
+        // ── Bevy composite (bevy3d): shaded solids under the overlays ─────
+        #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+        if self.bevy_active {
+            if let Some(bind_group) = &self.bevy_composite_bind_group {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("bevy_composite.render_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: msaa,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_viewport(0.0, 0.0, vp.width as f32, vp.height as f32, 0.0, 1.0);
+                pass.set_pipeline(&self.bevy_composite_pipeline);
+                pass.set_bind_group(0, bind_group, &[]);
+                pass.set_stencil_reference(stencil_ref);
+                pass.draw(0..3, 0..1);
+            }
+        }
+
         // ── Pass 2: raster images ─────────────────────────────────────────
         if !self.gpu_images.is_empty() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4296,6 +4449,33 @@ impl Pipeline {
             self.alloc_size = alloc;
         }
     }
+
+    /// Bind this pump's Bevy output for the composite pass. Rebuilt every
+    /// pump: the bridge recreates its textures on viewport resize and Bevy
+    /// recycles depth textures through its own cache, so identities are not
+    /// stable enough to memoize — and a pump already implies a re-render.
+    #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+    pub(crate) fn set_bevy_composite(
+        &mut self,
+        device: &wgpu::Device,
+        frame: &bevy_bridge::BevyFrame,
+    ) {
+        self.bevy_composite_bind_group =
+            Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("bevy_composite.bind_group"),
+                layout: &self.bevy_composite_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&frame.color_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&frame.depth_view),
+                    },
+                ],
+            }));
+    }
 }
 
 /// Round a texture dimension up to a coarse grid so a live divider drag
@@ -4526,6 +4706,13 @@ pub struct MultiPipeline {
             std::sync::Arc<rustc_hash::FxHashMap<u64, Vec<u32>>>,
         ),
     >,
+    /// The embedded Bevy renderer (bevy3d M1 POC). One windowless app for
+    /// all slots and panes, created on first demand from `prepare`. The
+    /// Mutex only satisfies the `shader::Pipeline: Sync` bound (Bevy's
+    /// extract closure is `Send` but not `Sync`); access goes through
+    /// `get_mut`, so it is never actually locked.
+    #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+    pub(crate) bevy: Option<std::sync::Mutex<bevy_bridge::BevyBridge>>,
 }
 
 impl MultiPipeline {
@@ -4626,6 +4813,29 @@ impl MultiPipeline {
         }
         slots
     }
+
+    /// Pump the embedded Bevy renderer for one shaded viewport: lazily boot
+    /// the bridge, mirror the OCS camera, render offscreen, and hand back
+    /// the frame for the composite pass. `None` (skip compositing) when the
+    /// compositor hasn't published its GPU handles yet.
+    #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+    pub(crate) fn bevy_sync_pump(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        slot_key: u64,
+        size: Size<u32>,
+        cam: &bevy_bridge::BevyCamData,
+    ) -> Option<bevy_bridge::BevyFrame> {
+        if self.bevy.is_none() {
+            self.bevy = bevy_bridge::BevyBridge::new(device, queue).map(std::sync::Mutex::new);
+        }
+        self.bevy
+            .as_mut()?
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sync_and_pump(device, slot_key, (size.width, size.height), cam)
+    }
 }
 
 /// Send wgpu's uncaptured validation errors to stderr instead of the default
@@ -4666,6 +4876,8 @@ impl iced::widget::shader::Pipeline for MultiPipeline {
             slot_last_used: vec![0],
             slot_clock: 0,
             wire_buffer_cache: rustc_hash::FxHashMap::default(),
+            #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
+            bevy: None,
         }
     }
 }

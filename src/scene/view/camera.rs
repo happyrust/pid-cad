@@ -294,6 +294,29 @@ impl Camera {
         OPENGL_TO_WGPU * proj * view
     }
 
+    /// Projection-only counterpart of [`view_proj_rte`](Self::view_proj_rte):
+    /// the same clip-from-view matrix (including the wgpu depth remap) with
+    /// no view factor, plus the far-plane distance in world units. The
+    /// embedded Bevy renderer (`bevy3d`) consumes it as a custom projection
+    /// so both renderers rasterize identical footprints and exactly
+    /// complementary depths.
+    pub fn proj_wgpu(&self, bounds: Rectangle) -> (Mat4, f32) {
+        let aspect = bounds.width / bounds.height;
+        match self.projection {
+            Projection::Perspective => {
+                let far = self.distance * 1000.0;
+                let proj = perspective(self.fov_y, aspect, self.distance * 0.001, far);
+                (OPENGL_TO_WGPU * proj, far)
+            }
+            Projection::Orthographic => {
+                let h = self.ortho_size();
+                let w = h * aspect;
+                let (near, far) = self.ortho_depth_range();
+                (OPENGL_TO_WGPU * orthographic(-w, w, -h, h, near, far), far)
+            }
+        }
+    }
+
     /// Project a world point to screen pixels with full f64 precision: the
     /// point is made eye-relative in f64 (small numbers near the view) before
     /// the rotation-only projection, so it stays exact at large absolute
