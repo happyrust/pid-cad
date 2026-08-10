@@ -103,7 +103,6 @@ const LAYER_SYMBOL_LABEL: &str = "PID-SYMBOL-LABEL";
 const LAYER_POINT: &str = "PID-POINT";
 const LAYER_ANNOTATION: &str = "PID-ANNOTATION";
 const LAYER_CONNECTIVITY: &str = "PID-CONNECTIVITY";
-const LAYER_UNRESOLVED: &str = "PID-UNRESOLVED";
 const LAYER_FRAME: &str = "PID-FRAME";
 
 /// Parse a `.pid` file and project its decoded Sheet geometry into a document.
@@ -131,15 +130,21 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         // switched off: the answer is in the file, one layer toggle away.
         (LAYER_SYMBOL_LABEL, Color::GRAY, false),
         (LAYER_POINT, Color::MAGENTA, true),
+        // There is no `PID-UNRESOLVED`. It held the `GLine2d` unit lines,
+        // which turned out not to be records at all: each was the top two
+        // bytes of an `igSmartFrame2d`'s page ratio, matched by a decoder
+        // that scanned rather than walked the record chain. `pid-parse`
+        // emits none now -- see its
+        // `docs/analysis/2026-08-10-gline2d-is-the-iso-page-ratio-not-a-record.md`.
+        // Unlike `PID-ANNOTATION`, whose records really are in the file with
+        // an unread anchor, there is nothing left for an empty layer to
+        // stand for.
         // Empty since the `JStyleOverride` anchor read was retracted -- see
         // `build_inferred`. Still declared, and still hidden: the records are
         // in the file, and a layer that is present and empty says so where a
         // missing one would not.
         (LAYER_ANNOTATION, Color::YELLOW, false),
         (LAYER_CONNECTIVITY, Color::BLUE, false),
-        // Decoded, but decoded into a shape the record does not really have.
-        // See `unresolved_unit_line`.
-        (LAYER_UNRESOLVED, Color::RED, false),
     ] {
         ensure_layer(&mut doc, layer, colour, visible);
     }
@@ -189,6 +194,7 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     let mut bounds = Bounds::new(projection);
     let mut decoded = 0usize;
     let mut drawn = 0usize;
+    let mut lettering_on_fallback = 0usize;
     for entity in &geometry.entities {
         let built = match entity.confidence {
             PidGeometryConfidence::Decoded => {
@@ -210,6 +216,9 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         drawn += built.len();
         let symbology = style_for(&styles, entity);
         let height_mm = height_for(&text_heights, entity).map(|h| projection.mm(h.height_m));
+        if height_mm.is_none() && matches!(entity.kind, PidGraphicKind::Text { .. }) {
+            lettering_on_fallback += 1;
+        }
         let semantic_hit = semantics.as_ref().and_then(|index| {
             entity
                 .graphic_oid
@@ -237,7 +246,13 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         ));
     }
 
-    report_import(path, &geometry, library.as_ref(), drawn);
+    report_import(
+        path,
+        &geometry,
+        library.as_ref(),
+        drawn,
+        lettering_on_fallback,
+    );
     draw_page_border(&mut doc, page_mm);
     frame_drawing(&mut doc, &bounds, page_mm);
     doc.source_path = Some(path.to_string_lossy().into_owned());
@@ -384,16 +399,18 @@ impl SheetBand {
 
 /// Say what the import could not draw, in the log rather than on the sheet.
 ///
-/// The two gaps a reader hits in practice are silent otherwise: evidence the
-/// parser could not decode looks like a sparse drawing, and an unreachable
-/// symbol library looks like a sheet full of dots. Both are recoverable --
-/// the second by pointing [`SYMBOL_LIBRARY_ENV`] at a local copy -- but only
-/// if the import says so.
+/// The gaps a reader hits in practice are silent otherwise: evidence the
+/// parser could not decode looks like a sparse drawing, an unreachable symbol
+/// library looks like a sheet full of dots, and lettering the drawing gave no
+/// usable height for looks like lettering the drawing sized at 2.5mm. All
+/// three are recoverable -- the second by pointing [`SYMBOL_LIBRARY_ENV`] at a
+/// local copy -- but only if the import says so.
 fn report_import(
     path: &Path,
     geometry: &pid_parse::NormalizedPidGeometry,
     library: Option<&SymbolLibrary>,
     drawn: usize,
+    lettering_on_fallback: usize,
 ) {
     for warning in &geometry.warnings {
         log::debug!("{}: {warning}", path.display());
@@ -438,6 +455,20 @@ fn report_import(
         "{}: drew {drawn} entit(ies) from {placed} decoded record(s); {undrawn} further evidence item(s) are inferred or probe-only and are hidden or dropped",
         path.display()
     );
+
+    // Lettering the drawing states no usable height for. The style chain
+    // itself resolves -- across the reference corpus all 184 text records
+    // reach a character style -- but 25 of them reach one storing 0.254mm
+    // (0.01"), which no drawing letters at, so `style_link` refuses it and
+    // this importer keeps `TEXT_HEIGHT_MM`. Measured in `pid-parse`'s
+    // `docs/analysis/2026-08-10-text-height-residue-is-one-sentinel-not-version-2.md`.
+    // Silent, this reads as lettering the drawing sized at 2.5mm.
+    if lettering_on_fallback > 0 {
+        log::warn!(
+            "{}: {lettering_on_fallback} text record(s) state no usable character height; they are lettered at the {TEXT_HEIGHT_MM}mm ISO 3098 fallback rather than a height read off the drawing",
+            path.display()
+        );
+    }
 
     let Some(library) = library else {
         log::warn!(
@@ -543,9 +574,9 @@ fn apply_text_height(entity: &mut EntityType, height_mm: f64) {
 /// Give an entity the width and colour its source record asks for.
 ///
 /// Only the two layers carrying the drawing's own line work are painted.
-/// `PID-UNRESOLVED` and `PID-CONNECTIVITY` are diagnostics whose layer colour
-/// *is* the diagnosis, and repainting them in the drawing's palette would
-/// hide the thing they exist to show.
+/// `PID-CONNECTIVITY` is a diagnostic whose layer colour *is* the diagnosis,
+/// and repainting it in the drawing's palette would hide the thing it exists
+/// to show.
 fn apply_symbology(
     entity: &mut EntityType,
     style: &ResolvedLineStyle,
@@ -662,12 +693,7 @@ fn build_entities(
     match kind {
         PidGraphicKind::Line { start, end } => {
             let mut line = Line::from_points(projection.point(start), projection.point(end));
-            line.common.layer = if unresolved_unit_line(start, end, projection) {
-                LAYER_UNRESOLVED
-            } else {
-                LAYER_GEOMETRY
-            }
-            .to_string();
+            line.common.layer = LAYER_GEOMETRY.to_string();
             vec![EntityType::Line(line)]
         }
         PidGraphicKind::Polyline { points, closed } => {
@@ -935,9 +961,6 @@ impl Bounds {
 fn accumulate_bounds(kind: &PidGraphicKind, bounds: &mut Bounds) {
     match kind {
         PidGraphicKind::Line { start, end } => {
-            if unresolved_unit_line(start, end, bounds.projection) {
-                return;
-            }
             bounds.add(start);
             bounds.add(end);
         }
@@ -956,30 +979,6 @@ fn accumulate_bounds(kind: &PidGraphicKind, bounds: &mut Bounds) {
         // and the caller frames on decoded geometry alone.
         PidGraphicKind::Annotation { .. } | PidGraphicKind::Unknown { .. } => {}
     }
-}
-
-/// Whether a line is the unit segment a `GLine2d` decodes to when its
-/// parameter range never resolved.
-///
-/// The parametric form is `origin + t * direction` with `direction` a unit
-/// vector, so an unresolved record comes out as the origin walked one whole
-/// source unit along x: `A01` yields `(1e-6, 1e-12) -> (1, 1e-6)` and
-/// `DWG-0201` the same shape twice. At 1000mm that is wider than the sheet
-/// it sits on, and framing on it shrinks the real drawing to a smudge in the
-/// middle of the screen.
-///
-/// The line is still imported -- the record is in the file, and dropping it
-/// would hide a decode gap rather than report it -- but on the hidden
-/// [`LAYER_UNRESOLVED`] rather than among the drawing's own line work, which
-/// is where it was drawing a 1000mm rule straight across the sheet. It gets
-/// no vote on where the camera goes either.
-fn unresolved_unit_line(start: &PidPoint, end: &PidPoint, projection: Projection) -> bool {
-    let (start_x, start_y) = (projection.mm(start.x), projection.mm(start.y));
-    let (end_x, end_y) = (projection.mm(end.x), projection.mm(end.y));
-    start_y.abs() < 1.0
-        && end_y.abs() < 1.0
-        && start_x.abs() < 5.0
-        && (end_x - projection.mm(1.0)).abs() < 1.0e-3
 }
 
 /// Where a symbol placement puts its library body on the sheet.

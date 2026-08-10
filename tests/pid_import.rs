@@ -191,9 +191,13 @@ fn lettering_carries_the_height_the_drawing_states() {
         }
     }
 
-    // 3.175 is 1/8 inch, 1.500 and 3.500 are ISO 3098 sizes. 2.500 is also
-    // the fallback, so it is the one bucket that proves nothing on its own;
-    // the other four are heights the old fixed default could not produce.
+    // 3.175 is 1/8 inch, 1.500 and 3.500 are ISO 3098 sizes, and 2.464 is a
+    // real stated height that lands on no drafting step at all. 2.500 is the
+    // one bucket that also happens to be the fallback -- but it is mostly not
+    // one: this drawing states 2.5mm ten times, and exactly one of its text
+    // records reaches a character style whose height is refused, so eight of
+    // the nine here are the drawing's own. Measured in `pid-parse`'s
+    // `docs/analysis/2026-08-10-text-height-residue-is-one-sentinel-not-version-2.md`.
     let expected: std::collections::BTreeMap<String, usize> = [
         ("1.500", 2),
         ("2.464", 3),
@@ -224,12 +228,7 @@ fn import_declares_its_layers_and_hides_the_evidence_ones() {
     ] {
         assert!(!is_hidden(&doc, visible), "{visible} must open visible");
     }
-    for hidden in [
-        "PID-SYMBOL-LABEL",
-        "PID-ANNOTATION",
-        "PID-CONNECTIVITY",
-        "PID-UNRESOLVED",
-    ] {
+    for hidden in ["PID-SYMBOL-LABEL", "PID-ANNOTATION", "PID-CONNECTIVITY"] {
         assert!(is_hidden(&doc, hidden), "{hidden} must open hidden");
     }
 }
@@ -275,30 +274,38 @@ fn the_annotation_layer_is_declared_but_draws_nothing() {
     }
 }
 
-/// A `GLine2d` whose parameter range never resolved decodes as the origin
-/// walked one whole source unit -- a 1000mm rule straight across a 594mm
-/// sheet. It stays in the document, because the record is in the file, but on
-/// the hidden diagnostic layer rather than among the drawing's line work.
+/// No line spans the sheet, and the layer that used to hold the ones that
+/// did is gone.
+///
+/// DWG-0201 used to import two 1000mm rules straight across a 594mm sheet.
+/// They were parked on a hidden `PID-UNRESOLVED` layer and blamed on a
+/// `GLine2d` whose parameter range had not decoded. The parameter range had
+/// decoded fine; the records were not records. Each was the top two bytes of
+/// an `igSmartFrame2d`'s `1/√2` page ratio, 160 bytes inside that record,
+/// matched by a decoder that scanned every byte offset. `pid-parse` now
+/// requires chain membership and emits none, so both the lines and the layer
+/// they needed are gone -- see that repo's
+/// `docs/analysis/2026-08-10-gline2d-is-the-iso-page-ratio-not-a-record.md`.
 #[test]
-fn unresolved_unit_lines_are_kept_off_the_drawing() {
+fn no_line_spans_the_sheet_and_the_diagnostic_layer_is_gone() {
     let Some(doc) = import("DWG-0201GP06-01.pid") else {
         return;
     };
 
-    let unresolved: Vec<_> = on_layer(&doc, "PID-UNRESOLVED").collect();
     assert!(
-        !unresolved.is_empty(),
-        "DWG-0201 has two unresolved unit lines; none reached the diagnostic layer"
+        doc.layers.get("PID-UNRESOLVED").is_none(),
+        "PID-UNRESOLVED is back; nothing in the file needs it"
     );
 
-    for entity in on_layer(&doc, "PID-GEOMETRY") {
+    for entity in doc.entities() {
         let EntityType::Line(line) = entity else {
             continue;
         };
         let width = (line.end.x - line.start.x).abs();
         assert!(
             width < 900.0,
-            "a {width:.0}mm line is on the drawing layer; the unit-line filter missed it"
+            "a {width:.0}mm line reached the drawing on layer {:?}; a scan artifact is back",
+            layer_of(entity)
         );
     }
 }
