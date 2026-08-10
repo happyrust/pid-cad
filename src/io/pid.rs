@@ -26,7 +26,7 @@ use acadrust::entities::{Circle, Hatch, Line, LwPolyline, Point, Text};
 use acadrust::tables::linetype::{LineType, LineTypeElement};
 use acadrust::types::{Color, LineWeight, Vector2, Vector3};
 use acadrust::{CadDocument, EntityType, TableEntry};
-use pid_parse::style_link::{DashPattern, LineStyleIndex, ResolvedLineStyle};
+use pid_parse::style_link::{DashPattern, LineStyleIndex, ResolvedFill, ResolvedLineStyle};
 use pid_parse::symbol_library::{SymbolLibrary, SymbolPrimitive};
 use pid_parse::{
     build_normalized_geometry, NormalizedPidGeometry, PidDrawingUnits, PidGeometryConfidence,
@@ -126,10 +126,9 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         // the line work it encloses.
         (LAYER_FRAME, Color::WHITE, true),
         (LAYER_TEXT, Color::GREEN, true),
-        // Filled areas. White because it is the line work's own colour and
-        // these are part of the drawing, not evidence about it -- the fill
-        // style's colour is not decoded, so this is the layer's default
-        // standing in rather than a value read off the drawing.
+        // Filled areas. Each fill carries its own decoded colour, so the layer
+        // colour is only the default for a fill that states none; white keeps
+        // those consistent with the line work they belong to.
         (LAYER_FILL, Color::WHITE, true),
         (LAYER_SYMBOL, Color::CYAN, true),
         // "Flanged Nozzle with blind" is wider than the equipment it names, so
@@ -215,12 +214,10 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         // the member lines already drew. See `build_fill`.
         let fill = fill_for(&fills, entity);
         let built = match entity.confidence {
-            PidGeometryConfidence::Decoded if fill.is_some() => {
-                build_fill(&entity.kind, projection)
-            }
-            PidGeometryConfidence::Decoded => {
-                build_entities(&entity.kind, library.as_mut(), projection)
-            }
+            PidGeometryConfidence::Decoded => match fill {
+                Some(fill) => build_fill(&entity.kind, fill, projection),
+                None => build_entities(&entity.kind, library.as_mut(), projection),
+            },
             PidGeometryConfidence::Inferred => build_inferred(&entity.kind, projection),
             PidGeometryConfidence::ProbeOnly => Vec::new(),
         };
@@ -583,11 +580,17 @@ fn fill_for<'a>(
 /// cannot say is that the ring is *filled*. This turns the ring into a solid
 /// `HATCH`, which is the entity the renderer already fills.
 ///
-/// The fill's own colour is not decoded -- `JStyleSimpleFill`'s payload has
-/// never been read -- so the hatch takes its layer's colour. Drawing the area
-/// in the wrong colour would be a guess; drawing it in the layer's is a
-/// stated default, and either is closer than leaving it hollow.
-fn build_fill(kind: &PidGraphicKind, projection: Projection) -> Vec<EntityType> {
+/// The fill takes the colour `JStyleSimpleFill` states at payload +30, a
+/// Win32 `COLORREF` decoded the same way as a line's. On the reference corpus
+/// the flow arrowheads read `#0000FF`, so they now come in blue rather than
+/// the layer's white. A fill that states no colour -- a hatch, or the "unset"
+/// sentinel every document's template fill carries -- keeps the layer default,
+/// which is what "no stated colour" asks for anyway.
+fn build_fill(
+    kind: &PidGraphicKind,
+    fill: &ResolvedFill,
+    projection: Projection,
+) -> Vec<EntityType> {
     let PidGraphicKind::Polyline { points, .. } = kind else {
         return Vec::new();
     };
@@ -595,7 +598,11 @@ fn build_fill(kind: &PidGraphicKind, projection: Projection) -> Vec<EntityType> 
         return Vec::new();
     }
     let mut path = BoundaryPath::with_flags(BoundaryPathFlags::EXTERNAL);
-    for (from, to) in points.iter().zip(points.iter().cycle().skip(1)).take(points.len()) {
+    for (from, to) in points
+        .iter()
+        .zip(points.iter().cycle().skip(1))
+        .take(points.len())
+    {
         path.edges.push(BoundaryEdge::Line(LineEdge {
             start: Vector2::new(projection.mm(from.x), projection.mm(from.y)),
             end: Vector2::new(projection.mm(to.x), projection.mm(to.y)),
@@ -605,6 +612,9 @@ fn build_fill(kind: &PidGraphicKind, projection: Projection) -> Vec<EntityType> 
     let mut hatch = Hatch::new();
     hatch.paths.push(path);
     hatch.common.layer = LAYER_FILL.to_string();
+    if let Some([r, g, b]) = fill.rgb() {
+        hatch.common.color = Color::from_rgb(r, g, b);
+    }
     vec![EntityType::Hatch(hatch)]
 }
 

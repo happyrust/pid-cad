@@ -311,16 +311,16 @@ fn no_line_spans_the_sheet_and_the_diagnostic_layer_is_gone() {
     }
 }
 
-/// An area the drawing fills comes in filled.
+/// An area the drawing fills comes in filled, and in the colour it states.
 ///
 /// `igBoundary2d` used to emit nothing, on the grounds that its segments
 /// re-list the member `igLine2d` records that already draw the outline. True,
 /// and it left the drawing's flow arrowheads hollow: every one of the corpus's
 /// boundaries resolves through a `JStyleOverride` to a `JStyleSimpleFill`, and
 /// the member lines have no way to say so. They now import as solid hatches --
-/// five on DWG-0202, ten on the gongyi drawing -- in their layer's colour,
-/// because `JStyleSimpleFill`'s own payload is still undecoded. Measured in
-/// `pid-parse`'s `docs/analysis/2026-08-10-fill-has-a-consumer-after-all.md`.
+/// five on DWG-0202, ten on the gongyi drawing -- in the blue `#0000FF` the
+/// fill states at payload +30, decoded like a line's `COLORREF`. Measured in
+/// `pid-parse`'s `docs/analysis/2026-08-10-fill-colour-is-002a-plus-30.md`.
 #[test]
 fn filled_areas_come_in_as_solid_hatches() {
     for (name, expected) in [("DWG-0202GP06-01.pid", 5), ("D06.pid", 0)] {
@@ -342,6 +342,13 @@ fn filled_areas_come_in_as_solid_hatches() {
             assert!(
                 edges >= 3,
                 "{name}: a filled area needs a closed ring, got {edges} edge(s)"
+            );
+            // The arrowheads state blue, and the decode carries it onto the
+            // hatch rather than leaving it the layer's white default.
+            assert_eq!(
+                hatch.common.color,
+                acadrust::types::Color::Rgb { r: 0, g: 0, b: 255 },
+                "{name}: the decoded fill colour is the blue the drawing states"
             );
         }
     }
