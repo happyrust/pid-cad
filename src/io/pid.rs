@@ -21,7 +21,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use acadrust::entities::{Circle, Line, LwPolyline, Point, Text};
+use acadrust::entities::hatch::{BoundaryEdge, BoundaryPath, BoundaryPathFlags, LineEdge};
+use acadrust::entities::{Circle, Hatch, Line, LwPolyline, Point, Text};
 use acadrust::tables::linetype::{LineType, LineTypeElement};
 use acadrust::types::{Color, LineWeight, Vector2, Vector3};
 use acadrust::{CadDocument, EntityType, TableEntry};
@@ -103,6 +104,7 @@ const LAYER_SYMBOL_LABEL: &str = "PID-SYMBOL-LABEL";
 const LAYER_POINT: &str = "PID-POINT";
 const LAYER_ANNOTATION: &str = "PID-ANNOTATION";
 const LAYER_CONNECTIVITY: &str = "PID-CONNECTIVITY";
+const LAYER_FILL: &str = "PID-FILL";
 const LAYER_FRAME: &str = "PID-FRAME";
 
 /// Parse a `.pid` file and project its decoded Sheet geometry into a document.
@@ -124,6 +126,11 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         // the line work it encloses.
         (LAYER_FRAME, Color::WHITE, true),
         (LAYER_TEXT, Color::GREEN, true),
+        // Filled areas. White because it is the line work's own colour and
+        // these are part of the drawing, not evidence about it -- the fill
+        // style's colour is not decoded, so this is the layer's default
+        // standing in rather than a value read off the drawing.
+        (LAYER_FILL, Color::WHITE, true),
         (LAYER_SYMBOL, Color::CYAN, true),
         // "Flanged Nozzle with blind" is wider than the equipment it names, so
         // on a sheet with 58 placements the labels bury the drawing. They ship
@@ -166,6 +173,13 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     // to be 1/8 inch, so `TEXT_HEIGHT_MM` was reading a quarter too small.
     // Records whose height does not resolve keep that fallback.
     let text_heights = pid_parse::style_link::text_heights_for_file(path).unwrap_or_default();
+    // Which areas the drawing fills. `pid-parse` resolves an `igBoundary2d`
+    // ring through its `JStyleOverride` to a `JStyleSimpleFill`; the fill's
+    // own colour is not decoded, so a filled ring is drawn in its layer's
+    // colour. On the reference corpus these are the solid flow arrowheads on
+    // the pipelines -- 5 on DWG-0202 and 10 on the gongyi drawing, all of
+    // which used to import as hollow triangles.
+    let fills = pid_parse::style_link::fill_styles_for_file(path).unwrap_or_default();
     // A line's dash pattern comes from the same style table, one reference
     // further along: a JStyleSimpleLine names a JStyleSimpleDashType, and
     // style_link hands the decoded segments back. Pool the distinct patterns
@@ -196,7 +210,14 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     let mut drawn = 0usize;
     let mut lettering_on_fallback = 0usize;
     for entity in &geometry.entities {
+        // A boundary ring is the one kind whose style decides its shape rather
+        // than its colour: filled, it is an area; unfilled, it is an outline
+        // the member lines already drew. See `build_fill`.
+        let fill = fill_for(&fills, entity);
         let built = match entity.confidence {
+            PidGeometryConfidence::Decoded if fill.is_some() => {
+                build_fill(&entity.kind, projection)
+            }
             PidGeometryConfidence::Decoded => {
                 build_entities(&entity.kind, library.as_mut(), projection)
             }
@@ -541,6 +562,50 @@ fn style_for<'a>(
     let stream = entity.source.stream_path.as_deref()?;
     let oid = entity.graphic_oid?;
     styles.get(&(stream.to_string(), oid))
+}
+
+/// The fill the drawing states for one boundary ring, if it states one. Same
+/// `(stream path, graphic oid)` join as [`style_for`].
+fn fill_for<'a>(
+    fills: &'a pid_parse::style_link::FillIndex,
+    entity: &pid_parse::PidGraphicEntity,
+) -> Option<&'a pid_parse::style_link::ResolvedFill> {
+    let stream = entity.source.stream_path.as_deref()?;
+    let oid = entity.graphic_oid?;
+    fills.get(&(stream.to_string(), oid))
+}
+
+/// Draw a filled area rather than its outline.
+///
+/// `pid-parse` emits an `igBoundary2d` as a closed polyline whose segments
+/// re-list the member `igLine2d` records that already drew the outline. So
+/// stroking it again would only thicken what is there; what the member lines
+/// cannot say is that the ring is *filled*. This turns the ring into a solid
+/// `HATCH`, which is the entity the renderer already fills.
+///
+/// The fill's own colour is not decoded -- `JStyleSimpleFill`'s payload has
+/// never been read -- so the hatch takes its layer's colour. Drawing the area
+/// in the wrong colour would be a guess; drawing it in the layer's is a
+/// stated default, and either is closer than leaving it hollow.
+fn build_fill(kind: &PidGraphicKind, projection: Projection) -> Vec<EntityType> {
+    let PidGraphicKind::Polyline { points, .. } = kind else {
+        return Vec::new();
+    };
+    if points.len() < 3 {
+        return Vec::new();
+    }
+    let mut path = BoundaryPath::with_flags(BoundaryPathFlags::EXTERNAL);
+    for (from, to) in points.iter().zip(points.iter().cycle().skip(1)).take(points.len()) {
+        path.edges.push(BoundaryEdge::Line(LineEdge {
+            start: Vector2::new(projection.mm(from.x), projection.mm(from.y)),
+            end: Vector2::new(projection.mm(to.x), projection.mm(to.y)),
+        }));
+    }
+    // `Hatch::new` is already a solid; the ring only has to be handed over.
+    let mut hatch = Hatch::new();
+    hatch.paths.push(path);
+    hatch.common.layer = LAYER_FILL.to_string();
+    vec![EntityType::Hatch(hatch)]
 }
 
 /// The character height the drawing states for one text record, if it has

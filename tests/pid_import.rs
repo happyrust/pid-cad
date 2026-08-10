@@ -223,6 +223,7 @@ fn import_declares_its_layers_and_hides_the_evidence_ones() {
         "PID-GEOMETRY",
         "PID-FRAME",
         "PID-TEXT",
+        "PID-FILL",
         "PID-SYMBOL",
         "PID-POINT",
     ] {
@@ -307,6 +308,42 @@ fn no_line_spans_the_sheet_and_the_diagnostic_layer_is_gone() {
             "a {width:.0}mm line reached the drawing on layer {:?}; a scan artifact is back",
             layer_of(entity)
         );
+    }
+}
+
+/// An area the drawing fills comes in filled.
+///
+/// `igBoundary2d` used to emit nothing, on the grounds that its segments
+/// re-list the member `igLine2d` records that already draw the outline. True,
+/// and it left the drawing's flow arrowheads hollow: every one of the corpus's
+/// boundaries resolves through a `JStyleOverride` to a `JStyleSimpleFill`, and
+/// the member lines have no way to say so. They now import as solid hatches --
+/// five on DWG-0202, ten on the gongyi drawing -- in their layer's colour,
+/// because `JStyleSimpleFill`'s own payload is still undecoded. Measured in
+/// `pid-parse`'s `docs/analysis/2026-08-10-fill-has-a-consumer-after-all.md`.
+#[test]
+fn filled_areas_come_in_as_solid_hatches() {
+    for (name, expected) in [("DWG-0202GP06-01.pid", 5), ("D06.pid", 0)] {
+        let Some(doc) = import(name) else {
+            continue;
+        };
+        let hatches: Vec<_> = on_layer(&doc, "PID-FILL").collect();
+        assert_eq!(
+            hatches.len(),
+            expected,
+            "{name}: expected {expected} filled area(s) on PID-FILL"
+        );
+        for entity in &hatches {
+            let EntityType::Hatch(hatch) = entity else {
+                panic!("{name}: PID-FILL must carry hatches, got {entity:?}");
+            };
+            assert!(hatch.is_solid, "{name}: the decoded fill is a solid one");
+            let edges: usize = hatch.paths.iter().map(|path| path.edges.len()).sum();
+            assert!(
+                edges >= 3,
+                "{name}: a filled area needs a closed ring, got {edges} edge(s)"
+            );
+        }
     }
 }
 
