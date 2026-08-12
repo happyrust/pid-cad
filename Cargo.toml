@@ -1,6 +1,6 @@
 [package]
 name = "OpenCADStudio"
-version = "0.9.3"
+version = "0.9.5"
 edition = "2021"
 build = "build.rs"
 
@@ -12,52 +12,52 @@ members = [
     "crates/dwg-thumbnailer-win",
 ]
 
-[target.'cfg(windows)'.build-dependencies]
-winresource = "0.1"
-
 [features]
-default = ["solid3d"]
-solid3d = ["dep:truck-meshalgo", "dep:truck-shapeops", "dep:lzma-sys"]
+default = []
+ifc = ["dep:acadifc"]
 # M1 POC: embedded Bevy renderer for the 3D shaded-solid layer (desktop only,
 # see docs/bevy-viewport-integration.md). Runtime opt-in via OCS_BEVY3D=1.
 bevy3d = ["dep:bevy"]
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [dependencies]
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 semver = "1"
-lzma-sys = { version = "0.1", features = ["static"], optional = true }
 # wgpu-30 port: local fork of iced-rs/iced @ 23604ff (branch wgpu-30-port)
 iced = { path = "../iced", features = ["image", "svg", "advanced", "canvas", "smol", "markdown"] }
 iced_core = { path = "../iced/core" }
 iced_aw = { git = "https://github.com/HakanSeven12/iced_aw.git", branch = "agent/fix-iced-fonts", features = ["menu", "context_menu", "color_picker", "drop_down"] }
 bytemuck = { version = "1.25", features = ["derive"] }
 glam = { version = "0.33", features = ["bytemuck"] }
-truck-modeling = "0.6"
-truck-meshalgo = { version = "0.4", default-features = false, features = ["tessellation"], optional = true }
-truck-polymesh = "0.6"
 rfd = "0.17"
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 # Log facade, already in the tree via wgpu/iced. Native writes through the
 # env_logger above; the web build installs its own logger.
 log = "0.4"
-acadrust = { version = "0.4", features = ["serde"] }
+acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "74c5fe9", features = ["serde"] }
+cadkernel = { git = "https://github.com/HakanSeven12/cadkernel.git", rev = "574cf13", features = ["acis", "offset"] }
+acadifc = { git = "https://github.com/OpenAEC-Foundation/acadifc.git", rev = "47b5603", optional = true }
 dwg-thumbnailer = { path = "crates/dwg-thumbnailer" }
 flate2 = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
+# Rasterises assets/logo.svg into the window icon at startup, so the taskbar
+# icon comes from the same file every other build target does. Already in the
+# tree behind iced's svg feature; named here only to use it directly.
+resvg = { version = "0.45", default-features = false }
 i18n-embed = { version = "0.16", features = ["fluent-system"] }
 i18n-embed-fl = "0.10"
 rust-embed = "8"
 inventory = "0.3"
-truck-shapeops = { version = "0.4", optional = true }
 rustc-hash = "2"
 sha2 = "0.10"
 fontdb = "0.23"
 ttf-parser = "0.25"
 cosmic-text = "0.15"
 lyon_tessellation = "1.0.20"
-cavalier_contours = "=0.7.0"
 
 [dev-dependencies]
 naga = { version = "30", features = ["wgsl-in"] }
@@ -69,7 +69,6 @@ windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_Window
 ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "wayland"] }
 
 [patch.crates-io]
-acadrust = { git = "https://github.com/OpenAEC-Foundation/acadifc.git", rev = "41149d7" }
 iced_core = { path = "../iced/core" }
 iced_widget = { path = "../iced/widget" }
 

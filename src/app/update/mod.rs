@@ -125,6 +125,22 @@ impl OpenCADStudio {
     /// changes, and the ribbon tool that launched the dialog is de-highlighted.
     fn close_active_modal(&mut self) {
         use super::ModalKind::*;
+        // Plot Style opened from PLOT behaves as a child modal.
+        // Closing it restores the parent Plot dialog instead of returning
+        // to the drawing.
+        if self.active_modal == Some(Plotstyle) {
+            if let Some((plot_offset, plot_resize)) =
+                self.plotstyle_parent_plot_geometry.take()
+            {
+                self.active_modal = Some(Plot);
+
+                self.reset_modal_geometry();
+                self.modal_offset = plot_offset;
+                self.modal_resize = plot_resize;
+
+                return;
+            }
+        }
         if self.active_modal == Some(Plot) && self.print_all_options {
             if let Some(previous) = self.print_all_options_prev.take() {
                 self.plot_dialog = previous;
@@ -148,6 +164,9 @@ impl OpenCADStudio {
         }
         if self.active_modal == Some(ScaleManager) {
             self.scale_stage_discard();
+        }
+        if self.active_modal == Some(DraftingSettings) {
+            self.snap_popup_open = false;
         }
         #[cfg(not(target_arch = "wasm32"))]
         if self.active_modal == Some(FileInUse) {
@@ -252,6 +271,7 @@ impl OpenCADStudio {
         {
             self.snapper.clear_tracking();
             self.otrack_active = None;
+            self.otrack_kind = None;
         }
         if let Some(started) = perf_started {
             let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -277,6 +297,7 @@ impl OpenCADStudio {
     pub(in crate::app) fn reset_tracking_after_point(&mut self) {
         self.snapper.clear_tracking();
         self.otrack_active = None;
+        self.otrack_kind = None;
     }
 
     fn update_inner(&mut self, msg: Message) -> Task<Message> {
@@ -353,115 +374,6 @@ impl OpenCADStudio {
             Message::StartSectionSelect(section) => {
                 self.start_section = section;
                 self.save_config();
-                Task::none()
-            }
-
-            Message::TogglePropertiesBar => {
-                self.props_expanded = !self.props_expanded;
-                Task::none()
-            }
-
-            Message::PropertiesClose => {
-                self.show_properties = false;
-                self.properties_hovered = false;
-                self.properties_dragging = false;
-                self.properties_resizing = false;
-                self.properties_drag_last = None;
-                self.properties_dock_preview = None;
-                self.ribbon.set_properties(false);
-                Task::none()
-            }
-
-            Message::PropertiesAutoCollapseToggle => {
-                self.properties_auto_collapse ^= true;
-                // Keep the panel open while the pointer is still over the
-                // button; leaving the panel performs the first collapse.
-                self.properties_hovered = self.properties_auto_collapse;
-                self.save_config();
-                Task::none()
-            }
-
-            Message::PropertiesHover(hovered) => {
-                if self.properties_auto_collapse
-                    && !self.properties_dragging
-                    && !self.properties_resizing
-                {
-                    self.properties_hovered = hovered;
-                }
-                Task::none()
-            }
-
-            Message::PropertiesDockGrab => {
-                self.properties_dragging = true;
-                self.properties_resizing = false;
-                self.properties_drag_last = None;
-                self.properties_dock_preview = Some(self.properties_side);
-                self.properties_hovered = true;
-                Task::none()
-            }
-
-            Message::PropertiesResizeGrab => {
-                self.properties_resizing = true;
-                self.properties_dragging = false;
-                self.properties_drag_last = None;
-                self.properties_dock_preview = None;
-                self.properties_hovered = true;
-                Task::none()
-            }
-
-            Message::PropertiesWidthReset => {
-                self.properties_width = 250.0;
-                self.save_config();
-                Task::none()
-            }
-
-            Message::PropertiesDragMove(point) => {
-                if self.properties_dragging {
-                    self.properties_dock_preview = Some(if point.x < self.win_size.0 * 0.5 {
-                        crate::app::config::DockSide::Left
-                    } else {
-                        crate::app::config::DockSide::Right
-                    });
-                } else if self.properties_resizing {
-                    if let Some(last) = self.properties_drag_last {
-                        let dx = point.x - last.x;
-                        let delta = match self.properties_side {
-                            crate::app::config::DockSide::Left => dx,
-                            crate::app::config::DockSide::Right => -dx,
-                        };
-                        let max_width = (self.win_size.0 * 0.45).clamp(220.0, 600.0);
-                        self.properties_width =
-                            (self.properties_width + delta).clamp(220.0, max_width);
-                    }
-                }
-                if self.properties_dragging || self.properties_resizing {
-                    self.properties_drag_last = Some(point);
-                }
-                Task::none()
-            }
-
-            Message::PropertiesDragRelease => {
-                let changed = if self.properties_dragging {
-                    if let Some(side) = self.properties_dock_preview {
-                        let changed = side != self.properties_side;
-                        self.properties_side = side;
-                        changed
-                    } else {
-                        false
-                    }
-                } else {
-                    self.properties_resizing
-                };
-                self.properties_dragging = false;
-                self.properties_resizing = false;
-                self.properties_drag_last = None;
-                self.properties_dock_preview = None;
-                if self.properties_auto_collapse {
-                    self.properties_hovered = false;
-                }
-                if changed {
-                    self.save_config();
-                }
                 Task::none()
             }
 
@@ -1188,18 +1100,6 @@ impl OpenCADStudio {
                 Task::none()
             }
 
-            Message::SetWireframe(w) => {
-                // Back-compat shim: forward to the new render-mode path so
-                // the ribbon button + WIREFRAME / SOLID command line still
-                // work without duplicating the rendering plumbing.
-                let mode = if w {
-                    acadrust::entities::ViewportRenderMode::Wireframe2D
-                } else {
-                    acadrust::entities::ViewportRenderMode::FlatShaded
-                };
-                Task::done(Message::SetRenderMode(mode))
-            }
-
             Message::SetRenderMode(mode) => {
                 self.render_mode_menu_open = false;
                 self.render_mode_preview = None;
@@ -1258,11 +1158,7 @@ impl OpenCADStudio {
             }
 
             Message::RibbonToolClick { tool_id, event } => {
-                if self.tabs[self.active_tab].is_start {
-                    Task::none()
-                } else {
-                    self.on_ribbon_tool_click(tool_id, event)
-                }
+                self.on_ribbon_tool_click(tool_id, event)
             }
             Message::PluginFileDialogResult { command, path } => {
                 if let Some(path) = path {
@@ -1869,6 +1765,142 @@ impl OpenCADStudio {
                 self.load_layer_state_editor(names.into_iter().next());
                 self.active_modal = Some(super::ModalKind::LayerStateManager);
                 Task::none()
+            }
+            // ── Layer Translator (#624) ──────────────────────────────────
+            Message::LayerTranslatorLoad => Task::perform(
+                crate::io::pick_layer_standard_path(),
+                |path| match path {
+                    Some(path) => Message::LayerTranslatorLoaded(path),
+                    None => Message::Noop,
+                },
+            ),
+            Message::LayerTranslatorLoaded(path) => {
+                use crate::modules::draw::layers::laytrans;
+                match laytrans::load_targets(&path) {
+                    Ok(targets) => {
+                        let state = self.layer_translator.get_or_insert_with(Default::default);
+                        state.source_file = path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        state.targets = targets;
+                        // A target set that no longer contains a mapped name
+                        // would translate onto nothing.
+                        let names: Vec<String> =
+                            state.targets.iter().map(|t| t.name.clone()).collect();
+                        state
+                            .mappings
+                            .retain(|m| names.iter().any(|n| n.eq_ignore_ascii_case(&m.to)));
+                        state.selected_to = None;
+                    }
+                    Err(why) => self
+                        .command_line
+                        .push_error(crate::tf!("LAYTRANS: {why}.").as_ref()),
+                }
+                Task::none()
+            }
+            Message::LayerTranslatorSelectFrom(name) => {
+                if let Some(state) = self.layer_translator.as_mut() {
+                    state.selected_from = Some(name);
+                }
+                Task::none()
+            }
+            Message::LayerTranslatorSelectTo(name) => {
+                if let Some(state) = self.layer_translator.as_mut() {
+                    state.selected_to = Some(name);
+                }
+                Task::none()
+            }
+            Message::LayerTranslatorMap => {
+                use crate::modules::draw::layers::laytrans::Mapping;
+                if let Some(state) = self.layer_translator.as_mut() {
+                    if let (Some(from), Some(to)) =
+                        (state.selected_from.take(), state.selected_to.clone())
+                    {
+                        state.mappings.retain(|m| !m.from.eq_ignore_ascii_case(&from));
+                        state.mappings.push(Mapping { from, to });
+                    }
+                }
+                Task::none()
+            }
+            Message::LayerTranslatorMapSame => {
+                use crate::modules::draw::layers::laytrans;
+                let i = self.active_tab;
+                let current = self.tabs[i].active_layer.clone();
+                let sources = laytrans::source_layers(&self.tabs[i].scene, &current);
+                if let Some(state) = self.layer_translator.as_mut() {
+                    for mapping in laytrans::map_same(&sources, &state.targets) {
+                        if !state
+                            .mappings
+                            .iter()
+                            .any(|m| m.from.eq_ignore_ascii_case(&mapping.from))
+                        {
+                            state.mappings.push(mapping);
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::LayerTranslatorUnmap(from) => {
+                if let Some(state) = self.layer_translator.as_mut() {
+                    state.mappings.retain(|m| m.from != from);
+                }
+                Task::none()
+            }
+            Message::LayerTranslatorForceByLayer(value) => {
+                if let Some(state) = self.layer_translator.as_mut() {
+                    state.force_bylayer = value;
+                }
+                Task::none()
+            }
+            Message::LayerTranslatorWriteLog(value) => {
+                if let Some(state) = self.layer_translator.as_mut() {
+                    state.write_log = value;
+                }
+                Task::none()
+            }
+            Message::LayerTranslatorSaveMappings => Task::perform(
+                crate::io::pick_layer_mapping_path(true),
+                |path| match path {
+                    Some(path) => Message::LayerTranslatorMappingsPath(path, true),
+                    None => Message::Noop,
+                },
+            ),
+            Message::LayerTranslatorLoadMappings => Task::perform(
+                crate::io::pick_layer_mapping_path(false),
+                |path| match path {
+                    Some(path) => Message::LayerTranslatorMappingsPath(path, false),
+                    None => Message::Noop,
+                },
+            ),
+            Message::LayerTranslatorMappingsPath(path, save) => {
+                self.layer_translator_mappings_file(&path, save);
+                Task::none()
+            }
+            Message::LayerTranslatorTranslate => {
+                use crate::modules::draw::layers::laytrans;
+                let Some(state) = self.layer_translator.take() else {
+                    return Task::none();
+                };
+                self.active_modal = None;
+                let i = self.active_tab;
+                let current = self.tabs[i].active_layer.clone();
+                self.push_undo_snapshot(i, "LAYTRANS");
+                let report = laytrans::translate(
+                    &mut self.tabs[i].scene,
+                    &state.mappings,
+                    &state.targets,
+                    &current,
+                    laytrans::Options {
+                        force_bylayer: state.force_bylayer,
+                    },
+                );
+                let write_log = state.write_log;
+                let task = self.finish_layer_translation(i, report);
+                if write_log {
+                    self.write_layer_translation_log(i);
+                }
+                task
             }
             Message::LayerStateManagerSelect(name) => {
                 self.load_layer_state_editor(Some(name));
@@ -2707,6 +2739,7 @@ impl OpenCADStudio {
             Message::ViewCubeHome => {
                 let i = self.active_tab;
                 self.clear_navigation_hover(i);
+                self.tabs[i].scene.remember_current_view();
                 let r_ucs = self.tabs[i].scene.viewcube_ucs_mat();
                 if self.tabs[i].scene.active_viewport.is_some() {
                     self.tabs[i]
@@ -2723,6 +2756,7 @@ impl OpenCADStudio {
             Message::ViewCubeRoll(cw) => {
                 let i = self.active_tab;
                 self.clear_navigation_hover(i);
+                self.tabs[i].scene.remember_current_view();
                 let ang = if cw {
                     std::f32::consts::FRAC_PI_2
                 } else {
@@ -2749,6 +2783,7 @@ impl OpenCADStudio {
                 };
                 let i = self.active_tab;
                 self.clear_navigation_hover(i);
+                self.tabs[i].scene.remember_current_view();
                 if self.tabs[i].scene.active_viewport.is_some() {
                     self.tabs[i]
                         .scene
@@ -2887,6 +2922,43 @@ impl OpenCADStudio {
                 self.sync_vport_display(self.active_tab);
                 Task::none()
             }
+            Message::ToggleIsometricDrafting => {
+                self.isometric_drafting = !self.isometric_drafting;
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+            Message::SetIsoPlane(plane) => {
+                self.isometric_drafting = true;
+                self.iso_plane = plane;
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+            Message::CycleIsoPlane => {
+                if self.isometric_drafting {
+                    self.iso_plane = self.iso_plane.next();
+                } else {
+                    self.isometric_drafting = true;
+                }
+                self.command_line.push_output(crate::tf!(
+                    "Isometric plane: {}.",
+                    self.iso_plane.label()
+                ).as_ref());
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+            Message::ResetDraftingRotation => {
+                self.snap_angle_deg = 0.0;
+                let i = self.active_tab;
+                if self.tabs[i].active_ucs.is_some() {
+                    self.tabs[i].active_ucs = None;
+                    self.commit_active_ucs_change(i, "UCS");
+                    self.tabs[i].scene.camera_generation += 1;
+                }
+                self.command_line
+                    .push_output(crate::t!("Drafting rotation reset to World at 0°.").as_ref());
+                self.persist_settings_if_changed();
+                Task::none()
+            }
             Message::ToggleGrid => {
                 self.show_grid ^= true;
                 self.sync_vport_display(self.active_tab);
@@ -2968,6 +3040,8 @@ impl OpenCADStudio {
                 self.snapper.otrack_enabled ^= true;
                 if !self.snapper.otrack_enabled {
                     self.snapper.clear_tracking();
+                    self.otrack_active = None;
+                    self.otrack_kind = None;
                 }
                 Task::none()
             }
@@ -3410,11 +3484,107 @@ impl OpenCADStudio {
                 self.units_popup_open = false;
                 Task::none()
             }
+            Message::OpenDrawingUnits => {
+                self.units_popup_open = false;
+                let header = &self.tabs[self.active_tab].scene.document.header;
+                self.drawing_units = Some(crate::ui::window::drawing_units::State {
+                    linear_format: header.linear_unit_format,
+                    linear_precision: header.linear_unit_precision,
+                    angular_format: header.angular_unit_format,
+                    angular_precision: header.angular_unit_precision,
+                    clockwise: header.angle_direction != 0,
+                    base_angle: format!("{:.6}", header.angle_base.to_degrees())
+                        .trim_end_matches('0')
+                        .trim_end_matches('.')
+                        .to_string(),
+                    insertion_units: header.insertion_units,
+                });
+                self.active_modal = Some(crate::app::ModalKind::DrawingUnits);
+                Task::none()
+            }
+            Message::DrawingUnitsField(field) => {
+                use crate::ui::window::drawing_units::Field;
+                let Some(state) = self.drawing_units.as_mut() else {
+                    return Task::none();
+                };
+                match field {
+                    Field::LinearFormat(v) => state.linear_format = v,
+                    Field::LinearPrecision(v) => state.linear_precision = v,
+                    Field::AngularFormat(v) => state.angular_format = v,
+                    Field::AngularPrecision(v) => state.angular_precision = v,
+                    Field::Clockwise(v) => state.clockwise = v,
+                    // Kept as typed so a lone "-" or a trailing "." survives
+                    // until the number it is becoming is finished.
+                    Field::BaseAngle(v) => state.base_angle = v,
+                    Field::InsertionUnits(v) => state.insertion_units = v,
+                }
+                Task::none()
+            }
+            Message::DrawingUnitsApply => {
+                let Some(state) = self.drawing_units.take() else {
+                    self.active_modal = None;
+                    return Task::none();
+                };
+                self.active_modal = None;
+                let i = self.active_tab;
+                self.push_undo_snapshot(i, "UNITS");
+                let header = &mut self.tabs[i].scene.document.header;
+                header.linear_unit_format = state.linear_format;
+                header.linear_unit_precision = state.linear_precision;
+                header.angular_unit_format = state.angular_format;
+                header.angular_unit_precision = state.angular_precision;
+                header.angle_direction = i16::from(state.clockwise);
+                // A base angle that will not parse is a half-finished edit, not
+                // an instruction to move zero — leave the drawing's own value.
+                if let Ok(degrees) = state.base_angle.trim().parse::<f64>() {
+                    header.angle_base = degrees.to_radians();
+                }
+                header.insertion_units = state.insertion_units;
+                self.tabs[i].dirty = true;
+                self.tabs[i].scene.bump_geometry();
+                self.refresh_properties();
+                Task::none()
+            }
+            Message::SetLinearFormat(code) => {
+                self.units_popup_open = false;
+                let i = self.active_tab;
+                if self.tabs[i].scene.document.header.linear_unit_format == code {
+                    return Task::none();
+                }
+                // Every displayed length is written through this, so the whole
+                // drawing re-reads at once — no geometry moves, only the way it
+                // is written down.
+                self.push_undo_snapshot(i, "LUNITS");
+                self.tabs[i].scene.document.header.linear_unit_format = code;
+                self.tabs[i].dirty = true;
+                self.tabs[i].scene.bump_geometry();
+                self.refresh_properties();
+                let label = crate::modules::draw::units::linear_format_label(code);
+                self.command_line
+                    .push_output(crate::tf!("Length format is now {label}.").as_ref());
+                Task::none()
+            }
             Message::SetDrawingUnits(code) => {
                 self.units_popup_open = false;
                 let i = self.active_tab;
+                let current = self.tabs[i].scene.document.header.insertion_units;
+                if current == code {
+                    return Task::none();
+                }
+                // Relabelling only: the geometry keeps every number it had, and
+                // now says they count something else. Say so, because picking a
+                // unit and seeing the drawing sit still otherwise reads as the
+                // menu having done nothing. (#668)
+                self.push_undo_snapshot(i, "UNITS");
                 self.tabs[i].scene.document.header.insertion_units = code;
                 self.tabs[i].dirty = true;
+                let label = crate::modules::draw::units::label(code);
+                self.command_line.push_output(
+                    crate::tf!(
+                        "Drawing unit is now {label}. Geometry unchanged — use DWGUNITS to convert it."
+                    )
+                    .as_ref(),
+                );
                 Task::none()
             }
             Message::ToggleIsolatePopup => {
@@ -3431,11 +3601,20 @@ impl OpenCADStudio {
                 Task::none()
             }
             Message::ToggleSnapPopup => {
-                self.snap_popup_open ^= true;
+                if self.active_modal == Some(super::ModalKind::DraftingSettings) {
+                    self.close_active_modal();
+                    self.snap_popup_open = false;
+                } else {
+                    self.active_modal = Some(super::ModalKind::DraftingSettings);
+                    self.snap_popup_open = true;
+                }
                 Task::none()
             }
             Message::CloseSnapPopup => {
                 self.snap_popup_open = false;
+                if self.active_modal == Some(super::ModalKind::DraftingSettings) {
+                    self.close_active_modal();
+                }
                 Task::none()
             }
             Message::SnapSelectAll => {
@@ -3723,23 +3902,23 @@ impl OpenCADStudio {
                     }
                     Text::EmptyOrUnsupported => {
                         self.command_line.push_error(
-                            crate::tr!("clipboard-no-supported-content").as_ref(),
+                            crate::tr!("clipboard", "no-supported-content").as_ref(),
                         );
                         Task::none()
                     }
                     Text::Unavailable => {
                         self.command_line
-                            .push_error(crate::tr!("clipboard-unavailable").as_ref());
+                            .push_error(crate::tr!("clipboard", "unavailable").as_ref());
                         Task::none()
                     }
                     Text::Occupied => {
                         self.command_line
-                            .push_error(crate::tr!("clipboard-occupied").as_ref());
+                            .push_error(crate::tr!("clipboard", "occupied").as_ref());
                         Task::none()
                     }
                     Text::ConversionFailed => {
                         self.command_line
-                            .push_error(crate::tr!("clipboard-conversion-failed").as_ref());
+                            .push_error(crate::tr!("clipboard", "conversion-failed").as_ref());
                         Task::none()
                     }
                 }
@@ -4926,6 +5105,41 @@ impl OpenCADStudio {
                 Task::none()
             }
 
+            Message::OptionsTabChanged(tab) => {
+                self.options_tab = tab;
+                Task::none()
+            }
+
+            Message::CursorSizeChanged(value) => {
+                self.cursor_size = value.clamp(1, 100);
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::PickBoxChanged(value) => {
+                self.pick_box = value.clamp(0, 50);
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::CursorTypeChanged(value) => {
+                self.cursor_type = value;
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::CrosshairColorChanged(value) => {
+                self.crosshair_color_input = value.clone();
+                if value.trim().is_empty() {
+                    self.crosshair_color = None;
+                    self.persist_settings_if_changed();
+                } else if let Some(rgb) = crate::app::config::parse_hex(&value) {
+                    self.crosshair_color = Some(rgb);
+                    self.persist_settings_if_changed();
+                }
+                Task::none()
+            }
+
             Message::DefaultSaveFormatChanged(format) => {
                 self.default_save_format =
                     crate::io::canonical_save_format(&format).to_string();
@@ -4963,6 +5177,39 @@ impl OpenCADStudio {
                 Task::none()
             }
 
+            Message::FileAssocChanged(enabled) => {
+                // The same two calls FILEASSOC makes, so the checkbox and the
+                // command cannot leave the setting and the registration
+                // disagreeing.
+                self.file_assoc_enabled = enabled;
+                self.persist_settings_if_changed();
+                let outcome = if enabled {
+                    crate::io::file_association::register_as_handler()
+                } else {
+                    crate::io::file_association::unregister_handler()
+                };
+                match outcome {
+                    Ok(()) => {
+                        let said = if enabled {
+                            crate::t!("Registered as a .dwg/.dxf handler.")
+                        } else {
+                            crate::t!("No longer registered as a file handler.")
+                        };
+                        self.command_line.push_output(said.as_ref());
+                    }
+                    Err(why) => {
+                        // The setting is what the user asked for; the
+                        // registration is what the system allowed. Put the
+                        // checkbox back rather than showing a state that is not
+                        // true.
+                        self.file_assoc_enabled = !enabled;
+                        self.persist_settings_if_changed();
+                        self.command_line
+                            .push_error(crate::tf!("File association failed: {why}").as_ref());
+                    }
+                }
+                Task::none()
+            }
             Message::LanguageChanged(language) => {
                 if self.language == language {
                     return Task::none();
@@ -5362,7 +5609,15 @@ impl OpenCADStudio {
                     crate::ui::window::about::platform_name(),
                     crate::ui::window::about::architecture_name(),
                 );
-                iced::clipboard::write(info).discard()
+                #[cfg(target_arch = "wasm32")]
+                {
+                    crate::sys::write_clipboard_text(&info);
+                    Task::none()
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    iced::clipboard::write(info).discard()
+                }
             }
 
             // ── Plugin Manager window ─────────────────────────────────────
@@ -5972,6 +6227,7 @@ impl OpenCADStudio {
             Message::PlotDialogOpen => self.on_plot_dialog_open(),
             Message::PlotDlg(m) => self.on_plot_dlg(m),
             Message::BlockPalette(m) => self.on_block_palette(m),
+            Message::Dock(m) => self.on_dock(m),
             Message::PrintAllOpen => self.on_print_all_open(),
             Message::PrintAllToggle(name) => {
                 if let Some((_, selected)) = self
@@ -6167,6 +6423,32 @@ impl OpenCADStudio {
 
             // ── Plot Style Panel ──────────────────────────────────────────────
             Message::PlotStylePanelOpen => {
+                // The Plot dialog's selected table is authoritative. Make sure
+                // the editor opens that table rather than a stale active table.
+                let selected_style = self.plot_dialog.style_name.clone();
+
+                if selected_style.is_empty() {
+                    self.active_plot_style = None;
+                } else {
+                    let needs_load = self
+                        .active_plot_style
+                        .as_ref()
+                        .is_none_or(|table| !table.name.eq_ignore_ascii_case(&selected_style));
+
+                    if needs_load {
+                        match crate::io::plot_style::PlotStyleTable::load_named(&selected_style) {
+                            Ok(table) => {
+                                self.active_plot_style = Some(table);
+                                self.plot_dialog.style_missing = false;
+                            }
+                            Err(error) => {
+                                self.plot_dialog.style_missing = true;
+                                self.command_line.push_error(&error);
+                                return Task::none();
+                            }
+                        }
+                    }
+                }
                 // Initialise edit buffers for ACI 1.
                 self.plotstyle_panel_aci = 1;
                 let entry = self
@@ -6185,6 +6467,19 @@ impl OpenCADStudio {
                 self.ps_screening_buf = entry
                     .map(|e| e.screening.to_string())
                     .unwrap_or("100".into());
+                // When launched from PLOT, preserve the parent dialog so the Plot Style
+                // editor can appear above it instead of replacing it.
+                if self.active_modal == Some(super::ModalKind::Plot) {
+                    self.plotstyle_parent_plot_geometry =
+                        Some((self.modal_offset, self.modal_resize));
+
+                    // The child editor starts with its own centred geometry.
+                    self.reset_modal_geometry();
+                } else {
+                    // Direct command launch: Plotstyle is a normal standalone modal.
+                    self.plotstyle_parent_plot_geometry = None;
+                }
+
                 self.active_modal = Some(super::ModalKind::Plotstyle);
                 Task::none()
             }
@@ -6214,22 +6509,77 @@ impl OpenCADStudio {
             }
             Message::PlotStylePanelColorBuf(s) => {
                 self.ps_color_buf = s;
-                Task::none()
+                self.on_plot_style_panel_apply()
             }
+
             Message::PlotStylePanelLwBuf(s) => {
                 self.ps_lineweight_buf = s;
-                Task::none()
+                self.on_plot_style_panel_apply()
             }
+            Message::PlotStylePanelLwSet(index) => {
+                self.ps_lineweight_buf = index.to_string();
+                self.on_plot_style_panel_apply()
+            }
+
             Message::PlotStylePanelScreenBuf(s) => {
                 self.ps_screening_buf = s;
-                Task::none()
+                self.on_plot_style_panel_apply()
             }
 
             Message::PlotStylePanelApply => self.on_plot_style_panel_apply(),
 
-            Message::PlotStylePanelSave => self.on_plot_style_panel_save(),
+            Message::PlotStylePanelSaveDirect => {
+            let Some(table) = self.active_plot_style.as_ref() else {
+                self.command_line.push_error(
+                    crate::t!("No plot style table loaded. Load or create one first.").as_ref(),
+                );
+                return Task::none();
+            };
 
-            Message::PlotStylePanelSavePath(Some(path)) => {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let table_name = table.name.clone();
+
+                let result = crate::io::plot_style::ensure_plot_styles_dir().and_then(|dir| {
+                    let path = dir.join(&table_name);
+                    table.save(&path)?;
+                    Ok(path)
+                });
+
+                match result {
+                    Ok(path) => {
+                        self.plot_dialog.style_name = table_name;
+                        self.plot_dialog.style_missing = false;
+                        self.plot_dialog.plot_styles =
+                            crate::io::plot_style::available_ctb_names();
+
+                        self.command_line.push_output(
+                            crate::tf!(
+                                "Plot style table saved to \"{}\".",
+                                path.display()
+                            )
+                            .as_ref(),
+                        );
+                    }
+                    Err(error) => {
+                        self.command_line
+                            .push_error(crate::tf!("Save error: {error}").as_ref());
+                    }
+                }
+
+                Task::none()
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                // Browsers cannot overwrite a local file directly, so fall back
+                // to the existing Save As flow.
+                self.on_plot_style_panel_save()
+            }
+        }
+
+        Message::PlotStylePanelSave => self.on_plot_style_panel_save(),
+        Message::PlotStylePanelSavePath(Some(path)) => {
                 let path = if path
                     .extension()
                     .is_some_and(|extension| extension.eq_ignore_ascii_case("ctb"))
@@ -6864,21 +7214,9 @@ impl OpenCADStudio {
             Message::DimStyleDialogSetCurrent => {
                 // Staged: persists on Apply.
                 let i = self.active_tab;
-                let read_only = self.tabs[i]
-                    .scene
-                    .document
-                    .dim_styles
-                    .get(&self.dimstyle_selected)
-                    .is_some_and(|style| {
-                        style.xref_reference
-                            || style.xref_dependent
-                            || !style.xref_handle.is_null()
-                    });
-                if read_only {
-                    return Task::none();
-                }
+
                 self.tabs[i].scene.document.header.current_dimstyle_name =
-                    self.dimstyle_selected.clone();
+                    self.dimstyle_selected.clone(); 
                 self.sync_ribbon_styles();
                 self.command_line.push_output(crate::tf!(
                     "Current dim style set to '{}'.",
@@ -6977,21 +7315,56 @@ impl OpenCADStudio {
             }
             Message::OpenColorWindow(target, color) => {
                 self.color_pick_target = Some((target, color));
+
+                // Always open the shared CAD colour picker on the indexed ACI page.
+                self.color_picker_tab = crate::app::ColorPickerTab::Index;
+                self.modal_offset = iced::Vector::ZERO;
                 self.ds_color_open = None;
                 self.mls_color_open = None;
                 self.ts_color_open = None;
                 self.ribbon.close_dropdown();
+
                 let i = self.active_tab;
                 self.tabs[i].properties.color_picker_open = false;
                 self.tabs[i].layers.color_picker_row = None;
-                // `color_pick_target.is_some()` drives the iced_aw overlay.
+
+                Task::none()
+            }
+
+            Message::ColorPickerTabChanged(tab) => {
+                self.color_picker_tab = tab;
+                Task::none()
+            }
+            Message::ColorPickerColorChanged(color) => {
+                if let Some((_, current)) = self.color_pick_target.as_mut() {
+                    *current = color;
+                }
                 Task::none()
             }
             Message::CloseColorPicker => {
                 self.color_pick_target = None;
                 Task::none()
             }
-            Message::ColorWindowPick(color) => self.on_color_window_pick(color),
+
+            Message::ColorWindowPick(color) => {
+                // Keep only real colours in the recent list. ByLayer / ByBlock / None
+                // are logical CAD states rather than reusable colours.
+                if matches!(
+                    &color,
+                    acadrust::types::Color::Index(_)
+                        | acadrust::types::Color::Rgb { .. }
+                ) {
+                    // No duplicates: selecting an existing colour moves it to the front.
+                    if let Some(pos) = self.recent_colors.iter().position(|c| c == &color) {
+                        self.recent_colors.remove(pos);
+                    }
+
+                    self.recent_colors.insert(0, color.clone());
+                    self.recent_colors.truncate(12);
+                }
+
+                self.on_color_window_pick(color)
+            }
             Message::DsSetHandle { field, value } => self.on_ds_set_handle(field, value),
         }
     }

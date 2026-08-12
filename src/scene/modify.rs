@@ -214,6 +214,7 @@ impl Scene {
             })
             .flatten()
             .collect();
+        let mut refresh_solid_handles = Vec::new();
         for &h in handles {
             // Delta-undo: capture the pre-transform image before mutating.
             if self.is_recording_undo() {
@@ -225,6 +226,20 @@ impl Scene {
                 if mirror_true {
                     mirror_true_text_flags(entity);
                 }
+            }
+            let rebuilt_history = self.transform_solid_history(h, t);
+            if !rebuilt_history
+                && self.document.get_entity(h).is_some_and(|entity| {
+                    matches!(
+                        entity,
+                        EntityType::Solid3D(_)
+                            | EntityType::Region(_)
+                            | EntityType::Body(_)
+                            | EntityType::Surface(_)
+                    )
+                })
+            {
+                refresh_solid_handles.push(h);
             }
             if self.hatches.contains_key(&h) {
                 let existing_color = self.hatches[&h].color;
@@ -271,6 +286,7 @@ impl Scene {
         let changes: Vec<(Handle, ChangeKind)> =
             handles.iter().map(|&h| (h, ChangeKind::Modified)).collect();
         self.bump_entities(&changes);
+        self.refresh_meshes_for_handles(&refresh_solid_handles);
     }
 
     /// Entities in anonymous dimension blocks that visually belong to
@@ -550,6 +566,7 @@ impl Scene {
             matches!(t, EntityTransform::Mirror { .. }) && self.document.header.mirror_text;
         let mut new_handles = Vec::with_capacity(clones.len());
         let mut handle_map = rustc_hash::FxHashMap::default();
+        let mut refresh_solid_handles = Vec::new();
         for (src_handle, mut entity) in clones {
             let text_orient = if preserve_text_orientation {
                 capture_text_orient(&entity)
@@ -602,6 +619,21 @@ impl Scene {
                 if let Some(model) = new_model {
                     self.hatches.insert(h, model);
                 }
+                let rebuilt_history = self.copy_solid_history(src_handle, h)
+                    && self.transform_solid_history(h, t);
+                if !rebuilt_history
+                    && self.document.get_entity(h).is_some_and(|entity| {
+                        matches!(
+                            entity,
+                            EntityType::Solid3D(_)
+                                | EntityType::Region(_)
+                                | EntityType::Body(_)
+                                | EntityType::Surface(_)
+                        )
+                    })
+                {
+                    refresh_solid_handles.push(h);
+                }
             }
             new_handles.push(h);
             if !h.is_null() {
@@ -620,14 +652,300 @@ impl Scene {
             .map(|&h| (h, ChangeKind::Added))
             .collect();
         self.bump_entities(&changes);
+        self.refresh_meshes_for_handles(&refresh_solid_handles);
         new_handles
     }
 
     // ── Grip editing ──────────────────────────────────────────────────────
 
+    pub(crate) fn solid_history_objects(
+        &self,
+        handle: Handle,
+    ) -> Vec<(Handle, acadrust::objects::ObjectType)> {
+        let Some(graph) = self.document.solid_history_graph(handle) else {
+            return Vec::new();
+        };
+        std::iter::once(graph.root)
+            .chain(graph.nodes)
+            .filter_map(|object_handle| {
+                self.document
+                    .objects
+                    .get(&object_handle)
+                    .cloned()
+                    .map(|object| (object_handle, object))
+            })
+            .collect()
+    }
+
+    fn record_solid_history_before(&mut self, handle: Handle) {
+        if !self.is_recording_undo() {
+            return;
+        }
+        for (object_handle, object) in self.solid_history_objects(handle) {
+            self.record_undo_object_before(object_handle, Some(object));
+        }
+    }
+
+    pub fn create_solid_history(
+        &mut self,
+        handle: Handle,
+        operation: acadrust::objects::SolidHistoryOperation,
+    ) -> bool {
+        let Some(graph) = self.document.create_solid_history(handle, operation) else {
+            return false;
+        };
+        self.record_undo_object_before(graph.root, None);
+        for node in graph.nodes {
+            self.record_undo_object_before(node, None);
+        }
+        true
+    }
+
+    fn copy_solid_history(&mut self, source: Handle, target: Handle) -> bool {
+        let Some(graph) = self.document.copy_solid_history(source, target) else {
+            return false;
+        };
+        self.record_undo_object_before(graph.root, None);
+        for node in graph.nodes {
+            self.record_undo_object_before(node, None);
+        }
+        true
+    }
+
+    pub(crate) fn delete_solid_history(&mut self, handle: Handle) {
+        self.record_solid_history_before(handle);
+        self.document.delete_solid_history(handle);
+    }
+
+    pub fn rebuild_solid_history(
+        &mut self,
+        handle: Handle,
+        operation: acadrust::objects::SolidHistoryOperation,
+    ) -> bool {
+        let Ok(body) = cadkernel::acis::rebuild_body(&operation) else {
+            return false;
+        };
+        let Some(document) = crate::scene::convert::acis_export::planar_solid_to_sat(&body) else {
+            return false;
+        };
+        self.record_solid_history_before(handle);
+        if self
+            .document
+            .update_solid_history(handle, operation)
+            .is_none()
+        {
+            return false;
+        }
+        let Some(EntityType::Solid3D(entity)) = self.document.get_entity_mut(handle) else {
+            return false;
+        };
+        entity.set_sat_document(&document);
+        self.register_solid_model(handle, body);
+        true
+    }
+
+    pub fn finalize_solid_history(&mut self, handle: Handle) -> bool {
+        let Some(operation) = self.document.solid_history_operation(handle).cloned() else {
+            return false;
+        };
+        let Ok(body) = cadkernel::acis::rebuild_body(&operation) else {
+            return false;
+        };
+        let Some(document) = crate::scene::convert::acis_export::planar_solid_to_sat(&body) else {
+            return false;
+        };
+        let Some(EntityType::Solid3D(entity)) = self.document.get_entity_mut(handle) else {
+            return false;
+        };
+        entity.set_sat_document(&document);
+        self.register_solid_model(handle, body);
+        true
+    }
+
+    fn preview_solid_history(
+        &mut self,
+        handle: Handle,
+        operation: acadrust::objects::SolidHistoryOperation,
+    ) -> bool {
+        let Ok(body) = cadkernel::acis::rebuild_body(&operation) else {
+            return false;
+        };
+        if self
+            .document
+            .update_solid_history(handle, operation)
+            .is_none()
+        {
+            return false;
+        }
+        let Some(EntityType::Solid3D(_)) = self.document.get_entity(handle) else {
+            return false;
+        };
+        self.register_solid_model(handle, body);
+        true
+    }
+
+    fn transform_solid_history(
+        &mut self,
+        handle: Handle,
+        transform: &EntityTransform,
+    ) -> bool {
+        let Some(mut operation) = self.document.solid_history_operation(handle).cloned() else {
+            return false;
+        };
+        if !crate::scene::model::solid_history::transform_operation(
+            &mut operation,
+            transform,
+        ) {
+            return false;
+        }
+        if let EntityTransform::Translate(delta) = transform {
+            if self
+                .document
+                .update_solid_history(handle, operation)
+                .is_none()
+            {
+                return false;
+            }
+            self.translate_solid_geometry(handle, delta.to_array());
+            return true;
+        }
+        self.rebuild_solid_history(handle, operation)
+    }
+
+    fn apply_solid_history_grip(
+        &mut self,
+        handle: Handle,
+        grip_id: usize,
+        apply: GripApply,
+    ) -> bool {
+        let Some(mut operation) = self.document.solid_history_operation(handle).cloned() else {
+            return false;
+        };
+        if !crate::scene::model::solid_history::apply_primitive_grip(
+            &mut operation,
+            grip_id,
+            apply,
+        ) {
+            return false;
+        }
+        self.preview_solid_history(handle, operation)
+    }
+
+    pub fn apply_solid_history_property(
+        &mut self,
+        handle: Handle,
+        field: &str,
+        value: &str,
+    ) -> bool {
+        let Some(mut operation) = self.document.solid_history_operation(handle).cloned() else {
+            return false;
+        };
+        if !crate::scene::model::solid_history::apply_primitive_property(
+            &mut operation,
+            field,
+            value,
+        ) {
+            return false;
+        }
+        self.rebuild_solid_history(handle, operation)
+    }
+
+    pub fn apply_solid_position_property(
+        &mut self,
+        handle: Handle,
+        field: &str,
+        value: &str,
+        plane: crate::command::WorkingPlane,
+    ) -> Option<bool> {
+        let axis = match field {
+            "s3d_px" | "rgn_px" | "bdy_px" | "srf_px" => 0,
+            "s3d_py" | "rgn_py" | "bdy_py" | "srf_py" => 1,
+            "s3d_pz" | "rgn_pz" | "bdy_pz" | "srf_pz" => 2,
+            _ => return None,
+        };
+        let Ok(target) = value.trim().parse::<f64>() else {
+            return Some(false);
+        };
+        if !target.is_finite() {
+            return Some(false);
+        }
+        let Some(point) = self
+            .document
+            .get_entity(handle)
+            .and_then(crate::entities::solid3d::point_of_reference)
+        else {
+            return Some(false);
+        };
+        let world = glam::DVec3::new(point.x, point.y, point.z);
+        let mut local = plane.to_local(world);
+        local[axis] = target;
+        let delta = plane.to_world(local) - world;
+        if delta.length_squared() <= f64::EPSILON {
+            return Some(true);
+        }
+        self.transform_entities(&[handle], &EntityTransform::Translate(delta));
+        Some(true)
+    }
+
+    pub(crate) fn translate_solid_geometry(&mut self, handle: Handle, delta: [f64; 3]) {
+        if delta.iter().all(|value| value.abs() <= f64::EPSILON) {
+            return;
+        }
+        let placement = cadkernel::brep::Placement::at(delta);
+        if let Some(body) = self.solid_models.get(&handle).cloned() {
+            if let Some(moved) = cadkernel::brep::transform(&body, &placement) {
+                self.solid_models.insert(handle, moved);
+            }
+        }
+        let Some(set) = self.meshes.get_mut(&handle) else {
+            return;
+        };
+        let translate_split = |high: &mut [f32; 3], low: &mut [f32; 3]| {
+            let absolute = [
+                high[0] as f64 + low[0] as f64 + delta[0],
+                high[1] as f64 + low[1] as f64 + delta[1],
+                high[2] as f64 + low[2] as f64 + delta[2],
+            ];
+            *high = [absolute[0] as f32, absolute[1] as f32, absolute[2] as f32];
+            *low = [
+                (absolute[0] - high[0] as f64) as f32,
+                (absolute[1] - high[1] as f64) as f32,
+                (absolute[2] - high[2] as f64) as f32,
+            ];
+        };
+        for lod in &mut set.lods {
+            if lod.verts_low.len() != lod.verts.len() {
+                lod.verts_low = vec![[0.0; 3]; lod.verts.len()];
+            }
+            for (high, low) in lod.verts.iter_mut().zip(lod.verts_low.iter_mut()) {
+                translate_split(high, low);
+            }
+        }
+        if set.edge_verts_low.len() != set.edge_verts.len() {
+            set.edge_verts_low = vec![[0.0; 3]; set.edge_verts.len()];
+        }
+        for (high, low) in set.edge_verts.iter_mut().zip(set.edge_verts_low.iter_mut()) {
+            translate_split(high, low);
+        }
+        for generator in &mut set.curved_gens {
+            if let Some(source) =
+                cadkernel::brep::mesh::transform_silhouette(&generator.source, &placement)
+            {
+                generator.source = source;
+            }
+        }
+        set.metrics.centroid[0] += delta[0];
+        set.metrics.centroid[1] += delta[1];
+        set.metrics.centroid[2] += delta[2];
+        set.recompute_aabb();
+    }
+
     pub fn apply_grip(&mut self, handle: Handle, grip_id: usize, apply: GripApply) {
         // Objects on a locked layer can't be grip-edited.
         if self.is_layer_locked(handle) {
+            return;
+        }
+        if self.apply_solid_history_grip(handle, grip_id, apply.clone()) {
             return;
         }
         // For Solid3D / Region / Body, record the old point_of_reference so we
@@ -660,82 +978,12 @@ impl Scene {
                 .map(|p| [p.x, p.y, p.z]);
             if let Some(new) = new_por {
                 let delta = [new[0] - old[0], new[1] - old[1], new[2] - old[2]];
-                if let Some(set) = self.meshes.get_mut(&handle) {
-                    let translate_split =
-                        |high: &mut [f32; 3], low: &mut [f32; 3]| {
-                            let absolute = [
-                                high[0] as f64 + low[0] as f64 + delta[0],
-                                high[1] as f64 + low[1] as f64 + delta[1],
-                                high[2] as f64 + low[2] as f64 + delta[2],
-                            ];
-                            *high = [
-                                absolute[0] as f32,
-                                absolute[1] as f32,
-                                absolute[2] as f32,
-                            ];
-                            *low = [
-                                (absolute[0] - high[0] as f64) as f32,
-                                (absolute[1] - high[1] as f64) as f32,
-                                (absolute[2] - high[2] as f64) as f32,
-                            ];
-                        };
-                    for lod in &mut set.lods {
-                        if lod.verts_low.len() != lod.verts.len() {
-                            lod.verts_low = vec![[0.0; 3]; lod.verts.len()];
-                        }
-                        for (high, low) in lod.verts.iter_mut().zip(lod.verts_low.iter_mut()) {
-                            translate_split(high, low);
-                        }
-                    }
-                    if set.edge_verts_low.len() != set.edge_verts.len() {
-                        set.edge_verts_low = vec![[0.0; 3]; set.edge_verts.len()];
-                    }
-                    for (high, low) in set
-                        .edge_verts
-                        .iter_mut()
-                        .zip(set.edge_verts_low.iter_mut())
-                    {
-                        translate_split(high, low);
-                    }
-                    for generator in &mut set.curved_gens {
-                        match generator {
-                            crate::scene::model::mesh_model::CurvedGen::Cone {
-                                base,
-                                base_low,
-                                ..
-                            } => translate_split(base, base_low),
-                            crate::scene::model::mesh_model::CurvedGen::Sphere {
-                                center,
-                                center_low,
-                                ..
-                            }
-                            | crate::scene::model::mesh_model::CurvedGen::Torus {
-                                center,
-                                center_low,
-                                ..
-                            } => translate_split(center, center_low),
-                        }
-                    }
-                    for silhouette in &mut set.stored_silhouettes {
-                        silhouette.target[0] += delta[0] as f32;
-                        silhouette.target[1] += delta[1] as f32;
-                        silhouette.target[2] += delta[2] as f32;
-                        if silhouette.edge_verts_low.len() != silhouette.edge_verts.len() {
-                            silhouette.edge_verts_low =
-                                vec![[0.0; 3]; silhouette.edge_verts.len()];
-                        }
-                        for (high, low) in silhouette
-                            .edge_verts
-                            .iter_mut()
-                            .zip(silhouette.edge_verts_low.iter_mut())
-                        {
-                            translate_split(high, low);
-                        }
-                    }
-                    set.metrics.centroid[0] += delta[0];
-                    set.metrics.centroid[1] += delta[1];
-                    set.metrics.centroid[2] += delta[2];
-                    set.recompute_aabb();
+                let moved_history = self.transform_solid_history(
+                    handle,
+                    &EntityTransform::Translate(glam::DVec3::from_array(delta)),
+                );
+                if !moved_history {
+                    self.translate_solid_geometry(handle, delta);
                 }
             }
         }
@@ -757,9 +1005,6 @@ impl Scene {
             }
             _ => {}
         }
-        // NOTE: no `bump_geometry()` here. The grip-drag caller hides the
-        // edited entity and previews it as an overlay during the drag (so a
-        // move doesn't re-tessellate the whole model), then bumps once on
-        // commit. Any other caller must bump geometry itself.
+        // The grip-drag caller refreshes changed resident meshes per move.
     }
 }

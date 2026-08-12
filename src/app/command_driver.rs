@@ -87,6 +87,7 @@ impl OpenCADStudio {
         self.snapper.from_point = None;
         self.snapper.clear_tracking();
         self.otrack_active = None;
+        self.otrack_kind = None;
         self.axis_lock_dir = None;
         self.dyn_user_reshaped = false;
         self.dyn_coord_absolute = false;
@@ -100,16 +101,31 @@ impl OpenCADStudio {
         self.ucs_icon_hover = false;
         self.tabs[i].pan_mode = false;
         self.tabs[i].orbit_mode = false;
+        self.tabs[i].zoom_dynamic_mode = false;
         let _ = self.on_viewport_exit();
     }
 
     /// Roll a hot grip back to its pre-drag image and remove every grip-owned
     /// overlay. Shared by Escape and drawing-space transitions.
+    pub(super) fn capture_grip_history_originals(&mut self, i: usize, handles: &[Handle]) {
+        if !self.grip_history_originals.is_empty() {
+            return;
+        }
+        self.grip_history_originals = handles
+            .iter()
+            .filter_map(|&handle| {
+                let objects = self.tabs[i].scene.solid_history_objects(handle);
+                (!objects.is_empty()).then_some((handle, objects))
+            })
+            .collect();
+    }
+
     pub(super) fn cancel_active_grip_edit(&mut self) -> bool {
         let i = self.active_tab;
         let had_grip = self.tabs[i].active_grip.take().is_some()
             || self.grip_add_provisional.is_some()
-            || !self.grip_preview_handles.is_empty();
+            || !self.grip_preview_handles.is_empty()
+            || !self.grip_history_originals.is_empty();
         if !had_grip {
             return false;
         }
@@ -130,11 +146,60 @@ impl OpenCADStudio {
 
         let handles = std::mem::take(&mut self.grip_preview_handles);
         let originals = std::mem::take(&mut self.grip_originals);
+        let history_originals = std::mem::take(&mut self.grip_history_originals);
+        let history_handles: rustc_hash::FxHashSet<_> = history_originals
+            .iter()
+            .map(|(handle, _)| *handle)
+            .collect();
+        for (_, objects) in history_originals {
+            for (object_handle, object) in objects {
+                self.tabs[i]
+                    .scene
+                    .document
+                    .objects
+                    .insert(object_handle, object);
+            }
+        }
         let mut changed_handles: rustc_hash::FxHashSet<_> = handles.iter().copied().collect();
         for (handle, original) in originals {
             changed_handles.insert(handle);
+            if !history_handles.contains(&handle) {
+                let current = self.tabs[i]
+                    .scene
+                    .document
+                    .get_entity(handle)
+                    .and_then(crate::entities::solid3d::point_of_reference)
+                    .map(|point| [point.x, point.y, point.z]);
+                let target = crate::entities::solid3d::point_of_reference(&original)
+                    .map(|point| [point.x, point.y, point.z]);
+                if let (Some(current), Some(target)) = (current, target) {
+                    self.tabs[i].scene.translate_solid_geometry(
+                        handle,
+                        [
+                            target[0] - current[0],
+                            target[1] - current[1],
+                            target[2] - current[2],
+                        ],
+                    );
+                }
+            }
             if let Some(entity) = self.tabs[i].scene.document.get_entity_mut(handle) {
                 *entity = original;
+            }
+        }
+        for handle in history_handles {
+            let restored = self.tabs[i]
+                .scene
+                .document
+                .solid_history_operation(handle)
+                .cloned()
+                .is_some_and(|operation| {
+                    self.tabs[i]
+                        .scene
+                        .rebuild_solid_history(handle, operation)
+                });
+            if !restored {
+                self.tabs[i].scene.reseed_derived_caches(handle);
             }
         }
         for &handle in &handles {
@@ -149,6 +214,7 @@ impl OpenCADStudio {
             self.tabs[i].dirty = dirty_before;
         }
 
+        self.grip_snap_wires.clear();
         self.grip_text_verts.clear();
         self.grip_text_slide = false;
         self.tabs[i].scene.clear_preview_wire();
@@ -391,7 +457,50 @@ impl OpenCADStudio {
             return None;
         }
         let kw = text.trim().to_ascii_uppercase();
+
+        // Modes that arm the next gesture rather than selecting anything now.
+        // Dragging normally decides window-vs-crossing from the direction the
+        // corner travels; asking for one by name has to override that, and hold
+        // the override until the box is finished. (#596)
+        if let "W" | "WINDOW" | "C" | "CROSSING" = kw.as_str() {
+            let crossing = matches!(kw.as_str(), "C" | "CROSSING");
+            {
+                let mut selection = self.tabs[i].scene.selection.borrow_mut();
+                selection.box_crossing = crossing;
+                selection.box_crossing_locked = true;
+            }
+            let hint = if crossing {
+                crate::t!("Crossing: specify first corner.")
+            } else {
+                crate::t!("Window: specify first corner.")
+            };
+            self.command_line.push_info(hint.as_ref());
+            return Some(Task::none());
+        }
+
+        // Whether a pick adds to the set or takes away from it, for the rest of
+        // this selection. Mirrors PICKADD, which the pick paths already read.
+        if let "R" | "REMOVE" | "A" | "ADD" = kw.as_str() {
+            let adding = matches!(kw.as_str(), "A" | "ADD");
+            self.select_remove_mode = !adding;
+            let hint = if adding {
+                crate::t!("Add mode: picks join the selection.")
+            } else {
+                crate::t!("Remove mode: picks leave the selection.")
+            };
+            self.command_line.push_info(hint.as_ref());
+            return Some(Task::none());
+        }
+
         let add: Vec<Handle> = match kw.as_str() {
+            // Every selectable object of the current space.
+            "ALL" => self.tabs[i]
+                .scene
+                .entity_wires()
+                .iter()
+                .filter_map(|w| crate::scene::Scene::handle_from_wire_name(&w.name))
+                .filter(|&h| !self.tabs[i].scene.is_layer_locked(h))
+                .collect(),
             "P" | "PREVIOUS" => self.tabs[i]
                 .prev_selection
                 .iter()
@@ -418,6 +527,7 @@ impl OpenCADStudio {
         if add.is_empty() {
             self.command_line.push_info(match kw.as_str() {
                 "P" | "PREVIOUS" => "No previous selection set.",
+                "ALL" => "Nothing to select.",
                 _ => "No last object.",
             });
             return Some(Task::none());
@@ -897,13 +1007,6 @@ impl OpenCADStudio {
                 // transform_entities — always delta-safe.
                 let pending = self.begin_undo(i, label, handles.len(), true);
                 self.tabs[i].scene.transform_entities(&handles, &transform);
-                // ACIS solids render from a cached mesh, so a move/rotate/
-                // scale/mirror needs the mesh re-tessellated from the now-moved
-                // body — wire re-tessellation alone leaves the solid drawn at
-                // its old spot. (#135)
-                if self.tabs[i].scene.any_solid(&handles) {
-                    self.tabs[i].scene.refresh_meshes_for_handles(&handles);
-                }
                 self.tabs[i].dirty = true;
                 self.tabs[i].scene.clear_preview_wire();
                 self.tabs[i].active_cmd = None;
@@ -921,9 +1024,6 @@ impl OpenCADStudio {
                 let delta_safe = self.delta_copy_safe(i, &handles);
                 let pending = self.begin_undo(i, label, handles.len(), delta_safe);
                 let new_handles = self.tabs[i].scene.copy_entities(&handles, &transform);
-                if self.tabs[i].scene.any_solid(&new_handles) {
-                    self.tabs[i].scene.refresh_meshes_for_handles(&new_handles);
-                }
                 self.tabs[i].dirty = true;
                 self.tabs[i].scene.deselect_all();
                 for h in new_handles {
@@ -981,10 +1081,14 @@ impl OpenCADStudio {
                     self.commit_undo_delta(i, pd);
                 }
             }
-            CmdResult::CommitSolid { entity, solid } => {
+            CmdResult::CommitSolid {
+                entity,
+                solid,
+                history,
+            } => {
                 let label = self.history_label_from_active_cmd(i, "SOLID");
                 let pending = self.begin_undo(i, label, 1, true);
-                self.add_solid_model(entity, *solid);
+                self.add_solid_model(entity, *solid, history);
                 self.tabs[i].dirty = true;
                 self.tabs[i].scene.clear_preview_wire();
                 self.tabs[i].active_cmd = None;
@@ -1099,7 +1203,8 @@ impl OpenCADStudio {
             CmdResult::CommitHatch(hatch) => {
                 let label = self.history_label_from_active_cmd(i, "HATCH");
                 let pending = self.begin_undo(i, label, 1, true);
-                let new_handle = self.tabs[i].scene.add_hatch(hatch);
+                let layer = self.tabs[i].active_layer.clone();
+                let new_handle = self.tabs[i].scene.add_hatch(hatch, Some(&layer));
                 if !new_handle.is_null() {
                     self.tabs[i].scene.select_entity(new_handle, true);
                 }
@@ -1476,6 +1581,69 @@ impl OpenCADStudio {
                     "Command cancelled."
                 });
             }
+            CmdResult::SelectByPath {
+                path,
+                closed,
+                crossing,
+            } => {
+                // The command picked the path; the hit test lives here, where
+                // the camera and the drawing's geometry are. Everything after
+                // matches what a lasso does, Remove included.
+                let canvas = self.tabs[i].scene.selection.borrow().vp_size;
+                let bounds = iced::Rectangle {
+                    x: 0.0,
+                    y: 0.0,
+                    width: canvas.0,
+                    height: canvas.1,
+                };
+                let edit_cam = self.tabs[i]
+                    .scene
+                    .viewport_edit_frame(canvas)
+                    .map(|(cam, _)| cam);
+                let (view_rot, eye, all_wires) = self.pick_view(i, &edit_cam, bounds);
+                let screen: Vec<iced::Point> = path
+                    .iter()
+                    .map(|p| {
+                        crate::scene::pick::hit_test::world_to_screen(
+                            glam::DVec3::new(p[0], p[1], 0.0),
+                            view_rot,
+                            eye,
+                            bounds,
+                        )
+                    })
+                    .collect();
+                let handles = self.tabs[i].scene.path_hit_handles(
+                    &screen,
+                    crossing,
+                    !closed,
+                    all_wires,
+                    view_rot,
+                    eye,
+                    bounds,
+                    |point| self.cursor_model_point(i, &edit_cam, point, bounds),
+                );
+                if self.select_remove_mode {
+                    for h in &handles {
+                        self.tabs[i].scene.deselect_entity(*h);
+                    }
+                } else {
+                    for h in &handles {
+                        self.tabs[i].scene.select_entity(*h, false);
+                    }
+                    self.tabs[i].scene.expand_selection_for_groups(&handles);
+                }
+                self.refresh_properties();
+                let selected: Vec<Handle> = self.tabs[i]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                let count = handles.len();
+                self.command_line
+                    .push_info(crate::tf!("{count} object(s) found.").as_ref());
+                return self.feed_command(StepInput::SelectionComplete(selected));
+            }
             CmdResult::Relaunch(cmd, handles) => {
                 self.tabs[i].scene.deselect_all();
                 for h in &handles {
@@ -1832,6 +2000,7 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = None;
                 self.tabs[i].snap_result = None;
                 self.tabs[i].scene.clear_preview_wire();
+                self.tabs[i].scene.remember_current_view();
                 self.tabs[i]
                     .scene
                     .zoom_to_window(p1.as_vec3(), p2.as_vec3());
@@ -2213,21 +2382,25 @@ impl OpenCADStudio {
                             .filter(|&h| !scene.is_layer_locked(h)),
                     );
                 }
-                if handles.is_empty() {
+                use crate::command::CadCommand;
+                use crate::modules::draw::modify::stretch::StretchCommand;
+                // A window that caught nothing is a missed aim, not a decision
+                // to stop. Ending the command there made the user restart it to
+                // try again; instead say so and ask for the corner afresh, the
+                // way a selection that picks nothing leaves MOVE still asking.
+                // (#676)
+                let cmd = if handles.is_empty() {
                     self.command_line
                         .push_output(crate::t!("STRETCH: nothing crosses the window.").as_ref());
-                    self.tabs[i].active_cmd = None;
-                    self.tabs[i].snap_result = None;
-                    self.tabs[i].scene.clear_preview_wire();
-                    self.restore_pre_cmd_tangent();
+                    StretchCommand::new(Vec::new(), Vec::new())
                 } else {
-                    use crate::command::CadCommand;
-                    use crate::modules::draw::modify::stretch::StretchCommand;
                     let wires = self.tabs[i].scene.wire_models_for(&handles);
-                    let cmd = StretchCommand::with_window(handles, wires, win_min, win_max);
-                    self.command_line.push_info(&CadCommand::prompt(&cmd));
-                    self.tabs[i].active_cmd = Some(Box::new(cmd));
-                }
+                    StretchCommand::with_window(handles, wires, win_min, win_max)
+                };
+                self.tabs[i].snap_result = None;
+                self.tabs[i].scene.clear_preview_wire();
+                self.command_line.push_info(&CadCommand::prompt(&cmd));
+                self.tabs[i].active_cmd = Some(Box::new(cmd));
             }
             CmdResult::StretchEntities {
                 handles,
@@ -2500,10 +2673,16 @@ impl OpenCADStudio {
                     let color = [0.6f32, 0.6, 0.8, 1.0]; // default colour; command embedded it
                     let _ = color; // color is captured inside mesh_fn
                     if let Some(mesh) = mesh_fn(name) {
-                        self.tabs[i]
-                            .scene
-                            .meshes
-                            .insert(handle, crate::scene::MeshLodSet::from_single(mesh));
+                        let set = crate::scene::MeshLodSet::from_single(mesh);
+                        if let Some(acadrust::EntityType::Solid3D(entity)) =
+                            self.tabs[i].scene.document.get_entity_mut(handle)
+                        {
+                            let center = set.metrics.centroid;
+                            entity.point_of_reference = acadrust::types::Vector3::new(
+                                center[0], center[1], center[2],
+                            );
+                        }
+                        self.tabs[i].scene.meshes.insert(handle, set);
                     }
                     self.tabs[i].dirty = true;
                     self.command_line.push_output(crate::t!("Solid created.").as_ref());
@@ -2523,62 +2702,32 @@ impl OpenCADStudio {
                 height,
                 color,
             } => {
-                use crate::entities::traits::EntityTypeOps;
                 use crate::modules::insert::solid3d_cmds::empty_solid3d;
-                use crate::scene::convert::acad_to_truck::TruckObject;
-                use crate::scene::convert::truck_tess;
-                use truck_modeling::builder;
-                use truck_modeling::Vector3 as TruckVec3;
+                use crate::scene::model::{solid_model, sweep_model};
 
                 let entity_opt = self.tabs[i].scene.document.get_entity(handle).cloned();
                 if let Some(entity) = entity_opt {
-                    let truck_entity = entity.to_truck_entity(&self.tabs[i].scene.document);
-                    let result = truck_entity.and_then(|te| {
-                        match te.object {
-                            TruckObject::Contour(wire) => {
-                                // Attach a planar face to the wire profile, then sweep.
-                                let face = builder::try_attach_plane(&[wire]).ok()?;
-                                // tsweep(Face) → Solid
-                                let solid =
-                                    builder::tsweep(&face, TruckVec3::new(0.0, 0.0, height as f64));
-                                match truck_tess::tessellate_solid(&solid) {
-                                    truck_tess::TruckTessResult::Mesh {
-                                        verts,
-                                        verts_low,
-                                        normals,
-                                        indices,
-                                    } => Some((
-                                        crate::scene::model::mesh_model::MeshModel {
-                                            name: String::new(),
-                                            verts,
-                                            verts_low,
-                                            normals,
-                                            indices,
-                                            triangle_material_handles: Vec::new(),
-                                            triangle_colors: Vec::new(),
-                                            color,
-                                            selected: false,
-                                        },
-                                        solid,
-                                    )),
-                                    _ => None,
-                                }
-                            }
-                            _ => None,
-                        }
-                    });
-                    if let Some((mut mesh, solid)) = result {
+                    // The kernel sweeps the profile into analytic surfaces —
+                    // a straight run becomes a plane and an arc a cylinder —
+                    // so the solid saves as exact ACIS rather than facets.
+                    let result = sweep_model::extruded(&entity, height as f64)
+                        .and_then(|body| Some((solid_model::mesh_from_solid(&body, color)?, body)));
+                    if let Some((mesh, solid)) = result {
+                        let history = crate::scene::model::solid_history::extrusion_op(
+                            &entity,
+                            height as f64,
+                        );
                         let pending = self.begin_undo(i, "EXTRUDE", 1, true);
-                        let new_entity = empty_solid3d();
-                        let new_handle = self.tabs[i].scene.add_entity(new_entity);
-                        mesh.name = format!("{}", new_handle.value());
+                        let mut s3d = empty_solid3d();
+                        if let acadrust::EntityType::Solid3D(inner) = &mut s3d {
+                            inner.wires = solid_model::edge_wires(&solid);
+                        }
+                        let new_handle = self.tabs[i].scene.add_entity(s3d);
                         self.tabs[i]
                             .scene
-                            .meshes
-                            .insert(new_handle, crate::scene::MeshLodSet::from_single(mesh));
-                        // Keep the truck B-rep so the save path can export exact
-                        // ACIS geometry (else the solid is dropped by other CAD apps).
-                        self.tabs[i].scene.solid_models.insert(new_handle, solid);
+                            .create_solid_history(new_handle, history);
+                        self.tabs[i].scene.register_solid_model(new_handle, solid);
+                        let _ = mesh;
                         self.tabs[i].dirty = true;
                         self.command_line.push_output(crate::t!("EXTRUDE: solid created.").as_ref());
                         if let Some(pd) = pending {
@@ -2604,65 +2753,43 @@ impl OpenCADStudio {
                 angle_deg,
                 color,
             } => {
-                use crate::entities::traits::EntityTypeOps;
                 use crate::modules::insert::solid3d_cmds::empty_solid3d;
-                use crate::scene::convert::acad_to_truck::TruckObject;
-                use crate::scene::convert::truck_tess;
-                use truck_modeling::builder;
-                use truck_modeling::{Point3, Rad, Vector3 as TruckVec3};
+                use crate::scene::model::{solid_model, sweep_model};
 
                 let entity_opt = self.tabs[i].scene.document.get_entity(handle).cloned();
                 if let Some(entity) = entity_opt {
-                    let truck_entity = entity.to_truck_entity(&self.tabs[i].scene.document);
-                    let result = truck_entity.and_then(|te| {
-                        let wire: Option<truck_modeling::Wire> = match te.object {
-                            TruckObject::Contour(w) => Some(w),
-                            TruckObject::Curve(e) => Some(std::iter::once(e).collect()),
-                            _ => None,
-                        };
-                        let wire = wire?;
-                        let origin = Point3::new(
+                    // A line turned about the axis sweeps into a plane, a
+                    // cylinder or a cone, and an arc into a sphere or a
+                    // torus, so a revolved solid keeps exact geometry too.
+                    let result = sweep_model::revolved(
+                        &entity,
+                        [
                             axis_start.x as f64,
                             axis_start.y as f64,
                             axis_start.z as f64,
+                        ],
+                        [axis_end.x as f64, axis_end.y as f64, axis_end.z as f64],
+                        (angle_deg as f64).to_radians(),
+                    )
+                    .and_then(|body| Some((solid_model::mesh_from_solid(&body, color)?, body)));
+                    if let Some((mesh, solid)) = result {
+                        let history = crate::scene::model::solid_history::revolve_op(
+                            &entity,
+                            axis_start.to_array(),
+                            axis_end.to_array(),
+                            (angle_deg as f64).to_radians(),
                         );
-                        let dir = (axis_end - axis_start).normalize();
-                        let axis = TruckVec3::new(dir.x as f64, dir.y as f64, dir.z as f64);
-                        let shell = builder::rsweep(
-                            &wire,
-                            origin,
-                            axis,
-                            Rad(angle_deg.to_radians() as f64),
-                        );
-                        match truck_tess::tessellate_shell(&shell) {
-                            truck_tess::TruckTessResult::Mesh {
-                                verts,
-                                verts_low,
-                                normals,
-                                indices,
-                            } => Some(crate::scene::model::mesh_model::MeshModel {
-                                name: String::new(),
-                                verts,
-                                verts_low,
-                                normals,
-                                indices,
-                                triangle_material_handles: Vec::new(),
-                                triangle_colors: Vec::new(),
-                                color,
-                                selected: false,
-                            }),
-                            _ => None,
-                        }
-                    });
-                    if let Some(mut mesh) = result {
                         let pending = self.begin_undo(i, "REVOLVE", 1, true);
-                        let new_entity = empty_solid3d();
-                        let new_handle = self.tabs[i].scene.add_entity(new_entity);
-                        mesh.name = format!("{}", new_handle.value());
+                        let mut s3d = empty_solid3d();
+                        if let acadrust::EntityType::Solid3D(inner) = &mut s3d {
+                            inner.wires = solid_model::edge_wires(&solid);
+                        }
+                        let new_handle = self.tabs[i].scene.add_entity(s3d);
                         self.tabs[i]
                             .scene
-                            .meshes
-                            .insert(new_handle, crate::scene::MeshLodSet::from_single(mesh));
+                            .create_solid_history(new_handle, history);
+                        self.tabs[i].scene.register_solid_model(new_handle, solid);
+                        let _ = mesh;
                         self.tabs[i].dirty = true;
                         self.command_line
                             .push_output(crate::tf!("REVOLVE: solid created ({:.0}°).", angle_deg).as_ref());
@@ -2674,26 +2801,22 @@ impl OpenCADStudio {
                             .push_error(crate::t!("REVOLVE: could not revolve profile.").as_ref());
                     }
                 } else {
-                    self.command_line.push_error(crate::t!("REVOLVE: entity not found.").as_ref());
+                    self.command_line
+                        .push_error(crate::t!("REVOLVE: entity not found.").as_ref());
                 }
                 self.tabs[i].active_cmd = None;
                 self.tabs[i].snap_result = None;
                 self.tabs[i].scene.clear_preview_wire();
                 self.restore_pre_cmd_tangent();
             }
-
-            // ── SWEEP ──────────────────────────────────────────────────────
+            // ── SWEEP ─────────────────────────────────────────────────────
             CmdResult::SweepEntity {
                 profile_handle,
                 path_handle,
                 color,
             } => {
-                use crate::entities::traits::EntityTypeOps;
                 use crate::modules::insert::solid3d_cmds::empty_solid3d;
-                use crate::scene::convert::acad_to_truck::TruckObject;
-                use crate::scene::convert::truck_tess;
-                use truck_modeling::builder;
-                use truck_modeling::Vector3 as TruckVec3;
+                use crate::scene::model::sweep_model;
 
                 let profile_ent = self.tabs[i]
                     .scene
@@ -2701,154 +2824,42 @@ impl OpenCADStudio {
                     .get_entity(profile_handle)
                     .cloned();
                 let path_ent = self.tabs[i].scene.document.get_entity(path_handle).cloned();
+                let history = profile_ent
+                    .as_ref()
+                    .zip(path_ent.as_ref())
+                    .map(|(profile, path)| {
+                        crate::scene::model::solid_history::sweep_op(profile, path)
+                    });
+                let result = profile_ent
+                    .zip(path_ent)
+                    .and_then(|(profile, path)| sweep_model::swept(&profile, &path, color));
 
-                let result = profile_ent.zip(path_ent).and_then(|(prof_e, path_e)| {
-                    let prof_truck = prof_e.to_truck_entity(&self.tabs[i].scene.document)?;
-                    let path_truck = path_e.to_truck_entity(&self.tabs[i].scene.document)?;
-
-                    // Profile must be a wire (closed or open).
-                    let profile_wire: truck_modeling::Wire = match prof_truck.object {
-                        TruckObject::Contour(w) => w,
-                        TruckObject::Curve(e) => std::iter::once(e).collect(),
-                        _ => return None,
-                    };
-
-                    // Path determines the sweep operation.
-                    let mesh = match path_truck.object {
-                        // Linear path: translate profile along the line direction.
-                        TruckObject::Curve(edge) => {
-                            let p_start = edge.front().point();
-                            let p_end = edge.back().point();
-                            let dir = TruckVec3::new(
-                                p_end.x - p_start.x,
-                                p_end.y - p_start.y,
-                                p_end.z - p_start.z,
-                            );
-                            // Try to build a face from the profile; if it's a closed
-                            // wire we get a Solid, otherwise a Shell.
-                            if let Ok(face) = builder::try_attach_plane(&[profile_wire.clone()]) {
-                                let solid = builder::tsweep(&face, dir);
-                                match truck_tess::tessellate_solid(&solid) {
-                                    truck_tess::TruckTessResult::Mesh {
-                                        verts,
-                                        verts_low,
-                                        normals,
-                                        indices,
-                                    } => Some(crate::scene::model::mesh_model::MeshModel {
-                                        name: String::new(),
-                                        verts,
-                                        verts_low,
-                                        normals,
-                                        indices,
-                                        triangle_material_handles: Vec::new(),
-                                        triangle_colors: Vec::new(),
-                                        color,
-                                        selected: false,
-                                    }),
-                                    _ => None,
-                                }
-                            } else {
-                                let shell = builder::tsweep(&profile_wire, dir);
-                                match truck_tess::tessellate_shell(&shell) {
-                                    truck_tess::TruckTessResult::Mesh {
-                                        verts,
-                                        verts_low,
-                                        normals,
-                                        indices,
-                                    } => Some(crate::scene::model::mesh_model::MeshModel {
-                                        name: String::new(),
-                                        verts,
-                                        verts_low,
-                                        normals,
-                                        indices,
-                                        triangle_material_handles: Vec::new(),
-                                        triangle_colors: Vec::new(),
-                                        color,
-                                        selected: false,
-                                    }),
-                                    _ => None,
-                                }
-                            }
-                        }
-
-                        // Contour path (polyline): sweep along the polyline using the
-                        // first edge's direction as approximation (multi-segment sweep
-                        // requires NURBS deformation — not supported here).
-                        TruckObject::Contour(path_wire) => {
-                            // Use start→end of the whole wire as translation vector.
-                            let p_start = path_wire.front_vertex()?.point();
-                            let p_end = path_wire.back_vertex()?.point();
-                            let dir = TruckVec3::new(
-                                p_end.x - p_start.x,
-                                p_end.y - p_start.y,
-                                p_end.z - p_start.z,
-                            );
-                            if let Ok(face) = builder::try_attach_plane(&[profile_wire.clone()]) {
-                                let solid = builder::tsweep(&face, dir);
-                                match truck_tess::tessellate_solid(&solid) {
-                                    truck_tess::TruckTessResult::Mesh {
-                                        verts,
-                                        verts_low,
-                                        normals,
-                                        indices,
-                                    } => Some(crate::scene::model::mesh_model::MeshModel {
-                                        name: String::new(),
-                                        verts,
-                                        verts_low,
-                                        normals,
-                                        indices,
-                                        triangle_material_handles: Vec::new(),
-                                        triangle_colors: Vec::new(),
-                                        color,
-                                        selected: false,
-                                    }),
-                                    _ => None,
-                                }
-                            } else {
-                                let shell = builder::tsweep(&profile_wire, dir);
-                                match truck_tess::tessellate_shell(&shell) {
-                                    truck_tess::TruckTessResult::Mesh {
-                                        verts,
-                                        verts_low,
-                                        normals,
-                                        indices,
-                                    } => Some(crate::scene::model::mesh_model::MeshModel {
-                                        name: String::new(),
-                                        verts,
-                                        verts_low,
-                                        normals,
-                                        indices,
-                                        triangle_material_handles: Vec::new(),
-                                        triangle_colors: Vec::new(),
-                                        color,
-                                        selected: false,
-                                    }),
-                                    _ => None,
-                                }
-                            }
-                        }
-
-                        _ => None,
-                    };
-                    mesh
-                });
-
-                if let Some(mut mesh) = result {
+                if let Some(mut set) = result {
                     let pending = self.begin_undo(i, "SWEEP", 1, true);
-                    let new_entity = empty_solid3d();
-                    let new_handle = self.tabs[i].scene.add_entity(new_entity);
-                    mesh.name = format!("{}", new_handle.value());
-                    self.tabs[i]
-                        .scene
-                        .meshes
-                        .insert(new_handle, crate::scene::MeshLodSet::from_single(mesh));
+                    let mut entity = empty_solid3d();
+                    if let acadrust::EntityType::Solid3D(solid) = &mut entity {
+                        let center = set.metrics.centroid;
+                        solid.point_of_reference = acadrust::types::Vector3::new(
+                            center[0], center[1], center[2],
+                        );
+                    }
+                    let new_handle = self.tabs[i].scene.add_entity(entity);
+                    if let Some(history) = history {
+                        self.tabs[i]
+                            .scene
+                            .create_solid_history(new_handle, history);
+                    }
+                    for mesh in &mut set.lods {
+                        mesh.name = format!("{}", new_handle.value());
+                    }
+                    self.tabs[i].scene.meshes.insert(new_handle, set);
                     self.tabs[i].dirty = true;
                     self.command_line.push_output(crate::t!("SWEEP: solid created.").as_ref());
                     if let Some(pd) = pending {
                         self.commit_undo_delta(i, pd);
                     }
                 } else {
-                    self.command_line.push_error(crate::t!("SWEEP: could not sweep profile along path. Use a closed 2D profile and a Line or Polyline path.").as_ref());
+                    self.command_line.push_error(crate::t!("SWEEP: could not sweep the profile along the path.").as_ref());
                 }
                 self.tabs[i].active_cmd = None;
                 self.tabs[i].snap_result = None;
@@ -2856,96 +2867,40 @@ impl OpenCADStudio {
                 self.restore_pre_cmd_tangent();
             }
 
-            // ── LOFT ───────────────────────────────────────────────────────
+            // ── LOFT ──────────────────────────────────────────────────────
             CmdResult::LoftEntities { handles, color } => {
-                use crate::entities::traits::EntityTypeOps;
                 use crate::modules::insert::solid3d_cmds::empty_solid3d;
-                use crate::scene::convert::acad_to_truck::TruckObject;
-                use crate::scene::convert::truck_tess;
-                use truck_modeling::builder;
+                use crate::scene::model::sweep_model;
 
-                // Collect wires from each profile.
-                let mut wires: Vec<truck_modeling::Wire> = Vec::new();
-                for h in &handles {
-                    if let Some(ent) = self.tabs[i].scene.document.get_entity(*h).cloned() {
-                        if let Some(te) = ent.to_truck_entity(&self.tabs[i].scene.document) {
-                            let wire = match te.object {
-                                TruckObject::Contour(w) => Some(w),
-                                TruckObject::Curve(e) => Some(std::iter::once(e).collect()),
-                                _ => None,
-                            };
-                            if let Some(w) = wire {
-                                wires.push(w);
-                            }
-                        }
-                    }
-                }
-
-                let result: Option<crate::scene::model::mesh_model::MeshModel> = (|| {
-                    if wires.len() < 2 {
-                        return None;
-                    }
-
-                    // Build ruled shells between consecutive profile pairs.
-                    let mut all_faces: Vec<truck_modeling::Face> = Vec::new();
-
-                    for pair in wires.windows(2) {
-                        let shell = builder::try_wire_homotopy(&pair[0], &pair[1]).ok()?;
-                        for face in shell.into_iter() {
-                            all_faces.push(face);
-                        }
-                    }
-
-                    // Cap the first and last profiles if they are closed.
-                    if let Ok(cap) = builder::try_attach_plane(&[wires.first()?.clone()]) {
-                        all_faces.push(cap);
-                    }
-                    if let Ok(cap) = builder::try_attach_plane(&[wires.last()?.clone()]) {
-                        all_faces.push(cap);
-                    }
-
-                    let shell = truck_modeling::Shell::from(all_faces);
-                    match truck_tess::tessellate_shell(&shell) {
-                        truck_tess::TruckTessResult::Mesh {
-                            verts,
-                            verts_low,
-                            normals,
-                            indices,
-                        } => Some(crate::scene::model::mesh_model::MeshModel {
-                            name: String::new(),
-                            verts,
-                            verts_low,
-                            normals,
-                            indices,
-                            triangle_material_handles: Vec::new(),
-                            triangle_colors: Vec::new(),
-                            color,
-                            selected: false,
-                        }),
-                        _ => None,
-                    }
-                })(
-                );
-
-                if let Some(mut mesh) = result {
+                let profiles: Vec<acadrust::EntityType> = handles
+                    .iter()
+                    .filter_map(|handle| self.tabs[i].scene.document.get_entity(*handle).cloned())
+                    .collect();
+                if let Some(mut set) = sweep_model::lofted(&profiles, color) {
+                    let history = crate::scene::model::solid_history::loft_op(&profiles);
                     let pending = self.begin_undo(i, "LOFT", 1, true);
-                    let new_entity = empty_solid3d();
-                    let new_handle = self.tabs[i].scene.add_entity(new_entity);
-                    mesh.name = format!("{}", new_handle.value());
+                    let mut entity = empty_solid3d();
+                    if let acadrust::EntityType::Solid3D(solid) = &mut entity {
+                        let center = set.metrics.centroid;
+                        solid.point_of_reference = acadrust::types::Vector3::new(
+                            center[0], center[1], center[2],
+                        );
+                    }
+                    let new_handle = self.tabs[i].scene.add_entity(entity);
                     self.tabs[i]
                         .scene
-                        .meshes
-                        .insert(new_handle, crate::scene::MeshLodSet::from_single(mesh));
+                        .create_solid_history(new_handle, history);
+                    for mesh in &mut set.lods {
+                        mesh.name = format!("{}", new_handle.value());
+                    }
+                    self.tabs[i].scene.meshes.insert(new_handle, set);
                     self.tabs[i].dirty = true;
-                    self.command_line.push_output(crate::tf!(
-                        "LOFT: solid created from {} profiles.",
-                        handles.len()
-                    ).as_ref());
+                    self.command_line.push_output(crate::t!("LOFT: solid created.").as_ref());
                     if let Some(pd) = pending {
                         self.commit_undo_delta(i, pd);
                     }
                 } else {
-                    self.command_line.push_error(crate::t!("LOFT: could not loft profiles. Ensure sections have the same edge count and are compatible.").as_ref());
+                    self.command_line.push_error(crate::t!("LOFT: select at least two closed profiles.").as_ref());
                 }
                 self.tabs[i].active_cmd = None;
                 self.tabs[i].snap_result = None;
@@ -2960,6 +2915,12 @@ impl OpenCADStudio {
                 angle,
             } => {
                 if let Some(mut model) = self.tabs[i].scene.hatches.get(&handle).cloned() {
+                    let layer = self.tabs[i]
+                        .scene
+                        .document
+                        .get_entity(handle)
+                        .map(|entity| entity.as_entity().layer().to_string())
+                        .unwrap_or_else(|| "0".to_string());
                     // Update model fields
                     if !name.is_empty() {
                         use crate::scene::model::hatch_model::HatchPattern;
@@ -2979,7 +2940,7 @@ impl OpenCADStudio {
                     // Remove old hatch (entity + GPU model)
                     self.tabs[i].scene.erase_entities(&[handle]);
                     // Re-add with updated model
-                    self.tabs[i].scene.add_hatch(model);
+                    self.tabs[i].scene.add_hatch(model, Some(&layer));
                     self.tabs[i].dirty = true;
                     self.command_line.push_output(crate::t!("HATCHEDIT: hatch updated.").as_ref());
                 } else {

@@ -20,7 +20,13 @@ pub(crate) enum CoordKind {
 /// `distance<angle<elevation`.
 /// A leading `@` marks the value relative to the last point; a leading
 /// `#` forces absolute. Separators: comma or semicolon.
+///
+/// Each number is read by the same pair that writes it, so anything the
+/// drawing displays can be typed straight back: `5'-6 1/2"`, `9 1/2`,
+/// `@72'8"<n45d20'6"e`. Angles after `<` are directions, and so are counted
+/// from the drawing's zero and run the way it says.
 pub(crate) fn parse_coord(text: &str) -> Option<(glam::DVec3, CoordKind)> {
+    use crate::entities::common::{parse_direction, parse_length};
     let trimmed = text.trim();
     let (kind, rest) = if let Some(r) = trimmed.strip_prefix('@') {
         (CoordKind::Relative, r)
@@ -29,12 +35,13 @@ pub(crate) fn parse_coord(text: &str) -> Option<(glam::DVec3, CoordKind)> {
     } else {
         (CoordKind::Default, trimmed)
     };
-    let number = |value: &str| value.trim().parse::<f64>().ok();
     if let Some((distance, angles)) = rest.split_once('<') {
-        let distance = number(distance)?;
+        let distance = parse_length(distance)?;
         if let Some((azimuth, elevation)) = angles.split_once('<') {
-            let azimuth = number(azimuth)?.to_radians();
-            let elevation = number(elevation)?.to_radians();
+            let azimuth = parse_direction(azimuth)?;
+            // The rise out of the plane is a size, not a compass direction, so
+            // it is not counted from the drawing's zero.
+            let elevation = crate::entities::common::parse_angle(elevation)?;
             let horizontal = distance * elevation.cos();
             return Some((
                 glam::DVec3::new(
@@ -45,13 +52,12 @@ pub(crate) fn parse_coord(text: &str) -> Option<(glam::DVec3, CoordKind)> {
                 kind,
             ));
         }
-        let angle_and_z: Vec<&str> = angles.split(|c| c == ',' || c == ';').collect();
-        let (angle, z) = match angle_and_z.as_slice() {
-            [angle] => (number(angle)?, 0.0),
-            [angle, z] => (number(angle)?, number(z)?),
-            _ => return None,
+        // A cylindrical `distance<angle,z` splits on the comma — but a
+        // surveyor's bearing has none, so nothing here can eat one.
+        let (angle, z) = match angles.split_once(|c| c == ',' || c == ';') {
+            Some((angle, z)) => (parse_direction(angle)?, parse_length(z)?),
+            None => (parse_direction(angles)?, 0.0),
         };
-        let angle = angle.to_radians();
         return Some((
             glam::DVec3::new(distance * angle.cos(), distance * angle.sin(), z),
             kind,
@@ -59,9 +65,8 @@ pub(crate) fn parse_coord(text: &str) -> Option<(glam::DVec3, CoordKind)> {
     }
     let parts: Vec<f64> = rest
         .split(|c| c == ',' || c == ';')
-        .map(|s| s.trim())
-        .filter_map(|s| s.parse().ok())
-        .collect();
+        .map(parse_length)
+        .collect::<Option<Vec<f64>>>()?;
     match parts.as_slice() {
         [x, y] => Some((glam::DVec3::new(*x, *y, 0.0), kind)),
         [x, y, z] => Some((glam::DVec3::new(*x, *y, *z), kind)),
@@ -255,19 +260,56 @@ pub(super) fn ucs_rotated_z(origin: glam::DVec3, angle_z: f32) -> Ucs {
 
 // ── Drawing constraint helpers ─────────────────────────────────────────────
 
-/// Constrain `pt` to the nearest 90° direction from `base`, in the active UCS
-/// plane — ortho follows the user's coordinate system, not world axes. `xf` is
-/// identity for plain WCS, so the world-XY behaviour is unchanged there.
-pub(super) fn ortho_constrain(pt: glam::DVec3, base: glam::DVec3, xf: &UcsXform) -> glam::DVec3 {
+/// The two live drafting directions in degrees inside the active UCS plane.
+pub(super) fn drafting_angles(
+    isometric: bool,
+    iso_plane: super::settings::IsoPlane,
+    snap_angle_deg: f32,
+) -> [f64; 2] {
+    let base = if isometric {
+        iso_plane.angles()
+    } else {
+        [0.0, 90.0]
+    };
+    base.map(|angle| angle + snap_angle_deg as f64)
+}
+
+/// Convert the live drafting directions into world-space axes.
+pub(super) fn drafting_axes(
+    x: glam::DVec3,
+    y: glam::DVec3,
+    z: glam::DVec3,
+    isometric: bool,
+    iso_plane: super::settings::IsoPlane,
+    snap_angle_deg: f32,
+) -> (glam::DVec3, glam::DVec3, glam::DVec3) {
+    let [a, b] = drafting_angles(isometric, iso_plane, snap_angle_deg);
+    let direction = |degrees: f64| {
+        let radians = degrees.to_radians();
+        (x * radians.cos() + y * radians.sin()).normalize_or(x)
+    };
+    (direction(a), direction(b), z.normalize_or(x.cross(y)))
+}
+
+/// Constrain `pt` to the nearest live drafting direction from `base`.
+pub(super) fn drafting_constrain(
+    pt: glam::DVec3,
+    base: glam::DVec3,
+    xf: &UcsXform,
+    isometric: bool,
+    iso_plane: super::settings::IsoPlane,
+    snap_angle_deg: f32,
+) -> glam::DVec3 {
     let p = xf.to_ucs(pt);
     let b = xf.to_ucs(base);
-    let dx = (p.x - b.x).abs();
-    let dy = (p.y - b.y).abs();
-    let c = if dx >= dy {
-        glam::DVec3::new(p.x, b.y, p.z)
-    } else {
-        glam::DVec3::new(b.x, p.y, p.z)
-    };
+    let delta = glam::DVec2::new(p.x - b.x, p.y - b.y);
+    let [a, c] = drafting_angles(isometric, iso_plane, snap_angle_deg).map(|degrees| {
+        let radians = degrees.to_radians();
+        glam::DVec2::new(radians.cos(), radians.sin())
+    });
+    let direction = if delta.dot(a).abs() >= delta.dot(c).abs() { a } else { c };
+    let projected = direction * delta.dot(direction);
+    let c = glam::DVec3::new(b.x + projected.x, b.y + projected.y, p.z);
     xf.to_wcs(c)
 }
 
@@ -297,10 +339,8 @@ pub(super) fn polar_constrain(
     ))
 }
 
-/// Polar constraint that only engages when the cursor is within `tol_px`
-/// screen pixels of the nearest polar ray; otherwise the cursor is left free
-/// so POLAR behaves as if off when pointing away from every angle (issue #70).
-pub(super) fn polar_constrain_near(
+/// Return the polar-constrained point while its ray is engaged.
+pub(super) fn polar_constrain_if_near(
     pt: glam::DVec3,
     base: glam::DVec3,
     step_deg: f32,
@@ -309,7 +349,7 @@ pub(super) fn polar_constrain_near(
     bounds: iced::Rectangle,
     tol_px: f32,
     xf: &UcsXform,
-) -> glam::DVec3 {
+) -> Option<glam::DVec3> {
     let snapped = polar_constrain(pt, base, step_deg, xf);
     let to_screen = |w: glam::DVec3| {
         let ndc = view_rot.project_point3((w - eye).as_vec3());
@@ -320,11 +360,22 @@ pub(super) fn polar_constrain_near(
     };
     let (cx, cy) = to_screen(pt);
     let (sx, sy) = to_screen(snapped);
-    if ((cx - sx).powi(2) + (cy - sy).powi(2)).sqrt() <= tol_px {
-        snapped
-    } else {
-        pt
-    }
+    (((cx - sx).powi(2) + (cy - sy).powi(2)).sqrt() <= tol_px).then_some(snapped)
+}
+
+/// Constrain near an engaged polar ray; otherwise keep the cursor free.
+pub(super) fn polar_constrain_near(
+    pt: glam::DVec3,
+    base: glam::DVec3,
+    step_deg: f32,
+    view_rot: glam::Mat4,
+    eye: glam::DVec3,
+    bounds: iced::Rectangle,
+    tol_px: f32,
+    xf: &UcsXform,
+) -> glam::DVec3 {
+    polar_constrain_if_near(pt, base, step_deg, view_rot, eye, bounds, tol_px, xf)
+        .unwrap_or(pt)
 }
 
 /// Hard axis lock (#312): the locked ray's direction — the nearest polar
@@ -336,6 +387,9 @@ pub(super) fn axis_lock_capture(
     polar: bool,
     step_deg: f32,
     xf: &UcsXform,
+    isometric: bool,
+    iso_plane: super::settings::IsoPlane,
+    snap_angle_deg: f32,
 ) -> Option<glam::DVec3> {
     let p = xf.to_ucs(cursor);
     let b = xf.to_ucs(base);
@@ -344,8 +398,20 @@ pub(super) fn axis_lock_capture(
     if dx.hypot(dy) < 1e-9 {
         return None;
     }
-    let step = (if polar { step_deg as f64 } else { 90.0 }).to_radians();
-    let ang = (dy.atan2(dx) / step).round() * step;
+    let ang = if polar {
+        let base = (snap_angle_deg as f64).to_radians();
+        let step = (step_deg as f64).to_radians();
+        ((dy.atan2(dx) - base) / step).round() * step + base
+    } else {
+        let delta = glam::DVec2::new(dx, dy);
+        let [a, b] = drafting_angles(isometric, iso_plane, snap_angle_deg).map(|degrees| {
+            let radians = degrees.to_radians();
+            glam::DVec2::new(radians.cos(), radians.sin())
+        });
+        let direction = if delta.dot(a).abs() >= delta.dot(b).abs() { a } else { b };
+        let direction = if delta.dot(direction) < 0.0 { -direction } else { direction };
+        direction.y.atan2(direction.x)
+    };
     let dir_ucs = glam::DVec3::new(ang.cos(), ang.sin(), 0.0);
     let dir = xf.to_wcs(b + dir_ucs) - xf.to_wcs(b);
     (dir.length_squared() > 1e-12).then(|| dir.normalize())
@@ -481,54 +547,33 @@ pub(super) fn title_case_word(value: &str) -> String {
 
 // ── Window icon ────────────────────────────────────────────────────────────
 
-/// Builds a 32×32 RGBA icon: red background with OCS drawn in white pixels.
+/// The window icon, rasterised from the same file every other build target
+/// draws its icon from.
+///
+/// This used to redraw the mark stroke by stroke in code, with the background
+/// colour written out as a literal. The taskbar therefore kept showing whatever
+/// the logo used to be, however many times the logo itself was redrawn — the
+/// one icon in the application that did not come from `assets/logo.svg`.
+///
+/// Returns 32×32 RGBA. A logo that cannot be rendered leaves the window with
+/// the platform default rather than something invented here, which would put
+/// this back where it started.
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) fn build_window_icon() -> Vec<u8> {
-    const W: usize = 32;
-    const SZ: usize = W * W * 4;
+pub(super) fn build_window_icon() -> Option<Vec<u8>> {
+    const W: u32 = 32;
+    static LOGO: &[u8] = include_bytes!("../../assets/logo.svg");
 
-    let bg = [176u8, 48, 32, 255];
-    let fg = [255u8, 255, 255, 255];
-
-    let mut px = vec![0u8; SZ];
-    for i in 0..W * W {
-        px[i * 4..i * 4 + 4].copy_from_slice(&bg);
-    }
-
-    fn stroke(px: &mut Vec<u8>, ax: i32, ay: i32, bx: i32, by: i32, fg: [u8; 4]) {
-        let steps = ((bx - ax).abs().max((by - ay).abs()) * 3).max(1);
-        for s in 0..=steps {
-            let t = s as f32 / steps as f32;
-            let cx = ax as f32 + (bx - ax) as f32 * t;
-            let cy = ay as f32 + (by - ay) as f32 * t;
-            for dy in -1i32..=1 {
-                for dx in -1i32..=1 {
-                    let ix = cx.round() as i32 + dx;
-                    let iy = cy.round() as i32 + dy;
-                    if ix >= 0 && ix < W as i32 && iy >= 0 && iy < W as i32 {
-                        let idx = (iy as usize * W + ix as usize) * 4;
-                        px[idx..idx + 4].copy_from_slice(&fg);
-                    }
-                }
-            }
-        }
-    }
-
-    // O
-    stroke(&mut px, 3, 6, 9, 6, fg);
-    stroke(&mut px, 3, 25, 9, 25, fg);
-    stroke(&mut px, 3, 6, 3, 25, fg);
-    stroke(&mut px, 9, 6, 9, 25, fg);
-    // C
-    stroke(&mut px, 12, 6, 18, 6, fg);
-    stroke(&mut px, 12, 25, 18, 25, fg);
-    stroke(&mut px, 12, 6, 12, 25, fg);
-    // S
-    stroke(&mut px, 21, 6, 27, 6, fg);
-    stroke(&mut px, 21, 6, 21, 15, fg);
-    stroke(&mut px, 21, 15, 27, 15, fg);
-    stroke(&mut px, 27, 15, 27, 25, fg);
-    stroke(&mut px, 21, 25, 27, 25, fg);
-
-    px
+    let tree = resvg::usvg::Tree::from_data(LOGO, &resvg::usvg::Options::default()).ok()?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(W, W)?;
+    let size = tree.size();
+    // Fit the artwork to the square without distorting it, whatever aspect the
+    // logo happens to have.
+    let scale = (W as f32 / size.width()).min(W as f32 / size.height());
+    let transform = resvg::tiny_skia::Transform::from_translate(
+        (W as f32 - size.width() * scale) / 2.0,
+        (W as f32 - size.height() * scale) / 2.0,
+    )
+    .pre_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    Some(pixmap.take())
 }

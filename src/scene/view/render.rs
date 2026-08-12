@@ -168,6 +168,10 @@ pub struct ViewportData {
     pub(in crate::scene) compass_rotation: Mat4,
     pub(in crate::scene) hover_region: Option<usize>,
     pub(in crate::scene) show_viewcube: bool,
+    /// Set when REDRAW/REDRAWALL requested a forced re-rasterize of this
+    /// viewport this frame — bypasses the scene-render cache even if the
+    /// signature is unchanged. Consumed (reset) in `prepare`.
+    pub(in crate::scene) force_rasterize: bool,
     /// Header.fill_mode (FILLMODE): when false, hatch / wipeout / face3d-fill
     /// uploads short-circuit so the renderer draws only wireframe.
     pub(in crate::scene) fill_mode: bool,
@@ -202,6 +206,10 @@ pub struct ViewportData {
     /// into the render signature so the settle frame re-renders hatches once and
     /// the scene-render cache holds it. See [`Scene::navigating_lod`].
     pub(in crate::scene) skip_hatch: bool,
+    /// True when this viewport must not paint a canvas of its own. A floating
+    /// viewport on a paper layout sits ON the sheet: anything it painted first
+    /// would cover the page it is supposed to be a window in.
+    pub(in crate::scene) skip_background: bool,
     pub(in crate::scene) geometry_epoch: u64,
     /// Camera generation captured when this Primitive was assembled. Paired
     /// with `geometry_epoch` so the per-frame scissor / LOD recompute runs.
@@ -413,6 +421,7 @@ impl shader::Primitive for Primitive {
                 inner.hatch_lod_key = (usize::MAX, u64::MAX, 0, 0, false);
                 inner.wipeout_lod_key = (usize::MAX, u64::MAX, 0, 0, false);
                 inner.mesh_lod_key = (usize::MAX, u64::MAX, 0, 0);
+                inner.silhouette_key = (usize::MAX, u64::MAX, u64::MAX, false);
                 inner.render_sig = u64::MAX;
             }
             // The MSAA / depth / resolve textures are always sized to the
@@ -461,6 +470,13 @@ impl shader::Primitive for Primitive {
             // keeps updating in its own always-on pass, so cube hover still
             // tracks while the scene is cached.
             let sig = render_signature(vp, clip_size.width, clip_size.height);
+            // REDRAW bypass: pin render_sig to force a full pass this frame
+            // even if the signature is otherwise unchanged. The request is
+            // one-shot per viewport (consumed by the builder that produced
+            // this `ViewportData`), so this frame only.
+            if vp.force_rasterize {
+                inner.render_sig = u64::MAX;
+            }
             let skip = inner.render_sig != u64::MAX && sig == inner.render_sig;
             inner.render_sig = sig;
             inner.skip_geometry = skip;
@@ -475,6 +491,7 @@ impl shader::Primitive for Primitive {
             }
             // Interaction LOD: skip the hatch draw this frame while navigating.
             inner.skip_hatch_frame = vp.skip_hatch;
+            inner.skip_background = vp.skip_background;
             if skip {
                 if vp.show_viewcube {
                     inner.viewcube.upload(
@@ -488,9 +505,13 @@ impl shader::Primitive for Primitive {
                 continue;
             }
             let Some(vp_wires) = vp.wires.upgrade() else {
+                inner.render_sig = u64::MAX;
+                inner.skip_geometry = true;
                 continue;
             };
             let Some(draw_depths) = vp.draw_depths.upgrade() else {
+                inner.render_sig = u64::MAX;
+                inner.skip_geometry = true;
                 continue;
             };
             // Third component is the *selected-set* signature (not
@@ -556,8 +577,15 @@ impl shader::Primitive for Primitive {
                 .cached_text_source
                 .as_ref()
                 .map_or(true, |source| !Arc::ptr_eq(source, &vp.text_verts))
+                || vp.wire_content_id != inner.cached_wire_id
             {
-                inner.upload_text(device, queue, &vp.text_verts[..]);
+                inner.upload_text(
+                    device,
+                    queue,
+                    &vp.text_verts[..],
+                    &vp_wires[..],
+                    &draw_depths,
+                );
                 inner.cached_text_source = Some(Arc::clone(&vp.text_verts));
             }
             inner.cached_fill_mode = fill_mode;
@@ -632,7 +660,8 @@ impl shader::Primitive for Primitive {
                     && (inner.wire_const_bgl.is_some()
                         || ((vp.wire_patch.is_some()
                             || inner.wire_arena_id != u64::MAX)
-                            && packed_arena_owner));
+                            && packed_arena_owner))
+                    && !vp_wires.iter().any(|wire| wire.render_instance.is_some());
                 if use_wire_arena {
                     use crate::scene::pipeline::wire_arena::{
                         self, PersistentWireArena as WireArena,
@@ -849,6 +878,7 @@ impl shader::Primitive for Primitive {
                             gpus.extend(arena.wire_gpus());
                         }
                         inner.gpu_wires = std::sync::Arc::new(gpus);
+                        inner.gpu_block_wires = std::sync::Arc::new(Vec::new());
                         if _patched {
                             wire_arena::patch_handle_index(
                                 &mut inner.wire_handle_index,
@@ -906,17 +936,26 @@ impl shader::Primitive for Primitive {
                             if pipeline.wire_buffer_cache.len() > 16 {
                                 pipeline
                                     .wire_buffer_cache
-                                    .retain(|_, (w, _)| std::sync::Arc::strong_count(w) > 1);
+                                    .retain(|_, (w, b, _)| {
+                                        std::sync::Arc::strong_count(w) > 1
+                                            || std::sync::Arc::strong_count(b) > 1
+                                    });
                             }
                             entry
                         }
                     };
                     inner.gpu_wires = built.0;
-                    inner.wire_handle_index = built.1;
+                    inner.gpu_block_wires = built.1;
+                    inner.wire_handle_index = built.2;
                 } // end !arena_served
                 inner.cached_wire_id = vp.wire_content_id;
                 if _perf {
                     let gi: u32 = inner.gpu_wires.iter().map(|w| w.instance_count).sum();
+                    let bi: u32 = inner
+                        .gpu_block_wires
+                        .iter()
+                        .map(|w| w.instance_count)
+                        .sum();
                     let outcome = if !arena_served {
                         "shared-fullupload"
                     } else if _patched {
@@ -927,11 +966,12 @@ impl shader::Primitive for Primitive {
                         "arena-build"
                     };
                     crate::perf_record!(
-                        "[perf] wire {:>7.1}ms  {:<18} wires={} gpu_instances={}",
+                        "[perf] wire {:>7.1}ms  {:<18} wires={} gpu_instances={} block_instances={}",
                         _t0.elapsed().as_secs_f64() * 1000.0,
                         outcome,
                         vp_wires.len(),
                         gi,
+                        bi,
                     );
                 }
             }
@@ -978,6 +1018,7 @@ impl shader::Primitive for Primitive {
                     &vp.selected_handles,
                     &vp.hover_handles,
                     &vp.annotation_context_wires,
+                    &draw_depths,
                 );
                 inner.cached_annotation_highlight_source =
                     Some(Arc::clone(&vp.annotation_context_wires));
@@ -1032,13 +1073,21 @@ impl shader::Primitive for Primitive {
                 vp.uniforms.eye_high[1] as f64 + vp.uniforms.eye_low[1] as f64,
                 vp.uniforms.eye_high[2] as f64 + vp.uniforms.eye_low[2] as f64,
             );
-            // Rebuild view-dependent silhouettes each frame when requested by
-            // DISPSILH or by a visual style such as HiddenLine. Only modes that
-            // draw edges consume them — pure shaded hides them.
-            if vp.display_silhouette && (vp.view_wireframe || vp.show_3d_edges) {
-                inner.upload_silhouettes(device, &vp.meshes[..], vp.view_dir);
-            } else {
-                inner.upload_silhouettes(device, &[], vp.view_dir);
+            let silhouette_enabled =
+                vp.display_silhouette && (vp.view_wireframe || vp.show_3d_edges);
+            let silhouette_key = (
+                Arc::as_ptr(&vp.meshes) as usize,
+                vp.wire_content_id,
+                vp.camera_generation,
+                silhouette_enabled,
+            );
+            if inner.silhouette_key != silhouette_key {
+                inner.upload_silhouettes(
+                    device,
+                    if silhouette_enabled { &vp.meshes[..] } else { &[] },
+                    vp.view_dir,
+                );
+                inner.silhouette_key = silhouette_key;
             }
             inner.upload_clip_boundary(device, &vp.clip_boundary_ndc);
             let hatch_lod_key = (
@@ -1273,6 +1322,12 @@ fn render_signature(vp: &ViewportData, clip_w: u32, clip_h: u32) -> u64 {
         .map(|image| std::sync::Arc::as_ptr(&image.pixels) as usize)
         .unwrap_or(0)
         .hash(&mut h);
+    if vp.meshes.is_empty() {
+        0usize
+    } else {
+        std::sync::Arc::as_ptr(&vp.meshes) as usize
+    }
+    .hash(&mut h);
     vp.geometry_epoch.hash(&mut h);
     vp.selection_generation.hash(&mut h);
     vp.selected_sig.hash(&mut h);
@@ -1291,6 +1346,7 @@ fn render_signature(vp: &ViewportData, clip_w: u32, clip_h: u32) -> u64 {
     // Interaction-LOD hatch suppression: differs the signature so the settle
     // frame (skip_hatch flips false) re-renders with hatches and re-caches.
     vp.skip_hatch.hash(&mut h);
+    vp.skip_background.hash(&mut h);
     clip_w.hash(&mut h);
     clip_h.hash(&mut h);
     // Live overlay (command preview / interim / grip drag). Small — a handful
@@ -1953,7 +2009,19 @@ impl Scene {
         &self,
         viewport: &ViewportInstance,
     ) -> ViewportDisplaySettings {
+        // What lies behind a viewport depends on what the viewport is. The
+        // full-canvas paper sheet shows the desk, and the page is drawn on top
+        // of it by `paper_sheet_fill` — give the desk the page's own colour and
+        // the edge disappears into a same-coloured surround that no amount of
+        // zooming out reveals. A floating viewport sits ON that sheet, so it
+        // paints no canvas at all; anything else would erase the page beneath
+        // it. Only model space clears to the editor background.
         let canvas_background = if viewport.paper_sheet {
+            crate::scene::PAPER_DESK_COLOR
+        } else if self.current_layout != "Model" {
+            // This viewport paints no canvas of its own (`skip_background`),
+            // but shading and fog still blend toward whatever is behind it —
+            // and behind a floating viewport is the page.
             self.paper_bg_color
         } else {
             self.bg_color
@@ -2838,6 +2906,9 @@ impl Scene {
         }
         let mut out: Vec<crate::scene::pipeline::text_gpu::TextVertex> = Vec::new();
         for w in wires {
+            if w.render_instance.is_some() {
+                continue;
+            }
             if !w.text_verts.is_empty() {
                 // Bake the host wire's draw-order depth into its glyphs so
                 // text layers like the rest of the entity: its own background
@@ -3093,7 +3164,10 @@ impl Scene {
         let bg_color = [0.0, 0.0, 0.0, 0.0];
         let viewports: Vec<ViewportData> = instances
             .iter()
-            .filter_map(|inst| self.viewport_data_for(inst, canvas, hover_region, show_viewcube))
+            .filter_map(|inst| {
+                let force = self.refresh_consume(self.instance_id_for(inst));
+                self.viewport_data_for(inst, canvas, hover_region, show_viewcube, force)
+            })
             .collect();
         // Empty viewports → blit nothing; the container background (model bg
         // or the paper desk colour) stays visible.
@@ -3172,8 +3246,9 @@ impl Scene {
             grid_on: tile.grid_on,
             paper_sheet: false,
         };
+        let force = self.refresh_consume(self.instance_id_for(&inst));
         let viewports = self
-            .viewport_data_for(&inst, canvas, hover_region, show_viewcube)
+            .viewport_data_for(&inst, canvas, hover_region, show_viewcube, force)
             .into_iter()
             .collect();
         let perf_nav = perf_nav.map(|mut sample| {
@@ -3198,17 +3273,13 @@ impl Scene {
         canvas: (f32, f32),
         hover_region: Option<usize>,
         show_viewcube: bool,
+        force_rasterize: bool,
     ) -> Option<ViewportData> {
         let display = self.viewport_display_settings(inst);
         let mut flags = render_mode_flags(inst.render_mode);
         if let Some(style) = display.visual_style.as_ref() {
-            if flags.mesh_fill {
-                flags.face3d_fill &= style.face_visible();
-                flags.mesh_fill &= style.face_visible();
-                flags.show_3d_edges = style.edges_visible();
-                if style.face_lighting_quality == 1 {
-                    flags.flat_shade = true;
-                }
+            if flags.mesh_fill && style.face_lighting_quality == 1 {
+                flags.flat_shade = true;
             }
         }
         let view_wireframe = !flags.face3d_fill;
@@ -3615,6 +3686,7 @@ impl Scene {
         };
         Some(ViewportData {
             instance_id,
+            force_rasterize,
             wires: Arc::downgrade(&all_wires),
             clip_boundary_ndc,
             preview_wires,
@@ -3656,6 +3728,7 @@ impl Scene {
             // (hatched) frame once it settles. Only applied to the on-screen
             // Model / paper content — the paper *sheet* keeps its fills.
             skip_hatch: self.hatch_lod_enabled() && !inst.paper_sheet && self.navigating_lod(),
+            skip_background: !inst.paper_sheet && self.current_layout != "Model",
             geometry_epoch: self.geometry_epoch,
             camera_generation: self.camera_generation,
             wire_content_id,

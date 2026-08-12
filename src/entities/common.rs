@@ -11,14 +11,35 @@ pub struct UnitContext {
     pub lunits: i16,
     /// LUPREC — decimal places (linear)
     pub luprec: i16,
-    /// AUNITS — 0=Decimal degrees, 1=DMS, 2=Grad, 3=Rad. Surfaced via
-    /// `format_angle`, which is read on demand by code that already
+    /// AUNITS — 0=Decimal degrees, 1=DMS, 2=Grad, 3=Rad, 4=Surveyor. Surfaced
+    /// via `format_angle`, which is read on demand by code that already
     /// formats angular values via radians.
     #[allow(dead_code)]
     pub aunits: i16,
     /// AUPREC — decimal places (angular)
     #[allow(dead_code)]
     pub auprec: i16,
+    /// ANGBASE — the world direction that a written angle of zero points in,
+    /// in radians. Applies to directions, never to angular sizes.
+    pub angbase: f64,
+    /// ANGDIR — true when written angles grow clockwise.
+    pub angdir_cw: bool,
+}
+
+impl UnitContext {
+    /// The settings as this drawing holds them. Every place that formats or
+    /// reads a number seeds the context from here, so none of them can be
+    /// working from a different idea of the drawing's conventions.
+    pub fn from_header(header: &acadrust::document::HeaderVariables) -> Self {
+        Self {
+            lunits: header.linear_unit_format,
+            luprec: header.linear_unit_precision,
+            aunits: header.angular_unit_format,
+            auprec: header.angular_unit_precision,
+            angbase: header.angle_base,
+            angdir_cw: header.angle_direction != 0,
+        }
+    }
 }
 
 thread_local! {
@@ -27,7 +48,41 @@ thread_local! {
         luprec: 4,
         aunits: 0,
         auprec: 0,
+        angbase: 0.0,
+        angdir_cw: false,
     }) };
+}
+
+thread_local! {
+    /// Text styles that fix their own height, by lowercased name.
+    ///
+    /// A style with a non-zero height fixes the size of everything drawn in it
+    /// — the CAD that writes the file skips the height prompt for such a style,
+    /// and the properties palette shows the height without letting it be
+    /// changed. The panel builders are handed an entity, not the document it
+    /// came from, so the lookup rides here beside the unit context, seeded from
+    /// the same place.
+    static FIXED_TEXT_HEIGHTS: std::cell::RefCell<rustc_hash::FxHashMap<String, f64>> =
+        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+}
+
+/// Record which text styles fix their height, from the drawing's style table.
+pub fn set_fixed_text_heights(document: &acadrust::CadDocument) {
+    FIXED_TEXT_HEIGHTS.with(|cell| {
+        let mut map = cell.borrow_mut();
+        map.clear();
+        for style in document.text_styles.iter() {
+            if style.height > 0.0 {
+                map.insert(style.name.to_ascii_lowercase(), style.height);
+            }
+        }
+    });
+}
+
+/// The height `style` fixes, or `None` when it leaves the height to the entity.
+pub fn style_fixed_height(style: &str) -> Option<f64> {
+    let key = style.trim().to_ascii_lowercase();
+    FIXED_TEXT_HEIGHTS.with(|cell| cell.borrow().get(&key).copied())
 }
 
 /// Set the per-thread unit context. Properties helpers consult it when
@@ -98,24 +153,260 @@ pub fn format_angle(value_rad: f64) -> String {
     let ctx = unit_context();
     let prec = ctx.auprec.max(0) as usize;
     match ctx.aunits {
-        1 => {
-            // DMS — degrees / minutes / seconds.
-            let deg = value_rad.to_degrees();
-            let sign = if deg < 0.0 { "-" } else { "" };
-            let a = deg.abs();
-            let d = a.floor();
-            let m_full = (a - d) * 60.0;
-            let m = m_full.floor();
-            let s = (m_full - m) * 60.0;
-            format!("{}{:.0}°{:.0}'{:.*}\"", sign, d, m, prec, s)
-        }
+        1 => dms(value_rad.to_degrees(), prec),
         2 => {
             let g = value_rad.to_degrees() / 0.9;
             format!("{:.*}g", prec, g)
         }
         3 => format!("{:.*}r", prec, value_rad),
+        4 => surveyor(value_rad, prec),
         _ => format!("{:.*}°", prec, value_rad.to_degrees()),
     }
+}
+
+/// Degrees / minutes / seconds. Each part carries its own mark — `d`, `'`, `"`
+/// — so the written angle says which convention it is in.
+fn dms(degrees: f64, prec: usize) -> String {
+    let sign = if degrees < 0.0 { "-" } else { "" };
+    let a = degrees.abs();
+    let d = a.floor();
+    let m_full = (a - d) * 60.0;
+    let m = m_full.floor();
+    let s = (m_full - m) * 60.0;
+    format!("{}{:.0}d{:.0}'{:.*}\"", sign, d, m, prec, s)
+}
+
+/// Surveyor's units: a bearing away from north or south, toward east or west,
+/// so the angle is never more than a quarter turn — `N 45d0'0" E`.
+///
+/// Due north, south, east and west have no bearing to quote and are written as
+/// the single letter, which is also what keeps a 90° angle from reading as the
+/// contradictory `N 90d0'0" E`.
+fn surveyor(value_rad: f64, prec: usize) -> String {
+    let deg = value_rad.to_degrees().rem_euclid(360.0);
+    let near = |target: f64| (deg - target).abs() < 1e-9;
+    if near(0.0) {
+        return "E".into();
+    }
+    if near(90.0) {
+        return "N".into();
+    }
+    if near(180.0) {
+        return "W".into();
+    }
+    if near(270.0) {
+        return "S".into();
+    }
+    // Measured from the nearer pole, toward the side the angle falls on.
+    let (pole, bearing, side) = if deg < 90.0 {
+        ("N", 90.0 - deg, "E")
+    } else if deg < 180.0 {
+        ("N", deg - 90.0, "W")
+    } else if deg < 270.0 {
+        ("S", 270.0 - deg, "W")
+    } else {
+        ("S", deg - 270.0, "E")
+    };
+    format!("{pole} {} {side}", dms(bearing, prec))
+}
+
+// ── Reading numbers back ───────────────────────────────────────────────────
+//
+// The inverses of the formatters above, kept beside them so the pair cannot
+// drift: whatever the drawing writes, it can be handed back. Reading is the
+// looser of the two — it takes the shorthands people type as well as the full
+// forms — but it never accepts a form the drawing could not have produced.
+
+/// Read a length. Accepts plain decimals, feet-and-inches, and fractions.
+///
+/// Feet and inches separate with a dash, a space, or nothing, and the closing
+/// `"` is optional: `5'-9 1/2"`, `5' 9-1/2`, `5'9`, `9 1/2`, `1/2`, `60"` and
+/// `5'` all read. As with the architectural and engineering formats, the
+/// notation itself means one unit is one inch.
+///
+/// A leading `-` is a sign, but the `-` inside `5'-9"` is a separator — after
+/// feet there is nothing left to subtract from.
+pub fn parse_length(text: &str) -> Option<f64> {
+    let text = text.trim();
+    let (sign, rest) = match text.strip_prefix('-') {
+        Some(rest) => (-1.0, rest.trim_start()),
+        None => (1.0, text.strip_prefix('+').unwrap_or(text).trim_start()),
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    let magnitude = match rest.split_once('\'') {
+        Some((feet, inches)) => {
+            let feet: f64 = feet.trim().parse().ok()?;
+            let inches = inches.trim().trim_end_matches('"').trim();
+            feet * 12.0 + parse_inches(inches.trim_start_matches('-').trim())?
+        }
+        None => parse_inches(rest.trim_end_matches('"').trim())?,
+    };
+    Some(sign * magnitude)
+}
+
+/// A count of inches: `9`, `9.5`, `1/2`, `9 1/2`, `9-1/2`, or nothing at all.
+fn parse_inches(text: &str) -> Option<f64> {
+    if text.is_empty() {
+        return Some(0.0);
+    }
+    let Some(slash) = text.find('/') else {
+        // No fraction, so any `-` left in here belongs to an exponent
+        // (`3.35E-01`) rather than to a separator.
+        return text.parse().ok();
+    };
+    let denominator: f64 = text[slash + 1..].trim().parse().ok()?;
+    if denominator == 0.0 {
+        return None;
+    }
+    // The numerator is the number nearest the slash; anything before the
+    // separator in front of it is a whole count of inches.
+    let head = text[..slash].trim();
+    let (whole, numerator) = match head.rfind([' ', '-']) {
+        Some(cut) => (head[..cut].trim(), head[cut + 1..].trim()),
+        None => ("", head),
+    };
+    let numerator: f64 = numerator.parse().ok()?;
+    let whole: f64 = if whole.is_empty() {
+        0.0
+    } else {
+        whole.parse().ok()?
+    };
+    Some(whole + numerator / denominator)
+}
+
+/// Read an angle, in radians.
+///
+/// A mark decides the convention — `g` grads, `r` radians, `d`/`'`/`"`
+/// degrees-minutes-seconds, compass letters a surveyor's bearing. A bare
+/// number is read in whatever convention the drawing is set to, so what the
+/// readout shows can be typed straight back.
+pub fn parse_angle(text: &str) -> Option<f64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let upper = text.to_ascii_uppercase();
+    if upper.starts_with('N') || upper.starts_with('S') {
+        return parse_surveyor(&upper);
+    }
+    if let Some(body) = upper.strip_suffix('G') {
+        return Some((body.trim().parse::<f64>().ok()? * 0.9).to_radians());
+    }
+    if let Some(body) = upper.strip_suffix('R') {
+        return body.trim().parse().ok();
+    }
+    // Bare east/west read as the directions they name.
+    if upper == "E" {
+        return Some(0.0);
+    }
+    if upper == "W" {
+        return Some(std::f64::consts::PI);
+    }
+    if upper.contains('D') || upper.contains('°') || upper.contains('\'') {
+        return Some(parse_dms(&upper)?.to_radians());
+    }
+    let value: f64 = upper.parse().ok()?;
+    Some(match unit_context().aunits {
+        2 => (value * 0.9).to_radians(),
+        3 => value,
+        _ => value.to_radians(),
+    })
+}
+
+/// Degrees, minutes and seconds, each part optional after the first:
+/// `45`, `45d`, `45d20'`, `45d20'6"`.
+fn parse_dms(upper: &str) -> Option<f64> {
+    let (sign, rest) = match upper.strip_prefix('-') {
+        Some(rest) => (-1.0, rest.trim_start()),
+        None => (1.0, upper),
+    };
+    let (degrees, rest) = match rest.find(['D', '°']) {
+        Some(at) => (
+            rest[..at].trim().parse::<f64>().ok()?,
+            rest[at + rest[at..].chars().next()?.len_utf8()..].trim(),
+        ),
+        None => (rest.trim().parse::<f64>().ok()?, ""),
+    };
+    let (minutes, rest) = match rest.split_once('\'') {
+        Some((minutes, rest)) if !minutes.trim().is_empty() => {
+            (minutes.trim().parse::<f64>().ok()?, rest.trim())
+        }
+        Some((_, rest)) => (0.0, rest.trim()),
+        None => (0.0, rest),
+    };
+    let seconds = match rest.trim_end_matches('"').trim() {
+        "" => 0.0,
+        seconds => seconds.parse::<f64>().ok()?,
+    };
+    Some(sign * (degrees + minutes / 60.0 + seconds / 3600.0))
+}
+
+/// A surveyor's bearing — `N45D20'6"E`, or a lone `N` / `S` for due north and
+/// south. The inverse of [`surveyor`].
+fn parse_surveyor(upper: &str) -> Option<f64> {
+    let pole = upper.chars().next()?;
+    let body = upper[1..].trim();
+    if body.is_empty() {
+        return Some(if pole == 'N' {
+            std::f64::consts::FRAC_PI_2
+        } else {
+            3.0 * std::f64::consts::FRAC_PI_2
+        });
+    }
+    let side = body.chars().last()?;
+    if !matches!(side, 'E' | 'W') {
+        return None;
+    }
+    let bearing = parse_dms(body[..body.len() - 1].trim())?;
+    let degrees = match (pole, side) {
+        ('N', 'E') => 90.0 - bearing,
+        ('N', _) => 90.0 + bearing,
+        (_, 'W') => 270.0 - bearing,
+        _ => 270.0 + bearing,
+    };
+    Some(degrees.to_radians())
+}
+
+/// Read a length typed at a command prompt.
+///
+/// Same forms as [`parse_length`], plus the comma some keyboards put where a
+/// decimal point belongs. A prompt asking for one value has no other use for a
+/// comma, so taking it here is safe in a way it would not be inside a
+/// coordinate, where the comma separates the axes.
+pub fn parse_typed_length(text: &str) -> Option<f64> {
+    parse_length(&text.replace(',', "."))
+}
+
+/// Read an angle typed at a command prompt, in radians. Same forms as
+/// [`parse_angle`], with the same tolerance for a decimal comma.
+pub fn parse_typed_angle(text: &str) -> Option<f64> {
+    parse_angle(&text.replace(',', "."))
+}
+
+// ── Directions ─────────────────────────────────────────────────────────────
+//
+// A direction is not an angular size. Which way something points is measured
+// from ANGBASE and runs the way ANGDIR says, while how wide an arc opens is
+// the same number whatever zero the drawing counts from. Only directions go
+// through the pair below; `format_angle` and `parse_angle` stay for sizes.
+
+/// Write a world direction the way this drawing counts directions.
+pub fn format_direction(world_rad: f64) -> String {
+    let ctx = unit_context();
+    let relative = world_rad - ctx.angbase;
+    let shown = if ctx.angdir_cw { -relative } else { relative };
+    format_angle(shown.rem_euclid(std::f64::consts::TAU))
+}
+
+/// Read a direction written the way this drawing counts them, as a world
+/// angle.
+pub fn parse_direction(text: &str) -> Option<f64> {
+    let ctx = unit_context();
+    let typed = parse_angle(text)?;
+    let relative = if ctx.angdir_cw { -typed } else { typed };
+    Some(relative + ctx.angbase)
 }
 
 /// Two interior triangles covering a quad (flat list, 6 vertices) — the
@@ -132,6 +423,7 @@ pub fn square_grip(id: usize, world: glam::DVec3) -> GripDef {
         is_midpoint: false,
         shape: GripShape::Square,
         dir: None,
+        axis: None,
     }
 }
 
@@ -144,6 +436,7 @@ pub fn center_grip(id: usize, world: glam::DVec3) -> GripDef {
         is_midpoint: true,
         shape: GripShape::Square,
         dir: None,
+        axis: None,
     }
 }
 
@@ -156,6 +449,7 @@ pub fn circle_grip(id: usize, world: glam::DVec3) -> GripDef {
         is_midpoint: true,
         shape: GripShape::Circle,
         dir: None,
+        axis: None,
     }
 }
 
@@ -169,6 +463,7 @@ pub fn rectangle_grip(id: usize, world: glam::DVec3, dir: [f32; 2]) -> GripDef {
         is_midpoint: true,
         shape: GripShape::Rectangle,
         dir: Some(dir),
+        axis: None,
     }
 }
 
@@ -180,6 +475,7 @@ pub fn triangle_grip(id: usize, world: glam::DVec3) -> GripDef {
         is_midpoint: false,
         shape: GripShape::Triangle,
         dir: None,
+        axis: None,
     }
 }
 
@@ -291,93 +587,15 @@ pub fn parse_angle_deg(value: &str) -> Option<f64> {
     Some(if neg { -total } else { total })
 }
 
-/// Bulge → arc geometry for a polyline segment.
+/// Bulge → arc geometry for a polyline segment, from the kernel.
 ///
-/// DXF/DWG polyline arcs are encoded as a bulge factor on each vertex —
-/// `bulge = tan(theta/4)` where `theta` is the included angle of the arc
-/// from `p0` to `p1`. Sign convention: positive bulge = CCW from p0 to p1,
-/// negative = CW. `|bulge| = 1` is a half-circle.
-///
-/// This struct centralises the (formerly duplicated) math that takes
-/// `(p0, p1, bulge)` and produces the canonical `(center, radius,
-/// start_angle, sweep)` quadruple. Callsites pick the fields they need.
-#[derive(Clone, Copy, Debug)]
-pub struct BulgeArc {
-    pub center: [f64; 2],
-    pub radius: f64,
-    /// Angle from center to p0 (atan2, range -π..π).
-    pub start_angle: f64,
-    /// Angle from center to p1 (atan2, range -π..π).
-    pub end_angle: f64,
-    /// Signed sweep from p0 to p1. Positive ⇒ CCW (bulge > 0),
-    /// negative ⇒ CW (bulge < 0). For exact half-turns the sign of
-    /// `bulge` decides the direction.
-    pub sweep: f64,
-}
-
-impl BulgeArc {
-    /// Build from endpoints + bulge. Returns `None` for degenerate input
-    /// (chord ≈ 0 or |bulge| ≈ 0).
-    pub fn from_bulge(p0: [f64; 2], p1: [f64; 2], bulge: f64) -> Option<Self> {
-        let chord_x = p1[0] - p0[0];
-        let chord_y = p1[1] - p0[1];
-        let chord_len = (chord_x * chord_x + chord_y * chord_y).sqrt();
-        if chord_len < 1e-12 || bulge.abs() < 1e-12 {
-            return None;
-        }
-        let b = bulge;
-        let b2 = b * b;
-        // r = chord · (1 + b²) / (4·|b|)
-        let r = chord_len * (1.0 + b2) / (4.0 * b.abs());
-        // d_perp = signed distance from chord midpoint to arc center
-        //        = r · (1 - b²) / (1 + b²) = r · cos(theta/2)
-        let d_perp = r * (1.0 - b2) / (1.0 + b2);
-        let mx = (p0[0] + p1[0]) * 0.5;
-        let my = (p0[1] + p1[1]) * 0.5;
-        // Left perpendicular to chord (90° CCW).
-        let perp_x = -chord_y / chord_len;
-        let perp_y = chord_x / chord_len;
-        let sign = b.signum();
-        let cx = mx + sign * d_perp * perp_x;
-        let cy = my + sign * d_perp * perp_y;
-        let a0 = (p0[1] - cy).atan2(p0[0] - cx);
-        let a1 = (p1[1] - cy).atan2(p1[0] - cx);
-        // Wrap sweep to match bulge sign: bulge>0 ⇒ positive (CCW),
-        // bulge<0 ⇒ negative (CW). Falls back to ±τ for half-turns.
-        const TAU: f64 = std::f64::consts::TAU;
-        let mut sweep = a1 - a0;
-        if bulge > 0.0 {
-            if sweep <= 0.0 {
-                sweep += TAU;
-            }
-        } else if sweep >= 0.0 {
-            sweep -= TAU;
-        }
-        if sweep.abs() < 1e-9 {
-            sweep = if bulge > 0.0 { TAU } else { -TAU };
-        }
-        Some(Self {
-            center: [cx, cy],
-            radius: r,
-            start_angle: a0,
-            end_angle: a1,
-            sweep,
-        })
-    }
-
-    /// Sample a point on the arc at parameter `t ∈ [0, 1]`. `t=0` ↦ p0,
-    /// `t=1` ↦ p1, walks along the signed sweep direction.
-    pub fn sample(&self, t: f64) -> [f64; 2] {
-        let a = self.start_angle + self.sweep * t;
-        [
-            self.center[0] + self.radius * a.cos(),
-            self.center[1] + self.radius * a.sin(),
-        ]
-    }
-}
+/// Re-exported rather than imported at each call site so the twelve modules
+/// that already reach for `entities::common::BulgeArc` keep working, and so
+/// there is one obvious place to see that the maths moved out.
+pub use cadkernel::geom2d::BulgeArc;
 
 /// Triangulate the solid bands a `wide_fills` returns into the flat WCS f64
-/// triangle list `TruckEntity::pick_tris` carries, so a wide polyline is
+/// triangle list `RenderEntity::pick_tris` carries, so a wide polyline is
 /// selectable across the band it draws and not just along its centreline.
 ///
 /// `origin` and `fills` are that function's own pair: 2-D offsets from the
@@ -403,7 +621,7 @@ pub(crate) fn wide_band_tris(origin: [f64; 2], fills: &[Vec<[f32; 2]>]) -> Vec<[
 /// thickness (code 39): a vertical wall between every band-boundary point and
 /// its `thickness`-along-`normal` copy, plus triangulated bottom and top caps.
 /// Returns `(fill_tris, edge_lines)` as flat WCS f64 lists — the caller wraps
-/// them in a `TruckEntity` (object = `Lines(edge_lines)`, `fill_tris`, and
+/// them in a `RenderEntity` (object = `Lines(edge_lines)`, `fill_tris`, and
 /// `pick_tris = fill_tris`). Shared by LwPolyline and Polyline2D so both wide
 /// polyline kinds extrude the same solid instead of just their centre-line.
 ///
@@ -457,14 +675,7 @@ pub(crate) fn thick_band_tube(
     (fill_tris, lines)
 }
 
-/// Build a continuous WCS point list + a per-point FULL band width for a
-/// tapered wide polyline, so the wire shader can interpolate each segment's two
-/// endpoint widths. Each `verts` entry is `(location_xy, bulge_to_next,
-/// start_width, end_width)` — the effective full widths at that vertex's segment
-/// start and end (already resolved against the polyline's constant width). Arcs
-/// are sampled in 16 steps with the width interpolated linearly along the arc.
-/// A shared vertex is emitted once (carrying the previous segment's end width),
-/// which is exact for the usual continuous taper.
+/// Build a continuous WCS point list and full width for a tapered polyline.
 pub(crate) fn tapered_band_points(
     verts: &[([f64; 2], f64, f64, f64)],
     is_closed: bool,
@@ -488,9 +699,10 @@ pub(crate) fn tapered_band_points(
         if bulge.abs() < 1e-9 {
             push(p1[0], p1[1], ew0 as f32);
         } else if let Some(arc) = BulgeArc::from_bulge(p0, p1, bulge) {
-            for j in 1..=16usize {
-                let t = j as f64 / 16.0;
-                let s = arc.sample(t);
+            let samples = arc.tessellate_angle(cadkernel::tessellation::DEFAULT_ANGLE);
+            let segments = samples.len().saturating_sub(1).max(1);
+            for (index, s) in samples.into_iter().enumerate().skip(1) {
+                let t = index as f64 / segments as f64;
                 push(s[0], s[1], (sw0 + (ew0 - sw0) * t) as f32);
             }
         }
@@ -579,4 +791,3 @@ pub(crate) fn polyline_segment_fill(
         Some(boundary)
     }
 }
-

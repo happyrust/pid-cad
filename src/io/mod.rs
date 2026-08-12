@@ -185,6 +185,40 @@ pub async fn pick_open_path() -> Option<(PathBuf, u64)> {
     Some((path, size))
 }
 
+/// Pick the drawing whose layers become translation targets. A standards file
+/// is a drawing too, so `.dws` and `.dwt` sit alongside the ordinary formats
+/// rather than needing anything of their own. (#624)
+pub async fn pick_layer_standard_path() -> Option<PathBuf> {
+    let handle = crate::sys::file_dialog()
+        .set_title("Load layer standard")
+        .add_filter(
+            "Drawings and standards",
+            &["dwg", "dws", "dwt", "dxf", "DWG", "DWS", "DWT", "DXF"],
+        )
+        .add_filter("All Files", &["*"])
+        .pick_file()
+        .await?;
+    Some(crate::sys::handle_path(&handle))
+}
+
+/// Pick where a set of layer mappings is written, or read back from.
+pub async fn pick_layer_mapping_path(save: bool) -> Option<PathBuf> {
+    let dialog = crate::sys::file_dialog()
+        .set_title(if save {
+            "Save layer mappings"
+        } else {
+            "Load layer mappings"
+        })
+        .add_filter("Layer mappings", &["ocslmap"])
+        .add_filter("All Files", &["*"]);
+    let handle = if save {
+        dialog.set_file_name("layers.ocslmap").save_file().await?
+    } else {
+        dialog.pick_file().await?
+    };
+    Some(crate::sys::handle_path(&handle))
+}
+
 /// Load a CAD file from a known path. Parsing and cache building run on a
 /// dedicated OS thread so the async executor stays free for rendering during
 /// the load. Writes phase markers into `phase` so the UI can show
@@ -644,6 +678,7 @@ async fn load_web_bytes(
         merge_read_diagnostics(&mut outcome.stats, initial_stats);
     }
     let mut doc = outcome.document;
+    normalize_block_origins(&mut doc);
     if name.to_ascii_lowercase().ends_with(".dxf") {
         fix_dxf_dimension_rotations(&mut doc);
         fix_dxf_layout_plot_settings(&mut doc);
@@ -726,6 +761,19 @@ fn sniff_dwg_or_dxf(path: &Path) -> String {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_file(path: &Path) -> Result<CadDocument, String> {
     load_file_with_progress(path, None).map(|outcome| outcome.document)
+}
+
+/// Opening a drawing by path is a desktop affair. In the browser a file
+/// arrives through the page rather than from a filesystem the app can reach,
+/// so there is nothing behind a path to open.
+///
+/// The function still exists there so the features that read a *second*
+/// drawing — importing one as a block, taking layer standards from one — go on
+/// compiling and say why they cannot run, instead of each having to know that
+/// the web has no files.
+#[cfg(target_arch = "wasm32")]
+pub fn load_file(_path: &Path) -> Result<CadDocument, String> {
+    Err(crate::t!("Opening a drawing by path is not available in the browser.").into_owned())
 }
 
 pub(crate) fn load_file_with_progress(
@@ -1899,7 +1947,7 @@ pub(crate) fn is_entity_corrupt(e: &EntityType) -> bool {
             !finite_vec3(&c.center)
                 || !finite_coord(c.radius)
                 // Reject zero- or near-zero circles: they tessellate into a
-                // degenerate truck curve that crashes parameter_division.
+                // degenerate curve the tessellator cannot sample.
                 || c.radius.abs() < 1.0e-10
                 || c.radius.abs() > 1.0e10
         }
@@ -1912,12 +1960,12 @@ pub(crate) fn is_entity_corrupt(e: &EntityType) -> bool {
                 || a.radius.abs() < 1.0e-10
                 || a.radius.abs() > 1.0e10
                 // Zero-sweep arc (start_angle == end_angle, modulo 2π) collapses
-                // to a single point in WCS — truck's circle_arc on three
+                // to a single point in WCS — a three-point circle fit on
                 // coincident vertices recurses unboundedly in parameter_division.
                 || (a.end_angle - a.start_angle).abs() < 1.0e-9
                 // Near-zero sweep is the same trap with a wider mouth: a tiny but
                 // non-zero sweep (e.g. 1.6e-6 rad) still places start/mid/end
-                // within truck's coincidence tolerance, so parameter_division
+                // within the coincidence tolerance, so sampling
                 // recurses and allocates until OOM. Gate on arc *length*
                 // (radius × sweep), not sweep alone, so a legitimately large-
                 // radius small-sweep arc (still a visible curve) survives while
@@ -1927,7 +1975,7 @@ pub(crate) fn is_entity_corrupt(e: &EntityType) -> bool {
                 // the floor above, a small sweep over a modest radius leaves
                 // start/mid/end almost on one line (a 35-unit, 6.5e-7-rad arc has
                 // arc length 2.3e-5 — past the gate — yet bows off its chord by
-                // only ~2e-12). truck's 3-point `circle_arc` fit then returns a
+                // only ~2e-12). A three-point circle fit then returns a
                 // near-infinite radius and `parameter_division` subdivides without
                 // bound. Gate on the sagitta (chord height = r·(1−cos(sweep/2))),
                 // the true measure of how far the arc departs a straight line and
@@ -1954,13 +2002,13 @@ pub(crate) fn is_entity_corrupt(e: &EntityType) -> bool {
         }
         E::Spline(s) => {
             // Parser desync emits exactly-100_000-control-point splines with a
-            // garbage knot vector. Building a truck NURBS/B-spline from one and
+            // garbage knot vector. Building a NURBS from one and
             // tessellating it runs `parameter_division` into an unbounded
             // allocation — single-threaded, 32 GB+ — long before the drawing
             // finishes loading. Reject the desync signature plus any spline
-            // truck can't build: non-finite control points, or a knot vector
+            // the kernel can't build: non-finite control points, or a knot vector
             // that's non-finite, non-monotonic, or the wrong length
-            // (truck requires `knots.len() == ctrl.len() + degree + 1`).
+            // (the kernel requires `knots.len() == ctrl.len() + degree + 1`).
             let n = s.control_points.len();
             let degree_bad = s.degree < 1;
             let deg = s.degree.max(0) as usize;
@@ -1969,7 +2017,7 @@ pub(crate) fn is_entity_corrupt(e: &EntityType) -> bool {
                     || s.knots.windows(2).any(|w| w[1] < w[0])
                     || s.knots.len() != n + deg + 1);
             // Degenerate: every control point collapses onto (nearly) the same
-            // point, so the curve has zero length. truck's `circle_arc` /
+            // point, so the curve has zero length. A three-point fit
             // `parameter_division` never converges on it and the tessellation
             // hangs — a periodic 9-point spline pinned at the origin is the seen
             // case. Reject when the control-point extent is sub-precision.
@@ -2206,7 +2254,7 @@ mod corrupt_guard_tests {
     // A near-zero-sweep arc: sweep 1.56e-6 rad on a 3.9e-3 radius. The angles
     // are individually finite and the radius is in range, so the old
     // (end-start) < 1e-9 check passed it through — but start/mid/end land
-    // within truck's coincidence tolerance and parameter_division allocates
+    // within the coincidence tolerance and sampling allocates
     // until OOM. The arc-length floor must reject it.
     #[test]
     fn rejects_near_degenerate_arc() {
@@ -2221,7 +2269,7 @@ mod corrupt_guard_tests {
 
     // A 35-unit-radius arc sweeping 6.5e-7 rad has arc length 2.3e-5 — past the
     // arc-length floor — yet its start/mid/end bow off the chord by only ~2e-12,
-    // so truck's 3-point circle fit blows up and parameter_division hangs. The
+    // so a three-point circle fit blows up and sampling hangs. The
     // sagitta floor must reject it where the arc-length floor alone does not.
     #[test]
     fn rejects_near_collinear_arc() {
@@ -2249,7 +2297,7 @@ mod corrupt_guard_tests {
         assert!(!is_entity_corrupt(&EntityType::Arc(a)));
     }
 
-    // Parser desync emits 100_000-control-point splines; building a truck
+    // Parser desync emits 100_000-control-point splines; building a kernel
     // NURBS from one and tessellating it OOMs. The control-point cap rejects it.
     #[test]
     fn rejects_desync_spline() {
@@ -2259,7 +2307,7 @@ mod corrupt_guard_tests {
     }
 
     // A periodic spline whose control points all collapse onto (nearly) one
-    // point has zero length; truck's parameter_division never converges and the
+    // point has zero length; sampling never converges and the
     // tessellation hangs. The control-point extent floor must reject it.
     #[test]
     fn rejects_degenerate_point_spline() {

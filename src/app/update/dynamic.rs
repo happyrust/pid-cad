@@ -4,7 +4,7 @@
 use super::util::*;
 use super::{format_size, VIEWCUBE_HIT_SIZE};
 use crate::app::helpers::{
-    ortho_constrain, parse_coord, polar_constrain_near, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis,
+    parse_coord, polar_constrain_near, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis,
     CoordKind,
 };
 use crate::app::{Message, OpenCADStudio, POLY_START_DELAY_MS};
@@ -22,6 +22,30 @@ use iced::{mouse, Point, Task};
 
 
 impl OpenCADStudio {
+    pub(in crate::app) fn active_distance_ray(
+        &self,
+        i: usize,
+    ) -> Option<(glam::DVec3, glam::DVec3)> {
+        // OTRACK already exposes its acquired world-space ray.
+        if let Some((base, dir)) = self.otrack_active {
+            return Some((base, dir));
+        }
+
+        // Extension measures along the ray its guide is drawn on. The snap
+        // carries the acquired endpoint that guide starts from, so read the ray
+        // off that rather than searching the tracking set again — a second
+        // search can disagree with the guide the user is looking at, and the
+        // acquisition it needs may already have aged out of the set.
+        let snap = self.tabs[i].snap_result?;
+        if snap.snap_type != crate::snap::SnapType::Extension {
+            return None;
+        }
+        let origin = snap.extension_origin?;
+        // The snap sits beyond its endpoint by construction, so the outward
+        // direction is simply the way from one to the other.
+        let dir = snap.world - origin;
+        Some((origin, dir.try_normalize()?))
+    }
     /// Rebuild the active tab's dynamic-input field set to match what the
     /// command is currently asking for. Called on cursor move and after
     /// command-state changes. The field set only changes shape when the
@@ -30,9 +54,55 @@ impl OpenCADStudio {
     pub(in crate::app) fn sync_dyn_fields(&mut self) {
         use crate::app::document::{DynComponent, DynFieldEntry};
         let i = self.active_tab;
-        if !self.dyn_input || self.tabs[i].active_cmd.is_none() {
+
+        if !self.dyn_input {
             self.tabs[i].dyn_fields.clear();
             self.tabs[i].dyn_active = 0;
+            self.tabs[i].dyn_anchor = None;
+            self.tabs[i].dyn_ref = None;
+            return;
+        }
+
+        // A normal 2D grip stretch behaves like a point-placement step:
+        // distance and angle are measured from the grip's original position.
+        //
+        // Grip editing is not an `active_cmd`, so handle it before the normal
+        // command-only path below.
+        let grip_origin = self.tabs[i]
+            .active_grip
+            .as_ref()
+            .filter(|grip| {
+                grip.mode == crate::scene::pick::grip::GripEditMode::Stretch
+            })
+            .map(|grip| grip.origin_world);
+
+        if let Some(origin) = grip_origin {
+            let wanted = [DynComponent::Distance, DynComponent::Angle];
+            let current: Vec<DynComponent> = self.tabs[i]
+                .dyn_fields
+                .iter()
+                .map(|field| field.component)
+                .collect();
+
+            if current.as_slice() != wanted {
+                self.tabs[i].dyn_fields = wanted
+                    .into_iter()
+                    .map(DynFieldEntry::new)
+                    .collect();
+                self.tabs[i].dyn_active = 0;
+            }
+
+            self.tabs[i].dyn_guide = crate::command::DynGuide::Polar;
+            self.tabs[i].dyn_anchor = Some(origin);
+            self.tabs[i].dyn_ref = None;
+            return;
+        }
+
+        if self.tabs[i].active_cmd.is_none() {
+            self.tabs[i].dyn_fields.clear();
+            self.tabs[i].dyn_active = 0;
+            self.tabs[i].dyn_anchor = None;
+            self.tabs[i].dyn_ref = None;
             return;
         }
         // A command may describe its step explicitly via `dyn_spec()` — that
@@ -79,11 +149,11 @@ impl OpenCADStudio {
         let has_base = self.last_point.is_some();
         // While aligned to an OTRACK ray, the point step reads a single
         // distance along the ray (issue #69) — show one Distance box.
-        let otrack_dist = self.otrack_active.is_some()
+        let guided_dist = self.active_distance_ray(i).is_some()
             && !wants_text
             && matches!(field, crate::command::DynField::Point);
         let default: Vec<DynComponent> = match field {
-            _ if otrack_dist => vec![DynComponent::Distance],
+            _ if guided_dist => vec![DynComponent::Distance],
             crate::command::DynField::Distance => vec![DynComponent::Distance],
             crate::command::DynField::Angle => vec![DynComponent::Angle],
             crate::command::DynField::Scalar => vec![DynComponent::Scalar],
@@ -528,9 +598,9 @@ impl OpenCADStudio {
         {
             return None;
         }
-        // OTRACK: while aligned to a tracking ray, a typed value is a distance
-        // along the ray from the tracking point (issue #69).
-        if let Some((base, dir)) = self.otrack_active {
+        // OTRACK and Extension both allow a typed scalar to act as a
+        // distance measured along the active reference ray.
+        if let Some((base, dir)) = self.active_distance_ray(i) {
             let wants_text = self.tabs[i]
                 .active_cmd
                 .as_ref()

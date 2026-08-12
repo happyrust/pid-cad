@@ -10,22 +10,19 @@
 //     3. Pick a point on the side to offset toward, or choose Multiple
 //        to keep offsetting the newly created result at the same distance
 
-use std::f64::consts::TAU;
-
-use crate::modules::draw::modify::spline_ops::{spline_pts_wire, spline_sample_xy};
+use crate::entities::curve::entity_curve;
+use crate::modules::draw::modify::spline_ops::spline_sample_xy;
 use acadrust::entities::LwVertex;
 use acadrust::entities::{
     Arc as ArcEnt, Circle as CircleEnt, Ellipse as EllipseEnt, Line as LineEnt, LwPolyline,
     Spline as SplineEnt, XLine as XLineEnt,
 };
 use acadrust::{EntityType, Handle};
-use cavalier_contours::core::math::Vector2 as CavVector2;
-use cavalier_contours::polyline::internal::pline_offset::{
-    create_raw_offset_polyline, slices_from_dual_raw_offsets, stitch_slices_together,
-};
-use cavalier_contours::polyline::{
-    seg_tangent_vector, PlineOffsetOptions, PlineSource, PlineSourceMut,
-    Polyline as CavPolyline,
+// Polyline offsetting, and the angle normalisation that goes with it, come
+// from the kernel; only the entity conversion stays here.
+use cadkernel::geom2d::nurbs::clamped_uniform_knots;
+use cadkernel::geom2d::{
+    offset_polyline, Polyline as KernelPolyline, PolylineVertex as KernelVertex,
 };
 use glam::{DVec3, Vec3};
 use crate::t;
@@ -46,26 +43,6 @@ pub fn tool() -> ToolDef {
         icon: IconKind::Svg(include_bytes!("../../../../assets/icons/offset.svg")),
         event: ModuleEvent::Command("OFFSET".to_string()),
     }
-}
-
-// ── Geometry helpers ────────────────────────────────────────────────────────
-
-/// Infinite-line intersection in 2D.  Returns the point or None if parallel.
-fn isect_lines(p0: [f64; 2], p1: [f64; 2], q0: [f64; 2], q1: [f64; 2]) -> Option<[f64; 2]> {
-    let dx = p1[0] - p0[0];
-    let dy = p1[1] - p0[1];
-    let ex = q1[0] - q0[0];
-    let ey = q1[1] - q0[1];
-    let det = dx * ey - dy * ex;
-    if det.abs() < 1e-10 {
-        return None;
-    }
-    let t = ((q0[0] - p0[0]) * ey - (q0[1] - p0[1]) * ex) / det;
-    Some([p0[0] + t * dx, p0[1] + t * dy])
-}
-
-fn norm_rad(a: f64) -> f64 {
-    ((a % TAU) + TAU) % TAU
 }
 
 // ── Line offset ────────────────────────────────────────────────────────────
@@ -178,248 +155,35 @@ fn offset_arc(a: &ArcEnt, dist: f64, side_pt: Vec3) -> Option<EntityType> {
 // remaining slices.  This can legitimately return several disconnected
 // polylines.
 
-const OFFSET_POS_EPS: f64 = 1e-5;
-const OFFSET_JOIN_EPS: f64 = 1e-4;
-
 /// Convert an acad LWPOLYLINE to the line/arc representation used by the
 /// topology pass. Coordinates are translated and divided by `dist`, so the
 /// offset passed to the algorithm is always ±1. This avoids fixed-epsilon
 /// failures on tiny drawings and on UTM-scale coordinates.
-fn normalized_offset_source(
-    p: &LwPolyline,
-    dist: f64,
-) -> Option<(CavPolyline<f64>, [f64; 2])> {
-    let first = p.vertices.first()?;
-    let origin = [first.location.x, first.location.y];
-    let normalize = |point: [f64; 2]| {
-        [
-            (point[0] - origin[0]) / dist,
-            (point[1] - origin[1]) / dist,
-        ]
-    };
-
-    let n = p.vertices.len();
-    if n < 2 {
-        return None;
-    }
-    let segment_count = if p.is_closed { n } else { n - 1 };
-    let mut source = if p.is_closed {
-        CavPolyline::new_closed()
-    } else {
-        CavPolyline::new()
-    };
-
-    for index in 0..segment_count {
-        let start = &p.vertices[index];
-        let end = &p.vertices[(index + 1) % n];
-        let p0 = [start.location.x, start.location.y];
-        let p1 = [end.location.x, end.location.y];
-        let bulge = if start.bulge.is_finite() {
-            start.bulge
-        } else {
-            0.0
-        };
-        let q0 = normalize(p0);
-
-        // CavalierContours represents arcs up to a half turn per segment.
-        // Split major bulge arcs at their exact midpoint; both halves retain
-        // the original circle and traversal direction.
-        if bulge.abs() > 1.0 {
-            if let Some(arc) =
-                crate::entities::common::BulgeArc::from_bulge(p0, p1, bulge)
-            {
-                let half_bulge = (arc.sweep / 8.0).tan();
-                let midpoint = normalize(arc.sample(0.5));
-                source.add(q0[0], q0[1], half_bulge);
-                source.add(midpoint[0], midpoint[1], half_bulge);
-                continue;
-            }
-        }
-
-        source.add(q0[0], q0[1], bulge);
-    }
-
-    if !p.is_closed {
-        let last = &p.vertices[n - 1];
-        let point = normalize([last.location.x, last.location.y]);
-        source.add(point[0], point[1], 0.0);
-    }
-
-    let source = source
-        .remove_repeat_pos(OFFSET_POS_EPS)
-        .unwrap_or(source);
-    (source.vertex_count() >= 2).then_some((source, origin))
-}
-
-/// CavalierContours deliberately connects diverging line offsets with a round
-/// arc. OFFSETGAPTYPE=0 (and OpenCADStudio's previous behavior) instead extends
-/// the two lines to a sharp projected intersection. Replace only those
-/// generated line-line connection arcs before the self-intersection pass.
-fn sharpen_line_connections(raw: &mut CavPolyline<f64>, source: &CavPolyline<f64>) {
-    loop {
-        let count = raw.vertex_data.len();
-        if count < 4 {
-            return;
-        }
-
-        let mut changed = false;
-        for index in 0..count {
-            if !raw.is_closed && index == 0 {
-                continue;
-            }
-            let next = if index + 1 < count {
-                index + 1
-            } else if raw.is_closed {
-                0
-            } else {
-                continue;
-            };
-            let after = if next + 1 < count {
-                next + 1
-            } else if raw.is_closed {
-                0
-            } else {
-                continue;
-            };
-            let previous = if index > 0 {
-                index - 1
-            } else if raw.is_closed {
-                count - 1
-            } else {
-                continue;
-            };
-
-            let arc_start = raw.vertex_data[index];
-            let arc_end = raw.vertex_data[next];
-            if arc_start.bulge.abs() < OFFSET_POS_EPS
-                || raw.vertex_data[previous].bulge.abs() >= OFFSET_POS_EPS
-                || arc_end.bulge.abs() >= OFFSET_POS_EPS
-            {
-                continue;
-            }
-
-            let Some(connection) = crate::entities::common::BulgeArc::from_bulge(
-                [arc_start.x, arc_start.y],
-                [arc_end.x, arc_end.y],
-                arc_start.bulge,
-            ) else {
-                continue;
-            };
-            if (connection.radius - 1.0).abs() > OFFSET_JOIN_EPS {
-                continue;
-            }
-            let generated_at_source_vertex = source.iter_vertexes().any(|vertex| {
-                let dx = vertex.x - connection.center[0];
-                let dy = vertex.y - connection.center[1];
-                dx * dx + dy * dy <= OFFSET_JOIN_EPS * OFFSET_JOIN_EPS
-            });
-            if !generated_at_source_vertex {
-                continue;
-            }
-
-            let before = raw.vertex_data[previous];
-            let after_vertex = raw.vertex_data[after];
-            let Some(point) = isect_lines(
-                [before.x, before.y],
-                [arc_start.x, arc_start.y],
-                [arc_end.x, arc_end.y],
-                [after_vertex.x, after_vertex.y],
-            ) else {
-                continue;
-            };
-
-            raw.vertex_data[index].x = point[0];
-            raw.vertex_data[index].y = point[1];
-            raw.vertex_data[index].bulge = 0.0;
-            raw.vertex_data.remove(next);
-            changed = true;
-            break;
-        }
-
-        if !changed {
-            return;
-        }
-    }
-}
-
-fn cleaned_parallel_offset(
-    source: &CavPolyline<f64>,
-    signed_offset: f64,
-) -> Vec<CavPolyline<f64>> {
-    let options = PlineOffsetOptions {
-        handle_self_intersects: true,
-        pos_equal_eps: OFFSET_POS_EPS,
-        slice_join_eps: OFFSET_JOIN_EPS,
-        offset_dist_eps: OFFSET_JOIN_EPS,
-        ..Default::default()
-    };
-    let source_index = source.create_approx_aabb_index();
-    let mut raw: CavPolyline<f64> =
-        create_raw_offset_polyline(source, signed_offset, OFFSET_POS_EPS);
-    if raw.is_empty() {
-        return Vec::new();
-    }
-    let mut dual: CavPolyline<f64> =
-        create_raw_offset_polyline(source, -signed_offset, OFFSET_POS_EPS);
-    sharpen_line_connections(&mut raw, source);
-    sharpen_line_connections(&mut dual, source);
-
-    let slices = slices_from_dual_raw_offsets(
-        source,
-        &raw,
-        &dual,
-        &source_index,
-        signed_offset,
-        &options,
-    );
-    stitch_slices_together::<_, f64, CavPolyline<f64>>(
-        &raw,
-        &slices,
-        source.is_closed(),
-        raw.vertex_count(),
-        &options,
-    )
-}
-
 fn offset_lwpolylines(p: &LwPolyline, dist: f64, side_pt: Vec3) -> Vec<EntityType> {
-    let dist = dist.abs();
-    if dist < 1e-12 {
-        return Vec::new();
-    }
-    let Some((source, origin)) = normalized_offset_source(p, dist) else {
-        return Vec::new();
+    let source = KernelPolyline {
+        closed: p.is_closed,
+        vertices: p
+            .vertices
+            .iter()
+            .map(|v| KernelVertex {
+                position: [v.location.x, v.location.y],
+                bulge: if v.bulge.is_finite() { v.bulge } else { 0.0 },
+            })
+            .collect(),
     };
-    let side = CavVector2::new(
-        (side_pt.x as f64 - origin[0]) / dist,
-        (side_pt.y as f64 - origin[1]) / dist,
-    );
-    let Some(closest) = source.closest_point(side, OFFSET_POS_EPS) else {
-        return Vec::new();
-    };
-    let start_index = closest.seg_start_index;
-    let tangent = seg_tangent_vector(
-        source.at(start_index),
-        source.at(source.next_wrapping_index(start_index)),
-        closest.seg_point,
-    );
-    let toward_pick = side - closest.seg_point;
-    let cross = tangent.x * toward_pick.y - tangent.y * toward_pick.x;
-    let signed_offset = if cross >= 0.0 { 1.0 } else { -1.0 };
 
-    cleaned_parallel_offset(&source, signed_offset)
+    offset_polyline(&source, dist, [side_pt.x as f64, side_pt.y as f64])
         .into_iter()
-        .filter(|result| result.vertex_count() >= 2)
         .map(|result| {
             let mut new_polyline = p.clone();
             new_polyline.common.handle = Handle::NULL;
-            new_polyline.is_closed = result.is_closed();
+            new_polyline.is_closed = result.closed;
             new_polyline.vertices = result
-                .iter_vertexes()
+                .vertices
+                .iter()
                 .map(|vertex| {
-                    let mut output = LwVertex::from_coords(
-                        origin[0] + vertex.x * dist,
-                        origin[1] + vertex.y * dist,
-                    );
+                    let mut output =
+                        LwVertex::from_coords(vertex.position[0], vertex.position[1]);
                     output.bulge = vertex.bulge;
                     output
                 })
@@ -532,11 +296,10 @@ fn offset_spline(spl: &SplineEnt, dist: f64, side_pt: Vec3) -> Option<EntityType
     let degree = spl.degree.max(1) as usize;
     let new_ctrl: Vec<acadrust::types::Vector3> = offset_pts;
     let n_ctrl = new_ctrl.len();
-    let kv = truck_modeling::KnotVec::uniform_knot(degree, n_ctrl - 1);
     let mut new_spl = spl.clone();
     new_spl.common.handle = Handle::NULL;
     new_spl.control_points = new_ctrl;
-    new_spl.knots = kv.iter().copied().collect();
+    new_spl.knots = clamped_uniform_knots(degree, n_ctrl);
     new_spl.fit_points.clear();
     new_spl.weights.clear();
     Some(EntityType::Spline(new_spl))
@@ -597,177 +360,54 @@ fn perp_distance(entity: &EntityType, pt: Vec3) -> f64 {
 
 // ── Wire preview points ─────────────────────────────────────────────────────
 
+/// Preview density, matching the figure the drawn wires use.
+const PREVIEW_SEGMENTS_PER_RADIAN: f64 = cadkernel::geom2d::DEFAULT_SEGMENTS_PER_RADIAN;
+
+/// Preview points for an entity, from its own curve.
+///
+/// One tessellation rather than a case per type. What that case-per-type
+/// version had accumulated: an arc and a circle read their `center.x/.y` as
+/// world coordinates when the entity stores them in its OCS, so an extruded
+/// one previewed on the wrong side of the drawing; every curved kind was cut
+/// at a fixed twenty segments per radian whatever its size; and an ellipse
+/// rebuilt its own axis frame from the major axis' X and Y alone, dropping
+/// the Z the entity actually stores.
+///
+/// The narrowing to `f32` stays here rather than in the kernel: a preview
+/// wire leaves `points_low` empty and accepts the loss, while the resident
+/// render path splits the `f64` into a high/low pair instead. Only a caller
+/// knows which of the two it is.
 fn entity_wire_pts(e: &EntityType) -> Vec<[f32; 3]> {
-    match e {
-        EntityType::Line(l) => vec![
-            [l.start.x as f32, l.start.y as f32, l.start.z as f32],
-            [l.end.x as f32, l.end.y as f32, l.end.z as f32],
-        ],
-        EntityType::Circle(c) => {
-            let steps = 64usize;
-            (0..=steps)
-                .map(|i| {
-                    let a = TAU * i as f64 / steps as f64;
-                    [
-                        (c.center.x + c.radius * a.cos()) as f32,
-                        (c.center.y + c.radius * a.sin()) as f32,
-                        c.center.z as f32,
-                    ]
-                })
-                .collect()
-        }
-        EntityType::Arc(a) => {
-            let a0 = norm_rad(a.start_angle);
-            let a1 = norm_rad(a.end_angle);
-            let span = {
-                let s = a1 - a0;
-                if s <= 0.0 {
-                    s + TAU
-                } else {
-                    s
-                }
-            };
-            let steps = ((span.abs() * 20.0).ceil() as usize).max(4);
-            (0..=steps)
-                .map(|i| {
-                    let ang = a0 + span * (i as f64 / steps as f64);
-                    [
-                        (a.center.x + a.radius * ang.cos()) as f32,
-                        (a.center.y + a.radius * ang.sin()) as f32,
-                        a.center.z as f32,
-                    ]
-                })
-                .collect()
-        }
-        EntityType::LwPolyline(p) => lwpolyline_pts(p),
-        EntityType::Ellipse(e) => {
-            let a = (e.major_axis.x.powi(2) + e.major_axis.y.powi(2)).sqrt();
-            if a < 1e-9 {
-                return vec![];
-            }
-            let b = a * e.minor_axis_ratio;
-            let nx = e.major_axis.x / a;
-            let ny = e.major_axis.y / a;
-            let t0 = e.start_parameter;
-            let mut t1 = e.end_parameter;
-            if t1 <= t0 {
-                t1 += TAU;
-            }
-            let span = t1 - t0;
-            let steps = ((span.abs() * 20.0).ceil() as usize).max(4);
-            (0..=steps)
-                .map(|i| {
-                    let t = t0 + span * (i as f64 / steps as f64);
-                    let lx = a * t.cos();
-                    let ly = b * t.sin();
-                    [
-                        (e.center.x + lx * nx - ly * ny) as f32,
-                        (e.center.y + lx * ny + ly * nx) as f32,
-                        e.center.z as f32,
-                    ]
-                })
-                .collect()
-        }
-        EntityType::Spline(s) => spline_pts_wire(s),
-        EntityType::XLine(x) => {
-            // Infinite in both directions — represent it as a very long segment
-            // for hit-testing and the offset preview. Long enough to read as
-            // infinite at any working zoom; the committed XLine renders true.
-            const HL: f64 = 1.0e6;
-            let (bx, by, bz) = (x.base_point.x, x.base_point.y, x.base_point.z);
-            let (dx, dy, dz) = (x.direction.x, x.direction.y, x.direction.z);
-            vec![
-                [(bx - dx * HL) as f32, (by - dy * HL) as f32, (bz - dz * HL) as f32],
-                [(bx + dx * HL) as f32, (by + dy * HL) as f32, (bz + dz * HL) as f32],
+    // The two kinds with no finite point list of their own, so how far to run
+    // them is a decision rather than a measurement. Long enough to read as
+    // infinite at any working zoom; the committed entity renders true. A ray
+    // runs one way only.
+    const HL: f64 = 1.0e6;
+    let unbounded = match e {
+        EntityType::XLine(x) => Some((x.base_point, x.direction, -HL)),
+        EntityType::Ray(r) => Some((r.base_point, r.direction, 0.0)),
+        _ => None,
+    };
+    if let Some((base, direction, back)) = unbounded {
+        let at = |k: f64| {
+            [
+                (base.x + direction.x * k) as f32,
+                (base.y + direction.y * k) as f32,
+                (base.z + direction.z * k) as f32,
             ]
-        }
-        _ => vec![],
+        };
+        return vec![at(back), at(HL)];
     }
-}
-
-/// Tessellate a LwPolyline into wire points (straight segments + arc bulges).
-fn lwpolyline_pts(p: &LwPolyline) -> Vec<[f32; 3]> {
-    let n = p.vertices.len();
-    if n < 2 {
+    let Some(curve) = entity_curve(e) else {
         return vec![];
-    }
-    let z = p.elevation as f32;
-    let n_segs = if p.is_closed { n } else { n - 1 };
-    let mut pts: Vec<[f32; 3]> = Vec::new();
-
-    for i in 0..n_segs {
-        let v0 = &p.vertices[i];
-        let v1 = &p.vertices[(i + 1) % n];
-        let x0 = v0.location.x;
-        let y0 = v0.location.y;
-        let x1 = v1.location.x;
-        let y1 = v1.location.y;
-
-        if pts.is_empty() {
-            pts.push([x0 as f32, y0 as f32, z]);
-        }
-
-        if v0.bulge.abs() < 1e-10 {
-            pts.push([x1 as f32, y1 as f32, z]);
-        } else {
-            // Arc from bulge
-            let b = v0.bulge;
-            let chord_x = x1 - x0;
-            let chord_y = y1 - y0;
-            let chord_len = (chord_x * chord_x + chord_y * chord_y).sqrt();
-            if chord_len < 1e-12 {
-                pts.push([x1 as f32, y1 as f32, z]);
-                continue;
-            }
-
-            let b2 = b * b;
-            let r = chord_len * (1.0 + b2) / (4.0 * b.abs());
-            let d = r * (1.0 - b2) / (1.0 + b2);
-            let mx = (x0 + x1) * 0.5;
-            let my = (y0 + y1) * 0.5;
-            let perp_x = -chord_y / chord_len;
-            let perp_y = chord_x / chord_len;
-            let sign = b.signum();
-            let cx = mx + sign * d * perp_x;
-            let cy = my + sign * d * perp_y;
-
-            let a0 = norm_rad((y0 - cy).atan2(x0 - cx));
-            let a1 = norm_rad((y1 - cy).atan2(x1 - cx));
-            let span = if b > 0.0 {
-                let s = a1 - a0;
-                if s <= 0.0 {
-                    s + TAU
-                } else {
-                    s
-                }
-            } else {
-                let s = a0 - a1;
-                if s <= 0.0 {
-                    s + TAU
-                } else {
-                    s
-                }
-            };
-            let steps = ((span.abs() * 20.0).ceil() as usize).max(4);
-            for j in 1..=steps {
-                let t = j as f64 / steps as f64;
-                let ang = if b > 0.0 {
-                    a0 + span * t
-                } else {
-                    a0 - span * t
-                };
-                pts.push([(cx + r * ang.cos()) as f32, (cy + r * ang.sin()) as f32, z]);
-            }
-        }
-    }
-
-    if p.is_closed {
-        if let Some(&first) = pts.first() {
-            pts.push(first);
-        }
-    }
-    pts
+    };
+    curve
+        .tessellate(PREVIEW_SEGMENTS_PER_RADIAN)
+        .into_iter()
+        .map(|p| [p[0] as f32, p[1] as f32, p[2] as f32])
+        .collect::<Vec<[f32; 3]>>()
 }
+
 
 // ── Command implementation ─────────────────────────────────────────────────
 
@@ -1004,7 +644,7 @@ impl CadCommand for OffsetCommand {
                 if t.eq_ignore_ascii_case("t") || t.eq_ignore_ascii_case("through") {
                     return Some(self.advance_from_distance(None));
                 }
-                if let Ok(d) = t.parse::<f64>() {
+                if let Some(d) = crate::entities::common::parse_typed_length(&t) {
                     let d = d.abs().max(1e-9);
                     defaults::set_offset_dist(d);
                     return Some(self.advance_from_distance(Some(d)));
@@ -1021,7 +661,7 @@ impl CadCommand for OffsetCommand {
                     return Some(CmdResult::NeedPoint);
                 }
                 if !t.is_empty() {
-                    if let Ok(d) = t.parse::<f64>() {
+                    if let Some(d) = crate::entities::common::parse_typed_length(&t) {
                         let d = d.abs().max(1e-9);
                         defaults::set_offset_dist(d);
                         *locked = Some(d);

@@ -425,22 +425,45 @@ impl OpenCADStudio {
             // TCOUNT [start] — prefix selected single-line text with sequential
             // numbers in reading order (top-to-bottom, then left-to-right).
             "TCOUNT" => {
-                use crate::command::SelectThenValueCommand;
+                use crate::command::TCountCommand;
+
                 let has_sel = !self.tabs[i].scene.selected_entities().is_empty();
-                let c = SelectThenValueCommand::new(
-                    "TCOUNT",
-                    "TCOUNT  starting number (Enter for 1):",
-                    has_sel,
-                );
+                let c = TCountCommand::new(has_sel);
+
                 self.command_line.push_info(&c.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(c));
             }
             cmd if cmd.starts_with("TCOUNT ") => {
-                let start: i64 = cmd
-                    .split_whitespace()
-                    .nth(1)
+                let mut args = cmd.split_whitespace().skip(1);
+
+                let start: i64 = args
+                    .next()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(1);
+
+                let increment: i64 = args
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1);
+
+                let placement = args
+                    .next()
+                    .unwrap_or("O")
+                    .to_uppercase();
+
+                let placement = match placement.as_str() {
+                    "O" | "OVERWRITE" => "O",
+                    "P" | "PREFIX" => "P",
+                    "S" | "SUFFIX" => "S",
+                    _ => {
+                        self.command_line.push_error(
+                            crate::t!("TCOUNT: placement must be Overwrite, Prefix, or Suffix.")
+                                .as_ref(),
+                        );
+                        return Some(Task::none());
+                    }
+                };
+
                 let mut texts: Vec<(acadrust::Handle, f64, f64)> = self.tabs[i]
                     .scene
                     .selected_entities()
@@ -452,19 +475,28 @@ impl OpenCADStudio {
                         _ => None,
                     })
                     .collect();
+
                 if texts.is_empty() {
                     self.command_line
                         .push_error(crate::t!("TCOUNT: select single-line text first.").as_ref());
                     return Some(Task::none());
                 }
-                // Reading order: higher Y first, then smaller X.
+
+                // Keep the existing reading order:
+                // higher Y first, then smaller X.
                 texts.sort_by(|a, b| {
                     b.2.partial_cmp(&a.2)
                         .unwrap_or(std::cmp::Ordering::Equal)
-                        .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                        .then(
+                            a.1.partial_cmp(&b.1)
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                        )
                 });
+
                 self.push_undo_snapshot(i, "TCOUNT");
+
                 let mut num = start;
+
                 for (h, _, _) in &texts {
                     if let Some(acadrust::EntityType::Text(t)) = self.tabs[i]
                         .scene
@@ -472,20 +504,39 @@ impl OpenCADStudio {
                         .entities_mut()
                         .find(|e| e.common().handle == *h)
                     {
-                        t.value = format!("{num} {}", t.value);
-                        num += 1;
+                        t.value = match placement {
+                            "P" => format!("{num} {}", t.value),
+                            "S" => format!("{} {num}", t.value),
+                            _ => num.to_string(),
+                        };
+
+                        num += increment;
                     }
                 }
+
                 self.tabs[i].dirty = true;
+
                 let changes: Vec<_> = texts
                     .iter()
-                    .map(|(handle, _, _)| (*handle, crate::scene::ChangeKind::Modified))
+                    .map(|(handle, _, _)| {
+                        (*handle, crate::scene::ChangeKind::Modified)
+                    })
                     .collect();
+
                 self.tabs[i].scene.bump_entities(&changes);
-                self.command_line.push_output(crate::tf!(
-                    "TCOUNT: numbered {} text object(s) from {start}.",
-                    texts.len()
-                ).as_ref());
+
+                let placement_name = crate::t!(match placement {
+                    "P" => "Prefix",
+                    "S" => "Suffix",
+                    _ => "Overwrite",
+                });
+                let n = texts.len();
+                self.command_line.push_output(
+                    crate::tf!(
+                        "TCOUNT: numbered {n} text object(s) from {start} by {increment} ({placement_name})."
+                    )
+                    .as_ref(),
+                );
             }
 
             "MLEADER" => {
@@ -754,40 +805,94 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(cmd));
             }
 
-            "ZOOM EXTENTS ALL" | "ZOOM EXTENTS ALL VIEWPORTS" | "ZEA" => {
+            "ZOOM EXTENTS ALL" | "ZOOM EXTENTS ALL VIEWPORTS" | "ZOOM EA" | "ZEA" => {
+                self.tabs[i].scene.remember_current_view();
                 self.tabs[i].scene.fit_all_model_viewports();
                 self.command_line.push_output(crate::t!("Zoom Extents — All Viewports").as_ref());
             }
 
-            "ZOOM EXTENTS" | "ZOOMEXTENTS" | "ZE" => {
+            "ZOOM EXTENTS" | "ZOOM E" | "ZOOMEXTENTS" | "ZE" => {
+                self.tabs[i].scene.remember_current_view();
                 self.tabs[i].scene.fit_all();
                 self.command_line.push_output(crate::t!("Zoom Extents").as_ref());
             }
 
-            "ZOOM IN" | "ZI" => {
+            "ZOOM IN" | "ZOOM I" | "ZI" => {
+                self.tabs[i].scene.remember_current_view();
                 self.tabs[i].scene.zoom_camera(1.0 / 1.5);
                 self.command_line.push_output(crate::t!("Zoom In").as_ref());
             }
 
             "ZOOM OUT" | "ZO" => {
+                self.tabs[i].scene.remember_current_view();
                 self.tabs[i].scene.zoom_camera(1.5);
                 self.command_line.push_output(crate::t!("Zoom Out").as_ref());
             }
 
             // ZOOM ALL — fit the configured drawing limits.
             "ZOOM ALL" | "ZOOM A" | "ZA" => {
+                self.tabs[i].scene.remember_current_view();
                 self.tabs[i].scene.fit_all_with_limits();
                 self.command_line.push_output(crate::t!("Zoom All").as_ref());
             }
 
+            "ZOOM PREVIOUS" | "ZOOM P" | "ZP" => {
+                if self.tabs[i].scene.restore_previous_view() {
+                    self.command_line.push_output(crate::t!("Zoom Previous").as_ref());
+                } else {
+                    self.command_line
+                        .push_error(crate::t!("ZOOM: no previous view.").as_ref());
+                }
+            }
+
+            "ZOOM OBJECT" | "ZOOM O" | "ZOBJ" => {
+                let handles: Vec<_> = self.tabs[i]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(handle, _)| handle)
+                    .collect();
+                if handles.is_empty() {
+                    use crate::modules::draw::select::SelectObjectsCommand;
+                    let command = SelectObjectsCommand::new("ZOOM OBJECT");
+                    self.command_line.push_info(&command.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(command));
+                } else {
+                    self.tabs[i].scene.remember_current_view();
+                    if self.tabs[i].scene.zoom_to_entities(&handles) {
+                        self.command_line.push_output(crate::t!("Zoom Object").as_ref());
+                    } else {
+                        self.command_line.push_error(
+                            crate::t!("ZOOM: selected objects have no visible bounds.").as_ref(),
+                        );
+                    }
+                }
+            }
+
+            "ZOOM DYNAMIC" | "ZOOM D" | "ZD" => {
+                self.tabs[i].zoom_dynamic_mode = true;
+                self.clear_navigation_hover(i);
+                self.command_line.push_output(
+                    crate::t!(
+                        "ZOOM Dynamic: drag horizontally to pan and vertically to zoom. Press Esc to exit."
+                    )
+                    .as_ref(),
+                );
+            }
+
             // ZOOM SCALE — set zoom factor (e.g. "ZOOM SCALE 2" or "ZS 0.5")
-            cmd if cmd.starts_with("ZOOM SCALE ") || cmd.starts_with("ZS ") => {
+            cmd if cmd.starts_with("ZOOM SCALE ")
+                || cmd.starts_with("ZOOM S ")
+                || cmd.starts_with("ZS ") =>
+            {
                 let rest = cmd
-                    .split_once(' ')
-                    .and_then(|(_, r)| r.split_once(' ').map(|(_, v)| v).or(Some(r)))
+                    .strip_prefix("ZOOM SCALE ")
+                    .or_else(|| cmd.strip_prefix("ZOOM S "))
+                    .or_else(|| cmd.strip_prefix("ZS "))
                     .unwrap_or("1");
                 if let Ok(factor) = rest.trim().parse::<f32>() {
                     if factor > 0.0 {
+                        self.tabs[i].scene.remember_current_view();
                         self.tabs[i].scene.zoom_camera(1.0 / factor);
                         self.command_line
                             .push_output(crate::tf!("Zoom Scale ×{factor:.3}").as_ref());
@@ -815,15 +920,18 @@ impl OpenCADStudio {
                 use crate::command::KeywordCommand;
                 let c = KeywordCommand::new(
                     "ZOOM",
-                    "ZOOM  [Window / Extents / Extents All / All / In / Out / Scale]:",
+                    "ZOOM  [Window / Extents / Previous / Object / All / Dynamic / Extents All / In / Out / Scale]:",
                     vec![
-                        ("Window", "WINDOW", None),
-                        ("Extents", "EXTENTS", None),
-                        ("Extents All", "EXTENTS ALL", None),
-                        ("All", "ALL", None),
-                        ("In", "IN", None),
+                        ("Window", "W", None),
+                        ("Extents", "E", None),
+                        ("Previous", "P", None),
+                        ("Object", "O", None),
+                        ("All", "A", None),
+                        ("Dynamic", "D", None),
+                        ("Extents All", "EA", None),
+                        ("In", "I", None),
                         ("Out", "OUT", None),
-                        ("Scale", "SCALE", Some("ZOOM  scale factor (e.g. 2 or 0.5):")),
+                        ("Scale", "S", Some("ZOOM  scale factor (e.g. 2 or 0.5):")),
                     ],
                 );
                 self.command_line.push_info(&c.prompt());

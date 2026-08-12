@@ -2,15 +2,15 @@
 //
 // Flow:
 //   EntityType
-//     ↓  acad_to_truck::convert()
-//   TruckEntity  { object: TruckObject, snap_pts, tangent_geoms, key_vertices }
-//     ↓  truck_tess::tessellate_*()
-//   TruckTessResult::Lines → WireModel
-//   TruckTessResult::Point → WireModel (small cross)
-//   TruckTessResult::Mesh  → MeshModel
-//   TruckObject::Text      → one WireModel per glyph stroke (elevation from entity Z)
+//     ↓  acad_to_render::convert()
+//   RenderEntity  { object: RenderObject, snap_pts, tangent_geoms, key_vertices }
+//     ↓
+//   RenderObject::Lines → WireModel
+//   RenderObject::Dot   → WireModel (a dot sized in pixels)
+//   RenderObject::Text  → WireModel (glyph strokes) + SDF quads
+//   RenderObject::Text      → one WireModel per glyph stroke (elevation from entity Z)
 //
-// Entities not handled by acad_to_truck (Viewport, Insert, Hatch, Ole2Frame)
+// Entities not handled by acad_to_render (Viewport, Insert, Hatch, Ole2Frame)
 // are tessellated by the FallbackTess fallback_geometry() path.
 
 use crate::entities::leader::LeaderTess;
@@ -18,10 +18,7 @@ use acadrust::types::Color as AcadColor;
 use acadrust::{CadDocument, EntityType, Handle};
 use glam::Vec3;
 
-use crate::scene::convert::acad_to_truck::{convert, TruckObject};
-use crate::scene::convert::truck_tess::{
-    tessellate_edge, tessellate_vertex, tessellate_wire, TruckTessResult,
-};
+use crate::scene::convert::acad_to_render::{convert, RenderObject};
 use crate::scene::model::wire_model::{SnapHint, WireModel};
 
 /// Split an f64 offset-relative coordinate into the double-single (high, low)
@@ -190,7 +187,7 @@ pub fn tessellate(
     // MLINE emits one WireModel per style element so each parallel line keeps
     // its own colour and linetype — a red Continuous line under a yellow dashed
     // line reads as the two-tone multiline the style defines. Handled here, like
-    // Leader, because the single-colour truck `Lines` path can't carry
+    // Leader, because the single-colour the kernel `Lines` path can't carry
     // per-element colour.
     if let EntityType::MLine(m) = entity {
         let lines = crate::entities::mline::mline_lines(m, document);
@@ -377,6 +374,7 @@ pub fn tessellate(
                     depth_override: None,
                     fill_is_3d: false,
                     fill_is_2d_solid: false,
+                    render_instance: None,
                     pick_tris: Vec::new(),
                     pick_tris_low: Vec::new(),
                     // MLINE dashes: A-type aligned, but the end-dash length is
@@ -422,11 +420,11 @@ pub fn tessellate(
         return out;
     }
 
-    // ── Try the truck path first ───────────────────────────────────────────
+    // ── Try the kernel path first ───────────────────────────────────────────
     // Relative-PDSIZE points size their glyph from the current zoom so they
     // stay a roughly constant on-screen size; otherwise the header-driven path.
-    let te = crate::entities::point::relative_truck(entity, document, world_per_pixel)
-        .or_else(|| crate::entities::light::relative_truck(entity, document, world_per_pixel))
+    let te = crate::entities::point::relative_render(entity, document, world_per_pixel)
+        .or_else(|| crate::entities::light::relative_render(entity, document, world_per_pixel))
         .or_else(|| convert(entity, document));
     if let Some(te) = te {
         match te.object {
@@ -438,7 +436,7 @@ pub fn tessellate(
             // groups by override colour and emit one WireModel per bin so a
             // single MTEXT can hand back N colour-distinct wires when the
             // value mixes inline colours.
-            TruckObject::Text(stroke_groups) => {
+            RenderObject::Text(stroke_groups) => {
                 let entity_zf = entity_z(entity) as f64;
                 let elev_v = entity_zf;
 
@@ -676,6 +674,7 @@ pub fn tessellate(
                                         depth_override: None,
                                         fill_is_3d: false,
                                         fill_is_2d_solid: false,
+                                        render_instance: None,
                                         pick_tris: Vec::new(),
                                         pick_tris_low: Vec::new(),
                                         dash_from_start: false,
@@ -717,6 +716,7 @@ pub fn tessellate(
                                         depth_override: None,
                                         fill_is_3d: false,
                                         fill_is_2d_solid: false,
+                                        render_instance: None,
                                         pick_tris: Vec::new(),
                                         pick_tris_low: Vec::new(),
                                         dash_from_start: false,
@@ -765,6 +765,7 @@ pub fn tessellate(
                             depth_override: None,
                             fill_is_3d: false,
                             fill_is_2d_solid: false,
+                            render_instance: None,
                             pick_tris: Vec::new(),
                             pick_tris_low: Vec::new(),
                             dash_from_start: false,
@@ -794,6 +795,7 @@ pub fn tessellate(
                         depth_override: None,
                         fill_is_3d: false,
                         fill_is_2d_solid: false,
+                        render_instance: None,
                         pick_tris: Vec::new(),
                         pick_tris_low: Vec::new(),
                         dash_from_start: false,
@@ -853,6 +855,7 @@ pub fn tessellate(
                             depth_override: None,
                             fill_is_3d: false,
                             fill_is_2d_solid: false,
+                            render_instance: None,
                             pick_tris: Vec::new(),
                             pick_tris_low: Vec::new(),
             dash_from_start: false,
@@ -894,6 +897,7 @@ pub fn tessellate(
                             depth_override: None,
                             fill_is_3d: false,
                             fill_is_2d_solid: false,
+                            render_instance: None,
                             pick_tris: Vec::new(),
                             pick_tris_low: Vec::new(),
             dash_from_start: false,
@@ -932,6 +936,7 @@ pub fn tessellate(
                         depth_override: None,
                         fill_is_3d: false,
                         fill_is_2d_solid: false,
+                        render_instance: None,
                         pick_tris: Vec::new(),
                         pick_tris_low: Vec::new(),
                         dash_from_start: false,
@@ -963,6 +968,7 @@ pub fn tessellate(
                         depth_override: None,
                         fill_is_3d: false,
                         fill_is_2d_solid: false,
+                        render_instance: None,
                         pick_tris: Vec::new(),
                         pick_tris_low: Vec::new(),
             dash_from_start: false,
@@ -990,10 +996,22 @@ pub fn tessellate(
             }
 
             // ── Standard topology objects ─────────────────────────────────
-            TruckObject::Point(v) => {
-                let result = tessellate_vertex(&v);
-                match result {
-                    TruckTessResult::Point([x, y, z], [xl, yl, zl]) => {
+            RenderObject::Dot(position) => {
+                {
+                    {
+                        // Split into a coarse float and a fine correction, so
+                        // a point at survey coordinates keeps its last
+                        // millimetres instead of losing them to f32.
+                        let [x, y, z] = [
+                            position[0] as f32,
+                            position[1] as f32,
+                            position[2] as f32,
+                        ];
+                        let [xl, yl, zl] = [
+                            (position[0] - x as f64) as f32,
+                            (position[1] - y as f64) as f32,
+                            (position[2] - z as f64) as f32,
+                        ];
                         // A PDMODE=0 point is a single dot. Size its marker to
                         // ~1 px so it reads as a dot rather than a large
                         // world-space "+" in small drawings — otherwise the
@@ -1016,6 +1034,7 @@ pub fn tessellate(
                             depth_override: None,
                             fill_is_3d: false,
                             fill_is_2d_solid: false,
+                            render_instance: None,
                             pick_tris: Vec::new(),
                             pick_tris_low: Vec::new(),
             dash_from_start: false,
@@ -1048,97 +1067,12 @@ pub fn tessellate(
                             fill_tris_low: Vec::new(),
                         }];
                     }
-                    _ => {}
                 }
             }
 
-            TruckObject::Curve(e) => {
-                if let TruckTessResult::Lines(points, points_low) =
-                    tessellate_edge(&e)
-                {
-                    let snap_pts = te.snap_pts;
-                    let key_vertices: Vec<[f64; 3]> = te
-                        .key_vertices
-                        .into_iter()
-                        .map(|[x, y, z]| [x, y, z])
-                        .collect();
-                    return vec![WireModel {
-                        taper_widths: Vec::new(),
-                        world_width: 0.0,
-                        depth_override: None,
-                        fill_is_3d: false,
-                        fill_is_2d_solid: false,
-                        pick_tris: Vec::new(),
-                        pick_tris_low: Vec::new(),
-            dash_from_start: false,
-            dash_align_end: None,
-            text_verts: Vec::new(),
-                        name,
-                        points,
-                        points_low,
-                        color,
-                        selected,
-                        pattern_length,
-                        pattern,
-                        line_weight_px,
-                        snap_pts,
-                        tangent_geoms: te.tangent_geoms,
-                        aci: 0,
-                        key_vertices,
-                        aabb: WireModel::UNBOUNDED_AABB,
-                        plinegen: true,
-                        fill_tris: vec![],
-                        fill_tris_low: Vec::new(),
-                    }];
-                }
-            }
 
-            TruckObject::Contour(w) => {
-                if let TruckTessResult::Lines(points, points_low) =
-                    tessellate_wire(&w)
-                {
-                    let snap_pts = te.snap_pts;
-                    let key_vertices: Vec<[f64; 3]> = te
-                        .key_vertices
-                        .into_iter()
-                        .map(|[x, y, z]| [x, y, z])
-                        .collect();
-                    // A wide polyline arrives here: the shader expands this
-                    // centre-line to `world_width` so the band IS the wire (the
-                    // linetype dashes it); the band also backs pick.
-                    let (pick_tris, pick_tris_low) = points_to_ds(te.pick_tris);
-                    return vec![WireModel {
-                        taper_widths: Vec::new(),
-                        world_width: polyline_band_width(entity),
-                        depth_override: None,
-                        fill_is_3d: false,
-                        fill_is_2d_solid: false,
-                        pick_tris,
-                        pick_tris_low,
-            dash_from_start: false,
-            dash_align_end: None,
-            text_verts: Vec::new(),
-                        name,
-                        points,
-                        points_low,
-                        color,
-                        selected,
-                        pattern_length,
-                        pattern,
-                        line_weight_px,
-                        snap_pts,
-                        tangent_geoms: te.tangent_geoms,
-                        aci: 0,
-                        key_vertices,
-                        aabb: WireModel::UNBOUNDED_AABB,
-                        plinegen: true,
-                        fill_tris: vec![],
-                        fill_tris_low: Vec::new(),
-                    }];
-                }
-            }
 
-            TruckObject::Lines(points) => {
+            RenderObject::Lines(points) => {
                 // Points are world-space f64 from entity converters (polyline,
                 // leader, mesh, solid2d, etc.). Subtract world_offset in f64
                 // and split into double-single (high, low) f32 buffers — the
@@ -1189,10 +1123,16 @@ pub fn tessellate(
                 } else {
                     color
                 };
-                // Circles use the Lines path for large-coordinate precision, but they
-                // must still preserve the entity's resolved linetype pattern.
+                // Basic curve entities use the Lines path for large-coordinate precision,
+                // but they must still preserve the entity's resolved linetype pattern.
                 let (edge_pattern_length, edge_pattern) =
-                    if matches!(entity, EntityType::Circle(_)) {
+                    if matches!(
+                        entity,
+                        EntityType::Line(_)
+                            | EntityType::Circle(_)
+                            | EntityType::Arc(_)
+                            | EntityType::Ellipse(_)
+                    ) {
                         (pattern_length, pattern)
                     } else {
                         (0.0, [0.0; 8])
@@ -1210,10 +1150,11 @@ pub fn tessellate(
                     };
                     out.push(WireModel {
                         taper_widths: Vec::new(),
-                        world_width: 0.0,
+                        world_width: polyline_band_width(entity),
                         depth_override: None,
                         fill_is_3d: false,
                         fill_is_2d_solid: false,
+                        render_instance: None,
                         pick_tris,
                         pick_tris_low,
             dash_from_start: false,
@@ -1274,6 +1215,7 @@ pub fn tessellate(
                         fill_tris_low,
                         fill_is_3d,
                         fill_is_2d_solid: matches!(entity, EntityType::Solid(_)),
+                        render_instance: None,
                         depth_override: None,
                     });
                 }
@@ -1285,6 +1227,7 @@ pub fn tessellate(
                         depth_override: None,
                         fill_is_3d: false,
                         fill_is_2d_solid: false,
+                        render_instance: None,
                         pick_tris: Vec::new(),
                         pick_tris_low: Vec::new(),
             dash_from_start: false,
@@ -1312,7 +1255,7 @@ pub fn tessellate(
                 return out;
             }
 
-            TruckObject::SegmentedLines(points) => {
+            RenderObject::SegmentedLines(points) => {
                 let (local_pts, local_pts_low) = points_to_ds(points);
                 let snap_pts = te.snap_pts;
                 let key_vertices: Vec<[f64; 3]> = te
@@ -1329,6 +1272,7 @@ pub fn tessellate(
                     depth_override: None,
                     fill_is_3d: false,
                     fill_is_2d_solid: false,
+                    render_instance: None,
                     pick_tris,
                     pick_tris_low,
             dash_from_start: false,
@@ -1353,7 +1297,7 @@ pub fn tessellate(
                 }];
             }
 
-            TruckObject::TaperedLines(points, widths) => {
+            RenderObject::TaperedLines(points, widths) => {
                 // A wide polyline whose width varies: one continuous band wire
                 // carrying a per-point width; the shader interpolates each
                 // segment's two endpoint widths. `world_width` (the widest edge)
@@ -1374,6 +1318,7 @@ pub fn tessellate(
                     depth_override: None,
                     fill_is_3d: false,
                     fill_is_2d_solid: false,
+                    render_instance: None,
                     pick_tris,
                     pick_tris_low,
                     dash_from_start: false,
@@ -1398,21 +1343,6 @@ pub fn tessellate(
                 }];
             }
 
-            TruckObject::Volume(_) => {
-                // Solid3D / Region / Body → mesh tessellation lives in
-                // `solid3d_tess`. As a wire fallback, render the pre-computed
-                // edge wires stored in the entity when present (e.g. from
-                // SOLVIEW output or when the SAT kernel cannot parse the
-                // ACIS data).
-                let wire_pts = solid_wire_fallback(entity);
-                let mut wm = WireModel::solid_f64(name, wire_pts, color, selected);
-                // Add insertion snap at point_of_reference.
-                if let Some(p) = crate::entities::solid3d::point_of_reference(entity) {
-                    let sp = glam::DVec3::new(p.x, p.y, p.z);
-                    wm.snap_pts.push((sp, SnapHint::Insertion));
-                }
-                return vec![wm];
-            }
         }
     }
 
@@ -1507,6 +1437,7 @@ pub fn tessellate(
         depth_override: None,
         fill_is_3d: false,
         fill_is_2d_solid: false,
+        render_instance: None,
         pick_tris,
         pick_tris_low,
             dash_from_start: false,
@@ -2013,7 +1944,6 @@ fn fallback_geometry(entity: &EntityType) -> Geometry {
         | EntityType::Region(_)
         | EntityType::Body(_)
         | EntityType::Surface(_) => {
-            let pts = solid_wire_fallback(entity);
             let mut snap = vec![];
             if let Some(p) = crate::entities::solid3d::point_of_reference(entity) {
                 snap.push((
@@ -2021,46 +1951,13 @@ fn fallback_geometry(entity: &EntityType) -> Geometry {
                     SnapHint::Insertion,
                 ));
             }
-            (pts, snap, vec![], vec![])
+            (vec![], snap, vec![], vec![])
         }
         _ => {
             let s = 0.5_f64;
             (vec![[-s, 0.0, 0.0], [s, 0.0, 0.0]], vec![], vec![], vec![])
         }
     }
-}
-
-/// Extract pre-computed edge-wire points from Solid3D / Region / Body entities.
-///
-/// Some drawings store explicit wire geometry alongside the
-/// ACIS data.  We use this as a visible fallback when the SAT tessellator
-/// produces no mesh (e.g. binary SAB data or unsupported geometry).
-fn solid_wire_fallback(entity: &EntityType) -> Vec<[f64; 3]> {
-    let Some(wires) = crate::entities::solid3d::fallback_wires(entity) else {
-        return vec![];
-    };
-    if wires.is_empty() {
-        return vec![];
-    }
-    // Fully supported ACIS → mesh pipeline draws body. Parseable-but-partial
-    // ACIS keeps source display wires so unsupported faces never disappear.
-    if crate::entities::solid3d::acis_has_complete_surface_support(entity) {
-        return vec![];
-    }
-
-    let mut pts: Vec<[f64; 3]> = Vec::new();
-    for wire in wires {
-        if wire.points.len() < 2 {
-            continue;
-        }
-        for v in &wire.points {
-            let transformed = crate::entities::solid3d::wire_point(wire, v);
-            pts.push([transformed.x, transformed.y, transformed.z]);
-        }
-        // NaN sentinel separates distinct wire segments.
-        pts.push([f64::NAN, f64::NAN, f64::NAN]);
-    }
-    pts
 }
 
 pub(crate) fn push_tri(out: &mut Vec<[f32; 3]>, a: Vec3, b: Vec3, c: Vec3) {

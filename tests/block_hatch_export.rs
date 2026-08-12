@@ -241,6 +241,7 @@ fn app_created_hatch_roundtrips_catalog_spacing() {
     let mut scene = Scene::new();
     let boundary: Vec<[f32; 2]> = vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
     let model = HatchModel {
+        render_instance: None,
         world_origin: [0.0, 0.0],
         boundary: Arc::new(boundary),
         boundary_wcs: None,
@@ -253,7 +254,7 @@ fn app_created_hatch_roundtrips_catalog_spacing() {
         scale: 1.0,
         draw_depth: 0.0,
     };
-    scene.add_hatch(model);
+    scene.add_hatch(model, None);
     scene.populate_hatches_from_document();
 
     let hatches = scene.paper_canvas_hatches();
@@ -292,6 +293,7 @@ fn nested_hatch_serializes_only_outer_as_external() {
     let boundary_f32: Vec<[f32; 2]> = wcs.iter().map(|&[x, y]| [x as f32, y as f32]).collect();
 
     let model = HatchModel {
+        render_instance: None,
         world_origin: [0.0, 0.0],
         boundary: Arc::new(boundary_f32),
         boundary_wcs: Some(Arc::new(wcs)),
@@ -306,7 +308,7 @@ fn nested_hatch_serializes_only_outer_as_external() {
     };
 
     let mut scene = Scene::new();
-    scene.add_hatch(model);
+    scene.add_hatch(model, None);
 
     let dxf = scene
         .document

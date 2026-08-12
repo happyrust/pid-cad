@@ -475,6 +475,11 @@ impl Scene {
             self.images.insert(handle, model);
         }
         self.refresh_meshes_for_handles(&[handle]);
+        if let Some(operation) = self.document.solid_history_operation(handle).cloned() {
+            if let Ok(body) = cadkernel::acis::rebuild_body(&operation) {
+                self.solid_models.insert(handle, body);
+            }
+        }
     }
 
     /// Re-tessellate only the named ACIS entities. The former edit path
@@ -1094,6 +1099,7 @@ impl Scene {
         .with_viewport(viewport);
         let mut hatch_block_memo = std::collections::HashMap::new();
         let mut models = Vec::new();
+        let mut hatch_sources = rustc_hash::FxHashMap::default();
         graph.walk_root(
             self.render_scene_root(layout_block),
             |entity, context| {
@@ -1180,6 +1186,35 @@ impl Scene {
                 if tint_selected && self.selected.contains(&context.root_handle) {
                     model.color = [0.15, 0.55, 1.00, model.color[3]];
                 }
+                let matrix = &context.transform.matrix.m;
+                let linear = [
+                    matrix[0][0].to_bits(), matrix[0][1].to_bits(), matrix[0][2].to_bits(),
+                    matrix[1][0].to_bits(), matrix[1][1].to_bits(), matrix[1][2].to_bits(),
+                    matrix[2][0].to_bits(), matrix[2][1].to_bits(), matrix[2][2].to_bits(),
+                ];
+                let key = (
+                    source_hatch.common.handle.value(),
+                    linear,
+                    model
+                        .boundary
+                        .iter()
+                        .flat_map(|point| point.map(f32::to_bits))
+                        .collect::<Vec<_>>(),
+                    model.color.map(f32::to_bits),
+                    model.angle_offset.to_bits(),
+                    model.scale.to_bits(),
+                    model.line_weight_px.to_bits(),
+                    model.aci,
+                );
+                let source_id = *hatch_sources
+                    .entry(key)
+                    .or_insert_with(crate::scene::model::instance_model::next_source_id);
+                model.render_instance = Some(
+                    crate::scene::model::instance_model::RenderInstance {
+                        source_id,
+                        translation: [matrix[0][3], matrix[1][3], matrix[2][3]],
+                    },
+                );
                 models.push(model);
             },
         );
@@ -1228,6 +1263,7 @@ impl Scene {
             depth_map.as_ref(),
         );
         let mut models = Vec::new();
+        let mut wipeout_sources = rustc_hash::FxHashMap::default();
         graph.walk_root(
             self.render_scene_root(target_block),
             |entity, context| {
@@ -1274,7 +1310,34 @@ impl Scene {
                 } else {
                     bg_color
                 };
+                let render_instance = if context.is_instanced() {
+                    let matrix = &context.transform.matrix.m;
+                    let linear = [
+                        matrix[0][0].to_bits(), matrix[0][1].to_bits(), matrix[0][2].to_bits(),
+                        matrix[1][0].to_bits(), matrix[1][1].to_bits(), matrix[1][2].to_bits(),
+                        matrix[2][0].to_bits(), matrix[2][1].to_bits(), matrix[2][2].to_bits(),
+                    ];
+                    let key = (
+                        source.common.handle.value(),
+                        linear,
+                        boundary
+                            .iter()
+                            .flat_map(|point| point.map(f32::to_bits))
+                            .collect::<Vec<_>>(),
+                        color.map(f32::to_bits),
+                    );
+                    let source_id = *wipeout_sources.entry(key).or_insert_with(
+                        crate::scene::model::instance_model::next_source_id,
+                    );
+                    Some(crate::scene::model::instance_model::RenderInstance {
+                        source_id,
+                        translation: [matrix[0][3], matrix[1][3], matrix[2][3]],
+                    })
+                } else {
+                    None
+                };
                 models.push(HatchModel {
+                    render_instance,
                     boundary: Arc::new(boundary),
                     boundary_wcs: None,
                     pattern: model::hatch_model::HatchPattern::Solid,
@@ -1398,214 +1461,14 @@ impl Scene {
 
             let mut edge_polys: Vec<Vec<[f64; 2]>> = Vec::new();
             for edge in &path.edges {
-                match edge {
-                    BoundaryEdge::Polyline(poly) => {
-                        let verts = &poly.vertices;
-                        let count = verts.len();
-                        if count == 0 {
-                            continue;
-                        }
-                        let seg_count = if poly.is_closed {
-                            count
-                        } else {
-                            count.saturating_sub(1)
-                        };
-                        for i in 0..seg_count {
-                            let v0 = &verts[i];
-                            let v1 = &verts[(i + 1) % count];
-                            let bulge = v0.z;
-                            // Tess in f64 to preserve ~1 cm precision at
-                            // UTM-scale WCS (the f32 path used to produce
-                            // visibly wavy hatch arcs at 1e5+ magnitude).
-                            let arc = if bulge.abs() < 1e-9 {
-                                None
-                            } else {
-                                crate::entities::common::BulgeArc::from_bulge(
-                                    [v0.x, v0.y],
-                                    [v1.x, v1.y],
-                                    bulge,
-                                )
-                            };
-                            let Some(arc) = arc else {
-                                boundary.push(to_xy(v0.x, v0.y));
-                                continue;
-                            };
-                            let segs = convert::tess_util::arc_segments(
-                                arc.radius,
-                                arc.sweep.abs(),
-                                convert::tess_util::fill_chord_tol(arc.radius),
-                            );
-                            for j in 0..segs {
-                                let s = arc.sample(j as f64 / segs as f64);
-                                boundary.push(to_xy(s[0], s[1]));
-                            }
-                        }
-                        if poly.is_closed {
-                            if let Some(&first) = boundary.get(path_start) {
-                                boundary.push(first);
-                            }
-                        }
-                    }
-                    BoundaryEdge::Line(line) => {
-                        edge_polys.push(vec![
-                            to_xy(line.start.x, line.start.y),
-                            to_xy(line.end.x, line.end.y),
-                        ]);
-                    }
-                    BoundaryEdge::CircularArc(arc) => {
-                        let (sa, span) = convert::tess_util::arc_signed_span(
-                            arc.start_angle,
-                            arc.end_angle,
-                            arc.counter_clockwise,
-                        );
-                        let segs = convert::tess_util::arc_segments(
-                            arc.radius,
-                            span.abs(),
-                            convert::tess_util::fill_chord_tol(arc.radius),
-                        );
-                        let mut pts = Vec::with_capacity(segs as usize + 1);
-                        for i in 0..=segs {
-                            let t = sa + span * (i as f64 / segs as f64);
-                            pts.push(to_xy(
-                                arc.center.x + arc.radius * t.cos(),
-                                arc.center.y + arc.radius * t.sin(),
-                            ));
-                        }
-                        edge_polys.push(pts);
-                    }
-                    BoundaryEdge::EllipticArc(ell) => {
-                        let r_maj = (ell.major_axis_endpoint.x * ell.major_axis_endpoint.x
-                            + ell.major_axis_endpoint.y * ell.major_axis_endpoint.y)
-                            .sqrt();
-                        let r_min = r_maj * ell.minor_axis_ratio;
-                        let rot = ell
-                            .major_axis_endpoint
-                            .y
-                            .atan2(ell.major_axis_endpoint.x);
-                        let (sa, span) = convert::tess_util::arc_signed_span(
-                            ell.start_angle,
-                            ell.end_angle,
-                            ell.counter_clockwise,
-                        );
-                        let segs = convert::tess_util::arc_segments(
-                            r_maj,
-                            span.abs(),
-                            convert::tess_util::fill_chord_tol(r_maj),
-                        );
-                        let (cr, sr) = (rot.cos(), rot.sin());
-                        let mut pts = Vec::with_capacity(segs as usize + 1);
-                        for i in 0..=segs {
-                            let t = sa + span * (i as f64 / segs as f64);
-                            let lx = r_maj * t.cos();
-                            let ly = r_min * t.sin();
-                            pts.push(to_xy(
-                                ell.center.x + lx * cr - ly * sr,
-                                ell.center.y + lx * sr + ly * cr,
-                            ));
-                        }
-                        edge_polys.push(pts);
-                    }
-                    BoundaryEdge::Spline(spline) => {
-                        // DXF spline control_points pack (x, y, weight) into
-                        // a Vector3 — the z field is the rational weight, NOT
-                        // a Z coordinate. The legacy code dropped weight and
-                        // sampled with a fixed 16 segments; both bugs
-                        // produced visibly wrong fill regions for spline-
-                        // bounded hatches (especially block-internal ones,
-                        // where boundaries are often spline curves with
-                        // rational weights and short cubic segments).
-                        //
-                        // Build a NurbsCurve when `rational`, otherwise a
-                        // plain BSplineCurve, and sample adaptively via
-                        // truck's `parameter_division` at the same chord
-                        // tolerance the fill polygon uses for arcs.
-                        let degree = spline.degree.max(0) as usize;
-                        let knot_vec = if !spline.knots.is_empty() {
-                            KnotVec::from(spline.knots.clone())
-                        } else if spline.control_points.len() >= degree + 1 {
-                            KnotVec::uniform_knot(degree, spline.control_points.len() - 1)
-                        } else {
-                            KnotVec::from(vec![])
-                        };
-                        let knot_ok = spline.control_points.len() >= 2
-                            && degree >= 1
-                            && knot_vec.len() == spline.control_points.len() + degree + 1;
-
-                        // Rough chord-tolerance: 0.1% of the control-poly
-                        // diagonal so adaptive sampling produces enough
-                        // points to follow the curve without exploding on
-                        // huge splines.
-                        let (mut sp_min_x, mut sp_min_y) = (f64::INFINITY, f64::INFINITY);
-                        let (mut sp_max_x, mut sp_max_y) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
-                        for cp in &spline.control_points {
-                            sp_min_x = sp_min_x.min(cp.x);
-                            sp_min_y = sp_min_y.min(cp.y);
-                            sp_max_x = sp_max_x.max(cp.x);
-                            sp_max_y = sp_max_y.max(cp.y);
-                        }
-                        let diag = ((sp_max_x - sp_min_x).powi(2)
-                            + (sp_max_y - sp_min_y).powi(2))
-                        .sqrt();
-                        let tol = convert::tess_util::fill_chord_tol(diag.max(1.0));
-
-                        let mut epts: Vec<[f64; 2]> = Vec::new();
-                        let mut sampled = false;
-                        if knot_ok {
-                            if spline.rational {
-                                // NURBS: pack (x, y, 0, w) into Vector4.
-                                let cps: Vec<Vector4> = spline
-                                    .control_points
-                                    .iter()
-                                    .map(|p| {
-                                        let w = if p.z.abs() > 1e-12 { p.z } else { 1.0 };
-                                        Vector4::new(p.x * w, p.y * w, 0.0, w)
-                                    })
-                                    .collect();
-                                let bspl = TruckBSpline::new(knot_vec.clone(), cps);
-                                let curve = NurbsCurve::new(bspl);
-                                let (t0, t1) = curve.range_tuple();
-                                let (_, pts) = curve.parameter_division((t0, t1), tol);
-                                for p in pts {
-                                    epts.push(to_xy(p.x, p.y));
-                                }
-                                sampled = true;
-                            } else {
-                                let cps: Vec<Point3> = spline
-                                    .control_points
-                                    .iter()
-                                    .map(|p| Point3::new(p.x, p.y, 0.0))
-                                    .collect();
-                                let bspl = TruckBSpline::new(knot_vec, cps);
-                                let (t0, t1) = bspl.range_tuple();
-                                let (_, pts) = bspl.parameter_division((t0, t1), tol);
-                                for p in pts {
-                                    epts.push(to_xy(p.x, p.y));
-                                }
-                                sampled = true;
-                            }
-                        }
-                        if !sampled {
-                            // Fallback: prefer fit_points (which lie on the
-                            // curve) over control_points (which usually
-                            // don't). A control-point polyline would draw
-                            // the convex-hull silhouette — visibly wrong.
-                            let pts: &[_] = if !spline.fit_points.is_empty() {
-                                &spline.fit_points
-                            } else {
-                                &[]
-                            };
-                            if !pts.is_empty() {
-                                for p in pts {
-                                    epts.push(to_xy(p.x, p.y));
-                                }
-                            } else {
-                                for cp in &spline.control_points {
-                                    epts.push(to_xy(cp.x, cp.y));
-                                }
-                            }
-                        }
-                        edge_polys.push(epts);
-                    }
+                if let Some(curve) = crate::entities::hatch::edge_curve(edge) {
+                    edge_polys.push(
+                        curve
+                            .tessellate_angle(cadkernel::tessellation::DEFAULT_ANGLE)
+                            .into_iter()
+                            .map(|point| to_xy(point[0], point[1]))
+                            .collect(),
+                    );
                 }
             }
             boundary.extend(chain_path_edges(edge_polys));
@@ -1817,6 +1680,7 @@ impl Scene {
             .collect();
 
         Some(HatchModel {
+            render_instance: None,
             boundary: std::sync::Arc::new(boundary_f32),
             boundary_wcs: None,
             pattern,
@@ -2121,6 +1985,7 @@ impl Scene {
             })
             .collect();
         HatchModel {
+            render_instance: None,
             boundary: std::sync::Arc::new(boundary),
             boundary_wcs: None,
             pattern: model::hatch_model::HatchPattern::Solid,
@@ -2135,7 +2000,7 @@ impl Scene {
         }
     }
 
-    pub fn add_hatch(&mut self, model: HatchModel) -> Handle {
+    pub fn add_hatch(&mut self, model: HatchModel, layer: Option<&str>) -> Handle {
         let mut dxf = DxfHatch::new();
         dxf.is_solid = matches!(
             model.pattern,
@@ -2252,14 +2117,19 @@ impl Scene {
                 },
             ];
         }
-
         // `add_entity` already builds the render model from the DXF entity via
         // `hatch_model_from_dxf` and inserts it with a correct `world_origin`
         // (AABB-centred) for the relative-to-eye fill. The command-built `model`
         // carries `world_origin: [0, 0]`, which after the world_offset removal
         // leaves the fill mis-placed and effectively invisible until a later
         // edit rebuilds it from the DXF — so keep the seed, don't overwrite it.
-        self.add_entity(EntityType::Hatch(dxf))
+        let mut entity = EntityType::Hatch(dxf);
+
+        if let Some(layer) = layer {
+            entity.as_entity_mut().set_layer(layer.to_string());
+        }
+
+        self.add_entity(entity)
     }
 
     pub fn clear(&mut self) {

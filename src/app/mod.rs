@@ -18,7 +18,7 @@ mod mtext_editor;
 pub mod plugin_host;
 mod properties;
 mod recent;
-mod settings;
+pub(crate) mod settings;
 mod shortcuts;
 mod style_ops;
 mod text_inline;
@@ -340,19 +340,6 @@ pub(super) struct OpenCADStudio {
     /// Widest natural single-row width of the Start-page action buttons,
     /// measured by `WrapFlow` so side lists collapse before those buttons wrap.
     start_action_w: std::sync::Arc<std::sync::atomic::AtomicU32>,
-    /// When the window is too narrow the properties panel collapses to a
-    /// vertical bar; this is the user's toggle to expand it back out.
-    props_expanded: bool,
-    /// Persisted dock width and side of the Properties panel.
-    properties_width: f32,
-    properties_side: config::DockSide,
-    properties_auto_collapse: bool,
-    /// Transient hover/drag state for the docked Properties panel.
-    properties_hovered: bool,
-    properties_dragging: bool,
-    properties_resizing: bool,
-    properties_drag_last: Option<Point>,
-    properties_dock_preview: Option<config::DockSide>,
     /// Read-only editor buffer backing the command-line history dropdown, so
     /// the log can be drag-selected across lines and copied (issue #232).
     /// Rebuilt from the history each time the dropdown is opened.
@@ -397,6 +384,19 @@ pub(super) struct OpenCADStudio {
     /// PICKADD (#226): true (default) = clicks accumulate; false = OS-style
     /// replace-on-click with Shift toggling.
     pick_add: bool,
+    /// The Remove selection keyword: picks take objects out of the set instead
+    /// of putting them in, until Add turns it off or the command ends. This is
+    /// what Shift already does per-click, not PICKADD — PICKADD decides whether
+    /// a pick *replaces* the set, so borrowing it here would wipe everything
+    /// gathered so far rather than subtract one thing. (#596)
+    select_remove_mode: bool,
+    /// What the last layer translation did, kept so the log can be written
+    /// after the fact rather than forcing a path out of the user up front.
+    last_layer_translation: Option<crate::modules::draw::layers::laytrans::Report>,
+    /// The layer-translator dialog's working state while it is open.
+    layer_translator: Option<crate::ui::window::layer_translator::State>,
+    /// Working copy of the Drawing Units dialog; `None` while it is closed.
+    drawing_units: Option<crate::ui::window::drawing_units::State>,
     /// PICKDRAG (#226): false (default) = press-drag lassoes; true =
     /// press-drag draws a rectangle marquee.
     pick_drag_rect: bool,
@@ -417,6 +417,8 @@ pub(super) struct OpenCADStudio {
     /// cursor is on a tracking ray. Lets a typed distance place a point along
     /// the ray from the tracking point (issue #69). `None` when not aligned.
     otrack_active: Option<(glam::DVec3, glam::DVec3)>,
+    /// Active OTRACK ray kind, separate from typed-distance geometry.
+    otrack_kind: Option<crate::snap::TrackingKind>,
     /// Whether Tangent snap was enabled before a tangent-pick command started.
     pre_cmd_tangent: Option<bool>,
     /// Drawing defaults captured by ADDSELECTED before it adopts the template
@@ -431,10 +433,31 @@ pub(super) struct OpenCADStudio {
     polar_mode: bool,
     /// Polar tracking angle increment in degrees (15 / 30 / 45 / 90).
     polar_increment_deg: f32,
+    /// Reverse the mouse-wheel zoom direction when true (ZOOMWHEEL = 1).
+    zoom_wheel_reversed: bool,
+    /// Mouse-wheel zoom sensitivity, clamped to 3..=100 (ZOOMFACTOR).
+    zoom_factor: i32,
+    /// Crosshair size setting (CURSORSIZE, 1..=100).
+    cursor_size: i32,
+    /// Selection-box size setting (PICKBOX, 0..=50).
+    pick_box: i32,
+    /// Drawing viewport cursor style (CURSORTYPE).
+    cursor_type: settings::CursorType,
+    /// Explicit crosshair colour; `None` retains automatic contrast.
+    crosshair_color: Option<[u8; 3]>,
+    /// Editable Options buffer for the crosshair colour.
+    crosshair_color_input: String,
+    /// Isometric drafting state and active axis pair.
+    isometric_drafting: bool,
+    iso_plane: settings::IsoPlane,
+    /// Drafting-grid/crosshair rotation in degrees (SNAPANG).
+    snap_angle_deg: f32,
     /// Show grid lines in the viewport (F7).
     show_grid: bool,
     /// Dynamic input overlay (F12): show coordinate tooltip near cursor.
     dyn_input: bool,
+    /// Currently visible page in the application Options dialog.
+    options_tab: crate::ui::window::options::OptionsTab,
     /// Controls whether the TEXTEDIT command repeats automatically (0 = Multiple, 1 = Single).
     pub texteditmode: bool,
     /// When true (default), saving over an existing file first writes a `.bak`
@@ -507,8 +530,20 @@ pub(super) struct OpenCADStudio {
     /// Snapshots of edited entities taken at the start of a grip drag. The drag
     /// mutates the document live, so Escape restores this group atomically.
     grip_originals: Vec<(acadrust::Handle, acadrust::EntityType)>,
+    /// Solid-history objects paired with their owning entity before a grip drag.
+    grip_history_originals: Vec<(
+        acadrust::Handle,
+        Vec<(acadrust::Handle, acadrust::objects::ObjectType)>,
+    )>,
     /// Document dirty state before the live grip mutation began.
     grip_dirty_before: Option<bool>,
+    /// Frozen wire geometry of the entities being grip-edited.
+    ///
+    /// The live entities are hidden from the resident hit-test set while their
+    /// grip preview is active. Keep their pre-drag geometry here so OSNAP,
+    /// Extension and OTRACK can still reference the entity's own vertices and
+    /// segments without snapping against the geometry being deformed.
+    grip_snap_wires: Vec<crate::scene::model::wire_model::WireModel>,
     /// Drag-start snapshot of the dragged entity's SDF glyph quads. A whole-
     /// entity text move slides these each frame (translating the already-shaped
     /// glyphs) instead of re-tessellating the run every cursor move (issue #316).
@@ -543,10 +578,21 @@ pub(super) struct OpenCADStudio {
     show_properties: bool,
     /// Docked Insert Block panel visibility.
     pub(crate) show_block_palette: bool,
+    /// General edge-stack dock layout for the side panels.
+    pub(crate) dock: crate::ui::dock::DockState,
+    /// Which panel is currently floated at full height (hovered, or a pinned
+    /// panel on top).
+    pub(crate) dock_expanded: Option<crate::ui::dock::PanelId>,
+    /// Panel currently being dragged between sides / reordered.
+    pub(crate) dock_dragging: Option<crate::ui::dock::PanelId>,
+    /// Panel currently being width-resized.
+    pub(crate) dock_resizing: Option<crate::ui::dock::PanelId>,
+    /// Last pointer position during a drag / resize.
+    pub(crate) dock_drag_last: Option<iced::Point>,
+    /// Live drag target (side + index), shown as a highlight while dragging.
+    pub(crate) dock_drag_target: Option<(crate::app::config::DockSide, usize)>,
     /// Docked Insert Block panel state (search, preview size, cached thumbnails).
     pub(crate) block_palette: crate::ui::window::block_palette::BlockPalette,
-    /// Whether the narrow-window block-palette bar is expanded.
-    block_palette_expanded: bool,
     /// Whether the document file tabs are shown at the top (FILETAB).
     show_file_tabs: bool,
     /// Whether the layout/paper-space tabs are shown at the bottom (LAYOUTTAB).
@@ -563,9 +609,17 @@ pub(super) struct OpenCADStudio {
     // ── Floating panel windows ────────────────────────────────────────────
     /// Active `iced_aw` colour picker: destination plus its initial colour.
     color_pick_target: Option<(ColorPickTarget, AcadColor)>,
+    /// Visible page in the shared CAD colour picker.
+    color_picker_tab: ColorPickerTab,
+    /// Recently committed real colours, newest first.
+    /// ACI and True Color remain semantically distinct even when their RGB matches.
+    recent_colors: Vec<AcadColor>,
     /// The open in-canvas modal dialog, if any (Plan B: shared overlay instead
     /// of OS windows).
     active_modal: Option<ModalKind>,
+    /// Plot modal geometry preserved while the Plot Style editor is open as
+    /// a child dialog. None means Plotstyle was opened directly (e.g. command).
+    plotstyle_parent_plot_geometry: Option<(iced::Vector, iced::Vector)>,
     /// FIND dialog inputs and current result cursor.
     find_replace: FindReplaceState,
     /// Set once the user acknowledges the AEC-drop warning, so re-entering the
@@ -1126,13 +1180,21 @@ pub struct SaveOutcome {
     refreshed_preview: Option<Option<acadrust::Preview>>,
     result: Result<(), crate::io::SaveFailure>,
 }
-
+/// Active page in the shared CAD colour picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColorPickerTab {
+    #[default]
+    Index,
+    TrueColor,
+}
 /// Where a colour chosen in the standalone palette window should be applied.
 #[derive(Debug, Clone)]
 pub enum ColorPickTarget {
     DimStyle(DsField),
     MLeader(&'static str),
     Table(u8, &'static str),
+    /// Plot-style colour override for the currently selected ACI entry.
+    PlotStyle,
     /// Selected entities' colour (left properties panel).
     Properties,
     /// Selected entities' background colour (hatch / MTEXT background row).
@@ -1483,6 +1545,9 @@ pub enum ModalKind {
     UpdateNotice,
     Layers,
     LayerStateManager,
+    LayerTranslator,
+    DrawingUnits,
+    DraftingSettings,
     LayerStateEditor,
     Plot,
     PrintAll,
@@ -1693,23 +1758,6 @@ pub enum Message {
     OpenUrl(String),
     /// Select which section a narrow (tabbed) Start page shows.
     StartSectionSelect(StartSection),
-    /// Expand/collapse the properties panel when it has shrunk to a bar.
-    TogglePropertiesBar,
-    /// Close the docked Properties panel; the ribbon command can reopen it.
-    PropertiesClose,
-    /// Pin/unpin the docked Properties panel.
-    PropertiesAutoCollapseToggle,
-    /// Hover state drives expansion while auto-collapse is enabled.
-    PropertiesHover(bool),
-    /// Begin dragging the Properties title bar to the opposite dock edge.
-    PropertiesDockGrab,
-    /// Begin dragging the Properties/viewport divider.
-    PropertiesResizeGrab,
-    /// Reset the dock width to its default value.
-    PropertiesWidthReset,
-    /// Full-workspace pointer tracking shared by dock and resize drags.
-    PropertiesDragMove(Point),
-    PropertiesDragRelease,
     /// Scroll the status-bar layout-tab strip horizontally by `delta` px
     /// (negative = left). Driven by the ‹ › arrows next to the tabs.
     ScrollLayoutTabs(f32),
@@ -1749,19 +1797,52 @@ pub enum Message {
     SaveDialogPathPicked(Option<std::path::PathBuf>),
     /// Open the application-wide Options dialog.
     OptionsOpen,
+    /// Switch the visible page in Options.
+    OptionsTabChanged(crate::ui::window::options::OptionsTab),
+    /// Set CURSORSIZE from the Display-page slider.
+    CursorSizeChanged(i32),
+    /// Set PICKBOX from the Selection-page slider.
+    PickBoxChanged(i32),
+    /// Set CURSORTYPE from Options.
+    CursorTypeChanged(settings::CursorType),
+    /// Edit the optional crosshair RGB value; blank restores automatic contrast.
+    CrosshairColorChanged(String),
     /// Set the default type/version used when first saving a new drawing.
     DefaultSaveFormatChanged(String),
     /// Select one of Iced's built-in themes or the editable Custom theme.
     OptionsThemeChanged(String),
     /// Edit one of Custom theme's six base colours as #RRGGBB.
     OptionsThemeColorChanged(usize, String),
+    /// Register or unregister as the .dwg/.dxf handler, from Options. Same
+    /// setting the FILEASSOC command carries.
+    FileAssocChanged(bool),
     /// Switch the interface language and redraw localized views.
     LanguageChanged(crate::i18n::Language),
+    /// Drop every entity from the active drawing.
     ClearScene,
-    SetWireframe(bool),
-    /// Set the active tab's render mode (one of acadrust's seven visual
-    /// styles). Replaces the binary `SetWireframe` over time; the older
-    /// message stays for ribbon/CLI back-compat and forwards.
+    // ── Layer Translator (#624) ──────────────────────────────────────────
+    /// Pick the drawing whose layers become the translation targets.
+    LayerTranslatorLoad,
+    /// A target set was read from `path`.
+    LayerTranslatorLoaded(std::path::PathBuf),
+    LayerTranslatorSelectFrom(String),
+    LayerTranslatorSelectTo(String),
+    /// Pair the two selected layers.
+    LayerTranslatorMap,
+    /// Pair every layer the two drawings name alike.
+    LayerTranslatorMapSame,
+    /// Drop the mapping that starts at this layer.
+    LayerTranslatorUnmap(String),
+    LayerTranslatorForceByLayer(bool),
+    LayerTranslatorWriteLog(bool),
+    LayerTranslatorSaveMappings,
+    LayerTranslatorLoadMappings,
+    /// Path chosen for saving or loading mappings.
+    LayerTranslatorMappingsPath(std::path::PathBuf, bool),
+    /// Apply every mapping.
+    LayerTranslatorTranslate,
+    /// Set the active tab's render mode — one of the seven visual styles, and
+    /// the only way a style is ever set.
     SetRenderMode(acadrust::entities::ViewportRenderMode),
     /// Open or close the active viewport's visual-style flyout.
     ToggleRenderModeMenu(acadrust::entities::ViewportRenderMode),
@@ -2052,6 +2133,14 @@ pub enum Message {
     ToggleSnapEnabled,
     /// Toggle grid-snap on/off — F9 / SNAP status-bar button.
     ToggleGridSnap,
+    /// Enable or disable isometric drafting.
+    ToggleIsometricDrafting,
+    /// Select one isometric drafting axis pair.
+    SetIsoPlane(settings::IsoPlane),
+    /// Advance Left → Top → Right, enabling isometric drafting if necessary.
+    CycleIsoPlane,
+    /// Reset SNAPANG and return the active drafting coordinate system to World.
+    ResetDraftingRotation,
     /// Toggle the ViewCube 3D gizmo visibility (NAVVCUBE).
     ToggleViewCube,
     /// Toggle the Properties panel visibility (PROPERTIES).
@@ -2161,6 +2250,14 @@ pub enum Message {
     CloseUnitsPopup,
     /// Set the drawing units (INSUNITS) for the active drawing.
     SetDrawingUnits(i16),
+    /// LUNITS — how lengths are written, from the status-bar units button.
+    SetLinearFormat(i16),
+    /// Open the Drawing Units dialog, seeded from the active drawing.
+    OpenDrawingUnits,
+    /// One field of the Drawing Units dialog changed.
+    DrawingUnitsField(crate::ui::window::drawing_units::Field),
+    /// Drawing Units OK — write the working copy into the drawing.
+    DrawingUnitsApply,
     /// Toggle the Isolate pill's action menu open/closed.
     ToggleIsolatePopup,
     /// Close the Isolate action menu.
@@ -2602,6 +2699,9 @@ pub enum Message {
     PlotDlg(crate::ui::window::plot::PlotDlgMsg),
     /// An edit inside the docked Insert Block panel.
     BlockPalette(crate::ui::window::block_palette::BlockPaletteMsg),
+    /// A dock chrome interaction (grab/resize/pin/hover/dock move) on a side
+    /// panel.
+    Dock(crate::ui::dock::DockMsg),
     /// Open the paper-layout batch output dialog.
     PrintAllOpen,
     /// Toggle one paper layout in the batch.
@@ -2635,10 +2735,13 @@ pub enum Message {
     /// Edit buffers changed.
     PlotStylePanelColorBuf(String),
     PlotStylePanelLwBuf(String),
+    PlotStylePanelLwSet(u8),
     PlotStylePanelScreenBuf(String),
     /// Apply current edit buffers to the selected ACI entry.
     PlotStylePanelApply,
-    /// Save the modified table back to disk.
+    /// Save the modified table directly over the currently edited CTB.
+    PlotStylePanelSaveDirect,
+    /// Save the modified table under a chosen name/path.
     PlotStylePanelSave,
     /// Save callback.
     PlotStylePanelSavePath(Option<std::path::PathBuf>),
@@ -2816,11 +2919,15 @@ pub enum Message {
     DsCenterMarkMode(String),
     /// Toggle the expanded colour palette for a DimStyle colour field.
     DsColorMore(DsField),
-    /// Open the `iced_aw` colour picker for a field and its current colour.
+    /// Open the shared CAD colour picker for a field and its current colour.
     OpenColorWindow(ColorPickTarget, AcadColor),
+    /// Switch between Index Color and True Color.
+    ColorPickerTabChanged(ColorPickerTab),
+    /// Change the pending colour without committing it yet.
+    ColorPickerColorChanged(AcadColor),
     /// Close the colour picker without choosing.
     CloseColorPicker,
-    /// A colour was chosen in the `iced_aw` picker.
+    /// Commit the colour chosen in the shared picker.
     ColorWindowPick(acadrust::types::Color),
     /// Set a block/linetype Handle field on the selected dim style from a
     /// dropdown of available block-records / linetypes (by name).
@@ -2935,15 +3042,6 @@ impl OpenCADStudio {
             props_asym_scale: std::collections::HashSet::new(),
             start_section: StartSection::default(),
             start_action_w: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            props_expanded: false,
-            properties_width: 250.0,
-            properties_side: config::DockSide::Left,
-            properties_auto_collapse: false,
-            properties_hovered: false,
-            properties_dragging: false,
-            properties_resizing: false,
-            properties_drag_last: None,
-            properties_dock_preview: None,
             history_content: iced::widget::text_editor::Content::new(),
             command_history_resizing: false,
             command_history_drag_last: None,
@@ -2966,11 +3064,16 @@ impl OpenCADStudio {
             annotation_auto_scale: -4,
             last_saved_config: None,
             otrack_active: None,
+            otrack_kind: None,
             clean_screen: false,
             quick_properties: false,
             quick_properties_anchor: Point::new(12.0, 12.0),
             selection_cycling: false,
             pick_add: true,
+            select_remove_mode: false,
+            last_layer_translation: None,
+            layer_translator: None,
+            drawing_units: None,
             pick_drag_rect: false,
             perf_hud: false,
             cycle_candidates: None,
@@ -2980,8 +3083,19 @@ impl OpenCADStudio {
             ortho_mode: false,
             polar_mode: false,
             polar_increment_deg: 45.0,
+            zoom_wheel_reversed: false,
+            zoom_factor: 60,
+            cursor_size: 5,
+            pick_box: 3,
+            cursor_type: settings::CursorType::Crosshair,
+            crosshair_color: None,
+            crosshair_color_input: String::new(),
+            isometric_drafting: false,
+            iso_plane: settings::IsoPlane::Left,
+            snap_angle_deg: 0.0,
             show_grid: false,
             dyn_input: true,
+            options_tab: crate::ui::window::options::OptionsTab::General,
             texteditmode: false,
             backup_on_save: true,
             file_assoc_enabled: true,
@@ -3004,7 +3118,9 @@ impl OpenCADStudio {
             grip_preview_handles: Vec::new(),
             hover_dwell: None,
             grip_originals: Vec::new(),
+            grip_history_originals: Vec::new(),
             grip_dirty_before: None,
+            grip_snap_wires: Vec::new(),
             grip_text_verts: Vec::new(),
             grip_text_slide: false,
             qselect: None,
@@ -3017,13 +3133,21 @@ impl OpenCADStudio {
             show_properties: true,
             show_block_palette: false,
             block_palette: Default::default(),
-            block_palette_expanded: false,
+            dock: Default::default(),
+            dock_expanded: None,
+            dock_dragging: None,
+            dock_resizing: None,
+            dock_drag_last: None,
+            dock_drag_target: None,
             show_file_tabs: true,
             show_layout_tabs: true,
             last_point: None,
             main_window: None,
             color_pick_target: None,
+            color_picker_tab: ColorPickerTab::Index,
+            recent_colors: Vec::new(),
             active_modal: None,
+            plotstyle_parent_plot_geometry: None,
             find_replace: FindReplaceState::default(),
             aec_drop_acknowledged: false,
             aec_drop_count: 0,
@@ -3370,7 +3494,8 @@ impl OpenCADStudio {
         let state = Self::new();
         let (id, open_task) = window::open(window::Settings {
             maximized: true,
-            icon: window::icon::from_rgba(build_window_icon(), 32, 32).ok(),
+            icon: build_window_icon()
+                .and_then(|rgba| window::icon::from_rgba(rgba, 32, 32).ok()),
             exit_on_close_request: false,
             // A Wayland compositor has no StartupWMClass to go on: it resolves a
             // window's dock icon by matching the window's app_id against the

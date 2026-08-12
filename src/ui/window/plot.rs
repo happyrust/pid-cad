@@ -784,8 +784,9 @@ pub fn view_window(
                 .on_press(Message::PlotDlg(PlotDlgMsg::LoadStyle))
                 .style(btn(false))
                 .padding([4, 10]),
-            button(text(t!("Save…")).size(11))
-                .on_press(Message::PlotDlg(PlotDlgMsg::SaveStyle))
+
+            button(text(t!("Edit…")).size(11))
+                .on_press(Message::PlotStylePanelOpen)
                 .style(btn(false))
                 .padding([4, 10]),
         ]
@@ -891,24 +892,22 @@ pub fn view_window(
     let body = row![list_panel, vsep(height), detail]
         .width(width)
         .height(height);
-    let mut toolbar_row = row![left_bar, Space::new().width(width)].align_y(iced::Center);
-    if !print_all_options {
-        toolbar_row = toolbar_row
-            .push(
-                button(text(t!("Set current")).size(11))
-                    .on_press(Message::PlotDlg(PlotDlgMsg::SetCurrent))
-                    .style(btn(false))
-                    .padding([4, 12]),
-            )
-            .push(Space::new().width(6))
-            .push(
-                button(text(t!("Preview")).size(11))
-                    .on_press(Message::PlotDlg(PlotDlgMsg::Preview))
-                    .style(btn(false))
-                    .padding([4, 12]),
-            )
-            .push(Space::new().width(6));
-    }
+    let mut toolbar_row = row![left_bar, Space::new().width(width)]
+    .align_y(iced::Center)
+    .push(
+        button(text(t!("Set current")).size(11))
+            .on_press(Message::PlotDlg(PlotDlgMsg::SetCurrent))
+            .style(btn(false))
+            .padding([4, 12]),
+    )
+    .push(Space::new().width(6))
+    .push(
+        button(text(t!("Preview")).size(11))
+            .on_press(Message::PlotDlg(PlotDlgMsg::Preview))
+            .style(btn(false))
+            .padding([4, 12]),
+    )
+    .push(Space::new().width(6));
     toolbar_row = toolbar_row.push(
         button(text(action).size(11))
             .on_press(Message::PlotDlg(PlotDlgMsg::Commit))

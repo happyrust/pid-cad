@@ -11,40 +11,6 @@ use crate::t;
 /// shows a count-only summary instead. Bulk edits still go through the ribbon.
 const MAX_PROP_AGGREGATE: usize = 2_000;
 
-fn material_color_text(color: &acadrust::objects::MaterialColor) -> String {
-    let rgb = color
-        .rgb
-        .map(|value| format!("#{:06X}", value as u32 & 0x00ff_ffff))
-        .unwrap_or_else(|| "Object".to_string());
-    format!("{rgb}, factor {:.3}", color.factor)
-}
-
-fn material_map_text(map: &acadrust::objects::MaterialMap) -> String {
-    let source = match map.source {
-        1 => {
-            if map.file_name.trim().is_empty() {
-                "File".to_string()
-            } else {
-                map.file_name.clone()
-            }
-        }
-        2 => format!(
-            "Procedural {:#?}",
-            map.texture
-        ),
-        0 => "Scene".to_string(),
-        value => format!("Source {value}"),
-    };
-    format!(
-        "{source}; blend {:.3}; projection {}; tiling {}; auto {}; transform {:?}",
-        map.blend_factor,
-        map.projection,
-        map.tiling,
-        map.auto_transform,
-        map.transform
-    )
-}
-
 fn visual_style_properties_text(style: &acadrust::objects::VisualStyle) -> String {
     style
         .properties
@@ -89,12 +55,14 @@ impl OpenCADStudio {
         // lengths/angles per LUNITS / LUPREC / AUNITS / AUPREC.
         {
             let h = &self.tabs[i].scene.document.header;
-            crate::entities::common::set_unit_context(crate::entities::common::UnitContext {
-                lunits: h.linear_unit_format,
-                luprec: h.linear_unit_precision,
-                aunits: h.angular_unit_format,
-                auprec: h.angular_unit_precision,
-            });
+            crate::entities::common::set_unit_context(
+                crate::entities::common::UnitContext::from_header(h),
+            );
+        }
+        {
+            // Which text styles fix their own height — the height rows read it
+            // to decide whether they are editable.
+            crate::entities::common::set_fixed_text_heights(&self.tabs[i].scene.document);
         }
 
         let layer_names: Vec<String> = self.tabs[i]
@@ -390,20 +358,11 @@ impl OpenCADStudio {
                     let group_names = self.tabs[i].scene.group_names_for_entity(handle);
                     let mut sections =
                         dispatch::properties_sectioned(handle, entity, &text_style_names);
-                    sections.insert(
-                        0,
-                        crate::scene::model::object::PropSection {
-                            title: t!("Coordinates").into_owned(),
-                            props: vec![crate::entities::common::ro_prop(
-                                t!("Coordinate system").as_ref(),
-                                "coordinate_system",
-                                self.tabs[i]
-                                    .active_ucs
-                                    .as_ref()
-                                    .map(|ucs| ucs.name.clone())
-                                    .unwrap_or_else(|| "WCS".to_string()),
-                            )],
-                        },
+                    sections.extend(
+                        crate::scene::model::solid_history::primitive_properties(
+                            &self.tabs[i].scene.document,
+                            handle,
+                        ),
                     );
 
                     // Turn the Material row into an editable picker: the source
@@ -447,161 +406,6 @@ impl OpenCADStudio {
                                     options: options.clone(),
                                 };
                             }
-                        }
-                        let effective_handle = match common.material_flags {
-                            3 => common.material_handle,
-                            0 => doc
-                                .layers
-                                .get(&common.layer)
-                                .map(|layer| layer.material)
-                                .filter(|handle| handle.is_valid()),
-                            _ => None,
-                        };
-                        if let Some(acadrust::objects::ObjectType::Material(material)) =
-                            effective_handle.and_then(|handle| doc.objects.get(&handle))
-                        {
-                            use crate::entities::common::ro_prop;
-                            sections.push(crate::scene::model::object::PropSection {
-                                title: t!("Material Details").into_owned(),
-                                props: vec![
-                                    ro_prop(t!("Name").as_ref(), "mat_name", material.name.clone()),
-                                    ro_prop(
-                                        t!("Description").as_ref(),
-                                        "mat_description",
-                                        material.description.clone(),
-                                    ),
-                                    ro_prop(
-                                        t!("Ambient").as_ref(),
-                                        "mat_ambient",
-                                        material_color_text(&material.ambient_color),
-                                    ),
-                                    ro_prop(
-                                        t!("Diffuse").as_ref(),
-                                        "mat_diffuse",
-                                        material_color_text(&material.diffuse_color),
-                                    ),
-                                    ro_prop(
-                                        t!("Specular").as_ref(),
-                                        "mat_specular",
-                                        material_color_text(&material.specular_color),
-                                    ),
-                                    ro_prop(
-                                        t!("Gloss").as_ref(),
-                                        "mat_gloss",
-                                        format!("{:.3}", material.specular_gloss_factor),
-                                    ),
-                                    ro_prop(
-                                        t!("Opacity").as_ref(),
-                                        "mat_opacity",
-                                        format!("{:.3}", material.opacity_percent),
-                                    ),
-                                    ro_prop(
-                                        t!("Reflectivity").as_ref(),
-                                        "mat_reflectivity",
-                                        format!("{:.3}", material.reflectivity),
-                                    ),
-                                    ro_prop(
-                                        t!("Translucence").as_ref(),
-                                        "mat_translucence",
-                                        format!("{:.3}", material.translucence),
-                                    ),
-                                    ro_prop(
-                                        t!("Refraction").as_ref(),
-                                        "mat_refraction",
-                                        format!("{:.3}", material.refraction_index),
-                                    ),
-                                    ro_prop(
-                                        t!("Self Illumination").as_ref(),
-                                        "mat_self_illumination",
-                                        format!("{:.3}", material.self_illumination),
-                                    ),
-                                    ro_prop(
-                                        t!("Luminance").as_ref(),
-                                        "mat_luminance",
-                                        format!(
-                                            "{:.3} (mode {})",
-                                            material.luminance, material.luminance_mode
-                                        ),
-                                    ),
-                                    ro_prop(
-                                        t!("Diffuse Map").as_ref(),
-                                        "mat_diffuse_map",
-                                        material_map_text(&material.diffuse_map),
-                                    ),
-                                    ro_prop(
-                                        t!("Specular Map").as_ref(),
-                                        "mat_specular_map",
-                                        material_map_text(&material.specular_map),
-                                    ),
-                                    ro_prop(
-                                        t!("Reflection Map").as_ref(),
-                                        "mat_reflection_map",
-                                        material_map_text(&material.reflection_map),
-                                    ),
-                                    ro_prop(
-                                        t!("Opacity Map").as_ref(),
-                                        "mat_opacity_map",
-                                        material_map_text(&material.opacity_map),
-                                    ),
-                                    ro_prop(
-                                        t!("Bump Map").as_ref(),
-                                        "mat_bump_map",
-                                        material_map_text(&material.bump_map),
-                                    ),
-                                    ro_prop(
-                                        t!("Refraction Map").as_ref(),
-                                        "mat_refraction_map",
-                                        material_map_text(&material.refraction_map),
-                                    ),
-                                    ro_prop(
-                                        t!("Normal Map").as_ref(),
-                                        "mat_normal_map",
-                                        material_map_text(&material.normal_map),
-                                    ),
-                                    ro_prop(
-                                        t!("Render Flags").as_ref(),
-                                        "mat_render_flags",
-                                        format!(
-                                            "illumination {}; channels {}; mode {}; two-sided {}",
-                                            material.illumination_model,
-                                            material.channel_flags,
-                                            material.mode,
-                                            material.two_sided_material
-                                        ),
-                                    ),
-                                    ro_prop(
-                                        t!("Advanced").as_ref(),
-                                        "mat_advanced",
-                                        format!(
-                                            "normal method {}; strength {:.3}; bump {:.3}; reflect {:.3}; transmit {:.3}; bleed {:.3}",
-                                            material.normal_map_method,
-                                            material.normal_map_strength,
-                                            material.indirect_bump_scale,
-                                            material.reflectance_scale,
-                                            material.transmittance_scale,
-                                            material.color_bleed_scale
-                                        ),
-                                    ),
-                                    ro_prop(
-                                        t!("Indirect Lighting").as_ref(),
-                                        "mat_indirect_lighting",
-                                        format!(
-                                            "global {}; final gather {}",
-                                            material.global_illumination,
-                                            material.final_gather
-                                        ),
-                                    ),
-                                    ro_prop(
-                                        t!("Source State").as_ref(),
-                                        "mat_source_state",
-                                        format!(
-                                            "advanced {}; anonymous {}",
-                                            material.advanced_data_present,
-                                            material.is_anonymous
-                                        ),
-                                    ),
-                                ],
-                            });
                         }
                     }
 
@@ -1590,21 +1394,10 @@ impl OpenCADStudio {
                         .map(|(handle, entity)| (*handle, entity))
                         .collect();
                     let mut sections = aggregate_sections(&local_refs, &text_style_names);
-                    sections.insert(
-                        0,
-                        crate::scene::model::object::PropSection {
-                            title: t!("Coordinates").into_owned(),
-                            props: vec![crate::entities::common::ro_prop(
-                                t!("Coordinate system").as_ref(),
-                                "coordinate_system",
-                                self.tabs[i]
-                                    .active_ucs
-                                    .as_ref()
-                                    .map(|ucs| ucs.name.clone())
-                                    .unwrap_or_else(|| "WCS".to_string()),
-                            )],
-                        },
-                    );
+                    sections.extend(aggregate_solid_history_sections(
+                        &self.tabs[i].scene.document,
+                        &local_refs.iter().map(|(handle, _)| *handle).collect::<Vec<_>>(),
+                    ));
                     ui::PropertiesPanel {
                         choice_combos: sections
                             .iter()
@@ -1790,7 +1583,12 @@ impl OpenCADStudio {
                     entity,
                     annotation_scale_handle,
                 );
-                for mut grip in dispatch::grips(contextual.as_ref()) {
+                let mut entity_grips = dispatch::grips(contextual.as_ref());
+                entity_grips.extend(crate::scene::model::solid_history::primitive_grips(
+                    &self.tabs[i].scene.document,
+                    handle,
+                ));
+                for mut grip in entity_grips {
                     // Subtract in f64: at UTM magnitudes an f32 cast before
                     // the offset costs ~1 unit and draws the grip off the wire.
                     grip.world.x -= wo[0];
@@ -1831,6 +1629,16 @@ impl OpenCADStudio {
     pub(super) fn invalidate_property_targets(&mut self, i: usize, handles: &[Handle]) {
         let mut context_object_changed = false;
         for &handle in handles {
+            // A dimension is drawn from the block holding its picture, and that
+            // picture was made under the settings just edited. Drop it so the
+            // dimension is drawn afresh — otherwise the edit changes the stored
+            // variables and nothing on screen.
+            if matches!(
+                self.tabs[i].scene.document.get_entity(handle),
+                Some(acadrust::EntityType::Dimension(_))
+            ) {
+                self.tabs[i].scene.invalidate_dim_block_recorded(handle);
+            }
             context_object_changed |= self.tabs[i]
                 .scene
                 .sync_displayed_annotation_context(handle);
@@ -2103,6 +1911,28 @@ pub(super) fn aggregate_sections(
         result = merge_sections(&result, &sections);
     }
     result
+}
+
+fn aggregate_solid_history_sections(
+    document: &acadrust::CadDocument,
+    handles: &[Handle],
+) -> Vec<crate::scene::model::object::PropSection> {
+    let mut sections = handles.iter().map(|handle| {
+        crate::scene::model::solid_history::primitive_properties(document, *handle)
+    });
+    let Some(mut merged) = sections.next() else {
+        return Vec::new();
+    };
+    if merged.is_empty() {
+        return Vec::new();
+    }
+    for next in sections {
+        if next.is_empty() {
+            return Vec::new();
+        }
+        merged = merge_sections(&merged, &next);
+    }
+    merged
 }
 
 fn merge_sections(

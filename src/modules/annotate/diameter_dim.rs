@@ -155,7 +155,7 @@ impl CadCommand for DiameterDimensionCommand {
             self.text_angle = if t.is_empty() {
                 None
             } else {
-                t.parse::<f64>().ok().map(f64::to_radians)
+                crate::entities::common::parse_typed_angle(t)
             };
             self.awaiting_angle = false;
             return Some(CmdResult::NeedPoint);
@@ -197,6 +197,7 @@ fn preview_line(a: Vec3, b: Vec3) -> WireModel {
         depth_override: None,
         fill_is_3d: false,
         fill_is_2d_solid: false,
+        render_instance: None,
         pick_tris: Vec::new(),
         pick_tris_low: Vec::new(),
             dash_from_start: false,

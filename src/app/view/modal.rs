@@ -10,44 +10,63 @@ impl OpenCADStudio {
     pub(super) fn modal_title(&self) -> String {
         use super::super::ModalKind as K;
         match self.active_modal {
-            Some(K::About) => crate::tr!("modal-about"),
-            Some(K::Shortcuts) => crate::tr!("modal-keyboard-shortcuts"),
-            Some(K::Aliases) => crate::tr!("modal-command-aliases"),
-            Some(K::Options) => crate::tr!("action-options"),
-            Some(K::FindReplace) => crate::tr!("modal-find-replace"),
-            Some(K::PluginManager) => crate::tr!("modal-plugin-manager"),
-            Some(K::UpdateNotice) => crate::tr!("modal-update-available"),
-            Some(K::Layers) => crate::tr!("modal-layer-manager"),
-            Some(K::LayerStateManager) => crate::tr!("modal-layer-state-manager"),
-            Some(K::LayerStateEditor) => crate::tr!("modal-edit-layer-state"),
-            Some(K::Plot) => crate::tr!("modal-plot"),
+            Some(K::About) => crate::tr!("modal", "about"),
+            Some(K::Shortcuts) => crate::tr!("modal", "keyboard-shortcuts"),
+            Some(K::Aliases) => crate::tr!("modal", "command-aliases"),
+            Some(K::Options) => crate::tr!("action", "options"),
+            Some(K::FindReplace) => crate::tr!("modal", "find-replace"),
+            Some(K::PluginManager) => crate::tr!("modal", "plugin-manager"),
+            Some(K::UpdateNotice) => crate::tr!("modal", "update-available"),
+            Some(K::Layers) => crate::tr!("modal", "layer-manager"),
+            Some(K::LayerStateManager) => crate::tr!("modal", "layer-state-manager"),
+            Some(K::LayerTranslator) => crate::t!("Layer Translator").into_owned(),
+            Some(K::DrawingUnits) => crate::t!("Drawing Units").into_owned(),
+            Some(K::DraftingSettings) => crate::t!("Drafting Settings").into_owned(),
+            Some(K::LayerStateEditor) => crate::tr!("modal", "edit-layer-state"),
+            Some(K::Plot) => crate::tr!("modal", "plot"),
             Some(K::PrintAll) => t!("Print All").into_owned(),
-            Some(K::LayoutManager) => crate::tr!("modal-layout-manager"),
-            Some(K::ScaleManager) => crate::tr!("modal-scale-manager"),
-            Some(K::AnnoObjectScale) => crate::tr!("modal-annotation-object-scale"),
-            Some(K::Plotstyle) => crate::tr!("modal-plot-style-editor"),
-            Some(K::TextStyle) => crate::tr!("modal-text-style-manager"),
-            Some(K::MlStyle) => crate::tr!("modal-multiline-style-manager"),
-            Some(K::TableStyle) => crate::tr!("modal-table-style-manager"),
-            Some(K::MLeaderStyle) => crate::tr!("modal-multileader-style-manager"),
-            Some(K::DimStyle) => crate::tr!("modal-dimension-style-manager"),
-            Some(K::AssocPrompt) => crate::tr!("modal-default-application"),
-            Some(K::AecDropWarning) => crate::tr!("modal-save-warning"),
+            Some(K::LayoutManager) => crate::tr!("modal", "layout-manager"),
+            Some(K::ScaleManager) => crate::tr!("modal", "scale-manager"),
+            Some(K::AnnoObjectScale) => crate::tr!("modal", "annotation-object-scale"),
+            Some(K::Plotstyle) => crate::tr!("modal", "plot-style-editor"),
+            Some(K::TextStyle) => crate::tr!("modal", "text-style-manager"),
+            Some(K::MlStyle) => crate::tr!("modal", "multiline-style-manager"),
+            Some(K::TableStyle) => crate::tr!("modal", "table-style-manager"),
+            Some(K::MLeaderStyle) => crate::tr!("modal", "multileader-style-manager"),
+            Some(K::DimStyle) => crate::tr!("modal", "dimension-style-manager"),
+            Some(K::AssocPrompt) => crate::tr!("modal", "default-application"),
+            Some(K::AecDropWarning) => crate::tr!("modal", "save-warning"),
             #[cfg(not(target_arch = "wasm32"))]
-            Some(K::FileInUse) => crate::tr!("modal-unable-save"),
+            Some(K::FileInUse) => crate::tr!("modal", "unable-save"),
             #[cfg(not(target_arch = "wasm32"))]
-            Some(K::ExternalChange) => crate::tr!("modal-drawing-changed"),
-            Some(K::LayerDeleteWarning) => crate::tr!("modal-delete-layer"),
-            Some(K::Unsaved) => crate::tr!("modal-unsaved-changes"),
-            Some(K::PointStyle) => crate::tr!("modal-point-style"),
-            Some(K::AttributeEditor) => crate::tr!("modal-attribute-editor"),
-            Some(K::SaveDialog) => crate::tr!("modal-save-drawing-as"),
-            Some(K::Recovery) => crate::tr!("modal-recovery-report"),
-            Some(K::RecoveryPrompt) => crate::tr!("modal-recovery-prompt"),
+            Some(K::ExternalChange) => crate::tr!("modal", "drawing-changed"),
+            Some(K::LayerDeleteWarning) => crate::tr!("modal", "delete-layer"),
+            Some(K::Unsaved) => crate::tr!("modal", "unsaved-changes"),
+            Some(K::PointStyle) => crate::tr!("modal", "point-style"),
+            Some(K::AttributeEditor) => crate::tr!("modal", "attribute-editor"),
+            Some(K::SaveDialog) => crate::tr!("modal", "save-drawing-as"),
+            Some(K::Recovery) => crate::tr!("modal", "recovery-report"),
+            Some(K::RecoveryPrompt) => crate::tr!("modal", "recovery-prompt"),
             None => String::new(),
         }
     }
-
+    pub(super) fn plot_modal_content<'s>(
+        &'s self,
+        extra: iced::Vector,
+    ) -> Element<'s, Message> {
+        sized_flow(
+            extra,
+            760,
+            540,
+            |flow| {
+                crate::ui::window::plot::view_window(
+                    &self.plot_dialog,
+                    self.print_all_options,
+                    flow,
+                )
+            },
+        )
+    }
     /// Build the currently-open modal dialog's content (Plan B), or `None`.
     /// Iced 0.15 measures the content first, so dialogs start at their natural
     /// size and overflowing regions become scrollable where a cap is supplied.
@@ -90,9 +109,35 @@ impl OpenCADStudio {
                 |flow| {
                     crate::ui::window::options::view_window(
                         &self.default_save_format,
+                        self.file_assoc_enabled,
                         &self.ui_theme,
                         &self.theme_color_inputs,
                         self.language,
+                        self.options_tab,
+                        self.cursor_size,
+                        self.pick_box,
+                        self.cursor_type,
+                        self.crosshair_color,
+                        &self.crosshair_color_input,
+                        flow,
+                    )
+                },
+            ),
+            super::super::ModalKind::DraftingSettings => sized_flow(
+                ex,
+                520,
+                560,
+                |flow| {
+                    crate::ui::window::drafting_settings::view_window(
+                        &self.snapper,
+                        self.show_grid,
+                        self.snapper.grid_snap(),
+                        self.ortho_mode,
+                        self.polar_mode,
+                        self.snapper.otrack_enabled,
+                        self.isometric_drafting,
+                        self.iso_plane,
+                        self.snap_angle_deg,
                         flow,
                     )
                 },
@@ -169,6 +214,26 @@ impl OpenCADStudio {
                     |flow| tab.layers.view_window(self.layer_name_col_w, flow),
                 )
             }
+            super::super::ModalKind::LayerTranslator => {
+                use crate::modules::draw::layers::laytrans;
+                let i = self.active_tab;
+                let current = self.tabs[i].active_layer.clone();
+                let sources = laytrans::source_layers(&self.tabs[i].scene, &current);
+                let state = self.layer_translator.as_ref()?;
+                sized_flow(ex, 760, 460, |flow| {
+                    crate::ui::window::layer_translator::view_window(
+                        state,
+                        sources.clone(),
+                        flow,
+                    )
+                })
+            }
+            super::super::ModalKind::DrawingUnits => {
+                let state = self.drawing_units.as_ref()?;
+                sized_flow(ex, 560, 420, |flow| {
+                    crate::ui::window::drawing_units::view_window(state, flow)
+                })
+            }
             super::super::ModalKind::LayerStateManager => {
                 let states = self.tabs[self.active_tab].scene.document.layer_states();
                 sized_flow(
@@ -231,20 +296,7 @@ impl OpenCADStudio {
                     })
                 }
             }
-            super::super::ModalKind::Plot => {
-                sized_flow(
-                    ex,
-                    760,
-                    540,
-                    |flow| {
-                        crate::ui::window::plot::view_window(
-                            &self.plot_dialog,
-                            self.print_all_options,
-                            flow,
-                        )
-                    },
-                )
-            }
+            super::super::ModalKind::Plot => self.plot_modal_content(ex),
             super::super::ModalKind::PrintAll => sized_flow(
                 ex,
                 520,
@@ -978,9 +1030,7 @@ impl OpenCADStudio {
                 }
             };
             let ds_sel = doc.dim_styles.get(&self.dimstyle_selected);
-            let read_only = ds_sel.is_some_and(|style| {
-                style.xref_reference || style.xref_dependent || !style.xref_handle.is_null()
-            });
+            let read_only = false;
             let in_use = doc.entities().any(|entity| {
                 matches!(entity, acadrust::EntityType::Dimension(dimension)
                     if dimension.base().style_name.eq_ignore_ascii_case(&self.dimstyle_selected))
@@ -1479,7 +1529,7 @@ fn unsaved_changes_dialog_window(
         column![
             text(name.to_owned()).size(14),
             iced::widget::Space::new().height(4),
-            text(crate::tr!("modal-unsaved-save-prompt"))
+            text(crate::tr!("modal", "unsaved-save-prompt"))
                 .size(12)
                 .style(dialog_muted_text_style),
             iced::widget::Space::new().height(20),

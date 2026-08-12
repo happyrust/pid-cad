@@ -4,7 +4,7 @@
 use super::util::*;
 use super::{format_size, VIEWCUBE_HIT_SIZE};
 use crate::app::helpers::{
-    ortho_constrain, parse_coord, polar_constrain_near, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis,
+    parse_coord, polar_constrain_near, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis,
     CoordKind,
 };
 use crate::app::{Message, OpenCADStudio, POLY_START_DELAY_MS};
@@ -358,15 +358,7 @@ impl OpenCADStudio {
 
     pub(in crate::app) fn apply_dimstyle_bufs(&mut self, tab: usize) {
         let doc = &mut self.tabs[tab].scene.document;
-        let read_only = doc
-            .dim_styles
-            .get(&self.dimstyle_selected)
-            .is_some_and(|style| {
-                style.xref_reference || style.xref_dependent || !style.xref_handle.is_null()
-            });
-        if read_only {
-            return;
-        }
+
         let text_style_handle = doc
             .text_styles
             .get(&self.ds_dimtxsty)
@@ -467,6 +459,29 @@ impl OpenCADStudio {
         ds.dimtofl = self.ds_dimtofl;
         ds.dimalt = self.ds_dimalt;
         ds.dimapost = self.ds_dimapost.clone();
+
+        // Same reason as a per-dimension edit: every dimension on this style is
+        // drawn from a block made under the settings that just changed, so the
+        // pictures are stale. Drop them and let each be drawn again. Without
+        // this an edit here would move the numbers and leave the drawing alone.
+        let edited = self.dimstyle_selected.clone();
+        let stale: Vec<acadrust::Handle> = self.tabs[tab]
+            .scene
+            .document
+            .entities()
+            .filter_map(|entity| match entity {
+                acadrust::EntityType::Dimension(dim)
+                    if dim.base().style_name.eq_ignore_ascii_case(&edited) =>
+                {
+                    Some(entity.common().handle)
+                }
+                _ => None,
+            })
+            .collect();
+        for handle in stale {
+            self.tabs[tab].scene.invalidate_dim_block_recorded(handle);
+        }
+
         self.command_line
             .push_output(crate::tf!("DimStyle '{}' updated.", self.dimstyle_selected).as_ref());
     }
@@ -1092,6 +1107,26 @@ pub(super) fn on_text_style_dialog_open(&mut self) -> Task<Message> {
     }
 
     pub(super) fn on_color_window_pick(&mut self, color: acadrust::types::Color) -> Task<Message> {
+                if matches!(
+                    self.color_pick_target.as_ref().map(|(target, _)| target),
+                    Some(crate::app::ColorPickTarget::PlotStyle)
+                ) {
+                    self.color_pick_target = None;
+
+                    let rgb = match color {
+                        acadrust::types::Color::Rgb { r, g, b } => Some((r, g, b)),
+                        acadrust::types::Color::Index(index) => {
+                            acadrust::types::aci_table::aci_to_rgb(index)
+                        }
+                        _ => None,
+                    };
+
+                    if let Some((r, g, b)) = rgb {
+                        self.ps_color_buf = format!("#{r:02X}{g:02X}{b:02X}");
+                    }
+
+                    return self.on_plot_style_panel_apply();
+                }
                 let s = crate::ui::color_select::color_to_aci_string(color);
                 let edit = match self.color_pick_target.take().map(|(target, _)| target) {
                     Some(crate::app::ColorPickTarget::DimStyle(f)) => Some(Message::DsEdit(f, s)),
@@ -1124,6 +1159,7 @@ pub(super) fn on_text_style_dialog_open(&mut self) -> Task<Message> {
                     Some(crate::app::ColorPickTarget::LayerState(idx)) => {
                         Some(Message::LayerStateEditorLayerColor(idx, color))
                     }
+                    Some(crate::app::ColorPickTarget::PlotStyle) => None,
                     None => None,
                 };
                 if let Some(m) = edit {
@@ -1141,11 +1177,6 @@ pub(super) fn on_text_style_dialog_open(&mut self) -> Task<Message> {
                     "dimltex_handle" | "dimltex1_handle" | "dimltex2_handle"
                 );
                 let doc = &self.tabs[i].scene.document;
-                if doc.dim_styles.get(&name).is_some_and(|style| {
-                    style.xref_reference || style.xref_dependent || !style.xref_handle.is_null()
-                }) {
-                    return Task::none();
-                }
                 let handle = if value == "Default" || value == "ByBlock" {
                     acadrust::types::Handle::NULL
                 } else if is_lt {

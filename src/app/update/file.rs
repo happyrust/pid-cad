@@ -4,7 +4,7 @@
 use super::util::*;
 use super::{format_size, VIEWCUBE_HIT_SIZE};
 use crate::app::helpers::{
-    ortho_constrain, parse_coord, polar_constrain_near, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis,
+    parse_coord, polar_constrain_near, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis,
     CoordKind,
 };
 use crate::app::{Message, OpenCADStudio, POLY_START_DELAY_MS};
@@ -220,14 +220,13 @@ fn plot_scene_content(
 }
 
 impl OpenCADStudio {
-    /// Before a save, give every cached truck solid that still has no ACIS
+    /// Before a save, give every cached solid that still has no ACIS
     /// geometry (EXTRUDE/REVOLVE/SWEEP/LOFT/boolean results) an exact modeler
-    /// body derived from its truck B-rep, so the written DWG/DXF carries real
+    /// body derived from its B-rep, so the written DWG/DXF carries real
     /// 3-D geometry other CAD apps can open instead of an empty data stream.
-    /// Curved solids that the exact planar path can't yet express are left
-    /// untouched (handled by the NURBS path).
-    #[cfg(feature = "solid3d")]
-    fn sync_truck_solids_to_acis(&mut self, i: usize) {
+    /// A body holding something the kernel has no ACIS record form for is
+    /// left untouched rather than written out half-complete.
+    fn sync_solid_models_to_acis(&mut self, i: usize) {
         use acadrust::EntityType;
         let scene = &mut self.tabs[i].scene;
         let targets: Vec<acadrust::Handle> = scene
@@ -256,15 +255,21 @@ impl OpenCADStudio {
         }
     }
 
-    #[cfg(not(feature = "solid3d"))]
-    fn sync_truck_solids_to_acis(&mut self, _i: usize) {}
-
     /// Snapshot the persisted UI preferences from live state.
     pub(in crate::app) fn current_settings(&self) -> crate::app::settings::UserSettings {
         crate::app::settings::UserSettings {
             dyn_input: self.dyn_input,
             polar: self.polar_mode,
             polar_increment_deg: self.polar_increment_deg,
+            zoom_wheel_reversed: self.zoom_wheel_reversed,
+            zoom_factor: self.zoom_factor,
+            cursor_size: self.cursor_size,
+            pick_box: self.pick_box,
+            cursor_type: self.cursor_type,
+            crosshair_color: self.crosshair_color,
+            isometric_drafting: self.isometric_drafting,
+            iso_plane: self.iso_plane,
+            snap_angle_deg: self.snap_angle_deg,
             otrack: self.snapper.otrack_enabled,
             default_assoc_prompted: self.default_assoc_prompted,
             disabled_plugins: {
@@ -299,6 +304,23 @@ impl OpenCADStudio {
         self.dyn_input = s.dyn_input;
         self.polar_mode = s.polar;
         self.polar_increment_deg = s.polar_increment_deg;
+        self.zoom_wheel_reversed = s.zoom_wheel_reversed;
+        self.zoom_factor = s.zoom_factor.clamp(3, 100);
+        self.cursor_size = s.cursor_size.clamp(1, 100);
+        self.pick_box = s.pick_box.clamp(0, 50);
+        self.cursor_type = s.cursor_type;
+        self.crosshair_color = s.crosshair_color;
+        self.crosshair_color_input = s
+            .crosshair_color
+            .map(crate::app::config::rgb_to_hex)
+            .unwrap_or_default();
+        self.isometric_drafting = s.isometric_drafting;
+        self.iso_plane = s.iso_plane;
+        self.snap_angle_deg = if s.snap_angle_deg.is_finite() {
+            s.snap_angle_deg.rem_euclid(360.0)
+        } else {
+            0.0
+        };
         // Ortho + running OSNAP are per-drawing (adopted from the header on
         // open / tab switch), not app-global, so they are not applied here.
         self.snapper.otrack_enabled = s.otrack;
@@ -531,10 +553,10 @@ impl OpenCADStudio {
                 section: self.start_section,
             },
             statusbar: self.statusbar_config.clone(),
-            properties: crate::app::config::PropertiesDockConfig {
-                side: self.properties_side,
-                width: self.properties_width,
-                auto_collapse: self.properties_auto_collapse,
+            dock: {
+                let mut dock = self.dock.clone();
+                dock.ensure_settings();
+                dock
             },
             annotation_auto_scale: self.annotation_auto_scale,
             ribbon: crate::app::config::RibbonConfig {
@@ -573,17 +595,16 @@ impl OpenCADStudio {
         // (`refresh_recent_thumbs`) — never here on the boot path.
         self.start_section = cfg.start.section;
         self.statusbar_config = cfg.statusbar;
-        self.properties_side = cfg.properties.side;
-        self.properties_width = if cfg.properties.width.is_finite() {
-            cfg.properties.width.clamp(220.0, 600.0)
-        } else {
-            250.0
-        };
-        self.properties_auto_collapse = cfg.properties.auto_collapse;
+        let mut dock = cfg.dock;
+        dock.ensure_settings();
+        self.dock = dock;
         self.annotation_auto_scale = cfg.annotation_auto_scale.clamp(-4, 4);
         self.ribbon.set_collapse_mode(cfg.ribbon.collapse);
         self.plot_dialog = cfg.plot;
         self.shortcut_bindings = cfg.shortcuts.bindings.into_iter().collect();
+        self.shortcut_bindings
+            .entry("F5".to_string())
+            .or_insert_with(|| "ISOPLANE".to_string());
     }
 
     /// Write the config only when it changed since the last write, so a toggle
@@ -1075,6 +1096,34 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 self.tabs[i].scene.material_base_dir =
                     path.parent().map(std::path::Path::to_path_buf);
                 self.tabs[i].scene.document = doc;
+                // DWG stores CLAYER as a layer handle. Resolve that handle back to
+                // the layer name after opening so the per-tab creation state and
+                // header name stay in sync. DXF already provides current_layer_name,
+                // so keep it as a fallback.
+                let current_layer = {
+                    let doc = &self.tabs[i].scene.document;
+
+                    doc.layers
+                        .iter()
+                        .find(|layer| layer.handle == doc.header.current_layer_handle)
+                        .map(|layer| (layer.name.clone(), layer.handle))
+                        .or_else(|| {
+                            doc.layers
+                                .get(&doc.header.current_layer_name)
+                                .map(|layer| (layer.name.clone(), layer.handle))
+                        })
+                        .or_else(|| {
+                            doc.layers
+                                .get("0")
+                                .map(|layer| (layer.name.clone(), layer.handle))
+                        })
+                };
+
+                if let Some((name, handle)) = current_layer {
+                    self.tabs[i].scene.document.header.current_layer_name = name.clone();
+                    self.tabs[i].scene.document.header.current_layer_handle = handle;
+                    self.tabs[i].active_layer = name;
+                }
                 // A file saved without the built-in Standard styles (foreign
                 // or damaged) gets them re-seeded so nothing dangles (#366).
                 crate::app::style_ops::ensure_standard_styles(
@@ -1319,7 +1368,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         self.stamp_header_sysvars(i);
         self.tabs[i].scene.document.header.user_real1 =
             self.tabs[i].scene.annotation_scale as f64;
-        self.sync_truck_solids_to_acis(i);
+        self.sync_solid_models_to_acis(i);
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1363,7 +1412,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
             && destination_is_current
         {
             self.command_line.push_error_once(
-                crate::tr!("recovery-save-new-file-required").as_ref(),
+                crate::tr!("recovery", "save-new-file-required").as_ref(),
             );
             self.restore_failed_save_continuation(continuation, i);
             self.active_tab = i;
@@ -2011,7 +2060,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     let close = self.close_save_dialog_window();
                     sync_annotation_scale_header(&mut self.tabs[i].scene);
                     self.stamp_header_sysvars(i);
-                    self.sync_truck_solids_to_acis(i);
+                    self.sync_solid_models_to_acis(i);
                     self.stamp_thumbnail(i, version);
                     let mut recent_task = Task::none();
                     let saved = match crate::io::save_to_bytes(
@@ -3301,10 +3350,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 }
                 Task::none()
             }
-            M::SetCurrent => {
-                if self.print_all_options {
-                    return Task::none();
-                }
+            M::SetCurrent => { 
                 self.apply_dialog_to_layout();
                 self.command_line.push_info(crate::t!("Page setup applied to the layout.").as_ref());
                 Task::none()
@@ -3407,7 +3453,6 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 self.plot_dialog.name_rename = false;
                 Task::none()
             }
-            M::Preview if self.print_all_options => Task::none(),
             M::Preview => self.on_plot_dlg_commit(true),
             M::Commit if self.print_all_options => {
                 if self.plot_dialog.style_missing {
@@ -4108,8 +4153,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                         if let Ok(sc) = self.ps_screening_buf.trim().parse::<u8>() {
                             entry.screening = sc.min(100);
                         }
-                        self.command_line
-                            .push_output(crate::tf!("Plot style ACI {aci} updated.").as_ref());
+
                     }
                 } else {
                     // No table loaded: create an identity table and apply.

@@ -28,6 +28,12 @@ use crate::ui::statusbar::status_menu::Entry as StatusMenuEntry;
 use crate::ui::wrap_bar::WrapBar;
 use crate::t;
 
+/// Height of one status-bar row. Matches the drawing-tab strip above it so the
+/// three horizontal strips — tabs, status bar, command line — line up, and it
+/// is also the reach a status-bar menu keeps around itself (see
+/// `status_menu::menu_bar`).
+pub const ROW_HEIGHT: f32 = 30.0;
+
 const ST_ANNO_VISIBILITY: &[u8] = include_bytes!("../../../assets/icons/scale_list.svg");
 const ST_ANNO_AUTO_ADD: &[u8] = include_bytes!("../../../assets/icons/add_scale.svg");
 const ST_VP_SCALE_SYNC: &[u8] = include_bytes!("../../../assets/icons/sync.svg");
@@ -65,6 +71,8 @@ impl StatusBar {
         polar_increment_deg: f32,
         dyn_input: bool,
         otrack: bool,
+        isometric_drafting: bool,
+        iso_plane: crate::app::settings::IsoPlane,
         layouts: Vec<String>,
         block_tabs: Vec<String>,
         reorderable_layouts: Vec<String>,
@@ -102,8 +110,8 @@ impl StatusBar {
         picking: bool,
         // True while clean-screen mode hides the ribbon and side panels.
         clean_screen: bool,
-        // Drawing units (INSUNITS) for the units pill.
-        insertion_units: i16,
+        // LUNITS — how lengths are written, for the units pill.
+        linear_format: i16,
         // True when objects are hidden by Isolate / Hide.
         isolation_active: bool,
         // Whether entity transparency is shown (Transparency pill state).
@@ -291,7 +299,11 @@ impl StatusBar {
                     osnap_active,
                     snapper.snap_enabled,
                     tooltip_hidden,
-                    crate::ui::popup::snap_popup::menu_entries(snapper),
+                    crate::ui::popup::snap_popup::menu_entries(
+                        snapper,
+                        isometric_drafting,
+                        iso_plane,
+                    ),
                 )
                 .into(),
             );
@@ -353,11 +365,13 @@ impl StatusBar {
             pills.push(
                 status_menu::menu_bar(
                     menu_tip(
-                        popup_pill(t!(crate::ui::popup::units_popup::unit_short(insertion_units))),
-                        t!("Drawing Units (INSUNITS)\nClick to change"),
+                        popup_pill(t!(crate::modules::draw::units::linear_format_short(
+                            linear_format
+                        ))),
+                        t!("Units (LUNITS)\nHow lengths are written\nClick to change"),
                         tooltip_hidden,
                     ),
-                    crate::ui::popup::units_popup::menu_entries(insertion_units),
+                    crate::ui::popup::units_popup::menu_entries(linear_format),
                     140.0,
                 )
                 .into(),
@@ -526,7 +540,7 @@ impl StatusBar {
             .vertical_spacing(0.0);
 
         let wrap = WrapBar::new(left_area.into(), right_status.into())
-            .min_row_h(30.0)
+            .min_row_h(ROW_HEIGHT)
             .justify_end(true);
 
         container(wrap)
@@ -554,8 +568,15 @@ impl StatusBar {
 
 // ── Coordinate readout ────────────────────────────────────────────────────
 
+/// The readout, in the drawing's own linear units.
+///
+/// Lengths went out at four decimal places whatever the drawing asked for, so a
+/// drawing set to architectural units read its coordinates in decimals, and one
+/// asking for two places got four. `format_length` is the same helper the
+/// properties panel formats through, so both now say a length the same way.
 fn format_coords(cursor: glam::DVec3, last: Option<glam::DVec3>, mode: i16, picking: bool) -> String {
-    let abs = |p: glam::DVec3| format!("{:.4}, {:.4}, {:.4}", p.x, p.y, p.z);
+    use crate::entities::common::format_length as len;
+    let abs = |p: glam::DVec3| format!("{}, {}, {}", len(p.x), len(p.y), len(p.z));
     match mode {
         // Static: show the last picked point; the readout freezes between picks.
         0 => abs(last.unwrap_or(cursor)),
@@ -565,11 +586,15 @@ fn format_coords(cursor: glam::DVec3, last: Option<glam::DVec3>, mode: i16, pick
             (true, Some(l)) => {
                 let d = cursor - l;
                 let dist = (d.x * d.x + d.y * d.y).sqrt();
-                let mut ang = d.y.atan2(d.x).to_degrees();
-                if ang < 0.0 {
-                    ang += 360.0;
-                }
-                format!("{dist:.4} < {ang:.2}\u{b0}")
+                // A bearing, so it is counted from the drawing's zero and runs
+                // the way the drawing says — and comes back out in the same
+                // form the polar input accepts.
+                let ang = d.y.atan2(d.x);
+                format!(
+                    "{} < {}",
+                    len(dist),
+                    crate::entities::common::format_direction(ang)
+                )
             }
             _ => abs(cursor),
         },

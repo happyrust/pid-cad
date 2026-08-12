@@ -5,7 +5,7 @@ use super::util::*;
 use crate::ui::window::block_palette::BlockPaletteMsg;
 use super::{format_size, VIEWCUBE_HIT_SIZE};
 use crate::app::helpers::{
-    ortho_constrain, parse_coord, polar_constrain_near, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis,
+    parse_coord, polar_constrain_near, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis,
     CoordKind,
 };
 use crate::app::{Message, OpenCADStudio, POLY_START_DELAY_MS};
@@ -107,17 +107,8 @@ impl OpenCADStudio {
 
 
 pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEvent) -> Task<Message> {
-                // On the Start page there is no drawing to act on, so a tool that
-                // touches the scene is inert — point the user at New / Open
-                // instead of running it into the empty welcome tab (#299).
-                //
-                // Commands are exempt: `dispatch_command` already decides which
-                // ones stand alone (About, Donate, Report, the web link…) and
-                // reports the rest. Refusing them here shadowed that list and
-                // killed the welcome page's own buttons, which by definition can
-                // only ever be clicked while `is_start` holds (#388, #389).
-                // Keep the policy in one place — this door must not second-guess
-                // it. Every other event below mutates the scene or its panels.
+                // Commands use `start_allowed`; other events need a drawing
+                // and stay blocked on the Start page (#299, #388, #389).
                 if self.tabs[self.active_tab].is_start && !matches!(event, ModuleEvent::Command(_)) {
                     self.ribbon.close_dropdown();
                     self.command_line
@@ -143,6 +134,7 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                             && self.active_modal.is_none()
                             && !self.tabs[i].pan_mode
                             && !self.tabs[i].orbit_mode
+                            && !self.tabs[i].zoom_dynamic_mode
                         {
                             self.ribbon.deactivate_tool();
                         }
@@ -158,20 +150,20 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                         self.tabs[i].properties = PropertiesPanel::empty();
                         self.command_line.push_output(crate::t!("Scene cleared.").as_ref());
                     }
-                    ModuleEvent::SetWireframe(w) => {
-                        let i = self.active_tab;
-                        self.tabs[i].wireframe = w;
-                        self.ribbon.set_wireframe(w);
-                        self.tabs[i].visual_style = if w {
-                            "Wireframe".into()
-                        } else {
-                            "Shaded".into()
-                        };
-                        self.command_line.push_output(if w {
-                            "Visual style: Wireframe"
-                        } else {
-                            "Visual style: Shaded"
-                        });
+                    ModuleEvent::SetVisualStyle(name) => {
+                        use crate::modules::view::visual_style;
+                        match visual_style::mode_for_keyword(&name) {
+                            Some(mode) => return Task::done(Message::SetRenderMode(mode)),
+                            None => {
+                                // Name the styles that do exist, from the same
+                                // list every other caller reads.
+                                self.command_line.push_error(
+                                    crate::tf!("Unknown visual style \"{name}\".").as_ref(),
+                                );
+                                self.command_line
+                                    .push_info(visual_style::keyword_prompt());
+                            }
+                        }
                     }
                     ModuleEvent::ToggleLayers => {
                         return Task::done(Message::ToggleLayers);
@@ -535,18 +527,6 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                 self.refresh_block_palette();
                 iced::Task::none()
             }
-            BlockPaletteMsg::ToggleBar => {
-                // Collapse bar (mirrors the Properties panel).
-                self.block_palette_expanded ^= true;
-                if self.block_palette_expanded {
-                    self.refresh_block_palette();
-                }
-                iced::Task::none()
-            }
-            BlockPaletteMsg::Close => {
-                self.show_block_palette = false;
-                iced::Task::none()
-            }
             BlockPaletteMsg::PickFile => iced::Task::perform(
                 async {
                     let handle = rfd::AsyncFileDialog::new()
@@ -584,6 +564,127 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
             }
             BlockPaletteMsg::Insert(name) => {
                 self.start_block_placement(&name);
+                iced::Task::none()
+            }
+        }
+    }
+
+    /// Dock chrome interaction (grab / pin / resize / hover / move) applied to
+    /// whichever panel the message names.
+    pub(super) fn on_dock(&mut self, m: crate::ui::dock::DockMsg) -> iced::Task<Message> {
+        use crate::app::config::DockSide;
+        use crate::ui::dock::{DockMsg, PanelId};
+        match m {
+            DockMsg::DockGrab(id) => {
+                self.dock_dragging = Some(id);
+                self.dock_resizing = None;
+                self.dock_drag_last = None;
+                self.dock_drag_target = self.dock.location(id);
+                self.dock_expanded = Some(id);
+                iced::Task::none()
+            }
+            DockMsg::ResizeGrab(id) => {
+                self.dock_resizing = Some(id);
+                self.dock_dragging = None;
+                self.dock_drag_last = None;
+                self.dock_drag_target = None;
+                self.dock_expanded = Some(id);
+                iced::Task::none()
+            }
+            DockMsg::WidthReset(id) => {
+                self.dock.reset_width(id);
+                self.save_config();
+                iced::Task::none()
+            }
+            DockMsg::AutoCollapseToggle(id) => {
+                let on = !self.dock.auto_collapse(id);
+                self.dock.set_auto_collapse(id, on);
+                self.dock_expanded = if on { None } else { Some(id) };
+                self.save_config();
+                iced::Task::none()
+            }
+            DockMsg::Close(id) => {
+                match id {
+                    PanelId::BlockPalette => {
+                        self.show_block_palette = false;
+                        self.block_palette.placing = None;
+                    }
+                    PanelId::Properties => {
+                        self.show_properties = false;
+                        self.ribbon.set_properties(false);
+                    }
+                }
+                if self.dock_expanded == Some(id) {
+                    self.dock_expanded = None;
+                }
+                if self.dock_dragging == Some(id) {
+                    self.dock_dragging = None;
+                }
+                if self.dock_resizing == Some(id) {
+                    self.dock_resizing = None;
+                }
+                iced::Task::none()
+            }
+            DockMsg::Hover(id) => {
+                // Ignored while dragging/resizing: the pointer is over the
+                // drag preview, not a rail, so a hover must not collapse the
+                // panel being dragged or repoint the resize target.
+                if self.dock_dragging.is_none() && self.dock_resizing.is_none() {
+                    self.dock_expanded = Some(id);
+                }
+                iced::Task::none()
+            }
+            DockMsg::HoverExit => {
+                if self.dock_dragging.is_none() && self.dock_resizing.is_none() {
+                    if let Some(id) = self.dock_expanded {
+                        if self.dock.auto_collapse(id) {
+                            self.dock_expanded = None;
+                        }
+                    }
+                }
+                iced::Task::none()
+            }
+            DockMsg::DragMove(point) => {
+                if self.dock_dragging.is_some() {
+                    let side = if point.x < self.win_size.0 * 0.5 {
+                        DockSide::Left
+                    } else {
+                        DockSide::Right
+                    };
+                    let index = crate::ui::dock::drop_index(
+                        point.y,
+                        std::cmp::max(self.dock.len(side), 1),
+                        self.win_size.1,
+                    );
+                    self.dock_drag_target = Some((side, index));
+                } else if let Some(id) = self.dock_resizing {
+                    if let Some(last) = self.dock_drag_last {
+                        let dx = point.x - last.x;
+                        let delta = match self.dock.location(id) {
+                            Some((DockSide::Left, _)) => dx,
+                            _ => -dx,
+                        };
+                        let cur = self.dock.settings(id).width + delta;
+                        self.dock.set_width(id, cur);
+                    }
+                }
+                if self.dock_dragging.is_some() || self.dock_resizing.is_some() {
+                    self.dock_drag_last = Some(point);
+                }
+                iced::Task::none()
+            }
+            DockMsg::DragRelease => {
+                if let Some(id) = self.dock_dragging {
+                    if let Some((side, index)) = self.dock_drag_target {
+                        if self.dock.dock(id, side, index) {
+                            self.save_config();
+                        }
+                    }
+                }
+                self.dock_dragging = None;
+                self.dock_resizing = None;
+                self.dock_drag_last = None;
+                self.dock_drag_target = None;
                 iced::Task::none()
             }
         }
@@ -949,16 +1050,50 @@ mod tests {
     }
 
     #[test]
-    fn blockpalette_collapse_and_close_toggle_state() {
+    fn blockpalette_pin_toggles_autocollapse_and_close_hides() {
         let mut app = fresh();
         app.show_block_palette = true;
-        app.block_palette_expanded = true;
-        let _ = app.on_block_palette(BlockPaletteMsg::ToggleBar);
-        assert!(!app.block_palette_expanded, "collapse hides the panel body");
-        let _ = app.on_block_palette(BlockPaletteMsg::ToggleBar);
-        assert!(app.block_palette_expanded, "bar click re-expands the panel");
-        let _ = app.on_block_palette(BlockPaletteMsg::Close);
+        let id = crate::ui::dock::PanelId::BlockPalette;
+        let _ = app.on_dock(crate::ui::dock::DockMsg::AutoCollapseToggle(id));
+        assert!(app.dock.auto_collapse(id), "pin enables auto-collapse");
+        let _ = app.on_dock(crate::ui::dock::DockMsg::AutoCollapseToggle(id));
+        assert!(!app.dock.auto_collapse(id), "second pin disables auto-collapse");
+        let _ = app.on_dock(crate::ui::dock::DockMsg::Close(id));
         assert!(!app.show_block_palette, "close dismisses the sidebar");
+    }
+
+    #[test]
+    fn blockpalette_dock_moves_to_other_side_and_persists() {
+        let mut app = fresh();
+        // Tests load the user's persisted config; reset the dock to a known
+        // state so this stays hermetic.
+        app.dock = Default::default();
+        let id = crate::ui::dock::PanelId::BlockPalette;
+        assert_eq!(
+            app.dock.location(id),
+            Some((crate::app::config::DockSide::Right, 0))
+        );
+        let _ = app.on_dock(crate::ui::dock::DockMsg::DockGrab(id));
+        app.win_size = (1600.0, 900.0).into();
+        let _ = app.on_dock(crate::ui::dock::DockMsg::DragMove(iced::Point::new(100.0, 100.0)));
+        assert_eq!(
+            app.dock_drag_target,
+            Some((crate::app::config::DockSide::Left, 0))
+        );
+        let _ = app.on_dock(crate::ui::dock::DockMsg::DragRelease);
+        assert_eq!(
+            app.dock.location(id),
+            Some((crate::app::config::DockSide::Left, 0))
+        );
+    }
+
+    #[test]
+    fn blockpalette_width_reset() {
+        let mut app = fresh();
+        let id = crate::ui::dock::PanelId::BlockPalette;
+        app.dock.set_width(id, 500.0);
+        let _ = app.on_dock(crate::ui::dock::DockMsg::WidthReset(id));
+        assert_eq!(app.dock.settings(id).width, 260.0);
     }
 
     #[test]

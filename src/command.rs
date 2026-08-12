@@ -566,8 +566,9 @@ impl CadCommand for KeywordCommand {
             // `None` would hand the same text to the command a second time.
             None => {
                 let up = t.to_uppercase();
-                let Some((_, keyword, value_prompt)) =
-                    self.options.iter().find(|(_, k, _)| k.eq_ignore_ascii_case(&up))
+                let Some((_, keyword, value_prompt)) = self.options.iter().find(|(label, k, _)| {
+                    k.eq_ignore_ascii_case(&up) || label.eq_ignore_ascii_case(t)
+                })
                 else {
                     // Unknown verb — keep prompting rather than dispatch garbage.
                     return Some(CmdResult::NeedPoint);
@@ -873,7 +874,170 @@ impl CadCommand for SelectThenValueCommand {
         CmdResult::Dispatch(format!("{} ", self.name))
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TCountStep {
+    Start,
+    Increment,
+    Placement,
+}
 
+/// Interactive front-end for TCOUNT.
+///
+/// After gathering the text selection it asks for:
+/// 1. starting number,
+/// 2. increment,
+/// 3. placement mode (Overwrite / Prefix / Suffix).
+///
+/// The actual entity modification remains in the inline TCOUNT handler.
+pub struct TCountCommand {
+    gathering: bool,
+    selected: Vec<Handle>,
+    step: TCountStep,
+    start: i64,
+    increment: i64,
+}
+
+impl TCountCommand {
+    pub fn new(has_selection: bool) -> Self {
+        Self {
+            gathering: !has_selection,
+            selected: Vec::new(),
+            step: TCountStep::Start,
+            start: 1,
+            increment: 1,
+        }
+    }
+
+    fn dispatch(&self, placement: &str) -> CmdResult {
+        CmdResult::Dispatch(format!(
+            "TCOUNT {} {} {}",
+            self.start, self.increment, placement
+        ))
+    }
+}
+
+impl CadCommand for TCountCommand {
+    fn name(&self) -> &'static str {
+        "TCOUNT"
+    }
+
+    fn prompt(&self) -> String {
+        if self.gathering {
+            return crate::t!("TCOUNT  select text objects, then press Enter:").into_owned();
+        }
+
+        match self.step {
+            TCountStep::Start => {
+                let start = self.start;
+                crate::tf!("TCOUNT  starting number <{start}>:").into_owned()
+            }
+            TCountStep::Increment => {
+                let increment = self.increment;
+                crate::tf!("TCOUNT  increment <{increment}>:").into_owned()
+            }
+            TCountStep::Placement => {
+                crate::t!("TCOUNT  placement [Overwrite/Prefix/Suffix] <Overwrite>:").into_owned()
+            }
+        }
+    }
+
+    fn options(&self) -> Vec<CmdOption> {
+        if self.gathering || self.step != TCountStep::Placement {
+            return Vec::new();
+        }
+
+        vec![
+            CmdOption::new("Overwrite", "O"),
+            CmdOption::new("Prefix", "P"),
+            CmdOption::new("Suffix", "S"),
+        ]
+    }
+
+    fn wants_text_input(&self) -> bool {
+        !self.gathering
+    }
+
+    fn is_selection_gathering(&self) -> bool {
+        self.gathering
+    }
+
+    fn on_selection_complete(&mut self, handles: Vec<Handle>) -> CmdResult {
+        self.selected = handles;
+        CmdResult::NeedPoint
+    }
+
+    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        if self.gathering {
+            return None;
+        }
+
+        let t = text.trim();
+
+        if t.is_empty() {
+            return None;
+        }
+
+        match self.step {
+            TCountStep::Start => {
+                if let Ok(value) = t.parse::<i64>() {
+                    self.start = value;
+                    self.step = TCountStep::Increment;
+                }
+                Some(CmdResult::NeedPoint)
+            }
+
+            TCountStep::Increment => {
+                if let Ok(value) = t.parse::<i64>() {
+                    self.increment = value;
+                    self.step = TCountStep::Placement;
+                }
+                Some(CmdResult::NeedPoint)
+            }
+
+            TCountStep::Placement => {
+                let placement = match t.to_uppercase().as_str() {
+                    "O" | "OVERWRITE" => "O",
+                    "P" | "PREFIX" => "P",
+                    "S" | "SUFFIX" => "S",
+                    _ => return Some(CmdResult::NeedPoint),
+                };
+
+                Some(self.dispatch(placement))
+            }
+        }
+    }
+
+    fn on_point(&mut self, _pt: DVec3) -> CmdResult {
+        CmdResult::NeedPoint
+    }
+
+    fn on_enter(&mut self) -> CmdResult {
+        if self.gathering {
+            if self.selected.is_empty() {
+                return CmdResult::Cancel;
+            }
+
+            self.gathering = false;
+            return CmdResult::NeedPoint;
+        }
+
+        match self.step {
+            TCountStep::Start => {
+                self.start = 1;
+                self.step = TCountStep::Increment;
+                CmdResult::NeedPoint
+            }
+
+            TCountStep::Increment => {
+                self.increment = 1;
+                self.step = TCountStep::Placement;
+                CmdResult::NeedPoint
+            }
+
+            TCountStep::Placement => self.dispatch("O"),
+        }
+    }
+}
 /// Generic front-end for a two-value command that operates on the current
 /// selection (POLYSOLID width + height on a selected polyline). Gathers a
 /// selection first when none is set, prompts for two values, and dispatches
@@ -990,11 +1154,12 @@ pub enum CmdResult {
     /// Commit an acadrust entity to the document and end the command.
     CommitAndExit(EntityType),
     /// Commit a Model-tab 3D solid: the acadrust entity (for selection /
-    /// persistence) plus its truck B-rep (cached for boolean ops + shaded
+    /// persistence) plus its B-rep (cached for boolean ops + shaded
     /// rendering). Ends the command.
     CommitSolid {
         entity: EntityType,
-        solid: Box<truck_modeling::Solid>,
+        solid: Box<cadkernel::brep::Body>,
+        history: acadrust::objects::SolidHistoryOperation,
     },
     /// Commit an acadrust entity, end the command, and open the in-place text
     /// editor on it (used by MLEADER to type the annotation after placement).
@@ -1034,6 +1199,15 @@ pub enum CmdResult {
     CancelForSpaceChange,
     /// End the selection-gather phase and re-dispatch the named command
     /// with the gathered handles installed as the active scene selection.
+    /// Select by a path the user picked point by point. `closed` polygons take
+    /// what they enclose, or merely touch when `crossing`; an open fence takes
+    /// only what it actually cuts. The host owns the hit test, so the command
+    /// hands over the geometry rather than the answer. (#596)
+    SelectByPath {
+        path: Vec<[f64; 2]>,
+        closed: bool,
+        crossing: bool,
+    },
     Relaunch(String, Vec<Handle>),
     /// End the command and dispatch the given command string. Used by an
     /// interactive front-end that gathered its arguments step-by-step and
@@ -1446,6 +1620,11 @@ pub trait CadCommand: Send {
     /// TRIM/EXTEND use it for the shift-select swap (Shift+click extends
     /// during TRIM and trims during EXTEND, #336). Default no-op.
     fn set_shift(&mut self, _shift: bool) {}
+
+    /// Constrain the cursor to a construction axis for this step.
+    fn cursor_axis(&self) -> Option<(DVec3, DVec3)> {
+        None
+    }
 
     /// Mid-command Ctrl+Z: a multi-point drawing command can take the undo
     /// itself (PLINE pops its last vertex) instead of the document undo

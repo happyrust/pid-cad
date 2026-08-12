@@ -1,4 +1,9 @@
 use acadrust::entities::{BoundaryEdge, Hatch};
+use cadkernel::geom2d::{
+    Arc as KernelArc, Curve as KernelCurve, Ellipse as KernelEllipse,
+    EllipseArc as KernelEllipseArc, Line as KernelLine, NurbsCurve as KernelNurbs,
+    Parameterization, Polyline as KernelPolyline, PolylineVertex as KernelVertex,
+};
 use glam::Vec3;
 use crate::t;
 
@@ -6,55 +11,133 @@ use crate::command::EntityTransform;
 use crate::entities::common::{center_grip, circle_grip, edit_angle_prop as edit_angle, edit_prop as edit, parse_f64, ro_prop as ro};
 use crate::entities::traits::{FallbackTess, Grippable, PropertyEditable, Transformable};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
-use crate::scene::convert::tess_util::{arc_segments, arc_signed_span, wire_chord_tol, FallbackGeometry};
+use crate::scene::convert::tess_util::FallbackGeometry;
 use crate::scene::model::wire_model::SnapHint;
 
-/// Signed area of every boundary path, summed via the shoelace formula over
-/// the OCS boundary vertices (bulge/curved edges approximated by their end
-/// points). Returns the absolute total area.
+/// The area the hatch's boundary paths enclose.
+///
+/// Summed edge by edge through the kernel, which measures what each edge
+/// actually encloses rather than what a polygon through some of its points
+/// would. The version this replaced pushed an arc's *centre* into the ring
+/// and a spline's control points — neither of which is on the boundary — so
+/// the number it produced was not the area of anything.
+///
+/// Outer paths and their holes both contribute; the sign of a loop says
+/// which it is, so the magnitude of the sum is the region's own area.
 fn boundary_area(h: &Hatch) -> f64 {
     let mut area = 0.0;
     for path in &h.paths {
-        let mut ring: Vec<[f64; 2]> = Vec::new();
+        let mut path_area = 0.0;
+        let mut ends: Vec<[f64; 2]> = Vec::new();
         for edge in &path.edges {
-            match edge {
-                BoundaryEdge::Polyline(poly) => {
-                    for v in &poly.vertices {
-                        ring.push([v.x, v.y]);
-                    }
-                }
-                BoundaryEdge::Line(l) => {
-                    ring.push([l.start.x, l.start.y]);
-                    ring.push([l.end.x, l.end.y]);
-                }
-                BoundaryEdge::CircularArc(a) => ring.push([a.center.x, a.center.y]),
-                BoundaryEdge::EllipticArc(e) => ring.push([e.center.x, e.center.y]),
-                BoundaryEdge::Spline(s) => {
-                    let src = if !s.fit_points.is_empty() {
-                        s.fit_points.iter().map(|p| [p.x, p.y]).collect::<Vec<_>>()
-                    } else {
-                        s.control_points
-                            .iter()
-                            .map(|p| [p.x, p.y])
-                            .collect::<Vec<_>>()
-                    };
-                    ring.extend(src);
-                }
-            }
+            let Some(curve) = edge_curve(edge) else {
+                continue;
+            };
+            path_area += curve.enclosed_area();
+            ends.push(curve.point_at(0.0));
+            ends.push(curve.point_at(1.0));
         }
-        let n = ring.len();
-        if n < 3 {
-            continue;
+        // Edges are stored as separate pieces, so the chain has to be closed
+        // by the chord from the last end back to the first — the same closing
+        // an open polyline gets.
+        if let (Some(first), Some(last)) = (ends.first(), ends.last()) {
+            path_area += 0.5 * (last[0] * first[1] - first[0] * last[1]);
         }
-        let mut acc = 0.0;
-        for i in 0..n {
-            let a = ring[i];
-            let b = ring[(i + 1) % n];
-            acc += a[0] * b[1] - b[0] * a[1];
-        }
-        area += acc.abs() * 0.5;
+        area += path_area.abs();
     }
     area
+}
+
+/// A hatch boundary edge as a kernel curve, in the hatch's own OCS.
+pub(crate) fn edge_curve(edge: &BoundaryEdge) -> Option<KernelCurve> {
+    Some(match edge {
+        BoundaryEdge::Line(l) => KernelCurve::Line(KernelLine {
+            start: [l.start.x, l.start.y],
+            end: [l.end.x, l.end.y],
+        }),
+        BoundaryEdge::CircularArc(a) => {
+            let (start, end) = if a.counter_clockwise {
+                (a.start_angle, a.end_angle)
+            } else {
+                (
+                    std::f64::consts::TAU - a.end_angle,
+                    std::f64::consts::TAU - a.start_angle,
+                )
+            };
+            KernelCurve::Arc(KernelArc {
+                centre: [a.center.x, a.center.y],
+                radius: a.radius,
+                start_angle: start,
+                end_angle: end,
+            })
+        }
+        BoundaryEdge::EllipticArc(e) => {
+            let major = (e.major_axis_endpoint.x, e.major_axis_endpoint.y);
+            let radius = major.0.hypot(major.1);
+            if radius < 1e-12 {
+                return None;
+            }
+            let (start, end) = if e.counter_clockwise {
+                (e.start_angle, e.end_angle)
+            } else {
+                (
+                    std::f64::consts::TAU - e.end_angle,
+                    std::f64::consts::TAU - e.start_angle,
+                )
+            };
+            KernelCurve::Ellipse(KernelEllipseArc {
+                ellipse: KernelEllipse {
+                    centre: [e.center.x, e.center.y],
+                    major_radius: radius,
+                    minor_radius: radius * e.minor_axis_ratio,
+                    major_axis: [major.0 / radius, major.1 / radius],
+                },
+                start_parameter: start,
+                end_parameter: end,
+            })
+        }
+        BoundaryEdge::Polyline(poly) => {
+            let vertices: Vec<KernelVertex> = poly
+                .vertices
+                .iter()
+                .map(|v| KernelVertex {
+                    position: [v.x, v.y],
+                    // A boundary polyline stores its bulge in the vertex's
+                    // third component.
+                    bulge: v.z,
+                })
+                .collect();
+            if vertices.len() < 2 {
+                return None;
+            }
+            KernelCurve::Polyline(KernelPolyline {
+                vertices,
+                closed: poly.is_closed,
+            })
+        }
+        BoundaryEdge::Spline(s) => {
+            let control: Vec<[f64; 2]> = s.control_points.iter().map(|p| [p.x, p.y]).collect();
+            // A boundary spline's control points carry their weight in the
+            // third component; for a polynomial one it is unset and the
+            // kernel's own default of all-ones applies.
+            let weights = s
+                .rational
+                .then(|| s.control_points.iter().map(|p| p.z).collect::<Vec<f64>>());
+            let curve = KernelNurbs::new(
+                s.degree.max(1) as usize,
+                control,
+                s.knots.clone(),
+                weights,
+            )
+            .or_else(|| {
+                // A fit-point boundary spline, interpolated the same way a
+                // SPLINE entity's is.
+                let fit: Vec<[f64; 2]> = s.fit_points.iter().map(|p| [p.x, p.y]).collect();
+                KernelNurbs::interpolate(&fit, None, None, Parameterization::Chord)
+            })?;
+            KernelCurve::Nurbs(curve)
+        }
+    })
 }
 
 /// Mean of every boundary edge point (OCS) — the centroid used to place the
@@ -912,146 +995,41 @@ impl FallbackTess for Hatch {
         let mut snap_pts: Vec<(Vec3, SnapHint)> = Vec::new();
         for path in &self.paths {
             for edge in &path.edges {
+                let Some(curve) = edge_curve(edge) else {
+                    continue;
+                };
+                let local = curve
+                    .tessellate_angle(cadkernel::tessellation::DEFAULT_ANGLE);
+                if local.len() < 2 {
+                    continue;
+                }
+                if !pts.is_empty() {
+                    pts.push([f64::NAN; 3]);
+                }
+                let world: Vec<[f64; 3]> = local
+                    .into_iter()
+                    .map(|point| to_wcs(point[0], point[1]))
+                    .collect();
                 match edge {
-                    BoundaryEdge::Polyline(poly) => {
-                        // Hatch-boundary polyline vertices encode bulge in
-                        // `Vector3.z`; straight segments emit just the
-                        // start vertex, bulged segments tessellate the arc
-                        // between v0 → v1.
-                        let verts = &poly.vertices;
-                        let count = verts.len();
-                        if count == 0 {
-                            continue;
-                        }
-                        // Break the wire between this polyline and whatever
-                        // preceded it — without the separator the renderer
-                        // draws a ghost segment from the previous edge / path
-                        // straight to this polyline's first vertex, which
-                        // shows up as a stray boundary line between hatch
-                        // regions.
-                        if !pts.is_empty() {
-                            pts.push([f64::NAN; 3]);
-                        }
-                        let start_idx = pts.len();
-                        let seg_count = if poly.is_closed {
-                            count
-                        } else {
-                            count.saturating_sub(1)
-                        };
-                        for i in 0..seg_count {
-                            let v0 = &verts[i];
-                            let v1 = &verts[(i + 1) % count];
-                            let bulge = v0.z;
-                            let arc = if bulge.abs() < 1e-9 {
-                                None
-                            } else {
-                                crate::entities::common::BulgeArc::from_bulge(
-                                    [v0.x, v0.y],
-                                    [v1.x, v1.y],
-                                    bulge,
-                                )
-                            };
-                            let Some(arc) = arc else {
-                                let p = to_wcs(v0.x, v0.y);
-                                pts.push(p);
-                                key_verts.push(p);
-                                continue;
-                            };
-                            let segs = arc_segments(
-                                arc.radius,
-                                arc.sweep.abs(),
-                                wire_chord_tol(arc.radius),
-                            );
-                            for j in 0..segs {
-                                let s = arc.sample(j as f64 / segs as f64);
-                                let p = to_wcs(s[0], s[1]);
-                                pts.push(p);
-                                if j == 0 {
-                                    key_verts.push(p);
-                                }
-                            }
-                        }
-                        // Close the loop visually for closed polylines by
-                        // returning to the first emitted point.
-                        if poly.is_closed {
-                            if let Some(first) = pts.get(start_idx).cloned() {
-                                if first[0].is_finite() {
-                                    pts.push(first);
-                                }
-                            }
-                        } else if let Some(last) = verts.last() {
-                            let p = to_wcs(last.x, last.y);
-                            pts.push(p);
-                            key_verts.push(p);
-                        }
-                    }
-                    BoundaryEdge::Line(ln) => {
-                        let p0 = to_wcs(ln.start.x, ln.start.y);
-                        let p1 = to_wcs(ln.end.x, ln.end.y);
-                        if !pts.is_empty() {
-                            pts.push([f64::NAN; 3]);
-                        }
-                        pts.push(p0);
-                        pts.push(p1);
-                        key_verts.push(p0);
-                        key_verts.push(p1);
-                    }
-                    BoundaryEdge::CircularArc(arc) => {
-                        let (sa, span) =
-                            arc_signed_span(arc.start_angle, arc.end_angle, arc.counter_clockwise);
-                        let segs = arc_segments(arc.radius, span.abs(), wire_chord_tol(arc.radius));
-                        if !pts.is_empty() {
-                            pts.push([f64::NAN; 3]);
-                        }
-                        for i in 0..=segs {
-                            let t = sa + span * (i as f64 / segs as f64);
-                            let p = to_wcs(
-                                arc.center.x + arc.radius * t.cos(),
-                                arc.center.y + arc.radius * t.sin(),
-                            );
-                            pts.push(p);
-                            if i == 0 || i == segs {
-                                key_verts.push(p);
-                            }
-                        }
-                        snap_pts.push((
-                            snap_at(to_wcs(arc.center.x, arc.center.y)),
-                            SnapHint::Center,
-                        ));
-                    }
-                    BoundaryEdge::EllipticArc(ell) => {
-                        let r_maj = (ell.major_axis_endpoint.x * ell.major_axis_endpoint.x
-                            + ell.major_axis_endpoint.y * ell.major_axis_endpoint.y)
-                            .sqrt();
-                        let r_min = r_maj * ell.minor_axis_ratio;
-                        let rot = ell.major_axis_endpoint.y.atan2(ell.major_axis_endpoint.x);
-                        let (sa, span) =
-                            arc_signed_span(ell.start_angle, ell.end_angle, ell.counter_clockwise);
-                        let segs = arc_segments(r_maj, span.abs(), wire_chord_tol(r_maj));
-                        if !pts.is_empty() {
-                            pts.push([f64::NAN; 3]);
-                        }
-                        let (cr, sr) = (rot.cos(), rot.sin());
-                        for i in 0..=segs {
-                            let t = sa + span * (i as f64 / segs as f64);
-                            let lx = r_maj * t.cos();
-                            let ly = r_min * t.sin();
-                            let p = to_wcs(
-                                ell.center.x + lx * cr - ly * sr,
-                                ell.center.y + lx * sr + ly * cr,
-                            );
-                            pts.push(p);
-                            if i == 0 || i == segs {
-                                key_verts.push(p);
-                            }
-                        }
-                        snap_pts.push((
-                            snap_at(to_wcs(ell.center.x, ell.center.y)),
-                            SnapHint::Center,
-                        ));
-                    }
+                    BoundaryEdge::Polyline(poly) => key_verts.extend(
+                        poly.vertices
+                            .iter()
+                            .map(|point| to_wcs(point.x, point.y)),
+                    ),
+                    _ => key_verts.extend([world[0], *world.last().unwrap()]),
+                }
+                match edge {
+                    BoundaryEdge::CircularArc(arc) => snap_pts.push((
+                        snap_at(to_wcs(arc.center.x, arc.center.y)),
+                        SnapHint::Center,
+                    )),
+                    BoundaryEdge::EllipticArc(ellipse) => snap_pts.push((
+                        snap_at(to_wcs(ellipse.center.x, ellipse.center.y)),
+                        SnapHint::Center,
+                    )),
                     _ => {}
                 }
+                pts.extend(world);
             }
         }
         if pts.is_empty() {

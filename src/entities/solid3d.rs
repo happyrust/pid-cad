@@ -1,12 +1,9 @@
 // Grippable + PropertyEditable for Solid3D, Region, Body.
 //
-// Geometry lives in ACIS data — we cannot edit it via the properties panel.
-// We expose the point_of_reference as a translate grip and show ACIS size
-// as read-only info.  Grip translate also updates wire points so the wire
-// fallback stays in sync; the caller (scene/mod.rs apply_grip) translates
-// the MeshModel vertices to match.
+// Shared grips and properties for modeler entities.
 
 use acadrust::entities::{Body, Region, Solid3D, Surface};
+use cadkernel::space::polygon;
 use crate::t;
 use crate::command::EntityTransform;
 use crate::entities::common::{center_grip, edit_prop as edit, parse_f64, ro_prop as ro};
@@ -203,30 +200,25 @@ fn position_section(prefix: &str, p: &acadrust::types::Vector3) -> PropSection {
 /// holes subtract) and halves its magnitude — exact for a single planar
 /// loop, approximate for multi-loop or curved regions. Returns zeros when
 /// there is nothing to measure.
+/// The area and perimeter of a region's boundary wires.
+///
+/// Measured in space rather than in projection: a region need not lie in a
+/// coordinate plane, and flattening it to XY first would report its shadow.
 fn region_area_perimeter(wires: &[acadrust::entities::Wire]) -> (f64, f64) {
+    let mut area_vector = [0.0f64; 3];
     let mut perimeter = 0.0;
-    let (mut nx, mut ny, mut nz) = (0.0, 0.0, 0.0);
     for wire in wires {
-        let pts = &wire.points;
-        if pts.len() < 2 {
-            continue;
-        }
-        for seg in pts.windows(2) {
-            let dx = seg[1].x - seg[0].x;
-            let dy = seg[1].y - seg[0].y;
-            let dz = seg[1].z - seg[0].z;
-            perimeter += (dx * dx + dy * dy + dz * dz).sqrt();
-        }
-        let n = pts.len();
-        for i in 0..n {
-            let a = &pts[i];
-            let b = &pts[(i + 1) % n];
-            nx += (a.y - b.y) * (a.z + b.z);
-            ny += (a.z - b.z) * (a.x + b.x);
-            nz += (a.x - b.x) * (a.y + b.y);
+        let ring: Vec<[f64; 3]> = wire.points.iter().map(|p| [p.x, p.y, p.z]).collect();
+        // Wires arrive as open chains that the region closes between them, so
+        // the length is the chain's and the area vectors are summed before
+        // being measured — one wire's contribution is not an area on its own.
+        perimeter += polygon::chain_length(&ring);
+        let piece = polygon::area_vector(&ring);
+        for axis in 0..3 {
+            area_vector[axis] += piece[axis];
         }
     }
-    let area = 0.5 * (nx * nx + ny * ny + nz * nz).sqrt();
+    let area = (area_vector[0].powi(2) + area_vector[1].powi(2) + area_vector[2].powi(2)).sqrt();
     (area, perimeter)
 }
 
@@ -749,11 +741,7 @@ impl PropertyEditable for Surface {
 
 // ── Accessors for the Solid3D / Region / Body trio ─────────────────────────
 //
-// These three entity types share a common subset of fields (ACIS data
-// + point_of_reference + wires fallback). Code that needs to treat them
-// uniformly (mesh tess dispatch, fallback wires, grip translate) used
-// to repeat a three-arm `match entity` block at every callsite — the
-// helpers below collapse those to a single call.
+// These entity types share ACIS data and a point of reference.
 
 use crate::scene::model::mesh_model::MeshLodSet;
 use crate::scene::convert::solid3d_tess;
@@ -768,77 +756,6 @@ pub fn point_of_reference(e: &EntityType) -> Option<&Vector3> {
         EntityType::Surface(s) => Some(&s.point_of_reference),
         _ => None,
     }
-}
-
-/// Pre-stored edge-wire fallback list (used when the SAT/SAB kernel
-/// can't produce a mesh — drawings authored by SOLVIEW / 3DPLOT carry
-/// these explicitly).
-pub fn fallback_wires(e: &EntityType) -> Option<&[acadrust::entities::Wire]> {
-    match e {
-        EntityType::Solid3D(s) => Some(&s.wires),
-        EntityType::Region(r) => Some(&r.wires),
-        EntityType::Body(b) => Some(&b.wires),
-        EntityType::Surface(s) => Some(&s.wires),
-        _ => None,
-    }
-}
-
-pub fn wire_point(
-    wire: &acadrust::entities::Wire,
-    point: &acadrust::types::Vector3,
-) -> acadrust::types::Vector3 {
-    if !wire.has_transform {
-        return *point;
-    }
-    let x = point.x * wire.scale.x;
-    let y = point.y * wire.scale.y;
-    let z = point.z * wire.scale.z;
-    acadrust::types::Vector3::new(
-        wire.translation.x
-            + wire.x_axis.x * x
-            + wire.y_axis.x * y
-            + wire.z_axis.x * z,
-        wire.translation.y
-            + wire.x_axis.y * x
-            + wire.y_axis.y * y
-            + wire.z_axis.y * z,
-        wire.translation.z
-            + wire.x_axis.z * x
-            + wire.y_axis.z * y
-            + wire.z_axis.z * z,
-    )
-}
-
-/// Whether every ACIS face uses a surface family the mesh pipeline can decode.
-/// Unsupported or unresolved faces must keep their display-cache wires visible;
-/// otherwise a parseable but incomplete shell looks like a valid solid.
-pub fn acis_has_complete_surface_support(e: &EntityType) -> bool {
-    let sat = match e {
-        EntityType::Solid3D(s) => s.acis_data.parse(),
-        EntityType::Region(r) => r.acis_data.parse(),
-        EntityType::Body(b) => b.acis_data.parse(),
-        EntityType::Surface(s) => s.acis_data.parse(),
-        _ => None,
-    };
-    let Some(sat) = sat else {
-        return false;
-    };
-    let faces = sat.faces();
-    !faces.is_empty()
-        && faces.iter().all(|face| {
-            sat.resolve(face.surface()).is_some_and(|surface| {
-                matches!(
-                    surface.entity_type.as_str(),
-                    "plane-surface"
-                        | "cone-surface"
-                        | "sphere-surface"
-                        | "torus-surface"
-                        | "spline-surface"
-                        | "meshsurf-surface"
-                        | "bs3-surface"
-                )
-            })
-        })
 }
 
 /// Build material-aware shaded geometry for every standard 3-D solid/surface

@@ -4,7 +4,7 @@
 use super::util::*;
 use super::{format_size, VIEWCUBE_HIT_SIZE};
 use crate::app::helpers::{
-    ortho_constrain, parse_coord, polar_constrain_near, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis,
+    parse_coord, polar_constrain_near, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis,
     CoordKind,
 };
 use crate::app::{Message, OpenCADStudio, POLY_START_DELAY_MS};
@@ -281,6 +281,162 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                     self.refresh_properties();
                     return Task::none();
                 }
+
+                // Numeric entry while a normal grip stretch is active.
+                //
+                // With Dynamic Input enabled, typed values live in the shared
+                // Distance / Angle fields. Resolve those fields into an exact
+                // world point. Without DYN input, preserve the existing direct-
+                // distance command-line behaviour.
+                {
+                    let i = self.active_tab;
+
+                    if let Some(grip) = self.tabs[i].active_grip.clone() {
+                        if grip.mode == GripEditMode::Stretch {
+                            let dyn_locked = self.tabs[i]
+                                .dyn_fields
+                                .iter()
+                                .any(|field| field.buffer.is_some());
+
+                            let target = if dyn_locked {
+                                // Distance only:
+                                //   keep the cursor's current direction.
+                                //
+                                // Distance + Angle:
+                                //   resolve both typed values from the grip's
+                                //   original position (`dyn_anchor`).
+                                self.dyn_resolve_point()
+                            } else {
+                                // Legacy command-line direct-distance entry.
+                                let text = crate::app::expr_eval::eval_to_string(
+                                    self.command_line.input.trim(),
+                                );
+
+                                crate::app::expr_eval::eval_number(text.trim()).map(|dist| {
+                                    let cursor = self.tabs[i].last_cursor_world;
+
+                                    // If the cursor is following OTRACK or Extension,
+                                    // preserve the existing reference-ray behaviour.
+                                    if let Some((base, dir)) = self.active_distance_ray(i) {
+                                        base + dir * dist
+                                    } else {
+                                        let direction = cursor - grip.origin_world;
+                                        let len = direction.length();
+
+                                        if len <= 1e-12 {
+                                            grip.origin_world
+                                        } else {
+                                            grip.origin_world + direction / len * dist
+                                        }
+                                    }
+                                })
+                            };
+
+                            if let Some(target) = target {
+                                // Typed Dynamic Input can commit a grip before the mouse has moved.
+                                //
+                                // Normally the first ViewportMove initializes the grip preview handles and
+                                // snapshots the original entities. Without that move the document changes,
+                                // so the refreshed grips move, but the resident wire tessellation is never
+                                // invalidated by the normal grip-finalization path.
+                                //
+                                // Seed the same bookkeeping here before modifying the entities.
+                                if self.grip_preview_handles.is_empty() {
+                                    let mut seen_handles = rustc_hash::FxHashSet::default();
+
+                                    let edited_handles: Vec<_> = grip
+                                        .targets
+                                        .iter()
+                                        .map(|target| target.handle)
+                                        .filter(|handle| seen_handles.insert(*handle))
+                                        .collect();
+
+                                    if self.grip_dirty_before.is_none() {
+                                        self.grip_dirty_before = Some(self.tabs[i].dirty);
+                                    }
+
+                                    if self.grip_originals.is_empty() {
+                                        self.grip_originals = edited_handles
+                                            .iter()
+                                            .filter_map(|&handle| {
+                                                self.tabs[i]
+                                                    .scene
+                                                    .document
+                                                    .get_entity(handle)
+                                                    .cloned()
+                                                    .map(|entity| (handle, entity))
+                                            })
+                                            .collect();
+                                    }
+
+                                    self.capture_grip_history_originals(i, &edited_handles);
+
+                                    self.grip_preview_handles = edited_handles;
+                                }
+                                let delta = target - grip.last_world;
+
+                                let actions: Vec<_> = grip
+                                    .targets
+                                    .iter()
+                                    .map(|target_grip| {
+                                        let apply = if target_grip.is_translate {
+                                            GripApply::Translate(delta)
+                                        } else {
+                                            GripApply::Absolute(
+                                                target_grip.last_world + delta,
+                                            )
+                                        };
+
+                                        (
+                                            target_grip.handle,
+                                            target_grip.grip_id,
+                                            apply,
+                                        )
+                                    })
+                                    .collect();
+
+                                for (handle, grip_id, apply) in actions {
+                                    self.tabs[i]
+                                        .scene
+                                        .apply_grip(handle, grip_id, apply);
+                                }
+
+                                // Keep GripEdit synchronized so the normal commit
+                                // path records the exact final position.
+                                if let Some(active) = self.tabs[i].active_grip.as_mut() {
+                                    active.last_world = target;
+
+                                    for target_grip in &mut active.targets {
+                                        target_grip.last_world += delta;
+                                    }
+                                }
+
+                                self.tabs[i].last_cursor_world = target;
+                                self.command_line.input.clear();
+
+                                // Consume the typed Dynamic Input values.
+                                for field in &mut self.tabs[i].dyn_fields {
+                                    field.buffer = None;
+                                }
+                                self.tabs[i].dyn_active = 0;
+                                self.dyn_user_reshaped = false;
+                                self.dyn_coord_absolute = false;
+
+                                self.tabs[i].dirty = true;
+
+                                // Reuse the existing grip finalization path:
+                                // undo grouping, preview restoration, cleanup, etc.
+                                let task = self.on_viewport_left_release();
+
+                                // active_grip is now gone, so remove the temporary
+                                // Distance / Angle fields as well.
+                                self.sync_dyn_fields();
+
+                                return task;
+                            }
+                        }
+                    }
+                }
                 // Interactive VPORTS: the entry after a bare `VPORTS` is the
                 // tiled configuration. Empty input defaults to SINGLE.
                 if self.awaiting_vports {
@@ -386,10 +542,9 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                         return self.feed_command(crate::command::StepInput::Enter);
                     }
 
-                    // OTRACK: while aligned to a tracking ray, a bare distance
-                    // places the point along the ray from the tracking point
-                    // (issue #69).
-                    if let Some((base, dir)) = self.otrack_active {
+                    // OTRACK and Extension both allow a bare scalar to act as a
+                    // distance measured along the active reference ray.
+                    if let Some((base, dir)) = self.active_distance_ray(i) {
                         if let Some(dist) = crate::app::expr_eval::eval_number(text.trim()) {
                             let pt = base + dir * dist;
                             if !self.command_point_allowed(i, pt) {
@@ -512,11 +667,26 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 if !self.command_line.input.trim().is_empty() {
                     return self.update(Message::CommandSubmit);
                 }
-                // A typed dynamic-input value commits as a point pick
-                // before the plain-Enter (on_enter) path runs.
+                // A grip edit is not an active CAD command, but its Dynamic Input
+                // fields use the same keyboard path. Route Enter through CommandSubmit,
+                // whose grip branch resolves Distance / Angle and finalizes the edit.
+                let i = self.active_tab;
+                let grip_dyn_locked = self.tabs[i].active_grip.is_some()
+                    && self.dyn_input
+                    && self.tabs[i]
+                        .dyn_fields
+                        .iter()
+                        .any(|field| field.locked());
+
+                if grip_dyn_locked {
+                    return self.update(Message::CommandSubmit);
+                }
+
+                // Normal command Dynamic Input commit.
                 if let Some(task) = self.try_dyn_commit() {
                     return task;
                 }
+
                 let i = self.active_tab;
                 if self.tabs[i].active_cmd.is_some() {
                     self.feed_command(crate::command::StepInput::Enter)
@@ -572,16 +742,22 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 // drag. Orbit exits silently; PAN keeps its existing message.
                 if self.tabs[self.active_tab].pan_mode
                     || self.tabs[self.active_tab].orbit_mode
+                    || self.tabs[self.active_tab].zoom_dynamic_mode
                 {
                     let i = self.active_tab;
                     let was_pan = self.tabs[i].pan_mode;
                     self.tabs[i].pan_mode = false;
                     self.tabs[i].orbit_mode = false;
+                    self.tabs[i].zoom_dynamic_mode = false;
                     {
                         let mut sel = self.tabs[i].scene.selection.borrow_mut();
                         sel.middle_down = false;
                         sel.middle_last_pos = None;
                         sel.orbit_pivot = None;
+                        sel.box_anchor = None;
+                        sel.box_anchor_world = None;
+                        sel.box_current = None;
+                        sel.box_crossing_locked = false;
                     }
                     if was_pan {
                         self.command_line.push_output(crate::t!("PAN ended.").as_ref());
@@ -1544,12 +1720,29 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 Task::none()
     }
 
-    pub(super) fn on_prop_geom_choice_changed(&mut self, field: &'static str, value: String) -> Task<Message> {
-                let i = self.active_tab;
-                let handles = self.property_target_handles(i);
-                if !handles.is_empty() {
-                    self.push_undo_snapshot(i, "CHPROP");
-                    if field == "vp_ucs_name" {
+    pub(super) fn on_prop_geom_choice_changed(
+        &mut self,
+        field: &'static str,
+        value: String,
+    ) -> Task<Message> {
+        let i = self.active_tab;
+        let handles = self.property_target_handles(i);
+
+        if !handles.is_empty() {
+            self.push_undo_snapshot(i, "CHPROP");
+
+            if field == "vscale_std" {
+                for &handle in &handles {
+                    if matches!(
+                        self.tabs[i].scene.document.get_entity(handle),
+                        Some(acadrust::EntityType::Viewport(_))
+                    ) {
+                        let _ = self.tabs[i]
+                            .scene
+                            .set_viewport_scale_named_for(handle, &value);
+                    }
+                }
+            } else if field == "vp_ucs_name" {
                         // Resolve UCS name → cloned data, then mutate viewports.
                         let ucs_data = self.tabs[i]
                             .scene
@@ -2030,15 +2223,36 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                                         }
                                     }
                                     _ => {
-                                        if let Some(entity) =
-                                            self.tabs[i].scene.document.get_entity_mut(handle)
-                                        {
-                                            crate::scene::view::dispatch::apply_geom_prop_in_working_plane(
-                                                entity,
+                                        if crate::scene::model::solid_history::is_primitive_property(
+                                            field,
+                                        ) {
+                                            self.tabs[i].scene.apply_solid_history_property(
+                                                handle,
+                                                field,
+                                                &val,
+                                            );
+                                        } else if self.tabs[i]
+                                            .scene
+                                            .apply_solid_position_property(
+                                                handle,
                                                 field,
                                                 &val,
                                                 plane,
-                                            );
+                                            )
+                                            .is_none()
+                                        {
+                                            if let Some(entity) = self.tabs[i]
+                                                .scene
+                                                .document
+                                                .get_entity_mut(handle)
+                                            {
+                                                crate::scene::view::dispatch::apply_geom_prop_in_working_plane(
+                                                    entity,
+                                                    field,
+                                                    &val,
+                                                    plane,
+                                                );
+                                            }
                                         }
                                     }
                                 }

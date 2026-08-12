@@ -713,6 +713,7 @@ pub(crate) fn tessellate_entity(
             depth_override: None,
             fill_is_3d: false,
             fill_is_2d_solid: false,
+            render_instance: None,
             pick_tris,
             pick_tris_low,
             dash_from_start: false,
@@ -735,6 +736,114 @@ pub(crate) fn tessellate_entity(
             fill_tris: vec![],
             fill_tris_low: Vec::new(),
         }];
+    }
+
+    // ── Dimension baked-block fast path ─────────────────────────────────────
+    //
+    // A DIMENSION carries the block "that contains the entities that make up
+    // the dimension picture" (DXF group 2), and that block IS the picture:
+    // AutoCAD requires it and draws it, BricsCAD draws it when present and only
+    // falls back to rendering from the dimension variables when it is missing.
+    // OCS re-derived the picture from DIMVARS every time instead, which means a
+    // drawing whose style disagrees with what it actually drew comes out wrong
+    // — a DIMTXT stored in different units from the DIMSCALE applied to it, or
+    // a per-object override that is already in drawing units, and the text and
+    // extension lines land hundreds of times too large.
+    //
+    // Drawing the block puts OCS on the same footing as the CAD that wrote the
+    // file: it shows what the file says it looks like. Re-deriving stays as the
+    // fallback, for a dimension with no block (one OCS just created, or one
+    // whose block was dropped because it was edited).
+    //
+    // Annotative dimensions keep the old path: their several representations
+    // are separate blocks, and choosing between them is what the annotation
+    // machinery already does. The doctrine above assumes one picture.
+    if let EntityType::Dimension(dim) = e {
+        let baked = Some(dim.base().block_name.trim())
+            .filter(|name| !name.is_empty())
+            .filter(|_| !crate::scene::annotative::is_annotative(document, e))
+            .and_then(|name| {
+                document
+                    .block_records
+                    .iter()
+                    .find(|record| record.name.eq_ignore_ascii_case(name))
+            })
+            .filter(|record| !record.entity_handles.is_empty());
+        if let Some(record) = baked {
+            // The block's contents are already in world space and its base
+            // point is the origin, so the instance that carries them is the
+            // identity — it exists only to reuse the graph's ByBlock / layer-0
+            // colour resolution and its handling of anything nested inside.
+            let mut insert = acadrust::entities::Insert::new(
+                record.name.clone(),
+                acadrust::types::Vector3::ZERO,
+            );
+            insert.common = dim.base().common.clone();
+
+            let depths = rustc_hash::FxHashMap::default();
+            let graph = crate::scene::render_graph::RenderSceneGraph::new(
+                document,
+                None,
+                annotation_scale_handle,
+                true,
+                &depths,
+            );
+            let mut wires = Vec::new();
+            graph.walk_insert(
+                &insert,
+                h,
+                |_, _| true,
+                |sub, context| {
+                    let has_book_color = view::render::has_resolved_book_color(document, sub);
+                    let color_byblock =
+                        !has_book_color && sub.common().color == acadrust::types::Color::ByBlock;
+                    let color_layer0 = !has_book_color
+                        && view::render::is_effective_layer_zero(&sub.common().layer)
+                        && sub.common().color == acadrust::types::Color::ByLayer;
+                    let style = context.style_for(document, sub);
+                    let mut placed = sub.clone();
+                    placed.apply_transform(&context.transform);
+                    let sub_wires = tessellate_entity(
+                        document,
+                        selected,
+                        active_viewport,
+                        bg_color,
+                        anno_scale,
+                        annotation_scale_handle,
+                        &placed,
+                        block_cache,
+                        view_aabb,
+                        world_per_pixel,
+                        paper_space,
+                    );
+                    for mut wire in sub_wires {
+                        // Every wire answers to the dimension, so a pick selects
+                        // the dimension rather than one of its pieces.
+                        wire.name = h.value().to_string();
+                        if sel {
+                            wire.selected = true;
+                            wire.color = WireModel::SELECTED;
+                        } else if color_byblock || color_layer0 {
+                            wire.color = view::render::adapt_to_bg(style.0, bg_color);
+                            wire.aci = style.4;
+                        }
+                        wires.push(wire);
+                    }
+                },
+            );
+            if !wires.is_empty() {
+                let aabb = entity_aabb(e);
+                for wire in &mut wires {
+                    // As below: only stroke / fill wires take the whole-dimension
+                    // box. An SDF-text wire keeps its own tight glyph box so the
+                    // text pick area hugs the text.
+                    if !wire.points.is_empty() || !wire.fill_tris.is_empty() {
+                        set_wire_aabb(wire, aabb);
+                    }
+                }
+                return wires;
+            }
+        }
     }
 
     if let EntityType::Dimension(dim) = e {
@@ -930,7 +1039,7 @@ pub(crate) fn tessellate_entity(
 
     if let EntityType::Insert(ins) = e {
         // Resolve the INSERT's own style so ByBlock sub-entities can inherit it.
-        let (ins_color, ins_pat_len, ins_pat, ins_lw_px, _) =
+        let (ins_color, ins_pat_len, ins_pat, ins_lw_px, ins_aci) =
             view::render::render_style_for_viewport(document, e, active_viewport);
         let ins_color = view::render::adapt_to_bg(ins_color, bg_color);
         // Resolve the INSERT's *layer* style — the layer-0 inheritance target
@@ -944,6 +1053,14 @@ pub(crate) fn tessellate_entity(
             s.color = view::render::adapt_to_bg(s.color, bg_color);
             s
         };
+        let ins_layer_aci = document
+            .layers
+            .get(&ins.common.layer)
+            .and_then(|layer| match &layer.color {
+                acadrust::types::Color::Index(index) => Some(*index),
+                _ => None,
+            })
+            .unwrap_or(0);
         let ip = glam::Vec3::new(
             (ins.insert_point.x) as f32,
             (ins.insert_point.y) as f32,
@@ -955,6 +1072,7 @@ pub(crate) fn tessellate_entity(
             depth_override: None,
             fill_is_3d: false,
             fill_is_2d_solid: false,
+            render_instance: None,
             pick_tris: Vec::new(),
             pick_tris_low: Vec::new(),
             dash_from_start: false,
@@ -1006,10 +1124,12 @@ pub(crate) fn tessellate_entity(
             ins,
             h,
             ins_color,
+            ins_aci,
             ins_pat_len,
             ins_pat,
             ins_lw_px,
             ins_layer,
+            ins_layer_aci,
             sel,
             pslt_factor,
             view_aabb,
@@ -1025,6 +1145,16 @@ pub(crate) fn tessellate_entity(
             let polygon =
                 pick::xclip::world_clip_polygon_for_transform(filter, &transform);
             pick::xclip::clip_wires(&mut wires, &polygon);
+            for wire in &mut wires {
+                if let Some(mut instance) = wire.render_instance {
+                    instance.source_id = cache.clip_source_id(
+                        instance.source_id,
+                        &polygon,
+                        instance.translation,
+                    );
+                    wire.render_instance = Some(instance);
+                }
+            }
             if document.header.xclip_frame != 0 && polygon.len() >= 3 {
                 wires.push(pick::xclip::frame_wire(
                     &polygon,
@@ -1316,6 +1446,7 @@ fn lod_stub_wire(
         depth_override: None,
         fill_is_3d: false,
         fill_is_2d_solid: false,
+        render_instance: None,
         pick_tris: Vec::new(),
         pick_tris_low: Vec::new(),
         dash_from_start: false,
@@ -1406,6 +1537,7 @@ fn lod_stub_wire_3d(
         depth_override: None,
         fill_is_3d: false,
         fill_is_2d_solid: false,
+        render_instance: None,
         pick_tris: Vec::new(),
         pick_tris_low: Vec::new(),
         dash_from_start: false,

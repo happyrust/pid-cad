@@ -38,8 +38,8 @@ impl canvas::Program<Message> for RenderModePreview {
         bounds: Rectangle,
         _cursor: iced::mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
+    
         use acadrust::entities::ViewportRenderMode as M;
-
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let palette = theme.palette();
         let ink = palette.background.base.text.scale_alpha(0.86);
@@ -214,16 +214,10 @@ pub(super) fn viewport_controls<'a>(
     render_mode_menu_open: bool,
     render_mode_preview: Option<acadrust::entities::ViewportRenderMode>,
 ) -> Element<'a, Message> {
-    use acadrust::entities::ViewportRenderMode as M;
-    let render_modes = [
-        RenderModeChoice(M::Wireframe2D),
-        RenderModeChoice(M::Wireframe3D),
-        RenderModeChoice(M::HiddenLine),
-        RenderModeChoice(M::FlatShaded),
-        RenderModeChoice(M::GouraudShaded),
-        RenderModeChoice(M::FlatShadedWithEdges),
-        RenderModeChoice(M::GouraudShadedWithEdges),
-    ];
+    let render_modes: Vec<RenderModeChoice> = crate::modules::view::visual_style::VISUAL_STYLES
+        .iter()
+        .map(|style| RenderModeChoice(style.mode))
+        .collect();
     let danger_btn = move |bytes: &'static [u8],
                            msg: Message,
                            title: String,
@@ -455,7 +449,7 @@ pub(super) fn viewport_controls<'a>(
                 crate::ui::icons::SPLIT_V,
                 false,
                 Message::SplitModelViewport(false),
-                crate::tr!("viewport-split-vertical"),
+                crate::tr!("viewport", "split-vertical"),
                 "VPORTS 2V",
             ))
             .push(sep())
@@ -463,7 +457,7 @@ pub(super) fn viewport_controls<'a>(
                 crate::ui::icons::SPLIT_H,
                 false,
                 Message::SplitModelViewport(true),
-                crate::tr!("viewport-split-horizontal"),
+                crate::tr!("viewport", "split-horizontal"),
                 "VPORTS 2H",
             ));
         // Drag handle + close: only meaningful with more than one model tile.
@@ -484,7 +478,7 @@ pub(super) fn viewport_controls<'a>(
             )
             .interaction(iced::mouse::Interaction::Grab)
             .on_press(Message::PaneMoveStart);
-            let drag = viewport_tooltip(drag, crate::tr!("viewport-move"), "VPORTS");
+            let drag = viewport_tooltip(drag, crate::tr!("viewport", "move"), "VPORTS");
             bar = bar
                 .push(sep())
                 .push(drag)
@@ -492,7 +486,7 @@ pub(super) fn viewport_controls<'a>(
                 .push(danger_btn(
                     crate::ui::icons::CLOSE,
                     Message::CloseModelViewport,
-                    crate::tr!("viewport-close"),
+                    crate::tr!("viewport", "close"),
                     "VPORTS SINGLE",
                 ));
         }

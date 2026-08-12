@@ -78,6 +78,53 @@ impl OpenCADStudio {
                 }
             }
 
+            // DWGUNITS — change what one drawing unit measures, and convert the
+            // model to match. The units pill only relabels, which is all the
+            // label is for; this is the one place geometry moves. (#668)
+            "DWGUNITS" => {
+                use crate::command::KeywordCommand;
+                use crate::modules::draw::units;
+                // Buttons read as full names; the token behind each is the
+                // abbreviation, since that is what gets typed. Unitless is left
+                // off — there is nothing to convert to.
+                let choices: Vec<(&str, &str, Option<&str>)> = units::all()
+                    .filter(|&(code, _)| code != 0)
+                    .map(|(code, label)| (label, units::short(code), None))
+                    .collect();
+                // Built once: the table it comes from never changes, and
+                // `KeywordCommand` wants a `&'static str`.
+                static PROMPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+                let prompt = PROMPT.get_or_init(|| {
+                    let listed = units::all()
+                        .filter(|&(code, _)| code != 0)
+                        .map(|(code, label)| format!("{label}({})", units::short(code)))
+                        .collect::<Vec<_>>()
+                        .join(" / ");
+                    format!("DWGUNITS  convert to  [{listed}]:")
+                });
+                let current = units::label(self.tabs[i].scene.document.header.insertion_units);
+                self.command_line
+                    .push_info(crate::tf!("DWGUNITS  current unit: {current}").as_ref());
+                let c = KeywordCommand::new("DWGUNITS", prompt.as_str(), choices);
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("DWGUNITS ") => {
+                return Some(self.convert_drawing_units(cmd.trim_start_matches("DWGUNITS").trim()));
+            }
+
+            // LAYTRANS — translate this drawing's layers onto a set taken from
+            // another drawing. Bare opens the mapping dialog; with a file it
+            // maps every name the two drawings share and translates at once,
+            // which is what most drawings coming from outside need. (#624)
+            "LAYTRANS" => {
+                return Some(self.open_layer_translator(None));
+            }
+            cmd if cmd.starts_with("LAYTRANS ") => {
+                let path = std::path::PathBuf::from(cmd.trim_start_matches("LAYTRANS").trim());
+                return Some(self.layer_translate_same(&path));
+            }
+
             // LAYDEL <name> — delete a layer and erase the objects on it.
             "LAYDEL" => {
                 use crate::command::ValuePromptCommand;
@@ -192,14 +239,13 @@ impl OpenCADStudio {
                     return Some(Task::none());
                 }
                 self.push_undo_snapshot(i, "LAYMRG");
-                let mut moved = 0usize;
-                for e in self.tabs[i].scene.document.entities_mut() {
-                    if e.common().layer == src {
-                        e.common_mut().layer = dst.clone();
-                        moved += 1;
-                    }
-                }
-                self.tabs[i].scene.document.layers.remove(&src);
+                // The same move a translation makes for each of its pairs.
+                let moved = crate::modules::draw::layers::laytrans::merge_layer(
+                    &mut self.tabs[i].scene,
+                    &src,
+                    &dst,
+                    false,
+                );
                 self.tabs[i].scene.invalidate_dependency_index();
                 self.tabs[i]
                     .scene
@@ -664,5 +710,352 @@ impl OpenCADStudio {
             _ => return None,
         }
         Some(self.finish_dispatch(cmd))
+    }
+}
+
+impl OpenCADStudio {
+    /// Translate every layer the two drawings name alike, in one step.
+    ///
+    /// The common case for a drawing arriving from outside: the names already
+    /// line up and only the properties are wrong, so there is nothing to sit in
+    /// a dialog and decide.
+    pub(in crate::app) fn layer_translate_same(&mut self, path: &std::path::Path) -> Task<Message> {
+        use crate::modules::draw::layers::laytrans;
+        let i = self.active_tab;
+        let targets = match laytrans::load_targets(path) {
+            Ok(targets) => targets,
+            Err(why) => {
+                self.command_line
+                    .push_error(crate::tf!("LAYTRANS: {why}.").as_ref());
+                return Task::none();
+            }
+        };
+        let current = self.tabs[i].active_layer.clone();
+        let sources = laytrans::source_layers(&self.tabs[i].scene, &current);
+        let mappings = laytrans::map_same(&sources, &targets);
+        if mappings.is_empty() {
+            self.command_line.push_info(
+                crate::t!("LAYTRANS: no layer names in common — use LAYTRANS with no file to map them.")
+                    .as_ref(),
+            );
+            return Task::none();
+        }
+        self.push_undo_snapshot(i, "LAYTRANS");
+        let report = laytrans::translate(
+            &mut self.tabs[i].scene,
+            &mappings,
+            &targets,
+            &current,
+            laytrans::Options::default(),
+        );
+        self.finish_layer_translation(i, report)
+    }
+
+    /// Relabel the drawing's unit and convert the model to suit.
+    ///
+    /// The label always changes — that is what was asked for. The geometry
+    /// changes with it whenever both units measure something, which is what
+    /// makes this different from picking a unit off the status bar. Unitless
+    /// measures nothing, so a drawing coming from or going to it is relabelled
+    /// and left alone.
+    pub(in crate::app) fn convert_drawing_units(&mut self, name: &str) -> Task<Message> {
+        use crate::command::EntityTransform;
+        use crate::modules::draw::units;
+
+        let i = self.active_tab;
+        let Some(to) = units::code_for_keyword(name) else {
+            self.command_line
+                .push_error(crate::t!("DWGUNITS: not a unit this drawing can use.").as_ref());
+            return Task::none();
+        };
+        let from = self.tabs[i].scene.document.header.insertion_units;
+        if from == to {
+            let label = units::label(to);
+            self.command_line
+                .push_output(crate::tf!("DWGUNITS: already in {label}.").as_ref());
+            return Task::none();
+        }
+
+        self.push_undo_snapshot(i, "DWGUNITS");
+        self.tabs[i].scene.document.header.insertion_units = to;
+
+        let factor = units::conversion_factor(from, to).filter(|f| (f - 1.0).abs() > 1e-12);
+        let (from_label, to_label) = (units::label(from), units::label(to));
+        let Some(factor) = factor else {
+            self.tabs[i].dirty = true;
+            self.command_line.push_output(
+                crate::tf!(
+                    "DWGUNITS: now {to_label}. Nothing was converted — {from_label} has no size to convert from."
+                )
+                .as_ref(),
+            );
+            return Task::none();
+        };
+
+        let handles = units::model_space_handles(&self.tabs[i].scene);
+        let moved = handles.len();
+        // A locked layer is protected from editing, not from the drawing
+        // changing what its numbers mean. Converting all but the locked layers
+        // would leave the drawing at two scales at once, so the locks are
+        // lifted for the duration and put back.
+        let relocked: Vec<String> = self.tabs[i]
+            .scene
+            .document
+            .layers
+            .iter()
+            .filter(|layer| layer.is_locked())
+            .map(|layer| layer.name.clone())
+            .collect();
+        for name in &relocked {
+            if let Some(layer) = self.tabs[i].scene.document.layers.get_mut(name) {
+                layer.flags.locked = false;
+            }
+        }
+        self.tabs[i].scene.transform_entities(
+            &handles,
+            &EntityTransform::Scale {
+                center: glam::DVec3::ZERO,
+                factor,
+            },
+        );
+        for name in &relocked {
+            if let Some(layer) = self.tabs[i].scene.document.layers.get_mut(name) {
+                layer.flags.locked = true;
+            }
+        }
+
+        // A viewport frames the model, so its framing is measured in model
+        // units and has to follow them. Left alone, every layout would suddenly
+        // look at a region a thousand times too large. The paper side of the
+        // ratio is untouched — the sheet is still the same sheet — so the ratio
+        // itself moves the other way.
+        //
+        // `transform_viewport` covers the rectangle and the target but not the
+        // framing, so the framing is done here for every viewport, and the
+        // target only for the ones the scale above did not already reach.
+        // Not every viewport frames the model, though. Each layout's sheet
+        // viewport frames the sheet — its view is the paper, measured in paper
+        // units — so scaling it by the model's factor would leave the drawing
+        // frame the same size as before while the view of it changed by a
+        // thousand, which is the boundary appearing to break.
+        let sheets: std::collections::HashSet<acadrust::Handle> = self.tabs[i]
+            .scene
+            .document
+            .objects
+            .values()
+            .filter_map(|object| match object {
+                acadrust::objects::ObjectType::Layout(layout) => Some(layout.viewport),
+                _ => None,
+            })
+            .collect();
+        let scaled: std::collections::HashSet<acadrust::Handle> = handles.iter().copied().collect();
+        let mut reframed = 0usize;
+        for entity in self.tabs[i].scene.document.entities_mut() {
+            let handle = entity.common().handle;
+            let acadrust::entities::EntityType::Viewport(vp) = entity else {
+                continue;
+            };
+            // Only a paper-space viewport can be a sheet — the scale above
+            // reached everything in model space, and what it reached frames the
+            // model by definition. Among the rest, the layout names its sheet
+            // outright, and a file that arrives without that link still gives
+            // itself away by sitting at the paper origin, where only the sheet
+            // sits.
+            let is_sheet = !scaled.contains(&handle)
+                && (sheets.contains(&handle) || !crate::scene::Scene::is_content_viewport(vp));
+            if is_sheet {
+                continue;
+            }
+            vp.view_center = vp.view_center * factor;
+            vp.view_height *= factor;
+            if vp.custom_scale.abs() > 1e-12 {
+                vp.custom_scale /= factor;
+            }
+            if !scaled.contains(&handle) {
+                vp.view_target = vp.view_target * factor;
+            }
+            reframed += 1;
+        }
+
+        // Keep the active model-space annotation scale in sync as well.
+        // annotation_scale is drawing/paper, while CANNOSCALEVALUE stores
+        // the reciprocal paper/drawing factor.
+        if self.tabs[i].scene.annotation_scale.abs() > 1.0e-12 {
+            self.tabs[i].scene.annotation_scale *= factor as f32;
+        }
+
+        if self.tabs[i]
+            .scene
+            .document
+            .header
+            .annotation_scale_value
+            .abs()
+            > 1.0e-12
+        {
+            self.tabs[i]
+                .scene
+                .document
+                .header
+                .annotation_scale_value /= factor;
+        }
+        // Sizes the drawing keeps as settings rather than as geometry: dash
+        // lengths, default heights and widths, the radii the fillet and chamfer
+        // commands start from. They are all lengths in the unit that just
+        // changed, so they change with it or the next line drawn comes out at
+        // the old scale. Angles and screen-relative sizes are left alone —
+        // PDSIZE is a percentage of the screen when negative.
+        let header = &mut self.tabs[i].scene.document.header;
+        for length in [
+            &mut header.linetype_scale,
+            &mut header.current_entity_linetype_scale,
+            &mut header.text_height,
+            &mut header.trace_width,
+            &mut header.sketch_increment,
+            &mut header.thickness,
+            &mut header.polyline_width,
+            &mut header.fillet_radius,
+            &mut header.chamfer_distance_a,
+            &mut header.chamfer_distance_b,
+            &mut header.chamfer_length,
+        ] {
+            *length *= factor;
+        }
+        if header.point_display_size > 0.0 {
+            header.point_display_size *= factor;
+        }
+
+        // A dimension style holds its text height and arrow size in drawing
+        // units and multiplies them by DIMSCALE, so moving that one factor
+        // rescales the whole style. Zero means "take it from the viewport",
+        // which is not a length and stays as it is.
+        for style in self.tabs[i].scene.document.dim_styles.iter_mut() {
+            if style.dimscale.abs() > 1e-12 {
+                style.dimscale *= factor;
+            }
+        }
+
+        self.tabs[i].scene.bump_geometry();
+        self.tabs[i].dirty = true;
+        self.refresh_properties();
+        self.command_line.push_output(
+            crate::tf!(
+                "DWGUNITS: {from_label} to {to_label} — {moved} object(s) scaled by {factor}, {reframed} viewport(s) reframed."
+            )
+            .as_ref(),
+        );
+        Task::none()
+    }
+
+    /// Open the translator, optionally with a standard already loaded.
+    pub(in crate::app) fn open_layer_translator(
+        &mut self,
+        preload: Option<std::path::PathBuf>,
+    ) -> Task<Message> {
+        self.layer_translator
+            .get_or_insert_with(Default::default);
+        self.active_modal = Some(crate::app::ModalKind::LayerTranslator);
+        match preload {
+            Some(path) => Task::done(Message::LayerTranslatorLoaded(path)),
+            None => Task::none(),
+        }
+    }
+
+    /// Read or write the mapping list as plain `from -> to` lines.
+    ///
+    /// A drawing standards file is where AutoCAD keeps these, but writing them
+    /// there would mean inventing a place inside the DWG for something no other
+    /// application reads back. A small text file beside the drawing carries the
+    /// same information without touching the drawing's own structure.
+    pub(in crate::app) fn layer_translator_mappings_file(&mut self, path: &std::path::Path, save: bool) {
+        use crate::modules::draw::layers::laytrans::Mapping;
+        if save {
+            let Some(state) = self.layer_translator.as_ref() else {
+                return;
+            };
+            let body: String = state
+                .mappings
+                .iter()
+                .map(|m| format!("{} -> {}\n", m.from, m.to))
+                .collect();
+            match std::fs::write(path, body) {
+                Ok(()) => self.command_line.push_output(
+                    crate::tf!("LAYTRANS: saved {n} mapping(s).", n = state.mappings.len())
+                        .as_ref(),
+                ),
+                Err(why) => self
+                    .command_line
+                    .push_error(crate::tf!("LAYTRANS: could not save — {why}.").as_ref()),
+            }
+            return;
+        }
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(why) => {
+                self.command_line
+                    .push_error(crate::tf!("LAYTRANS: could not read — {why}.").as_ref());
+                return;
+            }
+        };
+        let parsed: Vec<Mapping> = text
+            .lines()
+            .filter_map(|line| {
+                let (from, to) = line.split_once("->")?;
+                let (from, to) = (from.trim(), to.trim());
+                (!from.is_empty() && !to.is_empty()).then(|| Mapping {
+                    from: from.to_string(),
+                    to: to.to_string(),
+                })
+            })
+            .collect();
+        let count = parsed.len();
+        if let Some(state) = self.layer_translator.as_mut() {
+            state.mappings = parsed;
+        }
+        self.command_line
+            .push_output(crate::tf!("LAYTRANS: loaded {count} mapping(s).").as_ref());
+    }
+
+    /// Write what the last translation did beside the drawing.
+    pub(in crate::app) fn write_layer_translation_log(&mut self, i: usize) {
+        let Some(report) = self.last_layer_translation.as_ref() else {
+            return;
+        };
+        let base = self.tabs[i]
+            .current_path
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from(&self.tabs[i].tab_title));
+        let path = base.with_extension("laytrans.log");
+        match std::fs::write(&path, report.to_log()) {
+            Ok(()) => self
+                .command_line
+                .push_output(crate::tf!("LAYTRANS: log written to {}.", path.display()).as_ref()),
+            Err(why) => self
+                .command_line
+                .push_error(crate::tf!("LAYTRANS: could not write log — {why}.").as_ref()),
+        }
+    }
+
+    /// Apply a translation's result: mark the drawing, refresh the panel and
+    /// say what moved. Shared by the command and the dialog so both report the
+    /// same way.
+    pub(in crate::app) fn finish_layer_translation(
+        &mut self,
+        i: usize,
+        report: crate::modules::draw::layers::laytrans::Report,
+    ) -> Task<Message> {
+        let layers = report.translated.len();
+        let objects = report.objects();
+        self.tabs[i].dirty = true;
+        self.refresh_layer_panel();
+        self.refresh_properties();
+        for (layer, reason) in &report.skipped {
+            self.command_line
+                .push_info(crate::tf!("LAYTRANS: skipped \"{layer}\" — {reason}.").as_ref());
+        }
+        self.command_line.push_output(
+            crate::tf!("LAYTRANS: translated {layers} layer(s), {objects} object(s).").as_ref(),
+        );
+        self.last_layer_translation = Some(report);
+        Task::none()
     }
 }
