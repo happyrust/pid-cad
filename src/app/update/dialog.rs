@@ -29,23 +29,40 @@ impl OpenCADStudio {
         // document) — so Save-As round-trips the format instead of silently
         // re-targeting it. A new/unsaved drawing has no source format, so it
         // uses the application-wide default chosen in Options (#529).
-        self.save_dialog_format = if let Some(path) = &self.tabs[tab_idx].current_path {
-            let document = &self.tabs[tab_idx].scene.document;
-            let is_dxf = crate::io::source_is_dxf(Some(path), document);
-            let version = if is_dxf {
-                document.version
-            } else {
-                document.dwg_source_version.unwrap_or(document.version)
-            };
-            crate::io::format_for_version(version, is_dxf)
-        } else {
-            self.default_save_format.clone()
+        self.save_dialog_format = match &self.tabs[tab_idx].current_path {
+            // A read-only source (`.pid`) has no writable format to
+            // round-trip — `source_is_dxf` would misread its absent DWG
+            // source version as "DXF". Offer the application default the way
+            // an unsaved drawing does.
+            Some(path) if crate::io::is_read_only_source_path(path) => {
+                self.default_save_format.clone()
+            }
+            Some(path) => {
+                let document = &self.tabs[tab_idx].scene.document;
+                let is_dxf = crate::io::source_is_dxf(Some(path), document);
+                let version = if is_dxf {
+                    document.version
+                } else {
+                    document.dwg_source_version.unwrap_or(document.version)
+                };
+                crate::io::format_for_version(version, is_dxf)
+            }
+            None => self.default_save_format.clone(),
         };
 
         // Pre-fill the default file name from the current path or the tab name;
         // the destination folder comes from the native OS dialog that follows.
         if let Some(p) = &self.tabs[tab_idx].current_path.clone() {
-            if let Some(name) = p.file_name() {
+            // A read-only source (`.pid`) keeps its stem but not its
+            // extension — the unwritable name must not ride into the dialog.
+            if crate::io::is_read_only_source_path(p) {
+                let (ext, _) = crate::io::parse_save_format(&self.save_dialog_format);
+                let stem = p
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| self.tabs[tab_idx].tab_display_name());
+                self.save_dialog_filename = format!("{stem}.{ext}");
+            } else if let Some(name) = p.file_name() {
                 self.save_dialog_filename = name.to_string_lossy().into_owned();
             }
         } else {
@@ -270,22 +287,22 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                 return Task::none();
             }
 
-            if !self.tabs[idx].recovery_save_as_required {
-                if let Some(path) = self.tabs[idx].current_path.clone() {
-                    let version = self.tabs[idx].scene.document.version;
-                    self.prepare_native_save(idx);
-                    let close = self.close_unsaved_dialog_window();
-                    let save = self.queue_native_save(
-                        idx,
-                        path,
-                        version,
-                        crate::app::SavePurpose::Manual,
-                        continuation,
-                        false,
-                        true,
-                    );
-                    return Task::batch([close, save]);
-                }
+            // Same gate as plain Save: a repaired drawing and a read-only
+            // source (`.pid`) both fall through to the Save As flow below.
+            if let Some(path) = self.direct_save_path(idx) {
+                let version = self.tabs[idx].scene.document.version;
+                self.prepare_native_save(idx);
+                let close = self.close_unsaved_dialog_window();
+                let save = self.queue_native_save(
+                    idx,
+                    path,
+                    version,
+                    crate::app::SavePurpose::Manual,
+                    continuation,
+                    false,
+                    true,
+                );
+                return Task::batch([close, save]);
             }
 
             self.active_tab = idx;

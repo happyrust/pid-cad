@@ -22,6 +22,10 @@ fn pid_panel_captions_translate_in_every_shipped_language() {
         Language::NlNl,
         Language::RuRu,
         Language::TrTr,
+        Language::ArSa,
+        Language::EsEs,
+        Language::JaJp,
+        Language::PtBr,
     ] {
         set_language(language).expect("every shipped language loads");
         for caption in captions {

@@ -1873,6 +1873,8 @@ pub(super) fn message_attribute(source: &str) -> Option<(&'static str, &'static 
         "Page setup: {w:.1}×{h:.1} mm  area={plot_area}  center={center}  rot={rotation}°" => Some(("plot", "page-setup-w-1-h-1-mm-area-plot-area-center-ce")),
         "Page setups" => Some(("plot", "page-setups")),
         "Palettes" => Some(("view", "palettes")),
+        "P&ID import: {drawn} entities from {decoded} decoded records; {missing} source records not drawn" => Some(("common", "pid-import-drawn-decoded-missing")),
+        "P&ID style table did not read; line work keeps the layer defaults." => Some(("common", "pid-style-table-did-not-read")),
         "Pan" => Some(("view", "pan")),
         "Paper" => Some(("common", "paper")),
         "Paper Space Layout" => Some(("layout", "paper-space-layout")),

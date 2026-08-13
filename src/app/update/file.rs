@@ -1096,6 +1096,23 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 self.tabs[i].scene.material_base_dir =
                     path.parent().map(std::path::Path::to_path_buf);
                 self.tabs[i].scene.document = doc;
+                // A `.pid` import leaves a one-line report behind: the log
+                // holds the details, the command line gets the headline —
+                // without it a thin-looking sheet and a complete one are
+                // indistinguishable from inside the application.
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(summary) = crate::io::pid::take_import_summary(&path) {
+                    let (drawn, decoded, missing) =
+                        (summary.drawn, summary.decoded, summary.missing);
+                    self.command_line.push_info(crate::tf!(
+                        "P&ID import: {drawn} entities from {decoded} decoded records; {missing} source records not drawn"
+                    ).as_ref());
+                    if summary.style_tables_failed {
+                        self.command_line.push_error(crate::t!(
+                            "P&ID style table did not read; line work keeps the layer defaults."
+                        ).as_ref());
+                    }
+                }
                 // DWG stores CLAYER as a layer handle. Resolve that handle back to
                 // the layer name after opening so the per-tab creation state and
                 // header name stay in sync. DXF already provides current_layer_name,
@@ -1912,6 +1929,22 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         ))))
     }
 
+    /// The destination a plain Save may write to without asking: the tab's
+    /// own path, unless the repair flow demands a new file or the source is a
+    /// read-only format. A `.pid` opens like a drawing but is never a write
+    /// target ([`crate::io::is_read_only_source_path`]), so Save falls
+    /// through to Save As the same way a repaired drawing does.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn direct_save_path(&self, i: usize) -> Option<std::path::PathBuf> {
+        if self.tabs[i].recovery_save_as_required {
+            return None;
+        }
+        self.tabs[i]
+            .current_path
+            .clone()
+            .filter(|path| !crate::io::is_read_only_source_path(path))
+    }
+
     pub(super) fn on_save_file(&mut self) -> Task<Message> {
                 if self.read_only {
                     self.command_line
@@ -1929,21 +1962,19 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 // Native: save straight to the known path. Web has no path
                 // (downloads instead), so always go through the Save dialog.
                 #[cfg(not(target_arch = "wasm32"))]
-                if !self.tabs[i].recovery_save_as_required {
-                    if let Some(path) = self.tabs[i].current_path.clone() {
-                        // A direct Save preserves the document's current version.
-                        let ver = self.tabs[i].scene.document.version;
-                        self.prepare_native_save(i);
-                        return self.queue_native_save(
-                            i,
-                            path,
-                            ver,
-                            crate::app::SavePurpose::Manual,
-                            crate::app::SaveContinuation::None,
-                            false,
-                            true,
-                        );
-                    }
+                if let Some(path) = self.direct_save_path(i) {
+                    // A direct Save preserves the document's current version.
+                    let ver = self.tabs[i].scene.document.version;
+                    self.prepare_native_save(i);
+                    return self.queue_native_save(
+                        i,
+                        path,
+                        ver,
+                        crate::app::SavePurpose::Manual,
+                        crate::app::SaveContinuation::None,
+                        false,
+                        true,
+                    );
                 }
                 self.save_dialog_for_unsaved = false;
                 self.save_with_default_format(i)
@@ -1971,12 +2002,23 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
             self.default_save_format.clone()
         };
         let (ext, _) = crate::io::parse_save_format(&self.save_dialog_format);
-        self.save_dialog_filename = self.tabs[tab_idx]
-            .current_path
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| format!("{}.{ext}", self.tabs[tab_idx].tab_display_name()));
+        self.save_dialog_filename = match self.tabs[tab_idx].current_path.as_deref() {
+            // A read-only source keeps its stem but not its extension:
+            // seeding "X.pid" would carry the unwritable name into the OS
+            // dialog, and the deep save gate would then refuse the pick.
+            Some(p) if crate::io::is_read_only_source_path(p) => {
+                let stem = p
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| self.tabs[tab_idx].tab_display_name());
+                format!("{stem}.{ext}")
+            }
+            Some(p) => p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| format!("{}.{ext}", self.tabs[tab_idx].tab_display_name())),
+            None => format!("{}.{ext}", self.tabs[tab_idx].tab_display_name()),
+        };
         if self.tabs[tab_idx].recovery_save_as_required {
             let path = std::path::Path::new(&self.save_dialog_filename);
             let stem = path

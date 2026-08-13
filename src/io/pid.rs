@@ -107,6 +107,44 @@ const LAYER_CONNECTIVITY: &str = "PID-CONNECTIVITY";
 const LAYER_FILL: &str = "PID-FILL";
 const LAYER_FRAME: &str = "PID-FRAME";
 
+/// What the import wants the reader to know, sized for one command-line line:
+/// how much of the file became drawing, how much did not, and whether the
+/// style tables were readable at all. The detail behind each number stays in
+/// the log (see [`report_import`]); this is the headline.
+#[derive(Clone, Copy)]
+pub struct ImportSummary {
+    /// Entities handed to the document.
+    pub drawn: usize,
+    /// Decoded source records those entities came from.
+    pub decoded: usize,
+    /// Source records the parser saw but could not place: no decoder, or a
+    /// shape the decoder for that type refuses.
+    pub missing: usize,
+    /// A style table failed to read outright, so line work, lettering or
+    /// fills are on their fallbacks rather than the drawing's own statement.
+    pub style_tables_failed: bool,
+}
+
+/// Mailbox carrying each import's summary out of the io layer, keyed by the
+/// drawing's path.
+///
+/// `acadrust::ReadOutcome` is a foreign type with no room for extra freight,
+/// so the summary rides beside it: written when the import finishes, taken by
+/// the open-completion handler that installs the tab. Keying by path keeps
+/// concurrent imports (tests run them in parallel) out of each other's slots;
+/// an entry an abandoned open leaves behind is overwritten by the next import
+/// of that path rather than shown against the wrong drawing.
+static IMPORT_SUMMARIES: std::sync::Mutex<std::collections::BTreeMap<PathBuf, ImportSummary>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The summary the last [`load_pid`] of `path` left behind, draining it.
+pub fn take_import_summary(path: &Path) -> Option<ImportSummary> {
+    IMPORT_SUMMARIES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path)
+}
+
 /// Parse a `.pid` file and project its decoded Sheet geometry into a document.
 pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     let parsed = PidParser::new()
@@ -116,6 +154,14 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
 
     let mut doc = CadDocument::new();
     crate::io::linetypes::populate_document(&mut doc);
+    // A DWG carries `$LWDISPLAY` in its header; a `.pid` has no header to read
+    // it from, so a fresh document's `false` would stand. Every line here comes
+    // in at a width read off the drawing's own style table (see
+    // `apply_symbology`), and with the flag off the wire shader collapses all
+    // of them to a hairline -- a 0.13mm instrument line and a 0.7mm process
+    // header would look identical on screen, which is the thing reading that
+    // table exists to fix.
+    doc.header.lineweight_display = true;
     // Colours separate the kinds at a glance: a P&ID is mostly line work, and
     // an all-white import makes lettering, symbol bodies and the decode's own
     // loose ends indistinguishable from the piping.
@@ -164,21 +210,46 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     // Until this landed every line came in at the layer's white default, so a
     // 0.13mm instrument line and a 0.7mm process header looked identical.
     // A file whose style table will not read keeps that old behaviour rather
-    // than failing the import.
-    let styles = pid_parse::style_link::line_styles_for_file(path).unwrap_or_default();
+    // than failing the import -- but says so, in the log and in the summary,
+    // because an all-default sheet is otherwise indistinguishable from a
+    // drawing that genuinely states no styles.
+    let mut style_tables_failed = false;
+    let styles = pid_parse::style_link::line_styles_for_file(path).unwrap_or_else(|error| {
+        style_tables_failed = true;
+        log::warn!(
+            "{}: the line style table did not read; line work keeps the layer defaults: {error}",
+            path.display()
+        );
+        Default::default()
+    });
     // Character height comes from the same table, one hop further along: a
     // text record names a paragraph style, and the height is on the character
     // style that paragraph style names. Most of a P&ID's lettering turns out
     // to be 1/8 inch, so `TEXT_HEIGHT_MM` was reading a quarter too small.
     // Records whose height does not resolve keep that fallback.
-    let text_heights = pid_parse::style_link::text_heights_for_file(path).unwrap_or_default();
+    let text_heights =
+        pid_parse::style_link::text_heights_for_file(path).unwrap_or_else(|error| {
+            style_tables_failed = true;
+            log::warn!(
+                "{}: the text style table did not read; lettering keeps the {TEXT_HEIGHT_MM}mm fallback: {error}",
+                path.display()
+            );
+            Default::default()
+        });
     // Which areas the drawing fills. `pid-parse` resolves an `igBoundary2d`
     // ring through its `JStyleOverride` to a `JStyleSimpleFill`; the fill's
     // own colour is not decoded, so a filled ring is drawn in its layer's
     // colour. On the reference corpus these are the solid flow arrowheads on
     // the pipelines -- 5 on DWG-0202 and 10 on the gongyi drawing, all of
     // which used to import as hollow triangles.
-    let fills = pid_parse::style_link::fill_styles_for_file(path).unwrap_or_default();
+    let fills = pid_parse::style_link::fill_styles_for_file(path).unwrap_or_else(|error| {
+        style_tables_failed = true;
+        log::warn!(
+            "{}: the fill style table did not read; boundary rings import as outlines: {error}",
+            path.display()
+        );
+        Default::default()
+    });
     // A line's dash pattern comes from the same style table, one reference
     // further along: a JStyleSimpleLine names a JStyleSimpleDashType, and
     // style_link hands the decoded segments back. Pool the distinct patterns
@@ -271,6 +342,31 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         drawn,
         lettering_on_fallback,
     );
+    // The headline the open-completion handler shows on the command line;
+    // the counts agree with `report_import`'s log lines by construction.
+    let missing: usize = geometry
+        .dropped_graphic_records
+        .iter()
+        .map(|dropped| dropped.count)
+        .chain(
+            geometry
+                .refused_graphic_records
+                .iter()
+                .map(|refused| refused.count),
+        )
+        .sum();
+    IMPORT_SUMMARIES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            path.to_path_buf(),
+            ImportSummary {
+                drawn,
+                decoded,
+                missing,
+                style_tables_failed,
+            },
+        );
     draw_page_border(&mut doc, page_mm);
     frame_drawing(&mut doc, &bounds, page_mm);
     doc.source_path = Some(path.to_string_lossy().into_owned());

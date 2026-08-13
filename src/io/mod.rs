@@ -16,6 +16,17 @@ pub mod pid;
 /// open a DWG that already carries these records and must still read them
 /// (see `scene::cache::properties::pid_semantics_section`).
 pub(crate) const PID_SEMANTICS_XDATA_APP: &str = "PID_SEMANTICS";
+
+/// Whether `path` names a read-only source format: one this application opens
+/// as a drawing but must never write. `.pid` is the only member — the writers
+/// here speak DWG and DXF, so honouring a `.pid` destination would replace a
+/// SmartPlant drawing with DWG bytes. Every save entry point either redirects
+/// to Save As over this test or is refused by the gate in
+/// `save_owned_as_version_inner`.
+pub fn is_read_only_source_path(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pid"))
+}
 #[cfg(not(target_arch = "wasm32"))]
 pub mod single_instance;
 pub mod pdf_export;
@@ -1534,6 +1545,16 @@ fn save_owned_as_version_inner<F>(
 where
     F: FnOnce(&Path) -> Result<(), SaveFailure>,
 {
+    // The refusal half of the read-only-source contract: the UI reroutes a
+    // Save aimed at a `.pid` tab into Save As before reaching here, so this
+    // only fires for a destination typed or scripted past that — and stops it
+    // before the atomic replace can destroy the original.
+    if is_read_only_source_path(path) {
+        return Err(SaveFailure::other(format!(
+            "\"{}\" is a read-only Smart P&ID source; save as DWG or DXF instead",
+            path.display()
+        )));
+    }
     let perf = crate::perf::enabled();
     let total_started = iced::time::Instant::now();
     doc.version = version;

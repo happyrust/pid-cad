@@ -104,6 +104,94 @@ fn line_work_carries_the_width_and_colour_the_drawing_states() {
     assert_eq!(palette, expected);
 }
 
+/// Those widths are switched on for display, not only recorded.
+///
+/// The wire shader reads `$LWDISPLAY` from the header and collapses every
+/// line to a hairline while it is off, and a `.pid` has no header of its own
+/// to turn it on -- a fresh `CadDocument` ships it off. So the width test
+/// above passed on a sheet that drew every line identically, which is the
+/// state reading the style table was meant to end. The importer states the
+/// flag itself; this pins that, because nothing in an entity count or a
+/// symbology assertion can see it.
+#[test]
+fn the_widths_the_drawing_states_are_switched_on_for_display() {
+    for name in [
+        "DWG-0201GP06-01.pid",
+        "DWG-0202GP06-01.pid",
+        "D06.pid",
+        "工艺管道及仪表流程-1.pid",
+    ] {
+        let Some(doc) = import(name) else {
+            continue;
+        };
+        assert!(
+            doc.header.lineweight_display,
+            "{name}: LWDISPLAY must open on, or the decoded widths draw as hairlines"
+        );
+    }
+}
+
+/// A `.pid` is never a write target: the deepest save routine refuses the
+/// destination before anything touches the disk.
+///
+/// Everything above it — QSAVE on a `.pid` tab, the save-before-close prompt —
+/// reroutes to Save As first (`direct_save_path`), so this gate is the safety
+/// net for whatever slips past the UI: a Save As where the user types `.pid`
+/// back in, WBLOCK to a typed name, automation. Needs no fixture: the gate
+/// must hold for any document aimed at any `.pid` path.
+#[test]
+fn saving_refuses_a_pid_destination() {
+    let doc = acadrust::CadDocument::new();
+    for case in ["pid", "PID"] {
+        let target = std::env::temp_dir().join(format!(
+            "ocs-save-gate-{}.{case}",
+            std::process::id()
+        ));
+        let error = OpenCADStudio::io::save(&doc, &target)
+            .expect_err("a .pid destination must be refused");
+        assert!(
+            error.contains("read-only"),
+            "the refusal should say why: {error}"
+        );
+        assert!(
+            !target.exists(),
+            "nothing may be written at the refused destination"
+        );
+    }
+}
+
+/// The import leaves its command-line headline behind, keyed by path.
+///
+/// The open-completion handler takes it and shows the reader one line: how
+/// much of the file became drawing, how much did not, and whether the style
+/// tables read. A headline that disagreed with the document would be worse
+/// than none, so the numbers are checked against the import itself rather
+/// than pinned: everything the summary counts as drawn went through the
+/// entity loop, and the only entity added outside it is the sheet border.
+#[test]
+fn the_import_leaves_a_summary_the_app_can_show() {
+    let Some(path) = fixture("DWG-0201GP06-01.pid") else {
+        return;
+    };
+    let doc = OpenCADStudio::io::load_file(&path).expect("the fixture imports");
+    let summary = OpenCADStudio::io::pid::take_import_summary(&path)
+        .expect("an import leaves its summary behind");
+    assert_eq!(
+        summary.drawn + 1,
+        doc.entities().count(),
+        "drawn plus the page border is everything in the document"
+    );
+    assert!(summary.decoded > 0, "the fixture has decoded records");
+    assert!(
+        !summary.style_tables_failed,
+        "the fixture's style tables read; the palette test depends on it"
+    );
+    assert!(
+        OpenCADStudio::io::pid::take_import_summary(&path).is_none(),
+        "taking the summary drains it"
+    );
+}
+
 /// Dashed line work comes in as a named linetype the renderer can dash.
 ///
 /// `style.dll` stores a line's dash as a `JStyleSimpleDashType` reference, and
@@ -198,12 +286,23 @@ fn lettering_carries_the_height_the_drawing_states() {
     // records reaches a character style whose height is refused, so eight of
     // the nine here are the drawing's own. Measured in `pid-parse`'s
     // `docs/analysis/2026-08-10-text-height-residue-is-one-sentinel-not-version-2.md`.
+    //
+    // The table grew twice as `pid-parse` learned the `igTextBox` family.
+    // Retiring its fixed-68 overhead took the 1/8 inch bucket from 21 to 28;
+    // then reading the record's three native sub-types took it to 30 and put
+    // two sizes here that this drawing had never shown -- 6.350 is a quarter
+    // inch, the heading size. All of it is lettering that was simply missing
+    // from the sheet before. See that crate's
+    // `docs/analysis/2026-08-12-igtextbox-overhead-is-a-floor-not-a-constant.md`
+    // and `docs/analysis/2026-08-13-igtextbox-has-three-shapes.md`.
     let expected: std::collections::BTreeMap<String, usize> = [
         ("1.500", 2),
+        ("1.524", 1),
         ("2.464", 3),
         ("2.500", 9),
-        ("3.175", 21),
+        ("3.175", 30),
         ("3.500", 2),
+        ("6.350", 1),
     ]
     .iter()
     .map(|(key, count)| ((*key).to_string(), *count))

@@ -240,14 +240,15 @@ mod windows_impl {
     };
 
     /// Remove the per-user keys this app created — undoes [`register_handler`].
-    /// Best-effort: leaves the shared `.dwg/.dxf/.bak` OpenWithProgids values
-    /// (they point at now-deleted ProgIDs, which Windows simply ignores).
+    /// Best-effort: leaves the shared `.dwg/.dxf/.bak/.pid` OpenWithProgids
+    /// values (they point at now-deleted ProgIDs, which Windows simply ignores).
     pub(super) fn unregister_handler() -> Result<(), String> {
         for key in [
             r"Software\Classes\Applications\OpenCADStudio.exe",
             r"Software\Classes\OpenCADStudio.DWG",
             r"Software\Classes\OpenCADStudio.DXF",
             r"Software\Classes\OpenCADStudio.BAK",
+            r"Software\Classes\OpenCADStudio.PID",
             r"Software\Open CAD Studio",
         ] {
             let w = wide(key);
@@ -384,6 +385,11 @@ mod windows_impl {
         set_string(&format!(r"{APP_BASE}\SupportedTypes"), Some(".dxf"), "")?;
         // `.bak` copies hold verbatim DWG/DXF content and open the same way.
         set_string(&format!(r"{APP_BASE}\SupportedTypes"), Some(".bak"), "")?;
+        // `.pid` is a read-only import (SmartPlant P&ID). Registering it puts
+        // this app in the "Open with" list; whether it becomes the *default*
+        // stays the user's call in the OS dialog — on a plant workstation the
+        // default is usually SmartPlant itself.
+        set_string(&format!(r"{APP_BASE}\SupportedTypes"), Some(".pid"), "")?;
 
         // ── ProgIDs (per-user mirror of the MSI's) ──────────────────────────
         // The Capabilities entries below point at these, and they must resolve
@@ -391,6 +397,11 @@ mod windows_impl {
         register_progid(&exe, "OpenCADStudio.DWG", "DWG Drawing")?;
         register_progid(&exe, "OpenCADStudio.DXF", "DXF Drawing")?;
         register_progid(&exe, "OpenCADStudio.BAK", "CAD Backup")?;
+        register_progid(
+            &exe,
+            "OpenCADStudio.PID",
+            "Smart P&ID Drawing (read-only import)",
+        )?;
         // Also offer the ProgIDs in each extension's Open-with list.
         set_string(
             r"Software\Classes\.dwg\OpenWithProgids",
@@ -405,6 +416,11 @@ mod windows_impl {
         set_string(
             r"Software\Classes\.bak\OpenWithProgids",
             Some("OpenCADStudio.BAK"),
+            "",
+        )?;
+        set_string(
+            r"Software\Classes\.pid\OpenWithProgids",
+            Some("OpenCADStudio.PID"),
             "",
         )?;
 
@@ -423,6 +439,7 @@ mod windows_impl {
         set_string(&format!(r"{CAP}\FileAssociations"), Some(".dwg"), "OpenCADStudio.DWG")?;
         set_string(&format!(r"{CAP}\FileAssociations"), Some(".dxf"), "OpenCADStudio.DXF")?;
         set_string(&format!(r"{CAP}\FileAssociations"), Some(".bak"), "OpenCADStudio.BAK")?;
+        set_string(&format!(r"{CAP}\FileAssociations"), Some(".pid"), "OpenCADStudio.PID")?;
         set_string(
             r"Software\RegisteredApplications",
             Some("Open CAD Studio"),
