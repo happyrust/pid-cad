@@ -22,9 +22,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use acadrust::entities::hatch::{BoundaryEdge, BoundaryPath, BoundaryPathFlags, LineEdge};
-use acadrust::entities::{
-    Circle, Hatch, Line, LwPolyline, Point, Text, TextHorizontalAlignment,
-};
+use acadrust::entities::{Circle, Hatch, Line, LwPolyline, Point, Text, TextHorizontalAlignment};
 use acadrust::tables::linetype::{LineType, LineTypeElement};
 use acadrust::types::{Color, LineWeight, Vector2, Vector3};
 use acadrust::{CadDocument, EntityType, TableEntry};
@@ -325,7 +323,6 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
             decoded += 1;
             accumulate_bounds(&entity.kind, &mut bounds);
         }
-        drawn += built.len();
         let symbology = style_for(&styles, entity);
         let text_style = height_for(&text_heights, entity);
         let height_mm = text_style.map(|h| projection.mm(h.height_m));
@@ -344,6 +341,17 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         if height_mm.is_none() && matches!(entity.kind, PidGraphicKind::Text { .. }) {
             lettering_on_fallback += 1;
         }
+        // A label that carries a line break is several lines of lettering, and
+        // a TEXT entity is one. Split it here, before anything is styled, so
+        // each line arrives as an entity of its own and then picks up the
+        // height, colour, alignment and typeface below exactly as a one-line
+        // label does.
+        let built = stack_text_lines(
+            built,
+            height_mm.unwrap_or(TEXT_HEIGHT_MM),
+            text_style.and_then(|style| style.line_spacing),
+        );
+        drawn += built.len();
         let semantic_hit = semantics.as_ref().and_then(|index| {
             entity
                 .graphic_oid
@@ -863,6 +871,106 @@ fn apply_text_alignment(entity: &mut EntityType, alignment: TextAlignment) {
         };
         sync_text_alignment_point(text);
     }
+}
+
+/// The code points SmartPlant may end a line of a label on.
+///
+/// The corpus only ever uses `U+000D`, a bare carriage return with no line
+/// feed — measured over all 235 `igTextBox` records in `pid-parse`'s
+/// `examples/probe_text_multiline_census`. The rest are here because splitting
+/// on a break this list is missing is the failure that looks like nothing:
+/// the label renders with its lines run together and no error anywhere.
+const TEXT_LINE_BREAKS: [char; 7] = [
+    '\u{000A}', '\u{000D}', '\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}',
+];
+
+/// Turn a label that carries line breaks into one text entity per line,
+/// stacked down the page at the pitch its paragraph style asks for.
+///
+/// Four labels in the reference corpus have a second line, and until this they
+/// imported as a single TEXT whose `U+000D` is a code point no stroke font has
+/// a glyph for: the lines ran together on one baseline with a blank gap where
+/// each break should have been. A DXF TEXT entity is single-line by
+/// definition, so there is nowhere to put a line break except in more entities.
+///
+/// **`line_spacing` is the reason this takes a parameter rather than assuming
+/// single spacing.** `JStyleTextPara +66` states the multiple, and in this
+/// corpus the two labels with a second line both state `1.5` while all 228
+/// one-line labels state `1.0` — so the field and the line breaks agree about
+/// which labels they concern. Measured in pid-parse's
+/// `docs/analysis/2026-08-22-four-labels-have-a-second-line.md`. A label whose
+/// paragraph states nothing usable stacks at single spacing, which is what a
+/// consumer with no stated pitch has to assume anyway.
+///
+/// Scoped like [`apply_text_height`] and its siblings: only the sheet's own
+/// lettering on [`LAYER_TEXT`]. A symbol's internal text is placed by the
+/// `.sym` library, which carries no paragraph style and no breaks.
+///
+/// Lines are offset perpendicular to the baseline rather than straight down,
+/// so a label rotated to read up the page stacks across the page — the corpus
+/// letters at 0, 90 and 180 degrees, and a vertical label stacked downwards
+/// would overprint itself.
+fn stack_text_lines(
+    built: Vec<EntityType>,
+    height_mm: f64,
+    line_spacing: Option<f64>,
+) -> Vec<EntityType> {
+    if !built.iter().any(is_multi_line_label) {
+        return built;
+    }
+    let pitch = height_mm * line_spacing.unwrap_or(1.0);
+    let mut out = Vec::with_capacity(built.len());
+    for one in built {
+        if !is_multi_line_label(&one) {
+            out.push(one);
+            continue;
+        }
+        let EntityType::Text(text) = one else {
+            unreachable!("is_multi_line_label admits only a Text");
+        };
+        // Down the page as the reader sees it: the baseline runs along
+        // `rotation`, so the next line sits one pitch along its right normal.
+        let (sin, cos) = text.rotation.sin_cos();
+        let step = Vector3::new(pitch * sin, -pitch * cos, 0.0);
+        for (index, line) in text
+            .value
+            .replace("\r\n", "\n")
+            .split(TEXT_LINE_BREAKS)
+            .enumerate()
+        {
+            // A blank line still occupies its slot -- the offset comes from
+            // the index -- but it is not worth an entity, which is the same
+            // call `build_entities` makes for an empty label.
+            if line.trim().is_empty() {
+                continue;
+            }
+            let mut one_line = text.clone();
+            one_line.value = line.to_string();
+            #[allow(clippy::cast_precision_loss)]
+            let offset = index as f64;
+            one_line.insertion_point = Vector3::new(
+                text.insertion_point.x + step.x * offset,
+                text.insertion_point.y + step.y * offset,
+                text.insertion_point.z,
+            );
+            // `apply_text_alignment` re-seeds the alignment point from the
+            // insertion point afterwards, so a stale one from the clone would
+            // be overwritten -- but only when the paragraph states an
+            // alignment. Clear it here so a label that states none cannot
+            // letter every line from the first line's anchor.
+            one_line.alignment_point = None;
+            out.push(EntityType::Text(one_line));
+        }
+    }
+    out
+}
+
+/// Whether this is a sheet label with more than one line in it.
+fn is_multi_line_label(entity: &EntityType) -> bool {
+    let EntityType::Text(text) = entity else {
+        return false;
+    };
+    text.common.layer == LAYER_TEXT && text.value.contains(TEXT_LINE_BREAKS)
 }
 
 /// Letter a text entity in the typeface its character style names.

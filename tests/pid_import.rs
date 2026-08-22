@@ -143,12 +143,10 @@ fn the_widths_the_drawing_states_are_switched_on_for_display() {
 fn saving_refuses_a_pid_destination() {
     let doc = acadrust::CadDocument::new();
     for case in ["pid", "PID"] {
-        let target = std::env::temp_dir().join(format!(
-            "ocs-save-gate-{}.{case}",
-            std::process::id()
-        ));
-        let error = OpenCADStudio::io::save(&doc, &target)
-            .expect_err("a .pid destination must be refused");
+        let target =
+            std::env::temp_dir().join(format!("ocs-save-gate-{}.{case}", std::process::id()));
+        let error =
+            OpenCADStudio::io::save(&doc, &target).expect_err("a .pid destination must be refused");
         assert!(
             error.contains("read-only"),
             "the refusal should say why: {error}"
@@ -325,8 +323,7 @@ fn rotated_lettering_is_stored_in_radians() {
         return;
     };
 
-    let mut buckets: std::collections::BTreeMap<String, usize> =
-        std::collections::BTreeMap::new();
+    let mut buckets: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for entity in on_layer(&doc, "PID-TEXT") {
         if let EntityType::Text(text) = entity {
             // Degrees would land on 0 / 90 / 180; radians land on 0 / 1.571 /
@@ -354,6 +351,108 @@ fn rotated_lettering_is_stored_in_radians() {
         !buckets.contains_key("90.000") && !buckets.contains_key("180.000"),
         "a degree value here means the importer converted on the way in: {buckets:?}"
     );
+}
+
+/// A label with a second line comes in as a second line.
+///
+/// Four `igTextBox` records in the reference corpus carry a `U+000D` in their
+/// text — a title block and a note, each published twice. A DXF TEXT entity is
+/// single-line, so until this they imported as one run holding a code point no
+/// stroke font draws: the title block's four lines lettered end to end across
+/// the sheet with a blank gap between them.
+///
+/// The pitch is not this importer's invention. `JStyleTextPara +66` states a
+/// line spacing multiple, and the measurement that justified reading it is
+/// that the two labels here state `1.5` while all 228 single-line labels in
+/// the corpus state `1.0` — the field varies exactly where the line breaks do.
+/// See pid-parse's `docs/analysis/2026-08-22-four-labels-have-a-second-line.md`.
+///
+/// This pins both halves: that no break survives into an entity, and that the
+/// lines land one stated pitch apart rather than at a spacing of ours.
+///
+/// **The pitch is `height × spacing`, and the height arrives over pid-parse's
+/// two-hop join** (`igTextBox` → `JStyleTextPara` → `JStyleTextChar`). A
+/// shape-2 record also carries a run naming a different character style, and
+/// where the two disagree the run's height is the non-nominal one —
+/// unsettled as of 2026-08-22. The multiple is safe from that (spacing is a
+/// paragraph property), but if the run ever wins for height, this assertion's
+/// expected value moves with it and has to be re-measured rather than
+/// re-derived. The test reads the height off the entity for that reason: only
+/// the multiple is written down here.
+#[test]
+fn a_multi_line_label_stacks_at_the_spacing_its_paragraph_states() {
+    /// The title block, in the order the record spells it.
+    const TITLE: [&str; 4] = ["安3集气站", "排污单元", "污油池", "管道及仪表流程图"];
+    /// What `+66` reads on both of this drawing's multi-line labels.
+    const STATED_SPACING: f64 = 1.5;
+
+    let Some(doc) = import("DWG-0202GP06-01.pid") else {
+        return;
+    };
+
+    let line_of = |value: &str| -> &acadrust::entities::Text {
+        on_layer(&doc, "PID-TEXT")
+            .find_map(|entity| match entity {
+                EntityType::Text(text) if text.value == value => Some(text),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("`{value}` did not reach PID-TEXT as a line of its own"))
+    };
+
+    let lines: Vec<&acadrust::entities::Text> = TITLE.iter().map(|value| line_of(value)).collect();
+    let height = lines[0].height;
+    assert!(height > 0.0, "the title block letters at a real height");
+    let expected = height * STATED_SPACING;
+    for pair in lines.windows(2) {
+        let (from, to) = (pair[0].insertion_point, pair[1].insertion_point);
+        // Measured as a distance rather than a drop in Y, because the offset
+        // follows the baseline's normal and this label need not be horizontal.
+        let step = (to.x - from.x).hypot(to.y - from.y);
+        assert!(
+            (step - expected).abs() < 1e-6,
+            "`{}` to `{}` is {step}mm, not the stated {expected}mm",
+            pair[0].value,
+            pair[1].value
+        );
+        assert!(
+            (pair[1].height - height).abs() < 1e-9,
+            "every line of one label letters at one height"
+        );
+    }
+
+    // The two-line note splits too, so this is not a special case for titles.
+    let note = line_of("2、阻火器电伴热带从根部缠至地面以上2m。");
+    assert!(note.height > 0.0);
+}
+
+/// No label reaches an entity still holding a line break.
+///
+/// A break that survives is not a visible error — a stroke font has no glyph
+/// for `U+000D`, so it renders as a gap and the label simply reads wrong. This
+/// is the assertion that makes that loud, across every fixture rather than
+/// only the one that has multi-line labels today.
+#[test]
+fn no_label_keeps_a_line_break_it_cannot_draw() {
+    for name in [
+        "DWG-0201GP06-01.pid",
+        "DWG-0202GP06-01.pid",
+        "D06.pid",
+        "工艺管道及仪表流程-1.pid",
+    ] {
+        let Some(doc) = import(name) else {
+            continue;
+        };
+        for entity in on_layer(&doc, "PID-TEXT") {
+            let EntityType::Text(text) = entity else {
+                continue;
+            };
+            assert!(
+                !text.value.chars().any(char::is_control),
+                "{name}: `{}` reached the drawing with a control character in it",
+                text.value.escape_debug()
+            );
+        }
+    }
 }
 
 /// Lettering comes in the colour the drawing's character style states.
@@ -388,11 +487,10 @@ fn lettering_carries_the_colour_the_drawing_states() {
     // 0.254mm that `style_link` refuses, so the whole resolution returns
     // nothing and neither the height nor the colour is applied. Colour and
     // height fall back together because they ride one join.
-    let expected: std::collections::BTreeMap<String, usize> =
-        [("#000000", 47), ("ByLayer", 1)]
-            .iter()
-            .map(|(key, count)| ((*key).to_string(), *count))
-            .collect();
+    let expected: std::collections::BTreeMap<String, usize> = [("#000000", 47), ("ByLayer", 1)]
+        .iter()
+        .map(|(key, count)| ((*key).to_string(), *count))
+        .collect();
     assert_eq!(palette, expected);
 }
 
