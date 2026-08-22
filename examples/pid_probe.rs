@@ -47,6 +47,7 @@ fn main() {
         let mut per_layer: BTreeMap<String, usize> = BTreeMap::new();
         let mut labels: BTreeMap<String, usize> = BTreeMap::new();
         let mut heights: BTreeMap<String, usize> = BTreeMap::new();
+        let mut typefaces: BTreeMap<String, usize> = BTreeMap::new();
         for e in doc.entities() {
             if e.common().owner_handle == doc.header.model_space_block_handle {
                 owned += 1;
@@ -67,6 +68,17 @@ fn main() {
                             t.rotation.to_degrees()
                         ))
                         .or_default() += 1;
+                    // What the label will actually be drawn in: the style
+                    // names a typeface, and a name the machine has no font for
+                    // falls back silently, so print the typeface rather than
+                    // the style name.
+                    let face = doc
+                        .text_styles
+                        .iter()
+                        .find(|s| s.name.eq_ignore_ascii_case(&t.style))
+                        .map_or("<no such style>", |s| s.true_type_font.trim());
+                    let face = if face.is_empty() { "<unstated>" } else { face };
+                    *typefaces.entry(face.to_string()).or_default() += 1;
                 }
             }
         }
@@ -82,6 +94,10 @@ fn main() {
         println!("  text height/rotation ({} distinct):", heights.len());
         for (key, count) in &heights {
             println!("    {count:>3} x {key}");
+        }
+        println!("  text typefaces ({} distinct):", typefaces.len());
+        for (face, count) in &typefaces {
+            println!("    {count:>3} x {face}");
         }
 
         // A sheet is at most ~1189mm (A0) wide; anything reaching past 900 or

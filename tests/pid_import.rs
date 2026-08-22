@@ -464,6 +464,94 @@ fn lettering_starts_from_the_side_the_drawing_states() {
     assert_eq!(sides, expected);
 }
 
+/// Lettering names the typeface the drawing's character style states.
+///
+/// Every label used to render in the application's default face, because
+/// nothing read a font name. `JStyleTextChar` ends with one -- `+68` count,
+/// `+70` UTF-16 body -- and the importer pools the distinct ones into document
+/// text styles so a label references a style the way any other text entity in
+/// the application does.
+///
+/// The `height == 0` assertion is the one worth keeping. A `TextStyle` height
+/// is a *fixed* height that overrides the entity's, so a non-zero value here
+/// would silently undo the per-entity heights that
+/// `lettering_carries_the_height_the_drawing_states` pins -- and that test
+/// would keep passing, because it reads the entity rather than the style.
+#[test]
+fn lettering_names_the_typeface_the_drawing_states() {
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
+        return;
+    };
+
+    let registered: std::collections::BTreeMap<String, String> = doc
+        .text_styles
+        .iter()
+        .filter(|style| style.name.starts_with("PID-"))
+        .map(|style| {
+            assert_eq!(
+                style.height, 0.0,
+                "{} states a fixed height, which would override every entity's own",
+                style.name
+            );
+            (style.name.clone(), style.true_type_font.clone())
+        })
+        .collect();
+    // Five typefaces on this sheet. The style name is sanitised for the symbol
+    // table -- the space in "Arial Narrow" becomes a hyphen -- while the
+    // typeface itself travels verbatim in `true_type_font`, which is what the
+    // renderer matches against the installed fonts.
+    let expected_styles: std::collections::BTreeMap<String, String> = [
+        ("PID-Arial", "Arial"),
+        ("PID-Arial-Narrow", "Arial Narrow"),
+        ("PID-SimSun-ExtB", "SimSun-ExtB"),
+        ("PID-仿宋", "仿宋"),
+        ("PID-宋体", "宋体"),
+    ]
+    .iter()
+    .map(|(name, font)| ((*name).to_string(), (*font).to_string()))
+    .collect();
+    assert_eq!(registered, expected_styles);
+
+    let mut used: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for entity in on_layer(&doc, "PID-TEXT") {
+        if let EntityType::Text(text) = entity {
+            *used.entry(text.style.clone()).or_default() += 1;
+        }
+    }
+    // Three of the five are referenced. The other two are reached only by
+    // records whose lettering lands on `PID-SYMBOL-LABEL`, which this importer
+    // deliberately leaves alone -- the same scope every other text property
+    // respects -- so their styles are registered and unused, the way a DWG
+    // carries any style nothing currently names. `Standard` is the one label
+    // whose style resolution fails outright, keeping the fallback height,
+    // colour and alignment along with the default face.
+    let expected_used: std::collections::BTreeMap<String, usize> = [
+        ("PID-Arial", 21),
+        ("PID-Arial-Narrow", 8),
+        ("PID-宋体", 18),
+        ("Standard", 1),
+    ]
+    .iter()
+    .map(|(name, count)| ((*name).to_string(), *count))
+    .collect();
+    assert_eq!(used, expected_used);
+
+    // The scope itself, pinned: lettering that is not the sheet's own keeps
+    // the document default. A symbol's text is placed by the `.sym` library.
+    let strayed: Vec<&str> = ["PID-SYMBOL-LABEL", "PID-SYMBOL"]
+        .iter()
+        .flat_map(|layer| on_layer(&doc, layer))
+        .filter_map(|entity| match entity {
+            EntityType::Text(text) if text.style != "Standard" => Some(text.style.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        strayed.is_empty(),
+        "the importer restyled lettering it does not own: {strayed:?}"
+    );
+}
+
 /// Every layer the importer names exists, and the ones carrying evidence
 /// rather than drawing ship switched off.
 #[test]

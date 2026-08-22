@@ -18,7 +18,7 @@
 // `igPoint2d` is the only point family the format has, and all of it
 // decodes. `ProbeOnly` evidence has no position at all.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use acadrust::entities::hatch::{BoundaryEdge, BoundaryPath, BoundaryPathFlags, LineEdge};
@@ -277,6 +277,9 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     // dashed line to one and the renderer dashes it like any other linetype.
     // See pid-parse's `docs/analysis/2026-08-07-jstyle-simple-dash-type-linetype.md`.
     let dash_linetypes = register_dash_linetypes(&mut doc, &styles);
+    // Same pooling for the typefaces the character styles name, so a label can
+    // reference a document text style the way any other text entity does.
+    let font_styles = register_text_styles(&mut doc, &text_heights);
     // The published semantic model, when the drawing ships one: SmartPlant
     // publishes `<stem>_Data.xml` beside the `.pid`, and pid-parse joins its
     // GraphicOIDs onto the decoded records (two-hop rule, see pid-parse's
@@ -332,6 +335,12 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         // Alignment rides the same join but comes off the paragraph rather
         // than the character style, since it belongs to the run.
         let text_alignment = text_style.and_then(|style| style.alignment);
+        // And the typeface, which was registered as a document text style
+        // above, so what lands on the entity is that style's name.
+        let font_style = text_style
+            .and_then(|style| style.font_name.as_deref())
+            .and_then(|font| font_styles.get(font))
+            .map(String::as_str);
         if height_mm.is_none() && matches!(entity.kind, PidGraphicKind::Text { .. }) {
             lettering_on_fallback += 1;
         }
@@ -352,6 +361,9 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
             }
             if let Some(alignment) = text_alignment {
                 apply_text_alignment(&mut one, alignment);
+            }
+            if let Some(name) = font_style {
+                apply_text_style(&mut one, name);
             }
             if let Some(hit) = &semantic_hit {
                 attach_semantics(&mut one, hit);
@@ -853,6 +865,23 @@ fn apply_text_alignment(entity: &mut EntityType, alignment: TextAlignment) {
     }
 }
 
+/// Letter a text entity in the typeface its character style names.
+///
+/// The entity names a document text style rather than carrying the typeface
+/// itself, which is how every other text entity in the application works --
+/// see [`register_text_styles`] for what those styles hold.
+///
+/// Scoped like [`apply_text_height`], [`apply_text_colour`] and
+/// [`apply_text_alignment`]: the sheet's own lettering only. A symbol's
+/// internal text is drawn from the `.sym` library and names no typeface.
+fn apply_text_style(entity: &mut EntityType, style_name: &str) {
+    if let EntityType::Text(text) = entity {
+        if text.common.layer == LAYER_TEXT {
+            text.style = style_name.to_string();
+        }
+    }
+}
+
 /// Give an entity the width and colour its source record asks for.
 ///
 /// Only the two layers carrying the drawing's own line work are painted.
@@ -932,6 +961,85 @@ fn register_dash_linetypes(
         names.insert(key, name);
     }
     names
+}
+
+/// Register one document text style per distinct typeface the drawing's
+/// character styles name, returning the map from typeface to the style name it
+/// was given.
+///
+/// Pooled the way [`register_dash_linetypes`] pools patterns, and for the same
+/// reason: a `.pid` names a handful of typefaces, and once each is a named
+/// `TextStyle` the lettering resolves through
+/// [`crate::entities::text_support::resolve_text_style`] like a style any DWG
+/// shipped. That resolver prefers `true_type_font` and looks the name up among
+/// the installed system fonts, which is where the vendor's name goes, verbatim.
+///
+/// **`height` stays 0.** A `TextStyle` height is a *fixed* height that
+/// overrides the entity's own, and every one of these entities has already
+/// been given the height its character style states.
+///
+/// A typeface the corpus cannot match -- twelve of the 381 corpus names are
+/// damaged on the vendor's side, and none of them is reached by text today --
+/// gets a style like any other. `resolve_text_style` finds no such font and
+/// falls back, which is the intended outcome: better than writing a
+/// reconstructed name nobody measured.
+///
+/// Names are assigned over a `BTreeSet`, so they are stable for a given file.
+fn register_text_styles(
+    doc: &mut CadDocument,
+    text_heights: &pid_parse::style_link::TextHeightIndex,
+) -> HashMap<String, String> {
+    let fonts: BTreeSet<&str> = text_heights
+        .values()
+        .filter_map(|style| style.font_name.as_deref())
+        .collect();
+    let mut names = HashMap::new();
+    for font in fonts {
+        let base = text_style_name(font);
+        let mut name = base.clone();
+        let mut suffix = 2;
+        // The table matches case-insensitively, so asking it is also what
+        // keeps two typefaces that sanitise alike from colliding.
+        while doc.text_styles.contains(&name) {
+            name = format!("{base}-{suffix}");
+            suffix += 1;
+        }
+        let mut style = acadrust::tables::TextStyle::new(&name);
+        style.true_type_font = font.to_string();
+        style.set_handle(doc.allocate_handle());
+        if doc.text_styles.add(style).is_ok() {
+            names.insert(font.to_string(), name);
+        }
+    }
+    names
+}
+
+/// Turn a typeface name into a symbol-table name for the style that carries it.
+///
+/// The name only has to be stable, unique and readable, since the typeface
+/// itself travels in `true_type_font` -- so anything that is not a letter,
+/// digit or underscore becomes a hyphen. That includes the space in
+/// `Arial Narrow`: modern DXF permits one in a symbol name and R12 did not,
+/// and `PID-Arial-Narrow` reads the same either way. CJK names come through as
+/// themselves, since they are alphanumeric.
+fn text_style_name(font: &str) -> String {
+    let mut body = String::new();
+    for ch in font.chars() {
+        if ch.is_alphanumeric() || ch == '_' {
+            body.push(ch);
+        } else if !body.is_empty() && !body.ends_with('-') {
+            body.push('-');
+        }
+    }
+    // Well short of the 255-character symbol-name limit. A typeface name
+    // longer than this is damage rather than a name, and the caller's
+    // uniqueness loop numbers apart any two that truncate alike.
+    let body: String = body.chars().take(64).collect();
+    let body = body.trim_end_matches('-');
+    if body.is_empty() {
+        return "PID-FONT".to_string();
+    }
+    format!("PID-{body}")
 }
 
 /// Build a document linetype from a decoded dash pattern.
