@@ -56,8 +56,16 @@ fn main() {
                 if t.common.layer == "PID-SYMBOL-LABEL" {
                     *labels.entry(t.value.clone()).or_default() += 1;
                 } else {
+                    // `rotation` is stored in radians, which reads as 0 / 2 / 3
+                    // at this precision. Show degrees: a reader checking a
+                    // P&ID wants to know a label stands up, not that it holds
+                    // 1.5707963.
                     *heights
-                        .entry(format!("{:.2}mm rot={:.0}", t.height, t.rotation))
+                        .entry(format!(
+                            "{:.2}mm rot={:.0}deg",
+                            t.height,
+                            t.rotation.to_degrees()
+                        ))
                         .or_default() += 1;
                 }
             }

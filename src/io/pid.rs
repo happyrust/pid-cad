@@ -97,6 +97,22 @@ const SHEET_MARGIN_MM: f64 = 100.0;
 // shows a "P&ID" group for entities that carry it and no group otherwise.
 pub(crate) use super::PID_SEMANTICS_XDATA_APP;
 
+// Angles cross this module unchanged, because both sides already agree on
+// radians: `pid-parse` states them that way, and so does the in-memory
+// drawing model -- `src/io/mod.rs`'s `fix_dxf_dimension_rotations` exists
+// precisely to convert the DXF reader's degrees into radians on load, and
+// `entities::text` adds `PI` to `Text::rotation` for upside-down text.
+//
+// Six assignments here used to call `to_degrees()` on the way in. It was
+// invisible while every angle was zero: `pid-parse` hard-coded text rotation
+// to `0.0`, and `0.0f64.to_degrees()` is still `0.0`. Decoding the real
+// rotation made it visible -- a quarter turn arrived as 90 *radians*, which
+// renders at 116 degrees. The symbol library's arcs and labels were wrong
+// the whole time.
+//
+// The assignments below point back here, so the next person tempted to write
+// `.to_degrees()` in this file has something to read first.
+
 const LAYER_GEOMETRY: &str = "PID-GEOMETRY";
 const LAYER_TEXT: &str = "PID-TEXT";
 const LAYER_SYMBOL: &str = "PID-SYMBOL";
@@ -918,8 +934,9 @@ fn build_entities(
             let mut arc = acadrust::entities::Arc::new();
             arc.center = projection.point(center);
             arc.radius = projection.mm(*radius);
-            arc.start_angle = start_angle.to_degrees();
-            arc.end_angle = end_angle.to_degrees();
+            // Radians on both sides -- see the angle-unit note by the layer constants.
+            arc.start_angle = *start_angle;
+            arc.end_angle = *end_angle;
             arc.common.layer = LAYER_GEOMETRY.to_string();
             vec![EntityType::Arc(arc)]
         }
@@ -940,7 +957,8 @@ fn build_entities(
             } else {
                 TEXT_HEIGHT_MM
             };
-            text.rotation = rotation.to_degrees();
+            // Radians on both sides -- see the angle-unit note by the layer constants.
+            text.rotation = *rotation;
             text.common.layer = LAYER_TEXT.to_string();
             vec![EntityType::Text(text)]
         }
@@ -1260,8 +1278,12 @@ fn place_primitive(primitive: &SymbolPrimitive, at: &Placement<'_>) -> Option<En
             let mut arc = acadrust::entities::Arc::new();
             arc.center = at.apply(center.0, center.1);
             arc.radius = radius;
-            arc.start_angle = start_angle.to_degrees();
-            arc.end_angle = end_angle.to_degrees();
+            // Radians on both sides -- see the angle-unit note by the layer
+            // constants. The sum above already proves the unit: `at.rotation`
+            // is what `Placement::apply` feeds to `sin_cos`, so the library's
+            // angles have to be radians for the addition to mean anything.
+            arc.start_angle = start_angle;
+            arc.end_angle = end_angle;
             arc.common.layer = LAYER_SYMBOL.to_string();
             Some(EntityType::Arc(arc))
         }
@@ -1292,7 +1314,8 @@ fn place_primitive(primitive: &SymbolPrimitive, at: &Placement<'_>) -> Option<En
             // fallback the sheet's own text gets, scaled with the placement
             // so a half-size symbol does not carry full-size lettering.
             label.height = at.scale_radius(TEXT_HEIGHT_MM / at.projection.mm_per_unit);
-            label.rotation = at.rotation.to_degrees();
+            // Radians on both sides -- see the angle-unit note by the layer constants.
+            label.rotation = at.rotation;
             label.common.layer = LAYER_SYMBOL.to_string();
             Some(EntityType::Text(label))
         }

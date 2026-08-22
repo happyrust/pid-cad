@@ -310,6 +310,52 @@ fn lettering_carries_the_height_the_drawing_states() {
     assert_eq!(heights, expected);
 }
 
+/// Rotated lettering arrives in the unit the drawing model uses: radians.
+///
+/// The importer used to call `to_degrees()` on its way in, which was
+/// invisible while `pid-parse` hard-coded text rotation to zero -- and became
+/// a quarter turn rendered at 116 degrees the moment real rotations decoded.
+/// The model's contract is radians throughout: `io::fix_dxf_dimension_rotations`
+/// exists to convert the DXF reader's degrees on load, and `entities::text`
+/// adds `PI` for upside-down text. This pins the vertical labels to the value
+/// that contract asks for; under the old conversion they read 90.0 and fail.
+#[test]
+fn rotated_lettering_is_stored_in_radians() {
+    let Some(doc) = import("DWG-0202GP06-01.pid") else {
+        return;
+    };
+
+    let mut buckets: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for entity in on_layer(&doc, "PID-TEXT") {
+        if let EntityType::Text(text) = entity {
+            // Degrees would land on 0 / 90 / 180; radians land on 0 / 1.571 /
+            // 3.142. Rounding to three places keeps float noise out.
+            buckets
+                .entry(format!("{:.3}", text.rotation))
+                .and_modify(|n| *n += 1)
+                .or_insert(1);
+        }
+    }
+
+    let quarter = format!("{:.3}", std::f64::consts::FRAC_PI_2);
+    let half = format!("{:.3}", std::f64::consts::PI);
+    assert_eq!(
+        buckets.get(&quarter).copied().unwrap_or(0),
+        13,
+        "this sheet letters 13 labels up its vertical pipe runs, got {buckets:?}"
+    );
+    assert_eq!(
+        buckets.get(&half).copied().unwrap_or(0),
+        1,
+        "and one upside down, got {buckets:?}"
+    );
+    assert!(
+        !buckets.contains_key("90.000") && !buckets.contains_key("180.000"),
+        "a degree value here means the importer converted on the way in: {buckets:?}"
+    );
+}
+
 /// Every layer the importer names exists, and the ones carrying evidence
 /// rather than drawing ship switched off.
 #[test]
