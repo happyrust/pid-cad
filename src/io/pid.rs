@@ -22,11 +22,15 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use acadrust::entities::hatch::{BoundaryEdge, BoundaryPath, BoundaryPathFlags, LineEdge};
-use acadrust::entities::{Circle, Hatch, Line, LwPolyline, Point, Text};
+use acadrust::entities::{
+    Circle, Hatch, Line, LwPolyline, Point, Text, TextHorizontalAlignment,
+};
 use acadrust::tables::linetype::{LineType, LineTypeElement};
 use acadrust::types::{Color, LineWeight, Vector2, Vector3};
 use acadrust::{CadDocument, EntityType, TableEntry};
-use pid_parse::style_link::{DashPattern, LineStyleIndex, ResolvedFill, ResolvedLineStyle};
+use pid_parse::style_link::{
+    DashPattern, LineStyleIndex, ResolvedFill, ResolvedLineStyle, TextAlignment,
+};
 use pid_parse::symbol_library::{SymbolLibrary, SymbolPrimitive};
 use pid_parse::{
     build_normalized_geometry, NormalizedPidGeometry, PidDrawingUnits, PidGeometryConfidence,
@@ -320,7 +324,14 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         }
         drawn += built.len();
         let symbology = style_for(&styles, entity);
-        let height_mm = height_for(&text_heights, entity).map(|h| projection.mm(h.height_m));
+        let text_style = height_for(&text_heights, entity);
+        let height_mm = text_style.map(|h| projection.mm(h.height_m));
+        // The same character style states the colour, so it comes off the
+        // join already made rather than a second one.
+        let text_rgb = text_style.and_then(pid_parse::style_link::ResolvedTextHeight::rgb);
+        // Alignment rides the same join but comes off the paragraph rather
+        // than the character style, since it belongs to the run.
+        let text_alignment = text_style.and_then(|style| style.alignment);
         if height_mm.is_none() && matches!(entity.kind, PidGraphicKind::Text { .. }) {
             lettering_on_fallback += 1;
         }
@@ -335,6 +346,12 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
             }
             if let Some(mm) = height_mm {
                 apply_text_height(&mut one, mm);
+            }
+            if let Some(rgb) = text_rgb {
+                apply_text_colour(&mut one, rgb);
+            }
+            if let Some(alignment) = text_alignment {
+                apply_text_alignment(&mut one, alignment);
             }
             if let Some(hit) = &semantic_hit {
                 attach_semantics(&mut one, hit);
@@ -777,6 +794,62 @@ fn apply_text_height(entity: &mut EntityType, height_mm: f64) {
         if text.common.layer == LAYER_TEXT {
             text.height = height_mm;
         }
+    }
+}
+
+/// Letter a text entity in the colour its character style states.
+///
+/// Scoped the way [`apply_text_height`] is: only the sheet's own lettering on
+/// [`LAYER_TEXT`]. A symbol's internal text comes from the `.sym` library and
+/// states no colour of its own, and the diagnostic layers' colours *are* the
+/// diagnosis -- the same reason [`apply_symbology`] refuses to paint them.
+///
+/// Most of a P&ID letters in black, which on the editor's dark background the
+/// renderer flips to white (`scene::view::render::adapt_to_bg`) exactly as it
+/// already does for the drawing's black line work. So this is visible as
+/// colour where the drawing states one, and as no change at all where it
+/// states the black that most lettering uses.
+fn apply_text_colour(entity: &mut EntityType, [r, g, b]: [u8; 3]) {
+    if let EntityType::Text(text) = entity {
+        if text.common.layer == LAYER_TEXT {
+            text.common.color = Color::from_rgb(r, g, b);
+        }
+    }
+}
+
+/// Letter a text entity from the side its paragraph style states.
+///
+/// Half the labels a P&ID reaches are centred or right-aligned, and until this
+/// they all rendered from the left -- each of those runs sitting half a label
+/// away from where the drawing puts it.
+///
+/// The insertion point does double duty in a TEXT entity: it is the run origin
+/// only while the alignment is left-on-baseline, and otherwise the origin is
+/// `alignment_point` instead. Setting the alignment alone would therefore move
+/// the run to whatever `alignment_point` happened to hold -- which is nothing
+/// -- so [`sync_text_alignment_point`] seeds it from the insertion point in
+/// the same breath. The failure mode that guards against is not subtle: the
+/// label lands at the origin rather than half a word off.
+///
+/// Scoped like [`apply_text_height`] and [`apply_text_colour`]: the sheet's
+/// own lettering only. A symbol's internal text is placed by the `.sym`
+/// library, which states its own alignment.
+fn apply_text_alignment(entity: &mut EntityType, alignment: TextAlignment) {
+    use crate::entities::text::sync_text_alignment_point;
+
+    if let EntityType::Text(text) = entity {
+        if text.common.layer != LAYER_TEXT {
+            return;
+        }
+        // The two enums agree on 0/1/2 by coincidence of both following the
+        // DXF convention, but they are different types, so the mapping is
+        // written out rather than cast.
+        text.horizontal_alignment = match alignment {
+            TextAlignment::Left => TextHorizontalAlignment::Left,
+            TextAlignment::Center => TextHorizontalAlignment::Center,
+            TextAlignment::Right => TextHorizontalAlignment::Right,
+        };
+        sync_text_alignment_point(text);
     }
 }
 

@@ -356,6 +356,114 @@ fn rotated_lettering_is_stored_in_radians() {
     );
 }
 
+/// Lettering comes in the colour the drawing's character style states.
+///
+/// It used to be the `PID-TEXT` layer's green for every label, an invention of
+/// this importer: nothing read a text colour, so nothing could state one. The
+/// character style does, at `JStyleTextChar +34`, and the same two-hop join
+/// that already fetched the height carries it. Nearly all of a P&ID letters in
+/// black, which the renderer flips to white on the dark background exactly as
+/// it does the drawing's black line work -- so the visible change is that
+/// lettering stops being green, plus the handful of labels the drawing colours
+/// deliberately. A regression puts them back on `ByLayer`, which no entity
+/// count would show.
+#[test]
+fn lettering_carries_the_colour_the_drawing_states() {
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
+        return;
+    };
+
+    let mut palette: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for entity in on_layer(&doc, "PID-TEXT") {
+        let key = match entity.common().color {
+            acadrust::types::Color::Rgb { r, g, b } => format!("#{r:02X}{g:02X}{b:02X}"),
+            _ => "ByLayer".to_string(),
+        };
+        *palette.entry(key).or_default() += 1;
+    }
+
+    // 47 of this sheet's 48 labels reach a character style and letter in the
+    // black it states. The one left on `ByLayer` is the same record that
+    // keeps the 2.5mm height fallback -- its style states the unexplained
+    // 0.254mm that `style_link` refuses, so the whole resolution returns
+    // nothing and neither the height nor the colour is applied. Colour and
+    // height fall back together because they ride one join.
+    let expected: std::collections::BTreeMap<String, usize> =
+        [("#000000", 47), ("ByLayer", 1)]
+            .iter()
+            .map(|(key, count)| ((*key).to_string(), *count))
+            .collect();
+    assert_eq!(palette, expected);
+}
+
+/// Lettering starts from the side the drawing's paragraph style states, and
+/// carries the alignment point that makes it mean anything.
+///
+/// Every label used to render left-aligned because nothing read an alignment.
+/// `JStyleTextPara +35` states one, with Intergraph's own values, and across
+/// the corpus 49% of the styles text reaches are centred or right -- each of
+/// those runs sitting half a label from where the drawing puts it.
+///
+/// The second assertion is the one that matters more. A TEXT entity's
+/// insertion point is the run origin *only* while the alignment is
+/// left-on-baseline; otherwise the origin is `alignment_point`. Setting the
+/// alignment without seeding that point does not nudge a label, it drops it at
+/// the origin -- so this pins that every non-left label has one, and that the
+/// left ones do not (a stray point there would be equally wrong).
+#[test]
+fn lettering_starts_from_the_side_the_drawing_states() {
+    use acadrust::entities::TextHorizontalAlignment as HA;
+
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
+        return;
+    };
+
+    let mut sides: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut misplaced = Vec::new();
+    for entity in on_layer(&doc, "PID-TEXT") {
+        let acadrust::EntityType::Text(text) = entity else {
+            continue;
+        };
+        let key = match text.horizontal_alignment {
+            HA::Left => "left",
+            HA::Center => "center",
+            HA::Right => "right",
+            other => {
+                misplaced.push(format!("unexpected alignment {other:?}"));
+                continue;
+            }
+        };
+        *sides.entry(key.to_string()).or_default() += 1;
+        let needs_point = text.horizontal_alignment != HA::Left;
+        if needs_point != text.alignment_point.is_some() {
+            misplaced.push(format!(
+                "{:?} label {:?} has alignment_point {:?}",
+                text.horizontal_alignment, text.value, text.alignment_point
+            ));
+        }
+    }
+
+    assert!(
+        misplaced.is_empty(),
+        "every non-left label needs an alignment point and no left one may carry one: {misplaced:?}"
+    );
+    // This sheet letters 20 of its 48 labels from somewhere other than the
+    // left -- every one of which used to render half a label off.
+    //
+    // `left` is the one bucket that cannot be read as a measurement: a label
+    // whose style resolution fails states no alignment, keeps the entity
+    // default, and lands here indistinguishable from a stated left. This
+    // sheet has exactly one such record -- the same one that keeps the height
+    // and colour fallbacks, since all three ride one join -- so 28 means 27
+    // stated plus 1 defaulted.
+    let expected: std::collections::BTreeMap<String, usize> =
+        [("center", 18), ("left", 28), ("right", 2)]
+            .iter()
+            .map(|(key, count)| ((*key).to_string(), *count))
+            .collect();
+    assert_eq!(sides, expected);
+}
+
 /// Every layer the importer names exists, and the ones carrying evidence
 /// rather than drawing ship switched off.
 #[test]
