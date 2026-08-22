@@ -8,7 +8,7 @@
 //! line,x1,y1,x2,y2
 //! circle,cx,cy,r
 //! poly,x1,y1,x2,y2,...
-//! text,x,y,height,rotation_deg,"value"
+//! text,x,y,height,rotation_rad,"value"
 //! ```
 //!
 //! A row that draws with its own width and colour rather than the layer's
@@ -67,7 +67,12 @@ fn main() {
                 format!("circle,{},{},{}", c.center.x, c.center.y, c.radius)
             }
             EntityType::Arc(a) => {
-                let (from, to) = (a.start_angle.to_radians(), a.end_angle.to_radians());
+                // Radians already -- see the angle-unit note in `io::pid`. This
+                // used to call `to_radians()`, which was harmless while the
+                // importer stored degrees and became a second conversion the
+                // moment it stopped, flattening every arc to 1/57.3 of its
+                // sweep.
+                let (from, to) = (a.start_angle, a.end_angle);
                 let sweep = {
                     let raw = to - from;
                     if raw <= 0.0 {
