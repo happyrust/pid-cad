@@ -154,10 +154,23 @@ impl DockState {
     }
 
     /// Docked width for `id`, clamped to sane bounds.
+    ///
+    /// The two bounds are not peers. `DOCK_MIN_W` is a floor — below it a
+    /// panel cannot render its own chrome — while the 0.45-of-window share is
+    /// only a courtesy cap that keeps a panel from eating the drawing area.
+    /// So the share may lower the ceiling but never push it under the floor:
+    /// in a window too narrow to honour both, the panel keeps its floor and
+    /// overhangs. A window with no usable width at all (minimized, or a
+    /// collapsed restore/maximize frame) has no share to speak of, and falls
+    /// back to the plain maximum.
     pub fn width(&self, id: PanelId, win_w: f32) -> f32 {
-        self.settings(id)
-            .width
-            .clamp(DOCK_MIN_W, DOCK_MAX_W.min(win_w * 0.45))
+        let window_share = if win_w.is_finite() && win_w > 0.0 {
+            win_w * 0.45
+        } else {
+            DOCK_MAX_W
+        };
+        let ceiling = DOCK_MAX_W.min(window_share).max(DOCK_MIN_W);
+        self.settings(id).width.clamp(DOCK_MIN_W, ceiling)
     }
 
     pub fn auto_collapse(&self, id: PanelId) -> bool {
@@ -286,6 +299,34 @@ mod tests {
         state.set_width(PanelId::BlockPalette, 500.0);
         // Window too narrow -> capped by the 0.45 fraction, not DOCK_MAX_W.
         assert_eq!(state.width(PanelId::BlockPalette, 800.0), DOCK_MAX_W.min(360.0));
+    }
+
+    /// A minimized window — and some restore/maximize transition frames —
+    /// reports a zero-width client area. That drove the window share to 0.0
+    /// while the floor stayed at 200.0, and `f32::clamp` panicked with
+    /// "min > max, or either was NaN. min = 200.0, max = 0.0".
+    #[test]
+    fn width_survives_a_window_with_no_usable_area() {
+        let mut state = DockState::default();
+        state.ensure_settings();
+        for win_w in [0.0, -0.0, -1600.0, f32::NAN, f32::INFINITY] {
+            let w = state.width(PanelId::Properties, win_w);
+            assert!(
+                w.is_finite() && (DOCK_MIN_W..=DOCK_MAX_W).contains(&w),
+                "width(win_w = {win_w}) = {w}, outside [{DOCK_MIN_W}, {DOCK_MAX_W}]"
+            );
+        }
+    }
+
+    /// The floor outranks the window share: in a window too narrow for even
+    /// one minimum-width panel the panel stays at its floor and overhangs,
+    /// rather than inverting the clamp range.
+    #[test]
+    fn width_floor_outranks_the_window_fraction() {
+        let mut state = DockState::default();
+        state.set_width(PanelId::Properties, 500.0);
+        // 0.45 of 300px is 135px, under the floor.
+        assert_eq!(state.width(PanelId::Properties, 300.0), DOCK_MIN_W);
     }
 
     #[test]

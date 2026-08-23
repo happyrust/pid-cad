@@ -43,6 +43,18 @@ fn is_modal_blocked_key_msg(msg: &Message) -> bool {
     )
 }
 
+/// Whether an OS-reported window size describes an area we can lay out in.
+///
+/// A minimized window reports a 0x0 client area, and restore/maximize
+/// transitions emit the same collapsed frame on the way through. That is not a
+/// layout size: every window-fraction budget derived from it collapses too —
+/// most visibly the dock's "at most 0.45 of the window" panel cap, whose
+/// ceiling then drops under the 200px panel floor. Such a frame is dropped and
+/// the last real size stands until the OS reports another one.
+fn is_layout_window_size(w: f32, h: f32) -> bool {
+    w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0
+}
+
 fn perf_message_label(msg: &Message) -> &'static str {
     match msg {
         Message::ViewportLeftPress | Message::PanePress(_) => "pointer-down",
@@ -2728,8 +2740,10 @@ impl OpenCADStudio {
             Message::ViewportClick(viewport) => self.on_viewport_click(viewport),
 
             Message::WindowResized(w, h) => {
-                self.vp_size = ((w - 440.0).max(200.0), h);
-                self.win_size = (w, h);
+                if is_layout_window_size(w, h) {
+                    self.vp_size = ((w - 440.0).max(200.0), h);
+                    self.win_size = (w, h);
+                }
                 Task::none()
             }
 
@@ -7462,5 +7476,40 @@ impl OpenCADStudio {
             }
             n += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_collapsed_frame_is_not_a_layout_window_size() {
+        assert!(is_layout_window_size(1600.0, 900.0));
+        assert!(!is_layout_window_size(0.0, 0.0));
+        assert!(!is_layout_window_size(1600.0, 0.0));
+        assert!(!is_layout_window_size(-1.0, 900.0));
+        assert!(!is_layout_window_size(f32::NAN, 900.0));
+    }
+
+    /// Minimizing — and passing through restore/maximize — delivers a 0x0
+    /// `Resized`. Adopting it as `win_size` zeroed every window-fraction
+    /// budget downstream, and the next `view()` asked the dock for a panel
+    /// width against a 0px window: `f32::clamp` panicked with
+    /// "min > max, or either was NaN. min = 200.0, max = 0.0".
+    #[test]
+    fn a_collapsed_frame_keeps_the_last_real_window_size() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.update(Message::WindowResized(1600.0, 900.0));
+        let before = (app.win_size, app.vp_size);
+
+        let _ = app.update(Message::WindowResized(0.0, 0.0));
+
+        assert_eq!((app.win_size, app.vp_size), before);
+        // The width `view()` reaches for stays computable across that frame.
+        let w = app
+            .dock
+            .width(crate::ui::dock::PanelId::Properties, app.win_size.0);
+        assert!(w >= crate::ui::dock::DOCK_MIN_W, "dock width collapsed to {w}");
     }
 }
