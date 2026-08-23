@@ -736,6 +736,18 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         }
         self.tabs[i].disk_fingerprint =
             loaded_fingerprint.or(current_fingerprint);
+        // An edit lease defends a file this application is going to write over.
+        // A read-only source is never a save target, so leasing one protects
+        // nothing and costs the user two things: the platform lock holds their
+        // own file open, so they cannot copy or rename it while it is on
+        // screen, and the sidecar litters a directory that is theirs, not ours.
+        // The fingerprint above still stands — reading bytes locks nothing, and
+        // "it changed underneath you" is worth saying about any source.
+        if crate::io::is_read_only_source_path(path) {
+            self.tabs[i].edit_lease = None;
+            self.tabs[i].edit_lock_conflict = false;
+            return;
+        }
         match crate::io::edit_lock::EditLease::acquire(path) {
             Ok(lease) => {
                 if let Some(warning) = lease.platform_warning() {
@@ -2229,17 +2241,23 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
     }
 
     /// Where the autosave recovery copy for tab `i` lives.
+    ///
+    /// Beside the drawing when that directory is already a place we write —
+    /// the recovery copy then sits with the file it recovers. A read-only
+    /// source joins the never-saved drawings under the temp dir instead: we
+    /// will never write back to it, so its directory is not ours to leave
+    /// `.sv$` files in.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn autosave_target(&self, i: usize) -> std::path::PathBuf {
         match &self.tabs[i].current_path {
-            Some(p) => {
+            Some(p) if !crate::io::is_read_only_source_path(p) => {
                 let name = p
                     .file_name()
                     .map(|value| value.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "drawing".to_string());
                 p.with_file_name(format!("{name}.ocs-autosave.sv$"))
             }
-            None => {
+            _ => {
                 let safe: String = self.tabs[i]
                     .tab_display_name()
                     .chars()
@@ -4249,5 +4267,147 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     },
                     Message::PlotStylePanelSavePath,
                 )
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod read_only_source_hygiene_tests {
+    use crate::app::OpenCADStudio;
+    use std::path::{Path, PathBuf};
+
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ocs_t29_{}_{}_{name}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    /// A drawing alone in a directory of its own, so "what appeared next to
+    /// it" has an exact answer.
+    fn lone_drawing(dir_tag: &str, name: &str) -> (PathBuf, PathBuf) {
+        let dir = scratch(dir_tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        let drawing = dir.join(name);
+        std::fs::write(&drawing, b"bytes enough to be a real file on disk").unwrap();
+        (dir, drawing)
+    }
+
+    /// Everything in `dir` except the drawing itself.
+    fn litter(dir: &Path, drawing: &Path) -> Vec<String> {
+        let keep = drawing.file_name().unwrap();
+        let mut found: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter(|name| name != keep)
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Opening a `.pid` used to take the platform lock on the user's own source
+    /// file, so copying or renaming it while it was on screen failed with
+    /// `os error 33`, and a `.ocs.lock` sidecar appeared beside it (outliving a
+    /// hard kill). A format we never write back to gets no lease at all.
+    #[test]
+    fn opening_a_read_only_source_neither_locks_nor_litters_it() {
+        let (dir, pid) = lone_drawing("pid-dir", "DWG-0201GP06-01.pid");
+
+        let mut app = OpenCADStudio::new_for_test();
+        app.install_native_edit_guard(app.active_tab, &pid, None);
+        let i = app.active_tab;
+
+        // The symptom the report hit first: `Copy-Item` refusing with
+        // `os error 33`, because the lease holds a platform lock on the source.
+        let copy = scratch("copy-while-open.pid");
+        std::fs::copy(&pid, &copy).expect("the source stays copyable while open");
+
+        assert!(
+            app.tabs[i].edit_lease.is_none(),
+            "a read-only source must not hold an edit lease"
+        );
+        assert!(!app.tabs[i].edit_lock_conflict);
+        // Asks the directory rather than predicting a sidecar name, so
+        // renaming the lock file cannot make this pass by accident.
+        assert!(
+            litter(&dir, &pid).is_empty(),
+            "left files beside the user's source: {:?}",
+            litter(&dir, &pid)
+        );
+        // Reading the file is still guarded by a fingerprint, which locks
+        // nothing but still notices an edit underneath us.
+        assert!(app.tabs[i].disk_fingerprint.is_some());
+
+        drop(app);
+        let _ = std::fs::remove_file(&copy);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A writable drawing keeps the lease — the half of the behaviour the fix
+    /// must not take away. Pairs with the test above: if leasing stopped
+    /// happening altogether, that one would pass for the wrong reason.
+    #[test]
+    fn opening_a_writable_drawing_still_takes_the_lease() {
+        let (dir, dwg) = lone_drawing("dwg-dir", "editable.dwg");
+
+        let mut app = OpenCADStudio::new_for_test();
+        app.install_native_edit_guard(app.active_tab, &dwg, None);
+        let i = app.active_tab;
+
+        assert!(
+            app.tabs[i].edit_lease.is_some(),
+            "a writable drawing must still be leased"
+        );
+        assert_eq!(
+            litter(&dir, &dwg).len(),
+            1,
+            "expected exactly the lock sidecar beside a leased drawing, found {:?}",
+            litter(&dir, &dwg)
+        );
+
+        drop(app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Autosave used to drop `<name>.pid.ocs-autosave.sv$` in the source
+    /// directory. A read-only source recovers under the temp dir, where the
+    /// never-saved drawings already go.
+    #[test]
+    fn a_read_only_source_autosaves_to_the_temp_dir() {
+        let mut app = OpenCADStudio::new_for_test();
+        let i = app.active_tab;
+        let source_dir = scratch("pid-source-dir");
+        let pid = source_dir.join("DWG-0202GP06-01.pid");
+        app.tabs[i].current_path = Some(pid.clone());
+
+        let target = app.autosave_target(i);
+
+        assert_ne!(
+            target.parent(),
+            pid.parent(),
+            "autosave landed in the source directory: {}",
+            target.display()
+        );
+        assert_eq!(target.parent(), Some(std::env::temp_dir().as_path()));
+    }
+
+    /// The same call for a writable drawing still lands beside it.
+    #[test]
+    fn a_writable_drawing_autosaves_beside_itself() {
+        let mut app = OpenCADStudio::new_for_test();
+        let i = app.active_tab;
+        let dwg = scratch("plan.dwg");
+        app.tabs[i].current_path = Some(dwg.clone());
+        let name = dwg.file_name().unwrap().to_string_lossy().into_owned();
+
+        assert_eq!(
+            app.autosave_target(i),
+            dwg.with_file_name(format!("{name}.ocs-autosave.sv$")),
+        );
     }
 }
