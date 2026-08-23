@@ -127,7 +127,7 @@ impl ttf_parser::OutlineBuilder for OutlineFlattener {
 
     fn close(&mut self) {
         // Close the ring back to its start so the wire forms a loop.
-        if self.cur.first().map_or(false, |f| *f != self.pos) {
+        if self.cur.first().is_some_and(|f| *f != self.pos) {
             self.cur.push(self.start);
         }
         self.flush();
@@ -516,8 +516,23 @@ fn build_shaped(family: &str, text: &str) -> Option<ShapedRun> {
     // Pixel (at SHAPE_FS) → 9-unit cap-height factor.
     let px_to_9 = CAP_UNITS * upem_p / (SHAPE_FS * cap_p);
 
+    // cosmic-text matches on family name plus the CSS axes, so the family
+    // name alone is not enough to name a width variant: fontdb files Arial
+    // Narrow under "Arial" and only `stretch` tells it from Arial. Ask
+    // `sysfont` what the requested name actually resolves to and pass the
+    // whole thing on. An ordinary family answers with the CSS defaults, which
+    // is what `Attrs::new()` already carried.
+    let requested = sysfont::face_attributes(family);
+    let attrs = match &requested {
+        Some(face) => Attrs::new()
+            .family(Family::Name(&face.family))
+            .stretch(face.stretch)
+            .weight(face.weight)
+            .style(face.style),
+        None => Attrs::new().family(Family::Name(family)),
+    };
+
     let mut fs = font_system().lock().unwrap();
-    let attrs = Attrs::new().family(Family::Name(family));
     let mut buf = Buffer::new(&mut fs, Metrics::new(SHAPE_FS, SHAPE_FS));
     // No wrapping: a run is a single line.
     buf.set_size(&mut fs, None, None);
