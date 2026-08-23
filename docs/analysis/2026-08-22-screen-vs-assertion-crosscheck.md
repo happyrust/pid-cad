@@ -167,6 +167,8 @@
 
 ### 4.1 Arial Narrow 按 Arial 的字宽渲染
 
+> **已修复**，见 §8。下面保留当时的取证原文。
+
 **怎么复现**
 
 1. `cargo build --bin OpenCADStudio`
@@ -220,7 +222,7 @@
 | 黑字翻白 | `{#000000: 47, ByLayer: 1}` | 特性面板 `0,0,0`，屏幕上渲染为白，全图无绿字 | 一致 |
 | 宋体 vs Arial | 样式表五条 | 衬线中文 vs 无衬线拉丁，肉眼可分 | 一致 |
 | SimSun-ExtB | 同上 | 无衬线（字体无常用汉字，按字符回退），与宋体可分 | 一致 |
-| **Arial vs Arial Narrow** | `true_type_font = "Arial Narrow"` | **同宽，窄体没生效** | **不一致** |
+| **Arial vs Arial Narrow** | `true_type_font = "Arial Narrow"` | **同宽，窄体没生效**（§8 已修复） | **不一致** |
 | 逐实体字高 / 样式固定高度 0 | 高度表 + `style.height == 0` | 特性面板逐条对上，样式固定高度 0.000 | 一致 |
 
 ---
@@ -277,3 +279,140 @@
 | `shot-style-songti.png` | 文字样式管理器：PID-宋体 预览（可见不同） |
 
 全程只读：除本文与上表这些截图外，两个仓没有新建或修改任何文件，也没有 git commit。
+
+---
+
+## 8. 后续：§4.1 的修复
+
+§3.6(c) 量出来的那条不一致已经修掉。这一节记录岔路口定在哪、改了什么、修前修后的数各是多少。
+
+### 8.1 岔路口：是 fontdb 回落，还是下游又解析了一次
+
+**两个都不是。**丢在更前面一步：`sysfont` 自己的名字归一化。探针（在 `sysfont` 里临时加的
+单元测试，取证后已删）打出来的原始事实：
+
+```
+--- Arial Narrow ---
+  in families() list: false
+  raw fontdb query -> None
+  canonical_family_name -> Some("Arial")
+  face_id -> families=[("Arial", …)] post="ArialMT" stretch=Normal
+--- faces whose family or postscript name mentions 'narrow' ---
+  families=[("Arial", …)] post="ArialNarrow"            stretch=Condensed
+  families=[("Arial", …)] post="ArialNarrow-Bold"       stretch=Condensed
+  families=[("Arial", …)] post="ArialNarrow-Italic"     stretch=Condensed
+  families=[("Arial", …)] post="ArialNarrow-BoldItalic" stretch=Condensed
+```
+
+fontdb 给一张脸归档用的是**排印族名**（OpenType name ID 16），而 Arial Narrow 的 name ID 16
+就是 `Arial` —— 四张窄体脸全部挂在 `Arial` 名下，只靠 `stretch = Condensed` 区分。所以：
+
+- `db.query(Family::Name("Arial Narrow"))` 返回 `None`，**不是**回落到 Arial，是压根查不到；
+- `canonical_family_name` 于是一路落到它的第 4 步「前缀／子串匹配」，`"arial narrow"` 以
+  `"arial"` 开头，于是返回 `"Arial"`；
+- 从那以后一切都是忠实的：`face_id`、`ttf_glyph::glyph`、cosmic-text 拿到的都是 `"Arial"`，
+  各自都正确地画了 Arial。
+
+### 8.2 改了什么
+
+限 `src/scene/text/` 下两个文件：
+
+- **`sysfont.rs`** —— 把族名索引表达不了的那些脸找回来。对 `stretch != Normal` 的脸重读一次
+  name ID 1（旧族名，也就是 Windows 字体菜单里显示的 `Arial Narrow`），若它与 fontdb 归档用的
+  排印族名不同，就登记成一条可按名解析的条目：同名多脸时（Narrow 的常规／粗／斜／粗斜四张都叫
+  `Arial Narrow`）取正体常规那张。这些名字进 `families()`，所以选择器也能列出来；`face_id` 在
+  族名索引查空之后才查它们，族名索引能答的一律不受影响。
+  新增 `face_attributes(name) -> FaceRequest`，把「归档族名 + stretch/weight/style」一起交出去。
+  只有非 Normal 宽度的脸会被重读 name table，本机是 600 多张脸里的 4 张。
+- **`ttf_glyph.rs`** —— `build_shaped` 不再只给 cosmic-text 一个族名：
+  `Attrs::new().family(Name(&face.family)).stretch(..).weight(..).style(..)`。普通字体的
+  `face_attributes` 返回的就是 CSS 默认值，所以对它们是空操作。
+  顺手修了同文件里一条既有的 clippy 提示（`map_or(false, …)` → `is_some_and`），因为验收要求
+  改动文件零告警。
+
+### 8.3 修前 / 修后 / 参照
+
+屏幕上那条标签，`DD24024`（字高 2.5mm，特性面板样式 `PID-Arial-Narrow`），墨迹宽高比：
+
+| | 宽高比 |
+|---|---|
+| 修前（本文 §3.6c 实测） | **5.70** |
+| 修后（同一条标签，重新截屏实测） | **4.46** |
+| 参照 · 本机真 Arial（GDI 同法量） | 5.739 |
+| 参照 · 本机真 Arial Narrow（GDI 同法量） | 4.602 |
+
+修后 4.46 与真窄体 4.602 相差 3%，来自墨迹高度只有 23~24 像素的量化误差（按 h=23 算是 4.65）；
+与 Arial 的 5.739 差 22%，方向和量级都没有歧义。
+
+同一件事在渲染器内部量一遍（回归测试打印的，`HXOnoe0123` 在 9 单位字高空间下）：
+
+| | 宽高比 | 窄/常规 |
+|---|---|---|
+| 渲染器：Arial Narrow 6.567 vs Arial 8.007 | | **0.820** |
+| GDI 参照：Arial Narrow 6.659 vs Arial 8.225 | | 0.810 |
+| 修前：两者走同一张脸 | | 1.000 |
+
+### 8.4 回归
+
+`tests/text_width_variants.rs`。它做三件事：
+
+1. **自己从字体文件算出该有哪些宽度变体**（扫 fontdb 的脸，挑 `stretch != Normal` 且
+   name ID 1 与归档族名不同的），不去问 `sysfont` —— 否则一旦恢复逻辑坏掉，它会「找不到要检查的
+   东西」然后静默变绿。
+2. 对每一个变体，先断言解析结果（`Face::resolve` 必须落到 TTF 路径、`face_attributes` 报出来的
+   stretch 必须是装机的那个），**再**做能力检查。顺序是特意的：第一版把能力检查放在前面，结果
+   关掉修复后它以「这两张脸盖不住样本字」为由跳过，静默通过了。
+3. 然后过 `lff::tessellate_text_ex`（视口用的同一个入口）量两条 run 的墨迹宽高比，要求窄体严格
+   窄于常规体。
+
+**验证过会变红**：把 `recover_hidden_faces` 改成直接返回空 `Vec`（等价于修复前的行为），测试报
+
+```
+assertion `left == right` failed: Arial Narrow resolved to a Normal face; the installed one is Condensed
+  left: Normal
+ right: Condensed
+```
+
+机器上没有宽度变体字体时，它打印 `SKIPPED: no width-variant font installed …` 并说明原因，不会
+悄悄绿掉。
+
+### 8.5 本轮验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --test text_width_variants` | 1 passed（Arial Narrow、Bodoni MT Condensed 各量一遍） |
+| `cargo test --test pid_import` | 22 passed / 0 failed |
+| `cargo test --lib scene::text` | 25 passed / 0 failed |
+| `cargo clippy --lib --tests` 在改动文件上 | 零告警 |
+| `cargo fmt -- --check` 在改动文件上 | 没有新增排版漂移 |
+
+排版那一行要说准：`sysfont.rs` 现在有 6 处漂移、`ttf_glyph.rs` 有 5 处，但把 HEAD 版本单独取出来
+`rustfmt --check` 一遍，这 11 处一处不多一处不少地都在，只是行号被插进去的代码顶下去了 ——
+5 处在没碰过的 `canonical_family_name_uncached` 里，1 处是文件末尾那个空行（HEAD 上就有），
+`ttf_glyph.rs` 那 5 处也全在改动 hunk 之外。`git diff --check` 无输出。
+
+GUI 复量用的是 fixture 拷到 `%TEMP%` 的副本，仓里的 `test-file/` 没有被打开、也没有留下锁文件或
+自动保存文件。
+
+### 8.6 收口前的独立复核
+
+提交前由另一人把上面每一格重跑了一遍，用的是同一棵工作区树。结论：**§8.1–8.5 全部复现，无一条需要
+按实测改写**。补充三点原文没写的：
+
+1. **§8.4 的「关掉会变红」是真的**。把 `recover_hidden_faces` 改成直接返回空 `Vec` 后重跑，
+   `tests/text_width_variants.rs` 报的就是 §8.4 抄的那段，一字不差：
+   `Arial Narrow resolved to a Normal face; the installed one is Condensed`（left `Normal` /
+   right `Condensed`），`0 passed; 1 failed`。验完已还原，`git diff --stat` 回到 216 + 19 行。
+2. **同一次回滚下，`sysfont.rs` 里的单元测试 `a_recovered_name_resolves_to_its_own_face`
+   照样是绿的** —— 它遍历的是 `fonts().recovered`，恢复逻辑一没了，它就「没有要检查的东西」，
+   打一行 `SKIPPED:` 然后通过。这不是缺陷（它的 skip 会喊出来，而且 §8.4 那条集成测试正是为了
+   不踩这个坑才自己从字体文件推 oracle），但**真正钉住这条修复的是
+   `tests/text_width_variants.rs`，不是那个单元测试**，别把两者当同一道保险。
+3. **`cargo test --lib` 整跑有 3 条红的**：`app::automation::tests` 下的
+   `save_then_open_round_trips`、`start_page_runs_tools_that_need_no_drawing_but_still_refuses_the_rest`、
+   `tilted_ucs_places_planar_entities_with_the_plane_normal`。把 `sysfont.rs` / `ttf_glyph.rs`
+   两个文件临时退回 HEAD 再跑，**这 3 条照红**，所以与本修复无关，是 HEAD 上就有的。
+   不属于本文范围，报回去另派。
+
+`docs/analysis/` 之外只动了 `sysfont.rs` 一处过期的文档链接（`[`WidthVariant`]` 指向一个并不存在的
+类型，实际叫 `Recovered`）。
