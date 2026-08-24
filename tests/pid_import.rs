@@ -1250,19 +1250,21 @@ fn a_symbol_authored_away_from_its_origin_lands_on_the_line_work_it_marks() {
     );
 }
 
-/// A symbol body draws in the colour and width the symbol states, not in the
-/// layer default.
+/// A symbol body draws in the one style its placement names, which is the
+/// drawing's item-class colouring — not in the styles its `.sym` states
+/// stroke by stroke, and not in the layer default.
 ///
-/// Nothing on the drawing side can supply this: an `igSymbol2d` placement
-/// carries the `JSite` id in the payload slot its `igLine2d` siblings carry
-/// the style index in, so it names no style at all -- opening
-/// `apply_symbology`'s gate to this layer left all 123 of DWG-0201's symbol
-/// strokes on `ByLayer`. The symbology comes from the `StyleCluster` the
-/// `.sym` carries itself, which `pid-parse` now reads and hands over with
-/// each stroke. Without it the vessel, the valves and the instrument bubbles
-/// all came in as hairline `ByLayer` outlines.
+/// The placement record names a style after all: `igSymbol2d +25`, resolved
+/// in the root document's `StyleCluster`. On DWG-0201 the twenty placements
+/// resolve to four class colours — equipment `#800000`, piping `#808000`,
+/// instruments `#008000`, annotation black — and a SmartPlant screenshot of
+/// this drawing shows exactly that: the vessel maroon though its `.sym` is
+/// authored black, `Off-Unit` olive though its `.sym` authors cyan strokes.
+/// The `.sym`'s own symbology remains the fallback coat for a placement whose
+/// style does not resolve (none on this corpus), and the internal lettering
+/// keeps its text styles either way.
 #[test]
-fn a_symbol_body_draws_in_the_symbology_its_own_library_file_states() {
+fn a_symbol_body_draws_in_the_style_its_placement_names() {
     let Some(doc) = import("DWG-0201GP06-01.pid") else {
         return;
     };
@@ -1281,24 +1283,75 @@ fn a_symbol_body_draws_in_the_symbology_its_own_library_file_states() {
         }
     }
 
-    // Three strokes keep the layer default because their style index names
-    // something with no line symbology -- a fill or a text style. That is a
-    // statement about those three records, not a gap: the other 120 are
-    // painted.
+    // The three text strokes keep their `.sym` text styles rather than the
+    // placement's line style; lettering is not line work.
     assert_eq!(
         unstyled, 3,
-        "expected all but three symbol strokes to carry a stated symbology, got palette {palette:?}"
+        "expected all but the three internal texts to carry the placement's \
+         symbology, got palette {palette:?}"
     );
     let expected: std::collections::BTreeMap<String, usize> = [
-        (" 13 #000000", 35),
-        (" 35 #000000", 71),
-        (" 50 #00FEA0", 5),
-        (" 50 #00FFFF", 9),
+        // 3 instrument placements: LG / LT gauges and the DCS access box.
+        (" 18 #008000", 11),
+        // 5 annotation placements: Drawing Description, Item Note & Label
+        // x3, Line2.
+        (" 35 #000000", 28),
+        // 7 equipment placements: the vessel, three Flanged Nozzles, one
+        // with blind, Manway-Large, Gauge Hatch.
+        (" 35 #800000", 29),
+        // 5 piping placements: Cap, jinchuzhan2, Ball Valve Type 2, flame
+        // arrester breather valve, Off-Unit -- whose `.sym`-cyan strokes
+        // are among these, olive on screen and olive here.
+        (" 35 #808000", 52),
     ]
     .iter()
     .map(|(key, count)| ((*key).to_string(), *count))
     .collect();
-    assert_eq!(palette, expected);
+    assert_eq!(
+        palette, expected,
+        "PID-SYMBOL line work should carry the four class colours the \
+         placements name"
+    );
+}
+
+/// The vessel draws in the maroon its placement states, not the black its
+/// `.sym` is authored in.
+///
+/// This is the discriminating case for where a body's colour comes from.
+/// `Parametric Manifold.sym` styles every vessel stroke `#000000` 0.35mm;
+/// the placement (oid 326) names style id 75, `#800000` 0.35mm; SmartPlant's
+/// screen shows maroon. Reverting either half — the `+25` read in `pid-parse`
+/// or `apply_symbology`'s `PID-SYMBOL` gate here — turns these strokes black
+/// and this test red.
+#[test]
+fn the_vessel_draws_in_its_placements_maroon_not_its_syms_black() {
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
+        return;
+    };
+
+    // The vessel shell: two 188mm runs at y = 223.33 and y = 182.69.
+    let mut shell = 0usize;
+    for entity in on_layer(&doc, "PID-SYMBOL") {
+        let EntityType::Line(line) = entity else {
+            continue;
+        };
+        let length = line.start.distance(&line.end);
+        if !(187.0..190.0).contains(&length) {
+            continue;
+        }
+        shell += 1;
+        assert_eq!(
+            line.common.color,
+            acadrust::types::Color::Rgb { r: 128, g: 0, b: 0 },
+            "a vessel shell stroke should draw #800000: {line:?}"
+        );
+        assert_eq!(
+            line.common.line_weight,
+            acadrust::types::LineWeight::Value(35),
+            "a vessel shell stroke should weigh 0.35mm: {line:?}"
+        );
+    }
+    assert_eq!(shell, 2, "DWG-0201's vessel has two 188mm shell runs");
 }
 
 /// The opening view is framed on what the drawing draws.

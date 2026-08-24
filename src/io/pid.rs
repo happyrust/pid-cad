@@ -726,8 +726,9 @@ fn attach_semantics(entity: &mut EntityType, hit: &PidSemanticHit<'_>) {
 /// The style table's entry for one normalized entity, if it has one.
 ///
 /// The join is `(stream path, graphic oid)`, which is what `pid-parse` keys
-/// the table on. Only the three families that carry a style reference are in
-/// it, so text, symbols and every kind of evidence simply miss.
+/// the table on. Four families carry a style reference and are in it — lines,
+/// points, linestrings, and symbol placements (whose one style covers the
+/// placed body) — so text and every kind of evidence simply miss.
 fn style_for<'a>(
     styles: &'a LineStyleIndex,
     entity: &pid_parse::PidGraphicEntity,
@@ -997,17 +998,29 @@ fn apply_text_style(entity: &mut EntityType, style_name: &str) {
 
 /// Give an entity the width and colour its source record asks for.
 ///
-/// Only the two layers carrying the drawing's own line work are painted.
-/// `PID-CONNECTIVITY` is a diagnostic whose layer colour *is* the diagnosis,
-/// and repainting it in the drawing's palette would hide the thing it exists
-/// to show.
+/// Three layers are painted: the drawing's own line work (`PID-GEOMETRY`,
+/// `PID-POINT`) and the placed symbol bodies (`PID-SYMBOL`), whose placement
+/// record names one style for the whole body — `igSymbol2d +25` — that wins
+/// over the per-stroke styles the `.sym` states (see [`paint_symbol_stroke`],
+/// which ran first and is overwritten here exactly when the placement names a
+/// style). `PID-CONNECTIVITY` is a diagnostic whose layer colour *is* the
+/// diagnosis, and repainting it in the drawing's palette would hide the thing
+/// it exists to show.
 fn apply_symbology(
     entity: &mut EntityType,
     style: &ResolvedLineStyle,
     dash_linetypes: &HashMap<Vec<i64>, String>,
 ) {
+    // A placement's style covers its body's line work, not its lettering:
+    // a symbol's internal text keeps the text style its `.sym` names. The
+    // screen evidence for lettering is still open — DWG-0201's instrument
+    // tags letter green either way, since their character styles agree.
+    if matches!(entity, EntityType::Text(_)) {
+        return;
+    }
     let common = entity.common_mut();
-    if common.layer != LAYER_GEOMETRY && common.layer != LAYER_POINT {
+    if common.layer != LAYER_GEOMETRY && common.layer != LAYER_POINT && common.layer != LAYER_SYMBOL
+    {
         return;
     }
     let [r, g, b] = style.symbology.rgb();
@@ -1646,13 +1659,15 @@ fn place_primitive(styled: &StyledPrimitive, at: &Placement<'_>) -> Option<Entit
 
 /// Give a symbol's stroke the colour and width its own `.sym` states.
 ///
-/// This is a separate route from [`apply_symbology`], which paints the
-/// drawing's own line work and deliberately leaves this layer alone: the two
-/// read different tables. A symbol's placement record names no style at all
-/// -- the payload slot its `igLine2d` siblings use for the style index holds
-/// the `JSite` id -- so the only thing that knows a vessel is drawn in red is
-/// the `StyleCluster` inside the `.sym`. A symbol whose style index names no
-/// line style keeps `ByLayer`, which is what it drew as before this.
+/// This is the fallback coat, not the final one. A placement record *does*
+/// name a style — `igSymbol2d +25`, a slot this route once believed absent —
+/// and where it resolves, [`apply_symbology`] repaints the whole body over
+/// what is painted here: DWG-0201's vessel is authored black in
+/// `Parametric Manifold.sym` and SmartPlant screens it in the placement's
+/// `#800000`. What this coat still decides is the body of a placement whose
+/// style does not resolve, and the strokes' dash question either way. A
+/// symbol whose own style index names no line style keeps `ByLayer`, which
+/// is what it drew as before this.
 ///
 /// The dash such a style can also name is not carried across yet; a dashed
 /// symbol stroke still draws solid.
