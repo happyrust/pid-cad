@@ -1028,3 +1028,172 @@ fn fixtures_import_with_visible_drawing_content() {
         );
     }
 }
+
+/// The rectangle an entity covers, or `None` for a kind with no extent worth
+/// stating here. Written out again rather than shared with the importer, so a
+/// change to the importer's own idea of an extent cannot quietly move the
+/// yardstick these tests measure against.
+fn drawn_box(entity: &EntityType) -> Option<(f64, f64, f64, f64)> {
+    let around = |x: f64, y: f64, r: f64| (x - r, y - r, x + r, y + r);
+    match entity {
+        EntityType::Line(line) => Some((
+            line.start.x.min(line.end.x),
+            line.start.y.min(line.end.y),
+            line.start.x.max(line.end.x),
+            line.start.y.max(line.end.y),
+        )),
+        EntityType::Circle(circle) => Some(around(circle.center.x, circle.center.y, circle.radius)),
+        EntityType::Arc(arc) => Some(around(arc.center.x, arc.center.y, arc.radius)),
+        EntityType::LwPolyline(polyline) => polyline
+            .vertices
+            .iter()
+            .map(|v| (v.location.x, v.location.y, v.location.x, v.location.y))
+            .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))),
+        EntityType::Text(text) => Some((
+            text.insertion_point.x,
+            text.insertion_point.y,
+            text.insertion_point.x,
+            text.insertion_point.y,
+        )),
+        EntityType::Point(point) => Some((
+            point.location.x,
+            point.location.y,
+            point.location.x,
+            point.location.y,
+        )),
+        _ => None,
+    }
+}
+
+fn distance_to_box(point: (f64, f64), area: (f64, f64, f64, f64)) -> f64 {
+    let dx = (area.0 - point.0).max(point.0 - area.2).max(0.0);
+    let dy = (area.1 - point.1).max(point.1 - area.3).max(0.0);
+    dx.hypot(dy)
+}
+
+/// How far a symbol's name may sit from the nearest single stroke of drawing.
+///
+/// The importer puts the name 0.8mm clear of the right edge of the whole
+/// body, level with the body's middle, so on a compact symbol it lands
+/// against the line work. On a wide sparse one it need not: `Wastewater Pit`
+/// is 114mm across and the stroke that reaches furthest right is a short stub
+/// well above the middle, which measures 13.5mm -- the worst case across the
+/// four fixtures. The bound is set clear of that and still an order of
+/// magnitude under the 148mm the defect this guards produced.
+const LABEL_REACH_MM: f64 = 20.0;
+
+/// A symbol's name is lettered beside the symbol, not beside its anchor.
+///
+/// `PID-SYMBOL-LABEL` names each placement after its `.sym`. The name used to
+/// be hung 2.3mm right of the placement's insertion point, which is only
+/// beside the symbol when the library body is drawn around its own origin --
+/// and 211 of the reference library's 613 readable `.sym` are not, `Design`
+/// and `Equipment` almost entirely so. On DWG-0202 that put six
+/// `ElecTraceLine` names and four `Item Note & Label` names 100 to 200mm from
+/// their own line work, five of them off the left edge of the sheet and one
+/// below the bottom of it, while every one of those symbols drew inside the
+/// border. Anchoring on the drawn body instead is what this pins; the marker
+/// fallback is unaffected, since a 1.5mm dot centred on the insertion point
+/// reaches exactly as far right as the old formula assumed.
+///
+/// Measured in `docs/analysis/2026-08-24-two-texts-outside-the-frame.md`.
+#[test]
+fn a_symbol_name_is_lettered_beside_the_symbol_it_names() {
+    for name in [
+        "DWG-0201GP06-01.pid",
+        "DWG-0202GP06-01.pid",
+        "D06.pid",
+        "工艺管道及仪表流程-1.pid",
+    ] {
+        let Some(doc) = import(name) else {
+            continue;
+        };
+        let bodies: Vec<(f64, f64, f64, f64)> =
+            on_layer(&doc, "PID-SYMBOL").filter_map(drawn_box).collect();
+        let labels: Vec<&EntityType> = on_layer(&doc, "PID-SYMBOL-LABEL").collect();
+        assert!(
+            !labels.is_empty() && !bodies.is_empty(),
+            "{name}: every placement is named and drawn, got {} names over {} bodies",
+            labels.len(),
+            bodies.len()
+        );
+
+        let mut stranded: Vec<String> = Vec::new();
+        for label in labels {
+            let EntityType::Text(text) = label else {
+                panic!("{name}: PID-SYMBOL-LABEL carries lettering only, found {label:?}");
+            };
+            let at = (text.insertion_point.x, text.insertion_point.y);
+            let reach = bodies
+                .iter()
+                .map(|body| distance_to_box(at, *body))
+                .fold(f64::MAX, f64::min);
+            if reach > LABEL_REACH_MM {
+                stranded.push(format!(
+                    "{:?} at ({:.1}, {:.1}) is {reach:.1}mm from the nearest symbol",
+                    text.value, at.0, at.1
+                ));
+            }
+        }
+        assert!(
+            stranded.is_empty(),
+            "{name}: {} symbol names were lettered away from their symbol: {stranded:#?}",
+            stranded.len()
+        );
+    }
+}
+
+/// The opening view is framed on what the drawing draws.
+///
+/// Framing used to take a symbol placement's insertion point, which for the
+/// third of the library authored away from its own origin is a point no line
+/// work reaches. DWG-0202's `ext_min` read x = -25.64mm on the strength of
+/// six such anchors, so the drawing opened zoomed out over 25mm of sheet that
+/// holds nothing -- while its border starts at x = 0. This pins the extents
+/// inside the geometry that exists, which is the property the anchor broke.
+#[test]
+fn the_opening_view_is_framed_on_geometry_that_exists() {
+    // A hatch states its area through boundary edges this test does not walk,
+    // and lettering reaches past its insertion point by however wide the
+    // renderer sets it. Both are inside the drawing rather than off it, so a
+    // millimetre of slack covers the difference without covering the defect,
+    // which was 25mm wide.
+    const SLACK_MM: f64 = 1.0;
+
+    for name in [
+        "DWG-0201GP06-01.pid",
+        "DWG-0202GP06-01.pid",
+        "D06.pid",
+        "工艺管道及仪表流程-1.pid",
+    ] {
+        let Some(doc) = import(name) else {
+            continue;
+        };
+        let Some(drawn) = doc
+            .entities()
+            .filter_map(drawn_box)
+            .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
+        else {
+            panic!("{name}: nothing was drawn");
+        };
+
+        let min = doc.header.model_space_extents_min;
+        let max = doc.header.model_space_extents_max;
+        assert!(
+            min.x >= drawn.0 - SLACK_MM
+                && min.y >= drawn.1 - SLACK_MM
+                && max.x <= drawn.2 + SLACK_MM
+                && max.y <= drawn.3 + SLACK_MM,
+            "{name}: framed on ({:.2}, {:.2})..({:.2}, {:.2}), \
+             but the drawing only reaches ({:.2}, {:.2})..({:.2}, {:.2})",
+            min.x,
+            min.y,
+            max.x,
+            max.y,
+            drawn.0,
+            drawn.1,
+            drawn.2,
+            drawn.3
+        );
+    }
+}

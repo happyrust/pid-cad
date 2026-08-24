@@ -321,7 +321,7 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         // drawing, and it is the kind that strays: see `accumulate_bounds`.
         if entity.confidence == PidGeometryConfidence::Decoded {
             decoded += 1;
-            accumulate_bounds(&entity.kind, &mut bounds);
+            accumulate_bounds(&entity.kind, &built, &mut bounds);
         }
         let symbology = style_for(&styles, entity);
         let text_style = height_for(&text_heights, entity);
@@ -1292,12 +1292,9 @@ fn build_entities(
                 let mut label = Text::new();
                 label.value = name;
                 label.height = SYMBOL_LABEL_HEIGHT_MM;
-                // Beside the marker, not on it, and horizontal whatever the
-                // placement angle is -- a rotated label is the harder read.
-                label.insertion_point = Vector3::new(
-                    projection.mm(insertion.x) + SYMBOL_MARKER_RADIUS_MM + SYMBOL_LABEL_GAP_MM,
-                    projection.mm(insertion.y) - SYMBOL_LABEL_HEIGHT_MM / 2.0,
-                    0.0,
+                label.insertion_point = symbol_label_anchor(
+                    &built,
+                    (projection.mm(insertion.x), projection.mm(insertion.y)),
                 );
                 label.common.layer = LAYER_SYMBOL_LABEL.to_string();
                 built.push(EntityType::Text(label));
@@ -1443,7 +1440,11 @@ impl Bounds {
     }
 
     fn add(&mut self, point: &PidPoint) {
-        let (x, y) = (self.projection.mm(point.x), self.projection.mm(point.y));
+        self.add_mm(self.projection.mm(point.x), self.projection.mm(point.y));
+    }
+
+    /// Take in a point that is already on the sheet in millimetres.
+    fn add_mm(&mut self, x: f64, y: f64) {
         if !self.projection.band.holds(x) || !self.projection.band.holds(y) {
             return;
         }
@@ -1453,12 +1454,21 @@ impl Bounds {
         self.max_y = self.max_y.max(y);
     }
 
+    /// Take in the rectangle a set of drawn entities covers.
+    fn add_drawn(&mut self, entities: &[EntityType]) {
+        let Some((min_x, min_y, max_x, max_y)) = drawn_bounds(entities) else {
+            return;
+        };
+        self.add_mm(min_x, min_y);
+        self.add_mm(max_x, max_y);
+    }
+
     fn is_empty(&self) -> bool {
         self.min_x > self.max_x || self.min_y > self.max_y
     }
 }
 
-fn accumulate_bounds(kind: &PidGraphicKind, bounds: &mut Bounds) {
+fn accumulate_bounds(kind: &PidGraphicKind, built: &[EntityType], bounds: &mut Bounds) {
     match kind {
         PidGraphicKind::Line { start, end } => {
             bounds.add(start);
@@ -1472,13 +1482,107 @@ fn accumulate_bounds(kind: &PidGraphicKind, bounds: &mut Bounds) {
         PidGraphicKind::Circle { center, .. } | PidGraphicKind::Arc { center, .. } => {
             bounds.add(center);
         }
-        PidGraphicKind::Text { insertion, .. }
-        | PidGraphicKind::SymbolInstance { insertion, .. } => bounds.add(insertion),
+        PidGraphicKind::Text { insertion, .. } => bounds.add(insertion),
+        // A placement is framed on what it drew rather than on its insertion
+        // point. The two agree only for a symbol whose library body is drawn
+        // around its own origin; for the third of the library that is not,
+        // the anchor is up to 200mm from any of the symbol's own line work,
+        // and framing on it opened the drawing zoomed out over sheet nothing
+        // reaches. `DWG-0202`'s `ext_min` used to read x = -25.64 on the
+        // strength of six anchors whose symbols all draw inside the border.
+        PidGraphicKind::SymbolInstance { .. } => bounds.add_drawn(built),
         PidGraphicKind::Point { position } => bounds.add(position),
         // Never reached: both kinds only ever arrive inferred or probe-only,
         // and the caller frames on decoded geometry alone.
         PidGraphicKind::Annotation { .. } | PidGraphicKind::Unknown { .. } => {}
     }
+}
+
+/// The rectangle a drawn entity covers, in millimetres, as
+/// `(min_x, min_y, max_x, max_y)`.
+///
+/// An arc is taken as its whole circle, which over-reports a sweep that does
+/// not reach every quadrant. Both callers want somewhere to hang a label and
+/// a view to frame; neither is harmed by a millimetre of slack, and the
+/// quadrant walk that would remove it is not worth carrying. Lettering
+/// contributes its insertion point alone, since how far a run reaches needs
+/// the font the renderer will pick.
+fn drawn_extent(entity: &EntityType) -> Option<(f64, f64, f64, f64)> {
+    let around = |x: f64, y: f64, radius: f64| (x - radius, y - radius, x + radius, y + radius);
+    match entity {
+        EntityType::Line(line) => Some((
+            line.start.x.min(line.end.x),
+            line.start.y.min(line.end.y),
+            line.start.x.max(line.end.x),
+            line.start.y.max(line.end.y),
+        )),
+        EntityType::Circle(circle) => Some(around(circle.center.x, circle.center.y, circle.radius)),
+        EntityType::Arc(arc) => Some(around(arc.center.x, arc.center.y, arc.radius)),
+        EntityType::LwPolyline(polyline) => polyline
+            .vertices
+            .iter()
+            .map(|vertex| {
+                (
+                    vertex.location.x,
+                    vertex.location.y,
+                    vertex.location.x,
+                    vertex.location.y,
+                )
+            })
+            .reduce(union_extent),
+        EntityType::Text(text) => Some((
+            text.insertion_point.x,
+            text.insertion_point.y,
+            text.insertion_point.x,
+            text.insertion_point.y,
+        )),
+        _ => None,
+    }
+}
+
+/// Where a placement's name is lettered: clear of the right edge of what the
+/// placement drew, level with its middle, and horizontal whatever the
+/// placement angle is -- a rotated label is the harder read.
+///
+/// It reads off the drawn body rather than off `insertion_mm`, because those
+/// two are the same point only for a symbol whose library body is drawn
+/// around its own origin, and a third of the reference library is not: 211 of
+/// its 613 readable `.sym` are authored a hundred millimetres or more away,
+/// `Design` and `Equipment` almost entirely so. Naming those from the anchor
+/// put the name off the sheet while the symbol itself sat well inside it --
+/// `docs/analysis/2026-08-24-two-texts-outside-the-frame.md`.
+///
+/// The marker fallback keeps the position it always had: a dot of
+/// `SYMBOL_MARKER_RADIUS_MM` centred on the insertion point reaches exactly
+/// that far right of it and is level with it, so the arithmetic below comes
+/// out at the `+ radius + gap` the old formula spelled out. `insertion_mm` is
+/// only reached when a placement drew nothing at all, which the marker exists
+/// to prevent.
+fn symbol_label_anchor(drawn: &[EntityType], insertion_mm: (f64, f64)) -> Vector3 {
+    let (_, min_y, max_x, max_y) = drawn_bounds(drawn).unwrap_or((
+        insertion_mm.0,
+        insertion_mm.1,
+        insertion_mm.0,
+        insertion_mm.1,
+    ));
+    Vector3::new(
+        max_x + SYMBOL_LABEL_GAP_MM,
+        (min_y + max_y) / 2.0 - SYMBOL_LABEL_HEIGHT_MM / 2.0,
+        0.0,
+    )
+}
+
+/// The rectangle a set of drawn entities covers, or `None` where none of them
+/// has an extent this module can state.
+fn drawn_bounds(entities: &[EntityType]) -> Option<(f64, f64, f64, f64)> {
+    entities
+        .iter()
+        .filter_map(drawn_extent)
+        .reduce(union_extent)
+}
+
+fn union_extent(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+    (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
 }
 
 /// Where a symbol placement puts its library body on the sheet.
@@ -1719,4 +1823,89 @@ fn ensure_layer(doc: &mut CadDocument, name: &str, colour: Color, visible: bool)
     layer.color = colour;
     layer.flags.off = !visible;
     let _ = doc.layers.add(layer);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn marker_at(x: f64, y: f64) -> EntityType {
+        let mut marker = Circle::new();
+        marker.center = Vector3::new(x, y, 0.0);
+        marker.radius = SYMBOL_MARKER_RADIUS_MM;
+        EntityType::Circle(marker)
+    }
+
+    fn line(start: (f64, f64), end: (f64, f64)) -> EntityType {
+        EntityType::Line(Line::from_points(
+            Vector3::new(start.0, start.1, 0.0),
+            Vector3::new(end.0, end.1, 0.0),
+        ))
+    }
+
+    /// The marker fallback keeps the position the old anchor-relative formula
+    /// gave it, to the last decimal: `insertion + radius + gap` across, and
+    /// half a cap-height down from the insertion point.
+    #[test]
+    fn a_marker_is_named_where_the_insertion_point_formula_put_it() {
+        let insertion = (40.0, 25.0);
+        let anchor = symbol_label_anchor(&[marker_at(insertion.0, insertion.1)], insertion);
+        assert_eq!(
+            anchor.x,
+            insertion.0 + SYMBOL_MARKER_RADIUS_MM + SYMBOL_LABEL_GAP_MM
+        );
+        assert_eq!(anchor.y, insertion.1 - SYMBOL_LABEL_HEIGHT_MM / 2.0);
+    }
+
+    /// A symbol whose library body is drawn away from its own origin is named
+    /// beside the body. Reverting to the insertion point puts the name a
+    /// hundred millimetres away from anything the placement drew, which on
+    /// `DWG-0202` was off the edge of the sheet -- see
+    /// `docs/analysis/2026-08-24-two-texts-outside-the-frame.md`.
+    #[test]
+    fn a_body_drawn_away_from_its_anchor_is_named_beside_the_body() {
+        // `ElecTraceLine.sym` to scale: the placement is anchored at x = -25.6
+        // and the body it draws sits 104mm right and 155mm up from there.
+        let insertion = (-25.6, 349.9);
+        let body = [
+            line((78.2, 504.1), (82.1, 505.6)),
+            line((82.1, 504.1), (78.2, 505.6)),
+        ];
+        let anchor = symbol_label_anchor(&body, insertion);
+
+        assert_eq!(anchor.x, 82.1 + SYMBOL_LABEL_GAP_MM);
+        assert_eq!(
+            anchor.y,
+            (504.1 + 505.6) / 2.0 - SYMBOL_LABEL_HEIGHT_MM / 2.0
+        );
+        assert!(
+            anchor.x - insertion.0 > 100.0,
+            "the name follows the body, not the anchor it was placed from"
+        );
+    }
+
+    /// An arc contributes its whole circle and lettering contributes only the
+    /// point it starts from, so the extent a label and the opening view are
+    /// built on covers the line work either way.
+    #[test]
+    fn an_extent_covers_an_arc_and_stops_at_a_text_insertion_point() {
+        let mut arc = acadrust::entities::Arc::new();
+        arc.center = Vector3::new(10.0, 20.0, 0.0);
+        arc.radius = 2.5;
+        arc.start_angle = 0.0;
+        arc.end_angle = std::f64::consts::FRAC_PI_2;
+        assert_eq!(
+            drawn_extent(&EntityType::Arc(arc)),
+            Some((7.5, 17.5, 12.5, 22.5))
+        );
+
+        let mut text = Text::new();
+        text.value = "pump".to_string();
+        text.height = 2.5;
+        text.insertion_point = Vector3::new(3.0, 4.0, 0.0);
+        assert_eq!(
+            drawn_extent(&EntityType::Text(text)),
+            Some((3.0, 4.0, 3.0, 4.0))
+        );
+    }
 }
