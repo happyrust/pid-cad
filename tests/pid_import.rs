@@ -90,9 +90,12 @@ fn line_work_carries_the_width_and_colour_the_drawing_states() {
     // Widths are hundredths of a millimetre, so 70 is the 0.7mm process
     // header and 10 the 0.1mm point tick. Olive #808000 on the heavy lines
     // and green #008000 on the thin ones is this drawing's own palette.
+    // The 22 blue entities are the eleven class-coloured points twice over:
+    // the point record itself and the slash mark drawn on it -- see
+    // `a_class_coloured_point_is_marked_with_the_slash_smartplant_shows`.
     let expected: std::collections::BTreeMap<String, usize> = [
         (" 10 #000000", 53),
-        (" 10 #0000FF", 11),
+        (" 10 #0000FF", 22),
         (" 18 #008000", 4),
         (" 35 #000000", 43),
         (" 35 #FE0060", 3),
@@ -1352,6 +1355,86 @@ fn the_vessel_draws_in_its_placements_maroon_not_its_syms_black() {
         );
     }
     assert_eq!(shell, 2, "DWG-0201's vessel has two 188mm shell runs");
+}
+
+/// A point that carries a class colour is marked with the slash SmartPlant
+/// shows; a black-styled point draws nothing, which is also what its screen
+/// shows.
+///
+/// DWG-0201 places 75 decoded points. Eleven resolve to `#0000FF` -- one on
+/// each riser top and one at the vessel inlet -- and the screenshot shows a
+/// short blue slash at exactly those eleven spots and nowhere else: not at
+/// the 53 black junction points, not at the 11 black riser feet, though the
+/// records and style chains are byte-identical apart from the colour. The
+/// slash is measured off that screenshot: 15.24mm (0.6 inch) at 62 degrees,
+/// centred on the point. Reverting the tick build in `build_entities` leaves
+/// `PID-POINT` with no line work and this test red.
+#[test]
+fn a_class_coloured_point_is_marked_with_the_slash_smartplant_shows() {
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
+        return;
+    };
+
+    // The eleven class-coloured points, from the decoded igPoint2d records.
+    let marked = [
+        (81.83, 260.51),
+        (95.43, 261.35),
+        (108.12, 260.35),
+        (120.91, 258.83),
+        (133.22, 261.35),
+        (146.23, 260.35),
+        (158.95, 260.35),
+        (171.54, 260.35),
+        (184.13, 260.35),
+        (196.85, 260.35),
+        (294.11, 224.66),
+    ];
+
+    let mut ticks = 0usize;
+    let mut points = 0usize;
+    for entity in on_layer(&doc, "PID-POINT") {
+        match entity {
+            EntityType::Point(_) => points += 1,
+            EntityType::Line(line) => {
+                ticks += 1;
+                let length = line.start.distance(&line.end);
+                assert!(
+                    (length - 15.24).abs() < 0.01,
+                    "a point slash is 0.6 inch long, got {length:.3}: {line:?}"
+                );
+                let angle = (line.end.y - line.start.y)
+                    .atan2(line.end.x - line.start.x)
+                    .to_degrees()
+                    .rem_euclid(180.0);
+                assert!(
+                    (angle - 62.0).abs() < 0.1,
+                    "a point slash leans 62 degrees, got {angle:.2}: {line:?}"
+                );
+                let mid = (
+                    (line.start.x + line.end.x) / 2.0,
+                    (line.start.y + line.end.y) / 2.0,
+                );
+                assert!(
+                    marked
+                        .iter()
+                        .any(|(x, y)| (mid.0 - x).hypot(mid.1 - y) < 0.05),
+                    "a slash centres on one of the class-coloured points, got {mid:?}"
+                );
+                assert_eq!(
+                    line.common.color,
+                    acadrust::types::Color::Rgb { r: 0, g: 0, b: 255 },
+                    "DWG-0201's marked points are trace-blue: {line:?}"
+                );
+            }
+            other => panic!("PID-POINT carries points and slashes only, found {other:?}"),
+        }
+    }
+    assert_eq!(points, 75, "every decoded point still lands on the layer");
+    assert_eq!(
+        ticks, 11,
+        "exactly the class-coloured points are marked -- the 64 black ones \
+         draw nothing, same as SmartPlant's screen"
+    );
 }
 
 /// The opening view is framed on what the drawing draws.

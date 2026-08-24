@@ -80,6 +80,18 @@ const SYMBOL_LABEL_GAP_MM: f64 = 0.8;
 // `build_inferred`.
 const ANNOTATION_TICK_MM: f64 = 3.0;
 
+// A point that carries a class colour is a mark SmartPlant draws as a short
+// slash; a black-styled point draws nothing on its screen. Both numbers are
+// measured off the DWG-0201 screenshot (the one drawing with screen truth):
+// the ten riser ticks and the vessel-inlet tick fit 60.6..62.6 degrees, and
+// the cleanest length readings sit on 15.26mm -- 0.6 inch, which is what an
+// imperial-native application would state. The slash is centred on the point
+// (10 of 11 within 0.3mm; the vessel one reads 2.1mm high and is recorded as
+// an outlier). See pid-parse
+// `docs/analysis/2026-08-24-placement-names-the-body-style.md` section 4.
+const POINT_TICK_LENGTH_MM: f64 = 15.24;
+const POINT_TICK_ANGLE_DEG: f64 = 62.0;
+
 // Shortest connectivity link worth drawing, and the same bound used to tell an
 // endpoint that decoded as the origin from one that genuinely sits in the
 // sheet's bottom-left corner. A P&ID's own line work is millimetres apart at
@@ -305,10 +317,13 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         // than its colour: filled, it is an area; unfilled, it is an outline
         // the member lines already drew. See `build_fill`.
         let fill = fill_for(&fills, entity);
+        // Resolved before building: a point's style decides whether it draws
+        // the slash mark SmartPlant shows for a class-coloured point.
+        let symbology = style_for(&styles, entity);
         let built = match entity.confidence {
             PidGeometryConfidence::Decoded => match fill {
                 Some(fill) => build_fill(&entity.kind, fill, projection),
-                None => build_entities(&entity.kind, library.as_mut(), projection),
+                None => build_entities(&entity.kind, library.as_mut(), projection, symbology),
             },
             PidGeometryConfidence::Inferred => build_inferred(&entity.kind, projection),
             PidGeometryConfidence::ProbeOnly => Vec::new(),
@@ -323,7 +338,6 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
             decoded += 1;
             accumulate_bounds(&entity.kind, &built, &mut bounds);
         }
-        let symbology = style_for(&styles, entity);
         let text_style = height_for(&text_heights, entity);
         let height_mm = text_style.map(|h| projection.mm(h.height_m));
         // The same character style states the colour, so it comes off the
@@ -1205,6 +1219,7 @@ fn build_entities(
     kind: &PidGraphicKind,
     library: Option<&mut SymbolLibrary>,
     projection: Projection,
+    symbology: Option<&ResolvedLineStyle>,
 ) -> Vec<EntityType> {
     match kind {
         PidGraphicKind::Line { start, end } => {
@@ -1323,7 +1338,27 @@ fn build_entities(
             let mut point = Point::new();
             point.location = projection.point(position);
             point.common.layer = LAYER_POINT.to_string();
-            vec![EntityType::Point(point)]
+            let mut built = vec![EntityType::Point(point)];
+            // A point carrying a class colour is a mark SmartPlant shows as a
+            // short slash -- trace-blue on the riser tops and the vessel
+            // inlet of DWG-0201, signal-green on 工艺管道's instrument runs.
+            // A black-styled point is a junction or construction point and
+            // draws nothing on its screen, so it keeps drawing nothing here.
+            // The gate is observational: the record and its style chain are
+            // byte-identical between the two kinds apart from the colour, so
+            // the colour is the discriminator until a better one is found.
+            if symbology.is_some_and(|style| style.symbology.rgb() != [0, 0, 0]) {
+                let (sin, cos) = POINT_TICK_ANGLE_DEG.to_radians().sin_cos();
+                let half = POINT_TICK_LENGTH_MM / 2.0;
+                let centre = projection.point(position);
+                let mut tick = Line::from_points(
+                    Vector3::new(centre.x - half * cos, centre.y - half * sin, 0.0),
+                    Vector3::new(centre.x + half * cos, centre.y + half * sin, 0.0),
+                );
+                tick.common.layer = LAYER_POINT.to_string();
+                built.push(EntityType::Line(tick));
+            }
+            built
         }
         PidGraphicKind::Annotation { .. } | PidGraphicKind::Unknown { .. } => Vec::new(),
     }
