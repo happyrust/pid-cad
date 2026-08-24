@@ -1143,6 +1143,113 @@ fn a_symbol_name_is_lettered_beside_the_symbol_it_names() {
     }
 }
 
+/// Every straight run an entity draws, as endpoint pairs.
+fn segments_of(entity: &EntityType) -> Vec<((f64, f64), (f64, f64))> {
+    match entity {
+        EntityType::Line(line) => vec![((line.start.x, line.start.y), (line.end.x, line.end.y))],
+        EntityType::LwPolyline(polyline) => polyline
+            .vertices
+            .windows(2)
+            .map(|pair| {
+                (
+                    (pair[0].location.x, pair[0].location.y),
+                    (pair[1].location.x, pair[1].location.y),
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn distance_to_segment(point: (f64, f64), segment: ((f64, f64), (f64, f64))) -> f64 {
+    let ((x1, y1), (x2, y2)) = segment;
+    let (dx, dy) = (x2 - x1, y2 - y1);
+    let length_squared = dx * dx + dy * dy;
+    let along = if length_squared == 0.0 {
+        0.0
+    } else {
+        (((point.0 - x1) * dx + (point.1 - y1) * dy) / length_squared).clamp(0.0, 1.0)
+    };
+    (point.0 - (x1 + along * dx)).hypot(point.1 - (y1 + along * dy))
+}
+
+/// How far a trace symbol's name may sit from the pipe run it marks.
+///
+/// The worst of DWG-0202's six placements measures 2.55mm. The reading this
+/// guards against puts the same six 31 to 74mm out, so the bound sits clear
+/// of the first by more than double and under the second by five times.
+const TRACE_REACH_MM: f64 = 6.0;
+
+/// A symbol authored away from its own origin still lands on the line work it
+/// marks.
+///
+/// 211 of the reference library's 613 readable `.sym` draw their body 100 to
+/// 200mm from the file's own origin -- `ElecTraceLine` puts its ten strokes at
+/// (103.2..107.7, 154.1..155.6)mm. That left a question the analysis note
+/// carried unresolved for two rounds: does a placement record's insertion
+/// point mean *put the body here*, in which case some origin has to be
+/// subtracted and all 211 of those symbols are being drawn a hand's width off,
+/// or does it mean *add the library coordinates to this*, which is what the
+/// importer does.
+///
+/// Electric trace runs along a pipe, so its symbol has to sit on one, and
+/// `PID-GEOMETRY` carries that pipe from the drawing's own records with no
+/// help from the symbol library. Under what the importer does, all six of
+/// DWG-0202's placements land on it. Subtract an origin instead and the same
+/// measurement reads 31 to 74mm, with two of the six off the left edge of the
+/// sheet -- so this is the assertion that goes red first if anyone starts.
+///
+/// The name is measured rather than the strokes because the document does not
+/// say which stroke came from which `.sym`; the name is anchored on the drawn
+/// body's bounding box, which
+/// `a_symbol_name_is_lettered_beside_the_symbol_it_names` pins separately.
+///
+/// Measured in `docs/analysis/2026-08-24-two-texts-outside-the-frame.md`.
+#[test]
+fn a_symbol_authored_away_from_its_origin_lands_on_the_line_work_it_marks() {
+    let Some(doc) = import("DWG-0202GP06-01.pid") else {
+        return;
+    };
+
+    let drawing: Vec<((f64, f64), (f64, f64))> = on_layer(&doc, "PID-GEOMETRY")
+        .flat_map(segments_of)
+        .collect();
+    assert!(
+        !drawing.is_empty(),
+        "the drawing's own line work is what this measures against"
+    );
+
+    let mut reach: Vec<(f64, f64, f64)> = Vec::new();
+    for entity in on_layer(&doc, "PID-SYMBOL-LABEL") {
+        let EntityType::Text(text) = entity else {
+            continue;
+        };
+        if text.value != "ElecTraceLine" {
+            continue;
+        }
+        let at = (text.insertion_point.x, text.insertion_point.y);
+        let nearest = drawing
+            .iter()
+            .map(|segment| distance_to_segment(at, *segment))
+            .fold(f64::MAX, f64::min);
+        reach.push((at.0, at.1, nearest));
+    }
+
+    assert_eq!(
+        reach.len(),
+        6,
+        "DWG-0202 places six ElecTraceLine symbols, found {reach:#?}"
+    );
+    let adrift: Vec<&(f64, f64, f64)> = reach
+        .iter()
+        .filter(|(_, _, nearest)| *nearest > TRACE_REACH_MM)
+        .collect();
+    assert!(
+        adrift.is_empty(),
+        "trace symbols marking no pipe: {adrift:#?} (all six of {reach:#?})"
+    );
+}
+
 /// A symbol body draws in the colour and width the symbol states, not in the
 /// layer default.
 ///
