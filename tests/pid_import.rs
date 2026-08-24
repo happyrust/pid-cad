@@ -1273,7 +1273,7 @@ fn a_symbol_body_draws_in_the_style_its_placement_names() {
     };
 
     let mut palette: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let mut unstyled = 0usize;
+    let mut lettering = 0usize;
     for entity in on_layer(&doc, "PID-SYMBOL") {
         let common = entity.common();
         match (common.color, common.line_weight) {
@@ -1282,16 +1282,18 @@ fn a_symbol_body_draws_in_the_style_its_placement_names() {
                     .entry(format!("{w:>3} #{r:02X}{g:02X}{b:02X}"))
                     .or_default() += 1;
             }
-            _ => unstyled += 1,
+            _ => lettering += 1,
         }
     }
 
-    // The three text strokes keep their `.sym` text styles rather than the
-    // placement's line style; lettering is not line work.
+    // The three internal texts take the placement's colour but no line
+    // weight -- a weight means nothing on lettering -- so they sit outside
+    // the (colour, weight) palette; their colours are pinned by
+    // `a_symbols_lettering_follows_its_placement_colour_not_its_syms`.
     assert_eq!(
-        unstyled, 3,
-        "expected all but the three internal texts to carry the placement's \
-         symbology, got palette {palette:?}"
+        lettering, 3,
+        "expected exactly the three internal texts outside the line-work \
+         palette, got palette {palette:?}"
     );
     let expected: std::collections::BTreeMap<String, usize> = [
         // 3 instrument placements: LG / LT gauges and the DCS access box.
@@ -1434,6 +1436,46 @@ fn a_class_coloured_point_is_marked_with_the_slash_smartplant_shows() {
         ticks, 11,
         "exactly the class-coloured points are marked -- the 64 black ones \
          draw nothing, same as SmartPlant's screen"
+    );
+}
+
+/// A symbol's lettering follows its placement's colour, not the colour its
+/// `.sym` character style states.
+///
+/// The discriminating pair is the level-gauge bubbles: `LG-Magnetic Float
+/// Gauge.sym` and `LT-Magnetostrictive Level Gauge.sym` both author their
+/// bubble letters in a `#FF0000` character style, their placements name the
+/// instrument class colour `#008000`, and the screenshot letters them green.
+/// `Drawing Description`'s `说 明` letters black on a black-styled placement,
+/// which agrees with either reading and is pinned as the control. Reverting
+/// the lettering branch in `apply_symbology` leaves these texts `ByLayer`
+/// and this test red.
+#[test]
+fn a_symbols_lettering_follows_its_placement_colour_not_its_syms() {
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
+        return;
+    };
+
+    let mut seen: std::collections::BTreeMap<String, acadrust::types::Color> =
+        std::collections::BTreeMap::new();
+    for entity in on_layer(&doc, "PID-SYMBOL") {
+        if let EntityType::Text(text) = entity {
+            seen.insert(text.value.clone(), text.common.color);
+        }
+    }
+
+    let expected: std::collections::BTreeMap<String, acadrust::types::Color> = [
+        ("LGM", acadrust::types::Color::Rgb { r: 0, g: 128, b: 0 }),
+        ("LTM", acadrust::types::Color::Rgb { r: 0, g: 128, b: 0 }),
+        ("说 明", acadrust::types::Color::Rgb { r: 0, g: 0, b: 0 }),
+    ]
+    .iter()
+    .map(|(value, colour)| ((*value).to_string(), *colour))
+    .collect();
+    assert_eq!(
+        seen, expected,
+        "a symbol's lettering takes the placement's colour -- the LG/LT \
+         letters are authored #FF0000 in their own .sym and screen green"
     );
 }
 

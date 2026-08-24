@@ -1025,11 +1025,20 @@ fn apply_symbology(
     style: &ResolvedLineStyle,
     dash_linetypes: &HashMap<Vec<i64>, String>,
 ) {
-    // A placement's style covers its body's line work, not its lettering:
-    // a symbol's internal text keeps the text style its `.sym` names. The
-    // screen evidence for lettering is still open — DWG-0201's instrument
-    // tags letter green either way, since their character styles agree.
-    if matches!(entity, EntityType::Text(_)) {
+    // A placed symbol's lettering follows the placement's colour the same
+    // way its line work does. This is measured, not assumed: LG and LT
+    // author their bubble letters `#FF0000` in their own `.sym` character
+    // styles, the placements name `#008000`, and the screenshot letters
+    // them green. Size and typeface stay the `.sym`'s own — the placement
+    // names a line style, which carries no lettering metrics — and a line
+    // weight on a text entity would mean nothing, so colour is all that is
+    // painted here.
+    if let EntityType::Text(_) = entity {
+        let common = entity.common_mut();
+        if common.layer == LAYER_SYMBOL {
+            let [r, g, b] = style.symbology.rgb();
+            common.color = Color::from_rgb(r, g, b);
+        }
         return;
     }
     let common = entity.common_mut();
