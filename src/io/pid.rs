@@ -29,7 +29,7 @@ use acadrust::{CadDocument, EntityType, TableEntry};
 use pid_parse::style_link::{
     DashPattern, LineStyleIndex, ResolvedFill, ResolvedLineStyle, TextAlignment,
 };
-use pid_parse::symbol_library::{SymbolLibrary, SymbolPrimitive};
+use pid_parse::symbol_library::{PrimitiveStyle, StyledPrimitive, SymbolLibrary, SymbolPrimitive};
 use pid_parse::{
     build_normalized_geometry, NormalizedPidGeometry, PidDrawingUnits, PidGeometryConfidence,
     PidGraphicKind, PidParser, PidPoint, PidSemanticHit, PidSemanticIndex,
@@ -676,7 +676,12 @@ fn report_import(
         missing.len(),
         library.lookups(),
         library.roots(),
-        missing.iter().take(3).copied().collect::<Vec<_>>().join(", ")
+        missing
+            .iter()
+            .take(3)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 }
 
@@ -1631,8 +1636,45 @@ impl Placement<'_> {
     }
 }
 
-/// Draw one primitive of a symbol body at its placement.
-fn place_primitive(primitive: &SymbolPrimitive, at: &Placement<'_>) -> Option<EntityType> {
+/// Draw one primitive of a symbol body at its placement, in the colour and
+/// width the symbol states for it.
+fn place_primitive(styled: &StyledPrimitive, at: &Placement<'_>) -> Option<EntityType> {
+    let mut entity = shape_primitive(&styled.primitive, at)?;
+    paint_symbol_stroke(&mut entity, styled.style);
+    Some(entity)
+}
+
+/// Give a symbol's stroke the colour and width its own `.sym` states.
+///
+/// This is a separate route from [`apply_symbology`], which paints the
+/// drawing's own line work and deliberately leaves this layer alone: the two
+/// read different tables. A symbol's placement record names no style at all
+/// -- the payload slot its `igLine2d` siblings use for the style index holds
+/// the `JSite` id -- so the only thing that knows a vessel is drawn in red is
+/// the `StyleCluster` inside the `.sym`. A symbol whose style index names no
+/// line style keeps `ByLayer`, which is what it drew as before this.
+///
+/// The dash such a style can also name is not carried across yet; a dashed
+/// symbol stroke still draws solid.
+fn paint_symbol_stroke(entity: &mut EntityType, style: Option<PrimitiveStyle>) {
+    let Some(style) = style else {
+        return;
+    };
+    let common = entity.common_mut();
+    let [r, g, b] = style.rgb;
+    common.color = Color::from_rgb(r, g, b);
+    // Same ladder and the same guard as the drawing's own line work: DXF
+    // stores hundredths of a millimetre, and a width outside the range the
+    // format can state is left at the layer default rather than clamped into
+    // a width the symbol did not ask for.
+    let hundredths = (style.width_mm * 100.0).round();
+    if (0.0..=211.0).contains(&hundredths) {
+        common.line_weight = LineWeight::Value(hundredths as i16);
+    }
+}
+
+/// Where one primitive of a symbol body lands at its placement.
+fn shape_primitive(primitive: &SymbolPrimitive, at: &Placement<'_>) -> Option<EntityType> {
     match primitive {
         SymbolPrimitive::Line { start, end } => {
             let mut line = Line::from_points(at.apply(start.0, start.1), at.apply(end.0, end.1));

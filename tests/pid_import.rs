@@ -1143,6 +1143,57 @@ fn a_symbol_name_is_lettered_beside_the_symbol_it_names() {
     }
 }
 
+/// A symbol body draws in the colour and width the symbol states, not in the
+/// layer default.
+///
+/// Nothing on the drawing side can supply this: an `igSymbol2d` placement
+/// carries the `JSite` id in the payload slot its `igLine2d` siblings carry
+/// the style index in, so it names no style at all -- opening
+/// `apply_symbology`'s gate to this layer left all 123 of DWG-0201's symbol
+/// strokes on `ByLayer`. The symbology comes from the `StyleCluster` the
+/// `.sym` carries itself, which `pid-parse` now reads and hands over with
+/// each stroke. Without it the vessel, the valves and the instrument bubbles
+/// all came in as hairline `ByLayer` outlines.
+#[test]
+fn a_symbol_body_draws_in_the_symbology_its_own_library_file_states() {
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
+        return;
+    };
+
+    let mut palette: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut unstyled = 0usize;
+    for entity in on_layer(&doc, "PID-SYMBOL") {
+        let common = entity.common();
+        match (common.color, common.line_weight) {
+            (acadrust::types::Color::Rgb { r, g, b }, acadrust::types::LineWeight::Value(w)) => {
+                *palette
+                    .entry(format!("{w:>3} #{r:02X}{g:02X}{b:02X}"))
+                    .or_default() += 1;
+            }
+            _ => unstyled += 1,
+        }
+    }
+
+    // Three strokes keep the layer default because their style index names
+    // something with no line symbology -- a fill or a text style. That is a
+    // statement about those three records, not a gap: the other 120 are
+    // painted.
+    assert_eq!(
+        unstyled, 3,
+        "expected all but three symbol strokes to carry a stated symbology, got palette {palette:?}"
+    );
+    let expected: std::collections::BTreeMap<String, usize> = [
+        (" 13 #000000", 35),
+        (" 35 #000000", 71),
+        (" 50 #00FEA0", 5),
+        (" 50 #00FFFF", 9),
+    ]
+    .iter()
+    .map(|(key, count)| ((*key).to_string(), *count))
+    .collect();
+    assert_eq!(palette, expected);
+}
+
 /// The opening view is framed on what the drawing draws.
 ///
 /// Framing used to take a symbol placement's insertion point, which for the
