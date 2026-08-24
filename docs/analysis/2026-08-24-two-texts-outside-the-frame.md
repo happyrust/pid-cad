@@ -241,14 +241,26 @@ x 最大 549.09、y 最小 12.30 就是它顶出来的。
 按 Coverage Gap 登记。要定论，最短的路是解 `0x000F`：如果它是原点 / extent 且值 ≈ (103.8, 154.6)，
 乙成立；如果它与位置无关，甲成立。退一步的办法是在 SmartPlant 里打开这张图看那一排在哪。
 
-## 7. 建议
+## 7. 已落地与仍未决
 
-1. **先决 §6 的甲乙**，这是个只读的解码问题，落点明确（pid-parse `symbol_library.rs` 的
-   记录walk，`0x000F`，`ElecTraceLine.sym` 里 4 条），不需要动渲染。它决定了后面两条怎么修。
-2. **标签不该钉在放置原点**。就算甲成立，把符号名扔到本体一百多毫米外也没有用处——它是给人
-   看的诊断层。应改挂到本体包围盒（`SymbolGeometry::bounds()` 已经有了）。
-3. **`Bounds::add` 不该收放置原点**。初始视野现在按一个没有任何几何的点去框（`ext_min` 的
-   x = -25.64 就来自那里），默认视图比图纸宽出一截。这条用户直接看得见。
+**已落地**（`fix(io): name a placed .pid symbol beside the symbol, and frame on what it
+drew`）。这两条无论 §6 定成甲还是乙都该改，所以没等定论：
+
+1. **标签改挂本体**。`symbol_label_anchor` 读 `built` 的包围盒，把符号名放在右边缘外
+   `SYMBOL_LABEL_GAP_MM`、与本体中线齐平处。marker 回退路径**逐位不变**：1.5mm 的点
+   以插入点为心，右边缘正好是老公式的 `+ 半径 + 间隙`，中线正好是插入点。
+2. **取景改收本体**。`accumulate_bounds` 的 `SymbolInstance` 分支改成 `add_drawn(built)`。
+
+四张 fixture 的效果：`pid_probe` 报的出界实体 2 / 0 / 9 / 0 **全部归零**；`ext_min` 回到纸面上
+（0202 由 -25.64 → 40.79，工艺管道由 -8.03 → 63.37）。三条回归测试钉住它，全部验过"退回旧写法就会红"：
+`io::pid::tests` 两条（marker 位置逐位不变、本体远离锚点时标签跟本体走）与
+`tests/pid_import.rs` 两条（符号名不得离最近笔画超过 20mm；取景不得越出实际画出的东西 1mm）。
+
+**仍未决**：
+
+3. **§6 的甲乙**。只读的解码问题，落点明确（pid-parse `symbol_library.rs` 的记录 walk，
+   `0x000F`，`ElecTraceLine.sym` 里 4 条），不需要动渲染。上面两条修的是"名字和取景"，
+   若乙成立，**本体自己的落位仍是错的**，那是比这两条大得多的一件事。
 4. 顺带：`pid_probe` 的出界检查只看 x，漏了 y 方向的 `Item Note & Label`（§5 末）；
    `pid_probe` / `pid_plot_dump` 传相对路径会静默失去符号库，普查数字差一大截（180 → 23）。
    这两个 example 该在找不到符号库时明说一句，出界检查也该测 y。
