@@ -27,7 +27,8 @@ use acadrust::tables::linetype::{LineType, LineTypeElement};
 use acadrust::types::{Color, LineWeight, Vector2, Vector3};
 use acadrust::{CadDocument, EntityType, TableEntry};
 use pid_parse::style_link::{
-    DashPattern, LineStyleIndex, PointMarker, ResolvedFill, ResolvedLineStyle, TextAlignment,
+    DashPattern, LineStyleIndex, MarkerStatus, PointMarker, ResolvedFill, ResolvedLineStyle,
+    TextAlignment,
 };
 use pid_parse::symbol_library::{PrimitiveStyle, StyledPrimitive, SymbolLibrary, SymbolPrimitive};
 use pid_parse::{
@@ -120,6 +121,14 @@ const LAYER_TEXT: &str = "PID-TEXT";
 const LAYER_SYMBOL: &str = "PID-SYMBOL";
 const LAYER_SYMBOL_LABEL: &str = "PID-SYMBOL-LABEL";
 const LAYER_POINT: &str = "PID-POINT";
+// A point's mark is a review status, not decoration: the drawing's style
+// librarian names the four point symbols `psOk`, `psWarning`, `psError` and
+// `psApproved`, and `psOk`'s glyph is deliberately blank. Splitting the drawn
+// ones onto their own layers is what makes "show me everything SmartPlant
+// flagged" one toggle instead of a hunt.
+const LAYER_POINT_WARNING: &str = "PID-POINT-WARNING";
+const LAYER_POINT_ERROR: &str = "PID-POINT-ERROR";
+const LAYER_POINT_APPROVED: &str = "PID-POINT-APPROVED";
 const LAYER_ANNOTATION: &str = "PID-ANNOTATION";
 const LAYER_CONNECTIVITY: &str = "PID-CONNECTIVITY";
 const LAYER_FILL: &str = "PID-FILL";
@@ -200,6 +209,18 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         // switched off: the answer is in the file, one layer toggle away.
         (LAYER_SYMBOL_LABEL, Color::GRAY, false),
         (LAYER_POINT, Color::MAGENTA, true),
+        // The review statuses. Each mark keeps the colour its own style
+        // states, so these layer colours only ever show on a mark that states
+        // none — but they are the status colours the drawings themselves use,
+        // so a defaulted mark still reads correctly. `PID-POINT-ERROR` is
+        // empty across this whole corpus, which is the point of declaring it:
+        // every drawing that defines the state defines it and nothing is in
+        // it, and a present empty layer says that where a missing one would
+        // not. There is no `PID-POINT-OK` because a passing item's glyph is
+        // blank by construction and there is nothing to put on it.
+        (LAYER_POINT_WARNING, Color::BLUE, true),
+        (LAYER_POINT_ERROR, Color::RED, true),
+        (LAYER_POINT_APPROVED, Color::GREEN, true),
         // There is no `PID-UNRESOLVED`. It held the `GLine2d` unit lines,
         // which turned out not to be records at all: each was the top two
         // bytes of an `igSmartFrame2d`'s page ratio, matched by a decoder
@@ -1000,8 +1021,9 @@ fn apply_text_style(entity: &mut EntityType, style_name: &str) {
 
 /// Give an entity the width and colour its source record asks for.
 ///
-/// Three layers are painted: the drawing's own line work (`PID-GEOMETRY`,
-/// `PID-POINT`) and the placed symbol bodies (`PID-SYMBOL`), whose placement
+/// The drawing's own line work is painted: `PID-GEOMETRY`, every `PID-POINT`
+/// layer — the bare one and the three review statuses, which is why the test
+/// is a prefix — and the placed symbol bodies (`PID-SYMBOL`), whose placement
 /// record names one style for the whole body — `igSymbol2d +25` — that wins
 /// over the per-stroke styles the `.sym` states (see [`paint_symbol_stroke`],
 /// which ran first and is overwritten here exactly when the placement names a
@@ -1030,8 +1052,10 @@ fn apply_symbology(
         return;
     }
     let common = entity.common_mut();
-    if common.layer != LAYER_GEOMETRY && common.layer != LAYER_POINT && common.layer != LAYER_SYMBOL
-    {
+    let painted = common.layer == LAYER_GEOMETRY
+        || common.layer == LAYER_SYMBOL
+        || common.layer.starts_with(LAYER_POINT);
+    if !painted {
         return;
     }
     let [r, g, b] = style.symbology.rgb();
@@ -1336,23 +1360,32 @@ fn build_entities(
             point.location = projection.point(position);
             point.common.layer = LAYER_POINT.to_string();
             let mut built = vec![EntityType::Point(point)];
-            // Whether a point shows a mark, and what shape that mark is, are
-            // both stated by the file. Its line style may name a
+            // Whether a point shows a mark, what shape that mark is, and what
+            // it means are all stated by the file. Its line style may name a
             // `JStyleLineTerminator`, which names a `JStylePointSymbol`,
-            // which owns its glyph as a group of line records. A symbol whose
-            // lines are all zero-length is a blank one, and that is how a
-            // drawing says "junction point, draw nothing" -- 53 of DWG-0201's
-            // 75 points are exactly that.
+            // which owns its glyph as a group of line records and is named by
+            // the style librarian. A symbol whose lines are all zero-length is
+            // `psOk` -- an item that passed has nothing to draw -- and 53 of
+            // DWG-0201's 75 points are exactly that.
             //
             // Drawn at the size the group states. SmartPlant's own screen
-            // shows the slash about 1.7 times longer and anchored so the
-            // point sits inside the stroke rather than at its origin; neither
-            // number is anywhere in the `.pid`, so neither is invented here.
-            // See pid-parse `docs/analysis/
+            // draws it larger, but so are that screen's line weights, so the
+            // factor is a view-wide scale on style-declared sizes rather than
+            // anything the file says about this glyph. See pid-parse
+            // `docs/analysis/
             // 2026-08-25-a-point-draws-the-symbol-its-terminator-names.md`.
             let marker = symbology
                 .and_then(|style| style.marker)
                 .filter(PointMarker::draws);
+            // A mark whose status the librarian does not name stays on
+            // `PID-POINT`: filing it under a status would be this importer
+            // deciding one, which is the drawing's job.
+            let mark_layer = match marker.and_then(|marker| marker.status) {
+                Some(MarkerStatus::Warning) => LAYER_POINT_WARNING,
+                Some(MarkerStatus::Error) => LAYER_POINT_ERROR,
+                Some(MarkerStatus::Approved) => LAYER_POINT_APPROVED,
+                Some(MarkerStatus::Ok) | None => LAYER_POINT,
+            };
             let origin = projection.point(position);
             let offset = |(x, y): (f64, f64)| {
                 Vector3::new(
@@ -1366,7 +1399,7 @@ fn build_entities(
                     continue;
                 }
                 let mut segment = Line::from_points(offset(stroke.start), offset(stroke.end));
-                segment.common.layer = LAYER_POINT.to_string();
+                segment.common.layer = mark_layer.to_string();
                 built.push(EntityType::Line(segment));
             }
             built

@@ -66,7 +66,15 @@ fn line_work_carries_the_width_and_colour_the_drawing_states() {
 
     let mut palette: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut unstyled = 0usize;
-    for layer in ["PID-GEOMETRY", "PID-POINT"] {
+    // Every point layer, not just the bare one: a mark files under its review
+    // status, and its style has to survive the move.
+    for layer in [
+        "PID-GEOMETRY",
+        "PID-POINT",
+        "PID-POINT-WARNING",
+        "PID-POINT-ERROR",
+        "PID-POINT-APPROVED",
+    ] {
         for entity in on_layer(&doc, layer) {
             let common = entity.common();
             match (common.color, common.line_weight) {
@@ -668,6 +676,13 @@ fn import_declares_its_layers_and_hides_the_evidence_ones() {
         "PID-FILL",
         "PID-SYMBOL",
         "PID-POINT",
+        // The review statuses are drawing content the source shows, so they
+        // open visible even though `PID-POINT-ERROR` is empty on every
+        // fixture -- see
+        // `a_points_mark_files_under_the_review_status_the_drawing_names`.
+        "PID-POINT-WARNING",
+        "PID-POINT-ERROR",
+        "PID-POINT-APPROVED",
     ] {
         assert!(!is_hidden(&doc, visible), "{visible} must open visible");
     }
@@ -1371,13 +1386,14 @@ fn the_vessel_draws_in_its_placements_maroon_not_its_syms_black() {
 /// a 1.044mm stub below-left of it, both read out of the group rather than
 /// measured off a screen.
 ///
-/// The screen shows them about 1.7 times longer and anchored differently.
-/// That factor is in no `f64` of the `.pid` and is deliberately not applied
-/// here; see pid-parse
+/// The screen draws them larger, but it draws that drawing's line weights
+/// wide of their stated widths too, so the factor is a view-wide scale on
+/// style-declared sizes rather than anything the file says about this glyph.
+/// It is deliberately not applied here; see pid-parse
 /// `docs/analysis/2026-08-25-a-point-draws-the-symbol-its-terminator-names.md`.
 ///
-/// Reverting the marker build in `build_entities` leaves `PID-POINT` with no
-/// line work; gating on colour instead of on the glyph puts one stroke on
+/// Reverting the marker build in `build_entities` leaves the point layers with
+/// no line work; gating on colour instead of on the glyph puts one stroke on
 /// each marked point instead of two.
 #[test]
 fn a_point_draws_the_symbol_its_terminator_names() {
@@ -1401,45 +1417,104 @@ fn a_point_draws_the_symbol_its_terminator_names() {
     ];
 
     let mut points = 0usize;
-    let mut long_strokes = 0usize;
-    let mut stubs = 0usize;
     for entity in on_layer(&doc, "PID-POINT") {
         match entity {
             EntityType::Point(_) => points += 1,
-            EntityType::Line(line) => {
-                let length = line.start.distance(&line.end);
-                // The glyph's own two strokes: (0,0)->(3,6) and
-                // (-1,-2)->(-0.7,-1), in millimetres.
-                if (length - 6.708_204).abs() < 0.001 {
-                    long_strokes += 1;
-                } else if (length - 1.044_175).abs() < 0.001 {
-                    stubs += 1;
-                } else {
-                    panic!("a point mark is one of the glyph's two strokes, got {length:.4}mm");
-                }
-
-                // The glyph's origin is the point, so every stroke sits
-                // within the glyph's own reach of one of the eleven.
-                let near = marked
-                    .iter()
-                    .any(|(x, y)| (line.start.x - x).hypot(line.start.y - y) < 7.0);
-                assert!(near, "a stroke belongs to a marked point, got {line:?}");
-                assert_eq!(
-                    line.common.color,
-                    acadrust::types::Color::Rgb { r: 0, g: 0, b: 255 },
-                    "DWG-0201's marked points are trace-blue: {line:?}"
-                );
-            }
-            other => panic!("PID-POINT carries points and glyph strokes only, found {other:?}"),
+            other => panic!(
+                "the marks now file under their review status, so the bare \
+                 layer carries points only, found {other:?}"
+            ),
         }
     }
     assert_eq!(points, 75, "every decoded point still lands on the layer");
+
+    let mut long_strokes = 0usize;
+    let mut stubs = 0usize;
+    for entity in on_layer(&doc, "PID-POINT-WARNING") {
+        let EntityType::Line(line) = entity else {
+            panic!("a status layer carries glyph strokes only, found {entity:?}");
+        };
+        let length = line.start.distance(&line.end);
+        // The glyph's own two strokes: (0,0)->(3,6) and (-1,-2)->(-0.7,-1),
+        // in millimetres.
+        if (length - 6.708_204).abs() < 0.001 {
+            long_strokes += 1;
+        } else if (length - 1.044_175).abs() < 0.001 {
+            stubs += 1;
+        } else {
+            panic!("a point mark is one of the glyph's two strokes, got {length:.4}mm");
+        }
+
+        // The glyph's origin is the point, so every stroke sits within the
+        // glyph's own reach of one of the eleven.
+        let near = marked
+            .iter()
+            .any(|(x, y)| (line.start.x - x).hypot(line.start.y - y) < 7.0);
+        assert!(near, "a stroke belongs to a marked point, got {line:?}");
+        assert_eq!(
+            line.common.color,
+            acadrust::types::Color::Rgb { r: 0, g: 0, b: 255 },
+            "DWG-0201's marked points are trace-blue: {line:?}"
+        );
+    }
     assert_eq!(
         (long_strokes, stubs),
         (11, 11),
         "each of the eleven marked points draws both of its glyph's strokes, \
          and the 64 blank-symbol points draw none"
     );
+}
+
+/// A point's mark is a review status, and it lands on the layer for that
+/// status.
+///
+/// The drawing's style librarian names the four point symbols `psOk`,
+/// `psWarning`, `psError` and `psApproved`, each paired with a like-named line
+/// style — so the mark is one of four review states, not decoration and not a
+/// per-discipline tick. Two consequences are pinned here:
+///
+/// * `psOk` puts nothing on any status layer. Its glyph is two zero-length
+///   lines because an item that passed has nothing to draw, so all 53 of
+///   DWG-0201's junction points and all 23 of the gongyi drawing's are silent.
+/// * `psError` puts nothing on one either. Both drawings that define the state
+///   define it fully and no point in either is in it, which is why the layer
+///   ships declared and empty rather than not at all.
+///
+/// The gongyi drawing is the discriminating fixture: ten of its marks are
+/// `psApproved` check marks and exactly one is a `psWarning` slash, so an
+/// importer that filed every mark under one status, or picked the status off
+/// the glyph's shape or colour, would split them wrong.
+#[test]
+fn a_points_mark_files_under_the_review_status_the_drawing_names() {
+    for (fixture, warning, approved) in [
+        ("DWG-0201GP06-01.pid", 22usize, 0usize),
+        ("DWG-0202GP06-01.pid", 10, 0),
+        ("工艺管道及仪表流程-1.pid", 2, 20),
+    ] {
+        let Some(doc) = import(fixture) else {
+            continue;
+        };
+        // Two strokes per mark, so these are stroke counts.
+        assert_eq!(
+            on_layer(&doc, "PID-POINT-WARNING").count(),
+            warning,
+            "{fixture}: psWarning strokes"
+        );
+        assert_eq!(
+            on_layer(&doc, "PID-POINT-APPROVED").count(),
+            approved,
+            "{fixture}: psApproved strokes"
+        );
+        assert_eq!(
+            on_layer(&doc, "PID-POINT-ERROR").count(),
+            0,
+            "{fixture}: nothing in this corpus is in the error state"
+        );
+        assert!(
+            on_layer(&doc, "PID-POINT").all(|e| matches!(e, EntityType::Point(_))),
+            "{fixture}: every mark whose status the drawing names leaves the bare layer"
+        );
+    }
 }
 
 /// A symbol's lettering follows its placement's colour, not the colour its
