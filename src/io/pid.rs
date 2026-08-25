@@ -27,7 +27,7 @@ use acadrust::tables::linetype::{LineType, LineTypeElement};
 use acadrust::types::{Color, LineWeight, Vector2, Vector3};
 use acadrust::{CadDocument, EntityType, TableEntry};
 use pid_parse::style_link::{
-    DashPattern, LineStyleIndex, ResolvedFill, ResolvedLineStyle, TextAlignment,
+    DashPattern, LineStyleIndex, PointMarker, ResolvedFill, ResolvedLineStyle, TextAlignment,
 };
 use pid_parse::symbol_library::{PrimitiveStyle, StyledPrimitive, SymbolLibrary, SymbolPrimitive};
 use pid_parse::{
@@ -79,18 +79,6 @@ const SYMBOL_LABEL_GAP_MM: f64 = 0.8;
 // Nothing reaches this while the anchor read stands retracted; see
 // `build_inferred`.
 const ANNOTATION_TICK_MM: f64 = 3.0;
-
-// A point that carries a class colour is a mark SmartPlant draws as a short
-// slash; a black-styled point draws nothing on its screen. Both numbers are
-// measured off the DWG-0201 screenshot (the one drawing with screen truth):
-// the ten riser ticks and the vessel-inlet tick fit 60.6..62.6 degrees, and
-// the cleanest length readings sit on 15.26mm -- 0.6 inch, which is what an
-// imperial-native application would state. The slash is centred on the point
-// (10 of 11 within 0.3mm; the vessel one reads 2.1mm high and is recorded as
-// an outlier). See pid-parse
-// `docs/analysis/2026-08-24-placement-names-the-body-style.md` section 4.
-const POINT_TICK_LENGTH_MM: f64 = 15.24;
-const POINT_TICK_ANGLE_DEG: f64 = 62.0;
 
 // Shortest connectivity link worth drawing, and the same bound used to tell an
 // endpoint that decoded as the origin from one that genuinely sits in the
@@ -1348,24 +1336,38 @@ fn build_entities(
             point.location = projection.point(position);
             point.common.layer = LAYER_POINT.to_string();
             let mut built = vec![EntityType::Point(point)];
-            // A point carrying a class colour is a mark SmartPlant shows as a
-            // short slash -- trace-blue on the riser tops and the vessel
-            // inlet of DWG-0201, signal-green on 工艺管道's instrument runs.
-            // A black-styled point is a junction or construction point and
-            // draws nothing on its screen, so it keeps drawing nothing here.
-            // The gate is observational: the record and its style chain are
-            // byte-identical between the two kinds apart from the colour, so
-            // the colour is the discriminator until a better one is found.
-            if symbology.is_some_and(|style| style.symbology.rgb() != [0, 0, 0]) {
-                let (sin, cos) = POINT_TICK_ANGLE_DEG.to_radians().sin_cos();
-                let half = POINT_TICK_LENGTH_MM / 2.0;
-                let centre = projection.point(position);
-                let mut tick = Line::from_points(
-                    Vector3::new(centre.x - half * cos, centre.y - half * sin, 0.0),
-                    Vector3::new(centre.x + half * cos, centre.y + half * sin, 0.0),
-                );
-                tick.common.layer = LAYER_POINT.to_string();
-                built.push(EntityType::Line(tick));
+            // Whether a point shows a mark, and what shape that mark is, are
+            // both stated by the file. Its line style may name a
+            // `JStyleLineTerminator`, which names a `JStylePointSymbol`,
+            // which owns its glyph as a group of line records. A symbol whose
+            // lines are all zero-length is a blank one, and that is how a
+            // drawing says "junction point, draw nothing" -- 53 of DWG-0201's
+            // 75 points are exactly that.
+            //
+            // Drawn at the size the group states. SmartPlant's own screen
+            // shows the slash about 1.7 times longer and anchored so the
+            // point sits inside the stroke rather than at its origin; neither
+            // number is anywhere in the `.pid`, so neither is invented here.
+            // See pid-parse `docs/analysis/
+            // 2026-08-25-a-point-draws-the-symbol-its-terminator-names.md`.
+            let marker = symbology
+                .and_then(|style| style.marker)
+                .filter(PointMarker::draws);
+            let origin = projection.point(position);
+            let offset = |(x, y): (f64, f64)| {
+                Vector3::new(
+                    origin.x + projection.mm(x),
+                    origin.y + projection.mm(y),
+                    0.0,
+                )
+            };
+            for stroke in marker.iter().flat_map(PointMarker::strokes) {
+                if stroke.is_degenerate() {
+                    continue;
+                }
+                let mut segment = Line::from_points(offset(stroke.start), offset(stroke.end));
+                segment.common.layer = LAYER_POINT.to_string();
+                built.push(EntityType::Line(segment));
             }
             built
         }

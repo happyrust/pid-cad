@@ -88,14 +88,14 @@ fn line_work_carries_the_width_and_colour_the_drawing_states() {
         "every entity on the drawing layers should carry a resolved style, got palette {palette:?}"
     );
     // Widths are hundredths of a millimetre, so 70 is the 0.7mm process
-    // header and 10 the 0.1mm point tick. Olive #808000 on the heavy lines
+    // header and 10 the 0.1mm point symbol. Olive #808000 on the heavy lines
     // and green #008000 on the thin ones is this drawing's own palette.
-    // The 22 blue entities are the eleven class-coloured points twice over:
-    // the point record itself and the slash mark drawn on it -- see
-    // `a_class_coloured_point_is_marked_with_the_slash_smartplant_shows`.
+    // The 33 blue entities are the eleven marked points three times over:
+    // the point record itself plus the two strokes of the glyph its
+    // terminator names -- see `a_point_draws_the_symbol_its_terminator_names`.
     let expected: std::collections::BTreeMap<String, usize> = [
         (" 10 #000000", 53),
-        (" 10 #0000FF", 22),
+        (" 10 #0000FF", 33),
         (" 18 #008000", 4),
         (" 35 #000000", 43),
         (" 35 #FE0060", 3),
@@ -1359,25 +1359,33 @@ fn the_vessel_draws_in_its_placements_maroon_not_its_syms_black() {
     assert_eq!(shell, 2, "DWG-0201's vessel has two 188mm shell runs");
 }
 
-/// A point that carries a class colour is marked with the slash SmartPlant
-/// shows; a black-styled point draws nothing, which is also what its screen
-/// shows.
+/// A point draws the symbol its line terminator names, at the origin and the
+/// size the file states.
 ///
-/// DWG-0201 places 75 decoded points. Eleven resolve to `#0000FF` -- one on
-/// each riser top and one at the vessel inlet -- and the screenshot shows a
-/// short blue slash at exactly those eleven spots and nowhere else: not at
-/// the 53 black junction points, not at the 11 black riser feet, though the
-/// records and style chains are byte-identical apart from the colour. The
-/// slash is measured off that screenshot: 15.24mm (0.6 inch) at 62 degrees,
-/// centred on the point. Reverting the tick build in `build_entities` leaves
-/// `PID-POINT` with no line work and this test red.
+/// DWG-0201 places 75 decoded points and the screenshot marks exactly eleven
+/// of them -- one per riser top plus the vessel inlet -- and nothing at the
+/// other 64. The file says why: those eleven reach a `JStylePointSymbol`
+/// whose group holds two real `igLine2d`, while the 53 junction points reach
+/// one whose lines are zero-length and the 11 riser feet name no terminator
+/// at all. So each mark is **two** strokes, a 6.708mm one from the point plus
+/// a 1.044mm stub below-left of it, both read out of the group rather than
+/// measured off a screen.
+///
+/// The screen shows them about 1.7 times longer and anchored differently.
+/// That factor is in no `f64` of the `.pid` and is deliberately not applied
+/// here; see pid-parse
+/// `docs/analysis/2026-08-25-a-point-draws-the-symbol-its-terminator-names.md`.
+///
+/// Reverting the marker build in `build_entities` leaves `PID-POINT` with no
+/// line work; gating on colour instead of on the glyph puts one stroke on
+/// each marked point instead of two.
 #[test]
-fn a_class_coloured_point_is_marked_with_the_slash_smartplant_shows() {
+fn a_point_draws_the_symbol_its_terminator_names() {
     let Some(doc) = import("DWG-0201GP06-01.pid") else {
         return;
     };
 
-    // The eleven class-coloured points, from the decoded igPoint2d records.
+    // The eleven marked points, from the decoded igPoint2d records.
     let marked = [
         (81.83, 260.51),
         (95.43, 261.35),
@@ -1392,50 +1400,45 @@ fn a_class_coloured_point_is_marked_with_the_slash_smartplant_shows() {
         (294.11, 224.66),
     ];
 
-    let mut ticks = 0usize;
     let mut points = 0usize;
+    let mut long_strokes = 0usize;
+    let mut stubs = 0usize;
     for entity in on_layer(&doc, "PID-POINT") {
         match entity {
             EntityType::Point(_) => points += 1,
             EntityType::Line(line) => {
-                ticks += 1;
                 let length = line.start.distance(&line.end);
-                assert!(
-                    (length - 15.24).abs() < 0.01,
-                    "a point slash is 0.6 inch long, got {length:.3}: {line:?}"
-                );
-                let angle = (line.end.y - line.start.y)
-                    .atan2(line.end.x - line.start.x)
-                    .to_degrees()
-                    .rem_euclid(180.0);
-                assert!(
-                    (angle - 62.0).abs() < 0.1,
-                    "a point slash leans 62 degrees, got {angle:.2}: {line:?}"
-                );
-                let mid = (
-                    (line.start.x + line.end.x) / 2.0,
-                    (line.start.y + line.end.y) / 2.0,
-                );
-                assert!(
-                    marked
-                        .iter()
-                        .any(|(x, y)| (mid.0 - x).hypot(mid.1 - y) < 0.05),
-                    "a slash centres on one of the class-coloured points, got {mid:?}"
-                );
+                // The glyph's own two strokes: (0,0)->(3,6) and
+                // (-1,-2)->(-0.7,-1), in millimetres.
+                if (length - 6.708_204).abs() < 0.001 {
+                    long_strokes += 1;
+                } else if (length - 1.044_175).abs() < 0.001 {
+                    stubs += 1;
+                } else {
+                    panic!("a point mark is one of the glyph's two strokes, got {length:.4}mm");
+                }
+
+                // The glyph's origin is the point, so every stroke sits
+                // within the glyph's own reach of one of the eleven.
+                let near = marked
+                    .iter()
+                    .any(|(x, y)| (line.start.x - x).hypot(line.start.y - y) < 7.0);
+                assert!(near, "a stroke belongs to a marked point, got {line:?}");
                 assert_eq!(
                     line.common.color,
                     acadrust::types::Color::Rgb { r: 0, g: 0, b: 255 },
                     "DWG-0201's marked points are trace-blue: {line:?}"
                 );
             }
-            other => panic!("PID-POINT carries points and slashes only, found {other:?}"),
+            other => panic!("PID-POINT carries points and glyph strokes only, found {other:?}"),
         }
     }
     assert_eq!(points, 75, "every decoded point still lands on the layer");
     assert_eq!(
-        ticks, 11,
-        "exactly the class-coloured points are marked -- the 64 black ones \
-         draw nothing, same as SmartPlant's screen"
+        (long_strokes, stubs),
+        (11, 11),
+        "each of the eleven marked points draws both of its glyph's strokes, \
+         and the 64 blank-symbol points draw none"
     );
 }
 
