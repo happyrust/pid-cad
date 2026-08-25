@@ -28,7 +28,7 @@ use acadrust::types::{Color, LineWeight, Vector2, Vector3};
 use acadrust::{CadDocument, EntityType, TableEntry};
 use pid_parse::style_link::{
     DashPattern, LineStyleIndex, MarkerStatus, PointMarker, ResolvedFill, ResolvedLineStyle,
-    TextAlignment,
+    StyleNameIndex, TextAlignment,
 };
 use pid_parse::symbol_library::{PrimitiveStyle, StyledPrimitive, SymbolLibrary, SymbolPrimitive};
 use pid_parse::{
@@ -133,6 +133,27 @@ const LAYER_ANNOTATION: &str = "PID-ANNOTATION";
 const LAYER_CONNECTIVITY: &str = "PID-CONNECTIVITY";
 const LAYER_FILL: &str = "PID-FILL";
 const LAYER_FRAME: &str = "PID-FRAME";
+
+// The review-status vocabulary, which is not a discipline. These eight names
+// say what state an item is in, and the `PID-POINT-*` layers already carry
+// that; letting them through `discipline_layer` would file line work under a
+// vocabulary it does not belong to.
+const REVIEW_STATUS_STYLE_NAMES: [&str; 8] = [
+    "lsApproved",
+    "lsError",
+    "lsOk",
+    "lsWarning",
+    "psApproved",
+    "psError",
+    "psOk",
+    "psWarning",
+];
+// Line work split by the drawing's own name for the style it draws with --
+// `PID-STYLE-PRIMARY-PIPING-NEW`, `PID-STYLE-NOZZLE-NEW`. The prefix says
+// where the name came from, and it is what makes these layers safe to
+// generate: a project style library is free to call a style `Text` or
+// `Point`, and without the prefix that would land on top of `PID-TEXT`.
+const LAYER_DISCIPLINE_PREFIX: &str = "PID-STYLE-";
 
 /// What the import wants the reader to know, sized for one command-line line:
 /// how much of the file became drawing, how much did not, and whether the
@@ -261,6 +282,36 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         );
         Default::default()
     });
+    // What the drawing calls each of those styles. The same table carries it,
+    // one field further: every `StyleCluster` opens with a style librarian
+    // holding the authored name of every style the project library gave the
+    // document -- `Primary Piping - New`, `Nozzle - New`, `Electric Signal`.
+    // It is a classification width and colour cannot express (a nozzle and
+    // its equipment are drawn identically), so it becomes a layer rather than
+    // being dropped. See `discipline_layer`.
+    //
+    // A drawing whose names do not read is not a failed import: the line work
+    // stays on `PID-GEOMETRY` exactly as it did before this landed, which is
+    // why this one does not set `style_tables_failed`.
+    let style_names = pid_parse::style_link::style_names_for_file(path).unwrap_or_else(|error| {
+        log::warn!(
+            "{}: the style librarian did not read; line work stays on {LAYER_GEOMETRY}: {error}",
+            path.display()
+        );
+        Default::default()
+    });
+    // Which project standards file those names came from. It bounds them: a
+    // name means the same thing across two drawings only as far as they were
+    // drawn against the same library, and on the reference corpus the two
+    // drawings sharing a `.SPP` are exactly the two whose vocabularies agree.
+    // Logged rather than drawn -- it is provenance for the layer names above.
+    if let Ok(libraries) = pid_parse::style_link::style_libraries_for_file(path) {
+        let sources: std::collections::BTreeSet<&str> =
+            libraries.values().map(String::as_str).collect();
+        for source in sources {
+            log::info!("{}: styles were read from {source}", path.display());
+        }
+    }
     // Character height comes from the same table, one hop further along: a
     // text record names a paragraph style, and the height is on the character
     // style that paragraph style names. Most of a P&ID's lettering turns out
@@ -329,10 +380,22 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         // Resolved before building: a point's style decides whether it draws
         // the slash mark SmartPlant shows for a class-coloured point.
         let symbology = style_for(&styles, entity);
+        // Which layer this record's line work belongs on. A record whose
+        // style the drawing does not name keeps `PID-GEOMETRY`, and that
+        // absence is itself a reading: the librarian lists what came from the
+        // project library, so an unnamed style is one drawn in this file.
+        let line_work = discipline_for(&style_names, entity, symbology);
+        let line_work = line_work.as_deref().unwrap_or(LAYER_GEOMETRY);
         let built = match entity.confidence {
             PidGeometryConfidence::Decoded => match fill {
                 Some(fill) => build_fill(&entity.kind, fill, projection),
-                None => build_entities(&entity.kind, library.as_mut(), projection, symbology),
+                None => build_entities(
+                    &entity.kind,
+                    library.as_mut(),
+                    projection,
+                    symbology,
+                    line_work,
+                ),
             },
             PidGeometryConfidence::Inferred => build_inferred(&entity.kind, projection),
             PidGeometryConfidence::ProbeOnly => Vec::new(),
@@ -398,6 +461,12 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
             }
             if let Some(hit) = &semantic_hit {
                 attach_semantics(&mut one, hit);
+            }
+            // Declared when the first entity lands on it, so the layer list
+            // holds the disciplines this drawing actually draws rather than
+            // every name its project library happens to define.
+            if one.common().layer.starts_with(LAYER_DISCIPLINE_PREFIX) {
+                ensure_layer(&mut doc, &one.common().layer, Color::WHITE, true);
             }
             let _ = doc.add_entity(one);
         }
@@ -761,6 +830,69 @@ fn style_for<'a>(
     styles.get(&(stream.to_string(), oid))
 }
 
+/// The layer one entity's line work belongs on, when the drawing names the
+/// style it draws with.
+///
+/// A second join, one hop past [`style_for`]: that one gives the record its
+/// style, this one asks the drawing what it calls that style. The key is
+/// `(stream path, style id)` rather than the graphic oid, because a name
+/// belongs to the style — one `Primary Piping - New` covers thirty-nine
+/// records across this corpus.
+fn discipline_for(
+    names: &StyleNameIndex,
+    entity: &pid_parse::PidGraphicEntity,
+    style: Option<&ResolvedLineStyle>,
+) -> Option<String> {
+    let stream = entity.source.stream_path.as_deref()?;
+    let style_id = style?.style_id;
+    discipline_layer(names.get(&(stream.to_string(), style_id))?)
+}
+
+/// The layer name for one authored style name, or `None` when the name is not
+/// a discipline.
+///
+/// # Why the drawing's own name and not a taxonomy of ours
+///
+/// Because the name carries information the rest of the import cannot
+/// recover. Width and colour do not separate these: `0.350mm #800000` is both
+/// `Nozzle - New` and the `Equipment - New` the nozzle sits on, and `0.350mm
+/// #808000` is three different roles of piping. Mapping those onto a fixed
+/// set of disciplines would mean this importer deciding which bucket a name
+/// belongs in, and the file already decided — see `pid-parse`'s
+/// `docs/pid-format-guide.md` §6.1. So the layer is the name, and a drawing
+/// whose project library uses a vocabulary nobody here has seen gets layers
+/// for it with no code change.
+///
+/// The one exclusion is the review-status set, and it is excluded because it
+/// is already carried: those eight names are the four states a point's mark
+/// shows, and `PID-POINT-WARNING` and its siblings hold them. Every point in
+/// the corpus resolves to one of them, so this is also what keeps point marks
+/// out of the discipline layers.
+///
+/// Names that share every alphanumeric character land on one layer —
+/// `As Drawn` and `as-drawn` would merge. Nothing in the corpus does, and
+/// merging two spellings of one name is a better failure than emitting a
+/// layer name `DXF` cannot round-trip.
+fn discipline_layer(name: &str) -> Option<String> {
+    if REVIEW_STATUS_STYLE_NAMES.contains(&name) {
+        return None;
+    }
+    let mut layer = String::from(LAYER_DISCIPLINE_PREFIX);
+    let mut gap = false;
+    for character in name.chars() {
+        if character.is_alphanumeric() {
+            if gap && layer.len() > LAYER_DISCIPLINE_PREFIX.len() {
+                layer.push('-');
+            }
+            gap = false;
+            layer.extend(character.to_uppercase());
+        } else {
+            gap = true;
+        }
+    }
+    (layer.len() > LAYER_DISCIPLINE_PREFIX.len()).then_some(layer)
+}
+
 /// The fill the drawing states for one boundary ring, if it states one. Same
 /// `(stream path, graphic oid)` join as [`style_for`].
 fn fill_for<'a>(
@@ -1021,9 +1153,11 @@ fn apply_text_style(entity: &mut EntityType, style_name: &str) {
 
 /// Give an entity the width and colour its source record asks for.
 ///
-/// The drawing's own line work is painted: `PID-GEOMETRY`, every `PID-POINT`
-/// layer — the bare one and the three review statuses, which is why the test
-/// is a prefix — and the placed symbol bodies (`PID-SYMBOL`), whose placement
+/// The drawing's own line work is painted: `PID-GEOMETRY` and the
+/// `PID-STYLE-*` discipline layers its named line work files under, every
+/// `PID-POINT` layer — the bare one and the three review statuses, which is
+/// why the test is a prefix — and the placed symbol bodies (`PID-SYMBOL`),
+/// whose placement
 /// record names one style for the whole body — `igSymbol2d +25` — that wins
 /// over the per-stroke styles the `.sym` states (see [`paint_symbol_stroke`],
 /// which ran first and is overwritten here exactly when the placement names a
@@ -1053,6 +1187,7 @@ fn apply_symbology(
     }
     let common = entity.common_mut();
     let painted = common.layer == LAYER_GEOMETRY
+        || common.layer.starts_with(LAYER_DISCIPLINE_PREFIX)
         || common.layer == LAYER_SYMBOL
         || common.layer.starts_with(LAYER_POINT);
     if !painted {
@@ -1236,16 +1371,22 @@ fn build_dash_linetype(name: &str, dash: &DashPattern) -> LineType {
     lt
 }
 
+/// `line_work` is the layer the sheet's own lines, arcs and rings go on:
+/// `PID-GEOMETRY`, or the discipline layer when the drawing names the style
+/// they draw with (see [`discipline_layer`]). It is decided by the caller and
+/// passed in rather than patched afterwards, so there is one place that
+/// answers "which layer is this line on".
 fn build_entities(
     kind: &PidGraphicKind,
     library: Option<&mut SymbolLibrary>,
     projection: Projection,
     symbology: Option<&ResolvedLineStyle>,
+    line_work: &str,
 ) -> Vec<EntityType> {
     match kind {
         PidGraphicKind::Line { start, end } => {
             let mut line = Line::from_points(projection.point(start), projection.point(end));
-            line.common.layer = LAYER_GEOMETRY.to_string();
+            line.common.layer = line_work.to_string();
             vec![EntityType::Line(line)]
         }
         PidGraphicKind::Polyline { points, closed } => {
@@ -1258,14 +1399,14 @@ fn build_entities(
                 .collect();
             let mut polyline = LwPolyline::from_points(vertices);
             polyline.is_closed = *closed;
-            polyline.common.layer = LAYER_GEOMETRY.to_string();
+            polyline.common.layer = line_work.to_string();
             vec![EntityType::LwPolyline(polyline)]
         }
         PidGraphicKind::Circle { center, radius } => {
             let mut circle = Circle::new();
             circle.center = projection.point(center);
             circle.radius = projection.mm(*radius);
-            circle.common.layer = LAYER_GEOMETRY.to_string();
+            circle.common.layer = line_work.to_string();
             vec![EntityType::Circle(circle)]
         }
         PidGraphicKind::Arc {
@@ -1280,7 +1421,7 @@ fn build_entities(
             // Radians on both sides -- see the angle-unit note by the layer constants.
             arc.start_angle = *start_angle;
             arc.end_angle = *end_angle;
-            arc.common.layer = LAYER_GEOMETRY.to_string();
+            arc.common.layer = line_work.to_string();
             vec![EntityType::Arc(arc)]
         }
         PidGraphicKind::Text {

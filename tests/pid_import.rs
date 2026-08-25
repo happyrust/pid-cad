@@ -42,6 +42,25 @@ fn on_layer<'a>(doc: &'a CadDocument, layer: &'a str) -> impl Iterator<Item = &'
     doc.entities().filter(move |e| layer_of(e) == layer)
 }
 
+/// Prefix of the layers named line work files under, one per authored style
+/// name the drawing's project library states.
+const DISCIPLINE_PREFIX: &str = "PID-STYLE-";
+
+/// Whether a layer carries the sheet's own line work.
+///
+/// The family, not one member: a record whose style the drawing names is on a
+/// `PID-STYLE-*` layer and one it does not name is on `PID-GEOMETRY`. Same
+/// shape as `PID-POINT*`, and for the same reason -- a test that means "the
+/// drawing's line work" would otherwise quietly narrow to the unnamed part of
+/// it as soon as the disciplines landed.
+fn is_line_work(layer: &str) -> bool {
+    layer == "PID-GEOMETRY" || layer.starts_with(DISCIPLINE_PREFIX)
+}
+
+fn on_line_work(doc: &CadDocument) -> impl Iterator<Item = &EntityType> {
+    doc.entities().filter(|e| is_line_work(layer_of(e)))
+}
+
 fn is_hidden(doc: &CadDocument, layer: &str) -> bool {
     doc.layers
         .get(layer)
@@ -66,28 +85,22 @@ fn line_work_carries_the_width_and_colour_the_drawing_states() {
 
     let mut palette: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut unstyled = 0usize;
-    // Every point layer, not just the bare one: a mark files under its review
-    // status, and its style has to survive the move.
-    for layer in [
-        "PID-GEOMETRY",
-        "PID-POINT",
-        "PID-POINT-WARNING",
-        "PID-POINT-ERROR",
-        "PID-POINT-APPROVED",
-    ] {
-        for entity in on_layer(&doc, layer) {
-            let common = entity.common();
-            match (common.color, common.line_weight) {
-                (
-                    acadrust::types::Color::Rgb { r, g, b },
-                    acadrust::types::LineWeight::Value(w),
-                ) => {
-                    *palette
-                        .entry(format!("{w:>3} #{r:02X}{g:02X}{b:02X}"))
-                        .or_default() += 1;
-                }
-                _ => unstyled += 1,
+    // Every layer the drawing's own line work reaches, not one of them: a
+    // mark files under its review status and a named line under its
+    // discipline, and the style has to survive both moves.
+    let drawing = doc.entities().filter(|entity| {
+        let layer = layer_of(entity);
+        is_line_work(layer) || layer.starts_with("PID-POINT")
+    });
+    for entity in drawing {
+        let common = entity.common();
+        match (common.color, common.line_weight) {
+            (acadrust::types::Color::Rgb { r, g, b }, acadrust::types::LineWeight::Value(w)) => {
+                *palette
+                    .entry(format!("{w:>3} #{r:02X}{g:02X}{b:02X}"))
+                    .or_default() += 1;
             }
+            _ => unstyled += 1,
         }
     }
 
@@ -217,12 +230,13 @@ fn dashed_line_work_carries_a_linetype_matching_the_decoded_pattern() {
 
     // Every PID-DASH linetype an entity names, and how many entities name it.
     let mut used: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for layer in ["PID-GEOMETRY", "PID-POINT"] {
-        for entity in on_layer(&doc, layer) {
-            let name = entity.common().linetype.as_str();
-            if name.starts_with("PID-DASH-") {
-                *used.entry(name.to_string()).or_default() += 1;
-            }
+    let dashable = doc
+        .entities()
+        .filter(|entity| is_line_work(layer_of(entity)) || layer_of(entity) == "PID-POINT");
+    for entity in dashable {
+        let name = entity.common().linetype.as_str();
+        if name.starts_with("PID-DASH-") {
+            *used.entry(name.to_string()).or_default() += 1;
         }
     }
 
@@ -914,7 +928,7 @@ fn the_sheet_border_is_drawn_at_the_page_the_drawing_states() {
         "border is {width:.1} x {height:.1}mm, the drawing states 594.3 x 420.3"
     );
 
-    for entity in on_layer(&doc, "PID-GEOMETRY") {
+    for entity in on_line_work(&doc) {
         for point in geometry_extremes(entity) {
             assert!(
                 point.0 > -SHEET_MARGIN_MM && point.0 < width + SHEET_MARGIN_MM,
@@ -1034,10 +1048,11 @@ fn fixtures_import_with_visible_drawing_content() {
         let Some(doc) = import(name) else {
             continue;
         };
-        let visible = ["PID-GEOMETRY", "PID-TEXT", "PID-SYMBOL", "PID-POINT"]
-            .iter()
-            .map(|layer| on_layer(&doc, layer).count())
-            .sum::<usize>();
+        let visible = on_line_work(&doc).count()
+            + ["PID-TEXT", "PID-SYMBOL", "PID-POINT"]
+                .iter()
+                .map(|layer| on_layer(&doc, layer).count())
+                .sum::<usize>();
         assert!(visible > 0, "{name}: nothing reached a visible layer");
         assert_eq!(
             doc.source_path.as_deref().map(|p| p.ends_with(name)),
@@ -1210,8 +1225,8 @@ const TRACE_REACH_MM: f64 = 6.0;
 /// or does it mean *add the library coordinates to this*, which is what the
 /// importer does.
 ///
-/// Electric trace runs along a pipe, so its symbol has to sit on one, and
-/// `PID-GEOMETRY` carries that pipe from the drawing's own records with no
+/// Electric trace runs along a pipe, so its symbol has to sit on one, and the
+/// line-work layers carry that pipe from the drawing's own records with no
 /// help from the symbol library. Under what the importer does, all six of
 /// DWG-0202's placements land on it. Subtract an origin instead and the same
 /// measurement reads 31 to 74mm, with two of the six off the left edge of the
@@ -1229,9 +1244,7 @@ fn a_symbol_authored_away_from_its_origin_lands_on_the_line_work_it_marks() {
         return;
     };
 
-    let drawing: Vec<((f64, f64), (f64, f64))> = on_layer(&doc, "PID-GEOMETRY")
-        .flat_map(segments_of)
-        .collect();
+    let drawing: Vec<((f64, f64), (f64, f64))> = on_line_work(&doc).flat_map(segments_of).collect();
     assert!(
         !drawing.is_empty(),
         "the drawing's own line work is what this measures against"
@@ -1515,6 +1528,92 @@ fn a_points_mark_files_under_the_review_status_the_drawing_names() {
             "{fixture}: every mark whose status the drawing names leaves the bare layer"
         );
     }
+}
+
+/// Named line work files under the drawing's own word for what it is.
+///
+/// Every `StyleCluster` opens with a style librarian holding the authored name
+/// of each style the project library gave the document, and those names are a
+/// classification the import cannot recover any other way: `0.350mm #800000`
+/// is both `Nozzle - New` and the `Equipment - New` the nozzle sits on, and
+/// `0.350mm #808000` is three separate roles of piping. So the layer is the
+/// name.
+///
+/// Three things are pinned, because they fail differently:
+///
+/// * the census is exact, so a change that starts filing lines under the wrong
+///   name shows up even though the entity total does not move;
+/// * `PID-GEOMETRY` keeps a share of the line work rather than emptying. Those
+///   are the records whose style the librarian does not name, and their
+///   absence from it is the reading -- the librarian lists what came from the
+///   project library, so an unnamed style is one drawn in this file. The
+///   gongyi drawing is the fixture that would notice: 182 of its lines are on
+///   one unnamed style;
+/// * no review status becomes a discipline. All 107 `lsOk` and 18 `lsWarning`
+///   records in the corpus are points, whose marks belong on `PID-POINT-*`,
+///   and letting that vocabulary through would file them twice.
+#[test]
+fn named_line_work_files_under_the_discipline_the_drawing_names() {
+    // DWG-0201's 63 lines and linestrings, whole. Points and symbol bodies are
+    // not here: a point's style names a review status, and a placement's body
+    // stays on `PID-SYMBOL`. The three on `PID-GEOMETRY` are this drawing's
+    // own unnamed style.
+    let expected: std::collections::BTreeMap<String, usize> = [
+        ("PID-GEOMETRY", 3usize),
+        ("PID-STYLE-CONNECT-TO-PROCESS", 3),
+        ("PID-STYLE-DASHED", 14),
+        ("PID-STYLE-ELECTRIC", 1),
+        ("PID-STYLE-NORMAL", 18),
+        ("PID-STYLE-PRIMARY-PIPING-NEW", 24),
+    ]
+    .iter()
+    .map(|(layer, count)| ((*layer).to_string(), *count))
+    .collect();
+
+    if let Some(doc) = import("DWG-0201GP06-01.pid") {
+        let mut census: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for entity in on_line_work(&doc) {
+            *census.entry(layer_of(entity).to_string()).or_default() += 1;
+        }
+        assert_eq!(census, expected);
+        for layer in census.keys() {
+            assert!(
+                !is_hidden(&doc, layer),
+                "{layer} carries drawing content and must open visible"
+            );
+        }
+    }
+
+    for fixture in [
+        "DWG-0201GP06-01.pid",
+        "DWG-0202GP06-01.pid",
+        "D06.pid",
+        "工艺管道及仪表流程-1.pid",
+    ] {
+        let Some(doc) = import(fixture) else {
+            continue;
+        };
+        let statuses: Vec<&str> = doc
+            .entities()
+            .map(layer_of)
+            .filter(|layer| layer.starts_with("PID-STYLE-LS") || layer.starts_with("PID-STYLE-PS"))
+            .collect();
+        assert!(
+            statuses.is_empty(),
+            "{fixture}: a review status became a discipline layer: {statuses:?}"
+        );
+    }
+
+    let Some(doc) = import("工艺管道及仪表流程-1.pid") else {
+        return;
+    };
+    assert!(
+        on_layer(&doc, "PID-GEOMETRY").count() >= 182,
+        "the 182 lines on this drawing's own unnamed style must stay on \
+         PID-GEOMETRY: being unnamed is what says they did not come from the \
+         project style library"
+    );
 }
 
 /// A symbol's lettering follows its placement's colour, not the colour its

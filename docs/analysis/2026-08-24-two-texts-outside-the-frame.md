@@ -277,7 +277,8 @@ x 最大 549.09、y 最小 12.30 就是它顶出来的。
 ### 这条已被回归测试钉住
 
 `tests/pid_import.rs::a_symbol_authored_away_from_its_origin_lands_on_the_line_work_it_marks`：
-DWG-0202 的六个 `ElecTraceLine` 必须落在 `PID-GEOMETRY` 的 `TRACE_REACH_MM = 6mm` 以内。
+DWG-0202 的六个 `ElecTraceLine` 必须落在图纸自身线工作（`PID-GEOMETRY` 加
+`PID-STYLE-*` 各专业层）的 `TRACE_REACH_MM = 6mm` 以内。
 验过退回乙会红——在 `Placement::apply` 里减掉 `ElecTraceLine` 的本体原点
 `(0.1031916, 0.1542723)` 后，六条读数变成 29–172mm，两条落到负 x。
 
