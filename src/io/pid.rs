@@ -285,10 +285,15 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     // What the drawing calls each of those styles. The same table carries it,
     // one field further: every `StyleCluster` opens with a style librarian
     // holding the authored name of every style the project library gave the
-    // document -- `Primary Piping - New`, `Nozzle - New`, `Electric Signal`.
-    // It is a classification width and colour cannot express (a nozzle and
-    // its equipment are drawn identically), so it becomes a layer rather than
-    // being dropped. See `discipline_layer`.
+    // document -- `Primary Piping - New`, `Nozzle - New`, `Off-Line
+    // Instrument`. It is a classification width and colour cannot express (a
+    // nozzle and its equipment are drawn identically), so it becomes a layer
+    // rather than being dropped. See `discipline_layer`.
+    //
+    // Only names on a line style reach line work, which is narrower than it
+    // looks: the librarian also names fills, text and dash patterns, and it
+    // states the family of each. `Electric Signal` reads like a discipline and
+    // is a dash pattern, so nothing is ever filed under it.
     //
     // A drawing whose names do not read is not a failed import: the line work
     // stays on `PID-GEOMETRY` exactly as it did before this landed, which is
