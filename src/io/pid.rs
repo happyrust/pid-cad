@@ -148,6 +148,18 @@ const REVIEW_STATUS_STYLE_NAMES: [&str; 8] = [
     "psOk",
     "psWarning",
 ];
+// Names that say how a line is drawn, not what it is. A discipline layer is
+// for the classification width and colour cannot express; these three are that
+// appearance, so filing them separately splits `PID-GEOMETRY` along a line the
+// drawing already draws.
+//
+// `Normal` is the clearest of the three: the style librarian files it under
+// five different families -- simple line, simple fill, hatch fill, text
+// character, text paragraph -- so it is each family's default name rather than
+// any one role. `As Drawn` and `Dashed` are line styles, but they name the
+// stroke: `As Drawn` covers two different widths in this corpus, and `Dashed`
+// is the dash pattern the linetype already carries.
+const APPEARANCE_STYLE_NAMES: [&str; 3] = ["As Drawn", "Dashed", "Normal"];
 // Line work split by the drawing's own name for the style it draws with --
 // `PID-STYLE-PRIMARY-PIPING-NEW`, `PID-STYLE-NOZZLE-NEW`. The prefix says
 // where the name came from, and it is what makes these layers safe to
@@ -868,18 +880,24 @@ fn discipline_for(
 /// whose project library uses a vocabulary nobody here has seen gets layers
 /// for it with no code change.
 ///
-/// The one exclusion is the review-status set, and it is excluded because it
-/// is already carried: those eight names are the four states a point's mark
-/// shows, and `PID-POINT-WARNING` and its siblings hold them. Every point in
-/// the corpus resolves to one of them, so this is also what keeps point marks
-/// out of the discipline layers.
+/// Two sets are excluded, both because they are already carried elsewhere.
+///
+/// The review statuses are the four states a point's mark shows, and
+/// `PID-POINT-WARNING` and its siblings hold them. Every point in the corpus
+/// resolves to one, so this is also what keeps point marks out of the
+/// discipline layers.
+///
+/// The appearance names say how a line is drawn rather than what it is, and
+/// `PID-GEOMETRY` plus the linetype already say that. Excluding them is the
+/// one place this function does decide something the file did not spell out,
+/// so the evidence is in `APPEARANCE_STYLE_NAMES` next to the list.
 ///
 /// Names that share every alphanumeric character land on one layer —
 /// `As Drawn` and `as-drawn` would merge. Nothing in the corpus does, and
 /// merging two spellings of one name is a better failure than emitting a
 /// layer name `DXF` cannot round-trip.
 fn discipline_layer(name: &str) -> Option<String> {
-    if REVIEW_STATUS_STYLE_NAMES.contains(&name) {
+    if REVIEW_STATUS_STYLE_NAMES.contains(&name) || APPEARANCE_STYLE_NAMES.contains(&name) {
         return None;
     }
     let mut layer = String::from(LAYER_DISCIPLINE_PREFIX);

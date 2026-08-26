@@ -1552,18 +1552,20 @@ fn a_points_mark_files_under_the_review_status_the_drawing_names() {
 /// * no review status becomes a discipline. All 107 `lsOk` and 18 `lsWarning`
 ///   records in the corpus are points, whose marks belong on `PID-POINT-*`,
 ///   and letting that vocabulary through would file them twice.
+///
+/// Nor does an appearance name. `Normal`, `As Drawn` and `Dashed` say how a
+/// line is drawn, not what it is — the librarian files `Normal` under five
+/// different families — so they stay on `PID-GEOMETRY` with the unnamed work.
 #[test]
 fn named_line_work_files_under_the_discipline_the_drawing_names() {
     // DWG-0201's 63 lines and linestrings, whole. Points and symbol bodies are
     // not here: a point's style names a review status, and a placement's body
-    // stays on `PID-SYMBOL`. The three on `PID-GEOMETRY` are this drawing's
-    // own unnamed style.
+    // stays on `PID-SYMBOL`. `PID-GEOMETRY` holds three records on this
+    // drawing's own unnamed style plus the 32 whose name is an appearance.
     let expected: std::collections::BTreeMap<String, usize> = [
-        ("PID-GEOMETRY", 3usize),
+        ("PID-GEOMETRY", 35usize),
         ("PID-STYLE-CONNECT-TO-PROCESS", 3),
-        ("PID-STYLE-DASHED", 14),
         ("PID-STYLE-ELECTRIC", 1),
-        ("PID-STYLE-NORMAL", 18),
         ("PID-STYLE-PRIMARY-PIPING-NEW", 24),
     ]
     .iter()
@@ -1602,6 +1604,20 @@ fn named_line_work_files_under_the_discipline_the_drawing_names() {
         assert!(
             statuses.is_empty(),
             "{fixture}: a review status became a discipline layer: {statuses:?}"
+        );
+        let appearances: Vec<&str> = doc
+            .entities()
+            .map(layer_of)
+            .filter(|layer| {
+                matches!(
+                    *layer,
+                    "PID-STYLE-NORMAL" | "PID-STYLE-AS-DRAWN" | "PID-STYLE-DASHED"
+                )
+            })
+            .collect();
+        assert!(
+            appearances.is_empty(),
+            "{fixture}: an appearance name became a discipline layer: {appearances:?}"
         );
     }
 
