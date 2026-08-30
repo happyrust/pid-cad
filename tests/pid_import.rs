@@ -68,6 +68,41 @@ fn on_sheet_text(doc: &CadDocument) -> impl Iterator<Item = &EntityType> {
     })
 }
 
+/// Placement-time values are separate sheet text records, not the `NULL`
+/// placeholders embedded in the reusable symbol body. Both halves must meet
+/// on screen: the placed symbol supplies its bubble/frame while the sheet
+/// supplies the assigned tag, sequence and notes.
+#[test]
+fn placement_assignments_render_as_sheet_text_without_null_placeholders() {
+    let Some(doc) = import("DWG-0202GP06-01.pid") else {
+        return;
+    };
+
+    let values: std::collections::BTreeSet<String> = on_sheet_text(&doc)
+        .filter_map(|entity| match entity {
+            EntityType::Text(text) => Some(text.value.trim().to_string()),
+            _ => None,
+        })
+        .collect();
+    for expected in [
+        "LIA",
+        "LIT",
+        "060201",
+        "RD060201",
+        "1、污油池上放空管线高度应大于5m。",
+        "2、阻火器电伴热带从根部缠至地面以上2m。",
+    ] {
+        assert!(
+            values.contains(expected),
+            "assigned value {expected:?} did not reach PID-TEXT; values={values:?}"
+        );
+    }
+    assert!(
+        doc.entities().all(|entity| !matches!(entity, EntityType::Text(text) if text.value.contains("NULL"))),
+        "a symbol-library NULL template leaked into visible drawing text"
+    );
+}
+
 fn is_hidden(doc: &CadDocument, layer: &str) -> bool {
     doc.layers
         .get(layer)
@@ -982,7 +1017,7 @@ fn published_semantics_land_on_entities_when_the_xml_sits_beside() {
 
     let mut tagged = 0usize;
     let mut classes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut labelled = 0usize;
+    let mut labels: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut via_dependency = 0usize;
     for entity in doc.entities() {
         let Some(record) = entity.common().extended_data.get_record("PID_SEMANTICS") else {
@@ -996,8 +1031,8 @@ fn published_semantics_land_on_entities_when_the_xml_sits_beside() {
             if let Some(class) = text.strip_prefix("class=") {
                 classes.insert(class.to_string());
             }
-            if text.starts_with("label=") {
-                labelled += 1;
+            if let Some(label) = text.strip_prefix("label=") {
+                labels.insert(label.to_string());
             }
             if text.starts_with("resolved=dependency:") {
                 via_dependency += 1;
@@ -1010,7 +1045,7 @@ fn published_semantics_land_on_entities_when_the_xml_sits_beside() {
         "the publish pair ships a _Data.xml; some drawn entities must carry PID_SEMANTICS"
     );
     assert!(
-        labelled > 0,
+        !labels.is_empty(),
         "at least one published object carries an ItemTag / Name to show"
     );
     assert!(
@@ -1020,6 +1055,12 @@ fn published_semantics_land_on_entities_when_the_xml_sits_beside() {
     assert!(
         !classes.is_empty(),
         "every PID_SEMANTICS record carries its owning class"
+    );
+    assert!(
+        classes.contains("PIDControlSystemFunction")
+            && labels.contains("LIA-060201")
+            && labels.contains("LIT-060201"),
+        "DrawingItems must bind representations to business objects, not the PIDDrawing container; classes={classes:?} labels={labels:?}"
     );
 }
 
