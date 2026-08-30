@@ -2060,7 +2060,10 @@ fn shape_primitive(primitive: &SymbolPrimitive, at: &Placement<'_>) -> Option<En
             arc.common.layer = LAYER_SYMBOL.to_string();
             Some(EntityType::Arc(arc))
         }
-        SymbolPrimitive::Polyline { vertices } => {
+        SymbolPrimitive::Polyline {
+            vertices,
+            is_closed,
+        } => {
             if vertices.len() < 2 {
                 return None;
             }
@@ -2072,6 +2075,7 @@ fn shape_primitive(primitive: &SymbolPrimitive, at: &Placement<'_>) -> Option<En
                 })
                 .collect();
             let mut polyline = LwPolyline::from_points(points);
+            polyline.is_closed = *is_closed;
             polyline.common.layer = LAYER_SYMBOL.to_string();
             Some(EntityType::LwPolyline(polyline))
         }
@@ -2302,5 +2306,27 @@ mod tests {
             assert!(is_hidden_sheet_layer(name), "{name:?}");
         }
         assert!(!is_hidden_sheet_layer("Visible"));
+    }
+
+    #[test]
+    fn symbol_polyline_closure_reaches_the_cad_entity() {
+        let insertion = PidPoint { x: 0.0, y: 0.0 };
+        let placement = Placement {
+            insertion: &insertion,
+            rotation: 0.0,
+            scale: [1.0, 1.0],
+            projection: Projection {
+                mm_per_unit: 1000.0,
+                band: SheetBand::for_page(None),
+            },
+        };
+        let primitive = SymbolPrimitive::Polyline {
+            vertices: vec![(0.0, 0.0), (0.01, 0.0), (0.01, 0.01)],
+            is_closed: true,
+        };
+        let Some(EntityType::LwPolyline(polyline)) = shape_primitive(&primitive, &placement) else {
+            panic!("symbol polyline did not build");
+        };
+        assert!(polyline.is_closed);
     }
 }
