@@ -54,3 +54,9 @@ ocs_running.png
 docs/screenshots/*
 !docs/screenshots/open-cad-studio-start.png
 !docs/screenshots/save-changes-dialog.png
+
+# KC-Chat 运行时产物（插件自动生成，请勿入库）
+.cursor/mcp.json
+.cursor/kc-mcp/
+.cursor/kc-mcp-messages/
+.cursor/kc-chat-exports/
