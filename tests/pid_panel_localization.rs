@@ -12,7 +12,14 @@ use OpenCADStudio::i18n::{set_language, translate, Language};
 
 #[test]
 fn pid_panel_captions_translate_in_every_shipped_language() {
-    let captions = ["Type", "Item tag", "Line number", "Matched by"];
+    let captions = [
+        "Type",
+        "Item tag",
+        "Line number",
+        "Matched by",
+        "Sheet layer",
+        "Layer OID",
+    ];
     for language in [
         Language::EnUs,
         Language::ZhCn,
@@ -47,6 +54,10 @@ fn pid_panel_captions_translate_in_every_shipped_language() {
                 "{language:?}: the P&ID tag caption is not in the catalog, so it \
                  falls through to English while its neighbours translate"
             );
+        }
+        if language == Language::ZhCn {
+            assert_eq!(translate("Sheet layer"), "图纸图层");
+            assert_eq!(translate("Layer OID"), "图层 OID");
         }
     }
 }

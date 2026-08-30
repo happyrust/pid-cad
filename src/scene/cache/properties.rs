@@ -1,5 +1,5 @@
-use acadrust::{EntityType, Handle};
 use crate::t;
+use acadrust::{EntityType, Handle};
 
 use crate::scene::model::object::{PropSection, PropValue, Property};
 
@@ -95,9 +95,11 @@ pub fn general_section(entity: &EntityType) -> PropSection {
     // types that carry an extrusion thickness expose it (line, circle, arc,
     // polyline, text, 2D solid, …). Show it right after Hyperlink for those.
     if let Some(t) = crate::scene::view::dispatch::entity_thickness(entity) {
-        section
-            .props
-            .push(crate::entities::common::edit_prop(t!("Thickness").as_ref(), "thickness", t));
+        section.props.push(crate::entities::common::edit_prop(
+            t!("Thickness").as_ref(),
+            "thickness",
+            t,
+        ));
     }
 
     section
@@ -106,10 +108,8 @@ pub fn general_section(entity: &EntityType) -> PropSection {
 /// The "P&ID" group: the published identity a `.pid` import wrote into the
 /// entity's XDATA (see `crate::io::PID_SEMANTICS_XDATA_APP`).
 ///
-/// Present only when the drawing shipped a `_Data.xml` and the entity's
-/// record joined to it — an entity without the XDATA record simply has no
-/// group, which is exactly the no-published-model case. Every row is
-/// read-only: this is the drawing's own statement about itself.
+/// Present when either authored sheet-layer identity or published `_Data.xml`
+/// identity reached the entity. Every row is read-only.
 pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
     let record = entity
         .common()
@@ -119,6 +119,8 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
     let mut class = None;
     let mut label = None;
     let mut resolved = None;
+    let mut sheet_layer = None;
+    let mut sheet_layer_oid = None;
     for value in &record.values {
         let acadrust::xdata::XDataValue::String(text) = value else {
             continue;
@@ -130,25 +132,29 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
             "class" => class = Some(val.to_string()),
             "label" => label = Some(val.to_string()),
             "resolved" => resolved = Some(val.to_string()),
+            "sheet_layer" => sheet_layer = Some(val.to_string()),
+            "sheet_layer_oid" => sheet_layer_oid = Some(val.to_string()),
             _ => {}
         }
     }
 
-    let class = class?;
-    // A pipe's identifier is its line number; everything else carries an
-    // item tag. Same value, the caption the reader expects.
-    let label_caption = if matches!(class.as_str(), "PIDPipeline" | "PIDPipingConnector") {
-        t!("Line number")
-    } else {
-        t!("Item tag")
-    };
-
-    let mut props = vec![Property {
-        label: t!("Type").into_owned(),
-        field: "pid_class",
-        value: PropValue::ReadOnly(class),
-    }];
+    let mut props = Vec::new();
+    if let Some(class) = class.as_deref() {
+        props.push(Property {
+            label: t!("Type").into_owned(),
+            field: "pid_class",
+            value: PropValue::ReadOnly(class.to_string()),
+        });
+    }
     if let Some(label_value) = label {
+        // A pipe's identifier is its line number; everything else carries an
+        // item tag. Same value, the caption the reader expects.
+        let label_caption =
+            if matches!(class.as_deref(), Some("PIDPipeline" | "PIDPipingConnector")) {
+                t!("Line number")
+            } else {
+                t!("Item tag")
+            };
         props.push(Property {
             label: label_caption.into_owned(),
             field: "pid_label",
@@ -161,6 +167,24 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
             field: "pid_resolved",
             value: PropValue::ReadOnly(resolved_value),
         });
+    }
+    if let Some(layer_value) = sheet_layer {
+        props.push(Property {
+            label: t!("Sheet layer").into_owned(),
+            field: "pid_sheet_layer",
+            value: PropValue::ReadOnly(layer_value),
+        });
+    }
+    if let Some(oid_value) = sheet_layer_oid {
+        props.push(Property {
+            label: t!("Layer OID").into_owned(),
+            field: "pid_sheet_layer_oid",
+            value: PropValue::ReadOnly(oid_value),
+        });
+    }
+
+    if props.is_empty() {
+        return None;
     }
 
     Some(PropSection {

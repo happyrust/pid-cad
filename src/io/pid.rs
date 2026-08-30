@@ -18,7 +18,7 @@
 // `igPoint2d` is the only point family the format has, and all of it
 // decodes. `ProbeOnly` evidence has no position at all.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use acadrust::entities::hatch::{BoundaryEdge, BoundaryPath, BoundaryPathFlags, LineEdge};
@@ -95,9 +95,8 @@ const CONNECTIVITY_MIN_MM: f64 = 0.1;
 const SHEET_MARGIN_MM: f64 = 100.0;
 
 // XDATA application name carrying an entity's published P&ID identity
-// (`class=…`, `label=…`, `oid=…`, `resolved=…` string pairs). Written only
-// when a `<stem>_Data.xml` sits beside the drawing; the properties panel
-// shows a "P&ID" group for entities that carry it and no group otherwise.
+// (`sheet_layer=…`, `sheet_layer_oid=…`, plus optional published semantic
+// pairs). Authored layer identity is present without `_Data.xml`.
 pub(crate) use super::PID_SEMANTICS_XDATA_APP;
 
 // Angles cross this module unchanged, because both sides already agree on
@@ -133,6 +132,7 @@ const LAYER_ANNOTATION: &str = "PID-ANNOTATION";
 const LAYER_CONNECTIVITY: &str = "PID-CONNECTIVITY";
 const LAYER_FILL: &str = "PID-FILL";
 const LAYER_FRAME: &str = "PID-FRAME";
+const LAYER_HIDDEN: &str = "PID-HIDDEN";
 
 // The review-status vocabulary, which is not a discipline. These eight names
 // say what state an item is in, and the `PID-POINT-*` layers already carry
@@ -183,6 +183,13 @@ pub struct ImportSummary {
     /// A style table failed to read outright, so line work, lettering or
     /// fills are on their fallbacks rather than the drawing's own statement.
     pub style_tables_failed: bool,
+    /// Distinct authored layers referenced by drawn entities, keyed by
+    /// storage-local oid rather than merged by display name.
+    pub sheet_layers: usize,
+    /// Drawn CAD entities carrying an authored sheet-layer reference.
+    pub layered_entities: usize,
+    /// Distinct referenced layer ids whose authored name did not resolve.
+    pub unresolved_sheet_layers: usize,
 }
 
 /// Mailbox carrying each import's summary out of the io layer, keyed by the
@@ -269,6 +276,9 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         // missing one would not.
         (LAYER_ANNOTATION, Color::YELLOW, false),
         (LAYER_CONNECTIVITY, Color::BLUE, false),
+        // Content authored on a hidden/invisible sheet layer remains present
+        // and inspectable, but follows the source visibility on first open.
+        (LAYER_HIDDEN, Color::GRAY, false),
     ] {
         ensure_layer(&mut doc, layer, colour, visible);
     }
@@ -377,7 +387,12 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     // The DWG writer skips XDATA whose application is not in the APPID
     // table, so without this registration the identities would survive the
     // session and silently vanish on save (see `set_entity_xdata`).
-    if semantics.is_some() && !doc.app_ids.contains(PID_SEMANTICS_XDATA_APP) {
+    let has_pid_metadata = semantics.is_some()
+        || geometry
+            .entities
+            .iter()
+            .any(|entity| entity.source_layer.is_some());
+    if has_pid_metadata && !doc.app_ids.contains(PID_SEMANTICS_XDATA_APP) {
         let mut app = acadrust::tables::AppId::new(PID_SEMANTICS_XDATA_APP);
         app.handle = doc.allocate_handle();
         let _ = doc.app_ids.add(app);
@@ -389,6 +404,8 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     let mut decoded = 0usize;
     let mut drawn = 0usize;
     let mut lettering_on_fallback = 0usize;
+    let mut sheet_layer_distribution: BTreeMap<(String, u32, Option<String>), usize> =
+        BTreeMap::new();
     for entity in &geometry.entities {
         // A boundary ring is the one kind whose style decides its shape rather
         // than its colour: filled, it is an area; unfilled, it is an outline
@@ -455,6 +472,11 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
             text_style.and_then(|style| style.line_spacing),
         );
         drawn += built.len();
+        if let Some(layer) = &entity.source_layer {
+            *sheet_layer_distribution
+                .entry((layer.storage_path.clone(), layer.oid, layer.name.clone()))
+                .or_default() += built.len();
+        }
         let semantic_hit = semantics.as_ref().and_then(|index| {
             entity
                 .graphic_oid
@@ -476,8 +498,18 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
             if let Some(name) = font_style {
                 apply_text_style(&mut one, name);
             }
-            if let Some(hit) = &semantic_hit {
-                attach_semantics(&mut one, hit);
+            attach_pid_metadata(
+                &mut one,
+                semantic_hit.as_ref(),
+                entity.source_layer.as_ref(),
+            );
+            if entity
+                .source_layer
+                .as_ref()
+                .and_then(|layer| layer.name.as_deref())
+                .is_some_and(is_hidden_sheet_layer)
+            {
+                one.common_mut().layer = LAYER_HIDDEN.to_string();
             }
             // Declared when the first entity lands on it, so the layer list
             // holds the disciplines this drawing actually draws rather than
@@ -503,6 +535,7 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         library.as_ref(),
         drawn,
         lettering_on_fallback,
+        &sheet_layer_distribution,
     );
     // The headline the open-completion handler shows on the command line;
     // the counts agree with `report_import`'s log lines by construction.
@@ -527,6 +560,12 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
                 decoded,
                 missing,
                 style_tables_failed,
+                sheet_layers: sheet_layer_distribution.len(),
+                layered_entities: sheet_layer_distribution.values().sum(),
+                unresolved_sheet_layers: sheet_layer_distribution
+                    .keys()
+                    .filter(|(_, _, name)| name.is_none())
+                    .count(),
             },
         );
     draw_page_border(&mut doc, page_mm);
@@ -687,9 +726,23 @@ fn report_import(
     library: Option<&SymbolLibrary>,
     drawn: usize,
     lettering_on_fallback: usize,
+    sheet_layer_distribution: &BTreeMap<(String, u32, Option<String>), usize>,
 ) {
     for warning in &geometry.warnings {
         log::debug!("{}: {warning}", path.display());
+    }
+
+    for ((storage, oid, name), count) in sheet_layer_distribution {
+        match name {
+            Some(name) => log::info!(
+                "{}: authored sheet layer storage={} oid={} name={:?} drawn_entities={}",
+                path.display(), storage, oid, name, count
+            ),
+            None => log::warn!(
+                "{}: authored sheet layer storage={} oid={} has no decoded name; {} entity/entities keep their synthetic PID layer",
+                path.display(), storage, oid, count
+            ),
+        }
     }
 
     // Content the vendor's own graphic predicate says should draw, which
@@ -801,9 +854,13 @@ fn report_import(
 /// `pid-parse`'s semantic index: `class` is the owning object's XML element
 /// name (`PIDPipeline`, `PIDProcessVessel`, …), `label` its `ItemTag` /
 /// `Name`, `oid` the published `GraphicOID`, and `resolved` says which hop
-/// found it (`direct`, or `dependency:<aggregate oid>`). No new layer is
-/// involved: identity is data about an entity, not a place to put one.
-fn attach_semantics(entity: &mut EntityType, hit: &PidSemanticHit<'_>) {
+/// found it (`direct`, or `dependency:<aggregate oid>`). The authored layer
+/// pair is carried independently, including when no published XML exists.
+fn attach_pid_metadata(
+    entity: &mut EntityType,
+    hit: Option<&PidSemanticHit<'_>>,
+    source_layer: Option<&pid_parse::PidSourceLayer>,
+) {
     use acadrust::xdata::{ExtendedDataRecord, XDataValue};
 
     fn push_pair(record: &mut ExtendedDataRecord, key: &str, value: &str) {
@@ -812,24 +869,47 @@ fn attach_semantics(entity: &mut EntityType, hit: &PidSemanticHit<'_>) {
         }
     }
 
-    let object = hit.object();
     let mut record = ExtendedDataRecord::new(PID_SEMANTICS_XDATA_APP);
-    push_pair(&mut record, "class", &object.class);
-    if let Some(label) = object.label() {
-        push_pair(&mut record, "label", label);
+    if let Some(layer) = source_layer {
+        if let Some(name) = layer.name.as_deref() {
+            push_pair(&mut record, "sheet_layer", name);
+        }
+        push_pair(&mut record, "sheet_layer_oid", &layer.oid.to_string());
     }
-    push_pair(&mut record, "oid", &object.graphic_oid.to_string());
-    match hit {
-        PidSemanticHit::Direct(_) => push_pair(&mut record, "resolved", "direct"),
-        PidSemanticHit::ViaDependency { dependency_oid, .. } => {
-            push_pair(
-                &mut record,
-                "resolved",
-                &format!("dependency:{dependency_oid}"),
-            );
+    if let Some(hit) = hit {
+        let object = hit.object();
+        push_pair(&mut record, "class", &object.class);
+        if let Some(label) = object.label() {
+            push_pair(&mut record, "label", label);
+        }
+        push_pair(&mut record, "oid", &object.graphic_oid.to_string());
+        match hit {
+            PidSemanticHit::Direct(_) => push_pair(&mut record, "resolved", "direct"),
+            PidSemanticHit::ViaDependency { dependency_oid, .. } => {
+                push_pair(
+                    &mut record,
+                    "resolved",
+                    &format!("dependency:{dependency_oid}"),
+                );
+            }
         }
     }
-    entity.common_mut().extended_data.add_record(record);
+    if !record.values.is_empty() {
+        entity.common_mut().extended_data.add_record(record);
+    }
+}
+
+fn is_hidden_sheet_layer(name: &str) -> bool {
+    let normalized: String = name
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "hidden" | "hiddenobjects" | "invisible"
+    )
 }
 
 /// The style table's entry for one normalized entity, if it has one.
@@ -2207,5 +2287,20 @@ mod tests {
             drawn_extent(&EntityType::Text(text)),
             Some((3.0, 4.0, 3.0, 4.0))
         );
+    }
+
+    #[test]
+    fn hidden_sheet_layer_names_are_trimmed_case_folded_and_space_insensitive() {
+        for name in [
+            "Hidden",
+            " hidden ",
+            "HIDDENOBJECTS",
+            "Hidden Objects",
+            "Hidden\t  Objects",
+            "Invisible",
+        ] {
+            assert!(is_hidden_sheet_layer(name), "{name:?}");
+        }
+        assert!(!is_hidden_sheet_layer("Visible"));
     }
 }
