@@ -1,6 +1,6 @@
 [package]
 name = "OpenCADStudio"
-version = "0.9.5"
+version = "0.9.8"
 edition = "2021"
 build = "build.rs"
 
@@ -38,8 +38,8 @@ env_logger = "0.11"
 # Log facade, already in the tree via wgpu/iced. Native writes through the
 # env_logger above; the web build installs its own logger.
 log = "0.4"
-acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "74c5fe9", features = ["serde"] }
-cadkernel = { git = "https://github.com/HakanSeven12/cadkernel.git", rev = "574cf13", features = ["acis", "offset"] }
+acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "45789a7700bd5c006feb4c7ff16c2ff80a7047db", features = ["serde"] }
+cadkernel = { git = "https://github.com/HakanSeven12/cadkernel.git", rev = "0d48aa453f8689e4d737201b0a79604974427c6f", features = ["acis", "offset"] }
 acadifc = { git = "https://github.com/OpenAEC-Foundation/acadifc.git", rev = "47b5603", optional = true }
 dwg-thumbnailer = { path = "crates/dwg-thumbnailer" }
 flate2 = "1"
@@ -72,8 +72,12 @@ ashpd = { version = "0.13.13", default-features = false, features = ["async-io",
 iced_core = { path = "../iced/core" }
 iced_widget = { path = "../iced/widget" }
 
+[patch."https://github.com/HakanSeven12/cadcodec.git"]
+acadrust = { git = "https://git@github.com/HakanSeven12/cadcodec.git", rev = "45789a7700bd5c006feb4c7ff16c2ff80a7047db" }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ocs_plugin_api = { path = "crates/ocs_plugin_api", features = ["host"] }
+meshopt = "0.6.2"
 i18n-embed = { version = "0.16", features = ["desktop-requester"] }
 rayon = "1"
 open = "5"

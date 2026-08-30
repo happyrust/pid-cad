@@ -11,6 +11,7 @@ mod design_center;
 mod edit_block;
 pub(crate) mod insert_block;
 mod landxml;
+pub(crate) mod picker;
 pub mod minsert;
 mod mview_block;
 mod open_obj;
@@ -69,7 +70,7 @@ impl CadModule for InsertModule {
                                 ),
                                 (
                                     "FRAMES2",
-                                    "Frames & Print",
+                                    "Frames On, Not Plotted",
                                     IconKind::Svg(include_bytes!(
                                         "../../../assets/icons/underlay_frames.svg"
                                     )),

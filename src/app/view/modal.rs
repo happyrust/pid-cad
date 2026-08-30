@@ -21,6 +21,7 @@ impl OpenCADStudio {
             Some(K::LayerStateManager) => crate::tr!("modal", "layer-state-manager"),
             Some(K::LayerTranslator) => crate::t!("Layer Translator").into_owned(),
             Some(K::DrawingUnits) => crate::t!("Drawing Units").into_owned(),
+            Some(K::GeometricTolerance) => crate::t!("Geometric Tolerance").into_owned(),
             Some(K::DraftingSettings) => crate::t!("Drafting Settings").into_owned(),
             Some(K::LayerStateEditor) => crate::tr!("modal", "edit-layer-state"),
             Some(K::Plot) => crate::tr!("modal", "plot"),
@@ -234,6 +235,12 @@ impl OpenCADStudio {
                     crate::ui::window::drawing_units::view_window(state, flow)
                 })
             }
+            super::super::ModalKind::GeometricTolerance => {
+                let state = self.geometric_tolerance.as_ref()?;
+                sized_flow(ex, 670, 530, |flow| {
+                    crate::ui::window::geometric_tolerance::view_window(state, flow)
+                })
+            }
             super::super::ModalKind::LayerStateManager => {
                 let states = self.tabs[self.active_tab].scene.document.layer_states();
                 sized_flow(
@@ -421,6 +428,7 @@ impl OpenCADStudio {
                 540,
                 |flow| {
                     crate::ui::style::plotstyle::view_window(
+                        &self.tabs[self.active_tab].scene.document,
                         self.active_plot_style.as_ref(),
                         self.plotstyle_panel_aci,
                         &self.ps_color_buf,

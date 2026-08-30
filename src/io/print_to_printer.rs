@@ -11,7 +11,28 @@
 use crate::io::pdf_export;
 use crate::io::plot_style::PlotStyleTable;
 use crate::scene::model::hatch_model::HatchModel;
-use crate::scene::WireModel;
+use crate::io::pdf_export::PlotWire;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn temp_pdf_path(kind: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!(
+        "open_cad_studio_{kind}_{}_{stamp}_{id}.pdf",
+        std::process::id()
+    ))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn temp_pdf_path(kind: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{kind}.pdf"))
+}
 
 /// Extra options for a print job. On CUPS (Linux/macOS) these map to `lp`
 /// flags / `-o` options. On Windows the generated PDF already carries render
@@ -24,7 +45,10 @@ pub struct PrintOptions {
     pub printer: Option<String>,
     /// Number of copies (treated as at least 1).
     pub copies: u32,
-    /// Print quality label selected in the plot dialog.
+    /// Print quality label selected in the plot dialog. Read only on the CUPS
+    /// path (`lp -o print-quality=…`); on Windows the driver's own quality
+    /// setting wins, so the field is legitimately unread there.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub quality: Option<String>,
     /// Controls applied while building the intermediate PDF.
     pub render: crate::io::pdf_export::PdfPlotOptions,
@@ -38,7 +62,7 @@ pub fn list_printers() -> Vec<String> {
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::too_many_arguments)]
 pub async fn print_wires_with(
-    _wires: std::sync::Arc<Vec<WireModel>>,
+    _wires: std::sync::Arc<Vec<PlotWire>>,
     _hatches: Vec<HatchModel>,
     _wipeouts: Vec<HatchModel>,
     _paper_w: f64,
@@ -91,39 +115,56 @@ pub fn list_printers() -> Vec<String> {
     }
 }
 
+/// Build the platform printer-properties command.
+#[cfg(not(target_arch = "wasm32"))]
+fn printer_properties_command(printer: Option<&str>) -> (&'static str, Vec<String>) {
+    let named = printer
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+
+    #[cfg(target_os = "windows")]
+    let command = match named {
+        Some(name) => (
+            "rundll32.exe",
+            vec![
+                "printui.dll,PrintUIEntry".to_string(),
+                "/p".to_string(),
+                "/n".to_string(),
+                name.to_string(),
+            ],
+        ),
+        None => ("control.exe", vec!["printers".to_string()]),
+    };
+
+    #[cfg(target_os = "macos")]
+    let command = {
+        let _ = named;
+        (
+            "open",
+            vec!["x-apple.systempreferences:com.apple.Print-Scan-Settings.extension".to_string()],
+        )
+    };
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let command = {
+        let target = named
+            .map(|name| format!("http://localhost:631/printers/{name}"))
+            .unwrap_or_else(|| "http://localhost:631/printers".to_string());
+        ("xdg-open", vec![target])
+    };
+
+    command
+}
+
 /// Open the operating system's printer configuration surface.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn open_printer_properties(printer: Option<&str>) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        let mut command = std::process::Command::new("control.exe");
-        command.arg("printers");
-        return command
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| format!("Could not open printer properties: {error}"));
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let mut command = std::process::Command::new("open");
-        command.arg("x-apple.systempreferences:com.apple.Print-Scan-Settings.extension");
-        return command
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| format!("Could not open printer properties: {error}"));
-    }
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        let target = printer
-            .filter(|name| !name.is_empty())
-            .map(|name| format!("http://localhost:631/printers/{name}"))
-            .unwrap_or_else(|| "http://localhost:631/printers".to_string());
-        std::process::Command::new("xdg-open")
-            .arg(target)
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| format!("Could not open printer properties: {error}"))
-    }
+    let (program, args) = printer_properties_command(printer);
+    std::process::Command::new(program)
+        .args(args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not open printer properties: {error}"))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -136,7 +177,7 @@ pub fn open_printer_properties(_printer: Option<&str>) -> Result<(), String> {
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 pub async fn print_wires_with(
-    wires: std::sync::Arc<Vec<WireModel>>,
+    wires: std::sync::Arc<Vec<PlotWire>>,
     hatches: Vec<HatchModel>,
     wipeouts: Vec<HatchModel>,
     paper_w: f64,
@@ -149,7 +190,7 @@ pub async fn print_wires_with(
     plot_style: Option<PlotStyleTable>,
     opts: PrintOptions,
 ) -> Result<String, String> {
-    let tmp_path = std::env::temp_dir().join("open_cad_studio_print.pdf");
+    let tmp_path = temp_pdf_path("print");
     pdf_export::export_pdf(
         &wires,
         &hatches,
@@ -211,10 +252,15 @@ fn dispatch_to_printer_opts(
 ) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
-        // Target a named printer via the "printto" verb; fall back to the
-        // default-printer "print" verb.
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{GetLastError, ERROR_NO_ASSOCIATION};
+        use windows_sys::Win32::UI::Shell::{
+            ShellExecuteExW, SHELLEXECUTEINFOW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC,
+            SE_ERR_NOASSOC,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
         let wide = |s: &str| -> Vec<u16> { OsStr::new(s).encode_wide().chain(Some(0)).collect() };
         let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         let (verb, params, label) = match opts.printer.as_deref() {
@@ -223,18 +269,28 @@ fn dispatch_to_printer_opts(
         };
         let params_ptr = params.as_ref().map(|v| v.as_ptr()).unwrap_or(std::ptr::null());
         for _ in 0..opts.copies.max(1) {
-            let result = unsafe {
-                windows_sys::Win32::UI::Shell::ShellExecuteW(
-                    std::ptr::null_mut(),
-                    verb.as_ptr(),
-                    path_wide.as_ptr(),
-                    params_ptr,
-                    std::ptr::null(),
-                    windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE,
-                ) as usize
+            let mut info = SHELLEXECUTEINFOW {
+                cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+                fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
+                lpVerb: verb.as_ptr(),
+                lpFile: path_wide.as_ptr(),
+                lpParameters: params_ptr,
+                nShow: SW_HIDE,
+                ..Default::default()
             };
-            if result <= 32 {
-                return Err(format!("ShellExecute failed (code {result})"));
+            if unsafe { ShellExecuteExW(&mut info) } == 0 {
+                let shell_code = info.hInstApp as usize;
+                let code = if (1..=32).contains(&shell_code) {
+                    shell_code as u32
+                } else {
+                    unsafe { GetLastError() }
+                };
+                if code == SE_ERR_NOASSOC || code == ERROR_NO_ASSOCIATION {
+                    return Err(
+                        "Windows has no PDF application registered with Print support.".into(),
+                    );
+                }
+                return Err(format!("Windows print dispatch failed (code {code})"));
             }
         }
         Ok(label)
@@ -308,5 +364,74 @@ fn dispatch_to_printer_opts(
                 String::from_utf8_lossy(&out.stderr)
             ))
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod printer_properties_tests {
+    use super::printer_properties_command;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_opens_selected_printer_or_printer_list() {
+        assert_eq!(
+            printer_properties_command(Some("  Office LaserJet  ")),
+            (
+                "rundll32.exe",
+                vec![
+                    "printui.dll,PrintUIEntry".to_string(),
+                    "/p".to_string(),
+                    "/n".to_string(),
+                    "Office LaserJet".to_string(),
+                ],
+            ),
+        );
+        assert_eq!(
+            printer_properties_command(None),
+            ("control.exe", vec!["printers".to_string()]),
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_opens_print_settings() {
+        let expected = (
+            "open",
+            vec![
+                "x-apple.systempreferences:com.apple.Print-Scan-Settings.extension".to_string(),
+            ],
+        );
+        assert_eq!(
+            printer_properties_command(Some("  Office LaserJet  ")),
+            expected.clone(),
+        );
+        assert_eq!(printer_properties_command(None), expected);
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    #[test]
+    fn unix_opens_selected_cups_printer_or_printer_list() {
+        assert_eq!(
+            printer_properties_command(Some("  Office LaserJet  ")),
+            (
+                "xdg-open",
+                vec!["http://localhost:631/printers/Office LaserJet".to_string()],
+            ),
+        );
+        assert_eq!(
+            printer_properties_command(None),
+            (
+                "xdg-open",
+                vec!["http://localhost:631/printers".to_string()],
+            ),
+        );
+    }
+
+    #[test]
+    fn a_blank_selection_is_treated_as_no_selection() {
+        assert_eq!(
+            printer_properties_command(Some("   ")),
+            printer_properties_command(None),
+        );
     }
 }

@@ -26,7 +26,8 @@ use acadrust::tables::BlockRecord;
 use acadrust::types::Vector3;
 use acadrust::{CadDocument, EntityType, Handle};
 
-use crate::command::{CadCommand, CmdResult};
+use crate::command::{CadCommand, CmdResult, WorkingPlane};
+use crate::entities::curve::lwpolyline_world_xy;
 use crate::modules::{IconKind, ModuleEvent, ToolDef};
 use glam::DVec3;
 use crate::t;
@@ -62,6 +63,27 @@ pub fn explode_polyline_segments(entity: &EntityType) -> Vec<EntityType> {
 /// Returns an empty vec if the entity cannot be exploded.
 pub fn explode_entity(entity: &EntityType, document: &CadDocument) -> Vec<EntityType> {
     match entity {
+        EntityType::Line(line) => {
+            let Some(association) = acadrust::entities::CenterMarkAssociation::read(
+                &line.common.extended_data,
+            ) else {
+                return vec![];
+            };
+            crate::scene::centermark::mark_segments(&association)
+                .into_iter()
+                .map(|segment| {
+                    let mut common = line.common.clone();
+                    common.handle = Handle::NULL;
+                    acadrust::entities::CenterMarkAssociation::remove(&mut common.extended_data);
+                    EntityType::Line(LineEnt {
+                        common,
+                        start: Vector3::new(segment[0].x, segment[0].y, segment[0].z),
+                        end: Vector3::new(segment[1].x, segment[1].y, segment[1].z),
+                        ..LineEnt::new()
+                    })
+                })
+                .collect()
+        }
         EntityType::LwPolyline(p) => explode_lwpolyline(p),
         EntityType::Polyline2D(p) => explode_polyline2d(p),
         EntityType::Polyline(p) => explode_polyline(p),
@@ -188,6 +210,9 @@ pub fn normalize_entity_for_block(entity: EntityType) -> EntityType {
 }
 
 fn explode_lwpolyline(p: &LwPolyline) -> Vec<EntityType> {
+    let Some(p) = lwpolyline_world_xy(p) else {
+        return vec![];
+    };
     let n = p.vertices.len();
     if n < 2 {
         return vec![];
@@ -329,6 +354,38 @@ fn dim_seg(a: Vector3, b: Vector3, common: &acadrust::entities::EntityCommon) ->
         end: b,
         ..LineEnt::new()
     })
+}
+
+fn dim_geom_entities(
+    geometry: &crate::scene::convert::tessellate::DimGeom,
+    ext_common: &acadrust::entities::EntityCommon,
+    dim_common: &acadrust::entities::EntityCommon,
+) -> Vec<EntityType> {
+    let mut entities = Vec::new();
+    let point = |value: [f32; 3]| {
+        Vector3::new(value[0] as f64, value[1] as f64, value[2] as f64)
+    };
+    for (points, common) in [
+        (geometry.ext_lines.as_slice(), ext_common),
+        (geometry.dim_lines.as_slice(), dim_common),
+    ] {
+        for run in points.split(|point| point[0].is_nan()) {
+            for pair in run.windows(2) {
+                entities.push(dim_seg(point(pair[0]), point(pair[1]), common));
+            }
+        }
+    }
+    for triangle in geometry.arrow_fill.chunks_exact(3) {
+        let mut solid = acadrust::entities::Solid::triangle(
+            point(triangle[0]),
+            point(triangle[1]),
+            point(triangle[2]),
+        );
+        solid.common = dim_common.clone();
+        solid.common.handle = Handle::NULL;
+        entities.push(EntityType::Solid(solid));
+    }
+    entities
 }
 
 /// A dimension-line terminator at `tip`, body extending back along the unit
@@ -572,25 +629,24 @@ struct DimMetrics {
     dimclrt: i16,
     dimlwd: i16,
     dimlwe: i16,
-    /// Resolved terminator shapes for the first / second end (DIMTSZ tick,
-    /// DIMBLK/DIMBLK1/DIMBLK2 per DIMSAH, else closed-filled), so the bake
-    /// reproduces the style's actual arrow type.
+    dimltype: Handle,
+    dimltex1: Handle,
     arrow1: crate::scene::convert::tessellate::ArrowKind,
     arrow2: crate::scene::convert::tessellate::ArrowKind,
 }
 
-/// Metrics from the dim's style, mirroring what the live renderer applies, so a
-/// baked block reproduces the same gaps, arrow type, suppression, colours and
-/// lineweights: DIMASZ (arrow), DIMCEN (centre mark), DIMEXO/DIMEXE (extension
-/// gap/overshoot), DIMTSZ (oblique tick; >0 = ticks not arrows), DIMDLE (dim
-/// line overshoot past ticks), DIMSE1/2 + DIMSD1/2 (extension / dim-line
-/// suppression), DIMCLRD/E/T (colours) and DIMLWD/E (lineweights).
+/// Resolve style metrics used by saved dimension geometry.
 fn dim_metrics(dim: &Dimension, doc: &CadDocument) -> DimMetrics {
     let name = dim.base().style_name.as_str();
-    let style = doc.dim_styles.iter().find(|s| {
-        s.name.eq_ignore_ascii_case(name)
-            || (name.trim().is_empty() && s.name.eq_ignore_ascii_case("Standard"))
-    });
+    let effective_style = doc
+        .dim_styles
+        .iter()
+        .find(|style| {
+            style.name.eq_ignore_ascii_case(name)
+                || (name.trim().is_empty() && style.name.eq_ignore_ascii_case("Standard"))
+        })
+        .map(|style| crate::entities::dimension::resolved_dimension_style(style, dim, doc));
+    let style = effective_style.as_ref();
     let scale = style
         .map(|s| if s.dimscale > 1e-6 { s.dimscale } else { 1.0 })
         .unwrap_or(1.0);
@@ -598,14 +654,22 @@ fn dim_metrics(dim: &Dimension, doc: &CadDocument) -> DimMetrics {
     let dimasz = style.map(|s| s.dimasz * scale).unwrap_or(0.18 * scale).max(1e-6);
     let dimtsz = style.map(|s| s.dimtsz * scale).unwrap_or(0.0);
     let asz = dimasz as f32;
-    // Resolve the terminator shapes exactly like the live render: ticks when
-    // DIMTSZ>0, otherwise the DIMBLK / DIMBLK1+DIMBLK2 (per DIMSAH) arrow blocks,
-    // else closed-filled.
     let (arrow1, arrow2) = if dimtsz > 1e-9 {
         let t = ArrowKind::Tick { size: dimtsz as f32 };
         (t.clone(), t)
     } else if let Some(s) = style {
-        if s.dimsah {
+        if matches!(dim, Dimension::Radius(_) | Dimension::LargeRadial(_)) {
+            let arrow = arrow_from_block(doc, s.dimldrblk, asz);
+            (arrow.clone(), arrow)
+        } else if matches!(dim, Dimension::Diameter(_)) {
+            use crate::entities::dim_override as ov;
+            let data = &dim.base().common.extended_data;
+            let first = ov::handle(data, ov::DIMBLK1)
+                .unwrap_or(if s.dimsah { s.dimblk1 } else { s.dimblk });
+            let second = ov::handle(data, ov::DIMBLK2)
+                .unwrap_or(if s.dimsah { s.dimblk2 } else { s.dimblk });
+            (arrow_from_block(doc, first, asz), arrow_from_block(doc, second, asz))
+        } else if s.dimsah {
             (arrow_from_block(doc, s.dimblk1, asz), arrow_from_block(doc, s.dimblk2, asz))
         } else {
             let a = arrow_from_block(doc, s.dimblk, asz);
@@ -634,6 +698,8 @@ fn dim_metrics(dim: &Dimension, doc: &CadDocument) -> DimMetrics {
         dimclrt: style.map(|s| s.dimclrt).unwrap_or(0),
         dimlwd: style.map(|s| s.dimlwd).unwrap_or(-2),
         dimlwe: style.map(|s| s.dimlwe).unwrap_or(-2),
+        dimltype: style.map(|s| s.dimltex_handle).unwrap_or(Handle::NULL),
+        dimltex1: style.map(|s| s.dimltex1_handle).unwrap_or(Handle::NULL),
         arrow1,
         arrow2,
     }
@@ -653,6 +719,21 @@ fn dim_common(base: &acadrust::entities::EntityCommon, clr: i16, lw: i16) -> aca
         c.line_weight = acadrust::types::LineWeight::from_value(lw);
     }
     c
+}
+
+fn with_dim_linetype(
+    mut common: acadrust::entities::EntityCommon,
+    doc: &CadDocument,
+    handle: Handle,
+) -> acadrust::entities::EntityCommon {
+    common.linetype = doc
+        .line_types
+        .iter()
+        .find(|line_type| line_type.handle == handle)
+        .map(|line_type| line_type.name.clone())
+        .unwrap_or_else(|| "Continuous".to_string());
+    common.linetype_handle = (!handle.is_null()).then_some(handle);
+    common
 }
 
 /// Baked geometry for an angular dimension, matching the live render exactly:
@@ -717,49 +798,6 @@ fn angular_block_segs(
     out
 }
 
-fn jogged_radial_break(
-    chord: Vector3,
-    jog: Vector3,
-    override_center: Vector3,
-    jog_angle: f64,
-) -> (Vector3, Vector3) {
-    let radial = norm2(
-        chord.x - override_center.x,
-        chord.y - override_center.y,
-        1.0,
-        0.0,
-    );
-    let (sin, cos) = jog_angle.sin_cos();
-    let transverse = (
-        radial.0 * cos - radial.1 * sin,
-        radial.0 * sin + radial.1 * cos,
-    );
-    let length = ((chord.x - override_center.x).powi(2)
-        + (chord.y - override_center.y).powi(2))
-    .sqrt();
-    let half = (length * 0.04).max(1e-6);
-    let first = Vector3::new(
-        jog.x - transverse.0 * half,
-        jog.y - transverse.1 * half,
-        jog.z,
-    );
-    let second = Vector3::new(
-        jog.x + transverse.0 * half,
-        jog.y + transverse.1 * half,
-        jog.z,
-    );
-    let distance_squared = |point: Vector3| {
-        (point.x - chord.x).powi(2)
-            + (point.y - chord.y).powi(2)
-            + (point.z - chord.z).powi(2)
-    };
-    if distance_squared(first) <= distance_squared(second) {
-        (first, second)
-    } else {
-        (second, first)
-    }
-}
-
 /// The text anchor for a radial leader: the saved text middle point when set,
 /// else the midpoint of `a` and `b` — mirroring the live `dimension_text_position`.
 fn dim_text_anchor(
@@ -820,6 +858,42 @@ fn norm2(dx: f64, dy: f64, fx: f64, fy: f64) -> (f64, f64) {
 }
 
 fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
+    if let Dimension::Arc(arc) = dim {
+        if let Some((local_arc, normal)) =
+            crate::entities::dimension::arc_dimension_in_ocs(arc)
+        {
+            let (x_axis, y_axis) = crate::scene::view::transform::ocs_axes((
+                normal.x, normal.y, normal.z,
+            ));
+            let plane = WorkingPlane::new(
+                DVec3::ZERO,
+                DVec3::new(x_axis.0, x_axis.1, x_axis.2),
+                DVec3::new(y_axis.0, y_axis.1, y_axis.2),
+            );
+            return explode_dimension(&Dimension::Arc(local_arc), doc)
+                .into_iter()
+                .map(|entity| plane.place_entity(entity))
+                .collect();
+        }
+    }
+    if let Dimension::LargeRadial(radial) = dim {
+        if let Some((local_radial, normal)) =
+            crate::entities::dimension::large_radial_dimension_in_ocs(radial)
+        {
+            let (x_axis, y_axis) = crate::scene::view::transform::ocs_axes((
+                normal.x, normal.y, normal.z,
+            ));
+            let plane = WorkingPlane::new(
+                DVec3::ZERO,
+                DVec3::new(x_axis.0, x_axis.1, x_axis.2),
+                DVec3::new(y_axis.0, y_axis.1, y_axis.2),
+            );
+            return explode_dimension(&Dimension::LargeRadial(local_radial), doc)
+                .into_iter()
+                .map(|entity| plane.place_entity(entity))
+                .collect();
+        }
+    }
 
     let base = dim.base();
     let met = dim_metrics(dim, doc);
@@ -968,26 +1042,100 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
             result.extend(dim_center_mark(center, met.dimcen, len, &dim_c));
         }
         Dimension::Diameter(d) => {
-            // Full diameter through the centre (far edge -> near edge), inward
-            // terminators at both edges, plus the centre mark.
-            let (center, edge) = (d.angle_vertex, d.definition_point);
-            let far = v3(2.0 * center.x - edge.x, 2.0 * center.y - edge.y, edge.z);
-            result.push(make_seg(&far, &edge, &dim_c));
+            let (edge, far) = (d.angle_vertex, d.definition_point);
+            let center = v3(
+                (edge.x + far.x) * 0.5,
+                (edge.y + far.y) * 0.5,
+                (edge.z + far.z) * 0.5,
+            );
             let len = ((edge.x - far.x).powi(2) + (edge.y - far.y).powi(2))
                 .sqrt()
                 .max(1e-12);
             let (ux, uy) = ((edge.x - far.x) / len, (edge.y - far.y) / len);
-            result.extend(dim_terminator(edge, -ux, -uy, &met.arrow1, &dim_c));
-            result.extend(dim_terminator(far, ux, uy, &met.arrow2, &dim_c));
-            // Optional leader past the near edge toward the text. DIM-DIA-LEADER.
-            if d.leader_length.abs() > 1e-9 {
-                let anchor = dim_text_anchor(base, center, edge);
-                let ld = norm2(anchor.x - edge.x, anchor.y - edge.y, ux, uy);
+            let ticks = met.dimtsz > 1e-9;
+            let extension = if ticks { met.dimdle } else { 0.0 };
+            let edge_outer = v3(
+                edge.x + ux * extension,
+                edge.y + uy * extension,
+                edge.z,
+            );
+            let far_outer = v3(
+                far.x - ux * extension,
+                far.y - uy * extension,
+                far.z,
+            );
+            if !met.dimsd1 {
+                result.push(make_seg(&edge_outer, &center, &dim_c));
+            }
+            if !met.dimsd2 {
+                result.push(make_seg(&center, &far_outer, &dim_c));
+            }
+            let outside = !ticks && met.dimasz > 1e-6 && len < 2.0 * met.dimasz;
+            if outside {
+                result.extend(dim_terminator(edge, ux, uy, &met.arrow1, &dim_c));
+                result.extend(dim_terminator(far, -ux, -uy, &met.arrow2, &dim_c));
+                if !met.dimsoxd {
+                    let stub = 2.0 * met.dimasz;
+                    if !met.dimsd1 {
+                        result.push(make_seg(
+                            &edge,
+                            &v3(edge.x + ux * stub, edge.y + uy * stub, edge.z),
+                            &dim_c,
+                        ));
+                    }
+                    if !met.dimsd2 {
+                        result.push(make_seg(
+                            &far,
+                            &v3(far.x - ux * stub, far.y - uy * stub, far.z),
+                            &dim_c,
+                        ));
+                    }
+                }
+            } else {
+                result.extend(dim_terminator(edge, -ux, -uy, &met.arrow1, &dim_c));
+                result.extend(dim_terminator(far, ux, uy, &met.arrow2, &dim_c));
+            }
+            let anchor = dim_text_anchor(base, center, edge);
+            let distance_squared = |first: Vector3, second: Vector3| {
+                (first.x - second.x).powi(2)
+                    + (first.y - second.y).powi(2)
+                    + (first.z - second.z).powi(2)
+            };
+            let (leader_tip, suppressed, fallback) = if distance_squared(anchor, edge)
+                <= distance_squared(anchor, far)
+            {
+                (edge, met.dimsd1, (ux, uy))
+            } else {
+                (far, met.dimsd2, (-ux, -uy))
+            };
+            if !suppressed && d.leader_length.abs() > 1e-9 {
+                let ld = norm2(
+                    anchor.x - leader_tip.x,
+                    anchor.y - leader_tip.y,
+                    fallback.0,
+                    fallback.1,
+                );
                 result.push(make_seg(
-                    &edge,
-                    &v3(edge.x + ld.0 * d.leader_length, edge.y + ld.1 * d.leader_length, edge.z),
+                    &leader_tip,
+                    &v3(
+                        leader_tip.x + ld.0 * d.leader_length.abs(),
+                        leader_tip.y + ld.1 * d.leader_length.abs(),
+                        leader_tip.z,
+                    ),
                     &dim_c,
                 ));
+            }
+            if !met.dimse1 {
+                if let Some(points) = crate::scene::dimension_assoc::radial_extension_points(
+                    doc,
+                    base.common.handle,
+                    met.dimexo,
+                    met.dimexe,
+                ) {
+                    for pair in points.windows(2) {
+                        result.push(make_seg(&pair[0], &pair[1], &ext_c));
+                    }
+                }
             }
             result.extend(dim_center_mark(center, met.dimcen, len * 0.5, &dim_c));
         }
@@ -1016,10 +1164,19 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
             ));
         }
         Dimension::Ordinate(d) => {
-            result.push(make_seg(&d.feature_location, &d.definition_point, &dim_c));
-            result.push(make_seg(&d.definition_point, &d.leader_endpoint, &dim_c));
+            if !met.dimse1 {
+                let fixed_length = met.dimfxlon.then_some(met.dimfxl);
+                let points = d.leader_polyline(met.dimasz * 2.0, met.dimexo, fixed_length);
+                for pair in points.windows(2) {
+                    if (pair[1] - pair[0]).length() > 1e-12 {
+                        result.push(make_seg(&pair[0], &pair[1], &ext_c));
+                    }
+                }
+            }
         }
         Dimension::Arc(d) => {
+            let explicit_sweep = crate::entities::dimension::arc_dimension_angles(d)
+                .map(|(start, end)| (start as f64, end as f64));
             result.extend(angular_block_segs(
                 d.center_point,
                 d.first_extension_point,
@@ -1028,10 +1185,7 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
                 &met,
                 &ext_c,
                 &dim_c,
-                d.is_partial.then_some((
-                    d.arc_start_parameter,
-                    d.arc_end_parameter,
-                )),
+                explicit_sweep,
             ));
             if d.has_leader {
                 result.push(make_seg(
@@ -1041,27 +1195,23 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
                 ));
             }
         }
-        Dimension::LargeRadial(d) => {
-            let (near, far) = jogged_radial_break(
-                d.chord_point,
-                d.jog_point,
-                d.override_center,
-                d.jog_angle,
-            );
-            result.push(make_seg(&d.chord_point, &near, &dim_c));
-            result.push(make_seg(&near, &far, &dim_c));
-            result.push(make_seg(&far, &d.override_center, &dim_c));
-            let len = ((near.x - d.chord_point.x).powi(2)
-                + (near.y - d.chord_point.y).powi(2))
-            .sqrt()
-            .max(1e-12);
-            result.extend(dim_terminator(
-                d.chord_point,
-                (near.x - d.chord_point.x) / len,
-                (near.y - d.chord_point.y) / len,
-                &met.arrow1,
-                &dim_c,
-            ));
+        Dimension::LargeRadial(_) => {
+            if let Some(geometry) =
+                crate::entities::dimension::baked_large_radial_geometry(dim, doc)
+            {
+                let radial_ext_c = with_dim_linetype(ext_c.clone(), doc, met.dimltex1);
+                let radial_dim_c = with_dim_linetype(dim_c.clone(), doc, met.dimltype);
+                result.extend(dim_geom_entities(&geometry, &radial_ext_c, &radial_dim_c));
+            }
+        }
+    }
+
+    let symbol_points =
+        crate::entities::dimension::baked_arc_length_symbol_points(dim, doc, 1.0);
+    if symbol_points.len() > 1 {
+        let text_c = dim_common(&base.common, met.dimclrt, -2);
+        for pair in symbol_points.windows(2) {
+            result.push(make_seg(&pair[0], &pair[1], &text_c));
         }
     }
 
@@ -1146,23 +1296,7 @@ fn next_dimension_block_name(doc: &CadDocument, next: &mut u64) -> String {
     }
 }
 
-/// Bake an anonymous `*D<n>` geometry block for every DIMENSION that doesn't
-/// already own one, so the file is valid for AutoCAD-family readers.
-///
-/// OCS renders dimensions by re-tessellating them on the fly and never
-/// materialises the `*D` block that a DWG `DIMENSION` is supposed to reference
-/// (the lines / arrows / text that AutoCAD actually draws). A dimension created
-/// in OCS therefore goes out referencing a block that doesn't exist, and the
-/// writer emits a null block handle — strict readers (DWG TrueView, QCAD) drop
-/// the dimension or demand a recovery, and lenient ones (BricsCAD) regenerate it
-/// at a different position. Call this on the document about to be written so each
-/// such dimension gets a real block built from its exploded geometry (extension
-/// lines + dimension line + measurement text, the same decomposition EXPLODE
-/// uses) and its `block_name` points at it.
-///
-/// Dimensions that already reference an existing block (e.g. imported from a real
-/// DWG, or copied via the `*D`-cloning copy path) are left untouched so their
-/// original graphics are preserved.
+/// Build missing anonymous dimension geometry blocks before writing.
 pub fn bake_dimension_blocks(doc: &mut CadDocument) {
     // Keep group-10 in step and find missing blocks in one entity pass. Existing
     // `*D` blocks are the save cache: only invalidated/new dimensions enter the
@@ -1226,35 +1360,13 @@ pub fn bake_dimension_blocks(doc: &mut CadDocument) {
 
         if let Some(EntityType::Dimension(d)) = doc.get_entity_mut(handle) {
             d.base_mut().block_name = name;
-            // The block we just baked holds the dimension graphics in absolute
-            // WCS, so the DWG group-12 insertion point (base.insertion_point)
-            // MUST be the origin. A reader that positions the *D block by that
-            // point (BricsCAD / ODA) otherwise draws it shifted by the offset,
-            // while OCS — which renders the block in place — shows it correctly.
-            // OCS's dimension commands seed insertion_point with the text
-            // anchor; reset it here so the saved dimension lands identically in
-            // every application. (#181)
+            // Baked geometry uses absolute coordinates.
             d.base_mut().insertion_point = Vector3::new(0.0, 0.0, 0.0);
         }
     }
 }
 
-/// Drop a dimension's baked `*D` block so the next save regenerates it from the
-/// dimension's current definition points / text / style.
-///
-/// OCS renders a dimension live from its definition points, but exports a baked
-/// `*D` block that other applications (BricsCAD / ODA) draw instead. An in-place
-/// edit — grip drag, DIMTEDIT, restyle, text edit, DIMSPACE — changes the
-/// definition points while leaving the old block, so without this the export
-/// keeps the pre-edit graphics and the dimension appears wrong everywhere but in
-/// OCS. Call this after any such edit; [`bake_dimension_blocks`] then rebuilds a
-/// fresh block on save.
-///
-/// The transform path (MOVE / COPY / PASTE) keeps its own block in sync via
-/// `define_transformed_block` and must NOT call this. The removed block's record
-/// and owned entities are deleted too, so re-baking on every edit can't
-/// accumulate orphan `*D` blocks. No-op when the dimension has no baked block
-/// yet (the pending path bakes it fresh on save). (#181)
+/// Drop baked dimension geometry so the next save regenerates it.
 pub fn invalidate_dim_block(doc: &mut CadDocument, handle: Handle) {
     let bn = match doc.get_entity(handle) {
         Some(EntityType::Dimension(d)) => d.base().block_name.clone(),
@@ -1541,16 +1653,15 @@ mod tests {
         assert!(lines > 5, "angular bake must include arc chords, got {lines} lines");
     }
 
-    // A diameter dimension bakes a line edge-to-edge THROUGH the centre, not a
-    // radius-length line. The two extreme endpoints must be equidistant from the
-    // centre (angle_vertex) and the centre must lie between them.
+    // Diameter endpoints stay equidistant from the circle center.
     #[test]
     fn diameter_dim_bakes_through_center() {
         use acadrust::entities::DimensionDiameter;
         let mut doc = CadDocument::new();
         let center = Vector3::new(3.0, 4.0, 0.0);
         let edge = Vector3::new(8.0, 4.0, 0.0); // radius 5 along +x
-        let mut d = DimensionDiameter::new(center, edge);
+        let far = Vector3::new(-2.0, 4.0, 0.0);
+        let mut d = DimensionDiameter::new(edge, far);
         d.base.text_middle_point = Vector3::new(3.0, 9.0, 0.0);
         let handle = doc
             .add_entity(EntityType::Dimension(Dimension::Diameter(d)))

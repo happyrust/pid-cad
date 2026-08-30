@@ -1,10 +1,12 @@
 use acadrust::entities::{LwPolyline, LwVertex};
+use cadkernel::geom2d::{signed_area, Curve, Polyline, PolylineVertex, Vec2};
+
 use crate::t;
 
 use crate::command::EntityTransform;
 use crate::entities::common::{
-    edit_prop as edit, parse_f64, rectangle_grip, ro_prop as ro, square_grip,
-    stepper_prop as stepper,
+    edit_prop as edit, edit_scalar_prop as edit_scalar, format_area, format_length, parse_f64,
+    rectangle_grip, ro_prop as ro, square_grip, stepper_prop as stepper,
 };
 use crate::entities::traits::RenderConvertible;
 use crate::scene::convert::acad_to_render::{extrusion_wall_tris, RenderEntity, RenderObject};
@@ -12,6 +14,17 @@ use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Pr
 use crate::scene::model::wire_model::TangentGeom;
 
 const TAU: f64 = std::f64::consts::TAU;
+const REVCLOUD_BULGE: f64 = 0.5;
+const MAX_REVCLOUD_VERTICES: usize = 100_000;
+const WIDTH_EPSILON: f64 = 1.0e-9;
+
+fn effective_width(width: f64, constant_width: f64) -> f64 {
+    if width > WIDTH_EPSILON {
+        width
+    } else {
+        constant_width
+    }
+}
 
 /// Midpoint position on an arc segment defined by its bulge.
 fn arc_midpoint(p0: [f64; 2], p1: [f64; 2], bulge: f64) -> [f64; 2] {
@@ -247,7 +260,7 @@ fn thick_wide_band(
     }
 }
 
-fn to_render(pline: &LwPolyline) -> RenderEntity {
+fn to_render(pline: &LwPolyline, fill_mode: bool) -> RenderEntity {
     let verts = &pline.vertices;
     if verts.is_empty() {
         return RenderEntity {
@@ -264,9 +277,6 @@ fn to_render(pline: &LwPolyline) -> RenderEntity {
     let normal = (pline.normal.x, pline.normal.y, pline.normal.z);
     let count = verts.len();
     let seg_count = if pline.is_closed { count } else { count - 1 };
-    let mut tangents: Vec<TangentGeom> = Vec::new();
-    let mut key_verts: Vec<[f64; 3]> = Vec::new();
-
     // Convert OCS (x, y, elevation) to a WCS point.
     let to_wcs = |x: f64, y: f64| -> (f64, f64, f64) {
         crate::scene::view::transform::ocs_point_to_wcs((x, y, elev), normal)
@@ -275,6 +285,44 @@ fn to_render(pline: &LwPolyline) -> RenderEntity {
         let (wx, wy, wz) = to_wcs(v.location.x, v.location.y);
         [wx, wy, wz]
     };
+
+    let band_verts = band_verts(pline);
+    if !fill_mode {
+        let mut boundary = crate::entities::common::wide_band_outline(
+            &band_verts,
+            pline.is_closed,
+            !pline.plinegen,
+            &to_wcs,
+        );
+        if !boundary.points.is_empty() {
+            if pline.thickness.abs() > 1e-10 {
+                boundary = crate::entities::common::extrude_wide_band_outline(
+                    boundary,
+                    [
+                        pline.thickness * normal.0,
+                        pline.thickness * normal.1,
+                        pline.thickness * normal.2,
+                    ],
+                );
+            }
+            let (tangent_geoms, key_vertices) = centerline_metadata(pline, &to_wcs);
+            return RenderEntity {
+                pick_tris: Vec::new(),
+                object: RenderObject::BoundaryLines {
+                    points: boundary.points,
+                    stations: boundary.stations,
+                    point_segments: boundary.point_segments,
+                    station_pieces: boundary.station_pieces,
+                    source_length: boundary.source_length,
+                    plinegen: pline.plinegen,
+                },
+                snap_pts: vec![],
+                tangent_geoms,
+                key_vertices,
+                fill_tris: vec![],
+            };
+        }
+    }
 
     if pline.thickness.abs() > 1e-10 {
         let mut path: Vec<[f64; 3]> = Vec::new();
@@ -337,7 +385,7 @@ fn to_render(pline: &LwPolyline) -> RenderEntity {
     // A wide polyline whose per-vertex widths VARY renders a smooth taper —
     // handled here, before the PLINEGEN split, so both cases get it. A
     // uniform-width polyline falls through to the constant-band paths below.
-    if let Some(band_verts) = tapered_band_verts(pline) {
+    if tapered_band_verts(&band_verts).is_some() {
         let mut kv: Vec<[f64; 3]> = Vec::new();
         let mut tgs: Vec<TangentGeom> = Vec::new();
         for i in 0..seg_count {
@@ -366,8 +414,11 @@ fn to_render(pline: &LwPolyline) -> RenderEntity {
                 });
             }
         }
-        let (pts, widths) =
-            crate::entities::common::tapered_band_points(&band_verts, pline.is_closed, &to_wcs);
+        let (pts, widths) = crate::entities::common::tapered_band_points(
+            &band_verts,
+            pline.is_closed,
+            &to_wcs,
+        );
         let (fill_origin, fills) = wide_fills(pline);
         return RenderEntity {
             pick_tris: crate::entities::common::wide_band_tris(fill_origin, &fills),
@@ -440,36 +491,7 @@ fn to_render(pline: &LwPolyline) -> RenderEntity {
         };
     }
 
-    for i in 0..seg_count {
-        let v0 = &verts[i];
-        let v1 = &verts[(i + 1) % count];
-        let p0 = to_pt(v0);
-        let p1 = to_pt(v1);
-        let bulge = v0.bulge;
-
-        if bulge.abs() < 1e-9 {
-            tangents.push(TangentGeom::Line {
-                p1: [p0[0] as f32, p0[1] as f32, p0[2] as f32],
-                p2: [p1[0] as f32, p1[1] as f32, p1[2] as f32],
-            });
-        } else if let Some(arc) = crate::entities::common::BulgeArc::from_bulge(
-            [v0.location.x, v0.location.y],
-            [v1.location.x, v1.location.y],
-            bulge as f64,
-        ) {
-            let (wcx, wcy, wcz) = to_wcs(arc.center[0], arc.center[1]);
-            tangents.push(TangentGeom::Circle {
-                center: [wcx as f32, wcy as f32, wcz as f32],
-                radius: arc.radius as f32,
-            });
-        }
-
-        if i == 0 {
-            key_verts.push([p0[0], p0[1], p0[2]]);
-        }
-        key_verts.push([p1[0], p1[1], p1[2]]);
-    }
-
+    let (tangents, key_verts) = centerline_metadata(pline, &to_wcs);
     let (fill_origin, fills) = wide_fills(pline);
     RenderEntity {
         pick_tris: crate::entities::common::wide_band_tris(fill_origin, &fills),
@@ -487,20 +509,23 @@ fn to_render(pline: &LwPolyline) -> RenderEntity {
     }
 }
 
-/// The per-vertex `(location, bulge, start_width, end_width)` band description
-/// for a wide LwPolyline whose width VARIES — `None` when the width is uniform
-/// (a constant band) so the caller keeps the cheaper constant-width path.
-fn tapered_band_verts(pline: &LwPolyline) -> Option<Vec<([f64; 2], f64, f64, f64)>> {
+/// Effective segment widths for an LwPolyline band.
+fn band_verts(pline: &LwPolyline) -> Vec<([f64; 2], f64, f64, f64)> {
     let c = pline.constant_width;
-    let band: Vec<([f64; 2], f64, f64, f64)> = pline
+    pline
         .vertices
         .iter()
         .map(|v| {
-            let sw = if v.start_width > 1e-9 { v.start_width } else { c };
-            let ew = if v.end_width > 1e-9 { v.end_width } else { c };
+            let sw = effective_width(v.start_width, c);
+            let ew = effective_width(v.end_width, c);
             ([v.location.x, v.location.y], v.bulge, sw, ew)
         })
-        .collect();
+        .collect()
+}
+
+fn tapered_band_verts(
+    band: &[([f64; 2], f64, f64, f64)],
+) -> Option<&[([f64; 2], f64, f64, f64)]> {
     let w0 = band.first().map_or(0.0, |v| v.2);
     let varies = band
         .iter()
@@ -511,6 +536,47 @@ fn tapered_band_verts(pline: &LwPolyline) -> Option<Vec<([f64; 2], f64, f64, f64
     } else {
         None
     }
+}
+
+fn centerline_metadata(
+    pline: &LwPolyline,
+    to_wcs: &dyn Fn(f64, f64) -> (f64, f64, f64),
+) -> (Vec<TangentGeom>, Vec<[f64; 3]>) {
+    let count = pline.vertices.len();
+    let segment_count = if pline.is_closed {
+        count
+    } else {
+        count.saturating_sub(1)
+    };
+    let mut tangents = Vec::with_capacity(segment_count);
+    let mut key_vertices = Vec::with_capacity(segment_count + 1);
+    for index in 0..segment_count {
+        let start = &pline.vertices[index];
+        let end = &pline.vertices[(index + 1) % count];
+        let p0 = to_wcs(start.location.x, start.location.y);
+        let p1 = to_wcs(end.location.x, end.location.y);
+        if start.bulge.abs() < 1e-9 {
+            tangents.push(TangentGeom::Line {
+                p1: [p0.0 as f32, p0.1 as f32, p0.2 as f32],
+                p2: [p1.0 as f32, p1.1 as f32, p1.2 as f32],
+            });
+        } else if let Some(arc) = crate::entities::common::BulgeArc::from_bulge(
+            [start.location.x, start.location.y],
+            [end.location.x, end.location.y],
+            start.bulge,
+        ) {
+            let center = to_wcs(arc.center[0], arc.center[1]);
+            tangents.push(TangentGeom::Circle {
+                center: [center.0 as f32, center.1 as f32, center.2 as f32],
+                radius: arc.radius as f32,
+            });
+        }
+        if index == 0 {
+            key_vertices.push([p0.0, p0.1, p0.2]);
+        }
+        key_vertices.push([p1.0, p1.1, p1.2]);
+    }
+    (tangents, key_vertices)
 }
 
 /// Split at vertex `idx`: a closed polyline re-opens there (one piece); an
@@ -597,6 +663,246 @@ fn grips(pline: &LwPolyline) -> Vec<GripDef> {
     out
 }
 
+pub(crate) fn is_revision_cloud(pline: &LwPolyline) -> bool {
+    if !pline.is_closed || pline.vertices.len() < 3 {
+        return false;
+    }
+    let mut sign = 0.0_f64;
+    let mut magnitudes = Vec::with_capacity(pline.vertices.len());
+    for vertex in &pline.vertices {
+        let bulge = vertex.bulge;
+        if !bulge.is_finite() || bulge.abs() < 1.0e-9 {
+            return false;
+        }
+        if sign == 0.0 {
+            sign = bulge.signum();
+        } else if bulge.signum() != sign {
+            return false;
+        }
+        magnitudes.push(bulge.abs());
+    }
+    magnitudes.sort_by(f64::total_cmp);
+    let median = magnitudes[magnitudes.len() / 2];
+    (0.35..=0.65).contains(&median)
+        && magnitudes
+            .iter()
+            .filter(|value| (**value - median).abs() <= 0.15)
+            .count()
+            * 5
+            >= magnitudes.len() * 4
+}
+
+fn straight_guide(pline: &LwPolyline) -> Curve {
+    Curve::Polyline(Polyline {
+        vertices: pline
+            .vertices
+            .iter()
+            .map(|vertex| PolylineVertex::straight([vertex.location.x, vertex.location.y]))
+            .collect(),
+        closed: true,
+    })
+}
+
+fn revision_cloud_arc_length(pline: &LwPolyline) -> Option<f64> {
+    if !is_revision_cloud(pline) {
+        return None;
+    }
+    let total = straight_guide(pline).length();
+    (total.is_finite() && total > 0.0)
+        .then_some(total / pline.vertices.len() as f64)
+}
+
+fn cloud_anchors(curve: &Curve) -> Vec<f64> {
+    let segments = curve.segment_count();
+    let mut anchors = vec![0.0];
+    if segments <= 1 {
+        return anchors;
+    }
+    let delta = 1.0e-6 / segments as f64;
+    let corner_cosine = 30.0_f64.to_radians().cos();
+    for index in 1..segments {
+        let t = index as f64 / segments as f64;
+        let incoming = Vec2::from(curve.tangent_at(t - delta)).normalize();
+        let outgoing = Vec2::from(curve.tangent_at(t + delta)).normalize();
+        if incoming
+            .zip(outgoing)
+            .is_some_and(|(left, right)| left.dot(right) < corner_cosine)
+        {
+            anchors.push(curve.length_to(t));
+        }
+    }
+    anchors
+}
+
+fn cloud_points(curve: &Curve, requested: f64) -> Option<Vec<[f64; 2]>> {
+    if !curve.is_closed() || !requested.is_finite() || requested <= 0.0 {
+        return None;
+    }
+    let total = curve.length();
+    if !total.is_finite() || total <= 0.0 {
+        return None;
+    }
+    let anchors = cloud_anchors(curve);
+    let spans: Vec<(f64, f64)> = anchors
+        .iter()
+        .enumerate()
+        .map(|(index, start)| {
+            let end = anchors.get(index + 1).copied().unwrap_or(total);
+            (*start, end)
+        })
+        .collect();
+    let mut counts = Vec::with_capacity(spans.len());
+    let mut count_total = 0_usize;
+    for (start, end) in &spans {
+        let count = ((*end - *start) / requested).round().max(1.0);
+        if !count.is_finite() || count > MAX_REVCLOUD_VERTICES as f64 {
+            return None;
+        }
+        count_total = count_total.checked_add(count as usize)?;
+        if count_total > MAX_REVCLOUD_VERTICES {
+            return None;
+        }
+        counts.push(count as usize);
+    }
+    if count_total < 3 {
+        let longest = spans
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| {
+                (left.1 - left.0).total_cmp(&(right.1 - right.0))
+            })?
+            .0;
+        counts[longest] += 3 - count_total;
+    }
+    let mut points = Vec::new();
+    for ((start, end), count) in spans.into_iter().zip(counts) {
+        for step in 0..count {
+            points.push(curve.point_at_distance(
+                start + (end - start) * step as f64 / count as f64,
+            ));
+        }
+    }
+    let tolerance = requested.max(total) * 1.0e-12;
+    points.dedup_by(|right, left| Vec2::from(*left).distance((*right).into()) <= tolerance);
+    if points.len() >= 2
+        && Vec2::from(points[0]).distance((*points.last()?).into()) <= tolerance
+    {
+        points.pop();
+    }
+    (points.len() >= 3).then_some(points)
+}
+
+fn cloud_vertices(
+    points: &[[f64; 2]],
+    bulge: f64,
+    width_ratios: Option<(f64, f64)>,
+) -> Vec<LwVertex> {
+    points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| {
+            let next = points[(index + 1) % points.len()];
+            let chord = Vec2::from(*point).distance(next.into());
+            let mut vertex = LwVertex::from_coords(point[0], point[1]);
+            vertex.bulge = bulge;
+            if let Some((start, end)) = width_ratios {
+                vertex.start_width = start * chord;
+                vertex.end_width = end * chord;
+            }
+            vertex
+        })
+        .collect()
+}
+
+pub(crate) fn revision_cloud_from_curve(
+    curve: &Curve,
+    requested: f64,
+    reverse: bool,
+    width_ratios: Option<(f64, f64)>,
+) -> Option<LwPolyline> {
+    let points = cloud_points(curve, requested)?;
+    let area = signed_area(&points);
+    if !area.is_finite() || area.abs() <= f64::EPSILON {
+        return None;
+    }
+    let sign = if area > 0.0 { 1.0 } else { -1.0 };
+    let bulge = REVCLOUD_BULGE * sign * if reverse { -1.0 } else { 1.0 };
+    let mut cloud = LwPolyline::new();
+    cloud.is_closed = true;
+    cloud.vertices = cloud_vertices(&points, bulge, width_ratios);
+    Some(cloud)
+}
+
+fn median(mut values: Vec<f64>) -> Option<f64> {
+    values.sort_by(f64::total_cmp);
+    values.get(values.len() / 2).copied()
+}
+
+fn set_revision_cloud_arc_length(pline: &mut LwPolyline, requested: f64) {
+    if !is_revision_cloud(pline) || !requested.is_finite() || requested <= 0.0 {
+        return;
+    }
+    let guide = straight_guide(pline);
+    let points = match cloud_points(&guide, requested) {
+        Some(points) => points,
+        None => return,
+    };
+    let sign = pline.vertices[0].bulge.signum();
+    let magnitude = match median(
+        pline
+            .vertices
+            .iter()
+            .map(|vertex| vertex.bulge.abs())
+            .collect(),
+    ) {
+        Some(value) => value,
+        None => return,
+    };
+    let mut starts = Vec::new();
+    let mut ends = Vec::new();
+    for (index, vertex) in pline.vertices.iter().enumerate() {
+        let next = &pline.vertices[(index + 1) % pline.vertices.len()];
+        let chord = Vec2::new(vertex.location.x, vertex.location.y)
+            .distance(Vec2::new(next.location.x, next.location.y));
+        if chord > 0.0 && (vertex.start_width > 0.0 || vertex.end_width > 0.0) {
+            starts.push(vertex.start_width / chord);
+            ends.push(vertex.end_width / chord);
+        }
+    }
+    let width_ratios = match (median(starts), median(ends)) {
+        (Some(start), Some(end)) => Some((start, end)),
+        _ => None,
+    };
+    pline.vertices = cloud_vertices(&points, magnitude * sign, width_ratios);
+}
+
+pub(crate) fn is_rectangle(pline: &LwPolyline) -> bool {
+    if pline.common.extended_data.get_record("OCS_RECTANGLE").is_some() {
+        return true;
+    }
+    if !pline.is_closed
+        || pline.vertices.len() != 4
+        || pline.vertices.iter().any(|vertex| vertex.bulge.abs() > 1.0e-9)
+    {
+        return false;
+    }
+    let edges: Vec<Vec2> = (0..4)
+        .map(|index| {
+            let from = pline.vertices[index].location;
+            let to = pline.vertices[(index + 1) % 4].location;
+            Vec2::new(to.x - from.x, to.y - from.y)
+        })
+        .collect();
+    let lengths: Vec<f64> = edges.iter().map(|edge| edge.length()).collect();
+    if lengths.iter().any(|length| *length <= 1.0e-12) {
+        return false;
+    }
+    let tolerance = 1.0e-9;
+    edges[0].dot(edges[1]).abs() <= tolerance * lengths[0] * lengths[1]
+        && edges[0].cross(edges[2]).abs() <= tolerance * lengths[0] * lengths[2]
+        && edges[1].cross(edges[3]).abs() <= tolerance * lengths[1] * lengths[3]
+}
+
 fn properties(pline: &LwPolyline) -> Vec<PropSection> {
     let n = pline.vertices.len();
     // The panel's Current Vertex focus, clamped to this polyline's range.
@@ -608,55 +914,80 @@ fn properties(pline: &LwPolyline) -> Vec<PropSection> {
     let v = pline.vertices.get(vi);
     let vx = v.map_or(0.0, |v| v.location.x);
     let vy = v.map_or(0.0, |v| v.location.y);
-    let start_w = v.map_or(0.0, |v| v.start_width);
-    let end_w = v.map_or(0.0, |v| v.end_width);
+    let start_w = v.map_or(0.0, |v| {
+        effective_width(v.start_width, pline.constant_width)
+    });
+    let end_w = v.map_or(0.0, |v| {
+        effective_width(v.end_width, pline.constant_width)
+    });
     let mp = <LwPolyline as crate::entities::traits::MassPropsCalc>::mass_props(pline);
+    let cloud_arc_length = revision_cloud_arc_length(pline);
     let vertex_label = if n == 0 {
         "—".to_string()
     } else {
-        format!("{} / {}", vi + 1, n)
+        format!("{}", vi + 1)
     };
+    let mut misc_props = vec![
+        Property {
+            label: t!("Closed").into_owned(),
+            field: "closed",
+            value: PropValue::BoolToggle {
+                field: "closed",
+                value: pline.is_closed,
+            },
+        },
+        Property {
+            label: t!("Linetype generation").into_owned(),
+            field: "plinegen",
+            value: PropValue::BoolToggle {
+                field: "plinegen",
+                value: pline.plinegen,
+            },
+        },
+    ];
+    if let Some(arc_length) = cloud_arc_length {
+        misc_props.push(edit(
+            t!("Arc length").as_ref(),
+            "revcloud_arc_length",
+            arc_length,
+        ));
+    }
+    let mut geometry_props = vec![
+        stepper(t!("Current Vertex").as_ref(), "current_vertex", vertex_label),
+        edit(t!("Vertex X").as_ref(), "vertex_x", vx),
+        edit(t!("Vertex Y").as_ref(), "vertex_y", vy),
+        edit_scalar(t!("Bulge").as_ref(), "bulge", v.map_or(0.0, |vertex| vertex.bulge)),
+    ];
+    if !is_rectangle(pline) {
+        geometry_props.push(edit(t!("Start segment width").as_ref(), "start_width", start_w));
+        geometry_props.push(edit(t!("End segment width").as_ref(), "end_width", end_w));
+    }
+    geometry_props.extend([
+        edit(t!("Global width").as_ref(), "global_width", pline.constant_width),
+        edit(t!("Elevation").as_ref(), "elevation", pline.elevation),
+        ro(t!("Area").as_ref(), "area", format_area(mp.area)),
+        ro(t!("Length").as_ref(), "length", format_length(mp.perimeter)),
+    ]);
     vec![
         PropSection {
             title: t!("Geometry").into_owned(),
-            props: vec![
-                stepper(t!("Current Vertex").as_ref(), "current_vertex", vertex_label),
-                edit(t!("Vertex X").as_ref(), "vertex_x", vx),
-                edit(t!("Vertex Y").as_ref(), "vertex_y", vy),
-                edit(t!("Start segment width").as_ref(), "start_width", start_w),
-                edit(t!("End segment width").as_ref(), "end_width", end_w),
-                edit(t!("Global width").as_ref(), "global_width", pline.constant_width),
-                edit(t!("Elevation").as_ref(), "elevation", pline.elevation),
-                ro(t!("Area").as_ref(), "area", format!("{:.4}", mp.area)),
-                ro(t!("Length").as_ref(), "length", format!("{:.4}", mp.perimeter)),
-            ],
+            props: geometry_props,
         },
         PropSection {
             title: t!("Misc").into_owned(),
-            props: vec![
-                Property {
-                    label: t!("Closed").into_owned(),
-                    field: "closed",
-                    value: PropValue::BoolToggle {
-                        field: "closed",
-                        value: pline.is_closed,
-                    },
-                },
-                Property {
-                    label: t!("Linetype generation").into_owned(),
-                    field: "plinegen",
-                    value: PropValue::BoolToggle {
-                        field: "plinegen",
-                        value: pline.plinegen,
-                    },
-                },
-            ],
+            props: misc_props,
         },
     ]
 }
 
 fn apply_geom_prop(pline: &mut LwPolyline, field: &str, value: &str) {
     match field {
+        "revcloud_arc_length" => {
+            if let Some(value) = parse_f64(value) {
+                set_revision_cloud_arc_length(pline, value);
+            }
+            return;
+        }
         "closed" => {
             pline.is_closed = if value == "toggle" {
                 !pline.is_closed
@@ -699,7 +1030,7 @@ fn apply_geom_prop(pline: &mut LwPolyline, field: &str, value: &str) {
     };
     match field {
         "elevation" => pline.elevation = v,
-        "global_width" => pline.constant_width = v,
+        "global_width" if v.is_finite() && v >= 0.0 => pline.constant_width = v,
         "vertex_x" => {
             if let Some(vtx) = pline.vertices.get_mut(vi) {
                 vtx.location.x = v;
@@ -710,14 +1041,21 @@ fn apply_geom_prop(pline: &mut LwPolyline, field: &str, value: &str) {
                 vtx.location.y = v;
             }
         }
-        "start_width" => {
+        "start_width" if v.is_finite() && v >= 0.0 => {
             if let Some(vtx) = pline.vertices.get_mut(vi) {
                 vtx.start_width = v;
             }
         }
-        "end_width" => {
+        "end_width" if v.is_finite() && v >= 0.0 => {
             if let Some(vtx) = pline.vertices.get_mut(vi) {
                 vtx.end_width = v;
+            }
+        }
+        "bulge" => {
+            if v.is_finite() {
+                if let Some(vtx) = pline.vertices.get_mut(vi) {
+                    vtx.bulge = v.clamp(-1.0e6, 1.0e6);
+                }
             }
         }
         _ => {}
@@ -807,8 +1145,8 @@ fn apply_transform(pline: &mut LwPolyline, t: &EntityTransform) {
 }
 
 impl RenderConvertible for LwPolyline {
-    fn to_render(&self, _document: &acadrust::CadDocument) -> Option<RenderEntity> {
-        Some(to_render(self))
+    fn to_render(&self, document: &acadrust::CadDocument) -> Option<RenderEntity> {
+        Some(to_render(self, document.header.fill_mode))
     }
 }
 
@@ -929,16 +1267,8 @@ impl crate::entities::traits::Grippable for LwPolyline {
                 new_v.location.x = midpoint[0];
                 new_v.location.y = midpoint[1];
                 new_v.vertex_id = 0;
-                let effective_start = if v0.start_width > 1e-9 {
-                    v0.start_width
-                } else {
-                    self.constant_width
-                };
-                let effective_end = if v0.end_width > 1e-9 {
-                    v0.end_width
-                } else {
-                    self.constant_width
-                };
+                let effective_start = effective_width(v0.start_width, self.constant_width);
+                let effective_end = effective_width(v0.end_width, self.constant_width);
                 let middle_width = (effective_start + effective_end) * 0.5;
                 self.vertices[i0].end_width = middle_width;
                 new_v.start_width = middle_width;
@@ -999,7 +1329,6 @@ pub(crate) fn wide_fills(pl: &acadrust::entities::LwPolyline) -> ([f64; 2], Vec<
     // Feeding the stored width in whole draws every wide polyline twice as wide
     // as the file asks for, which on a donut (a closed 2-vertex bulge-1 polyline)
     // shows up as a disc 1.5× its real radius.
-    let hw_const = pl.constant_width as f32 * 0.5;
     let verts = &pl.vertices;
     let n = verts.len();
     if n < 2 {
@@ -1011,16 +1340,8 @@ pub(crate) fn wide_fills(pl: &acadrust::entities::LwPolyline) -> ([f64; 2], Vec<
     for i in 0..seg_count {
         let v0 = &verts[i];
         let v1 = &verts[(i + 1) % n];
-        let hw0 = if v0.start_width > 1e-9 {
-            v0.start_width as f32 * 0.5
-        } else {
-            hw_const
-        };
-        let hw1 = if v0.end_width > 1e-9 {
-            v0.end_width as f32 * 0.5
-        } else {
-            hw_const
-        };
+        let hw0 = effective_width(v0.start_width, pl.constant_width) as f32 * 0.5;
+        let hw1 = effective_width(v0.end_width, pl.constant_width) as f32 * 0.5;
         if hw0 < 1e-6 && hw1 < 1e-6 {
             continue;
         }
@@ -1053,32 +1374,20 @@ impl crate::entities::traits::MassPropsCalc for acadrust::entities::LwPolyline {
                 cy: 0.0,
             };
         }
-        // Shoelace area + perimeter
-        let mut area_sum = 0.0f64;
-        let mut perimeter = 0.0f64;
-        let mut cx_sum = 0.0f64;
-        let mut cy_sum = 0.0f64;
-        let n_segs = if p.is_closed { n } else { n - 1 };
-        for idx in 0..n_segs {
-            let v0 = &p.vertices[idx];
-            let v1 = &p.vertices[(idx + 1) % n];
-            let x0 = v0.location.x;
-            let y0 = v0.location.y;
-            let x1 = v1.location.x;
-            let y1 = v1.location.y;
-            area_sum += x0 * y1 - x1 * y0;
-            perimeter += ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
-            cx_sum += (x0 + x1) * (x0 * y1 - x1 * y0);
-            cy_sum += (y0 + y1) * (x0 * y1 - x1 * y0);
-        }
-        let area = (area_sum / 2.0).abs();
-        let (cx, cy) = if area > 1e-12 {
-            (cx_sum / (6.0 * area), cy_sum / (6.0 * area))
-        } else {
-            let sx: f64 = p.vertices.iter().map(|v| v.location.x).sum::<f64>() / n as f64;
-            let sy: f64 = p.vertices.iter().map(|v| v.location.y).sum::<f64>() / n as f64;
-            (sx, sy)
-        };
+        // Kernel measurement includes bulges and closes open curves only for area.
+        let curve = crate::entities::curve::lwpolyline_curve(p)
+            .expect("an LwPolyline with at least two vertices has a planar curve");
+        let area = curve.curve.enclosed_area().abs();
+        let perimeter = curve.length();
+        let center = curve
+            .curve
+            .enclosed_centroid()
+            .unwrap_or_else(|| {
+                let x = p.vertices.iter().map(|v| v.location.x).sum::<f64>() / n as f64;
+                let y = p.vertices.iter().map(|v| v.location.y).sum::<f64>() / n as f64;
+                [x, y]
+            });
+        let [cx, cy, _] = curve.plane.point_at(center);
         crate::entities::traits::MassProps {
             area,
             perimeter,

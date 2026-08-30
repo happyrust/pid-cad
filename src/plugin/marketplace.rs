@@ -219,14 +219,64 @@ pub fn fetch_release_info(repo: &str) -> Result<Vec<ReleaseInfo>, String> {
             let manifest_text = download_string(&manifest_asset.url)?;
             let manifest = external::parse_plugin_toml(&manifest_text)
                 .ok_or_else(|| format!("release {} plugin.toml is missing an id", release.tag))?;
+            let acadrust_source = manifest.acadrust_source.clone();
+            let acadrust_declared = manifest.acadrust_declared;
+            let acadrust_compatible = if !ocs_plugin_api::version_info::uses_acadrust_gate(
+                manifest.api_version,
+            ) {
+                true
+            } else if !acadrust_declared {
+                true
+            } else {
+                match acadrust_source.as_deref() {
+                    None | Some("") => false,
+                    Some(source) => ocs_plugin_api::version_info::acadrust_sources_compatible(
+                        source,
+                        ocs_plugin_api::version_info::host_acadrust_source(),
+                    ),
+                }
+            };
+            let rustc_version = manifest.rustc_version.clone();
+            let rustc_declared = manifest.rustc_declared;
+            let rustc_compatible = if !ocs_plugin_api::version_info::uses_acadrust_gate(
+                manifest.api_version,
+            ) {
+                true
+            } else {
+                match rustc_version.as_deref() {
+                    None | Some("") => false,
+                    Some(version) => ocs_plugin_api::version_info::rustc_versions_compatible(
+                        version,
+                        ocs_plugin_api::version_info::host_rustc_version(),
+                    ),
+                }
+            };
             Ok::<_, String>(ReleaseInfo {
                 tag: release.tag,
                 api_version: manifest.api_version,
+                acadrust_source,
+                acadrust_declared,
+                acadrust_compatible,
+                rustc_version,
+                rustc_declared,
+                rustc_compatible,
             })
         })();
         match result {
             Ok(release) => info.push(release),
             Err(error) => last_error = Some(error),
+        }
+    }
+
+    // Once a repo declares a fingerprint, require it on later API versions.
+    let any_acadrust_declared = info.iter().any(|r| r.acadrust_declared);
+    if any_acadrust_declared {
+        for r in &mut info {
+            if !r.acadrust_declared
+                && ocs_plugin_api::version_info::uses_acadrust_gate(r.api_version)
+            {
+                r.acadrust_compatible = false;
+            }
         }
     }
     if info.is_empty() {
@@ -283,20 +333,67 @@ fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Download and install a release's package into the plugins folder. Verifies
-/// the API version from the package's `plugin.toml` first. Returns the plugin
-/// id on success.
+/// the API version and, when present, the `acadrust` fingerprint from the
+/// package's `plugin.toml` first. Returns the plugin id on success.
 pub fn install(release: &Release, repository: &str) -> Result<String, String> {
     let lib = release.lib_asset().ok_or("no library for this platform")?;
     let toml = release.toml_asset().ok_or("release has no plugin.toml")?;
 
     let toml_text = download_string(&toml.url)?;
     let manifest = external::parse_plugin_toml(&toml_text).ok_or("plugin.toml is missing an id")?;
-    if manifest.api_version != ocs_plugin_api::API_VERSION {
+    if !ocs_plugin_api::manifest::host_accepts_plugin_version(manifest.api_version) {
         return Err(format!(
-            "API version {} is incompatible (host requires {})",
+            "API version {} is incompatible (host supports {}-{})",
             manifest.api_version,
-            ocs_plugin_api::API_VERSION
+            ocs_plugin_api::manifest::API_VERSION_MIN_SUPPORTED,
+            ocs_plugin_api::manifest::effective_max_api_version()
         ));
+    }
+
+    if ocs_plugin_api::version_info::uses_acadrust_gate(manifest.api_version)
+        && manifest.acadrust_declared
+    {
+        let Some(source) = manifest.acadrust_source.as_deref() else {
+            return Err(
+                "Release declares acadrust metadata but has no source; cannot verify ABI compatibility".to_string(),
+            );
+        };
+        if source.is_empty() {
+            return Err(
+                "Release declares acadrust metadata but has no source; cannot verify ABI compatibility".to_string(),
+            );
+        }
+        if !ocs_plugin_api::version_info::acadrust_sources_compatible(
+            source,
+            ocs_plugin_api::version_info::host_acadrust_source(),
+        ) {
+            let host_src = ocs_plugin_api::version_info::host_acadrust_source();
+            let plugin_hash = ocs_plugin_api::version_info::acadrust_source_hash(source)
+                .unwrap_or("unknown");
+            let host_hash = ocs_plugin_api::version_info::acadrust_source_hash(host_src)
+                .unwrap_or("unknown");
+            return Err(format!(
+                "Plugin built for acadrust @{plugin_hash}, but this host uses @{host_hash}"
+            ));
+        }
+    }
+
+    if ocs_plugin_api::version_info::uses_acadrust_gate(manifest.api_version) {
+        let Some(version) = manifest.rustc_version.as_deref() else {
+            return Err("Release has no rustc version; cannot verify ABI compatibility".to_string());
+        };
+        if version.is_empty() {
+            return Err("Release has no rustc version; cannot verify ABI compatibility".to_string());
+        }
+        if !ocs_plugin_api::version_info::rustc_versions_compatible(
+            version,
+            ocs_plugin_api::version_info::host_rustc_version(),
+        ) {
+            let host_rustc = ocs_plugin_api::version_info::host_rustc_version();
+            return Err(format!(
+                "Plugin built with {version}, host requires {host_rustc} - rebuild required"
+            ));
+        }
     }
 
     let dir = external::plugins_dir()

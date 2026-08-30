@@ -7,7 +7,7 @@ use crate::scene::GripDef;
 use crate::scene::{ObjectIsolationState, Scene};
 use crate::snap::SnapResult;
 use crate::ui::{LayerPanel, PropertiesPanel};
-use acadrust::tables::Ucs;
+use acadrust::tables::{normalize_name, Ucs};
 use acadrust::{CadDocument, EntityType, Handle};
 use iced;
 use crate::t;
@@ -195,10 +195,6 @@ pub(super) struct DocumentTab {
     pub(super) active_mleader_style: String,
     /// Last camera_generation value written back to the document.
     pub(super) last_synced_camera_gen: u64,
-    /// Render-state key of `scene.document.preview`. Matching saves reuse the
-    /// encoded DWG thumbnail instead of rescanning every resident wire.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(super) thumbnail_cache_key: Option<super::ThumbnailCacheKey>,
     /// Sentinel "Welcome / Start" tab. Always at index 0 when present.
     /// Cannot be closed; the viewport area renders a welcome page instead
     /// of the model-space shader. The scene is still constructed so the
@@ -222,6 +218,18 @@ pub(super) struct DocumentTab {
 }
 
 impl DocumentTab {
+    pub(super) fn rename_layer(&mut self, old_name: &str, new_name: &str) -> bool {
+        let active = normalize_name(&self.active_layer) == normalize_name(old_name);
+        if !self.scene.rename_layer(old_name, new_name) {
+            return false;
+        }
+        if active {
+            self.active_layer = new_name.to_string();
+        }
+        self.dirty = true;
+        true
+    }
+
     pub(super) fn active_block_edit_session(&self) -> Option<&BlockEditSession> {
         self.active_block_edit
             .and_then(|index| self.block_edits.get(index))
@@ -248,12 +256,11 @@ impl DocumentTab {
             .unwrap_or(glam::DVec3::ZERO)
     }
 
-    /// True when the active pane edits **model-space** geometry: the Model tab,
-    /// or inside a floating viewport (MSPACE). The UCS applies in both; plain
-    /// paper space (no active viewport) is excluded. Single predicate so every
-    /// UCS-aware system shares one rule. [[feedback_shared_infra]]
+    /// True when the active pane has a drawing coordinate plane.
     pub(super) fn editing_model_space(&self) -> bool {
-        self.scene.current_layout == "Model" || self.scene.active_viewport.is_some()
+        self.scene.current_layout == "Model"
+            || self.scene.active_viewport.is_some()
+            || self.active_ucs.is_some()
     }
 
     /// The document's saved model-space UCS (header), as a `Ucs`. `None` when it
@@ -313,9 +320,51 @@ impl DocumentTab {
         }
     }
 
+    pub(super) fn ucs_from_layout(&self) -> Option<Ucs> {
+        let layout = self.scene.document.objects.values().find_map(|object| {
+            let acadrust::objects::ObjectType::Layout(layout) = object else {
+                return None;
+            };
+            (layout.name == self.scene.current_layout).then_some(layout)
+        })?;
+        let mut ucs = self
+            .scene
+            .document
+            .ucss
+            .iter()
+            .find(|ucs| ucs.handle == layout.named_ucs)
+            .cloned()
+            .unwrap_or_else(|| Ucs::new("*PAPERUCS*"));
+        ucs.origin = acadrust::types::Vector3::new(
+            layout.ucs_origin.0,
+            layout.ucs_origin.1,
+            layout.ucs_origin.2,
+        );
+        ucs.x_axis = acadrust::types::Vector3::new(
+            layout.ucs_x_axis.0,
+            layout.ucs_x_axis.1,
+            layout.ucs_x_axis.2,
+        );
+        ucs.y_axis = acadrust::types::Vector3::new(
+            layout.ucs_y_axis.0,
+            layout.ucs_y_axis.1,
+            layout.ucs_y_axis.2,
+        );
+        ucs.elevation = layout.elevation;
+        ucs.ortho_type = layout.ucs_ortho_type;
+        ucs.named_ucs_handle = layout.named_ucs;
+        ucs.base_ucs_handle = layout.base_ucs;
+        let is_world = layout.named_ucs.is_null()
+            && layout.base_ucs.is_null()
+            && layout.ucs_ortho_type == 0
+            && layout.elevation.abs() <= f64::EPSILON
+            && super::helpers::UcsXform::from_ucs(&ucs).is_identity();
+        (!is_world).then_some(ucs)
+    }
+
     /// Set `active_ucs` to the UCS of the *current pane*: the entered viewport's
-    /// own per-viewport UCS, the model header UCS in the Model tab, or none in
-    /// plain paper space. Keeps the ViewCube in lock-step. Call on every pane
+    /// own per-viewport UCS, the model header UCS, or the layout UCS. Keeps the
+    /// ViewCube in lock-step. Call on every pane
     /// change (enter/exit viewport, layout / tab switch, load) so one field
     /// drives all UCS-aware systems regardless of where editing happens.
     pub(super) fn refresh_active_ucs(&mut self) {
@@ -326,15 +375,52 @@ impl DocumentTab {
         } else if self.scene.current_layout == "Model" {
             self.model_ucs_from_header()
         } else {
-            None
+            self.ucs_from_layout()
         };
+        if self.active_block_edit.is_none()
+            && self.scene.active_viewport.is_none()
+            && self.scene.current_layout != "Model"
+        {
+            self.sync_paper_ucs_header();
+        }
         self.sync_ucs_to_scene();
+    }
+
+    fn sync_paper_ucs_header(&mut self) {
+        use acadrust::types::Vector3;
+        let header = &mut self.scene.document.header;
+        match &self.active_ucs {
+            Some(ucs) => {
+                header.paper_space_ucs_origin = ucs.origin;
+                header.paper_space_ucs_x_axis = ucs.x_axis;
+                header.paper_space_ucs_y_axis = ucs.y_axis;
+                header.paper_elevation = ucs.elevation;
+                header.paper_space_ucs_name = if (ucs.named_ucs_handle.is_valid()
+                    || ucs.handle.is_valid())
+                    && !ucs.name.starts_with('*')
+                {
+                    ucs.name.clone()
+                } else {
+                    String::new()
+                };
+                header.paper_ucs_ortho_ref = ucs.base_ucs_handle;
+                header.paper_ucs_ortho_view = ucs.ortho_type;
+            }
+            None => {
+                header.paper_space_ucs_origin = Vector3::ZERO;
+                header.paper_space_ucs_x_axis = Vector3::UNIT_X;
+                header.paper_space_ucs_y_axis = Vector3::UNIT_Y;
+                header.paper_elevation = 0.0;
+                header.paper_space_ucs_name.clear();
+                header.paper_ucs_ortho_ref = Handle::NULL;
+                header.paper_ucs_ortho_view = 0;
+            }
+        }
     }
 
     /// Persist `active_ucs` back to its pane's storage so it round-trips: the
     /// entered viewport's per-viewport UCS fields, or the document header's
-    /// model-space UCS in the Model tab. No-op in plain paper space. Call after
-    /// any UCS change.
+    /// model-space UCS in the Model tab, or the layout UCS. Call after a change.
     pub(super) fn persist_active_ucs(&mut self) {
         use acadrust::types::Vector3;
         if let Some(index) = self.active_block_edit {
@@ -377,6 +463,48 @@ impl DocumentTab {
                     h.model_space_ucs_name.clear();
                 }
             }
+        } else {
+            let (origin, x_axis, y_axis, elevation, ortho, named, base) =
+                match &self.active_ucs {
+                    Some(ucs) => (
+                        ucs.origin,
+                        ucs.x_axis,
+                        ucs.y_axis,
+                        ucs.elevation,
+                        ucs.ortho_type,
+                        if ucs.named_ucs_handle.is_valid() {
+                            ucs.named_ucs_handle
+                        } else {
+                            ucs.handle
+                        },
+                        ucs.base_ucs_handle,
+                    ),
+                    None => (
+                        Vector3::ZERO,
+                        Vector3::UNIT_X,
+                        Vector3::UNIT_Y,
+                        0.0,
+                        0,
+                        Handle::NULL,
+                        Handle::NULL,
+                    ),
+                };
+            for object in self.scene.document.objects.values_mut() {
+                let acadrust::objects::ObjectType::Layout(layout) = object else {
+                    continue;
+                };
+                if layout.name == self.scene.current_layout {
+                    layout.ucs_origin = (origin.x, origin.y, origin.z);
+                    layout.ucs_x_axis = (x_axis.x, x_axis.y, x_axis.z);
+                    layout.ucs_y_axis = (y_axis.x, y_axis.y, y_axis.z);
+                    layout.elevation = elevation;
+                    layout.ucs_ortho_type = ortho;
+                    layout.named_ucs = named;
+                    layout.base_ucs = base;
+                    break;
+                }
+            }
+            self.sync_paper_ucs_header();
         }
     }
 
@@ -474,8 +602,6 @@ impl DocumentTab {
             active_block_edit: None,
             active_mleader_style: "Standard".to_string(),
             last_synced_camera_gen: 0,
-            #[cfg(not(target_arch = "wasm32"))]
-            thumbnail_cache_key: None,
             is_start: false,
             pan_mode: false,
             orbit_mode: false,
@@ -546,6 +672,11 @@ impl HistorySnapshot {
                 )
                 .saturating_add(d.selected_before.len().saturating_mul(16))
                 .saturating_add(d.selected_after.len().saturating_mul(16))
+                .saturating_add(
+                    d.active_layer
+                        .as_ref()
+                        .map_or(0, |(before, after)| before.len().saturating_add(after.len())),
+                )
                 .saturating_add(d.label.len()),
             HistorySnapshot::ObjectVisibility(v) => v
                 .before
@@ -598,6 +729,7 @@ pub(super) struct DeltaSnapshot {
     pub(super) selected_after: Vec<Handle>,
     pub(super) dirty_before: bool,
     pub(super) dirty_after: bool,
+    pub(super) active_layer: Option<(String, String)>,
     /// Opposite non-entity document state. `apply_delta_state` swaps this with
     /// the live structure, so the same allocation shuttles between undo/redo.
     pub(super) structure: Option<StructureSnapshot>,
@@ -671,6 +803,7 @@ pub(super) struct HistoryState {
 pub(super) struct PendingHistorySnapshot {
     pub(super) label: String,
     pub(super) current_layout: String,
+    pub(super) active_layer: String,
     pub(super) selected_before: Vec<Handle>,
     pub(super) dirty_before: bool,
     pub(super) structure_before: CadDocument,

@@ -1,5 +1,22 @@
 use super::*;
 
+fn selected_solid(app: &OpenCADStudio, tab: usize) -> Option<acadrust::Handle> {
+    let scene = &app.tabs.get(tab)?.scene;
+    let selected = scene.selected_handles_in_order();
+    let [handle] = selected.as_slice() else {
+        return None;
+    };
+
+    if matches!(
+        scene.document.get_entity(*handle),
+        Some(acadrust::EntityType::Solid3D(_))
+    ) {
+        Some(*handle)
+    } else {
+        None
+    }
+}
+
 impl OpenCADStudio {
     pub(super) fn dispatch_dim(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         match cmd {
@@ -31,9 +48,27 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }
 
+            "DIMJOGGED" | "DIMJOG" => {
+                use crate::modules::annotate::jogged_radius_dim::JoggedRadiusDimensionCommand;
+                let defaults = crate::scene::creation_style::current_dimension_defaults(
+                    &self.tabs[i].scene.document,
+                );
+                let multiplier = self.tabs[i].scene.creation_annotation_multiplier();
+                let new_cmd = JoggedRadiusDimensionCommand::new(defaults, multiplier);
+                self.command_line.push_info(&new_cmd.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(new_cmd));
+            }
+
             "DIMANGULAR" => {
                 use crate::modules::annotate::angular_dim::AngularDimensionCommand;
                 let new_cmd = AngularDimensionCommand::new();
+                self.command_line.push_info(&new_cmd.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(new_cmd));
+            }
+
+            "DIMARC" => {
+                use crate::modules::annotate::arc_length_dim::ArcLengthDimensionCommand;
+                let new_cmd = ArcLengthDimensionCommand::new();
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }
@@ -86,6 +121,7 @@ impl OpenCADStudio {
                     .selected_entities()
                     .iter()
                     .map(|(h, _)| *h)
+                    .filter(|handle| !self.tabs[i].scene.is_layer_locked(*handle))
                     .collect();
                 if handles.is_empty() {
                     self.command_line
@@ -208,6 +244,7 @@ impl OpenCADStudio {
                     .selected_entities()
                     .iter()
                     .map(|(h, _)| *h)
+                    .filter(|handle| !self.tabs[i].scene.is_layer_locked(*handle))
                     .collect();
                 if handles.is_empty() {
                     self.command_line
@@ -297,6 +334,7 @@ impl OpenCADStudio {
                         )
                     })
                     .map(|(h, _)| *h)
+                    .filter(|handle| !self.tabs[i].scene.is_layer_locked(*handle))
                     .collect();
                 if handles.is_empty() {
                     self.command_line
@@ -374,6 +412,7 @@ impl OpenCADStudio {
                     .iter()
                     .filter(|(_, e)| matches!(e, acadrust::EntityType::Text(_)))
                     .map(|(h, _)| *h)
+                    .filter(|handle| !self.tabs[i].scene.is_layer_locked(*handle))
                     .collect();
                 if handles.is_empty() {
                     self.command_line
@@ -469,7 +508,9 @@ impl OpenCADStudio {
                     .selected_entities()
                     .iter()
                     .filter_map(|(h, e)| match e {
-                        acadrust::EntityType::Text(t) => {
+                        acadrust::EntityType::Text(t)
+                            if !self.tabs[i].scene.is_layer_locked(*h) =>
+                        {
                             Some((*h, t.insertion_point.x, t.insertion_point.y))
                         }
                         _ => None,
@@ -563,18 +604,37 @@ impl OpenCADStudio {
                         _ => None,
                     });
                 let multiplier = self.tabs[i].scene.creation_annotation_multiplier();
+                let block_sources = self.tabs[i]
+                    .scene
+                    .document
+                    .block_records
+                    .iter()
+                    .filter(|block| !block.name.is_empty() && !block.name.starts_with('*'))
+                    .map(|block| (block.name.clone(), block.handle))
+                    .collect();
+                let layers = self.tabs[i]
+                    .scene
+                    .document
+                    .layers
+                    .iter()
+                    .map(|layer| layer.name.clone())
+                    .collect();
+                let text_styles = self.tabs[i]
+                    .scene
+                    .document
+                    .text_styles
+                    .iter()
+                    .map(|style| (style.name.clone(), style.handle))
+                    .collect();
                 let new_cmd = style.map_or_else(MLeaderCommand::new, |style| {
                     MLeaderCommand::with_style(style, multiplier)
-                });
+                }).with_drawing_resources(block_sources, layers, text_styles);
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }
 
             "TOLERANCE" => {
-                use crate::modules::annotate::tolerance_cmd::ToleranceCommand;
-                let cmd = ToleranceCommand::new();
-                self.command_line.push_info(&cmd.prompt());
-                self.tabs[i].active_cmd = Some(Box::new(cmd));
+                self.open_tolerance_dialog(None);
             }
 
             "TABLE" => {
@@ -608,138 +668,87 @@ impl OpenCADStudio {
 
             "DIMCONTINUE" => {
                 use crate::modules::annotate::dim_continue::DimContinueCommand;
-                let cmd = if let Some((p1, p2, dp, rot, trot)) =
-                    find_last_linear_dim(&self.tabs[i].scene)
-                {
-                    DimContinueCommand::from_base(p1, p2, dp, rot, trot)
-                } else {
-                    DimContinueCommand::new()
-                };
+                let scene = &self.tabs[i].scene;
+                let recent = scene
+                    .last_created_dimension
+                    .filter(|handle| scene.entity_belongs_to_active_space(*handle))
+                    .and_then(|handle| scene.document.get_entity(handle))
+                    .cloned();
+                let cmd = DimContinueCommand::new(
+                    recent,
+                    self.dimension_continue_mode == 1,
+                );
                 self.command_line.push_info(&cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(cmd));
             }
 
             "DIMBASELINE" => {
                 use crate::modules::annotate::dim_baseline::DimBaselineCommand;
-                let cmd = if let Some((p1, p2, dp, rot, trot)) =
-                    find_last_linear_dim(&self.tabs[i].scene)
-                {
-                    let doc = &self.tabs[i].scene.document;
-                    let dimdli = doc
-                        .dim_styles
-                        .iter()
-                        .find(|s| {
-                            s.name
-                                .eq_ignore_ascii_case(&doc.header.current_dimstyle_name)
-                        })
-                        .map(|s| s.dimdli as f32)
-                        .unwrap_or(1.5);
-                    DimBaselineCommand::from_base(p1, p2, dp, rot, trot, dimdli)
+                let scene = &self.tabs[i].scene;
+                let recent = scene
+                    .last_created_dimension
+                    .filter(|handle| scene.entity_belongs_to_active_space(*handle))
+                    .and_then(|handle| scene.document.get_entity(handle))
+                    .cloned();
+                let dimdli_by_style = scene
+                    .document
+                    .dim_styles
+                    .iter()
+                    .map(|style| (style.name.to_ascii_lowercase(), style.dimdli))
+                    .collect();
+                let fallback_dimdli = if scene.document.header.measurement == 1 {
+                    3.75
                 } else {
-                    DimBaselineCommand::new()
+                    0.38
                 };
+                let current_style_name = scene.document.header.current_dimstyle_name.clone();
+                let cmd = DimBaselineCommand::new(
+                    recent,
+                    dimdli_by_style,
+                    current_style_name,
+                    fallback_dimdli,
+                    self.dimension_continue_mode == 1,
+                );
                 self.command_line.push_info(&cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(cmd));
             }
 
             "QDIM" => {
                 use crate::modules::annotate::qdim::QdimCommand;
-                let cmd = QdimCommand::new();
-                self.command_line.push_info(&cmd.prompt());
-                self.tabs[i].active_cmd = Some(Box::new(cmd));
-            }
-
-            // QDIM second stage: the front-end relaunched with the picked
-            // dimension-line point and the gathered geometry now selected. Build
-            // a continuous chain of linear dimensions across the endpoints.
-            cmd if cmd.starts_with("QDIM_PLACE ") => {
-                let nums: Vec<f64> = cmd
-                    .split_whitespace()
-                    .skip(1)
-                    .filter_map(|s| s.parse().ok())
-                    .collect();
-                if nums.len() < 3 {
-                    return Some(Task::none());
-                }
-                let plane = if self.tabs[i].editing_model_space() {
-                    self.tabs[i].ucs_xform().working_plane()
-                } else {
-                    crate::command::WorkingPlane::default()
-                };
-                let place = plane.to_local(glam::DVec3::new(nums[0], nums[1], nums[2]));
-                let handles: Vec<acadrust::Handle> = self.tabs[i]
+                let document = &self.tabs[i].scene.document;
+                let dim_spacing = document
+                    .dim_styles
+                    .iter()
+                    .find(|style| {
+                        style
+                            .name
+                            .eq_ignore_ascii_case(&document.header.current_dimstyle_name)
+                    })
+                    .map(|style| style.dimdli)
+                    .unwrap_or_else(|| {
+                        if document.header.measurement == 1 {
+                            3.75
+                        } else {
+                            0.38
+                        }
+                    });
+                let selection = self.tabs[i]
                     .scene
                     .selected_entities()
-                    .iter()
-                    .map(|(h, _)| *h)
+                    .into_iter()
+                    .map(|(handle, entity)| crate::command::SelectionEntity {
+                        handle,
+                        entity: entity.clone(),
+                        surface_area: None,
+                    })
                     .collect();
-                let mut pts: Vec<glam::DVec3> = Vec::new();
-                for h in &handles {
-                    if let Some(e) = self.tabs[i].scene.document.get_entity(*h) {
-                        qdim_collect_points(e, &mut pts);
-                    }
-                }
-                for point in &mut pts {
-                    *point = plane.to_local(*point);
-                }
-                if pts.len() < 2 {
-                    self.command_line
-                        .push_error(crate::t!("QDIM: no dimensionable endpoints in the selection.").as_ref());
-                    return Some(Task::none());
-                }
-                // Choose the dimension axis from the points' spread: a wider X
-                // span dimensions horizontally (ordered by X), else vertically.
-                let (minx, maxx) = pts
-                    .iter()
-                    .fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.x), b.max(p.x)));
-                let (miny, maxy) = pts
-                    .iter()
-                    .fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.y), b.max(p.y)));
-                let horizontal = (maxx - minx) >= (maxy - miny);
-                if horizontal {
-                    pts.sort_by(|a, b| a.x.total_cmp(&b.x));
-                    pts.dedup_by(|a, b| (a.x - b.x).abs() < 1e-4);
-                } else {
-                    pts.sort_by(|a, b| a.y.total_cmp(&b.y));
-                    pts.dedup_by(|a, b| (a.y - b.y).abs() < 1e-4);
-                }
-                if pts.len() < 2 {
-                    self.command_line
-                        .push_error(crate::t!("QDIM: endpoints collapse to a single position.").as_ref());
-                    return Some(Task::none());
-                }
-                self.push_undo_snapshot(i, "QDIM");
-                let v = |p: glam::DVec3| {
-                    acadrust::types::Vector3::new(p.x, p.y, p.z)
-                };
-                let mut made = 0usize;
-                for w in pts.windows(2) {
-                    let (p1, p2) = (w[0], w[1]);
-                    let mut dim = acadrust::entities::DimensionLinear::new(v(p1), v(p2));
-                    dim.rotation = if horizontal {
-                        0.0
-                    } else {
-                        std::f64::consts::FRAC_PI_2
-                    };
-                    // Dim line passes through the picked perpendicular position.
-                    let def = if horizontal {
-                        glam::DVec3::new((p1.x + p2.x) * 0.5, place.y, 0.0)
-                    } else {
-                        glam::DVec3::new(place.x, (p1.y + p2.y) * 0.5, 0.0)
-                    };
-                    dim.definition_point = v(def);
-                    dim.base.definition_point = v(def);
-                    dim.base.actual_measurement = dim.measurement();
-                    let entity = acadrust::EntityType::Dimension(
-                        acadrust::entities::Dimension::Linear(dim),
-                    );
-                    self.commit_entity(plane.place_entity(entity));
-                    made += 1;
-                }
-                self.tabs[i].dirty = true;
-                self.command_line
-                    .push_output(crate::tf!("QDIM  {made} dimensions created.").as_ref());
-                return Some(Task::none());
+                let cmd = QdimCommand::new(
+                    selection,
+                    dim_spacing,
+                    self.quick_dimension_snap_priority,
+                );
+                self.command_line.push_info(&cmd.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(cmd));
             }
 
             "DIMEDIT" => {
@@ -914,30 +923,7 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(cmd));
             }
 
-            // Bare ZOOM prompts with the mode options as clickable keywords;
-            // the sub-keyword forms (ZOOM EXTENTS / WINDOW / …) run directly.
-            "ZOOM" => {
-                use crate::command::KeywordCommand;
-                let c = KeywordCommand::new(
-                    "ZOOM",
-                    "ZOOM  [Window / Extents / Previous / Object / All / Dynamic / Extents All / In / Out / Scale]:",
-                    vec![
-                        ("Window", "W", None),
-                        ("Extents", "E", None),
-                        ("Previous", "P", None),
-                        ("Object", "O", None),
-                        ("All", "A", None),
-                        ("Dynamic", "D", None),
-                        ("Extents All", "EA", None),
-                        ("In", "I", None),
-                        ("Out", "OUT", None),
-                        ("Scale", "S", Some("ZOOM  scale factor (e.g. 2 or 0.5):")),
-                    ],
-                );
-                self.command_line.push_info(&c.prompt());
-                self.tabs[i].active_cmd = Some(Box::new(c));
-            }
-            "ZOOM WINDOW" | "ZOOM W" | "ZW" => {
+            "ZOOM" | "ZOOM WINDOW" | "ZOOM W" | "ZW" => {
                 use crate::modules::view::zoom_window::ZoomWindowCommand;
                 let new_cmd = ZoomWindowCommand::new();
                 self.command_line.push_info(&new_cmd.prompt());
@@ -965,6 +951,20 @@ impl OpenCADStudio {
                 let new_cmd = StretchCommand::new(handles, wires);
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
+            }
+
+            "SOLIDFILLET" => {
+                use crate::modules::model::edge_cmd::{EdgeOperation, SolidEdgeCommand};
+                let command = SolidEdgeCommand::new(EdgeOperation::Fillet, selected_solid(self, i));
+                self.command_line.push_info(&command.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(command));
+            }
+
+            "FILLET" if selected_solid(self, i).is_some() => {
+                use crate::modules::model::edge_cmd::{EdgeOperation, SolidEdgeCommand};
+                let command = SolidEdgeCommand::new(EdgeOperation::Fillet, selected_solid(self, i));
+                self.command_line.push_info(&command.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(command));
             }
 
             "FILLET" => {
@@ -1100,6 +1100,20 @@ impl OpenCADStudio {
                 }
             }
 
+            "SOLIDCHAMFER" => {
+                use crate::modules::model::edge_cmd::{EdgeOperation, SolidEdgeCommand};
+                let command = SolidEdgeCommand::new(EdgeOperation::Chamfer, selected_solid(self, i));
+                self.command_line.push_info(&command.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(command));
+            }
+
+            "CHAMFER" if selected_solid(self, i).is_some() => {
+                use crate::modules::model::edge_cmd::{EdgeOperation, SolidEdgeCommand};
+                let command = SolidEdgeCommand::new(EdgeOperation::Chamfer, selected_solid(self, i));
+                self.command_line.push_info(&command.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(command));
+            }
+
             "CHAMFER" => {
                 use crate::modules::draw::modify::fillet::ChamferCommand;
                 let entities: Vec<_> = self.tabs[i]
@@ -1127,7 +1141,12 @@ impl OpenCADStudio {
 
             "EXPLODE" => {
                 use crate::modules::draw::modify::explode::explode_entity;
-                let entities: Vec<_> = self.tabs[i].scene.selected_entities().into_iter().collect();
+                let entities: Vec<_> = self.tabs[i]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .filter(|(handle, _)| !self.tabs[i].scene.is_layer_locked(*handle))
+                    .collect();
                 if entities.is_empty() {
                     use crate::modules::draw::select::SelectObjectsCommand;
                     let cmd = SelectObjectsCommand::new("EXPLODE");
@@ -1256,49 +1275,6 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }
 
-            // DIMJOGGED <DJO> — create a jogged radius dimension on the selected
-            // arc/circle: a standard radius dim carrying an OCS_JOGGED XData marker
-            // that the geometry generator renders with a foreshortened zig-zag.
-            "DIMJOGGED" | "DIMJOG" => {
-                use acadrust::entities::{Dimension, DimensionRadius};
-                use acadrust::types::Vector3;
-                use acadrust::xdata::{ExtendedDataRecord, XDataValue};
-                let found =
-                    self.tabs[i]
-                        .scene
-                        .selected_entities()
-                        .iter()
-                        .find_map(|(_, e)| match e {
-                            acadrust::EntityType::Arc(a) => Some((a.center, a.radius)),
-                            acadrust::EntityType::Circle(c) => Some((c.center, c.radius)),
-                            _ => None,
-                        });
-                let Some((center, radius)) = found else {
-                    self.command_line
-                        .push_error(crate::t!("DIMJOGGED: select an arc or circle first.").as_ref());
-                    return None;
-                };
-                if radius <= 0.0 {
-                    self.command_line.push_error(crate::t!("DIMJOGGED: invalid radius.").as_ref());
-                    return None;
-                }
-                let k = std::f64::consts::FRAC_1_SQRT_2;
-                let arc_point =
-                    Vector3::new(center.x + radius * k, center.y + radius * k, center.z);
-                let mut dim = DimensionRadius::new(center, arc_point);
-                dim.base.common.layer = self.tabs[i].active_layer.clone();
-                let mut rec = ExtendedDataRecord::new("OCS_JOGGED");
-                rec.add_value(XDataValue::String("1".to_string()));
-                dim.base.common.extended_data.add_record(rec);
-                self.push_undo_snapshot(i, "DIMJOGGED");
-                self.tabs[i]
-                    .scene
-                    .add_entity(acadrust::EntityType::Dimension(Dimension::Radius(dim)));
-                self.tabs[i].dirty = true;
-                self.command_line
-                    .push_output(crate::t!("DIMJOGGED: created a jogged radius dimension.").as_ref());
-            }
-
             // ARCTEXT <text> — lay the text out as one Text entity per character
             // along the selected arc, each rotated to follow the tangent.
             "ARCTEXT" => {
@@ -1368,120 +1344,6 @@ impl OpenCADStudio {
             _ => return None,
         }
         Some(self.finish_dispatch(cmd))
-    }
-}
-
-/// Find the last placed linear or aligned dimension in the document.
-/// Returns `(first_point, second_point, definition_point, rotation_rad)` in world-space.
-fn find_last_linear_dim(
-    scene: &crate::scene::Scene,
-) -> Option<(glam::Vec3, glam::Vec3, glam::Vec3, f64, f64)> {
-    use acadrust::entities::Dimension;
-    let mut best_handle: u64 = 0;
-    let mut result: Option<(glam::Vec3, glam::Vec3, glam::Vec3, f64, f64)> = None;
-
-    for entity in scene.document.entities() {
-        if let acadrust::EntityType::Dimension(dim) = entity {
-            let h = entity.common().handle.value();
-            if h <= best_handle {
-                continue;
-            }
-            let item = match dim {
-                Dimension::Linear(d) => {
-                    let p1 = glam::Vec3::new(
-                        d.first_point.x as f32,
-                        d.first_point.y as f32,
-                        d.first_point.z as f32,
-                    );
-                    let p2 = glam::Vec3::new(
-                        d.second_point.x as f32,
-                        d.second_point.y as f32,
-                        d.second_point.z as f32,
-                    );
-                    let dp = glam::Vec3::new(
-                        d.base.definition_point.x as f32,
-                        d.base.definition_point.y as f32,
-                        d.base.definition_point.z as f32,
-                    );
-                    Some((p1, p2, dp, d.rotation, d.base.text_rotation))
-                }
-                Dimension::Aligned(d) => {
-                    let p1 = glam::Vec3::new(
-                        d.first_point.x as f32,
-                        d.first_point.y as f32,
-                        d.first_point.z as f32,
-                    );
-                    let p2 = glam::Vec3::new(
-                        d.second_point.x as f32,
-                        d.second_point.y as f32,
-                        d.second_point.z as f32,
-                    );
-                    let dp = glam::Vec3::new(
-                        d.base.definition_point.x as f32,
-                        d.base.definition_point.y as f32,
-                        d.base.definition_point.z as f32,
-                    );
-                    let dx = (d.second_point.x - d.first_point.x) as f32;
-                    let dy = (d.second_point.y - d.first_point.y) as f32;
-                    let rot = dy.atan2(dx) as f64;
-                    Some((p1, p2, dp, rot, d.base.text_rotation))
-                }
-                _ => None,
-            };
-            if let Some(data) = item {
-                best_handle = h;
-                result = Some(data);
-            }
-        }
-    }
-    result
-}
-
-/// Collect candidate dimension endpoints from an entity for QDIM — line ends,
-/// polyline vertices, arc endpoints — in world space.
-fn qdim_collect_points(e: &acadrust::EntityType, out: &mut Vec<glam::DVec3>) {
-    use acadrust::EntityType as ET;
-    let p = |v: &acadrust::types::Vector3| glam::DVec3::new(v.x, v.y, v.z);
-    let ocs = |point: (f64, f64, f64), normal: acadrust::types::Vector3| {
-        let world = crate::scene::view::transform::ocs_point_to_wcs(
-            point,
-            (normal.x, normal.y, normal.z),
-        );
-        glam::DVec3::new(world.0, world.1, world.2)
-    };
-    match e {
-        ET::Line(l) => {
-            out.push(p(&l.start));
-            out.push(p(&l.end));
-        }
-        ET::LwPolyline(pl) => {
-            for v in &pl.vertices {
-                out.push(ocs((v.location.x, v.location.y, pl.elevation), pl.normal));
-            }
-        }
-        ET::Polyline2D(pl) => {
-            for v in &pl.vertices {
-                out.push(ocs((v.location.x, v.location.y, pl.elevation), pl.normal));
-            }
-        }
-        ET::Polyline(pl) => {
-            for v in &pl.vertices {
-                out.push(p(&v.location));
-            }
-        }
-        ET::Arc(a) => {
-            for &ang in &[a.start_angle, a.end_angle] {
-                out.push(ocs(
-                    (
-                        a.center.x + a.radius * ang.cos(),
-                        a.center.y + a.radius * ang.sin(),
-                        a.center.z,
-                    ),
-                    a.normal,
-                ));
-            }
-        }
-        _ => {}
     }
 }
 

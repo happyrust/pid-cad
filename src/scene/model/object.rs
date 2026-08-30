@@ -8,8 +8,12 @@ use glam::DVec3;
 pub enum PropValue {
     /// Read-only display text.
     ReadOnly(String),
-    /// Editable numeric/text field.
+    /// Read-only display text with a tooltip explaining why it cannot be edited.
+    ReadOnlyWithTooltip { value: String, tooltip: String },
+    /// Editable numeric field.
     EditText(String),
+    /// Editable text that must not be expression-evaluated.
+    PlainText(String),
     /// Layer name — rendered as a combo_box.
     LayerChoice(String),
     /// Generic string choice rendered as a combo_box.
@@ -30,6 +34,13 @@ pub enum PropValue {
     ColorVaries,
     /// Line weight — rendered as a combo_box.
     LwChoice(LineWeight),
+    /// Object-specific line weight routed by field name.
+    FieldLwChoice {
+        field: &'static str,
+        value: LineWeight,
+    },
+    /// Object-specific lineweight varies across the current selection.
+    FieldLwVaries { field: &'static str },
     /// Lineweight varies across the current multi-selection.
     LwVaries,
     /// Linetype name — rendered as a combo_box.
@@ -83,6 +94,8 @@ pub enum GripShape {
     Rectangle,
     Triangle,
     Circle,
+    /// Screen-offset menu selector.
+    Dropdown,
 }
 
 /// Describes one grip point for an entity.
@@ -101,10 +114,8 @@ pub struct GripDef {
     pub is_midpoint: bool,
     /// Visual marker shape for the grip.
     pub shape: GripShape,
-    /// World-XY direction vector used to orient a `Rectangle` grip
-    /// along its segment. `None` for shapes that don't need rotation
-    /// (Square, Triangle in non-directional contexts).
-    pub dir: Option<[f32; 2]>,
+    /// World-space marker direction, projected with the grip position.
+    pub dir: Option<glam::DVec3>,
     /// World-space axis that constrains this grip's drag.
     pub axis: Option<glam::DVec3>,
 }
@@ -165,6 +176,8 @@ pub enum GripMenuAction {
     RemoveFitPoint,
     Refit,
     RefineVertices,
+    ShowFit,
+    ShowControlVertices,
     MoveWithText,
     StackText,
     UnstackText,

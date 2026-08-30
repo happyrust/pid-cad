@@ -18,6 +18,7 @@ pub struct DimensionCreationDefaults {
     pub text_height: f64,
     pub gap: f64,
     pub arrow_size: f64,
+    pub jog_angle: f64,
     pub scale: f64,
     pub annotative: bool,
 }
@@ -92,6 +93,9 @@ pub fn current_dimension_defaults(doc: &CadDocument) -> DimensionCreationDefault
         text_height: style.as_ref().map_or(2.5, |style| style.dimtxt),
         gap: style.as_ref().map_or(0.625, |style| style.dimgap),
         arrow_size: style.as_ref().map_or(2.5, |style| style.dimasz),
+        jog_angle: style
+            .as_ref()
+            .map_or(std::f64::consts::FRAC_PI_4, |style| style.dimjogang),
         scale: style.as_ref().map_or(1.0, |style| {
             if style.annotative {
                 1.0
@@ -133,10 +137,6 @@ fn apply_text_defaults(doc: &CadDocument, entity: &mut EntityType) {
             }
             if text.oblique_angle.abs() <= 1.0e-9 {
                 text.oblique_angle = resolved.oblique_angle;
-            }
-            if text.generation_flags == 0 {
-                text.generation_flags = (if resolved.flags.backward { 2 } else { 0 })
-                    | (if resolved.flags.upside_down { 4 } else { 0 });
             }
         }
         EntityType::MText(text) => {

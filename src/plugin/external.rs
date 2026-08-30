@@ -30,6 +30,18 @@ pub struct RegistryEntry {
 pub struct ReleaseInfo {
     pub tag: String,
     pub api_version: u32,
+    /// Full `acadrust` git source used by the release.
+    pub acadrust_source: Option<String>,
+    /// Whether `[opencad]` declares `acadrust_source`.
+    pub acadrust_declared: bool,
+    /// Whether the release matches this host.
+    pub acadrust_compatible: bool,
+    /// Full `rustc --version` output used by the release.
+    pub rustc_version: Option<String>,
+    /// Whether `[opencad]` declares `rustc_version`.
+    pub rustc_declared: bool,
+    /// Whether the release's rustc matches this host.
+    pub rustc_compatible: bool,
 }
 
 /// An add-on package found on disk (not necessarily loaded or compatible).
@@ -44,6 +56,14 @@ pub struct ExternalPlugin {
     /// an older `plugin.toml` does not declare `repository`.
     pub repository: Option<String>,
     pub api_version: u32,
+    /// Full `acadrust` git source used by the plugin.
+    pub acadrust_source: Option<String>,
+    /// Whether `[opencad]` declares `acadrust_source`.
+    pub acadrust_declared: bool,
+    /// Full `rustc --version` output used by the plugin.
+    pub rustc_version: Option<String>,
+    /// Whether `[opencad]` declares `rustc_version`.
+    pub rustc_declared: bool,
     pub ribbon_order: i32,
     pub command_prefixes: Vec<String>,
     /// The package directory under the plugins folder.
@@ -55,14 +75,47 @@ pub struct ExternalPlugin {
 impl ExternalPlugin {
     /// True when the package's API version is supported by this host.
     pub fn api_compatible(&self) -> bool {
-        self.api_version == ocs_plugin_api::API_VERSION
+        ocs_plugin_api::manifest::host_accepts_plugin_version(self.api_version)
     }
 
-    /// True when the package can be loaded today: compatible API *and* a native
-    /// library present for this platform.
+    /// Returns whether the package's dependency fingerprint matches the host.
+    pub fn acadrust_compatible(&self) -> bool {
+        if !ocs_plugin_api::version_info::uses_acadrust_gate(self.api_version) {
+            return true;
+        }
+        if !self.acadrust_declared {
+            return true;
+        }
+        match self.acadrust_source.as_deref() {
+            None | Some("") => false,
+            Some(source) => ocs_plugin_api::version_info::acadrust_sources_compatible(
+                source,
+                ocs_plugin_api::version_info::host_acadrust_source(),
+            ),
+        }
+    }
+
+    /// Returns whether the package's rustc matches the host.
+    pub fn rustc_compatible(&self) -> bool {
+        if !ocs_plugin_api::version_info::uses_acadrust_gate(self.api_version) {
+            return true;
+        }
+        match self.rustc_version.as_deref() {
+            None | Some("") => false,
+            Some(version) => ocs_plugin_api::version_info::rustc_versions_compatible(
+                version,
+                ocs_plugin_api::version_info::host_rustc_version(),
+            ),
+        }
+    }
+
+    /// Returns whether the package can be loaded.
     #[allow(dead_code)] // plugin-host surface (issue #100); not yet wired
     pub fn loadable(&self) -> bool {
-        self.api_compatible() && self.lib_present
+        self.api_compatible()
+            && self.acadrust_compatible()
+            && self.rustc_compatible()
+            && self.lib_present
     }
 }
 
@@ -176,12 +229,23 @@ pub(crate) fn parse_plugin_toml(text: &str) -> Option<ExternalPlugin> {
     let mut description = String::new();
     let mut repository = None;
     let mut api_version: u32 = 0;
+    let mut acadrust_source: Option<String> = None;
+    let mut acadrust_declared = false;
+    let mut rustc_version: Option<String> = None;
+    let mut rustc_declared = false;
     let mut ribbon_order: i32 = 0;
     let mut command_prefixes: Vec<String> = Vec::new();
+    let mut section = None;
 
     for raw in text.lines() {
         let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(header) = line.strip_prefix('[') {
+            section = header
+                .find(']')
+                .map(|end| header[..end].trim());
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
@@ -196,6 +260,16 @@ pub(crate) fn parse_plugin_toml(text: &str) -> Option<ExternalPlugin> {
             "description" => description = unquote(value),
             "repository" => repository = normalize_repository(&unquote(value)),
             "api_version" => api_version = value.parse().unwrap_or(0),
+            "acadrust_source" if section == Some("opencad") => {
+                acadrust_declared = true;
+                let v = unquote(value);
+                acadrust_source = if v.is_empty() { None } else { Some(v) };
+            }
+            "rustc_version" if section == Some("opencad") => {
+                rustc_declared = true;
+                let v = unquote(value);
+                rustc_version = if v.is_empty() { None } else { Some(v) };
+            }
             "ribbon_order" => ribbon_order = value.parse().unwrap_or(0),
             "command_prefixes" => command_prefixes = parse_string_array(value),
             _ => {}
@@ -209,6 +283,10 @@ pub(crate) fn parse_plugin_toml(text: &str) -> Option<ExternalPlugin> {
         description,
         repository,
         api_version,
+        acadrust_source,
+        acadrust_declared,
+        rustc_version,
+        rustc_declared,
         ribbon_order,
         command_prefixes,
         dir: PathBuf::new(),
@@ -270,9 +348,13 @@ pub(crate) use loader::{shutdown_plugins, with_manager};
 pub(crate) use loader::{load_at_startup, loaded_ids};
 
 #[cfg(not(target_arch = "wasm32"))]
+pub(crate) use loader::remove_plugin;
+
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(test, allow(dead_code))]
 mod loader {
     use super::lib_extension;
+    use crate::plugin::v4_support;
     use ocs_plugin_api::process::PluginManager;
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
@@ -291,9 +373,50 @@ mod loader {
     ) -> Vec<(String, Result<(), String>)> {
         let discovered = super::discover();
         let mut manager = PluginManager::new();
+        manager.set_notification_handler(v4_support::notification_handler());
         let mut out = Vec::new();
         for d in &discovered {
-            if !d.api_compatible() || !d.lib_present {
+            if !d.api_compatible() {
+                continue;
+            }
+            if !d.lib_present {
+                continue;
+            }
+            if ocs_plugin_api::version_info::uses_acadrust_gate(d.api_version)
+                && d.acadrust_declared
+                && d.acadrust_source.is_none()
+            {
+                eprintln!(
+                    "[plugin] {} declares acadrust metadata but has no fingerprint; cannot verify compatibility",
+                    d.id
+                );
+            }
+            if !d.acadrust_compatible() {
+                let host_src = ocs_plugin_api::version_info::host_acadrust_source();
+                let plugin_hash = d
+                    .acadrust_source
+                    .as_deref()
+                    .and_then(ocs_plugin_api::version_info::acadrust_source_hash)
+                    .unwrap_or("unknown");
+                let host_hash = ocs_plugin_api::version_info::acadrust_source_hash(host_src)
+                    .unwrap_or("unknown");
+                out.push((
+                    d.id.clone(),
+                    Err(format!(
+                        "Plugin built for acadrust @{plugin_hash}, but this host uses @{host_hash}"
+                    )),
+                ));
+                continue;
+            }
+            if !d.rustc_compatible() {
+                let host_rustc = ocs_plugin_api::version_info::host_rustc_version();
+                let plugin_rustc = d.rustc_version.as_deref().unwrap_or("unknown");
+                out.push((
+                    d.id.clone(),
+                    Err(format!(
+                        "Plugin built with {plugin_rustc}, host requires {host_rustc} - rebuild required"
+                    )),
+                ));
                 continue;
             }
             let Some(path) = lib_file(&d.dir) else {
@@ -340,6 +463,23 @@ mod loader {
         });
     }
 
+    /// Shut down the loaded plugin with `id` and remove it from the manager so
+    /// its files can be deleted on Windows. Returns true if the plugin was
+    /// loaded and has been removed.
+    pub fn remove_plugin(id: &str) -> bool {
+        MANAGER.with(|m| {
+            if let Some(manager) = m.borrow_mut().as_mut() {
+                if manager.ids().iter().any(|loaded| loaded == id) {
+                    manager.remove(id)
+                } else {
+                    true
+                }
+            } else {
+                true
+            }
+        })
+    }
+
     /// Path to the native library beside `plugin.toml`, if any.
     fn lib_file(dir: &Path) -> Option<PathBuf> {
         let ext = lib_extension();
@@ -350,12 +490,13 @@ mod loader {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    use crate::plugin::v4_support;
 
     #[test]
-    fn api_v2_plugin_from_template_is_incompatible() {
+    fn api_v2_plugin_from_template_is_compatible() {
         let toml = r#"
 [plugin]
 id = "opencad.my_plugin"
@@ -374,7 +515,7 @@ xdata_apps = ["MYPLUGIN_RECORD"]
         assert_eq!(p.api_version, 2);
         assert_eq!(p.repository.as_deref(), Some("example/opencad-my-plugin"));
         assert!(p.command_prefixes.contains(&"MP_".to_string()));
-        assert!(!p.api_compatible(), "old API plugins must be rebuilt");
+        assert!(p.api_compatible(), "V2 plugins must be accepted by the V4 host");
     }
 
     #[test]
@@ -387,6 +528,233 @@ xdata_apps = ["MYPLUGIN_RECORD"]
         let p = parse_plugin_toml("id=\"a\"\napi_version = 9999").unwrap();
         assert!(!p.api_compatible());
         assert!(!p.loadable());
+    }
+
+    #[test]
+    fn undeclared_rustc_is_incompatible() {
+        let toml = r#"
+[plugin]
+id = "opencad.test"
+name = "Test"
+version = "0.1.0"
+api_version = 4
+"#;
+        let p = parse_plugin_toml(toml).expect("parsed");
+        assert!(!p.rustc_declared);
+        assert!(p.rustc_version.is_none());
+        assert!(!p.rustc_compatible());
+        assert!(!p.loadable());
+    }
+
+    #[test]
+    fn declared_empty_rustc_version_is_incompatible() {
+        let toml = r#"
+[plugin]
+id = "opencad.test"
+name = "Test"
+version = "0.1.0"
+api_version = 4
+
+[opencad]
+rustc_version = ""
+"#;
+        let p = parse_plugin_toml(toml).expect("parsed");
+        assert!(p.rustc_declared);
+        assert!(p.rustc_version.is_none());
+        assert!(!p.rustc_compatible(), "declared but empty rustc is incompatible");
+        assert!(!p.loadable());
+    }
+
+    #[test]
+    fn rustc_version_outside_opencad_is_ignored() {
+        let toml = r#"
+[plugin]
+id = "opencad.test"
+api_version = 4
+rustc_version = "rustc 1.98.0"
+"#;
+        let p = parse_plugin_toml(toml).expect("parsed");
+        assert!(!p.rustc_declared);
+        assert!(p.rustc_version.is_none());
+    }
+
+    #[test]
+    fn rustc_mismatch_detected() {
+        let _host = ocs_plugin_api::version_info::host_rustc_version();
+        let other = "rustc 0.0.0-fake (not matching anything)";
+        let toml = format!(
+            r#"
+[plugin]
+id = "opencad.test"
+name = "Test"
+version = "0.1.0"
+api_version = 4
+
+[opencad]
+rustc_version = "{other}"
+"#
+        );
+        let p = parse_plugin_toml(&toml).expect("parsed");
+        assert!(p.rustc_declared);
+        assert!(!p.rustc_compatible(), "mismatched rustc should be incompatible");
+        assert!(!p.loadable());
+    }
+
+    #[test]
+    fn rustc_match_detected() {
+        let host = ocs_plugin_api::version_info::host_rustc_version();
+        let toml = format!(
+            r#"
+[plugin]
+id = "opencad.test"
+name = "Test"
+version = "0.1.0"
+api_version = 4
+
+[opencad]
+rustc_version = "{host}"
+"#
+        );
+        let p = parse_plugin_toml(&toml).expect("parsed");
+        assert!(p.rustc_declared);
+        assert!(p.rustc_compatible(), "matching rustc should be compatible");
+    }
+
+    #[test]
+    fn rustc_gate_only_applies_to_api_v4_and_newer() {
+        let toml = r#"
+[plugin]
+id = "opencad.test"
+name = "Test"
+version = "0.1.0"
+api_version = 2
+
+[opencad]
+rustc_version = "rustc 0.0.0-fake"
+"#;
+        let mut p = parse_plugin_toml(toml).expect("parsed");
+        p.lib_present = true;
+        assert!(p.rustc_declared);
+        assert!(
+            p.rustc_compatible(),
+            "API v2 plugin should bypass rustc gate"
+        );
+        assert!(p.loadable());
+    }
+
+    #[test]
+    fn undeclared_acadrust_falls_back_to_api_gate() {
+        let toml = r#"
+[plugin]
+id = "opencad.test"
+name = "Test"
+version = "0.1.0"
+api_version = 4
+"#;
+        let p = parse_plugin_toml(toml).expect("parsed");
+        assert!(!p.acadrust_declared);
+        assert!(p.acadrust_source.is_none());
+        assert!(p.acadrust_compatible(), "undeclared acadrust is treated as compatible");
+    }
+
+    #[test]
+    fn declared_empty_acadrust_source_is_incompatible() {
+        let toml = r#"
+[plugin]
+id = "opencad.test"
+name = "Test"
+version = "0.1.0"
+api_version = 4
+
+[opencad]
+acadrust_source = ""
+"#;
+        let p = parse_plugin_toml(toml).expect("parsed");
+        assert!(p.acadrust_declared);
+        assert!(p.acadrust_source.is_none());
+        assert!(!p.acadrust_compatible(), "declared but empty source is incompatible");
+        assert!(!p.loadable());
+    }
+
+    #[test]
+    fn acadrust_source_outside_opencad_is_ignored() {
+        let toml = r#"
+[plugin]
+id = "opencad.test"
+api_version = 4
+acadrust_source = "0123456789012345678901234567890123456789"
+"#;
+        let p = parse_plugin_toml(toml).expect("parsed");
+        assert!(!p.acadrust_declared);
+        assert!(p.acadrust_source.is_none());
+    }
+
+    #[test]
+    fn acadrust_mismatch_detected() {
+        let host = ocs_plugin_api::version_info::host_acadrust_source();
+        let other = if host.contains("94df2c3") {
+            "git+https://github.com/HakanSeven12/cadcodec.git?rev=0908da7#0908da7b6e4f702a6c78359a57f53e2b79cf39eb"
+        } else {
+            "git+https://github.com/HakanSeven12/cadcodec.git?rev=94df2c3#94df2c3f87fa051b16ffc3923f80e9247c85c5fd"
+        };
+        let toml = format!(
+            r#"
+[plugin]
+id = "opencad.test"
+name = "Test"
+version = "0.1.0"
+api_version = 4
+
+[opencad]
+acadrust_source = "{other}"
+"#
+        );
+        let p = parse_plugin_toml(&toml).expect("parsed");
+        assert!(p.acadrust_declared);
+        assert!(!p.acadrust_compatible(), "mismatched acadrust fingerprint should be incompatible");
+        assert!(!p.loadable());
+    }
+
+    #[test]
+    fn acadrust_match_detected() {
+        let host = ocs_plugin_api::version_info::host_acadrust_source();
+        let toml = format!(
+            r#"
+[plugin]
+id = "opencad.test"
+name = "Test"
+version = "0.1.0"
+api_version = 4
+
+[opencad]
+acadrust_source = "{host}"
+"#
+        );
+        let p = parse_plugin_toml(&toml).expect("parsed");
+        assert!(p.acadrust_declared);
+        assert!(p.acadrust_compatible(), "matching acadrust fingerprint should be compatible");
+    }
+
+    #[test]
+    fn acadrust_gate_only_applies_to_api_v4_and_newer() {
+        let toml = r#"
+[plugin]
+id = "opencad.test"
+name = "Test"
+version = "0.1.0"
+api_version = 2
+
+[opencad]
+acadrust_source = "git+https://github.com/HakanSeven12/cadcodec.git?rev=0908da7#0908da7b6e4f702a6c78359a57f53e2b79cf39eb"
+"#;
+        let mut p = parse_plugin_toml(toml).expect("parsed");
+        p.lib_present = true;
+        assert!(p.acadrust_declared);
+        assert!(
+            p.acadrust_compatible(),
+            "API v2 plugin should bypass acadrust gate"
+        );
+        assert!(p.loadable());
     }
 
     /// Integration smoke test for the out-of-process plugin path.
@@ -415,7 +783,11 @@ xdata_apps = ["MYPLUGIN_RECORD"]
 
         let mut app = crate::app::OpenCADStudio::new_for_test();
         let mut host = crate::app::plugin_host::HostSession::new(&mut app, 0);
-        let process = ocs_plugin_api::process::PluginProcess::spawn(&path, &mut host)
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+                &path,
+                &mut host,
+                v4_support::notification_handler(),
+            )
             .expect("spawn test plugin");
         assert_eq!(process.id(), "opencad.my_plugin");
         let mut started = false;

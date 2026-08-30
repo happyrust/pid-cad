@@ -3,12 +3,14 @@ use crate::t;
 
 use crate::command::EntityTransform;
 use crate::entities::common::{
-    edit_prop as edit, parse_f64, ro_prop as ro, square_grip, stepper_prop as stepper,
+    edit_prop as edit, format_length, parse_f64, ro_prop as ro, square_grip,
+    stepper_prop as stepper,
 };
 use crate::entities::traits::{Grippable, PropertyEditable, Transformable, RenderConvertible};
 use crate::scene::convert::acad_to_render::{extrusion_wall_tris, RenderEntity, RenderObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 use crate::scene::model::wire_model::TangentGeom;
+use cadkernel::space::{NurbsCurve3, Vec3};
 
 // ── Polyline (old-style 3D heavy polyline) ────────────────────────────────────
 
@@ -195,7 +197,7 @@ pub fn drawn_vertices2d(
     (kept.len() >= 2).then_some(kept)
 }
 
-fn tessellate_polyline2d(pl: &Polyline2D) -> RenderEntity {
+fn tessellate_polyline2d(pl: &Polyline2D, fill_mode: bool) -> RenderEntity {
     let filtered = drawn_vertices2d(pl);
     let verts: &[acadrust::entities::Vertex2D] = filtered.as_deref().unwrap_or(&pl.vertices);
     if verts.is_empty() {
@@ -223,6 +225,47 @@ fn tessellate_polyline2d(pl: &Polyline2D) -> RenderEntity {
         let (wx, wy, wz) = to_wcs(v.location.x, v.location.y);
         [wx, wy, wz]
     };
+
+    if !fill_mode {
+        let continuous = pl.flags.bits()
+            & acadrust::entities::PolylineFlags::LINETYPE_CONTINUOUS.bits()
+            != 0;
+        let mut boundary = crate::entities::common::wide_band_outline(
+            &band_verts_2d(pl),
+            pl.is_closed(),
+            !continuous,
+            &to_wcs,
+        );
+        if !boundary.points.is_empty() {
+            if pl.thickness.abs() > 1e-10 {
+                boundary = crate::entities::common::extrude_wide_band_outline(
+                    boundary,
+                    [
+                        pl.thickness * normal.0,
+                        pl.thickness * normal.1,
+                        pl.thickness * normal.2,
+                    ],
+                );
+            }
+            let (tangent_geoms, key_vertices) =
+                centerline_metadata_2d(verts, pl.is_closed(), &to_wcs);
+            return RenderEntity {
+                pick_tris: Vec::new(),
+                object: RenderObject::BoundaryLines {
+                    points: boundary.points,
+                    stations: boundary.stations,
+                    point_segments: boundary.point_segments,
+                    station_pieces: boundary.station_pieces,
+                    source_length: boundary.source_length,
+                    plinegen: continuous,
+                },
+                snap_pts: vec![],
+                tangent_geoms,
+                key_vertices,
+                fill_tris: vec![],
+            };
+        }
+    }
 
     if pl.thickness.abs() > 1e-10 {
         let (nx, ny, nz) = normal;
@@ -348,13 +391,14 @@ fn tessellate_polyline2d(pl: &Polyline2D) -> RenderEntity {
         key_verts.push([p1[0], p1[1], p1[2]]);
     }
 
+    let band_verts = band_verts_2d(pl);
     let (fill_origin, fills) = wide_fills(pl);
     // A wide Polyline2D whose per-vertex widths VARY renders a smooth taper; a
     // uniform-width one keeps the constant-band Contour.
-    let object = match tapered_band_verts_2d(pl) {
+    let object = match tapered_band_verts_2d(&band_verts) {
         Some(band_verts) => {
             let (pts, widths) = crate::entities::common::tapered_band_points(
-                &band_verts,
+                band_verts,
                 pl.is_closed(),
                 &to_wcs,
             );
@@ -376,16 +420,15 @@ fn tessellate_polyline2d(pl: &Polyline2D) -> RenderEntity {
     }
 }
 
-/// Per-vertex `(location, bulge, start_width, end_width)` band description for a
-/// wide Polyline2D whose width VARIES — `None` when the width is uniform.
-fn tapered_band_verts_2d(
+/// Effective segment widths for a Polyline2D band.
+fn band_verts_2d(
     pl: &acadrust::entities::Polyline2D,
-) -> Option<Vec<([f64; 2], f64, f64, f64)>> {
+) -> Vec<([f64; 2], f64, f64, f64)> {
     let default_start = pl.start_width;
     let default_end = pl.end_width;
     let filtered = drawn_vertices2d(pl);
     let verts: &[acadrust::entities::Vertex2D] = filtered.as_deref().unwrap_or(&pl.vertices);
-    let band: Vec<([f64; 2], f64, f64, f64)> = verts
+    verts
         .iter()
         .map(|v| {
             let sw = if v.start_width > 1e-9 {
@@ -400,7 +443,12 @@ fn tapered_band_verts_2d(
             };
             ([v.location.x, v.location.y], v.bulge, sw, ew)
         })
-        .collect();
+        .collect()
+}
+
+fn tapered_band_verts_2d(
+    band: &[([f64; 2], f64, f64, f64)],
+) -> Option<&[([f64; 2], f64, f64, f64)]> {
     let w0 = band.first().map_or(0.0, |v| v.2);
     let varies = band
         .iter()
@@ -412,9 +460,51 @@ fn tapered_band_verts_2d(
     }
 }
 
+fn centerline_metadata_2d(
+    verts: &[acadrust::entities::Vertex2D],
+    closed: bool,
+    to_wcs: &dyn Fn(f64, f64) -> (f64, f64, f64),
+) -> (Vec<TangentGeom>, Vec<[f64; 3]>) {
+    let count = verts.len();
+    let segment_count = if closed {
+        count
+    } else {
+        count.saturating_sub(1)
+    };
+    let mut tangents = Vec::with_capacity(segment_count);
+    let mut key_vertices = Vec::with_capacity(segment_count + 1);
+    for index in 0..segment_count {
+        let start = &verts[index];
+        let end = &verts[(index + 1) % count];
+        let p0 = to_wcs(start.location.x, start.location.y);
+        let p1 = to_wcs(end.location.x, end.location.y);
+        if start.bulge.abs() < 1e-9 {
+            tangents.push(TangentGeom::Line {
+                p1: [p0.0 as f32, p0.1 as f32, p0.2 as f32],
+                p2: [p1.0 as f32, p1.1 as f32, p1.2 as f32],
+            });
+        } else if let Some(arc) = crate::entities::common::BulgeArc::from_bulge(
+            [start.location.x, start.location.y],
+            [end.location.x, end.location.y],
+            start.bulge,
+        ) {
+            let center = to_wcs(arc.center[0], arc.center[1]);
+            tangents.push(TangentGeom::Circle {
+                center: [center.0 as f32, center.1 as f32, center.2 as f32],
+                radius: arc.radius as f32,
+            });
+        }
+        if index == 0 {
+            key_vertices.push([p0.0, p0.1, p0.2]);
+        }
+        key_vertices.push([p1.0, p1.1, p1.2]);
+    }
+    (tangents, key_vertices)
+}
+
 impl RenderConvertible for Polyline2D {
-    fn to_render(&self, _document: &acadrust::CadDocument) -> Option<RenderEntity> {
-        Some(tessellate_polyline2d(self))
+    fn to_render(&self, document: &acadrust::CadDocument) -> Option<RenderEntity> {
+        Some(tessellate_polyline2d(self, document.header.fill_mode))
     }
 }
 
@@ -695,20 +785,191 @@ impl Transformable for Polyline2D {
 
 // ── Polyline3D ────────────────────────────────────────────────────────────────
 
+const POLY3D_SPLINE_POINT: i32 = 8;
+const POLY3D_SPLINE_CONTROL: i32 = 16;
+const POLY3D_VERTEX: i32 = 32;
+
+fn polyline3d_control_indices(pl: &Polyline3D) -> Vec<usize> {
+    if pl
+        .vertices
+        .iter()
+        .any(|vertex| vertex.flags & POLY3D_SPLINE_CONTROL != 0)
+    {
+        return pl
+            .vertices
+            .iter()
+            .enumerate()
+            .filter_map(|(index, vertex)| {
+                (vertex.flags & POLY3D_SPLINE_CONTROL != 0).then_some(index)
+            })
+            .collect();
+    }
+
+    let controls: Vec<usize> = pl
+        .vertices
+        .iter()
+        .enumerate()
+        .filter_map(|(index, vertex)| {
+            (vertex.flags & POLY3D_SPLINE_POINT == 0).then_some(index)
+        })
+        .collect();
+    if controls.is_empty() {
+        (0..pl.vertices.len()).collect()
+    } else {
+        controls
+    }
+}
+
+pub(crate) fn polyline3d_control_vertex_count(pl: &Polyline3D) -> usize {
+    polyline3d_control_indices(pl).len()
+}
+
+fn polyline3d_controls(pl: &Polyline3D) -> Vec<acadrust::entities::Vertex3DPolyline> {
+    polyline3d_control_indices(pl)
+        .into_iter()
+        .filter_map(|index| pl.vertices.get(index).cloned())
+        .collect()
+}
+
+fn polyline3d_wire_points(pl: &Polyline3D) -> Vec<[f64; 3]> {
+    let curve: Vec<[f64; 3]> = pl
+        .vertices
+        .iter()
+        .filter(|vertex| vertex.flags & POLY3D_SPLINE_POINT != 0)
+        .map(|vertex| [vertex.position.x, vertex.position.y, vertex.position.z])
+        .collect();
+    if !curve.is_empty() {
+        curve
+    } else {
+        polyline3d_controls(pl)
+            .iter()
+            .map(|vertex| [vertex.position.x, vertex.position.y, vertex.position.z])
+            .collect()
+    }
+}
+
+fn polyline3d_length(pl: &Polyline3D) -> f64 {
+    let points = polyline3d_wire_points(pl);
+    let mut length = points
+        .windows(2)
+        .map(|pair| Vec3::from(pair[0]).distance(Vec3::from(pair[1])))
+        .sum::<f64>();
+    if pl.is_closed() && points.len() >= 2 {
+        length += Vec3::from(points[0])
+            .distance(Vec3::from(points[points.len() - 1]));
+    }
+    length
+}
+
+fn polyline3d_spline_samples(
+    controls: &[[f64; 3]],
+    degree: usize,
+    closed: bool,
+) -> Option<Vec<[f64; 3]>> {
+    if !controls.iter().flatten().all(|value| value.is_finite()) {
+        return None;
+    }
+    let curve = if closed {
+        let mut periodic_controls = controls.to_vec();
+        periodic_controls.extend(controls.iter().take(degree).copied());
+        let knots = (0..periodic_controls.len() + degree + 1)
+            .map(|index| index as f64)
+            .collect();
+        NurbsCurve3::new(degree, periodic_controls, knots, None)?.with_periodicity(true)
+    } else {
+        NurbsCurve3::new(degree, controls.to_vec(), Vec::new(), None)?
+    };
+    let mut samples = curve.tessellate_angle(cadkernel::tessellation::DEFAULT_ANGLE);
+    if closed
+        && samples.len() >= 2
+        && Vec3::from(samples[0]).distance(Vec3::from(samples[samples.len() - 1])) <= 1.0e-9
+    {
+        samples.pop();
+    }
+    Some(samples)
+}
+
+fn rebuild_polyline3d_fit(pl: &mut Polyline3D) -> bool {
+    use acadrust::entities::polyline3d::SmoothSurfaceType as SST;
+
+    let mut controls = polyline3d_controls(pl);
+    if pl.smooth_type == SST::None {
+        for vertex in &mut controls {
+            vertex.flags =
+                (vertex.flags & !(POLY3D_SPLINE_POINT | POLY3D_SPLINE_CONTROL)) | POLY3D_VERTEX;
+        }
+        pl.vertices = controls;
+        pl.flags.spline_fit = false;
+        return true;
+    }
+
+    if pl.smooth_type == SST::Bezier {
+        pl.smooth_type = SST::CubicBSpline;
+    }
+    let degree = match pl.smooth_type {
+        SST::QuadraticBSpline => 2,
+        SST::CubicBSpline => 3,
+        SST::Bezier => unreachable!(),
+        SST::None => unreachable!(),
+    };
+    if controls.len() <= degree {
+        return false;
+    }
+    let points: Vec<[f64; 3]> = controls
+        .iter()
+        .map(|vertex| [vertex.position.x, vertex.position.y, vertex.position.z])
+        .collect();
+    let Some(samples) = polyline3d_spline_samples(&points, degree, pl.is_closed()) else {
+        return false;
+    };
+
+    for vertex in &mut controls {
+        vertex.flags = (vertex.flags & !(POLY3D_SPLINE_POINT | POLY3D_SPLINE_CONTROL))
+            | POLY3D_VERTEX
+            | POLY3D_SPLINE_CONTROL;
+    }
+    let vertex_layer = controls
+        .first()
+        .map(|vertex| vertex.layer.clone())
+        .unwrap_or_else(|| "0".to_string());
+    let curve_vertices = samples.into_iter().map(|point| {
+        let mut vertex = acadrust::entities::Vertex3DPolyline::from_xyz(
+            point[0], point[1], point[2],
+        );
+        vertex.layer = vertex_layer.clone();
+        vertex.flags = POLY3D_VERTEX | POLY3D_SPLINE_POINT;
+        vertex
+    });
+    controls.extend(curve_vertices);
+    pl.vertices = controls;
+    pl.flags.spline_fit = true;
+    true
+}
+
 fn tessellate_polyline3d(pl: &Polyline3D) -> RenderEntity {
     let to_pt = |v: &acadrust::entities::Vertex3DPolyline| -> [f64; 3] {
         [v.position.x, v.position.y, v.position.z]
     };
 
-    // DXF vertex flags:  8 = spline-fit curve point,  16 = spline frame control point.
-    // When spline-fit vertices are present use them for the wire and control points for snap;
-    // otherwise treat all vertices uniformly.
-    let spline_curve: Vec<_> = pl.vertices.iter().filter(|v| v.flags & 8 != 0).collect();
-    let ctrl_pts: Vec<_> = pl.vertices.iter().filter(|v| v.flags & 16 != 0).collect();
+    // Spline samples draw the wire; frame vertices remain snap points.
+    let spline_curve: Vec<_> = pl
+        .vertices
+        .iter()
+        .filter(|v| v.flags & POLY3D_SPLINE_POINT != 0)
+        .collect();
+    let ctrl_pts: Vec<_> = pl
+        .vertices
+        .iter()
+        .filter(|v| v.flags & POLY3D_SPLINE_CONTROL != 0)
+        .collect();
 
     let (wire_pts, key_verts) = if !spline_curve.is_empty() {
         let wire: Vec<[f64; 3]> = spline_curve.iter().map(|v| to_pt(v)).collect();
-        let ctrl: Vec<[f64; 3]> = ctrl_pts.iter().map(|v| to_pt(v)).collect();
+        let ctrl: Vec<[f64; 3]> = if ctrl_pts.is_empty() {
+            polyline3d_controls(pl).iter().map(to_pt).collect()
+        } else {
+            ctrl_pts.iter().map(|v| to_pt(v)).collect()
+        };
         (wire, ctrl)
     } else {
         let pts: Vec<[f64; 3]> = pl.vertices.iter().map(to_pt).collect();
@@ -738,8 +999,9 @@ impl RenderConvertible for Polyline3D {
 
 impl Grippable for Polyline3D {
     fn grips(&self) -> Vec<GripDef> {
-        self.vertices
-            .iter()
+        polyline3d_control_indices(self)
+            .into_iter()
+            .filter_map(|index| self.vertices.get(index))
             .enumerate()
             .map(|(i, v)| {
                 square_grip(
@@ -751,7 +1013,8 @@ impl Grippable for Polyline3D {
     }
 
     fn apply_grip(&mut self, grip_id: usize, apply: GripApply) {
-        if let Some(v) = self.vertices.get_mut(grip_id) {
+        let raw_index = polyline3d_control_indices(self).get(grip_id).copied();
+        if let Some(v) = raw_index.and_then(|index| self.vertices.get_mut(index)) {
             match apply {
                 GripApply::Translate(d) => {
                     v.position.x += d.x as f64;
@@ -764,12 +1027,19 @@ impl Grippable for Polyline3D {
                     v.position.z = p.z as f64;
                 }
             }
+            if self.smooth_type
+                != acadrust::entities::polyline3d::SmoothSurfaceType::None
+            {
+                let _ = rebuild_polyline3d_fit(self);
+            }
         }
     }
 
     fn grip_menu(&self, _grip_id: usize) -> Vec<crate::scene::model::object::GripMenuItem> {
         use crate::scene::model::object::{GripMenuAction, GripMenuItem};
-        vec![
+        use acadrust::entities::polyline3d::SmoothSurfaceType as SST;
+
+        let mut items = vec![
             GripMenuItem {
                 label: "Stretch",
                 action: GripMenuAction::Stretch,
@@ -778,40 +1048,75 @@ impl Grippable for Polyline3D {
                 label: "Add Vertex",
                 action: GripMenuAction::AddVertex,
             },
-            GripMenuItem {
+        ];
+        let minimum = match self.smooth_type {
+            SST::None if self.is_closed() => 3,
+            SST::None => 2,
+            SST::QuadraticBSpline => 3,
+            SST::CubicBSpline | SST::Bezier => 4,
+        };
+        if polyline3d_control_vertex_count(self) > minimum {
+            items.push(GripMenuItem {
                 label: "Remove Vertex",
                 action: GripMenuAction::RemoveVertex,
-            },
-        ]
+            });
+        }
+        items
     }
 
     fn apply_grip_menu(&mut self, grip_id: usize, action: crate::scene::model::object::GripMenuAction) {
         use crate::scene::model::object::GripMenuAction as A;
-        let n = self.vertices.len();
+        use acadrust::entities::polyline3d::SmoothSurfaceType as SST;
+
+        let mut controls = polyline3d_controls(self);
+        let n = controls.len();
         match action {
             A::AddVertex if grip_id < n => {
                 if grip_id == n - 1 && !self.is_closed() {
-                    let mut new_v = self.vertices[grip_id].clone();
+                    let mut new_v = controls[grip_id].clone();
+                    if n >= 2 {
+                        let previous = &controls[n - 2].position;
+                        let last = &controls[n - 1].position;
+                        let next = Vec3::new(previous.x, previous.y, previous.z).lerp(
+                            Vec3::new(last.x, last.y, last.z),
+                            2.0,
+                        );
+                        new_v.position.x = next.x;
+                        new_v.position.y = next.y;
+                        new_v.position.z = next.z;
+                    }
                     new_v.handle = acadrust::Handle::NULL;
-                    self.vertices.push(new_v);
-                    return;
+                    controls.push(new_v);
+                } else {
+                    let i1 = (grip_id + 1) % n;
+                    let v0 = &controls[grip_id];
+                    let v1 = &controls[i1];
+                    let midpoint = Vec3::new(v0.position.x, v0.position.y, v0.position.z).lerp(
+                        Vec3::new(v1.position.x, v1.position.y, v1.position.z),
+                        0.5,
+                    );
+                    let mut new_v = v0.clone();
+                    new_v.position.x = midpoint.x;
+                    new_v.position.y = midpoint.y;
+                    new_v.position.z = midpoint.z;
+                    new_v.handle = acadrust::Handle::NULL;
+                    controls.insert(grip_id + 1, new_v);
                 }
-                let i1 = (grip_id + 1) % n;
-                let v0 = &self.vertices[grip_id];
-                let v1 = &self.vertices[i1];
-                let mx = (v0.position.x + v1.position.x) * 0.5;
-                let my = (v0.position.y + v1.position.y) * 0.5;
-                let mz = (v0.position.z + v1.position.z) * 0.5;
-                let mut new_v = v0.clone();
-                new_v.position.x = mx;
-                new_v.position.y = my;
-                new_v.position.z = mz;
-                new_v.handle = acadrust::Handle::NULL;
-                let insert_at = (grip_id + 1).min(self.vertices.len());
-                self.vertices.insert(insert_at, new_v);
+                self.vertices = controls;
+                let _ = rebuild_polyline3d_fit(self);
             }
-            A::RemoveVertex if grip_id < n && n > 2 => {
-                self.vertices.remove(grip_id);
+            A::RemoveVertex if grip_id < n => {
+                let minimum = match self.smooth_type {
+                    SST::None if self.is_closed() => 3,
+                    SST::None => 2,
+                    SST::QuadraticBSpline => 3,
+                    SST::CubicBSpline | SST::Bezier => 4,
+                };
+                if n > minimum {
+                    controls.remove(grip_id);
+                    self.vertices = controls;
+                    let _ = rebuild_polyline3d_fit(self);
+                }
             }
             _ => {}
         }
@@ -821,40 +1126,79 @@ impl Grippable for Polyline3D {
 impl PropertyEditable for Polyline3D {
     fn geometry_properties(&self, _text_style_names: &[String]) -> Vec<PropSection> {
         use acadrust::entities::polyline3d::SmoothSurfaceType as SST;
-        let n = self.vertices.len();
-        let v0 = self.vertices.first();
-        let vertex_x = v0.map(|v| v.position.x).unwrap_or_default();
-        let vertex_y = v0.map(|v| v.position.y).unwrap_or_default();
-        let vertex_z = v0.map(|v| v.position.z).unwrap_or_default();
+        let control_indices = polyline3d_control_indices(self);
+        let n = control_indices.len();
+        let vi = if n == 0 {
+            0
+        } else {
+            crate::scene::view::dispatch::prop_current_vertex().min(n - 1)
+        };
+        let vertex = control_indices
+            .get(vi)
+            .and_then(|index| self.vertices.get(*index));
+        let vertex_x = vertex.map(|v| v.position.x).unwrap_or_default();
+        let vertex_y = vertex.map(|v| v.position.y).unwrap_or_default();
+        let vertex_z = vertex.map(|v| v.position.z).unwrap_or_default();
+        let vertex_label = if n == 0 {
+            "—".to_string()
+        } else {
+            format!("{} / {}", vi + 1, n)
+        };
         let fit_smooth = match self.smooth_type {
             SST::None => "None",
             SST::QuadraticBSpline => "Quadratic",
-            SST::CubicBSpline => "Cubic",
-            SST::Bezier => "Bezier",
+            SST::CubicBSpline | SST::Bezier => "Cubic",
         };
+        let mut smooth_options = vec!["None".to_string()];
+        if n >= 3 {
+            smooth_options.push("Quadratic".to_string());
+        }
+        if n >= 4 {
+            smooth_options.push("Cubic".to_string());
+        }
 
         vec![
             PropSection {
                 title: t!("Geometry").into_owned(),
                 props: vec![
-                    ro(t!("Vertex").as_ref(), "pl3_vertex", if n > 0 { "1" } else { "" }),
+                    stepper(
+                        t!("Current Vertex").as_ref(),
+                        "pl3_current_vertex",
+                        vertex_label,
+                    ),
                     edit(t!("Vertex X").as_ref(), "pl3_vertex_x", vertex_x),
                     edit(t!("Vertex Y").as_ref(), "pl3_vertex_y", vertex_y),
                     edit(t!("Vertex Z").as_ref(), "pl3_vertex_z", vertex_z),
+                    ro(
+                        t!("Length").as_ref(),
+                        "pl3_length",
+                        format_length(polyline3d_length(self)),
+                    ),
                 ],
             },
             PropSection {
                 title: t!("Misc").into_owned(),
                 props: vec![
                     Property {
-                        label: t!("Closed").into_owned(),
-                        field: "pl3_closed",
-                        value: PropValue::BoolToggle {
-                            field: "pl3_closed",
-                            value: self.is_closed(),
+                        label: t!("Fit/Smooth").into_owned(),
+                        field: "pl3_smooth",
+                        value: PropValue::Choice {
+                            selected: fit_smooth.to_string(),
+                            options: smooth_options,
                         },
                     },
-                    ro(t!("Fit/Smooth").as_ref(), "pl3_smooth", fit_smooth),
+                    Property {
+                        label: t!("Closed").into_owned(),
+                        field: "pl3_closed",
+                        value: if n >= 3 {
+                            PropValue::BoolToggle {
+                                field: "pl3_closed",
+                                value: self.is_closed(),
+                            }
+                        } else {
+                            PropValue::ReadOnly("No".to_string())
+                        },
+                    },
                 ],
             },
         ]
@@ -868,25 +1212,65 @@ impl PropertyEditable for Polyline3D {
                 } else {
                     value == "true"
                 };
+                if closed && polyline3d_control_vertex_count(self) < 3 {
+                    return;
+                }
                 if closed {
                     self.close();
                 } else {
                     self.open();
                 }
+                if self.smooth_type
+                    != acadrust::entities::polyline3d::SmoothSurfaceType::None
+                {
+                    let _ = rebuild_polyline3d_fit(self);
+                }
+            }
+            "pl3_smooth" => {
+                use acadrust::entities::polyline3d::SmoothSurfaceType as SST;
+                let next = match value {
+                    "None" => SST::None,
+                    "Quadratic" => SST::QuadraticBSpline,
+                    "Cubic" => SST::CubicBSpline,
+                    _ => return,
+                };
+                let previous = self.smooth_type;
+                self.smooth_type = next;
+                if !rebuild_polyline3d_fit(self) {
+                    self.smooth_type = previous;
+                }
             }
             "pl3_vertex_x" => {
-                if let (Some(v), Some(vert)) = (parse_f64(value), self.vertices.first_mut()) {
+                let vi = crate::scene::view::dispatch::prop_current_vertex();
+                let raw_index = polyline3d_control_indices(self).get(vi).copied();
+                if let (Some(v), Some(vert)) = (
+                    parse_f64(value).filter(|value| value.is_finite()),
+                    raw_index.and_then(|index| self.vertices.get_mut(index)),
+                ) {
                     vert.position.x = v;
+                    let _ = rebuild_polyline3d_fit(self);
                 }
             }
             "pl3_vertex_y" => {
-                if let (Some(v), Some(vert)) = (parse_f64(value), self.vertices.first_mut()) {
+                let vi = crate::scene::view::dispatch::prop_current_vertex();
+                let raw_index = polyline3d_control_indices(self).get(vi).copied();
+                if let (Some(v), Some(vert)) = (
+                    parse_f64(value).filter(|value| value.is_finite()),
+                    raw_index.and_then(|index| self.vertices.get_mut(index)),
+                ) {
                     vert.position.y = v;
+                    let _ = rebuild_polyline3d_fit(self);
                 }
             }
             "pl3_vertex_z" => {
-                if let (Some(v), Some(vert)) = (parse_f64(value), self.vertices.first_mut()) {
+                let vi = crate::scene::view::dispatch::prop_current_vertex();
+                let raw_index = polyline3d_control_indices(self).get(vi).copied();
+                if let (Some(v), Some(vert)) = (
+                    parse_f64(value).filter(|value| value.is_finite()),
+                    raw_index.and_then(|index| self.vertices.get_mut(index)),
+                ) {
                     vert.position.z = v;
+                    let _ = rebuild_polyline3d_fit(self);
                 }
             }
             _ => {}

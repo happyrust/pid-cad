@@ -1,5 +1,7 @@
 //! Viewport overlay widgets.
 
+use std::cell::RefCell;
+
 use glam::{Mat4, Vec3};
 use iced::mouse;
 use iced::widget::canvas;
@@ -81,16 +83,14 @@ pub struct GripMarker {
     pub is_hot: bool,
     /// True → pointer is over this grip (drawn with the hover fill).
     pub is_hovered: bool,
-    /// World-XY direction vector — only consumed by the `Rectangle`
-    /// shape to orient the box along its segment. `None` for grips
-    /// that don't need rotation.
+    /// Screen-plane direction with positive Y pointing up.
     pub dir: Option<[f32; 2]>,
 }
 
 // ── Grid display params ───────────────────────────────────────────────────
 
 /// Passed to the canvas when the GRID display is active.
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GridParams {
     /// Rotation-only view-projection (Camera::view_proj_rte). Grid points are
     /// made relative to `eye` in f64 before projecting, so the grid stays
@@ -110,6 +110,77 @@ pub struct GridParams {
     /// WCS XY drawing limits. When present, grid lines stop at this rectangle
     /// instead of extending across the full viewport.
     pub limits: Option<(glam::DVec2, glam::DVec2)>,
+}
+
+/// Pure result of grid projection — segments in canvas-local coordinates plus
+/// the axis extent (in world units along the active UCS axes) that the wrapper
+/// uses to size the coloured UCS axes overlay. Returned from `grid_segments` so
+/// the renderer-free geometry construction can be unit-tested and benchmarked
+/// without an iced `Renderer` (Mission #1, 2026-08-26 bench-first plan).
+pub(crate) struct GridGeometry {
+    pub segments: Vec<(Point, Point)>,
+    pub axis_extent: f32,
+}
+
+impl GridGeometry {
+    /// Empty geometry — no segments drawn, axes suppressed. Returned by the
+    /// early-exit branches of `grid_segments` (zero-sized bounds, no visible
+    /// samples, non-finite step) so the caller never needs to special-case
+    /// the `None` path.
+    fn empty() -> Self {
+        Self { segments: Vec::new(), axis_extent: 0.0 }
+    }
+}
+
+/// Cache key for the grid overlay. Identical `GridParams` for every pane plus
+/// identical overlay `bounds` ⇒ byte-identical grid geometry; that is the
+/// invariant the key encodes.
+///
+/// Bounds are part of the key, not the only key: a tile layout can pan/zoom
+/// inside a single bounds rect, so bounds-only reuse (iced's
+/// `geometry::Cache`) would serve a stale grid. The full per-pane
+/// `GridParams` set is required for correctness.
+///
+/// Added 2026-08-26 by Mission #1 (grid overlay cache, Tier 1 #1).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GridKey {
+    pub grids: Vec<GridParams>,
+    pub bounds: iced::Rectangle,
+}
+
+impl GridKey {
+    /// Build a key from the per-pane `GridParams` and the overlay bounds. The
+    /// input slice is copied; callers can drop the original.
+    pub(crate) fn from_grids(grids: &[GridParams], bounds: iced::Rectangle) -> Self {
+        Self { grids: grids.to_vec(), bounds }
+    }
+}
+
+/// Cache hit decision: `true` iff `cached` is `Some` and structurally equal to
+/// `new`. Reference-based to avoid moving the (potentially large) `Vec` of
+/// per-pane params; the caller borrows from `RefCell<Option<GridKey>>` on
+/// both sides.
+pub(crate) fn should_reuse(cached: Option<&GridKey>, new: &GridKey) -> bool {
+    match cached {
+        Some(old) => old == new,
+        None => false,
+    }
+}
+
+/// `Program::State` for `GridCanvas`. Stores the `GridKey` of the geometry
+/// currently in the cache and the `canvas::Cache` itself.
+///
+/// `RefCell<Option<GridKey>>` because `Program::draw` takes `&self`; the key
+/// is updated on every frame regardless of hit/miss. The `canvas::Cache`
+/// provides an Arc-clone hit path when the iced-level bounds match, and we
+/// use `clear()` on a params-key miss to force a real rebuild even if the
+/// bounds happen to be unchanged (e.g. a pan within the same canvas size).
+///
+/// Added 2026-08-26 by Mission #1 (grid overlay cache, Tier 1 #1).
+#[derive(Default)]
+pub(crate) struct GridCanvasState {
+    pub key: RefCell<Option<GridKey>>,
+    pub cache: canvas::Cache<iced::Renderer>,
 }
 
 /// Compute the adaptive grid step size (world units) from camera zoom.
@@ -221,39 +292,72 @@ struct GridCanvas {
 }
 
 impl canvas::Program<Message> for GridCanvas {
-    type State = ();
+    type State = GridCanvasState;
 
     fn draw(
         &self,
-        _state: &(),
+        state: &GridCanvasState,
         renderer: &iced::Renderer,
         _theme: &Theme,
         bounds: iced::Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let key = GridKey::from_grids(&self.grid, bounds);
 
-        for g in &self.grid {
-            let gb = g.bounds;
-            let cx0 = gb.x.max(0.0);
-            let cy0 = gb.y.max(0.0);
-            let cx1 = (gb.x + gb.width).min(bounds.width);
-            let cy1 = (gb.y + gb.height).min(bounds.height);
-            if cx1 <= cx0 || cy1 <= cy0 {
-                continue;
-            }
-            let clip = iced::Rectangle {
-                x: cx0,
-                y: cy0,
-                width: cx1 - cx0,
-                height: cy1 - cy0,
-            };
-            frame.with_clip(clip, |f| {
-                draw_grid(f, g.view_rot, g.eye, gb, g.step, g.origin, g.axes, g.limits)
-            });
-        }
+        // Hit check: same params, same bounds ⇒ the cached geometry is still
+        // valid. The key includes bounds, so a `should_reuse` match implies
+        // both are equal, and the fork's `draw_with_bounds` will return the
+        // cached `Arc` clone (essentially free).
+        let hit = should_reuse(state.key.borrow().as_ref(), &key);
 
-        vec![frame.into_geometry()]
+        let geometry = if hit {
+            // No-op closure: the fork short-circuits on bounds match and
+            // returns the cached geometry without invoking the closure.
+            state.cache.draw_with_bounds(renderer, bounds, |_frame| {})
+        } else {
+            // Params or bounds changed. Clear so the closure runs even when
+            // bounds happen to match the previously-cached frame (e.g. a pan
+            // within the same canvas size would otherwise leave stale
+            // geometry served — the fork's bounds-equality test would return
+            // the cached clone without calling our rebuild closure).
+            state.cache.clear();
+            state.cache.draw_with_bounds(renderer, bounds, |frame| {
+                for g in &self.grid {
+                    let gb = g.bounds;
+                    let cx0 = gb.x.max(0.0);
+                    let cy0 = gb.y.max(0.0);
+                    let cx1 = (gb.x + gb.width).min(bounds.width);
+                    let cy1 = (gb.y + gb.height).min(bounds.height);
+                    if cx1 <= cx0 || cy1 <= cy0 {
+                        continue;
+                    }
+                    let clip = iced::Rectangle {
+                        x: cx0,
+                        y: cy0,
+                        width: cx1 - cx0,
+                        height: cy1 - cy0,
+                    };
+                    frame.with_clip(clip, |f| {
+                        draw_grid(
+                            f,
+                            g.view_rot,
+                            g.eye,
+                            gb,
+                            g.step,
+                            g.origin,
+                            g.axes,
+                            g.limits,
+                        )
+                    });
+                }
+            })
+        };
+
+        // Update the stored key. Safe: the `borrow()` for `should_reuse` is
+        // dropped at the end of the `if` expression above; no live Ref here.
+        *state.key.borrow_mut() = Some(key);
+
+        vec![geometry]
     }
 }
 
@@ -263,6 +367,7 @@ pub fn selection_overlay<'a>(
     snap_ext_base: Option<Point>,
     snap_ext_base2: Option<Point>,
     grips: Vec<GripMarker>,
+    control_polygon: Option<(Vec<Point>, bool)>,
     grip_clip: Option<iced::Rectangle>,
     ucs_icons: Vec<UcsIconParams>,
     ost_points: Vec<OstTrackPoint>,
@@ -284,6 +389,7 @@ pub fn selection_overlay<'a>(
         snap_ext_base,
         snap_ext_base2,
         grips,
+        control_polygon,
         grip_clip,
         ucs_icons,
         ost_points,
@@ -314,6 +420,8 @@ struct SelectionCanvas {
     /// both crossing extensions stay drawn when the crossing is caught. (#247, #259)
     snap_ext_base2: Option<Point>,
     grips: Vec<GripMarker>,
+    /// Selected spline control polygon and closed state.
+    control_polygon: Option<(Vec<Point>, bool)>,
     /// Active 3D pane / floating viewport rectangle. Grip markers are clipped
     /// here so orbiting cannot leak them into paper space or adjacent panes.
     grip_clip: Option<iced::Rectangle>,
@@ -347,7 +455,7 @@ struct SelectionCanvas {
     /// is usable instead of the cursor vanishing over it. (#227)
     suppressed: bool,
     /// The entity under the crosshair is on a locked layer — draw a small lock
-    /// badge by the cursor so the user knows it can't be selected/edited.
+    /// badge by the cursor so the user knows it can't be edited.
     hover_locked: bool,
     /// Background of the active drawing space. Crosshair contrast follows this
     /// rather than the UI theme, which may be light over a dark model viewport.
@@ -386,12 +494,29 @@ fn draw_grip_marker(frame: &mut canvas::Frame, grip: &GripMarker, theme: &Theme)
             })
         }
         GripShape::Triangle => canvas::Path::new(|b| {
-            b.move_to(Point::new(sp.x, sp.y - h));
-            b.line_to(Point::new(sp.x + h, sp.y + h));
-            b.line_to(Point::new(sp.x - h, sp.y + h));
+            let (forward_x, forward_y) = match grip.dir {
+                Some([dx, dy]) if (dx * dx + dy * dy) > 1e-12 => {
+                    let length = (dx * dx + dy * dy).sqrt();
+                    (dx / length, -dy / length)
+                }
+                _ => (0.0, -1.0),
+            };
+            let side_x = -forward_y;
+            let side_y = forward_x;
+            let tip = Point::new(sp.x + forward_x * h, sp.y + forward_y * h);
+            let base = Point::new(sp.x - forward_x * h, sp.y - forward_y * h);
+            b.move_to(tip);
+            b.line_to(Point::new(base.x + side_x * h, base.y + side_y * h));
+            b.line_to(Point::new(base.x - side_x * h, base.y - side_y * h));
             b.close();
         }),
         GripShape::Circle => canvas::Path::circle(Point::new(sp.x, sp.y), h),
+        GripShape::Dropdown => canvas::Path::new(|b| {
+            b.move_to(Point::new(sp.x - h, sp.y - h * 0.5));
+            b.line_to(Point::new(sp.x + h, sp.y - h * 0.5));
+            b.line_to(Point::new(sp.x, sp.y + h));
+            b.close();
+        }),
     };
 
     if grip.is_hot {
@@ -410,10 +535,12 @@ fn draw_grip_marker(frame: &mut canvas::Frame, grip: &GripMarker, theme: &Theme)
     } else {
         let palette = theme.palette();
         let color = palette.primary.base.color;
-        frame.fill(
-            &path,
-            palette.background.base.color.scale_alpha(0.7),
-        );
+        let fill = if grip.shape == GripShape::Dropdown {
+            color
+        } else {
+            palette.background.base.color.scale_alpha(0.7)
+        };
+        frame.fill(&path, fill);
         frame.stroke(
             &path,
             canvas::Stroke {
@@ -686,6 +813,31 @@ impl canvas::Program<Message> for SelectionCanvas {
                 height: grip_y1 - grip_y0,
             };
             frame.with_clip(grip_clip, |frame| {
+                if let Some((points, closed)) = &self.control_polygon {
+                    if points.len() >= 2 {
+                        let polygon = canvas::Path::new(|builder| {
+                            builder.move_to(points[0]);
+                            for point in points.iter().skip(1) {
+                                builder.line_to(*point);
+                            }
+                            if *closed {
+                                builder.line_to(points[0]);
+                            }
+                        });
+                        frame.stroke(
+                            &polygon,
+                            canvas::Stroke {
+                                width: 1.0,
+                                style: canvas::Style::Solid(Color::from_rgb(0.72, 0.32, 0.15)),
+                                line_dash: canvas::LineDash {
+                                    segments: &[4.0, 4.0],
+                                    offset: 0,
+                                },
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
                 for grip in &self.grips {
                     draw_grip_marker(frame, grip, theme);
                 }
@@ -1042,7 +1194,7 @@ impl canvas::Program<Message> for SelectionCanvas {
 
                 // Locked-layer badge: a small padlock beside the crosshair when
                 // the hovered object sits on a locked layer (issue: locked
-                // objects are visible + snappable but not selectable/editable).
+                // objects are visible, snappable and selectable but not editable).
                 if self.hover_locked {
                     let warning = theme.palette().warning.base;
                     let amber = warning.color.scale_alpha(0.98);
@@ -1198,8 +1350,53 @@ fn draw_grid(
     grid_axes: (Vec3, Vec3, Vec3),
     limits: Option<(glam::DVec2, glam::DVec2)>,
 ) {
+    let gc = Color {
+        r: 0.28,
+        g: 0.28,
+        b: 0.28,
+        a: 0.7,
+    };
+    let st = canvas::Stroke {
+        width: 0.5,
+        style: canvas::Style::Solid(gc),
+        ..Default::default()
+    };
+    let geometry = grid_segments(view_rot, eye, bounds, step, grid_origin, grid_axes, limits);
+    if !geometry.segments.is_empty() {
+        let path = canvas::Path::new(|builder| {
+            for (p0, p1) in &geometry.segments {
+                builder.move_to(*p0);
+                builder.line_to(*p1);
+            }
+        });
+        frame.stroke(&path, st);
+    }
+    if geometry.axis_extent > 0.0 {
+        let (gx, gy, gz) = grid_axes;
+        let extent = (geometry.axis_extent + step) * 1.5;
+        draw_axes(frame, view_rot, eye, bounds, extent.max(10.0), grid_origin, (gx, gy, gz));
+    }
+}
+
+/// Pure, renderer-free projection of the grid for one pane. Returns canvas-local
+/// `(Point, Point)` segments plus the axis extent (in world units along the
+/// active UCS axes) used by `draw_grid` to size the coloured UCS axes overlay.
+///
+/// Extracted from `draw_grid` (2026-08-26, Mission #1 step 1) so the geometry
+/// construction can be unit-tested and benchmarked without an iced
+/// `Renderer`. Behaviour is identical to the inlined version that preceded it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn grid_segments(
+    view_rot: Mat4,
+    eye: glam::DVec3,
+    bounds: iced::Rectangle,
+    step: f32,
+    grid_origin: glam::DVec3,
+    grid_axes: (Vec3, Vec3, Vec3),
+    limits: Option<(glam::DVec2, glam::DVec2)>,
+) -> GridGeometry {
     if bounds.width <= 0.0 || bounds.height <= 0.0 {
-        return;
+        return GridGeometry::empty();
     }
 
     // World → viewport-local screen via relative-to-eye: subtract the f64 eye
@@ -1325,27 +1522,15 @@ fn draw_grid(
         }
     }
     if samples.is_empty() {
-        return;
+        return GridGeometry::empty();
     };
 
     // Step follows camera zoom only. The previous visible-sample calculation
     // changed depth while orbiting and made the grid jump 1 → 5 → 25.
     if !step.is_finite() || step <= 0.0 {
-        return;
+        return GridGeometry::empty();
     }
     let s = step;
-
-    let gc = Color {
-        r: 0.28,
-        g: 0.28,
-        b: 0.28,
-        a: 0.7,
-    };
-    let st = canvas::Stroke {
-        width: 0.5,
-        style: canvas::Style::Solid(gc),
-        ..Default::default()
-    };
 
     // Trace a family-specific visible region around the viewport perimeter.
     // When a boundary ray points through the horizon, binary-search back toward
@@ -1579,18 +1764,9 @@ fn draw_grid(
         }
         result
     };
-    let draw_segments = |frame: &mut canvas::Frame, segments: &[(Point, Point)]| {
-        if segments.is_empty() {
-            return;
-        }
-        let path = canvas::Path::new(|builder| {
-            for (p0, p1) in segments {
-                builder.move_to(*p0);
-                builder.line_to(*p1);
-            }
-        });
-        frame.stroke(&path, st.clone());
-    };
+
+    let mut all_segments: Vec<(Point, Point)> = Vec::new();
+    let mut axis_extent = 0.0_f32;
 
     // A finite LIMITS rectangle replaces the usual viewport/horizon extent.
     // Clip each UCS grid line analytically against the WCS XY rectangle, then
@@ -1676,33 +1852,22 @@ fn draw_grid(
                 }
             }
         }
-        draw_segments(frame, &segments);
+        all_segments.extend(segments);
 
         // LIMITS bounds the grid, not the UCS axes. Size the axes from the
         // visible grid plane so X/Y/Z still span the viewport even when the
         // finite grid rectangle is small or currently off-screen.
-        let axis_extent = samples.iter().fold(0.0_f32, |extent, (_, world)| {
+        let limits_extent = samples.iter().fold(0.0_f32, |extent, (_, world)| {
             let delta = (*world - grid_origin).as_vec3();
             extent
                 .max(delta.dot(axis1).abs())
                 .max(delta.dot(axis2).abs())
         });
-        if axis_extent > 0.0 {
-            let extent = (axis_extent + s) * 1.5;
-            draw_axes(
-                frame,
-                view_rot,
-                eye,
-                bounds,
-                extent.max(10.0),
-                grid_origin,
-                (gx, gy, gz),
-            );
+        if limits_extent > 0.0 {
+            axis_extent = limits_extent;
         }
-        return;
+        return GridGeometry { segments: all_segments, axis_extent };
     }
-
-    let mut axis_extent = 0.0_f32;
 
     // Lines parallel to axis2 (varying axis1 position).
     if let Some((anchor_screen, anchor_world, gap)) = best_anchor(0) {
@@ -1720,7 +1885,7 @@ fn draw_grid(
                         segments.extend(trim_line(0, p0, p1));
                     }
                 }
-                draw_segments(frame, &segments);
+                all_segments.extend(segments);
                 axis_extent =
                     axis_extent.max(min1.abs().max(max1.abs()).max(min2.abs()).max(max2.abs()));
             }
@@ -1743,18 +1908,15 @@ fn draw_grid(
                         segments.extend(trim_line(1, p0, p1));
                     }
                 }
-                draw_segments(frame, &segments);
+                all_segments.extend(segments);
                 axis_extent =
                     axis_extent.max(min1.abs().max(max1.abs()).max(min2.abs()).max(max2.abs()));
             }
         }
     }
 
-    // Coloured axes drawn on top of the grid lines, along the same UCS basis.
-    if axis_extent > 0.0 {
-        let extent = (axis_extent + s) * 1.5;
-        draw_axes(frame, view_rot, eye, bounds, extent.max(10.0), grid_origin, (gx, gy, gz));
-    }
+    let _ = gz; // gz unused after move; retained for symmetry with `draw_axes` call sites.
+    GridGeometry { segments: all_segments, axis_extent }
 }
 
 // ── Coloured UCS axes ──────────────────────────────────────────────────────
@@ -1841,39 +2003,28 @@ fn ucs_icon_geometry(
         return None;
     }
 
-    // Project to NDC (including depth) then to screen pixels.
-    let w2ndc = |world: Vec3| -> Option<Vec3> {
-        let ndc = vp.project_point3(world);
-        if !ndc.x.is_finite() || !ndc.y.is_finite() || !ndc.z.is_finite() {
+    // Transform directions directly. Projecting a point at the eye origin is
+    // undefined in perspective views.
+    let axis_screen = |axis: Vec3| -> Option<(f32, f32, f32, f32)> {
+        let clip = vp * axis.extend(0.0);
+        if !clip.x.is_finite() || !clip.y.is_finite() || !clip.z.is_finite() {
             return None;
         }
-        Some(ndc)
-    };
-    let ndc2s = |ndc: Vec3| -> Point {
-        Point::new(
-            bounds.x + (ndc.x + 1.0) * 0.5 * bounds.width,
-            bounds.y + (1.0 - ndc.y) * 0.5 * bounds.height,
-        )
+        let dx = clip.x * 0.5 * bounds.width;
+        let dy = -clip.y * 0.5 * bounds.height;
+        Some((dx, dy, (dx * dx + dy * dy).sqrt(), clip.z))
     };
 
-    // Project the UCS axis directions (not fixed world axes) so the tripod
-    // rotates to the active UCS. Directions are translation-invariant, so a
-    // common origin is fine.
     let (ax, ay, az) = axes;
-    let org = w2ndc(Vec3::ZERO)?;
-    let xn = w2ndc(ax)?;
-    let yn = w2ndc(ay)?;
-    let zn = w2ndc(az)?;
-
-    let org_s = ndc2s(org);
+    let (xdx, xdy, xlen, xdepth) = axis_screen(ax)?;
+    let (ydx, ydy, ylen, ydepth) = axis_screen(ay)?;
+    let (zdx, zdy, zlen, zdepth) = axis_screen(az)?;
     let corner = Point::new(
         bounds.x + UCS_ICON_MARGIN,
         bounds.y + (bounds.height - UCS_ICON_MARGIN).max(UCS_ICON_MARGIN),
     );
     // Snap the tripod to the projected UCS origin when it is on-screen
-    // (UCSICON ORigin); otherwise keep it in the corner. `org_s` (the
-    // rotation-only origin) stays the reference for axis-tip directions —
-    // those are translation-invariant, so only the anchor point moves.
+    // (UCSICON ORigin); otherwise keep it in the corner.
     let (icon_origin, at_origin) = match origin_screen {
         Some(p)
             if p.x >= bounds.x
@@ -1886,37 +2037,24 @@ fn ucs_icon_geometry(
         _ => (corner, false),
     };
 
-    // Raw screen-space displacement for each axis tip.
-    let raw = |ndc_tip: Vec3| -> (f32, f32, f32) {
-        let s = ndc2s(ndc_tip);
-        let dx = s.x - org_s.x;
-        let dy = s.y - org_s.y;
-        (dx, dy, (dx * dx + dy * dy).sqrt())
-    };
-
-    let (xdx, xdy, xlen) = raw(xn);
-    let (ydx, ydy, ylen) = raw(yn);
-    let (zdx, zdy, zlen) = raw(zn);
-
     // Scale so the longest projected axis fills UCS_ICON_LEN; shorter axes
     // stay proportionally shorter (this IS the foreshortening effect).
     let max_len = xlen.max(ylen).max(zlen).max(1e-4);
     let sc = UCS_ICON_LEN / max_len;
 
-    let mk = |dx: f32, dy: f32, len: f32, tip_z: f32| IconAxis {
+    let mk = |dx: f32, dy: f32, len: f32, depth: f32| IconAxis {
         dx: dx * sc,
         dy: dy * sc,
         sc_len: len * sc,
-        // depth > 0 → tip farther than origin (into screen); < 0 → toward viewer.
-        depth: tip_z - org.z,
+        depth,
     };
     Some((
         icon_origin,
         at_origin,
         [
-            mk(xdx, xdy, xlen, xn.z),
-            mk(ydx, ydy, ylen, yn.z),
-            mk(zdx, zdy, zlen, zn.z),
+            mk(xdx, xdy, xlen, xdepth),
+            mk(ydx, ydy, ylen, ydepth),
+            mk(zdx, zdy, zlen, zdepth),
         ],
     ))
 }
@@ -2755,5 +2893,394 @@ mod clip_tests {
         let (a, c) = clip_seg(Point::new(10.0, 10.0), Point::new(700.0, 500.0), b()).unwrap();
         assert!((a.x - 10.0).abs() < 0.01 && (c.x - 700.0).abs() < 0.01);
         assert!(clip_seg(Point::new(-9000.0, -9000.0), Point::new(-8000.0, -8000.0), b()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod bench_grid_geometry_tests {
+    use super::*;
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    /// Benchmarks the pure grid geometry construction (uncached).
+    /// Represents a 2-pane tiled Model layout: pane 1 at x=0..1280, pane 2 at
+    /// x=1280..1920. Slight tilt, typical eye, step 80 (pane 1) / 160 (pane 2).
+    /// RED: requires `grid_segments(...)` which does not exist yet — compilation
+    /// must fail with E0425 "cannot find function `grid_segments`". The bench
+    /// becomes meaningful at Step 1 once the helper is extracted.
+    #[test]
+    #[ignore]
+    fn bench_grid_geometry_uncached() {
+        let view_rot1 = Mat4::from_rotation_x(0.15) * Mat4::from_rotation_y(0.05);
+        let eye1 = glam::DVec3::new(4.0, 3.5, 9.0);
+        let bounds1 = iced::Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1280.0,
+            height: 720.0,
+        };
+        let step1 = 80.0_f32;
+        let grid_origin1 = glam::DVec3::new(0.0, 0.0, 0.0);
+        let grid_axes1 = (Vec3::X, Vec3::Y, Vec3::Z);
+        let limits1: Option<(glam::DVec2, glam::DVec2)> = None;
+
+        let view_rot2 = Mat4::from_rotation_x(0.15) * Mat4::from_rotation_y(0.05);
+        let eye2 = glam::DVec3::new(4.0, 3.5, 9.0);
+        let bounds2 = iced::Rectangle {
+            x: 1280.0,
+            y: 0.0,
+            width: 640.0,
+            height: 720.0,
+        };
+        let step2 = 160.0_f32;
+        let grid_origin2 = glam::DVec3::new(0.0, 0.0, 0.0);
+        let grid_axes2 = (Vec3::X, Vec3::Y, Vec3::Z);
+        let limits2: Option<(glam::DVec2, glam::DVec2)> = None;
+
+        for _ in 0..20 {
+            let _ = black_box(grid_segments(
+                black_box(view_rot1),
+                black_box(eye1),
+                black_box(bounds1),
+                black_box(step1),
+                black_box(grid_origin1),
+                black_box(grid_axes1),
+                black_box(limits1),
+            ));
+            let _ = black_box(grid_segments(
+                black_box(view_rot2),
+                black_box(eye2),
+                black_box(bounds2),
+                black_box(step2),
+                black_box(grid_origin2),
+                black_box(grid_axes2),
+                black_box(limits2),
+            ));
+        }
+
+        let n = 200u32;
+        let start = Instant::now();
+        for _ in 0..n {
+            let _ = black_box(grid_segments(
+                black_box(view_rot1),
+                black_box(eye1),
+                black_box(bounds1),
+                black_box(step1),
+                black_box(grid_origin1),
+                black_box(grid_axes1),
+                black_box(limits1),
+            ));
+            let _ = black_box(grid_segments(
+                black_box(view_rot2),
+                black_box(eye2),
+                black_box(bounds2),
+                black_box(step2),
+                black_box(grid_origin2),
+                black_box(grid_axes2),
+                black_box(limits2),
+            ));
+        }
+        let elapsed = start.elapsed();
+        let per_frame = elapsed / n;
+        println!(
+            "grid_segments uncached: {:?} per frame (n = {}, total {:?})",
+            per_frame, n, elapsed
+        );
+        assert!(per_frame.as_secs_f64() > 0.0, "per-frame time must be positive");
+    }
+
+    /// A/B partner of `bench_grid_geometry_uncached` (Mission #1, step 6).
+    /// Times the hit-path decision only: build `GridKey` from the current
+    /// pane params + canvas bounds, borrow the stored key, call
+    /// `should_reuse`. Mirrors the body of the hit branch in
+    /// `GridCanvas::draw`. Excludes the iced `canvas::Cache` internals
+    /// (Arc-clone + draw_with_bounds fast path) because they live in the
+    /// fork and are not what we added; measures only the cost we own.
+    #[test]
+    #[ignore]
+    fn bench_grid_geometry_cached() {
+        let view_rot1 = Mat4::from_rotation_x(0.15) * Mat4::from_rotation_y(0.05);
+        let eye1 = glam::DVec3::new(4.0, 3.5, 9.0);
+        let bounds1 = iced::Rectangle { x: 0.0, y: 0.0, width: 1280.0, height: 720.0 };
+        let step1 = 80.0_f32;
+        let origin1 = glam::DVec3::new(0.0, 0.0, 0.0);
+        let axes1 = (Vec3::X, Vec3::Y, Vec3::Z);
+        let limits1: Option<(glam::DVec2, glam::DVec2)> = None;
+
+        let view_rot2 = Mat4::from_rotation_x(0.15) * Mat4::from_rotation_y(0.05);
+        let eye2 = glam::DVec3::new(4.0, 3.5, 9.0);
+        let bounds2 = iced::Rectangle { x: 1280.0, y: 0.0, width: 640.0, height: 720.0 };
+        let step2 = 160.0_f32;
+        let origin2 = glam::DVec3::new(0.0, 0.0, 0.0);
+        let axes2 = (Vec3::X, Vec3::Y, Vec3::Z);
+        let limits2: Option<(glam::DVec2, glam::DVec2)> = None;
+
+        let params1 = GridParams {
+            view_rot: view_rot1, eye: eye1, bounds: bounds1, step: step1,
+            origin: origin1, axes: axes1, limits: limits1,
+        };
+        let params2 = GridParams {
+            view_rot: view_rot2, eye: eye2, bounds: bounds2, step: step2,
+            origin: origin2, axes: axes2, limits: limits2,
+        };
+        let grids = vec![params1, params2];
+        // Overall canvas bounds — what `GridCanvas::draw` receives and
+        // passes to `GridKey::from_grids`. The 1920×720 covers the two
+        // tiled panes (1280 + 640).
+        let canvas_bounds = iced::Rectangle { x: 0.0, y: 0.0, width: 1920.0, height: 720.0 };
+
+        // Pre-seed a `GridCanvasState` with the same key the bench will
+        // build each iteration — guaranteed hit path.
+        let state = GridCanvasState::default();
+        let stored_key = GridKey::from_grids(&grids, canvas_bounds);
+        *state.key.borrow_mut() = Some(stored_key);
+
+        for _ in 0..20 {
+            let key = GridKey::from_grids(black_box(&grids), black_box(canvas_bounds));
+            let hit = should_reuse(state.key.borrow().as_ref(), &key);
+            black_box(hit);
+        }
+
+        let n = 200u32;
+        let start = Instant::now();
+        let mut hit_count = 0u32;
+        for _ in 0..n {
+            let key = GridKey::from_grids(black_box(&grids), black_box(canvas_bounds));
+            if should_reuse(state.key.borrow().as_ref(), &key) {
+                hit_count += 1;
+            }
+        }
+        let elapsed = start.elapsed();
+        let per_frame = elapsed / n;
+        assert_eq!(hit_count, n, "bench should always hit (sanity)");
+        println!(
+            "grid key + should_reuse (hit path): {:?} per frame (n = {}, total {:?})",
+            per_frame, n, elapsed
+        );
+        assert!(per_frame.as_secs_f64() > 0.0, "per-frame time must be positive");
+    }
+}
+
+#[cfg(test)]
+mod grid_key_tests {
+    use super::*;
+
+    /// Reference `GridParams` used as the baseline for key-construction tests.
+    /// Mirrors a representative Model pane: identity-ish view, eye ~3.5m back,
+    /// step 80 world units, WCS, no limits. Tests mutate one field at a time
+    /// off this baseline to assert that `GridKey` invalidates on every input
+    /// change.
+    fn baseline_params() -> GridParams {
+        GridParams {
+            view_rot: Mat4::from_rotation_x(0.15) * Mat4::from_rotation_y(0.05),
+            eye: glam::DVec3::new(4.0, 3.5, 9.0),
+            bounds: iced::Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 1280.0,
+                height: 720.0,
+            },
+            step: 80.0,
+            origin: glam::DVec3::new(0.0, 0.0, 0.0),
+            axes: (Vec3::X, Vec3::Y, Vec3::Z),
+            limits: None,
+        }
+    }
+
+    /// Same `Vec<GridParams>` + same bounds ⇒ keys compare equal.
+    #[test]
+    fn grid_key_matches_identical_params() {
+        let grids = vec![baseline_params(), baseline_params()];
+        let bounds = iced::Rectangle { x: 0.0, y: 0.0, width: 1920.0, height: 720.0 };
+        let a = GridKey::from_grids(&grids, bounds);
+        let b = GridKey::from_grids(&grids, bounds);
+        assert_eq!(a, b);
+    }
+
+    /// One test, one baseline. Every change of any of the 7 inputs must produce
+    /// a key that differs from the baseline. This is the entire correctness
+    /// contract for cache hit/miss — if any input is ignored, the cache serves
+    /// a stale grid.
+    #[test]
+    fn grid_key_invalidates_on_changed_fields() {
+        let baseline_bounds = iced::Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 720.0,
+        };
+        let baseline_grids = vec![baseline_params()];
+        let baseline_key = GridKey::from_grids(&baseline_grids, baseline_bounds);
+
+        // view_rot: small extra rotation
+        let mut p = baseline_params();
+        p.view_rot = Mat4::from_rotation_x(0.15 + 0.01) * Mat4::from_rotation_y(0.05);
+        assert_ne!(
+            GridKey::from_grids(&[p], baseline_bounds),
+            baseline_key,
+            "view_rot change must invalidate"
+        );
+
+        // eye: shift in z
+        let mut p = baseline_params();
+        p.eye = glam::DVec3::new(4.0, 3.5, 9.5);
+        assert_ne!(
+            GridKey::from_grids(&[p], baseline_bounds),
+            baseline_key,
+            "eye change must invalidate"
+        );
+
+        // step: zoom in
+        let mut p = baseline_params();
+        p.step = 40.0;
+        assert_ne!(
+            GridKey::from_grids(&[p], baseline_bounds),
+            baseline_key,
+            "step change must invalidate"
+        );
+
+        // origin: translate the UCS origin off-zero
+        let mut p = baseline_params();
+        p.origin = glam::DVec3::new(100.0, 0.0, 0.0);
+        assert_ne!(
+            GridKey::from_grids(&[p], baseline_bounds),
+            baseline_key,
+            "origin change must invalidate"
+        );
+
+        // axes: rotate the active UCS
+        let mut p = baseline_params();
+        p.axes = (Vec3::Y, Vec3::X, Vec3::Z);
+        assert_ne!(
+            GridKey::from_grids(&[p], baseline_bounds),
+            baseline_key,
+            "axes change must invalidate"
+        );
+
+        // limits: switch from None to Some
+        let mut p = baseline_params();
+        p.limits = Some((glam::DVec2::new(0.0, 0.0), glam::DVec2::new(100.0, 100.0)));
+        assert_ne!(
+            GridKey::from_grids(&[p], baseline_bounds),
+            baseline_key,
+            "limits change must invalidate"
+        );
+
+        // bounds: same baseline GridParams but a different overlay bounds
+        let other_bounds = iced::Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1280.0,
+            height: 720.0,
+        };
+        assert_ne!(
+            GridKey::from_grids(&baseline_grids, other_bounds),
+            baseline_key,
+            "bounds change must invalidate"
+        );
+    }
+
+    /// In a 2-pane tiled layout, changing the second pane's params (with pane 1
+    /// unchanged) must produce a different key — the cache cannot share geometry
+    /// when any pane is dirty.
+    #[test]
+    fn grid_key_invalidates_when_any_pane_changes() {
+        let bounds = iced::Rectangle { x: 0.0, y: 0.0, width: 1920.0, height: 720.0 };
+        let pane1 = baseline_params();
+        let pane2 = baseline_params();
+        let both = vec![pane1.clone(), pane2.clone()];
+        let baseline = GridKey::from_grids(&both, bounds);
+
+        let mut pane2_changed = pane2;
+        pane2_changed.step = 160.0;
+        let dirty = vec![pane1, pane2_changed];
+        assert_ne!(
+            GridKey::from_grids(&dirty, bounds),
+            baseline,
+            "second pane change must invalidate"
+        );
+    }
+
+    /// `should_reuse(None, &key)` ⇒ `false` (no cached key to reuse).
+    #[test]
+    fn should_reuse_empty() {
+        let grids = vec![baseline_params()];
+        let bounds = iced::Rectangle { x: 0.0, y: 0.0, width: 1920.0, height: 720.0 };
+        let key = GridKey::from_grids(&grids, bounds);
+        assert!(!should_reuse(None, &key));
+    }
+
+    /// `should_reuse(Some(&old), &same)` ⇒ `true` (structural equality).
+    #[test]
+    fn should_reuse_equal() {
+        let grids = vec![baseline_params()];
+        let bounds = iced::Rectangle { x: 0.0, y: 0.0, width: 1920.0, height: 720.0 };
+        let key = GridKey::from_grids(&grids, bounds);
+        assert!(should_reuse(Some(&key), &key));
+    }
+
+    /// `should_reuse(Some(&old), &new)` with keys built from different inputs
+    /// ⇒ `false` (must recompute, not serve stale geometry).
+    #[test]
+    fn should_reuse_changed() {
+        let grids_a = vec![baseline_params()];
+        let mut pane2 = baseline_params();
+        pane2.step = 160.0;
+        let grids_b = vec![pane2];
+        let bounds = iced::Rectangle { x: 0.0, y: 0.0, width: 1920.0, height: 720.0 };
+        let old = GridKey::from_grids(&grids_a, bounds);
+        let new = GridKey::from_grids(&grids_b, bounds);
+        assert!(!should_reuse(Some(&old), &new));
+    }
+}
+
+#[cfg(test)]
+mod grid_canvas_state_tests {
+    use super::*;
+
+    /// A freshly-defaulted `GridCanvasState` must have no cached key — the
+    /// first draw of a session always misses. This pins the `Default` impl
+    /// to a usable empty state (no need for the wrapper to special-case it).
+    #[test]
+    fn default_state_has_no_cached_key() {
+        let state = GridCanvasState::default();
+        assert!(state.key.borrow().is_none());
+    }
+
+    /// After manually storing a key in the state (the same way `draw` will
+    /// on a miss), `should_reuse` must return `true` for the stored key and
+    /// `false` for a key built from different inputs. This exercises the
+    /// state → decision wiring end-to-end without a real iced `Renderer`.
+    #[test]
+    fn stored_key_is_recognized_by_should_reuse() {
+        let view_rot = Mat4::from_rotation_x(0.15) * Mat4::from_rotation_y(0.05);
+        let eye = glam::DVec3::new(4.0, 3.5, 9.0);
+        let bounds = iced::Rectangle { x: 0.0, y: 0.0, width: 1280.0, height: 720.0 };
+        let step = 80.0_f32;
+        let grid_origin = glam::DVec3::new(0.0, 0.0, 0.0);
+        let grid_axes = (Vec3::X, Vec3::Y, Vec3::Z);
+        let limits: Option<(glam::DVec2, glam::DVec2)> = None;
+
+        let params = GridParams {
+            view_rot,
+            eye,
+            bounds,
+            step,
+            origin: grid_origin,
+            axes: grid_axes,
+            limits,
+        };
+        let key = GridKey::from_grids(&[params], bounds);
+
+        let state = GridCanvasState::default();
+        *state.key.borrow_mut() = Some(key.clone());
+
+        // Same key in the cache and in the request ⇒ reuse.
+        assert!(should_reuse(state.key.borrow().as_ref(), &key));
+
+        // Different bounds on the same params ⇒ different key, do not reuse.
+        let other_bounds = iced::Rectangle { x: 0.0, y: 0.0, width: 640.0, height: 480.0 };
+        let other_key = GridKey::from_grids(&[params], other_bounds);
+        assert!(!should_reuse(state.key.borrow().as_ref(), &other_key));
     }
 }

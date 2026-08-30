@@ -24,12 +24,27 @@ use printpdf::{
 use std::io::Write;
 use std::path::Path;
 
+#[derive(Clone, Debug)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub struct PlotWire {
+    pub wire: WireModel,
+    pub draw_depth: f32,
+}
+
+impl std::ops::Deref for PlotWire {
+    type Target = WireModel;
+
+    fn deref(&self) -> &Self::Target {
+        &self.wire
+    }
+}
+
 // The web build has no `printpdf` (it pulls a wasm-incompatible `memchr` via
 // lopdf → nom_locate) and no filesystem, so PDF export is native-only; the web
 // build gets these stubs so the call sites still compile.
 #[cfg(target_arch = "wasm32")]
 pub fn export_pdf(
-    _wires: &[WireModel],
+    _wires: &[PlotWire],
     _hatches: &[HatchModel],
     _wipeouts: &[HatchModel],
     _paper_w: f64,
@@ -95,7 +110,7 @@ pub struct PlotGroupSplits {
 /// Owned render data for one page in a multi-page PDF.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub struct PdfPageInput {
-    pub wires: std::sync::Arc<Vec<WireModel>>,
+    pub wires: std::sync::Arc<Vec<PlotWire>>,
     pub hatches: Vec<HatchModel>,
     pub wipeouts: Vec<HatchModel>,
     pub paper_w: f64,
@@ -106,6 +121,7 @@ pub struct PdfPageInput {
     pub scale: f32,
     pub clip: Option<(f32, f32, f32, f32)>,
     pub options: PdfPlotOptions,
+    pub plot_style: Option<PlotStyleTable>,
 }
 
 impl Default for PdfPlotOptions {
@@ -131,7 +147,7 @@ impl Default for PdfPlotOptions {
 /// - `rotation_deg`: 0 | 90 | 180 | 270 — rotates the entire drawing on the page.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn export_pdf(
-    wires: &[WireModel],
+    wires: &[PlotWire],
     hatches: &[HatchModel],
     wipeouts: &[HatchModel],
     paper_w: f64,
@@ -204,7 +220,7 @@ pub fn pick_pdf_path_owned(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn build_pdf(
-    wires: &[WireModel],
+    wires: &[PlotWire],
     hatches: &[HatchModel],
     wipeouts: &[HatchModel],
     paper_w: f32,
@@ -256,7 +272,7 @@ fn build_pdf_pages(pages: &[PdfPageInput], plot_style: Option<&PlotStyleTable>) 
             page.rotation_deg,
             page.scale,
             page.clip,
-            plot_style,
+            page.plot_style.as_ref().or(plot_style),
             page.options,
         );
     }
@@ -267,7 +283,7 @@ fn build_pdf_pages(pages: &[PdfPageInput], plot_style: Option<&PlotStyleTable>) 
 #[cfg(not(target_arch = "wasm32"))]
 fn append_pdf_page(
     doc: &mut PdfDocument,
-    wires: &[WireModel],
+    wires: &[PlotWire],
     hatches: &[HatchModel],
     wipeouts: &[HatchModel],
     paper_w: f32,
@@ -393,29 +409,96 @@ fn append_pdf_page(
         (first_wires, first_hatches, first_wipeouts),
         (second_wires, second_hatches, second_wipeouts),
     ] {
-    emit_wire_fills(&mut ops, wires, ox, oy, plot_style, options);
-
-    // Hatch / wipeout fills render before wires so linework stays visible.
-    for hatch in wipeouts.iter().chain(hatches.iter()) {
-        emit_hatch(
-            &mut ops,
-            hatch,
-            ox,
-            oy,
-            plot_style,
-            scale,
-            options,
-            normal_blend.as_ref(),
-        );
+    enum DrawItem<'a> {
+        WireFill(&'a PlotWire),
+        Hatch(&'a HatchModel),
+        Wire(&'a PlotWire),
+        Text(&'a PlotWire),
     }
+
+    let mut draw_items = Vec::with_capacity(wires.len() * 2 + hatches.len() + wipeouts.len());
+    let mut sequence = 0usize;
+    for wire in wires {
+        if !wire.fill_tris.is_empty() {
+            draw_items.push((wire.draw_depth, 0u8, sequence, DrawItem::WireFill(wire)));
+            sequence += 1;
+        }
+        draw_items.push((wire.draw_depth, 2u8, sequence, DrawItem::Wire(wire)));
+        sequence += 1;
+        if !wire.text_verts.is_empty() {
+            draw_items.push((wire.draw_depth, 3u8, sequence, DrawItem::Text(wire)));
+            sequence += 1;
+        }
+    }
+    for hatch in wipeouts.iter().chain(hatches.iter()) {
+        draw_items.push((hatch.draw_depth, 1u8, sequence, DrawItem::Hatch(hatch)));
+        sequence += 1;
+    }
+    draw_items.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
 
     let mut last_color: Option<[f32; 3]> = None;
     let mut last_lw: Option<f32> = None;
+    let mut last_cap = Some(LineCapStyle::Round);
+    let mut last_join = Some(LineJoinStyle::Round);
     // Current PDF dash array (empty = solid). Tracked so the dash op is only
     // re-emitted when it actually changes between wires.
     let mut last_dash: Option<Vec<i64>> = None;
 
-    for wire in wires {
+    for (_, _, _, item) in draw_items {
+        let wire = match item {
+            DrawItem::WireFill(wire) => {
+                emit_wire_fills(
+                    &mut ops,
+                    std::slice::from_ref(&wire.wire),
+                    ox,
+                    oy,
+                    plot_style,
+                    scale,
+                    options,
+                    normal_blend.as_ref(),
+                );
+                last_color = None;
+                last_lw = None;
+                last_dash = None;
+                continue;
+            }
+            DrawItem::Hatch(hatch) => {
+                emit_hatch(
+                    &mut ops,
+                    hatch,
+                    ox,
+                    oy,
+                    plot_style,
+                    scale,
+                    options,
+                    normal_blend.as_ref(),
+                );
+                last_color = None;
+                last_lw = None;
+                last_dash = None;
+                continue;
+            }
+            DrawItem::Text(wire) => {
+                emit_text(
+                    &mut ops,
+                    std::slice::from_ref(&wire.wire),
+                    ox,
+                    oy,
+                    scale,
+                    plot_style,
+                    options,
+                );
+                last_color = None;
+                last_lw = None;
+                last_dash = None;
+                continue;
+            }
+            DrawItem::Wire(wire) => wire,
+        };
         let [mut r, mut g, mut b, a] = wire.color;
         if a < 0.01 {
             continue;
@@ -429,6 +512,8 @@ fn append_pdf_page(
         let mut lw_override: Option<f32> = None;
         let mut screening = 1.0;
         let mut color_overridden = false;
+        let mut cap = None;
+        let mut join = None;
         if let Some(ctb) = plot_style {
             if wire.aci > 0 {
                 if let Some([cr, cg, cb]) = ctb.resolve_color(wire.aci) {
@@ -441,6 +526,20 @@ fn append_pdf_page(
                     .resolve_lineweight(wire.aci)
                     .map(|mm| (mm * MM_TO_PT).max(0.1));
                 screening = ctb.resolve_screening(wire.aci);
+                if let Some(entry) = ctb.aci_entries.get(wire.aci as usize) {
+                    cap = match entry.end_style {
+                        0 => Some(LineCapStyle::Butt),
+                        1 | 3 => Some(LineCapStyle::ProjectingSquare),
+                        2 => Some(LineCapStyle::Round),
+                        _ => None,
+                    };
+                    join = match entry.join_style {
+                        0 => Some(LineJoinStyle::Miter),
+                        1 | 3 => Some(LineJoinStyle::Bevel),
+                        2 => Some(LineJoinStyle::Round),
+                        _ => None,
+                    };
+                }
             }
         }
         // Near-white and near-yellow (viewport active border) → dark grey for print
@@ -461,6 +560,17 @@ fn append_pdf_page(
             }
         }
         [r, g, b] = plotted_color([r, g, b], a, screening, options);
+
+        let cap = cap.unwrap_or(LineCapStyle::Round);
+        if last_cap != Some(cap) {
+            ops.push(Op::SetLineCapStyle { cap });
+            last_cap = Some(cap);
+        }
+        let join = join.unwrap_or(LineJoinStyle::Round);
+        if last_join != Some(join) {
+            ops.push(Op::SetLineJoinStyle { join });
+            last_join = Some(join);
+        }
 
         if last_color
             .map(|c| (c[0] - r).abs() > 0.01 || (c[1] - g).abs() > 0.01 || (c[2] - b).abs() > 0.01)
@@ -499,13 +609,11 @@ fn append_pdf_page(
         let lw_pt = if wire.world_width > 0.0 {
             wire.world_width * MM_TO_PT
         } else {
-            let physical = lw_override.unwrap_or_else(|| {
-                if options.object_lineweights {
-                    (wire.line_weight_px * LW_PX_TO_PT).max(0.1)
-                } else {
-                    0.1
-                }
-            });
+            let physical = if options.object_lineweights {
+                lw_override.unwrap_or_else(|| (wire.line_weight_px * LW_PX_TO_PT).max(0.1))
+            } else {
+                0.1
+            };
             physical / pen_divisor
         };
         if last_lw.map(|l| (l - lw_pt).abs() > 0.01).unwrap_or(true) {
@@ -516,6 +624,43 @@ fn append_pdf_page(
         // Linetype dash pattern. Without this every wire exported as a solid
         // line regardless of its linetype (dashed / centre / dash-dot). (#155)
         let dash_arr = dash_array_from_pattern(wire.pattern_length, &wire.pattern, MM_TO_PT);
+        let stationed =
+            !dash_arr.is_empty() && wire.pattern_stations.len() > wire.points.len();
+        if stationed {
+            if last_dash.as_ref().is_none_or(|dash| !dash.is_empty()) {
+                ops.push(Op::SetLineDashPattern {
+                    dash: LineDashPattern::default(),
+                });
+                last_dash = Some(Vec::new());
+            }
+            for index in 0..wire.points.len().saturating_sub(1) {
+                if !wire.points[index][0].is_finite()
+                    || !wire.points[index + 1][0].is_finite()
+                {
+                    continue;
+                }
+                let start = wire.point_world(index, paper_h as f64 / scale.max(1e-6) as f64);
+                let end = wire.point_world(index + 1, paper_h as f64 / scale.max(1e-6) as f64);
+                for [from, to] in visible_station_ranges(
+                    wire.pattern_stations[index],
+                    wire.pattern_stations[index + 1],
+                    wire.pattern_length,
+                    &wire.pattern,
+                ) {
+                    let point = |t: f32| {
+                        LinePoint {
+                            p: Point::new(
+                                Mm((start.x + (end.x - start.x) * t as f64 + ox) as f32),
+                                Mm((start.y + (end.y - start.y) * t as f64 + oy) as f32),
+                            ),
+                            bezier: false,
+                        }
+                    };
+                    flush_line(&mut ops, &[point(from), point(to)], None);
+                }
+            }
+            continue;
+        }
         if last_dash.as_deref() != Some(dash_arr.as_slice()) {
             let dash = if dash_arr.is_empty() {
                 LineDashPattern::default()
@@ -523,7 +668,7 @@ fn append_pdf_page(
                 LineDashPattern::from_array(&dash_arr, 0)
             };
             ops.push(Op::SetLineDashPattern { dash });
-            last_dash = Some(dash_arr);
+            last_dash = Some(dash_arr.clone());
         }
 
         // Emit segments (NaN = pen-up). Points are the "high" half of a
@@ -541,9 +686,9 @@ fn append_pdf_page(
                 flush_line(&mut ops, &segment, dot_radius);
                 segment.clear();
             } else {
-                let lo = wire.points_low.get(pi).copied().unwrap_or([0.0; 3]);
-                let wx = (x as f64 + lo[0] as f64 + ox) as f32;
-                let wy = (y as f64 + lo[1] as f64 + oy) as f32;
+                let point = wire.point_world(pi, paper_h as f64 / scale.max(1e-6) as f64);
+                let wx = (point.x + ox) as f32;
+                let wy = (point.y + oy) as f32;
                 segment.push(LinePoint {
                     p: Point::new(Mm(wx), Mm(wy)),
                     bezier: false,
@@ -552,13 +697,6 @@ fn append_pdf_page(
         }
         flush_line(&mut ops, &segment, dot_radius);
     }
-
-    // Text (SDF glyph quads) — re-emitted as vector strokes / fills. Text now
-    // renders on-screen only as textured SDF quads (`wire.text_verts`), which
-    // this CPU exporter can't sample, so without this pass all text — including
-    // dimension text — is missing from the PDF (issue #385). Drawn after the
-    // wires (on top) and under the same rotation/scale/clip CTM.
-    emit_text(&mut ops, wires, ox, oy, scale, plot_style, options);
     }
 
     if needs_state {
@@ -598,6 +736,76 @@ fn dash_array_from_pattern(pattern_length: f32, pattern: &[f32; 8], mm_to_pt: f3
         // 1 pt floor so a zero-length dot still prints as a short mark.
         .map(|&v| (((v.abs() * mm_to_pt).round()) as i64).max(1))
         .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn visible_station_ranges(
+    start: f32,
+    end: f32,
+    pattern_length: f32,
+    pattern: &[f32; 8],
+) -> Vec<[f32; 2]> {
+    let count = pattern.iter().rposition(|value| *value != 0.0).map_or(0, |i| i + 1);
+    if count == 0 || pattern_length <= 1e-6 {
+        return vec![[0.0, 1.0]];
+    }
+    let dot = 1.0 / MM_TO_PT;
+    let mut elements: Vec<(f32, bool)> = pattern[..count]
+        .iter()
+        .map(|value| (if *value == 0.0 { dot } else { value.abs() }, *value >= 0.0))
+        .collect();
+    let total: f32 = elements.iter().map(|(length, _)| *length).sum();
+    if total <= 1e-6 {
+        return vec![[0.0, 1.0]];
+    }
+    let factor = pattern_length / total;
+    for (length, _) in &mut elements {
+        *length *= factor;
+    }
+    let delta = end - start;
+    let state = |station: f32, forward: bool| {
+        let mut phase = station.rem_euclid(pattern_length);
+        if !forward && phase <= 1e-6 {
+            phase = pattern_length;
+        }
+        let mut offset = 0.0;
+        if forward {
+            for &(length, drawn) in &elements {
+                let end = offset + length;
+                if phase < end - 1e-6 {
+                    return (drawn, end - phase);
+                }
+                offset = end;
+            }
+            (elements[0].1, elements[0].0)
+        } else {
+            offset = pattern_length;
+            for &(length, drawn) in elements.iter().rev() {
+                offset -= length;
+                if phase > offset + 1e-6 {
+                    return (drawn, phase - offset);
+                }
+            }
+            let last = elements[elements.len() - 1];
+            (last.1, last.0)
+        }
+    };
+    if delta.abs() <= 1e-6 {
+        return state(start, true).0.then_some([0.0, 1.0]).into_iter().collect();
+    }
+
+    let mut ranges = Vec::new();
+    let mut t = 0.0;
+    while t < 1.0 - 1e-6 {
+        let station = start + delta * t;
+        let (drawn, remaining) = state(station, delta > 0.0);
+        let next = (t + remaining / delta.abs()).clamp(t + 1e-6, 1.0);
+        if drawn {
+            ranges.push([t, next]);
+        }
+        t = next;
+    }
+    ranges
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -675,10 +883,69 @@ fn emit_wire_fills(
     ox: f64,
     oy: f64,
     plot_style: Option<&PlotStyleTable>,
+    scale: f32,
     options: PdfPlotOptions,
+    normal_blend: Option<&ExtendedGraphicsStateId>,
 ) {
     for wire in wires {
         if wire.fill_tris.is_empty() {
+            continue;
+        }
+        let styled_pattern = plot_style.and_then(|table| {
+            (wire.aci > 0)
+                .then(|| table.aci_entries.get(wire.aci as usize))
+                .flatten()
+                .and_then(|entry| {
+                    (65..=72)
+                        .contains(&entry.fill_style)
+                        .then(|| {
+                            crate::scene::model::hatch_model::plot_style_fill_pattern(
+                                entry.fill_style,
+                            )
+                        })
+                        .flatten()
+                })
+        });
+        if let Some(pattern) = styled_pattern {
+            for (triangle_index, triangle) in wire.fill_tris.chunks_exact(3).enumerate() {
+                let mut boundary = Vec::with_capacity(4);
+                for (point_index, point) in triangle.iter().enumerate() {
+                    let index = triangle_index * 3 + point_index;
+                    let low = wire.fill_tris_low.get(index).copied().unwrap_or([0.0; 3]);
+                    boundary.push([point[0] + low[0], point[1] + low[1]]);
+                }
+                boundary.push(boundary[0]);
+                let hatch = HatchModel {
+                    render_instance: wire.render_instance.clone(),
+                    world_origin: [0.0, 0.0],
+                    boundary: std::sync::Arc::new(boundary),
+                    boundary_wcs: None,
+                    fill_plane: None,
+                    fill_plane_boundary: None,
+                    boundary_exterior: None,
+                    boundary_sources: None,
+                    boundary_paths: None,
+                    style: acadrust::entities::HatchStyleType::Normal,
+                    pattern: pattern.clone(),
+                    name: "PLOTSTYLE".to_string(),
+                    color: wire.color,
+                    aci: wire.aci,
+                    line_weight_px: wire.line_weight_px,
+                    angle_offset: 0.0,
+                    scale: 1.0 / scale.max(1.0e-6),
+                    draw_depth: wire.depth_override.unwrap_or(0.0),
+                };
+                emit_hatch(
+                    ops,
+                    &hatch,
+                    ox,
+                    oy,
+                    plot_style,
+                    scale,
+                    options,
+                    normal_blend,
+                );
+            }
             continue;
         }
         let [mut r, mut g, mut b, a] = wire.color;
@@ -787,6 +1054,26 @@ fn emit_hatch(
     if hatch.boundary.is_empty() {
         return;
     }
+    let mut styled_hatch = None;
+    if let Some(table) = plot_style {
+        if hatch.aci > 0 && matches!(hatch.pattern, HatchPattern::Solid) {
+            if let Some(pattern) = table
+                .aci_entries
+                .get(hatch.aci as usize)
+                .and_then(|entry| {
+                    crate::scene::model::hatch_model::plot_style_fill_pattern(
+                        entry.fill_style,
+                    )
+                })
+            {
+                let mut model = hatch.clone();
+                model.pattern = pattern;
+                model.scale = 1.0 / scale.max(1.0e-6);
+                styled_hatch = Some(model);
+            }
+        }
+    }
+    let hatch = styled_hatch.as_ref().unwrap_or(hatch);
     let [mut r, mut g, mut b, a] = hatch.color;
     if a < 0.01 {
         return;
@@ -905,13 +1192,11 @@ fn emit_hatch(
     // Pattern hatches: rasterise the family lines clipped to the boundary
     // and emit each as a stroked line. Skips the polygon outline entirely.
     if matches!(hatch.pattern, HatchPattern::Pattern(_)) {
-        let physical = lw_override.unwrap_or_else(|| {
-            if options.object_lineweights {
-                (hatch.line_weight_px * LW_PX_TO_PT).max(0.1)
-            } else {
-                0.1
-            }
-        });
+        let physical = if options.object_lineweights {
+            lw_override.unwrap_or_else(|| (hatch.line_weight_px * LW_PX_TO_PT).max(0.1))
+        } else {
+            0.1
+        };
         let divisor = if options.scale_lineweights {
             1.0
         } else {
@@ -1071,16 +1356,16 @@ fn emit_text(
         if let Some(ctb) = plot_style {
             if wire.aci > 0 {
                 ctb_color = ctb.resolve_color(wire.aci);
-                lw_override = ctb
-                    .resolve_lineweight(wire.aci)
-                    .map(|mm| {
+                lw_override = options.object_lineweights.then(|| {
+                    ctb.resolve_lineweight(wire.aci).map(|mm| {
                         let divisor = if options.scale_lineweights {
                             1.0
                         } else {
                             scale.max(1e-6)
                         };
                         (mm * MM_TO_PT).max(0.1) / divisor
-                    });
+                    })
+                }).flatten();
                 screening = ctb.resolve_screening(wire.aci);
             }
         }
@@ -1222,12 +1507,15 @@ mod tests {
 
     #[test]
     fn clip_and_scale_emit_pdf_bytes() {
-        let w = WireModel::solid(
-            "test".into(),
-            vec![[0.0, 0.0, 0.0], [50.0, 50.0, 0.0]],
-            WireModel::WHITE,
-            false,
-        );
+        let w = PlotWire {
+            wire: WireModel::solid(
+                "test".into(),
+                vec![[0.0, 0.0, 0.0], [50.0, 50.0, 0.0]],
+                WireModel::WHITE,
+                false,
+            ),
+            draw_depth: 0.0,
+        };
         let bytes = build_pdf(
             &[w],
             &[],
@@ -1249,7 +1537,7 @@ mod tests {
 
     // Build a WireModel carrying the SDF glyph quads for `text` in the embedded
     // "txt" stroke font, laid out into the process-wide atlas emit_text reads.
-    fn text_wire(text: &str, origin: [f64; 3]) -> WireModel {
+    fn text_wire(text: &str, origin: [f64; 3]) -> PlotWire {
         use crate::scene::pipeline::text_gpu::push_glyph_vertices;
         use crate::scene::text::{glyph_quads::layout_glyph_quads, sdf_atlas};
         let quads = {
@@ -1259,9 +1547,12 @@ mod tests {
         assert!(!quads.is_empty(), "stroke glyphs laid out for {text:?}");
         let mut verts = Vec::new();
         push_glyph_vertices(&mut verts, &quads, origin, 1.0, [1.0, 0.0, 0.0, 1.0], 0.0);
-        WireModel {
-            text_verts: verts,
-            ..WireModel::solid("t".into(), Vec::new(), WireModel::WHITE, false)
+        PlotWire {
+            wire: WireModel {
+                text_verts: verts,
+                ..WireModel::solid("t".into(), Vec::new(), WireModel::WHITE, false)
+            },
+            draw_depth: 0.0,
         }
     }
 
@@ -1271,7 +1562,7 @@ mod tests {
     fn text_grows_the_pdf_vs_no_text() {
         let wire = text_wire("HELLO", [20.0, 20.0, 0.0]);
         let mut blank = wire.clone();
-        blank.text_verts.clear();
+        blank.wire.text_verts.clear();
 
         let with_text = build_pdf(
             &[wire],

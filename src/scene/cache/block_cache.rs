@@ -20,9 +20,13 @@ use std::sync::Arc;
 
 use acadrust::types::{Color as AcadColor, LineWeight, Transform, Vector3};
 use acadrust::{CadDocument, EntityType, Handle};
+use cadkernel::space::{Plane as KernelPlane, Vec3 as KernelVec3};
 
 use crate::scene::convert::tessellate;
-use crate::scene::model::wire_model::{SnapHint, TangentGeom, WireModel};
+use crate::scene::model::wire_model::{
+    decode_pattern_station_map, encode_pattern_stations, pattern_station_values, PatternStationMap,
+    PatternStationPiece, PointMarker, SnapHint, TangentGeom, WireModel,
+};
 
 const MAX_NESTING_DEPTH: usize = 32;
 /// Skip wires whose world-AABB projects to fewer than this many pixels in
@@ -38,6 +42,7 @@ pub struct LocalWire {
     /// Low-bit residual paired with `points` so block-instance wires keep
     /// sub-f32 precision once the renderer translates them to world space.
     pub points_low: Vec<[f32; 3]>,
+    pub point_marker: Option<PointMarker>,
     /// SDF glyph quads for block-internal text, in block-local coordinates.
     /// Non-empty only when SDF text is on and this sub is a TEXT/MTEXT. The
     /// expand-time transform (`emit_wire`) maps each vertex to world exactly
@@ -48,6 +53,7 @@ pub struct LocalWire {
     pub tangent_geoms: Vec<TangentGeom>,
     pub fill_tris: Vec<[f32; 3]>,
     pub fill_tris_low: Vec<[f32; 3]>,
+    pub fill_is_3d: bool,
     /// Preserves the planar SOLID classification through block expansion so
     /// it never gets merged with unrelated annotation fills of the same style.
     pub fill_is_2d_solid: bool,
@@ -60,15 +66,22 @@ pub struct LocalWire {
     /// equals the sub-entity's resolved colour. For colour-split MTEXT
     /// (`\C`/`\c` inline overrides) each wire carries its own override colour.
     pub color: [f32; 4],
+    pub contrast_bg: Option<[f32; 4]>,
+    pub preserve_color: bool,
+    pub canvas_color: bool,
     pub aci: u8,
     pub pattern_length: f32,
     pub pattern: [f32; 8],
     pub line_weight_px: f32,
+    pub pattern_stations: Vec<f32>,
     /// World-space band width for a wide polyline (see `WireModel.world_width`).
     /// Block-local; the expand-time transform scales it by the insert so the
     /// shader band grows with a scaled insert. `0.0` = a normal wire.
     pub world_width: f32,
     pub plinegen: bool,
+    pub plot_visible: bool,
+    pub plot_l0: bool,
+    pub hide_unselected: bool,
     /// Set at construction; used to discriminate fill-only GPU batches from
     /// stroke batches in [`StyleKey`]. Derived from
     /// `points.is_empty() && !fill_tris.is_empty()`.
@@ -102,6 +115,8 @@ pub struct NestedRef {
     pub xform: Transform,
     pub style: crate::scene::render_graph::InsertStyleSpec,
     pub instance_offsets: Vec<[f64; 3]>,
+    pub plot_visible: bool,
+    pub plot_l0: bool,
     /// XCLIP boundary for this nested insert, in the parent defn's local frame
     /// (`None` = unclipped). Baked at build time because the clip's spatial
     /// filter lives in `doc.objects`, which isn't reachable at expand time; on
@@ -123,6 +138,7 @@ pub enum LocalSub {
 pub struct BlockDefn {
     pub subs: Vec<LocalSub>,
     pub base_point: Vector3,
+    pub has_point_marker: bool,
     /// Union of every sub's local AABB (including nested-INSERT contributions
     /// resolved at expand time via their own defn's `aabb_local`). XY only —
     /// the wire renderer is 2D-dominant. Expressed in this defn's *offset*
@@ -303,21 +319,47 @@ impl BlockCache {
         // many parents is re-walked per parent — real work on block-heavy
         // drawings — and the per-name walks are independent, so they fan out.
         let this: &Self = self;
-        let resolved: Vec<(&String, [f32; 4])> = names
+        let resolved: Vec<(&String, [f32; 4], bool)> = names
             .par_iter()
             .map(|name| {
                 let mut visited: Vec<String> = Vec::new();
-                (name, this.defn_aabb_recursive(name, &mut visited))
+                let aabb = this.defn_aabb_recursive(name, &mut visited);
+                visited.clear();
+                let has_marker = this.defn_has_point_marker_recursive(name, &mut visited);
+                (name, aabb, has_marker)
             })
             .collect();
         // Phase 2 (serial): store the AABB back into each defn.
-        for (name, aabb) in resolved {
+        for (name, aabb, has_marker) in resolved {
             if let Some(defn_arc) = self.defns.get_mut(name) {
                 let mut defn = (**defn_arc).clone();
                 defn.aabb_local = aabb;
+                defn.has_point_marker = has_marker;
                 *defn_arc = Arc::new(defn);
             }
         }
+    }
+
+    fn defn_has_point_marker_recursive(
+        &self,
+        block_name: &str,
+        visited: &mut Vec<String>,
+    ) -> bool {
+        if visited.iter().any(|name| name == block_name) {
+            return false;
+        }
+        let Some(defn) = self.defns.get(block_name) else {
+            return false;
+        };
+        visited.push(block_name.to_string());
+        let found = defn.subs.iter().any(|sub| match sub {
+            LocalSub::Wire(wire) => wire.point_marker.is_some(),
+            LocalSub::Nested(insert) => {
+                self.defn_has_point_marker_recursive(&insert.block_name, visited)
+            }
+        });
+        visited.pop();
+        found
     }
 
     /// Returns the union AABB for `block_name`'s defn, expressed in **that
@@ -514,6 +556,14 @@ fn build_defn(
                 if let Some(record) = baked.filter(|record| {
                     !record.entity_handles.is_empty()
                 }) {
+                    let table_plot_l0 = crate::scene::view::render::is_effective_layer_zero(
+                        &table.common.layer,
+                    );
+                    let table_plot_visible = doc
+                        .layers
+                        .get(&table.common.layer)
+                        .map(|layer| layer.is_plottable)
+                        .unwrap_or(true);
                     let mut insert = acadrust::entities::Insert::new(
                         record.name.clone(),
                         table.insertion_point,
@@ -538,7 +588,7 @@ fn build_defn(
                         |leaf, context| {
                             let mut placed = leaf.clone();
                             placed.apply_transform(&context.transform);
-                            for wire in tessellate_sub_local(
+                            for mut wire in tessellate_sub_local(
                                 doc,
                                 &placed,
                                 anno_scale,
@@ -547,6 +597,8 @@ fn build_defn(
                                 viewport,
                                 depth_map,
                             ) {
+                                wire.plot_visible &= table_plot_l0 || table_plot_visible;
+                                wire.plot_l0 |= table_plot_l0;
                                 subs.push(LocalSub::Wire(wire));
                             }
                         },
@@ -600,6 +652,7 @@ fn build_defn(
     BlockDefn {
         subs,
         base_point: crate::scene::render_graph::block_base_point(doc, block_name),
+        has_point_marker: false,
         aabb_local: [0.0; 4],
         child_count: br.entity_handles.len(),
     }
@@ -622,12 +675,22 @@ fn build_nested_ref(
         .map(|filter| {
             crate::scene::pick::xclip::world_clip_polygon_for_transform(filter, &xform)
         });
+    let plot_l0 = crate::scene::view::render::is_effective_layer_zero(
+        &nested_ins.common.layer,
+    );
+    let plot_visible = doc
+        .layers
+        .get(&nested_ins.common.layer)
+        .map(|layer| layer.is_plottable)
+        .unwrap_or(true);
 
     NestedRef {
         block_name: nested_ins.block_name.clone(),
         xform,
         style: crate::scene::render_graph::InsertStyleSpec::new(doc, nested_ins, viewport),
         instance_offsets: crate::scene::render_graph::array_offsets(nested_ins),
+        plot_visible,
+        plot_l0,
         clip_poly,
         local_rank: depth_map
             .get(&nested_ins.common.handle.value())
@@ -673,6 +736,11 @@ fn tessellate_sub_local(
     // INSERT's layer at expand time. Flag each ByLayer property so emit_wire
     // can override the cached (layer-0-resolved) value with the insert layer's.
     let on_l0 = crate::scene::view::render::is_effective_layer_zero(&sub.common().layer);
+    let layer_plottable = doc
+        .layers
+        .get(&sub.common().layer)
+        .map(|layer| layer.is_plottable)
+        .unwrap_or(true);
     let color_l0 =
         !has_book_color && on_l0 && sub.common().color == AcadColor::ByLayer;
     let transparency_l0 = on_l0 && sub.common().transparency.alpha() == 0;
@@ -725,6 +793,8 @@ fn tessellate_sub_local(
         return vec![];
     }
 
+    let frame_mode = crate::scene::frame::entity_kind(sub)
+        .map(|kind| crate::scene::frame::mode(doc, kind));
     let mut result = Vec::with_capacity(wires_out.len());
     for wire in wires_out {
         // Per-wire point-count cap: a single wire that exceeds this is skipped
@@ -752,6 +822,23 @@ fn tessellate_sub_local(
                 .chain(wire.text_verts.iter().map(|v| v.pos)),
         );
         let is_fill_only = wire.points.is_empty() && !wire.fill_tris.is_empty();
+        let mtext_has_background = matches!(
+            sub,
+            EntityType::MText(text) if text.background_fill_flags & 0x03 != 0
+        );
+        let preserve_color = mtext_has_background && is_fill_only;
+        let canvas_color = is_fill_only
+            && matches!(
+                sub,
+                EntityType::MText(text) if text.background_fill_flags & 0x02 != 0
+            );
+        let contrast_bg = if !preserve_color
+            && (!wire.text_verts.is_empty() || !wire.points.is_empty())
+        {
+            tessellate::explicit_mtext_background(sub)
+        } else {
+            None
+        };
         // A wire whose colour differs from the entity's resolved base colour
         // carries an explicit per-segment override (e.g. an MTEXT `\C1;` inline
         // colour). ByBlock / layer-0 inheritance applies only to wires still on
@@ -763,22 +850,32 @@ fn tessellate_sub_local(
         result.push(LocalWire {
             points: wire.points,
             points_low: wire.points_low,
+            point_marker: wire.point_marker,
             text_verts: wire.text_verts,
             key_vertices: wire.key_vertices,
             snap_pts: wire.snap_pts,
             tangent_geoms: wire.tangent_geoms,
             fill_tris: wire.fill_tris,
             fill_tris_low: wire.fill_tris_low,
+            fill_is_3d: wire.fill_is_3d,
             fill_is_2d_solid: wire.fill_is_2d_solid,
             pick_tris: wire.pick_tris,
             pick_tris_low: wire.pick_tris_low,
             color: wire.color,
+            contrast_bg,
+            preserve_color,
+            canvas_color,
             aci,
             pattern_length: pat_len,
             pattern: pat,
             line_weight_px: lw_px,
+            pattern_stations: wire.pattern_stations,
             world_width: wire.world_width,
             plinegen: wire.plinegen,
+            plot_visible: frame_mode.is_none_or(|mode| mode == 1)
+                && (on_l0 || layer_plottable),
+            plot_l0: on_l0,
+            hide_unselected: frame_mode == Some(0),
             is_fill_only,
             color_is_byblock: color_is_byblock && wire_on_base_color,
             lt_is_byblock,
@@ -890,6 +987,7 @@ pub fn expand_insert(
     // The INSERT's own layer style — layer-0 inheritance target for children.
     ins_layer: crate::scene::view::render::InheritStyle,
     ins_layer_aci: u8,
+    ins_layer_plottable: bool,
     selected: bool,
     pslt_factor: f32,
     // World-space XY view AABB (with world_offset already subtracted, so the
@@ -941,6 +1039,7 @@ pub fn expand_insert(
             ins_pat,
             ins_lw_px,
             ins_layer,
+            ins_layer_plottable,
             selected,
             pslt_factor,
             is_xref,
@@ -1006,7 +1105,7 @@ pub fn expand_insert(
     // Whole-Insert pixel-size LOD: if the entire Insert footprint projects
     // to sub-pixel size, skip it entirely.
     if let Some(wpp) = world_per_pixel {
-        if aabb_pixel_size(insert_local, wpp) < MIN_PIXEL_SIZE {
+        if !defn.has_point_marker && aabb_pixel_size(insert_local, wpp) < MIN_PIXEL_SIZE {
             return Some(vec![]);
         }
     }
@@ -1020,6 +1119,8 @@ pub fn expand_insert(
         ins_lw_px,
         l0: ins_layer,
         l0_aci: ins_layer_aci,
+        l0_plottable: ins_layer_plottable,
+        plot_visible: ins_layer_plottable,
         selected,
         pslt_factor,
         view_aabb: None,
@@ -1123,6 +1224,7 @@ fn expansion_prototype_key(
     ins_pat: [f32; 8],
     ins_lw_px: f32,
     ins_layer: crate::scene::view::render::InheritStyle,
+    ins_layer_plottable: bool,
     selected: bool,
     pslt_factor: f32,
     is_xref: bool,
@@ -1150,6 +1252,7 @@ fn expansion_prototype_key(
     insert_style.push(ins_layer.pat_len.to_bits());
     insert_style.extend(ins_layer.pat.map(f32::to_bits));
     insert_style.push(ins_layer.lw_px.to_bits());
+    insert_style.push(ins_layer_plottable as u32);
     insert_style.push(pslt_factor.to_bits());
     insert_style.extend(bg_color.map(f32::to_bits));
     insert_style.push(anno_scale.to_bits());
@@ -1177,6 +1280,9 @@ fn translated_prototype_wire(
     translate_double_single(&mut wire.points, &mut wire.points_low, delta);
     translate_double_single(&mut wire.fill_tris, &mut wire.fill_tris_low, delta);
     translate_double_single(&mut wire.pick_tris, &mut wire.pick_tris_low, delta);
+    if let Some(marker) = &mut wire.point_marker {
+        marker.origin += glam::DVec3::from_array(delta);
+    }
     for (point, _) in &mut wire.snap_pts {
         point.x += delta[0];
         point.y += delta[1];
@@ -1199,6 +1305,12 @@ fn translated_prototype_wire(
             TangentGeom::Circle { center, .. } => {
                 for axis in 0..3 {
                     center[axis] += delta_f32[axis];
+                }
+            }
+            TangentGeom::PlanarCircle { center, .. }
+            | TangentGeom::Arc { center, .. } => {
+                for axis in 0..3 {
+                    center[axis] += delta[axis];
                 }
             }
         }
@@ -1252,6 +1364,8 @@ struct ExpandCtx<'a> {
     /// for child wires on layer "0" whose properties are ByLayer.
     l0: crate::scene::view::render::InheritStyle,
     l0_aci: u8,
+    l0_plottable: bool,
+    plot_visible: bool,
     selected: bool,
     pslt_factor: f32,
     // World-space XY view AABB (post world_offset). `None` = no culling.
@@ -1286,6 +1400,8 @@ fn nested_prototype_key(
     style.push(ctx.l0.pat_len.to_bits());
     style.extend(ctx.l0.pat.map(f32::to_bits));
     style.push(ctx.l0.lw_px.to_bits());
+    style.push(ctx.l0_plottable as u32);
+    style.push(ctx.plot_visible as u32);
     style.push(ctx.pslt_factor.to_bits());
     style.extend(ctx.bg_color.map(f32::to_bits));
     NestedPrototypeKey {
@@ -1316,13 +1432,18 @@ pub(crate) fn fade_toward_bg(color: [f32; 4], bg: [f32; 4]) -> [f32; 4] {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct StyleKey {
     color: [u32; 4],
+    contrast_bg: Option<[u32; 4]>,
+    preserve_color: bool,
+    canvas_color: bool,
     pattern_length: u32,
     pattern: [u32; 8],
     line_weight_px: u32,
+    source_length: u32,
     /// Wide-polyline band width (bit-cast). Keeps bands of different widths — and
     /// bands vs thin wires of the same colour/style — in separate batches so the
     /// finalized WireModel carries one correct `world_width`.
     world_width: u32,
+    point_marker: Option<PointMarkerKey>,
     aci: u8,
     plinegen: bool,
     /// Marks batches that emit only `fill_tris` with no wire `points`. The
@@ -1333,19 +1454,39 @@ struct StyleKey {
     /// Part of the batch key so planar SOLID fills remain independently
     /// switchable after block geometry is merged by style.
     fill_is_2d_solid: bool,
+    fill_is_3d: bool,
+    plot_visible: bool,
+    hide_unselected: bool,
     /// Bit-cast composed block-local depth for band wires (`0` = no override).
     /// Keeps bands of different in-block draw ranks in separate batches so
     /// each finalized WireModel carries one correct `depth_override`.
     depth_bits: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct PointMarkerKey {
+    origin: [u64; 3],
+    normal: [u64; 3],
+    axis_x: [u64; 3],
+    axis_y: [u64; 3],
+    viewport_percent: u32,
+}
+
 #[derive(Default, Debug)]
 struct BatchEntry {
     color: [f32; 4],
+    contrast_bg: Option<[f32; 4]>,
+    preserve_color: bool,
+    canvas_color: bool,
     pattern_length: f32,
     pattern: [f32; 8],
     line_weight_px: f32,
+    pattern_stations: Vec<f32>,
+    pattern_station_segments: Vec<i32>,
+    pattern_station_pieces: Vec<PatternStationPiece>,
+    source_length: f32,
     world_width: f32,
+    point_marker: Option<PointMarker>,
     aci: u8,
     plinegen: bool,
     /// Composed block-local draw-order offset for a band batch (see
@@ -1362,7 +1503,10 @@ struct BatchEntry {
     /// reconstructs `high + low`). Without it absolute f32 fills quantize to
     /// ~0.5 m and the greek-text rectangles shear.
     fill_tris_low: Vec<[f32; 3]>,
+    fill_is_3d: bool,
     fill_is_2d_solid: bool,
+    plot_visible: bool,
+    hide_unselected: bool,
     /// Accumulated thickness-wall pick geometry, paired high/low like
     /// `fill_tris`. Pick-only — no GPU batch reads this.
     pick_tris: Vec<[f32; 3]>,
@@ -1415,14 +1559,22 @@ struct Batches {
 impl BatchEntry {
     fn new(
         color: [f32; 4],
+        contrast_bg: Option<[f32; 4]>,
+        preserve_color: bool,
+        canvas_color: bool,
         pat_len: f32,
         pat: [f32; 8],
         lw_px: f32,
+        source_length: f32,
         world_width: f32,
+        point_marker: Option<PointMarker>,
         aci: u8,
         plinegen: bool,
         _is_fill_only: bool,
         fill_is_2d_solid: bool,
+        fill_is_3d: bool,
+        plot_visible: bool,
+        hide_unselected: bool,
     ) -> Self {
         // `is_fill_only` is part of the StyleKey hash so greek fills never
         // share a batch with regular wires (otherwise the finalized
@@ -1431,13 +1583,21 @@ impl BatchEntry {
         // itself — the empty `points` field is enough at finalize time.
         Self {
             color,
+            contrast_bg,
+            preserve_color,
+            canvas_color,
             pattern_length: pat_len,
             pattern: pat,
             line_weight_px: lw_px,
+            source_length,
             world_width,
+            point_marker,
             aci,
             plinegen,
             fill_is_2d_solid,
+            fill_is_3d,
+            plot_visible,
+            hide_unselected,
             min_x: f32::INFINITY,
             min_y: f32::INFINITY,
             max_x: f32::NEG_INFINITY,
@@ -1454,23 +1614,52 @@ impl Batches {
             .closed
             .into_iter()
             .chain(self.by_style.into_values())
-            .map(|b| {
+            .map(|mut b| {
+                if b.hide_unselected && !selected {
+                    b.points.clear();
+                    b.points_low.clear();
+                    b.pattern_stations.clear();
+                    b.pattern_station_segments.clear();
+                    b.pattern_station_pieces.clear();
+                }
                 let aabb = if b.min_x.is_infinite() {
                     WireModel::UNBOUNDED_AABB
                 } else {
                     [b.min_x, b.min_y, b.max_x, b.max_y]
                 };
-                // RAW colour came from `tessellate_sub_local` (and from
-                // `expand_defn`'s ByBlock fallbacks); apply `adapt_to_bg`
-                // now so each render against a different bg gets the
-                // right pure-black ↔ pure-white flip without rebuilding
-                // the cached defn.
-                let color = crate::scene::view::render::adapt_to_bg(b.color, bg_color);
+                let contrast_bg = b.contrast_bg.unwrap_or(bg_color);
+                let color = if b.canvas_color {
+                    bg_color
+                } else if b.preserve_color {
+                    b.color
+                } else {
+                    crate::scene::view::render::adapt_to_bg(b.color, contrast_bg)
+                };
+                if !b.preserve_color {
+                    for vertex in &mut b.text_verts {
+                        vertex.color = crate::scene::view::render::adapt_to_bg(
+                            vertex.color,
+                            contrast_bg,
+                        );
+                    }
+                }
+                if !b.pattern_stations.is_empty() {
+                    b.pattern_stations = encode_pattern_stations(
+                        std::mem::take(&mut b.pattern_stations),
+                        b.source_length,
+                        &b.pattern_station_segments,
+                        &b.pattern_station_pieces,
+                    );
+                }
                 WireModel {
+                    point_marker: b.point_marker,
                     taper_widths: Vec::new(),
+                    pattern_stations: b.pattern_stations,
                     world_width: b.world_width,
                     depth_override: b.local_depth,
-                    fill_is_3d: false,
+                    display_visible: !b.hide_unselected || selected,
+                    plot_visible: b.plot_visible,
+                    fill_is_3d: b.fill_is_3d,
                     fill_is_2d_solid: b.fill_is_2d_solid,
                     render_instance: None,
                     pick_tris: b.pick_tris,
@@ -1510,14 +1699,22 @@ impl Batches {
 
 fn style_key(
     color: [f32; 4],
+    contrast_bg: Option<[f32; 4]>,
+    preserve_color: bool,
+    canvas_color: bool,
     pat_len: f32,
     pat: [f32; 8],
     lw_px: f32,
+    source_length: f32,
     world_width: f32,
+    point_marker: Option<PointMarker>,
     aci: u8,
     plinegen: bool,
     is_fill_only: bool,
     fill_is_2d_solid: bool,
+    fill_is_3d: bool,
+    plot_visible: bool,
+    hide_unselected: bool,
     local_depth: Option<f32>,
 ) -> StyleKey {
     StyleKey {
@@ -1527,6 +1724,9 @@ fn style_key(
             color[2].to_bits(),
             color[3].to_bits(),
         ],
+        contrast_bg: contrast_bg.map(|color| color.map(f32::to_bits)),
+        preserve_color,
+        canvas_color,
         pattern_length: pat_len.to_bits(),
         pattern: [
             pat[0].to_bits(),
@@ -1539,11 +1739,22 @@ fn style_key(
             pat[7].to_bits(),
         ],
         line_weight_px: lw_px.to_bits(),
+        source_length: source_length.to_bits(),
         world_width: world_width.to_bits(),
+        point_marker: point_marker.map(|marker| PointMarkerKey {
+            origin: marker.origin.to_array().map(f64::to_bits),
+            normal: marker.normal.to_array().map(f64::to_bits),
+            axis_x: marker.axis_x.to_array().map(f64::to_bits),
+            axis_y: marker.axis_y.to_array().map(f64::to_bits),
+            viewport_percent: marker.viewport_percent.to_bits(),
+        }),
         aci,
         plinegen,
         is_fill_only,
         fill_is_2d_solid,
+        fill_is_3d,
+        plot_visible,
+        hide_unselected,
         depth_bits: local_depth.map_or(0, f32::to_bits),
     }
 }
@@ -1641,6 +1852,11 @@ fn expand_defn(
                     layer0_aci: ctx.l0_aci,
                 };
                 let nested_style = nref.style.resolve(parent_style);
+                let nested_layer_plottable = if nref.plot_l0 {
+                    ctx.l0_plottable
+                } else {
+                    nref.plot_visible
+                };
                 let inner_ctx = ExpandCtx {
                     cache: ctx.cache,
                     ins_color: nested_style.insert.0,
@@ -1650,6 +1866,8 @@ fn expand_defn(
                     ins_lw_px: nested_style.insert.3,
                     l0: nested_style.layer0,
                     l0_aci: nested_style.layer0_aci,
+                    l0_plottable: nested_layer_plottable,
+                    plot_visible: ctx.plot_visible && nested_layer_plottable,
                     selected: ctx.selected,
                     pslt_factor: ctx.pslt_factor,
                     view_aabb: ctx.view_aabb,
@@ -1868,6 +2086,179 @@ fn transformed_wire_length_scale(lw: &LocalWire, xform: &Transform) -> f32 {
     }
 }
 
+struct TransformedStationData {
+    values: Vec<f32>,
+    source_length: f32,
+    point_segments: Vec<i32>,
+    pieces: Vec<PatternStationPiece>,
+}
+
+fn transformed_station_data(
+    values: &[f32],
+    map: &PatternStationMap,
+    plinegen: bool,
+    xform: &Transform,
+) -> Option<TransformedStationData> {
+    if values.len() != map.point_segments.len() || map.pieces.is_empty() {
+        return None;
+    }
+
+    let mut pieces = Vec::with_capacity(map.pieces.len());
+    let mut global = 0.0_f32;
+    let mut local = 0.0_f32;
+    let mut current_segment = None;
+    for piece in &map.pieces {
+        if current_segment != Some(piece.source_segment) {
+            current_segment = Some(piece.source_segment);
+            local = 0.0;
+        }
+        let vector = Vector3::new(
+            piece.vector[0] as f64,
+            piece.vector[1] as f64,
+            piece.vector[2] as f64,
+        );
+        let mapped = xform.matrix.transform_direction(vector);
+        let chord = vector.length();
+        let mapped_chord = mapped.length();
+        let original_length = (piece.source_distances[1] - piece.source_distances[0]).abs();
+        let length = if chord > 1e-12 && mapped_chord.is_finite() {
+            original_length * (mapped_chord / chord) as f32
+        } else {
+            original_length
+        };
+        pieces.push(PatternStationPiece {
+            source_segment: piece.source_segment,
+            source_distances: [global, global + length],
+            segment_distances: [local, local + length],
+            vector: [mapped.x as f32, mapped.y as f32, mapped.z as f32],
+        });
+        global += length;
+        local += length;
+    }
+
+    let fallback_scale = map
+        .pieces
+        .last()
+        .map(|piece| piece.source_distances[1])
+        .filter(|length| length.abs() > 1e-12)
+        .map_or(1.0, |length| global / length);
+    let mapped_values = values
+        .iter()
+        .zip(&map.point_segments)
+        .map(|(&value, &segment)| {
+            if segment < 0 {
+                return 0.0;
+            }
+            let segment = segment as u32;
+            let range = |piece: &PatternStationPiece| {
+                if plinegen {
+                    piece.source_distances
+                } else {
+                    piece.segment_distances
+                }
+            };
+            let distance_to = |piece: &PatternStationPiece| {
+                let [start, end] = range(piece);
+                if value < start {
+                    start - value
+                } else if value > end {
+                    value - end
+                } else {
+                    0.0
+                }
+            };
+            let Some((old_piece, new_piece)) = map
+                .pieces
+                .iter()
+                .zip(&pieces)
+                .filter(|(piece, _)| piece.source_segment == segment)
+                .min_by(|(a, _), (b, _)| distance_to(a).total_cmp(&distance_to(b)))
+            else {
+                return value * fallback_scale;
+            };
+            let old = range(old_piece);
+            let new = range(new_piece);
+            let span = old[1] - old[0];
+            let t = if span.abs() > 1e-12 {
+                ((value - old[0]) / span).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            new[0] + (new[1] - new[0]) * t
+        })
+        .collect();
+
+    Some(TransformedStationData {
+        values: mapped_values,
+        source_length: global,
+        point_segments: map.point_segments.clone(),
+        pieces,
+    })
+}
+
+fn transformed_point_marker(marker: PointMarker, xform: &Transform) -> (PointMarker, f64) {
+    let origin = xform.apply(Vector3::new(marker.origin.x, marker.origin.y, marker.origin.z));
+    let map_direction = |direction: glam::DVec3| {
+        let mapped = xform.matrix.transform_direction(Vector3::new(
+            direction.x,
+            direction.y,
+            direction.z,
+        ));
+        KernelVec3::new(mapped.x, mapped.y, mapped.z)
+    };
+    let mapped_normal = map_direction(marker.normal);
+    let normal_scale = mapped_normal.length().max(f64::MIN_POSITIVE);
+    let normal = mapped_normal.normalize().unwrap_or(KernelVec3::Z);
+    let mapped_x = map_direction(marker.axis_x);
+    let axis_x = (mapped_x - normal * mapped_x.dot(normal))
+        .normalize()
+        .unwrap_or(KernelVec3::X);
+    let mapped_y = map_direction(marker.axis_y);
+    let axis_y = (mapped_y - normal * mapped_y.dot(normal) - axis_x * mapped_y.dot(axis_x))
+        .normalize()
+        .or_else(|| normal.cross(axis_x).normalize())
+        .unwrap_or(KernelVec3::Y);
+    (
+        PointMarker {
+            origin: glam::DVec3::new(origin.x, origin.y, origin.z),
+            normal: glam::DVec3::from_array(normal.to_array()),
+            axis_x: glam::DVec3::from_array(axis_x.to_array()),
+            axis_y: glam::DVec3::from_array(axis_y.to_array()),
+            viewport_percent: marker.viewport_percent,
+        },
+        normal_scale,
+    )
+}
+
+fn transformed_marker_point(
+    point: KernelVec3,
+    source: PointMarker,
+    target: PointMarker,
+    axial_scale: f64,
+) -> KernelVec3 {
+    let source_origin = KernelVec3::from(source.origin.to_array());
+    let source_normal = KernelVec3::from(source.normal.to_array())
+        .normalize()
+        .unwrap_or(KernelVec3::Z);
+    let delta = point - source_origin;
+    let axial = delta.dot(source_normal);
+    let source_plane = KernelPlane::from_axes(
+        source.origin.to_array(),
+        source.axis_x.to_array(),
+        source.axis_y.to_array(),
+    );
+    let uv = source_plane
+        .project_vector((delta - source_normal * axial).to_array())
+        .unwrap_or([0.0; 2]);
+    let target_plane = KernelPlane::from_axes(
+        target.origin.to_array(),
+        target.axis_x.to_array(),
+        target.axis_y.to_array(),
+    );
+    KernelVec3::from(target_plane.point_at(uv))
+        + KernelVec3::from(target.normal.to_array()) * axial * axial_scale
+}
+
 fn emit_wire(
     lw: &LocalWire,
     accum_xform: &Transform,
@@ -1908,16 +2299,38 @@ fn emit_wire(
         lw.line_weight_px
     };
 
-    // Pattern distances are stored in block-local units. Scale them by the
-    // wire's actual path-length ratio so uniform and non-uniform INSERTs both
-    // stay dimensionally consistent with their transformed geometry.
-    let pattern_scale = if final_pat_len > 0.0 {
-        transformed_wire_length_scale(lw, accum_xform)
-    } else {
-        1.0
-    };
+    let station_values = pattern_station_values(&lw.pattern_stations, lw.points.len());
+    let station_map = decode_pattern_station_map(&lw.pattern_stations, lw.points.len());
+    let transformed_stations = station_values.and_then(|(values, _)| {
+        station_map.as_ref().and_then(|map| {
+            transformed_station_data(values, map, lw.plinegen, accum_xform)
+        })
+    });
+    let has_stations = station_values.is_some();
+    let pattern_scale = transformed_stations.as_ref().map_or_else(
+        || {
+            if final_pat_len > 0.0 || has_stations {
+                transformed_wire_length_scale(lw, accum_xform)
+            } else {
+                1.0
+            }
+        },
+        |data| {
+            station_values.map_or(1.0, |(_, source_length)| {
+                if source_length.abs() > 1e-12 {
+                    data.source_length / source_length
+                } else {
+                    1.0
+                }
+            })
+        },
+    );
     let final_pat_len = final_pat_len * ctx.pslt_factor * pattern_scale;
     let final_pat = final_pat.map(|v| v * ctx.pslt_factor * pattern_scale);
+    let source_length = transformed_stations.as_ref().map_or_else(
+        || station_values.map_or(0.0, |(_, length)| length * pattern_scale),
+        |data| data.source_length,
+    );
 
     // A wide polyline's band width is baked in block-local units; scale it by
     // the insert transform so the shader band matches the scaled geometry.
@@ -1933,6 +2346,10 @@ fn emit_wire(
     } else {
         0.0
     };
+    let marker_transform = lw
+        .point_marker
+        .map(|marker| transformed_point_marker(marker, accum_xform));
+    let point_marker = marker_transform.map(|(marker, _)| marker);
 
     // Only band wires take a per-child composed depth: their solid area is
     // what covers siblings, and their width already splits them into their own
@@ -1940,19 +2357,36 @@ fn emit_wire(
     // batches stay merged.
     let local_depth = (lw.world_width > 0.0)
         .then(|| d_range.0 + lw.local_rank * d_range.1);
+    let plot_visible = ctx.plot_visible
+        && lw.plot_visible
+        && (!lw.plot_l0 || ctx.l0_plottable);
 
     let key = style_key(
         final_color,
+        lw.contrast_bg,
+        lw.preserve_color,
+        lw.canvas_color,
         final_pat_len,
         final_pat,
         final_lw_px,
+        source_length,
         final_world_width,
+        point_marker,
         final_aci,
         lw.plinegen,
         lw.is_fill_only,
         lw.fill_is_2d_solid,
+        lw.fill_is_3d,
+        plot_visible,
+        lw.hide_unselected,
         local_depth,
     );
+
+    if transformed_stations.is_some() {
+        if let Some(closed) = out.by_style.remove(&key) {
+            out.closed.push(closed);
+        }
+    }
 
     // If the open batch for this style would exceed wgpu's per-buffer limit
     // after appending this wire, finalize it now and start a fresh batch.
@@ -1966,17 +2400,28 @@ fn emit_wire(
     let entry = out.by_style.entry(key).or_insert_with(|| {
         BatchEntry::new(
             final_color,
+            lw.contrast_bg,
+            lw.preserve_color,
+            lw.canvas_color,
             final_pat_len,
             final_pat,
             final_lw_px,
+            source_length,
             final_world_width,
+            point_marker,
             final_aci,
             lw.plinegen,
             lw.is_fill_only,
             lw.fill_is_2d_solid,
+            lw.fill_is_3d,
+            plot_visible,
+            lw.hide_unselected,
         )
     });
     entry.local_depth = local_depth;
+    if let Some(data) = &transformed_stations {
+        entry.pattern_station_pieces.clone_from(&data.pieces);
+    }
 
     // NaN separator between previously-appended geometry and this wire so the
     // GPU shader treats them as disconnected polylines within one buffer.
@@ -1987,24 +2432,52 @@ fn emit_wire(
         if needs_sep {
             entry.points.push([f32::NAN; 3]);
             entry.points_low.push([0.0; 3]);
+            if has_stations {
+                entry.pattern_stations.push(0.0);
+            }
+            if transformed_stations.is_some() {
+                entry.pattern_station_segments.push(-1);
+            }
         }
         // Iterate paired with the matching low residual so the GPU keeps
         // sub-f32 precision once the INSERT transform lands the wire in
         // world space at UTM-scale coordinates.
         for (idx, p) in lw.points.iter().enumerate() {
+            let station = transformed_stations
+                .as_ref()
+                .map(|data| data.values[idx])
+                .or_else(|| has_stations.then(|| lw.pattern_stations[idx] * pattern_scale));
+            let station_segment = transformed_stations
+                .as_ref()
+                .map(|data| data.point_segments[idx]);
             if p[0].is_nan() {
                 entry.points.push([f32::NAN; 3]);
                 entry.points_low.push([0.0; 3]);
+                if let Some(station) = station {
+                    entry.pattern_stations.push(station);
+                }
+                if let Some(segment) = station_segment {
+                    entry.pattern_station_segments.push(segment);
+                }
                 continue;
             }
             let pl = lw.points_low.get(idx).copied().unwrap_or([0.0; 3]);
             // Reconstruct the f64 source from (high, low) before applying the
             // insert transform — otherwise the low half is silently dropped.
-            let v = accum_xform.apply(Vector3::new(
+            let source = KernelVec3::new(
                 p[0] as f64 + pl[0] as f64,
                 p[1] as f64 + pl[1] as f64,
                 p[2] as f64 + pl[2] as f64,
-            ));
+            );
+            let mapped = if let (Some(source_marker), Some((target_marker, axial_scale))) =
+                (lw.point_marker, marker_transform)
+            {
+                transformed_marker_point(source, source_marker, target_marker, axial_scale)
+            } else {
+                let point = accum_xform.apply(Vector3::new(source.x, source.y, source.z));
+                KernelVec3::new(point.x, point.y, point.z)
+            };
+            let v = Vector3::new(mapped.x, mapped.y, mapped.z);
             let qx = (v.x) as f32;
             let qy = (v.y) as f32;
             let qz = (v.z) as f32;
@@ -2026,6 +2499,12 @@ fn emit_wire(
             }
             entry.points.push(q);
             entry.points_low.push([qx_l, qy_l, qz_l]);
+            if let Some(station) = station {
+                entry.pattern_stations.push(station);
+            }
+            if let Some(segment) = station_segment {
+                entry.pattern_station_segments.push(segment);
+            }
         }
     }
 
@@ -2049,9 +2528,9 @@ fn emit_wire(
         ));
     }
     for tg in &lw.tangent_geoms {
-        entry
-            .tangent_geoms
-            .push(transform_tangent(tg, accum_xform));
+        if let Some(tangent) = transform_tangent(tg, accum_xform) {
+            entry.tangent_geoms.push(tangent);
+        }
     }
     // Per the WireModel contract an empty `fill_tris_low` means "all-zero low
     // half" (e.g. a Leader / dimension arrowhead fill, which the tessellator
@@ -2154,7 +2633,7 @@ fn emit_wire(
 fn transform_tangent(
     tg: &TangentGeom,
     t: &Transform,
-) -> TangentGeom {
+) -> Option<TangentGeom> {
     match tg {
         TangentGeom::Line { p1, p2 } => {
             let q1 = t.apply(Vector3::new(
@@ -2167,10 +2646,10 @@ fn transform_tangent(
                 p2[1] as f64,
                 p2[2] as f64,
             ));
-            TangentGeom::Line {
+            Some(TangentGeom::Line {
                 p1: [(q1.x) as f32, (q1.y) as f32, (q1.z) as f32],
                 p2: [(q2.x) as f32, (q2.y) as f32, (q2.z) as f32],
-            }
+            })
         }
         TangentGeom::Circle { center, radius } => {
             let c = t.apply(Vector3::new(
@@ -2182,10 +2661,74 @@ fn transform_tangent(
             let sx = ((m[0][0] * m[0][0] + m[0][1] * m[0][1] + m[0][2] * m[0][2]) as f64).sqrt();
             let sy = ((m[1][0] * m[1][0] + m[1][1] * m[1][1] + m[1][2] * m[1][2]) as f64).sqrt();
             let s = ((sx + sy) * 0.5) as f32;
-            TangentGeom::Circle {
+            Some(TangentGeom::Circle {
                 center: [(c.x) as f32, (c.y) as f32, (c.z) as f32],
                 radius: radius * s,
+            })
+        }
+        TangentGeom::Arc {
+            center,
+            axis_x,
+            axis_y,
+            radius,
+            start_angle,
+            end_angle,
+        } => {
+            let c = t.apply(Vector3::new(center[0], center[1], center[2]));
+            let x = t.apply_rotation(Vector3::new(axis_x[0], axis_x[1], axis_x[2]));
+            let y = t.apply_rotation(Vector3::new(axis_y[0], axis_y[1], axis_y[2]));
+            let sx = x.length();
+            let sy = y.length();
+            let scale = sx.max(sy);
+            if !scale.is_finite()
+                || scale <= 1.0e-12
+                || (sx - sy).abs() > scale * 1.0e-9
+            {
+                return None;
             }
+            let x = x / sx;
+            let y = y / sy;
+            if x.dot(&y).abs() > 1.0e-9 {
+                return None;
+            }
+            Some(TangentGeom::Arc {
+                center: [c.x, c.y, c.z],
+                axis_x: [x.x, x.y, x.z],
+                axis_y: [y.x, y.y, y.z],
+                radius: radius * ((sx + sy) * 0.5),
+                start_angle: *start_angle,
+                end_angle: *end_angle,
+            })
+        }
+        TangentGeom::PlanarCircle {
+            center,
+            axis_x,
+            axis_y,
+            radius,
+        } => {
+            let c = t.apply(Vector3::new(center[0], center[1], center[2]));
+            let x = t.apply_rotation(Vector3::new(axis_x[0], axis_x[1], axis_x[2]));
+            let y = t.apply_rotation(Vector3::new(axis_y[0], axis_y[1], axis_y[2]));
+            let sx = x.length();
+            let sy = y.length();
+            let scale = sx.max(sy);
+            if !scale.is_finite()
+                || scale <= 1.0e-12
+                || (sx - sy).abs() > scale * 1.0e-9
+            {
+                return None;
+            }
+            let x = x / sx;
+            let y = y / sy;
+            if x.dot(&y).abs() > 1.0e-9 {
+                return None;
+            }
+            Some(TangentGeom::PlanarCircle {
+                center: [c.x, c.y, c.z],
+                axis_x: [x.x, x.y, x.z],
+                axis_y: [y.x, y.y, y.z],
+                radius: radius * ((sx + sy) * 0.5),
+            })
         }
     }
 }

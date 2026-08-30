@@ -1,5 +1,6 @@
 use acadrust::entities::acis::{SabReader, SatBody, SatDocument};
 use acadrust::entities::{Body, Region, Solid3D};
+use cadkernel::brep::{self, Body as KernelBody};
 
 use crate::scene::model::mesh_model::{MeshLodSet, MeshModel};
 
@@ -8,9 +9,17 @@ fn tessellate_acis(
     name: String,
     color: [f32; 4],
     facet_res: f64,
+    chordal_deflection: Option<f64>,
     isolines: usize,
 ) -> Option<MeshLodSet> {
-    crate::scene::convert::acis_kernel::tessellate_sat(sat, name, color, facet_res, isolines)
+    crate::scene::convert::acis_kernel::tessellate_sat(
+        sat,
+        name,
+        color,
+        facet_res,
+        chordal_deflection,
+        isolines,
+    )
 }
 
 pub(crate) fn body_transform(
@@ -34,6 +43,8 @@ pub(crate) fn body_transform(
             values.extend_from_slice(&components[..len]);
         } else if let Some(value) = token.as_float() {
             values.push(value);
+        } else if let Some(value) = token.as_integer() {
+            values.push(value as f64);
         } else if let Some(text) = token.as_string() {
             for word in text.split_ascii_whitespace() {
                 let Ok(value) = word.parse::<f64>() else {
@@ -144,6 +155,33 @@ fn parse_acis(
     })
 }
 
+pub fn kernel_body(solid: &Solid3D) -> Option<KernelBody> {
+    let sat = parse_acis(
+        || solid.parse_sat(),
+        solid.acis_data.is_binary,
+        &solid.acis_data.sab_data,
+    )?;
+    let (mut bodies, loss) = cadkernel::acis::lift(&sat);
+    if !loss.is_empty() || bodies.len() != 1 {
+        return None;
+    }
+    let body = bodies.pop()?;
+    let source = body.provenance.source()?;
+    let Some((matrix, translation, scale)) = body_transform(&sat, source.index() as usize).ok()?
+    else {
+        return Some(body);
+    };
+    brep::transform(
+        &body,
+        &brep::Placement {
+            x_axis: [scale * matrix[0], scale * matrix[1], scale * matrix[2]],
+            y_axis: [scale * matrix[3], scale * matrix[4], scale * matrix[5]],
+            z_axis: [scale * matrix[6], scale * matrix[7], scale * matrix[8]],
+            origin: translation,
+        },
+    )
+}
+
 fn remap_acis_material_bindings(
     set: &mut MeshLodSet,
     acis: &acadrust::entities::AcisData,
@@ -167,10 +205,18 @@ fn finish(
     name: String,
     color: [f32; 4],
     facet_res: f64,
+    chordal_deflection: Option<f64>,
     isolines: usize,
     acis: &acadrust::entities::AcisData,
 ) -> Option<MeshLodSet> {
-    let mut set = tessellate_acis(&sat, name, color, facet_res, isolines)?;
+    let mut set = tessellate_acis(
+        &sat,
+        name,
+        color,
+        facet_res,
+        chordal_deflection,
+        isolines,
+    )?;
     remap_acis_material_bindings(&mut set, acis);
     Some(set)
 }
@@ -179,6 +225,7 @@ pub fn tessellate_region(
     region: &Region,
     color: [f32; 4],
     facet_res: f64,
+    chordal_deflection: Option<f64>,
     isolines: usize,
 ) -> Option<MeshLodSet> {
     let sat = parse_acis(
@@ -191,6 +238,7 @@ pub fn tessellate_region(
         region.common.handle.value().to_string(),
         color,
         facet_res,
+        chordal_deflection,
         isolines,
         &region.acis_data,
     )
@@ -200,6 +248,7 @@ pub fn tessellate_body(
     body: &Body,
     color: [f32; 4],
     facet_res: f64,
+    chordal_deflection: Option<f64>,
     isolines: usize,
 ) -> Option<MeshLodSet> {
     let sat = parse_acis(
@@ -212,6 +261,7 @@ pub fn tessellate_body(
         body.common.handle.value().to_string(),
         color,
         facet_res,
+        chordal_deflection,
         isolines,
         &body.acis_data,
     )
@@ -221,6 +271,7 @@ pub fn tessellate_surface(
     surface: &acadrust::entities::Surface,
     color: [f32; 4],
     facet_res: f64,
+    chordal_deflection: Option<f64>,
     isolines: usize,
 ) -> Option<MeshLodSet> {
     let sat = parse_acis(
@@ -233,6 +284,7 @@ pub fn tessellate_surface(
         surface.common.handle.value().to_string(),
         color,
         facet_res,
+        chordal_deflection,
         isolines,
         &surface.acis_data,
     )
@@ -242,6 +294,7 @@ pub fn tessellate_solid3d(
     solid: &Solid3D,
     color: [f32; 4],
     facet_res: f64,
+    chordal_deflection: Option<f64>,
     isolines: usize,
 ) -> Option<MeshLodSet> {
     let sat = parse_acis(
@@ -254,6 +307,7 @@ pub fn tessellate_solid3d(
         solid.common.handle.value().to_string(),
         color,
         facet_res,
+        chordal_deflection,
         isolines,
         &solid.acis_data,
     )

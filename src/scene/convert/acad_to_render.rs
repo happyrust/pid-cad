@@ -24,12 +24,21 @@ pub struct TextStroke {
     pub origin: [f64; 2],
     pub color: Option<[f32; 3]>,
     pub fill_tris: Vec<[f32; 2]>,
+    pub plane: Option<TextPlane>,
     /// Layout inputs to rebuild this run as per-glyph SDF quads (see
     /// `scene::text::glyph_quads`). `Some` on runs wired for the SDF text
     /// renderer; `None` leaves the run to the stroke path only. Heights are
     /// raw (pre annotation-scale), matching `strokes` — the SDF collector
     /// applies annotation scale the same way `tessellate` does for strokes.
     pub run: Option<GlyphRun>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TextPlane {
+    pub origin: [f64; 3],
+    pub scale_origin: [f64; 3],
+    pub x_axis: [f64; 3],
+    pub y_axis: [f64; 3],
 }
 
 /// Per-run text-layout inputs needed to reproduce a run as SDF glyph quads.
@@ -61,6 +70,15 @@ pub enum RenderObject {
     Lines(Vec<[f64; 3]>),
     /// Like Lines but linetype pattern restarts at each NaN-separated segment (plinegen=false).
     SegmentedLines(Vec<[f64; 3]>),
+    /// Kernel band boundary with centreline-based linetype stations.
+    BoundaryLines {
+        points: Vec<[f64; 3]>,
+        stations: Vec<f32>,
+        point_segments: Vec<i32>,
+        station_pieces: Vec<crate::scene::model::wire_model::PatternStationPiece>,
+        source_length: f32,
+        plinegen: bool,
+    },
     /// A wide polyline whose band width VARIES (a taper): a continuous WCS point
     /// list paired index-for-index with a per-point full band width. The wire
     /// shader interpolates the two endpoint widths of each segment so the band

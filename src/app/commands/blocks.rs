@@ -1,6 +1,28 @@
 use super::*;
 
 impl OpenCADStudio {
+    pub(in crate::app) fn copy_entities_to_clipboard(
+        &mut self,
+        i: usize,
+        handles: &[acadrust::Handle],
+        base: glam::DVec3,
+    ) -> usize {
+        let (entities, deps) = {
+            let document = &self.tabs[i].scene.document;
+            let entities: Vec<_> = handles
+                .iter()
+                .filter_map(|&handle| document.get_entity(handle).cloned())
+                .collect();
+            let deps = super::super::ClipboardDeps::capture(document, &entities);
+            (entities, deps)
+        };
+        let count = entities.len();
+        self.clipboard_base = base;
+        self.clipboard = entities;
+        self.clipboard_deps = deps;
+        count
+    }
+
     pub(super) fn dispatch_blocks(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         match cmd {
             // ── BASE — drawing insertion base point ───────────────────────
@@ -30,6 +52,7 @@ impl OpenCADStudio {
                                 .document
                                 .header
                                 .paper_space_insertion_base = pt;
+                            self.tabs[i].scene.persist_current_layout_state();
                         } else {
                             self.tabs[i]
                                 .scene
@@ -78,22 +101,14 @@ impl OpenCADStudio {
                     self.command_line.push_info(&cmd.prompt());
                     self.tabs[i].active_cmd = Some(Box::new(cmd));
                 } else {
-                    let entities: Vec<_> = handles
-                        .iter()
-                        .filter_map(|&h| self.tabs[i].scene.document.get_entity(h).cloned())
-                        .collect();
-                    self.clipboard_base = super::super::helpers::entities_lower_left_by_bbox(
+                    let base = super::super::helpers::entities_lower_left_by_bbox(
                         &self.tabs[i].scene.document,
                         &handles,
                     );
-                    self.clipboard = entities;
-                    self.clipboard_deps = super::super::ClipboardDeps::capture(
-                        &self.tabs[i].scene.document,
-                        &self.clipboard,
-                    );
+                    let count = self.copy_entities_to_clipboard(i, &handles, base);
                     self.command_line.push_info(crate::tf!(
                         "{} object(s) copied to clipboard.",
-                        self.clipboard.len()
+                        count
                     ).as_ref());
                 }
             }
@@ -135,19 +150,10 @@ impl OpenCADStudio {
                     .collect();
                 if coords.len() == 3 && !handles.is_empty() {
                     let base = glam::DVec3::new(coords[0], coords[1], coords[2]);
-                    let entities: Vec<_> = handles
-                        .iter()
-                        .filter_map(|&h| self.tabs[i].scene.document.get_entity(h).cloned())
-                        .collect();
-                    self.clipboard_base = base;
-                    self.clipboard = entities;
-                    self.clipboard_deps = super::super::ClipboardDeps::capture(
-                        &self.tabs[i].scene.document,
-                        &self.clipboard,
-                    );
+                    let count = self.copy_entities_to_clipboard(i, &handles, base);
                     self.command_line.push_info(crate::tf!(
                         "{} object(s) copied to clipboard (base {:.3},{:.3}).",
-                        self.clipboard.len(),
+                        count,
                         base.x,
                         base.y
                     ).as_ref());
@@ -160,6 +166,7 @@ impl OpenCADStudio {
                     .selected_entities()
                     .into_iter()
                     .map(|(h, _)| h)
+                    .filter(|handle| !self.tabs[i].scene.is_layer_locked(*handle))
                     .collect();
                 if handles.is_empty() {
                     use crate::modules::draw::select::SelectObjectsCommand;
@@ -167,20 +174,11 @@ impl OpenCADStudio {
                     self.command_line.push_info(&cmd.prompt());
                     self.tabs[i].active_cmd = Some(Box::new(cmd));
                 } else {
-                    let entities: Vec<_> = handles
-                        .iter()
-                        .filter_map(|&h| self.tabs[i].scene.document.get_entity(h).cloned())
-                        .collect();
-                    self.clipboard_base = super::super::helpers::entities_lower_left_by_bbox(
+                    let base = super::super::helpers::entities_lower_left_by_bbox(
                         &self.tabs[i].scene.document,
                         &handles,
                     );
-                    let count = entities.len();
-                    self.clipboard = entities;
-                    self.clipboard_deps = super::super::ClipboardDeps::capture(
-                        &self.tabs[i].scene.document,
-                        &self.clipboard,
-                    );
+                    let count = self.copy_entities_to_clipboard(i, &handles, base);
                     self.push_undo_snapshot(i, "CUTCLIP");
                     self.tabs[i].scene.erase_entities(&handles);
                     self.tabs[i].scene.deselect_all();
@@ -191,7 +189,7 @@ impl OpenCADStudio {
                 }
             }
 
-            "PASTECLIP" => {
+            "PASTE" | "PASTECLIP" => {
                 if self.clipboard.is_empty() {
                     return Some(self.read_system_clipboard_for_paste());
                 } else {
@@ -326,8 +324,16 @@ impl OpenCADStudio {
                         .push_error(crate::t!("No user-defined blocks found in this drawing.").as_ref());
                 } else {
                     use crate::modules::insert::insert_block::InsertBlockCommand;
-                    let cmd = InsertBlockCommand::new(blocks);
+                    let ranked = self.ranked_block_names(&blocks);
+                    let snapshot = self.block_usage_snapshot();
+                    let cmd = InsertBlockCommand::new_with_usage(
+                        ranked,
+                        snapshot,
+                        self.cliprompt_lines.clamp(0, 50) as u8,
+                    );
                     self.command_line.push_info(&cmd.prompt());
+                    let opts = cmd.options();
+                    self.command_line.set_step_options(opts.clone());
                     self.tabs[i].active_cmd = Some(Box::new(cmd));
                 }
             }
@@ -339,8 +345,16 @@ impl OpenCADStudio {
                         .push_error(crate::t!("No user-defined blocks found in this drawing.").as_ref());
                 } else {
                     use crate::modules::insert::minsert::MinsertCommand;
-                    let cmd = MinsertCommand::new(blocks);
+                    let ranked = self.ranked_block_names(&blocks);
+                    let snapshot = self.block_usage_snapshot();
+                    let cmd = MinsertCommand::new_with_usage(
+                        ranked,
+                        snapshot,
+                        self.cliprompt_lines.clamp(0, 50) as u8,
+                    );
                     self.command_line.push_info(&cmd.prompt());
+                    let opts = cmd.options();
+                    self.command_line.set_step_options(opts.clone());
                     self.tabs[i].active_cmd = Some(Box::new(cmd));
                 }
             }
@@ -393,32 +407,55 @@ impl OpenCADStudio {
                             .collect()
                     })
                     .unwrap_or_default();
+                let inserts: Vec<_> = self.tabs[i]
+                    .scene
+                    .document
+                    .entities()
+                    .filter_map(|entity| match entity {
+                        acadrust::EntityType::Insert(insert)
+                            if insert.block_name.eq_ignore_ascii_case(&block)
+                                && !self.tabs[i]
+                                    .scene
+                                    .is_layer_locked(insert.common.handle) =>
+                        {
+                            Some(insert.common.handle)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if inserts.is_empty() {
+                    self.command_line.push_error(
+                        crate::t!("ATTSYNC: no editable block references.").as_ref(),
+                    );
+                    return Some(Task::none());
+                }
                 self.push_undo_snapshot(i, "ATTSYNC");
                 let mut synced = 0usize;
                 let mut changes = Vec::new();
-                for e in self.tabs[i].scene.document.entities_mut() {
-                    if let acadrust::EntityType::Insert(ins) = e {
-                        if ins.block_name.eq_ignore_ascii_case(&block) {
-                            ins.attributes.retain(|a| {
-                                attdefs.iter().any(|(t, _)| t.eq_ignore_ascii_case(&a.tag))
-                            });
-                            for (tag, default) in &attdefs {
-                                if !ins
-                                    .attributes
-                                    .iter()
-                                    .any(|a| a.tag.eq_ignore_ascii_case(tag))
-                                {
-                                    ins.attributes
-                                        .push(acadrust::entities::AttributeEntity::new(
-                                            tag.clone(),
-                                            default.clone(),
-                                        ));
-                                }
+                for handle in inserts {
+                    let Some(acadrust::EntityType::Insert(ins)) =
+                        self.tabs[i].scene.document.get_entity_mut(handle)
+                    else {
+                        continue;
+                    };
+                    ins.attributes.retain(|a| {
+                        attdefs.iter().any(|(t, _)| t.eq_ignore_ascii_case(&a.tag))
+                    });
+                    for (tag, default) in &attdefs {
+                        if !ins
+                            .attributes
+                            .iter()
+                            .any(|a| a.tag.eq_ignore_ascii_case(tag))
+                        {
+                            ins.attributes
+                                .push(acadrust::entities::AttributeEntity::new(
+                                    tag.clone(),
+                                    default.clone(),
+                                ));
                             }
-                            synced += 1;
-                            changes.push((ins.common.handle, crate::scene::ChangeKind::Modified));
-                        }
                     }
+                    synced += 1;
+                    changes.push((ins.common.handle, crate::scene::ChangeKind::Modified));
                 }
                 self.tabs[i].scene.bump_entities(&changes);
                 self.tabs[i].dirty = true;
@@ -626,6 +663,7 @@ impl OpenCADStudio {
                     .iter()
                     .filter(|(_, e)| matches!(e, acadrust::EntityType::Insert(_)))
                     .map(|(h, _)| *h)
+                    .filter(|handle| !self.tabs[i].scene.is_layer_locked(*handle))
                     .collect();
                 if inserts.is_empty() {
                     self.command_line

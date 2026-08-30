@@ -480,7 +480,15 @@ pub fn annotative_offscale_for(
         }),
     }
 }
-
+pub(crate) fn annotation_scale_handles_for_entity(
+    doc: &CadDocument,
+    entity_handle: Handle,
+) -> Vec<Handle> {
+    object_scale_memberships(doc, entity_handle)
+        .into_iter()
+        .map(|(_, scale_handle)| scale_handle)
+        .collect()
+}
 pub fn scale_handle_by_name(doc: &CadDocument, name: &str) -> Option<Handle> {
     doc.objects.iter().find_map(|(handle, object)| match object {
         ObjectType::Scale(scale)
@@ -662,7 +670,19 @@ pub fn effective_annotation_scale_for(
     if !context_annotative && (text_like || !style_annotative) {
         return 1.0;
     }
-
+    // Annotative TEXT/MTEXT store their paper text height as the base value.
+    // `fallback` is the absolute paper-to-model multiplier for the active
+    // annotation scale and already includes the drawing's INSUNITS conversion.
+    //
+    // Example for a metre drawing with 2 mm paper text:
+    //   1:1   -> 2 * 0.001 = 0.002 m
+    //   1:100 -> 2 * 0.100 = 0.200 m
+    //
+    // Using active/native here would only produce 1 / 100 and would lose the
+    // millimetre-to-metre conversion entirely.
+    if matches!(entity, EntityType::Text(_) | EntityType::MText(_)) {
+        return fallback;
+    }
     if matches!(
         entity,
         EntityType::Dimension(_)
@@ -673,29 +693,9 @@ pub fn effective_annotation_scale_for(
         return fallback;
     }
 
-    // Unlike MTEXT / DIMENSION contexts, an MLEADER context carries its
-    // already-scaled text height and overall scale factor. Keep the text
-    // height as stored; make `ml.scale_factor * anno_scale` resolve to the
-    // active context's scale factor for arrows, doglegs, and fallback text.
-    if let EntityType::MultiLeader(mleader) = entity {
-        let Some(active) =
-            active_object_context_for_scale(doc, entity.common().handle, scale_handle)
-        else {
-            return fallback;
-        };
-        let ObjectContextKind::MLeader(context) = &active.kind else {
-            return fallback;
-        };
-        let base = mleader.scale_factor;
-        if base.abs() <= 1.0e-12 {
-            return fallback;
-        }
-        let relative = context.scale_factor / base;
-        return if relative.is_finite() && relative > 0.0 {
-            relative as f32
-        } else {
-            fallback
-        };
+    // MLEADER resolves the active-to-stored context ratio while tessellating.
+    if matches!(entity, EntityType::MultiLeader(_)) {
+        return fallback;
     }
 
     let Some(coll_h) = annotation_scales_dict(doc, entity.common().handle) else {
@@ -1502,68 +1502,209 @@ pub fn apply_mleader_style(
     entity: &mut acadrust::entities::MultiLeader,
     style: &acadrust::objects::MultiLeaderStyle,
 ) {
+    use acadrust::entities::MultiLeaderPropertyOverrideFlags as F;
+
+    let flags = entity.property_override_flags;
     entity.style_handle = Some(style.handle);
-    entity.content_type = (style.content_type as i16).into();
-    entity.path_type = (style.path_type as i16).into();
-    entity.line_color = style.line_color;
-    entity.line_type_handle = style.line_type_handle;
-    entity.line_weight = style.line_weight;
-    entity.enable_landing = style.enable_landing;
-    entity.enable_dogleg = style.enable_dogleg;
-    entity.dogleg_length = style.landing_distance;
-    entity.arrowhead_handle = style.arrowhead_handle;
-    entity.arrowhead_size = style.arrowhead_size;
-    entity.context.arrowhead_size = style.arrowhead_size;
-    entity.context.landing_gap = style.landing_gap;
-    entity.text_style_handle = style.text_style_handle;
-    entity.text_color = style.text_color;
-    entity.text_frame = style.text_frame;
-    entity.text_height = style.text_height;
-    entity.context.text_height = style.text_height;
-    entity.context.text_style_handle = style.text_style_handle;
-    entity.context.text_color = style.text_color;
-    entity.text_left_attachment = (style.text_left_attachment as i16).into();
-    entity.text_right_attachment = (style.text_right_attachment as i16).into();
-    entity.text_top_attachment = (style.text_top_attachment as i16).into();
-    entity.text_bottom_attachment = (style.text_bottom_attachment as i16).into();
-    entity.text_attachment_direction = (style.text_attachment_direction as i16).into();
-    entity.text_alignment = (style.text_alignment as i16).into();
-    entity.text_angle_type = (style.text_angle_type as i16).into();
+    if !flags.contains(F::CONTENT_TYPE) {
+        entity.content_type = (style.content_type as i16).into();
+    }
+    if !flags.contains(F::PATH_TYPE) {
+        entity.path_type = (style.path_type as i16).into();
+    }
+    if !flags.contains(F::LINE_COLOR) {
+        entity.line_color = style.line_color;
+    }
+    if !flags.contains(F::LEADER_LINE_TYPE) {
+        entity.line_type_handle = style.line_type_handle;
+    }
+    if !flags.contains(F::LEADER_LINE_WEIGHT) {
+        entity.line_weight = style.line_weight;
+    }
+    if !flags.contains(F::ENABLE_LANDING) {
+        entity.enable_landing = style.enable_landing;
+    }
+    if !flags.contains(F::ENABLE_DOGLEG) {
+        entity.enable_dogleg = style.enable_dogleg;
+    }
+    if !flags.contains(F::LANDING_DISTANCE) {
+        entity.dogleg_length = style.landing_distance;
+    }
+    if !flags.contains(F::LANDING_GAP) {
+        entity.context.landing_gap = style.landing_gap;
+    }
+    if !flags.contains(F::ARROWHEAD) {
+        entity.arrowhead_handle = style.arrowhead_handle;
+    }
+    if !flags.contains(F::ARROWHEAD_SIZE) {
+        entity.arrowhead_size = style.arrowhead_size;
+        entity.context.arrowhead_size = style.arrowhead_size;
+    }
+    if !flags.contains(F::TEXT_STYLE) {
+        entity.text_style_handle = style.text_style_handle;
+    }
+    if !flags.contains(F::TEXT_COLOR) {
+        entity.text_color = style.text_color;
+    }
+    if !flags.contains(F::TEXT_FRAME) {
+        entity.text_frame = style.text_frame;
+    }
+    if !flags.contains(F::TEXT_HEIGHT) {
+        entity.text_height = style.text_height;
+        entity.context.text_height = style.text_height;
+    }
+    if !flags.contains(F::TEXT_LEFT_ATTACHMENT) {
+        entity.text_left_attachment = (style.text_left_attachment as i16).into();
+    }
+    if !flags.contains(F::TEXT_RIGHT_ATTACHMENT) {
+        entity.text_right_attachment = (style.text_right_attachment as i16).into();
+    }
+    if !flags.contains(F::TEXT_TOP_ATTACHMENT) {
+        entity.text_top_attachment = (style.text_top_attachment as i16).into();
+    }
+    if !flags.contains(F::TEXT_BOTTOM_ATTACHMENT) {
+        entity.text_bottom_attachment = (style.text_bottom_attachment as i16).into();
+    }
+    if !flags.contains(F::TEXT_ATTACHMENT_DIRECTION) {
+        entity.text_attachment_direction = (style.text_attachment_direction as i16).into();
+    }
+    if !flags.contains(F::TEXT_ALIGNMENT) {
+        entity.text_alignment = (style.text_alignment as i16).into();
+    }
+    if !flags.contains(F::TEXT_ANGLE) {
+        entity.text_angle_type = (style.text_angle_type as i16).into();
+    }
     entity.context.text_left_attachment = entity.text_left_attachment;
     entity.context.text_right_attachment = entity.text_right_attachment;
     entity.context.text_top_attachment = entity.text_top_attachment;
     entity.context.text_bottom_attachment = entity.text_bottom_attachment;
     entity.context.text_alignment = entity.text_alignment;
-    entity.block_content_handle = style.block_content_handle;
-    entity.block_content_color = style.block_content_color;
-    entity.block_connection_type = (style.block_content_connection as i16).into();
-    entity.block_rotation = style.block_content_rotation;
-    entity.block_scale = Vector3::new(
-        style.block_content_scale_x,
-        style.block_content_scale_y,
-        style.block_content_scale_z,
-    );
-    entity.scale_factor = style.scale_factor;
-    entity.context.block_content_handle = style.block_content_handle;
-    entity.context.block_content_color = style.block_content_color;
+    entity.context.text_style_handle = entity.text_style_handle;
+    entity.context.text_color = entity.text_color;
+    if !flags.contains(F::BLOCK_CONTENT) {
+        entity.block_content_handle = style.block_content_handle;
+    }
+    if !flags.contains(F::BLOCK_CONTENT_COLOR) {
+        entity.block_content_color = style.block_content_color;
+    }
+    if !flags.contains(F::BLOCK_CONTENT_CONNECTION) {
+        entity.block_connection_type = (style.block_content_connection as i16).into();
+    }
+    if !flags.contains(F::BLOCK_CONTENT_ROTATION) {
+        entity.block_rotation = style.block_content_rotation;
+    }
+    if !flags.contains(F::BLOCK_CONTENT_SCALE) {
+        entity.block_scale = Vector3::new(
+            style.block_content_scale_x,
+            style.block_content_scale_y,
+            style.block_content_scale_z,
+        );
+    }
+    if !flags.contains(F::SCALE_FACTOR) {
+        entity.scale_factor = style.scale_factor;
+        entity.context.scale_factor = style.scale_factor;
+    }
+    entity.context.block_content_handle = entity.block_content_handle;
+    entity.context.block_content_color = entity.block_content_color;
     entity.context.block_connection_type = entity.block_connection_type;
-    entity.context.block_rotation = style.block_content_rotation;
+    entity.context.block_rotation = entity.block_rotation;
     entity.context.block_content_scale = entity.block_scale;
-    entity.context.scale_factor = style.scale_factor;
     entity.enable_annotation_scale = style.is_annotative;
+    match entity.content_type {
+        acadrust::entities::LeaderContentType::MText => {
+            entity.context.has_text_contents = true;
+            entity.context.has_block_contents = false;
+        }
+        acadrust::entities::LeaderContentType::Block => {
+            entity.context.has_text_contents = false;
+            entity.context.has_block_contents = entity.block_content_handle.is_some();
+            entity.context.block_content_location = entity.context.content_base_point;
+        }
+        _ => {
+            entity.context.has_text_contents = false;
+            entity.context.has_block_contents = false;
+        }
+    }
     for root in &mut entity.context.leader_roots {
-        root.landing_distance = style.landing_distance;
+        if !flags.contains(F::LANDING_DISTANCE) {
+            root.landing_distance = entity.dogleg_length;
+        }
         root.text_attachment_direction = entity.text_attachment_direction;
         for line in &mut root.lines {
-            if line.override_flags.is_empty() {
+            use acadrust::entities::LeaderLinePropertyOverrideFlags as F;
+            if !line.override_flags.contains(F::PATH_TYPE) {
                 line.path_type = entity.path_type;
-                line.line_color = style.line_color;
-                line.line_type_handle = style.line_type_handle;
-                line.line_weight = style.line_weight;
-                line.arrowhead_handle = style.arrowhead_handle;
-                line.arrowhead_size = style.arrowhead_size;
+            }
+            if !line.override_flags.contains(F::LINE_COLOR) {
+                line.line_color = entity.line_color;
+            }
+            if !line.override_flags.contains(F::LINE_TYPE) {
+                line.line_type_handle = entity.line_type_handle;
+            }
+            if !line.override_flags.contains(F::LINE_WEIGHT) {
+                line.line_weight = entity.line_weight;
+            }
+            if !line.override_flags.contains(F::ARROWHEAD) {
+                line.arrowhead_handle = entity.arrowhead_handle;
+            }
+            if !line.override_flags.contains(F::ARROWHEAD_SIZE) {
+                line.arrowhead_size = entity.arrowhead_size;
             }
         }
+    }
+}
+fn apply_mleader_style_at_display_scale(
+    entity: &mut acadrust::entities::MultiLeader,
+    style: &acadrust::objects::MultiLeaderStyle,
+    display_scale: f64,
+) {
+    use acadrust::entities::MultiLeaderPropertyOverrideFlags as F;
+
+    let old_scale = entity.context.scale_factor.max(1.0e-12);
+    let landing_gap = entity.context.landing_gap / old_scale;
+    let landing_distances = entity
+        .context
+        .leader_roots
+        .iter()
+        .map(|root| root.landing_distance / old_scale)
+        .collect::<Vec<_>>();
+    apply_mleader_style(entity, style);
+
+    let scale = if display_scale.is_finite()
+        && display_scale > 1.0e-12
+    {
+        display_scale
+    } else {
+        1.0
+    };
+
+    // Context sizes are stored at their display scale.
+    entity.context.scale_factor = scale;
+
+    entity.context.text_height = entity.text_height * scale;
+    entity.context.arrowhead_size = entity.arrowhead_size * scale;
+    entity.context.landing_gap = if entity.property_override_flags.contains(F::LANDING_GAP) {
+        landing_gap * scale
+    } else {
+        style.landing_gap * scale
+    };
+
+    for (index, root) in entity.context.leader_roots.iter_mut().enumerate() {
+        root.landing_distance = if entity
+            .property_override_flags
+            .contains(F::LANDING_DISTANCE)
+        {
+            landing_distances
+                .get(index)
+                .copied()
+                .unwrap_or(entity.dogleg_length)
+                * scale
+        } else {
+            entity.dogleg_length * scale
+        };
+
+        root.text_attachment_direction =
+            entity.text_attachment_direction;
     }
 }
 
@@ -1572,41 +1713,108 @@ pub fn apply_mleader_style_to_object(
     handle: Handle,
     style: &acadrust::objects::MultiLeaderStyle,
 ) -> bool {
-    let Some(EntityType::MultiLeader(original)) = doc.get_entity(handle).cloned() else {
+    let Some(EntityType::MultiLeader(original)) =
+        doc.get_entity(handle).cloned()
+    else {
         return false;
     };
+
+    let base_display_scale = if style.is_annotative {
+        let scale = original.context.scale_factor;
+
+        if scale.is_finite() && scale > 1.0e-12 {
+            scale
+        } else {
+            1.0
+        }
+    } else {
+        let scale = style.scale_factor;
+
+        if scale.is_finite() && scale > 1.0e-12 {
+            scale
+        } else {
+            1.0
+        }
+    };
+
     let mut styled = original.clone();
-    apply_mleader_style(&mut styled, style);
-    if let Some(EntityType::MultiLeader(entity)) = doc.get_entity_mut(handle) {
+
+    apply_mleader_style_at_display_scale(
+        &mut styled,
+        style,
+        base_display_scale,
+    );
+
+    if let Some(EntityType::MultiLeader(entity)) =
+        doc.get_entity_mut(handle)
+    {
         *entity = styled;
     }
 
-    let leaf_handles: Vec<_> = annotation_scales_dict(doc, handle)
-        .and_then(|collection| as_dict(doc, collection))
-        .map(|collection| collection.entries.iter().map(|(_, leaf)| *leaf).collect())
-        .unwrap_or_default();
+    let leaf_handles: Vec<_> =
+        annotation_scales_dict(doc, handle)
+            .and_then(|collection| as_dict(doc, collection))
+            .map(|collection| {
+                collection
+                    .entries
+                    .iter()
+                    .map(|(_, leaf)| *leaf)
+                    .collect()
+            })
+            .unwrap_or_default();
+
     for leaf_handle in leaf_handles {
-        let Some(ObjectType::ObjectContextData(leaf)) = doc.objects.get_mut(&leaf_handle) else {
-            continue;
-        };
-        let ObjectContextKind::MLeader(context) = &mut leaf.kind else {
-            continue;
-        };
-        let context_scale = context.scale_factor;
-        let text_height_ratio = if original.text_height.abs() > 1.0e-12 {
-            context.text_height / original.text_height
-        } else {
-            1.0
-        };
+        let context_before =
+            match doc.objects.get(&leaf_handle) {
+                Some(
+                    ObjectType::ObjectContextData(leaf)
+                ) => {
+                    let ObjectContextKind::MLeader(context) =
+                        &leaf.kind
+                    else {
+                        continue;
+                    };
+
+                    context.clone()
+                }
+
+                _ => continue,
+            };
+
+        let context_scale =
+            if context_before.scale_factor.is_finite()
+                && context_before.scale_factor > 1.0e-12
+            {
+                context_before.scale_factor
+            } else {
+                base_display_scale
+            };
+
         let mut per_scale = original.clone();
-        per_scale.context.clone_from(context);
-        apply_mleader_style(&mut per_scale, style);
-        per_scale.context.scale_factor = context_scale;
-        if style.text_height > 0.0 && text_height_ratio.is_finite() {
-            per_scale.context.text_height = style.text_height * text_height_ratio;
+
+        per_scale.context =
+            context_before;
+
+        apply_mleader_style_at_display_scale(
+            &mut per_scale,
+            style,
+            context_scale,
+        );
+
+        if let Some(
+            ObjectType::ObjectContextData(leaf)
+        ) = doc.objects.get_mut(&leaf_handle)
+        {
+            if let ObjectContextKind::MLeader(context) =
+                &mut leaf.kind
+            {
+                context.clone_from(
+                    &per_scale.context,
+                );
+            }
         }
-        context.clone_from(&per_scale.context);
     }
+
     true
 }
 
@@ -1752,5 +1960,3 @@ pub fn is_annotative(doc: &CadDocument, entity: &EntityType) -> bool {
         _ => false,
     }
 }
-
-

@@ -70,12 +70,7 @@ fn capture_text_orient(e: &EntityType) -> Option<TextOrient> {
     }
 }
 
-/// MIRRTEXT off: after the mirror reflects a text's points and rotation, put
-/// the glyphs back to right-reading. Restores the captured rotation / oblique /
-/// x-scale, and for single-line TEXT also flips the horizontal justification
-/// (left ↔ right) so the box lands mirror-symmetric to the source instead of
-/// hugging the axis — AutoCAD's behaviour. Center/Middle/Aligned/Fit are already
-/// symmetric about their (reflected) anchor, so they stay.
+/// Restores readable text orientation after a mirror.
 fn restore_text_orient(e: &mut EntityType, o: &TextOrient) {
     match e {
         EntityType::Text(t) => {
@@ -168,14 +163,10 @@ impl Scene {
             .filter(|&h| !self.is_layer_locked(h))
             .collect();
         let handles = &handles[..];
-        // MIRRTEXT (header.mirror_text): when false AutoCAD positions text /
-        // mtext / shape by the mirror but keeps the original rotation +
-        // oblique so the text stays right-reading. Capture before the
-        // transform and re-apply afterwards.
+        // Preserve readable text orientation when MIRRTEXT is disabled.
         let preserve_text_orientation =
             matches!(t, EntityTransform::Mirror { .. }) && !self.document.header.mirror_text;
-        // MIRRTEXT on: toggle the group-71 flags after the reflect so text
-        // becomes a true glyph mirror (see `mirror_true_text_flags`).
+        // Toggle group-71 flags when glyph mirroring is enabled.
         let mirror_true =
             matches!(t, EntityTransform::Mirror { .. }) && self.document.header.mirror_text;
         let mut text_orient_backup: Vec<(Handle, TextOrient)> = Vec::new();
@@ -252,6 +243,24 @@ impl Scene {
                 };
                 if let Some(model) = new_model {
                     self.hatches.insert(h, model);
+                }
+            }
+            let image_bearing = self.document.get_entity(h).is_some_and(|entity| {
+                matches!(
+                    entity,
+                    EntityType::RasterImage(_)
+                        | EntityType::Ole2Frame(_)
+                        | EntityType::Underlay(_)
+                )
+            });
+            if image_bearing {
+                let model = self
+                    .document
+                    .get_entity(h)
+                    .and_then(|entity| self.image_seed_for(entity));
+                self.images.remove(&h);
+                if let Some(model) = model {
+                    self.images.insert(h, model);
                 }
             }
         }
@@ -467,12 +476,21 @@ impl Scene {
         }
     }
 
-    /// Add a freshly-cloned entity, allocating a new handle for it *and* every
-    /// inline sub-entity so the copy never shares a handle with its source.
-    /// Use this (not `add_entity`) whenever inserting a duplicate. (#129)
+    /// Add a clone to the active space with fresh top-level and inline handles.
+    /// Source owner handles are document-local and must not cross drawings.
+    /// (#129, #934)
     pub fn add_entity_clone(&mut self, mut entity: EntityType) -> Handle {
         Self::reset_clone_subhandles(&mut self.document, &mut entity);
-        entity.common_mut().handle = Handle::NULL;
+        let common = entity.common_mut();
+        common.handle = Handle::NULL;
+        common.owner_handle = Handle::NULL;
+        common.entity_mode = Some(
+            if self.current_layout != "Model" && self.active_viewport.is_none() {
+                1
+            } else {
+                2
+            },
+        );
         self.add_entity(entity)
     }
 
@@ -551,11 +569,43 @@ impl Scene {
     }
 
     pub fn copy_entities(&mut self, handles: &[Handle], t: &EntityTransform) -> Vec<Handle> {
-        // Objects on a locked layer can't be copied (they can't be selected).
-        let clones: Vec<(Handle, EntityType)> = handles
+        let copy_handles = self.handles_expanded_for_leader_annotations(handles);
+
+        // LEADER + attached MTEXT are a logical pair. Their entity clones must not
+        // retain the source extension dictionary, otherwise both copies share the
+        // same annotation-context objects.
+        let leader_pair_handles: Vec<Handle> = copy_handles
+            .iter()
+            .flat_map(|&handle| {
+                let annotation = match self.document.get_entity(handle) {
+                    Some(EntityType::Leader(leader)) if !leader.annotation_handle.is_null() => {
+                        Some(leader.annotation_handle)
+                    }
+                    _ => None,
+                };
+
+                std::iter::once(handle).chain(annotation)
+            })
+            .collect();
+
+        // Objects on a locked layer can be selected but not copied.
+        let clones: Vec<(Handle, EntityType, Vec<Handle>)> = copy_handles
             .iter()
             .filter(|&&h| !self.is_layer_locked(h))
-            .filter_map(|&h| self.document.get_entity(h).cloned().map(|e| (h, e)))
+            .filter_map(|&h| {
+                let entity = self.document.get_entity(h)?.clone();
+
+                let annotation_scales = if leader_pair_handles.contains(&h) {
+                    crate::scene::annotative::annotation_scale_handles_for_entity(
+                        &self.document,
+                        h,
+                    )
+                } else {
+                    Vec::new()
+                };
+
+                Some((h, entity, annotation_scales))
+            })
             .collect();
         // MIRRTEXT also governs the copy path (default MIRROR keeps the source
         // and adds a mirrored copy): keep the copied text right-reading when the
@@ -567,7 +617,7 @@ impl Scene {
         let mut new_handles = Vec::with_capacity(clones.len());
         let mut handle_map = rustc_hash::FxHashMap::default();
         let mut refresh_solid_handles = Vec::new();
-        for (src_handle, mut entity) in clones {
+        for (src_handle, mut entity, annotation_scales) in clones {
             let text_orient = if preserve_text_orientation {
                 capture_text_orient(&entity)
             } else {
@@ -598,9 +648,31 @@ impl Scene {
                 }
             }
             Self::reset_clone_subhandles(&mut self.document, &mut entity);
+
+            // An annotative LEADER/MTEXT pair must receive a fresh extension dictionary.
+            // Keeping this handle would make the copy share the source's context tree.
+            if !annotation_scales.is_empty() {
+                entity.common_mut().xdictionary_handle = None;
+            }
+
             entity.common_mut().handle = Handle::NULL;
             let h = self.document.add_entity(entity).unwrap_or(Handle::NULL);
             if !h.is_null() {
+                if !annotation_scales.is_empty() {
+                    for scale_handle in annotation_scales {
+                        crate::scene::annotative::create_annotation_context(
+                            &mut self.document,
+                            h,
+                            scale_handle,
+                        );
+                    }
+
+                    // Annotation contexts add dictionary/object records outside the entity
+                    // delta itself, so keep undo on the safe full-snapshot path.
+                    if self.is_recording_undo() {
+                        self.poison_undo_recording();
+                    }
+                }
                 // Delta-undo: a copy's before-image is "nothing" (undo erases it).
                 if self.is_recording_undo() {
                     self.record_undo_before(h, None);
@@ -640,7 +712,35 @@ impl Scene {
                 handle_map.insert(src_handle, h);
             }
         }
+        // A copied LEADER must reference the copied annotation, never the
+        // source annotation. Both entities now exist, so remap the stored handle.
+        let leader_links: Vec<(Handle, Handle)> = handle_map
+            .iter()
+            .filter_map(|(&source_handle, &copied_handle)| {
+                let EntityType::Leader(source_leader) =
+                    self.document.get_entity(source_handle)?
+                else {
+                    return None;
+                };
 
+                let copied_annotation = handle_map
+                    .get(&source_leader.annotation_handle)
+                    .copied()
+                    .unwrap_or(Handle::NULL);
+
+                Some((copied_handle, copied_annotation))
+            })
+            .collect();
+
+        for (leader_handle, annotation_handle) in leader_links {
+            if let Some(EntityType::Leader(leader)) =
+                self.document.get_entity_mut(leader_handle)
+            {
+                leader.annotation_handle = annotation_handle;
+            }
+
+            let _ = self.sync_displayed_annotation_context(leader_handle);
+        }
         // Complete group copies record their new Group objects and dictionary
         // entry as targeted object deltas inside copy_complete_groups.
         self.copy_complete_groups(&handle_map);
@@ -691,6 +791,7 @@ impl Scene {
         handle: Handle,
         operation: acadrust::objects::SolidHistoryOperation,
     ) -> bool {
+        let box_primitive = matches!(operation, acadrust::objects::SolidHistoryOperation::Box(_));
         let Some(graph) = self.document.create_solid_history(handle, operation) else {
             return false;
         };
@@ -698,7 +799,34 @@ impl Scene {
         for node in graph.nodes {
             self.record_undo_object_before(node, None);
         }
+        if box_primitive {
+            let _ = crate::scene::model::solid_history::apply_history_choice(
+                &mut self.document,
+                handle,
+                crate::scene::model::solid_history::PROP_HISTORY,
+                "None",
+            );
+        }
+        self.sync_solid_reference_point(handle);
         true
+    }
+
+    fn sync_solid_reference_point(&mut self, handle: Handle) {
+        let reference = self
+            .document
+            .solid_history_operation(handle)
+            .and_then(crate::scene::model::solid_history::reference_point);
+        let Some(reference) = reference else {
+            return;
+        };
+        let Some(EntityType::Solid3D(entity)) = self.document.get_entity_mut(handle) else {
+            return;
+        };
+        entity.point_of_reference = acadrust::types::Vector3::new(
+            reference.x,
+            reference.y,
+            reference.z,
+        );
     }
 
     fn copy_solid_history(&mut self, source: Handle, target: Handle) -> bool {
@@ -725,7 +853,7 @@ impl Scene {
         let Ok(body) = cadkernel::acis::rebuild_body(&operation) else {
             return false;
         };
-        let Some(document) = crate::scene::convert::acis_export::planar_solid_to_sat(&body) else {
+        let Some(document) = crate::scene::convert::acis_export::solid_to_sat(&body) else {
             return false;
         };
         self.record_solid_history_before(handle);
@@ -740,6 +868,7 @@ impl Scene {
             return false;
         };
         entity.set_sat_document(&document);
+        self.sync_solid_reference_point(handle);
         self.register_solid_model(handle, body);
         true
     }
@@ -751,13 +880,14 @@ impl Scene {
         let Ok(body) = cadkernel::acis::rebuild_body(&operation) else {
             return false;
         };
-        let Some(document) = crate::scene::convert::acis_export::planar_solid_to_sat(&body) else {
+        let Some(document) = crate::scene::convert::acis_export::solid_to_sat(&body) else {
             return false;
         };
         let Some(EntityType::Solid3D(entity)) = self.document.get_entity_mut(handle) else {
             return false;
         };
         entity.set_sat_document(&document);
+        self.sync_solid_reference_point(handle);
         self.register_solid_model(handle, body);
         true
     }
@@ -810,6 +940,21 @@ impl Scene {
             return true;
         }
         self.rebuild_solid_history(handle, operation)
+    }
+
+    pub fn apply_solid_history_choice(
+        &mut self,
+        handle: Handle,
+        field: &str,
+        value: &str,
+    ) -> bool {
+        self.record_solid_history_before(handle);
+        crate::scene::model::solid_history::apply_history_choice(
+            &mut self.document,
+            handle,
+            field,
+            value,
+        )
     }
 
     fn apply_solid_history_grip(
@@ -956,9 +1101,65 @@ impl Scene {
             .get_entity(handle)
             .and_then(crate::entities::solid3d::point_of_reference)
             .map(|p| [p.x, p.y, p.z]);
+        // A LEADER's final vertex is the end of its horizontal landing.
+        // Remember its old position and linked MTEXT so the annotation can follow
+        // when that grip stretches the landing.
+        let leader_landing_before = self.document.get_entity(handle).and_then(|entity| {
+            let EntityType::Leader(leader) = entity else {
+                return None;
+            };
 
+            let n = leader.vertices.len();
+            if n < 3 || (grip_id != n - 1 && grip_id != n - 2) || leader.annotation_handle.is_null() {
+                return None;
+            }
+
+            let point = leader.vertices.last()?;
+
+            Some((
+                leader.annotation_handle,
+                glam::DVec3::new(point.x, point.y, point.z),
+            ))
+        });
         if let Some(entity) = self.document.get_entity_mut(handle) {
             view::dispatch::apply_grip(entity, grip_id, apply);
+        }
+        if let Some((annotation_handle, old_landing)) = leader_landing_before {
+            let new_landing = self.document.get_entity(handle).and_then(|entity| {
+                let EntityType::Leader(leader) = entity else {
+                    return None;
+                };
+
+                let point = leader.vertices.last()?;
+                Some(glam::DVec3::new(point.x, point.y, point.z))
+            });
+
+            if let Some(new_landing) = new_landing {
+                let delta = new_landing - old_landing;
+
+                if delta.length_squared() > 1.0e-20 {
+                    if self.is_recording_undo() {
+                        if let Some(before) = self.document.get_entity_arc(annotation_handle) {
+                            self.record_undo_before(annotation_handle, Some(before));
+                        }
+                    }
+
+                    if let Some(annotation) = self.document.get_entity_mut(annotation_handle) {
+                        view::dispatch::apply_transform(
+                            annotation,
+                            &crate::command::EntityTransform::Translate(delta),
+                        );
+                    }
+
+                    if self.sync_displayed_annotation_context(annotation_handle) {
+                        self.poison_undo_recording();
+                    }
+                    self.bump_entities(&[(
+                        annotation_handle,
+                        crate::scene::ChangeKind::Modified,
+                    )]);
+                }
+            }
         }
         if self.sync_displayed_annotation_context(handle) {
             self.poison_undo_recording();

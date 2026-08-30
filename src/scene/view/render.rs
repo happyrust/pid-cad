@@ -22,6 +22,8 @@ use crate::scene::{
     SceneLight, Uniforms, ViewportInstance, WireModel,
 };
 
+const DISPLAY_STYLE_CACHE_LIMIT: usize = if cfg!(target_arch = "wasm32") { 4 } else { 24 };
+
 // ── Camera hover state (shader::Program::State) ───────────────────────────
 
 #[derive(Clone, Default)]
@@ -34,6 +36,7 @@ struct ViewportLightingSettings {
     force_default: bool,
     default_type: i16,
     ambient: [f32; 3],
+    sun_handle: Handle,
 }
 
 #[derive(Clone)]
@@ -94,6 +97,7 @@ impl Default for ViewportLightingSettings {
             force_default: true,
             default_type: 1,
             ambient: [0.18; 3],
+            sun_handle: Handle::NULL,
         }
     }
 }
@@ -408,7 +412,7 @@ impl shader::Primitive for Primitive {
                 inner.cached_wire_id = u64::MAX;
                 inner.cached_selection = (u64::MAX, u64::MAX);
                 inner.cached_mesh_content_id = u64::MAX;
-                inner.cached_face3d_key = (u64::MAX, false, false);
+                inner.cached_face3d_key = (u64::MAX, false, false, u64::MAX);
                 inner.cached_hatch_source = None;
                 inner.cached_preview_hatch_source = None;
                 inner.cached_wipeout_source = None;
@@ -420,8 +424,7 @@ impl shader::Primitive for Primitive {
                 inner.wire_cull_key = (u64::MAX, u64::MAX, 0, 0);
                 inner.hatch_lod_key = (usize::MAX, u64::MAX, 0, 0, false);
                 inner.wipeout_lod_key = (usize::MAX, u64::MAX, 0, 0, false);
-                inner.mesh_lod_key = (usize::MAX, u64::MAX, 0, 0);
-                inner.silhouette_key = (usize::MAX, u64::MAX, u64::MAX, false);
+                inner.silhouette_key = (usize::MAX, u64::MAX, [u32::MAX; 3], false);
                 inner.render_sig = u64::MAX;
             }
             // The MSAA / depth / resolve textures are always sized to the
@@ -524,6 +527,12 @@ impl shader::Primitive for Primitive {
             // the view toggle so 2D fills stay on even when the user picks
             // the Wireframe overlay style.
             let face3d_fill_active = fill_mode && !vp.view_wireframe;
+            let solid_fill_active = fill_mode && vp.show_2d_solid_fills;
+            let solid_visibility_key =
+                crate::scene::pipeline::face3d_gpu::planar_solid_visibility_key(
+                    &vp_wires,
+                    vp.view_dir,
+                );
             let fill_changed = inner.cached_fill_mode != fill_mode;
             let hatch_changed = inner
                 .cached_hatch_source
@@ -614,14 +623,16 @@ impl shader::Primitive for Primitive {
                     && !face_pass_unchanged);
             if face3d_changed
                 || face3d_fill_active != inner.cached_face3d_key.1
-                || vp.show_2d_solid_fills != inner.cached_face3d_key.2
+                || solid_fill_active != inner.cached_face3d_key.2
+                || solid_visibility_key != inner.cached_face3d_key.3
             {
                 inner.upload_face3d(
                     device,
                     &vp.face3d_wires[..],
                     &vp_wires[..],
                     !face3d_fill_active,
-                    vp.show_2d_solid_fills,
+                    solid_fill_active,
+                    vp.view_dir,
                     &draw_depths,
                 );
                 inner.cached_face3d_source = Some(Arc::clone(&vp.face3d_wires));
@@ -630,7 +641,8 @@ impl shader::Primitive for Primitive {
             inner.cached_face3d_key = (
                 vp.wire_content_id,
                 face3d_fill_active,
-                vp.show_2d_solid_fills,
+                solid_fill_active,
+                solid_visibility_key,
             );
             // Wire buffers are world-space, so a camera move alone doesn't
             // change them — only the view_proj uniform (uploaded every frame).
@@ -1078,13 +1090,14 @@ impl shader::Primitive for Primitive {
             let silhouette_key = (
                 Arc::as_ptr(&vp.meshes) as usize,
                 vp.wire_content_id,
-                vp.camera_generation,
+                vp.view_dir.to_array().map(f32::to_bits),
                 silhouette_enabled,
             );
             if inner.silhouette_key != silhouette_key {
                 inner.upload_silhouettes(
                     device,
                     if silhouette_enabled { &vp.meshes[..] } else { &[] },
+                    vp.wire_content_id,
                     vp.view_dir,
                 );
                 inner.silhouette_key = silhouette_key;
@@ -1111,22 +1124,6 @@ impl shader::Primitive for Primitive {
             if inner.wipeout_lod_key != wipeout_lod_key {
                 inner.compute_wipeout_lod(view_rot, eye, clip_size.width, clip_size.height);
                 inner.wipeout_lod_key = wipeout_lod_key;
-            }
-            let mesh_lod_key = (
-                Arc::as_ptr(&vp.meshes) as usize,
-                vp.camera_generation,
-                clip_size.width,
-                clip_size.height,
-            );
-            if inner.mesh_lod_key != mesh_lod_key {
-                inner.compute_mesh_lod(
-                    queue,
-                    view_rot,
-                    eye,
-                    clip_size.width,
-                    clip_size.height,
-                );
-                inner.mesh_lod_key = mesh_lod_key;
             }
             let cull_key = (
                 vp.wire_content_id,
@@ -1337,6 +1334,7 @@ fn render_signature(vp: &ViewportData, clip_w: u32, clip_h: u32) -> u64 {
     vp.show_2d_solid_fills.hash(&mut h);
     vp.mesh_fill.hash(&mut h);
     vp.show_3d_edges.hash(&mut h);
+    vp.display_silhouette.hash(&mut h);
     vp.hidden_line.hash(&mut h);
     // ViewCube visibility is excluded from the *scene* signature elsewhere only
     // for the live-hover pass; here it MUST invalidate the cache so toggling the
@@ -1399,6 +1397,7 @@ fn render_signature(vp: &ViewportData, clip_w: u32, clip_h: u32) -> u64 {
                 color2,
                 kind,
                 invert,
+                shift,
             } => {
                 2_u8.hash(&mut h);
                 angle_deg.to_bits().hash(&mut h);
@@ -1407,6 +1406,7 @@ fn render_signature(vp: &ViewportData, clip_w: u32, clip_h: u32) -> u64 {
                 }
                 kind.shader_kind().hash(&mut h);
                 invert.hash(&mut h);
+                shift.to_bits().hash(&mut h);
             }
         }
     }
@@ -1467,9 +1467,148 @@ fn crop_view_proj(view_proj: glam::Mat4, uo: f32, vo: f32, us: f32, vs: f32) -> 
     crop * view_proj
 }
 
+fn normalized_direction(value: [f64; 3], fallback: [f32; 3]) -> [f32; 3] {
+    let length = (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt();
+    if length <= 1e-12 {
+        fallback
+    } else {
+        [
+            (value[0] / length) as f32,
+            (value[1] / length) as f32,
+            (value[2] / length) as f32,
+        ]
+    }
+}
+
+fn solar_direction(
+    sun: &acadrust::objects::Sun,
+    geo: &acadrust::objects::GeoData,
+) -> Option<[f32; 3]> {
+    if sun.julian_day < 1_000_000 {
+        return None;
+    }
+    let daylight_ms = if sun.is_daylight_savings_on {
+        3_600_000.0
+    } else {
+        0.0
+    };
+    let jd = sun.julian_day as f64
+        + (sun.milliseconds as f64 - daylight_ms) / 86_400_000.0;
+    let days = jd - 2_451_545.0;
+    let mean_longitude = (280.460 + 0.985_647_4 * days).to_radians();
+    let mean_anomaly = (357.528 + 0.985_600_3 * days).to_radians();
+    let ecliptic_longitude = mean_longitude
+        + (1.915 * mean_anomaly.sin() + 0.020 * (2.0 * mean_anomaly).sin()).to_radians();
+    let obliquity = (23.439 - 0.000_000_4 * days).to_radians();
+    let right_ascension =
+        (obliquity.cos() * ecliptic_longitude.sin()).atan2(ecliptic_longitude.cos());
+    let declination = (obliquity.sin() * ecliptic_longitude.sin()).asin();
+    let local_sidereal =
+        (280.460_618_37 + 360.985_647_366_29 * days + geo.reference_point.x).to_radians();
+    let hour_angle = (local_sidereal - right_ascension + std::f64::consts::PI)
+        .rem_euclid(std::f64::consts::TAU)
+        - std::f64::consts::PI;
+    let latitude = geo.reference_point.y.to_radians();
+    let east_component = -declination.cos() * hour_angle.sin();
+    let north_component = declination.sin() * latitude.cos()
+        - declination.cos() * hour_angle.cos() * latitude.sin();
+    let up_component = declination.sin() * latitude.sin()
+        + declination.cos() * hour_angle.cos() * latitude.cos();
+    if up_component <= 0.0 {
+        return None;
+    }
+    let north = normalized_direction(
+        [geo.north_direction.x, geo.north_direction.y, 0.0],
+        [0.0, 1.0, 0.0],
+    );
+    let east = [north[1], -north[0], 0.0];
+    let up = normalized_direction(
+        [geo.up_direction.x, geo.up_direction.y, geo.up_direction.z],
+        [0.0, 0.0, 1.0],
+    );
+    Some(normalized_direction(
+        [
+            -(east[0] as f64 * east_component
+                + north[0] as f64 * north_component
+                + up[0] as f64 * up_component),
+            -(east[1] as f64 * east_component
+                + north[1] as f64 * north_component
+                + up[1] as f64 * up_component),
+            -(east[2] as f64 * east_component
+                + north[2] as f64 * north_component
+                + up[2] as f64 * up_component),
+        ],
+        [0.0, 0.0, -1.0],
+    ))
+}
+
 // ── Render-style helpers (impl Scene) ────────────────────────────────────
 
 impl Scene {
+    fn model_tile_vport(&self, index: usize) -> Option<&acadrust::tables::VPort> {
+        let rect = self.model_tiles.borrow().get(index)?.rect;
+        let lower_left = [rect.x as f64, (1.0 - rect.y - rect.height) as f64];
+        let upper_right = [
+            (rect.x + rect.width) as f64,
+            (1.0 - rect.y) as f64,
+        ];
+        const EPSILON: f64 = 1e-5;
+        let exact = self
+            .document
+            .vports
+            .iter()
+            .filter(|value| value.name.eq_ignore_ascii_case("*Active"))
+            .find(|value| {
+                (value.lower_left.x - lower_left[0]).abs() <= EPSILON
+                    && (value.lower_left.y - lower_left[1]).abs() <= EPSILON
+                    && (value.upper_right.x - upper_right[0]).abs() <= EPSILON
+                    && (value.upper_right.y - upper_right[1]).abs() <= EPSILON
+            });
+        exact.or_else(|| {
+            let center_x = (lower_left[0] + upper_right[0]) * 0.5;
+            let center_y = (lower_left[1] + upper_right[1]) * 0.5;
+            self.document
+                .vports
+                .iter()
+                .filter(|value| {
+                    value.name.eq_ignore_ascii_case("*Active")
+                        && center_x >= value.lower_left.x - EPSILON
+                        && center_x <= value.upper_right.x + EPSILON
+                        && center_y >= value.lower_left.y - EPSILON
+                        && center_y <= value.upper_right.y + EPSILON
+                })
+                .min_by(|left, right| {
+                    let left_area = (left.upper_right.x - left.lower_left.x)
+                        * (left.upper_right.y - left.lower_left.y);
+                    let right_area = (right.upper_right.x - right.lower_left.x)
+                        * (right.upper_right.y - right.lower_left.y);
+                    left_area.total_cmp(&right_area)
+                })
+                .or_else(|| {
+                    self.document
+                        .vports
+                        .iter()
+                        .find(|value| value.name.eq_ignore_ascii_case("*Active"))
+                })
+        })
+    }
+
+    fn geolocation(&self) -> Option<&acadrust::objects::GeoData> {
+        use acadrust::objects::ObjectType;
+
+        crate::entities::object_data::geo_objects(&self.object_data_cache)
+            .iter()
+            .find_map(|handle| match self.document.objects.get(handle) {
+                Some(ObjectType::GeoData(value))
+                    if value.coordinate_type == 3
+                        && value.reference_point.x.is_finite()
+                        && value.reference_point.y.is_finite()
+                        && value.reference_point.x.abs() <= 180.0
+                        && value.reference_point.y.abs() <= 90.0 => Some(value),
+                _ => None,
+            })
+    }
+
     fn build_lighting_cache(
         &self,
         target_block: Handle,
@@ -1477,92 +1616,11 @@ impl Scene {
     ) -> Vec<SceneLight> {
         use acadrust::objects::{ClassObjectData, ObjectType};
 
-        fn normalized(value: [f64; 3], fallback: [f32; 3]) -> [f32; 3] {
-            let length =
-                (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt();
-            if length <= 1e-12 {
-                fallback
-            } else {
-                [
-                    (value[0] / length) as f32,
-                    (value[1] / length) as f32,
-                    (value[2] / length) as f32,
-                ]
-            }
-        }
-
-        fn solar_direction(
-            sun: &acadrust::objects::Sun,
-            geo: &acadrust::objects::GeoData,
-        ) -> Option<[f32; 3]> {
-            if sun.julian_day < 1_000_000 {
-                return None;
-            }
-            let daylight_ms = if sun.is_daylight_savings_on {
-                3_600_000.0
-            } else {
-                0.0
-            };
-            let jd = sun.julian_day as f64
-                + (sun.milliseconds as f64 - daylight_ms) / 86_400_000.0;
-            let days = jd - 2_451_545.0;
-            let mean_longitude = (280.460 + 0.985_647_4 * days).to_radians();
-            let mean_anomaly = (357.528 + 0.985_600_3 * days).to_radians();
-            let ecliptic_longitude = mean_longitude
-                + (1.915 * mean_anomaly.sin()
-                    + 0.020 * (2.0 * mean_anomaly).sin())
-                    .to_radians();
-            let obliquity = (23.439 - 0.000_000_4 * days).to_radians();
-            let right_ascension = (obliquity.cos() * ecliptic_longitude.sin())
-                .atan2(ecliptic_longitude.cos());
-            let declination =
-                (obliquity.sin() * ecliptic_longitude.sin()).asin();
-            let local_sidereal = (280.460_618_37
-                + 360.985_647_366_29 * days
-                + geo.reference_point.x)
-                .to_radians();
-            let hour_angle = (local_sidereal - right_ascension + std::f64::consts::PI)
-                .rem_euclid(std::f64::consts::TAU)
-                - std::f64::consts::PI;
-            let latitude = geo.reference_point.y.to_radians();
-            let east_component = -declination.cos() * hour_angle.sin();
-            let north_component = declination.sin() * latitude.cos()
-                - declination.cos() * hour_angle.cos() * latitude.sin();
-            let up_component = declination.sin() * latitude.sin()
-                + declination.cos() * hour_angle.cos() * latitude.cos();
-            if up_component <= 0.0 {
-                return None;
-            }
-            let north = normalized(
-                [geo.north_direction.x, geo.north_direction.y, 0.0],
-                [0.0, 1.0, 0.0],
-            );
-            let east = [north[1], -north[0], 0.0];
-            let up = normalized(
-                [geo.up_direction.x, geo.up_direction.y, geo.up_direction.z],
-                [0.0, 0.0, 1.0],
-            );
-            Some(normalized(
-                [
-                    -(east[0] as f64 * east_component
-                        + north[0] as f64 * north_component
-                        + up[0] as f64 * up_component),
-                    -(east[1] as f64 * east_component
-                        + north[1] as f64 * north_component
-                        + up[1] as f64 * up_component),
-                    -(east[2] as f64 * east_component
-                        + north[2] as f64 * north_component
-                        + up[2] as f64 * up_component),
-                ],
-                [0.0, 0.0, -1.0],
-            ))
-        }
-
         fn converted(scene: &Scene, light: &acadrust::entities::Light) -> Option<SceneLight> {
             if !light.status {
                 return None;
             }
-            let mut direction = normalized(
+            let mut direction = normalized_direction(
                 [
                     light.target.x - light.position.x,
                     light.target.y - light.position.y,
@@ -1728,19 +1786,7 @@ impl Scene {
             }
         }
 
-        // SUN is document-global. Keep it after entity lights so the four-light
-        // shader limit prefers visible lights owned by this viewport's block.
-        let geo = crate::entities::object_data::geo_objects(&self.object_data_cache)
-            .iter()
-            .find_map(|handle| match self.document.objects.get(handle) {
-                Some(ObjectType::GeoData(value))
-                    if value.coordinate_type == 3
-                        && value.reference_point.x.is_finite()
-                        && value.reference_point.y.is_finite()
-                        && value.reference_point.x.abs() <= 180.0
-                        && value.reference_point.y.abs() <= 90.0 => Some(value),
-                _ => None,
-            });
+        let geo = self.geolocation();
         for handle in crate::entities::object_data::sun_objects(&self.object_data_cache) {
             let Some(ObjectType::ClassObject(value)) = self.document.objects.get(handle) else {
                 continue;
@@ -1752,10 +1798,10 @@ impl Scene {
                 continue;
             }
             let Some(geo) = geo else {
-                break;
+                continue;
             };
             let Some(direction) = solar_direction(sun, geo) else {
-                break;
+                continue;
             };
             let rgba = tess_util::aci_to_rgba(&sun.color);
             lights.push(SceneLight {
@@ -1778,7 +1824,6 @@ impl Scene {
                 web_rotation: [0.0; 3],
                 web_enabled: false,
             });
-            break;
         }
         lights
     }
@@ -1797,6 +1842,7 @@ impl Scene {
         }
         let cache = self.lighting_cache.borrow();
         let lights = cache.get(&key).map(Vec::as_slice).unwrap_or_default();
+        let settings = self.viewport_lighting_settings(viewport);
         let visible_lights: Vec<&SceneLight> = lights
             .iter()
             .filter(|light| match self.document.get_entity(light.handle) {
@@ -1818,12 +1864,12 @@ impl Scene {
                         object,
                         acadrust::objects::ObjectType::ClassObject(value)
                             if matches!(&value.data, acadrust::objects::ClassObjectData::Sun(_))
-                    )
+                    ) && (!settings.sun_handle.is_valid()
+                        || settings.sun_handle == light.handle)
                 }),
             })
             .take(4)
             .collect();
-        let settings = self.viewport_lighting_settings(viewport);
         uniforms.lighting[1..4].copy_from_slice(&settings.ambient);
         if settings.force_default || visible_lights.is_empty() {
             Self::apply_default_lighting(uniforms, &viewport.camera, settings.default_type);
@@ -1974,11 +2020,13 @@ impl Scene {
             force_default: value.default_lighting,
             default_type: value.default_lighting_type,
             ambient: ambient(&value.ambient_color),
+            sun_handle: value.sun_handle,
         };
         let from_table = |value: &acadrust::tables::VPort| ViewportLightingSettings {
             force_default: value.use_default_lights,
             default_type: value.default_lighting_type,
             ambient: ambient(&value.ambient_color),
+            sun_handle: value.sun_handle,
         };
 
         if viewport.paper_sheet {
@@ -1992,13 +2040,7 @@ impl Scene {
             }
         } else if self.current_layout == "Model" {
             let index = viewport.tile_idx.unwrap_or(0);
-            if let Some(value) = self
-                .document
-                .vports
-                .iter()
-                .filter(|value| value.name.eq_ignore_ascii_case("*Active"))
-                .nth(index)
-            {
+            if let Some(value) = self.model_tile_vport(index) {
                 return from_table(value);
             }
         }
@@ -2066,13 +2108,7 @@ impl Scene {
             }
         } else if self.current_layout == "Model" {
             let index = viewport.tile_idx.unwrap_or(0);
-            if let Some(value) = self
-                .document
-                .vports
-                .iter()
-                .filter(|value| value.name.eq_ignore_ascii_case("*Active"))
-                .nth(index)
-            {
+            if let Some(value) = self.model_tile_vport(index) {
                 return build(
                     value.visual_style_handle,
                     value.brightness,
@@ -2120,7 +2156,16 @@ impl Scene {
             candidates.push(base.join(&source));
             if let Some(name) = source.file_name() {
                 candidates.push(base.join(name));
-                for folder in ["Textures", "textures", "Materials", "materials"] {
+                for folder in [
+                    "Textures",
+                    "textures",
+                    "Materials",
+                    "materials",
+                    "Environments",
+                    "environments",
+                    "Render",
+                    "render",
+                ] {
                     candidates.push(base.join(folder).join(name));
                 }
             }
@@ -2414,12 +2459,38 @@ impl Scene {
                 }
                 result
             }
-            ClassObjectData::SkyLightBackground(_) => {
+            ClassObjectData::SkyLightBackground(background) => {
                 let mut result = ViewportBackgroundSettings::canvas(canvas);
                 result.colors[0] = [0.18, 0.42, 0.78, 1.0];
+                result.colors[1] = [1.0, 0.92, 0.72, 0.0];
                 result.colors[2] = [0.78, 0.86, 0.95, 1.0];
                 result.base = result.colors[2];
                 result.params[0] = 6.0;
+                if let Some(ObjectType::ClassObject(value)) =
+                    self.document.objects.get(&background.sun)
+                {
+                    if let ClassObjectData::Sun(sun) = &value.data {
+                        if sun.is_on {
+                            if let Some(direction) = self
+                                .geolocation()
+                                .and_then(|geo| solar_direction(sun, geo))
+                            {
+                                result.params[1..4].copy_from_slice(&[
+                                    -direction[0],
+                                    -direction[1],
+                                    -direction[2],
+                                ]);
+                                let color = tess_util::aci_to_rgba(&sun.color);
+                                result.colors[1] = [
+                                    color[0],
+                                    color[1],
+                                    color[2],
+                                    sun.intensity.max(0.0) as f32,
+                                ];
+                            }
+                        }
+                    }
+                }
                 result
             }
             _ => ViewportBackgroundSettings::canvas(canvas),
@@ -2467,6 +2538,238 @@ impl Scene {
             adapted
         };
         (final_color, pl, pat, lw, aci)
+    }
+
+    fn display_plot_style(&self) -> Option<Arc<crate::io::plot_style::PlotStyleTable>> {
+        if self.current_layout == "Model" {
+            return None;
+        }
+        let settings = self.effective_plot_settings()?;
+        if !settings.flags.show_plot_styles || settings.current_style_sheet.is_empty() {
+            return None;
+        }
+        let key = (
+            self.current_layout.clone(),
+            settings.current_style_sheet.to_ascii_lowercase(),
+        );
+        if let Some(style) = self.display_plot_style_cache.borrow().get(&key) {
+            return style.clone();
+        }
+        let style = crate::io::plot_style::PlotStyleTable::load_named(
+            &settings.current_style_sheet,
+        )
+        .ok()
+        .map(Arc::new);
+        self.display_plot_style_cache
+            .borrow_mut()
+            .insert(key, style.clone());
+        style
+    }
+
+    fn apply_display_plot_style(
+        &self,
+        color: &mut [f32; 4],
+        aci: u8,
+        style: &crate::io::plot_style::PlotStyleTable,
+    ) {
+        if aci == 0 {
+            return;
+        }
+        if let Some(rgb) = style.resolve_color(aci) {
+            color[..3].copy_from_slice(&rgb);
+        }
+        let screening = style.resolve_screening(aci);
+        for (channel, paper) in color[..3]
+            .iter_mut()
+            .zip(self.paper_bg_color[..3].iter())
+        {
+            *channel = *channel * screening + *paper * (1.0 - screening);
+        }
+    }
+
+    fn display_styled_wires(
+        &self,
+        source: Arc<Vec<WireModel>>,
+        source_gen: u64,
+    ) -> (Arc<Vec<WireModel>>, u64) {
+        let Some(style) = self.display_plot_style() else {
+            return (source, source_gen);
+        };
+        let key = (source_gen, style.name.to_ascii_lowercase());
+        if let Some((gen, wires)) = self.styled_wire_cache.borrow().get(&key) {
+            return (Arc::clone(wires), *gen);
+        }
+        let mut wires = source.as_ref().clone();
+        for wire in &mut wires {
+            self.apply_display_plot_style(&mut wire.color, wire.aci, &style);
+            if wire.aci > 0 {
+                if wire.fill_is_2d_solid
+                    && style
+                        .aci_entries
+                        .get(wire.aci as usize)
+                        .is_some_and(|entry| (65..=72).contains(&entry.fill_style))
+                {
+                    wire.fill_tris.clear();
+                    wire.fill_tris_low.clear();
+                }
+                if let Some(mm) = style.resolve_lineweight(wire.aci) {
+                    wire.line_weight_px = (mm * (96.0 / 25.4) * 2.0).max(1.0);
+                }
+                for vertex in &mut wire.text_verts {
+                    self.apply_display_plot_style(&mut vertex.color, wire.aci, &style);
+                }
+            }
+        }
+        let wires = Arc::new(wires);
+        let gen = crate::scene::WIRE_CONTENT_GEN
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut cache = self.styled_wire_cache.borrow_mut();
+        if cache.len() >= DISPLAY_STYLE_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(key, (gen, Arc::clone(&wires)));
+        (wires, gen)
+    }
+
+    fn display_styled_hatches(
+        &self,
+        source: Arc<Vec<HatchModel>>,
+        wire_fills: Option<&Arc<Vec<HatchModel>>>,
+        pattern_scale: f32,
+    ) -> Arc<Vec<HatchModel>> {
+        let Some(style) = self.display_plot_style() else {
+            return source;
+        };
+        let key = (
+            self.geometry_epoch,
+            Arc::as_ptr(&source) as usize,
+            wire_fills.map_or(0, |fills| Arc::as_ptr(fills) as usize),
+            style.name.to_ascii_lowercase(),
+            pattern_scale.to_bits(),
+        );
+        if let Some(hatches) = self.styled_hatch_cache.borrow().get(&key) {
+            return Arc::clone(hatches);
+        }
+        let mut hatches = source.as_ref().clone();
+        for hatch in &mut hatches {
+            self.apply_display_plot_style(&mut hatch.color, hatch.aci, &style);
+            if hatch.aci > 0 {
+                if matches!(hatch.pattern, crate::scene::model::hatch_model::HatchPattern::Solid) {
+                    if let Some(fill_style) = style
+                        .aci_entries
+                        .get(hatch.aci as usize)
+                        .and_then(|entry| {
+                            crate::scene::model::hatch_model::plot_style_fill_pattern(
+                                entry.fill_style,
+                            )
+                        })
+                    {
+                        hatch.pattern = fill_style;
+                        hatch.scale = pattern_scale;
+                    }
+                }
+                if let Some(mm) = style.resolve_lineweight(hatch.aci) {
+                    hatch.line_weight_px = (mm * (96.0 / 25.4) * 2.0).max(1.0);
+                }
+                if let crate::scene::model::hatch_model::HatchPattern::Gradient {
+                    color2, ..
+                } = &mut hatch.pattern
+                {
+                    self.apply_display_plot_style(color2, hatch.aci, &style);
+                }
+            }
+        }
+        if let Some(wire_fills) = wire_fills {
+            hatches.extend(wire_fills.iter().cloned());
+        }
+        let hatches = Arc::new(hatches);
+        let mut cache = self.styled_hatch_cache.borrow_mut();
+        cache.retain(|(epoch, _, _, _, _), _| *epoch == self.geometry_epoch);
+        if cache.len() >= DISPLAY_STYLE_CACHE_LIMIT * 2 {
+            cache.clear();
+        }
+        cache.insert(key, Arc::clone(&hatches));
+        hatches
+    }
+
+    fn display_styled_wire_fills(
+        &self,
+        wires: &Arc<Vec<WireModel>>,
+        source_gen: u64,
+        pattern_scale: f32,
+    ) -> Option<Arc<Vec<HatchModel>>> {
+        let Some(style) = self.display_plot_style() else {
+            return None;
+        };
+        let key = (
+            source_gen,
+            style.name.to_ascii_lowercase(),
+            pattern_scale.to_bits(),
+        );
+        if let Some(hatches) = self.styled_wire_fill_cache.borrow().get(&key) {
+            return Some(Arc::clone(hatches));
+        }
+        let mut hatches = Vec::new();
+        for wire in wires.iter().filter(|wire| wire.fill_is_2d_solid && wire.aci > 0) {
+            let Some(pattern) = style
+                .aci_entries
+                .get(wire.aci as usize)
+                .and_then(|entry| {
+                    (65..=72)
+                        .contains(&entry.fill_style)
+                        .then(|| {
+                            crate::scene::model::hatch_model::plot_style_fill_pattern(
+                                entry.fill_style,
+                            )
+                        })
+                        .flatten()
+                })
+            else {
+                continue;
+            };
+            let mut color = wire.color;
+            self.apply_display_plot_style(&mut color, wire.aci, &style);
+            let line_weight_px = style
+                .resolve_lineweight(wire.aci)
+                .map(|mm| (mm * (96.0 / 25.4) * 2.0).max(1.0))
+                .unwrap_or(wire.line_weight_px);
+            for (triangle_index, triangle) in wire.fill_tris.chunks_exact(3).enumerate() {
+                let mut boundary = Vec::with_capacity(4);
+                for (point_index, point) in triangle.iter().enumerate() {
+                    let index = triangle_index * 3 + point_index;
+                    let low = wire.fill_tris_low.get(index).copied().unwrap_or([0.0; 3]);
+                    boundary.push([point[0] + low[0], point[1] + low[1]]);
+                }
+                boundary.push(boundary[0]);
+                hatches.push(HatchModel {
+                    render_instance: wire.render_instance.clone(),
+                    world_origin: [0.0, 0.0],
+                    boundary: Arc::new(boundary),
+                    boundary_wcs: None,
+                    fill_plane: None,
+                    fill_plane_boundary: None,
+                    boundary_exterior: None,
+                    boundary_sources: None,
+                    boundary_paths: None,
+                    style: acadrust::entities::HatchStyleType::Normal,
+                    pattern: pattern.clone(),
+                    name: "PLOTSTYLE".to_string(),
+                    color,
+                    aci: 0,
+                    line_weight_px,
+                    angle_offset: 0.0,
+                    scale: pattern_scale,
+                    draw_depth: wire.depth_override.unwrap_or(0.0),
+                });
+            }
+        }
+        let hatches = Arc::new(hatches);
+        let mut cache = self.styled_wire_fill_cache.borrow_mut();
+        if cache.len() >= DISPLAY_STYLE_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(key, Arc::clone(&hatches));
+        Some(hatches)
     }
 }
 
@@ -2540,7 +2843,7 @@ fn viewport_override(
         .find_map(|(handle, value)| (handle == viewport).then_some(value))
 }
 
-pub(in crate::scene) fn render_style_for_viewport(
+pub(crate) fn render_style_for_viewport(
     document: &CadDocument,
     e: &EntityType,
     viewport: Option<Handle>,
@@ -2906,6 +3209,9 @@ impl Scene {
         }
         let mut out: Vec<crate::scene::pipeline::text_gpu::TextVertex> = Vec::new();
         for w in wires {
+            if !w.display_visible {
+                continue;
+            }
             if w.render_instance.is_some() {
                 continue;
             }
@@ -3045,15 +3351,38 @@ impl Scene {
             let Some(entity) = self.document.get_entity(handle) else {
                 continue;
             };
-            if !crate::scene::annotative::is_annotative(&self.document, entity)
-                || !self.resident_entity_visible(
+            if !self.resident_entity_visible(
                     entity,
                     target_block,
                     Some(&frozen),
                     annotation_scale_handle,
                     true,
-                )
-            {
+                ) {
+                continue;
+            }
+
+            if matches!(entity, EntityType::Hatch(_)) {
+                if selected {
+                    if let Some(mut wire) = self.hatch_outline_wire(handle) {
+                        let (_, pattern_length, pattern, line_weight_px, aci) =
+                            render_style_for_viewport(
+                                &self.document,
+                                entity,
+                                content_viewport.then_some(inst.handle),
+                            );
+                        wire.color = WireModel::SELECTED;
+                        wire.selected = true;
+                        wire.pattern_length = pattern_length;
+                        wire.pattern = pattern;
+                        wire.line_weight_px = line_weight_px;
+                        wire.aci = aci;
+                        wires.push(wire);
+                    }
+                }
+                continue;
+            }
+
+            if !crate::scene::annotative::is_annotative(&self.document, entity) {
                 continue;
             }
 
@@ -3095,7 +3424,7 @@ impl Scene {
                 }
                 let context_scale = match self.document.objects.get(&scale) {
                     Some(acadrust::objects::ObjectType::Scale(value)) => {
-                        value.inverse_factor() as f32
+                        (value.inverse_factor() / self.annotation_scale_unit_factor()) as f32
                     }
                     _ => annotation_scale,
                 };
@@ -3143,6 +3472,7 @@ impl Scene {
         model_render_mode: acadrust::entities::ViewportRenderMode,
         _hover_region: Option<usize>,
         show_viewcube: bool,
+        show_interaction: bool,
         viewcube_text_color: [f32; 4],
     ) -> Primitive {
         let nav_build_started = iced::time::Instant::now();
@@ -3150,7 +3480,7 @@ impl Scene {
         // Hover comes from the scene cell driven by the app-level
         // `CursorMoved` handler — the cube overlay sits above the shader
         // and would otherwise mask the move event from `Program::update`.
-        let hover_region = self.viewcube_hover.get();
+        let hover_region = show_interaction.then(|| self.viewcube_hover.get()).flatten();
         self.selection.borrow_mut().vp_size = (bounds.width, bounds.height);
         if bounds.height > 0.0 {
             self.set_render_aspect(bounds.width / bounds.height);
@@ -3166,7 +3496,14 @@ impl Scene {
             .iter()
             .filter_map(|inst| {
                 let force = self.refresh_consume(self.instance_id_for(inst));
-                self.viewport_data_for(inst, canvas, hover_region, show_viewcube, force)
+                self.viewport_data_for(
+                    inst,
+                    canvas,
+                    hover_region,
+                    show_viewcube,
+                    show_interaction,
+                    force,
+                )
             })
             .collect();
         // Empty viewports → blit nothing; the container background (model bg
@@ -3195,9 +3532,10 @@ impl Scene {
         tile_idx: usize,
         model_render_mode: acadrust::entities::ViewportRenderMode,
         show_viewcube: bool,
+        show_interaction: bool,
         viewcube_text_color: [f32; 4],
     ) -> Primitive {
-        let hover_region = self.viewcube_hover.get();
+        let hover_region = show_interaction.then(|| self.viewcube_hover.get()).flatten();
         let canvas = (bounds.width.max(1.0), bounds.height.max(1.0));
         let bg_color = [0.0, 0.0, 0.0, 0.0];
         let tiles = self.model_tiles.borrow();
@@ -3248,7 +3586,14 @@ impl Scene {
         };
         let force = self.refresh_consume(self.instance_id_for(&inst));
         let viewports = self
-            .viewport_data_for(&inst, canvas, hover_region, show_viewcube, force)
+            .viewport_data_for(
+                &inst,
+                canvas,
+                hover_region,
+                show_viewcube,
+                show_interaction,
+                force,
+            )
             .into_iter()
             .collect();
         let perf_nav = perf_nav.map(|mut sample| {
@@ -3273,6 +3618,7 @@ impl Scene {
         canvas: (f32, f32),
         hover_region: Option<usize>,
         show_viewcube: bool,
+        show_interaction: bool,
         force_rasterize: bool,
     ) -> Option<ViewportData> {
         let display = self.viewport_display_settings(inst);
@@ -3332,11 +3678,15 @@ impl Scene {
         } else {
             self.model_wires_for_viewport_arc(inst.handle, full.height)
         };
+        let source_gen = self.last_model_wire_gen.get();
+        let styled_fill_source = Arc::clone(&base_arc);
+        let (base_arc, styled_gen) = self.display_styled_wires(base_arc, source_gen);
+        self.last_model_wire_gen.set(styled_gen);
         // Wire-buffer content id for the upload gate. Preview / interim wires
         // are NOT part of this buffer anymore (they go in a separate per-frame
         // overlay buffer below), so the base id is the source's stable content
         // gen — a drag or camera move never re-uploads the base wire set.
-        let base_wire_content_id = self.last_model_wire_gen.get();
+        let base_wire_content_id = styled_gen;
         let base_wire_patch = self.model_wire_patch_for(base_wire_content_id);
         // Split Face3D wires from the rest. The split is content-only (keyed
         // by the wire-set content id), so while the geometry is unchanged it's
@@ -3412,7 +3762,7 @@ impl Scene {
         // paper layout, model-space overlays go to all content viewports while
         // paper-space overlays stay on the sheet. This also keeps model-space
         // coordinates out of the full-canvas sheet pass (#540).
-        let show_live_overlay = if self.current_layout == "Model" {
+        let show_live_overlay = show_interaction && if self.current_layout == "Model" {
             true
         } else if self.active_viewport.is_some() {
             !inst.paper_sheet
@@ -3477,16 +3827,30 @@ impl Scene {
             width: full.width.max(1.0),
             height: full.height.max(1.0),
         };
-        let mut uniforms =
-            Uniforms::new(&inst.camera, full_bounds, self.document.header.lineweight_display);
-        if self.document.header.paper_space_linetype_scaling
+        let display_plot_lineweights = self.current_layout != "Model"
+            && self.effective_plot_settings().is_some_and(|settings| {
+                settings.flags.show_plot_styles && settings.flags.print_lineweights
+            });
+        let mut uniforms = Uniforms::new(
+            &inst.camera,
+            full_bounds,
+            self.document.header.lineweight_display || display_plot_lineweights,
+        );
+
+        // Model space: scale linetypes using the current annotation scale so their
+        // appearance can match a paper-space viewport at the same drawing scale.
+        if self.current_layout == "Model" {
+            if self.annotation_scale.is_finite() && self.annotation_scale > 1e-9 {
+                uniforms.linetype_scale = self.annotation_scale;
+            }
+        } else if self.document.header.paper_space_linetype_scaling
             && !inst.paper_sheet
-            && inst.tile_idx.is_none()
             && inst.handle != Handle::NULL
         {
             if let Some(EntityType::Viewport(vp)) = self.document.get_entity(inst.handle) {
                 let viewport_scale =
                     vp_effective_scale(vp.custom_scale, vp.view_height, vp.height);
+
                 if viewport_scale.is_finite() && viewport_scale > 1e-9 {
                     uniforms.linetype_scale = (1.0 / viewport_scale) as f32;
                 }
@@ -3508,7 +3872,13 @@ impl Scene {
         uniforms.background_image_params = display.background.image_params;
         uniforms.background_image_transform = display.background.image_transform;
         uniforms.environment_params = display.background.environment_params;
-        uniforms.environment_view = glam::Mat4::from_quat(inst.camera.rotation);
+        let environment_scale = (inst.camera.fov_y * 0.5).tan().max(1e-4);
+        uniforms.environment_view = glam::Mat4::from_quat(inst.camera.rotation)
+            * glam::Mat4::from_scale(glam::Vec3::new(
+                visible_w / visible_h.max(1.0) * environment_scale,
+                environment_scale,
+                1.0,
+            ));
         uniforms.fog_color = display.background.fog_color;
         uniforms.fog_params = display.background.fog_params;
         uniforms.fog_distances = display.background.fog_distances;
@@ -3555,15 +3925,39 @@ impl Scene {
         // paper area. Content viewport model builders are block-filtered too;
         // the scissor only clips their already-correct Model Space set.
         let (hatches, wipeout_hatches, paper_images) = if inst.paper_sheet {
-            let (hatches, wipeouts, images) = self.paper_sheet_render_models();
+            let (hatches, wipeouts, images) =
+                self.paper_sheet_render_models_for_view(show_interaction);
             (hatches, wipeouts, Some(images))
         } else {
             (
-                self.hatch_models_for_viewport(inst.handle, &vp_frozen),
+                self.hatch_models_for_viewport(inst.handle, &vp_frozen, show_interaction),
                 self.wipeout_models_for_viewport(inst.handle, &vp_frozen),
                 None,
             )
         };
+        let viewport_scale = if inst.paper_sheet {
+            1.0
+        } else {
+            self.document
+                .get_entity(inst.handle)
+                .and_then(|entity| match entity {
+                    EntityType::Viewport(viewport) => Some(vp_effective_scale(
+                        viewport.custom_scale,
+                        viewport.view_height,
+                        viewport.height,
+                    )),
+                    _ => None,
+                })
+                .unwrap_or(1.0)
+        };
+        let pattern_scale = (self.paper_space_unit_factor() / viewport_scale.max(1.0e-9)) as f32;
+        let styled_wire_fills =
+            self.display_styled_wire_fills(&styled_fill_source, source_gen, pattern_scale);
+        let hatches = self.display_styled_hatches(
+            hatches,
+            styled_wire_fills.as_ref().filter(|fills| !fills.is_empty()),
+            pattern_scale,
+        );
         let images = if let Some(images) = paper_images {
             images
         } else {
@@ -3663,6 +4057,7 @@ impl Scene {
         } else {
             Arc::new(vec![])
         };
+        let navigating = !inst.paper_sheet && self.navigating_lod();
         // Camera mirror for the embedded Bevy renderer: shaded modes only
         // (wireframe / paper sheets never pump Bevy), same visible-sub-rect
         // crop as the in-house projection, wrapped in the reversed-z flip.
@@ -3727,16 +4122,27 @@ impl Scene {
             // actively moving; the scene-render cache holds the full-quality
             // (hatched) frame once it settles. Only applied to the on-screen
             // Model / paper content — the paper *sheet* keeps its fills.
-            skip_hatch: self.hatch_lod_enabled() && !inst.paper_sheet && self.navigating_lod(),
+            skip_hatch: self.hatch_lod_enabled() && navigating,
             skip_background: !inst.paper_sheet && self.current_layout != "Model",
             geometry_epoch: self.geometry_epoch,
             camera_generation: self.camera_generation,
             wire_content_id,
             wire_patch,
-            selected_handles: Arc::new(self.selected.iter().copied().collect()),
-            hover_handles: Arc::new(self.hover_highlight_handles()),
-            selection_generation: self.selection_generation,
-            selected_sig: self.selected_set_sig(),
+            selected_handles: Arc::new(if show_interaction {
+                self.selected.iter().copied().collect()
+            } else {
+                rustc_hash::FxHashSet::default()
+            }),
+            hover_handles: Arc::new(if show_interaction {
+                self.hover_highlight_handles()
+            } else {
+                rustc_hash::FxHashSet::default()
+            }),
+            selection_generation: self
+                .selection_generation
+                .wrapping_mul(2)
+                .wrapping_add(u64::from(!show_interaction)),
+            selected_sig: if show_interaction { self.selected_set_sig() } else { 0 },
             screen_rect,
             #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
             bevy_cam,

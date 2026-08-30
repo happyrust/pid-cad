@@ -22,16 +22,10 @@ enum Step {
     Point {
         name: String,
     },
-    /// Attribute filling: prompt the user tag by tag.
     FillAttr {
-        /// The block's attribute definitions — carried in full so the created
-        /// attributes inherit their position / alignment / height / rotation /
-        /// style, not just tag + prompt + default (#255).
         attdefs: Vec<AttributeDefinition>,
-        /// Index of the attdef currently being prompted.
         idx: usize,
-        /// (tag, value) pairs collected so far, in attdef order.
-        values: Vec<(String, String)>,
+        values: Vec<(usize, String)>,
     },
 }
 
@@ -44,7 +38,7 @@ enum AwaitKind {
 }
 
 pub struct InsertBlockCommand {
-    available: Vec<String>,
+    picker: crate::modules::insert::picker::BlockPicker,
     step: Step,
     /// Uniform X/Y scale applied to the placed block (default 1).
     x_scale: f64,
@@ -63,9 +57,17 @@ pub struct InsertBlockCommand {
 }
 
 impl InsertBlockCommand {
-    pub fn new(available: Vec<String>) -> Self {
+    /// Construct with explicit usage ranking. `usage` maps uppercase block name → (frequency, MRU position).
+    /// `cliprompt_lines` directly controls suggestion count (relation per spec).
+    pub fn new_with_usage(
+        available: Vec<String>,
+        usage_rank: rustc_hash::FxHashMap<String, (u32, usize)>,
+        cliprompt_lines: u8,
+    ) -> Self {
+        let limit = (cliprompt_lines as usize).clamp(0, crate::modules::insert::picker::MAX_SUGGESTIONS);
+        let picker = crate::modules::insert::picker::BlockPicker::new(available, usage_rank, limit);
         Self {
-            available,
+            picker,
             step: Step::Name,
             x_scale: 1.0,
             y_scale: 1.0,
@@ -82,8 +84,14 @@ impl InsertBlockCommand {
     /// from `base`) rubber-band under the cursor. Used by paste-as-block, which
     /// has just defined the block and only needs the drop point.
     pub fn new_for_block(name: String, preview_wires: Vec<WireModel>, base: Vec3) -> Self {
+        // Minimal picker for the locked-name path; not used for Name step.
+        let picker = crate::modules::insert::picker::BlockPicker::new(
+            vec![name.clone()],
+            rustc_hash::FxHashMap::default(),
+            0,
+        );
         Self {
-            available: vec![name.clone()],
+            picker,
             step: Step::Point { name },
             x_scale: 1.0,
             y_scale: 1.0,
@@ -94,6 +102,7 @@ impl InsertBlockCommand {
             plane: WorkingPlane::default(),
         }
     }
+
 }
 
 impl CadCommand for InsertBlockCommand {
@@ -108,12 +117,39 @@ impl CadCommand for InsertBlockCommand {
     fn prompt(&self) -> String {
         match &self.step {
             Step::Name => {
-                let hint = if self.available.is_empty() {
-                    String::new()
+                if self.picker.is_empty() {
+                    return t!("INSERT  Enter block name:").into_owned();
+                }
+                let needle = self.picker.needle();
+                let filtered = self.picker.filtered();
+                if !needle.is_empty() && filtered.is_empty() {
+                    return t!(
+                        "INSERT  No matching blocks for \"%{needle}\"",
+                        needle = needle
+                    )
+                    .into_owned();
+                }
+                if needle.is_empty() {
+                    let total = self.picker.total();
+                    let shown = filtered.len();
+                    if total <= shown {
+                        t!("INSERT  Enter block name:").into_owned()
+                    } else {
+                        t!(
+                            "INSERT  Enter block name:  [%{shown} of %{total} — type to search]",
+                            shown = shown,
+                            total = total
+                        )
+                        .into_owned()
+                    }
                 } else {
-                    format!("  [{}]", self.available.join(", "))
-                };
-                t!("INSERT  Enter block name:%{hint}", hint = hint).into_owned()
+                    t!(
+                        "INSERT  Enter block name:  \"%{needle}\"  [%{shown} matches]",
+                        needle = needle,
+                        shown = filtered.len()
+                    )
+                    .into_owned()
+                }
             }
             Step::Point { name } => match self.awaiting {
                 Some(AwaitKind::Scale) => t!("INSERT  Specify scale factor <1>:").into_owned(),
@@ -171,6 +207,32 @@ impl CadCommand for InsertBlockCommand {
         }
     }
 
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        match &self.step {
+            Step::Name => self
+                .picker
+                .filtered()
+                .iter()
+                .map(|n| crate::command::CmdOption::new(n, n))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn on_live_input(&mut self, input: &str) -> bool {
+        if !matches!(self.step, Step::Name) {
+            return false;
+        }
+        // Performance: only recompute if needle actually changed; picker
+        // uses upper/lower caches and partial sort so per-keystroke is <0.2ms.
+        let needle = input.trim();
+        if needle == self.picker.needle() {
+            return false;
+        }
+        self.picker.set_needle(needle.to_string());
+        true
+    }
+
     fn on_enter(&mut self) -> CmdResult {
         match &self.step {
             // A bare Enter while a scale/rotation value is awaited keeps the
@@ -210,12 +272,25 @@ impl CadCommand for InsertBlockCommand {
         match &self.step {
             Step::Name => {
                 let name = text.trim();
-                if !self.available.iter().any(|c| c.eq_ignore_ascii_case(name)) {
-                    return None;
+                // Empty input: reset needle to show default ranked list (2.1).
+                // Consumed so prompt+buttons refresh, not stale filter.
+                if name.is_empty() {
+                    self.picker.set_needle(String::new());
+                    return Some(CmdResult::NeedPoint);
                 }
-                self.step = Step::Point {
-                    name: name.to_string(),
-                };
+                // Exact block name (case-insensitive) → accept and go to point step.
+                // This path is used both for typed exact names and for CmdOption
+                // button clicks (Message::CommandOptionPick feeds the keyword through
+                // on_text_input). Returning NeedPoint keeps the prompt updated.
+                if let Some(canonical) = self.picker.contains_name(name) {
+                    self.step = Step::Point { name: canonical };
+                    return Some(CmdResult::NeedPoint);
+                }
+                // Not an exact match → treat as incremental search needle.
+                // Update filter and re-render prompt + option buttons. Must return
+                // Some(NeedPoint) (consumed) not None, otherwise the driver would
+                // offer the same text to the command a second time.
+                self.picker.set_needle(name.to_string());
                 Some(CmdResult::NeedPoint)
             }
             Step::FillAttr { .. } => Some(self.accept_attr_value(text)),
@@ -268,12 +343,16 @@ impl CadCommand for InsertBlockCommand {
         }
     }
 
-    fn attreq_set_attdefs(&mut self, attdefs: Vec<AttributeDefinition>) {
+    fn attreq_set_attdefs(
+        &mut self,
+        attdefs: Vec<AttributeDefinition>,
+    ) -> Option<acadrust::EntityType> {
         self.step = Step::FillAttr {
             attdefs,
             idx: 0,
             values: vec![],
         };
+        self.advance_automatic_attributes()
     }
 
     fn attreq_take_insert(&mut self) -> Option<acadrust::EntityType> {
@@ -284,13 +363,13 @@ impl CadCommand for InsertBlockCommand {
 }
 
 impl InsertBlockCommand {
-    /// Accept the current attribute value (empty = use default) and advance.
-    /// Returns CommitAndExit when all attdefs have been filled.
     fn accept_attr_value(&mut self, text: &str) -> CmdResult {
-        let (tag, default, next_idx, total) = match &self.step {
+        let (attdef_idx, default) = match &self.step {
             Step::FillAttr { attdefs, idx, .. } => {
-                let ad = &attdefs[*idx];
-                (ad.tag.clone(), ad.default_value.clone(), idx + 1, attdefs.len())
+                let Some(ad) = attdefs.get(*idx) else {
+                    return CmdResult::Cancel;
+                };
+                (*idx, ad.default_value.clone())
             }
             _ => return CmdResult::Cancel,
         };
@@ -307,36 +386,57 @@ impl InsertBlockCommand {
             ..
         } = self.step
         {
-            values.push((tag, value));
-            *idx = next_idx;
+            values.push((attdef_idx, value));
+            *idx = attdef_idx + 1;
         }
 
-        if next_idx >= total {
-            // All attdefs filled — build the INSERT's attribute list. Each
-            // attribute inherits its ATTDEF's geometry (position, alignment,
-            // height, rotation, style) via `from_definition`, then the block's
-            // insertion transform places it into WCS so it lands where the block
-            // put it instead of stacking at the origin (#255).
-            let (attdefs, values) = match &self.step {
-                Step::FillAttr {
-                    attdefs, values, ..
-                } => (attdefs.clone(), values.clone()),
-                _ => (vec![], vec![]),
-            };
-            let mut ins = match self.pending_insert.take() {
-                Some(i) => i,
-                None => return CmdResult::Cancel,
-            };
-            let xform = ins.get_transform();
-            for (ad, (_tag, value)) in attdefs.iter().zip(values.iter()) {
-                let mut attr = AttributeEntity::from_definition(ad, Some(value.clone()));
-                attr.apply_transform(&xform);
-                ins.attributes.push(attr);
-            }
-            CmdResult::CommitAndExit(EntityType::Insert(ins))
-        } else {
-            CmdResult::NeedPoint
+        match self.advance_automatic_attributes() {
+            Some(entity) => CmdResult::CommitAndExit(entity),
+            None => CmdResult::NeedPoint,
         }
+    }
+
+    fn advance_automatic_attributes(&mut self) -> Option<EntityType> {
+        loop {
+            let next = match &self.step {
+                Step::FillAttr { attdefs, idx, .. } => attdefs.get(*idx).map(|ad| {
+                    (*idx, ad.flags.constant, ad.flags.preset, ad.default_value.clone())
+                }),
+                _ => return None,
+            };
+            let Some((attdef_idx, constant, preset, default)) = next else {
+                return self.finish_insert();
+            };
+            if !constant && !preset {
+                return None;
+            }
+            if let Step::FillAttr { idx, values, .. } = &mut self.step {
+                if !constant {
+                    values.push((attdef_idx, default));
+                }
+                *idx += 1;
+            }
+        }
+    }
+
+    fn finish_insert(&mut self) -> Option<EntityType> {
+        let (attdefs, values) = match &self.step {
+            Step::FillAttr {
+                attdefs, values, ..
+            } => (attdefs.clone(), values.clone()),
+            _ => return None,
+        };
+        let mut insert = self.pending_insert.take()?;
+        let transform = insert.get_transform();
+        for (attdef_idx, value) in values {
+            let Some(attdef) = attdefs.get(attdef_idx) else {
+                continue;
+            };
+            let mut attribute = AttributeEntity::from_definition(attdef, Some(value));
+            attribute.apply_transform(&transform);
+            insert.attributes.push(attribute);
+        }
+        Some(EntityType::Insert(insert))
     }
 }
 

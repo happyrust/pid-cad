@@ -1,7 +1,9 @@
 use acadrust::entities::{
-    FlowDirectionType, LeaderContentType, LineSpacingStyle, MultiLeader, MultiLeaderPathType,
-    TextAlignmentType, TextAttachmentDirectionType, TextAttachmentType,
+    BlockContentConnectionType, FlowDirectionType, LeaderContentType, LineSpacingStyle,
+    MultiLeader, MultiLeaderPathType, MultiLeaderPropertyOverrideFlags, TextAlignmentType,
+    TextAttachmentDirectionType, TextAttachmentType,
 };
+use cadkernel::geom2d::Transform;
 
 use crate::entities::text_support::{
     layout_mtext, resolve_text_style, MTextRenderOpts, MTextVAnchor, ResolvedTextStyle,
@@ -182,9 +184,24 @@ fn to_render(ml: &MultiLeader, document: &acadrust::CadDocument) -> Option<Rende
                 style: &resolved,
                 // Side-anchored on the leader-facing edge so the text reads
                 // outward; flips live with the leader/text side.
-                attach_h_anchor: if text_sign >= 0.0 { 0.0 } else { 1.0 },
-                v_anchor: mleader_v_anchor(ctx.text_left_attachment),
+                attach_h_anchor: match ctx.text_attachment_point {
+                    acadrust::entities::multileader::TextAttachmentPointType::Left => 0.0,
+                    acadrust::entities::multileader::TextAttachmentPointType::Center => 0.5,
+                    acadrust::entities::multileader::TextAttachmentPointType::Right => 1.0,
+                },
+                v_anchor: mleader_v_anchor(
+                    if text_sign >= 0.0 {
+                        ctx.text_left_attachment
+                    } else {
+                        ctx.text_right_attachment
+                    },
+                ),
                 line_spacing_factor: ctx.line_spacing_factor as f32,
+                exact_line_spacing: matches!(
+                    ctx.line_spacing_style,
+                    acadrust::entities::LineSpacingStyle::Exactly
+                ),
+                rectangle_height: 0.0,
                 vertical_text: false,
                 want_glyph_boxes: false,
             }))
@@ -200,11 +217,19 @@ fn to_render(ml: &MultiLeader, document: &acadrust::CadDocument) -> Option<Rende
     } else {
         0.0
     };
-    // text_location is the leader-facing (near) edge; the landing runs one
-    // dogleg from there back toward the leader.
-    let landing_pt = [
-        text_loc.x - text_sign * dogleg * tdx,
-        text_loc.y - text_sign * dogleg * tdy,
+
+    let landing_gap = ml.context.landing_gap.max(0.0);
+
+    // Landing endpoints.
+    let elbow_pt = [
+        text_loc.x - text_sign * (dogleg + landing_gap) * tdx,
+        text_loc.y - text_sign * (dogleg + landing_gap) * tdy,
+        text_loc.z,
+    ];
+
+    let text_edge_pt = [
+        text_loc.x - text_sign * landing_gap * tdx,
+        text_loc.y - text_sign * landing_gap * tdy,
         text_loc.z,
     ];
 
@@ -225,13 +250,17 @@ fn to_render(ml: &MultiLeader, document: &acadrust::CadDocument) -> Option<Rende
                 first = false;
 
                 // Build the full control-point list: line.points + landing point
-                let mut ctrl: Vec<[f64; 3]> = line.points.iter().map(|p| p3(p)).collect();
-                let last_f = *ctrl.last().unwrap_or(&landing_pt);
-                let dist = ((last_f[0] - landing_pt[0]).powi(2)
-                    + (last_f[1] - landing_pt[1]).powi(2))
+                let mut ctrl: Vec<[f64; 3]> =
+                    line.points.iter().map(|p| p3(p)).collect();
+
+                let last_f = *ctrl.last().unwrap_or(&elbow_pt);
+
+                let dist = ((last_f[0] - elbow_pt[0]).powi(2)
+                    + (last_f[1] - elbow_pt[1]).powi(2))
                 .sqrt();
+
                 if dist > 1e-9 {
-                    ctrl.push(landing_pt);
+                    ctrl.push(elbow_pt);
                 }
                 for &c in &ctrl {
                     key_verts.push(c);
@@ -295,8 +324,8 @@ fn to_render(ml: &MultiLeader, document: &acadrust::CadDocument) -> Option<Rende
         // Horizontal landing from the leader end to the text's near edge.
         if dogleg > 0.0 {
             points.push(nan);
-            points.push(landing_pt);
-            points.push([text_loc.x, text_loc.y, text_loc.z]);
+            points.push(elbow_pt);
+            points.push(text_edge_pt);
         }
     }
 
@@ -339,9 +368,7 @@ fn to_render(ml: &MultiLeader, document: &acadrust::CadDocument) -> Option<Rende
 
 // ── Grips ──────────────────────────────────────────────────────────────────
 //
-// IDs are assigned in two passes:
-//   0 .. total_line_pts - 1  : square grips on every LeaderLine vertex
-//   total_line_pts            : diamond grip on context.text_location (if MText)
+// Leader vertices come first, followed by optional elbow, text, and width grips.
 
 /// Side the text reads toward (+1 right / -1 left) and the text box's far
 /// edge (the wrap-width grip position). The box width is the explicit wrap
@@ -392,6 +419,7 @@ fn text_box_geom(ml: &MultiLeader) -> ([f64; 2], [f64; 3]) {
             oblique_angle: 0.0,
             is_backward: false,
             is_upside_down: false,
+            is_vertical: false,
         };
         let layout = layout_mtext(&MTextRenderOpts {
             columns: Default::default(),
@@ -404,6 +432,11 @@ fn text_box_geom(ml: &MultiLeader) -> ([f64; 2], [f64; 3]) {
             attach_h_anchor: 0.0,
             v_anchor: MTextVAnchor::Top,
             line_spacing_factor: ctx.line_spacing_factor as f32,
+            exact_line_spacing: matches!(
+                ctx.line_spacing_style,
+                acadrust::entities::LineSpacingStyle::Exactly
+            ),
+            rectangle_height: 0.0,
             vertical_text: vertical,
             want_glyph_boxes: false,
         });
@@ -428,27 +461,131 @@ fn text_box_geom(ml: &MultiLeader) -> ([f64; 2], [f64; 3]) {
         ],
     )
 }
+fn mleader_landing_geom(
+    ml: &MultiLeader,
+) -> Option<(DVec3, DVec3, f64, f64, f64)> {
+    if ml.content_type != LeaderContentType::MText
+        || !ml.enable_landing
+        || !ml.enable_dogleg
+    {
+        return None;
+    }
+
+    let text = DVec3::new(
+        ml.context.text_location.x,
+        ml.context.text_location.y,
+        ml.context.text_location.z,
+    );
+
+    let td = ml.context.text_direction;
+
+    let axis = {
+        let d = DVec3::new(td.x, td.y, td.z);
+
+        if d.length_squared() > 1.0e-18 {
+            d.normalize()
+        } else {
+            let a = ml.context.text_rotation;
+
+            DVec3::new(a.cos(), a.sin(), 0.0)
+        }
+    };
+
+    let leader_ref = ml
+        .context
+        .leader_roots
+        .first()
+        .and_then(|root| root.lines.first())
+        .and_then(|line| line.points.last())
+        .map(|p| DVec3::new(p.x, p.y, p.z))
+        .or_else(|| {
+            ml.context.leader_roots.first().map(|root| {
+                DVec3::new(
+                    root.connection_point.x,
+                    root.connection_point.y,
+                    root.connection_point.z,
+                )
+            })
+        })
+        .unwrap_or(text);
+
+    let sign = if (text - leader_ref).dot(axis) >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+
+    let dogleg = ml
+        .context
+        .leader_roots
+        .first()
+        .map(|root| root.landing_distance.max(0.0))
+        .unwrap_or_else(|| ml.dogleg_length.max(0.0));
+
+    let gap = ml.context.landing_gap.max(0.0);
+
+    if dogleg <= 1.0e-9 {
+        return None;
+    }
+
+    let elbow = text - axis * (sign * (dogleg + gap));
+
+    Some((elbow, axis, sign, dogleg, gap))
+}
+
+fn set_mleader_text_location(ml: &mut MultiLeader, location: DVec3) {
+    let location = acadrust::types::Vector3::new(location.x, location.y, location.z);
+    ml.context.text_location = location;
+    ml.context.content_base_point = location;
+}
 
 fn grips(ml: &MultiLeader) -> Vec<GripDef> {
-    let mut result: Vec<GripDef> = Vec::new();
+    let mut result = Vec::new();
     let mut id = 0usize;
 
     for root in &ml.context.leader_roots {
         for line in &root.lines {
             for p in &line.points {
-                result.push(square_grip(id, glam::DVec3::new(p.x, p.y, p.z)));
+                result.push(square_grip(
+                    id,
+                    DVec3::new(p.x, p.y, p.z),
+                ));
+
                 id += 1;
             }
         }
     }
 
     if ml.content_type == LeaderContentType::MText {
+        if let Some((elbow, _, _, _, _)) = mleader_landing_geom(ml)
+        {
+            result.push(square_grip(
+                id,
+                elbow,
+            ));
+
+            id += 1;
+        }
+
         let tl = &ml.context.text_location;
-        // Text-location grip, then the wrap-width grip at the box's far edge.
-        result.push(center_grip(id, glam::DVec3::new(tl.x, tl.y, tl.z)));
+
+        result.push(center_grip(
+            id,
+            DVec3::new(tl.x, tl.y, tl.z),
+        ));
+
         id += 1;
+
         let (_, far) = text_box_geom(ml);
-        result.push(triangle_grip(id, glam::DVec3::new(far[0], far[1], far[2])));
+
+        result.push(triangle_grip(
+            id,
+            DVec3::new(
+                far[0],
+                far[1],
+                far[2],
+            ),
+        ));
     }
 
     result
@@ -458,16 +595,29 @@ fn grips(ml: &MultiLeader) -> Vec<GripDef> {
 /// text grip's "Move with Leader" action so the leader follows the text.
 pub(crate) const MOVE_ALL_GRIP: usize = usize::MAX;
 
-fn apply_grip(ml: &mut MultiLeader, grip_id: usize, apply: GripApply) {
+fn apply_grip(
+    ml: &mut MultiLeader,
+    grip_id: usize,
+    apply: GripApply,
+) {
     if grip_id == MOVE_ALL_GRIP {
         let (dx, dy, dz) = match apply {
-            GripApply::Translate(d) => (d.x as f64, d.y as f64, d.z as f64),
+            GripApply::Translate(d) => (
+                d.x as f64,
+                d.y as f64,
+                d.z as f64,
+            ),
+
             GripApply::Absolute(a) => (
-                a.x as f64 - ml.context.text_location.x,
-                a.y as f64 - ml.context.text_location.y,
-                a.z as f64 - ml.context.text_location.z,
+                a.x as f64
+                    - ml.context.text_location.x,
+                a.y as f64
+                    - ml.context.text_location.y,
+                a.z as f64
+                    - ml.context.text_location.z,
             ),
         };
+
         for root in &mut ml.context.leader_roots {
             for line in &mut root.lines {
                 for p in &mut line.points {
@@ -476,13 +626,21 @@ fn apply_grip(ml: &mut MultiLeader, grip_id: usize, apply: GripApply) {
                     p.z += dz;
                 }
             }
+
             root.connection_point.x += dx;
             root.connection_point.y += dy;
             root.connection_point.z += dz;
         }
-        ml.context.text_location.x += dx;
-        ml.context.text_location.y += dy;
-        ml.context.text_location.z += dz;
+
+        set_mleader_text_location(
+            ml,
+            DVec3::new(
+                ml.context.text_location.x + dx,
+                ml.context.text_location.y + dy,
+                ml.context.text_location.z + dz,
+            ),
+        );
+
         return;
     }
 
@@ -498,55 +656,130 @@ fn apply_grip(ml: &mut MultiLeader, grip_id: usize, apply: GripApply) {
                             p.y = a.y as f64;
                             p.z = a.z as f64;
                         }
+
                         GripApply::Translate(d) => {
                             p.x += d.x as f64;
                             p.y += d.y as f64;
                             p.z += d.z as f64;
                         }
                     }
+
                     return;
                 }
+
                 idx += 1;
             }
         }
     }
 
-    // Text-location grip (idx == n_vertices), then the wrap-width grip.
-    if ml.content_type == LeaderContentType::MText {
-        if idx == grip_id {
-            let tl = &mut ml.context.text_location;
-            match apply {
-                GripApply::Absolute(a) => {
-                    tl.x = a.x as f64;
-                    tl.y = a.y as f64;
-                    tl.z = a.z as f64;
-                }
+    if ml.content_type != LeaderContentType::MText {
+        return;
+    }
+
+    let landing = mleader_landing_geom(ml);
+
+    if let Some((old_elbow, axis, old_sign, dogleg, gap)) = landing {
+        if grip_id == idx {
+            let target = match apply {
+                GripApply::Absolute(a) => DVec3::new(a.x as f64, a.y as f64, a.z as f64),
                 GripApply::Translate(d) => {
-                    tl.x += d.x as f64;
-                    tl.y += d.y as f64;
-                    tl.z += d.z as f64;
+                    old_elbow + DVec3::new(d.x as f64, d.y as f64, d.z as f64)
                 }
+            };
+            let arrow = ml
+                .context
+                .leader_roots
+                .first()
+                .and_then(|root| root.lines.first())
+                .and_then(|line| line.points.first())
+                .map(|p| DVec3::new(p.x, p.y, p.z))
+                .unwrap_or(old_elbow);
+            let side_distance = (target - arrow).dot(axis);
+            let flip_tol = (dogleg * 0.10).max(1.0e-6);
+            let new_sign = if side_distance > flip_tol {
+                1.0
+            } else if side_distance < -flip_tol {
+                -1.0
+            } else {
+                old_sign
+            };
+            ml.context.text_attachment_point = if new_sign >= 0.0 {
+                acadrust::entities::multileader::TextAttachmentPointType::Left
+            } else {
+                acadrust::entities::multileader::TextAttachmentPointType::Right
+            };
+            set_mleader_text_location(ml, target + axis * (new_sign * (dogleg + gap)));
+
+            if let Some(root) = ml.context.leader_roots.first_mut() {
+                root.connection_point.x = target.x;
+                root.connection_point.y = target.y;
+                root.connection_point.z = target.z;
+                root.direction.x = axis.x * new_sign;
+                root.direction.y = axis.y * new_sign;
+                root.direction.z = axis.z * new_sign;
             }
             return;
         }
+
         idx += 1;
-        if idx == grip_id {
-            // Dragging the box edge sets the MText wrap limit, projected on
-            // the box's flow axis (rotated baseline, or down the column for
-            // vertical flow).
-            let (dir, far) = text_box_geom(ml);
-            let (nx, ny) = match apply {
-                GripApply::Absolute(a) => (a.x as f64, a.y as f64),
-                GripApply::Translate(d) => (far[0] + d.x as f64, far[1] + d.y as f64),
-            };
-            let tl = &ml.context.text_location;
-            // `dir` carries the attachment-side factor (may be ±half), so
-            // normalise by its squared length: width = proj(flow)/k.
-            let d2 = (dir[0] * dir[0] + dir[1] * dir[1]).max(1e-12);
-            let proj = ((nx - tl.x) * dir[0] + (ny - tl.y) * dir[1]) / d2;
-            let min_w = ml.text_height.max(1.0) * 0.5;
-            ml.context.text_width = proj.max(min_w);
+    }
+
+    if grip_id == idx {
+        let old_end = DVec3::new(
+            ml.context.text_location.x,
+            ml.context.text_location.y,
+            ml.context.text_location.z,
+        );
+        let target = match apply {
+            GripApply::Absolute(a) => DVec3::new(a.x as f64, a.y as f64, a.z as f64),
+            GripApply::Translate(d) => {
+                old_end + DVec3::new(d.x as f64, d.y as f64, d.z as f64)
+            }
+        };
+
+        if let Some((elbow, axis, sign, _, gap)) = landing {
+            let requested_total = (target - elbow).dot(axis) * sign;
+            let new_length = (requested_total - gap).max(1.0e-6);
+            set_mleader_text_location(
+                ml,
+                elbow + axis * (sign * (new_length + gap)),
+            );
+            ml.dogleg_length = new_length;
+            for root in &mut ml.context.leader_roots {
+                root.landing_distance = new_length;
+            }
+        } else {
+            set_mleader_text_location(ml, target);
         }
+        return;
+    }
+
+    idx += 1;
+
+    if grip_id == idx {
+        let (dir, far) = text_box_geom(ml);
+
+        let (nx, ny) = match apply {
+            GripApply::Absolute(a) => (
+                a.x as f64,
+                a.y as f64,
+            ),
+
+            GripApply::Translate(d) => (
+                far[0] + d.x as f64,
+                far[1] + d.y as f64,
+            ),
+        };
+
+        let tl = &ml.context.text_location;
+
+        let d2 = (dir[0] * dir[0] + dir[1] * dir[1]).max(1.0e-12);
+
+        let proj = ((nx - tl.x) * dir[0] + (ny - tl.y) * dir[1]) / d2;
+
+        let min_w = ml.text_height.max(1.0) * 0.5;
+
+        ml.context.text_width = proj.max(min_w);
     }
 }
 
@@ -673,9 +906,7 @@ fn properties(ml: &MultiLeader) -> Vec<PropSection> {
     // ── Leaders ──────────────────────────────────────────────────────────
     // Landing rows are folded in here: the standalone "Leader Structure" group
     // is a style-dialog tab, not a palette group.
-    let leaders = PropSection {
-        title: t!("Leaders").into_owned(),
-        props: vec![
+    let mut leader_props = vec![
             choice(
                 t!("Leader type").as_ref(),
                 "path_type",
@@ -692,20 +923,34 @@ fn properties(ml: &MultiLeader) -> Vec<PropSection> {
             Property {
                 label: t!("Leader lineweight").into_owned(),
                 field: "line_weight",
-                value: PropValue::LwChoice(ml.line_weight),
+                value: PropValue::FieldLwChoice {
+                    field: "line_weight",
+                    value: ml.line_weight,
+                },
             },
             // Arrowhead block name resolved by the panel builder (default "Closed filled").
             ro(t!("Arrowhead").as_ref(), "arrowhead_handle", "Closed filled"),
-            edit(t!("Arrowhead size").as_ref(), "arrowhead_size", ml.arrowhead_size),
+            edit(t!("Arrowhead Size").as_ref(), "arrowhead_size", ml.arrowhead_size),
             bool_toggle(t!("Horizontal Landing").as_ref(), "enable_dogleg", ml.enable_dogleg),
             num_row(
                 t!("Landing distance").as_ref(),
                 "landing_distance",
-                ml.dogleg_length,
+                if ml.enable_dogleg { ml.dogleg_length } else { 0.0 },
                 ml.enable_dogleg,
             ),
-            bool_toggle(t!("Leader extension").as_ref(), "enable_landing", ml.enable_landing),
-        ],
+        ];
+    // The extension is an MText-only landing option. It is absent for block
+    // content and whenever the horizontal landing itself is disabled.
+    if ml.content_type == LeaderContentType::MText && ml.enable_dogleg {
+        leader_props.push(bool_toggle(
+                t!("Leader extension").as_ref(),
+                "extend_leader_to_text",
+                ml.extend_leader_to_text,
+            ));
+    }
+    let leaders = PropSection {
+        title: t!("Leaders").into_owned(),
+        props: leader_props,
     };
 
     // ── Text (shown only for MText content) ──────────────────────────────
@@ -715,7 +960,7 @@ fn properties(ml: &MultiLeader) -> Vec<PropSection> {
             Property {
                 label: t!("Contents").into_owned(),
                 field: "text_string",
-                value: PropValue::EditText(ctx.text_string.clone()),
+                value: PropValue::PlainText(ctx.text_string.clone()),
             },
             // Text-style name resolved from text_style_handle by the panel builder.
             ro(t!("Text style").as_ref(), "text_style_handle", "Standard"),
@@ -757,6 +1002,18 @@ fn properties(ml: &MultiLeader) -> Vec<PropSection> {
                 attach_dir_str(&ml.text_attachment_direction),
                 &["Horizontal", "Vertical"],
             ),
+            edit(
+                t!("Landing gap").as_ref(),
+                "landing_gap",
+                ctx.landing_gap / ctx.scale_factor.max(1.0e-12),
+            ),
+            bool_toggle(t!("Text frame").as_ref(), "text_frame", ml.text_frame),
+        ],
+    };
+    let mut text = text;
+    let attachment_insert = text.props.len().saturating_sub(2);
+    let attachment_rows = match ml.text_attachment_direction {
+        TextAttachmentDirectionType::Horizontal => vec![
             choice(
                 t!("Left Attachment").as_ref(),
                 "text_left_attachment",
@@ -769,10 +1026,23 @@ fn properties(ml: &MultiLeader) -> Vec<PropSection> {
                 attachment_str(&ml.text_right_attachment),
                 &ATTACH_LABELS,
             ),
-            edit(t!("Landing gap").as_ref(), "landing_gap", ctx.landing_gap),
-            bool_toggle(t!("Text frame").as_ref(), "text_frame", ml.text_frame),
+        ],
+        TextAttachmentDirectionType::Vertical => vec![
+            choice(
+                t!("Top Attachment").as_ref(),
+                "text_top_attachment",
+                attachment_str(&ml.text_top_attachment),
+                &ATTACH_LABELS,
+            ),
+            choice(
+                t!("Bottom Attachment").as_ref(),
+                "text_bottom_attachment",
+                attachment_str(&ml.text_bottom_attachment),
+                &ATTACH_LABELS,
+            ),
         ],
     };
+    text.props.splice(attachment_insert..attachment_insert, attachment_rows);
 
     // ── Block ────────────────────────────────────────────────────────────
     let block = PropSection {
@@ -783,29 +1053,16 @@ fn properties(ml: &MultiLeader) -> Vec<PropSection> {
                 "block_content_handle",
                 hexh(ml.block_content_handle),
             ),
-            ro(
-                t!("Block connection").as_ref(),
+            choice(
+                t!("Attachment").as_ref(),
                 "block_connection_type",
-                format!("{:?}", ml.block_connection_type),
+                match ml.block_connection_type {
+                    BlockContentConnectionType::BasePoint => "Insertion point",
+                    BlockContentConnectionType::BlockExtents => "Extents",
+                },
+                &["Extents", "Insertion point"],
             ),
-            ro(
-                t!("Block color").as_ref(),
-                "block_content_color",
-                format!("{:?}", ml.block_content_color),
-            ),
-            ro(
-                t!("Block scale").as_ref(),
-                "block_scale",
-                format!(
-                    "{:.3} × {:.3} × {:.3}",
-                    ml.block_scale.x, ml.block_scale.y, ml.block_scale.z
-                ),
-            ),
-            edit(
-                t!("Block rotation").as_ref(),
-                "block_rotation",
-                ml.block_rotation.to_degrees(),
-            ),
+            edit(t!("Scale").as_ref(), "block_scale", ml.block_scale.x),
         ],
     };
 
@@ -836,22 +1093,27 @@ fn apply_geom_prop(ml: &mut MultiLeader, field: &str, value: &str) {
         "text_height" => {
             if let Some(v) = f64(value) {
                 ml.text_height = v;
-                ml.context.text_height = v;
+                ml.context.text_height = v * ml.context.scale_factor.max(1.0e-12);
+                ml.property_override_flags
+                    .insert(MultiLeaderPropertyOverrideFlags::TEXT_HEIGHT);
             }
         }
         "text_x" => {
             if let Some(v) = f64(value) {
                 ml.context.text_location.x = v;
+                ml.context.content_base_point.x = v;
             }
         }
         "text_y" => {
             if let Some(v) = f64(value) {
                 ml.context.text_location.y = v;
+                ml.context.content_base_point.y = v;
             }
         }
         "text_z" => {
             if let Some(v) = f64(value) {
                 ml.context.text_location.z = v;
+                ml.context.content_base_point.z = v;
             }
         }
         "text_frame" => {
@@ -859,7 +1121,9 @@ fn apply_geom_prop(ml: &mut MultiLeader, field: &str, value: &str) {
                 !ml.text_frame
             } else {
                 value == "true"
-            }
+            };
+            ml.property_override_flags
+                .insert(MultiLeaderPropertyOverrideFlags::TEXT_FRAME);
         }
         "path_type" => {
             ml.path_type = match value {
@@ -867,17 +1131,38 @@ fn apply_geom_prop(ml: &mut MultiLeader, field: &str, value: &str) {
                 "None" => MultiLeaderPathType::Invisible,
                 _ => MultiLeaderPathType::StraightLineSegments,
             };
+            for root in &mut ml.context.leader_roots {
+                for line in &mut root.lines {
+                    line.path_type = ml.path_type;
+                    line.override_flags.insert(
+                        acadrust::entities::LeaderLinePropertyOverrideFlags::PATH_TYPE,
+                    );
+                }
+            }
+            ml.property_override_flags
+                .insert(MultiLeaderPropertyOverrideFlags::PATH_TYPE);
         }
         "enable_landing" => {
             ml.enable_landing = if value == "toggle" {
                 !ml.enable_landing
             } else {
                 value == "true"
-            }
+            };
+            ml.property_override_flags
+                .insert(MultiLeaderPropertyOverrideFlags::ENABLE_LANDING);
         }
         "enable_dogleg" => {
             ml.enable_dogleg = if value == "toggle" {
                 !ml.enable_dogleg
+            } else {
+                value == "true"
+            };
+            ml.property_override_flags
+                .insert(MultiLeaderPropertyOverrideFlags::ENABLE_DOGLEG);
+        }
+        "extend_leader_to_text" => {
+            ml.extend_leader_to_text = if value == "toggle" {
+                !ml.extend_leader_to_text
             } else {
                 value == "true"
             }
@@ -896,38 +1181,129 @@ fn apply_geom_prop(ml: &mut MultiLeader, field: &str, value: &str) {
                 value == "true"
             }
         }
+        "background_mask_fill_on" => {
+            ml.context.background_mask_fill_on = if value == "toggle" {
+                !ml.context.background_mask_fill_on
+            } else {
+                value == "true"
+            }
+        }
+        "background_scale_factor" => {
+            if let Some(v) = f64(value) {
+                if v > 0.0 {
+                    ml.context.background_scale_factor = v;
+                }
+            }
+        }
+        "background_transparency" => {
+            if let Ok(v) = value.trim().parse::<i32>() {
+                ml.context.background_transparency = v.clamp(0, 90);
+            }
+        }
         "dogleg_length" => {
             if let Some(v) = f64(value) {
                 ml.dogleg_length = v;
+                ml.property_override_flags
+                    .insert(MultiLeaderPropertyOverrideFlags::LANDING_DISTANCE);
             }
         }
         "arrowhead_size" => {
             if let Some(v) = f64(value) {
                 ml.arrowhead_size = v;
+                ml.context.arrowhead_size = v * ml.context.scale_factor.max(1.0e-12);
+                for root in &mut ml.context.leader_roots {
+                    for line in &mut root.lines {
+                        line.arrowhead_size = v;
+                        line.override_flags.insert(
+                            acadrust::entities::LeaderLinePropertyOverrideFlags::ARROWHEAD_SIZE,
+                        );
+                    }
+                }
+                ml.property_override_flags
+                    .insert(MultiLeaderPropertyOverrideFlags::ARROWHEAD_SIZE);
             }
         }
         "scale_factor" => {
             if let Some(v) = f64(value) {
-                ml.scale_factor = v;
+                if v > 0.0 {
+                    let old = ml.context.scale_factor.max(1.0e-12);
+                    let ratio = v / old;
+                    ml.scale_factor = v;
+                    ml.context.scale_factor = v;
+                    ml.context.arrowhead_size *= ratio;
+                    ml.context.text_height *= ratio;
+                    ml.context.landing_gap *= ratio;
+                    ml.block_scale.x *= ratio;
+                    ml.block_scale.y *= ratio;
+                    ml.block_scale.z *= ratio;
+                    ml.context.block_content_scale = ml.block_scale;
+                    if let Some(root) = ml.context.leader_roots.first() {
+                        let anchor = root.connection_point;
+                        for point in [
+                            &mut ml.context.content_base_point,
+                            &mut ml.context.text_location,
+                            &mut ml.context.block_content_location,
+                        ] {
+                            point.x = anchor.x + (point.x - anchor.x) * ratio;
+                            point.y = anchor.y + (point.y - anchor.y) * ratio;
+                            point.z = anchor.z + (point.z - anchor.z) * ratio;
+                        }
+                    }
+                    for root in &mut ml.context.leader_roots {
+                        root.landing_distance *= ratio;
+                    }
+                    ml.property_override_flags
+                        .insert(MultiLeaderPropertyOverrideFlags::SCALE_FACTOR);
+                }
             }
         }
         "landing_distance" => {
             if let Some(v) = f64(value) {
                 ml.dogleg_length = v;
-                if let Some(root) = ml.context.leader_roots.first_mut() {
-                    root.landing_distance = v;
+                let display = v * ml.context.scale_factor.max(1.0e-12);
+                for root in &mut ml.context.leader_roots {
+                    root.landing_distance = display;
                 }
+                place_content_after_landing(ml);
+                ml.property_override_flags
+                    .insert(MultiLeaderPropertyOverrideFlags::LANDING_DISTANCE);
             }
         }
         "landing_gap" => {
             if let Some(v) = f64(value) {
-                ml.context.landing_gap = v;
+                ml.context.landing_gap = v * ml.context.scale_factor.max(1.0e-12);
+                place_content_after_landing(ml);
+                ml.property_override_flags
+                    .insert(MultiLeaderPropertyOverrideFlags::LANDING_GAP);
             }
         }
         "block_rotation" => {
             if let Some(v) = f64(value) {
                 ml.block_rotation = v.to_radians();
+                ml.context.block_rotation = ml.block_rotation;
+                ml.property_override_flags
+                    .insert(MultiLeaderPropertyOverrideFlags::BLOCK_CONTENT_ROTATION);
             }
+        }
+        "block_scale" => {
+            if let Some(v) = f64(value) {
+                if v > 0.0 {
+                    ml.block_scale = acadrust::types::Vector3::new(v, v, v);
+                    ml.context.block_content_scale = ml.block_scale;
+                    ml.property_override_flags
+                        .insert(MultiLeaderPropertyOverrideFlags::BLOCK_CONTENT_SCALE);
+                }
+            }
+        }
+        "block_connection_type" => {
+            ml.block_connection_type = if value == "Insertion point" {
+                BlockContentConnectionType::BasePoint
+            } else {
+                BlockContentConnectionType::BlockExtents
+            };
+            ml.context.block_connection_type = ml.block_connection_type;
+            ml.property_override_flags
+                .insert(MultiLeaderPropertyOverrideFlags::BLOCK_CONTENT_CONNECTION);
         }
         "conn_x" => {
             if let (Some(v), Some(root)) = (f64(value), ml.context.leader_roots.first_mut()) {
@@ -947,18 +1323,26 @@ fn apply_geom_prop(ml: &mut MultiLeader, field: &str, value: &str) {
         "text_left_attachment" => {
             ml.text_left_attachment = parse_attachment(value);
             ml.context.text_left_attachment = parse_attachment(value);
+            ml.property_override_flags
+                .insert(MultiLeaderPropertyOverrideFlags::TEXT_LEFT_ATTACHMENT);
         }
         "text_right_attachment" => {
             ml.text_right_attachment = parse_attachment(value);
             ml.context.text_right_attachment = parse_attachment(value);
+            ml.property_override_flags
+                .insert(MultiLeaderPropertyOverrideFlags::TEXT_RIGHT_ATTACHMENT);
         }
         "text_top_attachment" => {
             ml.text_top_attachment = parse_attachment(value);
             ml.context.text_top_attachment = parse_attachment(value);
+            ml.property_override_flags
+                .insert(MultiLeaderPropertyOverrideFlags::TEXT_TOP_ATTACHMENT);
         }
         "text_bottom_attachment" => {
             ml.text_bottom_attachment = parse_attachment(value);
             ml.context.text_bottom_attachment = parse_attachment(value);
+            ml.property_override_flags
+                .insert(MultiLeaderPropertyOverrideFlags::TEXT_BOTTOM_ATTACHMENT);
         }
         "text_alignment" => {
             ml.text_alignment = match value {
@@ -971,6 +1355,8 @@ fn apply_geom_prop(ml: &mut MultiLeader, field: &str, value: &str) {
                 "Right" => TextAlignmentType::Right,
                 _ => TextAlignmentType::Left,
             };
+            ml.property_override_flags
+                .insert(MultiLeaderPropertyOverrideFlags::TEXT_ALIGNMENT);
         }
         "text_flow_direction" => {
             ml.context.text_flow_direction = match value {
@@ -984,6 +1370,16 @@ fn apply_geom_prop(ml: &mut MultiLeader, field: &str, value: &str) {
                 "Vertical" => TextAttachmentDirectionType::Vertical,
                 _ => TextAttachmentDirectionType::Horizontal,
             };
+            if ml.text_attachment_direction == TextAttachmentDirectionType::Vertical {
+                ml.enable_dogleg = false;
+                ml.property_override_flags
+                    .insert(MultiLeaderPropertyOverrideFlags::ENABLE_DOGLEG);
+            }
+            for root in &mut ml.context.leader_roots {
+                root.text_attachment_direction = ml.text_attachment_direction;
+            }
+            ml.property_override_flags
+                .insert(MultiLeaderPropertyOverrideFlags::TEXT_ATTACHMENT_DIRECTION);
         }
         "line_space_style" => {
             ml.context.line_spacing_style = match value {
@@ -999,6 +1395,13 @@ fn apply_geom_prop(ml: &mut MultiLeader, field: &str, value: &str) {
         "text_rotation" => {
             if let Some(v) = f64(value) {
                 ml.context.text_rotation = v.to_radians();
+                ml.context.text_direction = acadrust::types::Vector3::new(
+                    ml.context.text_rotation.cos(),
+                    ml.context.text_rotation.sin(),
+                    0.0,
+                );
+                ml.property_override_flags
+                    .insert(MultiLeaderPropertyOverrideFlags::TEXT_ANGLE);
             }
         }
         "line_spacing" => {
@@ -1018,6 +1421,27 @@ fn apply_geom_prop(ml: &mut MultiLeader, field: &str, value: &str) {
         }
         _ => {}
     }
+}
+
+fn place_content_after_landing(ml: &mut MultiLeader) {
+    let Some(root) = ml.context.leader_roots.first() else {
+        return;
+    };
+    let length = (root.direction.x * root.direction.x + root.direction.y * root.direction.y).sqrt();
+    let (ux, uy) = if length > 1.0e-12 {
+        (root.direction.x / length, root.direction.y / length)
+    } else {
+        (1.0, 0.0)
+    };
+    let distance = root.landing_distance.max(0.0) + ml.context.landing_gap.max(0.0);
+    let location = acadrust::types::Vector3::new(
+        root.connection_point.x + ux * distance,
+        root.connection_point.y + uy * distance,
+        root.connection_point.z,
+    );
+    ml.context.content_base_point = location;
+    ml.context.text_location = location;
+    ml.context.block_content_location = location;
 }
 
 fn parse_attachment(s: &str) -> TextAttachmentType {
@@ -1090,6 +1514,7 @@ fn apply_transform(ml: &mut MultiLeader, t: &EntityTransform) {
             p1,
             p2,
         );
+        entity.context.content_base_point = entity.context.text_location;
         reflect_xy_direction(
             &mut entity.context.text_direction.x,
             &mut entity.context.text_direction.y,
@@ -1133,53 +1558,83 @@ impl crate::entities::traits::Grippable for MultiLeader {
     fn apply_grip(&mut self, grip_id: usize, apply: GripApply) {
         apply_grip(self, grip_id, apply);
     }
-    fn grip_menu(&self, grip_id: usize) -> Vec<crate::scene::model::object::GripMenuItem> {
-        use crate::scene::model::object::{GripMenuAction, GripMenuItem};
+    fn grip_menu(
+        &self,
+        grip_id: usize,
+    ) -> Vec<crate::scene::model::object::GripMenuItem> {
+        use crate::scene::model::object::{
+            GripMenuAction,
+            GripMenuItem,
+        };
+
         let n_vertices: usize = self
             .context
             .leader_roots
             .iter()
-            .flat_map(|r| r.lines.iter())
-            .map(|l| l.points.len())
+            .flat_map(|root| root.lines.iter())
+            .map(|line| line.points.len())
             .sum();
-        if self.content_type == LeaderContentType::MText && grip_id >= n_vertices {
-            if grip_id == n_vertices {
-                // Text-location grip.
-                vec![
+
+        if self.content_type
+            == LeaderContentType::MText
+        {
+            let has_elbow =
+                mleader_landing_geom(self).is_some();
+
+            let elbow_id =
+                n_vertices;
+
+            let landing_id =
+                n_vertices
+                    + usize::from(has_elbow);
+
+            let width_id =
+                landing_id + 1;
+
+            if has_elbow
+                && grip_id == elbow_id
+            {
+                return vec![
                     GripMenuItem {
                         label: "Stretch",
-                        action: GripMenuAction::Stretch,
+                        action:
+                            GripMenuAction::Stretch,
                     },
-                    GripMenuItem {
-                        label: "Move with Leader",
-                        action: GripMenuAction::MoveWithLeader,
-                    },
-                    GripMenuItem {
-                        label: "Move Independent",
-                        action: GripMenuAction::MoveIndependent,
-                    },
-                ]
-            } else {
-                // Wrap-width grip: drag only.
-                Vec::new()
+                ];
             }
-        } else {
-            // Leader-line vertex.
-            vec![
-                GripMenuItem {
-                    label: "Stretch",
-                    action: GripMenuAction::Stretch,
-                },
-                GripMenuItem {
-                    label: "Add Leader",
-                    action: GripMenuAction::AddLeader,
-                },
-                GripMenuItem {
-                    label: "Remove Leader",
-                    action: GripMenuAction::RemoveLeader,
-                },
-            ]
+
+            if grip_id == landing_id {
+                return vec![
+                    GripMenuItem {
+                        label: "Stretch",
+                        action:
+                            GripMenuAction::Stretch,
+                    },
+                ];
+            }
+
+            if grip_id == width_id {
+                return Vec::new();
+            }
         }
+
+        vec![
+            GripMenuItem {
+                label: "Stretch",
+                action:
+                    GripMenuAction::Stretch,
+            },
+            GripMenuItem {
+                label: "Add Leader",
+                action:
+                    GripMenuAction::AddLeader,
+            },
+            GripMenuItem {
+                label: "Remove Leader",
+                action:
+                    GripMenuAction::RemoveLeader,
+            },
+        ]
     }
     fn apply_grip_menu(&mut self, grip_id: usize, action: crate::scene::model::object::GripMenuAction) {
         use crate::scene::model::object::GripMenuAction as A;
@@ -1323,16 +1778,40 @@ impl MultiLeaderTess for MultiLeader {
 
         // ── Scaling ──────────────────────────────────────────────────────────────
         // Used only when a context omits an already-resolved content size.
-        let fallback_content_scale = (ml.scale_factor as f32)
-            * if crate::scene::annotative::mleader_is_annotative(document, ml) {
-                anno_scale
+        let annotative =
+            crate::scene::annotative::mleader_is_annotative(document, ml);
+
+        // Context sizes are resolved at their stored annotation scale.
+        let base_scale = if ml.scale_factor.abs() > 1.0e-12 {
+            ml.scale_factor as f32
+        } else {
+            1.0
+        };
+
+        let stored_context_scale = ml.context.scale_factor as f32;
+
+        let context_scale_correction =
+            if annotative && stored_context_scale.abs() > 1.0e-12 {
+                let correction =
+                    (base_scale * anno_scale) / stored_context_scale;
+
+                if correction.is_finite() && correction > 0.0 {
+                    correction
+                } else {
+                    1.0
+                }
             } else {
                 1.0
             };
 
+        let fallback_content_scale =
+            base_scale * if annotative { anno_scale } else { 1.0 };
+
         // The active context stores the resolved world-space arrow size.
         // Reapplying the entity scale here makes context-sized arrows grow twice.
-        let arrow_size = ml.context.arrowhead_size as f32;
+        let arrow_size =
+            ml.context.arrowhead_size as f32
+                * context_scale_correction;
         let draw_arrow = arrow_size > 0.0;
         let invisible = ml.path_type == MultiLeaderPathType::Invisible;
         // arrowhead_handle resolves through the block records to a named arrow
@@ -1357,7 +1836,25 @@ impl MultiLeaderTess for MultiLeader {
 
         // Which side the text grip sits on, recomputed every frame so the text
         // alignment and the landing mirror live when the arrow or text moves.
-        let text_loc_w = ml.context.text_location;
+        let mut text_loc_w = ml.context.text_location;
+
+        // Scale the annotation-side offset around the fixed elbow.
+        if annotative
+            && (context_scale_correction - 1.0).abs() > 1.0e-6
+        {
+            if let Some(root) = ml.context.leader_roots.first() {
+                let anchor = root.connection_point;
+                let k = context_scale_correction as f64;
+
+                text_loc_w = acadrust::types::Vector3::new(
+                    anchor.x
+                        + (text_loc_w.x - anchor.x) * k,
+                    anchor.y
+                        + (text_loc_w.y - anchor.y) * k,
+                    text_loc_w.z,
+                );
+            }
+        }
         let leader_ref_w = ml
             .context
             .leader_roots
@@ -1451,9 +1948,7 @@ impl MultiLeaderTess for MultiLeader {
                 }
             }
 
-            // Vertically-attached leaders (text above/below) have no dogleg:
-            // the leader meets the text edge directly, so the short horizontal
-            // dash would be a stray mark AutoCAD never draws.
+            // Vertically attached leaders meet the text edge directly.
             let vertical_attach = matches!(
                 ml.text_attachment_direction,
                 acadrust::entities::multileader::TextAttachmentDirectionType::Vertical
@@ -1471,16 +1966,14 @@ impl MultiLeaderTess for MultiLeader {
                 // stray line up the side of the text.
                 // Landing distance belongs to the selected leader-root context
                 // and is already resolved in world units.
-                let d = root.landing_distance;
+                let d =
+                    root.landing_distance
+                        * context_scale_correction as f64;
                 // The dogleg runs along the leader root's stored direction —
                 // for a rotated leader that is the angled baseline, not world
                 // X. Roots without a usable direction keep the legacy
                 // horizontal toward the text side.
-                let (ux, uy) = ml
-                    .context
-                    .leader_roots
-                    .first()
-                    .map(|r| (r.direction.x, r.direction.y))
+                let (ux, uy) = Some((root.direction.x, root.direction.y))
                     .filter(|(x, y)| (x * x + y * y).sqrt() > 1e-9)
                     .map(|(x, y)| {
                         let l = (x * x + y * y).sqrt();
@@ -1495,6 +1988,15 @@ impl MultiLeaderTess for MultiLeader {
                 points.push(nan);
                 points.push(cp_f);
                 points.push(landing_end);
+                if ml.extend_leader_to_text {
+                    let gap = ml.context.landing_gap.max(0.0)
+                        * context_scale_correction as f64;
+                    points.push([
+                        (text_loc_w.x - ux * gap) as f32,
+                        (text_loc_w.y - uy * gap) as f32,
+                        text_loc_w.z as f32,
+                    ]);
+                }
             }
         }
 
@@ -1503,9 +2005,13 @@ impl MultiLeaderTess for MultiLeader {
         // WireModels so the renderer respects per-piece coloring.
         let mut wires: Vec<WireModel> = Vec::new();
         wires.push(WireModel {
+            point_marker: None,
             taper_widths: Vec::new(),
+            pattern_stations: Vec::new(),
             world_width: 0.0,
             depth_override: None,
+            display_visible: true,
+            plot_visible: true,
             fill_is_3d: false,
             fill_is_2d_solid: false,
             render_instance: None,
@@ -1543,31 +2049,66 @@ impl MultiLeaderTess for MultiLeader {
         // synthetic Insert supplies that context to the shared scene graph;
         // every child then uses its normal tessellator.
         if ml.content_type == LeaderContentType::Block && ml.context.has_block_contents {
-            let block_name = match ml.block_content_handle {
+            let block_record = match ml.block_content_handle {
                 Some(h) if !h.is_null() => document
                     .block_records
                     .iter()
                     .find(|br| br.handle == h)
-                    .map(|br| br.name.clone()),
+                    .cloned(),
                 _ => None,
             };
-            if let Some(block_name) = block_name {
+            if let Some(block_record) = block_record {
+                let block_name = block_record.name.clone();
                 let block_color = if selected {
                     line_color
                 } else {
                     color_or_inherit(&ml.block_content_color, entity_color)
                 };
-                let mut synth_ins =
-                    acadrust::entities::Insert::new(block_name, ml.context.block_content_location);
+                let mut insertion = ml.context.block_content_location;
+                if ml.block_connection_type == BlockContentConnectionType::BlockExtents {
+                    let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+                    for entity_handle in &block_record.entity_handles {
+                        if let Some(entity) = document.get_entity(*entity_handle) {
+                            let aabb = crate::scene::convert::tess::entity_aabb(entity);
+                            if aabb != WireModel::UNBOUNDED_AABB {
+                                bounds[0] = bounds[0].min(aabb[0]);
+                                bounds[1] = bounds[1].min(aabb[1]);
+                                bounds[2] = bounds[2].max(aabb[2]);
+                                bounds[3] = bounds[3].max(aabb[3]);
+                            }
+                        }
+                    }
+                    if bounds[0] <= bounds[2] && bounds[1] <= bounds[3] {
+                        let to_block = Transform::rotation(-ml.block_rotation);
+                        let from_left = ml
+                            .context
+                            .leader_roots
+                            .first()
+                            .map_or(true, |root| {
+                                to_block.apply_vector([
+                                    root.direction.x,
+                                    root.direction.y,
+                                ])[0]
+                                    >= 0.0
+                            });
+                        let anchor_x = if from_left { bounds[0] } else { bounds[2] } as f64;
+                        let anchor_y = ((bounds[1] + bounds[3]) * 0.5) as f64;
+                        let local_x =
+                            (anchor_x - block_record.base_point.x) * ml.block_scale.x;
+                        let local_y =
+                            (anchor_y - block_record.base_point.y) * ml.block_scale.y;
+                        let rotated = Transform::rotation(ml.block_rotation)
+                            .apply_vector([local_x, local_y]);
+                        insertion.x -= rotated[0];
+                        insertion.y -= rotated[1];
+                    }
+                }
+                let mut synth_ins = acadrust::entities::Insert::new(block_name, insertion);
                 synth_ins.set_x_scale(ml.block_scale.x);
                 synth_ins.set_y_scale(ml.block_scale.y);
                 synth_ins.set_z_scale(ml.block_scale.z);
                 synth_ins.rotation = ml.block_rotation;
                 synth_ins.common.layer = ml.common.layer.clone();
-                // block_connection_type (BlockExtents vs BasePoint) chooses the
-                // anchor when *creating* the multileader; at render time the
-                // file's stored leader endpoints already encode that choice.
-                let _ = ml.block_connection_type;
                 let depths = rustc_hash::FxHashMap::default();
                 let graph = crate::scene::render_graph::RenderSceneGraph::new(
                     document,
@@ -1630,23 +2171,20 @@ impl MultiLeaderTess for MultiLeader {
             // scale_factor + annotation scale applied.
             let height = if ctx.text_height > 0.0 {
                 ctx.text_height as f32
+                    * context_scale_correction
             } else {
-                ml.text_height as f32 * fallback_content_scale
+                ml.text_height as f32
+                    * fallback_content_scale
             };
 
-            let ins = &ctx.text_location;
+            let ins = &text_loc_w;
             // Subtract world_offset in f64 before casting to f32: drawings often
             // sit at large absolute coordinates and casting first then subtracting
             // throws away the precision needed for the rotated sub-glyph offsets.
             let local_ins_x = (ins.x) as f32;
             let z = (ins.z) as f32;
 
-            // Rotation: the annotation context is AutoCAD's BAKED display
-            // state — text_direction / text_rotation already reflect whatever
-            // the style's angle setting produced at edit time. Re-deriving
-            // from ml.text_angle_type here (e.g. forcing Horizontal to 0)
-            // un-rotated leaders whose stored context is angled; the angle
-            // type only guides recomputation during edits, not display.
+            // The context stores the resolved display rotation.
             let td = ctx.text_direction;
             let mut rot = if td.x.abs() > 1e-9 || td.y.abs() > 1e-9 {
                 (td.y as f32).atan2(td.x as f32)
@@ -1698,14 +2236,14 @@ impl MultiLeaderTess for MultiLeader {
             // anchor within the text block (Left/Center/Right) — honour it
             // instead of guessing from the leader side.
             use acadrust::entities::multileader::{
-                TextAttachmentDirectionType, TextAttachmentPointType,
+                TextAttachmentDirectionType,
             };
             // The context's attachment point exists in every DWG version;
             // the entity-level copy only exists from R2010 on.
-            let h_anchor: f32 = match ctx.text_attachment_point {
-                TextAttachmentPointType::Left => 0.0,
-                TextAttachmentPointType::Center => 0.5,
-                TextAttachmentPointType::Right => 1.0,
+            let h_anchor: f32 = match ctx.text_alignment {
+                TextAlignmentType::Left => 0.0,
+                TextAlignmentType::Center => 0.5,
+                TextAlignmentType::Right => 1.0,
             };
             // Pick the vertical-anchor attachment based on text_attachment_direction:
             //   Horizontal — leader attaches left/right; use ml.text_left_attachment
@@ -1727,12 +2265,19 @@ impl MultiLeaderTess for MultiLeader {
                 value: &ctx.text_string,
                 insertion: [local_ins_x as f64, local_ins_y as f64, z as f64],
                 height,
-                rect_w: ctx.text_width as f32,
+                rect_w:
+                    ctx.text_width as f32
+                        * context_scale_correction,
                 rotation: rot,
                 style: &style,
                 attach_h_anchor: h_anchor,
                 v_anchor,
                 line_spacing_factor: ctx.line_spacing_factor as f32,
+                exact_line_spacing: matches!(
+                    ctx.line_spacing_style,
+                    acadrust::entities::LineSpacingStyle::Exactly
+                ),
+                rectangle_height: 0.0,
                 // Vertical flow (top-to-bottom) is stored per-context.
                 vertical_text: matches!(
                     ctx.text_flow_direction,
@@ -1840,9 +2385,13 @@ impl MultiLeaderTess for MultiLeader {
                         xy = xy.max(p[1] as f64);
                     }
                     wires.push(WireModel {
+                        point_marker: None,
                         taper_widths: Vec::new(),
+                        pattern_stations: Vec::new(),
                         world_width: 0.0,
                         depth_override: None,
+                        display_visible: true,
+                        plot_visible: true,
                         fill_is_3d: false,
                         fill_is_2d_solid: false,
                         render_instance: None,
@@ -1910,9 +2459,13 @@ impl MultiLeaderTess for MultiLeader {
                         pts.push([bx, by, z]);
                     }
                     wires.push(WireModel {
+                        point_marker: None,
                         taper_widths: Vec::new(),
+                        pattern_stations: Vec::new(),
                         world_width: 0.0,
                         depth_override: None,
+                        display_visible: true,
+                        plot_visible: true,
                         fill_is_3d: false,
                         fill_is_2d_solid: false,
                         render_instance: None,
@@ -1943,14 +2496,9 @@ impl MultiLeaderTess for MultiLeader {
 
             // Text frame / background-fill rectangle in local frame, then rotated to WCS.
             if ml.text_frame || ctx.background_fill_enabled {
-                // Frame/fill offset from the glyphs: the context's landing gap
-                // (AutoCAD spaces the box by exactly that), with the old
-                // quarter-height heuristic as the no-gap fallback.
-                let pad = if ctx.landing_gap > 0.0 {
-                    ctx.landing_gap as f32
-                } else {
-                    height * 0.25
-                };
+                // Border offset is a scale factor around the laid-out text box.
+                let pad = height
+                    * ((ctx.background_scale_factor.max(1.0) as f32 - 1.0) * 0.5);
                 // Box the glyphs that were actually laid out (valid for
                 // vertical flow too); the metric-derived box is only the
                 // no-glyph fallback.
@@ -1981,11 +2529,16 @@ impl MultiLeaderTess for MultiLeader {
 
                 // Background fill — emit two triangles; renders under the text strokes.
                 if ctx.background_fill_enabled {
-                    let fill_color = if selected {
+                    let mut fill_color = if selected {
                         line_color
+                    } else if ctx.background_mask_fill_on {
+                        bg_color
                     } else {
                         color_or_inherit(&ctx.background_fill_color, entity_color)
                     };
+                    fill_color[3] *=
+                        (1.0 - ctx.background_transparency.clamp(0, 90) as f32 / 100.0)
+                            .clamp(0.1, 1.0);
                     let fill_tris: Vec<[f32; 3]> = vec![
                         wcs_corners[0],
                         wcs_corners[1],
@@ -1995,9 +2548,13 @@ impl MultiLeaderTess for MultiLeader {
                         wcs_corners[3],
                     ];
                     wires.push(WireModel {
+                        point_marker: None,
                         taper_widths: Vec::new(),
+                        pattern_stations: Vec::new(),
                         world_width: 0.0,
                         depth_override: None,
+                        display_visible: true,
+                        plot_visible: true,
                         fill_is_3d: false,
                         fill_is_2d_solid: false,
                         render_instance: None,
@@ -2035,9 +2592,13 @@ impl MultiLeaderTess for MultiLeader {
                         wcs_corners[0],
                     ];
                     wires.push(WireModel {
+                        point_marker: None,
                         taper_widths: Vec::new(),
+                        pattern_stations: Vec::new(),
                         world_width: 0.0,
                         depth_override: None,
+                        display_visible: true,
+                        plot_visible: true,
                         fill_is_3d: false,
                         fill_is_2d_solid: false,
                         render_instance: None,

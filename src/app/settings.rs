@@ -198,6 +198,13 @@ pub struct UserSettings {
     pub osmode: i32,
     /// Controls whether the TEXTEDIT command repeats automatically (0 = Multiple, 1 = Single).
     pub texteditmode: bool,
+    /// QDIM extension-origin priority: 0 = endpoints, 1 = intersections.
+    #[serde(default)]
+    pub quick_dimension_snap_priority: u8,
+    /// DIMCONTINUEMODE: 1 inherits the base dimension's layer/style; 0 uses
+    /// the current creation layer/style. Registry-style, app-level preference.
+    #[serde(default = "default_dimension_continue_mode")]
+    pub dimension_continue_mode: i16,
     /// TEXTFILL: fill TrueType glyphs (true) or draw them hollow (false).
     pub textfill: bool,
     /// When true, saving over an existing file first copies it to a sibling
@@ -230,6 +237,37 @@ pub struct UserSettings {
     /// Interface language preference. `System` negotiates against the
     /// platform locale on every launch.
     pub language: crate::i18n::Language,
+    /// CLIPROMPTLINES: how many temporary prompt lines for a single command
+    /// are displayed above the command window (0–50, Registry, default 3).
+    #[serde(default = "default_clipromptlines", deserialize_with = "deserialize_clipromptlines")]
+    pub cliprompt_lines: i32,
+    /// Most-recently-inserted block names, most recent first, capped to 20.
+    /// Used to rank INSERT suggestions without touching the drawing file.
+    #[serde(default)]
+    pub block_mru: Vec<String>,
+    /// Insertion frequency per block name (uppercase key → count).
+    #[serde(default)]
+    pub block_freq: std::collections::HashMap<String, u32>,
+}
+
+fn default_clipromptlines() -> i32 {
+    3
+}
+
+fn default_dimension_continue_mode() -> i16 {
+    1
+}
+
+fn deserialize_clipromptlines<'de, D>(de: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = i32::deserialize(de).unwrap_or(3);
+    Ok(v.clamp(0, 50))
+}
+
+pub fn clamp_clipromptlines(v: i32) -> i32 {
+    v.clamp(0, 50)
 }
 
 impl Default for UserSettings {
@@ -257,6 +295,8 @@ impl Default for UserSettings {
             // off (suppress bit 16384).
             osmode: 575 | OSMODE_SUPPRESS,
             texteditmode: false,
+            quick_dimension_snap_priority: 0,
+            dimension_continue_mode: 1,
             textfill: true,
             backup_on_save: true,
             file_assoc_enabled: true,
@@ -268,6 +308,9 @@ impl Default for UserSettings {
             bg_color: None,
             paper_bg_color: None,
             language: crate::i18n::Language::default(),
+            cliprompt_lines: 3,
+            block_mru: Vec::new(),
+            block_freq: std::collections::HashMap::new(),
         }
     }
 }
