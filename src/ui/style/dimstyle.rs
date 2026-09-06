@@ -5,6 +5,7 @@ use iced::widget::{
     button, canvas, checkbox, column, container, row, scrollable, text, text_input, Space,
 };
 use iced::{mouse, Background, Border, Element, Length, Point, Rectangle, Theme};
+use crate::ui::style::common::muted_style;
 use crate::t;
 use std::borrow::Cow;
 use std::fmt;
@@ -153,12 +154,6 @@ fn field_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
         placeholder: palette.background.base.text.scale_alpha(0.48),
         value: palette.background.base.text,
         selection: palette.primary.base.color.scale_alpha(0.5),
-    }
-}
-
-fn muted_style(theme: &Theme) -> iced::widget::text::Style {
-    iced::widget::text::Style {
-        color: Some(theme.palette().background.base.text.scale_alpha(0.68)),
     }
 }
 
@@ -961,7 +956,7 @@ pub fn view_window<'a>(
                 t!("Unit format"),
                 DsField::Dimaunit,
                 vals.dimaunit,
-                &[("0", "Decimal degrees"), ("1", "Degrees, minutes, seconds"), ("2", "Gradians"), ("3", "Radians")],
+                &[("0", "Decimal degrees"), ("1", "Degrees, minutes, seconds"), ("2", "Gradians"), ("3", "Radians"), ("4", "Surveyor's units")],
             ),
             row![lbl(t!("Precision")), mk_field(DsField::Dimadec, vals.dimadec)]
                 .spacing(8).align_y(iced::Center),

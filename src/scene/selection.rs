@@ -1,8 +1,4 @@
-// Auto-split from scene/mod.rs. Pure text-move; behaviour unchanged.
 use super::*;
-
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 impl Scene {
     // ── Selection ─────────────────────────────────────────────────────────
@@ -102,7 +98,11 @@ impl Scene {
         self.selected.len()
     }
 
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub(crate) fn selection_fingerprint(&mut self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
         if self.selection_fingerprint_dirty {
             let mut fingerprint = self.selected.len() as u64;
             for handle in &self.selected {
@@ -360,19 +360,38 @@ impl Scene {
         self.selected.len()
     }
 
-    /// Returns the sorted set of entity-type names present in the active
-    /// layout. Used to populate the Quick Select "Object type" dropdown
-    /// with only the types that actually exist in the drawing.
-    pub fn entity_type_names_in_layout(&self) -> Vec<String> {
+    /// Sorted entity types in the current layout, cached until geometry or layout changes.
+    pub fn entity_type_names_in_layout(&self) -> std::sync::Arc<Vec<String>> {
         use crate::entities::traits::entity_type_name;
-        let mut names: std::collections::BTreeSet<String> =
-            std::collections::BTreeSet::new();
-        for h in self.current_layout_entity_handles() {
-            if let Some(e) = self.document.get_entity(h) {
-                names.insert(entity_type_name(e).to_string());
+        let block = self.current_layout_block_handle();
+        {
+            let cache = self.layout_type_names_cache.borrow();
+            if let Some((epoch, cached_block, names)) = cache.as_ref() {
+                if *epoch == self.geometry_epoch && *cached_block == block {
+                    return std::sync::Arc::clone(names);
+                }
             }
         }
-        names.into_iter().collect()
+        let mut names: std::collections::BTreeSet<&str> =
+            std::collections::BTreeSet::new();
+        if let Some(record) = self
+            .document
+            .block_records
+            .iter()
+            .find(|record| record.handle == block)
+        {
+            for &handle in &record.entity_handles {
+                if let Some(entity) = self.document.get_entity(handle) {
+                    names.insert(entity_type_name(entity));
+                }
+            }
+        }
+        let names: std::sync::Arc<Vec<String>> = std::sync::Arc::new(
+            names.into_iter().map(str::to_string).collect(),
+        );
+        *self.layout_type_names_cache.borrow_mut() =
+            Some((self.geometry_epoch, block, std::sync::Arc::clone(&names)));
+        names
     }
 
     /// True when `handle`'s entity type is allowed by the selection filter.
@@ -568,7 +587,8 @@ impl Scene {
                                     }
                                     QSelectValueEditor::Choice(values)
                                 }
-                                PropValue::ColorChoice(_) => QSelectValueEditor::Choice(vec![
+                                PropValue::ColorChoice(_)
+                                | PropValue::NamedColorChoice { .. } => QSelectValueEditor::Choice(vec![
                                     "ByLayer".into(),
                                     "ByBlock".into(),
                                 ]),
@@ -659,7 +679,13 @@ impl Scene {
         match field {
             "handle" => Some(entity.common().handle.value().to_string()),
             "layer" => Some(entity.common().layer.clone()),
-            "color" => Some(Self::format_color(entity.common().color)),
+            "color" => Some(
+                entity
+                    .common()
+                    .color_name
+                    .clone()
+                    .unwrap_or_else(|| Self::format_color(entity.common().color)),
+            ),
             "linetype" => Some(if entity.common().linetype.is_empty() {
                 "ByLayer".to_string()
             } else {
@@ -675,11 +701,12 @@ impl Scene {
                 .to_string(),
             ),
             "lineweight" => Some(Self::format_lineweight(entity.common().line_weight)),
-            "transparency" => Some(if entity.common().transparency.alpha() == 0 {
-                "ByLayer".to_string()
-            } else {
-                ((entity.common().transparency.alpha() as f64 / 255.0 * 100.0).round() as u32)
-                    .to_string()
+            "transparency" => Some(match entity.common().transparency {
+                acadrust::types::Transparency::ByLayer => "ByLayer".to_string(),
+                acadrust::types::Transparency::ByBlock => "ByBlock".to_string(),
+                acadrust::types::Transparency::Explicit(alpha) => {
+                    ((alpha as f64 / 255.0 * 100.0).round() as u32).to_string()
+                }
             }),
             "hyperlink" => Some(
                 entity
@@ -731,6 +758,7 @@ impl Scene {
                     PropValue::Choice { selected, .. } => selected,
                     PropValue::EditChoice { value, .. } => value,
                     PropValue::ColorChoice(c) => Self::format_color(c),
+                    PropValue::NamedColorChoice { name, .. } => name,
                     PropValue::LwChoice(lw)
                     | PropValue::FieldLwChoice { value: lw, .. } => {
                         Self::format_lineweight(lw)
@@ -772,7 +800,19 @@ impl Scene {
     // ── Erase ─────────────────────────────────────────────────────────────
 
     pub fn erase_entities(&mut self, handles: &[Handle]) {
+        self.remove_entities(handles, true);
+    }
 
+    /// Roll back entities created by the current command after a downstream
+    /// registration failure. These entities were never successful command
+    /// results, so locked-layer edit policy must not prevent their removal.
+    /// The shared removal path keeps first-touch undo state, history objects,
+    /// groups, selection, and derived caches coherent.
+    pub(crate) fn rollback_new_entities(&mut self, handles: &[Handle]) {
+        self.remove_entities(handles, false);
+    }
+
+    fn remove_entities(&mut self, handles: &[Handle], respect_layer_locks: bool) {
         let erase_handles = self.handles_expanded_for_leader_annotations(handles);
 
         let mut handle_set: HashSet<Handle> = HashSet::default();
@@ -782,7 +822,7 @@ impl Scene {
 
         for &h in &erase_handles {
             // Objects on a locked layer can't be erased.
-            if self.is_layer_locked(h) {
+            if respect_layer_locks && self.is_layer_locked(h) {
                 continue;
             }
             // Delta-undo: capture the removed entity so an undo can re-insert it.
@@ -913,6 +953,46 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layout_type_cache_reuses_and_invalidates_on_edits_undo_and_layout() {
+        use acadrust::entities::{Circle, EntityType, Line};
+        use acadrust::types::Vector3;
+        use std::sync::Arc;
+
+        let mut scene = Scene::new();
+        let empty = scene.entity_type_names_in_layout();
+        assert!(empty.is_empty());
+        assert!(Arc::ptr_eq(&empty, &scene.entity_type_names_in_layout()));
+        scene.add_entity(EntityType::Line(Line::from_points(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )));
+        let lines = scene.entity_type_names_in_layout();
+        assert_eq!(lines.as_slice(), ["Line"]);
+        assert!(Arc::ptr_eq(&lines, &scene.entity_type_names_in_layout()));
+        let circle = scene.add_entity(EntityType::Circle(Circle::new()));
+        let before = scene.document.get_entity_arc(circle);
+        assert_eq!(
+            scene.entity_type_names_in_layout().as_slice(),
+            ["Circle", "Line"]
+        );
+        scene.erase_entities(&[circle]);
+        assert_eq!(scene.entity_type_names_in_layout().as_slice(), ["Line"]);
+        let changes = scene.apply_entity_delta(&[(circle, before, None)], true);
+        scene.bump_entities(&changes);
+        assert_eq!(
+            scene.entity_type_names_in_layout().as_slice(),
+            ["Circle", "Line"]
+        );
+        scene.set_current_layout("Layout1".to_owned());
+        assert!(scene.entity_type_names_in_layout().is_empty());
+        scene.set_current_layout("Model".to_owned());
+        assert_eq!(
+            scene.entity_type_names_in_layout().as_slice(),
+            ["Circle", "Line"]
+        );
+    }
 
     #[test]
     fn selection_fingerprint_tracks_final_set_only() {

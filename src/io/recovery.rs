@@ -254,7 +254,7 @@ impl RecoveryReport {
         lines.push("Open CAD Studio drawing recovery report".to_string());
         lines.push(format!("Report schema: {}", REPORT_SCHEMA_VERSION));
         lines.push(format!("Report ID: {}", self.report_id));
-        lines.push(format!("Application version: {}", env!("CARGO_PKG_VERSION")));
+        lines.push(format!("Application version: {}", env!("OCS_APP_VERSION")));
         lines.push(format!("Application revision: {}", env!("OCS_GIT_REV")));
         lines.push(format!("Build profile: {}", env!("OCS_BUILD_PROFILE")));
         lines.push(format!("Build features: {}", env!("OCS_BUILD_FEATURES")));
@@ -373,6 +373,7 @@ impl RecoveryReport {
         lines.push(format!("Validation: {} ms", self.timings.purge_ms));
         lines.push(format!("References: {} ms", self.timings.xref_ms));
         lines.push(format!("Scene caches: {} ms", self.timings.caches_ms));
+        lines.push(format!("Geometry prep: {} ms", self.timings.finalize_ms));
         lines.push(format!("Total: {} ms", self.total_ms));
         if !self.diagnostics.is_empty() {
             lines.push(String::new());

@@ -23,6 +23,7 @@ impl super::OpenCADStudio {
         let EntityType::Solid3D(inner) = &mut entity else {
             return Handle::NULL;
         };
+        inner.common.plotstyle_flags = 2;
         inner.wires = solid_model::edge_wires(&solid);
         let Some(document) = crate::scene::convert::acis_export::solid_to_sat(&solid)
         else {
@@ -34,8 +35,49 @@ impl super::OpenCADStudio {
         let Some(handle) = self.commit_entity_handle(entity) else {
             return Handle::NULL;
         };
+        let require_complete = matches!(history, SolidHistoryOperation::Loft(_));
         self.tabs[i].scene.create_solid_history(handle, history);
-        self.tabs[i].scene.register_solid_model(handle, solid);
+        if !self.tabs[i].scene.register_solid_model(handle, solid)
+            || (require_complete && self.tabs[i].scene.meshes.get(&handle).is_none_or(|mesh| !mesh.complete)) {
+            // A command result is not successful until it has renderable
+            // geometry. Roll the new entity back so DELOBJ cannot consume a
+            // visible source in exchange for an invisible result.
+            self.tabs[i].scene.rollback_new_entities(&[handle]);
+            return Handle::NULL;
+        }
+        handle
+    }
+
+    /// Add an open sheet body as a persistent Surface entity and register its
+    /// exact B-rep for shaded and wireframe display.
+    pub(super) fn add_surface_model(
+        &mut self,
+        mut entity: EntityType,
+        surface: Body,
+    ) -> Handle {
+        let i = self.active_tab;
+        let EntityType::Surface(inner) = &mut entity else {
+            return Handle::NULL;
+        };
+        inner.common.plotstyle_flags = 2;
+        inner.wires = solid_model::edge_wires(&surface);
+        let Some(document) = crate::scene::convert::acis_export::solid_to_sat(&surface)
+        else {
+            self.command_line
+                .push_error(crate::t!("The surface could not be encoded as ACIS.").as_ref());
+            return Handle::NULL;
+        };
+        inner.acis_data = acadrust::entities::AcisData::from_sat(&document.to_sat_string());
+        let Some(handle) = self.commit_entity_handle(entity) else {
+            return Handle::NULL;
+        };
+        let require_complete = self.tabs[i].scene.document.get_entity(handle).is_some_and(|entity|
+            matches!(entity, EntityType::Surface(value) if value.kind == acadrust::entities::SurfaceKind::Lofted));
+        if !self.tabs[i].scene.register_solid_model(handle, surface)
+            || (require_complete && self.tabs[i].scene.meshes.get(&handle).is_none_or(|mesh| !mesh.complete)) {
+            self.tabs[i].scene.rollback_new_entities(&[handle]);
+            return Handle::NULL;
+        }
         handle
     }
 
@@ -77,6 +119,12 @@ impl super::OpenCADStudio {
         entity.history_handle = None;
         entity.set_sat_document(&document);
 
+        let Some(display) = self.tabs[i].scene.prepare_solid_model_display(handle, &result)
+            .filter(|display| display.0.complete)
+        else {
+            self.command_line.push_error(crate::t!("The result could not be displayed completely. The original solid was retained.").as_ref());
+            return false;
+        };
         self.push_undo_snapshot(i, label);
         self.tabs[i].scene.delete_solid_history(handle);
         if !self.tabs[i]
@@ -89,7 +137,7 @@ impl super::OpenCADStudio {
         }
         let history = solid_history::brep_op(&result);
         self.tabs[i].scene.create_solid_history(handle, history);
-        self.tabs[i].scene.register_solid_model(handle, result);
+        self.tabs[i].scene.register_prepared_solid_model(handle, result, display);
         self.tabs[i].scene.deselect_all();
         self.tabs[i].scene.select_entity(handle, false);
         self.tabs[i].dirty = true;
@@ -143,59 +191,6 @@ impl super::OpenCADStudio {
         if self.replace_solid_body(handle, result, label) {
             self.command_line
                 .push_output(crate::tf!("{label}: solid updated.").as_ref());
-        }
-        Task::none()
-    }
-
-    pub(super) fn solid_face_presspull(
-        &mut self,
-        handle: Handle,
-        pick: glam::DVec3,
-        distance: f64,
-        drag: Option<glam::DVec3>,
-    ) -> Task<Message> {
-        let i = self.active_tab;
-        if self.reject_locked_edit(i, handle) {
-            return Task::none();
-        }
-        self.tabs[i].scene.restore_solid_models(&[handle]);
-        let Some(body) = self.tabs[i].scene.solid_models.get(&handle).cloned() else {
-            self.command_line
-                .push_error(crate::t!("The solid geometry could not be restored.").as_ref());
-            return Task::none();
-        };
-        let Some(face) = solid_model::nearest_planar_face(&body, pick.to_array()) else {
-            self.command_line
-                .push_error(crate::t!("Select a planar solid face.").as_ref());
-            return Task::none();
-        };
-        let distance = match drag {
-            Some(point) => {
-                let Some(normal) = solid_model::planar_face_normal(&body, face) else {
-                    self.command_line
-                        .push_error(crate::t!("Select a planar solid face.").as_ref());
-                    return Task::none();
-                };
-                (point - pick).dot(glam::DVec3::from_array(normal))
-            }
-            None => distance,
-        };
-        if !distance.is_finite() || distance.abs() <= 1e-6 {
-            self.command_line.push_error(
-                crate::t!("PRESSPULL: drag along the selected face normal.").as_ref(),
-            );
-            return Task::none();
-        }
-        let Some(result) = cadkernel::brep::presspull(&body, face, distance) else {
-            self.command_line.push_error(
-                crate::t!("PRESSPULL: the face move would collapse or invalidate the solid.")
-                    .as_ref(),
-            );
-            return Task::none();
-        };
-        if self.replace_solid_body(handle, result, "PRESSPULL") {
-            self.command_line
-                .push_output(crate::t!("PRESSPULL: solid updated.").as_ref());
         }
         Task::none()
     }
@@ -468,55 +463,6 @@ impl super::OpenCADStudio {
         Task::none()
     }
 
-    /// POLYSOLID — build a wall solid around an exact polyline offset.
-    pub(super) fn solid_polysolid(&mut self, width: f64, height: f64) -> Task<Message> {
-        let i = self.active_tab;
-        let found: Option<(Handle, EntityType)> = self.tabs[i]
-            .scene
-            .selected_entities()
-            .iter()
-            .filter(|(h, _)| !self.tabs[i].scene.is_layer_locked(*h))
-            .find_map(|(h, e)| match e {
-                EntityType::LwPolyline(_) => Some((*h, (*e).clone())),
-                _ => None,
-            });
-        let Some((handle, entity)) = found else {
-            self.command_line
-                .push_error(crate::t!("POLYSOLID: select a polyline first.").as_ref());
-            return Task::none();
-        };
-        let Some(result) = crate::scene::model::sweep_model::polysolid(&entity, width, height)
-        else {
-            self.command_line
-                .push_error(crate::t!("POLYSOLID: the kernel could not offset the polyline.").as_ref());
-            return Task::none();
-        };
-        if crate::scene::convert::acis_export::solid_to_sat(&result).is_none() {
-            self.command_line
-                .push_error(crate::t!("POLYSOLID: the result could not be encoded as ACIS.").as_ref());
-            return Task::none();
-        }
-        self.push_undo_snapshot(i, "POLYSOLID");
-        self.tabs[i].scene.erase_entities(&[handle]);
-        let mut s3d = Solid3D::new();
-        s3d.wires = solid_model::edge_wires(&result);
-        let history = solid_history::brep_op(&result);
-        let h = self.add_solid_model(EntityType::Solid3D(s3d), result, history);
-        self.tabs[i].scene.deselect_all();
-        if !h.is_null() {
-            self.tabs[i].scene.select_entity(h, false);
-        }
-        if !h.is_null() {
-            self.tabs[i].dirty = true;
-            self.refresh_properties();
-            self.command_line.push_output(
-                crate::tf!("POLYSOLID: created a wall solid (width {width}, height {height}).")
-                    .as_ref(),
-            );
-        }
-        Task::none()
-    }
-
     /// 3DMIRROR — add a mirrored copy of the one selected solid across the plane
     /// perpendicular to the X/Y/Z axis (0/1/2) through its centre, keeping the
     /// original. A reflection loses handedness, so the kernel reverses every
@@ -699,8 +645,10 @@ impl super::OpenCADStudio {
         let history = solid_history::pyramid_op(
             glam::DMat4::IDENTITY.to_cols_array(),
             radius,
+            0.0,
             height,
             n,
+            true,
         );
         let handle = self.add_solid_model(entity, solid, history);
         self.tabs[i].scene.deselect_all();

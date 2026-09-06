@@ -149,7 +149,22 @@ impl Geo {
         }
     }
 }
-
+pub fn is_trim_boundary_entity(entity: &EntityType) -> bool {
+    matches!(
+        entity,
+        EntityType::Line(_)
+            | EntityType::Arc(_)
+            | EntityType::Circle(_)
+            | EntityType::Ellipse(_)
+            | EntityType::Ray(_)
+            | EntityType::XLine(_)
+            | EntityType::Spline(_)
+            | EntityType::LwPolyline(_)
+            | EntityType::Polyline(_)
+            | EntityType::Polyline2D(_)
+            | EntityType::Polyline3D(_)
+    )
+}
 fn build_geos(entities: &[EntityType]) -> Vec<Geo> {
     let mut out = Vec::new();
     for e in entities {
@@ -2169,21 +2184,33 @@ pub struct TrimCommand {
 
 impl TrimCommand {
     pub fn new(all_entities: Vec<EntityType>) -> Self {
+        Self::with_cutting_edges(all_entities, Vec::new())
+    }
+
+    pub fn with_cutting_edges(
+        all_entities: Vec<EntityType>,
+        initial_edges: Vec<Handle>,
+    ) -> Self {
         let all_entities: Vec<EntityType> = all_entities
             .iter()
             .map(entity_with_lwpolyline_world_xy)
             .collect();
+
         let entity_index = ModifyEntityIndex::build(&all_entities);
-        let geos = build_geos(&all_entities);
-        Self {
+
+        let mut cmd = Self {
             all_entities,
             entity_index,
-            geos,
+            geos: Vec::new(),
             mode: TrimMode::Pick,
-            edge_set: Vec::new(),
+            edge_set: initial_edges,
             implied_edges: false,
             shift: false,
-        }
+        };
+
+        cmd.rebuild_geos();
+
+        cmd
     }
 
     /// Boundary geometry from the edge selection (or everything when none),
@@ -3719,6 +3746,7 @@ fn collect_runs(pts: &[[f64; 2]], take: &dyn Fn([f64; 2]) -> bool, out: &mut Vec
 /// Build a preview wire from a NaN-break point list.
 fn preview_wire(points: Vec<[f32; 3]>, color: [f32; 4], name: &str) -> WireModel {
     WireModel {
+        bg_adapt: None,
         point_marker: None,
         taper_widths: Vec::new(),
         pattern_stations: Vec::new(),

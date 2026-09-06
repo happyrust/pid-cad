@@ -20,6 +20,7 @@ language =
     .polish = Polski
     .chinese-traditional = 繁體中文
     .bulgarian = Български
+    .greek = Ελληνικά
 
 action =
     .close = 关闭
@@ -3577,6 +3578,7 @@ dimstyle =
     .move-text-outside-first = 优先将文字移到外部
     .period = 句点
     .space = 空格
+    .surveyors-units = 测量单位
 
 style-manager =
     .alignment-spacing = 对齐间距

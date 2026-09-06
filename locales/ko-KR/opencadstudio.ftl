@@ -20,6 +20,7 @@ language =
     .polish = Polski
     .chinese-traditional = 繁體中文
     .bulgarian = Български
+    .greek = Ελληνικά
 
 action =
     .close = 닫기
@@ -3586,6 +3587,7 @@ dimstyle =
     .move-text-outside-first = 먼저 텍스트를 외부로 이동하세요.
     .period = 기간
     .space = 스페이스바
+    .surveyors-units = 측량 단위
 
 style-manager =
     .alignment-spacing = 정렬 간격

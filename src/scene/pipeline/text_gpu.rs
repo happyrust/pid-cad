@@ -1,20 +1,6 @@
-//! GPU buffers for SDF text quads (Phase 2b of the text-shader initiative).
-//!
-//! Unlike images (one texture per entity), all glyphs share ONE atlas texture
-//! and every glyph is a quad in a single instance-less vertex buffer, so the
-//! whole layout draws in one call. Group 1 is just `{ atlas texture, sampler }`;
-//! per-glyph colour and draw-order live in the vertices.
-//!
-//! Vertex positions use the same double-single relative-to-eye encoding as
-//! wires/hatches/images so text stays precise at large drawing coordinates.
-
-// Not yet driven by the render loop — that hook-up (Pipeline fields, per-frame
-// upload, a render pass, and suppressing the old stroke text) is the final
-// integration step, done with the app running to verify pixels.
-#![allow(dead_code)]
+//! Chunked SDF text quads sharing one glyph atlas.
 
 use iced::wgpu;
-use iced::wgpu::util::DeviceExt;
 
 use crate::scene::text::glyph_quads::GlyphQuad;
 use crate::scene::text::sdf_atlas::GlyphAtlas;
@@ -90,6 +76,11 @@ impl BlockTextInstance {
             attributes: ATTRS,
         }
     }
+}
+
+pub struct TextGpu {
+    pub vertex_buffer: wgpu::Buffer,
+    pub vertex_count: u32,
 }
 
 pub struct BlockTextGpu {
@@ -230,6 +221,11 @@ pub struct TextAtlasGpu {
 }
 
 impl TextAtlasGpu {
+    /// Device bytes this atlas holds. `R8`, so one byte per texel.
+    pub fn gpu_bytes(&self) -> u64 {
+        u64::from(self._texture.width()) * u64::from(self._texture.height())
+    }
+
     /// Bind-group layout for group 1: `{ R8 atlas texture, linear sampler }`.
     pub fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -465,15 +461,17 @@ pub fn create_pipelines(
 
 pub fn upload_block_vertices(
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     wires: &[crate::scene::model::wire_model::WireModel],
     depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
 ) -> Vec<BlockTextGpu> {
     let refs: Vec<&crate::scene::model::wire_model::WireModel> = wires.iter().collect();
-    upload_block_vertex_refs(device, &refs, depth_map, None)
+    upload_block_vertex_refs(device, queue, &refs, depth_map, None)
 }
 
 pub fn upload_block_vertex_refs(
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     wires: &[&crate::scene::model::wire_model::WireModel],
     depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
     tint: Option<[f32; 4]>,
@@ -519,9 +517,7 @@ pub fn upload_block_vertex_refs(
         } else {
             source.text_verts.as_slice()
         };
-        let Some(vertex_buffer) = upload_vertices(device, vertices) else {
-            continue;
-        };
+        let vertex_chunks = upload_vertices(device, queue, vertices);
         let instances: Vec<BlockTextInstance> = group
             .iter()
             .filter_map(|wire| {
@@ -544,36 +540,50 @@ pub fn upload_block_vertex_refs(
                 })
             })
             .collect();
-        let max_instances = ((device.limits().max_buffer_size as usize / 10) * 9
-            / std::mem::size_of::<BlockTextInstance>())
-            .max(1);
+        let max_instances =
+            super::gpu_budget::max_elements::<BlockTextInstance>(device);
         for chunk in instances.chunks(max_instances) {
-            let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("block_text.instances"),
-                contents: bytemuck::cast_slice(chunk),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            out.push(BlockTextGpu {
-                vertex_buffer: vertex_buffer.clone(),
-                instance_buffer,
-                vertex_count: vertices.len() as u32,
-                instance_count: chunk.len() as u32,
-            });
+            let instance_buffer = super::gpu_upload::upload_buffer(
+                device,
+                queue,
+                "block_text.instances",
+                chunk,
+                wgpu::BufferUsages::VERTEX,
+            );
+            for text in &vertex_chunks {
+                out.push(BlockTextGpu {
+                    vertex_buffer: text.vertex_buffer.clone(),
+                    instance_buffer: instance_buffer.clone(),
+                    vertex_count: text.vertex_count,
+                    instance_count: chunk.len() as u32,
+                });
+            }
         }
     }
     out
 }
 
-/// Upload a finished vertex list; `None` if empty.
-pub fn upload_vertices(device: &wgpu::Device, verts: &[TextVertex]) -> Option<wgpu::Buffer> {
-    if verts.is_empty() {
-        return None;
-    }
-    Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("text.vbuf"),
-        contents: bytemuck::cast_slice(verts),
-        usage: wgpu::BufferUsages::VERTEX,
-    }))
+/// Upload whole glyph quads within the per-buffer budget.
+pub fn upload_vertices(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    verts: &[TextVertex],
+) -> Vec<TextGpu> {
+    verts
+        .chunks(super::gpu_budget::max_elements_grouped::<TextVertex>(
+            device, 6,
+        ))
+        .map(|chunk| TextGpu {
+            vertex_buffer: super::gpu_upload::upload_buffer(
+                device,
+                queue,
+                "text.vbuf",
+                chunk,
+                wgpu::BufferUsages::VERTEX,
+            ),
+            vertex_count: chunk.len() as u32,
+        })
+        .collect()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

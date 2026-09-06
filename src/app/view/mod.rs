@@ -35,47 +35,13 @@ pub(in crate::app) use overlay::{MTEXT_TEXT_ID, TEXT_INLINE_ID};
 pub(in crate::app) const VIEWPORT_CAPTURE_BOUNDS_ID: &str = "viewport-capture-bounds";
 
 const VIEWCUBE_HIT_SIZE: f32 = VIEWCUBE_REGION_PX;
-/// The desk shown around the sheet, as the widget wants it. One definition,
-/// shared with the renderer that clears the sheet viewport to the same thing.
-const PAPER_SPACE_BACKGROUND: Color = Color {
-    r: crate::scene::PAPER_DESK_COLOR[0],
-    g: crate::scene::PAPER_DESK_COLOR[1],
-    b: crate::scene::PAPER_DESK_COLOR[2],
-    a: crate::scene::PAPER_DESK_COLOR[3],
-};
 
-/// Base surface directly under the crosshair. Paper content viewports render
-/// transparently over the sheet/desk, including while MSPACE input is active.
+/// Background used by drafting overlays in model or paper space.
 fn crosshair_background(tab: &DocumentTab, is_paper: bool) -> [f32; 4] {
     if !is_paper {
         return tab.scene.bg_color;
     }
-
-    let desk = [
-        PAPER_SPACE_BACKGROUND.r,
-        PAPER_SPACE_BACKGROUND.g,
-        PAPER_SPACE_BACKGROUND.b,
-        PAPER_SPACE_BACKGROUND.a,
-    ];
-    let (cursor, viewport_size) = {
-        let selection = tab.scene.selection.borrow();
-        (selection.last_move_pos, selection.vp_size)
-    };
-    let Some(cursor) = cursor else {
-        return desk;
-    };
-    if viewport_size.0 <= 0.0 || viewport_size.1 <= 0.0 {
-        return desk;
-    }
-    let on_sheet = tab
-        .scene
-        .paper_sheet_screen_rect(viewport_size)
-        .is_some_and(|rect| rect.contains(cursor));
-    if on_sheet {
-        tab.scene.paper_bg_color
-    } else {
-        desk
-    }
+    tab.scene.paper_bg_color
 }
 
 /// Clear gap (px) kept between the render-mode bar (top-left) and the ViewCube
@@ -116,6 +82,36 @@ fn hatch_pattern_key_event(
         }
         _ => None,
     }
+}
+
+fn shortcut_capture_key_event(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _window: window::Id,
+) -> Option<Message> {
+    let iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event else {
+        return None;
+    };
+    // Ignore bare modifier presses so holding Ctrl+Shift before the final
+    // key doesn't end the capture early.
+    if let keyboard::Key::Named(named) = &key {
+        if matches!(
+            named,
+            keyboard::key::Named::Control
+                | keyboard::key::Named::Shift
+                | keyboard::key::Named::Alt
+                | keyboard::key::Named::Super
+                | keyboard::key::Named::Meta
+        ) {
+            return None;
+        }
+    }
+    // Esc backs out of capture (and abandons an unfinished draft row) —
+    // binding the ESCAPE key itself is still possible via SHORTCUTS SET.
+    if matches!(key, keyboard::Key::Named(keyboard::key::Named::Escape)) {
+        return Some(Message::ShortcutCaptureCancel);
+    }
+    shortcut_key_name(&key, modifiers).map(Message::ShortcutCaptureKey)
 }
 
 fn shortcut_key_name(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<String> {
@@ -177,13 +173,40 @@ impl OpenCADStudio {
         // All dialogs are in-canvas modals now (Plan B); view_main stacks the
         // active one. `window_id` is unused — there is only the main window.
         let _ = window_id;
-        self.view_main()
+        // Pan latency on a large drawing is ~120 ms while `update`, `prepare`
+        // and `encode` together account for ~1 ms of it, the GPU sits at 0-8%,
+        // and encoding no scene at all changes nothing. Widget-tree
+        // construction is the largest span between the input handler returning
+        // and `prepare` running, and it was never measured.
+        let started = crate::perf::enabled().then(iced::time::Instant::now);
+        let element = self.view_main();
+        if let Some(started) = started {
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            if elapsed_ms >= 1.0 {
+                crate::perf_record!("[perf] view {:>7.1}ms", elapsed_ms);
+            }
+        }
+        element
     }
 
     /// The primary window: viewport, ribbon, tab bar, status bar. Split out of
     /// `view` so the single-window web build can render it directly, bypassing
     /// the multi-window id dispatch above (the web build has no extra windows).
     pub fn view_main(&self) -> Element<'_, Message> {
+        // Section marks for `view-detail`. A closure over a RefCell rather
+        // than one binding per section: two of these sections sit inside a
+        // nested block and would otherwise be out of scope at the report.
+        let view_t0 = crate::perf::enabled().then(iced::time::Instant::now);
+        let view_marks: std::cell::RefCell<Vec<(&'static str, f64)>> =
+            std::cell::RefCell::new(Vec::with_capacity(8));
+        let mark = |name: &'static str| {
+            if let Some(t0) = view_t0 {
+                view_marks
+                    .borrow_mut()
+                    .push((name, t0.elapsed().as_secs_f64() * 1000.0));
+            }
+        };
+
         let i = self.active_tab;
         let tab = &self.tabs[i];
         let thumbnail_capture_clean = self.thumbnail_capture_clean;
@@ -244,7 +267,31 @@ impl OpenCADStudio {
         // the same shader as model space: a full-canvas top-locked "sheet"
         // viewport draws the layout's own geometry (white sheet + entities +
         // borders) and the floating content viewports blit on top.
-        let viewport_3d: Element<'_, Message> = if tab.is_start {
+        mark("viewport_3d");
+        let viewport_3d: Element<'_, Message> = if self.layout_settling && !tab.is_start {
+            // Omit the shader and drafting overlays for the notice frame.
+            let bg = crosshair_background(tab, is_paper);
+            let lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2];
+            let ink = if lum > 0.5 {
+                Color::from_rgba(0.0, 0.0, 0.0, 0.55)
+            } else {
+                Color::from_rgba(1.0, 1.0, 1.0, 0.55)
+            };
+            container(
+                text(crate::tr!("viewport", "preparing-layout"))
+                    .size(15)
+                    .color(ink),
+            )
+            .width(Fill)
+            .height(Fill)
+            .center_x(Fill)
+            .center_y(Fill)
+            .style(move |_| container::Style {
+                background: Some(Color::from_rgba(bg[0], bg[1], bg[2], bg[3]).into()),
+                ..container::Style::default()
+            })
+            .into()
+        } else if tab.is_start {
             start_page_view(
                 &self.patrons,
                 &self.videos,
@@ -321,7 +368,8 @@ impl OpenCADStudio {
         // the shader pane_grid (same `model_panes` → identical layout). Layered
         // above the crosshair overlay so it actually receives mouse events, and
         // it owns the divider resize. Only built for the Model layout.
-        let model_input_layer: Option<Element<'_, Message>> = if is_paper || tab.is_start {
+        mark("model_input");
+        let model_input_layer: Option<Element<'_, Message>> = if is_paper || tab.is_start || self.layout_settling {
             None
         } else {
             let scene = &tab.scene;
@@ -338,7 +386,10 @@ impl OpenCADStudio {
             )
         };
 
-        let grid_overlay = {
+        mark("grid");
+        let grid_overlay = if self.layout_settling || tab.is_start {
+            Space::new().into()
+        } else {
             let (vw, vh) = tab.scene.selection.borrow().vp_size;
             let model_basis = {
                 let (o, ux, uy, uz) = tab.ucs_xform().axes();
@@ -352,9 +403,15 @@ impl OpenCADStudio {
                 );
                 (o, (ux.as_vec3(), uy.as_vec3(), uz.as_vec3()))
             };
-            let grid: Vec<crate::ui::overlay::GridParams> = tab
-                .scene
-                .grid_views(vw, vh)
+            // The first paper frame spends seconds in this block and `grid`
+            // alone cannot say which part. Reported only when it costs
+            // something, so ordinary frames stay quiet.
+            let t_grid = crate::perf::enabled().then(iced::time::Instant::now);
+            let views = tab.scene.grid_views(vw, vh);
+            let views_ms = crate::perf::elapsed_ms(t_grid);
+            let view_count = views.len();
+            let t_params = crate::perf::enabled().then(iced::time::Instant::now);
+            let grid: Vec<crate::ui::overlay::GridParams> = views
                 .into_iter()
                 .map(|(bounds, cam, handle)| {
                     let (origin, mut axes): (glam::DVec3, _) = if is_paper {
@@ -398,18 +455,43 @@ impl OpenCADStudio {
                     }
                 })
                 .collect();
-            crate::ui::overlay::grid_overlay(grid)
+            let params_ms = crate::perf::elapsed_ms(t_params);
+            let t_bg = crate::perf::enabled().then(iced::time::Instant::now);
+            let bg = crosshair_background(tab, is_paper);
+            let bg_ms = crate::perf::elapsed_ms(t_bg);
+            if views_ms + params_ms + bg_ms >= 1.0 {
+                crate::perf_record!(
+                    "[perf] grid-detail views={views_ms:.1}ms params={params_ms:.1}ms \
+bg={bg_ms:.1}ms n={view_count}"
+                );
+            }
+            let bg_lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2];
+            let grid_style = crate::ui::overlay::GridStyle {
+                opacity: self.model_space.grid_opacity,
+                bg_luminance: bg_lum,
+            };
+            crate::ui::overlay::grid_overlay(grid, grid_style)
         };
 
-        let selection_overlay = {
-            let sel = tab.scene.selection.borrow().clone();
+        mark("selection_overlay");
+        let selection_overlay = if self.layout_settling || tab.is_start {
+            Space::new().into()
+        } else {
+            // Hold a single `Ref<'_, SelectionState>` for the whole overlay
+            // block. The `vp_size` and `last_move_pos` reads below become
+            // field accesses on `sel_ref` (no redundant `borrow()`s), and
+            // the final widget call takes `Arc::clone(&selection)` — atomic
+            // bump per frame instead of a deep `SelectionState` clone.
+            // `sel_ref` is a borrowed view for field reads; the widget owns
+            // the Arc clone. No `selection` mutation occurs inside this block.
+            let sel_ref = tab.scene.selection.borrow();
             let snap_info = tab.snap_result.map(|s| (s.screen, s.snap_type));
             let snap_ext_base = tab.snap_result.and_then(|s| s.extension_base);
             let snap_ext_base2 = tab.snap_result.and_then(|s| s.extension_base2);
 
             let grips: Vec<crate::ui::overlay::GripMarker> =
                 if tab.active_cmd.is_none() && !tab.selected_grips.is_empty() {
-                    let (vw, vh) = tab.scene.selection.borrow().vp_size;
+                    let (vw, vh) = sel_ref.vp_size;
                     // Overlays project through the active tile's camera, so
                     // they must use the active tile's screen rectangle (with
                     // its canvas offset) — not the whole canvas — or they
@@ -531,7 +613,7 @@ impl OpenCADStudio {
             let grip_clip = if grips.is_empty() {
                 None
             } else {
-                let (vw, vh) = tab.scene.selection.borrow().vp_size;
+                let (vw, vh) = sel_ref.vp_size;
                 Some(
                     tab.scene
                         .viewport_edit_frame((vw, vh))
@@ -540,7 +622,7 @@ impl OpenCADStudio {
                 )
             };
 
-            let (vw, vh) = tab.scene.selection.borrow().vp_size;
+            let (vw, vh) = sel_ref.vp_size;
             // Active tile rectangle (canvas-offset included) so grid / UCS
             // icon / crosshair project through the active pane's camera at
             // the correct place and scale.
@@ -617,8 +699,13 @@ impl OpenCADStudio {
             // viewport). Without the `ob.x/ob.y` offset it silently vanishes.
             // Shared OTRACK projection basis: the active pane's camera + rect
             // (canvas offset included), matching the grips / UCS icon above.
+            let drafting_alignment_active =
+                self.snapper.alignment_active()
+                    || (tab.active_grip.is_some()
+                        && (self.polar_mode || self.ortho_mode));
+
             let otrack_proj: Option<(glam::Mat4, glam::DVec3, iced::Rectangle)> =
-                if self.snapper.alignment_active() {
+                if drafting_alignment_active {
                     Some(
                         if let Some((vp_cam, full)) = tab.scene.viewport_edit_frame((vw, vh)) {
                             (vp_cam.view_proj_rte(full), vp_cam.eye(), full)
@@ -676,7 +763,7 @@ impl OpenCADStudio {
 
             // Model-space pane dividers (none in paper / single-pane layouts).
             let dividers = if !is_paper {
-                let (vw, vh) = tab.scene.selection.borrow().vp_size;
+                let (vw, vh) = sel_ref.vp_size;
                 tab.scene.model_pane_dividers(vw, vh)
             } else {
                 vec![]
@@ -686,8 +773,8 @@ impl OpenCADStudio {
             // target pane under the cursor.
             let (pane_move_rect, pane_drop_rect) = match self.pane_move_from {
                 Some(from) if !is_paper => {
-                    let (vw, vh) = tab.scene.selection.borrow().vp_size;
-                    let cursor = tab.scene.selection.borrow().last_move_pos;
+                    let (vw, vh) = sel_ref.vp_size;
+                    let cursor = sel_ref.last_move_pos;
                     let tiles = tab.scene.model_tiles.borrow();
                     let px = |t: &crate::scene::ModelTile| iced::Rectangle {
                         x: t.rect.x * vw,
@@ -715,8 +802,11 @@ impl OpenCADStudio {
                 .hover_highlight
                 .map(|h| tab.scene.is_layer_locked(h))
                 .unwrap_or(false);
+            let point_cursor = tab.active_cmd.as_ref().is_some_and(|cmd| {
+                !cmd.needs_entity_pick() && !cmd.is_selection_gathering()
+            });
             crate::ui::overlay::selection_overlay(
-                sel,
+                std::sync::Arc::clone(&tab.scene.selection),
                 snap_info,
                 snap_ext_base,
                 snap_ext_base2,
@@ -740,14 +830,27 @@ impl OpenCADStudio {
                     size_percent: self.cursor_size,
                     pick_box: self.pick_box,
                     cursor_type: self.cursor_type,
+                    point_mode: point_cursor,
                     color: self.crosshair_color,
                     isometric: self.isometric_drafting,
                     iso_plane: self.iso_plane,
                     snap_angle_deg: self.snap_angle_deg,
                 },
+                crate::ui::overlay::SelectionVisualOptions {
+                    area: self.model_space.selection_area,
+                    opacity: self.model_space.selection_opacity,
+                    window_color: self.model_space.selection_window_color,
+                    crossing_color: self.model_space.selection_crossing_color,
+                    highlight_color: self.model_space.selection_highlight_color,
+                    grip_size: self.model_space.grip_size as f32,
+                    grip_color: self.model_space.grip_color,
+                    grip_hot: self.model_space.grip_hot,
+                    grip_hover: self.model_space.grip_hover,
+                },
             )
         };
 
+        mark("viewport_mouse");
         let viewport_mouse = mouse_area(container(
             iced::widget::Space::new().width(Fill).height(Fill),
         ))
@@ -761,18 +864,23 @@ impl OpenCADStudio {
         .on_scroll(Message::ViewportScroll)
         .on_exit(Message::ViewportExit);
 
+        let desk_bg = self.model_space.resolve_desk_bg();
+        let desk_color = Color {
+            r: desk_bg[0],
+            g: desk_bg[1],
+            b: desk_bg[2],
+            a: desk_bg[3],
+        };
         let bg_color = if is_paper {
-            PAPER_SPACE_BACKGROUND
+            desk_color
         } else {
-            tab.bg_color
-                .map(|[r, g, b, a]| Color { r, g, b, a })
-                .unwrap_or(Color {
-                    // Default model background: RGB (33, 40, 48).
-                    r: 33.0 / 255.0,
-                    g: 40.0 / 255.0,
-                    b: 48.0 / 255.0,
-                    a: 1.0,
-                })
+            let c = tab.scene.bg_color;
+            Color {
+                r: c[0],
+                g: c[1],
+                b: c[2],
+                a: c[3],
+            }
         };
 
         // Dynamic input overlay — editable boxes near the cursor, one per
@@ -795,6 +903,27 @@ impl OpenCADStudio {
             {
                 let w = tab.last_cursor_world;
                 let base = tab.dyn_anchor.or(self.last_point);
+                let label_screen = tab
+                    .active_cmd
+                    .as_ref()
+                    .and_then(|command| command.dyn_label_point(w))
+                    .and_then(|world| {
+                        let (vw, vh) = tab.scene.selection.borrow().vp_size;
+                        let (camera, bounds) = tab
+                            .scene
+                            .viewport_edit_frame((vw, vh))
+                            .unwrap_or_else(|| {
+                                (
+                                    tab.scene.camera.borrow().clone(),
+                                    tab.scene.active_model_tile_bounds(vw, vh),
+                                )
+                            });
+                        camera.project(world, bounds).and_then(|point| {
+                            (point.x.is_finite() && point.y.is_finite()).then(|| {
+                                iced::Point::new(bounds.x + point.x, bounds.y + point.y)
+                            })
+                        })
+                    });
                 // A command may drive a typed scalar by mouse (e.g. a
                 // perpendicular distance to a picked object); show that live
                 // value in the box until the user types over it.
@@ -857,6 +986,7 @@ impl OpenCADStudio {
                     tab.last_cursor_screen,
                     tab.last_point_screen,
                     tab.dyn_ref_screen,
+                    label_screen,
                     tab.dyn_guide,
                     boxes,
                     prompt,
@@ -866,7 +996,8 @@ impl OpenCADStudio {
                 None
             };
 
-        let mut viewport_stack = if tab.is_start {
+        mark("viewport_stack");
+        let mut viewport_stack = if tab.is_start || self.layout_settling {
             // Start tab: only the welcome widget over a flat background.
             // Skip every drawing-only overlay (selection markers, snap info,
             // mouse-area capturing draw clicks, viewcube, nav toolbar, …).
@@ -880,7 +1011,7 @@ impl OpenCADStudio {
             .width(Fill)
             .height(Fill)
         } else if thumbnail_capture_clean {
-            let capture_bg = if is_paper { PAPER_SPACE_BACKGROUND } else { bg_color };
+            let capture_bg = if is_paper { desk_color } else { bg_color };
             stack![
                 container(Space::new())
                     .style(move |_: &Theme| container::Style {
@@ -898,7 +1029,7 @@ impl OpenCADStudio {
             stack![
                 container(Space::new())
                     .style(move |_: &Theme| container::Style {
-                        background: Some(Background::Color(PAPER_SPACE_BACKGROUND)),
+                        background: Some(Background::Color(desk_color)),
                         ..Default::default()
                     })
                     .width(Fill)
@@ -927,7 +1058,7 @@ impl OpenCADStudio {
             .height(Fill)
         };
 
-        if !thumbnail_capture_clean {
+        if !thumbnail_capture_clean && !self.layout_settling {
         // Per-pane input pane_grid goes ABOVE the crosshair overlay so it
         // receives mouse events (the overlay's `Hidden` cursor would otherwise
         // starve any layer beneath it). The controls bar is pushed on top of it.
@@ -984,6 +1115,7 @@ impl OpenCADStudio {
         // both layered ABOVE the viewport mouse_area so they receive
         // clicks (the shader viewport sits below it). Positioned with
         // leading Spaces sized to the viewport's screen rectangle.
+        mark("active_vp_rect");
         let active_vp_rect: Option<(acadrust::Handle, iced::Rectangle)> =
             if is_paper && !tab.is_start {
                 tab.scene.active_viewport.and_then(|h| {
@@ -1090,7 +1222,7 @@ impl OpenCADStudio {
                 )))
                 .position(iced::Point::new(
                         cube_x + VIEWCUBE_HIT_SIZE * 0.5 - UCS_PICKER_W * 0.5,
-                        cube_y + VIEWCUBE_HIT_SIZE + 6.0,
+                        cube_y + VIEWCUBE_HIT_SIZE + 10.0,
                     ));
                 viewport_stack = viewport_stack.push(picker);
             }
@@ -1130,7 +1262,7 @@ impl OpenCADStudio {
             )))
             .position(iced::Point::new(
                     cube_x + VIEWCUBE_HIT_SIZE * 0.5 - UCS_PICKER_W * 0.5,
-                    cube_y + VIEWCUBE_HIT_SIZE + 6.0,
+                    cube_y + VIEWCUBE_HIT_SIZE + 10.0,
                 ));
             viewport_stack = viewport_stack.push(picker);
         }
@@ -1314,6 +1446,7 @@ impl OpenCADStudio {
         }
 
         // Reserve the overlaid command line when placing cursor-anchored panels.
+        mark("chrome");
         let command_line_inset = if self.command_line.history_open {
             self.command_line.history_height.clamp(
                 crate::ui::command_line::HISTORY_HEIGHT_MIN,
@@ -1754,6 +1887,8 @@ impl OpenCADStudio {
             dyn_capturing,
             &self.history_content,
             self.win_size.1,
+            self.control.enabled,
+            self.control_busy(),
         );
         let center_stack: Element<'_, Message> = if thumbnail_capture_clean {
             workspace
@@ -1876,9 +2011,8 @@ impl OpenCADStudio {
                         selection_types: tab
                             .scene
                             .entity_type_names_in_layout()
-                            .into_iter()
-                            .map(|name| name.to_string())
-                            .collect(),
+                            .as_ref()
+                            .clone(),
                         selection_filter: &tab.scene.selection_filter,
                         tooltip_hidden: self.status_menu_tooltip_hidden,
                     };
@@ -2032,6 +2166,34 @@ impl OpenCADStudio {
         };
         // Shared CAD colour picker. Indexed ACI colours use OpenCADStudio's own
         // dialog; True Color keeps the existing iced_aw gradient picker.
+        // Which part of the widget tree the frame went into. Reported as a
+        // breakdown rather than one number, because a first switch to a paper
+        // layout spends seconds here and `view` alone cannot say where.
+        if let Some(t0) = view_t0 {
+            mark("end");
+            let total = t0.elapsed().as_secs_f64() * 1000.0;
+            if total >= 1.0 {
+                let marks = view_marks.borrow();
+                // A mark opens a section; the following mark closes it, so a
+                // section's cost is the gap to its successor. The first mark
+                // is preceded by the preamble, reported as `head`.
+                let mut detail = String::new();
+                if let Some((_, first)) = marks.first() {
+                    let _ = std::fmt::Write::write_fmt(
+                        &mut detail,
+                        format_args!(" head={first:.1}"),
+                    );
+                }
+                for pair in marks.windows(2) {
+                    let _ = std::fmt::Write::write_fmt(
+                        &mut detail,
+                        format_args!(" {}={:.1}", pair[0].0, pair[1].1 - pair[0].1),
+                    );
+                }
+                crate::perf_record!("[perf] view-detail total={total:.1}ms{detail}");
+            }
+        }
+
         if let Some((_, current)) = self.color_pick_target.as_ref() {
             match self.color_picker_tab {
                 super::ColorPickerTab::Index => {
@@ -2118,6 +2280,12 @@ impl OpenCADStudio {
         // the mouse perfectly still — `ViewportMove` alone would never
         // fire again. Auto-stops once the hover clears or the popup is
         // already open.
+        // Resume scene construction after the notice redraw.
+        let layout_settle = if self.layout_settling {
+            window::frames().map(|_| Message::LayoutSettled)
+        } else {
+            Subscription::none()
+        };
         let grip_dwell = if self.grip_hover.is_some() && self.grip_popup.is_none() {
             window::frames().map(|_| Message::GripDwellTick)
         } else {
@@ -2198,19 +2366,12 @@ impl OpenCADStudio {
         } else {
             Subscription::none()
         };
-        iced::Subscription::batch([
-            frames,
-            history_tick,
-            grip_dwell,
-            hover_dwell,
-            nav_settle,
-            thumbnail_capture,
-            caret_blink,
-            web_fonts,
-            autosave,
-            plugin_drain,
-            single_instance,
-            hatch_pattern_keys,
+        // While a shortcut-editor Key cell is armed for capture, a dedicated
+        // listener records the pressed combination and swallows every other
+        // key so captured shortcuts do not run in the drawing.
+        let keyboard_events = if self.shortcut_capture_row.is_some() {
+            event::listen_with(shortcut_capture_key_event)
+        } else {
             event::listen_with(|ev, status, win_id| {
                 use iced::event::Status;
                 match ev {
@@ -2340,7 +2501,28 @@ impl OpenCADStudio {
                     }
                     _ => None,
                 }
-            }),
+            })
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let control = super::control::subscribe().map(Message::ControlRequest);
+        #[cfg(target_arch = "wasm32")]
+        let control = iced::time::every(std::time::Duration::from_millis(50)).map(|_|Message::PollWebControl);
+        iced::Subscription::batch([
+            control,
+            frames,
+            history_tick,
+            layout_settle,
+            grip_dwell,
+            hover_dwell,
+            nav_settle,
+            thumbnail_capture,
+            caret_blink,
+            web_fonts,
+            autosave,
+            plugin_drain,
+            single_instance,
+            hatch_pattern_keys,
+            keyboard_events,
         ])
     }
 
@@ -2528,15 +2710,33 @@ fn doc_tab_context_menu(
 ) -> Element<'static, Message> {
     const MENU_W: f32 = 210.0;
 
-    let item = |label: &'static str, msg: Option<Message>| {
-        let mut item = button(text(label).size(12))
-        .style(button::subtle)
-        .padding([4, 12])
-        .width(Fill);
+    let item = |label: &'static str, msg: Option<Message>| -> Element<'static, Message> {
+        let enabled = msg.is_some();
+
+        let content = container(text(label).size(12))
+            .padding([4, 12])
+            .width(Fill)
+            .style(move |theme: &Theme| {
+                let palette = theme.palette();
+
+                container::Style {
+                    text_color: Some(if enabled {
+                        palette.background.base.text
+                    } else {
+                        palette.background.base.text.scale_alpha(0.42)
+                    }),
+                    ..Default::default()
+                }
+            });
+
         if let Some(msg) = msg {
-            item = item.on_press(msg);
+            mouse_area(content)
+                .on_press(msg)
+                .interaction(iced::mouse::Interaction::Pointer)
+                .into()
+        } else {
+            content.into()
         }
-        item
     };
 
     let mut menu = column![
@@ -3826,4 +4026,17 @@ pub(super) fn recent_files_panel<'a>(
         }
     })
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_crosshair_background_paper_space() {
+        let tab = crate::app::document::DocumentTab::new_drawing(1);
+        let bg = crosshair_background(&tab, true);
+        assert_eq!(bg, tab.scene.paper_bg_color);
+        assert!(crate::ui::style::common::canvas_is_light(bg));
+    }
 }

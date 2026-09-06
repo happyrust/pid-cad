@@ -1,12 +1,15 @@
-use acadrust::entities::Solid3D;
+use acadrust::entities::{EmbeddedEntity, Solid3D};
 use acadrust::objects::{
-    DynamicBlockData, ObjectType, SolidHistoryBox, SolidHistoryBrep,
-    SolidHistoryCylinder, SolidHistoryNodeBase, SolidHistoryOperation,
-    SolidHistoryPyramid, SolidHistorySphere, SolidHistoryTorus,
+    DynamicBlockData, ObjectType, SolidHistoryBox, SolidHistoryBrep, SolidHistoryCone,
+    SolidHistoryCylinder, SolidHistoryLoft, SolidHistoryLoftParameters, SolidHistoryNodeBase, SolidHistoryOperation,
+    SolidHistoryPyramid, SolidHistoryRevolve, SolidHistorySphere, SolidHistorySweep,
+    SolidHistoryTorus,
 };
+use acadrust::EntityType;
 use cadkernel::brep::Body;
 
 use crate::command::EntityTransform;
+use crate::entities::traits::EntityTypeOps;
 use crate::scene::model::object::{
     GripApply, GripDef, GripShape, PropSection, PropValue, Property,
 };
@@ -19,6 +22,16 @@ pub const GRIP_RADIUS: usize = 10_004;
 pub const GRIP_OUTER_RADIUS: usize = 10_005;
 pub const GRIP_INNER_RADIUS: usize = 10_006;
 pub const GRIP_SIDES: usize = 10_007;
+pub const GRIP_MAJOR_RADIUS: usize = 10_008;
+pub const GRIP_MINOR_RADIUS: usize = 10_009;
+pub const GRIP_TOP_RADIUS: usize = 10_010;
+pub const GRIP_DRAFT: usize = 10_012;
+pub const GRIP_PROFILE_FIRST: usize = 10_200;
+pub const GRIP_SWEEP_PROFILE_FIRST: usize = 20_000;
+pub const GRIP_SWEEP_PATH_FIRST: usize = 30_000;
+pub const GRIP_LOFT_SECTION_FIRST: usize = 40_000;
+pub const GRIP_REVOLVE_PROFILE_FIRST: usize = 50_000;
+pub const GRIP_REVOLVE_AXIS: usize = 10_013;
 pub const GRIP_BOX_CORNER_FIRST: usize = 10_100;
 pub const GRIP_BOX_FACE_X_MIN: usize = 10_110;
 pub const GRIP_BOX_FACE_X_MAX: usize = 10_111;
@@ -31,6 +44,16 @@ pub const PROP_LENGTH: &str = "solid_history_length";
 pub const PROP_WIDTH: &str = "solid_history_width";
 pub const PROP_HEIGHT: &str = "solid_history_height";
 pub const PROP_RADIUS: &str = "solid_history_radius";
+pub const PROP_DIAMETER: &str = "solid_history_diameter";
+pub const PROP_BASE_RADIUS: &str = "solid_history_base_radius";
+pub const PROP_TOP_RADIUS: &str = "solid_history_top_radius";
+pub const PROP_BASE_MAJOR_RADIUS: &str = "solid_history_base_major_radius";
+pub const PROP_BASE_MINOR_RADIUS: &str = "solid_history_base_minor_radius";
+pub const PROP_TOP_MAJOR_RADIUS: &str = "solid_history_top_major_radius";
+pub const PROP_TOP_MINOR_RADIUS: &str = "solid_history_top_minor_radius";
+pub const PROP_MAJOR_RADIUS: &str = "solid_history_major_radius";
+pub const PROP_MINOR_RADIUS: &str = "solid_history_minor_radius";
+pub const PROP_ELLIPTICAL: &str = "solid_history_elliptical";
 pub const PROP_OUTER_RADIUS: &str = "solid_history_outer_radius";
 pub const PROP_INNER_RADIUS: &str = "solid_history_inner_radius";
 pub const PROP_SIDES: &str = "solid_history_sides";
@@ -38,6 +61,33 @@ pub const PROP_POSITION_X: &str = "solid_history_position_x";
 pub const PROP_POSITION_Y: &str = "solid_history_position_y";
 pub const PROP_POSITION_Z: &str = "solid_history_position_z";
 pub const PROP_ROTATION: &str = "solid_history_rotation";
+pub const PROP_PROFILE_ROTATION: &str = "solid_history_profile_rotation";
+pub const PROP_BANK: &str = "solid_history_bank";
+pub const PROP_TWIST_ALONG_PATH: &str = "solid_history_twist_along_path";
+pub const PROP_SCALE_ALONG_PATH: &str = "solid_history_scale_along_path";
+pub const PROP_SWEEP_LENGTH: &str = "solid_history_sweep_length";
+pub const PROP_EXTRUSION_HEIGHT: &str = "solid_history_extrusion_height";
+pub const PROP_EXTRUSION_DIRECTION_X: &str = "solid_history_extrusion_direction_x";
+pub const PROP_EXTRUSION_DIRECTION_Y: &str = "solid_history_extrusion_direction_y";
+pub const PROP_EXTRUSION_DIRECTION_Z: &str = "solid_history_extrusion_direction_z";
+pub const PROP_TAPER_ANGLE: &str = "solid_history_taper_angle";
+pub const PROP_REVOLVE_ANGLE: &str = "solid_history_revolve_angle";
+pub const PROP_AXIS_POSITION_X: &str = "solid_history_axis_position_x";
+pub const PROP_AXIS_POSITION_Y: &str = "solid_history_axis_position_y";
+pub const PROP_AXIS_POSITION_Z: &str = "solid_history_axis_position_z";
+pub const PROP_AXIS_DIRECTION_X: &str = "solid_history_axis_direction_x";
+pub const PROP_AXIS_DIRECTION_Y: &str = "solid_history_axis_direction_y";
+pub const PROP_AXIS_DIRECTION_Z: &str = "solid_history_axis_direction_z";
+pub const PROP_PYRAMID_TYPE: &str = "solid_history_pyramid_type";
+pub const PROP_LOFT_TYPE: &str = "solid_history_loft_type";
+pub const PROP_LOFT_SECTION_COUNT: &str = "solid_history_loft_section_count";
+pub const PROP_LOFT_NORMALS: &str = "solid_history_loft_normals";
+pub const PROP_LOFT_START_DRAFT_ANGLE: &str = "solid_history_loft_start_draft_angle";
+pub const PROP_LOFT_END_DRAFT_ANGLE: &str = "solid_history_loft_end_draft_angle";
+pub const PROP_LOFT_START_MAGNITUDE: &str = "solid_history_loft_start_magnitude";
+pub const PROP_LOFT_END_MAGNITUDE: &str = "solid_history_loft_end_magnitude";
+pub const PROP_LOFT_CLOSED: &str = "solid_history_loft_closed";
+pub const PROP_LOFT_PERIODIC: &str = "solid_history_loft_periodic";
 pub const PROP_HISTORY: &str = "solid_history_record";
 pub const PROP_SHOW_HISTORY: &str = "solid_history_show";
 
@@ -52,7 +102,7 @@ fn history_prop(label: &str, field: &'static str, value: impl ToString) -> Prope
 fn history_flags(
     document: &acadrust::CadDocument,
     handle: acadrust::Handle,
-) -> Option<(bool, bool)> {
+) -> Option<(bool, bool, i16)> {
     let graph = document.solid_history_graph(handle)?;
     let ObjectType::DynamicBlock(object) = document.objects.get(&graph.root)? else {
         return None;
@@ -60,33 +110,1191 @@ fn history_flags(
     let DynamicBlockData::SolidHistory(history) = &object.data else {
         return None;
     };
-    Some((history.record_history, history.show_history))
+    Some((
+        history.record_history,
+        history.show_history,
+        document.header.show_solid_history.clamp(0, 2),
+    ))
 }
 
-pub fn is_box_primitive(
+fn displayed_history_state(object_show_history: bool, show_history_mode: i16) -> (bool, bool) {
+    match show_history_mode {
+        0 => (false, false),
+        2 => (true, false),
+        _ => (object_show_history, true),
+    }
+}
+
+fn revolve_profile_world_normal(value: &SolidHistoryRevolve) -> Option<glam::DVec3> {
+    let profile = value.sweep_entity.as_ref().and_then(embedded_entity)?;
+    let normal = crate::entities::curve::entity_curve(&profile)?.plane.normal()?;
+    let inverse_transpose = matrix(value.base.transform)?.inverse().transpose();
+    inverse_transpose
+        .transform_vector3(glam::DVec3::from_array(normal))
+        .try_normalize()
+}
+
+fn revolve_position_component_editable(value: &SolidHistoryRevolve, axis: usize) -> bool {
+    revolve_profile_world_normal(value).is_some_and(|normal| normal[axis].abs() <= 1e-9)
+}
+
+fn revolve_direction_component_capacity(
+    value: &SolidHistoryRevolve,
+    axis: usize,
+) -> Option<(glam::DVec3, f64)> {
+    let normal = revolve_profile_world_normal(value)?;
+    let capacity = (1.0 - normal[axis] * normal[axis]).max(0.0).sqrt();
+    Some((normal, capacity))
+}
+
+fn revolve_direction_component_editable(value: &SolidHistoryRevolve, axis: usize) -> bool {
+    revolve_direction_component_capacity(value, axis)
+        .is_some_and(|(_, capacity)| capacity > 1e-9)
+}
+
+fn revolve_position_property(
+    value: &SolidHistoryRevolve,
+    axis: usize,
+    label: &str,
+    field: &'static str,
+    position: f64,
+) -> Property {
+    if revolve_position_component_editable(value, axis) {
+        crate::entities::common::edit_prop(label, field, position)
+    } else {
+        Property {
+            label: label.to_string(),
+            field,
+            value: PropValue::ReadOnly(crate::entities::common::format_length(position)),
+        }
+    }
+}
+
+fn revolve_direction_property(
+    value: &SolidHistoryRevolve,
+    axis: usize,
+    label: &str,
+    field: &'static str,
+    direction: f64,
+) -> Property {
+    if revolve_direction_component_editable(value, axis) {
+        crate::entities::common::edit_scalar_prop(label, field, direction)
+    } else {
+        Property {
+            label: label.to_string(),
+            field,
+            value: PropValue::ReadOnly(if direction == 0.0 {
+                "0".to_string()
+            } else {
+                direction.to_string()
+            }),
+        }
+    }
+}
+
+pub fn has_specialized_primitive_properties(
     document: &acadrust::CadDocument,
     handle: acadrust::Handle,
 ) -> bool {
     matches!(
         document.solid_history_operation(handle),
-        Some(SolidHistoryOperation::Box(_))
+        Some(
+            SolidHistoryOperation::Box(_)
+                | SolidHistoryOperation::Wedge(_)
+                | SolidHistoryOperation::Sphere(_)
+                | SolidHistoryOperation::Cone(_)
+                | SolidHistoryOperation::Cylinder(_)
+                | SolidHistoryOperation::Torus(_)
+                | SolidHistoryOperation::Pyramid(_)
+                | SolidHistoryOperation::Sweep(_)
+                | SolidHistoryOperation::Loft(_)
+                | SolidHistoryOperation::Extrusion(_)
+                | SolidHistoryOperation::Revolve(_)
+        )
     )
 }
 
 pub fn reference_point(operation: &SolidHistoryOperation) -> Option<glam::DVec3> {
     match operation {
-        SolidHistoryOperation::Box(value) => world_point(
+        SolidHistoryOperation::Box(value) | SolidHistoryOperation::Wedge(value) => world_point(
             value.base.transform,
             [value.length * 0.5, value.width * 0.5, 0.0],
+        ),
+        SolidHistoryOperation::Sphere(value) => {
+            world_point(value.base.transform, [0.0, 0.0, 0.0])
+        }
+        SolidHistoryOperation::Cone(value) => world_point(value.base.transform, [0.0; 3]),
+        SolidHistoryOperation::Cylinder(value) => world_point(value.base.transform, [0.0; 3]),
+        SolidHistoryOperation::Sweep(value) => cadkernel::acis::sweep_history_reference_point(value)
+            .ok().map(glam::DVec3::from_array),
+        SolidHistoryOperation::Extrusion(value) => world_point(
+            value.base.transform,
+            [
+                value.reference_point.x,
+                value.reference_point.y,
+                value.reference_point.z,
+            ],
+        ),
+        SolidHistoryOperation::Torus(value) => world_point(value.base.transform, [0.0; 3]),
+        SolidHistoryOperation::Pyramid(value) => world_point(value.base.transform, [0.0; 3]),
+        SolidHistoryOperation::Revolve(value) => world_point(
+            value.base.transform,
+            [value.axis_point.x, value.axis_point.y, value.axis_point.z],
         ),
         _ => None,
     }
 }
 
-fn box_properties(
+fn revolve_properties(
+    document: &acadrust::CadDocument,
+    handle: acadrust::Handle,
+    value: &SolidHistoryRevolve,
+) -> Vec<PropSection> {
+    let Some(axis_position) = world_point(
+        value.base.transform,
+        [value.axis_point.x, value.axis_point.y, value.axis_point.z],
+    ) else {
+        return Vec::new();
+    };
+    let Some(axis_direction) = world_vector(
+        value.base.transform,
+        [value.direction.x, value.direction.y, value.direction.z],
+    ) else {
+        return Vec::new();
+    };
+    let (record_history, object_show_history, show_history_mode) =
+        history_flags(document, handle).unwrap_or((false, false, 1));
+    let (show_history, show_history_editable) =
+        displayed_history_state(object_show_history, show_history_mode);
+    let show_value = if show_history { "Yes" } else { "No" };
+    vec![
+        PropSection {
+            title: t!("Geometry").into_owned(),
+            props: vec![
+                Property {
+                    label: t!("Solid type").into_owned(),
+                    field: "solid_history_type",
+                    value: PropValue::ReadOnly(t!("Revolve").into_owned()),
+                },
+                Property {
+                    label: t!("Angle of revolution").into_owned(),
+                    field: PROP_REVOLVE_ANGLE,
+                    value: PropValue::EditText(crate::entities::common::format_angle(
+                        value.revolve_angle,
+                    )),
+                },
+                revolve_position_property(
+                    value,
+                    0,
+                    t!("Axis position X").as_ref(),
+                    PROP_AXIS_POSITION_X,
+                    axis_position.x,
+                ),
+                revolve_position_property(
+                    value,
+                    1,
+                    t!("Axis position Y").as_ref(),
+                    PROP_AXIS_POSITION_Y,
+                    axis_position.y,
+                ),
+                revolve_position_property(
+                    value,
+                    2,
+                    t!("Axis position Z").as_ref(),
+                    PROP_AXIS_POSITION_Z,
+                    axis_position.z,
+                ),
+                revolve_direction_property(
+                    value,
+                    0,
+                    t!("Axis direction X").as_ref(),
+                    PROP_AXIS_DIRECTION_X,
+                    axis_direction.x,
+                ),
+                revolve_direction_property(
+                    value,
+                    1,
+                    t!("Axis direction Y").as_ref(),
+                    PROP_AXIS_DIRECTION_Y,
+                    axis_direction.y,
+                ),
+                revolve_direction_property(
+                    value,
+                    2,
+                    t!("Axis direction Z").as_ref(),
+                    PROP_AXIS_DIRECTION_Z,
+                    axis_direction.z,
+                ),
+            ],
+        },
+        PropSection {
+            title: t!("Solid History").into_owned(),
+            props: vec![
+                Property {
+                    label: t!("History").into_owned(),
+                    field: PROP_HISTORY,
+                    value: PropValue::Choice {
+                        selected: if record_history { "Record" } else { "None" }.to_string(),
+                        options: vec!["None".to_string(), "Record".to_string()],
+                    },
+                },
+                Property {
+                    label: t!("Show History").into_owned(),
+                    field: PROP_SHOW_HISTORY,
+                    value: if show_history_editable {
+                        PropValue::Choice {
+                            selected: show_value.to_string(),
+                            options: vec!["No".to_string(), "Yes".to_string()],
+                        }
+                    } else {
+                        PropValue::ReadOnly(show_value.to_string())
+                    },
+                },
+            ],
+        },
+    ]
+}
+
+fn extrusion_properties(
+    document: &acadrust::CadDocument,
+    handle: acadrust::Handle,
+    value: &SolidHistorySweep,
+) -> Vec<PropSection> {
+    let direction = matrix(value.base.transform).map(|transform| {
+        transform.transform_vector3(glam::DVec3::new(
+            value.direction.x, value.direction.y, value.direction.z,
+        ))
+    }).filter(|direction| direction.is_finite());
+    let direction_property = |label: &str, field: &'static str, axis: usize| Property {
+        label: label.to_string(),
+        field,
+        value: PropValue::ReadOnly(direction.map_or_else(
+            || t!("Unavailable").into_owned(),
+            |direction| crate::entities::common::format_length(direction[axis]),
+        )),
+    };
+    let (record_history, object_show_history, show_history_mode) =
+        history_flags(document, handle).unwrap_or((false, false, 1));
+    let (show_history, show_history_editable) =
+        displayed_history_state(object_show_history, show_history_mode);
+    let path_length = sweep_path_length(value);
+    let height_value = path_length.unwrap_or(value.end_draft_distance);
+    let height = if value.path_entity.is_some() {
+        PropValue::ReadOnly(crate::entities::common::format_length(height_value))
+    } else {
+        PropValue::EditText(crate::entities::common::format_length(height_value))
+    };
+    let taper = if value.path_entity.is_some() {
+        PropValue::ReadOnly(crate::entities::common::format_angle(value.draft_angle))
+    } else {
+        PropValue::EditText(crate::entities::common::format_angle(value.draft_angle))
+    };
+    vec![
+        PropSection {
+            title: t!("Geometry").into_owned(),
+            props: vec![
+                Property {
+                    label: t!("Solid type").into_owned(),
+                    field: "solid_history_type",
+                    value: PropValue::ReadOnly(t!("Extrusion").into_owned()),
+                },
+                Property {
+                    label: t!("Height").into_owned(),
+                    field: PROP_EXTRUSION_HEIGHT,
+                    value: height,
+                },
+                Property {
+                    label: t!("Taper angle").into_owned(),
+                    field: PROP_TAPER_ANGLE,
+                    value: taper,
+                },
+                direction_property(t!("Direction X").as_ref(), PROP_EXTRUSION_DIRECTION_X, 0),
+                direction_property(t!("Direction Y").as_ref(), PROP_EXTRUSION_DIRECTION_Y, 1),
+                direction_property(t!("Direction Z").as_ref(), PROP_EXTRUSION_DIRECTION_Z, 2),
+            ],
+        },
+        PropSection {
+            title: t!("Solid History").into_owned(),
+            props: vec![
+                Property {
+                    label: t!("History").into_owned(),
+                    field: PROP_HISTORY,
+                    value: PropValue::Choice {
+                        selected: if record_history { "Record" } else { "None" }.to_string(),
+                        options: vec!["Record".to_string(), "None".to_string()],
+                    },
+                },
+                Property {
+                    label: t!("Show History").into_owned(),
+                    field: PROP_SHOW_HISTORY,
+                    value: if show_history_editable {
+                        PropValue::Choice {
+                            selected: if show_history { "Yes" } else { "No" }.to_string(),
+                            options: vec!["Yes".to_string(), "No".to_string()],
+                        }
+                    } else {
+                        PropValue::ReadOnly(if show_history { "Yes" } else { "No" }.to_string())
+                    },
+                },
+            ],
+        },
+    ]
+}
+
+/// Native surface construction data mirrors the same local profile, placement,
+/// direction and taper used by the extrusion history rebuild.
+pub fn extrusion_surface_data(
+    value: &SolidHistorySweep,
+) -> Option<acadrust::entities::SurfaceData> {
+    use acadrust::entities::{SurfaceData, SurfaceSweepOptions};
+
+    if value.path_entity.is_some() {
+        return None;
+    }
+    let profile = value.sweep_entity.clone()?;
+    matrix(value.base.transform)?;
+    matrix(value.sweep_entity_transform)?;
+    Some(SurfaceData::Extruded {
+        sweep_entity: Some(profile),
+        options: SurfaceSweepOptions {
+            draft_angle: value.draft_angle,
+            draft_start_distance: value.start_draft_distance,
+            draft_end_distance: value.end_draft_distance,
+            twist_angle: value.twist_angle,
+            scale_factor: value.scale_factor,
+            align_angle: value.align_angle,
+            sweep_entity_transform: value.sweep_entity_transform,
+            path_entity_transform: value.path_entity_transform,
+            is_solid: false,
+            sweep_alignment_flags: value.align_option as i16,
+            align_start: value.has_align_start,
+            bank: value.bank,
+            base_point_set: true,
+            reference_vector: value.reference_point,
+            ..SurfaceSweepOptions::default()
+        },
+        sweep_vector: value.direction,
+        sweep_transform: value.base.transform,
+    })
+}
+
+fn sweep_properties(
+    document: &acadrust::CadDocument,
+    handle: acadrust::Handle,
+    value: &SolidHistorySweep,
+) -> Vec<PropSection> {
+    let (record_history, object_show_history, show_history_mode) =
+        history_flags(document, handle).unwrap_or((false, false, 1));
+    let (show_history, show_history_editable) =
+        displayed_history_state(object_show_history, show_history_mode);
+    let show_value = if show_history { "Yes" } else { "No" };
+    let length = cadkernel::acis::sweep_history_path_length(value).ok()
+        .map(crate::entities::common::format_length)
+        .unwrap_or_default();
+    vec![
+        PropSection {
+            title: t!("Geometry").into_owned(),
+            props: vec![
+                Property {
+                    label: t!("Solid type").into_owned(),
+                    field: "solid_history_type",
+                    value: PropValue::ReadOnly(t!("Sweep").into_owned()),
+                },
+                Property {
+                    label: t!("Profile rotation").into_owned(),
+                    field: PROP_PROFILE_ROTATION,
+                    value: PropValue::EditText(
+                        crate::entities::common::format_angle(value.align_angle),
+                    ),
+                },
+                Property {
+                    label: t!("Bank").into_owned(),
+                    field: PROP_BANK,
+                    value: PropValue::ReadOnly(
+                        if value.bank { "Yes" } else { "No" }.to_string(),
+                    ),
+                },
+                Property {
+                    label: t!("Twist along path").into_owned(),
+                    field: PROP_TWIST_ALONG_PATH,
+                    value: PropValue::EditText(
+                        crate::entities::common::format_angle(value.twist_angle),
+                    ),
+                },
+                Property {
+                    label: t!("Scale along path").into_owned(),
+                    field: PROP_SCALE_ALONG_PATH,
+                    value: PropValue::EditText(value.scale_factor.to_string()),
+                },
+                Property {
+                    label: t!("Length").into_owned(),
+                    field: PROP_SWEEP_LENGTH,
+                    value: PropValue::ReadOnly(length),
+                },
+            ],
+        },
+        PropSection {
+            title: t!("Solid History").into_owned(),
+            props: vec![
+                Property {
+                    label: t!("History").into_owned(),
+                    field: PROP_HISTORY,
+                    value: PropValue::Choice {
+                        selected: if record_history { "Record" } else { "None" }.to_string(),
+                        options: vec!["Record".to_string(), "None".to_string()],
+                    },
+                },
+                Property {
+                    label: t!("Show History").into_owned(),
+                    field: PROP_SHOW_HISTORY,
+                    value: if show_history_editable {
+                        PropValue::Choice {
+                            selected: show_value.to_string(),
+                            options: vec!["Yes".to_string(), "No".to_string()],
+                        }
+                    } else {
+                        PropValue::ReadOnly(show_value.to_string())
+                    },
+                },
+            ],
+        },
+    ]
+}
+
+const LOFT_NORMAL_CHOICES: [&str; 7] = [
+    "Ruled",
+    "Smooth",
+    "First normal",
+    "Last normal",
+    "Ends normal",
+    "All normal",
+    "Use draft angles",
+];
+
+fn loft_parameters(value: &SolidHistoryLoft) -> SolidHistoryLoftParameters {
+    value.parameters.clone().unwrap_or_else(|| SolidHistoryLoftParameters {
+        // Older history predates the options extension and rebuilds as ruled.
+        // Displaying or editing it must not silently change it to smooth.
+        normals: 0,
+        ..SolidHistoryLoftParameters::default()
+    })
+}
+
+pub fn loft_section_count(value: &SolidHistoryLoft) -> usize {
+    value.parameters.as_ref()
+        .filter(|parameters| !parameters.section_counts.is_empty())
+        .map_or(value.cross_sections.len(), |parameters| parameters.section_counts.len())
+}
+
+pub fn loft_closed_editable(value: &SolidHistoryLoft) -> bool {
+    loft_section_count(value) >= 3
+        && !value.cross_sections.iter().any(|section| matches!(section, EmbeddedEntity::Point(_)))
+}
+
+fn loft_properties(
+    document: &acadrust::CadDocument,
+    handle: acadrust::Handle,
+    value: &SolidHistoryLoft,
+) -> Vec<PropSection> {
+    let parameters = loft_parameters(value);
+    let kind = if parameters.path_entity.is_some() {
+        t!("Loft with path").into_owned()
+    } else if !value.guides.is_empty() {
+        t!("Loft with guides").into_owned()
+    } else {
+        t!("Loft with cross sections only").into_owned()
+    };
+    let mut geometry = vec![
+        Property {
+            label: t!("Solid type").into_owned(),
+            field: PROP_LOFT_TYPE,
+            value: PropValue::ReadOnly(kind),
+        },
+        Property {
+            label: t!("Number of Cross sections").into_owned(),
+            field: PROP_LOFT_SECTION_COUNT,
+            value: PropValue::ReadOnly(loft_section_count(value).to_string()),
+        },
+        Property {
+            label: t!("Surface Normals").into_owned(),
+            field: PROP_LOFT_NORMALS,
+            value: PropValue::Choice {
+                selected: LOFT_NORMAL_CHOICES.get(parameters.normals as usize)
+                    .map_or_else(|| parameters.normals.to_string(), |name| (*name).to_string()),
+                options: LOFT_NORMAL_CHOICES.iter().map(|name| (*name).to_string()).collect(),
+            },
+        },
+    ];
+    if parameters.normals == 6 {
+        geometry.extend([
+            Property {
+                label: t!("Start draft angle").into_owned(),
+                field: PROP_LOFT_START_DRAFT_ANGLE,
+                value: PropValue::EditText(crate::entities::common::format_angle(parameters.start_draft_angle)),
+            },
+            Property {
+                label: t!("End draft angle").into_owned(),
+                field: PROP_LOFT_END_DRAFT_ANGLE,
+                value: PropValue::EditText(crate::entities::common::format_angle(parameters.end_draft_angle)),
+            },
+            Property {
+                label: t!("Start magnitude").into_owned(),
+                field: PROP_LOFT_START_MAGNITUDE,
+                value: PropValue::EditText(parameters.start_magnitude.to_string()),
+            },
+            Property {
+                label: t!("End magnitude").into_owned(),
+                field: PROP_LOFT_END_MAGNITUDE,
+                value: PropValue::EditText(parameters.end_magnitude.to_string()),
+            },
+        ]);
+    }
+    let (record_history, object_show_history, show_history_mode) =
+        history_flags(document, handle).unwrap_or((false, false, 1));
+    let (show_history, show_history_editable) =
+        displayed_history_state(object_show_history, show_history_mode);
+    let show_value = if show_history { "Yes" } else { "No" }.to_string();
+    let closed_value = if parameters.closed { "Yes" } else { "No" }.to_string();
+    let mut sections = vec![
+        PropSection {
+            title: t!("Geometry").into_owned(),
+            props: geometry,
+        },
+        PropSection {
+            title: t!("Solid History").into_owned(),
+            props: vec![
+                Property {
+                    label: t!("History").into_owned(),
+                    field: PROP_HISTORY,
+                    value: PropValue::Choice {
+                        selected: if record_history { "Record" } else { "None" }.to_string(),
+                        options: vec!["Record".to_string(), "None".to_string()],
+                    },
+                },
+                Property {
+                    label: t!("Show History").into_owned(),
+                    field: PROP_SHOW_HISTORY,
+                    value: if show_history_editable {
+                        PropValue::Choice {
+                            selected: show_value,
+                            options: vec!["Yes".to_string(), "No".to_string()],
+                        }
+                    } else {
+                        PropValue::ReadOnly(show_value)
+                    },
+                },
+            ],
+        },
+        PropSection {
+            title: t!("Misc").into_owned(),
+            props: vec![
+                Property {
+                    label: t!("Closed").into_owned(),
+                    field: PROP_LOFT_CLOSED,
+                    value: if loft_closed_editable(value) {
+                        PropValue::Choice {
+                            selected: closed_value,
+                            options: vec!["Yes".to_string(), "No".to_string()],
+                        }
+                    } else {
+                        PropValue::ReadOnly(closed_value)
+                    },
+                },
+            ],
+        },
+    ];
+    if parameters.closed {
+        sections[2].props.push(Property {
+            label: t!("Periodic").into_owned(),
+            field: PROP_LOFT_PERIODIC,
+            value: PropValue::Choice {
+                selected: if parameters.periodic { "Yes" } else { "No" }.to_string(),
+                options: vec!["Yes".to_string(), "No".to_string()],
+            },
+        });
+    }
+    sections
+}
+
+fn sweep_path_length(value: &SolidHistorySweep) -> Option<f64> {
+    use acadrust::entities::EmbeddedEntity;
+    use acadrust::EntityType;
+
+    let path_entity = value.path_entity.as_ref()?;
+    if let EmbeddedEntity::Spline(path) = path_entity {
+        if path.degree == 1 && path.control_points.len() >= 2 && path.weights.is_empty() {
+            let transform = glam::DMat4::from_cols_array(&value.path_entity_transform);
+            if !transform.is_finite() || transform.determinant().abs() <= 1e-12 {
+                return None;
+            }
+            return Some(
+                path.control_points
+                    .windows(2)
+                    .map(|pair| {
+                        let start = transform.transform_point3(glam::DVec3::new(
+                            pair[0].x, pair[0].y, pair[0].z,
+                        ));
+                        let end = transform.transform_point3(glam::DVec3::new(
+                            pair[1].x, pair[1].y, pair[1].z,
+                        ));
+                        end.distance(start)
+                    })
+                    .sum(),
+            );
+        }
+    }
+    let entity = match path_entity {
+        EmbeddedEntity::Line(value) => EntityType::Line(value.clone()),
+        EmbeddedEntity::Arc(value) => EntityType::Arc(value.clone()),
+        EmbeddedEntity::Circle(value) => EntityType::Circle(value.clone()),
+        EmbeddedEntity::Ellipse(value) => EntityType::Ellipse(value.clone()),
+        EmbeddedEntity::Spline(value) => EntityType::Spline(value.clone()),
+        EmbeddedEntity::LwPolyline(value) => EntityType::LwPolyline(value.clone()),
+        _ => return None,
+    };
+    let curve = crate::entities::curve::entity_curve(&entity)?;
+    let transform = value.path_entity_transform;
+    if transform.iter().any(|value| !value.is_finite())
+        || transform[3].abs() > 1e-9
+        || transform[7].abs() > 1e-9
+        || transform[11].abs() > 1e-9
+        || (transform[15] - 1.0).abs() > 1e-9
+    {
+        return None;
+    }
+    let placement = cadkernel::brep::Placement {
+        x_axis: [transform[0], transform[1], transform[2]],
+        y_axis: [transform[4], transform[5], transform[6]],
+        z_axis: [transform[8], transform[9], transform[10]],
+        origin: [transform[12], transform[13], transform[14]],
+    };
+    let length = curve.curve.length() * placement.scale()?;
+    (length.is_finite() && length >= 0.0).then_some(length)
+}
+
+fn torus_properties(
+    document: &acadrust::CadDocument,
+    handle: acadrust::Handle,
+    value: &SolidHistoryTorus,
+) -> Vec<PropSection> {
+    let Some(position) = world_point(value.base.transform, [0.0; 3]) else {
+        return Vec::new();
+    };
+    let (record_history, object_show_history, show_history_mode) =
+        history_flags(document, handle).unwrap_or((false, false, 1));
+    let (show_history, _) = displayed_history_state(object_show_history, show_history_mode);
+    vec![
+        PropSection {
+            title: t!("Geometry").into_owned(),
+            props: vec![
+                Property {
+                    label: t!("Solid type").into_owned(),
+                    field: "solid_history_type",
+                    value: PropValue::ReadOnly(t!("Torus").into_owned()),
+                },
+                crate::entities::common::edit_prop(
+                    t!("Position X").as_ref(),
+                    PROP_POSITION_X,
+                    position.x,
+                ),
+                crate::entities::common::edit_prop(
+                    t!("Position Y").as_ref(),
+                    PROP_POSITION_Y,
+                    position.y,
+                ),
+                crate::entities::common::edit_prop(
+                    t!("Position Z").as_ref(),
+                    PROP_POSITION_Z,
+                    position.z,
+                ),
+                history_prop(
+                    t!("Torus radius").as_ref(),
+                    PROP_MAJOR_RADIUS,
+                    value.major_radius,
+                ),
+                history_prop(
+                    t!("Tube radius").as_ref(),
+                    PROP_MINOR_RADIUS,
+                    value.minor_radius,
+                ),
+            ],
+        },
+        PropSection {
+            title: t!("Solid History").into_owned(),
+            props: vec![
+                Property {
+                    label: t!("History").into_owned(),
+                    field: PROP_HISTORY,
+                    value: PropValue::ReadOnly(
+                        if record_history { "Record" } else { "None" }.to_string(),
+                    ),
+                },
+                Property {
+                    label: t!("Show History").into_owned(),
+                    field: PROP_SHOW_HISTORY,
+                    value: PropValue::ReadOnly(
+                        if show_history { "Yes" } else { "No" }.to_string(),
+                    ),
+                },
+            ],
+        },
+    ]
+}
+
+fn cone_properties(
+    document: &acadrust::CadDocument,
+    handle: acadrust::Handle,
+    value: &SolidHistoryCone,
+) -> Vec<PropSection> {
+    let Some(position) = world_point(value.base.transform, [0.0; 3]) else {
+        return Vec::new();
+    };
+    let scale = value
+        .base_x_radius
+        .abs()
+        .max(value.base_y_radius.abs())
+        .max(1.0);
+    let elliptical = (value.base_x_radius - value.base_y_radius).abs() > 1e-9 * scale;
+    let rotation = matrix(value.base.transform)
+        .map(|matrix| matrix.x_axis.y.atan2(matrix.x_axis.x))
+        .unwrap_or(0.0);
+    let top_minor_radius = if value.base_x_radius.abs() > 1e-9 {
+        value.top_radius * value.base_y_radius / value.base_x_radius
+    } else {
+        0.0
+    };
+    let (record_history, object_show_history, show_history_mode) =
+        history_flags(document, handle).unwrap_or((false, false, 1));
+    let (show_history, show_history_editable) =
+        displayed_history_state(object_show_history, show_history_mode);
+    let show_value = if show_history { "Yes" } else { "No" };
+    let mut geometry = vec![
+        Property {
+            label: t!("Solid type").into_owned(),
+            field: "solid_history_type",
+            value: PropValue::ReadOnly(t!("Cone").into_owned()),
+        },
+        crate::entities::common::edit_prop(
+            t!("Position X").as_ref(),
+            PROP_POSITION_X,
+            position.x,
+        ),
+        crate::entities::common::edit_prop(
+            t!("Position Y").as_ref(),
+            PROP_POSITION_Y,
+            position.y,
+        ),
+        crate::entities::common::edit_prop(
+            t!("Position Z").as_ref(),
+            PROP_POSITION_Z,
+            position.z,
+        ),
+        Property {
+            label: t!("Elliptical").into_owned(),
+            field: PROP_ELLIPTICAL,
+            value: PropValue::ReadOnly(if elliptical { "Yes" } else { "No" }.to_string()),
+        },
+    ];
+    if elliptical {
+        geometry.extend([
+            history_prop(
+                t!("Base major radius").as_ref(),
+                PROP_BASE_MAJOR_RADIUS,
+                value.base_x_radius,
+            ),
+            history_prop(
+                t!("Base minor radius").as_ref(),
+                PROP_BASE_MINOR_RADIUS,
+                value.base_y_radius,
+            ),
+            history_prop(
+                t!("Top major radius").as_ref(),
+                PROP_TOP_MAJOR_RADIUS,
+                value.top_radius,
+            ),
+            history_prop(
+                t!("Top minor radius").as_ref(),
+                PROP_TOP_MINOR_RADIUS,
+                top_minor_radius,
+            ),
+            Property {
+                label: t!("Rotation").into_owned(),
+                field: PROP_ROTATION,
+                value: PropValue::ReadOnly(crate::entities::common::format_direction(rotation)),
+            },
+        ]);
+    } else {
+        geometry.extend([
+            history_prop(
+                t!("Base radius").as_ref(),
+                PROP_BASE_RADIUS,
+                value.base_x_radius,
+            ),
+            history_prop(
+                t!("Top radius").as_ref(),
+                PROP_TOP_RADIUS,
+                value.top_radius,
+            ),
+        ]);
+    }
+    geometry.push(history_prop(
+        t!("Height").as_ref(),
+        PROP_HEIGHT,
+        value.height,
+    ));
+    vec![
+        PropSection {
+            title: t!("Geometry").into_owned(),
+            props: geometry,
+        },
+        PropSection {
+            title: t!("Solid History").into_owned(),
+            props: vec![
+                Property {
+                    label: t!("History").into_owned(),
+                    field: PROP_HISTORY,
+                    value: PropValue::Choice {
+                        selected: if record_history { "Record" } else { "None" }.to_string(),
+                        options: vec!["None".to_string(), "Record".to_string()],
+                    },
+                },
+                Property {
+                    label: t!("Show History").into_owned(),
+                    field: PROP_SHOW_HISTORY,
+                    value: if show_history_editable {
+                        PropValue::Choice {
+                            selected: show_value.to_string(),
+                            options: vec!["No".to_string(), "Yes".to_string()],
+                        }
+                    } else {
+                        PropValue::ReadOnly(show_value.to_string())
+                    },
+                },
+            ],
+        },
+    ]
+}
+
+fn cylinder_properties(
+    document: &acadrust::CadDocument,
+    handle: acadrust::Handle,
+    value: &SolidHistoryCylinder,
+) -> Vec<PropSection> {
+    let Some(position) = world_point(value.base.transform, [0.0; 3]) else {
+        return Vec::new();
+    };
+    let scale = value
+        .major_radius
+        .abs()
+        .max(value.minor_radius.abs())
+        .max(1.0);
+    let elliptical = (value.major_radius - value.minor_radius).abs() > 1e-9 * scale;
+    let rotation = matrix(value.base.transform)
+        .map(|matrix| matrix.x_axis.y.atan2(matrix.x_axis.x))
+        .unwrap_or(0.0);
+    let (record_history, object_show_history, show_history_mode) =
+        history_flags(document, handle).unwrap_or((false, false, 1));
+    let (show_history, show_history_editable) =
+        displayed_history_state(object_show_history, show_history_mode);
+    let show_value = if show_history { "Yes" } else { "No" };
+    let mut geometry = vec![
+        Property {
+            label: t!("Solid type").into_owned(),
+            field: "solid_history_type",
+            value: PropValue::ReadOnly(t!("Cylinder").into_owned()),
+        },
+        crate::entities::common::edit_prop(
+            t!("Position X").as_ref(),
+            PROP_POSITION_X,
+            position.x,
+        ),
+        crate::entities::common::edit_prop(
+            t!("Position Y").as_ref(),
+            PROP_POSITION_Y,
+            position.y,
+        ),
+        crate::entities::common::edit_prop(
+            t!("Position Z").as_ref(),
+            PROP_POSITION_Z,
+            position.z,
+        ),
+        Property {
+            label: t!("Elliptical").into_owned(),
+            field: PROP_ELLIPTICAL,
+            value: PropValue::ReadOnly(if elliptical { "Yes" } else { "No" }.to_string()),
+        },
+    ];
+    if elliptical {
+        geometry.extend([
+            history_prop(
+                t!("Major radius").as_ref(),
+                PROP_MAJOR_RADIUS,
+                value.major_radius,
+            ),
+            history_prop(
+                t!("Minor radius").as_ref(),
+                PROP_MINOR_RADIUS,
+                value.minor_radius,
+            ),
+            Property {
+                label: t!("Rotation").into_owned(),
+                field: PROP_ROTATION,
+                value: PropValue::ReadOnly(crate::entities::common::format_direction(rotation)),
+            },
+        ]);
+    } else {
+        geometry.push(history_prop(
+            t!("Radius").as_ref(),
+            PROP_RADIUS,
+            value.major_radius,
+        ));
+    }
+    geometry.push(history_prop(
+        t!("Height").as_ref(),
+        PROP_HEIGHT,
+        value.height,
+    ));
+    vec![
+        PropSection {
+            title: t!("Geometry").into_owned(),
+            props: geometry,
+        },
+        PropSection {
+            title: t!("Solid History").into_owned(),
+            props: vec![
+                Property {
+                    label: t!("History").into_owned(),
+                    field: PROP_HISTORY,
+                    value: PropValue::Choice {
+                        selected: if record_history { "Record" } else { "None" }.to_string(),
+                        options: vec!["None".to_string(), "Record".to_string()],
+                    },
+                },
+                Property {
+                    label: t!("Show History").into_owned(),
+                    field: PROP_SHOW_HISTORY,
+                    value: if show_history_editable {
+                        PropValue::Choice {
+                            selected: show_value.to_string(),
+                            options: vec!["No".to_string(), "Yes".to_string()],
+                        }
+                    } else {
+                        PropValue::ReadOnly(show_value.to_string())
+                    },
+                },
+            ],
+        },
+    ]
+}
+
+fn pyramid_is_inscribed(value: &SolidHistoryPyramid) -> bool {
+    value.operation_minor == -1
+}
+
+fn pyramid_apothem_factor(sides: i32) -> f64 {
+    (std::f64::consts::PI / sides.clamp(3, 32) as f64).cos()
+}
+
+fn pyramid_display_radius(value: &SolidHistoryPyramid, radius: f64) -> f64 {
+    if pyramid_is_inscribed(value) {
+        radius
+    } else {
+        radius * pyramid_apothem_factor(value.sides)
+    }
+}
+
+fn pyramid_display_rotation(value: &SolidHistoryPyramid) -> Option<f64> {
+    let vertex_rotation = matrix(value.base.transform)
+        .map(|matrix| matrix.x_axis.y.atan2(matrix.x_axis.x))?;
+    if pyramid_is_inscribed(value) {
+        Some(vertex_rotation)
+    } else {
+        Some(vertex_rotation + std::f64::consts::PI / value.sides.clamp(3, 32) as f64)
+    }
+}
+
+fn pyramid_properties(
+    document: &acadrust::CadDocument,
+    handle: acadrust::Handle,
+    value: &SolidHistoryPyramid,
+) -> Vec<PropSection> {
+    let Some(position) = world_point(value.base.transform, [0.0; 3]) else {
+        return Vec::new();
+    };
+    let rotation = pyramid_display_rotation(value).unwrap_or(0.0);
+    let (record_history, object_show_history, show_history_mode) =
+        history_flags(document, handle).unwrap_or((false, false, 1));
+    let (show_history, show_history_editable) =
+        displayed_history_state(object_show_history, show_history_mode);
+    let show_value = if show_history { "Yes" } else { "No" };
+    vec![
+        PropSection {
+            title: t!("Geometry").into_owned(),
+            props: vec![
+                Property {
+                    label: t!("Solid type").into_owned(),
+                    field: "solid_history_type",
+                    value: PropValue::ReadOnly(t!("Pyramid").into_owned()),
+                },
+                crate::entities::common::edit_prop(
+                    t!("Position X").as_ref(),
+                    PROP_POSITION_X,
+                    position.x,
+                ),
+                crate::entities::common::edit_prop(
+                    t!("Position Y").as_ref(),
+                    PROP_POSITION_Y,
+                    position.y,
+                ),
+                crate::entities::common::edit_prop(
+                    t!("Position Z").as_ref(),
+                    PROP_POSITION_Z,
+                    position.z,
+                ),
+                Property {
+                    label: t!("Type").into_owned(),
+                    field: PROP_PYRAMID_TYPE,
+                    value: PropValue::Choice {
+                        selected: if pyramid_is_inscribed(value) {
+                            "Inscribed"
+                        } else {
+                            "Circumscribed"
+                        }
+                        .to_string(),
+                        options: vec!["Circumscribed".to_string(), "Inscribed".to_string()],
+                    },
+                },
+                history_prop(
+                    t!("Base radius").as_ref(),
+                    PROP_BASE_RADIUS,
+                    pyramid_display_radius(value, value.radius),
+                ),
+                history_prop(
+                    t!("Top radius").as_ref(),
+                    PROP_TOP_RADIUS,
+                    pyramid_display_radius(value, value.top_radius),
+                ),
+                history_prop(t!("Sides").as_ref(), PROP_SIDES, value.sides),
+                Property {
+                    label: t!("Rotation").into_owned(),
+                    field: PROP_ROTATION,
+                    value: PropValue::EditText(
+                        crate::entities::common::format_direction(rotation),
+                    ),
+                },
+                history_prop(t!("Height").as_ref(), PROP_HEIGHT, value.height),
+            ],
+        },
+        PropSection {
+            title: t!("Solid History").into_owned(),
+            props: vec![
+                Property {
+                    label: t!("History").into_owned(),
+                    field: PROP_HISTORY,
+                    value: PropValue::Choice {
+                        selected: if record_history { "Record" } else { "None" }.to_string(),
+                        options: vec!["None".to_string(), "Record".to_string()],
+                    },
+                },
+                Property {
+                    label: t!("Show History").into_owned(),
+                    field: PROP_SHOW_HISTORY,
+                    value: if show_history_editable {
+                        PropValue::Choice {
+                            selected: show_value.to_string(),
+                            options: vec!["No".to_string(), "Yes".to_string()],
+                        }
+                    } else {
+                        PropValue::ReadOnly(show_value.to_string())
+                    },
+                },
+            ],
+        },
+    ]
+}
+
+fn sphere_properties(
+    document: &acadrust::CadDocument,
+    handle: acadrust::Handle,
+    value: &SolidHistorySphere,
+) -> Vec<PropSection> {
+    let Some(position) = world_point(value.base.transform, [0.0; 3]) else {
+        return Vec::new();
+    };
+    let (record_history, object_show_history, show_history_mode) =
+        history_flags(document, handle).unwrap_or((false, false, 1));
+    let (show_history, show_history_editable) =
+        displayed_history_state(object_show_history, show_history_mode);
+    let show_value = if show_history { "Yes" } else { "No" };
+    vec![
+        PropSection {
+            title: t!("Geometry").into_owned(),
+            props: vec![
+                Property {
+                    label: t!("Solid type").into_owned(),
+                    field: "solid_history_type",
+                    value: PropValue::ReadOnly(t!("Sphere").into_owned()),
+                },
+                crate::entities::common::edit_prop(
+                    t!("Position X").as_ref(),
+                    PROP_POSITION_X,
+                    position.x,
+                ),
+                crate::entities::common::edit_prop(
+                    t!("Position Y").as_ref(),
+                    PROP_POSITION_Y,
+                    position.y,
+                ),
+                crate::entities::common::edit_prop(
+                    t!("Position Z").as_ref(),
+                    PROP_POSITION_Z,
+                    position.z,
+                ),
+                crate::entities::common::edit_prop(
+                    t!("Radius").as_ref(),
+                    PROP_RADIUS,
+                    value.radius,
+                ),
+                crate::entities::common::edit_prop(
+                    t!("Diameter").as_ref(),
+                    PROP_DIAMETER,
+                    value.radius * 2.0,
+                ),
+            ],
+        },
+        PropSection {
+            title: t!("Solid History").into_owned(),
+            props: vec![
+                Property {
+                    label: t!("History").into_owned(),
+                    field: PROP_HISTORY,
+                    value: PropValue::Choice {
+                        selected: if record_history { "Record" } else { "None" }.to_string(),
+                        options: vec!["None".to_string(), "Record".to_string()],
+                    },
+                },
+                Property {
+                    label: t!("Show History").into_owned(),
+                    field: PROP_SHOW_HISTORY,
+                    value: if show_history_editable {
+                        PropValue::Choice {
+                            selected: show_value.to_string(),
+                            options: vec!["No".to_string(), "Yes".to_string()],
+                        }
+                    } else {
+                        PropValue::ReadOnly(show_value.to_string())
+                    },
+                },
+            ],
+        },
+    ]
+}
+
+fn rectangular_properties(
     document: &acadrust::CadDocument,
     handle: acadrust::Handle,
     value: &SolidHistoryBox,
+    solid_type: &str,
 ) -> Vec<PropSection> {
     let Some(position) = world_point(
         value.base.transform,
@@ -97,7 +1305,10 @@ fn box_properties(
     let rotation = matrix(value.base.transform)
         .map(|matrix| matrix.x_axis.y.atan2(matrix.x_axis.x))
         .unwrap_or(0.0);
-    let (record_history, show_history) = history_flags(document, handle).unwrap_or((false, false));
+    let (record_history, object_show_history, show_history_mode) =
+        history_flags(document, handle).unwrap_or((false, false, 1));
+    let (show_history, show_history_editable) =
+        displayed_history_state(object_show_history, show_history_mode);
     let show_value = if show_history { "Yes" } else { "No" };
     vec![
         PropSection {
@@ -106,7 +1317,7 @@ fn box_properties(
                 Property {
                     label: t!("Solid type").into_owned(),
                     field: "solid_history_type",
-                    value: PropValue::ReadOnly(t!("Box").into_owned()),
+                    value: PropValue::ReadOnly(t!(solid_type).into_owned()),
                 },
                 crate::entities::common::edit_prop(
                     t!("Position X").as_ref(),
@@ -161,7 +1372,7 @@ fn box_properties(
                 Property {
                     label: t!("Show History").into_owned(),
                     field: PROP_SHOW_HISTORY,
-                    value: if record_history {
+                    value: if show_history_editable {
                         PropValue::Choice {
                             selected: show_value.to_string(),
                             options: vec!["No".to_string(), "Yes".to_string()],
@@ -182,45 +1393,26 @@ pub fn primitive_properties(
     let Some(operation) = document.solid_history_operation(handle) else {
         return Vec::new();
     };
-    let props = match operation {
-        SolidHistoryOperation::Box(value) => return box_properties(document, handle, value),
-        SolidHistoryOperation::Wedge(value) => vec![
-            history_prop(t!("Length").as_ref(), PROP_LENGTH, value.length),
-            history_prop(t!("Width").as_ref(), PROP_WIDTH, value.width),
-            history_prop(t!("Height").as_ref(), PROP_HEIGHT, value.height),
-        ],
-        SolidHistoryOperation::Cylinder(value) | SolidHistoryOperation::Cone(value) => vec![
-            history_prop(t!("Radius").as_ref(), PROP_RADIUS, value.major_radius),
-            history_prop(t!("Height").as_ref(), PROP_HEIGHT, value.height),
-        ],
-        SolidHistoryOperation::Sphere(value) => vec![history_prop(
-            t!("Radius").as_ref(),
-            PROP_RADIUS,
-            value.radius,
-        )],
-        SolidHistoryOperation::Torus(value) => vec![
-            history_prop(
-                t!("Outer Radius").as_ref(),
-                PROP_OUTER_RADIUS,
-                value.major_radius + value.minor_radius,
-            ),
-            history_prop(
-                t!("Inner Radius").as_ref(),
-                PROP_INNER_RADIUS,
-                (value.major_radius - value.minor_radius).max(0.0),
-            ),
-        ],
-        SolidHistoryOperation::Pyramid(value) => vec![
-            history_prop(t!("Radius").as_ref(), PROP_RADIUS, value.radius),
-            history_prop(t!("Height").as_ref(), PROP_HEIGHT, value.height),
-            history_prop(t!("Sides").as_ref(), PROP_SIDES, value.sides),
-        ],
-        _ => return Vec::new(),
-    };
-    vec![PropSection {
-        title: t!("Primitive").into_owned(),
-        props,
-    }]
+    match operation {
+        SolidHistoryOperation::Box(value) => {
+            rectangular_properties(document, handle, value, "Box")
+        }
+        SolidHistoryOperation::Wedge(value) => {
+            rectangular_properties(document, handle, value, "Wedge")
+        }
+        SolidHistoryOperation::Sphere(value) => sphere_properties(document, handle, value),
+        SolidHistoryOperation::Cone(value) => cone_properties(document, handle, value),
+        SolidHistoryOperation::Cylinder(value) => cylinder_properties(document, handle, value),
+        SolidHistoryOperation::Pyramid(value) => pyramid_properties(document, handle, value),
+        SolidHistoryOperation::Torus(value) => torus_properties(document, handle, value),
+        SolidHistoryOperation::Sweep(value) => sweep_properties(document, handle, value),
+        SolidHistoryOperation::Loft(value) => loft_properties(document, handle, value),
+        SolidHistoryOperation::Extrusion(value) => {
+            extrusion_properties(document, handle, value)
+        }
+        SolidHistoryOperation::Revolve(value) => revolve_properties(document, handle, value),
+        _ => Vec::new(),
+    }
 }
 
 pub fn is_primitive_property(field: &str) -> bool {
@@ -230,6 +1422,15 @@ pub fn is_primitive_property(field: &str) -> bool {
             | PROP_WIDTH
             | PROP_HEIGHT
             | PROP_RADIUS
+            | PROP_DIAMETER
+            | PROP_BASE_RADIUS
+            | PROP_TOP_RADIUS
+            | PROP_BASE_MAJOR_RADIUS
+            | PROP_BASE_MINOR_RADIUS
+            | PROP_TOP_MAJOR_RADIUS
+            | PROP_TOP_MINOR_RADIUS
+            | PROP_MAJOR_RADIUS
+            | PROP_MINOR_RADIUS
             | PROP_OUTER_RADIUS
             | PROP_INNER_RADIUS
             | PROP_SIDES
@@ -237,11 +1438,229 @@ pub fn is_primitive_property(field: &str) -> bool {
             | PROP_POSITION_Y
             | PROP_POSITION_Z
             | PROP_ROTATION
+            | PROP_PROFILE_ROTATION
+            | PROP_TWIST_ALONG_PATH
+            | PROP_SCALE_ALONG_PATH
+            | PROP_EXTRUSION_HEIGHT
+            | PROP_TAPER_ANGLE
+            | PROP_REVOLVE_ANGLE
+            | PROP_AXIS_POSITION_X
+            | PROP_AXIS_POSITION_Y
+            | PROP_AXIS_POSITION_Z
+            | PROP_AXIS_DIRECTION_X
+            | PROP_AXIS_DIRECTION_Y
+            | PROP_AXIS_DIRECTION_Z
+            | PROP_PYRAMID_TYPE
+            | PROP_LOFT_NORMALS
+            | PROP_LOFT_START_DRAFT_ANGLE
+            | PROP_LOFT_END_DRAFT_ANGLE
+            | PROP_LOFT_START_MAGNITUDE
+            | PROP_LOFT_END_MAGNITUDE
+            | PROP_LOFT_CLOSED
+            | PROP_LOFT_PERIODIC
     )
 }
 
 pub fn is_history_choice(field: &str) -> bool {
     matches!(field, PROP_HISTORY | PROP_SHOW_HISTORY)
+}
+
+pub fn is_loft_geometry_choice(field: &str) -> bool {
+    matches!(field, PROP_LOFT_NORMALS | PROP_LOFT_CLOSED | PROP_LOFT_PERIODIC)
+}
+
+pub fn is_specialized_property(field: &str) -> bool {
+    matches!(field, "solid_history_type" | PROP_BANK | PROP_SWEEP_LENGTH
+        | PROP_LOFT_TYPE | PROP_LOFT_SECTION_COUNT
+        | PROP_EXTRUSION_DIRECTION_X | PROP_EXTRUSION_DIRECTION_Y | PROP_EXTRUSION_DIRECTION_Z)
+        || is_primitive_property(field)
+        || is_history_choice(field)
+}
+
+fn apply_extrusion_geometry_property(
+    value: &mut SolidHistorySweep,
+    field: &str,
+    text: &str,
+) -> Option<bool> {
+    if value.path_entity.is_some()
+        && matches!(field, PROP_EXTRUSION_HEIGHT | PROP_TAPER_ANGLE)
+    {
+        return Some(false);
+    }
+    match field {
+        PROP_POSITION_X | PROP_POSITION_Y | PROP_POSITION_Z => {
+            let axis = match field {
+                PROP_POSITION_X => 0,
+                PROP_POSITION_Y => 1,
+                _ => 2,
+            };
+            let target = crate::entities::common::parse_length(text)?;
+            if !target.is_finite() {
+                return Some(false);
+            }
+            let current = matrix(value.base.transform)?;
+            let reference = current.transform_point3(glam::DVec3::new(
+                value.reference_point.x,
+                value.reference_point.y,
+                value.reference_point.z,
+            ));
+            if !reference.is_finite() || (target - reference[axis]).abs() <= 1e-12 {
+                return Some(false);
+            }
+            let mut delta = glam::DVec3::ZERO;
+            delta[axis] = target - reference[axis];
+            let updated = glam::DMat4::from_translation(delta) * current;
+            if !updated.is_finite() || updated.determinant().abs() <= 1e-12 {
+                return Some(false);
+            }
+            value.base.transform = updated.to_cols_array();
+            Some(true)
+        }
+        PROP_EXTRUSION_HEIGHT => {
+            let height = crate::entities::common::parse_length(text)?;
+            if !height.is_finite() || height <= 1e-9 {
+                return Some(false);
+            }
+            let direction = glam::DVec3::new(
+                value.direction.x,
+                value.direction.y,
+                value.direction.z,
+            );
+            let Some(unit) = direction.try_normalize() else {
+                return Some(false);
+            };
+            let updated = unit * height;
+            if (updated - direction).length_squared() <= 1e-24 {
+                return Some(false);
+            }
+            value.direction = acadrust::types::Vector3::new(updated.x, updated.y, updated.z);
+            value.end_draft_distance = height;
+            Some(true)
+        }
+        PROP_TAPER_ANGLE => {
+            let angle = crate::entities::common::parse_angle(text)?;
+            if !angle.is_finite()
+                || angle.abs() >= std::f64::consts::FRAC_PI_2
+                || (angle - value.draft_angle).abs() <= 1e-12
+            {
+                return Some(false);
+            }
+            value.draft_angle = angle;
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
+fn apply_revolve_geometry_property(
+    value: &mut SolidHistoryRevolve,
+    field: &str,
+    text: &str,
+) -> Option<bool> {
+    if field == PROP_REVOLVE_ANGLE {
+        let angle = crate::entities::common::parse_angle(text)?;
+        if !angle.is_finite()
+            || angle.abs() <= 1e-12
+            || angle.abs() > std::f64::consts::TAU + 1e-12
+            || (angle - value.revolve_angle).abs() <= 1e-12
+        {
+            return Some(false);
+        }
+        value.revolve_angle = angle;
+        return Some(true);
+    }
+
+    if matches!(
+        field,
+        PROP_AXIS_POSITION_X | PROP_AXIS_POSITION_Y | PROP_AXIS_POSITION_Z
+    ) {
+        let axis = match field {
+            PROP_AXIS_POSITION_X => 0,
+            PROP_AXIS_POSITION_Y => 1,
+            _ => 2,
+        };
+        if !revolve_position_component_editable(value, axis) {
+            return Some(false);
+        }
+        let target = crate::entities::common::parse_length(text)?;
+        if !target.is_finite() {
+            return Some(false);
+        }
+        let mut world = world_point(
+            value.base.transform,
+            [value.axis_point.x, value.axis_point.y, value.axis_point.z],
+        )?;
+        if (world[axis] - target).abs() <= 1e-12 {
+            return Some(false);
+        }
+        world[axis] = target;
+        let local = local_point(value.base.transform, world)?;
+        if !local.is_finite() {
+            return Some(false);
+        }
+        value.axis_point = acadrust::types::Vector3::new(local.x, local.y, local.z);
+        return Some(true);
+    }
+
+    if matches!(
+        field,
+        PROP_AXIS_DIRECTION_X | PROP_AXIS_DIRECTION_Y | PROP_AXIS_DIRECTION_Z
+    ) {
+        let axis = match field {
+            PROP_AXIS_DIRECTION_X => 0,
+            PROP_AXIS_DIRECTION_Y => 1,
+            _ => 2,
+        };
+        let target = text.trim().replace(',', ".").parse::<f64>().ok()?;
+        let Some((normal, capacity)) = revolve_direction_component_capacity(value, axis) else {
+            return Some(false);
+        };
+        if !target.is_finite() || capacity <= 1e-9 || target.abs() > capacity + 1e-12 {
+            return Some(false);
+        }
+        let current_world = world_vector(
+            value.base.transform,
+            [value.direction.x, value.direction.y, value.direction.z],
+        )?;
+        let target = target.clamp(-capacity, capacity);
+        if (current_world[axis] - target).abs() <= 1e-12 {
+            return Some(false);
+        }
+        let component_axis = match axis {
+            0 => glam::DVec3::X,
+            1 => glam::DVec3::Y,
+            _ => glam::DVec3::Z,
+        };
+        let Some(projected_axis) = (component_axis - normal * normal[axis]).try_normalize() else {
+            return Some(false);
+        };
+        let other_axis = normal.cross(projected_axis);
+        let along_projected = target / capacity;
+        let remaining = (1.0 - along_projected * along_projected).max(0.0).sqrt();
+        let other_sign = if current_world.dot(other_axis) < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
+        let world =
+            projected_axis * along_projected + other_axis * (other_sign * remaining);
+        let Some(local) = matrix(value.base.transform)?
+            .inverse()
+            .transform_vector3(world)
+            .try_normalize()
+        else {
+            return Some(false);
+        };
+        let current = glam::DVec3::new(value.direction.x, value.direction.y, value.direction.z)
+            .normalize_or_zero();
+        if (local - current).length_squared() <= 1e-24 {
+            return Some(false);
+        }
+        value.direction = acadrust::types::Vector3::new(local.x, local.y, local.z);
+        return Some(true);
+    }
+
+    None
 }
 
 pub fn apply_history_choice(
@@ -250,6 +1669,7 @@ pub fn apply_history_choice(
     field: &str,
     value: &str,
 ) -> bool {
+    let show_history_mode = document.header.show_solid_history.clamp(0, 2);
     let Some(graph) = document.solid_history_graph(handle) else {
         return false;
     };
@@ -269,11 +1689,8 @@ pub fn apply_history_choice(
             } else {
                 return false;
             };
-            if !history.record_history {
-                history.show_history = false;
-            }
         }
-        PROP_SHOW_HISTORY if history.record_history => {
+        PROP_SHOW_HISTORY if show_history_mode == 1 => {
             history.show_history = if value.eq_ignore_ascii_case("Yes") {
                 true
             } else if value.eq_ignore_ascii_case("No") {
@@ -287,7 +1704,7 @@ pub fn apply_history_choice(
     before != (history.record_history, history.show_history)
 }
 
-fn apply_box_geometry_property(
+fn apply_rectangular_geometry_property(
     value: &mut SolidHistoryBox,
     field: &str,
     text: &str,
@@ -355,13 +1772,429 @@ fn apply_box_geometry_property(
     Some(true)
 }
 
+fn apply_sphere_geometry_property(
+    value: &mut SolidHistorySphere,
+    field: &str,
+    text: &str,
+) -> Option<bool> {
+    let axis = match field {
+        PROP_POSITION_X => 0,
+        PROP_POSITION_Y => 1,
+        PROP_POSITION_Z => 2,
+        _ => return None,
+    };
+    let target = crate::entities::common::parse_length(text)?;
+    if !target.is_finite() {
+        return Some(false);
+    }
+    let current = matrix(value.base.transform)?;
+    let center = current.transform_point3(glam::DVec3::ZERO);
+    if !center.is_finite() || (target - center[axis]).abs() <= 1e-12 {
+        return Some(false);
+    }
+    let mut delta = glam::DVec3::ZERO;
+    delta[axis] = target - center[axis];
+    let updated = glam::DMat4::from_translation(delta) * current;
+    if !updated.is_finite() || updated.determinant().abs() <= 1e-12 {
+        return Some(false);
+    }
+    value.base.transform = updated.to_cols_array();
+    Some(true)
+}
+
+fn apply_cone_position_property(
+    value: &mut SolidHistoryCone,
+    field: &str,
+    text: &str,
+) -> Option<bool> {
+    let axis = match field {
+        PROP_POSITION_X => 0,
+        PROP_POSITION_Y => 1,
+        PROP_POSITION_Z => 2,
+        _ => return None,
+    };
+    let target = crate::entities::common::parse_length(text)?;
+    if !target.is_finite() {
+        return Some(false);
+    }
+    let current = matrix(value.base.transform)?;
+    let origin = current.transform_point3(glam::DVec3::ZERO);
+    if !origin.is_finite() || (target - origin[axis]).abs() <= 1e-12 {
+        return Some(false);
+    }
+    let mut delta = glam::DVec3::ZERO;
+    delta[axis] = target - origin[axis];
+    let updated = glam::DMat4::from_translation(delta) * current;
+    if !updated.is_finite() || updated.determinant().abs() <= 1e-12 {
+        return Some(false);
+    }
+    value.base.transform = updated.to_cols_array();
+    Some(true)
+}
+
+fn apply_cylinder_position_property(
+    value: &mut SolidHistoryCylinder,
+    field: &str,
+    text: &str,
+) -> Option<bool> {
+    let axis = match field {
+        PROP_POSITION_X => 0,
+        PROP_POSITION_Y => 1,
+        PROP_POSITION_Z => 2,
+        _ => return None,
+    };
+    let target = crate::entities::common::parse_length(text)?;
+    if !target.is_finite() {
+        return Some(false);
+    }
+    let current = matrix(value.base.transform)?;
+    let origin = current.transform_point3(glam::DVec3::ZERO);
+    if !origin.is_finite() || (target - origin[axis]).abs() <= 1e-12 {
+        return Some(false);
+    }
+    let mut delta = glam::DVec3::ZERO;
+    delta[axis] = target - origin[axis];
+    let updated = glam::DMat4::from_translation(delta) * current;
+    if !updated.is_finite() || updated.determinant().abs() <= 1e-12 {
+        return Some(false);
+    }
+    value.base.transform = updated.to_cols_array();
+    Some(true)
+}
+
+fn apply_sweep_geometry_property(
+    value: &mut SolidHistorySweep,
+    field: &str,
+    text: &str,
+) -> Option<bool> {
+    match field {
+        PROP_PROFILE_ROTATION => {
+            let target = crate::entities::common::parse_angle(text)?;
+            if !target.is_finite() || (target - value.align_angle).abs() <= 1e-12 {
+                return Some(false);
+            }
+            value.align_angle = target;
+            Some(true)
+        }
+        PROP_TWIST_ALONG_PATH => {
+            let target = crate::entities::common::parse_angle(text)?;
+            if !target.is_finite() || (target - value.twist_angle).abs() <= 1e-12 {
+                return Some(false);
+            }
+            value.twist_angle = target;
+            Some(true)
+        }
+        PROP_SCALE_ALONG_PATH => {
+            let target = text.trim().replace(',', ".").parse::<f64>().ok()?;
+            if !target.is_finite()
+                || target <= 1e-9
+                || (target - value.scale_factor).abs() <= 1e-12
+            {
+                return Some(false);
+            }
+            value.scale_factor = target;
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
+fn apply_loft_geometry_property(
+    value: &mut SolidHistoryLoft,
+    field: &str,
+    text: &str,
+) -> Option<bool> {
+    let current = loft_parameters(value);
+    let mut parameters = current.clone();
+    match field {
+        PROP_LOFT_NORMALS => {
+            let Some(index) = LOFT_NORMAL_CHOICES.iter()
+                .position(|name| name.eq_ignore_ascii_case(text.trim()))
+            else {
+                return Some(false);
+            };
+            parameters.normals = index as i32;
+        }
+        PROP_LOFT_START_DRAFT_ANGLE | PROP_LOFT_END_DRAFT_ANGLE => {
+            if parameters.normals != 6 {
+                return Some(false);
+            }
+            let Some(angle) = crate::entities::common::parse_angle(text)
+                .filter(|angle| angle.is_finite() && (0.0..=std::f64::consts::PI).contains(angle))
+            else {
+                return Some(false);
+            };
+            if field == PROP_LOFT_START_DRAFT_ANGLE {
+                parameters.start_draft_angle = angle;
+            } else {
+                parameters.end_draft_angle = angle;
+            }
+        }
+        PROP_LOFT_START_MAGNITUDE | PROP_LOFT_END_MAGNITUDE => {
+            if parameters.normals != 6 {
+                return Some(false);
+            }
+            let Some(magnitude) = text.trim().replace(',', ".").parse::<f64>().ok()
+                .filter(|magnitude| magnitude.is_finite() && *magnitude >= 0.0)
+            else {
+                return Some(false);
+            };
+            if field == PROP_LOFT_START_MAGNITUDE {
+                parameters.start_magnitude = magnitude;
+            } else {
+                parameters.end_magnitude = magnitude;
+            }
+        }
+        PROP_LOFT_CLOSED => {
+            if !loft_closed_editable(value) {
+                return Some(false);
+            }
+            parameters.closed = if text.trim().eq_ignore_ascii_case("Yes") {
+                true
+            } else if text.trim().eq_ignore_ascii_case("No") {
+                false
+            } else {
+                return Some(false);
+            };
+        }
+        PROP_LOFT_PERIODIC => {
+            if !parameters.closed {
+                return Some(false);
+            }
+            parameters.periodic = if text.trim().eq_ignore_ascii_case("Yes") {
+                true
+            } else if text.trim().eq_ignore_ascii_case("No") {
+                false
+            } else {
+                return Some(false);
+            };
+        }
+        _ => return None,
+    }
+    if parameters == current {
+        return Some(false);
+    }
+    value.parameters = Some(parameters);
+    Some(true)
+}
+
+fn apply_torus_position_property(
+    value: &mut SolidHistoryTorus,
+    field: &str,
+    text: &str,
+) -> Option<bool> {
+    let axis = match field {
+        PROP_POSITION_X => 0,
+        PROP_POSITION_Y => 1,
+        PROP_POSITION_Z => 2,
+        _ => return None,
+    };
+    let target = crate::entities::common::parse_length(text)?;
+    if !target.is_finite() {
+        return Some(false);
+    }
+    let current = matrix(value.base.transform)?;
+    let origin = current.transform_point3(glam::DVec3::ZERO);
+    if !origin.is_finite() || (target - origin[axis]).abs() <= 1e-12 {
+        return Some(false);
+    }
+    let mut delta = glam::DVec3::ZERO;
+    delta[axis] = target - origin[axis];
+    let updated = glam::DMat4::from_translation(delta) * current;
+    if !updated.is_finite() || updated.determinant().abs() <= 1e-12 {
+        return Some(false);
+    }
+    value.base.transform = updated.to_cols_array();
+    Some(true)
+}
+
+fn canonicalize_cylinder_radii(value: &mut SolidHistoryCylinder) -> bool {
+    if value.minor_radius <= value.major_radius {
+        value.x_radius = value.major_radius;
+        return true;
+    }
+    let Some(current) = matrix(value.base.transform) else {
+        return false;
+    };
+    std::mem::swap(&mut value.major_radius, &mut value.minor_radius);
+    value.x_radius = value.major_radius;
+    value.base.transform =
+        (current * glam::DMat4::from_rotation_z(std::f64::consts::FRAC_PI_2)).to_cols_array();
+    true
+}
+
+fn apply_pyramid_geometry_property(
+    value: &mut SolidHistoryPyramid,
+    field: &str,
+    text: &str,
+) -> Option<bool> {
+    if field == PROP_PYRAMID_TYPE {
+        let next_inscribed = if text.eq_ignore_ascii_case("Inscribed") {
+            true
+        } else if text.eq_ignore_ascii_case("Circumscribed") {
+            false
+        } else {
+            return Some(false);
+        };
+        let old_inscribed = pyramid_is_inscribed(value);
+        if next_inscribed == old_inscribed {
+            return Some(false);
+        }
+        let factor = pyramid_apothem_factor(value.sides);
+        if factor <= 1e-9 {
+            return Some(false);
+        }
+        let base_display = if old_inscribed { value.radius } else { value.radius * factor };
+        let top_display = if old_inscribed {
+            value.top_radius
+        } else {
+            value.top_radius * factor
+        };
+        let Some(current) = matrix(value.base.transform) else {
+            return Some(false);
+        };
+        value.radius = if next_inscribed { base_display } else { base_display / factor };
+        value.top_radius = if next_inscribed { top_display } else { top_display / factor };
+        let half = std::f64::consts::PI / value.sides.clamp(3, 32) as f64;
+        let delta = if next_inscribed { half } else { -half };
+        value.base.transform =
+            (current * glam::DMat4::from_rotation_z(delta)).to_cols_array();
+        value.operation_minor = if next_inscribed { -1 } else { 0 };
+        return Some(true);
+    }
+    if field == PROP_ROTATION {
+        let target = crate::entities::common::parse_direction(text)?;
+        if !target.is_finite() {
+            return Some(false);
+        }
+        let current = matrix(value.base.transform)?;
+        let projected = current.x_axis.truncate();
+        if projected.length_squared() <= 1e-12 {
+            return Some(false);
+        }
+        let current_angle = projected.y.atan2(projected.x);
+        let target_vertex_angle = if pyramid_is_inscribed(value) {
+            target
+        } else {
+            target - std::f64::consts::PI / value.sides.clamp(3, 32) as f64
+        };
+        let delta = (target_vertex_angle - current_angle + std::f64::consts::PI)
+            .rem_euclid(std::f64::consts::TAU)
+            - std::f64::consts::PI;
+        if delta.abs() <= 1e-12 {
+            return Some(false);
+        }
+        let updated = current * glam::DMat4::from_rotation_z(delta);
+        if !updated.is_finite() || updated.determinant().abs() <= 1e-12 {
+            return Some(false);
+        }
+        value.base.transform = updated.to_cols_array();
+        return Some(true);
+    }
+    let axis = match field {
+        PROP_POSITION_X => 0,
+        PROP_POSITION_Y => 1,
+        PROP_POSITION_Z => 2,
+        _ => return None,
+    };
+    let target = crate::entities::common::parse_length(text)?;
+    if !target.is_finite() {
+        return Some(false);
+    }
+    let current = matrix(value.base.transform)?;
+    let origin = current.transform_point3(glam::DVec3::ZERO);
+    if !origin.is_finite() || (target - origin[axis]).abs() <= 1e-12 {
+        return Some(false);
+    }
+    let mut delta = glam::DVec3::ZERO;
+    delta[axis] = target - origin[axis];
+    let updated = glam::DMat4::from_translation(delta) * current;
+    if !updated.is_finite() || updated.determinant().abs() <= 1e-12 {
+        return Some(false);
+    }
+    value.base.transform = updated.to_cols_array();
+    Some(true)
+}
+
+fn set_pyramid_sides(value: &mut SolidHistoryPyramid, sides: i32) -> bool {
+    if !(3..=32).contains(&sides) || sides == value.sides {
+        return false;
+    }
+    if !pyramid_is_inscribed(value) {
+        let Some(current) = matrix(value.base.transform) else {
+            return false;
+        };
+        let old_factor = pyramid_apothem_factor(value.sides);
+        let new_factor = pyramid_apothem_factor(sides);
+        value.radius = value.radius * old_factor / new_factor;
+        value.top_radius = value.top_radius * old_factor / new_factor;
+        let old_half = std::f64::consts::PI / value.sides.clamp(3, 32) as f64;
+        let new_half = std::f64::consts::PI / sides as f64;
+        value.base.transform =
+            (current * glam::DMat4::from_rotation_z(old_half - new_half)).to_cols_array();
+    }
+    value.sides = sides;
+    true
+}
+
 pub fn apply_primitive_property(
     operation: &mut SolidHistoryOperation,
     field: &str,
     value: &str,
 ) -> bool {
-    if let SolidHistoryOperation::Box(box_value) = operation {
-        if let Some(applied) = apply_box_geometry_property(box_value, field, value) {
+    if let SolidHistoryOperation::Box(rectangular_value)
+    | SolidHistoryOperation::Wedge(rectangular_value) = operation
+    {
+        if let Some(applied) =
+            apply_rectangular_geometry_property(rectangular_value, field, value)
+        {
+            return applied;
+        }
+    }
+    if let SolidHistoryOperation::Sphere(sphere_value) = operation {
+        if let Some(applied) = apply_sphere_geometry_property(sphere_value, field, value) {
+            return applied;
+        }
+    }
+    if let SolidHistoryOperation::Cone(cone_value) = operation {
+        if let Some(applied) = apply_cone_position_property(cone_value, field, value) {
+            return applied;
+        }
+    }
+    if let SolidHistoryOperation::Cylinder(cylinder_value) = operation {
+        if let Some(applied) = apply_cylinder_position_property(cylinder_value, field, value) {
+            return applied;
+        }
+    }
+    if let SolidHistoryOperation::Sweep(sweep_value) = operation {
+        if let Some(applied) = apply_sweep_geometry_property(sweep_value, field, value) {
+            return applied;
+        }
+    }
+    if let SolidHistoryOperation::Loft(loft_value) = operation {
+        if let Some(applied) = apply_loft_geometry_property(loft_value, field, value) {
+            return applied;
+        }
+    }
+    if let SolidHistoryOperation::Extrusion(extrusion_value) = operation {
+        if let Some(applied) =
+            apply_extrusion_geometry_property(extrusion_value, field, value)
+        {
+            return applied;
+        }
+    }
+    if let SolidHistoryOperation::Revolve(revolve_value) = operation {
+        if let Some(applied) = apply_revolve_geometry_property(revolve_value, field, value) {
+            return applied;
+        }
+    }
+    if let SolidHistoryOperation::Torus(torus_value) = operation {
+        if let Some(applied) = apply_torus_position_property(torus_value, field, value) {
+            return applied;
+        }
+    }
+    if let SolidHistoryOperation::Pyramid(pyramid_value) = operation {
+        if let Some(applied) = apply_pyramid_geometry_property(pyramid_value, field, value) {
             return applied;
         }
     }
@@ -376,7 +2209,7 @@ pub fn apply_primitive_property(
         return false;
     }
     let positive = || (number > 0.0).then_some(number);
-    if let SolidHistoryOperation::Box(value) = operation {
+    if let SolidHistoryOperation::Box(value) | SolidHistoryOperation::Wedge(value) = operation {
         let Some(next) = positive() else {
             return false;
         };
@@ -411,13 +2244,7 @@ pub fn apply_primitive_property(
         return true;
     }
     match operation {
-        SolidHistoryOperation::Wedge(value) => match field {
-            PROP_LENGTH => value.length = positive().unwrap_or(value.length),
-            PROP_WIDTH => value.width = positive().unwrap_or(value.width),
-            PROP_HEIGHT => value.height = positive().unwrap_or(value.height),
-            _ => return false,
-        },
-        SolidHistoryOperation::Cylinder(value) | SolidHistoryOperation::Cone(value) => match field {
+        SolidHistoryOperation::Cylinder(value) => match field {
             PROP_RADIUS => {
                 let Some(radius) = positive() else {
                     return false;
@@ -426,58 +2253,135 @@ pub fn apply_primitive_property(
                 value.minor_radius = radius;
                 value.x_radius = radius;
             }
+            PROP_MAJOR_RADIUS => {
+                value.major_radius = positive().unwrap_or(value.major_radius);
+                if !canonicalize_cylinder_radii(value) {
+                    return false;
+                }
+            }
+            PROP_MINOR_RADIUS => {
+                value.minor_radius = positive().unwrap_or(value.minor_radius);
+                if !canonicalize_cylinder_radii(value) {
+                    return false;
+                }
+            }
             PROP_HEIGHT => value.height = positive().unwrap_or(value.height),
             _ => return false,
         },
-        SolidHistoryOperation::Sphere(value) if field == PROP_RADIUS => {
-            value.radius = positive().unwrap_or(value.radius);
-        }
-        SolidHistoryOperation::Torus(value) => {
-            let outer = value.major_radius + value.minor_radius;
-            let inner = (value.major_radius - value.minor_radius).max(0.0);
-            match field {
-                PROP_OUTER_RADIUS => {
-                    let Some(next_outer) = positive() else {
-                        return false;
-                    };
-                    if next_outer <= inner {
-                        return false;
-                    }
-                    value.major_radius = (next_outer + inner) * 0.5;
-                    value.minor_radius = (next_outer - inner) * 0.5;
-                }
-                PROP_INNER_RADIUS => {
-                    let Some(next_inner) = positive() else {
-                        return false;
-                    };
-                    if next_inner >= outer {
-                        return false;
-                    }
-                    value.major_radius = (outer + next_inner) * 0.5;
-                    value.minor_radius = (outer - next_inner) * 0.5;
-                }
-                _ => return false,
+        SolidHistoryOperation::Cone(value) => match field {
+            PROP_BASE_RADIUS => {
+                let Some(radius) = positive() else {
+                    return false;
+                };
+                let ratio = if value.base_x_radius > 1e-9 {
+                    value.base_y_radius / value.base_x_radius
+                } else {
+                    1.0
+                };
+                value.base_x_radius = radius;
+                value.base_y_radius = radius * ratio;
             }
+            PROP_BASE_MAJOR_RADIUS => {
+                value.base_x_radius = positive().unwrap_or(value.base_x_radius);
+            }
+            PROP_BASE_MINOR_RADIUS => {
+                value.base_y_radius = positive().unwrap_or(value.base_y_radius);
+            }
+            PROP_TOP_RADIUS => {
+                if number < 0.0 {
+                    return false;
+                }
+                value.top_radius = number;
+            }
+            PROP_TOP_MAJOR_RADIUS => {
+                if number < 0.0 {
+                    return false;
+                }
+                value.top_radius = number;
+            }
+            PROP_TOP_MINOR_RADIUS => {
+                if number < 0.0 || value.base_y_radius.abs() <= 1e-9 {
+                    return false;
+                }
+                value.top_radius = number * value.base_x_radius / value.base_y_radius;
+            }
+            PROP_HEIGHT => value.height = positive().unwrap_or(value.height),
+            _ => return false,
+        },
+        SolidHistoryOperation::Sphere(value) => {
+            let Some(next) = positive() else {
+                return false;
+            };
+            let radius = match field {
+                PROP_RADIUS => next,
+                PROP_DIAMETER => next * 0.5,
+                _ => return false,
+            };
+            if (radius - value.radius).abs() <= 1e-12 {
+                return false;
+            }
+            value.radius = radius;
         }
+        SolidHistoryOperation::Torus(value) => match field {
+            PROP_MAJOR_RADIUS => {
+                let Some(radius) = positive() else {
+                    return false;
+                };
+                if (radius - value.major_radius).abs() <= 1e-12 {
+                    return false;
+                }
+                value.major_radius = radius;
+            }
+            PROP_MINOR_RADIUS => {
+                let Some(radius) = positive() else {
+                    return false;
+                };
+                if (radius - value.minor_radius).abs() <= 1e-12 {
+                    return false;
+                }
+                value.minor_radius = radius;
+            }
+            _ => return false,
+        },
         SolidHistoryOperation::Pyramid(value) => match field {
-            PROP_RADIUS => value.radius = positive().unwrap_or(value.radius),
+            PROP_BASE_RADIUS => {
+                let Some(displayed) = positive() else {
+                    return false;
+                };
+                value.radius = if pyramid_is_inscribed(value) {
+                    displayed
+                } else {
+                    displayed / pyramid_apothem_factor(value.sides)
+                };
+            }
+            PROP_TOP_RADIUS => {
+                if number < 0.0 {
+                    return false;
+                }
+                value.top_radius = if pyramid_is_inscribed(value) {
+                    number
+                } else {
+                    number / pyramid_apothem_factor(value.sides)
+                };
+            }
             PROP_HEIGHT => value.height = positive().unwrap_or(value.height),
             PROP_SIDES => {
                 let rounded = number.round();
                 if (number - rounded).abs() > 1e-9 {
                     return false;
                 }
-                let sides = rounded as i32;
-                if !(3..=71).contains(&sides) {
-                    return false;
-                }
-                value.sides = sides;
+                return set_pyramid_sides(value, rounded as i32);
             }
             _ => return false,
         },
         _ => return false,
     }
-    positive().is_some() || field == PROP_SIDES
+    positive().is_some()
+        || field == PROP_SIDES
+        || matches!(
+            field,
+            PROP_TOP_RADIUS | PROP_TOP_MAJOR_RADIUS | PROP_TOP_MINOR_RADIUS
+        )
 }
 
 fn matrix(transform: [f64; 16]) -> Option<glam::DMat4> {
@@ -561,6 +2465,560 @@ fn world_vector(transform: [f64; 16], vector: [f64; 3]) -> Option<glam::DVec3> {
 
 fn local_point(transform: [f64; 16], point: glam::DVec3) -> Option<glam::DVec3> {
     Some(matrix(transform)?.inverse().transform_point3(point))
+}
+
+fn embedded_entity(value: &EmbeddedEntity) -> Option<EntityType> {
+    Some(match value {
+        EmbeddedEntity::Point(value) => EntityType::Point(value.clone()),
+        EmbeddedEntity::Line(value) => EntityType::Line(value.clone()),
+        EmbeddedEntity::Arc(value) => EntityType::Arc(value.clone()),
+        EmbeddedEntity::Circle(value) => EntityType::Circle(value.clone()),
+        EmbeddedEntity::Ellipse(value) => EntityType::Ellipse(value.clone()),
+        EmbeddedEntity::Spline(value) => EntityType::Spline(value.clone()),
+        EmbeddedEntity::LwPolyline(value) => EntityType::LwPolyline(value.clone()),
+        EmbeddedEntity::Region(value) => EntityType::Region(value.clone()),
+        EmbeddedEntity::Ray(value) => EntityType::Ray(value.clone()),
+        EmbeddedEntity::XLine(value) => EntityType::XLine(value.clone()),
+        EmbeddedEntity::Unknown { .. } => return None,
+    })
+}
+
+/// Visible LOFT construction curves, owned by the parent display entity.
+/// Copies are transformed to WCS and never inserted into the document.
+pub fn loft_visible_history_entities(
+    document: &acadrust::CadDocument,
+    handle: acadrust::Handle,
+) -> Vec<EntityType> {
+    let Some((_, object_show_history, show_history_mode)) = history_flags(document, handle) else {
+        return Vec::new();
+    };
+    if !displayed_history_state(object_show_history, show_history_mode).0 {
+        return Vec::new();
+    }
+    let Some(SolidHistoryOperation::Loft(value)) = document.solid_history_operation(handle) else {
+        return Vec::new();
+    };
+    let Some(parent) = document.get_entity(handle) else {
+        return Vec::new();
+    };
+    let Some(transform) = matrix(value.base.transform) else {
+        return Vec::new();
+    };
+    let columns = transform.to_cols_array_2d();
+    let affine = acadrust::types::Transform::from_matrix(
+        acadrust::types::Matrix4 {
+            m: std::array::from_fn(|row| std::array::from_fn(|column| columns[column][row])),
+        },
+    );
+    value.cross_sections.iter()
+        .chain(&value.guides)
+        .chain(value.parameters.as_ref().and_then(|parameters| parameters.path_entity.as_ref()))
+        .filter_map(|source| {
+            let mut entity = embedded_entity(source)?;
+            entity.apply_transform(&affine);
+            // Construction sources belong to the visible parent's layer and
+            // selection identity, not a deleted source or hidden source layer.
+            let common = entity.common_mut();
+            common.handle = handle;
+            common.owner_handle = parent.common().owner_handle;
+            common.layer = parent.common().layer.clone();
+            common.invisible = parent.common().invisible;
+            Some(entity)
+        })
+        .collect()
+}
+
+fn into_embedded_entity(value: EntityType) -> Option<EmbeddedEntity> {
+    Some(match value {
+        EntityType::Point(value) => EmbeddedEntity::Point(value),
+        EntityType::Line(value) => EmbeddedEntity::Line(value),
+        EntityType::Arc(value) => EmbeddedEntity::Arc(value),
+        EntityType::Circle(value) => EmbeddedEntity::Circle(value),
+        EntityType::Ellipse(value) => EmbeddedEntity::Ellipse(value),
+        EntityType::Spline(value) => EmbeddedEntity::Spline(value),
+        EntityType::LwPolyline(value) => EmbeddedEntity::LwPolyline(value),
+        EntityType::Region(value) => EmbeddedEntity::Region(value),
+        EntityType::Ray(value) => EmbeddedEntity::Ray(value),
+        EntityType::XLine(value) => EmbeddedEntity::XLine(value),
+        _ => return None,
+    })
+}
+
+fn profile_matrix(value: &SolidHistorySweep) -> Option<glam::DMat4> {
+    Some(matrix(value.base.transform)? * matrix(value.sweep_entity_transform)?)
+}
+
+fn extrusion_profile_grips(value: &SolidHistorySweep) -> (Vec<GripDef>, Option<glam::DVec3>) {
+    let Some(profile) = value.sweep_entity.as_ref().and_then(embedded_entity) else {
+        return (Vec::new(), None);
+    };
+    let Some(transform) = profile_matrix(value) else {
+        return (Vec::new(), None);
+    };
+    let source = profile.grips();
+    if source.is_empty() {
+        return (Vec::new(), None);
+    }
+
+    let mut center = glam::DVec3::ZERO;
+    let mut count = 0.0;
+    let grips = source
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, grip)| {
+            let world = transform.transform_point3(grip.world);
+            if !world.is_finite() {
+                return None;
+            }
+            center += world;
+            count += 1.0;
+            let transform_vector = |vector: glam::DVec3| {
+                let vector = transform.transform_vector3(vector);
+                (vector.length_squared() > 1e-12).then(|| vector.normalize())
+            };
+            Some(GripDef {
+                id: GRIP_PROFILE_FIRST + index,
+                world,
+                is_midpoint: grip.is_midpoint,
+                shape: grip.shape,
+                dir: grip.dir.and_then(transform_vector),
+                axis: grip.axis.and_then(transform_vector),
+            })
+        })
+        .collect::<Vec<_>>();
+    let center = (count > 0.0).then_some(center / count);
+    (grips, center)
+}
+
+fn apply_extrusion_profile_grip(
+    value: &mut SolidHistorySweep,
+    index: usize,
+    apply: GripApply,
+) -> bool {
+    let Some(mut profile) = value.sweep_entity.as_ref().and_then(embedded_entity) else {
+        return false;
+    };
+    let Some(source_grip) = profile.grips().get(index).cloned() else {
+        return false;
+    };
+    let Some(transform) = profile_matrix(value) else {
+        return false;
+    };
+    let inverse = transform.inverse();
+    if !inverse.is_finite() {
+        return false;
+    }
+    let local_apply = match apply {
+        GripApply::Absolute(world) => {
+            let local = inverse.transform_point3(world);
+            if !local.is_finite() {
+                return false;
+            }
+            GripApply::Absolute(local)
+        }
+        GripApply::Translate(world_delta) => {
+            let local_delta = inverse.transform_vector3(world_delta);
+            if !local_delta.is_finite() || local_delta.length_squared() <= 1e-24 {
+                return false;
+            }
+            GripApply::Translate(local_delta)
+        }
+    };
+    profile.apply_grip(source_grip.id, local_apply);
+    let Some(profile) = into_embedded_entity(profile) else {
+        return false;
+    };
+    value.sweep_entity = Some(profile);
+    true
+}
+
+fn sweep_placement_matrices(value: &SolidHistorySweep) -> Option<(glam::DMat4, glam::DMat4)> {
+    let (profile, path) = cadkernel::acis::sweep_history_placements(value).ok()?;
+    let matrix = |place: cadkernel::brep::Placement| {
+        glam::DMat4::from_cols(
+            glam::DVec3::from_array(place.x_axis).extend(0.0),
+            glam::DVec3::from_array(place.y_axis).extend(0.0),
+            glam::DVec3::from_array(place.z_axis).extend(0.0),
+            glam::DVec3::from_array(place.origin).extend(1.0),
+        )
+    };
+    Some((matrix(profile), matrix(path)))
+}
+
+fn sweep_embedded_grips(
+    value: Option<&EmbeddedEntity>,
+    transform: glam::DMat4,
+    first_id: usize,
+) -> Vec<GripDef> {
+    let Some(entity) = value.and_then(embedded_entity) else {
+        return Vec::new();
+    };
+    entity
+        .grips()
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, grip)| {
+            let world = transform.transform_point3(grip.world);
+            if !world.is_finite() {
+                return None;
+            }
+            let transform_vector = |vector: glam::DVec3| {
+                let vector = transform.transform_vector3(vector);
+                (vector.length_squared() > 1e-12).then(|| vector.normalize())
+            };
+            Some(GripDef {
+                id: first_id + index,
+                world,
+                is_midpoint: grip.is_midpoint,
+                shape: grip.shape,
+                dir: grip.dir.and_then(transform_vector),
+                axis: grip.axis.and_then(transform_vector),
+            })
+        })
+        .collect()
+}
+
+fn apply_sweep_embedded_grip(
+    value: &mut Option<EmbeddedEntity>,
+    transform: glam::DMat4,
+    index: usize,
+    apply: GripApply,
+) -> bool {
+    let Some(mut entity) = value.as_ref().and_then(embedded_entity) else {
+        return false;
+    };
+    let Some(source_grip) = entity.grips().get(index).cloned() else {
+        return false;
+    };
+    let inverse = transform.inverse();
+    if !inverse.is_finite() {
+        return false;
+    }
+    let apply = match apply {
+        GripApply::Absolute(world) => {
+            let local = inverse.transform_point3(world);
+            if !local.is_finite() {
+                return false;
+            }
+            GripApply::Absolute(local)
+        }
+        GripApply::Translate(world_delta) => {
+            let local_delta = inverse.transform_vector3(world_delta);
+            if !local_delta.is_finite() || local_delta.length_squared() <= 1e-24 {
+                return false;
+            }
+            GripApply::Translate(local_delta)
+        }
+    };
+    entity.apply_grip(source_grip.id, apply);
+    let Some(entity) = into_embedded_entity(entity) else {
+        return false;
+    };
+    *value = Some(entity);
+    true
+}
+
+fn loft_section_grips(value: &SolidHistoryLoft) -> Vec<GripDef> {
+    if !value.guides.is_empty() {
+        return Vec::new();
+    }
+    let Some(transform) = matrix(value.base.transform) else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    let mut index = 0;
+    for section in &value.cross_sections {
+        let Some(entity) = embedded_entity(section) else {
+            continue;
+        };
+        for source in entity.grips() {
+            let id = GRIP_LOFT_SECTION_FIRST + index;
+            index += 1;
+            let world = transform.transform_point3(source.world);
+            if !world.is_finite() {
+                continue;
+            }
+            let transform_vector = |vector: glam::DVec3| {
+                let vector = transform.transform_vector3(vector);
+                (vector.length_squared() > 1e-12).then(|| vector.normalize())
+            };
+            result.push(GripDef {
+                id,
+                world,
+                is_midpoint: source.is_midpoint,
+                shape: source.shape,
+                dir: source.dir.and_then(transform_vector),
+                axis: source.axis.and_then(transform_vector),
+            });
+        }
+    }
+    result
+}
+
+fn apply_loft_section_grip(
+    value: &mut SolidHistoryLoft,
+    mut index: usize,
+    apply: GripApply,
+) -> bool {
+    if !value.guides.is_empty() {
+        return false;
+    }
+    let Some(transform) = matrix(value.base.transform) else {
+        return false;
+    };
+    let inverse = transform.inverse();
+    if !inverse.is_finite() {
+        return false;
+    }
+    let local_apply = match apply {
+        GripApply::Absolute(world) => {
+            let local = inverse.transform_point3(world);
+            if !local.is_finite() {
+                return false;
+            }
+            GripApply::Absolute(local)
+        }
+        GripApply::Translate(world_delta) => {
+            let local_delta = inverse.transform_vector3(world_delta);
+            if !local_delta.is_finite() || local_delta.length_squared() <= 1e-24 {
+                return false;
+            }
+            GripApply::Translate(local_delta)
+        }
+    };
+    for section in &mut value.cross_sections {
+        let Some(mut entity) = embedded_entity(section) else {
+            continue;
+        };
+        let grips = entity.grips();
+        if index >= grips.len() {
+            index -= grips.len();
+            continue;
+        }
+        let grip_id = grips[index].id;
+        entity.apply_grip(grip_id, local_apply);
+        let Some(entity) = into_embedded_entity(entity) else {
+            return false;
+        };
+        *section = entity;
+        return true;
+    }
+    false
+}
+
+fn revolve_profile_matrix(value: &SolidHistoryRevolve) -> Option<glam::DMat4> {
+    let base = matrix(value.base.transform)?;
+    let axis_point = glam::DVec3::new(
+        value.axis_point.x,
+        value.axis_point.y,
+        value.axis_point.z,
+    );
+    let axis = glam::DVec3::new(value.direction.x, value.direction.y, value.direction.z)
+        .try_normalize()?;
+    if !axis_point.is_finite() || !value.start_angle.is_finite() {
+        return None;
+    }
+    Some(
+        base
+            * glam::DMat4::from_translation(axis_point)
+            * glam::DMat4::from_axis_angle(axis, value.start_angle)
+            * glam::DMat4::from_translation(-axis_point),
+    )
+}
+
+fn revolve_profile_grips(value: &SolidHistoryRevolve) -> Vec<GripDef> {
+    let Some(profile) = value.sweep_entity.as_ref().and_then(embedded_entity) else {
+        return Vec::new();
+    };
+    let Some(transform) = revolve_profile_matrix(value) else {
+        return Vec::new();
+    };
+    profile
+        .grips()
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, source)| {
+            let world = transform.transform_point3(source.world);
+            if !world.is_finite() {
+                return None;
+            }
+            let transform_vector = |vector: glam::DVec3| {
+                let vector = transform.transform_vector3(vector);
+                (vector.length_squared() > 1e-12).then(|| vector.normalize())
+            };
+            Some(GripDef {
+                id: GRIP_REVOLVE_PROFILE_FIRST + index,
+                world,
+                is_midpoint: source.is_midpoint,
+                shape: source.shape,
+                dir: source.dir.and_then(transform_vector),
+                axis: source.axis.and_then(transform_vector),
+            })
+        })
+        .collect()
+}
+
+fn apply_revolve_profile_grip(
+    value: &mut SolidHistoryRevolve,
+    index: usize,
+    apply: GripApply,
+) -> bool {
+    let Some(mut profile) = value.sweep_entity.as_ref().and_then(embedded_entity) else {
+        return false;
+    };
+    let Some(source) = profile.grips().get(index).cloned() else {
+        return false;
+    };
+    let Some(transform) = revolve_profile_matrix(value) else {
+        return false;
+    };
+    let inverse = transform.inverse();
+    if !inverse.is_finite() {
+        return false;
+    }
+    let apply = match apply {
+        GripApply::Absolute(world) => {
+            let local = inverse.transform_point3(world);
+            if !local.is_finite() {
+                return false;
+            }
+            GripApply::Absolute(local)
+        }
+        GripApply::Translate(delta) => {
+            let local = inverse.transform_vector3(delta);
+            if !local.is_finite() || local.length_squared() <= 1e-24 {
+                return false;
+            }
+            GripApply::Translate(local)
+        }
+    };
+    profile.apply_grip(source.id, apply);
+    let Some(profile) = into_embedded_entity(profile) else {
+        return false;
+    };
+    value.sweep_entity = Some(profile);
+    true
+}
+
+fn extrusion_draft_grip(
+    value: &SolidHistorySweep,
+) -> Option<(glam::DVec3, glam::DVec3, glam::DVec3, f64, f64)> {
+    if value.path_entity.is_some() {
+        return None;
+    }
+    let (profile_grips, center) = extrusion_profile_grips(value);
+    let center = center?;
+    let transform = profile_matrix(value)?;
+    let inverse = transform.inverse();
+    if !inverse.is_finite() {
+        return None;
+    }
+    let profile = value.sweep_entity.as_ref().and_then(embedded_entity)?;
+    let normal = crate::entities::curve::entity_curve(&profile)?.plane.normal()?;
+    let normal = transform
+        .transform_vector3(glam::DVec3::from_array(normal))
+        .try_normalize()?;
+    let center_local = inverse.transform_point3(center);
+    let anchor = profile_grips
+        .into_iter()
+        .filter_map(|grip| {
+            let local = inverse.transform_point3(grip.world);
+            let radius = (grip.world - center).length_squared();
+            (local.is_finite() && radius > 1e-12).then_some((grip.world, local))
+        })
+        .min_by(|(_, a), (_, b)| {
+            a.x.total_cmp(&b.x)
+                .then_with(|| {
+                    (a.y - center_local.y)
+                        .abs()
+                        .total_cmp(&(b.y - center_local.y).abs())
+                })
+                .then_with(|| {
+                    (a.z - center_local.z)
+                        .abs()
+                        .total_cmp(&(b.z - center_local.z).abs())
+                })
+        })?
+        .0;
+    let radial = anchor - center;
+    let radial_length = radial.length();
+    if !radial_length.is_finite() || radial_length <= 1e-6 {
+        return None;
+    }
+    let radial = radial / radial_length;
+    let base = matrix(value.base.transform)?;
+    let direction = base.transform_vector3(glam::DVec3::new(
+        value.direction.x,
+        value.direction.y,
+        value.direction.z,
+    ));
+    let height = direction.dot(normal).abs();
+    if !direction.is_finite() || !height.is_finite() || height <= 1e-6 {
+        return None;
+    }
+    let draft_offset = -height * value.draft_angle.tan();
+    if !draft_offset.is_finite() {
+        return None;
+    }
+    let base_top = anchor + direction;
+    let world = base_top + radial * draft_offset;
+    world
+        .is_finite()
+        .then_some((world, base_top, radial, radial_length, height))
+}
+
+fn apply_extrusion_draft_grip(value: &mut SolidHistorySweep, apply: GripApply) -> bool {
+    let GripApply::Absolute(world) = apply else {
+        return false;
+    };
+    let Some((_, base_top, radial, _, height)) = extrusion_draft_grip(value) else {
+        return false;
+    };
+    let top_offset = (world - base_top).dot(radial);
+    if !top_offset.is_finite() {
+        return false;
+    }
+    let limit = 89.0_f64.to_radians();
+    let desired = (-top_offset).atan2(height).clamp(-limit, limit);
+    let angle = if desired > 0.0 && !extrusion_draft_rebuilds(value, desired) {
+        // The maximum inset is profile-dependent. A corner radius is too
+        // restrictive for many outlines, while allowing the pointer through
+        // a collapsed outline makes the top grow again. Search the actual
+        // rebuild boundary so every supported profile reaches its smallest
+        // valid top without crossing into an inverted result.
+        let mut valid = 0.0;
+        let mut invalid = limit;
+        for _ in 0..16 {
+            let candidate = (valid + invalid) * 0.5;
+            if extrusion_draft_rebuilds(value, candidate) {
+                valid = candidate;
+            } else {
+                invalid = candidate;
+            }
+        }
+        valid
+    } else {
+        desired
+    };
+    if !angle.is_finite() || (angle - value.draft_angle).abs() <= 1e-12 {
+        return false;
+    }
+    value.draft_angle = angle;
+    true
+}
+
+fn extrusion_draft_rebuilds(value: &SolidHistorySweep, angle: f64) -> bool {
+    let mut candidate = value.clone();
+    candidate.draft_angle = angle;
+    let Some(profile) = candidate.sweep_entity.as_ref() else {
+        return false;
+    };
+    let Ok((_, _, closed)) = cadkernel::acis::sweep_profile_geometry(
+        profile, candidate.sweep_entity_transform,
+    ) else {
+        return false;
+    };
+    cadkernel::acis::rebuild_extrusion_with_mode(&candidate, !closed).is_ok()
 }
 
 fn grip(
@@ -676,11 +3134,49 @@ pub fn primitive_grips(
                 Some([0.0, 0.0, 1.0]),
             );
         }
-        SolidHistoryOperation::Cylinder(value) | SolidHistoryOperation::Cone(value) => {
+        SolidHistoryOperation::Cylinder(value) => {
+            let scale = value
+                .major_radius
+                .abs()
+                .max(value.minor_radius.abs())
+                .max(1.0);
+            if (value.major_radius - value.minor_radius).abs() > 1e-9 * scale {
+                add(
+                    GRIP_MAJOR_RADIUS,
+                    value.base.transform,
+                    [value.major_radius, 0.0, value.height * 0.5],
+                    GripShape::Square,
+                    None,
+                );
+                add(
+                    GRIP_MINOR_RADIUS,
+                    value.base.transform,
+                    [0.0, value.minor_radius, value.height * 0.5],
+                    GripShape::Square,
+                    None,
+                );
+            } else {
+                add(
+                    GRIP_RADIUS,
+                    value.base.transform,
+                    [value.major_radius, 0.0, value.height * 0.5],
+                    GripShape::Square,
+                    None,
+                );
+            }
+            add(
+                GRIP_HEIGHT,
+                value.base.transform,
+                [0.0, 0.0, value.height],
+                GripShape::Square,
+                Some([0.0, 0.0, 1.0]),
+            );
+        }
+        SolidHistoryOperation::Cone(value) => {
             add(
                 GRIP_RADIUS,
                 value.base.transform,
-                [value.major_radius, 0.0, value.height * 0.5],
+                [value.base_x_radius, 0.0, 0.0],
                 GripShape::Square,
                 None,
             );
@@ -701,22 +3197,18 @@ pub fn primitive_grips(
         ),
         SolidHistoryOperation::Torus(value) => {
             add(
-                GRIP_OUTER_RADIUS,
+                GRIP_MAJOR_RADIUS,
                 value.base.transform,
-                [value.major_radius + value.minor_radius, 0.0, 0.0],
+                [value.major_radius, 0.0, 0.0],
                 GripShape::Square,
                 None,
             );
             add(
-                GRIP_INNER_RADIUS,
+                GRIP_MINOR_RADIUS,
                 value.base.transform,
-                [
-                    (value.major_radius - value.minor_radius).max(0.0),
-                    0.0,
-                    0.0,
-                ],
+                [value.major_radius, 0.0, value.minor_radius],
                 GripShape::Square,
-                None,
+                Some([0.0, 0.0, 1.0]),
             );
         }
         SolidHistoryOperation::Pyramid(value) => {
@@ -728,13 +3220,20 @@ pub fn primitive_grips(
                 None,
             );
             add(
+                GRIP_TOP_RADIUS,
+                value.base.transform,
+                [value.top_radius, 0.0, value.height],
+                GripShape::Square,
+                None,
+            );
+            add(
                 GRIP_HEIGHT,
                 value.base.transform,
                 [0.0, 0.0, value.height],
                 GripShape::Square,
                 Some([0.0, 0.0, 1.0]),
             );
-            let angle = (value.sides.clamp(3, 71) as f64 * 5.0).to_radians();
+            let angle = (value.sides.clamp(3, 32) as f64 * 5.0).to_radians();
             add(
                 GRIP_SIDES,
                 value.base.transform,
@@ -742,6 +3241,53 @@ pub fn primitive_grips(
                 GripShape::Triangle,
                 None,
             );
+        }
+        SolidHistoryOperation::Sweep(value) => {
+            if let Some((profile, path)) = sweep_placement_matrices(value) {
+                grips.extend(sweep_embedded_grips(
+                    value.sweep_entity.as_ref(), profile, GRIP_SWEEP_PROFILE_FIRST,
+                ));
+                grips.extend(sweep_embedded_grips(
+                    value.path_entity.as_ref(), path, GRIP_SWEEP_PATH_FIRST,
+                ));
+            }
+        }
+        SolidHistoryOperation::Loft(value) => grips.extend(loft_section_grips(value)),
+        SolidHistoryOperation::Revolve(value) => {
+            add(
+                GRIP_REVOLVE_AXIS,
+                value.base.transform,
+                [value.axis_point.x, value.axis_point.y, value.axis_point.z],
+                GripShape::Square,
+                None,
+            );
+            grips.extend(revolve_profile_grips(value));
+        }
+        SolidHistoryOperation::Extrusion(value) => {
+            let (profile_grips, profile_center) = extrusion_profile_grips(value);
+            grips.extend(profile_grips);
+            let direction = [value.direction.x, value.direction.y, value.direction.z];
+            if value.path_entity.is_none() {
+                if let (Some(center), Some(base)) = (profile_center, matrix(value.base.transform)) {
+                    let direction = base.transform_vector3(glam::DVec3::from_array(direction));
+                    if direction.length_squared() > 1e-12 {
+                        grips.push(grip(
+                            GRIP_HEIGHT,
+                            center + direction,
+                            GripShape::Triangle,
+                            Some(direction.normalize()),
+                        ));
+                    }
+                }
+                if let Some((world, _, radial, _, _)) = extrusion_draft_grip(value) {
+                    grips.push(grip(
+                        GRIP_DRAFT,
+                        world,
+                        GripShape::Triangle,
+                        Some(radial),
+                    ));
+                }
+            }
         }
         _ => {}
     }
@@ -753,6 +3299,48 @@ pub fn apply_primitive_grip(
     grip_id: usize,
     apply: GripApply,
 ) -> bool {
+    if let SolidHistoryOperation::Revolve(value) = operation {
+        if let Some(index) = grip_id.checked_sub(GRIP_REVOLVE_PROFILE_FIRST) {
+            return apply_revolve_profile_grip(value, index, apply);
+        }
+    }
+    if let SolidHistoryOperation::Loft(value) = operation {
+        if let Some(index) = grip_id.checked_sub(GRIP_LOFT_SECTION_FIRST) {
+            return apply_loft_section_grip(value, index, apply);
+        }
+    }
+    if let SolidHistoryOperation::Sweep(value) = operation {
+        let Some((profile, path)) = sweep_placement_matrices(value) else {
+            return false;
+        };
+        if let Some(index) = grip_id.checked_sub(GRIP_SWEEP_PATH_FIRST) {
+            return apply_sweep_embedded_grip(
+                &mut value.path_entity,
+                path,
+                index,
+                apply,
+            );
+        }
+        if let Some(index) = grip_id
+            .checked_sub(GRIP_SWEEP_PROFILE_FIRST)
+            .filter(|_| grip_id < GRIP_SWEEP_PATH_FIRST)
+        {
+            return apply_sweep_embedded_grip(
+                &mut value.sweep_entity,
+                profile,
+                index,
+                apply,
+            );
+        }
+    }
+    if let SolidHistoryOperation::Extrusion(value) = operation {
+        if let Some(index) = grip_id.checked_sub(GRIP_PROFILE_FIRST) {
+            return apply_extrusion_profile_grip(value, index, apply);
+        }
+        if grip_id == GRIP_DRAFT {
+            return apply_extrusion_draft_grip(value, apply);
+        }
+    }
     let GripApply::Absolute(world) = apply else {
         return false;
     };
@@ -825,7 +3413,7 @@ pub fn apply_primitive_grip(
                 _ => return false,
             }
         }
-        SolidHistoryOperation::Cylinder(value) | SolidHistoryOperation::Cone(value) => {
+        SolidHistoryOperation::Cylinder(value) => {
             match grip_id {
                 GRIP_RADIUS => {
                     let radius = local.x.hypot(local.y).max(1e-6);
@@ -833,41 +3421,94 @@ pub fn apply_primitive_grip(
                     value.minor_radius = radius;
                     value.x_radius = radius;
                 }
+                GRIP_MAJOR_RADIUS => {
+                    value.major_radius = local.x.abs().max(1e-6);
+                    if !canonicalize_cylinder_radii(value) {
+                        return false;
+                    }
+                }
+                GRIP_MINOR_RADIUS => {
+                    value.minor_radius = local.y.abs().max(1e-6);
+                    if !canonicalize_cylinder_radii(value) {
+                        return false;
+                    }
+                }
                 GRIP_HEIGHT => value.height = local.z.max(1e-6),
                 _ => return false,
             }
         }
+        SolidHistoryOperation::Cone(value) => match grip_id {
+            GRIP_RADIUS => {
+                let radius = local.x.hypot(local.y).max(1e-6);
+                let ratio = if value.base_x_radius > 1e-9 {
+                    value.base_y_radius / value.base_x_radius
+                } else {
+                    1.0
+                };
+                value.base_x_radius = radius;
+                value.base_y_radius = radius * ratio;
+            }
+            GRIP_HEIGHT => value.height = local.z.max(1e-6),
+            _ => return false,
+        },
         SolidHistoryOperation::Sphere(value) if grip_id == GRIP_RADIUS => {
             value.radius = local.length().max(1e-6);
         }
         SolidHistoryOperation::Torus(value) => match grip_id {
-            GRIP_OUTER_RADIUS => {
-                let outer = local.x.hypot(local.y).max(1e-6);
-                let inner = (value.major_radius - value.minor_radius).max(1e-6);
-                if outer <= inner {
-                    return false;
-                }
-                value.major_radius = (outer + inner) * 0.5;
-                value.minor_radius = (outer - inner) * 0.5;
-            }
-            GRIP_INNER_RADIUS => {
-                let inner = local.x.hypot(local.y).max(1e-6);
-                let outer = value.major_radius + value.minor_radius;
-                if inner >= outer {
-                    return false;
-                }
-                value.major_radius = (outer + inner) * 0.5;
-                value.minor_radius = (outer - inner) * 0.5;
-            }
+            GRIP_MAJOR_RADIUS => value.major_radius = local.x.hypot(local.y).max(1e-6),
+            GRIP_MINOR_RADIUS => value.minor_radius = local.z.abs().max(1e-6),
             _ => return false,
         },
         SolidHistoryOperation::Pyramid(value) => match grip_id {
             GRIP_RADIUS => value.radius = local.x.hypot(local.y).max(1e-6),
+            GRIP_TOP_RADIUS => {
+                value.top_radius = local.x.hypot(local.y).max(0.0);
+            }
             GRIP_HEIGHT => value.height = local.z.max(1e-6),
             GRIP_SIDES => {
                 let angle = local.y.atan2(local.x).rem_euclid(std::f64::consts::TAU);
-                value.sides = (angle.to_degrees() / 5.0).round() as i32;
-                value.sides = value.sides.clamp(3, 71);
+                let sides = ((angle.to_degrees() / 5.0).round() as i32).clamp(3, 32);
+                if !set_pyramid_sides(value, sides) {
+                    return false;
+                }
+            }
+            _ => return false,
+        },
+        SolidHistoryOperation::Revolve(value) if grip_id == GRIP_REVOLVE_AXIS => {
+            value.axis_point = acadrust::types::Vector3::new(local.x, local.y, local.z);
+        }
+        SolidHistoryOperation::Extrusion(value) => match grip_id {
+            GRIP_HEIGHT => {
+                if value.path_entity.is_some() {
+                    return false;
+                }
+                let (_, Some(profile_center)) = extrusion_profile_grips(value) else {
+                    return false;
+                };
+                let Some(current) = matrix(value.base.transform) else {
+                    return false;
+                };
+                let direction = current
+                    .inverse()
+                    .transform_vector3(world - profile_center);
+                let height = direction.length();
+                if !direction.is_finite() || !height.is_finite() || height <= 1e-6 {
+                    return false;
+                }
+                let current = glam::DVec3::new(
+                    value.direction.x,
+                    value.direction.y,
+                    value.direction.z,
+                );
+                if (direction - current).length_squared() <= 1e-24 {
+                    return false;
+                }
+                value.direction = acadrust::types::Vector3::new(
+                    direction.x,
+                    direction.y,
+                    direction.z,
+                );
+                value.end_draft_distance = height;
             }
             _ => return false,
         },
@@ -930,19 +3571,38 @@ pub fn cylinder_op(
     })
 }
 
-pub fn cone_op(
+pub fn elliptical_cylinder_op(
     transform: [f64; 16],
-    radius: f64,
+    major_radius: f64,
+    minor_radius: f64,
     height: f64,
 ) -> SolidHistoryOperation {
-    SolidHistoryOperation::Cone(SolidHistoryCylinder {
+    SolidHistoryOperation::Cylinder(SolidHistoryCylinder {
         base: base(transform),
         operation_major: 1,
         height,
-        major_radius: radius,
-        minor_radius: radius,
-        x_radius: radius,
+        major_radius,
+        minor_radius,
+        x_radius: major_radius,
         ..SolidHistoryCylinder::default()
+    })
+}
+
+pub fn cone_op(
+    transform: [f64; 16],
+    base_x_radius: f64,
+    base_y_radius: f64,
+    top_radius: f64,
+    height: f64,
+) -> SolidHistoryOperation {
+    SolidHistoryOperation::Cone(SolidHistoryCone {
+        base: base(transform),
+        operation_major: 1,
+        height,
+        base_x_radius,
+        base_y_radius,
+        top_radius,
+        ..SolidHistoryCone::default()
     })
 }
 
@@ -972,15 +3632,19 @@ pub fn torus_op(
 pub fn pyramid_op(
     transform: [f64; 16],
     radius: f64,
+    top_radius: f64,
     height: f64,
     sides: usize,
+    inscribed: bool,
 ) -> SolidHistoryOperation {
     SolidHistoryOperation::Pyramid(SolidHistoryPyramid {
         base: base(transform),
         operation_major: 1,
+        operation_minor: if inscribed { -1 } else { 0 },
         height,
         sides: sides as i32,
         radius,
+        top_radius,
         ..SolidHistoryPyramid::default()
     })
 }

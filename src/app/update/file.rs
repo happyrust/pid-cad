@@ -364,6 +364,7 @@ impl OpenCADStudio {
             pick_box: self.pick_box,
             cursor_type: self.cursor_type,
             crosshair_color: self.crosshair_color,
+            lineweight_display_scale: self.lineweight_display_scale,
             isometric_drafting: self.isometric_drafting,
             iso_plane: self.iso_plane,
             snap_angle_deg: self.snap_angle_deg,
@@ -392,10 +393,13 @@ impl OpenCADStudio {
             pick_add: self.pick_add,
             pick_drag_rect: self.pick_drag_rect,
             quick_properties: self.quick_properties,
-            bg_color: self.default_bg_color.map(f4_to_u3),
-            paper_bg_color: self.default_paper_bg_color.map(f4_to_u3),
+            bg_color: None,
+            paper_bg_color: None,
             language: self.language,
             cliprompt_lines: crate::app::settings::clamp_clipromptlines(self.cliprompt_lines),
+            commandline_fade_ms: crate::app::settings::clamp_commandline_fade_ms(
+                self.commandline_fade_ms,
+            ),
             block_mru: self.block_mru.clone(),
             block_freq: self.block_freq.clone(),
         }
@@ -416,6 +420,7 @@ impl OpenCADStudio {
             .crosshair_color
             .map(crate::app::config::rgb_to_hex)
             .unwrap_or_default();
+        self.lineweight_display_scale = s.lineweight_display_scale.clamp(25, 200);
         self.isometric_drafting = s.isometric_drafting;
         self.iso_plane = s.iso_plane;
         self.snap_angle_deg = if s.snap_angle_deg.is_finite() {
@@ -453,14 +458,18 @@ impl OpenCADStudio {
         self.pick_add = s.pick_add;
         self.pick_drag_rect = s.pick_drag_rect;
         self.quick_properties = s.quick_properties;
-        self.default_bg_color = s.bg_color.map(u3_to_f4);
-        self.default_paper_bg_color = s.paper_bg_color.map(u3_to_f4);
+        // Legacy settings.bg_color / paper_bg_color are superseded by model_space config.
         if crate::i18n::set_language(s.language).is_ok() {
             self.language = s.language;
         }
         self.cliprompt_lines = crate::app::settings::clamp_clipromptlines(s.cliprompt_lines);
         self.command_line
             .set_cliprompt_lines(self.cliprompt_lines.clamp(0, 50) as u8);
+        self.commandline_fade_ms =
+            crate::app::settings::clamp_commandline_fade_ms(s.commandline_fade_ms);
+        self.command_line.set_commandline_fade_ms(
+            self.commandline_fade_ms.clamp(0, 60000) as u32,
+        );
         // Block usage: clone but cap to sane sizes (MRU 20, freq map 200)
         self.block_mru = s.block_mru.iter().take(20).cloned().collect();
         self.block_freq = s
@@ -469,11 +478,10 @@ impl OpenCADStudio {
             .take(200)
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-        // Push the restored background onto every drawing tab that exists now
-        // (the start tab and any initial drawing). Tabs created later pick it
-        // up via `apply_bg_default` at their construction site.
+        // Push restored display defaults onto every drawing tab that exists now.
+        // Tabs created later pick them up at their construction site.
         for idx in 0..self.tabs.len() {
-            self.apply_bg_default(idx);
+            self.apply_display_defaults(idx);
         }
         self.rebuild_ribbon_modules();
     }
@@ -596,17 +604,16 @@ impl OpenCADStudio {
         h.object_snap_mode = osmode;
     }
 
-    /// Apply the persisted default background(s) to tab `idx`. No-op for the
-    /// start tab or when no default is set. Refreshes the tab's cached wires
-    /// and meshes so background-adaptive colours pick up the change.
-    pub(in crate::app) fn apply_bg_default(&mut self, idx: usize) {
+    /// Apply persisted viewport display defaults to tab `idx`.
+    pub(in crate::app) fn apply_display_defaults(&mut self, idx: usize) {
         let bg = self.default_bg_color;
         let paper_bg = self.default_paper_bg_color;
-        if bg.is_none() && paper_bg.is_none() {
-            return;
-        }
         let tab = &mut self.tabs[idx];
         if tab.is_start {
+            return;
+        }
+        tab.scene.model_lineweight_scale = self.lineweight_display_scale as f32 / 100.0;
+        if bg.is_none() && paper_bg.is_none() {
             return;
         }
         if let Some(c) = bg {
@@ -775,6 +782,7 @@ impl OpenCADStudio {
                     .map(|(key, command)| (key.clone(), command.clone()))
                     .collect(),
             },
+            model_space: self.model_space.clone(),
         }
     }
 
@@ -784,6 +792,23 @@ impl OpenCADStudio {
         self.ui_theme = cfg.theme.clone();
         self.active_theme = self.ui_theme.to_iced();
         self.theme_color_inputs = self.ui_theme.palette.hex_values();
+        self.model_space = cfg.model_space;
+        self.model_bg_input = self
+            .model_space
+            .custom_bg
+            .map(crate::app::config::rgb_to_hex)
+            .unwrap_or_default();
+        self.paper_bg_input = self
+            .model_space
+            .custom_paper_bg
+            .map(crate::app::config::rgb_to_hex)
+            .unwrap_or_default();
+        self.desk_bg_input = self
+            .model_space
+            .custom_desk_bg
+            .map(crate::app::config::rgb_to_hex)
+            .unwrap_or_default();
+        self.sync_model_space_theme(false);
         self.recent_files = cfg
             .recent
             .files
@@ -828,6 +853,40 @@ impl OpenCADStudio {
         // move. The release message saves the final height once.
         if !self.command_history_resizing {
             self.save_config();
+        }
+    }
+
+    /// Sync the active theme and model space configuration into all open tabs
+    /// and the application default background settings.
+    pub(in crate::app) fn sync_model_space_theme(&mut self, geometry_changed: bool) {
+        let model_bg = self.model_space.resolve_model_bg(&self.active_theme);
+        let paper_bg = self.model_space.resolve_paper_bg();
+        let sel_color = self.model_space.resolve_selection_color();
+        let sel_effect = self.model_space.selection_effect;
+        self.default_bg_color = Some(model_bg);
+        self.default_paper_bg_color = Some(paper_bg);
+
+        for tab in &mut self.tabs {
+            let old_bg = tab.scene.bg_color;
+            let old_paper = tab.scene.paper_bg_color;
+            let old_sel_color = tab.scene.selection_color;
+            let old_sel_effect = tab.scene.selection_effect;
+            tab.scene.bg_color = model_bg;
+            tab.scene.paper_bg_color = paper_bg;
+            tab.scene.selection_color = sel_color;
+            tab.scene.selection_effect = sel_effect;
+            tab.bg_color = Some(model_bg);
+            tab.paper_bg_color = Some(paper_bg);
+
+            if old_sel_color != sel_color || old_sel_effect != sel_effect {
+                tab.scene.selection_generation = tab.scene.selection_generation.wrapping_add(1);
+            }
+
+            if geometry_changed || old_bg != model_bg || old_paper != paper_bg {
+                tab.scene.recolor_meshes();
+                tab.scene.bump_geometry();
+            }
+            tab.scene.request_refresh(crate::scene::ViewportRefreshScope::All);
         }
     }
 
@@ -1298,7 +1357,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     self.tabs.push(new_tab);
                     let idx = self.tabs.len() - 1;
                     self.active_tab = idx;
-                    self.apply_bg_default(idx);
+                    self.apply_display_defaults(idx);
                     idx
                 };
 
@@ -1409,7 +1468,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     timings.purge_ms,
                     timings.xref_ms,
                     timings.caches_ms,
-                    timings.prepare_ms,
+                    timings.finalize_ms,
                     timings.prepare_wires_ms,
                     timings.prepare_index_ms,
                     total_ms
@@ -1429,6 +1488,8 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 if let Some(prepared) = prepared_geometry {
                     self.tabs[i].scene.install_prepared_open_geometry(prepared);
                 }
+                // Pay for the interaction index here, not on the first hover.
+                self.tabs[i].scene.warm_interaction_caches();
                 self.tabs[i]
                     .scene
                     .replace_selection(rustc_hash::FxHashSet::default());
@@ -2423,7 +2484,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         self.tab_counter += 1;
         self.tabs[i] = crate::app::document::DocumentTab::new_drawing(self.tab_counter);
         self.active_tab = i;
-        self.apply_bg_default(i);
+        self.apply_display_defaults(i);
         self.update(Message::OpenPathPicked(Some((
             conflict.path,
             metadata.len(),

@@ -38,7 +38,7 @@ pub const VIEWCUBE_PAD: f32 = 12.0;
 pub const NAV_INSET_F: f32 = 2.0;
 /// Side of the whole nav widget (cube + compass ring + controls) in pixels.
 pub const VIEWCUBE_REGION_PX: f32 = VIEWCUBE_DRAW_PX * NAV_INSET_F;
-pub const VIEWCUBE_RENDER_PX: f32 = VIEWCUBE_REGION_PX + 8.0;
+pub const VIEWCUBE_RENDER_PX: f32 = VIEWCUBE_REGION_PX + 20.0;
 /// Z height of the compass ring + cardinals in cube-local space. The cube
 /// spans ±1, so −1 parks the ring at the cube's base — it sits *under* the
 /// cube in 3D views and reads as a ground compass.
@@ -1078,43 +1078,54 @@ pub struct ViewCubePipeline {
 
 impl ViewCubePipeline {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        use wgpu::util::DeviceExt;
         let (verts, idxs) = build_geometry();
         let line_verts = surface_edge_lines(&verts, &idxs);
         let (ring_verts, ring_idxs) = build_ring_geometry();
         let ring_line_verts = surface_edge_lines(&ring_verts, &ring_idxs);
         let cube_px = VIEWCUBE_PX;
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vc.vb"),
-            contents: bytemuck::cast_slice(&verts),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vc.ib"),
-            contents: bytemuck::cast_slice(&idxs),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-        let line_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vc.line_vb"),
-            contents: bytemuck::cast_slice(&line_verts),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let ring_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vc.ring_vb"),
-            contents: bytemuck::cast_slice(&ring_verts),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let ring_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vc.ring_ib"),
-            contents: bytemuck::cast_slice(&ring_idxs),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let vertex_buffer = super::gpu_upload::upload_buffer(
+            device,
+            queue,
+            "vc.vb",
+            &verts,
+            wgpu::BufferUsages::VERTEX,
+        );
+        let index_buffer = super::gpu_upload::upload_buffer(
+            device,
+            queue,
+            "vc.ib",
+            &idxs,
+            wgpu::BufferUsages::INDEX,
+        );
+        let line_vertex_buffer = super::gpu_upload::upload_buffer(
+            device,
+            queue,
+            "vc.line_vb",
+            &line_verts,
+            wgpu::BufferUsages::VERTEX,
+        );
+        let ring_vertex_buffer = super::gpu_upload::upload_buffer(
+            device,
+            queue,
+            "vc.ring_vb",
+            &ring_verts,
+            wgpu::BufferUsages::VERTEX,
+        );
+        let ring_index_buffer = super::gpu_upload::upload_buffer(
+            device,
+            queue,
+            "vc.ring_ib",
+            &ring_idxs,
+            wgpu::BufferUsages::INDEX,
+        );
         let ring_line_vertex_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("vc.ring_line_vb"),
-                contents: bytemuck::cast_slice(&ring_line_verts),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+            super::gpu_upload::upload_buffer(
+                device,
+                queue,
+                "vc.ring_line_vb",
+                &ring_line_verts,
+                wgpu::BufferUsages::VERTEX,
+            );
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vc.ub"),
             size: std::mem::size_of::<CubeUniforms>() as u64,
@@ -1291,11 +1302,13 @@ impl ViewCubePipeline {
                 ],
             });
         let composite_uniform_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("vc.composite_uniform"),
-                contents: bytemuck::cast_slice(&[1.0f32, 1.0, 0.0, 0.0]),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
+            super::gpu_upload::upload_buffer(
+                device,
+                queue,
+                "vc.composite_uniform",
+                &[1.0f32, 1.0, 0.0, 0.0],
+                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            );
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("vc.composite_sampler"),
             mag_filter: wgpu::FilterMode::Nearest,

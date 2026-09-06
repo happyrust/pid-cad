@@ -20,6 +20,7 @@ language =
     .polish = Polski
     .chinese-traditional = 繁體中文
     .bulgarian = Български
+    .greek = Ελληνικά
 
 action =
     .close = إغلاق
@@ -3606,6 +3607,7 @@ dimstyle =
     .move-text-outside-first = نقل النص إلى الخارج أولًا
     .period = نقطة
     .space = مسافة
+    .surveyors-units = وحدات المسّاح
 
 style-manager =
     .alignment-spacing = تباعد المحاذاة

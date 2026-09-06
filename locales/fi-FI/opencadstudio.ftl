@@ -20,6 +20,7 @@ language =
     .polish = Polski
     .chinese-traditional = 繁體中文
     .bulgarian = Български
+    .greek = Ελληνικά
 
 action =
     .close = Sulje
@@ -3586,6 +3587,7 @@ dimstyle =
     .move-text-outside-first = Siirrä teksti ensin ulos
     .period = Kausi
     .space = Välilyönti
+    .surveyors-units = Maanmittausyksiköt
 
 style-manager =
     .alignment-spacing = Tasausvälit

@@ -73,6 +73,7 @@ fn block_entity_transform(
     block_name: &str,
     target: Handle,
     visited: &mut Vec<String>,
+    annotation_scale: f32,
 ) -> Option<acadrust::types::Transform> {
     if visited
         .iter()
@@ -90,12 +91,29 @@ fn block_entity_transform(
 
     visited.push(record.name.clone());
     let transform = record.entity_handles.iter().find_map(|handle| {
-        let EntityType::Insert(insert) = document.get_entity(*handle)? else {
-            return None;
-        };
-        let inner =
-            block_entity_transform(document, &insert.block_name, target, visited)?;
-        Some(inner.then(&insert.get_transform()))
+        let entity = document.get_entity(*handle)?;
+        crate::scene::render_graph::entity_render_block_uses(
+            document,
+            entity,
+            annotation_scale,
+        )
+        .into_iter()
+        .filter(|block_use| block_use.active)
+        .find_map(|block_use| {
+            let inner = block_entity_transform(
+                document,
+                &block_use.insert.block_name,
+                target,
+                visited,
+                annotation_scale,
+            )?;
+            Some(inner.then(&crate::scene::render_graph::insert_transform_with_policy(
+                document,
+                &block_use.insert,
+                annotation_scale,
+                block_use.scale_policy,
+            )))
+        })
     });
     visited.pop();
     transform
@@ -112,6 +130,17 @@ fn is_active_vport_name(name: &str) -> bool {
 }
 
 impl Scene {
+    /// A geometry mutation makes every fitted Model camera AABB stale. Clear
+    /// both the live camera and inactive tile snapshots immediately so no view
+    /// can clip against the old drawing until its bounds are refreshed.
+    pub(super) fn invalidate_projection_bounds(&self) {
+        self.projection_bounds_epoch.set(0);
+        self.camera.borrow_mut().invalidate_model_bounds();
+        for tile in self.model_tiles.borrow_mut().iter_mut() {
+            tile.camera.invalidate_model_bounds();
+        }
+    }
+
     // ── Hit-test convenience: wire name → Handle ──────────────────────────
 
     pub fn handle_from_wire_name(name: &str) -> Option<Handle> {
@@ -297,7 +326,7 @@ impl Scene {
     /// Refresh model bounds without moving the live camera. Reusing `fit_all`
     /// keeps projection framing on the same visibility and outlier filters as
     /// Zoom Extents instead of accepting every finite cached AABB.
-    fn refresh_projection_bounds(&mut self) {
+    pub(crate) fn refresh_projection_bounds(&mut self) {
         if self.current_layout != "Model"
             || self.active_viewport.is_some()
             || (self.projection_bounds_epoch.get() == self.geometry_epoch
@@ -308,7 +337,7 @@ impl Scene {
 
         let saved_camera = self.camera.borrow().clone();
         let saved_generation = self.camera_generation;
-        self.camera.borrow_mut().model_bounds = None;
+        self.camera.borrow_mut().invalidate_model_bounds();
         self.fit_all();
         let refreshed = self.camera.borrow().fitted_model_bounds();
         *self.camera.borrow_mut() = saved_camera;
@@ -461,7 +490,7 @@ impl Scene {
     /// Centre on a text entity stored in a block definition, transformed
     /// through the concrete visible INSERT occurrence that FIND is visiting.
     pub fn center_camera_on_block_entity(&mut self, insert: Handle, entity: Handle) -> bool {
-        let (source, mut transform) = {
+        let (source, transform) = {
             let Some(EntityType::Insert(insert_entity)) = self.document.get_entity(insert) else {
                 return false;
             };
@@ -474,39 +503,19 @@ impl Scene {
                 &insert_entity.block_name,
                 entity,
                 &mut visited,
+                self.annotation_scale,
             ) else {
                 return false;
             };
             (
                 source.clone(),
-                inner.then(&insert_entity.get_transform()),
+                inner.then(&crate::scene::render_graph::insert_transform_at_scale(
+                    &self.document,
+                    insert_entity,
+                    self.annotation_scale,
+                )),
             )
         };
-
-        if (self.annotation_scale - 1.0).abs() > 1e-6 {
-            let Some(EntityType::Insert(insert_entity)) = self.document.get_entity(insert) else {
-                return false;
-            };
-            if insert_entity
-                .common
-                .extended_data
-                .get_record("AcAnnotativeData")
-                .is_some()
-            {
-                let point = insert_entity.insert_point;
-                let scale_about =
-                    acadrust::types::Transform::from_translation(acadrust::types::Vector3::new(
-                        -point.x, -point.y, -point.z,
-                    ))
-                    .then(&acadrust::types::Transform::from_scale(
-                        self.annotation_scale as f64,
-                    ))
-                    .then(&acadrust::types::Transform::from_translation(
-                        acadrust::types::Vector3::new(point.x, point.y, point.z),
-                    ));
-                transform = transform.then(&scale_about);
-            }
-        }
 
         let fallback_z = self.active_camera_target().z;
         let wires = self.tessellate_one(&source);

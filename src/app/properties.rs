@@ -42,7 +42,6 @@ impl OpenCADStudio {
         // Note: the color-picker dropdown is intentionally NOT carried over — a
         // rebuild means the selection (or a property) changed, so the dropdown
         // closes, matching the deselect / reselect / click-away expectation.
-        let color_palette_open = self.tabs[i].properties.color_palette_open;
         let edit_buf = std::mem::take(&mut self.tabs[i].properties.edit_buf);
         let active_field = std::mem::take(&mut self.tabs[i].properties.active_field);
         // Expanded coordinate groups persist across rebuilds AND selection
@@ -441,20 +440,15 @@ impl OpenCADStudio {
                     let display_entity = dispatch::entity_in_working_plane(contextual.as_ref(), plane);
                     let entity = &display_entity;
                     let group_names = self.tabs[i].scene.group_names_for_entity(handle);
-                    let box_primitive =
-                        crate::scene::model::solid_history::is_box_primitive(
+                    let specialized_primitive =
+                        crate::scene::model::solid_history::has_specialized_primitive_properties(
                             &self.tabs[i].scene.document,
                             handle,
                         );
                     let mut sections =
                         dispatch::properties_sectioned(handle, entity, &text_style_names);
-                    if box_primitive {
-                        sections.retain(|section| {
-                            !section.props.iter().any(|property| {
-                                property.field.starts_with("acis_")
-                                    || property.field.starts_with("s3d_")
-                            })
-                        });
+                    if specialized_primitive {
+                        retain_specialized_primitive_sections(&mut sections);
                     }
                     sections.extend(
                         crate::scene::model::solid_history::primitive_properties(
@@ -509,37 +503,59 @@ impl OpenCADStudio {
                     {
                         let doc = &self.tabs[i].scene.document;
                         let common = entity.common();
-                        if let Some(acadrust::objects::ObjectType::BookColor(book)) = common
+                        let named_color = common
                             .color_book_handle
                             .filter(|handle| handle.is_valid())
                             .and_then(|handle| doc.objects.get(&handle))
-                        {
+                            .and_then(|object| match object {
+                                acadrust::objects::ObjectType::BookColor(book) => Some((
+                                    book.color,
+                                    book.book_name.clone(),
+                                    book.color_name.clone(),
+                                )),
+                                _ => None,
+                            })
+                            .or_else(|| {
+                                let identity = common.color_name.as_deref()?;
+                                let (book_name, color_name) = identity
+                                    .split_once('$')
+                                    .map(|(book, color)| (book.to_string(), color.to_string()))
+                                    .unwrap_or_else(|| (String::new(), identity.to_string()));
+                                Some((common.color, book_name, color_name))
+                            });
+                        if let Some((color, book_name, color_name)) = named_color {
                             for section in sections.iter_mut() {
                                 if let Some(row) =
                                     section.props.iter_mut().find(|row| row.field == "color")
                                 {
-                                    row.value =
-                                        crate::scene::model::object::PropValue::ColorChoice(
-                                            book.color,
-                                        );
+                                    row.value = crate::scene::model::object::PropValue::NamedColorChoice {
+                                        color,
+                                        name: color_name.clone(),
+                                    };
                                 }
                             }
                             use crate::entities::common::ro_prop;
+                            let mut props = Vec::new();
+                            if !book_name.is_empty() {
+                                props.push(ro_prop(
+                                    t!("Book").as_ref(),
+                                    "book_color_book",
+                                    book_name,
+                                ));
+                            }
+                            props.push(ro_prop(
+                                t!("Color Name").as_ref(),
+                                "book_color_name",
+                                color_name,
+                            ));
+                            props.push(ro_prop(
+                                t!("Color").as_ref(),
+                                "book_color_value",
+                                format!("{:?}", color),
+                            ));
                             sections.push(crate::scene::model::object::PropSection {
                                 title: t!("Color Book").into_owned(),
-                                props: vec![
-                                    ro_prop(t!("Book").as_ref(), "book_color_book", book.book_name.clone()),
-                                    ro_prop(
-                                        t!("Color Name").as_ref(),
-                                        "book_color_name",
-                                        book.color_name.clone(),
-                                    ),
-                                    ro_prop(
-                                        t!("Color").as_ref(),
-                                        "book_color_value",
-                                        format!("{:?}", book.color),
-                                    ),
-                                ],
+                                props,
                             });
                         }
 
@@ -620,7 +636,7 @@ impl OpenCADStudio {
                         }
                     }
 
-                    if !box_primitive && matches!(
+                    if !specialized_primitive && matches!(
                         entity,
                         acadrust::EntityType::Solid3D(_)
                             | acadrust::EntityType::Region(_)
@@ -694,7 +710,7 @@ impl OpenCADStudio {
                         }
                     }
 
-                    if !box_primitive {
+                    if !specialized_primitive {
                         sections.extend(crate::entities::object_data::sections(
                             &self.tabs[i].scene.document,
                             &self.tabs[i].scene.object_data_cache,
@@ -2052,6 +2068,9 @@ impl OpenCADStudio {
                             });
                         }
                     }
+                    if specialized_primitive {
+                        retain_specialized_primitive_sections(&mut sections);
+                    }
                     let title = match entity {
                         acadrust::EntityType::Insert(ins) => {
                             let is_xref = self.tabs[i]
@@ -2146,6 +2165,19 @@ impl OpenCADStudio {
                         .map(|(handle, entity)| (*handle, entity))
                         .collect();
                     let mut sections = aggregate_sections(&local_refs, &text_style_names);
+                    if local_refs.iter().all(|(handle, _)| {
+                        crate::scene::model::solid_history::has_specialized_primitive_properties(
+                            &self.tabs[i].scene.document,
+                            *handle,
+                        )
+                    }) {
+                        sections.retain(|section| {
+                            !section.props.iter().any(|property| {
+                                property.field.starts_with("acis_")
+                                    || property.field.starts_with("s3d_")
+                            })
+                        });
+                    }
                     sections.extend(aggregate_solid_history_sections(
                         &self.tabs[i].scene.document,
                         &local_refs.iter().map(|(handle, _)| *handle).collect::<Vec<_>>(),
@@ -2186,7 +2218,6 @@ impl OpenCADStudio {
             // Precompute the focused-id → field-key map for O(1) lookups on
             // `PropSyncActive`; derived from `sections`, so rebuild it here.
             panel.field_key_by_id = crate::ui::properties::build_field_key_map(&panel.sections);
-            panel.color_palette_open = color_palette_open;
             let new_handles: Vec<acadrust::Handle> = selected.iter().map(|(h, _)| *h).collect();
             // Carry the in-progress edits only when the selection is unchanged
             // (a commit-triggered rebuild); a genuine selection change starts
@@ -2227,7 +2258,6 @@ impl OpenCADStudio {
                 panel.edit_buf.clear();
                 panel.active_field = None;
                 panel.color_picker_open = false;
-                panel.color_palette_open = false;
                 panel.bg_color_picker_open = false;
                 panel.open_color_field = None;
                 panel.hatch_pattern_picker_open = false;
@@ -2386,7 +2416,7 @@ impl OpenCADStudio {
                     annotation_scale_handle,
                 );
                 let mut entity_grips = dispatch::grips(contextual.as_ref());
-                if crate::scene::model::solid_history::is_box_primitive(
+                if crate::scene::model::solid_history::has_specialized_primitive_properties(
                     &self.tabs[i].scene.document,
                     handle,
                 ) {
@@ -2561,14 +2591,33 @@ impl OpenCADStudio {
         &mut self,
         entity: acadrust::EntityType,
     ) -> Option<Handle> {
-        self.commit_entity_handle_with_dimension_policy(entity, false)
+        self.commit_entity_handle_with_policies(entity, false, false)
     }
 
-    /// Commit an entity, optionally preserving its source dimension style.
     pub(super) fn commit_entity_handle_with_dimension_policy(
+        &mut self,
+        entity: acadrust::EntityType,
+        preserve_dimension_layer_and_style: bool,
+    ) -> Option<Handle> {
+        self.commit_entity_handle_with_policies(
+            entity,
+            preserve_dimension_layer_and_style,
+            false,
+        )
+    }
+
+    pub(super) fn commit_entity_handle_preserve_layer(
+        &mut self,
+        entity: acadrust::EntityType,
+    ) -> Option<Handle> {
+        self.commit_entity_handle_with_policies(entity, false, true)
+    }
+
+    fn commit_entity_handle_with_policies(
         &mut self,
         mut entity: acadrust::EntityType,
         preserve_dimension_layer_and_style: bool,
+        preserve_entity_layer: bool,
     ) -> Option<Handle> {
         let i = self.active_tab;
         let tracks_dimension_chain = matches!(
@@ -2657,7 +2706,7 @@ impl OpenCADStudio {
         };
         if let Some(layer) = explicit_mleader_layer {
             entity.as_entity_mut().set_layer(layer);
-        } else {
+        } else if !preserve_entity_layer {
             let layer = &self.tabs[i].active_layer;
             if layer != "0" || entity.as_entity().layer().is_empty() {
                 entity.as_entity_mut().set_layer(layer.clone());
@@ -2903,6 +2952,7 @@ fn make_sections_read_only(
                 acadrust::types::Color::Index(index) => index.to_string(),
                 acadrust::types::Color::Rgb { r, g, b } => format!("{r},{g},{b}"),
             },
+            PropValue::NamedColorChoice { name, .. } => name.clone(),
             PropValue::ColorVaries
             | PropValue::LwVaries
             | PropValue::FieldLwVaries { .. } => VARIES_LABEL.to_string(),
@@ -3011,6 +3061,28 @@ fn aggregate_solid_history_sections(
     merged
 }
 
+fn retain_specialized_primitive_sections(
+    sections: &mut Vec<crate::scene::model::object::PropSection>,
+) {
+    sections.iter_mut().for_each(|section| {
+        section.props.retain(|property| {
+            matches!(
+                property.field,
+                "color"
+                    | "layer"
+                    | "linetype"
+                    | "linetype_scale"
+                    | "plot_style"
+                    | "lineweight"
+                    | "transparency"
+                    | "hyperlink"
+                    | "material"
+            ) || crate::scene::model::solid_history::is_specialized_property(property.field)
+        });
+    });
+    sections.retain(|section| !section.props.is_empty());
+}
+
 fn merge_sections(
     left: &[crate::scene::model::object::PropSection],
     right: &[crate::scene::model::object::PropSection],
@@ -3062,6 +3134,9 @@ fn merge_prop_value(
             PropValue::LayerChoice(VARIES_LABEL.into())
         }
         (PropValue::ColorChoice(_), PropValue::ColorChoice(_))
+        | (PropValue::NamedColorChoice { .. }, PropValue::NamedColorChoice { .. })
+        | (PropValue::ColorChoice(_), PropValue::NamedColorChoice { .. })
+        | (PropValue::NamedColorChoice { .. }, PropValue::ColorChoice(_))
         | (PropValue::ColorVaries, _)
         | (_, PropValue::ColorVaries) => PropValue::ColorVaries,
         (PropValue::LwChoice(_), PropValue::LwChoice(_))
@@ -3248,6 +3323,9 @@ fn update_row_color(
         };
         match &mut row.value {
             PropValue::ColorChoice(current) => *current = color,
+            PropValue::NamedColorChoice { .. } => {
+                row.value = PropValue::ColorChoice(color)
+            }
             PropValue::ReadOnly(current) => *current = label,
             PropValue::ReadOnlyWithTooltip { value: current, .. } => *current = label,
             _ => {}
@@ -3617,7 +3695,6 @@ mod apply_property_op_tests {
     use acadrust::types::{Color, Vector3};
 
     fn line_handle(app: &mut OpenCADStudio) -> acadrust::Handle {
-        let i = app.active_tab;
         let mut line = Line::new();
         line.start = Vector3::ZERO;
         line.end = Vector3::new(1.0, 0.0, 0.0);
@@ -3720,7 +3797,6 @@ mod chprop_integration_tests {
     use acadrust::types::{Color, LineWeight, Vector3};
 
     fn line_handle(app: &mut OpenCADStudio) -> acadrust::Handle {
-        let i = app.active_tab;
         let mut line = Line::new();
         line.start = Vector3::ZERO;
         line.end = Vector3::new(1.0, 0.0, 0.0);
@@ -3879,7 +3955,6 @@ mod chprop_integration_tests {
     #[test]
     fn ribbon_lineweight_updates_after_change() {
         let mut app = OpenCADStudio::new_for_test();
-        let i = app.active_tab;
         let _h = line_handle(&mut app);
         let _ = app.automation_op(r#"{"op":"select","type":"Line"}"#);
 

@@ -4,27 +4,11 @@
 // attached so eprintln! / panics stay visible while developing.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-mod app;
-mod config;
+use OpenCADStudio::app;
 #[cfg(not(target_arch = "wasm32"))]
-mod cli;
-mod command;
-mod entities;
-mod i18n;
-mod io;
-#[cfg(not(target_arch = "wasm32"))]
-mod network;
-mod modules;
-mod patreon;
-mod discussions;
-mod videos;
-mod plugin;
-mod perf;
-mod scene;
-mod snap;
-mod ui;
-mod par;
-mod sys;
+use OpenCADStudio::{cli, io, mcp, scene};
+#[cfg(target_arch = "wasm32")]
+use OpenCADStudio::sys;
 
 fn main() -> iced::Result {
     // Web (wasm) uses the single-window entry; native uses the multi-window
@@ -73,6 +57,14 @@ fn main() -> iced::Result {
                 size,
             );
             std::process::exit(if ok { 0 } else { 1 });
+        }
+
+        // MCP is a client-neutral local entry point. It uses only stdin,
+        // stdout and the authenticated GUI bridge, so it must run before any
+        // logging or graphics setup can write to the protocol stream.
+        if args.mcp {
+            mcp::run();
+            return Ok(());
         }
 
         // Opt-in logging. `--log LEVEL` seeds RUST_LOG; the subscriber then

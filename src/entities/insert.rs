@@ -185,6 +185,60 @@ impl crate::entities::traits::FallbackTess for Insert {
         )
     }
 }
+pub(crate) fn insert_attribute_entities(
+    document: &acadrust::CadDocument,
+    insert: &acadrust::entities::Insert,
+    annotation_scale: f32,
+    scale_policy: crate::scene::BlockScalePolicy,
+) -> Vec<EntityType> {
+    let visibility = document.header.attribute_visibility;
+    if visibility == 0 || insert.attributes.is_empty() {
+        return Vec::new();
+    }
+    let block_scale = if scale_policy
+        == crate::scene::BlockScalePolicy::FromInsert
+        && insert
+            .common
+            .extended_data
+            .get_record("AcAnnotativeData")
+            .is_some()
+    {
+        annotation_scale as f64
+    } else {
+        1.0
+    };
+    let insertion = insert.insert_point;
+    let scale_about = |point: Vector3| {
+        Vector3::new(
+            insertion.x + (point.x - insertion.x) * block_scale,
+            insertion.y + (point.y - insertion.y) * block_scale,
+            insertion.z + (point.z - insertion.z) * block_scale,
+        )
+    };
+    insert
+        .attributes
+        .iter()
+        .filter(|attribute| {
+            let layer_visible = document
+                .layers
+                .get(&attribute.common.layer)
+                .is_none_or(|layer| !layer.flags.off && !layer.flags.frozen);
+            layer_visible
+                && (visibility == 2
+                    || (!attribute.common.invisible && !attribute.flags.invisible))
+        })
+        .map(|attribute| {
+            let mut attribute = attribute.clone();
+            if (block_scale - 1.0).abs() > 1.0e-6 {
+                attribute.height *= block_scale;
+                attribute.insertion_point = scale_about(attribute.insertion_point);
+                attribute.alignment_point = scale_about(attribute.alignment_point);
+            }
+            EntityType::AttributeEntity(attribute)
+        })
+        .collect()
+}
+
 pub(crate) fn append_insert_attribute_wires(
     wires: &mut Vec<WireModel>,
     document: &acadrust::CadDocument,
@@ -202,98 +256,75 @@ pub(crate) fn append_insert_attribute_wires(
     pslt_factor: f32,
     anno_scale: f32,
 ) {
-    if ins.attributes.is_empty() {
-        return;
-    }
-    // ATTMODE (header.attribute_visibility):
-    //   0 = Off    — every attribute hidden
-    //   1 = Normal — honour per-attribute `invisible` flag (default)
-    //   2 = On     — every attribute forced visible, ignoring its flag
-    let attmode = document.header.attribute_visibility;
-    if attmode == 0 {
-        return;
-    }
-    // Attributes inherit the annotative block scale. Pre-scale them here so
-    // text tessellation stays at a neutral scale.
-    let annotative = ins
-        .common
-        .extended_data
-        .get_record("AcAnnotativeData")
-        .is_some();
-    let block_scale = if annotative { anno_scale as f64 } else { 1.0 };
-    let ip = ins.insert_point;
-    let scale_about = |q: acadrust::types::Vector3| {
-        acadrust::types::Vector3::new(
-            ip.x + (q.x - ip.x) * block_scale,
-            ip.y + (q.y - ip.y) * block_scale,
-            ip.z + (q.z - ip.z) * block_scale,
-        )
-    };
-    for attr in &ins.attributes {
-        let per_attr_hidden = attr.common.invisible || attr.flags.invisible;
-        if attmode == 1 && per_attr_hidden {
-            continue;
-        }
-        let attr_entity = EntityType::AttributeEntity({
-            let mut a = attr.clone();
-            if (block_scale - 1.0).abs() > 1e-6 {
-                a.height *= block_scale;
-                a.insertion_point = scale_about(a.insertion_point);
-                a.alignment_point = scale_about(a.alignment_point);
+    let attributes = insert_attribute_entities(
+        document,
+        ins,
+        anno_scale,
+        crate::scene::BlockScalePolicy::FromInsert,
+    );
+    for offset in crate::scene::render_graph::array_offsets(ins) {
+        let delta = crate::scene::render_graph::insert_instance_translation_delta(
+            document,
+            ins,
+            offset,
+            anno_scale,
+            crate::scene::BlockScalePolicy::FromInsert,
+        );
+        for source in &attributes {
+            let mut attr_entity = source.clone();
+            if delta != Vector3::ZERO {
+                attr_entity.apply_transform(&Transform::from_translation(delta));
             }
-            a
-        });
-        let (sub_color, sub_plen, sub_pat, sub_lw_px, sub_aci) = render::render_style_for_block_sub(
-            document,
-            &attr_entity,
-            ins_color,
-            ins_pat_len,
-            ins_pat,
-            ins_lw_px,
-            ins_layer,
-        );
-        let sub_color = render::adapt_to_bg(sub_color, bg_color);
-        let sub_color = if is_xref && !sel {
-            block_cache::fade_toward_bg(sub_color, bg_color)
-        } else {
-            sub_color
-        };
-        let attr_plottable = if render::is_effective_layer_zero(&attr.common.layer) {
-            ins_layer_plottable
-        } else {
-            document
-                .layers
-                .get(&attr.common.layer)
-                .map(|layer| layer.is_plottable)
-                .unwrap_or(true)
-        };
-        let attr_plottable = ins_layer_plottable && attr_plottable;
-        let sub_aabb = crate::scene::entity_aabb(&attr_entity);
-        let mut attr_wires = tessellate::tessellate(
-            document,
-            insert_handle,
-            &attr_entity,
-            sel,
-            sub_color,
-            sub_plen * pslt_factor,
-            sub_pat.map(|v| v * pslt_factor),
-            sub_lw_px,
-            // Neutral: the attribute is already scaled as part of the block unit
-            // above, so the text path must not scale it a second time.
-            1.0,
-            None,
-            None,
-            bg_color,
-            false,
-        );
-        // Use the INSERT's handle so selection / picking groups attribute
-        // text with the parent insert instead of treating it as a stray text.
-        for w in &mut attr_wires {
-            w.name = insert_handle.value().to_string();
-            w.aci = sub_aci;
-            w.aabb = sub_aabb;
-            w.plot_visible &= attr_plottable;
+            let attr = attr_entity.common();
+            let (sub_color, sub_plen, sub_pat, sub_lw_px, sub_aci) =
+                render::render_style_for_block_sub(
+                    document,
+                    &attr_entity,
+                    ins_color,
+                    ins_pat_len,
+                    ins_pat,
+                    ins_lw_px,
+                    ins_layer,
+                );
+            let sub_color = render::adapt_to_bg(sub_color, bg_color);
+            let sub_color = if is_xref && !sel {
+                block_cache::fade_toward_bg(sub_color, bg_color)
+            } else {
+                sub_color
+            };
+            let attr_plottable = if render::is_effective_layer_zero(&attr.layer) {
+                ins_layer_plottable
+            } else {
+                document
+                    .layers
+                    .get(&attr.layer)
+                    .map(|layer| layer.is_plottable)
+                    .unwrap_or(true)
+            };
+            let attr_plottable = ins_layer_plottable && attr_plottable;
+            let sub_aabb = crate::scene::entity_aabb(&attr_entity);
+            let mut attr_wires = tessellate::tessellate(
+                document,
+                insert_handle,
+                &attr_entity,
+                sel,
+                sub_color,
+                sub_plen * pslt_factor,
+                sub_pat.map(|v| v * pslt_factor),
+                sub_lw_px,
+                1.0,
+                None,
+                None,
+                bg_color,
+                false,
+            );
+            for w in &mut attr_wires {
+                w.name = insert_handle.value().to_string();
+                w.aci = sub_aci;
+                w.aabb = sub_aabb;
+                w.plot_visible &= attr_plottable;
+            }
+            wires.extend(attr_wires);
         }
-        wires.extend(attr_wires);
     }
 }

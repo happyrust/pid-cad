@@ -13,6 +13,7 @@ use crate::scene::model::object::GripShape;
 use crate::scene::SelectionState;
 
 use crate::snap::SnapType;
+use std::sync::Arc;
 
 /// Original crosshair geometry retained at the default setting values.
 pub const CROSSHAIR_SQ: f32 = 7.5;
@@ -68,6 +69,268 @@ pub struct CrosshairOptions {
     pub isometric: bool,
     pub iso_plane: IsoPlane,
     pub snap_angle_deg: f32,
+    pub point_mode: bool,
+}
+
+/// Rendering style for the viewport grid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GridStyle {
+    pub opacity: u8,
+    pub bg_luminance: f32,
+}
+
+impl Default for GridStyle {
+    fn default() -> Self {
+        Self {
+            opacity: 18,
+            bg_luminance: 0.15,
+        }
+    }
+}
+
+/// Visual effect options for selection windows, crossings, entity highlights, and grips.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SelectionVisualOptions {
+    pub area: bool,
+    pub opacity: u8,
+    pub window_color: u8,
+    pub crossing_color: u8,
+    pub highlight_color: u8,
+    pub grip_size: f32,
+    pub grip_color: u8,
+    pub grip_hot: u8,
+    pub grip_hover: u8,
+}
+
+impl Default for SelectionVisualOptions {
+    fn default() -> Self {
+        Self {
+            area: true,
+            opacity: 12,
+            window_color: 0,
+            crossing_color: 0,
+            highlight_color: 0,
+            grip_size: 5.0,
+            grip_color: 0,
+            grip_hot: 0,
+            grip_hover: 0,
+        }
+    }
+}
+
+/// Standard CAD crossing selection color (emerald green: `#33B870` / RGB `0.20, 0.72, 0.44`).
+pub const DEFAULT_CROSSING_COLOR: Color = Color {
+    r: 0.20,
+    g: 0.72,
+    b: 0.44,
+    a: 1.0,
+};
+
+/// Standard CAD window selection color (cobalt blue: `#3370B8` / RGB `0.20, 0.44, 0.72`).
+pub const DEFAULT_WINDOW_COLOR: Color = Color {
+    r: 0.20,
+    g: 0.44,
+    b: 0.72,
+    a: 1.0,
+};
+
+/// Returns the curated (crossing_color, window_color) pair tailored for a specific theme.
+/// Crossing is always a theme-harmonious green/teal variant, and Window is always a theme-harmonious blue/cyan variant.
+pub fn theme_selection_colors(theme: &Theme) -> (Color, Color) {
+    match theme {
+        Theme::Dark => (
+            DEFAULT_CROSSING_COLOR,
+            DEFAULT_WINDOW_COLOR,
+        ),
+        Theme::Light => (
+            Color::from_rgb(0.12, 0.52, 0.30), // Engineering Forest Green
+            Color::from_rgb(0.13, 0.40, 0.70), // Engineering Blueprint Blue
+        ),
+        Theme::Oxocarbon => (
+            Color::from_rgb(0.26, 0.75, 0.40), // Oxocarbon Green (#42be65)
+            Color::from_rgb(0.20, 0.69, 1.00), // Oxocarbon Vibrant Cyan (#33b1ff)
+        ),
+        Theme::Dracula => (
+            Color::from_rgb(0.31, 0.98, 0.48), // Dracula Neon Green (#50fa7b)
+            Color::from_rgb(0.54, 0.91, 0.99), // Dracula Vibrant Cyan (#8be9fd)
+        ),
+        Theme::Nord => (
+            Color::from_rgb(0.64, 0.75, 0.55), // Nord Aurora Green (#a3be8c)
+            Color::from_rgb(0.53, 0.75, 0.82), // Nord Frost Cyan (#88c0d0)
+        ),
+        Theme::GruvboxDark => (
+            Color::from_rgb(0.72, 0.73, 0.15), // Gruvbox Bright Green (#b8bb26)
+            Color::from_rgb(0.51, 0.65, 0.60), // Gruvbox Blue/Aqua (#83a598)
+        ),
+        Theme::GruvboxLight => (
+            Color::from_rgb(0.47, 0.46, 0.05), // Gruvbox Dark Olive Green (#78750d)
+            Color::from_rgb(0.03, 0.40, 0.47), // Gruvbox Deep Teal (#076678)
+        ),
+        Theme::SolarizedDark => (
+            Color::from_rgb(0.52, 0.60, 0.00), // Solarized Green (#859900)
+            Color::from_rgb(0.15, 0.55, 0.82), // Solarized Blue (#268bd2)
+        ),
+        Theme::SolarizedLight => (
+            Color::from_rgb(0.44, 0.53, 0.00), // Solarized Deep Green (#708700)
+            Color::from_rgb(0.12, 0.47, 0.72), // Solarized Deep Blue (#1f78b8)
+        ),
+        Theme::TokyoNight | Theme::TokyoNightStorm => (
+            Color::from_rgb(0.45, 0.85, 0.79), // Tokyo Night Teal Green (#73daca)
+            Color::from_rgb(0.48, 0.64, 0.97), // Tokyo Night Electric Blue (#7aa2f7)
+        ),
+        Theme::TokyoNightLight => (
+            Color::from_rgb(0.22, 0.45, 0.37), // Tokyo Night Dark Teal (#38735e)
+            Color::from_rgb(0.20, 0.35, 0.60), // Tokyo Night Deep Blue (#335999)
+        ),
+        Theme::KanagawaWave => (
+            Color::from_rgb(0.60, 0.73, 0.42), // Spring Green (#98bb6c)
+            Color::from_rgb(0.49, 0.61, 0.85), // Crystal Blue (#7e9cd8)
+        ),
+        Theme::KanagawaDragon => (
+            Color::from_rgb(0.53, 0.66, 0.53), // Dragon Green (#87a987)
+            Color::from_rgb(0.40, 0.52, 0.58), // Dragon Blue (#668594)
+        ),
+        Theme::KanagawaLotus => (
+            Color::from_rgb(0.38, 0.49, 0.25), // Lotus Deep Green (#617d40)
+            Color::from_rgb(0.24, 0.38, 0.53), // Lotus Deep Blue (#3d6187)
+        ),
+        Theme::CatppuccinMocha => (
+            Color::from_rgb(0.65, 0.89, 0.63), // Mocha Green (#a6e3a1)
+            Color::from_rgb(0.54, 0.71, 0.98), // Mocha Sapphire (#89b4fa)
+        ),
+        Theme::CatppuccinMacchiato => (
+            Color::from_rgb(0.65, 0.85, 0.58), // Macchiato Green (#a6da95)
+            Color::from_rgb(0.54, 0.68, 0.96), // Macchiato Blue (#8aadf4)
+        ),
+        Theme::CatppuccinFrappe => (
+            Color::from_rgb(0.65, 0.82, 0.54), // Frappe Green (#a6d189)
+            Color::from_rgb(0.55, 0.67, 0.93), // Frappe Blue (#8caaee)
+        ),
+        Theme::CatppuccinLatte => (
+            Color::from_rgb(0.25, 0.63, 0.17), // Latte Green (#40a02b)
+            Color::from_rgb(0.12, 0.40, 0.96), // Latte Blue (#1e66f5)
+        ),
+        Theme::Moonfly => (
+            Color::from_rgb(0.55, 0.78, 0.37), // Moonfly Lime Green (#8cc85f)
+            Color::from_rgb(0.50, 0.63, 1.00), // Moonfly Sky Blue (#80a0ff)
+        ),
+        Theme::Nightfly => (
+            Color::from_rgb(0.13, 0.85, 0.43), // Nightfly Emerald (#21d96e)
+            Color::from_rgb(0.51, 0.67, 1.00), // Nightfly Electric Blue (#82aaff)
+        ),
+        Theme::Ferra => (
+            Color::from_rgb(0.69, 0.87, 0.63), // Ferra Sage Green (#b1dda1)
+            Color::from_rgb(0.69, 0.84, 0.97), // Ferra Ice Blue (#b1d5f7)
+        ),
+        _ => (
+            DEFAULT_CROSSING_COLOR,
+            DEFAULT_WINDOW_COLOR,
+        ),
+    }
+}
+
+/// Selection colors for light surfaces (paper space sheet or user-configured light model space background).
+/// Uses deep-contrast pairs for the six light themes and the shared engineering pair (#1F854D / #2166B3)
+/// for dark themes rendered on a light canvas.
+pub fn light_canvas_color(crossing: bool, theme: &Theme) -> Color {
+    let (crossing_color, window_color) = match theme {
+        Theme::Light => (
+            Color::from_rgb8(0x1F, 0x85, 0x4D), // Engineering Forest Green (#1F854D)
+            Color::from_rgb8(0x21, 0x66, 0xB3), // Engineering Blueprint Blue (#2166B3)
+        ),
+        Theme::GruvboxLight => (
+            Color::from_rgb8(0x78, 0x75, 0x0D), // Gruvbox Dark Olive Green (#78750d)
+            Color::from_rgb8(0x07, 0x66, 0x78), // Gruvbox Deep Teal (#076678)
+        ),
+        Theme::SolarizedLight => (
+            Color::from_rgb8(0x70, 0x87, 0x00), // Solarized Deep Green (#708700)
+            Color::from_rgb8(0x1F, 0x78, 0xB8), // Solarized Deep Blue (#1f78b8)
+        ),
+        Theme::TokyoNightLight => (
+            Color::from_rgb8(0x38, 0x73, 0x5E), // Tokyo Night Dark Teal (#38735e)
+            Color::from_rgb8(0x33, 0x59, 0x99), // Tokyo Night Deep Blue (#335999)
+        ),
+        Theme::KanagawaLotus => (
+            Color::from_rgb8(0x61, 0x7D, 0x40), // Lotus Deep Green (#617d40)
+            Color::from_rgb8(0x3D, 0x61, 0x87), // Lotus Deep Blue (#3d6187)
+        ),
+        Theme::CatppuccinLatte => (
+            Color::from_rgb8(0x40, 0xA0, 0x2B), // Latte Green (#40a02b)
+            Color::from_rgb8(0x1E, 0x66, 0xF5), // Latte Blue (#1e66f5)
+        ),
+        Theme::Dark
+        | Theme::Oxocarbon
+        | Theme::Dracula
+        | Theme::Nord
+        | Theme::GruvboxDark
+        | Theme::SolarizedDark
+        | Theme::TokyoNight
+        | Theme::TokyoNightStorm
+        | Theme::KanagawaWave
+        | Theme::KanagawaDragon
+        | Theme::CatppuccinMocha
+        | Theme::CatppuccinMacchiato
+        | Theme::CatppuccinFrappe
+        | Theme::Moonfly
+        | Theme::Nightfly
+        | Theme::Ferra
+        | Theme::Custom(_) => (
+            Color::from_rgb8(0x1F, 0x85, 0x4D), // Shared engineering crossing (#1F854D)
+            Color::from_rgb8(0x21, 0x66, 0xB3), // Shared engineering window (#2166B3)
+        ),
+    };
+    if crossing {
+        crossing_color
+    } else {
+        window_color
+    }
+}
+
+/// Calculates the fill opacity for selection marquees.
+/// The 1.35× scale and 0.45 ceiling on light canvases compensate for the reduced
+/// perceived contrast of translucent fills on light surfaces, ensuring the fill
+/// remains perceptible without washing out underlying drawing geometry.
+pub fn selection_fill_alpha(user_opacity_percent: f32, canvas_light: bool) -> f32 {
+    let base = (user_opacity_percent / 100.0).clamp(0.0, 1.0);
+    if canvas_light {
+        (base * 1.35).clamp(0.0, 0.45)
+    } else {
+        base
+    }
+}
+
+/// Resolve the base color for selection marquee / polygon.
+/// Resolves in this priority order:
+/// 1. User ACI override (if custom > 0)
+/// 2. Light-canvas palette (if canvas background is light)
+/// 3. Theme curated palette (for dark/normal canvas)
+pub fn resolve_selection_base_color(
+    crossing: bool,
+    theme: &Theme,
+    visual: &SelectionVisualOptions,
+    canvas_bg: [f32; 4],
+) -> Color {
+    let custom = if crossing {
+        visual.crossing_color
+    } else {
+        visual.window_color
+    };
+    // ACI 0 (BYBLOCK) and 256 (BYLAYER) are not explicit overrides;
+    // the sysvar uses 0 as the unset sentinel; valid user picks are 1..=255.
+    if custom > 0 {
+        if let Some((r, g, b)) = acadrust::types::aci_table::aci_to_rgb(custom) {
+            return Color::from_rgb8(r, g, b);
+        }
+    }
+    if crate::ui::style::common::canvas_is_light(canvas_bg) {
+        return light_canvas_color(crossing, theme);
+    }
+    let (theme_crossing, theme_window) = theme_selection_colors(theme);
+    if crossing {
+        theme_crossing
+    } else {
+        theme_window
+    }
 }
 
 // ── Grip marker data ──────────────────────────────────────────────────────
@@ -146,13 +409,13 @@ impl GridGeometry {
 pub(crate) struct GridKey {
     pub grids: Vec<GridParams>,
     pub bounds: iced::Rectangle,
+    pub style: GridStyle,
 }
 
 impl GridKey {
-    /// Build a key from the per-pane `GridParams` and the overlay bounds. The
-    /// input slice is copied; callers can drop the original.
-    pub(crate) fn from_grids(grids: &[GridParams], bounds: iced::Rectangle) -> Self {
-        Self { grids: grids.to_vec(), bounds }
+    /// Build a key from the per-pane `GridParams`, overlay bounds, and grid style.
+    pub(crate) fn from_grids(grids: &[GridParams], bounds: iced::Rectangle, style: GridStyle) -> Self {
+        Self { grids: grids.to_vec(), bounds, style }
     }
 }
 
@@ -280,8 +543,9 @@ pub struct OstTrackPoint {
 
 pub fn grid_overlay<'a>(
     grid: Vec<GridParams>,
+    style: GridStyle,
 ) -> Element<'a, Message> {
-    canvas(GridCanvas { grid })
+    canvas(GridCanvas { grid, style })
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -289,6 +553,7 @@ pub fn grid_overlay<'a>(
 
 struct GridCanvas {
     grid: Vec<GridParams>,
+    style: GridStyle,
 }
 
 impl canvas::Program<Message> for GridCanvas {
@@ -302,10 +567,10 @@ impl canvas::Program<Message> for GridCanvas {
         bounds: iced::Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let key = GridKey::from_grids(&self.grid, bounds);
+        let key = GridKey::from_grids(&self.grid, bounds, self.style);
 
-        // Hit check: same params, same bounds ⇒ the cached geometry is still
-        // valid. The key includes bounds, so a `should_reuse` match implies
+        // Hit check: same params, same bounds, same style ⇒ the cached geometry is still
+        // valid. The key includes bounds and style, so a `should_reuse` match implies
         // both are equal, and the fork's `draw_with_bounds` will return the
         // cached `Arc` clone (essentially free).
         let hit = should_reuse(state.key.borrow().as_ref(), &key);
@@ -315,11 +580,8 @@ impl canvas::Program<Message> for GridCanvas {
             // returns the cached geometry without invoking the closure.
             state.cache.draw_with_bounds(renderer, bounds, |_frame| {})
         } else {
-            // Params or bounds changed. Clear so the closure runs even when
-            // bounds happen to match the previously-cached frame (e.g. a pan
-            // within the same canvas size would otherwise leave stale
-            // geometry served — the fork's bounds-equality test would return
-            // the cached clone without calling our rebuild closure).
+            // Params, style, or bounds changed. Clear so the closure runs even when
+            // bounds happen to match the previously-cached frame.
             state.cache.clear();
             state.cache.draw_with_bounds(renderer, bounds, |frame| {
                 for g in &self.grid {
@@ -347,14 +609,14 @@ impl canvas::Program<Message> for GridCanvas {
                             g.origin,
                             g.axes,
                             g.limits,
+                            self.style,
                         )
                     });
                 }
             })
         };
 
-        // Update the stored key. Safe: the `borrow()` for `should_reuse` is
-        // dropped at the end of the `if` expression above; no live Ref here.
+        // Update the stored key.
         *state.key.borrow_mut() = Some(key);
 
         vec![geometry]
@@ -362,7 +624,7 @@ impl canvas::Program<Message> for GridCanvas {
 }
 
 pub fn selection_overlay<'a>(
-    selection: SelectionState,
+    selection: Arc<RefCell<SelectionState>>,
     snap: Option<(Point, SnapType)>,
     snap_ext_base: Option<Point>,
     snap_ext_base2: Option<Point>,
@@ -382,6 +644,7 @@ pub fn selection_overlay<'a>(
     hover_locked: bool,
     crosshair_bg: [f32; 4],
     crosshair: CrosshairOptions,
+    selection_visual: SelectionVisualOptions,
 ) -> Element<'a, Message> {
     canvas(SelectionCanvas {
         selection,
@@ -404,6 +667,7 @@ pub fn selection_overlay<'a>(
         hover_locked,
         crosshair_bg,
         crosshair,
+        selection_visual,
     })
     .width(Length::Fill)
     .height(Length::Fill)
@@ -411,7 +675,7 @@ pub fn selection_overlay<'a>(
 }
 
 struct SelectionCanvas {
-    selection: SelectionState,
+    selection: Arc<RefCell<SelectionState>>,
     snap: Option<(Point, SnapType)>,
     /// Screen position of the endpoint an active Extension snap extends from,
     /// so the dashed extension guide line can be drawn back to it. (#238)
@@ -461,11 +725,17 @@ struct SelectionCanvas {
     /// rather than the UI theme, which may be light over a dark model viewport.
     crosshair_bg: [f32; 4],
     crosshair: CrosshairOptions,
+    selection_visual: SelectionVisualOptions,
 }
 
-fn draw_grip_marker(frame: &mut canvas::Frame, grip: &GripMarker, theme: &Theme) {
+fn draw_grip_marker(
+    frame: &mut canvas::Frame,
+    grip: &GripMarker,
+    theme: &Theme,
+    visual: &SelectionVisualOptions,
+) {
     let sp = grip.pos;
-    let h = crate::scene::pick::grip::GRIP_HALF_PX;
+    let h = visual.grip_size.clamp(1.0, 25.0);
     let path = match grip.shape {
         GripShape::Square => canvas::Path::rectangle(
             Point::new(sp.x - h, sp.y - h),
@@ -520,10 +790,28 @@ fn draw_grip_marker(frame: &mut canvas::Frame, grip: &GripMarker, theme: &Theme)
     };
 
     if grip.is_hot {
-        frame.fill(&path, theme.palette().danger.base.color);
+        let hot_color = if visual.grip_hot > 0 {
+            if let Some((r, g, b)) = acadrust::types::aci_table::aci_to_rgb(visual.grip_hot) {
+                Color::from_rgb8(r, g, b)
+            } else {
+                theme.palette().danger.base.color
+            }
+        } else {
+            theme.palette().danger.base.color
+        };
+        frame.fill(&path, hot_color);
     } else if grip.is_hovered {
         let pair = theme.palette().primary.strong;
-        frame.fill(&path, pair.color);
+        let hover_color = if visual.grip_hover > 0 {
+            if let Some((r, g, b)) = acadrust::types::aci_table::aci_to_rgb(visual.grip_hover) {
+                Color::from_rgb8(r, g, b)
+            } else {
+                pair.color
+            }
+        } else {
+            pair.color
+        };
+        frame.fill(&path, hover_color);
         frame.stroke(
             &path,
             canvas::Stroke {
@@ -534,7 +822,15 @@ fn draw_grip_marker(frame: &mut canvas::Frame, grip: &GripMarker, theme: &Theme)
         );
     } else {
         let palette = theme.palette();
-        let color = palette.primary.base.color;
+        let color = if visual.grip_color > 0 {
+            if let Some((r, g, b)) = acadrust::types::aci_table::aci_to_rgb(visual.grip_color) {
+                Color::from_rgb8(r, g, b)
+            } else {
+                palette.primary.base.color
+            }
+        } else {
+            palette.primary.base.color
+        };
         let fill = if grip.shape == GripShape::Dropdown {
             color
         } else {
@@ -588,7 +884,7 @@ impl canvas::Program<Message> for SelectionCanvas {
         // PAN mode owns the whole viewport: an open hand when hovering, a
         // closed hand while dragging.
         if self.pan_mode && cursor.is_over(bounds) {
-            return if self.selection.middle_down {
+            return if self.selection.borrow().middle_down {
                 mouse::Interaction::Grabbing
             } else {
                 mouse::Interaction::Grab
@@ -685,7 +981,7 @@ impl canvas::Program<Message> for SelectionCanvas {
             }
             // Ghost card dragged under the cursor — a 0.32× preview of the
             // source pane, centred on the cursor.
-            if let Some(c) = self.selection.last_move_pos {
+            if let Some(c) = self.selection.borrow().last_move_pos {
                 let gw = (src.width * 0.32).clamp(60.0, 280.0);
                 let gh = (src.height * 0.32).clamp(40.0, 200.0);
                 let g = canvas::Path::rectangle(
@@ -714,88 +1010,101 @@ impl canvas::Program<Message> for SelectionCanvas {
             b: Point,
             crossing: bool,
             theme: &Theme,
+            visual: &SelectionVisualOptions,
+            canvas_bg: [f32; 4],
         ) {
-            let base = if crossing {
-                theme.palette().success.base.color
-            } else {
-                theme.palette().primary.base.color
-            };
-            let fill = base.scale_alpha(0.12);
-            let stroke = base.scale_alpha(0.9);
+            let base = resolve_selection_base_color(crossing, theme, visual, canvas_bg);
+            let canvas_light = crate::ui::style::common::canvas_is_light(canvas_bg);
+            // Desk-spanning marquee edge case: deliberate limitation to avoid mid-drag rectangle color splits when dragged past sheet onto desk.
             let x0 = a.x.min(b.x);
             let y0 = a.y.min(b.y);
             let w = (a.x - b.x).abs();
             let h = (a.y - b.y).abs();
             let rect = canvas::Path::rectangle(Point::new(x0, y0), Size::new(w, h));
-            frame.fill(&rect, fill);
+            if visual.area && visual.opacity > 0 {
+                let alpha = selection_fill_alpha(visual.opacity as f32, canvas_light);
+                let fill = base.scale_alpha(alpha);
+                frame.fill(&rect, fill);
+            }
+            let stroke_alpha = if canvas_light { 0.95 } else { 0.90 };
+            let stroke = base.scale_alpha(stroke_alpha);
             frame.stroke(
                 &rect,
                 canvas::Stroke {
                     width: 1.0,
                     style: canvas::Style::Solid(stroke),
+                    line_dash: if crossing {
+                        canvas::LineDash {
+                            segments: &[4.0, 4.0],
+                            offset: 0,
+                        }
+                    } else {
+                        canvas::LineDash::default()
+                    },
                     ..Default::default()
                 },
             );
         }
 
-        if let (Some(a), Some(b)) = (self.selection.box_anchor, self.selection.box_current) {
-            draw_marquee(&mut frame, a, b, self.selection.box_crossing, theme);
+        if let (Some(a), Some(b)) = (self.selection.borrow().box_anchor, self.selection.borrow().box_current) {
+            draw_marquee(&mut frame, a, b, self.selection.borrow().box_crossing, theme, &self.selection_visual, self.crosshair_bg);
         }
         // Preview marquee for point-picked windows (STRETCH) — same look, no pick.
-        if let Some((a, b, crossing)) = self.selection.preview_box {
-            draw_marquee(&mut frame, a, b, crossing, theme);
+        if let Some((a, b, crossing)) = self.selection.borrow().preview_box {
+            draw_marquee(&mut frame, a, b, crossing, theme, &self.selection_visual, self.crosshair_bg);
         }
 
-        if self.selection.poly_active && self.selection.poly_points.len() > 1 {
-            let base = if self.selection.poly_crossing {
-                theme.palette().success.base.color
-            } else {
-                theme.palette().primary.base.color
-            };
-            let fill = base.scale_alpha(0.12);
-            let stroke = base.scale_alpha(0.9);
-            if let Some(cur) = self.selection.last_move_pos {
-                let start = self.selection.poly_points[0];
-                let fill_path = canvas::Path::new(|p| {
-                    p.move_to(start);
-                    for pt in &self.selection.poly_points[1..] {
-                        p.line_to(*pt);
-                    }
-                    p.line_to(cur);
-                    p.line_to(start);
-                });
-                frame.fill(&fill_path, fill);
+        if self.selection.borrow().poly_active && self.selection.borrow().poly_points.len() > 1 {
+            let crossing = self.selection.borrow().poly_crossing;
+            let base = resolve_selection_base_color(crossing, theme, &self.selection_visual, self.crosshair_bg);
+            let canvas_light = crate::ui::style::common::canvas_is_light(self.crosshair_bg);
+            if self.selection_visual.area && self.selection_visual.opacity > 0 {
+                let alpha = selection_fill_alpha(self.selection_visual.opacity as f32, canvas_light);
+                let fill = base.scale_alpha(alpha);
+                if let Some(cur) = self.selection.borrow().last_move_pos {
+                    let start = self.selection.borrow().poly_points[0];
+                    let fill_path = canvas::Path::new(|p| {
+                        p.move_to(start);
+                        for pt in &self.selection.borrow().poly_points[1..] {
+                            p.line_to(*pt);
+                        }
+                        p.line_to(cur);
+                        p.line_to(start);
+                    });
+                    frame.fill(&fill_path, fill);
+                }
             }
+            let stroke_alpha = if canvas_light { 0.95 } else { 0.90 };
+            let stroke = base.scale_alpha(stroke_alpha);
             let path = canvas::Path::new(|p| {
-                p.move_to(self.selection.poly_points[0]);
-                for pt in &self.selection.poly_points[1..] {
+                p.move_to(self.selection.borrow().poly_points[0]);
+                for pt in &self.selection.borrow().poly_points[1..] {
                     p.line_to(*pt);
                 }
             });
-            frame.stroke(
-                &path,
-                canvas::Stroke {
-                    width: 1.0,
-                    style: canvas::Style::Solid(stroke),
-                    ..Default::default()
+            let stroke_style = canvas::Stroke {
+                width: 1.0,
+                style: canvas::Style::Solid(stroke),
+                line_dash: if crossing {
+                    canvas::LineDash {
+                        segments: &[4.0, 4.0],
+                        offset: 0,
+                    }
+                } else {
+                    canvas::LineDash::default()
                 },
-            );
-            if let Some(cur) = self.selection.last_move_pos {
-                let start = self.selection.poly_points[0];
-                let last = *self.selection.poly_points.last().unwrap();
+                ..Default::default()
+            };
+            frame.stroke(&path, stroke_style.clone());
+            if let Some(cur) = self.selection.borrow().last_move_pos {
+                let start = self.selection.borrow().poly_points[0];
+                let last = *self.selection.borrow().poly_points.last().unwrap();
                 let preview = canvas::Path::new(|p| {
                     p.move_to(last);
                     p.line_to(cur);
                     p.line_to(start);
                 });
-                frame.stroke(
-                    &preview,
-                    canvas::Stroke {
-                        width: 1.0,
-                        style: canvas::Style::Solid(stroke),
-                        ..Default::default()
-                    },
-                );
+                frame.stroke(&preview, stroke_style);
             }
         }
 
@@ -839,7 +1148,7 @@ impl canvas::Program<Message> for SelectionCanvas {
                     }
                 }
                 for grip in &self.grips {
-                    draw_grip_marker(frame, grip, theme);
+                    draw_grip_marker(frame, grip, theme, &self.selection_visual);
                 }
             });
         }
@@ -1138,7 +1447,7 @@ impl canvas::Program<Message> for SelectionCanvas {
             && !self.suppressed
             && self.crosshair.cursor_type == CursorType::Crosshair
         {
-            if let Some(cp) = self.selection.last_move_pos {
+            if let Some(cp) = self.selection.borrow().last_move_pos {
                 let [r, g, b, a] = self.crosshair.color.map_or_else(
                     || {
                         crate::scene::view::render::adapt_to_bg(
@@ -1161,7 +1470,12 @@ impl canvas::Program<Message> for SelectionCanvas {
                     style: canvas::Style::Solid(color),
                     ..Default::default()
                 };
-                let sq = pick_box_half_px(self.crosshair.pick_box);
+                let point_mode = self.crosshair.point_mode;
+                let sq = if point_mode {
+                    0.0
+                } else {
+                    pick_box_half_px(self.crosshair.pick_box)
+                };
                 let arm = crosshair_arm_px(bounds, self.crosshair.size_percent);
                 let base_angles: [f64; 2] = if self.crosshair.isometric {
                     self.crosshair.iso_plane.angles()
@@ -1171,7 +1485,9 @@ impl canvas::Program<Message> for SelectionCanvas {
                 for angle in base_angles {
                     let rad = (angle + self.crosshair.snap_angle_deg as f64).to_radians();
                     let dir = Point::new(rad.cos() as f32, -rad.sin() as f32);
-                    let gap = if sq > 0.0 {
+                    let gap = if point_mode {
+                        9.0
+                    } else if sq > 0.0 {
                         sq / dir.x.abs().max(dir.y.abs()).max(1e-6)
                     } else {
                         0.0
@@ -1184,7 +1500,10 @@ impl canvas::Program<Message> for SelectionCanvas {
                     });
                     frame.stroke(&arms, stroke.clone());
                 }
-                if sq > 0.0 {
+                if point_mode {
+                    let dot = canvas::Path::circle(cp, 1.75);
+                    frame.fill(&dot, color);
+                } else if sq > 0.0 {
                     let square = canvas::Path::rectangle(
                         Point::new(cp.x - sq, cp.y - sq),
                         Size::new(sq * 2.0, sq * 2.0),
@@ -1241,6 +1560,7 @@ impl canvas::Program<Message> for SelectionCanvas {
                 ucs.origin_screen,
                 ucs.hover,
                 ucs.selected,
+                self.crosshair_bg,
             );
         }
 
@@ -1340,6 +1660,7 @@ const MIN_GRID_PX: f32 = 20.0;
 /// Stop an infinite perspective grid before adjacent lines merge at the horizon.
 const MIN_HORIZON_GRID_PX: f32 = 5.0;
 
+#[allow(clippy::too_many_arguments)]
 fn draw_grid(
     frame: &mut canvas::Frame,
     view_rot: Mat4,
@@ -1349,12 +1670,25 @@ fn draw_grid(
     grid_origin: glam::DVec3,
     grid_axes: (Vec3, Vec3, Vec3),
     limits: Option<(glam::DVec2, glam::DVec2)>,
+    style: GridStyle,
 ) {
-    let gc = Color {
-        r: 0.28,
-        g: 0.28,
-        b: 0.28,
-        a: 0.7,
+    let alpha = (style.opacity as f32 / 100.0).clamp(0.02, 1.0);
+    let gc = if style.bg_luminance > 0.5 {
+        // Light background: subtle dark grid lines
+        Color {
+            r: 0.10,
+            g: 0.10,
+            b: 0.10,
+            a: alpha,
+        }
+    } else {
+        // Dark background: subtle light grid lines
+        Color {
+            r: 0.80,
+            g: 0.80,
+            b: 0.80,
+            a: alpha,
+        }
     };
     let st = canvas::Stroke {
         width: 0.5,
@@ -1374,7 +1708,7 @@ fn draw_grid(
     if geometry.axis_extent > 0.0 {
         let (gx, gy, gz) = grid_axes;
         let extent = (geometry.axis_extent + step) * 1.5;
-        draw_axes(frame, view_rot, eye, bounds, extent.max(10.0), grid_origin, (gx, gy, gz));
+        draw_axes(frame, view_rot, eye, bounds, extent.max(10.0), grid_origin, (gx, gy, gz), style.bg_luminance);
     }
 }
 
@@ -1921,6 +2255,7 @@ pub(crate) fn grid_segments(
 
 // ── Coloured UCS axes ──────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn draw_axes(
     frame: &mut canvas::Frame,
     view_rot: Mat4,
@@ -1929,6 +2264,7 @@ fn draw_axes(
     extent: f32,
     origin: glam::DVec3,
     axes: (Vec3, Vec3, Vec3),
+    bg_luminance: f32,
 ) {
     let w2s = |world: glam::DVec3| -> Point {
         let ndc = view_rot.project_point3((world - eye).as_vec3());
@@ -1954,8 +2290,9 @@ fn draw_axes(
             axis_stroke(r, g, b),
         );
     };
+    let y_green = if bg_luminance > 0.5 { 0.60 } else { 0.85 };
     line(ax, 0.90, 0.20, 0.20); // X — red
-    line(ay, 0.20, 0.85, 0.20); // Y — green
+    line(ay, 0.20, y_green, 0.20); // Y — green
     line(az, 0.20, 0.40, 0.90); // Z — blue
 }
 
@@ -2089,6 +2426,7 @@ fn draw_ucs_icon(
     origin_screen: Option<Point>,
     hover: bool,
     selected: bool,
+    crosshair_bg: [f32; 4],
 ) {
     let Some((icon_origin, at_origin, geom)) =
         ucs_icon_geometry(vp, bounds, axes, origin_screen)
@@ -2100,6 +2438,8 @@ fn draw_ucs_icon(
     // corner), so hover/selection highlight applies there too.
     let _ = at_origin;
     let highlight = hover || selected;
+    let is_light_bg = 0.299 * crosshair_bg[0] + 0.587 * crosshair_bg[1] + 0.114 * crosshair_bg[2] > 0.5;
+    let y_green = if is_light_bg { 0.60 } else { 0.85 };
 
     struct AxisInfo {
         dx: f32,
@@ -2128,7 +2468,7 @@ fn draw_ucs_icon(
             sc_len: geom[1].sc_len,
             depth: geom[1].depth,
             r: 0.22,
-            g: 0.85,
+            g: y_green,
             b: 0.22,
             label: "Y",
         },
@@ -2227,15 +2567,23 @@ fn draw_ucs_icon(
 
     // Origin dot.
     let circle = canvas::Path::circle(icon_origin, 3.5);
-    frame.fill(
-        &circle,
+    let dot_lum = 0.299 * crosshair_bg[0] + 0.587 * crosshair_bg[1] + 0.114 * crosshair_bg[2];
+    let dot_color = if dot_lum > 0.5 {
+        Color {
+            r: 0.15,
+            g: 0.15,
+            b: 0.15,
+            a: 0.95,
+        }
+    } else {
         Color {
             r: 0.9,
             g: 0.9,
             b: 0.9,
             a: 0.95,
-        },
-    );
+        }
+    };
+    frame.fill(&circle, dot_color);
 
     // Draggable grips when selected: a square at the origin and at the X / Y
     // tips. Warm grip colour with a light border, like an entity grip.
@@ -2301,6 +2649,7 @@ pub fn dynamic_input_overlay<'a>(
     cursor_screen: Point,
     base_screen: Option<Point>,
     ref_screen: Option<Point>,
+    label_screen: Option<Point>,
     guide: DynGuide,
     boxes: Vec<DynBox>,
     prompt: String,
@@ -2310,6 +2659,7 @@ pub fn dynamic_input_overlay<'a>(
         cursor_screen,
         base_screen,
         ref_screen,
+        label_screen,
         guide,
         boxes,
         prompt,
@@ -2327,6 +2677,8 @@ struct DynInputCanvas {
     base_screen: Option<Point>,
     /// Far end of the reference line (projected `dyn_ref`) — for `Perp`.
     ref_screen: Option<Point>,
+    /// Command-supplied world-space label point projected by the active camera.
+    label_screen: Option<Point>,
     guide: DynGuide,
     boxes: Vec<DynBox>,
     /// The active command's current prompt, drawn just above the boxes.
@@ -2355,6 +2707,10 @@ impl DynInputCanvas {
         }
     }
 
+    fn box_width(b: &DynBox) -> f32 {
+        (Self::box_content(b).len() as f32 * DYN_CHAR_W) + DYN_PAD * 2.0
+    }
+
     /// Draw a value box centred at `center`, clamped inside `bounds`.
     fn draw_box(
         frame: &mut canvas::Frame,
@@ -2364,7 +2720,7 @@ impl DynInputCanvas {
         theme: &Theme,
     ) {
         let content = Self::box_content(b);
-        let w = (content.len() as f32 * DYN_CHAR_W) + DYN_PAD * 2.0;
+        let w = Self::box_width(b);
         let x = (center.x - w * 0.5).clamp(0.0, (bounds.width - w).max(0.0));
         let y = (center.y - DYN_BOX_H * 0.5).clamp(0.0, (bounds.height - DYN_BOX_H).max(0.0));
         let rect = canvas::Path::rectangle(Point { x, y }, Size { width: w, height: DYN_BOX_H });
@@ -2641,19 +2997,14 @@ impl DynInputCanvas {
         // ── Box placement by role ──
         for b in &self.boxes {
             let center = match b.role {
-                DynRole::Angle => {
+                DynRole::Angle => self.label_screen.unwrap_or_else(|| {
                     let a_mid = a_ref + sweep * 0.5;
-                    // Pull the box back along the ray and lift it to the side
-                    // opposite the distance box. A near-zero sweep collapses the
-                    // mid-angle direction onto the cursor ray, so placing the box
-                    // at full `len` would plant it on the cursor / snap point and
-                    // hide it. (#124)
                     let r = (len - DYN_BOX_H * 2.0).max(len * 0.5);
                     Point {
                         x: base.x + a_mid.cos() * r - nx * 18.0,
                         y: base.y + a_mid.sin() * r - ny * 18.0,
                     }
-                }
+                }),
                 DynRole::X | DynRole::Width => Point {
                     x: (base.x + cursor.x) * 0.5,
                     y: base.y + 14.0,
@@ -2752,6 +3103,13 @@ impl DynInputCanvas {
         let mut x = bx;
         for (i, b) in self.boxes.iter().enumerate() {
             let w = widths[i];
+            if b.role == DynRole::Angle {
+                if let Some(center) = self.label_screen {
+                    Self::draw_box(frame, b, center, bounds, theme);
+                    x += w + DYN_GAP;
+                    continue;
+                }
+            }
             let rect =
                 canvas::Path::rectangle(Point { x, y: by }, Size { width: w, height: DYN_BOX_H });
             let (fill, border, text) = Self::box_colors(b, theme);
@@ -3032,11 +3390,11 @@ mod bench_grid_geometry_tests {
         // Pre-seed a `GridCanvasState` with the same key the bench will
         // build each iteration — guaranteed hit path.
         let state = GridCanvasState::default();
-        let stored_key = GridKey::from_grids(&grids, canvas_bounds);
+        let stored_key = GridKey::from_grids(&grids, canvas_bounds, GridStyle::default());
         *state.key.borrow_mut() = Some(stored_key);
 
         for _ in 0..20 {
-            let key = GridKey::from_grids(black_box(&grids), black_box(canvas_bounds));
+            let key = GridKey::from_grids(black_box(&grids), black_box(canvas_bounds), GridStyle::default());
             let hit = should_reuse(state.key.borrow().as_ref(), &key);
             black_box(hit);
         }
@@ -3045,7 +3403,7 @@ mod bench_grid_geometry_tests {
         let start = Instant::now();
         let mut hit_count = 0u32;
         for _ in 0..n {
-            let key = GridKey::from_grids(black_box(&grids), black_box(canvas_bounds));
+            let key = GridKey::from_grids(black_box(&grids), black_box(canvas_bounds), GridStyle::default());
             if should_reuse(state.key.borrow().as_ref(), &key) {
                 hit_count += 1;
             }
@@ -3087,17 +3445,17 @@ mod grid_key_tests {
         }
     }
 
-    /// Same `Vec<GridParams>` + same bounds ⇒ keys compare equal.
+    /// Same `Vec<GridParams>` + same bounds + same style ⇒ keys compare equal.
     #[test]
     fn grid_key_matches_identical_params() {
         let grids = vec![baseline_params(), baseline_params()];
         let bounds = iced::Rectangle { x: 0.0, y: 0.0, width: 1920.0, height: 720.0 };
-        let a = GridKey::from_grids(&grids, bounds);
-        let b = GridKey::from_grids(&grids, bounds);
+        let a = GridKey::from_grids(&grids, bounds, GridStyle::default());
+        let b = GridKey::from_grids(&grids, bounds, GridStyle::default());
         assert_eq!(a, b);
     }
 
-    /// One test, one baseline. Every change of any of the 7 inputs must produce
+    /// One test, one baseline. Every change of any of the inputs must produce
     /// a key that differs from the baseline. This is the entire correctness
     /// contract for cache hit/miss — if any input is ignored, the cache serves
     /// a stale grid.
@@ -3110,13 +3468,13 @@ mod grid_key_tests {
             height: 720.0,
         };
         let baseline_grids = vec![baseline_params()];
-        let baseline_key = GridKey::from_grids(&baseline_grids, baseline_bounds);
+        let baseline_key = GridKey::from_grids(&baseline_grids, baseline_bounds, GridStyle::default());
 
         // view_rot: small extra rotation
         let mut p = baseline_params();
         p.view_rot = Mat4::from_rotation_x(0.15 + 0.01) * Mat4::from_rotation_y(0.05);
         assert_ne!(
-            GridKey::from_grids(&[p], baseline_bounds),
+            GridKey::from_grids(&[p], baseline_bounds, GridStyle::default()),
             baseline_key,
             "view_rot change must invalidate"
         );
@@ -3125,7 +3483,7 @@ mod grid_key_tests {
         let mut p = baseline_params();
         p.eye = glam::DVec3::new(4.0, 3.5, 9.5);
         assert_ne!(
-            GridKey::from_grids(&[p], baseline_bounds),
+            GridKey::from_grids(&[p], baseline_bounds, GridStyle::default()),
             baseline_key,
             "eye change must invalidate"
         );
@@ -3134,7 +3492,7 @@ mod grid_key_tests {
         let mut p = baseline_params();
         p.step = 40.0;
         assert_ne!(
-            GridKey::from_grids(&[p], baseline_bounds),
+            GridKey::from_grids(&[p], baseline_bounds, GridStyle::default()),
             baseline_key,
             "step change must invalidate"
         );
@@ -3143,7 +3501,7 @@ mod grid_key_tests {
         let mut p = baseline_params();
         p.origin = glam::DVec3::new(100.0, 0.0, 0.0);
         assert_ne!(
-            GridKey::from_grids(&[p], baseline_bounds),
+            GridKey::from_grids(&[p], baseline_bounds, GridStyle::default()),
             baseline_key,
             "origin change must invalidate"
         );
@@ -3152,7 +3510,7 @@ mod grid_key_tests {
         let mut p = baseline_params();
         p.axes = (Vec3::Y, Vec3::X, Vec3::Z);
         assert_ne!(
-            GridKey::from_grids(&[p], baseline_bounds),
+            GridKey::from_grids(&[p], baseline_bounds, GridStyle::default()),
             baseline_key,
             "axes change must invalidate"
         );
@@ -3161,7 +3519,7 @@ mod grid_key_tests {
         let mut p = baseline_params();
         p.limits = Some((glam::DVec2::new(0.0, 0.0), glam::DVec2::new(100.0, 100.0)));
         assert_ne!(
-            GridKey::from_grids(&[p], baseline_bounds),
+            GridKey::from_grids(&[p], baseline_bounds, GridStyle::default()),
             baseline_key,
             "limits change must invalidate"
         );
@@ -3174,9 +3532,27 @@ mod grid_key_tests {
             height: 720.0,
         };
         assert_ne!(
-            GridKey::from_grids(&baseline_grids, other_bounds),
+            GridKey::from_grids(&baseline_grids, other_bounds, GridStyle::default()),
             baseline_key,
             "bounds change must invalidate"
+        );
+
+        // style opacity: change opacity
+        let mut style = GridStyle::default();
+        style.opacity = 50;
+        assert_ne!(
+            GridKey::from_grids(&baseline_grids, baseline_bounds, style),
+            baseline_key,
+            "style opacity change must invalidate"
+        );
+
+        // style bg_luminance: change luminance (dark to light)
+        let mut style = GridStyle::default();
+        style.bg_luminance = 0.9;
+        assert_ne!(
+            GridKey::from_grids(&baseline_grids, baseline_bounds, style),
+            baseline_key,
+            "style bg_luminance change must invalidate"
         );
     }
 
@@ -3189,13 +3565,13 @@ mod grid_key_tests {
         let pane1 = baseline_params();
         let pane2 = baseline_params();
         let both = vec![pane1.clone(), pane2.clone()];
-        let baseline = GridKey::from_grids(&both, bounds);
+        let baseline = GridKey::from_grids(&both, bounds, GridStyle::default());
 
         let mut pane2_changed = pane2;
         pane2_changed.step = 160.0;
         let dirty = vec![pane1, pane2_changed];
         assert_ne!(
-            GridKey::from_grids(&dirty, bounds),
+            GridKey::from_grids(&dirty, bounds, GridStyle::default()),
             baseline,
             "second pane change must invalidate"
         );
@@ -3206,7 +3582,7 @@ mod grid_key_tests {
     fn should_reuse_empty() {
         let grids = vec![baseline_params()];
         let bounds = iced::Rectangle { x: 0.0, y: 0.0, width: 1920.0, height: 720.0 };
-        let key = GridKey::from_grids(&grids, bounds);
+        let key = GridKey::from_grids(&grids, bounds, GridStyle::default());
         assert!(!should_reuse(None, &key));
     }
 
@@ -3215,7 +3591,7 @@ mod grid_key_tests {
     fn should_reuse_equal() {
         let grids = vec![baseline_params()];
         let bounds = iced::Rectangle { x: 0.0, y: 0.0, width: 1920.0, height: 720.0 };
-        let key = GridKey::from_grids(&grids, bounds);
+        let key = GridKey::from_grids(&grids, bounds, GridStyle::default());
         assert!(should_reuse(Some(&key), &key));
     }
 
@@ -3228,8 +3604,8 @@ mod grid_key_tests {
         pane2.step = 160.0;
         let grids_b = vec![pane2];
         let bounds = iced::Rectangle { x: 0.0, y: 0.0, width: 1920.0, height: 720.0 };
-        let old = GridKey::from_grids(&grids_a, bounds);
-        let new = GridKey::from_grids(&grids_b, bounds);
+        let old = GridKey::from_grids(&grids_a, bounds, GridStyle::default());
+        let new = GridKey::from_grids(&grids_b, bounds, GridStyle::default());
         assert!(!should_reuse(Some(&old), &new));
     }
 }
@@ -3270,7 +3646,7 @@ mod grid_canvas_state_tests {
             axes: grid_axes,
             limits,
         };
-        let key = GridKey::from_grids(&[params], bounds);
+        let key = GridKey::from_grids(&[params], bounds, GridStyle::default());
 
         let state = GridCanvasState::default();
         *state.key.borrow_mut() = Some(key.clone());
@@ -3280,7 +3656,145 @@ mod grid_canvas_state_tests {
 
         // Different bounds on the same params ⇒ different key, do not reuse.
         let other_bounds = iced::Rectangle { x: 0.0, y: 0.0, width: 640.0, height: 480.0 };
-        let other_key = GridKey::from_grids(&[params], other_bounds);
+        let other_key = GridKey::from_grids(&[params], other_bounds, GridStyle::default());
         assert!(!should_reuse(state.key.borrow().as_ref(), &other_key));
     }
 }
+
+#[cfg(test)]
+mod selection_visual_color_tests {
+    use super::*;
+
+    #[test]
+    fn default_selection_colors_match_theme_palette() {
+        let visual = SelectionVisualOptions::default();
+        let dark_canvas = [0.0, 0.0, 0.0, 1.0];
+
+        // Dark theme uses authentic classic CAD green and blue
+        let dark_crossing = resolve_selection_base_color(true, &Theme::Dark, &visual, dark_canvas);
+        let dark_window = resolve_selection_base_color(false, &Theme::Dark, &visual, dark_canvas);
+        assert_eq!(dark_crossing, DEFAULT_CROSSING_COLOR);
+        assert_eq!(dark_window, DEFAULT_WINDOW_COLOR);
+
+        // Oxocarbon uses curated vibrant cyan and green
+        let (oxo_crossing, oxo_window) = theme_selection_colors(&Theme::Oxocarbon);
+        assert_eq!(oxo_crossing, Color::from_rgb(0.26, 0.75, 0.40));
+        assert_eq!(oxo_window, Color::from_rgb(0.20, 0.69, 1.00));
+
+        // Dracula uses iconic neon green and cyan
+        let (drac_crossing, drac_window) = theme_selection_colors(&Theme::Dracula);
+        assert_eq!(drac_crossing, Color::from_rgb(0.31, 0.98, 0.48));
+        assert_eq!(drac_window, Color::from_rgb(0.54, 0.91, 0.99));
+
+        // Nord uses aurora green and frost cyan
+        let (nord_crossing, nord_window) = theme_selection_colors(&Theme::Nord);
+        assert_eq!(nord_crossing, Color::from_rgb(0.64, 0.75, 0.55));
+        assert_eq!(nord_window, Color::from_rgb(0.53, 0.75, 0.82));
+
+        // Gruvbox Dark uses bright green and aqua
+        let (gruv_crossing, gruv_window) = theme_selection_colors(&Theme::GruvboxDark);
+        assert_eq!(gruv_crossing, Color::from_rgb(0.72, 0.73, 0.15));
+        assert_eq!(gruv_window, Color::from_rgb(0.51, 0.65, 0.60));
+
+        // All 22 themes must provide non-zero, full-alpha colors
+        for theme in Theme::ALL {
+            let (c, w) = theme_selection_colors(theme);
+            assert_eq!(c.a, 1.0, "Theme {:?} crossing alpha should be 1.0", theme);
+            assert_eq!(w.a, 1.0, "Theme {:?} window alpha should be 1.0", theme);
+            assert!(c.g > 0.0, "Theme {:?} crossing should have green component", theme);
+            assert!(w.b > 0.0 || w.g > 0.0, "Theme {:?} window should have blue/cyan component", theme);
+        }
+    }
+
+    #[test]
+    fn custom_aci_selection_colors_override_defaults() {
+        let mut visual = SelectionVisualOptions::default();
+        visual.crossing_color = 1; // Red
+        visual.window_color = 5; // Blue
+        let dark_canvas = [0.0, 0.0, 0.0, 1.0];
+        let light_canvas = [1.0, 1.0, 1.0, 1.0];
+
+        for theme in Theme::ALL {
+            let crossing_dark = resolve_selection_base_color(true, theme, &visual, dark_canvas);
+            let window_dark = resolve_selection_base_color(false, theme, &visual, dark_canvas);
+            assert_eq!(crossing_dark, Color::from_rgb8(255, 0, 0));
+            assert_eq!(window_dark, Color::from_rgb8(0, 0, 255));
+
+            let crossing_light = resolve_selection_base_color(true, theme, &visual, light_canvas);
+            let window_light = resolve_selection_base_color(false, theme, &visual, light_canvas);
+            assert_eq!(crossing_light, Color::from_rgb8(255, 0, 0));
+            assert_eq!(window_light, Color::from_rgb8(0, 0, 255));
+        }
+    }
+
+    #[test]
+    fn paper_space_on_dark_themes_uses_light_canvas_palette() {
+        let visual = SelectionVisualOptions::default();
+        let paper_bg = [1.0, 1.0, 1.0, 1.0];
+        for theme in Theme::ALL {
+            let crossing = resolve_selection_base_color(true, theme, &visual, paper_bg);
+            let window = resolve_selection_base_color(false, theme, &visual, paper_bg);
+            let c_lum = crate::ui::style::common::wcag_luminance(crossing);
+            let w_lum = crate::ui::style::common::wcag_luminance(window);
+            assert!(
+                c_lum < 0.5,
+                "Theme {:?} crossing on paper ({:.3}) must have luminance < 0.5",
+                theme,
+                c_lum
+            );
+            assert!(
+                w_lum < 0.5,
+                "Theme {:?} window on paper ({:.3}) must have luminance < 0.5",
+                theme,
+                w_lum
+            );
+        }
+    }
+
+    #[test]
+    fn classic_dark_model_bg_resolves_dark_canvas_palette() {
+        let visual = SelectionVisualOptions::default();
+        let classic_dark = [33.0 / 255.0, 40.0 / 255.0, 48.0 / 255.0, 1.0];
+        for theme in Theme::ALL {
+            let crossing = resolve_selection_base_color(true, theme, &visual, classic_dark);
+            let window = resolve_selection_base_color(false, theme, &visual, classic_dark);
+            let (expected_crossing, expected_window) = theme_selection_colors(theme);
+            assert_eq!(
+                crossing, expected_crossing,
+                "Theme {:?} crossing on ClassicDark should match theme pair",
+                theme
+            );
+            assert_eq!(
+                window, expected_window,
+                "Theme {:?} window on ClassicDark should match theme pair",
+                theme
+            );
+        }
+    }
+
+    #[test]
+    fn custom_light_background_resolves_light_canvas_palette() {
+        let visual = SelectionVisualOptions::default();
+        let custom_light = [0.95, 0.95, 0.9, 1.0];
+        let crossing = resolve_selection_base_color(true, &Theme::Dark, &visual, custom_light);
+        let window = resolve_selection_base_color(false, &Theme::Dark, &visual, custom_light);
+        assert_eq!(crossing, light_canvas_color(true, &Theme::Dark));
+        assert_eq!(window, light_canvas_color(false, &Theme::Dark));
+    }
+
+    #[test]
+    fn test_selection_fill_alpha_clamping() {
+        // Dark canvas preserves user opacity directly clamped to [0.0, 1.0]
+        assert_eq!(selection_fill_alpha(0.0, false), 0.0);
+        assert!((selection_fill_alpha(50.0, false) - 0.5).abs() < 1e-5);
+        assert_eq!(selection_fill_alpha(100.0, false), 1.0);
+        assert_eq!(selection_fill_alpha(150.0, false), 1.0);
+
+        // Light canvas applies 1.35x boost and clamps to [0.0, 0.45]
+        assert_eq!(selection_fill_alpha(0.0, true), 0.0);
+        assert!((selection_fill_alpha(20.0, true) - 0.27).abs() < 1e-4);
+        assert!((selection_fill_alpha(50.0, true) - 0.45).abs() < 1e-5);
+        assert!((selection_fill_alpha(100.0, true) - 0.45).abs() < 1e-5);
+    }
+}
+

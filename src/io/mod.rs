@@ -404,6 +404,8 @@ async fn open_path_with_phase_attempt(
             purge_ms,
             caches_ms: t_caches.elapsed().as_millis() as u32,
                     xref_ms,
+                    // `finalize_ms` and its wires / index split are filled in
+                    // after `prepare_open_geometry` below.
                     ..Default::default()
         };
         caches.corrupt_dropped = dropped;
@@ -417,15 +419,26 @@ async fn open_path_with_phase_attempt(
                     );
                 }
                 progress2.set(crate::app::OPEN_PHASE_FINALIZING, 9600, 0, 1);
-                let t_prepare = Instant::now();
+                let t_finalize = Instant::now();
                 let (prepared_doc, prepared_geometry, prepare_timings) =
                     crate::scene::prepare_open_geometry(doc, &caches, model_bg);
-                caches.timings.prepare_ms = t_prepare.elapsed().as_millis() as u32;
+                caches.timings.finalize_ms = t_finalize.elapsed().as_millis() as u32;
                 caches.timings.prepare_wires_ms = prepare_timings.wires_ms;
                 caches.timings.prepare_index_ms = prepare_timings.index_ms;
                 doc = prepared_doc;
                 caches.prepared_geometry = Some(prepared_geometry);
                 progress2.set(crate::app::OPEN_PHASE_FINALIZING, 9950, 1, 1);
+                // The localized command-line summary predates `finalize_ms` and
+                // is keyed on its format string, so the full breakdown goes out
+                // here instead of changing that key across every locale.
+                crate::perf_record!(
+                    "[perf] open-phases parse={}ms purge={}ms xref={}ms caches={}ms finalize={}ms",
+                    caches.timings.parse_ms,
+                    caches.timings.purge_ms,
+                    caches.timings.xref_ms,
+                    caches.timings.caches_ms,
+                    caches.timings.finalize_ms,
+                );
                     Ok((doc, caches))
                 })()
             }));

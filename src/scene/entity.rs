@@ -602,6 +602,9 @@ impl Scene {
                     Some(EntityType::Solid3D(solid)) => {
                         crate::scene::convert::solid3d_tess::kernel_body(solid)
                     }
+                    Some(EntityType::Surface(surface)) => {
+                        crate::scene::convert::solid3d_tess::kernel_surface_body(surface)
+                    }
                     _ => None,
                 })?;
                 Some((handle, body))
@@ -1183,7 +1186,7 @@ impl Scene {
     fn layer_plottable_in_context(
         &self,
         entity: &EntityType,
-        context: &crate::scene::render_graph::RenderContext,
+        context: &crate::scene::render_graph::InstanceContext,
     ) -> bool {
         let common = entity.common();
         let layer = if crate::scene::view::render::is_effective_layer_zero(&common.layer) {
@@ -1289,6 +1292,7 @@ impl Scene {
             all_visible,
             depth_map.as_ref(),
         )
+        .with_annotation_scale(self.annotation_scale)
         .with_viewport(viewport);
         let mut hatch_block_memo = std::collections::HashMap::new();
         let mut models = Vec::new();
@@ -1315,24 +1319,24 @@ impl Scene {
                     return matches!(entity, EntityType::Insert(_))
                         && targets.contains(&common.handle);
                 }
-                match entity {
-                    EntityType::Insert(insert) => {
+                let block_uses: Vec<_> = crate::scene::render_graph::entity_render_block_uses(
+                    &self.document,
+                    entity,
+                    1.0,
+                )
+                .into_iter()
+                .filter(|block_use| block_use.active)
+                .collect();
+                if block_uses.is_empty() {
+                    true
+                } else {
+                    block_uses.into_iter().any(|block_use| {
                         crate::scene::render_graph::block_contains_hatch(
                             &self.document,
-                            &insert.block_name,
+                            &block_use.insert.block_name,
                             &mut hatch_block_memo,
                         )
-                    }
-                    EntityType::Dimension(dimension) => {
-                        let name = dimension.base().block_name.trim();
-                        !name.is_empty()
-                            && crate::scene::render_graph::block_contains_hatch(
-                                &self.document,
-                                name,
-                                &mut hatch_block_memo,
-                            )
-                    }
-                    _ => true,
+                    })
                 }
             },
             |entity, context| {
@@ -1464,7 +1468,8 @@ impl Scene {
             annotation_scale_handle,
             all_visible,
             depth_map.as_ref(),
-        );
+        )
+        .with_annotation_scale(self.annotation_scale);
         let mut models = Vec::new();
         let mut wipeout_sources = rustc_hash::FxHashMap::default();
         graph.walk_root(

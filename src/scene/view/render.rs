@@ -23,6 +23,7 @@ use crate::scene::{
 };
 
 const DISPLAY_STYLE_CACHE_LIMIT: usize = if cfg!(target_arch = "wasm32") { 4 } else { 24 };
+const MM_TO_PX: f32 = 96.0 / 25.4;
 
 // ── Camera hover state (shader::Program::State) ───────────────────────────
 
@@ -259,6 +260,10 @@ pub struct Primitive {
     pub(in crate::scene) bg_color: [f32; 4],
     /// Active Iced theme text colour for GPU-rendered ViewCube labels.
     pub(in crate::scene) viewcube_text_color: [f32; 4],
+    /// Color used to draw the selection highlight overlay wires.
+    pub(in crate::scene) selection_color: [f32; 4],
+    /// Whether selection visual effect (glow/highlight) is enabled.
+    pub(in crate::scene) selection_effect: bool,
     /// One input-to-render sample, carried only when PERF tracing is enabled.
     pub(in crate::scene) nav_perf: Option<NavPerfSample>,
 }
@@ -364,10 +369,16 @@ impl shader::Primitive for Primitive {
         viewport: &Viewport,
     ) {
         let nav_prepare_started = iced::time::Instant::now();
+        let errors_at_entry = crate::scene::pipeline::gpu_errors_seen();
+        let recovering = pipeline.gpu_error_epoch != errors_at_entry;
+        if recovering {
+            pipeline.wire_buffer_cache.clear();
+            pipeline.block_geometry.clear();
+            pipeline.gpu_error_epoch = errors_at_entry;
+        }
         let scale = viewport.scale_factor() as f32;
         let instance_ids: Vec<u64> = self.viewports.iter().map(|vp| vp.instance_id).collect();
         let slots = pipeline.resolve_slots(device, queue, &instance_ids);
-
         for (i, vp) in self.viewports.iter().enumerate() {
             // Pump the embedded Bevy renderer (bevy3d) before borrowing this
             // slot's inner pipeline — the bridge lives on the MultiPipeline.
@@ -397,6 +408,9 @@ impl shader::Primitive for Primitive {
                 }
             };
             let inner = &mut pipeline.inners[slots[i]];
+            inner.sync_gpu_error_epoch();
+            // Do not latch rejected uploads as current content.
+            let slot_errors_before = crate::scene::pipeline::gpu_errors_seen();
             // Pipeline slots are addressed by list index, but off-canvas
             // viewports are dropped from the list — so a slot can be reused by a
             // DIFFERENT viewport across frames (e.g. the first viewport scrolls
@@ -408,24 +422,7 @@ impl shader::Primitive for Primitive {
             // the surviving viewport's text/geometry vanish.
             if inner.slot_id != vp.instance_id {
                 inner.slot_id = vp.instance_id;
-                inner.cached_epoch = (u64::MAX, u64::MAX, u64::MAX);
-                inner.cached_wire_id = u64::MAX;
-                inner.cached_selection = (u64::MAX, u64::MAX);
-                inner.cached_mesh_content_id = u64::MAX;
-                inner.cached_face3d_key = (u64::MAX, false, false, u64::MAX);
-                inner.cached_hatch_source = None;
-                inner.cached_preview_hatch_source = None;
-                inner.cached_wipeout_source = None;
-                inner.cached_image_source = None;
-                inner.cached_text_source = None;
-                inner.cached_mesh_source = None;
-                inner.cached_face3d_source = None;
-                inner.cached_face3d_depth_source = None;
-                inner.wire_cull_key = (u64::MAX, u64::MAX, 0, 0);
-                inner.hatch_lod_key = (usize::MAX, u64::MAX, 0, 0, false);
-                inner.wipeout_lod_key = (usize::MAX, u64::MAX, 0, 0, false);
-                inner.silhouette_key = (usize::MAX, u64::MAX, [u32::MAX; 3], false);
-                inner.render_sig = u64::MAX;
+                inner.forget_cached_keys();
             }
             // The MSAA / depth / resolve textures are always sized to the
             // FULL viewport rectangle (not the on-canvas-visible portion)
@@ -459,7 +456,7 @@ impl shader::Primitive for Primitive {
                 vp.background_image.as_ref(),
                 vp.environment_image.as_ref(),
             );
-            inner.upload_uniforms(queue, &vp.uniforms);
+            inner.upload_uniforms(device, queue, &vp.uniforms);
 
             // ── Scene-render cache ────────────────────────────────────────
             // A pure cursor move — or any frame where the view, geometry,
@@ -528,11 +525,25 @@ impl shader::Primitive for Primitive {
             // the Wireframe overlay style.
             let face3d_fill_active = fill_mode && !vp.view_wireframe;
             let solid_fill_active = fill_mode && vp.show_2d_solid_fills;
-            let solid_visibility_key =
+            let view_dir_key = [
+                vp.view_dir.x.to_bits(),
+                vp.view_dir.y.to_bits(),
+                vp.view_dir.z.to_bits(),
+            ];
+            let solid_visibility_key = if !solid_fill_active {
+                0
+            } else if inner.cached_solid_visibility.0 == vp.wire_content_id
+                && inner.cached_solid_visibility.1 == view_dir_key
+            {
+                inner.cached_solid_visibility.2
+            } else {
                 crate::scene::pipeline::face3d_gpu::planar_solid_visibility_key(
                     &vp_wires,
                     vp.view_dir,
-                );
+                )
+            };
+            inner.cached_solid_visibility =
+                (vp.wire_content_id, view_dir_key, solid_visibility_key);
             let fill_changed = inner.cached_fill_mode != fill_mode;
             let hatch_changed = inner
                 .cached_hatch_source
@@ -566,6 +577,7 @@ impl shader::Primitive for Primitive {
             if wipeout_changed || fill_changed {
                 inner.upload_wipeouts(
                     device,
+                    queue,
                     if fill_mode {
                         &vp.wipeout_hatches[..]
                     } else {
@@ -628,6 +640,7 @@ impl shader::Primitive for Primitive {
             {
                 inner.upload_face3d(
                     device,
+                    queue,
                     &vp.face3d_wires[..],
                     &vp_wires[..],
                     !face3d_fill_active,
@@ -672,8 +685,7 @@ impl shader::Primitive for Primitive {
                     && (inner.wire_const_bgl.is_some()
                         || ((vp.wire_patch.is_some()
                             || inner.wire_arena_id != u64::MAX)
-                            && packed_arena_owner))
-                    && !vp_wires.iter().any(|wire| wire.render_instance.is_some());
+                            && packed_arena_owner));
                 if use_wire_arena {
                     use crate::scene::pipeline::wire_arena::{
                         self, PersistentWireArena as WireArena,
@@ -714,21 +726,9 @@ impl shader::Primitive for Primitive {
                                 .get(&handle)
                                 .map(|wires| wires.as_slice())
                                 .unwrap_or(&[]);
-                            let mesh_entity = run
-                                .iter()
-                                .any(|w| !w.fill_tris.is_empty() && !w.fill_tris_low.is_empty());
-                            regular_changed.insert(
-                                handle,
-                                run.iter()
-                                    .filter(|w| !w.points.is_empty() && !mesh_entity)
-                                    .collect(),
-                            );
-                            mesh_changed.insert(
-                                handle,
-                                run.iter()
-                                    .filter(|w| !w.points.is_empty() && mesh_entity)
-                                    .collect(),
-                            );
+                            let (regular, mesh) = wire_arena::split_wires(run);
+                            regular_changed.insert(handle, regular);
+                            mesh_changed.insert(handle, mesh);
                         }
                     }
                     let fallback_touched = |mesh_edge: bool| {
@@ -745,6 +745,9 @@ impl shader::Primitive for Primitive {
                             })
                         })
                     };
+                    // Snapshot before any arena allocation, so a rejected
+                    // upload cannot claim this content id below.
+                    let arena_errors_before = crate::scene::pipeline::gpu_errors_seen();
                     let reg_ok = base_ok
                         && if let Some(arena) = inner.wire_arena.as_mut() {
                             let patch = patch.unwrap();
@@ -776,22 +779,7 @@ impl shader::Primitive for Primitive {
                     if !reg_ok || !mesh_ok {
                         // Initial upload or a patch that outgrew arena capacity:
                         // only then pay the full regular/mesh split.
-                        let mesh_names: rustc_hash::FxHashSet<u64> = vp_wires
-                            .iter()
-                            .filter(|w| !w.fill_tris.is_empty() && !w.fill_tris_low.is_empty())
-                            .filter_map(|w| w.name.parse::<u64>().ok())
-                            .collect();
-                        let regular: Vec<&crate::scene::WireModel> = vp_wires
-                            .iter()
-                            .filter(|w| {
-                                !w.points.is_empty()
-                                    && !wire_arena::is_mesh_edge(w, &mesh_names)
-                            })
-                            .collect();
-                        let mesh: Vec<&crate::scene::WireModel> = vp_wires
-                            .iter()
-                            .filter(|w| wire_arena::is_mesh_edge(w, &mesh_names))
-                            .collect();
+                        let (regular, mesh) = wire_arena::split_wires(&vp_wires);
                         if !reg_ok {
                             inner.wire_arena = WireArena::build(
                                 device,
@@ -805,6 +793,7 @@ impl shader::Primitive for Primitive {
                                 inner.wire_arena_fallback = std::sync::Arc::new(
                                     crate::scene::pipeline::WireGpu::from_run_refs(
                                         device,
+                                        queue,
                                         &regular,
                                         &draw_depths,
                                         false,
@@ -841,6 +830,7 @@ impl shader::Primitive for Primitive {
                                 inner.wire_arena_fallback = std::sync::Arc::new(
                                     crate::scene::pipeline::WireGpu::from_run_refs(
                                         device,
+                                        queue,
                                         &mesh,
                                         &draw_depths,
                                         true,
@@ -890,7 +880,20 @@ impl shader::Primitive for Primitive {
                             gpus.extend(arena.wire_gpus());
                         }
                         inner.gpu_wires = std::sync::Arc::new(gpus);
-                        inner.gpu_block_wires = std::sync::Arc::new(Vec::new());
+                        // Blocks keep their own cached geometry and placements.
+                        let instanced: Vec<&crate::scene::WireModel> = vp_wires
+                            .iter()
+                            .filter(|w| w.render_instance.is_some())
+                            .collect();
+                        inner.gpu_block_wires = std::sync::Arc::new(
+                            inner.upload_block_wires(
+                                device,
+                                queue,
+                                &instanced,
+                                &draw_depths,
+                                &mut pipeline.block_geometry,
+                            ),
+                        );
                         if _patched {
                             wire_arena::patch_handle_index(
                                 &mut inner.wire_handle_index,
@@ -900,7 +903,15 @@ impl shader::Primitive for Primitive {
                             inner.wire_handle_index =
                                 wire_arena::build_handle_index(&vp_wires[..]);
                         }
-                        inner.wire_arena_id = vp.wire_content_id;
+                        // Only claim the content id when the device accepted
+                        // the upload; otherwise the slot believes it holds this
+                        // content and never rebuilds it.
+                        inner.wire_arena_id =
+                            if crate::scene::pipeline::gpu_errors_seen() == arena_errors_before {
+                                vp.wire_content_id
+                            } else {
+                                u64::MAX
+                            };
                         arena_served = true;
                     } else {
                         inner.wire_arena = None;
@@ -937,21 +948,51 @@ impl shader::Primitive for Primitive {
                     let built = match cached {
                         Some(entry) => entry,
                         None => {
+                            // Release superseded buffers before allocating replacements.
+                            // Other panes retain their own references to shared geometry.
+                            inner.gpu_wires = std::sync::Arc::new(Vec::new());
+                            inner.gpu_block_wires = std::sync::Arc::new(Vec::new());
+                            let held_before = pipeline.wire_buffer_cache.len();
+                            pipeline.wire_buffer_cache.retain(|_, (w, b, _)| {
+                                std::sync::Arc::strong_count(w) > 1
+                                    || std::sync::Arc::strong_count(b) > 1
+                            });
+                            if _perf {
+                                crate::perf_record!(
+                                    "[perf] wire-cache evicted={} held={}",
+                                    held_before - pipeline.wire_buffer_cache.len(),
+                                    pipeline.wire_buffer_cache.len(),
+                                );
+                            }
+                            let t_upload = _perf.then(iced::time::Instant::now);
+                            let errors_before =
+                                crate::scene::pipeline::gpu_errors_seen();
                             let entry =
-                                inner.build_wire_buffers(device, &vp_wires[..], &draw_depths);
-                            pipeline
-                                .wire_buffer_cache
-                                .insert(vp.wire_content_id, entry.clone());
-                            // Evict entries no slot still holds (only the cache
-                            // references them). An entry drawn by any pane keeps a
-                            // strong count ≥ 2, so this never drops live geometry.
-                            if pipeline.wire_buffer_cache.len() > 16 {
+                                inner.build_wire_buffers(
+                                    device,
+                                    queue,
+                                    &vp_wires[..],
+                                    &draw_depths,
+                                    &mut pipeline.block_geometry,
+                                );
+                            if let Some(start) = t_upload {
+                                crate::perf_record!(
+                                    "[perf] wire-upload {:.1}ms wires={} content_id={}",
+                                    start.elapsed().as_secs_f64() * 1000.0,
+                                    vp_wires.len(),
+                                    vp.wire_content_id,
+                                );
+                            }
+
+                            // Buffers the device rejected are still `Buffer`s.
+                            // Cached under a content id that keeps matching,
+                            // they render nothing for the rest of the session
+                            // and nothing ever rebuilds them. Draw the degraded
+                            // frame, but let the next one try again.
+                            if crate::scene::pipeline::gpu_errors_seen() == errors_before {
                                 pipeline
                                     .wire_buffer_cache
-                                    .retain(|_, (w, b, _)| {
-                                        std::sync::Arc::strong_count(w) > 1
-                                            || std::sync::Arc::strong_count(b) > 1
-                                    });
+                                    .insert(vp.wire_content_id, entry.clone());
                             }
                             entry
                         }
@@ -1013,24 +1054,33 @@ impl shader::Primitive for Primitive {
                         && !Arc::ptr_eq(previous, &vp.annotation_context_wires)
                 });
             if selection_changed || highlighted_geometry_changed || annotation_context_changed {
+                let sel_color = if self.selection_effect {
+                    Some(self.selection_color)
+                } else {
+                    None
+                };
                 inner.upload_selected_wires(
                     device,
+                    queue,
                     &vp_wires[..],
                     &vp.selected_handles,
                     &vp.hover_handles,
                     &vp.annotation_context_wires,
                     &draw_depths,
+                    sel_color,
                 );
                 // Text highlight rides the same selection key: a pick / rollover
                 // recolours the selected / hovered glyphs without touching the
                 // base text buffer.
                 inner.upload_text_highlight(
                     device,
+                    queue,
                     &vp_wires[..],
                     &vp.selected_handles,
                     &vp.hover_handles,
                     &vp.annotation_context_wires,
                     &draw_depths,
+                    sel_color,
                 );
                 inner.cached_annotation_highlight_source =
                     Some(Arc::clone(&vp.annotation_context_wires));
@@ -1069,13 +1119,17 @@ impl shader::Primitive for Primitive {
                 vp.selection_generation,
             );
             if hl_key != inner.cached_highlight_key {
-                inner.update_mesh_highlight(&vp.selected_handles, &vp.hover_handles);
+                inner.update_mesh_highlight(
+                    &vp.selected_handles,
+                    &vp.hover_handles,
+                    &vp.annotation_context_wires,
+                );
                 inner.cached_highlight_key = hl_key;
             }
             // Live overlay (command preview / interim / grip drag) — small and
             // refreshed every frame it's present, so a drag never re-uploads
             // the resident base wire buffer.
-            inner.upload_preview_wires(device, &vp.preview_wires[..], &draw_depths);
+            inner.upload_preview_wires(device, queue, &vp.preview_wires[..], &draw_depths);
             inner.upload_preview_text(device, queue, &vp.preview_text_verts[..]);
             // Cull / scissor / LOD project AABBs relative-to-eye (matching the
             // GPU's RTE path) so the math stays precise at UTM-scale coords.
@@ -1096,13 +1150,14 @@ impl shader::Primitive for Primitive {
             if inner.silhouette_key != silhouette_key {
                 inner.upload_silhouettes(
                     device,
+                    queue,
                     if silhouette_enabled { &vp.meshes[..] } else { &[] },
                     vp.wire_content_id,
                     vp.view_dir,
                 );
                 inner.silhouette_key = silhouette_key;
             }
-            inner.upload_clip_boundary(device, &vp.clip_boundary_ndc);
+            inner.upload_clip_boundary(device, queue, &vp.clip_boundary_ndc);
             let hatch_lod_key = (
                 Arc::as_ptr(&vp.hatches) as usize,
                 vp.camera_generation,
@@ -1172,6 +1227,15 @@ impl shader::Primitive for Primitive {
                     self.viewcube_text_color,
                 );
             }
+
+            // A rejected allocation leaves buffers that are invalid but
+            // indistinguishable from good ones at every cache key. Forget
+            // them all, so the next frame rebuilds this slot instead of
+            // drawing nothing for the rest of the session — which is what
+            // sent a user to REGENALL to get the model back.
+            if crate::scene::pipeline::gpu_errors_seen() != slot_errors_before {
+                inner.forget_cached_keys();
+            }
         }
         let prepare_ms = nav_prepare_started.elapsed().as_secs_f64() * 1000.0;
         if let Some(sample) = self.nav_perf {
@@ -1193,6 +1257,17 @@ impl shader::Primitive for Primitive {
                 self.viewports.len(),
             );
         }
+        // Memory pressure shortens cold-slot retention without evicting siblings.
+        let errors_now = crate::scene::pipeline::gpu_errors_seen();
+        let urgent = recovering || errors_now != errors_at_entry;
+        let released = pipeline.release_idle_slots(device, &slots, urgent);
+        if released > 0 && crate::perf::enabled() {
+            crate::perf_record!(
+                "[perf] slots-released n={released} urgent={urgent} slots={}",
+                pipeline.inners.len(),
+            );
+        }
+        report_gpu_live(pipeline);
     }
 
     fn render(
@@ -1203,6 +1278,7 @@ impl shader::Primitive for Primitive {
         clip: &Rectangle<u32>,
     ) {
         let nav_render_started = iced::time::Instant::now();
+        pipeline.frame_rendered.store(true, std::sync::atomic::Ordering::Relaxed);
         let cw = clip.width as f32;
         let ch = clip.height as f32;
         let clip_right = clip.x + clip.width;
@@ -1543,6 +1619,42 @@ fn solar_direction(
 }
 
 // ── Render-style helpers (impl Scene) ────────────────────────────────────
+
+/// Report what the renderer is holding on the device, when it changes.
+///
+/// Only on change: `prepare` runs thousands of times a session and these
+/// numbers move a handful of times. RSS is deliberately not used — the
+/// allocator and the driver both retain high-water memory that RSS cannot tell
+/// apart from live resources.
+fn report_gpu_live(pipeline: &crate::scene::pipeline::MultiPipeline) {
+    use std::cell::Cell;
+    if !crate::perf::enabled() {
+        return;
+    }
+    thread_local! {
+        static LAST: Cell<Option<crate::scene::pipeline::GpuLiveBytes>> = const { Cell::new(None) };
+    }
+    let now = pipeline.gpu_live_bytes();
+    LAST.with(|last| {
+        if last.get() == Some(now) {
+            return;
+        }
+        last.set(Some(now));
+        const MIB: f64 = 1024.0 * 1024.0;
+        let mib = |bytes: u64| bytes as f64 / MIB;
+        crate::perf_record!(
+            "[perf] gpu-live slots={} total={:.1}MiB shadow={:.1} targets={:.1} \
+text_atlas={:.1} wire_arena={:.1} block_geometry={:.1}",
+            now.slots,
+            mib(now.total()),
+            mib(now.shadow),
+            mib(now.render_targets),
+            mib(now.text_atlas),
+            mib(now.wire_arena),
+            mib(now.block_geometry),
+        );
+    });
+}
 
 impl Scene {
     fn model_tile_vport(&self, index: usize) -> Option<&acadrust::tables::VPort> {
@@ -2613,7 +2725,7 @@ impl Scene {
                     wire.fill_tris_low.clear();
                 }
                 if let Some(mm) = style.resolve_lineweight(wire.aci) {
-                    wire.line_weight_px = (mm * (96.0 / 25.4) * 2.0).max(1.0);
+                    wire.line_weight_px = (mm * MM_TO_PX).max(1.0);
                 }
                 for vertex in &mut wire.text_verts {
                     self.apply_display_plot_style(&mut vertex.color, wire.aci, &style);
@@ -2669,7 +2781,7 @@ impl Scene {
                     }
                 }
                 if let Some(mm) = style.resolve_lineweight(hatch.aci) {
-                    hatch.line_weight_px = (mm * (96.0 / 25.4) * 2.0).max(1.0);
+                    hatch.line_weight_px = (mm * MM_TO_PX).max(1.0);
                 }
                 if let crate::scene::model::hatch_model::HatchPattern::Gradient {
                     color2, ..
@@ -2731,7 +2843,7 @@ impl Scene {
             self.apply_display_plot_style(&mut color, wire.aci, &style);
             let line_weight_px = style
                 .resolve_lineweight(wire.aci)
-                .map(|mm| (mm * (96.0 / 25.4) * 2.0).max(1.0))
+                .map(|mm| (mm * MM_TO_PX).max(1.0))
                 .unwrap_or(wire.line_weight_px);
             for (triangle_index, triangle) in wire.fill_tris.chunks_exact(3).enumerate() {
                 let mut boundary = Vec::with_capacity(4);
@@ -2888,7 +3000,7 @@ pub(crate) fn render_style_for_viewport(
             _ => 0,
         };
         let [r, g, b, _] = tess_util::aci_to_rgba(resolved);
-        let transparency = if common.transparency.alpha() == 0 {
+        let transparency = if common.transparency.is_by_layer() {
             viewport_override(
                 document,
                 layer_name,
@@ -2964,15 +3076,8 @@ pub struct InheritStyle {
 
 /// Convert a concrete (already layer-resolved) lineweight to display pixels.
 pub(crate) fn lineweight_to_px(lw: &LineWeight) -> f32 {
-    const MM_TO_PX: f32 = 96.0 / 25.4;
-    // CAD apps display model-space lineweights larger than their true physical
-    // size so the gradations stay legible on screen — at true scale a 0.5 mm
-    // line is ~2 px and is indistinguishable from thinner weights (which all
-    // floor to 1 px). Apply the same legibility boost so weights are pronounced
-    // and tell apart, matching other DWG editors. (#147)
-    const LWT_DISPLAY_BOOST: f32 = 2.0;
     lw.millimeters()
-        .map(|mm| (mm as f32 * MM_TO_PX * LWT_DISPLAY_BOOST).max(1.0))
+        .map(|mm| (mm as f32 * MM_TO_PX).max(1.0))
         .unwrap_or(1.0)
 }
 
@@ -3102,18 +3207,21 @@ pub(crate) fn render_style_for_block_sub_viewport(
     let on_l0 = is_effective_layer_zero(&common.layer);
 
     let has_book_color = has_resolved_book_color(document, e);
-    let final_color = if !has_book_color && common.color == AcadColor::ByBlock {
+    let resolved_rgb = if !has_book_color && common.color == AcadColor::ByBlock {
         insert_color
     } else if !has_book_color && on_l0 && common.color == AcadColor::ByLayer {
-        let alpha = if common.transparency.alpha() == 0 {
-            l0.color[3]
-        } else {
-            color[3]
-        };
-        [l0.color[0], l0.color[1], l0.color[2], alpha]
+        l0.color
     } else {
         color
     };
+    let alpha = if common.transparency.is_by_block() {
+        insert_color[3]
+    } else if on_l0 && common.transparency.is_by_layer() {
+        l0.color[3]
+    } else {
+        color[3]
+    };
+    let final_color = [resolved_rgb[0], resolved_rgb[1], resolved_rgb[2], alpha];
 
     let lt_bylayer =
         common.linetype.is_empty() || common.linetype.eq_ignore_ascii_case("bylayer");
@@ -3149,6 +3257,43 @@ pub(crate) fn adapt_to_bg(color: [f32; 4], bg: [f32; 4]) -> [f32; 4] {
         [1.0, 1.0, 1.0, color[3]]
     } else {
         color
+    }
+}
+
+/// Re-resolve display colours for `bg`, for wires that recorded what their
+/// resolution consumed.
+///
+/// This is what lets a set tessellated under one background be shown under
+/// another without rebuilding it: the geometry never depended on the
+/// background, only the colours did — see the `let _ = bg_color;` in
+/// `block_cache::local_wires_for`.
+///
+/// Every colour is recomputed from `raw_color`, never from the current
+/// `color`, so the pass is idempotent and safe over a set that mixes memoized
+/// wires with freshly tessellated ones. Recomputing from `color` would not be:
+/// `adapt_to_bg` maps a near-white colour to pure black, and pure black back
+/// to pure *white*, so a second application loses the original tint.
+///
+/// Wires with `bg_adapt: None` — everything not built by `Batches::finalize` —
+/// are left alone.
+pub(crate) fn resolve_colors_for_bg(wires: &mut [WireModel], bg: [f32; 4]) {
+    for wire in wires {
+        let Some(adapt) = wire.bg_adapt.as_deref() else {
+            continue;
+        };
+        let contrast = adapt.contrast_bg.unwrap_or(bg);
+        wire.color = if adapt.canvas_color {
+            bg
+        } else if adapt.preserve_color {
+            adapt.raw_color
+        } else {
+            adapt_to_bg(adapt.raw_color, contrast)
+        };
+        if !adapt.preserve_color {
+            for (vertex, raw) in wire.text_verts.iter_mut().zip(&adapt.text_raw_colors) {
+                vertex.color = adapt_to_bg(*raw, contrast);
+            }
+        }
     }
 }
 
@@ -3346,6 +3491,7 @@ impl Scene {
         highlighted.sort_unstable_by_key(|(handle, _)| handle.value());
 
         let empty_selection = rustc_hash::FxHashSet::default();
+        let interaction_meshes = self.interaction_meshes_arc();
         let mut wires = Vec::new();
         for (handle, selected) in highlighted {
             let Some(entity) = self.document.get_entity(handle) else {
@@ -3361,6 +3507,46 @@ impl Scene {
                 continue;
             }
 
+            let tint = if selected {
+                self.selection_color
+            } else {
+                WireModel::HOVER
+            };
+            for set in interaction_meshes
+                .iter()
+                .filter(|set| set.entity_handle() == Some(handle))
+            {
+                let (edges, edges_low) = set.geometry_edges();
+                if edges.len() < 2 {
+                    continue;
+                }
+                let mut points = Vec::with_capacity(edges.len() / 2 * 3);
+                for pair_start in (0..edges.len() - 1).step_by(2) {
+                    for index in [pair_start, pair_start + 1] {
+                        let high = edges[index];
+                        let low = edges_low.get(index).copied().unwrap_or([0.0; 3]);
+                        let local = acadrust::types::Vector3::new(
+                            high[0] as f64 + low[0] as f64,
+                            high[1] as f64 + low[1] as f64,
+                            high[2] as f64 + low[2] as f64,
+                        );
+                        let world = set
+                            .instance_transform
+                            .map_or(local, |transform| transform.apply(local));
+                        points.push([world.x, world.y, world.z]);
+                    }
+                    points.push([f64::NAN; 3]);
+                }
+                let mut edge_wire = WireModel::solid_f64(
+                    format!("mesh-edge:{}", handle.value()),
+                    points,
+                    tint,
+                    selected,
+                );
+                edge_wire.line_weight_px = 2.0;
+                wires.push(edge_wire);
+            }
+
             if matches!(entity, EntityType::Hatch(_)) {
                 if selected {
                     if let Some(mut wire) = self.hatch_outline_wire(handle) {
@@ -3370,7 +3556,7 @@ impl Scene {
                                 entity,
                                 content_viewport.then_some(inst.handle),
                             );
-                        wire.color = WireModel::SELECTED;
+                        wire.color = self.selection_color;
                         wire.selected = true;
                         wire.pattern_length = pattern_length;
                         wire.pattern = pattern;
@@ -3412,12 +3598,6 @@ impl Scene {
                     .map(|context| context.scale)
                 })
                 .flatten();
-            let tint = if selected {
-                WireModel::SELECTED
-            } else {
-                WireModel::HOVER
-            };
-
             for scale in scales {
                 if displayed_scale == Some(scale) {
                     continue;
@@ -3516,6 +3696,8 @@ impl Scene {
             viewports,
             bg_color,
             viewcube_text_color,
+            selection_color: self.selection_color,
+            selection_effect: self.selection_effect,
             nav_perf: perf_nav,
         }
     }
@@ -3544,6 +3726,8 @@ impl Scene {
                 viewports: vec![],
                 bg_color,
                 viewcube_text_color,
+                selection_color: self.selection_color,
+                selection_effect: self.selection_effect,
                 nav_perf: None,
             };
         };
@@ -3604,6 +3788,8 @@ impl Scene {
             viewports,
             bg_color,
             viewcube_text_color,
+            selection_color: self.selection_color,
+            selection_effect: self.selection_effect,
             nav_perf: perf_nav,
         }
     }
@@ -3836,6 +4022,13 @@ impl Scene {
             full_bounds,
             self.document.header.lineweight_display || display_plot_lineweights,
         );
+        if self.current_layout == "Model" {
+            uniforms.lineweight_scale = -self.model_lineweight_scale;
+        } else {
+            let paper_per_pixel = 2.0 * self.camera.borrow().ortho_size() / canvas.1.max(1.0);
+            let paper_units_per_mm = self.paper_space_unit_factor() as f32;
+            uniforms.lineweight_scale = paper_units_per_mm / paper_per_pixel / MM_TO_PX;
+        }
 
         // Model space: scale linetypes using the current annotation scale so their
         // appearance can match a paper-space viewport at the same drawing scale.
@@ -4366,5 +4559,23 @@ mod layer0_inherit_tests {
         let c = resolve(&d, &EntityType::Line(l), walls);
         assert_eq!(&c[..3], &walls[..3], "RGB inherited from the insert layer");
         assert!((c[3] - 0.5).abs() < 0.02, "child's own 50% transparency is kept, got {}", c[3]);
+    }
+
+    #[test]
+    fn byblock_transparency_inherits_insert_alpha() {
+        let d = doc();
+        let mut entity = child("Other", Color::Index(3));
+        entity.common_mut().transparency = Transparency::BY_BLOCK;
+        let color = resolve(&d, &entity, [0.2, 0.4, 0.6, 0.25]);
+        assert_eq!(color[3], 0.25);
+    }
+
+    #[test]
+    fn explicit_opaque_does_not_inherit_alpha() {
+        let d = doc();
+        let mut entity = child("0", Color::ByLayer);
+        entity.common_mut().transparency = Transparency::OPAQUE;
+        let color = resolve(&d, &entity, [0.2, 0.4, 0.6, 0.25]);
+        assert_eq!(color[3], 1.0);
     }
 }

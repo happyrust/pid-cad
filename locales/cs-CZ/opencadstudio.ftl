@@ -20,6 +20,7 @@ language =
     .polish = Polski
     .chinese-traditional = 繁體中文
     .bulgarian = Български
+    .greek = Ελληνικά
 
 action =
     .close = Zavřít
@@ -3586,6 +3587,7 @@ dimstyle =
     .move-text-outside-first = Nejprve přesuňte text ven
     .period = Období
     .space = Mezerník
+    .surveyors-units = Zeměměřické jednotky
 
 style-manager =
     .alignment-spacing = Rozteč zarovnání

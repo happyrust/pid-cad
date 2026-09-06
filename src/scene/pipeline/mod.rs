@@ -3,8 +3,12 @@
 /// a composite pass folds its color + depth under the in-house overlays.
 #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
 pub mod bevy_bridge;
+#[cfg(test)]
+mod gpu_tests;
 mod device_capabilities;
 pub mod face3d_gpu;
+pub mod gpu_budget;
+pub mod gpu_upload;
 pub mod hatch_gpu;
 pub mod wipeout_gpu;
 pub mod image_gpu;
@@ -19,7 +23,6 @@ pub mod wire_arena;
 pub mod wire_gpu;
 
 use iced::wgpu;
-use iced::wgpu::util::DeviceExt;
 use iced::{Rectangle, Size};
 
 pub use face3d_gpu::Face3DGpu;
@@ -76,6 +79,7 @@ struct MeshHighlightDraw {
 }
 
 pub struct Pipeline {
+    gpu_error_epoch: usize,
     background_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
     shadow_plain_pipeline: wgpu::RenderPipeline,
@@ -96,6 +100,10 @@ pub struct Pipeline {
     /// compatibility mode. Passed to `WireGpu::from_run` / `from_batch`.
     pub(crate) wire_const_bgl: Option<wgpu::BindGroupLayout>,
     block_wire_const_bgl: wgpu::BindGroupLayout,
+    /// Which block-wire pipeline was built. Decides whether a definition's
+    /// segments go to a vertex buffer six times over or to a storage buffer
+    /// once.
+    block_wire_mode: wire_gpu::WirePipelineMode,
     wipeout_pipeline: wgpu::RenderPipeline,
     /// Capability-selected hatch renderer. Storage and texture transports are
     /// private backends behind one upload/LOD/draw lifecycle.
@@ -148,8 +156,16 @@ pub struct Pipeline {
     background_sampler: wgpu::Sampler,
     background_source_id: usize,
     environment_source_id: usize,
-    _shadow_texture: wgpu::Texture,
-    shadow_view: wgpu::TextureView,
+    /// The shadow depth target, allocated only while this viewport actually
+    /// casts shadows. `SHADOW_MAP_SIZE` squared at `Depth32Float` is 16 MiB,
+    /// and every slot used to hold one whether or not its visual style enabled
+    /// shadows — 128 MiB across eight viewports, none of it ever sampled.
+    shadow_full: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// Bound at the frame group's shadow slot while `shadow_full` is `None`.
+    /// The binding must be filled for the layout to be satisfied, but nothing
+    /// samples it when shadows are off, so 1x1 is the whole requirement.
+    _shadow_fallback_texture: wgpu::Texture,
+    shadow_fallback_view: wgpu::TextureView,
     shadow_sampler: wgpu::Sampler,
     shadow_enabled: bool,
     wipeout_bgl1: wgpu::BindGroupLayout,
@@ -159,24 +175,21 @@ pub struct Pipeline {
     /// GPU glyph atlas (texture + sampler + bind group). Rebuilt when the shared
     /// CPU atlas grows (new glyphs baked). `None` until the first text upload.
     text_atlas_gpu: Option<text_gpu::TextAtlasGpu>,
-    /// All glyph-quad vertices for the frame, one buffer, `None` when empty.
-    text_vbuf: Option<wgpu::Buffer>,
-    text_vcount: u32,
+    /// Glyph-quad vertices for the frame, split at whole glyph boundaries.
+    text_gpu: Vec<text_gpu::TextGpu>,
     block_text_gpu: Vec<text_gpu::BlockTextGpu>,
     block_text_highlight_gpu: Vec<text_gpu::BlockTextGpu>,
     /// Tinted glyph quads of just the selected / hovered text, drawn over the
     /// base text pass so a selection / rollover recolours the glyphs (the text
     /// analogue of the selected-wire xray overlay). Rebuilt on selection change.
-    text_highlight_vbuf: Option<wgpu::Buffer>,
-    text_highlight_vcount: u32,
+    text_highlight_gpu: Vec<text_gpu::TextGpu>,
     /// Live grip-drag / command-preview SDF glyph quads. The base text buffer
     /// only re-uploads on a geometry-epoch change, but a grip drag hides the
     /// dragged entity from the base wire set and shows it as a per-frame
     /// overlay — so its glyphs ride here, re-uploaded every frame like
     /// `gpu_preview_wires`, or the dragged text vanishes until release re-tesses
     /// it back into the base set (issue #316).
-    text_preview_vbuf: Option<wgpu::Buffer>,
-    text_preview_vcount: u32,
+    text_preview_gpu: Vec<text_gpu::TextGpu>,
     /// Per-frame silhouette line lists from the kernel mesh and current view.
     silhouette_chunks: Vec<SilhouetteChunk>,
     silhouette_source_key: (usize, usize, u64),
@@ -333,6 +346,8 @@ pub struct Pipeline {
     pub cached_selection: (u64, u64),
     /// Face upload key; keeps the resident wire Arc uniquely owned by Scene.
     pub cached_face3d_key: (u64, bool, bool, u64),
+    /// Cached planar-solid visibility for `(wire_content_id, view direction)`.
+    pub cached_solid_visibility: (u64, [u32; 3], u64),
     /// Handle → indices into the resident wire set, built once per wire upload
     /// (when `cached_wire_id` changes). Lets the selection/hover xray overlay
     /// gather just the highlighted entity's wires (`O(highlighted)`) instead of
@@ -502,21 +517,9 @@ impl Pipeline {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
-        let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shadow.texture"),
-            size: wgpu::Extent3d {
-                width: SHADOW_MAP_SIZE,
-                height: SHADOW_MAP_SIZE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_fallback_texture = create_shadow_texture(device, 1);
+        let shadow_fallback_view =
+            shadow_fallback_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shadow.sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -555,7 +558,7 @@ impl Pipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&shadow_view),
+                    resource: wgpu::BindingResource::TextureView(&shadow_fallback_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
@@ -595,7 +598,8 @@ impl Pipeline {
             bind_group_layouts: &wire_bgls,
             immediate_size: 0,
         });
-        let block_wire_const_bgl = wire_gpu::block_const_bind_group_layout(device);
+        let block_wire_const_bgl =
+            wire_gpu::block_const_bind_group_layout(device, wire_mode.uses_storage());
         let block_wire_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("block_wire.pipeline_layout"),
             bind_group_layouts: &[Some(&frame_bgl), Some(&block_wire_const_bgl)],
@@ -616,9 +620,13 @@ impl Pipeline {
         });
         let block_wire_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("block_wire.shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
-                "../../shaders/block_wire.wgsl"
-            ))),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+                if wire_mode.uses_storage() {
+                    include_str!("../../shaders/block_wire_storage.wgsl")
+                } else {
+                    include_str!("../../shaders/block_wire.wgsl")
+                },
+            )),
         });
 
         // Stencil test shared by every paper content pipeline: draw only where
@@ -894,6 +902,17 @@ impl Pipeline {
             multiview_mask: None,
             cache: None,
         });
+        // wgpu 30 takes each vertex-buffer slot as an `Option`, hence the
+        // `Some(..)` around every layout here.
+        let block_wire_buffers: &[Option<wgpu::VertexBufferLayout<'_>>] =
+            if wire_mode.uses_storage() {
+                &[Some(wire_gpu::BlockWireInstance::layout())]
+            } else {
+                &[
+                    Some(wire_gpu::BlockWireVertex::layout()),
+                    Some(wire_gpu::BlockWireInstance::layout()),
+                ]
+            };
         let make_block_wire_pipeline = |
             label: &'static str,
             fragment: &'static str,
@@ -906,10 +925,10 @@ impl Pipeline {
                 vertex: wgpu::VertexState {
                     module: &block_wire_shader,
                     entry_point: Some("vs_main"),
-                    buffers: &[
-                        Some(wire_gpu::BlockWireVertex::layout()),
-                        Some(wire_gpu::BlockWireInstance::layout()),
-                    ],
+                    // Storage mode has no geometry vertex buffer: the
+                    // instances become slot 0 and the segments arrive through
+                    // the bind group.
+                    buffers: block_wire_buffers,
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 },
                 primitive: wgpu::PrimitiveState {
@@ -2137,11 +2156,13 @@ impl Pipeline {
         // UV crop uniform: [uv_offset_x, uv_offset_y, uv_scale_x, uv_scale_y]
         // padded to 16 bytes (std140 vec2 alignment). Defaulted to the
         // identity crop (offset 0, scale 1) for the common on-canvas case.
-        let blit_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("blit.uniform_buffer"),
-            contents: bytemuck::cast_slice(&[0.0f32, 0.0, 1.0, 1.0]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        let blit_uniform_buffer = gpu_upload::upload_buffer(
+            device,
+            queue,
+            "blit.uniform_buffer",
+            &[0.0f32, 0.0, 1.0, 1.0],
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
 
         let blit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("blit.pipeline_layout"),
@@ -2315,6 +2336,8 @@ impl Pipeline {
             block_wire_xray_pipeline,
             wire_const_bgl,
             block_wire_const_bgl,
+            block_wire_mode: wire_mode,
+            gpu_error_epoch: gpu_errors_seen(),
             wipeout_pipeline,
             hatch_gpu,
             image_pipeline,
@@ -2324,14 +2347,11 @@ impl Pipeline {
             block_text_highlight_pipeline,
             text_atlas_bgl,
             text_atlas_gpu: None,
-            text_vbuf: None,
-            text_vcount: 0,
+            text_gpu: Vec::new(),
             block_text_gpu: Vec::new(),
             block_text_highlight_gpu: Vec::new(),
-            text_highlight_vbuf: None,
-            text_highlight_vcount: 0,
-            text_preview_vbuf: None,
-            text_preview_vcount: 0,
+            text_highlight_gpu: Vec::new(),
+            text_preview_gpu: Vec::new(),
             silhouette_chunks: Vec::new(),
             silhouette_source_key: (usize::MAX, usize::MAX, u64::MAX),
             silhouette_source_groups: Vec::new(),
@@ -2364,8 +2384,9 @@ impl Pipeline {
             background_sampler,
             background_source_id: 0,
             environment_source_id: 0,
-            _shadow_texture: shadow_texture,
-            shadow_view,
+            shadow_full: None,
+            _shadow_fallback_texture: shadow_fallback_texture,
+            shadow_fallback_view,
             shadow_sampler,
             shadow_enabled: false,
             wipeout_bgl1,
@@ -2435,6 +2456,7 @@ impl Pipeline {
             cached_wire_id: u64::MAX,
             cached_selection: (u64::MAX, u64::MAX),
             cached_face3d_key: (u64::MAX, false, false, u64::MAX),
+            cached_solid_visibility: (u64::MAX, [u32::MAX; 3], u64::MAX),
             wire_handle_index: std::sync::Arc::new(rustc_hash::FxHashMap::default()),
             render_sig: u64::MAX,
             skip_geometry: false,
@@ -2444,16 +2466,37 @@ impl Pipeline {
         }
     }
 
-    /// Build the resident wire batches + handle index for `wires`, wrapped in
-    /// `Arc` so the caller can cache them by `wire_content_id` and share one
-    /// copy across every slot that renders that content (see
-    /// `MultiPipeline::wire_buffer_cache`). Takes `&self` (reads only the const
-    /// bind-group layout) so the shared cache — not the slot — owns the result.
-    pub fn build_wire_buffers(
-        &self,
+    /// Upload block placements while reusing unchanged geometry.
+    pub fn upload_block_wires(
+        &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        wires: &[&WireModel],
+        depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
+        block_geometry: &mut wire_gpu::BlockGeometryCache,
+    ) -> Vec<BlockWireGpu> {
+        BlockWireGpu::from_wires(
+            device,
+            queue,
+            wires,
+            depth_map,
+            None,
+            wire_gpu::BlockWireTarget {
+                const_bgl: &self.block_wire_const_bgl,
+                mode: self.block_wire_mode,
+            },
+            Some(block_geometry),
+        )
+    }
+
+    /// Build resident batches and a handle index shared across viewport slots.
+    pub fn build_wire_buffers(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
         wires: &[WireModel],
         depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
+        block_geometry: &mut wire_gpu::BlockGeometryCache,
     ) -> (
         std::sync::Arc<Vec<WireGpu>>,
         std::sync::Arc<Vec<BlockWireGpu>>,
@@ -2494,6 +2537,7 @@ impl Pipeline {
             let refs: Vec<&WireModel> = wires[i..j].iter().collect();
             batches.extend(WireGpu::from_run_refs(
                 device,
+                queue,
                 &refs,
                 depth_map,
                 mesh_edge,
@@ -2503,21 +2547,38 @@ impl Pipeline {
         }
         let block_batches = BlockWireGpu::from_wires(
             device,
+            queue,
             &block_wires,
             depth_map,
             None,
-            &self.block_wire_const_bgl,
+            wire_gpu::BlockWireTarget {
+                const_bgl: &self.block_wire_const_bgl,
+                mode: self.block_wire_mode,
+            },
+            Some(block_geometry),
         );
 
-        // Index handle → wire slots once, here, so the per-hover selection
-        // overlay can gather just the highlighted wires instead of scanning +
-        // string-parsing the whole set every time the hovered entity changes.
+        // Parse handles in parallel, preserving wire order for hover slot lists.
+        let t_index = crate::perf::enabled().then(iced::time::Instant::now);
+        let parsed: Vec<(u64, u32)> = {
+            use crate::par::prelude::*;
+            wires
+                .par_iter()
+                .enumerate()
+                .filter_map(|(idx, w)| w.name.parse::<u64>().ok().map(|h| (h, idx as u32)))
+                .collect()
+        };
         let mut index: rustc_hash::FxHashMap<u64, Vec<u32>> = rustc_hash::FxHashMap::default();
-        index.reserve(wires.len());
-        for (idx, w) in wires.iter().enumerate() {
-            if let Ok(h) = w.name.parse::<u64>() {
-                index.entry(h).or_default().push(idx as u32);
-            }
+        index.reserve(parsed.len());
+        for (handle, idx) in parsed {
+            index.entry(handle).or_default().push(idx);
+        }
+        if let Some(started) = t_index {
+            crate::perf_record!(
+                "[perf] wire-handle-index {:.1}ms wires={}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                wires.len(),
+            );
         }
         (
             std::sync::Arc::new(batches),
@@ -2537,11 +2598,13 @@ impl Pipeline {
     pub fn upload_selected_wires(
         &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         wires: &[WireModel],
         selected: &rustc_hash::FxHashSet<acadrust::Handle>,
         hovered: &rustc_hash::FxHashSet<acadrust::Handle>,
         annotation_context_wires: &[WireModel],
         depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
+        selected_tint: Option<[f32; 4]>,
     ) {
         let perf_started = crate::perf::enabled().then(iced::time::Instant::now);
         if selected.is_empty() && hovered.is_empty() && annotation_context_wires.is_empty() {
@@ -2602,34 +2665,54 @@ impl Pipeline {
             .copied()
             .filter(|wire| wire.render_instance.is_some())
             .collect();
-        let mut gpu = WireGpu::from_highlight_refs(
-            device,
-            &selected_regular,
-            WireModel::SELECTED,
-            depth_map,
-            self.wire_const_bgl.as_ref(),
-        );
+        let mut gpu = if let Some(tint) = selected_tint {
+            WireGpu::from_highlight_refs(
+                device,
+                queue,
+                &selected_regular,
+                tint,
+                depth_map,
+                self.wire_const_bgl.as_ref(),
+            )
+        } else {
+            Vec::new()
+        };
         gpu.extend(WireGpu::from_highlight_refs(
             device,
+            queue,
             &hover_regular,
             WireModel::HOVER,
             depth_map,
             self.wire_const_bgl.as_ref(),
         ));
         self.gpu_selected_wires = gpu;
-        let mut block_gpu = BlockWireGpu::from_wires(
-            device,
-            &selected_blocks,
-            depth_map,
-            Some(WireModel::SELECTED),
-            &self.block_wire_const_bgl,
-        );
+        let mut block_gpu = if let Some(tint) = selected_tint {
+            BlockWireGpu::from_wires(
+                device,
+                queue,
+                &selected_blocks,
+                depth_map,
+                Some(tint),
+                wire_gpu::BlockWireTarget {
+                    const_bgl: &self.block_wire_const_bgl,
+                    mode: self.block_wire_mode,
+                },
+                None,
+            )
+        } else {
+            Vec::new()
+        };
         block_gpu.extend(BlockWireGpu::from_wires(
             device,
+            queue,
             &hover_blocks,
             depth_map,
             Some(WireModel::HOVER),
-            &self.block_wire_const_bgl,
+            wire_gpu::BlockWireTarget {
+                const_bgl: &self.block_wire_const_bgl,
+                mode: self.block_wire_mode,
+            },
+            None,
         ));
         self.gpu_selected_block_wires = block_gpu;
         if let Some(started) = perf_started {
@@ -2656,16 +2739,17 @@ impl Pipeline {
     pub fn upload_text_highlight(
         &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         wires: &[WireModel],
         selected: &rustc_hash::FxHashSet<acadrust::Handle>,
         hovered: &rustc_hash::FxHashSet<acadrust::Handle>,
         annotation_context_wires: &[WireModel],
         depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
+        selected_tint: Option<[f32; 4]>,
     ) {
         let perf_started = crate::perf::enabled().then(iced::time::Instant::now);
         if selected.is_empty() && hovered.is_empty() && annotation_context_wires.is_empty() {
-            self.text_highlight_vbuf = None;
-            self.text_highlight_vcount = 0;
+            self.text_highlight_gpu.clear();
             self.block_text_highlight_gpu.clear();
             return;
         }
@@ -2697,15 +2781,17 @@ impl Pipeline {
                 }
             }
         }
-        for h in selected {
-            push(
-                &self.wire_handle_index,
-                h.value(),
-                WireModel::SELECTED,
-                wires,
-                &mut out,
-                &mut selected_blocks,
-            );
+        if let Some(tint) = selected_tint {
+            for h in selected {
+                push(
+                    &self.wire_handle_index,
+                    h.value(),
+                    tint,
+                    wires,
+                    &mut out,
+                    &mut selected_blocks,
+                );
+            }
         }
         for h in hovered.iter().filter(|handle| !selected.contains(handle)) {
             push(
@@ -2719,27 +2805,34 @@ impl Pipeline {
         }
         for wire in annotation_context_wires {
             let tint = if wire.selected {
-                WireModel::SELECTED
+                selected_tint.unwrap_or(WireModel::SELECTED)
             } else {
                 WireModel::HOVER
             };
-            for vertex in &wire.text_verts {
-                out.push(text_gpu::TextVertex {
-                    color: [tint[0], tint[1], tint[2], vertex.color[3]],
-                    ..*vertex
-                });
+            if !wire.selected || selected_tint.is_some() {
+                for vertex in &wire.text_verts {
+                    out.push(text_gpu::TextVertex {
+                        color: [tint[0], tint[1], tint[2], vertex.color[3]],
+                        ..*vertex
+                    });
+                }
             }
         }
-        self.text_highlight_vcount = out.len() as u32;
-        self.text_highlight_vbuf = text_gpu::upload_vertices(device, &out);
-        let mut block_gpu = text_gpu::upload_block_vertex_refs(
-            device,
-            &selected_blocks,
-            depth_map,
-            Some(WireModel::SELECTED),
-        );
+        self.text_highlight_gpu = text_gpu::upload_vertices(device, queue, &out);
+        let mut block_gpu = if let Some(tint) = selected_tint {
+            text_gpu::upload_block_vertex_refs(
+                device,
+                queue,
+                &selected_blocks,
+                depth_map,
+                Some(tint),
+            )
+        } else {
+            Vec::new()
+        };
         block_gpu.extend(text_gpu::upload_block_vertex_refs(
             device,
+            queue,
             &hover_blocks,
             depth_map,
             Some(WireModel::HOVER),
@@ -2763,13 +2856,14 @@ impl Pipeline {
     pub fn upload_preview_wires(
         &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         wires: &[WireModel],
         depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
     ) {
         self.gpu_preview_wires = if wires.is_empty() {
             vec![]
         } else {
-            WireGpu::from_run(device, wires, depth_map, false, self.wire_const_bgl.as_ref())
+            WireGpu::from_run(device, queue, wires, depth_map, false, self.wire_const_bgl.as_ref())
         };
     }
 
@@ -2785,8 +2879,7 @@ impl Pipeline {
         verts: &[text_gpu::TextVertex],
     ) {
         if verts.is_empty() {
-            self.text_preview_vbuf = None;
-            self.text_preview_vcount = 0;
+            self.text_preview_gpu.clear();
             return;
         }
         // Ensure the glyph atlas exists / is current even when the base text
@@ -2802,8 +2895,7 @@ impl Pipeline {
                 atlas.clear_dirty();
             }
         }
-        self.text_preview_vbuf = text_gpu::upload_vertices(device, verts);
-        self.text_preview_vcount = verts.len() as u32;
+        self.text_preview_gpu = text_gpu::upload_vertices(device, queue, verts);
     }
 
     // The math lives outside the GPU method so it can be unit-tested; see the
@@ -2813,6 +2905,7 @@ impl Pipeline {
     pub fn upload_silhouettes(
         &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         sets: &[crate::scene::model::mesh_model::MeshLodSet],
         content_id: u64,
         view_dir: glam::Vec3,
@@ -2821,12 +2914,7 @@ impl Pipeline {
         let view = glam::DVec3::new(view_dir.x as f64, view_dir.y as f64, view_dir.z as f64)
             .normalize_or(glam::DVec3::NEG_Z);
         use crate::scene::pipeline::mesh_gpu::{SilhouetteInstance, SilhouetteVertex};
-        use wgpu::util::DeviceExt;
-        const SILHOUETTE_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
-        let chunk_bytes = device
-            .limits()
-            .max_buffer_size
-            .min(SILHOUETTE_CHUNK_BYTES) as usize;
+        let chunk_bytes = gpu_budget::buffer_budget(device);
         let max_vertices = chunk_bytes / std::mem::size_of::<SilhouetteVertex>() / 2 * 2;
         if max_vertices < 2 {
             self.silhouette_chunks.clear();
@@ -2901,12 +2989,12 @@ impl Pipeline {
                         .chunks(max_instances.max(1))
                         .map(|instances| {
                             (
-                                device.create_buffer_init(
-                                    &wgpu::util::BufferInitDescriptor {
-                                        label: Some("mesh.silhouette.instances"),
-                                        contents: bytemuck::cast_slice(instances),
-                                        usage: wgpu::BufferUsages::VERTEX,
-                                    },
+                                gpu_upload::upload_buffer(
+                                    device,
+                                    queue,
+                                    "mesh.silhouette.instances",
+                                    instances,
+                                    wgpu::BufferUsages::VERTEX,
                                 ),
                                 instances.len() as u32,
                             )
@@ -3008,12 +3096,12 @@ impl Pipeline {
                 if vertex_count == 0 {
                     return;
                 }
-                let vertex_buffer = device.create_buffer_init(
-                    &wgpu::util::BufferInitDescriptor {
-                        label: Some("mesh.silhouette.vbuf"),
-                        contents: bytemuck::cast_slice(&verts[..vertex_count]),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    },
+                let vertex_buffer = gpu_upload::upload_buffer(
+                    device,
+                    queue,
+                    "mesh.silhouette.vbuf",
+                    &verts[..vertex_count],
+                    wgpu::BufferUsages::VERTEX,
                 );
                 for (instance_buffer, instance_count) in &group.instance_buffers {
                     chunks.push(SilhouetteChunk {
@@ -3053,8 +3141,7 @@ impl Pipeline {
     /// so the mask pipeline stamps it straight into the stencil with `Invert`
     /// (even-odd fill → interior marked, any convexity). Empty input clears the
     /// boundary so the viewport renders unclipped (its render rectangle clips).
-    pub fn upload_clip_boundary(&mut self, device: &wgpu::Device, boundary_ndc: &[[f32; 2]]) {
-        use wgpu::util::DeviceExt;
+    pub fn upload_clip_boundary(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, boundary_ndc: &[[f32; 2]]) {
         if boundary_ndc.len() < 3 {
             self.clip_boundary = None;
             return;
@@ -3070,11 +3157,13 @@ impl Pipeline {
             self.clip_boundary = None;
             return;
         }
-        let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("clip_boundary.vbuf"),
-            contents: bytemuck::cast_slice(&verts),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let vbuf = gpu_upload::upload_buffer(
+            device,
+            queue,
+            "clip_boundary.vbuf",
+            &verts,
+            wgpu::BufferUsages::VERTEX,
+        );
         self.clip_boundary = Some((vbuf, (verts.len() / 2) as u32));
     }
 
@@ -3130,6 +3219,7 @@ impl Pipeline {
     pub fn upload_face3d(
         &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         face3d_wires: &[WireModel],
         all_wires: &[WireModel],
         wireframe_only: bool,
@@ -3141,7 +3231,7 @@ impl Pipeline {
         // Edge buffer is always built from `face3d_wires`, so 3DFACE
         // outlines stay on the screen regardless of mode.
         self.gpu_face3d_edges =
-            WireGpu::from_batch(device, face3d_wires, depth_map, self.wire_const_bgl.as_ref());
+            WireGpu::from_batch(device, queue, face3d_wires, depth_map, self.wire_const_bgl.as_ref());
         // Fill buffer split: 3D quads + PolyfaceMesh / PolygonMesh face
         // tris go to `chunks_3d` (gated by `keep_3d_mesh_fills`);
         // 2D fills (text-LOD greek, MultiLeader background, dimension arrows) go to
@@ -3164,6 +3254,7 @@ impl Pipeline {
         } else {
             self.gpu_face3d_fill = Some(Face3DGpu::from_wires(
                 device,
+                queue,
                 face3d_wires,
                 all_wires,
                 keep_3d_mesh_fills,
@@ -3378,9 +3469,19 @@ impl Pipeline {
         &mut self,
         selected: &rustc_hash::FxHashSet<acadrust::Handle>,
         hovered: &rustc_hash::FxHashSet<acadrust::Handle>,
+        edge_wires: &[WireModel],
     ) {
+        let edge_handles: rustc_hash::FxHashSet<acadrust::Handle> = edge_wires
+            .iter()
+            .filter_map(|wire| wire.name.strip_prefix("mesh-edge:"))
+            .filter_map(|value| value.parse::<u64>().ok())
+            .map(acadrust::Handle::new)
+            .collect();
         let mut out = Vec::new();
-        for handle in selected {
+        for handle in selected
+            .iter()
+            .filter(|handle| !edge_handles.contains(handle))
+        {
             if let Some(ranges) = self.mesh_ranges_by_handle.get(handle) {
                 out.extend(ranges.iter().copied().map(|range| MeshHighlightDraw {
                     range,
@@ -3388,7 +3489,9 @@ impl Pipeline {
                 }));
             }
         }
-        for handle in hovered.iter().filter(|handle| !selected.contains(handle)) {
+        for handle in hovered.iter().filter(|handle| {
+            !selected.contains(handle) && !edge_handles.contains(handle)
+        }) {
             if let Some(ranges) = self.mesh_ranges_by_handle.get(&handle) {
                 out.extend(ranges.iter().copied().map(|range| MeshHighlightDraw {
                     range,
@@ -3448,13 +3551,18 @@ impl Pipeline {
         self.hatch_gpu.upload_preview(device, queue, hatches);
     }
 
-    pub fn upload_wipeouts(&mut self, device: &wgpu::Device, wipeouts: &[HatchModel]) {
+    pub fn upload_wipeouts(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        wipeouts: &[HatchModel],
+    ) {
         let renderable: Vec<HatchModel> = wipeouts
             .iter()
             .filter(|h| h.boundary.len() >= 3)
             .cloned()
             .collect();
-        self.gpu_wipeouts = WipeoutGpu::from_models(device, &renderable, &self.wipeout_bgl1);
+        self.gpu_wipeouts = WipeoutGpu::from_models(device, queue, &renderable, &self.wipeout_bgl1);
     }
 
     pub fn upload_images(
@@ -3489,9 +3597,8 @@ impl Pipeline {
                 atlas.clear_dirty();
             }
         }
-        self.text_vbuf = text_gpu::upload_vertices(device, verts);
-        self.text_vcount = verts.len() as u32;
-        self.block_text_gpu = text_gpu::upload_block_vertices(device, wires, depth_map);
+        self.text_gpu = text_gpu::upload_vertices(device, queue, verts);
+        self.block_text_gpu = text_gpu::upload_block_vertices(device, queue, wires, depth_map);
         if let Some(started) = perf_started {
             let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
             if elapsed_ms >= 1.0 {
@@ -3504,9 +3611,98 @@ impl Pipeline {
         }
     }
 
-    pub fn upload_uniforms(&mut self, queue: &wgpu::Queue, uniforms: &Uniforms) {
+    /// Whatever is bound at the frame group's shadow slot: the real depth
+    /// target when this viewport casts shadows, the 1x1 placeholder otherwise.
+    fn shadow_view(&self) -> &wgpu::TextureView {
+        match &self.shadow_full {
+            Some((_, view)) => view,
+            None => &self.shadow_fallback_view,
+        }
+    }
+
+    /// Rebuild the frame bind group from whatever this slot currently holds.
+    ///
+    /// Three things can change what belongs in it — a background image, an
+    /// environment image, and whether the shadow target exists — and it used to
+    /// be assembled inline at each. One builder means a shadow transition
+    /// cannot forget the background the slot already had.
+    fn rebuild_frame_bind_group(&mut self, device: &wgpu::Device) {
+        let background_view = self
+            .background_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let environment_view = self
+            .environment_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        self.uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("viewer.bind_group"),
+            layout: &self.frame_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&background_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.background_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&environment_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.background_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(self.shadow_view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                },
+            ],
+        });
+    }
+
+    /// Allocate or drop the shadow target to match `shadow_enabled`.
+    ///
+    /// Only on a transition: the frame bind group has to be rebuilt with the
+    /// new view, and a viewport that keeps its shadow setting should not pay
+    /// for that every frame.
+    fn sync_shadow_target(&mut self, device: &wgpu::Device) {
+        match (self.shadow_enabled, self.shadow_full.is_some()) {
+            (true, false) => {
+                let errors_before = gpu_errors_seen();
+                let texture = create_shadow_texture(device, SHADOW_MAP_SIZE);
+                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                if gpu_errors_seen() == errors_before {
+                    self.shadow_full = Some((texture, view));
+                }
+            }
+            (false, true) => self.shadow_full = None,
+            _ => return,
+        }
+        self.rebuild_frame_bind_group(device);
+    }
+
+    pub fn upload_uniforms(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        uniforms: &Uniforms,
+    ) {
         self.shadow_enabled = uniforms.shadow_params[0] > 0.5;
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(uniforms));
+        self.sync_shadow_target(device);
+        let mut uniforms = *uniforms;
+        if self.shadow_full.is_none() {
+            uniforms.shadow_params[0] = 0.0;
+        }
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
     }
 
     pub fn upload_background_images(
@@ -3572,46 +3768,7 @@ impl Pipeline {
             environment,
             [128, 128, 128, 255],
         );
-        let background_view = self
-            .background_texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let environment_view = self
-            .environment_texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        self.uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("viewer.bind_group"),
-            layout: &self.frame_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&background_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.background_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&environment_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&self.background_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&self.shadow_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
-                },
-            ],
-        });
+        self.rebuild_frame_bind_group(device);
         self.background_source_id = background_id;
         self.environment_source_id = environment_id;
     }
@@ -3680,12 +3837,18 @@ impl Pipeline {
         // render rectangle does the clipping).
         let stencil_ref: u32 = if self.clip_boundary.is_some() { 0xFF } else { 0 };
 
-        if self.shadow_enabled && !self.skip_geometry && !mesh_wireframe {
+        // Render shadows only when a full target was allocated.
+        if let Some(shadow_target) = self
+            .shadow_full
+            .as_ref()
+            .map(|(_, view)| view)
+            .filter(|_| self.shadow_enabled && !self.skip_geometry && !mesh_wireframe)
+        {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow.render_pass"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_view,
+                    view: shadow_target,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
@@ -3900,7 +4063,7 @@ impl Pipeline {
             // Four draw paths share this pass:
             //  - Solid:           `mesh_pipeline` + triangle index buf.
             //  - Wireframe:       `mesh_wireframe_pipeline` + the
-            //                     pre-built `wire_index_buffer`.
+            //                     pre-built expanded wire vertex buffer.
             //  - HiddenLine:      depth prepass (`mesh_depth_pipeline`,
             //                     writes Z, no colour) → wire overlay.
             //  - Solid+Edges:     `mesh_pipeline` shaded fill → wire
@@ -3959,17 +4122,9 @@ impl Pipeline {
                     );
                     pass.set_vertex_buffer(1, c.instance_buffer.slice(..));
                     // Plain-mesh triangulation edges.
-                    if c.wire_index_count != 0 {
-                        pass.set_vertex_buffer(0, c.vertex_buffer.slice(..));
-                        pass.set_index_buffer(
-                            c.wire_index_buffer.slice(..),
-                            wgpu::IndexFormat::Uint32,
-                        );
-                        pass.draw_indexed(
-                            0..c.wire_index_count,
-                            0,
-                            0..c.instance_count,
-                        );
+                    if c.wire_vertex_count != 0 {
+                        pass.set_vertex_buffer(0, c.wire_vertex_buffer.slice(..));
+                        pass.draw(0..c.wire_vertex_count, 0..c.instance_count);
                     }
                     // ACIS solid B-rep feature edges (LineList, non-indexed).
                     if c.edge_vertex_count != 0 {
@@ -3996,17 +4151,9 @@ impl Pipeline {
                             &[],
                         );
                         pass.set_vertex_buffer(1, c.instance_buffer.slice(..));
-                        if c.wire_index_count != 0 {
-                            pass.set_vertex_buffer(0, c.vertex_buffer.slice(..));
-                            pass.set_index_buffer(
-                                c.wire_index_buffer.slice(..),
-                                wgpu::IndexFormat::Uint32,
-                            );
-                            pass.draw_indexed(
-                                0..c.wire_index_count,
-                                0,
-                                0..c.instance_count,
-                            );
+                        if c.wire_vertex_count != 0 {
+                            pass.set_vertex_buffer(0, c.wire_vertex_buffer.slice(..));
+                            pass.draw(0..c.wire_vertex_count, 0..c.instance_count);
                         }
                         if c.edge_vertex_count != 0 {
                             pass.set_vertex_buffer(0, c.edge_vertex_buffer.slice(..));
@@ -4077,6 +4224,11 @@ impl Pipeline {
                 // Selection / hover highlight reuses index ranges already
                 // resident in the chunk buffers; hover never uploads geometry.
                 for kind in [MeshHighlightKind::Selected, MeshHighlightKind::Hover] {
+                    // Hidden-line views keep the depth-only faces colourless;
+                    // visible selected edges are tinted in the pass below.
+                    if hidden_line {
+                        continue;
+                    }
                     if !self
                         .mesh_highlight_draws
                         .iter()
@@ -4152,17 +4304,9 @@ impl Pipeline {
                             &[],
                         );
                         pass.set_vertex_buffer(1, c.instance_buffer.slice(..));
-                        if c.wire_index_count != 0 {
-                            pass.set_vertex_buffer(0, c.vertex_buffer.slice(..));
-                            pass.set_index_buffer(
-                                c.wire_index_buffer.slice(..),
-                                wgpu::IndexFormat::Uint32,
-                            );
-                            pass.draw_indexed(
-                                0..c.wire_index_count,
-                                0,
-                                0..c.instance_count,
-                            );
+                        if c.wire_vertex_count != 0 {
+                            pass.set_vertex_buffer(0, c.wire_vertex_buffer.slice(..));
+                            pass.draw(0..c.wire_vertex_count, 0..c.instance_count);
                         }
                         if c.edge_vertex_count != 0 {
                             pass.set_vertex_buffer(0, c.edge_vertex_buffer.slice(..));
@@ -4383,10 +4527,7 @@ impl Pipeline {
                     });
                     block_black_active = use_black;
                 }
-                pass.set_bind_group(1, wire.const_bind_group.as_ref(), &[]);
-                pass.set_vertex_buffer(0, wire.vertex_buffer.slice(..));
-                pass.set_vertex_buffer(1, wire.instance_buffer.slice(..));
-                pass.draw(0..wire.vertex_count, 0..wire.instance_count);
+                bind_and_draw_block_wire(&mut pass, wire);
             }
             // Live overlay wires (command preview / interim / grip drag) always
             // on top: the xray pipeline (depth_compare=Always, no depth write)
@@ -4414,10 +4555,10 @@ impl Pipeline {
         // Selection / rollover text is drawn later with the selected-wire xray
         // overlay, after wipeouts, so normal text cannot hide its own tint.
         if let Some(atlas) = &self.text_atlas_gpu {
-            let have_base = self.text_vbuf.is_some() && self.text_vcount > 0;
+            let have_base = !self.text_gpu.is_empty();
             let have_blocks = !self.block_text_gpu.is_empty();
             let have_preview =
-                self.text_preview_vbuf.is_some() && self.text_preview_vcount > 0;
+                !self.text_preview_gpu.is_empty();
             if have_base || have_blocks || have_preview {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("text.render_pass"),
@@ -4447,11 +4588,9 @@ impl Pipeline {
                 pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 pass.set_stencil_reference(stencil_ref);
                 pass.set_bind_group(1, &atlas.bind_group, &[]);
-                if let Some(vbuf) = &self.text_vbuf {
-                    if self.text_vcount > 0 {
-                        pass.set_vertex_buffer(0, vbuf.slice(..));
-                        pass.draw(0..self.text_vcount, 0..1);
-                    }
+                for text in &self.text_gpu {
+                    pass.set_vertex_buffer(0, text.vertex_buffer.slice(..));
+                    pass.draw(0..text.vertex_count, 0..1);
                 }
                 if have_blocks {
                     pass.set_pipeline(&self.block_text_pipeline);
@@ -4462,11 +4601,11 @@ impl Pipeline {
                     }
                 }
                 // Grip-drag / command-preview glyphs, drawn over the base text.
-                if let Some(pbuf) = &self.text_preview_vbuf {
-                    if self.text_preview_vcount > 0 {
-                        pass.set_pipeline(&self.text_pipeline);
-                        pass.set_vertex_buffer(0, pbuf.slice(..));
-                        pass.draw(0..self.text_preview_vcount, 0..1);
+                if have_preview {
+                    pass.set_pipeline(&self.text_pipeline);
+                    for text in &self.text_preview_gpu {
+                        pass.set_vertex_buffer(0, text.vertex_buffer.slice(..));
+                        pass.draw(0..text.vertex_count, 0..1);
                     }
                 }
             }
@@ -4516,7 +4655,7 @@ impl Pipeline {
         // Redraws selected wires and text with depth_compare=Always so both
         // appear on top of all other geometry at full brightness.
         let have_text_highlight =
-            (self.text_highlight_vbuf.is_some() && self.text_highlight_vcount > 0)
+            (!self.text_highlight_gpu.is_empty())
                 || !self.block_text_highlight_gpu.is_empty();
         if !self.gpu_selected_wires.is_empty()
             || !self.gpu_selected_block_wires.is_empty()
@@ -4549,7 +4688,11 @@ impl Pipeline {
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             pass.set_stencil_reference(stencil_ref);
             if !self.gpu_selected_wires.is_empty() {
-                pass.set_pipeline(&self.wire_xray_pipeline);
+                pass.set_pipeline(if hidden_line {
+                    &self.wire_pipeline
+                } else {
+                    &self.wire_xray_pipeline
+                });
                 for wire in &self.gpu_selected_wires {
                     if wire.instance_count > 0 {
                         if let Some(bg) = &wire.const_bind_group {
@@ -4564,25 +4707,26 @@ impl Pipeline {
                 }
             }
             if !self.gpu_selected_block_wires.is_empty() {
-                pass.set_pipeline(&self.block_wire_xray_pipeline);
+                pass.set_pipeline(if hidden_line {
+                    &self.block_wire_pipeline
+                } else {
+                    &self.block_wire_xray_pipeline
+                });
                 for wire in &self.gpu_selected_block_wires {
                     if wire.instance_count == 0 {
                         continue;
                     }
-                    pass.set_bind_group(1, wire.const_bind_group.as_ref(), &[]);
-                    pass.set_vertex_buffer(0, wire.vertex_buffer.slice(..));
-                    pass.set_vertex_buffer(1, wire.instance_buffer.slice(..));
-                    pass.draw(0..wire.vertex_count, 0..wire.instance_count);
+                    bind_and_draw_block_wire(&mut pass, wire);
                 }
             }
-            if let (Some(atlas), Some(hlbuf)) =
-                (&self.text_atlas_gpu, &self.text_highlight_vbuf)
-            {
-                if self.text_highlight_vcount > 0 {
+            if let Some(atlas) = &self.text_atlas_gpu {
+                if !self.text_highlight_gpu.is_empty() {
                     pass.set_pipeline(&self.text_highlight_pipeline);
                     pass.set_bind_group(1, &atlas.bind_group, &[]);
-                    pass.set_vertex_buffer(0, hlbuf.slice(..));
-                    pass.draw(0..self.text_highlight_vcount, 0..1);
+                    for text in &self.text_highlight_gpu {
+                        pass.set_vertex_buffer(0, text.vertex_buffer.slice(..));
+                        pass.draw(0..text.vertex_count, 0..1);
+                    }
                 }
             }
             if let Some(atlas) = &self.text_atlas_gpu {
@@ -4658,6 +4802,117 @@ impl Pipeline {
             pass.set_bind_group(0, &self.blit_bind_group, &[]);
             pass.draw(0..6, 0..1);
         }
+    }
+
+    /// Forget every cache key that describes this slot's uploaded content.
+    ///
+    /// Shared by slot reuse and by [`Self::release_heavy_resources`] so the two
+    /// cannot disagree about what "this slot holds nothing you can trust"
+    /// means. Keys only — the buffers themselves are dropped by the caller that
+    /// wants the memory back.
+    pub(crate) fn forget_cached_keys(&mut self) {
+        self.cached_epoch = (u64::MAX, u64::MAX, u64::MAX);
+        self.cached_wire_id = u64::MAX;
+        self.cached_selection = (u64::MAX, u64::MAX);
+        self.cached_highlight_key = (u64::MAX, u64::MAX);
+        self.cached_mesh_content_id = u64::MAX;
+        self.cached_face3d_key = (u64::MAX, false, false, u64::MAX);
+        self.cached_solid_visibility = (u64::MAX, [u32::MAX; 3], u64::MAX);
+        self.cached_hatch_source = None;
+        self.cached_preview_hatch_source = None;
+        self.cached_wipeout_source = None;
+        self.cached_image_source = None;
+        self.cached_text_source = None;
+        self.cached_mesh_source = None;
+        self.cached_face3d_source = None;
+        self.cached_face3d_depth_source = None;
+        self.wire_cull_key = (u64::MAX, u64::MAX, 0, 0);
+        self.hatch_lod_key = (usize::MAX, u64::MAX, 0, 0, false);
+        self.wipeout_lod_key = (usize::MAX, u64::MAX, 0, 0, false);
+        self.silhouette_key = (usize::MAX, u64::MAX, [u32::MAX; 3], false);
+        self.silhouette_source_key = (usize::MAX, usize::MAX, u64::MAX);
+        self.render_sig = u64::MAX;
+    }
+
+    /// Catch errors delivered after the previous upload/submit completed.
+    pub(crate) fn sync_gpu_error_epoch(&mut self) {
+        let errors = gpu_errors_seen();
+        if errors == self.gpu_error_epoch {
+            return;
+        }
+        self.gpu_error_epoch = errors;
+        self.forget_cached_keys();
+        self.wire_arena = None;
+        self.wire_arena_mesh = None;
+        self.wire_arena_id = u64::MAX;
+        self.alloc_size = Size::new(0, 0);
+        self.shadow_full = None;
+        self.background_source_id = usize::MAX;
+        self.environment_source_id = usize::MAX;
+    }
+
+    /// Give this slot's device memory back and forget what it held.
+    ///
+    /// A slot nobody is drawing still owns its wire arena, its render targets,
+    /// its text atlas and every category buffer — tens of megabytes each. Held
+    /// while another viewport is asking for an allocation, that is the
+    /// difference between a degraded frame and a session that cannot recover.
+    ///
+    /// Everything released here is derived state with a rebuild path guarded by
+    /// a cache key, and every one of those keys is reset, so the next frame that
+    /// needs this slot builds it again. The cost of releasing a slot that turns
+    /// out to be needed is one slow frame.
+    pub(crate) fn release_heavy_resources(&mut self, device: &wgpu::Device) {
+        self.forget_cached_keys();
+
+        self.gpu_wires = std::sync::Arc::new(Vec::new());
+        self.gpu_block_wires = std::sync::Arc::new(Vec::new());
+        self.wire_handle_index = std::sync::Arc::new(rustc_hash::FxHashMap::default());
+        self.wire_arena = None;
+        self.wire_arena_mesh = None;
+        self.wire_arena_fallback = std::sync::Arc::new(Vec::new());
+        self.wire_arena_fallback_kind = None;
+        self.wire_arena_fallback_handles.clear();
+        self.wire_arena_id = u64::MAX;
+
+        self.gpu_selected_wires.clear();
+        self.gpu_selected_block_wires.clear();
+        self.gpu_preview_wires.clear();
+        self.hatch_gpu.clear();
+        self.gpu_wipeouts.clear();
+        self.wipeout_skip_flags.clear();
+        self.gpu_images.clear();
+        self.gpu_mesh_batch.clear();
+        self.gpu_mesh_dynamic.clear();
+        self.mesh_disabled_chunks.clear();
+        self.mesh_dynamic_handles.clear();
+        self.mesh_ranges_by_handle.clear();
+        self.mesh_highlight_draws.clear();
+        self.silhouette_chunks.clear();
+        self.silhouette_source_groups.clear();
+        self.clip_boundary = None;
+
+        // A cold slot's shadow target goes back too. `shadow_enabled` is left
+        // alone, so `sync_shadow_target` reallocates on the next frame that
+        // still wants shadows.
+        if self.shadow_full.take().is_some() {
+            self.rebuild_frame_bind_group(device);
+        }
+
+        self.text_atlas_gpu = None;
+        self.text_gpu.clear();
+        self.block_text_gpu.clear();
+        self.block_text_highlight_gpu.clear();
+        self.text_highlight_gpu.clear();
+        self.text_preview_gpu.clear();
+
+        // Back to the smallest allocation the rounding allows (128x128, about
+        // 0.6 MiB against the ~70 MiB a full-canvas slot holds). Going through
+        // `ensure_depth_texture` rather than reaching for the textures directly
+        // keeps the blit bind group consistent with the views it samples.
+        self.ensure_depth_texture(device, Size::new(1, 1));
+        // ...and make the next real size a mismatch, so it reallocates.
+        self.alloc_size = Size::new(0, 0);
     }
 
     pub fn ensure_depth_texture(&mut self, device: &wgpu::Device, size: Size<u32>) {
@@ -4821,6 +5076,167 @@ fn aabb_below_pixel(
     (max_px - min_px).max(max_py - min_py) < threshold_px
 }
 
+/// Device bytes a renderer is holding, counted from the sizes it allocated
+/// rather than from process RSS — the allocator and the driver both keep
+/// high-water memory that RSS cannot distinguish from live resources.
+///
+/// Partial by construction: it covers the categories large enough to decide
+/// where the next fix goes, and says so rather than pretending to be a total.
+#[derive(Default, Clone, Copy, PartialEq)]
+pub(crate) struct GpuLiveBytes {
+    pub slots: usize,
+    pub shadow: u64,
+    pub render_targets: u64,
+    pub text_atlas: u64,
+    pub wire_arena: u64,
+    pub block_geometry: u64,
+}
+
+impl GpuLiveBytes {
+    pub(crate) fn total(&self) -> u64 {
+        self.shadow + self.render_targets + self.text_atlas + self.wire_arena + self.block_geometry
+    }
+}
+
+impl Pipeline {
+    /// This slot's share. `alloc_size` is the real allocation, which is rounded
+    /// up from the requested size and grows only.
+    fn gpu_live_bytes(&self) -> GpuLiveBytes {
+        // 4x MSAA colour (4 B/sample) + 4x MSAA depth-stencil (4 B/sample) +
+        // one single-sample resolve target.
+        const BYTES_PER_PIXEL: u64 = (MSAA_SAMPLES as u64) * 4 + (MSAA_SAMPLES as u64) * 4 + 4;
+        let pixels = u64::from(self.alloc_size.width) * u64::from(self.alloc_size.height);
+        GpuLiveBytes {
+            slots: 1,
+            // Only while this viewport casts shadows; the placeholder that
+            // stands in otherwise is 4 bytes.
+            shadow: match &self.shadow_full {
+                Some(_) => u64::from(SHADOW_MAP_SIZE) * u64::from(SHADOW_MAP_SIZE) * 4,
+                None => 4,
+            },
+            render_targets: pixels * BYTES_PER_PIXEL,
+            text_atlas: self
+                .text_atlas_gpu
+                .as_ref()
+                .map(text_gpu::TextAtlasGpu::gpu_bytes)
+                .unwrap_or(0),
+            wire_arena: self
+                .wire_arena
+                .as_ref()
+                .map(wire_arena::PersistentWireArena::gpu_bytes)
+                .unwrap_or(0)
+                + self
+                    .wire_arena_mesh
+                    .as_ref()
+                    .map(wire_arena::PersistentWireArena::gpu_bytes)
+                    .unwrap_or(0),
+            block_geometry: 0,
+        }
+    }
+}
+
+impl MultiPipeline {
+    /// Release cold slots after 64 frames, or two frames under memory pressure.
+    /// Current and previous frame slots remain reserved for sibling widgets.
+    pub(crate) fn release_idle_slots(
+        &mut self,
+        device: &wgpu::Device,
+        reserved: &[usize],
+        urgent: bool,
+    ) -> usize {
+        const IDLE_FRAMES: u64 = 64;
+        // Other shader widgets may prepare later in this frame. Keep every
+        // slot used in this or the previous frame, even under memory pressure.
+        let idle_frames = if urgent { 2 } else { IDLE_FRAMES };
+        let mut released = 0;
+        for index in 0..self.inners.len() {
+            if reserved.contains(&index) {
+                continue;
+            }
+            let idle = self.slot_clock.saturating_sub(self.slot_last_used[index]);
+            if idle < idle_frames {
+                continue;
+            }
+            // Nothing to give back — releasing again would only churn the
+            // render targets it just rebuilt at their smallest size.
+            let held = self.inners[index].gpu_live_bytes();
+            if held.wire_arena == 0
+                && held.shadow <= 4
+                && self.inners[index].alloc_size == Size::new(0, 0)
+            {
+                continue;
+            }
+            self.inners[index].release_heavy_resources(device);
+            released += 1;
+        }
+        if released > 0 {
+            self.wire_buffer_cache.retain(|_, entry| {
+                std::sync::Arc::strong_count(&entry.0) > 1
+                    || std::sync::Arc::strong_count(&entry.1) > 1
+            });
+            self.block_geometry.retain(|_, chunks| {
+                chunks.iter().any(|chunk| std::sync::Arc::strong_count(&chunk.bind_group) > 1)
+            });
+        }
+        released
+    }
+
+    /// Sum across slots, plus the caches held once for all of them.
+    pub(crate) fn gpu_live_bytes(&self) -> GpuLiveBytes {
+        let mut total = GpuLiveBytes {
+            block_geometry: wire_gpu::block_geometry_bytes(&self.block_geometry),
+            ..Default::default()
+        };
+        for inner in &self.inners {
+            let slot = inner.gpu_live_bytes();
+            total.slots += slot.slots;
+            total.shadow += slot.shadow;
+            total.render_targets += slot.render_targets;
+            total.text_atlas += slot.text_atlas;
+            total.wire_arena += slot.wire_arena;
+        }
+        total
+    }
+}
+
+/// Bind one block-wire batch and draw it.
+///
+/// The two pipeline modes lay the vertex slots out differently — packed puts
+/// the six-per-segment geometry in slot 0 and the placements in slot 1, while
+/// storage has no geometry vertex buffer at all and the placements become slot
+/// 0. Both draw loops go through here so they cannot drift apart.
+fn bind_and_draw_block_wire(pass: &mut wgpu::RenderPass<'_>, wire: &wire_gpu::BlockWireGpu) {
+    pass.set_bind_group(1, wire.const_bind_group.as_ref(), &[]);
+    match &wire.vertex_buffer {
+        Some(vertices) => {
+            pass.set_vertex_buffer(0, vertices.slice(..));
+            pass.set_vertex_buffer(1, wire.instance_buffer.slice(..));
+        }
+        None => pass.set_vertex_buffer(0, wire.instance_buffer.slice(..)),
+    }
+    pass.draw(0..wire.vertex_count, 0..wire.instance_count);
+}
+
+/// A square `Depth32Float` render target for the shadow pass. `side` is 1 for
+/// the placeholder that keeps the frame bind group satisfied while shadows are
+/// off, and `SHADOW_MAP_SIZE` for the real thing.
+fn create_shadow_texture(device: &wgpu::Device, side: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("shadow.texture"),
+        size: wgpu::Extent3d {
+            width: side,
+            height: side,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    })
+}
+
 fn create_depth_texture(device: &wgpu::Device, size: Size<u32>) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("viewer.depth_texture"),
@@ -4896,14 +5312,11 @@ pub struct MultiPipeline {
     pub(crate) slot_by_instance: rustc_hash::FxHashMap<u64, usize>,
     slot_last_used: Vec<u64>,
     slot_clock: u64,
-    /// The resident wire batches, keyed by `wire_content_id` and shared across
-    /// every slot (and every pane — one `MultiPipeline` backs all of them) that
-    /// renders the same content. `prepare` builds an entry once on a cache miss
-    /// then hands `Arc` clones to each slot, so N paper viewports / Model tiles
-    /// showing one identical resident set upload the wire vertex buffers exactly
-    /// once between them instead of once per slot. Kept trim by dropping entries
-    /// no slot still references (`Arc::strong_count == 1`) once it grows past a
-    /// small bound.
+    pub(crate) frame_rendered: std::sync::atomic::AtomicBool,
+    pub(crate) gpu_error_epoch: usize,
+    /// Definition geometry shared across viewport slots.
+    pub(crate) block_geometry: wire_gpu::BlockGeometryCache,
+    /// Shared resident batches, keyed by wire content identity.
     pub(crate) wire_buffer_cache: rustc_hash::FxHashMap<
         u64,
         (
@@ -4922,11 +5335,7 @@ pub struct MultiPipeline {
 }
 
 impl MultiPipeline {
-    /// Ensure at least `n` (≥1) inner pipelines exist, creating any missing
-    /// ones. Grow-only: extra pipelines are NOT dropped, because per-pane Model
-    /// shader widgets share this storage and each only touches its own slot —
-    /// truncating mid-frame would destroy another pane's slot. Stale inners (a
-    /// closed pane, or fewer paper viewports) are harmless idle GPU resources.
+    /// Grow slot storage without disturbing sibling shader widgets.
     pub(crate) fn ensure_len(
         &mut self,
         device: &wgpu::Device,
@@ -4940,12 +5349,7 @@ impl MultiPipeline {
         }
     }
 
-    /// Resolve stable slots for the viewport identities in one primitive.
-    /// Thirty-two hot slots cover ordinary tiled/paper drawings. A cold slot
-    /// is recycled only after several other prepare calls, which prevents
-    /// sibling Model panes prepared in the same frame from evicting each
-    /// other. If every slot is still hot, growing is safer than a visible
-    /// rebuild hitch.
+    /// Preserve viewport slots across frames; recycle only cold slots above the limit.
     pub(crate) fn resolve_slots(
         &mut self,
         device: &wgpu::Device,
@@ -4955,7 +5359,11 @@ impl MultiPipeline {
         const SOFT_LIMIT: usize = 32;
         const HOT_WINDOW: u64 = 8;
 
-        self.slot_clock = self.slot_clock.wrapping_add(1).max(1);
+        if self.frame_rendered.swap(false, std::sync::atomic::Ordering::Relaxed)
+            || self.slot_clock == 0
+        {
+            self.slot_clock = self.slot_clock.wrapping_add(1).max(1);
+        }
         let now = self.slot_clock;
         let reserved: rustc_hash::FxHashSet<u64> = instance_ids.iter().copied().collect();
         // `inner.slot_id` is updated later in `prepare`, after this whole
@@ -5060,12 +5468,25 @@ impl MultiPipeline {
 /// `Pipeline::new`, which runs again for every pane `ensure_len` adds. If iced
 /// ever rebuilds the device it builds a new `MultiPipeline` too, so the fresh
 /// device is covered (and the throttle restarts with it).
+static GPU_ERRORS_SEEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many uncaptured device errors have been reported since this device was
+/// created.
+///
+/// Callers snapshot it around an allocation to find out whether what they just
+/// built is usable. Best effort: wgpu surfaces some errors asynchronously, so a
+/// move means "something failed", while no move is not proof that nothing did.
+/// That is the right asymmetry here — the cost of believing a bad buffer is a
+/// frozen viewport, the cost of rebuilding a good one is a frame.
+pub(crate) fn gpu_errors_seen() -> usize {
+    GPU_ERRORS_SEEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn install_gpu_error_handler(device: &wgpu::Device) {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static SEEN: AtomicUsize = AtomicUsize::new(0);
-    SEEN.store(0, Ordering::Relaxed);
+    use std::sync::atomic::Ordering;
+    GPU_ERRORS_SEEN.store(0, Ordering::Relaxed);
     device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
-        let n = SEEN.fetch_add(1, Ordering::Relaxed) + 1;
+        let n = GPU_ERRORS_SEEN.fetch_add(1, Ordering::Relaxed) + 1;
         if n.is_power_of_two() {
             eprintln!("[gpu] uncaptured wgpu error #{n} (frame degraded, session kept alive): {e}");
         }
@@ -5076,11 +5497,14 @@ impl iced::widget::shader::Pipeline for MultiPipeline {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         install_gpu_error_handler(device);
         Self {
+            block_geometry: Default::default(),
             inners: vec![Pipeline::new(device, queue, format)],
             format,
             slot_by_instance: rustc_hash::FxHashMap::default(),
             slot_last_used: vec![0],
             slot_clock: 0,
+            frame_rendered: std::sync::atomic::AtomicBool::new(false),
+            gpu_error_epoch: gpu_errors_seen(),
             wire_buffer_cache: rustc_hash::FxHashMap::default(),
             #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
             bevy: None,

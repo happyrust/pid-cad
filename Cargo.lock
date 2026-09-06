@@ -9,6 +9,7 @@ dependencies = [
  "acadifc",
  "acadrust",
  "ashpd",
+ "base64",
  "bevy",
  "bincode",
  "bytemuck",
@@ -27,6 +28,7 @@ dependencies = [
  "iced",
  "iced_aw",
  "iced_core",
+ "iced_runtime",
  "image",
  "inventory",
  "js-sys",
@@ -86,8 +88,8 @@ dependencies = [
 
 [[package]]
 name = "acadrust"
-version = "0.4.1"
-source = "git+https://git@github.com/HakanSeven12/cadcodec.git?rev=45789a7700bd5c006feb4c7ff16c2ff80a7047db#45789a7700bd5c006feb4c7ff16c2ff80a7047db"
+version = "0.5.4"
+source = "git+https://git@github.com/HakanSeven12/cadcodec.git?rev=5b56571a190e7a17c8f12d36390d2938b0fb72f7#5b56571a190e7a17c8f12d36390d2938b0fb72f7"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -1788,7 +1790,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 [[package]]
 name = "cadkernel"
 version = "0.1.0"
-source = "git+https://github.com/HakanSeven12/cadkernel.git?rev=0d48aa453f8689e4d737201b0a79604974427c6f#0d48aa453f8689e4d737201b0a79604974427c6f"
+source = "git+https://github.com/HakanSeven12/cadkernel.git?rev=67f2427282d28922d9263e37b0136b6632e929b3#67f2427282d28922d9263e37b0136b6632e929b3"
 dependencies = [
  "acadrust",
  "cavalier_contours",
@@ -5246,7 +5248,7 @@ dependencies = [
 
 [[package]]
 name = "ocs_plugin_api"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "acadrust",
  "bincode",

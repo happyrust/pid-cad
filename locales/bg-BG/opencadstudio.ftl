@@ -20,6 +20,7 @@ language =
     .polish = Polski
     .chinese-traditional = 繁體中文
     .bulgarian = Български
+    .greek = Ελληνικά
 
 action =
     .close = Затвори
@@ -3587,6 +3588,7 @@ dimstyle =
     .move-text-outside-first = Първо премести текста навън
     .period = Точка
     .space = Интервал
+    .surveyors-units = Геодезически единици
 
 style-manager =
     .alignment-spacing = Разстояние на подравняване

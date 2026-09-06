@@ -1,7 +1,7 @@
 // PEDIT edits polylines and polygon meshes.
 
 use acadrust::entities::LwVertex;
-use acadrust::types::Vector2;
+use acadrust::types::{Vector2, Vector3};
 use acadrust::{EntityType, Handle};
 use cadkernel::geom2d::nurbs::clamped_uniform_knots;
 use cadkernel::geom2d::NurbsCurve;
@@ -22,6 +22,9 @@ pub struct PeditTarget {
     pub convertible: bool,
     /// M/N size for a legacy polygon mesh; absent for ordinary polylines.
     pub mesh_size: Option<(usize, usize)>,
+    /// Current M/N closure state for a polygon mesh. The option list exposes
+    /// only the operation applicable to each direction.
+    pub mesh_closed: Option<(bool, bool)>,
 }
 
 enum Mode {
@@ -43,15 +46,40 @@ pub struct PeditCommand {
     info: HashMap<u64, PeditTarget>,
     mode: Mode,
     undo_count: usize,
+    mesh_smooth_type: acadrust::entities::polygon_mesh::SurfaceSmoothType,
+    mesh_smooth_density: (i16, i16),
+    mesh_vertex_default: isize,
+    pending_mesh_closed: Option<(bool, bool)>,
+    mesh_closed_history: Vec<Option<(bool, bool)>>,
 }
 
 impl PeditCommand {
-    pub fn new(info: HashMap<u64, PeditTarget>) -> Self {
+    pub fn new(
+        info: HashMap<u64, PeditTarget>,
+        surface_type: i16,
+        surface_u_density: i16,
+        surface_v_density: i16,
+    ) -> Self {
+        use acadrust::entities::polygon_mesh::SurfaceSmoothType;
+
+        let mesh_smooth_type = match surface_type {
+            5 => SurfaceSmoothType::Quadratic,
+            8 => SurfaceSmoothType::Bezier,
+            _ => SurfaceSmoothType::Cubic,
+        };
         Self {
             target: None,
             info,
             mode: Mode::PickTarget,
             undo_count: 0,
+            mesh_smooth_type,
+            mesh_smooth_density: (
+                surface_u_density.clamp(2, 200),
+                surface_v_density.clamp(2, 200),
+            ),
+            mesh_vertex_default: 1,
+            pending_mesh_closed: None,
+            mesh_closed_history: Vec::new(),
         }
     }
 
@@ -78,6 +106,37 @@ impl PeditCommand {
     fn mesh_size(&self) -> Option<(usize, usize)> {
         let handle = self.target?;
         self.info.get(&handle.value())?.mesh_size
+    }
+
+    fn mesh_closed(&self) -> Option<(bool, bool)> {
+        let handle = self.target?;
+        self.info.get(&handle.value())?.mesh_closed
+    }
+
+    fn set_mesh_closed(&mut self, m_direction: bool, closed: bool) {
+        let Some(handle) = self.target else {
+            return;
+        };
+        let Some(target) = self.info.get_mut(&handle.value()) else {
+            return;
+        };
+        let Some((closed_m, closed_n)) = target.mesh_closed.as_mut() else {
+            return;
+        };
+        if m_direction {
+            *closed_m = closed;
+        } else {
+            *closed_n = closed;
+        }
+    }
+
+    fn replace_mesh_closed(&mut self, closed: (bool, bool)) {
+        let Some(handle) = self.target else {
+            return;
+        };
+        if let Some(target) = self.info.get_mut(&handle.value()) {
+            target.mesh_closed = Some(closed);
+        }
     }
 }
 
@@ -118,17 +177,26 @@ impl CadCommand for PeditCommand {
     fn options(&self) -> Vec<crate::command::CmdOption> {
         use crate::command::CmdOption;
         match &self.mode {
-            Mode::Options if self.mesh_size().is_some() => vec![
-                CmdOption::new(t!("Edit vertex").as_ref(), "E"),
-                CmdOption::new(t!("Smooth surface").as_ref(), "S"),
-                CmdOption::new(t!("Desmooth").as_ref(), "D"),
-                CmdOption::new(t!("M close").as_ref(), "MC"),
-                CmdOption::new(t!("M open").as_ref(), "MO"),
-                CmdOption::new(t!("N close").as_ref(), "NC"),
-                CmdOption::new(t!("N open").as_ref(), "NO"),
-                CmdOption::new(t!("Undo").as_ref(), "U"),
-                CmdOption::new(t!("eXit").as_ref(), "X"),
-            ],
+            Mode::Options if self.mesh_size().is_some() => {
+                let (closed_m, closed_n) = self.mesh_closed().unwrap_or((false, false));
+                vec![
+                    CmdOption::new(t!("Edit vertex").as_ref(), "E"),
+                    CmdOption::new(t!("Smooth surface").as_ref(), "S"),
+                    CmdOption::new(t!("Desmooth").as_ref(), "D"),
+                    if closed_m {
+                        CmdOption::new(t!("M open").as_ref(), "MO")
+                    } else {
+                        CmdOption::new(t!("M close").as_ref(), "MC")
+                    },
+                    if closed_n {
+                        CmdOption::new(t!("N open").as_ref(), "NO")
+                    } else {
+                        CmdOption::new(t!("N close").as_ref(), "NC")
+                    },
+                    CmdOption::new(t!("Undo").as_ref(), "U"),
+                    CmdOption::new(t!("eXit").as_ref(), "X"),
+                ]
+            }
             Mode::Options => vec![
                 CmdOption::new(t!("Close").as_ref(), "C"),
                 CmdOption::new(t!("Open").as_ref(), "O"),
@@ -214,6 +282,7 @@ impl CadCommand for PeditCommand {
                     is_poly: true,
                     convertible: false,
                     mesh_size: None,
+                    mesh_closed: None,
                 },
             );
             self.target = Some(nh);
@@ -223,6 +292,13 @@ impl CadCommand for PeditCommand {
 
     fn on_pedit_applied(&mut self) {
         self.undo_count = self.undo_count.saturating_add(1);
+        if let Some((m_direction, closed)) = self.pending_mesh_closed.take() {
+            let previous = self.mesh_closed();
+            self.mesh_closed_history.push(previous);
+            self.set_mesh_closed(m_direction, closed);
+        } else {
+            self.mesh_closed_history.push(None);
+        }
     }
 
     fn wants_text_input(&self) -> bool {
@@ -230,6 +306,7 @@ impl CadCommand for PeditCommand {
     }
 
     fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        self.pending_mesh_closed = None;
         let up = text.trim().to_uppercase();
         let mesh_size = self.mesh_size();
         match &mut self.mode {
@@ -273,12 +350,21 @@ impl CadCommand for PeditCommand {
                 let row = *index / n;
                 let column = *index % n;
                 match up.as_str() {
-                    "N" | "NEXT" => *index = (*index + 1) % count,
-                    "P" | "PREVIOUS" => *index = (*index + count - 1) % count,
-                    "L" | "LEFT" => *index = row * n + (column + n - 1) % n,
-                    "R" | "RIGHT" => *index = row * n + (column + 1) % n,
-                    "U" | "UP" => *index = ((row + m - 1) % m) * n + column,
-                    "D" | "DOWN" => *index = ((row + 1) % m) * n + column,
+                    "N" | "NEXT" => {
+                        self.mesh_vertex_default = 1;
+                        if *index + 1 < count {
+                            *index += 1;
+                        }
+                    }
+                    "P" | "PREVIOUS" => {
+                        self.mesh_vertex_default = -1;
+                        *index = index.saturating_sub(1);
+                    }
+                    "L" | "LEFT" if column > 0 => *index -= 1,
+                    "R" | "RIGHT" if column + 1 < n => *index += 1,
+                    "U" | "UP" if row + 1 < m => *index += n,
+                    "D" | "DOWN" if row > 0 => *index -= n,
+                    "L" | "LEFT" | "R" | "RIGHT" | "U" | "UP" | "D" | "DOWN" => {}
                     "M" | "MOVE" => self.mode = Mode::MeshVertexMove(*index),
                     "G" | "REGEN" => {
                         // Mesh display is regenerated after every edit; keep the
@@ -300,34 +386,54 @@ impl CadCommand for PeditCommand {
                         }
                         "S" | "SMOOTH" | "SMOOTH SURFACE" => Some(CmdResult::PeditOp {
                             handle,
-                            op: PeditOp::SetMeshSmooth(
-                                acadrust::entities::polygon_mesh::SurfaceSmoothType::Quadratic,
-                            ),
+                            op: PeditOp::SetMeshSmooth {
+                                smooth: self.mesh_smooth_type,
+                                m_density: self.mesh_smooth_density.0,
+                                n_density: self.mesh_smooth_density.1,
+                            },
                         }),
                         "D" | "DESMOOTH" => Some(CmdResult::PeditOp {
                             handle,
-                            op: PeditOp::SetMeshSmooth(
-                                acadrust::entities::polygon_mesh::SurfaceSmoothType::NoSmooth,
-                            ),
+                            op: PeditOp::SetMeshSmooth {
+                                smooth:
+                                    acadrust::entities::polygon_mesh::SurfaceSmoothType::NoSmooth,
+                                m_density: self.mesh_smooth_density.0,
+                                n_density: self.mesh_smooth_density.1,
+                            },
                         }),
-                        "MC" | "MCLOSE" | "M CLOSE" => Some(CmdResult::PeditOp {
-                            handle,
-                            op: PeditOp::SetMeshClosedM(true),
-                        }),
-                        "MO" | "MOPEN" | "M OPEN" => Some(CmdResult::PeditOp {
-                            handle,
-                            op: PeditOp::SetMeshClosedM(false),
-                        }),
-                        "NC" | "NCLOSE" | "N CLOSE" => Some(CmdResult::PeditOp {
-                            handle,
-                            op: PeditOp::SetMeshClosedN(true),
-                        }),
-                        "NO" | "NOPEN" | "N OPEN" => Some(CmdResult::PeditOp {
-                            handle,
-                            op: PeditOp::SetMeshClosedN(false),
-                        }),
+                        "MC" | "MCLOSE" | "M CLOSE" => {
+                            self.pending_mesh_closed = Some((true, true));
+                            Some(CmdResult::PeditOp {
+                                handle,
+                                op: PeditOp::SetMeshClosedM(true),
+                            })
+                        }
+                        "MO" | "MOPEN" | "M OPEN" => {
+                            self.pending_mesh_closed = Some((true, false));
+                            Some(CmdResult::PeditOp {
+                                handle,
+                                op: PeditOp::SetMeshClosedM(false),
+                            })
+                        }
+                        "NC" | "NCLOSE" | "N CLOSE" => {
+                            self.pending_mesh_closed = Some((false, true));
+                            Some(CmdResult::PeditOp {
+                                handle,
+                                op: PeditOp::SetMeshClosedN(true),
+                            })
+                        }
+                        "NO" | "NOPEN" | "N OPEN" => {
+                            self.pending_mesh_closed = Some((false, false));
+                            Some(CmdResult::PeditOp {
+                                handle,
+                                op: PeditOp::SetMeshClosedN(false),
+                            })
+                        }
                         "U" | "UNDO" if self.undo_count > 0 => {
                             self.undo_count -= 1;
+                            if let Some(Some(closed)) = self.mesh_closed_history.pop() {
+                                self.replace_mesh_closed(closed);
+                            }
                             Some(CmdResult::UndoDocument)
                         }
                         "U" | "UNDO" => Some(CmdResult::NeedPoint),
@@ -398,7 +504,9 @@ impl CadCommand for PeditCommand {
     }
 
     fn on_enter(&mut self) -> CmdResult {
-        match &self.mode {
+        let mesh_size = self.mesh_size();
+        let vertex_default = self.mesh_vertex_default;
+        match &mut self.mode {
             Mode::JoinGather(list) if list.len() >= 2 => CmdResult::JoinEntities(list.clone()),
             Mode::JoinGather(_) => {
                 self.mode = Mode::Options;
@@ -408,6 +516,20 @@ impl CadCommand for PeditCommand {
                 handle: *h,
                 op: PeditOp::ConvertToPolyline,
             },
+            Mode::MeshVertex(index) => {
+                let Some((m, n)) = mesh_size else {
+                    return CmdResult::NeedPoint;
+                };
+                let count = m.saturating_mul(n);
+                if vertex_default >= 0 {
+                    if *index + 1 < count {
+                        *index += 1;
+                    }
+                } else {
+                    *index = index.saturating_sub(1);
+                }
+                CmdResult::NeedPoint
+            }
             _ => CmdResult::Cancel,
         }
     }
@@ -426,7 +548,11 @@ pub enum PeditOp {
     Decurve,
     SetMeshClosedM(bool),
     SetMeshClosedN(bool),
-    SetMeshSmooth(acadrust::entities::polygon_mesh::SurfaceSmoothType),
+    SetMeshSmooth {
+        smooth: acadrust::entities::polygon_mesh::SurfaceSmoothType,
+        m_density: i16,
+        n_density: i16,
+    },
     MoveMeshVertex { index: usize, point: DVec3 },
 }
 
@@ -503,19 +629,25 @@ pub fn apply_pedit(entity: &mut EntityType, op: &PeditOp) -> bool {
             }
             _ => false,
         },
-        PeditOp::SetMeshSmooth(smooth) => match entity {
+        PeditOp::SetMeshSmooth {
+            smooth,
+            m_density,
+            n_density,
+        } => match entity {
             EntityType::PolygonMesh(mesh) => {
                 let mut changed = mesh.smooth_type != *smooth;
                 mesh.smooth_type = *smooth;
                 if mesh.smooth_type
                     != acadrust::entities::polygon_mesh::SurfaceSmoothType::NoSmooth
                 {
-                    if !(2..=256).contains(&mesh.m_smooth_density) {
-                        mesh.m_smooth_density = 6;
+                    let m_density = (*m_density).clamp(2, 200);
+                    let n_density = (*n_density).clamp(2, 200);
+                    if mesh.m_smooth_density != m_density {
+                        mesh.m_smooth_density = m_density;
                         changed = true;
                     }
-                    if !(2..=256).contains(&mesh.n_smooth_density) {
-                        mesh.n_smooth_density = 6;
+                    if mesh.n_smooth_density != n_density {
+                        mesh.n_smooth_density = n_density;
                         changed = true;
                     }
                 }
@@ -553,14 +685,35 @@ pub fn convert_to_polyline(entity: &EntityType) -> Option<EntityType> {
     let mut pl = acadrust::LwPolyline::new();
     match entity {
         EntityType::Line(l) => {
+            let normal = DVec3::new(l.normal.x, l.normal.y, l.normal.z).try_normalize()?;
+            let normal = Vector3::new(normal.x, normal.y, normal.z);
+            let start = [l.start.x, l.start.y, l.start.z];
+            let end = [l.end.x, l.end.y, l.end.z];
+            let elevation = DVec3::from_array(start).dot(DVec3::new(
+                normal.x, normal.y, normal.z,
+            ));
+            let plane = crate::entities::curve::ocs_plane(normal.clone(), elevation);
+            let tolerance = cadkernel::space::coplanarity_tolerance(&[start, end]);
+            if !plane.contains(end, tolerance) {
+                return None;
+            }
+            let start = plane.project(start)?;
+            let end = plane.project(end)?;
             pl.common = l.common.clone();
+            pl.thickness = l.thickness;
+            pl.elevation = elevation;
+            pl.normal = normal;
             pl.vertices = vec![
-                LwVertex::new(Vector2::new(l.start.x, l.start.y)),
-                LwVertex::new(Vector2::new(l.end.x, l.end.y)),
+                LwVertex::new(Vector2::new(start[0], start[1])),
+                LwVertex::new(Vector2::new(end[0], end[1])),
             ];
         }
         EntityType::Arc(a) => {
+            let normal = DVec3::new(a.normal.x, a.normal.y, a.normal.z).try_normalize()?;
             pl.common = a.common.clone();
+            pl.thickness = a.thickness;
+            pl.elevation = a.center.z;
+            pl.normal = Vector3::new(normal.x, normal.y, normal.z);
             let (sa, ea) = (a.start_angle, a.end_angle);
             let sweep = {
                 let s = (ea - sa).rem_euclid(TAU);
@@ -586,6 +739,53 @@ pub fn convert_to_polyline(entity: &EntityType) -> Option<EntityType> {
     }
     pl.common.handle = Handle::NULL;
     Some(EntityType::LwPolyline(pl))
+}
+
+#[cfg(test)]
+mod convert_tests {
+    use super::*;
+
+    // PEDIT convert rebuilds the entity as a polyline; thickness must move
+    // onto the new entity instead of resetting to 0 (#916).
+    #[test]
+    fn convert_keeps_line_thickness() {
+        let mut l = acadrust::entities::Line::new();
+        l.start = acadrust::types::Vector3::new(2.0, 3.0, 4.0);
+        l.end = acadrust::types::Vector3::new(2.0, 5.0, 6.0);
+        l.normal = acadrust::types::Vector3::new(1.0, 0.0, 0.0);
+        l.thickness = 3.5;
+        let Some(EntityType::LwPolyline(pl)) = convert_to_polyline(&EntityType::Line(l)) else {
+            panic!("line must convert");
+        };
+        assert!(
+            (pl.thickness - 3.5).abs() < 1e-12,
+            "converted polyline must keep source thickness, got {}",
+            pl.thickness
+        );
+        assert_eq!(pl.normal, acadrust::types::Vector3::new(1.0, 0.0, 0.0));
+        assert!((pl.elevation - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn convert_keeps_arc_thickness() {
+        let mut a = acadrust::entities::Arc::new();
+        a.center = acadrust::types::Vector3::new(0.0, 0.0, 4.0);
+        a.normal = acadrust::types::Vector3::new(0.0, 1.0, 0.0);
+        a.radius = 5.0;
+        a.start_angle = 0.0;
+        a.end_angle = std::f64::consts::FRAC_PI_2;
+        a.thickness = -2.0;
+        let Some(EntityType::LwPolyline(pl)) = convert_to_polyline(&EntityType::Arc(a)) else {
+            panic!("arc must convert");
+        };
+        assert!(
+            (pl.thickness - (-2.0)).abs() < 1e-12,
+            "converted polyline must keep negative thickness, got {}",
+            pl.thickness
+        );
+        assert_eq!(pl.normal, acadrust::types::Vector3::new(0.0, 1.0, 0.0));
+        assert!((pl.elevation - 4.0).abs() < 1e-12);
+    }
 }
 
 // ── Curve fitting ─────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
+use acadrust::{EntityType, Handle, Transparency};
 use crate::t;
-use acadrust::{EntityType, Handle};
 
 use crate::scene::model::object::{PropSection, PropValue, Property};
 
@@ -10,16 +10,25 @@ pub fn general_section(entity: &EntityType) -> PropSection {
     } else {
         common.linetype.clone()
     };
-    // Alpha 0 is ByLayer, Alpha 1 is ByBlock; show them by name and fall back
-    // to a rounded percentage for explicit values.
-    let transp_display = match common.transparency.alpha() {
-        0 => "ByLayer".to_string(),
-        1 => "ByBlock".to_string(),
-        alpha => format!(
-            "{}",
-            (alpha as f64 / 255.0 * 100.0).round() as u32
-        ),
+    let transp_display = match common.transparency {
+        Transparency::ByLayer => "ByLayer".to_string(),
+        Transparency::ByBlock => "ByBlock".to_string(),
+        Transparency::Explicit(alpha) => {
+            ((alpha as f64 / 255.0 * 100.0).round() as u32).to_string()
+        }
     };
+    let color_value = common.color_name.as_deref().map_or_else(
+        || PropValue::ColorChoice(common.color),
+        |identity| PropValue::NamedColorChoice {
+            color: common.color,
+            name: identity
+                .split_once('$')
+                .map(|(_, color_name)| color_name)
+                .filter(|color_name| !color_name.is_empty())
+                .unwrap_or(identity)
+                .to_string(),
+        },
+    );
 
     // Hyperlink is stored in XDATA under the "PE_URL" application.
     let hyperlink = common
@@ -39,7 +48,7 @@ pub fn general_section(entity: &EntityType) -> PropSection {
             Property {
                 label: t!("Color").into_owned(),
                 field: "color",
-                value: PropValue::ColorChoice(common.color),
+                value: color_value,
             },
             Property {
                 label: t!("Layer").into_owned(),

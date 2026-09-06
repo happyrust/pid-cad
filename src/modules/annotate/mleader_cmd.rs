@@ -5,7 +5,7 @@ use acadrust::types::Vector3;
 use acadrust::EntityType;
 use glam::{DVec3, Mat4, Vec3};
 
-use crate::command::{CadCommand, CmdOption, CmdResult, WorkingPlane};
+use crate::command::{CadCommand, CmdOption, CmdResult, InputKind, WorkingPlane};
 use crate::modules::{IconKind, ModuleEvent, ToolDef};
 use crate::scene::model::wire_model::WireModel;
 use crate::t;
@@ -469,12 +469,12 @@ impl CadCommand for MLeaderCommand {
         Some(preview)
     }
 
-    fn wants_text_input(&self) -> bool {
-        true
-    }
-
-    fn wants_text_with_spaces(&self) -> bool {
-        matches!(self.step, Step::Layer | Step::PreEnterText)
+    fn input_kind(&self) -> InputKind {
+        if matches!(self.step, Step::Layer | Step::PreEnterText) {
+            InputKind::FreeText
+        } else {
+            InputKind::SingleToken
+        }
     }
 
     fn point_step_accepts_keywords(&self) -> bool {
@@ -764,6 +764,7 @@ fn preview_wire(pts: &[Vec3], arrow_size: f32) -> WireModel {
         points.push([w2.x, w2.y, w2.z]);
     }
     WireModel {
+        bg_adapt: None,
         point_marker: None,
         taper_widths: Vec::new(),
         pattern_stations: Vec::new(),

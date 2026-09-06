@@ -22,7 +22,7 @@ const USD_RATES_URL: &str = "https://api.frankfurter.dev/v2/rates?base=USD";
 /// amount is in **USD cents**: a $25 donation is `2500`; convert other
 /// currencies to USD before adding them.
 const MANUAL_SUPPORTERS: &[(&str, i64)] = &[
-    ("Stefano", 8750), // $87.50
+    ("Stefano", 10_500), // $105
 ];
 
 /// Append the hand-maintained [`MANUAL_SUPPORTERS`] to `patrons` and sort the
@@ -43,7 +43,7 @@ pub fn merge_manual(mut patrons: Vec<(String, i64)>) -> Vec<(String, i64)> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-const UA: &str = concat!("OpenCADStudio/", env!("CARGO_PKG_VERSION"));
+const UA: &str = concat!("OpenCADStudio/", env!("OCS_APP_VERSION"));
 
 /// Fetch patrons with a successful payment in the last month from the Patreon
 /// API as `(display name, amount in USD cents)`, highest payment first. `Err`

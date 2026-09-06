@@ -6,18 +6,26 @@ use crate::app::Message;
 use crate::command::CmdOption;
 use crate::t;
 use iced::widget::{
-    button, column, container, opaque, row, rule, scrollable, stack, text, text_editor,
-    text_input, tooltip, Space,
+    button, column, container, opaque, row, rule, scrollable, stack, text, text_editor, text_input,
+    tooltip, Space,
 };
 use iced::{Background, Border, Color, Element, Length, Padding, Theme};
 use std::ops::Range;
+
+use crate::ui::style::common::accessible_accent_threshold;
 
 pub const CMD_INPUT_ID: &str = "cmd_input";
 pub const HISTORY_SCROLL_ID: &str = "command_history_scroll";
 
 /// How long a history entry stays visible on the overlay before fading
 /// out. Picking the full archive happens through the dropdown button.
-const HISTORY_VISIBLE_SECS: f32 = 3.0;
+/// Default for `COMMANDLINEFADETIME` (ms); the live value lives on
+/// [`CommandLine::fade_ms`] so it can be changed via SETVAR.
+pub const DEFAULT_COMMANDLINE_FADE_MS: u32 = 3000;
+/// COMMANDLINEFADETIME bounds in milliseconds: 0 skips the overlay entirely,
+/// 60000 keeps lines for a full minute.
+pub const COMMANDLINE_FADE_MIN_MS: u32 = 0;
+pub const COMMANDLINE_FADE_MAX_MS: u32 = 60000;
 
 /// Resizable full-history editor bounds. The live upper bound also follows the
 /// window height so the command input and a useful drawing area remain visible.
@@ -38,6 +46,25 @@ const AUTOCOMPLETE_LIMIT: usize = 8;
 
 fn cmd_input_id() -> iced::widget::Id {
     iced::widget::Id::new(CMD_INPUT_ID)
+}
+
+fn mcp_status(enabled: bool, busy: bool) -> (&'static str, Color) {
+    if !enabled {
+        (
+            "MCP control is off",
+            Color::from_rgb(0.90, 0.35, 0.35),
+        )
+    } else if busy {
+        (
+            "MCP is handling a request",
+            Color::from_rgb(0.95, 0.72, 0.25),
+        )
+    } else {
+        (
+            "MCP control is ready",
+            Color::from_rgb(0.35, 0.85, 0.55),
+        )
+    }
 }
 
 /// Drop a prompt's "[A / B / …]" option listing — used for the pinned line
@@ -67,6 +94,8 @@ pub struct CommandLine {
     /// instead of submitting. Saved in the user config.
     pub literal_spaces: bool,
     pub history: Vec<HistoryEntry>,
+    pub error_revision: u64,
+    pub last_error: Option<String>,
     /// Successfully dispatched commands used for ↑/↓ recall, newest last.
     /// Stored separately because recall also maintains its own cursor and draft.
     pub cmd_recall: Vec<String>,
@@ -106,6 +135,10 @@ pub struct CommandLine {
     /// CLIPROMPTLINES: how many temporary prompt lines for a single command
     /// are displayed above the command window (0–50, default 3).
     cliprompt_lines: u8,
+    /// COMMANDLINEFADETIME: how long overlay history lines stay visible,
+    /// in milliseconds (0–60000, default 3000). 0 skips drawing transient
+    /// lines entirely; the pinned step prompt still shows.
+    fade_ms: u32,
 }
 
 impl Default for CommandLine {
@@ -114,6 +147,8 @@ impl Default for CommandLine {
             input: String::new(),
             literal_spaces: false,
             history: Vec::new(),
+            error_revision: 0,
+            last_error: None,
             cmd_recall: Vec::new(),
             recent_commands: Vec::new(),
             recall_cursor: None,
@@ -126,6 +161,7 @@ impl Default for CommandLine {
             step_prompt: None,
             step_options: Vec::new(),
             cliprompt_lines: 3,
+            fade_ms: DEFAULT_COMMANDLINE_FADE_MS,
         }
     }
 }
@@ -135,8 +171,8 @@ pub struct HistoryEntry {
     pub kind: EntryKind,
     pub text: String,
     /// When this entry was pushed. Used by the overlay to fade entries
-    /// out after `HISTORY_VISIBLE_SECS`. The dropdown popup ignores it
-    /// and always shows the whole list.
+    /// out after `fade_ms` (`COMMANDLINEFADETIME`). The dropdown popup
+    /// ignores it and always shows the whole list.
     pub created_at: Instant,
     /// The active command step's prompt is pinned so it does not fade
     /// while the user is still working on that step. When the step
@@ -305,6 +341,8 @@ impl CommandLine {
         self.push(EntryKind::Output, msg.to_string());
     }
     pub fn push_error(&mut self, msg: &str) {
+        self.error_revision = self.error_revision.wrapping_add(1);
+        self.last_error = Some(msg.to_owned());
         self.push(EntryKind::Error, format!("*{}*  {msg}", t!("Invalid")));
     }
     /// Append an error unless it is already the latest history line. Repeated
@@ -312,6 +350,8 @@ impl CommandLine {
     /// with identical copies (#498).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn push_error_once(&mut self, msg: &str) {
+        self.error_revision = self.error_revision.wrapping_add(1);
+        self.last_error = Some(msg.to_owned());
         let text = format!("*{}*  {msg}", t!("Invalid"));
         if let Some(last) = self
             .history
@@ -324,7 +364,12 @@ impl CommandLine {
         self.push(EntryKind::Error, text);
     }
     pub fn push_info(&mut self, msg: &str) {
-        self.push(EntryKind::Info, msg.to_string());
+        let text = if msg.starts_with("i  ") {
+            msg.to_string()
+        } else {
+            format!("i  {msg}")
+        };
+        self.push(EntryKind::Info, text);
     }
     fn push(&mut self, kind: EntryKind, text: String) {
         self.history.push(HistoryEntry {
@@ -354,10 +399,15 @@ impl CommandLine {
             e.created_at = Instant::now();
         }
         if let Some(p) = &prompt {
+            let formatted = if p.starts_with("i  ") {
+                p.clone()
+            } else {
+                format!("i  {p}")
+            };
             // Reuse the prompt line dispatch/step-transition just pushed;
             // otherwise add it.
-            if self.history.last().map(|e| &e.text) != Some(p) {
-                self.push(EntryKind::Info, p.clone());
+            if self.history.last().map(|e| &e.text) != Some(&formatted) {
+                self.push(EntryKind::Info, formatted);
             }
             if let Some(last) = self.history.last_mut() {
                 last.pinned = true;
@@ -376,17 +426,32 @@ impl CommandLine {
         self.cliprompt_lines = n.min(50);
     }
 
+    /// COMMANDLINEFADETIME mirror (ms, 0–60000). `0` skips transient overlay
+    /// lines entirely; the pinned step prompt still shows.
+    pub fn set_commandline_fade_ms(&mut self, ms: u32) {
+        self.fade_ms = ms.min(COMMANDLINE_FADE_MAX_MS);
+    }
+
+    pub fn commandline_fade_ms(&self) -> u32 {
+        self.fade_ms
+    }
+
+    fn fade_secs(&self) -> f32 {
+        self.fade_ms as f32 / 1000.0
+    }
+
+    fn entry_visible(&self, e: &HistoryEntry) -> bool {
+        e.pinned || (self.fade_ms > 0 && e.created_at.elapsed().as_secs_f32() < self.fade_secs())
+    }
+
     /// Visible overlay count respecting CLIPROMPTLINES (0–50). Used in tests.
     #[cfg(test)]
     pub fn visible_history_count(&self) -> usize {
         if self.cliprompt_lines == 0 {
             return 0;
         }
-        let visible: Vec<&HistoryEntry> = self
-            .history
-            .iter()
-            .filter(|e| e.pinned || e.created_at.elapsed().as_secs_f32() < HISTORY_VISIBLE_SECS)
-            .collect();
+        let visible: Vec<&HistoryEntry> =
+            self.history.iter().filter(|e| self.entry_visible(e)).collect();
         visible.len().min(self.cliprompt_lines as usize)
     }
 
@@ -398,9 +463,7 @@ impl CommandLine {
         if self.cliprompt_lines == 0 {
             return false;
         }
-        self.history
-            .iter()
-            .any(|e| e.pinned || e.created_at.elapsed().as_secs_f32() < HISTORY_VISIBLE_SECS)
+        self.history.iter().any(|e| self.entry_visible(e))
     }
 
     pub fn toggle_history(&mut self) {
@@ -448,11 +511,7 @@ impl CommandLine {
             return false;
         }
         let current = self.autocomplete_cursor.unwrap_or(0).min(len - 1);
-        self.autocomplete_cursor = Some(if current == 0 {
-            len - 1
-        } else {
-            current - 1
-        });
+        self.autocomplete_cursor = Some(if current == 0 { len - 1 } else { current - 1 });
         true
     }
 
@@ -463,11 +522,7 @@ impl CommandLine {
             return false;
         }
         let current = self.autocomplete_cursor.unwrap_or(0).min(len - 1);
-        self.autocomplete_cursor = Some(if current + 1 < len {
-            current + 1
-        } else {
-            0
-        });
+        self.autocomplete_cursor = Some(if current + 1 < len { current + 1 } else { 0 });
         true
     }
 
@@ -494,15 +549,14 @@ impl CommandLine {
         dyn_capturing: bool,
         history_content: &'a text_editor::Content,
         window_height: f32,
+        control_enabled: bool,
+        control_busy: bool,
     ) -> Element<'a, Message> {
-        // Only the most recent entries pushed within the last few
-        // seconds show on the overlay. The dropdown button keeps the
-        // full backlog reachable when the user actually wants it.
-        let mut visible: Vec<&HistoryEntry> = self
-            .history
-            .iter()
-            .filter(|e| e.pinned || e.created_at.elapsed().as_secs_f32() < HISTORY_VISIBLE_SECS)
-            .collect();
+        // Only the most recent entries pushed within COMMANDLINEFADETIME
+        // show on the overlay (0 skips transient lines). The dropdown button
+        // keeps the full backlog reachable when the user actually wants it.
+        let mut visible: Vec<&HistoryEntry> =
+            self.history.iter().filter(|e| self.entry_visible(e)).collect();
         // Keep the active prompt/options immediately above the input. Commands
         // may emit informational lines while waiting for the next option; those
         // lines belong above the pinned interaction row, not below it.
@@ -537,34 +591,32 @@ impl CommandLine {
                 // listing is dropped here (the history log keeps the full text).
                 if entry.pinned && !self.step_options.is_empty() {
                     let shown = strip_option_listing(&entry.text);
-                    let mut r = row![entry_text(shown)]
-                        .spacing(6)
-                        .align_y(iced::Center);
+                    let mut r = row![entry_text(shown)].spacing(6).align_y(iced::Center);
                     for opt in &self.step_options {
                         let btn = button(text(opt.label.to_uppercase()).size(11))
-                        .on_press(Message::CommandOptionPick(opt.keyword.clone()))
-                        .padding([1, 6])
-                        .style(|theme: &Theme, status| {
-                            let palette = theme.palette();
-                            let pair = if matches!(
-                                status,
-                                button::Status::Hovered | button::Status::Pressed
-                            ) {
-                                palette.primary.weak
-                            } else {
-                                palette.background.weakest
-                            };
-                            button::Style {
-                                background: Some(Background::Color(pair.color)),
-                                text_color: pair.text,
-                                border: Border {
-                                    color: palette.background.neutral.color,
-                                    width: 1.0,
-                                    radius: 3.0.into(),
-                                },
-                                ..Default::default()
-                            }
-                        });
+                            .on_press(Message::CommandOptionPick(opt.keyword.clone()))
+                            .padding([1, 6])
+                            .style(|theme: &Theme, status| {
+                                let palette = theme.palette();
+                                let pair = if matches!(
+                                    status,
+                                    button::Status::Hovered | button::Status::Pressed
+                                ) {
+                                    palette.primary.weak
+                                } else {
+                                    palette.background.weakest
+                                };
+                                button::Style {
+                                    background: Some(Background::Color(pair.color)),
+                                    text_color: pair.text,
+                                    border: Border {
+                                        color: palette.background.neutral.color,
+                                        width: 1.0,
+                                        radius: 3.0.into(),
+                                    },
+                                    ..Default::default()
+                                }
+                            });
                         r = r.push(btn);
                     }
                     col.push(container(r).padding([1, 8]))
@@ -572,11 +624,20 @@ impl CommandLine {
                     col.push(container(entry_text(entry.text.clone())).padding([1, 8]))
                 }
             });
-        let prompt = container(
-            text(crate::tr!("command-line", "label")).size(11).style(|theme: &Theme| iced::widget::text::Style {
-                color: Some(theme.palette().success.base.color),
-            }),
-        )
+        let prompt = container(text(crate::tr!("command-line", "label")).size(11).style(
+            |theme: &Theme| {
+                let p = theme.palette();
+                let color = accessible_accent_threshold(
+                    p.success.base.color,
+                    p.background.base.color,
+                    p.background.base.text,
+                    4.5,
+                );
+                iced::widget::text::Style {
+                    color: Some(color),
+                }
+            },
+        ))
         .padding([5, 8]);
         // Literal-space toggle: while active, every line behaves as if it
         // started with `>` — Space stays in the line instead of submitting, so
@@ -585,34 +646,31 @@ impl CommandLine {
         // lights the button too (same mode, one line only).
         let literal_active = self.literal_spaces || self.input.starts_with('>');
         let literal_btn = button(text(">").size(11))
-        .on_press(Message::CommandLiteralToggle)
-        .padding([2, 6])
-        .style(move |theme: &Theme, status| {
-            let palette = theme.palette();
-            let pair = if literal_active {
-                palette.primary.weak
-            } else if matches!(
-                status,
-                button::Status::Hovered | button::Status::Pressed
-            ) {
-                palette.background.weak
-            } else {
-                palette.background.weakest
-            };
-            button::Style {
-                background: Some(Background::Color(pair.color)),
-                text_color: pair.text,
-                border: Border {
-                    color: palette.background.neutral.color,
-                    width: 1.0,
-                    radius: 3.0.into(),
-                },
-                ..Default::default()
-            }
-        });
+            .on_press(Message::CommandLiteralToggle)
+            .padding([2, 6])
+            .style(move |theme: &Theme, status| {
+                let palette = theme.palette();
+                let pair = if literal_active {
+                    palette.primary.weak
+                } else if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+                    palette.background.weak
+                } else {
+                    palette.background.weakest
+                };
+                button::Style {
+                    background: Some(Background::Color(pair.color)),
+                    text_color: pair.text,
+                    border: Border {
+                        color: palette.background.neutral.color,
+                        width: 1.0,
+                        radius: 3.0.into(),
+                    },
+                    ..Default::default()
+                }
+            });
         let literal_tip = container(text(crate::tr!("command-line", "literal-spaces")).size(11))
-        .padding([3, 6])
-        .style(container::bordered_box);
+            .padding([3, 6])
+            .style(container::bordered_box);
         let literal_btn = tooltip(literal_btn, literal_tip, tooltip::Position::Top).gap(4);
         // While dynamic input is capturing keystrokes, the command-line
         // text field is left without an `on_input` handler so it can't
@@ -699,7 +757,29 @@ impl CommandLine {
                 .align_y(iced::alignment::Vertical::Center),
         ]
         .width(Length::Fill);
-        let input_row = row![prompt, literal_btn, input_with_history]
+        let (mcp_tooltip, mcp_color) = mcp_status(control_enabled, control_busy);
+        let mcp_btn = button(text("MCP").size(11))
+            .on_press(Message::ControlToggle)
+            .style(move |theme: &Theme, status| {
+                let mut style = button::subtle(theme, status);
+                style.background = Some(Background::Color(mcp_color));
+                style.text_color = Color::from_rgb(0.08, 0.08, 0.10);
+                style.border.color = mcp_color;
+                style.border.width = 1.0;
+                style
+            })
+            .padding([2, 6]);
+        let mcp_tip = container(text(mcp_tooltip).size(11))
+            .padding([3, 6])
+            .style(container::bordered_box);
+        let mcp_btn = container(tooltip(mcp_btn, mcp_tip, tooltip::Position::Top).gap(4))
+            .padding(Padding {
+                top: 0.0,
+                right: 6.0,
+                bottom: 0.0,
+                left: 0.0,
+            });
+        let input_row = row![prompt, literal_btn, input_with_history, mcp_btn]
             .spacing(4)
             .align_y(iced::Center);
 
@@ -737,9 +817,7 @@ impl CommandLine {
                 .id(iced::widget::Id::new(HISTORY_SCROLL_ID))
                 .height(Length::Fixed(history_height))
                 .direction(scrollable::Direction::Vertical(
-                    scrollable::Scrollbar::new()
-                        .width(8)
-                        .scroller_width(6),
+                    scrollable::Scrollbar::new().width(8).scroller_width(6),
                 ))
                 .anchor_bottom();
             // Header strip: a Copy-all and a Clear button pinned above the log.
@@ -806,9 +884,7 @@ impl CommandLine {
         } else {
             container(history_rows)
                 .style(|theme: &Theme| container::Style {
-                    background: Some(Background::Color(
-                        theme.palette().background.base.color,
-                    )),
+                    background: Some(Background::Color(theme.palette().background.base.color)),
                     ..Default::default()
                 })
                 .width(Length::Fill)
@@ -832,9 +908,7 @@ impl CommandLine {
                     .style(|theme: &Theme| {
                         let palette = theme.palette();
                         container::Style {
-                            background: Some(Background::Color(
-                                palette.background.weakest.color,
-                            )),
+                            background: Some(Background::Color(palette.background.weakest.color)),
                             ..Default::default()
                         }
                     })
@@ -944,7 +1018,12 @@ fn history_color(theme: &Theme, kind: &EntryKind) -> Color {
         EntryKind::Command => palette.background.base.text,
         EntryKind::Output => palette.background.base.text.scale_alpha(0.72),
         EntryKind::Error => palette.danger.base.color,
-        EntryKind::Info => palette.primary.base.color,
+        EntryKind::Info => accessible_accent_threshold(
+            palette.primary.base.color,
+            palette.background.base.color,
+            palette.background.base.text,
+            4.5,
+        ),
     }
 }
 
@@ -960,7 +1039,7 @@ fn history_highlight_format(
 
 #[cfg(test)]
 mod tests {
-    use super::{ranked_matches, CommandLine};
+    use super::{mcp_status, ranked_matches, CommandLine};
     use crate::t;
     use rustc_hash::FxHashMap;
 
@@ -969,6 +1048,13 @@ mod tests {
             .iter()
             .map(|(a, c)| (a.to_string(), c.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn mcp_status_distinguishes_off_ready_and_busy() {
+        assert_eq!(mcp_status(false, false).0, "MCP control is off");
+        assert_eq!(mcp_status(true, false).0, "MCP control is ready");
+        assert_eq!(mcp_status(true, true).0, "MCP is handling a request");
     }
 
     #[test]
@@ -997,7 +1083,10 @@ mod tests {
         // still appears. (#288)
         let a = aliases(&[("L", "LINE")]);
         let m = ranked_matches("L", &[], &a);
-        assert!(!m.iter().any(|c| c == "L"), "alias L should be hidden: {m:?}");
+        assert!(
+            !m.iter().any(|c| c == "L"),
+            "alias L should be hidden: {m:?}"
+        );
         assert!(m.iter().any(|c| c == "LINE"), "LINE should remain: {m:?}");
     }
 
@@ -1039,7 +1128,10 @@ mod tests {
         assert_eq!(line.input, "CIRCLE");
         line.history_next();
         assert_eq!(line.input, "PARTIAL");
-        assert_eq!(line.cmd_recall, vec!["LINE".to_string(), "CIRCLE".to_string()]);
+        assert_eq!(
+            line.cmd_recall,
+            vec!["LINE".to_string(), "CIRCLE".to_string()]
+        );
     }
 
     #[test]
@@ -1055,5 +1147,46 @@ mod tests {
             line.cmd_recall.last().map(String::as_str),
             Some("MOVE 0,0 10,0")
         );
+    }
+
+    #[test]
+    fn commandline_fade_defaults_to_3000ms() {
+        let line = CommandLine::new();
+        assert_eq!(line.commandline_fade_ms(), 3000);
+    }
+
+    #[test]
+    fn commandline_fade_zero_hides_unpinned_but_keeps_pinned() {
+        let mut line = CommandLine::new();
+        line.push_info("transient");
+        assert!(line.has_visible_history());
+        line.set_commandline_fade_ms(0);
+        // Non-pinned entries are skipped entirely at 0.
+        assert!(!line.has_visible_history());
+        assert_eq!(line.visible_history_count(), 0);
+        // Pinned step prompt still shows at 0.
+        line.set_step_prompt(Some("Specify point:".to_string()));
+        assert!(line.has_visible_history());
+    }
+
+    #[test]
+    fn info_entries_carry_prefix_marker() {
+        let mut line = CommandLine::new();
+        line.push_info("Object selected.");
+        assert_eq!(line.history.last().map(|e| e.text.as_str()), Some("i  Object selected."));
+        assert_eq!(line.history.last().map(|e| &e.kind), Some(&super::EntryKind::Info));
+    }
+
+    #[test]
+    fn set_step_prompt_reuses_push_info_entry() {
+        let mut line = CommandLine::new();
+        let initial_len = line.history.len();
+        line.push_info("Specify first point:");
+        assert_eq!(line.history.len(), initial_len + 1);
+        line.set_step_prompt(Some("Specify first point:".to_string()));
+        assert_eq!(line.history.len(), initial_len + 1, "prompt must reuse push_info entry without duplicating");
+        let last = line.history.last().unwrap();
+        assert!(last.pinned);
+        assert_eq!(last.text, "i  Specify first point:");
     }
 }

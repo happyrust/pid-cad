@@ -20,6 +20,7 @@ language =
     .polish = Polski
     .chinese-traditional = 繁體中文
     .bulgarian = Български
+    .greek = Ελληνικά
 
 action =
     .close = Cerrar
@@ -3594,6 +3595,7 @@ dimstyle =
     .move-text-outside-first = Mover primero el texto fuera
     .period = Punto
     .space = Espacio
+    .surveyors-units = Unidades de topografía
 
 style-manager =
     .alignment-spacing = Espaciado de alineación

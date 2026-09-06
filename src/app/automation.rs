@@ -14,6 +14,7 @@
 //! - `{"op":"save","path":"out.dwg"}`        — write the document (path optional
 //!                                             once opened/saved)
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
@@ -24,6 +25,7 @@ use super::OpenCADStudio;
 /// Run the headless JSON server. Default transport is stdin/stdout; with
 /// `--port <N>` it instead listens on `127.0.0.1:<N>` and serves one client at
 /// a time (the document session persists across reconnects).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn serve() {
     let mut app = OpenCADStudio::new();
     match port_arg() {
@@ -35,6 +37,7 @@ pub fn serve() {
 /// Headless one-shot format conversion (`--export IN OUT`). Loads `input`,
 /// writes `output` (format chosen from `output`'s extension), and returns a
 /// process exit code (0 on success). No window is created.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn export_headless(input: &std::path::Path, output: &std::path::Path) -> i32 {
     let doc = match crate::io::load_file(input) {
         Ok(doc) => doc,
@@ -56,6 +59,7 @@ pub fn export_headless(input: &std::path::Path, output: &std::path::Path) -> i32
 }
 
 /// `--port <N>` if present on the command line.
+#[cfg(not(target_arch = "wasm32"))]
 fn port_arg() -> Option<u16> {
     let mut args = std::env::args();
     while let Some(a) = args.next() {
@@ -66,10 +70,12 @@ fn port_arg() -> Option<u16> {
     None
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn ready() -> Value {
-    json!({ "ok": true, "ready": true, "version": env!("CARGO_PKG_VERSION") })
+    json!({ "ok": true, "ready": true, "version": env!("OCS_APP_VERSION") })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn serve_stdio(app: &mut OpenCADStudio) {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -91,6 +97,7 @@ fn serve_stdio(app: &mut OpenCADStudio) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn serve_socket(app: &mut OpenCADStudio, port: u16) {
     let listener = match std::net::TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
@@ -131,9 +138,9 @@ fn v3(v: acadrust::types::Vector3) -> Value {
     json!([v.x, v.y, v.z])
 }
 
-/// One entity as JSON: handle, type, layer, plus basic geometry for the common
-/// types (others carry only the common fields).
-fn entity_json(e: &acadrust::EntityType) -> Value {
+/// One entity as JSON. Summary mode carries identity only, geometry adds the
+/// entity's defining values, and full also includes its world bounds.
+fn entity_json(e: &acadrust::EntityType, detail: &str) -> Value {
     use acadrust::EntityType as E;
     let c = e.common();
     let mut obj = json!({
@@ -141,6 +148,9 @@ fn entity_json(e: &acadrust::EntityType) -> Value {
         "type": crate::entities::names::ui_name(e),
         "layer": c.layer,
     });
+    if detail == "summary" {
+        return obj;
+    }
     let map = obj.as_object_mut().expect("json object");
     match e {
         E::Line(l) => {
@@ -187,12 +197,58 @@ fn entity_json(e: &acadrust::EntityType) -> Value {
         }
         _ => {}
     }
+    if detail == "full" {
+        let bounds = e.as_entity().bounding_box();
+        map.insert("bounds".into(), json!({
+            "min":[bounds.min.x,bounds.min.y,bounds.min.z],
+            "max":[bounds.max.x,bounds.max.y,bounds.max.z]
+        }));
+    }
     obj
+}
+
+fn request_point(req: &Value, key: &str) -> Option<[f64; 2]> {
+    let values = req[key].as_array()?;
+    if !(2..=3).contains(&values.len()) {
+        return None;
+    }
+    let x = values[0].as_f64()?;
+    let y = values[1].as_f64()?;
+    (x.is_finite() && y.is_finite()).then_some([x, y])
+}
+
+fn request_handle(value: &Value) -> Option<acadrust::Handle> {
+    value.as_str()
+        .and_then(|value| u64::from_str_radix(value.trim_start_matches("0x"), 16).ok())
+        .map(acadrust::Handle::new)
+}
+
+fn projected_fields(mut entity: Value, fields: Option<&Vec<Value>>) -> Value {
+    let Some(fields) = fields else { return entity };
+    let Some(source) = entity.as_object_mut() else { return entity };
+    let keep: std::collections::HashSet<&str> =
+        fields.iter().filter_map(Value::as_str).collect();
+    source.retain(|key, _| key == "handle" || keep.contains(key.as_str()));
+    entity
 }
 
 impl OpenCADStudio {
     /// Handle one JSON request line and return the JSON response.
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub(crate) fn automation_op(&mut self, line: &str) -> Value {
+        if let Ok(req) = serde_json::from_str::<Value>(line) {
+            if req["protocol"].is_number() {
+                let id = req["request_id"].clone();
+                let (response, task) = self.control_request(req);
+                if let Err(error) = self.drive_headless_task(task) {
+                    return err(error);
+                }
+                if matches!(response["status"].as_str(), Some("accepted" | "running")) {
+                    return self.control_request(json!({"op":"operation","request_id":id})).0;
+                }
+                return response;
+            }
+        }
         let res = self.automation_op_inner(line);
         // Most automation ops mutate `Scene::selected` directly rather than
         // going through `update()` (`select` calls `deselect_all` /
@@ -203,7 +259,7 @@ impl OpenCADStudio {
         res
     }
 
-    fn automation_op_inner(&mut self, line: &str) -> Value {
+    pub(super) fn automation_op_inner(&mut self, line: &str) -> Value {
         let req: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => return err(format!("invalid JSON: {e}")),
@@ -220,6 +276,7 @@ impl OpenCADStudio {
                 self.tabs[i].scene.bump_geometry();
                 self.entity_summary()
             }
+            #[cfg(not(target_arch = "wasm32"))]
             "open" => {
                 let Some(path) = req["path"].as_str() else {
                     return err("open: missing \"path\"");
@@ -249,6 +306,8 @@ impl OpenCADStudio {
                     Err(e) => err(format!("open: {e}")),
                 }
             }
+            #[cfg(target_arch = "wasm32")]
+            "open" => err("open: use the browser file action"),
             "run" => {
                 let cmd = req["cmd"].as_str().unwrap_or("").to_string();
                 if cmd.is_empty() {
@@ -256,11 +315,16 @@ impl OpenCADStudio {
                 }
                 let i = self.active_tab;
                 let before = self.tabs[i].scene.document.entities().count();
-                self.run_headless(&cmd);
+                let error_revision = self.command_line.error_revision;
+                if let Err(error) = self.run_headless(&cmd) { return err(error); }
+                if self.command_line.error_revision != error_revision {
+                    return err(self.command_line.last_error.clone().unwrap_or_default());
+                }
                 let after = self.tabs[i].scene.document.entities().count();
                 json!({
                     "ok": true,
                     "cmd": cmd,
+                    "status": if self.tabs[i].active_cmd.is_some() { "waiting_input" } else { "completed" },
                     "entities": after,
                     "added": after as i64 - before as i64,
                 })
@@ -269,12 +333,17 @@ impl OpenCADStudio {
             "query" => self.entity_query(&req),
             "layers" => {
                 let i = self.active_tab;
+                let offset = req["offset"].as_u64().unwrap_or(0) as usize;
+                let limit = req["limit"].as_u64().unwrap_or(1000).min(10_000) as usize;
+                let count = self.tabs[i].scene.document.layers.iter().count();
                 let layers: Vec<Value> = self
                     .tabs[i]
                     .scene
                     .document
                     .layers
                     .iter()
+                    .skip(offset)
+                    .take(limit)
                     .map(|l| {
                         let mut o = json!({
                             "name": l.name,
@@ -295,6 +364,8 @@ impl OpenCADStudio {
                 json!({
                     "ok": true,
                     "current": self.tabs[i].scene.document.header.current_layer_name,
+                    "count": count,
+                    "next_offset": (offset + layers.len() < count).then_some(offset + layers.len()),
                     "layers": layers,
                 })
             }
@@ -385,40 +456,180 @@ impl OpenCADStudio {
     /// [`OpenCADStudio::run_command_line`] (see `cmd_result.rs`), which the GUI
     /// command line uses too so both process `UCS Z 90` / `LINE 0,0 10,10` /
     /// `PDMODE 3` identically.
-    fn run_headless(&mut self, cmd: &str) {
-        let _ = self.run_command_line(cmd);
+    fn run_headless(&mut self, cmd: &str) -> Result<(), String> {
+        let task = self.run_command_line(cmd);
+        self.drive_headless_task(task)
     }
 
-    /// List entities (handle, type, layer, basic geometry), optionally filtered
-    /// by `type` and/or `layer`, capped by `limit` (default 1000).
-    fn entity_query(&self, req: &Value) -> Value {
-        let i = self.active_tab;
-        let type_filter = req["type"].as_str();
-        let layer_filter = req["layer"].as_str();
-        let limit = req["limit"].as_u64().unwrap_or(1000) as usize;
-
-        let mut entities = Vec::new();
-        let mut matched = 0u64;
-        for e in self.tabs[i].scene.document.entities() {
-            if let Some(tf) = type_filter {
-                if !crate::entities::names::ui_name(e).eq_ignore_ascii_case(tf) {
-                    continue;
+    pub(super) fn drive_headless_task(&mut self, task: iced::Task<super::Message>) -> Result<(), String> {
+        use iced::futures::StreamExt;
+        let mut streams = Vec::new();
+        if let Some(stream) = iced_runtime::task::into_stream(task) { streams.push(stream); }
+        while let Some(stream) = streams.last_mut() {
+            match iced::futures::executor::block_on(stream.next()) {
+                Some(iced_runtime::Action::Output(message)) => {
+                    let next = self.update(message);
+                    if let Some(stream) = iced_runtime::task::into_stream(next) { streams.push(stream); }
                 }
-            }
-            if let Some(lf) = layer_filter {
-                if e.common().layer != lf {
-                    continue;
-                }
-            }
-            matched += 1;
-            if entities.len() < limit {
-                entities.push(entity_json(e));
+                Some(iced_runtime::Action::Widget(_)) | Some(iced_runtime::Action::Tick) | Some(iced_runtime::Action::Reload) => {},
+                Some(action) => return Err(format!("GUI runtime required for {action:?}")),
+                None => { streams.pop(); }
             }
         }
+        self.finish_all_pending_history();
+        Ok(())
+    }
+
+    /// Query entities by identity, metadata and exact plane-curve relationships.
+    fn entity_query(&self, req: &Value) -> Value {
+        let i = self.active_tab;
+        let tab = &self.tabs[i];
+        if let Some(pair) = req["intersections"].as_array() {
+            if pair.len() != 2 {
+                return err("query intersections expects exactly two handles");
+            }
+            let Some(first) = request_handle(&pair[0]) else {
+                return err("query intersections contains an invalid first handle");
+            };
+            let Some(second) = request_handle(&pair[1]) else {
+                return err("query intersections contains an invalid second handle");
+            };
+            let Some(first_entity) = tab.scene.document.get_entity(first) else {
+                return err("query intersections first entity does not exist");
+            };
+            let Some(second_entity) = tab.scene.document.get_entity(second) else {
+                return err("query intersections second entity does not exist");
+            };
+            let Some(first_curve) = crate::entities::curve::entity_curve_xy(first_entity) else {
+                return err("query intersections first entity is not a planar curve");
+            };
+            let Some(second_curve) = crate::entities::curve::entity_curve_xy(second_entity) else {
+                return err("query intersections second entity is not a planar curve");
+            };
+            let crossings = cadkernel::geom2d::intersect(
+                &first_curve,
+                &second_curve,
+                cadkernel::geom2d::Tolerance::default(),
+            );
+            return json!({
+                "ok":true,
+                "document_id":tab.id,
+                "geometry_revision":tab.scene.geometry_epoch,
+                "handles":[format!("{:X}",first.value()),format!("{:X}",second.value())],
+                "count":crossings.len(),
+                "intersections":crossings.into_iter().map(|crossing|json!({
+                    "point":[crossing.point[0],crossing.point[1]],
+                    "parameter_first":crossing.t_a,
+                    "parameter_second":crossing.t_b
+                })).collect::<Vec<_>>()
+            });
+        }
+
+        let type_filter = req["type"].as_str();
+        let layer_filter = req["layer"].as_str();
+        let handles: Option<std::collections::HashSet<u64>> = req["handles"]
+            .as_array()
+            .map(|values| values.iter().filter_map(request_handle).map(|h| h.value()).collect())
+            .or_else(|| request_handle(&req["handle"])
+                .map(|handle| std::iter::once(handle.value()).collect()));
+        let near = request_point(req, "near");
+        let contains = request_point(req, "contains_point");
+        let bounds = req["bounds"].as_array().and_then(|values| {
+            (values.len() == 4).then(|| Some([
+                values[0].as_f64()?, values[1].as_f64()?,
+                values[2].as_f64()?, values[3].as_f64()?,
+            ])).flatten()
+        });
+        if req.get("handles").is_some() && handles.as_ref().is_some_and(|parsed| {
+            parsed.len() != req["handles"].as_array().map_or(0, Vec::len)
+        }) {
+            return err("query handles contains an invalid hexadecimal handle");
+        }
+        if req.get("handle").is_some() && request_handle(&req["handle"]).is_none() {
+            return err("query handle must be hexadecimal");
+        }
+        if req.get("near").is_some() && near.is_none() {
+            return err("query near expects two or three finite coordinates");
+        }
+        if req.get("contains_point").is_some() && contains.is_none() {
+            return err("query contains_point expects two or three finite coordinates");
+        }
+        if req.get("bounds").is_some() && bounds.is_none_or(|bounds| {
+            !bounds.iter().all(|value| value.is_finite())
+                || bounds[0] > bounds[2] || bounds[1] > bounds[3]
+        }) {
+            return err("query bounds expects finite [min_x,min_y,max_x,max_y]");
+        }
+        let detail = req["detail"].as_str().unwrap_or("geometry");
+        if !matches!(detail, "summary" | "geometry" | "full") {
+            return err("query detail must be summary, geometry or full");
+        }
+        let limit = req["limit"].as_u64().unwrap_or(1000).min(10000) as usize;
+        let offset = req["offset"].as_u64().unwrap_or(0) as usize;
+
+        let mut matched = Vec::new();
+        for e in tab.scene.document.entities() {
+            if handles.as_ref().is_some_and(|handles| {
+                !handles.contains(&e.common().handle.value())
+            }) {
+                continue;
+            }
+            if type_filter.is_some_and(|value| {
+                !crate::entities::names::ui_name(e).eq_ignore_ascii_case(value)
+            }) || layer_filter.is_some_and(|value| e.common().layer != value) {
+                continue;
+            }
+            if let Some(bounds) = bounds {
+                let entity_bounds = e.as_entity().bounding_box();
+                if entity_bounds.max.x < bounds[0] || entity_bounds.max.y < bounds[1]
+                    || entity_bounds.min.x > bounds[2] || entity_bounds.min.y > bounds[3]
+                {
+                    continue;
+                }
+            }
+            let curve = (near.is_some() || contains.is_some())
+                .then(|| crate::entities::curve::entity_curve_xy(e)).flatten();
+            if let Some(point) = contains {
+                let Some(curve) = curve.as_ref().filter(|curve| curve.is_closed()) else {
+                    continue;
+                };
+                if !cadkernel::geom2d::contains(
+                    std::slice::from_ref(curve), point,
+                    cadkernel::geom2d::Tolerance::default(),
+                ) {
+                    continue;
+                }
+            }
+            let nearest = near.and_then(|point| curve.as_ref()
+                .map(|curve| cadkernel::geom2d::closest_point(curve, point)));
+            if near.is_some() && nearest.is_none() {
+                continue;
+            }
+            let mut entity = entity_json(e, detail);
+            if let Some(nearest) = nearest {
+                let object = entity.as_object_mut().expect("entity JSON object");
+                object.insert("distance".into(), json!(nearest.distance));
+                object.insert("closest_point".into(),
+                    json!([nearest.point[0], nearest.point[1]]));
+                object.insert("parameter".into(), json!(nearest.t));
+            }
+            matched.push((nearest.map(|nearest| nearest.distance), entity));
+        }
+        if near.is_some() {
+            matched.sort_by(|left, right| left.0.partial_cmp(&right.0)
+                .unwrap_or(std::cmp::Ordering::Equal));
+        }
+        let count = matched.len();
+        let fields = req["fields"].as_array();
+        let entities: Vec<Value> = matched.into_iter().skip(offset).take(limit)
+            .map(|(_, entity)| projected_fields(entity, fields)).collect();
         json!({
             "ok": true,
-            "count": matched,
+            "document_id":tab.id,
+            "geometry_revision":tab.scene.geometry_epoch,
+            "count": count,
             "returned": entities.len(),
+            "next_offset": (offset + entities.len() < count).then_some(offset + entities.len()),
             "entities": entities,
         })
     }
@@ -441,6 +652,36 @@ impl OpenCADStudio {
 #[cfg(test)]
 mod tests {
     use crate::app::OpenCADStudio;
+
+    #[test]
+    fn layout_notice_skips_grid_camera_and_scene_builds() {
+        let mut app = OpenCADStudio::new_for_test();
+        assert_eq!(app.automation_op(r#"{"op":"new"}"#)["ok"], true);
+        assert_eq!(app.automation_op(r#"{"op":"run","cmd":"LINE 0,0 10,10"}"#)["ok"], true);
+        let i = app.active_tab;
+        let scene = &mut app.tabs[i].scene;
+        scene.document.add_layout("Review").unwrap();
+        scene.set_current_layout("Review".to_string());
+        let mut viewport = acadrust::entities::Viewport::new();
+        viewport.id = 2;
+        viewport.width = 100.0;
+        viewport.height = 50.0;
+        viewport.status.is_on = true;
+        scene.add_entity(acadrust::EntityType::Viewport(viewport));
+        for entity in scene.document.entities_mut() {
+            if let acadrust::EntityType::Viewport(viewport) = entity {
+                viewport.status.grid_on = true;
+            }
+        }
+        let before = scene.last_tess_wires.get();
+        app.layout_settling = true;
+        drop(app.view_main());
+        assert_eq!(app.tabs[i].scene.last_tess_wires.get(), before);
+        let _ = app.update(crate::app::Message::LayoutSettled);
+        assert!(!app.layout_settling);
+        drop(app.view_main());
+        assert!(app.tabs[i].scene.last_tess_wires.get() > before);
+    }
 
     #[test]
     fn automation_ops_round_trip() {
@@ -562,14 +803,11 @@ mod tests {
                 _ => None,
             })
             .expect("CIRCLE should create one entity");
-        let center = crate::scene::view::transform::ocs_point_to_wcs(
-            (circle.center.x, circle.center.y, circle.center.z),
-            (circle.normal.x, circle.normal.y, circle.normal.z),
-        );
+        let center = circle.center_wcs();
         let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
-        assert!(close(center.0, 2.0));
-        assert!(close(center.1, 0.0));
-        assert!(close(center.2, 3.0));
+        assert!(close(center.x, 2.0));
+        assert!(close(center.y, 0.0));
+        assert!(close(center.z, 3.0));
         assert!(close(circle.normal.x, 0.0));
         assert!(close(circle.normal.y, -1.0));
         assert!(close(circle.normal.z, 0.0));
@@ -621,17 +859,11 @@ mod tests {
 
     #[test]
     fn start_page_runs_tools_that_need_no_drawing_but_still_refuses_the_rest() {
-        // The welcome page's own buttons (Donate / Send Feedback / OCS Web) and
-        // Manage > About route through RibbonToolClick, so a blanket is_start
-        // refusal killed them outright — by definition they are only ever
-        // clickable while is_start holds. `dispatch_command` owns the list of
-        // commands that stand alone; this door must not shadow it. (#388, #389)
+        // App-wide commands remain available on the welcome page; drawing
+        // commands and scene tools do not. (#388, #389)
         use crate::app::Message;
         use crate::modules::ModuleEvent;
-
-        let command_refusal =
-            crate::t!("No drawing open. Use NEW or OPEN to start a drawing.");
-        let tool_refusal = crate::t!("No drawing open — use New or Open first.");
+        use crate::ui::command_line::EntryKind;
 
         // Fresh app = welcome tab, no drawing.
         let mut app = OpenCADStudio::new_for_test();
@@ -640,22 +872,16 @@ mod tests {
             "test needs the welcome tab"
         );
 
-        // ABOUT is safe to drive: it opens a modal. DONATE / WEBVERSION / REPORT
-        // take the same path but shell out to a browser, so they are covered by
-        // the allowlist assertion below rather than by dispatching them here.
+        // ABOUT schedules its modal; it must pass the welcome-page gate.
         let start = app.command_line.history.len();
         let _ = app.update(Message::RibbonToolClick {
             tool_id: "ABOUT".to_string(),
             event: ModuleEvent::Command("ABOUT".to_string()),
         });
-        let out: String = app.command_line.history[start..]
-            .iter()
-            .map(|e| e.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            !out.contains(command_refusal.as_ref()),
-            "ABOUT needs no drawing and must not be refused on the welcome page: {out:?}"
+        assert_eq!(
+            app.command_line.history.len(),
+            start,
+            "ABOUT must not be refused on the welcome page"
         );
 
         // …but a tool that does need a drawing is still turned away (#299).
@@ -664,15 +890,9 @@ mod tests {
             tool_id: "LINE".to_string(),
             event: ModuleEvent::Command("LINE".to_string()),
         });
-        let out: String = app.command_line.history[start..]
-            .iter()
-            .map(|e| e.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            out.contains(command_refusal.as_ref()),
-            "LINE must still be refused on the welcome page: {out:?}"
-        );
+        let refusal = &app.command_line.history[start..];
+        assert_eq!(refusal.len(), 1, "LINE must emit one refusal");
+        assert_eq!(refusal[0].kind, EntryKind::Info);
         assert!(
             app.tabs[app.active_tab].active_cmd.is_none(),
             "LINE must not have started"
@@ -684,30 +904,19 @@ mod tests {
             tool_id: "LAYERS".to_string(),
             event: ModuleEvent::ToggleLayers,
         });
-        let out: String = app.command_line.history[start..]
-            .iter()
-            .map(|e| e.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            out.contains(tool_refusal.as_ref()),
-            "a scene-touching event must stay inert on the welcome page: {out:?}"
-        );
+        let refusal = &app.command_line.history[start..];
+        assert_eq!(refusal.len(), 1, "scene tools must emit one refusal");
+        assert_eq!(refusal[0].kind, EntryKind::Info);
 
-        // Every welcome-page button must also clear dispatch's own gate, or the
-        // fix above just moves the refusal one door down. Asserted on the source
-        // rather than by dispatching: DONATE / REPORT / WEBVERSION shell out to
-        // a real browser, which a test must not do.
+        // Check link commands in source without launching them.
         let dispatch_src = include_str!("commands/mod.rs");
-        // The gate's allow-list lives in the `start_allowed` fn (#388/389);
-        // its first `}` closes the `matches!` body, past every name.
+        // Extract the `start_allowed` match body.
         let gate = dispatch_src
             .split("pub fn start_allowed")
             .nth(1)
             .and_then(|s| s.split('}').next())
             .expect("the start_allowed gate moved — re-point this test");
-        // DONATE/REPORT/WEBVERSION are the welcome page's own buttons; the rest
-        // are ribbon tools that configure the application, not a drawing.
+        // Welcome-page links plus app-wide configuration commands.
         let standalone = [
             "DONATE",
             "REPORT",
@@ -724,7 +933,7 @@ mod tests {
                  list, so it is refused on the welcome page"
             );
         }
-        // …and each must actually have somewhere to land.
+        // Every allowed command needs a dispatch arm.
         let view_src = include_str!("commands/view.rs");
         for cmd in standalone {
             assert!(
@@ -828,7 +1037,7 @@ mod tests {
         // (feed_active_cmd is the same path the GUI submit offers first).
         let _ = app.run_command_line("PICKDRAG");
         assert!(app.tabs[app.active_tab].active_cmd.is_some(), "prompt must open");
-        app.feed_active_cmd("1");
+        let _ = app.feed_active_cmd("1");
         assert!(app.pick_drag_rect, "PICKDRAG 1 via the prompt must switch");
     }
 
@@ -1033,7 +1242,11 @@ mod tests {
     #[test]
     fn save_then_open_round_trips() {
         let mut app = OpenCADStudio::new_for_test();
-        let path = std::env::temp_dir().join("ocs_automation_test.dxf");
+        let path = std::env::temp_dir().join(format!(
+            "ocs_automation_test_{}.dxf",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
         let p = path.to_string_lossy().replace('\\', "\\\\");
         app.automation_op(r#"{"op":"new"}"#);
         assert_eq!(
@@ -1044,6 +1257,12 @@ mod tests {
             app.automation_op(&format!(r#"{{"op":"open","path":"{p}"}}"#))["ok"],
             true
         );
+        drop(app);
+        let sidecar = path.with_file_name(format!(
+            ".{}.ocs.lock",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = std::fs::remove_file(sidecar);
         let _ = std::fs::remove_file(&path);
     }
 }

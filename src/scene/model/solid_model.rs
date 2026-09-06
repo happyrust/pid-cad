@@ -3,6 +3,7 @@
 use cadkernel::brep::{self, Body, Curve3, EdgeKey, FaceKey, Surface};
 
 use crate::scene::model::mesh_model::{MeshLodSet, MeshModel};
+use crate::scene::model::wire_model::WireModel;
 
 /// What counts as the same point when the kernel checks a body over.
 const TOL: f64 = 1e-9;
@@ -15,6 +16,29 @@ fn tessellation(body: &Body) -> brep::mesh::BodyMesh {
             TOL,
         ),
     )
+}
+
+fn display_tessellation(
+    body: &Body,
+    facet_resolution: f64,
+    chordal_deflection: Option<f64>,
+    isolines: usize,
+) -> brep::mesh::BodyMesh {
+    let resolution = if facet_resolution.is_finite() && facet_resolution > 0.0 {
+        facet_resolution.clamp(0.01, 10.0)
+    } else {
+        1.0
+    };
+    let max_angle = chordal_deflection.map_or_else(
+        || cadkernel::tessellation::angle_for_resolution(resolution),
+        |_| cadkernel::tessellation::display_angle_for_resolution(resolution),
+    );
+    let mut tolerance = brep::mesh::TessellationTolerance::new(max_angle, TOL)
+        .with_isolines(isolines);
+    if let Some(deflection) = chordal_deflection {
+        tolerance = tolerance.with_chordal_deflection(deflection);
+    }
+    brep::mesh::tessellate(body, tolerance)
 }
 
 /// Axis-aligned box from its center and full extents.
@@ -40,9 +64,31 @@ pub fn cylinder_solid(center: [f64; 3], radius: f64, height: f64) -> Option<Body
     brep::make::cylinder(center, radius, height)
 }
 
-/// Solid cone standing on the z = base plane, apex `height` above it.
-pub fn cone_solid(center: [f64; 3], radius: f64, height: f64) -> Option<Body> {
-    brep::make::cone(center, radius, height)
+/// Circular or elliptical cone/frustum standing on the z = base plane.
+pub fn cone_frustum_solid(
+    center: [f64; 3],
+    base_x_radius: f64,
+    base_y_radius: f64,
+    top_radius: f64,
+    height: f64,
+) -> Option<Body> {
+    brep::make::frustum(
+        center,
+        base_x_radius,
+        base_y_radius,
+        top_radius,
+        height,
+    )
+}
+
+/// Circular or elliptical cylinder standing on the local z = base plane.
+pub fn elliptical_cylinder_solid(
+    center: [f64; 3],
+    major_radius: f64,
+    minor_radius: f64,
+    height: f64,
+) -> Option<Body> {
+    brep::make::elliptical_cylinder(center, major_radius, minor_radius, height)
 }
 
 /// Solid sphere about `center`.
@@ -58,6 +104,17 @@ pub fn torus_solid(center: [f64; 3], major: f64, minor: f64) -> Option<Body> {
 /// Solid pyramid on a regular polygon of `sides` corners.
 pub fn pyramid_solid(center: [f64; 3], radius: f64, height: f64, sides: usize) -> Option<Body> {
     brep::make::pyramid(center, radius, height, sides)
+}
+
+/// Solid pyramid or polygonal frustum on a regular polygon of `sides` corners.
+pub fn pyramid_frustum_solid(
+    center: [f64; 3],
+    base_radius: f64,
+    top_radius: f64,
+    height: f64,
+    sides: usize,
+) -> Option<Body> {
+    brep::make::pyramid_frustum(center, base_radius, top_radius, height, sides)
 }
 
 // ── Placement ───────────────────────────────────────────────────────────────
@@ -210,6 +267,27 @@ pub fn edge_wires(body: &Body) -> Vec<acadrust::entities::Wire> {
         .collect()
 }
 
+/// White wireframe used while a solid-history grip is hot.
+///
+/// This deliberately does not touch the resident solid mesh or its entity
+/// wires: the selected source stays visible in blue while the candidate body
+/// is presented as a separate, non-pickable outline until placement.
+pub fn grip_preview_wires(body: &Body, handle: acadrust::Handle) -> Vec<WireModel> {
+    tessellation(body)
+        .edges
+        .into_iter()
+        .filter(|edge| edge.positions.len() >= 2)
+        .map(|edge| {
+            WireModel::solid_f64(
+                format!("{}-GRIP-PREVIEW", handle.value()),
+                edge.positions,
+                WireModel::WHITE,
+                false,
+            )
+        })
+        .collect()
+}
+
 /// B-rep edge nearest a world-space surface pick.
 pub fn nearest_edge(body: &Body, pick: [f64; 3]) -> Option<EdgeKey> {
     let pick = cadkernel::space::Vec3::from(pick);
@@ -342,8 +420,13 @@ fn mesh_from_tessellation(
         color,
         selected: false,
     });
-    for edge in tessellation.edges {
-        for segment in edge.positions.windows(2) {
+    for positions in tessellation
+        .edges
+        .into_iter()
+        .map(|edge| edge.positions)
+        .chain(tessellation.isolines.into_iter().map(|line| line.positions))
+    {
+        for segment in positions.windows(2) {
             for point in segment {
                 let high = [point[0] as f32, point[1] as f32, point[2] as f32];
                 set.edge_verts.push(high);
@@ -363,9 +446,17 @@ fn mesh_from_tessellation(
 pub fn display_from_solid(
     body: &Body,
     color: [f32; 4],
+    facet_resolution: f64,
+    chordal_deflection: Option<f64>,
+    isolines: usize,
 ) -> Option<(MeshLodSet, Vec<acadrust::entities::Wire>, [f64; 3])> {
     use acadrust::types::Vector3;
-    let tessellation = tessellation(body);
+    let tessellation = display_tessellation(
+        body,
+        facet_resolution,
+        chordal_deflection,
+        isolines,
+    );
     let center = mesh_center(&tessellation.mesh)?;
     let wires = tessellation
         .edges
@@ -441,7 +532,7 @@ mod tests {
     use super::*;
 
     fn tri_count(body: &Body) -> usize {
-        display_from_solid(body, [0.7, 0.7, 0.7, 1.0])
+        display_from_solid(body, [0.7, 0.7, 0.7, 1.0], 1.0, None, 0)
             .map(|(m, _, _)| m.lods[0].indices.len() / 3)
             .unwrap_or(0)
     }
@@ -452,7 +543,7 @@ mod tests {
         assert!(tri_count(&box_solid(c, 10.0, 10.0, 10.0).unwrap()) >= 12, "box");
         assert!(tri_count(&wedge_solid(c, 10.0, 10.0, 10.0).unwrap()) >= 6, "wedge");
         assert!(tri_count(&cylinder_solid(c, 5.0, 12.0).unwrap()) > 20, "cylinder");
-        assert!(tri_count(&cone_solid(c, 5.0, 12.0).unwrap()) > 10, "cone");
+        assert!(tri_count(&cone_frustum_solid(c, 5.0, 5.0, 0.0, 12.0).unwrap()) > 10, "cone");
         assert!(tri_count(&sphere_solid(c, 5.0).unwrap()) > 50, "sphere");
         assert!(tri_count(&torus_solid(c, 8.0, 2.0).unwrap()) > 50, "torus");
         assert!(tri_count(&pyramid_solid(c, 5.0, 9.0, 6).unwrap()) >= 8, "pyramid");
@@ -469,7 +560,10 @@ mod tests {
         let cases: [(Body, f64); 5] = [
             (box_solid(c, 10.0, 4.0, 6.0).unwrap(), 240.0),
             (cylinder_solid(c, 5.0, 12.0).unwrap(), PI * 25.0 * 12.0),
-            (cone_solid(c, 5.0, 12.0).unwrap(), PI * 25.0 * 12.0 / 3.0),
+            (
+                cone_frustum_solid(c, 5.0, 5.0, 0.0, 12.0).unwrap(),
+                PI * 25.0 * 12.0 / 3.0,
+            ),
             (sphere_solid(c, 5.0).unwrap(), 4.0 / 3.0 * PI * 125.0),
             (torus_solid(c, 8.0, 2.0).unwrap(), 2.0 * PI * PI * 8.0 * 4.0),
         ];

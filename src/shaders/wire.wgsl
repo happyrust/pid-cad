@@ -29,7 +29,7 @@ struct Uniforms {
     // every line opaque.
     transparency_enable: f32,
     linetype_scale: f32,
-    _pad: f32,
+    lineweight_scale: f32,
     // ── Relative-to-eye (double-single) ──────────────────────────────────
     // view_rot is the rotation-only view-projection; vertices subtract the eye
     // (eye_high + eye_low, two f32 emulating f64) before transforming, so the
@@ -72,6 +72,8 @@ struct InstanceIn {
 // draw_depth is signed (-1,1): front → positive → smaller z → drawn on top;
 // 0.0 = neutral (real depth). Depth32Float gives ample precision.
 const DRAW_ORDER_BIAS: f32 = 0.001;
+const MODEL_LINEWEIGHT_BOOST: f32 = 2.0;
+const MODEL_LINEWEIGHT_MAX_PX: f32 = 10.0;
 
 struct VertexOut {
     @builtin(position)              clip_pos:       vec4<f32>,
@@ -102,7 +104,17 @@ struct VertexOut {
 fn resolve_hw(taper: f32, world_hw: f32, px_hw: f32) -> f32 {
     if taper > 0.0 { return max(taper / u.world_per_pixel, 0.5); }
     if world_hw > 0.0 { return max(world_hw / u.world_per_pixel, 0.5); }
-    return select(0.5, px_hw, u.lwdisplay_enable > 0.5);
+    var display_hw = max(px_hw * u.lineweight_scale, 0.5);
+    if u.lineweight_scale < 0.0 {
+        let scale = -u.lineweight_scale;
+        let base_hw = select(
+            min(px_hw * MODEL_LINEWEIGHT_BOOST, MODEL_LINEWEIGHT_MAX_PX * 0.5),
+            0.5,
+            px_hw <= 0.5,
+        );
+        display_hw = max(base_hw * scale, 0.5);
+    }
+    return select(0.5, display_hw, u.lwdisplay_enable > 0.5);
 }
 
 fn marker_relative(position_high: vec3<f32>, position_low: vec3<f32>, instance: InstanceIn) -> vec3<f32> {

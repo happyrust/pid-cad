@@ -20,6 +20,7 @@ language =
     .polish = Polski
     .chinese-traditional = 繁體中文
     .bulgarian = Български
+    .greek = Ελληνικά
 
 action =
     .close = 閉じる
@@ -3582,6 +3583,7 @@ dimstyle =
     .move-text-outside-first = 先に寸法値を外側へ移動
     .period = ピリオド
     .space = 空白
+    .surveyors-units = 測量単位
 
 style-manager =
     .alignment-spacing = 位置合わせ間隔

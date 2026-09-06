@@ -20,6 +20,7 @@ language =
     .polish = Polski
     .chinese-traditional = 繁體中文
     .bulgarian = Български
+    .greek = Ελληνικά
 
 action =
     .close = Zamknij
@@ -3586,6 +3587,7 @@ dimstyle =
     .move-text-outside-first = Najpierw przenieś tekst na zewnątrz
     .period = Okres
     .space = Spacja
+    .surveyors-units = Jednostki geodezyjne
 
 style-manager =
     .alignment-spacing = Rozstaw wyrównania

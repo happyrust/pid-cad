@@ -5,7 +5,7 @@ struct Uniforms {
     flat_shade: f32,
     transparency_enable: f32,
     linetype_scale: f32,
-    _pad: f32,
+    lineweight_scale: f32,
     view_rot: mat4x4<f32>,
     eye_high: vec3<f32>,
     _pad_eh: f32,
@@ -45,6 +45,8 @@ struct VertexIn {
 }
 
 const DRAW_ORDER_BIAS: f32 = 0.001;
+const MODEL_LINEWEIGHT_BOOST: f32 = 2.0;
+const MODEL_LINEWEIGHT_MAX_PX: f32 = 10.0;
 
 struct VertexOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -67,7 +69,17 @@ fn resolve_hw(taper_ratio: f32, world_hw: f32, px_hw: f32) -> f32 {
     if world_hw > 0.0 {
         return max(world_hw / u.world_per_pixel, 0.5);
     }
-    return select(0.5, px_hw, u.lwdisplay_enable > 0.5);
+    var display_hw = max(px_hw * u.lineweight_scale, 0.5);
+    if u.lineweight_scale < 0.0 {
+        let scale = -u.lineweight_scale;
+        let base_hw = select(
+            min(px_hw * MODEL_LINEWEIGHT_BOOST, MODEL_LINEWEIGHT_MAX_PX * 0.5),
+            0.5,
+            px_hw <= 0.5,
+        );
+        display_hw = max(base_hw * scale, 0.5);
+    }
+    return select(0.5, display_hw, u.lwdisplay_enable > 0.5);
 }
 
 fn marker_relative(

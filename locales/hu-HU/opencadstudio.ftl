@@ -20,6 +20,7 @@ language =
     .polish = Polski
     .chinese-traditional = 繁體中文
     .bulgarian = Български
+    .greek = Ελληνικά
 
 action =
     .close = Bezárás
@@ -3586,6 +3587,7 @@ dimstyle =
     .move-text-outside-first = Először mozgassa ki a szöveget
     .period = Időszak
     .space = Szóköz
+    .surveyors-units = Földmérési egységek
 
 style-manager =
     .alignment-spacing = Igazítási távolság

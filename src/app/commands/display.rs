@@ -736,21 +736,30 @@ impl OpenCADStudio {
             // ── EXTRUDE ────────────────────────────────────────────────────
             "EXTRUDE" | "THICKEN" => {
                 use crate::modules::insert::solid3d_cmds::ExtrudeCommand;
-                // If a single entity is already selected, skip the pick step.
+                // A preselection becomes the complete source set; otherwise
+                // the interactive command gathers any number of profiles.
                 let selected: Vec<_> = self.tabs[i].scene.selected_entities().into_iter().collect();
                 let color = self.tabs[i].scene.layer_color(&self.tabs[i].active_layer);
-                if selected.len() == 1 {
-                    let handle = selected[0].0;
+                if !selected.is_empty() {
                     let mut cmd = ExtrudeCommand::new_named(cmd, color);
-                    if let Some(curve) = crate::entities::curve::entity_curve(selected[0].1) {
-                        cmd.set_entity_pick_direction(
-                            curve.plane.normal().map(glam::DVec3::from_array),
-                        );
-                        cmd.on_entity_pick(
-                            handle,
-                            glam::DVec3::from_array(curve.plane.origin),
-                        );
-                    }
+                    let first_curve = selected
+                        .iter()
+                        .find_map(|(_, entity)| crate::entities::curve::entity_curve(entity));
+                    let anchor = first_curve
+                        .as_ref()
+                        .map(|curve| glam::DVec3::from_array(curve.plane.origin))
+                        .unwrap_or(glam::DVec3::ZERO);
+                    let direction = first_curve
+                        .and_then(|curve| curve.plane.normal())
+                        .map(glam::DVec3::from_array);
+                    cmd.set_preselection(
+                        selected
+                            .iter()
+                            .map(|(handle, entity)| (*handle, (*entity).clone()))
+                            .collect(),
+                        anchor,
+                        direction,
+                    );
                     self.command_line.push_info(&cmd.prompt());
                     self.tabs[i].active_cmd = Some(Box::new(cmd));
                 } else {
@@ -762,22 +771,10 @@ impl OpenCADStudio {
 
             "PRESSPULL" => {
                 use crate::modules::insert::solid3d_cmds::PresspullCommand;
-                let selected: Vec<_> = self.tabs[i].scene.selected_entities().into_iter().collect();
                 let color = self.tabs[i].scene.layer_color(&self.tabs[i].active_layer);
                 let mut command = PresspullCommand::new(color);
-                if selected.len() == 1
-                    && !matches!(selected[0].1, acadrust::EntityType::Solid3D(_))
-                {
-                    if let Some(curve) = crate::entities::curve::entity_curve(selected[0].1) {
-                        command.set_entity_pick_direction(
-                            curve.plane.normal().map(glam::DVec3::from_array),
-                        );
-                        command.on_entity_pick(
-                            selected[0].0,
-                            glam::DVec3::from_array(curve.plane.origin),
-                        );
-                    }
-                }
+                command.set_isolines(self.tabs[i].scene.document.header.isolines.max(0) as usize);
+                command.set_preselection(self.presspull_preselection());
                 self.command_line.push_info(&command.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(command));
             }
@@ -785,8 +782,18 @@ impl OpenCADStudio {
             // ── REVOLVE ────────────────────────────────────────────────────
             "REVOLVE" => {
                 use crate::modules::insert::solid3d_cmds::RevolveCommand;
+                let selected: Vec<_> = self.tabs[i].scene.selected_entities().into_iter().collect();
                 let color = self.tabs[i].scene.layer_color(&self.tabs[i].active_layer);
-                let cmd = RevolveCommand::new(color);
+                let isolines = self.tabs[i].scene.document.header.isolines.max(0) as usize;
+                let mut cmd = RevolveCommand::new(color, isolines);
+                if !selected.is_empty() {
+                    cmd.set_preselection(
+                        selected
+                            .iter()
+                            .map(|(handle, entity)| (*handle, (*entity).clone()))
+                            .collect(),
+                    );
+                }
                 self.command_line.push_info(&cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(cmd));
             }
@@ -795,7 +802,16 @@ impl OpenCADStudio {
             "SWEEP" => {
                 use crate::modules::insert::solid3d_cmds::SweepCommand;
                 let color = self.tabs[i].scene.layer_color(&self.tabs[i].active_layer);
-                let cmd = SweepCommand::new(color);
+                let isolines = self.tabs[i].scene.document.header.isolines.max(0) as usize;
+                let mut cmd = SweepCommand::new(color, isolines);
+                let selected = self.tabs[i].scene.selected_handles_in_order()
+                    .into_iter()
+                    .filter_map(|handle| self.tabs[i].scene.document.get_entity(handle)
+                        .cloned().map(|entity| (handle, entity)))
+                    .collect::<Vec<_>>();
+                if !selected.is_empty() {
+                    cmd.set_preselection(selected);
+                }
                 self.command_line.push_info(&cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(cmd));
             }
@@ -804,7 +820,13 @@ impl OpenCADStudio {
             "LOFT" => {
                 use crate::modules::insert::solid3d_cmds::LoftCommand;
                 let color = self.tabs[i].scene.layer_color(&self.tabs[i].active_layer);
-                let cmd = LoftCommand::new(color);
+                let isolines = self.tabs[i].scene.document.header.isolines.max(0) as usize;
+                let selected = self.tabs[i].scene.selected_handles_in_order().into_iter()
+                    .filter_map(|handle| self.tabs[i].scene.document.get_entity(handle)
+                        .cloned().map(|entity| (handle, entity))).collect();
+                let available = self.tabs[i].scene.document.entities()
+                    .map(|entity| (entity.common().handle, entity.clone())).collect();
+                let cmd = LoftCommand::new(color, isolines, crate::command::ExtrudeMode::Solid, selected, available);
                 self.command_line.push_info(&cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(cmd));
             }

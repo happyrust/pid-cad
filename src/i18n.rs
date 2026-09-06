@@ -65,10 +65,12 @@ pub enum Language {
     PlPl,
     #[serde(rename = "zh-TW")]
     ZhTw,
+    #[serde(rename = "el-GR")]
+    ElGr,
 }
 
 impl Language {
-    pub const ALL: [Language; 21] = [
+    pub const ALL: [Language; 22] = [
         Language::System,
         Language::EnUs,
         Language::BgBg,
@@ -78,6 +80,7 @@ impl Language {
         Language::FrFr,
         Language::FiFi,
         Language::DeDe,
+        Language::ElGr,
         Language::HuHu,
         Language::ItIt,
         Language::JaJp,
@@ -115,6 +118,7 @@ impl Language {
             Language::HuHu => vec!["hu-HU".parse().expect("valid locale")],
             Language::PlPl => vec!["pl-PL".parse().expect("valid locale")],
             Language::ZhTw => vec!["zh-TW".parse().expect("valid locale")],
+            Language::ElGr => vec!["el-GR".parse().expect("valid locale")],
         }
     }
 
@@ -141,6 +145,7 @@ impl Language {
             Language::HuHu => crate::tr!("language", "hungarian"),
             Language::PlPl => crate::tr!("language", "polish"),
             Language::ZhTw => crate::tr!("language", "chinese-traditional"),
+            Language::ElGr => crate::tr!("language", "greek"),
         }
     }
 }
@@ -396,4 +401,34 @@ macro_rules! tf {
         let rendered = format!($template $($args)*);
         $crate::i18n::translate_format($template, rendered)
     }};
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn greek_catalog_loads_and_covers_the_source_catalog() {
+        let loader = FluentLanguageLoader::new("opencadstudio", "en-US".parse().unwrap());
+        load_language(&loader, Language::ElGr).expect("Greek Fluent resources must parse");
+        let keys = |language: &str| -> BTreeSet<(String, String)> {
+            loader.with_message_iter(&language.parse().unwrap(), |messages| {
+                messages
+                    .flat_map(|message| {
+                        std::iter::once((message.id.name.to_owned(), String::new())).chain(
+                            message.attributes.iter().map(|attribute| {
+                                (message.id.name.to_owned(), attribute.id.name.to_owned())
+                            }),
+                        )
+                    })
+                    .collect()
+            })
+        };
+        let source = keys("en-US");
+        assert!(!source.is_empty());
+        assert_eq!(keys("el-GR"), source);
+        assert_eq!(loader.get_attr("language", "greek"), "Ελληνικά");
+        assert_eq!(serde_json::to_string(&Language::ElGr).unwrap(), "\"el-GR\"");
+    }
 }

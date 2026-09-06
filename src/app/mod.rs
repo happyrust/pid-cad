@@ -1,13 +1,16 @@
 mod alias;
-#[cfg(not(target_arch = "wasm32"))]
 mod automation;
+mod control;
+pub(crate) fn automation_action_names() -> &'static [&'static str] {
+    control::action_names()
+}
 pub(crate) mod config;
 #[cfg(not(target_arch = "wasm32"))]
 pub use automation::{export_headless, serve};
 mod command_driver;
 pub(crate) mod commands;
 mod document;
-mod expr_eval;
+pub(crate) mod expr_eval;
 mod find_replace;
 pub(crate) mod helpers;
 mod history;
@@ -17,6 +20,7 @@ mod mtext_editor;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod plugin_host;
 mod properties;
+mod presspull_ops;
 mod recent;
 pub(crate) mod settings;
 mod shortcuts;
@@ -323,8 +327,24 @@ pub enum StartSection {
     Supporters,
 }
 
+/// What the Space / Enter keys currently mean at the command line. One
+/// decision point (`OpenCADStudio::text_entry_mode`) for every keyboard
+/// route that used to re-derive the answer from editor state.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TextEntryMode {
+    /// Normal command line: Space submits, Enter finalises.
+    Command,
+    /// MText preview pane: every key is literal content, Enter is a line break.
+    MTextPreview,
+    /// Free-form text prompt (table cell content, TEXT / MTEXT bodies):
+    /// Space is literal, typed case is preserved, Enter finishes the edit,
+    /// Shift+Enter inserts a line break.
+    FreeText,
+}
+
 pub(super) struct OpenCADStudio {
     start: Instant,
+    control: control::State,
     tabs: Vec<DocumentTab>,
     active_tab: usize,
     hovered_doc_tab: Option<usize>,
@@ -477,6 +497,8 @@ pub(super) struct OpenCADStudio {
     crosshair_color: Option<[u8; 3]>,
     /// Editable Options buffer for the crosshair colour.
     crosshair_color_input: String,
+    /// Model-space lineweight preview scale, in percent (25..=200).
+    lineweight_display_scale: i32,
     /// Isometric drafting state and active axis pair.
     isometric_drafting: bool,
     iso_plane: settings::IsoPlane,
@@ -512,6 +534,8 @@ pub(super) struct OpenCADStudio {
     /// CLIPROMPTLINES: how many temporary prompt lines for a single command
     /// are displayed above the command window (0–50, Registry, default 3).
     cliprompt_lines: i32,
+    /// COMMANDLINEFADETIME: overlay history visible time in ms (0–60000, default 3000).
+    commandline_fade_ms: i32,
     /// MRU list of block names inserted via INSERT, most recent first, capped to 20.
     block_mru: Vec<String>,
     /// Insertion frequency per block name (uppercase key → count), capped.
@@ -519,8 +543,6 @@ pub(super) struct OpenCADStudio {
     /// Last time block-usage was flushed to disk (debounce per 2.4).
     #[cfg(not(target_arch = "wasm32"))]
     block_usage_last_persist: Option<std::time::Instant>,
-    #[cfg(target_arch = "wasm32")]
-    block_usage_last_persist: Option<()>,
     /// `true` after a bare `VPORTS` in model space — the next command-line
     /// entry is treated as the tiled-config option (SIngle/2H/2V/4).
     awaiting_vports: bool,
@@ -583,13 +605,12 @@ pub(super) struct OpenCADStudio {
     )>,
     /// Document dirty state before the live grip mutation began.
     grip_dirty_before: Option<bool>,
-    /// Frozen wire geometry of the entities being grip-edited.
+    /// Frozen pre-drag wire geometry used only as a visual/reference snapshot.
     ///
-    /// The live entities are hidden from the resident hit-test set while their
-    /// grip preview is active. Keep their pre-drag geometry here so OSNAP,
-    /// Extension and OTRACK can still reference the entity's own vertices and
-    /// segments without snapping against the geometry being deformed.
-    grip_snap_wires: Vec<crate::scene::model::wire_model::WireModel>,
+    /// It is deliberately NOT added to normal snap candidates: the live entity is
+    /// hidden while dragging and this copy only preserves its original appearance
+    /// and provides edge directions when the engaged grip is acquired for OTRACK.
+    grip_reference_wires: Vec<crate::scene::model::wire_model::WireModel>,
     /// Drag-start snapshot of the dragged entity's SDF glyph quads. A whole-
     /// entity text move slides these each frame (translating the already-shaped
     /// glyphs) instead of re-tessellating the run every cursor move (issue #316).
@@ -961,12 +982,31 @@ pub(super) struct OpenCADStudio {
     active_theme: Theme,
     ui_theme: config::UiThemeConfig,
     theme_color_inputs: [String; 6],
+    model_space: config::ModelSpaceThemeConfig,
+    model_bg_input: String,
+    paper_bg_input: String,
+    desk_bg_input: String,
+    pub(crate) saved_custom_palette: Option<config::UiThemePalette>,
 
     // ── Keyboard Shortcut Editor ──────────────────────────────────────────
     /// Complete editable key → command/action table.
     shortcut_bindings: rustc_hash::FxHashMap<String, String>,
     /// Working rows shown by the shortcut editor until Apply is pressed.
     shortcut_editor_rows: Vec<(String, String)>,
+    /// Row whose Key cell is armed for capture: the next key combination
+    /// pressed anywhere fills that row's key. While set, the keyboard
+    /// subscription swallows every key so captured shortcuts do not run in
+    /// the drawing.
+    shortcut_capture_row: Option<usize>,
+    /// True while a freshly added (top) row is an unfinished draft: it exists
+    /// only until its key and command are filled (success) or it is cancelled
+    /// (Esc / ✕ / dialog close), so the list never keeps an empty row.
+    shortcut_pending_add: bool,
+    /// True while the "Reset to default" confirmation is showing.
+    shortcut_reset_confirm: bool,
+    /// True while the "unsaved changes will be discarded" confirmation
+    /// overlays the editor: the user tried to close with un-applied rows.
+    shortcut_close_confirm: bool,
 
     // ── Command Aliases ───────────────────────────────────────────────────
     /// Command-line aliases: uppercase abbreviation → uppercase command
@@ -1017,6 +1057,8 @@ pub(super) struct OpenCADStudio {
     /// `Some` while a CAD file is loading — drives the modal overlay.
     /// Cleared when the load finishes, errors, or the user cancels.
     pub(super) opening: Option<OpenProgress>,
+    /// Show a lightweight notice until the next layout redraw.
+    pub(super) layout_settling: bool,
     open_job_serial: u64,
     /// Last repair or failed-open report shown in the recovery modal.
     recovery_report: Option<crate::io::recovery::RecoveryReport>,
@@ -1615,7 +1657,7 @@ impl ClipboardDeps {
 /// Which in-canvas modal dialog is currently open (Plan B). At most one shows
 /// at a time; dialog-specific data lives in its own fields. Closed via the
 /// modal's ✕ (`Message::CloseModal`).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalKind {
     About,
     Shortcuts,
@@ -1770,6 +1812,12 @@ pub enum ArrowKey {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    ControlRequest(control::Envelope),
+    PollWebControl,
+    ControlStep(String, Box<Message>),
+    ControlTaskDone(String),
+    ControlScreenshot(String, Option<iced::window::Screenshot>),
+    ControlToggle,
     Tick(Instant),
     /// Periodic drain of plugin-to-host requests that arrived outside a host
     /// call (e.g. mutations from the Python REPL).
@@ -1888,6 +1936,8 @@ pub enum Message {
     PickBoxChanged(i32),
     /// Set CURSORTYPE from Options.
     CursorTypeChanged(settings::CursorType),
+    /// Set the model-space lineweight preview scale from Options.
+    LineweightDisplayScaleChanged(i32),
     /// Edit the optional crosshair RGB value; blank restores automatic contrast.
     CrosshairColorChanged(String),
     /// Set the default type/version used when first saving a new drawing.
@@ -1896,6 +1946,38 @@ pub enum Message {
     OptionsThemeChanged(String),
     /// Edit one of Custom theme's six base colours as #RRGGBB.
     OptionsThemeColorChanged(usize, String),
+    /// Change Model Space canvas mode (MatchTheme, ClassicDark, Custom).
+    ModelSpaceModeChanged(config::ModelSpaceMode),
+    /// Change Model Space custom background color as hex or empty for default.
+    ModelSpaceBgChanged(String),
+    /// Change Paper Space custom sheet background color as hex or empty for default.
+    PaperSpaceBgChanged(String),
+    /// Change Paper Space desk surround background (#RRGGBB).
+    DeskSpaceBgChanged(String),
+    /// Change Grid opacity percentage (5–100).
+    GridOpacityChanged(u8),
+    /// Change Selection Area indicator toggle (SELECTIONAREA).
+    SelectionAreaToggled(bool),
+    /// Change Selection Area opacity percentage (0–100, SELECTIONAREAOPACITY).
+    SelectionOpacityChanged(u8),
+    /// Change Window selection color ACI index (0 = Theme Primary, 1..=255 = ACI).
+    SelectionWindowColorChanged(u8),
+    /// Change Crossing selection color ACI index (0 = Theme Success, 1..=255 = ACI).
+    SelectionCrossingColorChanged(u8),
+    /// Change Selection Highlight color ACI index (0 = Theme Primary, 1..=255 = ACI).
+    SelectionHighlightColorChanged(u8),
+    /// Change Grip size in pixels (1–25, GRIPSIZE).
+    GripSizeChanged(u8),
+    /// Change Unselected Grip color ACI index (0 = Theme Primary, 1..=255 = ACI, GRIPCOLOR).
+    GripColorChanged(u8),
+    /// Change Selected/Hot Grip color ACI index (0 = Theme Danger, 1..=255 = ACI, GRIPHOT).
+    GripHotChanged(u8),
+    /// Change Hover/Warm Grip color ACI index (0 = Theme Primary Strong, 1..=255 = ACI, GRIPHOVER).
+    GripHoverChanged(u8),
+    /// Restore Model Space display/canvas appearance to defaults.
+    RestoreModelSpaceDisplayDefaults,
+    /// Restore Selection visual effect settings to defaults.
+    RestoreSelectionVisualDefaults,
     /// Register or unregister as the .dwg/.dxf handler, from Options. Same
     /// setting the FILEASSOC command carries.
     FileAssocChanged(bool),
@@ -2205,6 +2287,8 @@ pub enum Message {
     /// Timer pulse while the cursor is dwelling on a grip; drives the
     /// dwell-to-popup transition without requiring further mouse motion.
     GripDwellTick,
+    /// The notice redraw allows the next frame to build the scene.
+    LayoutSettled,
     /// Timer pulse while a rollover hit-test is queued; fires when the
     /// cursor has been still long enough to safely run the pick.
     HoverDwellTick,
@@ -2501,8 +2585,6 @@ pub enum Message {
     /// properties-panel dropdown (a combo_box) opens, so at most one panel
     /// dropdown is open at a time and they can't overlap. (#235)
     PropColorPickerClose,
-    /// Toggle the full ACI colour palette expansion.
-    PropColorPaletteToggle,
     /// Enter the model-space editing mode inside the given viewport (MSPACE).
     EnterViewport(acadrust::Handle),
     /// Exit MSPACE and return to paper-space editing (PSPACE).
@@ -2559,6 +2641,28 @@ pub enum Message {
     ShortcutEditorAdd,
     ShortcutEditorRemove(usize),
     ShortcutEditorApply,
+    /// Apply the working rows and close the dialog.
+    ShortcutEditorApplyExit,
+    /// The check button on a draft row: finish the addition without applying.
+    ShortcutEditorDraftAccept,
+    /// Show the "Reset to default" confirmation.
+    ShortcutEditorResetAsk,
+    /// Reset bindings and rows to the shipped defaults.
+    ShortcutEditorResetConfirm,
+    /// Hide the reset confirmation without resetting.
+    ShortcutEditorResetDeny,
+    /// Discard un-applied rows and close the editor.
+    ShortcutEditorCloseDiscard,
+    /// Keep editing: hide the discard confirmation.
+    ShortcutEditorCloseKeep,
+    /// The user clicked a row's Key cell: arm capture for that row.
+    ShortcutCaptureStart(usize),
+    /// A key combination was pressed while a row's Key cell was armed.
+    ShortcutCaptureKey(String),
+    /// Disarm capture without filling the row.
+    ShortcutCaptureClear,
+    /// Cancel capture (Esc): also discards an unfinished draft row.
+    ShortcutCaptureCancel,
     /// Canonical key emitted by the global keyboard subscription.
     ShortcutPressed(String),
     // ── Command Alias Editor (ALIASEDIT) ────────────────────────────────
@@ -3087,6 +3191,12 @@ pub enum Message {
     ImagePick,
     /// Result of the image file picker + pixel dimension decode.
     ImagePickResult(Result<(std::path::PathBuf, u32, u32), String>),
+    // ── PDF Underlay ──────────────────────────────────────────────────────
+    /// Open file-picker dialog for PDFATTACH command (async).
+    PdfAttachPick,
+    /// Result of the PDFATTACH file picker.
+    PdfAttachPickResult(Result<std::path::PathBuf, String>),
+
     // ── XREF ──────────────────────────────────────────────────────────────
     /// Open file-picker dialog for XATTACH command (async).
     XAttachPick,
@@ -3167,6 +3277,7 @@ impl OpenCADStudio {
         // explicitly (File → New); we never auto-spawn Drawing1.
         let start_tab = DocumentTab::new_start();
         let mut app = Self {
+            control: control::State::new(),
             start: Instant::now(),
             tabs: vec![start_tab],
             active_tab: 0,
@@ -3238,6 +3349,7 @@ impl OpenCADStudio {
             cursor_type: settings::CursorType::Crosshair,
             crosshair_color: None,
             crosshair_color_input: String::new(),
+            lineweight_display_scale: 100,
             isometric_drafting: false,
             iso_plane: settings::IsoPlane::Left,
             snap_angle_deg: 0.0,
@@ -3253,8 +3365,10 @@ impl OpenCADStudio {
             default_bg_color: None,
             default_paper_bg_color: None,
             cliprompt_lines: 3,
+            commandline_fade_ms: 3000,
             block_mru: Vec::new(),
             block_freq: std::collections::HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
             block_usage_last_persist: None,
             awaiting_vports: false,
             pending_setvar: None,
@@ -3274,7 +3388,7 @@ impl OpenCADStudio {
             grip_originals: Vec::new(),
             grip_history_originals: Vec::new(),
             grip_dirty_before: None,
-            grip_snap_wires: Vec::new(),
+            grip_reference_wires: Vec::new(),
             grip_text_verts: Vec::new(),
             grip_text_slide: false,
             qselect: None,
@@ -3383,6 +3497,7 @@ impl OpenCADStudio {
             print_all_plot_window_prev: None,
             print_all_plot_setup_prev: None,
             opening: None,
+            layout_settling: false,
             open_job_serial: 0,
             recovery_report: None,
             pending_opens: std::collections::VecDeque::new(),
@@ -3419,9 +3534,18 @@ impl OpenCADStudio {
             active_theme: Theme::Oxocarbon,
             ui_theme: config::UiThemeConfig::default(),
             theme_color_inputs: config::UiThemePalette::default().hex_values(),
+            model_space: config::ModelSpaceThemeConfig::default(),
+            model_bg_input: String::new(),
+            paper_bg_input: String::new(),
+            desk_bg_input: String::new(),
+            saved_custom_palette: None,
             // Keyboard shortcuts
             shortcut_bindings: rustc_hash::FxHashMap::default(),
             shortcut_editor_rows: Vec::new(),
+            shortcut_capture_row: None,
+            shortcut_pending_add: false,
+            shortcut_reset_confirm: false,
+            shortcut_close_confirm: false,
             // Command aliases (populated from ocad.pgp just after construction)
             command_aliases: rustc_hash::FxHashMap::default(),
             alias_editor_rows: Vec::new(),
@@ -3833,15 +3957,19 @@ pub fn run() -> iced::Result {
         OpenCADStudio::update,
         OpenCADStudio::view,
     )
+    .settings(iced::Settings {
+        power_preference: iced::backend::PowerPreference::HighPerformance,
+        ..iced::Settings::default()
+    })
     .subscription(OpenCADStudio::subscription)
     .title(|state: &OpenCADStudio, window_id: window::Id| {
         let _ = window_id; // all dialogs are in-canvas modals now
         if let Some(tab) = state.tabs.get(state.active_tab) {
             let dot = if tab.dirty { "● " } else { "" };
             let name = tab.tab_display_name();
-            format!("{}Open CAD Studio — {}", dot, name)
+            format!("{}Open CAD Studio {} - {}", dot, env!("OCS_APP_VERSION"), name)
         } else {
-            "Open CAD Studio".to_string()
+            concat!("Open CAD Studio ", env!("OCS_APP_VERSION")).to_string()
         }
     })
     .theme(|state: &OpenCADStudio, _| state.active_theme.clone())
@@ -3873,7 +4001,7 @@ pub fn run_web() -> iced::Result {
         OpenCADStudio::view_main,
     )
     .subscription(OpenCADStudio::subscription)
-    .title(|_state: &OpenCADStudio| "Open CAD Studio".to_string())
+    .title(|_state: &OpenCADStudio| concat!("Open CAD Studio ", env!("OCS_APP_VERSION")).to_string())
     .theme(|state: &OpenCADStudio| state.active_theme.clone())
     .backend(iced::Backend::Hardware(iced::backend::Api::OpenGL))
     .font(iced_aw::ICED_AW_FONT_BYTES)

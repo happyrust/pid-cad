@@ -140,9 +140,13 @@ pub fn apply_common_prop(entity: &mut EntityType, field: &str, value: &str) {
         "transparency" => {
             let s = value.trim();
             if s.eq_ignore_ascii_case("ByLayer") {
-                entity.as_entity_mut().set_transparency(Transparency::new(0));
+                entity
+                    .as_entity_mut()
+                    .set_transparency(Transparency::BY_LAYER);
             } else if s.eq_ignore_ascii_case("ByBlock") {
-                entity.as_entity_mut().set_transparency(Transparency::new(1));
+                entity
+                    .as_entity_mut()
+                    .set_transparency(Transparency::BY_BLOCK);
             } else {
                 let clean = s.trim_end_matches('%').trim();
                 if let Ok(pct) = clean.parse::<f64>() {
@@ -295,7 +299,9 @@ pub fn toggle_invisible(entity: &mut EntityType) {
 
 pub fn apply_color(entity: &mut EntityType, color: AcadColor) {
     entity.as_entity_mut().set_color(color);
-    entity.common_mut().color_book_handle = None;
+    let common = entity.common_mut();
+    common.color_name = None;
+    common.color_book_handle = None;
 }
 
 pub fn apply_line_weight(entity: &mut EntityType, lw: LineWeight) {

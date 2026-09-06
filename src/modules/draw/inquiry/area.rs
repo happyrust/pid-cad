@@ -8,7 +8,10 @@ use crate::command::{
 use crate::entities::curve::entity_curve;
 use crate::entities::traits::EntityTypeOps;
 use crate::scene::model::wire_model::WireModel;
+use crate::modules::IconKind;
 
+pub const ICON: IconKind =
+    IconKind::Svg(include_bytes!("../../../../assets/icons/area.svg"));
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AreaMode {
     Single,
@@ -362,6 +365,7 @@ impl CadCommand for AreaCommand {
         points.push(to_render(point));
         points.push(to_render(self.points[0]));
         Some(WireModel {
+            bg_adapt: None,
             point_marker: None,
             taper_widths: Vec::new(),
             pattern_stations: Vec::new(),

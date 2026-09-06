@@ -566,14 +566,14 @@ impl Ribbon {
             if let Some(module) = self.modules.get(effective_active) {
                 let groups = module.ribbon_groups();
                 let style_ctx = StyleContext {
-                    text_style_names: self.text_style_names.clone(),
-                    active_text_style: self.active_text_style.clone(),
-                    dim_style_names: self.dim_style_names.clone(),
-                    active_dim_style: self.active_dim_style.clone(),
-                    mleader_style_names: self.mleader_style_names.clone(),
-                    active_mleader_style: self.active_mleader_style.clone(),
-                    table_style_names: self.table_style_names.clone(),
-                    active_table_style: self.active_table_style.clone(),
+                    text_style_names: &self.text_style_names,
+                    active_text_style: &self.active_text_style,
+                    dim_style_names: &self.dim_style_names,
+                    active_dim_style: &self.active_dim_style,
+                    mleader_style_names: &self.mleader_style_names,
+                    active_mleader_style: &self.active_mleader_style,
+                    table_style_names: &self.table_style_names,
+                    active_table_style: &self.active_table_style,
                 };
 
                 // Adaptive tool area: panels sit on one row; when they don't all
@@ -853,6 +853,7 @@ impl Ribbon {
                 let label_el =
                     text(t!(*label))
                         .size(11)
+                        .wrapping(iced::advanced::text::Wrapping::None)
                         .style(move |theme: &Theme| iced::widget::text::Style {
                             color: (!is_current).then_some(
                                 theme
@@ -880,11 +881,22 @@ impl Ribbon {
             })
             .collect();
 
+        let labels: Vec<String> = items
+            .iter()
+            .map(|(_, label, _)| t!(*label).to_string())
+            .collect();
+        let panel_w = crate::ui::style::common::dropdown_popup_width(
+            labels.iter().map(|s| s.as_str()),
+            11.0,
+            68.0,
+            190.0,
+        );
+
         let panel = container(column(rows))
             .style(popup_panel_style)
-            .width(Length::Fixed(190.0));
+            .width(Length::Fixed(panel_w));
 
-        let (align_right, h_pad, top) = self.dd_anchor(open_id, 190.0, win.0);
+        let (align_right, h_pad, top) = self.dd_anchor(open_id, panel_w, win.0);
         Some(dropdown_backdrop(position_ribbon_dropdown(
             panel.into(),
             align_right,
@@ -1057,14 +1069,14 @@ impl Ribbon {
         let (style_key, manager_cmd) = found?;
 
         let ctx = StyleContext {
-            text_style_names: self.text_style_names.clone(),
-            active_text_style: self.active_text_style.clone(),
-            dim_style_names: self.dim_style_names.clone(),
-            active_dim_style: self.active_dim_style.clone(),
-            mleader_style_names: self.mleader_style_names.clone(),
-            active_mleader_style: self.active_mleader_style.clone(),
-            table_style_names: self.table_style_names.clone(),
-            active_table_style: self.active_table_style.clone(),
+            text_style_names: &self.text_style_names,
+            active_text_style: &self.active_text_style,
+            dim_style_names: &self.dim_style_names,
+            active_dim_style: &self.active_dim_style,
+            mleader_style_names: &self.mleader_style_names,
+            active_mleader_style: &self.active_mleader_style,
+            table_style_names: &self.table_style_names,
+            active_table_style: &self.active_table_style,
         };
         let active = ctx.active_for(style_key).to_string();
 
@@ -1298,7 +1310,7 @@ fn render_group<'a>(
     active_color: AcadColor,
     active_linetype: &'a str,
     active_lineweight: LineWeight,
-    style_ctx: &StyleContext,
+    style_ctx: &StyleContext<'_>,
 ) -> Element<'a, Message> {
     let mut items_row: Vec<Element<Message>> = Vec::new();
     let mut small_buf: Vec<Element<Message>> = Vec::new();
@@ -1419,7 +1431,7 @@ fn collapse_button<'a>(
     active_color: AcadColor,
     active_linetype: &'a str,
     active_lineweight: LineWeight,
-    style_ctx: &StyleContext,
+    style_ctx: &StyleContext<'_>,
     // When set, this is the TIGHT step (reached once even the all-collapsed row
     // overflows): the whole panel becomes a single non-running button — the first
     // tool's icon + a ▾ that opens the tools flyout. Nothing runs directly here.
