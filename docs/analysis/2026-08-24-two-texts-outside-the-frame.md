@@ -316,7 +316,7 @@ drew`）。这两条无论 §6 定成甲还是乙都该改，所以没等定论�
    带一条回归测试 `a_symbol_authored_away_from_its_origin_lands_on_the_line_work_it_marks`。
    这条原本是"比那两条大得多的一件事"——现在它不再是待办，是已钉住的不变量。
 
-**仍未决**：
+**仍未决**（这三条 9-06 复核时都已经落地了，原文保留，现状见 §8 末的表）：
 
 4. 顺带：`pid_probe` 的出界检查只看 x，漏了 y 方向的 `Item Note & Label`（§5 末）；
    `pid_probe` / `pid_plot_dump` 传相对路径会静默失去符号库，普查数字差一大截（180 → 23）。
@@ -327,3 +327,145 @@ drew`）。这两条无论 §6 定成甲还是乙都该改，所以没等定论�
 6. `place_primitive` 的 `SymbolPrimitive::Polyline` 分支不设 `is_closed`——
    `pid-parse` 那侧的 `SymbolPrimitive::Polyline { vertices }` 也没有这个字段，
    所以符号里若有闭合折线，会画成开口的。尚未证实库里有这种符号。
+
+## 8. 2026-09-06 复核：结论在 HEAD `1dbb04d6` 上原样成立
+
+不改结论，只把它重新跑了一遍。§0 钉的 `78192c9f` 之后主干走了 453 个提交，其中三个动了 pid
+这条线（`19e69888` 图纸自带图层、`6e1f40d3` 符号折线闭合 + 探针加固、`17ebb7ee` 赋值渲染测试），
+而 §7 的「仍未决」正好被后两个覆盖掉了。
+
+⚠ **先记一个坑**：这个工作区设了 `CARGO_TARGET_DIR=D:\Rust\target`，仓里那份
+`target\debug\examples\pid_probe.exe` 停在 8-24 02:01 就没再动过。照仓内路径跑到的是**首版的
+二进制**——它的表头还印着 `entities reaching x>900 or x<0`（没有 y），一眼可辨。本节所有输出
+都出自 `D:\Rust\target\debug\examples\`。
+
+### 两条文字：逐位复现
+
+fixture 拷到 `%TEMP%\t55-fixture\`（仓里那份没动），不带符号库跑——走的是 marker 回退路径，
+§7 第 1 条保证它逐位不变：
+
+```
+pid_plot_dump.exe %TEMP%\t55-fixture\DWG-0202GP06-01.pid PID-SYMBOL,PID-SYMBOL-LABEL
+text,-10.533442794355608,348.8291107611703,2,0,"ElecTraceLine"
+text,-23.34074305406294,348.8921901726485,2,0,"ElecTraceLine"
+```
+
+与 §1 的两行**一位不差**。同一次的 `pid_probe`：
+
+```
+  entities reaching x/y>900 or x/y<0:
+    Circle       (-12.8,349.8)
+    Text         (-10.5,348.8)
+    Circle       (-25.6,349.9)
+    Text         (-23.3,348.9)
+    Circle       (428.4,-126.1)
+    Text         (430.7,-127.1)
+    total outliers = 6
+```
+
+前四行就是 §2 那四行。后两行是 §5 末预告的 `Item Note & Label`：首版探针只测 x 所以看不见它，
+现在两轴都测，它自己跳了出来。
+
+### 修好之后的样子
+
+同一个二进制，`PID_SYMBOL_LIBRARY` 指向 `pid-parse\test-file\symbols-full`：
+
+```
+    PID-SYMBOL         180
+    PID-SYMBOL-LABEL   23
+  ext_min    = (40.79, 5.27)  ext_max = (583.70, 409.87)
+  entities reaching x/y>900 or x/y<0:
+    total outliers = 0
+```
+
+`180` 和 `ext_min = 40.79` 都是 §5 / §7 记下的数。180 的拆法也没变：163 line + 15 poly（采样弧）
++ 1 circle + 1 text。六条 `ElecTraceLine` 标签确实跟着本体走了：
+
+```
+text,132.03569564153605,243.48219017269665,2,0,"ElecTraceLine"
+text,144.84299590124337,243.41911076121843,2,0,"ElecTraceLine"
+text,159.25074856992651,242.7252372349545,2,0,"ElecTraceLine"
+text,173.68433056714713,242.75677694069375,2,0,"ElecTraceLine"
+text,309.77348928111024,242.99913407492068,2,0,"ElecTraceLine"
+text,219.01318220349808,219.1778403196385,2,0,"ElecTraceLine"
+```
+
+正对上 §5 那张表的六个本体落点（y≈244 那一排的 129.4 / 142.2 / 156.6 / 171.0 / 307.1，
+加 (214.6, 220.2)）。
+
+`cargo test --test pid_import` → `33 passed; 0 failed`，
+`a_symbol_authored_away_from_its_origin_lands_on_the_line_work_it_marks` 与
+`a_symbol_name_is_lettered_beside_the_symbol_it_names` 都在里面。
+
+### §7「仍未决」三条的现状
+
+| 条目 | 现状 |
+|---|---|
+| 4. 探针只测 x；相对路径静默丢符号库 | **已落地** `6e1f40d3`。两轴都测了，相对路径找不到库时先 `warning:` 一句。上面那条 y 方向的出界就是它报出来的。 |
+| 5. `poly` 行不带闭合标志 | **已落地** `6e1f40d3`。行格式改成了 `poly,closed(0\|1),...`。 |
+| 6. 符号里的闭合折线会画成开口 | 管路**已落地**（pid-parse `af8e802` + OCS `6e1f40d3`），「库里到底有没有闭合折线」**也答了**：有，5 个符号、8 条（原始记录 11 条），`form=2` 与几何闭合一一对应，见下节。0202 的 15 条 `poly` 全是 `closed=0`，是因为它们是采样弧，而且这张图没放那 5 个符号中的任何一个。 |
+
+### §7 第 6 条补答：库里有闭合折线——5 个符号、11 条记录，`form=2` 一个不漏
+
+`probe_sym_polyline_closure` 扫的是原始 `igLineString2d`（`0x0084`）记录：首尾顶点重合即"几何闭合"，
+再按顶点数后面那两个字节（`form`、`scope`）分组，看有没有一个值把闭合与开口分干净。
+跑在 pid-parse `e70de07`（`examples/probe_sym_polyline_closure.rs` 对 HEAD 无差异），
+corpus 是 `test-file\symbols-full`：
+
+```
+cargo run --quiet --example probe_sym_polyline_closure
+symbol files: 618
+polylines: 31; geometrically closed: 11
+form=1 scope=1 closed=false: 20
+form=2 scope=1 closed=true: 11
+verdict: form=2 is_closed, form=1 is open on the complete local corpus
+```
+
+与 8-31 `.m1-verify\pid-real-layers-20260831\verification-record.txt` 里那次的数字一位不差。
+`form` 把 31 条分成两堆，没有一条串堆：`payload[22] == 2` 就是 `is_closed`，
+`symbol_library.rs:412` 读的正是这个字节。
+
+探针只印前 4 个样本，把 corpus 按目录拆开喂它（它接受路径参数），11 条落在 5 个文件里：
+
+| 符号 | 库内路径 | 闭合记录 | 去重后闭合折线 |
+|---|---|---:|---:|
+| Static Mixer | `Equipment\Other Equipment\` | 2 | 1 |
+| Venting device | `Equipment\Other Equipment\` | 2 | 2 |
+| Cyclone Separator | `Equipment\Vessels\Separation Equipment\`（文件名带尾随空格：`Cyclone Separator .sym`） | 1 | 1 |
+| Filter Type 1 | `Equipment\Vessels\Separation Equipment\` | 2 | 2 |
+| Self-Operated Safety Block Valve | `Instrumentation\In-Line\Valves\Pressure Regulators\` | 4 | 2 |
+| | **合计** | **11** | **8** |
+
+Design（41 个文件）与 Equipment Components（21）一条折线都没有；Piping（186）4 条全开口。
+
+"记录"与"折线"两列不等是正常的：探针数的是每个 `Sheet*` 流里的原始记录，而 `read_symbol_geometry`
+跨 sheet 去重（同一符号常带几张内容相同的 sheet，`symbol_library.rs:528-534`）。
+`dump_symbol_geometry` 对这 5 个文件各出一份，`poly,1,…` 的行数就是最后一列，且每条首尾顶点确实相同
+——例如 Cyclone Separator 那条是个 4.0mm × 4.4mm 的矩形：
+
+```
+poly,1,-0.00198,0.02342, 0.00198,0.02342, 0.00198,0.01902, -0.00198,0.01902, -0.00198,0.02342
+```
+
+**所以 §7 第 6 条那句"尚未证实库里有这种符号"有答案了：有，8 条，分布在 5 个设备 / 仪表符号里；
+`af8e802` + `6e1f40d3` 那条管路不是防御性的，是有实际载荷的。** 两端的单测本轮都重新跑过：
+pid-parse `symbol_polyline_form_two_is_closed_and_form_one_is_open`、
+OCS `io::pid::tests::symbol_polyline_closure_reaches_the_cad_entity`，各 1 passed。
+
+**还剩一个覆盖缺口，在这四张图上，不在库上**：四张 fixture 没有一张放置了这 5 个符号中的任何一个。
+同一个 `pid_plot_dump` 带库跑四张（`PID-SYMBOL,PID-SYMBOL-LABEL`，`text` 列是两层合计）：
+
+```
+工艺管道及仪表流程-1.pid   poly=280  closed=0   text=58
+D06.pid                     poly=0    closed=0   text=7
+DWG-0201GP06-01.pid         poly=5    closed=0   text=23
+DWG-0202GP06-01.pid         poly=15   closed=0   text=24
+```
+
+`closed=0` 四张全零，标签里也没有这 5 个名字。也就是说"把符号里的闭合折线画成闭合"这一步，
+眼下只有单测在钉，没有一张真图走过它；要补，得找一张放了 Static Mixer / Filter Type 1 这类符号的图。
+这不是本文的问题，记在这里是免得下次有人又拿 0202 的 15 条 `closed=0` 当"库里没有"的证据——
+那 15 条是采样弧。
+
+§0 那张表只需改环境一行：HEAD 现在是 `1dbb04d6`，pid-parse 在 `e70de07`，两边都另有他人未提交
+的改动，与本文无关。
