@@ -1649,6 +1649,8 @@ pub(super) fn message_attribute(source: &str) -> Option<(&'static str, &'static 
         "Match" => Some(("properties", "match")),
         "Match Layer" => Some(("layers", "match-layer")),
         "Matched by" => Some(("properties", "matched-by")),
+        "Sheet layer" => Some(("properties", "sheet-layer")),
+        "Layer OID" => Some(("properties", "layer-oid")),
         "Material" => Some(("properties", "material")),
         "Material Bindings" => Some(("model", "material-bindings")),
         "Material Details" => Some(("properties", "material-details")),

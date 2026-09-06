@@ -12,6 +12,11 @@ use OpenCADStudio::io;
 fn main() {
     for arg in std::env::args().skip(1) {
         let path = std::path::PathBuf::from(&arg);
+        if path.is_relative() && !symbol_library_is_discoverable(&path) {
+            eprintln!(
+                "warning: relative input {arg:?} has no discoverable symbol library; set PID_SYMBOL_LIBRARY or use an absolute drawing path"
+            );
+        }
         let doc = match io::load_file(&path) {
             Ok(doc) => doc,
             Err(error) => {
@@ -100,9 +105,9 @@ fn main() {
             println!("    {count:>3} x {face}");
         }
 
-        // A sheet is at most ~1189mm (A0) wide; anything reaching past 900 or
-        // behind 0 either is the border or is the reason the view is wrong.
-        println!("  entities reaching x>900 or x<0:");
+        // Check both axes: a vertical outlier breaks framing just as surely as
+        // a horizontal one.
+        println!("  entities reaching x/y>900 or x/y<0:");
         let mut outliers = 0usize;
         for e in doc.entities() {
             let pts: Vec<(f64, f64)> = match e {
@@ -118,7 +123,10 @@ fn main() {
                 EntityType::Point(p) => vec![(p.location.x, p.location.y)],
                 _ => Vec::new(),
             };
-            if pts.iter().any(|(x, _)| *x > 900.0 || *x < 0.0) {
+            if pts
+                .iter()
+                .any(|(x, y)| *x > 900.0 || *x < 0.0 || *y > 900.0 || *y < 0.0)
+            {
                 outliers += 1;
                 if outliers <= 12 {
                     let kind = match e {
@@ -141,6 +149,37 @@ fn main() {
         }
         println!("    total outliers = {outliers}");
     }
+}
+
+fn symbol_library_is_discoverable(drawing: &std::path::Path) -> bool {
+    if std::env::var_os("PID_SYMBOL_LIBRARY")
+        .is_some_and(|value| std::env::split_paths(&value).any(|root| root.is_dir()))
+    {
+        return true;
+    }
+    let absolute = std::env::current_dir()
+        .map(|cwd| cwd.join(drawing))
+        .unwrap_or_else(|_| drawing.to_path_buf());
+    let mut dir = absolute.parent();
+    for _ in 0..5 {
+        let Some(at) = dir else { break };
+        for holder in [at.to_path_buf(), at.join("Ref")] {
+            if std::fs::read_dir(holder).is_ok_and(|entries| {
+                entries.flatten().any(|entry| {
+                    entry.file_type().is_ok_and(|kind| kind.is_dir())
+                        && entry
+                            .file_name()
+                            .to_string_lossy()
+                            .to_lowercase()
+                            .contains("symbol")
+                })
+            }) {
+                return true;
+            }
+        }
+        dir = at.parent();
+    }
+    false
 }
 
 /// What `pid-parse` offered, before `load_pid` decided what to draw.

@@ -1342,8 +1342,13 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 if let Some(summary) = crate::io::pid::take_import_summary(&path) {
                     let (drawn, decoded, missing) =
                         (summary.drawn, summary.decoded, summary.missing);
+                    let (layered, layers, unresolved) = (
+                        summary.layered_entities,
+                        summary.sheet_layers,
+                        summary.unresolved_sheet_layers,
+                    );
                     self.command_line.push_info(crate::tf!(
-                        "P&ID import: {drawn} entities from {decoded} decoded records; {missing} source records not drawn"
+                        "P&ID import: {drawn} entities from {decoded} decoded records; {missing} source records not drawn; {layered} entities on {layers} authored sheet layers ({unresolved} unresolved)"
                     ).as_ref());
                     if summary.style_tables_failed {
                         self.command_line.push_error(crate::t!(

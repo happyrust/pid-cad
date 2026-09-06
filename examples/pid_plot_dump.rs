@@ -7,7 +7,7 @@
 //! ```text
 //! line,x1,y1,x2,y2
 //! circle,cx,cy,r
-//! poly,x1,y1,x2,y2,...
+//! poly,closed(0|1),x1,y1,x2,y2,...
 //! text,x,y,height,rotation_rad,"value"
 //! ```
 //!
@@ -91,7 +91,7 @@ fn main() {
                         ]
                     })
                     .collect();
-                format!("poly,{}", points.join(","))
+                format!("poly,0,{}", points.join(","))
             }
             EntityType::LwPolyline(p) => {
                 if p.vertices.len() < 2 {
@@ -102,7 +102,7 @@ fn main() {
                     .iter()
                     .flat_map(|v| [v.location.x.to_string(), v.location.y.to_string()])
                     .collect();
-                format!("poly,{}", points.join(","))
+                format!("poly,{},{}", u8::from(p.is_closed), points.join(","))
             }
             EntityType::Text(t) => {
                 if t.value.trim().is_empty() {

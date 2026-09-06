@@ -61,6 +61,48 @@ fn on_line_work(doc: &CadDocument) -> impl Iterator<Item = &EntityType> {
     doc.entities().filter(|e| is_line_work(layer_of(e)))
 }
 
+fn on_sheet_text(doc: &CadDocument) -> impl Iterator<Item = &EntityType> {
+    doc.entities().filter(|entity| {
+        matches!(entity, EntityType::Text(_))
+            && matches!(layer_of(entity), "PID-TEXT" | "PID-HIDDEN")
+    })
+}
+
+/// Placement-time values are separate sheet text records, not the `NULL`
+/// placeholders embedded in the reusable symbol body. Both halves must meet
+/// on screen: the placed symbol supplies its bubble/frame while the sheet
+/// supplies the assigned tag, sequence and notes.
+#[test]
+fn placement_assignments_render_as_sheet_text_without_null_placeholders() {
+    let Some(doc) = import("DWG-0202GP06-01.pid") else {
+        return;
+    };
+
+    let values: std::collections::BTreeSet<String> = on_sheet_text(&doc)
+        .filter_map(|entity| match entity {
+            EntityType::Text(text) => Some(text.value.trim().to_string()),
+            _ => None,
+        })
+        .collect();
+    for expected in [
+        "LIA",
+        "LIT",
+        "060201",
+        "RD060201",
+        "1、污油池上放空管线高度应大于5m。",
+        "2、阻火器电伴热带从根部缠至地面以上2m。",
+    ] {
+        assert!(
+            values.contains(expected),
+            "assigned value {expected:?} did not reach PID-TEXT; values={values:?}"
+        );
+    }
+    assert!(
+        doc.entities().all(|entity| !matches!(entity, EntityType::Text(text) if text.value.contains("NULL"))),
+        "a symbol-library NULL template leaked into visible drawing text"
+    );
+}
+
 fn is_hidden(doc: &CadDocument, layer: &str) -> bool {
     doc.layers
         .get(layer)
@@ -90,7 +132,9 @@ fn line_work_carries_the_width_and_colour_the_drawing_states() {
     // discipline, and the style has to survive both moves.
     let drawing = doc.entities().filter(|entity| {
         let layer = layer_of(entity);
-        is_line_work(layer) || layer.starts_with("PID-POINT")
+        is_line_work(layer)
+            || layer.starts_with("PID-POINT")
+            || (layer == "PID-HIDDEN" && !matches!(entity, EntityType::Text(_)))
     });
     for entity in drawing {
         let common = entity.common();
@@ -205,12 +249,16 @@ fn the_import_leaves_a_summary_the_app_can_show() {
     );
     assert!(summary.decoded > 0, "the fixture has decoded records");
     assert!(
-        !summary.style_tables_failed,
-        "the fixture's style tables read; the palette test depends on it"
+        summary.sheet_layers > 0,
+        "authored sheet layers are summarized"
     );
     assert!(
-        OpenCADStudio::io::pid::take_import_summary(&path).is_none(),
-        "taking the summary drains it"
+        summary.layered_entities > 0,
+        "drawn entities retain authored layers"
+    );
+    assert!(
+        !summary.style_tables_failed,
+        "the fixture's style tables read; the palette test depends on it"
     );
 }
 
@@ -296,7 +344,7 @@ fn lettering_carries_the_height_the_drawing_states() {
     };
 
     let mut heights: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for entity in on_layer(&doc, "PID-TEXT") {
+    for entity in on_sheet_text(&doc) {
         if let EntityType::Text(text) = entity {
             *heights.entry(format!("{:.3}", text.height)).or_default() += 1;
         }
@@ -349,7 +397,7 @@ fn rotated_lettering_is_stored_in_radians() {
     };
 
     let mut buckets: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for entity in on_layer(&doc, "PID-TEXT") {
+    for entity in on_sheet_text(&doc) {
         if let EntityType::Text(text) = entity {
             // Degrees would land on 0 / 90 / 180; radians land on 0 / 1.571 /
             // 3.142. Rounding to three places keeps float noise out.
@@ -416,7 +464,7 @@ fn a_multi_line_label_stacks_at_the_spacing_its_paragraph_states() {
     };
 
     let line_of = |value: &str| -> &acadrust::entities::Text {
-        on_layer(&doc, "PID-TEXT")
+        on_sheet_text(&doc)
             .find_map(|entity| match entity {
                 EntityType::Text(text) if text.value == value => Some(text),
                 _ => None,
@@ -467,7 +515,7 @@ fn no_label_keeps_a_line_break_it_cannot_draw() {
         let Some(doc) = import(name) else {
             continue;
         };
-        for entity in on_layer(&doc, "PID-TEXT") {
+        for entity in on_sheet_text(&doc) {
             let EntityType::Text(text) = entity else {
                 continue;
             };
@@ -498,7 +546,7 @@ fn lettering_carries_the_colour_the_drawing_states() {
     };
 
     let mut palette: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for entity in on_layer(&doc, "PID-TEXT") {
+    for entity in on_sheet_text(&doc) {
         let key = match entity.common().color {
             acadrust::types::Color::Rgb { r, g, b } => format!("#{r:02X}{g:02X}{b:02X}"),
             _ => "ByLayer".to_string(),
@@ -543,7 +591,7 @@ fn lettering_starts_from_the_side_the_drawing_states() {
 
     let mut sides: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut misplaced = Vec::new();
-    for entity in on_layer(&doc, "PID-TEXT") {
+    for entity in on_sheet_text(&doc) {
         let acadrust::EntityType::Text(text) = entity else {
             continue;
         };
@@ -636,7 +684,7 @@ fn lettering_names_the_typeface_the_drawing_states() {
     assert_eq!(registered, expected_styles);
 
     let mut used: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for entity in on_layer(&doc, "PID-TEXT") {
+    for entity in on_sheet_text(&doc) {
         if let EntityType::Text(text) = entity {
             *used.entry(text.style.clone()).or_default() += 1;
         }
@@ -969,7 +1017,7 @@ fn published_semantics_land_on_entities_when_the_xml_sits_beside() {
 
     let mut tagged = 0usize;
     let mut classes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut labelled = 0usize;
+    let mut labels: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut via_dependency = 0usize;
     for entity in doc.entities() {
         let Some(record) = entity.common().extended_data.get_record("PID_SEMANTICS") else {
@@ -983,8 +1031,8 @@ fn published_semantics_land_on_entities_when_the_xml_sits_beside() {
             if let Some(class) = text.strip_prefix("class=") {
                 classes.insert(class.to_string());
             }
-            if text.starts_with("label=") {
-                labelled += 1;
+            if let Some(label) = text.strip_prefix("label=") {
+                labels.insert(label.to_string());
             }
             if text.starts_with("resolved=dependency:") {
                 via_dependency += 1;
@@ -997,7 +1045,7 @@ fn published_semantics_land_on_entities_when_the_xml_sits_beside() {
         "the publish pair ships a _Data.xml; some drawn entities must carry PID_SEMANTICS"
     );
     assert!(
-        labelled > 0,
+        !labels.is_empty(),
         "at least one published object carries an ItemTag / Name to show"
     );
     assert!(
@@ -1008,13 +1056,19 @@ fn published_semantics_land_on_entities_when_the_xml_sits_beside() {
         !classes.is_empty(),
         "every PID_SEMANTICS record carries its owning class"
     );
+    assert!(
+        classes.contains("PIDControlSystemFunction")
+            && labels.contains("LIA-060201")
+            && labels.contains("LIT-060201"),
+        "DrawingItems must bind representations to business objects, not the PIDDrawing container; classes={classes:?} labels={labels:?}"
+    );
 }
 
-/// Without a `_Data.xml` beside the drawing nothing changes: no entity
-/// carries the semantics record, so the properties panel never shows the
-/// "P&ID" group. The XML is an enrichment, never a prerequisite.
+/// An authored sheet layer is P&ID metadata even when the optional published
+/// semantic XML is absent. Its storage-local oid and decoded name therefore
+/// ride the same durable XDATA record without inventing a semantic class.
 #[test]
-fn a_drawing_without_published_xml_carries_no_semantics() {
+fn a_drawing_without_published_xml_still_carries_authored_sheet_layers() {
     for name in [
         "DWG-0201GP06-01.pid",
         "DWG-0202GP06-01.pid",
@@ -1024,14 +1078,56 @@ fn a_drawing_without_published_xml_carries_no_semantics() {
         let Some(doc) = import(name) else {
             continue;
         };
+        let records: Vec<_> = doc
+            .entities()
+            .filter_map(|entity| entity.common().extended_data.get_record("PID_SEMANTICS"))
+            .collect();
         assert!(
-            doc.entities().all(|e| e
+            !records.is_empty(),
+            "{name}: no authored layer XDATA reached the drawing"
+        );
+        assert!(records.iter().all(|record| record.values.iter().any(|value| {
+            matches!(value, acadrust::xdata::XDataValue::String(text) if text.starts_with("sheet_layer_oid="))
+        })), "{name}: an authored-layer XDATA record lost its oid");
+        assert!(records.iter().any(|record| record.values.iter().any(|value| {
+            matches!(value, acadrust::xdata::XDataValue::String(text) if text.starts_with("sheet_layer="))
+        })), "{name}: no authored layer name resolved");
+    }
+}
+
+#[test]
+fn hidden_authored_layers_open_on_pid_hidden_and_metadata_survives_dwg_and_dxf() {
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
+        return;
+    };
+    assert!(is_hidden(&doc, "PID-HIDDEN"), "PID-HIDDEN must default off");
+    assert_eq!(on_layer(&doc, "PID-HIDDEN").count(), 11);
+    for entity in on_layer(&doc, "PID-HIDDEN") {
+        let record = entity
+            .common()
+            .extended_data
+            .get_record("PID_SEMANTICS")
+            .expect("hidden source entity keeps PID metadata");
+        assert!(record.values.iter().any(|value| {
+            matches!(value, acadrust::xdata::XDataValue::String(text) if text == "sheet_layer=HiddenObjects")
+        }));
+    }
+
+    for ext in ["dwg", "dxf"] {
+        let bytes = OpenCADStudio::io::save_to_bytes(&doc, ext, doc.version)
+            .unwrap_or_else(|error| panic!("save {ext}: {error}"));
+        let reopened =
+            OpenCADStudio::io::load_bytes(&format!("sheet-layer-roundtrip.{ext}"), bytes)
+                .unwrap_or_else(|error| panic!("reopen {ext}: {error}"));
+        assert!(reopened.entities().any(|entity| {
+            entity
                 .common()
                 .extended_data
                 .get_record("PID_SEMANTICS")
-                .is_none()),
-            "{name}: no _Data.xml sits beside this fixture, so no entity may carry PID_SEMANTICS"
-        );
+                .is_some_and(|record| record.values.iter().any(|value| {
+                    matches!(value, acadrust::xdata::XDataValue::String(text) if text == "sheet_layer=HiddenObjects")
+                }))
+        }), "authored sheet-layer XDATA was lost across {ext} round-trip");
     }
 }
 
@@ -1563,7 +1659,9 @@ fn named_line_work_files_under_the_discipline_the_drawing_names() {
     // stays on `PID-SYMBOL`. `PID-GEOMETRY` holds three records on this
     // drawing's own unnamed style plus the 32 whose name is an appearance.
     let expected: std::collections::BTreeMap<String, usize> = [
-        ("PID-GEOMETRY", 35usize),
+        // Ten otherwise-geometry strokes are authored on HiddenObjects and
+        // intentionally move to the default-off PID-HIDDEN layer.
+        ("PID-GEOMETRY", 25usize),
         ("PID-STYLE-CONNECT-TO-PROCESS", 3),
         ("PID-STYLE-ELECTRIC", 1),
         ("PID-STYLE-PRIMARY-PIPING-NEW", 24),
