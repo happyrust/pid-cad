@@ -716,7 +716,7 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
             43 + 9,
             25,
             10,
-            0,
+            4,
         ),
         (
             "DWG-0100SP02-05 发油泵棚(二)工艺自控流程图.dxf",
@@ -761,6 +761,17 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
             distinct.len(),
             ball_tags.len(),
             "{file}: no BV tag used twice"
+        );
+        // Dictionary-named shapes: every FV control valve reads its FV bubble.
+        let control = tags_of(&recognition, "control-valve");
+        assert_eq!(
+            control.len(),
+            count(&recognition, "control-valve"),
+            "{file}"
+        );
+        assert!(
+            control.iter().all(|t| t.starts_with("FV-")),
+            "{file}: {control:?}"
         );
         assert!(
             !recognition.orphan_tags.contains_key("球阀"),

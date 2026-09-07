@@ -67,7 +67,20 @@
       "38fb58d8": { "class": "flow-arrow", "label": "流向/接图箭头", "color": [120, 140, 180], "tag": { "shape": "*DWG-*", "radius_mm": 15.0, "report_orphans": false } },
       "322720ec": { "class": "evalve", "label": "电动阀", "color": [255, 0, 0], "tag": { "bubble": "XV" } },
       "62a8c552": { "class": "evalve", "label": "电动阀", "color": [255, 0, 0], "tag": { "bubble": "XV" } },
-      "2948f064": { "class": "actuated-valve", "label": "带执行机构阀", "color": [255, 100, 0], "tag": { "bubble": "FV" } }
+      "2948f064": { "class": "actuated-valve", "label": "带执行机构阀", "color": [255, 100, 0], "tag": { "bubble": "FV" } },
+      "6b327a9a": { "class": "bleed-valve", "label": "排净阀", "color": [120, 120, 220] },
+      "24de4807": { "class": "eh-switch", "label": "电动手动切换", "color": [0, 160, 200] },
+      "5055a1ba": { "class": "filter", "label": "过滤器", "color": [160, 200, 60] },
+      "729f6697": { "class": "control-valve", "label": "调节阀", "color": [255, 60, 0], "tag": { "bubble": "FV" } },
+      "bba9f543": { "class": "electric-motor", "label": "电机", "color": [255, 130, 130] },
+      "236a380d": { "class": "evalve", "label": "电动阀", "color": [255, 0, 0], "tag": { "bubble": "XV" } },
+      "8258db75": { "class": "evalve", "label": "电动阀", "color": [255, 0, 0], "tag": { "bubble": "XV" } },
+      "7276b414": { "class": "flow-arrow", "label": "流向/接图箭头", "color": [120, 140, 180], "tag": { "shape": "*DWG-*", "radius_mm": 15.0, "report_orphans": false } },
+      "e1bf1abf": { "class": "additive-tank", "label": "添加剂罐", "color": [60, 160, 230] },
+      "a7e11c6d": { "class": "ignore", "label": "盘装框+联锁菱形", "color": [0, 0, 0] },
+      "33653a1f": { "class": "ignore", "label": "阀杆箭头", "color": [0, 0, 0] },
+      "c5f0844b": { "class": "ignore", "label": "盘装框附属", "color": [0, 0, 0] },
+      "e4985046": { "class": "ignore", "label": "盘装框+菱形", "color": [0, 0, 0] }
     }
   }
 }
