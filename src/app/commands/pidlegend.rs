@@ -201,13 +201,15 @@ mod tests {
     #[test]
     fn pidlegend_marks_up_an_exploded_sheet_with_shape_colours() {
         let mut app = OpenCADStudio::new_for_test();
-        if !open_sheet(&mut app, "DWG-0100SP02-07 汽车装卸岛(二)工艺自控流程图.dxf") {
+        // SP02-10 is the loading-island sheet that still has shapes the
+        // dictionary does not name (SP02-06..09 are fully named).
+        if !open_sheet(&mut app, "DWG-0100SP02-10 汽车装卸岛(五)工艺自控流程图.dxf") {
             return;
         }
         let i = app.active_tab;
         let _ = app.run_command_line("PIDLEGEND ON");
         let doc = &app.tabs[i].scene.document;
-        assert!(legend_count(&app) > 300, "{}", legend_count(&app));
+        assert!(legend_count(&app) > 200, "{}", legend_count(&app));
         assert!(doc.layers.get("PID-LEGEND-BALL-VALVE").is_some());
         assert!(doc.layers.get(pid_legend::SHAPE_LAYER).is_some());
         // Unnamed shapes carry their own colour; everything else is ByLayer.

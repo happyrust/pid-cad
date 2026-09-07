@@ -963,10 +963,6 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
             "{file}: BV tags nobody claimed: {:?}",
             recognition.orphan_tags.get("球阀")
         );
-        assert!(
-            !recognition.unknown_shapes.is_empty(),
-            "{file}: repeated unnamed shapes are reported"
-        );
         checked += 1;
     }
     if checked == 0 {
@@ -1031,6 +1027,44 @@ fn cpecc_sp02_10_joined_symbols_come_apart_and_are_named() {
         "no joined pair is left: {:?}",
         recognition.unknown_shapes
     );
+}
+
+/// With the dictionary as named on 2026-09-07, four of the loading-island
+/// sheets have nothing left unnamed: every repeated shape is a symbol class
+/// or an ignore.
+#[test]
+fn cpecc_loading_island_sheets_have_no_unnamed_shape_left() {
+    let rules = Rules::builtin();
+    let mut checked = 0;
+    for (file, globe_valves, small_check_valves) in [
+        ("DWG-0100SP02-06 汽车装卸岛(一)工艺自控流程图.dxf", 11, 3),
+        ("DWG-0100SP02-07 汽车装卸岛(二)工艺自控流程图.dxf", 4, 0),
+        ("DWG-0100SP02-08 汽车装卸岛(三)工艺自控流程图.dxf", 3, 0),
+        ("DWG-0100SP02-09 汽车装卸岛(四)工艺自控流程图.dxf", 4, 0),
+    ] {
+        let Some(doc) = load_sheet(file) else {
+            continue;
+        };
+        let recognition = pid_legend::recognise(&doc, &rules);
+        assert!(
+            recognition.unknown_shapes.is_empty(),
+            "{file}: {:?}",
+            recognition.unknown_shapes
+        );
+        assert_eq!(count(&recognition, "globe-valve"), globe_valves, "{file}");
+        // The small check valves beside the pumps carry no tag; the tagged
+        // ones are the tag-class claims.
+        let untagged_checks = recognition
+            .symbols
+            .iter()
+            .filter(|s| s.class == "check-valve" && s.tag.is_none())
+            .count();
+        assert_eq!(untagged_checks, small_check_valves, "{file}");
+        checked += 1;
+    }
+    if checked == 0 {
+        eprintln!("cpecc SP02 sheets not present; skipped");
+    }
 }
 
 #[test]
