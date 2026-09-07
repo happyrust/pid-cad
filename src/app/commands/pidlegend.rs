@@ -2,8 +2,9 @@
 //!
 //! Recognition and the legend geometry live in `io::pid_legend`; this is the
 //! command-line front: run it, print the per-class summary, put the coloured
-//! rectangles and labels into the drawing on `PID-LEGEND-<CLASS>` layers, and
-//! take them out again.
+//! rectangles and labels into the drawing on `PID-LEGEND-<CLASS>` layers (and
+//! the traced pipe runs on `PID-PIPE-<line number>` ones), and take them out
+//! again.
 //!
 //! ```text
 //! PIDLEGEND            prompt with the three verbs below (Enter = ON)
@@ -112,10 +113,19 @@ impl OpenCADStudio {
                 for line in pid_legend::report(&recognition) {
                     self.command_line.push_output(&line);
                 }
+                let pipe_layers = layers
+                    .keys()
+                    .filter(|name| name.starts_with(pid_legend::PIPE_LAYER_PREFIX))
+                    .count();
                 self.command_line.push_output(&format!(
-                    "PIDLEGEND: drew {drawn} entities on {} layers ({}*). PIDLEGEND OFF removes them.",
+                    "PIDLEGEND: drew {drawn} entities on {} layers ({}*{}). PIDLEGEND OFF removes them.",
                     layers.len(),
-                    pid_legend::LAYER_PREFIX
+                    pid_legend::LAYER_PREFIX,
+                    if pipe_layers > 0 {
+                        format!(", {pipe_layers} of them {}*", pid_legend::PIPE_LAYER_PREFIX)
+                    } else {
+                        String::new()
+                    }
                 ));
             }
             other => {
@@ -167,13 +177,14 @@ mod tests {
         let i = app.active_tab;
         let before = app.tabs[i].scene.document.entities().count();
         let rules = Rules::load();
-        let expected = pid_legend::recognise(&app.tabs[i].scene.document, &rules)
-            .symbols
-            .len();
-        assert_eq!(expected, 118);
+        let recognition = pid_legend::recognise(&app.tabs[i].scene.document, &rules);
+        assert_eq!(recognition.symbols.len(), 118);
+        // A box and a label per symbol, then the pipe runs with their rings.
+        let expected = pid_legend::legend_entities(&recognition, &rules).len();
+        assert!(expected > 118 * 2, "{expected}");
 
         let _ = app.run_command_line("PIDLEGEND ON");
-        assert_eq!(legend_count(&app), expected * 2, "a box and a label each");
+        assert_eq!(legend_count(&app), expected);
         let layer = app.tabs[i]
             .scene
             .document
@@ -188,10 +199,19 @@ mod tests {
                 b: 0
             }
         );
+        assert!(
+            app.tabs[i]
+                .scene
+                .document
+                .layers
+                .get("PID-PIPE-100-FW")
+                .is_some(),
+            "a layer per line number"
+        );
         assert!(app.tabs[i].dirty);
 
         let _ = app.run_command_line("PIDLEGEND ON");
-        assert_eq!(legend_count(&app), expected * 2, "a second ON replaces");
+        assert_eq!(legend_count(&app), expected, "a second ON replaces");
 
         let _ = app.run_command_line("PIDLEGEND OFF");
         assert_eq!(legend_count(&app), 0);

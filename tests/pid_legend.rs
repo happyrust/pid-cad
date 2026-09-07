@@ -454,6 +454,109 @@ fn pipe_runs_join_symbols_and_carry_the_line_number_lettered_along_them() {
         .is_empty());
 }
 
+/// The runs are drawn in with the legend: a polyline per run on a layer per
+/// line number in a colour of its own, the runs on no line in grey, a ring
+/// at every open end -- and `clear` takes them off with the rectangles.
+#[test]
+fn pipe_runs_are_drawn_on_a_layer_per_line_number_and_come_off_again() {
+    let mut doc = piped_block_sheet();
+    let rules = Rules::builtin();
+    let recognition = pid_legend::recognise(&doc, &rules);
+    let before = doc.entity_count();
+    let added = pid_legend::apply(&mut doc, &recognition, &rules);
+    // A rectangle and a label per symbol, a polyline per run (none carries
+    // two lines here), a ring at each of the two open ends.
+    assert_eq!(added, recognition.symbols.len() * 2 + 9 + 2);
+
+    let on = |doc: &CadDocument, layer: &str| -> Vec<EntityType> {
+        doc.model_space_entities()
+            .filter(|e| e.common().layer == layer)
+            .cloned()
+            .collect()
+    };
+    let open_polylines = |es: &[EntityType]| {
+        es.iter()
+            .filter(|e| matches!(e, EntityType::LwPolyline(p) if !p.is_closed))
+            .count()
+    };
+    fn rings(es: &[EntityType]) -> Vec<&Circle> {
+        es.iter()
+            .filter_map(|e| match e {
+                EntityType::Circle(c) => Some(c),
+                _ => None,
+            })
+            .collect()
+    }
+    let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+
+    // 100-FW: the header's four pieces, ringed where it starts in the air
+    // at x = 10; the middle piece runs tee to tee, x = 30 to x = 45.
+    let header = on(&doc, "PID-PIPE-100-FW");
+    assert_eq!(open_polylines(&header), 4, "{header:?}");
+    let header_rings = rings(&header);
+    assert_eq!(header_rings.len(), 1);
+    assert!(
+        near(header_rings[0].center.x, 10.0)
+            && near(header_rings[0].center.y, 50.0)
+            && near(header_rings[0].radius, 0.6),
+        "{:?}",
+        header_rings[0]
+    );
+    assert!(header.iter().any(|e| match e {
+        EntityType::LwPolyline(p) => {
+            let mut xs: Vec<f64> = p.vertices.iter().map(|v| v.location.x).collect();
+            xs.sort_by(f64::total_cmp);
+            xs.len() == 2 && near(xs[0], 30.0) && near(xs[1], 45.0)
+        }
+        _ => false,
+    }));
+    // 80-FW: the two pieces either side of BUV-3101, no open end.
+    let branch = on(&doc, "PID-PIPE-80-FW");
+    assert_eq!(open_polylines(&branch), 2, "{branch:?}");
+    assert!(rings(&branch).is_empty());
+    // No line: the vent stub, ringed where it stops at (20, 53), and both
+    // pieces of BUV-3102's unlettered branch; grey.
+    let none = on(&doc, pid_legend::PIPE_NONE_LAYER);
+    assert_eq!(open_polylines(&none), 3, "{none:?}");
+    let none_rings = rings(&none);
+    assert_eq!(none_rings.len(), 1);
+    assert!(near(none_rings[0].center.x, 20.0) && near(none_rings[0].center.y, 53.0));
+    let colour = |name: &str| {
+        doc.layers
+            .get(name)
+            .unwrap_or_else(|| panic!("{name}"))
+            .color
+    };
+    assert_eq!(
+        colour(pid_legend::PIPE_NONE_LAYER),
+        Color::Rgb {
+            r: 128,
+            g: 128,
+            b: 128
+        }
+    );
+    assert_ne!(colour("PID-PIPE-100-FW"), colour("PID-PIPE-80-FW"));
+    assert_ne!(
+        colour("PID-PIPE-100-FW"),
+        colour(pid_legend::PIPE_NONE_LAYER)
+    );
+    // Every run and ring is there, all ByLayer.
+    let pipe_entities: Vec<&EntityType> = doc
+        .model_space_entities()
+        .filter(|e| e.common().layer.starts_with(pid_legend::PIPE_LAYER_PREFIX))
+        .collect();
+    assert_eq!(pipe_entities.len(), 11);
+    assert!(pipe_entities
+        .iter()
+        .all(|e| e.common().color == Color::ByLayer));
+
+    assert_eq!(pid_legend::clear(&mut doc), added);
+    assert_eq!(doc.entity_count(), before);
+    assert!(doc
+        .model_space_entities()
+        .all(|e| !pid_legend::is_legend_layer(&e.common().layer)));
+}
+
 /// The S point (circle) at x on the piped block sheet.
 fn symbol_s(recognition: &pid_legend::Recognition, x: f64) -> usize {
     recognition
@@ -1690,8 +1793,47 @@ fn cpecc_sheet_legend_round_trips_through_apply_and_clear() {
     let recognition = pid_legend::recognise(&doc, &rules);
     let before = doc.entity_count();
     let added = pid_legend::apply(&mut doc, &recognition, &rules);
-    assert_eq!(added, recognition.symbols.len() * 2);
+    // A rectangle and a label per symbol; a polyline per run on the layer of
+    // each line it carries, a ring at each open end.
+    let pipes = &recognition.pipes;
+    let drawn_runs: usize = pipes
+        .runs
+        .iter()
+        .map(|r| {
+            let layers = r.lines.len().max(1);
+            let open = r
+                .ends
+                .iter()
+                .filter(|e| **e == pid_pipes::End::Open)
+                .count();
+            layers * (1 + open)
+        })
+        .sum();
+    assert_eq!(
+        pid_legend::pipe_entities(&recognition, &rules).len(),
+        drawn_runs
+    );
+    assert_eq!(added, recognition.symbols.len() * 2 + drawn_runs);
     assert_eq!(pid_legend::legend_handles(&doc).len(), added);
+    for layer in [
+        "PID-PIPE-100-FW",
+        "PID-PIPE-150-FW",
+        pid_legend::PIPE_NONE_LAYER,
+    ] {
+        assert!(doc.layers.get(layer).is_some(), "{layer}");
+    }
+    let rings = doc
+        .model_space_entities()
+        .filter(|e| {
+            matches!(e, EntityType::Circle(_))
+                && e.common().layer.starts_with(pid_legend::PIPE_LAYER_PREFIX)
+        })
+        .count();
+    assert!(
+        rings >= pipes.open_ends,
+        "{rings} rings for {} open ends",
+        pipes.open_ends
+    );
     // Labels are 1.3 mm on a 1:100 sheet: 130 drawing units.
     let label_height = doc
         .model_space_entities()

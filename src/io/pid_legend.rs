@@ -37,12 +37,15 @@
 //! strokes joined into runs between the symbols' connection points (the
 //! `POINT`s of a valve block, the insertion point of a block without any,
 //! the rim of an S / K circle), each run carrying the line number lettered
-//! along it, so a symbol knows the lines it sits in.
+//! along it, so a symbol knows the lines it sits in. The runs are drawn in
+//! with the legend: a polyline along each on `PID-PIPE-<line number>`, one
+//! layer per line in a colour of its own, the runs on no numbered line in
+//! grey on `PID-PIPE-NONE`, and a small ring wherever a run ends in the air.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-use acadrust::entities::{LwPolyline, Text};
+use acadrust::entities::{Circle, LwPolyline, Text};
 use acadrust::types::{Color, Vector2, Vector3};
 use acadrust::{CadDocument, EntityType, Handle};
 use serde::Deserialize;
@@ -55,6 +58,16 @@ pub const LAYER_PREFIX: &str = "PID-LEGEND-";
 /// Layer that unnamed exploded shapes go on; each shape keeps its own colour
 /// there (there is no class to give a layer to).
 pub const SHAPE_LAYER: &str = "PID-LEGEND-SHAPE";
+
+/// Every pipe layer starts with this; the rest is the line number the runs
+/// on it carry (`PID-PIPE-100-FW`), or `NONE`.
+pub const PIPE_LAYER_PREFIX: &str = "PID-PIPE-";
+
+/// Layer of the runs on no numbered line.
+pub const PIPE_NONE_LAYER: &str = "PID-PIPE-NONE";
+
+/// Colour of [`PIPE_NONE_LAYER`]: grey.
+pub const PIPE_NONE_COLOR: [u8; 3] = [128, 128, 128];
 
 /// Class prefix of an exploded shape the dictionary does not name.
 pub const SHAPE_CLASS_PREFIX: &str = "shape-";
@@ -2660,15 +2673,22 @@ pub fn layer_for_class(class: &str) -> String {
     format!("{LAYER_PREFIX}{}", class.to_ascii_uppercase())
 }
 
-/// Whether `layer` is one [`legend_entities`] writes to.
-pub fn is_legend_layer(layer: &str) -> bool {
-    layer.starts_with(LAYER_PREFIX)
+/// The layer the runs carrying `line` are drawn on.
+pub fn pipe_layer(line: &str) -> String {
+    format!("{PIPE_LAYER_PREFIX}{line}")
 }
 
-/// Layer name -> colour for every class in `recognition`. Unnamed shapes
-/// share [`SHAPE_LAYER`], white; each draws in its own colour.
+/// Whether `layer` is one [`legend_entities`] writes to: a class layer or a
+/// pipe layer.
+pub fn is_legend_layer(layer: &str) -> bool {
+    layer.starts_with(LAYER_PREFIX) || layer.starts_with(PIPE_LAYER_PREFIX)
+}
+
+/// Layer name -> colour for every class in `recognition` and every line
+/// number its pipe carries. Unnamed shapes share [`SHAPE_LAYER`], white;
+/// each draws in its own colour.
 pub fn legend_layers(recognition: &Recognition) -> BTreeMap<String, [u8; 3]> {
-    recognition
+    let mut layers: BTreeMap<String, [u8; 3]> = recognition
         .symbols
         .iter()
         .map(|s| {
@@ -2678,13 +2698,76 @@ pub fn legend_layers(recognition: &Recognition) -> BTreeMap<String, [u8; 3]> {
                 (layer_for_class(&s.class), s.color)
             }
         })
-        .collect()
+        .collect();
+    layers.extend(pipe_layers(recognition));
+    layers
+}
+
+/// The layers a run is drawn on: one per line number it carries, so each
+/// line's layer shows the whole line; [`PIPE_NONE_LAYER`] for a run on none.
+fn run_layers(run: &pid_pipes::Run) -> Vec<String> {
+    if run.lines.is_empty() {
+        vec![PIPE_NONE_LAYER.to_string()]
+    } else {
+        run.lines.iter().map(|line| pipe_layer(line)).collect()
+    }
+}
+
+/// Layer name -> colour for the pipe runs: a colour of its own per line
+/// number, derived from the number so the same line is the same colour on
+/// every sheet; grey for the runs on no numbered line.
+pub fn pipe_layers(recognition: &Recognition) -> BTreeMap<String, [u8; 3]> {
+    let mut out = BTreeMap::new();
+    for run in &recognition.pipes.runs {
+        if run.lines.is_empty() {
+            out.insert(PIPE_NONE_LAYER.to_string(), PIPE_NONE_COLOR);
+        }
+        for line in &run.lines {
+            out.insert(pipe_layer(line), hash_color(fnv1a(line.as_bytes())));
+        }
+    }
+    out
+}
+
+/// The pipe runs drawn in: a polyline along each run on the layer of every
+/// line number it carries -- a run two lines both reach is drawn on both, so
+/// either layer alone shows its whole line -- or on [`PIPE_NONE_LAYER`] when
+/// it carries none, and a ring of `pipes.open_end_mm` wherever a run ends in
+/// the air. All ByLayer.
+pub fn pipe_entities(recognition: &Recognition, rules: &Rules) -> Vec<EntityType> {
+    let radius = rules.pipes.open_end_mm * recognition.units_per_mm;
+    let mut out = Vec::new();
+    for run in &recognition.pipes.runs {
+        let Some((&first, &last)) = run.path.first().zip(run.path.last()) else {
+            continue;
+        };
+        for layer in run_layers(run) {
+            let mut polyline = LwPolyline::from_points(
+                run.path.iter().map(|&(x, y)| Vector2::new(x, y)).collect(),
+            );
+            polyline.common.layer = layer.clone();
+            polyline.common.color = Color::ByLayer;
+            out.push(EntityType::LwPolyline(polyline));
+            for (end, at) in [(run.ends[0], first), (run.ends[1], last)] {
+                if end != End::Open {
+                    continue;
+                }
+                let mut ring = Circle::new();
+                ring.center = Vector3::new(at.0, at.1, 0.0);
+                ring.radius = radius;
+                ring.common.layer = layer.clone();
+                ring.common.color = Color::ByLayer;
+                out.push(EntityType::Circle(ring));
+            }
+        }
+    }
+    out
 }
 
 /// A closed rectangle and a one-line label per recognised symbol, each on
 /// its class layer with colour ByLayer (an unnamed shape carries its own
-/// colour). The label reads `<label> <tag>`, or just the label when the
-/// symbol carries no tag.
+/// colour), then the pipe runs ([`pipe_entities`]). The label reads
+/// `<label> <tag>`, or just the label when the symbol carries no tag.
 pub fn legend_entities(recognition: &Recognition, rules: &Rules) -> Vec<EntityType> {
     let upm = recognition.units_per_mm;
     let pad = rules.pad_mm * upm;
@@ -2724,6 +2807,7 @@ pub fn legend_entities(recognition: &Recognition, rules: &Rules) -> Vec<EntityTy
         label.common.color = color;
         out.push(EntityType::Text(label));
     }
+    out.extend(pipe_entities(recognition, rules));
     out
 }
 
@@ -2743,9 +2827,9 @@ fn ensure_layer(doc: &mut CadDocument, name: &str, color: [u8; 3]) {
     let _ = doc.layers.add(layer);
 }
 
-/// Draw the legend into `doc` (headless path): create the class layers in
-/// their colours and add the rectangles and labels to model space. Returns
-/// how many entities were added.
+/// Draw the legend into `doc` (headless path): create the class and pipe
+/// layers in their colours and add the rectangles, labels and runs to model
+/// space. Returns how many entities were added.
 pub fn apply(doc: &mut CadDocument, recognition: &Recognition, rules: &Rules) -> usize {
     for (layer, color) in legend_layers(recognition) {
         ensure_layer(doc, &layer, color);
@@ -2890,9 +2974,87 @@ mod tests {
     fn legend_layer_names() {
         assert_eq!(layer_for_class("butterfly"), "PID-LEGEND-BUTTERFLY");
         assert_eq!(layer_for_class("shape-1a2b3c4d"), SHAPE_LAYER);
+        assert_eq!(pipe_layer("100-FW"), "PID-PIPE-100-FW");
         assert!(is_legend_layer("PID-LEGEND-TANK"));
         assert!(is_legend_layer(SHAPE_LAYER));
+        assert!(is_legend_layer("PID-PIPE-200-FS-31001-A2"));
+        assert!(is_legend_layer(PIPE_NONE_LAYER));
         assert!(!is_legend_layer("VALVE_消防"));
+        assert!(!is_legend_layer("PIPE-消防"));
+    }
+
+    #[test]
+    fn pipe_runs_draw_on_a_layer_per_line_and_ring_their_open_ends() {
+        use super::pid_pipes::{End, Run};
+        let run = |lines: &[&str], ends: [End; 2], path: &[(f64, f64)]| Run {
+            numbers: Vec::new(),
+            lines: lines.iter().map(|l| l.to_string()).collect(),
+            segments: path.len() - 1,
+            length_mm: 0.0,
+            ends,
+            path: path.to_vec(),
+        };
+        let recognition = Recognition {
+            units_per_mm: 100.0,
+            pipes: Pipes {
+                runs: vec![
+                    run(
+                        &["100-FW"],
+                        [End::Open, End::Tee],
+                        &[(0.0, 0.0), (500.0, 0.0)],
+                    ),
+                    run(&[], [End::Tee, End::Open], &[(500.0, 0.0), (500.0, 300.0)]),
+                    run(
+                        &["100-FW", "80-FW"],
+                        [End::Tee, End::Symbol(0)],
+                        &[(500.0, 0.0), (900.0, 0.0), (900.0, -200.0)],
+                    ),
+                ],
+                ..Pipes::default()
+            },
+            ..Recognition::default()
+        };
+        let layers = pipe_layers(&recognition);
+        assert_eq!(
+            layers.keys().collect::<Vec<_>>(),
+            ["PID-PIPE-100-FW", "PID-PIPE-80-FW", PIPE_NONE_LAYER]
+        );
+        assert_eq!(layers[PIPE_NONE_LAYER], PIPE_NONE_COLOR);
+        assert_ne!(layers["PID-PIPE-100-FW"], layers["PID-PIPE-80-FW"]);
+        assert_eq!(
+            layers["PID-PIPE-100-FW"],
+            hash_color(fnv1a(b"100-FW")),
+            "a line's colour comes from its number, the same on every sheet"
+        );
+
+        let rules = Rules::default();
+        let entities = pipe_entities(&recognition, &rules);
+        let on = |layer: &str| -> Vec<&EntityType> {
+            entities
+                .iter()
+                .filter(|e| e.common().layer == layer)
+                .collect()
+        };
+        // The header piece and the two-line piece; one ring at the open end.
+        let header = on("PID-PIPE-100-FW");
+        assert_eq!(header.len(), 3, "{header:?}");
+        assert!(
+            matches!(header[0], EntityType::LwPolyline(p) if p.vertices.len() == 2 && !p.is_closed)
+        );
+        assert!(matches!(header[1], EntityType::Circle(c)
+            if c.center.x == 0.0 && c.center.y == 0.0 && (c.radius - 60.0).abs() < 1e-9));
+        assert!(matches!(header[2], EntityType::LwPolyline(p) if p.vertices.len() == 3));
+        // The two-line piece is on the second line's layer too, whole.
+        let branch = on("PID-PIPE-80-FW");
+        assert_eq!(branch.len(), 1);
+        assert!(matches!(branch[0], EntityType::LwPolyline(p) if p.vertices.len() == 3));
+        // The unnumbered stub, grey, ringed where it stops.
+        let none = on(PIPE_NONE_LAYER);
+        assert_eq!(none.len(), 2);
+        assert!(matches!(none[1], EntityType::Circle(c) if c.center.y == 300.0));
+        assert_eq!(entities.len(), 6);
+        assert!(entities.iter().all(|e| e.common().color == Color::ByLayer));
+        assert!(entities.iter().all(|e| is_legend_layer(&e.common().layer)));
     }
 
     fn bowtie(x: f64, y: f64, turn: fn((f64, f64)) -> (f64, f64)) -> Vec<Prim> {

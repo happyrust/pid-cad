@@ -8,7 +8,10 @@
 //!     [--units-per-mm N]    override unit detection
 //!     [--verbose]           one line per recognised symbol
 //!     [--write DIR]         also write <DIR>/<name>.legend.dxf with the
-//!                           coloured rectangles and labels drawn in
+//!                           coloured rectangles and labels drawn in, and
+//!                           the pipe runs on PID-PIPE-<line number> layers
+//!                           (grey PID-PIPE-NONE for runs on no line, a
+//!                           ring at every open end)
 //!     [--json]              machine-readable output instead of the report
 //! ```
 

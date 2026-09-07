@@ -52,7 +52,8 @@
   "pipes": {
     "layer_prefixes": ["PIPE"],
     "snap_mm": 0.3,
-    "number_mm": 5.0
+    "number_mm": 5.0,
+    "open_end_mm": 0.6
   },
   "shapes": {
     "layers_any": ["DEVICE", "DEVICES", "T-MaR-ZNACKY", "T-SYMBOLS", "T_ZNACKY", "YIBIAO"],

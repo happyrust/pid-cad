@@ -32,6 +32,9 @@ pub struct PipeRules {
     pub snap_mm: f64,
     /// A line number lettered within this (paper mm) of a run is the run's.
     pub number_mm: f64,
+    /// Radius (paper mm) of the ring drawn where a run ends in the air when
+    /// the runs are drawn into the sheet.
+    pub open_end_mm: f64,
 }
 
 impl Default for PipeRules {
@@ -40,6 +43,7 @@ impl Default for PipeRules {
             layer_prefixes: Vec::new(),
             snap_mm: 0.3,
             number_mm: 5.0,
+            open_end_mm: 0.6,
         }
     }
 }
