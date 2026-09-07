@@ -158,6 +158,10 @@ pub struct PlotSvgRequest {
     pub dry_run: bool,
     /// Replace files that already exist.
     pub force: bool,
+    /// Write a page whose text the glyph atlas could not fully supply, and
+    /// say how many glyphs it lost, rather than refuse it (R1). Off by
+    /// default: a drawing that looks finished and is not is the worse outcome.
+    pub allow_missing_glyphs: bool,
 }
 
 /// Headless plot to SVG (`--plot-svg IN OUT`). Returns a process exit code.
@@ -198,6 +202,15 @@ pub fn plot_svg_headless(
                         "  note: {} fill(s) were not a clean triangle mesh and \
                          kept their triangles",
                         page.report.mesh_fallbacks
+                    );
+                }
+                if page.report.missing_glyphs > 0 {
+                    // Only reachable with --allow-missing-glyphs; the default
+                    // refuses the page instead.
+                    eprintln!(
+                        "  warning: {} glyph(s) are missing from this page — its \
+                         text is incomplete",
+                        page.report.missing_glyphs
                     );
                 }
             }
@@ -255,16 +268,23 @@ pub(crate) fn plot_svg_with(
         PlotRequest::layouts(names)
     };
 
-    let pages = app.resolve_plot_job(&plot)?;
+    let job = app.resolve_plot_job(&plot)?;
     crate::io::svg_export::export_svg_pages(
-        &pages,
+        &job.pages,
         None,
-        &crate::io::plot_emit::PlotAssets::default(),
+        &job.assets,
         output,
         &crate::io::svg_export::SvgWriteOptions {
+            svg: crate::io::svg_export::SvgOptions {
+                missing_glyphs: if request.allow_missing_glyphs {
+                    crate::io::svg_export::MissingGlyphs::Report
+                } else {
+                    crate::io::svg_export::MissingGlyphs::Refuse
+                },
+                ..Default::default()
+            },
             force: request.force,
             dry_run: request.dry_run,
-            ..Default::default()
         },
     )
     .map_err(|error| error.to_string())
@@ -976,6 +996,130 @@ mod tests {
         let _ = std::fs::remove_dir_all(&bare_dir);
         resvg::usvg::Tree::from_str(&text, &resvg::usvg::Options::default())
             .expect("the written file is a valid SVG");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // R1: the job carries the glyph snapshot its pages are drawn from, taken
+    // by `resolve_plot_job` itself and already checked against the pages — so
+    // a backend on another thread, or a lenient one, cannot be handed text the
+    // snapshot does not cover without the check having said so first.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_job_carries_one_glyph_snapshot_that_covers_its_pages() {
+        use crate::app::update::file::PlotRequest;
+
+        let (dir, drawing) = drawing_with_geometry("job-snapshot");
+        let mut app = OpenCADStudio::new_for_test();
+        app.open_drawing_headless(&drawing).unwrap();
+        app.select_layout_headless("Model").unwrap();
+        app.set_headless_model_page("A3", true, true, None).unwrap();
+        let job = app.resolve_plot_job(&PlotRequest::current_view()).unwrap();
+        assert_eq!(job.pages.len(), 1);
+        let snapshot = job
+            .assets
+            .glyphs
+            .as_ref()
+            .expect("a page with a label gets a snapshot");
+        assert!(
+            snapshot.glyphs() >= 4,
+            "PLOT is four glyphs: {}",
+            snapshot.glyphs()
+        );
+        assert_eq!(
+            job.assets.stale_glyphs(&job.pages),
+            0,
+            "the snapshot the job carries does not cover the job's own text"
+        );
+        // And the strict default plots it without a word about missing text.
+        let out = dir.join("plot.svg");
+        let batch = super::plot_svg_with(&mut app, &drawing, &out, &model_on_a3()).unwrap();
+        assert_eq!(batch.pages[0].report.missing_glyphs, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A drawing with no text takes no snapshot: nothing to draw from it,
+        // and the export table is not free.
+        let (bare_dir, bare_drawing) = drawing_with("job-no-text", false);
+        let mut app = OpenCADStudio::new_for_test();
+        app.open_drawing_headless(&bare_drawing).unwrap();
+        app.select_layout_headless("Model").unwrap();
+        app.set_headless_model_page("A3", true, true, None).unwrap();
+        let job = app.resolve_plot_job(&PlotRequest::current_view()).unwrap();
+        assert!(job.assets.glyphs.is_none(), "no text, no snapshot");
+        let _ = std::fs::remove_dir_all(&bare_dir);
+    }
+
+    // R1, the recovery: the scene keeps its laid-out wires until the geometry
+    // changes, and the atlas can be rewound or re-scaled behind them — every
+    // key those quads carry then points at a tile that is gone. A job resolved
+    // from such wires would be short its text, and `resolve_plot_job` is the
+    // one place that can notice: it checks the snapshot against the pages and
+    // lays the drawing out again when they disagree.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_job_whose_text_the_atlas_no_longer_holds_is_laid_out_again() {
+        use crate::app::update::file::PlotRequest;
+        use crate::io::plot_emit::{GlyphSnapshot, PlotAssets};
+        use crate::io::svg_export::{export_svg_pages, SvgWriteOptions};
+
+        let (dir, drawing) = drawing_with_geometry("job-rewound");
+        let mut app = OpenCADStudio::new_for_test();
+        app.open_drawing_headless(&drawing).unwrap();
+        app.select_layout_headless("Model").unwrap();
+        app.set_headless_model_page("A3", true, true, None).unwrap();
+        let first = app.resolve_plot_job(&PlotRequest::current_view()).unwrap();
+        assert_eq!(first.assets.stale_glyphs(&first.pages), 0);
+
+        // Rewind the atlas behind the job's back, as TEXTFILL does.
+        crate::scene::text::sdf_atlas::text_atlas()
+            .lock()
+            .unwrap()
+            .reset();
+        let live = PlotAssets {
+            glyphs: GlyphSnapshot::capture(),
+            ..Default::default()
+        };
+        assert!(
+            live.stale_glyphs(&first.pages) > 0,
+            "the reset should have orphaned every glyph the first job laid out"
+        );
+        // The first job is unaffected: it draws from the snapshot it carries,
+        // and the strict default writes its page whole.
+        assert_eq!(first.assets.stale_glyphs(&first.pages), 0);
+        let strict = SvgWriteOptions {
+            force: true,
+            ..Default::default()
+        };
+        let before = export_svg_pages(
+            &first.pages,
+            None,
+            &first.assets,
+            &dir.join("before.svg"),
+            &strict,
+        )
+        .expect("a job carries its own glyphs, whatever happened to the atlas since");
+        assert_eq!(before.pages[0].report.missing_glyphs, 0);
+
+        // A job resolved now starts from the same cached wires, whose keys the
+        // atlas no longer has; it must come back laid out afresh and covered.
+        let second = app.resolve_plot_job(&PlotRequest::current_view()).unwrap();
+        assert_eq!(
+            second.assets.stale_glyphs(&second.pages),
+            0,
+            "the job was handed pages its snapshot cannot letter"
+        );
+        let after = export_svg_pages(
+            &second.pages,
+            None,
+            &second.assets,
+            &dir.join("after.svg"),
+            &strict,
+        )
+        .expect("the re-laid-out page is whole under the strict default");
+        assert_eq!(after.pages[0].report.missing_glyphs, 0);
+        assert_eq!(
+            after.pages[0].report.elements, before.pages[0].report.elements,
+            "the same drawing laid out twice should draw the same number of elements"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

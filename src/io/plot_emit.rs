@@ -204,16 +204,146 @@ pub struct PlotPage<'a> {
     pub options: PdfPlotOptions,
 }
 
-/// Inputs the emitter would otherwise read from the environment.
+/// The baked glyph geometry a page's text needs, lifted out of the
+/// process-wide atlas.
 ///
-/// P0 carries only the stamp text; the glyph-atlas snapshot `emit_text` takes
-/// per text item still comes from the process-wide atlas (moving it here
-/// changes *when* the snapshot is taken and is a separate change).
+/// `wire.text_verts` carries glyph *quads*, keyed by the atlas tile each was
+/// baked into; the outlines live in the atlas. A key is only valid until the
+/// atlas grows and re-scales its tiles, so a page that lays out its text and
+/// then plots it while something else bakes a glyph looks up keys that no
+/// longer exist — and the exporter's answer to that has always been to skip
+/// the quad without a word (R1). Taking one snapshot and plotting from it
+/// closes that window: whatever it holds is what the page draws.
+#[derive(Clone, Debug)]
+pub struct GlyphSnapshot {
+    table: std::collections::HashMap<u64, crate::scene::text::sdf_atlas::GlyphExport>,
+    solid_key: u64,
+}
+
+impl GlyphSnapshot {
+    /// Snapshot the process-wide atlas. `None` when its lock is poisoned —
+    /// the state in which the exporter has always drawn no text at all.
+    pub fn capture() -> Option<Self> {
+        let atlas = crate::scene::text::sdf_atlas::text_atlas().lock().ok()?;
+        Some(Self::of(&atlas))
+    }
+
+    /// Snapshot an atlas the caller is already holding.
+    ///
+    /// Laying text out and taking the snapshot under the same lock is the one
+    /// way to be certain the keys the quads carry are keys the snapshot has:
+    /// nothing can bake, grow or rewind the atlas in between. `capture` is
+    /// this with a lock of its own.
+    pub fn of(atlas: &crate::scene::text::sdf_atlas::GlyphAtlas) -> Self {
+        Self {
+            table: atlas.export_table(),
+            solid_key: crate::scene::text::sdf_atlas::uv_key(atlas.solid_uv()),
+        }
+    }
+
+    pub fn glyphs(&self) -> usize {
+        self.table.len()
+    }
+
+    /// The visible glyph quads on `wires` this snapshot has no geometry for —
+    /// exactly the quads `emit_text` would have to skip.
+    ///
+    /// Zero means the text and the snapshot come from the same atlas state.
+    /// Anything else means the atlas was re-scaled between laying the text
+    /// out and taking the snapshot, and the text has to be laid out again
+    /// before a page drawn from it can be whole.
+    pub fn missing_in<'a>(&self, wires: impl IntoIterator<Item = &'a WireModel>) -> usize {
+        use crate::scene::text::sdf_atlas::uv_key;
+        wires
+            .into_iter()
+            .flat_map(|wire| wire.text_verts.as_chunks::<6>().0)
+            // Mirrors `emit_text`: an invisible quad is never looked up, and
+            // the decoration bar's solid texel is not a glyph.
+            .filter(|quad| quad[0].color[3] >= 0.01)
+            .filter(|quad| {
+                let key = uv_key([quad[5].uv[0], quad[5].uv[1]]);
+                key != self.solid_key && !self.table.contains_key(&key)
+            })
+            .count()
+    }
+}
+
+/// Inputs the emitter would otherwise read from the environment.
 #[derive(Clone, Debug, Default)]
 pub struct PlotAssets {
     /// Text of the plot stamp. `None` = "Open CAD Studio | <user> | <unix
     /// seconds>", read from the clock and `USER` / `USERNAME` at emit time.
     pub stamp_label: Option<String>,
+    /// Glyph geometry for this page. `None` = take one snapshot when the
+    /// page's first text item is reached, and use it for the whole page.
+    pub glyphs: Option<GlyphSnapshot>,
+}
+
+impl PlotAssets {
+    /// Assets for a job whose pages are already laid out: one glyph snapshot
+    /// shared by every page, taken now, while the caller still holds the
+    /// thread that laid the text out and nothing else has had the chance to
+    /// bake into the atlas (R1). A job with no text on any page takes none —
+    /// `export_table` re-resolves a font per family under the atlas lock, and
+    /// a page without text should not pay for it.
+    ///
+    /// Whether the snapshot actually covers the text is a separate question,
+    /// answered by [`Self::stale_glyphs`].
+    pub fn for_pages(pages: &[crate::io::plot_types::PdfPageInput]) -> Self {
+        let has_text = pages
+            .iter()
+            .any(|page| page.wires.iter().any(|wire| !wire.text_verts.is_empty()));
+        Self {
+            stamp_label: None,
+            glyphs: has_text.then(GlyphSnapshot::capture).flatten(),
+        }
+    }
+
+    /// Glyph quads on `pages` the snapshot cannot draw — the count a strict
+    /// backend would refuse the job over. Zero when there is no snapshot: the
+    /// emitter will take its own then, and report on that one.
+    pub fn stale_glyphs(&self, pages: &[crate::io::plot_types::PdfPageInput]) -> usize {
+        let Some(snapshot) = &self.glyphs else {
+            return 0;
+        };
+        pages
+            .iter()
+            .map(|page| snapshot.missing_in(page.wires.iter().map(|wire| &wire.wire)))
+            .sum()
+    }
+}
+
+/// A glyph quad the atlas had no geometry for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MissingGlyph {
+    /// The wire the quad belongs to, as the scene names it.
+    pub wire: String,
+    /// Its index among that wire's quads.
+    pub quad: usize,
+}
+
+/// What the traversal could and could not put on the page.
+///
+/// The sink sees drawing operations, so it cannot tell a page with no text
+/// from a page whose text was dropped; this is how it finds out. A backend
+/// that must not hand back a quietly incomplete drawing checks it (R1).
+#[derive(Clone, Debug, Default)]
+pub struct PlotReport {
+    /// Wires carrying text that the page drew from.
+    pub text_items: usize,
+    /// Glyph quads skipped because the snapshot had no geometry for them.
+    pub missing_glyphs: usize,
+    /// The first one, to point at.
+    pub first_missing: Option<MissingGlyph>,
+    /// The atlas could not be read at all, so no text was drawn.
+    pub atlas_unavailable: bool,
+}
+
+impl PlotReport {
+    /// Whether text was lost — the thing a strict backend refuses to publish.
+    pub fn text_is_incomplete(&self) -> bool {
+        self.atlas_unavailable || self.missing_glyphs > 0
+    }
 }
 
 // ── Page traversal ────────────────────────────────────────────────────────
@@ -224,7 +354,11 @@ pub fn emit_plot_content<S: PlotSink>(
     page: &PlotPage<'_>,
     assets: &PlotAssets,
     sink: &mut S,
-) -> Result<(), S::Error> {
+) -> Result<PlotReport, S::Error> {
+    // One snapshot for the page, taken when its first text item is reached so
+    // a page without text never pays for it (`export_table` reparses a font
+    // per family under the atlas lock).
+    let mut glyphs = GlyphState::new(assets.glyphs.clone());
     let PlotPage {
         wires,
         hatches,
@@ -408,6 +542,7 @@ pub fn emit_plot_content<S: PlotSink>(
                         scale,
                         plot_style,
                         options,
+                        &mut glyphs,
                     )?;
                     last_color = None;
                     last_lw = None;
@@ -614,7 +749,39 @@ pub fn emit_plot_content<S: PlotSink>(
     if options.stamp {
         emit_plot_stamp(sink, assets)?;
     }
-    Ok(())
+    Ok(glyphs.report)
+}
+
+/// The page's glyph snapshot and what it could not supply.
+struct GlyphState {
+    snapshot: Option<GlyphSnapshot>,
+    /// The snapshot was asked for and could not be taken.
+    tried: bool,
+    report: PlotReport,
+}
+
+impl GlyphState {
+    fn new(snapshot: Option<GlyphSnapshot>) -> Self {
+        Self {
+            tried: snapshot.is_some(),
+            snapshot,
+            report: PlotReport::default(),
+        }
+    }
+
+    /// The page's snapshot, taken now if this is its first text item, with
+    /// the report to record what it cannot supply.
+    fn ensure(&mut self) -> Option<(&GlyphSnapshot, &mut PlotReport)> {
+        if !self.tried {
+            self.tried = true;
+            self.snapshot = GlyphSnapshot::capture();
+            if self.snapshot.is_none() {
+                self.report.atlas_unavailable = true;
+            }
+        }
+        let snapshot = self.snapshot.as_ref()?;
+        Some((snapshot, &mut self.report))
+    }
 }
 
 // ── Helpers shared by the passes ──────────────────────────────────────────
@@ -1167,10 +1334,13 @@ fn adapt_text_color([r, g, b]: [f32; 3]) -> [f32; 3] {
 /// plane rect — so a stroke (LFF) font emits polylines and a filled TrueType
 /// glyph emits filled triangles, exactly where the SDF quad sits.
 ///
-/// The atlas is the process-wide one: if its lock is poisoned nothing is
-/// emitted, and a quad whose key the atlas no longer has is skipped. Both are
-/// the exporter's historical behaviour and are what R1 of the SVG plan is
-/// about; they change together with the snapshot's move into `PlotAssets`.
+/// Geometry comes from the page's [`GlyphSnapshot`] — one for the whole page,
+/// so a glyph baked while the page is being written cannot move the tiles out
+/// from under it. A quad the snapshot has no geometry for is still skipped,
+/// as the exporter has always skipped it, but now it is *counted* and the
+/// first one is named, so a backend can refuse to hand back a page that is
+/// quietly missing its text (R1).
+#[allow(clippy::too_many_arguments)]
 fn emit_text<S: PlotSink>(
     sink: &mut S,
     wires: &[WireModel],
@@ -1179,19 +1349,18 @@ fn emit_text<S: PlotSink>(
     scale: f32,
     plot_style: Option<&PlotStyleTable>,
     options: PdfPlotOptions,
+    glyphs: &mut GlyphState,
 ) -> Result<(), S::Error> {
     use crate::scene::text::sdf_atlas;
 
     if wires.iter().all(|w| w.text_verts.is_empty()) {
         return Ok(());
     }
-    // Snapshot the atlas' baked-glyph geometry once; drop the lock before use.
-    let (table, solid_key) = {
-        let Ok(atlas) = sdf_atlas::text_atlas().lock() else {
-            return Ok(());
-        };
-        (atlas.export_table(), sdf_atlas::uv_key(atlas.solid_uv()))
+    let Some((snapshot, report)) = glyphs.ensure() else {
+        return Ok(());
     };
+    let (table, solid_key) = (&snapshot.table, snapshot.solid_key);
+    report.text_items += 1;
 
     // The dash pattern is persistent graphics state and the wire pass above
     // only re-emits it on change, so whatever the last wire needed is still
@@ -1335,6 +1504,15 @@ fn emit_text<S: PlotSink>(
                         .collect()],
                     rule: FillRule::NonZero,
                 })?;
+            } else {
+                // The snapshot has no geometry under this quad's key. The page
+                // is short a glyph; say which one rather than let a backend
+                // hand back a drawing with a hole in its text (R1).
+                report.missing_glyphs += 1;
+                report.first_missing.get_or_insert_with(|| MissingGlyph {
+                    wire: wire.name.clone(),
+                    quad: gi / 6 - 1,
+                });
             }
         }
     }

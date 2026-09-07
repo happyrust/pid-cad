@@ -8,7 +8,7 @@
 // wipeouts, two render groups — so a case added for one backend hardens the
 // other. Test-only.
 
-use crate::io::plot_emit::PlotPage;
+use crate::io::plot_emit::{GlyphSnapshot, PlotPage};
 use crate::io::plot_style::PlotStyleTable;
 use crate::io::plot_types::{PdfPlotOptions, PlotGroupSplits, PlotWire};
 use crate::scene::model::hatch_model::{plot_style_fill_pattern, HatchModel, HatchPattern};
@@ -144,23 +144,37 @@ pub fn square(x: f32, y: f32, size: f32) -> Vec<[f32; 2]> {
 
 /// A wire carrying the SDF glyph quads for `text` in the embedded "txt" stroke
 /// font, laid out into the process-wide atlas `emit_text` reads.
+///
+/// The quads' keys are only good until the atlas is re-scaled, and other tests
+/// bake into the same atlas in parallel; a test that needs the text to
+/// *survive* the plot takes [`text_wire_with_snapshot`] and hands the snapshot
+/// to the emitter.
 pub fn text_wire(text: &str, origin: [f64; 3]) -> PlotWire {
+    text_wire_with_snapshot(text, origin).0
+}
+
+/// [`text_wire`] plus the glyph snapshot taken under the same lock as the
+/// layout — so the snapshot is guaranteed to have every key the quads carry,
+/// whatever another test bakes a moment later.
+pub fn text_wire_with_snapshot(text: &str, origin: [f64; 3]) -> (PlotWire, GlyphSnapshot) {
     use crate::scene::pipeline::text_gpu::push_glyph_vertices;
     use crate::scene::text::{glyph_quads::layout_glyph_quads, sdf_atlas};
-    let quads = {
+    let (quads, snapshot) = {
         let mut atlas = sdf_atlas::text_atlas().lock().unwrap();
-        layout_glyph_quads(&mut atlas, 10.0, 0.0, 1.0, 0.0, 1.0, "txt", false, text)
+        let quads = layout_glyph_quads(&mut atlas, 10.0, 0.0, 1.0, 0.0, 1.0, "txt", false, text);
+        (quads, GlyphSnapshot::of(&atlas))
     };
     assert!(!quads.is_empty(), "stroke glyphs laid out for {text:?}");
     let mut verts = Vec::new();
     push_glyph_vertices(&mut verts, &quads, origin, 1.0, [1.0, 0.0, 0.0, 1.0], 0.0);
-    PlotWire {
+    let wire = PlotWire {
         wire: WireModel {
             text_verts: verts,
             ..WireModel::solid("t".into(), Vec::new(), WireModel::WHITE, false)
         },
         draw_depth: 0.0,
-    }
+    };
+    (wire, snapshot)
 }
 
 /// A CTB that exercises every override the emitter reads: colour, pen,

@@ -152,10 +152,13 @@ struct ExpectedState {
     clips: usize,
 }
 
-fn record(page: &PlotPage<'_>) -> Vec<PlotOp> {
+/// The emitter's own account of the page, drawn from `assets` — the same
+/// assets the page under test was written from, or the two can disagree about
+/// which glyphs exist (see `shared_assets`).
+fn record_with(page: &PlotPage<'_>, assets: &PlotAssets) -> Vec<PlotOp> {
     let mut sink = RecordingSink::default();
-    match crate::io::plot_emit::emit_plot_content(page, &PlotAssets::default(), &mut sink) {
-        Ok(()) => {}
+    match crate::io::plot_emit::emit_plot_content(page, assets, &mut sink) {
+        Ok(_) => {}
         Err(never) => match never {},
     }
     sink.ops
@@ -550,9 +553,48 @@ fn same_dash(want: &[f64], got: &[f64]) -> bool {
 
 // ── Layer 2: every corpus page ────────────────────────────────────────────
 
+/// The corpus keeps a text quad whose key the atlas does not have, on purpose:
+/// it is how the traversal's skip gets exercised. And the corpus lays its text
+/// out into the process-wide atlas without a snapshot of its own, so a test
+/// elsewhere in the binary that resets the atlas (every `OpenCADStudio::new`
+/// applies TEXTFILL, which does) or grows it makes the corpus text stale in
+/// flight. Writing corpus pages is therefore the lenient caller's job — the
+/// strict one refuses them, which is its own test, on pages that carry their
+/// own snapshot.
+fn lenient() -> SvgOptions {
+    SvgOptions {
+        missing_glyphs: MissingGlyphs::Report,
+        ..Default::default()
+    }
+}
+
+fn lenient_files() -> SvgWriteOptions {
+    SvgWriteOptions {
+        svg: lenient(),
+        ..Default::default()
+    }
+}
+
 fn write(case: &Case) -> (String, SvgReport) {
-    svg_page_to_string(&case.page(), &PlotAssets::default(), &SvgOptions::default())
+    write_with(case, &PlotAssets::default())
+}
+
+fn write_with(case: &Case, assets: &PlotAssets) -> (String, SvgReport) {
+    svg_page_to_string(&case.page(), assets, &lenient())
         .unwrap_or_else(|e| panic!("{}: {e}", case.name))
+}
+
+/// One glyph snapshot for both halves of a comparison. Written from one
+/// snapshot and recorded from another, a page can legitimately differ by
+/// exactly its glyphs — a test elsewhere resets or grows the shared atlas in
+/// between — and the comparison would blame the writer. Drawn from the same
+/// snapshot, the two sides agree on which glyphs exist and the comparison is
+/// about the serialisation, which is what it is for.
+fn shared_assets() -> PlotAssets {
+    PlotAssets {
+        glyphs: crate::io::plot_emit::GlyphSnapshot::capture(),
+        ..Default::default()
+    }
 }
 
 #[test]
@@ -564,8 +606,9 @@ fn the_written_svg_draws_what_the_emitter_asked_for() {
         if case.options.stamp {
             continue; // refused, and covered by its own test
         }
-        let (svg, _) = write(case);
-        let expected = expected_shapes(&record(&case.page()), case.paper.1);
+        let assets = shared_assets();
+        let (svg, _) = write_with(case, &assets);
+        let expected = expected_shapes(&record_with(&case.page(), &assets), case.paper.1);
         let actual = actual_shapes(&parse(&svg), case.paper.0);
         if let Err(why) = compare(&expected, &actual) {
             panic!("{}: {why}", case.name);
@@ -583,8 +626,9 @@ fn the_comparison_catches_a_broken_file() {
         .into_iter()
         .find(|c| c.name == "hatches")
         .expect("the hatch page is in the corpus");
-    let (svg, _) = write(&case);
-    let expected = expected_shapes(&record(&case.page()), case.paper.1);
+    let assets = shared_assets();
+    let (svg, _) = write_with(&case, &assets);
+    let expected = expected_shapes(&record_with(&case.page(), &assets), case.paper.1);
     compare(&expected, &actual_shapes(&parse(&svg), case.paper.0))
         .expect("the unmutated file passes");
 
@@ -690,6 +734,7 @@ fn the_stamp_is_refused_rather_than_approximated() {
         &case.page(),
         &PlotAssets {
             stamp_label: Some("PINNED".into()),
+            ..Default::default()
         },
         &SvgOptions::default(),
     )
@@ -826,7 +871,10 @@ fn the_coordinate_precision_follows_the_plot_scale() {
     let (svg, _) = svg_page_to_string(
         &case.page(),
         &PlotAssets::default(),
-        &SvgOptions { decimals: Some(1) },
+        &SvgOptions {
+            decimals: Some(1),
+            ..Default::default()
+        },
     )
     .unwrap();
     assert!(svg.contains("M3.5,6.6"), "one decimal place: {svg}");
@@ -948,6 +996,125 @@ fn the_corpus_exercises_mesh_outlines() {
     assert!(outlined >= 4, "only {outlined} mesh fills in the corpus");
 }
 
+// ── R1: text the atlas cannot supply ──────────────────────────────────────
+
+/// A page whose text quads point at atlas tiles that do not exist — the state
+/// a page reaches on its own when the atlas grows between layout and plot.
+fn page_with_unknown_glyphs() -> Case {
+    let mut case = Case::new("lost text");
+    let mut wire = crate::io::plot_corpus::text_wire("LOST", [20.0, 20.0, 0.0]);
+    for vertex in &mut wire.wire.text_verts {
+        vertex.uv = [0.123_456, 0.654_321];
+    }
+    wire.wire.name = "the-label".into();
+    case.wires.push(wire);
+    case
+}
+
+#[test]
+fn a_page_missing_its_text_is_refused_by_default_and_says_which_wire() {
+    let case = page_with_unknown_glyphs();
+    let error = svg_page_to_string(&case.page(), &PlotAssets::default(), &SvgOptions::default())
+        .expect_err("a page short of text must not come back as success");
+    match &error {
+        SvgError::MissingGlyphs { count, first, .. } => {
+            assert!(*count >= 4, "four letters went missing, not {count}");
+            let (wire, _quad) = first.as_ref().expect("the first one is named");
+            assert_eq!(wire, "the-label");
+        }
+        other => panic!("expected a missing-glyph refusal, got {other}"),
+    }
+    assert!(error.to_string().contains("the-label"), "{error}");
+}
+
+#[test]
+fn the_lenient_caller_gets_the_page_and_the_count() {
+    let case = page_with_unknown_glyphs();
+    let (svg, report) = svg_page_to_string(
+        &case.page(),
+        &PlotAssets::default(),
+        &SvgOptions {
+            missing_glyphs: MissingGlyphs::Report,
+            ..Default::default()
+        },
+    )
+    .expect("the lenient caller asked for the page anyway");
+    assert!(report.missing_glyphs >= 4, "{report:?}");
+    assert!(svg.contains("<svg"), "still a document");
+}
+
+// The point of the snapshot: what the page draws is decided once, at a moment
+// the caller chooses, and the live atlas has no say afterwards. Here the live
+// atlas holds every glyph the page needs and the snapshot holds none — an
+// empty atlas of its own — and the page is refused: the emitter drew from the
+// snapshot it was given, not from the atlas it could have reached for.
+#[test]
+fn the_page_is_drawn_from_the_snapshot_it_was_given_not_the_live_atlas() {
+    use crate::io::plot_emit::GlyphSnapshot;
+    use crate::scene::text::sdf_atlas::GlyphAtlas;
+
+    let mut case = Case::new("snapshot decides");
+    case.wires.push(crate::io::plot_corpus::text_wire(
+        "HELLO",
+        [20.0, 20.0, 0.0],
+    ));
+    let empty = GlyphSnapshot::of(&GlyphAtlas::new(64, 64));
+    assert_eq!(empty.glyphs(), 0);
+    assert!(
+        empty.missing_in(case.wires.iter().map(|w| &w.wire)) >= 5,
+        "the check should find every letter missing from an empty snapshot"
+    );
+
+    let error = svg_page_to_string(
+        &case.page(),
+        &PlotAssets {
+            glyphs: Some(empty),
+            ..Default::default()
+        },
+        &SvgOptions::default(),
+    )
+    .expect_err("the live atlas has the glyphs; the snapshot given does not");
+    assert!(
+        matches!(error, SvgError::MissingGlyphs { count, .. } if count >= 5),
+        "{error}"
+    );
+}
+
+// And the converse, which is what closes R1's window: a snapshot taken under
+// the same lock as the layout has every key the quads carry, so the page is
+// whole under the strict default no matter what the rest of this suite bakes
+// into the shared atlas while the page is being written. Before the snapshot
+// existed this scenario was a flake here, with the text silently gone.
+#[test]
+fn a_snapshot_taken_with_the_layout_keeps_the_page_whole() {
+    let (wire, snapshot) =
+        crate::io::plot_corpus::text_wire_with_snapshot("HELLO", [20.0, 20.0, 0.0]);
+    let mut case = Case::new("snapshot");
+    case.wires.push(wire);
+    assert!(snapshot.glyphs() > 0, "the snapshot is empty");
+    assert_eq!(snapshot.missing_in(case.wires.iter().map(|w| &w.wire)), 0);
+
+    // Bake more into the shared atlas in the meantime.
+    for text in ["MORE", "GLYPHS", "STILL MORE", "AND MORE AGAIN"] {
+        let _ = crate::io::plot_corpus::text_wire(text, [0.0, 0.0, 0.0]);
+    }
+
+    let (svg, report) = svg_page_to_string(
+        &case.page(),
+        &PlotAssets {
+            glyphs: Some(snapshot),
+            ..Default::default()
+        },
+        &SvgOptions::default(),
+    )
+    .expect("the snapshot has what the page needs, so the strict default passes");
+    assert_eq!(report.missing_glyphs, 0);
+    assert!(
+        svg.matches("<path").count() >= 5,
+        "the page lost its glyphs anyway"
+    );
+}
+
 // ── Files: naming, overwriting, publishing (D3) ───────────────────────────
 
 /// A directory of this test's own, removed on the way out.
@@ -1036,7 +1203,7 @@ fn a_multi_page_job_writes_numbered_files_that_parse() {
         None,
         &PlotAssets::default(),
         &scratch.join("plot.svg"),
-        &SvgWriteOptions::default(),
+        &lenient_files(),
     )
     .unwrap();
     assert_eq!(batch.pages.len(), 3);
@@ -1141,7 +1308,7 @@ fn a_failure_after_the_first_page_says_what_is_already_on_disk() {
         &scratch.join("plot.svg"),
         &SvgWriteOptions {
             force: true,
-            ..Default::default()
+            ..lenient_files()
         },
     )
     .expect_err("page two cannot be written");
@@ -1211,9 +1378,11 @@ fn an_svgz_target_gets_gzip_and_an_svg_target_never_does() {
 #[test]
 fn a_dry_run_renders_and_resolves_but_writes_nothing() {
     let scratch = Scratch::new("dry");
+    // Lenient about text: the ctb page's glyphs live in the shared atlas, and
+    // whether they survive another test's reset is R1's business, not this.
     let dry = SvgWriteOptions {
         dry_run: true,
-        ..Default::default()
+        ..lenient_files()
     };
     let batch = export_svg_pages(
         &job(&["hatches", "ctb"]),
@@ -1250,12 +1419,15 @@ fn a_page_style_table_wins_over_the_job_wide_one() {
     let mut pages = job(&["ctb", "ctb"]);
     pages[1].plot_style = None;
     let styled = crate::io::plot_corpus::styled_ctb();
+    // The ctb page carries text laid out into the shared atlas, which another
+    // test may reset or grow before this page is written; that is R1's
+    // subject, not this test's, so write leniently (see `lenient`).
     let batch = export_svg_pages(
         &pages,
         Some(&styled),
         &PlotAssets::default(),
         &scratch.join("plot.svg"),
-        &SvgWriteOptions::default(),
+        &lenient_files(),
     )
     .unwrap();
     let with_page_style = std::fs::read_to_string(&batch.pages[0].path).unwrap();
@@ -1272,7 +1444,7 @@ fn a_page_style_table_wins_over_the_job_wide_one() {
         None,
         &PlotAssets::default(),
         &scratch.join("bare.svg"),
-        &SvgWriteOptions::default(),
+        &lenient_files(),
     )
     .unwrap();
     assert_ne!(
@@ -1502,26 +1674,21 @@ fn a_missing_glyph_hides_from_a_whole_page_rate_but_not_from_the_local_check() {
     // Why §8 refuses a whole-page difference rate as the only judge: drop a
     // word from an A3 sheet and the page is still 99.9 % identical.
     //
-    // The layout and the export both go through the process-wide glyph atlas,
-    // and a growth between them re-scales it and invalidates the quads' UV
-    // keys — R1's silent skip, which another test laying out its own text in
-    // parallel can provoke. Retry rather than assert a page with no glyphs on
-    // it; a page that never gets them is a real failure and still fails.
-    let mut attempt = 0;
-    let (case, svg) = loop {
-        let mut case = Case::new("text");
-        case.paper = (297.0, 210.0);
-        case.wires.push(crate::io::plot_corpus::text_wire(
-            "HELLO",
-            [20.0, 100.0, 0.0],
-        ));
-        let (svg, _) = write(&case);
-        if svg.contains("<path") {
-            break (case, svg);
-        }
-        attempt += 1;
-        assert!(attempt < 5, "the atlas never yielded glyph geometry");
+    // The text is plotted from the snapshot taken with its layout, under the
+    // strict default: this test used to retry around R1's silent skip when
+    // another test grew the shared atlas between the two, and now it cannot
+    // happen — a page short of its glyphs would be refused, not retried.
+    let (wire, snapshot) =
+        crate::io::plot_corpus::text_wire_with_snapshot("HELLO", [20.0, 100.0, 0.0]);
+    let mut case = Case::new("text");
+    case.paper = (297.0, 210.0);
+    case.wires.push(wire);
+    let assets = PlotAssets {
+        glyphs: Some(snapshot),
+        ..Default::default()
     };
+    let (svg, _) = svg_page_to_string(&case.page(), &assets, &SvgOptions::default())
+        .expect("the page's own snapshot has every glyph");
     let first = svg.find("<path").expect("glyph paths");
     let end = svg[first..].find("/>").unwrap() + first + 2;
     let without = format!("{}{}", &svg[..first], &svg[end..]);
@@ -1552,7 +1719,7 @@ fn a_missing_glyph_hides_from_a_whole_page_rate_but_not_from_the_local_check() {
         "the whole-page rate was supposed to be tiny, it is {page_rate}"
     );
     // The structural comparison, which does not average over the page, says no.
-    let expected = expected_shapes(&record(&case.page()), case.paper.1);
+    let expected = expected_shapes(&record_with(&case.page(), &assets), case.paper.1);
     assert!(compare(&expected, &actual_shapes(&parse(&without), case.paper.0)).is_err());
     // And so does the raster, once the difference is measured where it is
     // instead of spread over a sheet: the ink in the affected region is gone,

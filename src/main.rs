@@ -120,6 +120,7 @@ fn main() -> iced::Result {
                     scale: args.scale.clone(),
                     dry_run: args.dry_run,
                     force: args.force,
+                    allow_missing_glyphs: args.allow_missing_glyphs,
                 },
             );
             std::process::exit(code);

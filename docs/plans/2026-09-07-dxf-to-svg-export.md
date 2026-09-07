@@ -730,3 +730,47 @@ usvg 能直接读**。
 同时排版自己的文字、把图集撑大重排，我这边 quad 的 UV key 就失效了，`emit_text` 于是**静默少画**。
 这正是 R1 描述的失效模式，第一次在测试里现形（用例改成重试，并把原因写在注释里）。真要治，
 得按 R1 做「快照进 `PlotAssets`」加严格模式。
+
+## 15. R1 实施记录（2026-09-08）
+
+**做了什么**（一个提交；P0 的机械抽取早已单独提交，这一笔只动快照的时机与缺字的下场）：
+
+| 层 | 内容 |
+|---|---|
+| `src/io/plot_emit.rs` | `GlyphSnapshot`（`capture` / `of(&atlas)` / `missing_in`）；`PlotAssets.glyphs` + `for_pages` / `stale_glyphs`；`PlotReport { text_items, missing_glyphs, first_missing, atlas_unavailable }` + `MissingGlyph { wire, quad }`；`emit_plot_content` 按 D0 的签名返回 `PlotReport`；`emit_text` 从**页的**快照画，缺 key 计数并点名第一个，锁不上记 `atlas_unavailable` |
+| `src/io/svg_export.rs` | `SvgOptions.missing_glyphs: MissingGlyphs::{Refuse, Report}`（**默认 `Refuse`**）；`SvgError::MissingGlyphs { count, atlas_unavailable, first }`；`SvgReport.missing_glyphs`；`write_svg_page` 在**任何字节到达调用方之前**拒绝——sink 看到的是绘制操作，看不见没画的字，这是唯一能拒的地方 |
+| `src/io/pdf_export.rs` | 收下报告、不看：PDF 历史上一直发布缺字页，把它改成拒绝是 PDF 的决定，不混进这一笔；9 条冻结比较逐位不变 |
+| `src/io/plot_corpus.rs` | `text_wire_with_snapshot`：排版与快照**在同一把锁下**，快照一定持有 quad 携带的每个 key |
+| `src/app/update/file.rs` | `PlotJob { pages, assets }`；`resolve_plot_job` 排完版**当场**取一份任务级快照并对页检查，发现失配就 `bump_geometry` 重排一次再取；`EXPORTSVG` 走 `job.assets`，严格默认，错误进命令行 |
+| `src/app/automation.rs` / `cli.rs` / `main.rs` | `--allow-missing-glyphs`：默认拒绝，给了才写页并在 stderr 打 `warning: N glyph(s) are missing` |
+
+**快照的时机**：任务级——`resolve_plot_job` 在排版的那条线程上、排完版立刻取，所以后台线程出图时
+编辑器继续烘焙字形也动不到它。`PlotAssets.glyphs` 为 `None` 时 emitter 在页的**第一个文本项**处自取
+一次、整页共用（无文字的页不付 `export_table` 的代价——它在图集锁下按字体族重新解析字体）。
+两处都是「一页一份」，不再是原来 `emit_text` 每个渲染组各取一份。
+
+**三种下场**：图集锁不上 → `atlas_unavailable`，严格模式报「the glyph atlas could not be read」；
+key 缺 → 计数 + 第一个的 `wire` 名与 quad 序号，严格模式报「N glyph(s) are missing from the page,
+first on 'wire' at quad k」；宽松（只有 `--allow-missing-glyphs`）→ 照写，`SvgReport.missing_glyphs > 0`，
+CLI 打 warning。**任何入口都不会成功返回一张悄悄少字的图**。
+
+**恢复**：`stale_glyphs > 0` 说明排版期间图集长过一次、早排的 quad 指向已不存在的 tile
+（冷图集上第一张大图正是这种情形），于是重排一次——此时图集已含全部字形，不会再长——再取快照。
+只重排一次；若之后仍失配（理论上不该），任务按严格规则被拒，不循环。
+
+**验收**：
+
+- `io::svg_export` **30/30**（+4）、`app::automation` **22/22**（+2）、`io::pdf_export` **9/9** 逐位不变。
+  全库 `cargo test --lib` 并行**跑三遍**，每遍 676 过 / 1 失败（还是那条无关的
+  `free_text_entry_tests::normal_commands_…`）；§14.4 那条 `a_missing_glyph…` 的重试拆掉了，三遍没有 flake。
+- 新用例钉的是：默认拒绝并点名 wire（`the-label`）；宽松拿到页和计数；**快照说了算而不是活图集**
+  （空快照 + 活图集里有字 → 拒绝）；同锁快照下别的用例并行烘焙不影响（严格通过）；任务携带一份快照且
+  覆盖自己的页、无文字的图不取快照；图集被 `reset`（TEXTFILL 的路）后老任务照样整页、新任务重排后覆盖、
+  两次元素数相同。
+- **11 张真图**在严格默认下全部出图，**11/11 与 §14 的 R3 批次 SHA-256 逐字节相同**——快照只改变从哪个
+  图集状态画，不改变画什么；`--allow-missing-glyphs` 接受且输出与严格相同。
+- clippy 对 R1 的行 0 告警（本工具链新增的 `chunks_exact_to_as_chunks` 在旧行上还响着，没动），
+  wasm 编译过，touched 文件 fmt 过（`automation.rs` 只格式化新代码，同 P2 的口径）。
+
+**没做的**：PDF 仍旧宽松（历史行为）；GUI 没有宽松开关（缺字就是错误，用户只能改图重试），对话框也没有
+相应的 UI；`PlotReport.text_items` 只记录没展示；§14.4 的 R3 剩余项不变。

@@ -123,6 +123,18 @@ impl PlotRequest {
     }
 }
 
+/// A plot job as [`OpenCADStudio::resolve_plot_job`] hands it to a backend:
+/// the pages, and the inputs the emitter would otherwise read from the
+/// environment, fixed at the same moment as the pages.
+pub struct PlotJob {
+    pub pages: Vec<crate::io::pdf_export::PdfPageInput>,
+    /// One glyph snapshot for every page, taken right after the pages were
+    /// laid out and checked against them (R1). A backend that plots on another
+    /// thread draws from this while the editor goes on baking glyphs, and the
+    /// text it draws is the text the pages were laid out with.
+    pub assets: crate::io::plot_emit::PlotAssets,
+}
+
 type LayoutPlotParams = (
     std::sync::Arc<Vec<crate::io::pdf_export::PlotWire>>,
     Vec<crate::scene::model::hatch_model::HatchModel>,
@@ -3295,15 +3307,38 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         result
     }
 
-    /// The pages of a plot job, prepared once for every backend and every
-    /// entry point (D5 of docs/plans/2026-09-07-dxf-to-svg-export.md).
+    /// A plot job, prepared once for every backend and every entry point (D5
+    /// of docs/plans/2026-09-07-dxf-to-svg-export.md).
     ///
     /// Whether the request came from a menu, a command or `--plot-svg`, the
     /// paper, scale, area, offsets, CTB and render options are resolved here,
     /// by the same code, so a plot means the same thing either way. The result
-    /// is a page list any sink can take: `export_pdf_pages` and
-    /// `export_svg_pages` both consume it.
-    pub(crate) fn resolve_plot_job(
+    /// is a page list any sink can take — `export_pdf_pages` and
+    /// `export_svg_pages` both consume it — plus the glyph snapshot the pages'
+    /// text is to be drawn from.
+    ///
+    /// The snapshot is taken here, on the thread that laid the text out, and
+    /// checked against the pages before anything sees them. Glyph quads carry
+    /// the atlas tile they were baked into, and a growth re-scales every tile:
+    /// a cold atlas filling up under a large drawing can do that in the middle
+    /// of laying the drawing out, leaving the quads laid out before the growth
+    /// pointing at tiles that no longer exist. Plotted, those glyphs would be
+    /// missing (R1). When the check finds any, the drawing is laid out once
+    /// more against the atlas as it now stands — it holds every glyph by then,
+    /// so it will not grow again — and the snapshot is taken afresh.
+    pub(crate) fn resolve_plot_job(&mut self, request: &PlotRequest) -> Result<PlotJob, String> {
+        let mut pages = self.resolve_plot_pages(request)?;
+        let mut assets = crate::io::plot_emit::PlotAssets::for_pages(&pages);
+        if assets.stale_glyphs(&pages) > 0 {
+            self.tabs[self.active_tab].scene.bump_geometry();
+            pages = self.resolve_plot_pages(request)?;
+            assets = crate::io::plot_emit::PlotAssets::for_pages(&pages);
+        }
+        Ok(PlotJob { pages, assets })
+    }
+
+    /// The pages of a plot job, laid out against the atlas as it is now.
+    fn resolve_plot_pages(
         &mut self,
         request: &PlotRequest,
     ) -> Result<Vec<crate::io::pdf_export::PdfPageInput>, String> {
@@ -3462,8 +3497,8 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     self.load_plotsettings_into_dialog(&settings);
                 }
             }
-            let pages = match self.resolve_plot_job(&PlotRequest::current_view()) {
-                Ok(pages) => pages,
+            let job = match self.resolve_plot_job(&PlotRequest::current_view()) {
+                Ok(job) => job,
                 Err(error) => {
                     self.command_line.push_error(&error);
                     return Task::none();
@@ -3471,10 +3506,13 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
             };
             let background = self.plot_dialog.background;
             let work = move || {
+                // Strict about text (the default): a page the atlas could not
+                // fully letter comes back as an error naming the wire, not as
+                // a file that looks finished (R1).
                 crate::io::svg_export::export_svg_pages(
-                    &pages,
+                    &job.pages,
                     None,
-                    &crate::io::plot_emit::PlotAssets::default(),
+                    &job.assets,
                     &path,
                     &crate::io::svg_export::SvgWriteOptions {
                         force: true,

@@ -119,6 +119,12 @@ pub struct Cli {
     #[arg(long)]
     pub force: bool,
 
+    /// Let --plot-svg write a page whose text the glyph atlas could not fully
+    /// supply, with a warning saying how many glyphs it lost. Without this
+    /// the page is refused and the error names the first wire affected.
+    #[arg(long)]
+    pub allow_missing_glyphs: bool,
+
     /// Print the layouts of FILE, one per line, and exit.
     #[arg(long, value_name = "FILE")]
     pub list_layouts: Option<PathBuf>,

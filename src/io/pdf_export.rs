@@ -212,8 +212,11 @@ fn append_pdf_page(doc: &mut PdfDocument, page: &PlotPage<'_>) {
 #[cfg(not(target_arch = "wasm32"))]
 fn page_ops(doc: &mut PdfDocument, page: &PlotPage<'_>, assets: &PlotAssets) -> Vec<Op> {
     let mut sink = PdfSink::new(doc);
+    // The PDF backend has always published a page whose text the atlas could
+    // not supply; the report says so, and turning that into a refusal is a
+    // change to PDF behaviour, not to the SVG work that added the report.
     match emit_plot_content(page, assets, &mut sink) {
-        Ok(()) => {}
+        Ok(_report) => {}
         Err(never) => match never {},
     }
     sink.finish()
@@ -711,6 +714,7 @@ mod tests {
             &case.page(),
             &PlotAssets {
                 stamp_label: Some("PINNED".into()),
+                ..Default::default()
             },
         );
         let shown: Vec<&Op> = ops

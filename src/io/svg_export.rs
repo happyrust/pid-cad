@@ -71,6 +71,14 @@ pub enum SvgError {
     Unsupported(&'static str),
     /// A coordinate, length or page dimension that cannot be serialised.
     Invalid(String),
+    /// The page's text is incomplete and the caller asked not to be handed a
+    /// drawing like that (R1).
+    MissingGlyphs {
+        count: usize,
+        atlas_unavailable: bool,
+        /// The wire and quad index of the first one lost.
+        first: Option<(String, usize)>,
+    },
     Io(std::io::Error),
     /// Which page of a multi-page job failed.
     Page {
@@ -93,6 +101,24 @@ impl std::fmt::Display for SvgError {
         match self {
             SvgError::Unsupported(what) => write!(f, "SVG export does not support {what}"),
             SvgError::Invalid(what) => write!(f, "cannot write SVG: {what}"),
+            SvgError::MissingGlyphs {
+                count,
+                atlas_unavailable,
+                first,
+            } => {
+                if *atlas_unavailable {
+                    return write!(
+                        f,
+                        "the glyph atlas could not be read, so the page would \
+                         have carried no text at all"
+                    );
+                }
+                write!(f, "{count} glyph(s) are missing from the page")?;
+                if let Some((wire, quad)) = first {
+                    write!(f, ", first on '{wire}' at quad {quad}")?;
+                }
+                Ok(())
+            }
             SvgError::Io(error) => write!(f, "cannot write SVG: {error}"),
             SvgError::Page { page, source } => write!(f, "page {page}: {source}"),
             #[cfg(not(target_arch = "wasm32"))]
@@ -136,6 +162,19 @@ pub struct SvgOptions {
     /// the emitter produced; a larger scale magnifies the rounding and needs
     /// more digits.
     pub decimals: Option<usize>,
+    /// What to do about text the glyph atlas could not supply (R1).
+    pub missing_glyphs: MissingGlyphs,
+}
+
+/// A drawing whose text is quietly incomplete looks fine and is not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MissingGlyphs {
+    /// Refuse the page and name the first quad that was lost.
+    #[default]
+    Refuse,
+    /// Write the page anyway and count them in the report — for a caller who
+    /// would rather have the drawing and the warning than nothing.
+    Report,
 }
 
 /// What the writer had to do, for the caller to report or refuse.
@@ -153,6 +192,10 @@ pub struct SvgReport {
     /// Meshes whose triangles did not form a clean manifold and were written
     /// as one path of triangle sub-paths instead.
     pub mesh_fallbacks: usize,
+    /// Glyph quads the atlas had no geometry for. Non-zero only when the
+    /// caller asked for [`MissingGlyphs::Report`]; otherwise the page is
+    /// refused instead.
+    pub missing_glyphs: usize,
 }
 
 /// Write one plotted page as an SVG document.
@@ -163,7 +206,17 @@ pub fn write_svg_page<W: std::io::Write>(
     out: &mut W,
 ) -> Result<SvgReport, SvgError> {
     let mut sink = SvgSink::new(page, options)?;
-    emit_plot_content(page, assets, &mut sink)?;
+    let plot = emit_plot_content(page, assets, &mut sink)?;
+    // Before a byte reaches the caller: the sink cannot see text that was
+    // never drawn, so this is the only place that can refuse it (R1).
+    if options.missing_glyphs == MissingGlyphs::Refuse && plot.text_is_incomplete() {
+        return Err(SvgError::MissingGlyphs {
+            count: plot.missing_glyphs,
+            atlas_unavailable: plot.atlas_unavailable,
+            first: plot.first_missing.map(|m| (m.wire, m.quad)),
+        });
+    }
+    sink.report.missing_glyphs = plot.missing_glyphs;
     sink.finish(out)
 }
 
