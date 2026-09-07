@@ -1109,6 +1109,9 @@ fn loose_prims(
     used_circles: &HashSet<Handle>,
 ) -> Loose {
     let mm = |v: f64| v / upm;
+    // Strokes short enough for a symbol, with their axis run if straight;
+    // pipe runs go straight to `out.runs`.
+    let mut kept: Vec<(Prim, Option<AxisRun>)> = Vec::new();
     let mut out = Loose {
         prims: Vec::new(),
         runs: Vec::new(),
@@ -1214,17 +1217,73 @@ fn loose_prims(
         // stub length: pipe (or an instrument leader), not symbol.
         let pipe = (prim.kind != PrimKind::Circle && prim.longest_segment() > rules.max_stroke_mm)
             || (rules.pipe_stub_mm > 0.0 && run.is_some_and(|r| r.len() > rules.pipe_stub_mm));
-        if let Some(run) = run {
-            out.runs.push(SheetRun {
-                run,
-                prim: (!pipe).then_some(out.prims.len()),
-            });
-        }
-        if !pipe {
-            out.prims.push(prim);
+        if pipe {
+            if let Some(run) = run {
+                out.runs.push(SheetRun { run, prim: None });
+            }
+        } else {
+            kept.push((prim, run));
         }
     }
+    let (prims, runs): (Vec<Prim>, Vec<Option<AxisRun>>) = kept.into_iter().unzip();
+    let (prims, index) = dedupe(prims, rules.touch_mm);
+    for (old, run) in runs.into_iter().enumerate() {
+        if let (Some(run), Some(prim)) = (run, index[old]) {
+            out.runs.push(SheetRun {
+                run,
+                prim: Some(prim),
+            });
+        }
+    }
+    out.prims = prims;
     out
+}
+
+/// Whether two strokes are the same drawing: same kind of mark, same points
+/// (either way round, within `eps`), same radius.
+fn same_stroke(a: &Prim, b: &Prim, eps: f64) -> bool {
+    if a.kind.letter() != b.kind.letter() || a.pts.len() != b.pts.len() || (a.r - b.r).abs() > eps {
+        return false;
+    }
+    let close = |p: Point, q: Point| (p.0 - q.0).abs() <= eps && (p.1 - q.1).abs() <= eps;
+    a.pts.iter().zip(&b.pts).all(|(&p, &q)| close(p, q))
+        || a.pts
+            .iter()
+            .zip(b.pts.iter().rev())
+            .all(|(&p, &q)| close(p, q))
+}
+
+/// Drop strokes drawn twice over: a line on top of an identical polyline, a
+/// diagonal repeated. A symbol with one of its lines doubled then has the id
+/// of the symbol drawn once, and a doubled piece of pipe between two valves
+/// is one piece, so taking it out does part them. Returns the strokes kept
+/// and, per input stroke, its new index (`None` = dropped).
+fn dedupe(prims: Vec<Prim>, eps: f64) -> (Vec<Prim>, Vec<Option<usize>>) {
+    let mut order: Vec<usize> = (0..prims.len()).collect();
+    order.sort_by(|&a, &b| prims[a].bbox.0.total_cmp(&prims[b].bbox.0));
+    let mut dropped = vec![false; prims.len()];
+    for (n, &i) in order.iter().enumerate() {
+        if dropped[i] {
+            continue;
+        }
+        for &j in &order[n + 1..] {
+            if prims[j].bbox.0 - prims[i].bbox.0 > eps {
+                break;
+            }
+            if !dropped[j] && same_stroke(&prims[i], &prims[j], eps) {
+                dropped[j] = true;
+            }
+        }
+    }
+    let mut index = vec![None; prims.len()];
+    let mut out = Vec::with_capacity(prims.len());
+    for (i, prim) in prims.into_iter().enumerate() {
+        if !dropped[i] {
+            index[i] = Some(out.len());
+            out.push(prim);
+        }
+    }
+    (out, index)
 }
 
 fn point_segment_distance(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
@@ -1466,12 +1525,13 @@ fn split_at_bridges(
 
 /// Drop the pipe left touching a symbol: a straight axis-aligned stroke
 /// attached to the rest at one end only, whose free end sticks out past the
-/// rest along its own axis while it runs through the rest's body -- the
-/// pipe entering the symbol -- and whose free end touches no recognised
-/// circle (a stem to an actuator mark or a drain point looks the same and is
-/// part of the symbol). Done until nothing changes, so a stub drawn in two
-/// pieces goes too. A symbol so has one id whatever length of pipe was drawn
-/// against it.
+/// rest along its own axis while it lies within the rest's width -- the
+/// pipe entering the symbol, or turning a corner at its edge -- and whose
+/// free end touches no recognised circle (a stem to an actuator mark or a
+/// drain point looks the same and is part of the symbol). A tick at the
+/// symbol's edge ends where the body ends and so does not stick out. Done
+/// until nothing changes, so a stub drawn in two pieces goes too. A symbol
+/// so has one id whatever length of pipe was drawn against it.
 fn trim_pipe_stubs(
     prims: &[Prim],
     mut idxs: Vec<usize>,
@@ -1500,16 +1560,17 @@ fn trim_pipe_stubs(
             let Some(core) = group_bbox(prims, &rest) else {
                 return false;
             };
-            let ((lo, hi), _) = extents(core, run.axis);
+            let ((lo, hi), (across_lo, across_hi)) = extents(core, run.axis);
             let along = match run.axis {
                 Axis::Horizontal => free.0,
                 Axis::Vertical => free.1,
             };
             let sticks_out = along < lo - eps || along > hi + eps;
+            let within = run.at >= across_lo - eps && run.at <= across_hi + eps;
             let to_a_circle = circles
                 .iter()
                 .any(|&(c, r)| ((free.0 - c.0).hypot(free.1 - c.1) - r).abs() <= STEM_END_MM);
-            sticks_out && run.through(core, eps) && !to_a_circle
+            sticks_out && within && !to_a_circle
         });
         match stub {
             Some(at) => {

@@ -534,11 +534,14 @@ fn piped_sheet() -> CadDocument {
     doc.add_entity(layered(line(0.0, 0.0, 0.0, 297.0), "A"))
         .unwrap();
 
-    // Pipe run, check valve, 1.5 mm of pipe, ball valve, 1.5 mm stub, pipe run.
+    // Pipe run, check valve, 1.5 mm of pipe -- drawn twice over, as the
+    // sheets do -- ball valve, 1.5 mm stub, pipe run.
     doc.add_entity(layered(line(10.0, 20.0, 17.8, 20.0), "0"))
         .unwrap();
     bowtie(&mut doc, 19.0, 20.0, |(x, y)| (x, y));
     doc.add_entity(layered(line(20.2, 20.0, 21.7, 20.0), "0"))
+        .unwrap();
+    doc.add_entity(layered(line(21.7, 20.0, 20.2, 20.0), "1"))
         .unwrap();
     ball_valve(&mut doc, 23.1, 20.0, |(x, y)| (x, y));
     doc.add_entity(layered(line(24.5, 20.0, 26.0, 20.0), "0"))
@@ -562,6 +565,9 @@ fn piped_sheet() -> CadDocument {
         .unwrap();
     ball_valve(&mut doc, 100.0, 50.0, |(x, y)| (x, y));
     doc.add_entity(layered(line(101.4, 50.0, 102.2, 50.0), "0"))
+        .unwrap();
+    // ... this one with a half-diagonal drawn twice.
+    doc.add_entity(layered(line(98.6, 49.3, 99.6422, 49.8211), "DEVICE"))
         .unwrap();
 
     // A valve on a pipe run with a 2 mm stem up from its centre to a
@@ -1014,7 +1020,7 @@ fn cpecc_sp02_10_joined_symbols_come_apart_and_are_named() {
         .iter()
         .map(|u| u.id.as_str())
         .collect();
-    for named in ["5311cc3f", "7bc421fd", "c1f16b9d", "a94ece16", "f3f9a2ff"] {
+    for named in ["5311cc3f", "7bc421fd", "6852c808", "a94ece16", "f3f9a2ff"] {
         assert!(
             !still_unknown.contains(&named),
             "{named} is in the dictionary"
