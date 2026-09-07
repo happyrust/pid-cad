@@ -246,6 +246,12 @@ pub struct ShapeRules {
     /// symbols: a tag left over after the one-to-one pass may join one that
     /// is already claimed, and the box then lists every tag. 0 turns this off.
     pub assembly_mm: f64,
+    /// Take the pipe out of a component: drop the stubs of pipe left touching
+    /// a symbol, and cut at a piece of pipe joining two symbols (a valve and
+    /// the strainer beside it) when each side has at least this many strokes.
+    /// A symbol then has one id whatever pipe was drawn against it. 0 leaves
+    /// components as they connect.
+    pub split_min_strokes: usize,
     /// Shape id -> what it is. Ids come from the report (`UNKNOWN SHAPE`).
     /// Class [`IGNORE_CLASS`] drops the shape: neither boxed nor reported
     /// (the square a panel bubble sits in is not a symbol of its own).
@@ -270,6 +276,7 @@ impl Default for ShapeRules {
             quantum_mm: 0.1,
             min_count: 2,
             assembly_mm: 0.0,
+            split_min_strokes: 0,
             dictionary: BTreeMap::new(),
         }
     }
@@ -976,16 +983,107 @@ impl Prim {
             .fold(0.0, f64::max)
     }
 
-    /// A single straight stroke running along one axis, longer than `min`.
-    fn is_axis_run(&self, min: f64) -> bool {
-        if min <= 0.0 || self.pts.len() != 2 {
-            return false;
+    /// This stroke as a single straight run along one axis, if it is one.
+    fn axis_run(&self) -> Option<AxisRun> {
+        if !matches!(self.kind, PrimKind::Line | PrimKind::Poly) || self.pts.len() != 2 {
+            return None;
         }
-        let (a, b) = (self.pts[0], self.pts[1]);
-        let (dx, dy) = ((b.0 - a.0).abs(), (b.1 - a.1).abs());
-        let aligned = dx <= 1e-3 * dy.max(1.0) || dy <= 1e-3 * dx.max(1.0);
-        aligned && dx.max(dy) > min
+        AxisRun::of(self.pts[0], self.pts[1])
     }
+}
+
+type Point = (f64, f64);
+type BBox = (f64, f64, f64, f64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    Horizontal,
+    Vertical,
+}
+
+impl Axis {
+    fn other(self) -> Axis {
+        match self {
+            Axis::Horizontal => Axis::Vertical,
+            Axis::Vertical => Axis::Horizontal,
+        }
+    }
+}
+
+/// A straight stroke along one axis: where it sits across that axis (`at`)
+/// and how far it runs along it (`lo..hi`), paper mm.
+#[derive(Clone, Copy)]
+struct AxisRun {
+    axis: Axis,
+    at: f64,
+    lo: f64,
+    hi: f64,
+}
+
+/// A stroke runs along an axis when it strays from it by no more than this
+/// (or a thousandth of its length): a pipe snapped a hair off square is
+/// still a pipe.
+const AXIS_SLACK_MM: f64 = 0.05;
+
+impl AxisRun {
+    fn of(a: Point, b: Point) -> Option<AxisRun> {
+        let (dx, dy) = ((b.0 - a.0).abs(), (b.1 - a.1).abs());
+        let slack = AXIS_SLACK_MM.max(1e-3 * dx.max(dy));
+        if dx > dy && dy <= slack {
+            Some(AxisRun {
+                axis: Axis::Horizontal,
+                at: (a.1 + b.1) / 2.0,
+                lo: a.0.min(b.0),
+                hi: a.0.max(b.0),
+            })
+        } else if dy > dx && dx <= slack {
+            Some(AxisRun {
+                axis: Axis::Vertical,
+                at: (a.0 + b.0) / 2.0,
+                lo: a.1.min(b.1),
+                hi: a.1.max(b.1),
+            })
+        } else {
+            None
+        }
+    }
+
+    fn len(&self) -> f64 {
+        self.hi - self.lo
+    }
+
+    /// Whether this run sits strictly within a box's width across the axis:
+    /// through the body, not along one of its edges.
+    fn through(&self, bbox: BBox, eps: f64) -> bool {
+        let (_, (lo, hi)) = extents(bbox, self.axis);
+        self.at > lo + eps && self.at < hi - eps
+    }
+}
+
+/// The extent of `bbox` along `axis`, and across it.
+fn extents(bbox: BBox, axis: Axis) -> ((f64, f64), (f64, f64)) {
+    match axis {
+        Axis::Horizontal => ((bbox.0, bbox.2), (bbox.1, bbox.3)),
+        Axis::Vertical => ((bbox.1, bbox.3), (bbox.0, bbox.2)),
+    }
+}
+
+/// An axis-aligned straight stroke of the sheet, whether or not it is short
+/// enough to be part of a symbol; `prim` indexes it in the loose strokes
+/// when it is.
+struct SheetRun {
+    run: AxisRun,
+    prim: Option<usize>,
+}
+
+/// What [`loose_prims`] takes from a sheet.
+struct Loose {
+    /// Strokes short enough to be part of a symbol.
+    prims: Vec<Prim>,
+    /// Every straight axis-aligned stroke, pipe runs included.
+    runs: Vec<SheetRun>,
+    /// Circles already recognised as symbols, `(centre, radius)`.
+    circles: Vec<(Point, f64)>,
 }
 
 fn arc_points(c: (f64, f64), r: f64, start: f64, end: f64, n: usize) -> Vec<(f64, f64)> {
@@ -1002,15 +1100,20 @@ fn arc_points(c: (f64, f64), r: f64, start: f64, end: f64, n: usize) -> Vec<(f64
         .collect()
 }
 
-/// The loose strokes of a sheet that can be part of an exploded symbol.
+/// The loose strokes of a sheet that can be part of an exploded symbol, with
+/// the pipe runs and recognised circles that say where the pipe goes.
 fn loose_prims(
     doc: &CadDocument,
     upm: f64,
     rules: &ShapeRules,
     used_circles: &HashSet<Handle>,
-) -> Vec<Prim> {
+) -> Loose {
     let mm = |v: f64| v / upm;
-    let mut out = Vec::new();
+    let mut out = Loose {
+        prims: Vec::new(),
+        runs: Vec::new(),
+        circles: Vec::new(),
+    };
     for entity in doc.model_space_entities() {
         let layer = entity.common().layer.as_str();
         if is_legend_layer(layer) || rules.skip_layers.iter().any(|l| l == layer) {
@@ -1046,10 +1149,17 @@ fn loose_prims(
             }
             EntityType::Circle(c) => {
                 let r = mm(c.radius);
-                if used_circles.contains(&c.common.handle) || r > rules.max_circle_mm {
+                let centre = (mm(c.center.x), mm(c.center.y));
+                if used_circles.contains(&c.common.handle) {
+                    if sane(centre.0) && sane(centre.1) && sane(r) {
+                        out.circles.push((centre, r));
+                    }
                     continue;
                 }
-                Prim::new(PrimKind::Circle, vec![(mm(c.center.x), mm(c.center.y))], r)
+                if r > rules.max_circle_mm {
+                    continue;
+                }
+                Prim::new(PrimKind::Circle, vec![centre], r)
             }
             EntityType::Arc(a) => {
                 let r = mm(a.radius);
@@ -1096,18 +1206,23 @@ fn loose_prims(
         let Some(prim) = prim else {
             continue;
         };
-        if prim.kind != PrimKind::Circle && prim.longest_segment() > rules.max_stroke_mm {
-            continue;
-        }
-        if matches!(prim.kind, PrimKind::Line | PrimKind::Poly)
-            && prim.is_axis_run(rules.pipe_stub_mm)
-        {
-            continue;
-        }
         if !(sane(prim.bbox.0) && sane(prim.bbox.1) && sane(prim.bbox.2) && sane(prim.bbox.3)) {
             continue;
         }
-        out.push(prim);
+        let run = prim.axis_run();
+        // Too long for a symbol stroke, or a straight axis run past the pipe
+        // stub length: pipe (or an instrument leader), not symbol.
+        let pipe = (prim.kind != PrimKind::Circle && prim.longest_segment() > rules.max_stroke_mm)
+            || (rules.pipe_stub_mm > 0.0 && run.is_some_and(|r| r.len() > rules.pipe_stub_mm));
+        if let Some(run) = run {
+            out.runs.push(SheetRun {
+                run,
+                prim: (!pipe).then_some(out.prims.len()),
+            });
+        }
+        if !pipe {
+            out.prims.push(prim);
+        }
     }
     out
 }
@@ -1219,7 +1334,191 @@ fn components(prims: &[Prim], eps: f64) -> Vec<Vec<usize>> {
     groups.into_values().collect()
 }
 
-type Point = (f64, f64);
+/// Box of a set of strokes.
+fn group_bbox(prims: &[Prim], idxs: &[usize]) -> Option<BBox> {
+    let mut bbox = None;
+    for &i in idxs {
+        let b = prims[i].bbox;
+        grow(&mut bbox, b.0, b.1);
+        grow(&mut bbox, b.2, b.3);
+    }
+    bbox
+}
+
+/// Connected parts of `idxs` when `without` is taken out, by the touch
+/// relation among the remaining strokes.
+fn parts_without(prims: &[Prim], idxs: &[usize], without: usize, eps: f64) -> Vec<Vec<usize>> {
+    let rest: Vec<usize> = idxs.iter().copied().filter(|&i| i != without).collect();
+    let mut seen = vec![false; rest.len()];
+    let mut parts = Vec::new();
+    for start in 0..rest.len() {
+        if seen[start] {
+            continue;
+        }
+        let mut part = vec![rest[start]];
+        seen[start] = true;
+        let mut queue = vec![start];
+        while let Some(a) = queue.pop() {
+            for b in 0..rest.len() {
+                if !seen[b] && touches(&prims[rest[a]], &prims[rest[b]], eps) {
+                    seen[b] = true;
+                    part.push(rest[b]);
+                    queue.push(b);
+                }
+            }
+        }
+        parts.push(part);
+    }
+    parts
+}
+
+/// A part cut off a component must be at least this wide and this tall to
+/// count as a symbol rather than a bit of pipe or a tick.
+const MIN_PART_SIDE_MM: f64 = 0.5;
+
+/// A run reaching within this of a box's edge enters it.
+const REACH_MM: f64 = 0.2;
+
+/// A stub whose free end lies within this of a recognised circle's rim is a
+/// stem to that circle (an actuator mark, a drain point), not pipe.
+const STEM_END_MM: f64 = 0.1;
+
+/// Whether point `p` lies on stroke `q` (within `eps`).
+fn point_on_prim(p: Point, q: &Prim, eps: f64) -> bool {
+    if q.kind == PrimKind::Circle {
+        let d = (p.0 - q.pts[0].0).hypot(p.1 - q.pts[0].1);
+        return (d - q.r).abs() <= eps;
+    }
+    q.pts
+        .windows(2)
+        .any(|w| point_segment_distance(p, w[0], w[1]) <= eps)
+}
+
+/// Whether a straight run along `axis` that is not one of the part's own
+/// strokes (`own`) enters the part from outside: it lies within the part's
+/// width across the axis and reaches either of its edges along the axis, or
+/// passes straight through. That is a pipe (or an instrument leader) drawn
+/// into the symbol.
+fn threaded(
+    runs: &[SheetRun],
+    own: impl Fn(usize) -> bool,
+    bbox: BBox,
+    axis: Axis,
+    eps: f64,
+) -> bool {
+    let ((lo, hi), _) = extents(bbox, axis);
+    runs.iter().any(|r| {
+        r.run.axis == axis
+            && r.prim.is_none_or(|i| !own(i))
+            && r.run.through(bbox, eps)
+            && (((r.run.hi - lo).abs() <= REACH_MM && r.run.lo < lo)
+                || ((r.run.lo - hi).abs() <= REACH_MM && r.run.hi > hi)
+                || (r.run.lo <= lo + REACH_MM && r.run.hi >= hi - REACH_MM))
+    })
+}
+
+/// Cut a component where a piece of pipe joins two symbols: a straight
+/// axis-aligned stroke whose removal leaves at least two parts of
+/// `min_strokes` strokes and some width and height, running through the
+/// body of each part rather than along an edge -- unless the pipe enters one
+/// of those parts the other way, in which case the stroke is a stem or a
+/// branch and belongs to the symbol. The pipe piece is dropped and each part
+/// is cut again the same way.
+fn split_at_bridges(
+    prims: &[Prim],
+    runs: &[SheetRun],
+    idxs: Vec<usize>,
+    min_strokes: usize,
+    eps: f64,
+) -> Vec<Vec<usize>> {
+    if min_strokes == 0 || idxs.len() < 2 * min_strokes + 1 {
+        return vec![idxs];
+    }
+    for &candidate in &idxs {
+        let Some(bridge) = prims[candidate].axis_run() else {
+            continue;
+        };
+        let parts = parts_without(prims, &idxs, candidate, eps);
+        let substantial: Vec<(&Vec<usize>, BBox)> = parts
+            .iter()
+            .filter_map(|part| {
+                let bbox = group_bbox(prims, part)?;
+                let side = (bbox.2 - bbox.0).min(bbox.3 - bbox.1);
+                (part.len() >= min_strokes && side >= MIN_PART_SIDE_MM).then_some((part, bbox))
+            })
+            .collect();
+        if substantial.len() < 2 || !substantial.iter().all(|(_, b)| bridge.through(*b, eps)) {
+            continue;
+        }
+        let crossed = substantial.iter().any(|(part, bbox)| {
+            threaded(runs, |i| part.contains(&i), *bbox, bridge.axis.other(), eps)
+        });
+        if crossed {
+            continue;
+        }
+        return parts
+            .into_iter()
+            .flat_map(|part| split_at_bridges(prims, runs, part, min_strokes, eps))
+            .collect();
+    }
+    vec![idxs]
+}
+
+/// Drop the pipe left touching a symbol: a straight axis-aligned stroke
+/// attached to the rest at one end only, whose free end sticks out past the
+/// rest along its own axis while it runs through the rest's body -- the
+/// pipe entering the symbol -- and whose free end touches no recognised
+/// circle (a stem to an actuator mark or a drain point looks the same and is
+/// part of the symbol). Done until nothing changes, so a stub drawn in two
+/// pieces goes too. A symbol so has one id whatever length of pipe was drawn
+/// against it.
+fn trim_pipe_stubs(
+    prims: &[Prim],
+    mut idxs: Vec<usize>,
+    circles: &[(Point, f64)],
+    eps: f64,
+) -> Vec<usize> {
+    loop {
+        if idxs.len() < 2 {
+            return idxs;
+        }
+        let stub = idxs.iter().position(|&i| {
+            let p = &prims[i];
+            let Some(run) = p.axis_run() else {
+                return false;
+            };
+            let attached = |e: Point| {
+                idxs.iter()
+                    .any(|&j| j != i && point_on_prim(e, &prims[j], eps))
+            };
+            let free = match (attached(p.pts[0]), attached(p.pts[1])) {
+                (true, false) => p.pts[1],
+                (false, true) => p.pts[0],
+                _ => return false,
+            };
+            let rest: Vec<usize> = idxs.iter().copied().filter(|&j| j != i).collect();
+            let Some(core) = group_bbox(prims, &rest) else {
+                return false;
+            };
+            let ((lo, hi), _) = extents(core, run.axis);
+            let along = match run.axis {
+                Axis::Horizontal => free.0,
+                Axis::Vertical => free.1,
+            };
+            let sticks_out = along < lo - eps || along > hi + eps;
+            let to_a_circle = circles
+                .iter()
+                .any(|&(c, r)| ((free.0 - c.0).hypot(free.1 - c.1) - r).abs() <= STEM_END_MM);
+            sticks_out && run.through(core, eps) && !to_a_circle
+        });
+        match stub {
+            Some(at) => {
+                idxs.remove(at);
+            }
+            None => return idxs,
+        }
+    }
+}
 
 /// The eight symmetries of the square.
 const SYMMETRIES: [fn(Point) -> Point; 8] = [
@@ -1337,19 +1636,31 @@ fn exploded_symbols(
     lettering: &[Lettering],
     taken_text: &mut [bool],
 ) -> Exploded {
-    let prims = loose_prims(doc, upm, shape_rules, used_circles);
+    let loose = loose_prims(doc, upm, shape_rules, used_circles);
+    let prims = loose.prims.as_slice();
     let mut comps: Vec<Component> = Vec::new();
-    for idxs in components(&prims, shape_rules.touch_mm) {
-        if idxs.len() < 2 && prims[idxs[0]].kind != PrimKind::Circle {
+    let eps = shape_rules.touch_mm;
+    let min_strokes = shape_rules.split_min_strokes;
+    // Take the pipe out: stubs off each component, then a cut wherever a
+    // piece of pipe joins two symbols, then the stubs that cut left behind.
+    let trim = |idxs: Vec<usize>| {
+        if min_strokes > 0 {
+            trim_pipe_stubs(prims, idxs, &loose.circles, eps)
+        } else {
+            idxs
+        }
+    };
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for group in components(prims, eps) {
+        for part in split_at_bridges(prims, &loose.runs, trim(group), min_strokes, eps) {
+            groups.push(trim(part));
+        }
+    }
+    for idxs in groups {
+        if idxs.is_empty() || (idxs.len() < 2 && prims[idxs[0]].kind != PrimKind::Circle) {
             continue;
         }
-        let mut bbox = None;
-        for &i in &idxs {
-            let b = prims[i].bbox;
-            grow(&mut bbox, b.0, b.1);
-            grow(&mut bbox, b.2, b.3);
-        }
-        let Some(bbox) = bbox else {
+        let Some(bbox) = group_bbox(prims, &idxs) else {
             continue;
         };
         let (w, h) = (bbox.2 - bbox.0, bbox.3 - bbox.1);
@@ -1358,7 +1669,7 @@ fn exploded_symbols(
             continue;
         }
         let centre = ((bbox.0 + bbox.2) / 2.0, (bbox.1 + bbox.3) / 2.0);
-        let sig = signature(&prims, &idxs, centre, shape_rules.quantum_mm);
+        let sig = signature(prims, &idxs, centre, shape_rules.quantum_mm);
         let hash = fnv1a(sig.as_bytes());
         comps.push(Component {
             bbox,
@@ -1930,6 +2241,28 @@ mod tests {
         assert_eq!(id(&upright), id(&quarter));
         assert_eq!(id(&upright), id(&mirrored));
         assert_ne!(id(&upright), id(&other), "a wider valve is another shape");
+    }
+
+    #[test]
+    fn a_stroke_a_hair_off_square_is_still_an_axis_run() {
+        let run = AxisRun::of((275.47, 241.07), (277.35, 241.03)).expect("0.04 mm off over 1.9 mm");
+        assert_eq!(run.axis, Axis::Horizontal);
+        assert!((run.len() - 1.88).abs() < 1e-9);
+        assert!((run.at - 241.05).abs() < 1e-9);
+        assert!(
+            AxisRun::of((0.0, 0.0), (1.0, 0.3)).is_none(),
+            "a slope is not a run"
+        );
+        assert!(
+            AxisRun::of((1.0, 1.0), (1.0, 1.0)).is_none(),
+            "nor is a point"
+        );
+        let v = AxisRun::of((5.0, 9.0), (5.02, 1.0)).unwrap();
+        assert_eq!(v.axis, Axis::Vertical);
+        assert!((v.at - 5.01).abs() < 1e-9 && v.lo == 1.0 && v.hi == 9.0);
+        // Through a box's body, not along its edge.
+        assert!(v.through((4.0, 0.0, 6.0, 10.0), 0.05));
+        assert!(!v.through((5.0, 0.0, 6.0, 10.0), 0.05));
     }
 
     #[test]

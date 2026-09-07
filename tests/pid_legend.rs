@@ -322,6 +322,33 @@ fn bowtie(doc: &mut CadDocument, x: f64, y: f64, turn: fn((f64, f64)) -> (f64, f
     }
 }
 
+/// A ball valve the way the loading-island sheets draw one: two uprights
+/// 2.8 mm apart, a 0.4 mm ball in the middle, and four half-diagonals from
+/// the corners to the ball's rim. Seven strokes about (x, y), turned by
+/// `turn`.
+fn ball_valve(doc: &mut CadDocument, x: f64, y: f64, turn: fn((f64, f64)) -> (f64, f64)) {
+    let p = |dx: f64, dy: f64| {
+        let (tx, ty) = turn((dx, dy));
+        (x + tx, y + ty)
+    };
+    // A corner is 1.565 mm from the centre; the rim point on the way to it
+    // is 0.4 mm out along the same direction.
+    let (rx, ry) = (0.4 * 1.4 / 1.565, 0.4 * 0.7 / 1.565);
+    for (a, b) in [
+        (p(-1.4, -0.7), p(-1.4, 0.7)),
+        (p(1.4, -0.7), p(1.4, 0.7)),
+        (p(-1.4, -0.7), p(-rx, -ry)),
+        (p(-1.4, 0.7), p(-rx, ry)),
+        (p(1.4, -0.7), p(rx, -ry)),
+        (p(1.4, 0.7), p(rx, ry)),
+    ] {
+        doc.add_entity(layered(line(a.0, a.1, b.0, b.1), "DEVICE"))
+            .unwrap();
+    }
+    doc.add_entity(layered(circle(x, y, 0.4), "DEVICE"))
+        .unwrap();
+}
+
 /// A triangle of three touching lines, 2 mm, about (x, y).
 fn triangle(doc: &mut CadDocument, x: f64, y: f64) {
     for (a, b) in [
@@ -494,6 +521,159 @@ fn the_shape_dictionary_names_or_drops_a_shape_by_its_id() {
     assert_eq!(count(&dropped, "vent-hood"), 0);
     assert!(dropped.unknown_shapes.is_empty());
     assert_eq!(dropped.symbols.len(), first.symbols.len() - 3);
+}
+
+/// A sheet whose symbols touch the pipe they sit on: a check valve and a
+/// ball valve joined by a 1.5 mm piece of pipe, three ball valves each with a
+/// different length of pipe stub left touching them, and a valve with a stem
+/// up to a two-stroke actuator, on a pipe run.
+fn piped_sheet() -> CadDocument {
+    let mut doc = CadDocument::new();
+    doc.add_entity(layered(line(0.0, 0.0, 420.0, 0.0), "A"))
+        .unwrap();
+    doc.add_entity(layered(line(0.0, 0.0, 0.0, 297.0), "A"))
+        .unwrap();
+
+    // Pipe run, check valve, 1.5 mm of pipe, ball valve, 1.5 mm stub, pipe run.
+    doc.add_entity(layered(line(10.0, 20.0, 17.8, 20.0), "0"))
+        .unwrap();
+    bowtie(&mut doc, 19.0, 20.0, |(x, y)| (x, y));
+    doc.add_entity(layered(line(20.2, 20.0, 21.7, 20.0), "0"))
+        .unwrap();
+    ball_valve(&mut doc, 23.1, 20.0, |(x, y)| (x, y));
+    doc.add_entity(layered(line(24.5, 20.0, 26.0, 20.0), "0"))
+        .unwrap();
+    doc.add_entity(layered(line(26.0, 20.0, 40.0, 20.0), "0"))
+        .unwrap();
+    doc.add_entity(layered(text("CV0301", 17.5, 22.3), "DEVICE"))
+        .unwrap();
+    doc.add_entity(layered(text("BV0301", 23.5, 22.5), "DEVICE"))
+        .unwrap();
+
+    // The same ball valve three times, untagged, with 1.0, 2.2 and 0.8 mm of
+    // pipe left touching it -- one of them turned a quarter.
+    doc.add_entity(layered(line(50.0, 50.0, 57.6, 50.0), "0"))
+        .unwrap();
+    doc.add_entity(layered(line(57.6, 50.0, 58.6, 50.0), "0"))
+        .unwrap();
+    ball_valve(&mut doc, 60.0, 50.0, |(x, y)| (x, y));
+    ball_valve(&mut doc, 80.0, 50.0, |(x, y)| (-y, x));
+    doc.add_entity(layered(line(80.0, 51.4, 80.0, 53.6), "0"))
+        .unwrap();
+    ball_valve(&mut doc, 100.0, 50.0, |(x, y)| (x, y));
+    doc.add_entity(layered(line(101.4, 50.0, 102.2, 50.0), "0"))
+        .unwrap();
+
+    // A valve on a pipe run with a 2 mm stem up from its centre to a
+    // three-line actuator: one symbol, the stem is not pipe.
+    doc.add_entity(layered(line(50.0, 80.0, 58.8, 80.0), "0"))
+        .unwrap();
+    doc.add_entity(layered(line(61.2, 80.0, 70.0, 80.0), "0"))
+        .unwrap();
+    bowtie(&mut doc, 60.0, 80.0, |(x, y)| (x, y));
+    doc.add_entity(layered(line(60.0, 80.0, 60.0, 82.0), "DEVICE"))
+        .unwrap();
+    for (a, b) in [
+        ((59.3, 82.0), (60.7, 82.0)),
+        ((60.7, 82.0), (60.0, 83.2)),
+        ((60.0, 83.2), (59.3, 82.0)),
+    ] {
+        doc.add_entity(layered(line(a.0, a.1, b.0, b.1), "DEVICE"))
+            .unwrap();
+    }
+    doc.add_entity(layered(text("GV0301", 62.5, 82.5), "DEVICE"))
+        .unwrap();
+    doc
+}
+
+fn shape_id(symbol: &pid_legend::Recognized) -> &str {
+    symbol
+        .source
+        .strip_prefix("shape ")
+        .and_then(|s| s.split(' ').next())
+        .unwrap_or_else(|| panic!("not an exploded shape: {}", symbol.source))
+}
+
+#[test]
+fn pipe_is_cut_away_from_exploded_symbols_and_a_stem_is_not() {
+    let doc = piped_sheet();
+    let rules = Rules::builtin();
+    let recognition = pid_legend::recognise(&doc, &rules);
+    assert_eq!(recognition.units_per_mm, 1.0);
+
+    // Two symbols joined by a piece of pipe are two symbols, each its own tag.
+    let check = recognition
+        .symbols
+        .iter()
+        .find(|s| s.class == "check-valve")
+        .expect("check valve");
+    assert_eq!(check.tag.as_deref(), Some("CV0301"));
+    assert!(
+        (check.bbox.0 - 17.8).abs() < 0.01 && (check.bbox.2 - 20.2).abs() < 0.01,
+        "the pipe piece is not part of the check valve: {:?}",
+        check.bbox
+    );
+    assert_eq!(
+        count(&recognition, "ball-valve"),
+        1,
+        "{:?}",
+        recognition.symbols
+    );
+    let ball = recognition
+        .symbols
+        .iter()
+        .find(|s| s.class == "ball-valve")
+        .unwrap();
+    assert_eq!(ball.tag.as_deref(), Some("BV0301"));
+    assert!(
+        (ball.bbox.0 - 21.7).abs() < 0.01 && (ball.bbox.2 - 24.5).abs() < 0.01,
+        "neither the pipe piece nor the stub is part of the ball valve: {:?}",
+        ball.bbox
+    );
+    assert!(ball.source.contains("(7 strokes)"), "{}", ball.source);
+
+    // Whatever pipe was drawn touching it, and however it is turned, a ball
+    // valve has the id of the tagged one.
+    assert_eq!(
+        recognition.unknown_shapes.len(),
+        1,
+        "{:?}",
+        recognition.unknown_shapes
+    );
+    let repeated = &recognition.unknown_shapes[0];
+    assert_eq!(repeated.count, 3);
+    assert_eq!(repeated.strokes, 7);
+    assert_eq!(repeated.id, shape_id(ball));
+    let boxed: Vec<&pid_legend::Recognized> = recognition
+        .symbols
+        .iter()
+        .filter(|s| pid_legend::is_shape_class(&s.class))
+        .collect();
+    assert_eq!(boxed.len(), 3);
+    for s in boxed {
+        let (w, h) = (s.bbox.2 - s.bbox.0, s.bbox.3 - s.bbox.1);
+        assert!(
+            (w.max(h) - 2.8).abs() < 0.01 && (w.min(h) - 1.4).abs() < 0.01,
+            "boxed without its stub: {:?}",
+            s.bbox
+        );
+    }
+
+    // The stem to the actuator stays: the pipe runs through the valve the
+    // other way, so the vertical stroke is part of the symbol.
+    let gate = recognition
+        .symbols
+        .iter()
+        .find(|s| s.class == "gate")
+        .expect("the actuated valve is one component, claimed by GV0301");
+    assert_eq!(gate.tag.as_deref(), Some("GV0301"));
+    assert!(gate.source.contains("(8 strokes)"), "{}", gate.source);
+    assert!((gate.bbox.3 - 83.2).abs() < 0.01, "{:?}", gate.bbox);
+    assert!(
+        recognition.orphan_tags.is_empty(),
+        "{:?}",
+        recognition.orphan_tags
+    );
 }
 
 #[test]
