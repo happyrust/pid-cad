@@ -2163,7 +2163,7 @@ fn exploded_symbols(
 
     // ── second pass: the tags still free, over the strokes the pipe rule took
     if shape_rules.recover_min_runs > 0 && shape_rules.pipe_stub_mm > 0.0 {
-        for (comp, ri, k, d) in recovered_symbols(
+        for (comp, claim) in recovered_symbols(
             &loose,
             &in_symbol,
             rules,
@@ -2172,34 +2172,64 @@ fn exploded_symbols(
             upm,
             taken_text,
         ) {
-            let rule = &rules.tag_classes[ri];
-            symbols.push((
-                Recognized {
-                    class: rule.class.clone(),
-                    label: rule.label.clone(),
-                    color: rule.color,
-                    at: (comp.centre.0 * upm, comp.centre.1 * upm),
-                    bbox: scale(comp.bbox),
-                    source: format!(
-                        "shape {} ({} strokes, second pass)",
-                        comp.id,
-                        comp.strokes()
-                    ),
-                    known: true,
-                    inner_text: Vec::new(),
-                    tag: Some(lettering[k].value.clone()),
-                    tag_distance_mm: Some(d),
-                    wants_tag: true,
-                },
-                TagRule::default(),
-            ));
+            let at = (comp.centre.0 * upm, comp.centre.1 * upm);
+            let source = format!(
+                "shape {} ({} strokes, second pass)",
+                comp.id,
+                comp.strokes()
+            );
+            if let Some((ri, k, d)) = claim {
+                let rule = &rules.tag_classes[ri];
+                symbols.push((
+                    Recognized {
+                        class: rule.class.clone(),
+                        label: rule.label.clone(),
+                        color: rule.color,
+                        at,
+                        bbox: scale(comp.bbox),
+                        source,
+                        known: true,
+                        inner_text: Vec::new(),
+                        tag: Some(lettering[k].value.clone()),
+                        tag_distance_mm: Some(d),
+                        wants_tag: true,
+                    },
+                    TagRule::default(),
+                ));
+            } else if let Some(rule) = shape_rules.dictionary.get(&comp.id) {
+                // Named by the dictionary, as a first-pass component would be;
+                // one of these that no tag took is still the symbol it is.
+                if rule.class == IGNORE_CLASS {
+                    continue;
+                }
+                symbols.push((
+                    Recognized {
+                        class: rule.class.clone(),
+                        label: rule.label.clone(),
+                        color: rule.color,
+                        at,
+                        bbox: scale(comp.bbox),
+                        source,
+                        known: true,
+                        inner_text: Vec::new(),
+                        tag: None,
+                        tag_distance_mm: None,
+                        wants_tag: rule.tag.wants_tag(),
+                    },
+                    rule.tag.clone(),
+                ));
+            }
         }
     }
     Exploded { symbols, unknown }
 }
 
-/// Components for the tags no first-pass component took, and the claim each
-/// gets: `(component, tag rule, text, mm)`.
+/// A tag's claim on a component: `(tag rule, text, mm)`.
+type Claim = (usize, usize, f64);
+
+/// The candidate components of the second pass, each with the claim a tag
+/// no first-pass component took makes on it, or none. A candidate nobody
+/// claims is the caller's to name by the dictionary.
 ///
 /// A symbol drawn in pipe-length strokes -- the flame arrester's frame of
 /// 2.7 and 3.2 mm lines, the flow indicator's 3.7 x 4.9 mm body -- loses all
@@ -2214,7 +2244,8 @@ fn exploded_symbols(
 /// pipe is then taken out of each component as in the first pass, and a
 /// component of at least three strokes, `recover_min_runs` of them such
 /// runs, is a candidate. Tags pair with candidates as in the first pass:
-/// most pairs, then shortest, then nearest free for the rest.
+/// most pairs, then shortest -- a candidate the dictionary names as another
+/// class left out of that -- then nearest free for the rest.
 fn recovered_symbols(
     loose: &Loose,
     in_symbol: &[bool],
@@ -2223,7 +2254,7 @@ fn recovered_symbols(
     lettering: &[Lettering],
     upm: f64,
     taken_text: &mut [bool],
-) -> Vec<(Component, usize, usize, f64)> {
+) -> Vec<(Component, Option<Claim>)> {
     let eps = shape_rules.touch_mm;
     let free: Vec<usize> = (0..loose.prims.len()).filter(|&i| !in_symbol[i]).collect();
     if loose.pipe_prims.is_empty() {
@@ -2338,8 +2369,23 @@ fn recovered_symbols(
         }
     }
     claims.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let pairs: Vec<(f64, usize, usize)> = claims.iter().map(|&(d, k, ci, _)| (d, k, ci)).collect();
-    let mut chosen = match_pairs(&pairs);
+    let eligible: Vec<usize> = (0..claims.len())
+        .filter(|&e| {
+            let (_, _, ci, ri) = claims[e];
+            !shape_rules
+                .dictionary
+                .get(&comps[ci].id)
+                .is_some_and(|named| named.class != rules.tag_classes[ri].class)
+        })
+        .collect();
+    let pairs: Vec<(f64, usize, usize)> = eligible
+        .iter()
+        .map(|&e| (claims[e].0, claims[e].1, claims[e].2))
+        .collect();
+    let mut chosen: Vec<usize> = match_pairs(&pairs)
+        .into_iter()
+        .map(|p| eligible[p])
+        .collect();
     let mut text_used = vec![false; lettering.len()];
     let mut comp_used = vec![false; comps.len()];
     for &e in &chosen {
@@ -2354,17 +2400,13 @@ fn recovered_symbols(
         comp_used[ci] = true;
         chosen.push(e);
     }
-    let mut taken_comp: Vec<Option<(usize, usize, f64)>> = vec![None; comps.len()];
+    let mut taken_comp: Vec<Option<Claim>> = vec![None; comps.len()];
     for e in chosen {
         let (d, k, ci, ri) = claims[e];
         taken_text[k] = true;
         taken_comp[ci] = Some((ri, k, d));
     }
-    comps
-        .into_iter()
-        .zip(taken_comp)
-        .filter_map(|(comp, claim)| claim.map(|(ri, k, d)| (comp, ri, k, d)))
-        .collect()
+    comps.into_iter().zip(taken_comp).collect()
 }
 
 // ── Report ───────────────────────────────────────────────────────────────

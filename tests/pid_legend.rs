@@ -681,21 +681,22 @@ fn pipe_is_cut_away_from_exploded_symbols_and_a_stem_is_not() {
     );
 }
 
-/// A flame arrester the way the loading-island sheets draw one: a frame of
-/// two 3.2 mm uprights 1.8 mm apart and two 2.7 mm bars across the top and
-/// bottom, sticking out 0.45 mm each side, with two 1.8 mm lines through the
-/// middle -- every stroke of the frame longer than a pipe stub -- on a
-/// vertical pipe, 3.6 mm of stub from each bar to the run.
+/// A flame arrester the way the loading-island sheets draw one, to their
+/// measure: a frame of two 3.18 mm uprights 1.81 mm apart and two 2.72 mm
+/// bars across the top and bottom, sticking out 0.45 mm each side, with two
+/// 1.81 mm lines through the middle -- every stroke of the frame longer than
+/// a pipe stub -- on a vertical pipe, 3.6 mm of stub from each bar to the
+/// run.
 fn flame_arrester(doc: &mut CadDocument, x: f64, y: f64) {
     for (a, b) in [
-        ((x - 0.9, y - 1.6), (x - 0.9, y + 1.6)),
-        ((x + 0.9, y - 1.6), (x + 0.9, y + 1.6)),
-        ((x - 1.35, y + 1.6), (x + 1.35, y + 1.6)),
-        ((x - 1.35, y - 1.6), (x + 1.35, y - 1.6)),
-        ((x - 0.9, y + 0.2), (x + 0.9, y + 0.2)),
-        ((x - 0.9, y - 0.2), (x + 0.9, y - 0.2)),
-        ((x, y + 1.6), (x, y + 5.2)),
-        ((x, y - 1.6), (x, y - 5.2)),
+        ((x - 0.905, y - 1.59), (x - 0.905, y + 1.59)),
+        ((x + 0.905, y - 1.59), (x + 0.905, y + 1.59)),
+        ((x - 1.36, y + 1.59), (x + 1.36, y + 1.59)),
+        ((x - 1.36, y - 1.59), (x + 1.36, y - 1.59)),
+        ((x - 0.905, y + 0.2), (x + 0.905, y + 0.2)),
+        ((x - 0.905, y - 0.2), (x + 0.905, y - 0.2)),
+        ((x, y + 1.59), (x, y + 5.2)),
+        ((x, y - 1.59), (x, y - 5.2)),
         ((x, y + 5.2), (x, y + 30.0)),
         ((x, y - 5.2), (x, y - 30.0)),
     ] {
@@ -704,9 +705,9 @@ fn flame_arrester(doc: &mut CadDocument, x: f64, y: f64) {
     }
 }
 
-/// A sheet with a flame arrester lettered FA0301 on a riser, and two ball
-/// valves 8 mm apart joined by 5.6 mm of pipe with a stray FA0302 lettered
-/// over the pipe.
+/// A sheet with a flame arrester lettered FA0301 on a riser and another,
+/// unlettered, on a second riser; and two ball valves 8 mm apart joined by
+/// 5.6 mm of pipe with a stray FA0302 lettered over the pipe.
 fn framed_sheet() -> CadDocument {
     let mut doc = CadDocument::new();
     doc.add_entity(layered(line(0.0, 0.0, 420.0, 0.0), "A"))
@@ -717,6 +718,7 @@ fn framed_sheet() -> CadDocument {
     flame_arrester(&mut doc, 40.0, 100.0);
     doc.add_entity(layered(text("FA0301", 34.0, 101.0), "DEVICE"))
         .unwrap();
+    flame_arrester(&mut doc, 120.0, 200.0);
 
     doc.add_entity(layered(line(50.0, 20.0, 58.8, 20.0), "0"))
         .unwrap();
@@ -739,8 +741,10 @@ fn framed_sheet() -> CadDocument {
 /// first pass has nothing for FA0301; the second pass brings back the
 /// pipe-length strokes that other strokes hold at two or more points -- the
 /// frame, but not the stubs, held only at the frame end -- and the tag names
-/// the frame. The pipe between the two ball valves is held only by symbols
-/// and stays pipe: the stray FA0302 gets nothing.
+/// the frame. The unlettered frame is the dictionary's flame arrester
+/// (`2bbe9e32`, the loading-island sheets' seven) and is named by it. The
+/// pipe between the two ball valves is held only by symbols and stays pipe:
+/// the stray FA0302 gets nothing.
 #[test]
 fn a_symbol_drawn_in_pipe_length_strokes_is_found_for_its_tag() {
     let doc = framed_sheet();
@@ -751,8 +755,8 @@ fn a_symbol_drawn_in_pipe_length_strokes_is_found_for_its_tag() {
     let arrester = recognition
         .symbols
         .iter()
-        .find(|s| s.class == "flame-arrester")
-        .expect("the frame is a flame arrester");
+        .find(|s| s.class == "flame-arrester" && s.tag.is_some())
+        .expect("the lettered frame is a flame arrester");
     assert_eq!(arrester.tag.as_deref(), Some("FA0301"));
     assert!(
         arrester.source.contains("(6 strokes, second pass)"),
@@ -761,14 +765,28 @@ fn a_symbol_drawn_in_pipe_length_strokes_is_found_for_its_tag() {
     );
     let (x0, y0, x1, y1) = arrester.bbox;
     assert!(
-        (x0 - 38.65).abs() < 0.01
-            && (x1 - 41.35).abs() < 0.01
-            && (y0 - 98.4).abs() < 0.01
-            && (y1 - 101.6).abs() < 0.01,
+        (x0 - 38.64).abs() < 0.01
+            && (x1 - 41.36).abs() < 0.01
+            && (y0 - 98.41).abs() < 0.01
+            && (y1 - 101.59).abs() < 0.01,
         "the frame without its stubs: {:?}",
         arrester.bbox
     );
-    assert_eq!(count(&recognition, "flame-arrester"), 1);
+    assert_eq!(shape_id(arrester), "2bbe9e32", "{}", arrester.source);
+    assert_eq!(count(&recognition, "flame-arrester"), 2);
+    let unlettered = recognition
+        .symbols
+        .iter()
+        .find(|s| s.class == "flame-arrester" && s.tag.is_none())
+        .expect("the unlettered frame is named by the dictionary");
+    assert!(unlettered.known);
+    assert_eq!(shape_id(unlettered), "2bbe9e32", "{}", unlettered.source);
+    assert!(
+        unlettered.source.contains("second pass") && (unlettered.at.0 - 120.0).abs() < 0.01,
+        "{} at {:?}",
+        unlettered.source,
+        unlettered.at
+    );
 
     let mut balls: Vec<&pid_legend::Recognized> = recognition
         .symbols
