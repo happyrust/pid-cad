@@ -997,7 +997,9 @@ fn cpecc_sp02_10_joined_symbols_come_apart_and_are_named() {
     for (class, expected, tagged) in [
         ("ball-valve", 24, 2),
         ("check-valve", 8, 2),
-        ("gate", 10, 6),
+        // Seven gates in a row on the 0326/0327 risers, each carrying its
+        // own tag (see below), plus the four elsewhere.
+        ("gate", 11, 7),
         ("y-strainer", 6, 0),
         ("quick-coupling", 4, 0),
         ("normally-open-valve", 2, 0),
@@ -1033,6 +1035,44 @@ fn cpecc_sp02_10_joined_symbols_come_apart_and_are_named() {
         "{:?}",
         recognition.unknown_shapes
     );
+    // The row of seven gates on the 80-LG92/LD20-0326A..0327D risers: each
+    // tag sits 6 mm left of its own valve and 3 mm right of the neighbour's,
+    // so nearest-first paired the whole row one valve to the left, orphaned
+    // GV0326A and left the seventh gate unnamed. The one-to-one pairing puts
+    // every tag on its own valve, left to right.
+    let mut row: Vec<(f64, &str)> = recognition
+        .symbols
+        .iter()
+        .filter(|s| s.class == "gate" && (s.at.1 / recognition.units_per_mm - 150.1).abs() < 0.5)
+        .map(|s| {
+            (
+                s.at.0 / recognition.units_per_mm,
+                s.tag.as_deref().unwrap_or("-"),
+            )
+        })
+        .collect();
+    row.sort_by(|a, b| a.0.total_cmp(&b.0));
+    assert_eq!(
+        row.iter().map(|(_, tag)| *tag).collect::<Vec<_>>(),
+        ["GV0326A", "GV0326B", "GV0326C", "GV0327A", "GV0327B", "GV0327C", "GV0327D"],
+        "{row:?}"
+    );
+    assert!(
+        !recognition.orphan_tags.contains_key("闸阀"),
+        "{:?}",
+        recognition.orphan_tags.get("闸阀")
+    );
+    // QK-0302 / QK-0303 are the additive skids' equipment numbers (they sit in
+    // the equipment table too), not quick-coupling tags: no class claims them
+    // and none reports them.
+    assert!(
+        !recognition
+            .orphan_tags
+            .keys()
+            .any(|label| label.contains("快速接头") || label.contains("橇块")),
+        "{:?}",
+        recognition.orphan_tags
+    );
 }
 
 /// With the dictionary as named on 2026-09-07, four of the loading-island
@@ -1042,10 +1082,13 @@ fn cpecc_sp02_10_joined_symbols_come_apart_and_are_named() {
 fn cpecc_loading_island_sheets_have_no_unnamed_shape_left() {
     let rules = Rules::builtin();
     let mut checked = 0;
+    // SP02-08 has four globe valves: the fourth used to be taken for a gate by
+    // GV0311A, whose own gate stands 6 mm to the right of it; a tag no longer
+    // pulls a shape the dictionary names as another class.
     for (file, globe_valves, small_check_valves) in [
         ("DWG-0100SP02-06 汽车装卸岛(一)工艺自控流程图.dxf", 11, 3),
         ("DWG-0100SP02-07 汽车装卸岛(二)工艺自控流程图.dxf", 4, 0),
-        ("DWG-0100SP02-08 汽车装卸岛(三)工艺自控流程图.dxf", 3, 0),
+        ("DWG-0100SP02-08 汽车装卸岛(三)工艺自控流程图.dxf", 4, 0),
         ("DWG-0100SP02-09 汽车装卸岛(四)工艺自控流程图.dxf", 4, 0),
     ] {
         let Some(doc) = load_sheet(file) else {

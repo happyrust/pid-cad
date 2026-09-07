@@ -47,7 +47,7 @@
     { "shape": "FI9999*", "class": "flow-indicator", "label": "流量指示", "color": [170, 0, 255], "radius_mm": 10.0 },
     { "shape": "FQ9999*", "class": "flow-meter", "label": "流量计", "color": [140, 0, 220], "radius_mm": 10.0 },
     { "shape": "FM9999*", "class": "flow-meter", "label": "流量计", "color": [140, 0, 220], "radius_mm": 10.0 },
-    { "shape": "QK-9999*", "class": "quick-coupling", "label": "快速接头", "color": [0, 180, 180], "radius_mm": 10.0 }
+    { "shape": "QK-9999*", "class": "skid", "label": "橇块（设备位号）", "color": [0, 180, 180], "radius_mm": 0.0, "report_orphans": false }
   ],
   "shapes": {
     "layers_any": ["DEVICE", "DEVICES", "T-MaR-ZNACKY", "T-SYMBOLS", "T_ZNACKY", "YIBIAO"],
@@ -81,7 +81,7 @@
       "5311cc3f": { "class": "ball-valve", "label": "球阀", "color": [255, 170, 0], "tag": { "shape": "BV9999*", "radius_mm": 10.0 } },
       "7bc421fd": { "class": "check-valve", "label": "止回阀", "color": [200, 160, 40], "tag": { "shape": "CV9999*", "radius_mm": 10.0 } },
       "6852c808": { "class": "y-strainer", "label": "Y型过滤器", "color": [60, 190, 160] },
-      "a94ece16": { "class": "quick-coupling", "label": "快速接头", "color": [0, 180, 180], "tag": { "shape": "QK-9999*", "radius_mm": 10.0 } },
+      "a94ece16": { "class": "quick-coupling", "label": "快速接头", "color": [0, 180, 180] },
       "f3f9a2ff": { "class": "gate", "label": "闸阀", "color": [255, 220, 0], "tag": { "shape": "GV9999*", "radius_mm": 10.0 } },
       "7e243bbc": { "class": "normally-open-valve", "label": "常开阀", "color": [180, 140, 255] },
       "4e5121c1": { "class": "globe-valve", "label": "截止阀", "color": [210, 120, 30] },

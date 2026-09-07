@@ -201,13 +201,22 @@ pub struct TagClassRule {
     /// claimed; keeps a flange tick from taking the valve's tag.
     #[serde(default = "default_min_side_mm")]
     pub min_side_mm: f64,
-    /// Search radius, paper mm; absent = `Rules::radius_mm`.
+    /// Search radius, paper mm; absent = `Rules::radius_mm`. Zero = the
+    /// shape is an equipment number this pass cannot pair (a skid's QK
+    /// number names an outline too big to be a component): claims nothing.
     #[serde(default)]
     pub radius_mm: Option<f64>,
+    /// List lettering of this shape that no component claimed.
+    #[serde(default = "default_true")]
+    pub report_orphans: bool,
 }
 
 fn default_min_side_mm() -> f64 {
     0.8
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Connected-component clustering of loose geometry, for sheets whose
@@ -485,6 +494,11 @@ impl Recognition {
 }
 
 struct Lettering {
+    /// The anchor the drawing stores: the alignment point, else the
+    /// insertion point. Tags are measured from here and not from the middle
+    /// of the lettering: the CPECC sheets start a valve's tag beside the
+    /// valve and let it run on towards the next one, so the insertion point
+    /// is the end that sits by the valve.
     at: (f64, f64),
     value: String,
 }
@@ -899,6 +913,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             rules
                 .tag_classes
                 .iter()
+                .filter(|r| r.report_orphans)
                 .map(|r| (r.shape.as_str(), r.label.as_str())),
         )
         .collect();
@@ -1686,6 +1701,103 @@ struct Exploded {
     unknown: Vec<UnknownShape>,
 }
 
+/// One-to-one pairing of texts with components over the candidate
+/// `(distance, text, component)` edges: as many pairs as the edges allow
+/// and, of those pairings, the least total distance. Returns the indices of
+/// the chosen edges.
+///
+/// Successive shortest augmenting paths on the unit-capacity flow network
+/// source -> texts -> components -> sink; each augmentation adds one pair at
+/// the least extra distance, so after the last one the pairing is both
+/// maximum and cheapest. The graph is small (a sheet's tags, each within
+/// reach of a few components), so Bellman-Ford with a queue is plenty.
+fn match_pairs(edges: &[(f64, usize, usize)]) -> Vec<usize> {
+    struct Arc {
+        to: usize,
+        cap: u8,
+        cost: f64,
+        rev: usize,
+    }
+    const SOURCE: usize = 0;
+    const SINK: usize = 1;
+    let mut text_node: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut comp_node: BTreeMap<usize, usize> = BTreeMap::new();
+    for &(_, k, ci) in edges {
+        text_node.entry(k).or_insert(0);
+        comp_node.entry(ci).or_insert(0);
+    }
+    let mut n = 2;
+    for node in text_node.values_mut().chain(comp_node.values_mut()) {
+        *node = n;
+        n += 1;
+    }
+    let mut adj: Vec<Vec<Arc>> = (0..n).map(|_| Vec::new()).collect();
+    let add = |adj: &mut Vec<Vec<Arc>>, from: usize, to: usize, cost: f64| -> usize {
+        let (fi, ti) = (adj[from].len(), adj[to].len());
+        adj[from].push(Arc {
+            to,
+            cap: 1,
+            cost,
+            rev: ti,
+        });
+        adj[to].push(Arc {
+            to: from,
+            cap: 0,
+            cost: -cost,
+            rev: fi,
+        });
+        fi
+    };
+    for &t in text_node.values() {
+        add(&mut adj, SOURCE, t, 0.0);
+    }
+    for &c in comp_node.values() {
+        add(&mut adj, c, SINK, 0.0);
+    }
+    let arcs: Vec<(usize, usize)> = edges
+        .iter()
+        .map(|&(d, k, ci)| {
+            let t = text_node[&k];
+            (t, add(&mut adj, t, comp_node[&ci], d))
+        })
+        .collect();
+    loop {
+        let mut dist = vec![f64::INFINITY; n];
+        let mut prev: Vec<Option<(usize, usize)>> = vec![None; n];
+        let mut queued = vec![false; n];
+        let mut queue = std::collections::VecDeque::from([SOURCE]);
+        dist[SOURCE] = 0.0;
+        while let Some(u) = queue.pop_front() {
+            queued[u] = false;
+            for (i, arc) in adj[u].iter().enumerate() {
+                if arc.cap > 0 && dist[u] + arc.cost < dist[arc.to] - 1e-9 {
+                    dist[arc.to] = dist[u] + arc.cost;
+                    prev[arc.to] = Some((u, i));
+                    if !queued[arc.to] {
+                        queued[arc.to] = true;
+                        queue.push_back(arc.to);
+                    }
+                }
+            }
+        }
+        if !dist[SINK].is_finite() {
+            break;
+        }
+        let mut v = SINK;
+        while let Some((u, i)) = prev[v] {
+            let rev = adj[u][i].rev;
+            adj[u][i].cap -= 1;
+            adj[v][rev].cap += 1;
+            v = u;
+        }
+    }
+    arcs.iter()
+        .enumerate()
+        .filter(|(_, &(t, i))| adj[t][i].cap == 0)
+        .map(|(e, _)| e)
+        .collect()
+}
+
 /// Components of loose geometry, named by the tag beside them or by the
 /// shape dictionary, or boxed as repeated unknowns.
 fn exploded_symbols(
@@ -1745,6 +1857,9 @@ fn exploded_symbols(
     let mut claims: Vec<(f64, usize, usize, usize)> = Vec::new(); // (mm, text, comp, rule)
     for (ri, rule) in rules.tag_classes.iter().enumerate() {
         let reach = rule.radius_mm.unwrap_or(rules.radius_mm);
+        if reach <= 0.0 {
+            continue;
+        }
         for (k, l) in lettering.iter().enumerate() {
             if taken_text[k] || !shape_matches(&rule.shape, &l.value) {
                 continue;
@@ -1763,12 +1878,71 @@ fn exploded_symbols(
         }
     }
     claims.sort_by(|a, b| a.0.total_cmp(&b.0));
-    // comp -> (rule, text, mm) of its first claim, then any further tags.
-    let mut claimed: HashMap<usize, (usize, usize, f64, Vec<usize>)> = HashMap::new();
-    for &(d, k, ci, ri) in &claims {
-        if taken_text[k] || claimed.contains_key(&ci) {
+    let mut text_used = vec![false; lettering.len()];
+    let mut comp_used = vec![false; comps.len()];
+    // Nearest free pair first, to learn which classes have a symbol on this
+    // sheet at all. One none of whose tags finds one (the flame arresters,
+    // drawn in pipe-length strokes and filtered out) sits out the pairing
+    // below: with no symbol of its own to be had, it could only take another
+    // class's.
+    let mut found: HashSet<&str> = HashSet::new();
+    for &(_, k, ci, ri) in &claims {
+        if text_used[k] || comp_used[ci] {
             continue;
         }
+        text_used[k] = true;
+        comp_used[ci] = true;
+        found.insert(rules.tag_classes[ri].class.as_str());
+    }
+    // Then pair for real, keeping as many tags matched as the candidates
+    // allow and, of such pairings, the shortest. A row of valves lettered at
+    // one offset (SP02-10's GV0326A..GV0327D: 7 mm apart, each tag 6 mm left
+    // of its own valve and 3 mm right of the neighbour's) defeats
+    // nearest-first: the whole row shifts by one, the end tag is orphaned and
+    // the end valve goes unnamed, though pairing all seven is possible. A
+    // shape the dictionary names as some other class is left out here, so
+    // that being matched at all never pulls a tag onto it.
+    let eligible: Vec<usize> = (0..claims.len())
+        .filter(|&e| {
+            let (_, _, ci, ri) = claims[e];
+            let rule = &rules.tag_classes[ri];
+            found.contains(rule.class.as_str())
+                && !shape_rules
+                    .dictionary
+                    .get(&comps[ci].id)
+                    .is_some_and(|named| named.class != rule.class)
+        })
+        .collect();
+    let pairs: Vec<(f64, usize, usize)> = eligible
+        .iter()
+        .map(|&e| (claims[e].0, claims[e].1, claims[e].2))
+        .collect();
+    let mut chosen: Vec<usize> = match_pairs(&pairs)
+        .into_iter()
+        .map(|p| eligible[p])
+        .collect();
+    // What that could not place takes the nearest free component as before:
+    // a tag whose only candidate the dictionary names otherwise (SP02-05's
+    // PSV0407A, lettered beside a valve drawn like the bleed valves) still
+    // names it -- the tag is the stronger evidence.
+    text_used.fill(false);
+    comp_used.fill(false);
+    for &e in &chosen {
+        text_used[claims[e].1] = true;
+        comp_used[claims[e].2] = true;
+    }
+    for (e, &(_, k, ci, _)) in claims.iter().enumerate() {
+        if text_used[k] || comp_used[ci] {
+            continue;
+        }
+        text_used[k] = true;
+        comp_used[ci] = true;
+        chosen.push(e);
+    }
+    // comp -> (rule, text, mm) of its claim, then any further tags.
+    let mut claimed: HashMap<usize, (usize, usize, f64, Vec<usize>)> = HashMap::new();
+    for e in chosen {
+        let (d, k, ci, ri) = claims[e];
         taken_text[k] = true;
         claimed.insert(ci, (ri, k, d, Vec::new()));
     }
