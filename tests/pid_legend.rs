@@ -991,6 +991,11 @@ fn cpecc_sp02_10_joined_symbols_come_apart_and_are_named() {
         ("quick-coupling", 4, 0),
         ("normally-open-valve", 2, 0),
         ("additive-tank", 2, 0),
+        ("globe-valve", 2, 0),
+        ("pipe-cap", 2, 0),
+        ("flame-arrester", 2, 0),
+        ("breather-valve", 2, 0),
+        ("vent-outlet", 2, 0),
     ] {
         assert_eq!(count(&recognition, class), expected, "{class}");
         assert_eq!(tags_of(&recognition, class).len(), tagged, "{class} tagged");
@@ -1011,20 +1016,10 @@ fn cpecc_sp02_10_joined_symbols_come_apart_and_are_named() {
             s.source
         );
     }
-    let still_unknown: Vec<&str> = recognition
-        .unknown_shapes
-        .iter()
-        .map(|u| u.id.as_str())
-        .collect();
-    for named in ["5311cc3f", "7bc421fd", "6852c808", "a94ece16", "f3f9a2ff"] {
-        assert!(
-            !still_unknown.contains(&named),
-            "{named} is in the dictionary"
-        );
-    }
+    // Everything the sheet repeats is now named or ignored.
     assert!(
-        recognition.unknown_shapes.iter().all(|u| u.strokes <= 8),
-        "no joined pair is left: {:?}",
+        recognition.unknown_shapes.is_empty(),
+        "{:?}",
         recognition.unknown_shapes
     );
 }

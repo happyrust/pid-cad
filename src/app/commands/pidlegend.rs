@@ -201,23 +201,29 @@ mod tests {
     #[test]
     fn pidlegend_marks_up_an_exploded_sheet_with_shape_colours() {
         let mut app = OpenCADStudio::new_for_test();
-        // SP02-10 is the loading-island sheet that still has shapes the
-        // dictionary does not name (SP02-06..09 are fully named).
-        if !open_sheet(&mut app, "DWG-0100SP02-10 汽车装卸岛(五)工艺自控流程图.dxf") {
+        if !open_sheet(&mut app, "DWG-0100SP02-05 发油泵棚(二)工艺自控流程图.dxf") {
             return;
         }
         let i = app.active_tab;
+        let recognition =
+            pid_legend::recognise(&app.tabs[i].scene.document, &pid_legend::Rules::load());
         let _ = app.run_command_line("PIDLEGEND ON");
         let doc = &app.tabs[i].scene.document;
         assert!(legend_count(&app) > 200, "{}", legend_count(&app));
-        assert!(doc.layers.get("PID-LEGEND-BALL-VALVE").is_some());
-        assert!(doc.layers.get(pid_legend::SHAPE_LAYER).is_some());
+        assert!(doc.layers.get("PID-LEGEND-EVALVE").is_some());
         // Unnamed shapes carry their own colour; everything else is ByLayer.
+        // (As the dictionary fills up a sheet may have none left; then there
+        // is nothing on the shape layer either.)
         let (own, by_layer): (Vec<_>, Vec<_>) = doc
             .model_space_entities()
             .filter(|e| pid_legend::is_legend_layer(&e.common().layer))
             .partition(|e| e.common().layer == pid_legend::SHAPE_LAYER);
-        assert!(!own.is_empty() && own.iter().all(|e| e.common().color != Color::ByLayer));
+        if recognition.unknown_shapes.is_empty() {
+            assert!(own.is_empty());
+        } else {
+            assert!(doc.layers.get(pid_legend::SHAPE_LAYER).is_some());
+            assert!(!own.is_empty() && own.iter().all(|e| e.common().color != Color::ByLayer));
+        }
         assert!(by_layer.iter().all(|e| e.common().color == Color::ByLayer));
     }
 }
