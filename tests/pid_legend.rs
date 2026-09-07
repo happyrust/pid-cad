@@ -895,13 +895,14 @@ fn cpecc_sheets_every_symbol_is_known_and_every_valve_has_its_own_tag() {
 fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
     let rules = Rules::builtin();
     let mut checked = 0;
-    for (file, bubbles, ball_valves, check_valves, evalves) in [
+    for (file, bubbles, ball_valves, check_valves, evalves, reducers) in [
         (
             "DWG-0100SP02-07 汽车装卸岛(二)工艺自控流程图.dxf",
             43 + 9,
             25,
             10,
             4,
+            0,
         ),
         (
             "DWG-0100SP02-05 发油泵棚(二)工艺自控流程图.dxf",
@@ -909,6 +910,7 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
             0,
             5,
             27,
+            5,
         ),
     ] {
         let Some(doc) = load_sheet(file) else {
@@ -962,6 +964,15 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
             !recognition.orphan_tags.contains_key("球阀"),
             "{file}: BV tags nobody claimed: {:?}",
             recognition.orphan_tags.get("球阀")
+        );
+        // The eccentric reducer on each pump suction carries no tag and is
+        // named by the dictionary; with it named, neither sheet has a shape
+        // left unnamed.
+        assert_eq!(count(&recognition, "eccentric-reducer"), reducers, "{file}");
+        assert!(
+            recognition.unknown_shapes.is_empty(),
+            "{file}: {:?}",
+            recognition.unknown_shapes
         );
         checked += 1;
     }
