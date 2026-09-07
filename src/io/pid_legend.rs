@@ -234,6 +234,9 @@ pub struct ShapeRules {
     pub min_box_mm: f64,
     /// ... and over this are equipment outlines.
     pub max_box_mm: f64,
+    /// An unnamed shape thinner than this in either direction is a tick or a
+    /// collinear pair of strokes, not a symbol; it is not boxed.
+    pub min_side_mm: f64,
     /// Coordinates are rounded to this before a shape is hashed.
     pub quantum_mm: f64,
     /// A shape the dictionary lacks is boxed only when the sheet repeats it
@@ -244,8 +247,13 @@ pub struct ShapeRules {
     /// is already claimed, and the box then lists every tag. 0 turns this off.
     pub assembly_mm: f64,
     /// Shape id -> what it is. Ids come from the report (`UNKNOWN SHAPE`).
+    /// Class [`IGNORE_CLASS`] drops the shape: neither boxed nor reported
+    /// (the square a panel bubble sits in is not a symbol of its own).
     pub dictionary: BTreeMap<String, BlockRule>,
 }
+
+/// Dictionary class that means "not a symbol, leave it alone".
+pub const IGNORE_CLASS: &str = "ignore";
 
 impl Default for ShapeRules {
     fn default() -> Self {
@@ -258,6 +266,7 @@ impl Default for ShapeRules {
             touch_mm: 0.05,
             min_box_mm: 0.6,
             max_box_mm: 30.0,
+            min_side_mm: 0.3,
             quantum_mm: 0.1,
             min_count: 2,
             assembly_mm: 0.0,
@@ -1429,7 +1438,11 @@ fn exploded_symbols(
     // ── the rest: dictionary, or repeated unknowns
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for (ci, c) in comps.iter().enumerate() {
-        if !claimed.contains_key(&ci) && !shape_rules.dictionary.contains_key(&c.id) {
+        let (w, h) = (c.bbox.2 - c.bbox.0, c.bbox.3 - c.bbox.1);
+        if !claimed.contains_key(&ci)
+            && !shape_rules.dictionary.contains_key(&c.id)
+            && w.min(h) >= shape_rules.min_side_mm
+        {
             *counts.entry(c.id.as_str()).or_default() += 1;
         }
     }
@@ -1464,6 +1477,9 @@ fn exploded_symbols(
                 TagRule::default(),
             ));
         } else if let Some(rule) = shape_rules.dictionary.get(&c.id) {
+            if rule.class == IGNORE_CLASS {
+                continue;
+            }
             symbols.push((
                 Recognized {
                     class: rule.class.clone(),

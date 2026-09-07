@@ -465,6 +465,38 @@ fn exploded_sheet_symbols_are_named_by_their_tags_or_boxed_by_shape() {
 }
 
 #[test]
+fn the_shape_dictionary_names_or_drops_a_shape_by_its_id() {
+    let doc = exploded_sheet();
+    let mut rules = Rules::builtin();
+    let first = pid_legend::recognise(&doc, &rules);
+    let id = first.unknown_shapes[0].id.clone();
+
+    // Named: the three triangles become a class of their own, on their layer.
+    let shapes = rules.shapes.as_mut().unwrap();
+    shapes.dictionary.insert(
+        id.clone(),
+        serde_json::from_str(r#"{"class":"vent-hood","label":"放空罩","color":[1,2,3]}"#).unwrap(),
+    );
+    let named = pid_legend::recognise(&doc, &rules);
+    assert_eq!(count(&named, "vent-hood"), 3);
+    assert!(named.unknown_shapes.is_empty());
+    assert!(named
+        .symbols
+        .iter()
+        .all(|s| !pid_legend::is_shape_class(&s.class)));
+
+    // Dropped: class "ignore" means it is not a symbol at all.
+    rules.shapes.as_mut().unwrap().dictionary.insert(
+        id,
+        serde_json::from_str(r#"{"class":"ignore","label":"-","color":[0,0,0]}"#).unwrap(),
+    );
+    let dropped = pid_legend::recognise(&doc, &rules);
+    assert_eq!(count(&dropped, "vent-hood"), 0);
+    assert!(dropped.unknown_shapes.is_empty());
+    assert_eq!(dropped.symbols.len(), first.symbols.len() - 3);
+}
+
+#[test]
 fn unnamed_shapes_draw_in_their_own_colour_on_one_layer() {
     let mut doc = exploded_sheet();
     let rules = Rules::builtin();
