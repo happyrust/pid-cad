@@ -124,6 +124,14 @@ fn main() {
                 "lettering": recognition.lettering,
                 "symbols": recognition.symbols.iter().map(symbol_json).collect::<Vec<_>>(),
                 "unknown_blocks": recognition.unknown_blocks,
+                "unknown_shapes": recognition.unknown_shapes.iter().map(|s| serde_json::json!({
+                    "id": s.id,
+                    "count": s.count,
+                    "size_mm": [s.size_mm.0, s.size_mm.1],
+                    "strokes": s.strokes,
+                    "example_at": [s.example_at.0, s.example_at.1],
+                    "nearby": s.nearby,
+                })).collect::<Vec<_>>(),
                 "orphan_tags": recognition.orphan_tags,
             }));
         } else {

@@ -1,5 +1,5 @@
 {
-  "_comment": "P&ID legend recognition rules (io::pid_legend). Compiled in as the default; OCS_PID_LEGEND_RULES=<path> overrides at run time. Colours are RGB. Tag shapes: 9 = digit, ? = capital letter, * = anything, other characters literal. Distances are paper millimetres; the sheet's units-per-mm is detected from its drawn extent.",
+  "_comment": "P&ID legend recognition rules (io::pid_legend). Compiled in as the default; OCS_PID_LEGEND_RULES=<path> overrides at run time. Colours are RGB. Tag shapes: 9 = digit, ? = capital letter, * = anything from here on (leading * = anything before), other characters literal. Distances are paper millimetres; the sheet's units-per-mm is detected from its drawn extent. Circle rules are tried in order; 'inner' is what must be lettered inside ('tag' = capitals + number, 'empty' = nothing), 'inner_is' lists exact values.",
   "radius_mm": 15.0,
   "label_mm": 1.3,
   "pad_mm": 0.5,
@@ -16,9 +16,9 @@
     "$Standard$00000144": { "class": "vent", "label": "放空短管", "color": [0, 200, 200] },
     "$Standard$00000080": { "class": "funnel", "label": "漏斗", "color": [90, 160, 90] },
     "$Standard$00000114": { "class": "gauge", "label": "压力表", "color": [60, 180, 120] },
-    "$TwtSys$00000132": { "class": "sheet-ref", "label": "图幅连接符", "color": [120, 140, 180], "tag": { "shape": "DWG-*" } },
+    "$TwtSys$00000132": { "class": "sheet-ref", "label": "图幅连接符", "color": [120, 140, 180], "tag": { "shape": "*DWG-*", "radius_mm": 30.0, "report_orphans": false } },
     "$TwtSys$00000147": { "class": "drain-node", "label": "排水节点", "color": [100, 160, 200] },
-    "11111": { "class": "loading-arm", "label": "鹤管总成", "color": [220, 120, 60] },
+    "11111": { "class": "loading-arm", "label": "鹤管总成", "color": [220, 120, 60], "tag": { "shape": "LA-9999*", "radius_mm": 25.0 } },
     "RC": { "class": "rc", "label": "RC", "color": [150, 150, 150] }
   },
   "layer_prefixes": [
@@ -29,8 +29,44 @@
   ],
   "circles": [
     { "class": "tank", "label": "储罐", "color": [0, 120, 255], "radius_mm": [8.0, 60.0], "tag": { "shape": "T?-9999", "inner": true } },
-    { "class": "bubble", "label": "仪表圈", "color": [0, 200, 0], "radius_mm": [3.4, 4.2], "tag": { "inner": true } },
-    { "class": "s-point", "label": "S点", "color": [120, 200, 255], "radius_mm": [1.8, 2.4], "tag": { "inner": true } }
+    { "class": "pump", "label": "泵", "color": [0, 90, 200], "radius_mm": [4.5, 7.5], "inner": "empty", "tag": { "shape": "P-9999*", "radius_mm": 20.0 } },
+    { "class": "bubble", "label": "仪表圈", "color": [0, 200, 0], "radius_mm": [1.6, 4.2], "inner": "tag", "tag": { "inner": true } },
+    { "class": "s-point", "label": "S点", "color": [120, 200, 255], "radius_mm": [1.8, 2.4], "inner_is": ["S", "K"], "tag": { "inner": true } },
+    { "class": "motor", "label": "电动执行器", "color": [255, 90, 90], "radius_mm": [0.9, 1.9], "inner_is": ["M"] },
+    { "class": "drain-point", "label": "D点", "color": [150, 150, 255], "radius_mm": [0.8, 1.0], "inner_is": ["D"] }
   ],
-  "panel_bubble": { "from": "bubble", "class": "bubble-panel", "label": "盘装仪表", "color": [0, 120, 60], "min_lines": 3 }
+  "panel_bubble": { "from": "bubble", "class": "bubble-panel", "label": "盘装仪表", "color": [0, 120, 60], "min_lines": 3 },
+  "tag_classes": [
+    { "shape": "BV9999*", "class": "ball-valve", "label": "球阀", "color": [255, 170, 0], "radius_mm": 10.0 },
+    { "shape": "GV9999*", "class": "gate", "label": "闸阀", "color": [255, 220, 0], "radius_mm": 10.0 },
+    { "shape": "CV9999*", "class": "check-valve", "label": "止回阀", "color": [200, 160, 40], "radius_mm": 10.0 },
+    { "shape": "PSV9999*", "class": "relief-valve", "label": "安全阀", "color": [255, 60, 120], "radius_mm": 10.0 },
+    { "shape": "XV-9999*", "class": "evalve", "label": "电动阀", "color": [255, 0, 0], "radius_mm": 10.0 },
+    { "shape": "CVV9999*", "class": "breather-valve", "label": "呼吸阀", "color": [120, 200, 120], "radius_mm": 10.0 },
+    { "shape": "FA9999*", "class": "flame-arrester", "label": "阻火器", "color": [200, 80, 200], "radius_mm": 10.0 },
+    { "shape": "FI9999*", "class": "flow-indicator", "label": "流量指示", "color": [170, 0, 255], "radius_mm": 10.0 },
+    { "shape": "FQ9999*", "class": "flow-meter", "label": "流量计", "color": [140, 0, 220], "radius_mm": 10.0 },
+    { "shape": "FM9999*", "class": "flow-meter", "label": "流量计", "color": [140, 0, 220], "radius_mm": 10.0 },
+    { "shape": "QK-9999*", "class": "quick-coupling", "label": "快速接头", "color": [0, 180, 180], "radius_mm": 10.0 }
+  ],
+  "shapes": {
+    "layers_any": ["DEVICE", "DEVICES", "T-MaR-ZNACKY", "T-SYMBOLS", "T_ZNACKY", "YIBIAO"],
+    "skip_layers": ["A", "PUB_TITLE", "CPECC", "TWT", "TWT_TEXT", "LAYERDIM", "bzc", "BZC"],
+    "max_stroke_mm": 8.0,
+    "pipe_stub_mm": 2.5,
+    "max_circle_mm": 8.0,
+    "touch_mm": 0.05,
+    "min_box_mm": 0.6,
+    "max_box_mm": 30.0,
+    "quantum_mm": 0.1,
+    "min_count": 2,
+    "assembly_mm": 6.0,
+    "dictionary": {
+      "f510fd60": { "class": "flow-arrow", "label": "流向/接图箭头", "color": [120, 140, 180], "tag": { "shape": "*DWG-*", "radius_mm": 15.0, "report_orphans": false } },
+      "38fb58d8": { "class": "flow-arrow", "label": "流向/接图箭头", "color": [120, 140, 180], "tag": { "shape": "*DWG-*", "radius_mm": 15.0, "report_orphans": false } },
+      "322720ec": { "class": "evalve", "label": "电动阀", "color": [255, 0, 0], "tag": { "bubble": "XV" } },
+      "62a8c552": { "class": "evalve", "label": "电动阀", "color": [255, 0, 0], "tag": { "bubble": "XV" } },
+      "2948f064": { "class": "actuated-valve", "label": "带执行机构阀", "color": [255, 100, 0], "tag": { "bubble": "FV" } }
+    }
+  }
 }

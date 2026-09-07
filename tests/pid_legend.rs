@@ -297,6 +297,196 @@ fn legend_entities_go_on_coloured_class_layers_and_come_off_again() {
     assert!(pid_legend::legend_handles(&doc).is_empty());
 }
 
+// ── exploded sheet ──────────────────────────────────────────────────────
+
+fn layered(mut entity: EntityType, layer: &str) -> EntityType {
+    entity.common_mut().layer = layer.to_string();
+    entity
+}
+
+/// A bowtie valve of four touching lines, 2.4 x 1.2 mm about (x, y), turned
+/// by `turn`.
+fn bowtie(doc: &mut CadDocument, x: f64, y: f64, turn: fn((f64, f64)) -> (f64, f64)) {
+    let p = |dx: f64, dy: f64| {
+        let (tx, ty) = turn((dx, dy));
+        (x + tx, y + ty)
+    };
+    for (a, b) in [
+        (p(-1.2, -0.6), p(-1.2, 0.6)),
+        (p(-1.2, 0.6), p(1.2, -0.6)),
+        (p(1.2, -0.6), p(1.2, 0.6)),
+        (p(1.2, 0.6), p(-1.2, -0.6)),
+    ] {
+        doc.add_entity(layered(line(a.0, a.1, b.0, b.1), "DEVICE"))
+            .unwrap();
+    }
+}
+
+/// A triangle of three touching lines, 2 mm, about (x, y).
+fn triangle(doc: &mut CadDocument, x: f64, y: f64) {
+    for (a, b) in [
+        ((x - 1.0, y - 1.0), (x + 1.0, y - 1.0)),
+        ((x + 1.0, y - 1.0), (x, y + 1.0)),
+        ((x, y + 1.0), (x - 1.0, y - 1.0)),
+    ] {
+        doc.add_entity(layered(line(a.0, a.1, b.0, b.1), "DEVICE"))
+            .unwrap();
+    }
+}
+
+/// A sheet in paper millimetres whose symbols are loose strokes, the way the
+/// loading-island sheets are drawn: ball valves lettered BV, a check valve,
+/// an XV bubble and a motor mark, a pump with its number, a shape the rules
+/// do not name repeated three times, and one that occurs once.
+fn exploded_sheet() -> CadDocument {
+    let mut doc = CadDocument::new();
+    // Frame, so the extent is an A3 in paper mm; "A" is a skipped layer.
+    doc.add_entity(layered(line(0.0, 0.0, 420.0, 0.0), "A"))
+        .unwrap();
+    doc.add_entity(layered(line(0.0, 0.0, 0.0, 297.0), "A"))
+        .unwrap();
+
+    // Two ball valves on a pipe run, 9 mm apart, tags lettered beside them;
+    // the pipe stubs between are straight axis runs and must not chain them.
+    bowtie(&mut doc, 20.0, 20.0, |(x, y)| (x, y));
+    bowtie(&mut doc, 29.0, 20.0, |(x, y)| (-y, x));
+    doc.add_entity(layered(line(21.2, 20.0, 27.8, 20.0), "0"))
+        .unwrap();
+    doc.add_entity(layered(line(10.0, 20.0, 18.8, 20.0), "0"))
+        .unwrap();
+    doc.add_entity(layered(text("BV0301", 18.0, 22.0), "DEVICE"))
+        .unwrap();
+    doc.add_entity(layered(text("BV0302", 27.0, 23.0), "DEVICE"))
+        .unwrap();
+    // A check valve: the same bowtie, named by its tag alone.
+    bowtie(&mut doc, 60.0, 20.0, |(x, y)| (x, y));
+    doc.add_entity(layered(text("CV0301", 58.0, 22.5), "DEVICE"))
+        .unwrap();
+
+    // An XV bubble (small, as this family draws them) and a motor mark.
+    doc.add_entity(circle(80.0, 30.0, 2.45)).unwrap();
+    doc.add_entity(text("XV", 80.0, 30.8)).unwrap();
+    doc.add_entity(text("0301", 80.0, 29.0)).unwrap();
+    doc.add_entity(circle(80.0, 24.0, 1.0)).unwrap();
+    doc.add_entity(text("M", 80.0, 24.0)).unwrap();
+
+    // A pump, its number lettered below.
+    doc.add_entity(circle(120.0, 60.0, 5.2)).unwrap();
+    doc.add_entity(layered(text("P-0301", 118.0, 50.0), "DEVICE"))
+        .unwrap();
+
+    // Three of a shape nobody has named, one of them mirrored.
+    triangle(&mut doc, 150.0, 100.0);
+    triangle(&mut doc, 170.0, 100.0);
+    for (a, b) in [
+        ((189.0, 101.0), (191.0, 101.0)),
+        ((191.0, 101.0), (190.0, 99.0)),
+        ((190.0, 99.0), (189.0, 101.0)),
+    ] {
+        doc.add_entity(layered(line(a.0, a.1, b.0, b.1), "DEVICE"))
+            .unwrap();
+    }
+    // And a one-off: a lone pentagon-ish zigzag.
+    for (a, b) in [
+        ((200.0, 200.0), (201.0, 202.0)),
+        ((201.0, 202.0), (202.5, 200.3)),
+        ((202.5, 200.3), (203.0, 202.0)),
+    ] {
+        doc.add_entity(layered(line(a.0, a.1, b.0, b.1), "DEVICE"))
+            .unwrap();
+    }
+    doc
+}
+
+#[test]
+fn exploded_sheet_symbols_are_named_by_their_tags_or_boxed_by_shape() {
+    let doc = exploded_sheet();
+    let rules = Rules::builtin();
+    let recognition = pid_legend::recognise(&doc, &rules);
+    assert_eq!(recognition.units_per_mm, 1.0);
+
+    // Tags name the strokes beside them, one to one.
+    assert_eq!(
+        count(&recognition, "ball-valve"),
+        2,
+        "{:?}",
+        recognition.symbols
+    );
+    assert_eq!(tags_of(&recognition, "ball-valve"), ["BV0301", "BV0302"]);
+    let left = recognition
+        .symbols
+        .iter()
+        .find(|s| s.class == "ball-valve" && s.at.0 < 25.0)
+        .unwrap();
+    assert_eq!(left.tag.as_deref(), Some("BV0301"));
+    assert!((left.bbox.0 - 18.8).abs() < 0.01 && (left.bbox.2 - 21.2).abs() < 0.01);
+    assert_eq!(count(&recognition, "check-valve"), 1);
+    assert_eq!(tags_of(&recognition, "check-valve"), ["CV0301"]);
+
+    // Small circles are told apart by their lettering.
+    assert_eq!(tags_of(&recognition, "bubble"), ["XV-0301"]);
+    assert_eq!(count(&recognition, "motor"), 1);
+    assert_eq!(tags_of(&recognition, "pump"), ["P-0301"]);
+
+    // The repeated unnamed shape is boxed under one id, the one-off is not.
+    let shapes: Vec<&pid_legend::Recognized> = recognition
+        .symbols
+        .iter()
+        .filter(|s| pid_legend::is_shape_class(&s.class))
+        .collect();
+    assert_eq!(shapes.len(), 3, "{shapes:?}");
+    let ids: BTreeSet<&str> = shapes.iter().map(|s| s.class.as_str()).collect();
+    assert_eq!(ids.len(), 1, "the mirrored one has the same id: {ids:?}");
+    assert!(shapes
+        .iter()
+        .all(|s| !s.known && s.color != [255, 255, 255]));
+    assert_eq!(recognition.unknown_shapes.len(), 1);
+    assert_eq!(recognition.unknown_shapes[0].count, 3);
+    assert_eq!(recognition.unknown_shapes[0].strokes, 3);
+    assert!(
+        recognition.orphan_tags.is_empty(),
+        "{:?}",
+        recognition.orphan_tags
+    );
+
+    let lines = pid_legend::report(&recognition);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("UNKNOWN SHAPE") && l.contains("x3")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("球阀 (ball-valve) x2  tagged 2/2")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn unnamed_shapes_draw_in_their_own_colour_on_one_layer() {
+    let mut doc = exploded_sheet();
+    let rules = Rules::builtin();
+    let recognition = pid_legend::recognise(&doc, &rules);
+    let added = pid_legend::apply(&mut doc, &recognition, &rules);
+    assert_eq!(added, recognition.symbols.len() * 2);
+    let shape_entities: Vec<&EntityType> = doc
+        .model_space_entities()
+        .filter(|e| e.common().layer == pid_legend::SHAPE_LAYER)
+        .collect();
+    assert_eq!(shape_entities.len(), 6);
+    assert!(shape_entities
+        .iter()
+        .all(|e| matches!(e.common().color, Color::Rgb { .. })));
+    let valve_entities = doc
+        .model_space_entities()
+        .filter(|e| e.common().layer == "PID-LEGEND-BALL-VALVE")
+        .count();
+    assert_eq!(valve_entities, 4);
+    assert_eq!(pid_legend::clear(&mut doc), added);
+}
+
 #[test]
 fn a_broken_rules_override_falls_back_to_the_builtin_rules() {
     let dir = std::env::temp_dir().join(format!("ocs-pid-legend-{}", std::process::id()));
@@ -480,6 +670,79 @@ fn cpecc_sheets_every_symbol_is_known_and_every_valve_has_its_own_tag() {
     }
     if checked == 0 {
         eprintln!("cpecc sheets not present; skipped");
+    }
+}
+
+/// The loading-island sheets: symbols are loose strokes, bubbles are small.
+#[test]
+fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
+    let rules = Rules::builtin();
+    let mut checked = 0;
+    for (file, bubbles, ball_valves, check_valves, evalves) in [
+        (
+            "DWG-0100SP02-07 汽车装卸岛(二)工艺自控流程图.dxf",
+            43 + 9,
+            25,
+            10,
+            0,
+        ),
+        (
+            "DWG-0100SP02-05 发油泵棚(二)工艺自控流程图.dxf",
+            80 + 38,
+            0,
+            5,
+            27,
+        ),
+    ] {
+        let Some(doc) = load_sheet(file) else {
+            continue;
+        };
+        let recognition = pid_legend::recognise(&doc, &rules);
+        assert_eq!(recognition.units_per_mm, 1.0, "{file}: paper mm");
+        assert!(
+            recognition.unknown_blocks.is_empty(),
+            "{file}: {:?}",
+            recognition.unknown_blocks
+        );
+        let all_bubbles = count(&recognition, "bubble") + count(&recognition, "bubble-panel");
+        assert_eq!(all_bubbles, bubbles, "{file}: bubbles");
+        assert_eq!(
+            tags_of(&recognition, "bubble").len() + tags_of(&recognition, "bubble-panel").len(),
+            bubbles,
+            "{file}: every bubble reads its lettering"
+        );
+        for (class, expected) in [
+            ("ball-valve", ball_valves),
+            ("check-valve", check_valves),
+            ("evalve", evalves),
+        ] {
+            assert_eq!(count(&recognition, class), expected, "{file}: {class}");
+            assert_eq!(
+                tags_of(&recognition, class).len(),
+                expected,
+                "{file}: every {class} tagged"
+            );
+        }
+        let ball_tags = tags_of(&recognition, "ball-valve");
+        let distinct: BTreeSet<&str> = ball_tags.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            ball_tags.len(),
+            "{file}: no BV tag used twice"
+        );
+        assert!(
+            !recognition.orphan_tags.contains_key("球阀"),
+            "{file}: BV tags nobody claimed: {:?}",
+            recognition.orphan_tags.get("球阀")
+        );
+        assert!(
+            !recognition.unknown_shapes.is_empty(),
+            "{file}: repeated unnamed shapes are reported"
+        );
+        checked += 1;
+    }
+    if checked == 0 {
+        eprintln!("cpecc SP02 sheets not present; skipped");
     }
 }
 

@@ -127,3 +127,95 @@ impl OpenCADStudio {
         Some(Task::none())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::pid_legend;
+
+    /// A real CPECC sheet beside the checkout, when it is there and not
+    /// locked by an editor.
+    fn open_sheet(app: &mut OpenCADStudio, name: &str) -> bool {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("0版重新处理dxf-12张")
+            .join(name);
+        if !path.is_file() {
+            eprintln!("skipping: {name} not present");
+            return false;
+        }
+        let request = serde_json::json!({ "op": "open", "path": path.to_string_lossy() });
+        let reply = app.automation_op(&request.to_string());
+        if reply["ok"].as_bool() != Some(true) {
+            eprintln!("skipping: {reply}");
+            return false;
+        }
+        true
+    }
+
+    fn legend_count(app: &OpenCADStudio) -> usize {
+        pid_legend::legend_handles(&app.tabs[app.active_tab].scene.document).len()
+    }
+
+    #[test]
+    fn pidlegend_on_draws_off_removes_and_on_twice_does_not_stack() {
+        let mut app = OpenCADStudio::new_for_test();
+        if !open_sheet(&mut app, "DWG-0100FF02-06 罐组II消防冷却水流程图.dxf") {
+            return;
+        }
+        let i = app.active_tab;
+        let before = app.tabs[i].scene.document.entities().count();
+        let rules = Rules::load();
+        let expected = pid_legend::recognise(&app.tabs[i].scene.document, &rules)
+            .symbols
+            .len();
+        assert_eq!(expected, 118);
+
+        let _ = app.run_command_line("PIDLEGEND ON");
+        assert_eq!(legend_count(&app), expected * 2, "a box and a label each");
+        let layer = app.tabs[i]
+            .scene
+            .document
+            .layers
+            .get("PID-LEGEND-BUTTERFLY")
+            .expect("class layer created");
+        assert_eq!(
+            layer.color,
+            Color::Rgb {
+                r: 255,
+                g: 140,
+                b: 0
+            }
+        );
+        assert!(app.tabs[i].dirty);
+
+        let _ = app.run_command_line("PIDLEGEND ON");
+        assert_eq!(legend_count(&app), expected * 2, "a second ON replaces");
+
+        let _ = app.run_command_line("PIDLEGEND OFF");
+        assert_eq!(legend_count(&app), 0);
+        assert_eq!(app.tabs[i].scene.document.entities().count(), before);
+    }
+
+    #[test]
+    fn pidlegend_marks_up_an_exploded_sheet_with_shape_colours() {
+        let mut app = OpenCADStudio::new_for_test();
+        if !open_sheet(&mut app, "DWG-0100SP02-07 汽车装卸岛(二)工艺自控流程图.dxf") {
+            return;
+        }
+        let i = app.active_tab;
+        let _ = app.run_command_line("PIDLEGEND ON");
+        let doc = &app.tabs[i].scene.document;
+        assert!(legend_count(&app) > 300, "{}", legend_count(&app));
+        assert!(doc.layers.get("PID-LEGEND-BALL-VALVE").is_some());
+        assert!(doc.layers.get(pid_legend::SHAPE_LAYER).is_some());
+        // Unnamed shapes carry their own colour; everything else is ByLayer.
+        let (own, by_layer): (Vec<_>, Vec<_>) = doc
+            .model_space_entities()
+            .filter(|e| pid_legend::is_legend_layer(&e.common().layer))
+            .partition(|e| e.common().layer == pid_legend::SHAPE_LAYER);
+        assert!(!own.is_empty() && own.iter().all(|e| e.common().color != Color::ByLayer));
+        assert!(by_layer.iter().all(|e| e.common().color == Color::ByLayer));
+    }
+}
