@@ -1,7 +1,8 @@
 # 开发计划：DXF → SVG 导出（v2，已经 oracle 复核）
 
 > 日期：2026-09-07
-> 状态：**v2 方案待评审**，未动代码。v1 于同日写成；v2 是把 oracle（GPT-5.5 Pro，会话
+> 状态：**v2 已批准（2026-09-07 16:00「直接开工，同意了」），P0 已实施**，记录见 §11。
+> v1 于同日写成；v2 是把 oracle（GPT-5.5 Pro，会话
 > `ocs-dxf-svg-plan-review-2`，18 分钟）的十六条评审意见逐条并进来之后的版本，纪要见 §9。
 > 结论先说：**今天不支持**。缺的表面上是「一个 SVG 后端」，但 v1 把「PDF 后端的入参」误认成
 > 「已经完成语义解析、可直接序列化的纸面矢量」——真正决定纸上画什么的那一千多行
@@ -487,3 +488,54 @@ wipeout 顺序等故障，证明判据真能检出。**阈值必须同时「不�
 5. **图章**：首版不支持可以接受吗？还是需要一个固定字体的矢量图章协议（那是另一件事）。
 
 计划文件目前**未跟踪**；这个仓里另一个会话在持续提交，评审通过前是否先提一笔占住，请说一声。
+
+> 2026-09-07 16:00 拍板：五条全按上面的建议走（接受 D0；D4 首版 `--layout/--model`、`--ctb`、
+> `--dry-run` 必有；D3 三位定宽；R5 在 P1 做边界提取；图章首版不支持）。
+
+## 11. P0 实施记录（2026-09-07）
+
+**做了什么**（一个提交，不改任何调用方）：
+
+| 文件 | 内容 |
+|---|---|
+| `src/io/plot_types.rs`（新） | `PlotWire` / `PdfPlotOptions` / `PlotGroupSplits` / `PdfPageInput` 原样搬来；`pdf_export` `pub use` 回去，`app/update/file.rs` 七处与 `print_to_printer.rs` 零改动 |
+| `src/io/plot_emit.rs`（新） | `PlotOp`（15 个变体）、`PlotSink`、`RecordingSink`、`PlotPage`、`PlotAssets`、`emit_plot_content`：`append_pdf_page` + `emit_wire_fills` / `emit_hatch` / `emit_text` / `emit_plot_stamp` + 五个 helper 的机械抽取，发 `PlotOp` 而不是 `printpdf::Op` |
+| `src/io/pdf_export.rs`（改） | 只剩 PDF 专有的东西：`PdfSink`（`PlotOp` → `Op` 一对一，`BuiltinText` 展开成图章那六个文本 op）、文档 / 页 / 图形状态注册、保存、对话框 |
+| `src/io/pdf_export/legacy_reference.rs`（新，test-only） | 旧 `append_pdf_page` 与全部 helper **逐字冻结**，只把 `PdfPage` 入栈改成返回 `Vec<Op>` |
+
+**坐标契约**：`PlotPoint` 用 PDF 点。旧代码几何走 `Point::new(Mm(v))`（printpdf 的 `From<Mm> for Pt`
+是 `v * 2.834_646`），而笔宽 / 裁剪 / CTM 平移 / 虚线用 `MM_TO_PT = 2.834645`——两个常量差在第七位。
+抽取**两个都保留**（`GEOMETRY_MM_TO_PT` 与 `MM_TO_PT`），PDF sink 直接包 `Pt`，结果逐位相同；统一它们是
+行为变更，另提。CTM 平移里的 `tx * 2.834645` 是 f64 字面量参与运算再转 f32，也照原样。
+
+**验收（第一层，全过）**，`cargo test --lib io::pdf_export` 9/9：
+
+- `emitter_through_pdf_sink_matches_the_frozen_exporter_op_for_op`：22 个用例（四种旋转 + 比例 + 偏移 + 裁剪；
+  普通 / 超六项 / stationed 正反向虚线；三种笔宽选项组合 + 宽多段线；颜色适配 + 透明；视口点阵圆点；
+  wire 填充 + 低位残差；solid / pattern / gradient / 岛 / ACI-7 白 / wipeout / 退化环 / UTM 量级 `world_origin`；
+  CTB 颜色 / 笔 / 加网 / cap-join / 灰度策略 / fill_style 转 pattern；图集文字 + 缺 key + 装饰条；
+  两个 render group 交叉深度 + 越界 split + merge_lines + stamp；空页），旧 emitter 与新
+  `PdfSink` 的 `Op` 流**逐 op、逐位**相同。**比较不能用 printpdf 自带的 `PartialEq`**：它的 `Pt::eq`
+  先四舍五入到 1/1000，`Point::eq` 要求四个分量 `is_normal()`——**坐标为 0 的点跟自己都不相等**。
+  改用每个 op 的 `Debug` 文本（Rust 浮点 `Debug` 是最短往返表示，文本相同 ⇔ 逐位相同）。
+- `the_corpus_exercises_every_op_kind`：语料覆盖旧 exporter 能发出的全部 18 种 `Op`。
+- `geometry_points_match_printpdf_mm_to_pt_bit_for_bit`：`GEOMETRY_MM_TO_PT` 对库逐位钉死（6000+ 个采样）。
+- `saved_pdf_bytes_match_the_frozen_exporter_apart_from_the_trailer_id`：**结构级 / 条件字节级**——非
+  merge_lines、非 stamp 的 20 个用例，旧 op 与新 op 各自存成 PDF 后，除 trailer `/ID` 外**字节相同**。
+- `pdf_bytes_repeat_except_for_the_random_trailer_id`：R6 的实测结论——printpdf 0.9.1 的「随机」是**进程级
+  xorshift 计数器**（`RAND_SEED` 从 2100 起、每次 `+21`），每次 `save` 抽两串进 `/ID`，`add_graphics_state`
+  也从同一计数器取名。所以同进程两次导出永不逐字节相同、但除 `/ID` 外全同；跨进程第 N 次导出可重复。
+  `merge_lines` 时图形状态名进内容流，字节级不适用，由操作级覆盖。
+- **变异检验**：把 `GEOMETRY_MM_TO_PT` 改动第七位，钉死 / 操作级 / 字节级三条同时红。
+
+**wasm**：`cargo check --lib --target wasm32-unknown-unknown` 通过，`plot_emit` 与 `plot_types` 全部进 web 构建
+（唯一的平台分叉是图章的 `SystemTime::now`，wasm 上给 0）。
+
+**其它**：全库 `cargo test --lib` 635 过 / 1 失败——`app::update::free_text_entry_tests::normal_commands_still_uppercase_and_submit_on_space`
+（「Space submitted the line」），与本改动无关，HEAD 干净工作树上同样失败。clippy 对新文件的 9 条告警全是旧代码
+原有的写法（`chunks_exact(3)`、`Option<RenderInstance>.clone()`、`&format!`），P0 不改语句；`legacy_reference`
+显式 `allow`。
+
+**P0 出口条件对照**：新 `PdfSink` 与旧实现操作级回归通过 ✓；字节一致性的适用条件写清（上面）✓；
+没有生产遍历副本 ✓（`legacy_reference` 是 test-only）。R4 里那个**组间 cap/join 缓存**的现有问题在抽取里
+原样保留（两边一致），单独修。

@@ -31,7 +31,9 @@ pub fn is_read_only_source_path(path: &Path) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 pub mod single_instance;
 pub mod pdf_export;
+pub mod plot_emit;
 pub mod plot_style;
+pub mod plot_types;
 pub mod print_to_printer;
 pub mod recovery;
 pub mod step;
