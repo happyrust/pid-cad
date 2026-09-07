@@ -681,6 +681,126 @@ fn pipe_is_cut_away_from_exploded_symbols_and_a_stem_is_not() {
     );
 }
 
+/// A flame arrester the way the loading-island sheets draw one: a frame of
+/// two 3.2 mm uprights 1.8 mm apart and two 2.7 mm bars across the top and
+/// bottom, sticking out 0.45 mm each side, with two 1.8 mm lines through the
+/// middle -- every stroke of the frame longer than a pipe stub -- on a
+/// vertical pipe, 3.6 mm of stub from each bar to the run.
+fn flame_arrester(doc: &mut CadDocument, x: f64, y: f64) {
+    for (a, b) in [
+        ((x - 0.9, y - 1.6), (x - 0.9, y + 1.6)),
+        ((x + 0.9, y - 1.6), (x + 0.9, y + 1.6)),
+        ((x - 1.35, y + 1.6), (x + 1.35, y + 1.6)),
+        ((x - 1.35, y - 1.6), (x + 1.35, y - 1.6)),
+        ((x - 0.9, y + 0.2), (x + 0.9, y + 0.2)),
+        ((x - 0.9, y - 0.2), (x + 0.9, y - 0.2)),
+        ((x, y + 1.6), (x, y + 5.2)),
+        ((x, y - 1.6), (x, y - 5.2)),
+        ((x, y + 5.2), (x, y + 30.0)),
+        ((x, y - 5.2), (x, y - 30.0)),
+    ] {
+        doc.add_entity(layered(line(a.0, a.1, b.0, b.1), "0"))
+            .unwrap();
+    }
+}
+
+/// A sheet with a flame arrester lettered FA0301 on a riser, and two ball
+/// valves 8 mm apart joined by 5.6 mm of pipe with a stray FA0302 lettered
+/// over the pipe.
+fn framed_sheet() -> CadDocument {
+    let mut doc = CadDocument::new();
+    doc.add_entity(layered(line(0.0, 0.0, 420.0, 0.0), "A"))
+        .unwrap();
+    doc.add_entity(layered(line(0.0, 0.0, 0.0, 297.0), "A"))
+        .unwrap();
+
+    flame_arrester(&mut doc, 40.0, 100.0);
+    doc.add_entity(layered(text("FA0301", 34.0, 101.0), "DEVICE"))
+        .unwrap();
+
+    doc.add_entity(layered(line(50.0, 20.0, 58.8, 20.0), "0"))
+        .unwrap();
+    bowtie(&mut doc, 60.0, 20.0, |(x, y)| (x, y));
+    doc.add_entity(layered(line(61.2, 20.0, 66.8, 20.0), "0"))
+        .unwrap();
+    bowtie(&mut doc, 68.0, 20.0, |(x, y)| (x, y));
+    doc.add_entity(layered(line(69.2, 20.0, 80.0, 20.0), "0"))
+        .unwrap();
+    doc.add_entity(layered(text("BV0301", 58.0, 22.3), "DEVICE"))
+        .unwrap();
+    doc.add_entity(layered(text("BV0302", 66.0, 22.3), "DEVICE"))
+        .unwrap();
+    doc.add_entity(layered(text("FA0302", 64.0, 23.0), "DEVICE"))
+        .unwrap();
+    doc
+}
+
+/// The pipe rule takes every stroke of the flame arrester's frame, so the
+/// first pass has nothing for FA0301; the second pass brings back the
+/// pipe-length strokes that other strokes hold at two or more points -- the
+/// frame, but not the stubs, held only at the frame end -- and the tag names
+/// the frame. The pipe between the two ball valves is held only by symbols
+/// and stays pipe: the stray FA0302 gets nothing.
+#[test]
+fn a_symbol_drawn_in_pipe_length_strokes_is_found_for_its_tag() {
+    let doc = framed_sheet();
+    let rules = Rules::builtin();
+    let recognition = pid_legend::recognise(&doc, &rules);
+    assert_eq!(recognition.units_per_mm, 1.0);
+
+    let arrester = recognition
+        .symbols
+        .iter()
+        .find(|s| s.class == "flame-arrester")
+        .expect("the frame is a flame arrester");
+    assert_eq!(arrester.tag.as_deref(), Some("FA0301"));
+    assert!(
+        arrester.source.contains("(6 strokes, second pass)"),
+        "{}",
+        arrester.source
+    );
+    let (x0, y0, x1, y1) = arrester.bbox;
+    assert!(
+        (x0 - 38.65).abs() < 0.01
+            && (x1 - 41.35).abs() < 0.01
+            && (y0 - 98.4).abs() < 0.01
+            && (y1 - 101.6).abs() < 0.01,
+        "the frame without its stubs: {:?}",
+        arrester.bbox
+    );
+    assert_eq!(count(&recognition, "flame-arrester"), 1);
+
+    let mut balls: Vec<&pid_legend::Recognized> = recognition
+        .symbols
+        .iter()
+        .filter(|s| s.class == "ball-valve")
+        .collect();
+    balls.sort_by(|a, b| a.at.0.total_cmp(&b.at.0));
+    assert_eq!(
+        balls.iter().map(|s| s.tag.as_deref()).collect::<Vec<_>>(),
+        [Some("BV0301"), Some("BV0302")]
+    );
+    for (s, x0, x1) in [(balls[0], 58.8, 61.2), (balls[1], 66.8, 69.2)] {
+        assert!(
+            (s.bbox.0 - x0).abs() < 0.01 && (s.bbox.2 - x1).abs() < 0.01,
+            "the pipe between the valves is not part of either: {:?}",
+            s.bbox
+        );
+    }
+    assert_eq!(
+        recognition.orphan_tags.get("阻火器").map(Vec::as_slice),
+        Some(&["FA0302".to_string()][..]),
+        "{:?}",
+        recognition.orphan_tags
+    );
+    assert_eq!(
+        recognition.orphan_tags.len(),
+        1,
+        "{:?}",
+        recognition.orphan_tags
+    );
+}
+
 #[test]
 fn unnamed_shapes_draw_in_their_own_colour_on_one_layer() {
     let mut doc = exploded_sheet();
@@ -895,7 +1015,21 @@ fn cpecc_sheets_every_symbol_is_known_and_every_valve_has_its_own_tag() {
 fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
     let rules = Rules::builtin();
     let mut checked = 0;
-    for (file, bubbles, ball_valves, check_valves, evalves, reducers) in [
+    // SP02-07's flame arresters and SP02-05's flow indicators are drawn in
+    // pipe-length strokes and are found for their tags by the second pass
+    // (`second_pass` names the classes all of whose symbols must be); SP02-07's
+    // five flow indicators are ordinary first-pass claims.
+    for (
+        file,
+        bubbles,
+        ball_valves,
+        check_valves,
+        evalves,
+        reducers,
+        arresters,
+        indicators,
+        second_pass,
+    ) in [
         (
             "DWG-0100SP02-07 汽车装卸岛(二)工艺自控流程图.dxf",
             43 + 9,
@@ -903,6 +1037,9 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
             10,
             4,
             0,
+            2,
+            5,
+            &["flame-arrester"][..],
         ),
         (
             "DWG-0100SP02-05 发油泵棚(二)工艺自控流程图.dxf",
@@ -911,6 +1048,9 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
             5,
             27,
             5,
+            0,
+            5,
+            &["flow-indicator"][..],
         ),
     ] {
         let Some(doc) = load_sheet(file) else {
@@ -934,12 +1074,32 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
             ("ball-valve", ball_valves),
             ("check-valve", check_valves),
             ("evalve", evalves),
+            ("flame-arrester", arresters),
+            ("flow-indicator", indicators),
         ] {
             assert_eq!(count(&recognition, class), expected, "{file}: {class}");
             assert_eq!(
                 tags_of(&recognition, class).len(),
                 expected,
                 "{file}: every {class} tagged"
+            );
+        }
+        for s in &recognition.symbols {
+            if second_pass.contains(&s.class.as_str()) {
+                assert!(s.source.contains("second pass"), "{file}: {}", s.source);
+                let (w, h) = (s.bbox.2 - s.bbox.0, s.bbox.3 - s.bbox.1);
+                assert!(
+                    (2.0..6.0).contains(&w) && (2.0..6.0).contains(&h),
+                    "{file}: {} boxed without pipe: {w:.2} x {h:.2}",
+                    s.source
+                );
+            }
+        }
+        for label in ["阻火器", "流量指示"] {
+            assert!(
+                !recognition.orphan_tags.contains_key(label),
+                "{file}: {label} tags nobody claimed: {:?}",
+                recognition.orphan_tags.get(label)
             );
         }
         let ball_tags = tags_of(&recognition, "ball-valve");
@@ -1009,10 +1169,22 @@ fn cpecc_sp02_10_joined_symbols_come_apart_and_are_named() {
         ("flame-arrester", 2, 0),
         ("breather-valve", 2, 0),
         ("vent-outlet", 2, 0),
+        // The two flow indicators on the 0326 / 0327 risers: a 5 mm D-shaped
+        // body of pipe-length strokes, found for FI0326 / FI0327 by the
+        // second pass.
+        ("flow-indicator", 2, 2),
     ] {
         assert_eq!(count(&recognition, class), expected, "{class}");
         assert_eq!(tags_of(&recognition, class).len(), tagged, "{class} tagged");
     }
+    let mut indicators: Vec<&str> = tags_of(&recognition, "flow-indicator");
+    indicators.sort_unstable();
+    assert_eq!(indicators, ["FI0326", "FI0327"]);
+    assert!(
+        !recognition.orphan_tags.contains_key("流量指示"),
+        "{:?}",
+        recognition.orphan_tags.get("流量指示")
+    );
     // The dictionary's ball valve, 22 times, none carrying a stub: all one
     // size. (The two BV-tagged ones are a larger drawing of their own.)
     let small: Vec<&pid_legend::Recognized> = recognition
@@ -1085,11 +1257,14 @@ fn cpecc_loading_island_sheets_have_no_unnamed_shape_left() {
     // SP02-08 has four globe valves: the fourth used to be taken for a gate by
     // GV0311A, whose own gate stands 6 mm to the right of it; a tag no longer
     // pulls a shape the dictionary names as another class.
-    for (file, globe_valves, small_check_valves) in [
-        ("DWG-0100SP02-06 汽车装卸岛(一)工艺自控流程图.dxf", 11, 3),
-        ("DWG-0100SP02-07 汽车装卸岛(二)工艺自控流程图.dxf", 4, 0),
-        ("DWG-0100SP02-08 汽车装卸岛(三)工艺自控流程图.dxf", 4, 0),
-        ("DWG-0100SP02-09 汽车装卸岛(四)工艺自控流程图.dxf", 4, 0),
+    // Each sheet's flame arresters (one per loading lane's vapour return) are
+    // drawn in pipe-length strokes: the second pass finds them for their FA
+    // tags, one each, all the same shape.
+    for (file, globe_valves, small_check_valves, arresters) in [
+        ("DWG-0100SP02-06 汽车装卸岛(一)工艺自控流程图.dxf", 11, 3, 1),
+        ("DWG-0100SP02-07 汽车装卸岛(二)工艺自控流程图.dxf", 4, 0, 2),
+        ("DWG-0100SP02-08 汽车装卸岛(三)工艺自控流程图.dxf", 4, 0, 2),
+        ("DWG-0100SP02-09 汽车装卸岛(四)工艺自控流程图.dxf", 4, 0, 2),
     ] {
         let Some(doc) = load_sheet(file) else {
             continue;
@@ -1101,6 +1276,25 @@ fn cpecc_loading_island_sheets_have_no_unnamed_shape_left() {
             recognition.unknown_shapes
         );
         assert_eq!(count(&recognition, "globe-valve"), globe_valves, "{file}");
+        let found: Vec<&pid_legend::Recognized> = recognition
+            .symbols
+            .iter()
+            .filter(|s| s.class == "flame-arrester")
+            .collect();
+        assert_eq!(found.len(), arresters, "{file}");
+        for s in &found {
+            assert!(
+                s.tag.as_deref().is_some_and(|t| t.starts_with("FA03")),
+                "{file}: {:?}",
+                s.tag
+            );
+            assert_eq!(shape_id(s), "2bbe9e32", "{file}: {}", s.source);
+        }
+        assert!(
+            !recognition.orphan_tags.contains_key("阻火器"),
+            "{file}: {:?}",
+            recognition.orphan_tags.get("阻火器")
+        );
         // The small check valves beside the pumps carry no tag; the tagged
         // ones are the tag-class claims.
         let untagged_checks = recognition

@@ -63,6 +63,7 @@
     "min_count": 2,
     "assembly_mm": 6.0,
     "split_min_strokes": 2,
+    "recover_min_runs": 2,
     "dictionary": {
       "f510fd60": { "class": "flow-arrow", "label": "流向/接图箭头", "color": [120, 140, 180], "tag": { "shape": "*DWG-*", "radius_mm": 15.0, "report_orphans": false } },
       "38fb58d8": { "class": "flow-arrow", "label": "流向/接图箭头", "color": [120, 140, 180], "tag": { "shape": "*DWG-*", "radius_mm": 15.0, "report_orphans": false } },

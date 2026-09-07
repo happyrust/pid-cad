@@ -261,6 +261,16 @@ pub struct ShapeRules {
     /// A symbol then has one id whatever pipe was drawn against it. 0 leaves
     /// components as they connect.
     pub split_min_strokes: usize,
+    /// Second pass for the tags left over: a symbol drawn in pipe-length
+    /// strokes (a flame arrester's frame, a flow indicator's body) falls to
+    /// `pipe_stub_mm` whole. The strokes not yet part of any symbol are
+    /// clustered again together with the pipe-length axis runs (over
+    /// `pipe_stub_mm`, under `max_stroke_mm`) that are held at two or more
+    /// points by other such strokes -- a frame's side or a T's bar is, a pipe
+    /// leading off is held at one end only -- and a component of that pass
+    /// holding at least this many of those runs may be claimed by a tag no
+    /// component of the first pass took. 0 turns the second pass off.
+    pub recover_min_runs: usize,
     /// Shape id -> what it is. Ids come from the report (`UNKNOWN SHAPE`).
     /// Class [`IGNORE_CLASS`] drops the shape: neither boxed nor reported
     /// (the square a panel bubble sits in is not a symbol of its own).
@@ -286,6 +296,7 @@ impl Default for ShapeRules {
             min_count: 2,
             assembly_mm: 0.0,
             split_min_strokes: 0,
+            recover_min_runs: 0,
             dictionary: BTreeMap::new(),
         }
     }
@@ -969,6 +980,7 @@ impl PrimKind {
 }
 
 /// One loose stroke, paper millimetres.
+#[derive(Clone)]
 struct Prim {
     kind: PrimKind,
     /// Polyline points; a circle's centre only.
@@ -1085,16 +1097,21 @@ fn extents(bbox: BBox, axis: Axis) -> ((f64, f64), (f64, f64)) {
 
 /// An axis-aligned straight stroke of the sheet, whether or not it is short
 /// enough to be part of a symbol; `prim` indexes it in the loose strokes
-/// when it is.
+/// when it is, `pipe` in the pipe-length strokes kept for the second pass.
 struct SheetRun {
     run: AxisRun,
     prim: Option<usize>,
+    pipe: Option<usize>,
 }
 
 /// What [`loose_prims`] takes from a sheet.
 struct Loose {
     /// Strokes short enough to be part of a symbol.
     prims: Vec<Prim>,
+    /// Straight axis-aligned strokes past the pipe stub length but not past
+    /// the longest a symbol stroke can be: pipe, unless the second pass finds
+    /// them framed into a symbol.
+    pipe_prims: Vec<Prim>,
     /// Every straight axis-aligned stroke, pipe runs included.
     runs: Vec<SheetRun>,
     /// Circles already recognised as symbols, `(centre, radius)`.
@@ -1127,8 +1144,10 @@ fn loose_prims(
     // Strokes short enough for a symbol, with their axis run if straight;
     // pipe runs go straight to `out.runs`.
     let mut kept: Vec<(Prim, Option<AxisRun>)> = Vec::new();
+    let mut pipes: Vec<(Prim, AxisRun)> = Vec::new();
     let mut out = Loose {
         prims: Vec::new(),
+        pipe_prims: Vec::new(),
         runs: Vec::new(),
         circles: Vec::new(),
     };
@@ -1229,15 +1248,21 @@ fn loose_prims(
         }
         let run = prim.axis_run();
         // Too long for a symbol stroke, or a straight axis run past the pipe
-        // stub length: pipe (or an instrument leader), not symbol.
-        let pipe = (prim.kind != PrimKind::Circle && prim.longest_segment() > rules.max_stroke_mm)
-            || (rules.pipe_stub_mm > 0.0 && run.is_some_and(|r| r.len() > rules.pipe_stub_mm));
-        if pipe {
-            if let Some(run) = run {
-                out.runs.push(SheetRun { run, prim: None });
-            }
-        } else {
-            kept.push((prim, run));
+        // stub length: pipe (or an instrument leader), not symbol. A run of
+        // pipe stub length that a symbol stroke could still be is kept aside
+        // for the second pass.
+        let too_long =
+            prim.kind != PrimKind::Circle && prim.longest_segment() > rules.max_stroke_mm;
+        let stub = rules.pipe_stub_mm > 0.0 && run.is_some_and(|r| r.len() > rules.pipe_stub_mm);
+        match run {
+            Some(run) if too_long => out.runs.push(SheetRun {
+                run,
+                prim: None,
+                pipe: None,
+            }),
+            Some(run) if stub => pipes.push((prim, run)),
+            _ if too_long => {}
+            _ => kept.push((prim, run)),
         }
     }
     let (prims, runs): (Vec<Prim>, Vec<Option<AxisRun>>) = kept.into_iter().unzip();
@@ -1247,10 +1272,23 @@ fn loose_prims(
             out.runs.push(SheetRun {
                 run,
                 prim: Some(prim),
+                pipe: None,
             });
         }
     }
     out.prims = prims;
+    let (pipe_prims, runs): (Vec<Prim>, Vec<AxisRun>) = pipes.into_iter().unzip();
+    let (pipe_prims, index) = dedupe(pipe_prims, rules.touch_mm);
+    for (old, run) in runs.into_iter().enumerate() {
+        if let Some(pipe) = index[old] {
+            out.runs.push(SheetRun {
+                run,
+                prim: None,
+                pipe: Some(pipe),
+            });
+        }
+    }
+    out.pipe_prims = pipe_prims;
     out
 }
 
@@ -1693,7 +1731,38 @@ struct Component {
     centre: (f64, f64),
     id: String,
     hash: u64,
-    strokes: usize,
+    /// The strokes, as indices into the pass's stroke list.
+    idxs: Vec<usize>,
+}
+
+impl Component {
+    /// A component of `idxs` with its box, centre and shape id, unless its
+    /// box is too small for a symbol or too big for one.
+    fn of(prims: &[Prim], idxs: Vec<usize>, rules: &ShapeRules) -> Option<Component> {
+        let bbox = group_bbox(prims, &idxs)?;
+        let longest = (bbox.2 - bbox.0).max(bbox.3 - bbox.1);
+        if longest < rules.min_box_mm || longest > rules.max_box_mm {
+            return None;
+        }
+        let centre = ((bbox.0 + bbox.2) / 2.0, (bbox.1 + bbox.3) / 2.0);
+        let sig = signature(prims, &idxs, centre, rules.quantum_mm);
+        let hash = fnv1a(sig.as_bytes());
+        Some(Component {
+            bbox,
+            centre,
+            id: format!("{:08x}", (hash >> 32) as u32 ^ hash as u32),
+            hash,
+            idxs,
+        })
+    }
+
+    fn strokes(&self) -> usize {
+        self.idxs.len()
+    }
+
+    fn size(&self) -> (f64, f64) {
+        (self.bbox.2 - self.bbox.0, self.bbox.3 - self.bbox.1)
+    }
 }
 
 struct Exploded {
@@ -1833,24 +1902,9 @@ fn exploded_symbols(
         if idxs.is_empty() || (idxs.len() < 2 && prims[idxs[0]].kind != PrimKind::Circle) {
             continue;
         }
-        let Some(bbox) = group_bbox(prims, &idxs) else {
-            continue;
-        };
-        let (w, h) = (bbox.2 - bbox.0, bbox.3 - bbox.1);
-        let longest = w.max(h);
-        if longest < shape_rules.min_box_mm || longest > shape_rules.max_box_mm {
-            continue;
+        if let Some(comp) = Component::of(prims, idxs, shape_rules) {
+            comps.push(comp);
         }
-        let centre = ((bbox.0 + bbox.2) / 2.0, (bbox.1 + bbox.3) / 2.0);
-        let sig = signature(prims, &idxs, centre, shape_rules.quantum_mm);
-        let hash = fnv1a(sig.as_bytes());
-        comps.push(Component {
-            bbox,
-            centre,
-            id: format!("{:08x}", (hash >> 32) as u32 ^ hash as u32),
-            hash,
-            strokes: idxs.len(),
-        });
     }
 
     // ── a tag lettered beside a component names it
@@ -1866,7 +1920,7 @@ fn exploded_symbols(
             }
             let at = (l.at.0 / upm, l.at.1 / upm);
             for (ci, c) in comps.iter().enumerate() {
-                let (w, h) = (c.bbox.2 - c.bbox.0, c.bbox.3 - c.bbox.1);
+                let (w, h) = c.size();
                 if w < rule.min_side_mm || h < rule.min_side_mm {
                     continue;
                 }
@@ -1984,7 +2038,7 @@ fn exploded_symbols(
     // ── the rest: dictionary, or repeated unknowns
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for (ci, c) in comps.iter().enumerate() {
-        let (w, h) = (c.bbox.2 - c.bbox.0, c.bbox.3 - c.bbox.1);
+        let (w, h) = c.size();
         if !claimed.contains_key(&ci)
             && !shape_rules.dictionary.contains_key(&c.id)
             && w.min(h) >= shape_rules.min_side_mm
@@ -1995,10 +2049,19 @@ fn exploded_symbols(
     let mut summaries: BTreeMap<&str, UnknownShape> = BTreeMap::new();
     let mut nearby: HashMap<&str, HashMap<&str, usize>> = HashMap::new();
     let mut symbols = Vec::new();
+    let scale = |b: (f64, f64, f64, f64)| (b.0 * upm, b.1 * upm, b.2 * upm, b.3 * upm);
+    // Strokes of the components that became symbols (named, ignored or
+    // boxed): the second pass leaves them alone.
+    let mut in_symbol = vec![false; prims.len()];
     for (ci, c) in comps.iter().enumerate() {
-        let scale = |b: (f64, f64, f64, f64)| (b.0 * upm, b.1 * upm, b.2 * upm, b.3 * upm);
         let at = (c.centre.0 * upm, c.centre.1 * upm);
-        let source = format!("shape {} ({} strokes)", c.id, c.strokes);
+        let source = format!("shape {} ({} strokes)", c.id, c.strokes());
+        let repeated = counts.get(c.id.as_str()).copied().unwrap_or(0) >= shape_rules.min_count;
+        if claimed.contains_key(&ci) || shape_rules.dictionary.contains_key(&c.id) || repeated {
+            for &i in &c.idxs {
+                in_symbol[i] = true;
+            }
+        }
         if let Some((ri, k, d, more)) = claimed.get(&ci) {
             let rule = &rules.tag_classes[*ri];
             let mut tag = lettering[*k].value.clone();
@@ -2042,8 +2105,8 @@ fn exploded_symbols(
                 },
                 rule.tag.clone(),
             ));
-        } else if counts.get(c.id.as_str()).copied().unwrap_or(0) >= shape_rules.min_count {
-            let (w, h) = (c.bbox.2 - c.bbox.0, c.bbox.3 - c.bbox.1);
+        } else if repeated {
+            let (w, h) = c.size();
             symbols.push((
                 Recognized {
                     class: format!("{SHAPE_CLASS_PREFIX}{}", c.id),
@@ -2066,7 +2129,7 @@ fn exploded_symbols(
                     id: c.id.clone(),
                     count: 0,
                     size_mm: (w, h),
-                    strokes: c.strokes,
+                    strokes: c.strokes(),
                     example_at: at,
                     nearby: Vec::new(),
                 });
@@ -2097,7 +2160,211 @@ fn exploded_symbols(
         })
         .collect();
     unknown.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.id.cmp(&b.id)));
+
+    // ── second pass: the tags still free, over the strokes the pipe rule took
+    if shape_rules.recover_min_runs > 0 && shape_rules.pipe_stub_mm > 0.0 {
+        for (comp, ri, k, d) in recovered_symbols(
+            &loose,
+            &in_symbol,
+            rules,
+            shape_rules,
+            lettering,
+            upm,
+            taken_text,
+        ) {
+            let rule = &rules.tag_classes[ri];
+            symbols.push((
+                Recognized {
+                    class: rule.class.clone(),
+                    label: rule.label.clone(),
+                    color: rule.color,
+                    at: (comp.centre.0 * upm, comp.centre.1 * upm),
+                    bbox: scale(comp.bbox),
+                    source: format!(
+                        "shape {} ({} strokes, second pass)",
+                        comp.id,
+                        comp.strokes()
+                    ),
+                    known: true,
+                    inner_text: Vec::new(),
+                    tag: Some(lettering[k].value.clone()),
+                    tag_distance_mm: Some(d),
+                    wants_tag: true,
+                },
+                TagRule::default(),
+            ));
+        }
+    }
     Exploded { symbols, unknown }
+}
+
+/// Components for the tags no first-pass component took, and the claim each
+/// gets: `(component, tag rule, text, mm)`.
+///
+/// A symbol drawn in pipe-length strokes -- the flame arrester's frame of
+/// 2.7 and 3.2 mm lines, the flow indicator's 3.7 x 4.9 mm body -- loses all
+/// of them to `pipe_stub_mm` and leaves nothing for its tag to claim. Here
+/// the strokes not yet part of a symbol are clustered again together with
+/// those pipe-length runs (`Loose::pipe_prims`) that are *framed*: held at
+/// two or more points by other strokes of this pool, not counting a run
+/// along the same line. A frame's side has the two neighbouring sides on
+/// it, a T's bar has its stem and a side; a pipe leading off the symbol is
+/// held at one end, by the symbol, and the pipe between two valves is held
+/// by the valves, which are symbols already and so not in the pool. The
+/// pipe is then taken out of each component as in the first pass, and a
+/// component of at least three strokes, `recover_min_runs` of them such
+/// runs, is a candidate. Tags pair with candidates as in the first pass:
+/// most pairs, then shortest, then nearest free for the rest.
+fn recovered_symbols(
+    loose: &Loose,
+    in_symbol: &[bool],
+    rules: &Rules,
+    shape_rules: &ShapeRules,
+    lettering: &[Lettering],
+    upm: f64,
+    taken_text: &mut [bool],
+) -> Vec<(Component, usize, usize, f64)> {
+    let eps = shape_rules.touch_mm;
+    let free: Vec<usize> = (0..loose.prims.len()).filter(|&i| !in_symbol[i]).collect();
+    if loose.pipe_prims.is_empty() {
+        return Vec::new();
+    }
+    // The pool: the free strokes first, then every pipe-length run.
+    let mut pool: Vec<Prim> = free.iter().map(|&i| loose.prims[i].clone()).collect();
+    pool.extend(loose.pipe_prims.iter().cloned());
+    let n_free = free.len();
+    let collinear = |a: &Prim, b: &Prim| match (a.axis_run(), b.axis_run()) {
+        (Some(ra), Some(rb)) => ra.axis == rb.axis && (ra.at - rb.at).abs() <= eps,
+        _ => false,
+    };
+    let framed: Vec<bool> = (0..pool.len())
+        .map(|i| {
+            if i < n_free {
+                return true;
+            }
+            let (run, bi) = (&pool[i], pool[i].bbox);
+            let held = pool
+                .iter()
+                .enumerate()
+                .filter(|&(j, other)| {
+                    let bj = other.bbox;
+                    j != i
+                        && !(bi.0 > bj.2 + eps
+                            || bj.0 > bi.2 + eps
+                            || bi.1 > bj.3 + eps
+                            || bj.1 > bi.3 + eps)
+                        && !collinear(run, other)
+                        && touches(run, other, eps)
+                })
+                .count();
+            held >= 2
+        })
+        .collect();
+    // Renumber to the strokes of the pass: the free strokes (all of them, so
+    // they keep the indices 0..n_free), then the framed runs.
+    let mut prims: Vec<Prim> = Vec::new();
+    let mut of_prim: HashMap<usize, usize> = HashMap::new(); // Loose::prims index -> pass index
+    let mut of_pipe: HashMap<usize, usize> = HashMap::new(); // Loose::pipe_prims index -> pass index
+    for (p, prim) in pool.into_iter().enumerate() {
+        if !framed[p] {
+            continue;
+        }
+        if p < n_free {
+            of_prim.insert(free[p], prims.len());
+        } else {
+            of_pipe.insert(p - n_free, prims.len());
+        }
+        prims.push(prim);
+    }
+    if prims.len() == n_free {
+        return Vec::new();
+    }
+    let runs: Vec<SheetRun> = loose
+        .runs
+        .iter()
+        .map(|r| SheetRun {
+            run: r.run,
+            prim: r
+                .prim
+                .and_then(|i| of_prim.get(&i))
+                .or_else(|| r.pipe.and_then(|i| of_pipe.get(&i)))
+                .copied(),
+            pipe: None,
+        })
+        .collect();
+    let min_strokes = shape_rules.split_min_strokes;
+    let trim = |idxs: Vec<usize>| {
+        if min_strokes > 0 {
+            trim_pipe_stubs(&prims, idxs, &loose.circles, eps)
+        } else {
+            idxs
+        }
+    };
+    let mut comps: Vec<Component> = Vec::new();
+    for group in components(&prims, eps) {
+        for part in split_at_bridges(&prims, &runs, trim(group), min_strokes, eps) {
+            let idxs = trim(part);
+            let held_runs = idxs.iter().filter(|&&i| i >= n_free).count();
+            if idxs.len() < 3 || held_runs < shape_rules.recover_min_runs {
+                continue;
+            }
+            if let Some(comp) = Component::of(&prims, idxs, shape_rules) {
+                comps.push(comp);
+            }
+        }
+    }
+    // Pair as the first pass does.
+    let mut claims: Vec<(f64, usize, usize, usize)> = Vec::new(); // (mm, text, comp, rule)
+    for (ri, rule) in rules.tag_classes.iter().enumerate() {
+        let reach = rule.radius_mm.unwrap_or(rules.radius_mm);
+        if reach <= 0.0 {
+            continue;
+        }
+        for (k, l) in lettering.iter().enumerate() {
+            if taken_text[k] || !shape_matches(&rule.shape, &l.value) {
+                continue;
+            }
+            let at = (l.at.0 / upm, l.at.1 / upm);
+            for (ci, c) in comps.iter().enumerate() {
+                let (w, h) = c.size();
+                if w < rule.min_side_mm || h < rule.min_side_mm {
+                    continue;
+                }
+                let d = (c.centre.0 - at.0).hypot(c.centre.1 - at.1);
+                if d <= reach {
+                    claims.push((d, k, ci, ri));
+                }
+            }
+        }
+    }
+    claims.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let pairs: Vec<(f64, usize, usize)> = claims.iter().map(|&(d, k, ci, _)| (d, k, ci)).collect();
+    let mut chosen = match_pairs(&pairs);
+    let mut text_used = vec![false; lettering.len()];
+    let mut comp_used = vec![false; comps.len()];
+    for &e in &chosen {
+        text_used[claims[e].1] = true;
+        comp_used[claims[e].2] = true;
+    }
+    for (e, &(_, k, ci, _)) in claims.iter().enumerate() {
+        if text_used[k] || comp_used[ci] {
+            continue;
+        }
+        text_used[k] = true;
+        comp_used[ci] = true;
+        chosen.push(e);
+    }
+    let mut taken_comp: Vec<Option<(usize, usize, f64)>> = vec![None; comps.len()];
+    for e in chosen {
+        let (d, k, ci, ri) = claims[e];
+        taken_text[k] = true;
+        taken_comp[ci] = Some((ri, k, d));
+    }
+    comps
+        .into_iter()
+        .zip(taken_comp)
+        .filter_map(|(comp, claim)| claim.map(|(ri, k, d)| (comp, ri, k, d)))
+        .collect()
 }
 
 // ── Report ───────────────────────────────────────────────────────────────
