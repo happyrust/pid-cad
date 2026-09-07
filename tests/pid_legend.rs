@@ -613,17 +613,11 @@ fn pipe_is_cut_away_from_exploded_symbols_and_a_stem_is_not() {
         "the pipe piece is not part of the check valve: {:?}",
         check.bbox
     );
-    assert_eq!(
-        count(&recognition, "ball-valve"),
-        1,
-        "{:?}",
-        recognition.symbols
-    );
     let ball = recognition
         .symbols
         .iter()
-        .find(|s| s.class == "ball-valve")
-        .unwrap();
+        .find(|s| s.class == "ball-valve" && s.tag.is_some())
+        .expect("the ball valve beside BV0301");
     assert_eq!(ball.tag.as_deref(), Some("BV0301"));
     assert!(
         (ball.bbox.0 - 21.7).abs() < 0.01 && (ball.bbox.2 - 24.5).abs() < 0.01,
@@ -633,24 +627,29 @@ fn pipe_is_cut_away_from_exploded_symbols_and_a_stem_is_not() {
     assert!(ball.source.contains("(7 strokes)"), "{}", ball.source);
 
     // Whatever pipe was drawn touching it, and however it is turned, a ball
-    // valve has the id of the tagged one.
+    // valve has the id of the tagged one -- which, drawn to the loading-island
+    // sheets' measure, is the dictionary's ball valve, so the three untagged
+    // ones are named too rather than boxed as an unknown shape.
     assert_eq!(
-        recognition.unknown_shapes.len(),
-        1,
+        count(&recognition, "ball-valve"),
+        4,
+        "{:?}",
+        recognition.symbols
+    );
+    assert!(
+        recognition.unknown_shapes.is_empty(),
         "{:?}",
         recognition.unknown_shapes
     );
-    let repeated = &recognition.unknown_shapes[0];
-    assert_eq!(repeated.count, 3);
-    assert_eq!(repeated.strokes, 7);
-    assert_eq!(repeated.id, shape_id(ball));
-    let boxed: Vec<&pid_legend::Recognized> = recognition
+    let untagged: Vec<&pid_legend::Recognized> = recognition
         .symbols
         .iter()
-        .filter(|s| pid_legend::is_shape_class(&s.class))
+        .filter(|s| s.class == "ball-valve" && s.tag.is_none())
         .collect();
-    assert_eq!(boxed.len(), 3);
-    for s in boxed {
+    assert_eq!(untagged.len(), 3);
+    for s in untagged {
+        assert_eq!(shape_id(s), shape_id(ball), "{}", s.source);
+        assert!(s.known);
         let (w, h) = (s.bbox.2 - s.bbox.0, s.bbox.3 - s.bbox.1);
         assert!(
             (w.max(h) - 2.8).abs() < 0.01 && (w.min(h) - 1.4).abs() < 0.01,
@@ -967,6 +966,65 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
     if checked == 0 {
         eprintln!("cpecc SP02 sheets not present; skipped");
     }
+}
+
+/// SP02-10 draws its valves touching the pipe and each other: a ball valve
+/// against a strainer, a check valve against a ball valve, a coupling
+/// against a ball valve. Each comes apart into its two symbols, and the
+/// ball valve is one dictionary id however much pipe touched it.
+#[test]
+fn cpecc_sp02_10_joined_symbols_come_apart_and_are_named() {
+    let rules = Rules::builtin();
+    let Some(doc) = load_sheet("DWG-0100SP02-10 汽车装卸岛(五)工艺自控流程图.dxf")
+    else {
+        eprintln!("cpecc SP02-10 not present; skipped");
+        return;
+    };
+    let recognition = pid_legend::recognise(&doc, &rules);
+    for (class, expected, tagged) in [
+        ("ball-valve", 24, 2),
+        ("check-valve", 8, 2),
+        ("gate", 10, 6),
+        ("y-strainer", 6, 0),
+        ("quick-coupling", 4, 0),
+        ("normally-open-valve", 2, 0),
+        ("additive-tank", 2, 0),
+    ] {
+        assert_eq!(count(&recognition, class), expected, "{class}");
+        assert_eq!(tags_of(&recognition, class).len(), tagged, "{class} tagged");
+    }
+    // The dictionary's ball valve, 22 times, none carrying a stub: all one
+    // size. (The two BV-tagged ones are a larger drawing of their own.)
+    let small: Vec<&pid_legend::Recognized> = recognition
+        .symbols
+        .iter()
+        .filter(|s| s.class == "ball-valve" && shape_id(s) == "5311cc3f")
+        .collect();
+    assert_eq!(small.len(), 22);
+    for s in small {
+        let (w, h) = (s.bbox.2 - s.bbox.0, s.bbox.3 - s.bbox.1);
+        assert!(
+            (w.max(h) - 2.8).abs() < 0.1 && (w.min(h) - 1.4).abs() < 0.1,
+            "{}: {w:.2} x {h:.2} mm",
+            s.source
+        );
+    }
+    let still_unknown: Vec<&str> = recognition
+        .unknown_shapes
+        .iter()
+        .map(|u| u.id.as_str())
+        .collect();
+    for named in ["5311cc3f", "7bc421fd", "c1f16b9d", "a94ece16", "f3f9a2ff"] {
+        assert!(
+            !still_unknown.contains(&named),
+            "{named} is in the dictionary"
+        );
+    }
+    assert!(
+        recognition.unknown_shapes.iter().all(|u| u.strokes <= 8),
+        "no joined pair is left: {:?}",
+        recognition.unknown_shapes
+    );
 }
 
 #[test]

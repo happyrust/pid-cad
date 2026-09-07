@@ -78,6 +78,12 @@
       "8258db75": { "class": "evalve", "label": "电动阀", "color": [255, 0, 0], "tag": { "bubble": "XV" } },
       "7276b414": { "class": "flow-arrow", "label": "流向/接图箭头", "color": [120, 140, 180], "tag": { "shape": "*DWG-*", "radius_mm": 15.0, "report_orphans": false } },
       "1fa29398": { "class": "additive-tank", "label": "添加剂罐", "color": [60, 160, 230] },
+      "5311cc3f": { "class": "ball-valve", "label": "球阀", "color": [255, 170, 0], "tag": { "shape": "BV9999*", "radius_mm": 10.0 } },
+      "7bc421fd": { "class": "check-valve", "label": "止回阀", "color": [200, 160, 40], "tag": { "shape": "CV9999*", "radius_mm": 10.0 } },
+      "c1f16b9d": { "class": "y-strainer", "label": "Y型过滤器", "color": [60, 190, 160] },
+      "a94ece16": { "class": "quick-coupling", "label": "快速接头", "color": [0, 180, 180], "tag": { "shape": "QK-9999*", "radius_mm": 10.0 } },
+      "f3f9a2ff": { "class": "gate", "label": "闸阀", "color": [255, 220, 0], "tag": { "shape": "GV9999*", "radius_mm": 10.0 } },
+      "7e243bbc": { "class": "normally-open-valve", "label": "常开阀", "color": [180, 140, 255] },
       "a7e11c6d": { "class": "ignore", "label": "盘装框+联锁菱形", "color": [0, 0, 0] },
       "33653a1f": { "class": "ignore", "label": "阀杆箭头", "color": [0, 0, 0] },
       "0d37e288": { "class": "ignore", "label": "盘装框+菱形", "color": [0, 0, 0] }
