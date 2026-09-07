@@ -1389,6 +1389,30 @@ const SHEETS: &[Expected] = &[
         // Four of the six; the other two hang off branches lettered nowhere.
         vents_in_line: (4, "150-FS"),
     },
+    Expected {
+        file: "DWG-0100FF02-04 罐组I消防冷却水流程图.dxf",
+        butterfly: 12,
+        evalve: 6,
+        tanks: 6,
+        field_bubbles: 12,
+        panel_bubbles: 6,
+        total: 108,
+        pipe_strokes: 135,
+        runs: 119,
+        // The six open ends are the 1/2" NPT stubs; the eleven hydrants sit
+        // on the 250-FW ring with no pipe drawn to them, as on FF02-06.
+        connected_ports: (112, 153),
+        open_ends: 6,
+        evalve_line: "200-FW",
+        butterfly_line: (
+            &[
+                "BUV-3101", "BUV-3102", "BUV-3103", "BUV-3104", "BUV-3105", "BUV-3106", "BUV-3107",
+                "BUV-3108", "BUV-3109", "BUV-3110", "BUV-3111", "BUV-3112",
+            ],
+            "150-FW",
+        ),
+        vents_in_line: (6, "200-FW"),
+    },
 ];
 
 #[test]
