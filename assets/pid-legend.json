@@ -13,7 +13,7 @@
     "$VALVE$00000315": { "class": "drain-valve", "label": "排水阀", "color": [140, 100, 60] },
     "$Attachment$00000086": { "class": "hydrant", "label": "消火栓", "color": [255, 0, 170] },
     "$Attachment$00000194": { "class": "foam-port", "label": "泡沫接口", "color": [200, 90, 160] },
-    "$Standard$00000144": { "class": "vent", "label": "放空短管", "color": [0, 200, 200] },
+    "$Standard$00000144": { "class": "vent", "label": "放空短管", "color": [0, 200, 200], "port": "stem-end" },
     "$Standard$00000080": { "class": "funnel", "label": "漏斗", "color": [90, 160, 90] },
     "$Standard$00000114": { "class": "gauge", "label": "压力表", "color": [60, 180, 120] },
     "$TwtSys$00000132": { "class": "sheet-ref", "label": "图幅连接符", "color": [120, 140, 180], "tag": { "shape": "*DWG-*", "radius_mm": 30.0, "report_orphans": false } },

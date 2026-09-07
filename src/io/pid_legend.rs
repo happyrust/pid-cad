@@ -35,7 +35,8 @@
 //!
 //! On the block family the pipe is traced too ([`pid_pipes`]): the `PIPE-*`
 //! strokes joined into runs between the symbols' connection points (the
-//! `POINT`s of a valve block, the insertion point of a block without any,
+//! `POINT`s of a valve block, the insertion point of a block without any --
+//! or the far end of its stem when its rule says `"port": "stem-end"` --
 //! the rim of an S / K circle), each run carrying the line number lettered
 //! along it, so a symbol knows the lines it sits in. The runs are drawn in
 //! with the legend: a polyline along each on `PID-PIPE-<line number>`, one
@@ -143,6 +144,19 @@ impl TagRule {
     }
 }
 
+/// Where pipe joins a block that carries no connection `POINT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PortRule {
+    /// Its insertion point: the sheet connector, the foam interface.
+    Insertion,
+    /// The far end of the block along its stem -- the line drawn out of the
+    /// insertion point -- where the block's geometry stops: the vent stub,
+    /// whose pipe is drawn over the stem right through to the closed end of
+    /// the cup, 13 mm from the insertion point.
+    StemEnd,
+}
+
 /// What a block name (or a shape id) means.
 #[derive(Debug, Clone, Deserialize)]
 pub struct BlockRule {
@@ -151,6 +165,10 @@ pub struct BlockRule {
     pub color: [u8; 3],
     #[serde(default)]
     pub tag: TagRule,
+    /// Where pipe joins the block when it has no `POINT`; absent = its
+    /// insertion point.
+    #[serde(default)]
+    pub port: Option<PortRule>,
 }
 
 /// A fallback for block ids the dictionary has not met: the layer they are
@@ -586,6 +604,40 @@ fn place(
     (x * cos - y * sin + at.0, x * sin + y * cos + at.1)
 }
 
+/// A block's line, block coordinates.
+type Segment = ((f64, f64), (f64, f64));
+
+/// The far end of a block along its stem, block coordinates
+/// ([`PortRule::StemEnd`]). The stem is the block's line that starts at the
+/// base point (the one nearest it, if none quite does -- within a twentieth
+/// of the block's reach); the far end is the point on the stem's axis where
+/// the block's geometry (`corners`, its members' boxes) stops. None when the
+/// block has no line at its base.
+fn stem_end(lines: &[Segment], corners: &[(f64, f64)], base: (f64, f64)) -> Option<(f64, f64)> {
+    let dist = |p: (f64, f64)| (p.0 - base.0).hypot(p.1 - base.1);
+    let reach = corners.iter().map(|&c| dist(c)).fold(0.0, f64::max);
+    let (near, far) = lines
+        .iter()
+        .map(|&(a, b)| if dist(a) <= dist(b) { (a, b) } else { (b, a) })
+        .min_by(|x, y| dist(x.0).total_cmp(&dist(y.0)))?;
+    if reach <= 0.0 || dist(near) > reach / 20.0 {
+        return None;
+    }
+    let length = (far.0 - near.0).hypot(far.1 - near.1);
+    if length <= 0.0 {
+        return None;
+    }
+    let direction = ((far.0 - near.0) / length, (far.1 - near.1) / length);
+    let along = corners
+        .iter()
+        .map(|c| (c.0 - base.0) * direction.0 + (c.1 - base.1) * direction.1)
+        .fold(f64::NEG_INFINITY, f64::max);
+    if !along.is_finite() {
+        return None;
+    }
+    Some((base.0 + direction.0 * along, base.1 + direction.1 * along))
+}
+
 fn lettering_of(doc: &CadDocument) -> Vec<Lettering> {
     let mut out = Vec::new();
     for entity in doc.model_space_entities() {
@@ -708,8 +760,13 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
         let mut bbox = None;
         // The block's connection points, placed; a block without any joins
         // pipe at its insertion point (the sheet connector, the foam
-        // interface).
+        // interface) or, when its rule says so, at the far end of its stem
+        // (the vent stub). The stem rule needs the block's own lines and
+        // extent, in block coordinates.
+        let port_rule = rules.blocks.get(name).and_then(|r| r.port);
         let mut connections = 0;
+        let mut local_lines: Vec<Segment> = Vec::new();
+        let mut local_corners: Vec<(f64, f64)> = Vec::new();
         for member in doc.entities_in_block(name) {
             if let EntityType::Point(point) = member {
                 let p = place(
@@ -725,6 +782,11 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             if skip_for_box(member) {
                 continue;
             }
+            if port_rule == Some(PortRule::StemEnd) {
+                if let EntityType::Line(l) = member {
+                    local_lines.push(((l.start.x, l.start.y), (l.end.x, l.end.y)));
+                }
+            }
             let bb = member.as_entity().bounding_box();
             for corner in [
                 (bb.min.x, bb.min.y),
@@ -732,6 +794,9 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
                 (bb.max.x, bb.min.y),
                 (bb.max.x, bb.max.y),
             ] {
+                if port_rule == Some(PortRule::StemEnd) {
+                    local_corners.push(corner);
+                }
                 let (x, y) = place(corner, base, scale, insert.rotation, at);
                 grow(&mut bbox, x, y);
             }
@@ -739,7 +804,13 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
         let half = EMPTY_BODY_HALF_MM * upm;
         let bbox = bbox.unwrap_or((at.0 - half, at.1 - half, at.0 + half, at.1 + half));
         if connections == 0 {
-            ports.push((symbols.len(), Port::At(at)));
+            let port = match port_rule {
+                Some(PortRule::StemEnd) => stem_end(&local_lines, &local_corners, base)
+                    .map(|p| place(p, base, scale, insert.rotation, at))
+                    .unwrap_or(at),
+                Some(PortRule::Insertion) | None => at,
+            };
+            ports.push((symbols.len(), Port::At(port)));
         }
         // Tags are measured from the body, not the insertion point: a block
         // whose base point is far from what it draws (the title block, the
@@ -2895,6 +2966,47 @@ mod tests {
         assert!(rules.circle_rule(1.12, &[]).is_none());
         assert!(rules.shapes.is_some(), "exploded family is configured");
         assert!(!rules.tag_classes.is_empty());
+        assert_eq!(
+            rules.blocks["$Standard$00000144"].port,
+            Some(PortRule::StemEnd),
+            "the vent stub joins pipe at the far end of its stem"
+        );
+        assert_eq!(rules.blocks["$TwtSys$00000132"].port, None);
+    }
+
+    #[test]
+    fn a_stem_ends_where_the_block_stops_along_it() {
+        // The vent stub as TWT draws it: a stem from the base point along -x
+        // and a cup at its end, closed 245 units past the stem's own end.
+        let lines: [Segment; 4] = [
+            ((-2430.8, 0.0), (0.0, 0.0)),
+            ((-2675.7, 252.7), (-2675.7, -252.7)),
+            ((-2675.7, -252.7), (-2430.8, -252.7)),
+            ((-2675.7, 252.7), (-2430.8, 252.7)),
+        ];
+        let corners: Vec<(f64, f64)> = lines
+            .iter()
+            .flat_map(|&(a, b)| {
+                let (x0, x1) = (a.0.min(b.0), a.0.max(b.0));
+                let (y0, y1) = (a.1.min(b.1), a.1.max(b.1));
+                [(x0, y0), (x0, y1), (x1, y0), (x1, y1)]
+            })
+            .collect();
+        let end = stem_end(&lines, &corners, (0.0, 0.0)).unwrap();
+        assert!(
+            (end.0 + 2675.7).abs() < 1e-9 && end.1.abs() < 1e-9,
+            "{end:?}"
+        );
+        // A block whose lines are all far from its base has no stem.
+        assert_eq!(stem_end(&lines[1..], &corners, (0.0, 0.0)), None);
+        // A stem pointing the other way, base off the origin.
+        let up: [Segment; 2] = [((10.0, 5.0), (10.0, 20.0)), ((8.0, 20.0), (12.0, 22.0))];
+        let corners = [(10.0, 5.0), (10.0, 20.0), (8.0, 20.0), (12.0, 22.0)];
+        let end = stem_end(&up, &corners, (10.0, 5.0)).unwrap();
+        assert!(
+            (end.0 - 10.0).abs() < 1e-9 && (end.1 - 22.0).abs() < 1e-9,
+            "{end:?}"
+        );
     }
 
     #[test]

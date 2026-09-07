@@ -557,6 +557,94 @@ fn pipe_runs_are_drawn_on_a_layer_per_line_number_and_come_off_again() {
         .all(|e| !pid_legend::is_legend_layer(&e.common().layer)));
 }
 
+/// A header on `PIPE-消防` from an open end at x = 10 to one at x = 60,
+/// lettered `150-FW`; at x = 30 a vent stub hangs off it, turned a quarter
+/// to point down and drawn the way TWT draws it -- a 12.15 mm stem from the
+/// insertion point and a cup closed 1.23 mm past the stem's end -- with the
+/// pipe stroke drawn over the stem right through to the cup's closed end.
+fn vented_block_sheet() -> CadDocument {
+    let mut doc = CadDocument::new();
+    define_block(
+        &mut doc,
+        "$Standard$00000144",
+        vec![
+            line(-12.15, 0.0, 0.0, 0.0),
+            line(-13.38, 1.26, -13.38, -1.26),
+            line(-13.38, -1.26, -12.15, -1.26),
+            line(-13.38, 1.26, -12.15, 1.26),
+        ],
+    );
+    doc.add_entity(line(0.0, 0.0, 420.0, 0.0)).unwrap();
+    doc.add_entity(line(0.0, 0.0, 0.0, 297.0)).unwrap();
+    let pipe = |doc: &mut CadDocument, x0: f64, y0: f64, x1: f64, y1: f64| {
+        doc.add_entity(layered(line(x0, y0, x1, y1), "PIPE-消防"))
+            .unwrap();
+    };
+    pipe(&mut doc, 10.0, 50.0, 30.0, 50.0);
+    pipe(&mut doc, 30.0, 50.0, 60.0, 50.0);
+    doc.add_entity(text("150-FW", 40.0, 51.5)).unwrap();
+    doc.add_entity(insert_turned(
+        "$Standard$00000144",
+        30.0,
+        50.0,
+        "EQUIP_消防",
+        std::f64::consts::FRAC_PI_2,
+    ))
+    .unwrap();
+    pipe(&mut doc, 30.0, 50.0, 30.0, 50.0 - 13.38);
+    doc
+}
+
+/// A block without a `POINT` joins pipe at its insertion point -- unless its
+/// rule says `"port": "stem-end"`, as the vent stub's does: the pipe is drawn
+/// over the stub's stem right through to the closed end of its cup, 13 mm
+/// from the insertion point, and that is where the run must meet it instead
+/// of stopping in the air.
+#[test]
+fn a_vent_stub_joins_the_pipe_at_the_far_end_of_its_stem() {
+    let doc = vented_block_sheet();
+    let rules = Rules::builtin();
+    let recognition = pid_legend::recognise(&doc, &rules);
+    let vent = recognition
+        .symbols
+        .iter()
+        .position(|s| s.source == "$Standard$00000144")
+        .expect("the vent stub");
+    assert_eq!(recognition.symbols[vent].class, "vent");
+    let pipes = &recognition.pipes;
+    assert_eq!((pipes.connected_ports, pipes.ports), (1, 1));
+    // The header in two pieces either side of the tee, and the piece down the
+    // stem to the vent: only the header's two ends are in the air.
+    assert_eq!(pipes.runs.len(), 3, "{:?}", pipes.runs);
+    assert_eq!(pipes.open_ends, 2, "{:?}", pipes.runs);
+    let stem = pipes
+        .runs
+        .iter()
+        .find(|r| r.ends.contains(&pid_pipes::End::Symbol(vent)))
+        .unwrap_or_else(|| panic!("no run reaches the vent: {:?}", pipes.runs));
+    assert!(stem.ends.contains(&pid_pipes::End::Tee), "{stem:?}");
+    assert!((stem.length_mm - 13.38).abs() < 0.01, "{stem:?}");
+    let far = if stem.ends[0] == pid_pipes::End::Symbol(vent) {
+        stem.path[0]
+    } else {
+        stem.path[stem.path.len() - 1]
+    };
+    assert!(
+        (far.0 - 30.0).abs() < 1e-6 && (far.1 - 36.62).abs() < 1e-6,
+        "the run meets the vent at the cup's closed end: {far:?}"
+    );
+    // The stem is a branch off the header: its number does not turn down it.
+    assert!(stem.lines.is_empty(), "{stem:?}");
+    assert!(recognition.symbols[vent].lines.is_empty());
+
+    // Without the rule the port is the insertion point, up on the header, and
+    // the pipe's end in the cup is one more open end.
+    let mut plain = Rules::builtin();
+    plain.blocks.get_mut("$Standard$00000144").unwrap().port = None;
+    let without = pid_legend::recognise(&doc, &plain);
+    assert_eq!(without.pipes.open_ends, 3, "{:?}", without.pipes.runs);
+}
+
 /// The S point (circle) at x on the piped block sheet.
 fn symbol_s(recognition: &pid_legend::Recognition, x: f64) -> usize {
     recognition
@@ -1244,6 +1332,10 @@ struct Expected {
     /// ... and these butterfly valves in this one; the other butterfly valves
     /// are on branches the sheet letters nowhere and carry no line.
     butterfly_line: (&'static [&'static str], &'static str),
+    /// This many vent stubs sit in this line: the pipe drawn over a stub's
+    /// stem meets it at the far end of the stem (`"port": "stem-end"`), not
+    /// in the air.
+    vents_in_line: (usize, &'static str),
 }
 
 const SHEETS: &[Expected] = &[
@@ -1257,8 +1349,10 @@ const SHEETS: &[Expected] = &[
         total: 118,
         pipe_strokes: 124,
         runs: 118,
-        connected_ports: (112, 167),
-        open_ends: 16,
+        // 120 with the eight vent stubs met at the far end of their stems;
+        // the eight open ends left are the 1/2" NPT stubs.
+        connected_ports: (120, 167),
+        open_ends: 8,
         evalve_line: "150-FW",
         butterfly_line: (
             &[
@@ -1268,6 +1362,7 @@ const SHEETS: &[Expected] = &[
             ],
             "100-FW",
         ),
+        vents_in_line: (8, "150-FW"),
     },
     Expected {
         file: "DWG-0100FF02-05 罐组I泡沫混合液流程图.dxf",
@@ -1279,8 +1374,10 @@ const SHEETS: &[Expected] = &[
         total: 145,
         pipe_strokes: 218,
         runs: 174,
-        connected_ports: (150, 201),
-        open_ends: 12,
+        // 156 with the six vent stubs met; the six open ends left are the
+        // 1/2" NPT stubs.
+        connected_ports: (156, 201),
+        open_ends: 6,
         evalve_line: "",
         butterfly_line: (
             &[
@@ -1289,6 +1386,8 @@ const SHEETS: &[Expected] = &[
             ],
             "80-FS",
         ),
+        // Four of the six; the other two hang off branches lettered nowhere.
+        vents_in_line: (4, "150-FS"),
     },
 ];
 
@@ -1447,6 +1546,15 @@ fn cpecc_sheets_every_symbol_is_known_and_every_valve_has_its_own_tag() {
                 );
             }
         }
+        // The vent stubs: the pipe drawn over each stub's stem reaches it at
+        // the far end of the stem, so the stub sits in the header's line.
+        let (vents, vent_line) = expected.vents_in_line;
+        let in_line = recognition
+            .symbols
+            .iter()
+            .filter(|s| s.class == "vent" && s.lines == [vent_line.to_string()])
+            .count();
+        assert_eq!(in_line, vents, "{name}: vent stubs in {vent_line}");
         checked += 1;
     }
     if checked == 0 {
