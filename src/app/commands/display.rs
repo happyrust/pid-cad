@@ -863,6 +863,12 @@ impl OpenCADStudio {
             "EXPORT" | "EXPORTPDF" => {
                 return Some(Task::done(Message::PlotExport));
             }
+            // EXPORTSVG / SVGOUT — the same plot settings, written as SVG.
+            // Multi-page jobs become one numbered file each; the plot stamp is
+            // device text and SVG export refuses it.
+            "EXPORTSVG" | "SVGOUT" => {
+                return Some(Task::done(Message::SvgExport));
+            }
             // PLOTSTYLE — load or clear CTB/STB plot style table
             cmd if cmd == "PLOTSTYLE" || cmd.starts_with("PLOTSTYLE ") => {
                 let sub = cmd

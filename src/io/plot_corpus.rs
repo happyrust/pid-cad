@@ -62,6 +62,24 @@ impl Case {
         }
     }
 
+    /// The same page as one entry of a multi-page job.
+    pub fn page_input(&self) -> crate::io::plot_types::PdfPageInput {
+        crate::io::plot_types::PdfPageInput {
+            wires: std::sync::Arc::new(self.wires.clone()),
+            hatches: self.hatches.clone(),
+            wipeouts: self.wipeouts.clone(),
+            paper_w: self.paper.0 as f64,
+            paper_h: self.paper.1 as f64,
+            offset_x: self.offset.0,
+            offset_y: self.offset.1,
+            rotation_deg: self.rotation_deg,
+            scale: self.scale,
+            clip: self.clip,
+            options: self.options,
+            plot_style: self.plot_style.clone(),
+        }
+    }
+
     pub fn clone_for(&self, name: &'static str) -> Self {
         Self {
             name,

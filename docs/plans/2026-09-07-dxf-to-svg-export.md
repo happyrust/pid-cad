@@ -1,8 +1,8 @@
 # 开发计划：DXF → SVG 导出（v2，已经 oracle 复核）
 
 > 日期：2026-09-07
-> 状态：**v2 已批准（2026-09-07 16:00「直接开工，同意了」），P0 已实施**（记录见 §11），
-> **P1 已实施**（记录见 §12）。
+> 状态：**v2 已批准（2026-09-07 16:00「直接开工，同意了」）**；P0 已实施（§11）、P1 已实施（§12）、
+> P2 已实施（§13，web 那一半除外）。
 > v1 于同日写成；v2 是把 oracle（GPT-5.5 Pro，会话
 > `ocs-dxf-svg-plan-review-2`，18 分钟）的十六条评审意见逐条并进来之后的版本，纪要见 §9。
 > 结论先说：**今天不支持**。缺的表面上是「一个 SVG 后端」，但 v1 把「PDF 后端的入参」误认成
@@ -600,3 +600,61 @@ PDF 栅格引擎（pdftoppm / mutool / pdfium），这棵树里没有，装它�
 R3 的体量工作里再解（两趟，或对能接受的消费者把 defs 放最后）；每个叶子都写全属性，样式复用没做；
 字形边界没做缓存（一个字形出现 N 次就提 N 次边界）；浏览器 / Inkscape / Illustrator / librsvg 的实测
 没做（§8「兼容性」那一行还欠着）。
+
+## 13. P2 实施记录（2026-09-07）
+
+**做了什么**（一个提交）：
+
+| 层 | 内容 |
+|---|---|
+| `src/io/svg_export.rs` | 文件层（D3）：`export_svg_pages` / `page_paths` / `SvgWriteOptions{force,dry_run}` / `SvgBatch` / `SvgPageOutcome`、`SvgError::{Page,Partial}`、`pick_svg_path_owned`（带父窗口，同 PDF 的 Wayland 处理） |
+| `src/io/plot_types.rs` | `PdfPageInput::as_plot_page(fallback)`：页级 CTB 优先、任务级回退这条规则**只有一份**，PDF 与 SVG 共用（`build_pdf_pages` 改用它） |
+| `src/app/update/file.rs` | `PlotRequest` + **`resolve_plot_job`**：GUI 的 SVG 导出与无头 `--plot-svg` 都从这里拿页；`set_headless_model_page`（模型空间的纸张 / 比例）；`on_svg_export_path_some` |
+| `src/app/automation.rs` | `plot_svg_headless` / `plot_svg_with` / `list_layouts_headless` + 无头四件套（开图、列布局、切布局、装 CTB） |
+| `src/cli.rs` / `src/main.rs` | `--plot-svg IN OUT`、`--layout` / `--model`（+`--paper` / `--landscape` / `--fit` / `--scale`）、`--ctb`、`--dry-run`、`--force`、`--list-layouts FILE` |
+| `src/app/{mod,update/mod,commands/display,commands/mod}.rs` | `EXPORTSVG` / `SVGOUT` 命令 → 保存对话框 → 同一个 `resolve_plot_job` |
+
+**D3 的文件语义**：单页用给的名字，多页**全部**编号 `out-001.svg`（三位定宽、按请求顺序）。写之前先
+把全部目标路径算出来查一遍——批内撞名（含只差大小写，Windows 上是同一个文件）、以及**默认不覆盖**
+（`--force` 才覆盖）；然后**先把每一页都渲染出来**再开始发布，所以一页写不出来（图章、坏数值）时
+磁盘上一个文件都不会动。真到了发布阶段还失败（比如目标是个非空目录），先写同目录临时文件再改名，
+错误里**点名已经落盘的是哪几个**——一页一文件不是事务，不假装回滚，也不删上一批多出来的页。
+
+**D4 的命令行**：`--layout` / `--model` 二选一，都不给就是**这张图的每个布局各一页**；无头**从不**借用
+编辑器的「当前布局」。`--model` 必须自己说清纸张与比例：`--paper A3`（A0…A4）加 `--fit` 或
+`--scale 1:2` 之一，缺一个就报错——比例串是**严格解析**的，不走 GUI 那个「读不懂就当 1:1」的
+`parse_plot_scale`（那对着人看的输入框是对的，对着脚本是错的）。`--ctb` 收文件路径、样式库里的名字、
+或 `none`；装不上就是错误，不悄悄回退。`--dry-run` **照样渲染**（所以不支持的选项一样会失败），
+只是不落盘，并把要写的路径打出来。`--list-layouts FILE` 单独一条路，不用凑 IN/OUT。
+
+**验收**：`cargo test --lib app::automation` **20/20**（新增 5 条），`io::svg_export` **25/25**（新增 8 条），
+全库 `cargo test --lib` **667 过 / 1 失败**（还是那条无关的 `free_text_entry_tests::normal_commands_…`）。
+
+- 无头端到端：临时目录里造一张有边框、圆和 `TEXT` 的图 → 存 DXF → `plot_svg_with` → SVG 落盘、
+  usvg 解析通过、**纸张就是命令行要的那张**（A3 横 = 420×297）。**字形是冷图集里出来的**：同一张图
+  去掉标签再画一遍，元素数必须少——这条正面回答 D6 的「无 GUI 冷启动字形」，也说明没有 `<text>`
+  在替字形挡枪。
+- 拒绝的路径都有用例：不存在的布局、装不上的 CTB、`--model` 缺纸张 / 缺比例 / 两个都给 / 纸张名不认识 /
+  比例串读不懂——都必须报错**且不落盘**；`--ctb none` 是合法答案。`--scale 1:2` 与 `--fit` 画出来必须不同。
+- 文件层：编号、拒绝覆盖 / `--force`、已存在的文件挡下整批（页一也不许写）、发布中途失败点名已落盘的页、
+  dry-run 不落盘但照样拒绝图章、页级 CTB 与任务级 CTB 走同一张表画出同一页。
+- 真跑了一遍二进制：`--list-layouts` 列出 `Model` / `Layout1`；`--plot-svg … --model --paper A3 --landscape --fit`
+  写出 420×297、CTM `matrix(4,0,0,4,0,0)`；`--paper A4 --scale 1:2` 写出 297×210、CTM `matrix(0.5,…)`；
+  重复一次不带 `--force` 被拒。
+- GUI 侧：`EXPORTSVG` / `SVGOUT` 进命令表并能派发（无头下没有窗口，路径选择直接返回「取消」，
+  但命令必须被认出来且不 panic）。clippy 对新代码 0 告警，wasm 编译通过。
+
+**P2 出口条件对照**：原生端到端 ✓；无 GUI 预热依赖 ✓；多页失败行为可预测 ✓；**web 端到端 ✗**。
+
+**这一期没做的**（下一步的料）：
+
+- **web 下载与多页打包**：web 构建上 `EXPORTSVG` 明确报「暂不可用」，`Vec<u8>` 下载与多页打包没写。
+  写入器本身是跨平台的（wasm 编译通过），缺的是包装层。
+- **缺字诊断**（R1 的严格 / 宽松模式）：`emit_text` 仍沿用 PDF 一直以来的行为——图集锁不上就整段不画、
+  key 查不到就静默跳过。SVG 这一侧既没有严格模式的可定位错误，`SvgReport` 里也没有缺失计数。
+  R1 点名要的东西，现在只在计划里，不在代码里。
+- **D4 表里剩下的**：`--units`（无单位图纸不该默认当 mm）、`--preset`、`--margins`、
+  `--orientation` 作为取值（现在是 `--landscape` 开关）。
+- **GUI 的多页 SVG**：编辑器里 SVG 导出目前是当前这一页；`PRINTALL` 那条「所有布局」的路只通 PDF。
+  CLI 那边不带 `--layout` 就是全部布局，两边不对称。
+- **图章置灰**：对话框没有按目标格式变灰，SVG 导出遇到 `stamp=true` 是明确报错。

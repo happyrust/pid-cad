@@ -7,6 +7,8 @@ pub(crate) fn automation_action_names() -> &'static [&'static str] {
 pub(crate) mod config;
 #[cfg(not(target_arch = "wasm32"))]
 pub use automation::{export_headless, serve};
+#[cfg(not(target_arch = "wasm32"))]
+pub use automation::{list_layouts_headless, plot_svg_headless, PlotSvgRequest};
 mod command_driver;
 pub(crate) mod commands;
 mod document;
@@ -2925,10 +2927,14 @@ pub enum Message {
     /// release URL in the OS default browser and closes the notice.
     UpdateNoticeOpenRelease,
     // ── Plot / Export ─────────────────────────────────────────────────────
-    /// Show the SVG save-file dialog and trigger export.
+    /// Show the PDF save-file dialog and trigger export.
     PlotExport,
     /// Callback after the user picks (or cancels) the export path.
     PlotExportPath(Option<std::path::PathBuf>),
+    /// Show the SVG save-file dialog and trigger export (EXPORTSVG / SVGOUT).
+    SvgExport,
+    /// Callback after the user picks (or cancels) the SVG export path.
+    SvgExportPath(Option<std::path::PathBuf>),
     /// User picked a paper size for the model-space window plot.
     PlotFormat(crate::io::paper_sizes::PaperSize),
     /// User picked a sheet orientation for the model-space window plot.

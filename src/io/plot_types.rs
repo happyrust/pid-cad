@@ -7,6 +7,7 @@
 // call sites in `app/update/file.rs` and `io/print_to_printer.rs` do not have
 // to change); `pdf_export` re-exports them.
 
+use crate::io::plot_emit::PlotPage;
 use crate::io::plot_style::PlotStyleTable;
 use crate::scene::model::hatch_model::HatchModel;
 use crate::scene::WireModel;
@@ -61,6 +62,28 @@ pub struct PdfPageInput {
     pub clip: Option<(f32, f32, f32, f32)>,
     pub options: PdfPlotOptions,
     pub plot_style: Option<PlotStyleTable>,
+}
+
+impl PdfPageInput {
+    /// The page as the emitter wants it. `fallback` is the job-wide plot style
+    /// table; a page that names its own overrides it, which is the priority
+    /// the PDF exporter has always used and every backend has to keep.
+    pub fn as_plot_page<'a>(&'a self, fallback: Option<&'a PlotStyleTable>) -> PlotPage<'a> {
+        PlotPage {
+            wires: &self.wires,
+            hatches: &self.hatches,
+            wipeouts: &self.wipeouts,
+            paper_w: self.paper_w as f32,
+            paper_h: self.paper_h as f32,
+            offset_x: self.offset_x,
+            offset_y: self.offset_y,
+            rotation_deg: self.rotation_deg,
+            scale: self.scale,
+            clip: self.clip,
+            plot_style: self.plot_style.as_ref().or(fallback),
+            options: self.options,
+        }
+    }
 }
 
 impl Default for PdfPlotOptions {

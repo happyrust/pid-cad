@@ -92,6 +92,37 @@ fn native_paths_match(left: &std::path::Path, right: &std::path::Path) -> bool {
     }
 }
 
+/// Which pages a plot job covers.
+///
+/// Deliberately not "whatever the app happens to be showing": a headless plot
+/// has to name its layout (D4), and both entry points go through
+/// [`OpenCADStudio::resolve_plot_job`] with one of these.
+#[derive(Debug, Clone, Default)]
+pub struct PlotRequest {
+    /// Layouts to plot, in order, one page each. Empty plots what the active
+    /// tab is showing: the layout's page setup in paper space, the drawing's
+    /// extents in model space.
+    pub layouts: Vec<String>,
+    /// Plot every layout with the dialog's current settings rather than the
+    /// page setup each layout carries.
+    pub use_current_settings: bool,
+}
+
+impl PlotRequest {
+    /// One page: whatever the active tab is showing.
+    pub fn current_view() -> Self {
+        Self::default()
+    }
+
+    /// One page per named layout, each with its own saved page setup.
+    pub fn layouts(names: Vec<String>) -> Self {
+        Self {
+            layouts: names,
+            use_current_settings: false,
+        }
+    }
+}
+
 type LayoutPlotParams = (
     std::sync::Arc<Vec<crate::io::pdf_export::PlotWire>>,
     Vec<crate::scene::model::hatch_model::HatchModel>,
@@ -3262,6 +3293,206 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         *self.tabs[i].scene.camera.borrow_mut() = original_camera;
         self.tabs[i].scene.camera_generation = original_camera_generation;
         result
+    }
+
+    /// The pages of a plot job, prepared once for every backend and every
+    /// entry point (D5 of docs/plans/2026-09-07-dxf-to-svg-export.md).
+    ///
+    /// Whether the request came from a menu, a command or `--plot-svg`, the
+    /// paper, scale, area, offsets, CTB and render options are resolved here,
+    /// by the same code, so a plot means the same thing either way. The result
+    /// is a page list any sink can take: `export_pdf_pages` and
+    /// `export_svg_pages` both consume it.
+    pub(crate) fn resolve_plot_job(
+        &mut self,
+        request: &PlotRequest,
+    ) -> Result<Vec<crate::io::pdf_export::PdfPageInput>, String> {
+        if request.layouts.is_empty() {
+            let Some((
+                wires,
+                hatches,
+                wipeouts,
+                group_splits,
+                paper_w,
+                paper_h,
+                offset_x,
+                offset_y,
+                rotation_deg,
+                scale,
+                clip,
+            )) = self.direct_plot_params()
+            else {
+                return Err(crate::t!(
+                    "Nothing to plot: model space contains no printable geometry."
+                )
+                .into_owned());
+            };
+            return Ok(vec![crate::io::pdf_export::PdfPageInput {
+                wires,
+                hatches,
+                wipeouts,
+                paper_w,
+                paper_h,
+                offset_x,
+                offset_y,
+                rotation_deg,
+                scale,
+                clip,
+                options: Self::pdf_plot_options(&self.plot_dialog, group_splits),
+                plot_style: self.dialog_plot_style(&self.plot_dialog),
+            }]);
+        }
+        let available = self.tabs[self.active_tab].scene.layout_names();
+        if let Some(missing) = request
+            .layouts
+            .iter()
+            .find(|name| !available.contains(*name))
+        {
+            return Err(format!(
+                "No layout named '{missing}'. This drawing has: {}",
+                available.join(", ")
+            ));
+        }
+        let layouts = std::mem::replace(
+            &mut self.print_all_layouts,
+            request
+                .layouts
+                .iter()
+                .map(|name| (name.clone(), true))
+                .collect(),
+        );
+        let override_settings = std::mem::replace(
+            &mut self.print_all_settings_override,
+            request.use_current_settings,
+        );
+        let pages = self.print_all_pages();
+        self.print_all_layouts = layouts;
+        self.print_all_settings_override = override_settings;
+        pages
+    }
+
+    /// Point the plot settings at model space with an explicit sheet and
+    /// scale strategy, for a headless plot.
+    ///
+    /// D4: a headless model-space plot states its paper and how the drawing
+    /// meets it. The editor can fall back on whatever the dialog last held
+    /// because someone is looking at it; a script cannot.
+    pub(in crate::app) fn set_headless_model_page(
+        &mut self,
+        paper: &str,
+        landscape: bool,
+        fit: bool,
+        scale: Option<&str>,
+    ) -> Result<(), String> {
+        let known = ["A0", "A1", "A2", "A3", "A4"];
+        let paper = paper.to_uppercase();
+        if !known.contains(&paper.as_str()) {
+            return Err(format!(
+                "unknown paper size '{paper}'. Known sizes: {}",
+                known.join(", ")
+            ));
+        }
+        self.plot_dialog.paper = paper;
+        self.plot_dialog.orientation = if landscape { "Landscape" } else { "Portrait" }.into();
+        let (w, h) = plot_dialog_sheet_mm(&self.plot_dialog);
+        self.plot_dialog.paper_width_mm = w;
+        self.plot_dialog.paper_height_mm = h;
+        self.plot_dialog.area = "Extents".into();
+        self.plot_dialog.center = true;
+        self.plot_dialog.offset_x = "0".into();
+        self.plot_dialog.offset_y = "0".into();
+        self.plot_dialog.fit_to_paper = fit;
+        if let Some(scale) = scale {
+            // Strictly, and not through `parse_plot_scale`: that one answers
+            // 1:1 for anything it cannot read, which is the right thing for a
+            // text box someone is looking at and the wrong thing for a script.
+            let text = scale.trim();
+            let ratio = match text.split_once(':') {
+                Some((paper, drawing)) => paper
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .zip(drawing.trim().parse::<f64>().ok())
+                    .filter(|(paper, drawing)| *paper > 0.0 && *drawing > 0.0)
+                    .map(|_| text.to_string()),
+                // A bare factor is the same thing over one.
+                None => text
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|factor| *factor > 0.0)
+                    .map(|factor| format!("{factor}:1")),
+            };
+            let Some(ratio) = ratio else {
+                return Err(format!(
+                    "cannot read the scale '{scale}'. Write it as 1:100, 2:1 or 0.01"
+                ));
+            };
+            self.plot_dialog.scale = ratio;
+        }
+        Ok(())
+    }
+
+    /// EXPORTSVG / SVGOUT: the plot the dialog describes, written as SVG.
+    ///
+    /// Same settings, same page preparation, different sink (D5) — SVG has no
+    /// pages, so a multi-page job becomes a file each (D3).
+    pub(in crate::app) fn on_svg_export_path_some(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> Task<Message> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = path;
+            self.command_line
+                .push_error(crate::t!("SVG export is not available in the web version yet.").as_ref());
+            Task::none()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let i = self.active_tab;
+            if self.tabs[i].scene.current_layout != "Model" {
+                self.plot_dialog.paper_space = true;
+                self.plot_dialog.scales = self.tabs[i]
+                    .scene
+                    .scale_list()
+                    .into_iter()
+                    .map(|(name, _, factor)| (name, factor))
+                    .collect();
+                if let Some(settings) = self.tabs[i].scene.effective_plot_settings() {
+                    self.load_plotsettings_into_dialog(&settings);
+                }
+            }
+            let pages = match self.resolve_plot_job(&PlotRequest::current_view()) {
+                Ok(pages) => pages,
+                Err(error) => {
+                    self.command_line.push_error(&error);
+                    return Task::none();
+                }
+            };
+            let background = self.plot_dialog.background;
+            let work = move || {
+                crate::io::svg_export::export_svg_pages(
+                    &pages,
+                    None,
+                    &crate::io::plot_emit::PlotAssets::default(),
+                    &path,
+                    &crate::io::svg_export::SvgWriteOptions {
+                        force: true,
+                        ..Default::default()
+                    },
+                )
+                .map(|batch| {
+                    let paths: Vec<String> = batch
+                        .pages
+                        .iter()
+                        .map(|page| page.path.display().to_string())
+                        .collect();
+                    format!("Exported: {}", paths.join(", "))
+                })
+                .map_err(|error| format!("Export failed: {error}"))
+            };
+            self.run_plot_work(background, false, work)
+        }
     }
 
     pub(super) fn on_print_all_pdf_path_some(

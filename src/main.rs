@@ -5,10 +5,10 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use OpenCADStudio::app;
-#[cfg(not(target_arch = "wasm32"))]
-use OpenCADStudio::{cli, io, mcp, scene};
 #[cfg(target_arch = "wasm32")]
 use OpenCADStudio::sys;
+#[cfg(not(target_arch = "wasm32"))]
+use OpenCADStudio::{cli, io, mcp, scene};
 
 fn main() -> iced::Result {
     // Web (wasm) uses the single-window entry; native uses the multi-window
@@ -100,6 +100,28 @@ fn main() -> iced::Result {
         if let Some(io) = &args.export {
             // clap enforces exactly two values for --export.
             let code = app::export_headless(&io[0], &io[1]);
+            std::process::exit(code);
+        }
+        if let Some(input) = &args.list_layouts {
+            std::process::exit(app::list_layouts_headless(input));
+        }
+        if let Some(io) = &args.plot_svg {
+            // clap enforces exactly two values for --plot-svg.
+            let code = app::plot_svg_headless(
+                &io[0],
+                &io[1],
+                &app::PlotSvgRequest {
+                    layout: args.layout.clone(),
+                    model: args.model,
+                    ctb: args.ctb.clone(),
+                    paper: args.paper.clone(),
+                    landscape: args.landscape,
+                    fit: args.fit,
+                    scale: args.scale.clone(),
+                    dry_run: args.dry_run,
+                    force: args.force,
+                },
+            );
             std::process::exit(code);
         }
 

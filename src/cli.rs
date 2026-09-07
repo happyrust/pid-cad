@@ -72,6 +72,57 @@ pub struct Cli {
     #[arg(long, num_args = 2, value_names = ["IN", "OUT"])]
     pub export: Option<Vec<PathBuf>>,
 
+    /// Headless plot: read IN, write OUT as SVG, exit. A drawing plots one
+    /// page per layout, so a multi-page job writes OUT-001.svg, OUT-002.svg, …
+    /// Pick the page with --layout or --model; without either, every layout.
+    #[arg(long, num_args = 2, value_names = ["IN", "OUT"])]
+    pub plot_svg: Option<Vec<PathBuf>>,
+
+    /// Which layout --plot-svg should plot. Headless never borrows the
+    /// editor's "current layout" — say which one.
+    #[arg(long, value_name = "NAME", conflicts_with = "model")]
+    pub layout: Option<String>,
+
+    /// Plot model space rather than a layout (--plot-svg). Needs --paper and
+    /// one of --fit / --scale: a plot nobody is watching states its sheet.
+    #[arg(long)]
+    pub model: bool,
+
+    /// Sheet for a model-space plot: A0 … A4.
+    #[arg(long, value_name = "SIZE")]
+    pub paper: Option<String>,
+
+    /// Lay the sheet on its side (--model).
+    #[arg(long)]
+    pub landscape: bool,
+
+    /// Fit the drawing's extents to the sheet (--model).
+    #[arg(long, conflicts_with = "scale")]
+    pub fit: bool,
+
+    /// Plot scale for --model, as 1:100, 2:1 or 0.01.
+    #[arg(long, value_name = "RATIO")]
+    pub scale: Option<String>,
+
+    /// Plot style table for --plot-svg: a .ctb path, a name from the plot
+    /// styles folder, or `none`. Omitted, the page setup's own table is used;
+    /// a table that cannot be loaded is an error, never a silent fallback.
+    #[arg(long, value_name = "PATH|NAME|none")]
+    pub ctb: Option<String>,
+
+    /// Say what --plot-svg would write, and write nothing. The pages are still
+    /// rendered, so an unsupported option fails here too.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Let --plot-svg replace files that already exist.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Print the layouts of FILE, one per line, and exit.
+    #[arg(long, value_name = "FILE")]
+    pub list_layouts: Option<PathBuf>,
+
     /// Run a command script at startup: one command line per line of FILE.
     #[arg(long, value_name = "FILE")]
     pub script: Option<PathBuf>,

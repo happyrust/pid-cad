@@ -103,7 +103,7 @@ fn reorder_insertion_index(from: usize, to: usize, after: bool, len: usize) -> O
 mod command;
 mod dialog;
 mod dynamic;
-mod file;
+pub(in crate::app) mod file;
 mod style;
 mod util;
 mod viewport;
@@ -7283,6 +7283,35 @@ impl OpenCADStudio {
             }
             Message::PlotExportPath(None) => Task::none(),
             Message::PlotExportPath(Some(path)) => self.on_plot_export_path_some(path),
+
+            Message::SvgExport => {
+                let i = self.active_tab;
+                let stem = self.tabs[i]
+                    .current_path
+                    .as_deref()
+                    .and_then(|p: &std::path::Path| p.file_stem())
+                    .map(|s: &std::ffi::OsStr| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "drawing".into());
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let Some(window_id) = self.main_window else {
+                        return Task::done(Message::SvgExportPath(None));
+                    };
+                    iced::window::run(window_id, move |parent| {
+                        crate::io::svg_export::pick_svg_path_owned(stem, parent)
+                    })
+                    .map(Message::SvgExportPath)
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    Task::perform(
+                        crate::io::svg_export::pick_svg_path_owned(stem),
+                        Message::SvgExportPath,
+                    )
+                }
+            }
+            Message::SvgExportPath(None) => Task::none(),
+            Message::SvgExportPath(Some(path)) => self.on_svg_export_path_some(path),
 
             Message::PlotFormat(f) => {
                 self.plot_format = f;

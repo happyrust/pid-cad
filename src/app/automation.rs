@@ -58,6 +58,233 @@ pub fn export_headless(input: &std::path::Path, output: &std::path::Path) -> i32
     }
 }
 
+/// The pieces a headless plot needs from the app: a drawing, a layout, and a
+/// plot style table. Kept next to the CLI entry points that use them; the GUI
+/// reaches the same state through the dialog.
+#[cfg(not(target_arch = "wasm32"))]
+impl OpenCADStudio {
+    /// Load `path` into the active tab, as the `open` operation does.
+    pub(crate) fn open_drawing_headless(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let bytes = self.read_drawing(path).map_err(|e| e.to_string())?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let document = crate::io::load_bytes(&name, bytes).map_err(|e| e.to_string())?;
+        let i = self.active_tab;
+        self.tabs[i].scene.document = document;
+        self.tabs[i].scene.deselect_all();
+        crate::app::style_ops::ensure_standard_styles(&mut self.tabs[i].scene.document);
+        self.tabs[i].adopt_active_ucs_from_header();
+        self.tabs[i].current_path = Some(PathBuf::from(path));
+        self.tabs[i].is_start = false;
+        self.tabs[i].scene.bump_geometry();
+        Ok(())
+    }
+
+    /// The drawing's paper-space layouts, in the order the tabs show them.
+    pub(crate) fn plottable_layouts(&self) -> Vec<String> {
+        self.tabs[self.active_tab]
+            .scene
+            .layout_names()
+            .into_iter()
+            .filter(|name| name != "Model")
+            .collect()
+    }
+
+    pub(crate) fn select_layout_headless(&mut self, name: &str) -> Result<(), String> {
+        let i = self.active_tab;
+        let available = self.tabs[i].scene.layout_names();
+        if !available.iter().any(|l| l == name) {
+            return Err(format!(
+                "no layout named '{name}'. This drawing has: {}",
+                available.join(", ")
+            ));
+        }
+        let scene = &mut self.tabs[i].scene;
+        scene.current_layout = name.to_string();
+        scene.active_viewport = None;
+        scene.load_current_layout_state();
+        Ok(())
+    }
+
+    /// `--ctb PATH` loads that table, `--ctb none` plots without one, and no
+    /// flag at all leaves whatever the page setup names. A named table that
+    /// cannot be loaded is an error, never a silent fallback (D4).
+    pub(crate) fn apply_headless_plot_style(&mut self, ctb: Option<&str>) -> Result<(), String> {
+        let Some(choice) = ctb else { return Ok(()) };
+        if choice.eq_ignore_ascii_case("none") {
+            self.active_plot_style = None;
+            self.plot_dialog.style_name.clear();
+            self.plot_dialog.apply_plot_styles = false;
+            self.plot_dialog.style_missing = false;
+            return Ok(());
+        }
+        let path = std::path::Path::new(choice);
+        let table = if path.is_file() {
+            crate::io::plot_style::PlotStyleTable::load(path)?
+        } else {
+            crate::io::plot_style::PlotStyleTable::load_named(choice)?
+        };
+        self.plot_dialog.style_name = table.name.clone();
+        self.plot_dialog.apply_plot_styles = true;
+        self.plot_dialog.style_missing = false;
+        self.active_plot_style = Some(table);
+        Ok(())
+    }
+}
+
+/// What `--plot-svg` was asked to do.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default)]
+pub struct PlotSvgRequest {
+    /// Layout to plot. `None` with `model` false plots every layout.
+    pub layout: Option<String>,
+    /// Plot model space instead of a layout.
+    pub model: bool,
+    /// `Some(path)` for a CTB file, `Some("none")` for none at all, `None` to
+    /// keep whatever the page setup names.
+    pub ctb: Option<String>,
+    /// Sheet for a model-space plot: A0…A4. Required with `model`.
+    pub paper: Option<String>,
+    /// Sheet orientation for a model-space plot.
+    pub landscape: bool,
+    /// Fit the drawing's extents to the sheet. Mutually exclusive with
+    /// `scale`; one of the two is required with `model`.
+    pub fit: bool,
+    /// Plot scale for a model-space plot, as `1:100`, `2:1` or `0.01`.
+    pub scale: Option<String>,
+    /// Resolve and render, print the plan, write nothing.
+    pub dry_run: bool,
+    /// Replace files that already exist.
+    pub force: bool,
+}
+
+/// Headless plot to SVG (`--plot-svg IN OUT`). Returns a process exit code.
+///
+/// No window: the pages come from the same `resolve_plot_job` the GUI export
+/// uses, on an app instance built without a GUI, so a plotted layout means
+/// here what it means there. Which layout is never inferred (D4) — say
+/// `--layout NAME` or `--model`, or get every layout in the drawing.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn plot_svg_headless(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    request: &PlotSvgRequest,
+) -> i32 {
+    let mut app = OpenCADStudio::new();
+    match plot_svg_with(&mut app, input, output, request) {
+        Ok(batch) => {
+            let verb = if batch.dry_run {
+                "would write"
+            } else {
+                "wrote"
+            };
+            for page in &batch.pages {
+                println!(
+                    "{verb} {} ({} elements, {} bytes)",
+                    page.path.display(),
+                    page.report.elements,
+                    page.bytes
+                );
+                if page.report.needs_mix_blend_mode {
+                    println!(
+                        "  note: merge-lines output needs a viewer that supports \
+                         CSS mix-blend-mode"
+                    );
+                }
+                if page.report.mesh_fallbacks > 0 {
+                    println!(
+                        "  note: {} fill(s) were not a clean triangle mesh and \
+                         kept their triangles",
+                        page.report.mesh_fallbacks
+                    );
+                }
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("plot-svg: {error}");
+            1
+        }
+    }
+}
+
+/// `--plot-svg` on an app that is already built — the part with a result to
+/// look at, so the tests can.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn plot_svg_with(
+    app: &mut OpenCADStudio,
+    input: &std::path::Path,
+    output: &std::path::Path,
+    request: &PlotSvgRequest,
+) -> Result<crate::io::svg_export::SvgBatch, String> {
+    use crate::app::update::file::PlotRequest;
+
+    app.open_drawing_headless(input)?;
+    app.apply_headless_plot_style(request.ctb.as_deref())?;
+
+    let plot = if request.model {
+        // No implicit sheet and no implicit scale (D4): a plot nobody is
+        // watching has to say what it is putting the drawing on.
+        let Some(paper) = &request.paper else {
+            return Err("--model needs a sheet: --paper A3 (and --fit or --scale)".to_string());
+        };
+        if request.fit == request.scale.is_some() {
+            return Err("--model needs exactly one of --fit and --scale <1:100>".to_string());
+        }
+        app.select_layout_headless("Model")?;
+        app.set_headless_model_page(
+            paper,
+            request.landscape,
+            request.fit,
+            request.scale.as_deref(),
+        )?;
+        PlotRequest::current_view()
+    } else if let Some(name) = &request.layout {
+        PlotRequest::layouts(vec![name.clone()])
+    } else {
+        let names = app.plottable_layouts();
+        if names.is_empty() {
+            return Err(format!(
+                "{} has no paper-space layout. Use --model to plot model \
+                 space, or --layout NAME.",
+                input.display()
+            ));
+        }
+        PlotRequest::layouts(names)
+    };
+
+    let pages = app.resolve_plot_job(&plot)?;
+    crate::io::svg_export::export_svg_pages(
+        &pages,
+        None,
+        &crate::io::plot_emit::PlotAssets::default(),
+        output,
+        &crate::io::svg_export::SvgWriteOptions {
+            force: request.force,
+            dry_run: request.dry_run,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// `--list-layouts FILE`: the layouts a drawing offers `--plot-svg`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn list_layouts_headless(input: &std::path::Path) -> i32 {
+    let mut app = OpenCADStudio::new();
+    if let Err(error) = app.open_drawing_headless(input) {
+        eprintln!("list-layouts: {error}");
+        return 1;
+    }
+    println!("Model");
+    for name in app.plottable_layouts() {
+        println!("{name}");
+    }
+    0
+}
+
 /// `--port <N>` if present on the command line.
 #[cfg(not(target_arch = "wasm32"))]
 fn port_arg() -> Option<u16> {
@@ -199,10 +426,13 @@ fn entity_json(e: &acadrust::EntityType, detail: &str) -> Value {
     }
     if detail == "full" {
         let bounds = e.as_entity().bounding_box();
-        map.insert("bounds".into(), json!({
-            "min":[bounds.min.x,bounds.min.y,bounds.min.z],
-            "max":[bounds.max.x,bounds.max.y,bounds.max.z]
-        }));
+        map.insert(
+            "bounds".into(),
+            json!({
+                "min":[bounds.min.x,bounds.min.y,bounds.min.z],
+                "max":[bounds.max.x,bounds.max.y,bounds.max.z]
+            }),
+        );
     }
     obj
 }
@@ -218,16 +448,18 @@ fn request_point(req: &Value, key: &str) -> Option<[f64; 2]> {
 }
 
 fn request_handle(value: &Value) -> Option<acadrust::Handle> {
-    value.as_str()
+    value
+        .as_str()
         .and_then(|value| u64::from_str_radix(value.trim_start_matches("0x"), 16).ok())
         .map(acadrust::Handle::new)
 }
 
 fn projected_fields(mut entity: Value, fields: Option<&Vec<Value>>) -> Value {
     let Some(fields) = fields else { return entity };
-    let Some(source) = entity.as_object_mut() else { return entity };
-    let keep: std::collections::HashSet<&str> =
-        fields.iter().filter_map(Value::as_str).collect();
+    let Some(source) = entity.as_object_mut() else {
+        return entity;
+    };
+    let keep: std::collections::HashSet<&str> = fields.iter().filter_map(Value::as_str).collect();
     source.retain(|key, _| key == "handle" || keep.contains(key.as_str()));
     entity
 }
@@ -244,7 +476,9 @@ impl OpenCADStudio {
                     return err(error);
                 }
                 if matches!(response["status"].as_str(), Some("accepted" | "running")) {
-                    return self.control_request(json!({"op":"operation","request_id":id})).0;
+                    return self
+                        .control_request(json!({"op":"operation","request_id":id}))
+                        .0;
                 }
                 return response;
             }
@@ -316,7 +550,9 @@ impl OpenCADStudio {
                 let i = self.active_tab;
                 let before = self.tabs[i].scene.document.entities().count();
                 let error_revision = self.command_line.error_revision;
-                if let Err(error) = self.run_headless(&cmd) { return err(error); }
+                if let Err(error) = self.run_headless(&cmd) {
+                    return err(error);
+                }
                 if self.command_line.error_revision != error_revision {
                     return err(self.command_line.last_error.clone().unwrap_or_default());
                 }
@@ -336,8 +572,7 @@ impl OpenCADStudio {
                 let offset = req["offset"].as_u64().unwrap_or(0) as usize;
                 let limit = req["limit"].as_u64().unwrap_or(1000).min(10_000) as usize;
                 let count = self.tabs[i].scene.document.layers.iter().count();
-                let layers: Vec<Value> = self
-                    .tabs[i]
+                let layers: Vec<Value> = self.tabs[i]
                     .scene
                     .document
                     .layers
@@ -398,7 +633,9 @@ impl OpenCADStudio {
                     if let Some(arr) = req["handles"].as_array() {
                         for h in arr.iter().filter_map(|h| h.as_str()) {
                             if let Ok(v) = u64::from_str_radix(h.trim_start_matches("0x"), 16) {
-                                self.tabs[i].scene.select_entity(acadrust::Handle::new(v), false);
+                                self.tabs[i]
+                                    .scene
+                                    .select_entity(acadrust::Handle::new(v), false);
                             }
                         }
                     }
@@ -435,8 +672,7 @@ impl OpenCADStudio {
                     return err("save: no \"path\" and the document has none");
                 };
                 #[cfg(not(target_arch = "wasm32"))]
-                let result =
-                    self.save_tab_synchronously_protected(i, path.clone(), true);
+                let result = self.save_tab_synchronously_protected(i, path.clone(), true);
                 #[cfg(target_arch = "wasm32")]
                 let result = crate::io::save(&self.tabs[i].scene.document, &path)
                     .map_err(crate::io::SaveFailure::other);
@@ -461,19 +697,30 @@ impl OpenCADStudio {
         self.drive_headless_task(task)
     }
 
-    pub(super) fn drive_headless_task(&mut self, task: iced::Task<super::Message>) -> Result<(), String> {
+    pub(super) fn drive_headless_task(
+        &mut self,
+        task: iced::Task<super::Message>,
+    ) -> Result<(), String> {
         use iced::futures::StreamExt;
         let mut streams = Vec::new();
-        if let Some(stream) = iced_runtime::task::into_stream(task) { streams.push(stream); }
+        if let Some(stream) = iced_runtime::task::into_stream(task) {
+            streams.push(stream);
+        }
         while let Some(stream) = streams.last_mut() {
             match iced::futures::executor::block_on(stream.next()) {
                 Some(iced_runtime::Action::Output(message)) => {
                     let next = self.update(message);
-                    if let Some(stream) = iced_runtime::task::into_stream(next) { streams.push(stream); }
+                    if let Some(stream) = iced_runtime::task::into_stream(next) {
+                        streams.push(stream);
+                    }
                 }
-                Some(iced_runtime::Action::Widget(_)) | Some(iced_runtime::Action::Tick) | Some(iced_runtime::Action::Reload) => {},
+                Some(iced_runtime::Action::Widget(_))
+                | Some(iced_runtime::Action::Tick)
+                | Some(iced_runtime::Action::Reload) => {}
                 Some(action) => return Err(format!("GUI runtime required for {action:?}")),
-                None => { streams.pop(); }
+                None => {
+                    streams.pop();
+                }
             }
         }
         self.finish_all_pending_history();
@@ -529,20 +776,36 @@ impl OpenCADStudio {
         let layer_filter = req["layer"].as_str();
         let handles: Option<std::collections::HashSet<u64>> = req["handles"]
             .as_array()
-            .map(|values| values.iter().filter_map(request_handle).map(|h| h.value()).collect())
-            .or_else(|| request_handle(&req["handle"])
-                .map(|handle| std::iter::once(handle.value()).collect()));
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(request_handle)
+                    .map(|h| h.value())
+                    .collect()
+            })
+            .or_else(|| {
+                request_handle(&req["handle"])
+                    .map(|handle| std::iter::once(handle.value()).collect())
+            });
         let near = request_point(req, "near");
         let contains = request_point(req, "contains_point");
         let bounds = req["bounds"].as_array().and_then(|values| {
-            (values.len() == 4).then(|| Some([
-                values[0].as_f64()?, values[1].as_f64()?,
-                values[2].as_f64()?, values[3].as_f64()?,
-            ])).flatten()
+            (values.len() == 4)
+                .then(|| {
+                    Some([
+                        values[0].as_f64()?,
+                        values[1].as_f64()?,
+                        values[2].as_f64()?,
+                        values[3].as_f64()?,
+                    ])
+                })
+                .flatten()
         });
-        if req.get("handles").is_some() && handles.as_ref().is_some_and(|parsed| {
-            parsed.len() != req["handles"].as_array().map_or(0, Vec::len)
-        }) {
+        if req.get("handles").is_some()
+            && handles
+                .as_ref()
+                .is_some_and(|parsed| parsed.len() != req["handles"].as_array().map_or(0, Vec::len))
+        {
             return err("query handles contains an invalid hexadecimal handle");
         }
         if req.get("handle").is_some() && request_handle(&req["handle"]).is_none() {
@@ -554,10 +817,13 @@ impl OpenCADStudio {
         if req.get("contains_point").is_some() && contains.is_none() {
             return err("query contains_point expects two or three finite coordinates");
         }
-        if req.get("bounds").is_some() && bounds.is_none_or(|bounds| {
-            !bounds.iter().all(|value| value.is_finite())
-                || bounds[0] > bounds[2] || bounds[1] > bounds[3]
-        }) {
+        if req.get("bounds").is_some()
+            && bounds.is_none_or(|bounds| {
+                !bounds.iter().all(|value| value.is_finite())
+                    || bounds[0] > bounds[2]
+                    || bounds[1] > bounds[3]
+            })
+        {
             return err("query bounds expects finite [min_x,min_y,max_x,max_y]");
         }
         let detail = req["detail"].as_str().unwrap_or("geometry");
@@ -569,39 +835,48 @@ impl OpenCADStudio {
 
         let mut matched = Vec::new();
         for e in tab.scene.document.entities() {
-            if handles.as_ref().is_some_and(|handles| {
-                !handles.contains(&e.common().handle.value())
-            }) {
+            if handles
+                .as_ref()
+                .is_some_and(|handles| !handles.contains(&e.common().handle.value()))
+            {
                 continue;
             }
             if type_filter.is_some_and(|value| {
                 !crate::entities::names::ui_name(e).eq_ignore_ascii_case(value)
-            }) || layer_filter.is_some_and(|value| e.common().layer != value) {
+            }) || layer_filter.is_some_and(|value| e.common().layer != value)
+            {
                 continue;
             }
             if let Some(bounds) = bounds {
                 let entity_bounds = e.as_entity().bounding_box();
-                if entity_bounds.max.x < bounds[0] || entity_bounds.max.y < bounds[1]
-                    || entity_bounds.min.x > bounds[2] || entity_bounds.min.y > bounds[3]
+                if entity_bounds.max.x < bounds[0]
+                    || entity_bounds.max.y < bounds[1]
+                    || entity_bounds.min.x > bounds[2]
+                    || entity_bounds.min.y > bounds[3]
                 {
                     continue;
                 }
             }
             let curve = (near.is_some() || contains.is_some())
-                .then(|| crate::entities::curve::entity_curve_xy(e)).flatten();
+                .then(|| crate::entities::curve::entity_curve_xy(e))
+                .flatten();
             if let Some(point) = contains {
                 let Some(curve) = curve.as_ref().filter(|curve| curve.is_closed()) else {
                     continue;
                 };
                 if !cadkernel::geom2d::contains(
-                    std::slice::from_ref(curve), point,
+                    std::slice::from_ref(curve),
+                    point,
                     cadkernel::geom2d::Tolerance::default(),
                 ) {
                     continue;
                 }
             }
-            let nearest = near.and_then(|point| curve.as_ref()
-                .map(|curve| cadkernel::geom2d::closest_point(curve, point)));
+            let nearest = near.and_then(|point| {
+                curve
+                    .as_ref()
+                    .map(|curve| cadkernel::geom2d::closest_point(curve, point))
+            });
             if near.is_some() && nearest.is_none() {
                 continue;
             }
@@ -609,20 +884,29 @@ impl OpenCADStudio {
             if let Some(nearest) = nearest {
                 let object = entity.as_object_mut().expect("entity JSON object");
                 object.insert("distance".into(), json!(nearest.distance));
-                object.insert("closest_point".into(),
-                    json!([nearest.point[0], nearest.point[1]]));
+                object.insert(
+                    "closest_point".into(),
+                    json!([nearest.point[0], nearest.point[1]]),
+                );
                 object.insert("parameter".into(), json!(nearest.t));
             }
             matched.push((nearest.map(|nearest| nearest.distance), entity));
         }
         if near.is_some() {
-            matched.sort_by(|left, right| left.0.partial_cmp(&right.0)
-                .unwrap_or(std::cmp::Ordering::Equal));
+            matched.sort_by(|left, right| {
+                left.0
+                    .partial_cmp(&right.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
         let count = matched.len();
         let fields = req["fields"].as_array();
-        let entities: Vec<Value> = matched.into_iter().skip(offset).take(limit)
-            .map(|(_, entity)| projected_fields(entity, fields)).collect();
+        let entities: Vec<Value> = matched
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(_, entity)| projected_fields(entity, fields))
+            .collect();
         json!({
             "ok": true,
             "document_id":tab.id,
@@ -653,11 +937,275 @@ impl OpenCADStudio {
 mod tests {
     use crate::app::OpenCADStudio;
 
+    /// A drawing on disk with a little geometry in model space, built through
+    /// the same dispatcher the editor uses.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn drawing_with_geometry(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        drawing_with(name, true)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn drawing_with(name: &str, label: bool) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ocs-plot-svg-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("drawing.dxf");
+
+        let mut app = OpenCADStudio::new_for_test();
+        assert_eq!(app.automation_op(r#"{"op":"new"}"#)["ok"], true);
+        assert_eq!(
+            app.automation_op(r#"{"op":"run","cmd":"LINE 0,0 100,0 100,60 0,60 0,0"}"#)["ok"],
+            true
+        );
+        assert_eq!(
+            app.automation_op(r#"{"op":"run","cmd":"CIRCLE 50,30 20"}"#)["ok"],
+            true
+        );
+        // Text, because glyph geometry is the one thing a headless plot could
+        // silently lose: `emit_text` reads the process-wide SDF atlas, which
+        // in the editor is warm from drawing the canvas (D6/R1).
+        if label {
+            let text = acadrust::entities::Text::with_value(
+                "PLOT".to_string(),
+                acadrust::types::Vector3::new(20.0, 20.0, 0.0),
+            )
+            .with_height(8.0);
+            app.tabs[app.active_tab]
+                .scene
+                .add_entity(acadrust::EntityType::Text(text));
+        }
+        let save = format!(
+            r#"{{"op":"save","path":{}}}"#,
+            serde_json::to_string(&path.to_string_lossy()).unwrap()
+        );
+        assert_eq!(app.automation_op(&save)["ok"], true, "saved the fixture");
+        (dir, path)
+    }
+
+    // The headless entry point end to end: open a drawing with no window in
+    // sight, resolve the page through the same `resolve_plot_job` the GUI
+    // export uses, and write an SVG that parses.
+    /// A model-space plot with everything D4 requires stated.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn model_on_a3() -> super::PlotSvgRequest {
+        super::PlotSvgRequest {
+            model: true,
+            paper: Some("A3".into()),
+            landscape: true,
+            fit: true,
+            ..Default::default()
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn plot_svg_writes_model_space_without_a_gui() {
+        let (dir, drawing) = drawing_with_geometry("model");
+        let out = dir.join("plot.svg");
+        let mut app = OpenCADStudio::new_for_test();
+        let batch = super::plot_svg_with(&mut app, &drawing, &out, &model_on_a3())
+            .expect("model space plots");
+
+        assert_eq!(batch.pages.len(), 1);
+        assert_eq!(batch.pages[0].path, out);
+        assert!(batch.pages[0].report.elements > 1, "nothing was drawn");
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert!(text.starts_with("<?xml"));
+        assert!(
+            text.contains("width=\"420mm\" height=\"297mm\""),
+            "the sheet the command line asked for is not the sheet it got"
+        );
+        // The label's glyphs came out as geometry from a cold atlas — no
+        // window ever drew this drawing (D6) — and as geometry, not a <text>
+        // element pointing at a font this file does not carry.
+        assert!(!text.contains("<text"), "the label is not vector geometry");
+        let (bare_dir, bare_drawing) = drawing_with("unlabelled", false);
+        let bare_out = bare_dir.join("plot.svg");
+        let mut app = OpenCADStudio::new_for_test();
+        let bare = super::plot_svg_with(&mut app, &bare_drawing, &bare_out, &model_on_a3())
+            .expect("the same drawing without its label plots");
+        assert!(
+            batch.pages[0].report.elements > bare.pages[0].report.elements,
+            "the label added nothing: {} elements with it, {} without",
+            batch.pages[0].report.elements,
+            bare.pages[0].report.elements
+        );
+        let _ = std::fs::remove_dir_all(&bare_dir);
+        resvg::usvg::Tree::from_str(&text, &resvg::usvg::Options::default())
+            .expect("the written file is a valid SVG");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // D4: headless never picks a sheet or a scale on the user's behalf.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_model_space_plot_must_state_its_sheet_and_scale() {
+        let (dir, drawing) = drawing_with_geometry("explicit");
+        let out = dir.join("plot.svg");
+        let refuse = |request: super::PlotSvgRequest| {
+            let mut app = OpenCADStudio::new_for_test();
+            super::plot_svg_with(&mut app, &drawing, &out, &request)
+                .expect_err("the request is under-specified")
+        };
+        assert!(refuse(super::PlotSvgRequest {
+            model: true,
+            fit: true,
+            ..Default::default()
+        })
+        .contains("--paper"));
+        assert!(refuse(super::PlotSvgRequest {
+            model: true,
+            paper: Some("A3".into()),
+            ..Default::default()
+        })
+        .contains("--fit"));
+        assert!(refuse(super::PlotSvgRequest {
+            model: true,
+            paper: Some("A3".into()),
+            fit: true,
+            scale: Some("1:100".into()),
+            ..Default::default()
+        })
+        .contains("--fit"));
+        assert!(refuse(super::PlotSvgRequest {
+            model: true,
+            paper: Some("A9".into()),
+            fit: true,
+            ..Default::default()
+        })
+        .contains("A9"));
+        assert!(refuse(super::PlotSvgRequest {
+            model: true,
+            paper: Some("A3".into()),
+            scale: Some("one to a hundred".into()),
+            ..Default::default()
+        })
+        .contains("scale"));
+        assert!(!out.exists(), "a refused plot wrote a file");
+
+        // An explicit ratio is honoured: 1:2 puts a 100 mm line on 50 mm of
+        // paper, which a fitted plot would not.
+        let mut app = OpenCADStudio::new_for_test();
+        super::plot_svg_with(
+            &mut app,
+            &drawing,
+            &out,
+            &super::PlotSvgRequest {
+                model: true,
+                paper: Some("A3".into()),
+                landscape: true,
+                scale: Some("1:2".into()),
+                ..Default::default()
+            },
+        )
+        .expect("an explicit scale plots");
+        let scaled = std::fs::read_to_string(&out).unwrap();
+        let _ = std::fs::remove_file(&out);
+        let mut app = OpenCADStudio::new_for_test();
+        super::plot_svg_with(&mut app, &drawing, &out, &model_on_a3()).expect("a fitted plot");
+        let fitted = std::fs::read_to_string(&out).unwrap();
+        assert_ne!(scaled, fitted, "--scale drew the same as --fit");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A rehearsal renders the page — so it still fails on a page it could not
+    // write — but leaves the directory alone.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_dry_run_plot_writes_nothing() {
+        let (dir, drawing) = drawing_with_geometry("dry");
+        let out = dir.join("plot.svg");
+        let mut app = OpenCADStudio::new_for_test();
+        let batch = super::plot_svg_with(
+            &mut app,
+            &drawing,
+            &out,
+            &super::PlotSvgRequest {
+                dry_run: true,
+                ..model_on_a3()
+            },
+        )
+        .expect("the rehearsal succeeds");
+        assert!(batch.dry_run);
+        assert_eq!(batch.pages.len(), 1);
+        assert!(batch.pages[0].bytes > 0, "the page was not rendered");
+        assert!(!out.exists(), "a dry run wrote a file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Headless never guesses which layout to plot (D4), and a plot style table
+    // that cannot be loaded is an error rather than a quiet fallback.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_headless_plot_refuses_what_it_cannot_resolve() {
+        let (dir, drawing) = drawing_with_geometry("refuse");
+        let out = dir.join("plot.svg");
+
+        let mut app = OpenCADStudio::new_for_test();
+        let error = super::plot_svg_with(
+            &mut app,
+            &drawing,
+            &out,
+            &super::PlotSvgRequest {
+                layout: Some("Nonexistent".into()),
+                ..Default::default()
+            },
+        )
+        .expect_err("there is no such layout");
+        assert!(error.contains("Nonexistent"), "{error}");
+
+        let mut app = OpenCADStudio::new_for_test();
+        let error = super::plot_svg_with(
+            &mut app,
+            &drawing,
+            &out,
+            &super::PlotSvgRequest {
+                ctb: Some("no-such-table.ctb".into()),
+                ..model_on_a3()
+            },
+        )
+        .expect_err("the plot style table is missing");
+        assert!(error.to_lowercase().contains("no-such-table"), "{error}");
+        assert!(!out.exists(), "a refused plot wrote a file");
+
+        // And `none` is a valid answer: plot with no table at all.
+        let mut app = OpenCADStudio::new_for_test();
+        super::plot_svg_with(
+            &mut app,
+            &drawing,
+            &out,
+            &super::PlotSvgRequest {
+                ctb: Some("none".into()),
+                ..model_on_a3()
+            },
+        )
+        .expect("no plot style table is fine");
+        assert!(out.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The editor's side of the same feature: the command exists, dispatches,
+    // and asks for a path. With no window there is nothing to pick, so it
+    // stops there — but an unrecognised command would fail here.
+    #[test]
+    fn the_svg_export_command_is_wired_up() {
+        let mut app = OpenCADStudio::new_for_test();
+        assert_eq!(app.automation_op(r#"{"op":"new"}"#)["ok"], true);
+        for command in ["EXPORTSVG", "SVGOUT"] {
+            let request = format!(r#"{{"op":"run","cmd":"{command}"}}"#);
+            let response = app.automation_op(&request);
+            assert_eq!(response["ok"], true, "{command}: {response}");
+        }
+    }
+
     #[test]
     fn layout_notice_skips_grid_camera_and_scene_builds() {
         let mut app = OpenCADStudio::new_for_test();
         assert_eq!(app.automation_op(r#"{"op":"new"}"#)["ok"], true);
-        assert_eq!(app.automation_op(r#"{"op":"run","cmd":"LINE 0,0 10,10"}"#)["ok"], true);
+        assert_eq!(
+            app.automation_op(r#"{"op":"run","cmd":"LINE 0,0 10,10"}"#)["ok"],
+            true
+        );
         let i = app.active_tab;
         let scene = &mut app.tabs[i].scene;
         scene.document.add_layout("Review").unwrap();
@@ -789,9 +1337,7 @@ mod tests {
     fn tilted_ucs_places_planar_entities_with_the_plane_normal() {
         let mut app = OpenCADStudio::new_for_test();
         app.automation_op(r#"{"op":"new"}"#);
-        app.automation_op(
-            r#"{"op":"run","cmd":"UCS 3POINT 0,0,0 1,0,0 0,0,1"}"#,
-        );
+        app.automation_op(r#"{"op":"run","cmd":"UCS 3POINT 0,0,0 1,0,0 0,0,1"}"#);
         app.automation_op(r#"{"op":"run","cmd":"CIRCLE 2,3 1"}"#);
 
         let circle = app.tabs[app.active_tab]
@@ -831,7 +1377,10 @@ mod tests {
             h.linetype_scale
         );
         // No command should be left dangling.
-        assert!(app.tabs[i].active_cmd.is_none(), "command must have finished");
+        assert!(
+            app.tabs[i].active_cmd.is_none(),
+            "command must have finished"
+        );
     }
 
     #[test]
@@ -993,7 +1542,9 @@ mod tests {
                     (20.0, 300.0),
                 ]
             };
-            let _ = app.update(Message::ViewportMove(iced::Point::new(path[0].0, path[0].1)));
+            let _ = app.update(Message::ViewportMove(iced::Point::new(
+                path[0].0, path[0].1,
+            )));
             let _ = app.update(Message::ViewportLeftPress);
             std::thread::sleep(std::time::Duration::from_millis(180));
             for &(x, y) in &path {
@@ -1036,7 +1587,10 @@ mod tests {
         // Two-step: bare command then the value, like typing 1 + Enter
         // (feed_active_cmd is the same path the GUI submit offers first).
         let _ = app.run_command_line("PICKDRAG");
-        assert!(app.tabs[app.active_tab].active_cmd.is_some(), "prompt must open");
+        assert!(
+            app.tabs[app.active_tab].active_cmd.is_some(),
+            "prompt must open"
+        );
         let _ = app.feed_active_cmd("1");
         assert!(app.pick_drag_rect, "PICKDRAG 1 via the prompt must switch");
     }
@@ -1074,10 +1628,7 @@ mod tests {
         let _ = app.run_command_line("MATCHPROP");
         assert!(app.tabs[i].active_cmd.is_some(), "MATCHPROP must start");
         let _ = app.feed_command(StepInput::EntityPick(src_h, glam::DVec3::ZERO));
-        let _ = app.feed_command(StepInput::SelectionComplete(vec![
-            dst_text_h,
-            dst_mtext_h,
-        ]));
+        let _ = app.feed_command(StepInput::SelectionComplete(vec![dst_text_h, dst_mtext_h]));
 
         let doc = &app.tabs[i].scene.document;
         match doc.get_entity(dst_text_h) {
@@ -1129,7 +1680,10 @@ mod tests {
             app.opening.is_none(),
             "an already-open drawing must not start a load"
         );
-        assert!(app.pending_opens.is_empty(), "and must not queue one either");
+        assert!(
+            app.pending_opens.is_empty(),
+            "and must not queue one either"
+        );
 
         // The same file spelled differently (a `..` hop) is still the same file.
         let indirect = canon.parent().unwrap().join("..").join(
@@ -1223,8 +1777,7 @@ mod tests {
             assert_eq!(saved["ok"], true, "{label}: {}", saved["error"]);
             let saved_again = app.automation_op(r#"{"op":"save"}"#);
             assert_eq!(
-                saved_again["ok"],
-                true,
+                saved_again["ok"], true,
                 "normal save: {}",
                 saved_again["error"]
             );
@@ -1242,10 +1795,8 @@ mod tests {
     #[test]
     fn save_then_open_round_trips() {
         let mut app = OpenCADStudio::new_for_test();
-        let path = std::env::temp_dir().join(format!(
-            "ocs_automation_test_{}.dxf",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ocs_automation_test_{}.dxf", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let p = path.to_string_lossy().replace('\\', "\\\\");
         app.automation_op(r#"{"op":"new"}"#);

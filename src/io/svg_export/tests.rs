@@ -936,6 +936,299 @@ fn the_corpus_exercises_mesh_outlines() {
     assert!(outlined >= 4, "only {outlined} mesh fills in the corpus");
 }
 
+// ── Files: naming, overwriting, publishing (D3) ───────────────────────────
+
+/// A directory of this test's own, removed on the way out.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("ocs-svg-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+
+    fn join(&self, name: &str) -> std::path::PathBuf {
+        self.0.join(name)
+    }
+
+    fn files(&self) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(&self.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn job(cases: &[&str]) -> Vec<crate::io::plot_types::PdfPageInput> {
+    let corpus = corpus();
+    cases
+        .iter()
+        .map(|name| {
+            corpus
+                .iter()
+                .find(|c| c.name == *name)
+                .unwrap_or_else(|| panic!("{name} is in the corpus"))
+                .page_input()
+        })
+        .collect()
+}
+
+#[test]
+fn one_page_keeps_its_name_and_several_are_all_numbered() {
+    let base = std::path::Path::new("/plots/site plan.svg");
+    assert_eq!(page_paths(base, 1), vec![base.to_path_buf()]);
+    let three = page_paths(base, 3);
+    let names: Vec<String> = three
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    // All of them, including the first: a script should not have to special
+    // case page one, and three digits sort as text.
+    assert_eq!(
+        names,
+        [
+            "site plan-001.svg",
+            "site plan-002.svg",
+            "site plan-003.svg"
+        ]
+    );
+    assert!(three.iter().all(|p| p.parent() == base.parent()));
+}
+
+#[test]
+fn a_case_only_difference_is_the_same_file() {
+    let paths: Vec<std::path::PathBuf> = ["a/Plan.svg", "a/other.svg", "a/plan.svg"]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    assert_eq!(first_case_insensitive_clash(&paths), Some((0, 2)));
+    assert_eq!(first_case_insensitive_clash(&paths[..2]), None);
+}
+
+#[test]
+fn a_multi_page_job_writes_numbered_files_that_parse() {
+    let scratch = Scratch::new("multi");
+    let pages = job(&["polyline with pen-up", "dash patterns", "text"]);
+    let batch = export_svg_pages(
+        &pages,
+        None,
+        &PlotAssets::default(),
+        &scratch.join("plot.svg"),
+        &SvgWriteOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(batch.pages.len(), 3);
+    assert!(!batch.dry_run);
+    assert_eq!(
+        scratch.files(),
+        ["plot-001.svg", "plot-002.svg", "plot-003.svg"],
+        "no leftovers from the temporary files either"
+    );
+    for outcome in &batch.pages {
+        let text = std::fs::read_to_string(&outcome.path).unwrap();
+        assert_eq!(text.len(), outcome.bytes);
+        parse(&text); // it is a document, not just bytes
+        assert!(outcome.report.elements > 0);
+    }
+}
+
+#[test]
+fn an_existing_file_stops_the_job_until_it_is_forced() {
+    let scratch = Scratch::new("overwrite");
+    let pages = job(&["polyline with pen-up", "dash patterns"]);
+    std::fs::write(scratch.join("plot-002.svg"), b"last week's issue").unwrap();
+
+    let error = export_svg_pages(
+        &pages,
+        None,
+        &PlotAssets::default(),
+        &scratch.join("plot.svg"),
+        &SvgWriteOptions::default(),
+    )
+    .expect_err("the second page is already there");
+    assert!(error.to_string().contains("plot-002.svg"), "{error}");
+    assert_eq!(
+        scratch.files(),
+        ["plot-002.svg"],
+        "page one must not have been written either"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.join("plot-002.svg")).unwrap(),
+        "last week's issue"
+    );
+
+    let forced = export_svg_pages(
+        &pages,
+        None,
+        &PlotAssets::default(),
+        &scratch.join("plot.svg"),
+        &SvgWriteOptions {
+            force: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(forced.pages.len(), 2);
+    assert!(std::fs::read_to_string(scratch.join("plot-002.svg"))
+        .unwrap()
+        .starts_with("<?xml"));
+}
+
+#[test]
+fn a_page_that_cannot_be_written_stops_the_job_before_any_file_moves() {
+    let scratch = Scratch::new("refused");
+    let mut pages = job(&["polyline with pen-up", "dash patterns"]);
+    pages[1].options.stamp = true;
+
+    let error = export_svg_pages(
+        &pages,
+        None,
+        &PlotAssets::default(),
+        &scratch.join("plot.svg"),
+        &SvgWriteOptions::default(),
+    )
+    .expect_err("the stamp is not supported");
+    match &error {
+        SvgError::Page { page, source } => {
+            assert_eq!(*page, 2);
+            assert!(matches!(**source, SvgError::Unsupported(_)), "{source}");
+        }
+        other => panic!("expected a page error, got {other}"),
+    }
+    assert!(
+        scratch.files().is_empty(),
+        "page one was published anyway: {:?}",
+        scratch.files()
+    );
+}
+
+#[test]
+fn a_failure_after_the_first_page_says_what_is_already_on_disk() {
+    // Page two's target is a non-empty directory: it cannot be replaced by a
+    // file, and by then page one has been published. A file each is not a
+    // transaction, so the error has to say so rather than imply a rollback.
+    let scratch = Scratch::new("partial");
+    let blocked = scratch.join("plot-002.svg");
+    std::fs::create_dir_all(&blocked).unwrap();
+    std::fs::write(blocked.join("occupied"), b"x").unwrap();
+
+    let error = export_svg_pages(
+        &job(&["polyline with pen-up", "dash patterns", "text"]),
+        None,
+        &PlotAssets::default(),
+        &scratch.join("plot.svg"),
+        &SvgWriteOptions {
+            force: true,
+            ..Default::default()
+        },
+    )
+    .expect_err("page two cannot be written");
+    match &error {
+        SvgError::Partial {
+            published, failed, ..
+        } => {
+            assert_eq!(published.len(), 1);
+            assert!(published[0].ends_with("plot-001.svg"), "{published:?}");
+            assert!(failed.ends_with("plot-002.svg"), "{failed:?}");
+        }
+        other => panic!("expected a partial-publication error, got {other}"),
+    }
+    assert!(error.to_string().contains("plot-001.svg"), "{error}");
+    assert!(
+        scratch.files().contains(&"plot-001.svg".to_string()),
+        "page one should still be there: {:?}",
+        scratch.files()
+    );
+    assert!(
+        !scratch.files().contains(&"plot-003.svg".to_string()),
+        "the job should have stopped"
+    );
+}
+
+#[test]
+fn a_dry_run_renders_and_resolves_but_writes_nothing() {
+    let scratch = Scratch::new("dry");
+    let dry = SvgWriteOptions {
+        dry_run: true,
+        ..Default::default()
+    };
+    let batch = export_svg_pages(
+        &job(&["hatches", "ctb"]),
+        None,
+        &PlotAssets::default(),
+        &scratch.join("plot.svg"),
+        &dry,
+    )
+    .unwrap();
+    assert!(batch.dry_run);
+    assert_eq!(batch.pages.len(), 2);
+    assert!(batch.pages[0].path.ends_with("plot-001.svg"));
+    assert!(batch.pages.iter().all(|p| p.bytes > 0));
+    assert!(scratch.files().is_empty(), "{:?}", scratch.files());
+
+    // The rehearsal still finds what the real run would refuse.
+    let mut stamped = job(&["hatches"]);
+    stamped[0].options.stamp = true;
+    assert!(export_svg_pages(
+        &stamped,
+        None,
+        &PlotAssets::default(),
+        &scratch.join("plot.svg"),
+        &dry
+    )
+    .is_err());
+}
+
+#[test]
+fn a_page_style_table_wins_over_the_job_wide_one() {
+    // D4's multi-page rule, kept from the PDF path: the page's own CTB first,
+    // the job's as the fallback.
+    let scratch = Scratch::new("ctb");
+    let mut pages = job(&["ctb", "ctb"]);
+    pages[1].plot_style = None;
+    let styled = crate::io::plot_corpus::styled_ctb();
+    let batch = export_svg_pages(
+        &pages,
+        Some(&styled),
+        &PlotAssets::default(),
+        &scratch.join("plot.svg"),
+        &SvgWriteOptions::default(),
+    )
+    .unwrap();
+    let with_page_style = std::fs::read_to_string(&batch.pages[0].path).unwrap();
+    let with_job_style = std::fs::read_to_string(&batch.pages[1].path).unwrap();
+    assert_eq!(
+        with_page_style, with_job_style,
+        "the same table by either route must draw the same page"
+    );
+    // And it is really the table talking, not both pages ignoring it.
+    let mut plain = job(&["ctb"]);
+    plain[0].plot_style = None;
+    let bare = export_svg_pages(
+        &plain,
+        None,
+        &PlotAssets::default(),
+        &scratch.join("bare.svg"),
+        &SvgWriteOptions::default(),
+    )
+    .unwrap();
+    assert_ne!(
+        with_page_style,
+        std::fs::read_to_string(&bare.pages[0].path).unwrap(),
+        "the CTB changed nothing"
+    );
+}
+
 // ── Layer 3: what the picture looks like ──────────────────────────────────
 
 /// Render at `px_per_mm`, on white, and return the pixmap.

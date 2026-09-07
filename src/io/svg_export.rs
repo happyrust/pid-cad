@@ -40,8 +40,14 @@ use crate::io::plot_emit::{
     emit_plot_content, FillRule, LineCap, LineJoin, PlotAssets, PlotBlend, PlotOp, PlotPage,
     PlotPoint, PlotSink, GEOMETRY_MM_TO_PT,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::io::plot_style::PlotStyleTable;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::Write as _;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
 
 /// PDF points → sheet mm. The reciprocal of the factor the emitter's geometry
 /// went through, so a coordinate that started life as `mm * k` comes back to
@@ -66,6 +72,20 @@ pub enum SvgError {
     /// A coordinate, length or page dimension that cannot be serialised.
     Invalid(String),
     Io(std::io::Error),
+    /// Which page of a multi-page job failed.
+    Page {
+        page: usize,
+        source: Box<SvgError>,
+    },
+    /// A page could not be written after earlier pages had already been
+    /// published. A file each is not a transaction (D3), so say what is on
+    /// disk rather than pretend the job did not happen.
+    #[cfg(not(target_arch = "wasm32"))]
+    Partial {
+        published: Vec<std::path::PathBuf>,
+        failed: std::path::PathBuf,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for SvgError {
@@ -74,6 +94,29 @@ impl std::fmt::Display for SvgError {
             SvgError::Unsupported(what) => write!(f, "SVG export does not support {what}"),
             SvgError::Invalid(what) => write!(f, "cannot write SVG: {what}"),
             SvgError::Io(error) => write!(f, "cannot write SVG: {error}"),
+            SvgError::Page { page, source } => write!(f, "page {page}: {source}"),
+            #[cfg(not(target_arch = "wasm32"))]
+            SvgError::Partial {
+                published,
+                failed,
+                reason,
+            } => {
+                write!(f, "cannot write {}: {reason}", failed.display())?;
+                if published.is_empty() {
+                    write!(f, " (nothing was written)")
+                } else {
+                    write!(
+                        f,
+                        " ({} already written: {})",
+                        published.len(),
+                        published
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            }
         }
     }
 }
@@ -86,7 +129,7 @@ impl From<std::io::Error> for SvgError {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SvgOptions {
     /// Decimal places for path coordinates. `None` derives them from the plot
     /// scale so a serialised point is within [`COORD_BUDGET_MM`] of the point
@@ -136,6 +179,227 @@ pub fn svg_page_to_string(
     let text = String::from_utf8(bytes)
         .map_err(|_| SvgError::Invalid("the document is not valid UTF-8".into()))?;
     Ok((text, report))
+}
+
+// ── Files (D3) ────────────────────────────────────────────────────────────
+
+/// Where one page went, and what it needed.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub struct SvgPageOutcome {
+    pub path: std::path::PathBuf,
+    pub report: SvgReport,
+    pub bytes: usize,
+}
+
+/// The result of writing a plot job.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub struct SvgBatch {
+    pub pages: Vec<SvgPageOutcome>,
+    /// Nothing was written: the pages were rendered and the paths resolved,
+    /// but the files were not published.
+    pub dry_run: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Default)]
+pub struct SvgWriteOptions {
+    pub svg: SvgOptions,
+    /// Replace files that are already there. Off by default: a plot that
+    /// silently overwrote last week's issue would be a bad afternoon.
+    pub force: bool,
+    /// Render and resolve the paths, write nothing. Unsupported options still
+    /// fail — the point of the rehearsal is to find out before the files move.
+    pub dry_run: bool,
+}
+
+/// SVG has no pages, so a multi-page job is a file each (D3).
+///
+/// One page keeps the name it was given. Several are numbered
+/// `stem-001.svg`, `stem-002.svg`, … in request order — all of them, including
+/// the first, so a script can enumerate them without special-casing.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn page_paths(base: &Path, pages: usize) -> Vec<std::path::PathBuf> {
+    if pages <= 1 {
+        return vec![base.to_path_buf()];
+    }
+    let parent = base.parent().unwrap_or_else(|| Path::new(""));
+    let stem = base
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "plot".into());
+    let extension = base
+        .extension()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "svg".into());
+    (1..=pages)
+        .map(|n| parent.join(format!("{stem}-{n:03}.{extension}")))
+        .collect()
+}
+
+/// Write a plot job: one SVG per page.
+///
+/// Every target path is resolved and checked before anything is written — for
+/// clashes inside the batch (including two that differ only in case, which is
+/// one file on Windows) and, unless `force`, for files that already exist.
+/// Each page is then written to a temporary file next to its target and
+/// renamed onto it, so a reader never sees half a document.
+///
+/// **A file each is not a transaction.** If page three cannot be written,
+/// pages one and two stay on disk and the error names them; nothing is rolled
+/// back and nothing left over from an earlier, longer run is deleted.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn export_svg_pages(
+    pages: &[crate::io::plot_types::PdfPageInput],
+    plot_style: Option<&PlotStyleTable>,
+    assets: &PlotAssets,
+    base: &Path,
+    options: &SvgWriteOptions,
+) -> Result<SvgBatch, SvgError> {
+    if pages.is_empty() {
+        return Err(SvgError::Invalid("no pages were selected".into()));
+    }
+    let paths = page_paths(base, pages.len());
+
+    if let Some((first, second)) = first_case_insensitive_clash(&paths) {
+        return Err(SvgError::Invalid(format!(
+            "pages {} and {} would both write {} (paths that differ only in \
+             case are the same file on Windows)",
+            first + 1,
+            second + 1,
+            paths[second].display()
+        )));
+    }
+    if !options.force {
+        let taken: Vec<String> = paths
+            .iter()
+            .filter(|p| p.exists())
+            .map(|p| p.display().to_string())
+            .collect();
+        if !taken.is_empty() {
+            return Err(SvgError::Invalid(format!(
+                "these files already exist: {}",
+                taken.join(", ")
+            )));
+        }
+    }
+
+    // Render every page before publishing any of them, so a page that cannot
+    // be written at all — a stamp, a bad number — stops the job with nothing
+    // on disk rather than half a set.
+    let mut documents = Vec::with_capacity(pages.len());
+    for (index, page) in pages.iter().enumerate() {
+        let mut bytes = Vec::new();
+        let report = write_svg_page(
+            &page.as_plot_page(plot_style),
+            assets,
+            &options.svg,
+            &mut bytes,
+        )
+        .map_err(|error| {
+            if pages.len() > 1 {
+                SvgError::Page {
+                    page: index + 1,
+                    source: Box::new(error),
+                }
+            } else {
+                error
+            }
+        })?;
+        documents.push((bytes, report));
+    }
+
+    let mut outcomes = Vec::with_capacity(pages.len());
+    for (path, (bytes, report)) in paths.iter().zip(documents) {
+        if !options.dry_run {
+            if let Err(error) = publish(path, &bytes) {
+                return Err(SvgError::Partial {
+                    published: outcomes
+                        .iter()
+                        .map(|o: &SvgPageOutcome| o.path.clone())
+                        .collect(),
+                    failed: path.clone(),
+                    reason: error.to_string(),
+                });
+            }
+        }
+        outcomes.push(SvgPageOutcome {
+            path: path.clone(),
+            report,
+            bytes: bytes.len(),
+        });
+    }
+    Ok(SvgBatch {
+        pages: outcomes,
+        dry_run: options.dry_run,
+    })
+}
+
+/// Show a parented SVG save-file dialog and return the chosen path.
+///
+/// Parented for the same reason the PDF one is: a parentless save dialog is
+/// refused on some Wayland desktops (#537).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn pick_svg_path_owned(
+    stem: String,
+    parent: &dyn iced::window::Window,
+) -> Option<std::path::PathBuf> {
+    let path = crate::sys::blocking_file_dialog()
+        .set_parent(parent)
+        .set_title("Export as SVG")
+        .set_file_name(format!("{stem}.svg"))
+        .add_filter("SVG Files", &["svg"])
+        .add_filter("All Files", &["*"])
+        .save_file()?;
+    crate::config::remember_dialog_dir(&path);
+    Some(path)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn pick_svg_path_owned(_stem: String) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// The first pair of paths that name the same file on a case-insensitive
+/// filesystem. Numbering cannot produce one today; a naming scheme that takes
+/// the layout's name — the obvious next request — can.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn first_case_insensitive_clash(paths: &[std::path::PathBuf]) -> Option<(usize, usize)> {
+    let mut seen: HashMap<String, usize> = HashMap::with_capacity(paths.len());
+    for (index, path) in paths.iter().enumerate() {
+        if let Some(first) = seen.insert(path.to_string_lossy().to_lowercase(), index) {
+            return Some((first, index));
+        }
+    }
+    None
+}
+
+/// Write `bytes` to a temporary file beside `path`, then rename it on.
+#[cfg(not(target_arch = "wasm32"))]
+fn publish(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if !parent.as_os_str().is_empty() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let temporary = parent.join(format!(".{name}.part"));
+    let write = || -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    };
+    if let Err(error) = write() {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    // Windows will not rename onto an existing file.
+    let _ = std::fs::remove_file(path);
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
 }
 
 // ── PlotSink → SVG ────────────────────────────────────────────────────────

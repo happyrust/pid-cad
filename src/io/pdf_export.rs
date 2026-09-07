@@ -194,23 +194,7 @@ fn build_pdf(
 fn build_pdf_pages(pages: &[PdfPageInput], plot_style: Option<&PlotStyleTable>) -> Vec<u8> {
     let mut doc = PdfDocument::new("Open CAD Studio Export");
     for page in pages {
-        append_pdf_page(
-            &mut doc,
-            &PlotPage {
-                wires: &page.wires,
-                hatches: &page.hatches,
-                wipeouts: &page.wipeouts,
-                paper_w: page.paper_w as f32,
-                paper_h: page.paper_h as f32,
-                offset_x: page.offset_x,
-                offset_y: page.offset_y,
-                rotation_deg: page.rotation_deg,
-                scale: page.scale,
-                clip: page.clip,
-                plot_style: page.plot_style.as_ref().or(plot_style),
-                options: page.options,
-            },
-        );
+        append_pdf_page(&mut doc, &page.as_plot_page(plot_style));
     }
     let mut warnings = Vec::new();
     doc.save(&PdfSaveOptions::default(), &mut warnings)
