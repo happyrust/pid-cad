@@ -49,6 +49,11 @@
     { "shape": "FM9999*", "class": "flow-meter", "label": "流量计", "color": [140, 0, 220], "radius_mm": 10.0 },
     { "shape": "QK-9999*", "class": "skid", "label": "橇块（设备位号）", "color": [0, 180, 180], "radius_mm": 0.0, "report_orphans": false }
   ],
+  "pipes": {
+    "layer_prefixes": ["PIPE"],
+    "snap_mm": 0.3,
+    "number_mm": 5.0
+  },
   "shapes": {
     "layers_any": ["DEVICE", "DEVICES", "T-MaR-ZNACKY", "T-SYMBOLS", "T_ZNACKY", "YIBIAO"],
     "skip_layers": ["A", "PUB_TITLE", "CPECC", "TWT", "TWT_TEXT", "LAYERDIM", "bzc", "BZC"],

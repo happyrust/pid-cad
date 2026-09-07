@@ -14,6 +14,7 @@ use acadrust::types::{Color, Vector3};
 use acadrust::{CadDocument, EntityType, Handle};
 use OpenCADStudio::io;
 use OpenCADStudio::io::pid_legend::{self, Rules};
+use OpenCADStudio::io::pid_pipes;
 
 // ── in-memory sheet ─────────────────────────────────────────────────────
 
@@ -295,6 +296,171 @@ fn legend_entities_go_on_coloured_class_layers_and_come_off_again() {
     assert_eq!(removed, added);
     assert_eq!(doc.entity_count(), before);
     assert!(pid_legend::legend_handles(&doc).is_empty());
+}
+
+// ── piped block sheet ───────────────────────────────────────────────────
+
+fn insert_turned(name: &str, x: f64, y: f64, layer: &str, rotation: f64) -> EntityType {
+    let mut i = Insert::new(name, Vector3::new(x, y, 0.0));
+    i.common.layer = layer.to_string();
+    i.rotation = rotation;
+    EntityType::Insert(i)
+}
+
+/// A header on `PIPE-消防` from an open end at x = 10 to a sheet connector at
+/// x = 60, lettered `100-FW`; a vent stub off it at x = 20 ending in the air;
+/// at x = 30 and x = 45 a branch down through a butterfly valve (turned a
+/// quarter, so its connection points face up and down) to an S point --
+/// BUV-3101's branch lettered `80-FW` below the valve, BUV-3102's lettered
+/// nowhere.
+fn piped_block_sheet() -> CadDocument {
+    let mut doc = CadDocument::new();
+    define_block(
+        &mut doc,
+        "$VALVE$00000316",
+        vec![
+            line(-1.25, -0.72, 1.25, -0.72),
+            line(1.25, -0.72, 1.25, 0.72),
+            line(1.25, 0.72, -1.25, 0.72),
+            line(-1.25, 0.72, -1.25, -0.72),
+            line(-1.25, -0.72, 1.25, 0.72),
+            point(-1.25, 0.0),
+            point(1.25, 0.0),
+        ],
+    );
+    define_block(
+        &mut doc,
+        "$TwtSys$00000132",
+        vec![line(0.0, 0.0, 1.0, 1.0), line(0.0, 0.0, 1.0, -1.0)],
+    );
+    doc.add_entity(line(0.0, 0.0, 420.0, 0.0)).unwrap();
+    doc.add_entity(line(0.0, 0.0, 0.0, 297.0)).unwrap();
+
+    let pipe = |doc: &mut CadDocument, x0: f64, y0: f64, x1: f64, y1: f64| {
+        doc.add_entity(layered(line(x0, y0, x1, y1), "PIPE-消防"))
+            .unwrap();
+    };
+    pipe(&mut doc, 10.0, 50.0, 30.0, 50.0);
+    pipe(&mut doc, 30.0, 50.0, 45.0, 50.0);
+    pipe(&mut doc, 45.0, 50.0, 60.0, 50.0);
+    pipe(&mut doc, 20.0, 50.0, 20.0, 53.0);
+    doc.add_entity(insert("$TwtSys$00000132", 60.0, 50.0, "EQUIP_消防"))
+        .unwrap();
+    doc.add_entity(text("100-FW", 37.0, 51.5)).unwrap();
+    for (x, tag) in [(30.0, "BUV-3101"), (45.0, "BUV-3102")] {
+        pipe(&mut doc, x, 50.0, x, 41.25);
+        doc.add_entity(insert_turned(
+            "$VALVE$00000316",
+            x,
+            40.0,
+            "VALVE_消防",
+            std::f64::consts::FRAC_PI_2,
+        ))
+        .unwrap();
+        doc.add_entity(text(tag, x + 2.0, 40.5)).unwrap();
+        pipe(&mut doc, x, 38.75, x, 30.0);
+        doc.add_entity(circle(x, 27.9, 2.1)).unwrap();
+        doc.add_entity(text("S", x, 27.9)).unwrap();
+    }
+    doc.add_entity(text("80-FW", 31.5, 34.0)).unwrap();
+    doc
+}
+
+/// Pipe strokes join into runs cut at the valves' connection points, at tees
+/// and at open ends; a line number goes to the run it is lettered along and
+/// on to the runs that continue it straight through a tee or through a valve,
+/// not to a branch; each symbol knows the lines at its connection points.
+#[test]
+fn pipe_runs_join_symbols_and_carry_the_line_number_lettered_along_them() {
+    let doc = piped_block_sheet();
+    let rules = Rules::builtin();
+    let recognition = pid_legend::recognise(&doc, &rules);
+    assert_eq!(recognition.units_per_mm, 1.0);
+    let pipes = &recognition.pipes;
+    assert_eq!(pipes.segments, 8);
+    // Header in four pieces (open end, vent tee, two branch tees, connector),
+    // the vent, two pieces per branch.
+    assert_eq!(pipes.runs.len(), 9, "{:?}", pipes.runs);
+    assert_eq!((pipes.connected_ports, pipes.ports), (7, 7));
+    assert_eq!(pipes.open_ends, 2);
+
+    let symbol = |tag: &str| {
+        recognition
+            .symbols
+            .iter()
+            .position(|s| s.tag.as_deref() == Some(tag))
+            .unwrap_or_else(|| panic!("no symbol tagged {tag}"))
+    };
+    let (v1, v2) = (symbol("BUV-3101"), symbol("BUV-3102"));
+    let connector = recognition
+        .symbols
+        .iter()
+        .position(|s| s.source == "$TwtSys$00000132")
+        .expect("the sheet connector");
+    let run_between = |a: pid_pipes::End, b: pid_pipes::End| {
+        pipes
+            .runs
+            .iter()
+            .find(|r| r.ends == [a, b] || r.ends == [b, a])
+            .unwrap_or_else(|| panic!("no run {a:?} -- {b:?} in {:?}", pipes.runs))
+    };
+    use pid_pipes::End::{Open, Symbol, Tee};
+    // The header: lettered on its middle piece, the same line straight through
+    // both tees to the open end and to the connector.
+    let middle = run_between(Tee, Tee);
+    assert_eq!(middle.numbers, ["100-FW"]);
+    assert!((middle.length_mm - 15.0).abs() < 0.01, "{middle:?}");
+    let last = run_between(Tee, Symbol(connector));
+    assert!(
+        last.numbers.is_empty() && last.lines == ["100-FW"],
+        "{last:?}"
+    );
+    assert_eq!(recognition.symbols[connector].lines, ["100-FW"]);
+    let mut header_open: Vec<&pid_pipes::Run> = pipes
+        .runs
+        .iter()
+        .filter(|r| r.ends.contains(&Open))
+        .collect();
+    header_open.sort_by(|a, b| a.length_mm.total_cmp(&b.length_mm));
+    assert_eq!(header_open.len(), 2);
+    assert!(
+        header_open[0].lines.is_empty() && (header_open[0].length_mm - 3.0).abs() < 0.01,
+        "the vent stub is a branch and carries no line: {:?}",
+        header_open[0]
+    );
+    assert_eq!(header_open[1].lines, ["100-FW"], "{:?}", header_open[1]);
+    // BUV-3101: 80-FW lettered below the valve, carried up through the valve
+    // to the piece above it -- but not on to the header, which it branches
+    // off.
+    let below = run_between(Symbol(v1), Symbol(symbol_s(&recognition, 30.0)));
+    assert_eq!(below.numbers, ["80-FW"]);
+    let above = run_between(Tee, Symbol(v1));
+    assert!(
+        above.numbers.is_empty() && above.lines == ["80-FW"],
+        "{above:?}"
+    );
+    assert_eq!(recognition.symbols[v1].lines, ["80-FW"]);
+    assert_eq!(
+        recognition.symbols[symbol_s(&recognition, 30.0)].lines,
+        ["80-FW"]
+    );
+    // BUV-3102: nothing lettered on its branch, so no line -- the header's
+    // number does not turn down a branch.
+    let above2 = run_between(Tee, Symbol(v2));
+    assert!(above2.lines.is_empty(), "{above2:?}");
+    assert!(recognition.symbols[v2].lines.is_empty());
+    assert!(recognition.symbols[symbol_s(&recognition, 45.0)]
+        .lines
+        .is_empty());
+}
+
+/// The S point (circle) at x on the piped block sheet.
+fn symbol_s(recognition: &pid_legend::Recognition, x: f64) -> usize {
+    recognition
+        .symbols
+        .iter()
+        .position(|s| s.source.starts_with("circle") && (s.at.0 - x).abs() < 0.01)
+        .unwrap_or_else(|| panic!("no S point at x = {x}"))
 }
 
 // ── exploded sheet ──────────────────────────────────────────────────────
@@ -964,6 +1130,17 @@ struct Expected {
     field_bubbles: usize,
     panel_bubbles: usize,
     total: usize,
+    /// The pipe: strokes, runs, connection points a pipe meets of those the
+    /// symbols offer, open ends.
+    pipe_strokes: usize,
+    runs: usize,
+    connected_ports: (usize, usize),
+    open_ends: usize,
+    /// Every motorised valve sits in this line ...
+    evalve_line: &'static str,
+    /// ... and these butterfly valves in this one; the other butterfly valves
+    /// are on branches the sheet letters nowhere and carry no line.
+    butterfly_line: (&'static [&'static str], &'static str),
 }
 
 const SHEETS: &[Expected] = &[
@@ -975,6 +1152,19 @@ const SHEETS: &[Expected] = &[
         field_bubbles: 16,
         panel_bubbles: 8,
         total: 118,
+        pipe_strokes: 124,
+        runs: 118,
+        connected_ports: (112, 167),
+        open_ends: 16,
+        evalve_line: "150-FW",
+        butterfly_line: (
+            &[
+                "BUV-3201", "BUV-3202", "BUV-3203", "BUV-3204", "BUV-3205", "BUV-3206", "BUV-3207",
+                "BUV-3208", "BUV-3209", "BUV-3210", "BUV-3211", "BUV-3212", "BUV-3213", "BUV-3214",
+                "BUV-3215", "BUV-3216",
+            ],
+            "100-FW",
+        ),
     },
     Expected {
         file: "DWG-0100FF02-05 罐组I泡沫混合液流程图.dxf",
@@ -984,6 +1174,18 @@ const SHEETS: &[Expected] = &[
         field_bubbles: 22,
         panel_bubbles: 11,
         total: 145,
+        pipe_strokes: 218,
+        runs: 174,
+        connected_ports: (150, 201),
+        open_ends: 12,
+        evalve_line: "",
+        butterfly_line: (
+            &[
+                "BUV-3113", "BUV-3114", "BUV-3115", "BUV-3116", "BUV-3125", "BUV-3126", "BUV-3127",
+                "BUV-3128",
+            ],
+            "80-FS",
+        ),
     },
 ];
 
@@ -1088,6 +1290,59 @@ fn cpecc_sheets_every_symbol_is_known_and_every_valve_has_its_own_tag() {
                 s.source,
                 s.bbox
             );
+        }
+
+        // The pipe: every PIPE-* stroke is in a run, the runs end at the
+        // valves' connection points (0.00 mm off on these sheets), at S / K
+        // circles and at the sheet connectors, and each valve knows the line
+        // number lettered along the pipe it sits in.
+        let pipes = &recognition.pipes;
+        assert_eq!(
+            pipes.segments, expected.pipe_strokes,
+            "{name}: pipe strokes"
+        );
+        assert_eq!(pipes.runs.len(), expected.runs, "{name}: runs");
+        assert_eq!(
+            (pipes.connected_ports, pipes.ports),
+            expected.connected_ports,
+            "{name}: connection points a pipe end meets"
+        );
+        assert_eq!(pipes.open_ends, expected.open_ends, "{name}: open ends");
+        assert!(
+            pipes.runs.iter().map(|r| r.segments).sum::<usize>() >= expected.pipe_strokes,
+            "{name}: every stroke is in a run (a tee only adds strokes)"
+        );
+        if !expected.evalve_line.is_empty() {
+            for s in recognition
+                .symbols
+                .iter()
+                .filter(|s| s.class == "evalve" && !s.source.starts_with("circle"))
+            {
+                assert_eq!(
+                    s.lines,
+                    [expected.evalve_line.to_string()],
+                    "{name}: {:?} sits in {}",
+                    s.tag,
+                    expected.evalve_line
+                );
+            }
+        }
+        let (lettered, line) = expected.butterfly_line;
+        for s in recognition
+            .symbols
+            .iter()
+            .filter(|s| s.class == "butterfly")
+        {
+            let tag = s.tag.as_deref().unwrap_or("");
+            if lettered.contains(&tag) {
+                assert_eq!(s.lines, [line.to_string()], "{name}: {tag} sits in {line}");
+            } else {
+                assert!(
+                    s.lines.is_empty(),
+                    "{name}: {tag} is on an unlettered branch: {:?}",
+                    s.lines
+                );
+            }
         }
         checked += 1;
     }

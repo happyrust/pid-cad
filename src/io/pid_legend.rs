@@ -32,6 +32,12 @@
 //! whose colour is the class colour. Layers give on/off and recolouring for
 //! free, and the marked-up sheet survives a DXF export. [`clear`] removes
 //! them again.
+//!
+//! On the block family the pipe is traced too ([`pid_pipes`]): the `PIPE-*`
+//! strokes joined into runs between the symbols' connection points (the
+//! `POINT`s of a valve block, the insertion point of a block without any,
+//! the rim of an S / K circle), each run carrying the line number lettered
+//! along it, so a symbol knows the lines it sits in.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -40,6 +46,8 @@ use acadrust::entities::{LwPolyline, Text};
 use acadrust::types::{Color, Vector2, Vector3};
 use acadrust::{CadDocument, EntityType, Handle};
 use serde::Deserialize;
+
+use super::pid_pipes::{self, End, PipeRules, Pipes, Port};
 
 /// Every legend layer starts with this; the rest is the class in upper case.
 pub const LAYER_PREFIX: &str = "PID-LEGEND-";
@@ -331,6 +339,8 @@ pub struct Rules {
     /// Lettering shapes that name the exploded symbol beside them.
     pub tag_classes: Vec<TagClassRule>,
     pub shapes: Option<ShapeRules>,
+    /// The pipe pass; no layer prefixes = off.
+    pub pipes: PipeRules,
 }
 
 impl Default for Rules {
@@ -346,6 +356,7 @@ impl Default for Rules {
             panel_bubble: None,
             tag_classes: Vec::new(),
             shapes: None,
+            pipes: PipeRules::default(),
         }
     }
 }
@@ -454,6 +465,9 @@ pub struct Recognized {
     pub tag_distance_mm: Option<f64>,
     /// Whether this class expects a tag at all.
     pub wants_tag: bool,
+    /// Line numbers of the pipe runs at the symbol's connection points,
+    /// distinct, sorted. Empty when no pipe reaches it or none is numbered.
+    pub lines: Vec<String>,
 }
 
 /// An exploded shape the sheet repeats but nothing names: what the report
@@ -486,6 +500,8 @@ pub struct Recognition {
     pub orphan_tags: BTreeMap<String, Vec<String>>,
     /// Pieces of model-space lettering considered.
     pub lettering: usize,
+    /// The pipe, joined into runs between the symbols (block family).
+    pub pipes: Pipes,
 }
 
 impl Recognition {
@@ -658,6 +674,8 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
     // The tag rule of each symbol, in `symbols` order, for the pairing pass.
     let mut tag_rules: Vec<TagRule> = Vec::new();
     let mut unknown_blocks: BTreeMap<String, usize> = BTreeMap::new();
+    // Where pipe can meet each symbol, by index into `symbols`.
+    let mut ports: Vec<(usize, Port)> = Vec::new();
 
     // ── block symbols
     for entity in doc.model_space_entities() {
@@ -675,7 +693,22 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
         let at = (insert.insert_point.x, insert.insert_point.y);
         let scale = (insert.x_scale(), insert.y_scale());
         let mut bbox = None;
+        // The block's connection points, placed; a block without any joins
+        // pipe at its insertion point (the sheet connector, the foam
+        // interface).
+        let mut connections = 0;
         for member in doc.entities_in_block(name) {
+            if let EntityType::Point(point) = member {
+                let p = place(
+                    (point.location.x, point.location.y),
+                    base,
+                    scale,
+                    insert.rotation,
+                    at,
+                );
+                ports.push((symbols.len(), Port::At(p)));
+                connections += 1;
+            }
             if skip_for_box(member) {
                 continue;
             }
@@ -692,6 +725,9 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
         }
         let half = EMPTY_BODY_HALF_MM * upm;
         let bbox = bbox.unwrap_or((at.0 - half, at.1 - half, at.0 + half, at.1 + half));
+        if connections == 0 {
+            ports.push((symbols.len(), Port::At(at)));
+        }
         // Tags are measured from the body, not the insertion point: a block
         // whose base point is far from what it draws (the title block, the
         // loading arm) is inserted nowhere near its body.
@@ -732,6 +768,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             known,
             inner_text: Vec::new(),
             wants_tag: tag.wants_tag(),
+            lines: Vec::new(),
             tag: None,
             tag_distance_mm: None,
         });
@@ -797,6 +834,14 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             }
             _ => (rule.class.clone(), rule.label.clone(), rule.color),
         };
+        // Pipe meets a circle symbol (an S / K point) on its rim.
+        ports.push((
+            symbols.len(),
+            Port::Rim {
+                centre: (cx, cy),
+                r,
+            },
+        ));
         symbols.push(Recognized {
             class,
             label,
@@ -807,6 +852,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             known: true,
             inner_text: inner,
             wants_tag: rule.tag.wants_tag(),
+            lines: Vec::new(),
             tag: None,
             tag_distance_mm: None,
         });
@@ -946,6 +992,22 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
         values.dedup();
     }
 
+    // ── the pipe: runs between the symbols' connection points, numbered
+    let letter_points: Vec<((f64, f64), &str)> =
+        lettering.iter().map(|l| (l.at, l.value.as_str())).collect();
+    let pipes = pid_pipes::trace(doc, upm, &rules.pipes, &ports, &letter_points);
+    for run in &pipes.runs {
+        for end in run.ends {
+            if let End::Symbol(i) = end {
+                symbols[i].lines.extend(run.lines.iter().cloned());
+            }
+        }
+    }
+    for symbol in &mut symbols {
+        symbol.lines.sort();
+        symbol.lines.dedup();
+    }
+
     Recognition {
         units_per_mm: upm,
         symbols,
@@ -953,6 +1015,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
         unknown_shapes,
         orphan_tags,
         lettering: lettering.len(),
+        pipes,
     }
 }
 
@@ -2102,6 +2165,7 @@ fn exploded_symbols(
                     tag: Some(tag),
                     tag_distance_mm: Some(*d),
                     wants_tag: true,
+                    lines: Vec::new(),
                 },
                 TagRule::default(),
             ));
@@ -2122,6 +2186,7 @@ fn exploded_symbols(
                     tag: None,
                     tag_distance_mm: None,
                     wants_tag: rule.tag.wants_tag(),
+                    lines: Vec::new(),
                 },
                 rule.tag.clone(),
             ));
@@ -2140,6 +2205,7 @@ fn exploded_symbols(
                     tag: None,
                     tag_distance_mm: None,
                     wants_tag: false,
+                    lines: Vec::new(),
                 },
                 TagRule::default(),
             ));
@@ -2213,6 +2279,7 @@ fn exploded_symbols(
                         tag: Some(lettering[k].value.clone()),
                         tag_distance_mm: Some(d),
                         wants_tag: true,
+                        lines: Vec::new(),
                     },
                     TagRule::default(),
                 ));
@@ -2235,6 +2302,7 @@ fn exploded_symbols(
                         tag: None,
                         tag_distance_mm: None,
                         wants_tag: rule.tag.wants_tag(),
+                        lines: Vec::new(),
                     },
                     rule.tag.clone(),
                 ));
@@ -2525,6 +2593,54 @@ pub fn report(recognition: &Recognition) -> Vec<String> {
             "  ORPHAN {label} tags (no symbol claimed them): {}",
             tags.join(", ")
         ));
+    }
+    let pipes = &recognition.pipes;
+    if pipes.segments > 0 {
+        let lettered = pipes.runs.iter().filter(|r| !r.numbers.is_empty()).count();
+        let on_a_line = pipes.runs.iter().filter(|r| !r.lines.is_empty()).count();
+        let ambiguous = pipes.runs.iter().filter(|r| r.lines.len() > 1).count();
+        lines.push(format!(
+            "  PIPE {} strokes -> {} runs: {lettered} lettered, {on_a_line} on a line ({ambiguous} on two), {} on none; {}/{} connection points on a pipe, {} open ends",
+            pipes.segments,
+            pipes.runs.len(),
+            pipes.runs.len() - on_a_line,
+            pipes.connected_ports,
+            pipes.ports,
+            pipes.open_ends
+        ));
+        for (line, runs) in pipes.by_line() {
+            let length: f64 = runs.iter().map(|r| r.length_mm).sum();
+            let mut on: Vec<String> = pipes
+                .symbols_on(line)
+                .into_iter()
+                .map(|i| {
+                    let s = &recognition.symbols[i];
+                    s.tag
+                        .clone()
+                        .unwrap_or_else(|| format!("{} ({:.0}, {:.0})", s.label, s.at.0, s.at.1))
+                })
+                .collect();
+            on.sort();
+            on.dedup();
+            lines.push(format!(
+                "  LINE {line}: {} runs, {length:.0} mm, symbols: {}",
+                runs.len(),
+                if on.is_empty() {
+                    "-".to_string()
+                } else {
+                    on.join(", ")
+                }
+            ));
+        }
+        let off_line: Vec<&pid_pipes::Run> =
+            pipes.runs.iter().filter(|r| r.lines.is_empty()).collect();
+        if !off_line.is_empty() {
+            let length: f64 = off_line.iter().map(|r| r.length_mm).sum();
+            lines.push(format!(
+                "  LINE (none): {} runs, {length:.0} mm on no numbered line",
+                off_line.len()
+            ));
+        }
     }
     lines
 }

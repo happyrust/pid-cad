@@ -1,0 +1,631 @@
+//! Pipe topology for the block-family P&ID sheets.
+//!
+//! The TWT sheets draw pipe as two-point polylines on `PIPE-*` layers, each
+//! valve block carries two `POINT` entities where pipe joins it, and pipe
+//! ends land exactly on those points (0.00 mm on FF02-05, 106 of 112), on a
+//! sheet connector's or foam interface's insertion point (blocks without a
+//! `POINT`), or on the rim of an S / K circle. This module joins the
+//! strokes end to end into *runs*, cutting a run wherever it meets a
+//! symbol's connection point, another run (a tee) or nothing (an open end),
+//! and gives each run the line number lettered along it -- so every stroke
+//! of pipe belongs to a run, every run to a line number when the sheet
+//! letters one, and every symbol knows the lines at its connection points.
+//!
+//! Distances here are drawing units unless a name says `mm`; `upm` converts.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+use acadrust::{CadDocument, EntityType};
+use serde::Deserialize;
+
+pub type Point = (f64, f64);
+
+/// Rules for the pipe pass, `pipes` in the rules JSON.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PipeRules {
+    /// A stroke on a layer whose name starts with one of these (case
+    /// insensitive) is pipe. Empty turns the pass off.
+    pub layer_prefixes: Vec<String>,
+    /// Ends closer than this (paper mm) meet: pipe to pipe, pipe to a
+    /// connection point, pipe to a circle's rim.
+    pub snap_mm: f64,
+    /// A line number lettered within this (paper mm) of a run is the run's.
+    pub number_mm: f64,
+}
+
+impl Default for PipeRules {
+    fn default() -> Self {
+        PipeRules {
+            layer_prefixes: Vec::new(),
+            snap_mm: 0.3,
+            number_mm: 5.0,
+        }
+    }
+}
+
+impl PipeRules {
+    fn is_pipe_layer(&self, layer: &str) -> bool {
+        self.layer_prefixes.iter().any(|p| {
+            layer
+                .as_bytes()
+                .get(..p.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(p.as_bytes()))
+        })
+    }
+}
+
+/// Two arms of a tee that leave it at least this straight (cosine of the
+/// angle between their directions) are one line running through; the third
+/// arm is the branch.
+const STRAIGHT_THROUGH_COS: f64 = -0.866;
+
+/// Where pipe can meet a symbol, drawing units.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Port {
+    /// A connection point: a `POINT` of the block, placed; or the insertion
+    /// point of a block that has none.
+    At(Point),
+    /// Anywhere on a circle's rim.
+    Rim { centre: Point, r: f64 },
+}
+
+/// What a run ends at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    /// A symbol's connection point; the index into `Recognition::symbols`.
+    Symbol(usize),
+    /// Other runs: three or more strokes meet here.
+    Tee,
+    /// Nothing: the pipe just stops.
+    Open,
+    /// The run closes on itself with no symbol or tee on it.
+    Loop,
+}
+
+/// A stretch of pipe between two ends.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Run {
+    /// Line numbers lettered along this run itself, distinct, in lettering
+    /// order.
+    pub numbers: Vec<String>,
+    /// The line numbers the run carries: its own, or -- when it has none --
+    /// those of the lettered runs it continues, through a tee straight on or
+    /// through a two-port symbol (an in-line valve). Sorted; more than one
+    /// means two differently numbered lines both reach it unlettered.
+    pub lines: Vec<String>,
+    /// Pipe strokes it is made of (after tees split them).
+    pub segments: usize,
+    pub length_mm: f64,
+    pub ends: [End; 2],
+    /// The run's vertices from `ends[0]` to `ends[1]`, drawing units.
+    pub path: Vec<Point>,
+}
+
+/// The pipe of a sheet.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Pipes {
+    pub runs: Vec<Run>,
+    /// Pipe strokes read from the sheet, before tees split them.
+    pub segments: usize,
+    /// Connection points the symbols offered, and how many a pipe end met.
+    pub ports: usize,
+    pub connected_ports: usize,
+    pub open_ends: usize,
+}
+
+impl Pipes {
+    /// Line number -> the runs carrying it, in run order.
+    pub fn by_line(&self) -> BTreeMap<&str, Vec<&Run>> {
+        let mut out: BTreeMap<&str, Vec<&Run>> = BTreeMap::new();
+        for run in &self.runs {
+            for n in &run.lines {
+                out.entry(n.as_str()).or_default().push(run);
+            }
+        }
+        out
+    }
+
+    /// The symbols at the ends of the runs carrying `line`, distinct.
+    pub fn symbols_on(&self, line: &str) -> BTreeSet<usize> {
+        self.runs
+            .iter()
+            .filter(|r| r.lines.iter().any(|n| n == line))
+            .flat_map(|r| r.ends)
+            .filter_map(|e| match e {
+                End::Symbol(i) => Some(i),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// Whether `value` is a line number as these sheets letter one:
+/// `<size>-<service>` with an optional `-<5 digits>-<class letter><digit>`,
+/// as in `80-FS`, `150-FW`, `200-FS-31001-A2`.
+pub fn is_line_number(value: &str) -> bool {
+    let mut parts = value.split('-');
+    let (Some(size), Some(service)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    if size.is_empty()
+        || !size.bytes().all(|b| b.is_ascii_digit())
+        || service.is_empty()
+        || service.len() > 3
+        || !service.bytes().all(|b| b.is_ascii_uppercase())
+    {
+        return false;
+    }
+    match (parts.next(), parts.next(), parts.next()) {
+        (None, None, None) => true,
+        (Some(number), Some(class), None) => {
+            number.len() == 5
+                && number.bytes().all(|b| b.is_ascii_digit())
+                && class.len() == 2
+                && class.as_bytes()[0].is_ascii_uppercase()
+                && class.as_bytes()[1].is_ascii_digit()
+        }
+        _ => false,
+    }
+}
+
+fn dist(a: Point, b: Point) -> f64 {
+    (a.0 - b.0).hypot(a.1 - b.1)
+}
+
+fn point_segment_distance(p: Point, a: Point, b: Point) -> f64 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    if len2 == 0.0 {
+        return dist(p, a);
+    }
+    let t = (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0);
+    dist(p, (a.0 + t * dx, a.1 + t * dy))
+}
+
+/// The pipe strokes of the sheet as two-point segments, drawing units.
+fn pipe_segments(doc: &CadDocument, rules: &PipeRules) -> Vec<(Point, Point)> {
+    let mut segments = Vec::new();
+    let mut push = |a: Point, b: Point| {
+        if a.0.is_finite() && a.1.is_finite() && b.0.is_finite() && b.1.is_finite() && a != b {
+            segments.push((a, b));
+        }
+    };
+    for entity in doc.model_space_entities() {
+        if !rules.is_pipe_layer(&entity.common().layer) {
+            continue;
+        }
+        match entity {
+            EntityType::Line(l) => push((l.start.x, l.start.y), (l.end.x, l.end.y)),
+            EntityType::LwPolyline(p) => {
+                let pts: Vec<Point> = p
+                    .vertices
+                    .iter()
+                    .map(|v| (v.location.x, v.location.y))
+                    .collect();
+                for w in pts.windows(2) {
+                    push(w[0], w[1]);
+                }
+                if p.is_closed && pts.len() > 2 {
+                    push(pts[pts.len() - 1], pts[0]);
+                }
+            }
+            EntityType::Polyline2D(p) => {
+                let pts: Vec<Point> = p
+                    .vertices
+                    .iter()
+                    .map(|v| (v.location.x, v.location.y))
+                    .collect();
+                for w in pts.windows(2) {
+                    push(w[0], w[1]);
+                }
+                if p.flags.is_closed() && pts.len() > 2 {
+                    push(pts[pts.len() - 1], pts[0]);
+                }
+            }
+            _ => {}
+        }
+    }
+    segments
+}
+
+/// Vertices of the pipe graph: ends within `snap` of each other are one
+/// vertex, placed at their mean. Returns each vertex's position and, per
+/// segment, its two vertices.
+fn snap_vertices(segments: &[(Point, Point)], snap: f64) -> (Vec<Point>, Vec<(usize, usize)>) {
+    let ends: Vec<Point> = segments.iter().flat_map(|&(a, b)| [a, b]).collect();
+    let mut parent: Vec<usize> = (0..ends.len()).collect();
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let cell = |v: f64| (v / snap.max(1e-9)).floor() as i64;
+    let mut grid: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+    for (i, e) in ends.iter().enumerate() {
+        grid.entry((cell(e.0), cell(e.1))).or_default().push(i);
+    }
+    for (i, e) in ends.iter().enumerate() {
+        let (cx, cy) = (cell(e.0), cell(e.1));
+        for gx in cx - 1..=cx + 1 {
+            for gy in cy - 1..=cy + 1 {
+                let Some(items) = grid.get(&(gx, gy)) else {
+                    continue;
+                };
+                for &j in items {
+                    if j > i && dist(*e, ends[j]) <= snap {
+                        let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                        if ri != rj {
+                            parent[ri] = rj;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut index: HashMap<usize, usize> = HashMap::new();
+    let mut sums: Vec<(f64, f64, usize)> = Vec::new();
+    let mut of_end = vec![0; ends.len()];
+    for (i, e) in ends.iter().enumerate() {
+        let root = find(&mut parent, i);
+        let v = *index.entry(root).or_insert_with(|| {
+            sums.push((0.0, 0.0, 0));
+            sums.len() - 1
+        });
+        sums[v].0 += e.0;
+        sums[v].1 += e.1;
+        sums[v].2 += 1;
+        of_end[i] = v;
+    }
+    let vertices: Vec<Point> = sums
+        .iter()
+        .map(|&(x, y, n)| (x / n as f64, y / n as f64))
+        .collect();
+    let of_segment: Vec<(usize, usize)> = (0..segments.len())
+        .map(|s| (of_end[2 * s], of_end[2 * s + 1]))
+        .collect();
+    (vertices, of_segment)
+}
+
+/// Pipe strokes joined into runs, cut at the symbols' connection points and
+/// at tees, with the line numbers lettered along them. `ports` are the
+/// symbols' connection points by symbol index; `lettering` is the sheet's
+/// text with its anchor.
+pub fn trace(
+    doc: &CadDocument,
+    upm: f64,
+    rules: &PipeRules,
+    ports: &[(usize, Port)],
+    lettering: &[(Point, &str)],
+) -> Pipes {
+    if rules.layer_prefixes.is_empty() {
+        return Pipes::default();
+    }
+    let snap = rules.snap_mm * upm;
+    let mut segments = pipe_segments(doc, rules);
+    let read = segments.len();
+    if segments.is_empty() {
+        return Pipes {
+            ports: ports.len(),
+            ..Pipes::default()
+        };
+    }
+
+    // Tees: an end lying on another stroke's interior splits that stroke.
+    // The ends are found first; splitting adds strokes but no new ends.
+    let ends: Vec<Point> = segments.iter().flat_map(|&(a, b)| [a, b]).collect();
+    let mut s = 0;
+    while s < segments.len() {
+        let (a, b) = segments[s];
+        let hit = ends.iter().copied().find(|&e| {
+            dist(e, a) > snap && dist(e, b) > snap && point_segment_distance(e, a, b) <= snap
+        });
+        match hit {
+            Some(e) => {
+                segments[s] = (a, e);
+                segments.push((e, b));
+                // `segments[s]` may be split again by another end.
+            }
+            None => s += 1,
+        }
+    }
+
+    let (vertices, of_segment) = snap_vertices(&segments, snap);
+    let mut incident: Vec<Vec<usize>> = vec![Vec::new(); vertices.len()];
+    for (si, &(a, b)) in of_segment.iter().enumerate() {
+        if a == b {
+            continue;
+        }
+        incident[a].push(si);
+        incident[b].push(si);
+    }
+
+    // Symbols' connection points onto vertices.
+    let mut port_of: Vec<Option<usize>> = vec![None; vertices.len()];
+    let mut connected_ports = 0;
+    for &(symbol, port) in ports {
+        let mut met = false;
+        match port {
+            Port::At(p) => {
+                let nearest = vertices
+                    .iter()
+                    .enumerate()
+                    .filter(|(v, q)| !incident[*v].is_empty() && dist(p, **q) <= snap)
+                    .min_by(|a, b| dist(p, *a.1).total_cmp(&dist(p, *b.1)));
+                if let Some((v, _)) = nearest {
+                    port_of[v].get_or_insert(symbol);
+                    met = true;
+                }
+            }
+            Port::Rim { centre, r } => {
+                for (v, q) in vertices.iter().enumerate() {
+                    if !incident[v].is_empty() && (dist(centre, *q) - r).abs() <= snap {
+                        port_of[v].get_or_insert(symbol);
+                        met = true;
+                    }
+                }
+            }
+        }
+        if met {
+            connected_ports += 1;
+        }
+    }
+
+    // A vertex that ends a run: a symbol's, a tee's, an open end's.
+    let end_at = |v: usize| -> Option<End> {
+        if let Some(symbol) = port_of[v] {
+            return Some(End::Symbol(symbol));
+        }
+        match incident[v].len() {
+            0 | 1 => Some(End::Open),
+            2 => None,
+            _ => Some(End::Tee),
+        }
+    };
+
+    // Walk each stroke out to both ends.
+    let mut used = vec![false; segments.len()];
+    let mut runs: Vec<Run> = Vec::new();
+    // The vertex at each end of each run (none for a loop).
+    let mut end_vertex: Vec<[Option<usize>; 2]> = Vec::new();
+    for start in 0..segments.len() {
+        if used[start] || of_segment[start].0 == of_segment[start].1 {
+            continue;
+        }
+        used[start] = true;
+        let (mut path_v, mut count) = (vec![of_segment[start].0, of_segment[start].1], 1usize);
+        let mut ends = [None, None];
+        let mut closed = false;
+        // Extend from the tail (side 1), then from the head (side 0).
+        for side in [1usize, 0] {
+            loop {
+                let v = if side == 1 {
+                    *path_v.last().unwrap()
+                } else {
+                    path_v[0]
+                };
+                if let Some(end) = end_at(v) {
+                    ends[side] = Some(end);
+                    break;
+                }
+                let next = incident[v].iter().copied().find(|&s| !used[s]);
+                let Some(s) = next else {
+                    // Both strokes at this vertex are used: the run came
+                    // back to where it began.
+                    closed = true;
+                    break;
+                };
+                used[s] = true;
+                count += 1;
+                let (a, b) = of_segment[s];
+                let w = if a == v { b } else { a };
+                if side == 1 {
+                    path_v.push(w);
+                } else {
+                    path_v.insert(0, w);
+                }
+            }
+            if closed {
+                break;
+            }
+        }
+        let ends = if closed {
+            end_vertex.push([None, None]);
+            [End::Loop, End::Loop]
+        } else {
+            end_vertex.push([Some(path_v[0]), Some(*path_v.last().unwrap())]);
+            [ends[0].unwrap_or(End::Open), ends[1].unwrap_or(End::Open)]
+        };
+        let path: Vec<Point> = path_v.iter().map(|&v| vertices[v]).collect();
+        let length_mm = path.windows(2).map(|w| dist(w[0], w[1])).sum::<f64>() / upm;
+        runs.push(Run {
+            numbers: Vec::new(),
+            lines: Vec::new(),
+            segments: count,
+            length_mm,
+            ends,
+            path,
+        });
+    }
+
+    // Line numbers onto the nearest run.
+    let reach = rules.number_mm * upm;
+    for &(at, value) in lettering {
+        if !is_line_number(value) {
+            continue;
+        }
+        let nearest = runs
+            .iter_mut()
+            .map(|run| {
+                let d = run
+                    .path
+                    .windows(2)
+                    .map(|w| point_segment_distance(at, w[0], w[1]))
+                    .fold(f64::INFINITY, f64::min);
+                (d, run)
+            })
+            .filter(|(d, _)| *d <= reach)
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, run)) = nearest {
+            if !run.numbers.iter().any(|n| n == value) {
+                run.numbers.push(value.to_string());
+            }
+        }
+    }
+
+    // A run continues into another through a tee it goes straight across,
+    // or through a symbol with two connection points (an in-line valve):
+    // those neighbours carry the same line. A lettered run keeps its own
+    // number; an unlettered one takes the numbers of every lettered run it
+    // continues -- the header's on one side of a stub, the branch's on the
+    // other, if the sheet letters both.
+    let mut next: Vec<Vec<usize>> = vec![Vec::new(); runs.len()];
+    // The runs ending at each vertex, with the direction each leaves it in.
+    let mut arms: HashMap<usize, Vec<(usize, Point)>> = HashMap::new();
+    for (ri, (run, ends)) in runs.iter().zip(&end_vertex).enumerate() {
+        let n = run.path.len();
+        let leaving = [
+            (ends[0], run.path[0], run.path[1]),
+            (ends[1], run.path[n - 1], run.path[n - 2]),
+        ];
+        for (v, from, to) in leaving {
+            let Some(v) = v else {
+                continue;
+            };
+            let len = dist(from, to);
+            if len > 0.0 {
+                let direction = ((to.0 - from.0) / len, (to.1 - from.1) / len);
+                arms.entry(v).or_default().push((ri, direction));
+            }
+        }
+    }
+    for (v, at_v) in &arms {
+        if port_of[*v].is_some() {
+            continue;
+        }
+        for (n, &(a, da)) in at_v.iter().enumerate() {
+            for &(b, db) in &at_v[n + 1..] {
+                if a != b && da.0 * db.0 + da.1 * db.1 <= STRAIGHT_THROUGH_COS {
+                    next[a].push(b);
+                    next[b].push(a);
+                }
+            }
+        }
+    }
+    let mut ports_of_symbol: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (v, symbol) in port_of.iter().enumerate() {
+        if let Some(symbol) = symbol {
+            ports_of_symbol.entry(*symbol).or_default().push(v);
+        }
+    }
+    let two_point: HashSet<usize> = ports
+        .iter()
+        .filter(|(_, p)| matches!(p, Port::At(_)))
+        .fold(HashMap::<usize, usize>::new(), |mut n, (s, _)| {
+            *n.entry(*s).or_default() += 1;
+            n
+        })
+        .into_iter()
+        .filter(|&(_, n)| n == 2)
+        .map(|(s, _)| s)
+        .collect();
+    for (symbol, vs) in &ports_of_symbol {
+        if !two_point.contains(symbol) || vs.len() != 2 {
+            continue;
+        }
+        let at = |v: usize| {
+            arms.get(&v)
+                .map(|a| a.iter().map(|(r, _)| *r).collect::<Vec<_>>())
+        };
+        if let (Some(ra), Some(rb)) = (at(vs[0]), at(vs[1])) {
+            for &a in &ra {
+                for &b in &rb {
+                    if a != b {
+                        next[a].push(b);
+                        next[b].push(a);
+                    }
+                }
+            }
+        }
+    }
+    let mut lines: Vec<BTreeSet<String>> = runs
+        .iter()
+        .map(|r| r.numbers.iter().cloned().collect())
+        .collect();
+    for (source, run) in runs.iter().enumerate() {
+        if run.numbers.is_empty() {
+            continue;
+        }
+        let mut seen = vec![false; runs.len()];
+        seen[source] = true;
+        let mut queue = vec![source];
+        while let Some(r) = queue.pop() {
+            for &n in &next[r] {
+                if seen[n] || !runs[n].numbers.is_empty() {
+                    continue;
+                }
+                seen[n] = true;
+                lines[n].extend(run.numbers.iter().cloned());
+                queue.push(n);
+            }
+        }
+    }
+    for (run, lines) in runs.iter_mut().zip(lines) {
+        run.lines = lines.into_iter().collect();
+    }
+
+    let open_ends = runs
+        .iter()
+        .flat_map(|r| r.ends)
+        .filter(|e| *e == End::Open)
+        .count();
+    Pipes {
+        runs,
+        segments: read,
+        ports: ports.len(),
+        connected_ports,
+        open_ends,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_numbers_have_a_size_a_service_and_maybe_a_number_and_class() {
+        for good in ["80-FS", "150-FW", "200-FS-31001-A2", "100-FW-32002-B1"] {
+            assert!(is_line_number(good), "{good}");
+        }
+        for bad in [
+            "BUV-3101",
+            "XV-3201",
+            "DWG-0100FF02-04",
+            "80-",
+            "-FS",
+            "80-fs",
+            "80-FSXX",
+            "200-FS-3100-A2",
+            "200-FS-31001-AA",
+            "200-FS-31001",
+            "1/2\"NPT",
+            "5000m",
+        ] {
+            assert!(!is_line_number(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_pipe_layer_is_matched_by_prefix_regardless_of_case() {
+        let rules = PipeRules {
+            layer_prefixes: vec!["PIPE".to_string()],
+            ..PipeRules::default()
+        };
+        assert!(rules.is_pipe_layer("PIPE-消防"));
+        assert!(rules.is_pipe_layer("pipe"));
+        assert!(!rules.is_pipe_layer("VALVE_消防"));
+        assert!(!rules.is_pipe_layer("PIP"));
+    }
+}
