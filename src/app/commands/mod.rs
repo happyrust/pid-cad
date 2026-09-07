@@ -12,6 +12,7 @@ mod fileops;
 mod inquiry;
 mod layerprops;
 mod layers;
+mod pidlegend;
 mod styleprops;
 mod view;
 
@@ -235,6 +236,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_display(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidlegend(cmd, i) {
             return Some(t);
         }
         None
@@ -629,6 +633,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PAGESETUP",
         "PERF",
         "PERSP",
+        // P&ID symbol recognition mark-up (io::pid_legend).
+        "PIDLEGEND",
         "PLOT",
         "PLOTSTYLE",
         "PLOTSTYLEEDITOR",

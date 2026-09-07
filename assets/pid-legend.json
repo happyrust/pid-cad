@@ -1,0 +1,36 @@
+{
+  "_comment": "P&ID legend recognition rules (io::pid_legend). Compiled in as the default; OCS_PID_LEGEND_RULES=<path> overrides at run time. Colours are RGB. Tag shapes: 9 = digit, ? = capital letter, * = anything, other characters literal. Distances are paper millimetres; the sheet's units-per-mm is detected from its drawn extent.",
+  "radius_mm": 15.0,
+  "label_mm": 1.3,
+  "pad_mm": 0.5,
+  "ignore_blocks": ["A3角图章", "会签栏-A3", "1", "_ArchTick"],
+  "blocks": {
+    "$EVALVE$00000018": { "class": "evalve", "label": "电动阀", "color": [255, 0, 0], "tag": { "bubble": "XV" } },
+    "$VALVE$00000316": { "class": "butterfly", "label": "蝶阀", "color": [255, 140, 0], "tag": { "shape": "BUV-9999" } },
+    "$VALVE$00000333": { "class": "gate", "label": "闸阀", "color": [255, 220, 0] },
+    "$VALVE$00000296": { "class": "block-valve", "label": "截断阀", "color": [170, 110, 40] },
+    "$VALVE$00000501": { "class": "flow-indicator", "label": "水流指示器", "color": [170, 0, 255] },
+    "$VALVE$00000315": { "class": "drain-valve", "label": "排水阀", "color": [140, 100, 60] },
+    "$Attachment$00000086": { "class": "hydrant", "label": "消火栓", "color": [255, 0, 170] },
+    "$Attachment$00000194": { "class": "foam-port", "label": "泡沫接口", "color": [200, 90, 160] },
+    "$Standard$00000144": { "class": "vent", "label": "放空短管", "color": [0, 200, 200] },
+    "$Standard$00000080": { "class": "funnel", "label": "漏斗", "color": [90, 160, 90] },
+    "$Standard$00000114": { "class": "gauge", "label": "压力表", "color": [60, 180, 120] },
+    "$TwtSys$00000132": { "class": "sheet-ref", "label": "图幅连接符", "color": [120, 140, 180], "tag": { "shape": "DWG-*" } },
+    "$TwtSys$00000147": { "class": "drain-node", "label": "排水节点", "color": [100, 160, 200] },
+    "11111": { "class": "loading-arm", "label": "鹤管总成", "color": [220, 120, 60] },
+    "RC": { "class": "rc", "label": "RC", "color": [150, 150, 150] }
+  },
+  "layer_prefixes": [
+    { "prefix": "EVALVE_", "class": "evalve-unknown", "label": "未知电动阀" },
+    { "prefix": "VALVE_", "class": "valve-unknown", "label": "未知阀" },
+    { "prefix": "EQUIP_", "class": "equip-unknown", "label": "未知设备符" },
+    { "prefix": "PIPE-", "class": "pipe-unknown", "label": "未知管件" }
+  ],
+  "circles": [
+    { "class": "tank", "label": "储罐", "color": [0, 120, 255], "radius_mm": [8.0, 60.0], "tag": { "shape": "T?-9999", "inner": true } },
+    { "class": "bubble", "label": "仪表圈", "color": [0, 200, 0], "radius_mm": [3.4, 4.2], "tag": { "inner": true } },
+    { "class": "s-point", "label": "S点", "color": [120, 200, 255], "radius_mm": [1.8, 2.4], "tag": { "inner": true } }
+  ],
+  "panel_bubble": { "from": "bubble", "class": "bubble-panel", "label": "盘装仪表", "color": [0, 120, 60], "min_lines": 3 }
+}

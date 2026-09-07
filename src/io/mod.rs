@@ -9,6 +9,7 @@ pub mod edit_lock;
 pub mod obj;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pid;
+pub mod pid_legend;
 
 /// XDATA application name under which a `.pid` import publishes an entity's
 /// P&ID identity (`class=…`, `label=…`, … string pairs). Lives outside the
