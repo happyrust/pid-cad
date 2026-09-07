@@ -1287,6 +1287,50 @@ fn dump_the_corpus_for_a_human() {
     println!("wrote {}", dir.display());
 }
 
+// Rasterise SVGs this crate wrote, for the eyeball pass §8's third layer asks
+// for on real drawings: `OCS_SVG_PREVIEW=<dir or file> cargo test --lib
+// preview_written_svgs -- --ignored --nocapture`.
+#[test]
+#[ignore = "renders the SVGs named by OCS_SVG_PREVIEW to PNGs beside them"]
+fn preview_written_svgs() {
+    let Ok(target) = std::env::var("OCS_SVG_PREVIEW") else {
+        println!("set OCS_SVG_PREVIEW to a .svg file or a directory of them");
+        return;
+    };
+    let target = std::path::PathBuf::from(target);
+    let files: Vec<std::path::PathBuf> = if target.is_dir() {
+        let mut files: Vec<_> = std::fs::read_dir(&target)
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                (path.extension().is_some_and(|e| e == "svg")).then_some(path)
+            })
+            .collect();
+        files.sort();
+        files
+    } else {
+        vec![target]
+    };
+    let dpi: f32 = std::env::var("OCS_SVG_PREVIEW_DPI")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(150.0);
+    for file in files {
+        let svg = std::fs::read_to_string(&file).unwrap();
+        let png = file.with_extension("png");
+        let pixmap = render(&svg, dpi / 25.4);
+        pixmap.save_png(&png).unwrap();
+        println!(
+            "{} → {} ({}×{} px, svg {} KiB)",
+            file.file_name().unwrap().to_string_lossy(),
+            png.file_name().unwrap().to_string_lossy(),
+            pixmap.width(),
+            pixmap.height(),
+            svg.len() / 1024
+        );
+    }
+}
+
 #[test]
 fn a_hundred_millimetre_line_is_a_hundred_millimetres_from_the_top() {
     // The one test that would catch a wrong unit, a wrong page origin or a
