@@ -1098,6 +1098,7 @@ fn extents(bbox: BBox, axis: Axis) -> ((f64, f64), (f64, f64)) {
 /// An axis-aligned straight stroke of the sheet, whether or not it is short
 /// enough to be part of a symbol; `prim` indexes it in the loose strokes
 /// when it is, `pipe` in the pipe-length strokes kept for the second pass.
+#[derive(Clone, Copy)]
 struct SheetRun {
     run: AxisRun,
     prim: Option<usize>,
@@ -1510,7 +1511,8 @@ fn point_on_prim(p: Point, q: &Prim, eps: f64) -> bool {
 /// strokes (`own`) enters the part from outside: it lies within the part's
 /// width across the axis and reaches either of its edges along the axis, or
 /// passes straight through. That is a pipe (or an instrument leader) drawn
-/// into the symbol.
+/// into the symbol. `runs` are the runs that can do so -- see
+/// [`runs_for_group`].
 fn threaded(
     runs: &[SheetRun],
     own: impl Fn(usize) -> bool,
@@ -1529,13 +1531,30 @@ fn threaded(
     })
 }
 
+/// The runs that can enter a component's parts from outside and so keep a
+/// bridge from being cut: the pipe runs (no stroke of the pass) and the
+/// component's own strokes -- the stubs trimmed off it are pipe too. Another
+/// symbol's stroke is neither: the stem arrow drawn 0.07 mm off a gate valve
+/// has a 0.2 mm base that would otherwise "enter" the valve and hold the
+/// three valves of SP02-05's relief branch together. Empty when the
+/// component is too small for [`split_at_bridges`] to cut at all.
+fn runs_for_group(runs: &[SheetRun], group: &[usize], min_strokes: usize) -> Vec<SheetRun> {
+    if min_strokes == 0 || group.len() < 2 * min_strokes + 1 {
+        return Vec::new();
+    }
+    runs.iter()
+        .filter(|r| r.prim.is_none_or(|i| group.contains(&i)))
+        .copied()
+        .collect()
+}
+
 /// Cut a component where a piece of pipe joins two symbols: a straight
 /// axis-aligned stroke whose removal leaves at least two parts of
 /// `min_strokes` strokes and some width and height, running through the
 /// body of each part rather than along an edge -- unless the pipe enters one
 /// of those parts the other way, in which case the stroke is a stem or a
 /// branch and belongs to the symbol. The pipe piece is dropped and each part
-/// is cut again the same way.
+/// is cut again the same way. `runs` as [`runs_for_group`] gives them.
 fn split_at_bridges(
     prims: &[Prim],
     runs: &[SheetRun],
@@ -1894,7 +1913,8 @@ fn exploded_symbols(
     };
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for group in components(prims, eps) {
-        for part in split_at_bridges(prims, &loose.runs, trim(group), min_strokes, eps) {
+        let runs = runs_for_group(&loose.runs, &group, min_strokes);
+        for part in split_at_bridges(prims, &runs, trim(group), min_strokes, eps) {
             groups.push(trim(part));
         }
     }
@@ -2310,17 +2330,23 @@ fn recovered_symbols(
     if prims.len() == n_free {
         return Vec::new();
     }
+    // The sheet's runs in this pass's numbering: a symbol's stroke is gone
+    // (it can no more thread a component here than in the first pass), a
+    // pipe-length run is a stroke of the pass when framed and pipe when not.
     let runs: Vec<SheetRun> = loose
         .runs
         .iter()
-        .map(|r| SheetRun {
-            run: r.run,
-            prim: r
-                .prim
-                .and_then(|i| of_prim.get(&i))
-                .or_else(|| r.pipe.and_then(|i| of_pipe.get(&i)))
-                .copied(),
-            pipe: None,
+        .filter_map(|r| {
+            let prim = match (r.prim, r.pipe) {
+                (Some(i), _) => Some(*of_prim.get(&i)?),
+                (None, Some(p)) => of_pipe.get(&p).copied(),
+                (None, None) => None,
+            };
+            Some(SheetRun {
+                run: r.run,
+                prim,
+                pipe: None,
+            })
         })
         .collect();
     let min_strokes = shape_rules.split_min_strokes;
@@ -2333,6 +2359,7 @@ fn recovered_symbols(
     };
     let mut comps: Vec<Component> = Vec::new();
     for group in components(&prims, eps) {
+        let runs = runs_for_group(&runs, &group, min_strokes);
         for part in split_at_bridges(&prims, &runs, trim(group), min_strokes, eps) {
             let idxs = trim(part);
             let held_runs = idxs.iter().filter(|&&i| i >= n_free).count();

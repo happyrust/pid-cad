@@ -681,6 +681,74 @@ fn pipe_is_cut_away_from_exploded_symbols_and_a_stem_is_not() {
     );
 }
 
+/// Two bowtie valves joined by 2 mm of pipe, GV0301 and GV0302, with a small
+/// arrow -- another symbol, four strokes of its own -- drawn under the second
+/// valve, its shaft ending 0.07 mm short of the valve's lower edge, the way
+/// SP02-05 draws a stem arrow beside the lower gate of each relief branch.
+/// Only pipe, or a stub trimmed off the component itself, entering a part
+/// from the side keeps the pipe between two symbols from being cut; the
+/// arrow's shaft is neither, so the two valves come apart and each takes
+/// its tag.
+#[test]
+fn another_symbols_stroke_at_the_edge_does_not_hold_two_valves_together() {
+    let mut doc = CadDocument::new();
+    doc.add_entity(layered(line(0.0, 0.0, 420.0, 0.0), "A"))
+        .unwrap();
+    doc.add_entity(layered(line(0.0, 0.0, 0.0, 297.0), "A"))
+        .unwrap();
+    doc.add_entity(layered(line(10.0, 20.0, 18.8, 20.0), "0"))
+        .unwrap();
+    bowtie(&mut doc, 20.0, 20.0, |(x, y)| (x, y));
+    doc.add_entity(layered(line(21.2, 20.0, 23.2, 20.0), "0"))
+        .unwrap();
+    bowtie(&mut doc, 24.4, 20.0, |(x, y)| (x, y));
+    doc.add_entity(layered(line(25.6, 20.0, 40.0, 20.0), "0"))
+        .unwrap();
+    doc.add_entity(layered(text("GV0301", 18.0, 22.3), "DEVICE"))
+        .unwrap();
+    doc.add_entity(layered(text("GV0302", 25.0, 22.3), "DEVICE"))
+        .unwrap();
+    for (a, b) in [
+        ((24.4, 18.0), (24.4, 19.33)),
+        ((24.4, 18.0), (24.2, 18.6)),
+        ((24.4, 18.0), (24.6, 18.6)),
+        ((24.2, 18.6), (24.6, 18.6)),
+    ] {
+        doc.add_entity(layered(line(a.0, a.1, b.0, b.1), "0"))
+            .unwrap();
+    }
+
+    let rules = Rules::builtin();
+    let recognition = pid_legend::recognise(&doc, &rules);
+    let mut gates: Vec<&pid_legend::Recognized> = recognition
+        .symbols
+        .iter()
+        .filter(|s| s.class == "gate")
+        .collect();
+    gates.sort_by(|a, b| a.at.0.total_cmp(&b.at.0));
+    assert_eq!(
+        gates.iter().map(|s| s.tag.as_deref()).collect::<Vec<_>>(),
+        [Some("GV0301"), Some("GV0302")],
+        "{:?}",
+        recognition.symbols
+    );
+    for (s, x0, x1) in [(gates[0], 18.8, 21.2), (gates[1], 23.2, 25.6)] {
+        assert!(
+            (s.bbox.0 - x0).abs() < 0.01
+                && (s.bbox.2 - x1).abs() < 0.01
+                && (s.bbox.1 - 19.4).abs() < 0.01,
+            "each valve boxed alone, without the pipe or the arrow: {:?}",
+            s.bbox
+        );
+        assert!(s.source.contains("(4 strokes)"), "{}", s.source);
+    }
+    assert!(
+        recognition.orphan_tags.is_empty(),
+        "{:?}",
+        recognition.orphan_tags
+    );
+}
+
 /// A flame arrester the way the loading-island sheets draw one, to their
 /// measure: a frame of two 3.18 mm uprights 1.81 mm apart and two 2.72 mm
 /// bars across the top and bottom, sticking out 0.45 mm each side, with two
@@ -1037,12 +1105,18 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
     // pipe-length strokes and are found for their tags by the second pass
     // (`second_pass` names the classes all of whose symbols must be); SP02-07's
     // five flow indicators are ordinary first-pass claims.
+    // SP02-05's ten relief branches are each two gates and a relief valve
+    // drawn touching; all ten come apart (five used to be held together by
+    // the stem arrow beside the lower gate), so no symbol there carries more
+    // than one tag.
     for (
         file,
         bubbles,
         ball_valves,
         check_valves,
         evalves,
+        gates,
+        relief_valves,
         reducers,
         arresters,
         indicators,
@@ -1054,6 +1128,8 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
             25,
             10,
             4,
+            10,
+            0,
             0,
             2,
             5,
@@ -1065,6 +1141,8 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
             0,
             5,
             27,
+            20,
+            10,
             5,
             0,
             5,
@@ -1092,6 +1170,8 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
             ("ball-valve", ball_valves),
             ("check-valve", check_valves),
             ("evalve", evalves),
+            ("gate", gates),
+            ("relief-valve", relief_valves),
             ("flame-arrester", arresters),
             ("flow-indicator", indicators),
         ] {
@@ -1102,6 +1182,23 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
                 "{file}: every {class} tagged"
             );
         }
+        let joined: Vec<&str> = recognition
+            .symbols
+            .iter()
+            .filter_map(|s| s.tag.as_deref())
+            .filter(|t| t.contains(" + "))
+            .collect();
+        assert!(
+            joined.is_empty(),
+            "{file}: symbols still joined: {joined:?}"
+        );
+        let gate_tags = tags_of(&recognition, "gate");
+        let distinct: BTreeSet<&str> = gate_tags.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            gate_tags.len(),
+            "{file}: no GV tag used twice"
+        );
         for s in &recognition.symbols {
             if second_pass.contains(&s.class.as_str()) {
                 assert!(s.source.contains("second pass"), "{file}: {}", s.source);
