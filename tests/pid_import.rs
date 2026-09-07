@@ -1359,6 +1359,134 @@ fn a_placement_without_a_library_body_draws_the_body_the_drawing_carries() {
     );
 }
 
+/// The fixture imported from a fresh temp directory, where the walk up from
+/// the drawing finds no symbol library. `None` when the fixture is absent.
+fn import_without_library(name: &str) -> Option<CadDocument> {
+    let source = fixture(name)?;
+    let dir = std::env::temp_dir().join(format!(
+        "ocs-pid-no-library-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let copy = dir.join(name);
+    std::fs::copy(&source, &copy).expect("copy fixture");
+    let doc =
+        OpenCADStudio::io::load_file(&copy).unwrap_or_else(|error| panic!("load copy: {error}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    Some(doc)
+}
+
+/// Whether an open run turns the same way at every vertex: what a sampled
+/// convex curve does and a hand-drawn outline does not.
+fn bends_one_way(points: &[(f64, f64)]) -> bool {
+    let turns: Vec<f64> = points
+        .windows(3)
+        .map(|w| {
+            let (ax, ay) = (w[1].0 - w[0].0, w[1].1 - w[0].1);
+            let (bx, by) = (w[2].0 - w[1].0, w[2].1 - w[1].1);
+            ax * by - ay * bx
+        })
+        .collect();
+    !turns.is_empty()
+        && (turns.iter().all(|turn| *turn > 0.0) || turns.iter().all(|turn| *turn < 0.0))
+}
+
+/// The curved lip of `arrester breather valve(RD)` is a B-spline record, and
+/// it reaches the drawing by both routes: the `.sym` reader carries the curve
+/// the library body holds, and the drawing's own cached copy of that body
+/// holds the same curve. Either way it draws as one open polyline of
+/// seventeen vertices -- two knot spans of eight segments, plus the end --
+/// bending one way for its whole length and spanning about a millimetre and
+/// a half, and the two routes put every vertex in the same place. DWG-0202
+/// places the valve once, so there is one such run on `PID-SYMBOL` and no
+/// other.
+///
+/// Before the two readers carried the record, both routes stepped over it
+/// and the valve drew without its lip. Skips when `PID_SYMBOL_LIBRARY` is
+/// set, since the library-less import would not be.
+#[test]
+fn a_symbols_bspline_lip_reaches_the_drawing_from_either_body() {
+    if std::env::var_os("PID_SYMBOL_LIBRARY").is_some() {
+        eprintln!("skipping: PID_SYMBOL_LIBRARY is set, so no import is library-less");
+        return;
+    }
+    let Some(with_library) = import("DWG-0202GP06-01.pid") else {
+        return;
+    };
+    let Some(without_library) = import_without_library("DWG-0202GP06-01.pid") else {
+        return;
+    };
+
+    // The lip at scale one is 1.04 x 1.59mm; a run this small, this smooth
+    // and this finely divided is the sampled curve and nothing else on the
+    // symbol layer.
+    const LIP_REACH_MM: f64 = 3.0;
+    let lips = |doc: &CadDocument| -> Vec<Vec<(f64, f64)>> {
+        on_layer(doc, "PID-SYMBOL")
+            .filter_map(|entity| match entity {
+                EntityType::LwPolyline(polyline)
+                    if !polyline.is_closed && polyline.vertices.len() == 17 =>
+                {
+                    Some(
+                        polyline
+                            .vertices
+                            .iter()
+                            .map(|v| (v.location.x, v.location.y))
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                _ => None,
+            })
+            .filter(|points| {
+                let (mut min_x, mut min_y, mut max_x, mut max_y) =
+                    (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+                for (x, y) in points {
+                    min_x = min_x.min(*x);
+                    min_y = min_y.min(*y);
+                    max_x = max_x.max(*x);
+                    max_y = max_y.max(*y);
+                }
+                max_x - min_x < LIP_REACH_MM && max_y - min_y < LIP_REACH_MM
+            })
+            .filter(|points| bends_one_way(points))
+            .collect()
+    };
+    let library_lips = lips(&with_library);
+    let embedded_lips = lips(&without_library);
+    assert_eq!(
+        library_lips.len(),
+        1,
+        "the library body draws the valve's lip once: {library_lips:?}"
+    );
+    assert_eq!(
+        embedded_lips.len(),
+        1,
+        "the drawing's own body draws the valve's lip once: {embedded_lips:?}"
+    );
+    for (index, (from_library, from_cache)) in
+        library_lips[0].iter().zip(&embedded_lips[0]).enumerate()
+    {
+        assert!(
+            (from_library.0 - from_cache.0).abs() < 1e-6
+                && (from_library.1 - from_cache.1).abs() < 1e-6,
+            "vertex {index}: library {from_library:?} vs cache {from_cache:?}"
+        );
+    }
+    // A run of about the lip's size, not a degenerate one.
+    let reach = library_lips[0]
+        .windows(2)
+        .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
+        .sum::<f64>();
+    assert!(
+        (1.5..3.0).contains(&reach),
+        "the lip's sampled length is {reach:.3}mm; the curve is about 2mm long"
+    );
+}
+
 /// Every straight run an entity draws, as endpoint pairs.
 fn segments_of(entity: &EntityType) -> Vec<((f64, f64), (f64, f64))> {
     match entity {

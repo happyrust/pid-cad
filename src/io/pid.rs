@@ -2131,6 +2131,35 @@ fn shape_primitive(primitive: &SymbolPrimitive, at: &Placement<'_>) -> Option<En
             polyline.common.layer = LAYER_SYMBOL.to_string();
             Some(EntityType::LwPolyline(polyline))
         }
+        SymbolPrimitive::BSpline {
+            poles,
+            weights,
+            knots,
+        } => {
+            // Sampled in the symbol's own space and placed point by point, so
+            // the placement's rotation, scale and mirror fall out of the same
+            // `apply` a polyline's vertices go through. The segment count is
+            // pid-parse's own, so the curve looks the same here as it does
+            // when a sheet carries one directly.
+            let points: Vec<Vector2> = pid_parse::bspline::sample(
+                poles,
+                weights,
+                knots,
+                pid_parse::bspline::SEGMENTS_PER_SPAN,
+            )
+            .into_iter()
+            .map(|(x, y)| {
+                let placed = at.apply(x, y);
+                Vector2::new(placed.x, placed.y)
+            })
+            .collect();
+            if points.len() < 2 {
+                return None;
+            }
+            let mut curve = LwPolyline::from_points(points);
+            curve.common.layer = LAYER_SYMBOL.to_string();
+            Some(EntityType::LwPolyline(curve))
+        }
         SymbolPrimitive::Text { text, at: origin } => {
             let value = text.trim();
             if !carries_a_label(value) {
