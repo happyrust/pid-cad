@@ -1,7 +1,8 @@
 # 开发计划：DXF → SVG 导出（v2，已经 oracle 复核）
 
 > 日期：2026-09-07
-> 状态：**v2 已批准（2026-09-07 16:00「直接开工，同意了」），P0 已实施**，记录见 §11。
+> 状态：**v2 已批准（2026-09-07 16:00「直接开工，同意了」），P0 已实施**（记录见 §11），
+> **P1 已实施**（记录见 §12）。
 > v1 于同日写成；v2 是把 oracle（GPT-5.5 Pro，会话
 > `ocs-dxf-svg-plan-review-2`，18 分钟）的十六条评审意见逐条并进来之后的版本，纪要见 §9。
 > 结论先说：**今天不支持**。缺的表面上是「一个 SVG 后端」，但 v1 把「PDF 后端的入参」误认成
@@ -539,3 +540,63 @@ wipeout 顺序等故障，证明判据真能检出。**阈值必须同时「不�
 **P0 出口条件对照**：新 `PdfSink` 与旧实现操作级回归通过 ✓；字节一致性的适用条件写清（上面）✓；
 没有生产遍历副本 ✓（`legacy_reference` 是 test-only）。R4 里那个**组间 cap/join 缓存**的现有问题在抽取里
 原样保留（两边一致），单独修。
+
+## 12. P1 实施记录（2026-09-07）
+
+**做了什么**（一个提交，PDF 侧仍逐位不变）：
+
+| 文件 | 内容 |
+|---|---|
+| `src/io/svg_export.rs`（新） | `SvgSink`（`PlotOp` → 元素 + 表现属性）、`write_svg_page` / `svg_page_to_string`、`SvgOptions` / `SvgError` / `SvgReport`、R5 的三角网提边界 |
+| `src/io/svg_export/tests.rs`（新，test-only） | 第二层与第三层验收，见下 |
+| `src/io/plot_emit.rs` | 新增 `PlotOp::FillMesh { tris }`：**一个字形 / 一个 wire 填充是一个形状**，`emit_text` 与 `emit_wire_fills` 各发一条 |
+| `src/io/pdf_export.rs` | `PdfSink` 把 `FillMesh` **按原顺序展开成一三角一个 `DrawPolygon`**，PDF 的 `Op` 流一位不动；测试语料搬走后只留 PDF 专有的护栏 |
+| `src/io/plot_corpus.rs`（新，test-only） | 22 个用例的语料从 `pdf_export::tests` 搬出来，PDF 与 SVG 两侧共用——为一边加的用例自动护住另一边 |
+
+**坐标（D1/D2 落地）**：外层 `matrix(1/k 0 0 −1/k 0 H)`（k = `GEOMETRY_MM_TO_PT`）+ 内层原 CTM 两层组；
+**根 mm、内部无单位**，`viewBox` 就是纸面 mm，所以 `stroke-width="0.25"` 正好是 0.25 mm 纸面。
+内层坐标仍是 emitter 的**点**——它们在 F 里跟几何一起缩放，和 PDF 的 CTM 一样，所以笔宽 / dash 不用换算。
+小数位按比例自适应：`½·10⁻ᵈ · s · pt→mm ≤ 0.001 mm`，下限 4 位、上限 9 位（D2 的「大比例要加位数」）。
+裁剪 `<clipPath clipPathUnits="userSpaceOnUse">` 放 `<defs>`，由 CTM 组**内**的内容组引用；页面另有
+`page-clip`（等价 PDF 的 media box），白底在内容裁剪之外。cap/join/miterlimit=10 挂页组继承，只有 CTB
+覆盖时才写在叶子上；multiply 用 `style="mix-blend-mode:multiply"` 挂**叶子**，页组 `isolation:isolate`
+（且只在真用到时才写）。图章 `BuiltinText` **显式报错**。
+
+**R5**：`FillMesh` 先提边界——按顶点位模式配对有向边，内部边成对抵消，剩下的串成环（外轮廓与孔各一环、
+保持原绕向，nonzero 填充孔就还是孔）。**不是干净流形就不猜**（同向重边、顶点出度 > 1 的夹点 / T 接点、
+退化三角形都判失败），退回「同一个 `<path>` 里一三角一子路径」——仍是一次栅格化，接缝一样没有，只是
+路径大一点。不用同色细描边、不靠 epsilon 焊接：一个字形的三角全过同一个仿射映射，共享顶点的 f32
+**逐位相同**，所以位比较是可靠的身份判据。
+
+**验收**：`cargo test --lib io::svg_export` **18/18**（含 1 个 `#[ignore]` 的人工看图导出）。
+
+- **第二层（主）`the_written_svg_draws_what_the_emitter_asked_for`**：22 页语料每页写出 SVG，再用
+  **usvg 0.45.1 解析写出的文件**（第三方解析器，不是本模块），把 transform / clip / 继承样式解析回
+  纸面 mm，与 `RecordingSink` 的操作流逐个形状比：几何、填充规则、笔宽、dash、cap/join、颜色、
+  绘制顺序、multiply、裁剪层数。容差 0.002 mm；**离纸面很远的点按 f32 精度放宽**（语料里有故意放在
+  UTM 世界原点、落在纸外 500 m 的图元，SVG 消费者用 f32，那儿的精度是格式给的，不是写入器给的）。
+- **故障注入 `the_comparison_catches_a_broken_file`**：删一个 `<path>`、挪一个点、去掉
+  `fill-rule="evenodd"`、把页矩阵的 Y 翻转符号改回去、笔宽乘 9 —— 五种都必须被上面那条判据抓到。
+- **第三层（栅格，resvg 0.45.1）**：100 mm 标尺（同时锁单位、页原点、Y 方向：CAD y=160 在 210 mm 纸上
+  离顶 50 mm）；wipeout 真的遮住底下的墨；两三角方块的**对角线上最淡的像素 > 0.9 墨**（分开填充时那里
+  会留一条抗锯齿缝）；缺字用例证明 §8 那句话——删掉一个字形，全页差异率 < 0.1 % 但结构比较直接红、
+  局部差异率高出两个数量级。
+- 其它：序列化契约（XML 声明 / `xmlns` / mm 尺寸 / 无 DTD / 无脚本 / 无外部引用 / 无 `<text>` /
+  描边路径显式 `fill="none"` / id 唯一）；数字格式（无指数、`-0` 归一、去尾零）；不可能的页面
+  （零高、负比例、NaN 裁剪、无穷坐标）显式失败；`mesh_outline` 的单元测试（两三角方块、方环的孔
+  保持反向绕、领结退回兜底）。
+- **PDF 没退化**：`cargo test --lib io::pdf_export` 9/9，`FillMesh` 展开后与冻结旧 exporter 仍逐 op 逐位相同、
+  存盘字节除 `/ID` 外相同。**wasm**：`cargo check --lib --target wasm32-unknown-unknown` 通过，
+  `svg_export` 进 web 构建（不碰 printpdf、不碰文件系统）。rustfmt 0 diff；clippy 对两个新文件 0 告警。
+  全库 `cargo test --lib` 655 过 / 1 失败——`free_text_entry_tests::normal_commands_still_uppercase_and_submit_on_space`，
+  P0 那趟就红着，在 `src/app/update/mod.rs`，与本改动无关。
+
+**P1 出口条件对照**：单页语义矩阵通过 ✓；实际 SVG 独立解析通过 ✓；不支持的选项显式失败 ✓（图章）；
+重点栅格比较 **部分** ✓——做了受控栅格与故障注入，但**没有做 PDF ↔ SVG 的栅格对比**：那需要一个锁定版
+PDF 栅格引擎（pdftoppm / mutool / pdfium），这棵树里没有，装它是另一个决定。§8 第三层的这一半留给 P3，
+连同 11 张真图的人工抽查（`#[ignore]` 的 `dump_the_corpus_for_a_human` 是那个抽查的入口）。
+
+**留给后面的**：body 目前**先在内存里拼**再写（`<defs>` 要在引用之前），大页面这是实打实的内存代价，
+R3 的体量工作里再解（两趟，或对能接受的消费者把 defs 放最后）；每个叶子都写全属性，样式复用没做；
+字形边界没做缓存（一个字形出现 N 次就提 N 次边界）；浏览器 / Inkscape / Illustrator / librsvg 的实测
+没做（§8「兼容性」那一行还欠着）。

@@ -1,0 +1,1168 @@
+// Acceptance for the SVG backend (§8 of docs/plans/2026-09-07-dxf-to-svg-export.md).
+//
+// The second layer is the one that matters: every page of the shared corpus is
+// written to SVG, the *written file* is parsed back by usvg — a third-party
+// parser, not this module — and every shape it resolves is compared, in sheet
+// millimetres, against what the emitter said to draw. Comparing the two sinks'
+// operation streams would only prove they were handed the same input; this
+// compares the artefact.
+//
+// The third layer rasterises with resvg and checks a handful of things a
+// structural comparison cannot see: that a 100 mm line is 100 mm long and the
+// right way up, that a wipeout masks, that a mesh fill has no anti-aliasing
+// seam. Both layers carry fault injection, because a check that never fails is
+// not a check: the mutations below (delete a path, move a point, drop the
+// even-odd rule, flip the page matrix, remove a glyph) must all be caught.
+//
+// There is no PDF-versus-SVG raster comparison here. That needs a pinned PDF
+// rasteriser, which this tree does not have; §8's third layer stays open for
+// P3 and the plan says so.
+
+use super::*;
+use crate::io::plot_corpus::{corpus, hatch, square, wire, Case};
+use crate::io::plot_emit::{PlotAssets, RecordingSink};
+use crate::scene::model::hatch_model::HatchPattern;
+use crate::scene::WireModel;
+use resvg::{tiny_skia, usvg};
+
+// ── Affine helpers ────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug)]
+struct Mat {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    e: f64,
+    f: f64,
+}
+
+impl Mat {
+    const ID: Mat = Mat {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        e: 0.0,
+        f: 0.0,
+    };
+
+    /// `self` applied after `inner`.
+    fn concat(self, inner: Mat) -> Mat {
+        Mat {
+            a: self.a * inner.a + self.c * inner.b,
+            b: self.b * inner.a + self.d * inner.b,
+            c: self.a * inner.c + self.c * inner.d,
+            d: self.b * inner.c + self.d * inner.d,
+            e: self.a * inner.e + self.c * inner.f + self.e,
+            f: self.b * inner.e + self.d * inner.f + self.f,
+        }
+    }
+
+    fn apply(self, x: f64, y: f64) -> [f64; 2] {
+        [
+            self.a * x + self.c * y + self.e,
+            self.b * x + self.d * y + self.f,
+        ]
+    }
+
+    fn scale(self) -> f64 {
+        (self.a * self.d - self.b * self.c).abs().sqrt()
+    }
+
+    fn of(t: tiny_skia::Transform) -> Mat {
+        Mat {
+            a: t.sx as f64,
+            b: t.ky as f64,
+            c: t.kx as f64,
+            d: t.sy as f64,
+            e: t.tx as f64,
+            f: t.ty as f64,
+        }
+    }
+}
+
+// ── One drawn thing, in sheet millimetres ─────────────────────────────────
+
+#[derive(Clone, Debug, PartialEq)]
+enum Paint {
+    Fill { color: [u8; 3], rule: FillRule },
+    Stroke { color: [u8; 3] },
+}
+
+#[derive(Clone, Debug)]
+struct Shape {
+    paint: Paint,
+    rings: Vec<Vec<[f64; 2]>>,
+    /// Stroke width in mm of paper.
+    width_mm: f64,
+    /// Dash run lengths in mm of paper.
+    dash_mm: Vec<f64>,
+    cap: LineCap,
+    join: LineJoin,
+    multiply: bool,
+    /// Clip paths in force, excluding the page clip.
+    clips: usize,
+    /// A mesh fill is compared by area and extent, not ring for ring: the
+    /// writer is free to collapse the triangles into their outline, which is
+    /// the whole point of `FillMesh`, so the rings legitimately differ.
+    mesh: bool,
+}
+
+impl Shape {
+    fn area(&self) -> f64 {
+        self.rings
+            .iter()
+            .map(|ring| {
+                let mut sum = 0.0;
+                for i in 0..ring.len() {
+                    let p = ring[i];
+                    let q = ring[(i + 1) % ring.len()];
+                    sum += p[0] * q[1] - q[0] * p[1];
+                }
+                sum * 0.5
+            })
+            .sum()
+    }
+
+    fn bbox(&self) -> [f64; 4] {
+        let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+        for p in self.rings.iter().flatten() {
+            b[0] = b[0].min(p[0]);
+            b[1] = b[1].min(p[1]);
+            b[2] = b[2].max(p[0]);
+            b[3] = b[3].max(p[1]);
+        }
+        b
+    }
+}
+
+// ── Expected: the emitter's own operation stream, resolved to paper ───────
+
+#[derive(Clone)]
+struct ExpectedState {
+    ctm: Mat,
+    stroke: [f32; 3],
+    fill: [f32; 3],
+    width_pt: f32,
+    cap: LineCap,
+    join: LineJoin,
+    dash: Vec<i64>,
+    blend: PlotBlend,
+    clips: usize,
+}
+
+fn record(page: &PlotPage<'_>) -> Vec<PlotOp> {
+    let mut sink = RecordingSink::default();
+    match crate::io::plot_emit::emit_plot_content(page, &PlotAssets::default(), &mut sink) {
+        Ok(()) => {}
+        Err(never) => match never {},
+    }
+    sink.ops
+}
+
+/// Where the operation stream says the ink goes, in sheet mm with Y down —
+/// the same space the SVG root user units live in.
+fn expected_shapes(ops: &[PlotOp], paper_h: f32) -> Vec<Shape> {
+    let flip = |p: [f64; 2]| [p[0] * PT_TO_MM, paper_h as f64 - p[1] * PT_TO_MM];
+    let mut state = ExpectedState {
+        ctm: Mat::ID,
+        stroke: [0.0; 3],
+        fill: [0.0; 3],
+        width_pt: 1.0,
+        cap: LineCap::Round,
+        join: LineJoin::Round,
+        dash: Vec::new(),
+        blend: PlotBlend::Normal,
+        clips: 0,
+    };
+    let mut stack: Vec<ExpectedState> = Vec::new();
+    let mut shapes = Vec::new();
+    for op in ops {
+        let paper = |points: &[PlotPoint], state: &ExpectedState| -> Vec<[f64; 2]> {
+            points
+                .iter()
+                .map(|p| flip(state.ctm.apply(p.x as f64, p.y as f64)))
+                .collect()
+        };
+        match op {
+            PlotOp::Save => stack.push(state.clone()),
+            PlotOp::Restore => state = stack.pop().expect("balanced graphics state"),
+            PlotOp::Concat([a, b, c, d, e, f]) => {
+                state.ctm = state.ctm.concat(Mat {
+                    a: *a as f64,
+                    b: *b as f64,
+                    c: *c as f64,
+                    d: *d as f64,
+                    e: *e as f64,
+                    f: *f as f64,
+                })
+            }
+            PlotOp::Blend(blend) => state.blend = *blend,
+            PlotOp::LineCap(cap) => state.cap = *cap,
+            PlotOp::LineJoin(join) => state.join = *join,
+            PlotOp::StrokeColor(c) => state.stroke = *c,
+            PlotOp::FillColor(c) => state.fill = *c,
+            PlotOp::StrokeWidthPt(w) => state.width_pt = *w,
+            PlotOp::Dash { lengths, .. } => state.dash = lengths.clone(),
+            PlotOp::Clip { .. } => state.clips += 1,
+            PlotOp::FillRect {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let corners = [
+                    PlotPoint { x: *x, y: *y },
+                    PlotPoint {
+                        x: x + width,
+                        y: *y,
+                    },
+                    PlotPoint {
+                        x: x + width,
+                        y: y + height,
+                    },
+                    PlotPoint {
+                        x: *x,
+                        y: y + height,
+                    },
+                ];
+                shapes.push(fill_shape(&state, vec![paper(&corners, &state)], false));
+            }
+            PlotOp::Stroke { points, .. } => {
+                let scale = state.ctm.scale();
+                shapes.push(Shape {
+                    paint: Paint::Stroke {
+                        color: channels(state.stroke),
+                    },
+                    rings: vec![paper(points, &state)],
+                    width_mm: state.width_pt as f64 * scale * PT_TO_MM,
+                    dash_mm: state
+                        .dash
+                        .iter()
+                        .map(|l| *l as f64 * scale * PT_TO_MM)
+                        .collect(),
+                    cap: state.cap,
+                    join: state.join,
+                    multiply: state.blend == PlotBlend::Multiply,
+                    clips: state.clips,
+                    mesh: false,
+                });
+            }
+            PlotOp::Fill { rings, rule } => {
+                let rings = rings.iter().map(|r| paper(r, &state)).collect();
+                let mut shape = fill_shape(&state, rings, false);
+                shape.paint = Paint::Fill {
+                    color: channels(state.fill),
+                    rule: *rule,
+                };
+                shapes.push(shape);
+            }
+            PlotOp::FillMesh { tris } => {
+                let rings = tris.iter().map(|t| paper(t, &state)).collect();
+                shapes.push(fill_shape(&state, rings, true));
+            }
+            PlotOp::BuiltinText { .. } => unreachable!("the corpus stamp cases are excluded"),
+        }
+    }
+    shapes
+}
+
+fn fill_shape(state: &ExpectedState, rings: Vec<Vec<[f64; 2]>>, mesh: bool) -> Shape {
+    Shape {
+        paint: Paint::Fill {
+            color: channels(state.fill),
+            rule: FillRule::NonZero,
+        },
+        rings,
+        width_mm: 0.0,
+        dash_mm: Vec::new(),
+        cap: state.cap,
+        join: state.join,
+        multiply: state.blend == PlotBlend::Multiply,
+        clips: state.clips,
+        mesh,
+    }
+}
+
+// ── Actual: the written file, parsed by usvg ──────────────────────────────
+
+fn parse(svg: &str) -> usvg::Tree {
+    usvg::Tree::from_str(svg, &usvg::Options::default()).expect("the document parses")
+}
+
+fn actual_shapes(tree: &usvg::Tree, paper_w: f32) -> Vec<Shape> {
+    // usvg resolves the document to CSS pixels: `width="297mm"` becomes
+    // 297·96/25.4 px and the viewBox scale rides in every node's absolute
+    // transform. Scale back, so the shapes come out in the document's own user
+    // units — which, this being the point of D2, are millimetres of paper.
+    let factor = paper_w as f64 / tree.size().width() as f64;
+    let to_mm = Mat {
+        a: factor,
+        d: factor,
+        ..Mat::ID
+    };
+    let mut out = Vec::new();
+    collect(tree.root(), to_mm, false, 0, &mut out);
+    out
+}
+
+fn collect(group: &usvg::Group, to_mm: Mat, multiply: bool, clips: usize, out: &mut Vec<Shape>) {
+    for node in group.children() {
+        match node {
+            usvg::Node::Group(g) => {
+                // The page clip is the writer's own frame, not something the
+                // emitter asked for; every other clip is.
+                let page_clip = g.clip_path().is_some_and(|clip| clip.id() == "page-clip");
+                let clips = clips + usize::from(g.clip_path().is_some() && !page_clip);
+                let multiply = multiply || g.blend_mode() == usvg::BlendMode::Multiply;
+                collect(g, to_mm, multiply, clips, out);
+            }
+            usvg::Node::Path(path) => {
+                let abs = to_mm.concat(Mat::of(path.abs_transform()));
+                let scale = abs.scale();
+                let mut rings: Vec<Vec<[f64; 2]>> = Vec::new();
+                for segment in path.data().segments() {
+                    match segment {
+                        tiny_skia::PathSegment::MoveTo(p) => {
+                            rings.push(vec![abs.apply(p.x as f64, p.y as f64)])
+                        }
+                        tiny_skia::PathSegment::LineTo(p) => rings
+                            .last_mut()
+                            .expect("a sub-path starts with a move")
+                            .push(abs.apply(p.x as f64, p.y as f64)),
+                        tiny_skia::PathSegment::Close => {}
+                        other => panic!("unexpected curve in the output: {other:?}"),
+                    }
+                }
+                let paint = match (path.fill(), path.stroke()) {
+                    (Some(fill), None) => Paint::Fill {
+                        color: paint_color(fill.paint()),
+                        rule: match fill.rule() {
+                            usvg::FillRule::NonZero => FillRule::NonZero,
+                            usvg::FillRule::EvenOdd => FillRule::EvenOdd,
+                        },
+                    },
+                    (None, Some(stroke)) => Paint::Stroke {
+                        color: paint_color(stroke.paint()),
+                    },
+                    (fill, stroke) => panic!(
+                        "a path must be filled or stroked, never both or neither \
+                         (fill {}, stroke {})",
+                        fill.is_some(),
+                        stroke.is_some()
+                    ),
+                };
+                let stroke = path.stroke();
+                out.push(Shape {
+                    paint,
+                    rings,
+                    width_mm: stroke.map_or(0.0, |s| s.width().get() as f64 * scale),
+                    dash_mm: stroke
+                        .and_then(|s| s.dasharray())
+                        .map(|d| d.iter().map(|v| *v as f64 * scale).collect())
+                        .unwrap_or_default(),
+                    cap: stroke.map_or(LineCap::Round, |s| match s.linecap() {
+                        usvg::LineCap::Butt => LineCap::Butt,
+                        usvg::LineCap::Round => LineCap::Round,
+                        usvg::LineCap::Square => LineCap::Square,
+                    }),
+                    join: stroke.map_or(LineJoin::Round, |s| match s.linejoin() {
+                        usvg::LineJoin::Miter | usvg::LineJoin::MiterClip => LineJoin::Miter,
+                        usvg::LineJoin::Round => LineJoin::Round,
+                        usvg::LineJoin::Bevel => LineJoin::Bevel,
+                    }),
+                    multiply,
+                    clips,
+                    mesh: false,
+                });
+            }
+            other => panic!("unexpected node in the output: {other:?}"),
+        }
+    }
+}
+
+fn paint_color(paint: &usvg::Paint) -> [u8; 3] {
+    match paint {
+        usvg::Paint::Color(c) => [c.red, c.green, c.blue],
+        other => panic!("unexpected paint server in the output: {other:?}"),
+    }
+}
+
+// ── The comparison ────────────────────────────────────────────────────────
+
+/// Sheet tolerance. D2 budgets 0.001 mm per axis for serialisation; the rest
+/// is the f32 arithmetic usvg does on the way back.
+const TOL_MM: f64 = 0.002;
+
+/// The tolerance for a coordinate of that magnitude.
+///
+/// On the sheet it is the budget above. Off the sheet it cannot be: SVG
+/// consumers parse into f32 (usvg does), so a point half a kilometre from the
+/// page — which the corpus has, to exercise the emitter's f64 cancellation of
+/// a UTM world origin — is quantised by the format itself, not by the writer.
+/// Ink that lands on the paper is what the budget is about.
+fn tol_at(mm: f64) -> f64 {
+    TOL_MM.max(4.0 * mm.abs() * f32::EPSILON as f64)
+}
+
+fn compare(expected: &[Shape], actual: &[Shape]) -> Result<(), String> {
+    if expected.len() != actual.len() {
+        return Err(format!(
+            "{} shapes drawn, {} in the file",
+            expected.len(),
+            actual.len()
+        ));
+    }
+    for (i, (want, got)) in expected.iter().zip(actual).enumerate() {
+        let fault = |what: String| Err(format!("shape #{i}: {what}"));
+        match (&want.paint, &got.paint) {
+            (
+                Paint::Fill {
+                    color: wc,
+                    rule: wr,
+                },
+                Paint::Fill {
+                    color: gc,
+                    rule: gr,
+                },
+            ) => {
+                if wr != gr {
+                    return fault(format!("fill rule {wr:?} became {gr:?}"));
+                }
+                if !near_color(*wc, *gc) {
+                    return fault(format!("fill {wc:?} became {gc:?}"));
+                }
+            }
+            (Paint::Stroke { color: wc }, Paint::Stroke { color: gc }) => {
+                if !near_color(*wc, *gc) {
+                    return fault(format!("stroke {wc:?} became {gc:?}"));
+                }
+                if (want.width_mm - got.width_mm).abs() > TOL_MM {
+                    return fault(format!(
+                        "pen {:.6} mm became {:.6} mm",
+                        want.width_mm, got.width_mm
+                    ));
+                }
+                if !same_dash(&want.dash_mm, &got.dash_mm) {
+                    return fault(format!("dash {:?} became {:?}", want.dash_mm, got.dash_mm));
+                }
+                if want.cap != got.cap || want.join != got.join {
+                    return fault(format!(
+                        "cap/join {:?}/{:?} became {:?}/{:?}",
+                        want.cap, want.join, got.cap, got.join
+                    ));
+                }
+            }
+            (w, g) => return fault(format!("{w:?} became {g:?}")),
+        }
+        if want.multiply != got.multiply {
+            return fault(format!(
+                "multiply {} became {}",
+                want.multiply, got.multiply
+            ));
+        }
+        if want.clips != got.clips {
+            return fault(format!("{} clips became {}", want.clips, got.clips));
+        }
+        if want.mesh {
+            // A mesh may be written as its outline, so compare what the
+            // outline must preserve: the ink's extent and its signed area
+            // (holes included, since they subtract).
+            if (want.area() - got.area()).abs() > TOL_MM * 10.0 {
+                return fault(format!(
+                    "mesh area {:.6} mm² became {:.6} mm²",
+                    want.area(),
+                    got.area()
+                ));
+            }
+            let (wb, gb) = (want.bbox(), got.bbox());
+            if wb.iter().zip(gb).any(|(w, g)| (w - g).abs() > tol_at(*w)) {
+                return fault(format!("mesh extent {wb:?} became {gb:?}"));
+            }
+            continue;
+        }
+        // A closed ring that ends where it began carries no extra information,
+        // and whether the repeat survives the round trip is up to the writer.
+        let closed = matches!(want.paint, Paint::Fill { .. });
+        let (want_rings, got_rings) = (closed_rings(want, closed), closed_rings(got, closed));
+        if want_rings.len() != got_rings.len()
+            || want_rings.iter().map(Vec::len).sum::<usize>()
+                != got_rings.iter().map(Vec::len).sum::<usize>()
+        {
+            return fault(format!(
+                "{} rings / {} points became {} rings / {} points",
+                want_rings.len(),
+                want_rings.iter().map(Vec::len).sum::<usize>(),
+                got_rings.len(),
+                got_rings.iter().map(Vec::len).sum::<usize>()
+            ));
+        }
+        for (wr, gr) in want_rings.iter().zip(&got_rings) {
+            for (wp, gp) in wr.iter().zip(gr) {
+                if (wp[0] - gp[0]).abs() > tol_at(wp[0]) || (wp[1] - gp[1]).abs() > tol_at(wp[1]) {
+                    return fault(format!("point {wp:?} became {gp:?}"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A shape's rings with the redundant closing point dropped, for shapes whose
+/// rings are closed.
+fn closed_rings(shape: &Shape, closed: bool) -> Vec<Vec<[f64; 2]>> {
+    shape
+        .rings
+        .iter()
+        .map(|ring| {
+            let mut ring = ring.clone();
+            if closed && ring.len() > 1 {
+                let (first, last) = (ring[0], ring[ring.len() - 1]);
+                if (first[0] - last[0]).abs() < 1e-9 && (first[1] - last[1]).abs() < 1e-9 {
+                    ring.pop();
+                }
+            }
+            ring
+        })
+        .collect()
+}
+
+fn near_color(a: [u8; 3], b: [u8; 3]) -> bool {
+    a.iter()
+        .zip(b)
+        .all(|(x, y)| (*x as i16 - y as i16).abs() <= 1)
+}
+
+fn same_dash(want: &[f64], got: &[f64]) -> bool {
+    // SVG repeats an odd-length dash list to make it even; usvg may have done
+    // that already.
+    let doubled: Vec<f64> = want.iter().chain(want).copied().collect();
+    let matches = |reference: &[f64]| {
+        reference.len() == got.len()
+            && reference
+                .iter()
+                .zip(got)
+                .all(|(w, g)| (w - g).abs() <= TOL_MM)
+    };
+    matches(want) || (want.len() % 2 == 1 && matches(&doubled))
+}
+
+// ── Layer 2: every corpus page ────────────────────────────────────────────
+
+fn write(case: &Case) -> (String, SvgReport) {
+    svg_page_to_string(&case.page(), &PlotAssets::default(), &SvgOptions::default())
+        .unwrap_or_else(|e| panic!("{}: {e}", case.name))
+}
+
+#[test]
+fn the_written_svg_draws_what_the_emitter_asked_for() {
+    let cases = corpus();
+    assert!(cases.len() >= 20, "corpus shrank to {}", cases.len());
+    let mut checked = 0;
+    for case in &cases {
+        if case.options.stamp {
+            continue; // refused, and covered by its own test
+        }
+        let (svg, _) = write(case);
+        let expected = expected_shapes(&record(&case.page()), case.paper.1);
+        let actual = actual_shapes(&parse(&svg), case.paper.0);
+        if let Err(why) = compare(&expected, &actual) {
+            panic!("{}: {why}", case.name);
+        }
+        checked += 1;
+    }
+    assert!(checked >= 20, "only {checked} pages compared");
+}
+
+// A check that cannot fail proves nothing: break the file in five ways the
+// comparison is supposed to notice, and require it to notice.
+#[test]
+fn the_comparison_catches_a_broken_file() {
+    let case = corpus()
+        .into_iter()
+        .find(|c| c.name == "hatches")
+        .expect("the hatch page is in the corpus");
+    let (svg, _) = write(&case);
+    let expected = expected_shapes(&record(&case.page()), case.paper.1);
+    compare(&expected, &actual_shapes(&parse(&svg), case.paper.0))
+        .expect("the unmutated file passes");
+
+    let first_path = svg.find("<path").expect("the page has paths");
+    let end = svg[first_path..].find("/>").unwrap() + first_path + 2;
+    let mutations = [
+        (
+            "a deleted path",
+            format!("{}{}", &svg[..first_path], &svg[end..]),
+        ),
+        ("a moved point", move_first_point(&svg)),
+        (
+            "a lost even-odd rule",
+            svg.replacen(" fill-rule=\"evenodd\"", "", 1),
+        ),
+        (
+            "an unflipped page",
+            svg.replacen("0,0,-0.352777", "0,0,0.352777", 1),
+        ),
+        (
+            "a fatter pen",
+            svg.replacen("stroke-width=\"", "stroke-width=\"9", 1),
+        ),
+    ];
+    for (what, mutated) in mutations {
+        assert_ne!(mutated, svg, "the {what} mutation did not apply");
+        let actual = actual_shapes(&parse(&mutated), case.paper.0);
+        assert!(
+            compare(&expected, &actual).is_err(),
+            "{what} went unnoticed"
+        );
+    }
+}
+
+/// Push the first coordinate of the first sub-path 5 points sideways.
+fn move_first_point(svg: &str) -> String {
+    let at = svg.find("d=\"M").expect("a path") + 4;
+    let end = at + svg[at..].find(',').expect("an x,y pair");
+    let x: f64 = svg[at..end].parse().expect("a number");
+    format!("{}{}{}", &svg[..at], x + 5.0, &svg[end..])
+}
+
+// ── The serialisation contract (§8) ───────────────────────────────────────
+
+#[test]
+fn the_document_is_self_contained_and_says_its_physical_size() {
+    let mut case = Case::new("A3 landscape");
+    case.paper = (420.0, 297.0);
+    case.wires.push(wire(
+        "a",
+        vec![[10.0, 10.0, 0.0], [400.0, 200.0, 0.0]],
+        WireModel::WHITE,
+        0.0,
+    ));
+    let (svg, _) = write(&case);
+
+    assert!(svg.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg "));
+    assert!(svg.contains("xmlns=\"http://www.w3.org/2000/svg\""));
+    assert!(svg.contains("width=\"420mm\" height=\"297mm\""));
+    assert!(svg.contains("viewBox=\"0 0 420 297\""));
+    // No DTD, no scripting, nothing to fetch, no font to find.
+    for forbidden in [
+        "<!DOCTYPE",
+        "<script",
+        "<text",
+        "xlink:href",
+        "href=",
+        "<image",
+        "font-family",
+    ] {
+        assert!(!svg.contains(forbidden), "{forbidden} in the output");
+    }
+    // Stroked paths say they are not filled, filled paths say they are not
+    // stroked; ids are unique.
+    for path in svg.match_indices("<path").map(|(i, _)| &svg[i..]) {
+        let tag = &path[..path.find("/>").unwrap()];
+        assert_eq!(
+            tag.contains("fill=\"none\""),
+            tag.contains("stroke-width"),
+            "neither or both of fill=none and a pen: {tag}"
+        );
+    }
+    let ids: Vec<&str> = svg.match_indices("id=\"").map(|(i, _)| &svg[i..]).collect();
+    let unique: std::collections::HashSet<&str> = ids.iter().copied().collect();
+    assert_eq!(ids.len(), unique.len(), "duplicate ids");
+
+    let tree = parse(&svg);
+    let mm_per_px = 25.4 / 96.0;
+    assert!((tree.size().width() as f64 * mm_per_px - 420.0).abs() < 0.01);
+    assert!((tree.size().height() as f64 * mm_per_px - 297.0).abs() < 0.01);
+}
+
+#[test]
+fn the_stamp_is_refused_rather_than_approximated() {
+    let mut case = Case::new("stamp");
+    case.options.stamp = true;
+    let error = svg_page_to_string(
+        &case.page(),
+        &PlotAssets {
+            stamp_label: Some("PINNED".into()),
+        },
+        &SvgOptions::default(),
+    )
+    .expect_err("a stamped page cannot be written");
+    assert!(matches!(error, SvgError::Unsupported(_)), "{error}");
+    assert!(error.to_string().contains("stamp"), "{error}");
+}
+
+#[test]
+fn an_impossible_page_is_refused() {
+    let mut broken: Vec<(&str, Case)> = Vec::new();
+
+    let mut case = Case::new("bad");
+    case.paper = (297.0, 0.0);
+    broken.push(("a page with no height", case));
+
+    let mut case = Case::new("bad");
+    case.scale = -1.0;
+    broken.push(("a negative plot scale", case));
+
+    let mut case = Case::new("bad");
+    case.clip = Some((0.0, f32::NAN, 10.0, 10.0));
+    broken.push(("a NaN clip rectangle", case));
+
+    // NaN is the emitter's pen-up sentinel and never reaches a coordinate, but
+    // an infinity would, and there is no number to write for it.
+    let mut case = Case::new("bad");
+    case.wires.push(wire(
+        "runaway",
+        vec![[f32::INFINITY, 0.0, 0.0], [10.0, 0.0, 0.0]],
+        WireModel::WHITE,
+        0.0,
+    ));
+    broken.push(("an infinite coordinate", case));
+
+    for (what, case) in broken {
+        let error =
+            svg_page_to_string(&case.page(), &PlotAssets::default(), &SvgOptions::default())
+                .expect_err(what);
+        assert!(matches!(error, SvgError::Invalid(_)), "{what}: {error}");
+    }
+}
+
+#[test]
+fn merge_lines_multiplies_on_the_leaves_inside_an_isolated_page() {
+    let case = corpus()
+        .into_iter()
+        .find(|c| c.name == "hatches, merge_lines")
+        .expect("the merge_lines page is in the corpus");
+    let (svg, report) = write(&case);
+    assert!(report.needs_mix_blend_mode);
+    assert!(
+        svg.contains("isolation:isolate"),
+        "the page is not isolated"
+    );
+    // On the leaves, as a CSS property: `mix-blend-mode` does not inherit, and
+    // librsvg only reads the style, not a same-named XML attribute.
+    assert!(
+        svg.contains("<path style=\"mix-blend-mode:multiply\"")
+            || svg.contains(" style=\"mix-blend-mode:multiply\" d=")
+    );
+    let tree = parse(&svg);
+    let shapes = actual_shapes(&tree, case.paper.0);
+    assert!(shapes.iter().any(|s| s.multiply), "nothing multiplies");
+    // The wipeout drops back to normal inside a multiplied page, so a page
+    // that multiplies everything would be wrong.
+    assert!(
+        shapes.iter().any(|s| !s.multiply),
+        "the wipeout should not multiply"
+    );
+}
+
+#[test]
+fn a_page_without_blending_stays_plain() {
+    let case = corpus()
+        .into_iter()
+        .find(|c| c.name == "hatches")
+        .expect("the hatch page is in the corpus");
+    let (svg, report) = write(&case);
+    assert!(!report.needs_mix_blend_mode);
+    assert!(!svg.contains("mix-blend-mode"));
+    assert!(!svg.contains("isolation"));
+}
+
+// ── Numbers (D2) ──────────────────────────────────────────────────────────
+
+#[test]
+fn numbers_are_plain_decimal_and_lose_nothing_that_matters() {
+    let mut s = String::new();
+    for (value, decimals, want) in [
+        (0.0, 4, "0"),
+        (-0.0, 4, "0"),
+        (-0.00001, 4, "0"),
+        (1.5, 4, "1.5"),
+        (1.50009, 4, "1.5001"),
+        (-12.25, 4, "-12.25"),
+        (1e-9, 12, "0.000000001"),
+        (297.0, 4, "297"),
+    ] {
+        s.clear();
+        num(&mut s, value, decimals);
+        assert_eq!(s, want, "{value} at {decimals} decimals");
+        assert!(!s.contains('e'), "exponent notation in {s}");
+    }
+}
+
+#[test]
+fn the_coordinate_precision_follows_the_plot_scale() {
+    // ½·10⁻ᵈ points, magnified by the scale, must stay inside 0.001 mm.
+    for scale in [0.1, 1.0, 2.0, 50.0, 100.0, 1000.0] {
+        let d = auto_decimals(scale);
+        let worst = 0.5 * 10f64.powi(-(d as i32)) * scale.max(1.0) * PT_TO_MM;
+        assert!(
+            worst <= COORD_BUDGET_MM,
+            "scale {scale}: {d} decimals leaves {worst} mm of error"
+        );
+        assert!(d >= 4, "scale {scale}: {d} decimals is below the floor");
+    }
+    // And the option overrides it.
+    let mut case = Case::new("coarse");
+    case.wires.push(wire(
+        "a",
+        vec![[1.234_567, 2.345_678, 0.0], [10.0, 10.0, 0.0]],
+        WireModel::WHITE,
+        0.0,
+    ));
+    let (svg, _) = svg_page_to_string(
+        &case.page(),
+        &PlotAssets::default(),
+        &SvgOptions { decimals: Some(1) },
+    )
+    .unwrap();
+    assert!(svg.contains("M3.5,6.6"), "one decimal place: {svg}");
+}
+
+// ── R5: a mesh is one shape ───────────────────────────────────────────────
+
+fn pt(x: f32, y: f32) -> PlotPoint {
+    PlotPoint { x, y }
+}
+
+#[test]
+fn a_two_triangle_square_comes_out_as_one_square() {
+    // The shared diagonal must cancel: what is left is the outline.
+    let tris = [
+        [pt(0.0, 0.0), pt(10.0, 0.0), pt(10.0, 10.0)],
+        [pt(0.0, 0.0), pt(10.0, 10.0), pt(0.0, 10.0)],
+    ];
+    let rings = mesh_outline(&tris).expect("a clean manifold");
+    assert_eq!(rings.len(), 1);
+    assert_eq!(rings[0].len(), 4, "{:?}", rings[0]);
+    let corners: Vec<(f32, f32)> = rings[0].iter().map(|p| (p.x, p.y)).collect();
+    for corner in [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)] {
+        assert!(
+            corners.contains(&corner),
+            "{corner:?} missing from {corners:?}"
+        );
+    }
+}
+
+#[test]
+fn a_glyph_counter_survives_as_its_own_ring() {
+    // A square annulus: outer ring counter-clockwise, hole clockwise, meshed
+    // into eight triangles. The outline must keep both rings and the hole must
+    // keep the opposite winding, or a non-zero fill would swallow it.
+    let outer = [pt(0.0, 0.0), pt(30.0, 0.0), pt(30.0, 30.0), pt(0.0, 30.0)];
+    let inner = [
+        pt(10.0, 10.0),
+        pt(20.0, 10.0),
+        pt(20.0, 20.0),
+        pt(10.0, 20.0),
+    ];
+    let mut tris = Vec::new();
+    for i in 0..4 {
+        let (o0, o1) = (outer[i], outer[(i + 1) % 4]);
+        let (i0, i1) = (inner[i], inner[(i + 1) % 4]);
+        tris.push([o0, o1, i1]);
+        tris.push([o0, i1, i0]);
+    }
+    let rings = mesh_outline(&tris).expect("a clean manifold");
+    assert_eq!(rings.len(), 2, "outline and counter");
+    let area = |ring: &Vec<PlotPoint>| {
+        let mut sum = 0.0;
+        for i in 0..ring.len() {
+            let (p, q) = (ring[i], ring[(i + 1) % ring.len()]);
+            sum += (p.x * q.y - q.x * p.y) as f64;
+        }
+        sum * 0.5
+    };
+    let areas: Vec<f64> = rings.iter().map(area).collect();
+    assert!(
+        areas.iter().any(|a| (*a - 900.0).abs() < 1e-3),
+        "no 30×30 outline in {areas:?}"
+    );
+    assert!(
+        areas.iter().any(|a| (*a + 100.0).abs() < 1e-3),
+        "no 10×10 hole wound the other way in {areas:?}"
+    );
+}
+
+#[test]
+fn a_mesh_that_is_not_a_manifold_falls_back_instead_of_guessing() {
+    // Two triangles meeting at a single point: the walk would have to guess
+    // which edge leaves the shared vertex.
+    let bowtie = [
+        [pt(0.0, 0.0), pt(10.0, 0.0), pt(5.0, 5.0)],
+        [pt(5.0, 5.0), pt(10.0, 10.0), pt(0.0, 10.0)],
+    ];
+    assert!(mesh_outline(&bowtie).is_none());
+    // A degenerate triangle is not a mesh either.
+    let degenerate = [[pt(0.0, 0.0), pt(10.0, 0.0), pt(0.0, 0.0)]];
+    assert!(mesh_outline(&degenerate).is_none());
+
+    // The page still draws it — as one path of triangles, not one path each.
+    let mut case = Case::new("bowtie");
+    let mut w = wire(
+        "bowtie",
+        vec![[0.0, 0.0, 0.0], [10.0, 10.0, 0.0]],
+        [0.2, 0.2, 0.2, 1.0],
+        0.0,
+    );
+    w.wire.fill_tris = vec![
+        [0.0, 0.0, 0.0],
+        [10.0, 0.0, 0.0],
+        [5.0, 5.0, 0.0],
+        [5.0, 5.0, 0.0],
+        [10.0, 10.0, 0.0],
+        [0.0, 10.0, 0.0],
+    ];
+    case.wires.push(w);
+    let (svg, report) = write(&case);
+    assert_eq!(report.mesh_fallbacks, 1);
+    assert_eq!(report.mesh_outlines, 0);
+    let shapes = actual_shapes(&parse(&svg), case.paper.0);
+    let mesh = shapes
+        .iter()
+        .find(|s| s.rings.len() == 2)
+        .expect("both triangles in one path");
+    assert!((mesh.area().abs() - 50.0).abs() < 0.1, "{}", mesh.area());
+}
+
+#[test]
+fn the_corpus_exercises_mesh_outlines() {
+    let outlined: usize = corpus()
+        .iter()
+        .filter(|c| !c.options.stamp)
+        .map(|c| write(c).1.mesh_outlines)
+        .sum();
+    assert!(outlined >= 4, "only {outlined} mesh fills in the corpus");
+}
+
+// ── Layer 3: what the picture looks like ──────────────────────────────────
+
+/// Render at `px_per_mm`, on white, and return the pixmap.
+fn render(svg: &str, px_per_mm: f32) -> tiny_skia::Pixmap {
+    let tree = parse(svg);
+    // usvg sizes the tree in CSS px at 96 dpi; scale from there.
+    let factor = px_per_mm * 25.4 / 96.0;
+    let w = (tree.size().width() * factor).ceil() as u32;
+    let h = (tree.size().height() * factor).ceil() as u32;
+    let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("a pixmap");
+    pixmap.fill(tiny_skia::Color::WHITE);
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(factor, factor),
+        &mut pixmap.as_mut(),
+    );
+    pixmap
+}
+
+/// 0 = white, 1 = black.
+fn ink(pixmap: &tiny_skia::Pixmap, x: u32, y: u32) -> f64 {
+    let p = pixmap.pixel(x, y).expect("inside the pixmap");
+    1.0 - (p.red() as f64 + p.green() as f64 + p.blue() as f64) / (3.0 * 255.0)
+}
+
+/// Mean ink over a rectangle of pixels.
+fn ink_in(pixmap: &tiny_skia::Pixmap, x0: u32, y0: u32, x1: u32, y1: u32) -> f64 {
+    let mut sum = 0.0;
+    let mut n = 0.0_f64;
+    for y in y0..y1.min(pixmap.height()) {
+        for x in x0..x1.min(pixmap.width()) {
+            sum += ink(pixmap, x, y);
+            n += 1.0;
+        }
+    }
+    sum / n.max(1.0)
+}
+
+// The one thing no assertion replaces: looking at the page. Writes every
+// corpus page next to a PNG of it, for the eyeball check §8's third layer asks
+// for on real drawings.
+#[test]
+#[ignore = "writes sample pages to the temp directory to look at"]
+fn dump_the_corpus_for_a_human() {
+    let dir = std::env::temp_dir().join("ocs-svg-corpus");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (i, case) in corpus().iter().filter(|c| !c.options.stamp).enumerate() {
+        let stem = format!("{i:02}-{}", case.name.replace([' ', '/', ','], "_"));
+        let (svg, report) = write(case);
+        std::fs::write(dir.join(format!("{stem}.svg")), &svg).unwrap();
+        render(&svg, 6.0)
+            .save_png(dir.join(format!("{stem}.png")))
+            .unwrap();
+        println!("{stem}: {report:?}");
+    }
+    println!("wrote {}", dir.display());
+}
+
+#[test]
+fn a_hundred_millimetre_line_is_a_hundred_millimetres_from_the_top() {
+    // The one test that would catch a wrong unit, a wrong page origin or a
+    // missing Y flip, all three.
+    let mut case = Case::new("ruler");
+    case.paper = (297.0, 210.0);
+    case.wires.push(wire(
+        "ruler",
+        vec![[50.0, 160.0, 0.0], [150.0, 160.0, 0.0]],
+        WireModel::WHITE,
+        0.0,
+    ));
+    let ppmm = 4.0;
+    let pixmap = render(&write(&case).0, ppmm);
+    let (mut x0, mut x1, mut y0, mut y1) = (u32::MAX, 0u32, u32::MAX, 0u32);
+    for y in 0..pixmap.height() {
+        for x in 0..pixmap.width() {
+            if ink(&pixmap, x, y) > 0.5 {
+                x0 = x0.min(x);
+                x1 = x1.max(x);
+                y0 = y0.min(y);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    let mm = |v: u32| v as f64 / ppmm as f64;
+    assert!((mm(x0) - 50.0).abs() < 0.5, "left edge at {} mm", mm(x0));
+    assert!((mm(x1) - 150.0).abs() < 0.5, "right edge at {} mm", mm(x1));
+    // CAD y = 160 on a 210 mm sheet is 50 mm from the top of the image.
+    let mid = mm((y0 + y1) / 2);
+    assert!(
+        (mid - 50.0).abs() < 0.5,
+        "the line sits {mid} mm from the top"
+    );
+}
+
+#[test]
+fn a_wipeout_masks_the_ink_under_it() {
+    let mut case = Case::new("wipeout");
+    case.paper = (100.0, 100.0);
+    case.hatches.push(hatch(
+        "SOLID",
+        square(20.0, 20.0, 60.0),
+        HatchPattern::Solid,
+        [0.1, 0.1, 0.1, 1.0],
+    ));
+    let mut cover = hatch(
+        "WIPEOUT_FILL",
+        square(30.0, 30.0, 20.0),
+        HatchPattern::Solid,
+        [0.0, 0.0, 0.0, 1.0],
+    );
+    // Deeper than the black fill, so the sort paints it afterwards.
+    cover.draw_depth = 0.6;
+    case.wipeouts.push(cover);
+    let ppmm = 4.0;
+    let pixmap = render(&write(&case).0, ppmm);
+    let px = |mm: f64| (mm * ppmm as f64) as u32;
+    // Inside the wipeout: paper white. Outside it, still inside the hatch: ink.
+    assert!(
+        ink_in(&pixmap, px(33.0), px(53.0), px(47.0), px(67.0)) < 0.02,
+        "the wipeout did not mask"
+    );
+    assert!(
+        ink_in(&pixmap, px(60.0), px(30.0), px(75.0), px(45.0)) > 0.8,
+        "the hatch is missing"
+    );
+}
+
+#[test]
+fn a_mesh_fill_has_no_seam_where_its_triangles_meet() {
+    // Two triangles sharing a diagonal. Filled separately, every renderer that
+    // anti-aliases per shape leaves a pale line along the join (R5); as one
+    // path there is nothing to leave it on.
+    let mut case = Case::new("seam");
+    case.paper = (60.0, 60.0);
+    let mut w = wire(
+        "solid",
+        vec![[10.0, 10.0, 0.0], [50.0, 50.0, 0.0]],
+        [0.0, 0.0, 0.0, 1.0],
+        0.0,
+    );
+    w.wire.color = [0.05, 0.05, 0.05, 1.0];
+    w.wire.fill_tris = vec![
+        [10.0, 10.0, 0.0],
+        [50.0, 10.0, 0.0],
+        [50.0, 50.0, 0.0],
+        [10.0, 10.0, 0.0],
+        [50.0, 50.0, 0.0],
+        [10.0, 50.0, 0.0],
+    ];
+    // Nothing else on the page: the wire itself would cross the diagonal.
+    w.wire.points = vec![[10.0, 10.0, 0.0]];
+    case.wires.push(w);
+    let (svg, report) = write(&case);
+    assert_eq!(report.mesh_outlines, 1, "the square should be one outline");
+    let ppmm = 8.0;
+    let pixmap = render(&svg, ppmm);
+    // Walk the diagonal from (12,12) to (48,48) in CAD mm; in image space the
+    // square spans the same x and the mirrored y.
+    let mut palest: f64 = 1.0;
+    for step in 0..=36 {
+        let mm = 12.0 + step as f64;
+        let x = (mm * ppmm as f64) as u32;
+        let y = ((60.0 - mm) * ppmm as f64) as u32;
+        palest = palest.min(ink(&pixmap, x, y));
+    }
+    assert!(
+        palest > 0.9,
+        "a seam runs along the diagonal: palest pixel {palest}"
+    );
+}
+
+#[test]
+fn a_missing_glyph_hides_from_a_whole_page_rate_but_not_from_the_local_check() {
+    // Why §8 refuses a whole-page difference rate as the only judge: drop a
+    // word from an A3 sheet and the page is still 99.9 % identical.
+    let mut case = Case::new("text");
+    case.paper = (297.0, 210.0);
+    case.wires.push(crate::io::plot_corpus::text_wire(
+        "HELLO",
+        [20.0, 100.0, 0.0],
+    ));
+    let (svg, _) = write(&case);
+    let first = svg.find("<path").expect("glyph paths");
+    let end = svg[first..].find("/>").unwrap() + first + 2;
+    let without = format!("{}{}", &svg[..first], &svg[end..]);
+
+    let ppmm = 8.0;
+    let (whole, broken) = (render(&svg, ppmm), render(&without, ppmm));
+    let mut differing = 0u64;
+    let mut total = 0u64;
+    let mut region = [u32::MAX, u32::MAX, 0u32, 0u32];
+    for y in 0..whole.height() {
+        for x in 0..whole.width() {
+            total += 1;
+            if (ink(&whole, x, y) - ink(&broken, x, y)).abs() > 0.05 {
+                differing += 1;
+                region = [
+                    region[0].min(x),
+                    region[1].min(y),
+                    region[2].max(x + 1),
+                    region[3].max(y + 1),
+                ];
+            }
+        }
+    }
+    let page_rate = differing as f64 / total as f64;
+    assert!(differing > 0, "the mutation changed nothing");
+    assert!(
+        page_rate < 0.001,
+        "the whole-page rate was supposed to be tiny, it is {page_rate}"
+    );
+    // The structural comparison, which does not average over the page, says no.
+    let expected = expected_shapes(&record(&case.page()), case.paper.1);
+    assert!(compare(&expected, &actual_shapes(&parse(&without), case.paper.0)).is_err());
+    // And so does the raster, once the difference is measured where it is
+    // instead of spread over a sheet: the ink in the affected region is gone,
+    // and the local rate is orders of magnitude above the page rate.
+    let before = ink_in(&whole, region[0], region[1], region[2], region[3]);
+    let after = ink_in(&broken, region[0], region[1], region[2], region[3]);
+    let local_rate =
+        differing as f64 / (((region[2] - region[0]) * (region[3] - region[1])) as f64).max(1.0);
+    assert!(
+        before - after > 0.1,
+        "local ink barely moved: {before} → {after}"
+    );
+    assert!(
+        local_rate > 100.0 * page_rate,
+        "the local rate {local_rate} is not far above the page rate {page_rate}"
+    );
+}

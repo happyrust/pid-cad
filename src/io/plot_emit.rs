@@ -135,6 +135,16 @@ pub enum PlotOp {
         rings: Vec<Vec<PlotPoint>>,
         rule: FillRule,
     },
+    /// A triangle mesh that is semantically *one* filled shape — a glyph, or a
+    /// wire's solid fill. The triangles tile the shape, so a backend that can
+    /// draw them as a single path should, and one that cannot expands them in
+    /// order into one non-zero fill per triangle (what `PdfSink` does, which is
+    /// what the exporter always emitted). The batch exists because filling the
+    /// triangles separately leaves anti-aliasing seams along the shared edges
+    /// in renderers that composite per shape (R5 of the SVG plan).
+    FillMesh {
+        tris: Vec<[PlotPoint; 3]>,
+    },
     /// Intersect the clip region with these rings.
     Clip {
         rings: Vec<Vec<PlotPoint>>,
@@ -860,20 +870,21 @@ fn emit_wire_fills<S: PlotSink>(
         }
         [r, g, b] = plotted_color([r, g, b], a, screening, options);
         sink.emit(PlotOp::FillColor([r, g, b]))?;
+        let mut tris = Vec::with_capacity(wire.fill_tris.len() / 3);
         for (triangle_index, triangle) in wire.fill_tris.chunks_exact(3).enumerate() {
-            let mut points = Vec::with_capacity(3);
+            let mut points = [PlotPoint { x: 0.0, y: 0.0 }; 3];
             for (point_index, &[x, y, _]) in triangle.iter().enumerate() {
                 let index = triangle_index * 3 + point_index;
                 let low = wire.fill_tris_low.get(index).copied().unwrap_or([0.0; 3]);
-                points.push(PlotPoint {
+                points[point_index] = PlotPoint {
                     x: geometry_pt((x as f64 + low[0] as f64 + ox) as f32),
                     y: geometry_pt((y as f64 + low[1] as f64 + oy) as f32),
-                });
+                };
             }
-            sink.emit(PlotOp::Fill {
-                rings: vec![points],
-                rule: FillRule::NonZero,
-            })?;
+            tris.push(points);
+        }
+        if !tris.is_empty() {
+            sink.emit(PlotOp::FillMesh { tris })?;
         }
     }
     Ok(())
@@ -1269,13 +1280,17 @@ fn emit_text<S: PlotSink>(
                 };
 
                 if !ge.fill_tris.is_empty() {
-                    // Filled TrueType glyph: one filled triangle per triple.
+                    // Filled TrueType glyph: the triangulation of one glyph is
+                    // one shape (`FillMesh`), which the PDF sink expands back
+                    // into a filled triangle per triple.
                     sink.emit(PlotOp::FillColor([r, g, b]))?;
-                    for tri in ge.fill_tris.chunks_exact(3) {
-                        sink.emit(PlotOp::Fill {
-                            rings: vec![tri.iter().map(|&p| map(p)).collect()],
-                            rule: FillRule::NonZero,
-                        })?;
+                    let tris: Vec<[PlotPoint; 3]> = ge
+                        .fill_tris
+                        .chunks_exact(3)
+                        .map(|tri| [map(tri[0]), map(tri[1]), map(tri[2])])
+                        .collect();
+                    if !tris.is_empty() {
+                        sink.emit(PlotOp::FillMesh { tris })?;
                     }
                 } else {
                     // Stroke (LFF/SHX pen) font or hollow glyph: polylines.
