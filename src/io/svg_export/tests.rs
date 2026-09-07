@@ -606,7 +606,7 @@ fn the_comparison_catches_a_broken_file() {
         ),
         (
             "a fatter pen",
-            svg.replacen("stroke-width=\"", "stroke-width=\"9", 1),
+            svg.replace("stroke-width=\"", "stroke-width=\"9"),
         ),
     ];
     for (what, mutated) in mutations {
@@ -657,16 +657,21 @@ fn the_document_is_self_contained_and_says_its_physical_size() {
     ] {
         assert!(!svg.contains(forbidden), "{forbidden} in the output");
     }
-    // Stroked paths say they are not filled, filled paths say they are not
-    // stroked; ids are unique.
+    // Every path says which half of the paint it is not using — the other
+    // half it inherits from the group its run shares.
     for path in svg.match_indices("<path").map(|(i, _)| &svg[i..]) {
         let tag = &path[..path.find("/>").unwrap()];
-        assert_eq!(
+        assert_ne!(
             tag.contains("fill=\"none\""),
-            tag.contains("stroke-width"),
-            "neither or both of fill=none and a pen: {tag}"
+            tag.contains("stroke=\"none\""),
+            "a path must be a stroke or a fill, not both or neither: {tag}"
         );
     }
+    // And the paint itself is on the groups, not repeated on every leaf.
+    assert!(
+        svg.contains("<g stroke=\"#"),
+        "no shared paint group in the output"
+    );
     let ids: Vec<&str> = svg.match_indices("id=\"").map(|(i, _)| &svg[i..]).collect();
     let unique: std::collections::HashSet<&str> = ids.iter().copied().collect();
     assert_eq!(ids.len(), unique.len(), "duplicate ids");
@@ -793,7 +798,9 @@ fn numbers_are_plain_decimal_and_lose_nothing_that_matters() {
 
 #[test]
 fn the_coordinate_precision_follows_the_plot_scale() {
-    // ½·10⁻ᵈ points, magnified by the scale, must stay inside 0.001 mm.
+    // ½·10⁻ᵈ points, magnified by the scale, must stay inside 0.001 mm —
+    // and must not spend a digit it does not need, since nine tenths of the
+    // file is coordinates.
     for scale in [0.1, 1.0, 2.0, 50.0, 100.0, 1000.0] {
         let d = auto_decimals(scale);
         let worst = 0.5 * 10f64.powi(-(d as i32)) * scale.max(1.0) * PT_TO_MM;
@@ -801,8 +808,13 @@ fn the_coordinate_precision_follows_the_plot_scale() {
             worst <= COORD_BUDGET_MM,
             "scale {scale}: {d} decimals leaves {worst} mm of error"
         );
-        assert!(d >= 4, "scale {scale}: {d} decimals is below the floor");
+        let one_fewer = 0.5 * 10f64.powi(-(d as i32 - 1)) * scale.max(1.0) * PT_TO_MM;
+        assert!(
+            d == 9 || one_fewer > COORD_BUDGET_MM,
+            "scale {scale}: {d} decimals is one more than the budget needs"
+        );
     }
+    assert_eq!(auto_decimals(1.0), 3, "a 1:1 plot needs three decimals");
     // And the option overrides it.
     let mut case = Case::new("coarse");
     case.wires.push(wire(
@@ -1156,6 +1168,47 @@ fn a_failure_after_the_first_page_says_what_is_already_on_disk() {
 }
 
 #[test]
+fn an_svgz_target_gets_gzip_and_an_svg_target_never_does() {
+    let scratch = Scratch::new("svgz");
+    let pages = job(&["hatches"]);
+    let plain = export_svg_pages(
+        &pages,
+        None,
+        &PlotAssets::default(),
+        &scratch.join("plot.svg"),
+        &SvgWriteOptions::default(),
+    )
+    .unwrap();
+    let zipped = export_svg_pages(
+        &pages,
+        None,
+        &PlotAssets::default(),
+        &scratch.join("plot.svgz"),
+        &SvgWriteOptions::default(),
+    )
+    .unwrap();
+
+    let raw = std::fs::read(&plain.pages[0].path).unwrap();
+    let gz = std::fs::read(&zipped.pages[0].path).unwrap();
+    assert_eq!(&raw[..5], b"<?xml", "an .svg must not be gzip");
+    assert_eq!(&gz[..2], &[0x1f, 0x8b], "an .svgz must be gzip");
+    assert!(
+        gz.len() * 2 < raw.len(),
+        "gzip saved almost nothing: {} → {}",
+        raw.len(),
+        gz.len()
+    );
+    assert_eq!(
+        zipped.pages[0].bytes,
+        gz.len(),
+        "the report counts the file"
+    );
+    // The one consumer in this tree reads it, which is what `.svgz` is for.
+    usvg::Tree::from_data(&gz, &usvg::Options::default())
+        .expect("usvg reads the compressed document");
+}
+
+#[test]
 fn a_dry_run_renders_and_resolves_but_writes_nothing() {
     let scratch = Scratch::new("dry");
     let dry = SvgWriteOptions {
@@ -1448,13 +1501,27 @@ fn a_mesh_fill_has_no_seam_where_its_triangles_meet() {
 fn a_missing_glyph_hides_from_a_whole_page_rate_but_not_from_the_local_check() {
     // Why §8 refuses a whole-page difference rate as the only judge: drop a
     // word from an A3 sheet and the page is still 99.9 % identical.
-    let mut case = Case::new("text");
-    case.paper = (297.0, 210.0);
-    case.wires.push(crate::io::plot_corpus::text_wire(
-        "HELLO",
-        [20.0, 100.0, 0.0],
-    ));
-    let (svg, _) = write(&case);
+    //
+    // The layout and the export both go through the process-wide glyph atlas,
+    // and a growth between them re-scales it and invalidates the quads' UV
+    // keys — R1's silent skip, which another test laying out its own text in
+    // parallel can provoke. Retry rather than assert a page with no glyphs on
+    // it; a page that never gets them is a real failure and still fails.
+    let mut attempt = 0;
+    let (case, svg) = loop {
+        let mut case = Case::new("text");
+        case.paper = (297.0, 210.0);
+        case.wires.push(crate::io::plot_corpus::text_wire(
+            "HELLO",
+            [20.0, 100.0, 0.0],
+        ));
+        let (svg, _) = write(&case);
+        if svg.contains("<path") {
+            break (case, svg);
+        }
+        attempt += 1;
+        assert!(attempt < 5, "the atlas never yielded glyph geometry");
+    };
     let first = svg.find("<path").expect("glyph paths");
     let end = svg[first..].find("/>").unwrap() + first + 2;
     let without = format!("{}{}", &svg[..first], &svg[end..]);

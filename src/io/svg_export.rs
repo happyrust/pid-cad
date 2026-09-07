@@ -285,6 +285,13 @@ pub fn export_svg_pages(
         }
     }
 
+    // `.svgz` is gzip, and only when the caller asked for it by name: a
+    // consumer that is handed gzip bytes in a file called `.svg` has no way to
+    // know, and half of them will not sniff for it.
+    let compress = base
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("svgz"));
+
     // Render every page before publishing any of them, so a page that cannot
     // be written at all — a stamp, a bad number — stops the job with nothing
     // on disk rather than half a set.
@@ -307,6 +314,9 @@ pub fn export_svg_pages(
                 error
             }
         })?;
+        if compress {
+            bytes = gzip(&bytes)?;
+        }
         documents.push((bytes, report));
     }
 
@@ -375,6 +385,18 @@ pub fn first_case_insensitive_clash(paths: &[std::path::PathBuf]) -> Option<(usi
     None
 }
 
+/// The document, gzipped, for a `.svgz` target. A plotted sheet is mostly
+/// digits and repeated tags, so this is worth about a third of the file.
+#[cfg(not(target_arch = "wasm32"))]
+fn gzip(bytes: &[u8]) -> Result<Vec<u8>, SvgError> {
+    let mut encoder = flate2::write::GzEncoder::new(
+        Vec::with_capacity(bytes.len() / 3),
+        flate2::Compression::default(),
+    );
+    encoder.write_all(bytes)?;
+    Ok(encoder.finish()?)
+}
+
 /// Write `bytes` to a temporary file beside `path`, then rename it on.
 #[cfg(not(target_arch = "wasm32"))]
 fn publish(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -434,6 +456,9 @@ struct SvgSink {
     decimals: usize,
     state: State,
     stack: Vec<State>,
+    /// The paint a run of elements shares, written once on a wrapping group
+    /// instead of on every leaf. `None` = no run is open.
+    style_run: Option<String>,
     report: SvgReport,
 }
 
@@ -473,6 +498,7 @@ impl SvgSink {
                 open_groups: 0,
             },
             stack: Vec::new(),
+            style_run: None,
             report: SvgReport::default(),
         })
     }
@@ -480,6 +506,7 @@ impl SvgSink {
     /// Assemble the document: header, the clip definitions collected while
     /// walking the page, the page groups, the body.
     fn finish<W: std::io::Write>(mut self, out: &mut W) -> Result<SvgReport, SvgError> {
+        self.end_style_run();
         // The emitter balances its own Save/Restore; close anything left over
         // rather than write a malformed document.
         let dangling =
@@ -534,70 +561,81 @@ impl SvgSink {
         Ok(self.report)
     }
 
-    /// `stroke=` / `fill=` / pen / dash for a stroked element, writing only
-    /// what differs from the page group's defaults.
-    fn stroke_attributes(&mut self) -> Result<(), SvgError> {
-        let (stroke, width, cap, join) = (
-            self.state.stroke,
-            self.state.width_pt,
-            self.state.cap,
-            self.state.join,
-        );
-        self.body.push_str(" fill=\"none\" stroke=\"");
-        color(&mut self.body, stroke);
-        self.body.push_str("\" stroke-width=\"");
-        finite(width, "stroke width")?;
-        let decimals = self.decimals;
-        num(&mut self.body, width as f64, decimals);
-        self.body.push('"');
-        if cap != DEFAULT_CAP {
-            self.body.push_str(" stroke-linecap=\"");
-            self.body.push_str(match cap {
+    /// The paint the next element will use, as SVG attributes.
+    ///
+    /// These are all inherited properties, so a run of elements that share
+    /// them carries them once on a wrapping group; only what a leaf has to
+    /// contradict (`fill="none"` on a stroke, `stroke="none"` on a fill) goes
+    /// on the leaf. Attributes are a tenth of a plotted sheet's bytes and the
+    /// emitter changes paint far less often than it draws, so the run is
+    /// usually long.
+    fn paint_attributes(&self) -> Result<String, SvgError> {
+        finite(self.state.width_pt, "stroke width")?;
+        let mut out = String::with_capacity(64);
+        out.push_str(" stroke=\"");
+        color(&mut out, self.state.stroke);
+        out.push_str("\" fill=\"");
+        color(&mut out, self.state.fill);
+        out.push_str("\" stroke-width=\"");
+        num(&mut out, self.state.width_pt as f64, self.decimals);
+        out.push('"');
+        if self.state.cap != DEFAULT_CAP {
+            out.push_str(" stroke-linecap=\"");
+            out.push_str(match self.state.cap {
                 LineCap::Butt => "butt",
                 LineCap::Round => "round",
                 LineCap::Square => "square",
             });
-            self.body.push('"');
+            out.push('"');
         }
-        if join != DEFAULT_JOIN {
-            self.body.push_str(" stroke-linejoin=\"");
-            self.body.push_str(match join {
+        if self.state.join != DEFAULT_JOIN {
+            out.push_str(" stroke-linejoin=\"");
+            out.push_str(match self.state.join {
                 LineJoin::Miter => "miter",
                 LineJoin::Round => "round",
                 LineJoin::Bevel => "bevel",
             });
-            self.body.push('"');
+            out.push('"');
         }
         if !self.state.dash.is_empty() {
-            self.body.push_str(" stroke-dasharray=\"");
+            out.push_str(" stroke-dasharray=\"");
             for (i, length) in self.state.dash.iter().enumerate() {
                 if i > 0 {
-                    self.body.push(' ');
+                    out.push(' ');
                 }
-                let _ = write!(self.body, "{length}");
+                let _ = write!(out, "{length}");
             }
-            self.body.push('"');
+            out.push('"');
             if self.state.dash_phase != 0 {
-                let _ = write!(
-                    self.body,
-                    " stroke-dashoffset=\"{}\"",
-                    self.state.dash_phase
-                );
+                let _ = write!(out, " stroke-dashoffset=\"{}\"", self.state.dash_phase);
             }
+        } else {
+            // The run this replaces may have left a dash pattern behind.
+            out.push_str(" stroke-dasharray=\"none\"");
         }
-        self.blend_attribute();
+        Ok(out)
+    }
+
+    /// Open the group the next element belongs to, if the paint changed.
+    fn begin_style_run(&mut self) -> Result<(), SvgError> {
+        let paint = self.paint_attributes()?;
+        if self.style_run.as_deref() == Some(paint.as_str()) {
+            return Ok(());
+        }
+        self.end_style_run();
+        self.body.push_str("<g");
+        self.body.push_str(&paint);
+        self.body.push_str(">\n");
+        self.style_run = Some(paint);
         Ok(())
     }
 
-    fn fill_attributes(&mut self, rule: FillRule) {
-        let fill = self.state.fill;
-        self.body.push_str(" stroke=\"none\" fill=\"");
-        color(&mut self.body, fill);
-        self.body.push('"');
-        if rule == FillRule::EvenOdd {
-            self.body.push_str(" fill-rule=\"evenodd\"");
+    /// Close the paint group, before anything that changes the structure —
+    /// a save, a transform, a clip — so a run never straddles one.
+    fn end_style_run(&mut self) {
+        if self.style_run.take().is_some() {
+            self.body.push_str("</g>\n");
         }
-        self.blend_attribute();
     }
 
     /// `mix-blend-mode` does not inherit, so it goes on the leaf that draws —
@@ -644,10 +682,12 @@ impl PlotSink for SvgSink {
     fn emit(&mut self, op: PlotOp) -> Result<(), Self::Error> {
         match op {
             PlotOp::Save => {
+                self.end_style_run();
                 self.stack.push(self.state.clone());
                 self.state.open_groups = 0;
             }
             PlotOp::Restore => {
+                self.end_style_run();
                 for _ in 0..self.state.open_groups {
                     self.body.push_str("</g>");
                 }
@@ -657,6 +697,7 @@ impl PlotSink for SvgSink {
                     .ok_or(SvgError::Invalid("unbalanced graphics state".into()))?;
             }
             PlotOp::Concat(m) => {
+                self.end_style_run();
                 for v in m {
                     finite(v, "transform")?;
                 }
@@ -683,6 +724,7 @@ impl PlotSink for SvgSink {
                 self.state.dash_phase = phase;
             }
             PlotOp::Clip { rings, rule } => {
+                self.end_style_run();
                 let id = format!("clip-{}", self.report.clip_paths + 1);
                 self.report.clip_paths += 1;
                 let mut data = String::new();
@@ -711,7 +753,8 @@ impl PlotSink for SvgSink {
                 for v in [x, y, width, height] {
                     finite(v, "rectangle")?;
                 }
-                self.body.push_str("<rect x=\"");
+                self.begin_style_run()?;
+                self.body.push_str("<rect stroke=\"none\" x=\"");
                 let d = self.decimals;
                 num(&mut self.body, x as f64, d);
                 self.body.push_str("\" y=\"");
@@ -721,20 +764,25 @@ impl PlotSink for SvgSink {
                 self.body.push_str("\" height=\"");
                 num(&mut self.body, height as f64, d);
                 self.body.push('"');
-                self.fill_attributes(FillRule::NonZero);
+                self.blend_attribute();
                 self.body.push_str("/>\n");
                 self.report.elements += 1;
             }
             PlotOp::Stroke { points, closed } => {
-                self.body.push_str("<path");
-                self.stroke_attributes()?;
+                self.begin_style_run()?;
+                self.body.push_str("<path fill=\"none\"");
+                self.blend_attribute();
                 self.path_data(&[points.as_slice()], closed)?;
                 self.body.push_str("/>\n");
                 self.report.elements += 1;
             }
             PlotOp::Fill { rings, rule } => {
-                self.body.push_str("<path");
-                self.fill_attributes(rule);
+                self.begin_style_run()?;
+                self.body.push_str("<path stroke=\"none\"");
+                if rule == FillRule::EvenOdd {
+                    self.body.push_str(" fill-rule=\"evenodd\"");
+                }
+                self.blend_attribute();
                 let refs: Vec<&[PlotPoint]> = rings.iter().map(|r| r.as_slice()).collect();
                 self.path_data(&refs, true)?;
                 self.body.push_str("/>\n");
@@ -759,8 +807,9 @@ impl PlotSink for SvgSink {
                 if rings.is_empty() {
                     return Ok(());
                 }
-                self.body.push_str("<path");
-                self.fill_attributes(FillRule::NonZero);
+                self.begin_style_run()?;
+                self.body.push_str("<path stroke=\"none\"");
+                self.blend_attribute();
                 self.path_data(&rings, true)?;
                 self.body.push_str("/>\n");
                 self.report.elements += 1;
@@ -869,10 +918,15 @@ fn mesh_outline(tris: &[[PlotPoint; 3]]) -> Option<Vec<Vec<PlotPoint>>> {
 /// A coordinate is written in the pre-CTM space, so its rounding error reaches
 /// the sheet multiplied by the plot scale and by points → mm: the written
 /// error `½·10⁻ᵈ` must satisfy `½·10⁻ᵈ · s · PT_TO_MM ≤ budget`.
+///
+/// Nine tenths of a plotted sheet's bytes are coordinates, so the budget is
+/// what decides this and not a round number: at 1:1 it asks for three
+/// decimals, and a digit per coordinate is about a tenth of the file. A scale
+/// above 1 magnifies the rounding and buys more digits back.
 fn auto_decimals(scale: f64) -> usize {
     let factor = scale.max(1.0) * PT_TO_MM;
     let needed = (factor / (2.0 * COORD_BUDGET_MM)).log10().ceil();
-    (needed.max(4.0) as usize).min(9)
+    (needed.max(1.0) as usize).min(9)
 }
 
 /// A number with at most `decimals` places, trailing zeros and a trailing
