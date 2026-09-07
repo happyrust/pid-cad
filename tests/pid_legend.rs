@@ -1413,6 +1413,35 @@ const SHEETS: &[Expected] = &[
         ),
         vents_in_line: (6, "200-FW"),
     },
+    Expected {
+        file: "DWG-0100FF02-07 罐组II泡沫混合液流程图.dxf",
+        butterfly: 30,
+        evalve: 8,
+        tanks: 8,
+        field_bubbles: 16,
+        panel_bubbles: 8,
+        total: 155,
+        pipe_strokes: 196,
+        runs: 192,
+        // The eight open ends are the 1/2" NPT stubs. The foam lines and
+        // the water lines share this sheet: the butterfly valves sit in the
+        // foam branches, the motorised valves and vent stubs in the water
+        // header.
+        connected_ports: (178, 218),
+        open_ends: 8,
+        evalve_line: "150-FW",
+        butterfly_line: (
+            &[
+                "BUV-3217", "BUV-3218", "BUV-3219", "BUV-3220", "BUV-3221", "BUV-3222", "BUV-3223",
+                "BUV-3224", "BUV-3225", "BUV-3226", "BUV-3227", "BUV-3228", "BUV-3229", "BUV-3230",
+                "BUV-3231", "BUV-3232", "BUV-3233", "BUV-3234", "BUV-3235", "BUV-3236", "BUV-3237",
+                "BUV-3238", "BUV-3239", "BUV-3240", "BUV-3241", "BUV-3242", "BUV-3243", "BUV-3244",
+                "BUV-3245", "BUV-3246",
+            ],
+            "80-FS",
+        ),
+        vents_in_line: (8, "150-FW"),
+    },
 ];
 
 #[test]
