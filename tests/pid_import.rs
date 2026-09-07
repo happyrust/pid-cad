@@ -1272,6 +1272,93 @@ fn a_symbol_name_is_lettered_beside_the_symbol_it_names() {
     }
 }
 
+/// A drawing opened away from any symbol library still draws its symbols.
+///
+/// A `.pid` carries a copy of every symbol definition it places -- the same
+/// records the `.sym` holds, in the same symbol-local coordinates -- and each
+/// placement names its copy. Until this landed a drawing without the
+/// reference share drew every placement as a 1.5mm marker dot; now it draws
+/// the body the file itself carries: the PT transmitter's two balloon
+/// circles at their radii, no marker left, and every circle a radius the
+/// library body also draws.
+///
+/// The two routes are not asserted equal, because they are not: the library
+/// reader merges every `Sheet*` stream of a `.sym`, and `Ball Valve Type 1`
+/// carries a second sheet (a 1.59mm circle and six lines) that the drawing's
+/// own copy of the placed body does not include. The cache is the flavour
+/// SmartPlant placed; which of the two the screen should prefer is recorded
+/// as an open question in pid-parse's
+/// `docs/analysis/2026-09-07-placement-tail-names-the-cached-definition.md`.
+///
+/// The library is found by walking up from the drawing, so the fixture is
+/// copied into a fresh temp directory to take it away. Skips when
+/// `PID_SYMBOL_LIBRARY` is set, since that would hand the library back.
+#[test]
+fn a_placement_without_a_library_body_draws_the_body_the_drawing_carries() {
+    if std::env::var_os("PID_SYMBOL_LIBRARY").is_some() {
+        eprintln!("skipping: PID_SYMBOL_LIBRARY is set, so no import is library-less");
+        return;
+    }
+    let Some(source) = fixture("D06.pid") else {
+        return;
+    };
+    let Some(with_library) = import("D06.pid") else {
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!(
+        "ocs-pid-embedded-body-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let copy = dir.join("D06.pid");
+    std::fs::copy(&source, &copy).expect("copy fixture");
+    let without_library =
+        OpenCADStudio::io::load_file(&copy).unwrap_or_else(|error| panic!("load copy: {error}"));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let radii = |doc: &CadDocument| -> Vec<f64> {
+        let mut radii: Vec<f64> = on_layer(doc, "PID-SYMBOL")
+            .filter_map(|entity| match entity {
+                EntityType::Circle(circle) => Some((circle.radius * 100.0).round() / 100.0),
+                _ => None,
+            })
+            .collect();
+        radii.sort_by(f64::total_cmp);
+        radii
+    };
+    let library_radii = radii(&with_library);
+    let embedded_radii = radii(&without_library);
+    assert!(
+        !embedded_radii.contains(&1.5),
+        "a placement still fell back to the 1.5mm marker: {embedded_radii:?}"
+    );
+    for balloon in [6.35, 7.57] {
+        assert!(
+            embedded_radii.contains(&balloon),
+            "the PT transmitter's {balloon}mm balloon is missing from the embedded body: {embedded_radii:?}"
+        );
+    }
+    assert!(
+        embedded_radii
+            .iter()
+            .all(|radius| library_radii.contains(radius)),
+        "an embedded body drew a circle no library body draws: embedded {embedded_radii:?}, library {library_radii:?}"
+    );
+    // Six placements, each a real body of several strokes rather than one
+    // marker: the count is well past six and in the library's neighbourhood.
+    let embedded = on_layer(&without_library, "PID-SYMBOL").count();
+    let library = on_layer(&with_library, "PID-SYMBOL").count();
+    assert!(
+        embedded >= 30 && embedded <= library,
+        "the embedded bodies drew {embedded} entities against the library's {library}"
+    );
+}
+
 /// Every straight run an entity draws, as endpoint pairs.
 fn segments_of(entity: &EntityType) -> Vec<((f64, f64), (f64, f64))> {
     match entity {

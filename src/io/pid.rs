@@ -404,6 +404,7 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     let mut decoded = 0usize;
     let mut drawn = 0usize;
     let mut lettering_on_fallback = 0usize;
+    let mut embedded_bodies_drawn = 0usize;
     let mut sheet_layer_distribution: BTreeMap<(String, u32, Option<String>), usize> =
         BTreeMap::new();
     for entity in &geometry.entities {
@@ -420,15 +421,28 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         // project library, so an unnamed style is one drawn in this file.
         let line_work = discipline_for(&style_names, entity, symbology);
         let line_work = line_work.as_deref().unwrap_or(LAYER_GEOMETRY);
+        // The body the drawing itself carries for a placement, for when the
+        // library has none. See `build_entities`.
+        let embedded_body = match &entity.kind {
+            PidGraphicKind::SymbolInstance {
+                definition: Some(definition),
+                ..
+            } => geometry
+                .symbol_definition(*definition)
+                .map(|body| body.primitives.as_slice()),
+            _ => None,
+        };
         let built = match entity.confidence {
             PidGeometryConfidence::Decoded => match fill {
                 Some(fill) => build_fill(&entity.kind, fill, projection),
                 None => build_entities(
                     &entity.kind,
                     library.as_mut(),
+                    embedded_body,
                     projection,
                     symbology,
                     line_work,
+                    &mut embedded_bodies_drawn,
                 ),
             },
             PidGeometryConfidence::Inferred => build_inferred(&entity.kind, projection),
@@ -535,6 +549,7 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         library.as_ref(),
         drawn,
         lettering_on_fallback,
+        embedded_bodies_drawn,
         &sheet_layer_distribution,
     );
     // The headline the open-completion handler shows on the command line;
@@ -726,8 +741,19 @@ fn report_import(
     library: Option<&SymbolLibrary>,
     drawn: usize,
     lettering_on_fallback: usize,
+    embedded_bodies_drawn: usize,
     sheet_layer_distribution: &BTreeMap<(String, u32, Option<String>), usize>,
 ) {
+    // Placements the library could not supply a body for, drawn from the
+    // copy the drawing carries inside itself instead. Information rather
+    // than a warning: the body is the drawing's own, and it is the same
+    // body the library would have drawn.
+    if embedded_bodies_drawn > 0 {
+        log::info!(
+            "{}: {embedded_bodies_drawn} symbol placement(s) drew the body the drawing carries in its own definition cache, the library having none for them",
+            path.display()
+        );
+    }
     for warning in &geometry.warnings {
         log::debug!("{}: {warning}", path.display());
     }
@@ -1482,9 +1508,11 @@ fn build_dash_linetype(name: &str, dash: &DashPattern) -> LineType {
 fn build_entities(
     kind: &PidGraphicKind,
     library: Option<&mut SymbolLibrary>,
+    embedded_body: Option<&[SymbolPrimitive]>,
     projection: Projection,
     symbology: Option<&ResolvedLineStyle>,
     line_work: &str,
+    embedded_bodies_drawn: &mut usize,
 ) -> Vec<EntityType> {
     match kind {
         PidGraphicKind::Line { start, end } => {
@@ -1554,6 +1582,7 @@ fn build_entities(
             symbol_path,
             rotation,
             scale,
+            ..
         } => {
             let placement = Placement {
                 insertion,
@@ -1571,6 +1600,29 @@ fn build_entities(
                         .filter_map(|primitive| place_primitive(primitive, &placement))
                         .collect::<Vec<_>>()
                 });
+
+            // Without a library body, the drawing's own copy of the
+            // definition. A `.pid` caches every symbol it places inside
+            // itself -- the same records the `.sym` holds, in the same
+            // symbol-local coordinates -- and `pid-parse` hands that body over
+            // keyed by the placement's own definition reference. It carries no
+            // stroke style of its own; `apply_symbology` repaints the body in
+            // the placement's style afterwards, exactly as it does a library
+            // body, so the two routes end up in the same colour and width.
+            // Measured in pid-parse's `docs/analysis/
+            // 2026-09-07-placement-tail-names-the-cached-definition.md`.
+            let body = body.or_else(|| {
+                let primitives = embedded_body?;
+                let entities: Vec<EntityType> = primitives
+                    .iter()
+                    .filter_map(|primitive| shape_primitive(primitive, &placement))
+                    .collect();
+                if entities.is_empty() {
+                    return None;
+                }
+                *embedded_bodies_drawn += 1;
+                Some(entities)
+            });
 
             // Only fall back to the marker when the body is genuinely
             // unavailable. A symbol that resolved to real geometry should not
