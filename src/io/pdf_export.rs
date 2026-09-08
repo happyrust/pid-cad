@@ -630,6 +630,43 @@ mod tests {
         }
     }
 
+    // R4. The comparison above cannot see this one: the frozen exporter had
+    // the same blind spot, so it asks the stream what cap each line is
+    // actually drawn with. The first group ends on a CTB butt / miter wire;
+    // nothing between the groups restores the graphics state; the plain wire
+    // that opens the second group is round by default and must be drawn
+    // round — which takes saying so again.
+    #[test]
+    fn the_second_group_says_round_again_after_a_ctb_butt() {
+        let case = corpus()
+            .into_iter()
+            .find(|c| c.name == "two groups, ctb cap across the split")
+            .unwrap();
+        let mut cap = LineCapStyle::Butt;
+        let mut join = LineJoinStyle::Miter;
+        let mut stack = Vec::new();
+        let mut drawn = Vec::new();
+        for op in new_ops(&case) {
+            match op {
+                Op::SetLineCapStyle { cap: c } => cap = c,
+                Op::SetLineJoinStyle { join: j } => join = j,
+                Op::SaveGraphicsState => stack.push((cap, join)),
+                Op::RestoreGraphicsState => (cap, join) = stack.pop().unwrap(),
+                Op::DrawLine { .. } => drawn.push((cap, join)),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            drawn,
+            [
+                (LineCapStyle::Butt, LineJoinStyle::Miter),
+                (LineCapStyle::Round, LineJoinStyle::Round),
+                (LineCapStyle::Butt, LineJoinStyle::Miter),
+            ],
+            "g1-butt, g2-round, g2-butt"
+        );
+    }
+
     // The corpus must actually reach every op kind the exporter can emit,
     // otherwise the comparison above proves less than it claims.
     #[test]

@@ -1,7 +1,7 @@
 # 开发计划：SVG 导出 · 第二阶段（P4–P7）
 
 > 日期：2026-09-08
-> 状态：§6 五条已于 2026-09-08 拍板（全按建议）；**P4.1 已实施**（§8），其余待做。
+> 状态：§6 五条已于 2026-09-08 拍板（全按建议）；**P4.1 已实施**（§8）、**P5.1 已实施**（§9），其余待做。
 > 前置：`docs/plans/2026-09-07-dxf-to-svg-export.md`（v2）——P0 / P1 / P2（web 除外）/ R3 第一轮 / R1 已实施。
 > 本文件只写「还没做的」与「怎么做」；已实施部分的记录仍在 v2 的 §11–§15，不重复。
 
@@ -95,7 +95,7 @@ v2 计划的 §11–§15 与代码逐条对得上。
 
 ### P5 债务与验收补齐
 
-**P5.1 R4 修复（G2）**
+**P5.1 R4 修复（G2）** — ✓ 已实施，记录在 §9
 
 - 修法：每个 render group 开头 `last_cap = None; last_join = None`（首根 wire 必发一次 cap/join），或在组边界显式发
   `LineCap(Round)/LineJoin(Round)`——取前者，Op 更少且语义直白。
@@ -221,3 +221,33 @@ v2 计划的 §11–§15 与代码逐条对得上。
 **这一期没做的**：web 多页（等 G4，§6 Q1）；`.svgz` 下载（web 没有「按扩展名决定压缩」的入口，首版只出 `.svg`）；
 `on_plot_export_path_some`（PDF）里同一段「纸空间先装页面设置」还是自己的一份，没有并进 `current_view_svg_job`——
 那是 PDF 路径的改动，留给碰 PDF 时顺手做。
+
+## 9. P5.1 实施记录（2026-09-08）
+
+**修法**：与 §3 写的「每组开头置 `None`」不同——那样每一页第一组的首根 wire 都会多发一对 Round，17 例全变。
+实际取的是**把 `last_cap` / `last_join` 提到组循环外**，用前奏刚发出的 Round 起始：组间没有 `Save/Restore`，图形状态
+本来就是连续的，追踪器跟着连续即可。这样只有「第一组以非 Round 结尾、第二组要 Round」那一类多出两个 op，其余逐位不变。
+`legacy_reference.rs` 同一处同样改法（文件头写明这是冻结后唯一一次有意改动、同一提交）。
+
+| 文件 | 内容 |
+|---|---|
+| `src/io/plot_corpus.rs` | 反例 **`two groups, ctb cap across the split`**：`g1-butt`（ACI 1 → butt/miter）单独一组；第二组 `g2-round`（普通白线，默认 Round）+ `g2-butt`（ACI 1 再切回）。语料 17 → 18 例 |
+| `src/io/plot_emit.rs` | 追踪器提到组循环外（+注释说明为什么组边界不是重置） |
+| `src/io/pdf_export/legacy_reference.rs` | 同步同一改动 |
+| `src/io/pdf_export.rs` | `the_second_group_says_round_again_after_a_ctb_butt`：走 `new_ops` 的 Op 流，按 `Save/Restore` 栈追踪 cap/join，三条 `DrawLine` 依次必须是 (Butt,Miter) / (Round,Round) / (Butt,Miter) |
+| `src/io/svg_export/tests.rs` | `a_ctb_cap_left_by_the_first_group_does_not_leak_into_the_second`：**问写出的 SVG**（usvg 解析回来的 `stroke-linecap/linejoin`），不问 Op 流——第二层对比两边一起错时看不见这个 bug |
+
+**出口条件对照**：
+
+- 反例修前红、修后绿：两条新用例修前都失败，实际都是 `[(Butt, Miter) ×3]`；修 emitter 不修冻结文件时，
+  `emitter_through_pdf_sink_matches_the_frozen_exporter_op_for_op` 只在反例上红（`legacy 22 ops, new 24 ops`，
+  第 11 个 op 处多出 `SetLineCapStyle{Round}` / `SetLineJoinStyle{Round}`），其余 17 例照旧绿；冻结文件同步后全绿。
+- 其余用例逐位不变：把 18 例的 `exact(normalized(new_ops))` 在修前 / 修后各 dump 一遍（单独跑、不并行，避开共享字形图集
+  的抖动），17 个旧例文件哈希相同，只有反例多出那两行。第一次并行 dump 时 `ctb` 两例看似不同，是文字走共享图集被别的
+  测试重烘导致的，与 R4 无关——单独跑即相同。
+- `saved_pdf_bytes_match_the_frozen_exporter_apart_from_the_trailer_id` 仍绿。
+- `cargo test --lib -- io::svg_export io::pdf_export app::automation` **65 过 / 0 败 / 2 忽略**（§8 的 63 + 新 2）。
+- rustfmt 对五个改动文件 0 diff；clippy 对改动的行 0 告警（`plot_emit.rs` 的 4 条是既有的、不在改动处）。
+- 真图：11 张 P&ID 用修后的 debug 二进制重跑 `--plot-svg … --model --paper A1 --landscape --fit`，**11/11 与 R1 批次
+  （= R3 批次）SHA-256 逐字节相同**（8–15 s / 张）。意料之中：`--model` 出图第一组为空，追踪器起始就是前奏的 Round；
+  会多两个 op 的只有「纸空间组以 CTB butt/miter 结尾、模型空间组以 Round 开头」的布局出图。

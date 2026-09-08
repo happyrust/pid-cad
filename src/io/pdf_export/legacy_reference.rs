@@ -160,6 +160,15 @@ pub(super) fn legacy_page_ops(
         hatches.split_at(options.group_splits.hatches.min(hatches.len()));
     let (first_wipeouts, second_wipeouts) =
         wipeouts.split_at(options.group_splits.wipeouts.min(wipeouts.len()));
+    // The one deliberate change since the freeze (2026-09-08, R4 of
+    // docs/plans/2026-09-08-svg-export-next-steps.md): cap and join are
+    // tracked across both render groups instead of being presumed Round at
+    // the start of each. The original re-declared them inside the loop, and
+    // a first group ending on a CTB butt / miter drew the second group's
+    // round wires butt / miter. Moved here in the same commit as the shared
+    // emitter, per the header.
+    let mut last_cap = Some(LineCapStyle::Round);
+    let mut last_join = Some(LineJoinStyle::Round);
     for (wires, hatches, wipeouts) in [
         (first_wires, first_hatches, first_wipeouts),
         (second_wires, second_hatches, second_wipeouts),
@@ -197,8 +206,6 @@ pub(super) fn legacy_page_ops(
 
         let mut last_color: Option<[f32; 3]> = None;
         let mut last_lw: Option<f32> = None;
-        let mut last_cap = Some(LineCapStyle::Round);
-        let mut last_join = Some(LineJoinStyle::Round);
         // Current PDF dash array (empty = solid). Tracked so the dash op is only
         // re-emitted when it actually changes between wires.
         let mut last_dash: Option<Vec<i64>> = None;

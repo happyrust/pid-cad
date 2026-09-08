@@ -671,6 +671,41 @@ fn move_first_point(svg: &str) -> String {
     format!("{}{}{}", &svg[..at], x + 5.0, &svg[end..])
 }
 
+// ── R4: cap and join across the render groups ─────────────────────────────
+
+#[test]
+fn a_ctb_cap_left_by_the_first_group_does_not_leak_into_the_second() {
+    // Layer 2 cannot see this: it compares the file with the emitter's own
+    // stream, and when the emitter forgets to say Round both sides agree on
+    // the wrong cap. So this asks the written file directly. Three strokes,
+    // one per 10 mm: the CTB wire ending group one is butt / miter; the plain
+    // wire opening group two is round by default and must come out round on
+    // paper; the CTB wire after it is butt / miter again.
+    let case = corpus()
+        .into_iter()
+        .find(|c| c.name == "two groups, ctb cap across the split")
+        .unwrap();
+    let (svg, _) = write(&case);
+    let mut strokes: Vec<Shape> = actual_shapes(&parse(&svg), case.paper.0)
+        .into_iter()
+        .filter(|s| matches!(s.paint, Paint::Stroke { .. }))
+        .collect();
+    assert_eq!(strokes.len(), 3, "three wires, three strokes");
+    // Document order is draw order; sort by the wire's height on the sheet
+    // (Y down, so the lowest wire has the largest y) to name them.
+    strokes.sort_by(|a, b| b.rings[0][0][1].total_cmp(&a.rings[0][0][1]));
+    let caps: Vec<(LineCap, LineJoin)> = strokes.iter().map(|s| (s.cap, s.join)).collect();
+    assert_eq!(
+        caps,
+        [
+            (LineCap::Butt, LineJoin::Miter),
+            (LineCap::Round, LineJoin::Round),
+            (LineCap::Butt, LineJoin::Miter),
+        ],
+        "g1-butt, g2-round, g2-butt"
+    );
+}
+
 // ── The serialisation contract (§8) ───────────────────────────────────────
 
 #[test]

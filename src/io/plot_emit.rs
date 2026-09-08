@@ -456,6 +456,17 @@ pub fn emit_plot_content<S: PlotSink>(
         hatches.split_at(options.group_splits.hatches.min(hatches.len()));
     let (first_wipeouts, second_wipeouts) =
         wipeouts.split_at(options.group_splits.wipeouts.min(wipeouts.len()));
+    // Cap and join are the graphics state's, and nothing between the two
+    // render groups saves or restores it: the second group starts with
+    // whatever the first left set. So the tracker lives outside the loop,
+    // primed with the Round the prelude just emitted, and a group boundary
+    // is not a reset. (Colour, pen and dash below are simply forgotten at
+    // each group, which costs a redundant op at worst; a cap presumed Round
+    // at the boundary let a first group that ended butt / miter draw the
+    // second group's round wires butt / miter — R4 of
+    // docs/plans/2026-09-08-svg-export-next-steps.md.)
+    let mut last_cap = Some(LineCap::Round);
+    let mut last_join = Some(LineJoin::Round);
     for (wires, hatches, wipeouts) in [
         (first_wires, first_hatches, first_wipeouts),
         (second_wires, second_hatches, second_wipeouts),
@@ -493,8 +504,6 @@ pub fn emit_plot_content<S: PlotSink>(
 
         let mut last_color: Option<[f32; 3]> = None;
         let mut last_lw: Option<f32> = None;
-        let mut last_cap = Some(LineCap::Round);
-        let mut last_join = Some(LineJoin::Round);
         // Current dash array (empty = solid). Tracked so the dash op is only
         // re-emitted when it actually changes between wires.
         let mut last_dash: Option<Vec<i64>> = None;

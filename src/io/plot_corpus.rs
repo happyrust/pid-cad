@@ -635,6 +635,41 @@ pub fn corpus() -> Vec<Case> {
     cases.push(clamped);
     cases.push(m);
 
+    // R4: the first group ends on a CTB butt / miter wire, the second opens
+    // with a plain wire that is round by default. Nothing between the groups
+    // restores the graphics state, so the emitter has to say Round again —
+    // and until 2026-09-08 it believed it already had. A second CTB wire
+    // follows so the stream toggles back, which is the normal case.
+    let mut c = Case::new("two groups, ctb cap across the split");
+    c.plot_style = Some(styled_ctb());
+    let mut butt = wire(
+        "g1-butt",
+        vec![[0.0, 0.0, 0.0], [40.0, 0.0, 0.0]],
+        [0.9, 0.2, 0.2, 1.0],
+        0.5,
+    );
+    butt.wire.aci = 1;
+    c.wires.push(butt);
+    c.wires.push(wire(
+        "g2-round",
+        vec![[0.0, 10.0, 0.0], [40.0, 10.0, 0.0]],
+        WireModel::WHITE,
+        0.5,
+    ));
+    let mut butt_again = wire(
+        "g2-butt",
+        vec![[0.0, 20.0, 0.0], [40.0, 20.0, 0.0]],
+        [0.9, 0.2, 0.2, 1.0],
+        0.6,
+    );
+    butt_again.wire.aci = 1;
+    c.wires.push(butt_again);
+    c.options.group_splits = PlotGroupSplits {
+        wires: 1,
+        ..Default::default()
+    };
+    cases.push(c);
+
     // An empty page still gets its background and state ops.
     cases.push(Case::new("empty page"));
 
