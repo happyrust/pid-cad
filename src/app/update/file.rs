@@ -1054,7 +1054,9 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         Ok(bytes)
     }
 
-    /// Start the next drawing a second launch handed us, if any.
+    /// Start the next drawing a second launch handed us, if any. Once the
+    /// queue is empty — the startup opens have settled — flush any `--script`
+    /// lines that were waiting for a drawing to exist (see `startup_script`).
     ///
     /// Must be called from EVERY path that clears `opening` — completion, error
     /// and cancel alike. Draining only the success path would strand the queue
@@ -1062,8 +1064,25 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
     pub(in crate::app) fn drain_pending_open(&mut self) -> Task<Message> {
         match self.pending_opens.pop_front() {
             Some(p) => Task::done(Message::OpenExternal(p)),
-            None => Task::none(),
+            None => self.flush_startup_script(),
         }
+    }
+
+    /// Dispatch the stashed `--script` lines, at most once. The active tab is
+    /// the drawing that just finished opening, so a command like
+    /// `PIDLEGEND ON` now has its sheet. On the cancel and failed-open paths
+    /// the lines run against whatever tab is left, exactly as if they had been
+    /// typed at that moment.
+    pub(in crate::app) fn flush_startup_script(&mut self) -> Task<Message> {
+        if self.startup_script.is_empty() {
+            return Task::none();
+        }
+        let lines = std::mem::take(&mut self.startup_script);
+        Task::batch(
+            lines
+                .into_iter()
+                .map(|line| Task::done(Message::Command(line))),
+        )
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -5506,6 +5525,31 @@ mod read_only_source_hygiene_tests {
         assert_eq!(
             app.autosave_target(i),
             dwg.with_file_name(format!("{name}.ocs-autosave.sv$")),
+        );
+    }
+
+    /// `--script` lines stashed at boot flush only when the open queue has
+    /// settled. Dispatching them while a startup drawing was still loading hit
+    /// the Start tab ("no drawing open") and dropped them — a script of
+    /// `PIDLEGEND ON` drew nothing.
+    #[test]
+    fn a_startup_script_waits_for_the_open_queue_to_settle() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.startup_script = vec!["PIDLEGEND ON".into()];
+        app.pending_opens
+            .push_back(std::path::PathBuf::from("queued.dxf"));
+
+        let _ = app.drain_pending_open();
+        assert_eq!(
+            app.startup_script,
+            vec!["PIDLEGEND ON".to_string()],
+            "script must wait while drawings are still queued"
+        );
+
+        let _ = app.drain_pending_open();
+        assert!(
+            app.startup_script.is_empty(),
+            "an empty queue flushes the script exactly once"
         );
     }
 }

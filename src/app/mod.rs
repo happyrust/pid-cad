@@ -648,6 +648,8 @@ pub(super) struct OpenCADStudio {
     show_properties: bool,
     /// Docked Insert Block panel visibility.
     pub(crate) show_block_palette: bool,
+    /// Docked P&ID legend list visibility (PIDLEGEND LIST).
+    pub(crate) show_pid_legend_list: bool,
     /// General edge-stack dock layout for the side panels.
     pub(crate) dock: crate::ui::dock::DockState,
     /// Which panel is currently floated at full height (hovered, or a pinned
@@ -1071,6 +1073,13 @@ pub(super) struct OpenCADStudio {
     /// drawings in a file manager produces exactly that (one process per file,
     /// all arriving at once), which makes this queue load-bearing, not polish.
     pub(super) pending_opens: std::collections::VecDeque<PathBuf>,
+    /// `--script` lines waiting for the startup opens to finish. Dispatching
+    /// them straight from `boot` raced the async DXF load: the command hit the
+    /// Start tab ("no drawing open") seconds before the drawing appeared, so a
+    /// script like `PIDLEGEND ON` silently did nothing. `drain_pending_open`
+    /// flushes these once the open queue settles — every path that clears
+    /// `opening` funnels through it.
+    pub(super) startup_script: Vec<String>,
     /// One global interaction-index build at a time. Large drawings can each
     /// hold millions of entries, so file-open bursts must not multiply peak
     /// CPU and memory by the number of tabs.
@@ -2980,6 +2989,9 @@ pub enum Message {
     PlotDlg(crate::ui::window::plot::PlotDlgMsg),
     /// An edit inside the docked Insert Block panel.
     BlockPalette(crate::ui::window::block_palette::BlockPaletteMsg),
+    /// A row click in the P&ID legend list: zoom the model camera to the
+    /// world-space rectangle (already padded by the panel).
+    PidLegendJump { min: (f64, f64), max: (f64, f64) },
     /// A dock chrome interaction (grab/resize/pin/hover/dock move) on a side
     /// panel.
     Dock(crate::ui::dock::DockMsg),
@@ -3443,6 +3455,7 @@ impl OpenCADStudio {
             render_mode_preview: None,
             show_properties: true,
             show_block_palette: false,
+            show_pid_legend_list: false,
             block_palette: Default::default(),
             dock: Default::default(),
             dock_expanded: None,
@@ -3543,6 +3556,7 @@ impl OpenCADStudio {
             open_job_serial: 0,
             recovery_report: None,
             pending_opens: std::collections::VecDeque::new(),
+            startup_script: Vec::new(),
             active_interaction_index: None,
             queued_interaction_indices: std::collections::VecDeque::new(),
             pending_close: None,
@@ -3853,7 +3867,8 @@ impl OpenCADStudio {
         // `--read-only` disables saving. `--script` queues command lines.
         let cfg = crate::cli::gui_config();
         s.read_only = cfg.read_only;
-        let cli_open: Task<Message> = if !cfg.files.is_empty() {
+        let has_files = !cfg.files.is_empty();
+        let cli_open: Task<Message> = if has_files {
             Task::batch(
                 cfg.files
                     .into_iter()
@@ -3865,8 +3880,16 @@ impl OpenCADStudio {
             Task::none()
         };
         // Startup command script: each line dispatched as if typed at the
-        // command line, in order, after any file open is requested.
+        // command line, in order. With file arguments the lines must wait for
+        // the drawings to actually load — the DXF parse is asynchronous and a
+        // command dispatched now would hit the Start tab ("no drawing open")
+        // and be dropped. They are stashed and flushed by
+        // `drain_pending_open` when the open queue settles. Without files
+        // (`--new` opens its tab synchronously) they dispatch right away.
         let script: Task<Message> = if cfg.script_lines.is_empty() {
+            Task::none()
+        } else if has_files {
+            s.startup_script = cfg.script_lines;
             Task::none()
         } else {
             Task::batch(

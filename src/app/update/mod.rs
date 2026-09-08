@@ -502,6 +502,8 @@ impl OpenCADStudio {
                     // Recents are read from disk every save → the path may be
                     // stale. Skip silently if the file no longer exists; the
                     // entry stays in the list so the user can clean it up.
+                    // Draining keeps a missing path from stranding drawings
+                    // queued behind it or a stashed `--script`.
                     return match std::fs::metadata(&path) {
                         Ok(m) => self.update(Message::OpenPathPicked(Some((path, m.len())))),
                         Err(_) => {
@@ -509,7 +511,7 @@ impl OpenCADStudio {
                                 "Recent file no longer exists: {}",
                                 path.display()
                             ).as_ref());
-                            Task::none()
+                            self.drain_pending_open()
                         }
                     };
                 }
@@ -7190,6 +7192,15 @@ impl OpenCADStudio {
             Message::PlotDialogOpen => self.on_plot_dialog_open(),
             Message::PlotDlg(m) => self.on_plot_dlg(m),
             Message::BlockPalette(m) => self.on_block_palette(m),
+            Message::PidLegendJump { min, max } => {
+                let i = self.active_tab;
+                self.tabs[i].scene.remember_current_view();
+                self.tabs[i].scene.zoom_to_window(
+                    glam::Vec3::new(min.0 as f32, min.1 as f32, 0.0),
+                    glam::Vec3::new(max.0 as f32, max.1 as f32, 0.0),
+                );
+                Task::none()
+            }
             Message::Dock(m) => self.on_dock(m),
             Message::PrintAllOpen => self.on_print_all_open(),
             Message::PrintAllToggle(name) => {

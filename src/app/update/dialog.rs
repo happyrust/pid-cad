@@ -630,6 +630,9 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                         self.show_properties = false;
                         self.ribbon.set_properties(false);
                     }
+                    PanelId::PidLegend => {
+                        self.show_pid_legend_list = false;
+                    }
                 }
                 if self.dock_expanded == Some(id) {
                     self.dock_expanded = None;
@@ -719,6 +722,7 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
         match id {
             PanelId::Properties => self.show_properties,
             PanelId::BlockPalette => self.show_block_palette,
+            PanelId::PidLegend => self.show_pid_legend_list,
         }
     }
 

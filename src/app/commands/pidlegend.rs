@@ -7,11 +7,18 @@
 //! again.
 //!
 //! ```text
-//! PIDLEGEND            prompt with the three verbs below (Enter = ON)
+//! PIDLEGEND            prompt with the verbs below (Enter = ON)
 //! PIDLEGEND ON         recognise, then draw (replacing an earlier legend)
 //! PIDLEGEND OFF        remove the legend entities (layers stay, empty)
 //! PIDLEGEND REPORT     recognise and print the summary, draw nothing
+//! PIDLEGEND LIST       toggle the docked legend list panel (recognising
+//!                      first when this sheet has not been read yet)
 //! ```
+//!
+//! ON and REPORT stash the recognition on the tab; the legend list panel
+//! (`ui::window::pid_legend_list`) renders it and its rows zoom to symbols
+//! and pipe lines. ON also opens the panel — the list is the index of what
+//! was just drawn.
 //!
 //! Bare `PIDLEGEND` only prompts, like bare `PURGE`: the command driver
 //! dispatches the first word of any inline line on its own before the whole
@@ -34,11 +41,12 @@ impl OpenCADStudio {
             use crate::command::KeywordCommand;
             let c = KeywordCommand::new(
                 "PIDLEGEND",
-                "PIDLEGEND  [ON / OFF / REPORT] <ON>:",
+                "PIDLEGEND  [ON / OFF / REPORT / LIST] <ON>:",
                 vec![
                     ("ON", "ON", None),
                     ("OFF", "OFF", None),
                     ("REPORT", "REPORT", None),
+                    ("LIST", "LIST", None),
                 ],
             )
             .with_default("ON");
@@ -67,6 +75,24 @@ impl OpenCADStudio {
                 let recognition = pid_legend::recognise(&self.tabs[i].scene.document, &rules);
                 for line in pid_legend::report(&recognition) {
                     self.command_line.push_output(&line);
+                }
+                self.tabs[i].pid_legend = Some(recognition);
+            }
+            "LIST" => {
+                if self.show_pid_legend_list {
+                    self.show_pid_legend_list = false;
+                } else {
+                    if self.tabs[i].pid_legend.is_none() {
+                        let rules = Rules::load();
+                        let recognition =
+                            pid_legend::recognise(&self.tabs[i].scene.document, &rules);
+                        self.command_line.push_output(&format!(
+                            "PIDLEGEND: {} symbols listed. PIDLEGEND ON draws them.",
+                            recognition.symbols.len()
+                        ));
+                        self.tabs[i].pid_legend = Some(recognition);
+                    }
+                    self.open_pid_legend_panel();
                 }
             }
             "ON" => {
@@ -127,14 +153,26 @@ impl OpenCADStudio {
                         String::new()
                     }
                 ));
+                self.tabs[i].pid_legend = Some(recognition);
+                self.open_pid_legend_panel();
             }
             other => {
                 self.command_line.push_error(&format!(
-                    "PIDLEGEND: unknown option \"{other}\" -- use ON, OFF or REPORT."
+                    "PIDLEGEND: unknown option \"{other}\" -- use ON, OFF, REPORT or LIST."
                 ));
             }
         }
         Some(Task::none())
+    }
+
+    /// Show the legend list panel, docking it on the right the first time.
+    fn open_pid_legend_panel(&mut self) {
+        use crate::ui::dock::PanelId;
+        if self.dock.location(PanelId::PidLegend).is_none() {
+            self.dock
+                .dock(PanelId::PidLegend, crate::app::config::DockSide::Right, 0);
+        }
+        self.show_pid_legend_list = true;
     }
 }
 
@@ -185,6 +223,19 @@ mod tests {
 
         let _ = app.run_command_line("PIDLEGEND ON");
         assert_eq!(legend_count(&app), expected);
+        // ON stashes the recognition for the legend list panel and opens it.
+        assert_eq!(
+            app.tabs[i].pid_legend.as_ref().map(|r| r.symbols.len()),
+            Some(118),
+            "recognition stored on the tab"
+        );
+        assert!(app.show_pid_legend_list, "ON opens the legend list");
+        assert!(
+            app.dock
+                .location(crate::ui::dock::PanelId::PidLegend)
+                .is_some(),
+            "panel got a dock slot"
+        );
         let layer = app.tabs[i]
             .scene
             .document
@@ -216,6 +267,39 @@ mod tests {
         let _ = app.run_command_line("PIDLEGEND OFF");
         assert_eq!(legend_count(&app), 0);
         assert_eq!(app.tabs[i].scene.document.entities().count(), before);
+        assert!(
+            app.tabs[i].pid_legend.is_some(),
+            "the list stays browsable after OFF"
+        );
+    }
+
+    /// LIST recognises without drawing and toggles the docked panel.
+    #[test]
+    fn pidlegend_list_fills_the_panel_without_drawing() {
+        let mut app = OpenCADStudio::new_for_test();
+        if !open_sheet(&mut app, "DWG-0100FF02-06 罐组II消防冷却水流程图.dxf") {
+            return;
+        }
+        let i = app.active_tab;
+        assert!(app.tabs[i].pid_legend.is_none());
+        assert!(!app.show_pid_legend_list);
+
+        let _ = app.run_command_line("PIDLEGEND LIST");
+        let recognition = app.tabs[i].pid_legend.as_ref().expect("recognition stored");
+        assert_eq!(recognition.symbols.len(), 118);
+        assert!(
+            !recognition.pipes.runs.is_empty(),
+            "pipe runs listed for the line-number section"
+        );
+        assert!(app.show_pid_legend_list, "first LIST shows the panel");
+        assert_eq!(legend_count(&app), 0, "LIST draws nothing");
+
+        let _ = app.run_command_line("PIDLEGEND LIST");
+        assert!(!app.show_pid_legend_list, "second LIST hides the panel");
+        assert!(
+            app.tabs[i].pid_legend.is_some(),
+            "hiding keeps the recognition"
+        );
     }
 
     #[test]
