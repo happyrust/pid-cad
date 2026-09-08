@@ -193,6 +193,11 @@ impl OpenCADStudio {
             self.pending_external_change = None;
             self.pending_close = None;
         }
+        // Dismissed is declined: the pending plot is dropped unwritten.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.active_modal == Some(SvgOverwrite) {
+            self.pending_svg_export = None;
+        }
         match self.active_modal {
             // Dismissing these via ✕ is the cancel/decline path.
             Some(Unsaved) => self.pending_close = None,
@@ -7239,6 +7244,54 @@ impl OpenCADStudio {
             }
             Message::PrintAllPdfPath(None) => Task::none(),
             Message::PrintAllPdfPath(Some(path)) => self.on_print_all_pdf_path_some(path),
+            Message::PrintAllSvg => {
+                let i = self.active_tab;
+                let stem = self.tabs[i]
+                    .current_path
+                    .as_deref()
+                    .and_then(|path| path.file_stem())
+                    .map(|name| format!("{}_layouts", name.to_string_lossy()))
+                    .unwrap_or_else(|| "drawing_layouts".into());
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let Some(window_id) = self.main_window else {
+                        return Task::done(Message::PrintAllSvgPath(None));
+                    };
+                    iced::window::run(window_id, move |parent| {
+                        crate::io::svg_export::pick_svg_path_owned(stem, parent)
+                    })
+                    .map(Message::PrintAllSvgPath)
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    // A file each and no numbering on a download: how a
+                    // multi-page web plot should arrive is still open (§6 Q1
+                    // of docs/plans/2026-09-08-svg-export-next-steps.md).
+                    let _ = stem;
+                    self.command_line.push_error(
+                        crate::t!(
+                            "Multi-page SVG export is not available in the web version; \
+                             EXPORTSVG downloads the current layout."
+                        )
+                        .as_ref(),
+                    );
+                    Task::none()
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Message::PrintAllSvgPath(None) => Task::none(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Message::PrintAllSvgPath(Some(path)) => self.on_print_all_svg_path_some(path),
+            #[cfg(not(target_arch = "wasm32"))]
+            Message::SvgOverwriteReplace => self.on_svg_overwrite_replace(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Message::SvgOverwriteCancel => {
+                // Back to the layout list, selection intact, disk untouched.
+                self.pending_svg_export = None;
+                self.active_modal = Some(super::ModalKind::PrintAll);
+                self.reset_modal_geometry();
+                Task::none()
+            }
             Message::PrintAllPrint => self.on_print_all_print(),
             Message::PrintAllFinished(result) => {
                 match result {

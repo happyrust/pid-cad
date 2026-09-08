@@ -2,7 +2,7 @@
 
 > 日期：2026-09-08
 > 状态：§6 五条已于 2026-09-08 拍板（全按建议）；**P4.1 已实施**（§8）、**P5.1 已实施**（§9）、**P6.1 已量**（§7，
-> 结论：P6.2–P6.4 不做）、**P4.2 已实施**（§10）；剩 P5.2 / P5.3 / P4.3 / P7。
+> 结论：P6.2–P6.4 不做）、**P4.2 已实施**（§10）、**P4.3 已实施**（§11）；剩 P5.2 / P5.3 / P7 与 G10。
 > 前置：`docs/plans/2026-09-07-dxf-to-svg-export.md`（v2）——P0 / P1 / P2（web 除外）/ R3 第一轮 / R1 已实施。
 > 本文件只写「还没做的」与「怎么做」；已实施部分的记录仍在 v2 的 §11–§15，不重复。
 
@@ -87,7 +87,7 @@ v2 计划的 §11–§15 与代码逐条对得上。
 - `pick_svg_path_owned` 的过滤器加 `svgz`（G9）。
 - 出口：对话框三种目的地各走一遍（自动化测试用 `plot_dialog` 状态直接驱动，不开窗口）；页面设置保存 / 读回 `OUT_SVG` 不丢。
 
-**P4.3 GUI 多页 SVG（G4 + G5）**
+**P4.3 GUI 多页 SVG（G4 + G5）** — ✓ 已实施，记录在 §11
 
 - `PRINTALL` 的布局勾选面（`print_all_layouts` / `print_all_settings_override`）对 SVG 开放：`PlotRequest::layouts(names)` →
   `export_svg_pages` 的 D3 编号。
@@ -321,3 +321,34 @@ clippy 对改动的行 0 告警；rustfmt：`svg_export.rs` 0 diff，`plot.rs` �
 - 三条新文案（`Save to SVG file…`、`Export SVG`、stamp 说明）**没进 21 份 Fluent 目录**，与 P2 的 `Export as SVG` 一样
   回落英文；下次翻译批次一起补。
 - `PlotFlag::Stamp` 的消息在 SVG 下仍会翻转 `stamp` 偏好（复选框已禁用，正常点不出来），没加拦截。
+
+## 11. P4.3 实施记录（2026-09-08）
+
+**形状**：PRINTALL 对话框多一个 **SVG** 按钮（与 PDF / Print 同排）→ `Message::PrintAllSvg` → 同一个 `pick_svg_path_owned`
+选一个基名 → `PrintAllSvgPath` → `on_print_all_svg_path_some(base)`：勾选的布局 → `PlotRequest { layouts, use_current_settings:
+print_all_settings_override }` → `resolve_plot_job` → **先** `page_paths(base, n)` 查已存在的文件：一个都没有就直接写
+（`force: false`，中间冒出来的文件让写入器拒绝而不是覆盖）；有就把整套（已排好版的 `PlotJob`）存进 `pending_svg_export`，
+弹 `ModalKind::SvgOverwrite`——「N of M files this plot writes already exist」+ 逐个文件名 + **Replace All / Cancel**。
+Replace 才 `force: true`；Cancel 回到 PRINTALL（勾选不丢）；点 ✕ 关掉等于 Cancel（`close_active_modal` 把 pending 丢掉）。
+三条 SVG 入口（单页对话框 / 命令、PRINTALL、覆盖确认）最后都落在同一个 `write_svg_job(job, base, force)`，
+报告文案一致（`Exported: …` / `Export failed: …`，`Partial` 原样进命令行）。web 上按钮存在但报「Multi-page SVG export is
+not available in the web version; EXPORTSVG downloads the current layout.」（§6 Q1 仍开）。
+
+| 文件 | 内容 |
+|---|---|
+| `src/app/mod.rs` | `Message::{PrintAllSvg, PrintAllSvgPath, SvgOverwriteReplace, SvgOverwriteCancel}`、`ModalKind::SvgOverwrite`、`pending_svg_export: Option<PendingSvgExport { base, taken, job, background }>`（后三者 native only） |
+| `src/app/update/mod.rs` | 四条消息的 arm；`close_active_modal` 对 `SvgOverwrite` 丢 pending |
+| `src/app/update/file.rs` | `write_svg_job`（三个入口共用）、`on_print_all_svg_path_some`、`on_svg_overwrite_replace`；`on_svg_export_path_some` 改用 `write_svg_job(job, &path, true)` |
+| `src/app/view/modal.rs` | `SvgOverwrite` 标题与 `svg_overwrite_dialog_window(taken, total)`（最多显示 8 行、多了滚动） |
+| `src/ui/window/print_all.rs` | SVG 按钮 |
+| `src/app/update/file.rs`（tests） | `print_all_svg_tests`：新图 + `Layout1` + `add_layout("Sheet B")`、两个都勾、`background=false` 同步跑——**两页 → `plot-001.svg` / `plot-002.svg`**；预放 `plot-002.svg` 垃圾 → 弹 `SvgOverwrite`、`taken == [plot-002.svg]`、job 两页、**页一也没写**；Cancel → 磁盘不动、回 PRINTALL；`CloseModal` → pending 丢、磁盘不动；Replace → 两页都写、旧文件成了文档 |
+
+**出口条件对照**：`cargo test --lib -- print_all_svg_tests plot_destination_tests io::svg_export io::pdf_export app::automation`
+**70 过 / 0 败 / 2 忽略**（§10 的 68 + 新 2）；`cargo check` native 与 wasm 都过；clippy 对改动的行 0 告警；rustfmt 对新代码 0 diff。
+GUI 同样**没人手点过**。
+
+**踩到的坑（重要）**：`on_print_all_svg_path_some` 与 PDF 一样调 `save_config()`，而测试里的 `OpenCADStudio::new_for_test()`
+用的是**真实的** `%APPDATA%\OpenCADStudio\settings.json`——第一次跑测试把用户的 `plot.background` 写成了 false
+（20:48:53，已手工改回 true，其余字段是从同一份配置读回再写出的，应当没变）。测试现在先
+`app.last_saved_config = Some(app.current_config())` 让 `save_config` 无事可做。**任何会走到 `save_config` 的测试都有这个坑**，
+`new_for_test` 该给一个不落盘的配置路径——单独一条债，没在这一期动。

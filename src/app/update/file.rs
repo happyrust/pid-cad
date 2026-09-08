@@ -135,6 +135,36 @@ pub struct PlotJob {
     pub assets: crate::io::plot_emit::PlotAssets,
 }
 
+/// Write a plot job as SVG at `base` — a file each, numbered when there are
+/// several (D3) — and say what was written. Every SVG entry point in the
+/// editor ends here, so they all report the same way; `force` is the
+/// caller's word that the files it would replace have been asked about.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_svg_job(job: PlotJob, base: &std::path::Path, force: bool) -> Result<String, String> {
+    // Strict about text (the default): a page the atlas could not fully
+    // letter comes back as an error naming the wire, not as a file that
+    // looks finished (R1).
+    crate::io::svg_export::export_svg_pages(
+        &job.pages,
+        None,
+        &job.assets,
+        base,
+        &crate::io::svg_export::SvgWriteOptions {
+            force,
+            ..Default::default()
+        },
+    )
+    .map(|batch| {
+        let paths: Vec<String> = batch
+            .pages
+            .iter()
+            .map(|page| page.path.display().to_string())
+            .collect();
+        format!("Exported: {}", paths.join(", "))
+    })
+    .map_err(|error| format!("Export failed: {error}"))
+}
+
 type LayoutPlotParams = (
     std::sync::Arc<Vec<crate::io::pdf_export::PlotWire>>,
     Vec<crate::scene::model::hatch_model::HatchModel>,
@@ -3501,31 +3531,93 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
             }
         };
         let background = self.plot_dialog.background;
-        let work = move || {
-            // Strict about text (the default): a page the atlas could not
-            // fully letter comes back as an error naming the wire, not as
-            // a file that looks finished (R1).
-            crate::io::svg_export::export_svg_pages(
-                &job.pages,
-                None,
-                &job.assets,
-                &path,
-                &crate::io::svg_export::SvgWriteOptions {
-                    force: true,
-                    ..Default::default()
-                },
-            )
-            .map(|batch| {
-                let paths: Vec<String> = batch
-                    .pages
-                    .iter()
-                    .map(|page| page.path.display().to_string())
-                    .collect();
-                format!("Exported: {}", paths.join(", "))
-            })
-            .map_err(|error| format!("Export failed: {error}"))
-        };
+        // One page, and the save dialog has already asked about that one
+        // file, so replacing it is not asked about again.
+        let work = move || write_svg_job(job, &path, true);
         self.run_plot_work(background, false, work)
+    }
+
+    /// PRINTALL → SVG: the checked layouts, one numbered file each (D3),
+    /// from the same page list the multi-page PDF uses.
+    ///
+    /// The save dialog asked about one name, but the pages are numbered from
+    /// it, so it could not have asked about the files that actually get
+    /// written. Those are checked here before anything moves: if any exist,
+    /// the whole set is put to the user once, by name, and written only when
+    /// they say so (G5). Nothing is written while the question is open.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn on_print_all_svg_path_some(&mut self, base: std::path::PathBuf) -> Task<Message> {
+        let dialog = self.plot_dialog.clone();
+        if self.print_all_settings_override && dialog.style_missing && dialog.apply_plot_styles {
+            self.command_line.push_error(
+                crate::tf!("Plot style table '{}' is not loaded.", dialog.style_name).as_ref(),
+            );
+            return Task::none();
+        }
+        let available = self.tabs[self.active_tab].scene.layout_names();
+        let selected: Vec<String> = self
+            .print_all_layouts
+            .iter()
+            .filter(|(name, checked)| *checked && available.contains(name))
+            .map(|(name, _)| name.clone())
+            .collect();
+        if selected.is_empty() {
+            self.command_line
+                .push_error(crate::t!("Select at least one layout.").as_ref());
+            return Task::none();
+        }
+        let request = PlotRequest {
+            layouts: selected,
+            use_current_settings: self.print_all_settings_override,
+        };
+        let job = match self.resolve_plot_job(&request) {
+            Ok(job) => job,
+            Err(error) => {
+                self.command_line.push_error(&error);
+                return Task::none();
+            }
+        };
+        self.save_config();
+        self.close_active_modal();
+
+        let taken: Vec<std::path::PathBuf> =
+            crate::io::svg_export::page_paths(&base, job.pages.len())
+                .into_iter()
+                .filter(|path| path.exists())
+                .collect();
+        if taken.is_empty() {
+            // Not forced: should a file appear between this check and the
+            // write, the writer refuses rather than replaces.
+            let work = move || write_svg_job(job, &base, false);
+            return self.run_print_all_work(dialog.background, work);
+        }
+        self.pending_svg_export = Some(crate::app::PendingSvgExport {
+            base,
+            taken,
+            job,
+            background: dialog.background,
+        });
+        self.active_modal = Some(crate::app::ModalKind::SvgOverwrite);
+        self.reset_modal_geometry();
+        Task::none()
+    }
+
+    /// The user agreed to replace the files named in the overwrite dialog.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn on_svg_overwrite_replace(&mut self) -> Task<Message> {
+        let Some(pending) = self.pending_svg_export.take() else {
+            return Task::none();
+        };
+        self.active_modal = None;
+        self.reset_modal_geometry();
+        let crate::app::PendingSvgExport {
+            base,
+            job,
+            background,
+            ..
+        } = pending;
+        let work = move || write_svg_job(job, &base, true);
+        self.run_print_all_work(background, work)
     }
 
     /// EXPORTSVG / SVGOUT on the web: the same plot, handed to the browser as
@@ -5482,5 +5574,143 @@ mod plot_destination_tests {
         let json = r#"{"to_file": true, "file_format": "Svg"}"#;
         let state: crate::ui::window::plot::PlotDialogState = serde_json::from_str(json).unwrap();
         assert_eq!(state.destination(), PlotDestination::Svg);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod print_all_svg_tests {
+    //! P4.3 of docs/plans/2026-09-08-svg-export-next-steps.md: PRINTALL
+    //! writes the checked layouts as numbered SVG files, and asks once, by
+    //! name, before replacing any that are already there.
+    use crate::app::{Message, ModalKind, OpenCADStudio};
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ocs-printall-svg-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn files(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A drawing with two paper layouts, both checked, plotting on this
+    /// thread so the files are there when the call returns.
+    fn app_with_two_layouts() -> OpenCADStudio {
+        let mut app = OpenCADStudio::new_for_test();
+        assert_eq!(app.automation_op(r#"{"op":"new"}"#)["ok"], true);
+        assert_eq!(
+            app.automation_op(r#"{"op":"run","cmd":"LINE 0,0 100,0 100,60 0,60 0,0"}"#)["ok"],
+            true
+        );
+        let i = app.active_tab;
+        app.tabs[i].scene.document.add_layout("Sheet B").unwrap();
+        app.print_all_layouts = app
+            .plottable_layouts()
+            .into_iter()
+            .map(|name| (name, true))
+            .collect();
+        assert_eq!(
+            app.print_all_layouts.len(),
+            2,
+            "{:?}",
+            app.print_all_layouts
+        );
+        app.plot_dialog.background = false;
+        // The export persists the plot preferences, as the PDF one does. From
+        // a test that must not reach the user's settings file, so the config
+        // is marked saved as it now stands and `save_config` has nothing to do.
+        app.last_saved_config = Some(app.current_config());
+        app
+    }
+
+    #[test]
+    fn two_layouts_become_two_numbered_files() {
+        let dir = scratch("two");
+        let mut app = app_with_two_layouts();
+        let _ = app.on_print_all_svg_path_some(dir.join("plot.svg"));
+        assert!(
+            app.pending_svg_export.is_none(),
+            "nothing to ask about on an empty directory"
+        );
+        assert_eq!(
+            files(&dir),
+            ["plot-001.svg", "plot-002.svg"],
+            "{}",
+            app.command_line.history_plain_text()
+        );
+        for name in files(&dir) {
+            let text = std::fs::read_to_string(dir.join(&name)).unwrap();
+            assert!(text.starts_with("<?xml"), "{name} is not a document");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_page_file_already_there_is_asked_about_once_for_the_whole_set() {
+        let dir = scratch("ask");
+        let mut app = app_with_two_layouts();
+        std::fs::write(dir.join("plot-002.svg"), b"last week's issue").unwrap();
+
+        let _ = app.on_print_all_svg_path_some(dir.join("plot.svg"));
+        assert_eq!(
+            app.active_modal,
+            Some(ModalKind::SvgOverwrite),
+            "{}",
+            app.command_line.history_plain_text()
+        );
+        let pending = app.pending_svg_export.as_ref().expect("the plot is held");
+        assert_eq!(pending.taken, [dir.join("plot-002.svg")]);
+        assert_eq!(
+            pending.job.pages.len(),
+            2,
+            "the whole set is held, laid out"
+        );
+        assert_eq!(
+            files(&dir),
+            ["plot-002.svg"],
+            "page one must not have been written while the question is open"
+        );
+
+        // Cancel: disk untouched, back to the layout list.
+        let _ = app.update(Message::SvgOverwriteCancel);
+        assert!(app.pending_svg_export.is_none());
+        assert_eq!(app.active_modal, Some(ModalKind::PrintAll));
+        assert_eq!(files(&dir), ["plot-002.svg"]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("plot-002.svg")).unwrap(),
+            "last week's issue"
+        );
+
+        // Dismissing the question is declining it.
+        let _ = app.on_print_all_svg_path_some(dir.join("plot.svg"));
+        assert_eq!(app.active_modal, Some(ModalKind::SvgOverwrite));
+        let _ = app.update(Message::CloseModal);
+        assert!(app.pending_svg_export.is_none());
+        assert_eq!(files(&dir), ["plot-002.svg"]);
+
+        // Replace: every page is written, the old file included.
+        let _ = app.on_print_all_svg_path_some(dir.join("plot.svg"));
+        let _ = app.update(Message::SvgOverwriteReplace);
+        assert!(app.pending_svg_export.is_none());
+        assert_eq!(app.active_modal, None);
+        assert_eq!(
+            files(&dir),
+            ["plot-001.svg", "plot-002.svg"],
+            "{}",
+            app.command_line.history_plain_text()
+        );
+        assert!(std::fs::read_to_string(dir.join("plot-002.svg"))
+            .unwrap()
+            .starts_with("<?xml"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

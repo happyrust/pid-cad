@@ -1108,6 +1108,9 @@ pub(super) struct OpenCADStudio {
     /// Save stopped because the drawing changed outside this editor.
     #[cfg(not(target_arch = "wasm32"))]
     pending_external_change: Option<PendingExternalChange>,
+    /// A multi-page SVG plot waiting for the user to allow the overwrite.
+    #[cfg(not(target_arch = "wasm32"))]
+    pending_svg_export: Option<PendingSvgExport>,
     /// OS window for the unsaved-changes confirmation dialog.
 
     // ── Custom Save-As dialog ─────────────────────────────────────────────
@@ -1281,6 +1284,21 @@ pub(super) struct PendingExternalChange {
     purpose: SavePurpose,
     continuation: SaveContinuation,
     set_current_path: bool,
+}
+
+/// A multi-page SVG plot that would replace files already on disk, held
+/// while the user decides (P4.3 of docs/plans/2026-09-08-svg-export-next-steps.md).
+///
+/// The job is kept laid out, not re-resolved on confirmation: what the user
+/// was shown is what is written.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) struct PendingSvgExport {
+    /// The base path the user chose; the pages are numbered from it (D3).
+    base: PathBuf,
+    /// The page files that are already there, in page order.
+    taken: Vec<PathBuf>,
+    job: update::file::PlotJob,
+    background: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1692,6 +1710,9 @@ pub enum ModalKind {
     FileInUse,
     #[cfg(not(target_arch = "wasm32"))]
     ExternalChange,
+    /// A multi-page SVG plot would replace files that are already there.
+    #[cfg(not(target_arch = "wasm32"))]
+    SvgOverwrite,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     AssocPrompt,
     PointStyle,
@@ -2975,6 +2996,18 @@ pub enum Message {
     PrintAllPdf,
     /// Callback after the multi-page PDF path is picked or cancelled.
     PrintAllPdfPath(Option<std::path::PathBuf>),
+    /// Save the selected layouts as SVG, one numbered file per layout.
+    PrintAllSvg,
+    /// Callback after the SVG base path is picked or cancelled.
+    #[cfg(not(target_arch = "wasm32"))]
+    PrintAllSvgPath(Option<std::path::PathBuf>),
+    /// The user agreed to replace the files a multi-page SVG plot would
+    /// overwrite; write the pending job.
+    #[cfg(not(target_arch = "wasm32"))]
+    SvgOverwriteReplace,
+    /// The user declined; nothing is written.
+    #[cfg(not(target_arch = "wasm32"))]
+    SvgOverwriteCancel,
     /// Send the selected layouts to the configured printer as one job.
     PrintAllPrint,
     /// Completion of a Print All PDF or printer job.
@@ -3524,6 +3557,8 @@ impl OpenCADStudio {
             pending_save_failure: None,
             #[cfg(not(target_arch = "wasm32"))]
             pending_external_change: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            pending_svg_export: None,
             save_dialog_format: crate::io::DEFAULT_SAVE_FORMAT.to_string(),
             save_dialog_filename: "drawing.dwg".to_string(),
             save_dialog_for_unsaved: false,

@@ -41,6 +41,8 @@ impl OpenCADStudio {
             Some(K::FileInUse) => crate::tr!("modal", "unable-save"),
             #[cfg(not(target_arch = "wasm32"))]
             Some(K::ExternalChange) => crate::tr!("modal", "drawing-changed"),
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(K::SvgOverwrite) => t!("Replace existing files?").into_owned(),
             Some(K::LayerDeleteWarning) => crate::tr!("modal", "delete-layer"),
             Some(K::Unsaved) => crate::tr!("modal", "unsaved-changes"),
             Some(K::PointStyle) => crate::tr!("modal", "point-style"),
@@ -1355,6 +1357,15 @@ impl OpenCADStudio {
                     .unwrap_or_default();
                 automatic_flow(ex, |flow| external_change_dialog_window(&path, flow))
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            super::super::ModalKind::SvgOverwrite => {
+                let (taken, total) = self
+                    .pending_svg_export
+                    .as_ref()
+                    .map(|pending| (pending.taken.as_slice(), pending.job.pages.len()))
+                    .unwrap_or((&[], 0));
+                automatic_flow(ex, |flow| svg_overwrite_dialog_window(taken, total, flow))
+            }
             super::super::ModalKind::LayerDeleteWarning => {
                 let (names, count) = self
                     .layer_delete_pending
@@ -1678,6 +1689,67 @@ fn file_in_use_dialog_window(
                     Message::SaveFileInUseCancel,
                     button::secondary
                 ),
+            ],
+        ]
+        .spacing(0),
+    )
+    .style(dialog_body_style)
+    .padding([18, 20])
+    .width(sizing.width)
+    .height(sizing.height)
+    .into()
+}
+
+/// A multi-page SVG plot would replace `taken` of its `total` page files.
+/// The whole set is asked about once, by name; nothing has been written.
+#[cfg(not(target_arch = "wasm32"))]
+fn svg_overwrite_dialog_window(
+    taken: &[std::path::PathBuf],
+    total: usize,
+    sizing: crate::ui::modal::ModalSizing,
+) -> Element<'static, Message> {
+    let heading = t!(
+        "%{taken} of the %{total} files this plot writes already exist.",
+        taken = taken.len(),
+        total = total
+    );
+    let names = column(
+        taken
+            .iter()
+            .map(|path| {
+                text(path.display().to_string())
+                    .size(11)
+                    .style(dialog_muted_text_style)
+                    .width(Fit)
+                    .into()
+            })
+            .collect::<Vec<Element<'static, Message>>>(),
+    )
+    .spacing(2);
+
+    container(
+        column![
+            text(heading).size(14),
+            Space::new().height(8),
+            text(t!(
+                "Replacing them writes every page of the plot; cancelling writes nothing."
+            ))
+            .size(13)
+            .width(Fit),
+            Space::new().height(12),
+            // Up to eight names at a time; more scroll.
+            iced::widget::scrollable(names).height(iced::Length::Fixed(
+                taken.len().clamp(1, 8) as f32 * 18.0 + 4.0
+            )),
+            Space::new().height(18),
+            row![
+                dialog_button(
+                    t!("Replace All"),
+                    Message::SvgOverwriteReplace,
+                    button::danger
+                ),
+                Space::new().width(8),
+                dialog_button(t!("Cancel"), Message::SvgOverwriteCancel, button::secondary),
             ],
         ]
         .spacing(0),

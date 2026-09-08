@@ -62,11 +62,15 @@ pub fn view_window<'a>(
     let mut pdf = button(text(t!("PDF")).size(11))
         .style(button_style(false))
         .padding([5, 16]);
+    let mut svg = button(text(t!("SVG")).size(11))
+        .style(button_style(false))
+        .padding([5, 16]);
     let mut print = button(text(t!("Print")).size(11))
         .style(button_style(true))
         .padding([5, 18]);
     if selected > 0 {
         pdf = pdf.on_press(Message::PrintAllPdf);
+        svg = svg.on_press(Message::PrintAllSvg);
         print = print.on_press(Message::PrintAllPrint);
     }
 
@@ -113,6 +117,7 @@ pub fn view_window<'a>(
                     .style(button_style(false))
                     .padding([5, 12]),
                 pdf,
+                svg,
                 print,
             ]
             .spacing(7)
