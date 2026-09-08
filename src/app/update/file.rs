@@ -2961,11 +2961,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 ps.standard_scale_factor = factor;
                 ps.flags.use_standard_scale = false;
             }
-            ps.printer_name = if dialog.to_file {
-                crate::ui::window::plot::OUT_PDF.into()
-            } else {
-                dialog.printer.clone().unwrap_or_default()
-            };
+            ps.printer_name = dialog.destination_name();
             ps.current_style_sheet = dialog.style_name.clone();
             ps.flags.scale_lineweights = dialog.scale_lw;
             ps.flags.print_lineweights = dialog.lineweights;
@@ -4144,24 +4140,14 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         &mut self,
         msg: crate::ui::window::plot::PlotDlgMsg,
     ) -> Task<Message> {
-        use crate::ui::window::plot::{
-            PlotDlgMsg as M, PlotFlag, OUT_DEFAULT, OUT_PDF, STYLE_NONE,
-        };
+        use crate::ui::window::plot::{PlotDlgMsg as M, PlotFlag, STYLE_NONE};
         match msg {
             M::Close => {
                 self.close_active_modal();
                 Task::none()
             }
             M::Printer(s) => {
-                if s == OUT_PDF {
-                    self.plot_dialog.to_file = true;
-                } else if s == OUT_DEFAULT {
-                    self.plot_dialog.to_file = false;
-                    self.plot_dialog.printer = None;
-                } else {
-                    self.plot_dialog.to_file = false;
-                    self.plot_dialog.printer = Some(s);
-                }
+                self.plot_dialog.set_destination_name(&s);
                 Task::none()
             }
             M::PrinterProperties => {
@@ -4483,6 +4469,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
             let is_model = self.tabs[self.active_tab].scene.current_layout == "Model";
             let d = &mut self.plot_dialog;
             d.to_file = true;
+            d.file_format = crate::ui::window::plot::PlotFileFormat::Pdf;
             d.paper = "A4".into();
             d.orientation = "Landscape".into();
             d.paper_width_mm = 297.0;
@@ -4596,11 +4583,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
             ps.standard_scale_factor = factor;
             ps.flags.use_standard_scale = false;
         }
-        ps.printer_name = if d.to_file {
-            crate::ui::window::plot::OUT_PDF.into()
-        } else {
-            d.printer.clone().unwrap_or_default()
-        };
+        ps.printer_name = d.destination_name();
         ps.current_style_sheet = d.style_name.clone();
         ps.flags.scale_lineweights = d.scale_lw;
         ps.flags.print_lineweights = d.lineweights;
@@ -4746,8 +4729,17 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
             _ => "Normal",
         }
         .into();
-        if ps.printer_name.to_ascii_lowercase().contains("pdf") {
+        // The file sentinels come back as themselves. Anything else that
+        // mentions PDF — a PDF printer driver's own name, say — is taken as
+        // the PDF file too, as it always was.
+        let printer_name = ps.printer_name.to_ascii_lowercase();
+        if ps.printer_name == crate::ui::window::plot::OUT_SVG {
             d.to_file = true;
+            d.file_format = crate::ui::window::plot::PlotFileFormat::Svg;
+            d.printer = None;
+        } else if printer_name.contains("pdf") {
+            d.to_file = true;
+            d.file_format = crate::ui::window::plot::PlotFileFormat::Pdf;
             d.printer = None;
         } else {
             d.to_file = false;
@@ -4817,6 +4809,12 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         self.reset_modal_geometry();
 
         let plot_style = self.dialog_plot_style(&d);
+        // SVG is the one destination with a single path from every entry
+        // point (D5); the dialog only chooses it. EXPORTSVG at the command
+        // line lands in the same place.
+        if !preview && d.destination() == crate::ui::window::plot::PlotDestination::Svg {
+            return Task::done(Message::SvgExport);
+        }
         // Extents, Window and Display use one plot path in both spaces. Only
         // Paper-space Layout is special: it uses the physical sheet bounds.
         if d.area != "Layout" {
@@ -4952,7 +4950,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
             object_lineweights: d.lineweights,
             scale_lineweights: d.scale_lw && !d.fit_to_paper,
             transparency: d.transparency,
-            stamp: d.stamp,
+            stamp: d.effective_stamp(),
             merge_lines: d.merge_lines,
             group_splits,
         }
@@ -5396,5 +5394,93 @@ mod read_only_source_hygiene_tests {
             app.autosave_target(i),
             dwg.with_file_name(format!("{name}.ocs-autosave.sv$")),
         );
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod plot_destination_tests {
+    //! P4.2 of docs/plans/2026-09-08-svg-export-next-steps.md: the plot
+    //! dialog knows three destinations, driven here through the same messages
+    //! the dropdown sends, without a window.
+    use crate::app::OpenCADStudio;
+    use crate::ui::window::plot::{
+        PlotDestination, PlotDlgMsg, PlotFileFormat, OUT_DEFAULT, OUT_PDF, OUT_SVG,
+    };
+
+    fn app() -> OpenCADStudio {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        app
+    }
+
+    #[test]
+    fn the_dropdown_reaches_all_three_destinations_and_the_setup_names_them() {
+        let mut app = app();
+        for (choice, destination, name) in [
+            (OUT_SVG, PlotDestination::Svg, OUT_SVG.to_string()),
+            (OUT_PDF, PlotDestination::Pdf, OUT_PDF.to_string()),
+            (OUT_DEFAULT, PlotDestination::Printer, String::new()),
+            (
+                "Plotter 7",
+                PlotDestination::Printer,
+                "Plotter 7".to_string(),
+            ),
+        ] {
+            let _ = app.on_plot_dlg(PlotDlgMsg::Printer(choice.into()));
+            assert_eq!(app.plot_dialog.destination(), destination, "{choice}");
+            // The page setup stores the destination as its printer name and
+            // gets it back — OUT_SVG included, which an older build would only
+            // have read as a printer it does not have.
+            let setup = app.dialog_to_plotsettings();
+            assert_eq!(setup.printer_name, name, "{choice}");
+            let _ = app.on_plot_dlg(PlotDlgMsg::Printer("Something Else".into()));
+            app.load_plotsettings_into_dialog(&setup);
+            assert_eq!(
+                app.plot_dialog.destination(),
+                destination,
+                "{choice} read back"
+            );
+        }
+        // A PDF driver's own name still means the PDF file, as it always has.
+        let mut setup = app.dialog_to_plotsettings();
+        setup.printer_name = "Microsoft Print to PDF".into();
+        app.load_plotsettings_into_dialog(&setup);
+        assert_eq!(app.plot_dialog.destination(), PlotDestination::Pdf);
+    }
+
+    #[test]
+    fn switching_to_svg_takes_the_stamp_off_and_gives_it_back() {
+        let mut app = app();
+        let _ = app.on_plot_dlg(PlotDlgMsg::Printer(OUT_PDF.into()));
+        app.plot_dialog.stamp = true;
+        assert!(app.plot_dialog.effective_stamp());
+        assert!(OpenCADStudio::pdf_plot_options(&app.plot_dialog, Default::default()).stamp);
+
+        let _ = app.on_plot_dlg(PlotDlgMsg::Printer(OUT_SVG.into()));
+        assert!(app.plot_dialog.stamp, "the preference is kept for PDF");
+        assert!(!app.plot_dialog.effective_stamp(), "but SVG has no stamp");
+        assert!(
+            !OpenCADStudio::pdf_plot_options(&app.plot_dialog, Default::default()).stamp,
+            "the options every plot is built from say so too"
+        );
+
+        let _ = app.on_plot_dlg(PlotDlgMsg::Printer(OUT_PDF.into()));
+        assert!(
+            app.plot_dialog.effective_stamp(),
+            "back on PDF, the stamp is back"
+        );
+    }
+
+    #[test]
+    fn a_config_without_the_format_field_reads_as_pdf() {
+        // Every config written before this field existed says `to_file` and
+        // nothing more; it has to keep meaning the PDF file.
+        let json = r#"{"to_file": true}"#;
+        let state: crate::ui::window::plot::PlotDialogState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.file_format, PlotFileFormat::Pdf);
+        assert_eq!(state.destination(), PlotDestination::Pdf);
+        let json = r#"{"to_file": true, "file_format": "Svg"}"#;
+        let state: crate::ui::window::plot::PlotDialogState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.destination(), PlotDestination::Svg);
     }
 }

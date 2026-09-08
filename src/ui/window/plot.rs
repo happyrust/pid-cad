@@ -15,9 +15,31 @@ use crate::t;
 use std::borrow::Cow;
 use std::fmt;
 
-/// Sentinel entries in the printer dropdown (not real printer names).
+/// Sentinel entries in the printer dropdown (not real printer names). The
+/// two file sentinels are also what a page setup stores as its printer name.
 pub const OUT_DEFAULT: &str = "System default printer";
 pub const OUT_PDF: &str = "Save to PDF file…";
+pub const OUT_SVG: &str = "Save to SVG file…";
+
+/// Which file `to_file` means. Kept beside `to_file` rather than folded into
+/// it: `to_file` is in every saved config and every page setup already, and
+/// an older build reading a newer config must still land on "a file".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum PlotFileFormat {
+    #[default]
+    Pdf,
+    Svg,
+}
+
+/// Where a plot goes, as one answer — the dialog's `printer` / `to_file` /
+/// `file_format` fields resolved (D5 of docs/plans/2026-09-07-dxf-to-svg-export.md:
+/// the destination is the only thing that changes between the backends).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlotDestination {
+    Printer,
+    Pdf,
+    Svg,
+}
 
 /// Top-of-list entries: no page setup (defaults + PDF), and the last-used
 /// settings captured when the dialog opened.
@@ -131,8 +153,11 @@ pub struct PlotDialogState {
     pub printers: Vec<String>,
     /// Chosen printer name, or `None` for the system default.
     pub printer: Option<String>,
-    /// Output goes to a PDF file instead of a printer.
+    /// Output goes to a file instead of a printer; `file_format` says which.
     pub to_file: bool,
+    /// The file `to_file` writes. Meaningless while `to_file` is false, and
+    /// kept then, so switching back from a printer finds it where it was.
+    pub file_format: PlotFileFormat,
     pub paper: String,
     #[serde(skip)]
     pub paper_width_mm: f64,
@@ -194,6 +219,7 @@ impl Default for PlotDialogState {
             printers: Vec::new(),
             printer: None,
             to_file: false,
+            file_format: PlotFileFormat::Pdf,
             paper: "A4".into(),
             paper_width_mm: 297.0,
             paper_height_mm: 210.0,
@@ -238,6 +264,7 @@ impl PlotDialogState {
     pub fn copy_settings_from(&mut self, o: &PlotDialogState) {
         self.printer = o.printer.clone();
         self.to_file = o.to_file;
+        self.file_format = o.file_format;
         self.paper = o.paper.clone();
         self.paper_width_mm = o.paper_width_mm;
         self.paper_height_mm = o.paper_height_mm;
@@ -265,6 +292,52 @@ impl PlotDialogState {
         self.style_missing = o.style_missing;
     }
 
+    /// Where this plot goes.
+    pub fn destination(&self) -> PlotDestination {
+        match (self.to_file, self.file_format) {
+            (false, _) => PlotDestination::Printer,
+            (true, PlotFileFormat::Pdf) => PlotDestination::Pdf,
+            (true, PlotFileFormat::Svg) => PlotDestination::Svg,
+        }
+    }
+
+    /// Point the plot at `name`: a file sentinel, the default-printer
+    /// sentinel, or a printer's own name. The inverse of [`destination_name`].
+    ///
+    /// [`destination_name`]: Self::destination_name
+    pub fn set_destination_name(&mut self, name: &str) {
+        if name == OUT_SVG {
+            self.to_file = true;
+            self.file_format = PlotFileFormat::Svg;
+        } else if name == OUT_PDF {
+            self.to_file = true;
+            self.file_format = PlotFileFormat::Pdf;
+        } else if name == OUT_DEFAULT {
+            self.to_file = false;
+            self.printer = None;
+        } else {
+            self.to_file = false;
+            self.printer = Some(name.to_string());
+        }
+    }
+
+    /// What a page setup stores as this plot's printer name: a printer's own
+    /// name (empty for the system default), or the sentinel for the file.
+    pub fn destination_name(&self) -> String {
+        match self.destination() {
+            PlotDestination::Svg => OUT_SVG.into(),
+            PlotDestination::Pdf => OUT_PDF.into(),
+            PlotDestination::Printer => self.printer.clone().unwrap_or_default(),
+        }
+    }
+
+    /// The stamp this plot carries. SVG has none — it is device text in a
+    /// font the file would not carry, and `svg_export` refuses a page that
+    /// asks for it — so under SVG the switch reads off whatever it remembers
+    /// for PDF, and the dialog shows it disabled with the reason.
+    pub fn effective_stamp(&self) -> bool {
+        self.stamp && self.destination() != PlotDestination::Svg
+    }
 }
 
 fn legacy_fit_to_paper_default() -> bool {
@@ -516,10 +589,12 @@ pub fn view_window(
     let height = sizing.height;
     let action = if print_all_options {
         t!("Apply")
-    } else if s.to_file {
-        t!("Export PDF")
     } else {
-        t!("Print")
+        match s.destination() {
+            PlotDestination::Svg => t!("Export SVG"),
+            PlotDestination::Pdf => t!("Export PDF"),
+            PlotDestination::Printer => t!("Print"),
+        }
     };
     let is_special = s.selected_setup == SETUP_NONE || s.selected_setup == SETUP_PREV;
     let sel_is_layout = s.selected_setup.len() >= 2
@@ -633,14 +708,15 @@ pub fn view_window(
     let mut printer_opts = vec![PlotChoice::localized(OUT_DEFAULT)];
     printer_opts.extend(s.printers.iter().cloned().map(PlotChoice::raw));
     printer_opts.push(PlotChoice::localized(OUT_PDF));
-    let printer_sel = if s.to_file {
-        Some(PlotChoice::localized(OUT_PDF))
-    } else {
-        Some(match &s.printer {
+    printer_opts.push(PlotChoice::localized(OUT_SVG));
+    let printer_sel = Some(match s.destination() {
+        PlotDestination::Svg => PlotChoice::localized(OUT_SVG),
+        PlotDestination::Pdf => PlotChoice::localized(OUT_PDF),
+        PlotDestination::Printer => match &s.printer {
             Some(printer) => PlotChoice::raw(printer.clone()),
             None => PlotChoice::localized(OUT_DEFAULT),
-        })
-    };
+        },
+    });
     let mut paper_opts: Vec<String> = PaperSize::ALL.iter().map(|p| p.label().to_string()).collect();
     if !paper_opts.iter().any(|name| name == &s.paper) {
         paper_opts.push(s.paper.clone());
@@ -872,6 +948,20 @@ pub fn view_window(
     } else {
         Space::new().height(0).into()
     };
+    // No stamp on an SVG: the switch is shown off and disabled, with the
+    // reason, rather than left on for the export to refuse.
+    let svg_out = s.destination() == PlotDestination::Svg;
+    let stamp_note: Element<'_, Message> = if svg_out {
+        text(t!(
+            "SVG has no plot stamp: it is device text in a font the file would not carry."
+        ))
+        .size(10)
+        .style(muted_style)
+        .width(width)
+        .into()
+    } else {
+        Space::new().height(0).into()
+    };
     let options_panel = panel(column![
         section_label(t!("Plot options")),
         row![
@@ -885,7 +975,8 @@ pub fn view_window(
             column![
                 paper_order_option,
                 check(t!("Merge overlapping lines"), s.merge_lines, PlotFlag::MergeLines),
-                check(t!("Plot stamp"), s.stamp, PlotFlag::Stamp),
+                check_enabled(t!("Plot stamp"), s.effective_stamp(), PlotFlag::Stamp, !svg_out),
+                stamp_note,
             ]
             .spacing(6)
             .width(width),

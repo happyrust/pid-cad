@@ -2,7 +2,7 @@
 
 > 日期：2026-09-08
 > 状态：§6 五条已于 2026-09-08 拍板（全按建议）；**P4.1 已实施**（§8）、**P5.1 已实施**（§9）、**P6.1 已量**（§7，
-> 结论：P6.2–P6.4 不做），其余待做。
+> 结论：P6.2–P6.4 不做）、**P4.2 已实施**（§10）；剩 P5.2 / P5.3 / P4.3 / P7。
 > 前置：`docs/plans/2026-09-07-dxf-to-svg-export.md`（v2）——P0 / P1 / P2（web 除外）/ R3 第一轮 / R1 已实施。
 > 本文件只写「还没做的」与「怎么做」；已实施部分的记录仍在 v2 的 §11–§15，不重复。
 
@@ -57,6 +57,7 @@ v2 计划的 §11–§15 与代码逐条对得上。
 | G7 | R3 第二梯队 | `SvgSink.body: String` 整页内存拼接（`<defs>` 要在前）；`mesh_outline` 每次 `FillMesh` 现算（同一字形出现 N 次提 N 次）；无受限路径合并 | 体量与耗时上限未知——**先量再改** |
 | G8 | 第三层另一半 + 兼容性 | 见 §1.2 | 「同一张图」的最终判据还差 PDF ↔ SVG 栅格对比与外部渲染器实测 |
 | G9 | 小项 | 保存对话框过滤器只有 `svg`（`svg_export.rs:415`），`.svgz` 只能手输；`PlotReport.text_items` 只记不显示；PDF 对缺字仍旧宽松（历史行为，是产品决定不是 bug） | — |
+| G10 | **模型空间 SVG 不看出图区域**（P4.2 时发现） | `Message::SvgExport` → `direct_plot_params()` 在模型空间恒取 Extents；对话框里 PDF 目的地按 Window / Display / Limits / View 裁（`PlotWindowExport`） | 对话框选了 Window 再选 SVG 目的地，出的是 Extents。修法要么 `PlotRequest` 带区域，要么 `direct_plot_params` 认区域（它被菜单 Export PDF 与打印共用，改它会改 PDF 行为）；单独一期 |
 
 不在清单里、也**不打算做**的（沿用 v2 §5）：SVG 导入、按图层重组 `<g>`（`WireModel` 无图层字段）、`<pattern>` / `<mask>` / 渐变、
 `<text>` 图章、透明底图模式。
@@ -76,7 +77,7 @@ v2 计划的 §11–§15 与代码逐条对得上。
 - 出口：`cargo check --target wasm32-unknown-unknown` 过；native 侧加一条用例钉住「web 路径拿到的字符串与 native 写盘的字节相同」
   （两边都是 `write_svg_page`，比较的是包装层没绕开它）；真机 `trunk serve` 点一次拿到下载（人工，记进 evidence）。
 
-**P4.2 出图对话框里的 SVG 目的地（G3，D5 补完）**
+**P4.2 出图对话框里的 SVG 目的地（G3，D5 补完）** — ✓ 已实施，记录在 §10
 
 - `OUT_SVG = "Save to SVG file…"` 进「Printer / plotter」下拉，与 `OUT_PDF` 同级；`to_file: bool` 换成
   `Destination { Printer, Pdf, Svg }`（或保留 `to_file` 再加一位，取改动最小者）；页面设置持久化的 `printer_name`
@@ -289,3 +290,34 @@ v2 计划的 §11–§15 与代码逐条对得上。
 - 真图：11 张 P&ID 用修后的 debug 二进制重跑 `--plot-svg … --model --paper A1 --landscape --fit`，**11/11 与 R1 批次
   （= R3 批次）SHA-256 逐字节相同**（8–15 s / 张）。意料之中：`--model` 出图第一组为空，追踪器起始就是前奏的 Round；
   会多两个 op 的只有「纸空间组以 CTB butt/miter 结尾、模型空间组以 Round 开头」的布局出图。
+
+## 10. P4.2 实施记录（2026-09-08）
+
+**形状**：`to_file: bool` 保留（它在每份已存配置与每个页面设置里），旁边加 `file_format: PlotFileFormat { Pdf, Svg }`
+（serde 默认 `Pdf`，老配置读回来还是 PDF；老版本读新配置忽略这个字段，落在「文件」上）。三者合成一个答案
+`PlotDialogState::destination() -> PlotDestination { Printer, Pdf, Svg }`，视图与提交都只问它。
+
+| 文件 | 内容 |
+|---|---|
+| `src/ui/window/plot.rs` | `OUT_SVG = "Save to SVG file…"` 进 Printer / plotter 下拉，与 `OUT_PDF` 同级；`set_destination_name` / `destination_name`（页面设置存取哨兵的唯一一份逻辑）；`effective_stamp()`：SVG 下为 false；动作按钮 `Export SVG` / `Export PDF` / `Print`；「Plot stamp」在 SVG 下用 `check_enabled(…, false)` 置灰、显示实际生效值（关），下面一行说明「SVG has no plot stamp: it is device text in a font the file would not carry.」 |
+| `src/app/update/file.rs` | `M::Printer` 走 `set_destination_name`；两处写 `ps.printer_name` 改 `destination_name()`；`load_plotsettings_into_dialog` 先认 `OUT_SVG`、再沿用「名字含 pdf 就是 PDF 文件」的老规矩；`<none>` 页面设置把格式复位成 PDF；`pdf_plot_options` 用 `effective_stamp()`（预览 / 打印 / PDF / SVG 都从这里拿选项）；`on_plot_dlg_commit` 非预览、目的地为 SVG 时直接 `Task::done(Message::SvgExport)`——与 `EXPORTSVG` / `SVGOUT` 同一条路（D5） |
+| `src/io/svg_export.rs` | 保存对话框过滤器加「Compressed SVG Files (*.svgz)」（G9） |
+| `src/app/update/file.rs`（tests） | `plot_destination_tests`：三种目的地 + 一个具名打印机各走一遍 `M::Printer`，`destination()` 对，`dialog_to_plotsettings().printer_name` 存的是哨兵 / 打印机名，切走再 `load_plotsettings_into_dialog` 读回不丢；「Microsoft Print to PDF」仍读成 PDF；stamp 在 PDF 下开、切到 SVG 时 `effective_stamp` 与 `pdf_plot_options().stamp` 都为 false 而偏好保留、切回 PDF 又回来；`{"to_file": true}` 这种老配置反序列化成 PDF |
+
+**出口条件对照**：`cargo test --lib -- plot_destination_tests io::svg_export io::pdf_export app::automation`
+**68 过 / 0 败 / 2 忽略**（§9 的 65 + 新 3）；`cargo check` native 与 wasm 都过（wasm 仍是那 5 条既有 dead-code）；
+clippy 对改动的行 0 告警；rustfmt：`svg_export.rs` 0 diff，`plot.rs` 只多一处——`check_enabled(...)` 那一行落在一个
+**本来就没格式化过**的 `column![]` 块里（HEAD 上同一位置的 `check(...)` 也在 rustfmt 的 diff 里），照 P2「只格式化新代码」
+的口径没有动整块；`file.rs` 新增的测试模块 0 diff。
+
+**没做 / 顺手发现的**：
+
+- **GUI 没有人手点过一遍**（无窗口驱动的是状态与消息，不是像素）。要看：打开 PLOT → Printer/plotter 选「Save to SVG file…」
+  → 按钮变 Export SVG、Plot stamp 灰掉并出现说明 → 点 Export SVG 弹 SVG 保存框（过滤器里有 .svgz）。
+- **模型空间下的出图区域**（新缺口 **G10**）：SVG 目的地走的是 `Message::SvgExport` → `direct_plot_params()`，在模型空间
+  **永远按 Extents**，不看对话框的 Window / Display / Limits / View；PDF 目的地在同一对话框里走 `PlotWindowExport`
+  是按区域裁的。要补得让 `PlotRequest` 带区域（或 `direct_plot_params` 认区域——但它也被菜单 Export PDF 与打印共用，
+  改它会改 PDF 的行为），单独一期做，别顺手。
+- 三条新文案（`Save to SVG file…`、`Export SVG`、stamp 说明）**没进 21 份 Fluent 目录**，与 P2 的 `Export as SVG` 一样
+  回落英文；下次翻译批次一起补。
+- `PlotFlag::Stamp` 的消息在 SVG 下仍会翻转 `stamp` 偏好（复选框已禁用，正常点不出来），没加拦截。

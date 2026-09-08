@@ -448,6 +448,9 @@ pub fn pick_svg_path_owned(
         .set_title("Export as SVG")
         .set_file_name(format!("{stem}.svg"))
         .add_filter("SVG Files", &["svg"])
+        // Gzip is chosen by the name, and only by the name (see
+        // `export_svg_pages`), so the name has to be easy to give.
+        .add_filter("Compressed SVG Files", &["svgz"])
         .add_filter("All Files", &["*"])
         .save_file()?;
     crate::config::remember_dialog_dir(&path);
