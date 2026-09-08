@@ -3467,70 +3467,105 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         Ok(())
     }
 
+    /// EXPORTSVG / SVGOUT: the plot job for the active view, with a paper-space
+    /// layout's own page setup loaded into the dialog first. Both SVG entry
+    /// points — the desktop's file, the web's download — prepare their pages
+    /// here, so the two plot the same thing.
+    fn current_view_svg_job(&mut self) -> Result<PlotJob, String> {
+        let i = self.active_tab;
+        if self.tabs[i].scene.current_layout != "Model" {
+            self.plot_dialog.paper_space = true;
+            self.plot_dialog.scales = self.tabs[i]
+                .scene
+                .scale_list()
+                .into_iter()
+                .map(|(name, _, factor)| (name, factor))
+                .collect();
+            if let Some(settings) = self.tabs[i].scene.effective_plot_settings() {
+                self.load_plotsettings_into_dialog(&settings);
+            }
+        }
+        self.resolve_plot_job(&PlotRequest::current_view())
+    }
+
     /// EXPORTSVG / SVGOUT: the plot the dialog describes, written as SVG.
     ///
     /// Same settings, same page preparation, different sink (D5) — SVG has no
     /// pages, so a multi-page job becomes a file each (D3).
+    #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn on_svg_export_path_some(
         &mut self,
         path: std::path::PathBuf,
     ) -> Task<Message> {
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = path;
-            self.command_line
-                .push_error(crate::t!("SVG export is not available in the web version yet.").as_ref());
-            Task::none()
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let i = self.active_tab;
-            if self.tabs[i].scene.current_layout != "Model" {
-                self.plot_dialog.paper_space = true;
-                self.plot_dialog.scales = self.tabs[i]
-                    .scene
-                    .scale_list()
-                    .into_iter()
-                    .map(|(name, _, factor)| (name, factor))
-                    .collect();
-                if let Some(settings) = self.tabs[i].scene.effective_plot_settings() {
-                    self.load_plotsettings_into_dialog(&settings);
-                }
+        let job = match self.current_view_svg_job() {
+            Ok(job) => job,
+            Err(error) => {
+                self.command_line.push_error(&error);
+                return Task::none();
             }
-            let job = match self.resolve_plot_job(&PlotRequest::current_view()) {
-                Ok(job) => job,
-                Err(error) => {
-                    self.command_line.push_error(&error);
-                    return Task::none();
-                }
-            };
-            let background = self.plot_dialog.background;
-            let work = move || {
-                // Strict about text (the default): a page the atlas could not
-                // fully letter comes back as an error naming the wire, not as
-                // a file that looks finished (R1).
-                crate::io::svg_export::export_svg_pages(
-                    &job.pages,
-                    None,
-                    &job.assets,
-                    &path,
-                    &crate::io::svg_export::SvgWriteOptions {
-                        force: true,
-                        ..Default::default()
-                    },
-                )
-                .map(|batch| {
-                    let paths: Vec<String> = batch
-                        .pages
-                        .iter()
-                        .map(|page| page.path.display().to_string())
-                        .collect();
-                    format!("Exported: {}", paths.join(", "))
-                })
-                .map_err(|error| format!("Export failed: {error}"))
-            };
-            self.run_plot_work(background, false, work)
+        };
+        let background = self.plot_dialog.background;
+        let work = move || {
+            // Strict about text (the default): a page the atlas could not
+            // fully letter comes back as an error naming the wire, not as
+            // a file that looks finished (R1).
+            crate::io::svg_export::export_svg_pages(
+                &job.pages,
+                None,
+                &job.assets,
+                &path,
+                &crate::io::svg_export::SvgWriteOptions {
+                    force: true,
+                    ..Default::default()
+                },
+            )
+            .map(|batch| {
+                let paths: Vec<String> = batch
+                    .pages
+                    .iter()
+                    .map(|page| page.path.display().to_string())
+                    .collect();
+                format!("Exported: {}", paths.join(", "))
+            })
+            .map_err(|error| format!("Export failed: {error}"))
+        };
+        self.run_plot_work(background, false, work)
+    }
+
+    /// EXPORTSVG / SVGOUT on the web: the same plot, handed to the browser as
+    /// a download named after the drawing — there is no path to pick.
+    ///
+    /// Everything up to the bytes is the desktop's path. `resolve_plot_job`
+    /// lays the page out and takes the glyph snapshot (a cold atlas re-lays
+    /// out once, as it does there); `svg_job_to_string` runs the writer the
+    /// files go through; text is strict by default and a stamp is refused,
+    /// in the same words. Only the last step differs. One page for now: the
+    /// GUI plots the active view, and a longer job is refused, not truncated
+    /// (P4.1 of docs/plans/2026-09-08-svg-export-next-steps.md).
+    ///
+    /// Synchronous on purpose. wasm has the one thread, so there is no
+    /// background plot for the editor to keep baking glyphs under, and the
+    /// download has to fire inside the user gesture that asked for it.
+    #[cfg(target_arch = "wasm32")]
+    pub(in crate::app) fn on_svg_export_web(&mut self, stem: String) -> Task<Message> {
+        let result = self.current_view_svg_job().and_then(|job| {
+            crate::io::svg_export::svg_job_to_string(
+                &job.pages,
+                None,
+                &job.assets,
+                &crate::io::svg_export::SvgOptions::default(),
+            )
+            .map_err(|error| format!("Export failed: {error}"))
+        });
+        match result {
+            Ok((svg, _report)) => {
+                let name = format!("{stem}.svg");
+                crate::sys::download_bytes(&name, svg.as_bytes());
+                self.command_line.push_info(&format!("Exported: {name}"));
+            }
+            Err(error) => self.command_line.push_error(&error),
         }
+        Task::none()
     }
 
     pub(super) fn on_print_all_pdf_path_some(

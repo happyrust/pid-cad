@@ -2932,8 +2932,11 @@ pub enum Message {
     /// Callback after the user picks (or cancels) the export path.
     PlotExportPath(Option<std::path::PathBuf>),
     /// Show the SVG save-file dialog and trigger export (EXPORTSVG / SVGOUT).
+    /// On the web there is no path to pick: the plot is written and handed
+    /// to the browser as a download right here.
     SvgExport,
     /// Callback after the user picks (or cancels) the SVG export path.
+    #[cfg(not(target_arch = "wasm32"))]
     SvgExportPath(Option<std::path::PathBuf>),
     /// User picked a paper size for the model-space window plot.
     PlotFormat(crate::io::paper_sizes::PaperSize),

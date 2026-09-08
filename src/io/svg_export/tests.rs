@@ -1454,6 +1454,62 @@ fn a_page_style_table_wins_over_the_job_wide_one() {
     );
 }
 
+// ── In memory: the web build's download (P4.1) ────────────────────────────
+
+#[test]
+fn the_web_download_is_the_file_the_desktop_would_have_written() {
+    // The web build has no filesystem; it takes the document from
+    // `svg_job_to_string` and hands it to the browser. That wrapper must not
+    // be a second writer: for the same page, job-wide style and options, its
+    // bytes are the bytes `export_svg_pages` put on disk. Three pages that
+    // exercise different parts of the writer — plain strokes, a page-level
+    // CTB (so `as_plot_page`'s priority rule is on the line too), text from
+    // the shared snapshot.
+    let scratch = Scratch::new("web");
+    let assets = shared_assets();
+    let styled = crate::io::plot_corpus::styled_ctb();
+    for (index, name) in ["polyline with pen-up", "ctb", "text"]
+        .into_iter()
+        .enumerate()
+    {
+        let pages = job(&[name]);
+        let batch = export_svg_pages(
+            &pages,
+            Some(&styled),
+            &assets,
+            &scratch.join(&format!("plot-{index}.svg")),
+            &lenient_files(),
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let on_disk = std::fs::read(&batch.pages[0].path).unwrap();
+        let (downloaded, report) = svg_job_to_string(&pages, Some(&styled), &assets, &lenient())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            downloaded.as_bytes(),
+            on_disk.as_slice(),
+            "{name}: the download and the file differ"
+        );
+        assert_eq!(report, batch.pages[0].report, "{name}");
+        assert!(report.elements > 0, "{name}: an empty page proves nothing");
+    }
+}
+
+#[test]
+fn the_web_download_is_one_page_and_refuses_a_longer_job() {
+    // A download has no numbering. A job of several pages is refused and the
+    // error says how many there were — not quietly cut down to page one; an
+    // empty job is refused the way the files refuse it.
+    let two = job(&["polyline with pen-up", "dash patterns"]);
+    let error = svg_job_to_string(&two, None, &PlotAssets::default(), &lenient())
+        .expect_err("two pages are not one download");
+    assert!(matches!(error, SvgError::Invalid(_)), "{error}");
+    assert!(error.to_string().contains("this job has 2"), "{error}");
+
+    let error = svg_job_to_string(&[], None, &PlotAssets::default(), &lenient())
+        .expect_err("nothing to download");
+    assert!(error.to_string().contains("no pages"), "{error}");
+}
+
 // ── Layer 3: what the picture looks like ──────────────────────────────────
 
 /// Render at `px_per_mm`, on white, and return the pixmap.

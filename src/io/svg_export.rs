@@ -40,8 +40,8 @@ use crate::io::plot_emit::{
     emit_plot_content, FillRule, LineCap, LineJoin, PlotAssets, PlotBlend, PlotOp, PlotPage,
     PlotPoint, PlotSink, GEOMETRY_MM_TO_PT,
 };
-#[cfg(not(target_arch = "wasm32"))]
 use crate::io::plot_style::PlotStyleTable;
+use crate::io::plot_types::PdfPageInput;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 #[cfg(not(target_arch = "wasm32"))]
@@ -234,6 +234,41 @@ pub fn svg_page_to_string(
     Ok((text, report))
 }
 
+// ── In memory (the web build) ─────────────────────────────────────────────
+
+/// A plot job as one document in memory, for a caller with no filesystem to
+/// write to: the web build hands the result to the browser as a download.
+///
+/// This wraps `write_svg_page`, the writer the files go through — it is not a
+/// second one — with the same job-wide `plot_style` fallback (page-level CTB
+/// still wins, `as_plot_page` decides that) and the same options, so the bytes
+/// a browser downloads are the bytes `export_svg_pages` would have put on disk
+/// for the same page. A test on the native side pins that.
+///
+/// One page only. SVG has no pages and a download has no numbering, so a
+/// longer job is refused rather than quietly cut down to its first page. The
+/// GUI plots the active view today, which is one page; what a multi-page web
+/// plot should be — N downloads, or a zip — is decided when the GUI's layout
+/// selection reaches SVG (§6 Q1 of docs/plans/2026-09-08-svg-export-next-steps.md).
+pub fn svg_job_to_string(
+    pages: &[PdfPageInput],
+    plot_style: Option<&PlotStyleTable>,
+    assets: &PlotAssets,
+    options: &SvgOptions,
+) -> Result<(String, SvgReport), SvgError> {
+    let page = match pages {
+        [page] => page,
+        [] => return Err(SvgError::Invalid("no pages were selected".into())),
+        more => {
+            return Err(SvgError::Invalid(format!(
+                "a download is one page and this job has {}; plot one layout at a time",
+                more.len()
+            )))
+        }
+    };
+    svg_page_to_string(&page.as_plot_page(plot_style), assets, options)
+}
+
 // ── Files (D3) ────────────────────────────────────────────────────────────
 
 /// Where one page went, and what it needed.
@@ -304,7 +339,7 @@ pub fn page_paths(base: &Path, pages: usize) -> Vec<std::path::PathBuf> {
 /// back and nothing left over from an earlier, longer run is deleted.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn export_svg_pages(
-    pages: &[crate::io::plot_types::PdfPageInput],
+    pages: &[PdfPageInput],
     plot_style: Option<&PlotStyleTable>,
     assets: &PlotAssets,
     base: &Path,
@@ -417,11 +452,6 @@ pub fn pick_svg_path_owned(
         .save_file()?;
     crate::config::remember_dialog_dir(&path);
     Some(path)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub async fn pick_svg_path_owned(_stem: String) -> Option<std::path::PathBuf> {
-    None
 }
 
 /// The first pair of paths that name the same file on a case-insensitive

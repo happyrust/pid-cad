@@ -7304,13 +7304,13 @@ impl OpenCADStudio {
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
-                    Task::perform(
-                        crate::io::svg_export::pick_svg_path_owned(stem),
-                        Message::SvgExportPath,
-                    )
+                    // No path to pick: the browser names the download.
+                    self.on_svg_export_web(stem)
                 }
             }
+            #[cfg(not(target_arch = "wasm32"))]
             Message::SvgExportPath(None) => Task::none(),
+            #[cfg(not(target_arch = "wasm32"))]
             Message::SvgExportPath(Some(path)) => self.on_svg_export_path_some(path),
 
             Message::PlotFormat(f) => {
