@@ -121,6 +121,7 @@ fn main() -> iced::Result {
                     dry_run: args.dry_run,
                     force: args.force,
                     allow_missing_glyphs: args.allow_missing_glyphs,
+                    timing: args.timing,
                 },
             );
             std::process::exit(code);

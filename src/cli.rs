@@ -125,6 +125,11 @@ pub struct Cli {
     #[arg(long)]
     pub allow_missing_glyphs: bool,
 
+    /// Report on stderr how long --plot-svg spent reading the drawing,
+    /// building the scene and the pages, and writing them.
+    #[arg(long)]
+    pub timing: bool,
+
     /// Print the layouts of FILE, one per line, and exit.
     #[arg(long, value_name = "FILE")]
     pub list_layouts: Option<PathBuf>,

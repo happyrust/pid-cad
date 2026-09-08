@@ -162,6 +162,10 @@ pub struct PlotSvgRequest {
     /// say how many glyphs it lost, rather than refuse it (R1). Off by
     /// default: a drawing that looks finished and is not is the worse outcome.
     pub allow_missing_glyphs: bool,
+    /// Say on stderr how long each stage took — reading the drawing, building
+    /// the scene and the pages, writing them — so a baseline can be taken
+    /// without a profiler (P6.1 of docs/plans/2026-09-08-svg-export-next-steps.md).
+    pub timing: bool,
 }
 
 /// Headless plot to SVG (`--plot-svg IN OUT`). Returns a process exit code.
@@ -234,8 +238,10 @@ pub(crate) fn plot_svg_with(
 ) -> Result<crate::io::svg_export::SvgBatch, String> {
     use crate::app::update::file::PlotRequest;
 
+    let started = std::time::Instant::now();
     app.open_drawing_headless(input)?;
     app.apply_headless_plot_style(request.ctb.as_deref())?;
+    let opened = started.elapsed();
 
     let plot = if request.model {
         // No implicit sheet and no implicit scale (D4): a plot nobody is
@@ -269,7 +275,8 @@ pub(crate) fn plot_svg_with(
     };
 
     let job = app.resolve_plot_job(&plot)?;
-    crate::io::svg_export::export_svg_pages(
+    let laid_out = started.elapsed();
+    let batch = crate::io::svg_export::export_svg_pages(
         &job.pages,
         None,
         &job.assets,
@@ -287,7 +294,24 @@ pub(crate) fn plot_svg_with(
             dry_run: request.dry_run,
         },
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    if request.timing {
+        // Wall clock, in process. "read" is the file read and parsed into a
+        // document; the scene is only marked dirty there, so "scene+pages"
+        // is where the geometry is actually built and the text laid out, plus
+        // the pages and the glyph snapshot; "write" is the emitter and the
+        // SVG writer, publishing included. Process start-up is not in here —
+        // measure that from outside.
+        let written = started.elapsed();
+        eprintln!(
+            "timing: read {} ms, scene+pages {} ms, write {} ms, total {} ms",
+            opened.as_millis(),
+            (laid_out - opened).as_millis(),
+            (written - laid_out).as_millis(),
+            written.as_millis()
+        );
+    }
+    Ok(batch)
 }
 
 /// `--list-layouts FILE`: the layouts a drawing offers `--plot-svg`.
