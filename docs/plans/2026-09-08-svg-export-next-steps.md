@@ -2,7 +2,7 @@
 
 > 日期：2026-09-08
 > 状态：§6 五条已于 2026-09-08 拍板（全按建议）；**P4.1 已实施**（§8）、**P5.1 已实施**（§9）、**P6.1 已量**（§7，
-> 结论：P6.2–P6.4 不做）、**P4.2 已实施**（§10）、**P4.3 已实施**（§11）；剩 P5.2 / P5.3 / P7 与 G10。
+> 结论：P6.2–P6.4 不做）、**P4.2 已实施**（§10）、**P4.3 已实施**（§11）、**P7 已实施**（§12）；剩 P5.2 / P5.3 与 G10。
 > 前置：`docs/plans/2026-09-07-dxf-to-svg-export.md`（v2）——P0 / P1 / P2（web 除外）/ R3 第一轮 / R1 已实施。
 > 本文件只写「还没做的」与「怎么做」；已实施部分的记录仍在 v2 的 §11–§15，不重复。
 
@@ -153,7 +153,7 @@ v2 计划的 §11–§15 与代码逐条对得上。
 - 边界照 v2 R3：不越过绘制顺序、不跨 wipeout / clip / blend 变化、不倒转线段、不拼接独立子路径、multiply 下有重叠不合并。
 - 出口：第二层比较仍绿；体量 / 解析耗时都记录，不只看文件变小。
 
-### P7 命令行剩余（G6）
+### P7 命令行剩余（G6） — ✓ 已实施，记录在 §12
 
 - `--orientation portrait|landscape`（`--landscape` 保留为别名）。
 - `--paper` 扩到 ANSI A–E 与 `WxH`（mm）自定义；纸张表放 `io/paper_sizes.rs` 一份，GUI 与 CLI 共用。
@@ -352,3 +352,53 @@ GUI 同样**没人手点过**。
 （20:48:53，已手工改回 true，其余字段是从同一份配置读回再写出的，应当没变）。测试现在先
 `app.last_saved_config = Some(app.current_config())` 让 `save_config` 无事可做。**任何会走到 `save_config` 的测试都有这个坑**，
 `new_for_test` 该给一个不落盘的配置路径——单独一条债，没在这一期动。
+
+## 12. P7 实施记录（2026-09-08）
+
+**形状**：参数解析与裁决全在 `plot_svg_with` 里（`PlotSvgRequest` 多 `orientation` / `units` / `margins` / `preset` 四个字符串位），
+`main.rs` 照旧只是抄写员。返回值从 `SvgBatch` 变成 `PlotSvgRun { batch, plan }`：`plan` 是这次出图用词说清的样子——
+preset 展开成了什么、单位从哪来、逐页的纸张 / 比例 / 窗口 / 裁剪 / CTB / 缺字——`--dry-run` 把它打出来（排练的答案是计划，
+不只是文件名）。
+
+- **`--paper`**（表在 `io/paper_sizes.rs` 一份）：`PaperSize` 长出 ANSI A–E（英寸尺寸精确换算），GUI 的下拉
+  （`PaperSize::ALL`）与页面设置的标签推断（`paper_label_from_dims`）同步长出来；`from_label` 认大小写与分隔
+  （`ansi-b` = `ANSI B`）；`parse_paper` 另收 `WxH`（mm，正有限数），`plot_dialog_sheet_mm` 与 `file.rs:4740` 的
+  硬编码 A 系列匹配都改走 `from_label`。
+- **`--orientation portrait|landscape`**：`--landscape` 保留，两者 clap `conflicts_with`；都不说时**自定义 `WxH` 跟纸形走**
+  （600x300 自然横放），标准纸照旧竖放。
+- **`--units mm|cm|m|km|in|ft|yd|mi`**：与图纸 `$INSUNITS`（`insunits_to_mm`，现 `pub(crate)`）之间的裁决在 `plot_unit_mm`：
+  两边都有须一致（连 `--fit` 下撒谎也拒，谎话不该因为没人读它就过关）；图纸有单位它自己作答；都没有时**只在给了
+  `--scale` 才是错**——fit 不读单位，这里对 v2 D4 表「无单位图纸要求 --units」收窄到真正需要它的那条路。比例按物理毫米折算
+  （`set_headless_model_page` 把 `ratio × unit_mm` 写进对话框比例）：**米图 1:1000 与毫米图 1:1 逐字节同一张纸**（有用例钉住）。
+  这对声明了 $INSUNITS 的图纸是行为变更（此前一律当 mm），fit 出图（含 11 张真图批次）不受影响。
+- **`--margins M|H,V|L,B,R,T`**（mm，未旋转纸面上的左/下/右/上）：`window_to_sheet` 收进 `window_to_sheet_margins`——
+  给了边距 fit **精确**贴边框（边距就是呼吸空间，5% 松弛不再叠加）、居中在框内；不给时旧公式原样走一遍，**字节不变**。
+  边距吃光纸面在 `set_headless_model_page` 里点名拒绝；负数 / 三个值 / 读不出都在解析处拒绝。
+- **`--preset preview-a4-fit / preview-a3-fit / preview-a1-fit`**：= `--model --paper X --orientation landscape --fit`，
+  **只填没说的**（显式旗子赢）；配 `--layout` 是矛盾，拒绝；`--dry-run` 的 plan 第一行就是展开记录。
+- **严格化**：layout 出图（点名或全部）带任何 model 专属旗子（`--paper` / `--orientation` / `--landscape` / `--fit` /
+  `--scale` / `--units` / `--margins`）在**打开图纸之前**拒绝——会被静默忽略的旗子是陷阱不是便利（D4）。
+  `--landscape` 从「layout 下静默忽略」改为同样拒绝，是这一期唯一收紧的旧旗子。
+
+| 文件 | 内容 |
+|---|---|
+| `src/io/paper_sizes.rs` | ANSI A–E、`from_label`、`PaperSpec` / `parse_paper`、`window_to_sheet_margins`；测试 +4（ANSI 尺寸、拼法、解析拒绝、边距数学） |
+| `src/ui/window/plot.rs` | `PlotDialogState.margins_mm: Option<[f64;4]>`（`serde(skip)`，GUI 永远 `None`，只有无头路径设置） |
+| `src/app/update/file.rs` | `set_headless_model_page(paper, landscape, fit, scale, margins_mm, unit_mm)`；`plot_dialog_sheet_mm` / 页面设置标签走 `from_label`；`area_plot_job` 走 `window_to_sheet_margins` |
+| `src/app/properties.rs` | `insunits_to_mm` / `insunits_name` 改 `pub(crate)`（其余原样） |
+| `src/app/automation.rs` | 四个新字段、`PLOT_PRESETS` / `PLOT_UNITS` 表、`apply_plot_preset` / `stray_model_flag` / `plot_orientation_landscape` / `plot_unit_mm` / `parse_plot_margins` / `plan_num`、`PlotSvgRun` 与 plan 组装、`plot_svg_headless` 在 dry-run 下打印 plan；测试 +6 |
+| `src/cli.rs` · `src/main.rs` | 四个新旗子（`--orientation` 与 `--landscape` clap 互斥）、request 抄写 |
+
+**出口条件对照**（P7 的两条全中）：每个拒绝路径有用例且**不落盘**——未知纸张 / 读不出的 WxH、不是 portrait 或 landscape、
+未知单位、单位与图纸矛盾（fit 下也拒）、无单位又给 scale、边距吃光纸面 / 负数 / 三个值、未知 preset、preset 配 layout、
+七个 model 旗子落在 layout 出图上（图纸路径都是假的，证明拒绝先于打开）；`--dry-run` 输出含纸张 / 比例 / 范围 / 裁剪 /
+CTB / 缺字告警（plan 逐页一行 + 已有的 per-page 告警行）。
+`cargo test --lib -- io::paper_sizes io::svg_export io::pdf_export app::automation plot_destination_tests print_all_svg_tests`
+**83 过 / 0 败 / 2 忽略**（§11 的 70 + paper_sizes 旧 3 + 新 10）；native / wasm `cargo check` 过（wasm dead-code 仍是已知那 5 条）；
+clippy 对改动行 0 告警；rustfmt：`paper_sizes.rs` / `cli.rs` / `main.rs` 整文件 0 diff，其余文件新增 0 处（对 HEAD 基线逐处核对）。
+**未做真机跑批**：11 张真图没用新旗子重跑（fit 路径字节不变有单元用例背书，release 批次留给下次要动比例时一起）。
+
+**并发插曲**：同晚另一个会话在同一棵工作树上起了一版平行的 P7 开头（`PlotScale::FitMargins(f64)` 变体、
+`NamedSheet` / `ANSI_SHEETS` / `SheetSpec` / `parse_sheet_spec` 一套，全部无人引用），用户裁决停掉那个会话由本会话收尾，
+这些桩已删（等价能力都在：FitMargins ⊂ `--margins` 四边版，NamedSheet 表 ⊂ `PaperSize`）。同一棵树上多会话并行写码
+没有锁就是互相覆盖，这次靠 mtime 与 `git status` 及时看见——协同要么编组拿写锁，要么分树。

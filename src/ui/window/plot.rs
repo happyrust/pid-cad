@@ -171,6 +171,12 @@ pub struct PlotDialogState {
     pub offset_x: String,
     pub offset_y: String,
     pub scale: String,
+    /// Margins in mm — left, bottom, right, top on the un-rotated sheet —
+    /// that fitting and centering must stay inside. Only the command line
+    /// sets this (`--margins`, P7); the dialog has no control for it, so in
+    /// the editor it is always `None` and plotting is as it always was.
+    #[serde(skip)]
+    pub margins_mm: Option<[f64; 4]>,
     #[serde(default = "legacy_fit_to_paper_default")]
     pub fit_to_paper: bool,
     #[serde(skip)]
@@ -231,6 +237,7 @@ impl Default for PlotDialogState {
             offset_x: "0.0".into(),
             offset_y: "0.0".into(),
             scale: "1:1".into(),
+            margins_mm: None,
             fit_to_paper: true,
             scales: Vec::new(),
             plot_views: Vec::new(),

@@ -3467,7 +3467,7 @@ fn dim_lineweight_label(dimlwd: i16) -> String {
 }
 
 /// Human-readable INSUNITS name (DXF group 70 unit codes).
-fn insunits_name(code: i16) -> &'static str {
+pub(crate) fn insunits_name(code: i16) -> &'static str {
     match code {
         1 => "Inches",
         2 => "Feet",
@@ -3519,7 +3519,7 @@ fn format_unit_factor(factor: f64) -> String {
 }
 
 /// Convert INSUNITS (DXF group 70) to millimetres.
-fn insunits_to_mm(code: i16) -> Option<f64> {
+pub(crate) fn insunits_to_mm(code: i16) -> Option<f64> {
     Some(match code {
         1 => 25.4,                       // Inches
         2 => 304.8,                      // Feet

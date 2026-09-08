@@ -200,15 +200,7 @@ fn plot_dialog_sheet_mm(d: &crate::ui::window::plot::PlotDialogState) -> (f64, f
     } else {
         Orientation::Landscape
     };
-    let standard = match d.paper.as_str() {
-        "A3" => Some(PaperSize::A3),
-        "A2" => Some(PaperSize::A2),
-        "A1" => Some(PaperSize::A1),
-        "A0" => Some(PaperSize::A0),
-        "A4" => Some(PaperSize::A4),
-        _ => None,
-    };
-    if let Some(paper) = standard {
+    if let Some(paper) = PaperSize::from_label(&d.paper) {
         return sheet_mm(paper, orientation);
     }
     let short = d.paper_width_mm.min(d.paper_height_mm).max(1.0);
@@ -3438,26 +3430,50 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
     /// D4: a headless model-space plot states its paper and how the drawing
     /// meets it. The editor can fall back on whatever the dialog last held
     /// because someone is looking at it; a script cannot.
+    ///
+    /// `unit_mm` is what one drawing unit is on paper at 1:1 — the caller
+    /// settles it between `--units` and the drawing's $INSUNITS (P7). It
+    /// scales `scale` only; a fitted plot never reads it. `margins_mm` is
+    /// `[left, bottom, right, top]` for the fit and the centering to respect.
     pub(in crate::app) fn set_headless_model_page(
         &mut self,
         paper: &str,
         landscape: bool,
         fit: bool,
         scale: Option<&str>,
+        margins_mm: Option<[f64; 4]>,
+        unit_mm: f64,
     ) -> Result<(), String> {
-        let known = ["A0", "A1", "A2", "A3", "A4"];
-        let paper = paper.to_uppercase();
-        if !known.contains(&paper.as_str()) {
-            return Err(format!(
-                "unknown paper size '{paper}'. Known sizes: {}",
-                known.join(", ")
-            ));
+        use crate::io::paper_sizes::{parse_paper, PaperSpec};
+        let spec = parse_paper(paper)?;
+        match spec {
+            PaperSpec::Standard(size) => {
+                self.plot_dialog.paper = size.label().to_string();
+            }
+            PaperSpec::Custom { width_mm, height_mm } => {
+                // The verbatim text is the label: `from_label` does not know
+                // it, so `plot_dialog_sheet_mm` reads the dimensions instead.
+                self.plot_dialog.paper = paper.trim().to_string();
+                self.plot_dialog.paper_width_mm = width_mm;
+                self.plot_dialog.paper_height_mm = height_mm;
+            }
         }
-        self.plot_dialog.paper = paper;
         self.plot_dialog.orientation = if landscape { "Landscape" } else { "Portrait" }.into();
         let (w, h) = plot_dialog_sheet_mm(&self.plot_dialog);
         self.plot_dialog.paper_width_mm = w;
         self.plot_dialog.paper_height_mm = h;
+        if let Some([left, bottom, right, top]) = margins_mm {
+            if w - left - right <= 0.0 || h - bottom - top <= 0.0 {
+                return Err(format!(
+                    "the margins leave no sheet: {} is {w} × {h} mm here and \
+                     --margins takes {} mm of width and {} mm of height",
+                    self.plot_dialog.paper,
+                    left + right,
+                    bottom + top,
+                ));
+            }
+        }
+        self.plot_dialog.margins_mm = margins_mm;
         self.plot_dialog.area = "Extents".into();
         self.plot_dialog.center = true;
         self.plot_dialog.offset_x = "0".into();
@@ -3474,21 +3490,22 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     .parse::<f64>()
                     .ok()
                     .zip(drawing.trim().parse::<f64>().ok())
-                    .filter(|(paper, drawing)| *paper > 0.0 && *drawing > 0.0)
-                    .map(|_| text.to_string()),
+                    .filter(|(paper, drawing)| *paper > 0.0 && *drawing > 0.0),
                 // A bare factor is the same thing over one.
                 None => text
                     .parse::<f64>()
                     .ok()
                     .filter(|factor| *factor > 0.0)
-                    .map(|factor| format!("{factor}:1")),
+                    .map(|factor| (factor, 1.0)),
             };
-            let Some(ratio) = ratio else {
+            let Some((paper_mm, drawing_units)) = ratio else {
                 return Err(format!(
                     "cannot read the scale '{scale}'. Write it as 1:100, 2:1 or 0.01"
                 ));
             };
-            self.plot_dialog.scale = ratio;
+            // 1:100 says 100 drawing units land on 1 unit's worth of paper;
+            // unit_mm says how many millimetres that is.
+            self.plot_dialog.scale = format!("{}:{drawing_units}", paper_mm * unit_mm);
         }
         Ok(())
     }
@@ -4740,7 +4757,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 .as_deref()
                 .is_some_and(|name| name.eq_ignore_ascii_case(&style_name));
         let (mut paper, orient) = paper_label_from_dims(ps.paper_width, ps.paper_height);
-        if !matches!(paper.as_str(), "A4" | "A3" | "A2" | "A1" | "A0")
+        if crate::io::paper_sizes::PaperSize::from_label(&paper).is_none()
             && !ps.paper_size.is_empty()
         {
             paper = ps.paper_size.clone();
@@ -5185,7 +5202,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
     /// Render a selected rectangle through one shared Model/Paper path. The
     /// window may lie partly or wholly outside a paper sheet.
     fn area_plot_job(&self, window: (f64, f64, f64, f64)) -> Option<ClippedPlotParams> {
-        use crate::io::paper_sizes::{window_to_sheet, PlotScale};
+        use crate::io::paper_sizes::{window_to_sheet_margins, PlotScale};
         let i = self.active_tab;
         let (x0, y0, x1, y1) = window;
         if (x1 - x0) < 1e-6 || (y1 - y0) < 1e-6 {
@@ -5209,8 +5226,12 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 PlotScale::Fit
             }
         };
-        let (scale, centered_x, centered_y) =
-            window_to_sheet((win_w, win_h), (sheet_w, sheet_h), scale_sel);
+        let (scale, centered_x, centered_y) = window_to_sheet_margins(
+            (win_w, win_h),
+            (sheet_w, sheet_h),
+            self.plot_dialog.margins_mm,
+            scale_sel,
+        );
         let target_x = if self.plot_dialog.center {
             centered_x
         } else {

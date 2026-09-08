@@ -88,11 +88,17 @@ pub struct Cli {
     #[arg(long)]
     pub model: bool,
 
-    /// Sheet for a model-space plot: A0 … A4.
+    /// Sheet for a model-space plot: A0 … A4, ANSI A … E, or WxH in mm
+    /// (e.g. 300x600).
     #[arg(long, value_name = "SIZE")]
     pub paper: Option<String>,
 
-    /// Lay the sheet on its side (--model).
+    /// Sheet orientation for --model. Left unsaid, a WxH sheet keeps the
+    /// shape it was given and a standard sheet stands upright.
+    #[arg(long, value_name = "portrait|landscape", conflicts_with = "landscape")]
+    pub orientation: Option<String>,
+
+    /// Lay the sheet on its side (--model): --orientation landscape.
     #[arg(long)]
     pub landscape: bool,
 
@@ -100,9 +106,28 @@ pub struct Cli {
     #[arg(long, conflicts_with = "scale")]
     pub fit: bool,
 
-    /// Plot scale for --model, as 1:100, 2:1 or 0.01.
+    /// Plot scale for --model, as 1:100, 2:1 or 0.01 — paper to drawing,
+    /// with the drawing unit's length settled by --units or the drawing.
     #[arg(long, value_name = "RATIO")]
     pub scale: Option<String>,
+
+    /// What one drawing unit is, for --scale: mm, cm, m, km, in, ft, yd, mi.
+    /// Required when the drawing does not say ($INSUNITS = 0); checked
+    /// against the drawing when it does.
+    #[arg(long, value_name = "UNIT")]
+    pub units: Option<String>,
+
+    /// Margins in mm the plot stays inside (--model): one value for all four
+    /// sides, H,V, or L,B,R,T. With --fit the drawing fills the margin box
+    /// exactly — no extra slack.
+    #[arg(long, value_name = "MM[,MM…]")]
+    pub margins: Option<String>,
+
+    /// A named bundle of model-plot defaults: preview-a4-fit, preview-a3-fit
+    /// or preview-a1-fit. Flags given explicitly win; --dry-run prints what
+    /// it expanded to.
+    #[arg(long, value_name = "NAME")]
+    pub preset: Option<String>,
 
     /// Plot style table for --plot-svg: a .ctb path, a name from the plot
     /// styles folder, or `none`. Omitted, the page setup's own table is used;

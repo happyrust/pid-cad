@@ -136,7 +136,7 @@ impl OpenCADStudio {
 
 /// What `--plot-svg` was asked to do.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PlotSvgRequest {
     /// Layout to plot. `None` with `model` false plots every layout.
     pub layout: Option<String>,
@@ -145,15 +145,35 @@ pub struct PlotSvgRequest {
     /// `Some(path)` for a CTB file, `Some("none")` for none at all, `None` to
     /// keep whatever the page setup names.
     pub ctb: Option<String>,
-    /// Sheet for a model-space plot: A0…A4. Required with `model`.
+    /// Sheet for a model-space plot: A0…A4, ANSI A…E, or `WxH` in mm.
+    /// Required with `model`.
     pub paper: Option<String>,
-    /// Sheet orientation for a model-space plot.
+    /// Sheet orientation for a model-space plot: `portrait` or `landscape`.
+    /// `None` follows the shape of a custom `WxH` sheet and lays a standard
+    /// one upright, as plots always have.
+    pub orientation: Option<String>,
+    /// Sheet orientation for a model-space plot — the historical spelling of
+    /// `--orientation landscape`; the parser keeps the two apart.
     pub landscape: bool,
     /// Fit the drawing's extents to the sheet. Mutually exclusive with
     /// `scale`; one of the two is required with `model`.
     pub fit: bool,
-    /// Plot scale for a model-space plot, as `1:100`, `2:1` or `0.01`.
+    /// Plot scale for a model-space plot, as `1:100`, `2:1` or `0.01` — paper
+    /// millimetres' worth of drawing per drawing unit's worth of paper, with
+    /// the unit settled by `units` and the drawing (P7).
     pub scale: Option<String>,
+    /// What one drawing unit is (`mm`, `cm`, `m`, `km`, `in`, `ft`, `yd`,
+    /// `mi`), for `scale`. Required when the drawing does not say ($INSUNITS
+    /// is 0); checked against the drawing when it does.
+    pub units: Option<String>,
+    /// Margins in mm — `M`, `H,V` or `L,B,R,T` — that the fit and the
+    /// centering stay inside. With margins the fit is exact: they are the
+    /// breathing room the default 5% slack used to approximate.
+    pub margins: Option<String>,
+    /// A named bundle of model-plot defaults (`preview-a4-fit`,
+    /// `preview-a3-fit`, `preview-a1-fit`). It fills only what the request
+    /// left unsaid; flags given explicitly win.
+    pub preset: Option<String>,
     /// Resolve and render, print the plan, write nothing.
     pub dry_run: bool,
     /// Replace files that already exist.
@@ -166,6 +186,214 @@ pub struct PlotSvgRequest {
     /// the scene and the pages, writing them — so a baseline can be taken
     /// without a profiler (P6.1 of docs/plans/2026-09-08-svg-export-next-steps.md).
     pub timing: bool,
+}
+
+/// The presets `--preset` knows: quick fitted previews of model space on the
+/// common sheets, lying the way drawings do. Each says exactly
+/// `--model --paper <sheet> --orientation landscape --fit`.
+#[cfg(not(target_arch = "wasm32"))]
+const PLOT_PRESETS: [(&str, &str); 3] = [
+    ("preview-a4-fit", "A4"),
+    ("preview-a3-fit", "A3"),
+    ("preview-a1-fit", "A1"),
+];
+
+/// The units `--units` knows, in millimetres. A subset of $INSUNITS on
+/// purpose: these are the ones drawings are actually drawn in; a drawing in
+/// light years can still state itself through its header.
+#[cfg(not(target_arch = "wasm32"))]
+const PLOT_UNITS: [(&str, f64); 8] = [
+    ("mm", 1.0),
+    ("cm", 10.0),
+    ("m", 1_000.0),
+    ("km", 1_000_000.0),
+    ("in", 25.4),
+    ("ft", 304.8),
+    ("yd", 914.4),
+    ("mi", 1_609_344.0),
+];
+
+/// `--preset`: fill in what the command line left unsaid, and never override
+/// what it said (P7). A preset is model-space by definition, so it cannot
+/// dress a `--layout` plot, whose page setup already states these things.
+/// Returns the effective request and the expansion in words, for `--dry-run`
+/// to print.
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_plot_preset(request: &PlotSvgRequest) -> Result<(PlotSvgRequest, Option<String>), String> {
+    let Some(name) = request.preset.as_deref() else {
+        return Ok((request.clone(), None));
+    };
+    let Some((_, paper)) = PLOT_PRESETS
+        .iter()
+        .find(|(candidate, _)| *candidate == name)
+    else {
+        return Err(format!(
+            "unknown preset '{name}'. Presets: {}",
+            PLOT_PRESETS.map(|(name, _)| name).join(", ")
+        ));
+    };
+    if request.layout.is_some() {
+        return Err(format!(
+            "--preset {name} plots model space and --layout plots a layout's \
+             own page setup; say one or the other"
+        ));
+    }
+    let mut effective = request.clone();
+    effective.model = true;
+    if effective.paper.is_none() {
+        effective.paper = Some((*paper).to_string());
+    }
+    if effective.orientation.is_none() && !effective.landscape {
+        effective.orientation = Some("landscape".to_string());
+    }
+    if !effective.fit && effective.scale.is_none() {
+        effective.fit = true;
+    }
+    let expansion = format!(
+        "preset {name}: --model --paper {paper} --orientation landscape --fit \
+         — flags given explicitly win"
+    );
+    Ok((effective, Some(expansion)))
+}
+
+/// The flags only a model-space plot reads. A layout plot would ignore them
+/// silently, and a flag that does nothing is a trap (D4) — refused instead.
+#[cfg(not(target_arch = "wasm32"))]
+fn stray_model_flag(request: &PlotSvgRequest) -> Option<&'static str> {
+    [
+        (request.paper.is_some(), "--paper"),
+        (request.orientation.is_some(), "--orientation"),
+        (request.landscape, "--landscape"),
+        (request.fit, "--fit"),
+        (request.scale.is_some(), "--scale"),
+        (request.units.is_some(), "--units"),
+        (request.margins.is_some(), "--margins"),
+    ]
+    .into_iter()
+    .find_map(|(given, flag)| given.then_some(flag))
+}
+
+/// The orientation the request states, or the one its paper implies: a custom
+/// `600x300` already lies on its side, a standard sheet stays upright.
+#[cfg(not(target_arch = "wasm32"))]
+fn plot_orientation_landscape(
+    request: &PlotSvgRequest,
+    paper: &crate::io::paper_sizes::PaperSpec,
+) -> Result<bool, String> {
+    use crate::io::paper_sizes::PaperSpec;
+    match request.orientation.as_deref() {
+        Some(word) if word.eq_ignore_ascii_case("portrait") => Ok(false),
+        Some(word) if word.eq_ignore_ascii_case("landscape") => Ok(true),
+        Some(word) => Err(format!(
+            "--orientation is portrait or landscape, not '{word}'"
+        )),
+        None if request.landscape => Ok(true),
+        None => Ok(match paper {
+            PaperSpec::Custom {
+                width_mm,
+                height_mm,
+            } => width_mm > height_mm,
+            PaperSpec::Standard(_) => false,
+        }),
+    }
+}
+
+/// What one drawing unit is in millimetres, settled between `--units` and the
+/// drawing's $INSUNITS: both given must agree, either alone answers, and
+/// neither is an error only when `--scale` needs the answer — a fitted plot
+/// never reads it. Returns the length and where it came from, for the plan.
+#[cfg(not(target_arch = "wasm32"))]
+fn plot_unit_mm(app: &OpenCADStudio, request: &PlotSvgRequest) -> Result<(f64, String), String> {
+    use crate::app::properties::{insunits_name, insunits_to_mm};
+    let cli = match request.units.as_deref() {
+        None => None,
+        Some(word) => {
+            let Some((name, mm)) = PLOT_UNITS
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(word))
+            else {
+                return Err(format!(
+                    "unknown unit '{word}' for --units. Units: {}",
+                    PLOT_UNITS.map(|(name, _)| name).join(", ")
+                ));
+            };
+            Some((*name, *mm))
+        }
+    };
+    let code = app.tabs[app.active_tab]
+        .scene
+        .document
+        .header
+        .insertion_units;
+    match (cli, insunits_to_mm(code)) {
+        (Some((name, cli_mm)), Some(header_mm)) => {
+            if (cli_mm - header_mm).abs() > 1e-9 * header_mm.max(cli_mm) {
+                Err(format!(
+                    "--units {name} contradicts the drawing, whose $INSUNITS \
+                     says {}",
+                    insunits_name(code)
+                ))
+            } else {
+                Ok((cli_mm, format!("--units {name}")))
+            }
+        }
+        (Some((name, cli_mm)), None) => Ok((cli_mm, format!("--units {name}"))),
+        (None, Some(header_mm)) => Ok((header_mm, format!("$INSUNITS {}", insunits_name(code)))),
+        (None, None) => {
+            if request.scale.is_some() {
+                Err(format!(
+                    "--scale needs to know what a drawing unit is, and this \
+                     drawing does not say ($INSUNITS is {code}). Say --units \
+                     with one of: {}",
+                    PLOT_UNITS.map(|(name, _)| name).join(", ")
+                ))
+            } else {
+                Ok((1.0, "unstated; --fit does not read it".to_string()))
+            }
+        }
+    }
+}
+
+/// `--margins`, read as mm: one value for all four sides, `H,V`, or
+/// `L,B,R,T` on the un-rotated sheet. Negative margins would push ink off
+/// the page and are refused with the rest of the gibberish.
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_plot_margins(text: &str) -> Result<[f64; 4], String> {
+    let refuse = || {
+        format!(
+            "cannot read --margins '{text}'. Say mm as M, H,V or L,B,R,T — \
+             10, or 10,15, or 10,15,10,15"
+        )
+    };
+    let values = text
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite() && *v >= 0.0)
+        })
+        .collect::<Option<Vec<f64>>>()
+        .ok_or_else(refuse)?;
+    match values[..] {
+        [all] => Ok([all; 4]),
+        [h, v] => Ok([h, v, h, v]),
+        [left, bottom, right, top] => Ok([left, bottom, right, top]),
+        _ => Err(refuse()),
+    }
+}
+
+/// A number for the plan: up to four decimals, the trailing noise cut.
+#[cfg(not(target_arch = "wasm32"))]
+fn plan_num(value: f64) -> String {
+    let mut text = format!("{value:.4}");
+    while text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    text
 }
 
 /// Headless plot to SVG (`--plot-svg IN OUT`). Returns a process exit code.
@@ -182,7 +410,16 @@ pub fn plot_svg_headless(
 ) -> i32 {
     let mut app = OpenCADStudio::new();
     match plot_svg_with(&mut app, input, output, request) {
-        Ok(batch) => {
+        Ok(run) => {
+            let batch = &run.batch;
+            if batch.dry_run {
+                // The rehearsal's answer is the plan, not just the names: what
+                // a preset expanded to, and per page the sheet, scale, window,
+                // clip and style table (P7).
+                for line in &run.plan {
+                    println!("{line}");
+                }
+            }
             let verb = if batch.dry_run {
                 "would write"
             } else {
@@ -227,6 +464,17 @@ pub fn plot_svg_headless(
     }
 }
 
+/// What a headless plot did, or — dry — would have done.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub(crate) struct PlotSvgRun {
+    pub batch: crate::io::svg_export::SvgBatch,
+    /// The plot in words: the request a preset expanded to, the sheet, the
+    /// unit and margins in force, and per page the paper, scale, window,
+    /// clip, style table and anything the text lost. `--dry-run` prints it.
+    pub plan: Vec<String>,
+}
+
 /// `--plot-svg` on an app that is already built — the part with a result to
 /// look at, so the tests can.
 #[cfg(not(target_arch = "wasm32"))]
@@ -235,8 +483,23 @@ pub(crate) fn plot_svg_with(
     input: &std::path::Path,
     output: &std::path::Path,
     request: &PlotSvgRequest,
-) -> Result<crate::io::svg_export::SvgBatch, String> {
+) -> Result<PlotSvgRun, String> {
     use crate::app::update::file::PlotRequest;
+
+    let (request, preset_expansion) = apply_plot_preset(request)?;
+    let mut plan: Vec<String> = Vec::new();
+    plan.extend(preset_expansion);
+    if !request.model {
+        // These flags describe the sheet a model plot invents. A layout
+        // brings its own page setup, so here they would do nothing — and a
+        // flag that does nothing is a trap, not a convenience.
+        if let Some(flag) = stray_model_flag(&request) {
+            return Err(format!(
+                "{flag} belongs to a model-space plot; a layout's page setup \
+                 states its own. Add --model, or drop {flag}."
+            ));
+        }
+    }
 
     let started = std::time::Instant::now();
     app.open_drawing_headless(input)?;
@@ -252,13 +515,39 @@ pub(crate) fn plot_svg_with(
         if request.fit == request.scale.is_some() {
             return Err("--model needs exactly one of --fit and --scale <1:100>".to_string());
         }
+        let spec = crate::io::paper_sizes::parse_paper(paper)?;
+        let landscape = plot_orientation_landscape(&request, &spec)?;
+        let (unit_mm, unit_source) = plot_unit_mm(app, &request)?;
+        let margins = request
+            .margins
+            .as_deref()
+            .map(parse_plot_margins)
+            .transpose()?;
         app.select_layout_headless("Model")?;
         app.set_headless_model_page(
             paper,
-            request.landscape,
+            landscape,
             request.fit,
             request.scale.as_deref(),
+            margins,
+            unit_mm,
         )?;
+        let margins_said = match margins {
+            Some([left, bottom, right, top]) => format!(
+                "margins {}/{}/{}/{} mm (left/bottom/right/top)",
+                plan_num(left),
+                plan_num(bottom),
+                plan_num(right),
+                plan_num(top)
+            ),
+            None => "no margins".to_string(),
+        };
+        plan.push(format!(
+            "model space on {} {}, {margins_said}, 1 drawing unit = {} mm ({unit_source})",
+            app.plot_dialog.paper,
+            if landscape { "landscape" } else { "portrait" },
+            plan_num(unit_mm),
+        ));
         PlotRequest::current_view()
     } else if let Some(name) = &request.layout {
         PlotRequest::layouts(vec![name.clone()])
@@ -295,6 +584,51 @@ pub(crate) fn plot_svg_with(
         },
     )
     .map_err(|error| error.to_string())?;
+    for (page, outcome) in job.pages.iter().zip(&batch.pages) {
+        let name = outcome
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| outcome.path.display().to_string());
+        let mut line = format!(
+            "{name}: paper {} × {} mm, {} mm of paper per drawing unit",
+            plan_num(page.paper_w),
+            plan_num(page.paper_h),
+            plan_num(page.scale as f64),
+        );
+        if let Some((clip_x, clip_y, clip_w, clip_h)) = page.clip {
+            // The clip rectangle is the plotted window in drawing units,
+            // placed on the sheet; subtracting the page offset recovers where
+            // that window sits in the drawing.
+            let x0 = clip_x as f64 - page.offset_x;
+            let y0 = clip_y as f64 - page.offset_y;
+            let scale = page.scale as f64;
+            line.push_str(&format!(
+                ", window ({}, {}) to ({}, {}) drawing units, clip {} × {} mm at ({}, {}) mm",
+                plan_num(x0),
+                plan_num(y0),
+                plan_num(x0 + clip_w as f64),
+                plan_num(y0 + clip_h as f64),
+                plan_num(clip_w as f64 * scale),
+                plan_num(clip_h as f64 * scale),
+                plan_num(clip_x as f64 * scale),
+                plan_num(clip_y as f64 * scale),
+            ));
+        }
+        let ctb = page
+            .plot_style
+            .as_ref()
+            .map(|table| table.name.as_str())
+            .unwrap_or("none");
+        line.push_str(&format!(", ctb {ctb}"));
+        if outcome.report.missing_glyphs > 0 {
+            line.push_str(&format!(
+                ", {} glyph(s) the atlas could not supply",
+                outcome.report.missing_glyphs
+            ));
+        }
+        plan.push(line);
+    }
     if request.timing {
         // Wall clock, in process. "read" is the file read and parsed into a
         // document; the scene is only marked dirty there, so "scene+pages"
@@ -311,7 +645,7 @@ pub(crate) fn plot_svg_with(
             written.as_millis()
         );
     }
-    Ok(batch)
+    Ok(PlotSvgRun { batch, plan })
 }
 
 /// `--list-layouts FILE`: the layouts a drawing offers `--plot-svg`.
@@ -991,7 +1325,8 @@ mod tests {
         let out = dir.join("plot.svg");
         let mut app = OpenCADStudio::new_for_test();
         let batch = super::plot_svg_with(&mut app, &drawing, &out, &model_on_a3())
-            .expect("model space plots");
+            .expect("model space plots")
+            .batch;
 
         assert_eq!(batch.pages.len(), 1);
         assert_eq!(batch.pages[0].path, out);
@@ -1010,7 +1345,8 @@ mod tests {
         let bare_out = bare_dir.join("plot.svg");
         let mut app = OpenCADStudio::new_for_test();
         let bare = super::plot_svg_with(&mut app, &bare_drawing, &bare_out, &model_on_a3())
-            .expect("the same drawing without its label plots");
+            .expect("the same drawing without its label plots")
+            .batch;
         assert!(
             batch.pages[0].report.elements > bare.pages[0].report.elements,
             "the label added nothing: {} elements with it, {} without",
@@ -1036,7 +1372,8 @@ mod tests {
         let mut app = OpenCADStudio::new_for_test();
         app.open_drawing_headless(&drawing).unwrap();
         app.select_layout_headless("Model").unwrap();
-        app.set_headless_model_page("A3", true, true, None).unwrap();
+        app.set_headless_model_page("A3", true, true, None, None, 1.0)
+            .unwrap();
         let job = app.resolve_plot_job(&PlotRequest::current_view()).unwrap();
         assert_eq!(job.pages.len(), 1);
         let snapshot = job
@@ -1056,7 +1393,9 @@ mod tests {
         );
         // And the strict default plots it without a word about missing text.
         let out = dir.join("plot.svg");
-        let batch = super::plot_svg_with(&mut app, &drawing, &out, &model_on_a3()).unwrap();
+        let batch = super::plot_svg_with(&mut app, &drawing, &out, &model_on_a3())
+            .unwrap()
+            .batch;
         assert_eq!(batch.pages[0].report.missing_glyphs, 0);
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -1066,7 +1405,8 @@ mod tests {
         let mut app = OpenCADStudio::new_for_test();
         app.open_drawing_headless(&bare_drawing).unwrap();
         app.select_layout_headless("Model").unwrap();
-        app.set_headless_model_page("A3", true, true, None).unwrap();
+        app.set_headless_model_page("A3", true, true, None, None, 1.0)
+            .unwrap();
         let job = app.resolve_plot_job(&PlotRequest::current_view()).unwrap();
         assert!(job.assets.glyphs.is_none(), "no text, no snapshot");
         let _ = std::fs::remove_dir_all(&bare_dir);
@@ -1089,7 +1429,8 @@ mod tests {
         let mut app = OpenCADStudio::new_for_test();
         app.open_drawing_headless(&drawing).unwrap();
         app.select_layout_headless("Model").unwrap();
-        app.set_headless_model_page("A3", true, true, None).unwrap();
+        app.set_headless_model_page("A3", true, true, None, None, 1.0)
+            .unwrap();
         let first = app.resolve_plot_job(&PlotRequest::current_view()).unwrap();
         assert_eq!(first.assets.stale_glyphs(&first.pages), 0);
 
@@ -1188,6 +1529,7 @@ mod tests {
         assert!(refuse(super::PlotSvgRequest {
             model: true,
             paper: Some("A3".into()),
+            units: Some("mm".into()),
             scale: Some("one to a hundred".into()),
             ..Default::default()
         })
@@ -1195,7 +1537,8 @@ mod tests {
         assert!(!out.exists(), "a refused plot wrote a file");
 
         // An explicit ratio is honoured: 1:2 puts a 100 mm line on 50 mm of
-        // paper, which a fitted plot would not.
+        // paper, which a fitted plot would not. The fixture does not state
+        // its units, so the ratio has to (P7).
         let mut app = OpenCADStudio::new_for_test();
         super::plot_svg_with(
             &mut app,
@@ -1206,6 +1549,7 @@ mod tests {
                 paper: Some("A3".into()),
                 landscape: true,
                 scale: Some("1:2".into()),
+                units: Some("mm".into()),
                 ..Default::default()
             },
         )
@@ -1227,7 +1571,7 @@ mod tests {
         let (dir, drawing) = drawing_with_geometry("dry");
         let out = dir.join("plot.svg");
         let mut app = OpenCADStudio::new_for_test();
-        let batch = super::plot_svg_with(
+        let run = super::plot_svg_with(
             &mut app,
             &drawing,
             &out,
@@ -1237,10 +1581,25 @@ mod tests {
             },
         )
         .expect("the rehearsal succeeds");
-        assert!(batch.dry_run);
-        assert_eq!(batch.pages.len(), 1);
-        assert!(batch.pages[0].bytes > 0, "the page was not rendered");
+        assert!(run.batch.dry_run);
+        assert_eq!(run.batch.pages.len(), 1);
+        assert!(run.batch.pages[0].bytes > 0, "the page was not rendered");
         assert!(!out.exists(), "a dry run wrote a file");
+        // And the rehearsal says what it rehearsed: the sheet, the scale, the
+        // window it clipped to and the style table (P7's exit condition).
+        let plan = run.plan.join("\n");
+        for expected in [
+            "paper 420 × 297 mm",
+            "window",
+            "clip",
+            "ctb",
+            "model space on A3",
+        ] {
+            assert!(
+                plan.contains(expected),
+                "no '{expected}' in the plan:\n{plan}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1293,6 +1652,407 @@ mod tests {
         .expect("no plot style table is fine");
         assert!(out.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `drawing_with`, minus the label, plus a stated $INSUNITS. No text on
+    /// purpose: these fixtures are compared byte for byte, and glyphs are the
+    /// one thing another test running beside this one could disturb.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn drawing_with_units(name: &str, code: i16) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ocs-plot-svg-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("drawing.dxf");
+        let mut app = OpenCADStudio::new_for_test();
+        assert_eq!(app.automation_op(r#"{"op":"new"}"#)["ok"], true);
+        assert_eq!(
+            app.automation_op(r#"{"op":"run","cmd":"LINE 0,0 100,0 100,60 0,60 0,0"}"#)["ok"],
+            true
+        );
+        let set = format!(r#"{{"op":"run","cmd":"INSUNITS {code}"}}"#);
+        assert_eq!(app.automation_op(&set)["ok"], true, "INSUNITS {code}");
+        let save = format!(
+            r#"{{"op":"save","path":{}}}"#,
+            serde_json::to_string(&path.to_string_lossy()).unwrap()
+        );
+        assert_eq!(app.automation_op(&save)["ok"], true, "saved the fixture");
+        (dir, path)
+    }
+
+    // P7: --orientation is the sheet's word now; --landscape stays as its
+    // alias, and a word that is neither way up is refused.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_orientation_flag_turns_the_sheet() {
+        let (dir, drawing) = drawing_with("orientation", false);
+        let out = dir.join("plot.svg");
+        let sheet = |orientation: Option<&str>| {
+            let mut app = OpenCADStudio::new_for_test();
+            super::plot_svg_with(
+                &mut app,
+                &drawing,
+                &out,
+                &super::PlotSvgRequest {
+                    model: true,
+                    paper: Some("A3".into()),
+                    orientation: orientation.map(str::to_string),
+                    fit: true,
+                    force: true,
+                    ..Default::default()
+                },
+            )
+            .expect("an oriented plot");
+            std::fs::read_to_string(&out).unwrap()
+        };
+        // Unsaid, a standard sheet stands upright, as it always has.
+        assert!(sheet(None).contains("width=\"297mm\" height=\"420mm\""));
+        assert!(sheet(Some("portrait")).contains("width=\"297mm\" height=\"420mm\""));
+        // Any spelling of sideways, including the old flag's.
+        assert!(sheet(Some("Landscape")).contains("width=\"420mm\" height=\"297mm\""));
+        let mut app = OpenCADStudio::new_for_test();
+        let error = super::plot_svg_with(
+            &mut app,
+            &drawing,
+            &out,
+            &super::PlotSvgRequest {
+                model: true,
+                paper: Some("A3".into()),
+                orientation: Some("sideways".into()),
+                fit: true,
+                ..Default::default()
+            },
+        )
+        .expect_err("not a way up");
+        assert!(error.contains("portrait or landscape"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // P7: the sheet table grew ANSI A–E, and `WxH` says anything else. A
+    // custom sheet keeps the shape it was given unless told otherwise.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn ansi_and_custom_sheets_reach_the_plot() {
+        let (dir, drawing) = drawing_with("sheets", false);
+        let out = dir.join("plot.svg");
+        let sheet = |paper: &str, orientation: Option<&str>| {
+            let mut app = OpenCADStudio::new_for_test();
+            super::plot_svg_with(
+                &mut app,
+                &drawing,
+                &out,
+                &super::PlotSvgRequest {
+                    model: true,
+                    paper: Some(paper.into()),
+                    orientation: orientation.map(str::to_string),
+                    fit: true,
+                    force: true,
+                    ..Default::default()
+                },
+            )
+            .expect(paper);
+            std::fs::read_to_string(&out).unwrap()
+        };
+        assert!(
+            sheet("ansi-b", Some("landscape")).contains("width=\"431.8mm\" height=\"279.4mm\""),
+            "ANSI B on its side is 17 × 11 inches"
+        );
+        assert!(sheet("ANSI A", None).contains("width=\"215.9mm\" height=\"279.4mm\""));
+        // A custom size is the sheet as typed…
+        assert!(sheet("300x600", None).contains("width=\"300mm\" height=\"600mm\""));
+        assert!(sheet("600x300", None).contains("width=\"600mm\" height=\"300mm\""));
+        // …and an explicit orientation outranks the typed shape.
+        assert!(sheet("600x300", Some("portrait")).contains("width=\"300mm\" height=\"600mm\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // P7: a ratio is paper to drawing, and that needs a unit. A drawing that
+    // states one answers by itself; one that does not must be told; told and
+    // stated must agree; and --fit never asks.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_scale_settles_its_unit_between_the_flag_and_the_drawing() {
+        let (dir, unitless) = drawing_with("unitless", false);
+        let out = dir.join("plot.svg");
+        let plot = |drawing: &std::path::Path, request: super::PlotSvgRequest| {
+            let mut app = OpenCADStudio::new_for_test();
+            super::plot_svg_with(&mut app, drawing, &out, &request)
+                .map(|_| std::fs::read_to_string(&out).unwrap())
+        };
+        let scaled = |scale: &str, units: Option<&str>| super::PlotSvgRequest {
+            model: true,
+            paper: Some("A3".into()),
+            landscape: true,
+            scale: Some(scale.into()),
+            units: units.map(str::to_string),
+            force: true,
+            ..Default::default()
+        };
+
+        // Unitless drawing, --scale, no --units: refused before anything moves.
+        let error = plot(&unitless, scaled("1:2", None)).expect_err("no unit anywhere");
+        assert!(error.contains("--units"), "{error}");
+        assert!(error.contains("$INSUNITS"), "{error}");
+        assert!(!out.exists(), "a refused plot wrote a file");
+        // A unit the flag does not know is refused with the list.
+        let error = plot(&unitless, scaled("1:2", Some("furlong"))).expect_err("not a unit");
+        assert!(error.contains("mm, cm, m"), "{error}");
+
+        // On the same unitless drawing, metres at 1:1000 and millimetres at
+        // 1:1 are the same square of paper.
+        let metres = plot(&unitless, scaled("1:1000", Some("m"))).expect("metres plot");
+        let millimetres = plot(&unitless, scaled("1:1", Some("mm"))).expect("mm plot");
+        assert_eq!(
+            metres, millimetres,
+            "1000 mm per unit ≠ 1 mm per unit × 1000"
+        );
+
+        // A drawing that states $INSUNITS answers for itself…
+        let (mm_dir, in_mm) = drawing_with_units("units-mm", 4);
+        let stated = plot(&in_mm, scaled("1:2", None)).expect("the drawing knows its unit");
+        let told = plot(&in_mm, scaled("1:2", Some("mm"))).expect("agreeing is fine");
+        assert_eq!(stated, told);
+        // …contradicting it is refused, in the drawing's words.
+        let error = plot(&in_mm, scaled("1:2", Some("in"))).expect_err("inches it is not");
+        assert!(error.contains("Millimeters"), "{error}");
+        // The contradiction is refused even under --fit, which never reads
+        // the unit: a lie on the command line does not get to do nothing.
+        let mut fitted = scaled("1:2", Some("in"));
+        fitted.scale = None;
+        fitted.fit = true;
+        plot(&in_mm, fitted).expect_err("the same lie, fitted");
+
+        // A metre drawing at 1:1000 is a millimetre drawing at 1:1 — the
+        // physical plot, not the numeral, is what the ratio means.
+        let (m_dir, in_m) = drawing_with_units("units-m", 6);
+        let metres = plot(&in_m, scaled("1:1000", None)).expect("a metre drawing plots");
+        let millimetres = plot(&in_mm, scaled("1:1", None)).expect("a mm drawing plots");
+        assert_eq!(metres, millimetres);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&mm_dir);
+        let _ = std::fs::remove_dir_all(&m_dir);
+    }
+
+    // P7: margins bound the fit and the centering. The numbers on the page
+    // are checked, not just that something differs.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn margins_keep_the_plot_inside_the_sheet() {
+        use crate::app::update::file::PlotRequest;
+
+        let (dir, drawing) = drawing_with("margins", false);
+        let mut app = OpenCADStudio::new_for_test();
+        app.open_drawing_headless(&drawing).unwrap();
+        app.select_layout_headless("Model").unwrap();
+        app.set_headless_model_page("A4", true, true, None, Some([20.0; 4]), 1.0)
+            .unwrap();
+        let job = app.resolve_plot_job(&PlotRequest::current_view()).unwrap();
+        let page = &job.pages[0];
+        assert_eq!((page.paper_w, page.paper_h), (297.0, 210.0));
+        let (clip_x, clip_y, clip_w, clip_h) = page.clip.expect("a model plot clips its window");
+        let scale = page.scale as f64;
+        let (usable_w, usable_h) = (297.0 - 40.0, 210.0 - 40.0);
+        let exact_fit = (usable_w / clip_w as f64).min(usable_h / clip_h as f64);
+        assert!(
+            (scale - exact_fit).abs() < 1e-6,
+            "fit into the margin box is exact, no 5% slack: {scale} vs {exact_fit}"
+        );
+        // The window's min corner, in sheet mm, is centered in the margin box.
+        let x_mm = clip_x as f64 * scale;
+        let y_mm = clip_y as f64 * scale;
+        assert!(
+            (x_mm - (20.0 + (usable_w - clip_w as f64 * scale) / 2.0)).abs() < 1e-3,
+            "x {x_mm}"
+        );
+        assert!(
+            (y_mm - (20.0 + (usable_h - clip_h as f64 * scale) / 2.0)).abs() < 1e-3,
+            "y {y_mm}"
+        );
+
+        // Margins that eat the sheet are refused when the sheet is known.
+        let error = app
+            .set_headless_model_page("A4", true, true, None, Some([200.0; 4]), 1.0)
+            .expect_err("400 mm of margin on 297 mm of paper");
+        assert!(error.contains("margins"), "{error}");
+
+        // And the gibberish forms are refused before that, file untouched.
+        let out = dir.join("plot.svg");
+        for bad in ["10,20,30", "-5", "wide", ""] {
+            let mut app = OpenCADStudio::new_for_test();
+            let error = super::plot_svg_with(
+                &mut app,
+                &drawing,
+                &out,
+                &super::PlotSvgRequest {
+                    model: true,
+                    paper: Some("A4".into()),
+                    fit: true,
+                    margins: Some(bad.into()),
+                    ..Default::default()
+                },
+            )
+            .expect_err(bad);
+            assert!(error.contains("--margins"), "{bad}: {error}");
+        }
+        assert!(!out.exists(), "a refused plot wrote a file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // P7: a preset is defaults, not orders — it fills what was not said,
+    // loses to what was, and cannot dress a layout plot.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_preset_fills_in_only_what_was_not_said() {
+        let (dir, drawing) = drawing_with("preset", false);
+        let out = dir.join("plot.svg");
+
+        // The preset alone is exactly its expansion.
+        let mut app = OpenCADStudio::new_for_test();
+        super::plot_svg_with(
+            &mut app,
+            &drawing,
+            &out,
+            &super::PlotSvgRequest {
+                preset: Some("preview-a3-fit".into()),
+                force: true,
+                ..Default::default()
+            },
+        )
+        .expect("the preset carries the whole request");
+        let preset_bytes = std::fs::read_to_string(&out).unwrap();
+        let mut app = OpenCADStudio::new_for_test();
+        super::plot_svg_with(
+            &mut app,
+            &drawing,
+            &out,
+            &super::PlotSvgRequest {
+                force: true,
+                ..model_on_a3()
+            },
+        )
+        .expect("the spelled-out request");
+        assert_eq!(preset_bytes, std::fs::read_to_string(&out).unwrap());
+
+        // An explicit flag wins over the preset's default.
+        let mut app = OpenCADStudio::new_for_test();
+        let run = super::plot_svg_with(
+            &mut app,
+            &drawing,
+            &out,
+            &super::PlotSvgRequest {
+                preset: Some("preview-a3-fit".into()),
+                paper: Some("A4".into()),
+                force: true,
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .expect("the preset yields the paper");
+        let plan = run.plan.join("\n");
+        assert!(plan.contains("preset preview-a3-fit:"), "{plan}");
+        assert!(plan.contains("model space on A4 landscape"), "{plan}");
+
+        // Not a preset; and a preset under --layout is a contradiction.
+        let mut app = OpenCADStudio::new_for_test();
+        let error = super::plot_svg_with(
+            &mut app,
+            &drawing,
+            &out,
+            &super::PlotSvgRequest {
+                preset: Some("preview-b5".into()),
+                ..Default::default()
+            },
+        )
+        .expect_err("no such preset");
+        assert!(error.contains("preview-a3-fit"), "{error}");
+        let mut app = OpenCADStudio::new_for_test();
+        let error = super::plot_svg_with(
+            &mut app,
+            &drawing,
+            &out,
+            &super::PlotSvgRequest {
+                preset: Some("preview-a3-fit".into()),
+                layout: Some("Layout1".into()),
+                ..Default::default()
+            },
+        )
+        .expect_err("a preset plots model space");
+        assert!(error.contains("model space"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // P7 exit condition: a flag a layout plot would silently ignore is
+    // refused instead, before the drawing is even opened.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn model_sheet_flags_are_refused_on_a_layout_plot() {
+        let out = std::path::PathBuf::from("never-written.svg");
+        let missing = std::path::Path::new("no-such-drawing.dxf");
+        let strays: [(&str, super::PlotSvgRequest); 7] = [
+            (
+                "--paper",
+                super::PlotSvgRequest {
+                    paper: Some("A3".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "--orientation",
+                super::PlotSvgRequest {
+                    orientation: Some("landscape".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "--landscape",
+                super::PlotSvgRequest {
+                    landscape: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "--fit",
+                super::PlotSvgRequest {
+                    fit: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "--scale",
+                super::PlotSvgRequest {
+                    scale: Some("1:2".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "--units",
+                super::PlotSvgRequest {
+                    units: Some("mm".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "--margins",
+                super::PlotSvgRequest {
+                    margins: Some("10".into()),
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (flag, mut request) in strays {
+            // With a named layout and without one (= every layout): both are
+            // page-setup plots, and the refusal comes before the open — the
+            // drawing here does not exist.
+            for layout in [Some("Layout1".to_string()), None] {
+                request.layout = layout;
+                let mut app = OpenCADStudio::new_for_test();
+                let error =
+                    super::plot_svg_with(&mut app, missing, &out, &request).expect_err(flag);
+                assert!(error.contains(flag), "{flag}: {error}");
+                assert!(error.contains("--model"), "{flag}: {error}");
+            }
+        }
+        assert!(!out.exists());
     }
 
     // The editor's side of the same feature: the command exists, dispatches,
