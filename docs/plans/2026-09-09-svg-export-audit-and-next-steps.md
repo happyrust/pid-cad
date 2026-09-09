@@ -3,8 +3,9 @@
 > 日期：2026-09-09
 > 状态：Plannotator 批准（2026-09-09，无批注）；**P8.1 / P8.2 已实施**（§6.1，真图三行 FAIL 的定性见
 > §6.2——判据局限，非导出缺陷）、**P8.4 已实施**（§6.3）、**P8.3 已实施**（§6.4；merge_lines 的答案：
-> **只有 resvg 丢**，Chrome / Inkscape / librsvg 都画——拍板 3 落地为「就地记录、不升格」）；
-> 剩 P8.5 / P8.6 与「判据学会彩色墨 / 亚 2 px 覆盖」一条新债（§6.2、§6.4）。
+> **只有 resvg 丢**，Chrome / Inkscape / librsvg 都画——拍板 3 落地为「就地记录、不升格」）、**P8.5 已实施**（§6.5，
+> 2026-09-10：测试不再碰用户配置、Stamp 消息在 SVG 下拦住、SVG 文案的 Fluent key 建齐）；
+> 剩 P8.6（待拍板 2）与「判据学会彩色墨 / 亚 2 px 覆盖」一条新债（§6.2、§6.4）。
 > 前置：`docs/plans/2026-09-07-dxf-to-svg-export.md`（v2，P0 / P1 / P2 / R1 / R3 第一轮已实施）、
 > `docs/plans/2026-09-08-svg-export-next-steps.md`（P4.1–P4.3 / P5.1 / P6.1（裁决 P6.2–P6.4 不做）/ P7 已实施；
 > **P5.2 已在 `../OpenCADStudio-p52` worktree 实施、未收尾**，记录在其 §13）。
@@ -59,9 +60,9 @@ P5.2（PDF ↔ SVG 栅格对比）的代码与语料证据在 p52 worktree 已�
 | P5.3 | 兼容性实测：rsvg-convert / Inkscape / Chromium 对 22 语料 + 3 真图 | next-steps §3 | **已实施**（P8.3，§6.4） |
 | G10 | 模型空间 SVG 不看出图区域（Window/Display/Limits/View，恒取 Extents） | next-steps §2/§10 | **已实施**（P8.4，§6.3） |
 | Q1 | web 多页（顺序 N 次下载 vs zip 打包），PRINTALL 的 SVG 在 web 上明确报不可用 | next-steps §6 | 待拍板 |
-| 债1 | `new_for_test` 用真实 `%APPDATA%\OpenCADStudio\settings.json`，走到 `save_config` 的测试会写用户配置（P4.3 踩过，已污染过一次 `plot.background`） | next-steps §11 | 未修 |
-| 债2 | P4.2 的三条新文案没进 21 份 Fluent 目录（回落英文） | next-steps §10 | 未补 |
-| 债3 | `PlotFlag::Stamp` 在 SVG 目的地下仍会翻转偏好（复选框已禁用，点不出来，低危） | next-steps §10 | 未拦 |
+| 债1 | `new_for_test` 用真实 `%APPDATA%\OpenCADStudio\settings.json`，走到 `save_config` 的测试会写用户配置（P4.3 踩过，已污染过一次 `plot.background`） | next-steps §11 | **已修**（P8.5，§6.5） |
+| 债2 | P4.2 的三条新文案没进 21 份 Fluent 目录（回落英文） | next-steps §10 | **key 已建**（P8.5，§6.5；译文等翻译批次） |
+| 债3 | `PlotFlag::Stamp` 在 SVG 目的地下仍会翻转偏好（复选框已禁用，点不出来，低危） | next-steps §10 | **已拦**（P8.5，§6.5） |
 | 债4 | web 真机 `trunk serve` 下载没人手验过（P4.1 出口条件挂账） | next-steps §8 | 未验 |
 | 线索 | merge_lines：resvg 新版是否已修；导出侧要不要裁掉页外墨（牵动两个门的字节与第一层冻结对照） | p52 §13 | **P8.3 已答**（§6.4）：Chrome / Inkscape / librsvg 都画那块填充，只有 resvg 0.45.1 丢 → 导出侧裁页外墨**不升格**；resvg 升级时重跑 `-Only corpus` 复验 |
 | 线索 | 出图耗时 88–92% 在 `scene+pages`（场景层，与 SVG 无关） | next-steps §7 | 另开计划 |
@@ -285,3 +286,34 @@ resvg 是参照只因为它是树里能跑的那一个；FAIL = 「有分歧、�
   跑它是守「每期护栏都要绿」的规矩。
 - 没有 Illustrator（按 v2 D1 口径「按版本实测，不承诺」，本机没有）；Edge 152 装了但脚本取到 Chrome 就用 Chrome，
   两者同一 Blink，没有分列。
+
+### 6.5 P8.5 小债打包实施记录（2026-09-10 凌晨，`p85-small-debts` 分支，在 `../OpenCADStudio-p52` worktree 里做）
+
+主树当时正被 P&ID 图例那条会话连续提交（`68394097` → `6f0cf040`），同一棵工作树上再开一条会话就是 P5.2 第一稿被盖掉的
+剧本重演，所以按 §3 的老规矩换到 worktree：`p52-svg-raster` 已并回 main，就在它上面从 main 拉出 `p85-small-debts`
+（拍板 4 的「留作下一个隔离期的模板」就这样用上了）。**没动生产路径上的 PDF 代码**，`direct_plot_params` 与 PDF 字节一位没碰。
+
+| 债 | 形状 | 文件 |
+|---|---|---|
+| 债1 | `crate::config::config_dir()` 在 `cfg(test)` 下返回 `%TEMP%\OpenCADStudio-test-<pid>`（`OnceLock`，进程内稳定）；真实的平台解析搬进 `platform_config_dir()`，非测试构建一行不变。于是 `settings.json`、`ocad.pgp` 别名、`last_dir.txt` 在 `cargo test --lib` 下**全部**落进临时目录，`new()`（`new_for_test` 就是它）也从全默认配置起步，不再读开发机的设置。两处「先喂 `last_saved_config`」的绕法删掉。两条用例钉住：临时目录在 `temp_dir()` 下、不在用户目录下、进程内稳定；`AppConfig::default().save()` 写到的正是它 | `src/config.rs`；`src/app/update/file.rs`（`svg_plot_area_tests` / `print_all_svg_tests` 的两处绕法） |
+| 债3 | `on_plot_dlg` 里 `PlotFlag::Stamp` 加守卫 `d.destination() != PlotDestination::Svg`——与相邻的 `Center if d.area != "Layout"` 同一写法；SVG 下这条消息是 no-op，PDF 下照旧翻转。用例 `the_stamp_switch_is_refused_under_svg_and_still_toggles_under_pdf` | `src/app/update/file.rs`（`plot_destination_tests`） |
+| 债2 | `Export SVG`、`Save to SVG file…`、stamp 说明三条进 `locale_catalog.rs` 与 **21 份** Fluent 目录；顺手把同一批 SVG 文案里另两条也收了（P4.3 的 web 多页提示、PRINTALL 的 `SVG` 标签 → `common.svg`，对着 `common.pdf`）。`i18n::tests::every_catalog_covers_and_formats_the_source_catalog` 要求 21 份目录 key 集合完全一致，所以「只建 en-US」走不通——非英文目录先放**英文占位**（与目录里既有的 `PDF` 一类同款），译文跟下一次翻译批次；界面可见行为不变（之前就是回落英文）。`scripts/test_locales.py` 的缺口从 86 → 82，剩的全是 `model_ops.rs` 等别处的既有债 | `src/locale_catalog.rs`（+5 行）、`locales/*/opencadstudio.ftl`（各 +5 行，位置照 en-US 的邻居：`.export-pdf` / `.save-to-pdf-file` / `.merge-overlapping-lines` / `.shaded-viewport-options` / `common.pdf` 之后） |
+
+**没做 / 边界**：`cfg(test)` 只覆盖本 crate 的单元测试（`cargo test --lib`）；`tests/` 下的集成测试以普通构建编译，仍走真实配置目录
+（目前那几条都不碰 `save_config`）——要连它们也隔离，得走环境变量一类的运行期开关，不在本期。临时目录随 pid 走，跑完不清
+（每次几 KB，`%TEMP%` 里可见 `OpenCADStudio-test-*`）。GUI 仍未人手点验（与 P8.4 同一挂账）。
+
+**验证摘要**（2026-09-10 凌晨，提交前在最终字节上跑）：
+
+- `cargo test --lib -- io::svg_export io::pdf_export app::automation io::paper_sizes plot_destination_tests
+  print_all_svg_tests svg_plot_area_tests config::tests i18n::tests` → **104 过 / 0 败 / 5 忽略**（316.5 s，含例行
+  PDF↔SVG 栅格门真跑）。比 P8.3 的 92 多出的：Stamp 守卫用例 1、`config::tests` 2、`i18n::tests` 整组（其中
+  `every_catalog_covers_and_formats_the_source_catalog` 就是 21 份目录 key 集合一致的那道门）。PDF 第一层冻结对照在这一套里，
+  **一位没动**。
+- 隔离实证：跑完后 `%APPDATA%\OpenCADStudio\settings.json` 的修改时间仍是跑前的 23:25:35；`%TEMP%\OpenCADStudio-test-<pid>\`
+  里出现 `settings.json` / `ocad.pgp` / `ocad.pgp.version`——正是原先会写进用户目录的三样。
+- `scripts/test_locales.py`（改成打印全部缺口的临时副本）：缺口 86 → 82，SVG 相关五条全部消失；无「Missing Fluent targets」、无重复 key。
+- `cargo clippy --lib --tests` → **0 error**，Finished；`config.rs` / `locale_catalog.rs` 整文件 0 命中，`file.rs` 改动行 0 命中；
+  lib 告警总数仍是 1104（与 §6.4 记录同数，本期没添一条）。
+- `cargo check --lib --target wasm32-unknown-unknown` → Finished（`config_dir` 的测试分支全在 `not(wasm32)` 之下）。
+- `rustfmt --check --edition 2021`：`config.rs` 整文件 0 diff；`file.rs` 改动行 0 diff（另有 124 处既有差异，沿用「只体检新代码」）。

@@ -4334,7 +4334,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         &mut self,
         msg: crate::ui::window::plot::PlotDlgMsg,
     ) -> Task<Message> {
-        use crate::ui::window::plot::{PlotDlgMsg as M, PlotFlag, STYLE_NONE};
+        use crate::ui::window::plot::{PlotDestination, PlotDlgMsg as M, PlotFlag, STYLE_NONE};
         match msg {
             M::Close => {
                 self.close_active_modal();
@@ -4448,7 +4448,12 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     PlotFlag::PaperspaceLast if d.paper_space => {
                         d.paperspace_last = !d.paperspace_last
                     }
-                    PlotFlag::Stamp => d.stamp = !d.stamp,
+                    // An SVG has no stamp: the switch is disabled in the dialog,
+                    // and the message is refused here too so nothing else can
+                    // flip the PDF preference through it.
+                    PlotFlag::Stamp if d.destination() != PlotDestination::Svg => {
+                        d.stamp = !d.stamp
+                    }
                     _ => {}
                 }
                 Task::none()
@@ -5632,7 +5637,7 @@ mod plot_destination_tests {
     //! the dropdown sends, without a window.
     use crate::app::OpenCADStudio;
     use crate::ui::window::plot::{
-        PlotDestination, PlotDlgMsg, PlotFileFormat, OUT_DEFAULT, OUT_PDF, OUT_SVG,
+        PlotDestination, PlotDlgMsg, PlotFileFormat, PlotFlag, OUT_DEFAULT, OUT_PDF, OUT_SVG,
     };
 
     fn app() -> OpenCADStudio {
@@ -5700,6 +5705,26 @@ mod plot_destination_tests {
     }
 
     #[test]
+    fn the_stamp_switch_is_refused_under_svg_and_still_toggles_under_pdf() {
+        // P8.5 债3: the dialog disables the switch under SVG, but the message
+        // itself must not flip the PDF preference either.
+        let mut app = app();
+        let _ = app.on_plot_dlg(PlotDlgMsg::Printer(OUT_SVG.into()));
+        app.plot_dialog.stamp = true;
+        let _ = app.on_plot_dlg(PlotDlgMsg::Flag(PlotFlag::Stamp));
+        assert!(app.plot_dialog.stamp, "SVG: the stamp message is a no-op");
+        app.plot_dialog.stamp = false;
+        let _ = app.on_plot_dlg(PlotDlgMsg::Flag(PlotFlag::Stamp));
+        assert!(!app.plot_dialog.stamp, "SVG: a no-op in either direction");
+
+        let _ = app.on_plot_dlg(PlotDlgMsg::Printer(OUT_PDF.into()));
+        let _ = app.on_plot_dlg(PlotDlgMsg::Flag(PlotFlag::Stamp));
+        assert!(app.plot_dialog.stamp, "PDF: the switch toggles as before");
+        let _ = app.on_plot_dlg(PlotDlgMsg::Flag(PlotFlag::Stamp));
+        assert!(!app.plot_dialog.stamp);
+    }
+
+    #[test]
     fn a_config_without_the_format_field_reads_as_pdf() {
         // Every config written before this field existed says `to_file` and
         // nothing more; it has to keep meaning the PDF file.
@@ -5743,9 +5768,6 @@ mod svg_plot_area_tests {
         app.set_headless_model_page("A4", true, true, None, None, 1.0)
             .unwrap();
         app.plot_dialog.background = false;
-        // Keep the test away from the user's settings file (the save_config
-        // trap P4.3 documented): the config is marked saved as it stands.
-        app.last_saved_config = Some(app.current_config());
         app
     }
 
@@ -5888,10 +5910,6 @@ mod print_all_svg_tests {
             app.print_all_layouts
         );
         app.plot_dialog.background = false;
-        // The export persists the plot preferences, as the PDF one does. From
-        // a test that must not reach the user's settings file, so the config
-        // is marked saved as it now stands and `save_config` has nothing to do.
-        app.last_saved_config = Some(app.current_config());
         app
     }
 
