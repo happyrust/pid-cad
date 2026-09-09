@@ -34,6 +34,8 @@ pub mod single_instance;
 pub mod pdf_export;
 #[cfg(test)]
 pub mod plot_corpus;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub mod raster_compare;
 pub mod plot_emit;
 pub mod plot_style;
 pub mod plot_types;
