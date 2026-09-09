@@ -638,8 +638,10 @@ inventory::submit!(crate::command::CommandRegistration {
         "PAGESETUP",
         "PERF",
         "PERSP",
-        // P&ID symbol recognition mark-up (io::pid_legend).
+        // P&ID symbol recognition mark-up (io::pid_legend), and selecting a
+        // whole pipe line by its coding-rule family.
         "PIDLEGEND",
+        "PIDLINE",
         "PLOT",
         "PLOTSTYLE",
         "PLOTSTYLEEDITOR",

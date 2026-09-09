@@ -6,6 +6,7 @@
 > `SPE-0100FF01-01` 或未提供的图例张里。
 > 带 ⭕ 的决策按推荐落笔、未经拍板（方案在 Plannotator 里等批注时用户没有回话），
 > 批注里划一笔即可翻案。
+> **D19 之后的审核与四期计划见 `2026-09-09-pid-legend-recognition-audit-and-next-steps.md`。**
 
 ## 决策记录
 

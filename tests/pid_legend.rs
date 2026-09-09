@@ -1300,15 +1300,76 @@ fn sheet(name: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// `OCS_PID_SHEETS_REQUIRED=1` turns a skipped sheet into a failure: for a
+/// run on the machine that has the sheets, where a silent skip would hide a
+/// missing or locked file behind a green light. Unset, a sheet that is not
+/// there -- or that an editor holds byte-range locks on -- is skipped with a
+/// line on stderr, as a checkout without the corpus must still pass and an
+/// editor may have a sheet open while the tests run.
+fn sheets_required() -> bool {
+    std::env::var_os("OCS_PID_SHEETS_REQUIRED").is_some_and(|v| v == "1")
+}
+
+fn skip_sheet(name: &str, why: &str) {
+    if sheets_required() {
+        panic!("{name}: {why} -- and OCS_PID_SHEETS_REQUIRED=1 does not skip");
+    }
+    eprintln!("skipping {name}: {why}");
+}
+
 fn load_sheet(name: &str) -> Option<CadDocument> {
-    let path = sheet(name)?;
+    let Some(path) = sheet(name) else {
+        skip_sheet(name, "not present");
+        return None;
+    };
     match io::load_file(&path) {
         Ok(doc) => Some(doc),
         Err(error) => {
             // The editor holding the file open locks byte ranges; that is not
             // a recognition failure.
-            eprintln!("skipping {name}: {error}");
+            skip_sheet(name, &error);
             None
+        }
+    }
+}
+
+/// The sheets a test asked for and which of them it skipped, for the line it
+/// prints at the end -- so a green run says which sheets it covered instead
+/// of a skip hiding behind `cargo test`'s captured stderr.
+struct Ran {
+    asked: usize,
+    skipped: Vec<String>,
+}
+
+impl Ran {
+    fn new() -> Self {
+        Ran {
+            asked: 0,
+            skipped: Vec::new(),
+        }
+    }
+
+    /// [`load_sheet`], counted.
+    fn sheet(&mut self, name: &str) -> Option<CadDocument> {
+        self.asked += 1;
+        let doc = load_sheet(name);
+        if doc.is_none() {
+            self.skipped.push(name.to_string());
+        }
+        doc
+    }
+
+    fn finish(self, test: &str) {
+        let read = self.asked - self.skipped.len();
+        if self.skipped.is_empty() {
+            eprintln!("{test}: ran {read}/{} sheets", self.asked);
+        } else {
+            eprintln!(
+                "{test}: ran {read}/{} sheets, skipped {}: {}",
+                self.asked,
+                self.skipped.len(),
+                self.skipped.join(", ")
+            );
         }
     }
 }
@@ -1447,9 +1508,9 @@ const SHEETS: &[Expected] = &[
 #[test]
 fn cpecc_sheets_every_symbol_is_known_and_every_valve_has_its_own_tag() {
     let rules = Rules::builtin();
-    let mut checked = 0;
+    let mut ran = Ran::new();
     for expected in SHEETS {
-        let Some(doc) = load_sheet(expected.file) else {
+        let Some(doc) = ran.sheet(expected.file) else {
             continue;
         };
         let recognition = pid_legend::recognise(&doc, &rules);
@@ -1608,18 +1669,15 @@ fn cpecc_sheets_every_symbol_is_known_and_every_valve_has_its_own_tag() {
             .filter(|s| s.class == "vent" && s.lines == [vent_line.to_string()])
             .count();
         assert_eq!(in_line, vents, "{name}: vent stubs in {vent_line}");
-        checked += 1;
     }
-    if checked == 0 {
-        eprintln!("cpecc sheets not present; skipped");
-    }
+    ran.finish("cpecc_sheets_every_symbol_is_known_and_every_valve_has_its_own_tag");
 }
 
 /// The loading-island sheets: symbols are loose strokes, bubbles are small.
 #[test]
 fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
     let rules = Rules::builtin();
-    let mut checked = 0;
+    let mut ran = Ran::new();
     // SP02-07's flame arresters and SP02-05's flow indicators are drawn in
     // pipe-length strokes and are found for their tags by the second pass
     // (`second_pass` names the classes all of whose symbols must be); SP02-07's
@@ -1668,7 +1726,7 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
             &["flow-indicator"][..],
         ),
     ] {
-        let Some(doc) = load_sheet(file) else {
+        let Some(doc) = ran.sheet(file) else {
             continue;
         };
         let recognition = pid_legend::recognise(&doc, &rules);
@@ -1768,11 +1826,8 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
             "{file}: {:?}",
             recognition.unknown_shapes
         );
-        checked += 1;
     }
-    if checked == 0 {
-        eprintln!("cpecc SP02 sheets not present; skipped");
-    }
+    ran.finish("cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves");
 }
 
 /// SP02-10 draws its valves touching the pipe and each other: a ball valve
@@ -1784,7 +1839,6 @@ fn cpecc_sp02_10_joined_symbols_come_apart_and_are_named() {
     let rules = Rules::builtin();
     let Some(doc) = load_sheet("DWG-0100SP02-10 汽车装卸岛(五)工艺自控流程图.dxf")
     else {
-        eprintln!("cpecc SP02-10 not present; skipped");
         return;
     };
     let recognition = pid_legend::recognise(&doc, &rules);
@@ -1887,7 +1941,7 @@ fn cpecc_sp02_10_joined_symbols_come_apart_and_are_named() {
 #[test]
 fn cpecc_loading_island_sheets_have_no_unnamed_shape_left() {
     let rules = Rules::builtin();
-    let mut checked = 0;
+    let mut ran = Ran::new();
     // SP02-08 has four globe valves: the fourth used to be taken for a gate by
     // GV0311A, whose own gate stands 6 mm to the right of it; a tag no longer
     // pulls a shape the dictionary names as another class.
@@ -1900,7 +1954,7 @@ fn cpecc_loading_island_sheets_have_no_unnamed_shape_left() {
         ("DWG-0100SP02-08 汽车装卸岛(三)工艺自控流程图.dxf", 4, 0, 2),
         ("DWG-0100SP02-09 汽车装卸岛(四)工艺自控流程图.dxf", 4, 0, 2),
     ] {
-        let Some(doc) = load_sheet(file) else {
+        let Some(doc) = ran.sheet(file) else {
             continue;
         };
         let recognition = pid_legend::recognise(&doc, &rules);
@@ -1937,18 +1991,14 @@ fn cpecc_loading_island_sheets_have_no_unnamed_shape_left() {
             .filter(|s| s.class == "check-valve" && s.tag.is_none())
             .count();
         assert_eq!(untagged_checks, small_check_valves, "{file}");
-        checked += 1;
     }
-    if checked == 0 {
-        eprintln!("cpecc SP02 sheets not present; skipped");
-    }
+    ran.finish("cpecc_loading_island_sheets_have_no_unnamed_shape_left");
 }
 
 #[test]
 fn cpecc_sheet_legend_round_trips_through_apply_and_clear() {
     let rules = Rules::builtin();
     let Some(mut doc) = load_sheet(SHEETS[0].file) else {
-        eprintln!("cpecc sheet not present; skipped");
         return;
     };
     let recognition = pid_legend::recognise(&doc, &rules);

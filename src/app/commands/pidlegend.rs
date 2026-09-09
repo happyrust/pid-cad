@@ -372,28 +372,46 @@ mod tests {
     use crate::io::pid_legend;
 
     /// A real CPECC sheet beside the checkout, when it is there and not
-    /// locked by an editor.
+    /// locked by an editor; otherwise skipped with a line on stderr -- unless
+    /// `OCS_PID_SHEETS_REQUIRED=1`, which makes the skip a failure so a green
+    /// run cannot hide it (same switch as `tests/pid_legend.rs`).
     fn open_sheet(app: &mut OpenCADStudio, name: &str) -> bool {
+        let skip = |why: String| {
+            if std::env::var_os("OCS_PID_SHEETS_REQUIRED").is_some_and(|v| v == "1") {
+                panic!("{name}: {why} -- and OCS_PID_SHEETS_REQUIRED=1 does not skip");
+            }
+            eprintln!("skipping {name}: {why}");
+            false
+        };
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
             .join("0版重新处理dxf-12张")
             .join(name);
         if !path.is_file() {
-            eprintln!("skipping: {name} not present");
-            return false;
+            return skip("not present".to_string());
         }
         let request = serde_json::json!({ "op": "open", "path": path.to_string_lossy() });
         let reply = app.automation_op(&request.to_string());
         if reply["ok"].as_bool() != Some(true) {
-            eprintln!("skipping: {reply}");
-            return false;
+            return skip(reply.to_string());
         }
         true
     }
 
     fn legend_count(app: &OpenCADStudio) -> usize {
         pid_legend::legend_handles(&app.tabs[app.active_tab].scene.document).len()
+    }
+
+    /// Both verbs complete on the command line: they dispatch here without a
+    /// `CadCommand` module of their own, so `commands/mod.rs` lists them by
+    /// hand -- PIDLINE was left out when it arrived.
+    #[test]
+    fn pidlegend_and_pidline_are_registered_for_autocomplete() {
+        let names = crate::command::all_registered_command_names();
+        for verb in ["PIDLEGEND", "PIDLINE"] {
+            assert!(names.contains(&verb), "{verb} missing from the registry");
+        }
     }
 
     #[test]
