@@ -7201,6 +7201,15 @@ impl OpenCADStudio {
                 );
                 Task::none()
             }
+            Message::PidLegendPickFamily(family) => {
+                let i = self.active_tab;
+                let families: std::collections::BTreeSet<String> =
+                    std::iter::once(family).collect();
+                if let Some(receipt) = self.pid_line_select(i, &families, &[]) {
+                    self.command_line.push_output(&receipt);
+                }
+                Task::none()
+            }
             Message::Dock(m) => self.on_dock(m),
             Message::PrintAllOpen => self.on_print_all_open(),
             Message::PrintAllToggle(name) => {

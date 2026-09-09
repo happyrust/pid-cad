@@ -241,6 +241,9 @@ impl OpenCADStudio {
         if let Some(t) = self.dispatch_pidlegend(cmd, i) {
             return Some(t);
         }
+        if let Some(t) = self.dispatch_pidline(cmd, i) {
+            return Some(t);
+        }
         None
     }
 

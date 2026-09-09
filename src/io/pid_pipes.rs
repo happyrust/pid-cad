@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use acadrust::{CadDocument, EntityType};
+use acadrust::{CadDocument, EntityType, Handle};
 use serde::Deserialize;
 
 pub type Point = (f64, f64);
@@ -104,6 +104,21 @@ pub struct Run {
     pub ends: [End; 2],
     /// The run's vertices from `ends[0]` to `ends[1]`, drawing units.
     pub path: Vec<Point>,
+    /// Handles of the sheet entities whose strokes make the run, distinct,
+    /// in handle order. A polyline a tee splits feeds every run it crosses,
+    /// so two runs can share a handle.
+    pub handles: Vec<Handle>,
+}
+
+impl Run {
+    /// Bounding box of the run's path, `(min_x, min_y, max_x, max_y)`,
+    /// drawing units; `None` for an empty path.
+    pub fn bbox(&self) -> Option<(f64, f64, f64, f64)> {
+        self.path.iter().fold(None, |acc, p| match acc {
+            None => Some((p.0, p.1, p.0, p.1)),
+            Some(a) => Some((a.0.min(p.0), a.1.min(p.1), a.2.max(p.0), a.3.max(p.1))),
+        })
+    }
 }
 
 /// The pipe of a sheet.
@@ -126,6 +141,19 @@ impl Pipes {
             for n in &run.lines {
                 out.entry(n.as_str()).or_default().push(run);
             }
+        }
+        out
+    }
+
+    /// The lines grouped into families by the coding rule: family key ->
+    /// line number -> that line's runs. `200-FS-31001-A2` and
+    /// `150-FS-31001-A2` are one family, `FS-31001` -- the same line past a
+    /// reducer or a spec break. A run lettered with two families is under
+    /// both.
+    pub fn by_family(&self) -> BTreeMap<String, BTreeMap<&str, Vec<&Run>>> {
+        let mut out: BTreeMap<String, BTreeMap<&str, Vec<&Run>>> = BTreeMap::new();
+        for (line, runs) in self.by_line() {
+            out.entry(line_family(line)).or_default().insert(line, runs);
         }
         out
     }
@@ -173,6 +201,19 @@ pub fn is_line_number(value: &str) -> bool {
     }
 }
 
+/// The family a line number belongs to by the coding rule: the service and
+/// the sequence number (`200-FS-31001-A2` -> `FS-31001`), because one
+/// physical line keeps them while its size changes at a reducer and its
+/// class at a spec break. A short code with no sequence number (`80-FS`)
+/// has nothing to family by and is its own family.
+pub fn line_family(value: &str) -> String {
+    let parts: Vec<&str> = value.split('-').collect();
+    match parts.as_slice() {
+        [_, service, number, _] => format!("{service}-{number}"),
+        _ => value.to_string(),
+    }
+}
+
 fn dist(a: Point, b: Point) -> f64 {
     (a.0 - b.0).hypot(a.1 - b.1)
 }
@@ -187,18 +228,20 @@ fn point_segment_distance(p: Point, a: Point, b: Point) -> f64 {
     dist(p, (a.0 + t * dx, a.1 + t * dy))
 }
 
-/// The pipe strokes of the sheet as two-point segments, drawing units.
-fn pipe_segments(doc: &CadDocument, rules: &PipeRules) -> Vec<(Point, Point)> {
+/// The pipe strokes of the sheet as two-point segments with the handle of
+/// the entity each was read from, drawing units.
+fn pipe_segments(doc: &CadDocument, rules: &PipeRules) -> Vec<(Handle, Point, Point)> {
     let mut segments = Vec::new();
-    let mut push = |a: Point, b: Point| {
-        if a.0.is_finite() && a.1.is_finite() && b.0.is_finite() && b.1.is_finite() && a != b {
-            segments.push((a, b));
-        }
-    };
     for entity in doc.model_space_entities() {
         if !rules.is_pipe_layer(&entity.common().layer) {
             continue;
         }
+        let handle = entity.common().handle;
+        let mut push = |a: Point, b: Point| {
+            if a.0.is_finite() && a.1.is_finite() && b.0.is_finite() && b.1.is_finite() && a != b {
+                segments.push((handle, a, b));
+            }
+        };
         match entity {
             EntityType::Line(l) => push((l.start.x, l.start.y), (l.end.x, l.end.y)),
             EntityType::LwPolyline(p) => {
@@ -319,24 +362,25 @@ pub fn trace(
 
     // Tees: an end lying on another stroke's interior splits that stroke.
     // The ends are found first; splitting adds strokes but no new ends.
-    let ends: Vec<Point> = segments.iter().flat_map(|&(a, b)| [a, b]).collect();
+    let ends: Vec<Point> = segments.iter().flat_map(|&(_, a, b)| [a, b]).collect();
     let mut s = 0;
     while s < segments.len() {
-        let (a, b) = segments[s];
+        let (h, a, b) = segments[s];
         let hit = ends.iter().copied().find(|&e| {
             dist(e, a) > snap && dist(e, b) > snap && point_segment_distance(e, a, b) <= snap
         });
         match hit {
             Some(e) => {
-                segments[s] = (a, e);
-                segments.push((e, b));
+                segments[s] = (h, a, e);
+                segments.push((h, e, b));
                 // `segments[s]` may be split again by another end.
             }
             None => s += 1,
         }
     }
 
-    let (vertices, of_segment) = snap_vertices(&segments, snap);
+    let geometry: Vec<(Point, Point)> = segments.iter().map(|&(_, a, b)| (a, b)).collect();
+    let (vertices, of_segment) = snap_vertices(&geometry, snap);
     let mut incident: Vec<Vec<usize>> = vec![Vec::new(); vertices.len()];
     for (si, &(a, b)) in of_segment.iter().enumerate() {
         if a == b {
@@ -400,6 +444,7 @@ pub fn trace(
         }
         used[start] = true;
         let (mut path_v, mut count) = (vec![of_segment[start].0, of_segment[start].1], 1usize);
+        let mut handles = vec![segments[start].0];
         let mut ends = [None, None];
         let mut closed = false;
         // Extend from the tail (side 1), then from the head (side 0).
@@ -423,6 +468,7 @@ pub fn trace(
                 };
                 used[s] = true;
                 count += 1;
+                handles.push(segments[s].0);
                 let (a, b) = of_segment[s];
                 let w = if a == v { b } else { a };
                 if side == 1 {
@@ -444,6 +490,8 @@ pub fn trace(
         };
         let path: Vec<Point> = path_v.iter().map(|&v| vertices[v]).collect();
         let length_mm = path.windows(2).map(|w| dist(w[0], w[1])).sum::<f64>() / upm;
+        handles.sort_unstable_by_key(|h| h.value());
+        handles.dedup();
         runs.push(Run {
             numbers: Vec::new(),
             lines: Vec::new(),
@@ -451,6 +499,7 @@ pub fn trace(
             length_mm,
             ends,
             path,
+            handles,
         });
     }
 
@@ -619,6 +668,51 @@ mod tests {
         ] {
             assert!(!is_line_number(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_line_family_is_the_service_and_the_sequence_number() {
+        assert_eq!(line_family("200-FS-31001-A2"), "FS-31001");
+        assert_eq!(line_family("150-FS-31001-B1"), "FS-31001");
+        assert_eq!(line_family("100-FW-32002-B1"), "FW-32002");
+        // No sequence number: nothing to family by, the code stands alone.
+        assert_eq!(line_family("80-FS"), "80-FS");
+        assert_eq!(line_family("150-FW"), "150-FW");
+    }
+
+    #[test]
+    fn by_family_unites_the_sizes_of_one_line_and_leaves_short_codes_alone() {
+        let run = |lines: &[&str]| Run {
+            numbers: Vec::new(),
+            lines: lines.iter().map(|l| l.to_string()).collect(),
+            segments: 1,
+            length_mm: 1.0,
+            ends: [End::Open, End::Open],
+            path: vec![(0.0, 0.0), (1.0, 0.0)],
+            handles: Vec::new(),
+        };
+        let pipes = Pipes {
+            runs: vec![
+                run(&["200-FS-31001-A2"]),
+                run(&["150-FS-31001-A2"]),
+                run(&["80-FS"]),
+                run(&[]),
+            ],
+            ..Pipes::default()
+        };
+        let families = pipes.by_family();
+        assert_eq!(
+            families.keys().collect::<Vec<_>>(),
+            ["80-FS", "FS-31001"],
+            "one family per short code, one per service-number"
+        );
+        let fs = &families["FS-31001"];
+        assert_eq!(
+            fs.keys().copied().collect::<Vec<_>>(),
+            ["150-FS-31001-A2", "200-FS-31001-A2"],
+            "both sizes of the line sit in its family"
+        );
+        assert_eq!(families["80-FS"].len(), 1);
     }
 
     #[test]

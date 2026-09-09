@@ -3105,6 +3105,7 @@ mod tests {
             length_mm: 0.0,
             ends,
             path: path.to_vec(),
+            handles: Vec::new(),
         };
         let recognition = Recognition {
             units_per_mm: 100.0,

@@ -2992,6 +2992,9 @@ pub enum Message {
     /// A row click in the P&ID legend list: zoom the model camera to the
     /// world-space rectangle (already padded by the panel).
     PidLegendJump { min: (f64, f64), max: (f64, f64) },
+    /// A pipe-row click in the P&ID legend list: select every stroke of the
+    /// line family's runs in the drawing and zoom to their whole extent.
+    PidLegendPickFamily(String),
     /// A dock chrome interaction (grab/resize/pin/hover/dock move) on a side
     /// panel.
     Dock(crate::ui::dock::DockMsg),

@@ -40,11 +40,6 @@ fn union(rects: impl Iterator<Item = (f64, f64, f64, f64)>) -> Option<(f64, f64,
     })
 }
 
-/// Bounding box of one pipe run's polyline path.
-fn run_bbox(run: &crate::io::pid_pipes::Run) -> Option<(f64, f64, f64, f64)> {
-    union(run.path.iter().map(|p| (p.0, p.1, p.0, p.1)))
-}
-
 fn swatch(color: [u8; 3]) -> Element<'static, Message> {
     container(iced::widget::Space::new())
         .width(Length::Fixed(10.0))
@@ -70,9 +65,10 @@ fn muted(theme: &Theme) -> iced::widget::text::Style {
 }
 
 /// One clickable row. `indent` mimics a tree without one.
-fn jump_row<'a>(
+fn click_row<'a>(
     label: Element<'a, Message>,
-    target: ((f64, f64), (f64, f64)),
+    indent: f32,
+    message: Message,
 ) -> Element<'a, Message> {
     mouse_area(
         container(label)
@@ -81,15 +77,27 @@ fn jump_row<'a>(
                 top: 2.0,
                 right: 6.0,
                 bottom: 2.0,
-                left: 18.0,
+                left: indent,
             }),
     )
     .interaction(iced::mouse::Interaction::Pointer)
-    .on_press(Message::PidLegendJump {
-        min: target.0,
-        max: target.1,
-    })
+    .on_press(message)
     .into()
+}
+
+/// A row whose click zooms the camera to `target`.
+fn jump_row<'a>(
+    label: Element<'a, Message>,
+    target: ((f64, f64), (f64, f64)),
+) -> Element<'a, Message> {
+    click_row(
+        label,
+        18.0,
+        Message::PidLegendJump {
+            min: target.0,
+            max: target.1,
+        },
+    )
 }
 
 /// Build the docked panel element from the active tab's recognition.
@@ -210,27 +218,40 @@ pub fn view(recognition: Option<&Recognition>, width: f32, auto_collapse: bool) 
         }
     }
 
-    // ── Pipe runs by line number ──────────────────────────────────────────
+    // ── Pipe lines, grouped into families by the coding rule ──────────────
+    // A family (service + sequence number) is one physical line however its
+    // size or class changes along the way. Clicking a family (or a lone
+    // line) selects every stroke of it in the drawing and zooms to it; a
+    // line nested under a family header just zooms.
     let by_line = rec.pipes.by_line();
+    let families = rec.pipes.by_family();
     let unnumbered: Vec<_> = rec
         .pipes
         .runs
         .iter()
         .filter(|r| r.lines.is_empty())
         .collect();
-    if !by_line.is_empty() || !unnumbered.is_empty() {
-        col = col.push(
-            container(text(format!("管线 {} 条", by_line.len())).size(12))
-                .padding(iced::Padding {
-                    top: 10.0,
-                    right: 6.0,
-                    bottom: 4.0,
-                    left: 6.0,
-                }),
-        );
-        for (line, runs) in &by_line {
-            let length_mm: f64 = runs.iter().map(|r| r.length_mm).sum();
-            if let Some(bbox) = union(runs.iter().filter_map(|r| run_bbox(r))) {
+    if !families.is_empty() || !unnumbered.is_empty() {
+        let header = if families.len() == by_line.len() {
+            format!("管线 {} 条", by_line.len())
+        } else {
+            format!("管线 {} 条 · {} 族", by_line.len(), families.len())
+        };
+        col = col.push(container(text(header).size(12)).padding(iced::Padding {
+            top: 10.0,
+            right: 6.0,
+            bottom: 4.0,
+            left: 6.0,
+        }));
+        for (family, lines) in &families {
+            let run_count: usize = lines.values().map(|runs| runs.len()).sum();
+            let length_mm: f64 = lines
+                .values()
+                .flat_map(|runs| runs.iter())
+                .map(|r| r.length_mm)
+                .sum();
+            if let [(line, runs)] = lines.iter().collect::<Vec<_>>().as_slice() {
+                // The family is one line: one row, worded as the line.
                 let label: Element<'_, Message> = row![
                     text(line.to_string()).size(11),
                     iced::widget::Space::new().width(Fill),
@@ -240,11 +261,57 @@ pub fn view(recognition: Option<&Recognition>, width: f32, auto_collapse: bool) 
                 ]
                 .spacing(6)
                 .into();
-                col = col.push(jump_row(label, jump_rect(bbox, rec.units_per_mm)));
+                col = col.push(click_row(
+                    label,
+                    18.0,
+                    Message::PidLegendPickFamily(family.clone()),
+                ));
+            } else {
+                let label: Element<'_, Message> = row![
+                    text(family.clone()).size(11),
+                    iced::widget::Space::new().width(Fill),
+                    text(format!(
+                        "{} 线号 · {} 段 · {:.0} mm",
+                        lines.len(),
+                        run_count,
+                        length_mm
+                    ))
+                    .size(10)
+                    .style(muted),
+                ]
+                .spacing(6)
+                .into();
+                col = col.push(click_row(
+                    label,
+                    18.0,
+                    Message::PidLegendPickFamily(family.clone()),
+                ));
+                for (line, runs) in lines {
+                    let length_mm: f64 = runs.iter().map(|r| r.length_mm).sum();
+                    if let Some(bbox) = union(runs.iter().filter_map(|r| r.bbox())) {
+                        let label: Element<'_, Message> = row![
+                            text(line.to_string()).size(11),
+                            iced::widget::Space::new().width(Fill),
+                            text(format!("{} 段 · {:.0} mm", runs.len(), length_mm))
+                                .size(10)
+                                .style(muted),
+                        ]
+                        .spacing(6)
+                        .into();
+                        col = col.push(click_row(
+                            label,
+                            30.0,
+                            Message::PidLegendJump {
+                                min: jump_rect(bbox, rec.units_per_mm).0,
+                                max: jump_rect(bbox, rec.units_per_mm).1,
+                            },
+                        ));
+                    }
+                }
             }
         }
         if !unnumbered.is_empty() {
-            if let Some(bbox) = union(unnumbered.iter().filter_map(|r| run_bbox(r))) {
+            if let Some(bbox) = union(unnumbered.iter().filter_map(|r| r.bbox())) {
                 let label: Element<'_, Message> = row![
                     text("（未编号）").size(11).style(muted),
                     iced::widget::Space::new().width(Fill),
