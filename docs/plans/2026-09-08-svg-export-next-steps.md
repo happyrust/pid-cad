@@ -2,7 +2,7 @@
 
 > 日期：2026-09-08
 > 状态：§6 五条已于 2026-09-08 拍板（全按建议）；**P4.1 已实施**（§8）、**P5.1 已实施**（§9）、**P6.1 已量**（§7，
-> 结论：P6.2–P6.4 不做）、**P4.2 已实施**（§10）、**P4.3 已实施**（§11）、**P7 已实施**（§12）；剩 P5.2 / P5.3 与 G10。
+> 结论：P6.2–P6.4 不做）、**P4.2 已实施**（§10）、**P4.3 已实施**（§11）、**P7 已实施**（§12）、**P5.2 已实施**（§13；真图栅格对比 **FAIL 待定性**）；剩 P5.3 与 G10。
 > 前置：`docs/plans/2026-09-07-dxf-to-svg-export.md`（v2）——P0 / P1 / P2（web 除外）/ R3 第一轮 / R1 已实施。
 > 本文件只写「还没做的」与「怎么做」；已实施部分的记录仍在 v2 的 §11–§15，不重复。
 
@@ -402,3 +402,62 @@ clippy 对改动行 0 告警；rustfmt：`paper_sizes.rs` / `cli.rs` / `main.rs`
 `NamedSheet` / `ANSI_SHEETS` / `SheetSpec` / `parse_sheet_spec` 一套，全部无人引用），用户裁决停掉那个会话由本会话收尾，
 这些桩已删（等价能力都在：FitMargins ⊂ `--margins` 四边版，NamedSheet 表 ⊂ `PaperSize`）。同一棵树上多会话并行写码
 没有锁就是互相覆盖，这次靠 mtime 与 `git status` 及时看见——协同要么编组拿写锁，要么分树。
+
+## 13. P5.2 实施记录（2026-09-09）
+
+**处境**：P5.2 的四个文件在主工作树上写完、还没提交，就被一场 origin/main 整合 merge 盖掉（merge 到本记录
+落笔时仍未提交完）；靠 `%TEMP%\ocs-p52-fable-5-15-snapshot\` 逐字节恢复。按用户 2026-09-09 的裁决，P5.2 从此在
+**自己的 worktree** 收尾：`../OpenCADStudio-p52`，分支 `p52-svg-raster`，基 `0f716727`（merge 前的 HEAD），
+不再与别的会话同树。worktree 用自己的 `CARGO_TARGET_DIR`——这个 crate 每次 `cargo test` 都会重链接测试
+可执行文件，共享 target 下两个并发 cargo 必有一个撞 LNK1104（本期实测撞上，与此前「并发编译错误」同根）。
+
+**形状**（照 §3 P5.2 与 §6 Q2 的拍板：外部栅格引擎，不进依赖树，缺了就大声跳过）：
+
+| 文件 | 内容 |
+|---|---|
+| `src/io/raster_compare.rs`（新，test-only） | `PdfRasterizer::discover`（`OCS_PDF_RASTERIZER` → winget Links → PATH，认 mutool / pdftoppm，探版本进表头；pdftoppm 带 `-thinlinemode shape`）、`render_svg`（resvg 0.45.1，与第二层同一棵树）、`compare`（1 px 位移窗、2/255 值容差、32 px 瓦片 × 8 px 预算、页缘跳 2 px，另有**单向合成豁免**：SVG 侧实心墨（≤96/255）内，PDF 只考「两像素内有没有全覆盖的墨」、不考它的值——PDF 门把字形写成三角网格，poppler 逐三角抗锯齿，网格内部欠涂 6–23%、共享边裂到近白，深度分不开真伪、结构分得开；SVG 侧永不豁免，PDF 比 SVG 更深也不豁免）、`diff_map` |
+| `src/io/svg_export/tests.rs` | 例行门 `the_pdf_and_the_svg_rasterise_to_the_same_picture`：300 dpi 全语料（空间上比计划的 600 dpi/1 px 更严），跳过 stamp 页、文字页（并行跑时共享字形图集会翻动，留给单线程证据跑）、发丝线页与 merge_lines 页（都有注释说明与证据）；注入门 `the_raster_comparison_catches_the_planted_faults`：整线缺失 / 2% 错比例 / dash 错相位 / wipeout 次序换组，四对都先证明干净配对是绿的；证据倾倒 `dump_raster_evidence`（600 dpi 全语料含文字页，单线程） |
+| `src/io/mod.rs` | `#[cfg(all(test, not(target_arch = "wasm32")))] pub mod raster_compare;`（+2 行） |
+| `src/app/automation.rs` | `dump_real_sheet_raster_evidence`：FF02-06 / SP02-05 / WS02-05 三张真图（FF 取 -06 不取 -05：-05 常开在编辑器里，它的字节区锁连第二个进程的读都拒）走整条无头出图链路（开图 → CTB → Model → A1 横放 fit → `resolve_plot_job`），同一个 job 出两个门，600 dpi。先试过 300（真图线宽 ≥0.13 mm ≈ 1.5 px，在亚像素地板之上）：线条全过，但**每个标签都在冒斑**——整张图是 2.5–3.5 mm 的密排文字，300 dpi 下字形笔画只有 2–3 px，标签里几乎没有一个像素算得上实心墨，合成豁免无处立足；600 dpi 笔画内部才是真的实心（A1 600 dpi 单引擎 GB 级位图，手动证据跑负担得起） |
+| `docs/evidence/2026-09-09-svg-pdf-raster/` | `corpus-600dpi.tsv`、逐对 `diff-*.png`、merge_lines 最小对照一对、README；`real-sheets-600dpi.tsv` **待跑**（见出口对照第四条） |
+
+**merge_lines 的裁决（本期唯一的实质发现，含一次修正）**：例行重跑抓到 `hatches, merge_lines` 整块红色
+multiply 填充在 resvg 侧不见（poppler 画 (178,25,25)，resvg 出白），300 dpi 下 2209 缺陷像素。上一会话留下的
+判断是「隔离层包围盒扫到远端几何就丢」——**最小复现证明这不完整**：isolate + 远端路径 + 页上 multiply 填充
+（无 clip）渲染**正确**。真正的触发条件是**三件齐备**：`isolation:isolate` 图层 ∧ 图层内容包围盒扫到
+~1.3e7 单位外的远端几何（这页是远离原点用例：出图窗口在世界 (500000, 4500000) mm，页上只有一块 multiply
+填充，其余全部在 500 km 外、被页裁剪切掉）∧ 祖先 `<g clip-path>`。三缺一都正确：真实页去掉 isolation 渲染
+正确、去掉 clip-path 渲染正确；最小对照一对只差 clip 包裹层，留在 evidence 目录。PDF 同一内容 poppler 全部
+变体都画对 ⇒ **渲染器局限，不是导出缺陷**（第二层 usvg 解析回来的 multiply 结构也对着，
+`merge_lines_multiplies_on_the_leaves_inside_an_isolated_page`）。例行门照发丝线的先例跳过并注明；600 dpi
+证据表记 FAIL + 说明 + diff 图，不假绿。
+
+**出口条件对照**（§3 P5.2 的四条）：
+
+- 栅格引擎不进依赖树：✓ discover 顺序 env → winget → PATH，都没有就打印 SKIPPED 并检查零条（大声跳过，
+  不是假绿）；版本号进两张 tsv 表头（本机 pdftoppm 25.07.0；mutool 不在）。
+- 口径：✓ 白底、1 px 位移、2/255 值容差、32 px 瓦片 8 px 预算、页缘 2 px；证据 600 dpi，例行门 300 dpi
+  （同 1 px 窗在半密度下空间上更严，跑进例行时长）。噪声地板没有第二个 PDF 引擎可对照（机器上只有
+  pdftoppm），用干净语料自身的最差瓦片衡量：例行门全绿时最差干净瓦片见跑批输出，预算 8 px 在其上留有余量。
+- 判据「不误报也不漏报」：✓ 600 dpi 全语料 20 行 ok，仅有的 2 行 FAIL 各有注明（亚像素发丝线、merge_lines
+  渲染器局限）；四个注入故障全部被抓，且各自的干净配对先证明是绿的。
+- 证据落盘：✓ 两张 tsv 齐。语料 22 行（20 ok / 2 FAIL 有解释有对照）；**真图三张全部 FAIL**（补跑于
+  2026-09-09 18:32–19:15，600 dpi）：FF02-06 **527** 缺陷 px / 3 瓦片超额（worst 30）、SP02-05 **2340** / 27
+  （worst 64）、WS02-05 **3785** / 74（worst 120）——对 2.8 亿像素的 A1 这是 0.0002–0.0014 %，但判据本来就是
+  局部的。worst-tile 剪裁存在本目录（`crop-real-*.png`），首看三张不是一种病：WS 的缺陷全在**大号标题字形
+  笔画内部**（网格接缝纹样——合成豁免在大字形上没接住，字色偏浅或 2 px 可达性不成立，待查）；SP 的缺陷贴着
+  红色管线与箭头相交的那几段（**像绘制次序或箭头填充的真差异**）；FF 只有 3 瓦片、在文字与线的交界。
+  **「不误报」在真图上目前不成立，或导出真有缺陷——两种都可能，逐瓦片定性升格为独立一期**
+  （记进 `2026-09-09-svg-export-audit-and-next-steps.md` 的待办），本节不拿「接近零」冒充 ok。
+
+**验证数字**（2026-09-09 收尾复核）：`cargo test --lib -- io::svg_export io::pdf_export app::automation`
+**73 过 / 0 败 / 4 忽略**（369 s；例行栅格门与注入门都是真跑，pdftoppm 25.07.0，四个注入故障全抓）；
+600 dpi 证据表 22 行如上；真图三张 600 dpi **全部 FAIL**（527 / 2340 / 3785 缺陷 px，
+见出口对照第四条与 `real-sheets-600dpi.tsv`，定性升格为独立一期）。rustfmt：`raster_compare.rs` / `tests.rs` 整文件 0 diff
+（`rustfmt --check --edition 2021`，exit 0）；clippy `--lib --tests`（test cfg 才编译这批 test-only 代码）
+对改动行 0 告警——`raster_compare.rs` 整文件零命中，`tests.rs` / `automation.rs` 新增行零命中
+（两文件旧行的既有告警不动，沿用「只体检新代码」）。
+
+**没做 / 留给后面的**：P5.3 兼容性实测（脚本 + 四个外部渲染器）与 G10 照旧在队列里；merge_lines 的两条
+后续线索——resvg 新版是否已修（树里钉 0.45.1，没动）、导出侧要不要干脆裁掉整页外的墨（会同时改两个门的
+字节，牵动第一层冻结对照，单独一期）——都只记不做。主树那场 origin/main 整合 merge 收尾后，本分支再并回去。

@@ -1549,19 +1549,7 @@ fn the_web_download_is_one_page_and_refuses_a_longer_job() {
 
 /// Render at `px_per_mm`, on white, and return the pixmap.
 fn render(svg: &str, px_per_mm: f32) -> tiny_skia::Pixmap {
-    let tree = parse(svg);
-    // usvg sizes the tree in CSS px at 96 dpi; scale from there.
-    let factor = px_per_mm * 25.4 / 96.0;
-    let w = (tree.size().width() * factor).ceil() as u32;
-    let h = (tree.size().height() * factor).ceil() as u32;
-    let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("a pixmap");
-    pixmap.fill(tiny_skia::Color::WHITE);
-    resvg::render(
-        &tree,
-        tiny_skia::Transform::from_scale(factor, factor),
-        &mut pixmap.as_mut(),
-    );
-    pixmap
+    crate::io::raster_compare::render_svg(svg, px_per_mm)
 }
 
 /// 0 = white, 1 = black.
@@ -1828,3 +1816,369 @@ fn a_missing_glyph_hides_from_a_whole_page_rate_but_not_from_the_local_check() {
         "the local rate {local_rate} is not far above the page rate {page_rate}"
     );
 }
+
+// ── Layer 3, the other half: PDF and SVG as pictures (P5.2) ───────────────
+//
+// The same page goes out both doors — export_pdf_pages and the SVG writer —
+// and an external rasteriser (mutool / pdftoppm, never in the dependency
+// tree) turns the PDF into pixels next to resvg's rendering of the SVG.
+// `raster_compare` counts the pixels one picture cannot explain in the other.
+// Without a rasteriser on the machine these tests print SKIPPED and check
+// nothing: a loud skip, not a quiet pass (`#[ignore]` cannot be decided at
+// runtime).
+
+fn rasterizer_or_skip(what: &str) -> Option<crate::io::raster_compare::PdfRasterizer> {
+    let found = crate::io::raster_compare::PdfRasterizer::discover();
+    if found.is_none() {
+        eprintln!(
+            "SKIPPED {what}: no PDF rasteriser. Install one (e.g. `winget \
+             install oschwartz10612.Poppler`) or point OCS_PDF_RASTERIZER at \
+             mutool / pdftoppm — the PDF↔SVG raster comparison checked nothing."
+        );
+    }
+    found
+}
+
+/// The case's page, out the PDF door and back as pixels.
+fn pdf_raster(
+    tool: &crate::io::raster_compare::PdfRasterizer,
+    case: &Case,
+    dir: &std::path::Path,
+    dpi: f32,
+) -> tiny_skia::Pixmap {
+    let pdf = dir.join(format!(
+        "{}.pdf",
+        case.name.replace([' ', '/', ',', ':'], "_")
+    ));
+    crate::io::pdf_export::export_pdf_pages(&[case.page_input()], &pdf, None)
+        .unwrap_or_else(|e| panic!("{}: pdf export: {e}", case.name));
+    tool.rasterize(&pdf, dpi, dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", case.name))
+}
+
+/// A page has text quads, whose glyphs the PDF exporter snapshots at write
+/// time while the SVG side pins its own — under the parallel test runner the
+/// shared atlas can turn over in between, so the routine comparison leaves
+/// text pages to the single-threaded evidence run.
+fn has_text(case: &Case) -> bool {
+    case.wires.iter().any(|w| !w.wire.text_verts.is_empty())
+}
+
+// The whole corpus, PDF against SVG, at the pixels. 300 dpi: the plan states
+// its 1 px shift tolerance at 600 dpi, so the same pixel at half the density
+// is spatially stricter, and the run stays inside a couple of minutes.
+#[test]
+fn the_pdf_and_the_svg_rasterise_to_the_same_picture() {
+    let Some(tool) = rasterizer_or_skip("corpus raster comparison") else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("ocs-raster-cmp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dpi = 300.0;
+    let cfg = crate::io::raster_compare::RasterCmp::default();
+    let mut compared = 0;
+    let mut worst_clean = 0u32;
+    for case in &corpus() {
+        if case.options.stamp || has_text(case) {
+            continue;
+        }
+        // Weights-off pages draw everything at the 0.1 pt hairline sentinel:
+        // 0.83 px even at 600 dpi. Below one device pixel the engines lay
+        // the same ink at different sub-pixel phases — poppler one 83% row,
+        // resvg 8% + 76% across two — and no value tolerance short of one
+        // that would also excuse wrong flat colours absorbs that. The width
+        // itself is a number layers 1 and 2 pin exactly, and this page's
+        // geometry rides above the floor in the other two pen-width
+        // variants; the evidence run records the sub-pixel pair anyway.
+        if !case.options.object_lineweights {
+            continue;
+        }
+        // The merge_lines page is the far-from-origin case: its plot window
+        // sits at world (500000, 4500000) mm, so every multiply fill but one
+        // lands ~1.3e7 SVG units off the sheet, cut away by the page clip.
+        // resvg 0.45.1 drops the one on-sheet fill in exactly that
+        // arrangement — an `isolation:isolate` layer whose content bounding
+        // box spans the far-off geometry, composited through an ancestor
+        // `clip-path` — leaving white where poppler paints red from the
+        // equivalent PDF. Take away any one ingredient and it paints: the
+        // same page renders correctly with the isolation attribute removed
+        // or with the page clip removed, and the minimal pair kept in
+        // docs/evidence/2026-09-09-svg-pdf-raster/ differs only by the clip
+        // wrapper. The SVG itself is valid: layer 2 parses the multiply
+        // structure back (`merge_lines_multiplies_on_the_leaves_inside_an_
+        // isolated_page`), and the 600 dpi evidence run records the pair
+        // with a diff map. A renderer limitation, not an export fault, so
+        // the routine gate excuses it exactly as it does the sub-pixel
+        // hairlines.
+        if case.options.merge_lines {
+            continue;
+        }
+        let pdf_pixels = pdf_raster(&tool, case, &dir, dpi);
+        let svg_pixels = render(&write(case).0, dpi / 25.4);
+        let verdict = crate::io::raster_compare::compare(&pdf_pixels, &svg_pixels, &cfg)
+            .unwrap_or_else(|e| panic!("{}: {e}", case.name));
+        assert!(
+            verdict.ok(),
+            "{}: {} tiles over budget ({} defect px total, worst tile {:?})",
+            case.name,
+            verdict.failing_tiles(),
+            verdict.defects_total,
+            verdict.worst,
+        );
+        worst_clean = worst_clean.max(verdict.worst.2);
+        compared += 1;
+    }
+    assert!(compared >= 15, "the corpus shrank to {compared} pages");
+    eprintln!(
+        "PDF↔SVG raster: {compared} pages agree via {} ({}); worst clean tile \
+         {worst_clean} defect px against a budget of {}",
+        tool.exe.display(),
+        tool.version,
+        cfg.tile_budget,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// The planted faults the plan names: content missing, the wrong scale, a
+// dash pattern off its phase, a wipeout drawn in the wrong order. Each pair
+// is checked clean first — the PDF of the good page against the SVG of the
+// good page — so a catch is the fault's doing, not the pairing's.
+#[test]
+fn the_raster_comparison_catches_the_planted_faults() {
+    let Some(tool) = rasterizer_or_skip("raster fault injection") else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("ocs-raster-faults-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dpi = 300.0;
+    let cfg = crate::io::raster_compare::RasterCmp::default();
+
+    let lines = |name: &'static str, keep_both: bool| {
+        let mut case = Case::new(name);
+        case.paper = (150.0, 100.0);
+        case.wires.push(wire(
+            "keep",
+            vec![[10.0, 30.0, 0.0], [140.0, 30.0, 0.0]],
+            WireModel::WHITE,
+            0.0,
+        ));
+        if keep_both {
+            case.wires.push(wire(
+                "lose",
+                vec![[10.0, 60.0, 0.0], [140.0, 60.0, 0.0]],
+                WireModel::WHITE,
+                0.0,
+            ));
+        }
+        case
+    };
+    let scaled = |name: &'static str, scale: f32| {
+        let mut case = lines(name, true);
+        case.scale = scale;
+        case
+    };
+    let dashed = |name: &'static str, pattern: [f64; 2]| {
+        let mut case = Case::new(name);
+        case.paper = (150.0, 100.0);
+        let mut dashed = wire(
+            "dashed",
+            vec![[10.0, 50.0, 0.0], [140.0, 50.0, 0.0]],
+            WireModel::WHITE,
+            0.0,
+        );
+        dashed.wire.pattern_length = (pattern[0] - pattern[1]) as f32;
+        dashed.wire.pattern = [
+            pattern[0] as f32,
+            pattern[1] as f32,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        case.wires.push(dashed);
+        case
+    };
+    let covered = |name: &'static str, wipeout_first: bool| {
+        let mut case = Case::new(name);
+        case.paper = (150.0, 100.0);
+        case.hatches.push(hatch(
+            "ink",
+            square(40.0, 30.0, 40.0),
+            HatchPattern::Solid,
+            [0.05, 0.05, 0.05, 1.0],
+        ));
+        case.wipeouts.push(hatch(
+            "WIPEOUT",
+            square(50.0, 40.0, 20.0),
+            HatchPattern::Solid,
+            [1.0, 1.0, 1.0, 1.0],
+        ));
+        // Two render groups; the second is drawn after the first, so which
+        // group holds the wipeout decides whether it masks the ink or the
+        // ink paints over it.
+        case.options.group_splits = if wipeout_first {
+            crate::io::plot_types::PlotGroupSplits {
+                wires: 0,
+                hatches: 0,
+                wipeouts: 1,
+            }
+        } else {
+            crate::io::plot_types::PlotGroupSplits {
+                wires: 0,
+                hatches: 1,
+                wipeouts: 0,
+            }
+        };
+        case
+    };
+
+    // (told the PDF, told the SVG, what went wrong)
+    let faults: [(Case, Case, &str); 4] = [
+        (
+            lines("fault-missing", true),
+            lines("fault-missing-svg", false),
+            "a whole line is missing",
+        ),
+        (
+            scaled("fault-scale", 1.0),
+            scaled("fault-scale-svg", 1.02),
+            "the drawing is 2% too large",
+        ),
+        (
+            dashed("fault-dash", [6.0, -6.0]),
+            dashed("fault-dash-svg", [3.0, -3.0]),
+            "the dashes land where the gaps should be",
+        ),
+        (
+            covered("fault-wipeout", false),
+            covered("fault-wipeout-svg", true),
+            "the wipeout is drawn before the ink it should cover",
+        ),
+    ];
+    for (good, bad, what) in &faults {
+        let pdf_pixels = pdf_raster(&tool, good, &dir, dpi);
+        let clean = crate::io::raster_compare::compare(
+            &pdf_pixels,
+            &render(&write(good).0, dpi / 25.4),
+            &cfg,
+        )
+        .unwrap();
+        assert!(
+            clean.ok(),
+            "{}: the clean pairing already fails ({} defects, worst {:?})",
+            good.name,
+            clean.defects_total,
+            clean.worst,
+        );
+        let verdict = crate::io::raster_compare::compare(
+            &pdf_pixels,
+            &render(&write(bad).0, dpi / 25.4),
+            &cfg,
+        )
+        .unwrap();
+        assert!(
+            !verdict.ok(),
+            "not caught: {what} ({} defect px, worst tile {:?})",
+            verdict.defects_total,
+            verdict.worst,
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// The evidence run: the whole corpus, text pages included, at the plan's
+// 600 dpi, with a diff map written for anything that differs. Run it alone —
+// `cargo test --lib dump_raster_evidence -- --ignored --nocapture
+// --test-threads=1` — so the shared glyph atlas holds still between the two
+// exports of a text page.
+#[test]
+#[ignore = "writes the PDF↔SVG raster evidence table and diff maps to docs/evidence"]
+fn dump_raster_evidence() {
+    let Some(tool) = rasterizer_or_skip("raster evidence") else {
+        return;
+    };
+    let out = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("docs")
+        .join("evidence")
+        .join("2026-09-09-svg-pdf-raster");
+    std::fs::create_dir_all(&out).unwrap();
+    let work = std::env::temp_dir().join(format!("ocs-raster-evidence-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    let dpi = 600.0;
+    let cfg = crate::io::raster_compare::RasterCmp::default();
+    let mut rows = vec![format!(
+        "# tool: {} ({}), -thinlinemode shape; resvg {}; {} dpi; shift {} px, \
+         value tol {}/255, tile {} px, budget {} px, conflation ink {}/255 \
+         within {} px",
+        tool.exe.display(),
+        tool.version,
+        "0.45.1",
+        dpi,
+        cfg.shift_px,
+        cfg.value_tol,
+        cfg.tile_px,
+        cfg.tile_budget,
+        cfg.seam_ink,
+        cfg.seam_reach_px,
+    )];
+    rows.push("case\tdefect_px\tworst_tile\tfailing_tiles\tverdict\tnote".into());
+    for case in &corpus() {
+        if case.options.stamp {
+            continue;
+        }
+        let label = if case.name == "pen widths" {
+            // Three variants share the name; the flags tell them apart.
+            format!(
+                "{} (scale_lw={}, object_lw={})",
+                case.name, case.options.scale_lineweights, case.options.object_lineweights
+            )
+        } else {
+            case.name.to_string()
+        };
+        let note = if case.options.merge_lines {
+            "resvg 0.45.1 drops the on-sheet multiply fill when an isolated \
+             layer's bbox spans the far-off geometry and an ancestor \
+             clip-path cuts the page; poppler paints it; excused by the \
+             routine gate (see its comment), minimal pair in this folder"
+        } else if case.options.object_lineweights {
+            ""
+        } else {
+            "sub-pixel hairlines (0.1 pt = 0.83 px): below the raster floor, \
+             phase differs by engine policy; width pinned at layers 1-2"
+        };
+        let assets = shared_assets();
+        let pdf_pixels = pdf_raster(&tool, case, &work, dpi);
+        let svg_pixels = render(&write_with(case, &assets).0, dpi / 25.4);
+        let verdict = crate::io::raster_compare::compare(&pdf_pixels, &svg_pixels, &cfg).unwrap();
+        rows.push(format!(
+            "{}\t{}\t{:?}\t{}\t{}\t{}",
+            label,
+            verdict.defects_total,
+            verdict.worst,
+            verdict.failing_tiles(),
+            if verdict.ok() { "ok" } else { "FAIL" },
+            note,
+        ));
+        if verdict.defects_total > 0 {
+            let map = crate::io::raster_compare::diff_map(&pdf_pixels, &verdict);
+            map.save_png(out.join(format!(
+                "diff-{}.png",
+                label.replace([' ', '/', ',', ':', '(', ')', '='], "_")
+            )))
+            .unwrap();
+        }
+    }
+    let table = out.join("corpus-600dpi.tsv");
+    std::fs::write(&table, rows.join("\n") + "\n").unwrap();
+    println!("wrote {}", table.display());
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+// The other half of the evidence — the three real sheets — lives with the
+// headless plot tests in `app::automation`, which can open a drawing; the
+// pages go out both doors there exactly as the corpus pages do here.

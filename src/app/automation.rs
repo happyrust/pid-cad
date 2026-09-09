@@ -1497,6 +1497,137 @@ mod tests {
         let _ = std::fs::remove_dir_all(&bare_dir);
     }
 
+    // The real-sheet half of the P5.2 raster evidence: three of the eleven
+    // sheets (one FF, one SP, one WS), the same `PlotJob` out both doors —
+    // `export_pdf_pages` and `svg_job_to_string` — exactly as the corpus
+    // pages go in `io::svg_export::tests`, but with a whole drawing behind
+    // them. These sheets are wall-to-wall 2.5–3.5 mm text, and text is where
+    // the engines earn their conflation excusal — the PDF door writes each
+    // glyph as its triangle mesh, and poppler anti-aliases every triangle
+    // alone, underpainting the interiors and cracking the shared edges that
+    // the SVG outline fills solid (`RasterCmp::seam_reach_px`). The sheets
+    // live next to the repo, not in it; OCS_REAL_SHEETS_DIR points elsewhere.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "writes the real-sheet PDF↔SVG raster evidence; needs the sheets and a rasteriser"]
+    fn dump_real_sheet_raster_evidence() {
+        use crate::app::update::file::PlotRequest;
+        use crate::io::raster_compare::{self, PdfRasterizer, RasterCmp};
+        use crate::io::svg_export::{svg_job_to_string, SvgOptions};
+
+        let Some(tool) = PdfRasterizer::discover() else {
+            eprintln!(
+                "SKIPPED real-sheet raster evidence: no PDF rasteriser. \
+                 Install one (e.g. `winget install oschwartz10612.Poppler`) \
+                 or point OCS_PDF_RASTERIZER at mutool / pdftoppm."
+            );
+            return;
+        };
+        let sheets_dir = std::env::var("OCS_REAL_SHEETS_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("0版重新处理dxf-12张")
+            });
+        if !sheets_dir.is_dir() {
+            eprintln!(
+                "SKIPPED real-sheet raster evidence: no sheet folder at {} \
+                 (set OCS_REAL_SHEETS_DIR)",
+                sheets_dir.display()
+            );
+            return;
+        }
+        let out = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("docs")
+            .join("evidence")
+            .join("2026-09-09-svg-pdf-raster");
+        std::fs::create_dir_all(&out).unwrap();
+        let work = std::env::temp_dir().join(format!("ocs-raster-real-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).unwrap();
+        // 600 dpi like the corpus dump, though an A1 sheet is a gigabyte-class
+        // pixmap per engine: 300 was tried first (real linewidths sit above
+        // the sub-pixel floor there) and the linework passed, but the labels
+        // speckled — at 300 a glyph stroke is 2–3 px, hardly any pixel of a
+        // label is solid ink on either side, and the conflation excusal has
+        // nothing to hold on to. At 600 the stroke interiors are real.
+        let dpi = 600.0;
+        let cfg = RasterCmp::default();
+        let mut rows = vec![format!(
+            "# tool: {} ({}), -thinlinemode shape; resvg {}; {} dpi; shift {} px, \
+             value tol {}/255, tile {} px, budget {} px, conflation ink {}/255 \
+             within {} px; --model --paper A1 --landscape --fit, page setup's \
+             own style table",
+            tool.exe.display(),
+            tool.version,
+            "0.45.1",
+            dpi,
+            cfg.shift_px,
+            cfg.value_tol,
+            cfg.tile_px,
+            cfg.tile_budget,
+            cfg.seam_ink,
+            cfg.seam_reach_px,
+        )];
+        rows.push("sheet\tdefect_px\tworst_tile\tfailing_tiles\tverdict".into());
+        for (short, stem) in [
+            // FF02-06 rather than -05: any sheet of the eleven qualifies, and
+            // -05 is the one the desk usually has open in the editor, whose
+            // byte-range lock fails even a read from a second process.
+            ("FF02-06", "DWG-0100FF02-06 罐组II消防冷却水流程图"),
+            ("SP02-05", "DWG-0100SP02-05 发油泵棚(二)工艺自控流程图"),
+            ("WS02-05", "DWG-0100WS02-05 辅助生产区排水流程图"),
+        ] {
+            let dxf = sheets_dir.join(format!("{stem}.dxf"));
+            let mut app = OpenCADStudio::new_for_test();
+            app.open_drawing_headless(&dxf)
+                .unwrap_or_else(|e| panic!("{short}: open: {e}"));
+            app.apply_headless_plot_style(None)
+                .unwrap_or_else(|e| panic!("{short}: style: {e}"));
+            app.select_layout_headless("Model")
+                .unwrap_or_else(|e| panic!("{short}: layout: {e}"));
+            app.set_headless_model_page("A1", true, true, None, None, 1.0)
+                .unwrap_or_else(|e| panic!("{short}: page: {e}"));
+            let job = app
+                .resolve_plot_job(&PlotRequest::current_view())
+                .unwrap_or_else(|e| panic!("{short}: job: {e}"));
+            let (svg, _) = svg_job_to_string(&job.pages, None, &job.assets, &SvgOptions::default())
+                .unwrap_or_else(|e| panic!("{short}: svg: {e}"));
+            let pdf = work.join(format!("{short}.pdf"));
+            crate::io::pdf_export::export_pdf_pages(&job.pages, &pdf, None)
+                .unwrap_or_else(|e| panic!("{short}: pdf: {e}"));
+            let pdf_pixels = tool
+                .rasterize(&pdf, dpi, &work)
+                .unwrap_or_else(|e| panic!("{short}: {e}"));
+            let svg_pixels = raster_compare::render_svg(&svg, dpi / 25.4);
+            let verdict = raster_compare::compare(&pdf_pixels, &svg_pixels, &cfg)
+                .unwrap_or_else(|e| panic!("{short}: {e}"));
+            eprintln!(
+                "{short}: {} defect px, worst tile {:?}, {} tiles over budget",
+                verdict.defects_total,
+                verdict.worst,
+                verdict.failing_tiles(),
+            );
+            rows.push(format!(
+                "{short}\t{}\t{:?}\t{}\t{}",
+                verdict.defects_total,
+                verdict.worst,
+                verdict.failing_tiles(),
+                if verdict.ok() { "ok" } else { "FAIL" },
+            ));
+            if verdict.defects_total > 0 {
+                let map = raster_compare::diff_map(&pdf_pixels, &verdict);
+                map.save_png(out.join(format!("diff-real-{short}.png")))
+                    .unwrap();
+            }
+        }
+        let table = out.join("real-sheets-600dpi.tsv");
+        std::fs::write(&table, rows.join("\n") + "\n").unwrap();
+        println!("wrote {}", table.display());
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
     // R1, the recovery: the scene keeps its laid-out wires until the geometry
     // changes, and the atlas can be rewound or re-scaled behind them — every
     // key those quads carry then points at a tile that is gone. A job resolved

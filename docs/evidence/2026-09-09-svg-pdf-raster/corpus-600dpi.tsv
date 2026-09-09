@@ -1,0 +1,24 @@
+# tool: pdftoppm (pdftoppm version 25.07.0), -thinlinemode shape; resvg 0.45.1; 600 dpi; shift 1 px, value tol 2/255, tile 32 px, budget 8 px, conflation ink 96/255 within 2 px
+case	defect_px	worst_tile	failing_tiles	verdict	note
+polyline with pen-up	0	(219, 154, 0)	0	ok	
+rotation / scale / clip	0	(219, 154, 0)	0	ok	
+rotation / scale / clip	0	(154, 219, 0)	0	ok	
+rotation / scale / clip	0	(219, 154, 0)	0	ok	
+rotation / scale / clip	0	(154, 219, 0)	0	ok	
+dash patterns	0	(219, 154, 0)	0	ok	
+pen widths (scale_lw=false, object_lw=true)	0	(219, 154, 0)	0	ok	
+pen widths (scale_lw=true, object_lw=true)	0	(219, 154, 0)	0	ok	
+pen widths (scale_lw=false, object_lw=false)	2360	(72, 147, 32)	74	FAIL	sub-pixel hairlines (0.1 pt = 0.83 px): below the raster floor, phase differs by engine policy; width pinned at layers 1-2
+colour adaptation	0	(219, 154, 0)	0	ok	
+colour adaptation, transparency on	0	(219, 154, 0)	0	ok	
+viewport hatch dots	0	(219, 154, 0)	0	ok	
+wire fills	0	(219, 154, 0)	0	ok	
+hatches	0	(219, 154, 0)	0	ok	
+hatches, merge_lines	8930	(2, 152, 1024)	15	FAIL	resvg 0.45.1 drops the on-sheet multiply fill when an isolated layer's bbox spans the far-off geometry and an ancestor clip-path cuts the page; poppler paints it; excused by the routine gate (see its comment), minimal pair in this folder
+ctb	0	(219, 154, 0)	0	ok	
+ctb, scale_lineweights	4	(7, 127, 4)	0	ok	
+text	0	(219, 154, 0)	0	ok	
+two groups	0	(219, 154, 0)	0	ok	
+two groups, splits past the end	0	(219, 154, 0)	0	ok	
+two groups, ctb cap across the split	0	(219, 154, 0)	0	ok	
+empty page	0	(219, 154, 0)	0	ok	
