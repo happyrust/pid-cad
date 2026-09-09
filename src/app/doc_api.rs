@@ -1965,9 +1965,9 @@ mod tests {
         let neg = convert::bulge_arc_segment([0.0, 0.0], [1.0, 0.0], -0.4142)
             .expect("negative bulge arc");
         if let cadkernel::geom2d::Curve::Arc(arc) = &neg {
-            // 90° arc, chord 1: radius = 0.5/sin(45°) ≈ 0.7071; center y must be negative.
+            // 90° arc, chord 1: radius = 0.5/sin(45°) = 1/√2; center y must be negative.
             assert!(
-                (arc.radius - 0.7071).abs() < 0.01,
+                (arc.radius - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.01,
                 "cw arc radius {}",
                 arc.radius
             );
