@@ -8,8 +8,35 @@ use std::path::PathBuf;
 /// The OpenCADStudio config directory (not created). `None` when the platform
 /// config base can't be resolved (e.g. no `HOME`). Callers `join` their own
 /// file name onto it and `create_dir_all` its parent before writing.
+///
+/// Under `cargo test` this is a scratch folder of the test process instead:
+/// every store that would land in the user's folder (settings.json, aliases,
+/// last dialog dir, …) lands there, so a test that reaches `save_config` can
+/// never rewrite the developer's own settings, and every test boots from the
+/// same all-defaults config whatever the machine holds.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn config_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        Some(test_config_dir().clone())
+    }
+    #[cfg(not(test))]
+    {
+        platform_config_dir()
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn test_config_dir() -> &'static PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        std::env::temp_dir().join(format!("OpenCADStudio-test-{}", std::process::id()))
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(test, allow(dead_code))]
+fn platform_config_dir() -> Option<PathBuf> {
     let base: PathBuf = if cfg!(target_os = "windows") {
         std::env::var_os("APPDATA").map(PathBuf::from)?
     } else if cfg!(target_os = "macos") {
@@ -75,5 +102,43 @@ pub fn remember_dialog_dir(file_path: &Path) {
     if let Some(cfg) = config_dir() {
         let _ = std::fs::create_dir_all(&cfg);
         let _ = std::fs::write(cfg.join("last_dir.txt"), dir.display().to_string());
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tests_get_a_scratch_config_dir_not_the_users_folder() {
+        // P8.5 债1 (2026-09-09 plan): a test that reaches `save_config` used
+        // to rewrite the developer's %APPDATA%\OpenCADStudio\settings.json.
+        let dir = config_dir().expect("the scratch dir always resolves");
+        assert!(
+            dir.starts_with(std::env::temp_dir()),
+            "{} is not under the temp dir",
+            dir.display()
+        );
+        assert!(
+            dir.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("OpenCADStudio-test-")),
+            "{}",
+            dir.display()
+        );
+        if let Some(user_dir) = platform_config_dir() {
+            assert_ne!(dir, user_dir);
+            assert!(!dir.starts_with(&user_dir), "{}", dir.display());
+        }
+        // Stable for the whole process, so the stores agree with each other.
+        assert_eq!(config_dir(), Some(dir));
+    }
+
+    #[test]
+    fn the_settings_written_by_a_test_land_in_the_scratch_dir() {
+        let cfg = crate::app::config::AppConfig::default();
+        cfg.save();
+        let written = config_dir().unwrap().join("settings.json");
+        assert!(written.is_file(), "{}", written.display());
     }
 }

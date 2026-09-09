@@ -322,8 +322,10 @@ clippy 对改动的行 0 告警；rustfmt：`svg_export.rs` 0 diff，`plot.rs` �
   是按区域裁的。要补得让 `PlotRequest` 带区域（或 `direct_plot_params` 认区域——但它也被菜单 Export PDF 与打印共用，
   改它会改 PDF 的行为），单独一期做，别顺手。
 - 三条新文案（`Save to SVG file…`、`Export SVG`、stamp 说明）**没进 21 份 Fluent 目录**，与 P2 的 `Export as SVG` 一样
-  回落英文；下次翻译批次一起补。
+  回落英文；下次翻译批次一起补。**→ P8.5 已建 key**（2026-09-10，09-09 计划 §6.5）：21 份目录 + `locale_catalog.rs`
+  都有了这几条（连同 web 多页提示与 PRINTALL 的 `SVG` 标签），非英文目录先放英文占位，等翻译批次。
 - `PlotFlag::Stamp` 的消息在 SVG 下仍会翻转 `stamp` 偏好（复选框已禁用，正常点不出来），没加拦截。
+  **→ P8.5 已拦**（2026-09-10，09-09 计划 §6.5）。
 
 ## 11. P4.3 实施记录（2026-09-08）
 
@@ -355,6 +357,8 @@ GUI 同样**没人手点过**。
 （20:48:53，已手工改回 true，其余字段是从同一份配置读回再写出的，应当没变）。测试现在先
 `app.last_saved_config = Some(app.current_config())` 让 `save_config` 无事可做。**任何会走到 `save_config` 的测试都有这个坑**，
 `new_for_test` 该给一个不落盘的配置路径——单独一条债，没在这一期动。
+**→ P8.5 已翻掉**（2026-09-10，09-09 计划 §6.5）：`cargo test` 下 `config::config_dir()` 指向进程私有的临时目录，
+`settings.json` / 别名 / 上次目录都落在那里；两处「先喂 `last_saved_config`」的绕法已删。
 
 ## 12. P7 实施记录（2026-09-08）
 
