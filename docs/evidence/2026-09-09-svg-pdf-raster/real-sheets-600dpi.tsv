@@ -1,0 +1,5 @@
+# tool: pdftoppm (pdftoppm version 25.07.0), -thinlinemode shape; resvg 0.45.1; 600 dpi; shift 1 px, value tol 2/255, tile 32 px, budget 8 px, conflation ink 96/255 within 2 px; --model --paper A1 --landscape --fit, page setup's own style table
+sheet	defect_px	worst_tile	failing_tiles	verdict
+FF02-06	527	(352, 97, 30)	3	FAIL
+SP02-05	2340	(98, 92, 64)	27	FAIL
+WS02-05	3785	(132, 181, 120)	74	FAIL

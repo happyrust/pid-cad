@@ -22,12 +22,19 @@ screen) has no solid ink within reach of its middle and still fails
 - `corpus-600dpi.tsv` — the whole corpus at 600 dpi, text pages included
   (written by `dump_raster_evidence`, single-threaded so the shared glyph
   atlas holds still between the two exports of a text page).
-- `real-sheets-600dpi.tsv` — **not yet generated**: run `cargo test --lib
-  dump_real_sheet_raster_evidence -- --ignored --nocapture --test-threads=1`
-  (needs the sheets folder and a rasteriser); the table lands here when it
-  has. It will hold three real P&ID sheets (FF02-06, SP02-05, WS02-05)
-  through the whole headless plot path at 600 dpi (written by
-  `app::automation::dump_real_sheet_raster_evidence`). 300 dpi was tried
+- `real-sheets-600dpi.tsv` — three real P&ID sheets (FF02-06, SP02-05,
+  WS02-05) through the whole headless plot path at 600 dpi (written by
+  `app::automation::dump_real_sheet_raster_evidence`). **All three FAIL**
+  (527 / 2340 / 3785 defect px; 3 / 27 / 74 tiles over budget) — tiny
+  against a 278-megapixel A1, but the metric is local on purpose. The
+  worst-tile crops sit next to the table (`crop-real-*.png`) and show three
+  different stories: WS02-05's defects run *inside* the strokes of a large
+  title (the mesh-seam pattern the conflation excusal exists for — it does
+  not hold on these glyphs, why is an open question), SP02-05's cluster
+  where arrows cross a red pipe line (which smells like a real draw-order
+  or fill difference), FF02-06 has three tiles at a text/line junction.
+  Per-tile triage is its own phase (see the 2026-09-09 plan); these rows
+  are FAIL until it says otherwise. 300 dpi was tried
   first: the linework passed but every label speckled — these sheets are
   wall-to-wall 2.5–3.5 mm text, a glyph stroke is 2–3 px at 300 dpi, and
   hardly any pixel of a label counts as solid ink on either side, so the
