@@ -68,3 +68,42 @@ preview_written_svgs -- --ignored --nocapture`.
 The routine gate (`the_pdf_and_the_svg_rasterise_to_the_same_picture`)
 excuses merge_lines pages with a comment stating the same facts, exactly as
 it excuses the sub-pixel hairline pages.
+
+## The real-sheet triage (2026-09-09, same evening)
+
+All three FAILs were taken apart against raw renders (a temporary local
+patch of `dump_real_sheet_raster_evidence` dumped `{sheet}-pdf.png` /
+`{sheet}-svg.png` and the run reproduced the committed numbers exactly),
+with per-pixel scanline sampling at the worst tiles. **Verdict: no export
+defect — two limitations of the judge.**
+
+- **SP02-05, and FF02-06's junction specks: the hairline policy meeting
+  other ink.** The sheets carry 0.1 pt hairline linework (the arrows'
+  crossbars, symbol details). Poppler pins a hairline to a full-value
+  one-pixel row; resvg spreads its true ~0.8 px coverage — over bare paper
+  the 1 px shift window explains the disagreement away, which is why the
+  sheet is not red everywhere. Where the hairline meets the red pipe line
+  or a table rule, the PDF's solid-black row has no dark counterpart
+  within reach — measured at (1465, 2953): PDF `0,0,0`, SVG `208,16,16`
+  (the line's red fringe over the hairline's fifth of a row) — and every
+  crossing charges a few dozen pixels. The 0.25 mm stems align
+  pixel-for-pixel in both renders; nothing is missing, displaced or the
+  wrong colour. Same class the corpus already documents on the
+  `pen widths (scale_lw=false, object_lw=false)` row.
+- **WS02-05: the conflation excusal does not know coloured ink.** The
+  title's ink is blue `(0,38,128)`. The excusal gates "solid ink" per
+  channel at `seam_ink` = 96; blue's own channel sits at 128, so in the
+  blue channel the title never qualifies, and poppler's mesh underpainting
+  — measured `(33,66,144)` and `(58,87,157)` inside strokes the SVG fills
+  solid `(0,38,128)` — is charged in that channel. This is precisely the
+  artifact the excusal exists for, unexcused for coloured ink: "96 keeps
+  coloured ink in" holds for a colour's dark channels, never its bright
+  one.
+
+Follow-up, scoped and not done here: teach the excusal what coloured ink
+is (qualify a pixel as ink by its darkest channel — its distance from
+paper — keep it one-way, and prove the planted faults still land), and/or
+run the real-sheet evidence at 1200 dpi, where 0.1 pt clears the raster
+floor (≈1.7 px) — at the price of ~4 GB pixmaps per engine. Until one of
+those lands, these three rows stay FAIL with this note; nobody tunes the
+budget to make them pass.
