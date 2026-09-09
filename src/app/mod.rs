@@ -865,6 +865,11 @@ pub(super) struct OpenCADStudio {
     mtext_click_count: u8,
     /// Pending model-space plot window (x0, y0, x1, y1) in world XY, or None.
     plot_window: Option<(f64, f64, f64, f64)>,
+    /// The dialog's plot area for the SVG export in flight, set by the plot
+    /// dialog's own commit and consumed by the job it triggers (G10). The
+    /// EXPORTSVG / SVGOUT shortcut never sets it, so it keeps plotting the
+    /// extents.
+    svg_export_dialog_area: Option<String>,
     plot_format: crate::io::paper_sizes::PaperSize,
     plot_orientation: crate::io::paper_sizes::Orientation,
     /// Backing state for the full Plot / Print dialog.
@@ -3560,6 +3565,7 @@ impl OpenCADStudio {
             mtext_click_off: 0,
             mtext_click_count: 0,
             plot_window: None,
+            svg_export_dialog_area: None,
             plot_format: crate::io::paper_sizes::PaperSize::A4,
             plot_orientation: crate::io::paper_sizes::Orientation::Landscape,
             plot_dialog: crate::ui::window::plot::PlotDialogState::default(),

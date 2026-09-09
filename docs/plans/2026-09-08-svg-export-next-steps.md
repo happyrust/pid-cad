@@ -2,7 +2,8 @@
 
 > 日期：2026-09-08
 > 状态：§6 五条已于 2026-09-08 拍板（全按建议）；**P4.1 已实施**（§8）、**P5.1 已实施**（§9）、**P6.1 已量**（§7，
-> 结论：P6.2–P6.4 不做）、**P4.2 已实施**（§10）、**P4.3 已实施**（§11）、**P7 已实施**（§12）、**P5.2 已实施**（§13；真图栅格 FAIL **已定性=判据局限，非导出缺陷**，见 evidence README 的 triage 节）；剩 P5.3 与 G10。
+> 结论：P6.2–P6.4 不做）、**P4.2 已实施**（§10）、**P4.3 已实施**（§11）、**P7 已实施**（§12）、**P5.2 已实施**（§13；真图栅格 FAIL **已定性=判据局限，非导出缺陷**，见 evidence README 的 triage 节）、**G10 已实施**（2026-09-09，`PlotRequest.dialog_area`，记录在
+> `docs/plans/2026-09-09-svg-export-audit-and-next-steps.md` §6.3）；剩 P5.3。
 > 前置：`docs/plans/2026-09-07-dxf-to-svg-export.md`（v2）——P0 / P1 / P2（web 除外）/ R3 第一轮 / R1 已实施。
 > 本文件只写「还没做的」与「怎么做」；已实施部分的记录仍在 v2 的 §11–§15，不重复。
 
@@ -57,7 +58,7 @@ v2 计划的 §11–§15 与代码逐条对得上。
 | G7 | R3 第二梯队 | `SvgSink.body: String` 整页内存拼接（`<defs>` 要在前）；`mesh_outline` 每次 `FillMesh` 现算（同一字形出现 N 次提 N 次）；无受限路径合并 | 体量与耗时上限未知——**先量再改** |
 | G8 | 第三层另一半 + 兼容性 | 见 §1.2 | 「同一张图」的最终判据还差 PDF ↔ SVG 栅格对比与外部渲染器实测 |
 | G9 | 小项 | 保存对话框过滤器只有 `svg`（`svg_export.rs:415`），`.svgz` 只能手输；`PlotReport.text_items` 只记不显示；PDF 对缺字仍旧宽松（历史行为，是产品决定不是 bug） | — |
-| G10 | **模型空间 SVG 不看出图区域**（P4.2 时发现） | `Message::SvgExport` → `direct_plot_params()` 在模型空间恒取 Extents；对话框里 PDF 目的地按 Window / Display / Limits / View 裁（`PlotWindowExport`） | 对话框选了 Window 再选 SVG 目的地，出的是 Extents。修法要么 `PlotRequest` 带区域，要么 `direct_plot_params` 认区域（它被菜单 Export PDF 与打印共用，改它会改 PDF 行为）；单独一期 |
+| G10 | **模型空间 SVG 不看出图区域**（P4.2 时发现） | `Message::SvgExport` → `direct_plot_params()` 在模型空间恒取 Extents；对话框里 PDF 目的地按 Window / Display / Limits / View 裁（`PlotWindowExport`） | 对话框选了 Window 再选 SVG 目的地，出的是 Extents。修法要么 `PlotRequest` 带区域，要么 `direct_plot_params` 认区域（它被菜单 Export PDF 与打印共用，改它会改 PDF 行为）；单独一期。**已实施（2026-09-09）**：走第一条路，`PlotRequest.dialog_area`，`direct_plot_params` 没动——见 09-09 计划 §6.3 |
 
 不在清单里、也**不打算做**的（沿用 v2 §5）：SVG 导入、按图层重组 `<g>`（`WireModel` 无图层字段）、`<pattern>` / `<mask>` / 渐变、
 `<text>` 图章、透明底图模式。

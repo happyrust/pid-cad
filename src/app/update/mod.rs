@@ -7413,7 +7413,12 @@ impl OpenCADStudio {
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]
-            Message::SvgExportPath(None) => Task::none(),
+            Message::SvgExportPath(None) => {
+                // A cancelled save dialog drops the area the plot dialog's
+                // commit put in flight (G10); the next export states its own.
+                self.svg_export_dialog_area = None;
+                Task::none()
+            }
             #[cfg(not(target_arch = "wasm32"))]
             Message::SvgExportPath(Some(path)) => self.on_svg_export_path_some(path),
 

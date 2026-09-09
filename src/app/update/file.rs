@@ -106,6 +106,13 @@ pub struct PlotRequest {
     /// Plot every layout with the dialog's current settings rather than the
     /// page setup each layout carries.
     pub use_current_settings: bool,
+    /// The dialog's plot area — "Window", "Display", "Limits", "Extents" or
+    /// "View: name" — when this plot was committed from the plot dialog
+    /// (G10). `None` is the historical answer and what every other entry
+    /// point sends: model space plots its extents, paper space its layout
+    /// sheet. Only read when `layouts` is empty; a layout plot's area comes
+    /// from each layout's own page setup.
+    pub dialog_area: Option<String>,
 }
 
 impl PlotRequest {
@@ -118,7 +125,7 @@ impl PlotRequest {
     pub fn layouts(names: Vec<String>) -> Self {
         Self {
             layouts: names,
-            use_current_settings: false,
+            ..Self::default()
         }
     }
 }
@@ -3384,6 +3391,54 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         request: &PlotRequest,
     ) -> Result<Vec<crate::io::pdf_export::PdfPageInput>, String> {
         if request.layouts.is_empty() {
+            // G10: a plot committed from the dialog brings the dialog's area
+            // and is clipped like the PDF destination in the same dialog
+            // would be. The command shortcut, the CLI and PRINTALL send no
+            // area and keep the historical extents / layout-sheet answer.
+            // "Layout" is not an area to dispatch on: it is the paper-space
+            // sheet itself, which is what `direct_plot_params` already plots.
+            if let Some(area) = request.dialog_area.as_deref().filter(|a| *a != "Layout") {
+                let params = match area {
+                    "Display" => self.display_plot_job(),
+                    "Extents" => self.extents_plot_job(),
+                    "Limits" => self.limits_plot_job(),
+                    "Window" => self.window_plot_job(),
+                    named if named.starts_with("View: ") => {
+                        self.named_view_plot_job(named.trim_start_matches("View: "))
+                    }
+                    _ => None,
+                };
+                let Some((
+                    wires,
+                    hatches,
+                    wipeouts,
+                    group_splits,
+                    paper_w,
+                    paper_h,
+                    offset_x,
+                    offset_y,
+                    rotation_deg,
+                    scale,
+                    clip,
+                )) = params
+                else {
+                    return Err(crate::t!("Plot area is empty. Pick a larger window.").into_owned());
+                };
+                return Ok(vec![crate::io::pdf_export::PdfPageInput {
+                    wires: std::sync::Arc::new(wires),
+                    hatches,
+                    wipeouts,
+                    paper_w,
+                    paper_h,
+                    offset_x,
+                    offset_y,
+                    rotation_deg,
+                    scale,
+                    clip,
+                    options: Self::pdf_plot_options(&self.plot_dialog, group_splits),
+                    plot_style: self.dialog_plot_style(&self.plot_dialog),
+                }]);
+            }
             let Some((
                 wires,
                 hatches,
@@ -3551,7 +3606,13 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 self.load_plotsettings_into_dialog(&settings);
             }
         }
-        self.resolve_plot_job(&PlotRequest::current_view())
+        // The area travels from the dialog commit (G10); the field is consumed
+        // so a later EXPORTSVG at the command line is back to extents.
+        let dialog_area = self.svg_export_dialog_area.take();
+        self.resolve_plot_job(&PlotRequest {
+            dialog_area,
+            ..PlotRequest::current_view()
+        })
     }
 
     /// EXPORTSVG / SVGOUT: the plot the dialog describes, written as SVG.
@@ -3609,6 +3670,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         let request = PlotRequest {
             layouts: selected,
             use_current_settings: self.print_all_settings_override,
+            dialog_area: None,
         };
         let job = match self.resolve_plot_job(&request) {
             Ok(job) => job,
@@ -4946,8 +5008,10 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         let plot_style = self.dialog_plot_style(&d);
         // SVG is the one destination with a single path from every entry
         // point (D5); the dialog only chooses it. EXPORTSVG at the command
-        // line lands in the same place.
+        // line lands in the same place — without this snapshot, so only the
+        // dialog's own commit carries its plot area (G10).
         if !preview && d.destination() == crate::ui::window::plot::PlotDestination::Svg {
+            self.svg_export_dialog_area = Some(d.area.clone());
             return Task::done(Message::SvgExport);
         }
         // Extents, Window and Display use one plot path in both spaces. Only
@@ -5646,6 +5710,133 @@ mod plot_destination_tests {
         let json = r#"{"to_file": true, "file_format": "Svg"}"#;
         let state: crate::ui::window::plot::PlotDialogState = serde_json::from_str(json).unwrap();
         assert_eq!(state.destination(), PlotDestination::Svg);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod svg_plot_area_tests {
+    //! G10 of docs/plans/2026-09-08-svg-export-next-steps.md, P8.4 of the
+    //! 2026-09-09 plan: a model-space plot committed from the dialog carries
+    //! the dialog's plot area to the SVG destination — Window plots the
+    //! window, exactly as the PDF destination in the same dialog would —
+    //! while the EXPORTSVG shortcut keeps plotting the extents, whatever the
+    //! dialog happens to hold.
+    use super::PlotRequest;
+    use crate::app::{Message, OpenCADStudio};
+    use crate::ui::window::plot::{PlotDlgMsg, OUT_SVG};
+
+    /// Two squares far apart on an A4 fit: the window holds only the first,
+    /// so a windowed plot is scaled ~80× larger than an extents plot and the
+    /// two cannot be confused.
+    fn app_with_two_squares() -> OpenCADStudio {
+        let mut app = OpenCADStudio::new_for_test();
+        assert_eq!(app.automation_op(r#"{"op":"new"}"#)["ok"], true);
+        assert_eq!(
+            app.automation_op(r#"{"op":"run","cmd":"LINE 0,0 10,0 10,10 0,10 0,0"}"#)["ok"],
+            true
+        );
+        assert_eq!(
+            app.automation_op(r#"{"op":"run","cmd":"LINE 1000,0 1010,0 1010,10 1000,10 1000,0"}"#)
+                ["ok"],
+            true
+        );
+        app.set_headless_model_page("A4", true, true, None, None, 1.0)
+            .unwrap();
+        app.plot_dialog.background = false;
+        // Keep the test away from the user's settings file (the save_config
+        // trap P4.3 documented): the config is marked saved as it stands.
+        app.last_saved_config = Some(app.current_config());
+        app
+    }
+
+    fn page_scale(app: &mut OpenCADStudio, request: &PlotRequest) -> f32 {
+        let job = app.resolve_plot_job(request).unwrap();
+        assert_eq!(job.pages.len(), 1);
+        job.pages[0].scale
+    }
+
+    #[test]
+    fn a_window_area_plots_the_window_and_no_area_still_plots_the_extents() {
+        let mut app = app_with_two_squares();
+        app.plot_window = Some((-1.0, -1.0, 11.0, 11.0));
+        let extents = page_scale(&mut app, &PlotRequest::current_view());
+        let windowed = page_scale(
+            &mut app,
+            &PlotRequest {
+                dialog_area: Some("Window".into()),
+                ..PlotRequest::current_view()
+            },
+        );
+        assert!(
+            windowed > extents * 10.0,
+            "a 12-unit window on A4 must be scaled far above the 1010-unit \
+             extents: window {windowed}, extents {extents}"
+        );
+    }
+
+    #[test]
+    fn the_dialog_commit_carries_its_area_and_the_shortcut_does_not() {
+        let mut app = app_with_two_squares();
+        app.plot_window = Some((-1.0, -1.0, 11.0, 11.0));
+        let extents = page_scale(&mut app, &PlotRequest::current_view());
+
+        // The dialog: area Window, destination SVG, commit. The commit puts
+        // the area in flight and hands over to the shared SVG entry point.
+        let _ = app.on_plot_dlg(PlotDlgMsg::Printer(OUT_SVG.into()));
+        app.plot_dialog.area = "Window".into();
+        let _ = app.on_plot_dlg_commit(false);
+        assert_eq!(app.svg_export_dialog_area.as_deref(), Some("Window"));
+        let job = app.current_view_svg_job().unwrap();
+        assert!(
+            job.pages[0].scale > extents * 10.0,
+            "the committed dialog's Window did not reach the SVG plot"
+        );
+        assert_eq!(
+            app.svg_export_dialog_area, None,
+            "the area is consumed by the job it was meant for"
+        );
+
+        // EXPORTSVG afterwards: the dialog still says Window, but the
+        // shortcut states no area and plots the extents, as it always has.
+        let job = app.current_view_svg_job().unwrap();
+        assert_eq!(
+            job.pages[0].scale, extents,
+            "the shortcut must keep the historical extents plot"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_save_dialog_drops_the_area_in_flight() {
+        let mut app = app_with_two_squares();
+        app.plot_window = Some((-1.0, -1.0, 11.0, 11.0));
+        let _ = app.on_plot_dlg(PlotDlgMsg::Printer(OUT_SVG.into()));
+        app.plot_dialog.area = "Window".into();
+        let _ = app.on_plot_dlg_commit(false);
+        assert!(app.svg_export_dialog_area.is_some());
+        let _ = app.update(Message::SvgExportPath(None));
+        assert_eq!(
+            app.svg_export_dialog_area, None,
+            "cancelling the save dialog must not leave an area lying in wait \
+             for the next EXPORTSVG"
+        );
+    }
+
+    #[test]
+    fn an_empty_window_is_refused_with_the_dialog_wording() {
+        let mut app = app_with_two_squares();
+        app.plot_window = None;
+        let error = match app.resolve_plot_job(&PlotRequest {
+            dialog_area: Some("Window".into()),
+            ..PlotRequest::current_view()
+        }) {
+            Ok(_) => panic!("no window rectangle, no plot"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            crate::t!("Plot area is empty. Pick a larger window.").into_owned(),
+            "the refusal must say what the PDF destination says"
+        );
     }
 }
 

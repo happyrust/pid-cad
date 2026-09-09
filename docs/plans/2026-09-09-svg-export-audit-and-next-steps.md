@@ -1,7 +1,8 @@
 # 开发计划：SVG 导出 · 第三阶段（审核 + P8 收尾与验收补齐）
 
 > 日期：2026-09-09
-> 状态：待批准
+> 状态：Plannotator 批准（2026-09-09，无批注）；**P8.1 / P8.2 已实施**（§6.1，真图三行 FAIL 的定性见
+> §6.2——判据局限，非导出缺陷）、**P8.4 已实施**（§6.3）；剩 P8.3 / P8.5 / P8.6 与「判据学会彩色墨」一条新债（§6.2）。
 > 前置：`docs/plans/2026-09-07-dxf-to-svg-export.md`（v2，P0 / P1 / P2 / R1 / R3 第一轮已实施）、
 > `docs/plans/2026-09-08-svg-export-next-steps.md`（P4.1–P4.3 / P5.1 / P6.1（裁决 P6.2–P6.4 不做）/ P7 已实施；
 > **P5.2 已在 `../OpenCADStudio-p52` worktree 实施、未收尾**，记录在其 §13）。
@@ -54,7 +55,7 @@ P5.2（PDF ↔ SVG 栅格对比）的代码与语料证据在 p52 worktree 已�
 | # | 缺口 | 出处 | 状态 |
 |---|---|---|---|
 | P5.3 | 兼容性实测：rsvg-convert / Inkscape / Chromium 对 22 语料 + 3 真图 | next-steps §3 | 未动 |
-| G10 | 模型空间 SVG 不看出图区域（Window/Display/Limits/View，恒取 Extents） | next-steps §2/§10 | 未动 |
+| G10 | 模型空间 SVG 不看出图区域（Window/Display/Limits/View，恒取 Extents） | next-steps §2/§10 | **已实施**（P8.4，§6.3） |
 | Q1 | web 多页（顺序 N 次下载 vs zip 打包），PRINTALL 的 SVG 在 web 上明确报不可用 | next-steps §6 | 待拍板 |
 | 债1 | `new_for_test` 用真实 `%APPDATA%\OpenCADStudio\settings.json`，走到 `save_config` 的测试会写用户配置（P4.3 踩过，已污染过一次 `plot.background`） | next-steps §11 | 未修 |
 | 债2 | P4.2 的三条新文案没进 21 份 Fluent 目录（回落英文） | next-steps §10 | 未补 |
@@ -159,3 +160,63 @@ P5.2（PDF ↔ SVG 栅格对比）的代码与语料证据在 p52 worktree 已�
 - 证据核对：`corpus-600dpi.tsv` 22 行（20 ok / 2 FAIL 有解释有对照）；`real-sheets-600dpi.tsv` **不存在**
   （README 声称存在，×）；两份 `raster_compare.rs` 哈希不同（主树 stray 为旧稿）。
 - 记录核对：p52 §13 有 `REAL_SHEET_NUMBERS` / `CLIPPY_RESULT` 两个未填占位符。
+
+## 6. 实施记录
+
+### 6.1 P8.1 + P8.2（2026-09-09 晚）
+
+- **主树 merge**：暂存的解决 + 工作树里没暂存的收尾（wgpu `buffers: &[Some(…)]` 适配、
+  `prepare_open_geometry` 三元组、`resolve_plot_job` / `with_stable_atlas` 的图集稳定性重试、8 份 locale 的
+  PID 文案、`Cargo.lock` 再生）一并提交为 `fb62909e`——测试绿的就是这个组合。
+  `tests/dwg_acadsharp_samples.rs` 里的 `probe_ac1015_clayer_tmp` 调试探针是别的会话的临时物，**没并进去**。
+- **P5.2 收尾**：rustfmt（两文件 0 diff）与 clippy `--lib --tests`（改动行 0 告警）实跑并把 §13 的两个
+  占位符换成事实；发现上一会话的真图证据跑还挂在后台，等它落盘（19:15）收下 `real-sheets-600dpi.tsv`。
+  两笔提交在 `p52-svg-raster`：`e749d7cf`（P5.2 主体）+ `b17fdb27`（真图证据，三张全 FAIL 如实记录）。
+- **合流**：`p52-svg-raster` 并回 main（`fc99218d`，自动合并零冲突）；主树过期 stray `raster_compare.rs`
+  删除；合流后 `cargo test --lib -- io::svg_export io::pdf_export app::automation io::paper_sizes
+  plot_destination_tests print_all_svg_tests` **88 过 / 0 败 / 4 忽略**（含例行栅格门真跑 322 s）。
+
+### 6.2 真图 FAIL 定性（2026-09-09 晚，`b45d4065`）
+
+对生像素逐点核对（方法与量测数字在 evidence README「real-sheet triage」节）：**三张都是判据的局限，
+不是导出缺陷**。SP02-05 / FF02-06 是 0.1 pt 发丝线撞上别的墨（poppler 把发丝线钉成整值一像素行、resvg 摊
+真实覆盖；光纸上位移窗解释得掉，贴着红管线 / 表格线解释不掉）；WS02-05 是合成豁免不认识彩色墨
+（标题蓝 `(0,38,128)`，`seam_ink`=96 按通道判，蓝的本通道 128 永远不合格）。三行 FAIL 挂注释留在证据里。
+**新债**：判据学会彩色墨（按最暗通道认墨，重证四个注入故障）或真图证据升 1200 dpi——单独一期。
+
+### 6.3 P8.4 G10 实施记录（2026-09-09）
+
+**形状**：`PlotRequest` 长出 `dialog_area: Option<String>`（`None` = 历史行为，其余入口都发 None）；
+出图对话框 commit 的 SVG 分支把 `d.area` 存进 `svg_export_dialog_area`（app 上的一格在途状态，
+`current_view_svg_job` 用 `take()` 消费——同一个 `Message::SvgExport` 入口因此分得开「对话框提交」与
+「EXPORTSVG 快捷命令」，后者永远拿不到区域，维持 Extents）；`resolve_plot_pages` 在 `layouts` 为空且带
+区域时按 **PDF commit 同款调度**取页（`Display` / `Extents` / `Limits` / `Window` / `View: 名` →
+`*_plot_job`，拒绝文案同一句 `Plot area is empty. Pick a larger window.`）；`"Layout"` 不进调度——它就是
+`direct_plot_params` 本来画的纸面。保存对话框取消时清掉在途区域（`SvgExportPath(None)`）。
+**没动 `direct_plot_params`**（菜单 Export PDF 与打印共用它，PDF 行为一位不变）。
+
+| 文件 | 内容 |
+|---|---|
+| `src/app/update/file.rs` | `PlotRequest.dialog_area` + 构造函数；`resolve_plot_pages` 的区域调度；`current_view_svg_job` 消费在途区域；commit 的 SVG 分支存区域；`svg_plot_area_tests` ×4 |
+| `src/app/mod.rs` | `svg_export_dialog_area: Option<String>` 字段 |
+| `src/app/update/mod.rs` | `SvgExportPath(None)` 清在途区域 |
+
+**出口条件对照**：对话框选 Window + SVG 目的地 → 出的是窗口不是 Extents（12 单位窗对 1010 单位 extents，
+比例差 >10× 被钉住）✓；EXPORTSVG 在对话框仍留着 Window 时照旧出 Extents（逐位同一比例）✓；取消保存
+对话框不留在途区域 ✓；空窗口拒绝且文案与 PDF 目的地同句（按 `t!` 比，本机中文局面下也对）✓；
+PDF 第一层护栏与全部既有用例见下方验证数字。
+
+**验证摘要**（2026-09-09 晚，提交前在最终字节上跑）：
+
+- `cargo test --lib -- io::svg_export io::pdf_export app::automation io::paper_sizes plot_destination_tests
+  print_all_svg_tests svg_plot_area_tests` → **92 过 / 0 败 / 4 忽略**（314.9 s，含例行 PDF↔SVG 栅格门真跑；
+  比 P8.2 合流后多的 4 条就是 `svg_plot_area_tests`）。PDF 第一层冻结对照在这一套里，**一位没动**。
+- `cargo check --lib --target wasm32-unknown-unknown` → Finished；5 条告警全是 `../iced/Cargo.toml` 的
+  lint 名写法弃用，与本期无关。
+- `cargo clippy --lib --tests` → 0 error；改动行 0 告警（`file.rs` / `app/mod.rs` / `update/mod.rs` 的新行
+  逐行过滤）。跑到这一步先撞上两条**既有**的 `approx_constant` 错误（deny-by-default，让 test target 根本
+  编不过 clippy）：`doc_api.rs` 测试里的 `0.7071`、`scene/mod.rs` 测试里的 `3.14159`——换成 `FRAC_1_SQRT_2` /
+  `PI`，**单独一笔提交**（`b8ae09ee`），不混进 G10。
+- `rustfmt --check` 对三个改动文件：新增行 **0 diff**；`file.rs` 另有 120 余处既有格式差异，沿用「只体检新代码」，
+  没顺手全文重排（那会把 diff 淹掉）。
+- 未做人手 GUI 点验（无窗口驱动的是状态与消息，同 P4.2 的挂账，随 P8.6 的 web 真机验证一起销）。
