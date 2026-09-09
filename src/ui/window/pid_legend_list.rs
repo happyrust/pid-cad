@@ -8,8 +8,8 @@
 //!
 //! Within a class the tagged symbols come first, in tag order, then the
 //! untagged ones top to bottom, left to right; the filter row under the title
-//! narrows the list to the tagged symbols or to the ones that should carry a
-//! tag and do not ([`PidLegendFilter`]).
+//! narrows the list to the tagged symbols or to the untagged ones
+//! ([`PidLegendFilter`]).
 //!
 //! The panel follows the active tab. A tab that has not run PIDLEGEND yet
 //! shows a hint instead of a list. A list whose drawing has moved on since it
@@ -30,9 +30,10 @@ pub enum PidLegendFilter {
     All,
     /// Symbols carrying a tag.
     Tagged,
-    /// Symbols of a class that takes a tag, carrying none -- the ones left to
-    /// chase. A class that never takes a tag (a flow arrow, a hydrant) is in
-    /// neither group: it shows under `All` only.
+    /// Symbols carrying none -- those of a class that takes a tag and did not
+    /// get one, and those of a class that never takes one (a flow arrow, a
+    /// hydrant) alike: every symbol is in one group or the other. The class
+    /// header's `位号 m/n` tells the two kinds apart.
     Untagged,
 }
 
@@ -42,7 +43,7 @@ impl PidLegendFilter {
         match self {
             PidLegendFilter::All => true,
             PidLegendFilter::Tagged => s.tag.is_some(),
-            PidLegendFilter::Untagged => s.wants_tag && s.tag.is_none(),
+            PidLegendFilter::Untagged => s.tag.is_none(),
         }
     }
 }
@@ -271,7 +272,7 @@ pub fn view(
         ))
         .padding([4, 6]),
     );
-    // The group filter: all / tagged / should carry a tag but does not.
+    // The group filter: all / tagged / untagged.
     let choice = |label: String, tip: &'static str, choose: PidLegendFilter| {
         let selected = filter == choose;
         let b = button(text(label).size(10))
@@ -301,7 +302,7 @@ pub fn view(
                 ),
                 choice(
                     format!("无位号 {untagged}"),
-                    "应带位号而没有配到的符号（不编号的类不算）",
+                    "没有位号的符号，含不编号的类；类名后的 位号 m/n 区分两者",
                     PidLegendFilter::Untagged,
                 ),
             ]
@@ -520,8 +521,8 @@ mod tests {
 
     /// Within a class the tagged symbols lead, in tag order, then the untagged
     /// ones as the sheet reads (top to bottom, left to right) -- whatever
-    /// order recognition found them in. The filters take one group each; a
-    /// symbol of a class that never takes a tag is in neither.
+    /// order recognition found them in. The filters take one group each, and
+    /// a symbol of a class that never takes a tag counts as untagged.
     #[test]
     fn rows_group_tagged_before_untagged_and_the_filters_take_one_group_each() {
         let found = [
@@ -552,8 +553,8 @@ mod tests {
         );
         assert_eq!(
             name(rows(&refs, PidLegendFilter::Untagged)),
-            ["(10, 30)", "(40, 30)", "(50, 10)"],
-            "the class that takes no tag is not 'untagged'"
+            ["(10, 30)", "(40, 30)", "(50, 10)", "(0, 0)"],
+            "a symbol of a class that takes no tag is untagged too"
         );
     }
 }
