@@ -1,0 +1,11 @@
+# reference: resvg 0.45.1 at 254 dpi on white; external PNGs as written by scripts/svg-compat.ps1; comparator: shift 1 px, value tol 2/255, tile 32 px, budget 8 px, conflation ink 96/255 within 2 px (excusal on the external side)
+sample	renderer	size_external	size_resvg	defect_px	worst_tile	failing_tiles	verdict
+real-FF02-06	chromium	8410×5940	8410×5940	270	(158, 124, 24)	6	FAIL
+real-FF02-06	inkscape	8410×5940	8410×5940	442	(214, 174, 30)	11	FAIL
+real-FF02-06	rsvg	8410×5940	8410×5940	442	(214, 174, 30)	11	FAIL
+real-SP02-05	chromium	8410×5940	8410×5940	1437	(53, 69, 44)	51	FAIL
+real-SP02-05	inkscape	8410×5940	8410×5940	5956	(53, 69, 43)	187	FAIL
+real-SP02-05	rsvg	8410×5940	8410×5940	2158	(53, 69, 43)	68	FAIL
+real-WS02-05	chromium	8410×5940	8410×5940	96	(220, 179, 25)	2	FAIL
+real-WS02-05	inkscape	8410×5940	8410×5940	242	(214, 174, 30)	7	FAIL
+real-WS02-05	rsvg	8410×5940	8410×5940	242	(214, 174, 30)	7	FAIL

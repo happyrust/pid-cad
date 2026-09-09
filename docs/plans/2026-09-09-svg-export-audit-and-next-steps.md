@@ -2,7 +2,9 @@
 
 > 日期：2026-09-09
 > 状态：Plannotator 批准（2026-09-09，无批注）；**P8.1 / P8.2 已实施**（§6.1，真图三行 FAIL 的定性见
-> §6.2——判据局限，非导出缺陷）、**P8.4 已实施**（§6.3）；剩 P8.3 / P8.5 / P8.6 与「判据学会彩色墨」一条新债（§6.2）。
+> §6.2——判据局限，非导出缺陷）、**P8.4 已实施**（§6.3）、**P8.3 已实施**（§6.4；merge_lines 的答案：
+> **只有 resvg 丢**，Chrome / Inkscape / librsvg 都画——拍板 3 落地为「就地记录、不升格」）；
+> 剩 P8.5 / P8.6 与「判据学会彩色墨 / 亚 2 px 覆盖」一条新债（§6.2、§6.4）。
 > 前置：`docs/plans/2026-09-07-dxf-to-svg-export.md`（v2，P0 / P1 / P2 / R1 / R3 第一轮已实施）、
 > `docs/plans/2026-09-08-svg-export-next-steps.md`（P4.1–P4.3 / P5.1 / P6.1（裁决 P6.2–P6.4 不做）/ P7 已实施；
 > **P5.2 已在 `../OpenCADStudio-p52` worktree 实施、未收尾**，记录在其 §13）。
@@ -54,14 +56,14 @@ P5.2（PDF ↔ SVG 栅格对比）的代码与语料证据在 p52 worktree 已�
 
 | # | 缺口 | 出处 | 状态 |
 |---|---|---|---|
-| P5.3 | 兼容性实测：rsvg-convert / Inkscape / Chromium 对 22 语料 + 3 真图 | next-steps §3 | 未动 |
+| P5.3 | 兼容性实测：rsvg-convert / Inkscape / Chromium 对 22 语料 + 3 真图 | next-steps §3 | **已实施**（P8.3，§6.4） |
 | G10 | 模型空间 SVG 不看出图区域（Window/Display/Limits/View，恒取 Extents） | next-steps §2/§10 | **已实施**（P8.4，§6.3） |
 | Q1 | web 多页（顺序 N 次下载 vs zip 打包），PRINTALL 的 SVG 在 web 上明确报不可用 | next-steps §6 | 待拍板 |
 | 债1 | `new_for_test` 用真实 `%APPDATA%\OpenCADStudio\settings.json`，走到 `save_config` 的测试会写用户配置（P4.3 踩过，已污染过一次 `plot.background`） | next-steps §11 | 未修 |
 | 债2 | P4.2 的三条新文案没进 21 份 Fluent 目录（回落英文） | next-steps §10 | 未补 |
 | 债3 | `PlotFlag::Stamp` 在 SVG 目的地下仍会翻转偏好（复选框已禁用，点不出来，低危） | next-steps §10 | 未拦 |
 | 债4 | web 真机 `trunk serve` 下载没人手验过（P4.1 出口条件挂账） | next-steps §8 | 未验 |
-| 线索 | merge_lines：resvg 新版是否已修；导出侧要不要裁掉页外墨（牵动两个门的字节与第一层冻结对照） | p52 §13 | 只记不做 |
+| 线索 | merge_lines：resvg 新版是否已修；导出侧要不要裁掉页外墨（牵动两个门的字节与第一层冻结对照） | p52 §13 | **P8.3 已答**（§6.4）：Chrome / Inkscape / librsvg 都画那块填充，只有 resvg 0.45.1 丢 → 导出侧裁页外墨**不升格**；resvg 升级时重跑 `-Only corpus` 复验 |
 | 线索 | 出图耗时 88–92% 在 `scene+pages`（场景层，与 SVG 无关） | next-steps §7 | 另开计划 |
 
 不做的清单沿用 v2 §5 与 next-steps §2（SVG 导入、图层 `<g>`、`<pattern>`/`<mask>`/渐变、`<text>` 图章、
@@ -149,6 +151,9 @@ P5.2（PDF ↔ SVG 栅格对比）的代码与语料证据在 p52 worktree 已�
 3. **merge_lines 后续**：若 P8.3 实测浏览器 / Inkscape 也丢那块填充（不是 resvg 一家的事），
    「导出侧裁掉页外墨」升格为正式一期（含冻结对照同步的完整仪式）；若只有 resvg 丢，
    就地记录、等 resvg 升级期再验。请提前给个倾向。
+   **→ P8.3 实测（§6.4）：只有 resvg 丢。** Chrome 152 / Inkscape 1.4.4 / librsvg 2.62.91 对最小对照
+   `merge-lines-minimal-drops.svg` 与整页语料都画出填充，与 poppler 一致；按上面第二支落地——就地记录，
+   不升格，resvg 升级期复验。
 4. **p52 worktree 的去留**：合流后退役删除，还是留作下一个隔离期的模板？
 
 ## 5. 本轮审核的验证摘要
@@ -220,3 +225,63 @@ PDF 第一层护栏与全部既有用例见下方验证数字。
 - `rustfmt --check` 对三个改动文件：新增行 **0 diff**；`file.rs` 另有 120 余处既有格式差异，沿用「只体检新代码」，
   没顺手全文重排（那会把 diff 淹掉）。
 - 未做人手 GUI 点验（无窗口驱动的是状态与消息，同 P4.2 的挂账，随 P8.6 的 web 真机验证一起销）。
+
+### 6.4 P8.3 兼容性实测记录（2026-09-09 晚）
+
+**形状**：`scripts/svg-compat.ps1`（Windows 本机，三步各可跳）——① 样本：`dump_the_corpus_for_a_human` 出 22 页
+语料 + 栅格证据目录里的 merge_lines 最小对照一对；三张真图（FF02-06 / SP02-05 / WS02-05）走 debug 二进制
+`--plot-svg --model --paper A1 --landscape --fit`（与栅格证据同一次出图）。② 渲染：Chrome / Edge headless
+`--screenshot`（device scale = dpi/96，截图裁回页面；**`--force-gpu-mem-available-mb=4096`**，不然 A1 @ 300 dpi
+第 6351 行以下整片白、不报错）、`inkscape.com --export-type=png --export-dpi`、librsvg 经 libvips / sharp
+（winget 没有 `rsvg-convert` 包；sharp 装在 `%LOCALAPPDATA%\ocs-svg-compat\node`，密度取 √(72×dpi) 抵消 libvips
+对 mm 页面的二次缩放）；版本进 `versions.txt`，缺的渲染器**留空列并注明**。③ 对比：新增 `#[ignore]` 用例
+`compare_external_renders`（`OCS_SVG_COMPAT_DIR` / `OCS_SVG_COMPAT_DPI`）用 P5.2 同一个比较器把每张外部 PNG 与
+resvg 同 dpi 渲染逐对比，写 `compat-<dpi>dpi.tsv` + diff 图，`--release` 跑。**都不进依赖树。**
+resvg 是参照只因为它是树里能跑的那一个；FAIL = 「有分歧、去看」，不是谁错的裁决。
+
+| 文件 | 内容 |
+|---|---|
+| `scripts/svg-compat.ps1` | 新，上述三步；`-Only corpus` / `-Only real`、`-Renderers`、`-Dpi`（600）/ `-RealDpi`（254）、`-SkipSamples` / `-SkipCompare` / `-NoInstall` / `-Force` |
+| `src/io/svg_export/tests.rs` | `compare_external_renders`（ignored；渲染器 × 样本 → tsv 一行 + diff 图） |
+| `docs/evidence/2026-09-09-svg-compat/` | README、`versions.txt`、`corpus-600dpi.tsv`、`real-sheets-254dpi.tsv` + `-structural.tsv`、`real-sheets-300dpi-superseded.tsv`、`calibration-150dpi.tsv`、8 张四引擎 4-up 对照图 |
+
+**结果**：
+
+- **语料 600 dpi**：24 样本 × 3 渲染器 = 72 对，**66 ok / 6 FAIL**；ok 的全部 0–1 缺陷像素（35 Mpx 一页），
+  含计划点名人工看的负 scale+clip+文字（01–04）、细虚线（05）、multiply+wipeout（13）、文字（17）、CTB（15–16）。
+  6 条 FAIL 全是 merge_lines 两页（语料页 + 最小对照 `drops`）× 三渲染器。
+- **merge_lines 的答案：只有 resvg 丢。** Chrome 152 / Inkscape 1.4.4 / librsvg 2.62.91 在
+  `merge-lines-minimal-drops.svg` 与整页语料上**都画出**那块 multiply 填充（与 resvg 的差 9119 / 9119 / 9214 px
+  正是填充面积），`renders` 变体三家 0 缺陷；与 poppler 一致。→ §4 拍板 3 落地为第二支：导出侧裁页外墨
+  **不升格**，就地记录，树里 resvg 升级时重跑 `scripts\svg-compat.ps1 -Only corpus` 复验。
+- **真图 254 dpi**（10 px/mm，A1 = 8410×5940，四引擎同尺寸）：9 对**按局部判据全 FAIL**（96–5956 缺陷 px，
+  最差瓦片 24–44 > 预算 8），但**结构性缺陷 0**——每个缺陷像素两侧 2 px 内都有墨，没有缺失 / 位移 / 变色
+  （逐对分类见 `real-sheets-254dpi-structural.tsv`）。成分：x = 507 mm 一根亚像素发丝线 resvg 50 % 覆盖 vs 其余
+  三家 61 %；SP 右侧材料表细表格线 75 % 覆盖的边行 resvg 63 vs Inkscape 60（一级之差，沿 380 mm 表格线积成
+  3798 px——Inkscape 计数偏高的全部原因）；Skia 超采样覆盖（39–47 vs 63）与笔画外淡边；红管线边行
+  (194,92,92) vs (159,95,95)；密排 2.5–3.5 mm 文字的字形笔画边缘。最差瓦片 4-up 四引擎几何一致。
+  **定性：判据局限（跨引擎 AA 覆盖策略在 ≤ 2 px 特征上不一致），非导出缺陷**；行保留 FAIL 加注，不调预算。
+- 校准记录留档：先跑的 **300 dpi** 真图三渲染器都在底边框线一行 ~300 瓦片 FAIL（Chromium 尺寸与 resvg 完全一致
+  也一样——横边落在分数像素行上，沿全长覆盖值不一致；Inkscape / librsvg 另把页面四舍五入成 9933 宽），254 dpi
+  下整行消失；**150 dpi** 全集里 0.75 pt 线 = 1.5 px，细线页（dash / ctb / colour / two_groups、cairo 两家的
+  pen_widths 08）全被 AA 量化绊倒，600 dpi 下同页全 0 → 不是导出的事。
+
+**出口条件对照**（§2 P8.3）：脚本 ✓（缺渲染器留空注明，不假绿）；版本进表头 ✓；重点样本人工看 ✓（600 dpi 三引擎
+0 缺陷 + 4-up 图）；merge_lines 最小对照喂给每个渲染器 ✓（resvg 一家）；evidence 一张表 + 重点 PNG 并列 ✓；
+偏差各开后续 ✓（README「Follow-ups」：merge_lines 随 resvg 升级复验；真图跨引擎 FAIL 并入 §6.2 那期「判据学会
+彩色墨」——扩成「彩色墨 / 亚 2 px 覆盖或 1200 dpi」，动阈值前先证注入故障仍被抓；导出侧无事可修）。
+
+**验证摘要**（2026-09-09 晚）：
+
+- `compare_external_renders`（release）：语料 600 dpi 72 对 → 303.7 s / 310.9 s 两次复跑同表；真图 254 dpi 9 对
+  → 57.6 s。对比跑在本用例的最终逻辑上；其后唯一改动是 rustfmt 对一行 `format!` 的换行（无语义变化）。
+- 真图缺陷结构性分类：临时 numpy 脚本（未入库）逐像素判「另一侧 2 px 内有无墨」→ 9 对 **0 结构性**。
+- `rustfmt --check --edition 2021 src/io/svg_export/tests.rs` → **整文件 0 diff**。
+- `cargo clippy --lib --tests` → **0 error**，Finished；`tests.rs` 整文件 0 命中（新用例所在的 1636–1745 行自然也是 0）；
+  其余 1104 条 lib 告警全是既有的，不在改动处。
+- `cargo test --lib -- io::svg_export io::pdf_export app::automation io::paper_sizes plot_destination_tests
+  print_all_svg_tests svg_plot_area_tests` → **92 过 / 0 败 / 5 忽略**（319.6 s，含例行 PDF↔SVG 栅格门真跑；
+  多出的 1 条忽略就是 `compare_external_renders`）。本期没动生产代码，只加了一条 ignored 用例；
+  跑它是守「每期护栏都要绿」的规矩。
+- 没有 Illustrator（按 v2 D1 口径「按版本实测，不承诺」，本机没有）；Edge 152 装了但脚本取到 Chrome 就用 Chrome，
+  两者同一 Blink，没有分列。

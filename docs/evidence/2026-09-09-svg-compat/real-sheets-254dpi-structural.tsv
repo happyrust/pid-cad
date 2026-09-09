@@ -1,0 +1,10 @@
+sample	renderer	defects	structural_ext_only	structural_ref_only	edge_residue	ext_min_channel_quartiles	ref_min_channel_quartiles
+real-FF02-06	chromium	270	0	0	270	97/130/172	127/127/191
+real-FF02-06	inkscape	442	0	0	442	102/169/238	127/191/255
+real-FF02-06	rsvg	442	0	0	442	102/169/238	127/191/255
+real-SP02-05	chromium	1437	0	0	1437	47/155/224	63/143/255
+real-SP02-05	inkscape	5956	0	0	5956	60/60/92	63/63/96
+real-SP02-05	rsvg	2158	0	0	2158	57/172/224	64/191/255
+real-WS02-05	chromium	96	0	0	96	201/217/243	191/191/255
+real-WS02-05	inkscape	242	0	0	242	201/238/238	191/255/255
+real-WS02-05	rsvg	242	0	0	242	201/238/238	191/255/255

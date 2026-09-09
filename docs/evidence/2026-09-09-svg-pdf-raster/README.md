@@ -69,6 +69,11 @@ The routine gate (`the_pdf_and_the_svg_rasterise_to_the_same_picture`)
 excuses merge_lines pages with a comment stating the same facts, exactly as
 it excuses the sub-pixel hairline pages.
 
+Cross-renderer check (P8.3, the same evening, `../2026-09-09-svg-compat/`):
+Chrome 152, Inkscape 1.4.4 and librsvg 2.62.91 all paint the fill in
+`merge-lines-minimal-drops.svg` and in the full corpus page. The drop is
+resvg 0.45.1's alone.
+
 ## The real-sheet triage (2026-09-09, same evening)
 
 All three FAILs were taken apart against raw renders (a temporary local

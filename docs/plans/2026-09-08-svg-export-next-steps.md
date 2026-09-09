@@ -3,7 +3,9 @@
 > 日期：2026-09-08
 > 状态：§6 五条已于 2026-09-08 拍板（全按建议）；**P4.1 已实施**（§8）、**P5.1 已实施**（§9）、**P6.1 已量**（§7，
 > 结论：P6.2–P6.4 不做）、**P4.2 已实施**（§10）、**P4.3 已实施**（§11）、**P7 已实施**（§12）、**P5.2 已实施**（§13；真图栅格 FAIL **已定性=判据局限，非导出缺陷**，见 evidence README 的 triage 节）、**G10 已实施**（2026-09-09，`PlotRequest.dialog_area`，记录在
-> `docs/plans/2026-09-09-svg-export-audit-and-next-steps.md` §6.3）；剩 P5.3。
+> `docs/plans/2026-09-09-svg-export-audit-and-next-steps.md` §6.3）、**P5.3 已实施**（2026-09-09，
+> `scripts/svg-compat.ps1` + `compare_external_renders`，记录在 09-09 计划 §6.4；merge_lines 只有 resvg 丢）。
+> 本文件的分期全部收口。
 > 前置：`docs/plans/2026-09-07-dxf-to-svg-export.md`（v2）——P0 / P1 / P2（web 除外）/ R3 第一轮 / R1 已实施。
 > 本文件只写「还没做的」与「怎么做」；已实施部分的记录仍在 v2 的 §11–§15，不重复。
 
@@ -116,7 +118,7 @@ v2 计划的 §11–§15 与代码逐条对得上。
 - 语料：22 例 + 3 张真图（一张 FF、一张 SP、一张 WS）。
 - 出口：阈值同时「不误报」与「不漏报」；结果与差异图进 `docs/evidence/2026-xx-xx-svg-pdf-raster/`。
 
-**P5.3 兼容性实测（G8）**
+**P5.3 兼容性实测（G8）** — ✓ 已实施（2026-09-09），记录在 09-09 计划 §6.4，证据在 `docs/evidence/2026-09-09-svg-compat/`
 
 - 脚本（`scripts/svg-compat.ps1` / `.sh`）：把 22 例语料 + 3 张真图分别喂给 resvg（已有）、`rsvg-convert`（librsvg）、
   `inkscape --export-type=png`、Chromium headless（若机器上有）；输出 PNG 并列进 evidence，人工看重点样本：

@@ -1635,6 +1635,109 @@ fn preview_written_svgs() {
     }
 }
 
+// P5.3 / P8.3, the compatibility half of the third layer: the pages this
+// crate wrote, rendered by the renderers people actually open SVGs with,
+// judged against resvg (the tree's own rasteriser, itself held to poppler
+// by P5.2) with the same comparator. `scripts/svg-compat.ps1` writes the
+// external renderings as `<stem>.<renderer>.png` beside each `<stem>.svg`
+// and then runs this: `OCS_SVG_COMPAT_DIR=<dir> [OCS_SVG_COMPAT_DPI=150]
+// cargo test --lib compare_external_renders -- --ignored --nocapture`.
+// Output: `<dir>/compat-<dpi>dpi.tsv` and a diff map per disagreeing pair
+// under `<dir>/diff/`. A FAIL here is a disagreement to look at, not a
+// verdict on who is wrong — resvg is the reference because it is the one
+// engine the tree can run, and the merge_lines pages are the standing case
+// where it is the one that is wrong.
+#[test]
+#[ignore = "compares external renderings named by OCS_SVG_COMPAT_DIR against resvg"]
+fn compare_external_renders() {
+    let Ok(dir) = std::env::var("OCS_SVG_COMPAT_DIR") else {
+        println!("set OCS_SVG_COMPAT_DIR to a directory of <stem>.svg + <stem>.<renderer>.png");
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let dpi: f32 = std::env::var("OCS_SVG_COMPAT_DPI")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(150.0);
+    let cfg = crate::io::raster_compare::RasterCmp::default();
+    let diff_dir = dir.join("diff");
+    std::fs::create_dir_all(&diff_dir).unwrap();
+    let mut svgs: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| {
+            let path = entry.unwrap().path();
+            (path.extension().is_some_and(|e| e == "svg")).then_some(path)
+        })
+        .collect();
+    svgs.sort();
+    let mut rows = vec![format!(
+        "# reference: resvg 0.45.1 at {dpi} dpi on white; external PNGs as written by \
+         scripts/svg-compat.ps1; comparator: shift {} px, value tol {}/255, tile {} px, \
+         budget {} px, conflation ink {}/255 within {} px (excusal on the external side)",
+        cfg.shift_px, cfg.value_tol, cfg.tile_px, cfg.tile_budget, cfg.seam_ink, cfg.seam_reach_px,
+    )];
+    rows.push("sample\trenderer\tsize_external\tsize_resvg\tdefect_px\tworst_tile\tfailing_tiles\tverdict".into());
+    let mut compared = 0;
+    for svg_path in &svgs {
+        let stem = svg_path.file_stem().unwrap().to_string_lossy().into_owned();
+        let svg = std::fs::read_to_string(svg_path).unwrap();
+        let reference = render(&svg, dpi / 25.4);
+        let mut externals: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                let name = path.file_name()?.to_string_lossy().into_owned();
+                let rest = name.strip_prefix(&format!("{stem}."))?;
+                let renderer = rest.strip_suffix(".png")?;
+                (!renderer.is_empty() && !renderer.contains('.')).then_some(path)
+            })
+            .collect();
+        externals.sort();
+        for png_path in externals {
+            let name = png_path.file_name().unwrap().to_string_lossy().into_owned();
+            let renderer = name[stem.len() + 1..name.len() - 4].to_string();
+            let bytes = std::fs::read(&png_path).unwrap();
+            let external = match tiny_skia::Pixmap::decode_png(&bytes) {
+                Ok(pixmap) => pixmap,
+                Err(e) => {
+                    rows.push(format!(
+                        "{stem}\t{renderer}\t?\t{}×{}\t\t\t\tUNREADABLE: {e}",
+                        reference.width(),
+                        reference.height()
+                    ));
+                    continue;
+                }
+            };
+            let size_external = format!("{}×{}", external.width(), external.height());
+            let size_resvg = format!("{}×{}", reference.width(), reference.height());
+            match crate::io::raster_compare::compare(&external, &reference, &cfg) {
+                Ok(verdict) => {
+                    rows.push(format!(
+                        "{stem}\t{renderer}\t{size_external}\t{size_resvg}\t{}\t{:?}\t{}\t{}",
+                        verdict.defects_total,
+                        verdict.worst,
+                        verdict.failing_tiles(),
+                        if verdict.ok() { "ok" } else { "FAIL" },
+                    ));
+                    if verdict.defects_total > 0 {
+                        crate::io::raster_compare::diff_map(&external, &verdict)
+                            .save_png(diff_dir.join(format!("diff-{stem}.{renderer}.png")))
+                            .unwrap();
+                    }
+                    compared += 1;
+                }
+                Err(e) => rows.push(format!(
+                    "{stem}\t{renderer}\t{size_external}\t{size_resvg}\t\t\t\tSIZE: {e}"
+                )),
+            }
+            eprintln!("{}", rows.last().unwrap());
+        }
+    }
+    let table = dir.join(format!("compat-{dpi}dpi.tsv"));
+    std::fs::write(&table, rows.join("\n") + "\n").unwrap();
+    println!("compared {compared} pairs; wrote {}", table.display());
+}
+
 #[test]
 fn a_hundred_millimetre_line_is_a_hundred_millimetres_from_the_top() {
     // The one test that would catch a wrong unit, a wrong page origin or a
