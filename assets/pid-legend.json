@@ -70,7 +70,7 @@
     "min_count": 2,
     "assembly_mm": 6.0,
     "split_min_strokes": 2,
-    "recover_min_runs": 2,
+    "recover_min_runs": 1,
     "dictionary": {
       "f510fd60": { "class": "flow-arrow", "label": "流向/接图箭头", "color": [120, 140, 180], "tag": { "shape": "*DWG-*", "radius_mm": 15.0, "report_orphans": false } },
       "38fb58d8": { "class": "flow-arrow", "label": "流向/接图箭头", "color": [120, 140, 180], "tag": { "shape": "*DWG-*", "radius_mm": 15.0, "report_orphans": false } },
@@ -108,6 +108,7 @@
       "0d5c9aac": { "class": "flame-arrester", "label": "阻火器", "color": [200, 80, 200], "tag": { "shape": "FA9999*", "radius_mm": 10.0 } },
       "55f0d3a6": { "class": "breather-valve", "label": "呼吸阀", "color": [120, 200, 120], "tag": { "shape": "CVV9999*", "radius_mm": 10.0 } },
       "f672ca3c": { "class": "vent-outlet", "label": "放空口", "color": [0, 170, 230] },
+      "b6f54271": { "class": "loading-arm", "label": "鹤管总成", "color": [220, 120, 60], "tag": { "shape": "LA-9999*" } },
       "7a6bfa0f": { "class": "eccentric-reducer", "label": "偏心大小头", "color": [150, 110, 60] },
       "2bbe9e32": { "class": "flame-arrester", "label": "阻火器", "color": [200, 80, 200], "tag": { "shape": "FA9999*", "radius_mm": 10.0 } },
       "b982f10d": { "class": "flow-indicator", "label": "流量指示", "color": [170, 0, 255], "tag": { "shape": "FI9999*", "radius_mm": 10.0 } },

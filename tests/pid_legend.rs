@@ -291,6 +291,77 @@ fn unclaimed_lettering_is_sorted_into_ranges_duplicates_and_orphans() {
     );
 }
 
+/// A column of loading arms the way the loading-island sheets place them
+/// (SP02-07's left column, to the millimetre): the `11111` block draws its
+/// 27 x 5.5 mm body two metres from its base point, the arms stand 9.5 mm
+/// apart and each tag is lettered under its own arm's body, starting at the
+/// body's left edge. Measured from the body's middle, every tag is nearer
+/// the arm *below* the one it names (13 mm against 14), so nearest-first
+/// shifts the whole column by one: the top arm gets nothing and the bottom
+/// tag, 23 mm from the only arm it can reach, is an orphan. Pairing as many
+/// as possible, then shortest, names all three.
+#[test]
+fn a_column_of_loading_arms_lettered_under_their_bodies_is_paired_arm_by_arm() {
+    let mut doc = CadDocument::new();
+    doc.add_entity(line(0.0, 0.0, 420.0, 0.0)).unwrap();
+    doc.add_entity(line(0.0, 0.0, 0.0, 297.0)).unwrap();
+    define_block(
+        &mut doc,
+        "11111",
+        vec![
+            line(2000.0, 2000.0, 2027.15, 2000.0),
+            line(2027.15, 2000.0, 2027.15, 2005.52),
+            line(2027.15, 2005.52, 2000.0, 2005.52),
+            line(2000.0, 2005.52, 2000.0, 2000.0),
+            line(2000.0, 2000.0, 2027.15, 2005.52),
+        ],
+    );
+    // Bodies at x 122.67..149.82, y from 245.94, 255.03, 265.04.
+    for y in [245.94, 255.03, 265.04] {
+        doc.add_entity(insert("11111", 122.67 - 2000.0, y - 2000.0, "0"))
+            .unwrap();
+    }
+    doc.add_entity(text("LA-0304", 114.09, 242.11)).unwrap();
+    doc.add_entity(text("LA-0303", 123.55, 251.83)).unwrap();
+    doc.add_entity(text("LA-0320", 123.61, 261.47)).unwrap();
+
+    let recognition = pid_legend::recognise(&doc, &Rules::builtin());
+    assert_eq!(recognition.units_per_mm, 1.0);
+    let mut arms: Vec<&pid_legend::Recognized> = recognition
+        .symbols
+        .iter()
+        .filter(|s| s.class == "loading-arm")
+        .collect();
+    arms.sort_by(|a, b| a.at.1.total_cmp(&b.at.1));
+    assert_eq!(arms.len(), 3);
+    for (arm, tag, mm) in [
+        (arms[0], "LA-0304", 23.1),
+        (arms[1], "LA-0303", 14.0),
+        (arms[2], "LA-0320", 14.1),
+    ] {
+        assert!(
+            (arm.at.0 - 136.245).abs() < 0.01,
+            "measured from the body, not the base point: {:?}",
+            arm.at
+        );
+        assert_eq!(arm.tag.as_deref(), Some(tag), "arm at {:?}", arm.at);
+        let d = arm.tag_distance_mm.unwrap();
+        assert!((d - mm).abs() < 0.1, "{tag}: {d:.2} mm");
+    }
+    assert!(
+        recognition.orphan_tags.is_empty(),
+        "{:?}",
+        recognition.orphan_tags
+    );
+    let lines = pid_legend::report(&recognition);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("鹤管总成 (loading-arm) x3  tagged 3/3")),
+        "{lines:?}"
+    );
+}
+
 #[test]
 fn legend_entities_go_on_coloured_class_layers_and_come_off_again() {
     let mut doc = synthetic_sheet();
@@ -1915,6 +1986,11 @@ fn cpecc_sp02_10_joined_symbols_come_apart_and_are_named() {
         // body of pipe-length strokes, found for FI0326 / FI0327 by the
         // second pass.
         ("flow-indicator", 2, 2),
+        // The two unloading arms over BV0326 / BV0327: not the `11111` block
+        // of the other islands but a curved polyline with a 3.9 x 1.4 mm
+        // bracket at its end, two strokes of which are pipe-length -- a
+        // second-pass shape the dictionary names.
+        ("loading-arm", 2, 2),
     ] {
         assert_eq!(count(&recognition, class), expected, "{class}");
         assert_eq!(tags_of(&recognition, class).len(), tagged, "{class} tagged");
@@ -2049,10 +2125,114 @@ fn cpecc_loading_island_sheets_have_no_unnamed_shape_left() {
     ran.finish("cpecc_loading_island_sheets_have_no_unnamed_shape_left");
 }
 
+/// Every loading arm on the five island sheets carries its own tag. The arms
+/// stand in columns 9.5 mm apart with each tag lettered under its own arm,
+/// which nearest-first read one arm down (top arm unnamed, bottom tag an
+/// orphan: 7 arms and 7 tags over SP02-06..09); pairing as many as possible,
+/// then shortest, reads each column top to bottom as the sheet numbers it.
+/// SP02-10's two unloading arms are not the `11111` block but loose strokes
+/// -- a curved polyline into a 3.9 x 1.4 mm bracket -- which the second pass
+/// brings back and the dictionary names (`b6f54271`).
+#[test]
+fn cpecc_every_loading_arm_carries_its_own_tag() {
+    let rules = Rules::builtin();
+    let mut ran = Ran::new();
+    // (file, columns left to right, each top to bottom, drawn as)
+    for (file, columns, drawn_as) in [
+        (
+            "DWG-0100SP02-06 汽车装卸岛(一)工艺自控流程图.dxf",
+            &[&["LA-0319", "LA-0301", "LA-0302"][..]][..],
+            "11111",
+        ),
+        (
+            "DWG-0100SP02-07 汽车装卸岛(二)工艺自控流程图.dxf",
+            &[
+                &["LA-0320", "LA-0303", "LA-0304"][..],
+                &["LA-0321", "LA-0305", "LA-0306", "LA-0307"][..],
+            ][..],
+            "11111",
+        ),
+        (
+            "DWG-0100SP02-08 汽车装卸岛(三)工艺自控流程图.dxf",
+            &[
+                &["LA-0322", "LA-0308", "LA-0309", "LA-0310"][..],
+                &["LA-0323", "LA-0311", "LA-0312", "LA-0313"][..],
+            ][..],
+            "11111",
+        ),
+        (
+            "DWG-0100SP02-09 汽车装卸岛(四)工艺自控流程图.dxf",
+            &[
+                &["LA-0324", "LA-0314", "LA-0315", "LA-0316"][..],
+                &["LA-0325", "LA-0317", "LA-0318"][..],
+            ][..],
+            "11111",
+        ),
+        (
+            "DWG-0100SP02-10 汽车装卸岛(五)工艺自控流程图.dxf",
+            &[&["LA-0326"][..], &["LA-0327"][..]][..],
+            "shape b6f54271 (4 strokes, second pass)",
+        ),
+    ] {
+        let Some(doc) = ran.sheet(file) else {
+            continue;
+        };
+        let recognition = pid_legend::recognise(&doc, &rules);
+        let mut arms: Vec<&pid_legend::Recognized> = recognition
+            .symbols
+            .iter()
+            .filter(|s| s.class == "loading-arm")
+            .collect();
+        let expected: usize = columns.iter().map(|c| c.len()).sum();
+        assert_eq!(arms.len(), expected, "{file}: loading arms");
+        for arm in &arms {
+            assert_eq!(arm.source, drawn_as, "{file}: {:?}", arm.at);
+            assert!(
+                arm.tag_distance_mm.is_some_and(|d| d <= 25.0),
+                "{file}: arm at {:?} tagged {:?} at {:?} mm",
+                arm.at,
+                arm.tag,
+                arm.tag_distance_mm
+            );
+        }
+        // Columns: arms sorted by x, a new column wherever x jumps; each
+        // read top to bottom.
+        arms.sort_by(|a, b| a.at.0.total_cmp(&b.at.0));
+        let mut by_column: Vec<Vec<&pid_legend::Recognized>> = Vec::new();
+        for &arm in &arms {
+            match by_column.last_mut() {
+                Some(column) if arm.at.0 - column[0].at.0 <= 20.0 => column.push(arm),
+                _ => by_column.push(vec![arm]),
+            }
+        }
+        let read: Vec<Vec<&str>> = by_column
+            .into_iter()
+            .map(|mut column| {
+                column.sort_by(|a, b| b.at.1.total_cmp(&a.at.1));
+                column
+                    .iter()
+                    .map(|s| s.tag.as_deref().unwrap_or("-"))
+                    .collect()
+            })
+            .collect();
+        let expected: Vec<Vec<&str>> = columns.iter().map(|c| c.to_vec()).collect();
+        assert_eq!(read, expected, "{file}");
+        assert!(
+            !recognition.orphan_tags.contains_key("鹤管总成"),
+            "{file}: LA tags nobody claimed: {:?}",
+            recognition.orphan_tags.get("鹤管总成")
+        );
+    }
+    ran.finish("cpecc_every_loading_arm_carries_its_own_tag");
+}
+
 /// On the six loading-island sheets the 34 pieces of unclaimed tag-shaped
-/// lettering are 19 range annotations, 6 table rows and 9 loading-arm tags
-/// -- and only the last are reported as orphans. Every one of the 34 is
-/// still in the report, on the line that says what it is.
+/// lettering were 19 range annotations, 6 table rows and 9 loading-arm tags;
+/// with every loading arm now carrying its own tag (see
+/// `cpecc_every_loading_arm_carries_its_own_tag`) the 9 are claimed, every
+/// range is complete, and no sheet reports an orphan. The 25 pieces that
+/// remain unclaimed are still in the report, on the line that says what
+/// they are.
 #[test]
 fn cpecc_unclaimed_lettering_on_the_loading_islands_is_sorted() {
     let rules = Rules::builtin();
@@ -2062,48 +2242,42 @@ fn cpecc_unclaimed_lettering_on_the_loading_islands_is_sorted() {
     for (file, ranges, duplicates, orphans) in [
         (
             "DWG-0100SP02-05 发油泵棚(二)工艺自控流程图.dxf",
-            vec![("电动阀", 8, vec![])],
+            vec![("电动阀", 8, Vec::<&str>::new())],
             vec![("电动阀", vec!["XV-0407C", "XV-0407F", "XV-0408E"])],
-            vec![],
+            Vec::<(&str, Vec<&str>)>::new(),
         ),
         (
             "DWG-0100SP02-06 汽车装卸岛(一)工艺自控流程图.dxf",
-            vec![("鹤管总成", 1, vec!["LA-0301～0302"])],
+            vec![("鹤管总成", 1, vec![])],
             vec![
                 ("电动阀", vec!["XV-0301", "XV-0302"]),
                 ("鹤管总成", vec!["LA-0319"]),
             ],
-            vec![("鹤管总成", vec!["LA-0302"])],
+            vec![],
         ),
         (
             "DWG-0100SP02-07 汽车装卸岛(二)工艺自控流程图.dxf",
-            vec![
-                ("电动阀", 2, vec![]),
-                ("鹤管总成", 2, vec!["LA-0303～0307"]),
-            ],
+            vec![("电动阀", 2, vec![]), ("鹤管总成", 2, vec![])],
             vec![],
-            vec![("鹤管总成", vec!["LA-0304", "LA-0306"])],
+            vec![],
         ),
         (
             "DWG-0100SP02-08 汽车装卸岛(三)工艺自控流程图.dxf",
-            vec![
-                ("电动阀", 1, vec![]),
-                ("鹤管总成", 2, vec!["LA-0308～0313"]),
-            ],
+            vec![("电动阀", 1, vec![]), ("鹤管总成", 2, vec![])],
             vec![],
-            vec![("鹤管总成", vec!["LA-0310", "LA-0313"])],
+            vec![],
         ),
         (
             "DWG-0100SP02-09 汽车装卸岛(四)工艺自控流程图.dxf",
-            vec![("鹤管总成", 2, vec!["LA-0314～0318"])],
+            vec![("鹤管总成", 2, vec![])],
             vec![],
-            vec![("鹤管总成", vec!["LA-0316", "LA-0318"])],
+            vec![],
         ),
         (
             "DWG-0100SP02-10 汽车装卸岛(五)工艺自控流程图.dxf",
-            vec![("鹤管总成", 1, vec!["LA-0326～0327"])],
+            vec![("鹤管总成", 1, vec![])],
             vec![],
-            vec![("鹤管总成", vec!["LA-0326", "LA-0327"])],
+            vec![],
         ),
     ] {
         let Some(doc) = ran.sheet(file) else {

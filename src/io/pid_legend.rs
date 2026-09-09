@@ -21,11 +21,16 @@
 //! the id in the report, so a person can name it with one line of JSON.
 //!
 //! Tags are paired one-to-one: every symbol class names the shape of tag it
-//! takes (`BUV-9999` for a butterfly valve, the nearest `XV` bubble for a
-//! motorised valve), candidates within `radius_mm` are ranked by distance
-//! across the whole sheet, and the closest free pair wins. That is what
-//! resolves two valves 9 mm apart both having two `BUV-` tags within reach:
-//! each gets the one it is nearer to, and a tag is never handed out twice.
+//! takes (`BUV-9999` for a butterfly valve, an `XV` bubble for a motorised
+//! valve), the candidates within `radius_mm` are gathered across the whole
+//! sheet, and of them as many pairs are made as the candidates allow and, of
+//! such pairings, the one with the least total distance ([`match_pairs`]).
+//! That is what resolves two valves 9 mm apart both having two `BUV-` tags
+//! within reach -- each gets the one it is nearer to, a tag is never handed
+//! out twice -- and also a column of loading arms whose tags are each
+//! lettered under their own arm and so nearer the middle of the next one:
+//! nearest-first would shift the whole column by one, leaving the top arm
+//! unnamed and the bottom tag an orphan.
 //!
 //! The result is drawn as real entities -- a closed polyline rectangle and a
 //! one-line label per symbol -- on one layer per class, `PID-LEGEND-<CLASS>`,
@@ -115,8 +120,8 @@ pub struct TagRule {
     /// Read the tag from the lettering inside the symbol (circles): a line of
     /// capitals and a line of digits compose as `XV-3201`.
     pub inner: bool,
-    /// Take the tag of the nearest recognised bubble whose function letters
-    /// are these (`XV` for a motorised valve).
+    /// Take the tag of a recognised bubble whose function letters are these
+    /// (`XV` for a motorised valve), paired one-to-one like lettering.
     pub bubble: Option<String>,
     /// Search radius for this class, paper mm; absent = `Rules::radius_mm`.
     pub radius_mm: Option<f64>,
@@ -1038,12 +1043,18 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
         }
     }
 
-    // ── tags paired from outside: nearest free pair first, one-to-one
-    enum Key {
-        Text(usize),
-        Symbol(usize),
-    }
-    let mut pairs: Vec<(f64, usize, Key)> = Vec::new();
+    // ── tags paired from outside, one-to-one: as many pairs as the
+    // candidates allow and, of those pairings, the shortest (`match_pairs`,
+    // as the exploded family). Nearest-first is not enough here either: the
+    // loading-island sheets letter a loading arm's tag under its body, and a
+    // column of arms 9.5 mm apart has every tag nearer the middle of the arm
+    // *below* the one it names -- the whole column shifted by one, the top
+    // arm unnamed and the bottom tag an orphan, though pairing them all is
+    // possible. What a symbol takes is a piece of lettering or, for a
+    // `bubble` rule, a recognised bubble; both are keyed on one index space
+    // so that neither is handed out twice.
+    let bubble_key = |j: usize| lettering.len() + j;
+    let mut candidates: Vec<(f64, usize, usize)> = Vec::new(); // (units, key, symbol)
     for (i, (symbol, rule)) in symbols.iter().zip(&tag_rules).enumerate() {
         if rule.inner || symbol.tag.is_some() {
             continue;
@@ -1057,7 +1068,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
                 {
                     let d = (other.at.0 - symbol.at.0).hypot(other.at.1 - symbol.at.1);
                     if d <= reach * BUBBLE_RADIUS_FACTOR {
-                        pairs.push((d, i, Key::Symbol(j)));
+                        candidates.push((d, bubble_key(j), i));
                     }
                 }
             }
@@ -1066,33 +1077,22 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
                 if !taken_text[k] && shape_matches(shape, &l.value) {
                     let d = (l.at.0 - symbol.at.0).hypot(l.at.1 - symbol.at.1);
                     if d <= reach {
-                        pairs.push((d, i, Key::Text(k)));
+                        candidates.push((d, k, i));
                     }
                 }
             }
         }
     }
-    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut taken_symbol = vec![false; symbols.len()];
-    for (d, i, key) in pairs {
-        if symbols[i].tag.is_some() {
-            continue;
-        }
-        let tag = match key {
-            Key::Text(k) => {
-                if taken_text[k] {
-                    continue;
-                }
-                taken_text[k] = true;
-                lettering[k].value.clone()
-            }
-            Key::Symbol(j) => {
-                if taken_symbol[j] {
-                    continue;
-                }
-                taken_symbol[j] = true;
-                symbols[j].tag.clone().unwrap_or_default()
-            }
+    for e in match_pairs(&candidates) {
+        let (d, key, i) = candidates[e];
+        let tag = if key < lettering.len() {
+            taken_text[key] = true;
+            lettering[key].value.clone()
+        } else {
+            symbols[key - lettering.len()]
+                .tag
+                .clone()
+                .unwrap_or_default()
         };
         symbols[i].tag = Some(tag);
         symbols[i].tag_distance_mm = Some(d / upm);
@@ -3185,6 +3185,17 @@ mod tests {
         assert!(rules.circle_rule(1.12, &[]).is_none());
         assert!(rules.shapes.is_some(), "exploded family is configured");
         assert!(!rules.tag_classes.is_empty());
+        // The loading arm both ways the sheets draw it: the `11111` block with
+        // its tag up to 25 mm from the body, and SP02-10's loose strokes,
+        // whose bracket has one pipe-length stroke the second pass brings
+        // back -- so one framed run is enough for a second-pass candidate.
+        assert_eq!(rules.blocks["11111"].tag.shape.as_deref(), Some("LA-9999*"));
+        assert_eq!(rules.blocks["11111"].tag.radius_mm, Some(25.0));
+        let shapes = rules.shapes.as_ref().unwrap();
+        assert_eq!(shapes.recover_min_runs, 1);
+        let arm = &shapes.dictionary["b6f54271"];
+        assert_eq!(arm.class, "loading-arm");
+        assert_eq!(arm.tag.shape.as_deref(), Some("LA-9999*"));
         assert_eq!(
             rules.blocks["$Standard$00000144"].port,
             Some(PortRule::StemEnd),
