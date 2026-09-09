@@ -435,6 +435,7 @@ impl OpenCADStudio {
             snap_angle_deg: self.snap_angle_deg,
             otrack: self.snapper.otrack_enabled,
             default_assoc_prompted: self.default_assoc_prompted,
+            donation_prompt_version: self.donation_prompt_version.clone(),
             disabled_plugins: {
                 let mut v: Vec<String> = self.disabled_plugins.iter().cloned().collect();
                 v.sort();
@@ -497,6 +498,7 @@ impl OpenCADStudio {
         // open / tab switch), not app-global, so they are not applied here.
         self.snapper.otrack_enabled = s.otrack;
         self.default_assoc_prompted = s.default_assoc_prompted;
+        self.donation_prompt_version = s.donation_prompt_version.clone();
         self.disabled_plugins = s.disabled_plugins.iter().cloned().collect();
         self.plugin_repos = s.plugin_repos.clone();
         self.command_line.literal_spaces = s.literal_spaces;
@@ -1828,19 +1830,14 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         let Some(pending) = self.pending_web_thumbnail_save.take() else {
             return Task::none();
         };
-        iced::window::latest()
-            .then(|window| match window {
-                Some(window) => iced::window::screenshot(window).map(Some),
-                None => Task::done(None),
-            })
-            .map(move |screenshot| Message::WebSaveScreenshot {
-                tab_id: pending.tab_id,
-                filename: pending.filename.clone(),
-                ext: pending.ext.clone(),
-                version: pending.version,
-                bounds: Some(pending.bounds),
-                screenshot,
-            })
+        Task::done(Message::WebSaveScreenshot {
+            tab_id: pending.tab_id,
+            filename: pending.filename,
+            ext: pending.ext,
+            version: pending.version,
+            bounds: Some(pending.bounds),
+            screenshot: crate::sys::capture_canvas(),
+        })
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2730,7 +2727,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     let pick = Task::perform(
                         async move {
                             let mut dlg = crate::sys::file_dialog()
-                                .set_title("Save Drawing As")
+                                .set_title(crate::t!("Save Drawing As").as_ref())
                                 .set_file_name(default_name)
                                 .add_filter(filter_label, &[filter_ext]);
                             if let Some(dir) = seed_dir {
@@ -3090,8 +3087,8 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     plot_style.as_ref(),
                     render_options,
                 )
-                .map(|_| format!("Exported: {}", worker_path.display()))
-                .map_err(|e| format!("Export failed: {e}"))
+                .map(|_| crate::tf!("Exported: {}", worker_path.display()).into_owned())
+                .map_err(|e| crate::tf!("Export failed: {e}").into_owned())
         };
         self.run_plot_work(self.plot_dialog.background, false, work)
     }
@@ -3134,12 +3131,12 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     plot_style.as_ref(),
                     render_options,
                 )
-                .map(|_| {format!(
+                .map(|_| {crate::tf!(
                             "Plotted window to {}",
                         worker_path
                             .file_name().unwrap_or_default().to_string_lossy()
-                        )
-                }).map_err(|e| format!("Plot failed: {e}"))
+                        ).into_owned()
+                }).map_err(|e| crate::tf!("Plot failed: {e}").into_owned())
         };
         self.run_plot_work(self.plot_dialog.background, false, work)
     }
@@ -3227,7 +3224,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 let page_setup = self.tabs[i]
                     .scene
                     .plot_settings_for(&name)
-                    .ok_or_else(|| format!("Layout '{name}' has no page setup."))?;
+                    .ok_or_else(|| crate::tf!("Layout '{name}' has no page setup.").into_owned())?;
                 {
                     let scene = &mut self.tabs[i].scene;
                     scene.current_layout = name.clone();
@@ -3248,10 +3245,10 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     self.tabs[i].scene.restore_saved_camera();
                 }
                 if dialog.style_missing && dialog.apply_plot_styles {
-                    return Err(format!(
+                    return Err(crate::tf!(
                         "Layout '{name}' plot style table '{}' is not loaded.",
                         dialog.style_name
-                    ));
+                    ).into_owned());
                 }
                 let plot_style = self.dialog_plot_style(&dialog);
                 let params = match dialog.area.as_str() {
@@ -3291,7 +3288,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                         rotation_deg,
                         scale,
                         clip,
-                    ) = params.ok_or_else(|| format!("Layout '{name}' plot area is empty."))?;
+                    ) = params.ok_or_else(|| crate::tf!("Layout '{name}' plot area is empty.").into_owned())?;
                     (
                         std::sync::Arc::new(wires),
                         hatches,
@@ -3361,12 +3358,19 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
     /// of laying the drawing out, leaving the quads laid out before the growth
     /// pointing at tiles that no longer exist. Plotted, those glyphs would be
     /// missing (R1). When the check finds any, the drawing is laid out once
-    /// more against the atlas as it now stands — it holds every glyph by then,
-    /// so it will not grow again — and the snapshot is taken afresh.
+    /// more against the atlas as it now stands and the snapshot is taken
+    /// afresh. One relayout settles the single-document case — the atlas holds
+    /// every glyph by then, so laying the same text out cannot grow it again —
+    /// but the atlas is process-wide: another document (or a parallel test)
+    /// can grow it *between* the relayout and the fresh snapshot, so the check
+    /// repeats until a snapshot covers the pages, within a small bound.
     pub(crate) fn resolve_plot_job(&mut self, request: &PlotRequest) -> Result<PlotJob, String> {
         let mut pages = self.resolve_plot_pages(request)?;
         let mut assets = crate::io::plot_emit::PlotAssets::for_pages(&pages);
-        if assets.stale_glyphs(&pages) > 0 {
+        for _ in 0..4 {
+            if assets.stale_glyphs(&pages) == 0 {
+                break;
+            }
             self.tabs[self.active_tab].scene.bump_geometry();
             pages = self.resolve_plot_pages(request)?;
             assets = crate::io::plot_emit::PlotAssets::for_pages(&pages);
@@ -3723,8 +3727,8 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 &worker_path,
                 None,
             )
-            .map(|_| format!("Exported {} layouts to {}", pages.len(), worker_path.display()))
-            .map_err(|error| format!("Export failed: {error}"))
+            .map(|_| crate::tf!("Exported {} layouts to {}", pages.len(), worker_path.display()).into_owned())
+            .map_err(|error| crate::tf!("Export failed: {error}").into_owned())
         };
         self.run_print_all_work(dialog.background, work)
     }
@@ -3773,8 +3777,8 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 .and_then(|_| {
                     crate::io::print_to_printer::print_existing_pdf(&temp_path, &options)
                 })
-                .map(|printer| format!("Sent {} layouts to printer: {printer}", pages.len()))
-                .map_err(|error| format!("Print failed: {error}"))
+                .map(|printer| crate::tf!("Sent {} layouts to printer: {printer}", pages.len()).into_owned())
+                .map_err(|error| crate::tf!("Print failed: {error}").into_owned())
             };
             self.run_print_all_work(true, work)
         }
@@ -4889,6 +4893,9 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
             "A2" => PaperSize::A2,
             "A1" => PaperSize::A1,
             "A0" => PaperSize::A0,
+            "Letter" => PaperSize::Letter,
+            "Legal" => PaperSize::Legal,
+            "Tabloid" => PaperSize::Tabloid,
             _ => PaperSize::A4,
         };
         let orient = if d.orientation == "Portrait" {
@@ -4986,7 +4993,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     plot_style.as_ref(),
                     render_options,
                 ).and_then(|_| crate::io::print_to_printer::open_in_viewer(&tmp))
-                        .map(|_| "Opened plot preview.".to_string()).map_err(|e| format!("Preview failed: {e}"))
+                        .map(|_| crate::t!("Opened plot preview.").into_owned()).map_err(|e| crate::tf!("Preview failed: {e}").into_owned())
                 };
                 return self.run_plot_work(d.background, true, work);
             }
@@ -5003,8 +5010,8 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 plot_style.as_ref(),
                 render_options,
             ).and_then(|_| crate::io::print_to_printer::print_existing_pdf(&tmp, &opts))
-                    .map(|printer| format!("Sent to printer: {printer}"))
-                    .map_err(|e| format!("Print failed: {e}"))
+                    .map(|printer| crate::tf!("Sent to printer: {printer}").into_owned())
+                    .map_err(|e| crate::tf!("Print failed: {e}").into_owned())
             };
             return self.run_plot_work(true, false, work);
         }
@@ -5031,7 +5038,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 plot_style.as_ref(),
                 render_options,
             ).and_then(|_| crate::io::print_to_printer::open_in_viewer(&tmp))
-                    .map(|_| "Opened plot preview.".to_string()).map_err(|e| format!("Preview failed: {e}"))
+                    .map(|_| crate::t!("Opened plot preview.").into_owned()).map_err(|e| crate::tf!("Preview failed: {e}").into_owned())
             };
             return self.run_plot_work(d.background, true, work);
         }
@@ -5049,8 +5056,8 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     wires, hatches, wipeouts, page_w, page_h, ox, oy, rotation, scale, clip,
                     plot_style, opts,
                 ))
-                .map(|printer| format!("Sent to printer: {printer}"))
-                .map_err(|error| format!("Print failed: {error}"))
+                .map(|printer| crate::tf!("Sent to printer: {printer}").into_owned())
+                .map_err(|error| crate::tf!("Print failed: {error}").into_owned())
         };
         self.run_plot_work(true, false, work)
     }
@@ -5370,10 +5377,10 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 Task::perform(
                     async move {
                         let dialog = crate::sys::file_dialog()
-                            .set_title("Save Plot Style Table")
+                            .set_title(crate::t!("Save Plot Style Table").as_ref())
                             .set_file_name(&default_name)
-                            .add_filter("Plot Style Files", &["ctb", "CTB"])
-                            .add_filter("All Files", &["*"]);
+                            .add_filter(crate::t!("Plot Style Files").as_ref(), &["ctb", "CTB"])
+                            .add_filter(crate::t!("All Files").as_ref(), &["*"]);
                         #[cfg(not(target_arch = "wasm32"))]
                         let dialog = match crate::io::plot_style::ensure_plot_styles_dir() {
                             Ok(dir) => dialog.set_directory(dir),

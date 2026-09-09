@@ -19,6 +19,12 @@ rustflags = [
     '-Clink-arg=-zstack-size=4194304',
 ]
 
-# Large stack for deep DWG/scene recursion on Windows debug builds.
+[target.x86_64-pc-windows-gnu]
+rustflags = [
+    "-Clink-arg=-Wl,--stack,16777216",
+]
+
+# Large stack for deep DWG/scene recursion on Windows debug builds (the
+# upstream default of 16 MiB overflows on the deepest sheets).
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "link-arg=/STACK:67108864"]

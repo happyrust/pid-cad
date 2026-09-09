@@ -11,6 +11,8 @@ pub use automation::{export_headless, serve};
 pub use automation::{list_layouts_headless, plot_svg_headless, PlotSvgRequest};
 mod command_driver;
 pub(crate) mod commands;
+#[cfg(not(target_arch = "wasm32"))]
+mod doc_api;
 mod document;
 pub(crate) mod expr_eval;
 mod find_replace;
@@ -21,11 +23,13 @@ mod model_ops;
 mod mtext_editor;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod plugin_host;
-mod properties;
 mod presspull_ops;
+mod properties;
 mod recent;
+mod record_api;
 pub(crate) mod settings;
 mod shortcuts;
+mod startup;
 mod style_ops;
 mod text_inline;
 mod tolerance_dialog;
@@ -159,7 +163,7 @@ impl std::fmt::Display for QSelectOp {
             QSelectOp::Gt => "> Greater than",
             QSelectOp::Lt => "< Less than",
         };
-        f.write_str(s)
+        f.write_str(crate::t!(s).as_ref())
     }
 }
 
@@ -224,7 +228,10 @@ impl From<&QSelectState> for QSelectSettings {
         Self {
             scope: state.scope,
             type_filter: state.type_filter.clone(),
-            property_field: state.property.as_ref().map(|property| property.field.clone()),
+            property_field: state
+                .property
+                .as_ref()
+                .map(|property| property.field.clone()),
             operator: state.operator,
             value: state.value.clone(),
             mode: state.mode,
@@ -255,12 +262,12 @@ pub(crate) enum FindMatchKey {
 }
 use crate::snap::Snapper;
 use crate::ui::{CommandLine, Ribbon, StatusBar};
-use acadrust::types::{Color as AcadColor, LineWeight};
 use acadrust::CadDocument;
+use acadrust::types::{Color as AcadColor, LineWeight};
 
 use iced::time::Instant;
 use iced::window;
-use iced::{mouse, Point, Task, Theme};
+use iced::{Point, Task, Theme, mouse};
 use std::sync::Arc;
 
 pub(super) const POLY_START_DELAY_MS: u128 = 150;
@@ -317,9 +324,7 @@ struct AddSelectedRestore {
 }
 
 /// Which Start-page section a narrow (tabbed) Start page is showing.
-#[derive(
-    Clone, Copy, PartialEq, Eq, Default, Debug, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub enum StartSection {
     Recent,
     Videos,
@@ -695,6 +700,7 @@ pub(super) struct OpenCADStudio {
     /// The open in-canvas modal dialog, if any (Plan B: shared overlay instead
     /// of OS windows).
     active_modal: Option<ModalKind>,
+    pending_startup_modals: std::collections::VecDeque<ModalKind>,
     /// Plot modal geometry preserved while the Plot Style editor is open as
     /// a child dialog. None means Plotstyle was opened directly (e.g. command).
     plotstyle_parent_plot_geometry: Option<(iced::Vector, iced::Vector)>,
@@ -780,15 +786,13 @@ pub(super) struct OpenCADStudio {
     /// Live filter for installed and available plugin cards.
     plugin_search_input: String,
     /// Installable release tags fetched per linked repo (for the dropdown).
-    repo_release_tags:
-        rustc_hash::FxHashMap<String, Vec<crate::plugin::external::ReleaseInfo>>,
+    repo_release_tags: rustc_hash::FxHashMap<String, Vec<crate::plugin::external::ReleaseInfo>>,
     /// The release tag currently selected per linked repo.
     repo_selected_tag: rustc_hash::FxHashMap<String, String>,
     /// Repository currently shown in the Plugin Manager detail pane.
     selected_plugin_repo: Option<String>,
     /// Parsed GitHub README content or the last fetch error, cached per repo.
-    plugin_readmes:
-        rustc_hash::FxHashMap<String, Result<iced::widget::markdown::Content, String>>,
+    plugin_readmes: rustc_hash::FxHashMap<String, Result<iced::widget::markdown::Content, String>>,
     /// README requests in flight, used to render a deterministic loading state.
     plugin_readme_loading: rustc_hash::FxHashSet<String>,
     /// Last marketplace status / error line shown in the Plugin Manager.
@@ -799,13 +803,9 @@ pub(super) struct OpenCADStudio {
     /// Tracked separately from the PDSIZE sign so a size of 0 (sign-less) still
     /// remembers which radio is active.
     point_size_relative: bool,
-    /// New-release notification window — opened on startup when the
-    /// GitHub releases API reports a newer version than this build.
-    /// First-launch "make Open CAD Studio the default for .dwg/.dxf?" prompt
-    /// window. Shown once, gated on `default_assoc_prompted`.
-    /// Whether the one-time default-association prompt has already been shown.
-    /// Persisted via [`settings::UserSettings`] so it survives restarts.
+    /// Whether the default-association prompt has been answered.
     default_assoc_prompted: bool,
+    donation_prompt_version: String,
     /// Read-only session (`--read-only`): editing is allowed but every save
     /// path is refused. Set once at boot from the CLI config.
     read_only: bool,
@@ -1109,8 +1109,7 @@ pub(super) struct OpenCADStudio {
     save_job_serial: u64,
     /// Destination leases held while Save As workers are active.
     #[cfg(not(target_arch = "wasm32"))]
-    pending_save_leases:
-        std::collections::HashMap<u64, crate::io::edit_lock::EditLease>,
+    pending_save_leases: std::collections::HashMap<u64, crate::io::edit_lock::EditLease>,
     /// Locked-file failure currently shown in the recovery dialog.
     #[cfg(not(target_arch = "wasm32"))]
     pending_save_failure: Option<PendingSaveFailure>,
@@ -1477,7 +1476,8 @@ impl ClipboardDeps {
                 if !objects.is_empty() {
                     let mut annotation_scales = Vec::new();
                     for (_, object) in &objects {
-                        let acadrust::objects::ObjectType::ObjectContextData(context) = object else {
+                        let acadrust::objects::ObjectType::ObjectContextData(context) = object
+                        else {
                             continue;
                         };
                         if annotation_scales
@@ -1647,9 +1647,7 @@ impl ClipboardDeps {
     fn snapshot_block(doc: &acadrust::CadDocument, name: &str) -> Option<BlockDef> {
         use acadrust::EntityType;
         let br = doc.block_records.get(name)?;
-        if name.starts_with("*Model_Space")
-            || name.starts_with("*Paper_Space")
-            || br.flags.is_xref
+        if name.starts_with("*Model_Space") || name.starts_with("*Paper_Space") || br.flags.is_xref
         {
             return None;
         }
@@ -1692,6 +1690,7 @@ pub enum ModalKind {
     Shortcuts,
     PluginManager,
     UpdateNotice,
+    DonationPrompt,
     Layers,
     LayerStateManager,
     LayerTranslator,
@@ -1866,10 +1865,7 @@ pub enum Message {
     /// Register a font already held by the shared web store with the UI renderer.
     ApplyWebFont(crate::scene::text::web_font::Script),
     /// Completion of the UI renderer's runtime font registration.
-    WebUiFontLoaded(
-        crate::scene::text::web_font::Script,
-        Result<(), String>,
-    ),
+    WebUiFontLoaded(crate::scene::text::web_font::Script, Result<(), String>),
     /// Ctrl+V. Routed by `update` into an open text editor, the drawing-object
     /// clipboard, or the system text clipboard.
     PasteShortcut,
@@ -1937,10 +1933,13 @@ pub enum Message {
     WebFileOpened(u64, crate::io::WebOpenOutcome),
     #[cfg(target_arch = "wasm32")]
     WebFileCached(u64, crate::io::WebOpenOutcome, Result<(), String>),
-    FileOpened(u64, Result<
-        (String, PathBuf, CadDocument, crate::scene::DerivedCaches),
-        crate::io::OpenLoadError,
-    >),
+    FileOpened(
+        u64,
+        Result<
+            (String, PathBuf, CadDocument, crate::scene::DerivedCaches),
+            crate::io::OpenLoadError,
+        >,
+    ),
     RecoveryClose,
     RecoveryAttempt,
     RecoveryDecline,
@@ -2148,6 +2147,10 @@ pub enum Message {
     CommandInput(String),
     CommandSubmit,
     Command(String),
+    /// Execute one complete line read from a command script. Unlike UI/ribbon
+    /// dispatch, this accepts an interactive verb and all of its arguments on
+    /// the same line (`BOX 0,0,0 10,10,0 10`).
+    ScriptLine(String),
     /// Append one typed character to the command-line input from the
     /// global key-press subscription. Used when the text-input widget
     /// itself isn't focused (focus parked on viewport / button / etc.)
@@ -2177,9 +2180,16 @@ pub enum Message {
     },
     /// A widget captured Up/Down; resolve it only if the command input owns
     /// keyboard focus.
-    CommandLineArrowProbe { direction: ArrowKey, extend_selection: bool },
+    CommandLineArrowProbe {
+        direction: ArrowKey,
+        extend_selection: bool,
+    },
     /// Result of the command-input focus query for a captured Up/Down key.
-    CommandLineArrowResolved { direction: ArrowKey, focused: bool, extend_selection: bool },
+    CommandLineArrowResolved {
+        direction: ArrowKey,
+        focused: bool,
+        extend_selection: bool,
+    },
     /// Toggle the dropdown listing the full command-line history.
     CommandHistoryToggle,
     /// Grab/move/release the expanded history panel's top resize edge.
@@ -2330,9 +2340,7 @@ pub enum Message {
         epoch: u64,
         source: usize,
         wires: std::sync::Weak<Vec<crate::scene::WireModel>>,
-        index: std::sync::Arc<
-            crate::scene::pick::interaction_index::InteractionIndex,
-        >,
+        index: std::sync::Arc<crate::scene::pick::interaction_index::InteractionIndex>,
         build_ms: f64,
     },
     WindowResized(f32, f32),
@@ -2586,7 +2594,10 @@ pub enum Message {
     PropEditChoiceToggle,
     /// User is typing in a block-attribute value field (live buffer update),
     /// keyed by the attribute tag.
-    PropAttrInput { tag: String, value: String },
+    PropAttrInput {
+        tag: String,
+        value: String,
+    },
     /// User committed a block-attribute value edit (Enter pressed).
     PropAttrCommit(String),
     /// Reports the currently keyboard-focused widget (if any) after a
@@ -2612,7 +2623,10 @@ pub enum Message {
     PropColorFieldToggle(String),
     /// User picked a colour for a generic per-field colour row (hatch gradient
     /// `Color 1` / `Color 2`), routed by the field name.
-    PropColorFieldChanged { field: String, color: AcadColor },
+    PropColorFieldChanged {
+        field: String,
+        color: AcadColor,
+    },
     /// Collapse the inline color picker dropdown. Fired when another
     /// properties-panel dropdown (a combo_box) opens, so at most one panel
     /// dropdown is open at a time and they can't overlap. (#235)
@@ -2724,7 +2738,10 @@ pub enum Message {
     /// Select the row the Text Options / Properties tabs act on.
     AttrEditorSelect(usize),
     /// Live edit of the attribute value at row `idx` (Attribute tab).
-    AttrEditorInput { idx: usize, value: String },
+    AttrEditorInput {
+        idx: usize,
+        value: String,
+    },
     // Text Options — all act on the selected row:
     AttrEditorTextStyle(String),
     AttrEditorJustify(String),
@@ -2779,9 +2796,7 @@ pub enum Message {
     /// GitHub Discussions fetched at boot for the Start page.
     DiscussionsFetched(Result<Vec<crate::discussions::DiscussionEntry>, String>),
     /// Recent-file DWG preview thumbnails decoded on a background thread.
-    RecentThumbsLoaded(
-        Vec<(std::path::PathBuf, Option<iced::widget::image::Handle>)>,
-    ),
+    RecentThumbsLoaded(Vec<(std::path::PathBuf, Option<iced::widget::image::Handle>)>),
     /// Installable releases and manifest API versions fetched for `owner/repo`.
     PluginReleasesFetched(
         String,
@@ -2822,7 +2837,10 @@ pub enum Message {
     InvertSelection,
     /// Keyboard modifier state changed — tracks whether Shift is held so the
     /// pick path can do subtractive (Shift+click) selection.
-    SetModifiers { shift: bool, ctrl: bool },
+    SetModifiers {
+        shift: bool,
+        ctrl: bool,
+    },
     // ── In-place MText editor ───────────────────────────────────────────
     /// Text-area edit action from the multi-line editor widget.
     MTextEdit(iced::widget::text_editor::Action),
@@ -2946,6 +2964,7 @@ pub enum Message {
     UpdateCheckResult(Option<crate::io::update_check::UpdateInfo>),
     /// User dismissed the update-notice window.
     UpdateNoticeClose,
+    DonationPromptDonate,
     /// First-launch default-association prompt: user accepted — register this
     /// app as the default handler for .dwg / .dxf.
     AssocPromptYes,
@@ -3316,10 +3335,7 @@ impl OpenCADStudio {
             .iter()
             .filter_map(|v| {
                 let bytes = v.thumb.clone()?;
-                Some((
-                    v.id.clone(),
-                    iced::widget::image::Handle::from_bytes(bytes),
-                ))
+                Some((v.id.clone(), iced::widget::image::Handle::from_bytes(bytes)))
             })
             .collect();
         self.videos = videos;
@@ -3479,6 +3495,7 @@ impl OpenCADStudio {
             color_picker_tab: ColorPickerTab::Index,
             recent_colors: Vec::new(),
             active_modal: None,
+            pending_startup_modals: std::collections::VecDeque::new(),
             plotstyle_parent_plot_geometry: None,
             find_replace: FindReplaceState::default(),
             aec_drop_acknowledged: false,
@@ -3519,6 +3536,7 @@ impl OpenCADStudio {
             point_size_buf: String::new(),
             point_size_relative: true,
             default_assoc_prompted: false,
+            donation_prompt_version: String::new(),
             read_only: false,
             update_notice_version: None,
             update_notice_body: None,
@@ -3835,8 +3853,7 @@ impl OpenCADStudio {
         let state = Self::new();
         let (id, open_task) = window::open(window::Settings {
             maximized: true,
-            icon: build_window_icon()
-                .and_then(|rgba| window::icon::from_rgba(rgba, 32, 32).ok()),
+            icon: build_window_icon().and_then(|rgba| window::icon::from_rgba(rgba, 32, 32).ok()),
             exit_on_close_request: false,
             // A Wayland compositor has no StartupWMClass to go on: it resolves a
             // window's dock icon by matching the window's app_id against the
@@ -3898,16 +3915,10 @@ impl OpenCADStudio {
             Task::batch(
                 cfg.script_lines
                     .into_iter()
-                    .map(|line| Task::done(Message::Command(line))),
+                    .map(|line| Task::done(Message::ScriptLine(line))),
             )
         };
-        // One-time prompt offering to make Open CAD Studio the default app for
-        // .dwg / .dxf. Shown only on the first launch that hasn't answered it
-        // yet; the flag is persisted so we never ask twice.
-        let assoc_prompt: Task<Message> = Task::none();
-        if !s.default_assoc_prompted {
-            s.active_modal = Some(ModalKind::AssocPrompt);
-        }
+        s.queue_startup_prompts();
         // Fetch the Patreon supporters list once at boot for the Start page.
         #[cfg(not(target_arch = "wasm32"))]
         let patrons_fetch = Task::perform(
@@ -3970,7 +3981,6 @@ impl OpenCADStudio {
                 focus_cmd,
                 cli_open,
                 script,
-                assoc_prompt,
                 patrons_fetch,
                 videos_fetch,
                 discussions_fetch,
@@ -3986,25 +3996,19 @@ impl OpenCADStudio {
     fn boot_web() -> (Self, Task<Message>) {
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut s = Self::new();
+        s.queue_startup_prompts();
         let focus = s.focus_cmd_input();
-        let primary_font = crate::scene::text::web_font::preload_language(
-            &crate::i18n::active_language_tag(),
-        );
+        let primary_font =
+            crate::scene::text::web_font::preload_language(&crate::i18n::active_language_tag());
         let fonts = Task::batch([
             Task::done(Message::PollWebFonts),
             Task::done(Message::ApplyWebFont(primary_font)),
         ]);
         // Web can't reach the Patreon API directly (CORS); fetch the CI-built
         // supporters.json served on the same origin instead.
-        let patrons = Task::perform(
-            crate::patreon::fetch_patrons_web(),
-            Message::PatronsFetched,
-        );
+        let patrons = Task::perform(crate::patreon::fetch_patrons_web(), Message::PatronsFetched);
         s.videos_loading = true;
-        let videos = Task::perform(
-            crate::videos::fetch_playlist_web(),
-            Message::VideosFetched,
-        );
+        let videos = Task::perform(crate::videos::fetch_playlist_web(), Message::VideosFetched);
         s.discussions_loading = true;
         let discussions = Task::perform(
             crate::discussions::fetch_discussions_web(),
@@ -4037,7 +4041,12 @@ pub fn run() -> iced::Result {
         if let Some(tab) = state.tabs.get(state.active_tab) {
             let dot = if tab.dirty { "● " } else { "" };
             let name = tab.tab_display_name();
-            format!("{}Open CAD Studio {} - {}", dot, env!("OCS_APP_VERSION"), name)
+            format!(
+                "{}Open CAD Studio {} - {}",
+                dot,
+                env!("OCS_APP_VERSION"),
+                name
+            )
         } else {
             concat!("Open CAD Studio ", env!("OCS_APP_VERSION")).to_string()
         }
@@ -4071,7 +4080,9 @@ pub fn run_web() -> iced::Result {
         OpenCADStudio::view_main,
     )
     .subscription(OpenCADStudio::subscription)
-    .title(|_state: &OpenCADStudio| concat!("Open CAD Studio ", env!("OCS_APP_VERSION")).to_string())
+    .title(|_state: &OpenCADStudio| {
+        concat!("Open CAD Studio ", env!("OCS_APP_VERSION")).to_string()
+    })
     .theme(|state: &OpenCADStudio| state.active_theme.clone())
     .backend(iced::Backend::Hardware(iced::backend::Api::OpenGL))
     .font(iced_aw::ICED_AW_FONT_BYTES)

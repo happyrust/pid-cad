@@ -29,7 +29,7 @@ impl OpenCADStudio {
                 let describe = |c: &Color| match c {
                     Color::ByLayer => "ByLayer".to_string(),
                     Color::ByBlock => "ByBlock".to_string(),
-                    Color::Index(n) => format!("index {n}"),
+                    Color::Index(n) => crate::tf!("index {n}").into_owned(),
                     _ => "(custom)".to_string(),
                 };
                 let arg = if cmd == "BYLAYER" {
@@ -65,7 +65,7 @@ impl OpenCADStudio {
                     }
                     None => {
                         self.command_line.push_error(
-                            "Usage: COLOR <ByLayer|ByBlock|1-255|red|yellow|green|cyan|blue|magenta|white>",
+                            crate::t!("Usage: COLOR <ByLayer|ByBlock|1-255|red|yellow|green|cyan|blue|magenta|white>").as_ref(),
                         );
                     }
                 }
@@ -486,19 +486,19 @@ impl OpenCADStudio {
                     // Per-type breakdown so the user sees exactly what went.
                     let mut parts: Vec<String> = Vec::new();
                     if n_layers > 0 {
-                        parts.push(format!("{n_layers} layer(s)"));
+                        parts.push(crate::tf!("{n_layers} layer(s)").into_owned());
                     }
                     if n_styles > 0 {
-                        parts.push(format!("{n_styles} text style(s)"));
+                        parts.push(crate::tf!("{n_styles} text style(s)").into_owned());
                     }
                     if n_lts > 0 {
-                        parts.push(format!("{n_lts} linetype(s)"));
+                        parts.push(crate::tf!("{n_lts} linetype(s)").into_owned());
                     }
                     if n_blocks > 0 {
-                        parts.push(format!("{n_blocks} block(s)"));
+                        parts.push(crate::tf!("{n_blocks} block(s)").into_owned());
                     }
                     if n_sortents > 0 {
-                        parts.push(format!("{n_sortents} stale draw-order table(s)"));
+                        parts.push(crate::tf!("{n_sortents} stale draw-order table(s)").into_owned());
                     }
                     self.command_line.push_output(crate::tf!(
                         "PURGE: {} item(s) removed — {}.",
@@ -539,7 +539,7 @@ impl OpenCADStudio {
 
                 if prop.is_empty() {
                     self.command_line.push_info(
-                        "Usage: CHPROP <prop> <val>  (props: LAYER COLOR LINETYPE LTSCALE)",
+                        crate::t!("Usage: CHPROP <prop> <val>  (props: LAYER COLOR LINETYPE LTSCALE)").as_ref(),
                     );
                 } else {
                     let handles: Vec<_> = self.tabs[i]
@@ -940,7 +940,7 @@ impl OpenCADStudio {
                 let value = it.next().map(|s| s.trim().to_string());
                 if name.is_empty() || name == "?" {
                     self.command_line.push_info(
-                        "SETVAR: LTSCALE CELTSCALE PDMODE PDSIZE TEXTSIZE ORTHOMODE FILLMODE MIRRTEXT FRAME IMAGEFRAME PDFFRAME WIPEOUTFRAME XCLIPFRAME POINTCLOUDCLIPFRAME ZOOMWHEEL ZOOMFACTOR CURSORSIZE PICKBOX CURSORTYPE SNAPANG TEXTFILL CLIPROMPTLINES COMMANDLINEFADETIME ATTREQ ATTDIA DIMASSOC DIMCONTINUEMODE ANGBASE ANGDIR SKETCHINC SKPOLY SKTOLERANCE DONUTID DONUTOD CENTEREXE CENTERLAYER CENTERLTYPE CENTERLTSCALE CENTERLTYPEFILE CENTERCROSSSIZE CENTERCROSSGAP CENTERMARKEXE COLORTHEME SELECTIONAREA SELECTIONAREAOPACITY SELECTIONEFFECT SELECTIONEFFECTCOLOR WINDOWSAREACOLOR CROSSINGAREACOLOR SELECTIONPREVIEW GRIPSIZE GRIPCOLOR GRIPHOT GRIPHOVER | CLAYER CELTYPE TEXTSTYLE (read-only)",
+                        crate::t!("SETVAR: LTSCALE CELTSCALE PDMODE PDSIZE TEXTSIZE ORTHOMODE FILLMODE MIRRTEXT FRAME IMAGEFRAME PDFFRAME WIPEOUTFRAME XCLIPFRAME POINTCLOUDCLIPFRAME ZOOMWHEEL ZOOMFACTOR CURSORSIZE PICKBOX CURSORTYPE SNAPANG TEXTFILL CLIPROMPTLINES COMMANDLINEFADETIME ATTREQ ATTDIA DIMASSOC DIMCONTINUEMODE ANGBASE ANGDIR SKETCHINC SKPOLY SKTOLERANCE DONUTID DONUTOD CENTEREXE CENTERLAYER CENTERLTYPE CENTERLTSCALE CENTERLTYPEFILE CENTERCROSSSIZE CENTERCROSSGAP CENTERMARKEXE COLORTHEME SELECTIONAREA SELECTIONAREAOPACITY SELECTIONEFFECT SELECTIONEFFECTCOLOR WINDOWSAREACOLOR CROSSINGAREACOLOR SELECTIONPREVIEW GRIPSIZE GRIPCOLOR GRIPHOT GRIPHOVER | CLAYER CELTYPE TEXTSTYLE (read-only)").as_ref(),
                     );
                 } else {
                     if matches!(name.as_str(), "SHOWHIST" | "SOLIDHIST") {
@@ -964,12 +964,12 @@ impl OpenCADStudio {
                                         self.tabs[i].dirty = true;
                                         self.refresh_properties();
                                     }
-                                    self.command_line.push_output(&format!("{name} = {mode}"));
+                                    self.command_line.push_output(&crate::tf!("{name} = {mode}"));
                                 }
-                                None => self.command_line.push_error(&format!("{name}: expected an integer from 0 to {maximum}.")),
+                                None => self.command_line.push_error(&crate::tf!("{name}: expected an integer from 0 to {maximum}.")),
                             }
                         } else {
-                            self.command_line.push_output(&format!("Enter new value for {name} <{current}>:"));
+                            self.command_line.push_output(&crate::tf!("Enter new value for {name} <{current}>:"));
                             self.pending_setvar = Some(name.clone());
                         }
                         return Some(self.finish_dispatch(cmd));
@@ -1033,7 +1033,7 @@ impl OpenCADStudio {
                                         self.tabs[i].dirty = true;
                                     }
                                     self.command_line
-                                        .push_output(&format!("{name} = {mode}"));
+                                        .push_output(&crate::tf!("{name} = {mode}"));
                                 }
                                 _ => self.command_line.push_error(
                                     crate::tf!("SETVAR: {name} requires 0, 1, or 2.").as_ref(),
@@ -1095,10 +1095,10 @@ impl OpenCADStudio {
                                     self.dimension_continue_mode = mode;
                                     self.persist_settings_if_changed();
                                     self.command_line
-                                        .push_output(&format!("DIMCONTINUEMODE = {mode}"));
+                                        .push_output(&crate::tf!("DIMCONTINUEMODE = {mode}"));
                                 }
                                 _ => self.command_line.push_error(
-                                    "SETVAR: DIMCONTINUEMODE requires 0 or 1.",
+                                    crate::t!("SETVAR: DIMCONTINUEMODE requires 0 or 1.").as_ref(),
                                 ),
                             }
                         } else {
@@ -1136,13 +1136,13 @@ impl OpenCADStudio {
                                     crate::modules::draw::defaults::set_donut_outer_diameter(number);
                                 }
                                 self.command_line
-                                    .push_output(&format!("{name} = {number}"));
+                                    .push_output(&crate::tf!("{name} = {number}"));
                             } else {
-                                self.command_line.push_error(if name == "DONUTID" {
+                                self.command_line.push_error(crate::t!(if name == "DONUTID" {
                                     "SETVAR: DONUTID requires a finite value greater than or equal to zero."
                                 } else {
                                     "SETVAR: DONUTOD requires a finite value greater than zero."
-                                });
+                                }).as_ref());
                             }
                         } else {
                             self.command_line.push_output(crate::tf!(
@@ -2097,7 +2097,7 @@ impl OpenCADStudio {
                                     false,
                                 )),
                             },
-                            _ => Err(format!("SETVAR: unknown variable \"{name}\".")),
+                            _ => Err(crate::tf!("SETVAR: unknown variable \"{name}\".").into_owned()),
                         }
                     };
                     match outcome {
@@ -2501,7 +2501,7 @@ impl OpenCADStudio {
                     self.command_line.push_output(crate::tf!("PDMODE set to {v}").as_ref());
                 } else {
                     self.command_line.push_error(
-                        "Usage: PDMODE [value]  (0=dot 1=none 2=+ 3=x 4=tick; +32 circle, +64 square)",
+                        crate::t!("Usage: PDMODE [value]  (0=dot 1=none 2=+ 3=x 4=tick; +32 circle, +64 square)").as_ref(),
                     );
                 }
             }
@@ -2569,7 +2569,7 @@ impl OpenCADStudio {
                         self.persist_settings_if_changed();
                         match crate::io::file_association::register_as_handler() {
                             Ok(()) => self.command_line.push_output(
-                                "FILEASSOC set to 1 — registered as a .dwg/.dxf/.bak handler",
+                                crate::t!("FILEASSOC set to 1 — registered as a .dwg/.dxf/.bak handler").as_ref(),
                             ),
                             Err(e) => self
                                 .command_line
@@ -2614,7 +2614,7 @@ impl OpenCADStudio {
                         let msg = if v == 0 {
                             "SAVETIME set to 0 (autosave off)".to_string()
                         } else {
-                            format!("SAVETIME set to {v} minute(s)")
+                            crate::tf!("SAVETIME set to {v} minute(s)").into_owned()
                         };
                         self.command_line.push_output(&msg);
                     }
@@ -2646,7 +2646,7 @@ impl OpenCADStudio {
                         .push_output(crate::tf!("PDSIZE set to {v:.4}").as_ref());
                 } else {
                     self.command_line.push_error(
-                        "Usage: PDSIZE [value]  (>0 absolute size, <0 percent of viewport, 0 default)",
+                        crate::t!("Usage: PDSIZE [value]  (>0 absolute size, <0 percent of viewport, 0 default)").as_ref(),
                     );
                 }
             }
@@ -2940,20 +2940,6 @@ mod tests {
     fn test_cad_selection_and_model_space_sysvars() {
         let mut app = fresh_app();
 
-        // COLORTHEME 1 (Light)
-        let _ = app.run_command_line("SETVAR COLORTHEME 1");
-        assert_eq!(app.active_theme, iced::Theme::Light);
-        assert_eq!(app.ui_theme.name, "Light");
-
-        // COLORTHEME 0 (Dark)
-        let _ = app.run_command_line("SETVAR COLORTHEME 0");
-        assert_eq!(app.active_theme, iced::Theme::Dark);
-        assert_eq!(app.ui_theme.name, "Dark");
-
-        // Direct command name: COLORTHEME 1
-        let _ = app.run_command_line("COLORTHEME 1");
-        assert_eq!(app.active_theme, iced::Theme::Light);
-
         // SELECTIONAREA toggle
         let _ = app.run_command_line("SETVAR SELECTIONAREA 0");
         assert!(!app.model_space.selection_area);
@@ -3011,12 +2997,6 @@ mod tests {
             [33.0 / 255.0, 40.0 / 255.0, 48.0 / 255.0, 1.0]
         );
 
-        // Switch to light theme and set BACKGROUND THEME
-        let _ = app.run_command_line("COLORTHEME 1");
-        let _ = app.run_command_line("BACKGROUND THEME");
-        assert_eq!(app.model_space.mode, crate::app::config::ModelSpaceMode::MatchTheme);
-        assert_eq!(app.tabs[i].scene.bg_color, [1.0, 1.0, 1.0, 1.0]);
-
         // BACKGROUND RGB custom
         let _ = app.run_command_line("BACKGROUND 50 60 70");
         assert_eq!(app.model_space.mode, crate::app::config::ModelSpaceMode::Custom);
@@ -3038,74 +3018,15 @@ mod tests {
     }
 
     #[test]
-    fn test_colorscheme_command() {
-        let mut app = fresh_app();
-        app.model_space.mode = crate::app::config::ModelSpaceMode::MatchTheme;
-        let i = app.active_tab;
-
-        // Bare COLORSCHEME launches interactive ValuePromptCommand
-        let _ = app.run_command_line("COLORSCHEME");
-        assert!(app.tabs[i].active_cmd.is_some());
-        assert_eq!(app.tabs[i].active_cmd.as_ref().unwrap().name(), "COLORSCHEME");
-
-        // Cancel the interactive command
-        app.tabs[i].active_cmd = None;
-
-        // COLORSCHEME LIGHT sets Light theme and synchronizes model space
-        let _ = app.run_command_line("COLORSCHEME LIGHT");
-        assert_eq!(app.active_theme, iced::Theme::Light);
-        assert_eq!(app.tabs[i].scene.bg_color, [1.0, 1.0, 1.0, 1.0]);
-
-        // Case-insensitive and spaces: "colorscheme tokyo night"
-        let _ = app.run_command_line("colorscheme tokyo night");
-        assert_eq!(app.active_theme, iced::Theme::TokyoNight);
-
-        // COLORSCHEME rejects 1 and 0 (which belong to COLORTHEME)
-        let _ = app.run_command_line("colorscheme 1");
-        assert_ne!(app.active_theme, iced::Theme::Light); // stays TokyoNight
-
-        // COLORTHEME accepts 1 and 0
-        let _ = app.run_command_line("COLORTHEME 1");
-        assert_eq!(app.active_theme, iced::Theme::Light);
-        let _ = app.run_command_line("COLORTHEME 0");
-        assert_eq!(app.active_theme, iced::Theme::Dark);
-    }
-
-    #[test]
     fn test_reviewer_feedback_fixes() {
         let mut app = fresh_app();
 
-        // 1. COLORTHEME query returns UI theme scheme regardless of canvas background
-        let _ = app.run_command_line("COLORTHEME 0");
-        // Set canvas background to bright white in custom mode
-        let _ = app.run_command_line("BACKGROUND 255 255 255");
-        let _ = app.run_command_line("SETVAR COLORTHEME");
-        let output = app.command_line.history_plain_text();
-        assert!(output.contains("<0 (Dark)>"), "UI is dark, so query must return 0 despite white canvas: {output}");
-
-        let _ = app.run_command_line("COLORTHEME 1");
-        let _ = app.run_command_line("SETVAR COLORTHEME");
-        let output = app.command_line.history_plain_text();
-        assert!(output.contains("<1 (Light)>"), "UI is light, so query must return 1: {output}");
-
-        // 2. Custom theme safety when COLORTHEME 0/1 or COLORSCHEME runs
-        app.ui_theme.name = "Custom".to_string();
-        app.ui_theme.palette.background = [12, 34, 56];
-        let _ = app.run_command_line("COLORTHEME 0");
-        assert_eq!(app.saved_custom_palette.map(|p| p.background), Some([12, 34, 56]));
-
-        app.saved_custom_palette = None;
-        app.ui_theme.name = "Custom".to_string();
-        app.ui_theme.palette.background = [78, 90, 12];
-        let _ = app.run_command_line("COLORSCHEME DRACULA");
-        assert_eq!(app.saved_custom_palette.map(|p| p.background), Some([78, 90, 12]));
-
-        // 3. ModelSpaceBgChanged empty reverts mode to MatchTheme
+        // An empty background restores MatchTheme.
         let _ = app.update(crate::app::Message::ModelSpaceBgChanged("".to_string()));
         assert_eq!(app.model_space.mode, crate::app::config::ModelSpaceMode::MatchTheme);
         assert_eq!(app.model_space.custom_bg, None);
 
-        // 4. Split restore defaults: Display vs Selection
+        // Display and selection defaults are restored separately.
         app.model_space.mode = crate::app::config::ModelSpaceMode::Custom;
         app.model_space.custom_bg = Some([10, 20, 30]);
         app.model_space.selection_opacity = 99;

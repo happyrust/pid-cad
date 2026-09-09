@@ -2468,6 +2468,14 @@ impl OpenCADStudio {
                     previews.push(guide);
                 }
             }
+            let preview_hidden = self.tabs[i]
+                .active_cmd
+                .as_ref()
+                .map(|command| command.preview_hidden_handles().to_vec())
+                .unwrap_or_default();
+            self.tabs[i]
+                .scene
+                .set_command_preview_hidden(&preview_hidden);
             self.tabs[i].scene.set_preview_wires(previews);
         } else {
             self.tabs[i].snap_result = None;
@@ -5122,7 +5130,7 @@ impl OpenCADStudio {
         }
         self.tabs[i].scene.camera_generation += 1;
         self.command_line
-            .push_output(crate::tf!("View: {}", region.label()).as_ref());
+            .push_output(crate::tf!("View: {}", crate::t!(region.label())).as_ref());
         Task::none()
     }
 

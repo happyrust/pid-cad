@@ -12,6 +12,9 @@ pub enum PaperSize {
     A2,
     A1,
     A0,
+    Letter,
+    Legal,
+    Tabloid,
     AnsiA,
     AnsiB,
     AnsiC,
@@ -20,12 +23,15 @@ pub enum PaperSize {
 }
 
 impl PaperSize {
-    pub const ALL: [PaperSize; 10] = [
+    pub const ALL: [PaperSize; 13] = [
         PaperSize::A4,
         PaperSize::A3,
         PaperSize::A2,
         PaperSize::A1,
         PaperSize::A0,
+        PaperSize::Letter,
+        PaperSize::Legal,
+        PaperSize::Tabloid,
         PaperSize::AnsiA,
         PaperSize::AnsiB,
         PaperSize::AnsiC,
@@ -40,6 +46,9 @@ impl PaperSize {
             PaperSize::A2 => "A2",
             PaperSize::A1 => "A1",
             PaperSize::A0 => "A0",
+            PaperSize::Letter => "Letter",
+            PaperSize::Legal => "Legal",
+            PaperSize::Tabloid => "Tabloid",
             PaperSize::AnsiA => "ANSI A",
             PaperSize::AnsiB => "ANSI B",
             PaperSize::AnsiC => "ANSI C",
@@ -56,6 +65,9 @@ impl PaperSize {
             PaperSize::A2 => (420.0, 594.0),
             PaperSize::A1 => (594.0, 841.0),
             PaperSize::A0 => (841.0, 1189.0),
+            PaperSize::Letter => (215.9, 279.4),
+            PaperSize::Legal => (215.9, 355.6),
+            PaperSize::Tabloid => (279.4, 431.8),
             // ANSI sheets are defined in inches (8.5×11 doubling up to 34×44);
             // these are those figures exactly, at 25.4 mm to the inch.
             PaperSize::AnsiA => (215.9, 279.4),
@@ -215,10 +227,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn iso_dimensions_and_orientation() {
+    fn paper_dimensions_and_orientation() {
         assert_eq!(PaperSize::A4.dimensions_mm(), (210.0, 297.0));
         assert_eq!(PaperSize::A0.dimensions_mm(), (841.0, 1189.0));
-        assert_eq!(PaperSize::ALL.len(), 10);
+        assert_eq!(PaperSize::Letter.dimensions_mm(), (215.9, 279.4));
+        assert_eq!(PaperSize::Legal.dimensions_mm(), (215.9, 355.6));
+        assert_eq!(PaperSize::Tabloid.dimensions_mm(), (279.4, 431.8));
+        assert_eq!(PaperSize::ALL.len(), 13);
         assert_eq!(PaperSize::A3.label(), "A3");
         // Portrait keeps (w,h); landscape swaps.
         assert_eq!(

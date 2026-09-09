@@ -1,8 +1,9 @@
 [package]
 name = "OpenCADStudio"
-version = "0.9.8"
+version = "2026.36.0"
 edition = "2021"
 build = "build.rs"
+default-run = "OpenCADStudio"
 
 [workspace]
 members = [
@@ -10,6 +11,7 @@ members = [
     "crates/ocs_web_worker",
     "crates/dwg-thumbnailer",
     "crates/dwg-thumbnailer-win",
+    "crates/ocs_doc_api",
 ]
 
 [features]
@@ -35,13 +37,13 @@ iced_aw = { git = "https://github.com/HakanSeven12/iced_aw.git", branch = "agent
 bytemuck = { version = "1.25", features = ["derive"] }
 glam = { version = "0.33", features = ["bytemuck"] }
 rfd = "0.17"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "string"] }
 env_logger = "0.11"
 # Log facade, already in the tree via wgpu/iced. Native writes through the
 # env_logger above; the web build installs its own logger.
 log = "0.4"
-acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "5b56571a190e7a17c8f12d36390d2938b0fb72f7", features = ["serde"] }
-cadkernel = { git = "https://github.com/HakanSeven12/cadkernel.git", rev = "67f2427282d28922d9263e37b0136b6632e929b3", features = ["acis", "offset"] }
+acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "7b4c112bd7895fe9039514c21c5b5aa59eaf2525", features = ["serde"] }
+cadkernel = { git = "https://github.com/HakanSeven12/cadkernel.git", rev = "8efd43cb2f04577d20c3ee33ce5273bb49affa3d", features = ["acis", "offset"] }
 acadifc = { git = "https://github.com/OpenAEC-Foundation/acadifc.git", rev = "47b5603", optional = true }
 dwg-thumbnailer = { path = "crates/dwg-thumbnailer" }
 flate2 = "1"
@@ -62,6 +64,8 @@ cosmic-text = "0.15"
 lyon_tessellation = "1.0.20"
 
 [dev-dependencies]
+fluent-syntax = "0.12"
+# naga follows the wgpu-30 port (local iced fork); upstream still sits on 27.
 naga = { version = "30", features = ["wgsl-in"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -70,17 +74,23 @@ windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_Window
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "wayland"] }
 
+# For `src/bin/ocs_launcher.rs` only (the .app's real CFBundleExecutable,
+# see that file for why) — already in the tree transitively via winit, pinned
+# here to the same versions Cargo already resolves for it.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSResponder", "NSRunningApplication"] }
+objc2-foundation = { version = "0.2", features = ["NSArray", "NSURL", "NSString", "NSObject", "NSNotification", "NSThread", "NSEnumerator"] }
+
 [patch.crates-io]
 iced_core = { path = "../iced/core" }
 iced_widget = { path = "../iced/widget" }
 
-[patch."https://github.com/HakanSeven12/cadcodec.git"]
-acadrust = { git = "https://git@github.com/HakanSeven12/cadcodec.git", rev = "5b56571a190e7a17c8f12d36390d2938b0fb72f7" }
-
-
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 getrandom = "0.3"
 ocs_plugin_api = { path = "crates/ocs_plugin_api", features = ["host"] }
+ocs_doc_api = { path = "crates/ocs_doc_api", features = ["host", "ipc"] }
+bincode = "1.3"
 meshopt = "0.6.2"
 i18n-embed = { version = "0.16", features = ["desktop-requester"] }
 rayon = "1"
@@ -149,6 +159,9 @@ web-sys = { version = "=0.3.92", features = [
     "console",
     "Node",
     "HtmlElement",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "ImageData",
 ] }
 iced = { path = "../iced", features = ["webgl", "fira-sans"] }
 

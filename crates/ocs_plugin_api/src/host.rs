@@ -552,6 +552,18 @@ pub trait HostApi {
         let _ = tab_id;
         None
     }
+
+    /// DocApi v2 (`ocs_doc_api`): dispatch one bincode-serialized `DocApiEnvelope`
+    /// (one write op OR a read-only query batch) and return the bincode-serialized
+    /// `Result<Receipt, ApiError>`. Opaque bytes:
+    /// this crate does not depend on `ocs_doc_api`, it only routes the envelope.
+    ///
+    /// Added for the DocApi v2 adapter. The default returns `Err` ("not supported");
+    /// the in-process host (`HostSession`) overrides it to call the DocApi executor.
+    fn doc_api_dispatch(&mut self, tab_id: u64, bytes: &[u8]) -> Result<Vec<u8>, String> {
+        let _ = (tab_id, bytes);
+        Err("DocApi v2 not supported by this host".to_string())
+    }
 }
 
 /// Simplified, read-only entity kind exposed by [`DocumentReader`].
@@ -734,10 +746,13 @@ mod repl {
             error: Option<String>,
             error_type: Option<String>,
             traceback: Option<String>,
-            line_number: Option<u32>,
-            column_number: Option<u32>,
+            position: Option<(u32, u32)>,
             duration_ms: f64,
         ) -> Self {
+            let (line_number, column_number) = match position {
+                Some((l, c)) => (Some(l), Some(c)),
+                None => (None, None),
+            };
             Self {
                 success,
                 output,
