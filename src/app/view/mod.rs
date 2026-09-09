@@ -2694,6 +2694,7 @@ impl OpenCADStudio {
             crate::ui::dock::PanelId::PidLegend => crate::ui::window::pid_legend_list::view(
                 tab.pid_legend(),
                 tab.pid_legend_is_stale(),
+                self.pid_legend_filter,
                 width,
                 auto_collapse,
             ),

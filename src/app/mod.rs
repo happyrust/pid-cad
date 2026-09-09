@@ -655,6 +655,8 @@ pub(super) struct OpenCADStudio {
     pub(crate) show_block_palette: bool,
     /// Docked P&ID legend list visibility (PIDLEGEND LIST).
     pub(crate) show_pid_legend_list: bool,
+    /// Which group of symbols the P&ID legend list shows (its filter row).
+    pub(crate) pid_legend_filter: crate::ui::window::pid_legend_list::PidLegendFilter,
     /// General edge-stack dock layout for the side panels.
     pub(crate) dock: crate::ui::dock::DockState,
     /// Which panel is currently floated at full height (hovered, or a pinned
@@ -3019,6 +3021,9 @@ pub enum Message {
     /// A pipe-row click in the P&ID legend list: select every stroke of the
     /// line family's runs in the drawing and zoom to their whole extent.
     PidLegendPickFamily(String),
+    /// The P&ID legend list's group filter: all symbols, the tagged ones, or
+    /// the ones that should carry a tag and do not.
+    PidLegendFilter(crate::ui::window::pid_legend_list::PidLegendFilter),
     /// A dock chrome interaction (grab/resize/pin/hover/dock move) on a side
     /// panel.
     Dock(crate::ui::dock::DockMsg),
@@ -3480,6 +3485,7 @@ impl OpenCADStudio {
             show_properties: true,
             show_block_palette: false,
             show_pid_legend_list: false,
+            pid_legend_filter: Default::default(),
             block_palette: Default::default(),
             dock: Default::default(),
             dock_expanded: None,

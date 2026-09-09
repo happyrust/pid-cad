@@ -7241,6 +7241,10 @@ impl OpenCADStudio {
                 }
                 Task::none()
             }
+            Message::PidLegendFilter(filter) => {
+                self.pid_legend_filter = filter;
+                Task::none()
+            }
             Message::Dock(m) => self.on_dock(m),
             Message::PrintAllOpen => self.on_print_all_open(),
             Message::PrintAllToggle(name) => {

@@ -6,6 +6,11 @@
 //! camera to that symbol or that line's whole extent — the panel is the index,
 //! the drawing stays the document.
 //!
+//! Within a class the tagged symbols come first, in tag order, then the
+//! untagged ones top to bottom, left to right; the filter row under the title
+//! narrows the list to the tagged symbols or to the ones that should carry a
+//! tag and do not ([`PidLegendFilter`]).
+//!
 //! The panel follows the active tab. A tab that has not run PIDLEGEND yet
 //! shows a hint instead of a list. A list whose drawing has moved on since it
 //! was read (`stale`) is marked out of date and greyed: its rows may point at
@@ -13,10 +18,53 @@
 //! before it selects; `PIDLEGEND LIST` refreshes the list itself.
 
 use crate::app::Message;
-use crate::io::pid_legend::Recognition;
+use crate::io::pid_legend::{Recognition, Recognized};
 use crate::ui::dock::{DockMsg, PanelId};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, tooltip};
 use iced::{Background, Element, Fill, Length, Theme};
+
+/// Which symbols the legend list shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PidLegendFilter {
+    #[default]
+    All,
+    /// Symbols carrying a tag.
+    Tagged,
+    /// Symbols of a class that takes a tag, carrying none -- the ones left to
+    /// chase. A class that never takes a tag (a flow arrow, a hydrant) is in
+    /// neither group: it shows under `All` only.
+    Untagged,
+}
+
+impl PidLegendFilter {
+    /// Whether `s` is in the group.
+    fn admits(self, s: &Recognized) -> bool {
+        match self {
+            PidLegendFilter::All => true,
+            PidLegendFilter::Tagged => s.tag.is_some(),
+            PidLegendFilter::Untagged => s.wants_tag && s.tag.is_none(),
+        }
+    }
+}
+
+/// The rows of one class the list shows for `filter`: the tagged symbols
+/// first, in tag order, then the untagged ones as the sheet reads -- top to
+/// bottom, left to right. The recognition's own order is the order symbols
+/// were found in, which for the exploded family varies from run to run.
+fn rows<'a>(symbols: &[&'a Recognized], filter: PidLegendFilter) -> Vec<&'a Recognized> {
+    let mut out: Vec<&Recognized> = symbols
+        .iter()
+        .copied()
+        .filter(|s| filter.admits(s))
+        .collect();
+    out.sort_by(|a, b| match (&a.tag, &b.tag) {
+        (Some(x), Some(y)) => x.cmp(y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => b.at.1.total_cmp(&a.at.1).then(a.at.0.total_cmp(&b.at.0)),
+    });
+    out
+}
 
 /// World-space rectangle a row's click should zoom to: the box padded so the
 /// target sits well inside the view instead of touching its edges.
@@ -115,10 +163,12 @@ fn jump_row<'a>(
 }
 
 /// Build the docked panel element from the active tab's recognition. `stale`
-/// says the drawing has changed since the recognition was read.
+/// says the drawing has changed since the recognition was read; `filter` is
+/// the group of symbols the list is narrowed to.
 pub fn view(
     recognition: Option<&Recognition>,
     stale: bool,
+    filter: PidLegendFilter,
     width: f32,
     auto_collapse: bool,
 ) -> Element<'_, Message> {
@@ -208,6 +258,11 @@ pub fn view(
     // ── Symbols by class ──────────────────────────────────────────────────
     let groups = rec.by_class();
     let tagged: usize = rec.symbols.iter().filter(|s| s.tag.is_some()).count();
+    let untagged: usize = rec
+        .symbols
+        .iter()
+        .filter(|s| PidLegendFilter::Untagged.admits(s))
+        .count();
     col = col.push(
         container(row_text(
             format!("符号 {}（带位号 {}）", rec.symbols.len(), tagged),
@@ -216,7 +271,49 @@ pub fn view(
         ))
         .padding([4, 6]),
     );
+    // The group filter: all / tagged / should carry a tag but does not.
+    let choice = |label: String, tip: &'static str, choose: PidLegendFilter| {
+        let selected = filter == choose;
+        let b = button(text(label).size(10))
+            .on_press(Message::PidLegendFilter(choose))
+            .padding([2, 6])
+            .style(move |theme: &Theme, status| {
+                if selected {
+                    button::primary(theme, status)
+                } else {
+                    button::secondary(theme, status)
+                }
+            });
+        tooltip(b, text(tip).size(10), tooltip::Position::Bottom).gap(4)
+    };
+    col = col.push(
+        container(
+            row![
+                choice(
+                    format!("全部 {}", rec.symbols.len()),
+                    "所有识别出的符号",
+                    PidLegendFilter::All,
+                ),
+                choice(
+                    format!("有位号 {tagged}"),
+                    "带位号的符号",
+                    PidLegendFilter::Tagged,
+                ),
+                choice(
+                    format!("无位号 {untagged}"),
+                    "应带位号而没有配到的符号（不编号的类不算）",
+                    PidLegendFilter::Untagged,
+                ),
+            ]
+            .spacing(4),
+        )
+        .padding([0, 6]),
+    );
     for ((_, label), symbols) in &groups {
+        let shown = rows(symbols, filter);
+        if shown.is_empty() {
+            continue;
+        }
         let color = symbols[0].color;
         let wants_tag = symbols[0].wants_tag;
         let with_tag = symbols.iter().filter(|s| s.tag.is_some()).count();
@@ -239,7 +336,7 @@ pub fn view(
             .width(Fill)
             .padding([3, 6]),
         );
-        for s in symbols {
+        for s in shown {
             let name: String = match &s.tag {
                 Some(tag) => tag.clone(),
                 None => format!(
@@ -401,5 +498,62 @@ mod tests {
         let ((x0, _), (x1, _)) = jump_rect((0.0, 0.0, 100.0, 10.0), 1.0);
         assert_eq!(x0, -120.0);
         assert_eq!(x1, 220.0);
+    }
+
+    fn symbol(tag: Option<&str>, wants_tag: bool, at: (f64, f64)) -> Recognized {
+        Recognized {
+            class: "ball-valve".into(),
+            label: "球阀".into(),
+            color: [0, 0, 0],
+            at,
+            bbox: (at.0 - 1.0, at.1 - 1.0, at.0 + 1.0, at.1 + 1.0),
+            source: "shape".into(),
+            known: true,
+            inner_text: Vec::new(),
+            tag: tag.map(str::to_string),
+            tag_distance_mm: tag.map(|_| 3.0),
+            wants_tag,
+            report_untagged: wants_tag,
+            lines: Vec::new(),
+        }
+    }
+
+    /// Within a class the tagged symbols lead, in tag order, then the untagged
+    /// ones as the sheet reads (top to bottom, left to right) -- whatever
+    /// order recognition found them in. The filters take one group each; a
+    /// symbol of a class that never takes a tag is in neither.
+    #[test]
+    fn rows_group_tagged_before_untagged_and_the_filters_take_one_group_each() {
+        let found = [
+            symbol(None, true, (50.0, 10.0)),
+            symbol(Some("BV0302"), true, (20.0, 40.0)),
+            symbol(None, true, (10.0, 30.0)),
+            symbol(Some("BV0301"), true, (10.0, 40.0)),
+            symbol(None, true, (40.0, 30.0)),
+            symbol(None, false, (0.0, 0.0)),
+        ];
+        let refs: Vec<&Recognized> = found.iter().collect();
+        let name = |rows: Vec<&Recognized>| -> Vec<String> {
+            rows.iter()
+                .map(|s| {
+                    s.tag
+                        .clone()
+                        .unwrap_or_else(|| format!("({:.0}, {:.0})", s.at.0, s.at.1))
+                })
+                .collect()
+        };
+        assert_eq!(
+            name(rows(&refs, PidLegendFilter::All)),
+            ["BV0301", "BV0302", "(10, 30)", "(40, 30)", "(50, 10)", "(0, 0)"]
+        );
+        assert_eq!(
+            name(rows(&refs, PidLegendFilter::Tagged)),
+            ["BV0301", "BV0302"]
+        );
+        assert_eq!(
+            name(rows(&refs, PidLegendFilter::Untagged)),
+            ["(10, 30)", "(40, 30)", "(50, 10)"],
+            "the class that takes no tag is not 'untagged'"
+        );
     }
 }
