@@ -237,6 +237,60 @@ fn synthetic_sheet_is_recognised_and_tagged_one_to_one() {
     );
 }
 
+/// Unclaimed lettering with the shape of a tag is sorted, not lumped: a
+/// range annotation is checked member by member, a value a symbol already
+/// carries (a table row) is a duplicate, and only what is neither is an
+/// orphan -- with a range's missing member counted among those.
+#[test]
+fn unclaimed_lettering_is_sorted_into_ranges_duplicates_and_orphans() {
+    let mut doc = synthetic_sheet();
+    // Far from any valve (the search radius is 15 mm): an interlock table's
+    // two ways of writing a group, one complete and one naming a valve the
+    // sheet does not place; an equipment table's row repeating BUV-3101; and
+    // a tag no symbol has.
+    doc.add_entity(text("BUV-3101/3102", 200.0, 200.0)).unwrap();
+    doc.add_entity(text("BUV-3101～3103", 200.0, 190.0))
+        .unwrap();
+    doc.add_entity(text("BUV-3101", 200.0, 180.0)).unwrap();
+    doc.add_entity(text("BUV-3199", 200.0, 170.0)).unwrap();
+    let mut rules = Rules::builtin();
+    let recognition = pid_legend::recognise(&doc, &rules);
+
+    // The valves keep the tags lettered beside them.
+    assert_eq!(tags_of(&recognition, "butterfly"), ["BUV-3101", "BUV-3102"]);
+    let ranges = &recognition.range_annotations["蝶阀"];
+    assert_eq!(ranges.len(), 2, "{ranges:?}");
+    assert_eq!(ranges[0].value, "BUV-3101/3102");
+    assert_eq!(ranges[0].members, ["BUV-3101", "BUV-3102"]);
+    assert!(ranges[0].missing.is_empty());
+    assert_eq!(ranges[1].value, "BUV-3101～3103");
+    assert_eq!(ranges[1].members, ["BUV-3101", "BUV-3102", "BUV-3103"]);
+    assert_eq!(ranges[1].missing, ["BUV-3103"]);
+    assert_eq!(recognition.duplicate_tags["蝶阀"], ["BUV-3101"]);
+    assert_eq!(recognition.orphan_tags["蝶阀"], ["BUV-3103", "BUV-3199"]);
+
+    let lines = pid_legend::report(&recognition);
+    for expected in [
+        "ORPHAN 蝶阀 tags (no symbol claimed them): BUV-3103, BUV-3199",
+        "RANGE 蝶阀 annotations, 1/2 with every member on a symbol: BUV-3101/3102, BUV-3101～3103 (missing BUV-3103)",
+        "DUPLICATE 蝶阀 tags (a symbol already carries them): BUV-3101",
+    ] {
+        assert!(
+            lines.iter().any(|l| l.contains(expected)),
+            "missing {expected:?} in {lines:#?}"
+        );
+    }
+
+    // The rules can keep table rows among the orphans instead.
+    rules.orphans.claimed_elsewhere = true;
+    let recognition = pid_legend::recognise(&doc, &rules);
+    assert!(recognition.duplicate_tags.is_empty());
+    assert_eq!(
+        recognition.orphan_tags["蝶阀"],
+        ["BUV-3101", "BUV-3103", "BUV-3199"]
+    );
+}
+
 #[test]
 fn legend_entities_go_on_coloured_class_layers_and_come_off_again() {
     let mut doc = synthetic_sheet();
@@ -1993,6 +2047,122 @@ fn cpecc_loading_island_sheets_have_no_unnamed_shape_left() {
         assert_eq!(untagged_checks, small_check_valves, "{file}");
     }
     ran.finish("cpecc_loading_island_sheets_have_no_unnamed_shape_left");
+}
+
+/// On the six loading-island sheets the 34 pieces of unclaimed tag-shaped
+/// lettering are 19 range annotations, 6 table rows and 9 loading-arm tags
+/// -- and only the last are reported as orphans. Every one of the 34 is
+/// still in the report, on the line that says what it is.
+#[test]
+fn cpecc_unclaimed_lettering_on_the_loading_islands_is_sorted() {
+    let rules = Rules::builtin();
+    let mut ran = Ran::new();
+    // (file, range annotations per label with the ones naming a missing
+    // member, duplicates per label, orphans per label)
+    for (file, ranges, duplicates, orphans) in [
+        (
+            "DWG-0100SP02-05 发油泵棚(二)工艺自控流程图.dxf",
+            vec![("电动阀", 8, vec![])],
+            vec![("电动阀", vec!["XV-0407C", "XV-0407F", "XV-0408E"])],
+            vec![],
+        ),
+        (
+            "DWG-0100SP02-06 汽车装卸岛(一)工艺自控流程图.dxf",
+            vec![("鹤管总成", 1, vec!["LA-0301～0302"])],
+            vec![
+                ("电动阀", vec!["XV-0301", "XV-0302"]),
+                ("鹤管总成", vec!["LA-0319"]),
+            ],
+            vec![("鹤管总成", vec!["LA-0302"])],
+        ),
+        (
+            "DWG-0100SP02-07 汽车装卸岛(二)工艺自控流程图.dxf",
+            vec![
+                ("电动阀", 2, vec![]),
+                ("鹤管总成", 2, vec!["LA-0303～0307"]),
+            ],
+            vec![],
+            vec![("鹤管总成", vec!["LA-0304", "LA-0306"])],
+        ),
+        (
+            "DWG-0100SP02-08 汽车装卸岛(三)工艺自控流程图.dxf",
+            vec![
+                ("电动阀", 1, vec![]),
+                ("鹤管总成", 2, vec!["LA-0308～0313"]),
+            ],
+            vec![],
+            vec![("鹤管总成", vec!["LA-0310", "LA-0313"])],
+        ),
+        (
+            "DWG-0100SP02-09 汽车装卸岛(四)工艺自控流程图.dxf",
+            vec![("鹤管总成", 2, vec!["LA-0314～0318"])],
+            vec![],
+            vec![("鹤管总成", vec!["LA-0316", "LA-0318"])],
+        ),
+        (
+            "DWG-0100SP02-10 汽车装卸岛(五)工艺自控流程图.dxf",
+            vec![("鹤管总成", 1, vec!["LA-0326～0327"])],
+            vec![],
+            vec![("鹤管总成", vec!["LA-0326", "LA-0327"])],
+        ),
+    ] {
+        let Some(doc) = ran.sheet(file) else {
+            continue;
+        };
+        let recognition = pid_legend::recognise(&doc, &rules);
+        assert_eq!(
+            recognition.range_annotations.len(),
+            ranges.len(),
+            "{file}: range labels {:?}",
+            recognition.range_annotations.keys()
+        );
+        for (label, count, incomplete) in ranges {
+            let found = &recognition.range_annotations[label];
+            assert_eq!(found.len(), count, "{file}: {label} ranges {found:?}");
+            let with_missing: Vec<&str> = found
+                .iter()
+                .filter(|a| !a.missing.is_empty())
+                .map(|a| a.value.as_str())
+                .collect();
+            assert_eq!(with_missing, incomplete, "{file}: {label}");
+            // Every member a range names and no symbol carries is an orphan.
+            for a in found {
+                for m in &a.missing {
+                    assert!(
+                        recognition.orphan_tags[label].contains(m),
+                        "{file}: {m} missing from {a:?} but not an orphan"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            recognition.duplicate_tags.len(),
+            duplicates.len(),
+            "{file}: duplicate labels {:?}",
+            recognition.duplicate_tags.keys()
+        );
+        for (label, tags) in duplicates {
+            assert_eq!(recognition.duplicate_tags[label], tags, "{file}: {label}");
+        }
+        assert_eq!(
+            recognition.orphan_tags.len(),
+            orphans.len(),
+            "{file}: orphan labels {:?}",
+            recognition.orphan_tags
+        );
+        for (label, tags) in orphans {
+            assert_eq!(recognition.orphan_tags[label], tags, "{file}: {label}");
+        }
+        // The flow arrows' tags are not worth chasing: their line says how
+        // many carry one and nothing about where the others stand.
+        let report = pid_legend::report(&recognition);
+        let arrows = report
+            .iter()
+            .find(|l| l.contains("(flow-arrow)"))
+            .unwrap_or_else(|| panic!("{file}: no flow-arrow line in {report:#?}"));
+        assert!(!arrows.contains("UNTAGGED"), "{file}: {arrows}");
+    }
+    ran.finish("cpecc_unclaimed_lettering_on_the_loading_islands_is_sorted");
 }
 
 #[test]

@@ -164,6 +164,14 @@ fn main() {
                     "nearby": s.nearby,
                 })).collect::<Vec<_>>(),
                 "orphan_tags": recognition.orphan_tags,
+                "range_annotations": recognition.range_annotations.iter().map(|(label, annotations)| {
+                    (label.clone(), serde_json::Value::Array(annotations.iter().map(|a| serde_json::json!({
+                        "value": a.value,
+                        "members": a.members,
+                        "missing": a.missing,
+                    })).collect()))
+                }).collect::<serde_json::Map<String, serde_json::Value>>(),
+                "duplicate_tags": recognition.duplicate_tags,
                 "pipes": pipes_json(&recognition.pipes),
             }));
         } else {

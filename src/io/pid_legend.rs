@@ -124,6 +124,13 @@ pub struct TagRule {
     /// that also occur where no symbol is expected (a sheet's own number in
     /// the title block has the shape of a sheet reference).
     pub report_orphans: bool,
+    /// List where the symbols of this class that got no tag stand. Absent =
+    /// same as `report_orphans`: a class whose tags are not worth chasing
+    /// (the flow arrows, which only carry a sheet number at the sheet's edge)
+    /// is not worth a line of coordinates either. Set it to keep the
+    /// coordinates for a class that turns orphans off for another reason
+    /// (the sheet connector, whose orphan would be the sheet's own number).
+    pub report_untagged: Option<bool>,
 }
 
 impl Default for TagRule {
@@ -134,6 +141,7 @@ impl Default for TagRule {
             bubble: None,
             radius_mm: None,
             report_orphans: true,
+            report_untagged: None,
         }
     }
 }
@@ -142,6 +150,22 @@ impl TagRule {
     fn wants_tag(&self) -> bool {
         self.shape.is_some() || self.inner || self.bubble.is_some()
     }
+
+    fn reports_untagged(&self) -> bool {
+        self.report_untagged.unwrap_or(self.report_orphans)
+    }
+}
+
+/// How lettering that has the shape of a tag but that no symbol claimed is
+/// sorted, `orphans` in the rules JSON.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct OrphanRules {
+    /// Report lettering whose value a symbol already carries as its tag as
+    /// an orphan too. Off (the default), such lettering -- an equipment
+    /// table's row, an interlock table's cell -- is listed as a duplicate
+    /// instead: not lost, not mistaken for a symbol that lost its tag.
+    pub claimed_elsewhere: bool,
 }
 
 /// Where pipe joins a block that carries no connection `POINT`.
@@ -372,6 +396,8 @@ pub struct Rules {
     pub shapes: Option<ShapeRules>,
     /// The pipe pass; no layer prefixes = off.
     pub pipes: PipeRules,
+    /// How unclaimed tag-shaped lettering is sorted.
+    pub orphans: OrphanRules,
 }
 
 impl Default for Rules {
@@ -388,6 +414,7 @@ impl Default for Rules {
             tag_classes: Vec::new(),
             shapes: None,
             pipes: PipeRules::default(),
+            orphans: OrphanRules::default(),
         }
     }
 }
@@ -496,9 +523,27 @@ pub struct Recognized {
     pub tag_distance_mm: Option<f64>,
     /// Whether this class expects a tag at all.
     pub wants_tag: bool,
+    /// Whether the report says where this symbol stands when it got no tag
+    /// (`TagRule::report_untagged`).
+    pub report_untagged: bool,
     /// Line numbers of the pipe runs at the symbol's connection points,
     /// distinct, sorted. Empty when no pipe reaches it or none is numbered.
     pub lines: Vec<String>,
+}
+
+/// Lettering that names several tags at once -- `XV-0407A～0409A`,
+/// `XV-0407D/0407E`, `LA-0308～0313` -- an interlock or equipment table's
+/// way of writing a group, not a tag a symbol could carry. Its members are
+/// checked against the symbols' tags: an annotation whose members are all on
+/// a symbol is a free cross-check of the sheet; a member no symbol carries is
+/// reported as an orphan in its own right.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RangeAnnotation {
+    pub value: String,
+    /// The tags it names, in order.
+    pub members: Vec<String>,
+    /// Those of `members` no symbol carries.
+    pub missing: Vec<String>,
 }
 
 /// An exploded shape the sheet repeats but nothing names: what the report
@@ -527,8 +572,16 @@ pub struct Recognition {
     /// Repeated exploded shapes nothing names, most frequent first.
     pub unknown_shapes: Vec<UnknownShape>,
     /// Class label -> lettering that matched the class's tag shape but no
-    /// symbol claimed.
+    /// symbol claimed -- and no range annotation or duplicate accounts for.
+    /// A range annotation's missing members are listed here too.
     pub orphan_tags: BTreeMap<String, Vec<String>>,
+    /// Class label -> unclaimed lettering that names a group of tags, with
+    /// the members checked against the symbols.
+    pub range_annotations: BTreeMap<String, Vec<RangeAnnotation>>,
+    /// Class label -> unclaimed lettering whose value a symbol already
+    /// carries as its tag (a table row), distinct. Empty when the rules say
+    /// `orphans.claimed_elsewhere`, which keeps them among the orphans.
+    pub duplicate_tags: BTreeMap<String, Vec<String>>,
     /// Pieces of model-space lettering considered.
     pub lettering: usize,
     /// The pipe, joined into runs between the symbols (block family).
@@ -852,6 +905,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             known,
             inner_text: Vec::new(),
             wants_tag: tag.wants_tag(),
+            report_untagged: tag.reports_untagged(),
             lines: Vec::new(),
             tag: None,
             tag_distance_mm: None,
@@ -936,6 +990,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             known: true,
             inner_text: inner,
             wants_tag: rule.tag.wants_tag(),
+            report_untagged: rule.tag.reports_untagged(),
             lines: Vec::new(),
             tag: None,
             tag_distance_mm: None,
@@ -1044,7 +1099,13 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
     }
 
     // ── lettering that looks like a tag but found no symbol
+    // Sorted three ways: a range annotation (`XV-0407A～0409A`) is checked
+    // member by member and only a member no symbol carries is an orphan; a
+    // value some symbol already carries is a duplicate (a table row), not a
+    // symbol that lost its tag; the rest are orphans proper.
     let mut orphan_tags: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut range_annotations: BTreeMap<String, Vec<RangeAnnotation>> = BTreeMap::new();
+    let mut duplicate_tags: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let orphan_shapes: Vec<(&str, &str)> = rules
         .blocks
         .values()
@@ -1058,12 +1119,47 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
                 .map(|r| (r.shape.as_str(), r.label.as_str())),
         )
         .collect();
+    let carried: HashSet<&str> = symbols.iter().filter_map(|s| s.tag.as_deref()).collect();
     for (k, l) in lettering.iter().enumerate() {
         if taken_text[k] {
             continue;
         }
+        let expanded = expand_range(&l.value);
         for (shape, label) in &orphan_shapes {
-            if shape_matches(shape, &l.value) {
+            // A range is of a class when every tag it names has the class's
+            // shape -- `BUV-3101/3102` is not itself shaped `BUV-9999`.
+            let range = expanded
+                .as_ref()
+                .filter(|members| members.iter().all(|m| shape_matches(shape, m)));
+            if range.is_none() && !shape_matches(shape, &l.value) {
+                continue;
+            }
+            if let Some(members) = range {
+                let missing: Vec<String> = members
+                    .iter()
+                    .filter(|m| !carried.contains(m.as_str()))
+                    .cloned()
+                    .collect();
+                if !missing.is_empty() {
+                    orphan_tags
+                        .entry(label.to_string())
+                        .or_default()
+                        .extend(missing.iter().cloned());
+                }
+                range_annotations
+                    .entry(label.to_string())
+                    .or_default()
+                    .push(RangeAnnotation {
+                        value: l.value.clone(),
+                        members: members.clone(),
+                        missing,
+                    });
+            } else if carried.contains(l.value.as_str()) && !rules.orphans.claimed_elsewhere {
+                duplicate_tags
+                    .entry(label.to_string())
+                    .or_default()
+                    .push(l.value.clone());
+            } else {
                 orphan_tags
                     .entry(label.to_string())
                     .or_default()
@@ -1071,9 +1167,13 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             }
         }
     }
-    for values in orphan_tags.values_mut() {
+    for values in orphan_tags.values_mut().chain(duplicate_tags.values_mut()) {
         values.sort();
         values.dedup();
+    }
+    for annotations in range_annotations.values_mut() {
+        annotations.sort_by(|a, b| a.value.cmp(&b.value));
+        annotations.dedup_by(|a, b| a.value == b.value);
     }
 
     // ── the pipe: runs between the symbols' connection points, numbered
@@ -1098,9 +1198,97 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
         unknown_blocks,
         unknown_shapes,
         orphan_tags,
+        range_annotations,
+        duplicate_tags,
         lettering: lettering.len(),
         pipes,
     }
+}
+
+/// A tag split into the part before its number, the number, and what
+/// follows it: `XV-0407A` -> `("XV-", "0407", "A")`, `0409A` -> `("", "0409",
+/// "A")`, `LA-0303` -> `("LA-", "0303", "")`. `None` when there is no number
+/// or more than one capital letter follows it.
+fn split_tag(value: &str) -> Option<(&str, &str, &str)> {
+    let start = value.find(|c: char| c.is_ascii_digit())?;
+    let digits = value[start..]
+        .find(|c: char| !c.is_ascii_digit())
+        .map_or(value.len(), |n| start + n);
+    let (prefix, number, suffix) = (&value[..start], &value[start..digits], &value[digits..]);
+    let suffix_ok =
+        suffix.is_empty() || (suffix.len() == 1 && suffix.as_bytes()[0].is_ascii_uppercase());
+    suffix_ok.then_some((prefix, number, suffix))
+}
+
+/// The most members a range annotation may name; a wider span is a typo or
+/// not a range at all.
+const RANGE_MEMBERS_MAX: usize = 50;
+
+/// The tags a range annotation names, or `None` when `value` is not one.
+///
+/// Two spellings occur on the sheets: an enumeration, `XV-0407D/0407E` --
+/// each part after the first inherits the first's prefix -- and a span,
+/// `XV-0407A～0409A` (also `~`), which runs over the numbers when the
+/// suffixes agree (`0407A`, `0408A`, `0409A`) and over the suffix letters
+/// when the numbers agree (`XV-0410A～0410H`). Anything else -- a size like
+/// `1/2"`, a span over both number and letter, a part with a different
+/// prefix -- is not a range.
+pub fn expand_range(value: &str) -> Option<Vec<String>> {
+    if value.contains(char::is_whitespace) || value.contains('"') {
+        return None;
+    }
+    let separator = ['～', '~', '/'].into_iter().find(|s| value.contains(*s))?;
+    let parts: Vec<&str> = value.split(separator).collect();
+    if parts.len() < 2 || parts.iter().any(|p| p.is_empty()) {
+        return None;
+    }
+    let (prefix, first_number, first_suffix) = split_tag(parts[0])?;
+    if prefix.is_empty() {
+        return None;
+    }
+    let mut ends = vec![(first_number, first_suffix)];
+    for part in &parts[1..] {
+        let (p, number, suffix) = split_tag(part)?;
+        if !p.is_empty() && p != prefix {
+            return None;
+        }
+        ends.push((number, suffix));
+    }
+    if separator == '/' {
+        return Some(
+            ends.iter()
+                .map(|(number, suffix)| format!("{prefix}{number}{suffix}"))
+                .collect(),
+        );
+    }
+    if ends.len() != 2 {
+        return None;
+    }
+    let ((n1, s1), (n2, s2)) = (ends[0], ends[1]);
+    if n1 != n2 && s1 == s2 {
+        let (a, b) = (n1.parse::<usize>().ok()?, n2.parse::<usize>().ok()?);
+        if b < a || b - a + 1 > RANGE_MEMBERS_MAX {
+            return None;
+        }
+        let width = n1.len();
+        return Some(
+            (a..=b)
+                .map(|n| format!("{prefix}{n:0width$}{s1}"))
+                .collect(),
+        );
+    }
+    if n1 == n2 && s1 != s2 && s1.len() == 1 && s2.len() == 1 {
+        let (a, b) = (s1.as_bytes()[0], s2.as_bytes()[0]);
+        if b < a {
+            return None;
+        }
+        return Some(
+            (a..=b)
+                .map(|c| format!("{prefix}{n1}{}", c as char))
+                .collect(),
+        );
+    }
+    None
 }
 
 // ── Exploded symbols ─────────────────────────────────────────────────────
@@ -2249,6 +2437,7 @@ fn exploded_symbols(
                     tag: Some(tag),
                     tag_distance_mm: Some(*d),
                     wants_tag: true,
+                    report_untagged: rule.report_orphans,
                     lines: Vec::new(),
                 },
                 TagRule::default(),
@@ -2270,6 +2459,7 @@ fn exploded_symbols(
                     tag: None,
                     tag_distance_mm: None,
                     wants_tag: rule.tag.wants_tag(),
+                    report_untagged: rule.tag.reports_untagged(),
                     lines: Vec::new(),
                 },
                 rule.tag.clone(),
@@ -2289,6 +2479,7 @@ fn exploded_symbols(
                     tag: None,
                     tag_distance_mm: None,
                     wants_tag: false,
+                    report_untagged: false,
                     lines: Vec::new(),
                 },
                 TagRule::default(),
@@ -2363,6 +2554,7 @@ fn exploded_symbols(
                         tag: Some(lettering[k].value.clone()),
                         tag_distance_mm: Some(d),
                         wants_tag: true,
+                        report_untagged: rule.report_orphans,
                         lines: Vec::new(),
                     },
                     TagRule::default(),
@@ -2386,6 +2578,7 @@ fn exploded_symbols(
                         tag: None,
                         tag_distance_mm: None,
                         wants_tag: rule.tag.wants_tag(),
+                        report_untagged: rule.tag.reports_untagged(),
                         lines: Vec::new(),
                     },
                     rule.tag.clone(),
@@ -2622,9 +2815,11 @@ pub fn report(recognition: &Recognition) -> Vec<String> {
             if !tags.is_empty() {
                 line.push_str(&format!(": {}", tags.join(", ")));
             }
+            // Where the untagged ones stand -- unless the class says its tags
+            // are not worth chasing (the flow arrows): then the count says it.
             let untagged: Vec<String> = items
                 .iter()
-                .filter(|s| s.tag.is_none())
+                .filter(|s| s.tag.is_none() && s.report_untagged)
                 .map(|s| format!("({:.0}, {:.0})", s.at.0, s.at.1))
                 .collect();
             if !untagged.is_empty() {
@@ -2675,6 +2870,30 @@ pub fn report(recognition: &Recognition) -> Vec<String> {
     for (label, tags) in &recognition.orphan_tags {
         lines.push(format!(
             "  ORPHAN {label} tags (no symbol claimed them): {}",
+            tags.join(", ")
+        ));
+    }
+    for (label, annotations) in &recognition.range_annotations {
+        let spelt: Vec<String> = annotations
+            .iter()
+            .map(|a| {
+                if a.missing.is_empty() {
+                    a.value.clone()
+                } else {
+                    format!("{} (missing {})", a.value, a.missing.join(", "))
+                }
+            })
+            .collect();
+        let complete = annotations.iter().filter(|a| a.missing.is_empty()).count();
+        lines.push(format!(
+            "  RANGE {label} annotations, {complete}/{} with every member on a symbol: {}",
+            annotations.len(),
+            spelt.join(", ")
+        ));
+    }
+    for (label, tags) in &recognition.duplicate_tags {
+        lines.push(format!(
+            "  DUPLICATE {label} tags (a symbol already carries them): {}",
             tags.join(", ")
         ));
     }
@@ -2972,6 +3191,55 @@ mod tests {
             "the vent stub joins pipe at the far end of its stem"
         );
         assert_eq!(rules.blocks["$TwtSys$00000132"].port, None);
+        // The sheet connector turns orphans off (the sheet's own number has
+        // the shape) but keeps the coordinates of the connectors without one.
+        let connector = &rules.blocks["$TwtSys$00000132"].tag;
+        assert!(!connector.report_orphans && connector.reports_untagged());
+        assert!(
+            !rules.orphans.claimed_elsewhere,
+            "a table row a symbol already carries is a duplicate, not an orphan"
+        );
+    }
+
+    /// The two spellings of a group of tags come apart into their members;
+    /// what is not a group stays whole.
+    #[test]
+    fn a_range_annotation_expands_to_the_tags_it_names() {
+        assert_eq!(
+            expand_range("XV-0407A～0409A"),
+            Some(words(&["XV-0407A", "XV-0408A", "XV-0409A"]))
+        );
+        assert_eq!(
+            expand_range("XV-0410A~0410D"),
+            Some(words(&["XV-0410A", "XV-0410B", "XV-0410C", "XV-0410D"]))
+        );
+        assert_eq!(
+            expand_range("XV-0407D/0407E"),
+            Some(words(&["XV-0407D", "XV-0407E"]))
+        );
+        assert_eq!(
+            expand_range("LA-0303～0307"),
+            Some(words(&[
+                "LA-0303", "LA-0304", "LA-0305", "LA-0306", "LA-0307"
+            ]))
+        );
+        assert_eq!(
+            expand_range("LA-0326～LA-0327"),
+            Some(words(&["LA-0326", "LA-0327"])),
+            "a repeated prefix is allowed"
+        );
+        // Not ranges: a plain tag, a size, a span over number and letter at
+        // once, a backwards span, a different prefix on the far end.
+        assert_eq!(expand_range("XV-0407A"), None);
+        assert_eq!(expand_range("PR-0301A 1/2\""), None);
+        assert_eq!(expand_range("XV-0407A～0409B"), None);
+        assert_eq!(expand_range("LA-0307～0303"), None);
+        assert_eq!(expand_range("XV-0407A～HS-0409A"), None);
+        assert_eq!(
+            expand_range("LA-0001～0999"),
+            None,
+            "too wide to be a group"
+        );
     }
 
     #[test]
