@@ -1955,6 +1955,47 @@ fn cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves() {
     ran.finish("cpecc_exploded_sheets_read_every_bubble_and_name_the_tagged_valves");
 }
 
+/// The symbols come out in the same order every time the sheet is read. The
+/// exploded family's components once came in the order a union-find's roots
+/// happened to land, which followed a HashMap's iteration -- SP02-10 read
+/// four times gave the ball valves in four orders, so the panel's rows
+/// jumped on every `PIDLEGEND ON` and `End::Symbol(i)` named a different
+/// symbol each run. Components now come by their first stroke, in the
+/// sheet's own order.
+#[test]
+fn cpecc_symbols_come_in_the_same_order_every_run() {
+    let rules = Rules::builtin();
+    let Some(doc) = load_sheet("DWG-0100SP02-10 汽车装卸岛(五)工艺自控流程图.dxf")
+    else {
+        return;
+    };
+    let order = || -> Vec<(String, (i64, i64), Option<String>)> {
+        pid_legend::recognise(&doc, &rules)
+            .symbols
+            .iter()
+            .map(|s| {
+                (
+                    s.class.clone(),
+                    (
+                        (s.at.0 * 10.0).round() as i64,
+                        (s.at.1 * 10.0).round() as i64,
+                    ),
+                    s.tag.clone(),
+                )
+            })
+            .collect()
+    };
+    let first = order();
+    assert_eq!(first.len(), 120);
+    for run in 1..4 {
+        assert_eq!(
+            order(),
+            first,
+            "run {run} read the symbols in another order"
+        );
+    }
+}
+
 /// SP02-10 draws its valves touching the pipe and each other: a ball valve
 /// against a strainer, a check valve against a ball valve, a coupling
 /// against a ball valve. Each comes apart into its two symbols, and the

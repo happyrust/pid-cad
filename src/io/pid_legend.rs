@@ -1779,7 +1779,14 @@ fn components(prims: &[Prim], eps: f64) -> Vec<Vec<usize>> {
         let root = find(&mut parent, i);
         groups.entry(root).or_default().push(i);
     }
-    groups.into_values().collect()
+    // Which stroke a component's root lands on depends on the order the
+    // pairs came in, and that is a HashMap's -- a different one every run,
+    // which put the symbols in a different order every run (the panel's rows
+    // jumped, `End::Symbol(i)` moved). By first stroke the order is the
+    // sheet's own.
+    let mut groups: Vec<Vec<usize>> = groups.into_values().collect();
+    groups.sort_by_key(|group| group[0]);
+    groups
 }
 
 /// Box of a set of strokes.
