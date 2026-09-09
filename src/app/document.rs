@@ -216,12 +216,61 @@ pub(super) struct DocumentTab {
     pub(super) plugin_state: HashMap<&'static str, Box<dyn Any + Send + Sync>>,
     pub(super) suspended_cmd: Option<Box<dyn CadCommand>>,
     /// What PIDLEGEND last recognised on this sheet — the legend list panel's
-    /// data. Kept through PIDLEGEND OFF so the list stays browsable after the
-    /// drawn markup is removed.
-    pub(super) pid_legend: Option<crate::io::pid_legend::Recognition>,
+    /// data and PIDLINE's index — with the scene epoch it was read at. Kept
+    /// through PIDLEGEND OFF so the list stays browsable after the drawn
+    /// markup is removed; once the drawing has moved on (an edit, an erase,
+    /// an undo) it is out of date — the panel says so and PIDLINE reads the
+    /// sheet again before it selects (`pid_legend_is_stale`).
+    pub(super) pid_legend: Option<PidLegendIndex>,
+}
+
+/// A sheet's P&ID recognition and the `scene.geometry_epoch` it was read at.
+pub(crate) struct PidLegendIndex {
+    /// `scene.geometry_epoch` when `recognition` was read — taken after
+    /// PIDLEGEND ON's own entities went in, so drawing the legend (or taking
+    /// it out again) does not date the index.
+    pub(crate) epoch: u64,
+    pub(crate) recognition: crate::io::pid_legend::Recognition,
 }
 
 impl DocumentTab {
+    /// Stash `recognition` as this sheet's P&ID index, read at the scene's
+    /// current geometry epoch.
+    pub(super) fn set_pid_legend(&mut self, recognition: crate::io::pid_legend::Recognition) {
+        self.pid_legend = Some(PidLegendIndex {
+            epoch: self.scene.geometry_epoch,
+            recognition,
+        });
+    }
+
+    /// The sheet's P&ID recognition, whether or not the drawing has moved on
+    /// since it was read.
+    pub(super) fn pid_legend(&self) -> Option<&crate::io::pid_legend::Recognition> {
+        self.pid_legend.as_ref().map(|index| &index.recognition)
+    }
+
+    /// True when the drawing has changed since the P&ID index was read: the
+    /// panel's rows may point at entities that moved or went, and the stroke
+    /// handles PIDLINE would select may no longer exist. Any geometry bump
+    /// counts — a layer toggled off dates it too — because reading the sheet
+    /// again is cheap (well under a second) and missing a change is not.
+    pub(super) fn pid_legend_is_stale(&self) -> bool {
+        self.pid_legend
+            .as_ref()
+            .is_some_and(|index| index.epoch != self.scene.geometry_epoch)
+    }
+
+    /// After a change that leaves what was recognised as it was — PIDLEGEND
+    /// taking its own legend entities out — an index current at `was` is
+    /// current still.
+    pub(super) fn pid_legend_survives(&mut self, was: u64) {
+        if let Some(index) = &mut self.pid_legend {
+            if index.epoch == was {
+                index.epoch = self.scene.geometry_epoch;
+            }
+        }
+    }
+
     pub(super) fn rename_layer(&mut self, old_name: &str, new_name: &str) -> bool {
         let active = normalize_name(&self.active_layer) == normalize_name(old_name);
         if !self.scene.rename_layer(old_name, new_name) {

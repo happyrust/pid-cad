@@ -22,7 +22,11 @@
 //! ON and REPORT stash the recognition on the tab; the legend list panel
 //! (`ui::window::pid_legend_list`) renders it and its rows zoom to symbols
 //! and pipe lines. ON also opens the panel — the list is the index of what
-//! was just drawn.
+//! was just drawn. The index is of the drawing it was read from: once the
+//! drawing moves on (an edit, an erase, an undo — any geometry epoch bump
+//! other than the legend's own entities going in or out) the panel says it
+//! is out of date, and PIDLINE, a pipe row of the panel and LIST read the
+//! sheet again before they use it (`refresh_pid_legend`).
 //!
 //! PIDLINE answers "what else is this pipe?": from a picked pipe stroke (or
 //! a typed code) it resolves the line's *family* by the sheets' coding rule
@@ -76,8 +80,12 @@ impl OpenCADStudio {
                         .push_info("PIDLEGEND: no legend entities to remove.");
                 } else {
                     self.push_undo_snapshot(i, "PIDLEGEND");
+                    let was = self.tabs[i].scene.geometry_epoch;
                     self.tabs[i].scene.erase_entities(&handles);
                     self.tabs[i].dirty = true;
+                    // Taking the legend out changes nothing recognition
+                    // reads (it skips the legend layers): the index stays.
+                    self.tabs[i].pid_legend_survives(was);
                     self.command_line.push_output(&format!(
                         "PIDLEGEND: removed {} legend entities.",
                         handles.len()
@@ -90,21 +98,17 @@ impl OpenCADStudio {
                 for line in pid_legend::report(&recognition) {
                     self.command_line.push_output(&line);
                 }
-                self.tabs[i].pid_legend = Some(recognition);
+                self.tabs[i].set_pid_legend(recognition);
             }
             "LIST" => {
                 if self.show_pid_legend_list {
                     self.show_pid_legend_list = false;
                 } else {
-                    if self.tabs[i].pid_legend.is_none() {
-                        let rules = Rules::load();
-                        let recognition =
-                            pid_legend::recognise(&self.tabs[i].scene.document, &rules);
+                    if self.refresh_pid_legend(i) {
                         self.command_line.push_output(&format!(
                             "PIDLEGEND: {} symbols listed. PIDLEGEND ON draws them.",
-                            recognition.symbols.len()
+                            self.tabs[i].pid_legend().map_or(0, |r| r.symbols.len())
                         ));
-                        self.tabs[i].pid_legend = Some(recognition);
                     }
                     self.open_pid_legend_panel();
                 }
@@ -167,7 +171,9 @@ impl OpenCADStudio {
                         String::new()
                     }
                 ));
-                self.tabs[i].pid_legend = Some(recognition);
+                // Stamped after the legend went in: drawing it is not a
+                // change to the sheet it indexes.
+                self.tabs[i].set_pid_legend(recognition);
                 self.open_pid_legend_panel();
             }
             other => {
@@ -187,6 +193,29 @@ impl OpenCADStudio {
                 .dock(PanelId::PidLegend, crate::app::config::DockSide::Right, 0);
         }
         self.show_pid_legend_list = true;
+    }
+
+    /// Read the sheet when it has not been read yet, or has changed since it
+    /// was (`DocumentTab::pid_legend_is_stale`): the index's row boxes and
+    /// the runs' stroke handles are only good for the drawing they came
+    /// from. Cheap enough to do in place -- under 0.2 s on the CPECC sheets
+    /// -- and says so on the command line when it is a re-read. True when it
+    /// read.
+    pub(in crate::app) fn refresh_pid_legend(&mut self, i: usize) -> bool {
+        let stale = self.tabs[i].pid_legend_is_stale();
+        if self.tabs[i].pid_legend.is_some() && !stale {
+            return false;
+        }
+        let rules = Rules::load();
+        let recognition = pid_legend::recognise(&self.tabs[i].scene.document, &rules);
+        if stale {
+            self.command_line.push_info(&format!(
+                "PIDLEGEND: the sheet changed since it was read -- read again, {} symbols.",
+                recognition.symbols.len()
+            ));
+        }
+        self.tabs[i].set_pid_legend(recognition);
+        true
     }
 
     pub(super) fn dispatch_pidline(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
@@ -209,19 +238,17 @@ impl OpenCADStudio {
             self.tabs[i].active_cmd = Some(Box::new(c));
             return Some(self.finish_dispatch(cmd));
         }
-        // The index must exist before a line can be looked up in it, so a
-        // fresh sheet is recognised here, like PIDLEGEND LIST does.
-        if self.tabs[i].pid_legend.is_none() {
-            let rules = Rules::load();
-            self.tabs[i].pid_legend =
-                Some(pid_legend::recognise(&self.tabs[i].scene.document, &rules));
-        }
+        // The index must exist, and be of this drawing, before a line can be
+        // looked up in it: a fresh sheet is recognised here, like PIDLEGEND
+        // LIST does, and a sheet that changed since it was read is read
+        // again -- the runs' stroke handles are what gets selected.
+        self.refresh_pid_legend(i);
         // What to select: the families the argument or the picked strokes
         // name, plus any picked run no line number reaches.
         let mut families: BTreeSet<String> = BTreeSet::new();
         let mut picked_runs: Vec<usize> = Vec::new();
         {
-            let rec = self.tabs[i].pid_legend.as_ref().expect("recognised above");
+            let rec = self.tabs[i].pid_legend().expect("recognised above");
             match &code {
                 Some(code) => {
                     let by_family = rec.pipes.by_family();
@@ -291,16 +318,19 @@ impl OpenCADStudio {
     /// Select every stroke of the runs `families` cover -- plus
     /// `picked_runs`, for picked strokes no line number reaches -- zoom to
     /// their whole extent, and word the command-line receipt. `None` when
-    /// nothing is recognised or nothing matches. Also serves the legend
-    /// list panel's pipe rows, via `Message::PidLegendPickFamily`.
+    /// nothing matches. Also serves the legend list panel's pipe rows, via
+    /// `Message::PidLegendPickFamily`; a sheet that changed since the panel
+    /// was filled is read again first, so the handles selected are of the
+    /// drawing as it is (a family the change took away then matches nothing).
     pub(in crate::app) fn pid_line_select(
         &mut self,
         i: usize,
         families: &BTreeSet<String>,
         picked_runs: &[usize],
     ) -> Option<String> {
+        self.refresh_pid_legend(i);
         let (handles, bbox, upm, receipt) = {
-            let rec = self.tabs[i].pid_legend.as_ref()?;
+            let rec = self.tabs[i].pid_legend()?;
             let runs = &rec.pipes.runs;
             let mut picked: BTreeSet<usize> = picked_runs
                 .iter()
@@ -433,9 +463,13 @@ mod tests {
         assert_eq!(legend_count(&app), expected);
         // ON stashes the recognition for the legend list panel and opens it.
         assert_eq!(
-            app.tabs[i].pid_legend.as_ref().map(|r| r.symbols.len()),
+            app.tabs[i].pid_legend().map(|r| r.symbols.len()),
             Some(118),
             "recognition stored on the tab"
+        );
+        assert!(
+            !app.tabs[i].pid_legend_is_stale(),
+            "drawing the legend does not date the index"
         );
         assert!(app.show_pid_legend_list, "ON opens the legend list");
         assert!(
@@ -471,6 +505,7 @@ mod tests {
 
         let _ = app.run_command_line("PIDLEGEND ON");
         assert_eq!(legend_count(&app), expected, "a second ON replaces");
+        assert!(!app.tabs[i].pid_legend_is_stale(), "nor does replacing it");
 
         let _ = app.run_command_line("PIDLEGEND OFF");
         assert_eq!(legend_count(&app), 0);
@@ -478,6 +513,84 @@ mod tests {
         assert!(
             app.tabs[i].pid_legend.is_some(),
             "the list stays browsable after OFF"
+        );
+        assert!(
+            !app.tabs[i].pid_legend_is_stale(),
+            "taking the legend out does not date the index either"
+        );
+    }
+
+    /// The index is of the drawing it was read from. Once the drawing moves
+    /// on -- here a line is added -- the panel is told it is out of date, and
+    /// PIDLINE, a pipe row of the panel and LIST each read the sheet again
+    /// before they use it (C4 / D24). An empty drawing serves: what is under
+    /// test is the epoch, not the recognition.
+    #[test]
+    fn a_changed_sheet_dates_the_index_and_it_is_read_again_before_use() {
+        use acadrust::entities::{EntityType, Line};
+        use acadrust::types::Vector3;
+        let add_line = |app: &mut OpenCADStudio, i: usize, x: f64| {
+            let mut line = Line::new();
+            line.start = Vector3::new(x, 0.0, 0.0);
+            line.end = Vector3::new(x + 10.0, 0.0, 0.0);
+            app.tabs[i].scene.add_entity(EntityType::Line(line));
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        add_line(&mut app, i, 0.0);
+
+        let _ = app.run_command_line("PIDLEGEND LIST");
+        let read_at = app.tabs[i].pid_legend.as_ref().expect("LIST reads").epoch;
+        assert_eq!(read_at, app.tabs[i].scene.geometry_epoch);
+        assert!(!app.tabs[i].pid_legend_is_stale());
+
+        // An edit dates it.
+        add_line(&mut app, i, 20.0);
+        assert!(
+            app.tabs[i].pid_legend_is_stale(),
+            "an added entity dates the index"
+        );
+
+        // PIDLINE reads again before it looks the code up; the code is not on
+        // this sheet, the index is current again all the same.
+        let _ = app.run_command_line("PIDLINE 100-FW");
+        assert!(
+            !app.tabs[i].pid_legend_is_stale(),
+            "PIDLINE read the sheet again"
+        );
+        let read_at_2 = app.tabs[i].pid_legend.as_ref().unwrap().epoch;
+        assert!(read_at_2 > read_at);
+
+        // A pipe row picked in the panel goes the same way.
+        add_line(&mut app, i, 40.0);
+        assert!(app.tabs[i].pid_legend_is_stale());
+        let families: BTreeSet<String> = std::iter::once("FW-1".to_string()).collect();
+        assert!(app.pid_line_select(i, &families, &[]).is_none());
+        assert!(
+            !app.tabs[i].pid_legend_is_stale(),
+            "the panel's pick read the sheet again"
+        );
+
+        // And LIST, opening the panel on a dated index, reads too; a current
+        // index it leaves alone.
+        assert!(app.show_pid_legend_list, "LIST opened the panel");
+        let _ = app.run_command_line("PIDLEGEND LIST");
+        assert!(!app.show_pid_legend_list, "second LIST hid it");
+        add_line(&mut app, i, 60.0);
+        assert!(app.tabs[i].pid_legend_is_stale());
+        let _ = app.run_command_line("PIDLEGEND LIST");
+        assert!(app.show_pid_legend_list);
+        assert!(
+            !app.tabs[i].pid_legend_is_stale(),
+            "LIST read the sheet again"
+        );
+        let read_at_3 = app.tabs[i].pid_legend.as_ref().unwrap().epoch;
+        let _ = app.run_command_line("PIDLINE 100-FW");
+        assert_eq!(
+            app.tabs[i].pid_legend.as_ref().unwrap().epoch,
+            read_at_3,
+            "a current index is not read again"
         );
     }
 
@@ -493,7 +606,7 @@ mod tests {
         assert!(!app.show_pid_legend_list);
 
         let _ = app.run_command_line("PIDLEGEND LIST");
-        let recognition = app.tabs[i].pid_legend.as_ref().expect("recognition stored");
+        let recognition = app.tabs[i].pid_legend().expect("recognition stored");
         assert_eq!(recognition.symbols.len(), 118);
         assert!(
             !recognition.pipes.runs.is_empty(),
@@ -524,8 +637,7 @@ mod tests {
         // By code. PIDLINE recognises on first use, no PIDLEGEND run needed.
         let _ = app.run_command_line("PIDLINE 100-FW");
         let rec = app.tabs[i]
-            .pid_legend
-            .as_ref()
+            .pid_legend()
             .expect("PIDLINE recognises on first use")
             .clone();
         assert!(

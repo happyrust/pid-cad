@@ -7,7 +7,10 @@
 //! the drawing stays the document.
 //!
 //! The panel follows the active tab. A tab that has not run PIDLEGEND yet
-//! shows a hint instead of a list.
+//! shows a hint instead of a list. A list whose drawing has moved on since it
+//! was read (`stale`) is marked out of date and greyed: its rows may point at
+//! entities that moved or went. Clicking a pipe row reads the sheet again
+//! before it selects; `PIDLEGEND LIST` refreshes the list itself.
 
 use crate::app::Message;
 use crate::io::pid_legend::Recognition;
@@ -64,6 +67,17 @@ fn muted(theme: &Theme) -> iced::widget::text::Style {
     }
 }
 
+/// Row text, greyed when `dim` -- an untagged symbol, or every row once the
+/// drawing has moved on since the list was read.
+fn row_text<'a>(s: impl Into<String>, size: f32, dim: bool) -> iced::widget::Text<'a> {
+    let t = text(s.into()).size(size);
+    if dim {
+        t.style(muted)
+    } else {
+        t
+    }
+}
+
 /// One clickable row. `indent` mimics a tree without one.
 fn click_row<'a>(
     label: Element<'a, Message>,
@@ -100,8 +114,14 @@ fn jump_row<'a>(
     )
 }
 
-/// Build the docked panel element from the active tab's recognition.
-pub fn view(recognition: Option<&Recognition>, width: f32, auto_collapse: bool) -> Element<'_, Message> {
+/// Build the docked panel element from the active tab's recognition. `stale`
+/// says the drawing has changed since the recognition was read.
+pub fn view(
+    recognition: Option<&Recognition>,
+    stale: bool,
+    width: f32,
+    auto_collapse: bool,
+) -> Element<'_, Message> {
     // ── Dock chrome (title, pin, close) — matches the block palette ───────
     let pin_icon = if auto_collapse {
         crate::ui::icons::themed_primary_weak_text(crate::ui::icons::PIN, 12.0)
@@ -130,10 +150,14 @@ pub fn view(recognition: Option<&Recognition>, width: f32, auto_collapse: bool) 
         .padding([3, 5]);
     let close = tooltip(close, text("Close").size(10), tooltip::Position::Bottom).gap(4);
 
+    let mut title = row![text("P&ID 图例").size(12)].spacing(6).align_y(iced::Center);
+    if stale && recognition.is_some() {
+        title = title.push(text("已过期").size(10).style(muted));
+    }
     let title_bar = mouse_area(
         container(
             row![
-                text("P&ID 图例").size(12),
+                title,
                 iced::widget::Space::new().width(Fill),
                 pin,
                 close,
@@ -168,13 +192,28 @@ pub fn view(recognition: Option<&Recognition>, width: f32, auto_collapse: bool) 
 
     let mut col = column![].spacing(2);
 
+    // Once the drawing has moved on, every row is greyed: it may point at an
+    // entity that moved or went.
+    if stale {
+        col = col.push(
+            container(
+                text("图已改动，列表可能不准 — PIDLEGEND LIST 重新读取")
+                    .size(11)
+                    .style(muted),
+            )
+            .padding([4, 6]),
+        );
+    }
+
     // ── Symbols by class ──────────────────────────────────────────────────
     let groups = rec.by_class();
     let tagged: usize = rec.symbols.iter().filter(|s| s.tag.is_some()).count();
     col = col.push(
-        container(
-            text(format!("符号 {}（带位号 {}）", rec.symbols.len(), tagged)).size(12),
-        )
+        container(row_text(
+            format!("符号 {}（带位号 {}）", rec.symbols.len(), tagged),
+            12.0,
+            stale,
+        ))
         .padding([4, 6]),
     );
     for ((_, label), symbols) in &groups {
@@ -190,7 +229,7 @@ pub fn view(recognition: Option<&Recognition>, width: f32, auto_collapse: bool) 
             container(
                 row![
                     swatch(color),
-                    text(label.clone()).size(12),
+                    row_text(label.clone(), 12.0, stale),
                     iced::widget::Space::new().width(Fill),
                     text(counts).size(11).style(muted),
                 ]
@@ -209,11 +248,7 @@ pub fn view(recognition: Option<&Recognition>, width: f32, auto_collapse: bool) 
                     s.at.1 / rec.units_per_mm
                 ),
             };
-            let label: Element<'_, Message> = if s.tag.is_some() {
-                text(name).size(11).into()
-            } else {
-                text(name).size(11).style(muted).into()
-            };
+            let label: Element<'_, Message> = row_text(name, 11.0, stale || s.tag.is_none()).into();
             col = col.push(jump_row(label, jump_rect(s.bbox, rec.units_per_mm)));
         }
     }
@@ -237,12 +272,14 @@ pub fn view(recognition: Option<&Recognition>, width: f32, auto_collapse: bool) 
         } else {
             format!("管线 {} 条 · {} 族", by_line.len(), families.len())
         };
-        col = col.push(container(text(header).size(12)).padding(iced::Padding {
-            top: 10.0,
-            right: 6.0,
-            bottom: 4.0,
-            left: 6.0,
-        }));
+        col = col.push(
+            container(row_text(header, 12.0, stale)).padding(iced::Padding {
+                top: 10.0,
+                right: 6.0,
+                bottom: 4.0,
+                left: 6.0,
+            }),
+        );
         for (family, lines) in &families {
             let run_count: usize = lines.values().map(|runs| runs.len()).sum();
             let length_mm: f64 = lines
@@ -253,7 +290,7 @@ pub fn view(recognition: Option<&Recognition>, width: f32, auto_collapse: bool) 
             if let [(line, runs)] = lines.iter().collect::<Vec<_>>().as_slice() {
                 // The family is one line: one row, worded as the line.
                 let label: Element<'_, Message> = row![
-                    text(line.to_string()).size(11),
+                    row_text(line.to_string(), 11.0, stale),
                     iced::widget::Space::new().width(Fill),
                     text(format!("{} 段 · {:.0} mm", runs.len(), length_mm))
                         .size(10)
@@ -268,7 +305,7 @@ pub fn view(recognition: Option<&Recognition>, width: f32, auto_collapse: bool) 
                 ));
             } else {
                 let label: Element<'_, Message> = row![
-                    text(family.clone()).size(11),
+                    row_text(family.clone(), 11.0, stale),
                     iced::widget::Space::new().width(Fill),
                     text(format!(
                         "{} 线号 · {} 段 · {:.0} mm",
@@ -290,7 +327,7 @@ pub fn view(recognition: Option<&Recognition>, width: f32, auto_collapse: bool) 
                     let length_mm: f64 = runs.iter().map(|r| r.length_mm).sum();
                     if let Some(bbox) = union(runs.iter().filter_map(|r| r.bbox())) {
                         let label: Element<'_, Message> = row![
-                            text(line.to_string()).size(11),
+                            row_text(line.to_string(), 11.0, stale),
                             iced::widget::Space::new().width(Fill),
                             text(format!("{} 段 · {:.0} mm", runs.len(), length_mm))
                                 .size(10)
