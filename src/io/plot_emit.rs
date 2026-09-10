@@ -741,6 +741,30 @@ pub fn emit_plot_content<S: PlotSink>(
                 last_color = Some([r, g, b]);
             }
 
+            // A wide polyline whose width VARIES along it — the flow arrow on
+            // a P&ID is one: a two-vertex polyline from width 0 to width w —
+            // carries a width per point in `taper_widths`, and `world_width`
+            // is only the widest of them. Stroking the centre-line at that
+            // weight (the constant-band path below) prints the arrow as a
+            // 3 mm pill with round caps where the drawing has a triangle.
+            // Fill the band the widths describe instead, one quad per
+            // segment with the joints mitred. The linetype is not applied to
+            // it; a dashed taper is not something the drawings have.
+            if wire.world_width > 0.0
+                && !wire.taper_widths.is_empty()
+                && wire.taper_widths.len() == wire.points.len()
+            {
+                let rings =
+                    tapered_band_rings(wire, ox, oy, paper_h as f64 / scale.max(1e-6) as f64);
+                if !rings.is_empty() {
+                    sink.emit(PlotOp::Fill {
+                        rings,
+                        rule: FillRule::NonZero,
+                    })?;
+                }
+                continue;
+            }
+
             // Line weight: style override or object weight. Normal output divides
             // by the page transform so physical pen widths stay constant; the
             // scale-lineweights option deliberately keeps the transformed width.
@@ -1035,6 +1059,179 @@ fn emit_round_dot<S: PlotSink>(
         rings: vec![points],
         rule: FillRule::NonZero,
     })
+}
+
+/// The miter limit SVG and PDF apply to strokes (4: a joint may reach four
+/// stroke widths from the centre-line), as the cosine of half the turn at
+/// which a band joint stops being mitred.
+const MITRE_COS_LIMIT: f64 = 0.25;
+
+/// The band of a tapered polyline as fill rings, in points: one quad per
+/// segment, its corners the two endpoints pushed out by half their own width
+/// along the segment's normal. Where two segments meet, the corner is the
+/// mitre of the two offsets, so neighbouring quads share an edge and the
+/// band shows no notch on the outside of a bend and no seam on the inside; a
+/// bend too sharp for a mitre falls back to a bevel with a wedge over the
+/// gap. `NaN` points split the run, as they do for a stroke, and a run that
+/// returns to its first point is joined there too. Every ring is wound the
+/// same way, so a non-zero fill of all of them together is their union.
+fn tapered_band_rings(wire: &WireModel, ox: f64, oy: f64, view_height: f64) -> Vec<Vec<PlotPoint>> {
+    let mut rings = Vec::new();
+    let mut run: Vec<([f64; 2], f64)> = Vec::new();
+    for (index, &[x, y, _z]) in wire.points.iter().enumerate() {
+        if x.is_nan() || y.is_nan() {
+            band_run_rings(&run, &mut rings);
+            run.clear();
+            continue;
+        }
+        let point = wire.point_world(index, view_height);
+        let p = [point.x + ox, point.y + oy];
+        let w = wire.taper_widths[index].max(0.0) as f64;
+        // A zero-length segment is a step in width, not a segment: keep the
+        // vertex once, at the wider of the two.
+        if let Some((last, last_w)) = run.last_mut() {
+            if (last[0] - p[0]).abs() <= 1e-9 && (last[1] - p[1]).abs() <= 1e-9 {
+                *last_w = last_w.max(w);
+                continue;
+            }
+        }
+        run.push((p, w));
+    }
+    band_run_rings(&run, &mut rings);
+    rings
+}
+
+/// One `NaN`-free run of `tapered_band_rings`: vertices in sheet mm, each
+/// with the band's full width there.
+fn band_run_rings(run: &[([f64; 2], f64)], out: &mut Vec<Vec<PlotPoint>>) {
+    let n = run.len();
+    if n < 2 {
+        return;
+    }
+    let same =
+        |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() <= 1e-9 && (a[1] - b[1]).abs() <= 1e-9;
+    let closed = n >= 4 && same(run[0].0, run[n - 1].0);
+    // Unit direction of the segment leaving vertex `i`.
+    let dir = |i: usize| -> [f64; 2] {
+        let (a, _) = run[i];
+        let (b, _) = run[i + 1];
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        [dx / len, dy / len]
+    };
+    let left_of = |d: [f64; 2]| -> [f64; 2] { [-d[1], d[0]] };
+
+    // The left-side offset of each vertex as the end of the segment coming
+    // in and as the start of the one going out — one and the same at a
+    // mitred joint; the right side is the negation.
+    let mut offsets: Vec<([f64; 2], [f64; 2])> = Vec::with_capacity(n);
+    let mut bevelled: Vec<usize> = Vec::new();
+    for (i, &(_, width)) in run.iter().enumerate() {
+        let h = width * 0.5;
+        let incoming = if i > 0 {
+            Some(dir(i - 1))
+        } else if closed {
+            Some(dir(n - 2))
+        } else {
+            None
+        };
+        let outgoing = if i + 1 < n {
+            Some(dir(i))
+        } else if closed {
+            Some(dir(0))
+        } else {
+            None
+        };
+        let scaled = |normal: [f64; 2]| [normal[0] * h, normal[1] * h];
+        offsets.push(match (incoming, outgoing) {
+            (Some(d0), Some(d1)) => {
+                let n0 = left_of(d0);
+                let n1 = left_of(d1);
+                let m = [n0[0] + n1[0], n0[1] + n1[1]];
+                let len = (m[0] * m[0] + m[1] * m[1]).sqrt();
+                // The cosine of half the turn; the mitre is 1/cos as long as
+                // the plain offset.
+                let cos_half = if len > 1e-12 {
+                    (m[0] * n0[0] + m[1] * n0[1]) / len
+                } else {
+                    0.0
+                };
+                if cos_half >= MITRE_COS_LIMIT {
+                    let k = h / (cos_half * len);
+                    let mitre = [m[0] * k, m[1] * k];
+                    (mitre, mitre)
+                } else {
+                    if h > 1e-9 {
+                        bevelled.push(i);
+                    }
+                    (scaled(n0), scaled(n1))
+                }
+            }
+            (Some(d0), None) => {
+                let offset = scaled(left_of(d0));
+                (offset, offset)
+            }
+            (None, Some(d1)) => {
+                let offset = scaled(left_of(d1));
+                (offset, offset)
+            }
+            (None, None) => ([0.0, 0.0], [0.0, 0.0]),
+        });
+    }
+
+    for i in 0..n - 1 {
+        let (a, _) = run[i];
+        let (b, _) = run[i + 1];
+        let oa = offsets[i].1;
+        let ob = offsets[i + 1].0;
+        push_band_ring(
+            out,
+            &[
+                [a[0] + oa[0], a[1] + oa[1]],
+                [b[0] + ob[0], b[1] + ob[1]],
+                [b[0] - ob[0], b[1] - ob[1]],
+                [a[0] - oa[0], a[1] - oa[1]],
+            ],
+        );
+    }
+    for i in bevelled {
+        let (p, _) = run[i];
+        let (o_in, o_out) = offsets[i];
+        for sign in [1.0, -1.0] {
+            push_band_ring(
+                out,
+                &[
+                    p,
+                    [p[0] + sign * o_in[0], p[1] + sign * o_in[1]],
+                    [p[0] + sign * o_out[0], p[1] + sign * o_out[1]],
+                ],
+            );
+        }
+    }
+}
+
+/// One ring of a band in sheet mm → points, wound anticlockwise; a ring
+/// with no area (both ends of a segment at width 0) is dropped.
+fn push_band_ring(out: &mut Vec<Vec<PlotPoint>>, corners: &[[f64; 2]]) {
+    let mut area2 = 0.0;
+    for (i, a) in corners.iter().enumerate() {
+        let b = corners[(i + 1) % corners.len()];
+        area2 += a[0] * b[1] - b[0] * a[1];
+    }
+    if area2.abs() <= 1e-12 {
+        return;
+    }
+    let mut ring: Vec<PlotPoint> = corners
+        .iter()
+        .map(|&[x, y]| PlotPoint {
+            x: geometry_pt(x as f32),
+            y: geometry_pt(y as f32),
+        })
+        .collect();
+    if area2 < 0.0 {
+        ring.reverse();
+    }
+    out.push(ring);
 }
 
 fn plotted_color(rgb: [f32; 3], alpha: f32, screening: f32, options: PdfPlotOptions) -> [f32; 3] {
@@ -1740,6 +1937,124 @@ mod tests {
         assert_eq!(ops[at - 2], PlotOp::Save);
         assert_eq!(ops[at - 1], PlotOp::Blend(PlotBlend::Normal));
         assert_eq!(ops[at + 1], PlotOp::Restore);
+    }
+
+    /// A wide polyline whose width varies, as the scene hands it to the plot:
+    /// a width per point and the widest of them in `world_width`.
+    fn tapered(points: Vec<[f32; 3]>, widths: Vec<f32>) -> PlotWire {
+        let mut wire = crate::io::plot_corpus::wire("taper", points, WireModel::WHITE, 0.1);
+        wire.wire.world_width = widths.iter().copied().fold(0.0, f32::max);
+        wire.wire.taper_widths = widths;
+        wire
+    }
+
+    fn fill_rings(ops: &[PlotOp]) -> Vec<Vec<PlotPoint>> {
+        ops.iter()
+            .filter_map(|op| match op {
+                PlotOp::Fill { rings, .. } => Some(rings.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    fn near(p: PlotPoint, x_mm: f32, y_mm: f32) -> bool {
+        (p.x - geometry_pt(x_mm)).abs() < 1e-3 && (p.y - geometry_pt(y_mm)).abs() < 1e-3
+    }
+
+    /// The flow arrow on a P&ID pipe: a two-vertex polyline from width 0 to
+    /// width 1.2. It fills the triangle its widths describe — apex at the
+    /// zero end, a 1.2 mm base at the other — and is not stroked at its
+    /// widest width, which printed it as a round-capped pill.
+    #[test]
+    fn a_tapered_polyline_fills_its_triangle_instead_of_a_pill() {
+        let mut case = Case::new("taper");
+        case.wires.push(tapered(
+            vec![[10.0, 20.0, 0.0], [10.0, 17.0, 0.0]],
+            vec![0.0, 1.2],
+        ));
+        let ops = ops_for(&case);
+        assert!(
+            !ops.iter().any(|op| matches!(op, PlotOp::Stroke { .. })),
+            "the arrow was stroked: {ops:?}"
+        );
+        let rings = fill_rings(&ops);
+        assert_eq!(rings.len(), 1, "{rings:?}");
+        let ring = &rings[0];
+        assert!(
+            ring.iter().any(|&p| near(p, 10.0, 20.0)),
+            "no apex at the zero-width end: {ring:?}"
+        );
+        let base: Vec<PlotPoint> = ring
+            .iter()
+            .copied()
+            .filter(|p| (p.y - geometry_pt(17.0)).abs() < 1e-3)
+            .collect();
+        assert_eq!(base.len(), 2, "{ring:?}");
+        assert!(
+            ((base[0].x - base[1].x).abs() - geometry_pt(1.2)).abs() < 1e-3,
+            "base is not 1.2 mm wide: {base:?}"
+        );
+        // The fill is in the wire's colour — white adapted to ink — and the
+        // pen state was not touched for it.
+        let fill_at = ops
+            .iter()
+            .position(|op| matches!(op, PlotOp::Fill { .. }))
+            .unwrap();
+        assert!(ops[..fill_at]
+            .iter()
+            .any(|op| *op == PlotOp::FillColor([0.0, 0.0, 0.0])));
+        assert!(!ops[..fill_at]
+            .iter()
+            .any(|op| matches!(op, PlotOp::StrokeWidthPt(_))));
+    }
+
+    /// At a bend the two quads meet on the mitred offsets: they share an
+    /// edge, so the band has neither a notch on the outside of the corner nor
+    /// a seam on the inside.
+    #[test]
+    fn a_tapered_polyline_is_mitred_where_it_bends() {
+        let mut case = Case::new("taper-bend");
+        case.wires.push(tapered(
+            vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]],
+            vec![2.0, 2.0, 1.0],
+        ));
+        let rings = fill_rings(&ops_for(&case));
+        assert_eq!(rings.len(), 2, "{rings:?}");
+        // The mitre of a right angle at half-width 1 lies 1 mm out along
+        // both normals: (9, 1) inside the corner and (11, -1) outside.
+        for corner in [(9.0, 1.0), (11.0, -1.0)] {
+            for ring in &rings {
+                assert!(
+                    ring.iter().any(|&p| near(p, corner.0, corner.1)),
+                    "{corner:?} missing from {ring:?}"
+                );
+            }
+        }
+        // The far end tapers to width 1: half a millimetre either side.
+        assert!(rings[1].iter().any(|&p| near(p, 9.5, 10.0)));
+        assert!(rings[1].iter().any(|&p| near(p, 10.5, 10.0)));
+    }
+
+    /// A polyline of one width still strokes its centre-line at that width,
+    /// dashed by its linetype, as it always has.
+    #[test]
+    fn a_constant_band_still_strokes_its_centre_line() {
+        let mut case = Case::new("band");
+        let mut band = crate::io::plot_corpus::wire(
+            "band",
+            vec![[0.0, 10.0, 0.0], [50.0, 10.0, 0.0]],
+            WireModel::WHITE,
+            0.1,
+        );
+        band.wire.world_width = 3.0;
+        case.wires.push(band);
+        let ops = ops_for(&case);
+        assert!(fill_rings(&ops).is_empty());
+        assert!(ops.iter().any(
+            |op| matches!(op, PlotOp::StrokeWidthPt(w) if (*w - 3.0 * MM_TO_PT).abs() < 1e-3)
+        ));
+        assert!(ops.iter().any(|op| matches!(op, PlotOp::Stroke { .. })));
     }
 
     /// The strokes and group marks of a page, in order: what a sink that
