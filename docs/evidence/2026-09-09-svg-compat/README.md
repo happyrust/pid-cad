@@ -74,9 +74,10 @@ librsvg column is the same library reached through libvips.
   --plot-svg <DXF> <out> --model --paper A1 --landscape --fit --force`),
   archived 2026-09-10 so the sheets the `real-sheets-*.tsv` rows and
   `real-*-4up.png` crops describe stay in the tree after `%TEMP%` is cleared.
-  **FF02-06 and SP02-05 are the 2026-09-10 export from `47e5a49e`; WS02-05
-  is the one from `59c96574`, which the later commits leave byte-identical;
-  none is the 09-09 run's bytes.** Four commits landed between the 09-09
+  **FF02-06 is the 2026-09-10 export from `47e5a49e`, SP02-05 the one from
+  `49159fbc`, WS02-05 the one from `59c96574`; each later commit leaves the
+  other files byte-identical; none is the 09-09 run's bytes.** Four commits
+  landed between the 09-09
   run and `59c96574`. Two text fixes — `3e305477` (a
   DXF STYLE whose TrueType typeface lives only in `ACAD` xdata now resolves
   to that face, so `-宋体` / `ST` / `HT` / `HZDX` render in SimSun instead
@@ -120,13 +121,31 @@ librsvg column is the same library reached through libvips.
   (`PIPE-消防`, ACI 3, 49.6 units a side, two per point, where the editor's
   export puts them), SP02-05 10 white SOLID triangles; groups and strokes
   are unchanged, and WS02-05 has no such entity and is byte-identical
-  still. The renderings and TSVs in this folder were made
-  from the 09-09 export and were not re-run; the per-engine comparison is
-  about strokes and fills, which none of the four commits touches, but the
-  text areas in the `*-4up.png` crops show the old glyphs and the
-  spray-point squares are not in them. Sizes:
-  3,172,448 / 7,800,514 / 1,825,077 bytes (gzip ≈ 1.1 / 2.3 / 0.6 MB),
-  SHA-256 `AB1AF418…` / `B40DE305…` / `097AE6E5…`, LF line endings so
+  still. Then two plot fixes, of which only SP02-05 among the three has
+  anything to show. `ed93fb1d`: **a wide polyline whose width varies along it is filled
+  as the band its widths describe**, not stroked at its widest width with
+  round caps — SP02-05's 43 flow arrows (two-vertex LWPOLYLINEs tapering
+  from width 0 to 0.5 / 1.2 / 1.92 mm) were 43 black pills, a
+  `<path fill="none">` each at stroke-width 1.417 / 3.402 / 5.443 pt; they
+  are 43 four-vertex `<path stroke="none">` triangles at the same places.
+  And `49159fbc`: **an ACI-7 solid fill plots black** — colour 7 is the
+  foreground colour, white on screen and black on paper, as AutoCAD plots
+  it; the emitter had exempted it from the near-white → black paper
+  adaptation since 2026-08-01 (upstream #618), so SP02-05's 10
+  valve-actuator boxes (layer `0`, SOLID hatches 0.42 × 1.2 mm) were white
+  holes inside their thin outline; they are the same 10 paths with
+  `fill="#000000"`. Nothing else moves between the `47e5a49e` and
+  `49159fbc` exports of SP02-05 (4,574 stroked paths, 3,116 fills, 191
+  groups after; the 43 + 10 paths above are the whole delta), and FF02-06
+  and WS02-05 have neither a tapered polyline nor an ACI-7 solid, so both
+  fixes leave them byte-identical. The renderings and TSVs in this folder
+  were made from the 09-09 export and were not re-run; the per-engine
+  comparison is about strokes and fills, which none of the four commits
+  touches, but the text areas in the `*-4up.png` crops show the old glyphs,
+  and the crops predate the spray-point squares, the arrow triangles and
+  the black actuator boxes. Sizes:
+  3,172,448 / 7,799,004 / 1,825,077 bytes (gzip ≈ 1.1 / 2.2 / 0.6 MB),
+  SHA-256 `AB1AF418…` / `2DD6258F…` / `097AE6E5…`, LF line endings so
   `eol=lf` leaves them alone. The 22 corpus pages are not archived:
   `cargo test --lib dump_the_corpus_for_a_human -- --ignored` regenerates
   them from the tree.
