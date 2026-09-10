@@ -20,7 +20,20 @@
 //! PIDTAG               prompt for a tag (Enter = the picked symbol's)
 //! PIDTAG <tag>         select the symbol(s) carrying the tag with their tag
 //!                      lettering, frame them in red, zoom to them
+//! PIDGROUP             prompt with the verbs below (Enter = GROUP)
+//! PIDGROUP GROUP       group the selection as a symbol, tag read from its
+//!                      own lettering (GROUP does the same, and asks a name)
+//! PIDGROUP TAG <tag>   set the group's tag by hand; AUTO reads it again;
+//!                      OFF dissolves the group (= UNGROUP)
 //! ```
+//!
+//! A group a person makes is a P&ID symbol when its description carries
+//! `tagName=` (`io::pid_legend::GroupTag`): GROUP and PIDGROUP read the tag
+//! from the group's own lettering by the recognition's rule and write it in;
+//! a tag set by hand is `tagSource=manual`. The group helpers here
+//! (`make_pid_group`, `dissolve_pid_groups`) are what GROUP and UNGROUP run
+//! too, so a drawn legend is redrawn in the same undo step as the group
+//! change.
 //!
 //! ON and REPORT stash the recognition on the tab; the legend list panel
 //! (`ui::window::pid_legend_list`) renders it: its symbol rows select and
@@ -55,7 +68,8 @@
 //! with `--script`, marks up a new sheet as it opens.
 
 use super::*;
-use crate::io::pid_legend::{self, Rules};
+use crate::app::history::PendingObjectDelta;
+use crate::io::pid_legend::{self, GroupTag, Rules, TagSource};
 use acadrust::types::Color;
 use std::collections::BTreeSet;
 
@@ -125,6 +139,11 @@ impl OpenCADStudio {
             }
             "ON" => {
                 let rules = Rules::load();
+                // The stored tag of a hand-made group whose lettering has
+                // moved on is refreshed here, where the sheet is being marked
+                // up anyway (D35): the recognition reads the lettering as it
+                // stands either way.
+                self.refresh_auto_group_tags(i, &rules);
                 let recognition = pid_legend::recognise(&self.tabs[i].scene.document, &rules);
                 if recognition.symbols.is_empty() {
                     self.command_line.push_info(
@@ -133,47 +152,12 @@ impl OpenCADStudio {
                     return Some(Task::none());
                 }
                 self.push_undo_snapshot(i, "PIDLEGEND");
-                // Running it twice must not stack two legends.
-                let stale = pid_legend::legend_handles(&self.tabs[i].scene.document);
-                if !stale.is_empty() {
-                    self.tabs[i].scene.erase_entities(&stale);
-                }
-                let layers = pid_legend::legend_layers(&recognition);
-                let names: Vec<String> = layers.keys().cloned().collect();
-                for (name, [r, g, b]) in &layers {
-                    self.tabs[i].scene.ensure_layer(name);
-                    if let Some(layer) = self.tabs[i].scene.document.layers.get_mut(name) {
-                        layer.color = Color::Rgb {
-                            r: *r,
-                            g: *g,
-                            b: *b,
-                        };
-                    }
-                }
-                self.tabs[i].scene.invalidate_layer_dependencies(&names);
-                let entities = pid_legend::legend_entities(&recognition, &rules);
-                let drawn = entities.len();
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    self.tabs[i].scene.add_entities(entities);
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    for entity in entities {
-                        self.tabs[i].scene.add_entity(entity);
-                    }
-                }
-                self.tabs[i].dirty = true;
                 for line in pid_legend::report(&recognition) {
                     self.command_line.push_output(&line);
                 }
-                let pipe_layers = layers
-                    .keys()
-                    .filter(|name| name.starts_with(pid_legend::PIPE_LAYER_PREFIX))
-                    .count();
+                let (drawn, layers, pipe_layers) = self.place_pid_legend(i, &rules, recognition);
                 self.command_line.push_output(&format!(
-                    "PIDLEGEND: drew {drawn} entities on {} layers ({}*{}). PIDLEGEND OFF removes them.",
-                    layers.len(),
+                    "PIDLEGEND: drew {drawn} entities on {layers} layers ({}*{}). PIDLEGEND OFF removes them.",
                     pid_legend::LAYER_PREFIX,
                     if pipe_layers > 0 {
                         format!(", {pipe_layers} of them {}*", pid_legend::PIPE_LAYER_PREFIX)
@@ -181,9 +165,6 @@ impl OpenCADStudio {
                         String::new()
                     }
                 ));
-                // Stamped after the legend went in: drawing it is not a
-                // change to the sheet it indexes.
-                self.tabs[i].set_pid_legend(recognition);
                 self.open_pid_legend_panel();
             }
             other => {
@@ -203,6 +184,414 @@ impl OpenCADStudio {
                 .dock(PanelId::PidLegend, crate::app::config::DockSide::Right, 0);
         }
         self.show_pid_legend_list = true;
+    }
+
+    /// Put `recognition`'s legend into the drawing, replacing the legend
+    /// already there (running it twice must not stack two), and keep the
+    /// recognition as the tab's index. What PIDLEGEND ON does once it has
+    /// decided to draw; also how the legend is redrawn after a group command
+    /// (D38). The caller has opened the undo step. Returns the entities
+    /// drawn, the layers used and how many of those are pipe layers.
+    fn place_pid_legend(
+        &mut self,
+        i: usize,
+        rules: &Rules,
+        recognition: pid_legend::Recognition,
+    ) -> (usize, usize, usize) {
+        let stale = pid_legend::legend_handles(&self.tabs[i].scene.document);
+        if !stale.is_empty() {
+            self.tabs[i].scene.erase_entities(&stale);
+        }
+        let layers = pid_legend::legend_layers(&recognition);
+        let names: Vec<String> = layers.keys().cloned().collect();
+        for (name, [r, g, b]) in &layers {
+            self.tabs[i].scene.ensure_layer(name);
+            if let Some(layer) = self.tabs[i].scene.document.layers.get_mut(name) {
+                layer.color = Color::Rgb {
+                    r: *r,
+                    g: *g,
+                    b: *b,
+                };
+            }
+        }
+        self.tabs[i].scene.invalidate_layer_dependencies(&names);
+        let entities = pid_legend::legend_entities(&recognition, rules);
+        let drawn = entities.len();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.tabs[i].scene.add_entities(entities);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for entity in entities {
+                self.tabs[i].scene.add_entity(entity);
+            }
+        }
+        self.tabs[i].dirty = true;
+        let pipe_layers = layers
+            .keys()
+            .filter(|name| name.starts_with(pid_legend::PIPE_LAYER_PREFIX))
+            .count();
+        // Stamped after the legend went in: drawing it is not a change to
+        // the sheet it indexes.
+        self.tabs[i].set_pid_legend(recognition);
+        (drawn, layers.len(), pipe_layers)
+    }
+
+    /// When a legend is drawn on the sheet, read the sheet again and redraw
+    /// it, inside the undo step the caller opened -- so a group made or
+    /// dissolved shows up in the coloured boxes at once (D38). A sheet with
+    /// no legend drawn is left alone: PIDLEGEND ON is the user's call. True
+    /// when it redrew.
+    fn redraw_pid_legend_if_drawn(&mut self, i: usize, rules: &Rules) -> bool {
+        if pid_legend::legend_handles(&self.tabs[i].scene.document).is_empty() {
+            return false;
+        }
+        let recognition = pid_legend::recognise(&self.tabs[i].scene.document, rules);
+        let (drawn, ..) = self.place_pid_legend(i, rules, recognition);
+        self.command_line
+            .push_info(&format!("PIDLEGEND: legend redrawn, {drawn} entities."));
+        true
+    }
+
+    /// Bring the stored tag of every `auto` group up to what its lettering
+    /// reads as now (D35): the description is a copy for whoever reads the
+    /// file, the lettering is the truth. Returns how many changed. No undo
+    /// of its own; callers run it inside their own step.
+    pub(in crate::app) fn refresh_auto_group_tags(&mut self, i: usize, rules: &Rules) -> usize {
+        let scene = &self.tabs[i].scene;
+        let refreshed: Vec<(acadrust::Handle, GroupTag)> = scene
+            .tagged_groups()
+            .filter(|(_, tag)| tag.source == TagSource::Auto)
+            .filter_map(|(group, tag)| {
+                let read = pid_legend::derive_group_tag(&scene.document, group, rules)
+                    .map(|read| read.value);
+                (read != tag.name).then(|| (group.handle, GroupTag::auto(read)))
+            })
+            .collect();
+        let count = refreshed.len();
+        for (handle, tag) in refreshed {
+            self.tabs[i].scene.set_group_tag(handle, Some(&tag));
+        }
+        if count > 0 {
+            self.tabs[i].dirty = true;
+        }
+        count
+    }
+
+    /// Whether the sheet has a legend drawn: then a group command's undo step
+    /// has to cover entities as well as group objects, so it takes the full
+    /// snapshot PIDLEGEND ON takes rather than the group-object delta.
+    fn open_group_undo(&mut self, i: usize, label: &str) -> Option<PendingObjectDelta> {
+        if pid_legend::legend_handles(&self.tabs[i].scene.document).is_empty() {
+            Some(self.begin_group_undo(i, label))
+        } else {
+            self.push_undo_snapshot(i, label);
+            None
+        }
+    }
+
+    fn close_group_undo(&mut self, i: usize, pending: Option<PendingObjectDelta>) {
+        if let Some(pending) = pending {
+            self.commit_group_undo(i, pending);
+        }
+    }
+
+    /// GROUP and PIDGROUP, once the members are known: make the group, read
+    /// its tag from its own lettering by the recognition's rule and write it
+    /// into the description when there is one (a group that letters nothing
+    /// readable stays a plain group, D31), redraw the legend when one is
+    /// drawn -- one undo step. `tag` names the tag by hand instead of
+    /// reading it (`PIDGROUP TAG <tag>` on an ungrouped selection). Returns
+    /// the group's handle and the receipt; `None` when nothing groupable was
+    /// picked.
+    pub(in crate::app) fn make_pid_group(
+        &mut self,
+        i: usize,
+        label: &str,
+        name: String,
+        mut handles: Vec<acadrust::Handle>,
+        tag: Option<&str>,
+    ) -> Option<(acadrust::Handle, String)> {
+        handles.retain(|handle| !self.tabs[i].scene.is_layer_locked(*handle));
+        if handles.is_empty() {
+            return None;
+        }
+        let rules = Rules::load();
+        let pending = self.open_group_undo(i, label);
+        let group = self.tabs[i].scene.create_group(name.clone(), handles);
+        self.tabs[i].dirty = true;
+        let created = crate::tf!("Group \"{}\" created.", name);
+        let tail = match tag {
+            Some(tag) => self.set_pid_group_tag(i, group, Some(tag), &rules),
+            None => self.read_pid_group_tag(i, group, &rules),
+        };
+        self.redraw_pid_legend_if_drawn(i, &rules);
+        self.close_group_undo(i, pending);
+        Some((group, format!("{created} {tail}")))
+    }
+
+    /// Read a new group's tag from its lettering and write it in; the tail of
+    /// the GROUP receipt says what was read, or why nothing was.
+    fn read_pid_group_tag(&mut self, i: usize, group: acadrust::Handle, rules: &Rules) -> String {
+        match self.tabs[i].scene.derive_group_tag(group, rules) {
+            Some(read) => {
+                let class = pid_legend::class_for_tag(&read.value, rules);
+                self.tabs[i]
+                    .scene
+                    .set_group_tag(group, Some(&GroupTag::auto(Some(read.value.clone()))));
+                match class {
+                    Some(class) => format!("tagName {} ({}).", read.value, class.label),
+                    None => format!("tagName {}.", read.value),
+                }
+            }
+            None => {
+                let texts = self.group_lettering_count(i, group);
+                format!(
+                    "No tagName: the group letters nothing that reads as a tag ({texts} text{}). Set one in Properties or with PIDGROUP TAG <tag>.",
+                    if texts == 1 { "" } else { "s" }
+                )
+            }
+        }
+    }
+
+    /// How many pieces of lettering (TEXT / MTEXT) a group has among its
+    /// members -- for the receipt that says why no tag was read.
+    fn group_lettering_count(&self, i: usize, group: acadrust::Handle) -> usize {
+        use acadrust::objects::ObjectType;
+        let doc = &self.tabs[i].scene.document;
+        match doc.objects.get(&group) {
+            Some(ObjectType::Group(g)) => g
+                .entities
+                .iter()
+                .filter_map(|h| doc.get_entity(*h))
+                .filter(|e| {
+                    matches!(
+                        e,
+                        acadrust::EntityType::Text(_) | acadrust::EntityType::MText(_)
+                    )
+                })
+                .count(),
+            _ => 0,
+        }
+    }
+
+    /// Set a group's tag by hand (`Some`), or hand it back to its lettering
+    /// (`None`). A hand-set value that is what the lettering reads anyway, or
+    /// an empty one, is `auto` too: `manual` is only for a value the
+    /// lettering would not give (D35). Returns the tail of the receipt.
+    fn set_pid_group_tag(
+        &mut self,
+        i: usize,
+        group: acadrust::Handle,
+        value: Option<&str>,
+        rules: &Rules,
+    ) -> String {
+        let read = self.tabs[i]
+            .scene
+            .derive_group_tag(group, rules)
+            .map(|read| read.value);
+        let value = value.map(str::trim).filter(|v| !v.is_empty());
+        let tag = match value {
+            Some(v) if read.as_deref() != Some(v) => GroupTag::manual(v),
+            _ => GroupTag::auto(read.clone()),
+        };
+        self.tabs[i].scene.set_group_tag(group, Some(&tag));
+        match (&tag.name, tag.source) {
+            (Some(name), TagSource::Manual) => format!("tagName {name} (set by hand)."),
+            (Some(name), TagSource::Auto) => format!("tagName {name} (read from the lettering)."),
+            (None, _) => "No tagName: the group letters nothing that reads as a tag.".to_string(),
+        }
+    }
+
+    /// UNGROUP and PIDGROUP OFF: dissolve every group containing one of
+    /// `handles`, redrawing the legend when one is drawn (D38) -- one undo
+    /// step. Returns how many groups went.
+    pub(in crate::app) fn dissolve_pid_groups(
+        &mut self,
+        i: usize,
+        label: &str,
+        handles: &[acadrust::Handle],
+    ) -> usize {
+        let handles: Vec<acadrust::Handle> = handles
+            .iter()
+            .copied()
+            .filter(|handle| !self.tabs[i].scene.is_layer_locked(*handle))
+            .collect();
+        if handles.is_empty() {
+            return 0;
+        }
+        let pending = self.open_group_undo(i, label);
+        let count = self.tabs[i].scene.delete_groups_containing(&handles);
+        self.tabs[i].dirty = true;
+        if count > 0 {
+            let rules = Rules::load();
+            self.redraw_pid_legend_if_drawn(i, &rules);
+        }
+        self.close_group_undo(i, pending);
+        count
+    }
+
+    /// PIDGROUP: a group as a P&ID symbol.
+    ///
+    /// ```text
+    /// PIDGROUP              prompt with the verbs below (Enter = GROUP)
+    /// PIDGROUP GROUP        group the selection; the tag is read from the
+    ///                       group's own lettering (no name prompt: *A<n>)
+    /// PIDGROUP TAG <tag>    set the tag of the selection's group(s) by hand
+    ///                       (an ungrouped selection is grouped first); the
+    ///                       value the lettering reads anyway is `auto`
+    /// PIDGROUP AUTO         read the tag from the lettering again
+    /// PIDGROUP OFF          dissolve the selection's group(s) (= UNGROUP)
+    /// ```
+    ///
+    /// GROUP and UNGROUP do the same reading and dissolving; PIDGROUP is the
+    /// scriptable front that skips the name prompt and carries the by-hand
+    /// verbs. Bare `PIDGROUP` only prompts, like bare PIDLEGEND: the driver
+    /// dispatches the first word of an inline line on its own first.
+    pub(super) fn dispatch_pidgroup(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        let rest = cmd.strip_prefix("PIDGROUP")?;
+        if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+            return None;
+        }
+        let mut words = rest.split_whitespace();
+        let Some(verb) = words.next().map(str::to_uppercase) else {
+            use crate::command::KeywordCommand;
+            let c = KeywordCommand::new(
+                "PIDGROUP",
+                "PIDGROUP  [GROUP / TAG / AUTO / OFF] <GROUP>:",
+                vec![
+                    ("GROUP", "GROUP", None),
+                    ("TAG", "TAG", Some("PIDGROUP  tag:")),
+                    ("AUTO", "AUTO", None),
+                    ("OFF", "OFF", None),
+                ],
+            )
+            .with_default("GROUP");
+            self.command_line.push_info(&c.prompt());
+            self.tabs[i].active_cmd = Some(Box::new(c));
+            return Some(self.finish_dispatch(cmd));
+        };
+        let selected: Vec<acadrust::Handle> = self.tabs[i].scene.selected_handles_in_order();
+        match verb.as_str() {
+            "GROUP" => {
+                if selected.is_empty() {
+                    use crate::modules::draw::select::SelectObjectsCommand;
+                    let c = SelectObjectsCommand::plain("PIDGROUP", "PIDGROUP GROUP");
+                    self.command_line.push_info(&c.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(c));
+                    return Some(self.finish_dispatch(cmd));
+                }
+                let name = crate::app::helpers::next_group_auto_name(&self.tabs[i].scene);
+                match self.make_pid_group(i, "PIDGROUP", name, selected, None) {
+                    Some((_, receipt)) => self.command_line.push_info(&receipt),
+                    None => self
+                        .command_line
+                        .push_info("PIDGROUP: nothing groupable selected (locked layers?)."),
+                }
+            }
+            "TAG" => {
+                let value = rest.trim_start()["TAG".len()..].trim();
+                if value.is_empty() {
+                    self.command_line.push_error(
+                        "PIDGROUP TAG needs the tag -- PIDGROUP TAG BUV-3101. PIDGROUP AUTO reads it from the lettering again.",
+                    );
+                    return Some(Task::none());
+                }
+                if selected.is_empty() {
+                    self.command_line.push_info(
+                        "PIDGROUP: pick the group's members first, then PIDGROUP TAG <tag>.",
+                    );
+                    return Some(Task::none());
+                }
+                let groups = self.groups_of(i, &selected);
+                if groups.is_empty() {
+                    // An ungrouped selection: group it with the tag given.
+                    let name = crate::app::helpers::next_group_auto_name(&self.tabs[i].scene);
+                    match self.make_pid_group(i, "PIDGROUP", name, selected, Some(value)) {
+                        Some((_, receipt)) => self.command_line.push_info(&receipt),
+                        None => self
+                            .command_line
+                            .push_info("PIDGROUP: nothing groupable selected (locked layers?)."),
+                    }
+                } else {
+                    self.retag_pid_groups(i, &groups, Some(value));
+                }
+            }
+            "AUTO" => {
+                if selected.is_empty() {
+                    self.command_line
+                        .push_info("PIDGROUP: pick the group's members first, then PIDGROUP AUTO.");
+                    return Some(Task::none());
+                }
+                let groups = self.groups_of(i, &selected);
+                if groups.is_empty() {
+                    self.command_line
+                        .push_info("PIDGROUP: the picked entities are in no group.");
+                    return Some(Task::none());
+                }
+                self.retag_pid_groups(i, &groups, None);
+            }
+            "OFF" => {
+                if selected.is_empty() {
+                    use crate::modules::draw::select::SelectObjectsCommand;
+                    let c = SelectObjectsCommand::plain("PIDGROUP", "PIDGROUP OFF");
+                    self.command_line.push_info(&c.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(c));
+                    return Some(self.finish_dispatch(cmd));
+                }
+                let count = self.dissolve_pid_groups(i, "PIDGROUP", &selected);
+                if count > 0 {
+                    self.command_line
+                        .push_info(crate::tf!("{} group(s) dissolved.", count).as_ref());
+                } else {
+                    self.command_line
+                        .push_info(crate::t!("No groups found for selected objects.").as_ref());
+                }
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDGROUP: unknown option \"{other}\" -- use GROUP, TAG <tag>, AUTO or OFF."
+                ));
+            }
+        }
+        Some(Task::none())
+    }
+
+    /// The groups containing any of `handles`, each once, in first-seen order.
+    fn groups_of(&self, i: usize, handles: &[acadrust::Handle]) -> Vec<acadrust::Handle> {
+        let mut groups: Vec<acadrust::Handle> = Vec::new();
+        for handle in handles {
+            for group in self.tabs[i].scene.groups_containing(*handle) {
+                if !groups.contains(&group) {
+                    groups.push(group);
+                }
+            }
+        }
+        groups
+    }
+
+    /// PIDGROUP TAG / AUTO on existing groups: set (`Some`) or hand back
+    /// (`None`) the tag of each, redraw the legend when drawn, one undo step,
+    /// one receipt line per group.
+    fn retag_pid_groups(&mut self, i: usize, groups: &[acadrust::Handle], value: Option<&str>) {
+        let rules = Rules::load();
+        let pending = self.open_group_undo(i, "PIDGROUP");
+        let mut receipts = Vec::new();
+        for group in groups {
+            let name = match self.tabs[i].scene.document.objects.get(group) {
+                Some(acadrust::objects::ObjectType::Group(g)) => g.name.clone(),
+                _ => continue,
+            };
+            let tail = self.set_pid_group_tag(i, *group, value, &rules);
+            receipts.push(format!("Group \"{name}\": {tail}"));
+        }
+        self.tabs[i].dirty = true;
+        self.redraw_pid_legend_if_drawn(i, &rules);
+        self.close_group_undo(i, pending);
+        for receipt in receipts {
+            self.command_line.push_info(&receipt);
+        }
     }
 
     /// Read the sheet when it has not been read yet, or has changed since it
@@ -612,7 +1001,7 @@ mod tests {
     #[test]
     fn pidlegend_and_pidline_are_registered_for_autocomplete() {
         let names = crate::command::all_registered_command_names();
-        for verb in ["PIDLEGEND", "PIDLINE", "PIDTAG"] {
+        for verb in ["PIDLEGEND", "PIDLINE", "PIDTAG", "PIDGROUP"] {
             assert!(names.contains(&verb), "{verb} missing from the registry");
         }
     }
@@ -673,6 +1062,365 @@ mod tests {
         let mut handles = app.tabs[app.active_tab].scene.selected_handles_in_order();
         handles.sort_by_key(|h| h.value());
         handles
+    }
+
+    /// A bow-tie valve of four loose lines at `x`, with `tag` lettered above
+    /// it when given. Returns the strokes and the tag's handle.
+    fn loose_valve(
+        app: &mut OpenCADStudio,
+        x: f64,
+        tag: Option<&str>,
+    ) -> (Vec<acadrust::Handle>, Option<acadrust::Handle>) {
+        use acadrust::entities::{EntityType, Line, Text};
+        use acadrust::types::Vector3;
+        let i = app.active_tab;
+        let strokes: Vec<acadrust::Handle> = [
+            ((0.0, 0.0), (0.0, 3.0)),
+            ((0.0, 3.0), (6.0, 0.0)),
+            ((6.0, 0.0), (6.0, 3.0)),
+            ((6.0, 3.0), (0.0, 0.0)),
+        ]
+        .into_iter()
+        .map(|(a, b)| {
+            let mut line = Line::new();
+            line.start = Vector3::new(x + a.0, a.1, 0.0);
+            line.end = Vector3::new(x + b.0, b.1, 0.0);
+            app.tabs[i].scene.add_entity(EntityType::Line(line))
+        })
+        .collect();
+        let tag = tag.map(|value| {
+            app.tabs[i].scene.add_entity(EntityType::Text(
+                Text::with_value(value, Vector3::new(x, 4.0, 0.0)).with_height(2.5),
+            ))
+        });
+        (strokes, tag)
+    }
+
+    fn select_all_of(app: &mut OpenCADStudio, handles: &[acadrust::Handle]) {
+        let i = app.active_tab;
+        app.tabs[i]
+            .scene
+            .replace_selection(handles.iter().copied().collect());
+    }
+
+    /// The groups of the active drawing, by handle, in handle order.
+    fn groups(app: &OpenCADStudio) -> Vec<acadrust::Handle> {
+        let mut out: Vec<acadrust::Handle> = app.tabs[app.active_tab]
+            .scene
+            .groups()
+            .map(|g| g.handle)
+            .collect();
+        out.sort_by_key(|h| h.value());
+        out
+    }
+
+    fn description_of(app: &OpenCADStudio, group: acadrust::Handle) -> String {
+        app.tabs[app.active_tab]
+            .scene
+            .groups()
+            .find(|g| g.handle == group)
+            .map(|g| g.description.clone())
+            .unwrap_or_else(|| panic!("no group {group:?}"))
+    }
+
+    /// Every line the command line has shown, newest last.
+    fn history(app: &OpenCADStudio) -> Vec<String> {
+        app.command_line
+            .history
+            .iter()
+            .map(|entry| entry.text.clone())
+            .collect()
+    }
+
+    /// GROUP reads the new group's tag from its own lettering and writes it
+    /// into the description; a group that letters nothing stays a plain
+    /// group and the receipt says so. Both undo and redo as one step each.
+    #[test]
+    fn group_reads_its_tag_from_the_lettering_into_the_description() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let (strokes, tag) = loose_valve(&mut app, 0.0, Some("BUV-3101"));
+        let (bare, _) = loose_valve(&mut app, 40.0, None);
+
+        let mut members = strokes.clone();
+        members.push(tag.unwrap());
+        select_all_of(&mut app, &members);
+        let _ = app.run_command_line("GROUP");
+        assert!(
+            app.tabs[app.active_tab].active_cmd.is_some(),
+            "GROUP asks a name"
+        );
+        let _ = app.feed_command(crate::command::StepInput::Enter);
+        let tagged = groups(&app);
+        assert_eq!(tagged.len(), 1);
+        assert_eq!(
+            description_of(&app, tagged[0]),
+            "tagName=BUV-3101;tagSource=auto"
+        );
+        // The first half of the receipt is the localised GROUP line.
+        let receipt = last_line(&app);
+        assert!(
+            receipt.contains("*A1") && receipt.contains("tagName BUV-3101 (蝶阀)."),
+            "{receipt}"
+        );
+
+        select_all_of(&mut app, &bare);
+        let _ = app.run_command_line("GROUP");
+        let _ = app.feed_command(crate::command::StepInput::Enter);
+        let all = groups(&app);
+        assert_eq!(all.len(), 2);
+        let plain = *all.iter().find(|g| **g != tagged[0]).unwrap();
+        assert_eq!(description_of(&app, plain), "", "no lettering, no marker");
+        let receipt = last_line(&app);
+        assert!(
+            receipt.contains("No tagName") && receipt.contains("0 texts"),
+            "{receipt}"
+        );
+        assert_eq!(app.tabs[app.active_tab].scene.tagged_groups().count(), 1);
+
+        // One undo step per GROUP, description and all.
+        let _ = app.update(Message::Undo);
+        assert_eq!(groups(&app), tagged);
+        let _ = app.update(Message::Undo);
+        assert!(groups(&app).is_empty());
+        let _ = app.update(Message::Redo);
+        assert_eq!(groups(&app), tagged);
+        assert_eq!(
+            description_of(&app, tagged[0]),
+            "tagName=BUV-3101;tagSource=auto",
+            "redo brings the tag back with the group"
+        );
+    }
+
+    /// PIDGROUP groups without asking a name, sets a tag by hand (`manual`),
+    /// hands it back to the lettering (`auto`), and treats a hand-set value
+    /// the lettering reads anyway as `auto`; on an ungrouped selection TAG
+    /// groups first; OFF dissolves. Bare PIDGROUP only prompts.
+    #[test]
+    fn pidgroup_groups_tags_by_hand_reads_again_and_dissolves() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let (strokes, tag) = loose_valve(&mut app, 0.0, Some("BUV-3101"));
+        let (bare, _) = loose_valve(&mut app, 40.0, None);
+
+        let mut members = strokes.clone();
+        members.push(tag.unwrap());
+        select_all_of(&mut app, &members);
+        let _ = app.run_command_line("PIDGROUP GROUP");
+        assert!(app.tabs[i].active_cmd.is_none(), "no name prompt");
+        let first = groups(&app);
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            description_of(&app, first[0]),
+            "tagName=BUV-3101;tagSource=auto"
+        );
+        assert!(last_line(&app).contains("tagName BUV-3101 (蝶阀)"));
+
+        // By hand, through one member.
+        select_all_of(&mut app, &[tag.unwrap()]);
+        let _ = app.run_command_line("PIDGROUP TAG XV-0001");
+        assert_eq!(
+            description_of(&app, first[0]),
+            "tagName=XV-0001;tagSource=manual"
+        );
+        assert!(
+            last_line(&app).contains("set by hand"),
+            "{}",
+            last_line(&app)
+        );
+        // The value the lettering reads anyway is not a hand-set one.
+        let _ = app.run_command_line("PIDGROUP TAG BUV-3101");
+        assert_eq!(
+            description_of(&app, first[0]),
+            "tagName=BUV-3101;tagSource=auto"
+        );
+        // Back to the lettering from a hand-set value.
+        let _ = app.run_command_line("PIDGROUP TAG XV-0002");
+        assert_eq!(
+            description_of(&app, first[0]),
+            "tagName=XV-0002;tagSource=manual"
+        );
+        let _ = app.run_command_line("PIDGROUP AUTO");
+        assert_eq!(
+            description_of(&app, first[0]),
+            "tagName=BUV-3101;tagSource=auto"
+        );
+        assert!(last_line(&app).contains("read from the lettering"));
+        // Undo the last two by-hand steps: one step each.
+        let _ = app.update(Message::Undo);
+        assert_eq!(
+            description_of(&app, first[0]),
+            "tagName=XV-0002;tagSource=manual"
+        );
+        let _ = app.update(Message::Redo);
+        assert_eq!(
+            description_of(&app, first[0]),
+            "tagName=BUV-3101;tagSource=auto"
+        );
+
+        // TAG without a value: typed inline, the verb prompt asks for the tag
+        // and Enter cancels; dispatched whole, it is refused. The group is
+        // left alone either way.
+        let _ = app.run_command_line("PIDGROUP TAG");
+        assert!(
+            app.tabs[i].active_cmd.is_none(),
+            "Enter at the tag prompt cancelled"
+        );
+        let _ = app.dispatch_command("PIDGROUP TAG");
+        assert!(
+            last_line(&app).contains("needs the tag"),
+            "{}",
+            last_line(&app)
+        );
+        assert_eq!(
+            description_of(&app, first[0]),
+            "tagName=BUV-3101;tagSource=auto"
+        );
+
+        // An ungrouped selection tagged by hand is grouped first.
+        select_all_of(&mut app, &bare);
+        let _ = app.run_command_line("PIDGROUP TAG GV0301");
+        let all = groups(&app);
+        assert_eq!(all.len(), 2);
+        let second = *all.iter().find(|g| **g != first[0]).unwrap();
+        assert_eq!(
+            description_of(&app, second),
+            "tagName=GV0301;tagSource=manual"
+        );
+        assert!(
+            last_line(&app).contains("set by hand"),
+            "{}",
+            last_line(&app)
+        );
+        // Nothing to read from: AUTO leaves it marked, tagless.
+        select_all_of(&mut app, &bare[..1]);
+        let _ = app.run_command_line("PIDGROUP AUTO");
+        assert_eq!(description_of(&app, second), "tagName=;tagSource=auto");
+
+        // OFF dissolves the picked member's group only (the receipt is the
+        // localised UNGROUP line).
+        let _ = app.run_command_line("PIDGROUP OFF");
+        assert_eq!(groups(&app), first);
+        assert!(app.tabs[i].active_cmd.is_none());
+
+        // Bare PIDGROUP prompts; Enter with nothing selected goes on to a
+        // selection prompt rather than making an empty group.
+        app.tabs[i].scene.deselect_all();
+        let _ = app.run_command_line("PIDGROUP");
+        assert!(app.tabs[i].active_cmd.is_some(), "bare PIDGROUP prompts");
+        let _ = app.feed_command(crate::command::StepInput::Enter);
+        assert!(
+            app.tabs[i].active_cmd.is_some(),
+            "GROUP with nothing selected asks for objects"
+        );
+        let _ = app.feed_command(crate::command::StepInput::Escape);
+        assert_eq!(groups(&app), first, "nothing was made");
+    }
+
+    /// A copy of a tagged group carries the tag (the description is copied
+    /// with the group, in the drawing and through the clipboard); when the
+    /// copy's lettering is then changed, PIDLEGEND ON brings the stored
+    /// `auto` tag up to date (D35). A drawn legend is redrawn when a group
+    /// is made or dissolved, in the same undo step (D38).
+    #[test]
+    fn a_copied_group_keeps_its_tag_and_the_legend_follows_group_changes() {
+        use crate::command::EntityTransform;
+        let mut app = OpenCADStudio::new_for_test();
+        let (insert, tag, _pipe) = valve_with_tag(&mut app);
+        let i = app.active_tab;
+        select_all_of(&mut app, &[insert, tag]);
+        let _ = app.run_command_line("PIDGROUP GROUP");
+        let original = groups(&app);
+        assert_eq!(original.len(), 1);
+        assert_eq!(
+            description_of(&app, original[0]),
+            "tagName=BUV-3101;tagSource=auto"
+        );
+
+        // An in-drawing copy of the whole group: a second group, same tag.
+        let copied = app.tabs[i].scene.copy_entities(
+            &[insert, tag],
+            &EntityTransform::Translate(glam::DVec3::new(60.0, 0.0, 0.0)),
+        );
+        assert_eq!(copied.len(), 2);
+        let all = groups(&app);
+        assert_eq!(all.len(), 2, "the copy is grouped too");
+        let copy = *all.iter().find(|g| **g != original[0]).unwrap();
+        assert_eq!(
+            description_of(&app, copy),
+            "tagName=BUV-3101;tagSource=auto"
+        );
+
+        // Letter the copy differently; the stored tag lags until the sheet is
+        // marked up again, then follows.
+        let copied_tag = *copied
+            .iter()
+            .find(|h| {
+                matches!(
+                    app.tabs[i].scene.document.get_entity(**h),
+                    Some(acadrust::EntityType::Text(_))
+                )
+            })
+            .expect("the copied tag");
+        if let Some(acadrust::EntityType::Text(text)) =
+            app.tabs[i].scene.document.get_entity_mut(copied_tag)
+        {
+            text.value = "BUV-3102".to_string();
+        }
+        assert_eq!(
+            description_of(&app, copy),
+            "tagName=BUV-3101;tagSource=auto"
+        );
+        let _ = app.run_command_line("PIDLEGEND ON");
+        assert_eq!(
+            description_of(&app, copy),
+            "tagName=BUV-3102;tagSource=auto"
+        );
+        assert_eq!(
+            description_of(&app, original[0]),
+            "tagName=BUV-3101;tagSource=auto",
+            "the original is as it was"
+        );
+        let drawn = legend_count(&app);
+        assert!(drawn > 0, "PIDLEGEND ON drew the legend");
+
+        // With a legend drawn, dissolving and making a group redraws it in
+        // the same step: one undo takes both back.
+        let before = history(&app).len();
+        select_all_of(&mut app, &[copied_tag]);
+        let _ = app.run_command_line("UNGROUP");
+        assert_eq!(groups(&app), original);
+        let lines = history(&app)[before..].join("\n");
+        assert!(lines.contains("legend redrawn"), "{lines}");
+        assert_eq!(
+            legend_count(&app),
+            drawn,
+            "the same sheet draws the same legend"
+        );
+        let _ = app.update(Message::Undo);
+        assert_eq!(groups(&app).len(), 2, "one undo brings the group back");
+        assert_eq!(legend_count(&app), drawn, "and the legend is whole");
+        let _ = app.update(Message::Redo);
+        assert_eq!(groups(&app), original);
+
+        // Through the clipboard into another drawing: the tag travels.
+        select_all_of(&mut app, &[insert, tag]);
+        let _ = app.run_command_line("COPYCLIP");
+        assert_eq!(
+            app.clipboard.len(),
+            2,
+            "the block and its tag are on the clipboard"
+        );
+        app.automation_op(r#"{"op":"new"}"#);
+        assert!(groups(&app).is_empty());
+        let _ = app.run_command_line("PASTECLIP 0,0");
+        let pasted = groups(&app);
+        assert_eq!(pasted.len(), 1, "the pasted group came along");
+        assert_eq!(
+            description_of(&app, pasted[0]),
+            "tagName=BUV-3101;tagSource=auto"
+        );
     }
 
     /// The command line's latest entry.

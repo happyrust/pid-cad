@@ -685,10 +685,9 @@ impl OpenCADStudio {
                     self.command_line.push_info(&cmd.prompt());
                     self.tabs[i].active_cmd = Some(Box::new(cmd));
                 } else {
-                    let undo = self.begin_group_undo(i, "UNGROUP");
-                    let count = self.tabs[i].scene.delete_groups_containing(&handles);
-                    self.tabs[i].dirty = true;
-                    self.commit_group_undo(i, undo);
+                    // Dissolving is P&ID-aware: a drawn legend is redrawn in
+                    // the same undo step (commands/pidlegend.rs).
+                    let count = self.dissolve_pid_groups(i, "UNGROUP", &handles);
                     if count > 0 {
                         self.command_line
                             .push_info(crate::tf!("{} group(s) dissolved.", count).as_ref());

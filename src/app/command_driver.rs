@@ -2767,33 +2767,25 @@ impl OpenCADStudio {
                         .push_info(crate::tf!("{count} object(s) pasted.").as_ref());
                 }
             }
-            CmdResult::CreateGroup { mut handles, name } => {
-                handles.retain(|handle| !self.tabs[i].scene.is_layer_locked(*handle));
+            CmdResult::CreateGroup { handles, name } => {
                 self.tabs[i].active_cmd = None;
                 self.tabs[i].snap_result = None;
                 self.tabs[i].scene.clear_preview_wire();
-                if handles.is_empty() {
-                    return Task::none();
+                // A group is a P&ID symbol when its lettering reads as a tag:
+                // `make_pid_group` reads it, writes it into the description
+                // and redraws a drawn legend, all in the one undo step.
+                if let Some((_, receipt)) = self.make_pid_group(i, "GROUP", name, handles, None) {
+                    self.command_line.push_info(&receipt);
                 }
-                let undo = self.begin_group_undo(i, "GROUP");
-                self.tabs[i].scene.create_group(name.clone(), handles);
-                self.tabs[i].dirty = true;
-                self.commit_group_undo(i, undo);
-                self.command_line
-                    .push_info(crate::tf!("Group \"{}\" created.", name).as_ref());
             }
-            CmdResult::DeleteGroups { mut handles } => {
-                handles.retain(|handle| !self.tabs[i].scene.is_layer_locked(*handle));
+            CmdResult::DeleteGroups { handles } => {
                 self.tabs[i].active_cmd = None;
                 self.tabs[i].snap_result = None;
                 self.tabs[i].scene.clear_preview_wire();
                 if handles.is_empty() {
                     return Task::none();
                 }
-                let undo = self.begin_group_undo(i, "UNGROUP");
-                let count = self.tabs[i].scene.delete_groups_containing(&handles);
-                self.tabs[i].dirty = true;
-                self.commit_group_undo(i, undo);
+                let count = self.dissolve_pid_groups(i, "UNGROUP", &handles);
                 if count > 0 {
                     self.command_line
                         .push_info(crate::tf!("{} group(s) dissolved.", count).as_ref());
