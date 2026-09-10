@@ -832,6 +832,120 @@ fn a_vent_stub_joins_the_pipe_at_the_far_end_of_its_stem() {
     assert_eq!(without.pipes.open_ends, 3, "{:?}", without.pipes.runs);
 }
 
+/// A loading-island sheet: a header on `PIPE-工艺` from an open end at x = 10
+/// to one at x = 60 through a butterfly valve at x = 35, lettered
+/// `100-CGA-0319-A1` left of the valve and `80-CGA-0319-A1` right of it --
+/// the islands' spelling, a 4-digit sequence number -- with the bare
+/// `100-CGA-0319` written under the right piece; and below it a second
+/// header lettered `200-FS-31001-A2`, the tank farms' 5-digit spelling.
+fn loading_island_pipe_sheet() -> CadDocument {
+    let mut doc = CadDocument::new();
+    define_block(
+        &mut doc,
+        "$VALVE$00000316",
+        vec![
+            line(-1.25, -0.72, 1.25, -0.72),
+            line(1.25, -0.72, 1.25, 0.72),
+            line(1.25, 0.72, -1.25, 0.72),
+            line(-1.25, 0.72, -1.25, -0.72),
+            line(-1.25, -0.72, 1.25, 0.72),
+            point(-1.25, 0.0),
+            point(1.25, 0.0),
+        ],
+    );
+    doc.add_entity(line(0.0, 0.0, 420.0, 0.0)).unwrap();
+    doc.add_entity(line(0.0, 0.0, 0.0, 297.0)).unwrap();
+    let pipe = |doc: &mut CadDocument, x0: f64, y0: f64, x1: f64, y1: f64| {
+        doc.add_entity(layered(line(x0, y0, x1, y1), "PIPE-工艺"))
+            .unwrap();
+    };
+    pipe(&mut doc, 10.0, 50.0, 33.75, 50.0);
+    doc.add_entity(insert("$VALVE$00000316", 35.0, 50.0, "VALVE_工艺"))
+        .unwrap();
+    doc.add_entity(text("BUV-0319", 35.0, 47.5)).unwrap();
+    pipe(&mut doc, 36.25, 50.0, 60.0, 50.0);
+    doc.add_entity(text("100-CGA-0319-A1", 18.0, 51.5)).unwrap();
+    doc.add_entity(text("80-CGA-0319-A1", 45.0, 51.5)).unwrap();
+    doc.add_entity(text("100-CGA-0319", 50.0, 48.0)).unwrap();
+    pipe(&mut doc, 10.0, 30.0, 60.0, 30.0);
+    doc.add_entity(text("200-FS-31001-A2", 35.0, 31.5)).unwrap();
+    doc
+}
+
+/// The loading islands letter their line numbers with a 4-digit sequence
+/// number, `100-CGA-0319-A1`: the built-in rules' second pattern reads them,
+/// and the family template unites the two sizes either side of the valve as
+/// `CGA-0319` -- beside the tank farms' 5-digit spelling on the same sheet,
+/// a family of its own. The bare `100-CGA-0319`, with no class, is no line
+/// number under either pattern.
+#[test]
+fn loading_island_line_numbers_with_a_four_digit_sequence_are_read_and_familied() {
+    let doc = loading_island_pipe_sheet();
+    let rules = Rules::builtin();
+    // The compiled-in JSON spells the same two patterns as the code's default.
+    assert!(rules
+        .pipes
+        .number_pattern
+        .iter()
+        .map(String::as_str)
+        .eq(pid_pipes::DEFAULT_NUMBER_PATTERN));
+    assert_eq!(rules.pipes.family, "{service}-{seq}");
+
+    let recognition = pid_legend::recognise(&doc, &rules);
+    assert_eq!(recognition.units_per_mm, 1.0);
+    let pipes = &recognition.pipes;
+    assert_eq!(pipes.segments, 3);
+    assert_eq!(pipes.runs.len(), 3, "{:?}", pipes.runs);
+    assert_eq!((pipes.connected_ports, pipes.ports), (2, 2));
+    assert_eq!(pipes.open_ends, 4, "{:?}", pipes.runs);
+
+    let numbered = |number: &str| {
+        pipes
+            .runs
+            .iter()
+            .find(|r| r.numbers.iter().any(|n| n == number))
+            .unwrap_or_else(|| panic!("no run lettered {number} in {:?}", pipes.runs))
+    };
+    let left = numbered("100-CGA-0319-A1");
+    let right = numbered("80-CGA-0319-A1");
+    let farm = numbered("200-FS-31001-A2");
+    assert_eq!(left.numbers, ["100-CGA-0319-A1"]);
+    assert_eq!(
+        right.numbers,
+        ["80-CGA-0319-A1"],
+        "the bare 100-CGA-0319 is no line number"
+    );
+    // Each piece keeps its own number through the valve; the valve sits on
+    // both.
+    assert_eq!(left.lines, ["100-CGA-0319-A1"]);
+    assert_eq!(right.lines, ["80-CGA-0319-A1"]);
+    assert_eq!(farm.lines, ["200-FS-31001-A2"]);
+    let valve = recognition
+        .symbols
+        .iter()
+        .find(|s| s.tag.as_deref() == Some("BUV-0319"))
+        .expect("the valve tagged BUV-0319");
+    let mut valve_lines = valve.lines.clone();
+    valve_lines.sort();
+    assert_eq!(valve_lines, ["100-CGA-0319-A1", "80-CGA-0319-A1"]);
+
+    // The families the panel and PIDLINE read off the index: both sizes of
+    // the island line are one, the farm line another.
+    assert_eq!(pipes.family_of("100-CGA-0319-A1"), "CGA-0319");
+    assert_eq!(pipes.family_of("80-CGA-0319-A1"), "CGA-0319");
+    assert_eq!(pipes.family_of("200-FS-31001-A2"), "FS-31001");
+    let families = pipes.by_family();
+    assert_eq!(
+        families.keys().collect::<Vec<_>>(),
+        ["CGA-0319", "FS-31001"]
+    );
+    assert_eq!(
+        families["CGA-0319"].keys().copied().collect::<Vec<_>>(),
+        ["100-CGA-0319-A1", "80-CGA-0319-A1"]
+    );
+    assert_eq!(families["FS-31001"].len(), 1);
+}
+
 /// The S point (circle) at x on the piped block sheet.
 fn symbol_s(recognition: &pid_legend::Recognition, x: f64) -> usize {
     recognition
