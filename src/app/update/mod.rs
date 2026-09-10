@@ -7232,6 +7232,21 @@ impl OpenCADStudio {
                 );
                 Task::none()
             }
+            Message::PidLegendPickSymbol(handles) => {
+                let i = self.active_tab;
+                match self.pid_group_select(i, |s| {
+                    s.handles
+                        .iter()
+                        .chain(&s.tag_handles)
+                        .any(|h| handles.contains(&h.value()))
+                }) {
+                    Some(receipt) => self.command_line.push_output(&receipt),
+                    None => self.command_line.push_info(
+                        "PIDTAG: that symbol is no longer on the sheet -- PIDLEGEND LIST re-reads it.",
+                    ),
+                }
+                Task::none()
+            }
             Message::PidLegendPickFamily(family) => {
                 let i = self.active_tab;
                 let families: std::collections::BTreeSet<String> =

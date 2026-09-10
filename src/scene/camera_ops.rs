@@ -392,17 +392,52 @@ impl Scene {
     }
 
     /// Fit the camera to a world-space bounding box (corners p1, p2).
+    ///
+    /// The window says what to frame, not how deep the drawing is: it is
+    /// picked (or, for PIDLINE / PIDTAG and the legend list, computed) on one
+    /// plane, so sizing near/far to its own box -- as `fit_to_bounds` does,
+    /// which is right for Zoom Extents -- left a unit of depth either side of
+    /// that plane, and anything the drawing keeps a little above or below it
+    /// (a P&ID sheet's tag lettering at z = 100, an elevation left in a 2-D
+    /// drawing) vanished behind the near plane until the next Zoom Extents.
+    /// The depth stays the whole drawing's ([`Self::frame_keeping_drawing_depth`]).
     pub fn zoom_to_window(&mut self, p1: glam::Vec3, p2: glam::Vec3) {
         let min = p1.min(p2);
         let max = p1.max(p2);
         if min == max {
             return;
         }
+        self.frame_keeping_drawing_depth(min, max);
+    }
+
+    /// Frame `min..max` with the live camera and size near/far to the
+    /// drawing, not to the framed box. The drawing's depth box the camera
+    /// already holds -- one a Zoom Extents or a projection refresh fitted for
+    /// this very geometry (`projection_bounds_epoch`), which every geometry
+    /// bump throws away -- is kept, grown to take the framed box in; without
+    /// one the depth is refitted from the drawing, as an orbit does before it
+    /// starts. A box that arrived some other way (the saved extents a file's
+    /// view is restored with, ZOOM All's flat limits) is not trusted to be
+    /// the drawing's, and costs one refit.
+    fn frame_keeping_drawing_depth(&mut self, min: glam::Vec3, max: glam::Vec3) {
         let aspect = self.active_camera_aspect();
-        self.camera
-            .borrow_mut()
-            .fit_to_bounds(min, max, aspect);
-        self.projection_bounds_epoch.set(self.geometry_epoch);
+        let drawing = (self.projection_bounds_epoch.get() == self.geometry_epoch)
+            .then(|| self.camera.borrow().fitted_model_bounds())
+            .flatten();
+        self.camera.borrow_mut().fit_to_bounds(min, max, aspect);
+        match drawing {
+            Some((lo, hi)) => {
+                self.camera.borrow_mut().fit_depth_to_bounds_f64(
+                    lo.min(min.as_dvec3()),
+                    hi.max(max.as_dvec3()),
+                );
+                self.projection_bounds_epoch.set(self.geometry_epoch);
+            }
+            None => {
+                self.camera.borrow_mut().invalidate_model_bounds();
+                self.refresh_projection_bounds();
+            }
+        }
         self.camera_generation += 1;
     }
 
@@ -445,10 +480,9 @@ impl Scene {
         if self.active_viewport.is_some() {
             return self.fit_active_viewport_to_bounds(min, max);
         }
-        let aspect = self.active_camera_aspect();
-        self.camera.borrow_mut().fit_to_bounds(min, max, aspect);
-        self.projection_bounds_epoch.set(self.geometry_epoch);
-        self.camera_generation += 1;
+        // The entities' own box frames the view; the depth stays the drawing's
+        // (a valve on the plane, its tag lettering a hundred units above it).
+        self.frame_keeping_drawing_depth(min, max);
         true
     }
 
@@ -1543,4 +1577,96 @@ impl Scene {
     }
 
     pub fn update(&mut self, _dt: Duration) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acadrust::entities::Line;
+    use acadrust::types::Vector3;
+
+    fn line(scene: &mut Scene, a: (f64, f64, f64), b: (f64, f64, f64)) -> Handle {
+        let mut line = Line::new();
+        line.start = Vector3::new(a.0, a.1, a.2);
+        line.end = Vector3::new(b.0, b.1, b.2);
+        scene.add_entity(EntityType::Line(line))
+    }
+
+    /// A line on the plane and one a hundred units above it: a flat zoom
+    /// window must leave both between near and far.
+    fn two_storeys() -> (Scene, Handle) {
+        let mut s = Scene::new();
+        let ground = line(&mut s, (0.0, 0.0, 0.0), (1000.0, 0.0, 0.0));
+        line(&mut s, (0.0, 50.0, 100.0), (1000.0, 50.0, 100.0));
+        (s, ground)
+    }
+
+    fn assert_depth_is_the_drawings(s: &Scene, centre: (f64, f64)) {
+        let camera = s.camera.borrow();
+        let target = camera.target;
+        assert!(
+            (target.x - centre.0).abs() < 1e-3 && (target.y - centre.1).abs() < 1e-3,
+            "the view is centred on what was framed, got {target:?}"
+        );
+        let (min, max) = camera
+            .fitted_model_bounds()
+            .expect("the depth is sized to the drawing");
+        assert!(min.z <= 0.0 && max.z >= 100.0, "depth box {min:?}..{max:?}");
+        assert!(
+            min.x <= 0.0 && max.x >= 1000.0,
+            "the depth box is the drawing's, not the framed box: {min:?}..{max:?}"
+        );
+    }
+
+    /// A window picked on the z = 0 plane frames the view but must not size
+    /// the depth: the drawing's lettering a hundred units above that plane
+    /// still has to lie between near and far, or it vanishes after the zoom.
+    /// With no depth box held, the drawing is refitted for one.
+    #[test]
+    fn zoom_to_window_frames_the_window_but_keeps_the_drawing_depth() {
+        let (mut s, _) = two_storeys();
+        assert!(s.camera.borrow().fitted_model_bounds().is_none());
+
+        s.zoom_to_window(
+            glam::Vec3::new(400.0, -20.0, 0.0),
+            glam::Vec3::new(600.0, 20.0, 0.0),
+        );
+        assert_depth_is_the_drawings(&s, (500.0, 0.0));
+    }
+
+    /// The depth box a Zoom Extents fitted for this geometry is kept across
+    /// window zooms rather than refitted -- and never narrowed to the window.
+    #[test]
+    fn zoom_to_window_keeps_a_fitted_depth_box_without_refitting() {
+        let (mut s, _) = two_storeys();
+        s.fit_all();
+        let fitted = s.camera.borrow().fitted_model_bounds();
+        assert!(fitted.is_some());
+
+        // Two windows inside the drawing's own box.
+        s.zoom_to_window(
+            glam::Vec3::new(400.0, 10.0, 0.0),
+            glam::Vec3::new(600.0, 40.0, 0.0),
+        );
+        assert_depth_is_the_drawings(&s, (500.0, 25.0));
+        s.zoom_to_window(
+            glam::Vec3::new(100.0, 10.0, 0.0),
+            glam::Vec3::new(300.0, 40.0, 0.0),
+        );
+        assert_depth_is_the_drawings(&s, (200.0, 25.0));
+        assert_eq!(
+            s.camera.borrow().fitted_model_bounds(),
+            fitted,
+            "two zooms inside the drawing leave the fitted box as it was"
+        );
+    }
+
+    /// Zooming to the ground line alone frames it, and the storey above it
+    /// stays in front of the near plane.
+    #[test]
+    fn zoom_to_entities_keeps_the_drawing_depth() {
+        let (mut s, ground) = two_storeys();
+        assert!(s.zoom_to_entities(&[ground]));
+        assert_depth_is_the_drawings(&s, (500.0, 0.0));
+    }
 }

@@ -3015,9 +3015,16 @@ pub enum Message {
     PlotDlg(crate::ui::window::plot::PlotDlgMsg),
     /// An edit inside the docked Insert Block panel.
     BlockPalette(crate::ui::window::block_palette::BlockPaletteMsg),
-    /// A row click in the P&ID legend list: zoom the model camera to the
+    /// A line-row click in the P&ID legend list: zoom the model camera to the
     /// world-space rectangle (already padded by the panel).
     PidLegendJump { min: (f64, f64), max: (f64, f64) },
+    /// A symbol-row click in the P&ID legend list: select the symbol's
+    /// entities and its tag lettering (the group the SVG export writes as
+    /// `<g tagName>`), frame them in red and zoom to them, as PIDTAG does.
+    /// The symbol is named by its entity handles (values), which survive a
+    /// re-read of a sheet that changed under the panel where a row index
+    /// would not.
+    PidLegendPickSymbol(Vec<u64>),
     /// A pipe-row click in the P&ID legend list: select every stroke of the
     /// line family's runs in the drawing and zoom to their whole extent.
     PidLegendPickFamily(String),

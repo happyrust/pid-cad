@@ -232,6 +232,7 @@ pub use model::mesh_model::MeshLodSet;
 pub use model::object::{GripApply, GripDef};
 pub use model::wire_model::WireModel;
 pub use pick::selection_state::SelectionState;
+pub use preview::{PID_GROUP_FRAME, PID_GROUP_HIGHLIGHT};
 pub use pipeline::uniforms::Uniforms;
 pub use pipeline::viewcube::{
     hit_test, hit_test_cardinal, hover_id, CubeRegion, NudgeDir, VIEWCUBE_DRAW_PX, VIEWCUBE_PAD,
@@ -1653,6 +1654,13 @@ pub struct Scene {
     pub selection_filter: HashSet<String>,
     /// In-progress preview wires while a command is active (rubber-band + object ghosts).
     pub preview_wires: Vec<WireModel>,
+    /// The P&ID symbol group last jumped to (PIDTAG, a symbol row of the
+    /// legend list): its wires in red and a red frame round them, drawn over
+    /// the drawing with the command preview
+    /// ([`Scene::set_pid_group_highlight`]). It goes with the selection it
+    /// was made with -- any change of selection drops it -- and is not drawn
+    /// once the geometry has moved on from the epoch it was built at.
+    pid_group_highlight: Option<preview::PidGroupHighlight>,
     /// Candidate wireframes produced by editable solid-history grips. The
     /// resident body remains untouched until the grip is committed.
     solid_history_preview_wires: HashMap<Handle, Vec<WireModel>>,
@@ -2087,6 +2095,7 @@ impl Scene {
             model_lineweight_scale: 1.0,
             selection_filter: HashSet::default(),
             preview_wires: vec![],
+            pid_group_highlight: None,
             solid_history_preview_wires: HashMap::default(),
             preview_hatches: Arc::new(Vec::new()),
             preview_text: vec![],
@@ -2914,6 +2923,8 @@ impl Scene {
 
     pub(crate) fn bump_selection_set(&mut self) {
         self.selection_fingerprint_dirty = true;
+        // The tag-group highlight belongs to the selection it came with.
+        self.pid_group_highlight = None;
         self.bump_selection();
     }
 

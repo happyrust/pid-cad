@@ -3581,7 +3581,7 @@ impl Scene {
             }
 
             let tint = if selected {
-                self.selection_color
+                self.selection_tint()
             } else {
                 WireModel::HOVER
             };
@@ -3629,7 +3629,7 @@ impl Scene {
                                 entity,
                                 content_viewport.then_some(inst.handle),
                             );
-                        wire.color = self.selection_color;
+                        wire.color = self.selection_tint();
                         wire.selected = true;
                         wire.pattern_length = pattern_length;
                         wire.pattern = pattern;
@@ -3769,7 +3769,7 @@ impl Scene {
             viewports,
             bg_color,
             viewcube_text_color,
-            selection_color: self.selection_color,
+            selection_color: self.selection_tint(),
             selection_effect: self.selection_effect,
             nav_perf: perf_nav,
         }
@@ -3799,7 +3799,7 @@ impl Scene {
                 viewports: vec![],
                 bg_color,
                 viewcube_text_color,
-                selection_color: self.selection_color,
+                selection_color: self.selection_tint(),
                 selection_effect: self.selection_effect,
                 nav_perf: None,
             };
@@ -3861,7 +3861,7 @@ impl Scene {
             viewports,
             bg_color,
             viewcube_text_color,
-            selection_color: self.selection_color,
+            selection_color: self.selection_tint(),
             selection_effect: self.selection_effect,
             nav_perf: perf_nav,
         }
@@ -4033,16 +4033,23 @@ impl Scene {
         } else {
             Arc::new(Vec::new())
         };
+        // The P&ID tag-group highlight rides with the command preview: the
+        // same overlay upload, the same place in the frame signature.
+        let pid_group = self.pid_group_highlight_wires();
         let preview_wires = if !show_live_overlay
-            || (self.interim_wire.is_none() && self.preview_wires.is_empty())
+            || (self.interim_wire.is_none()
+                && self.preview_wires.is_empty()
+                && pid_group.is_empty())
         {
             Arc::new(Vec::new())
         } else {
-            let mut v: Vec<WireModel> = Vec::with_capacity(self.preview_wires.len() + 1);
+            let mut v: Vec<WireModel> =
+                Vec::with_capacity(self.preview_wires.len() + pid_group.len() + 1);
             if let Some(iw) = &self.interim_wire {
                 v.push(iw.clone());
             }
             v.extend(self.preview_wires.iter().cloned());
+            v.extend(pid_group.iter().cloned());
             Arc::new(v)
         };
         let preview_hatches = if show_live_overlay {

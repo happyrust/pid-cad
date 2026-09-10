@@ -244,6 +244,9 @@ impl OpenCADStudio {
         if let Some(t) = self.dispatch_pidline(cmd, i) {
             return Some(t);
         }
+        if let Some(t) = self.dispatch_pidtag(cmd, i) {
+            return Some(t);
+        }
         None
     }
 
@@ -638,10 +641,11 @@ inventory::submit!(crate::command::CommandRegistration {
         "PAGESETUP",
         "PERF",
         "PERSP",
-        // P&ID symbol recognition mark-up (io::pid_legend), and selecting a
-        // whole pipe line by its coding-rule family.
+        // P&ID symbol recognition mark-up (io::pid_legend), selecting a whole
+        // pipe line by its coding-rule family, and a symbol group by its tag.
         "PIDLEGEND",
         "PIDLINE",
+        "PIDTAG",
         "PLOT",
         "PLOTSTYLE",
         "PLOTSTYLEEDITOR",

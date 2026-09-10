@@ -2,9 +2,11 @@
 //!
 //! `PIDLEGEND ON` (and `REPORT` / `LIST`) stash the sheet's [`Recognition`] on
 //! its tab; this panel lists it: every recognised symbol grouped by class, and
-//! every pipe line number with its runs. Clicking a row zooms the model-space
-//! camera to that symbol or that line's whole extent — the panel is the index,
-//! the drawing stays the document.
+//! every pipe line number with its runs. Clicking a symbol row selects the
+//! symbol's group — its entities and its tag lettering, what the SVG export
+//! writes as `<g tagName>` — frames it in red and zooms to it (PIDTAG);
+//! clicking a pipe row selects the line and zooms to its whole extent — the
+//! panel is the index, the drawing stays the document.
 //!
 //! Within a class the tagged symbols come first, in tag order, then the
 //! untagged ones top to bottom, left to right; the filter row under the title
@@ -347,7 +349,25 @@ pub fn view(
                 ),
             };
             let label: Element<'_, Message> = row_text(name, 11.0, stale || s.tag.is_none()).into();
-            col = col.push(jump_row(label, jump_rect(s.bbox, rec.units_per_mm)));
+            // A symbol row selects the symbol's group -- its entities and its
+            // tag lettering -- frames it in red and zooms to it (PIDTAG). A
+            // symbol nothing was drawn for (nothing to select) just zooms.
+            let handles: Vec<u64> = s
+                .handles
+                .iter()
+                .chain(&s.tag_handles)
+                .filter(|h| !h.is_null())
+                .map(|h| h.value())
+                .collect();
+            if handles.is_empty() {
+                col = col.push(jump_row(label, jump_rect(s.bbox, rec.units_per_mm)));
+            } else {
+                col = col.push(click_row(
+                    label,
+                    18.0,
+                    Message::PidLegendPickSymbol(handles),
+                ));
+            }
         }
     }
 

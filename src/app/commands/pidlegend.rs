@@ -17,16 +17,27 @@
 //!                      the picked stroke instead)
 //! PIDLINE <code>       select the whole line by number or family
 //!                      (PIDLINE 100-FW, PIDLINE FS-31001)
+//! PIDTAG               prompt for a tag (Enter = the picked symbol's)
+//! PIDTAG <tag>         select the symbol(s) carrying the tag with their tag
+//!                      lettering, frame them in red, zoom to them
 //! ```
 //!
 //! ON and REPORT stash the recognition on the tab; the legend list panel
-//! (`ui::window::pid_legend_list`) renders it and its rows zoom to symbols
-//! and pipe lines. ON also opens the panel — the list is the index of what
-//! was just drawn. The index is of the drawing it was read from: once the
-//! drawing moves on (an edit, an erase, an undo — any geometry epoch bump
-//! other than the legend's own entities going in or out) the panel says it
-//! is out of date, and PIDLINE, a pipe row of the panel and LIST read the
-//! sheet again before they use it (`refresh_pid_legend`).
+//! (`ui::window::pid_legend_list`) renders it: its symbol rows select and
+//! frame the symbol as PIDTAG does, its pipe rows select the line. ON also
+//! opens the panel — the list is the index of what was just drawn. The
+//! index is of the drawing it was read from: once the drawing moves on (an
+//! edit, an erase, an undo — any geometry epoch bump other than the legend's
+//! own entities going in or out) the panel says it is out of date, and
+//! PIDLINE, PIDTAG, a row of the panel and LIST read the sheet again before
+//! they use it (`refresh_pid_legend`).
+//!
+//! PIDTAG answers "what does this tag stand for on the sheet?": the group
+//! the SVG export writes as `<g tagName="…">` — the symbol's own entities
+//! and the lettering its tag was read from — is selected, drawn over in red
+//! with a red frame round it (`Scene::set_pid_group_highlight`, the
+//! debugging view of the group's extent), and zoomed to. The highlight goes
+//! with the selection: pick anything else, or Esc, and it is gone.
 //!
 //! PIDLINE answers "what else is this pipe?": from a picked pipe stroke (or
 //! a typed code) it resolves the line's *family* by the sheets' coding rule
@@ -413,6 +424,147 @@ impl OpenCADStudio {
         }
         Some(receipt)
     }
+
+    /// PIDTAG: jump to a symbol group by its tag.
+    ///
+    /// ```text
+    /// PIDTAG              prompt for a tag (Enter = the picked symbol's)
+    /// PIDTAG <tag>        select the symbol(s) tagged so and their tag
+    ///                     lettering, frame them in red, zoom to them
+    /// ```
+    ///
+    /// The group is what the SVG export wraps in one `<g tagName>`: the
+    /// symbol's own entities plus the lettering its tag was read from. Two
+    /// symbols may carry one tag (a motorised valve and its `XV` bubble) and
+    /// are then both selected, each in its own frame. With nothing named, the
+    /// picked entities say which symbols: a stroke of the valve, or its tag.
+    pub(super) fn dispatch_pidtag(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        let rest = cmd.strip_prefix("PIDTAG")?;
+        if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+            return None;
+        }
+        let arg = rest.trim();
+        if arg.is_empty() && cmd.trim_end() == cmd {
+            // Bare verb: prompt for the tag, like bare PIDLINE. Enter at the
+            // prompt dispatches `PIDTAG ` -- the picked-symbol path.
+            use crate::command::ValuePromptCommand;
+            let c = ValuePromptCommand::new("PIDTAG", "PIDTAG  tag <picked symbol>:");
+            self.command_line.push_info(&c.prompt());
+            self.tabs[i].active_cmd = Some(Box::new(c));
+            return Some(self.finish_dispatch(cmd));
+        }
+        let receipt = if arg.is_empty() {
+            let picked: Vec<u64> = self.tabs[i]
+                .scene
+                .selected_handles_in_order()
+                .iter()
+                .map(|h| h.value())
+                .collect();
+            if picked.is_empty() {
+                self.command_line.push_info(
+                    "PIDTAG: pick a symbol (or its tag lettering) first, or name the tag -- PIDTAG BUV-3201.",
+                );
+                return Some(Task::none());
+            }
+            self.pid_group_select(i, |s| symbol_has_any(s, &picked))
+        } else {
+            let wanted = arg.to_uppercase();
+            let found = self.pid_group_select(i, |s| {
+                s.tag.as_deref().is_some_and(|t| t.to_uppercase() == wanted)
+            });
+            if found.is_none() {
+                self.command_line.push_error(&format!(
+                    "PIDTAG: no symbol tagged \"{arg}\" on this sheet -- PIDLEGEND LIST shows the tags."
+                ));
+                return Some(Task::none());
+            }
+            found
+        };
+        match receipt {
+            Some(receipt) => self.command_line.push_output(&receipt),
+            None => self
+                .command_line
+                .push_info("PIDTAG: the picked entities belong to no recognised symbol."),
+        }
+        Some(Task::none())
+    }
+
+    /// Select the entities of every recognised symbol `pick` admits -- each
+    /// symbol's own entities and the lettering of its tag, what the SVG export
+    /// wraps in one `<g tagName>` -- draw them in red with a frame round each
+    /// (`Scene::set_pid_group_highlight`), zoom to their whole extent, and
+    /// word the receipt. `None` when nothing matches or nothing of it draws.
+    /// Serves PIDTAG and the legend list's symbol rows; a sheet that changed
+    /// since it was read is read again first, and `pick` sees the fresh
+    /// recognition -- which is why the callers pick by tag or by handle, not
+    /// by row.
+    pub(in crate::app) fn pid_group_select(
+        &mut self,
+        i: usize,
+        pick: impl Fn(&pid_legend::Recognized) -> bool,
+    ) -> Option<String> {
+        self.refresh_pid_legend(i);
+        let (groups, names, upm) = {
+            let rec = self.tabs[i].pid_legend()?;
+            let mut groups: Vec<Vec<acadrust::Handle>> = Vec::new();
+            let mut names: Vec<String> = Vec::new();
+            for symbol in rec.symbols.iter().filter(|s| pick(s)) {
+                let handles: Vec<acadrust::Handle> = symbol
+                    .handles
+                    .iter()
+                    .chain(&symbol.tag_handles)
+                    .copied()
+                    .filter(|h| !h.is_null())
+                    .collect();
+                if handles.is_empty() {
+                    continue;
+                }
+                groups.push(handles);
+                names.push(match &symbol.tag {
+                    Some(tag) => format!("{} {tag}", symbol.label),
+                    None => format!("{} (无位号)", symbol.label),
+                });
+            }
+            (groups, names, rec.units_per_mm)
+        };
+        if groups.is_empty() {
+            return None;
+        }
+        let selected: rustc_hash::FxHashSet<acadrust::Handle> =
+            groups.iter().flatten().copied().collect();
+        let count = selected.len();
+        self.tabs[i].scene.replace_selection(selected);
+        self.refresh_properties();
+        // A millimetre of paper round each group, so the frame stands off
+        // the symbol's own strokes.
+        let frame = self.tabs[i].scene.set_pid_group_highlight(&groups, upm);
+        let what = names.join(" + ");
+        let Some(bbox) = frame else {
+            return Some(format!(
+                "PIDTAG: {what} -- {count} entities selected, none of them draws anything to frame."
+            ));
+        };
+        let (min, max) = crate::ui::window::pid_legend_list::jump_rect(bbox, upm);
+        self.tabs[i].scene.remember_current_view();
+        self.tabs[i].scene.zoom_to_window(
+            glam::Vec3::new(min.0 as f32, min.1 as f32, 0.0),
+            glam::Vec3::new(max.0 as f32, max.1 as f32, 0.0),
+        );
+        Some(format!(
+            "PIDTAG: {what} -- {} group(s), {count} entities selected and framed in red.",
+            groups.len()
+        ))
+    }
+}
+
+/// Whether any of `handles` (handle values) is one of `symbol`'s entities or
+/// of its tag lettering.
+fn symbol_has_any(symbol: &pid_legend::Recognized, handles: &[u64]) -> bool {
+    symbol
+        .handles
+        .iter()
+        .chain(&symbol.tag_handles)
+        .any(|h| handles.contains(&h.value()))
 }
 
 #[cfg(test)]
@@ -458,9 +610,280 @@ mod tests {
     #[test]
     fn pidlegend_and_pidline_are_registered_for_autocomplete() {
         let names = crate::command::all_registered_command_names();
-        for verb in ["PIDLEGEND", "PIDLINE"] {
+        for verb in ["PIDLEGEND", "PIDLINE", "PIDTAG"] {
             assert!(names.contains(&verb), "{verb} missing from the registry");
         }
+    }
+
+    /// A sheet of one symbol: a butterfly valve block (`$VALVE$00000316`, a
+    /// 6 x 3 mm bow-tie of four lines) with `BUV-3101` lettered above it, a
+    /// run of pipe through it and a frame round everything. Returns the
+    /// handles of the block reference, the tag lettering and the pipe. The
+    /// frame is also the sheet's extent -- lettering does not count towards
+    /// it, and a plot fitted to the body alone would leave the tag off the
+    /// page.
+    fn valve_with_tag(
+        app: &mut OpenCADStudio,
+    ) -> (acadrust::Handle, acadrust::Handle, acadrust::Handle) {
+        use acadrust::entities::{EntityType, Line, Text};
+        use acadrust::types::{Transform, Vector3};
+
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let line = |a: (f64, f64), b: (f64, f64)| {
+            let mut line = Line::new();
+            line.start = Vector3::new(a.0, a.1, 0.0);
+            line.end = Vector3::new(b.0, b.1, 0.0);
+            EntityType::Line(line)
+        };
+        let body: Vec<acadrust::Handle> = [
+            ((0.0, 0.0), (0.0, 3.0)),
+            ((0.0, 3.0), (6.0, 0.0)),
+            ((6.0, 0.0), (6.0, 3.0)),
+            ((6.0, 3.0), (0.0, 0.0)),
+        ]
+        .into_iter()
+        .map(|(a, b)| app.tabs[i].scene.add_entity(line(a, b)))
+        .collect();
+        let identity = Transform::identity();
+        let insert = app.tabs[i]
+            .scene
+            .create_block_from_entities(&body, "$VALVE$00000316", &identity, &identity)
+            .unwrap();
+        let tag = app.tabs[i].scene.add_entity(EntityType::Text(
+            Text::with_value("BUV-3101", Vector3::new(0.0, 4.0, 0.0)).with_height(2.5),
+        ));
+        let pipe = app.tabs[i]
+            .scene
+            .add_entity(line((-20.0, 1.5), (30.0, 1.5)));
+        for (a, b) in [
+            ((-30.0, -10.0), (40.0, -10.0)),
+            ((40.0, -10.0), (40.0, 20.0)),
+            ((40.0, 20.0), (-30.0, 20.0)),
+            ((-30.0, 20.0), (-30.0, -10.0)),
+        ] {
+            app.tabs[i].scene.add_entity(line(a, b));
+        }
+        (insert, tag, pipe)
+    }
+
+    fn selected(app: &OpenCADStudio) -> Vec<acadrust::Handle> {
+        let mut handles = app.tabs[app.active_tab].scene.selected_handles_in_order();
+        handles.sort_by_key(|h| h.value());
+        handles
+    }
+
+    /// The command line's latest entry.
+    fn last_line(app: &OpenCADStudio) -> String {
+        app.command_line
+            .history
+            .last()
+            .map(|entry| entry.text.clone())
+            .unwrap_or_default()
+    }
+
+    /// PIDTAG <tag>: the symbol's block reference and its tag lettering are
+    /// selected, drawn over in red with a red frame round them, and zoomed
+    /// to; the pipe through the valve is none of it. The highlight goes with
+    /// the selection, and with the geometry it was built from.
+    #[test]
+    fn pidtag_selects_frames_and_zooms_to_the_tagged_group() {
+        use crate::scene::{PID_GROUP_FRAME, PID_GROUP_HIGHLIGHT};
+
+        let mut app = OpenCADStudio::new_for_test();
+        let (insert, tag, pipe) = valve_with_tag(&mut app);
+        let i = app.active_tab;
+        let mut expected = vec![insert, tag];
+        expected.sort_by_key(|h| h.value());
+        let camera_before = app.tabs[i].scene.camera_generation;
+
+        let _ = app.run_command_line("PIDTAG buv-3101");
+        assert_eq!(
+            selected(&app),
+            expected,
+            "the block and its tag, case aside"
+        );
+        let receipt = last_line(&app);
+        assert!(
+            receipt.contains("蝶阀 BUV-3101") && receipt.contains("2 entities"),
+            "{receipt}"
+        );
+        assert!(
+            app.tabs[i].scene.camera_generation > camera_before,
+            "the view moved to the group"
+        );
+        let highlight = app.tabs[i].scene.pid_group_highlight_wires().to_vec();
+        assert!(
+            highlight.len() >= 2,
+            "the group's wires and a frame, got {}",
+            highlight.len()
+        );
+        assert!(highlight.iter().all(|w| w.color == PID_GROUP_HIGHLIGHT));
+        assert!(highlight
+            .iter()
+            .all(|w| w.text_verts.iter().all(|v| v.color == PID_GROUP_HIGHLIGHT)));
+        assert!(
+            highlight.iter().all(|w| w.render_instance.is_none()),
+            "the block's strokes draw as plain preview wires, not by the instanced path"
+        );
+        let frames: Vec<&crate::scene::WireModel> = highlight
+            .iter()
+            .filter(|w| w.name == PID_GROUP_FRAME)
+            .collect();
+        assert_eq!(frames.len(), 1, "one frame for one group");
+        // The frame is a closed rectangle a millimetre outside the valve body
+        // (0..6 x 0..3) and its tag (lettered from y = 4, 2.5 mm high; the
+        // glyph quads carry a little SDF padding past the ink, so the left
+        // edge sits a hair further out than the body alone would put it).
+        let frame = frames[0];
+        assert_eq!(frame.points.len(), 5);
+        let xs: Vec<f32> = frame.points.iter().map(|p| p[0]).collect();
+        let ys: Vec<f32> = frame.points.iter().map(|p| p[1]).collect();
+        let (x0, x1) = (
+            xs.iter().cloned().fold(f32::MAX, f32::min),
+            xs.iter().cloned().fold(f32::MIN, f32::max),
+        );
+        let (y0, y1) = (
+            ys.iter().cloned().fold(f32::MAX, f32::min),
+            ys.iter().cloned().fold(f32::MIN, f32::max),
+        );
+        assert!(x0 > -2.0 && x0 <= -1.0 + 1e-3, "left {x0}");
+        assert!((y0 - -1.0).abs() < 0.05, "bottom {y0}");
+        assert!(
+            x1 > 6.9 && x1 < 40.0,
+            "right {x1} clears the body and stops at the tag"
+        );
+        assert!(y1 > 6.4 && y1 < 9.0, "top {y1} covers the tag's height");
+        assert!(
+            !highlight
+                .iter()
+                .any(|w| w.name.ends_with(&pipe.value().to_string())),
+            "the pipe is not the symbol's"
+        );
+
+        // The selection overlay draws x-ray over the red copies, so it is the
+        // overlay that has to go red while the group is the selection.
+        assert_eq!(app.tabs[i].scene.selection_tint(), PID_GROUP_HIGHLIGHT);
+
+        // Any other selection takes the highlight with it, and the overlay
+        // is the user's selection colour again.
+        app.tabs[i].scene.deselect_all();
+        assert!(app.tabs[i].scene.pid_group_highlight_wires().is_empty());
+        assert_ne!(app.tabs[i].scene.selection_tint(), PID_GROUP_HIGHLIGHT);
+
+        // Built again, it does not survive the geometry moving on: the copies
+        // would show the symbol where it was.
+        let _ = app.run_command_line("PIDTAG BUV-3101");
+        assert!(!app.tabs[i].scene.pid_group_highlight_wires().is_empty());
+        app.tabs[i].scene.bump_geometry();
+        assert!(app.tabs[i].scene.pid_group_highlight_wires().is_empty());
+    }
+
+    /// On a real sheet the frame closes round the block reference's expansion
+    /// and the tag's glyphs, and nothing else: a block's wires carry their
+    /// world coordinates as they stand, whatever `render_instance` says. The
+    /// sheet letters its tags at z = 100 while the valve sits on the plane:
+    /// the frame goes up to the lettering, and the zoom keeps the drawing's
+    /// depth so the lettering stays in front of the near plane -- sized to
+    /// the flat zoom window, as it was, the tag vanished the moment the view
+    /// arrived at it.
+    ///
+    /// Ignored by default for the same reason as the whole-sheet plot below:
+    /// sizing the depth to the drawing lays the whole sheet out once, and
+    /// that grows the process-wide glyph atlas for seconds under the other
+    /// plot tests, which then run out of relayouts and refuse their pages.
+    #[test]
+    #[ignore = "lays a real sheet out; run alone with --ignored, with the sheets beside the checkout"]
+    fn on_a_real_sheet_the_frame_closes_round_the_valve_and_its_tag() {
+        use crate::scene::PID_GROUP_FRAME;
+        let mut app = OpenCADStudio::new_for_test();
+        if !open_sheet(&mut app, "DWG-0100FF02-06 罐组II消防冷却水流程图.dxf") {
+            return;
+        }
+        let i = app.active_tab;
+        let _ = app.run_command_line("PIDTAG BUV-3201");
+        let highlight = app.tabs[i].scene.pid_group_highlight_wires();
+        let frame = highlight
+            .iter()
+            .find(|w| w.name == PID_GROUP_FRAME)
+            .expect("a frame");
+        let xs: Vec<f32> = frame.points.iter().map(|p| p[0]).collect();
+        let ys: Vec<f32> = frame.points.iter().map(|p| p[1]).collect();
+        let width = xs.iter().cloned().fold(f32::MIN, f32::max)
+            - xs.iter().cloned().fold(f32::MAX, f32::min);
+        let height = ys.iter().cloned().fold(f32::MIN, f32::max)
+            - ys.iter().cloned().fold(f32::MAX, f32::min);
+        // The valve is 3 mm across and its tag 10.7 mm long, 100 drawing
+        // units to the millimetre, a millimetre of frame each side.
+        assert!(width > 1000.0 && width < 1600.0, "frame width {width}");
+        assert!(height > 500.0 && height < 900.0, "frame height {height}");
+        assert!(
+            frame.points.iter().all(|p| (p[2] - 100.0).abs() < 1e-3),
+            "the frame sits at the tag's z = 100, got {:?}",
+            frame.points[0]
+        );
+        assert_eq!(selected(&app).len(), 2, "the block reference and the tag");
+        let camera = app.tabs[i].scene.camera.borrow();
+        let (min, max) = camera
+            .fitted_model_bounds()
+            .expect("the depth is sized to the drawing");
+        assert!(
+            min.z <= 0.0 && max.z >= 100.0,
+            "the depth box {min:?}..{max:?} must hold the valve and its tag"
+        );
+    }
+
+    /// PIDTAG with nothing named goes by the picked entities -- a stroke of
+    /// the valve, or its tag -- and PIDTAG with a tag nobody carries says so
+    /// and leaves the selection alone.
+    #[test]
+    fn pidtag_reads_the_picked_symbol_and_refuses_an_unknown_tag() {
+        let mut app = OpenCADStudio::new_for_test();
+        let (insert, tag, pipe) = valve_with_tag(&mut app);
+        let i = app.active_tab;
+        let mut expected = vec![insert, tag];
+        expected.sort_by_key(|h| h.value());
+
+        // Picked the tag lettering only: the whole group follows.
+        app.tabs[i].scene.select_entity(tag, true);
+        let _ = app.run_command_line("PIDTAG ");
+        assert_eq!(selected(&app), expected);
+
+        // Picked the pipe: no symbol is made of it.
+        app.tabs[i].scene.select_entity(pipe, true);
+        let _ = app.run_command_line("PIDTAG ");
+        assert_eq!(selected(&app), vec![pipe], "the pick stays as it was");
+        assert!(app.tabs[i].scene.pid_group_highlight_wires().is_empty());
+
+        // An unknown tag.
+        let _ = app.run_command_line("PIDTAG XV-9999");
+        assert_eq!(selected(&app), vec![pipe]);
+        let last = last_line(&app);
+        assert!(last.contains("no symbol tagged \"XV-9999\""), "{last}");
+    }
+
+    /// A symbol row of the legend list does what PIDTAG does, and names the
+    /// symbol by its handles so a click still lands after the sheet was
+    /// re-read.
+    #[test]
+    fn a_legend_list_symbol_row_selects_and_frames_the_group() {
+        let mut app = OpenCADStudio::new_for_test();
+        let (insert, tag, _pipe) = valve_with_tag(&mut app);
+        let i = app.active_tab;
+        let _ = app.update(Message::PidLegendPickSymbol(vec![insert.value()]));
+        let mut expected = vec![insert, tag];
+        expected.sort_by_key(|h| h.value());
+        assert_eq!(selected(&app), expected);
+        assert!(!app.tabs[i].scene.pid_group_highlight_wires().is_empty());
+        assert!(
+            app.tabs[i].pid_legend().is_some(),
+            "the click read the sheet"
+        );
+        // A handle of nothing recognised selects nothing and says so.
+        let _ = app.update(Message::PidLegendPickSymbol(vec![u64::MAX]));
+        assert_eq!(selected(&app), expected, "the selection is left as it was");
+        let last = last_line(&app);
+        assert!(last.contains("no longer on the sheet"), "{last}");
     }
 
     #[test]
@@ -576,53 +999,10 @@ mod tests {
     fn an_svg_plot_groups_a_tagged_symbol_with_its_tag() {
         use crate::app::update::file::PlotRequest;
         use crate::io::svg_export::{svg_job_to_string, SvgOptions};
-        use acadrust::entities::{EntityType, Line, Text};
-        use acadrust::types::{Transform, Vector3};
 
         let mut app = OpenCADStudio::new_for_test();
-        app.automation_op(r#"{"op":"new"}"#);
+        let (insert, tag, pipe) = valve_with_tag(&mut app);
         let i = app.active_tab;
-        let line = |a: (f64, f64), b: (f64, f64)| {
-            let mut line = Line::new();
-            line.start = Vector3::new(a.0, a.1, 0.0);
-            line.end = Vector3::new(b.0, b.1, 0.0);
-            EntityType::Line(line)
-        };
-        // The valve body, a 6 x 3 mm bow-tie of four lines, as a block the
-        // rules know as a butterfly valve (tag shape BUV-9999, 15 mm reach).
-        let body: Vec<acadrust::Handle> = [
-            ((0.0, 0.0), (0.0, 3.0)),
-            ((0.0, 3.0), (6.0, 0.0)),
-            ((6.0, 0.0), (6.0, 3.0)),
-            ((6.0, 3.0), (0.0, 0.0)),
-        ]
-        .into_iter()
-        .map(|(a, b)| app.tabs[i].scene.add_entity(line(a, b)))
-        .collect();
-        let identity = Transform::identity();
-        let insert = app.tabs[i]
-            .scene
-            .create_block_from_entities(&body, "$VALVE$00000316", &identity, &identity)
-            .unwrap();
-        // Its tag lettered above it; a run of pipe through it and a frame
-        // round everything, which are nobody's symbol. The frame is also the
-        // sheet's extent -- lettering does not count towards it, and a plot
-        // fitted to the body alone would leave the tag off the page.
-        let tag = app.tabs[i].scene.add_entity(EntityType::Text(
-            Text::with_value("BUV-3101", Vector3::new(0.0, 4.0, 0.0)).with_height(2.5),
-        ));
-        let pipe = app.tabs[i]
-            .scene
-            .add_entity(line((-20.0, 1.5), (30.0, 1.5)));
-        let frame = [
-            ((-30.0, -10.0), (40.0, -10.0)),
-            ((40.0, -10.0), (40.0, 20.0)),
-            ((40.0, 20.0), (-30.0, 20.0)),
-            ((-30.0, 20.0), (-30.0, -10.0)),
-        ];
-        for (a, b) in frame {
-            app.tabs[i].scene.add_entity(line(a, b));
-        }
 
         app.select_layout_headless("Model").unwrap();
         app.set_headless_model_page("A4", true, true, None, None, 1.0)

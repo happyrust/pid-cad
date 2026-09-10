@@ -3,7 +3,157 @@ use super::*;
 use crate::command::{AreaPreviewRegion, AreaPreviewSource};
 use crate::scene::model::hatch_model::HatchPattern;
 
+/// Red of the P&ID tag-group highlight and its frame -- apart from the blue
+/// selection and the orange hover, so a symbol that is both selected and
+/// jumped to reads as the jump.
+pub const PID_GROUP_HIGHLIGHT: [f32; 4] = [1.0, 0.15, 0.15, 1.0];
+
+/// Name of the frame wire a tag-group highlight draws round each group.
+pub const PID_GROUP_FRAME: &str = "__pid_group_frame__";
+
+/// What [`Scene::set_pid_group_highlight`] built, and the geometry epoch it
+/// was built at: the wires are copies, so once the drawing moves on they
+/// would show the symbol where it was.
+pub(crate) struct PidGroupHighlight {
+    pub(crate) epoch: u64,
+    pub(crate) wires: Vec<WireModel>,
+}
+
 impl Scene {
+    // ── P&ID tag-group highlight ──────────────────────────────────────────
+
+    /// Draw `groups` -- each a P&ID symbol's entities with the lettering of
+    /// its tag, what the SVG export wraps in one `<g tagName>` -- over the
+    /// drawing in red, heavier than the sheet's lines, with a red frame `pad`
+    /// drawing units outside each group's extent: the debugging view of what
+    /// a tag stands for. Returns the union of the frames (min x, min y, max
+    /// x, max y) for the caller to zoom to, or `None` when nothing of
+    /// `groups` draws. Replaces any earlier highlight. The highlight goes
+    /// with the selection it was made with -- any change of selection drops
+    /// it (`bump_selection_set`) -- and is not drawn once the geometry has
+    /// moved on. No geometry bump: this is an overlay, like a command
+    /// preview, and rides on the same upload.
+    pub fn set_pid_group_highlight(
+        &mut self,
+        groups: &[Vec<Handle>],
+        pad: f64,
+    ) -> Option<(f64, f64, f64, f64)> {
+        let mut wires: Vec<WireModel> = Vec::new();
+        let mut extent: Option<(f64, f64, f64, f64)> = None;
+        for handles in groups {
+            // The group's box, z included: the frame is drawn at the group's
+            // own top, not at z = 0 -- a sheet's tag lettering is often lifted
+            // a little off the plane (FF02-06 letters its tags at z = 100),
+            // and a frame on a plane nothing else occupies has no business
+            // there.
+            let mut bbox: Option<(glam::DVec3, glam::DVec3)> = None;
+            for mut wire in self.wire_models_for(handles) {
+                // The points are world coordinates as they stand (a block
+                // reference's expansion included: `render_instance` is GPU
+                // instancing metadata, not an offset still to apply), in the
+                // double-single split the wires carry.
+                let mut grow = |high: [f32; 3], low: [f32; 3]| {
+                    let p = glam::DVec3::new(
+                        high[0] as f64 + low[0] as f64,
+                        high[1] as f64 + low[1] as f64,
+                        high[2] as f64 + low[2] as f64,
+                    );
+                    if !p.is_finite() {
+                        return;
+                    }
+                    bbox = Some(match bbox {
+                        None => (p, p),
+                        Some((min, max)) => (min.min(p), max.max(p)),
+                    });
+                };
+                for (index, high) in wire.points.iter().enumerate() {
+                    let low = wire.points_low.get(index).copied().unwrap_or([0.0; 3]);
+                    grow(*high, low);
+                }
+                for (index, high) in wire.fill_tris.iter().enumerate() {
+                    let low = wire.fill_tris_low.get(index).copied().unwrap_or([0.0; 3]);
+                    grow(*high, low);
+                }
+                for vertex in &wire.text_verts {
+                    grow(vertex.pos, vertex.pos_low);
+                }
+                wire.name = format!("pid_group_{}", wire.name);
+                wire.color = PID_GROUP_HIGHLIGHT;
+                wire.bg_adapt = None;
+                wire.selected = false;
+                wire.display_visible = true;
+                wire.line_weight_px = wire.line_weight_px.max(2.5);
+                // A block reference's strokes arrive tagged for the instanced
+                // block path, which the preview upload does not take (the
+                // instanced partition is dropped there): untagged, they are
+                // ordinary wires at the world coordinates they already hold.
+                wire.render_instance = None;
+                for vertex in &mut wire.text_verts {
+                    vertex.color = PID_GROUP_HIGHLIGHT;
+                }
+                wires.push(wire);
+            }
+            let Some((min, max)) = bbox else {
+                continue;
+            };
+            let frame = (min.x - pad, min.y - pad, max.x + pad, max.y + pad);
+            let z = max.z;
+            let mut rect = WireModel::solid_f64(
+                PID_GROUP_FRAME.to_string(),
+                vec![
+                    [frame.0, frame.1, z],
+                    [frame.2, frame.1, z],
+                    [frame.2, frame.3, z],
+                    [frame.0, frame.3, z],
+                    [frame.0, frame.1, z],
+                ],
+                PID_GROUP_HIGHLIGHT,
+                false,
+            );
+            rect.line_weight_px = 1.5;
+            wires.push(rect);
+            extent = Some(match extent {
+                None => frame,
+                Some(e) => (
+                    e.0.min(frame.0),
+                    e.1.min(frame.1),
+                    e.2.max(frame.2),
+                    e.3.max(frame.3),
+                ),
+            });
+        }
+        self.pid_group_highlight = (!wires.is_empty()).then_some(PidGroupHighlight {
+            epoch: self.geometry_epoch,
+            wires,
+        });
+        extent
+    }
+
+    /// The tag-group highlight to draw now: what was set, unless the
+    /// selection dropped it or the geometry has moved on since it was built.
+    pub(crate) fn pid_group_highlight_wires(&self) -> &[WireModel] {
+        match &self.pid_group_highlight {
+            Some(highlight) if highlight.epoch == self.geometry_epoch => &highlight.wires,
+            _ => &[],
+        }
+    }
+
+    /// The colour the selection overlay tints the selected entities with:
+    /// the user's selection colour, or the highlight's red while a tag group
+    /// is the selection. The overlay is drawn x-ray over everything, the red
+    /// copies of the group's wires included, so without this a jumped-to
+    /// symbol read as an ordinary blue pick and only its frame was red. It
+    /// tracks the highlight exactly: the highlight goes when the selection
+    /// changes or the geometry moves on, and both of those re-upload the
+    /// overlay.
+    pub(crate) fn selection_tint(&self) -> [f32; 4] {
+        if self.pid_group_highlight_wires().is_empty() {
+            self.selection_color
+        } else {
+            PID_GROUP_HIGHLIGHT
+        }
+    }
+
     // ── Preview wire ──────────────────────────────────────────────────────
 
     pub fn set_preview_wires(&mut self, wires: Vec<WireModel>) {
