@@ -50,6 +50,7 @@
 
 mod blocks;
 mod exploded;
+mod groups;
 mod legend;
 mod pairing;
 mod report;
@@ -57,6 +58,7 @@ mod rules;
 
 pub use blocks::guess_units_per_mm;
 pub use exploded::hash_color;
+pub use groups::plot_groups;
 pub use legend::{
     apply, clear, is_legend_layer, is_shape_class, layer_for_class, legend_entities,
     legend_handles, legend_layers, pipe_entities, pipe_layer, pipe_layers,
@@ -156,6 +158,14 @@ pub struct Recognized {
     /// Line numbers of the pipe runs at the symbol's connection points,
     /// distinct, sorted. Empty when no pipe reaches it or none is numbered.
     pub lines: Vec<String>,
+    /// The entities the symbol is drawn with: the block reference; the
+    /// circle and the lettering inside it; the strokes of an exploded shape.
+    pub handles: Vec<Handle>,
+    /// The lettering the tag was read from, when it stands beside the symbol
+    /// rather than inside it (an exploded assembly lists every tag it took).
+    /// Empty for an inner tag -- its lettering is in `handles` -- and for a
+    /// tag taken over from a bubble, which is a symbol of its own.
+    pub tag_handles: Vec<Handle>,
 }
 
 /// Lettering that names several tags at once -- `XV-0407A～0409A`,
@@ -232,6 +242,7 @@ impl Recognition {
 }
 
 struct Lettering {
+    handle: Handle,
     /// The anchor the drawing stores: the alignment point, else the
     /// insertion point. Tags are measured from here and not from the middle
     /// of the lettering: the CPECC sheets start a valve's tag beside the
@@ -373,6 +384,8 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             lines: Vec::new(),
             tag: None,
             tag_distance_mm: None,
+            handles: vec![insert.common.handle],
+            tag_handles: Vec::new(),
         });
         tag_rules.push(tag);
     }
@@ -405,14 +418,19 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
         };
         let (cx, cy, r) = (circle.center.x, circle.center.y, circle.radius);
         let r_mm = r / upm;
-        let mut inner: Vec<(f64, f64, &str)> = lettering
+        let mut inner: Vec<&Lettering> = lettering
             .iter()
             .filter(|l| (l.at.0 - cx).hypot(l.at.1 - cy) <= r * INNER_TEXT_RADIUS)
-            .map(|l| (l.at.1, l.at.0, l.value.as_str()))
             .collect();
         // Top line first, then left to right.
-        inner.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.total_cmp(&b.1)));
-        let inner: Vec<String> = inner.into_iter().map(|(_, _, v)| v.to_string()).collect();
+        inner.sort_by(|a, b| {
+            b.at.1
+                .total_cmp(&a.at.1)
+                .then_with(|| a.at.0.total_cmp(&b.at.0))
+        });
+        let mut handles = vec![circle.common.handle];
+        handles.extend(inner.iter().map(|l| l.handle));
+        let inner: Vec<String> = inner.into_iter().map(|l| l.value.clone()).collect();
         let Some(rule) = rules.circle_rule(r_mm, &inner) else {
             continue;
         };
@@ -458,6 +476,8 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             lines: Vec::new(),
             tag: None,
             tag_distance_mm: None,
+            handles,
+            tag_handles: Vec::new(),
         });
         tag_rules.push(rule.tag.clone());
     }
@@ -546,6 +566,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
         let (d, key, i) = candidates[e];
         let tag = if key < lettering.len() {
             taken_text[key] = true;
+            symbols[i].tag_handles = vec![lettering[key].handle];
             lettering[key].value.clone()
         } else {
             symbols[key - lettering.len()]

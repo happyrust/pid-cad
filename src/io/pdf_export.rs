@@ -419,6 +419,9 @@ impl PlotSink for PdfSink<'_> {
                 },
                 Op::EndTextSection,
             ]),
+            // A named group is structure for a backend that has it (SVG);
+            // a PDF content stream has nowhere to put the name.
+            PlotOp::BeginGroup { .. } | PlotOp::EndGroup => {}
         }
         Ok(())
     }

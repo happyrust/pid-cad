@@ -196,6 +196,9 @@ pub struct SvgReport {
     /// caller asked for [`MissingGlyphs::Report`]; otherwise the page is
     /// refused instead.
     pub missing_glyphs: usize,
+    /// Tagged symbol groups written — one `<g tagName="…">` each
+    /// ([`crate::io::plot_emit::PlotGroup`]).
+    pub groups: usize,
 }
 
 /// Write one plotted page as an SVG document.
@@ -905,6 +908,26 @@ impl PlotSink for SvgSink {
                     "the plot stamp: it is device text in a built-in font, not geometry",
                 ))
             }
+            // A tagged symbol: one group, named on a `tagName` attribute, so
+            // a consumer can find the valve by its tag. Structural, like a
+            // transform group — a paint run never straddles it, and one left
+            // open at a Restore closes with the state it was opened in.
+            PlotOp::BeginGroup { tag } => {
+                self.end_style_run();
+                self.body.push_str("<g tagName=\"");
+                attribute(&mut self.body, &tag);
+                self.body.push_str("\">\n");
+                self.state.open_groups += 1;
+                self.report.groups += 1;
+            }
+            PlotOp::EndGroup => {
+                if self.state.open_groups == 0 {
+                    return Err(SvgError::Invalid("a group ended that was not open".into()));
+                }
+                self.end_style_run();
+                self.body.push_str("</g>\n");
+                self.state.open_groups -= 1;
+            }
         }
         Ok(())
     }
@@ -1058,6 +1081,25 @@ fn finite(value: f32, what: &str) -> Result<(), SvgError> {
 /// `#rrggbb`. The emitter's colours are already the plotted ones — screening
 /// and the `transparency` option are pre-mixed against white upstream, so
 /// there is no alpha to carry and none is written.
+/// `value` as the text of a double-quoted attribute: the five XML escapes,
+/// and the control characters XML 1.0 cannot carry at all left out. A tag is
+/// plain lettering, but it is lettering from the drawing, so nothing is
+/// assumed about it.
+fn attribute(out: &mut String, value: &str) {
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            '\t' | '\n' | '\r' => out.push(' '),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+}
+
 fn color(out: &mut String, rgb: [f32; 3]) {
     let [r, g, b] = channels(rgb);
     let _ = write!(out, "#{r:02x}{g:02x}{b:02x}");

@@ -3609,10 +3609,14 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         // The area travels from the dialog commit (G10); the field is consumed
         // so a later EXPORTSVG at the command line is back to extents.
         let dialog_area = self.svg_export_dialog_area.take();
-        self.resolve_plot_job(&PlotRequest {
+        let mut job = self.resolve_plot_job(&PlotRequest {
             dialog_area,
             ..PlotRequest::current_view()
-        })
+        })?;
+        // SVG can name a group of elements, so the P&ID symbols the sheet
+        // places go out as one group each, named by their tags.
+        self.attach_pid_groups(&mut job);
+        Ok(job)
     }
 
     /// EXPORTSVG / SVGOUT: the plot the dialog describes, written as SVG.
@@ -3672,13 +3676,14 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
             use_current_settings: self.print_all_settings_override,
             dialog_area: None,
         };
-        let job = match self.resolve_plot_job(&request) {
+        let mut job = match self.resolve_plot_job(&request) {
             Ok(job) => job,
             Err(error) => {
                 self.command_line.push_error(&error);
                 return Task::none();
             }
         };
+        self.attach_pid_groups(&mut job);
         self.save_config();
         self.close_active_modal();
 

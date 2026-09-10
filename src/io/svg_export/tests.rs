@@ -20,7 +20,7 @@
 
 use super::*;
 use crate::io::plot_corpus::{corpus, hatch, square, wire, Case};
-use crate::io::plot_emit::{PlotAssets, RecordingSink};
+use crate::io::plot_emit::{geometry_pt, PlotAssets, PlotGroup, RecordingSink};
 use crate::scene::model::hatch_model::HatchPattern;
 use crate::scene::WireModel;
 use resvg::{tiny_skia, usvg};
@@ -266,6 +266,9 @@ fn expected_shapes(ops: &[PlotOp], paper_h: f32) -> Vec<Shape> {
                 shapes.push(fill_shape(&state, rings, true));
             }
             PlotOp::BuiltinText { .. } => unreachable!("the corpus stamp cases are excluded"),
+            // Structure, not ink: the shapes inside a group are compared like
+            // any other.
+            PlotOp::BeginGroup { .. } | PlotOp::EndGroup => {}
         }
     }
     shapes
@@ -852,6 +855,126 @@ fn a_page_without_blending_stays_plain() {
     assert!(!report.needs_mix_blend_mode);
     assert!(!svg.contains("mix-blend-mode"));
     assert!(!svg.contains("isolation"));
+}
+
+// ── Tagged groups ─────────────────────────────────────────────────────────
+
+/// The `<g tagName="…">` element for `tag`, open tag to its own close. The
+/// paint runs inside are groups too, so the close is found by nesting.
+fn group_element(svg: &str, tag: &str) -> String {
+    let open = svg
+        .find(&format!("<g tagName=\"{tag}\">"))
+        .unwrap_or_else(|| panic!("no group named {tag:?} in\n{svg}"));
+    let (mut depth, mut at) = (0usize, open);
+    loop {
+        let rest = &svg[at..];
+        match (rest.find("<g"), rest.find("</g>")) {
+            (Some(o), Some(c)) if o < c => {
+                depth += 1;
+                at += o + 2;
+            }
+            (_, Some(c)) => {
+                depth -= 1;
+                at += c + 4;
+                if depth == 0 {
+                    return svg[open..at].to_string();
+                }
+            }
+            _ => panic!("the group {tag:?} never closes"),
+        }
+    }
+}
+
+/// Three lines at x = 10, 20, 30 mm in depth order, the outer two one
+/// tagged symbol.
+fn tagged_page() -> (Case, PlotAssets) {
+    let mut case = Case::new("groups");
+    let black = [0.0, 0.0, 0.0, 1.0];
+    for (name, depth) in [("10", 0.0), ("11", 1.0), ("12", 2.0)] {
+        let x = 10.0 + depth * 10.0;
+        case.wires.push(wire(
+            name,
+            vec![[x, 10.0, 0.0], [x, 20.0, 0.0]],
+            black,
+            depth,
+        ));
+    }
+    let assets = PlotAssets {
+        groups: vec![PlotGroup {
+            tag: "BUV-3101".into(),
+            members: vec!["10".into(), "12".into()],
+        }],
+        ..Default::default()
+    };
+    (case, assets)
+}
+
+/// A tagged symbol is one `<g>` carrying its tag, holding exactly its own
+/// elements — the ones between them in depth order come after it — and the
+/// file still parses to the shapes the emitter asked for.
+#[test]
+fn a_tagged_symbol_is_one_group_named_by_its_tag() {
+    let (case, assets) = tagged_page();
+    let (svg, report) = write_with(&case, &assets);
+    assert_eq!(report.groups, 1);
+    let group = group_element(&svg, "BUV-3101");
+    assert_eq!(group.matches("<path").count(), 2, "{group}");
+    let at = |x: f32| {
+        let mut s = String::from("M");
+        num(&mut s, geometry_pt(x) as f64, auto_decimals(1.0));
+        s.push(',');
+        s
+    };
+    assert!(
+        group.contains(&at(10.0)) && group.contains(&at(30.0)),
+        "{group}"
+    );
+    assert!(
+        !group.contains(&at(20.0)),
+        "the line between is not the symbol's"
+    );
+    let after = svg.find(&group).unwrap() + group.len();
+    assert!(
+        svg[after..].contains(&at(20.0)),
+        "the line between is drawn after the group"
+    );
+    // Structure only: the parsed drawing is the emitter's, group or no group.
+    let expected = expected_shapes(&record_with(&case.page(), &assets), case.paper.1);
+    assert_eq!(expected.len(), 4, "the page background and three lines");
+    compare(&expected, &actual_shapes(&parse(&svg), case.paper.0))
+        .unwrap_or_else(|why| panic!("{why}"));
+    // No groups, no marks.
+    let (plain, report) = write(&case);
+    assert_eq!(report.groups, 0);
+    assert!(!plain.contains("tagName"));
+}
+
+/// The tag is lettering from the drawing: whatever it holds goes into the
+/// attribute escaped, and the document stays well-formed.
+#[test]
+fn a_tag_is_escaped_for_the_attribute() {
+    let (case, mut assets) = tagged_page();
+    assets.groups[0].tag = "A&B <\"C\"> 'D'\u{7}".into();
+    let (svg, _) = write_with(&case, &assets);
+    assert!(
+        svg.contains("<g tagName=\"A&amp;B &lt;&quot;C&quot;&gt; &apos;D&apos;\">"),
+        "{svg}"
+    );
+    let tree = parse(&svg);
+    assert_eq!(actual_shapes(&tree, case.paper.0).len(), 4);
+}
+
+/// The emitter balances its groups; a sink handed a close with nothing open
+/// says so rather than write a stray `</g>`.
+#[test]
+fn a_group_closed_that_was_never_opened_is_refused() {
+    let (case, _) = tagged_page();
+    let mut sink = SvgSink::new(&case.page(), &SvgOptions::default()).unwrap();
+    let error = sink.emit(PlotOp::EndGroup).expect_err("nothing is open");
+    assert!(matches!(error, SvgError::Invalid(_)), "{error}");
+    sink.emit(PlotOp::BeginGroup { tag: "T".into() }).unwrap();
+    sink.emit(PlotOp::EndGroup).unwrap();
+    assert!(sink.emit(PlotOp::EndGroup).is_err());
 }
 
 // ── Numbers (D2) ──────────────────────────────────────────────────────────

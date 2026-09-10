@@ -159,6 +159,31 @@ pub enum PlotOp {
         color: [f32; 3],
         text: String,
     },
+    /// Everything up to the matching `EndGroup` is one thing on the sheet
+    /// — a P&ID symbol and the tag lettered beside it ([`PlotGroup`]) — for
+    /// a backend that can hang a name on a group of elements (SVG wraps them
+    /// in one `<g tagName="…">`). Structure, not graphics state: nothing
+    /// about the pen changes, and the Save / Restore pairs the drawing
+    /// inside opens are closed inside. A backend with nowhere to put the
+    /// name (PDF) ignores both.
+    BeginGroup {
+        tag: String,
+    },
+    EndGroup,
+}
+
+/// Entities that plot as one named group.
+///
+/// The name is a P&ID tag (`BUV-3101`, `XV-0407A`) and the members are the
+/// wires drawn for the symbol that carries it and for its tag lettering, by
+/// [`WireModel::name`] — the entity handle in decimal, which is the name the
+/// scene gives every entity wire, a block reference's expansion included.
+/// `pid_legend::plot_groups` builds these from a recognition, disjoint; a
+/// wire that two groups do name draws with the later of them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlotGroup {
+    pub tag: String,
+    pub members: Vec<String>,
 }
 
 /// Receives the operation stream of one page.
@@ -277,6 +302,10 @@ pub struct PlotAssets {
     /// Glyph geometry for this page. `None` = take one snapshot when the
     /// page's first text item is reached, and use it for the whole page.
     pub glyphs: Option<GlyphSnapshot>,
+    /// The sheet's tagged symbols, each drawn as one group
+    /// ([`PlotOp::BeginGroup`]). Empty = no grouping, and the page is drawn
+    /// in plain depth order.
+    pub groups: Vec<PlotGroup>,
 }
 
 impl PlotAssets {
@@ -296,6 +325,7 @@ impl PlotAssets {
         Self {
             stamp_label: None,
             glyphs: has_text.then(GlyphSnapshot::capture).flatten(),
+            groups: Vec::new(),
         }
     }
 
@@ -467,15 +497,32 @@ pub fn emit_plot_content<S: PlotSink>(
     // docs/plans/2026-09-08-svg-export-next-steps.md.)
     let mut last_cap = Some(LineCap::Round);
     let mut last_join = Some(LineJoin::Round);
+    // Which group, if any, a wire or hatch belongs to, by name.
+    let group_of: std::collections::HashMap<&str, usize> = assets
+        .groups
+        .iter()
+        .enumerate()
+        .flat_map(|(g, group)| group.members.iter().map(move |m| (m.as_str(), g)))
+        .collect();
     for (wires, hatches, wipeouts) in [
         (first_wires, first_hatches, first_wipeouts),
         (second_wires, second_hatches, second_wipeouts),
     ] {
+        #[derive(Clone, Copy)]
         enum DrawItem<'a> {
             WireFill(&'a PlotWire),
             Hatch(&'a HatchModel),
             Wire(&'a PlotWire),
             Text(&'a PlotWire),
+        }
+
+        impl DrawItem<'_> {
+            fn name(&self) -> &str {
+                match self {
+                    DrawItem::WireFill(w) | DrawItem::Wire(w) | DrawItem::Text(w) => &w.name,
+                    DrawItem::Hatch(h) => &h.name,
+                }
+            }
         }
 
         let mut draw_items = Vec::with_capacity(wires.len() * 2 + hatches.len() + wipeouts.len());
@@ -502,13 +549,60 @@ pub fn emit_plot_content<S: PlotSink>(
                 .then_with(|| a.2.cmp(&b.2))
         });
 
+        // A group's items are drawn together, in the place of its first,
+        // so a sink that nests them wraps each symbol once; a symbol's own
+        // items keep their order among themselves, and everything else keeps
+        // the depth order above. The tag lettered beside a valve is drawn
+        // with the valve rather than at its own depth — the one visible
+        // effect, and only on what it overlaps. With no groups the order is
+        // exactly the sort's.
+        let order: Vec<(Option<usize>, usize)> = if group_of.is_empty() {
+            (0..draw_items.len()).map(|i| (None, i)).collect()
+        } else {
+            let of: Vec<Option<usize>> = draw_items
+                .iter()
+                .map(|(_, _, _, item)| group_of.get(item.name()).copied())
+                .collect();
+            let mut members: Vec<Vec<usize>> = vec![Vec::new(); assets.groups.len()];
+            for (i, g) in of.iter().enumerate() {
+                if let Some(g) = g {
+                    members[*g].push(i);
+                }
+            }
+            let mut order = Vec::with_capacity(draw_items.len());
+            for (i, g) in of.iter().enumerate() {
+                match g {
+                    None => order.push((None, i)),
+                    Some(g) => order.extend(
+                        std::mem::take(&mut members[*g])
+                            .into_iter()
+                            .map(|j| (Some(*g), j)),
+                    ),
+                }
+            }
+            order
+        };
+
         let mut last_color: Option<[f32; 3]> = None;
         let mut last_lw: Option<f32> = None;
         // Current dash array (empty = solid). Tracked so the dash op is only
         // re-emitted when it actually changes between wires.
         let mut last_dash: Option<Vec<i64>> = None;
+        let mut open_group: Option<usize> = None;
 
-        for (_, _, _, item) in draw_items {
+        for (group, index) in order {
+            if group != open_group {
+                if open_group.is_some() {
+                    sink.emit(PlotOp::EndGroup)?;
+                }
+                if let Some(g) = group {
+                    sink.emit(PlotOp::BeginGroup {
+                        tag: assets.groups[g].tag.clone(),
+                    })?;
+                }
+                open_group = group;
+            }
+            let item = draw_items[index].3;
             let wire = match item {
                 DrawItem::WireFill(wire) => {
                     emit_wire_fills(
@@ -746,6 +840,9 @@ pub fn emit_plot_content<S: PlotSink>(
                 }
             }
             flush_line(sink, &segment, dot_radius)?;
+        }
+        if open_group.is_some() {
+            sink.emit(PlotOp::EndGroup)?;
         }
     }
 
@@ -1643,6 +1740,92 @@ mod tests {
         assert_eq!(ops[at - 2], PlotOp::Save);
         assert_eq!(ops[at - 1], PlotOp::Blend(PlotBlend::Normal));
         assert_eq!(ops[at + 1], PlotOp::Restore);
+    }
+
+    /// The strokes and group marks of a page, in order: what a sink that
+    /// nests groups would see, with the pen state left out.
+    fn structure(ops: &[PlotOp]) -> Vec<String> {
+        ops.iter()
+            .filter_map(|op| match op {
+                PlotOp::BeginGroup { tag } => Some(format!("<{tag}>")),
+                PlotOp::EndGroup => Some("</>".to_string()),
+                PlotOp::Stroke { points, .. } => Some(format!("stroke@{}", points[0].x)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A tagged symbol's wires are drawn together where its first one falls
+    /// in the depth order, wrapped in one group; the wires between them
+    /// move after the group, and wires of no group draw as before.
+    #[test]
+    fn a_group_draws_its_members_together_where_the_first_one_falls() {
+        use crate::io::plot_corpus::wire;
+        let mut case = Case::new("groups");
+        let black = [0.0, 0.0, 0.0, 1.0];
+        // Depth order: the valve body (10), an unrelated line (11), the
+        // valve's tag (12), another valve (13) and its tag (14), a last line.
+        for (name, depth) in [
+            ("10", 0.0),
+            ("11", 1.0),
+            ("12", 2.0),
+            ("13", 3.0),
+            ("14", 4.0),
+            ("15", 5.0),
+        ] {
+            let x = depth * 10.0 + 10.0;
+            case.wires.push(wire(
+                name,
+                vec![[x, 10.0, 0.0], [x, 20.0, 0.0]],
+                black,
+                depth,
+            ));
+        }
+        let assets = PlotAssets {
+            groups: vec![
+                PlotGroup {
+                    tag: "BUV-3101".into(),
+                    members: vec!["10".into(), "12".into()],
+                },
+                PlotGroup {
+                    tag: "BUV-3102".into(),
+                    members: vec!["14".into(), "13".into()],
+                },
+                PlotGroup {
+                    tag: "absent".into(),
+                    members: vec!["99".into()],
+                },
+            ],
+            ..Default::default()
+        };
+        let mut sink = RecordingSink::default();
+        match emit_plot_content(&case.page(), &assets, &mut sink) {
+            Ok(_) => {}
+            Err(never) => match never {},
+        }
+        let pt = |x: f32| format!("stroke@{}", geometry_pt(x));
+        assert_eq!(
+            structure(&sink.ops),
+            [
+                "<BUV-3101>".to_string(),
+                pt(10.0),
+                pt(30.0),
+                "</>".to_string(),
+                pt(20.0),
+                "<BUV-3102>".to_string(),
+                pt(40.0),
+                pt(50.0),
+                "</>".to_string(),
+                pt(60.0),
+            ],
+            "a group with no member on the page leaves no mark"
+        );
+        // Without groups the page is the plain depth order, unmarked.
+        let plain = ops_for(&case);
+        assert_eq!(
+            structure(&plain),
+            [10.0, 20.0, 30.0, 40.0, 50.0, 60.0].map(pt)
+        );
     }
 
     /// The rule is keyed on `canvas_color`, not on the colour: an ordinary

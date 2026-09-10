@@ -445,6 +445,12 @@ pub fn plot_svg_headless(
                         page.report.mesh_fallbacks
                     );
                 }
+                if page.report.groups > 0 {
+                    println!(
+                        "  {} tagged P&ID symbol(s) grouped (<g tagName=…>)",
+                        page.report.groups
+                    );
+                }
                 if page.report.missing_glyphs > 0 {
                     // Only reachable with --allow-missing-glyphs; the default
                     // refuses the page instead.
@@ -563,7 +569,9 @@ pub(crate) fn plot_svg_with(
         PlotRequest::layouts(names)
     };
 
-    let job = app.resolve_plot_job(&plot)?;
+    let mut job = app.resolve_plot_job(&plot)?;
+    // The sheet's P&ID symbols, one `<g tagName="…">` each.
+    app.attach_pid_groups(&mut job);
     let laid_out = started.elapsed();
     let batch = crate::io::svg_export::export_svg_pages(
         &job.pages,
@@ -621,6 +629,12 @@ pub(crate) fn plot_svg_with(
             .map(|table| table.name.as_str())
             .unwrap_or("none");
         line.push_str(&format!(", ctb {ctb}"));
+        if outcome.report.groups > 0 {
+            line.push_str(&format!(
+                ", {} tagged P&ID symbol(s) grouped",
+                outcome.report.groups
+            ));
+        }
         if outcome.report.missing_glyphs > 0 {
             line.push_str(&format!(
                 ", {} glyph(s) the atlas could not supply",

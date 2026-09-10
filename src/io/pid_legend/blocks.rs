@@ -98,6 +98,7 @@ pub(super) fn lettering_of(doc: &CadDocument) -> Vec<Lettering> {
                 }
                 let anchor = text.alignment_point.unwrap_or(text.insertion_point);
                 out.push(Lettering {
+                    handle: text.common.handle,
                     at: (anchor.x, anchor.y),
                     value: value.to_string(),
                 });
@@ -109,6 +110,7 @@ pub(super) fn lettering_of(doc: &CadDocument) -> Vec<Lettering> {
                     continue;
                 }
                 out.push(Lettering {
+                    handle: mtext.common.handle,
                     at: (mtext.insertion_point.x, mtext.insertion_point.y),
                     value: value.to_string(),
                 });

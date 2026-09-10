@@ -516,6 +516,8 @@ mod tests {
             wants_tag,
             report_untagged: wants_tag,
             lines: Vec::new(),
+            handles: Vec::new(),
+            tag_handles: Vec::new(),
         }
     }
 

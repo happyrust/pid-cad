@@ -218,6 +218,25 @@ impl OpenCADStudio {
         true
     }
 
+    /// Hand the active sheet's tagged symbols to a plot job as groups, for a
+    /// backend that can name a group of elements -- the SVG export wraps each
+    /// in `<g tagName="…">`. The sheet is read first when it has not been, or
+    /// has changed since (`pid_legend_is_stale`), and what was read is kept
+    /// as the tab's index, as LIST would keep it; quietly, since a plot is
+    /// not the place for the panel's "read again" line. A sheet with no
+    /// tagged symbol leaves the job as it was.
+    pub(in crate::app) fn attach_pid_groups(&mut self, job: &mut crate::app::update::file::PlotJob) {
+        let i = self.active_tab;
+        if self.tabs[i].pid_legend.is_none() || self.tabs[i].pid_legend_is_stale() {
+            let rules = Rules::load();
+            let recognition = pid_legend::recognise(&self.tabs[i].scene.document, &rules);
+            self.tabs[i].set_pid_legend(recognition);
+        }
+        if let Some(recognition) = self.tabs[i].pid_legend() {
+            job.assets.groups = pid_legend::plot_groups(recognition);
+        }
+    }
+
     pub(super) fn dispatch_pidline(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         let mut words = cmd.split_whitespace();
         if words.next() != Some("PIDLINE") {
@@ -517,6 +536,187 @@ mod tests {
         assert!(
             !app.tabs[i].pid_legend_is_stale(),
             "taking the legend out does not date the index either"
+        );
+    }
+
+    /// The `<g tagName="…">` element for `tag`, open tag to its own close --
+    /// the paint runs inside are groups too, so the close is found by nesting.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn group_element<'a>(svg: &'a str, tag: &str) -> &'a str {
+        let open = svg
+            .find(&format!("<g tagName=\"{tag}\">"))
+            .unwrap_or_else(|| panic!("no group named {tag:?}"));
+        let (mut depth, mut at) = (0usize, open);
+        loop {
+            let rest = &svg[at..];
+            match (rest.find("<g"), rest.find("</g>")) {
+                (Some(o), Some(c)) if o < c => {
+                    depth += 1;
+                    at += o + 2;
+                }
+                (_, Some(c)) => {
+                    depth -= 1;
+                    at += c + 4;
+                    if depth == 0 {
+                        return &svg[open..at];
+                    }
+                }
+                _ => panic!("the group {tag:?} never closes"),
+            }
+        }
+    }
+
+    /// An SVG plot carries the sheet's tagged symbols as groups: a butterfly
+    /// valve block with `BUV-3101` lettered beside it comes out as one
+    /// `<g tagName="BUV-3101">` holding the block's strokes and the tag's
+    /// glyphs and nothing else -- the pipe through it stays outside -- and a
+    /// plot job carries no groups until the SVG entry point asks.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_svg_plot_groups_a_tagged_symbol_with_its_tag() {
+        use crate::app::update::file::PlotRequest;
+        use crate::io::svg_export::{svg_job_to_string, SvgOptions};
+        use acadrust::entities::{EntityType, Line, Text};
+        use acadrust::types::{Transform, Vector3};
+
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let line = |a: (f64, f64), b: (f64, f64)| {
+            let mut line = Line::new();
+            line.start = Vector3::new(a.0, a.1, 0.0);
+            line.end = Vector3::new(b.0, b.1, 0.0);
+            EntityType::Line(line)
+        };
+        // The valve body, a 6 x 3 mm bow-tie of four lines, as a block the
+        // rules know as a butterfly valve (tag shape BUV-9999, 15 mm reach).
+        let body: Vec<acadrust::Handle> = [
+            ((0.0, 0.0), (0.0, 3.0)),
+            ((0.0, 3.0), (6.0, 0.0)),
+            ((6.0, 0.0), (6.0, 3.0)),
+            ((6.0, 3.0), (0.0, 0.0)),
+        ]
+        .into_iter()
+        .map(|(a, b)| app.tabs[i].scene.add_entity(line(a, b)))
+        .collect();
+        let identity = Transform::identity();
+        let insert = app.tabs[i]
+            .scene
+            .create_block_from_entities(&body, "$VALVE$00000316", &identity, &identity)
+            .unwrap();
+        // Its tag lettered above it; a run of pipe through it and a frame
+        // round everything, which are nobody's symbol. The frame is also the
+        // sheet's extent -- lettering does not count towards it, and a plot
+        // fitted to the body alone would leave the tag off the page.
+        let tag = app.tabs[i].scene.add_entity(EntityType::Text(
+            Text::with_value("BUV-3101", Vector3::new(0.0, 4.0, 0.0)).with_height(2.5),
+        ));
+        let pipe = app.tabs[i]
+            .scene
+            .add_entity(line((-20.0, 1.5), (30.0, 1.5)));
+        let frame = [
+            ((-30.0, -10.0), (40.0, -10.0)),
+            ((40.0, -10.0), (40.0, 20.0)),
+            ((40.0, 20.0), (-30.0, 20.0)),
+            ((-30.0, 20.0), (-30.0, -10.0)),
+        ];
+        for (a, b) in frame {
+            app.tabs[i].scene.add_entity(line(a, b));
+        }
+
+        app.select_layout_headless("Model").unwrap();
+        app.set_headless_model_page("A4", true, true, None, None, 1.0)
+            .unwrap();
+        let mut job = app.resolve_plot_job(&PlotRequest::current_view()).unwrap();
+        assert!(
+            job.assets.groups.is_empty(),
+            "a plot job carries no groups by itself"
+        );
+        app.attach_pid_groups(&mut job);
+        assert!(
+            app.tabs[i].pid_legend().is_some(),
+            "the plot read the sheet and kept the index"
+        );
+        let mut members = vec![insert.value().to_string(), tag.value().to_string()];
+        members.sort();
+        assert_eq!(
+            job.assets.groups,
+            [crate::io::plot_emit::PlotGroup {
+                tag: "BUV-3101".into(),
+                members,
+            }]
+        );
+
+        let (svg, report) =
+            svg_job_to_string(&job.pages, None, &job.assets, &SvgOptions::default()).unwrap();
+        assert_eq!(report.groups, 1);
+        let group = group_element(&svg, "BUV-3101");
+        let inside = group.matches("<path").count();
+        // The pipe and the frame's four sides are all that is drawn outside
+        // the group (the clip path in `<defs>` is not ink).
+        let drawn = &svg[svg.find("</defs>").unwrap()..];
+        let total = drawn.matches("<path").count();
+        assert!(
+            inside >= 4 + 8,
+            "four body strokes and eight glyphs, got {inside} of {total} drawn:\n{group}"
+        );
+        assert_eq!(total, inside + 5, "{svg}");
+        let _ = pipe;
+    }
+
+    /// The whole of a real sheet: every tagged symbol recognised on FF02-06
+    /// draws as a group, and a block symbol's group holds its strokes and
+    /// its tag's glyphs. Ignored by default: laying out a whole sheet's text
+    /// grows the glyph atlas for seconds, which the plot tests running beside
+    /// it can only re-lay out so many times (R1).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "plots a real sheet; run alone with --ignored, with the sheets beside the checkout"]
+    fn a_real_sheet_plots_every_tagged_symbol_as_a_group() {
+        use crate::app::update::file::PlotRequest;
+        use crate::io::svg_export::{svg_job_to_string, SvgOptions};
+
+        let mut app = OpenCADStudio::new_for_test();
+        if !open_sheet(&mut app, "DWG-0100FF02-06 罐组II消防冷却水流程图.dxf") {
+            return;
+        }
+        app.select_layout_headless("Model").unwrap();
+        app.set_headless_model_page("A1", true, true, None, None, 1.0)
+            .unwrap();
+        let mut job = app.resolve_plot_job(&PlotRequest::current_view()).unwrap();
+        app.attach_pid_groups(&mut job);
+        let i = app.active_tab;
+        let recognition = app.tabs[i].pid_legend().expect("the plot read the sheet");
+        let tagged: Vec<&pid_legend::Recognized> = recognition
+            .symbols
+            .iter()
+            .filter(|s| s.tag.is_some())
+            .collect();
+        assert_eq!(job.assets.groups.len(), tagged.len());
+        assert!(
+            tagged.len() >= 60,
+            "{} tagged symbols on FF02-06",
+            tagged.len()
+        );
+
+        let (svg, report) =
+            svg_job_to_string(&job.pages, None, &job.assets, &SvgOptions::default())
+                .expect("the sheet plots");
+        assert_eq!(
+            report.groups,
+            tagged.len(),
+            "every tagged symbol draws as a group"
+        );
+        assert_eq!(svg.matches("<g tagName=\"").count(), tagged.len());
+        let valve = tagged
+            .iter()
+            .find(|s| s.source.starts_with('$') && !s.tag_handles.is_empty())
+            .expect("a block symbol with a tag lettered beside it");
+        let group = group_element(&svg, valve.tag.as_deref().unwrap());
+        assert!(
+            group.matches("<path").count() >= 2,
+            "{}",
+            &group[..group.len().min(400)]
         );
     }
 

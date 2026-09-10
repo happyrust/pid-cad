@@ -42,6 +42,9 @@ struct Prim {
     /// Radius of a circle / arc / ellipse (major), else 0.
     r: f64,
     bbox: (f64, f64, f64, f64),
+    /// The entities drawn as this stroke: the one it came from and, after
+    /// [`dedupe`], those drawn over it. Empty for a stroke made in a test.
+    handles: Vec<Handle>,
 }
 
 impl Prim {
@@ -54,7 +57,13 @@ impl Prim {
         if kind == PrimKind::Circle {
             bbox = (bbox.0 - r, bbox.1 - r, bbox.2 + r, bbox.3 + r);
         }
-        Some(Prim { kind, pts, r, bbox })
+        Some(Prim {
+            kind,
+            pts,
+            r,
+            bbox,
+            handles: Vec::new(),
+        })
     }
 
     fn longest_segment(&self) -> f64 {
@@ -295,12 +304,13 @@ fn loose_prims(
             }
             _ => continue,
         };
-        let Some(prim) = prim else {
+        let Some(mut prim) = prim else {
             continue;
         };
         if !(sane(prim.bbox.0) && sane(prim.bbox.1) && sane(prim.bbox.2) && sane(prim.bbox.3)) {
             continue;
         }
+        prim.handles.push(entity.common().handle);
         let run = prim.axis_run();
         // Too long for a symbol stroke, or a straight axis run past the pipe
         // stub length: pipe (or an instrument leader), not symbol. A run of
@@ -364,9 +374,11 @@ fn same_stroke(a: &Prim, b: &Prim, eps: f64) -> bool {
 /// Drop strokes drawn twice over: a line on top of an identical polyline, a
 /// diagonal repeated. A symbol with one of its lines doubled then has the id
 /// of the symbol drawn once, and a doubled piece of pipe between two valves
-/// is one piece, so taking it out does part them. Returns the strokes kept
-/// and, per input stroke, its new index (`None` = dropped).
-fn dedupe(prims: Vec<Prim>, eps: f64) -> (Vec<Prim>, Vec<Option<usize>>) {
+/// is one piece, so taking it out does part them. The stroke kept takes the
+/// dropped ones' entities, so the symbol still owns everything drawn for it.
+/// Returns the strokes kept and, per input stroke, its new index (`None` =
+/// dropped).
+fn dedupe(mut prims: Vec<Prim>, eps: f64) -> (Vec<Prim>, Vec<Option<usize>>) {
     let mut order: Vec<usize> = (0..prims.len()).collect();
     order.sort_by(|&a, &b| prims[a].bbox.0.total_cmp(&prims[b].bbox.0));
     let mut dropped = vec![false; prims.len()];
@@ -380,6 +392,8 @@ fn dedupe(prims: Vec<Prim>, eps: f64) -> (Vec<Prim>, Vec<Option<usize>>) {
             }
             if !dropped[j] && same_stroke(&prims[i], &prims[j], eps) {
                 dropped[j] = true;
+                let taken = std::mem::take(&mut prims[j].handles);
+                prims[i].handles.extend(taken);
             }
         }
     }
@@ -840,6 +854,14 @@ impl Component {
         self.idxs.len()
     }
 
+    /// The entities drawn as this component's strokes.
+    fn handles(&self, prims: &[Prim]) -> Vec<Handle> {
+        self.idxs
+            .iter()
+            .flat_map(|&i| prims[i].handles.iter().copied())
+            .collect()
+    }
+
     fn size(&self) -> (f64, f64) {
         (self.bbox.2 - self.bbox.0, self.bbox.3 - self.bbox.1)
     }
@@ -1049,9 +1071,11 @@ pub(super) fn exploded_symbols(
         if let Some((ri, k, d, more)) = claimed.get(&ci) {
             let rule = &rules.tag_classes[*ri];
             let mut tag = lettering[*k].value.clone();
+            let mut tag_handles = vec![lettering[*k].handle];
             for &m in more {
                 tag.push_str(" + ");
                 tag.push_str(&lettering[m].value);
+                tag_handles.push(lettering[m].handle);
             }
             symbols.push((
                 Recognized {
@@ -1068,6 +1092,8 @@ pub(super) fn exploded_symbols(
                     wants_tag: true,
                     report_untagged: rule.report_orphans,
                     lines: Vec::new(),
+                    handles: c.handles(prims),
+                    tag_handles,
                 },
                 TagRule::default(),
             ));
@@ -1090,6 +1116,8 @@ pub(super) fn exploded_symbols(
                     wants_tag: rule.tag.wants_tag(),
                     report_untagged: rule.tag.reports_untagged(),
                     lines: Vec::new(),
+                    handles: c.handles(prims),
+                    tag_handles: Vec::new(),
                 },
                 rule.tag.clone(),
             ));
@@ -1110,6 +1138,8 @@ pub(super) fn exploded_symbols(
                     wants_tag: false,
                     report_untagged: false,
                     lines: Vec::new(),
+                    handles: c.handles(prims),
+                    tag_handles: Vec::new(),
                 },
                 TagRule::default(),
             ));
@@ -1153,7 +1183,7 @@ pub(super) fn exploded_symbols(
 
     // ── second pass: the tags still free, over the strokes the pipe rule took
     if shape_rules.recover_min_runs > 0 && shape_rules.pipe_stub_mm > 0.0 {
-        for (comp, claim) in recovered_symbols(
+        for (comp, handles, claim) in recovered_symbols(
             &loose,
             &in_symbol,
             rules,
@@ -1185,6 +1215,8 @@ pub(super) fn exploded_symbols(
                         wants_tag: true,
                         report_untagged: rule.report_orphans,
                         lines: Vec::new(),
+                        handles,
+                        tag_handles: vec![lettering[k].handle],
                     },
                     TagRule::default(),
                 ));
@@ -1209,6 +1241,8 @@ pub(super) fn exploded_symbols(
                         wants_tag: rule.tag.wants_tag(),
                         report_untagged: rule.tag.reports_untagged(),
                         lines: Vec::new(),
+                        handles,
+                        tag_handles: Vec::new(),
                     },
                     rule.tag.clone(),
                 ));
@@ -1221,9 +1255,10 @@ pub(super) fn exploded_symbols(
 /// A tag's claim on a component: `(tag rule, text, mm)`.
 type Claim = (usize, usize, f64);
 
-/// The candidate components of the second pass, each with the claim a tag
-/// no first-pass component took makes on it, or none. A candidate nobody
-/// claims is the caller's to name by the dictionary.
+/// The candidate components of the second pass, each with the entities its
+/// strokes came from and the claim a tag no first-pass component took makes
+/// on it, or none. A candidate nobody claims is the caller's to name by the
+/// dictionary.
 ///
 /// A symbol drawn in pipe-length strokes -- the flame arrester's frame of
 /// 2.7 and 3.2 mm lines, the flow indicator's 3.7 x 4.9 mm body -- loses all
@@ -1248,7 +1283,7 @@ fn recovered_symbols(
     lettering: &[Lettering],
     upm: f64,
     taken_text: &mut [bool],
-) -> Vec<(Component, Option<Claim>)> {
+) -> Vec<(Component, Vec<Handle>, Option<Claim>)> {
     let eps = shape_rules.touch_mm;
     let free: Vec<usize> = (0..loose.prims.len()).filter(|&i| !in_symbol[i]).collect();
     if loose.pipe_prims.is_empty() {
@@ -1407,7 +1442,14 @@ fn recovered_symbols(
         taken_text[k] = true;
         taken_comp[ci] = Some((ri, k, d));
     }
-    comps.into_iter().zip(taken_comp).collect()
+    comps
+        .into_iter()
+        .zip(taken_comp)
+        .map(|(comp, claim)| {
+            let handles = comp.handles(&prims);
+            (comp, handles, claim)
+        })
+        .collect()
 }
 
 #[cfg(test)]
