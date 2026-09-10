@@ -325,6 +325,19 @@ pub fn derive_group_tag(doc: &CadDocument, group: &Group, rules: &Rules) -> Opti
         .map(|l| l.value.as_str())
         .filter(|value| expand_range(value).is_none())
         .collect();
+    derive_tag_from_texts(&texts, rules)
+}
+
+/// Apply the group-tag rule to lettering already filtered to the group's
+/// effective members and sorted in reading order. Recognition uses this for
+/// model-space members only; [`derive_group_tag`] uses every live member for
+/// command feedback and cache refresh.
+pub(super) fn derive_tag_from_texts(texts: &[&str], rules: &Rules) -> Option<TagRead> {
+    let texts: Vec<&str> = texts
+        .iter()
+        .copied()
+        .filter(|value| expand_range(value).is_none())
+        .collect();
     let shapes = rules.tag_shapes();
     let read = match tag_from_lettering(&texts, &shapes) {
         Some(read) if matches!(read.how, TagHow::Shape | TagHow::Bubble) => read,

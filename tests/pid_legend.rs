@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use acadrust::entities::{Block, BlockEnd, Circle, Insert, Line, Point, Text};
+use acadrust::objects::{Group, ObjectType};
 use acadrust::tables::BlockRecord;
 use acadrust::types::{Color, Vector3};
 use acadrust::{CadDocument, EntityType, Handle};
@@ -72,6 +73,22 @@ fn insert(name: &str, x: f64, y: f64, layer: &str) -> EntityType {
     let mut i = Insert::new(name, Vector3::new(x, y, 0.0));
     i.common.layer = layer.to_string();
     EntityType::Insert(i)
+}
+
+/// Register a DXF GROUP over `members`, carrying a P&ID description.
+fn group(doc: &mut CadDocument, name: &str, description: &str, members: Vec<Handle>) -> Handle {
+    let dictionary = doc.header.acad_group_dict_handle;
+    let mut group = Group::new(name);
+    group.handle = doc.allocate_handle();
+    group.owner = dictionary;
+    group.description = description.to_string();
+    group.add_entities(members);
+    let handle = group.handle;
+    doc.objects.insert(handle, ObjectType::Group(group));
+    if let Some(ObjectType::Dictionary(dict)) = doc.objects.get_mut(&dictionary) {
+        dict.add_entry(name, handle);
+    }
+    handle
 }
 
 /// A sheet in paper millimetres: two butterfly valves 9 mm apart with their
@@ -641,6 +658,97 @@ fn pipe_runs_join_symbols_and_carry_the_line_number_lettered_along_them() {
         .is_empty());
 }
 
+/// A marked group replaces the ordinary block symbol rather than adding a
+/// duplicate. Its auto tag is read from current lettering (not the cached
+/// description), and the block's placed POINT ports still cut and name pipe.
+#[test]
+fn a_grouped_block_owns_its_tag_body_and_pipe_ports() {
+    let mut doc = piped_block_sheet();
+    let valve = doc
+        .model_space_entities()
+        .find_map(|entity| match entity {
+            EntityType::Insert(insert)
+                if insert.block_name == "$VALVE$00000316"
+                    && (insert.insert_point.x - 30.0).abs() < 1e-9 =>
+            {
+                Some(insert.common.handle)
+            }
+            _ => None,
+        })
+        .expect("the first butterfly valve");
+    let lettering = doc
+        .model_space_entities()
+        .find_map(|entity| match entity {
+            EntityType::Text(text) if text.value == "BUV-3101" => Some(text.common.handle),
+            _ => None,
+        })
+        .expect("the valve's tag");
+    let group_handle = group(
+        &mut doc,
+        "VALVE-OVERRIDE",
+        "tagName=STALE-CACHE;tagSource=auto",
+        vec![valve, lettering],
+    );
+    if let Some(ObjectType::Group(group)) = doc.objects.get_mut(&group_handle) {
+        // acadrust's DXF reader currently leaves this empty; the dictionary
+        // key still names the group.
+        group.name.clear();
+    }
+
+    let rules = Rules::builtin();
+    let recognition = pid_legend::recognise(&doc, &rules);
+    assert_eq!(count(&recognition, "butterfly"), 2);
+    assert_eq!(tags_of(&recognition, "butterfly"), ["BUV-3101", "BUV-3102"]);
+    let grouped = recognition
+        .symbols
+        .iter()
+        .find(|symbol| symbol.source == "group VALVE-OVERRIDE")
+        .expect("the group is the symbol");
+    assert_eq!(grouped.tag.as_deref(), Some("BUV-3101"));
+    assert_eq!(grouped.tag_distance_mm, Some(0.0));
+    assert_eq!(grouped.handles, [valve]);
+    assert_eq!(grouped.tag_handles, [lettering]);
+    assert_eq!(grouped.lines, ["80-FW"]);
+    assert_eq!(
+        grouped
+            .group
+            .as_ref()
+            .map(|origin| (origin.name.as_str(), origin.tag_source)),
+        Some(("VALVE-OVERRIDE", pid_legend::TagSource::Auto))
+    );
+    assert_eq!(
+        (recognition.pipes.connected_ports, recognition.pipes.ports),
+        (7, 7),
+        "grouping did not lose either block POINT"
+    );
+    assert!(
+        recognition
+            .symbols
+            .iter()
+            .all(|symbol| symbol.source != "$VALVE$00000316" || symbol.at.0 != 30.0),
+        "the grouped INSERT is not recognised a second time"
+    );
+
+    let Some(ObjectType::Group(group)) = doc.objects.get_mut(&group_handle) else {
+        panic!("group disappeared");
+    };
+    group.description = "tagName=BUV-3999;tagSource=manual".to_string();
+    let recognition = pid_legend::recognise(&doc, &rules);
+    let grouped = recognition
+        .symbols
+        .iter()
+        .find(|symbol| symbol.source == "group VALVE-OVERRIDE")
+        .unwrap();
+    assert_eq!(grouped.tag.as_deref(), Some("BUV-3999"));
+    assert_eq!(
+        grouped.group.as_ref().map(|origin| origin.tag_source),
+        Some(pid_legend::TagSource::Manual)
+    );
+    assert!(pid_legend::report(&recognition)
+        .iter()
+        .any(|line| line == "  GROUP 1 manual symbols, 1 tagged (1 manual tags)"));
+}
+
 /// The runs are drawn in with the legend: a polyline per run on a layer per
 /// line number in a colour of its own, the runs on no line in grey, a ring
 /// at every open end -- and `clear` takes them off with the rectangles.
@@ -985,6 +1093,15 @@ fn bowtie(doc: &mut CadDocument, x: f64, y: f64, turn: fn((f64, f64)) -> (f64, f
 /// the corners to the ball's rim. Seven strokes about (x, y), turned by
 /// `turn`.
 fn ball_valve(doc: &mut CadDocument, x: f64, y: f64, turn: fn((f64, f64)) -> (f64, f64)) {
+    let _handles = ball_valve_handles(doc, x, y, turn);
+}
+
+fn ball_valve_handles(
+    doc: &mut CadDocument,
+    x: f64,
+    y: f64,
+    turn: fn((f64, f64)) -> (f64, f64),
+) -> Vec<Handle> {
     let p = |dx: f64, dy: f64| {
         let (tx, ty) = turn((dx, dy));
         (x + tx, y + ty)
@@ -992,6 +1109,7 @@ fn ball_valve(doc: &mut CadDocument, x: f64, y: f64, turn: fn((f64, f64)) -> (f6
     // A corner is 1.565 mm from the centre; the rim point on the way to it
     // is 0.4 mm out along the same direction.
     let (rx, ry) = (0.4 * 1.4 / 1.565, 0.4 * 0.7 / 1.565);
+    let mut handles = Vec::new();
     for (a, b) in [
         (p(-1.4, -0.7), p(-1.4, 0.7)),
         (p(1.4, -0.7), p(1.4, 0.7)),
@@ -1000,11 +1118,16 @@ fn ball_valve(doc: &mut CadDocument, x: f64, y: f64, turn: fn((f64, f64)) -> (f6
         (p(1.4, -0.7), p(rx, -ry)),
         (p(1.4, 0.7), p(rx, ry)),
     ] {
-        doc.add_entity(layered(line(a.0, a.1, b.0, b.1), "DEVICE"))
-            .unwrap();
+        handles.push(
+            doc.add_entity(layered(line(a.0, a.1, b.0, b.1), "DEVICE"))
+                .unwrap(),
+        );
     }
-    doc.add_entity(layered(circle(x, y, 0.4), "DEVICE"))
-        .unwrap();
+    handles.push(
+        doc.add_entity(layered(circle(x, y, 0.4), "DEVICE"))
+            .unwrap(),
+    );
+    handles
 }
 
 /// A triangle of three touching lines, 2 mm, about (x, y).
@@ -1147,6 +1270,85 @@ fn exploded_sheet_symbols_are_named_by_their_tags_or_boxed_by_shape() {
             .any(|l| l.contains("球阀 (ball-valve) x2  tagged 2/2")),
         "{lines:?}"
     );
+}
+
+/// Group membership is stronger than geometric proximity on an exploded
+/// sheet: grouped strokes and lettering disappear from the automatic pools,
+/// while nearby ungrouped symbols are still recognised normally. A marked
+/// group with an empty tag remains one explicit UNTAGGED symbol.
+#[test]
+fn manual_groups_override_exploded_pairing_and_leave_other_shapes_automatic() {
+    let mut doc = CadDocument::new();
+    doc.add_entity(layered(line(0.0, 0.0, 420.0, 0.0), "A"))
+        .unwrap();
+    doc.add_entity(layered(line(0.0, 0.0, 0.0, 297.0), "A"))
+        .unwrap();
+
+    let mut forced = ball_valve_handles(&mut doc, 20.0, 20.0, |point| point);
+    let forced_tag = doc
+        .add_entity(layered(text("BV0301", 28.0, 22.0), "DEVICE"))
+        .unwrap();
+    forced.push(forced_tag);
+    group(
+        &mut doc,
+        "FORCED-BALL",
+        "tagName=OLD;tagSource=auto",
+        forced,
+    );
+
+    // BV0301 is much nearer this valve than the grouped one, but is already
+    // owned by FORCED-BALL and cannot be paired here.
+    ball_valve(&mut doc, 30.0, 20.0, |point| point);
+    ball_valve(&mut doc, 50.0, 20.0, |point| point);
+    doc.add_entity(layered(text("BV0302", 48.0, 22.0), "DEVICE"))
+        .unwrap();
+
+    let untagged = ball_valve_handles(&mut doc, 80.0, 20.0, |point| point);
+    group(
+        &mut doc,
+        "UNTAGGED-BY-HAND",
+        "tagName=;tagSource=auto",
+        untagged,
+    );
+
+    let recognition = pid_legend::recognise(&doc, &Rules::builtin());
+    assert_eq!(count(&recognition, "ball-valve"), 3);
+    assert_eq!(tags_of(&recognition, "ball-valve"), ["BV0301", "BV0302"]);
+    let forced = recognition
+        .symbols
+        .iter()
+        .find(|symbol| symbol.source == "group FORCED-BALL")
+        .expect("the forced group");
+    assert_eq!(forced.class, "ball-valve");
+    assert_eq!(forced.tag.as_deref(), Some("BV0301"));
+    assert_eq!(forced.handles.len(), 7);
+    assert_eq!(forced.tag_handles, [forced_tag]);
+
+    let nearby = recognition
+        .symbols
+        .iter()
+        .find(|symbol| symbol.class == "ball-valve" && (symbol.at.0 - 30.0).abs() < 0.01)
+        .expect("the nearby ungrouped valve");
+    assert_eq!(nearby.tag, None, "the grouped tag cannot be stolen");
+    assert!(nearby.source.starts_with("shape "));
+
+    let explicit_untagged = recognition
+        .symbols
+        .iter()
+        .find(|symbol| symbol.source == "group UNTAGGED-BY-HAND")
+        .expect("an empty tag still marks a group");
+    assert_eq!(explicit_untagged.class, "manual");
+    assert_eq!(explicit_untagged.tag, None);
+    assert!(explicit_untagged.wants_tag && explicit_untagged.report_untagged);
+    assert!(recognition.unknown_shapes.is_empty());
+    assert!(
+        recognition.orphan_tags.is_empty(),
+        "{:?}",
+        recognition.orphan_tags
+    );
+    assert!(pid_legend::report(&recognition)
+        .iter()
+        .any(|line| line == "  GROUP 2 manual symbols, 1 tagged (0 manual tags)"));
 }
 
 #[test]

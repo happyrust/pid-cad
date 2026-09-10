@@ -529,6 +529,7 @@ mod tests {
             at,
             bbox: (at.0 - 1.0, at.1 - 1.0, at.0 + 1.0, at.1 + 1.0),
             source: "shape".into(),
+            group: None,
             known: true,
             inner_text: Vec::new(),
             tag: tag.map(str::to_string),

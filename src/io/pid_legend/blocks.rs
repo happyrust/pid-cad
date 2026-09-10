@@ -2,6 +2,7 @@
 //! units it is drawn in, where a block's stem ends, how a bubble's inner
 //! text composes into a tag.
 
+use acadrust::entities::Insert;
 use acadrust::{CadDocument, EntityType};
 
 use super::*;
@@ -85,6 +86,86 @@ pub(super) fn stem_end(
         return None;
     }
     Some((base.0 + direction.0 * along, base.1 + direction.1 * along))
+}
+
+/// The placed body and pipe connection points of one block reference.
+///
+/// Both the ordinary block pass and a hand-made P&ID group use this exact
+/// expansion, so grouping an INSERT changes who owns the symbol without
+/// moving its box or its pipe ports.
+pub(super) struct PlacedBlock {
+    pub bbox: (f64, f64, f64, f64),
+    pub at: (f64, f64),
+    pub ports: Vec<Port>,
+}
+
+pub(super) fn placed_block(
+    doc: &CadDocument,
+    insert: &Insert,
+    upm: f64,
+    port_rule: Option<PortRule>,
+) -> Option<PlacedBlock> {
+    let record = doc.block_records.get(&insert.block_name)?;
+    let base = (record.base_point.x, record.base_point.y);
+    let insertion = (insert.insert_point.x, insert.insert_point.y);
+    let scale = (insert.x_scale(), insert.y_scale());
+    let mut bbox = None;
+    let mut ports = Vec::new();
+    let mut connections = 0;
+    let mut local_lines: Vec<Segment> = Vec::new();
+    let mut local_corners: Vec<(f64, f64)> = Vec::new();
+    for member in doc.entities_in_block(&insert.block_name) {
+        if let EntityType::Point(point) = member {
+            let p = place(
+                (point.location.x, point.location.y),
+                base,
+                scale,
+                insert.rotation,
+                insertion,
+            );
+            ports.push(Port::At(p));
+            connections += 1;
+        }
+        if skip_for_box(member) {
+            continue;
+        }
+        if port_rule == Some(PortRule::StemEnd) {
+            if let EntityType::Line(line) = member {
+                local_lines.push(((line.start.x, line.start.y), (line.end.x, line.end.y)));
+            }
+        }
+        let bb = member.as_entity().bounding_box();
+        for corner in [
+            (bb.min.x, bb.min.y),
+            (bb.min.x, bb.max.y),
+            (bb.max.x, bb.min.y),
+            (bb.max.x, bb.max.y),
+        ] {
+            if port_rule == Some(PortRule::StemEnd) {
+                local_corners.push(corner);
+            }
+            let (x, y) = place(corner, base, scale, insert.rotation, insertion);
+            grow(&mut bbox, x, y);
+        }
+    }
+    let half = EMPTY_BODY_HALF_MM * upm;
+    let bbox = bbox.unwrap_or((
+        insertion.0 - half,
+        insertion.1 - half,
+        insertion.0 + half,
+        insertion.1 + half,
+    ));
+    if connections == 0 {
+        let port = match port_rule {
+            Some(PortRule::StemEnd) => stem_end(&local_lines, &local_corners, base)
+                .map(|p| place(p, base, scale, insert.rotation, insertion))
+                .unwrap_or(insertion),
+            Some(PortRule::Insertion) | None => insertion,
+        };
+        ports.push(Port::At(port));
+    }
+    let at = ((bbox.0 + bbox.2) / 2.0, (bbox.1 + bbox.3) / 2.0);
+    Some(PlacedBlock { bbox, at, ports })
 }
 
 /// The lettering an entity is, when it is one: a TEXT's value at its

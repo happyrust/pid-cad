@@ -87,6 +87,7 @@ mod tests {
             at: (0.0, 0.0),
             bbox: (0.0, 0.0, side, side),
             source: "$VALVE$01".into(),
+            group: None,
             known: true,
             inner_text: Vec::new(),
             tag: tag.map(str::to_string),

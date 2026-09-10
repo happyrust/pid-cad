@@ -1,7 +1,7 @@
 # P&ID 图纸识别 · 手动操作（移动 / 复制粘贴 / 组合 / 位号）开发计划（2026-09-10）
 
 > 日期：2026-09-10 晚
-> 状态：**Plannotator 批准**（2026-09-10 19:2x，`{"decision":"approved"}`，无批注）。带 ⭕ 的决策按推荐落笔、未经拍板；§5 八条待拍板按各自「推荐」执行，批注里划一笔即可翻案。**M0 + M1 + M2 已落地**（见各期「进度」）。
+> 状态：**Plannotator 批准**（2026-09-10 19:2x，`{"decision":"approved"}`，无批注）。带 ⭕ 的决策按推荐落笔、未经拍板；§5 八条待拍板按各自「推荐」执行，批注里划一笔即可翻案。**M0 + M1 + M2 + M3 已落地**（见各期「进度」）。
 > 前置：`docs/plans/2026-09-07-pid-legend-recognition.md`（D1–D19，识别内核三期）、
 > `docs/plans/2026-09-09-pid-legend-recognition-audit-and-next-steps.md`（D20–D29，W0–W4 已落地，W5 线号规则外置正在另一会话进行：工作树里 `src/io/pid_pipes.rs` / `assets/pid-legend.json` / `Cargo.toml` 有未提交改动）。
 > 语料：`D:\work\plant-code\cad\0版重新处理dxf-12张`（CPECC 石楼油库 12 张 DXF）。
@@ -105,6 +105,7 @@
 - 端口（D40）：块成员的 `POINT` / 圆成员的圆周记到手动组符号的下标。
 - 报告加一行 `GROUP <n> manual symbols, <m> tagged (<k> manual tags)`；`--json` 每个符号已有 `source` 字段，值 `group <名>` 即可分辨。
 - 出口：内存图——① 炸开族：一只球阀的笔画 + `BV0301` 组合 → 1 个球阀带位号、`unknown_shapes` 空、无主 0；同图另一只**没组合**的球阀照旧走自动、位号 `BV0302` 照配；② 覆盖错配：两只阀一条位号，自动配给了错的那只（构造一例），把对的那只与位号组合 → 组合的那只得位号、另一只 UNTAGGED；③ 块族：`$VALVE$00000316` INSERT + `BUV-3101` 组合（D13 那张内存管线图）→ 类别蝶阀、端口照旧、`lines` 照旧 `["80-FW"]`；④ 无位号的手动组（特性面板设标记后又清空）→ 符号在、UNTAGGED；⑤ 12 张真图报告与基线逐字相同（图上没有组）。
+- **进度（2026-09-11 07:3x，会话 gpt-5.6-sol-13）✅ 已落地**。新增 `manual_groups.rs`：识别开头先取描述带 `tagName=` 的 GROUP，只收模型空间成员；`auto` 每次从当前文字重读、`manual` 照录描述；类别严格按已知 INSERT → 合规则 CIRCLE → 位号形状 → `manual_group`；非文字成员并框、文字全进 `tag_handles`，来源为 `group <组名>`（DXF 读后 `Group::name` 为空时从 `ACAD_GROUP` 字典键回填到识别来源），并保留 `GroupOrigin{name, tag_source}` 给 M4。块的 bbox / POINT / insertion / stem-end 端口抽成 `blocks::placed_block`，自动块与手动组共用；合圆规则的组内 CIRCLE 保留 rim 端口，炸开符号里的装饰圆不误当端口。组成员在后续各遍统一排除：INSERT 跳过块遍、CIRCLE 跳过圆遍、文字先标 `taken_text`、线不参与盘装框判断、`exploded_symbols` 两遍都收排除集；手动组本身先占符号下标，所以管道端口仍指向它。报告只在有组时增加 `GROUP n manual symbols, m tagged (k manual tags)`，无组真图报告不变。新增集成测试 `a_grouped_block_owns_its_tag_body_and_pipe_ports`（auto 缓存故意过期仍读当前字、DXF 空组名走字典、块不双认、2 个 POINT 与 `80-FW` 不丢、manual 照录）及 `manual_groups_override_exploded_pairing_and_leave_other_shapes_automatic`（故意把组内位号放得更靠近另一只阀，仍由组拿走；另一只 UNTAGGED、第三只继续自动；空位号组仍是显式符号）。**验证**：`cargo check --lib --tests` 过；`--test pid_legend` **26/26**；`cargo test --lib pid` **51 过 / 2 ignore**；rustfmt 改动文件干净、clippy 改动文件零告警；12 张 `dxf_legend --verbose` 与 M0 基线 **12/12 逐字节相同**。
 
 ### M4 · 特性面板与图例面板（中，1 天；D36 ①）
 

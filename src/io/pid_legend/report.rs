@@ -12,6 +12,28 @@ pub fn report(recognition: &Recognition) -> Vec<String> {
         recognition.lettering,
         recognition.units_per_mm
     ));
+    let groups: Vec<&Recognized> = recognition
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.group.is_some())
+        .collect();
+    if !groups.is_empty() {
+        let tagged = groups.iter().filter(|symbol| symbol.tag.is_some()).count();
+        let manual_tags = groups
+            .iter()
+            .filter(|symbol| {
+                symbol.tag.is_some()
+                    && symbol
+                        .group
+                        .as_ref()
+                        .is_some_and(|group| group.tag_source == TagSource::Manual)
+            })
+            .count();
+        lines.push(format!(
+            "  GROUP {} manual symbols, {tagged} tagged ({manual_tags} manual tags)",
+            groups.len()
+        ));
+    }
     for ((class, label), items) in recognition.by_class() {
         if is_shape_class(&class) {
             // Summarised below, one line per shape id.

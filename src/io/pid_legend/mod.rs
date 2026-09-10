@@ -57,6 +57,7 @@ mod blocks;
 mod exploded;
 mod groups;
 mod legend;
+mod manual_groups;
 mod pairing;
 mod report;
 mod rules;
@@ -84,8 +85,9 @@ use std::collections::{BTreeMap, HashSet};
 use acadrust::{CadDocument, EntityType, Handle};
 
 use super::pid_pipes::{self, End, Pipes, Port};
-use blocks::{grow, lettering_of, place, skip_for_box, stem_end, Segment};
-use exploded::exploded_symbols;
+use blocks::{lettering_of, placed_block};
+use exploded::{exploded_symbols, ExplodedExclusions};
+use manual_groups::recognise_manual_groups;
 use pairing::match_pairs;
 
 /// Every legend layer starts with this; the rest is the class in upper case.
@@ -139,6 +141,14 @@ const REPORTED_SHAPES: usize = 20;
 
 // ── Recognition ──────────────────────────────────────────────────────────
 
+/// The explicit GROUP that supplied a symbol, when a person overrode the
+/// automatic passes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupOrigin {
+    pub name: String,
+    pub tag_source: TagSource,
+}
+
 /// One recognised symbol.
 #[derive(Debug, Clone)]
 pub struct Recognized {
@@ -152,6 +162,8 @@ pub struct Recognized {
     /// Block name, `circle r=<mm>` for a loose circle, `shape <id>` for an
     /// exploded symbol.
     pub source: String,
+    /// The marked DXF GROUP that owns this symbol, if any.
+    pub group: Option<GroupOrigin>,
     /// `false` for a block the dictionary does not know (classified by
     /// layer) and for a shape nothing names.
     pub known: bool,
@@ -273,87 +285,40 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
     let radius = rules.radius_mm * upm;
     let lettering = lettering_of(doc);
     let mut taken_text = vec![false; lettering.len()];
-    let mut symbols: Vec<Recognized> = Vec::new();
+    let manual = recognise_manual_groups(doc, rules, upm, &lettering, &mut taken_text);
+    let excluded_handles = manual.excluded_handles;
+    let mut used_circles = manual.circle_handles;
+    let mut symbols = manual.symbols;
     // The tag rule of each symbol, in `symbols` order, for the pairing pass.
-    let mut tag_rules: Vec<TagRule> = Vec::new();
+    let mut tag_rules = vec![TagRule::default(); symbols.len()];
     let mut unknown_blocks: BTreeMap<String, usize> = BTreeMap::new();
     // Where pipe can meet each symbol, by index into `symbols`.
-    let mut ports: Vec<(usize, Port)> = Vec::new();
+    let mut ports = manual.ports;
 
     // ── block symbols
     for entity in doc.model_space_entities() {
         let EntityType::Insert(insert) = entity else {
             continue;
         };
+        if excluded_handles.contains(&insert.common.handle) {
+            continue;
+        }
         let name = insert.block_name.as_str();
         if rules.ignore_blocks.iter().any(|n| n == name) {
             continue;
         }
-        let Some(record) = doc.block_records.get(name) else {
+        let port_rule = rules.blocks.get(name).and_then(|rule| rule.port);
+        let Some(placed) = placed_block(doc, insert, upm, port_rule) else {
             continue;
         };
-        let base = (record.base_point.x, record.base_point.y);
-        let at = (insert.insert_point.x, insert.insert_point.y);
-        let scale = (insert.x_scale(), insert.y_scale());
-        let mut bbox = None;
-        // The block's connection points, placed; a block without any joins
-        // pipe at its insertion point (the sheet connector, the foam
-        // interface) or, when its rule says so, at the far end of its stem
-        // (the vent stub). The stem rule needs the block's own lines and
-        // extent, in block coordinates.
-        let port_rule = rules.blocks.get(name).and_then(|r| r.port);
-        let mut connections = 0;
-        let mut local_lines: Vec<Segment> = Vec::new();
-        let mut local_corners: Vec<(f64, f64)> = Vec::new();
-        for member in doc.entities_in_block(name) {
-            if let EntityType::Point(point) = member {
-                let p = place(
-                    (point.location.x, point.location.y),
-                    base,
-                    scale,
-                    insert.rotation,
-                    at,
-                );
-                ports.push((symbols.len(), Port::At(p)));
-                connections += 1;
-            }
-            if skip_for_box(member) {
-                continue;
-            }
-            if port_rule == Some(PortRule::StemEnd) {
-                if let EntityType::Line(l) = member {
-                    local_lines.push(((l.start.x, l.start.y), (l.end.x, l.end.y)));
-                }
-            }
-            let bb = member.as_entity().bounding_box();
-            for corner in [
-                (bb.min.x, bb.min.y),
-                (bb.min.x, bb.max.y),
-                (bb.max.x, bb.min.y),
-                (bb.max.x, bb.max.y),
-            ] {
-                if port_rule == Some(PortRule::StemEnd) {
-                    local_corners.push(corner);
-                }
-                let (x, y) = place(corner, base, scale, insert.rotation, at);
-                grow(&mut bbox, x, y);
-            }
-        }
-        let half = EMPTY_BODY_HALF_MM * upm;
-        let bbox = bbox.unwrap_or((at.0 - half, at.1 - half, at.0 + half, at.1 + half));
-        if connections == 0 {
-            let port = match port_rule {
-                Some(PortRule::StemEnd) => stem_end(&local_lines, &local_corners, base)
-                    .map(|p| place(p, base, scale, insert.rotation, at))
-                    .unwrap_or(at),
-                Some(PortRule::Insertion) | None => at,
-            };
-            ports.push((symbols.len(), Port::At(port)));
+        for port in placed.ports {
+            ports.push((symbols.len(), port));
         }
         // Tags are measured from the body, not the insertion point: a block
         // whose base point is far from what it draws (the title block, the
         // loading arm) is inserted nowhere near its body.
-        let at = ((bbox.0 + bbox.2) / 2.0, (bbox.1 + bbox.3) / 2.0);
+        let at = placed.at;
+        let bbox = placed.bbox;
         let (class, label, color, tag, known) = match rules.blocks.get(name) {
             Some(rule) => (
                 rule.class.clone(),
@@ -387,6 +352,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             at,
             bbox,
             source: name.to_string(),
+            group: None,
             known,
             inner_text: Vec::new(),
             wants_tag: tag.wants_tag(),
@@ -405,6 +371,9 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
     // and the sides of polylines (one family draws the square as two of them).
     let mut lines: Vec<((f64, f64), (f64, f64))> = Vec::new();
     for entity in doc.model_space_entities() {
+        if excluded_handles.contains(&entity.common().handle) {
+            continue;
+        }
         match entity {
             EntityType::Line(l) => lines.push(((l.start.x, l.start.y), (l.end.x, l.end.y))),
             EntityType::LwPolyline(p) => {
@@ -421,16 +390,22 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             _ => {}
         }
     }
-    let mut used_circles: HashSet<Handle> = HashSet::new();
     for entity in doc.model_space_entities() {
         let EntityType::Circle(circle) = entity else {
             continue;
         };
+        if excluded_handles.contains(&circle.common.handle) {
+            continue;
+        }
         let (cx, cy, r) = (circle.center.x, circle.center.y, circle.radius);
         let r_mm = r / upm;
         let mut inner: Vec<&Lettering> = lettering
             .iter()
-            .filter(|l| (l.at.0 - cx).hypot(l.at.1 - cy) <= r * INNER_TEXT_RADIUS)
+            .enumerate()
+            .filter(|(k, l)| {
+                !taken_text[*k] && (l.at.0 - cx).hypot(l.at.1 - cy) <= r * INNER_TEXT_RADIUS
+            })
+            .map(|(_, l)| l)
             .collect();
         // Top line first, then left to right.
         inner.sort_by(|a, b| {
@@ -479,6 +454,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             at: (cx, cy),
             bbox: (cx - r, cy - r, cx + r, cy + r),
             source: format!("circle r={r_mm:.2}mm"),
+            group: None,
             known: true,
             inner_text: inner,
             wants_tag: rule.tag.wants_tag(),
@@ -501,7 +477,10 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
                 upm,
                 rules,
                 shape_rules,
-                &used_circles,
+                &ExplodedExclusions {
+                    circles: &used_circles,
+                    handles: &excluded_handles,
+                },
                 &lettering,
                 &mut taken_text,
             );

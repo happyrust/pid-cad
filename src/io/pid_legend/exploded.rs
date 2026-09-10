@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use acadrust::types::Vector3;
 use acadrust::{CadDocument, EntityType, Handle};
 
-use super::blocks::sane;
+use super::blocks::{grow, sane};
 use super::pairing::match_pairs;
 use super::*;
 
@@ -198,11 +198,16 @@ fn arc_points(c: (f64, f64), r: f64, start: f64, end: f64, n: usize) -> Vec<(f64
 
 /// The loose strokes of a sheet that can be part of an exploded symbol, with
 /// the pipe runs and recognised circles that say where the pipe goes.
+pub(super) struct ExplodedExclusions<'a> {
+    pub circles: &'a HashSet<Handle>,
+    pub handles: &'a HashSet<Handle>,
+}
+
 fn loose_prims(
     doc: &CadDocument,
     upm: f64,
     rules: &ShapeRules,
-    used_circles: &HashSet<Handle>,
+    excluded: &ExplodedExclusions<'_>,
 ) -> Loose {
     let mm = |v: f64| v / upm;
     // Strokes short enough for a symbol, with their axis run if straight;
@@ -216,6 +221,13 @@ fn loose_prims(
         circles: Vec::new(),
     };
     for entity in doc.model_space_entities() {
+        let handle = entity.common().handle;
+        // A grouped circle is still recorded below as a recognised circle so
+        // a stem ending on its rim is not trimmed; every other grouped member
+        // is absent from both exploded-shape passes.
+        if excluded.handles.contains(&handle) && !excluded.circles.contains(&handle) {
+            continue;
+        }
         let layer = entity.common().layer.as_str();
         if is_legend_layer(layer) || rules.skip_layers.iter().any(|l| l == layer) {
             continue;
@@ -251,7 +263,7 @@ fn loose_prims(
             EntityType::Circle(c) => {
                 let r = mm(c.radius);
                 let centre = (mm(c.center.x), mm(c.center.y));
-                if used_circles.contains(&c.common.handle) {
+                if excluded.circles.contains(&c.common.handle) {
                     if sane(centre.0) && sane(centre.1) && sane(r) {
                         out.circles.push((centre, r));
                     }
@@ -879,11 +891,11 @@ pub(super) fn exploded_symbols(
     upm: f64,
     rules: &Rules,
     shape_rules: &ShapeRules,
-    used_circles: &HashSet<Handle>,
+    excluded: &ExplodedExclusions<'_>,
     lettering: &[Lettering],
     taken_text: &mut [bool],
 ) -> Exploded {
-    let loose = loose_prims(doc, upm, shape_rules, used_circles);
+    let loose = loose_prims(doc, upm, shape_rules, excluded);
     let prims = loose.prims.as_slice();
     let mut comps: Vec<Component> = Vec::new();
     let eps = shape_rules.touch_mm;
@@ -1088,6 +1100,7 @@ pub(super) fn exploded_symbols(
                     at,
                     bbox: scale(c.bbox),
                     source,
+                    group: None,
                     known: true,
                     inner_text: Vec::new(),
                     tag: Some(tag),
@@ -1112,6 +1125,7 @@ pub(super) fn exploded_symbols(
                     at,
                     bbox: scale(c.bbox),
                     source,
+                    group: None,
                     known: true,
                     inner_text: Vec::new(),
                     tag: None,
@@ -1134,6 +1148,7 @@ pub(super) fn exploded_symbols(
                     at,
                     bbox: scale(c.bbox),
                     source,
+                    group: None,
                     known: false,
                     inner_text: Vec::new(),
                     tag: None,
@@ -1211,6 +1226,7 @@ pub(super) fn exploded_symbols(
                         at,
                         bbox: scale(comp.bbox),
                         source,
+                        group: None,
                         known: true,
                         inner_text: Vec::new(),
                         tag: Some(lettering[k].value.clone()),
@@ -1237,6 +1253,7 @@ pub(super) fn exploded_symbols(
                         at,
                         bbox: scale(comp.bbox),
                         source,
+                        group: None,
                         known: true,
                         inner_text: Vec::new(),
                         tag: None,
