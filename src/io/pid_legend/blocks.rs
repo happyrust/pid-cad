@@ -87,38 +87,45 @@ pub(super) fn stem_end(
     Some((base.0 + direction.0 * along, base.1 + direction.1 * along))
 }
 
-pub(super) fn lettering_of(doc: &CadDocument) -> Vec<Lettering> {
-    let mut out = Vec::new();
-    for entity in doc.model_space_entities() {
-        match entity {
-            EntityType::Text(text) => {
-                let value = text.value.trim();
-                if value.is_empty() {
-                    continue;
-                }
-                let anchor = text.alignment_point.unwrap_or(text.insertion_point);
-                out.push(Lettering {
-                    handle: text.common.handle,
-                    at: (anchor.x, anchor.y),
-                    value: value.to_string(),
-                });
+/// The lettering an entity is, when it is one: a TEXT's value at its
+/// alignment point (else its insertion point), an MTEXT's value with its
+/// paragraph breaks as spaces at its insertion point. Blank lettering, and
+/// anything that is not text, is none. The one reading of text shared by
+/// the sheet pass and a group's own lettering.
+pub(super) fn lettering_value(entity: &EntityType) -> Option<Lettering> {
+    match entity {
+        EntityType::Text(text) => {
+            let value = text.value.trim();
+            if value.is_empty() {
+                return None;
             }
-            EntityType::MText(mtext) => {
-                let value = mtext.value.replace("\\P", " ");
-                let value = value.trim();
-                if value.is_empty() {
-                    continue;
-                }
-                out.push(Lettering {
-                    handle: mtext.common.handle,
-                    at: (mtext.insertion_point.x, mtext.insertion_point.y),
-                    value: value.to_string(),
-                });
-            }
-            _ => {}
+            let anchor = text.alignment_point.unwrap_or(text.insertion_point);
+            Some(Lettering {
+                handle: text.common.handle,
+                at: (anchor.x, anchor.y),
+                value: value.to_string(),
+            })
         }
+        EntityType::MText(mtext) => {
+            let value = mtext.value.replace("\\P", " ");
+            let value = value.trim();
+            if value.is_empty() {
+                return None;
+            }
+            Some(Lettering {
+                handle: mtext.common.handle,
+                at: (mtext.insertion_point.x, mtext.insertion_point.y),
+                value: value.to_string(),
+            })
+        }
+        _ => None,
     }
-    out
+}
+
+pub(super) fn lettering_of(doc: &CadDocument) -> Vec<Lettering> {
+    doc.model_space_entities()
+        .filter_map(lettering_value)
+        .collect()
 }
 
 /// The model-space extent over drawn entities, inserts left out (their box
@@ -169,12 +176,6 @@ pub(super) fn compose_tag(inner: &[String]) -> Option<String> {
     }
 }
 
-/// [`compose_tag`], or the inner lettering joined as read when it is not a
-/// tag (`S`, `K`, `M`).
-pub(super) fn inner_tag(inner: &[String]) -> Option<String> {
-    compose_tag(inner).or_else(|| (!inner.is_empty()).then(|| inner.join(" ")))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,23 +219,59 @@ mod tests {
         );
     }
 
+    /// A bubble's two lines compose; one line, or two that are not a line of
+    /// capitals and a line of digits, do not. (How the composition is used
+    /// is `tags::tag_from_lettering`'s, tested there.)
     #[test]
     fn inner_lettering_composes_a_bubble_tag() {
         assert_eq!(
-            inner_tag(&words(&["XV", "3201"])),
+            compose_tag(&words(&["XV", "3201"])),
             Some("XV-3201".to_string())
         );
         assert_eq!(
-            inner_tag(&words(&["HS", "0320A"])),
+            compose_tag(&words(&["HS", "0320A"])),
             Some("HS-0320A".to_string())
         );
         assert_eq!(
-            inner_tag(&words(&["FQRC", "0301"])),
+            compose_tag(&words(&["FQRC", "0301"])),
             Some("FQRC-0301".to_string())
         );
-        assert_eq!(inner_tag(&words(&["S"])), Some("S".to_string()));
-        assert_eq!(inner_tag(&[]), None);
         assert_eq!(compose_tag(&words(&["S"])), None);
+        assert_eq!(compose_tag(&[]), None);
         assert_eq!(compose_tag(&words(&["E", "H"])), None);
+    }
+
+    /// Text reads at its alignment point when it has one, MTEXT with its
+    /// paragraph breaks as spaces; blank text and other entities are not
+    /// lettering.
+    #[test]
+    fn an_entity_reads_as_lettering_or_not() {
+        use acadrust::entities::{Line, MText, Text};
+        use acadrust::types::Vector3;
+        let plain = EntityType::Text(Text::with_value(" BUV-3101 ", Vector3::new(1.0, 2.0, 0.0)));
+        let read = lettering_value(&plain).expect("text is lettering");
+        assert_eq!((read.value.as_str(), read.at), ("BUV-3101", (1.0, 2.0)));
+        let mut aligned = Text::with_value("XV", Vector3::new(1.0, 2.0, 0.0));
+        aligned.alignment_point = Some(Vector3::new(5.0, 6.0, 0.0));
+        assert_eq!(
+            lettering_value(&EntityType::Text(aligned)).unwrap().at,
+            (5.0, 6.0)
+        );
+        let mut mtext = MText::new();
+        mtext.value = "XV-0301\\P防爆电动平板闸阀".to_string();
+        mtext.insertion_point = Vector3::new(3.0, 4.0, 0.0);
+        let read = lettering_value(&EntityType::MText(mtext)).unwrap();
+        assert_eq!(
+            (read.value.as_str(), read.at),
+            ("XV-0301 防爆电动平板闸阀", (3.0, 4.0))
+        );
+        assert!(
+            lettering_value(&EntityType::Text(Text::with_value("  ", Vector3::ZERO))).is_none()
+        );
+        assert!(lettering_value(&EntityType::Line(Line::from_points(
+            Vector3::ZERO,
+            Vector3::ZERO
+        )))
+        .is_none());
     }
 }

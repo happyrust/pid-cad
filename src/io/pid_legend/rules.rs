@@ -189,6 +189,27 @@ fn default_true() -> bool {
     true
 }
 
+/// What a group a person made is when nothing else says: no known block or
+/// circle among its members and a tag (or none) whose shape no rule names.
+/// `manual_group` in the rules JSON; absent = the defaults here.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ManualGroupRule {
+    pub class: String,
+    pub label: String,
+    pub color: [u8; 3],
+}
+
+impl Default for ManualGroupRule {
+    fn default() -> Self {
+        ManualGroupRule {
+            class: "manual".to_string(),
+            label: "手动组合".to_string(),
+            color: [200, 200, 200],
+        }
+    }
+}
+
 /// Connected-component clustering of loose geometry, for sheets whose
 /// symbols are exploded strokes rather than blocks.
 #[derive(Debug, Clone, Deserialize)]
@@ -309,6 +330,8 @@ pub struct Rules {
     pub pipes: PipeRules,
     /// How unclaimed tag-shaped lettering is sorted.
     pub orphans: OrphanRules,
+    /// What a hand-made group is when no other rule names it.
+    pub manual_group: ManualGroupRule,
 }
 
 impl Default for Rules {
@@ -327,6 +350,7 @@ impl Default for Rules {
             shapes: None,
             pipes: PipeRules::default(),
             orphans: OrphanRules::default(),
+            manual_group: ManualGroupRule::default(),
         }
     }
 }
@@ -392,6 +416,32 @@ impl Rules {
     /// characters, surrounding whitespace not counted.
     pub fn accepts_tag(&self, value: &str) -> bool {
         value.trim().chars().count() >= self.tag_min_chars
+    }
+
+    /// Every tag shape the rules know, each once: the `tag_classes`, then
+    /// the block rules', the shape dictionary's and the circle rules' tag
+    /// shapes -- what lettering has to look like to be a tag under some
+    /// rule (`tags::derive_group_tag` reads a group's lettering against
+    /// all of them).
+    pub fn tag_shapes(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        let from_classes = self.tag_classes.iter().map(|rule| rule.shape.as_str());
+        let from_blocks = self
+            .blocks
+            .values()
+            .chain(self.shapes.iter().flat_map(|s| s.dictionary.values()))
+            .filter(|rule| rule.class != IGNORE_CLASS)
+            .filter_map(|rule| rule.tag.shape.as_deref());
+        let from_circles = self
+            .circles
+            .iter()
+            .filter_map(|rule| rule.tag.shape.as_deref());
+        for shape in from_classes.chain(from_blocks).chain(from_circles) {
+            if !out.contains(&shape) {
+                out.push(shape);
+            }
+        }
+        out
     }
 }
 

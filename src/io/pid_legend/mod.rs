@@ -60,6 +60,7 @@ mod legend;
 mod pairing;
 mod report;
 mod rules;
+mod tags;
 
 pub use blocks::guess_units_per_mm;
 pub use exploded::hash_color;
@@ -70,8 +71,12 @@ pub use legend::{
 };
 pub use report::report;
 pub use rules::{
-    shape_matches, BlockRule, CircleRule, LayerPrefixRule, OrphanRules, PanelBubbleRule, PortRule,
-    Rules, ShapeRules, TagClassRule, TagRule, IGNORE_CLASS,
+    shape_matches, BlockRule, CircleRule, LayerPrefixRule, ManualGroupRule, OrphanRules,
+    PanelBubbleRule, PortRule, Rules, ShapeRules, TagClassRule, TagRule, IGNORE_CLASS,
+};
+pub use tags::{
+    class_for_tag, derive_group_tag, tag_from_lettering, GroupTag, TagClass, TagHow, TagRead,
+    TagSource, TAG_NAME_KEY, TAG_SOURCE_KEY,
 };
 
 use std::collections::{BTreeMap, HashSet};
@@ -79,7 +84,7 @@ use std::collections::{BTreeMap, HashSet};
 use acadrust::{CadDocument, EntityType, Handle};
 
 use super::pid_pipes::{self, End, Pipes, Port};
-use blocks::{grow, inner_tag, lettering_of, place, skip_for_box, stem_end, Segment};
+use blocks::{grow, lettering_of, place, skip_for_box, stem_end, Segment};
 use exploded::exploded_symbols;
 use pairing::match_pairs;
 
@@ -509,21 +514,22 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
     }
 
     // ── tags read from inside the symbol
+    // The one tag rule (`tags::tag_from_lettering`): a rule with a shape
+    // takes the inner line of that shape and nothing else; without one the
+    // lines compose as a bubble's, or read as they stand.
     for (symbol, rule) in symbols.iter_mut().zip(&tag_rules) {
         if !rule.inner {
             continue;
         }
+        let inner: Vec<&str> = symbol.inner_text.iter().map(String::as_str).collect();
         let read = match &rule.shape {
-            Some(shape) => symbol
-                .inner_text
-                .iter()
-                .find(|v| shape_matches(shape, v))
-                .cloned(),
-            None => inner_tag(&symbol.inner_text),
+            Some(shape) => tag_from_lettering(&inner, &[shape.as_str()])
+                .filter(|read| read.how == TagHow::Shape),
+            None => tag_from_lettering(&inner, &[]),
         };
         match read {
-            Some(tag) if rules.accepts_tag(&tag) => {
-                symbol.tag = Some(tag);
+            Some(read) if rules.accepts_tag(&read.value) => {
+                symbol.tag = Some(read.value);
                 symbol.tag_distance_mm = Some(0.0);
             }
             // Lettered, not tagged: what is inside is too short to be a tag

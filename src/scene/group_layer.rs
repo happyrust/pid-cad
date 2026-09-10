@@ -1,6 +1,8 @@
 // Auto-split from scene/mod.rs. Pure text-move; behaviour unchanged.
 use super::*;
 
+use crate::io::pid_legend::{self, GroupTag, Rules, TagRead};
+
 impl Scene {
     // ── Group helpers ──────────────────────────────────────────────────────
 
@@ -17,6 +19,64 @@ impl Scene {
             .filter(|g| g.contains(handle))
             .map(|g| g.name.clone())
             .collect()
+    }
+
+    /// The handles of the groups that contain `handle`.
+    pub fn groups_containing(&self, handle: Handle) -> Vec<Handle> {
+        self.groups()
+            .filter(|g| g.contains(handle))
+            .map(|g| g.handle)
+            .collect()
+    }
+
+    // ── P&ID tags on groups ────────────────────────────────────────────────
+    //
+    // A group a person made is a P&ID symbol when its description carries
+    // `tagName=` (`pid_legend::GroupTag`); the tag is read from the group's
+    // own lettering by the recognition's rule, or set by hand.
+
+    /// The P&ID tag `group` carries in its description; `None` for a plain
+    /// group, or no group at that handle.
+    pub fn group_tag(&self, group: Handle) -> Option<GroupTag> {
+        match self.document.objects.get(&group)? {
+            ObjectType::Group(g) => GroupTag::parse(&g.description),
+            _ => None,
+        }
+    }
+
+    /// Write `tag` into `group`'s description; `None` takes the P&ID keys
+    /// out and leaves a plain group. True when a group was there and its
+    /// description changed. No undo of its own: callers wrap it in
+    /// `begin_group_undo` / `commit_group_undo`, which record the group
+    /// objects' before and after.
+    pub fn set_group_tag(&mut self, group: Handle, tag: Option<&GroupTag>) -> bool {
+        let Some(ObjectType::Group(g)) = self.document.objects.get_mut(&group) else {
+            return false;
+        };
+        let description = match tag {
+            Some(tag) => tag.write_into(&g.description),
+            None => GroupTag::strip(&g.description),
+        };
+        if description == g.description {
+            return false;
+        }
+        g.description = description;
+        true
+    }
+
+    /// The tag `group`'s own lettering reads as, by the rule the recognition
+    /// applies to a bubble's inner text (`pid_legend::derive_group_tag`).
+    pub fn derive_group_tag(&self, group: Handle, rules: &Rules) -> Option<TagRead> {
+        match self.document.objects.get(&group)? {
+            ObjectType::Group(g) => pid_legend::derive_group_tag(&self.document, g, rules),
+            _ => None,
+        }
+    }
+
+    /// The groups that are P&ID symbols, with their tags.
+    pub fn tagged_groups(&self) -> impl Iterator<Item = (&acadrust::objects::Group, GroupTag)> {
+        self.groups()
+            .filter_map(|g| GroupTag::parse(&g.description).map(|tag| (g, tag)))
     }
 
     /// Creates a named group from the given handles and registers it in the group dictionary.
@@ -209,5 +269,78 @@ impl Scene {
         if self.selected.len() != previous_len {
             self.bump_selection_set();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::pid_legend::{TagHow, TagSource};
+    use acadrust::entities::{Line, Text};
+    use acadrust::types::Vector3;
+
+    /// A group of a valve's strokes and the tag lettered beside them reads
+    /// its tag by the recognition's rule; written into the description it
+    /// is a P&ID group, stripped it is a plain group again.
+    #[test]
+    fn a_group_reads_carries_and_drops_its_pid_tag() {
+        let mut scene = Scene::new();
+        let strokes: Vec<Handle> = [
+            ((0.0, 0.0), (0.0, 3.0)),
+            ((0.0, 3.0), (6.0, 0.0)),
+            ((6.0, 0.0), (6.0, 3.0)),
+            ((6.0, 3.0), (0.0, 0.0)),
+        ]
+        .into_iter()
+        .map(|(a, b)| {
+            scene.add_entity(EntityType::Line(Line::from_points(
+                Vector3::new(a.0, a.1, 0.0),
+                Vector3::new(b.0, b.1, 0.0),
+            )))
+        })
+        .collect();
+        let tag = scene.add_entity(EntityType::Text(
+            Text::with_value("BUV-3101", Vector3::new(0.0, 4.0, 0.0)).with_height(2.5),
+        ));
+        let mut members = strokes.clone();
+        members.push(tag);
+        let gh = scene.create_group("*A1".to_string(), members);
+        assert_eq!(scene.groups_containing(tag), vec![gh]);
+
+        // A plain group until a tag is written into it.
+        assert_eq!(scene.group_tag(gh), None);
+        assert_eq!(scene.tagged_groups().count(), 0);
+        let rules = Rules::builtin();
+        let read = scene
+            .derive_group_tag(gh, &rules)
+            .expect("the lettering reads");
+        assert_eq!((read.value.as_str(), read.how), ("BUV-3101", TagHow::Shape));
+
+        assert!(scene.set_group_tag(gh, Some(&GroupTag::auto(Some(read.value.clone())))));
+        let carried = scene.group_tag(gh).expect("a P&ID group now");
+        assert_eq!(carried.name.as_deref(), Some("BUV-3101"));
+        assert_eq!(carried.source, TagSource::Auto);
+        assert_eq!(scene.tagged_groups().count(), 1);
+        assert!(
+            !scene.set_group_tag(gh, Some(&carried)),
+            "writing the same tag again changes nothing"
+        );
+
+        // By hand, then back to a plain group.
+        assert!(scene.set_group_tag(gh, Some(&GroupTag::manual("BUV-3199"))));
+        assert_eq!(
+            scene.group_tag(gh),
+            Some(GroupTag::manual("BUV-3199")),
+            "the hand-set value is what the description says"
+        );
+        assert_eq!(
+            scene.derive_group_tag(gh, &rules).map(|r| r.value),
+            Some("BUV-3101".to_string()),
+            "the lettering still reads as it did"
+        );
+        assert!(scene.set_group_tag(gh, None));
+        assert_eq!(scene.group_tag(gh), None);
+        assert!(!scene.set_group_tag(gh, None));
+        assert!(!scene.set_group_tag(Handle::new(0xFFFF), Some(&GroupTag::manual("X"))));
     }
 }
