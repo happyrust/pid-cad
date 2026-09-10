@@ -74,30 +74,47 @@ librsvg column is the same library reached through libvips.
   --plot-svg <DXF> <out> --model --paper A1 --landscape --fit --force`),
   archived 2026-09-10 so the sheets the `real-sheets-*.tsv` rows and
   `real-*-4up.png` crops describe stay in the tree after `%TEMP%` is cleared.
-  **They are the 2026-09-10 export from `d0bf8bca`, not the 09-09 run's
-  bytes**: two text fixes landed in between — `3e305477` (a DXF STYLE whose
-  TrueType typeface lives only in `ACAD` xdata now resolves to that face, so
-  `-宋体` / `ST` / `HT` / `HZDX` render in SimSun instead of the stroke
-  default plus a CJK fallback) and `d0bf8bca` (TrueType text height covers
-  the `A` top, AutoCAD's rule, not `sCapHeight`) — and 74–90 % of these
-  sheets' text goes through such a style. The 09-09 SVGs had every mixed
-  CJK / Latin line overlapping by a character or more and a label spilling
-  out of its box; these read as the drawing does (WS02-05 note line: CJK
-  pitch 5.75 mm on paper against the DXF's 5.76). The renderings and TSVs
-  in this folder were made from the 09-09 export and were not re-run; the
-  per-engine comparison is about strokes and fills, which the text fixes do
-  not touch, but the text areas in the `*-4up.png` crops show the old
-  glyphs. SimSun outlines are heavier than what they replaced, so the files
-  grew: 3,163,142 / 7,770,648 / 1,825,077 bytes (gzip ≈ 1.1 / 2.4 / 0.6 MB),
-  SHA-256 `CBADF2E1…` / `F4B4AF95…` / `097AE6E5…`, LF line endings so
+  **They are the 2026-09-10 export from `59c96574`, not the 09-09 run's
+  bytes.** Four commits landed in between. Two text fixes — `3e305477` (a
+  DXF STYLE whose TrueType typeface lives only in `ACAD` xdata now resolves
+  to that face, so `-宋体` / `ST` / `HT` / `HZDX` render in SimSun instead
+  of the stroke default plus a CJK fallback) and `d0bf8bca` (TrueType text
+  height covers the `A` top, AutoCAD's rule, not `sCapHeight`) — and
+  74–90 % of these sheets' text goes through such a style: the 09-09 SVGs
+  had every mixed CJK / Latin line overlapping by a character or more and a
+  label spilling out of its box; these read as the drawing does (WS02-05
+  note line: CJK pitch 5.75 mm on paper against the DXF's 5.76). Then
+  `17da0b4f`: an MTEXT with background fill flag 2 — "use the drawing
+  window colour" — plots paper white; SP02-05's material table has one (`个`,
+  row 3) that the earlier exports drew as a black box behind the glyph, and
+  that fix is exactly one line of the file (`fill="#161616"` → `#ffffff`).
+  And `59c96574`: **every P&ID symbol the legend recognition
+  (`io::pid_legend`) finds with a tag is one `<g tagName="…">`**, holding
+  the wires of the symbol's own entities (the block reference, or the circle
+  and its inner lettering, or an exploded shape's strokes) and of the
+  lettering the tag was read from — FF02-06 has 78 such groups (42 distinct
+  tags: `BUV-32xx` butterfly valves with their 8 glyphs, `XV-32xx` twice
+  each because the motorised valve and its `XV` bubble are two symbols,
+  `HS-32xx`, tanks `TD-020x`, six `DWG-0100FF02-04` sheet connectors, and
+  16 spray points whose tag is the `S` lettered in them), SP02-05 has 191
+  (132 tags, the exploded family: the tag lettering is red / blue there),
+  WS02-05 none — the recognition finds no tagged symbol on it, and its
+  file is byte-identical to the `d0bf8bca` export. `tagName` is not an
+  SVG attribute; usvg parses it without complaint (the tests compare the
+  parsed shapes of a grouped page against the emitter's), and Chrome 152 at
+  150 dpi renders these two files as it did the ungrouped ones (FF02-06:
+  24 px differ by one level; SP02-05: 16 px, where a sheet connector's
+  arrow and the red match line changed order, because a group's items are
+  drawn together where the first of them falls in the depth order); the
+  other two engines were not re-run. The renderings and TSVs in this folder were made
+  from the 09-09 export and were not re-run; the per-engine comparison is
+  about strokes and fills, which none of the four commits touches, but the
+  text areas in the `*-4up.png` crops show the old glyphs. Sizes:
+  3,170,784 / 7,798,659 / 1,825,077 bytes (gzip ≈ 1.1 / 2.3 / 0.6 MB),
+  SHA-256 `40393940…` / `D664D7C9…` / `097AE6E5…`, LF line endings so
   `eol=lf` leaves them alone. The 22 corpus pages are not archived:
   `cargo test --lib dump_the_corpus_for_a_human -- --ignored` regenerates
-  them from the tree. One thing these SVGs still show that is not the
-  export's typeface handling: SP02-05's material table has an MTEXT (`个`,
-  row 3) with background fill flag 2 — "use the drawing window colour" —
-  which plots as a black box behind the glyph where AutoCAD masks with paper
-  white; it is in the 09-09 export too, and since the fill comes out of the
-  shared plot pipeline the PDF should show it as well (not checked).
+  them from the tree.
 
 ## The merge_lines answer: resvg alone drops the fill
 
