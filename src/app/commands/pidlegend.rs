@@ -56,7 +56,6 @@
 
 use super::*;
 use crate::io::pid_legend::{self, Rules};
-use crate::io::pid_pipes;
 use acadrust::types::Color;
 use std::collections::BTreeSet;
 
@@ -285,7 +284,10 @@ impl OpenCADStudio {
                     if by_family.contains_key(code) {
                         families.insert(code.clone());
                     } else {
-                        let family = pid_pipes::line_family(code);
+                        // A number this sheet does not letter (another size
+                        // of a line it does) is not in the index; the rules
+                        // say what family it belongs to.
+                        let family = Rules::load().pipes.line_family(code);
                         if by_family.contains_key(&family) {
                             families.insert(family);
                         } else {
@@ -306,7 +308,7 @@ impl OpenCADStudio {
                                 .strip_prefix(pid_legend::PIPE_LAYER_PREFIX)
                             {
                                 if line != "NONE" {
-                                    families.insert(pid_pipes::line_family(line));
+                                    families.insert(rec.pipes.family_of(line).to_string());
                                 }
                                 continue;
                             }
@@ -324,7 +326,7 @@ impl OpenCADStudio {
                                 picked_runs.push(ri);
                             } else {
                                 for line in &run.lines {
-                                    families.insert(pid_pipes::line_family(line));
+                                    families.insert(rec.pipes.family_of(line).to_string());
                                 }
                             }
                         }
@@ -370,7 +372,7 @@ impl OpenCADStudio {
             let mut lines: BTreeSet<&str> = BTreeSet::new();
             for (ri, run) in runs.iter().enumerate() {
                 for line in &run.lines {
-                    if families.contains(&pid_pipes::line_family(line)) {
+                    if families.contains(rec.pipes.family_of(line)) {
                         picked.insert(ri);
                         lines.insert(line);
                     }

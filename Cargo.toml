@@ -42,6 +42,9 @@ env_logger = "0.11"
 # Log facade, already in the tree via wgpu/iced. Native writes through the
 # env_logger above; the web build installs its own logger.
 log = "0.4"
+# Line-number patterns of the P&ID rules (io::pid_pipes); already in the tree
+# via env_logger's env_filter.
+regex = "1"
 acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "7b4c112bd7895fe9039514c21c5b5aa59eaf2525", features = ["serde"] }
 cadkernel = { git = "https://github.com/HakanSeven12/cadkernel.git", rev = "8efd43cb2f04577d20c3ee33ce5273bb49affa3d", features = ["acis", "offset"] }
 acadifc = { git = "https://github.com/OpenAEC-Foundation/acadifc.git", rev = "47b5603", optional = true }

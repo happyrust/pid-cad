@@ -103,6 +103,7 @@ fn pipes_json(pipes: &pid_pipes::Pipes) -> serde_json::Value {
         "ports": pipes.ports,
         "connected_ports": pipes.connected_ports,
         "open_ends": pipes.open_ends,
+        "families": pipes.families,
         "runs": pipes.runs.iter().map(|r| serde_json::json!({
             "numbers": r.numbers,
             "lines": r.lines,

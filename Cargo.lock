@@ -46,6 +46,7 @@ dependencies = [
  "pid-parse",
  "printpdf",
  "rayon",
+ "regex",
  "resvg",
  "rfd",
  "rust-embed",

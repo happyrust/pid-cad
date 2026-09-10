@@ -334,20 +334,33 @@ impl Default for Rules {
 impl Rules {
     /// The rules compiled in from `assets/pid-legend.json`.
     pub fn builtin() -> Rules {
-        serde_json::from_str(DEFAULT_RULES_JSON)
-            .expect("assets/pid-legend.json is checked in and must parse")
+        let rules: Rules = serde_json::from_str(DEFAULT_RULES_JSON)
+            .expect("assets/pid-legend.json is checked in and must parse");
+        rules
+            .pipes
+            .validate()
+            .expect("assets/pid-legend.json is checked in and its pipe patterns must hold");
+        rules
     }
 
-    /// Rules read from a JSON file.
+    /// Rules read from a JSON file. A pipe number pattern that does not
+    /// compile, or a family template naming a group no pattern captures, is
+    /// an error here rather than a warning sheet by sheet later.
     pub fn from_path(path: &Path) -> Result<Rules, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+        let rules: Rules =
+            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        rules
+            .pipes
+            .validate()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(rules)
     }
 
-    /// The rules to use: the file named by [`RULES_ENV`] when it is set and
-    /// parses, else the compiled-in default. A broken override is reported
-    /// and ignored rather than silently replaced, so the sheet still gets
-    /// marked up.
+    /// The rules to use: the file named by [`RULES_ENV`] when it is set,
+    /// parses and validates, else the compiled-in default. A broken override
+    /// is reported and ignored rather than silently replaced, so the sheet
+    /// still gets marked up.
     pub fn load() -> Rules {
         match std::env::var_os(RULES_ENV) {
             Some(path) => match Rules::from_path(Path::new(&path)) {
@@ -527,6 +540,32 @@ mod tests {
         };
         assert!(lenient.accepts_tag("S"));
         assert!(!lenient.accepts_tag(" "));
+    }
+
+    /// An override file whose pipe number pattern does not compile, or whose
+    /// family template names a group no pattern captures, is refused whole,
+    /// so `load` falls back to the built-in rules rather than trace pipes
+    /// with half the patterns.
+    #[test]
+    fn an_override_with_a_broken_pipe_pattern_is_refused() {
+        let dir = std::env::temp_dir().join(format!("ocs-pid-rules-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pipes.json");
+        std::fs::write(
+            &path,
+            r#"{ "pipes": { "number_pattern": ["(?<size>[0-9]+"] } }"#,
+        )
+        .unwrap();
+        let err = Rules::from_path(&path).unwrap_err();
+        assert!(err.contains("pipes.number_pattern"), "{err}");
+        std::fs::write(&path, r#"{ "pipes": { "family": "{service}-{area}" } }"#).unwrap();
+        let err = Rules::from_path(&path).unwrap_err();
+        assert!(err.contains("{area}"), "{err}");
+        std::fs::write(&path, r#"{ "pipes": { "family": "{service}" } }"#).unwrap();
+        let rules = Rules::from_path(&path).unwrap();
+        assert_eq!(rules.pipes.family, "{service}");
+        assert_eq!(rules.pipes.line_family("200-FS-31001-A2"), "FS");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

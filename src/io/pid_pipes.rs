@@ -14,8 +14,10 @@
 //! Distances here are drawing units unless a name says `mm`; `upm` converts.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::OnceLock;
 
 use acadrust::{CadDocument, EntityType, Handle};
+use regex::Regex;
 use serde::Deserialize;
 
 pub type Point = (f64, f64);
@@ -35,6 +37,23 @@ pub struct PipeRules {
     /// Radius (paper mm) of the ring drawn where a run ends in the air when
     /// the runs are drawn into the sheet.
     pub open_end_mm: f64,
+    /// What a line number looks like: a piece of lettering is one when a
+    /// pattern matches the whole of it (the patterns are anchored; the
+    /// first that matches is the one `family` reads). A pattern names the
+    /// groups `family` refers to, `(?<service>...)` and `(?<seq>...)`. The
+    /// default is the two spellings this corpus uses: `80-FS`, `150-FW`,
+    /// `200-FS-31001-A2` with a 5-digit sequence, and the loading islands'
+    /// `100-CGA-0319-A1` with 4.
+    pub number_pattern: Vec<String>,
+    /// The family a line number belongs to, written from the groups its
+    /// pattern captured: `{service}-{seq}` makes `200-FS-31001-A2` and
+    /// `150-FS-31001-A2` one line, `FS-31001` -- the same line past a reducer
+    /// or a spec break. A number whose pattern has no value for a group the
+    /// template names (`80-FS` has no `seq`) is its own family.
+    pub family: String,
+    /// `number_pattern` compiled, anchored, on first use.
+    #[serde(skip)]
+    compiled: OnceLock<Vec<Regex>>,
 }
 
 impl Default for PipeRules {
@@ -44,9 +63,24 @@ impl Default for PipeRules {
             snap_mm: 0.3,
             number_mm: 5.0,
             open_end_mm: 0.6,
+            number_pattern: DEFAULT_NUMBER_PATTERN
+                .iter()
+                .map(|p| p.to_string())
+                .collect(),
+            family: "{service}-{seq}".to_string(),
+            compiled: OnceLock::new(),
         }
     }
 }
+
+/// The line numbers of the corpus: `<size>-<service>` with an optional
+/// `-<5 digits>-<class letter><digit>`, as in `80-FS`, `150-FW`,
+/// `200-FS-31001-A2`; and the loading islands' `<size>-<service>-<4
+/// digits>-<class>`, as in `100-CGA-0319-A1`.
+pub const DEFAULT_NUMBER_PATTERN: [&str; 2] = [
+    "(?<size>[0-9]+)-(?<service>[A-Z]{1,3})(?:-(?<seq>[0-9]{5})-(?<class>[A-Z][0-9]))?",
+    "(?<size>[0-9]+)-(?<service>[A-Z]{2,3})-(?<seq>[0-9]{4})-(?<class>[A-Z][0-9])",
+];
 
 impl PipeRules {
     fn is_pipe_layer(&self, layer: &str) -> bool {
@@ -57,6 +91,93 @@ impl PipeRules {
                 .is_some_and(|head| head.eq_ignore_ascii_case(p.as_bytes()))
         })
     }
+
+    /// Compile `pattern` to match a whole piece of lettering.
+    fn compile(pattern: &str) -> Result<Regex, regex::Error> {
+        Regex::new(&format!("^(?:{pattern})$"))
+    }
+
+    /// Whether every `number_pattern` compiles and `family` names only
+    /// groups some pattern has -- checked when the rules are loaded, so a
+    /// typo in an override file is reported then and not swallowed sheet by
+    /// sheet.
+    pub fn validate(&self) -> Result<(), String> {
+        let mut groups: BTreeSet<String> = BTreeSet::new();
+        for pattern in &self.number_pattern {
+            let re = Self::compile(pattern)
+                .map_err(|e| format!("pipes.number_pattern {pattern:?}: {e}"))?;
+            groups.extend(re.capture_names().flatten().map(str::to_string));
+        }
+        for name in template_groups(&self.family) {
+            if !groups.contains(name) {
+                return Err(format!(
+                    "pipes.family {:?} names a group {{{name}}} no number_pattern captures",
+                    self.family
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The patterns, compiled once. One that does not compile is dropped
+    /// with a warning; `validate` at load time is what normally catches it.
+    fn compiled(&self) -> &[Regex] {
+        self.compiled.get_or_init(|| {
+            self.number_pattern
+                .iter()
+                .filter_map(|p| match Self::compile(p) {
+                    Ok(re) => Some(re),
+                    Err(e) => {
+                        log::warn!("pipes.number_pattern {p:?} does not compile: {e}");
+                        None
+                    }
+                })
+                .collect()
+        })
+    }
+
+    /// Whether `value` is a line number as the rules letter one.
+    pub fn is_line_number(&self, value: &str) -> bool {
+        self.compiled().iter().any(|re| re.is_match(value))
+    }
+
+    /// The family `value` belongs to by the coding rule: `family` written
+    /// from the groups the first matching pattern captured
+    /// (`200-FS-31001-A2` -> `FS-31001`). A value no pattern matches, or one
+    /// missing a group the template names (`80-FS` has no sequence number),
+    /// has nothing to family by and is its own family.
+    pub fn line_family(&self, value: &str) -> String {
+        self.compiled()
+            .iter()
+            .find_map(|re| re.captures(value))
+            .and_then(|caps| {
+                let mut out = String::new();
+                let mut rest = self.family.as_str();
+                while let Some(open) = rest.find('{') {
+                    out.push_str(&rest[..open]);
+                    let close = rest[open..].find('}')? + open;
+                    out.push_str(caps.name(&rest[open + 1..close])?.as_str());
+                    rest = &rest[close + 1..];
+                }
+                out.push_str(rest);
+                Some(out)
+            })
+            .unwrap_or_else(|| value.to_string())
+    }
+}
+
+/// The `{group}` names a family template refers to.
+fn template_groups(template: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        let Some(close) = rest[open..].find('}') else {
+            break;
+        };
+        names.push(&rest[open + 1..open + close]);
+        rest = &rest[open + close + 1..];
+    }
+    names
 }
 
 /// Two arms of a tee that leave it at least this straight (cosine of the
@@ -131,6 +252,10 @@ pub struct Pipes {
     pub ports: usize,
     pub connected_ports: usize,
     pub open_ends: usize,
+    /// Line number -> its family by the rules' coding pattern
+    /// (`PipeRules::line_family`), for every number the runs carry; built by
+    /// `trace` so that the panel and PIDLINE need no rules in hand.
+    pub families: BTreeMap<String, String>,
 }
 
 impl Pipes {
@@ -145,6 +270,22 @@ impl Pipes {
         out
     }
 
+    /// The family of `line` as `trace` indexed it; a number it did not see
+    /// is its own family.
+    pub fn family_of<'a>(&'a self, line: &'a str) -> &'a str {
+        self.families.get(line).map_or(line, String::as_str)
+    }
+
+    /// (Re)build `families` for every number the runs carry.
+    pub fn index_families(&mut self, rules: &PipeRules) {
+        self.families = self
+            .runs
+            .iter()
+            .flat_map(|run| run.lines.iter().chain(&run.numbers))
+            .map(|line| (line.clone(), rules.line_family(line)))
+            .collect();
+    }
+
     /// The lines grouped into families by the coding rule: family key ->
     /// line number -> that line's runs. `200-FS-31001-A2` and
     /// `150-FS-31001-A2` are one family, `FS-31001` -- the same line past a
@@ -153,7 +294,9 @@ impl Pipes {
     pub fn by_family(&self) -> BTreeMap<String, BTreeMap<&str, Vec<&Run>>> {
         let mut out: BTreeMap<String, BTreeMap<&str, Vec<&Run>>> = BTreeMap::new();
         for (line, runs) in self.by_line() {
-            out.entry(line_family(line)).or_default().insert(line, runs);
+            out.entry(self.family_of(line).to_string())
+                .or_default()
+                .insert(line, runs);
         }
         out
     }
@@ -169,48 +312,6 @@ impl Pipes {
                 _ => None,
             })
             .collect()
-    }
-}
-
-/// Whether `value` is a line number as these sheets letter one:
-/// `<size>-<service>` with an optional `-<5 digits>-<class letter><digit>`,
-/// as in `80-FS`, `150-FW`, `200-FS-31001-A2`.
-pub fn is_line_number(value: &str) -> bool {
-    let mut parts = value.split('-');
-    let (Some(size), Some(service)) = (parts.next(), parts.next()) else {
-        return false;
-    };
-    if size.is_empty()
-        || !size.bytes().all(|b| b.is_ascii_digit())
-        || service.is_empty()
-        || service.len() > 3
-        || !service.bytes().all(|b| b.is_ascii_uppercase())
-    {
-        return false;
-    }
-    match (parts.next(), parts.next(), parts.next()) {
-        (None, None, None) => true,
-        (Some(number), Some(class), None) => {
-            number.len() == 5
-                && number.bytes().all(|b| b.is_ascii_digit())
-                && class.len() == 2
-                && class.as_bytes()[0].is_ascii_uppercase()
-                && class.as_bytes()[1].is_ascii_digit()
-        }
-        _ => false,
-    }
-}
-
-/// The family a line number belongs to by the coding rule: the service and
-/// the sequence number (`200-FS-31001-A2` -> `FS-31001`), because one
-/// physical line keeps them while its size changes at a reducer and its
-/// class at a spec break. A short code with no sequence number (`80-FS`)
-/// has nothing to family by and is its own family.
-pub fn line_family(value: &str) -> String {
-    let parts: Vec<&str> = value.split('-').collect();
-    match parts.as_slice() {
-        [_, service, number, _] => format!("{service}-{number}"),
-        _ => value.to_string(),
     }
 }
 
@@ -506,7 +607,7 @@ pub fn trace(
     // Line numbers onto the nearest run.
     let reach = rules.number_mm * upm;
     for &(at, value) in lettering {
-        if !is_line_number(value) {
+        if !rules.is_line_number(value) {
             continue;
         }
         let nearest = runs
@@ -634,13 +735,16 @@ pub fn trace(
         .flat_map(|r| r.ends)
         .filter(|e| *e == End::Open)
         .count();
-    Pipes {
+    let mut pipes = Pipes {
         runs,
         segments: read,
         ports: ports.len(),
         connected_ports,
         open_ends,
-    }
+        families: BTreeMap::new(),
+    };
+    pipes.index_families(rules);
+    pipes
 }
 
 #[cfg(test)]
@@ -649,8 +753,17 @@ mod tests {
 
     #[test]
     fn line_numbers_have_a_size_a_service_and_maybe_a_number_and_class() {
-        for good in ["80-FS", "150-FW", "200-FS-31001-A2", "100-FW-32002-B1"] {
-            assert!(is_line_number(good), "{good}");
+        let rules = PipeRules::default();
+        for good in [
+            "80-FS",
+            "150-FW",
+            "200-FS-31001-A2",
+            "100-FW-32002-B1",
+            // The loading islands' spelling: a 4-digit sequence number.
+            "100-CGA-0319-A1",
+            "200-FS-3100-A2",
+        ] {
+            assert!(rules.is_line_number(good), "{good}");
         }
         for bad in [
             "BUV-3101",
@@ -660,24 +773,62 @@ mod tests {
             "-FS",
             "80-fs",
             "80-FSXX",
-            "200-FS-3100-A2",
+            "200-FS-310-A2",
             "200-FS-31001-AA",
             "200-FS-31001",
+            "100-CGA-0319",
             "1/2\"NPT",
             "5000m",
         ] {
-            assert!(!is_line_number(bad), "{bad}");
+            assert!(!rules.is_line_number(bad), "{bad}");
         }
     }
 
     #[test]
     fn a_line_family_is_the_service_and_the_sequence_number() {
-        assert_eq!(line_family("200-FS-31001-A2"), "FS-31001");
-        assert_eq!(line_family("150-FS-31001-B1"), "FS-31001");
-        assert_eq!(line_family("100-FW-32002-B1"), "FW-32002");
+        let rules = PipeRules::default();
+        assert_eq!(rules.line_family("200-FS-31001-A2"), "FS-31001");
+        assert_eq!(rules.line_family("150-FS-31001-B1"), "FS-31001");
+        assert_eq!(rules.line_family("100-FW-32002-B1"), "FW-32002");
+        assert_eq!(rules.line_family("100-CGA-0319-A1"), "CGA-0319");
+        assert_eq!(rules.line_family("80-CGA-0319-B2"), "CGA-0319");
         // No sequence number: nothing to family by, the code stands alone.
-        assert_eq!(line_family("80-FS"), "80-FS");
-        assert_eq!(line_family("150-FW"), "150-FW");
+        assert_eq!(rules.line_family("80-FS"), "80-FS");
+        assert_eq!(rules.line_family("150-FW"), "150-FW");
+        // Not a line number at all: its own family too.
+        assert_eq!(rules.line_family("BUV-3101"), "BUV-3101");
+    }
+
+    #[test]
+    fn the_rules_file_can_respell_the_line_numbers_and_their_family() {
+        let rules = PipeRules {
+            number_pattern: vec!["(?<unit>[0-9]{2})-(?<fluid>[A-Z]+)-(?<no>[0-9]+)".to_string()],
+            family: "{fluid}{no}".to_string(),
+            ..PipeRules::default()
+        };
+        assert!(rules.is_line_number("12-CW-7"));
+        assert!(!rules.is_line_number("200-FS-31001-A2"));
+        assert_eq!(rules.line_family("12-CW-7"), "CW7");
+        assert_eq!(rules.line_family("200-FS-31001-A2"), "200-FS-31001-A2");
+    }
+
+    #[test]
+    fn validate_rejects_a_pattern_that_does_not_compile_or_a_family_group_no_pattern_has() {
+        assert_eq!(PipeRules::default().validate(), Ok(()));
+        let broken = PipeRules {
+            number_pattern: vec!["(?<size>[0-9]+".to_string()],
+            ..PipeRules::default()
+        };
+        let err = broken.validate().unwrap_err();
+        assert!(err.contains("pipes.number_pattern"), "{err}");
+        let unnamed = PipeRules {
+            family: "{service}-{area}".to_string(),
+            ..PipeRules::default()
+        };
+        let err = unnamed.validate().unwrap_err();
+        assert!(err.contains("{area}"), "{err}");
+        // A pattern that does not compile is dropped at use, not fatal.
+        assert!(!broken.is_line_number("200-FS-31001-A2"));
     }
 
     #[test]
@@ -691,7 +842,7 @@ mod tests {
             path: vec![(0.0, 0.0), (1.0, 0.0)],
             handles: Vec::new(),
         };
-        let pipes = Pipes {
+        let mut pipes = Pipes {
             runs: vec![
                 run(&["200-FS-31001-A2"]),
                 run(&["150-FS-31001-A2"]),
@@ -700,6 +851,11 @@ mod tests {
             ],
             ..Pipes::default()
         };
+        pipes.index_families(&PipeRules::default());
+        assert_eq!(pipes.family_of("150-FS-31001-A2"), "FS-31001");
+        assert_eq!(pipes.family_of("80-FS"), "80-FS");
+        // A number the runs do not carry was never indexed: its own family.
+        assert_eq!(pipes.family_of("300-FS-31001-A2"), "300-FS-31001-A2");
         let families = pipes.by_family();
         assert_eq!(
             families.keys().collect::<Vec<_>>(),
