@@ -74,8 +74,10 @@ librsvg column is the same library reached through libvips.
   --plot-svg <DXF> <out> --model --paper A1 --landscape --fit --force`),
   archived 2026-09-10 so the sheets the `real-sheets-*.tsv` rows and
   `real-*-4up.png` crops describe stay in the tree after `%TEMP%` is cleared.
-  **They are the 2026-09-10 export from `59c96574`, not the 09-09 run's
-  bytes.** Four commits landed in between. Two text fixes — `3e305477` (a
+  **FF02-06 is the 2026-09-10 export from `972dc351`; SP02-05 and WS02-05
+  are the one from `59c96574`, which the later commit leaves byte-identical;
+  none is the 09-09 run's bytes.** Four commits landed between the 09-09
+  run and `59c96574`. Two text fixes — `3e305477` (a
   DXF STYLE whose TrueType typeface lives only in `ACAD` xdata now resolves
   to that face, so `-宋体` / `ST` / `HT` / `HZDX` render in SimSun instead
   of the stroke default plus a CJK fallback) and `d0bf8bca` (TrueType text
@@ -92,11 +94,15 @@ librsvg column is the same library reached through libvips.
   (`io::pid_legend`) finds with a tag is one `<g tagName="…">`**, holding
   the wires of the symbol's own entities (the block reference, or the circle
   and its inner lettering, or an exploded shape's strokes) and of the
-  lettering the tag was read from — FF02-06 has 78 such groups (42 distinct
+  lettering the tag was read from — FF02-06 has 62 such groups (41 distinct
   tags: `BUV-32xx` butterfly valves with their 8 glyphs, `XV-32xx` twice
   each because the motorised valve and its `XV` bubble are two symbols,
-  `HS-32xx`, tanks `TD-020x`, six `DWG-0100FF02-04` sheet connectors, and
-  16 spray points whose tag is the `S` lettered in them), SP02-05 has 191
+  `HS-32xx`, tanks `TD-020x`, six `DWG-0100FF02-04` sheet connectors; the
+  `59c96574` export had 78, the extra 16 being the spray points grouped
+  under the `S` lettered in them, and `972dc351` — a tag is at least
+  `tag_min_chars` = 4 characters — no longer reads that letter as a tag, so
+  they are plain paths again: the same drawn paths and paint, Chrome 152 at
+  96 dpi within one level on 11 px), SP02-05 has 191
   (132 tags, the exploded family: the tag lettering is red / blue there),
   WS02-05 none — the recognition finds no tagged symbol on it, and its
   file is byte-identical to the `d0bf8bca` export. `tagName` is not an
@@ -110,8 +116,8 @@ librsvg column is the same library reached through libvips.
   from the 09-09 export and were not re-run; the per-engine comparison is
   about strokes and fills, which none of the four commits touches, but the
   text areas in the `*-4up.png` crops show the old glyphs. Sizes:
-  3,170,784 / 7,798,659 / 1,825,077 bytes (gzip ≈ 1.1 / 2.3 / 0.6 MB),
-  SHA-256 `40393940…` / `D664D7C9…` / `097AE6E5…`, LF line endings so
+  3,169,752 / 7,798,659 / 1,825,077 bytes (gzip ≈ 1.1 / 2.3 / 0.6 MB),
+  SHA-256 `E9763000…` / `D664D7C9…` / `097AE6E5…`, LF line endings so
   `eol=lf` leaves them alone. The 22 corpus pages are not archived:
   `cargo test --lib dump_the_corpus_for_a_human -- --ignored` regenerates
   them from the tree.
