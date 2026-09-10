@@ -28,6 +28,106 @@ fn visual_style_properties_text(style: &acadrust::objects::VisualStyle) -> Strin
         .join("\n")
 }
 
+/// The editable identity of every marked P&ID GROUP touched by `handles`.
+/// Several selected members of one group still make one identity; selections
+/// spanning groups aggregate each row to its common value or `*VARIES*`.
+fn pid_group_properties_section(
+    document: &acadrust::CadDocument,
+    handles: &[Handle],
+) -> Option<crate::scene::model::object::PropSection> {
+    if handles.is_empty() {
+        return None;
+    }
+    let selected: std::collections::HashSet<Handle> = handles.iter().copied().collect();
+    let group_handles: Vec<Handle> = document
+        .objects
+        .values()
+        .filter_map(|object| match object {
+            acadrust::objects::ObjectType::Group(group)
+                if group
+                    .entities
+                    .iter()
+                    .any(|handle| selected.contains(handle))
+                    && crate::io::pid_legend::GroupTag::parse(&group.description).is_some() =>
+            {
+                Some(group.handle)
+            }
+            _ => None,
+        })
+        .collect();
+    if group_handles.is_empty() {
+        return None;
+    }
+    let rules = crate::io::pid_legend::Rules::load();
+    let mut details: Vec<crate::io::pid_legend::GroupDetails> = group_handles
+        .into_iter()
+        .filter_map(|group| crate::io::pid_legend::group_details(document, group, &rules))
+        .collect();
+    if details.is_empty() {
+        return None;
+    }
+    details.sort_by(|a, b| a.name.cmp(&b.name));
+    let common = |values: Vec<String>| {
+        let first = values.first().cloned().unwrap_or_default();
+        if values.iter().all(|value| value == &first) {
+            first
+        } else {
+            VARIES_LABEL.to_string()
+        }
+    };
+    let tag = common(
+        details
+            .iter()
+            .map(|detail| detail.tag.clone().unwrap_or_default())
+            .collect(),
+    );
+    let source = common(
+        details
+            .iter()
+            .map(|detail| match detail.source {
+                crate::io::pid_legend::TagSource::Auto => t!("Automatic").into_owned(),
+                crate::io::pid_legend::TagSource::Manual => t!("Manual").into_owned(),
+            })
+            .collect(),
+    );
+    let group = common(details.iter().map(|detail| detail.name.clone()).collect());
+    let kind = common(
+        details
+            .iter()
+            .map(|detail| format!("{} ({})", detail.class.label, detail.class.class))
+            .collect(),
+    );
+    use crate::scene::model::object::{PropSection, Property};
+    Some(PropSection {
+        title: "P&ID".to_string(),
+        props: vec![
+            Property {
+                label: format!("{} (tagName)", t!("Item tag")),
+                field: "pid_tag",
+                value: PropValue::EditText(tag),
+            },
+            crate::entities::common::ro_prop(t!("Source").as_ref(), "pid_tag_source", source),
+            crate::entities::common::ro_prop(t!("Group").as_ref(), "pid_group", group),
+            crate::entities::common::ro_prop(t!("Type").as_ref(), "pid_group_class", kind),
+        ],
+    })
+}
+
+fn append_pid_group_properties(
+    sections: &mut Vec<crate::scene::model::object::PropSection>,
+    document: &acadrust::CadDocument,
+    handles: &[Handle],
+) {
+    let Some(mut group_section) = pid_group_properties_section(document, handles) else {
+        return;
+    };
+    if let Some(section) = sections.iter_mut().find(|section| section.title == "P&ID") {
+        section.props.append(&mut group_section.props);
+    } else {
+        sections.push(group_section);
+    }
+}
+
 impl OpenCADStudio {
     /// Rebuild the PropertiesPanel from the current entity selection.
     /// Preserves UI state (open pickers, edit buffer) across refreshes.
@@ -2113,6 +2213,11 @@ impl OpenCADStudio {
                     if compact_solid {
                         retain_compact_solid_sections(&mut sections);
                     }
+                    append_pid_group_properties(
+                        &mut sections,
+                        &self.tabs[i].scene.document,
+                        &[handle],
+                    );
                     let title = match entity {
                         acadrust::EntityType::Insert(ins) => {
                             let is_xref = self.tabs[i]
@@ -2224,6 +2329,14 @@ impl OpenCADStudio {
                         &self.tabs[i].scene.document,
                         &local_refs.iter().map(|(handle, _)| *handle).collect::<Vec<_>>(),
                     ));
+                    append_pid_group_properties(
+                        &mut sections,
+                        &self.tabs[i].scene.document,
+                        &filtered
+                            .iter()
+                            .map(|(handle, _)| *handle)
+                            .collect::<Vec<_>>(),
+                    );
                     ui::PropertiesPanel {
                         choice_combos: sections
                             .iter()

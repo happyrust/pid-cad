@@ -70,6 +70,7 @@ pub use legend::{
     apply, clear, is_legend_layer, is_shape_class, layer_for_class, legend_entities,
     legend_handles, legend_layers, pipe_entities, pipe_layer, pipe_layers,
 };
+pub use manual_groups::{group_details, GroupDetails};
 pub use report::report;
 pub use rules::{
     shape_matches, BlockRule, CircleRule, LayerPrefixRule, ManualGroupRule, OrphanRules,
@@ -160,7 +161,7 @@ pub struct Recognized {
     /// World-space box of what the symbol draws, drawing units.
     pub bbox: (f64, f64, f64, f64),
     /// Block name, `circle r=<mm>` for a loose circle, `shape <id>` for an
-    /// exploded symbol.
+    /// exploded symbol, or `group <name>` for a manual override.
     pub source: String,
     /// The marked DXF GROUP that owns this symbol, if any.
     pub group: Option<GroupOrigin>,

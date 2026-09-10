@@ -387,20 +387,30 @@ impl OpenCADStudio {
         value: Option<&str>,
         rules: &Rules,
     ) -> String {
-        let read = self.tabs[i]
-            .scene
-            .derive_group_tag(group, rules)
-            .map(|read| read.value);
-        let value = value.map(str::trim).filter(|v| !v.is_empty());
-        let tag = match value {
-            Some(v) if read.as_deref() != Some(v) => GroupTag::manual(v),
-            _ => GroupTag::auto(read.clone()),
-        };
+        let tag = self.pid_group_tag_for_value(i, group, value, rules);
         self.tabs[i].scene.set_group_tag(group, Some(&tag));
         match (&tag.name, tag.source) {
             (Some(name), TagSource::Manual) => format!("tagName {name} (set by hand)."),
             (Some(name), TagSource::Auto) => format!("tagName {name} (read from the lettering)."),
             (None, _) => "No tagName: the group letters nothing that reads as a tag.".to_string(),
+        }
+    }
+
+    fn pid_group_tag_for_value(
+        &self,
+        i: usize,
+        group: acadrust::Handle,
+        value: Option<&str>,
+        rules: &Rules,
+    ) -> GroupTag {
+        let read = self.tabs[i]
+            .scene
+            .derive_group_tag(group, rules)
+            .map(|read| read.value);
+        let value = value.map(str::trim).filter(|v| !v.is_empty());
+        match value {
+            Some(v) if read.as_deref() != Some(v) => GroupTag::manual(v),
+            _ => GroupTag::auto(read.clone()),
         }
     }
 
@@ -425,6 +435,9 @@ impl OpenCADStudio {
         let count = self.tabs[i].scene.delete_groups_containing(&handles);
         self.tabs[i].dirty = true;
         if count > 0 {
+            // Removing a marked group hands its members back to automatic
+            // recognition even though no entity geometry changed.
+            self.tabs[i].scene.bump_geometry();
             let rules = Rules::load();
             self.redraw_pid_legend_if_drawn(i, &rules);
         }
@@ -569,6 +582,42 @@ impl OpenCADStudio {
             }
         }
         groups
+    }
+
+    /// Apply the Properties panel's `pid_tag` value to every marked group
+    /// touched by the selected handles. Empty, or the value the lettering
+    /// already reads, means `auto`; any other value means `manual`.
+    pub(in crate::app) fn set_pid_group_tag_property(
+        &mut self,
+        i: usize,
+        handles: &[acadrust::Handle],
+        value: &str,
+    ) -> usize {
+        if value == crate::app::VARIES_LABEL {
+            return 0;
+        }
+        let rules = Rules::load();
+        let mut updates = Vec::new();
+        for group in self.groups_of(i, handles) {
+            let Some(current) = self.tabs[i].scene.group_tag(group) else {
+                continue;
+            };
+            let desired = self.pid_group_tag_for_value(i, group, Some(value), &rules);
+            if desired != current {
+                updates.push((group, desired));
+            }
+        }
+        if updates.is_empty() {
+            return 0;
+        }
+        let pending = self.open_group_undo(i, "PIDGROUP TAG");
+        for (group, tag) in &updates {
+            self.tabs[i].scene.set_group_tag(*group, Some(tag));
+        }
+        self.tabs[i].dirty = true;
+        self.redraw_pid_legend_if_drawn(i, &rules);
+        self.close_group_undo(i, pending);
+        updates.len()
     }
 
     /// PIDGROUP TAG / AUTO on existing groups: set (`Some`) or hand back
@@ -1123,6 +1172,23 @@ mod tests {
             .unwrap_or_else(|| panic!("no group {group:?}"))
     }
 
+    fn property_value(app: &OpenCADStudio, field: &str) -> Option<String> {
+        use crate::scene::model::object::PropValue;
+        app.tabs[app.active_tab]
+            .properties
+            .sections
+            .iter()
+            .flat_map(|section| &section.props)
+            .find(|property| property.field == field)
+            .and_then(|property| match &property.value {
+                PropValue::EditText(value)
+                | PropValue::PlainText(value)
+                | PropValue::ReadOnly(value) => Some(value.clone()),
+                PropValue::ReadOnlyWithTooltip { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+    }
+
     /// Every line the command line has shown, newest last.
     fn history(app: &OpenCADStudio) -> Vec<String> {
         app.command_line
@@ -1316,6 +1382,132 @@ mod tests {
         );
         let _ = app.feed_command(crate::command::StepInput::Escape);
         assert_eq!(groups(&app), first, "nothing was made");
+    }
+
+    /// Selecting any member exposes the group's P&ID identity in Properties.
+    /// Editing `pid_tag` uses the same auto/manual rule as PIDGROUP, is one
+    /// undo step, and dates the recognition index in both directions.
+    #[test]
+    fn properties_edits_a_group_tag_and_undo_restores_it() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let (strokes, tag) = loose_valve(&mut app, 0.0, Some("BUV-3101"));
+        let tag = tag.unwrap();
+        let mut members = strokes;
+        members.push(tag);
+        select_all_of(&mut app, &members);
+        let _ = app.run_command_line("PIDGROUP GROUP");
+        let group = groups(&app)[0];
+
+        let _ = app.run_command_line("PIDLEGEND LIST");
+        assert!(!app.tabs[i].pid_legend_is_stale());
+        select_all_of(&mut app, &[tag]);
+        app.refresh_properties();
+        assert_eq!(property_value(&app, "pid_tag").as_deref(), Some("BUV-3101"));
+        assert_eq!(
+            property_value(&app, "pid_tag_source").as_deref(),
+            Some(crate::t!("Automatic").as_ref())
+        );
+        assert_eq!(property_value(&app, "pid_group").as_deref(), Some("*A1"));
+        assert!(
+            property_value(&app, "pid_group_class")
+                .is_some_and(|value| value.contains("butterfly")),
+            "{:?}",
+            property_value(&app, "pid_group_class")
+        );
+
+        let _ = app.update(Message::PropGeomInput {
+            field: "pid_tag",
+            value: "XV-0001".to_string(),
+        });
+        let _ = app.update(Message::PropGeomCommit("pid_tag"));
+        assert_eq!(
+            description_of(&app, group),
+            "tagName=XV-0001;tagSource=manual"
+        );
+        assert!(app.tabs[i].pid_legend_is_stale());
+        assert_eq!(
+            property_value(&app, "pid_tag_source").as_deref(),
+            Some(crate::t!("Manual").as_ref())
+        );
+        let _ = app.run_command_line("PIDTAG XV-0001");
+        assert_eq!(selected(&app), {
+            let mut expected = members.clone();
+            expected.sort_by_key(|handle| handle.value());
+            expected
+        });
+
+        // Clearing the field hands the tag back to the lettering.
+        select_all_of(&mut app, &[tag]);
+        app.refresh_properties();
+        let _ = app.update(Message::PropGeomInput {
+            field: "pid_tag",
+            value: String::new(),
+        });
+        let _ = app.update(Message::PropGeomCommit("pid_tag"));
+        assert_eq!(
+            description_of(&app, group),
+            "tagName=BUV-3101;tagSource=auto"
+        );
+        let _ = app.run_command_line("PIDTAG BUV-3101");
+        assert!(!app.tabs[i].pid_legend_is_stale());
+
+        let _ = app.update(Message::Undo);
+        assert_eq!(
+            description_of(&app, group),
+            "tagName=XV-0001;tagSource=manual"
+        );
+        assert!(
+            app.tabs[i].pid_legend_is_stale(),
+            "object-only group undo dates the P&ID index"
+        );
+        let _ = app.run_command_line("PIDTAG XV-0001");
+        assert_eq!(selected(&app).len(), members.len());
+        let _ = app.update(Message::Redo);
+        assert_eq!(
+            description_of(&app, group),
+            "tagName=BUV-3101;tagSource=auto"
+        );
+
+        let (second_strokes, second_tag) = loose_valve(&mut app, 40.0, Some("BUV-3102"));
+        let second_tag = second_tag.unwrap();
+        let mut second_members = second_strokes;
+        second_members.push(second_tag);
+        select_all_of(&mut app, &second_members);
+        let _ = app.run_command_line("PIDGROUP GROUP");
+        let second_group = *groups(&app)
+            .iter()
+            .find(|candidate| **candidate != group)
+            .unwrap();
+        select_all_of(&mut app, &[tag, second_tag]);
+        app.refresh_properties();
+        assert_eq!(
+            property_value(&app, "pid_tag").as_deref(),
+            Some(crate::app::VARIES_LABEL)
+        );
+        assert_eq!(
+            property_value(&app, "pid_group").as_deref(),
+            Some(crate::app::VARIES_LABEL)
+        );
+        assert!(
+            property_value(&app, "pid_group_class")
+                .is_some_and(|value| value.contains("butterfly")),
+            "the common type remains visible across two groups"
+        );
+        let _ = app.update(Message::PropGeomInput {
+            field: "pid_tag",
+            value: "XV-9000".to_string(),
+        });
+        let _ = app.update(Message::PropGeomCommit("pid_tag"));
+        assert_eq!(
+            description_of(&app, group),
+            "tagName=XV-9000;tagSource=manual"
+        );
+        assert_eq!(
+            description_of(&app, second_group),
+            "tagName=XV-9000;tagSource=manual"
+        );
     }
 
     /// A copy of a tagged group carries the tag (the description is copied

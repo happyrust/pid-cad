@@ -48,7 +48,8 @@ impl Scene {
     /// out and leaves a plain group. True when a group was there and its
     /// description changed. No undo of its own: callers wrap it in
     /// `begin_group_undo` / `commit_group_undo`, which record the group
-    /// objects' before and after.
+    /// objects' before and after. A changed tag advances the scene epoch
+    /// because stored P&ID recognition depends on group descriptions.
     pub fn set_group_tag(&mut self, group: Handle, tag: Option<&GroupTag>) -> bool {
         let Some(ObjectType::Group(g)) = self.document.objects.get_mut(&group) else {
             return false;
@@ -61,6 +62,7 @@ impl Scene {
             return false;
         }
         g.description = description;
+        self.bump_geometry();
         true
     }
 

@@ -21,6 +21,7 @@
 
 use crate::app::Message;
 use crate::io::pid_legend::{Recognition, Recognized};
+use crate::t;
 use crate::ui::dock::{DockMsg, PanelId};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, tooltip};
 use iced::{Background, Element, Fill, Length, Theme};
@@ -127,6 +128,47 @@ fn row_text<'a>(s: impl Into<String>, size: f32, dim: bool) -> iced::widget::Tex
     } else {
         t
     }
+}
+
+/// The compact marker and tooltip for a symbol supplied by a hand-made DXF
+/// GROUP. The marker follows the UI language (`M` / `手`); the tooltip says
+/// which group and whether its tag follows lettering or was set by hand.
+fn manual_group_badge_text(symbol: &Recognized) -> Option<(String, String)> {
+    let group = symbol.group.as_ref()?;
+    let manual = t!("Manual");
+    let badge = manual.chars().next().unwrap_or('M').to_string();
+    let source = match group.tag_source {
+        crate::io::pid_legend::TagSource::Auto => t!("Automatic"),
+        crate::io::pid_legend::TagSource::Manual => t!("Manual"),
+    };
+    let tooltip = format!(
+        "{} {} · {} {}",
+        t!("Manual group"),
+        group.name,
+        t!("Tag source"),
+        source
+    );
+    Some((badge, tooltip))
+}
+
+fn manual_group_badge(symbol: &Recognized, dim: bool) -> Option<Element<'static, Message>> {
+    let (badge, tooltip_text) = manual_group_badge_text(symbol)?;
+    let chip = container(row_text(badge, 9.0, dim))
+        .padding([0, 4])
+        .style(|theme: &Theme| container::Style {
+            background: Some(Background::Color(theme.palette().background.weak.color)),
+            border: iced::Border {
+                color: theme.palette().background.strong.color,
+                width: 1.0,
+                radius: 3.0.into(),
+            },
+            ..Default::default()
+        });
+    Some(
+        tooltip(chip, text(tooltip_text).size(10), tooltip::Position::Left)
+            .gap(4)
+            .into(),
+    )
 }
 
 /// One clickable row. `indent` mimics a tree without one.
@@ -348,7 +390,17 @@ pub fn view(
                     s.at.1 / rec.units_per_mm
                 ),
             };
-            let label: Element<'_, Message> = row_text(name, 11.0, stale || s.tag.is_none()).into();
+            let dim = stale || s.tag.is_none();
+            let mut label = row![
+                row_text(name, 11.0, dim),
+                iced::widget::Space::new().width(Fill),
+            ]
+            .spacing(5)
+            .align_y(iced::Center);
+            if let Some(badge) = manual_group_badge(s, dim) {
+                label = label.push(badge);
+            }
+            let label: Element<'_, Message> = label.into();
             // A symbol row selects the symbol's group -- its entities and its
             // tag lettering -- frames it in red and zooms to it (PIDTAG). A
             // symbol nothing was drawn for (nothing to select) just zooms.
@@ -579,5 +631,22 @@ mod tests {
             ["(10, 30)", "(40, 30)", "(50, 10)", "(0, 0)"],
             "a symbol of a class that takes no tag is untagged too"
         );
+    }
+
+    #[test]
+    fn a_manual_group_symbol_gets_a_localised_badge_and_source_tooltip() {
+        let mut grouped = symbol(Some("BV0301"), true, (10.0, 20.0));
+        grouped.group = Some(crate::io::pid_legend::GroupOrigin {
+            name: "*A1".to_string(),
+            tag_source: crate::io::pid_legend::TagSource::Auto,
+        });
+        let (badge, tooltip) = manual_group_badge_text(&grouped).expect("badge");
+        assert_eq!(
+            badge,
+            t!("Manual").chars().next().unwrap_or('M').to_string()
+        );
+        assert!(tooltip.contains("*A1"), "{tooltip}");
+        assert!(tooltip.contains(t!("Automatic").as_ref()), "{tooltip}");
+        assert!(manual_group_badge_text(&symbol(None, true, (0.0, 0.0))).is_none());
     }
 }

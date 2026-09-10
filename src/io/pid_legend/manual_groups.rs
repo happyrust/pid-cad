@@ -9,9 +9,19 @@ use std::collections::HashSet;
 use acadrust::objects::{Group, ObjectType};
 use acadrust::{CadDocument, EntityType, Handle};
 
-use super::blocks::{grow, placed_block, skip_for_box};
+use super::blocks::{grow, lettering_value, placed_block, skip_for_box};
 use super::tags::derive_tag_from_texts;
 use super::*;
+
+/// The P&ID identity a marked DXF GROUP presents to recognition and the
+/// Properties panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupDetails {
+    pub name: String,
+    pub tag: Option<String>,
+    pub source: TagSource,
+    pub class: TagClass,
+}
 
 pub(super) struct ManualGroups {
     pub symbols: Vec<Recognized>,
@@ -82,64 +92,10 @@ pub(super) fn recognise_manual_groups(
         for &(index, _) in &letters {
             taken_text[index] = true;
         }
-        let text_values: Vec<&str> = letters
-            .iter()
-            .map(|(_, letter)| letter.value.as_str())
-            .collect();
-        let derived = derive_tag_from_texts(&text_values, rules);
-        let tag = match carried.source {
-            TagSource::Auto => derived.map(|read| read.value),
-            TagSource::Manual => carried.name.clone(),
-        };
-
-        // Evidence order is deliberate: a known INSERT, then a circle rule,
-        // then the effective tag's shape, then the configured manual class.
-        let block_class = members.iter().find_map(|entity| {
-            let EntityType::Insert(insert) = entity else {
-                return None;
-            };
-            rules
-                .blocks
-                .get(&insert.block_name)
-                .filter(|rule| rule.class != IGNORE_CLASS)
-                .map(|rule| (rule.class.clone(), rule.label.clone(), rule.color))
-        });
-        let circle_matches: Vec<(Handle, &CircleRule)> = members
-            .iter()
-            .filter_map(|entity| {
-                let EntityType::Circle(circle) = entity else {
-                    return None;
-                };
-                let inner: Vec<String> = letters
-                    .iter()
-                    .filter(|(_, letter)| {
-                        (letter.at.0 - circle.center.x).hypot(letter.at.1 - circle.center.y)
-                            <= circle.radius * INNER_TEXT_RADIUS
-                    })
-                    .map(|(_, letter)| letter.value.clone())
-                    .collect();
-                rules
-                    .circle_rule(circle.radius / upm, &inner)
-                    .map(|rule| (circle.common.handle, rule))
-            })
-            .collect();
-        let circle_class = circle_matches
-            .first()
-            .map(|(_, rule)| (rule.class.clone(), rule.label.clone(), rule.color));
-        let tag_class = tag.as_deref().and_then(|tag| {
-            class_for_tag(tag, rules).map(|class| (class.class, class.label, class.color))
-        });
-        let (class, label, color) =
-            block_class
-                .or(circle_class)
-                .or(tag_class)
-                .unwrap_or_else(|| {
-                    (
-                        rules.manual_group.class.clone(),
-                        rules.manual_group.label.clone(),
-                        rules.manual_group.color,
-                    )
-                });
+        let letter_refs: Vec<&Lettering> = letters.iter().map(|(_, letter)| *letter).collect();
+        let tag = effective_group_tag(&carried, &letter_refs, rules);
+        let (class, port_circles) =
+            classify_group(&members, &letter_refs, tag.as_deref(), rules, upm);
 
         let mut bbox = None;
         let mut handles = Vec::new();
@@ -178,10 +134,7 @@ pub(super) fn recognise_manual_groups(
                         circle.center.x + circle.radius,
                         circle.center.y + circle.radius,
                     );
-                    if circle_matches
-                        .iter()
-                        .any(|(circle_handle, _)| *circle_handle == handle)
-                    {
+                    if port_circles.contains(&handle) {
                         group_ports.push(Port::Rim {
                             centre: (circle.center.x, circle.center.y),
                             r: circle.radius,
@@ -209,9 +162,9 @@ pub(super) fn recognise_manual_groups(
         let symbol_index = symbols.len();
         ports.extend(group_ports.into_iter().map(|port| (symbol_index, port)));
         symbols.push(Recognized {
-            class,
-            label,
-            color,
+            class: class.class,
+            label: class.label,
+            color: class.color,
             at,
             bbox,
             source: format!("group {name}"),
@@ -237,6 +190,124 @@ pub(super) fn recognise_manual_groups(
         circle_handles,
         ports,
     }
+}
+
+/// Describe one marked group independently of a stored Recognition. This is
+/// cheap (only the group's members are inspected) and keeps the Properties
+/// panel's displayed tag and type on the same rules as recognition.
+pub fn group_details(
+    doc: &CadDocument,
+    group_handle: Handle,
+    rules: &Rules,
+) -> Option<GroupDetails> {
+    let ObjectType::Group(group) = doc.objects.get(&group_handle)? else {
+        return None;
+    };
+    let carried = GroupTag::parse(&group.description)?;
+    let members: Vec<&EntityType> = group
+        .entities
+        .iter()
+        .filter_map(|handle| doc.get_entity(*handle))
+        .collect();
+    let mut letters: Vec<Lettering> = members
+        .iter()
+        .filter_map(|entity| lettering_value(entity))
+        .collect();
+    letters.sort_by(|a, b| {
+        b.at.1
+            .total_cmp(&a.at.1)
+            .then_with(|| a.at.0.total_cmp(&b.at.0))
+    });
+    let letter_refs: Vec<&Lettering> = letters.iter().collect();
+    let tag = effective_group_tag(&carried, &letter_refs, rules);
+    let upm = if members
+        .iter()
+        .any(|entity| matches!(entity, EntityType::Circle(_)))
+    {
+        guess_units_per_mm(doc)
+    } else {
+        1.0
+    };
+    let (class, _) = classify_group(&members, &letter_refs, tag.as_deref(), rules, upm);
+    Some(GroupDetails {
+        name: group_name(doc, group),
+        tag,
+        source: carried.source,
+        class,
+    })
+}
+
+fn effective_group_tag(
+    carried: &GroupTag,
+    letters: &[&Lettering],
+    rules: &Rules,
+) -> Option<String> {
+    match carried.source {
+        TagSource::Auto => {
+            let values: Vec<&str> = letters.iter().map(|letter| letter.value.as_str()).collect();
+            derive_tag_from_texts(&values, rules).map(|read| read.value)
+        }
+        TagSource::Manual => carried.name.clone(),
+    }
+}
+
+/// Classify by the M3 evidence order and return the circles whose rims are
+/// pipe ports. A decorative circle inside an exploded shape is not a port:
+/// only a circle that matched a configured circle rule is.
+fn classify_group(
+    members: &[&EntityType],
+    letters: &[&Lettering],
+    tag: Option<&str>,
+    rules: &Rules,
+    upm: f64,
+) -> (TagClass, HashSet<Handle>) {
+    let block_class = members.iter().find_map(|entity| {
+        let EntityType::Insert(insert) = entity else {
+            return None;
+        };
+        rules
+            .blocks
+            .get(&insert.block_name)
+            .filter(|rule| rule.class != IGNORE_CLASS)
+            .map(|rule| TagClass {
+                class: rule.class.clone(),
+                label: rule.label.clone(),
+                color: rule.color,
+            })
+    });
+    let mut circle_class = None;
+    let mut port_circles = HashSet::new();
+    for entity in members {
+        let EntityType::Circle(circle) = entity else {
+            continue;
+        };
+        let inner: Vec<String> = letters
+            .iter()
+            .filter(|letter| {
+                (letter.at.0 - circle.center.x).hypot(letter.at.1 - circle.center.y)
+                    <= circle.radius * INNER_TEXT_RADIUS
+            })
+            .map(|letter| letter.value.clone())
+            .collect();
+        if let Some(rule) = rules.circle_rule(circle.radius / upm, &inner) {
+            port_circles.insert(circle.common.handle);
+            circle_class.get_or_insert_with(|| TagClass {
+                class: rule.class.clone(),
+                label: rule.label.clone(),
+                color: rule.color,
+            });
+        }
+    }
+    let tag_class = tag.and_then(|tag| class_for_tag(tag, rules));
+    let class = block_class
+        .or(circle_class)
+        .or(tag_class)
+        .unwrap_or_else(|| TagClass {
+            class: rules.manual_group.class.clone(),
+            label: rules.manual_group.label.clone(),
+            color: rules.manual_group.color,
+        });
+    (class, port_circles)
 }
 
 /// DXF keeps a GROUP's name on the ACAD_GROUP dictionary key but does not

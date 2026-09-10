@@ -2696,7 +2696,7 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                         .edit_buf
                         .remove(&crate::ui::properties::FieldKey::Geom(field))
                     {
-                        let val = if evaluates_expression {
+                        let val = if evaluates_expression && field != "pid_tag" {
                             crate::app::expr_eval::eval_to_string(&raw_val)
                         } else {
                             raw_val
@@ -2736,6 +2736,11 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                                     self.tabs[i].properties.prop_vertex_indicator_active = true;
                                 }
                             }
+                            self.refresh_properties();
+                            return Task::none();
+                        }
+                        if field == "pid_tag" {
+                            self.set_pid_group_tag_property(i, &handles, &val);
                             self.refresh_properties();
                             return Task::none();
                         }

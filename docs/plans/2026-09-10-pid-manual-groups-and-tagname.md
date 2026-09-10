@@ -1,7 +1,7 @@
 # P&ID 图纸识别 · 手动操作（移动 / 复制粘贴 / 组合 / 位号）开发计划（2026-09-10）
 
 > 日期：2026-09-10 晚
-> 状态：**Plannotator 批准**（2026-09-10 19:2x，`{"decision":"approved"}`，无批注）。带 ⭕ 的决策按推荐落笔、未经拍板；§5 八条待拍板按各自「推荐」执行，批注里划一笔即可翻案。**M0 + M1 + M2 + M3 已落地**（见各期「进度」）。
+> 状态：**Plannotator 批准**（2026-09-10 19:2x，`{"decision":"approved"}`，无批注）。带 ⭕ 的决策按推荐落笔、未经拍板；§5 八条待拍板按各自「推荐」执行，批注里划一笔即可翻案。**M0 + M1 + M2 + M3 + M4 已落地**（见各期「进度」）。
 > 前置：`docs/plans/2026-09-07-pid-legend-recognition.md`（D1–D19，识别内核三期）、
 > `docs/plans/2026-09-09-pid-legend-recognition-audit-and-next-steps.md`（D20–D29，W0–W4 已落地，W5 线号规则外置正在另一会话进行：工作树里 `src/io/pid_pipes.rs` / `assets/pid-legend.json` / `Cargo.toml` 有未提交改动）。
 > 语料：`D:\work\plant-code\cad\0版重新处理dxf-12张`（CPECC 石楼油库 12 张 DXF）。
@@ -114,6 +114,7 @@
 - 图例面板：手动组符号行尾加 `手` 角标（tooltip `手动组合 *A1 · 位号来源 自动/手动`）；`PidLegendFilter` 不加新档。
 - 新字串全部走 `t!`，en-US / zh-CN 两份 key 先建（其余 19 份跟 W9 的翻译批次）。
 - 出口：命令级测试——选成员、属性 `pid_tag` 设 `XV-0001` → 描述 manual、`PIDTAG XV-0001` 能找到；清空 → auto；撤销一步回到之前；面板行角标（`view` 的纯函数测试）。
+- **进度（2026-09-11 07:5x，会话 gpt-5.6-sol-13）✅ 已落地**。`manual_groups::group_details` 把有效位号、auto/manual 来源、DXF 字典组名和 M3 同一类别优先级收成一个轻量接口，特性面板不必整图重识别也不会复制规则。选中带标记组的任一成员后，现有 `P&ID` 段（含 `.pid` XDATA 时直接并存）新增可编辑 `位号 (tagName)`、只读来源 / 组 / 类型；多选同组只算一次，跨组逐字段聚合，相异值显示 `*VARIES*`。`PropGeomCommit("pid_tag")` 不走算式求值：空值或等于当前文字读值 → auto，其余 → manual；对所选成员触及的所有带标记组一次提交，包 `begin_group_undo` / `commit_group_undo`，图例已画时同一步重画。组描述变化现在推进 scene epoch；组对象撤销 / 重做把成员记作语义变更，保证已缓存的 P&ID 索引双向过期，`PIDTAG` 不会读到撤销前的位号；UNGROUP 同样显式推进 epoch。图例面板手动组行尾新增本地化 `M` / `手` 角标，tooltip 为 `Manual group *A1 · Tag source Automatic/Manual` / `手动组合 *A1 · 位号来源 自动/手动`；en-US / zh-CN 新增两条翻译。新增命令级测试覆盖单成员入口、类型/来源/组显示、manual → 清空 auto、PIDTAG、撤销/重做索引、跨两组 `*VARIES*` 与批量赋值；面板纯函数测试覆盖角标和来源提示。**验证**：`cargo check --lib --tests` 过；`cargo test --lib pid` **53 过 / 2 ignore**；`--test pid_legend` **26/26**；clippy 改动行零新增告警；12 张 `dxf_legend --verbose` 与 M0 基线 **12/12 逐字节相同**。
 
 ### M5 · 体验收尾（小，半天；可选）
 

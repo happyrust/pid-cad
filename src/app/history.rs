@@ -796,6 +796,7 @@ impl OpenCADStudio {
         // Install the chosen side of every entity image. Derived-cache, geometry
         // and UI invalidation are deferred until every requested undo/redo step
         // has been applied.
+        let mut object_members = Vec::new();
         if let Some(structure) = d.structure.as_mut() {
             match structure {
                 StructureSnapshot::Full(stored) => {
@@ -865,6 +866,20 @@ impl OpenCADStudio {
                     }
                 }
                 StructureSnapshot::Objects(entries) => {
+                    object_members.extend(entries.iter().flat_map(|entry| {
+                        entry
+                            .before
+                            .iter()
+                            .chain(&entry.after)
+                            .filter_map(|object| match object {
+                                acadrust::objects::ObjectType::Group(group) => {
+                                    Some(group.entities.as_slice())
+                                }
+                                _ => None,
+                            })
+                            .flatten()
+                            .copied()
+                    }));
                     for entry in entries {
                         let value = if undo {
                             entry.before.clone()
@@ -903,7 +918,15 @@ impl OpenCADStudio {
                 }
             }
         }
-        let changes = self.tabs[i].scene.apply_entity_delta(&d.entities, undo);
+        let mut changes = self.tabs[i].scene.apply_entity_delta(&d.entities, undo);
+        changes.extend(
+            object_members
+                .into_iter()
+                .filter(|handle| self.tabs[i].scene.document.get_entity(*handle).is_some())
+                .map(|handle| (handle, crate::scene::ChangeKind::Modified)),
+        );
+        changes.sort_by_key(|(handle, _)| handle.value());
+        changes.dedup_by_key(|(handle, _)| *handle);
         let scene = &mut self.tabs[i].scene;
         let (sel, dirty) = if undo {
             (&d.selected_before, d.dirty_before)
