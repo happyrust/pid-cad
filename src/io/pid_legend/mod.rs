@@ -32,6 +32,11 @@
 //! nearest-first would shift the whole column by one, leaving the top arm
 //! unnamed and the bottom tag an orphan.
 //!
+//! Lettering shorter than `tag_min_chars` (four characters unless the rules
+//! say otherwise) is never a tag, whichever way it would be read: the lone
+//! `S` or `K` inside a spray point says what the symbol is, not which one it
+//! is, and a symbol lettered so is not one that lost its tag.
+//!
 //! The result is drawn as real entities -- a closed polyline rectangle and a
 //! one-line label per symbol -- on one layer per class, `PID-LEGEND-<CLASS>`,
 //! whose colour is the class colour. Layers give on/off and recolouring for
@@ -508,7 +513,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
         if !rule.inner {
             continue;
         }
-        let tag = match &rule.shape {
+        let read = match &rule.shape {
             Some(shape) => symbol
                 .inner_text
                 .iter()
@@ -516,9 +521,19 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
                 .cloned(),
             None => inner_tag(&symbol.inner_text),
         };
-        if tag.is_some() {
-            symbol.tag = tag;
-            symbol.tag_distance_mm = Some(0.0);
+        match read {
+            Some(tag) if rules.accepts_tag(&tag) => {
+                symbol.tag = Some(tag);
+                symbol.tag_distance_mm = Some(0.0);
+            }
+            // Lettered, not tagged: what is inside is too short to be a tag
+            // (`S`, `K`), and an inner rule has nowhere else to look, so the
+            // symbol is not one that lost its tag.
+            Some(_) => {
+                symbol.wants_tag = false;
+                symbol.report_untagged = false;
+            }
+            None => {}
         }
     }
 
@@ -553,7 +568,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             }
         } else if let Some(shape) = &rule.shape {
             for (k, l) in lettering.iter().enumerate() {
-                if !taken_text[k] && shape_matches(shape, &l.value) {
+                if !taken_text[k] && rules.accepts_tag(&l.value) && shape_matches(shape, &l.value) {
                     let d = (l.at.0 - symbol.at.0).hypot(l.at.1 - symbol.at.1);
                     if d <= reach {
                         candidates.push((d, k, i));
@@ -601,7 +616,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
         .collect();
     let carried: HashSet<&str> = symbols.iter().filter_map(|s| s.tag.as_deref()).collect();
     for (k, l) in lettering.iter().enumerate() {
-        if taken_text[k] {
+        if taken_text[k] || !rules.accepts_tag(&l.value) {
             continue;
         }
         let expanded = expand_range(&l.value);

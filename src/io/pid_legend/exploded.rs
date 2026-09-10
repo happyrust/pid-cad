@@ -921,7 +921,10 @@ pub(super) fn exploded_symbols(
             continue;
         }
         for (k, l) in lettering.iter().enumerate() {
-            if taken_text[k] || !shape_matches(&rule.shape, &l.value) {
+            if taken_text[k]
+                || !rules.accepts_tag(&l.value)
+                || !shape_matches(&rule.shape, &l.value)
+            {
                 continue;
             }
             let at = (l.at.0 / upm, l.at.1 / upm);
@@ -1388,7 +1391,10 @@ fn recovered_symbols(
             continue;
         }
         for (k, l) in lettering.iter().enumerate() {
-            if taken_text[k] || !shape_matches(&rule.shape, &l.value) {
+            if taken_text[k]
+                || !rules.accepts_tag(&l.value)
+                || !shape_matches(&rule.shape, &l.value)
+            {
                 continue;
             }
             let at = (l.at.0 / upm, l.at.1 / upm);

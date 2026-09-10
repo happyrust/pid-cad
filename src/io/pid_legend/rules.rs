@@ -288,6 +288,10 @@ impl ShapeRules {
 pub struct Rules {
     /// Lettering within this distance of a symbol is a tag candidate.
     pub radius_mm: f64,
+    /// Lettering shorter than this many characters is never a tag, whatever
+    /// shape or inner rule would let it through: the lone `S` or `K` inside
+    /// a spray point says what the symbol is, not which one it is.
+    pub tag_min_chars: usize,
     /// Height of the label written above each rectangle.
     pub label_mm: f64,
     /// Margin between a symbol's box and its rectangle.
@@ -311,6 +315,7 @@ impl Default for Rules {
     fn default() -> Self {
         Rules {
             radius_mm: 15.0,
+            tag_min_chars: 4,
             label_mm: 1.3,
             pad_mm: 0.5,
             ignore_blocks: Vec::new(),
@@ -368,6 +373,12 @@ impl Rules {
         self.layer_prefixes
             .iter()
             .find(|r| layer.starts_with(&r.prefix))
+    }
+
+    /// Whether `value` is long enough to be a tag at all: `tag_min_chars`
+    /// characters, surrounding whitespace not counted.
+    pub fn accepts_tag(&self, value: &str) -> bool {
+        value.trim().chars().count() >= self.tag_min_chars
     }
 }
 
@@ -496,6 +507,26 @@ mod tests {
         assert!(rules.circle_rule(3.0, &[]).is_none());
         // Nor is a circle with a lone actuator letter a bubble.
         assert!(rules.circle_rule(2.94, &words(&["E", "H"])).is_none());
+    }
+
+    /// Four characters make a tag; the lone letter inside a spray point does
+    /// not, and the limit counts characters, not bytes.
+    #[test]
+    fn a_tag_is_at_least_four_characters() {
+        let rules = Rules::builtin();
+        assert_eq!(rules.tag_min_chars, 4);
+        for tag in ["XV-3201", "BUV-3101", "P-01", "接图 DWG-0100SP02-03"] {
+            assert!(rules.accepts_tag(tag), "{tag}");
+        }
+        for not in ["S", "K", " S ", "V-1", "S点", ""] {
+            assert!(!rules.accepts_tag(not), "{not:?}");
+        }
+        let lenient = Rules {
+            tag_min_chars: 1,
+            ..Rules::builtin()
+        };
+        assert!(lenient.accepts_tag("S"));
+        assert!(!lenient.accepts_tag(" "));
     }
 
     #[test]

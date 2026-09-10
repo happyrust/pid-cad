@@ -237,6 +237,68 @@ fn synthetic_sheet_is_recognised_and_tagged_one_to_one() {
     );
 }
 
+/// A spray point is a circle with a lone `S` or `K` inside. That letter says
+/// what the point is, not which one it is, and is not a tag: a tag has at
+/// least four characters. The point is still recognised, is not reported as
+/// one that lost its tag, and makes no plot group; a rules file that lowers
+/// the minimum gets the letter back.
+#[test]
+fn a_lone_letter_inside_a_spray_point_is_not_a_tag() {
+    let mut doc = synthetic_sheet();
+    doc.add_entity(circle(120.0, 40.0, 2.1)).unwrap();
+    doc.add_entity(text("S", 120.0, 40.0)).unwrap();
+    doc.add_entity(circle(130.0, 40.0, 2.1)).unwrap();
+    doc.add_entity(text("K", 130.0, 40.0)).unwrap();
+
+    let rules = Rules::builtin();
+    let recognition = pid_legend::recognise(&doc, &rules);
+    assert_eq!(count(&recognition, "s-point"), 2);
+    assert!(tags_of(&recognition, "s-point").is_empty());
+    let points: Vec<&pid_legend::Recognized> = recognition
+        .symbols
+        .iter()
+        .filter(|s| s.class == "s-point")
+        .collect();
+    assert!(
+        points
+            .iter()
+            .all(|s| !s.wants_tag && s.inner_text.len() == 1),
+        "lettered, not tagged"
+    );
+    assert!(
+        recognition.orphan_tags.is_empty(),
+        "{:?}",
+        recognition.orphan_tags
+    );
+    let lines = pid_legend::report(&recognition);
+    let line = lines
+        .iter()
+        .find(|l| l.contains("(s-point)"))
+        .expect("the points are reported");
+    assert!(
+        !line.contains("tagged") && !line.contains("UNTAGGED"),
+        "{line}"
+    );
+    assert!(pid_legend::plot_groups(&recognition)
+        .iter()
+        .all(|g| g.tag != "S" && g.tag != "K"));
+    // The rest of the sheet reads as before.
+    assert_eq!(tags_of(&recognition, "butterfly"), ["BUV-3101", "BUV-3102"]);
+    assert_eq!(tags_of(&recognition, "tank"), ["TD-0201"]);
+
+    let lenient = Rules {
+        tag_min_chars: 1,
+        ..Rules::builtin()
+    };
+    let recognition = pid_legend::recognise(&doc, &lenient);
+    assert_eq!(tags_of(&recognition, "s-point"), ["K", "S"]);
+    assert!(recognition
+        .symbols
+        .iter()
+        .filter(|s| s.class == "s-point")
+        .all(|s| s.wants_tag));
+}
+
 /// Unclaimed lettering with the shape of a tag is sorted, not lumped: a
 /// range annotation is checked member by member, a value a symbol already
 /// carries (a table row) is a duplicate, and only what is neither is an
