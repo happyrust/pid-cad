@@ -6,6 +6,7 @@
 pub mod file_association;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod edit_lock;
+pub(crate) mod dxf_style_typeface;
 pub mod obj;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pid;
@@ -716,6 +717,7 @@ async fn load_web_bytes(
     if name.to_ascii_lowercase().ends_with(".dxf") {
         fix_dxf_dimension_rotations(&mut doc);
         fix_dxf_layout_plot_settings(&mut doc);
+        dxf_style_typeface::fix_dxf_text_style_typefaces(&mut doc, std::io::Cursor::new(bytes));
     }
     fix_viewport_status_flags(&mut doc);
     fix_current_style_names(&mut doc);
@@ -763,12 +765,16 @@ pub fn load_bytes(name: &str, bytes: Vec<u8>) -> Result<CadDocument, String> {
             Ok(doc)
         }
         "dxf" => {
+            // The STYLE xdata scan needs the text the reader is about to
+            // consume; take it before the bytes move into the reader.
+            let style_typefaces = dxf_style_typeface::scan_style_typefaces(Cursor::new(&bytes[..]));
             let mut doc = DxfReader::from_reader(Cursor::new(bytes))
                 .map_err(|e| e.to_string())?
                 .read()
                 .map_err(|e| e.to_string())?;
             fix_dxf_dimension_rotations(&mut doc);
             fix_dxf_layout_plot_settings(&mut doc);
+            dxf_style_typeface::apply_style_typefaces(&mut doc, &style_typefaces);
             fix_viewport_status_flags(&mut doc);
             fix_current_style_names(&mut doc);
             Ok(doc)
@@ -1020,6 +1026,11 @@ fn finalize_loaded_outcome(
     if outcome.stats.source_format == Some(acadrust::SourceFormat::Dxf) {
         fix_dxf_dimension_rotations(doc);
         fix_dxf_layout_plot_settings(doc);
+        // Re-open the file for the STYLE table only; the reader has consumed
+        // its own stream and does not keep the xdata this needs.
+        if let Ok(file) = std::fs::File::open(path) {
+            dxf_style_typeface::fix_dxf_text_style_typefaces(doc, std::io::BufReader::new(file));
+        }
     }
     fix_viewport_status_flags(doc);
     fix_current_style_names(doc);
