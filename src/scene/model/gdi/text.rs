@@ -10,17 +10,15 @@ use super::{Dc, Font};
 use crate::scene::text::{sysfont, ttf_glyph};
 
 /// Per-face metrics needed to place metafile text: cap-height and ascent as
-/// fractions of the em. Falls back to typical Latin ratios when the face (or
-/// the whole family) is unavailable.
+/// fractions of the em. The cap height is the one `ttf_glyph` normalised the
+/// outlines to (the `A` top, AutoCAD's rule), so the 9-unit glyphs land at the
+/// em size the LOGFONT asked for. Falls back to typical Latin ratios when the
+/// face (or the whole family) is unavailable.
 fn face_ratios(family: &str) -> (f32, f32) {
     sysfont::with_face_data(family, |data, index| {
         let face = ttf_parser::Face::parse(data, index).ok()?;
         let upem = face.units_per_em() as f32;
-        let cap = face
-            .capital_height()
-            .filter(|&c| c > 0)
-            .map(|c| c as f32 / upem)
-            .unwrap_or(0.7);
+        let cap = ttf_glyph::cap_height_units(&face) / upem;
         let asc = face.ascender() as f32 / upem;
         Some((cap, asc.max(0.5)))
     })

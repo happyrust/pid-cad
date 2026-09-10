@@ -176,16 +176,37 @@ pub fn glyph(family: &str, ch: char) -> Option<Arc<Glyph>> {
     built
 }
 
-/// Font-unit → 9-unit-cap-height factor for a parsed face. Cap height comes
-/// from the OS/2 table; absent, we approximate it as 0.7 × units-per-em.
+/// Font-unit → 9-unit-cap-height factor for a parsed face.
 fn cap_scale(face: &ttf_parser::Face) -> f32 {
+    CAP_UNITS / cap_height_units(face)
+}
+
+/// The font-unit height that one text height covers for a TrueType face —
+/// AutoCAD's rule, not the OS/2 table's.
+///
+/// AutoCAD scales a TrueType style so that the capital **`A`** — the top of
+/// its outline, apex included — stands exactly one text height tall. The OS/2
+/// `sCapHeight` (the flat top of `H`) is *not* what it reads, and the two
+/// differ by a few percent on CJK faces. Measured on the WS02-05 sheet, whose
+/// notes are split into one TEXT per run: the insertion points sit 1.14414 h
+/// apart per full-width SimSun glyph at width factor 0.8, i.e. an em of
+/// 256/179 h to five digits — and 179 is the `A` top in simsun.ttc, where
+/// `sCapHeight` is 175 (`H`/`X` top) and `0` tops out at 177. Normalising to
+/// `sCapHeight` drew that sheet's CJK runs 2.3 % too wide, so the Latin run
+/// that follows each of them started under its last glyph.
+///
+/// A face with no `A` outline (symbol or CJK-only) falls back to
+/// `sCapHeight`, and one without that to 0.7 em.
+pub(crate) fn cap_height_units(face: &ttf_parser::Face) -> f32 {
     let upem = face.units_per_em() as f32;
-    let cap = face
-        .capital_height()
-        .filter(|&c| c > 0)
-        .map(|c| c as f32)
-        .unwrap_or(0.7 * upem);
-    CAP_UNITS / cap
+    let a_top = face
+        .glyph_index('A')
+        .and_then(|gid| face.glyph_bounding_box(gid))
+        .map(|bbox| bbox.y_max as f32)
+        .filter(|&top| top > 0.0);
+    a_top
+        .or_else(|| face.capital_height().filter(|&c| c > 0).map(|c| c as f32))
+        .unwrap_or(0.7 * upem)
 }
 
 fn triangulate_contours(contours: &[Vec<[f32; 2]>]) -> Vec<[f32; 2]> {
@@ -429,11 +450,7 @@ fn build_shaped(_family: &str, text: &str) -> Option<ShapedRun> {
 
     let primary_face = ttf_parser::Face::parse(&fonts[0], 0).ok()?;
     let upem = primary_face.units_per_em() as f32;
-    let cap = primary_face
-        .capital_height()
-        .filter(|height| *height > 0)
-        .map(|height| height as f32)
-        .unwrap_or(0.7 * upem);
+    let cap = cap_height_units(&primary_face);
     let px_to_9 = CAP_UNITS * upem / (SHAPE_FS * cap);
 
     let mut database = fontdb::Database::new();
@@ -504,13 +521,7 @@ fn build_shaped(family: &str, text: &str) -> Option<ShapedRun> {
     // scaled into the same pixel-per-unit so sizes stay consistent.
     let (upem_p, cap_p) = sysfont::with_face_data(family, |data, idx| {
         let f = ttf_parser::Face::parse(data, idx).ok()?;
-        let upem = f.units_per_em() as f32;
-        let cap = f
-            .capital_height()
-            .filter(|&c| c > 0)
-            .map(|c| c as f32)
-            .unwrap_or(0.7 * upem);
-        Some((upem, cap))
+        Some((f.units_per_em() as f32, cap_height_units(&f)))
     })
     .flatten()?;
     // Pixel (at SHAPE_FS) → 9-unit cap-height factor.
@@ -618,6 +629,40 @@ mod tests {
             .filter_map(|g| g.strokes.iter().flatten().map(|p| p[0]).fold(None, |m,x| Some(m.map_or(x, |mm:f32| mm.min(x)))))
             .collect();
         assert!(xs.windows(2).all(|w| w[1] >= w[0] - 1.0), "glyphs not L->R: {:?}", xs);
+    }
+
+    /// The text height covers the `A` top, not `sCapHeight`: on simsun.ttc
+    /// those are 179 and 175 of 256 — the 2.3 % that put WS02-05's Latin runs
+    /// under the CJK glyph before them. Also pins the `A` outline of any face
+    /// as exactly 9 units tall once scaled.
+    #[test]
+    fn cap_height_is_the_a_top() {
+        let checked = sysfont::with_face_data("SimSun", |data, idx| {
+            let face = ttf_parser::Face::parse(data, idx).ok()?;
+            Some((face.units_per_em(), cap_height_units(&face), face.capital_height()))
+        })
+        .flatten();
+        match checked {
+            Some((upem, cap, os2)) => {
+                assert_eq!(upem, 256);
+                assert_eq!(cap, 179.0, "SimSun `A` top");
+                assert_eq!(os2, Some(175), "SimSun sCapHeight, which is not it");
+            }
+            None => eprintln!("SimSun not installed; skipping the known-value check"),
+        }
+        let fams = sysfont::families();
+        let Some(fam) = fams.iter().find(|f| glyph(f, 'A').is_some()) else {
+            eprintln!("no family with an `A`; skipping");
+            return;
+        };
+        let a = glyph(fam, 'A').expect("A");
+        let top = a
+            .strokes
+            .iter()
+            .flatten()
+            .map(|p| p[1])
+            .fold(f32::MIN, f32::max);
+        assert!((top - CAP_UNITS).abs() < 0.05, "{fam}: `A` top {top} should be {CAP_UNITS}");
     }
 
     #[test]
