@@ -74,8 +74,8 @@ librsvg column is the same library reached through libvips.
   --plot-svg <DXF> <out> --model --paper A1 --landscape --fit --force`),
   archived 2026-09-10 so the sheets the `real-sheets-*.tsv` rows and
   `real-*-4up.png` crops describe stay in the tree after `%TEMP%` is cleared.
-  **FF02-06 is the 2026-09-10 export from `972dc351`; SP02-05 and WS02-05
-  are the one from `59c96574`, which the later commit leaves byte-identical;
+  **FF02-06 and SP02-05 are the 2026-09-10 export from `47e5a49e`; WS02-05
+  is the one from `59c96574`, which the later commits leave byte-identical;
   none is the 09-09 run's bytes.** Four commits landed between the 09-09
   run and `59c96574`. Two text fixes — `3e305477` (a
   DXF STYLE whose TrueType typeface lives only in `ACAD` xdata now resolves
@@ -112,12 +112,21 @@ librsvg column is the same library reached through libvips.
   24 px differ by one level; SP02-05: 16 px, where a sheet connector's
   arrow and the red match line changed order, because a group's items are
   drawn together where the first of them falls in the depth order); the
-  other two engines were not re-run. The renderings and TSVs in this folder were made
+  other two engines were not re-run. Then `47e5a49e`: **the headless open
+  builds the scene's derived caches**, which is where a plot takes its
+  fills from, so the top-level HATCH and SOLID entities of a sheet — in the
+  document, and in the editor's EXPORTSVG, but in no `--plot-svg` export
+  before — are on the page: FF02-06 gains its 20 spray-point squares
+  (`PIPE-消防`, ACI 3, 49.6 units a side, two per point, where the editor's
+  export puts them), SP02-05 10 white SOLID triangles; groups and strokes
+  are unchanged, and WS02-05 has no such entity and is byte-identical
+  still. The renderings and TSVs in this folder were made
   from the 09-09 export and were not re-run; the per-engine comparison is
   about strokes and fills, which none of the four commits touches, but the
-  text areas in the `*-4up.png` crops show the old glyphs. Sizes:
-  3,169,752 / 7,798,659 / 1,825,077 bytes (gzip ≈ 1.1 / 2.3 / 0.6 MB),
-  SHA-256 `E9763000…` / `D664D7C9…` / `097AE6E5…`, LF line endings so
+  text areas in the `*-4up.png` crops show the old glyphs and the
+  spray-point squares are not in them. Sizes:
+  3,172,448 / 7,800,514 / 1,825,077 bytes (gzip ≈ 1.1 / 2.3 / 0.6 MB),
+  SHA-256 `AB1AF418…` / `B40DE305…` / `097AE6E5…`, LF line endings so
   `eol=lf` leaves them alone. The 22 corpus pages are not archived:
   `cargo test --lib dump_the_corpus_for_a_human -- --ignored` regenerates
   them from the tree.
