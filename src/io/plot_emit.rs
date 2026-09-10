@@ -1464,6 +1464,12 @@ fn emit_hatch<S: PlotSink>(
     // would vanish white-on-white on paper. Force near-white/near-yellow → black
     // and near-cyan → dark blue for a readable white-sheet result.
     // Genuine colours are untouched; WIPEOUTS keep their paper-white mask.
+    // An ACI-7 solid fill is no exception (it was one from 2026-08-01 to
+    // 2026-09-10, upstream #618 "match the viewport"): colour 7 is the
+    // foreground colour, white on the dark screen and black on paper, as
+    // AutoCAD plots it -- the CPECC sheets' pipe-junction dots and valve
+    // actuator blocks are ByLayer on colour-7 layers and came out as white
+    // holes. A drawing that wants a paper-white mask draws a WIPEOUT.
     let is_wipeout = hatch.name == "WIPEOUT_FILL";
     let mut screening = 1.0;
     let mut lw_override = None;
@@ -1490,8 +1496,7 @@ fn emit_hatch<S: PlotSink>(
         r = 1.0;
         g = 1.0;
         b = 1.0;
-    } else if !color_overridden && !(hatch.aci == 7 && matches!(hatch.pattern, HatchPattern::Solid))
-    {
+    } else if !color_overridden {
         let is_light = r > 0.80 && g > 0.80 && b > 0.80;
         let is_yellow = r > 0.80 && g > 0.70 && b < 0.30;
         let is_cyan = r < 0.30 && g > 0.70 && b > 0.70;
@@ -2159,5 +2164,58 @@ mod tests {
         let (at, fill) = mesh_and_fill(&ops);
         assert_eq!(fill, [0.0, 0.0, 0.0]);
         assert!(matches!(ops[at - 1], PlotOp::FillColor(_)), "{:?}", ops[at - 1]);
+    }
+
+    /// The fill colour in force at each solid `Fill` on the page, in order.
+    fn fill_colours(ops: &[PlotOp]) -> Vec<[f32; 3]> {
+        let mut current = None;
+        let mut out = Vec::new();
+        for op in ops {
+            match op {
+                PlotOp::FillColor(c) => current = Some(*c),
+                PlotOp::Fill { .. } => out.push(current.expect("a fill colour before the fill")),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Colour 7 is the foreground colour: white on the dark screen, black on
+    /// paper, as AutoCAD plots it. A solid hatch that is ACI 7 -- its own
+    /// colour or ByLayer on a colour-7 layer, the CPECC sheets' pipe-junction
+    /// dots -- therefore fills black on the sheet like any other light fill;
+    /// only a WIPEOUT masks with the paper's white.
+    #[test]
+    fn an_aci_7_solid_fill_plots_black_and_only_a_wipeout_stays_white() {
+        use crate::io::plot_corpus::{hatch, square};
+        let mut case = Case::new("aci7");
+        let mut dot = hatch(
+            "SOLID",
+            square(10.0, 10.0, 5.0),
+            HatchPattern::Solid,
+            [1.0, 1.0, 1.0, 1.0],
+        );
+        dot.aci = 7;
+        case.hatches.push(dot);
+        let mut mask = hatch(
+            "WIPEOUT_FILL",
+            square(30.0, 10.0, 5.0),
+            HatchPattern::Solid,
+            [1.0, 1.0, 1.0, 1.0],
+        );
+        mask.aci = 7;
+        case.hatches.push(mask);
+        case.hatches.push(hatch(
+            "SOLID",
+            square(50.0, 10.0, 5.0),
+            HatchPattern::Solid,
+            [1.0, 0.0, 0.0, 1.0],
+        ));
+        let fills = fill_colours(&ops_for(&case));
+        assert_eq!(
+            fills,
+            [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [1.0, 0.0, 0.0]],
+            "ACI-7 dot black, wipeout white, a genuine colour untouched"
+        );
     }
 }

@@ -855,8 +855,12 @@ fn emit_hatch(
         r = 1.0;
         g = 1.0;
         b = 1.0;
-    } else if !color_overridden && !(hatch.aci == 7 && matches!(hatch.pattern, HatchPattern::Solid))
-    {
+    } else if !color_overridden {
+        // The second deliberate change since the freeze (2026-09-10): an
+        // ACI-7 solid fill is no longer exempt from the light-to-black
+        // adaptation -- colour 7 plots black on paper, as in AutoCAD. The
+        // original excluded `hatch.aci == 7 && Solid` here (upstream #618).
+        // Changed in the same commit as the shared emitter, per the header.
         let is_light = r > 0.80 && g > 0.80 && b > 0.80;
         let is_yellow = r > 0.80 && g > 0.70 && b < 0.30;
         let is_cyan = r < 0.30 && g > 0.70 && b > 0.70;

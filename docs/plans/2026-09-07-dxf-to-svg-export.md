@@ -514,7 +514,9 @@ wipeout 顺序等故障，证明判据真能检出。**阈值必须同时「不�
 
 - `emitter_through_pdf_sink_matches_the_frozen_exporter_op_for_op`：22 个用例（四种旋转 + 比例 + 偏移 + 裁剪；
   普通 / 超六项 / stationed 正反向虚线；三种笔宽选项组合 + 宽多段线；颜色适配 + 透明；视口点阵圆点；
-  wire 填充 + 低位残差；solid / pattern / gradient / 岛 / ACI-7 白 / wipeout / 退化环 / UTM 量级 `world_origin`；
+  wire 填充 + 低位残差；solid / pattern / gradient / 岛 / ACI-7 实心（2026-09-10 起纸面打黑：颜色 7 是前景色，
+  屏上白、纸上黑，与 AutoCAD 一致；此前按上游 #618「跟视口一致」保持白，CPECC 图上 29 处管线交点实心圆与阀执行
+  机构方块因此在纸上成了白洞，冻结参照 `legacy_reference.rs` 同一提交同步改）/ wipeout / 退化环 / UTM 量级 `world_origin`；
   CTB 颜色 / 笔 / 加网 / cap-join / 灰度策略 / fill_style 转 pattern；图集文字 + 缺 key + 装饰条；
   两个 render group 交叉深度 + 越界 split + merge_lines + stamp；空页），旧 emitter 与新
   `PdfSink` 的 `Op` 流**逐 op、逐位**相同。**比较不能用 printpdf 自带的 `PartialEq`**：它的 `Pt::eq`

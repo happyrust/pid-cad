@@ -400,7 +400,8 @@ pub fn corpus() -> Vec<Case> {
     cases.push(c);
 
     // Hatches: solid, pattern, gradient; a multi-ring boundary (island);
-    // an ACI-7 solid that must stay white; a wipeout; degenerate rings.
+    // an ACI-7 solid that plots black on paper like any light fill (it was
+    // kept white until 2026-09-10); a wipeout; degenerate rings.
     let mut c = Case::new("hatches");
     c.hatches.push(hatch(
         "SOLID",
