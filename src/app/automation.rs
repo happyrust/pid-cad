@@ -63,7 +63,8 @@ pub fn export_headless(input: &std::path::Path, output: &std::path::Path) -> i32
 /// reaches the same state through the dialog.
 #[cfg(not(target_arch = "wasm32"))]
 impl OpenCADStudio {
-    /// Load `path` into the active tab, as the `open` operation does.
+    /// Load `path` into the active tab; the `open` operation of the JSON
+    /// server goes through here too.
     pub(crate) fn open_drawing_headless(&mut self, path: &std::path::Path) -> Result<(), String> {
         let bytes = self.read_drawing(path).map_err(|e| e.to_string())?;
         let name = path
@@ -78,7 +79,14 @@ impl OpenCADStudio {
         self.tabs[i].adopt_active_ucs_from_header();
         self.tabs[i].current_path = Some(PathBuf::from(path));
         self.tabs[i].is_start = false;
-        self.tabs[i].scene.bump_geometry();
+        // The wires are laid out lazily from the document, but the fills are
+        // not: a plot takes its hatches, solids and images from the scene's
+        // derived caches, which the editor builds on its loader thread when
+        // it opens a file. Build them here as well, or every top-level HATCH
+        // and SOLID of the drawing is in the document and off the page (the
+        // ones inside a block come through the instanced path regardless).
+        // This bumps the geometry epoch too.
+        self.tabs[i].scene.rebuild_derived_caches();
         Ok(())
     }
 
@@ -933,28 +941,8 @@ impl OpenCADStudio {
                 let Some(path) = req["path"].as_str() else {
                     return err("open: missing \"path\"");
                 };
-                let bytes = match self.read_drawing(std::path::Path::new(path)) {
-                    Ok(b) => b,
-                    Err(e) => return err(format!("open: {e}")),
-                };
-                let name = PathBuf::from(path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.to_string());
-                match crate::io::load_bytes(&name, bytes) {
-                    Ok(doc) => {
-                        let i = self.active_tab;
-                        self.tabs[i].scene.document = doc;
-                        self.tabs[i].scene.deselect_all();
-                        crate::app::style_ops::ensure_standard_styles(
-                            &mut self.tabs[i].scene.document,
-                        );
-                        self.tabs[i].adopt_active_ucs_from_header();
-                        self.tabs[i].current_path = Some(PathBuf::from(path));
-                        self.tabs[i].is_start = false;
-                        self.tabs[i].scene.bump_geometry();
-                        self.entity_summary()
-                    }
+                match self.open_drawing_headless(std::path::Path::new(path)) {
+                    Ok(()) => self.entity_summary(),
                     Err(e) => err(format!("open: {e}")),
                 }
             }
@@ -1402,6 +1390,52 @@ mod tests {
         (dir, path)
     }
 
+    /// The unlabelled fixture with one solid HATCH in model space: a green
+    /// (ACI 3) 20 × 20 square at (30, 10), the one fill on the page.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn drawing_with_hatch(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        use acadrust::entities::hatch::{
+            BoundaryEdge, BoundaryPath, BoundaryPathFlags, PolylineEdge,
+        };
+        use acadrust::types::Vector2;
+
+        let dir = std::env::temp_dir().join(format!("ocs-plot-svg-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("drawing.dxf");
+
+        let mut app = OpenCADStudio::new_for_test();
+        assert_eq!(app.automation_op(r#"{"op":"new"}"#)["ok"], true);
+        assert_eq!(
+            app.automation_op(r#"{"op":"run","cmd":"LINE 0,0 100,0 100,60 0,60 0,0"}"#)["ok"],
+            true
+        );
+        let mut hatch = acadrust::entities::Hatch::new();
+        hatch.common.color = acadrust::types::Color::Index(3);
+        let mut boundary = BoundaryPath::with_flags(BoundaryPathFlags::from_bits(
+            BoundaryPathFlags::EXTERNAL.bits() | BoundaryPathFlags::OUTERMOST.bits(),
+        ));
+        boundary.add_edge(BoundaryEdge::Polyline(PolylineEdge::new(
+            vec![
+                Vector2::new(30.0, 10.0),
+                Vector2::new(50.0, 10.0),
+                Vector2::new(50.0, 30.0),
+                Vector2::new(30.0, 30.0),
+            ],
+            true,
+        )));
+        hatch.paths.push(boundary);
+        app.tabs[app.active_tab]
+            .scene
+            .add_entity(acadrust::EntityType::Hatch(hatch));
+        let save = format!(
+            r#"{{"op":"save","path":{}}}"#,
+            serde_json::to_string(&path.to_string_lossy()).unwrap()
+        );
+        assert_eq!(app.automation_op(&save)["ok"], true, "saved the fixture");
+        (dir, path)
+    }
+
     // The headless entry point end to end: open a drawing with no window in
     // sight, resolve the page through the same `resolve_plot_job` the GUI
     // export uses, and write an SVG that parses.
@@ -1455,6 +1489,87 @@ mod tests {
         let _ = std::fs::remove_dir_all(&bare_dir);
         resvg::usvg::Tree::from_str(&text, &resvg::usvg::Options::default())
             .expect("the written file is a valid SVG");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The fills too. A plot takes its hatches, solids and images from the
+    // scene's derived caches, which the editor builds when it opens a file
+    // and the headless open did not build at all — so every top-level HATCH
+    // and SOLID of a drawing was in the document and off the page (the
+    // twenty spray-point squares of FF02-06, missing from every --plot-svg
+    // export), while one inside a block came through the instanced path.
+    // The one fill on this page is the hatch, in the hatch's own colour, the
+    // same shape the editor's EXPORTSVG writes for it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_headless_plot_carries_the_drawings_top_level_fills() {
+        let (dir, drawing) = drawing_with_hatch("hatch");
+        let out = dir.join("plot.svg");
+        let mut app = OpenCADStudio::new_for_test();
+        let batch = super::plot_svg_with(&mut app, &drawing, &out, &model_on_a3())
+            .expect("a drawing with a hatch plots")
+            .batch;
+        assert_eq!(batch.pages.len(), 1);
+        let text = std::fs::read_to_string(&out).unwrap();
+        let fills = text.matches("<path stroke=\"none\"").count();
+        assert_eq!(fills, 1, "the hatch is the page's one fill; found {fills}");
+        assert!(
+            text.contains("fill=\"#00ff00\""),
+            "the fill is in the hatch's colour (ACI 3)"
+        );
+        // And it is the square, where the drawing has it. The fit decides the
+        // scale, so the fill is measured against the drawing's frame: a fifth
+        // of its width, a third of its height. (The paper's white rectangle is
+        // a fill too once usvg has parsed it; the hatch is told by its colour.)
+        let tree = resvg::usvg::Tree::from_str(&text, &resvg::usvg::Options::default())
+            .expect("the written file is a valid SVG");
+        let mut green: Vec<resvg::tiny_skia::Rect> = Vec::new();
+        let mut stroked: Vec<resvg::tiny_skia::Rect> = Vec::new();
+        fn walk(
+            group: &resvg::usvg::Group,
+            green: &mut Vec<resvg::tiny_skia::Rect>,
+            stroked: &mut Vec<resvg::tiny_skia::Rect>,
+        ) {
+            for node in group.children() {
+                match node {
+                    resvg::usvg::Node::Group(g) => walk(g, green, stroked),
+                    resvg::usvg::Node::Path(p) => match (p.fill(), p.stroke()) {
+                        (Some(fill), _) => {
+                            if let resvg::usvg::Paint::Color(c) = fill.paint() {
+                                if (c.red, c.green, c.blue) == (0, 255, 0) {
+                                    green.push(p.abs_bounding_box());
+                                }
+                            }
+                        }
+                        (None, Some(_)) => stroked.push(p.abs_bounding_box()),
+                        (None, None) => {}
+                    },
+                    _ => {}
+                }
+            }
+        }
+        walk(tree.root(), &mut green, &mut stroked);
+        assert_eq!(green.len(), 1, "one green fill in the parsed tree");
+        let frame = stroked
+            .iter()
+            .fold(None::<resvg::tiny_skia::Rect>, |acc, r| match acc {
+                None => Some(*r),
+                Some(a) => resvg::tiny_skia::Rect::from_ltrb(
+                    a.left().min(r.left()),
+                    a.top().min(r.top()),
+                    a.right().max(r.right()),
+                    a.bottom().max(r.bottom()),
+                ),
+            })
+            .expect("the frame is stroked");
+        let fill = green[0];
+        assert!(
+            (fill.width() / frame.width() - 0.2).abs() < 0.02
+                && (fill.height() / frame.height() - 1.0 / 3.0).abs() < 0.02,
+            "the fill is the 20 × 20 square of the 100 × 60 drawing: fill {:?} in frame {:?}",
+            fill,
+            frame
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
