@@ -1031,18 +1031,34 @@ fn emit_wire_fills<S: PlotSink>(
             continue;
         }
         let mut screening = 1.0;
-        let mut color_overridden = false;
-        if let Some(table) = plot_style {
-            if wire.aci > 0 {
-                if let Some(color) = table.resolve_color(wire.aci) {
-                    [r, g, b] = color;
-                    color_overridden = true;
+        // An MTEXT background mask set to "use the drawing window colour"
+        // (fill flag 0x02) reaches the plot in the screen's canvas colour —
+        // that is what the cache's `canvas_color` records — and on paper the
+        // window colour is the sheet. AutoCAD masks it with paper white, so
+        // this does too, outside the CTB and the adaptation below: a dark
+        // canvas colour would otherwise print as it is, and a light one would
+        // be adapted to black — either way a black box behind the glyphs
+        // (SP02-05's material table, the `个` cell).
+        let paints_canvas = wire
+            .bg_adapt
+            .as_deref()
+            .is_some_and(|adapt| adapt.canvas_color);
+        if paints_canvas {
+            [r, g, b] = [1.0, 1.0, 1.0];
+        } else {
+            let mut color_overridden = false;
+            if let Some(table) = plot_style {
+                if wire.aci > 0 {
+                    if let Some(color) = table.resolve_color(wire.aci) {
+                        [r, g, b] = color;
+                        color_overridden = true;
+                    }
+                    screening = table.resolve_screening(wire.aci);
                 }
-                screening = table.resolve_screening(wire.aci);
             }
-        }
-        if !color_overridden {
-            [r, g, b] = adapt_text_color([r, g, b]);
+            if !color_overridden {
+                [r, g, b] = adapt_text_color([r, g, b]);
+            }
         }
         [r, g, b] = plotted_color([r, g, b], a, screening, options);
         sink.emit(PlotOp::FillColor([r, g, b]))?;
@@ -1060,7 +1076,18 @@ fn emit_wire_fills<S: PlotSink>(
             tris.push(points);
         }
         if !tris.is_empty() {
+            // Under `merge_lines` the page multiplies ink, and white times
+            // anything is that thing: a mask would hide nothing. Paint it in
+            // Normal like a wipeout does.
+            let mask_under_multiply = paints_canvas && normal_blend;
+            if mask_under_multiply {
+                sink.emit(PlotOp::Save)?;
+                sink.emit(PlotOp::Blend(PlotBlend::Normal))?;
+            }
             sink.emit(PlotOp::FillMesh { tris })?;
+            if mask_under_multiply {
+                sink.emit(PlotOp::Restore)?;
+            }
         }
     }
     Ok(())
@@ -1526,4 +1553,113 @@ fn emit_text<S: PlotSink>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::plot_corpus::Case;
+    use crate::io::plot_types::PlotWire;
+    use crate::scene::model::wire_model::BgAdaptInputs;
+    use crate::scene::WireModel;
+
+    /// The fill-only wire the cache builds for an MTEXT background mask on
+    /// "drawing window colour": its colour is the canvas, and `canvas_color`
+    /// records that it is.
+    fn canvas_mask(canvas: [f32; 4]) -> PlotWire {
+        let mut wire = WireModel::solid("mask".into(), Vec::new(), canvas, false);
+        wire.fill_tris = vec![[10.0, 10.0, 0.0], [60.0, 10.0, 0.0], [60.0, 30.0, 0.0]];
+        wire.bg_adapt = Some(Box::new(BgAdaptInputs {
+            raw_color: canvas,
+            canvas_color: true,
+            ..Default::default()
+        }));
+        PlotWire {
+            wire,
+            draw_depth: 0.0,
+        }
+    }
+
+    fn ops_for(case: &Case) -> Vec<PlotOp> {
+        let mut sink = RecordingSink::default();
+        match emit_plot_content(&case.page(), &PlotAssets::default(), &mut sink) {
+            Ok(_) => {}
+            Err(never) => match never {},
+        }
+        sink.ops
+    }
+
+    /// Index of the one mesh on the page and the fill colour in force there.
+    fn mesh_and_fill(ops: &[PlotOp]) -> (usize, [f32; 3]) {
+        let at = ops
+            .iter()
+            .position(|op| matches!(op, PlotOp::FillMesh { .. }))
+            .expect("the mask's mesh");
+        let fill = ops[..at]
+            .iter()
+            .rev()
+            .find_map(|op| match op {
+                PlotOp::FillColor(c) => Some(*c),
+                _ => None,
+            })
+            .expect("a fill colour before the mesh");
+        (at, fill)
+    }
+
+    /// A dark canvas used to print as it was — a black box behind the glyphs
+    /// (SP02-05's material table). On paper the window colour is the sheet.
+    #[test]
+    fn mtext_canvas_mask_plots_paper_white() {
+        let mut case = Case::new("mask");
+        case.wires.push(canvas_mask([0.13, 0.13, 0.13, 1.0]));
+        let ops = ops_for(&case);
+        let (at, fill) = mesh_and_fill(&ops);
+        assert_eq!(fill, [1.0, 1.0, 1.0]);
+        // Nothing to switch out of without merge_lines: the colour is set and
+        // the mesh follows, no blend switch between them.
+        assert!(matches!(ops[at - 1], PlotOp::FillColor(_)), "{:?}", ops[at - 1]);
+    }
+
+    /// A light canvas would otherwise go through the light-to-dark adaptation
+    /// and come out black just the same.
+    #[test]
+    fn mtext_canvas_mask_is_not_adapted_to_black() {
+        let mut case = Case::new("mask-light");
+        case.wires.push(canvas_mask([0.96, 0.96, 0.96, 1.0]));
+        let (_, fill) = mesh_and_fill(&ops_for(&case));
+        assert_eq!(fill, [1.0, 1.0, 1.0]);
+    }
+
+    /// Under `merge_lines` the page multiplies; white times ink is ink, so the
+    /// mask paints in Normal for its own fill, as a wipeout does.
+    #[test]
+    fn mtext_canvas_mask_paints_normal_under_merge_lines() {
+        let mut case = Case::new("mask-merge");
+        case.options.merge_lines = true;
+        case.wires.push(canvas_mask([0.13, 0.13, 0.13, 1.0]));
+        let ops = ops_for(&case);
+        let (at, fill) = mesh_and_fill(&ops);
+        assert_eq!(fill, [1.0, 1.0, 1.0]);
+        assert_eq!(ops[at - 2], PlotOp::Save);
+        assert_eq!(ops[at - 1], PlotOp::Blend(PlotBlend::Normal));
+        assert_eq!(ops[at + 1], PlotOp::Restore);
+    }
+
+    /// The rule is keyed on `canvas_color`, not on the colour: an ordinary
+    /// light fill still adapts to black, and is not wrapped in a blend switch.
+    #[test]
+    fn an_ordinary_light_fill_still_adapts_to_black() {
+        let mut case = Case::new("fill");
+        case.options.merge_lines = true;
+        let mut wire = WireModel::solid("fill".into(), Vec::new(), [0.96, 0.96, 0.96, 1.0], false);
+        wire.fill_tris = vec![[10.0, 10.0, 0.0], [60.0, 10.0, 0.0], [60.0, 30.0, 0.0]];
+        case.wires.push(PlotWire {
+            wire,
+            draw_depth: 0.0,
+        });
+        let ops = ops_for(&case);
+        let (at, fill) = mesh_and_fill(&ops);
+        assert_eq!(fill, [0.0, 0.0, 0.0]);
+        assert!(matches!(ops[at - 1], PlotOp::FillColor(_)), "{:?}", ops[at - 1]);
+    }
 }

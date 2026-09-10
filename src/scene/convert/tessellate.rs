@@ -1182,7 +1182,15 @@ pub fn tessellate(
                                 );
                                 // Fill / mask — two triangles behind the glyphs.
                                 if has_fill {
-                                    let fill_color = if m.background_fill_flags & 0x02 != 0 {
+                                    // Flag 0x02: "use the drawing window colour". The
+                                    // fill *is* the canvas, so say so the way
+                                    // `block_cache` does for a block's MTEXT
+                                    // (`canvas_color`): the display re-resolves it
+                                    // to whatever the background becomes, and the
+                                    // plot paints it paper white instead of the
+                                    // canvas colour it was tessellated under.
+                                    let paints_canvas = m.background_fill_flags & 0x02 != 0;
+                                    let fill_color = if paints_canvas {
                                         bg_color
                                     } else {
                                         color_or_inherit(&m.background_color, bg_color)
@@ -1201,7 +1209,15 @@ pub fn tessellate(
                                         }
                                     }
                                     wires.push(WireModel {
-                                        bg_adapt: None,
+                                        bg_adapt: paints_canvas.then(|| {
+                                            Box::new(crate::scene::model::wire_model::BgAdaptInputs {
+                                                raw_color: fill_color,
+                                                text_raw_colors: Vec::new(),
+                                                contrast_bg: None,
+                                                canvas_color: true,
+                                                preserve_color: true,
+                                            })
+                                        }),
                                         point_marker: None,
                                         taper_widths: Vec::new(),
                                         pattern_stations: Vec::new(),
