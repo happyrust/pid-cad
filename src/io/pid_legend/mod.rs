@@ -77,8 +77,8 @@ pub use rules::{
     PanelBubbleRule, PortRule, Rules, ShapeRules, TagClassRule, TagRule, IGNORE_CLASS,
 };
 pub use tags::{
-    class_for_tag, derive_group_tag, tag_from_lettering, GroupTag, TagClass, TagHow, TagRead,
-    TagSource, TAG_NAME_KEY, TAG_SOURCE_KEY,
+    class_for_tag, derive_group_tag, derive_handles_tag, tag_from_lettering, GroupTag, TagClass,
+    TagHow, TagRead, TagSource, TAG_NAME_KEY, TAG_SOURCE_KEY,
 };
 
 use std::collections::{BTreeMap, HashSet};

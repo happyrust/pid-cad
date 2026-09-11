@@ -293,23 +293,6 @@ fn key_value(piece: &str) -> Option<(&str, &str)> {
     Some((key.trim(), value.trim()))
 }
 
-/// The lettering among `group`'s members, in reading order: top to bottom,
-/// left to right.
-pub(super) fn group_lettering(doc: &CadDocument, group: &Group) -> Vec<Lettering> {
-    let mut out: Vec<Lettering> = group
-        .entities
-        .iter()
-        .filter_map(|handle| doc.get_entity(*handle))
-        .filter_map(lettering_value)
-        .collect();
-    out.sort_by(|a, b| {
-        b.at.1
-            .total_cmp(&a.at.1)
-            .then_with(|| a.at.0.total_cmp(&b.at.0))
-    });
-    out
-}
-
 /// The tag `group`'s own lettering reads as, by the rule the recognition
 /// applies everywhere else. Range annotations (`XV-0407A～0409A` names
 /// several symbols, not one) are left out first; then the pieces shaped like
@@ -319,7 +302,27 @@ pub(super) fn group_lettering(doc: &CadDocument, group: &Group) -> Vec<Lettering
 /// that letters `DN100` and `1.6MPa` has no tag, not a tag of both. A tag too
 /// short to be one (`S`) is none either.
 pub fn derive_group_tag(doc: &CadDocument, group: &Group, rules: &Rules) -> Option<TagRead> {
-    let lettering = group_lettering(doc, group);
+    derive_handles_tag(doc, &group.entities, rules)
+}
+
+/// The tag read from the lettering among `handles`, in reading order. This
+/// is the group rule before a GROUP object exists, used for the friendly
+/// default name shown by the GROUP prompt.
+pub fn derive_handles_tag(
+    doc: &CadDocument,
+    handles: &[acadrust::Handle],
+    rules: &Rules,
+) -> Option<TagRead> {
+    let mut lettering: Vec<Lettering> = handles
+        .iter()
+        .filter_map(|handle| doc.get_entity(*handle))
+        .filter_map(lettering_value)
+        .collect();
+    lettering.sort_by(|a, b| {
+        b.at.1
+            .total_cmp(&a.at.1)
+            .then_with(|| a.at.0.total_cmp(&b.at.0))
+    });
     let texts: Vec<&str> = lettering
         .iter()
         .map(|l| l.value.as_str())

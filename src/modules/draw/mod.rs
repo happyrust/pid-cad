@@ -11,6 +11,7 @@ pub mod groups;
 pub mod inquiry;
 pub mod layers;
 pub mod modify;
+mod pid;
 pub mod properties;
 mod report;
 pub mod select;
@@ -44,6 +45,7 @@ impl CadModule for DrawModule {
             translate, trim,
         };
         use inquiry::{area, dist};
+        use pid::{group_tool, legend_tool, tag_tool};
         use properties::match_prop;
 
         static GROUPS: std::sync::OnceLock<Vec<RibbonGroup>> = std::sync::OnceLock::new();
@@ -219,6 +221,14 @@ impl CadModule for DrawModule {
                     ],
                 },
                 RibbonGroup {
+                    title: "P&ID",
+                    tools: vec![
+                        RibbonItem::LargeTool(legend_tool()),
+                        tag_tool().into(),
+                        group_tool().into(),
+                    ],
+                },
+                RibbonGroup {
                     title: "Clipboard",
                     tools: vec![
                         RibbonItem::LargeDropdown {
@@ -251,5 +261,28 @@ impl CadModule for DrawModule {
                 // start_page_view). Removed from the Draw ribbon to declutter.
             ]
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_draw_ribbon_exposes_the_three_pid_tools() {
+        let group = DrawModule
+            .ribbon_groups()
+            .iter()
+            .find(|group| group.title == "P&ID")
+            .expect("P&ID ribbon group");
+        let ids: Vec<&str> = group
+            .tools
+            .iter()
+            .filter_map(|item| match item {
+                RibbonItem::Tool(tool) | RibbonItem::LargeTool(tool) => Some(tool.id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, ["PIDLEGEND", "PIDTAG", "PIDGROUP"]);
     }
 }

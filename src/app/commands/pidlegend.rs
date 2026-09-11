@@ -584,6 +584,69 @@ impl OpenCADStudio {
         groups
     }
 
+    /// Friendly default for the ordinary GROUP prompt. Once the sheet has a
+    /// current P&ID index, a selected set that reads one tag uses that tag as
+    /// its group name when the tag occurs on exactly one recognised symbol
+    /// and no existing group already owns the name. The description remains
+    /// the data; this is only a readable dictionary key.
+    pub(in crate::app) fn suggested_pid_group_name(
+        &self,
+        i: usize,
+        handles: &[acadrust::Handle],
+    ) -> String {
+        let fallback = crate::app::helpers::next_group_auto_name(&self.tabs[i].scene);
+        if self.tabs[i].pid_legend_is_stale() {
+            return fallback;
+        }
+        let Some(recognition) = self.tabs[i].pid_legend() else {
+            return fallback;
+        };
+        let rules = Rules::load();
+        let Some(read) =
+            pid_legend::derive_handles_tag(&self.tabs[i].scene.document, handles, &rules)
+        else {
+            return fallback;
+        };
+        let candidate = read.value.trim();
+        if recognition
+            .symbols
+            .iter()
+            .filter(|symbol| {
+                symbol
+                    .tag
+                    .as_deref()
+                    .is_some_and(|tag| tag.eq_ignore_ascii_case(candidate))
+            })
+            .count()
+            != 1
+        {
+            return fallback;
+        }
+        let document = &self.tabs[i].scene.document;
+        let in_objects = self.tabs[i]
+            .scene
+            .groups()
+            .any(|group| group.name.eq_ignore_ascii_case(candidate));
+        let in_dictionary = document
+            .objects
+            .get(&document.header.acad_group_dict_handle)
+            .and_then(|object| match object {
+                acadrust::objects::ObjectType::Dictionary(dictionary) => Some(dictionary),
+                _ => None,
+            })
+            .is_some_and(|dictionary| {
+                dictionary
+                    .entries
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case(candidate))
+            });
+        if in_objects || in_dictionary {
+            fallback
+        } else {
+            candidate.to_string()
+        }
+    }
+
     /// Apply the Properties panel's `pid_tag` value to every marked group
     /// touched by the selected handles. Empty, or the value the lettering
     /// already reads, means `auto`; any other value means `manual`.
@@ -1255,6 +1318,47 @@ mod tests {
             description_of(&app, tagged[0]),
             "tagName=BUV-3101;tagSource=auto",
             "redo brings the tag back with the group"
+        );
+    }
+
+    /// With a current P&ID index, GROUP offers the selected symbol's unique
+    /// tag as its readable dictionary name. A stale index or an occupied name
+    /// falls back to the ordinary anonymous sequence.
+    #[test]
+    fn group_uses_a_unique_indexed_tag_as_its_default_name() {
+        let mut app = OpenCADStudio::new_for_test();
+        let (insert, tag, _pipe) = valve_with_tag(&mut app);
+        let i = app.active_tab;
+        let members = [insert, tag];
+        select_all_of(&mut app, &members);
+        let _ = app.run_command_line("PIDLEGEND REPORT");
+        assert_eq!(app.suggested_pid_group_name(i, &members), "BUV-3101");
+
+        app.tabs[i].scene.bump_geometry();
+        assert_eq!(
+            app.suggested_pid_group_name(i, &members),
+            "*A1",
+            "a stale index is never used for naming"
+        );
+        let _ = app.run_command_line("PIDLEGEND REPORT");
+        select_all_of(&mut app, &members);
+        let _ = app.run_command_line("GROUP");
+        let prompt = app.tabs[i]
+            .active_cmd
+            .as_ref()
+            .map(|command| command.prompt())
+            .unwrap_or_default();
+        assert!(prompt.contains("BUV-3101"), "{prompt}");
+        let _ = app.feed_command(crate::command::StepInput::Enter);
+        let group = app.tabs[i].scene.groups().next().expect("group created");
+        assert_eq!(group.name, "BUV-3101");
+        assert_eq!(group.description, "tagName=BUV-3101;tagSource=auto");
+
+        let _ = app.run_command_line("PIDLEGEND REPORT");
+        assert_eq!(
+            app.suggested_pid_group_name(i, &members),
+            "*A1",
+            "an existing dictionary name is not reused"
         );
     }
 

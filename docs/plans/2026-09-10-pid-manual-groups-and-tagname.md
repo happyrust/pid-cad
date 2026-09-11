@@ -1,7 +1,7 @@
 # P&ID 图纸识别 · 手动操作（移动 / 复制粘贴 / 组合 / 位号）开发计划（2026-09-10）
 
 > 日期：2026-09-10 晚
-> 状态：**Plannotator 批准**（2026-09-10 19:2x，`{"decision":"approved"}`，无批注）。带 ⭕ 的决策按推荐落笔、未经拍板；§5 八条待拍板按各自「推荐」执行，批注里划一笔即可翻案。**M0 + M1 + M2 + M3 + M4 已落地**（见各期「进度」）。
+> 状态：**Plannotator 批准**（2026-09-10 19:2x，`{"decision":"approved"}`，无批注）。带 ⭕ 的决策按推荐落笔、未经拍板；§5 八条待拍板按各自「推荐」执行，批注里划一笔即可翻案。**M0 + M1 + M2 + M3 + M4 + M5 已落地**（见各期「进度」）。
 > 前置：`docs/plans/2026-09-07-pid-legend-recognition.md`（D1–D19，识别内核三期）、
 > `docs/plans/2026-09-09-pid-legend-recognition-audit-and-next-steps.md`（D20–D29，W0–W4 已落地，W5 线号规则外置正在另一会话进行：工作树里 `src/io/pid_pipes.rs` / `assets/pid-legend.json` / `Cargo.toml` 有未提交改动）。
 > 语料：`D:\work\plant-code\cad\0版重新处理dxf-12张`（CPECC 石楼油库 12 张 DXF）。
@@ -121,6 +121,7 @@
 - `PIDGROUP` 进功能区（P&ID 一组：PIDLEGEND / PIDTAG / PIDGROUP）与右键菜单「组合为 P&ID 符号」。
 - `GROUP` 在有 `PIDLEGEND` 索引的图上，组名默认值改成位号（唯一时）而不是 `*A<n>`——⭕ 只是好看，组名仍不是数据。
 - 出口：GUI 实跑一遍 §3 的手工验收。
+- **进度（2026-09-11 08:1x，会话 gpt-5.6-sol-13）✅ 代码已落地**。Draw 功能区新增 `P&ID` 面板：大按钮 `P&ID 图例` 直接切换/刷新列表，紧凑按钮 `查找 P&ID 位号` 与 `P&ID 组合` 分别进入 `PIDTAG`、`PIDGROUP GROUP`；三个按钮使用现有 report / find / group 图标。视口有选择时的右键菜单在移动/复制旁新增「组合为 P&ID 符号」，直接对当前选择执行 `PIDGROUP GROUP`。普通 `GROUP` 的默认名现在只在 P&ID 索引存在且仍新鲜、所选文字能按同一规则读出位号、该位号在识别结果里恰好出现一次、组字典也尚未占名时采用位号；否则仍安全回退 `*A<n>`，描述字段仍是数据真值。`derive_handles_tag` 从 `derive_group_tag` 抽出供建组前命名共用。补齐 M4 新字串及 M5 按钮/菜单字串在 `locale_catalog` 的映射，en-US / zh-CN 均可实际命中。新增功能区三按钮测试与 GROUP 唯一位号 / 过期索引 / 已占名回退测试。**验证**：`cargo check --lib --tests` 过；`cargo test --lib pid` **55 过 / 2 ignore**；`--test pid_legend` **26/26**；clippy 改动行零新增告警；改动文件未增加 rustfmt 债；12 张 `dxf_legend --verbose` 与 M0 基线 **12/12 逐字节相同**。GUI / CUA 演示按用户要求在提交后执行。
 
 ### M6 · 文档与自动化口（小，半天）
 

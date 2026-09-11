@@ -1171,6 +1171,10 @@ pub(super) fn viewport_context_menu_overlay(
                 t!("Copy").into_owned(),
                 Message::Command("COPY".to_string()),
             ));
+            items.push(item(
+                t!("Group as P&ID Symbol").into_owned(),
+                Message::Command("PIDGROUP GROUP".to_string()),
+            ));
             items.push(sep());
             let do_caret = if draworder_open {
                 crate::ui::icons::themed_arrow_down(9.0)

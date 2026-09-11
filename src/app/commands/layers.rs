@@ -662,8 +662,7 @@ impl OpenCADStudio {
                     self.command_line.push_info(&cmd.prompt());
                     self.tabs[i].active_cmd = Some(Box::new(cmd));
                 } else {
-                    let auto_name =
-                        super::super::helpers::next_group_auto_name(&self.tabs[i].scene);
+                    let auto_name = self.suggested_pid_group_name(i, &handles);
                     use crate::modules::draw::groups::group::GroupCommand;
                     let cmd = GroupCommand::new(handles, auto_name);
                     self.command_line.push_info(&cmd.prompt());
