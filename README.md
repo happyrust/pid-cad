@@ -187,6 +187,8 @@ OpenCADStudio --mcp
 
 The automation server exchanges one JSON object per line over standard input/output or a local TCP socket. The self-contained MCP endpoint exposes the live desktop editor through the same tools to every compatible client. To connect a client, configure it to launch `OpenCADStudio --mcp`. See the [MCP control guide](docs/automation/README.md).
 
+P&ID recognition is available without drawing markup through `PIDLEGEND EXPORT <file.json|file.csv>` and the line API operation `{"op":"pid_legend","what":"recognise"}` (`report` and `export` return the same structured payload). See the [user guide](docs/user-guide.md#校正-pid-图例).
+
 ## Plugins
 
 Desktop plugins run in separate processes and communicate with the host through the versioned plugin API. The browser build does not load native plugins.

@@ -439,6 +439,10 @@ impl OpenCADStudio {
         }
         if tokens[0].eq_ignore_ascii_case("BACKGROUND")
             || tokens[0].eq_ignore_ascii_case("COLORSCHEME")
+            || (tokens[0].eq_ignore_ascii_case("PIDLEGEND")
+                && tokens
+                    .get(1)
+                    .is_some_and(|option| option.eq_ignore_ascii_case("EXPORT")))
         {
             return self.dispatch_command(cmd);
         }

@@ -57,6 +57,7 @@
 
 mod blocks;
 mod exploded;
+mod export;
 mod groups;
 mod legend;
 mod manual_groups;
@@ -68,6 +69,12 @@ mod xdata;
 
 pub use blocks::guess_units_per_mm;
 pub use exploded::hash_color;
+#[cfg(not(target_arch = "wasm32"))]
+pub use export::write as write_export;
+pub use export::{
+    json_documents_pretty, render as render_export, to_csv, to_json, to_json_document,
+    to_json_pretty, ExportFormat, ExportReceipt,
+};
 pub use groups::plot_groups;
 pub use legend::{
     apply, clear, is_legend_layer, is_shape_class, layer_for_class, legend_entities,

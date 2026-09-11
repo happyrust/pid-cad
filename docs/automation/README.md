@@ -107,6 +107,18 @@ A complete command can be sent with `run`. Prompt answers are separated by space
 }
 ```
 
+P&ID recognition is also a direct read operation, so clients do not need to parse command history:
+
+```json
+{
+  "ocs_session_id": "SESSION_FROM_OCS_SESSIONS",
+  "op": "pid_legend",
+  "parameters": {"what": "recognise"}
+}
+```
+
+Use `what: "report"` to add the human-readable report lines to the same structured symbol, exception, and pipe payload. Writing a JSON or CSV file is intentionally not a read operation; send `PIDLEGEND EXPORT <file.json|file.csv>` through `ocs_execute` with `op: "run"`.
+
 Use `batch` when the steps are already known. OCS supplies each step with the state produced by the previous one and stops on the first failure. `completed_steps` and `next_step` show exactly what committed:
 
 ```json

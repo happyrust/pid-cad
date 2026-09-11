@@ -106,6 +106,26 @@ Ribbon 中的 `Layers` 区域用于管理图层。你可以创建、锁定、冻
 
 `create`、`tag`、`auto` 和 `off` 分别对应 `PIDGROUP GROUP`、`PIDGROUP TAG`、`PIDGROUP AUTO` 和 `PIDGROUP OFF`。响应中的 `groups_before` / `groups_after` 会返回组句柄、组名、位号来源和成员句柄，`changed` 表示本次是否改变了组状态。
 
+要把识别结果交给其他程序，可以直接运行：
+
+```text
+PIDLEGEND EXPORT D:\output\sheet.json
+PIDLEGEND EXPORT D:\output\sheet.csv
+```
+
+扩展名决定格式。JSON 与 `dxf_legend --json` 使用同一个序列化器，包含符号、位号、例外和完整管线 run；CSV 先给出 `class,label,tag,x_mm,y_mm,lines,source` 符号表，再给出 `line,family,runs,length_mm,from,to` 管线表。导出会按需重新识别，但不会绘制覆盖层或写入实体 XDATA，所以在第一次 `PIDLEGEND ON` 之前、或 `PIDLEGEND OFF` 之后都可以使用。
+
+逐行 JSON 自动化接口提供同一份结构化结果：
+
+```json
+{"op":"pid_legend","what":"recognise"}
+{"op":"pid_legend","what":"report"}
+{"op":"pid_legend","what":"export","path":"D:\\output\\sheet.json"}
+{"op":"pid_legend","what":"export","path":"D:\\output\\sheet.csv"}
+```
+
+三种动作都返回相同的识别字段；`report` 额外返回命令行报告数组，`export` 额外返回写入路径、格式和字节数。
+
 ## 标注、文字和表格
 
 `Annotate` 页签集中放置文字和标注能力。常用功能包括：

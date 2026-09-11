@@ -35,6 +35,7 @@ const READ_OPS: &[&str] = &[
     "header",
     "properties",
     "measure",
+    "pid_legend",
     "history",
     "commands",
     "events",
@@ -804,6 +805,19 @@ fn call_tool(
                 .as_object()
                 .cloned()
                 .unwrap_or_default();
+            if op == "pid_legend" {
+                let what = request
+                    .get("what")
+                    .and_then(Value::as_str)
+                    .unwrap_or("recognise");
+                if !matches!(what, "recognise" | "report") {
+                    return Err(
+                        "ocs_read pid_legend supports recognise or report; use ocs_execute run with PIDLEGEND EXPORT for file output"
+                            .into(),
+                    );
+                }
+                request.insert("what".into(), Value::String(what.into()));
+            }
             request.insert("op".into(), Value::String(op.into()));
             client(clients, session_id)?.request(Value::Object(request), 30.0)
         }
@@ -987,8 +1001,8 @@ fn tool_definitions() -> Value {
         },
         {
             "name":"ocs_read",
-            "description":"Discover capabilities and record schemas, or read state, complete database records, command manifests, entities, properties, kernel measurements and spatial relationships, history, events or operation status from a live OCS session.",
-            "inputSchema":{"type":"object","properties":{"ocs_session_id":{"type":"string","minLength":1,"description":"Value of session_id returned by ocs_sessions."},"op":{"type":"string","enum":READ_OPS,"default":"state"},"parameters":{"type":"object","description":"Operation-specific filters.","properties":{"name":{"type":"string","description":"Command name or record name."},"search":{"type":"string","description":"Case-insensitive command or record-type search."},"document_id":{"type":"integer","minimum":0},"collection":{"type":"string","description":"Record collection, all for records, or omit to discover collections and schema types."},"handle":{"type":"string"},"handles":{"type":"array","items":{"type":"string"},"description":"Exact entity or record handles."},"type":{"type":"string","description":"Entity or record type filter; for record_schema, returns its complete type graph and writable field paths."},"layer":{"type":"string","description":"Layer name filter for query."},"detail":{"type":"string","enum":["summary","geometry","full"],"default":"geometry","description":"Entity detail returned by query."},"fields":{"type":"array","items":{"type":"string"},"description":"Return only these entity fields plus handle."},"paths":{"type":"array","items":{"type":"string"},"description":"Project RFC 6901 JSON Pointer paths relative to record.properties."},"where":{"type":"array","description":"All property filters must match.","items":{"type":"object","properties":{"path":{"type":"string"},"op":{"type":"string","enum":["eq","ne","lt","lte","gt","gte","contains","starts_with","ends_with","in","exists","not_exists"],"default":"eq"},"value":{}},"required":["path"],"additionalProperties":false}},"near":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Rank planar curves by exact kernel distance to this world XY point."},"contains_point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Return closed planar curves containing this world XY point."},"bounds":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Filter entities whose world XY bounds overlap [min_x,min_y,max_x,max_y]."},"intersections":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":2,"description":"Return exact kernel intersections between two planar curve handles."},"after":{"type":"integer","minimum":0,"description":"Event cursor."},"request_id":{"type":"string","description":"Operation id to query."},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":10000}},"additionalProperties":false}},"required":["ocs_session_id"],"additionalProperties":false},
+            "description":"Discover capabilities and record schemas, or read state, P&ID recognition, complete database records, command manifests, entities, properties, kernel measurements and spatial relationships, history, events or operation status from a live OCS session.",
+            "inputSchema":{"type":"object","properties":{"ocs_session_id":{"type":"string","minLength":1,"description":"Value of session_id returned by ocs_sessions."},"op":{"type":"string","enum":READ_OPS,"default":"state"},"parameters":{"type":"object","description":"Operation-specific filters.","properties":{"name":{"type":"string","description":"Command name or record name."},"search":{"type":"string","description":"Case-insensitive command or record-type search."},"what":{"type":"string","enum":["recognise","report"],"description":"For pid_legend: return structured recognition, optionally with report lines."},"document_id":{"type":"integer","minimum":0},"collection":{"type":"string","description":"Record collection, all for records, or omit to discover collections and schema types."},"handle":{"type":"string"},"handles":{"type":"array","items":{"type":"string"},"description":"Exact entity or record handles."},"type":{"type":"string","description":"Entity or record type filter; for record_schema, returns its complete type graph and writable field paths."},"layer":{"type":"string","description":"Layer name filter for query."},"detail":{"type":"string","enum":["summary","geometry","full"],"default":"geometry","description":"Entity detail returned by query."},"fields":{"type":"array","items":{"type":"string"},"description":"Return only these entity fields plus handle."},"paths":{"type":"array","items":{"type":"string"},"description":"Project RFC 6901 JSON Pointer paths relative to record.properties."},"where":{"type":"array","description":"All property filters must match.","items":{"type":"object","properties":{"path":{"type":"string"},"op":{"type":"string","enum":["eq","ne","lt","lte","gt","gte","contains","starts_with","ends_with","in","exists","not_exists"],"default":"eq"},"value":{}},"required":["path"],"additionalProperties":false}},"near":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Rank planar curves by exact kernel distance to this world XY point."},"contains_point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Return closed planar curves containing this world XY point."},"bounds":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Filter entities whose world XY bounds overlap [min_x,min_y,max_x,max_y]."},"intersections":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":2,"description":"Return exact kernel intersections between two planar curve handles."},"after":{"type":"integer","minimum":0,"description":"Event cursor."},"request_id":{"type":"string","description":"Operation id to query."},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":10000}},"additionalProperties":false}},"required":["ocs_session_id"],"additionalProperties":false},
             "outputSchema":read_output_schema(),
             "annotations":{"title":"Read OCS state","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
         },
@@ -1358,6 +1372,11 @@ mod tests {
         assert!(READ_OPS.contains(&"capabilities"));
         assert!(READ_OPS.contains(&"records"));
         assert!(READ_OPS.contains(&"record_schema"));
+        assert!(READ_OPS.contains(&"pid_legend"));
+        assert_eq!(
+            tools[1]["inputSchema"]["properties"]["parameters"]["properties"]["what"]["enum"],
+            json!(["recognise", "report"])
+        );
         assert!(EXECUTE_OPS.contains(&"set_properties"));
         assert_eq!(
             tools[1]["inputSchema"]["properties"]["parameters"]["properties"]["where"]["items"]["properties"]
@@ -1457,6 +1476,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(called["result"]["isError"], true);
+    }
+
+    #[test]
+    fn read_tool_rejects_pid_legend_file_export() {
+        let mut clients = HashMap::new();
+        let called = handle_message(
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ocs_read","arguments":{"ocs_session_id":"missing","op":"pid_legend","parameters":{"what":"export"}}}}),
+            &mut clients,
+            &mut TaskStore::default(),
+        )
+        .unwrap();
+        assert_eq!(called["result"]["isError"], true);
+        assert!(called["result"]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("PIDLEGEND EXPORT")));
     }
 
     #[test]

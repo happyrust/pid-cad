@@ -11,6 +11,8 @@
 //! - `{"op":"run","cmd":"LAYER Walls"}`      — run a command (the same dispatcher
 //!   the GUI command line uses)
 //! - `{"op":"entities"}`                     — summary count by entity type
+//! - `{"op":"pid_legend","what":"recognise"}`  — structured P&ID recognition
+//!   (`report` and `export` use the same payload)
 //! - `{"op":"pid_group","what":"create"}`     — group the current selection as a
 //!   P&ID symbol (`tag` / `auto` / `off` are the other actions)
 //! - `{"op":"save","path":"out.dwg"}`        — write the document (path optional
@@ -1073,6 +1075,7 @@ impl OpenCADStudio {
                 }
                 json!({ "ok": true, "selected": self.tabs[i].scene.selected_entities().len() })
             }
+            "pid_legend" => self.automation_pid_legend(&req),
             "pid_group" => self.automation_pid_group(&req),
             "save" => {
                 let i = self.active_tab;
@@ -1107,6 +1110,68 @@ impl OpenCADStudio {
     fn run_headless(&mut self, cmd: &str) -> Result<(), String> {
         let task = self.run_command_line(cmd);
         self.drive_headless_task(task)
+    }
+
+    /// Structured P&ID recognition for line-based automation. Every action
+    /// returns the same recognition fields; `report` adds the human-readable
+    /// report lines and `export` also writes the JSON/CSV path requested.
+    fn automation_pid_legend(&mut self, req: &Value) -> Value {
+        let Some(what) = req["what"].as_str() else {
+            return err("pid_legend: missing \"what\" (recognise, report or export)");
+        };
+        if !matches!(what, "recognise" | "report" | "export") {
+            return err(format!(
+                "pid_legend: unknown \"what\" value {what:?} (use recognise, report or export)"
+            ));
+        }
+
+        let i = self.active_tab;
+        let exported = if what == "export" {
+            let Some(path) = req["path"]
+                .as_str()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+            else {
+                return err("pid_legend export: missing non-empty \"path\" (.json or .csv)");
+            };
+            let path = PathBuf::from(path);
+            match self.export_pid_legend(i, &path) {
+                Ok(receipt) => Some(json!({
+                    "path": path.to_string_lossy(),
+                    "format": receipt.format.name(),
+                    "bytes": receipt.bytes,
+                })),
+                Err(error) => return err(format!("pid_legend export: {error}")),
+            }
+        } else {
+            self.refresh_pid_legend(i);
+            None
+        };
+
+        let source = self.tabs[i]
+            .current_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+        let Some(recognition) = self.tabs[i].pid_legend() else {
+            return err("pid_legend: recognition is unavailable");
+        };
+        let mut response = crate::io::pid_legend::to_json_document(&source, recognition);
+        let object = response
+            .as_object_mut()
+            .expect("P&ID recognition JSON is an object");
+        object.insert("ok".to_string(), Value::Bool(true));
+        object.insert("what".to_string(), Value::String(what.to_string()));
+        if what == "report" {
+            object.insert(
+                "report".to_string(),
+                json!(crate::io::pid_legend::report(recognition)),
+            );
+        }
+        if let Some(exported) = exported {
+            object.insert("exported".to_string(), exported);
+        }
+        response
     }
 
     /// Scriptable counterpart of the P&ID ribbon's Group / Ungroup tools.
@@ -2700,6 +2765,108 @@ mod tests {
             false,
             "create says that a selection is required"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pid_legend_automation_recognises_reports_and_exports_the_same_payload() {
+        use acadrust::entities::{EntityType, Line, Text};
+        use acadrust::types::Vector3;
+        use serde_json::{json, Value};
+
+        let mut app = OpenCADStudio::new_for_test();
+        assert_eq!(app.automation_op(r#"{"op":"new"}"#)["ok"], true);
+        let i = app.active_tab;
+        let line = app.tabs[i]
+            .scene
+            .add_entity(EntityType::Line(Line::from_points(
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(10.0, 0.0, 0.0),
+            )));
+        let text = app.tabs[i]
+            .scene
+            .add_entity(EntityType::Text(Text::with_value(
+                "BUV-3101",
+                Vector3::new(2.0, 2.0, 0.0),
+            )));
+        app.tabs[i].scene.select_entity(line, false);
+        app.tabs[i].scene.select_entity(text, false);
+        assert_eq!(
+            app.automation_op(r#"{"op":"pid_group","what":"create"}"#)["ok"],
+            true
+        );
+
+        let recognised = app.automation_op(r#"{"op":"pid_legend","what":"recognise"}"#);
+        assert_eq!(recognised["ok"], true, "{recognised}");
+        assert_eq!(recognised["what"], "recognise");
+        assert_eq!(recognised["symbols"].as_array().unwrap().len(), 1);
+        assert_eq!(recognised["symbols"][0]["tag"], "BUV-3101");
+        assert!(crate::io::pid_legend::legend_handles(&app.tabs[i].scene.document).is_empty());
+        assert!(
+            crate::io::pid_legend::attached_handles(&app.tabs[i].scene.document).is_empty(),
+            "automation recognition does not perform PIDLEGEND ON"
+        );
+
+        let reported = app.automation_op(r#"{"op":"pid_legend","what":"report"}"#);
+        assert_eq!(reported["ok"], true, "{reported}");
+        assert_eq!(reported["symbols"], recognised["symbols"]);
+        assert!(reported["report"]
+            .as_array()
+            .is_some_and(|lines| !lines.is_empty()));
+
+        let dir =
+            std::env::temp_dir().join(format!("ocs-pid-legend-automation-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let json_path = dir.join("legend result.json");
+        let exported = app.automation_op(
+            &json!({
+                "op": "pid_legend",
+                "what": "export",
+                "path": json_path,
+            })
+            .to_string(),
+        );
+        assert_eq!(exported["ok"], true, "{exported}");
+        assert_eq!(exported["exported"]["format"], "json");
+        assert_eq!(exported["symbols"], recognised["symbols"]);
+        let body = std::fs::read_to_string(&json_path).unwrap();
+        let expected = crate::io::pid_legend::to_json_pretty(
+            exported["file"].as_str().unwrap(),
+            app.tabs[i].pid_legend().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body, expected);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap()[0]["symbols"],
+            exported["symbols"]
+        );
+
+        let csv_path = dir.join("legend.csv");
+        let exported_csv = app.automation_op(
+            &json!({
+                "op": "pid_legend",
+                "what": "export",
+                "path": csv_path,
+            })
+            .to_string(),
+        );
+        assert_eq!(exported_csv["ok"], true, "{exported_csv}");
+        assert_eq!(exported_csv["exported"]["format"], "csv");
+        let csv = std::fs::read_to_string(&csv_path).unwrap();
+        assert!(csv.starts_with("class,label,tag,x_mm,y_mm,lines,source\n"));
+        assert!(csv.contains("BUV-3101"));
+        assert!(csv.contains("\nline,family,runs,length_mm,from,to\n"));
+
+        for bad in [
+            r#"{"op":"pid_legend"}"#,
+            r#"{"op":"pid_legend","what":"unknown"}"#,
+            r#"{"op":"pid_legend","what":"export"}"#,
+            r#"{"op":"pid_legend","what":"export","path":"legend.txt"}"#,
+        ] {
+            assert_eq!(app.automation_op(bad)["ok"], false, "{bad}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

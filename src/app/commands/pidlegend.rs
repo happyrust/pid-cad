@@ -15,6 +15,8 @@
 //! PIDLEGEND REPORT     recognise and print the summary, draw nothing
 //! PIDLEGEND LIST       toggle the docked legend list panel (recognising
 //!                      first when this sheet has not been read yet)
+//! PIDLEGEND EXPORT p   write the current recognition as JSON or CSV,
+//!                      selected by `p`'s extension
 //! PIDLINE              prompt for a line number or family (Enter = resolve
 //!                      the picked stroke instead)
 //! PIDLINE <code>       select the whole line by number or family
@@ -75,6 +77,27 @@ use crate::io::pid_legend::{self, GroupTag, Rules, TagSource};
 use acadrust::types::Color;
 use std::collections::BTreeSet;
 
+fn export_path_argument(cmd: &str, option: &str) -> Option<std::path::PathBuf> {
+    let tail = cmd
+        .trim_start()
+        .get("PIDLEGEND".len()..)?
+        .trim_start()
+        .get(option.len()..)?
+        .trim();
+    if tail.is_empty() {
+        return None;
+    }
+    let unquoted = if tail.len() >= 2
+        && ((tail.starts_with('"') && tail.ends_with('"'))
+            || (tail.starts_with('\'') && tail.ends_with('\'')))
+    {
+        &tail[1..tail.len() - 1]
+    } else {
+        tail
+    };
+    Some(std::path::PathBuf::from(unquoted))
+}
+
 impl OpenCADStudio {
     pub(super) fn dispatch_pidlegend(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         let mut words = cmd.split_whitespace();
@@ -85,13 +108,14 @@ impl OpenCADStudio {
             use crate::command::KeywordCommand;
             let c = KeywordCommand::new(
                 "PIDLEGEND",
-                "PIDLEGEND  [ON / OFF / PURGE / REPORT / LIST] <ON>:",
+                "PIDLEGEND  [ON / OFF / PURGE / REPORT / LIST / EXPORT] <ON>:",
                 vec![
                     ("ON", "ON", None),
                     ("OFF", "OFF", None),
                     ("PURGE", "PURGE", None),
                     ("REPORT", "REPORT", None),
                     ("LIST", "LIST", None),
+                    ("EXPORT", "EXPORT", None),
                 ],
             )
             .with_default("ON");
@@ -141,6 +165,37 @@ impl OpenCADStudio {
                         "PIDLEGEND: removed {} legend entities and {purged} recognition XDATA record(s).",
                         legend.len()
                     ));
+                }
+            }
+            "EXPORT" => {
+                let Some(path) = export_path_argument(cmd, &option) else {
+                    if cmd.trim_end() != cmd {
+                        self.command_line
+                            .push_error("Usage: PIDLEGEND EXPORT <file.json|file.csv>");
+                        return Some(Task::none());
+                    }
+                    use crate::command::ValuePromptCommand;
+                    let prompt = "PIDLEGEND EXPORT  file path (.json or .csv):";
+                    let command = ValuePromptCommand::new("PIDLEGEND EXPORT", prompt);
+                    self.command_line.push_info(&command.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(command));
+                    return Some(self.finish_dispatch(cmd));
+                };
+                match self.export_pid_legend(i, &path) {
+                    Ok(receipt) => {
+                        let recognition = self.tabs[i].pid_legend().expect("export recognised");
+                        self.command_line.push_output(&format!(
+                            "PIDLEGEND: exported {} symbols and {} pipe runs to {} ({}, {} bytes).",
+                            recognition.symbols.len(),
+                            recognition.pipes.runs.len(),
+                            path.display(),
+                            receipt.format.name(),
+                            receipt.bytes
+                        ));
+                    }
+                    Err(error) => self
+                        .command_line
+                        .push_error(&format!("PIDLEGEND EXPORT: {error}")),
                 }
             }
             "REPORT" => {
@@ -211,11 +266,52 @@ impl OpenCADStudio {
             }
             other => {
                 self.command_line.push_error(&format!(
-                    "PIDLEGEND: unknown option \"{other}\" -- use ON, OFF, PURGE, REPORT or LIST."
+                    "PIDLEGEND: unknown option \"{other}\" -- use ON, OFF, PURGE, REPORT, LIST or EXPORT."
                 ));
             }
         }
         Some(Task::none())
+    }
+
+    /// Recognise the current sheet when necessary and write its structured
+    /// JSON/CSV representation. Export never draws the overlay or publishes
+    /// XDATA; it is valid before ON and after OFF.
+    pub(in crate::app) fn export_pid_legend(
+        &mut self,
+        i: usize,
+        path: &std::path::Path,
+    ) -> Result<pid_legend::ExportReceipt, String> {
+        self.refresh_pid_legend(i);
+        let source = self.tabs[i]
+            .current_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+        let recognition = self.tabs[i]
+            .pid_legend()
+            .ok_or_else(|| "recognition is unavailable".to_string())?;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            pid_legend::write_export(path, &source, recognition)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let format = pid_legend::ExportFormat::for_path(path)?;
+            let body = pid_legend::render_export(path, &source, recognition)?;
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_else(|| match format {
+                    pid_legend::ExportFormat::Json => "pid-legend.json",
+                    pid_legend::ExportFormat::Csv => "pid-legend.csv",
+                });
+            crate::sys::download_bytes(name, body.as_bytes());
+            Ok(pid_legend::ExportReceipt {
+                format,
+                bytes: body.len(),
+            })
+        }
     }
 
     /// Show the legend list panel, docking it on the right the first time.
@@ -2182,6 +2278,65 @@ mod tests {
                 .map(|recognition| recognition.symbols.len()),
             Some(0)
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidlegend_export_writes_shared_json_and_csv_before_on_and_after_off() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = valve_with_tag(&mut app);
+        let i = app.active_tab;
+        let dir = std::env::temp_dir().join(format!("ocs pid export {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let json_path = dir.join("legend result.json");
+        let _ = app.run_command_line(&format!("PIDLEGEND EXPORT \"{}\"", json_path.display()));
+        let source = app.tabs[i].tab_title.clone();
+        let expected_json = pid_legend::to_json_pretty(
+            &source,
+            app.tabs[i].pid_legend().expect("EXPORT recognises"),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&json_path).unwrap(), expected_json);
+        assert_eq!(legend_count(&app), 0, "EXPORT does not draw");
+        assert!(
+            pid_legend::attached_handles(&app.tabs[i].scene.document).is_empty(),
+            "EXPORT does not publish XDATA"
+        );
+
+        let _ = app.run_command_line("PIDLEGEND ON");
+        let _ = app.run_command_line("PIDLEGEND OFF");
+        let published = pid_legend::attached_handles(&app.tabs[i].scene.document);
+        let csv_path = dir.join("legend after off.csv");
+        let _ = app.run_command_line(&format!("PIDLEGEND EXPORT {}", csv_path.display()));
+        assert_eq!(
+            std::fs::read_to_string(&csv_path).unwrap(),
+            pid_legend::to_csv(app.tabs[i].pid_legend().unwrap())
+        );
+        assert_eq!(
+            pid_legend::attached_handles(&app.tabs[i].scene.document),
+            published,
+            "EXPORT after OFF leaves published metadata as it was"
+        );
+
+        let error_revision = app.command_line.error_revision;
+        let _ = app.run_command_line("PIDLEGEND EXPORT");
+        assert!(
+            app.tabs[i].active_cmd.is_some(),
+            "EXPORT prompts for a path"
+        );
+        let _ = app.feed_command(crate::command::StepInput::Enter);
+        assert!(app.tabs[i].active_cmd.is_none());
+        assert!(app.command_line.error_revision > error_revision);
+        let error_revision = app.command_line.error_revision;
+        let _ = app.run_command_line(&format!(
+            "PIDLEGEND EXPORT {}",
+            dir.join("legend.txt").display()
+        ));
+        assert!(app.command_line.error_revision > error_revision);
+        assert!(!dir.join("legend.txt").exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

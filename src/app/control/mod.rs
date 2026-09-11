@@ -361,7 +361,7 @@ impl OpenCADStudio {
             "mtext_editor":self.mtext_editor.as_ref().map(|e|json!({"text":e.content.text(),"height":e.height,"style":e.style})),
             "text_editor":self.text_inline.is_some(),"event_cursor":self.control.serial,
             "operation":self.control.pending.as_ref().map(|p| &p.id),
-            "capabilities":["commands","command_manifest","step_input","batch","compact_results","entity_pick","structure_pick","selection","properties","records","record_schemas","record_filters","atomic_record_updates","layers","history","documents","events","capture","viewport_capture","measure","spatial_query"]
+            "capabilities":["commands","command_manifest","step_input","batch","compact_results","entity_pick","structure_pick","selection","properties","records","record_schemas","record_filters","atomic_record_updates","layers","history","documents","events","capture","viewport_capture","measure","spatial_query","pid_legend"]
         })
     }
 
@@ -376,6 +376,7 @@ impl OpenCADStudio {
                 | "commands"
                 | "properties"
                 | "measure"
+                | "pid_legend"
                 | "query"
                 | "records"
                 | "record_schema"
@@ -1188,6 +1189,26 @@ mod tests {
             "unknown_command"
         );
     }
+
+    #[test]
+    fn control_read_exposes_structured_pid_legend_recognition() {
+        let mut app = OpenCADStudio::new_for_test();
+        request(&mut app, json!({"op":"new"}));
+        let recognised = app
+            .control_request(json!({"op":"pid_legend","what":"recognise"}))
+            .0;
+        assert_eq!(recognised["ok"], true, "{recognised}");
+        assert_eq!(recognised["what"], "recognise");
+        assert!(recognised["symbols"].is_array());
+        assert!(recognised["pipes"].is_object());
+
+        let reported = app
+            .control_request(json!({"op":"pid_legend","what":"report"}))
+            .0;
+        assert_eq!(reported["ok"], true, "{reported}");
+        assert!(reported["report"].is_array());
+    }
+
     #[test]
     fn control_queries_exact_curve_relationships_and_metrics() {
         let mut app = OpenCADStudio::new_for_test();

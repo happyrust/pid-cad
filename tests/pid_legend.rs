@@ -2144,6 +2144,23 @@ const EXPLODED_PIPES: &[ExplodedPipeExpected] = &[
 ];
 
 #[test]
+fn cpecc_csv_line_endpoints_cover_every_butterfly_valve_on_ff02_06() {
+    let expected = &SHEETS[0];
+    let Some(doc) = load_sheet(expected.file) else {
+        return;
+    };
+    let recognition = pid_legend::recognise(&doc, &Rules::load());
+    let csv = pid_legend::to_csv(&recognition);
+    let row = csv
+        .lines()
+        .find(|row| row.starts_with("100-FW,"))
+        .expect("100-FW pipe row");
+    for tag in expected.butterfly_line.0 {
+        assert!(row.contains(tag), "{tag} missing from {row}");
+    }
+}
+
+#[test]
 fn cpecc_sheets_every_symbol_is_known_and_every_valve_has_its_own_tag() {
     let rules = Rules::builtin();
     let mut ran = Ran::new();

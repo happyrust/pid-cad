@@ -19,7 +19,6 @@ use std::path::{Path, PathBuf};
 
 use OpenCADStudio::io;
 use OpenCADStudio::io::pid_legend::{self, Rules};
-use OpenCADStudio::io::pid_pipes;
 
 struct Options {
     files: Vec<PathBuf>,
@@ -72,49 +71,6 @@ fn parse_args() -> Result<Options, String> {
     Ok(options)
 }
 
-fn symbol_json(symbol: &pid_legend::Recognized) -> serde_json::Value {
-    serde_json::json!({
-        "class": symbol.class,
-        "label": symbol.label,
-        "color": symbol.color,
-        "at": [symbol.at.0, symbol.at.1],
-        "bbox": [symbol.bbox.0, symbol.bbox.1, symbol.bbox.2, symbol.bbox.3],
-        "source": symbol.source,
-        "known": symbol.known,
-        "inner_text": symbol.inner_text,
-        "tag": symbol.tag,
-        "tag_distance_mm": symbol.tag_distance_mm,
-        "lines": symbol.lines,
-    })
-}
-
-fn end_json(end: pid_pipes::End) -> serde_json::Value {
-    match end {
-        pid_pipes::End::Symbol(i) => serde_json::json!({ "symbol": i }),
-        pid_pipes::End::Tee => serde_json::json!("tee"),
-        pid_pipes::End::Open => serde_json::json!("open"),
-        pid_pipes::End::Loop => serde_json::json!("loop"),
-    }
-}
-
-fn pipes_json(pipes: &pid_pipes::Pipes) -> serde_json::Value {
-    serde_json::json!({
-        "segments": pipes.segments,
-        "ports": pipes.ports,
-        "connected_ports": pipes.connected_ports,
-        "open_ends": pipes.open_ends,
-        "families": pipes.families,
-        "runs": pipes.runs.iter().map(|r| serde_json::json!({
-            "numbers": r.numbers,
-            "lines": r.lines,
-            "segments": r.segments,
-            "length_mm": r.length_mm,
-            "ends": [end_json(r.ends[0]), end_json(r.ends[1])],
-            "path": r.path.iter().map(|p| [p.0, p.1]).collect::<Vec<_>>(),
-        })).collect::<Vec<_>>(),
-    })
-}
-
 fn main() {
     let options = match parse_args() {
         Ok(options) => options,
@@ -150,31 +106,7 @@ fn main() {
         };
 
         if options.json {
-            reports.push(serde_json::json!({
-                "file": name,
-                "units_per_mm": recognition.units_per_mm,
-                "lettering": recognition.lettering,
-                "symbols": recognition.symbols.iter().map(symbol_json).collect::<Vec<_>>(),
-                "unknown_blocks": recognition.unknown_blocks,
-                "unknown_shapes": recognition.unknown_shapes.iter().map(|s| serde_json::json!({
-                    "id": s.id,
-                    "count": s.count,
-                    "size_mm": [s.size_mm.0, s.size_mm.1],
-                    "strokes": s.strokes,
-                    "example_at": [s.example_at.0, s.example_at.1],
-                    "nearby": s.nearby,
-                })).collect::<Vec<_>>(),
-                "orphan_tags": recognition.orphan_tags,
-                "range_annotations": recognition.range_annotations.iter().map(|(label, annotations)| {
-                    (label.clone(), serde_json::Value::Array(annotations.iter().map(|a| serde_json::json!({
-                        "value": a.value,
-                        "members": a.members,
-                        "missing": a.missing,
-                    })).collect()))
-                }).collect::<serde_json::Map<String, serde_json::Value>>(),
-                "duplicate_tags": recognition.duplicate_tags,
-                "pipes": pipes_json(&recognition.pipes),
-            }));
+            reports.push(pid_legend::to_json_document(&name, &recognition));
         } else {
             println!("{name}");
             for line in pid_legend::report(&recognition) {
@@ -226,10 +158,10 @@ fn main() {
         }
     }
     if options.json {
-        println!(
+        print!(
             "{}",
-            serde_json::to_string_pretty(&reports)
-                .unwrap_or_else(|e| format!("{{\"error\":{e:?}}}"))
+            pid_legend::json_documents_pretty(&reports)
+                .unwrap_or_else(|error| format!("{{\"error\":{error:?}}}\n"))
         );
     }
 }
