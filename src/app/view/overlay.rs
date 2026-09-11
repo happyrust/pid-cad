@@ -1175,6 +1175,10 @@ pub(super) fn viewport_context_menu_overlay(
                 t!("Group as P&ID Symbol").into_owned(),
                 Message::Command("PIDGROUP GROUP".to_string()),
             ));
+            items.push(item(
+                t!("Ungroup P&ID Symbol").into_owned(),
+                Message::Command("PIDGROUP OFF".to_string()),
+            ));
             items.push(sep());
             let do_caret = if draworder_open {
                 crate::ui::icons::themed_arrow_down(9.0)

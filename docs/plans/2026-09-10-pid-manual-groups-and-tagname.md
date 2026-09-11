@@ -118,10 +118,11 @@
 
 ### M5 · 体验收尾（小，半天；可选）
 
-- `PIDGROUP` 进功能区（P&ID 一组：PIDLEGEND / PIDTAG / PIDGROUP）与右键菜单「组合为 P&ID 符号」。
+- `PIDGROUP` 进功能区（P&ID 一组：PIDLEGEND / PIDTAG / PIDGROUP GROUP / PIDGROUP OFF）与右键菜单「组合为 P&ID 符号」「取消 P&ID 符号组合」。
 - `GROUP` 在有 `PIDLEGEND` 索引的图上，组名默认值改成位号（唯一时）而不是 `*A<n>`——⭕ 只是好看，组名仍不是数据。
 - 出口：GUI 实跑一遍 §3 的手工验收。
 - **进度（2026-09-11 08:1x，会话 gpt-5.6-sol-13）✅ 代码已落地**。Draw 功能区新增 `P&ID` 面板：大按钮 `P&ID 图例` 直接切换/刷新列表，紧凑按钮 `查找 P&ID 位号` 与 `P&ID 组合` 分别进入 `PIDTAG`、`PIDGROUP GROUP`；三个按钮使用现有 report / find / group 图标。视口有选择时的右键菜单在移动/复制旁新增「组合为 P&ID 符号」，直接对当前选择执行 `PIDGROUP GROUP`。普通 `GROUP` 的默认名现在只在 P&ID 索引存在且仍新鲜、所选文字能按同一规则读出位号、该位号在识别结果里恰好出现一次、组字典也尚未占名时采用位号；否则仍安全回退 `*A<n>`，描述字段仍是数据真值。`derive_handles_tag` 从 `derive_group_tag` 抽出供建组前命名共用。补齐 M4 新字串及 M5 按钮/菜单字串在 `locale_catalog` 的映射，en-US / zh-CN 均可实际命中。新增功能区三按钮测试与 GROUP 唯一位号 / 过期索引 / 已占名回退测试。**验证**：`cargo check --lib --tests` 过；`cargo test --lib pid` **55 过 / 2 ignore**；`--test pid_legend` **26/26**；clippy 改动行零新增告警；改动文件未增加 rustfmt 债；12 张 `dxf_legend --verbose` 与 M0 基线 **12/12 逐字节相同**。GUI / CUA 演示按用户要求在提交后执行。
+- **M5 追加（2026-09-11）✅**：P&ID 功能区与视口右键菜单同时提供「取消 P&ID 符号组合」，执行 `PIDGROUP OFF`；选择组内任一成员即可解组，调整成员后可再次组合。功能区测试同时锁定四个工具 id 与实际命令。**验证**：`cargo check --lib --tests`、功能区定向测试、`pidgroup_groups_tags_by_hand_reads_again_and_dissolves` 与 GUI 构建均通过；CUA 在 `pid-group-demo.dxf` 上实跑了 BUV-3102「图例选择 → 功能区组合 → 右键解组 → 再组合 → 功能区解组」，每次解组后刷新仍维持 2 个自动识别符号，BUV-3102 的「手」角标消失。
 
 ### M6 · 文档与自动化口（小，半天）
 

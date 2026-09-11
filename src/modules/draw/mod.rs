@@ -45,7 +45,7 @@ impl CadModule for DrawModule {
             translate, trim,
         };
         use inquiry::{area, dist};
-        use pid::{group_tool, legend_tool, tag_tool};
+        use pid::{group_tool, legend_tool, tag_tool, ungroup_tool};
         use properties::match_prop;
 
         static GROUPS: std::sync::OnceLock<Vec<RibbonGroup>> = std::sync::OnceLock::new();
@@ -226,6 +226,7 @@ impl CadModule for DrawModule {
                         RibbonItem::LargeTool(legend_tool()),
                         tag_tool().into(),
                         group_tool().into(),
+                        ungroup_tool().into(),
                     ],
                 },
                 RibbonGroup {
@@ -269,20 +270,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_draw_ribbon_exposes_the_three_pid_tools() {
+    fn the_draw_ribbon_exposes_the_pid_adjustment_tools() {
         let group = DrawModule
             .ribbon_groups()
             .iter()
             .find(|group| group.title == "P&ID")
             .expect("P&ID ribbon group");
-        let ids: Vec<&str> = group
+        let tools: Vec<_> = group
             .tools
             .iter()
             .filter_map(|item| match item {
-                RibbonItem::Tool(tool) | RibbonItem::LargeTool(tool) => Some(tool.id),
+                RibbonItem::Tool(tool) | RibbonItem::LargeTool(tool) => Some(tool),
                 _ => None,
             })
             .collect();
-        assert_eq!(ids, ["PIDLEGEND", "PIDTAG", "PIDGROUP"]);
+        assert_eq!(
+            tools.iter().map(|tool| tool.id).collect::<Vec<_>>(),
+            ["PIDLEGEND", "PIDTAG", "PIDGROUP", "PIDUNGROUP"]
+        );
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| match &tool.event {
+                    crate::modules::ModuleEvent::Command(command) => command.as_str(),
+                    _ => panic!("P&ID ribbon tools must dispatch commands"),
+                })
+                .collect::<Vec<_>>(),
+            ["PIDLEGEND LIST", "PIDTAG", "PIDGROUP GROUP", "PIDGROUP OFF"]
+        );
     }
 }

@@ -2906,6 +2906,7 @@ pub(super) fn message_attribute(source: &str) -> Option<(&'static str, &'static 
         "Undo" => Some(("common", "undo")),
         "Undo: {last_label}" => Some(("common", "undo-last-label")),
         "Ungroup" => Some(("groups", "ungroup")),
+        "Ungroup P&ID Symbol" => Some(("common", "ungroup-p-id-symbol")),
         "Uniform scale" => Some(("common", "uniform-scale")),
         "Uninstall" => Some(("plugins", "uninstall")),
         "Union" => Some(("model", "union")),

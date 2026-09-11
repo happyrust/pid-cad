@@ -28,3 +28,12 @@ pub fn group_tool() -> ToolDef {
         event: ModuleEvent::Command("PIDGROUP GROUP".to_string()),
     }
 }
+
+pub fn ungroup_tool() -> ToolDef {
+    ToolDef {
+        id: "PIDUNGROUP",
+        label: "Ungroup P&ID Symbol",
+        icon: IconKind::Svg(include_bytes!("../../../assets/icons/ungroup.svg")),
+        event: ModuleEvent::Command("PIDGROUP OFF".to_string()),
+    }
+}
