@@ -77,7 +77,7 @@ The project is under active development. Keep backups of important production dr
 | DWG | Read and write; versioned save targets from R14 through 2018 |
 | DXF | Read and write; versioned save targets from R14 through 2018 |
 | BAK / SV$ | Open drawing backups and autosave files |
-| PID | Read SmartPlant / Smart P&ID sheets through [`pid-parse`](../pid-parse); sheet geometry and `.sym` symbol placements land on `PID-*` layers |
+| PID / P&ID | Read SmartPlant / Smart P&ID sheets through [`pid-parse`](../pid-parse); recognise DXF symbols, manually group/ungroup misidentified geometry, edit `tagName`, and preserve corrected groups in DXF/DWG and SVG output |
 | OBJ | Import polygon meshes |
 | LandXML | Import `CgPoint` survey points |
 | STL | Export 3D mesh data |

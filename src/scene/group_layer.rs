@@ -29,6 +29,18 @@ impl Scene {
             .collect()
     }
 
+    /// Whether at least one currently selected entity belongs to any group.
+    /// The viewport menu uses this to avoid offering UNGROUP for an unrelated
+    /// selection.
+    pub fn selection_in_group(&self) -> bool {
+        self.groups().any(|group| {
+            group
+                .entities
+                .iter()
+                .any(|handle| self.selected.contains(handle))
+        })
+    }
+
     // ── P&ID tags on groups ────────────────────────────────────────────────
     //
     // A group a person made is a P&ID symbol when its description carries
@@ -280,6 +292,27 @@ mod tests {
     use crate::io::pid_legend::{TagHow, TagSource};
     use acadrust::entities::{Line, Text};
     use acadrust::types::Vector3;
+
+    #[test]
+    fn selected_entity_reports_whether_it_belongs_to_a_group() {
+        let mut scene = Scene::new();
+        let grouped = scene.add_entity(EntityType::Line(Line::from_points(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )));
+        let ungrouped = scene.add_entity(EntityType::Line(Line::from_points(
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(1.0, 1.0, 0.0),
+        )));
+        scene.create_group("*A1".to_string(), vec![grouped]);
+
+        scene.select_entity(ungrouped, true);
+        assert!(!scene.selection_in_group());
+        scene.select_entity(grouped, true);
+        assert!(scene.selection_in_group());
+        scene.deselect_all();
+        assert!(!scene.selection_in_group());
+    }
 
     /// A group of a valve's strokes and the tag lettered beside them reads
     /// its tag by the recognition's rule; written into the description it

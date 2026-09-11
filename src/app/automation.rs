@@ -9,10 +9,12 @@
 //! - `{"op":"new"}`                          — start an empty document
 //! - `{"op":"open","path":"file.dwg"}`       — load a drawing
 //! - `{"op":"run","cmd":"LAYER Walls"}`      — run a command (the same dispatcher
-//!                                             the GUI command line uses)
+//!   the GUI command line uses)
 //! - `{"op":"entities"}`                     — summary count by entity type
+//! - `{"op":"pid_group","what":"create"}`     — group the current selection as a
+//!   P&ID symbol (`tag` / `auto` / `off` are the other actions)
 //! - `{"op":"save","path":"out.dwg"}`        — write the document (path optional
-//!                                             once opened/saved)
+//!   once opened/saved)
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::{BufRead, Write};
@@ -1071,6 +1073,7 @@ impl OpenCADStudio {
                 }
                 json!({ "ok": true, "selected": self.tabs[i].scene.selected_entities().len() })
             }
+            "pid_group" => self.automation_pid_group(&req),
             "save" => {
                 let i = self.active_tab;
                 let path = req["path"]
@@ -1104,6 +1107,142 @@ impl OpenCADStudio {
     fn run_headless(&mut self, cmd: &str) -> Result<(), String> {
         let task = self.run_command_line(cmd);
         self.drive_headless_task(task)
+    }
+
+    /// Scriptable counterpart of the P&ID ribbon's Group / Ungroup tools.
+    /// The caller deliberately selects entities first with the ordinary
+    /// `select` operation; keeping that stateful split makes handles reusable
+    /// across Move / Copy / property edits and this operation.
+    fn automation_pid_group(&mut self, req: &Value) -> Value {
+        let Some(what) = req["what"].as_str() else {
+            return err("pid_group: missing \"what\" (create, tag, auto or off)");
+        };
+        if !matches!(what, "create" | "tag" | "auto" | "off") {
+            return err(format!(
+                "pid_group: unknown \"what\" value {what:?} (use create, tag, auto or off)"
+            ));
+        }
+
+        let i = self.active_tab;
+        let selected = self.tabs[i].scene.selected_handles_in_order();
+        if selected.is_empty() {
+            return err(format!(
+                "pid_group {what}: no selected objects; call the select operation first"
+            ));
+        }
+
+        let before_handles = self.automation_groups_for_handles(i, &selected);
+        if matches!(what, "auto" | "off") && before_handles.is_empty() {
+            return err(format!(
+                "pid_group {what}: the selected objects are not in a group"
+            ));
+        }
+        let before = self.automation_group_records(i, &before_handles);
+
+        let command = match what {
+            "create" => "PIDGROUP GROUP".to_string(),
+            "tag" => {
+                let Some(tag) = req["tag"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|tag| !tag.is_empty())
+                else {
+                    return err("pid_group tag: missing non-empty \"tag\"");
+                };
+                if tag.contains(['\r', '\n']) {
+                    return err("pid_group tag: \"tag\" cannot contain a line break");
+                }
+                format!("PIDGROUP TAG {tag}")
+            }
+            "auto" => "PIDGROUP AUTO".to_string(),
+            "off" => "PIDGROUP OFF".to_string(),
+            _ => unreachable!(),
+        };
+
+        let error_revision = self.command_line.error_revision;
+        // Dispatch the complete line as one command. Feeding it token by token
+        // would truncate valid multi-part tags such as `GV0326A + GV0326B`.
+        let task = self.dispatch_command(&command);
+        if let Err(error) = self.drive_headless_task(task) {
+            return err(format!("pid_group {what}: {error}"));
+        }
+        if self.command_line.error_revision != error_revision {
+            return err(format!(
+                "pid_group {what}: {}",
+                self.command_line.last_error.clone().unwrap_or_default()
+            ));
+        }
+
+        let after_handles = self.automation_groups_for_handles(i, &selected);
+        let after = self.automation_group_records(i, &after_handles);
+        let changed = before != after;
+        if what == "create" && !changed {
+            return err("pid_group create: no group was created (locked layers?)");
+        }
+
+        json!({
+            "ok": true,
+            "what": what,
+            "command": command,
+            "selected": selected.len(),
+            "changed": changed,
+            "groups_before": before,
+            "groups_after": after,
+        })
+    }
+
+    fn automation_groups_for_handles(
+        &self,
+        i: usize,
+        handles: &[acadrust::Handle],
+    ) -> Vec<acadrust::Handle> {
+        let mut groups = Vec::new();
+        for handle in handles {
+            for group in self.tabs[i].scene.groups_containing(*handle) {
+                if !groups.contains(&group) {
+                    groups.push(group);
+                }
+            }
+        }
+        groups.sort_unstable_by_key(|handle| handle.value());
+        groups
+    }
+
+    fn automation_group_records(&self, i: usize, groups: &[acadrust::Handle]) -> Vec<Value> {
+        use crate::io::pid_legend::TagSource;
+        use acadrust::objects::ObjectType;
+
+        let scene = &self.tabs[i].scene;
+        let rules = crate::io::pid_legend::Rules::load();
+        groups
+            .iter()
+            .filter_map(|handle| {
+                let Some(ObjectType::Group(group)) = scene.document.objects.get(handle) else {
+                    return None;
+                };
+                let details =
+                    crate::io::pid_legend::group_details(&scene.document, *handle, &rules);
+                let tag = details.as_ref().and_then(|details| details.tag.clone());
+                let source = details.as_ref().map(|details| match details.source {
+                    TagSource::Auto => "auto",
+                    TagSource::Manual => "manual",
+                });
+                Some(json!({
+                    "handle": format!("{:X}", handle.value()),
+                    "name": details
+                        .as_ref()
+                        .map(|details| details.name.as_str())
+                        .unwrap_or(group.name.as_str()),
+                    "tag": tag,
+                    "tag_source": source,
+                    "members": group
+                        .entities
+                        .iter()
+                        .map(|member| format!("{:X}", member.value()))
+                        .collect::<Vec<_>>(),
+                }))
+            })
+            .collect()
     }
 
     pub(super) fn drive_headless_task(
@@ -2500,6 +2639,67 @@ mod tests {
         assert_eq!(app.automation_op(r#"{"op":"bogus"}"#)["ok"], false);
         assert_eq!(app.automation_op("not json")["ok"], false);
         assert_eq!(app.automation_op(r#"{"op":"run"}"#)["ok"], false);
+    }
+
+    #[test]
+    fn pid_group_automation_creates_retags_and_dissolves_the_selection() {
+        use acadrust::entities::{EntityType, Line, Text};
+        use acadrust::types::Vector3;
+
+        let mut app = OpenCADStudio::new_for_test();
+        assert_eq!(app.automation_op(r#"{"op":"new"}"#)["ok"], true);
+        let i = app.active_tab;
+
+        let mut line = Line::new();
+        line.start = Vector3::new(0.0, 0.0, 0.0);
+        line.end = Vector3::new(10.0, 0.0, 0.0);
+        let line = app.tabs[i].scene.add_entity(EntityType::Line(line));
+        let text = Text::with_value("BUV-3101".to_string(), Vector3::new(2.0, 2.0, 0.0));
+        let text = app.tabs[i].scene.add_entity(EntityType::Text(text));
+        app.tabs[i].scene.select_entity(line, false);
+        app.tabs[i].scene.select_entity(text, false);
+
+        let created = app.automation_op(r#"{"op":"pid_group","what":"create"}"#);
+        assert_eq!(created["ok"], true, "{created}");
+        assert_eq!(created["changed"], true);
+        assert_eq!(created["selected"], 2);
+        assert_eq!(created["groups_before"].as_array().unwrap().len(), 0);
+        assert_eq!(created["groups_after"].as_array().unwrap().len(), 1);
+        assert_eq!(created["groups_after"][0]["tag"], "BUV-3101");
+        assert_eq!(created["groups_after"][0]["tag_source"], "auto");
+
+        let tagged =
+            app.automation_op(r#"{"op":"pid_group","what":"tag","tag":"GV0326A + GV0326B"}"#);
+        assert_eq!(tagged["ok"], true, "{tagged}");
+        assert_eq!(
+            tagged["groups_after"][0]["tag"], "GV0326A + GV0326B",
+            "the structured API preserves a complete multi-part tag"
+        );
+        assert_eq!(tagged["groups_after"][0]["tag_source"], "manual");
+
+        let automatic = app.automation_op(r#"{"op":"pid_group","what":"auto"}"#);
+        assert_eq!(automatic["ok"], true, "{automatic}");
+        assert_eq!(automatic["groups_after"][0]["tag"], "BUV-3101");
+        assert_eq!(automatic["groups_after"][0]["tag_source"], "auto");
+
+        let dissolved = app.automation_op(r#"{"op":"pid_group","what":"off"}"#);
+        assert_eq!(dissolved["ok"], true, "{dissolved}");
+        assert_eq!(dissolved["changed"], true);
+        assert_eq!(dissolved["groups_before"].as_array().unwrap().len(), 1);
+        assert_eq!(dissolved["groups_after"].as_array().unwrap().len(), 0);
+        assert!(app.tabs[i].scene.groups().next().is_none());
+
+        assert_eq!(
+            app.automation_op(r#"{"op":"pid_group","what":"off"}"#)["ok"],
+            false,
+            "off refuses an ungrouped selection instead of silently succeeding"
+        );
+        app.tabs[i].scene.deselect_all();
+        assert_eq!(
+            app.automation_op(r#"{"op":"pid_group","what":"create"}"#)["ok"],
+            false,
+            "create says that a selection is required"
+        );
     }
 
     #[test]

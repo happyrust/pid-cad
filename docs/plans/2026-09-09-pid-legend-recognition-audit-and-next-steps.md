@@ -8,6 +8,7 @@
 > 前置：`docs/plans/2026-09-07-pid-legend-recognition.md`（D1–D19，一期块族 / 二期炸开族 / 三期管线拓扑全部已落地）。
 > 语料：`D:\work\plant-code\cad\0版重新处理dxf-12张`（CPECC 石楼油库 12 张 DXF）。
 > 本文件 = 09-09 对 `io::pid_legend` / `io::pid_pipes` / `PIDLEGEND` / `PIDLINE` / 图例面板 / 规则 / 测试的审核结论 + 剩余工作的分期。只写「还没做的」与「怎么做」。
+> P&ID 手动组合、取消组合、位号编辑及自动化接口见 `docs/plans/2026-09-10-pid-manual-groups-and-tagname.md`。
 
 ## 0. 一句话
 

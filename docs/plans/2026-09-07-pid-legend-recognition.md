@@ -7,6 +7,7 @@
 > 带 ⭕ 的决策按推荐落笔、未经拍板（方案在 Plannotator 里等批注时用户没有回话），
 > 批注里划一笔即可翻案。
 > **D19 之后的审核与四期计划见 `2026-09-09-pid-legend-recognition-audit-and-next-steps.md`。**
+> **P&ID 手动组合、取消组合与位号修正见 `2026-09-10-pid-manual-groups-and-tagname.md`。**
 
 ## 决策记录
 

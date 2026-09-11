@@ -1,7 +1,7 @@
 # P&ID 图纸识别 · 手动操作（移动 / 复制粘贴 / 组合 / 位号）开发计划（2026-09-10）
 
 > 日期：2026-09-10 晚
-> 状态：**Plannotator 批准**（2026-09-10 19:2x，`{"decision":"approved"}`，无批注）。带 ⭕ 的决策按推荐落笔、未经拍板；§5 八条待拍板按各自「推荐」执行，批注里划一笔即可翻案。**M0 + M1 + M2 + M3 + M4 + M5 已落地**（见各期「进度」）。
+> 状态：**Plannotator 批准**（2026-09-10 19:2x，`{"decision":"approved"}`，无批注）。带 ⭕ 的决策按推荐落笔、未经拍板；§5 八条待拍板按各自「推荐」执行，批注里划一笔即可翻案。**M0 + M1 + M2 + M3 + M4 + M5 + M6 已落地**（见各期「进度」）。
 > 前置：`docs/plans/2026-09-07-pid-legend-recognition.md`（D1–D19，识别内核三期）、
 > `docs/plans/2026-09-09-pid-legend-recognition-audit-and-next-steps.md`（D20–D29，W0–W4 已落地，W5 线号规则外置正在另一会话进行：工作树里 `src/io/pid_pipes.rs` / `assets/pid-legend.json` / `Cargo.toml` 有未提交改动）。
 > 语料：`D:\work\plant-code\cad\0版重新处理dxf-12张`（CPECC 石楼油库 12 张 DXF）。
@@ -129,6 +129,7 @@
 - user-guide 一节：GROUP / UNGROUP / PIDGROUP、特性面板位号、`tagName=` 描述格式、SVG `<g tagName>` 的来源、`PICKSTYLE` 提示（G6）；README 功能表一行。
 - 自动化 op：`{"op":"pid_group","what":"create"|"tag"|"auto"|"off", …}`——若 W9 的 `{"op":"pid_legend"}` 先落地就挂在它下面。
 - 09-07 / 09-09 两份计划头部各加一行指向本文件。
+- **进度（2026-09-11）✅ 已落地**。`docs/user-guide.md` 新增完整校正流程、GROUP 描述格式、特性面板、SVG、`PICKSTYLE` 与 `OpenCADStudio --serve` 示例；README 的文件能力表补 P&ID 手动校正；09-07 / 09-09 两份计划已互链。逐行 JSON 自动化新增 `pid_group` 的 `create` / `tag` / `auto` / `off` 四种动作，返回稳定排序的 `groups_before` / `groups_after`、有效位号及来源，并保留 `GV0326A + GV0326B` 这类多段位号。视口右键「取消 P&ID 符号组合」现在仅在当前选择确实属于某个组时出现，状态判断有独立单测。**验证**：自动化、组选择状态与功能区定向测试各 1/1；lib 侧 P&ID 过滤 **56 过 / 2 ignore**；`--test pid_legend` **26/26**；`cargo check --lib --tests`、`git diff --check` 与 IDE 诊断均通过；四个改动 Rust 文件未增加既有 rustfmt 债。
 
 ## 3. 手工验收（GUI，M4 之后）
 

@@ -79,6 +79,33 @@ Ribbon 中的 `Layers` 区域用于管理图层。你可以创建、锁定、冻
 
 典型工作流是先设置当前图层，再绘制对象。这样后续可以按图层批量控制显示、打印和属性。
 
+## 校正 P&ID 图例
+
+打开 P&ID 图纸后，在 `Draw` 页签的 `P&ID` 区域点击 `P&ID 图例`，或运行 `PIDLEGEND LIST`。图例面板会列出当前识别到的符号和位号；点击一行可以选中并定位该符号。
+
+自动识别不准确时，可以把正确的几何和位号文字组成一个明确的 P&ID 符号：
+
+1. 选中符号的几何和它自己的位号文字。
+2. 点击 `P&ID 组合`，或在视口右键菜单中选择 `组合为 P&ID 符号`。命令行也可以运行 `PIDGROUP GROUP`；普通 `GROUP` 会额外询问组名。
+3. 组合会按自动识别的同一套文字规则读取位号，并把 `tagName=…;tagSource=auto` 写入原生 DXF/DWG GROUP 的描述。图例中的手动组带 `手` 角标。
+4. 要调整成员时，选中组内任一对象，点击 `取消 P&ID 符号组合`，或运行 `PIDGROUP OFF` / `UNGROUP`；重新选择正确成员后再次组合。右键菜单只在当前选择属于某个组时显示取消组合入口。
+
+选中手动组的任一成员后，左侧特性面板的 `P&ID` 区域可以直接修改 `位号 (tagName)`。输入与组内文字不同的值时来源变为 `手动`；清空，或改回文字本来能读出的值，来源恢复为 `自动`。自动来源会在下一次识别时重新读取当前文字。
+
+默认的 `PICKSTYLE` 会让点击一个成员时选中整组。需要单独编辑组内文字时，可以按住 `Ctrl` 选择，或临时运行 `PICKSTYLE 0`；完成后再恢复原设置。保存为 DXF 或 DWG 后，组、描述和位号会一起保留。导出 SVG 时，已识别的符号写成 `<g tagName="…">`，组内几何与位号文字都属于该节点。
+
+通过 `OpenCADStudio --serve` 启动的逐行 JSON 自动化接口使用同一套语义。先用 `query` 取得十六进制句柄并通过 `select` 建立当前选择，再调用 `pid_group`：
+
+```json
+{"op":"select","handles":["1A","1B"]}
+{"op":"pid_group","what":"create"}
+{"op":"pid_group","what":"tag","tag":"XV-0001"}
+{"op":"pid_group","what":"auto"}
+{"op":"pid_group","what":"off"}
+```
+
+`create`、`tag`、`auto` 和 `off` 分别对应 `PIDGROUP GROUP`、`PIDGROUP TAG`、`PIDGROUP AUTO` 和 `PIDGROUP OFF`。响应中的 `groups_before` / `groups_after` 会返回组句柄、组名、位号来源和成员句柄，`changed` 表示本次是否改变了组状态。
+
 ## 标注、文字和表格
 
 `Annotate` 页签集中放置文字和标注能力。常用功能包括：

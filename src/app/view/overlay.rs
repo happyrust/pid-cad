@@ -1094,15 +1094,28 @@ impl Widget<Message, Theme, iced::Renderer> for ClampedPin<'_> {
 
 // ── Viewport right-click context menu ──────────────────────────────────────
 
+#[derive(Clone, Copy)]
+pub(super) struct ViewportContextMenuState {
+    pub(super) has_cmd: bool,
+    pub(super) has_selection: bool,
+    pub(super) selection_in_group: bool,
+    pub(super) isolation_active: bool,
+    pub(super) draworder_open: bool,
+}
+
 pub(super) fn viewport_context_menu_overlay(
     pos: iced::Point,
     bottom_inset: f32,
-    has_cmd: bool,
-    has_selection: bool,
-    isolation_active: bool,
+    state: ViewportContextMenuState,
     last_cmds: Vec<String>,
-    draworder_open: bool,
 ) -> Element<'static, Message> {
+    let ViewportContextMenuState {
+        has_cmd,
+        has_selection,
+        selection_in_group,
+        isolation_active,
+        draworder_open,
+    } = state;
     let item = |label: String, msg: Message| -> Element<'static, Message> {
         button(text(label).size(12))
             .on_press(msg)
@@ -1175,10 +1188,12 @@ pub(super) fn viewport_context_menu_overlay(
                 t!("Group as P&ID Symbol").into_owned(),
                 Message::Command("PIDGROUP GROUP".to_string()),
             ));
-            items.push(item(
-                t!("Ungroup P&ID Symbol").into_owned(),
-                Message::Command("PIDGROUP OFF".to_string()),
-            ));
+            if selection_in_group {
+                items.push(item(
+                    t!("Ungroup P&ID Symbol").into_owned(),
+                    Message::Command("PIDGROUP OFF".to_string()),
+                ));
+            }
             items.push(sep());
             let do_caret = if draworder_open {
                 crate::ui::icons::themed_arrow_down(9.0)

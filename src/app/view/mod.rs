@@ -24,7 +24,7 @@ mod viewcube;
 use controls::{dyn_component_value, viewport_controls};
 use overlay::{
     mtext_editor_overlay, position_canvas_overlay, position_canvas_overlay_near_cursor,
-    qselect_overlay, text_inline_overlay, viewport_context_menu_overlay,
+    qselect_overlay, text_inline_overlay, viewport_context_menu_overlay, ViewportContextMenuState,
 };
 use viewcube::{viewcube_nav_controls, viewcube_ucs_picker, UCS_PICKER_W};
 
@@ -1605,6 +1605,7 @@ bg={bg_ms:.1}ms n={view_count}"
             if let Some(p) = ctx_pos {
                 let has_cmd = tab.active_cmd.is_some();
                 let has_selection = !tab.scene.selected.is_empty();
+                let selection_in_group = tab.scene.selection_in_group();
                 let isolation_active = tab.scene.is_isolation_active();
                 let last_cmds: Vec<String> = self
                     .command_line
@@ -1617,11 +1618,14 @@ bg={bg_ms:.1}ms n={view_count}"
                 viewport_stack = viewport_stack.push(viewport_context_menu_overlay(
                     p,
                     command_line_inset,
-                    has_cmd,
-                    has_selection,
-                    isolation_active,
+                    ViewportContextMenuState {
+                        has_cmd,
+                        has_selection,
+                        selection_in_group,
+                        isolation_active,
+                        draworder_open,
+                    },
                     last_cmds,
-                    draworder_open,
                 ));
             }
         }
