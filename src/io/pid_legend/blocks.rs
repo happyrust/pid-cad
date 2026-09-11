@@ -53,6 +53,30 @@ pub(super) fn place(
 /// A block's line, block coordinates.
 pub(super) type Segment = ((f64, f64), (f64, f64));
 
+fn stem_line(lines: &[Segment], corners: &[(f64, f64)], base: (f64, f64)) -> Option<Segment> {
+    let dist = |p: (f64, f64)| (p.0 - base.0).hypot(p.1 - base.1);
+    let reach = corners.iter().map(|&c| dist(c)).fold(0.0, f64::max);
+    let (near, far) = lines
+        .iter()
+        .map(|&(a, b)| if dist(a) <= dist(b) { (a, b) } else { (b, a) })
+        .min_by(|x, y| dist(x.0).total_cmp(&dist(y.0)))?;
+    if reach <= 0.0 || dist(near) > reach / 20.0 {
+        return None;
+    }
+    Some((near, far))
+}
+
+/// The endpoint of the line that forms a block's stem. Unlike [`stem_end`],
+/// this stops where that line itself stops instead of extending to the far
+/// edge of the rest of the block.
+fn stem_line_end(
+    lines: &[Segment],
+    corners: &[(f64, f64)],
+    base: (f64, f64),
+) -> Option<(f64, f64)> {
+    stem_line(lines, corners, base).map(|(_, far)| far)
+}
+
 /// The far end of a block along its stem, block coordinates
 /// ([`PortRule::StemEnd`]). The stem is the block's line that starts at the
 /// base point (the one nearest it, if none quite does -- within a twentieth
@@ -64,15 +88,7 @@ pub(super) fn stem_end(
     corners: &[(f64, f64)],
     base: (f64, f64),
 ) -> Option<(f64, f64)> {
-    let dist = |p: (f64, f64)| (p.0 - base.0).hypot(p.1 - base.1);
-    let reach = corners.iter().map(|&c| dist(c)).fold(0.0, f64::max);
-    let (near, far) = lines
-        .iter()
-        .map(|&(a, b)| if dist(a) <= dist(b) { (a, b) } else { (b, a) })
-        .min_by(|x, y| dist(x.0).total_cmp(&dist(y.0)))?;
-    if reach <= 0.0 || dist(near) > reach / 20.0 {
-        return None;
-    }
+    let (near, far) = stem_line(lines, corners, base)?;
     let length = (far.0 - near.0).hypot(far.1 - near.1);
     if length <= 0.0 {
         return None;
@@ -114,6 +130,7 @@ pub(super) fn placed_block(
     let mut connections = 0;
     let mut local_lines: Vec<Segment> = Vec::new();
     let mut local_corners: Vec<(f64, f64)> = Vec::new();
+    let mut local_circles: Vec<((f64, f64), f64)> = Vec::new();
     for member in doc.entities_in_block(&insert.block_name) {
         if let EntityType::Point(point) = member {
             let p = place(
@@ -126,10 +143,15 @@ pub(super) fn placed_block(
             ports.push(Port::At(p));
             connections += 1;
         }
+        if port_rule == Some(PortRule::Rim) {
+            if let EntityType::Circle(circle) = member {
+                local_circles.push(((circle.center.x, circle.center.y), circle.radius));
+            }
+        }
         if skip_for_box(member) {
             continue;
         }
-        if port_rule == Some(PortRule::StemEnd) {
+        if matches!(port_rule, Some(PortRule::StemEnd | PortRule::StemLineEnd)) {
             if let EntityType::Line(line) = member {
                 local_lines.push(((line.start.x, line.start.y), (line.end.x, line.end.y)));
             }
@@ -141,7 +163,7 @@ pub(super) fn placed_block(
             (bb.max.x, bb.min.y),
             (bb.max.x, bb.max.y),
         ] {
-            if port_rule == Some(PortRule::StemEnd) {
+            if matches!(port_rule, Some(PortRule::StemEnd | PortRule::StemLineEnd)) {
                 local_corners.push(corner);
             }
             let (x, y) = place(corner, base, scale, insert.rotation, insertion);
@@ -156,13 +178,30 @@ pub(super) fn placed_block(
         insertion.1 + half,
     ));
     if connections == 0 {
-        let port = match port_rule {
-            Some(PortRule::StemEnd) => stem_end(&local_lines, &local_corners, base)
-                .map(|p| place(p, base, scale, insert.rotation, insertion))
-                .unwrap_or(insertion),
-            Some(PortRule::Insertion) | None => insertion,
-        };
-        ports.push(Port::At(port));
+        match port_rule {
+            Some(PortRule::Rim) if !local_circles.is_empty() => {
+                let radius_scale = (scale.0.abs() + scale.1.abs()) * 0.5;
+                ports.extend(local_circles.into_iter().map(|(centre, radius)| Port::Rim {
+                    centre: place(centre, base, scale, insert.rotation, insertion),
+                    r: radius * radius_scale,
+                }));
+            }
+            Some(PortRule::StemEnd) => {
+                let port = stem_end(&local_lines, &local_corners, base)
+                    .map(|p| place(p, base, scale, insert.rotation, insertion))
+                    .unwrap_or(insertion);
+                ports.push(Port::At(port));
+            }
+            Some(PortRule::StemLineEnd) => {
+                let port = stem_line_end(&local_lines, &local_corners, base)
+                    .map(|p| place(p, base, scale, insert.rotation, insertion))
+                    .unwrap_or(insertion);
+                ports.push(Port::At(port));
+            }
+            Some(PortRule::Insertion | PortRule::Rim) | None => {
+                ports.push(Port::At(insertion));
+            }
+        }
     }
     let at = ((bbox.0 + bbox.2) / 2.0, (bbox.1 + bbox.3) / 2.0);
     Some(PlacedBlock { bbox, at, ports })
@@ -297,6 +336,26 @@ mod tests {
         assert!(
             (end.0 - 10.0).abs() < 1e-9 && (end.1 - 22.0).abs() < 1e-9,
             "{end:?}"
+        );
+    }
+
+    #[test]
+    fn a_stem_line_end_stops_at_a_funnels_throat() {
+        let lines: [Segment; 4] = [
+            ((-218.08, 659.66), (218.08, 659.66)),
+            ((0.0, 414.64), (-218.08, 659.66)),
+            ((0.0, 414.64), (218.08, 659.66)),
+            ((0.0, 414.64), (0.0, 0.0)),
+        ];
+        let corners: Vec<(f64, f64)> = lines.iter().flat_map(|&(a, b)| [a, b]).collect();
+        assert_eq!(
+            stem_line_end(&lines, &corners, (0.0, 0.0)),
+            Some((0.0, 414.64))
+        );
+        assert_eq!(
+            stem_end(&lines, &corners, (0.0, 0.0)),
+            Some((0.0, 659.66)),
+            "the existing vent-style rule deliberately reaches across the body"
         );
     }
 

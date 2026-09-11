@@ -2006,6 +2006,41 @@ const SHEETS: &[Expected] = &[
         ),
         vents_in_line: (8, "150-FW"),
     },
+    // The WS02 drainage sheets have no butterfly / motorised valves, tanks
+    // or instrument bubbles. Zeroes are intentional: putting them in the
+    // same table makes the shared symbol and pipe invariants cover them too.
+    Expected {
+        file: "DWG-0100WS02-05 辅助生产区排水流程图.dxf",
+        butterfly: 0,
+        evalve: 0,
+        tanks: 0,
+        field_bubbles: 0,
+        panel_bubbles: 0,
+        total: 11,
+        pipe_strokes: 17,
+        runs: 17,
+        connected_ports: (11, 11),
+        open_ends: 10,
+        evalve_line: "",
+        butterfly_line: (&[], ""),
+        vents_in_line: (0, ""),
+    },
+    Expected {
+        file: "DWG-0100WS02-06 水池排水流程图一.dxf",
+        butterfly: 0,
+        evalve: 0,
+        tanks: 0,
+        field_bubbles: 0,
+        panel_bubbles: 0,
+        total: 24,
+        pipe_strokes: 31,
+        runs: 24,
+        connected_ports: (27, 33),
+        open_ends: 9,
+        evalve_line: "",
+        butterfly_line: (&[], ""),
+        vents_in_line: (0, ""),
+    },
 ];
 
 #[test]
@@ -2174,6 +2209,87 @@ fn cpecc_sheets_every_symbol_is_known_and_every_valve_has_its_own_tag() {
         assert_eq!(in_line, vents, "{name}: vent stubs in {vent_line}");
     }
     ran.finish("cpecc_sheets_every_symbol_is_known_and_every_valve_has_its_own_tag");
+}
+
+/// W6: both drainage drawings are first-class fixtures. Before the block
+/// ports were described, WS02-05 had 31 open pipe ends: 21 were exactly on
+/// the rims of its eight circular drainage nodes. WS02-06 had 14: five were
+/// exactly at the throats of its five funnel blocks. The lists below account
+/// for every end left after those real connections are represented:
+///
+/// - WS02-05: four DN110 building laterals, four termini at named treatment
+///   facilities, and both ends of one isolated 2.3 mm stroke.
+/// - WS02-06: two incoming branches after sheet references, one pool-boundary
+///   termination, and the two sides of each of three explicitly drawn pumps.
+#[test]
+fn cpecc_drainage_sheets_name_references_and_account_for_every_open_end() {
+    let cases: &[(&str, &[&str], &[(i64, i64)])] = &[
+        (
+            "DWG-0100WS02-05 辅助生产区排水流程图.dxf",
+            &["化粪池", "去往中水池", "生活污水处理装置"],
+            &[
+                (13071, 16977),
+                (14997, 22677),
+                (19269, 16977),
+                (21541, 13046),
+                (21541, 13612),
+                (21541, 14204),
+                (21541, 18564),
+                (23682, 4589),
+                (24621, 4929),
+                (24621, 5157),
+            ],
+        ),
+        (
+            "DWG-0100WS02-06 水池排水流程图一.dxf",
+            &["去往雨水监控池", "库区来含油污水", "铁路区域来含油污水"],
+            &[
+                (8075, 18139),
+                (10096, 19557),
+                (16308, 6609),
+                (18284, 21713),
+                (18284, 23963),
+                (18769, 21713),
+                (18769, 23963),
+                (24947, 21713),
+                (25432, 21713),
+            ],
+        ),
+    ];
+
+    let rules = Rules::builtin();
+    let mut ran = Ran::new();
+    for &(file, expected_tags, expected_open) in cases {
+        let Some(doc) = ran.sheet(file) else {
+            continue;
+        };
+        let recognition = pid_legend::recognise(&doc, &rules);
+
+        let mut tags = tags_of(&recognition, "sheet-ref");
+        tags.sort_unstable();
+        assert_eq!(tags, expected_tags, "{file}: directional references");
+
+        let mut open: Vec<(i64, i64)> = recognition
+            .pipes
+            .runs
+            .iter()
+            .flat_map(|run| {
+                run.ends.iter().enumerate().filter_map(|(side, end)| {
+                    (*end == pid_pipes::End::Open).then(|| {
+                        let point = if side == 0 {
+                            run.path[0]
+                        } else {
+                            *run.path.last().unwrap()
+                        };
+                        (point.0.round() as i64, point.1.round() as i64)
+                    })
+                })
+            })
+            .collect();
+        open.sort_unstable();
+        assert_eq!(open, expected_open, "{file}: unexplained pipe end");
+    }
+    ran.finish("cpecc_drainage_sheets_name_references_and_account_for_every_open_end");
 }
 
 /// The loading-island sheets: symbols are loose strokes, bubbles are small.

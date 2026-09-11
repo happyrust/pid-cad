@@ -19,6 +19,10 @@ pub struct TagRule {
     /// letter, `*` anything from here on (a leading `*` = anything before),
     /// other characters literal.
     pub shape: Option<String>,
+    /// Additional accepted shapes for one symbol class. This keeps the
+    /// original single `shape` field compatible while allowing a sheet
+    /// connector to accept both drawing numbers and directional prose.
+    pub shapes: Vec<String>,
     /// Read the tag from the lettering inside the symbol (circles): a line of
     /// capitals and a line of digits compose as `XV-3201`.
     pub inner: bool,
@@ -27,6 +31,9 @@ pub struct TagRule {
     pub bubble: Option<String>,
     /// Search radius for this class, paper mm; absent = `Rules::radius_mm`.
     pub radius_mm: Option<f64>,
+    /// Minimum characters for this class's tag; absent =
+    /// `Rules::tag_min_chars`. Useful for a short but explicit place name.
+    pub min_chars: Option<usize>,
     /// List lettering of this shape that no symbol claimed. Off for shapes
     /// that also occur where no symbol is expected (a sheet's own number in
     /// the title block has the shape of a sheet reference).
@@ -44,9 +51,11 @@ impl Default for TagRule {
     fn default() -> Self {
         TagRule {
             shape: None,
+            shapes: Vec::new(),
             inner: false,
             bubble: None,
             radius_mm: None,
+            min_chars: None,
             report_orphans: true,
             report_untagged: None,
         }
@@ -54,8 +63,24 @@ impl Default for TagRule {
 }
 
 impl TagRule {
+    pub(super) fn shape_patterns(&self) -> impl Iterator<Item = &str> {
+        self.shape
+            .iter()
+            .map(String::as_str)
+            .chain(self.shapes.iter().map(String::as_str))
+    }
+
+    pub(super) fn matches_shape(&self, value: &str) -> bool {
+        self.shape_patterns()
+            .any(|shape| shape_matches(shape, value))
+    }
+
+    pub(super) fn accepts_tag(&self, value: &str, rules: &Rules) -> bool {
+        value.trim().chars().count() >= self.min_chars.unwrap_or(rules.tag_min_chars)
+    }
+
     pub(super) fn wants_tag(&self) -> bool {
-        self.shape.is_some() || self.inner || self.bubble.is_some()
+        self.shape_patterns().next().is_some() || self.inner || self.bubble.is_some()
     }
 
     pub(super) fn reports_untagged(&self) -> bool {
@@ -81,6 +106,12 @@ pub struct OrphanRules {
 pub enum PortRule {
     /// Its insertion point: the sheet connector, the foam interface.
     Insertion,
+    /// The rim of each circle in the block, transformed with the insertion.
+    /// Drainage nodes are small circular blocks whose pipes stop at the rim.
+    Rim,
+    /// The far endpoint of the stem line that starts at the block base point.
+    /// A funnel's pipe stops at the throat where that line meets its bowl.
+    StemLineEnd,
     /// The far end of the block along its stem -- the line drawn out of the
     /// insertion point -- where the block's geometry stops: the vent stub,
     /// whose pipe is drawn over the stem right through to the closed end of
@@ -431,11 +462,11 @@ impl Rules {
             .values()
             .chain(self.shapes.iter().flat_map(|s| s.dictionary.values()))
             .filter(|rule| rule.class != IGNORE_CLASS)
-            .filter_map(|rule| rule.tag.shape.as_deref());
+            .flat_map(|rule| rule.tag.shape_patterns());
         let from_circles = self
             .circles
             .iter()
-            .filter_map(|rule| rule.tag.shape.as_deref());
+            .flat_map(|rule| rule.tag.shape_patterns());
         for shape in from_classes.chain(from_blocks).chain(from_circles) {
             if !out.contains(&shape) {
                 out.push(shape);
@@ -529,11 +560,37 @@ mod tests {
             Some(PortRule::StemEnd),
             "the vent stub joins pipe at the far end of its stem"
         );
+        assert_eq!(
+            rules.blocks["$Standard$00000080"].port,
+            Some(PortRule::StemLineEnd),
+            "the funnel joins pipe at its throat"
+        );
+        assert_eq!(
+            rules.blocks["$TwtSys$00000147"].port,
+            Some(PortRule::Rim),
+            "the drainage node joins every pipe endpoint on its circular rim"
+        );
         assert_eq!(rules.blocks["$TwtSys$00000132"].port, None);
         // The sheet connector turns orphans off (the sheet's own number has
         // the shape) but keeps the coordinates of the connectors without one.
         let connector = &rules.blocks["$TwtSys$00000132"].tag;
         assert!(!connector.report_orphans && connector.reports_untagged());
+        for value in [
+            "接 DWG-0100FF02-04",
+            "去往雨水监控池",
+            "铁路区域来含油污水",
+            "化粪池",
+            "生活污水处理装置",
+        ] {
+            assert!(connector.matches_shape(value), "{value}");
+            assert!(connector.accepts_tag(value, &rules), "{value}");
+        }
+        for name in ["$VALVE$00000315", "$TwtSys$00000147", "RC"] {
+            assert!(
+                rules.blocks[name].label.contains("待图例"),
+                "{name}: an unconfirmed name must stay visibly provisional"
+            );
+        }
         assert!(
             !rules.orphans.claimed_elsewhere,
             "a table row a symbol already carries is a duplicate, not an orphan"

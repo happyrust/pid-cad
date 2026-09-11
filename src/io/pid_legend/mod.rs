@@ -45,9 +45,9 @@
 //!
 //! On the block family the pipe is traced too ([`pid_pipes`]): the `PIPE-*`
 //! strokes joined into runs between the symbols' connection points (the
-//! `POINT`s of a valve block, the insertion point of a block without any --
-//! or the far end of its stem when its rule says `"port": "stem-end"` --
-//! the rim of an S / K circle), each run carrying the line number lettered
+//! `POINT`s of a valve block, the insertion point of a block without any,
+//! a configured stem endpoint or circular block rim, or the rim of an S / K
+//! circle), each run carrying the line number lettered
 //! along it, so a symbol knows the lines it sits in. The runs are drawn in
 //! with the legend: a polyline along each on `PID-PIPE-<line number>`, one
 //! layer per line in a colour of its own, the runs on no numbered line in
@@ -502,13 +502,14 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             continue;
         }
         let inner: Vec<&str> = symbol.inner_text.iter().map(String::as_str).collect();
-        let read = match &rule.shape {
-            Some(shape) => tag_from_lettering(&inner, &[shape.as_str()])
-                .filter(|read| read.how == TagHow::Shape),
-            None => tag_from_lettering(&inner, &[]),
+        let shapes: Vec<&str> = rule.shape_patterns().collect();
+        let read = if shapes.is_empty() {
+            tag_from_lettering(&inner, &[])
+        } else {
+            tag_from_lettering(&inner, &shapes).filter(|read| read.how == TagHow::Shape)
         };
         match read {
-            Some(read) if rules.accepts_tag(&read.value) => {
+            Some(read) if rule.accepts_tag(&read.value, rules) => {
                 symbol.tag = Some(read.value);
                 symbol.tag_distance_mm = Some(0.0);
             }
@@ -552,9 +553,12 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
                     }
                 }
             }
-        } else if let Some(shape) = &rule.shape {
+        } else {
             for (k, l) in lettering.iter().enumerate() {
-                if !taken_text[k] && rules.accepts_tag(&l.value) && shape_matches(shape, &l.value) {
+                if !taken_text[k]
+                    && rule.accepts_tag(&l.value, rules)
+                    && rule.matches_shape(&l.value)
+                {
                     let d = (l.at.0 - symbol.at.0).hypot(l.at.1 - symbol.at.1);
                     if d <= reach {
                         candidates.push((d, k, i));
@@ -591,7 +595,11 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
         .blocks
         .values()
         .filter(|r| r.tag.report_orphans)
-        .filter_map(|r| r.tag.shape.as_deref().map(|s| (s, r.label.as_str())))
+        .flat_map(|r| {
+            r.tag
+                .shape_patterns()
+                .map(move |shape| (shape, r.label.as_str()))
+        })
         .chain(
             rules
                 .tag_classes

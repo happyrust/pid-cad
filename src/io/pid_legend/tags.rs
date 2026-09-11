@@ -120,25 +120,21 @@ pub fn class_for_tag(tag: &str, rules: &Rules) -> Option<TagClass> {
         if rule.class == IGNORE_CLASS {
             continue;
         }
-        if let Some(shape) = &rule.tag.shape {
-            if shape_matches(shape, first) {
-                return Some(TagClass {
-                    class: rule.class.clone(),
-                    label: rule.label.clone(),
-                    color: rule.color,
-                });
-            }
+        if rule.tag.matches_shape(first) {
+            return Some(TagClass {
+                class: rule.class.clone(),
+                label: rule.label.clone(),
+                color: rule.color,
+            });
         }
     }
     for rule in &rules.circles {
-        if let Some(shape) = &rule.tag.shape {
-            if shape_matches(shape, first) {
-                return Some(TagClass {
-                    class: rule.class.clone(),
-                    label: rule.label.clone(),
-                    color: rule.color,
-                });
-            }
+        if rule.tag.matches_shape(first) {
+            return Some(TagClass {
+                class: rule.class.clone(),
+                label: rule.label.clone(),
+                color: rule.color,
+            });
         }
     }
     None
