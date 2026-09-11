@@ -1006,6 +1006,7 @@ fn component_ports(
 pub(super) struct Exploded {
     pub(super) symbols: Vec<(Recognized, TagRule)>,
     pub(super) unknown: Vec<UnknownShape>,
+    pub(super) unknown_locations: BTreeMap<String, Vec<ExceptionLocation>>,
     pub(super) ports: Vec<(usize, Port)>,
     pub(super) pipe_strokes: Vec<pid_pipes::PipeStroke>,
 }
@@ -1198,6 +1199,7 @@ pub(super) fn exploded_symbols(
     }
     let mut summaries: BTreeMap<&str, UnknownShape> = BTreeMap::new();
     let mut nearby: HashMap<&str, HashMap<&str, usize>> = HashMap::new();
+    let mut unknown_locations: BTreeMap<String, Vec<ExceptionLocation>> = BTreeMap::new();
     let mut symbols = Vec::new();
     let scale = |b: (f64, f64, f64, f64)| (b.0 * upm, b.1 * upm, b.2 * upm, b.3 * upm);
     // Strokes of the components that became symbols (named, ignored or
@@ -1303,6 +1305,15 @@ pub(super) fn exploded_symbols(
                     nearby: Vec::new(),
                 });
             summary.count += 1;
+            unknown_locations
+                .entry(c.id.clone())
+                .or_default()
+                .push(ExceptionLocation {
+                    value: c.id.clone(),
+                    at,
+                    bbox: scale(c.bbox),
+                    handles: c.handles(prims),
+                });
             let reach = w.max(h) * 0.75 + 4.0;
             let near = nearby.entry(c.id.as_str()).or_default();
             for l in lettering {
@@ -1472,6 +1483,7 @@ pub(super) fn exploded_symbols(
     Exploded {
         symbols,
         unknown,
+        unknown_locations,
         ports,
         pipe_strokes,
     }

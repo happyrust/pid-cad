@@ -233,6 +233,28 @@ pub struct UnknownShape {
     pub nearby: Vec<(String, usize)>,
 }
 
+/// A source placement an exception row can select and zoom to.
+///
+/// These locations are deliberately kept beside the existing report fields
+/// rather than replacing them, so command-line and JSON report schemas stay
+/// byte-for-byte compatible while the editor gains navigation evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExceptionLocation {
+    pub value: String,
+    pub at: (f64, f64),
+    pub bbox: (f64, f64, f64, f64),
+    pub handles: Vec<Handle>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ExceptionLocations {
+    pub unknown_blocks: BTreeMap<String, Vec<ExceptionLocation>>,
+    pub unknown_shapes: BTreeMap<String, Vec<ExceptionLocation>>,
+    pub orphan_tags: BTreeMap<String, Vec<ExceptionLocation>>,
+    pub range_annotations: BTreeMap<String, Vec<ExceptionLocation>>,
+    pub duplicate_tags: BTreeMap<String, Vec<ExceptionLocation>>,
+}
+
 /// What [`recognise`] found on a sheet.
 #[derive(Debug, Clone, Default)]
 pub struct Recognition {
@@ -255,6 +277,9 @@ pub struct Recognition {
     pub duplicate_tags: BTreeMap<String, Vec<String>>,
     /// Pieces of model-space lettering considered.
     pub lettering: usize,
+    /// Editor-only source locations for the five exception summaries above.
+    /// Serializers intentionally continue to emit the established fields.
+    pub exceptions: ExceptionLocations,
     /// The pipe, joined into runs between the symbols (block family).
     pub pipes: Pipes,
 }
@@ -305,6 +330,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
     // The tag rule of each symbol, in `symbols` order, for the pairing pass.
     let mut tag_rules = vec![TagRule::default(); symbols.len()];
     let mut unknown_blocks: BTreeMap<String, usize> = BTreeMap::new();
+    let mut exceptions = ExceptionLocations::default();
     // Where pipe can meet each symbol, by index into `symbols`.
     let mut ports = manual.ports;
 
@@ -342,9 +368,18 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             ),
             None => {
                 let layer = insert.common.layer.as_str();
-                *unknown_blocks
-                    .entry(format!("{name} on {layer}"))
-                    .or_default() += 1;
+                let what = format!("{name} on {layer}");
+                *unknown_blocks.entry(what.clone()).or_default() += 1;
+                exceptions
+                    .unknown_blocks
+                    .entry(what)
+                    .or_default()
+                    .push(ExceptionLocation {
+                        value: name.to_string(),
+                        at,
+                        bbox,
+                        handles: vec![insert.common.handle],
+                    });
                 let (class, family) = match rules.layer_fallback(layer) {
                     Some(fallback) => (fallback.class.clone(), fallback.label.clone()),
                     None => ("unknown".to_string(), "未知块".to_string()),
@@ -516,6 +551,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
                 symbols.push(symbol);
                 tag_rules.push(tag);
             }
+            exceptions.unknown_shapes = found.unknown_locations;
             unknown_shapes = found.unknown;
         }
     }
@@ -661,6 +697,16 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
                         .entry(label.to_string())
                         .or_default()
                         .extend(missing.iter().cloned());
+                    exceptions
+                        .orphan_tags
+                        .entry(label.to_string())
+                        .or_default()
+                        .extend(missing.iter().map(|member| ExceptionLocation {
+                            value: member.clone(),
+                            at: l.at,
+                            bbox: (l.at.0, l.at.1, l.at.0, l.at.1),
+                            handles: vec![l.handle],
+                        }));
                 }
                 range_annotations
                     .entry(label.to_string())
@@ -670,16 +716,46 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
                         members: members.clone(),
                         missing,
                     });
+                exceptions
+                    .range_annotations
+                    .entry(label.to_string())
+                    .or_default()
+                    .push(ExceptionLocation {
+                        value: l.value.clone(),
+                        at: l.at,
+                        bbox: (l.at.0, l.at.1, l.at.0, l.at.1),
+                        handles: vec![l.handle],
+                    });
             } else if carried.contains(l.value.as_str()) && !rules.orphans.claimed_elsewhere {
                 duplicate_tags
                     .entry(label.to_string())
                     .or_default()
                     .push(l.value.clone());
+                exceptions
+                    .duplicate_tags
+                    .entry(label.to_string())
+                    .or_default()
+                    .push(ExceptionLocation {
+                        value: l.value.clone(),
+                        at: l.at,
+                        bbox: (l.at.0, l.at.1, l.at.0, l.at.1),
+                        handles: vec![l.handle],
+                    });
             } else {
                 orphan_tags
                     .entry(label.to_string())
                     .or_default()
                     .push(l.value.clone());
+                exceptions
+                    .orphan_tags
+                    .entry(label.to_string())
+                    .or_default()
+                    .push(ExceptionLocation {
+                        value: l.value.clone(),
+                        at: l.at,
+                        bbox: (l.at.0, l.at.1, l.at.0, l.at.1),
+                        handles: vec![l.handle],
+                    });
             }
         }
     }
@@ -690,6 +766,15 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
     for annotations in range_annotations.values_mut() {
         annotations.sort_by(|a, b| a.value.cmp(&b.value));
         annotations.dedup_by(|a, b| a.value == b.value);
+    }
+    for locations in exceptions
+        .orphan_tags
+        .values_mut()
+        .chain(exceptions.range_annotations.values_mut())
+        .chain(exceptions.duplicate_tags.values_mut())
+    {
+        locations.sort_by(|a, b| a.value.cmp(&b.value));
+        locations.dedup_by(|a, b| a.value == b.value);
     }
 
     // ── the pipe: runs between the symbols' connection points, numbered
@@ -751,6 +836,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
         range_annotations,
         duplicate_tags,
         lettering: lettering.len(),
+        exceptions,
         pipes,
     }
 }

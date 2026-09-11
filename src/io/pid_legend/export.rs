@@ -365,6 +365,7 @@ mod tests {
             )]),
             duplicate_tags: BTreeMap::from([("蝶阀".to_string(), vec!["BUV-1".to_string()])]),
             lettering: 4,
+            exceptions: Default::default(),
             pipes: Pipes {
                 runs: vec![
                     run(End::Open, End::Symbol(0), 10.0),
@@ -393,6 +394,10 @@ mod tests {
         );
         assert_eq!(value["pipes"]["runs"][0]["ends"][0], "open");
         assert_eq!(value["pipes"]["runs"][0]["ends"][1]["symbol"], 0);
+        assert!(
+            value.get("exceptions").is_none(),
+            "editor navigation evidence does not change the machine schema"
+        );
         let pretty = to_json_pretty("sheet.dxf", &recognition()).unwrap();
         assert_eq!(serde_json::from_str::<Value>(&pretty).unwrap()[0], value);
     }

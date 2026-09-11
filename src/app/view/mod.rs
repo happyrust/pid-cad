@@ -2699,6 +2699,7 @@ impl OpenCADStudio {
                 tab.pid_legend(),
                 tab.pid_legend_is_stale(),
                 self.pid_legend_filter,
+                self.pid_legend_exceptions_open,
                 width,
                 auto_collapse,
             ),

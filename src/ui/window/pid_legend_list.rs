@@ -25,6 +25,7 @@ use crate::t;
 use crate::ui::dock::{DockMsg, PanelId};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, tooltip};
 use iced::{Background, Element, Fill, Length, Theme};
+use std::collections::BTreeMap;
 
 /// Which symbols the legend list shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -207,6 +208,114 @@ fn jump_row<'a>(
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct ExceptionCounts {
+    unknown_blocks: usize,
+    unknown_shapes: usize,
+    orphan_tags: usize,
+    range_annotations: usize,
+    duplicate_tags: usize,
+}
+
+impl ExceptionCounts {
+    fn of(recognition: &Recognition) -> Self {
+        Self {
+            unknown_blocks: recognition.unknown_blocks.values().sum(),
+            unknown_shapes: recognition
+                .unknown_shapes
+                .iter()
+                .map(|shape| shape.count)
+                .sum(),
+            orphan_tags: recognition.orphan_tags.values().map(Vec::len).sum(),
+            range_annotations: recognition.range_annotations.values().map(Vec::len).sum(),
+            duplicate_tags: recognition.duplicate_tags.values().map(Vec::len).sum(),
+        }
+    }
+
+    fn total(self) -> usize {
+        self.unknown_blocks
+            + self.unknown_shapes
+            + self.orphan_tags
+            + self.range_annotations
+            + self.duplicate_tags
+    }
+}
+
+fn exception_location<'a>(
+    locations: &'a BTreeMap<String, Vec<crate::io::pid_legend::ExceptionLocation>>,
+    group: &str,
+    value: Option<&str>,
+) -> Option<&'a crate::io::pid_legend::ExceptionLocation> {
+    let locations = locations.get(group)?;
+    value
+        .and_then(|value| locations.iter().find(|location| location.value == value))
+        .or_else(|| locations.first())
+}
+
+fn exception_row(
+    name: String,
+    detail: Option<String>,
+    location: Option<&crate::io::pid_legend::ExceptionLocation>,
+    units_per_mm: f64,
+    dim: bool,
+) -> Element<'static, Message> {
+    let mut label = row![
+        row_text(name, 10.0, dim),
+        iced::widget::Space::new().width(Fill),
+    ]
+    .spacing(5)
+    .align_y(iced::Center);
+    if let Some(detail) = detail {
+        label = label.push(text(detail).size(9).style(muted));
+    }
+    let label: Element<'static, Message> = label.into();
+    let Some(location) = location else {
+        return container(label)
+            .padding(iced::Padding {
+                top: 2.0,
+                right: 6.0,
+                bottom: 2.0,
+                left: 28.0,
+            })
+            .width(Fill)
+            .into();
+    };
+    let target = jump_rect(location.bbox, units_per_mm);
+    click_row(
+        label,
+        28.0,
+        Message::PidLegendPickException {
+            handles: location
+                .handles
+                .iter()
+                .filter(|handle| !handle.is_null())
+                .map(|handle| handle.value())
+                .collect(),
+            min: target.0,
+            max: target.1,
+        },
+    )
+}
+
+fn exception_category(title: String, count: usize, dim: bool) -> Element<'static, Message> {
+    container(
+        row![
+            row_text(title, 11.0, dim),
+            iced::widget::Space::new().width(Fill),
+            text(count.to_string()).size(10).style(muted),
+        ]
+        .align_y(iced::Center),
+    )
+    .padding(iced::Padding {
+        top: 4.0,
+        right: 6.0,
+        bottom: 2.0,
+        left: 16.0,
+    })
+    .width(Fill)
+    .into()
+}
+
 /// Build the docked panel element from the active tab's recognition. `stale`
 /// says the drawing has changed since the recognition was read; `filter` is
 /// the group of symbols the list is narrowed to.
@@ -214,6 +323,7 @@ pub fn view(
     recognition: Option<&Recognition>,
     stale: bool,
     filter: PidLegendFilter,
+    exceptions_open: bool,
     width: f32,
     auto_collapse: bool,
 ) -> Element<'_, Message> {
@@ -531,6 +641,141 @@ pub fn view(
         }
     }
 
+    // ── Recognition exceptions ───────────────────────────────────────────
+    // The counts are the same values the command-line report summarises.
+    // Rows carry source evidence gathered during recognition, so a click
+    // selects the offending entity/text and zooms to it.
+    let counts = ExceptionCounts::of(rec);
+    let exception_header = button(
+        row![
+            text(if exceptions_open { "▼" } else { "▶" }).size(10),
+            row_text(format!("例外 {}", counts.total()), 12.0, stale),
+            iced::widget::Space::new().width(Fill),
+        ]
+        .spacing(5)
+        .align_y(iced::Center),
+    )
+    .on_press(Message::PidLegendExceptionsToggle)
+    .style(button::subtle)
+    .padding([4, 6])
+    .width(Fill);
+    col = col.push(container(exception_header).padding(iced::Padding {
+        top: 8.0,
+        right: 0.0,
+        bottom: 0.0,
+        left: 0.0,
+    }));
+    if exceptions_open {
+        if counts.total() == 0 {
+            col = col.push(container(text("没有例外").size(10).style(muted)).padding(
+                iced::Padding {
+                    top: 2.0,
+                    right: 6.0,
+                    bottom: 2.0,
+                    left: 28.0,
+                },
+            ));
+        }
+        if counts.unknown_blocks > 0 {
+            col = col.push(exception_category(
+                "未知块".to_string(),
+                counts.unknown_blocks,
+                stale,
+            ));
+            for (what, count) in &rec.unknown_blocks {
+                col = col.push(exception_row(
+                    what.clone(),
+                    Some(format!("×{count}")),
+                    exception_location(&rec.exceptions.unknown_blocks, what, None),
+                    rec.units_per_mm,
+                    stale,
+                ));
+            }
+        }
+        if counts.unknown_shapes > 0 {
+            col = col.push(exception_category(
+                "未命名形状".to_string(),
+                counts.unknown_shapes,
+                stale,
+            ));
+            for shape in &rec.unknown_shapes {
+                col = col.push(exception_row(
+                    shape.id.clone(),
+                    Some(format!(
+                        "×{} · {:.1}×{:.1} mm",
+                        shape.count, shape.size_mm.0, shape.size_mm.1
+                    )),
+                    exception_location(&rec.exceptions.unknown_shapes, &shape.id, None),
+                    rec.units_per_mm,
+                    stale,
+                ));
+            }
+        }
+        if counts.orphan_tags > 0 {
+            col = col.push(exception_category(
+                "无主位号".to_string(),
+                counts.orphan_tags,
+                stale,
+            ));
+            for (class, tags) in &rec.orphan_tags {
+                for tag in tags {
+                    col = col.push(exception_row(
+                        tag.clone(),
+                        Some(class.clone()),
+                        exception_location(&rec.exceptions.orphan_tags, class, Some(tag)),
+                        rec.units_per_mm,
+                        stale,
+                    ));
+                }
+            }
+        }
+        if counts.range_annotations > 0 {
+            col = col.push(exception_category(
+                "范围标注".to_string(),
+                counts.range_annotations,
+                stale,
+            ));
+            for (class, annotations) in &rec.range_annotations {
+                for annotation in annotations {
+                    let detail = if annotation.missing.is_empty() {
+                        class.clone()
+                    } else {
+                        format!("{class} · 缺 {}", annotation.missing.join(" + "))
+                    };
+                    col = col.push(exception_row(
+                        annotation.value.clone(),
+                        Some(detail),
+                        exception_location(
+                            &rec.exceptions.range_annotations,
+                            class,
+                            Some(&annotation.value),
+                        ),
+                        rec.units_per_mm,
+                        stale,
+                    ));
+                }
+            }
+        }
+        if counts.duplicate_tags > 0 {
+            col = col.push(exception_category(
+                "重复位号".to_string(),
+                counts.duplicate_tags,
+                stale,
+            ));
+            for (class, tags) in &rec.duplicate_tags {
+                for tag in tags {
+                    col = col.push(exception_row(
+                        tag.clone(),
+                        Some(class.clone()),
+                        exception_location(&rec.exceptions.duplicate_tags, class, Some(tag)),
+                        rec.units_per_mm,
+                        stale,
+                    ));
+                }
+            }
+        }
+    }
+
     let body = scrollable(container(col).padding(iced::Padding {
         top: 0.0,
         right: 8.0,
@@ -648,5 +893,61 @@ mod tests {
         assert!(tooltip.contains("*A1"), "{tooltip}");
         assert!(tooltip.contains(t!("Automatic").as_ref()), "{tooltip}");
         assert!(manual_group_badge_text(&symbol(None, true, (0.0, 0.0))).is_none());
+    }
+
+    #[test]
+    fn exception_counts_match_the_five_report_categories_and_locations() {
+        use crate::io::pid_legend::{ExceptionLocation, RangeAnnotation, UnknownShape};
+        use acadrust::Handle;
+
+        let location = |value: &str, handle: u64| ExceptionLocation {
+            value: value.to_string(),
+            at: (10.0, 20.0),
+            bbox: (10.0, 20.0, 10.0, 20.0),
+            handles: vec![Handle::new(handle)],
+        };
+        let mut recognition = Recognition {
+            unknown_blocks: BTreeMap::from([("BLOCK on 0".to_string(), 2)]),
+            unknown_shapes: vec![UnknownShape {
+                id: "abc".to_string(),
+                count: 3,
+                size_mm: (2.0, 3.0),
+                strokes: 4,
+                example_at: (10.0, 20.0),
+                nearby: Vec::new(),
+            }],
+            orphan_tags: BTreeMap::from([(
+                "蝶阀".to_string(),
+                vec!["BUV-1".to_string(), "BUV-2".to_string()],
+            )]),
+            range_annotations: BTreeMap::from([(
+                "蝶阀".to_string(),
+                vec![RangeAnnotation {
+                    value: "BUV-1/2".to_string(),
+                    members: vec!["BUV-1".to_string(), "BUV-2".to_string()],
+                    missing: Vec::new(),
+                }],
+            )]),
+            duplicate_tags: BTreeMap::from([("蝶阀".to_string(), vec!["BUV-1".to_string()])]),
+            ..Recognition::default()
+        };
+        recognition.exceptions.orphan_tags.insert(
+            "蝶阀".to_string(),
+            vec![location("BUV-1", 0x2A), location("BUV-2", 0x2B)],
+        );
+
+        let counts = ExceptionCounts::of(&recognition);
+        assert_eq!(counts.unknown_blocks, 2);
+        assert_eq!(counts.unknown_shapes, 3);
+        assert_eq!(counts.orphan_tags, 2);
+        assert_eq!(counts.range_annotations, 1);
+        assert_eq!(counts.duplicate_tags, 1);
+        assert_eq!(counts.total(), 9);
+        assert_eq!(
+            exception_location(&recognition.exceptions.orphan_tags, "蝶阀", Some("BUV-2"))
+                .unwrap()
+                .handles,
+            [Handle::new(0x2B)]
+        );
     }
 }

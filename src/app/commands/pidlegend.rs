@@ -2126,6 +2126,33 @@ mod tests {
     }
 
     #[test]
+    fn a_pid_exception_row_selects_and_zooms_to_its_source() {
+        use acadrust::entities::{EntityType, Text};
+        use acadrust::types::Vector3;
+
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let source = app.tabs[i]
+            .scene
+            .add_entity(EntityType::Text(Text::with_value(
+                "BUV-9999",
+                Vector3::new(20.0, 30.0, 0.0),
+            )));
+        assert!(!app.pid_legend_exceptions_open);
+        let _ = app.update(Message::PidLegendExceptionsToggle);
+        assert!(app.pid_legend_exceptions_open);
+        let camera = app.tabs[i].scene.camera_generation;
+        let _ = app.update(Message::PidLegendPickException {
+            handles: vec![source.value()],
+            min: (16.0, 26.0),
+            max: (24.0, 34.0),
+        });
+        assert_eq!(selected(&app), vec![source]);
+        assert!(app.tabs[i].scene.camera_generation > camera);
+    }
+
+    #[test]
     fn pidlegend_on_publishes_xdata_off_keeps_it_and_purge_removes_everything() {
         use acadrust::entities::{EntityType, Text};
         use acadrust::types::Vector3;

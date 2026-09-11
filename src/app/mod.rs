@@ -657,6 +657,8 @@ pub(super) struct OpenCADStudio {
     pub(crate) show_pid_legend_list: bool,
     /// Which group of symbols the P&ID legend list shows (its filter row).
     pub(crate) pid_legend_filter: crate::ui::window::pid_legend_list::PidLegendFilter,
+    /// Whether the P&ID panel's five exception summaries are expanded.
+    pub(crate) pid_legend_exceptions_open: bool,
     /// General edge-stack dock layout for the side panels.
     pub(crate) dock: crate::ui::dock::DockState,
     /// Which panel is currently floated at full height (hovered, or a pinned
@@ -3031,6 +3033,14 @@ pub enum Message {
     /// The P&ID legend list's group filter: all symbols, the tagged ones, or
     /// the ones that should carry a tag and do not.
     PidLegendFilter(crate::ui::window::pid_legend_list::PidLegendFilter),
+    /// Expand or collapse the P&ID panel's exception section.
+    PidLegendExceptionsToggle,
+    /// Select and zoom to the source placement of an exception row.
+    PidLegendPickException {
+        handles: Vec<u64>,
+        min: (f64, f64),
+        max: (f64, f64),
+    },
     /// A dock chrome interaction (grab/resize/pin/hover/dock move) on a side
     /// panel.
     Dock(crate::ui::dock::DockMsg),
@@ -3493,6 +3503,7 @@ impl OpenCADStudio {
             show_block_palette: false,
             show_pid_legend_list: false,
             pid_legend_filter: Default::default(),
+            pid_legend_exceptions_open: false,
             block_palette: Default::default(),
             dock: Default::default(),
             dock_expanded: None,

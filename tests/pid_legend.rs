@@ -232,6 +232,10 @@ fn synthetic_sheet_is_recognised_and_tagged_one_to_one() {
             .get("$VALVE$00000999 on VALVE_雨水"),
         Some(&1)
     );
+    let unknown_location =
+        &recognition.exceptions.unknown_blocks["$VALVE$00000999 on VALVE_雨水"][0];
+    assert_eq!(unknown_location.handles, unknown.handles);
+    assert_eq!(unknown_location.bbox, unknown.bbox);
     assert!(
         recognition.orphan_tags.is_empty(),
         "{:?}",
@@ -347,6 +351,27 @@ fn unclaimed_lettering_is_sorted_into_ranges_duplicates_and_orphans() {
     assert_eq!(ranges[1].missing, ["BUV-3103"]);
     assert_eq!(recognition.duplicate_tags["蝶阀"], ["BUV-3101"]);
     assert_eq!(recognition.orphan_tags["蝶阀"], ["BUV-3103", "BUV-3199"]);
+    assert_eq!(
+        recognition.exceptions.orphan_tags["蝶阀"]
+            .iter()
+            .map(|location| location.value.as_str())
+            .collect::<Vec<_>>(),
+        ["BUV-3103", "BUV-3199"]
+    );
+    assert_eq!(
+        recognition.exceptions.range_annotations["蝶阀"]
+            .iter()
+            .map(|location| location.value.as_str())
+            .collect::<Vec<_>>(),
+        ["BUV-3101/3102", "BUV-3101～3103"]
+    );
+    assert_eq!(
+        recognition.exceptions.duplicate_tags["蝶阀"][0].value,
+        "BUV-3101"
+    );
+    assert!(recognition.exceptions.orphan_tags["蝶阀"]
+        .iter()
+        .all(|location| location.handles.len() == 1));
 
     let lines = pid_legend::report(&recognition);
     for expected in [
@@ -1251,6 +1276,14 @@ fn exploded_sheet_symbols_are_named_by_their_tags_or_boxed_by_shape() {
     assert_eq!(recognition.unknown_shapes.len(), 1);
     assert_eq!(recognition.unknown_shapes[0].count, 3);
     assert_eq!(recognition.unknown_shapes[0].strokes, 3);
+    let locations = &recognition.exceptions.unknown_shapes[&recognition.unknown_shapes[0].id];
+    assert_eq!(locations.len(), 3);
+    assert!(locations
+        .iter()
+        .all(|location| !location.handles.is_empty()));
+    assert!(locations
+        .iter()
+        .all(|location| shapes.iter().any(|shape| shape.bbox == location.bbox)));
     assert!(
         recognition.orphan_tags.is_empty(),
         "{:?}",

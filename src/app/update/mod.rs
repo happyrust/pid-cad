@@ -7260,6 +7260,29 @@ impl OpenCADStudio {
                 self.pid_legend_filter = filter;
                 Task::none()
             }
+            Message::PidLegendExceptionsToggle => {
+                self.pid_legend_exceptions_open = !self.pid_legend_exceptions_open;
+                Task::none()
+            }
+            Message::PidLegendPickException { handles, min, max } => {
+                let i = self.active_tab;
+                let handles: Vec<acadrust::Handle> = handles
+                    .into_iter()
+                    .map(acadrust::Handle::new)
+                    .filter(|handle| self.tabs[i].scene.document.get_entity(*handle).is_some())
+                    .collect();
+                self.tabs[i].scene.deselect_all();
+                for handle in handles {
+                    self.tabs[i].scene.select_entity(handle, false);
+                }
+                self.refresh_properties();
+                self.tabs[i].scene.remember_current_view();
+                self.tabs[i].scene.zoom_to_window(
+                    glam::Vec3::new(min.0 as f32, min.1 as f32, 0.0),
+                    glam::Vec3::new(max.0 as f32, max.1 as f32, 0.0),
+                );
+                Task::none()
+            }
             Message::Dock(m) => self.on_dock(m),
             Message::PrintAllOpen => self.on_print_all_open(),
             Message::PrintAllToggle(name) => {
