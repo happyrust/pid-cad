@@ -249,6 +249,12 @@ pub struct ShapeRules {
     /// Cluster only sheets that draw on one of these layers (the exploded
     /// family's layers); empty = every sheet.
     pub layers_any: Vec<String>,
+    /// Additional layers whose long axis-aligned strokes can be process
+    /// pipe. The symbol layers in `layers_any` are included automatically.
+    pub pipe_layers: Vec<String>,
+    /// Line-number reach for exploded-sheet candidate pipe, paper mm.
+    /// Absent keeps `pipes.number_mm`.
+    pub pipe_number_mm: Option<f64>,
     /// Layers left out of clustering (frame, title block, dimensions).
     pub skip_layers: Vec<String>,
     /// A stroke with a segment longer than this is pipe, not symbol.
@@ -306,6 +312,8 @@ impl Default for ShapeRules {
     fn default() -> Self {
         ShapeRules {
             layers_any: Vec::new(),
+            pipe_layers: Vec::new(),
+            pipe_number_mm: None,
             skip_layers: Vec::new(),
             max_stroke_mm: 14.0,
             pipe_stub_mm: 0.0,
@@ -331,6 +339,13 @@ impl ShapeRules {
             || doc
                 .model_space_entities()
                 .any(|e| self.layers_any.iter().any(|l| *l == e.common().layer))
+    }
+
+    pub(super) fn is_pipe_source_layer(&self, layer: &str) -> bool {
+        self.layers_any
+            .iter()
+            .chain(&self.pipe_layers)
+            .any(|candidate| candidate == layer)
     }
 }
 
@@ -551,6 +566,15 @@ mod tests {
         assert_eq!(rules.blocks["11111"].tag.shape.as_deref(), Some("LA-9999*"));
         assert_eq!(rules.blocks["11111"].tag.radius_mm, Some(25.0));
         let shapes = rules.shapes.as_ref().unwrap();
+        assert_eq!(
+            shapes.pipe_layers,
+            ["0", "-0", "工艺外线", "T-PIPE_DIESEL O"]
+        );
+        assert_eq!(shapes.pipe_number_mm, Some(10.0));
+        for layer in ["DEVICE", "0", "-0", "工艺外线", "T-PIPE_DIESEL O"] {
+            assert!(shapes.is_pipe_source_layer(layer), "{layer}");
+        }
+        assert!(!shapes.is_pipe_source_layer("A"));
         assert_eq!(shapes.recover_min_runs, 1);
         let arm = &shapes.dictionary["b6f54271"];
         assert_eq!(arm.class, "loading-arm");

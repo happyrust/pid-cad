@@ -43,8 +43,10 @@
 //! free, and the marked-up sheet survives a DXF export. [`clear`] removes
 //! them again.
 //!
-//! On the block family the pipe is traced too ([`pid_pipes`]): the `PIPE-*`
-//! strokes joined into runs between the symbols' connection points (the
+//! Pipe is traced too ([`pid_pipes`]). The block family supplies `PIPE-*`
+//! strokes; the exploded family supplies the long axis runs its symbol pass
+//! already separated from symbol geometry. Both are joined into runs between
+//! the symbols' connection points (the
 //! `POINT`s of a valve block, the insertion point of a block without any,
 //! a configured stem endpoint or circular block rim, or the rim of an S / K
 //! circle), each run carrying the line number lettered
@@ -289,6 +291,7 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
     let manual = recognise_manual_groups(doc, rules, upm, &lettering, &mut taken_text);
     let excluded_handles = manual.excluded_handles;
     let mut used_circles = manual.circle_handles;
+    let mut process_circles = HashSet::new();
     let mut symbols = manual.symbols;
     // The tag rule of each symbol, in `symbols` order, for the pairing pass.
     let mut tag_rules = vec![TagRule::default(); symbols.len()];
@@ -440,6 +443,9 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
             }
             _ => (rule.class.clone(), rule.label.clone(), rule.color),
         };
+        if matches!(class.as_str(), "s-point" | "drain-point" | "pump" | "tank") {
+            process_circles.insert(circle.common.handle);
+        }
         // Pipe meets a circle symbol (an S / K point) on its rim.
         ports.push((
             symbols.len(),
@@ -471,8 +477,11 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
 
     // ── exploded symbols: connected components of loose strokes
     let mut unknown_shapes = Vec::new();
+    let mut exploded_pipe_strokes = Vec::new();
+    let mut exploded_pipe_number_mm = None;
     if let Some(shape_rules) = &rules.shapes {
         if shape_rules.applies(doc) {
+            exploded_pipe_number_mm = shape_rules.pipe_number_mm;
             let found = exploded_symbols(
                 doc,
                 upm,
@@ -480,11 +489,20 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
                 shape_rules,
                 &ExplodedExclusions {
                     circles: &used_circles,
+                    process_circles: &process_circles,
                     handles: &excluded_handles,
                 },
                 &lettering,
                 &mut taken_text,
             );
+            let symbol_offset = symbols.len();
+            ports.extend(
+                found
+                    .ports
+                    .into_iter()
+                    .map(|(symbol, port)| (symbol_offset + symbol, port)),
+            );
+            exploded_pipe_strokes = found.pipe_strokes;
             for (symbol, tag) in found.symbols {
                 symbols.push(symbol);
                 tag_rules.push(tag);
@@ -668,7 +686,41 @@ pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64)
     // ── the pipe: runs between the symbols' connection points, numbered
     let letter_points: Vec<((f64, f64), &str)> =
         lettering.iter().map(|l| (l.at, l.value.as_str())).collect();
-    let pipes = pid_pipes::trace(doc, upm, &rules.pipes, &ports, &letter_points);
+    // On exploded sheets, most recognised circles are instrument bubbles or
+    // actuator marks. Their leaders are not process pipe. Block/trimmed-stub
+    // ports are `At`; only process endpoint circles keep their rim ports.
+    let exploded_ports: Vec<(usize, Port)> = if exploded_pipe_strokes.is_empty() {
+        ports.clone()
+    } else {
+        ports
+            .iter()
+            .copied()
+            .filter(|(symbol, port)| {
+                matches!(port, Port::At(_))
+                    || matches!(
+                        symbols[*symbol].class.as_str(),
+                        "s-point" | "drain-point" | "pump" | "tank"
+                    )
+            })
+            .collect()
+    };
+    let mut pipe_rules = rules.pipes.clone();
+    if !exploded_pipe_strokes.is_empty() {
+        if let Some(number_mm) = exploded_pipe_number_mm {
+            pipe_rules.number_mm = number_mm;
+        }
+    }
+    let pipes = if exploded_pipe_strokes.is_empty() {
+        pid_pipes::trace(doc, upm, &pipe_rules, &exploded_ports, &letter_points)
+    } else {
+        pid_pipes::trace_with_strokes(
+            upm,
+            &pipe_rules,
+            &exploded_ports,
+            &letter_points,
+            &exploded_pipe_strokes,
+        )
+    };
     for run in &pipes.runs {
         for end in run.ends {
             if let End::Symbol(i) = end {

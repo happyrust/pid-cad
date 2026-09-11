@@ -1753,7 +1753,10 @@ fn unnamed_shapes_draw_in_their_own_colour_on_one_layer() {
     let rules = Rules::builtin();
     let recognition = pid_legend::recognise(&doc, &rules);
     let added = pid_legend::apply(&mut doc, &recognition, &rules);
-    assert_eq!(added, recognition.symbols.len() * 2);
+    assert_eq!(
+        added,
+        recognition.symbols.len() * 2 + pid_legend::pipe_entities(&recognition, &rules).len()
+    );
     let shape_entities: Vec<&EntityType> = doc
         .model_space_entities()
         .filter(|e| e.common().layer == pid_legend::SHAPE_LAYER)
@@ -2043,6 +2046,103 @@ const SHEETS: &[Expected] = &[
     },
 ];
 
+struct ExplodedPipeExpected {
+    file: &'static str,
+    symbols: usize,
+    segments: usize,
+    runs: usize,
+    connected_ports: usize,
+    ports: usize,
+    open_ends: usize,
+    lines: &'static [&'static str],
+}
+
+const EXPLODED_PIPES: &[ExplodedPipeExpected] = &[
+    ExplodedPipeExpected {
+        file: "DWG-0100SP02-05 发油泵棚(二)工艺自控流程图.dxf",
+        symbols: 254,
+        segments: 179,
+        runs: 226,
+        connected_ports: 101,
+        ports: 121,
+        open_ends: 48,
+        lines: &[],
+    },
+    ExplodedPipeExpected {
+        file: "DWG-0100SP02-06 汽车装卸岛(一)工艺自控流程图.dxf",
+        symbols: 131,
+        segments: 164,
+        runs: 216,
+        connected_ports: 181,
+        ports: 219,
+        open_ends: 59,
+        lines: &[
+            "100-CGA-0319-A1",
+            "100-QGA-0303-A1",
+            "25-LD-0314-B1",
+            "250-CGA-0311-A1",
+            "300-QGA-0312-A1",
+        ],
+    },
+    ExplodedPipeExpected {
+        file: "DWG-0100SP02-07 汽车装卸岛(二)工艺自控流程图.dxf",
+        symbols: 217,
+        segments: 193,
+        runs: 231,
+        connected_ports: 226,
+        ports: 308,
+        open_ends: 72,
+        lines: &[
+            "25-LD-0314-B1",
+            "25-LG-0313-B1",
+            "250-CGA-0311-A1",
+            "300-QGA-0312-A1",
+        ],
+    },
+    ExplodedPipeExpected {
+        file: "DWG-0100SP02-08 汽车装卸岛(三)工艺自控流程图.dxf",
+        symbols: 227,
+        segments: 185,
+        runs: 223,
+        connected_ports: 223,
+        ports: 325,
+        open_ends: 73,
+        lines: &[
+            "100-QGA-0323-A1",
+            "25-LD-0314-B1",
+            "25-LG-0313-B1",
+            "250-CGA-0311-A1",
+            "300-QGA-0312-A1",
+        ],
+    },
+    ExplodedPipeExpected {
+        file: "DWG-0100SP02-09 汽车装卸岛(四)工艺自控流程图.dxf",
+        symbols: 178,
+        segments: 153,
+        runs: 181,
+        connected_ports: 173,
+        ports: 259,
+        open_ends: 62,
+        lines: &[
+            "100-QGA-0324-A1",
+            "100-QGA-0325-A1",
+            "25-LD-0314-B1",
+            "25-LG-0313-B1",
+            "300-QGA-0312-A1",
+        ],
+    },
+    ExplodedPipeExpected {
+        file: "DWG-0100SP02-10 汽车装卸岛(五)工艺自控流程图.dxf",
+        symbols: 120,
+        segments: 93,
+        runs: 113,
+        connected_ports: 74,
+        ports: 104,
+        open_ends: 58,
+        lines: &["25-LD-0314-B1", "25-LG-0313-B1"],
+    },
+];
+
 #[test]
 fn cpecc_sheets_every_symbol_is_known_and_every_valve_has_its_own_tag() {
     let rules = Rules::builtin();
@@ -2211,6 +2311,8 @@ fn cpecc_sheets_every_symbol_is_known_and_every_valve_has_its_own_tag() {
     ran.finish("cpecc_sheets_every_symbol_is_known_and_every_valve_has_its_own_tag");
 }
 
+type DrainageCase = (&'static str, &'static [&'static str], &'static [(i64, i64)]);
+
 /// W6: both drainage drawings are first-class fixtures. Before the block
 /// ports were described, WS02-05 had 31 open pipe ends: 21 were exactly on
 /// the rims of its eight circular drainage nodes. WS02-06 had 14: five were
@@ -2223,7 +2325,7 @@ fn cpecc_sheets_every_symbol_is_known_and_every_valve_has_its_own_tag() {
 ///   termination, and the two sides of each of three explicitly drawn pumps.
 #[test]
 fn cpecc_drainage_sheets_name_references_and_account_for_every_open_end() {
-    let cases: &[(&str, &[&str], &[(i64, i64)])] = &[
+    let cases: &[DrainageCase] = &[
         (
             "DWG-0100WS02-05 辅助生产区排水流程图.dxf",
             &["化粪池", "去往中水池", "生活污水处理装置"],
@@ -2274,8 +2376,11 @@ fn cpecc_drainage_sheets_name_references_and_account_for_every_open_end() {
             .runs
             .iter()
             .flat_map(|run| {
-                run.ends.iter().enumerate().filter_map(|(side, end)| {
-                    (*end == pid_pipes::End::Open).then(|| {
+                run.ends
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, end)| **end == pid_pipes::End::Open)
+                    .map(|(side, _)| {
                         let point = if side == 0 {
                             run.path[0]
                         } else {
@@ -2283,13 +2388,112 @@ fn cpecc_drainage_sheets_name_references_and_account_for_every_open_end() {
                         };
                         (point.0.round() as i64, point.1.round() as i64)
                     })
-                })
             })
             .collect();
         open.sort_unstable();
         assert_eq!(open, expected_open, "{file}: unexplained pipe end");
     }
     ran.finish("cpecc_drainage_sheets_name_references_and_account_for_every_open_end");
+}
+
+/// W7: the exploded sheets hand the long axis runs already discovered by the
+/// symbol pass to the ordinary pipe tracer. Components that reach neither a
+/// process port nor a line number are table/instrument noise and stay out.
+#[test]
+fn cpecc_exploded_sheets_trace_process_pipe_and_numbered_families() {
+    let rules = Rules::builtin();
+    let mut ran = Ran::new();
+    for expected in EXPLODED_PIPES {
+        let Some(doc) = ran.sheet(expected.file) else {
+            continue;
+        };
+        let recognition = pid_legend::recognise(&doc, &rules);
+        let pipes = &recognition.pipes;
+        assert_eq!(
+            recognition.symbols.len(),
+            expected.symbols,
+            "{}",
+            expected.file
+        );
+        assert_eq!(
+            pipes.segments, expected.segments,
+            "{}: strokes",
+            expected.file
+        );
+        assert_eq!(pipes.runs.len(), expected.runs, "{}: runs", expected.file);
+        assert_eq!(
+            (pipes.connected_ports, pipes.ports),
+            (expected.connected_ports, expected.ports),
+            "{}: ports",
+            expected.file
+        );
+        assert_eq!(
+            pipes.open_ends, expected.open_ends,
+            "{}: open ends",
+            expected.file
+        );
+        assert!(
+            pipes
+                .runs
+                .iter()
+                .all(|run| run.path.len() >= 2 && !run.handles.is_empty()),
+            "{}: every run keeps selectable source geometry",
+            expected.file
+        );
+        let by_line = pipes.by_line();
+        assert_eq!(
+            by_line.keys().copied().collect::<Vec<_>>(),
+            expected.lines,
+            "{}: line numbers",
+            expected.file
+        );
+
+        if expected.file.contains("SP02-06") {
+            let tags_on = |line: &str| {
+                let mut tags: Vec<&str> = pipes
+                    .symbols_on(line)
+                    .into_iter()
+                    .filter_map(|index| recognition.symbols[index].tag.as_deref())
+                    .collect();
+                tags.sort_unstable();
+                tags
+            };
+            assert_eq!(
+                tags_on("100-CGA-0319-A1"),
+                ["CVV0319", "FA0319"],
+                "the breathing-gas line reaches its breather valve and flame arrester"
+            );
+            assert_eq!(
+                tags_on("100-QGA-0303-A1"),
+                ["接图 DWG-0100SP02-04"],
+                "the QGA line reaches the previous-sheet reference"
+            );
+            assert_eq!(
+                tags_on("25-LD-0314-B1"),
+                ["接图 DWG-0100SP02-07"],
+                "the drain line reaches the next-sheet reference"
+            );
+            assert_eq!(tags_on("300-QGA-0312-A1"), ["XV-0302"]);
+            let classes_on = |line: &str| {
+                pipes
+                    .symbols_on(line)
+                    .into_iter()
+                    .map(|index| recognition.symbols[index].class.as_str())
+                    .collect::<BTreeSet<_>>()
+            };
+            assert_eq!(
+                classes_on("250-CGA-0311-A1"),
+                BTreeSet::from(["flow-arrow"])
+            );
+            assert_eq!(
+                classes_on("300-QGA-0312-A1"),
+                BTreeSet::from(["evalve", "flow-arrow"])
+            );
+            assert_eq!(pipes.family_of("100-CGA-0319-A1"), "CGA-0319");
+            assert!(pipes.by_family().contains_key("CGA-0319"));
+        }
+    }
+    ran.finish("cpecc_exploded_sheets_trace_process_pipe_and_numbered_families");
 }
 
 /// The loading-island sheets: symbols are loose strokes, bubbles are small.

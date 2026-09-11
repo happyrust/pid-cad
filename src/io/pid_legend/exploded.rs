@@ -166,6 +166,9 @@ struct SheetRun {
     run: AxisRun,
     prim: Option<usize>,
     pipe: Option<usize>,
+    ends: [Point; 2],
+    handle: Handle,
+    pipe_source: bool,
 }
 
 /// What [`loose_prims`] takes from a sheet.
@@ -180,6 +183,9 @@ struct Loose {
     runs: Vec<SheetRun>,
     /// Circles already recognised as symbols, `(centre, radius)`.
     circles: Vec<(Point, f64)>,
+    /// Recognised circles that are instrumentation or actuator marks rather
+    /// than process endpoints.
+    non_pipe_circles: Vec<(Point, f64)>,
 }
 
 fn arc_points(c: (f64, f64), r: f64, start: f64, end: f64, n: usize) -> Vec<(f64, f64)> {
@@ -200,6 +206,7 @@ fn arc_points(c: (f64, f64), r: f64, start: f64, end: f64, n: usize) -> Vec<(f64
 /// the pipe runs and recognised circles that say where the pipe goes.
 pub(super) struct ExplodedExclusions<'a> {
     pub circles: &'a HashSet<Handle>,
+    pub process_circles: &'a HashSet<Handle>,
     pub handles: &'a HashSet<Handle>,
 }
 
@@ -219,6 +226,7 @@ fn loose_prims(
         pipe_prims: Vec::new(),
         runs: Vec::new(),
         circles: Vec::new(),
+        non_pipe_circles: Vec::new(),
     };
     for entity in doc.model_space_entities() {
         let handle = entity.common().handle;
@@ -266,6 +274,9 @@ fn loose_prims(
                 if excluded.circles.contains(&c.common.handle) {
                     if sane(centre.0) && sane(centre.1) && sane(r) {
                         out.circles.push((centre, r));
+                        if !excluded.process_circles.contains(&c.common.handle) {
+                            out.non_pipe_circles.push((centre, r));
+                        }
                     }
                     continue;
                 }
@@ -331,11 +342,15 @@ fn loose_prims(
         let too_long =
             prim.kind != PrimKind::Circle && prim.longest_segment() > rules.max_stroke_mm;
         let stub = rules.pipe_stub_mm > 0.0 && run.is_some_and(|r| r.len() > rules.pipe_stub_mm);
+        let pipe_source = stub && rules.is_pipe_source_layer(layer);
         match run {
             Some(run) if too_long => out.runs.push(SheetRun {
                 run,
                 prim: None,
                 pipe: None,
+                ends: [prim.pts[0], prim.pts[1]],
+                handle,
+                pipe_source,
             }),
             Some(run) if stub => pipes.push((prim, run)),
             _ if too_long => {}
@@ -350,11 +365,19 @@ fn loose_prims(
                 run,
                 prim: Some(prim),
                 pipe: None,
+                ends: [prims[prim].pts[0], prims[prim].pts[1]],
+                handle: prims[prim].handles[0],
+                pipe_source: false,
             });
         }
     }
     out.prims = prims;
-    let (pipe_prims, runs): (Vec<Prim>, Vec<AxisRun>) = pipes.into_iter().unzip();
+    let mut pipe_prims = Vec::with_capacity(pipes.len());
+    let mut runs = Vec::with_capacity(pipes.len());
+    for (prim, run) in pipes {
+        pipe_prims.push(prim);
+        runs.push(run);
+    }
     let (pipe_prims, index) = dedupe(pipe_prims, rules.touch_mm);
     for (old, run) in runs.into_iter().enumerate() {
         if let Some(pipe) = index[old] {
@@ -362,10 +385,59 @@ fn loose_prims(
                 run,
                 prim: None,
                 pipe: Some(pipe),
+                ends: [pipe_prims[pipe].pts[0], pipe_prims[pipe].pts[1]],
+                handle: pipe_prims[pipe].handles[0],
+                pipe_source: pipe_prims[pipe].handles.iter().any(|handle| {
+                    doc.get_entity(*handle)
+                        .is_some_and(|entity| rules.is_pipe_source_layer(&entity.common().layer))
+                }),
             });
         }
     }
     out.pipe_prims = pipe_prims;
+    let non_pipe_circles = &out.non_pipe_circles;
+    let mut instrument: Vec<bool> = out
+        .runs
+        .iter()
+        .map(|run| {
+            run.pipe_source
+                && run.ends.iter().any(|point| {
+                    non_pipe_circles.iter().any(|&(centre, radius)| {
+                        ((point.0 - centre.0).hypot(point.1 - centre.1) - radius).abs()
+                            <= STEM_END_MM
+                    })
+                })
+        })
+        .collect();
+    let mut queue: Vec<usize> = instrument
+        .iter()
+        .enumerate()
+        .filter_map(|(index, is_instrument)| (*is_instrument).then_some(index))
+        .collect();
+    let connected = |a: &SheetRun, b: &SheetRun| {
+        a.ends
+            .iter()
+            .any(|point| point_segment_distance(*point, b.ends[0], b.ends[1]) <= rules.touch_mm)
+            || b.ends
+                .iter()
+                .any(|point| point_segment_distance(*point, a.ends[0], a.ends[1]) <= rules.touch_mm)
+    };
+    while let Some(current) = queue.pop() {
+        for (candidate, is_instrument) in instrument.iter_mut().enumerate() {
+            if !*is_instrument
+                && out.runs[candidate].pipe_source
+                && connected(&out.runs[current], &out.runs[candidate])
+            {
+                *is_instrument = true;
+                queue.push(candidate);
+            }
+        }
+    }
+    for (run, instrument) in out.runs.iter_mut().zip(instrument) {
+        if instrument {
+            run.pipe_source = false;
+        }
+    }
     out
 }
 
@@ -691,34 +763,37 @@ fn split_at_bridges(
 /// symbol's edge ends where the body ends and so does not stick out. Done
 /// until nothing changes, so a stub drawn in two pieces goes too. A symbol
 /// so has one id whatever length of pipe was drawn against it.
+#[derive(Clone, Copy)]
+struct TrimmedStub {
+    prim: usize,
+    attached: Point,
+}
+
 fn trim_pipe_stubs(
     prims: &[Prim],
     mut idxs: Vec<usize>,
     circles: &[(Point, f64)],
     eps: f64,
+    trimmed: &mut Vec<TrimmedStub>,
 ) -> Vec<usize> {
     loop {
         if idxs.len() < 2 {
             return idxs;
         }
-        let stub = idxs.iter().position(|&i| {
+        let stub = idxs.iter().enumerate().find_map(|(at, &i)| {
             let p = &prims[i];
-            let Some(run) = p.axis_run() else {
-                return false;
-            };
+            let run = p.axis_run()?;
             let attached = |e: Point| {
                 idxs.iter()
                     .any(|&j| j != i && point_on_prim(e, &prims[j], eps))
             };
-            let free = match (attached(p.pts[0]), attached(p.pts[1])) {
-                (true, false) => p.pts[1],
-                (false, true) => p.pts[0],
-                _ => return false,
+            let (attached, free) = match (attached(p.pts[0]), attached(p.pts[1])) {
+                (true, false) => (p.pts[0], p.pts[1]),
+                (false, true) => (p.pts[1], p.pts[0]),
+                _ => return None,
             };
             let rest: Vec<usize> = idxs.iter().copied().filter(|&j| j != i).collect();
-            let Some(core) = group_bbox(prims, &rest) else {
-                return false;
-            };
+            let core = group_bbox(prims, &rest)?;
             let ((lo, hi), (across_lo, across_hi)) = extents(core, run.axis);
             let along = match run.axis {
                 Axis::Horizontal => free.0,
@@ -729,10 +804,14 @@ fn trim_pipe_stubs(
             let to_a_circle = circles
                 .iter()
                 .any(|&(c, r)| ((free.0 - c.0).hypot(free.1 - c.1) - r).abs() <= STEM_END_MM);
-            sticks_out && within && !to_a_circle
+            (sticks_out && within && !to_a_circle)
+                .then_some((at, TrimmedStub { prim: i, attached }))
         });
         match stub {
-            Some(at) => {
+            Some((at, stub)) => {
+                if !trimmed.iter().any(|item| item.prim == stub.prim) {
+                    trimmed.push(stub);
+                }
                 idxs.remove(at);
             }
             None => return idxs,
@@ -879,9 +958,56 @@ impl Component {
     }
 }
 
+fn component_ports(
+    component: &Component,
+    prims: &[Prim],
+    trimmed: &[TrimmedStub],
+    runs: &[SheetRun],
+    eps: f64,
+) -> Vec<Point> {
+    let mut ports = Vec::new();
+    let touches_component = |point| {
+        component
+            .idxs
+            .iter()
+            .any(|&index| point_on_prim(point, &prims[index], eps))
+    };
+    let component_handles: HashSet<Handle> = component
+        .idxs
+        .iter()
+        .flat_map(|&index| prims[index].handles.iter().copied())
+        .collect();
+    let mut push = |point: Point| {
+        if !ports
+            .iter()
+            .any(|existing: &Point| (existing.0 - point.0).hypot(existing.1 - point.1) <= eps)
+        {
+            ports.push(point);
+        }
+    };
+    for stub in trimmed {
+        if touches_component(stub.attached) {
+            push(stub.attached);
+        }
+    }
+    for run in runs
+        .iter()
+        .filter(|run| run.pipe_source && !component_handles.contains(&run.handle))
+    {
+        for point in run.ends {
+            if touches_component(point) {
+                push(point);
+            }
+        }
+    }
+    ports
+}
+
 pub(super) struct Exploded {
     pub(super) symbols: Vec<(Recognized, TagRule)>,
     pub(super) unknown: Vec<UnknownShape>,
+    pub(super) ports: Vec<(usize, Port)>,
+    pub(super) pipe_strokes: Vec<pid_pipes::PipeStroke>,
 }
 
 /// Components of loose geometry, named by the tag beside them or by the
@@ -902,18 +1028,21 @@ pub(super) fn exploded_symbols(
     let min_strokes = shape_rules.split_min_strokes;
     // Take the pipe out: stubs off each component, then a cut wherever a
     // piece of pipe joins two symbols, then the stubs that cut left behind.
-    let trim = |idxs: Vec<usize>| {
-        if min_strokes > 0 {
-            trim_pipe_stubs(prims, idxs, &loose.circles, eps)
-        } else {
-            idxs
-        }
-    };
+    let mut trimmed_stubs = Vec::new();
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for group in components(prims, eps) {
+        let group = if min_strokes > 0 {
+            trim_pipe_stubs(prims, group, &loose.circles, eps, &mut trimmed_stubs)
+        } else {
+            group
+        };
         let runs = runs_for_group(&loose.runs, &group, min_strokes);
-        for part in split_at_bridges(prims, &runs, trim(group), min_strokes, eps) {
-            groups.push(trim(part));
+        for part in split_at_bridges(prims, &runs, group, min_strokes, eps) {
+            groups.push(if min_strokes > 0 {
+                trim_pipe_stubs(prims, part, &loose.circles, eps, &mut trimmed_stubs)
+            } else {
+                part
+            });
         }
     }
     for idxs in groups {
@@ -1074,7 +1203,9 @@ pub(super) fn exploded_symbols(
     // Strokes of the components that became symbols (named, ignored or
     // boxed): the second pass leaves them alone.
     let mut in_symbol = vec![false; prims.len()];
+    let mut ports = Vec::new();
     for (ci, c) in comps.iter().enumerate() {
+        let symbol_index = symbols.len();
         let at = (c.centre.0 * upm, c.centre.1 * upm);
         let source = format!("shape {} ({} strokes)", c.id, c.strokes());
         let repeated = counts.get(c.id.as_str()).copied().unwrap_or(0) >= shape_rules.min_count;
@@ -1181,6 +1312,13 @@ pub(super) fn exploded_symbols(
                 }
             }
         }
+        if symbols.len() > symbol_index {
+            ports.extend(
+                component_ports(c, prims, &trimmed_stubs, &loose.runs, eps)
+                    .into_iter()
+                    .map(|point| (symbol_index, Port::At((point.0 * upm, point.1 * upm)))),
+            );
+        }
     }
     let mut unknown: Vec<UnknownShape> = summaries
         .into_iter()
@@ -1200,8 +1338,14 @@ pub(super) fn exploded_symbols(
     unknown.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.id.cmp(&b.id)));
 
     // ── second pass: the tags still free, over the strokes the pipe rule took
+    let mut recovered_symbol_handles = HashSet::new();
     if shape_rules.recover_min_runs > 0 && shape_rules.pipe_stub_mm > 0.0 {
-        for (comp, handles, claim) in recovered_symbols(
+        for RecoveredSymbol {
+            component: comp,
+            handles,
+            claim,
+            ports: component_ports,
+        } in recovered_symbols(
             &loose,
             &in_symbol,
             rules,
@@ -1210,6 +1354,10 @@ pub(super) fn exploded_symbols(
             upm,
             taken_text,
         ) {
+            if claim.is_some() || shape_rules.dictionary.contains_key(&comp.id) {
+                recovered_symbol_handles.extend(handles.iter().copied());
+            }
+            let symbol_index = symbols.len();
             let at = (comp.centre.0 * upm, comp.centre.1 * upm);
             let source = format!(
                 "shape {} ({} strokes, second pass)",
@@ -1267,13 +1415,77 @@ pub(super) fn exploded_symbols(
                     rule.tag.clone(),
                 ));
             }
+            if symbols.len() > symbol_index {
+                ports.extend(
+                    component_ports
+                        .into_iter()
+                        .map(|point| (symbol_index, Port::At((point.0 * upm, point.1 * upm)))),
+                );
+            }
         }
     }
-    Exploded { symbols, unknown }
+    let mut symbol_handles: HashSet<Handle> = symbols
+        .iter()
+        .flat_map(|(symbol, _)| symbol.handles.iter().copied())
+        .collect();
+    symbol_handles.extend(
+        in_symbol
+            .iter()
+            .enumerate()
+            .filter(|(_, used)| **used)
+            .flat_map(|(index, _)| prims[index].handles.iter().copied()),
+    );
+    symbol_handles.extend(recovered_symbol_handles);
+    let mut pipe_strokes: Vec<pid_pipes::PipeStroke> = Vec::new();
+    for run in loose.runs.iter().filter(|run| run.pipe_source) {
+        let handles: Vec<Handle> = match (run.prim, run.pipe) {
+            (Some(prim), _) => loose.prims[prim].handles.clone(),
+            (None, Some(pipe)) => loose.pipe_prims[pipe].handles.clone(),
+            (None, None) => vec![run.handle],
+        };
+        if handles.iter().any(|handle| symbol_handles.contains(handle)) {
+            continue;
+        }
+        let start = (run.ends[0].0 * upm, run.ends[0].1 * upm);
+        let end = (run.ends[1].0 * upm, run.ends[1].1 * upm);
+        let same = |stroke: &pid_pipes::PipeStroke| {
+            let close = |a: Point, b: Point| {
+                (a.0 - b.0).abs() <= eps * upm && (a.1 - b.1).abs() <= eps * upm
+            };
+            (close(stroke.start, start) && close(stroke.end, end))
+                || (close(stroke.start, end) && close(stroke.end, start))
+        };
+        if let Some(existing) = pipe_strokes.iter_mut().find(|stroke| same(stroke)) {
+            for handle in handles {
+                if !existing.handles.contains(&handle) {
+                    existing.handles.push(handle);
+                }
+            }
+        } else {
+            pipe_strokes.push(pid_pipes::PipeStroke {
+                handles,
+                start,
+                end,
+            });
+        }
+    }
+    Exploded {
+        symbols,
+        unknown,
+        ports,
+        pipe_strokes,
+    }
 }
 
 /// A tag's claim on a component: `(tag rule, text, mm)`.
 type Claim = (usize, usize, f64);
+
+struct RecoveredSymbol {
+    component: Component,
+    handles: Vec<Handle>,
+    claim: Option<Claim>,
+    ports: Vec<Point>,
+}
 
 /// The candidate components of the second pass, each with the entities its
 /// strokes came from and the claim a tag no first-pass component took makes
@@ -1303,7 +1515,7 @@ fn recovered_symbols(
     lettering: &[Lettering],
     upm: f64,
     taken_text: &mut [bool],
-) -> Vec<(Component, Vec<Handle>, Option<Claim>)> {
+) -> Vec<RecoveredSymbol> {
     let eps = shape_rules.touch_mm;
     let free: Vec<usize> = (0..loose.prims.len()).filter(|&i| !in_symbol[i]).collect();
     if loose.pipe_prims.is_empty() {
@@ -1375,22 +1587,28 @@ fn recovered_symbols(
                 run: r.run,
                 prim,
                 pipe: None,
+                ends: r.ends,
+                handle: r.handle,
+                pipe_source: r.pipe_source,
             })
         })
         .collect();
     let min_strokes = shape_rules.split_min_strokes;
-    let trim = |idxs: Vec<usize>| {
-        if min_strokes > 0 {
-            trim_pipe_stubs(&prims, idxs, &loose.circles, eps)
-        } else {
-            idxs
-        }
-    };
+    let mut trimmed_stubs = Vec::new();
     let mut comps: Vec<Component> = Vec::new();
     for group in components(&prims, eps) {
+        let group = if min_strokes > 0 {
+            trim_pipe_stubs(&prims, group, &loose.circles, eps, &mut trimmed_stubs)
+        } else {
+            group
+        };
         let runs = runs_for_group(&runs, &group, min_strokes);
-        for part in split_at_bridges(&prims, &runs, trim(group), min_strokes, eps) {
-            let idxs = trim(part);
+        for part in split_at_bridges(&prims, &runs, group, min_strokes, eps) {
+            let idxs = if min_strokes > 0 {
+                trim_pipe_stubs(&prims, part, &loose.circles, eps, &mut trimmed_stubs)
+            } else {
+                part
+            };
             let held_runs = idxs.iter().filter(|&&i| i >= n_free).count();
             if idxs.len() < 3 || held_runs < shape_rules.recover_min_runs {
                 continue;
@@ -1470,7 +1688,13 @@ fn recovered_symbols(
         .zip(taken_comp)
         .map(|(comp, claim)| {
             let handles = comp.handles(&prims);
-            (comp, handles, claim)
+            let ports = component_ports(&comp, &prims, &trimmed_stubs, &runs, eps);
+            RecoveredSymbol {
+                component: comp,
+                handles,
+                claim,
+                ports,
+            }
         })
         .collect()
 }

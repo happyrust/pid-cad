@@ -1,4 +1,4 @@
-//! Pipe topology for the block-family P&ID sheets.
+//! Pipe topology for block-family and exploded P&ID sheets.
 //!
 //! The TWT sheets draw pipe as two-point polylines on `PIPE-*` layers, each
 //! valve block carries two `POINT` entities where pipe joins it, and pipe
@@ -10,6 +10,10 @@
 //! and gives each run the line number lettered along it -- so every stroke
 //! of pipe belongs to a run, every run to a line number when the sheet
 //! letters one, and every symbol knows the lines at its connection points.
+//! Exploded sheets reuse the same graph through [`trace_with_strokes`]: their
+//! symbol pass hands over deduplicated long axis runs that reach a process
+//! port or line number, after removing recognised symbol strokes and
+//! instrumentation chains.
 //!
 //! Distances here are drawing units unless a name says `mm`; `upm` converts.
 
@@ -21,6 +25,16 @@ use regex::Regex;
 use serde::Deserialize;
 
 pub type Point = (f64, f64);
+
+/// One source stroke offered to the pipe graph. `handles` are every drawing
+/// entity represented by this logical stroke (exploded sheets can draw the
+/// same line twice and deduplicate it before tracing).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PipeStroke {
+    pub handles: Vec<Handle>,
+    pub start: Point,
+    pub end: Point,
+}
 
 /// Rules for the pipe pass, `pipes` in the rules JSON.
 #[derive(Debug, Clone, Deserialize)]
@@ -331,7 +345,7 @@ fn point_segment_distance(p: Point, a: Point, b: Point) -> f64 {
 
 /// The pipe strokes of the sheet as two-point segments with the handle of
 /// the entity each was read from, drawing units.
-fn pipe_segments(doc: &CadDocument, rules: &PipeRules) -> Vec<(Handle, Point, Point)> {
+fn pipe_segments(doc: &CadDocument, rules: &PipeRules) -> Vec<PipeStroke> {
     let mut segments = Vec::new();
     for entity in doc.model_space_entities() {
         if !rules.is_pipe_layer(&entity.common().layer) {
@@ -340,7 +354,11 @@ fn pipe_segments(doc: &CadDocument, rules: &PipeRules) -> Vec<(Handle, Point, Po
         let handle = entity.common().handle;
         let mut push = |a: Point, b: Point| {
             if a.0.is_finite() && a.1.is_finite() && b.0.is_finite() && b.1.is_finite() && a != b {
-                segments.push((handle, a, b));
+                segments.push(PipeStroke {
+                    handles: vec![handle],
+                    start: a,
+                    end: b,
+                });
             }
         };
         match entity {
@@ -375,6 +393,63 @@ fn pipe_segments(doc: &CadDocument, rules: &PipeRules) -> Vec<(Handle, Point, Po
         }
     }
     segments
+}
+
+/// Candidate strokes from an exploded sheet include table rules and
+/// instrument leaders drawn on the same layers as process pipe. Keep only
+/// connected components that reach a recognised process port or a valid
+/// line-number label.
+fn relevant_candidate_strokes(
+    strokes: &[PipeStroke],
+    ports: &[(usize, Port)],
+    lettering: &[(Point, &str)],
+    rules: &PipeRules,
+    snap: f64,
+    number_reach: f64,
+) -> Vec<PipeStroke> {
+    let endpoint_at_port = |point: Point| {
+        ports.iter().any(|(_, port)| match *port {
+            Port::At(at) => dist(point, at) <= snap,
+            Port::Rim { centre, r } => (dist(point, centre) - r).abs() <= snap,
+        })
+    };
+    let touches = |a: &PipeStroke, b: &PipeStroke| {
+        point_segment_distance(a.start, b.start, b.end) <= snap
+            || point_segment_distance(a.end, b.start, b.end) <= snap
+            || point_segment_distance(b.start, a.start, a.end) <= snap
+            || point_segment_distance(b.end, a.start, a.end) <= snap
+    };
+
+    let mut keep: Vec<bool> = strokes
+        .iter()
+        .map(|stroke| {
+            endpoint_at_port(stroke.start)
+                || endpoint_at_port(stroke.end)
+                || lettering.iter().any(|(point, value)| {
+                    rules.is_line_number(value)
+                        && point_segment_distance(*point, stroke.start, stroke.end) <= number_reach
+                })
+        })
+        .collect();
+    let mut queue: Vec<usize> = keep
+        .iter()
+        .enumerate()
+        .filter_map(|(index, seeded)| (*seeded).then_some(index))
+        .collect();
+    while let Some(current) = queue.pop() {
+        for candidate in 0..strokes.len() {
+            if !keep[candidate] && touches(&strokes[current], &strokes[candidate]) {
+                keep[candidate] = true;
+                queue.push(candidate);
+            }
+        }
+    }
+    strokes
+        .iter()
+        .zip(keep)
+        .filter(|(_, keep)| *keep)
+        .map(|(stroke, _)| stroke.clone())
+        .collect()
 }
 
 /// Vertices of the pipe graph: ends within `snap` of each other are one
@@ -451,8 +526,40 @@ pub fn trace(
     if rules.layer_prefixes.is_empty() {
         return Pipes::default();
     }
+    trace_segments(upm, rules, ports, lettering, pipe_segments(doc, rules))
+}
+
+/// Trace pipe strokes supplied by another recogniser. Exploded P&ID sheets
+/// have no `PIPE-*` layer: their symbol pass already identifies and
+/// deduplicates the long axis-aligned strokes, so it hands those same strokes
+/// here without scanning the drawing a second time.
+pub fn trace_with_strokes(
+    upm: f64,
+    rules: &PipeRules,
+    ports: &[(usize, Port)],
+    lettering: &[(Point, &str)],
+    additional: &[PipeStroke],
+) -> Pipes {
     let snap = rules.snap_mm * upm;
-    let mut segments = pipe_segments(doc, rules);
+    let segments = relevant_candidate_strokes(
+        additional,
+        ports,
+        lettering,
+        rules,
+        snap,
+        rules.number_mm * upm,
+    );
+    trace_segments(upm, rules, ports, lettering, segments)
+}
+
+fn trace_segments(
+    upm: f64,
+    rules: &PipeRules,
+    ports: &[(usize, Port)],
+    lettering: &[(Point, &str)],
+    mut segments: Vec<PipeStroke>,
+) -> Pipes {
+    let snap = rules.snap_mm * upm;
     let read = segments.len();
     if segments.is_empty() {
         return Pipes {
@@ -463,24 +570,35 @@ pub fn trace(
 
     // Tees: an end lying on another stroke's interior splits that stroke.
     // The ends are found first; splitting adds strokes but no new ends.
-    let ends: Vec<Point> = segments.iter().flat_map(|&(_, a, b)| [a, b]).collect();
+    let ends: Vec<Point> = segments
+        .iter()
+        .flat_map(|segment| [segment.start, segment.end])
+        .collect();
     let mut s = 0;
     while s < segments.len() {
-        let (h, a, b) = segments[s];
+        let segment = segments[s].clone();
+        let (a, b) = (segment.start, segment.end);
         let hit = ends.iter().copied().find(|&e| {
             dist(e, a) > snap && dist(e, b) > snap && point_segment_distance(e, a, b) <= snap
         });
         match hit {
             Some(e) => {
-                segments[s] = (h, a, e);
-                segments.push((h, e, b));
+                segments[s].end = e;
+                segments.push(PipeStroke {
+                    handles: segment.handles,
+                    start: e,
+                    end: b,
+                });
                 // `segments[s]` may be split again by another end.
             }
             None => s += 1,
         }
     }
 
-    let geometry: Vec<(Point, Point)> = segments.iter().map(|&(_, a, b)| (a, b)).collect();
+    let geometry: Vec<(Point, Point)> = segments
+        .iter()
+        .map(|segment| (segment.start, segment.end))
+        .collect();
     let (vertices, of_segment) = snap_vertices(&geometry, snap);
     let mut incident: Vec<Vec<usize>> = vec![Vec::new(); vertices.len()];
     for (si, &(a, b)) in of_segment.iter().enumerate() {
@@ -545,7 +663,7 @@ pub fn trace(
         }
         used[start] = true;
         let (mut path_v, mut count) = (vec![of_segment[start].0, of_segment[start].1], 1usize);
-        let mut handles = vec![segments[start].0];
+        let mut handles = segments[start].handles.clone();
         let mut ends = [None, None];
         let mut closed = false;
         // Extend from the tail (side 1), then from the head (side 0).
@@ -569,7 +687,7 @@ pub fn trace(
                 };
                 used[s] = true;
                 count += 1;
-                handles.push(segments[s].0);
+                handles.extend(segments[s].handles.iter().copied());
                 let (a, b) = of_segment[s];
                 let w = if a == v { b } else { a };
                 if side == 1 {
@@ -750,6 +868,36 @@ pub fn trace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exploded_candidates_keep_only_port_or_line_number_networks() {
+        let stroke = |handle, start, end| PipeStroke {
+            handles: vec![Handle::new(handle)],
+            start,
+            end,
+        };
+        let strokes = vec![
+            stroke(1, (0.0, 0.0), (10.0, 0.0)),
+            stroke(2, (10.0, 0.0), (20.0, 0.0)),
+            stroke(3, (50.0, 0.0), (60.0, 0.0)),
+            stroke(4, (100.0, 0.0), (110.0, 0.0)),
+        ];
+        let kept = relevant_candidate_strokes(
+            &strokes,
+            &[(0, Port::At((0.0, 0.0)))],
+            &[((105.0, 1.0), "100-CGA-0319-A1")],
+            &PipeRules::default(),
+            0.3,
+            10.0,
+        );
+        assert_eq!(
+            kept.iter()
+                .flat_map(|stroke| stroke.handles.iter().map(|handle| handle.value()))
+                .collect::<Vec<_>>(),
+            [1, 2, 4],
+            "the connected continuation and numbered run stay; table noise does not"
+        );
+    }
 
     #[test]
     fn line_numbers_have_a_size_a_service_and_maybe_a_number_and_class() {

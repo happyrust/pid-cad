@@ -1,5 +1,5 @@
 {
-  "_comment": "P&ID legend recognition rules (io::pid_legend). Compiled in as the default; OCS_PID_LEGEND_RULES=<path> overrides at run time. Colours are RGB. Tag shapes: 9 = digit, ? = capital letter, * = anything from here on (leading * = anything before), other characters literal; tag.shapes adds alternative accepted shapes to tag.shape, and tag.min_chars overrides the global minimum for that class. Distances are paper millimetres; the sheet's units-per-mm is detected from its drawn extent. Circle rules are tried in order; 'inner' is what must be lettered inside ('tag' = capitals + number, 'empty' = nothing), 'inner_is' lists exact values. Unclaimed tag-shaped lettering is sorted into range annotations (XV-0407A～0409A, checked member by member), duplicates (a symbol already carries the value; 'orphans.claimed_elsewhere' keeps them among the orphans instead) and orphans; a tag rule's 'report_orphans' turns the whole listing off for its class, 'report_untagged' says whether the untagged symbols' positions are listed (default: same as report_orphans).",
+  "_comment": "P&ID legend recognition rules (io::pid_legend). Compiled in as the default; OCS_PID_LEGEND_RULES=<path> overrides at run time. Colours are RGB. Tag shapes: 9 = digit, ? = capital letter, * = anything from here on (leading * = anything before), other characters literal; tag.shapes adds alternative accepted shapes to tag.shape, and tag.min_chars overrides the global minimum for that class. Distances are paper millimetres; the sheet's units-per-mm is detected from its drawn extent. On exploded sheets, shapes.pipe_layers adds process-pipe source layers to shapes.layers_any and shapes.pipe_number_mm overrides pipes.number_mm. Circle rules are tried in order; 'inner' is what must be lettered inside ('tag' = capitals + number, 'empty' = nothing), 'inner_is' lists exact values. Unclaimed tag-shaped lettering is sorted into range annotations (XV-0407A～0409A, checked member by member), duplicates (a symbol already carries the value; 'orphans.claimed_elsewhere' keeps them among the orphans instead) and orphans; a tag rule's 'report_orphans' turns the whole listing off for its class, 'report_untagged' says whether the untagged symbols' positions are listed (default: same as report_orphans).",
   "radius_mm": 15.0,
   "label_mm": 1.3,
   "pad_mm": 0.5,
@@ -63,6 +63,8 @@
   "orphans": { "claimed_elsewhere": false },
   "shapes": {
     "layers_any": ["DEVICE", "DEVICES", "T-MaR-ZNACKY", "T-SYMBOLS", "T_ZNACKY", "YIBIAO"],
+    "pipe_layers": ["0", "-0", "工艺外线", "T-PIPE_DIESEL O"],
+    "pipe_number_mm": 10.0,
     "skip_layers": ["A", "PUB_TITLE", "CPECC", "TWT", "TWT_TEXT", "LAYERDIM", "bzc", "BZC"],
     "max_stroke_mm": 8.0,
     "pipe_stub_mm": 2.5,
