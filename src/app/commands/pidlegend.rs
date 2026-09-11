@@ -8,8 +8,10 @@
 //!
 //! ```text
 //! PIDLEGEND            prompt with the verbs below (Enter = ON)
-//! PIDLEGEND ON         recognise, then draw (replacing an earlier legend)
-//! PIDLEGEND OFF        remove the legend entities (layers stay, empty)
+//! PIDLEGEND ON         recognise, publish entity XDATA, then draw (replacing
+//!                      an earlier legend)
+//! PIDLEGEND OFF        remove the legend entities; published XDATA stays
+//! PIDLEGEND PURGE      remove both legend entities and recognition XDATA
 //! PIDLEGEND REPORT     recognise and print the summary, draw nothing
 //! PIDLEGEND LIST       toggle the docked legend list panel (recognising
 //!                      first when this sheet has not been read yet)
@@ -83,10 +85,11 @@ impl OpenCADStudio {
             use crate::command::KeywordCommand;
             let c = KeywordCommand::new(
                 "PIDLEGEND",
-                "PIDLEGEND  [ON / OFF / REPORT / LIST] <ON>:",
+                "PIDLEGEND  [ON / OFF / PURGE / REPORT / LIST] <ON>:",
                 vec![
                     ("ON", "ON", None),
                     ("OFF", "OFF", None),
+                    ("PURGE", "PURGE", None),
                     ("REPORT", "REPORT", None),
                     ("LIST", "LIST", None),
                 ],
@@ -113,6 +116,30 @@ impl OpenCADStudio {
                     self.command_line.push_output(&format!(
                         "PIDLEGEND: removed {} legend entities.",
                         handles.len()
+                    ));
+                }
+            }
+            "PURGE" => {
+                let legend = pid_legend::legend_handles(&self.tabs[i].scene.document);
+                let metadata = pid_legend::attached_handles(&self.tabs[i].scene.document);
+                if legend.is_empty() && metadata.is_empty() {
+                    self.command_line
+                        .push_info("PIDLEGEND: no legend entities or recognition XDATA to remove.");
+                } else {
+                    self.push_undo_snapshot(i, "PIDLEGEND PURGE");
+                    let was = self.tabs[i].scene.geometry_epoch;
+                    if !legend.is_empty() {
+                        self.tabs[i].scene.erase_entities(&legend);
+                    }
+                    let purged = pid_legend::purge(&mut self.tabs[i].scene.document);
+                    self.tabs[i].dirty = true;
+                    // Neither the overlay nor its published copy is input to
+                    // recognition, so the in-memory list remains current.
+                    self.tabs[i].pid_legend_survives(was);
+                    self.refresh_properties();
+                    self.command_line.push_output(&format!(
+                        "PIDLEGEND: removed {} legend entities and {purged} recognition XDATA record(s).",
+                        legend.len()
                     ));
                 }
             }
@@ -146,6 +173,21 @@ impl OpenCADStudio {
                 self.refresh_auto_group_tags(i, &rules);
                 let recognition = pid_legend::recognise(&self.tabs[i].scene.document, &rules);
                 if recognition.symbols.is_empty() {
+                    // An earlier ON may have published a now-deleted symbol.
+                    // Clear its two published forms in one undo step instead
+                    // of leaving stale boxes or XDATA on the sheet.
+                    let legend = pid_legend::legend_handles(&self.tabs[i].scene.document);
+                    let metadata = pid_legend::attached_handles(&self.tabs[i].scene.document);
+                    if !legend.is_empty() || !metadata.is_empty() {
+                        self.push_undo_snapshot(i, "PIDLEGEND");
+                        if !legend.is_empty() {
+                            self.tabs[i].scene.erase_entities(&legend);
+                        }
+                        pid_legend::attach(&mut self.tabs[i].scene.document, &recognition);
+                        self.tabs[i].dirty = true;
+                    }
+                    self.tabs[i].set_pid_legend(recognition);
+                    self.refresh_properties();
                     self.command_line.push_info(
                         "PIDLEGEND: nothing recognised -- no known block or circle symbol on this sheet. PIDLEGEND REPORT lists what was seen.",
                     );
@@ -169,7 +211,7 @@ impl OpenCADStudio {
             }
             other => {
                 self.command_line.push_error(&format!(
-                    "PIDLEGEND: unknown option \"{other}\" -- use ON, OFF, REPORT or LIST."
+                    "PIDLEGEND: unknown option \"{other}\" -- use ON, OFF, PURGE, REPORT or LIST."
                 ));
             }
         }
@@ -198,6 +240,10 @@ impl OpenCADStudio {
         rules: &Rules,
         recognition: pid_legend::Recognition,
     ) -> (usize, usize, usize) {
+        // The overlay and entity metadata are one published view of the same
+        // recognition and therefore one undo step. `attach` also drops stale
+        // legend-owned records left on entities no longer recognised.
+        pid_legend::attach(&mut self.tabs[i].scene.document, &recognition);
         let stale = pid_legend::legend_handles(&self.tabs[i].scene.document);
         if !stale.is_empty() {
             self.tabs[i].scene.erase_entities(&stale);
@@ -235,6 +281,7 @@ impl OpenCADStudio {
         // Stamped after the legend went in: drawing it is not a change to
         // the sheet it indexes.
         self.tabs[i].set_pid_legend(recognition);
+        self.refresh_properties();
         (drawn, layers.len(), pipe_layers)
     }
 
@@ -252,6 +299,25 @@ impl OpenCADStudio {
         self.command_line
             .push_info(&format!("PIDLEGEND: legend redrawn, {drawn} entities."));
         true
+    }
+
+    /// Keep recognition XDATA current across GROUP / UNGROUP / PIDGROUP even
+    /// after `PIDLEGEND OFF` hid the overlay. `published` is captured before
+    /// the edit, because dissolving the last manual group may make the new
+    /// recognition empty and `attach` still has stale records to remove.
+    fn refresh_pid_publication_after_group_change(
+        &mut self,
+        i: usize,
+        rules: &Rules,
+        published: bool,
+    ) {
+        if self.redraw_pid_legend_if_drawn(i, rules) || !published {
+            return;
+        }
+        let recognition = pid_legend::recognise(&self.tabs[i].scene.document, rules);
+        pid_legend::attach(&mut self.tabs[i].scene.document, &recognition);
+        self.tabs[i].set_pid_legend(recognition);
+        self.refresh_properties();
     }
 
     /// Bring the stored tag of every `auto` group up to what its lettering
@@ -279,11 +345,14 @@ impl OpenCADStudio {
         count
     }
 
-    /// Whether the sheet has a legend drawn: then a group command's undo step
-    /// has to cover entities as well as group objects, so it takes the full
-    /// snapshot PIDLEGEND ON takes rather than the group-object delta.
+    /// Whether the sheet has a legend drawn or recognition XDATA published:
+    /// then a group command's undo step has to cover entities as well as group
+    /// objects, so it takes the full snapshot PIDLEGEND ON takes rather than
+    /// the group-object delta.
     fn open_group_undo(&mut self, i: usize, label: &str) -> Option<PendingObjectDelta> {
-        if pid_legend::legend_handles(&self.tabs[i].scene.document).is_empty() {
+        if pid_legend::legend_handles(&self.tabs[i].scene.document).is_empty()
+            && pid_legend::attached_handles(&self.tabs[i].scene.document).is_empty()
+        {
             Some(self.begin_group_undo(i, label))
         } else {
             self.push_undo_snapshot(i, label);
@@ -318,6 +387,7 @@ impl OpenCADStudio {
             return None;
         }
         let rules = Rules::load();
+        let published = !pid_legend::attached_handles(&self.tabs[i].scene.document).is_empty();
         let pending = self.open_group_undo(i, label);
         let group = self.tabs[i].scene.create_group(name.clone(), handles);
         self.tabs[i].dirty = true;
@@ -326,7 +396,7 @@ impl OpenCADStudio {
             Some(tag) => self.set_pid_group_tag(i, group, Some(tag), &rules),
             None => self.read_pid_group_tag(i, group, &rules),
         };
-        self.redraw_pid_legend_if_drawn(i, &rules);
+        self.refresh_pid_publication_after_group_change(i, &rules, published);
         self.close_group_undo(i, pending);
         Some((group, format!("{created} {tail}")))
     }
@@ -431,6 +501,7 @@ impl OpenCADStudio {
         if handles.is_empty() {
             return 0;
         }
+        let published = !pid_legend::attached_handles(&self.tabs[i].scene.document).is_empty();
         let pending = self.open_group_undo(i, label);
         let count = self.tabs[i].scene.delete_groups_containing(&handles);
         self.tabs[i].dirty = true;
@@ -439,7 +510,7 @@ impl OpenCADStudio {
             // recognition even though no entity geometry changed.
             self.tabs[i].scene.bump_geometry();
             let rules = Rules::load();
-            self.redraw_pid_legend_if_drawn(i, &rules);
+            self.refresh_pid_publication_after_group_change(i, &rules, published);
         }
         self.close_group_undo(i, pending);
         count
@@ -673,12 +744,13 @@ impl OpenCADStudio {
         if updates.is_empty() {
             return 0;
         }
+        let published = !pid_legend::attached_handles(&self.tabs[i].scene.document).is_empty();
         let pending = self.open_group_undo(i, "PIDGROUP TAG");
         for (group, tag) in &updates {
             self.tabs[i].scene.set_group_tag(*group, Some(tag));
         }
         self.tabs[i].dirty = true;
-        self.redraw_pid_legend_if_drawn(i, &rules);
+        self.refresh_pid_publication_after_group_change(i, &rules, published);
         self.close_group_undo(i, pending);
         updates.len()
     }
@@ -688,6 +760,7 @@ impl OpenCADStudio {
     /// one receipt line per group.
     fn retag_pid_groups(&mut self, i: usize, groups: &[acadrust::Handle], value: Option<&str>) {
         let rules = Rules::load();
+        let published = !pid_legend::attached_handles(&self.tabs[i].scene.document).is_empty();
         let pending = self.open_group_undo(i, "PIDGROUP");
         let mut receipts = Vec::new();
         for group in groups {
@@ -699,7 +772,7 @@ impl OpenCADStudio {
             receipts.push(format!("Group \"{name}\": {tail}"));
         }
         self.tabs[i].dirty = true;
-        self.redraw_pid_legend_if_drawn(i, &rules);
+        self.refresh_pid_publication_after_group_change(i, &rules, published);
         self.close_group_undo(i, pending);
         for receipt in receipts {
             self.command_line.push_info(&receipt);
@@ -1174,6 +1247,30 @@ mod tests {
         let mut handles = app.tabs[app.active_tab].scene.selected_handles_in_order();
         handles.sort_by_key(|h| h.value());
         handles
+    }
+
+    fn pid_xdata_strings(app: &OpenCADStudio, handle: acadrust::Handle) -> Vec<String> {
+        app.tabs[app.active_tab]
+            .scene
+            .document
+            .get_entity(handle)
+            .and_then(|entity| {
+                entity
+                    .common()
+                    .extended_data
+                    .get_record(crate::io::PID_SEMANTICS_XDATA_APP)
+            })
+            .map(|record| {
+                record
+                    .values
+                    .iter()
+                    .filter_map(|value| match value {
+                        acadrust::xdata::XDataValue::String(value) => Some(value.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// A bow-tie valve of four loose lines at `x`, with `tag` lettered above
@@ -1933,6 +2030,161 @@ mod tests {
     }
 
     #[test]
+    fn pidlegend_on_publishes_xdata_off_keeps_it_and_purge_removes_everything() {
+        use acadrust::entities::{EntityType, Text};
+        use acadrust::types::Vector3;
+
+        let mut app = OpenCADStudio::new_for_test();
+        let (insert, tag, pipe) = valve_with_tag(&mut app);
+        let i = app.active_tab;
+        app.tabs[i]
+            .scene
+            .document
+            .get_entity_mut(pipe)
+            .unwrap()
+            .common_mut()
+            .layer = "PIPE-PROCESS".to_string();
+        app.tabs[i].scene.add_entity(EntityType::Text(
+            Text::with_value("100-FW", Vector3::new(-10.0, 3.0, 0.0)).with_height(2.5),
+        ));
+        let before = app.tabs[i].scene.document.entities().count();
+
+        let _ = app.run_command_line("PIDLEGEND REPORT");
+        assert!(
+            pid_legend::attached_handles(&app.tabs[i].scene.document).is_empty(),
+            "REPORT reads but does not publish"
+        );
+        let _ = app.run_command_line("PIDLEGEND LIST");
+        assert!(
+            pid_legend::attached_handles(&app.tabs[i].scene.document).is_empty(),
+            "LIST reads but does not publish"
+        );
+
+        let _ = app.run_command_line("PIDLEGEND ON");
+        assert!(legend_count(&app) > 0);
+        assert!(
+            app.tabs[i]
+                .scene
+                .document
+                .app_ids
+                .contains(crate::io::PID_SEMANTICS_XDATA_APP),
+            "ON registers the APPID so metadata survives a save"
+        );
+        let symbol = app.tabs[i]
+            .pid_legend()
+            .unwrap()
+            .symbols
+            .iter()
+            .find(|symbol| symbol.handles.contains(&insert))
+            .expect("butterfly valve");
+        assert_eq!(symbol.tag.as_deref(), Some("BUV-3101"));
+        let mut expected_symbol = vec![
+            format!("class={}", symbol.label),
+            "label=BUV-3101".to_string(),
+        ];
+        if !symbol.lines.is_empty() {
+            expected_symbol.push(format!("lines={}", symbol.lines.join(",")));
+        }
+        expected_symbol.push("resolved=legend:block".to_string());
+        assert_eq!(pid_xdata_strings(&app, insert), expected_symbol);
+        assert_eq!(
+            pid_xdata_strings(&app, pipe),
+            ["class=PIDPipeline", "label=100-FW", "resolved=legend:pipe",]
+        );
+        assert!(
+            pid_xdata_strings(&app, tag).is_empty(),
+            "external tag lettering is not the symbol body"
+        );
+
+        let section = crate::scene::cache::properties::pid_semantics_section(
+            app.tabs[i].scene.document.get_entity(insert).unwrap(),
+        )
+        .expect("published identity appears in Properties");
+        assert!(section.props.iter().any(|property| {
+            property.field == "pid_resolved"
+                && property.value
+                    == crate::scene::model::object::PropValue::ReadOnly(
+                        crate::t!("Legend recognition").into_owned(),
+                    )
+        }));
+
+        let _ = app.run_command_line("PIDLEGEND OFF");
+        assert_eq!(legend_count(&app), 0);
+        assert!(
+            !pid_legend::attached_handles(&app.tabs[i].scene.document).is_empty(),
+            "OFF only hides the overlay"
+        );
+
+        let _ = app.run_command_line("PIDLEGEND ON");
+        assert!(legend_count(&app) > 0);
+        let _ = app.run_command_line("PIDLEGEND PURGE");
+        assert_eq!(legend_count(&app), 0);
+        assert_eq!(app.tabs[i].scene.document.entities().count(), before);
+        assert!(
+            pid_legend::attached_handles(&app.tabs[i].scene.document).is_empty(),
+            "PURGE clears recognition XDATA"
+        );
+        assert!(
+            app.tabs[i].pid_legend.is_some() && !app.tabs[i].pid_legend_is_stale(),
+            "the in-memory list remains usable after its published copies go"
+        );
+        let _ = app.update(Message::Undo);
+        assert!(legend_count(&app) > 0);
+        assert!(!pid_xdata_strings(&app, insert).is_empty());
+        let _ = app.update(Message::Redo);
+        assert_eq!(legend_count(&app), 0);
+        assert!(pid_xdata_strings(&app, insert).is_empty());
+
+        // If the overlay is hidden, dissolving a manual group still replaces
+        // its group-owned metadata rather than leaving a stale
+        // `resolved=legend:group:…` record behind.
+        app.tabs[i].scene.deselect_all();
+        app.tabs[i].scene.select_entity(insert, false);
+        app.tabs[i].scene.select_entity(tag, false);
+        let _ = app.run_command_line("PIDGROUP GROUP");
+        let _ = app.run_command_line("PIDLEGEND ON");
+        assert!(pid_xdata_strings(&app, insert)
+            .iter()
+            .any(|value| value.starts_with("resolved=legend:group:")));
+        let _ = app.run_command_line("PIDLEGEND OFF");
+        app.tabs[i].scene.deselect_all();
+        app.tabs[i].scene.select_entity(insert, false);
+        let _ = app.run_command_line("PIDGROUP OFF");
+        assert!(!pid_xdata_strings(&app, insert)
+            .iter()
+            .any(|value| value.starts_with("resolved=legend:group:")));
+    }
+
+    #[test]
+    fn pidlegend_on_clears_stale_publication_when_the_last_symbol_is_gone() {
+        let mut app = OpenCADStudio::new_for_test();
+        let (insert, _tag, _pipe) = valve_with_tag(&mut app);
+        let i = app.active_tab;
+
+        let _ = app.run_command_line("PIDLEGEND ON");
+        assert!(legend_count(&app) > 0);
+        assert!(!pid_xdata_strings(&app, insert).is_empty());
+
+        let acadrust::EntityType::Insert(block) =
+            app.tabs[i].scene.document.get_entity_mut(insert).unwrap()
+        else {
+            panic!("valve helper returned a block reference");
+        };
+        block.block_name = "NOT-A-PID-SYMBOL".to_string();
+        app.tabs[i].scene.bump_geometry();
+
+        let _ = app.run_command_line("PIDLEGEND ON");
+        assert_eq!(legend_count(&app), 0);
+        assert!(pid_xdata_strings(&app, insert).is_empty());
+        assert_eq!(
+            app.tabs[i]
+                .pid_legend()
+                .map(|recognition| recognition.symbols.len()),
+            Some(0)
+        );
+    }
+
+    #[test]
     fn pidlegend_on_draws_off_removes_and_on_twice_does_not_stack() {
         let mut app = OpenCADStudio::new_for_test();
         if !open_sheet(&mut app, "DWG-0100FF02-06 罐组II消防冷却水流程图.dxf") {
@@ -1966,6 +2218,47 @@ mod tests {
                 .is_some(),
             "panel got a dock slot"
         );
+        let buv = app.tabs[i]
+            .pid_legend()
+            .unwrap()
+            .symbols
+            .iter()
+            .find(|symbol| symbol.tag.as_deref() == Some("BUV-3201"))
+            .expect("BUV-3201 on FF02-06");
+        assert_eq!(buv.label, "蝶阀");
+        assert!(
+            buv.lines.iter().any(|line| line == "100-FW"),
+            "{:?}",
+            buv.lines
+        );
+        let body = *buv.handles.first().expect("BUV-3201 body handle");
+        let section = crate::scene::cache::properties::pid_semantics_section(
+            app.tabs[i].scene.document.get_entity(body).unwrap(),
+        )
+        .expect("BUV-3201 has published identity");
+        for (field, expected) in [
+            ("pid_class", "蝶阀"),
+            ("pid_label", "BUV-3201"),
+            ("pid_lines", "100-FW"),
+        ] {
+            assert!(
+                section.props.iter().any(|property| {
+                    property.field == field
+                        && property.value
+                            == crate::scene::model::object::PropValue::ReadOnly(
+                                expected.to_string(),
+                            )
+                }),
+                "{field}"
+            );
+        }
+        assert!(section.props.iter().any(|property| {
+            property.field == "pid_resolved"
+                && property.value
+                    == crate::scene::model::object::PropValue::ReadOnly(
+                        crate::t!("Legend recognition").into_owned(),
+                    )
+        }));
         let layer = app.tabs[i]
             .scene
             .document

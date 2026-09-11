@@ -112,11 +112,12 @@ pub fn general_section(entity: &EntityType) -> PropSection {
     section
 }
 
-/// The "P&ID" group: the published identity a `.pid` import wrote into the
-/// entity's XDATA (see `crate::io::PID_SEMANTICS_XDATA_APP`).
+/// The "P&ID" group: identity a `.pid` import or P&ID legend recognition
+/// wrote into the entity's XDATA (see
+/// `crate::io::PID_SEMANTICS_XDATA_APP`).
 ///
-/// Present when either authored sheet-layer identity or published `_Data.xml`
-/// identity reached the entity. Every row is read-only.
+/// Present when authored sheet-layer identity, published `_Data.xml` identity,
+/// or a `PIDLEGEND ON` result reached the entity. Every row is read-only.
 pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
     let record = entity
         .common()
@@ -124,7 +125,8 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
         .get_record(crate::io::PID_SEMANTICS_XDATA_APP)?;
 
     let mut class = None;
-    let mut label = None;
+    let mut labels = Vec::new();
+    let mut lines = Vec::new();
     let mut resolved = None;
     let mut sheet_layer = None;
     let mut sheet_layer_oid = None;
@@ -137,7 +139,20 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
         };
         match key {
             "class" => class = Some(val.to_string()),
-            "label" => label = Some(val.to_string()),
+            "label" if !val.is_empty() && !labels.iter().any(|old| old == val) => {
+                labels.push(val.to_string());
+            }
+            "lines" => {
+                for line in val
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                {
+                    if !lines.iter().any(|old| old == line) {
+                        lines.push(line.to_string());
+                    }
+                }
+            }
             "resolved" => resolved = Some(val.to_string()),
             "sheet_layer" => sheet_layer = Some(val.to_string()),
             "sheet_layer_oid" => sheet_layer_oid = Some(val.to_string()),
@@ -153,26 +168,44 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
             value: PropValue::ReadOnly(class.to_string()),
         });
     }
-    if let Some(label_value) = label {
+    if let Some(first) = labels.first() {
         // A pipe's identifier is its line number; everything else carries an
-        // item tag. Same value, the caption the reader expects.
+        // item tag. A source handle shared by two differently numbered runs
+        // carries two label values; show the first and make the extra count
+        // explicit instead of silently discarding it.
         let label_caption =
             if matches!(class.as_deref(), Some("PIDPipeline" | "PIDPipingConnector")) {
                 t!("Line number")
             } else {
                 t!("Item tag")
             };
+        let label_value = if labels.len() > 1 {
+            format!("{first} +{}", labels.len() - 1)
+        } else {
+            first.clone()
+        };
         props.push(Property {
             label: label_caption.into_owned(),
             field: "pid_label",
             value: PropValue::ReadOnly(label_value),
         });
     }
+    if !lines.is_empty() {
+        props.push(Property {
+            label: t!("Line number").into_owned(),
+            field: "pid_lines",
+            value: PropValue::ReadOnly(lines.join(", ")),
+        });
+    }
     if let Some(resolved_value) = resolved {
         props.push(Property {
             label: t!("Matched by").into_owned(),
             field: "pid_resolved",
-            value: PropValue::ReadOnly(resolved_value),
+            value: PropValue::ReadOnly(if resolved_value.starts_with("legend:") {
+                t!("Legend recognition").into_owned()
+            } else {
+                resolved_value
+            }),
         });
     }
     if let Some(layer_value) = sheet_layer {
@@ -254,5 +287,72 @@ pub fn fallback_properties(_handle: Handle, entity: &EntityType) -> PropSection 
                 crate::t!(crate::entities::names::ui_name_or_class(entity)).into_owned(),
             ),
         }],
+    }
+}
+
+#[cfg(test)]
+mod pid_semantics_tests {
+    use super::*;
+    use acadrust::entities::Line;
+    use acadrust::xdata::{ExtendedDataRecord, XDataValue};
+
+    fn entity(values: &[&str]) -> EntityType {
+        let mut entity = EntityType::Line(Line::new());
+        let mut record = ExtendedDataRecord::new(crate::io::PID_SEMANTICS_XDATA_APP);
+        for value in values {
+            record.add_value(XDataValue::String((*value).to_string()));
+        }
+        entity.common_mut().extended_data.add_record(record);
+        entity
+    }
+
+    fn value<'a>(section: &'a PropSection, field: &str) -> &'a str {
+        match &section
+            .props
+            .iter()
+            .find(|property| property.field == field)
+            .unwrap_or_else(|| panic!("missing {field}"))
+            .value
+        {
+            PropValue::ReadOnly(value) => value,
+            other => panic!("{field} is not read-only: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legend_identity_shows_connected_lines_and_a_friendly_match_source() {
+        let section = pid_semantics_section(&entity(&[
+            "class=蝶阀",
+            "label=BUV-3201",
+            "lines=100-FW, 150-FW",
+            "resolved=legend:block",
+        ]))
+        .expect("P&ID section");
+
+        assert_eq!(value(&section, "pid_class"), "蝶阀");
+        assert_eq!(value(&section, "pid_label"), "BUV-3201");
+        assert_eq!(value(&section, "pid_lines"), "100-FW, 150-FW");
+        assert_eq!(
+            value(&section, "pid_resolved"),
+            t!("Legend recognition").as_ref()
+        );
+    }
+
+    #[test]
+    fn a_pipeline_with_two_labels_shows_the_first_and_the_extra_count() {
+        let section = pid_semantics_section(&entity(&[
+            "class=PIDPipeline",
+            "label=100-FW",
+            "label=150-FW",
+            "resolved=legend:pipe",
+        ]))
+        .expect("P&ID section");
+
+        assert_eq!(value(&section, "pid_label"), "100-FW +1");
+        assert!(section
+            .props
+            .iter()
+            .find(|property| property.field == "pid_label")
+            .is_some_and(|property| property.label == t!("Line number")));
     }
 }

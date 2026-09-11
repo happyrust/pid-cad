@@ -498,6 +498,7 @@ common =
     .group = Group
     .group-as-p-id-symbol = Group as P&ID Symbol
     .ungroup-p-id-symbol = Ungroup P&ID Symbol
+    .legend-recognition = Legend recognition
     .group-created = Group "__ocs_fmt_0__" created.
     .groups = Groups
     .h-margin = H Margin:

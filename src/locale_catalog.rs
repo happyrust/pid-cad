@@ -4349,6 +4349,7 @@ pub(super) fn message_attribute(source: &str) -> Option<(&'static str, &'static 
         "File location" => Some(("common", "file-location")),
         "Manual" => Some(("common", "manual")),
         "Manual group" => Some(("common", "manual-group")),
+        "Legend recognition" => Some(("common", "legend-recognition")),
         "P&ID" => Some(("common", "p-id")),
         "P&ID Group" => Some(("common", "p-id-group")),
         "P&ID Legend" => Some(("common", "p-id-legend")),

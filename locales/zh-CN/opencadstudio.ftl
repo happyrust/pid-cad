@@ -487,6 +487,7 @@ common =
     .group = 组
     .group-as-p-id-symbol = 组合为 P&ID 符号
     .ungroup-p-id-symbol = 取消 P&ID 符号组合
+    .legend-recognition = 图例识别
     .group-created = 组"__ocs_fmt_0__"创建.
     .groups = 组
     .h-margin = 水平边距：

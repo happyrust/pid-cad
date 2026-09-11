@@ -5,7 +5,7 @@
 > `2026-09-09-pid-recognition-audit-and-next-steps.md`（也已批、无批注）。用户定：以本文件为骨架，并入姊妹计划的
 > **三条**（线号规则外置 / 识别结果写进 XDATA / 拆文件），删掉姊妹文件，重新过 Plannotator。并入与未并入的清单见 §6。
 > 带 ⭕ 的决策按推荐落笔、未经拍板，批注里划一笔即可翻案。
-> **W0 + W1 + W2 + W3 + W4 + W5 + W6 + W7 已落地**（见各期「进度」）。
+> **W0 + W1 + W2 + W3 + W4 + W5 + W6 + W7 + W8 已落地**（见各期「进度」）。
 > 前置：`docs/plans/2026-09-07-pid-legend-recognition.md`（D1–D19，一期块族 / 二期炸开族 / 三期管线拓扑全部已落地）。
 > 语料：`D:\work\plant-code\cad\0版重新处理dxf-12张`（CPECC 石楼油库 12 张 DXF）。
 > 本文件 = 09-09 对 `io::pid_legend` / `io::pid_pipes` / `PIDLEGEND` / `PIDLINE` / 图例面板 / 规则 / 测试的审核结论 + 剩余工作的分期。只写「还没做的」与「怎么做」。
@@ -177,6 +177,7 @@
 - `properties.rs::pid_semantics_section` 认 `lines` 键，`resolved` 以 `legend:` 开头时「匹配方式」显示「图例识别」。
 - 出口：FF02-06 `PIDLEGEND ON` 后点 BUV-3201 那个 INSERT，特性面板「P&ID」组显示 类型 蝶阀 / 位号 BUV-3201 / 管线号 100-FW / 匹配方式 图例识别；另存 DWG 再打开仍在；`PURGE` 后该组消失、实体数回到原值；命令级测试各加一条。
 - 风险：XDATA 让文档「脏」——本来 ON 就置 `dirty`，无新增；两条不同线号顺延到同一 run 的写法在面板上要说清（两个 `label`，面板取第一个并标 `+1`）。
+- **进度（2026-09-11）✅ 已落地**。新增 `pid_legend/xdata.rs`：`attach` 按实体句柄稳定发布 `PID_SEMANTICS`，符号写显示类型 / 位号 / 所在线号及 `legend:block|circle|shape:<id>|group:<name>`，管段写 `PIDPipeline`、每条有效线号一个 `label` 及 `legend:pipe`（这个来源键让无号管段也能被 `PURGE` 精确识别）；共享同一实体的两条 run 会合并线号。写前注册带真实句柄的 APPID，替换 / 清理时同时丢掉旧 DWG raw EED；已有 `.pid` 的 `resolved=direct|dependency:…` 身份优先，不被图例结果覆盖。`PIDLEGEND ON` 现在把 XDATA 与覆盖层放进同一撤销步，`OFF` 只关覆盖层，新增 `PURGE` 同步清两者但永不碰 GROUP 描述；最后一个符号消失时再次 ON 会清掉旧发布。GROUP / UNGROUP / PIDGROUP 在 OFF 之后仍会刷新已发布 XDATA，解组不残留 `legend:group`。特性面板读取 `lines`，两线号管段显示首条 `+1`，所有 `legend:` 来源本地化显示「图例识别」。测试覆盖 block / circle / shape / group 来源、两线号管段、`.pid` 身份不覆盖、DXF + DWG 两轮保存（含 purge 后不被 raw EED 带回）、命令 ON / OFF / PURGE / 撤销重做、隐藏覆盖层后解组、空识别清旧数据，以及 FF02-06 的 BUV-3201 类型 / 位号 / 100-FW / 匹配来源。**验证**：lib 侧 `pid` 过滤 **64 过 / 2 ignore**；`--test pid_legend` **28/28**；`cargo check --lib --tests --examples`、`git diff --check` 通过；改动行无 Clippy 告警，新文件 rustfmt 干净，其余文件未增加既有 rustfmt 债。全语种 catalog 测试仍列出 9 个仅有 en-US / zh-CN 的 P&ID 新字串（此前 M4/M5 的 8 个 + 本期 1 个），按 W9 的 19 语种翻译批次收口。
 
 ### W9 · 产品面：本地化、例外区、导出、自动化口、文档（中，1–2 天；C2 / C3 / C6 后半 / C8；D25）
 

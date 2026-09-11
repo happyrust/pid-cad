@@ -13,11 +13,12 @@ pub mod pid;
 pub mod pid_legend;
 pub mod pid_pipes;
 
-/// XDATA application name under which a `.pid` import publishes an entity's
-/// P&ID identity (`class=…`, `label=…`, … string pairs). Lives outside the
-/// native-only [`pid`] module: the web build never imports `.pid`, but it can
-/// open a DWG that already carries these records and must still read them
-/// (see `scene::cache::properties::pid_semantics_section`).
+/// XDATA application name under which a `.pid` import and P&ID legend
+/// recognition publish an entity's identity (`class=…`, `label=…`, … string
+/// pairs). Lives outside the native-only [`pid`] module: the web build never
+/// imports `.pid`, but it can open a DWG that already carries these records
+/// and must still read them (see
+/// `scene::cache::properties::pid_semantics_section`).
 pub(crate) const PID_SEMANTICS_XDATA_APP: &str = "PID_SEMANTICS";
 
 /// Whether `path` names a read-only source format: one this application opens

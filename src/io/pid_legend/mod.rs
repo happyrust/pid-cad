@@ -64,6 +64,7 @@ mod pairing;
 mod report;
 mod rules;
 mod tags;
+mod xdata;
 
 pub use blocks::guess_units_per_mm;
 pub use exploded::hash_color;
@@ -82,6 +83,7 @@ pub use tags::{
     class_for_tag, derive_group_tag, derive_handles_tag, tag_from_lettering, GroupTag, TagClass,
     TagHow, TagRead, TagSource, TAG_NAME_KEY, TAG_SOURCE_KEY,
 };
+pub use xdata::{attach, attached_handles, purge};
 
 use std::collections::{BTreeMap, HashSet};
 
