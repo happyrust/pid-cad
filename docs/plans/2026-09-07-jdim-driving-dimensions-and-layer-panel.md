@@ -6,6 +6,13 @@
 > 本计划把这两条接过来。事实基础是 09-07 下午对四主图 + A01 的字节实跑（JDim 18 条逐条列出）、
 > pid-parse 08-27 的 spacemap / tag-184 / tag-188 分析，以及 OCS 图层管理器现状。
 > 带 ⭕ 的决策按推荐落笔、未经拍板，Plannotator 批注里划一笔即可翻案。
+>
+> **修订（2026-09-13，会话 fable-5-1-47 审核后）**：09-07 落盘至今两仓一行代码未动（pid-parse 自 `1f2060c` 无提交，
+> `src` 里 `0x0057` / ViewFilterSet 零引用，`0x0115` 只在 `undecoded_census.rs` 里作丢弃计数；OCS 无 `PID_LAYER_MODE` /
+> `PID_VIEW_FILTER`，图层管理器无图纸图层模式）——09-07 之后的工时全进了 DXF P&ID 识别线。本次改三处：
+> ① **D8** XDATA 键名 `class=` 与既有实现撞车，改 `role=`；② **D7** 执行顺序改为 L2 先行（用户可见价值前置）；
+> ③ **T** 项扩成台账清单（已做 / 待做）。基线复核：OCS `--test pid_import` 35/35、pid-parse `--lib` 1094 + `parse_real_files` 127 全绿。
+> 状态：**Plannotator 批准**（2026-09-13 22:43，`{"decision":"approved"}`，无批注；见文末「门禁记录」）。
 
 ## 决策记录
 
@@ -15,9 +22,10 @@
 | D2 | JDim 画不画 | 默认**不画**：它在定义缓存的 `Dimension` 层上，与 `Construction` 同属定义内部构造几何；是否上屏由 L1 解出的视图过滤集显示状态裁决，不由名字猜。解码结果进 `JSiteNestedGeometry::dimensions` 作证据 + 进 OCS 特性面板 / 导入摘要 | ⭕ |
 | D3 | JDim 取证路线 | 先 `imagdex.dex` 原生读取器（08-31 的 `tools/idalib_imagdex_*.py` 现成，按 `JDim Object` vtable slot 3 → `DoIO` 反编译），字节统计只做互证；`radsrvitem.dll!sub_564BA320`（igDimension 277）作第二对照。**没有原生读法坐实的字段不进 DTO**（保持 `raw`），与曲线族同一纪律 | ⭕ |
 | D4 | 图层槽归谁 | **分两步**：先做「分类过滤机制 + 图层管理器的图纸图层视图」（L2，不动槽），再把槽换成图纸图层（L3，导入选项后置切换）。两步共用同一套按 XDATA 分类的逐实体可见性机制；L3 是否本轮做完见 D5 | ⭕ |
-| D5 | L3 范围 | 本轮**做到「选项可切、默认不切」**：`PID_LAYER_MODE=sheet` 时槽=图纸图层名（原样，不加前缀），taxonomy 退到 XDATA `class=` / `style=`；探针 / 测试 / 图例线跟着改成按 class 取；默认值翻转另开一轮，等 DXF 下游消费方的要求定下来 | ⭕ |
+| D5 | L3 范围 | 本轮**做到「选项可切、默认不切」**：`OCS_PID_LAYER_MODE=sheet` 时槽=图纸图层名（原样，不加前缀），taxonomy 退到 XDATA `role=` / `style=`；探针 / 测试 / 图例线跟着改成按 role 取；默认值翻转另开一轮，等 DXF 下游消费方的要求定下来。变量名与 `OCS_PID_LEGEND_RULES` 同前缀（09-13 改，原写 `PID_LAYER_MODE`） | ⭕ |
 | D6 | 图层显隐的事实源 | `0x0057 Top ViewFilterSet` 的显示状态字节（08-27 记为「`FF 02 00 …` 一段」，未解）→ 解出后**替代**现在按名字猜的隐藏类（`Hidden` / `HiddenObjects` / `Invisible`）；解不出则名字判据保留，登记缺口 | ⭕ |
-| D7 | 执行顺序 | L1（pid-parse 地基）→ J1 → J2 → L2（OCS 可见价值）→ J3 → L3（选项后置）→ 台账；一项一提交，先红后绿 | ⭕ |
+| D7 | 执行顺序 | ~~L1 → J1 → J2 → L2 → J3 → L3 → 台账~~ **2026-09-13 改为 L2 → L1 → J1 → J2 → J3 → L3 → T**：L2 是本轮唯一用户看得见的项，且自带「L1 未到之前用名字判据」的兜底，不必等 L1；J 线按 D2 默认不画，产出是证据与特性面板字段，排在 L2 之后不卡屏幕。一项一提交，先红后绿 | ⭕ |
+| D8 | 分类维的 XDATA 键名（2026-09-13 审核发现） | 原稿 L2 要写 `class=`（geometry / text / symbol / …），但 `PID_SEMANTICS` 记录里 **`class=` 已被占用**：`src/io/pid.rs::attach_pid_metadata` 写的是 `_Data.xml` 语义对象的元素名（`PIDPipeline` / `PIDProcessVessel` …），特性面板读它当「类型」；DXF 识别线 W8 的 `pid_legend/xdata.rs` 也往同一记录写 `class=<识别类>`。照原稿写下去两种语义互相覆盖。**改用 `role=`**（值不变：geometry / text / symbol / symbol-label / point-ok\|warning\|error\|approved / annotation / connectivity / fill / frame），`style=` 照旧；术语「分类」相应改「角色（role）」 | ⭕ |
 
 ## 背景
 
@@ -162,50 +170,78 @@ Tank 若同理则一并钉）；不改任何投影输出。
 逐实体可见位已存在（命令驱动里有先例）。
 
 **改法**：
-1. **导入端**把两维都写全：现有 `sheet_layer=` / `sheet_layer_oid=` 之外加 `class=`（geometry / text /
-   symbol / symbol-label / point-ok|warning|error|approved / annotation / connectivity / fill / frame）
-   与 `style=`（样式名，discipline 的来源）。零破坏。
-2. **过滤机制**：文档级「P&ID 视图过滤」（按存储的图纸图层 on/off 集合 + class on/off 集合），应用 =
-   对每个带 P&ID XDATA 的实体求 `invisible = !(sheet_layer_on && class_on)`；状态存文档 XDATA 记录
-   （`PID_VIEW_FILTER`），DXF 往返后 `invisible` 位与记录同在。**初值取 L1 解出的显示状态**（L1 未到
-   之前用现有名字判据）——这一步落地那天 `PID-HIDDEN` 的归层逻辑就可以退役成「`Hidden` 层 off」。
+1. **导入端**把两维都写全：现有 `sheet_layer=` / `sheet_layer_oid=` 之外加 `role=`（geometry / text /
+   symbol / symbol-label / point-ok|warning|error|approved / annotation / connectivity / fill / frame；
+   **不是 `class=`**，那个键已被语义对象类占用，见 D8）与 `style=`（样式名，discipline 的来源）。零破坏。
+2. **过滤机制**：文档级「P&ID 视图过滤」（按存储的图纸图层 on/off 集合 + role on/off 集合），应用 =
+   对每个带 P&ID XDATA 的实体求 `invisible = !(sheet_layer_on && role_on)`；状态存文档 XDATA 记录
+   （`PID_VIEW_FILTER`），DXF 往返后 `invisible` 位与记录同在。**初值先用现有名字判据**（`Hidden` /
+   `HiddenObjects` / `Invisible` 三名 off）；L1 落地后换成解出的显示状态，只改初值函数一处——这一步落地
+   那天 `PID-HIDDEN` 的归层逻辑就可以退役成「`Hidden` 层 off」。
 3. **图层管理器**加一个模式切换（合成层 / 图纸图层）：图纸图层模式列出该图的图层名（去重跨视图过滤
-   集，按存储折叠，默认只看顶层存储）、实体计数、on/off 开关；class 作为第二段（复选）；搜索框沿用。
+   集，按存储折叠，默认只看顶层存储）、实体计数、on/off 开关；role 作为第二段（复选）；搜索框沿用。
    Layer States 不动。
-4. 特性面板 P&ID 组加 `Class`；导入摘要加「图纸图层 N 个，其中 M 个按文件状态关闭」。
+4. 特性面板 P&ID 组加「角色」行（读 `role=`，与既有「类型」= `class=` 并列，两行都在时都显示）；
+   导入摘要加「图纸图层 N 个，其中 M 个按文件状态关闭」。
 
-**验收**：`pid_import` 新断言：每个 P&ID 实体带 `class=`；0202 在 XDATA 记录里关掉 `Labels` 后其 text
-实体 `invisible`、开回来恢复；`pid_panel_localization` 四语言覆盖新词条；手工验收：打开 0202，切到
+**验收**：`pid_import` 新断言：每个 P&ID 实体带 `role=`，且带 `class=` 的实体两键并存、值域不交叉
+（`role` 值 ∈ 上面那十个词，`class` 值 ∈ `_Data.xml` 元素名）；0202 在 XDATA 记录里关掉 `Labels` 后其
+text 实体 `invisible`、开回来恢复；`pid_panel_localization` 四语言覆盖新词条；手工验收：打开 0202，切到
 图纸图层模式，看到 `Default / Labels / HeatTrace / …` 与计数，勾掉 `HeatTrace` 电伴热线消失。
+**与 DXF 识别线的边界**：`pid_legend/xdata.rs` 只写 `class` / `label` / `lines` / `resolved`，不写 `role`；
+识别线的 `PIDLEGEND PURGE` 清 XDATA 时只认 `resolved=legend:*` 的记录，`.pid` 导入写的记录不受影响——
+L2 加断言钉住这两条，防止两条线以后互相踩。
 
 ### L3 · 图层槽切换到图纸图层（OCS，选项后置）
 
 **现状**：槽 = 合成 taxonomy；四处消费者按 `PID-*` 名字取实体。
 
-**改法**：导入选项 `PID_LAYER_MODE`（`taxonomy` 默认 / `sheet`）。`sheet` 模式：实体 layer =
-图纸图层名**原样**（`Default` / `Labels` / …，按 D5 不加前缀；同名跨存储合并为一个 DXF 层，oid 仍在
-XDATA）；没有图纸图层的 OCS 自造实体（连通链、符号名标签、评审点符号）保留各自 `PID-*` 层；
-`PID-STYLE-*` / `PID-HIDDEN` 不再生成（discipline 走 `style=` + L2 过滤，隐藏走文件状态）；
-`ensure_layer` 用 L1 的显示状态设初始 on/off。消费者改造：`pid_import.rs` 的 `on_layer` / `is_line_work`
-改成按 XDATA `class=` 取的 `of_class`（两种模式下同一套断言都得过）；`pid_probe` / `pid_plot_dump` 按
-class 分组输出。
+**改法**：导入选项 `OCS_PID_LAYER_MODE`（`taxonomy` 默认 / `sheet`；环境变量，与 `OCS_PID_LEGEND_RULES`
+同一命名法）。`sheet` 模式：实体 layer = 图纸图层名**原样**（`Default` / `Labels` / …，按 D5 不加前缀；
+同名跨存储合并为一个 DXF 层，oid 仍在 XDATA）；没有图纸图层的 OCS 自造实体（连通链、符号名标签、
+评审点符号）保留各自 `PID-*` 层；`PID-STYLE-*` / `PID-HIDDEN` 不再生成（discipline 走 `style=` + L2 过滤，
+隐藏走文件状态）；`ensure_layer` 用 L1 的显示状态设初始 on/off。消费者改造：`pid_import.rs` 的
+`on_layer` / `is_line_work` 改成按 XDATA `role=` 取的 `of_role`（两种模式下同一套断言都得过）；
+`pid_probe` / `pid_plot_dump` 按 role 分组输出。
 
 **验收**：两种模式下 `pid_import` 全绿；`sheet` 模式打开 0202：图层表就是 SmartPlant 的 16 个名字
 （含状态），DXF 另存后在第三方查看器里图层名一致；默认值不翻转（D5）。
 
 ### T · 台账与共享记忆（双仓）
 
-pid-parse `task_plan.md` 当前阶段加本轮指针；OCS `.context` 会话文件按惯例；每项落地 `remember` 一条。
+**已做（2026-09-13，收账一轮）**：
+
+- 08-29 计划入库：OCS `a1ad4f2c`——此前一直是未跟踪文件、文内无进度；现头部有终态段（两仓提交号逐项）、
+  W6 有进度行，OCS 3 条 `app::automation` 红测试的去向（上游 issue #941）第一次出现在 OCS 仓里。
+- 两仓换行符归一：pid-parse 新增 `.gitattributes`（`* text=auto eol=lf` + 二进制夹具，`cd20e3b`）；
+  两仓工作树 322 + 515 个 CRLF 文件逐字节改回 LF（blob 哈希与 HEAD 相同，无提交）；根因是系统级
+  `core.autocrlf=true`，已用用户级 `git config --global core.autocrlf false` 压掉。
+
+**待做（随本轮各项收尾）**：
+
+- pid-parse `task_plan.md`「当前阶段」加本轮指针（L1 / J2 落地时各刷一次）。
+- **user-guide 补 `.pid` 一节**（今天零字，README 只有一行）：只读来源与 Save As 闸门、导入汇总行、
+  `PID-*` 合成层与 `PID-HIDDEN`、特性面板 P&ID 组（`sheet_layer` / `class` / `label` / 匹配方式）；
+  L2 落地时加图纸图层模式与 role 过滤，L3 落地时加 `OCS_PID_LAYER_MODE`。归在 L2 的出口里一起验收。
+- OCS `.context` 会话文件按惯例；每项落地 `remember` 一条。
 
 ---
 
-## 执行顺序 ⭕D7
+## 执行顺序 ⭕D7（2026-09-13 修订）
 
-**L1 → J1 → J2 → L2 → J3 → L3 → T**。L1 先行是因为 J（D2 裁决）与 L（显隐初值）都吃它；J1/J2 紧接着
-把 JDim 从盲区拿出来；L2 是用户可见价值，且不依赖 J；J3 是纯证据，插在 L2 之后不卡屏幕；L3 最后，
-选项后置、默认不切，风险隔离。
+**L2 → L1 → J1 → J2 → J3 → L3 → T**。
 
-时间盒：L1 一个工作日；J1 两个工作日（原生读取器无果则 J2 只带坐实字段 + raw，不空转）。
+- **L2 先行**：本轮唯一用户看得见的项（图层管理器里出现 SmartPlant 自己的图层与开关），不依赖 J，
+  也不必等 L1——初值用现有名字判据，L1 到了只换一处初值函数。D8 的键名改动在 L2 第 1 步落地。
+- **L1 紧随**：解出显示状态就把 L2 的初值换成文件事实，`PID-HIDDEN` 归层退役；时间盒一个工作日，
+  无果按 D6 保留名字判据。
+- **J1 → J2 → J3**：把 JDim 从盲区拿出来并闭环参数化链。按 D2 默认不画，所以排在屏幕价值之后；
+  J1 两个工作日时间盒，原生读取器无果则 J2 只带坐实字段 + raw，不空转。
+- **L3 最后**：选项后置、默认不切，风险隔离。
+- **T** 随各项收尾，不单独占期。
+
+原稿 L1 → J1 → J2 → L2 的理由是「J 的 D2 裁决与 L 的显隐初值都吃 L1」——D2 裁决只影响 J 线画不画
+（默认不画，L1 之后若实测 `Dimension` 层为显示再翻），L 的初值有兜底；两者都不构成 L2 的前置。
 
 ## 登记不做（本轮）
 
@@ -215,7 +251,7 @@ pid-parse `task_plan.md` 当前阶段加本轮指针；OCS `.context` 会话文�
 | `JBalloon`（0x0117）/ `JLeader`（0x0118）/ `0x00FF` | 全语料 0 条，无 fixture 不写；08-07 的图形类点名告警已覆盖 |
 | `0x0010` 子记录语义（638 条） | 与 JDim 同 GUID，可能随 J1 顺带落地，但不作验收项 |
 | 按视图过滤集分别呈现图层状态 | OCS 单模型空间，取一份（顶层存储、第一个集合）；多视图是另一个产品命题 |
-| `PID_LAYER_MODE` 默认翻转 | 等 DXF 下游消费方（图例线那批 DXF 的用法）把要求说清 |
+| `OCS_PID_LAYER_MODE` 默认翻转 | 等 DXF 下游消费方（图例线那批 DXF 的用法）把要求说清 |
 | 缓存 vs 库本体优先级、缓存 `StyleCluster` 接入 | 09-07 上午登记的两条，与本轮无耦合，另排 |
 | A01 `/JSite204` `Default` 计数差 4、`0x0057 +32` 语义 | 未解释记账，等新证据（L1 可能顺带碰到，碰到就记） |
 
@@ -226,6 +262,13 @@ pid-parse `task_plan.md` 当前阶段加本轮指针；OCS `.context` 会话文�
   （annotation）不是一回事。
 - **视图过滤集（ViewFilterSet）**：`0x0057` / `0x0060`，按视图存的图层选集与显示状态；「图纸图层
   显隐」的事实源。
-- **分类（class）**：OCS 导入器给实体的角色标签（现在体现为 `PID-*` 合成层名），L2 起以 XDATA
-  `class=` 存在，与图纸图层正交。
+- **角色（role）**：OCS 导入器给实体的角色标签（现在体现为 `PID-*` 合成层名），L2 起以 XDATA
+  `role=` 存在，与图纸图层正交。**不叫「分类 / class」**：`class=` 在同一 XDATA 记录里已是语义对象的
+  XML 元素名（`PIDPipeline` …），特性面板显示为「类型」（D8）。
 - **图层槽（layer slot）**：DXF 实体唯一的 layer 字段；D4/D5 讨论的就是它归哪一维。
+
+## 门禁记录
+
+- 2026-09-13 22:43：修订版（D7 改序、D8 换键、T 扩充）过 Plannotator `annotate --gate --json`，
+  **`{"decision":"approved"}`，无批注**。⭕ 均未被翻案，D1–D8 按各自「结论」执行；09-07 原稿此前未过门禁，
+  本次是这份计划第一次批准。
