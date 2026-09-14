@@ -13,6 +13,12 @@
 > ① **D8** XDATA 键名 `class=` 与既有实现撞车，改 `role=`；② **D7** 执行顺序改为 L2 先行（用户可见价值前置）；
 > ③ **T** 项扩成台账清单（已做 / 待做）。基线复核：OCS `--test pid_import` 35/35、pid-parse `--lib` 1094 + `parse_real_files` 127 全绿。
 > 状态：**Plannotator 批准**（2026-09-13 22:43，`{"decision":"approved"}`，无批注；见文末「门禁记录」）。
+>
+> **补记（2026-09-14，会话 fable-5-1-5 对账后）**：L2 第 1 步落地（OCS `39b1cc72`），其余各项未动。对照代码把 L2 的
+> 三处口径补严，均不动决策表：① 识别线与导入线的边界补上 **attach** 那一半（原只写了 PURGE 与「不写 role」）；
+> ② L2 第 4 步新词条的覆盖面从「四语言」改为 **21 本目录全覆盖**（`i18n` 的目录守护测试如今对全部目录生效）；
+> ③ L2 第 2 步可见性公式补上**没有图纸图层的实体**怎么算。基线复核：OCS `--test pid_import` 38/38、
+> pid-parse `--lib` 1094 + `parse_real_files` 127 全绿。
 
 ## 决策记录
 
@@ -174,8 +180,10 @@ Tank 若同理则一并钉）；不改任何投影输出。
    symbol / symbol-label / point-ok|warning|error|approved / annotation / connectivity / fill / frame；
    **不是 `class=`**，那个键已被语义对象类占用，见 D8）与 `style=`（样式名，discipline 的来源）。零破坏。
 2. **过滤机制**：文档级「P&ID 视图过滤」（按存储的图纸图层 on/off 集合 + role on/off 集合），应用 =
-   对每个带 P&ID XDATA 的实体求 `invisible = !(sheet_layer_on && role_on)`；状态存文档 XDATA 记录
-   （`PID_VIEW_FILTER`），DXF 往返后 `invisible` 位与记录同在。**初值先用现有名字判据**（`Hidden` /
+   对每个带 P&ID XDATA 的实体求 `invisible = !(sheet_layer_on && role_on)`；**没有 `sheet_layer=` 的实体
+   `sheet_layer_on` 视为 on**，只受 role 开关管——导入器自造的 frame / connectivity / symbol-label 和
+   StyleCluster 字形线（`sheet_layer_ref == 0`）本来就不在任何图纸图层上，不能因为「没登记」被关掉；
+   状态存文档 XDATA 记录（`PID_VIEW_FILTER`），DXF 往返后 `invisible` 位与记录同在。**初值先用现有名字判据**（`Hidden` /
    `HiddenObjects` / `Invisible` 三名 off）；L1 落地后换成解出的显示状态，只改初值函数一处——这一步落地
    那天 `PID-HIDDEN` 的归层逻辑就可以退役成「`Hidden` 层 off」。
 3. **图层管理器**加一个模式切换（合成层 / 图纸图层）：图纸图层模式列出该图的图层名（去重跨视图过滤
@@ -186,11 +194,22 @@ Tank 若同理则一并钉）；不改任何投影输出。
 
 **验收**：`pid_import` 新断言：每个 P&ID 实体带 `role=`，且带 `class=` 的实体两键并存、值域不交叉
 （`role` 值 ∈ 上面那十个词，`class` 值 ∈ `_Data.xml` 元素名）；0202 在 XDATA 记录里关掉 `Labels` 后其
-text 实体 `invisible`、开回来恢复；`pid_panel_localization` 四语言覆盖新词条；手工验收：打开 0202，切到
+text 实体 `invisible`、开回来恢复；新词条（「角色」行等）**21 本 `locales/*/opencadstudio.ftl` 全覆盖**——
+`i18n::tests::every_catalog_covers_and_formats_the_source_catalog` 对全部目录生效，少一本就红（09-14 改，
+原写「`pid_panel_localization` 四语言」，那是 08-12 W5 的口径，早已过时）；手工验收：打开 0202，切到
 图纸图层模式，看到 `Default / Labels / HeatTrace / …` 与计数，勾掉 `HeatTrace` 电伴热线消失。
 **与 DXF 识别线的边界**：`pid_legend/xdata.rs` 只写 `class` / `label` / `lines` / `resolved`，不写 `role`；
 识别线的 `PIDLEGEND PURGE` 清 XDATA 时只认 `resolved=legend:*` 的记录，`.pid` 导入写的记录不受影响——
-L2 加断言钉住这两条，防止两条线以后互相踩。
+L2 加断言钉住这两条，防止两条线以后互相踩。**attach 那一半（09-14 补）**：`pid_legend/xdata.rs::attach`
+遇到已有非 `legend:*` 记录的实体一律跳过、不覆盖；第 1 步之后每个导入实体都带 `role=`，于是
+`PIDLEGEND ON` 在 `.pid` 导入的图上**不再写任何 XDATA**（此前只有既无发布身份、又无图纸图层的实体可写）。
+这是有意为之：覆盖等于丢 `role=`，随后 PURGE 会把整条记录删光。识别线是给 DXF 图的，`.pid` 导入自带身份，
+两者不在同一张图上工作；若日后要让识别线在 `.pid` 图上补位号，改法是**合并记录**（保留导入键、追加识别键、
+`resolved` 归识别线）而不是放开跳过，另开一项做。
+**进度**：第 1 步 ✅ 2026-09-14 OCS `39b1cc72`（`pid: every imported entity states its role= and style= in XDATA`）：
+`role=` 从实体建于其上的 `PID-*` 层读出、在 `PID-HIDDEN` 覆盖之前取；`style=` 不论是否换来 `PID-STYLE-*` 层都写；
+APPID 注册改无条件；页面边框带 `role=frame`。`tests/pid_import.rs` +3 条（词表 / role 与层一致 / role-class 值域不交叉、
+无 `legend:*` 记录 / `style=` 与 discipline 层互推）+ DWG/DXF 往返保 `role=` 的断言，35 → 38 全绿。第 2–4 步未动。
 
 ### L3 · 图层槽切换到图纸图层（OCS，选项后置）
 
