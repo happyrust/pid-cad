@@ -209,7 +209,16 @@ L2 加断言钉住这两条，防止两条线以后互相踩。**attach 那一�
 **进度**：第 1 步 ✅ 2026-09-14 OCS `39b1cc72`（`pid: every imported entity states its role= and style= in XDATA`）：
 `role=` 从实体建于其上的 `PID-*` 层读出、在 `PID-HIDDEN` 覆盖之前取；`style=` 不论是否换来 `PID-STYLE-*` 层都写；
 APPID 注册改无条件；页面边框带 `role=frame`。`tests/pid_import.rs` +3 条（词表 / role 与层一致 / role-class 值域不交叉、
-无 `legend:*` 记录 / `style=` 与 discipline 层互推）+ DWG/DXF 往返保 `role=` 的断言，35 → 38 全绿。第 2–4 步未动。
+无 `legend:*` 记录 / `style=` 与 discipline 层互推）+ DWG/DXF 往返保 `role=` 的断言，35 → 38 全绿。
+第 2 步 ✅ 2026-09-14 OCS `f082393d`（`pid: a stored view filter switches sheet layers and roles off, entity by entity`）：
+新模块 `src/io/pid_view_filter.rs`——`PidViewFilter { layers_off, roles_off }`，存为 `*Model_Space` 块记录扩展字典里的
+XRecord `PID_VIEW_FILTER`（每条 `layer_off=<名>` / `role_off=<角色>` 一个字串项；全开时删记录不留空账），`apply` 按
+`invisible = !(sheet_layer_on && role_on)` 逐实体置位，只碰带 `sheet_layer=` 或 `role=` 的记录；导入末尾 `initial → store → apply`，
+初值走 `is_hidden_sheet_layer`（从 `pid.rs` 搬进新模块，`PID-HIDDEN` 归层与过滤初值共用这一个函数，L1 只换它）。
+`tests/pid_import.rs` +4 条：导入即存过滤且 HiddenObjects 全暗、**0202 关 `Labels` → 46 条 text（连同 46 条线 + 5 个填充）暗、
+`Default` 照画、开回来全亮**、role 轴与无图纸图层实体只听 role、记录与 `invisible` 位过 DWG/DXF 往返；38 → 42 全绿。
+**过渡期注意**：隐藏类实体现在同时被 `PID-HIDDEN`（层关）和 `invisible` 位遮住，只开层不再能看见它们，要等第 3 步的开关
+（或一条命令）才能翻回来。第 3–4 步未动。
 
 ### L3 · 图层槽切换到图纸图层（OCS，选项后置）
 
