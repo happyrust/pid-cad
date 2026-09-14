@@ -134,11 +134,15 @@ mod tests {
         assert_eq!(config_dir(), Some(dir));
     }
 
+    /// The other half of P8.5 债1: `AppConfig::save` writes no settings file
+    /// at all under test. The scratch dir above already keeps the developer's
+    /// %APPDATA% copy out of reach; not writing also keeps the preferences
+    /// one test saved out of the application the next test builds.
     #[test]
-    fn the_settings_written_by_a_test_land_in_the_scratch_dir() {
-        let cfg = crate::app::config::AppConfig::default();
-        cfg.save();
-        let written = config_dir().unwrap().join("settings.json");
-        assert!(written.is_file(), "{}", written.display());
+    fn a_test_that_saves_settings_writes_nothing() {
+        let path = config_dir().expect("the scratch dir always resolves").join("settings.json");
+        let _ = std::fs::remove_file(&path);
+        crate::app::config::AppConfig::default().save();
+        assert!(!path.exists(), "{}", path.display());
     }
 }

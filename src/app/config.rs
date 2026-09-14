@@ -464,7 +464,8 @@ impl AppConfig {
     /// Does nothing under `cfg(test)`. The path is the developer's own
     /// settings file, and the suite builds whole applications and changes
     /// preferences on them — without this, running `cargo test` rewrites the
-    /// settings of whoever ran it.
+    /// settings of whoever ran it, and the preferences one test saved leak
+    /// into the application the next test builds.
     pub fn save(&self) {
         if cfg!(test) {
             return;
