@@ -2805,6 +2805,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: Stil '__ocs_fmt_1__' erstellt.
     .prefix-style-name-not-found = __ocs_fmt_0__: Stil '__ocs_fmt_1__' nicht gefunden.
     .prefix-style-style-name-not-found = __ocs_fmt_0__: Stil '__ocs_fmt_1__' nicht gefunden.
+    .sheet-layers = Blattebenen
+    .roles = Rollen
+    .sheet-layer-turned-entities = Blattebene __ocs_fmt_0__ auf __ocs_fmt_1__ geschaltet (__ocs_fmt_2__ Elemente)
+    .role-turned-entities = Rolle __ocs_fmt_0__ auf __ocs_fmt_1__ geschaltet (__ocs_fmt_2__ Elemente)
+    .layer-turned-on-so-the-sheet-layer-can-show = Ebene __ocs_fmt_0__ eingeschaltet, damit die Blattebene sichtbar wird
 
 annotate =
     .dimjogged-enter-dimension-text-blank-measured = DIMJOGGED  Maßtext eingeben (leer = Messwert):

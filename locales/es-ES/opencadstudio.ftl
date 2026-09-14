@@ -2805,6 +2805,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: se creó el estilo «__ocs_fmt_1__».
     .prefix-style-name-not-found = __ocs_fmt_0__: no se encontró el estilo «__ocs_fmt_1__».
     .prefix-style-style-name-not-found = __ocs_fmt_0__: no se encontró el estilo «__ocs_fmt_1__».
+    .sheet-layers = Capas de hoja
+    .roles = Roles
+    .sheet-layer-turned-entities = Capa de hoja __ocs_fmt_0__ cambiada a __ocs_fmt_1__ (__ocs_fmt_2__ entidades)
+    .role-turned-entities = Rol __ocs_fmt_0__ cambiado a __ocs_fmt_1__ (__ocs_fmt_2__ entidades)
+    .layer-turned-on-so-the-sheet-layer-can-show = Capa __ocs_fmt_0__ activada para que la capa de hoja sea visible
 
 annotate =
     .dimjogged-enter-dimension-text-blank-measured = DIMJOGGED  Introduzca el texto de cota (vacío = valor medido):

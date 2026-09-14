@@ -2795,6 +2795,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: スタイル「__ocs_fmt_1__」を作成しました。
     .prefix-style-name-not-found = __ocs_fmt_0__: スタイル「__ocs_fmt_1__」が見つかりません。
     .prefix-style-style-name-not-found = __ocs_fmt_0__: スタイル「__ocs_fmt_1__」が見つかりません。
+    .sheet-layers = シートレイヤー
+    .roles = ロール
+    .sheet-layer-turned-entities = シートレイヤー __ocs_fmt_0__ を__ocs_fmt_1__にしました（__ocs_fmt_2__ 個のエンティティ）
+    .role-turned-entities = ロール __ocs_fmt_0__ を__ocs_fmt_1__にしました（__ocs_fmt_2__ 個のエンティティ）
+    .layer-turned-on-so-the-sheet-layer-can-show = シートレイヤーを表示するためレイヤー __ocs_fmt_0__ をオンにしました
 
 annotate =
     .dimjogged-enter-dimension-text-blank-measured = DIMJOGGED  寸法値を入力 (空欄 = 計測値):

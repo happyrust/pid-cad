@@ -1300,6 +1300,7 @@ impl OpenCADStudio {
                 self.tabs[i]
                     .layers
                     .sync_with_viewports(&doc_layers, vp_info);
+                self.sync_pid_view(i);
                 self.command_line
                     .push_output(crate::t!("Scene cleared. Standard linetypes loaded.").as_ref());
                 self.tabs[i].current_path = None;
@@ -2069,6 +2070,10 @@ impl OpenCADStudio {
                     self.reset_modal_geometry();
                 } else {
                     self.sync_ribbon_layers();
+                    // The sheet-layer view's counts are read off the document
+                    // when the window opens, so erased or added entities show.
+                    let i = self.active_tab;
+                    self.sync_pid_view(i);
                     self.active_modal = Some(super::ModalKind::Layers);
                 }
                 Task::none()
@@ -2619,6 +2624,66 @@ impl OpenCADStudio {
                 // Keep the ribbon dropdown's order (and its toggle indices) in
                 // step with the re-sorted manager table.
                 self.sync_ribbon_layers();
+                Task::none()
+            }
+
+            Message::LayerViewSet(view) => {
+                let i = self.active_tab;
+                // Re-read the counts and switches on the way in: entities may
+                // have been added or erased since the summary was last taken.
+                let tab = &mut self.tabs[i];
+                tab.layers.sync_pid_view(&tab.scene.document);
+                tab.layers.view = view;
+                Task::none()
+            }
+
+            Message::PidSheetLayerToggle(idx) => {
+                let i = self.active_tab;
+                let Some(row) = self.tabs[i].layers.pid.layers.get(idx).cloned() else {
+                    return Task::none();
+                };
+                let on = !row.on;
+                self.push_undo_snapshot(i, "PID SHEET LAYER ON/OFF");
+                let switched = crate::io::pid_view_filter::switch_sheet_layer(
+                    &mut self.tabs[i].scene.document,
+                    &row.name,
+                    on,
+                );
+                self.after_pid_view_switch(i, switched);
+                self.command_line.push_output(
+                    crate::tf!(
+                        "Sheet layer {} turned {} ({} entities)",
+                        row.name,
+                        if on { crate::t!("On") } else { crate::t!("Off") },
+                        switched.entities
+                    )
+                    .as_ref(),
+                );
+                Task::none()
+            }
+
+            Message::PidRoleToggle(idx) => {
+                let i = self.active_tab;
+                let Some(row) = self.tabs[i].layers.pid.roles.get(idx).cloned() else {
+                    return Task::none();
+                };
+                let on = !row.on;
+                self.push_undo_snapshot(i, "PID ROLE ON/OFF");
+                let switched = crate::io::pid_view_filter::switch_role(
+                    &mut self.tabs[i].scene.document,
+                    &row.name,
+                    on,
+                );
+                self.after_pid_view_switch(i, switched);
+                self.command_line.push_output(
+                    crate::tf!(
+                        "Role {} turned {} ({} entities)",
+                        row.name,
+                        if on { crate::t!("On") } else { crate::t!("Off") },
+                        switched.entities
+                    )
+                    .as_ref(),
+                );
                 Task::none()
             }
 

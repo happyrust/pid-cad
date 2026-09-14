@@ -30,13 +30,19 @@
 //! layers SmartPlant hides by name (`Hidden` / `HiddenObjects` / `Invisible`)
 //! start switched off -- see [`is_hidden_sheet_layer`], the single function to
 //! change once the file's own display state is decoded (plan 2026-09-07, L1).
+//!
+//! The layer manager's sheet-layer view is a reading of the same two axes:
+//! [`PidViewSummary`] lists what the drawing's entities state along each,
+//! with the filter's answer for every name, and [`switch_sheet_layer`] /
+//! [`switch_role`] are the one call behind each of its switches.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use acadrust::objects::{XRecordEntry, XRecordValue};
 use acadrust::xdata::XDataValue;
 use acadrust::{CadDocument, EntityType, Handle};
 
+use super::pid::LAYER_HIDDEN;
 use super::PID_SEMANTICS_XDATA_APP;
 
 /// The XRecord key the filter is stored under, in the model-space block
@@ -195,6 +201,171 @@ impl PidViewFilter {
     /// Nothing is switched off.
     pub fn is_empty(&self) -> bool {
         self.layers_off.is_empty() && self.roles_off.is_empty()
+    }
+}
+
+/// The import's role vocabulary, in the order the layer manager lists it:
+/// what the sheet draws first, then the review marks, then what the importer
+/// adds around the drawing. A role outside it -- there is none today -- would
+/// list after these, alphabetically.
+pub const ROLE_ORDER: [&str; 12] = [
+    "geometry",
+    "text",
+    "symbol",
+    "symbol-label",
+    "point-ok",
+    "point-warning",
+    "point-error",
+    "point-approved",
+    "annotation",
+    "connectivity",
+    "fill",
+    "frame",
+];
+
+/// One row of the layer manager's sheet-layer view: an authored sheet layer
+/// or an import role, how many entities state it, and whether the filter has
+/// it on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PidViewRow {
+    pub name: String,
+    pub entities: usize,
+    pub on: bool,
+}
+
+/// What a drawing's entities state along the filter's two axes, with the
+/// filter's answer for each name.
+///
+/// Sheet layers are one row per distinct name, sorted. SmartPlant keeps one
+/// layer object per view filter set and per storage, so the same name can be
+/// several objects in the file; the filter switches names, the importer writes
+/// names, and a reader thinks in names, so that is what is listed. Roles are
+/// in [`ROLE_ORDER`]. Empty for a drawing without a `.pid` import, which is
+/// how the layer manager knows not to offer the view.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PidViewSummary {
+    pub layers: Vec<PidViewRow>,
+    pub roles: Vec<PidViewRow>,
+}
+
+impl PidViewSummary {
+    /// Read the summary off the drawing: its entities' `sheet_layer=` and
+    /// `role=` keys, and the filter it stores (none stored reads as all on).
+    pub fn of(doc: &CadDocument) -> Self {
+        let filter = PidViewFilter::load(doc).unwrap_or_default();
+        let mut layers: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut roles: BTreeMap<&str, usize> = BTreeMap::new();
+        for entity in doc.entities() {
+            let Some(keys) = pid_keys(entity) else {
+                continue;
+            };
+            if let Some(layer) = keys.sheet_layer {
+                *layers.entry(layer).or_default() += 1;
+            }
+            if let Some(role) = keys.role {
+                *roles.entry(role).or_default() += 1;
+            }
+        }
+        let mut roles: Vec<PidViewRow> = roles
+            .into_iter()
+            .map(|(name, entities)| PidViewRow {
+                on: filter.role_is_on(name),
+                name: name.to_string(),
+                entities,
+            })
+            .collect();
+        // Stable, so roles outside the vocabulary keep their alphabetical order
+        // after the known ones.
+        roles.sort_by_key(|row| role_rank(&row.name));
+        Self {
+            layers: layers
+                .into_iter()
+                .map(|(name, entities)| PidViewRow {
+                    on: filter.layer_is_on(name),
+                    name: name.to_string(),
+                    entities,
+                })
+                .collect(),
+            roles,
+        }
+    }
+
+    /// No entity states a sheet layer or a role: nothing to list.
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty() && self.roles.is_empty()
+    }
+}
+
+fn role_rank(role: &str) -> usize {
+    ROLE_ORDER
+        .iter()
+        .position(|known| *known == role)
+        .unwrap_or(ROLE_ORDER.len())
+}
+
+/// What one switch did to the drawing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Switched {
+    /// Entities whose `invisible` bit changed.
+    pub entities: usize,
+    /// The `PID-HIDDEN` layer was turned on so the entities the import filed
+    /// there could show. Only switching a sheet layer on ever does this.
+    pub released_hidden_layer: bool,
+}
+
+/// Switch one authored sheet layer on or off: the stored record follows and
+/// every entity's bit is set from the result.
+///
+/// Switching a layer *on* may have to release `PID-HIDDEN` as well: the import
+/// files the entities of the sheet layers it starts off on that layer, with the
+/// layer itself off, so their bit alone would not show them. That layer is the
+/// importer's own hiding device and the bit now carries the same reading, so
+/// the switch turns it on when an entity it just lit sits there. Switching off
+/// never touches the layer table; the bits do the hiding.
+pub fn switch_sheet_layer(doc: &mut CadDocument, layer: &str, on: bool) -> Switched {
+    let mut filter = PidViewFilter::load(doc).unwrap_or_default();
+    filter.set_layer(layer, on);
+    let mut switched = Switched {
+        entities: store_and_apply(doc, &filter),
+        released_hidden_layer: false,
+    };
+    if on {
+        switched.released_hidden_layer = release_hidden_layer(doc);
+    }
+    switched
+}
+
+/// Switch one import role on or off; see [`switch_sheet_layer`]. A role
+/// switch lights nothing the import hid, so the layer table is never touched.
+pub fn switch_role(doc: &mut CadDocument, role: &str, on: bool) -> Switched {
+    let mut filter = PidViewFilter::load(doc).unwrap_or_default();
+    filter.set_role(role, on);
+    Switched {
+        entities: store_and_apply(doc, &filter),
+        released_hidden_layer: false,
+    }
+}
+
+fn store_and_apply(doc: &mut CadDocument, filter: &PidViewFilter) -> usize {
+    filter.store(doc);
+    filter.apply(doc)
+}
+
+/// Turn `PID-HIDDEN` on when it is off and holds an entity whose bit says it
+/// should draw. Returns whether the layer changed.
+fn release_hidden_layer(doc: &mut CadDocument) -> bool {
+    let holds_a_lit_entity = doc
+        .entities()
+        .any(|entity| entity.common().layer == LAYER_HIDDEN && !entity.common().invisible);
+    if !holds_a_lit_entity {
+        return false;
+    }
+    match doc.layers.get_mut(LAYER_HIDDEN) {
+        Some(hidden) if hidden.flags.off => {
+            hidden.flags.off = false;
+            true
+        }
+        _ => false,
     }
 }
 
@@ -395,5 +566,171 @@ mod tests {
         );
         assert_eq!(filter.roles_off().count(), 0);
         assert!(PidViewFilter::initial(&document_with(Vec::new())).is_empty());
+    }
+
+    #[test]
+    fn the_summary_counts_by_name_orders_roles_by_vocabulary_and_reads_the_filter() {
+        let mut doc = document_with(vec![
+            line_with(&["sheet_layer=Labels", "role=text"]),
+            line_with(&["sheet_layer=Labels", "role=geometry"]),
+            line_with(&["sheet_layer=Default", "role=geometry"]),
+            line_with(&["sheet_layer=HiddenObjects", "role=geometry"]),
+            line_with(&["role=frame"]),
+            line_with(&["role=connectivity"]),
+            line_with(&["role=zzz-unknown"]),
+            line_with(&["class=蝶阀", "resolved=legend:block"]),
+            line_with(&[]),
+        ]);
+        assert!(PidViewSummary::of(&document_with(Vec::new())).is_empty());
+
+        let summary = PidViewSummary::of(&doc);
+        let rows = |rows: &[PidViewRow]| -> Vec<(String, usize, bool)> {
+            rows.iter()
+                .map(|row| (row.name.clone(), row.entities, row.on))
+                .collect()
+        };
+        assert_eq!(
+            rows(&summary.layers),
+            [
+                ("Default".to_string(), 1, true),
+                ("HiddenObjects".to_string(), 1, true),
+                ("Labels".to_string(), 2, true),
+            ],
+            "no record stored reads as everything on"
+        );
+        assert_eq!(
+            rows(&summary.roles),
+            [
+                ("geometry".to_string(), 3, true),
+                ("text".to_string(), 1, true),
+                ("connectivity".to_string(), 1, true),
+                ("frame".to_string(), 1, true),
+                ("zzz-unknown".to_string(), 1, true),
+            ]
+        );
+
+        let mut filter = PidViewFilter::default();
+        filter.set_layer("HiddenObjects", false);
+        filter.set_role("frame", false);
+        filter.store(&mut doc);
+        let summary = PidViewSummary::of(&doc);
+        assert!(
+            !summary
+                .layers
+                .iter()
+                .find(|row| row.name == "HiddenObjects")
+                .unwrap()
+                .on
+        );
+        assert!(
+            summary
+                .layers
+                .iter()
+                .find(|row| row.name == "Labels")
+                .unwrap()
+                .on
+        );
+        assert!(
+            !summary
+                .roles
+                .iter()
+                .find(|row| row.name == "frame")
+                .unwrap()
+                .on
+        );
+    }
+
+    #[test]
+    fn a_switch_stores_applies_and_releases_the_hidden_layer_only_when_lighting_it() {
+        let mut doc = document_with(vec![
+            line_with(&["sheet_layer=Labels", "role=text"]),
+            line_with(&["sheet_layer=HiddenObjects", "role=geometry"]),
+            line_with(&["role=frame"]),
+        ]);
+        let mut hidden = acadrust::tables::layer::Layer::new(LAYER_HIDDEN);
+        hidden.flags.off = true;
+        doc.layers
+            .add(hidden)
+            .expect("a fresh document has no PID-HIDDEN");
+        doc.entities_mut().nth(1).unwrap().common_mut().layer = LAYER_HIDDEN.to_string();
+        let initial = PidViewFilter::initial(&doc);
+        initial.store(&mut doc);
+        initial.apply(&mut doc);
+        let dark = |doc: &CadDocument| -> Vec<bool> {
+            doc.entities().map(|e| e.common().invisible).collect()
+        };
+        assert_eq!(dark(&doc), [false, true, false]);
+
+        let switched = switch_sheet_layer(&mut doc, "Labels", false);
+        assert_eq!(
+            switched,
+            Switched {
+                entities: 1,
+                released_hidden_layer: false
+            }
+        );
+        assert_eq!(dark(&doc), [true, true, false]);
+        assert_eq!(
+            PidViewFilter::load(&doc)
+                .unwrap()
+                .layers_off()
+                .collect::<Vec<_>>(),
+            ["HiddenObjects", "Labels"]
+        );
+        assert!(doc.layers.get(LAYER_HIDDEN).unwrap().flags.off);
+
+        let switched = switch_sheet_layer(&mut doc, "Labels", true);
+        assert_eq!(
+            switched,
+            Switched {
+                entities: 1,
+                released_hidden_layer: false
+            },
+            "nothing lit sits on PID-HIDDEN, so the layer stays as it was"
+        );
+        assert!(doc.layers.get(LAYER_HIDDEN).unwrap().flags.off);
+
+        let switched = switch_sheet_layer(&mut doc, "HiddenObjects", true);
+        assert_eq!(
+            switched,
+            Switched {
+                entities: 1,
+                released_hidden_layer: true
+            }
+        );
+        assert_eq!(dark(&doc), [false, false, false]);
+        assert!(!doc.layers.get(LAYER_HIDDEN).unwrap().flags.off);
+        assert!(
+            PidViewFilter::load(&doc).is_none(),
+            "all on leaves no record"
+        );
+
+        let switched = switch_sheet_layer(&mut doc, "HiddenObjects", false);
+        assert_eq!(
+            switched,
+            Switched {
+                entities: 1,
+                released_hidden_layer: false
+            }
+        );
+        assert!(
+            !doc.layers.get(LAYER_HIDDEN).unwrap().flags.off,
+            "off never touches the table"
+        );
+
+        let switched = switch_role(&mut doc, "frame", false);
+        assert_eq!(
+            switched,
+            Switched {
+                entities: 1,
+                released_hidden_layer: false
+            }
+        );
+        assert_eq!(dark(&doc), [false, true, true]);
+        let switched = switch_role(&mut doc, "frame", false);
+        assert_eq!(
+            switched.entities, 0,
+            "switching what is already off changes nothing"
+        );
     }
 }

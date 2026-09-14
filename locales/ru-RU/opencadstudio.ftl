@@ -2806,6 +2806,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: стиль __ocs_fmt_1__.
     .prefix-style-name-not-found = __ocs_fmt_0__: стиль __ocs_fmt_1__ не найден.
     .prefix-style-style-name-not-found = __ocs_fmt_0__: стиль __ocs_fmt_1__ не найден.
+    .sheet-layers = Слои листа
+    .roles = Роли
+    .sheet-layer-turned-entities = Слой листа __ocs_fmt_0__ переключён: __ocs_fmt_1__ (__ocs_fmt_2__ объектов)
+    .role-turned-entities = Роль __ocs_fmt_0__ переключена: __ocs_fmt_1__ (__ocs_fmt_2__ объектов)
+    .layer-turned-on-so-the-sheet-layer-can-show = Слой __ocs_fmt_0__ включён, чтобы слой листа стал виден
 
 annotate =
     .dimjogged-enter-dimension-text-blank-measured = DIMJOGGED  Введите текст размера (пусто = измеренное значение):

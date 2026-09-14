@@ -2804,6 +2804,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: „__ocs_fmt_1__” stílus létrehozva.
     .prefix-style-name-not-found = __ocs_fmt_0__: a '__ocs_fmt_1__' stílus nem található.
     .prefix-style-style-name-not-found = __ocs_fmt_0__: a '__ocs_fmt_1__' stílus nem található.
+    .sheet-layers = Lap fóliái
+    .roles = Szerepek
+    .sheet-layer-turned-entities = __ocs_fmt_0__ lapfólia átkapcsolva: __ocs_fmt_1__ (__ocs_fmt_2__ elem)
+    .role-turned-entities = __ocs_fmt_0__ szerep átkapcsolva: __ocs_fmt_1__ (__ocs_fmt_2__ elem)
+    .layer-turned-on-so-the-sheet-layer-can-show = A(z) __ocs_fmt_0__ fólia bekapcsolva, hogy a lapfólia látható legyen
 
 annotate =
     .dimjogged-enter-dimension-text-blank-measured = DIMJOGGED  Adja meg a méretszöveget (üres = mért érték):

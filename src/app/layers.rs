@@ -44,7 +44,46 @@ impl OpenCADStudio {
         self.tabs[i]
             .layers
             .sync_with_viewports(&doc_layers, vp_info);
+        self.sync_pid_view(i);
         self.sync_ribbon_layers();
+    }
+
+    /// Re-read the Layer Manager's sheet-layer view (a `.pid` import's own
+    /// layers and roles, with the view filter's switches) from tab `i`'s
+    /// document. Cheap -- one pass over the entities' XDATA -- and a no-op in
+    /// effect for a drawing without P&ID semantics.
+    pub(super) fn sync_pid_view(&mut self, i: usize) {
+        let tab = &mut self.tabs[i];
+        tab.layers.sync_pid_view(&tab.scene.document);
+    }
+
+    /// Bring the scene and the panels up to date after a sheet-layer or role
+    /// switch changed entities' `invisible` bits -- and, when switching a
+    /// hidden sheet layer on had to turn `PID-HIDDEN` on with it, the layer
+    /// table's mirrors too.
+    pub(super) fn after_pid_view_switch(
+        &mut self,
+        i: usize,
+        switched: crate::io::pid_view_filter::Switched,
+    ) {
+        self.sync_pid_view(i);
+        self.tabs[i].scene.bump_geometry();
+        self.tabs[i].dirty = true;
+        if switched.released_hidden_layer {
+            let doc_layers = self.tabs[i].scene.document.layers.clone();
+            let vp_info = self.tabs[i].scene.viewport_list();
+            self.tabs[i]
+                .layers
+                .sync_with_viewports(&doc_layers, vp_info);
+            self.sync_ribbon_layers();
+            self.command_line.push_output(
+                crate::tf!(
+                    "Layer {} turned on so the sheet layer can show",
+                    crate::io::pid::LAYER_HIDDEN
+                )
+                .as_ref(),
+            );
+        }
     }
 
     pub(super) fn sync_ribbon_layers(&mut self) {

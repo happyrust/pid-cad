@@ -2371,6 +2371,13 @@ pub enum Message {
     LayerTogglePlot(usize),
     /// Sort the Layer Manager table by a clicked column header.
     LayerSort(crate::ui::window::layers::LayerSortCol),
+    /// Show the layer table or, for a `.pid` import, its sheet-layer view.
+    LayerViewSet(crate::ui::window::layers::LayerView),
+    /// Switch the sheet layer at this row of the sheet-layer view on or off;
+    /// the P&ID view filter and every entity's `invisible` bit follow.
+    PidSheetLayerToggle(usize),
+    /// Switch the import role at this row of the sheet-layer view on or off.
+    PidRoleToggle(usize),
     /// Toggle per-viewport freeze: (layer_index, vp_col_index)
     LayerToggleVpFreeze(usize, usize),
     LayerNew,

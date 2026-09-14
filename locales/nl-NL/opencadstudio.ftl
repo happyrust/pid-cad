@@ -2805,6 +2805,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: stijl "__ocs_fmt_1__' aangemaakt.
     .prefix-style-name-not-found = __ocs_fmt_0__: stijl '__ocs_fmt_1__' niet gevonden.
     .prefix-style-style-name-not-found = __ocs_fmt_0__: stijl '__ocs_fmt_1__' niet gevonden.
+    .sheet-layers = Bladlagen
+    .roles = Rollen
+    .sheet-layer-turned-entities = Bladlaag __ocs_fmt_0__ op __ocs_fmt_1__ gezet (__ocs_fmt_2__ entiteiten)
+    .role-turned-entities = Rol __ocs_fmt_0__ op __ocs_fmt_1__ gezet (__ocs_fmt_2__ entiteiten)
+    .layer-turned-on-so-the-sheet-layer-can-show = Laag __ocs_fmt_0__ ingeschakeld zodat de bladlaag zichtbaar is
 
 annotate =
     .dimjogged-enter-dimension-text-blank-measured = DIMJOGGED  Voer maattekst in (leeg = gemeten waarde):

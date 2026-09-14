@@ -1311,6 +1311,7 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
         let doc_layers = self.tabs[i].scene.document.layers.clone();
         let vp_info = self.tabs[i].scene.viewport_list();
         self.tabs[i].layers.sync_with_viewports(&doc_layers, vp_info);
+        self.sync_pid_view(i);
         self.tabs[i].layers.selected = None;
         self.tabs[i].layers.selected_multi.clear();
         self.sync_ribbon_layers();

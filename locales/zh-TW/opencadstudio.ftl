@@ -2804,6 +2804,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: 樣式'__ocs_fmt_1__'建立。
     .prefix-style-name-not-found = __ocs_fmt_0__:樣式“__ocs_fmt_1__”未找到。
     .prefix-style-style-name-not-found = __ocs_fmt_0__:樣式“__ocs_fmt_1__”未找到。
+    .sheet-layers = 圖面圖層
+    .roles = 角色
+    .sheet-layer-turned-entities = 圖面圖層 __ocs_fmt_0__ 已__ocs_fmt_1__（__ocs_fmt_2__ 個實體）
+    .role-turned-entities = 角色 __ocs_fmt_0__ 已__ocs_fmt_1__（__ocs_fmt_2__ 個實體）
+    .layer-turned-on-so-the-sheet-layer-can-show = 已開啟圖層 __ocs_fmt_0__，以便該圖面圖層可見
 
 annotate =
     .dimjogged-enter-dimension-text-blank-measured = DIMJOGGED  輸入標註文字（留空 = 測量值）：

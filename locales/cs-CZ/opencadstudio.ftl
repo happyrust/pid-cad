@@ -2802,6 +2802,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: vytvořen styl '__ocs_fmt_1__'.
     .prefix-style-name-not-found = __ocs_fmt_0__: styl '__ocs_fmt_1__' nebyl nalezen.
     .prefix-style-style-name-not-found = __ocs_fmt_0__: styl '__ocs_fmt_1__' nebyl nalezen.
+    .sheet-layers = Hladiny listu
+    .roles = Role
+    .sheet-layer-turned-entities = Hladina listu __ocs_fmt_0__ přepnuta: __ocs_fmt_1__ (__ocs_fmt_2__ entit)
+    .role-turned-entities = Role __ocs_fmt_0__ přepnuta: __ocs_fmt_1__ (__ocs_fmt_2__ entit)
+    .layer-turned-on-so-the-sheet-layer-can-show = Hladina __ocs_fmt_0__ zapnuta, aby byla hladina listu vidět
 
 annotate =
     .dimjogged-enter-dimension-text-blank-measured = DIMJOGGED  Zadejte text kóty (prázdné = změřená hodnota):

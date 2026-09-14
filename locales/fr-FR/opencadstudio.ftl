@@ -2805,6 +2805,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: style '__ocs_fmt_1__' créé.
     .prefix-style-name-not-found = __ocs_fmt_0__: style '__ocs_fmt_1__' non trouvé.
     .prefix-style-style-name-not-found = __ocs_fmt_0__: style '__ocs_fmt_1__' non trouvé.
+    .sheet-layers = Calques de feuille
+    .roles = Rôles
+    .sheet-layer-turned-entities = Calque de feuille __ocs_fmt_0__ passé à __ocs_fmt_1__ (__ocs_fmt_2__ entités)
+    .role-turned-entities = Rôle __ocs_fmt_0__ passé à __ocs_fmt_1__ (__ocs_fmt_2__ entités)
+    .layer-turned-on-so-the-sheet-layer-can-show = Calque __ocs_fmt_0__ activé pour que le calque de feuille soit visible
 
 annotate =
     .dimjogged-enter-dimension-text-blank-measured = DIMJOGGED  Entrez le texte de cote (vide = valeur mesurée) :

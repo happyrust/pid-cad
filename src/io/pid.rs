@@ -138,7 +138,10 @@ const LAYER_ANNOTATION: &str = "PID-ANNOTATION";
 const LAYER_CONNECTIVITY: &str = "PID-CONNECTIVITY";
 const LAYER_FILL: &str = "PID-FILL";
 const LAYER_FRAME: &str = "PID-FRAME";
-const LAYER_HIDDEN: &str = "PID-HIDDEN";
+/// Where the import files the entities of the sheet layers it starts switched
+/// off, with the layer itself off. `pid_view_filter` releases it when such a
+/// sheet layer is switched back on.
+pub(crate) const LAYER_HIDDEN: &str = "PID-HIDDEN";
 
 // The review-status vocabulary, which is not a discipline. These eight names
 // say what state an item is in, and the `PID-POINT-*` layers already carry

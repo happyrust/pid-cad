@@ -1703,6 +1703,9 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 self.tabs[i]
                     .layers
                     .sync_with_viewports(&doc_layers, vp_info);
+                // A `.pid` import brings its own sheet layers and roles for
+                // the Layer Manager's second view; anything else clears it.
+                self.sync_pid_view(i);
                 self.sync_ribbon_layers();
                 // Load the Annotate-ribbon style dropdowns (text / dimension /
                 // multileader / table) from the opened document instead of

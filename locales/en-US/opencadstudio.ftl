@@ -2806,6 +2806,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: style '__ocs_fmt_1__' created.
     .prefix-style-name-not-found = __ocs_fmt_0__: style '__ocs_fmt_1__' not found.
     .prefix-style-style-name-not-found = __ocs_fmt_0__: style '__ocs_fmt_1__' not found.
+    .sheet-layers = Sheet layers
+    .roles = Roles
+    .sheet-layer-turned-entities = Sheet layer __ocs_fmt_0__ turned __ocs_fmt_1__ (__ocs_fmt_2__ entities)
+    .role-turned-entities = Role __ocs_fmt_0__ turned __ocs_fmt_1__ (__ocs_fmt_2__ entities)
+    .layer-turned-on-so-the-sheet-layer-can-show = Layer __ocs_fmt_0__ turned on so the sheet layer can show
 
 annotate =
     .prefix-textedit-enter-text-edit-mode-single-mu = __ocs_arg_prefix__TEXTEDIT Enter text edit mode [Single/Multiple] <__ocs_arg_mode__>:

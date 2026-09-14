@@ -2804,6 +2804,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: tyyli '__ocs_fmt_1__' luotu.
     .prefix-style-name-not-found = __ocs_fmt_0__: tyyliä '__ocs_fmt_1__' ei löydy.
     .prefix-style-style-name-not-found = __ocs_fmt_0__: tyyliä '__ocs_fmt_1__' ei löydy.
+    .sheet-layers = Arkin tasot
+    .roles = Roolit
+    .sheet-layer-turned-entities = Arkin taso __ocs_fmt_0__ vaihdettu: __ocs_fmt_1__ (__ocs_fmt_2__ kohdetta)
+    .role-turned-entities = Rooli __ocs_fmt_0__ vaihdettu: __ocs_fmt_1__ (__ocs_fmt_2__ kohdetta)
+    .layer-turned-on-so-the-sheet-layer-can-show = Taso __ocs_fmt_0__ kytketty päälle, jotta arkin taso näkyy
 
 annotate =
     .dimjogged-enter-dimension-text-blank-measured = DIMJOGGED  Anna mittateksti (tyhjä = mitattu arvo):

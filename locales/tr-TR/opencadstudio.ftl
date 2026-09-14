@@ -2785,6 +2785,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: '__ocs_fmt_1__' stili oluşturuldu.
     .prefix-style-name-not-found = __ocs_fmt_0__: '__ocs_fmt_1__' stili bulunamadı.
     .prefix-style-style-name-not-found = __ocs_fmt_0__: '__ocs_fmt_1__' stili bulunamadı.
+    .sheet-layers = Sayfa katmanları
+    .roles = Roller
+    .sheet-layer-turned-entities = Sayfa katmanı __ocs_fmt_0__ __ocs_fmt_1__ olarak ayarlandı (__ocs_fmt_2__ nesne)
+    .role-turned-entities = Rol __ocs_fmt_0__ __ocs_fmt_1__ olarak ayarlandı (__ocs_fmt_2__ nesne)
+    .layer-turned-on-so-the-sheet-layer-can-show = Sayfa katmanı görünsün diye __ocs_fmt_0__ katmanı açıldı
 
 annotate =
     .prefix-textedit-enter-text-edit-mode-single-mu = __ocs_arg_prefix__TEXTEDIT Metin düzenleme modu [Tekli/Çoklu] <__ocs_arg_mode__>:

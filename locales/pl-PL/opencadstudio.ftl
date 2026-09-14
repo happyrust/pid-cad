@@ -2804,6 +2804,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: utworzono styl „__ocs_fmt_1__”.
     .prefix-style-name-not-found = __ocs_fmt_0__: nie znaleziono stylu „__ocs_fmt_1__”.
     .prefix-style-style-name-not-found = __ocs_fmt_0__: nie znaleziono stylu „__ocs_fmt_1__”.
+    .sheet-layers = Warstwy arkusza
+    .roles = Role
+    .sheet-layer-turned-entities = Warstwa arkusza __ocs_fmt_0__ przełączona: __ocs_fmt_1__ (__ocs_fmt_2__ obiektów)
+    .role-turned-entities = Rola __ocs_fmt_0__ przełączona: __ocs_fmt_1__ (__ocs_fmt_2__ obiektów)
+    .layer-turned-on-so-the-sheet-layer-can-show = Warstwa __ocs_fmt_0__ włączona, aby warstwa arkusza była widoczna
 
 annotate =
     .dimjogged-enter-dimension-text-blank-measured = DIMJOGGED  Wprowadź tekst wymiaru (puste = wartość zmierzona):

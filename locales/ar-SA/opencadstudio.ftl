@@ -2817,6 +2817,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: أُنشئ النمط '__ocs_fmt_1__'.
     .prefix-style-name-not-found = __ocs_fmt_0__: لم يُعثر على النمط '__ocs_fmt_1__'.
     .prefix-style-style-name-not-found = __ocs_fmt_0__: لم يُعثر على النمط '__ocs_fmt_1__'.
+    .sheet-layers = طبقات الورقة
+    .roles = الأدوار
+    .sheet-layer-turned-entities = تم تحويل طبقة الورقة __ocs_fmt_0__ إلى __ocs_fmt_1__ (__ocs_fmt_2__ عنصر)
+    .role-turned-entities = تم تحويل الدور __ocs_fmt_0__ إلى __ocs_fmt_1__ (__ocs_fmt_2__ عنصر)
+    .layer-turned-on-so-the-sheet-layer-can-show = تم تشغيل الطبقة __ocs_fmt_0__ لتظهر طبقة الورقة
 
 annotate =
     .dimjogged-enter-dimension-text-blank-measured = DIMJOGGED  أدخل نص البعد (فارغ = القيمة المقاسة):

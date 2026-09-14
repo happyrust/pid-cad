@@ -2804,6 +2804,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: '__ocs_fmt_1__' 스타일이 생성되었습니다.
     .prefix-style-name-not-found = __ocs_fmt_0__: '__ocs_fmt_1__' 스타일을 찾을 수 없습니다.
     .prefix-style-style-name-not-found = __ocs_fmt_0__: '__ocs_fmt_1__' 스타일을 찾을 수 없습니다.
+    .sheet-layers = 시트 도면층
+    .roles = 역할
+    .sheet-layer-turned-entities = 시트 도면층 __ocs_fmt_0__을(를) __ocs_fmt_1__(으)로 전환했습니다 (__ocs_fmt_2__개 엔티티)
+    .role-turned-entities = 역할 __ocs_fmt_0__을(를) __ocs_fmt_1__(으)로 전환했습니다 (__ocs_fmt_2__개 엔티티)
+    .layer-turned-on-so-the-sheet-layer-can-show = 시트 도면층을 표시하기 위해 도면층 __ocs_fmt_0__을(를) 켰습니다
 
 annotate =
     .dimjogged-enter-dimension-text-blank-measured = DIMJOGGED  치수 문자 입력 (비워 두면 측정값):

@@ -2804,6 +2804,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: stile '__ocs_fmt_1__' creato.
     .prefix-style-name-not-found = __ocs_fmt_0__: stile '__ocs_fmt_1__' non trovato.
     .prefix-style-style-name-not-found = __ocs_fmt_0__: stile '__ocs_fmt_1__' non trovato.
+    .sheet-layers = Layer del foglio
+    .roles = Ruoli
+    .sheet-layer-turned-entities = Layer del foglio __ocs_fmt_0__ impostato su __ocs_fmt_1__ (__ocs_fmt_2__ entità)
+    .role-turned-entities = Ruolo __ocs_fmt_0__ impostato su __ocs_fmt_1__ (__ocs_fmt_2__ entità)
+    .layer-turned-on-so-the-sheet-layer-can-show = Layer __ocs_fmt_0__ attivato perché il layer del foglio sia visibile
 
 annotate =
     .dimjogged-enter-dimension-text-blank-measured = DIMJOGGED  Immettere il testo della quota (vuoto = valore misurato):

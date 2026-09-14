@@ -11,7 +11,9 @@
 use std::path::PathBuf;
 
 use acadrust::{CadDocument, EntityType};
-use OpenCADStudio::io::pid_view_filter::PidViewFilter;
+use OpenCADStudio::io::pid_view_filter::{
+    switch_role, switch_sheet_layer, PidViewFilter, PidViewSummary,
+};
 
 // An A2 sheet is 594 x 420mm. The decoded content of both fixtures sits
 // inside that, so any converted coordinate an order of magnitude past it is a
@@ -1375,6 +1377,172 @@ fn the_view_filter_and_its_invisible_bits_survive_dwg_and_dxf() {
             );
         }
     }
+}
+
+/// What the layer manager's sheet-layer view lists (plan 2026-09-07, L2 step
+/// 3): one row per authored sheet layer name with the entities filed under
+/// it and the filter's answer for it, and one row per role in vocabulary
+/// order. The names are the ones SmartPlant gave the layers, and the counts
+/// are what the drawing has on each of them, so the view can be checked
+/// against the filter tests above. All four fixtures draw on the same four
+/// of SmartPlant's layers -- `ConsistencyChecks` / `Default` /
+/// `HiddenObjects` / `Labels`; the others the template declares (`HeatTrace`
+/// among them) carry nothing drawn, so they do not list.
+#[test]
+fn the_layer_manager_summary_lists_sheet_layers_and_roles_with_their_counts() {
+    let Some(doc) = import("DWG-0202GP06-01.pid") else {
+        return;
+    };
+    let summary = PidViewSummary::of(&doc);
+    assert!(!summary.is_empty());
+
+    let names: Vec<&str> = summary.layers.iter().map(|row| row.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["ConsistencyChecks", "Default", "HiddenObjects", "Labels"],
+        "sheet layers are listed by name"
+    );
+    let row = |name: &str| {
+        summary
+            .layers
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("no row for {name}"))
+    };
+    assert_eq!(
+        row("Labels").entities,
+        97,
+        "46 text + 46 line work + 5 fills"
+    );
+    assert!(row("Labels").on);
+    assert_eq!(row("HiddenObjects").entities, 16);
+    assert!(
+        !row("HiddenObjects").on,
+        "the import switches HiddenObjects off"
+    );
+    for row in &summary.layers {
+        assert_eq!(
+            row.entities,
+            on_sheet_layer(&doc, &row.name).count(),
+            "{}: the count is not the entities stating that layer",
+            row.name
+        );
+    }
+
+    let roles: Vec<&str> = summary.roles.iter().map(|row| row.name.as_str()).collect();
+    let rank = |role: &str| ROLES.iter().position(|known| *known == role).unwrap();
+    assert!(
+        roles.windows(2).all(|pair| rank(pair[0]) < rank(pair[1])),
+        "roles are listed in vocabulary order: {roles:?}"
+    );
+    for row in &summary.roles {
+        assert!(row.on, "no role starts switched off");
+        assert_eq!(
+            row.entities,
+            of_role(&doc, &row.name).count(),
+            "{}: the count is not the entities stating that role",
+            row.name
+        );
+    }
+    assert_eq!(
+        summary.layers.iter().map(|row| row.entities).sum::<usize>(),
+        doc.entities()
+            .filter(|entity| pid_value(entity, "sheet_layer").is_some())
+            .count()
+    );
+}
+
+/// The switch behind each row of that view: a sheet layer goes dark with one
+/// call and the record follows (the plan's acceptance names `HeatTrace`; the
+/// fixtures draw nothing on it, so `ConsistencyChecks` -- 0202's 37 check
+/// marks -- stands in); and switching a hidden sheet layer back on shows its
+/// entities -- which means turning `PID-HIDDEN` on as well, since the import
+/// files them there with that layer off. The layer is the importer's own
+/// hiding device and the entity bit now carries the same reading, so the
+/// switch is allowed to release it.
+#[test]
+fn switching_a_row_reaches_the_document_and_releases_the_hidden_layer_when_needed() {
+    let Some(mut doc) = import("DWG-0202GP06-01.pid") else {
+        return;
+    };
+    let checks = on_sheet_layer(&doc, "ConsistencyChecks").count();
+    assert_eq!(checks, 37);
+    let hidden_objects = on_sheet_layer(&doc, "HiddenObjects").count();
+    assert_eq!(hidden_objects, 16);
+    assert!(
+        doc.layers
+            .get("PID-HIDDEN")
+            .is_some_and(|layer| layer.flags.off),
+        "PID-HIDDEN opens switched off"
+    );
+    assert!(on_sheet_layer(&doc, "HiddenObjects").all(|entity| layer_of(entity) == "PID-HIDDEN"));
+
+    let switched = switch_sheet_layer(&mut doc, "ConsistencyChecks", false);
+    assert_eq!(switched.entities, checks);
+    assert!(!switched.released_hidden_layer);
+    assert!(on_sheet_layer(&doc, "ConsistencyChecks").all(|entity| entity.common().invisible));
+    assert_eq!(dark(&doc), checks + hidden_objects);
+    let filter = PidViewFilter::load(&doc).expect("the record follows the switch");
+    assert_eq!(
+        filter.layers_off().collect::<Vec<_>>(),
+        ["ConsistencyChecks", "HiddenObjects"]
+    );
+    assert!(
+        !PidViewSummary::of(&doc)
+            .layers
+            .iter()
+            .find(|row| row.name == "ConsistencyChecks")
+            .unwrap()
+            .on
+    );
+
+    let switched = switch_sheet_layer(&mut doc, "HiddenObjects", true);
+    assert_eq!(switched.entities, hidden_objects);
+    assert!(
+        switched.released_hidden_layer,
+        "the hidden layer must be turned on for the entities to show"
+    );
+    assert!(doc
+        .layers
+        .get("PID-HIDDEN")
+        .is_some_and(|layer| !layer.flags.off));
+    assert!(on_sheet_layer(&doc, "HiddenObjects").all(|entity| !entity.common().invisible));
+    assert_eq!(dark(&doc), checks);
+
+    let switched = switch_sheet_layer(&mut doc, "HiddenObjects", false);
+    assert_eq!(switched.entities, hidden_objects);
+    assert!(
+        !switched.released_hidden_layer,
+        "switching off never touches the layer table"
+    );
+    assert!(
+        doc.layers
+            .get("PID-HIDDEN")
+            .is_some_and(|layer| !layer.flags.off),
+        "the released layer stays released; the bits do the hiding now"
+    );
+
+    let text = of_role(&doc, "text").count();
+    let text_dark = of_role(&doc, "text")
+        .filter(|entity| entity.common().invisible)
+        .count();
+    let switched = switch_role(&mut doc, "text", false);
+    assert_eq!(switched.entities, text - text_dark);
+    assert!(of_role(&doc, "text").all(|entity| entity.common().invisible));
+    let summary = PidViewSummary::of(&doc);
+    assert!(
+        !summary
+            .roles
+            .iter()
+            .find(|row| row.name == "text")
+            .unwrap()
+            .on
+    );
+    assert!(summary
+        .roles
+        .iter()
+        .filter(|row| row.name != "text")
+        .all(|row| row.on));
 }
 
 /// The `key=value` pairs of an entity's `PID_SEMANTICS` record, in the order

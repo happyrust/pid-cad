@@ -1,13 +1,14 @@
 //! Layer Manager — floating window.
 
 use crate::app::Message;
+use crate::io::pid_view_filter::{PidViewRow, PidViewSummary};
 use crate::ui::properties::{lw_options, LinetypeItem, LwItem};
 use crate::ui::ROW_H;
 use acadrust::tables::layer::Layer as DocLayer;
 use acadrust::tables::Table;
 use acadrust::types::aci_table::aci_to_rgb;
 use acadrust::types::{Color as AcadColor, LineWeight};
-use acadrust::Handle;
+use acadrust::{CadDocument, Handle};
 use iced::widget::{
     button, column, combo_box, container, mouse_area, row, scrollable, text, text_input, tooltip,
 };
@@ -37,6 +38,20 @@ pub enum LayerSortCol {
     Linetype,
     Lineweight,
     Transparency,
+}
+
+/// Which table the Layer Manager shows. `Layers` is the drawing's own layer
+/// table. `SheetLayers` is offered for a `.pid` import only: the sheet layers
+/// SmartPlant filed the entities under and the roles the importer read them
+/// as, each with an entity count and the view filter's switch (plan
+/// 2026-09-07, L2 step 3). The layer table is untouched by that view; the
+/// switches set each entity's own `invisible` bit through
+/// `crate::io::pid_view_filter`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LayerView {
+    #[default]
+    Layers,
+    SheetLayers,
 }
 
 // ── Row-height-derived constants ─────────────────────────────────────────
@@ -147,6 +162,12 @@ pub struct LayerPanel {
     pub sort_asc: bool,
     /// Live name filter from the search box; empty shows every layer (#343).
     pub filter: String,
+    /// Which table is showing; see [`LayerView`].
+    pub view: LayerView,
+    /// The sheet-layer view's rows, re-read from the document by
+    /// [`LayerPanel::sync_pid_view`]. Empty for anything but a `.pid` import,
+    /// and then the view is not offered.
+    pub pid: PidViewSummary,
 }
 
 impl Default for LayerPanel {
@@ -177,11 +198,30 @@ impl Default for LayerPanel {
             sort_col: Some(LayerSortCol::Name),
             sort_asc: true,
             filter: String::new(),
+            view: LayerView::Layers,
+            pid: PidViewSummary::default(),
         }
     }
 }
 
 impl LayerPanel {
+    /// Re-read the sheet-layer view from the document: every sheet layer and
+    /// role its entities state, with counts and the stored filter's switch for
+    /// each. A drawing that states none has nothing to show there, so the
+    /// panel falls back to the layer table and stops offering the switch.
+    pub fn sync_pid_view(&mut self, doc: &CadDocument) {
+        self.pid = PidViewSummary::of(doc);
+        if self.pid.is_empty() {
+            self.view = LayerView::Layers;
+        }
+    }
+
+    /// Whether the sheet-layer view is showing. It can only be while the
+    /// drawing has something to list there.
+    pub fn showing_sheet_layers(&self) -> bool {
+        self.view == LayerView::SheetLayers && !self.pid.is_empty()
+    }
+
     /// Sync layers + update per-viewport freeze columns.
     /// `vp_info`: list of (vp_handle, vp_label, frozen_layer_handles) from scene.
     pub fn sync_with_viewports(
@@ -349,42 +389,68 @@ impl LayerPanel {
             .and_then(|i| self.layers.get(i))
             .is_some_and(|layer| layer.name != self.current_layer);
 
+        let sheet_view = self.showing_sheet_layers();
+
         // ── Toolbar ───────────────────────────────────────────────────────
-        let toolbar = container(
-            row![
-                toolbar_btn(crate::ui::icons::PLUS, t!("New"), Message::LayerNew),
-                toolbar_btn_cond(
+        let mut toolbar_row = row![].spacing(2).align_y(iced::Center);
+        if !sheet_view {
+            // The table tools act on the drawing's layer table; the
+            // sheet-layer view has no rows for them to act on.
+            toolbar_row = toolbar_row
+                .push(toolbar_btn(
+                    crate::ui::icons::PLUS,
+                    t!("New"),
+                    Message::LayerNew,
+                ))
+                .push(toolbar_btn_cond(
                     crate::ui::icons::TRASH,
                     t!("Delete"),
                     Message::LayerDelete,
                     has_sel && !sel_is_zero,
-                ),
-                toolbar_btn_cond(
+                ))
+                .push(toolbar_btn_cond(
                     crate::ui::icons::CHECK,
                     t!("Set Current"),
                     Message::LayerSetCurrent,
                     can_set_current,
-                ),
-                iced::widget::Space::new().width(sizing.width),
-                // Search box: filters rows by name as the user types (#343).
+                ));
+        }
+        if !self.pid.is_empty() {
+            // A `.pid` import offers its own layers next to the synthetic
+            // table: the switch between the two views.
+            toolbar_row = toolbar_row
+                .push(iced::widget::Space::new().width(6))
+                .push(view_switch(t!("Layers"), LayerView::Layers, self.view))
+                .push(view_switch(
+                    t!("Sheet layers"),
+                    LayerView::SheetLayers,
+                    self.view,
+                ));
+        }
+        toolbar_row = toolbar_row
+            .push(iced::widget::Space::new().width(sizing.width))
+            // Search box: filters rows by name as the user types (#343).
+            .push(
                 text_input(t!("Search…").as_ref(), &self.filter)
                     .on_input(Message::LayerManagerFilterChanged)
                     .size(FONT_SZ)
                     .padding([3, 6])
                     .width(Length::Fixed(180.0))
                     .style(table_input_style),
-            ]
-            .spacing(2)
-            .align_y(iced::Center),
-        )
-        .style(|theme: &Theme| container::Style {
-            background: Some(Background::Color(
-                theme.palette().background.weak.color
-            )),
-            ..Default::default()
-        })
-        .width(sizing.width)
-        .padding([4, 8]);
+            );
+        let toolbar = container(toolbar_row)
+            .style(|theme: &Theme| container::Style {
+                background: Some(Background::Color(
+                    theme.palette().background.weak.color
+                )),
+                ..Default::default()
+            })
+            .width(sizing.width)
+            .padding([4, 8]);
+
+        if sheet_view {
+            return self.view_sheet_layers(toolbar, name_col_w, sizing);
+        }
 
         // ── Column header ─────────────────────────────────────────────────
         let sc = self.sort_col;
@@ -502,6 +568,236 @@ impl LayerPanel {
             .height(sizing.height)
             .into()
     }
+
+    /// The sheet-layer view: SmartPlant's own layer names first, the import
+    /// roles as a second section, each row an entity count and an on/off
+    /// switch. The search box filters both sections by name.
+    fn view_sheet_layers<'a>(
+        &'a self,
+        toolbar: container::Container<'a, Message>,
+        name_col_w: f32,
+        sizing: crate::ui::modal::ModalSizing,
+    ) -> Element<'a, Message> {
+        let header_row = row![
+            text(t!("Sheet layers"))
+                .size(10)
+                .style(muted_style)
+                .width(Length::Fixed(name_col_w)),
+            text(t!("Count"))
+                .size(10)
+                .style(muted_style)
+                .width(Length::Fixed(COL_COUNT)),
+            text(t!("On"))
+                .size(10)
+                .style(muted_style)
+                .width(Length::Fixed(COL_ICON)),
+        ]
+        .spacing(4)
+        .width(sizing.width)
+        .align_y(iced::Center);
+        let col_header = container(header_row)
+            .style(|theme: &Theme| {
+                let palette = theme.palette();
+                container::Style {
+                    background: Some(Background::Color(palette.background.weak.color)),
+                    border: Border {
+                        color: palette.background.neutral.color,
+                        width: 1.0,
+                        radius: 0.0.into(),
+                    },
+                    ..Default::default()
+                }
+            })
+            .padding([4, 8])
+            .width(sizing.width);
+
+        let filter = self.filter.to_lowercase();
+        let listed =
+            |row: &PidViewRow| filter.is_empty() || row.name.to_lowercase().contains(&filter);
+
+        let mut rows_col = column![].spacing(0);
+        let mut index = 0usize;
+        for (i, row) in self
+            .pid
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| listed(row))
+        {
+            rows_col = rows_col.push(switch_row(
+                index,
+                row,
+                Message::PidSheetLayerToggle(i),
+                name_col_w,
+            ));
+            index += 1;
+        }
+        let roles: Vec<(usize, &PidViewRow)> = self
+            .pid
+            .roles
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| listed(row))
+            .collect();
+        if !roles.is_empty() {
+            rows_col = rows_col.push(section_header(t!("Roles"), sizing.width));
+            for (i, row) in roles {
+                rows_col = rows_col.push(switch_row(
+                    index,
+                    row,
+                    Message::PidRoleToggle(i),
+                    name_col_w,
+                ));
+                index += 1;
+            }
+        }
+
+        let table = scrollable(rows_col)
+            .id(iced::advanced::widget::Id::new(LAYER_TABLE_SCROLL_ID))
+            .height(sizing.height.min(240.0));
+
+        container(column![toolbar, col_header, table].spacing(0))
+            .style(|theme: &Theme| container::Style {
+                background: Some(Background::Color(theme.palette().background.base.color)),
+                ..Default::default()
+            })
+            .width(sizing.width)
+            .height(sizing.height)
+            .into()
+    }
+}
+
+// ── Sheet-layer view pieces ─────────────────────────────────────────────────
+
+/// One of the two view buttons in the toolbar; the active one reads as
+/// pressed and does nothing.
+fn view_switch<'a>(
+    label: Cow<'static, str>,
+    view: LayerView,
+    active: LayerView,
+) -> Element<'a, Message> {
+    let is_active = view == active;
+    let mut b = button(text(label).size(11))
+        .style(move |theme: &Theme, status| {
+            let palette = theme.palette();
+            let pair = if is_active {
+                palette.primary.weak
+            } else {
+                match status {
+                    button::Status::Hovered | button::Status::Pressed => palette.background.strong,
+                    _ => palette.background.weak,
+                }
+            };
+            button::Style {
+                background: Some(Background::Color(pair.color)),
+                border: Border {
+                    radius: 3.0.into(),
+                    color: if is_active {
+                        palette.primary.base.color
+                    } else {
+                        palette.background.neutral.color
+                    },
+                    width: 1.0,
+                },
+                text_color: pair.text,
+                ..Default::default()
+            }
+        })
+        .padding([4, 10]);
+    if !is_active {
+        b = b.on_press(Message::LayerViewSet(view));
+    }
+    b.into()
+}
+
+/// The muted caption between the sheet layers and the roles.
+fn section_header<'a>(label: Cow<'static, str>, width: Length) -> Element<'a, Message> {
+    container(text(label).size(10).style(muted_style))
+        .style(|theme: &Theme| {
+            let palette = theme.palette();
+            container::Style {
+                background: Some(Background::Color(palette.background.weak.color)),
+                border: Border {
+                    color: palette.background.neutral.color,
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..Default::default()
+            }
+        })
+        .padding([4, 8])
+        .width(width)
+        .into()
+}
+
+/// A sheet-layer or role row: name, entity count, and the eye that switches
+/// it. `index` only drives the alternating background.
+fn switch_row<'a>(
+    index: usize,
+    row: &'a PidViewRow,
+    on_press: Message,
+    name_col_w: f32,
+) -> Element<'a, Message> {
+    let name_budget = ((name_col_w / 6.0) as usize).max(8);
+    let name = text(crate::ui::text_util::elide(&row.name, name_budget)).size(FONT_SZ);
+    let name_cell: Element<'_, Message> = if row.name.chars().count() > name_budget {
+        tooltip(name, name_tip(&row.name), tooltip::Position::FollowCursor).into()
+    } else {
+        name.into()
+    };
+    let eye = button(crate::ui::icons::semantic(
+        crate::ui::icons::layer_visible(row.on),
+        ICON_SZ,
+    ))
+    .on_press(on_press)
+    .style(move |theme: &Theme, status| layer_cell_button_style(theme, status, false, index))
+    .padding(Padding {
+        top: COMBO_PAD_V,
+        bottom: COMBO_PAD_V,
+        left: 4.0,
+        right: 4.0,
+    })
+    .height(Length::Fixed(ROW_H));
+
+    let content = row![
+        container(name_cell)
+            .width(Length::Fixed(name_col_w))
+            .align_y(iced::Center),
+        text(row.entities.to_string())
+            .size(FONT_SZ)
+            .style(muted_style)
+            .width(Length::Fixed(COL_COUNT)),
+        container(eye)
+            .width(Length::Fixed(COL_ICON))
+            .align_x(iced::Center),
+    ]
+    .spacing(4)
+    .width(Fill)
+    .align_y(iced::Center);
+
+    container(content)
+        .style(move |theme: &Theme| {
+            let palette = theme.palette();
+            let pair = if index.is_multiple_of(2) {
+                palette.background.base
+            } else {
+                palette.background.weak
+            };
+            container::Style {
+                background: Some(Background::Color(pair.color)),
+                text_color: Some(pair.text),
+                ..Default::default()
+            }
+        })
+        .padding(Padding {
+            top: 0.0,
+            bottom: 0.0,
+            left: 8.0,
+            right: 8.0,
+        })
+        .height(Length::Fixed(ROW_H))
+        .width(Fill)
+        .into()
 }
 
 // ── Sorting helpers ─────────────────────────────────────────────────────────
@@ -1008,6 +1304,8 @@ pub fn iced_color_from_acad(c: &AcadColor) -> Color {
 // Name column width is user-adjustable via the header divider drag (#359);
 // the app passes the current width into `view_window`.
 const COL_ICON: f32 = 44.0;
+/// Entity count in the sheet-layer view.
+const COL_COUNT: f32 = 70.0;
 const COL_COLOR: f32 = 90.0;
 const COL_LT: f32 = 110.0;
 const COL_LW: f32 = 90.0;

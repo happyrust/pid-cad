@@ -1110,6 +1110,10 @@ impl OpenCADStudio {
                 .sync_with_viewports(&doc_layers, vp_info);
             self.sync_ribbon_layers();
         }
+        // A P&ID sheet-layer or role switch is undone through the entities'
+        // bits and the stored record, neither of which is a layer-table
+        // change; the sheet-layer view re-reads the document either way.
+        self.sync_pid_view(i);
         self.refresh_properties();
     }
 

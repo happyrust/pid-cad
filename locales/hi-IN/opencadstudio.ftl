@@ -2793,6 +2793,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: शैली '__ocs_fmt_1__' बनाई गई।
     .prefix-style-name-not-found = __ocs_fmt_0__: शैली '__ocs_fmt_1__' नहीं मिली।
     .prefix-style-style-name-not-found = __ocs_fmt_0__: शैली '__ocs_fmt_1__' नहीं मिली।
+    .sheet-layers = शीट लेयर
+    .roles = भूमिकाएँ
+    .sheet-layer-turned-entities = शीट लेयर __ocs_fmt_0__ __ocs_fmt_1__ की गई (__ocs_fmt_2__ इकाइयाँ)
+    .role-turned-entities = भूमिका __ocs_fmt_0__ __ocs_fmt_1__ की गई (__ocs_fmt_2__ इकाइयाँ)
+    .layer-turned-on-so-the-sheet-layer-can-show = शीट लेयर दिखाने के लिए लेयर __ocs_fmt_0__ चालू की गई
 
 annotate =
     .dimjogged-enter-dimension-text-blank-measured = DIMJOGGED  माप पाठ दर्ज करें (खाली = मापा गया मान):

@@ -2805,6 +2805,11 @@ layers =
     .prefix-style-name-created = __ocs_fmt_0__: το στυλ '__ocs_fmt_1__' δημιουργήθηκε.
     .prefix-style-name-not-found = __ocs_fmt_0__: το στυλ '__ocs_fmt_1__' δεν βρέθηκε.
     .prefix-style-style-name-not-found = __ocs_fmt_0__: το στυλ '__ocs_fmt_1__' δεν βρέθηκε.
+    .sheet-layers = Επίπεδα φύλλου
+    .roles = Ρόλοι
+    .sheet-layer-turned-entities = Επίπεδο φύλλου __ocs_fmt_0__: __ocs_fmt_1__ (__ocs_fmt_2__ αντικείμενα)
+    .role-turned-entities = Ρόλος __ocs_fmt_0__: __ocs_fmt_1__ (__ocs_fmt_2__ αντικείμενα)
+    .layer-turned-on-so-the-sheet-layer-can-show = Το επίπεδο __ocs_fmt_0__ ενεργοποιήθηκε για να εμφανίζεται το επίπεδο φύλλου
 
 annotate =
     .prefix-textedit-enter-text-edit-mode-single-mu = __ocs_arg_prefix__TEXTEDIT Δώστε λειτουργία επεξεργασίας κειμένου [Μεμονωμένη/Πολλαπλή] <__ocs_arg_mode__>:
