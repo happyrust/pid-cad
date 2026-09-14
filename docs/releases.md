@@ -18,8 +18,20 @@ download for the installed platform.
 The app shows `2026.35`, Cargo and macOS use `2026.35.0`, and MSI uses `26.35.0`.
 The main window title is `Open CAD Studio 2026.35 - Drawing.dwg`.
 
+Builds that are not a clean checkout of the release tag carry build metadata:
+`2026.35+194.gef189d77` means 194 first-parent commits past `v2026.35` at
+commit `ef189d77`, and `.dirty` is appended when the tree has uncommitted
+changes. `build.rs` derives this from git at compile time (`OCS_FULL_VERSION`);
+without a tag to count from (shallow clone, source tarball) only the hash is
+shown. The full form appears in About, **Copy Info**, `REPORT`, `--version`
+and recovery reports. The window title, update check and User-Agent keep the
+plain `2026.35`.
+
 To preview release notes, manually run **Weekly release** on `main` with
 **publish** unchecked. Check **publish** to release immediately. Rerunning
 within the same week reuses the original tag and commit. To rebuild just a
 failed target, use GitHub's **Re-run failed jobs**. Manual web deployment
-always uses the latest published release rather than unreleased `main`.
+defaults to the latest published release. For a web hotfix, run **Deploy web**
+on `main` with **build_main** checked. The commit must descend from that release
+and keep its package version; `/app/release.json` records the actual build commit
+without moving the release tag.

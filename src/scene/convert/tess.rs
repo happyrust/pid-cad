@@ -1282,6 +1282,7 @@ fn tessellate_entity_inner(
         }
         if matches!(e, EntityType::Wipeout(_)) {
             b.depth_override = Some(0.5);
+            b.set_fixed_screen_width(2.0);
         }
     }
 
@@ -1718,7 +1719,16 @@ pub(crate) fn set_wire_aabb(w: &mut WireModel, entity_box: [f32; 4]) {
     w.aabb = out;
 }
 
-fn entity_bounds(e: &acadrust::EntityType) -> ([f64; 3], [f64; 3]) {
+pub(crate) fn entity_bounds(e: &acadrust::EntityType) -> ([f64; 3], [f64; 3]) {
+    if let acadrust::EntityType::Region(region) = e {
+        if region.wires.is_empty() {
+            if let Some(bounds) = super::solid3d_tess::kernel_region_body(region)
+                .and_then(|body| cadkernel::brep::body_bounds(&body))
+            {
+                return (bounds.min, bounds.max);
+            }
+        }
+    }
     if let acadrust::EntityType::Line(line) = e {
         if let Some(association) = acadrust::entities::CenterMarkAssociation::read(
             &line.common.extended_data,
@@ -1728,6 +1738,11 @@ fn entity_bounds(e: &acadrust::EntityType) -> ([f64; 3], [f64; 3]) {
     }
     if let acadrust::EntityType::Solid(solid) = e {
         if let Some(bounds) = crate::entities::solid::wcs_bounds(solid) {
+            return (bounds.min, bounds.max);
+        }
+    }
+    if let acadrust::EntityType::Spline(spline) = e {
+        if let Some(bounds) = crate::entities::spline::fit_geometry_bounds(spline) {
             return (bounds.min, bounds.max);
         }
     }

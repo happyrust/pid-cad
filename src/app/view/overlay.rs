@@ -141,10 +141,18 @@ impl MTextPreview {
             let d = dy * 1000.0 + dx; // prefer the correct line first
             if d < best_d {
                 best_d = d;
-                best = b.vis;
-                // After the glyph centre → caret sits after this char.
-                if wx > (b.xmin + b.xmax) * 0.5 {
-                    best = b.vis + 1;
+                if b.is_rtl {
+                    if wx < (b.xmin + b.xmax) * 0.5 {
+                        best = b.vis + 1;
+                    } else {
+                        best = b.vis;
+                    }
+                } else {
+                    best = b.vis;
+                    // After the glyph centre → caret sits after this char.
+                    if wx > (b.xmin + b.xmax) * 0.5 {
+                        best = b.vis + 1;
+                    }
                 }
             }
         }
@@ -280,14 +288,21 @@ impl iced::widget::canvas::Program<Message> for MTextPreview {
             );
         } else if collapsed {
             let bar = if let Some(b) = self.boxes.iter().find(|b| b.vis == self.caret) {
-                Some((b.xmin, b.ymin, b.ymax)) // left edge of the caret's glyph
+                let cx = if b.is_rtl { b.xmax } else { b.xmin };
+                Some((cx, b.ymin, b.ymax))
             } else if self.caret > 0 {
                 self.boxes
                     .iter()
                     .find(|b| b.vis == self.caret - 1)
-                    .map(|b| (b.xmax, b.ymin, b.ymax)) // after the last glyph
+                    .map(|b| {
+                        let cx = if b.is_rtl { b.xmin } else { b.xmax };
+                        (cx, b.ymin, b.ymax)
+                    })
             } else {
-                self.boxes.first().map(|b| (b.xmin, b.ymin, b.ymax))
+                self.boxes.first().map(|b| {
+                    let cx = if b.is_rtl { b.xmax } else { b.xmin };
+                    (cx, b.ymin, b.ymax)
+                })
             };
             if let Some((cx, y0, y1)) = bar {
                 let p0 = map(cx, y0);
@@ -1101,6 +1116,7 @@ pub(super) struct ViewportContextMenuState {
     pub(super) selection_in_group: bool,
     pub(super) isolation_active: bool,
     pub(super) draworder_open: bool,
+    pub(super) has_point_step: bool,
 }
 
 pub(super) fn viewport_context_menu_overlay(
@@ -1115,6 +1131,7 @@ pub(super) fn viewport_context_menu_overlay(
         selection_in_group,
         isolation_active,
         draworder_open,
+        has_point_step,
     } = state;
     let item = |label: String, msg: Message| -> Element<'static, Message> {
         button(text(label).size(12))
@@ -1159,6 +1176,15 @@ pub(super) fn viewport_context_menu_overlay(
     if has_cmd {
         items.push(item(t!("Cancel").into_owned(), Message::CommandEscape));
         items.push(item(t!("Enter").into_owned(), Message::CommandFinalize));
+        // MTP (`_M2P`) goes last, after Parallel: two picks, so not a
+        // `SnapType`, but same icon-only cell with hover tooltip.
+        if has_point_step {
+            items.push(sep());
+            items.push(item(
+                t!("Mid Between 2 Points (M2P)").into_owned(),
+                Message::SnapOverrideMtp,
+            ));
+        }
     } else {
         if !last_cmds.is_empty() {
             let last = last_cmds[0].clone();
@@ -1285,21 +1311,19 @@ pub(super) fn viewport_context_menu_overlay(
 
 /// One-shot snap override menu (Shift+RMB, #337): a cursor-anchored grid of
 /// snap ICONS only — the names show as hover tooltips. Picking one applies
-/// that snap to just the next point pick.
+/// that snap to just the next point pick; the trailing MTP cell instead
+/// suspends the prompt for two picks and returns their midpoint.
 pub(super) fn snap_override_overlay(pos: iced::Point) -> Element<'static, Message> {
     const COLS: usize = 4;
 
-    let cell = |snap_type: crate::snap::SnapType, label: &'static str| -> Element<'static, Message> {
-        let icon = container(crate::ui::icons::themed::<Message>(
-            crate::ui::icons::osnap(snap_type),
-            16.0,
-        ))
+    let cell_icon = |icon: &'static [u8], label: String, msg: Message| -> Element<'static, Message> {
+        let icon = container(crate::ui::icons::themed::<Message>(icon, 16.0))
         .width(26)
         .height(26)
         .align_x(iced::Center)
         .align_y(iced::Center);
         let btn = button(icon)
-            .on_press(Message::SnapOverridePick(snap_type))
+            .on_press(msg)
             .style(|theme: &Theme, status| button::Style {
                 background: matches!(
                     status,
@@ -1335,11 +1359,29 @@ pub(super) fn snap_override_overlay(pos: iced::Point) -> Element<'static, Messag
         .into()
     };
 
+    // MTP (`_M2P`) goes last, after Parallel: two picks, so not a
+    // `SnapType`, but same icon-only cell with hover tooltip.
+    let mut cells: Vec<Element<'static, Message>> = Vec::with_capacity(
+        crate::snap::ALL_SNAP_MODES.len() + 1,
+    );
+    for &(snap_type, _glyph, label) in crate::snap::ALL_SNAP_MODES {
+        cells.push(cell_icon(
+            crate::ui::icons::osnap(snap_type),
+            label.to_string(),
+            Message::SnapOverridePick(snap_type),
+        ));
+    }
+    cells.push(cell_icon(
+        crate::ui::icons::mtp_icon(),
+        t!("Mid Between 2 Points (M2P)").into_owned(),
+        Message::SnapOverrideMtp,
+    ));
     let mut grid = column![].spacing(2);
-    for chunk in crate::snap::ALL_SNAP_MODES.chunks(COLS) {
+    while !cells.is_empty() {
+        let n = cells.len().min(COLS);
         let mut r = row![].spacing(2);
-        for &(snap_type, _glyph, label) in chunk {
-            r = r.push(cell(snap_type, label));
+        for c in cells.drain(..n) {
+            r = r.push(c);
         }
         grid = grid.push(r);
     }

@@ -143,6 +143,106 @@ impl Scene {
         let _ = self.document.app_ids.add(app_id);
     }
 
+    fn prepare_section_objects(&mut self, entity: &mut EntityType) -> bool {
+        use acadrust::entities::ExtendedEntityData;
+        use acadrust::objects::{
+            ClassObject, ClassObjectData, SectionManager, SectionSettings,
+            SectionTypeSettings,
+        };
+
+        let EntityType::Extended(extended) = entity else {
+            return false;
+        };
+        let ExtendedEntityData::SectionObject(data) = &mut extended.data else {
+            return false;
+        };
+
+        if extended.common.handle.is_null() {
+            extended.common.handle = self.document.allocate_handle();
+        }
+        let entity_handle = extended.common.handle;
+
+        let valid_settings = matches!(
+            self.document.objects.get(&data.settings_handle),
+            Some(ObjectType::ClassObject(object))
+                if matches!(&object.data, ClassObjectData::SectionSettings(_))
+        );
+        if !valid_settings {
+            let settings_handle = self.document.allocate_handle();
+            let mut settings = ClassObject::new(ClassObjectData::SectionSettings(
+                SectionSettings {
+                    current_type: 4,
+                    types: vec![SectionTypeSettings {
+                        section_type: 4,
+                        generation: 17,
+                        ..SectionTypeSettings::default()
+                    }],
+                },
+            ));
+            settings.handle = settings_handle;
+            settings.owner = entity_handle;
+            self.document
+                .objects
+                .insert(settings_handle, ObjectType::ClassObject(settings));
+            data.settings_handle = settings_handle;
+        } else if let Some(ObjectType::ClassObject(settings)) =
+            self.document.objects.get_mut(&data.settings_handle)
+        {
+            settings.owner = entity_handle;
+        }
+
+        let root = crate::scene::annotative::root_named_dict_handle(&mut self.document);
+        let manager_handle = self
+            .document
+            .objects
+            .get(&root)
+            .and_then(|object| match object {
+                ObjectType::Dictionary(dictionary) => dictionary
+                    .entries
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("ACAD_SECTION_MANAGER"))
+                    .map(|(_, handle)| *handle),
+                _ => None,
+            })
+            .filter(|handle| {
+                matches!(
+                    self.document.objects.get(handle),
+                    Some(ObjectType::ClassObject(object))
+                        if matches!(&object.data, ClassObjectData::SectionManager(_))
+                )
+            })
+            .unwrap_or_else(|| {
+                let handle = self.document.allocate_handle();
+                let mut manager =
+                    ClassObject::new(ClassObjectData::SectionManager(SectionManager::default()));
+                manager.handle = handle;
+                manager.owner = root;
+                self.document
+                    .objects
+                    .insert(handle, ObjectType::ClassObject(manager));
+                if let Some(ObjectType::Dictionary(dictionary)) =
+                    self.document.objects.get_mut(&root)
+                {
+                    dictionary.entries.retain(|(name, _)| {
+                        !name.eq_ignore_ascii_case("ACAD_SECTION_MANAGER")
+                    });
+                    dictionary.add_entry("ACAD_SECTION_MANAGER", handle);
+                }
+                handle
+            });
+        if let Some(ObjectType::ClassObject(manager)) =
+            self.document.objects.get_mut(&manager_handle)
+        {
+            manager.owner = root;
+            if let ClassObjectData::SectionManager(manager) = &mut manager.data {
+                if !manager.sections.contains(&entity_handle) {
+                    manager.sections.push(entity_handle);
+                }
+            }
+        }
+        true
+    }
+
     pub fn add_entity(&mut self, entity: EntityType) -> Handle {
         self.add_entity_internal(entity, true)
     }
@@ -195,6 +295,7 @@ impl Scene {
         // bookkeeping and remains in place while an entity delta is undone.
         let mutates_block_structure =
             matches!(&entity, EntityType::Block(_) | EntityType::BlockEnd(_));
+        let creates_section_structure = self.prepare_section_objects(&mut entity);
         let hatch_seed = if let EntityType::Hatch(dxf) = &entity {
             let color = self.render_style(&entity).0;
             Self::hatch_model_from_dxf(dxf, color)
@@ -298,6 +399,9 @@ impl Scene {
         };
 
         if !handle.is_null() {
+            if let Some(keep) = self.refedit_keep.as_mut() {
+                keep.insert(handle);
+            }
             self.invalidate_dependency_index();
             if let Some(model) = hatch_seed {
                 self.hatches.insert(handle, model);
@@ -334,7 +438,11 @@ impl Scene {
             // state (a new layer, application ID, or block).
             if self.is_recording_undo() {
                 self.record_undo_before(handle, None);
-                if creates_layer || creates_app_id || mutates_block_structure {
+                if creates_layer
+                    || creates_app_id
+                    || mutates_block_structure
+                    || creates_section_structure
+                {
                     self.poison_undo_recording();
                 }
             }
@@ -1566,6 +1674,7 @@ impl Scene {
                 let fill_plane_boundary = Some(Arc::new(fill_plane.1));
                 let fill_plane = Some(fill_plane.0);
                 models.push(HatchModel {
+                    pattern_origin: None,
                     render_instance,
                     boundary: Arc::new(boundary),
                     boundary_wcs: None,
@@ -1999,6 +2108,7 @@ impl Scene {
 
         let storage = crate::entities::curve::ocs_plane(dxf.normal, dxf.elevation);
         Some(HatchModel {
+            pattern_origin: Some([dxf.pattern_origin().x, dxf.pattern_origin().y]),
             render_instance: None,
             boundary: std::sync::Arc::new(boundary_f32),
             boundary_wcs: None,
@@ -2321,6 +2431,7 @@ impl Scene {
             })
             .collect();
         HatchModel {
+            pattern_origin: None,
             render_instance: None,
             boundary: std::sync::Arc::new(boundary),
             boundary_wcs: None,
@@ -2555,6 +2666,9 @@ impl Scene {
         // carries `world_origin: [0, 0]`, which after the world_offset removal
         // leaves the fill mis-placed and effectively invisible until a later
         // edit rebuilds it from the DXF — so keep the seed, don't overwrite it.
+        if let Some(origin) = model.pattern_origin {
+            dxf.record_pattern_origin(Vector2::new(origin[0], origin[1]));
+        }
         let mut entity = EntityType::Hatch(dxf);
 
         if let Some(layer) = layer {
@@ -2563,6 +2677,8 @@ impl Scene {
         if let Some((color, transparency)) = entity_style {
             entity.common_mut().color = color;
             entity.common_mut().transparency = transparency;
+        } else {
+            entity.common_mut().transparency = self.document.current_entity_transparency();
         }
 
         self.add_entity(entity)
@@ -2583,6 +2699,12 @@ impl Scene {
         self.solid_models = HashMap::default();
         *self.camera.borrow_mut() = Camera::default();
         self.camera_generation += 1;
+        // A brand-new/replaced document has none of these yet — without
+        // resetting them, a "new"/"open" (e.g. via automation, which reuses
+        // this same reset) would leak the previous document's constraints
+        // and named parameters into the fresh one.
+        self.sketch_constraints.clear();
+        self.named_parameters = crate::scene::named_parameters::ParameterTable::new();
         self.bump_geometry();
     }
 }

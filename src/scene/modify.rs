@@ -752,6 +752,8 @@ impl Scene {
             .map(|&h| (h, ChangeKind::Added))
             .collect();
         self.bump_entities(&changes);
+        // Constraints wholly within the duplicated selection follow it.
+        self.duplicate_sketch_constraints_for(&handle_map);
         self.refresh_meshes_for_handles(&refresh_solid_handles);
         new_handles
     }
@@ -1041,9 +1043,21 @@ impl Scene {
         {
             return false;
         }
+        let (isoline_counts, planar_isolines) = match self.document.get_entity(handle) {
+            Some(EntityType::Surface(surface)) => (
+                crate::entities::solid3d::surface_isoline_counts(surface),
+                crate::entities::solid3d::surface_property_state(surface).isolines,
+            ),
+            _ => ([0; 2], false),
+        };
         self.solid_history_preview_wires.insert(
             handle,
-            crate::scene::model::solid_model::grip_preview_wires(&body, handle),
+            crate::scene::model::solid_model::grip_preview_wires(
+                &body,
+                handle,
+                isoline_counts,
+                planar_isolines,
+            ),
         );
         true
     }

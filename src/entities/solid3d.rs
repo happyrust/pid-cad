@@ -3,6 +3,7 @@
 // Shared grips and properties for modeler entities.
 
 use acadrust::entities::{Body, Region, Solid3D, Surface};
+use acadrust::xdata::{ExtendedDataRecord, XDataValue};
 use cadkernel::space::polygon;
 use crate::t;
 use crate::command::EntityTransform;
@@ -47,6 +48,71 @@ fn translate_acis_entity<T: acadrust::Entity>(entity: &mut T, d: glam::DVec3) {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "Yes" } else { "No" }
+}
+
+pub(crate) const SURFACE_PROPERTIES_APP: &str = "OCS_SURFACE_PROPERTIES";
+
+#[derive(Clone, Copy)]
+pub(crate) struct SurfacePropertyState {
+    pub isolines: bool,
+    pub maintain_associativity: bool,
+    pub show_associativity: bool,
+}
+
+pub(crate) fn surface_property_state(surface: &Surface) -> SurfacePropertyState {
+    let defaults = SurfacePropertyState {
+        isolines: true,
+        maintain_associativity: surface.history_handle.is_some(),
+        show_associativity: false,
+    };
+    let Some(record) = surface
+        .common
+        .extended_data
+        .get_record(SURFACE_PROPERTIES_APP)
+    else {
+        return defaults;
+    };
+    let mut values = record.values.iter().filter_map(|value| match value {
+        XDataValue::Integer16(value) => Some(*value),
+        _ => None,
+    });
+    let Some(version) = values.next() else {
+        return defaults;
+    };
+    if version != 1 {
+        return defaults;
+    }
+    SurfacePropertyState {
+        isolines: values.next().map_or(defaults.isolines, |value| value == 0),
+        maintain_associativity: values
+            .next()
+            .map_or(defaults.maintain_associativity, |value| value != 0),
+        show_associativity: values
+            .next()
+            .map_or(defaults.show_associativity, |value| value != 0),
+    }
+}
+
+pub(crate) fn surface_property_xdata_values(state: SurfacePropertyState) -> Vec<XDataValue> {
+    vec![
+        XDataValue::Integer16(1),
+        XDataValue::Integer16(if state.isolines { 0 } else { 1 }),
+        XDataValue::Integer16(state.maintain_associativity as i16),
+        XDataValue::Integer16(state.show_associativity as i16),
+    ]
+}
+
+fn write_surface_property_state(surface: &mut Surface, state: SurfacePropertyState) {
+    let mut record = ExtendedDataRecord::new(SURFACE_PROPERTIES_APP);
+    record.values = surface_property_xdata_values(state);
+    surface.common.extended_data.upsert_record(record);
+}
+
+pub(crate) fn surface_isoline_counts(surface: &Surface) -> [usize; 2] {
+    [
+        surface.u_isolines.max(0) as usize,
+        surface.v_isolines.max(0) as usize,
+    ]
 }
 
 fn handle_text(handle: Option<acadrust::Handle>) -> String {
@@ -194,17 +260,26 @@ fn position_section(prefix: &str, p: &acadrust::types::Vector3) -> PropSection {
     }
 }
 
-/// Approximate a region's enclosed area and boundary perimeter from its
-/// wireframe loops. Perimeter is the total edge length across every wire.
-/// Area accumulates the Newell area vector of each loop (opposite-wound
-/// holes subtract) and halves its magnitude — exact for a single planar
-/// loop, approximate for multi-loop or curved regions. Returns zeros when
-/// there is nothing to measure.
-/// The area and perimeter of a region's boundary wires.
-///
-/// Measured in space rather than in projection: a region need not lie in a
-/// coordinate plane, and flattening it to XY first would report its shadow.
-fn region_area_perimeter(wires: &[acadrust::entities::Wire]) -> (f64, f64) {
+/// Measure decoded planar curves in a unit frame, retaining legacy wire-only input.
+fn region_area_perimeter(region: &Region) -> (f64, f64) {
+    let exact = (|| {
+        let (plane, loops, true) = crate::scene::model::presspull_model::profile_geometry(
+            &EntityType::Region(region.clone()),
+        )? else { return None; };
+        let unit = cadkernel::space::Plane::orthonormal(plane.origin, plane.x_axis, plane.normal()?)?;
+        let transform = cadkernel::geom2d::Transform {
+            origin: unit.project(plane.origin)?.into(),
+            x_axis: unit.project_vector(plane.x_axis)?.into(),
+            y_axis: unit.project_vector(plane.y_axis)?.into(),
+        };
+        let curves = loops.iter().flatten().map(|curve| curve.transformed(&transform))
+            .collect::<Option<Vec<_>>>()?;
+        let area = curves.iter().map(|curve| curve.enclosed_area()).sum::<f64>().abs();
+        let perimeter = curves.iter().map(|curve| curve.length()).sum::<f64>();
+        (area.is_finite() && perimeter.is_finite()).then_some((area, perimeter))
+    })();
+    if let Some(measurements) = exact { return measurements; }
+    let wires = &region.wires;
     let mut area_vector = [0.0f64; 3];
     let mut perimeter = 0.0;
     for wire in wires {
@@ -285,7 +360,7 @@ impl Grippable for Region {
 
 impl PropertyEditable for Region {
     fn geometry_properties(&self, _text_style_names: &[String]) -> Vec<PropSection> {
-        let (area, perimeter) = region_area_perimeter(&self.wires);
+        let (area, perimeter) = region_area_perimeter(self);
         let mut sections =
             acis_sections(&self.acis_data, &self.wires, &self.silhouettes, self.history_handle);
         sections[0]
@@ -700,6 +775,21 @@ impl PropertyEditable for Surface {
 
     fn apply_geom_prop(&mut self, field: &str, value: &str) {
         match field {
+            "srf_wireframe_type" => {
+                let mut state = surface_property_state(self);
+                state.isolines = !value.eq_ignore_ascii_case("Isoparms");
+                write_surface_property_state(self, state);
+            }
+            "srf_maintain_associativity" => {
+                let mut state = surface_property_state(self);
+                state.maintain_associativity = value.eq_ignore_ascii_case("Yes");
+                write_surface_property_state(self, state);
+            }
+            "srf_show_associativity" => {
+                let mut state = surface_property_state(self);
+                state.show_associativity = value.eq_ignore_ascii_case("Yes");
+                write_surface_property_state(self, state);
+            }
             "srf_u_isolines" => {
                 if let Some(value) = parse_f64(value) {
                     self.u_isolines = (value.round() as i16).max(0);
@@ -822,11 +912,45 @@ pub fn tessellate_volume(
             color,
             facet_res,
             chordal_deflection,
-            isolines,
+            surface_isoline_counts(s),
+            surface_property_state(s).isolines,
         ),
         EntityType::Mesh(_) | EntityType::PolygonMesh(_) | EntityType::PolyfaceMesh(_) => {
             crate::entities::mesh::tessellate_shaded_mesh(e, color)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cadkernel::geom2d::{Curve, Line};
+
+    fn ring(points: &[[f64; 2]]) -> Vec<Curve> {
+        points.iter().copied().zip(points.iter().copied().cycle().skip(1))
+            .take(points.len()).map(|(start, end)| Curve::Line(Line { start, end })).collect()
+    }
+
+    #[test]
+    fn decoded_region_reports_exact_hole_area_perimeter_and_bounds() {
+        let loops = vec![
+            ring(&[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]),
+            ring(&[[2.0, 2.0], [2.0, 4.0], [4.0, 4.0], [4.0, 2.0]]),
+        ];
+        let EntityType::Region(mut region) =
+            crate::scene::model::presspull_model::region_from_loops(
+                &loops,
+                crate::command::WorkingPlane::default(),
+            ).unwrap()
+        else { unreachable!() };
+        region.wires.clear();
+
+        let (area, perimeter) = region_area_perimeter(&region);
+        assert!((area - 96.0).abs() < 1e-8, "{area}");
+        assert!((perimeter - 48.0).abs() < 1e-8, "{perimeter}");
+        let (min, max) = crate::scene::convert::tess::entity_bounds(&EntityType::Region(region));
+        assert_eq!(min, [0.0, 0.0, 0.0]);
+        assert_eq!(max, [10.0, 10.0, 0.0]);
     }
 }

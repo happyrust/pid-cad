@@ -784,6 +784,20 @@ pub fn load_bytes(name: &str, bytes: Vec<u8>) -> Result<CadDocument, String> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_bytes_finalized(path: &Path, bytes: Vec<u8>) -> Result<(CadDocument, usize), String> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    let mut doc = load_bytes(&name, bytes)?;
+    normalize_block_origins(&mut doc);
+    resolve_raster_image_paths(&mut doc, path.parent());
+    doc.source_path = Some(path.to_string_lossy().into_owned());
+    let dropped = purge_corrupt_entities(&mut doc);
+    Ok((doc, dropped))
+}
+
 /// Load a DWG or DXF file directly from a path (auto-detect by extension).
 /// Peek at a file's leading bytes to tell a DWG (version tag "AC10xx") from a
 /// DXF. Used for `.bak` copies, whose extension hides the real format.
@@ -2499,5 +2513,34 @@ mod corrupt_guard_tests {
         ];
         let s = Spline::from_control_points(3, pts);
         assert!(!is_entity_corrupt(&EntityType::Spline(s)));
+    }
+
+    // A corrupt or adversarial MINSERT row/column pair (u16, so its unchecked
+    // product can reach into the billions) must be rejected before it can
+    // drive the render graph's per-instance allocation and expansion.
+    #[test]
+    fn preserves_large_minsert_data_while_rendering_is_bounded() {
+        let mut i = acadrust::entities::Insert::new("BLOCK", Vector3::ZERO);
+        i.row_count = u16::MAX;
+        i.column_count = u16::MAX;
+        assert!(!is_entity_corrupt(&EntityType::Insert(i)));
+    }
+
+    // An ordinary array insert, well under the budget, is valid source data.
+    #[test]
+    fn keeps_a_reasonable_minsert() {
+        let mut i = acadrust::entities::Insert::new("BLOCK", Vector3::ZERO);
+        i.row_count = 10;
+        i.column_count = 10;
+        i.row_spacing = 5.0;
+        i.column_spacing = 5.0;
+        assert!(!is_entity_corrupt(&EntityType::Insert(i)));
+    }
+
+    // A plain (non-array) INSERT is never treated as a MINSERT-count problem.
+    #[test]
+    fn keeps_a_plain_insert() {
+        let i = acadrust::entities::Insert::new("BLOCK", Vector3::ZERO);
+        assert!(!is_entity_corrupt(&EntityType::Insert(i)));
     }
 }

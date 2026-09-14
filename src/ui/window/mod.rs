@@ -19,3 +19,4 @@ pub mod attribute_editor;
 pub mod alias_editor;
 pub mod find_replace;
 pub mod pid_legend_list;
+pub mod named_parameters;

@@ -2567,11 +2567,17 @@ impl Pipeline {
         if instances.is_empty() {
             vec![]
         } else {
+            let mut sorted = instances.to_vec();
+            sorted.sort_by(|a, b| {
+                a.params[2]
+                    .partial_cmp(&b.params[2])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             vec![CircleGpu::from_instances(
                 device,
                 queue,
                 "viewer.circles",
-                instances,
+                &sorted,
             )]
         }
     }
@@ -2607,11 +2613,17 @@ impl Pipeline {
         if instances.is_empty() {
             vec![]
         } else {
+            let mut sorted = instances.to_vec();
+            sorted.sort_by(|a, b| {
+                a.params[2]
+                    .partial_cmp(&b.params[2])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             vec![EllipseGpu::from_instances(
                 device,
                 queue,
                 "viewer.ellipses",
-                instances,
+                &sorted,
             )]
         }
     }
@@ -2730,6 +2742,72 @@ impl Pipeline {
     /// refreshes just this overlay instead of re-tessellating the model. The
     /// xray pass applies neither scissor nor mesh-edge skip, so everything
     /// merges into one order-preserving run.
+    /// Split highlighted wires into analytic instances and the wires that need
+    /// real geometry, in one extraction pass per wire.
+    #[allow(clippy::type_complexity)]
+    fn classify_highlight_wires<'a>(
+        wires: &[&'a WireModel],
+        color: Option<[f32; 4]>,
+        depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
+    ) -> (
+        Vec<CircleInstance>,
+        Vec<EllipseInstance>,
+        Vec<&'a WireModel>,
+        Vec<&'a WireModel>,
+    ) {
+        use crate::par::prelude::*;
+        // Pure per-wire work, so it fans out; `collect` on an indexed
+        // parallel iterator keeps the order, and the order is what decides
+        // the instance layout.
+        let per: Vec<(Option<Vec<CircleInstance>>, Option<Vec<EllipseInstance>>, bool)> =
+            wires
+                .par_iter()
+                .map(|&wire| {
+                    if wire.render_instance.is_some() {
+                        return (None, None, true);
+                    }
+                    let depth = wire_gpu::wire_draw_depth(wire, depth_map);
+                    let mut circles = circle_gpu::extract_circle_instances(wire, depth);
+                    let mut ellipses = ellipse_gpu::extract_ellipse_instances(wire, depth);
+                    if let Some(color) = color {
+                        if let Some(instances) = circles.as_mut() {
+                            for instance in instances {
+                                instance.color = color;
+                            }
+                        }
+                        if let Some(instances) = ellipses.as_mut() {
+                            for instance in instances {
+                                instance.color = color;
+                            }
+                        }
+                    }
+                    (circles, ellipses, false)
+                })
+                .collect();
+
+        let mut circles: Vec<CircleInstance> = Vec::new();
+        let mut ellipses: Vec<EllipseInstance> = Vec::new();
+        let mut regular: Vec<&'a WireModel> = Vec::new();
+        let mut blocks: Vec<&'a WireModel> = Vec::new();
+        for (&wire, (wire_circles, wire_ellipses, is_block)) in wires.iter().zip(per) {
+            if is_block {
+                blocks.push(wire);
+                continue;
+            }
+            let shaped = wire_circles.is_some() || wire_ellipses.is_some();
+            if let Some(instances) = wire_circles {
+                circles.extend(instances);
+            }
+            if let Some(instances) = wire_ellipses {
+                ellipses.extend(instances);
+            }
+            if !shaped {
+                regular.push(wire);
+            }
+        }
+        (circles, ellipses, regular, blocks)
+    }
+
     pub fn upload_selected_wires(
         &mut self,
         device: &wgpu::Device,
@@ -2755,9 +2833,11 @@ impl Pipeline {
         let mut hover_wires: Vec<&WireModel> = Vec::new();
         for h in selected {
             if let Some(idxs) = self.wire_handle_index.get(&h.value()) {
-                let mut slots = idxs.clone();
-                slots.sort_unstable();
-                for &i in &slots {
+                debug_assert!(
+                    idxs.windows(2).all(|pair| pair[0] <= pair[1]),
+                    "wire_handle_index slots must stay ascending",
+                );
+                for &i in idxs {
                     if let Some(w) = wires.get(i as usize) {
                         if !w.display_visible {
                             continue;
@@ -2769,9 +2849,7 @@ impl Pipeline {
         }
         for h in hovered.iter().filter(|handle| !selected.contains(handle)) {
             if let Some(idxs) = self.wire_handle_index.get(&h.value()) {
-                let mut slots = idxs.clone();
-                slots.sort_unstable();
-                for &i in &slots {
+                for &i in idxs {
                     if let Some(w) = wires.get(i as usize) {
                         if !w.display_visible {
                             continue;
@@ -2791,26 +2869,23 @@ impl Pipeline {
                 hover_wires.push(wire);
             }
         }
-        let mut selected_circles: Vec<CircleInstance> = Vec::new();
-        let circle_sel_tint = selected_tint.unwrap_or(WireModel::SELECTED);
-        for &wire in &selected_wires {
-            let depth = wire_gpu::wire_draw_depth(wire, depth_map);
-            if let Some(insts) = circle_gpu::extract_circle_instances(wire, depth) {
-                for mut inst in insts {
-                    inst.color = circle_sel_tint;
-                    selected_circles.push(inst);
-                }
-            }
-        }
-        for &wire in &hover_wires {
-            let depth = wire_gpu::wire_draw_depth(wire, depth_map);
-            if let Some(insts) = circle_gpu::extract_circle_instances(wire, depth) {
-                for mut inst in insts {
-                    inst.color = WireModel::HOVER;
-                    selected_circles.push(inst);
-                }
-            }
-        }
+        let t_gather = perf_started.map(|t| t.elapsed().as_secs_f64() * 1000.0);
+        let (mut selected_circles, mut selected_ellipses, selected_regular, selected_blocks) =
+            Self::classify_highlight_wires(
+                &selected_wires,
+                Some(selected_tint.unwrap_or(WireModel::SELECTED)),
+                depth_map,
+            );
+        let (hover_circles, hover_ellipses, hover_regular, hover_blocks) =
+            Self::classify_highlight_wires(
+                &hover_wires,
+                Some(WireModel::HOVER),
+                depth_map,
+            );
+        selected_circles.extend(hover_circles);
+        selected_ellipses.extend(hover_ellipses);
+
+        let t_shapes = perf_started.map(|t| t.elapsed().as_secs_f64() * 1000.0);
         self.gpu_selected_circles = if selected_circles.is_empty() {
             vec![]
         } else {
@@ -2821,27 +2896,6 @@ impl Pipeline {
                 &selected_circles,
             )]
         };
-
-        let mut selected_ellipses: Vec<EllipseInstance> = Vec::new();
-        let ellipse_sel_tint = selected_tint.unwrap_or(WireModel::SELECTED);
-        for &wire in &selected_wires {
-            let depth = wire_gpu::wire_draw_depth(wire, depth_map);
-            if let Some(insts) = ellipse_gpu::extract_ellipse_instances(wire, depth) {
-                for mut inst in insts {
-                    inst.color = ellipse_sel_tint;
-                    selected_ellipses.push(inst);
-                }
-            }
-        }
-        for &wire in &hover_wires {
-            let depth = wire_gpu::wire_draw_depth(wire, depth_map);
-            if let Some(insts) = ellipse_gpu::extract_ellipse_instances(wire, depth) {
-                for mut inst in insts {
-                    inst.color = WireModel::HOVER;
-                    selected_ellipses.push(inst);
-                }
-            }
-        }
         self.gpu_selected_ellipses = if selected_ellipses.is_empty() {
             vec![]
         } else {
@@ -2852,35 +2906,7 @@ impl Pipeline {
                 &selected_ellipses,
             )]
         };
-
-        let selected_regular: Vec<&WireModel> = selected_wires
-            .iter()
-            .copied()
-            .filter(|wire| {
-                wire.render_instance.is_none()
-                    && circle_gpu::extract_circle_instances(wire, 0.0).is_none()
-                    && ellipse_gpu::extract_ellipse_instances(wire, 0.0).is_none()
-            })
-            .collect();
-        let hover_regular: Vec<&WireModel> = hover_wires
-            .iter()
-            .copied()
-            .filter(|wire| {
-                wire.render_instance.is_none()
-                    && circle_gpu::extract_circle_instances(wire, 0.0).is_none()
-                    && ellipse_gpu::extract_ellipse_instances(wire, 0.0).is_none()
-            })
-            .collect();
-        let selected_blocks: Vec<&WireModel> = selected_wires
-            .iter()
-            .copied()
-            .filter(|wire| wire.render_instance.is_some())
-            .collect();
-        let hover_blocks: Vec<&WireModel> = hover_wires
-            .iter()
-            .copied()
-            .filter(|wire| wire.render_instance.is_some())
-            .collect();
+        let t_split = perf_started.map(|t| t.elapsed().as_secs_f64() * 1000.0);
         let mut gpu = if let Some(tint) = selected_tint {
             WireGpu::from_highlight_refs(
                 device,
@@ -2901,6 +2927,7 @@ impl Pipeline {
             depth_map,
             self.wire_const_bgl.as_ref(),
         ));
+        let t_regular = perf_started.map(|t| t.elapsed().as_secs_f64() * 1000.0);
         self.gpu_selected_wires = gpu;
         let mut block_gpu = if let Some(tint) = selected_tint {
             BlockWireGpu::from_wires(
@@ -2934,6 +2961,18 @@ impl Pipeline {
         if let Some(started) = perf_started {
             let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
             if elapsed_ms >= 1.0 {
+                let gather = t_gather.unwrap_or(0.0);
+                let classify = t_shapes.unwrap_or(0.0);
+                let analytic = t_split.unwrap_or(0.0);
+                let regular = t_regular.unwrap_or(0.0);
+                crate::perf_record!(
+                    "[perf] wire-highlight-detail gather={gather:.1} classify={:.1} \
+analytic={:.1} regular={:.1} blocks={:.1}",
+                    classify - gather,
+                    analytic - classify,
+                    regular - analytic,
+                    elapsed_ms - regular,
+                );
                 crate::perf_record!(
                     "[perf] wire-highlight {:>7.1}ms handles={} wires={}",
                     elapsed_ms,
@@ -5824,9 +5863,228 @@ fn install_gpu_error_handler(device: &wgpu::Device) {
     }));
 }
 
+/// The adapter wgpu ended up drawing on.
+///
+/// iced chooses it and names it only under `RUST_LOG`, so a fallback to a
+/// software rasterizer used to be invisible: an NVIDIA userspace update
+/// applied without a reboot left the Vulkan ICD unable to talk to the loaded
+/// kernel module, wgpu quietly took Mesa's `llvmpipe`, and a day of pan/zoom
+/// on the CPU read as a regression in the drawing code. `record_gpu_adapter`
+/// now reports one `[gpu] adapter:` line per device and keeps a copy for the
+/// app, which turns it into a [`GpuStatus`] the user can see.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GpuAdapter {
+    pub name: String,
+    pub backend: wgpu::Backend,
+    pub device_type: wgpu::DeviceType,
+}
+
+impl GpuAdapter {
+    /// A software rasterizer: every frame is drawn by the CPU, which on a
+    /// large drawing is the difference between interactive and unusable.
+    ///
+    /// `DeviceType::Cpu` is what Vulkan says for llvmpipe, DX12 for WARP and
+    /// GL for anything whose renderer string gives it away. WebGPU never says
+    /// it — wgpu reports every browser adapter as `Other` (gfx-rs/wgpu#8819)
+    /// — so the names browsers give their fallbacks are matched as well, the
+    /// same way wgpu's own GL backend classifies them.
+    pub fn is_software(&self) -> bool {
+        if self.device_type == wgpu::DeviceType::Cpu {
+            return true;
+        }
+        let name = self.name.to_ascii_lowercase();
+        SOFTWARE_RASTERIZER_NAMES
+            .iter()
+            .any(|marker| name.contains(marker))
+    }
+}
+
+/// Renderer names that mean "no GPU", lower-cased: Mesa's llvmpipe (also
+/// exposed as lavapipe under Vulkan), Google's SwiftShader (Chrome's WebGL /
+/// WebGPU fallback), and Microsoft's WARP, which DXGI names as a driver.
+const SOFTWARE_RASTERIZER_NAMES: [&str; 5] = [
+    "llvmpipe",
+    "lavapipe",
+    "softpipe",
+    "swiftshader",
+    "microsoft basic render",
+];
+
+/// What is drawing the scene, as far as the app can tell.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GpuStatus {
+    /// No scene frame has completed yet, so nothing is known.
+    Unknown,
+    /// A GPU, through wgpu. The normal case; nothing to say.
+    Hardware(GpuAdapter),
+    /// A CPU rasterizer, through wgpu — llvmpipe, WARP, SwiftShader. Every
+    /// frame works, slowly, and the driver that should be here is not.
+    Software(GpuAdapter),
+    /// wgpu found no adapter at all. iced then draws the interface with
+    /// tiny-skia and drops the scene primitive with a `log::warn!` nobody
+    /// sees, so the viewport stays blank while everything else works.
+    NoRenderer,
+}
+
+impl GpuStatus {
+    /// True when the user should be told: the scene is slow or missing.
+    pub fn is_degraded(&self) -> bool {
+        matches!(self, Self::Software(_) | Self::NoRenderer)
+    }
+
+    /// A stable name for "this situation", so the popup can be silenced for
+    /// one adapter without silencing the next one.
+    pub fn identity(&self) -> Option<String> {
+        match self {
+            Self::Software(adapter) => Some(format!("software:{}", adapter.name)),
+            Self::NoRenderer => Some("no-renderer".to_string()),
+            Self::Unknown | Self::Hardware(_) => None,
+        }
+    }
+}
+
+/// The adapter of the most recently created device.
+static GPU_ADAPTER: std::sync::Mutex<Option<GpuAdapter>> = std::sync::Mutex::new(None);
+
+/// How many times the viewport has asked the scene for a primitive. Counted
+/// in `ViewportPane::draw`, which every renderer calls; only wgpu goes on to
+/// `prepare` and build a device. Draws without a device are therefore the
+/// evidence that the scene is being dropped.
+static SCENE_DRAWS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Draws the viewport may request before a still-missing device counts as
+/// `NoRenderer`. Under wgpu the device exists before the first draw's frame
+/// ends, so one would do; the margin covers a frame that was drawn but never
+/// presented (an outdated surface, an occluded window).
+const SCENE_DRAWS_BEFORE_NO_RENDERER: u32 = 3;
+
+/// Bumped whenever the verdict of [`gpu_status`] can have changed: a device
+/// was created, or the draw count reached its threshold. The app compares it
+/// against what it last saw, so the per-message check is one atomic load.
+static GPU_STATUS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Called by the viewport's `shader::Program::draw`, whichever renderer runs it.
+pub(crate) fn note_scene_draw() {
+    use std::sync::atomic::Ordering;
+    if SCENE_DRAWS.fetch_add(1, Ordering::Relaxed) + 1 == SCENE_DRAWS_BEFORE_NO_RENDERER {
+        GPU_STATUS_GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// One line for whoever reads logs: stderr natively, the browser console on
+/// the web, where wasm has no stderr to write to.
+pub(crate) fn report_gpu_line(line: &str) {
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(line));
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("{line}");
+}
+
+fn record_gpu_adapter(device: &wgpu::Device) {
+    let info = device.adapter_info();
+    report_gpu_line(&format!(
+        "[gpu] adapter: {} ({:?}, {:?}, driver: {} {})",
+        info.name, info.backend, info.device_type, info.driver, info.driver_info
+    ));
+    let adapter = GpuAdapter {
+        name: info.name,
+        backend: info.backend,
+        device_type: info.device_type,
+    };
+    if let Ok(mut slot) = GPU_ADAPTER.lock() {
+        *slot = Some(adapter);
+    }
+    GPU_STATUS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The verdict from what has been recorded so far. Pure, so it can be tested
+/// without a device: `adapter` is the last device's adapter, `scene_draws`
+/// how often the viewport asked to be drawn.
+fn gpu_status_from(adapter: Option<GpuAdapter>, scene_draws: u32) -> GpuStatus {
+    match adapter {
+        Some(adapter) if adapter.is_software() => GpuStatus::Software(adapter),
+        Some(adapter) => GpuStatus::Hardware(adapter),
+        None if scene_draws >= SCENE_DRAWS_BEFORE_NO_RENDERER => GpuStatus::NoRenderer,
+        None => GpuStatus::Unknown,
+    }
+}
+
+/// The current verdict.
+pub(crate) fn gpu_status() -> GpuStatus {
+    let adapter = GPU_ADAPTER.lock().ok().and_then(|slot| slot.clone());
+    gpu_status_from(adapter, SCENE_DRAWS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The verdict, but only when it may have moved since `seen` — the app calls
+/// this after every message, and almost every call is one atomic load.
+pub(crate) fn gpu_status_if_changed(seen: &mut u64) -> Option<GpuStatus> {
+    let generation = GPU_STATUS_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+    if generation == *seen {
+        return None;
+    }
+    *seen = generation;
+    Some(gpu_status())
+}
+
+#[cfg(test)]
+mod gpu_status_tests {
+    use super::*;
+
+    fn adapter(name: &str, device_type: wgpu::DeviceType) -> GpuAdapter {
+        GpuAdapter {
+            name: name.to_string(),
+            backend: wgpu::Backend::Vulkan,
+            device_type,
+        }
+    }
+
+    #[test]
+    fn software_is_the_device_type_or_a_known_fallback_name() {
+        assert!(adapter("llvmpipe (LLVM 21.1.8, 256 bits)", wgpu::DeviceType::Cpu).is_software());
+        // WebGPU reports every adapter as Other, so the name has to carry it.
+        assert!(adapter(
+            "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)), SwiftShader driver)",
+            wgpu::DeviceType::Other
+        )
+        .is_software());
+        assert!(adapter("Microsoft Basic Render Driver", wgpu::DeviceType::Other).is_software());
+        assert!(!adapter("NVIDIA GeForce GT 1030", wgpu::DeviceType::DiscreteGpu).is_software());
+        assert!(!adapter("Apple M2", wgpu::DeviceType::IntegratedGpu).is_software());
+        assert!(!adapter("", wgpu::DeviceType::Other).is_software());
+    }
+
+    #[test]
+    fn the_verdict_needs_either_a_device_or_enough_dropped_draws() {
+        assert_eq!(gpu_status_from(None, 0), GpuStatus::Unknown);
+        assert_eq!(
+            gpu_status_from(None, SCENE_DRAWS_BEFORE_NO_RENDERER - 1),
+            GpuStatus::Unknown
+        );
+        assert_eq!(
+            gpu_status_from(None, SCENE_DRAWS_BEFORE_NO_RENDERER),
+            GpuStatus::NoRenderer
+        );
+        let gpu = adapter("NVIDIA GeForce GT 1030", wgpu::DeviceType::DiscreteGpu);
+        assert_eq!(gpu_status_from(Some(gpu.clone()), 100), GpuStatus::Hardware(gpu));
+        let cpu = adapter("llvmpipe", wgpu::DeviceType::Cpu);
+        assert_eq!(gpu_status_from(Some(cpu.clone()), 0), GpuStatus::Software(cpu));
+    }
+
+    #[test]
+    fn only_degraded_verdicts_carry_an_identity() {
+        assert!(GpuStatus::Unknown.identity().is_none());
+        assert!(GpuStatus::Hardware(adapter("x", wgpu::DeviceType::DiscreteGpu)).identity().is_none());
+        assert_eq!(GpuStatus::NoRenderer.identity().as_deref(), Some("no-renderer"));
+        let software = GpuStatus::Software(adapter("llvmpipe", wgpu::DeviceType::Cpu));
+        assert!(software.is_degraded());
+        assert_eq!(software.identity().as_deref(), Some("software:llvmpipe"));
+    }
+}
+
 impl iced::widget::shader::Pipeline for MultiPipeline {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         install_gpu_error_handler(device);
+        record_gpu_adapter(device);
         Self {
             block_geometry: Default::default(),
             inners: vec![Pipeline::new(device, queue, format)],
@@ -5840,5 +6098,93 @@ impl iced::widget::shader::Pipeline for MultiPipeline {
             #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
             bevy: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod highlight_classification_tests {
+    use super::*;
+    use crate::scene::model::wire_model::TangentGeom;
+
+    fn plain(name: &str) -> WireModel {
+        WireModel::solid(
+            name.to_string(),
+            vec![[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+            [1.0; 4],
+            false,
+        )
+    }
+
+    fn circle(name: &str) -> WireModel {
+        let mut wire = plain(name);
+        wire.tangent_geoms.push(TangentGeom::PlanarCircle {
+            center: [0.0, 0.0, 0.0],
+            axis_x: [1.0, 0.0, 0.0],
+            axis_y: [0.0, 1.0, 0.0],
+            radius: 2.0,
+        });
+        wire
+    }
+
+    fn ellipse(name: &str) -> WireModel {
+        let mut wire = plain(name);
+        wire.tangent_geoms.push(TangentGeom::PlanarEllipse {
+            center: [0.0, 0.0, 0.0],
+            major_axis: [2.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            minor_axis_ratio: 0.5,
+            start_param: 0.0,
+            end_param: std::f64::consts::TAU,
+        });
+        wire
+    }
+
+    #[test]
+    fn each_wire_lands_in_the_bucket_the_old_predicate_chose() {
+        let wires = vec![plain("1"), circle("2"), ellipse("3"), plain("4")];
+        let refs: Vec<&WireModel> = wires.iter().collect();
+        let depth_map = rustc_hash::FxHashMap::default();
+
+        let (circles, ellipses, regular, blocks) =
+            Pipeline::classify_highlight_wires(&refs, None, &depth_map);
+
+        for wire in &refs {
+            let was_regular = wire.render_instance.is_none()
+                && circle_gpu::extract_circle_instances(wire, 0.0).is_none()
+                && ellipse_gpu::extract_ellipse_instances(wire, 0.0).is_none();
+            assert_eq!(
+                was_regular,
+                regular.iter().any(|kept| std::ptr::eq(*kept, *wire)),
+                "wire {} disagrees with the old predicate",
+                wire.name,
+            );
+        }
+
+        assert_eq!(regular.len(), 2, "two plain lines");
+        assert_eq!(circles.len(), 1, "one circle instance");
+        assert_eq!(ellipses.len(), 1, "one ellipse instance");
+        assert!(blocks.is_empty(), "no block wires in this sample");
+    }
+
+    // Hover recolours every instance; a selection only recolours when a tint is
+    // configured. Both go through the same argument, so it has to actually
+    // reach the instances.
+    #[test]
+    fn the_colour_override_reaches_the_instances() {
+        let wires = vec![circle("2"), ellipse("3")];
+        let refs: Vec<&WireModel> = wires.iter().collect();
+        let depth_map = rustc_hash::FxHashMap::default();
+
+        let (tinted_circles, tinted_ellipses, _, _) =
+            Pipeline::classify_highlight_wires(&refs, Some(WireModel::HOVER), &depth_map);
+        assert_eq!(tinted_circles[0].color, WireModel::HOVER);
+        assert_eq!(tinted_ellipses[0].color, WireModel::HOVER);
+
+        let (plain_circles, _, _, _) =
+            Pipeline::classify_highlight_wires(&refs, None, &depth_map);
+        assert_ne!(
+            plain_circles[0].color, WireModel::HOVER,
+            "without a tint the extractor's own colour stands",
+        );
     }
 }

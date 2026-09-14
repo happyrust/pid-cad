@@ -68,17 +68,17 @@ pub fn export_headless(input: &std::path::Path, output: &std::path::Path) -> i32
 #[cfg(not(target_arch = "wasm32"))]
 impl OpenCADStudio {
     /// Load `path` into the active tab; the `open` operation of the JSON
-    /// server goes through here too.
-    pub(crate) fn open_drawing_headless(&mut self, path: &std::path::Path) -> Result<(), String> {
+    /// server goes through here too. Answers with the number of corrupt
+    /// entities the loader purged.
+    pub(crate) fn open_drawing_headless(&mut self, path: &std::path::Path) -> Result<usize, String> {
         let bytes = self.read_drawing(path).map_err(|e| e.to_string())?;
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        let document = crate::io::load_bytes(&name, bytes).map_err(|e| e.to_string())?;
+        let (document, dropped) = crate::io::load_bytes_finalized(path, bytes)?;
         let i = self.active_tab;
+        self.tabs[i].scene.clear();
         self.tabs[i].scene.document = document;
-        self.tabs[i].scene.deselect_all();
+        self.tabs[i].scene.load_sketch_constraints_from_document();
+        self.tabs[i].scene.load_named_parameters_from_document();
+        self.tabs[i].scene.material_base_dir = path.parent().map(PathBuf::from);
         crate::app::style_ops::ensure_standard_styles(&mut self.tabs[i].scene.document);
         self.tabs[i].adopt_active_ucs_from_header();
         self.tabs[i].current_path = Some(PathBuf::from(path));
@@ -91,7 +91,7 @@ impl OpenCADStudio {
         // ones inside a block come through the instanced path regardless).
         // This bumps the geometry epoch too.
         self.tabs[i].scene.rebuild_derived_caches();
-        Ok(())
+        Ok(dropped)
     }
 
     /// The drawing's paper-space layouts, in the order the tabs show them.
@@ -844,14 +844,8 @@ fn entity_json(e: &acadrust::EntityType, detail: &str) -> Value {
         _ => {}
     }
     if detail == "full" {
-        let bounds = e.as_entity().bounding_box();
-        map.insert(
-            "bounds".into(),
-            json!({
-                "min":[bounds.min.x,bounds.min.y,bounds.min.z],
-                "max":[bounds.max.x,bounds.max.y,bounds.max.z]
-            }),
-        );
+        let (min, max) = crate::scene::convert::tess::entity_bounds(e);
+        map.insert("bounds".into(), json!({ "min": min, "max": max }));
         if let Ok(Value::Object(wrapper)) = serde_json::to_value(e) {
             if let Some((_, properties)) = wrapper.into_iter().next() {
                 map.insert("properties".into(), properties);
@@ -931,13 +925,12 @@ impl OpenCADStudio {
         match req["op"].as_str().unwrap_or("") {
             "new" => {
                 let i = self.active_tab;
-                self.tabs[i].scene.document = acadrust::CadDocument::new();
-                self.tabs[i].scene.deselect_all();
+                self.tabs[i].scene.clear();
+                self.tabs[i].scene.material_base_dir = None;
                 self.tabs[i].current_path = None;
                 // The headless session starts on the welcome (Start) tab, which
                 // blocks drawing commands; turn it into a real drawing.
                 self.tabs[i].is_start = false;
-                self.tabs[i].scene.bump_geometry();
                 self.entity_summary()
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -946,7 +939,15 @@ impl OpenCADStudio {
                     return err("open: missing \"path\"");
                 };
                 match self.open_drawing_headless(std::path::Path::new(path)) {
-                    Ok(()) => self.entity_summary(),
+                    Ok(dropped) => {
+                        let mut summary = self.entity_summary();
+                        if dropped > 0 {
+                            if let Some(obj) = summary.as_object_mut() {
+                                obj.insert("purged".to_string(), json!(dropped));
+                            }
+                        }
+                        summary
+                    }
                     Err(e) => err(format!("open: {e}")),
                 }
             }
@@ -1460,11 +1461,11 @@ impl OpenCADStudio {
                 continue;
             }
             if let Some(bounds) = bounds {
-                let entity_bounds = e.as_entity().bounding_box();
-                if entity_bounds.max.x < bounds[0]
-                    || entity_bounds.max.y < bounds[1]
-                    || entity_bounds.min.x > bounds[2]
-                    || entity_bounds.min.y > bounds[3]
+                let (min, max) = crate::scene::convert::tess::entity_bounds(e);
+                if max[0] < bounds[0]
+                    || max[1] < bounds[1]
+                    || min[0] > bounds[2]
+                    || min[1] > bounds[3]
                 {
                     continue;
                 }
@@ -3439,6 +3440,57 @@ mod tests {
     }
 
     #[test]
+    fn open_finalizes_and_purges_like_the_ui_open_path() {
+        let mut app = OpenCADStudio::new_for_test();
+        let stale = acadrust::Handle::from(9999);
+        app.tabs[app.active_tab].scene.solid_models.insert(
+            stale, cadkernel::brep::make::cuboid([0.0; 3], [1.0; 3]).unwrap(),
+        );
+        let path = std::env::temp_dir().join(format!(
+            "ocs_automation_finalize_test_{}.dxf",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let mut doc = acadrust::CadDocument::new();
+        let mut good = acadrust::entities::Circle::new();
+        good.center = acadrust::types::Vector3::new(5.0, 5.0, 0.0);
+        good.radius = 2.0;
+        doc.add_entity(acadrust::EntityType::Circle(good)).unwrap();
+        let mut corrupt = acadrust::entities::Circle::new();
+        corrupt.center = acadrust::types::Vector3::new(1.0, 1.0, 0.0);
+        corrupt.radius = 0.0; // io::is_entity_corrupt rejects a zero-radius circle
+        doc.add_entity(acadrust::EntityType::Circle(corrupt)).unwrap();
+        let bytes = crate::io::save_to_bytes(&doc, "dxf", doc.version)
+            .expect("save a document containing a corrupt entity");
+        std::fs::write(&path, bytes).unwrap();
+
+        let p = path.to_string_lossy().replace('\\', "\\\\");
+        let result = app.automation_op(&format!(r#"{{"op":"open","path":"{p}"}}"#));
+        assert_eq!(result["ok"], true, "{}", result["error"]);
+        assert_eq!(result["total"], 1, "the corrupt circle must not survive the open");
+        assert_eq!(result["purged"], 1, "the purge count must be reported, matching the UI open path's diagnostics");
+
+        let i = app.active_tab;
+        assert!(!app.tabs[i].scene.solid_models.contains_key(&stale));
+        assert_eq!(app.tabs[i].scene.material_base_dir.as_deref(), path.parent());
+        assert!(
+            app.tabs[i].scene.document.source_path.is_some(),
+            "automation open must run the same finalization as a path-based open, which sets source_path (load_bytes alone never does)"
+        );
+
+        app.tabs[i].scene.solid_models.insert(
+            stale, cadkernel::brep::make::cuboid([0.0; 3], [1.0; 3]).unwrap(),
+        );
+        assert_eq!(app.automation_op(r#"{"op":"new"}"#)["ok"], true);
+        assert!(app.tabs[i].scene.solid_models.is_empty());
+        assert!(app.tabs[i].scene.material_base_dir.is_none());
+
+        drop(app);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn test_pline_line_then_arc() {
         use crate::app::Message;
         let mut app = OpenCADStudio::new_for_test();
@@ -3501,5 +3553,118 @@ mod tests {
 
         // Finish
         let _ = app.update(Message::CommandOptionPick(String::new()));
+    }
+
+    #[test]
+    fn test_mtp_in_line_command() {
+        use crate::app::Message;
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        {
+            app.tabs[0].scene.selection.borrow_mut().vp_size = (1920.0, 1080.0);
+            app.tabs[0].scene.sync_tiles_from_panes(1920.0, 1080.0);
+        }
+
+        // Start LINE
+        let _ = app.update(Message::CommandInput("LINE".to_string()));
+        let _ = app.update(Message::CommandSubmit);
+        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("LINE"));
+
+        // Type M2P
+        let _ = app.update(Message::CommandInput("M2P".to_string()));
+        let _ = app.update(Message::CommandSubmit);
+        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("MTP"));
+        assert!(app.tabs[0].suspended_cmd.is_some());
+        assert_eq!(app.tabs[0].suspended_cmd.as_ref().map(|c| c.name()), Some("LINE"));
+
+        // Point 1: 0,0
+        let _ = app.update(Message::CommandInput("0,0".to_string()));
+        let _ = app.update(Message::CommandSubmit);
+        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("MTP"));
+
+        // Point 2: 10,20
+        let _ = app.update(Message::CommandInput("10,20".to_string()));
+        let _ = app.update(Message::CommandSubmit);
+
+        // MTP should have finished and restored LINE, with midpoint (5, 10, 0)
+        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("LINE"));
+        assert!(app.tabs[0].suspended_cmd.is_none());
+        assert_eq!(app.last_point, Some(glam::DVec3::new(5.0, 10.0, 0.0)));
+
+        // Cancel LINE
+        let _ = app.update(Message::CommandEscape);
+        assert!(app.tabs[0].active_cmd.is_none());
+    }
+
+    #[test]
+    fn mtp_snap_override_starts_the_existing_modifier() {
+        use crate::app::Message;
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+
+        let _ = app.update(Message::CommandInput("LINE".to_string()));
+        let _ = app.update(Message::CommandSubmit);
+        let _ = app.update(Message::SnapOverrideMtp);
+
+        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("MTP"));
+        assert_eq!(
+            app.tabs[0].suspended_cmd.as_ref().map(|c| c.name()),
+            Some("LINE")
+        );
+    }
+
+    #[test]
+    fn test_mtp_escape_restores_parent() {
+        use crate::app::Message;
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+
+        // Start LINE
+        let _ = app.update(Message::CommandInput("LINE".to_string()));
+        let _ = app.update(Message::CommandSubmit);
+        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("LINE"));
+
+        // Type MTP
+        let _ = app.update(Message::CommandInput("MTP".to_string()));
+        let _ = app.update(Message::CommandSubmit);
+        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("MTP"));
+
+        // Escape during MTP
+        let _ = app.update(Message::CommandEscape);
+        // Parent LINE must be restored, not cancelled!
+        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("LINE"));
+        assert!(app.tabs[0].suspended_cmd.is_none());
+
+        // Escape again cancels LINE
+        let _ = app.update(Message::CommandEscape);
+        assert!(app.tabs[0].active_cmd.is_none());
+    }
+
+    #[test]
+    fn test_mtp_typing_routing_with_dyn_input() {
+        use crate::app::Message;
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        app.dyn_input = true;
+
+        // Start LINE
+        let _ = app.update(Message::CommandInput("LINE".to_string()));
+        let _ = app.update(Message::CommandSubmit);
+        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("LINE"));
+
+        // Simulate typing 'm', '2', 'p' character by character
+        let _ = app.update(Message::CommandAppendChar("m".to_string()));
+        assert_eq!(app.command_line.input, "M");
+
+        // The digit '2' must stay in command_line.input instead of routing to dyn fields!
+        let _ = app.update(Message::CommandAppendChar("2".to_string()));
+        assert_eq!(app.command_line.input, "M2");
+
+        let _ = app.update(Message::CommandAppendChar("p".to_string()));
+        assert_eq!(app.command_line.input, "M2P");
+
+        // Submit triggers MTP
+        let _ = app.update(Message::CommandSubmit);
+        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("MTP"));
     }
 }

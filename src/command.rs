@@ -13,13 +13,22 @@ use glam::DVec3;
 
 #[derive(Clone, Debug)]
 pub enum HatchEditOperation {
+    Appearance {
+        color: Option<acadrust::types::Color>,
+        layer: Option<String>,
+        transparency: Option<acadrust::types::Transparency>,
+    },
     Update {
         origin: Option<(f64, f64)>,
+        store_origin: bool,
         disassociate: bool,
         style: Option<acadrust::entities::HatchStyleType>,
         annotative: Option<bool>,
     },
-    RecreateBoundary,
+    RecreateBoundary { associate: bool, region: bool },
+    BeginAssociate,
+    AssociatePaths(Vec<acadrust::entities::BoundaryPath>),
+    DrawOrderBoundary { above: bool },
     Separate,
     AddBoundaries(Vec<Handle>),
     RemoveBoundaries(Vec<Handle>),
@@ -744,6 +753,88 @@ impl CadCommand for TwoValuePromptCommand {
     }
 }
 
+// ── Mid between 2 points (MTP / M2P) ────────────────────────────────────────
+
+/// Point-entry modifier that prompts for two points, draws a preview connecting line
+/// with a midpoint marker, and returns the midpoint to the caller.
+#[derive(Debug, Default)]
+pub struct Mid2PointCommand {
+    pub first_point: Option<DVec3>,
+}
+
+impl Mid2PointCommand {
+    pub fn new() -> Self {
+        Self { first_point: None }
+    }
+}
+
+impl CadCommand for Mid2PointCommand {
+    fn name(&self) -> &'static str {
+        "MTP"
+    }
+
+    fn prompt(&self) -> String {
+        if self.first_point.is_none() {
+            crate::t!("_mtp Specify first point of mid:").into_owned()
+        } else {
+            crate::t!("_mtp Specify second point of mid:").into_owned()
+        }
+    }
+
+    fn on_point(&mut self, pt: DVec3) -> CmdResult {
+        if let Some(first) = self.first_point {
+            let mid = (first + pt) * 0.5;
+            CmdResult::ReturnPoint(mid)
+        } else {
+            self.first_point = Some(pt);
+            CmdResult::NeedPoint
+        }
+    }
+
+    fn on_enter(&mut self) -> CmdResult {
+        CmdResult::Cancel
+    }
+
+    fn on_escape(&mut self) -> CmdResult {
+        CmdResult::Cancel
+    }
+
+    fn on_preview_wires(&mut self, pt: DVec3) -> Vec<WireModel> {
+        let mut wires = Vec::new();
+        if let Some(first) = self.first_point {
+            // Rubber-band line connecting the first point to the cursor
+            wires.push(WireModel::solid_f64(
+                "mtp_rubber_band".to_string(),
+                vec![[first.x, first.y, first.z], [pt.x, pt.y, pt.z]],
+                WireModel::CYAN,
+                false,
+            ));
+            // Midpoint marker (AutoCAD style triangle glyph)
+            let mid = (first + pt) * 0.5;
+            let dist = (pt - first).length();
+            let s = (dist * 0.02).clamp(0.5, 10.0);
+            let h = s * 1.5;
+            let w = s * 1.0;
+            wires.push(WireModel::solid_f64(
+                "mtp_mid_triangle".to_string(),
+                vec![
+                    [mid.x, mid.y + h * (2.0 / 3.0), mid.z],
+                    [mid.x - w, mid.y - h * (1.0 / 3.0), mid.z],
+                    [mid.x + w, mid.y - h * (1.0 / 3.0), mid.z],
+                ],
+                WireModel::CYAN,
+                true,
+            ));
+        }
+        wires
+    }
+}
+
+inventory::submit!(CommandRegistration {
+    names: &["MTP", "M2P"],
+});
+
+
 /// Generic interactive front-end for a keyword command that operates on the
 /// current selection (CHPROP, ADJUST, XDATA, UNDERLAY, DRAWORDER…). If nothing
 /// is selected when it starts it first gathers a selection (Enter confirms),
@@ -1326,6 +1417,60 @@ pub enum CmdResult {
     ReplaceMany(Vec<(Handle, Vec<EntityType>)>, Vec<EntityType>),
     /// Replace several entities as one undo step while keeping the command active.
     ReplaceManyContinue(Vec<(Handle, Vec<EntityType>)>),
+    /// Add a persistent parametric constraint to the current scope's
+    /// `SketchConstraintSet` and trigger its
+    /// first solve; end the command. Unlike `ReplaceMany`/`CommitEntity`,
+    /// nothing here is geometry to add or replace directly — the host adds
+    /// the constraint record, then re-solves through `Scene::bump_entities`'s
+    /// existing chain (`refresh_sketch_constraints`) the same way any later
+    /// edit to these entities will.
+    AddSketchConstraint {
+        kind: crate::scene::sketch_constraints::ConstraintKind,
+        refs: Vec<crate::scene::sketch_constraints::SketchRef>,
+        /// The typed target for a dimensional kind (Distance/Angle/Radius) —
+        /// a literal number, or a named-parameter reference recognized by
+        /// `DistanceConstraintCommand`/`AngleConstraintCommand::
+        /// on_text_input` when the typed token matches a known parameter
+        /// name instead of parsing as a number); `None` for a purely
+        /// geometric kind.
+        driving_param: Option<crate::scene::named_parameters::DrivingValue>,
+        /// Undo-history label, e.g. `"Horizontal constraint"`.
+        label: &'static str,
+    },
+    /// Adds a Coincident constraint between the sub-entity points nearest
+    /// the two picked positions. The host resolves the raw points because
+    /// `CadCommand` has no document access.
+    AddCoincidentConstraint {
+        point_a: DVec3,
+        point_b: DVec3,
+        label: &'static str,
+    },
+    /// Add a persistent `CenterPoint`/`Midpoint`/`PointOnCurve` constraint
+    /// (`crate::modules::parametric::point_on_entity`) between one
+    /// picked point and `target`, a whole entity selected before the tool
+    /// ran. Like `AddCoincidentConstraint`, the host resolves `point` via
+    /// `sketch_constraints::nearest_sketch_point` (a `CadCommand` has no
+    /// document access) and, for `CenterPoint` specifically, addresses
+    /// `target` via its center marker rather than as a whole entity — see
+    /// `ConstraintKind::CenterPoint`'s own doc comment for why it's the
+    /// same solve as `Coincident`/`Concentric` under a different DWG-native
+    /// class name.
+    AddPointOnEntityConstraint {
+        point: DVec3,
+        target: Handle,
+        kind: crate::scene::sketch_constraints::ConstraintKind,
+        label: &'static str,
+    },
+    /// Add a persistent `EqualDistance` constraint
+    /// (`crate::modules::parametric::equal_distance`): the distance
+    /// between `points[0]`/`points[1]` equals the distance between
+    /// `points[2]`/`points[3]`. The host resolves each point via
+    /// `sketch_constraints::nearest_sketch_point`, same reasoning as
+    /// `AddCoincidentConstraint`.
+    AddEqualDistanceConstraint {
+        points: [DVec3; 4],
+        label: &'static str,
+    },
     /// Attach one smart centre mark to a newly selected circular source.
     ReassociateCenterMark {
         target: Handle,
@@ -1393,15 +1538,17 @@ pub enum CmdResult {
     BreakEntity { handle: Handle, p1: DVec3, p2: DVec3 },
     /// Attempt to join the given entities into fewer merged entities.
     JoinEntities(Vec<Handle>),
+    /// Join candidates into an explicitly selected source.
+    JoinToSource { source: Handle, handles: Vec<Handle> },
     /// Apply a polyline-edit operation to one entity; keep command active.
     PeditOp {
         handle: Handle,
         op: crate::modules::draw::modify::pedit::PeditOp,
     },
     /// Place Point entities at N equal intervals along the entity.
-    DivideEntity { handle: Handle, n: usize },
+    DivideEntity { handle: Handle, n: usize, marker: Option<CurveMarker> },
     /// Place Point entities at `segment_length` intervals along the entity.
-    MeasureEntity { handle: Handle, segment_length: f64 },
+    MeasureEntity { handle: Handle, segment_length: f64, pick_point: DVec3, marker: Option<CurveMarker> },
     /// Extend/trim a Line or Arc by the given mode; end command.
     LengthenEntity {
         handle: Handle,
@@ -1518,6 +1665,11 @@ pub enum CmdResult {
         taper_angle: f64,
         color: [f32; 4],
     },
+    /// Thicken one or more persistent surface bodies without consuming them.
+    ThickenEntities {
+        handles: Vec<Handle>,
+        distance: f64,
+    },
     /// Resolve a profile, bounded area, or solid face for PRESSPULL.
     PresspullPick {
         handle: Option<Handle>,
@@ -1624,6 +1776,8 @@ pub enum CmdResult {
     UndoDocument,
     /// Sets the TEXTEDITMODE system variable and ends the command.
     SetTexteditMode(bool),
+    /// Return a resolved point back to a suspended parent command (e.g. MTP / M2P).
+    ReturnPoint(DVec3),
 }
 
 /// What kind of value the active command is currently asking for. Drives
@@ -1850,7 +2004,29 @@ impl InputKind {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct CurveMarker {
+    pub block: String,
+    pub align: bool,
+    pub plane: WorkingPlane,
+}
+
+
+/// Current screen projection and configured aperture for point-feature picking.
+#[derive(Clone, Copy)]
+pub struct PointPickContext {
+    pub view: glam::Mat4,
+    pub eye: DVec3,
+    pub bounds: iced::Rectangle,
+    pub aperture_px: f32,
+}
+
 pub trait CadCommand: Send {
+    /// Preserve source appearance for commands that extract existing entities.
+    fn preserve_commit_style(&self) -> bool { false }
+    fn nested_copy_bind_setting(&self) -> Option<bool> { None }
+    /// Symbol localization is committed together with the extracted entities.
+    fn nested_copy_symbol_names(&self) -> Option<&acadrust::nested_copy::NestedCopySymbolNames> { None }
     /// Keep the layer already carried by entities committed by this command
     /// instead of replacing it with the current drawing layer.
     fn preserve_commit_layer(&self) -> bool {
@@ -1916,6 +2092,12 @@ pub trait CadCommand: Send {
 
     /// Called when the user left-clicks in the viewport (point pick).
     fn on_point(&mut self, pt: DVec3) -> CmdResult;
+
+    /// Opt in only while a point input selects an existing point feature.
+    fn wants_point_pick_context(&self) -> bool { false }
+
+    /// Refreshed for each point input so zoom and viewport changes are reflected.
+    fn set_point_pick_context(&mut self, _context: Option<PointPickContext>) {}
 
     /// Called when the user presses Enter (finalize / next option).
     fn on_enter(&mut self) -> CmdResult;
@@ -2197,6 +2379,9 @@ pub trait CadCommand: Send {
         CmdResult::Cancel
     }
 
+    /// Exclude locked-layer entities from injected selection geometry.
+    fn selection_entities_exclude_locked(&self) -> bool { false }
+
     fn inject_selection_entities(&mut self, _entities: Vec<SelectionEntity>) {}
 
     fn area_preview_regions(&self) -> Option<Vec<AreaPreviewRegion>> {
@@ -2379,4 +2564,77 @@ pub fn all_registered_command_names() -> Vec<&'static str> {
         .into_iter()
         .flat_map(|r| r.names.iter().copied())
         .collect()
+}
+
+#[cfg(test)]
+mod constraint_registry_tests {
+    use super::*;
+
+    /// Ensures every constraint command remains discoverable by autocomplete
+    /// and command listings.
+    #[test]
+    fn every_constraint_command_is_in_the_autocomplete_registry() {
+        let names = all_registered_command_names();
+        for id in [
+            "CCONSTRAINT",
+            "EDCONSTRAINT",
+            "CPCONSTRAINT",
+            "MPCONSTRAINT",
+            "OCCONSTRAINT",
+            "HCONSTRAINT",
+            "VCONSTRAINT",
+            "PCONSTRAINT",
+            "QCONSTRAINT",
+            "ECONSTRAINT",
+            "TCONSTRAINT",
+            "NCONSTRAINT",
+            "NRCONSTRAINT",
+            "LCONSTRAINT",
+            "FXCONSTRAINT",
+            "SYCONSTRAINT",
+            "DCONSTRAINT",
+            "ACONSTRAINT",
+        ] {
+            assert!(names.contains(&id), "{id} is missing from the command registry");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mid2point_command() {
+        let mut cmd = Mid2PointCommand::new();
+        assert_eq!(cmd.name(), "MTP");
+        assert_eq!(cmd.prompt(), "_mtp Specify first point of mid:");
+
+        // First point
+        let res = cmd.on_point(DVec3::new(10.0, 20.0, 0.0));
+        assert!(matches!(res, CmdResult::NeedPoint));
+        assert_eq!(cmd.prompt(), "_mtp Specify second point of mid:");
+
+        // Preview wires
+        let wires = cmd.on_preview_wires(DVec3::new(30.0, 40.0, 0.0));
+        assert!(!wires.is_empty());
+
+        // Second point
+        let res = cmd.on_point(DVec3::new(30.0, 40.0, 0.0));
+        assert!(matches!(res, CmdResult::ReturnPoint(mid) if mid == DVec3::new(20.0, 30.0, 0.0)));
+    }
+
+    #[test]
+    fn test_mid2point_cancel() {
+        let mut cmd = Mid2PointCommand::new();
+        assert!(matches!(cmd.on_escape(), CmdResult::Cancel));
+        assert!(matches!(cmd.on_enter(), CmdResult::Cancel));
+    }
+
+    #[test]
+    fn test_mtp_registered() {
+        let names = all_registered_command_names();
+        assert!(names.contains(&"MTP"));
+        assert!(names.contains(&"M2P"));
+    }
 }

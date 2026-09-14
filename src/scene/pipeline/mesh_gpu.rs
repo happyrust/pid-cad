@@ -568,6 +568,23 @@ struct MeshSurfaceParams {
     flags: [u32; 4],
 }
 
+fn valid_rgba_size(width: u32, height: u32, pixels: &[u8]) -> bool {
+    width > 0 && height > 0
+        && (width as usize).checked_mul(height as usize).and_then(|size| size.checked_mul(4)) == Some(pixels.len())
+}
+
+fn downscale_rgba_to_limit(width: u32, height: u32, rgba: &[u8], limit: u32) -> Option<(u32, u32, Vec<u8>)> {
+    if limit == 0 || !valid_rgba_size(width, height, rgba) {
+        return None;
+    }
+    let buffer = image::RgbaImage::from_raw(width, height, rgba.to_vec())?;
+    let scale = (limit as f64 / width.max(height) as f64).min(1.0);
+    let new_width = ((width as f64 * scale).round() as u32).clamp(1, limit);
+    let new_height = ((height as f64 * scale).round() as u32).clamp(1, limit);
+    let resized = image::imageops::resize(&buffer, new_width, new_height, image::imageops::FilterType::Triangle);
+    Some((new_width, new_height, resized.into_raw()))
+}
+
 fn upload_rgba_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -576,9 +593,22 @@ fn upload_rgba_texture(
     fallback: [u8; 4],
     srgb: bool,
 ) -> wgpu::TextureView {
-    let (width, height, pixels) = image.map_or((1, 1, fallback.as_slice()), |image| {
-        (image.width, image.height, image.rgba.as_slice())
-    });
+    let limit = device.limits().max_texture_dimension_2d.max(1);
+    let resized;
+    let image = image.filter(|image| valid_rgba_size(image.width, image.height, &image.rgba));
+    let (width, height, pixels): (u32, u32, &[u8]) = match image {
+        Some(image) if image.width > limit || image.height > limit => {
+            match downscale_rgba_to_limit(image.width, image.height, &image.rgba, limit) {
+                Some((w, h, buf)) => {
+                    resized = buf;
+                    (w, h, resized.as_slice())
+                }
+                None => (1, 1, fallback.as_slice()),
+            }
+        }
+        Some(image) => (image.width, image.height, image.rgba.as_slice()),
+        None => (1, 1, fallback.as_slice()),
+    };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
@@ -1007,7 +1037,26 @@ fn material_key(
     key[34] = material.final_gather as u32;
     key[35] = material.color_bleed_scale.to_bits();
     key[36] = material.advanced_data_present as u32;
+    let mapper = material_mapper_key(material);
+    key[37] = mapper as u32;
+    key[38] = (mapper >> 32) as u32;
+    key[39] = material.mapper.is_some() as u32;
     MaterialBatchKey(key)
+}
+
+fn material_mapper_key(
+    material: &crate::scene::model::material_model::MeshMaterial,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let Some(mapper) = material.mapper else {
+        return 0;
+    };
+    let mut hasher = rustc_hash::FxHasher::default();
+    mapper.origin.map(f64::to_bits).hash(&mut hasher);
+    for row in mapper.inverse_basis {
+        row.map(f64::to_bits).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn morton_axis(mut value: u32) -> u64 {
@@ -1167,6 +1216,62 @@ fn material_has_textures(
     })
 }
 
+fn material_has_box_projection(
+    material: Option<&crate::scene::model::material_model::MeshMaterial>,
+) -> bool {
+    material.is_some_and(|material| {
+        [
+            &material.diffuse_map,
+            &material.specular_map,
+            &material.reflection_map,
+            &material.opacity_map,
+            &material.bump_map,
+            &material.refraction_map,
+            &material.normal_map,
+        ]
+        .into_iter()
+        .any(|map| map.image.is_some() && map.projection == 2)
+    })
+}
+
+fn triangle_mapping_normal(mesh: &MeshModel, triangle: &[u32]) -> [f32; 3] {
+    let vertex = |corner: usize| {
+        let index = triangle[corner] as usize;
+        (
+            mesh.verts[index],
+            mesh.verts_low.get(index).copied().unwrap_or([0.0; 3]),
+        )
+    };
+    let (a, a_low) = vertex(0);
+    let (b, b_low) = vertex(1);
+    let (c, c_low) = vertex(2);
+    let ab = [
+        (b[0] - a[0]) + (b_low[0] - a_low[0]),
+        (b[1] - a[1]) + (b_low[1] - a_low[1]),
+        (b[2] - a[2]) + (b_low[2] - a_low[2]),
+    ];
+    let ac = [
+        (c[0] - a[0]) + (c_low[0] - a_low[0]),
+        (c[1] - a[1]) + (c_low[1] - a_low[1]),
+        (c[2] - a[2]) + (c_low[2] - a_low[2]),
+    ];
+    let normal = [
+        ab[1] * ac[2] - ab[2] * ac[1],
+        ab[2] * ac[0] - ab[0] * ac[2],
+        ab[0] * ac[1] - ab[1] * ac[0],
+    ];
+    let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2])
+        .sqrt();
+    if length > f32::EPSILON {
+        [normal[0] / length, normal[1] / length, normal[2] / length]
+    } else {
+        mesh.normals
+            .get(triangle[0] as usize)
+            .copied()
+            .unwrap_or([0.0, 1.0, 0.0])
+    }
+}
+
 fn build_instanced_chunks(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1185,9 +1290,10 @@ fn build_instanced_chunks(
     let compact_vertices = !material_has_textures(material);
     let material_identity = if material_has_textures(material) {
         material.map_or(0, |material| {
-            material
+            let handle = material
                 .handle
-                .map_or(material as *const _ as usize as u64, |handle| handle.value())
+                .map_or(material as *const _ as usize as u64, |handle| handle.value());
+            handle ^ material_mapper_key(material).rotate_left(17)
         })
     } else {
         0
@@ -1199,7 +1305,8 @@ fn build_instanced_chunks(
     };
     let budget = super::gpu_budget::buffer_budget(device);
     let needs_wire_vertices = first.include_edges && source.edge_verts.is_empty();
-    let split_geometry = mesh
+    let split_geometry = (first.include_faces && material_has_box_projection(material))
+        || mesh
         .verts
         .len()
         .saturating_mul(std::mem::size_of::<MeshVertex>())
@@ -1227,21 +1334,24 @@ fn build_instanced_chunks(
 
     let has_normals = mesh.normals.len() == mesh.verts.len();
     let bounds = mesh_bounds(mesh);
-    let vertex = |index: usize| {
+    let vertex = |index: usize, mapping_normal: Option<[f32; 3]>| {
         let normal = if has_normals {
             mesh.normals[index]
         } else {
             [0.0, 1.0, 0.0]
         };
+        let mapping_normal = mapping_normal.unwrap_or(normal);
         let position = mesh.verts[index];
         let position_low = mesh.verts_low.get(index).copied().unwrap_or([0.0; 3]);
         let uvs = material_uvs(
             material,
             position,
-            normal,
+            position_low,
+            mapping_normal,
             bounds,
             position,
-            normal,
+            position_low,
+            mapping_normal,
             bounds,
         );
         MeshVertex {
@@ -1259,7 +1369,7 @@ fn build_instanced_chunks(
     };
     let verts: Vec<_> =
         if !split_geometry && (shared_vertex_buffer.is_none() || needs_wire_vertices) {
-            (0..mesh.verts.len()).map(vertex).collect()
+            (0..mesh.verts.len()).map(|index| vertex(index, None)).collect()
         } else {
             Vec::new()
         };
@@ -1368,10 +1478,16 @@ fn build_instanced_chunks(
             .max(1);
         if first.include_faces || needs_wire_vertices {
             for triangles in first.indices.chunks(max_triangles * 3) {
-                let vertices: Vec<_> = triangles
-                    .iter()
-                    .map(|index| vertex(*index as usize))
-                    .collect();
+                let mut vertices = Vec::with_capacity(triangles.len());
+                for triangle in triangles.chunks_exact(3) {
+                    let mapping_normal = material_has_box_projection(material)
+                        .then(|| triangle_mapping_normal(mesh, triangle));
+                    vertices.extend(
+                        triangle
+                            .iter()
+                            .map(|index| vertex(*index as usize, mapping_normal)),
+                    );
+                }
                 let indices: Vec<_> = (0..vertices.len() as u32).collect();
                 let wire_indices: Vec<_> = if needs_wire_vertices {
                     indices
@@ -1562,24 +1678,55 @@ fn material_is_transparent(
         || material.is_some_and(|material| {
             material.translucence > 0.0
                 || (material.channel_flags as u32 & 0x08 != 0
-                    && material.opacity_map.image.is_some())
+                    && material
+                        .opacity_map
+                        .image
+                        .as_deref()
+                        .is_some_and(|image| !opacity_image_is_binary_cutout(image)))
         })
+}
+
+fn opacity_image_is_binary_cutout(
+    image: &crate::scene::model::material_model::MaterialImage,
+) -> bool {
+    let mut pixels = image.rgba.chunks_exact(4);
+    !image.rgba.is_empty()
+        && pixels.all(|pixel| matches!(pixel[0], 0 | 255))
+        && pixels.remainder().is_empty()
 }
 
 fn material_map_uv(
     map: &crate::scene::model::material_model::MeshTextureMap,
+    mapper: Option<&crate::scene::model::material_model::MeshMaterialMapper>,
     local_position: [f32; 3],
+    local_position_low: [f32; 3],
     local_normal: [f32; 3],
     local_bounds: [f32; 6],
     model_position: [f32; 3],
+    model_position_low: [f32; 3],
     model_normal: [f32; 3],
     model_bounds: [f32; 6],
 ) -> [f32; 2] {
-    let (mut position, normal, bounds) = if map.auto_transform & 4 != 0 {
-        (model_position, model_normal, model_bounds)
+    let (mut position, position_low, mut normal, mut bounds) = if map.auto_transform & 4 != 0 {
+        (
+            model_position,
+            model_position_low,
+            model_normal,
+            model_bounds,
+        )
     } else {
-        (local_position, local_normal, local_bounds)
+        (
+            local_position,
+            local_position_low,
+            local_normal,
+            local_bounds,
+        )
     };
+    if let Some(mapper) = mapper {
+        position = mapper.map_position(position, position_low);
+        normal = mapper.map_normal(normal);
+        bounds = mapper.map_bounds(bounds);
+    }
     if map.auto_transform & 2 != 0 {
         for axis in 0..3 {
             let extent = bounds[axis + 3] - bounds[axis];
@@ -1629,9 +1776,11 @@ fn material_map_uv(
 fn material_uvs(
     material: Option<&crate::scene::model::material_model::MeshMaterial>,
     local_position: [f32; 3],
+    local_position_low: [f32; 3],
     local_normal: [f32; 3],
     local_bounds: [f32; 6],
     model_position: [f32; 3],
+    model_position_low: [f32; 3],
     model_normal: [f32; 3],
     model_bounds: [f32; 6],
 ) -> [[f32; 2]; 7] {
@@ -1644,10 +1793,13 @@ fn material_uvs(
         } else {
             material_map_uv(
                 map,
+                material.mapper.as_ref(),
                 local_position,
+                local_position_low,
                 local_normal,
                 local_bounds,
                 model_position,
+                model_position_low,
                 model_normal,
                 model_bounds,
             )
@@ -2038,7 +2190,9 @@ pub fn build_mesh_batch_filtered(
             .visual_style
             .as_ref()
             .map_or(part.display_color, |style| style.edge_color(part.display_color));
-        let vtx = |vi: usize| {
+        let vtx = |vi: usize,
+                   local_mapping_normal: Option<[f32; 3]>,
+                   model_mapping_normal: Option<[f32; 3]>| {
             let normal = if has_normals {
                 mesh.normals[vi]
             } else {
@@ -2049,6 +2203,11 @@ pub fn build_mesh_batch_filtered(
                 .get(vi)
                 .copied()
                 .unwrap_or(mesh.verts[vi]);
+            let local_position_low = uv_mesh
+                .verts_low
+                .get(vi)
+                .copied()
+                .unwrap_or_else(|| mesh.verts_low.get(vi).copied().unwrap_or([0.0; 3]));
             let local_normal = uv_mesh
                 .normals
                 .get(vi)
@@ -2057,10 +2216,12 @@ pub fn build_mesh_batch_filtered(
             let uv = material_uvs(
                 material,
                 local_position,
-                local_normal,
+                local_position_low,
+                local_mapping_normal.unwrap_or(local_normal),
                 local_bounds,
                 mesh.verts[vi],
-                normal,
+                mesh.verts_low.get(vi).copied().unwrap_or([0.0; 3]),
+                model_mapping_normal.unwrap_or(normal),
                 model_bounds,
             );
             MeshVertex {
@@ -2176,7 +2337,8 @@ pub fn build_mesh_batch_filtered(
 
         // A single mesh larger than a whole chunk: emit as triangle-soup
         // sub-chunks (corners expanded, no vertex sharing) so each buffer fits.
-        if mesh.verts.len() > max_verts || mesh_tris > max_tris {
+        let box_projected = part.include_faces && material_has_box_projection(material);
+        if mesh.verts.len() > max_verts || mesh_tris > max_tris || box_projected {
             if !verts.is_empty() || !edge_verts.is_empty() {
                 chunks.push(make_chunk(
                     device,
@@ -2214,10 +2376,26 @@ pub fn build_mesh_batch_filtered(
                 let (mut sv, mut si, mut swi) = (Vec::new(), Vec::new(), Vec::new());
                 for tri in t..end {
                     let ix = &part.indices[tri * 3..tri * 3 + 3];
+                    let local_mapping_normal =
+                        box_projected.then(|| triangle_mapping_normal(uv_mesh, ix));
+                    let model_mapping_normal =
+                        box_projected.then(|| triangle_mapping_normal(mesh, ix));
                     let b = sv.len() as u32;
-                    sv.push(vtx(ix[0] as usize));
-                    sv.push(vtx(ix[1] as usize));
-                    sv.push(vtx(ix[2] as usize));
+                    sv.push(vtx(
+                        ix[0] as usize,
+                        local_mapping_normal,
+                        model_mapping_normal,
+                    ));
+                    sv.push(vtx(
+                        ix[1] as usize,
+                        local_mapping_normal,
+                        model_mapping_normal,
+                    ));
+                    sv.push(vtx(
+                        ix[2] as usize,
+                        local_mapping_normal,
+                        model_mapping_normal,
+                    ));
                     if part.include_faces {
                         si.extend_from_slice(&[b, b + 1, b + 2]);
                     }
@@ -2329,7 +2507,7 @@ pub fn build_mesh_batch_filtered(
         }
         let base = verts.len() as u32;
         for i in 0..mesh.verts.len() {
-            verts.push(vtx(i));
+            verts.push(vtx(i, None, None));
         }
         if part.include_faces {
             let fill = if is_transp { &mut transp_indices } else { &mut indices };
@@ -2425,4 +2603,112 @@ pub fn build_mesh_batch_filtered(
         );
     }
     (chunks, total_tris)
+}
+
+#[cfg(test)]
+mod texture_limit_tests {
+    use super::{downscale_rgba_to_limit, opacity_image_is_binary_cutout};
+    use crate::scene::model::material_model::MaterialImage;
+    use std::sync::Arc;
+
+    #[test]
+    fn binary_opacity_image_uses_cutout_rendering() {
+        let image = MaterialImage {
+            width: 2,
+            height: 1,
+            rgba: Arc::new(vec![0, 0, 0, 255, 255, 255, 255, 255]),
+            path: String::new(),
+        };
+        assert!(opacity_image_is_binary_cutout(&image));
+
+        let blended = MaterialImage {
+            rgba: Arc::new(vec![127, 127, 127, 255]),
+            width: 1,
+            height: 1,
+            path: String::new(),
+        };
+        assert!(!opacity_image_is_binary_cutout(&blended));
+    }
+
+    #[test]
+    fn object_mapped_uv_is_stable_at_large_coordinates() {
+        let map = crate::scene::model::material_model::MeshTextureMap::default();
+        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let local_mapper = crate::scene::model::material_model::MeshMaterialMapper {
+            origin: [1.0, 2.0, 3.0],
+            inverse_basis: identity,
+            normal_basis: identity,
+        };
+        let local = super::material_map_uv(
+            &map,
+            Some(&local_mapper),
+            [3.0, 4.0, 5.0],
+            [0.0; 3],
+            [0.0, 0.0, 1.0],
+            [1.0, 2.0, 3.0, 11.0, 12.0, 13.0],
+            [3.0, 4.0, 5.0],
+            [0.0; 3],
+            [0.0, 0.0, 1.0],
+            [1.0, 2.0, 3.0, 11.0, 12.0, 13.0],
+        );
+        let shifted_mapper = crate::scene::model::material_model::MeshMaterialMapper {
+            origin: [1_200_001.0, -799_998.0, 3.0],
+            inverse_basis: identity,
+            normal_basis: identity,
+        };
+        let shifted = super::material_map_uv(
+            &map,
+            Some(&shifted_mapper),
+            [1_200_003.0, -799_996.0, 5.0],
+            [0.0; 3],
+            [0.0, 0.0, 1.0],
+            [1_200_001.0, -799_998.0, 3.0, 1_200_011.0, -799_988.0, 13.0],
+            [1_200_003.0, -799_996.0, 5.0],
+            [0.0; 3],
+            [0.0, 0.0, 1.0],
+            [1_200_001.0, -799_998.0, 3.0, 1_200_011.0, -799_988.0, 13.0],
+        );
+        assert_eq!(local, shifted);
+    }
+
+    #[test]
+    fn downscale_keeps_both_dimensions_within_the_limit() {
+        // A wide-and-short image: the limit is only crossed by width, but
+        // both dimensions must come out <= limit and aspect ratio preserved.
+        let (w, h) = (500u32, 10u32);
+        let rgba = vec![0u8; (w * h * 4) as usize];
+        let (new_w, new_h, buf) = downscale_rgba_to_limit(w, h, &rgba, 200).expect("well-formed input must resize");
+        assert!(new_w <= 200 && new_h <= 200, "both dimensions must respect the limit, got {new_w}x{new_h}");
+        assert_eq!(buf.len(), (new_w * new_h * 4) as usize, "the returned buffer must match its reported dimensions");
+        // Aspect ratio 50:1 should be preserved within rounding.
+        let ratio = new_w as f64 / new_h as f64;
+        assert!((ratio - 50.0).abs() < 1.0, "expected aspect ratio near 50:1, got {ratio}");
+    }
+
+    #[test]
+    fn downscale_handles_a_square_image_over_the_limit() {
+        let (w, h) = (300u32, 300u32);
+        let rgba = vec![255u8; (w * h * 4) as usize];
+        let (new_w, new_h, buf) = downscale_rgba_to_limit(w, h, &rgba, 128).expect("well-formed input must resize");
+        assert_eq!(new_w, 128);
+        assert_eq!(new_h, 128);
+        assert_eq!(buf.len(), (128 * 128 * 4) as usize);
+    }
+
+    #[test]
+    fn downscale_rejects_a_buffer_whose_length_does_not_match_its_dimensions() {
+        // Corrupt/mismatched input (audit's "validate decoded byte length" ask):
+        // must fail cleanly, not panic or silently misread the buffer.
+        let rgba = vec![0u8; 10];
+        assert!(downscale_rgba_to_limit(1000, 1000, &rgba, 512).is_none());
+    }
+    #[test]
+    fn malformed_material_images_are_rejected_even_below_the_texture_limit() {
+        for (width, height, pixels) in [(0, 1, vec![]), (1, 0, vec![]), (1, 1, vec![0; 3]), (1, 1, vec![0; 5])] {
+            assert!(!super::valid_rgba_size(width, height, &pixels));
+            assert!(downscale_rgba_to_limit(width, height, &pixels, 16).is_none());
+        }
+        assert!(downscale_rgba_to_limit(1, 1, &[0; 4], 0).is_none());
+    }
+
 }

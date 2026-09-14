@@ -363,6 +363,14 @@ impl CommandLine {
         }
         self.push(EntryKind::Error, text);
     }
+    /// Append a warning about the session that no command caused (the
+    /// renderer fell back to the CPU, say). Styled like an error so it is
+    /// seen, but it must not touch `last_error` / `error_revision`:
+    /// automation reads those to decide whether the command it just ran
+    /// failed, and a warning is not a failed command.
+    pub fn push_warning(&mut self, msg: &str) {
+        self.push(EntryKind::Error, format!("*{}*  {msg}", t!("Warning")));
+    }
     pub fn push_info(&mut self, msg: &str) {
         let text = if msg.starts_with("i  ") {
             msg.to_string()
@@ -849,10 +857,10 @@ impl CommandLine {
                     .align_y(iced::Center),
             )
             .width(Length::Fill)
-            .padding([2, 6]);
+            .padding([2, 8]);
             let panel = container(column![header, log])
                 .width(Length::Fill)
-                .padding([4, 8]);
+                .padding(Padding { top: 2.0, right: 8.0, bottom: 4.0, left: 8.0 });
             let resize = iced::widget::mouse_area(
                 container(crate::ui::icons::themed_primary(
                     crate::ui::icons::RESIZE,
@@ -1048,6 +1056,18 @@ mod tests {
             .iter()
             .map(|(a, c)| (a.to_string(), c.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn a_warning_is_shown_without_counting_as_a_failed_command() {
+        let mut line = CommandLine::new();
+        let revision = line.error_revision;
+        line.push_warning("GPU unavailable");
+        let last = line.history.last().expect("warning must be appended");
+        assert_eq!(last.kind, super::EntryKind::Error);
+        assert!(last.text.ends_with("GPU unavailable"), "{}", last.text);
+        assert_eq!(line.error_revision, revision);
+        assert!(line.last_error.is_none());
     }
 
     #[test]

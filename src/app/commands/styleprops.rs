@@ -3,6 +3,10 @@ use super::*;
 impl OpenCADStudio {
     pub(super) fn dispatch_styleprops(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         match cmd {
+            "CETRANSPARENCY" => return self.dispatch_styleprops("SETVAR CETRANSPARENCY", i),
+            cmd if cmd.starts_with("CETRANSPARENCY ") => {
+                return self.dispatch_styleprops(&format!("SETVAR {cmd}"), i);
+            }
             "FRAMES0" => return self.dispatch_styleprops("SETVAR FRAME 0", i),
             "FRAMES1" => return self.dispatch_styleprops("SETVAR FRAME 1", i),
             "FRAMES2" => return self.dispatch_styleprops("SETVAR FRAME 2", i),
@@ -645,98 +649,221 @@ impl OpenCADStudio {
             // ── SETBYLAYER — clear color/linetype/lineweight overrides ────
             // Resets the selected entities' direct property overrides back to
             // ByLayer so they follow their layer again.
-            "SETBYLAYER" => {
-                let handles: Vec<_> = self.tabs[i]
+            "SETBYLAYERMODE" => {
+                let command = crate::modules::draw::modify::setbylayer::ModeCommand;
+                self.command_line.push_info(&command.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(command));
+            }
+            value if value.starts_with("SETBYLAYERMODE ") => {
+                if let Ok(mode) = value.trim_start_matches("SETBYLAYERMODE ").trim().parse::<u8>() {
+                    crate::modules::draw::modify::setbylayer::set_mode(mode);
+                } else { self.command_line.push_error("SETBYLAYERMODE requires an integer from 0 to 255."); }
+            }
+            "SETBYLAYER" | "-SETBYLAYER" => {
+                let command = crate::modules::draw::modify::setbylayer::SetByLayerCommand::new(
+                    self.tabs[i].scene.selected.iter().copied().collect(),
+                );
+                self.command_line.push_info(&command.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(command));
+            }
+            cmd if cmd.starts_with("SETBYLAYER_APPLY ") => {
+                let flags: Vec<_> = cmd.split_whitespace().skip(1).collect();
+                if flags.len() != 2 || flags.iter().any(|flag| !matches!(*flag, "0" | "1")) {
+                    return Some(Task::none());
+                }
+                let mask = crate::modules::draw::modify::setbylayer::mode();
+                let change_byblock = flags[0] == "1";
+                let include_blocks = flags[1] == "1";
+                let mut handles: Vec<_> = self.tabs[i]
                     .scene
                     .selected_entities()
                     .into_iter()
                     .map(|(h, _)| h)
                     .filter(|handle| !self.tabs[i].scene.is_layer_locked(*handle))
                     .collect();
+                if include_blocks {
+                    let mut visited: std::collections::HashSet<_> = handles.iter().copied().collect();
+                    let mut index = 0;
+                    while index < handles.len() {
+                        let children = match self.tabs[i].scene.document.get_entity(handles[index]) {
+                            Some(acadrust::EntityType::Insert(insert)) => self.tabs[i].scene.document
+                                .block_records.get(&insert.block_name)
+                                .map(|block| block.entity_handles.clone()).unwrap_or_default(),
+                            _ => Vec::new(),
+                        };
+                        for child in children {
+                            if visited.insert(child) && !self.tabs[i].scene.is_layer_locked(child) {
+                                handles.push(child);
+                            }
+                        }
+                        index += 1;
+                    }
+                }
                 if handles.is_empty() {
                     self.command_line
                         .push_error(crate::t!("SETBYLAYER: select entities first.").as_ref());
                 } else {
+                    let has_changes = handles.iter().any(|handle| {
+                        self.tabs[i].scene.document.get_entity(*handle).is_some_and(|entity| {
+                            let mut common = entity.common().clone();
+                            crate::modules::draw::modify::setbylayer::apply_mask(
+                                &mut common, mask, change_byblock,
+                            )
+                        })
+                    });
+                    if !has_changes {
+                        self.command_line.push_output(
+                            crate::t!("SETBYLAYER: no properties required changes.").as_ref(),
+                        );
+                        return Some(Task::none());
+                    }
                     self.push_undo_snapshot(i, "SETBYLAYER");
-                    let mut changed = 0usize;
+                    let mut changed = Vec::new();
                     for handle in &handles {
                         if let Some(entity) = self.tabs[i].scene.document.get_entity_mut(*handle) {
-                            let common = entity.common_mut();
-                            common.color = acadrust::types::Color::ByLayer;
-                            common.color_name = None;
-                            common.color_book_handle = None;
-                            common.linetype = "ByLayer".to_string();
-                            common.line_weight = acadrust::types::LineWeight::ByLayer;
-                            changed += 1;
+                            if crate::modules::draw::modify::setbylayer::apply_mask(
+                                entity.common_mut(), mask, change_byblock,
+                            ) {
+                                changed.push(*handle);
+                            }
                         }
                     }
                     self.tabs[i].dirty = true;
-                    let changes: Vec<_> = handles
-                        .into_iter()
+                    let changes: Vec<_> = changed
+                        .iter()
+                        .copied()
                         .map(|handle| (handle, crate::scene::ChangeKind::Modified))
                         .collect();
                     self.tabs[i].scene.bump_entities(&changes);
+                    self.refresh_properties();
                     self.command_line.push_output(crate::tf!(
-                        "SETBYLAYER: reset {changed} entity/entities to ByLayer."
+                        "SETBYLAYER: reset {} entity/entities to ByLayer.",
+                        changed.len()
                     ).as_ref());
                 }
             }
 
-            // ── OVERKILL — delete duplicate (identical) objects ──────────
-            // Removes objects that are identical in geometry AND properties to
-            // another object (compared with the handle ignored). Operates on
-            // the current selection, or the whole drawing when nothing is
-            // selected. Conservative: only exact duplicates are removed.
-            "OVERKILL" => {
-                use acadrust::Handle;
-                let selected: std::collections::HashSet<u64> = self.tabs[i]
-                    .scene
-                    .selected_entities()
-                    .into_iter()
-                    .map(|(h, _)| h.value())
-                    .collect();
-                // Capture (handle, type-name, handle-normalized clone) for each
-                // candidate while the document is borrowed immutably.
-                let candidates: Vec<(Handle, String, acadrust::EntityType)> = self.tabs[i]
-                    .scene
-                    .document
-                    .entities()
-                    .filter(|e| {
-                        (selected.is_empty() || selected.contains(&e.common().handle.value()))
-                            && !self.tabs[i].scene.is_layer_locked(e.common().handle)
-                    })
-                    .map(|e| {
-                        let key = crate::entities::names::dxf_name(e).to_string();
-                        let mut norm = e.clone();
-                        norm.common_mut().handle = Handle::NULL;
-                        (e.common().handle, key, norm)
-                    })
-                    .collect();
-                // Bucket by (type, layer) so only like objects are compared.
-                let mut kept: Vec<(String, acadrust::EntityType)> = Vec::new();
-                let mut dups: Vec<Handle> = Vec::new();
-                for (h, key, norm) in &candidates {
-                    let bucket = format!("{key}\u{0}{}", norm.common().layer);
-                    if kept.iter().any(|(b, e)| b == &bucket && e == norm) {
-                        dups.push(*h);
-                    } else {
-                        kept.push((bucket, norm.clone()));
+            // OVERKILL gathers objects, exposes cleanup settings, then applies one undo group.
+            "OVERKILL" | "-OVERKILL" => {
+                let handles=self.tabs[i].scene.selected_entities().iter().map(|(h,_)|*h).collect();
+                let command=crate::modules::draw::modify::overkill::OverkillCommand::new(handles);
+                self.command_line.push_info(&command.prompt());
+                self.tabs[i].active_cmd=Some(Box::new(command));
+            }
+            value if value.starts_with("OVERKILL_APPLY ") => {
+                use crate::modules::draw::modify::overkill::{normalized,optimize};
+                let values:Vec<_>=value.split_whitespace().skip(1).collect();
+                if values.len()!=6 { return Some(self.finish_dispatch(cmd)); }
+                let tolerance=values[0].parse::<f64>().unwrap_or(1e-6);
+                let ignore=values[1].parse::<u16>().unwrap_or(0);
+                let optimize_plines=values[2]=="1";
+                let overlap=values[3]=="1";
+                let end_to_end=values[4]=="1";
+                let preserve_associative=values[5]=="1";
+                let mut candidates:Vec<_>=self.tabs[i].scene.selected_entities().into_iter()
+                    .filter(|(h,e)|!self.tabs[i].scene.is_layer_locked(*h)
+                        && (!preserve_associative||e.common().reactors.is_empty()))
+                    .map(|(h,e)|(h,e.clone())).collect();
+                candidates.sort_by_key(|(h,_)|h.value());
+                let mut changed=std::collections::HashSet::new();
+                if optimize_plines { for (h,e) in &mut candidates {
+                    let before=e.clone(); optimize(e,tolerance); if *e!=before {changed.insert(*h);}
+                } }
+                let mut removed=std::collections::HashSet::new();
+                // Iterate to a fixed point: a bridge can join two previously disjoint intervals.
+                loop {
+                    let mut progress=false;
+                    for a in 0..candidates.len() {
+                        if removed.contains(&candidates[a].0) {continue;}
+                        for b in a+1..candidates.len() {
+                            if removed.contains(&candidates[b].0) {continue;}
+                            let left=normalized(&candidates[a].1,ignore);
+                            let right=normalized(&candidates[b].1,ignore);
+                            if left==right {
+                                removed.insert(candidates[b].0);progress=true;continue;
+                            }
+                            if overlap {
+                                let contained = |circle: &acadrust::entities::Circle, arc: &acadrust::entities::Arc| {
+                                    circle.common == arc.common && circle.thickness == arc.thickness
+                                        && cadkernel::space::arc_union::circle_contains_arc(
+                                            [circle.center.x,circle.center.y,circle.center.z],
+                                            [circle.normal.x,circle.normal.y,circle.normal.z],circle.radius,
+                                            cadkernel::space::arc_union::CircularArc { center:[arc.center.x,arc.center.y,arc.center.z],
+                                                normal:[arc.normal.x,arc.normal.y,arc.normal.z],radius:arc.radius,start:arc.start_angle,end:arc.end_angle })
+                                };
+                                match (&left,&right) {
+                                    (acadrust::EntityType::Circle(circle),acadrust::EntityType::Arc(arc)) if contained(circle,arc) => {
+                                        removed.insert(candidates[b].0);progress=true;continue;
+                                    }
+                                    (acadrust::EntityType::Arc(arc),acadrust::EntityType::Circle(circle)) if contained(circle,arc) => {
+                                        removed.insert(candidates[a].0);progress=true;break;
+                                    }
+                                    _ => {},
+                                }
+                            }
+                            if let (acadrust::EntityType::Arc(l),acadrust::EntityType::Arc(r))=(&left,&right) {
+                                use cadkernel::space::arc_union::{CircularArc,ArcUnionKind,circular_arc_union};
+                                if l.common!=r.common || l.thickness!=r.thickness {continue;}
+                                let arc=|v:&acadrust::entities::Arc|CircularArc{center:[v.center.x,v.center.y,v.center.z],normal:[v.normal.x,v.normal.y,v.normal.z],radius:v.radius,start:v.start_angle,end:v.end_angle};
+                                let Some(union)=circular_arc_union(arc(l),arc(r),tolerance) else {continue;};
+                                let allowed=match union.kind {ArcUnionKind::Duplicate=>true,ArcUnionKind::Overlap=>overlap,ArcUnionKind::EndToEnd=>end_to_end};
+                                if !allowed {continue;}
+                                if let acadrust::EntityType::Arc(source)=&candidates[a].1 {
+                                    let replacement=if union.full_circle {
+                                        let mut circle=acadrust::entities::Circle::new();
+                                        circle.common=source.common.clone();circle.center=source.center.clone();circle.normal=source.normal.clone();circle.radius=source.radius;circle.thickness=source.thickness;
+                                        acadrust::EntityType::Circle(circle)
+                                    } else {
+                                        let mut arc=source.clone();arc.start_angle=union.start;arc.end_angle=union.end;acadrust::EntityType::Arc(arc)
+                                    };
+                                    candidates[a].1=replacement;
+                                }
+                                changed.insert(candidates[a].0);removed.insert(candidates[b].0);progress=true;
+                                continue;
+                            }
+                            let (acadrust::EntityType::Line(l),acadrust::EntityType::Line(r))=(&left,&right)
+                                else {continue;};
+                            if l.common!=r.common||l.thickness!=r.thickness||l.normal!=r.normal {continue;}
+                            let point=|p:acadrust::types::Vector3|[p.x,p.y,p.z];
+                            let Some(union)=cadkernel::space::line_union(
+                                [point(l.start),point(l.end)],[point(r.start),point(r.end)],tolerance)
+                                else {continue;};
+                            let allowed=match union.kind {
+                                cadkernel::space::LineUnionKind::Duplicate=>true,
+                                cadkernel::space::LineUnionKind::Overlap=>overlap,
+                                cadkernel::space::LineUnionKind::EndToEnd=>end_to_end,
+                            };
+                            if !allowed {continue;}
+                            if let acadrust::EntityType::Line(line)=&mut candidates[a].1 {
+                                line.start=acadrust::types::Vector3::new(union.start[0],union.start[1],union.start[2]);
+                                line.end=acadrust::types::Vector3::new(union.end[0],union.end[1],union.end[2]);
+                            }
+                            changed.insert(candidates[a].0);removed.insert(candidates[b].0);progress=true;
+                        }
                     }
+                    if !progress {break;}
                 }
-                if dups.is_empty() {
-                    self.command_line
-                        .push_output(crate::t!("OVERKILL: no duplicate objects found.").as_ref());
+                if !changed.is_empty()||!removed.is_empty() {
+                    self.push_undo_snapshot(i,"OVERKILL");
+                    let updates:Vec<_>=candidates.into_iter().filter(|(h,_)|changed.contains(h)&&!removed.contains(h)).collect();
+                    let updated_count = updates.len();
+                    let mut changes = Vec::new();
+                    for (handle, entity) in updates {
+                        if let Some(target) = self.tabs[i].scene.document.get_entity_mut(handle) {
+                            *target = entity;
+                            changes.push((handle, crate::scene::ChangeKind::Modified));
+                        }
+                    }
+                    self.tabs[i].scene.bump_entities(&changes);
+                    let mut handles:Vec<_>=removed.iter().copied().collect();
+                    handles.sort_by_key(|handle| handle.value());
+                    self.tabs[i].scene.erase_entities(&handles);
+                    self.tabs[i].dirty=true;self.refresh_properties();
+                    self.command_line.push_output(&format!("OVERKILL: removed {} objects; updated {} objects.",removed.len(),updated_count));
                 } else {
-                    let n = dups.len();
-                    self.push_undo_snapshot(i, "OVERKILL");
-                    self.tabs[i].scene.erase_entities(&dups);
-                    self.tabs[i].dirty = true;
-                    self.refresh_properties();
-                    self.command_line
-                        .push_output(crate::tf!("OVERKILL: deleted {n} duplicate object(s).").as_ref());
+                    self.command_line.push_output("OVERKILL: no objects required changes.");
                 }
             }
-
             // ── PICKADD / PICKDRAG — selection UX (#226, app settings) ───
             // Bare form reports; `<name> 0|1` sets and persists. Defaults keep
             // today's behaviour (PICKADD 1, PICKDRAG 0).
@@ -918,6 +1045,7 @@ impl OpenCADStudio {
                     | "GRIPCOLOR"
                     | "GRIPHOT"
                     | "GRIPHOVER"
+                    | "GRIPOBJLIMIT"
             ) =>
             {
                 return self.dispatch_styleprops(&format!("SETVAR {cmd}"), i);
@@ -940,9 +1068,34 @@ impl OpenCADStudio {
                 let value = it.next().map(|s| s.trim().to_string());
                 if name.is_empty() || name == "?" {
                     self.command_line.push_info(
-                        crate::t!("SETVAR: LTSCALE CELTSCALE PDMODE PDSIZE TEXTSIZE ORTHOMODE FILLMODE MIRRTEXT FRAME IMAGEFRAME PDFFRAME WIPEOUTFRAME XCLIPFRAME POINTCLOUDCLIPFRAME ZOOMWHEEL ZOOMFACTOR CURSORSIZE PICKBOX CURSORTYPE SNAPANG TEXTFILL CLIPROMPTLINES COMMANDLINEFADETIME ATTREQ ATTDIA DIMASSOC DIMCONTINUEMODE ANGBASE ANGDIR SKETCHINC SKPOLY SKTOLERANCE DONUTID DONUTOD CENTEREXE CENTERLAYER CENTERLTYPE CENTERLTSCALE CENTERLTYPEFILE CENTERCROSSSIZE CENTERCROSSGAP CENTERMARKEXE COLORTHEME SELECTIONAREA SELECTIONAREAOPACITY SELECTIONEFFECT SELECTIONEFFECTCOLOR WINDOWSAREACOLOR CROSSINGAREACOLOR SELECTIONPREVIEW GRIPSIZE GRIPCOLOR GRIPHOT GRIPHOVER | CLAYER CELTYPE TEXTSTYLE (read-only)").as_ref(),
+                        crate::t!("SETVAR: CETRANSPARENCY LTSCALE CELTSCALE PDMODE PDSIZE TEXTSIZE ORTHOMODE FILLMODE MIRRTEXT FRAME IMAGEFRAME PDFFRAME WIPEOUTFRAME XCLIPFRAME POINTCLOUDCLIPFRAME ZOOMWHEEL ZOOMFACTOR CURSORSIZE PICKBOX CURSORTYPE SNAPANG TEXTFILL CLIPROMPTLINES COMMANDLINEFADETIME ATTREQ ATTDIA DIMASSOC DIMCONTINUEMODE ANGBASE ANGDIR SKETCHINC SKPOLY SKTOLERANCE DONUTID DONUTOD CENTEREXE CENTERLAYER CENTERLTYPE CENTERLTSCALE CENTERLTYPEFILE CENTERCROSSSIZE CENTERCROSSGAP CENTERMARKEXE COLORTHEME SELECTIONAREA SELECTIONAREAOPACITY SELECTIONEFFECT SELECTIONEFFECTCOLOR WINDOWSAREACOLOR CROSSINGAREACOLOR SELECTIONPREVIEW GRIPSIZE GRIPCOLOR GRIPHOT GRIPHOVER GRIPOBJLIMIT | CLAYER CELTYPE TEXTSTYLE (read-only)").as_ref(),
                     );
                 } else {
+                    if name == "CETRANSPARENCY" {
+                        let current = self.tabs[i].scene.document.current_entity_transparency();
+                        if let Some(value) = &value {
+                            match crate::scene::creation_style::parse_current_transparency(value) {
+                                Some(transparency) => {
+                                    if current != transparency {
+                                        self.push_undo_snapshot(i, &name);
+                                        if !self.tabs[i].scene.document.set_current_entity_transparency(transparency) {
+                                            self.discard_last_undo_entry(i);
+                                            self.command_line.push_error("CETRANSPARENCY: drawing variable dictionary is invalid.");
+                                            return Some(self.finish_dispatch(cmd));
+                                        }
+                                        self.tabs[i].dirty = true;
+                                        self.refresh_properties();
+                                    }
+                                    self.command_line.push_output(&format!("CETRANSPARENCY = {}", crate::scene::creation_style::current_transparency_label(transparency)));
+                                }
+                                None => self.command_line.push_error("CETRANSPARENCY: expected ByLayer (-1), ByBlock (-2), or an integer from 0 to 90."),
+                            }
+                        } else {
+                            self.command_line.push_output(&format!("Enter new value for CETRANSPARENCY <{}>:", crate::scene::creation_style::current_transparency_label(current)));
+                            self.pending_setvar = Some(name.clone());
+                        }
+                        return Some(self.finish_dispatch(cmd));
+                    }
                     if matches!(name.as_str(), "SHOWHIST" | "SOLIDHIST") {
                         let current = if name == "SHOWHIST" {
                             self.tabs[i].scene.document.header.show_solid_history.clamp(0, 2)
@@ -1158,27 +1311,45 @@ impl OpenCADStudio {
                         "0" | "OFF" | "FALSE" => Some(false),
                         _ => None,
                     };
+                    let current_delete_objects = self.delete_objects;
+                    let requested_delete_objects = (name == "DELOBJ")
+                        .then(|| value.as_deref()?.parse::<i16>().ok())
+                        .flatten()
+                        .filter(|value| (0..=3).contains(value));
                     let outcome: Result<(String, bool), String> = {
                         let h = &mut self.tabs[i].scene.document.header;
                         match name.as_str() {
+                            // The standalone LTSCALE and CELTSCALE commands
+                            // require a positive value; reaching the same
+                            // variable through SETVAR used to accept zero or a
+                            // negative one, which degenerates every dash
+                            // pattern in the drawing.
                             "LTSCALE" => match &value {
                                 Some(v) => v
                                     .parse::<f64>()
+                                    .ok()
+                                    .filter(|x| x.is_finite() && *x > 0.0)
                                     .map(|x| {
                                         h.linetype_scale = x;
                                         (format!("LTSCALE = {x}"), true)
                                     })
-                                    .map_err(|_| "SETVAR: numeric value required.".into()),
+                                    .ok_or_else(|| {
+                                        "SETVAR: positive numeric value required.".into()
+                                    }),
                                 None => Ok((format!("LTSCALE = {}", h.linetype_scale), false)),
                             },
                             "CELTSCALE" => match &value {
                                 Some(v) => v
                                     .parse::<f64>()
+                                    .ok()
+                                    .filter(|x| x.is_finite() && *x > 0.0)
                                     .map(|x| {
                                         h.current_entity_linetype_scale = x;
                                         (format!("CELTSCALE = {x}"), true)
                                     })
-                                    .map_err(|_| "SETVAR: numeric value required.".into()),
+                                    .ok_or_else(|| {
+                                        "SETVAR: positive numeric value required.".into()
+                                    }),
                                 None => Ok((
                                     format!("CELTSCALE = {}", h.current_entity_linetype_scale),
                                     false,
@@ -1444,6 +1615,22 @@ impl OpenCADStudio {
                                 },
                                 None => Ok((format!("GRIPSIZE = {}", self.model_space.grip_size), false)),
                             },
+                            "GRIPOBJLIMIT" => match &value {
+                                Some(v) => match v.parse::<i32>() {
+                                    Ok(limit @ 0..=32767) => {
+                                        self.grip_object_limit = limit;
+                                        Ok((format!("GRIPOBJLIMIT = {limit}"), true))
+                                    }
+                                    _ => Err(
+                                        "SETVAR: integer from 0 to 32767 required (0 = no limit)."
+                                            .into(),
+                                    ),
+                                },
+                                None => Ok((
+                                    format!("GRIPOBJLIMIT = {}", self.grip_object_limit),
+                                    false,
+                                )),
+                            },
                             "GRIPCOLOR" => match &value {
                                 Some(v) => match v.parse::<u8>() {
                                     Ok(color) => {
@@ -1616,15 +1803,18 @@ impl OpenCADStudio {
                                 }
                             },
                             "DELOBJ" => match &value {
-                                Some(v) => parse_bool(v)
-                                    .map(|b| {
-                                        h.delete_objects = b;
-                                        (format!("DELOBJ = {}", b as i32), true)
+                                Some(v) => v
+                                    .parse::<i16>()
+                                    .ok()
+                                    .filter(|value| (0..=3).contains(value))
+                                    .map(|value| {
+                                        (format!("DELOBJ = {value}"), true)
                                     })
-                                    .ok_or_else(|| "SETVAR: 0 or 1 required.".into()),
-                                None => {
-                                    Ok((format!("DELOBJ = {}", h.delete_objects as i32), false))
-                                }
+                                    .ok_or_else(|| "SETVAR: integer from 0 to 3 required.".into()),
+                                None => Ok((
+                                    format!("DELOBJ = {current_delete_objects}"),
+                                    false,
+                                )),
                             },
                             "PLINEGEN" => match &value {
                                 Some(v) => parse_bool(v)
@@ -2102,6 +2292,9 @@ impl OpenCADStudio {
                     };
                     match outcome {
                         Ok((msg, changed)) => {
+                            if let Some(value) = requested_delete_objects {
+                                self.delete_objects = value;
+                            }
                             if changed {
                                 if matches!(
                                     name.as_str(),
@@ -2126,6 +2319,14 @@ impl OpenCADStudio {
                                         | "GRIPCOLOR"
                                         | "GRIPHOT"
                                         | "GRIPHOVER"
+                                        | "GRIPOBJLIMIT"
+                                        | "DELOBJ"
+                                        // App-level, not part of the drawing:
+                                        // it lives in a process global and is
+                                        // snapshotted into the settings file.
+                                        // Without this it marked the drawing
+                                        // modified instead of persisting.
+                                        | "TEXTFILL"
                                 ) {
                                     self.persist_settings_if_changed();
                                 } else {
@@ -2154,9 +2355,7 @@ impl OpenCADStudio {
                     // TEXTFILL reset the glyph atlas; re-tessellate so text picks
                     // up the re-baked filled / hollow tiles.
                     if name == "TEXTFILL" {
-                        self.tabs[i]
-                            .scene
-                            .invalidate_text_geometry_dependencies();
+                        self.invalidate_text_everywhere();
                     }
                     // LTSCALE scales the dash pattern baked into every wire, and
                     // PDMODE / PDSIZE decide the point glyph built at tessellation
@@ -2937,6 +3136,21 @@ mod tests {
     }
 
     #[test]
+    fn selection_commands_gather_instead_of_using_the_whole_drawing() {
+        for command in ["SETBYLAYER", "OVERKILL"] {
+            let mut app = fresh_app();
+            let _ = app.run_command_line(command);
+            assert!(
+                app.tabs[app.active_tab]
+                    .active_cmd
+                    .as_ref()
+                    .is_some_and(|active| active.is_selection_gathering()),
+                "{command} should gather an explicit selection"
+            );
+        }
+    }
+
+    #[test]
     fn test_cad_selection_and_model_space_sysvars() {
         let mut app = fresh_app();
 
@@ -2982,6 +3196,13 @@ mod tests {
         // SELECTIONPREVIEW
         let _ = app.run_command_line("SETVAR SELECTIONPREVIEW 2");
         assert_eq!(app.model_space.selection_preview, 2);
+
+        let _ = app.run_command_line("SETVAR GRIPOBJLIMIT 0");
+        assert_eq!(app.grip_object_limit, 0);
+        let _ = app.run_command_line("GRIPOBJLIMIT 32767");
+        assert_eq!(app.grip_object_limit, 32767);
+        let _ = app.run_command_line("GRIPOBJLIMIT 32768");
+        assert_eq!(app.grip_object_limit, 32767);
     }
 
     #[test]
@@ -3094,5 +3315,50 @@ mod tests {
         let _ = app.update(crate::app::Message::CommandEscape);
         assert!(app.tabs[app.active_tab].active_cmd.is_none());
         assert_eq!(app.commandline_fade_ms, 5000);
+    }
+
+    #[test]
+    fn delobj_accepts_values_zero_through_three() {
+        let mut app = fresh_app();
+
+        for value in 0..=3 {
+            let _ = app.run_command_line(&format!("SETVAR DELOBJ {value}"));
+            assert_eq!(app.delete_objects, value);
+        }
+
+        let _ = app.run_command_line("SETVAR DELOBJ 4");
+        assert_eq!(app.delete_objects, 3);
+    }
+}
+
+#[cfg(test)]
+mod scale_validation_tests {
+    use crate::app::OpenCADStudio;
+
+    /// A linetype scale of zero or less degenerates every dash pattern in the
+    /// drawing, which is why the standalone commands reject it. Reaching the
+    /// same variable through SETVAR used to accept it, so which door you came
+    /// through decided whether the drawing could be broken.
+    #[test]
+    fn both_doors_to_ltscale_refuse_a_non_positive_value() {
+        for name in ["LTSCALE", "CELTSCALE"] {
+            for entry in [format!("{name} -5"), format!("SETVAR {name} -5")] {
+                let mut app = OpenCADStudio::new_for_test();
+                app.automation_op(r#"{"op":"new"}"#);
+                let i = app.active_tab;
+                let before = if name == "LTSCALE" {
+                    app.tabs[i].scene.document.header.linetype_scale
+                } else {
+                    app.tabs[i].scene.document.header.current_entity_linetype_scale
+                };
+                let _ = app.run_command_line(&entry);
+                let after = if name == "LTSCALE" {
+                    app.tabs[i].scene.document.header.linetype_scale
+                } else {
+                    app.tabs[i].scene.document.header.current_entity_linetype_scale
+                };
+                assert_eq!(before, after, "{entry} must be refused");
+            }
+        }
     }
 }

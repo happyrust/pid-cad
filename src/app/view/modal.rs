@@ -13,6 +13,7 @@ impl OpenCADStudio {
             Some(K::About) => crate::tr!("modal", "about"),
             Some(K::Shortcuts) => crate::tr!("modal", "keyboard-shortcuts"),
             Some(K::Aliases) => crate::tr!("modal", "command-aliases"),
+            Some(K::NamedParameters) => crate::t!("Named Parameters").into_owned(),
             Some(K::Options) => crate::tr!("action", "options"),
             Some(K::FindReplace) => crate::tr!("modal", "find-replace"),
             Some(K::PluginManager) => crate::tr!("modal", "plugin-manager"),
@@ -51,6 +52,7 @@ impl OpenCADStudio {
             Some(K::SaveDialog) => crate::tr!("modal", "save-drawing-as"),
             Some(K::Recovery) => crate::tr!("modal", "recovery-report"),
             Some(K::RecoveryPrompt) => crate::tr!("modal", "recovery-prompt"),
+            Some(K::GpuWarning) => crate::tr!("gpu", "title"),
             None => String::new(),
         }
     }
@@ -175,20 +177,102 @@ impl OpenCADStudio {
                     },
                 )
             }
+            super::super::ModalKind::NamedParameters => {
+                let scene = &self.tabs[self.active_tab].scene;
+                sized_flow(
+                    ex,
+                    820,
+                    520,
+                    |flow| {
+                        crate::ui::window::named_parameters::view_window(
+                            &self.named_parameter_editor_rows,
+                            scene,
+                            flow,
+                        )
+                    },
+                )
+            }
             super::super::ModalKind::Options => sized_flow(
                 ex,
-                540,
-                560,
+                880,
+                620,
                 |flow| {
                     crate::ui::window::options::view_window(
                         &self.default_save_format,
                         self.file_assoc_enabled,
+                        self.write_dwg_native_constraints,
+                        self.show_constraint_values,
                         &self.ui_theme,
                         &self.theme_color_inputs,
                         self.language,
                         self.options_tab,
                         self.cursor_size,
-                        self.pick_box,
+                        crate::ui::window::options::SelectionPrefs {
+                            pick_box: self.pick_box,
+                            pick_add: self.pick_add,
+                            pick_drag_rect: self.pick_drag_rect,
+                            grip_object_limit: self.grip_object_limit,
+                            selection_cycling: self.selection_cycling,
+                        },
+                        crate::ui::window::options::AppPrefs {
+                            savetime_min: self.savetime_min,
+                            backup_on_save: self.backup_on_save,
+                            textfill: crate::scene::text::sdf_atlas::textfill(),
+                            cliprompt_lines: self.cliprompt_lines,
+                            commandline_fade_ms: self.commandline_fade_ms,
+                            zoom_wheel_reversed: self.zoom_wheel_reversed,
+                            zoom_factor: self.zoom_factor,
+                            texteditmode: self.texteditmode,
+                            dimension_continue_mode: self.dimension_continue_mode,
+                            qdim_snap_priority: self.quick_dimension_snap_priority,
+                            annotation_auto_scale: self.annotation_auto_scale,
+                            polar_increment_deg: self.polar_increment_deg,
+                            show_viewcube: self.show_viewcube,
+                            show_ucs_icon: self.show_ucs_icon,
+                            ucs_icon_at_origin: self.ucs_icon_at_origin,
+                        },
+                        &self.snap_angle_input,
+                        {
+                            let header = self
+                                .tabs
+                                .get(self.active_tab)
+                                .map(|tab| &tab.scene.document.header);
+                            crate::ui::window::options::DrawingPrefs {
+                                available: header.is_some(),
+                                isolines: header.map_or(4, |h| h.isolines),
+                                display_silhouette: header
+                                    .is_some_and(|h| h.display_silhouette),
+                                surface_u: header.map_or(6, |h| h.surface_u_density),
+                                surface_v: header.map_or(6, |h| h.surface_v_density),
+                                surface_type: header.map_or(6, |h| h.surface_type),
+                                record_solid_history: header
+                                    .is_some_and(|h| h.record_solid_history),
+                                show_solid_history: header
+                                    .map_or(1, |h| h.show_solid_history),
+                            }
+                        },
+                        {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                crate::ui::window::options::Folders {
+                                    config: crate::config::config_dir()
+                                        .map(|p| p.display().to_string()),
+                                    plot_styles: crate::io::plot_style::plot_styles_dir()
+                                        .ok()
+                                        .map(|p| p.display().to_string()),
+                                    plugins: crate::plugin::external::plugins_dir()
+                                        .map(|p| p.display().to_string()),
+                                    autosave: crate::config::config_dir()
+                                        .map(|_| std::env::temp_dir().display().to_string()),
+                                }
+                            }
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                crate::ui::window::options::Folders::default()
+                            }
+                        },
+                        self.double_click_block_refedit,
+                        self.double_click_block_attedit,
                         self.cursor_type,
                         self.crosshair_color,
                         &self.crosshair_color_input,
@@ -1306,6 +1390,9 @@ impl OpenCADStudio {
             super::super::ModalKind::DonationPrompt => {
                 sized_flow(ex, 540, 360, donation_dialog_window)
             }
+            super::super::ModalKind::GpuWarning => {
+                sized_flow(ex, 520, 400, |flow| gpu_warning_window(&self.gpu_status, flow))
+            }
             super::super::ModalKind::AecDropWarning => {
                 let src_label = self
                     .tabs
@@ -1908,6 +1995,57 @@ fn layer_delete_warning_window(
                 ),
                 iced::widget::Space::new().width(8),
                 dialog_button(t!("Cancel"), Message::CloseModal, button::secondary),
+            ],
+        ]
+        .spacing(0),
+    )
+    .style(dialog_body_style)
+    .center_x(sizing.width)
+    .center_y(sizing.height)
+    .padding([24, 28])
+    .into()
+}
+
+/// What the graphics verdict means and what usually fixes it. Two
+/// situations share the dialog — a software rasterizer (slow, but drawing)
+/// and no renderer at all (a blank viewport) — and the remedy hint is per
+/// platform. "OK" closes it for this session; the status-bar pill brings it
+/// back. "Don't show again" silences this verdict only, so a different
+/// failure on the same machine still prompts.
+fn gpu_warning_window(
+    status: &crate::scene::pipeline::GpuStatus,
+    sizing: crate::ui::modal::ModalSizing,
+) -> Element<'static, Message> {
+    use crate::scene::pipeline::GpuStatus;
+    let (headline, consequences) = match status {
+        GpuStatus::Software(adapter) => (
+            crate::tr!("gpu", "software-headline", adapter = adapter.name.clone()),
+            Some(crate::tr!("gpu", "software-consequences")),
+        ),
+        _ => (crate::tr!("gpu", "no-renderer-headline"), None),
+    };
+    let mut body = column![text(headline).size(13)].spacing(8);
+    if let Some(consequences) = consequences {
+        body = body.push(text(consequences).size(13));
+    }
+    body = body.push(
+        text(crate::app::startup::gpu_platform_hint())
+            .size(13)
+            .style(dialog_muted_text_style),
+    );
+
+    container(
+        column![
+            body,
+            Space::new().height(20),
+            row![
+                dialog_button(t!("OK"), Message::CloseModal, button::primary),
+                Space::new().width(8),
+                dialog_button(
+                    crate::tr!("gpu", "silence"),
+                    Message::GpuWarningSilence,
+                    button::secondary
+                ),
             ],
         ]
         .spacing(0),

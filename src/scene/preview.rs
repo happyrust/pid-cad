@@ -304,6 +304,7 @@ impl Scene {
             return None;
         }
         let mut model = HatchModel {
+            pattern_origin: None,
             render_instance: None,
             world_origin: origin,
             boundary: std::sync::Arc::new(boundary),

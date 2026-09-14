@@ -8,6 +8,8 @@ use glam::{DVec3, Mat4, Vec3};
 use iced::time::Instant;
 use iced::{Point, Rectangle};
 
+use cadkernel::geom2d::Curve;
+
 use crate::command::TangentObject;
 use crate::scene::model::wire_model::{SnapHint, TangentGeom, WireModel};
 use crate::scene::pick::interaction_index::WireSource;
@@ -1021,12 +1023,25 @@ impl Snapper {
                 f32::MAX
             }
         };
+        let flat_ortho = view_rot.z_axis.x.abs() < 1e-9
+            && view_rot.z_axis.y.abs() < 1e-9
+            && (view_rot.w_axis.w - 1.0).abs() < 1e-6;
 
         // Returns false when the wire's AABB does not overlap the snap circle —
         // safe to skip all vertex work for this wire.
         // UNBOUNDED_AABB (±infinity) passes through automatically without a
         // special-case branch because the arithmetic is exact for infinities.
         let wire_in_range = |wire: &WireModel| -> bool {
+            // In a tilted or perspective view `cursor_world` lies on the active
+            // construction plane, while the visible vertex may be anywhere on
+            // the same view ray. A world-XY AABB comparison can therefore reject
+            // a 3-D solid corner that is directly under the cursor. The scene's
+            // screen-space interaction index already performs the broad phase
+            // for those views; small unindexed drawings are cheap enough to let
+            // the exact screen-aperture checks below decide.
+            if !flat_ortho {
+                return true;
+            }
             // The AABB is stored in f32, so at UTM-scale coordinates each bound
             // is quantized by up to ~1 ulp (≈ coord × 2⁻²³ ≈ 0.7 m at 5.7e6).
             // When zoomed in hard the snap radius shrinks below that, so the
@@ -1367,6 +1382,24 @@ impl Snapper {
             && (local_segments.is_some() || allow_unindexed_pairwise)
         {
             if let Some(segments) = &local_segments {
+                let local_wires: Vec<_> = wires.iter().filter(|wire| wire_in_range(wire)).collect();
+                let mut resolved_pairs = rustc_hash::FxHashSet::default();
+                let pair_key = |a: &WireModel, b: &WireModel| {
+                    let a = a as *const WireModel as usize;
+                    let b = b as *const WireModel as usize;
+                    (a.min(b), a.max(b))
+                };
+                for (idx, &wire_i) in local_wires.iter().enumerate() {
+                    for &wire_j in &local_wires[idx + 1..] {
+                        if let Some(points) = exact_curve_intersections(wire_i, wire_j) {
+                            for point in points {
+                                try_pt(point, SnapType::Intersection);
+                            }
+                            resolved_pairs.insert(pair_key(wire_i, wire_j));
+                        }
+                    }
+                }
+
                 // Exact cursor-local sweep: never discard a valid intersection
                 // in dense geometry. Min-X ordering plus Y overlap avoids
                 // comparing segment pairs whose bounds cannot meet.
@@ -1380,6 +1413,10 @@ impl Snapper {
                                 break;
                             }
                             if a.wire == b.wire || a.max_y() < b.min_y() || a.min_y() > b.max_y() {
+                                continue;
+                            }
+                            if wires.source_wire(a.wire).zip(wires.source_wire(b.wire))
+                                .is_some_and(|(a, b)| resolved_pairs.contains(&pair_key(a, b))) {
                                 continue;
                             }
                             if let Some(pt) = seg_intersect_3d(a.a, a.b, b.a, b.b) {
@@ -1408,6 +1445,14 @@ impl Snapper {
                             continue;
                         };
                         if !wire_in_range(wire_j) {
+                            continue;
+                        }
+                        // Curved pairs are solved exactly (bug #1052); see
+                        // `exact_curve_intersections`'s doc comment.
+                        if let Some(pts) = exact_curve_intersections(wire_i, wire_j) {
+                            for pt in pts {
+                                try_pt(pt, SnapType::Intersection);
+                            }
                             continue;
                         }
                         for ai in 0..wire_i.points.len().saturating_sub(1) {
@@ -2301,6 +2346,164 @@ fn ray_segment_intersect_3d(
     ))
 }
 
+// Coordinates for adapting wire geometry to the kernel intersection solver.
+struct WirePlane {
+    origin: DVec3,
+    axis_x: DVec3,
+    axis_y: DVec3,
+    normal: DVec3,
+}
+
+impl WirePlane {
+    fn to_2d(&self, p: DVec3) -> [f64; 2] {
+        let rel = p - self.origin;
+        [rel.dot(self.axis_x), rel.dot(self.axis_y)]
+    }
+
+    /// Projects a *direction*, not a location — for re-expressing another
+    /// coplanar curve's own axis vector in this plane's 2D basis.
+    fn dir_to_2d(&self, d: DVec3) -> [f64; 2] {
+        [d.dot(self.axis_x), d.dot(self.axis_y)]
+    }
+
+    fn to_3d(&self, p: [f64; 2]) -> DVec3 {
+        self.origin + self.axis_x * p[0] + self.axis_y * p[1]
+    }
+
+    fn contains(&self, p: DVec3, tol: f64) -> bool {
+        (p - self.origin).dot(self.normal).abs() <= tol
+    }
+}
+
+fn wire_plane(wire: &WireModel) -> Option<WirePlane> {
+    let [geom] = wire.tangent_geoms.as_slice() else {
+        return None;
+    };
+    let (origin, axis_x, axis_y) = match geom {
+        TangentGeom::Circle { center, .. } => (DVec3::new(center[0] as f64, center[1] as f64, center[2] as f64), DVec3::X, DVec3::Y),
+        TangentGeom::PlanarCircle { center, axis_x, axis_y, .. } | TangentGeom::Arc { center, axis_x, axis_y, .. } => (
+            DVec3::new(center[0], center[1], center[2]),
+            DVec3::new(axis_x[0], axis_x[1], axis_x[2]),
+            DVec3::new(axis_y[0], axis_y[1], axis_y[2]),
+        ),
+        TangentGeom::PlanarEllipse { center, major_axis, normal, .. } => {
+            let origin = DVec3::new(center[0], center[1], center[2]);
+            let n = DVec3::new(normal[0], normal[1], normal[2]).normalize();
+            let major = DVec3::new(major_axis[0], major_axis[1], major_axis[2]);
+            if major.length() <= 1e-12 {
+                return None;
+            }
+            (origin, major.normalize(), n.cross(major.normalize()))
+        }
+        TangentGeom::Line { .. } => return None,
+    };
+    Some(WirePlane { origin, axis_x, axis_y, normal: axis_x.cross(axis_y).normalize() })
+}
+
+fn curve_in_frame(wire: &WireModel, frame: &WirePlane, tol: f64) -> Option<Curve> {
+    use cadkernel::geom2d::{Arc as KArc, Circle as KCircle, Ellipse as KEllipse, EllipseArc as KEllipseArc, Line as KLine};
+
+    if wire.tangent_geoms.is_empty() {
+        if wire.points.len() != 2 {
+            return None;
+        }
+        let (p0, p1) = (wp_f64(wire, 0), wp_f64(wire, 1));
+        return (frame.contains(p0, tol) && frame.contains(p1, tol)).then(|| Curve::Line(KLine { start: frame.to_2d(p0), end: frame.to_2d(p1) }));
+    }
+
+    let [geom] = wire.tangent_geoms.as_slice() else {
+        return None;
+    };
+    let angle_in_frame = |world_point: DVec3, centre: DVec3| {
+        let (p2, c2) = (frame.to_2d(world_point), frame.to_2d(centre));
+        (p2[1] - c2[1]).atan2(p2[0] - c2[0])
+    };
+
+    match geom {
+        TangentGeom::Line { p1, p2 } => {
+            let (p1, p2) = if wire.points.len() == 2 {
+                (wp_f64(wire, 0), wp_f64(wire, 1))
+            } else {
+                (Vec3::from_array(*p1).as_dvec3(), Vec3::from_array(*p2).as_dvec3())
+            };
+            (frame.contains(p1, tol) && frame.contains(p2, tol)).then(|| Curve::Line(KLine { start: frame.to_2d(p1), end: frame.to_2d(p2) }))
+        }
+        TangentGeom::Circle { center, radius } => {
+            let c = DVec3::new(center[0] as f64, center[1] as f64, center[2] as f64);
+            (DVec3::Z.cross(frame.normal).length() <= tol && frame.contains(c, tol)).then(|| Curve::Circle(KCircle { centre: frame.to_2d(c), radius: *radius as f64 }))
+        }
+        TangentGeom::PlanarCircle { center, axis_x, axis_y, radius } => {
+            let c = DVec3::new(center[0], center[1], center[2]);
+            let n = DVec3::new(axis_x[0], axis_x[1], axis_x[2]).cross(DVec3::new(axis_y[0], axis_y[1], axis_y[2])).normalize();
+            (n.cross(frame.normal).length() <= tol && frame.contains(c, tol)).then(|| Curve::Circle(KCircle { centre: frame.to_2d(c), radius: *radius }))
+        }
+        TangentGeom::Arc { center, axis_x, axis_y, radius, start_angle, end_angle } => {
+            let c = DVec3::new(center[0], center[1], center[2]);
+            let (ax, ay) = (DVec3::new(axis_x[0], axis_x[1], axis_x[2]), DVec3::new(axis_y[0], axis_y[1], axis_y[2]));
+            let n = ax.cross(ay).normalize();
+            if n.cross(frame.normal).length() > tol || !frame.contains(c, tol) {
+                return None;
+            }
+            let arc = KArc { centre: frame.to_2d(c), radius: *radius, start_angle: *start_angle, end_angle: *end_angle };
+            let sweep = arc.sweep();
+            if (sweep - std::f64::consts::TAU).abs() <= 1e-12 {
+                return Some(Curve::Circle(KCircle { centre: arc.centre, radius: *radius }));
+            }
+            let boundary = if n.dot(frame.normal) < 0.0 { *end_angle } else { *start_angle };
+            let start_angle = angle_in_frame(c + *radius * (boundary.cos() * ax + boundary.sin() * ay), c);
+            Some(Curve::Arc(KArc { start_angle, end_angle: start_angle + sweep, ..arc }))
+        }
+
+        TangentGeom::PlanarEllipse { center, major_axis, normal, minor_axis_ratio, start_param, end_param } => {
+            let c = DVec3::new(center[0], center[1], center[2]);
+            let ell_normal = DVec3::new(normal[0], normal[1], normal[2]).normalize();
+            if ell_normal.cross(frame.normal).length() > tol || !frame.contains(c, tol) {
+                return None;
+            }
+            let major = DVec3::new(major_axis[0], major_axis[1], major_axis[2]);
+            let major_radius = major.length();
+            if major_radius <= 1e-12 {
+                return None;
+            }
+            let minor_radius = major_radius * *minor_axis_ratio;
+            let dir2d = frame.dir_to_2d(major / major_radius);
+            let len = (dir2d[0] * dir2d[0] + dir2d[1] * dir2d[1]).sqrt();
+            if len <= 1e-12 {
+                return None;
+            }
+            let major_axis_2d = [dir2d[0] / len, dir2d[1] / len];
+            let (start_parameter, end_parameter) = if ell_normal.dot(frame.normal) < 0.0 {
+                (-*end_param, -*start_param)
+            } else {
+                (*start_param, *end_param)
+            };
+            Some(Curve::Ellipse(KEllipseArc {
+                ellipse: KEllipse { centre: frame.to_2d(c), major_radius, minor_radius, major_axis: major_axis_2d },
+                start_parameter,
+                end_parameter,
+            }))
+        }
+    }
+}
+
+fn exact_curve_intersections(wire_a: &WireModel, wire_b: &WireModel) -> Option<Vec<DVec3>> {
+    let frame = wire_plane(wire_a).or_else(|| wire_plane(wire_b))?;
+
+    const PLANE_TOL: f64 = 1e-7;
+    let curve_a = curve_in_frame(wire_a, &frame, PLANE_TOL)?;
+    let curve_b = curve_in_frame(wire_b, &frame, PLANE_TOL)?;
+    // Two lines have nothing this path can improve on (the segment sweep is
+    // already exact for a straight pair); avoid the extra work.
+    if matches!(curve_a, Curve::Line(_)) && matches!(curve_b, Curve::Line(_)) {
+        return None;
+    }
+
+    let tolerance = cadkernel::geom2d::Tolerance::new(1e-9_f64.max(PLANE_TOL));
+    let crossings = cadkernel::geom2d::intersect(&curve_a, &curve_b, tolerance);
+    let points: Vec<DVec3> = crossings.into_iter().map(|c| frame.to_3d(c.point)).collect();
+    Some(points)
+}
+
 /// XY-plane segment-segment intersection.  Returns `None` if parallel or outside.
 /// True 3D intersection of two segments: the point where their plan (XY)
 /// projections cross **and** both segments are at the same height there. Returns
@@ -2880,4 +3083,377 @@ mod ext_tests {
             hi.z
         );
     }
+
+    #[test]
+    fn exact_curve_intersections_matches_the_3_4_5_report() {
+        let c1 = WireModel {
+            tangent_geoms: vec![TangentGeom::PlanarCircle {
+                center: [0.0, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 4.0,
+            }],
+            ..Default::default()
+        };
+        let c2 = WireModel {
+            tangent_geoms: vec![TangentGeom::PlanarCircle {
+                center: [3.0, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 5.0,
+            }],
+            ..Default::default()
+        };
+        let pts = exact_curve_intersections(&c1, &c2).expect("two overlapping circles must intersect");
+        assert_eq!(pts.len(), 2, "two distinct circles crossing at two points");
+        let upper = pts.iter().copied().find(|p| p.y > 0.0).expect("an upper intersection");
+        assert!((upper - DVec3::new(0.0, 4.0, 0.0)).length() < 1e-9, "expected exactly (0,4,0), got {upper:?}");
+        for p in &pts {
+            assert!(((*p - DVec3::ZERO).length() - 4.0).abs() < 1e-9, "must be exactly radius 4 from c1's centre, got {p:?}");
+            assert!(((*p - DVec3::new(3.0, 0.0, 0.0)).length() - 5.0).abs() < 1e-9, "must be exactly radius 5 from c2's centre, got {p:?}");
+        }
+    }
+
+    #[test]
+    fn exact_curve_intersections_respects_an_arcs_own_sweep() {
+        let arc = WireModel {
+            tangent_geoms: vec![TangentGeom::Arc {
+                center: [0.0, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 4.0,
+                start_angle: 0.0,
+                end_angle: std::f64::consts::FRAC_PI_2,
+            }],
+            ..Default::default()
+        };
+        let circle = WireModel {
+            tangent_geoms: vec![TangentGeom::PlanarCircle {
+                center: [3.0, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 5.0,
+            }],
+            ..Default::default()
+        };
+        // Full-circle math gives (0,4,0) [on the 0..90° arc] and (0,-4,0)
+        // [not on it].
+        let pts = exact_curve_intersections(&arc, &circle).expect("the circles still cross");
+        assert_eq!(pts.len(), 1, "only the point on the arc's own sweep");
+        assert!((pts[0] - DVec3::new(0.0, 4.0, 0.0)).length() < 1e-9);
+    }
+
+    #[test]
+    fn exact_curve_intersections_is_none_for_non_coplanar_circles() {
+        let flat = WireModel {
+            tangent_geoms: vec![TangentGeom::PlanarCircle {
+                center: [0.0, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 4.0,
+            }],
+            ..Default::default()
+        };
+        let tilted = WireModel {
+            tangent_geoms: vec![TangentGeom::PlanarCircle {
+                center: [0.0, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 0.0, 1.0],
+                radius: 4.0,
+            }],
+            ..Default::default()
+        };
+        assert!(
+            exact_curve_intersections(&flat, &tilted).is_none(),
+            "a genuinely-3D pair must fall back to the ordinary sweep, not guess a plane"
+        );
+    }
+
+    #[test]
+    fn exact_curve_intersections_resolves_disjoint_circles() {
+        let near = WireModel {
+            tangent_geoms: vec![TangentGeom::PlanarCircle { center: [0.0, 0.0, 0.0], axis_x: [1.0, 0.0, 0.0], axis_y: [0.0, 1.0, 0.0], radius: 1.0 }],
+            ..Default::default()
+        };
+        let far = WireModel {
+            tangent_geoms: vec![TangentGeom::PlanarCircle { center: [100.0, 0.0, 0.0], axis_x: [1.0, 0.0, 0.0], axis_y: [0.0, 1.0, 0.0], radius: 1.0 }],
+            ..Default::default()
+        };
+        assert!(exact_curve_intersections(&near, &far).unwrap().is_empty());
+    }
+
+    #[test]
+    fn exact_curve_intersections_handles_two_arcs_in_differently_rotated_frames() {
+        // Arc A: quarter circle 0..90°, axis_x along world +X.
+        let arc_a = WireModel {
+            tangent_geoms: vec![TangentGeom::Arc {
+                center: [0.0, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 4.0,
+                start_angle: 0.0,
+                end_angle: std::f64::consts::FRAC_PI_2,
+            }],
+            ..Default::default()
+        };
+        let arc_b = WireModel {
+            tangent_geoms: vec![TangentGeom::Arc {
+                center: [3.0, 0.0, 0.0],
+                axis_x: [0.0, 1.0, 0.0],
+                axis_y: [-1.0, 0.0, 0.0],
+                radius: 5.0,
+                start_angle: std::f64::consts::FRAC_PI_2,
+                end_angle: 3.0 * std::f64::consts::FRAC_PI_2,
+            }],
+            ..Default::default()
+        };
+        assert!(exact_curve_intersections(&arc_a, &arc_b).unwrap().is_empty());
+
+        // Flip A to cover the lower-right quadrant (270..360°) instead: now
+        // (0,-4,0) is on both A's and B's own sweep, independently checked
+        // in each one's own (differently rotated) frame.
+        let arc_a_lower = WireModel {
+            tangent_geoms: vec![TangentGeom::Arc {
+                center: [0.0, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 4.0,
+                start_angle: 3.0 * std::f64::consts::FRAC_PI_2,
+                end_angle: std::f64::consts::TAU,
+            }],
+            ..Default::default()
+        };
+        let pts = exact_curve_intersections(&arc_a_lower, &arc_b).expect("both sweeps cover (0,-4,0)");
+        assert_eq!(pts.len(), 1);
+        assert!((pts[0] - DVec3::new(0.0, -4.0, 0.0)).length() < 1e-9, "got {:?}", pts[0]);
+    }
+
+    fn plain_line(a: [f64; 3], b: [f64; 3]) -> WireModel {
+        WireModel { points: vec![[a[0] as f32, a[1] as f32, a[2] as f32], [b[0] as f32, b[1] as f32, b[2] as f32]], points_low: vec![], ..Default::default() }
+    }
+
+    #[test]
+    fn exact_curve_intersections_handles_a_line_against_a_circle() {
+        let line = plain_line([-10.0, 0.0, 0.0], [10.0, 0.0, 0.0]);
+        let circle = WireModel {
+            tangent_geoms: vec![TangentGeom::PlanarCircle { center: [0.0, 0.0, 0.0], axis_x: [1.0, 0.0, 0.0], axis_y: [0.0, 1.0, 0.0], radius: 5.0 }],
+            ..Default::default()
+        };
+        let pts = exact_curve_intersections(&line, &circle).expect("a diameter line crosses its circle twice");
+        assert_eq!(pts.len(), 2);
+        let mut xs: Vec<f64> = pts.iter().map(|p| p.x).collect();
+        xs.sort_by(f64::total_cmp);
+        assert!((xs[0] - -5.0).abs() < 1e-9 && (xs[1] - 5.0).abs() < 1e-9, "expected x = -5 and +5, got {xs:?}");
+        for p in &pts {
+            assert!(p.y.abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn exact_curve_intersections_handles_a_line_against_an_arcs_own_sweep() {
+        let arc = WireModel {
+            tangent_geoms: vec![TangentGeom::Arc {
+                center: [0.0, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 4.0,
+                start_angle: 0.0,
+                end_angle: std::f64::consts::FRAC_PI_2,
+            }],
+            ..Default::default()
+        };
+        let line = plain_line([0.0, -10.0, 0.0], [0.0, 10.0, 0.0]);
+        let pts = exact_curve_intersections(&arc, &line).expect("the line crosses the arc's own sweep");
+        assert_eq!(pts.len(), 1);
+        assert!((pts[0] - DVec3::new(0.0, 4.0, 0.0)).length() < 1e-9);
+    }
+
+    #[test]
+    fn exact_curve_intersections_handles_a_line_against_an_ellipse() {
+        // x^2/16 + y^2/4 = 1 -- a vertical line at x=0 crosses it exactly at
+        // y = +-2.
+        let ellipse = WireModel {
+            tangent_geoms: vec![TangentGeom::PlanarEllipse {
+                center: [0.0, 0.0, 0.0],
+                major_axis: [4.0, 0.0, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                minor_axis_ratio: 0.5,
+                start_param: 0.0,
+                end_param: std::f64::consts::TAU,
+            }],
+            ..Default::default()
+        };
+        let line = plain_line([0.0, -10.0, 0.0], [0.0, 10.0, 0.0]);
+        let pts = exact_curve_intersections(&ellipse, &line).expect("the line crosses the ellipse");
+        assert_eq!(pts.len(), 2);
+        for p in &pts {
+            assert!(p.x.abs() < 1e-9);
+            assert!((p.y.abs() - 2.0).abs() < 1e-9, "expected y = +-2, got {p:?}");
+        }
+    }
+
+    #[test]
+    fn exact_curve_intersections_handles_a_circle_against_a_full_ellipse() {
+        // x^2/25 + y^2/9 = 1 against a radius-3 circle at (6,0,0): computed
+        // independently (not via this module's own math) as crossing at
+        // exactly x = 3.75, y = +-sqrt(63)/4.
+        let ellipse = WireModel {
+            tangent_geoms: vec![TangentGeom::PlanarEllipse {
+                center: [0.0, 0.0, 0.0],
+                major_axis: [5.0, 0.0, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                minor_axis_ratio: 0.6,
+                start_param: 0.0,
+                end_param: std::f64::consts::TAU,
+            }],
+            ..Default::default()
+        };
+        let circle = WireModel {
+            tangent_geoms: vec![TangentGeom::PlanarCircle { center: [6.0, 0.0, 0.0], axis_x: [1.0, 0.0, 0.0], axis_y: [0.0, 1.0, 0.0], radius: 3.0 }],
+            ..Default::default()
+        };
+        let pts = exact_curve_intersections(&ellipse, &circle).expect("the circle crosses the ellipse");
+        assert_eq!(pts.len(), 2);
+        let expected_y = (63.0_f64).sqrt() / 4.0;
+        for p in &pts {
+            assert!((p.x - 3.75).abs() < 1e-6, "expected x=3.75, got {p:?}");
+            assert!((p.y.abs() - expected_y).abs() < 1e-6, "expected y=+-{expected_y}, got {p:?}");
+        }
+    }
+
+    #[test]
+    fn exact_curve_intersections_ellipse_arc_respects_normal_direction() {
+        // Full ellipse x^2/25 + y^2/9 = 1, and a radius-3 "ellipse" (ratio
+        // 1.0, i.e. a circle) at (6,0,0) — same pair as the full-ellipse
+        // test above, crossing at (3.75, +-1.9843...).
+        let ellipse = WireModel {
+            tangent_geoms: vec![TangentGeom::PlanarEllipse {
+                center: [0.0, 0.0, 0.0],
+                major_axis: [5.0, 0.0, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                minor_axis_ratio: 0.6,
+                start_param: 0.0,
+                end_param: std::f64::consts::TAU,
+            }],
+            ..Default::default()
+        };
+        let deg = std::f64::consts::PI / 180.0;
+        let make_arc = |normal_z: f64| WireModel {
+            tangent_geoms: vec![TangentGeom::PlanarEllipse {
+                center: [6.0, 0.0, 0.0],
+                major_axis: [3.0, 0.0, 0.0],
+                normal: [0.0, 0.0, normal_z],
+                minor_axis_ratio: 1.0,
+                start_param: 100.0 * deg,
+                end_param: 170.0 * deg,
+            }],
+            ..Default::default()
+        };
+
+        // normal=+Z: independently computed, param range [100,170]deg holds
+        // only the UPPER crossing's own angle (~138.59deg under +Z).
+        let plus = exact_curve_intersections(&ellipse, &make_arc(1.0)).expect("normal=+Z arc crosses the ellipse");
+        assert_eq!(plus.len(), 1);
+        assert!(plus[0].y > 0.0, "expected the upper point, got {:?}", plus[0]);
+        assert!((plus[0] - DVec3::new(3.75, (63.0_f64).sqrt() / 4.0, 0.0)).length() < 1e-6);
+
+        // normal=-Z, SAME numeric [100,170]deg range: independently computed
+        // to hold only the LOWER crossing's own angle under this flipped
+        // convention (~138.59deg under -Z maps to the lower world point).
+        let minus = exact_curve_intersections(&ellipse, &make_arc(-1.0)).expect("normal=-Z arc crosses the ellipse");
+        assert_eq!(minus.len(), 1);
+        assert!(minus[0].y < 0.0, "expected the lower point (normal flip must change which physical arc this is), got {:?}", minus[0]);
+        assert!((minus[0] - DVec3::new(3.75, -(63.0_f64).sqrt() / 4.0, 0.0)).length() < 1e-6);
+    }
+
+    #[test]
+    fn exact_curve_intersections_arc_respects_normal_direction_against_an_ellipse_frame() {
+        let ellipse = WireModel {
+            tangent_geoms: vec![TangentGeom::PlanarEllipse {
+                center: [0.0, 0.0, 0.0],
+                major_axis: [5.0, 0.0, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                minor_axis_ratio: 0.6,
+                start_param: 0.0,
+                end_param: std::f64::consts::TAU,
+            }],
+            ..Default::default()
+        };
+        let deg = std::f64::consts::PI / 180.0;
+        // normal=-Z arc: axis_x/axis_y chosen so axis_x x axis_y = (0,0,-1),
+        // mirroring the ellipse test's make_arc(-1.0) exactly.
+        let arc_minus_z = WireModel {
+            tangent_geoms: vec![TangentGeom::Arc {
+                center: [6.0, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, -1.0, 0.0],
+                radius: 3.0,
+                start_angle: 100.0 * deg,
+                end_angle: 170.0 * deg,
+            }],
+            ..Default::default()
+        };
+        let pts = exact_curve_intersections(&ellipse, &arc_minus_z).expect("the arc crosses the ellipse");
+        assert_eq!(pts.len(), 1);
+        assert!(pts[0].y < 0.0, "expected the lower point (normal flip must change which physical arc this is), got {:?}", pts[0]);
+        assert!((pts[0] - DVec3::new(3.75, -(63.0_f64).sqrt() / 4.0, 0.0)).length() < 1e-6);
+    }
+    #[test]
+    fn indexed_intersection_uses_true_curves_even_when_chords_miss_the_aperture() {
+        use crate::scene::pick::interaction_index::InteractionIndex;
+        use std::sync::Arc;
+        let circle = |name: &str, x: f64, radius: f64| {
+            let points = (0..=48).map(|i| {
+                let angle = i as f64 * std::f64::consts::TAU / 48.0 + if x == 0.0 { 0.03 } else { 0.0 };
+                [(x + radius * angle.cos()) as f32, (radius * angle.sin()) as f32, 0.0]
+            }).collect();
+            let mut wire = WireModel::solid(name.to_owned(), points, [1.0; 4], false);
+            wire.aabb = [(x - radius) as f32, -radius as f32, (x + radius) as f32, radius as f32];
+            wire.tangent_geoms = vec![TangentGeom::PlanarCircle {
+                center: [x, 0.0, 0.0], axis_x: [1.0, 0.0, 0.0], axis_y: [0.0, 1.0, 0.0], radius,
+            }];
+            wire
+        };
+        let wires = Arc::new(vec![circle("1", 0.0, 4.0), circle("2", 3.0, 5.0)]);
+        let index = InteractionIndex::build(&wires);
+        let candidates = index.query_xy(Arc::clone(&wires), [-0.0001, 3.9999, 0.0001, 4.0001]);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.segments().unwrap().iter().all(|segment| segment.wire == 1));
+        let point = DVec3::new(0.0, 4.0, 0.0);
+        let mut snapper = Snapper::default();
+        snapper.snap_enabled = true;
+        snapper.enabled = [SnapType::Intersection].into_iter().collect();
+        let result = snapper.snap(
+            point, Point::new(500.0, 500.0), &candidates,
+            Mat4::from_scale(Vec3::splat(100.0)), point,
+            Rectangle { x: 0.0, y: 0.0, width: 1000.0, height: 1000.0 },
+            Vec3::ZERO, (Vec3::X, Vec3::Y, Vec3::Z), None,
+        ).expect("the true intersection remains available at high zoom");
+        assert!((result.world - point).length() < 1e-9);
+    }
+
+    #[test]
+    fn line_circle_intersection_retains_low_coordinate_bits() {
+        let origin = 1_000_000_000.0;
+        let a = [origin - 10.0, origin, 0.0];
+        let b = [origin + 10.0, origin, 0.0];
+        let points = [a, b].map(|point| point.map(|value| value as f32));
+        let low = [a, b].into_iter().zip(points).map(|(point, high)| {
+            std::array::from_fn(|axis| (point[axis] - high[axis] as f64) as f32)
+        }).collect();
+        let line = WireModel {
+            points: points.to_vec(), points_low: low,
+            tangent_geoms: vec![TangentGeom::Line { p1: points[0], p2: points[1] }],
+            ..Default::default()
+        };
+        let circle = WireModel {
+            tangent_geoms: vec![TangentGeom::PlanarCircle {
+                center: [origin, origin, 0.0], axis_x: [1.0, 0.0, 0.0], axis_y: [0.0, 1.0, 0.0], radius: 3.0,
+            }], ..Default::default()
+        };
+        let points = exact_curve_intersections(&line, &circle).unwrap();
+        assert_eq!(points.len(), 2);
+        assert!(points.iter().all(|point| (point.x - origin).abs() == 3.0 && point.y == origin));
+    }
+
 }

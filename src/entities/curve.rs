@@ -107,6 +107,45 @@ pub fn entity_curve(entity: &EntityType) -> Option<PlanarCurve> {
     }
 }
 
+/// Exact spatial source geometry for commands that traverse nonplanar curves.
+/// Curve construction and arc-length calculations remain in the kernel.
+pub fn entity_spatial_measurement(entity: &EntityType) -> Option<cadkernel::space::ArcLengthCurve3> {
+    use cadkernel::space::{ArcLengthCurve3, NurbsCurve3};
+    let curve = match entity {
+        EntityType::Polyline3D(polyline) => {
+            if polyline.flags.spline_fit {
+                use acadrust::entities::polyline3d::SmoothSurfaceType;
+                let degree = match polyline.smooth_type {
+                    SmoothSurfaceType::QuadraticBSpline => 2,
+                    SmoothSurfaceType::CubicBSpline | SmoothSurfaceType::Bezier => 3,
+                    SmoothSurfaceType::None => return None,
+                };
+                let controls: Vec<_> = crate::entities::polyline::polyline3d_controls(polyline)
+                    .into_iter().map(|vertex| xyz(vertex.position)).collect();
+                let curve = NurbsCurve3::from_control_polygon(degree, &controls, polyline.is_closed())?;
+                return ArcLengthCurve3::from_nurbs(curve);
+            }
+            let points: Vec<_> = polyline.vertices.iter().map(|vertex| {
+                [vertex.position.x, vertex.position.y, vertex.position.z]
+            }).collect();
+            return ArcLengthCurve3::from_polyline(&points, polyline.is_closed());
+        }
+        EntityType::Spline(spline) => {
+            if crate::entities::spline::uses_fit_method(spline) {
+                crate::entities::spline::fit_nurbs3(spline)?
+            } else {
+                let controls: Vec<_> = spline.control_points.iter().copied().map(xyz).collect();
+                let weights = if spline.weights.is_empty() { vec![1.0; controls.len()] }
+                    else { spline.weights.clone() };
+                NurbsCurve3::new_strict(spline.degree as usize, controls, spline.knots.clone(), weights)?
+                    .with_periodicity(spline.flags.periodic)
+            }
+        }
+        _ => return None,
+    };
+    ArcLengthCurve3::from_nurbs(curve)
+}
+
 /// The plane an OCS-stored entity's coordinates are read in.
 ///
 /// `elevation` is the entity's third stored coordinate — the distance along
@@ -683,6 +722,42 @@ mod tests {
         // nothing; the geometry is what is checked.
         spline.fit_points[2].z = 9.0;
         assert!(entity_curve(&EntityType::Spline(spline)).is_none());
+    }
+
+    #[test]
+    fn spatial_polyline_measurement_uses_unflagged_fit_controls() {
+        use acadrust::entities::polyline3d::SmoothSurfaceType;
+        use acadrust::entities::{Polyline3D, Vertex3DPolyline};
+
+        let mut polyline = Polyline3D::new();
+        polyline.flags.spline_fit = true;
+        polyline.smooth_type = SmoothSurfaceType::Bezier;
+        polyline.vertices = vec![
+            Vertex3DPolyline::from_xyz(0.0, 0.0, 0.0),
+            Vertex3DPolyline::from_xyz(1.0, 2.0, 1.0),
+            Vertex3DPolyline::from_xyz(3.0, 1.0, 3.0),
+            Vertex3DPolyline::from_xyz(5.0, 4.0, 2.0),
+        ];
+
+        let curve = entity_spatial_measurement(&EntityType::Polyline3D(polyline)).unwrap();
+        assert!(curve.length().is_finite() && curve.length() > 0.0);
+    }
+
+    #[test]
+    fn spatial_fit_spline_accepts_unset_tangents_and_closes() {
+        let mut spline = SplineEnt::default();
+        spline.degree = 3;
+        spline.flags.closed = true;
+        spline.fit_points = vec![
+            v3(0.0, 0.0, 0.0),
+            v3(2.0, 0.0, 1.0),
+            v3(2.0, 2.0, 3.0),
+            v3(0.0, 2.0, 1.0),
+        ];
+
+        let curve = entity_spatial_measurement(&EntityType::Spline(spline)).unwrap();
+        assert!(curve.is_closed());
+        assert!(curve.length().is_finite() && curve.length() > 0.0);
     }
 
     fn hints(snap: &CurveSnap, want: SnapHint) -> Vec<glam::DVec3> {

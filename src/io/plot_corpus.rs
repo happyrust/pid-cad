@@ -111,6 +111,7 @@ pub fn hatch(
     color: [f32; 4],
 ) -> HatchModel {
     HatchModel {
+        pattern_origin: None,
         render_instance: None,
         world_origin: [0.0, 0.0],
         boundary: std::sync::Arc::new(boundary),

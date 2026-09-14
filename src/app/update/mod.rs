@@ -305,6 +305,7 @@ impl OpenCADStudio {
             }
         }
         let task = self.update_inner(msg);
+        self.refresh_gpu_status();
         self.show_next_startup_modal();
         self.sync_open_command_history();
         // Close the document-level first-touch transaction started by
@@ -696,6 +697,29 @@ impl OpenCADStudio {
                     .unwrap_or("Snap");
                 self.command_line
                     .push_info(crate::tf!("Snap override: {label} (next pick only).").as_ref());
+                Task::none()
+            }
+
+            Message::SnapOverrideMtp => {
+                self.snap_override_popup = None;
+                self.tabs[self.active_tab]
+                    .scene
+                    .selection
+                    .borrow_mut()
+                    .context_menu = None;
+                // Same guard as typed MTP/M2P: point step, not entity pick.
+                let i = self.active_tab;
+                let allowed = self.tabs[i].active_cmd.as_ref().is_some_and(|c| {
+                    (!c.input_kind().wants_text() || c.point_step_accepts_keywords())
+                        && !c.needs_entity_pick()
+                });
+                if allowed {
+                    self.start_mtp_modifier(i);
+                } else {
+                    self.command_line.push_info(
+                        crate::t!("MTP needs an active point prompt.").as_ref(),
+                    );
+                }
                 Task::none()
             }
 
@@ -1602,6 +1626,26 @@ impl OpenCADStudio {
                 }
                 let live_input = s.clone();
                 self.command_line.input = live_input.clone();
+                let i = self.active_tab;
+                if self.dyn_input
+                    && self.tabs[i].active_grip.as_ref().is_some_and(|grip| {
+                        matches!(
+                            grip.mode,
+                            crate::scene::pick::grip::GripEditMode::Lengthen
+                                | crate::scene::pick::grip::GripEditMode::Radius
+                                | crate::scene::pick::grip::GripEditMode::ArcLength
+                                | crate::scene::pick::grip::GripEditMode::RectangleWidth
+                                | crate::scene::pick::grip::GripEditMode::RectangleHeight
+                        )
+                    })
+                    && !self.tabs[i].dyn_fields.is_empty()
+                {
+                    let a = self.tabs[i]
+                        .dyn_active
+                        .min(self.tabs[i].dyn_fields.len() - 1);
+                    self.tabs[i].dyn_fields[a].buffer =
+                        (!live_input.is_empty()).then_some(live_input.clone());
+                }
                 self.command_line.autocomplete_cursor = None;
                 self.command_line.cancel_history_navigation();
                 // Live incremental search for INSERT/MINSERT: update picker on each keystroke
@@ -1858,10 +1902,32 @@ impl OpenCADStudio {
             Message::CommandHistoryCopy => {
                 let text = self.command_line.history_plain_text();
                 if text.is_empty() {
-                    Task::none()
-                } else {
-                    iced::clipboard::write(text).discard()
+                    return Task::none();
                 }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let promise = crate::sys::copy_history_text(
+                        &text,
+                        crate::t!("Clipboard access is unavailable. Press Ctrl+C or Command+C to copy the selected history.").as_ref(),
+                        crate::t!("Close").as_ref(),
+                    );
+                    Task::perform(async move {
+                        wasm_bindgen_futures::JsFuture::from(promise).await
+                            .ok().and_then(|value| value.as_bool()).unwrap_or(false)
+                    }, Message::CommandHistoryCopied)
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                iced::clipboard::write(text).discard()
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            Message::CommandHistoryCopied(copied) => {
+                if copied {
+                    self.command_line.push_info(crate::t!("Copied").as_ref());
+                } else {
+                    self.command_line.push_error(crate::t!("Clipboard access is unavailable. Press Ctrl+C or Command+C to copy the selected history.").as_ref());
+                }
+                Task::none()
             }
 
             Message::CommandHistoryClear => {
@@ -3335,6 +3401,10 @@ impl OpenCADStudio {
                     self.command_line
                         .push_output(crate::tf!("COORDS = {mode} ({label})").as_ref());
                 }
+                Task::none()
+            }
+            Message::ResolveOneSketchConflict => {
+                self.resolve_one_sketch_conflict();
                 Task::none()
             }
             Message::TogglePolar => {
@@ -5125,6 +5195,20 @@ impl OpenCADStudio {
                 Task::none()
             }
 
+            Message::PropSectionToggle(title) => {
+                let sections = &mut self.collapsed_property_sections;
+                if !sections.remove(&title) {
+                    sections.insert(title);
+                }
+                // Keep already-built panels in other open documents in sync,
+                // rather than waiting for each one to rebuild on selection.
+                let sections = self.collapsed_property_sections.clone();
+                for tab in &mut self.tabs {
+                    tab.properties.collapsed_sections = sections.clone();
+                }
+                Task::none()
+            }
+
             Message::PropEditChoiceToggle => {
                 let panel = &mut self.tabs[self.active_tab].properties;
                 panel.edit_choice_open = !panel.edit_choice_open;
@@ -5233,6 +5317,21 @@ impl OpenCADStudio {
             Message::PropColorFieldChanged { field, color } => {
                 let i = self.active_tab;
                 let handles = self.property_target_handles(i);
+                if field == "indicator_fill_color" {
+                    self.apply_property_op(i, "CHPROP", &handles, |app, handle| {
+                        if let Some(acadrust::EntityType::Extended(extended)) =
+                            app.tabs[i].scene.document.get_entity_mut(handle)
+                        {
+                            if let acadrust::entities::ExtendedEntityData::SectionObject(data) =
+                                &mut extended.data
+                            {
+                                data.indicator_color = color;
+                            }
+                        }
+                    });
+                    self.tabs[i].properties.open_color_field = None;
+                    return Task::none();
+                }
                 // Dim-line colour override (Leader / Dimension): write it as an
                 // ACAD_DSTYLE code-176 override (an ACI index) so it round-trips
                 // through DWG and DXF. RGB picks collapse to the nearest ACI, in
@@ -5878,6 +5977,65 @@ impl OpenCADStudio {
                 Task::none()
             }
 
+            // ── Named Parameters (PARAMETERS) ─────────────────────────────────
+            Message::NamedParametersOpen => {
+                let i = self.active_tab;
+                self.named_parameter_editor_rows = self.tabs[i]
+                    .scene
+                    .named_parameters()
+                    .iter()
+                    .map(|p| crate::ui::window::named_parameters::ParamEditorRow { name: p.name.clone(), formula: p.source.clone() })
+                    .collect();
+                self.active_modal = Some(super::ModalKind::NamedParameters);
+                Task::none()
+            }
+            Message::NamedParametersInput { idx, field, value } => {
+                use crate::ui::window::named_parameters::ParamField;
+                if let Some(row) = self.named_parameter_editor_rows.get_mut(idx) {
+                    match field {
+                        ParamField::Name => row.name = value,
+                        ParamField::Formula => row.formula = value,
+                    }
+                }
+                Task::none()
+            }
+            Message::NamedParametersAdd => {
+                self.named_parameter_editor_rows.push(crate::ui::window::named_parameters::ParamEditorRow::default());
+                Task::none()
+            }
+            Message::NamedParametersRemove(idx) => {
+                if idx < self.named_parameter_editor_rows.len() {
+                    self.named_parameter_editor_rows.remove(idx);
+                }
+                Task::none()
+            }
+            Message::NamedParametersApply => {
+                self.apply_named_parameter_editor_rows();
+                Task::none()
+            }
+
+            // ── Parameters / Constraints sections embedded in the
+            // Properties panel ──────────────────────────────────────────────
+            Message::PropParamInput { index, field, value } => {
+                self.tabs[self.active_tab]
+                    .properties
+                    .edit_buf
+                    .insert(crate::ui::properties::FieldKey::Param(index, field), value);
+                Task::none()
+            }
+            Message::PropParamCommit { index, field } => self.on_prop_param_commit(index, field),
+            Message::PropParamDelete(index) => self.on_prop_param_delete(index),
+            Message::PropParamAddNew => self.on_prop_param_add_new(),
+            Message::PropConstraintLinkClick(handles) => {
+                let i = self.active_tab;
+                self.tabs[i].scene.deselect_all();
+                for h in handles {
+                    self.tabs[i].scene.select_entity(h, false);
+                }
+                self.refresh_properties();
+                Task::none()
+            }
+
             // ── Options / About windows ───────────────────────────────────
             Message::OptionsOpen => {
                 self.active_modal = Some(super::ModalKind::Options);
@@ -5897,6 +6055,18 @@ impl OpenCADStudio {
 
             Message::PickBoxChanged(value) => {
                 self.pick_box = value.clamp(0, 50);
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::DoubleClickBlockRefeditChanged(enabled) => {
+                self.double_click_block_refedit = enabled;
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::DoubleClickBlockAtteditChanged(enabled) => {
+                self.double_click_block_attedit = enabled;
                 self.persist_settings_if_changed();
                 Task::none()
             }
@@ -6110,6 +6280,230 @@ impl OpenCADStudio {
                 Task::none()
             }
 
+            Message::GripObjectLimitChanged(limit) => {
+                self.grip_object_limit = limit.clamp(0, 32767);
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::SelectionEffectToggled(enabled) => {
+                self.model_space.selection_effect = enabled;
+                self.sync_model_space_theme(false);
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            // SELECTIONPREVIEW is a bitmask and the two checkboxes own one bit
+            // each: 1 = rollover while idle, 2 = rollover during a command.
+            Message::SelectionPreviewIdleToggled(enabled) => {
+                self.model_space.selection_preview =
+                    set_preview_bit(self.model_space.selection_preview, 1, enabled);
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::SelectionPreviewCommandToggled(enabled) => {
+                self.model_space.selection_preview =
+                    set_preview_bit(self.model_space.selection_preview, 2, enabled);
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            // "Use Shift to add" is the inverse of PICKADD.
+            Message::ShiftToAddToggled(shift_to_add) => {
+                self.pick_add = !shift_to_add;
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::SaveTimeChanged(minutes) => {
+                self.savetime_min = minutes.max(0);
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::BackupOnSaveChanged(enabled) => {
+                self.backup_on_save = enabled;
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::TextFillChanged(filled) => {
+                crate::scene::text::sdf_atlas::set_textfill(filled);
+                self.invalidate_text_everywhere();
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::ClipromptLinesChanged(lines) => {
+                let lines = crate::app::settings::clamp_clipromptlines(lines);
+                self.cliprompt_lines = lines;
+                self.command_line.set_cliprompt_lines(lines.clamp(0, 50) as u8);
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::CommandLineFadeChanged(ms) => {
+                let ms = crate::app::settings::clamp_commandline_fade_ms(ms);
+                self.commandline_fade_ms = ms;
+                self.command_line.set_commandline_fade_ms(ms.max(0) as u32);
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::ZoomWheelReversedChanged(reversed) => {
+                self.zoom_wheel_reversed = reversed;
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::ZoomFactorChanged(factor) => {
+                self.zoom_factor = factor.clamp(3, 100);
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::TextEditModeChanged(single) => {
+                self.texteditmode = single;
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::DimContinueModeChanged(inherit) => {
+                self.dimension_continue_mode = i16::from(inherit);
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::QdimSnapPriorityChanged(priority) => {
+                self.quick_dimension_snap_priority = priority.min(1);
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            // The sign carries on/off and the magnitude the mode, so switching
+            // off and back on has to return to the mode that was chosen — the
+            // same convention the status-bar pill uses when it negates.
+            Message::AnnoAutoScaleChanged(mode) => {
+                self.annotation_auto_scale = if mode == 0 {
+                    -self.annotation_auto_scale.abs().max(1)
+                } else {
+                    mode.clamp(1, 4)
+                };
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            // Typed into freely; only committed when it parses, so clearing
+            // the field to retype does not snap the crosshair back to zero.
+            Message::SnapAngleInputChanged(value) => {
+                self.snap_angle_input = value;
+                if let Ok(angle) = self.snap_angle_input.trim().parse::<f32>() {
+                    if angle.is_finite() {
+                        self.snap_angle_deg = angle.rem_euclid(360.0);
+                        self.persist_settings_if_changed();
+                    }
+                }
+                Task::none()
+            }
+
+            Message::PolarIncrementChanged(deg) => {
+                if deg.is_finite() && deg > 0.0 {
+                    self.polar_increment_deg = deg;
+                    self.persist_settings_if_changed();
+                }
+                Task::none()
+            }
+
+            Message::ShowViewCubeChanged(show) => {
+                self.show_viewcube = show;
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::ShowUcsIconChanged(show) => {
+                self.show_ucs_icon = show;
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::UcsIconAtOriginChanged(at_origin) => {
+                self.ucs_icon_at_origin = at_origin;
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            // ISOLINES is baked into solid meshes, so rebuild once on release.
+            Message::IsolinesChanged(value) => {
+                let value = value.max(0);
+                let changed = self
+                    .tabs
+                    .get(self.active_tab)
+                    .is_some_and(|tab| tab.scene.document.header.isolines != value);
+                if changed {
+                    self.set_drawing_var(|header| header.isolines = value);
+                    self.isolines_awaiting_regen = true;
+                }
+                Task::none()
+            }
+
+            Message::IsolinesReleased => {
+                if std::mem::take(&mut self.isolines_awaiting_regen) {
+                    self.regenerate_meshes();
+                }
+                Task::none()
+            }
+
+            Message::DispSilhChanged(on) => {
+                self.set_drawing_var(|header| header.display_silhouette = on);
+                Task::none()
+            }
+
+            Message::SurfaceUChanged(value) => {
+                self.set_drawing_var(|header| header.surface_u_density = value.clamp(0, 200));
+                Task::none()
+            }
+
+            Message::SurfaceVChanged(value) => {
+                self.set_drawing_var(|header| header.surface_v_density = value.clamp(0, 200));
+                Task::none()
+            }
+
+            Message::SurfaceTypeChanged(value) => {
+                self.set_drawing_var(|header| header.surface_type = value);
+                Task::none()
+            }
+
+            Message::SolidHistChanged(record) => {
+                self.set_drawing_var(|header| header.record_solid_history = record);
+                Task::none()
+            }
+
+            Message::ShowHistChanged(mode) => {
+                self.set_drawing_var(|header| {
+                    header.show_solid_history = mode.clamp(0, 2)
+                });
+                let i = self.active_tab;
+                if let Some(tab) = self.tabs.get_mut(i) {
+                    tab.scene.bump_geometry();
+                }
+                Task::none()
+            }
+
+            Message::SelectionCyclingChanged(on) => {
+                self.selection_cycling = on;
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
+            Message::OpenFolder(path) => crate::sys::open_url(&path, None),
+
+            Message::PickDragRectToggled(rectangle) => {
+                self.pick_drag_rect = rectangle;
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+
             Message::RestoreSelectionVisualDefaults => {
                 self.model_space.selection_area = true;
                 self.model_space.selection_opacity = 12;
@@ -6122,6 +6516,10 @@ impl OpenCADStudio {
                 self.model_space.grip_color = 0;
                 self.model_space.grip_hot = 0;
                 self.model_space.grip_hover = 0;
+                // The button restores the *visual* defaults, which is why the
+                // grip limit is here and PICKADD / PICKDRAG are not — those are
+                // how selection behaves, not how it looks.
+                self.grip_object_limit = crate::app::settings::DEFAULT_GRIP_OBJECT_LIMIT;
                 self.sync_model_space_theme(false);
                 self.persist_settings_if_changed();
                 Task::none()
@@ -6160,6 +6558,16 @@ impl OpenCADStudio {
                 }
                 Task::none()
             }
+            Message::WriteDwgNativeConstraintsChanged(enabled) => {
+                self.write_dwg_native_constraints = enabled;
+                self.persist_settings_if_changed();
+                Task::none()
+            }
+            Message::ShowConstraintValuesChanged(enabled) => {
+                self.show_constraint_values = enabled;
+                self.persist_settings_if_changed();
+                Task::none()
+            }
             Message::LanguageChanged(language) => {
                 if self.language == language {
                     return Task::none();
@@ -6188,6 +6596,16 @@ impl OpenCADStudio {
 
             Message::AboutOpen => {
                 self.active_modal = Some(super::ModalKind::About);
+                Task::none()
+            }
+
+            Message::GpuWarningOpen => {
+                self.active_modal = Some(super::ModalKind::GpuWarning);
+                Task::none()
+            }
+            Message::GpuWarningSilence => {
+                self.gpu_warning_silenced = self.gpu_status.identity().unwrap_or_default();
+                self.close_active_modal();
                 Task::none()
             }
 
@@ -6563,8 +6981,12 @@ impl OpenCADStudio {
 
             Message::AboutCopyInfo => {
                 let info = format!(
-                    "Open CAD Studio v{}\nOS: {}\nArch: {}",
-                    env!("OCS_APP_VERSION"),
+                    "Open CAD Studio v{}\nRevision: {}\nCommit date: {}\nProfile: {}\nFeatures: {}\nOS: {}\nArch: {}",
+                    env!("OCS_FULL_VERSION"),
+                    env!("OCS_GIT_REV"),
+                    env!("OCS_COMMIT_DATE"),
+                    env!("OCS_BUILD_PROFILE"),
+                    env!("OCS_BUILD_FEATURES"),
                     crate::ui::window::about::platform_name(),
                     crate::ui::window::about::architecture_name(),
                 );
@@ -6782,7 +7204,7 @@ impl OpenCADStudio {
                 if let Some(error) = &self.plugin_registry_error {
                     return iced::clipboard::write(format!(
                         "Open CAD Studio v{}\nOS: {}\nArchitecture: {}\nRegistry: {}\nError: {}",
-                        env!("OCS_APP_VERSION"),
+                        env!("OCS_FULL_VERSION"),
                         std::env::consts::OS,
                         std::env::consts::ARCH,
                         crate::plugin::marketplace::REGISTRY_URL,
@@ -8815,5 +9237,14 @@ mod free_text_entry_tests {
             app.text_entry_mode()
         );
         assert_eq!(app.text_entry_mode(), TextEntryMode::Command);
+    }
+}
+
+/// Set or clear one bit of `SELECTIONPREVIEW`.
+fn set_preview_bit(current: u8, bit: u8, enabled: bool) -> u8 {
+    if enabled {
+        current | bit
+    } else {
+        current & !bit
     }
 }

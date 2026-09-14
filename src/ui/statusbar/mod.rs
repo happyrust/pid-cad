@@ -125,6 +125,18 @@ impl StatusBar {
         // Which pills the user has chosen to show on the bar.
         config: &'a StatusBarConfig,
         menu_data: StatusMenuData<'a>,
+        // Remaining degrees of freedom for the current sketch scope.
+        // `None` when the scope
+        // has no `SketchConstraintSet` yet (nothing constrained), so the
+        // badge stays invisible until it's actually relevant.
+        sketch_dof: Option<usize>,
+        // Number of redundant/conflicting constraints in the current scope.
+        // Zero hides
+        // the pill entirely, so an ordinarily/fully-constrained drawing sees
+        // no new clutter.
+        sketch_conflicts: usize,
+        // What is drawing the scene. Only a degraded verdict shows anything.
+        gpu_status: &'a crate::scene::pipeline::GpuStatus,
     ) -> Element<'a, Message> {
         let StatusMenuData {
             layout_names,
@@ -233,12 +245,60 @@ impl StatusBar {
         // when the width can't hold them all on one line.
         let vis = |p: StatusPill| config.is_visible(p);
         let mut pills: Vec<Element<'_, Message>> = Vec::new();
+        // Not a `StatusPill` and not hideable: the scene is on a software
+        // rasterizer or not drawn at all, and the popup that said so has been
+        // dismissed. This stays for the session and reopens it. Many people
+        // never read the command line, so this is the one place the fact
+        // remains visible.
+        if let Some(label) = gpu_pill_label(gpu_status) {
+            let detail = match gpu_status {
+                crate::scene::pipeline::GpuStatus::Software(adapter) => {
+                    format!("{}\n{}", adapter.name, crate::tr!("gpu", "pill-tip"))
+                }
+                _ => crate::tr!("gpu", "pill-tip"),
+            };
+            pills.push(tip(warning_pill(label, Message::GpuWarningOpen), detail.into()).into());
+        }
         if vis(StatusPill::Coords) {
             let coords_label = format_coords(cursor_world, last_point, coords_mode, picking);
             pills.push(
                 tip(
                     action_pill(&coords_label, Message::CycleCoordsMode),
                     t!("Cursor coordinates ($COORDS)\nClick to cycle: static / live / polar"),
+                )
+                .into(),
+            );
+        }
+        // Not a `StatusPill` (so not user-hideable yet): invisible until the
+        // current scope actually has a SketchConstraintSet, so a drawing
+        // that never uses parametric constraints sees no new clutter.
+        if let Some(dof) = sketch_dof {
+            let pill = if dof == 0 {
+                success_pill(crate::tf!("DOF: {dof}").into_owned())
+            } else {
+                status_pill(crate::tf!("DOF: {dof}").into_owned())
+            };
+            pills.push(
+                tip(
+                    pill,
+                    if dof == 0 {
+                        t!("Fully constrained — no remaining degrees of freedom")
+                    } else {
+                        t!("Remaining degrees of freedom in the current sketch's persistent constraints")
+                    },
+                )
+                .into(),
+            );
+        }
+        // Each click removes one flagged constraint.
+        if sketch_conflicts > 0 {
+            pills.push(
+                tip(
+                    action_pill(
+                        crate::tf!("⚠ {sketch_conflicts} conflicting").into_owned(),
+                        Message::ResolveOneSketchConflict,
+                    ),
+                    t!("One or more constraints in this sketch conflict or are redundant\nClick to remove one and re-solve"),
                 )
                 .into(),
             );
@@ -1032,6 +1092,43 @@ fn status_pill(label: impl Into<String>) -> Element<'static, Message> {
     .style(container::bordered_box)
     .padding([4, 8])
     .into()
+}
+
+/// A success-colored status pill used when no degrees of freedom remain.
+/// The status-bar text for a degraded graphics verdict; `None` when there is
+/// nothing to say, which is the case the bar must not clutter.
+fn gpu_pill_label(status: &crate::scene::pipeline::GpuStatus) -> Option<String> {
+    use crate::scene::pipeline::GpuStatus;
+    match status {
+        GpuStatus::Software(_) => Some(crate::tr!("gpu", "pill-software")),
+        GpuStatus::NoRenderer => Some(crate::tr!("gpu", "pill-no-renderer")),
+        GpuStatus::Unknown | GpuStatus::Hardware(_) => None,
+    }
+}
+
+/// A pill in the theme's warning colours: the only status-bar item that
+/// means "something is wrong", so it must not look like a toggle.
+fn warning_pill(label: impl Into<String>, msg: Message) -> Element<'static, Message> {
+    button(text(label.into()).size(12))
+        .on_press(msg)
+        .style(button::warning)
+        .padding([4, 8])
+        .into()
+}
+
+fn success_pill(label: impl Into<String>) -> Element<'static, Message> {
+    container(text(label.into()).size(12))
+        .style(|theme: &Theme| {
+            let palette = theme.palette();
+            container::Style {
+                background: Some(Background::Color(palette.success.weak.color)),
+                text_color: Some(palette.success.weak.text),
+                border: Border { color: palette.success.base.color, width: 1.0, radius: 4.0.into() },
+                ..Default::default()
+            }
+        })
+        .padding([4, 8])
+        .into()
 }
 
 // ── Scale popup button ────────────────────────────────────────────────────

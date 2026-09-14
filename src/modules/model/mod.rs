@@ -5,6 +5,7 @@ pub mod cylinder_cmd;
 pub mod edge_cmd;
 pub mod polysolid_cmd;
 pub mod primitive_cmd;
+pub mod sectionplane_cmd;
 pub mod shell_cmd;
 pub mod slice_cmd;
 
@@ -46,7 +47,7 @@ impl CadModule for ModelModule {
         "model"
     }
     fn title(&self) -> &'static str {
-        "Modelling"
+        "Model"
     }
 
     fn ribbon_groups(&self) -> &[RibbonGroup] {

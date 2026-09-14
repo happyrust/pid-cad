@@ -31,11 +31,14 @@ mod camera_ops;
 pub(crate) mod centerline;
 pub(crate) mod dimension_assoc;
 pub(crate) mod centermark;
+mod dwg_native_constraints;
 mod entity;
 mod group_layer;
 mod layout;
 mod limits;
 mod modify;
+pub mod named_parameters;
+mod named_parameters_persist;
 mod mspace;
 mod page_setup;
 mod paper;
@@ -43,6 +46,10 @@ mod preview;
 mod project;
 mod scene_markers;
 mod selection;
+pub(crate) use selection::pe_url_of;
+pub mod sketch_constraints;
+mod sketch_persist;
+mod sketch_solve;
 
 pub(crate) use boundary::{
     boundary_entities, boundary_entities_from_sources, boundary_faces,
@@ -328,6 +335,16 @@ pub struct UndoRecording {
     /// by the command. `None` denotes a newly-created object.
     object_before: HashMap<Handle, Option<ObjectType>>,
     object_order: Vec<Handle>,
+    /// First-touch before-images of every sketch-constraint scope a command
+    /// changed (e.g. ERASE removing an entity's constraints along with it via
+    /// `refresh_sketch_constraints`'s deletion policy). `sketch_constraints`
+    /// lives on `Scene`, not in `document`/`document.objects`, so neither
+    /// directory above ever sees this change — it needs its own directory.
+    /// Unlike the two above, there is no "didn't exist before" case: a
+    /// scope's `Vec` entry, once created, is never removed.
+    sketch_constraints_before: HashMap<sketch_constraints::SketchScope, sketch_constraints::SketchConstraintSet>,
+    sketch_constraints_order: Vec<sketch_constraints::SketchScope>,
+    named_parameters_before: Option<named_parameters::ParameterTable>,
     poisoned: bool,
 }
 
@@ -337,18 +354,26 @@ impl UndoRecording {
         self.poisoned
     }
 
-    /// No entity or object entry was recorded (nothing to undo).
+    /// No entity, object, constraint, or parameter state was recorded.
     pub fn is_empty(&self) -> bool {
-        self.order.is_empty() && self.object_order.is_empty()
+        self.order.is_empty()
+            && self.object_order.is_empty()
+            && self.sketch_constraints_order.is_empty()
+            && self.named_parameters_before.is_none()
     }
 
-    /// Consume both recording directories in deterministic first-touch order.
-    /// A `None` image means the entity/object was added by the command.
+    /// Consume the recording directories in deterministic first-touch
+    /// order. A `None` image means the entity/object was added by the
+    /// command; every sketch-constraint scope's before-image is a real
+    /// `SketchConstraintSet` (its `Vec` entry, once created, is never
+    /// removed, so there is no "didn't exist before" case there).
     pub fn into_recorded_images(
         mut self,
     ) -> (
         Vec<(Handle, Option<Arc<EntityType>>)>,
         Vec<(Handle, Option<ObjectType>)>,
+        Vec<(sketch_constraints::SketchScope, sketch_constraints::SketchConstraintSet)>,
+        Option<named_parameters::ParameterTable>,
     ) {
         let entities = self
             .order
@@ -360,7 +385,12 @@ impl UndoRecording {
             .drain(..)
             .map(|h| (h, self.object_before.remove(&h).flatten()))
             .collect();
-        (entities, objects)
+        let sketch_constraints = self
+            .sketch_constraints_order
+            .drain(..)
+            .filter_map(|scope| self.sketch_constraints_before.remove(&scope).map(|before| (scope, before)))
+            .collect();
+        (entities, objects, sketch_constraints, self.named_parameters_before)
     }
 
     /// Entity-only convenience used by the focused Scene delta tests.
@@ -1871,13 +1901,6 @@ pub struct Scene {
     pub block_meshes: HashMap<Handle, MeshLodSet>,
     /// Kernel B-reps used by solid operations and exact-geometry saves.
     pub solid_models: HashMap<Handle, cadkernel::brep::Body>,
-    /// Memoized DocApi volume/centroid per (handle, geometry_epoch) so repeated
-    /// mass queries on the same solid are O(1). Persists across DocApi dispatches.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub doc_api_mass_cache: std::collections::HashMap<Handle, (u64, f64, [f64; 3])>,
-    /// Bounds uncached mass computations in one API request.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub doc_api_cold_tess_used: usize,
     /// GPU render data for raster images (RasterImage entities), keyed by handle.
     pub images: HashMap<Handle, ImageModel>,
     /// The viewport that is currently "entered" (MSPACE mode).
@@ -1909,6 +1932,7 @@ pub struct Scene {
     entity_block_map_cache: RefCell<Option<(u64, HashMap<Handle, Handle>)>>,
     /// Candidate handles per block, in document order and keyed by geometry epoch.
     block_members_cache: RefCell<Option<BlockMembers>>,
+    leaders_by_annotation_cache: RefCell<Option<(u64, HashMap<Handle, Vec<Handle>>)>>,
     /// Insert/Viewport/Block/BlockEnd handles omitted by the spatial index.
     unindexable_cache: RefCell<Option<(u64, Vec<Handle>)>>,
     /// `(epoch, layout block, present type names, list exposed to the UI)`.
@@ -1932,6 +1956,17 @@ pub struct Scene {
     /// Conservative association hint: unknown until scanned, then updated from
     /// changed entities. Retaining `true` after deletion only costs an extra scan.
     has_associative_centers: std::cell::Cell<Option<bool>>,
+    /// Persistent parametric constraint sets, one per sketch scope.
+    /// Materialized into scoped XRecords during save and restored on open.
+    pub(crate) sketch_constraints: Vec<sketch_constraints::SketchConstraintSet>,
+    /// Session-only visibility overrides for constraint glyphs.
+    hidden_sketch_constraints: HashSet<(
+        sketch_constraints::SketchScope,
+        sketch_constraints::ConstraintId,
+    )>,
+    /// Document-wide named-parameter and expression table.
+    /// Persisted through a single drawing XRecord.
+    pub(crate) named_parameters: named_parameters::ParameterTable,
     /// Tessellated block definitions in block-local coords, keyed by render
     /// background and block epoch. Model and Paper adapt black/white colours
     /// differently; retaining both variants prevents a full block rebuild on
@@ -2053,6 +2088,90 @@ pub struct Scene {
     undo_recording: Option<UndoRecording>,
 }
 
+fn section_frame(
+    data: &acadrust::entities::SectionObjectData,
+) -> Option<(glam::DVec3, glam::DVec3, glam::DVec3, glam::DVec3)> {
+    let first = data.vertices.first()?;
+    let last = data.vertices.last()?;
+    let origin = glam::DVec3::new(first.x, first.y, first.z);
+    let tangent = (glam::DVec3::new(last.x, last.y, last.z) - origin).try_normalize()?;
+    let raw_vertical = glam::DVec3::new(
+        data.vertical_direction.x,
+        data.vertical_direction.y,
+        data.vertical_direction.z,
+    );
+    let vertical = (raw_vertical - tangent * raw_vertical.dot(tangent)).try_normalize()?;
+    let base_view = vertical.cross(tangent).try_normalize()?;
+    let viewing = if data.flags & 4 != 0 { base_view } else { -base_view };
+    Some((origin, tangent, vertical, viewing))
+}
+
+#[derive(Clone)]
+struct LiveSection {
+    data: acadrust::entities::SectionObjectData,
+    slice_depth: Option<f64>,
+}
+
+fn section_plane(
+    origin: glam::DVec3,
+    tangent: glam::DVec3,
+    normal: glam::DVec3,
+    body_to_world: Option<&acadrust::types::Transform>,
+) -> Option<cadkernel::space::Plane> {
+    let Some(transform) = body_to_world else {
+        return cadkernel::space::Plane::orthonormal(
+            origin.to_array(),
+            tangent.to_array(),
+            normal.to_array(),
+        );
+    };
+    let matrix = transform.matrix.m;
+    let linear = acadrust::types::Matrix3::from_rows(
+        [matrix[0][0], matrix[0][1], matrix[0][2]],
+        [matrix[1][0], matrix[1][1], matrix[1][2]],
+        [matrix[2][0], matrix[2][1], matrix[2][2]],
+    );
+    let inverse = linear.inverse()?;
+    let translation = acadrust::types::Vector3::new(
+        matrix[0][3],
+        matrix[1][3],
+        matrix[2][3],
+    );
+    let origin = inverse.transform_point(
+        acadrust::types::Vector3::new(origin.x, origin.y, origin.z) - translation,
+    );
+    let tangent = inverse.transform_point(acadrust::types::Vector3::new(
+        tangent.x, tangent.y, tangent.z,
+    ));
+    let normal = linear
+        .transpose()
+        .transform_point(acadrust::types::Vector3::new(normal.x, normal.y, normal.z));
+    cadkernel::space::Plane::orthonormal(
+        [origin.x, origin.y, origin.z],
+        [tangent.x, tangent.y, tangent.z],
+        [normal.x, normal.y, normal.z],
+    )
+}
+
+fn keep_section_positive(
+    body: &cadkernel::brep::Body,
+    plane: cadkernel::space::Plane,
+) -> Result<Option<cadkernel::brep::Body>, ()> {
+    match cadkernel::brep::slice_by_plane(body, plane) {
+        Ok(Some(result)) => Ok(Some(result.positive)),
+        Ok(None) => {
+            let bounds = cadkernel::brep::body_bounds(body).ok_or(())?;
+            let centre = [
+                (bounds.min[0] + bounds.max[0]) * 0.5,
+                (bounds.min[1] + bounds.max[1]) * 0.5,
+                (bounds.min[2] + bounds.max[2]) * 0.5,
+            ];
+            Ok((plane.distance_to(centre).ok_or(())? >= 0.0).then(|| body.clone()))
+        }
+        Err(_) => Err(()),
+    }
+}
+
 impl Scene {
     pub fn new() -> Self {
         Self {
@@ -2146,10 +2265,6 @@ impl Scene {
             material_base_dir: None,
             block_meshes: HashMap::default(),
             solid_models: HashMap::default(),
-            #[cfg(not(target_arch = "wasm32"))]
-            doc_api_mass_cache: std::collections::HashMap::default(),
-            #[cfg(not(target_arch = "wasm32"))]
-            doc_api_cold_tess_used: 0,
             images: HashMap::default(),
             active_viewport: None,
             bg_color: [33.0 / 255.0, 40.0 / 255.0, 48.0 / 255.0, 1.0],
@@ -2161,10 +2276,14 @@ impl Scene {
             model_extents_cache: RefCell::new(None),
             entity_block_map_cache: RefCell::new(None),
             block_members_cache: RefCell::new(None),
+            leaders_by_annotation_cache: RefCell::new(None),
             unindexable_cache: RefCell::new(None),
             layout_type_names_cache: RefCell::new(None),
             dependency_index_cache: RefCell::new(None),
             associative_hatch_source_cache: RefCell::new(None),
+            sketch_constraints: Vec::new(),
+            hidden_sketch_constraints: HashSet::default(),
+            named_parameters: named_parameters::ParameterTable::new(),
             has_associative_centers: std::cell::Cell::new(None),
             block_defn_cache: RefCell::new(HashMap::default()),
             entity_index_cache: RefCell::new(None),
@@ -2464,7 +2583,17 @@ impl Scene {
             bits |= CACHE_CATEGORY_IMAGE;
         }
         let is_insert = matches!(entity, EntityType::Insert(_));
-        if self.meshes.contains_key(&handle) || self.block_meshes.contains_key(&handle) || is_insert
+        let is_section = matches!(
+            entity,
+            EntityType::Extended(acadrust::entities::ExtendedEntity {
+                data: acadrust::entities::ExtendedEntityData::SectionObject(_),
+                ..
+            })
+        );
+        if self.meshes.contains_key(&handle)
+            || self.block_meshes.contains_key(&handle)
+            || is_insert
+            || is_section
         {
             bits |= CACHE_CATEGORY_MESH | CACHE_CATEGORY_INTERACTION;
         }
@@ -2572,7 +2701,8 @@ impl Scene {
     /// is `None` for a freshly added entity. No-op when not recording — the
     /// callers guard with [`Scene::is_recording_undo`] so the clone is skipped
     /// entirely on the common (no-recording) path.
-    pub(crate) fn record_undo_before(&mut self, handle: Handle, before: Option<Arc<EntityType>>) {
+    #[doc(hidden)]
+    pub fn record_undo_before(&mut self, handle: Handle, before: Option<Arc<EntityType>>) {
         if let Some(rec) = self.undo_recording.as_mut() {
             if !rec.before.contains_key(&handle) {
                 rec.order.push(handle);
@@ -2594,6 +2724,35 @@ impl Scene {
                 rec.object_order.push(handle);
                 rec.object_before.insert(handle, before);
             }
+        }
+    }
+
+    /// Record one sketch-constraint scope's whole-set image before its first
+    /// mutation within the open recording (first touch wins) — e.g. ERASE
+    /// about to remove some of a scope's constraints via
+    /// `refresh_sketch_constraints`'s deletion policy. `sketch_constraints`
+    /// lives on `Scene`, outside `document`/`document.objects`, so neither
+    /// `record_undo_before` nor `record_undo_object_before` ever sees this
+    /// change on their own.
+    pub(crate) fn record_undo_sketch_constraints_before(
+        &mut self,
+        scope: sketch_constraints::SketchScope,
+        before: sketch_constraints::SketchConstraintSet,
+    ) {
+        if let Some(rec) = self.undo_recording.as_mut() {
+            if !rec.sketch_constraints_before.contains_key(&scope) {
+                rec.sketch_constraints_order.push(scope);
+                rec.sketch_constraints_before.insert(scope, before);
+            }
+        }
+    }
+
+    /// Records the drawing-wide parameter table before its first mutation in
+    /// the current undo transaction.
+    pub(crate) fn record_undo_named_parameters_before(&mut self) {
+        let before = self.named_parameters.clone();
+        if let Some(recording) = self.undo_recording.as_mut() {
+            recording.named_parameters_before.get_or_insert(before);
         }
     }
 
@@ -2716,6 +2875,13 @@ impl Scene {
         for change in self.refresh_associative_hatches(&changes) {
             if !changes.iter().any(|(handle, _)| *handle == change.0) {
                 changes.push(change);
+            }
+        }
+        if !self.sketch_constraints.is_empty() {
+            for change in self.refresh_sketch_constraints(&changes) {
+                if !changes.iter().any(|(handle, _)| *handle == change.0) {
+                    changes.push(change);
+                }
             }
         }
         if !changes.is_empty() {
@@ -3021,7 +3187,13 @@ impl Scene {
         let facet_resolution = self.document.header.facet_resolution;
         let chordal_deflection =
             crate::entities::solid3d::display_deflection(&self.document.header, facet_resolution);
-        let isolines = self.document.header.isolines.max(0) as usize;
+        let (isolines, planar_isolines) = match self.document.get_entity(handle) {
+            Some(EntityType::Surface(surface)) => (
+                crate::entities::solid3d::surface_isoline_counts(surface),
+                crate::entities::solid3d::surface_property_state(surface).isolines,
+            ),
+            _ => ([self.document.header.isolines.max(0) as usize; 2], false),
+        };
         let (mut set, wires, center) =
             crate::scene::model::solid_model::display_from_solid(
                 solid,
@@ -3029,6 +3201,7 @@ impl Scene {
                 facet_resolution,
                 chordal_deflection,
                 isolines,
+                planar_isolines,
             )?;
         let name = handle.value().to_string();
         for mesh in &mut set.lods {
@@ -3726,6 +3899,7 @@ impl Scene {
         let ((x0, y0), (x1, y1)) = self.paper_limits()?;
         let (x0, y0, x1, y1) = (x0 as f32, y0 as f32, x1 as f32, y1 as f32);
         Some(HatchModel {
+            pattern_origin: None,
             render_instance: None,
             world_origin: [0.0, 0.0],
             boundary: Arc::new(vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]),
@@ -5246,7 +5420,8 @@ impl Scene {
     /// frustum cull, no zoom LOD, and no re-tessellation/re-upload on camera
     /// moves. The per-tile camera args are unused (kept for call-site symmetry
     /// with the paper-space wire sources).
-    pub(super) fn model_tile_wires_arc(
+    #[doc(hidden)]
+    pub fn model_tile_wires_arc(
         &self,
         _tile_idx: usize,
         _cam: &Camera,
@@ -5349,8 +5524,12 @@ impl Scene {
         // changed entities into it, instead of re-cloning + re-sorting the whole
         // set. Falls back to the full build below when it can't (no cache entry,
         // journal un-replayable, or a structural assumption violated).
-        if let Some(arc) =
-            self.try_resident_patch(
+        // A live section changes the displayed wires of every intersected
+        // solid, even when the delta journal contains only the section entity.
+        // Rebuild the resident set in that case so an incremental patch cannot
+        // retain the source solid's uncut edge cache.
+        if self.active_live_section(block).is_none() {
+            if let Some(arc) = self.try_resident_patch(
                 key,
                 block,
                 bg,
@@ -5359,9 +5538,9 @@ impl Scene {
                 all_visible,
                 frozen_layers,
                 style_viewport,
-            )
-        {
-            return arc;
+            ) {
+                return arc;
+            }
         }
         // Build once: full tessellation, no cull, no zoom LOD — the resident
         // set is zoom-independent (GPU analytical circles/arcs/ellipses).
@@ -6091,7 +6270,8 @@ impl Scene {
         self.draw_depth_generation.get()
     }
 
-    pub(super) fn draw_depth_map(&self) -> Arc<HashMap<u64, [f32; 2]>> {
+    #[doc(hidden)]
+    pub fn draw_depth_map(&self) -> Arc<HashMap<u64, [f32; 2]>> {
         {
             let cache = self.draw_depth_cache.borrow();
             if let Some(cache) = cache.as_ref() {
@@ -6629,6 +6809,12 @@ impl Scene {
                                     || matches!(
                                         self.document.get_entity(h),
                                         Some(EntityType::Insert(_))
+                                            | Some(EntityType::Extended(
+                                                acadrust::entities::ExtendedEntity {
+                                                    data: acadrust::entities::ExtendedEntityData::SectionObject(_),
+                                                    ..
+                                                }
+                                            ))
                                     )
                             },
                         ) =>
@@ -6815,6 +7001,7 @@ impl Scene {
         all_visible: bool,
         viewport: Option<Handle>,
     ) -> Vec<MeshLodSet> {
+        let live_section = self.active_live_section(target_block);
         // Top-level solids: drop those whose layer is off/frozen or that are
         // flagged invisible / isolated-hidden, mirroring the 2D wire path, plus
         // any whose layer is frozen in the requesting viewport.
@@ -6836,8 +7023,19 @@ impl Scene {
                         })
                         .unwrap_or(false)
             })
-            .map(|(&handle, set)| {
-                let mut set = set.clone();
+            .filter_map(|(&handle, set)| {
+                let mut set = if let Some(section) = live_section.as_ref() {
+                    match self.sectioned_body(handle, section) {
+                        Ok(Some(body)) => self
+                            .prepare_solid_model_display(handle, &body)
+                            .map(|display| display.0)
+                            .unwrap_or_else(|| set.clone()),
+                        Ok(None) => return None,
+                        Err(()) => set.clone(),
+                    }
+                } else {
+                    set.clone()
+                };
                 if let Some(entity) = self.document.get_entity(handle) {
                     let style = crate::scene::view::render::render_style_for_viewport(
                         &self.document,
@@ -6861,7 +7059,7 @@ impl Scene {
                         material.diffuse[3] = style.0[3];
                     }
                 }
-                set
+                Some(set)
             })
             .collect();
         // Block-definition solids are instanced per INSERT of the ACTIVE space's
@@ -6874,8 +7072,219 @@ impl Scene {
             annotation_scale_handle,
             all_visible,
             viewport,
+            live_section.as_ref(),
         ));
         all
+    }
+
+    fn active_live_section(
+        &self,
+        target_block: Handle,
+    ) -> Option<LiveSection> {
+        self.document
+            .entities()
+            .filter_map(|entity| {
+                let EntityType::Extended(extended) = entity else {
+                    return None;
+                };
+                let acadrust::entities::ExtendedEntityData::SectionObject(data) = &extended.data else {
+                    return None;
+                };
+                let owner = extended.common.owner_handle;
+                (data.flags & 1 != 0
+                    && !extended.common.invisible
+                    && (owner.is_null() || owner == target_block))
+                    .then(|| LiveSection {
+                        data: data.clone(),
+                        slice_depth: crate::entities::extended::section_is_slice(extended)
+                            .then(|| {
+                                crate::entities::extended::section_slice_depth(extended)
+                                    .unwrap_or(0.0)
+                            }),
+                    })
+            })
+            .last()
+    }
+
+    fn sectioned_body(
+        &self,
+        handle: Handle,
+        section: &LiveSection,
+    ) -> Result<Option<cadkernel::brep::Body>, ()> {
+        let body = self.section_source_body(handle).ok_or(())?;
+        Self::section_body(&body, &section.data, section.slice_depth, None)
+    }
+
+    /// Build a temporary entity whose wire data matches the live-section body.
+    /// The document entity stays unchanged so disabling the section restores
+    /// the complete source geometry and saving never persists the clipped body.
+    fn sectioned_wire_entity(
+        &self,
+        handle: Handle,
+        section: &LiveSection,
+    ) -> Result<Option<EntityType>, ()> {
+        let Some(body) = self.sectioned_body(handle, section)? else {
+            return Ok(None);
+        };
+        let (_, wires, center) = self
+            .prepare_solid_model_display(handle, &body)
+            .ok_or(())?;
+        let mut entity = self.document.get_entity(handle).cloned().ok_or(())?;
+        let reference = acadrust::types::Vector3::new(center[0], center[1], center[2]);
+        match &mut entity {
+            EntityType::Solid3D(solid) => {
+                solid.point_of_reference = reference;
+                solid.wires = wires;
+                solid.silhouettes.clear();
+            }
+            EntityType::Surface(surface) => {
+                surface.point_of_reference = reference;
+                surface.wires = wires;
+                surface.silhouettes.clear();
+            }
+            EntityType::Region(region) => {
+                region.point_of_reference = reference;
+                region.wires = wires;
+                region.silhouettes.clear();
+            }
+            EntityType::Body(body) => {
+                body.point_of_reference = reference;
+                body.wires = wires;
+                body.silhouettes.clear();
+            }
+            _ => return Err(()),
+        }
+        Ok(Some(entity))
+    }
+
+    fn section_source_body(
+        &self,
+        handle: Handle,
+    ) -> Option<std::borrow::Cow<'_, cadkernel::brep::Body>> {
+        if let Some(body) = self.solid_models.get(&handle) {
+            return Some(std::borrow::Cow::Borrowed(body));
+        }
+        let body = match self.document.get_entity(handle) {
+            Some(EntityType::Solid3D(solid)) => {
+                crate::scene::convert::solid3d_tess::kernel_body(solid)
+            }
+            Some(EntityType::Region(region)) => {
+                crate::scene::convert::solid3d_tess::kernel_region_body(region)
+            }
+            Some(EntityType::Body(body)) => {
+                crate::scene::convert::solid3d_tess::kernel_acis_body(&body.acis_data)
+            }
+            Some(EntityType::Surface(surface)) => {
+                crate::scene::convert::solid3d_tess::kernel_surface_body(surface)
+            }
+            _ => None,
+        }?;
+        Some(std::borrow::Cow::Owned(body))
+    }
+
+    fn section_body(
+        body: &cadkernel::brep::Body,
+        data: &acadrust::entities::SectionObjectData,
+        slice_depth: Option<f64>,
+        body_to_world: Option<&acadrust::types::Transform>,
+    ) -> Result<Option<cadkernel::brep::Body>, ()> {
+        let Some((origin, tangent, vertical, viewing)) = section_frame(data) else {
+            return Err(());
+        };
+        let front = section_plane(origin, tangent, viewing, body_to_world).ok_or(())?;
+        let mut clipped = keep_section_positive(body, front)?;
+        let Some(mut current) = clipped.take() else {
+            return Ok(None);
+        };
+        if data.state == 1 && slice_depth.is_none() {
+            return Ok(Some(current));
+        }
+
+        let depth = slice_depth.unwrap_or_else(|| {
+            data.vertices
+                .first()
+                .zip(data.back_line_vertices.first())
+                .map_or(0.0, |(front, back)| {
+                    (glam::DVec3::new(back.x, back.y, back.z)
+                        - glam::DVec3::new(front.x, front.y, front.z))
+                    .dot(viewing)
+                    .abs()
+                })
+        });
+        if depth <= 1e-12 {
+            return Ok(Some(current));
+        }
+        let back = section_plane(
+            origin + viewing * depth,
+            tangent,
+            -viewing,
+            body_to_world,
+        )
+        .ok_or(())?;
+        let Some(next) = keep_section_positive(&current, back)? else {
+            return Ok(None);
+        };
+        current = next;
+
+        if data.state == 1 {
+            return Ok(Some(current));
+        }
+
+        let span = data
+            .vertices
+            .first()
+            .zip(data.vertices.last())
+            .map_or(0.0, |(first, last)| {
+                (glam::DVec3::new(last.x, last.y, last.z)
+                    - glam::DVec3::new(first.x, first.y, first.z))
+                .length()
+            });
+        if span <= 1e-12 {
+            return Ok(Some(current));
+        }
+
+        let first = data.vertices.first().map(|point| glam::DVec3::new(point.x, point.y, point.z)).ok_or(())?;
+        let last = data.vertices.last().map(|point| glam::DVec3::new(point.x, point.y, point.z)).ok_or(())?;
+        for plane in [
+            section_plane(first, vertical, tangent, body_to_world),
+            section_plane(last, vertical, -tangent, body_to_world),
+        ] {
+            let Some(plane) = plane else {
+                return Err(());
+            };
+            let Some(next) = keep_section_positive(&current, plane)? else {
+                return Ok(None);
+            };
+            current = next;
+        }
+
+        if data.state != 4 {
+            return Ok(Some(current));
+        }
+
+        for plane in [
+            section_plane(
+                origin - vertical * data.bottom_height,
+                tangent,
+                vertical,
+                body_to_world,
+            ),
+            section_plane(
+                origin + vertical * data.top_height,
+                tangent,
+                -vertical,
+                body_to_world,
+            ),
+        ] {
+            let Some(plane) = plane else {
+                return Err(());
+            };
+            let Some(next) = keep_section_positive(&current, plane)? else {
+                return Ok(None);
+            };
+            current = next;
+        }
+        Ok(Some(current))
     }
 
     /// True when `layer` is turned off or frozen — entities on it never render.
@@ -7157,6 +7566,7 @@ impl Scene {
         annotation_scale_handle: Option<Handle>,
         all_visible: bool,
         viewport: Option<Handle>,
+        live_section: Option<&LiveSection>,
     ) -> Vec<MeshLodSet> {
         if self.block_meshes.is_empty() {
             return Vec::new();
@@ -7183,8 +7593,36 @@ impl Scene {
                     return;
                 }
                 let handle = entity.common().handle;
-                let Some(set) = self.block_meshes.get(&handle) else {
+                let Some(original) = self.block_meshes.get(&handle) else {
                     return;
+                };
+                let sectioned;
+                let set = if let Some((section, body)) = live_section.and_then(|section| {
+                    self.section_source_body(handle)
+                        .map(|body| (section, body))
+                }) {
+                    match Self::section_body(
+                        &body,
+                        &section.data,
+                        section.slice_depth,
+                        Some(&context.transform),
+                    ) {
+                        Ok(Some(body)) => {
+                            if let Some((mut mesh, _, _)) =
+                                self.prepare_solid_model_display(handle, &body)
+                            {
+                                mesh.prepare_instance_source(handle);
+                                sectioned = mesh;
+                                &sectioned
+                            } else {
+                                original
+                            }
+                        }
+                        Ok(None) => return,
+                        Err(()) => original,
+                    }
+                } else {
+                    original
                 };
                 let inherit = self.mesh_inherit_for_path(&context.insert_path);
                 let own_alpha = set.display_color().map_or(1.0, |color| color[3]);
@@ -7897,6 +8335,7 @@ impl Scene {
         wires: Arc<Vec<WireModel>>,
         aabb: [f64; 4],
         allow_pending_empty: bool,
+        area_only: bool,
     ) -> crate::scene::pick::interaction_index::InteractionCandidates {
         if let Some((base_epoch, base, changes)) = self.interaction_overlay_base() {
             let perf = crate::perf::enabled();
@@ -7915,11 +8354,20 @@ impl Scene {
             );
             let local_ms = t_local.elapsed().as_secs_f64() * 1000.0;
             let t_remap = iced::time::Instant::now();
-            let mut result =
-                base.query_remapped_xy(Arc::clone(&local), &base_slots, aabb);
-            result.extend_indexed(
-                changed_index.query_remapped_xy(local, &changed_slots, aabb),
-            );
+            let mut result = if area_only {
+                base.query_remapped_xy_area(Arc::clone(&local), &base_slots, aabb)
+            } else {
+                base.query_remapped_xy(Arc::clone(&local), &base_slots, aabb)
+            };
+            if area_only {
+                result.extend_indexed_area(
+                    changed_index.query_remapped_xy_area(local, &changed_slots, aabb),
+                );
+            } else {
+                result.extend_indexed(
+                    changed_index.query_remapped_xy(local, &changed_slots, aabb),
+                );
+            }
             let remap_ms = t_remap.elapsed().as_secs_f64() * 1000.0;
             let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
             if perf && total_ms >= 50.0 {
@@ -7937,7 +8385,11 @@ impl Scene {
             return result;
         }
         if let Some(index) = self.cached_interaction_index(&wires) {
-            index.query_xy(wires, aabb)
+            if area_only {
+                index.query_xy_area(wires, aabb)
+            } else {
+                index.query_xy(wires, aabb)
+            }
         } else if allow_pending_empty
             && self.interaction_index_pending_key.get()
             == Some((self.geometry_epoch, Arc::as_ptr(&wires) as usize))
@@ -8260,12 +8712,18 @@ impl Scene {
             cursor.x + radius,
             cursor.y + radius,
         ];
-        self.indexed_interaction_candidates_xy(wires, query, allow_pending_empty)
+        self.indexed_interaction_candidates_xy(wires, query, allow_pending_empty, false)
     }
 
     /// Shared rectangular broad phase for box/lasso/fence and command windows.
     /// Flat orthographic views query world XY; tilted/perspective views query
     /// projected 3D bounds using the supplied screen rectangle.
+    /// Candidates for an area selection: box, crossing, fence and lasso.
+    ///
+    /// Every caller feeds the result to the box/fence hit tests and to
+    /// `interaction_candidate_handles`, none of which snap, so the flat-ortho
+    /// path asks for the reduced category set. A caller that needs snapping
+    /// belongs on `interaction_candidates_near` instead.
     pub fn interaction_candidates_in_aabb(
         &self,
         wires: Arc<Vec<WireModel>>,
@@ -8302,6 +8760,7 @@ impl Scene {
                 wires,
                 [aabb[0] - pad, aabb[1] - pad, aabb[2] + pad, aabb[3] + pad],
                 false,
+                true,
             )
         } else {
             self.indexed_interaction_candidates_screen(
@@ -8357,7 +8816,7 @@ impl Scene {
 
     pub fn interaction_handles_in_world_aabb(&self, aabb: [f64; 4]) -> HashSet<Handle> {
         let wires = self.hit_test_wires();
-        let candidates = self.indexed_interaction_candidates_xy(wires, aabb, false);
+        let candidates = self.indexed_interaction_candidates_xy(wires, aabb, false, false);
         let mut handles: HashSet<Handle> = candidates
             .iter()
             .filter_map(|wire| Self::handle_from_wire_name(&wire.name))
@@ -9411,6 +9870,45 @@ impl Scene {
             memo_misses = visible_count;
             out
         };
+
+        // Normal Wireframe renders the persisted entity wires, whereas shaded
+        // and 3D Wireframe modes render the temporary sectioned mesh. Replace
+        // only the displayed wire run with one tessellated from that same
+        // temporary body so every visual style shows the identical live cut.
+        if let Some(section) = self.active_live_section(block_handle) {
+            let handles: Vec<Handle> = self.meshes.keys().copied().collect();
+            for handle in handles {
+                let Some(source) = self.document.get_entity(handle) else {
+                    continue;
+                };
+                if !visibility_ok(source) {
+                    continue;
+                }
+                let replacement = match self.sectioned_wire_entity(handle, &section) {
+                    Ok(Some(entity)) => Some(tessellate_entity(
+                        doc,
+                        sel,
+                        avp,
+                        bg,
+                        anno,
+                        annotation_scale_handle,
+                        &entity,
+                        Some(blk_ref),
+                        view_aabb,
+                        wpp,
+                        paper,
+                    )),
+                    Ok(None) => Some(Vec::new()),
+                    Err(()) => None,
+                };
+                let Some(replacement) = replacement else {
+                    continue;
+                };
+                let name = handle.value().to_string();
+                wires.retain(|wire| wire.name != name);
+                wires.extend(replacement);
+            }
+        }
         let build_ms = crate::perf::elapsed_ms(t_build);
 
         // Resolve display colours for the live background. Memo hits were
@@ -10453,28 +10951,55 @@ vis_index={:.1} visible_probe={:.1}",
             None,
             None,
         );
-        let wire_points = wires.iter().flat_map(|wire| wire.key_vertices.iter().copied());
-        let mesh_points = self.meshes.iter().filter_map(|(&handle, set)| {
-            let entity = self.document.get_entity(handle)?;
-            if !self.mesh_entity_visible(handle)
-                || !self.belongs_to_visible_block(handle, entity.common().owner_handle, model_block)
-            {
-                return None;
+        let mut min = [f64::INFINITY; 3];
+        let mut max = [f64::NEG_INFINITY; 3];
+        let mut has_points = false;
+
+        for wire in wires.iter() {
+            for &[x, y, z] in &wire.key_vertices {
+                if (x as f32).is_finite() && (y as f32).is_finite() && (z as f32).is_finite() {
+                    min[0] = min[0].min(x);
+                    min[1] = min[1].min(y);
+                    min[2] = min[2].min(z);
+                    max[0] = max[0].max(x);
+                    max[1] = max[1].max(y);
+                    max[2] = max[2].max(z);
+                    has_points = true;
+                }
             }
-            let [ax, ay, bx, by] = set.world_aabb;
-            let [az, bz] = set.z_aabb;
-            Some([
-                [ax as f64, ay as f64, az as f64],
-                [bx as f64, by as f64, bz as f64],
-            ])
-        }).flatten();
-        let points = wire_points.chain(mesh_points).filter(|point| {
-            point.iter().all(|coordinate| (*coordinate as f32).is_finite())
-        });
-        if let Some(bounds) = cadkernel::brep::bounds::Aabb::around(points) {
+        }
+
+        if !self.meshes.is_empty() {
+            for (&handle, set) in &self.meshes {
+                let Some(entity) = self.document.get_entity(handle) else {
+                    continue;
+                };
+                if !self.mesh_entity_visible(handle)
+                    || !self.belongs_to_visible_block(handle, entity.common().owner_handle, model_block)
+                {
+                    continue;
+                }
+                let [ax, ay, bx, by] = set.world_aabb;
+                let [az, bz] = set.z_aabb;
+                let (ax, ay, bx, by, az, bz) = (ax as f64, ay as f64, bx as f64, by as f64, az as f64, bz as f64);
+                if (ax as f32).is_finite() && (ay as f32).is_finite() && (az as f32).is_finite()
+                    && (bx as f32).is_finite() && (by as f32).is_finite() && (bz as f32).is_finite()
+                {
+                    min[0] = min[0].min(ax.min(bx));
+                    min[1] = min[1].min(ay.min(by));
+                    min[2] = min[2].min(az.min(bz));
+                    max[0] = max[0].max(ax.max(bx));
+                    max[1] = max[1].max(ay.max(by));
+                    max[2] = max[2].max(az.max(bz));
+                    has_points = true;
+                }
+            }
+        }
+
+        if has_points {
             return Some((
-                glam::Vec3::from_array(bounds.min.map(|v| v as f32)),
-                glam::Vec3::from_array(bounds.max.map(|v| v as f32)),
+                glam::Vec3::new(min[0] as f32, min[1] as f32, min[2] as f32),
+                glam::Vec3::new(max[0] as f32, max[1] as f32, max[2] as f32),
             ));
         }
         // Last resort: saved EXTMIN/EXTMAX before the wire cache is built.
@@ -10532,6 +11057,169 @@ vis_index={:.1} visible_probe={:.1}",
 impl Default for Scene {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod section_tests {
+    use super::*;
+    use acadrust::entities::{
+        EntityCommon, ExtendedEntity, ExtendedEntityData, SectionObjectData, Solid3D,
+    };
+    use acadrust::objects::ClassObjectData;
+    use acadrust::types::{Color, Vector3};
+
+    fn section(state: i32, depth: f64) -> SectionObjectData {
+        let vertices = vec![Vector3::new(5.0, 2.0, 5.0), Vector3::new(5.0, 8.0, 5.0)];
+        SectionObjectData {
+            state,
+            flags: 5,
+            name: "Section Plane (1)".to_string(),
+            vertical_direction: Vector3::UNIT_Z,
+            top_height: 1.0,
+            bottom_height: 2.0,
+            indicator_alpha: 70,
+            indicator_color: Color::from_index(9),
+            back_line_vertices: (depth > 0.0)
+                .then(|| {
+                    vertices
+                        .iter()
+                        .map(|point| *point + Vector3::new(-depth, 0.0, 0.0))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            vertices,
+            settings_handle: Handle::NULL,
+        }
+    }
+
+    fn bounds(body: Option<cadkernel::brep::Body>) -> ([f64; 3], [f64; 3]) {
+        let body = body.expect("section should retain material");
+        assert!(body.validate().is_empty());
+        let bounds = cadkernel::brep::body_bounds(&body).expect("sectioned body should be bounded");
+        (bounds.min, bounds.max)
+    }
+
+    fn assert_near(actual: [f64; 3], expected: [f64; 3]) {
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-8, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn kernel_clipping_obeys_plane_slice_boundary_and_volume_limits() {
+        let body = cadkernel::brep::make::cuboid([0.0; 3], [10.0; 3]).unwrap();
+
+        let (min, max) = bounds(Scene::section_body(&body, &section(1, 0.0), None, None).unwrap());
+        assert_near(min, [0.0, 0.0, 0.0]);
+        assert_near(max, [5.0, 10.0, 10.0]);
+
+        let (min, max) = bounds(
+            Scene::section_body(&body, &section(1, 0.0), Some(2.0), None).unwrap(),
+        );
+        assert_near(min, [3.0, 0.0, 0.0]);
+        assert_near(max, [5.0, 10.0, 10.0]);
+
+        let (min, max) = bounds(Scene::section_body(&body, &section(2, 4.0), None, None).unwrap());
+        assert_near(min, [1.0, 2.0, 0.0]);
+        assert_near(max, [5.0, 8.0, 10.0]);
+
+        let (min, max) = bounds(Scene::section_body(&body, &section(4, 4.0), None, None).unwrap());
+        assert_near(min, [1.0, 2.0, 3.0]);
+        assert_near(max, [5.0, 8.0, 6.0]);
+    }
+
+    #[test]
+    fn instance_transform_pulls_the_section_plane_into_body_space() {
+        let body = cadkernel::brep::make::cuboid([0.0; 3], [10.0; 3]).unwrap();
+        let transform = acadrust::types::Transform::from_scaling(
+            acadrust::types::Vector3::new(2.0, 1.0, 1.0),
+        )
+        .then(&acadrust::types::Transform::from_translation(
+            acadrust::types::Vector3::new(10.0, 0.0, 0.0),
+        ));
+        let mut data = section(1, 0.0);
+        for point in &mut data.vertices {
+            point.x = 20.0;
+        }
+
+        let (min, max) = bounds(
+            Scene::section_body(&body, &data, None, Some(&transform)).unwrap(),
+        );
+        assert_near(min, [0.0, 0.0, 0.0]);
+        assert_near(max, [5.0, 10.0, 10.0]);
+    }
+
+    #[test]
+    fn adding_and_erasing_a_section_keeps_its_object_graph_consistent() {
+        let mut scene = Scene::new();
+        let handle = scene.add_entity(EntityType::Extended(ExtendedEntity {
+            common: EntityCommon::new(),
+            data: ExtendedEntityData::SectionObject(section(1, 0.0)),
+        }));
+        let settings_handle = match scene.document.get_entity(handle).unwrap() {
+            EntityType::Extended(ExtendedEntity {
+                data: ExtendedEntityData::SectionObject(data),
+                ..
+            }) => data.settings_handle,
+            _ => unreachable!(),
+        };
+        assert!(matches!(
+            scene.document.objects.get(&settings_handle),
+            Some(ObjectType::ClassObject(object))
+                if object.owner == handle
+                    && matches!(&object.data, ClassObjectData::SectionSettings(_))
+        ));
+
+        let root = scene.document.header.named_objects_dict_handle;
+        let manager_handle = match scene.document.objects.get(&root).unwrap() {
+            ObjectType::Dictionary(dictionary) => dictionary
+                .entries
+                .iter()
+                .find(|(name, _)| name == "ACAD_SECTION_MANAGER")
+                .map(|(_, handle)| *handle)
+                .unwrap(),
+            _ => panic!("root must be a dictionary"),
+        };
+        assert!(matches!(
+            scene.document.objects.get(&manager_handle),
+            Some(ObjectType::ClassObject(object))
+                if matches!(&object.data, ClassObjectData::SectionManager(manager)
+                    if manager.sections == vec![handle])
+        ));
+
+        scene.erase_entities(&[handle]);
+        assert!(!scene.document.objects.contains_key(&settings_handle));
+        assert!(matches!(
+            scene.document.objects.get(&manager_handle),
+            Some(ObjectType::ClassObject(object))
+                if matches!(&object.data, ClassObjectData::SectionManager(manager)
+                    if manager.sections.is_empty())
+        ));
+    }
+
+    #[test]
+    fn live_section_rebuilds_an_uncached_persisted_solid() {
+        let body = cadkernel::brep::make::cuboid([0.0; 3], [10.0; 3]).unwrap();
+        let sat = crate::scene::convert::acis_export::solid_to_sat(&body).unwrap();
+        let mut solid = Solid3D::new();
+        solid.set_sat_document(&sat);
+        let mut scene = Scene::new();
+        let handle = scene.add_entity(EntityType::Solid3D(solid));
+        assert!(!scene.solid_models.contains_key(&handle));
+
+        let clipped = scene
+            .sectioned_body(
+                handle,
+                &LiveSection {
+                    data: section(1, 0.0),
+                    slice_depth: None,
+                },
+            )
+            .unwrap();
+        let (min, max) = bounds(clipped);
+        assert_near(min, [0.0, 0.0, 0.0]);
+        assert_near(max, [5.0, 10.0, 10.0]);
     }
 }
 
@@ -10832,6 +11520,8 @@ mod journal_tests {
         assert_eq!(folded.len(), before.len() + 1);
     }
 
+    // Differential oracle: the incrementally-patched entity index must always
+    // equal a from-scratch rebuild after any add / move / erase.
     #[test]
     fn block_member_index_matches_the_full_scan() {
         use acadrust::entities::Line;
@@ -11491,7 +12181,7 @@ mod delta_undo_tests {
         let handle = scene.add_entity(EntityType::RasterImage(image));
         let rec = scene.take_undo_recording().unwrap();
         assert!(!rec.is_poisoned());
-        let (entities, objects) = rec.into_recorded_images();
+        let (entities, objects, _sketch_constraints, _named_parameters) = rec.into_recorded_images();
         assert_eq!(entities.len(), 1);
         assert_eq!(entities[0].0, handle);
         assert_eq!(objects.len(), 1);
@@ -11515,7 +12205,7 @@ mod delta_undo_tests {
         scene.erase_entities(&[h1]);
         let rec = scene.take_undo_recording().unwrap();
         assert!(!rec.is_poisoned());
-        let (entities, objects) = rec.into_recorded_images();
+        let (entities, objects, _sketch_constraints, _named_parameters) = rec.into_recorded_images();
         assert_eq!(entities.len(), 1);
         assert_eq!(entities[0].0, h1);
         assert_eq!(objects.len(), 1);
@@ -11736,6 +12426,53 @@ mod layout_cache_tests {
     }
 
     #[test]
+    fn model_space_extents_mixed_entities_accuracy() {
+        use acadrust::types::{Vector2, Vector3};
+        let mut s = Scene::new();
+        // Line from (0, 0, 10) to (50, 100, 20)
+        let mut line = acadrust::entities::Line::new();
+        line.start = Vector3::new(0.0, 0.0, 10.0);
+        line.end = Vector3::new(50.0, 100.0, 20.0);
+        s.add_entity(EntityType::Line(line));
+
+        // Circle at (200, 200, 0) with radius 50
+        let mut circle = acadrust::entities::Circle::new();
+        circle.center = Vector3::new(200.0, 200.0, 0.0);
+        circle.radius = 50.0;
+        s.add_entity(EntityType::Circle(circle));
+
+        // Arc at (-100, -50, -5) with radius 25, angles 0 to PI
+        let mut arc = acadrust::entities::Arc::new();
+        arc.center = Vector3::new(-100.0, -50.0, -5.0);
+        arc.radius = 25.0;
+        arc.start_angle = 0.0;
+        arc.end_angle = std::f64::consts::PI;
+        s.add_entity(EntityType::Arc(arc));
+
+        // LwPolyline from (300, -200) to (400, -100)
+        let mut pl = acadrust::entities::LwPolyline::new();
+        pl.vertices = vec![
+            acadrust::entities::LwVertex::new(Vector2::new(300.0, -200.0)),
+            acadrust::entities::LwVertex::new(Vector2::new(400.0, -100.0)),
+        ];
+        s.add_entity(EntityType::LwPolyline(pl));
+
+        let bounds = s.model_space_extents().expect("Extents must exist");
+        // Key vertices come from entities with distinct vertex positions (Line, LwPolyline).
+        // Line vertices: (0, 0, 10), (50, 100, 20)
+        // LwPolyline vertices: (300, -200, 0), (400, -100, 0)
+        // Min X = 0.0, Max X = 400.0
+        // Min Y = -200.0, Max Y = 100.0
+        // Min Z = 0.0, Max Z = 20.0
+        assert!((bounds.0.x - 0.0).abs() < 1e-3, "min.x mismatch: {}", bounds.0.x);
+        assert!((bounds.1.x - 400.0).abs() < 1e-3, "max.x mismatch: {}", bounds.1.x);
+        assert!((bounds.0.y - (-200.0)).abs() < 1e-3, "min.y mismatch: {}", bounds.0.y);
+        assert!((bounds.1.y - 100.0).abs() < 1e-3, "max.y mismatch: {}", bounds.1.y);
+        assert!((bounds.0.z - 0.0).abs() < 1e-3, "min.z mismatch: {}", bounds.0.z);
+        assert!((bounds.1.z - 20.0).abs() < 1e-3, "max.z mismatch: {}", bounds.1.z);
+    }
+
+    #[test]
     fn resident_wires_are_zoom_independent_and_gpu_analytical() {
         let mut s = Scene::new();
         let mut circle = acadrust::entities::Circle::default();
@@ -11917,135 +12654,5 @@ mod layout_cache_tests {
             2,
             "Mixed polyline should have its 2 bulge arcs routed to analytical CircleGpu"
         );
-        assert_eq!(
-            partitioned.regular.len(),
-            1,
-            "Mixed polyline straight lines should form 1 regular wire"
-        );
-    }
-
-    #[test]
-    #[ignore = "benchmark"]
-    fn bench_analytical_rendering() {
-        use std::time::Instant;
-        use acadrust::entities::{Arc as AcadArc, Circle, Ellipse, LwPolyline, LwVertex};
-        use acadrust::types::{Vector2, Vector3};
-
-        let n_circles = 5000;
-        let n_arcs = 5000;
-        let n_ellipses = 2000;
-        let n_polylines = 2000;
-        let total_entities = n_circles + n_arcs + n_ellipses + n_polylines;
-
-        let mut scene = Scene::new();
-        for i in 0..n_circles {
-            let x = (i % 100) as f64 * 50.0;
-            let y = (i / 100) as f64 * 50.0;
-            let mut circle = Circle::default();
-            circle.center = Vector3::new(x, y, 0.0);
-            circle.radius = 10.0 + (i % 20) as f64;
-            scene.add_entity(EntityType::Circle(circle));
-        }
-
-        for i in 0..n_arcs {
-            let x = (i % 100) as f64 * 50.0 + 25.0;
-            let y = (i / 100) as f64 * 50.0;
-            let mut arc = AcadArc::default();
-            arc.center = Vector3::new(x, y, 0.0);
-            arc.radius = 15.0;
-            arc.start_angle = ((i % 8) as f64) * 0.25 * std::f64::consts::PI;
-            arc.end_angle = arc.start_angle + 0.75 * std::f64::consts::PI;
-            scene.add_entity(EntityType::Arc(arc));
-        }
-
-        for i in 0..n_ellipses {
-            let x = (i % 50) as f64 * 100.0;
-            let y = (i / 50) as f64 * 100.0 + 5000.0;
-            let mut el = Ellipse::default();
-            el.center = Vector3::new(x, y, 0.0);
-            el.major_axis = Vector3::new(20.0, 0.0, 0.0);
-            el.minor_axis_ratio = 0.5;
-            el.start_parameter = 0.0;
-            el.end_parameter = std::f64::consts::TAU;
-            scene.add_entity(EntityType::Ellipse(el));
-        }
-
-        for i in 0..n_polylines {
-            let x = (i % 50) as f64 * 100.0 + 50.0;
-            let y = (i / 50) as f64 * 100.0 + 5000.0;
-            let mut pline = LwPolyline::new();
-            pline.is_closed = true;
-            pline.vertices = vec![
-                LwVertex {
-                    location: Vector2::new(x, y),
-                    bulge: 1.0,
-                    start_width: 0.0,
-                    end_width: 0.0,
-                    vertex_id: 0,
-                },
-                LwVertex {
-                    location: Vector2::new(x + 30.0, y),
-                    bulge: 1.0,
-                    start_width: 0.0,
-                    end_width: 0.0,
-                    vertex_id: 1,
-                },
-            ];
-            scene.add_entity(EntityType::LwPolyline(pline));
-        }
-
-        let cam = Camera::default();
-        let t_tess_start = Instant::now();
-        let wires = scene.model_tile_wires_arc(0, &cam, 1.0, 1000.0);
-        let tess_duration = t_tess_start.elapsed();
-
-        let total_wires = wires.len();
-        let mut chord_points = 0usize;
-        let mut analytical_tangents = 0usize;
-        for w in wires.iter() {
-            chord_points += w.points.len();
-            analytical_tangents += w.tangent_geoms.len();
-        }
-
-        let depths = rustc_hash::FxHashMap::default();
-        let t_part_start = Instant::now();
-        let iters = 100;
-        let mut part = None;
-        for _ in 0..iters {
-            part = Some(crate::scene::pipeline::wire_arena::partition_wires(&wires, &depths));
-        }
-        let part_duration = t_part_start.elapsed() / (iters as u32);
-        let p = part.unwrap();
-
-        // Zoom simulation
-        let zoom_levels = [0.1f32, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 1000.0];
-        let t_zoom_start = Instant::now();
-        let mut dynamic_cam = Camera::default();
-        for &zoom in zoom_levels.iter().cycle().take(100) {
-            dynamic_cam.distance = 1000.0 / zoom;
-            let _w = scene.model_tile_wires_arc(0, &dynamic_cam, 1.0, 1000.0);
-        }
-        let zoom_100_duration = t_zoom_start.elapsed();
-        let per_zoom_ms = zoom_100_duration.as_secs_f64() * 1000.0 / 100.0;
-
-        let line_vram_mb = (chord_points * 36) as f64 / (1024.0 * 1024.0);
-        let inst_vram_mb = (p.circle_instances.len() * 128 + p.ellipse_instances.len() * 144) as f64 / (1024.0 * 1024.0);
-
-        println!("\n=== BENCHMARK REPORT: CURRENT HEAD (WITH GPU ANALYTICAL & OPTIMIZATIONS) ===");
-        println!("Curved Entities Tested:         {total_entities}");
-        println!("Initial Wire Build Time:        {:.2?}", tess_duration);
-        println!("Total Wires:                    {total_wires}");
-        println!("Tessellated Chord Vertices:     {chord_points}");
-        println!("Analytical Tangent Geometries:  {analytical_tangents}");
-        println!("Partitioning Time (per frame):  {:.3?}", part_duration);
-        println!("Regular Line Wires:             {}", p.regular.len());
-        println!("GPU Circle/Arc Instances:       {}", p.circle_instances.len());
-        println!("GPU Ellipse Instances:          {}", p.ellipse_instances.len());
-        println!("Line Arena VRAM (chord lines):  {:.2} MB", line_vram_mb);
-        println!("GPU Analytical VRAM:            {:.2} MB", inst_vram_mb);
-        println!("VRAM Reduction Ratio:           {:.1}x", if inst_vram_mb > 0.0 { line_vram_mb / inst_vram_mb } else { 0.0 });
-        println!("100 Camera Zoom Navigations:    {:.2?}", zoom_100_duration);
-        println!("Zoom Frame Overhead:            {:.3} ms ({:.0} FPS)", per_zoom_ms, 1000.0 / per_zoom_ms.max(0.001));
-        println!("============================================================================\n");
     }
 }

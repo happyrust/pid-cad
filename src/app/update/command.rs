@@ -191,7 +191,11 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                             c.is_ascii_digit()
                                 || matches!(c, '.' | '-' | '+' | '*' | '/' | '^' | '%' | '(' | ')')
                         });
-                    if dyn_field_char && self.dyn_input && !self.tabs[i].dyn_fields.is_empty() {
+                    if dyn_field_char
+                        && self.command_line.input.is_empty()
+                        && self.dyn_input
+                        && !self.tabs[i].dyn_fields.is_empty()
+                    {
                         let a = self.tabs[i]
                             .dyn_active
                             .min(self.tabs[i].dyn_fields.len() - 1);
@@ -199,6 +203,18 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                             .buffer
                             .get_or_insert_with(String::new)
                             .push_str(&s);
+                        if self.tabs[i].active_grip.as_ref().is_some_and(|grip| {
+                            matches!(
+                                grip.mode,
+                                GripEditMode::Lengthen
+                                    | GripEditMode::Radius
+                                    | GripEditMode::ArcLength
+                                    | GripEditMode::RectangleWidth
+                                    | GripEditMode::RectangleHeight
+                            )
+                        }) {
+                            self.command_line.input.push_str(&s);
+                        }
                     } else {
                         // Command-line entry is shown uppercase — except in
                         // free-form text prompts, where the typed case is the
@@ -242,6 +258,18 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                         if buf.is_empty() {
                             self.tabs[i].dyn_fields[a].buffer = None;
                         }
+                        if self.tabs[i].active_grip.as_ref().is_some_and(|grip| {
+                            matches!(
+                                grip.mode,
+                                GripEditMode::Lengthen
+                                    | GripEditMode::Radius
+                                    | GripEditMode::ArcLength
+                                    | GripEditMode::RectangleWidth
+                                    | GripEditMode::RectangleHeight
+                            )
+                        }) {
+                            self.command_line.input.pop();
+                        }
                         return self.focus_cmd_input();
                     }
                 }
@@ -277,13 +305,55 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 }
                 // Grip-menu value prompt — consume the typed number and
                 // route it through `apply_grip_menu_value`.
+                // Interactive grip prompts are valid only while their matching
+                // grip edit is alive. Do not let a stale Radius / Lengthen /
+                // Arc Length prompt consume Enter or coordinates from a later
+                // drawing command.
+                let stale_interactive_grip_prompt = self.grip_pending.as_ref().is_some_and(|pending| {
+                    let expected_mode = match pending.action {
+                        crate::scene::model::object::GripMenuAction::Lengthen => {
+                            Some(GripEditMode::Lengthen)
+                        }
+                        crate::scene::model::object::GripMenuAction::Radius => {
+                            Some(GripEditMode::Radius)
+                        }
+                        crate::scene::model::object::GripMenuAction::ArcLength => {
+                            Some(GripEditMode::ArcLength)
+                        }
+                        crate::scene::model::object::GripMenuAction::RectangleWidth => {
+                            Some(GripEditMode::RectangleWidth)
+                        }
+                        crate::scene::model::object::GripMenuAction::RectangleHeight => {
+                            Some(GripEditMode::RectangleHeight)
+                        }
+                        _ => None,
+                    };
+                    expected_mode.is_some_and(|mode| {
+                        !self.tabs[self.active_tab].active_grip.as_ref().is_some_and(|grip| {
+                            grip.mode == mode
+                                && grip.handle == pending.handle
+                                && grip.grip_id == pending.grip_id
+                        })
+                    })
+                });
+                if stale_interactive_grip_prompt {
+                    self.grip_pending = None;
+                }
                 if let Some(pending) = self.grip_pending.take() {
                     let i = self.active_tab;
                     if self.reject_locked_edit(i, pending.handle) {
                         self.cancel_active_grip_edit();
                         return Task::none();
                     }
-                    let raw = crate::app::expr_eval::eval_to_string(self.command_line.input.trim());
+                    // Dynamic Input keeps numeric typing in its focused field.
+                    // Fall back to the command-line buffer so the established
+                    // prompt workflow remains unchanged when DYN is disabled.
+                    let dyn_value = self.tabs[i]
+                        .dyn_fields
+                        .iter()
+                        .find_map(|field| field.buffer.as_deref());
+                    let entered = dyn_value.unwrap_or(self.command_line.input.trim());
+                    let raw = crate::app::expr_eval::eval_to_string(entered);
                     self.command_line.input.clear();
                     let Ok(v) = raw.parse::<f64>() else {
                         self.command_line.push_error(crate::tf!(
@@ -293,15 +363,33 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                         self.grip_pending = Some(pending);
                         return self.focus_cmd_input();
                     };
-                    let interactive_lengthen = self.tabs[i]
+                    let interactive_value_grip = self.tabs[i]
                         .active_grip
                         .as_ref()
                         .is_some_and(|grip| {
-                            grip.mode == GripEditMode::Lengthen
+                            matches!(
+                                (grip.mode, pending.action),
+                                (
+                                    GripEditMode::Lengthen,
+                                    crate::scene::model::object::GripMenuAction::Lengthen,
+                                ) | (
+                                    GripEditMode::Radius,
+                                    crate::scene::model::object::GripMenuAction::Radius,
+                                ) | (
+                                    GripEditMode::ArcLength,
+                                    crate::scene::model::object::GripMenuAction::ArcLength,
+                                ) | (
+                                    GripEditMode::RectangleWidth,
+                                    crate::scene::model::object::GripMenuAction::RectangleWidth,
+                                ) | (
+                                    GripEditMode::RectangleHeight,
+                                    crate::scene::model::object::GripMenuAction::RectangleHeight,
+                                )
+                            )
                                 && grip.handle == pending.handle
                                 && grip.grip_id == pending.grip_id
                         });
-                    if interactive_lengthen {
+                    if interactive_value_grip {
                         self.cancel_active_grip_edit();
                     }
                     use crate::entities::traits::EntityTypeOps;
@@ -335,13 +423,37 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                     let i = self.active_tab;
 
                     if let Some(grip) = self.tabs[i].active_grip.clone() {
-                        if grip.mode == GripEditMode::Stretch {
+                        if matches!(grip.mode, GripEditMode::Stretch | GripEditMode::RectangleResize) {
                             let dyn_locked = self.tabs[i]
                                 .dyn_fields
                                 .iter()
                                 .any(|field| field.buffer.is_some());
 
-                            let target = if dyn_locked {
+                            let target = if matches!(grip.mode, GripEditMode::RectangleResize) {
+                                grip.rectangle_frame.map(|(opposite, width_axis, height_axis)| {
+                                    let cursor_delta = self.tabs[i].last_cursor_world - opposite;
+                                    let mut width = cursor_delta.dot(width_axis);
+                                    let mut height = cursor_delta.dot(height_axis);
+                                    for field in &self.tabs[i].dyn_fields {
+                                        let value = field
+                                            .buffer
+                                            .as_ref()
+                                            .and_then(|buffer| crate::app::expr_eval::eval_number(buffer));
+                                        if let Some(value) = value {
+                                            match field.role {
+                                                crate::command::DynRole::Width => {
+                                                    width = value.abs().copysign(width);
+                                                }
+                                                crate::command::DynRole::Height => {
+                                                    height = value.abs().copysign(height);
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                    opposite + width_axis * width + height_axis * height
+                                })
+                            } else if dyn_locked {
                                 // Distance only:
                                 //   keep the cursor's current direction.
                                 //
@@ -418,10 +530,32 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                                 }
                                 let delta = target - grip.last_world;
 
-                                let actions: Vec<_> = grip
-                                    .targets
-                                    .iter()
-                                    .map(|target_grip| {
+                                let actions: Vec<_> = if let Some((opposite, width_axis, height_axis)) = grip.rectangle_frame {
+                                    let opposite_id = (grip.grip_id + 2) % 4;
+                                    let mut edits = Vec::with_capacity(3);
+                                    for adjacent_id in [(opposite_id + 1) % 4, (opposite_id + 3) % 4] {
+                                        if let Some(original) = self.tabs[i]
+                                            .selected_grip_handles
+                                            .iter()
+                                            .zip(self.tabs[i].selected_grips.iter())
+                                            .find(|(owner, candidate)| **owner == grip.handle && candidate.id == adjacent_id)
+                                            .map(|(_, candidate)| candidate.world)
+                                        {
+                                            let d = original - opposite;
+                                            let axis = if d.dot(width_axis).abs() >= d.dot(height_axis).abs() {
+                                                width_axis
+                                            } else {
+                                                height_axis
+                                            };
+                                            edits.push((grip.handle, adjacent_id, GripApply::Absolute(
+                                                opposite + axis * (target - opposite).dot(axis),
+                                            )));
+                                        }
+                                    }
+                                    edits.push((grip.handle, grip.grip_id, GripApply::Absolute(target)));
+                                    edits
+                                } else {
+                                    grip.targets.iter().map(|target_grip| {
                                         let apply = if target_grip.is_translate {
                                             GripApply::Translate(delta)
                                         } else {
@@ -435,8 +569,8 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                                             target_grip.grip_id,
                                             apply,
                                         )
-                                    })
-                                    .collect();
+                                    }).collect()
+                                };
 
                                 for (handle, grip_id, apply) in actions {
                                     self.tabs[i]
@@ -566,6 +700,30 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                         .map(|c| c.is_free_text_step())
                         .unwrap_or(false);
                     let raw = self.command_line.input.trim().to_string();
+                    let is_mtp = raw.trim_start_matches('_').eq_ignore_ascii_case("MTP")
+                        || raw.trim_start_matches('_').eq_ignore_ascii_case("M2P");
+                    if is_mtp {
+                        let is_point_step = !self.tabs[i]
+                            .active_cmd
+                            .as_ref()
+                            .map(|c| c.input_kind().wants_text())
+                            .unwrap_or(true)
+                            || self.tabs[i]
+                                .active_cmd
+                                .as_ref()
+                                .map(|c| c.point_step_accepts_keywords())
+                                .unwrap_or(false);
+                        let not_entity_pick = !self.tabs[i]
+                            .active_cmd
+                            .as_ref()
+                            .map(|c| c.needs_entity_pick())
+                            .unwrap_or(false);
+                        if is_point_step && not_entity_pick {
+                            self.command_line.input.clear();
+                            self.start_mtp_modifier(i);
+                            return self.focus_cmd_input();
+                        }
+                    }
                     let text = if free_text {
                         raw
                     } else {
@@ -794,6 +952,9 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
     }
 
     pub(super) fn on_command_escape(&mut self) -> Task<Message> {
+        if self.ribbon.escape_extension() {
+            return Task::none();
+        }
                 // Esc drops an unconsumed one-shot snap override and closes
                 // its menu (#337). Falls through — Esc keeps its usual effect.
                 self.snap_override_popup = None;
@@ -1225,6 +1386,7 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 if matches!(
                     item.action,
                     GripMenuAction::Stretch
+                        | GripMenuAction::RectangleResize
                         | GripMenuAction::MoveWithText
                         | GripMenuAction::MoveWithDimLine
                         | GripMenuAction::MoveWithLeader
@@ -1282,12 +1444,59 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                                         || (!is_dimension && g.is_midpoint),
                                 )
                             };
-                        self.tabs[i].active_grip = Some(GripEdit::single(
-                            popup.handle,
-                            grip_id,
-                            is_translate,
-                            g.world,
-                        ));
+                        if matches!(item.action, GripMenuAction::RectangleResize) {
+                            let rectangle = self.tabs[i]
+                                .scene
+                                .document
+                                .get_entity(popup.handle)
+                                .and_then(|entity| {
+                                    let AcadEntityType::LwPolyline(polyline) = entity else {
+                                        return None;
+                                    };
+                                    let (frame, plane) =
+                                        crate::entities::lwpolyline::rectangle_frame(polyline)?;
+                                    let opposite = polyline
+                                        .vertices
+                                        .get((popup.grip_id + 2) % 4)?
+                                        .location;
+                                    Some((
+                                        glam::DVec3::from_array(
+                                            plane.point_at([opposite.x, opposite.y]),
+                                        ),
+                                        glam::DVec3::from_array(plane.vector_at(frame.width_axis))
+                                            .try_normalize()?,
+                                        glam::DVec3::from_array(plane.vector_at(frame.height_axis))
+                                            .try_normalize()?,
+                                    ))
+                                });
+                            if let Some((opposite, width_axis, height_axis)) = rectangle {
+                                if self.grip_originals.is_empty() {
+                                    self.grip_originals = self.tabs[i]
+                                        .scene
+                                        .document
+                                        .get_entity(popup.handle)
+                                        .cloned()
+                                        .map(|entity| vec![(popup.handle, entity)])
+                                        .unwrap_or_default();
+                                }
+                                self.tabs[i].active_grip = Some(GripEdit::rectangle_resize(
+                                    popup.handle,
+                                    popup.grip_id,
+                                    g.world,
+                                    opposite,
+                                    width_axis,
+                                    height_axis,
+                                ));
+                                self.sync_dyn_fields();
+                            }
+                        } else {
+                            self.tabs[i].active_grip = Some(GripEdit::single(
+                                popup.handle,
+                                grip_id,
+                                is_translate,
+                                g.world,
+                            ));
+                        }
                     }
                     return Task::none();
                 }
@@ -1306,7 +1515,14 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                         action: item.action,
                         label,
                     });
-                    if matches!(item.action, GripMenuAction::Lengthen) {
+                    if matches!(
+                        item.action,
+                        GripMenuAction::Lengthen
+                            | GripMenuAction::Radius
+                            | GripMenuAction::ArcLength
+                            | GripMenuAction::RectangleWidth
+                            | GripMenuAction::RectangleHeight
+                    ) {
                         if let Some((_, grip)) = self.tabs[i]
                             .selected_grip_handles
                             .iter()
@@ -1315,14 +1531,66 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                                 **owner == popup.handle && grip.id == popup.grip_id
                             })
                         {
-                            self.tabs[i].active_grip = Some(GripEdit::lengthen(
-                                popup.handle,
-                                popup.grip_id,
-                                grip.world,
-                            ));
+                            if self.grip_originals.is_empty() {
+                                self.grip_originals = self.tabs[i]
+                                    .scene
+                                    .document
+                                    .get_entity(popup.handle)
+                                    .cloned()
+                                    .map(|entity| vec![(popup.handle, entity)])
+                                    .unwrap_or_default();
+                            }
+                            self.tabs[i].active_grip = Some(match item.action {
+                                GripMenuAction::Radius => GripEdit::radius(
+                                    popup.handle,
+                                    popup.grip_id,
+                                    grip.world,
+                                ),
+                                GripMenuAction::ArcLength => GripEdit::arc_length(
+                                    popup.handle,
+                                    popup.grip_id,
+                                    grip.world,
+                                ),
+                                GripMenuAction::RectangleWidth => GripEdit::rectangle_width(
+                                    popup.handle,
+                                    popup.grip_id,
+                                    grip.world,
+                                ),
+                                GripMenuAction::RectangleHeight => GripEdit::rectangle_height(
+                                    popup.handle,
+                                    popup.grip_id,
+                                    grip.world,
+                                ),
+                                _ => GripEdit::lengthen(
+                                    popup.handle,
+                                    popup.grip_id,
+                                    grip.world,
+                                ),
+                            });
                         }
-                        self.command_line
-                            .push_info(crate::t!("Specify point or enter distance:").as_ref());
+                        // Popup actions do not pass through the normal grip
+                        // press handler, which is where dynamic fields are
+                        // usually seeded. Build the value field
+                        // immediately so it is visible before the next mouse
+                        // move (and so keyboard input has a field to target).
+                        self.sync_dyn_fields();
+                        if matches!(item.action, GripMenuAction::Radius) {
+                            self.command_line.push_info(
+                                crate::t!("Specify point or enter radius:").as_ref(),
+                            );
+                        } else if matches!(item.action, GripMenuAction::ArcLength) {
+                            self.command_line.push_info(
+                                crate::t!("Specify point or enter arc length:").as_ref(),
+                            );
+                        } else if matches!(item.action, GripMenuAction::RectangleWidth) {
+                            self.command_line.push_info("Specify point or enter width:");
+                        } else if matches!(item.action, GripMenuAction::RectangleHeight) {
+                            self.command_line.push_info("Specify point or enter height:");
+                        } else {
+                            self.command_line.push_info(
+                                crate::t!("Specify point or enter distance:").as_ref(),
+                            );
+                        }
                     } else {
                         self.command_line.push_info(crate::tf!("{label}:").as_ref());
                     }
@@ -1443,24 +1711,25 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                     }
                 }
                 // One-shot action — apply immediately.
-                let unchanged = self.tabs[i]
-                    .scene
-                    .document
-                    .get_entity(popup.handle)
-                    .is_some_and(|entity| match (item.action, entity) {
-                        (GripMenuAction::ShowFit, acadrust::EntityType::Spline(spline)) => {
-                            !spline.cv_frame_visible
-                                && crate::entities::spline::uses_fit_method(spline)
-                        }
-                        (
-                            GripMenuAction::ShowControlVertices,
-                            acadrust::EntityType::Spline(spline),
-                        ) => {
-                            spline.cv_frame_visible
-                                || !crate::entities::spline::uses_fit_method(spline)
-                        }
-                        _ => false,
-                    });
+                let unchanged = item.label.starts_with('✓')
+                    || self.tabs[i]
+                        .scene
+                        .document
+                        .get_entity(popup.handle)
+                        .is_some_and(|entity| match (item.action, entity) {
+                            (GripMenuAction::ShowFit, acadrust::EntityType::Spline(spline)) => {
+                                !spline.cv_frame_visible
+                                    && crate::entities::spline::uses_fit_method(spline)
+                            }
+                            (
+                                GripMenuAction::ShowControlVertices,
+                                acadrust::EntityType::Spline(spline),
+                            ) => {
+                                spline.cv_frame_visible
+                                    || !crate::entities::spline::uses_fit_method(spline)
+                            }
+                            _ => false,
+                        });
                 if unchanged {
                     return Task::none();
                 }
@@ -1857,9 +2126,6 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                             if let Some(acadrust::EntityType::Hatch(dxf)) =
                                 self.tabs[i].scene.document.get_entity_mut(handle)
                             {
-                                let old_origin = dxf.pattern.lines.first().map(|line| {
-                                    (line.base_point.x, line.base_point.y)
-                                });
                                 let mut pattern = hatch_patterns::build_dxf_pattern(entry);
                                 // Stored pattern lines are final world-space
                                 // geometry. Preserve the selected hatch's scale,
@@ -1873,17 +2139,8 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                                     &mut pattern,
                                     dxf.pattern_angle,
                                 );
-                                if let (Some((old_x, old_y)), Some(new_origin)) =
-                                    (old_origin, pattern.lines.first())
-                                {
-                                    let dx = old_x - new_origin.base_point.x;
-                                    let dy = old_y - new_origin.base_point.y;
-                                    crate::entities::hatch::translate_pattern_geometry(
-                                        &mut pattern,
-                                        dx,
-                                        dy,
-                                    );
-                                }
+                                let origin = dxf.pattern_origin();
+                                crate::entities::hatch::translate_pattern_geometry(&mut pattern, origin.x, origin.y);
                                 dxf.pattern = pattern;
                                 dxf.is_solid = matches!(
                                     entry.gpu,
@@ -2002,7 +2259,51 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
             }
             self.push_undo_snapshot(i, "CHPROP");
 
-            if crate::scene::model::solid_history::is_loft_geometry_choice(field) {
+            if crate::scene::model::solid_history::is_surface_property_choice(field) {
+                use crate::scene::model::solid_history::{
+                    PROP_SURFACE_MAINTAIN_ASSOCIATIVITY, PROP_SURFACE_SHOW_ASSOCIATIVITY,
+                    PROP_SURFACE_WIREFRAME_TYPE,
+                };
+                for &handle in &handles {
+                    if self.tabs[i].scene.is_layer_locked(handle) {
+                        continue;
+                    }
+                    let Some(mut state) = self.tabs[i]
+                        .scene
+                        .document
+                        .get_entity(handle)
+                        .and_then(|entity| match entity {
+                            acadrust::EntityType::Surface(surface) => Some(
+                                crate::entities::solid3d::surface_property_state(surface),
+                            ),
+                            _ => None,
+                        })
+                    else {
+                        continue;
+                    };
+                    match field {
+                        PROP_SURFACE_WIREFRAME_TYPE => {
+                            state.isolines = !value.eq_ignore_ascii_case("Isoparms")
+                        }
+                        PROP_SURFACE_MAINTAIN_ASSOCIATIVITY => {
+                            state.maintain_associativity = value.eq_ignore_ascii_case("Yes")
+                        }
+                        PROP_SURFACE_SHOW_ASSOCIATIVITY => {
+                            state.show_associativity = value.eq_ignore_ascii_case("Yes")
+                        }
+                        _ => continue,
+                    }
+                    crate::scene::view::dispatch::set_entity_xdata(
+                        &mut self.tabs[i].scene.document,
+                        handle,
+                        crate::entities::solid3d::SURFACE_PROPERTIES_APP,
+                        Some(crate::entities::solid3d::surface_property_xdata_values(state)),
+                    );
+                    if field == PROP_SURFACE_WIREFRAME_TYPE {
+                        self.tabs[i].scene.reseed_derived_caches(handle);
+                    }
+                }
+            } else if crate::scene::model::solid_history::is_loft_geometry_choice(field) {
                 // These choices change the generated body, not just history
                 // flags. Use the same transactional rebuild as numeric edits.
                 for &handle in &handles {
@@ -2624,7 +2925,28 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 } else {
                     match field {
                         "transparency" => {
-                            self.tabs[i].dirty = true;
+                            let Some(transparency) = crate::scene::creation_style::parse_current_transparency(&value) else {
+                                self.command_line.push_error("Transparency: expected ByLayer, ByBlock, or an integer from 0 to 90.");
+                                self.refresh_properties();
+                                return Task::none();
+                            };
+                            if self.tabs[i].scene.document.current_entity_transparency()
+                                != transparency
+                            {
+                                self.push_undo_snapshot(i, "CETRANSPARENCY");
+                                if self.tabs[i]
+                                    .scene
+                                    .document
+                                    .set_current_entity_transparency(transparency)
+                                {
+                                    self.tabs[i].dirty = true;
+                                } else {
+                                    self.discard_last_undo_entry(i);
+                                    self.command_line.push_error(
+                                        "CETRANSPARENCY: drawing variable dictionary is invalid.",
+                                    );
+                                }
+                            }
                             self.refresh_properties();
                         }
                         "material" => {
@@ -2984,6 +3306,10 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                                                         );
                                                     }
                                                 }
+                                            }
+                                            if matches!(field, "srf_u_isolines" | "srf_v_isolines")
+                                            {
+                                                self.tabs[i].scene.reseed_derived_caches(handle);
                                             }
                                         }
                                     }

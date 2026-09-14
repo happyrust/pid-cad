@@ -43,6 +43,7 @@ static OSNAP_NEAREST: &[u8] = include_bytes!("../../assets/icons/osnap/nearest.s
 static OSNAP_APPARENT: &[u8] = include_bytes!("../../assets/icons/osnap/apparent.svg");
 static OSNAP_PARALLEL: &[u8] = include_bytes!("../../assets/icons/osnap/parallel.svg");
 static OSNAP_GRID: &[u8] = include_bytes!("../../assets/icons/osnap/grid.svg");
+static OSNAP_MTP: &[u8] = include_bytes!("../../assets/icons/osnap/mtp.svg");
 
 static LAY_ON: &[u8] = include_bytes!("../../assets/icons/layers/layon.svg");
 static LAY_OFF: &[u8] = include_bytes!("../../assets/icons/layers/layoff.svg");
@@ -158,7 +159,8 @@ thread_local! {
 /// trigger a `RefCell` panic on the second `borrow_mut`, because
 /// no `borrow_mut` is held while parsing runs. (The same
 /// `thread_local!` + `RefCell` shape is used by `SEMANTIC_CACHE`.)
-fn themed_handle(bytes: &'static [u8]) -> svg::Handle {
+#[doc(hidden)]
+pub fn themed_handle(bytes: &'static [u8]) -> svg::Handle {
     let key = (bytes.as_ptr() as usize, bytes.len());
     if let Some(handle) = THEMED_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
         return handle;
@@ -593,6 +595,11 @@ pub fn osnap(snap: crate::snap::SnapType) -> &'static [u8] {
         // Not shown in the snap menu; fall back to a neutral marker.
         S::ObjectPick => OSNAP_NEAREST,
     }
+}
+
+/// MTP menu icon: modal 2-pick modifier, not a persistent `SnapType` mode.
+pub fn mtp_icon() -> &'static [u8] {
+    OSNAP_MTP
 }
 
 /// Layer visibility icon bytes (on / off).

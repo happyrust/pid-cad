@@ -35,6 +35,12 @@ pub(in crate::app) use overlay::{MTEXT_TEXT_ID, TEXT_INLINE_ID};
 pub(in crate::app) const VIEWPORT_CAPTURE_BOUNDS_ID: &str = "viewport-capture-bounds";
 
 const VIEWCUBE_HIT_SIZE: f32 = VIEWCUBE_REGION_PX;
+static MOBILE_SPONSOR_IMAGE: std::sync::LazyLock<iced::widget::image::Handle> =
+    std::sync::LazyLock::new(|| {
+        iced::widget::image::Handle::from_bytes(
+            include_bytes!("../../../assets/sponsors/cad-editor-mobile-dwg-viewer.png").as_slice(),
+        )
+    });
 
 /// Background used by drafting overlays in model or paper space.
 fn crosshair_background(tab: &DocumentTab, is_paper: bool) -> [f32; 4] {
@@ -162,7 +168,7 @@ pub(super) struct RenderModeChoice(pub acadrust::entities::ViewportRenderMode);
 
 impl std::fmt::Display for RenderModeChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(crate::modules::view::visual_style::label_for(self.0))
+        f.write_str(crate::t!(crate::modules::view::visual_style::label_for(self.0)).as_ref())
     }
 }
 
@@ -489,8 +495,14 @@ bg={bg_ms:.1}ms n={view_count}"
             let snap_ext_base = tab.snap_result.and_then(|s| s.extension_base);
             let snap_ext_base2 = tab.snap_result.and_then(|s| s.extension_base2);
 
+            let show_grips = tab.active_cmd.is_none()
+                || tab
+                    .active_cmd
+                    .as_ref()
+                    .is_some_and(|cmd| cmd.name() == "STRETCH");
+
             let grips: Vec<crate::ui::overlay::GripMarker> =
-                if tab.active_cmd.is_none() && !tab.selected_grips.is_empty() {
+                if show_grips && !tab.selected_grips.is_empty() {
                     let (vw, vh) = sel_ref.vp_size;
                     // Overlays project through the active tile's camera, so
                     // they must use the active tile's screen rectangle (with
@@ -805,6 +817,73 @@ bg={bg_ms:.1}ms n={view_count}"
             let point_cursor = tab.active_cmd.as_ref().is_some_and(|cmd| {
                 !cmd.needs_entity_pick() && !cmd.is_selection_gathering()
             });
+            // Constraint glyphs are displayed in model space only.
+            let constraint_glyphs: Vec<(iced::Point, [f32; 2], String, bool)> = if is_paper {
+                Vec::new()
+            } else {
+                let (vw, vh) = sel_ref.vp_size;
+                let scope = tab.current_sketch_scope();
+                match tab.scene.sketch_constraint_set(scope) {
+                    Some(set) if !set.constraints.is_empty() => {
+                        let edit_frame = tab.scene.viewport_edit_frame((vw, vh));
+                        let bounds = match &edit_frame {
+                            Some((_, full)) => *full,
+                            None => tab.scene.active_model_tile_bounds(vw, vh),
+                        };
+                        let (view_rot, eye) = if let Some((cam, _)) = &edit_frame {
+                            (cam.view_proj_rte(bounds), cam.eye())
+                        } else {
+                            let cam = tab.scene.camera.borrow();
+                            (cam.view_proj_rte(bounds), cam.eye())
+                        };
+                        set.constraints
+                            .iter()
+                            .filter(|c| c.enabled)
+                            .filter(|c| tab.scene.is_sketch_constraint_visible(scope, c.id))
+                            .filter_map(|c| {
+                                let (anchor, outward) =
+                                    crate::scene::sketch_constraints::glyph_placement(
+                                        &tab.scene.document,
+                                        c,
+                                    )?;
+                                let screen = crate::scene::pick::grip::project_rte(
+                                    glam::DVec3::new(anchor.x, anchor.y, anchor.z),
+                                    view_rot,
+                                    eye,
+                                    bounds,
+                                )?;
+                                let outward_screen = crate::scene::pick::grip::project_rte(
+                                    glam::DVec3::new(
+                                        anchor.x + outward.x,
+                                        anchor.y + outward.y,
+                                        anchor.z + outward.z,
+                                    ),
+                                    view_rot,
+                                    eye,
+                                    bounds,
+                                )?;
+                                let direction = (outward_screen - screen)
+                                    .normalize_or(glam::Vec2::NEG_Y);
+                                let point = iced::Point::new(
+                                    bounds.x + screen.x,
+                                    bounds.y + screen.y,
+                                );
+                                let is_conflicting =
+                                    set.conflicts.iter().any(|(id, _)| *id == c.id);
+                                let label = if self.show_constraint_values {
+                                    crate::scene::sketch_constraints::glyph_label(c)
+                                } else {
+                                    c.kind.glyph_symbol().to_string()
+                                };
+                                point.x.is_finite().then(|| {
+                                    (point, direction.to_array(), label, is_conflicting)
+                                })
+                            })
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                }
+            };
             crate::ui::overlay::selection_overlay(
                 std::sync::Arc::clone(&tab.scene.selection),
                 snap_info,
@@ -847,6 +926,7 @@ bg={bg_ms:.1}ms n={view_count}"
                     grip_hot: self.model_space.grip_hot,
                     grip_hover: self.model_space.grip_hover,
                 },
+                constraint_glyphs,
             )
         };
 
@@ -927,7 +1007,96 @@ bg={bg_ms:.1}ms n={view_count}"
                 // A command may drive a typed scalar by mouse (e.g. a
                 // perpendicular distance to a picked object); show that live
                 // value in the box until the user types over it.
-                let live = tab.active_cmd.as_ref().and_then(|c| c.dyn_live_value(w));
+                let live = tab.active_cmd.as_ref().and_then(|c| c.dyn_live_value(w)).or_else(|| {
+                    let grip = tab.active_grip.as_ref()?;
+                    let action = match grip.mode {
+                        crate::scene::pick::grip::GripEditMode::Lengthen => {
+                            crate::scene::model::object::GripMenuAction::Lengthen
+                        }
+                        crate::scene::pick::grip::GripEditMode::Radius => {
+                            crate::scene::model::object::GripMenuAction::Radius
+                        }
+                        crate::scene::pick::grip::GripEditMode::ArcLength => {
+                            crate::scene::model::object::GripMenuAction::ArcLength
+                        }
+                        crate::scene::pick::grip::GripEditMode::RectangleWidth => {
+                            crate::scene::model::object::GripMenuAction::RectangleWidth
+                        }
+                        crate::scene::pick::grip::GripEditMode::RectangleHeight => {
+                            crate::scene::model::object::GripMenuAction::RectangleHeight
+                        }
+                        _ => return None,
+                    };
+                    let original = self
+                        .grip_originals
+                        .iter()
+                        .find(|(handle, _)| *handle == grip.handle)
+                        .map(|(_, entity)| entity)?;
+                    crate::scene::view::dispatch::grip_menu_point_value(
+                        original,
+                        grip.grip_id,
+                        action,
+                        w,
+                    )
+                });
+                let rectangle_values = tab
+                    .active_grip
+                    .as_ref()
+                    .and_then(|grip| grip.rectangle_frame)
+                    .map(|(opposite, width_axis, height_axis)| {
+                        let delta = w - opposite;
+                        (delta.dot(width_axis).abs(), delta.dot(height_axis).abs())
+                    });
+                let rectangle_label_screens = tab
+                    .active_grip
+                    .as_ref()
+                    .and_then(|grip| grip.rectangle_frame)
+                    .and_then(|(opposite, width_axis, height_axis)| {
+                        let delta = w - opposite;
+                        let width = delta.dot(width_axis);
+                        let height = delta.dot(height_axis);
+                        let width_center = opposite + width_axis * (width * 0.5);
+                        let height_center = opposite
+                            + width_axis * width
+                            + height_axis * (height * 0.5);
+                        let rectangle_center = opposite
+                            + width_axis * (width * 0.5)
+                            + height_axis * (height * 0.5);
+                        let (vw, vh) = tab.scene.selection.borrow().vp_size;
+                        let (camera, bounds) = tab
+                            .scene
+                            .viewport_edit_frame((vw, vh))
+                            .unwrap_or_else(|| {
+                                (
+                                    tab.scene.camera.borrow().clone(),
+                                    tab.scene.active_model_tile_bounds(vw, vh),
+                                )
+                            });
+                        let project = |point| {
+                            camera.project(point, bounds).map(|screen| iced::Point::new(
+                                bounds.x + screen.x,
+                                bounds.y + screen.y,
+                            ))
+                        };
+                        let center = project(rectangle_center)?;
+                        let offset_from_center = |side: iced::Point, pixels: f32| {
+                            let dx = side.x - center.x;
+                            let dy = side.y - center.y;
+                            let length = dx.hypot(dy);
+                            if length > 1.0e-3 {
+                                iced::Point::new(
+                                    side.x + dx / length * pixels,
+                                    side.y + dy / length * pixels,
+                                )
+                            } else {
+                                side
+                            }
+                        };
+                        Some((
+                            offset_from_center(project(width_center)?, 14.0),
+                            offset_from_center(project(height_center)?, 18.0),
+                        ))
+                    });
                 let boxes: Vec<crate::ui::overlay::DynBox> = tab
                     .dyn_fields
                     .iter()
@@ -935,6 +1104,14 @@ bg={bg_ms:.1}ms n={view_count}"
                     .map(|(idx, f)| {
                         let value = match (&f.buffer, live) {
                             (Some(b), _) => b.clone(),
+                            (None, _) if rectangle_values.is_some() => {
+                                let (width, height) = rectangle_values.unwrap();
+                                match f.role {
+                                    crate::command::DynRole::Width => format!("{width:.4}"),
+                                    crate::command::DynRole::Height => format!("{height:.4}"),
+                                    _ => String::new(),
+                                }
+                            }
                             // An angle step with a command-supplied live value
                             // (ARC span / direction) shows it in degrees.
                             (None, Some(lv)) if f.component == DynComponent::Angle => {
@@ -963,6 +1140,13 @@ bg={bg_ms:.1}ms n={view_count}"
                             active: idx == tab.dyn_active,
                             locked: f.locked(),
                             role: f.role,
+                            center: rectangle_label_screens.and_then(|(width, height)| {
+                                match f.role {
+                                    crate::command::DynRole::Width => Some(width),
+                                    crate::command::DynRole::Height => Some(height),
+                                    _ => None,
+                                }
+                            }),
                         }
                     })
                     .collect();
@@ -1604,6 +1788,11 @@ bg={bg_ms:.1}ms n={view_count}"
             };
             if let Some(p) = ctx_pos {
                 let has_cmd = tab.active_cmd.is_some();
+                // Same guard as typed MTP/M2P and SnapOverrideMtp.
+                let has_point_step = tab.active_cmd.as_ref().is_some_and(|c| {
+                    (!c.input_kind().wants_text() || c.point_step_accepts_keywords())
+                        && !c.needs_entity_pick()
+                });
                 let has_selection = !tab.scene.selected.is_empty();
                 let selection_in_group = tab.scene.selection_in_group();
                 let isolation_active = tab.scene.is_isolation_active();
@@ -1624,6 +1813,7 @@ bg={bg_ms:.1}ms n={view_count}"
                         selection_in_group,
                         isolation_active,
                         draworder_open,
+                        has_point_step,
                     },
                     last_cmds,
                 ));
@@ -1692,17 +1882,30 @@ bg={bg_ms:.1}ms n={view_count}"
         // viewport stack rather than as a separate row in the main
         // column — frees up vertical space when no command is active
         // and keeps the input close to where the cursor is drawing.
-        // Autocomplete shows only when no command is collecting its
-        // own input (otherwise typed prefixes are coordinates / values).
-        let allow_autocomplete = tab.active_cmd.is_none();
+        // Autocomplete shows only when no command or grip-menu action is
+        // collecting its own input. A pending Lengthen / Radius / Arc Length
+        // value is numeric input, not the prefix of a new command (for example,
+        // `3` must not open the 3DALIGN / 3DARRAY suggestions).
+        let allow_autocomplete = tab.active_cmd.is_none() && self.grip_pending.is_none();
         // Dynamic input captures keystrokes when its fields are showing,
         // so the command-line field must release focus / its on_input.
         // The MText preview also captures keystrokes (typing edits it), so the
         // command line must likewise release its on_input there.
+        let interactive_value_grip = tab.active_grip.as_ref().is_some_and(|grip| {
+            matches!(
+                grip.mode,
+                crate::scene::pick::grip::GripEditMode::Lengthen
+                    | crate::scene::pick::grip::GripEditMode::Radius
+                    | crate::scene::pick::grip::GripEditMode::ArcLength
+                    | crate::scene::pick::grip::GripEditMode::RectangleWidth
+                    | crate::scene::pick::grip::GripEditMode::RectangleHeight
+            )
+        });
         let dyn_capturing =
             (self.dyn_input
                 && (tab.active_cmd.is_some() || tab.active_grip.is_some())
-                && !tab.dyn_fields.is_empty())
+                && !tab.dyn_fields.is_empty()
+                && !interactive_value_grip)
                 || self.mtext_editor.as_ref().is_some_and(|e| e.show_preview)
                 || self.text_inline.is_some();
         // The workspace row is: left edge stack, viewport, right edge stack.
@@ -2060,6 +2263,9 @@ bg={bg_ms:.1}ms n={view_count}"
                         self.selection_cycling,
                         &self.statusbar_config,
                         status_menu_data,
+                        tab.scene.sketch_constraint_set(tab.current_sketch_scope()).and_then(|s| s.dof),
+                        tab.scene.sketch_constraint_set(tab.current_sketch_scope()).map(|s| s.conflicts.len()).unwrap_or(0),
+                        &self.gpu_status,
                     )
                 })
                 .width(Fill)
@@ -2314,6 +2520,18 @@ impl OpenCADStudio {
         } else {
             Subscription::none()
         };
+        // Graphics verdict: a device appears inside the first frame and a
+        // dropped scene shows up as draws without one, but neither arrives
+        // as a message. Tick until the verdict is in — one frame on a
+        // working GPU, three on none — then stop. The Start page draws no
+        // viewport, so there is nothing to learn there.
+        let gpu_probe = if matches!(self.gpu_status, crate::scene::pipeline::GpuStatus::Unknown)
+            && !self.tabs[self.active_tab].is_start
+        {
+            window::frames().map(Message::Tick)
+        } else {
+            Subscription::none()
+        };
         let thumbnail_capture = if self.thumbnail_capture_clean {
             window::frames().map(|_| Message::ThumbnailCaptureFrame)
         } else {
@@ -2520,6 +2738,7 @@ impl OpenCADStudio {
             grip_dwell,
             hover_dwell,
             nav_settle,
+            gpu_probe,
             thumbnail_capture,
             caret_blink,
             web_fonts,
@@ -2943,7 +3162,7 @@ pub(super) fn doc_tab_bar<'a>(
     let new_btn = button(text("+").size(14))
         .on_press(Message::TabNew)
         .height(iced::Length::Fixed(28.0))
-        .padding([5, 10])
+        .padding([4, 8])
         .style(|theme: &Theme, status| {
             let palette = theme.palette();
             let hovered = matches!(
@@ -2973,7 +3192,7 @@ pub(super) fn doc_tab_bar<'a>(
                 top: 0.0,
                 right: 0.0,
                 bottom: 0.0,
-                left: 6.0,
+                left: 2.0,
             })
             .into(),
     );
@@ -3320,6 +3539,18 @@ fn start_page_content<'a>(
         )
         .interaction(iced::mouse::Interaction::Pointer)
         .on_press(Message::OpenUrl("https://open-aec.com/".to_string())),
+        mouse_area(
+            container(
+                iced::widget::image(MOBILE_SPONSOR_IMAGE.clone())
+                .width(Fill)
+                .content_fit(iced::ContentFit::Contain),
+            )
+            .width(Fill),
+        )
+        .interaction(iced::mouse::Interaction::Pointer)
+        .on_press(Message::OpenUrl(
+            "https://play.google.com/store/apps/details?id=net.cadeditor.app".to_string(),
+        )),
     ]
     .spacing(10)
     .align_x(iced::alignment::Horizontal::Center)
@@ -3334,7 +3565,7 @@ fn start_page_content<'a>(
         container(secondary_row).center_x(Fill),
         Space::new().height(iced::Length::Fixed(10.0)),
         container(reddit_btn).center_x(Fill),
-        Space::new().height(Fill),
+        Space::new().height(iced::Length::Fixed(20.0)),
         sponsors,
         Space::new().height(iced::Length::Fixed(52.0)),
     ]

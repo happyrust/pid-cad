@@ -13,11 +13,18 @@ pub const GRIP_HALF_PX: f32 = 5.0;
 /// Screen offset for dropdown selectors anchored to a vertex.
 pub const GRIP_DROPDOWN_OFFSET_X_PX: f32 = 24.0;
 pub const GRIP_DROPDOWN_OFFSET_Y_PX: f32 = 27.0;
+pub const GRIP_ADJACENT_DROPDOWN_OFFSET_X_PX: f32 = 12.0;
 
 fn marker_screen_position(mut point: Point, shape: GripShape) -> Point {
-    if shape == GripShape::Dropdown {
-        point.x += GRIP_DROPDOWN_OFFSET_X_PX;
-        point.y += GRIP_DROPDOWN_OFFSET_Y_PX;
+    match shape {
+        GripShape::Dropdown => {
+            point.x += GRIP_DROPDOWN_OFFSET_X_PX;
+            point.y += GRIP_DROPDOWN_OFFSET_Y_PX;
+        }
+        GripShape::DropdownAdjacent => {
+            point.x += GRIP_ADJACENT_DROPDOWN_OFFSET_X_PX;
+        }
+        _ => {}
     }
     point
 }
@@ -41,12 +48,19 @@ pub struct GripEdit {
     pub axis: Option<DVec3>,
     /// Every hot grip moved by this edit. A normal grip edit contains one target.
     pub targets: Vec<GripTarget>,
+    /// Opposite corner and local width/height axes for rectangle corner resize.
+    pub rectangle_frame: Option<(DVec3, DVec3, DVec3)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GripEditMode {
     Stretch,
     Lengthen,
+    Radius,
+    ArcLength,
+    RectangleWidth,
+    RectangleHeight,
+    RectangleResize,
 }
 
 #[derive(Clone, Debug)]
@@ -77,12 +91,51 @@ impl GripEdit {
                 is_translate,
                 last_world: world,
             }],
+            rectangle_frame: None,
         }
     }
 
     pub fn lengthen(handle: Handle, grip_id: usize, world: DVec3) -> Self {
         let mut edit = Self::single(handle, grip_id, false, world);
         edit.mode = GripEditMode::Lengthen;
+        edit
+    }
+
+    pub fn radius(handle: Handle, grip_id: usize, world: DVec3) -> Self {
+        let mut edit = Self::single(handle, grip_id, false, world);
+        edit.mode = GripEditMode::Radius;
+        edit
+    }
+
+    pub fn arc_length(handle: Handle, grip_id: usize, world: DVec3) -> Self {
+        let mut edit = Self::single(handle, grip_id, false, world);
+        edit.mode = GripEditMode::ArcLength;
+        edit
+    }
+
+    pub fn rectangle_width(handle: Handle, grip_id: usize, world: DVec3) -> Self {
+        let mut edit = Self::single(handle, grip_id, false, world);
+        edit.mode = GripEditMode::RectangleWidth;
+        edit
+    }
+
+    pub fn rectangle_height(handle: Handle, grip_id: usize, world: DVec3) -> Self {
+        let mut edit = Self::single(handle, grip_id, false, world);
+        edit.mode = GripEditMode::RectangleHeight;
+        edit
+    }
+
+    pub fn rectangle_resize(
+        handle: Handle,
+        grip_id: usize,
+        world: DVec3,
+        opposite: DVec3,
+        width_axis: DVec3,
+        height_axis: DVec3,
+    ) -> Self {
+        let mut edit = Self::single(handle, grip_id, false, world);
+        edit.mode = GripEditMode::RectangleResize;
+        edit.rectangle_frame = Some((opposite, width_axis, height_axis));
         edit
     }
 }
@@ -217,8 +270,10 @@ pub fn find_hit_grip(
 /// Project an f64 world point with an explicit relative-to-eye `(view_rot,
 /// eye)` pair — the camera-less form of `Camera::project`. Used by the
 /// in-viewport editing path, which supplies a *composed* model→screen view
-/// (see `Scene::composed_viewport_view`) instead of a real camera.
-fn project_rte(world: DVec3, view_rot: Mat4, eye: DVec3, bounds: Rectangle) -> Option<Vec2> {
+/// (see `Scene::composed_viewport_view`) instead of a real camera. `pub(crate)`
+/// so any other single-point world→screen projection (e.g. constraint-glyph
+/// anchors) can reuse it instead of re-deriving the same NDC math.
+pub(crate) fn project_rte(world: DVec3, view_rot: Mat4, eye: DVec3, bounds: Rectangle) -> Option<Vec2> {
     let rel = (world - eye).as_vec3();
     let clip = view_rot * rel.extend(1.0);
     if clip.w.abs() < 1e-9 {

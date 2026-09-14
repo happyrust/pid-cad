@@ -270,7 +270,7 @@ pub struct ModelSpaceThemeConfig {
     pub selection_highlight_color: u8,
     /// SELECTIONEFFECT: whether selected objects glow with solid highlight (true) or dash (false).
     pub selection_effect: bool,
-    /// SELECTIONPREVIEW: rollover/hover highlight mode (0 = off, 1 = in cmd, 2 = idle, 3 = both).
+    /// SELECTIONPREVIEW bitmask: 1 = idle, 2 = during a command, 3 = both.
     pub selection_preview: u8,
     /// GRIPSIZE: grip marker half-size in pixels (1–25, default 5).
     pub grip_size: u8,
@@ -460,7 +460,16 @@ impl AppConfig {
 
     /// Persist the config as JSON. Best-effort; silent on unavailable or
     /// read-only storage.
+    ///
+    /// Does nothing under `cfg(test)`. The path is the developer's own
+    /// settings file, and the suite builds whole applications and changes
+    /// preferences on them — without this, running `cargo test` rewrites the
+    /// settings of whoever ran it.
     pub fn save(&self) {
+        if cfg!(test) {
+            return;
+        }
+
         #[cfg(not(target_arch = "wasm32"))]
         {
             let Some(path) = config_path() else { return };

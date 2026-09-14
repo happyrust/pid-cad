@@ -1288,6 +1288,7 @@ fn emit_wire_fills<S: PlotSink>(
                 }
                 boundary.push(boundary[0]);
                 let hatch = HatchModel {
+                    pattern_origin: None,
                     render_instance: wire.render_instance.clone(),
                     world_origin: [0.0, 0.0],
                     boundary: std::sync::Arc::new(boundary),
