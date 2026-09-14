@@ -197,6 +197,23 @@ raw」。
 09-07 记的「`+18 u32 2`」在工艺图上是 65538）；标记字与尾字都未坐实。尺寸值 `+42` 18/18 都是英寸整倍（3.81…114.3 mm）。
 `cargo fmt` / `clippy -D warnings` 干净。
 
+**② ⏳ 未果（2026-09-14，pid-parse `1b30dff`）**——`tools/idalib_imagdex_jdim.py` 写好并跑通，但 **08-31 那条路子不通用**。
+JDim 不导出 `ExportedVTableJ…PersistImp` 访问器，于是改走 RTTI：类型描述符 → 完全对象定位器 → 它前面那张 vtable。
+**身份坐实了**：imagdex 里确有 `.?AVJDim@@` 与 `.?AVJDimGroup@@` 两个类（与 `psm_type_clsid.py` 把 `0x0115` / `0x0058`
+解到 `JDim Object` / `JDimGroup Object` 对得上）。**位置否掉了**：两个类各只到一张 vtable（8 / 7 槽），
+**没有一槽走到 `jengine_1075` / `jengine_1076`**，模块里也没有 `IJPersistImp@JDim@@` 这种子对象（`JStyleBase` 等都有）。
+imagdex 为它们准备的是 `tagDimPersistData` / `tagDimGrpPersistData` / `tagAnnotPersistData`——但那是**内存载荷结构不是读取器**：
+唯一的虚函数是删除析构，构造器（`sub_1032F87D`）清零七百多字节，远多于记录的 166…308。
+**两条可走的路**（写进脚本 docstring）：一是计划里点名的另一个入口 `radsrvitem.dll!sub_564BA320`（08-04 已从里面拿到
+三处位域读法）；二是横扫 `jengine_1075` 的 2161 个调用点——这份 i64 几乎没存函数边界，每个调用点都要先往回找 `55 8B EC`
+序言把函数造出来（试过区域内的 6 个，落到的是 JGroupEngine 的持久化，不是 JDim）。
+**顺带收的账**：`tools/psm_type_clsid.py` 把探针列出的类代码全解了——`0x0058` = **JDimGroup Object**、
+`0x0114` = `JSheet Object`（docext）、`0x0089` = `FreeFormAttrSet`（jengine）、`0x0085` = `Vertical Constraint`；
+两个标记字 `0x0067` = `Assoc subsystem element list`（jengine）、`0x008C` = `Groups Collection Object`，
+而 `0x00CB` / `0x00F0` 两个 GUID **不在 RAD 注册表里**（`A16AFDC0-…` / `57CDB650-…`）。
+于是 `+92` 那个槽读作「被量的几何 + 关联类」、`+140` 读作「这条尺寸归属的 JDimGroup / 约束 / 属性集」，都有了名字。
+（`rad_class_name()` 的表还没补这几个名字，探针里它们仍显示 `?`；要补是 `src/parsers/undecoded_census.rs` 一处。）
+
 ### J2 · JDim 解码器与缓存本体证据（pid-parse）
 
 **现状**：`decode_nested_geometry` 只试七族解码器，JDim 记录在缓存里**静默跳过**，任何 warning 都不提它。
