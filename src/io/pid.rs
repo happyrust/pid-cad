@@ -103,7 +103,7 @@ pub(crate) use super::PID_SEMANTICS_XDATA_APP;
 // The one name criterion for "SmartPlant hides this sheet layer": it decides
 // both which entities move to `PID-HIDDEN` and which sheet layers the view
 // filter starts with switched off.
-use super::pid_view_filter::{is_hidden_sheet_layer, PidViewFilter};
+use super::pid_view_filter::{is_hidden_sheet_layer, PidViewFilter, PidViewSummary};
 
 // Angles cross this module unchanged, because both sides already agree on
 // radians: `pid-parse` states them that way, and so does the in-memory
@@ -235,6 +235,13 @@ pub struct ImportSummary {
     pub layered_entities: usize,
     /// Distinct referenced layer ids whose authored name did not resolve.
     pub unresolved_sheet_layers: usize,
+    /// Distinct authored sheet layer *names* drawn entities state -- the rows
+    /// of the Layer Manager's sheet-layer view. Fewer than `sheet_layers`
+    /// when the same name is several layer objects across storages.
+    pub sheet_layer_names: usize,
+    /// How many of those names the import starts switched off in the
+    /// drawing's view filter.
+    pub sheet_layers_off: usize,
 }
 
 /// Mailbox carrying each import's summary out of the io layer, keyed by the
@@ -603,8 +610,18 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         embedded_bodies_drawn,
         &sheet_layer_distribution,
     );
+    draw_page_border(&mut doc, page_mm);
+    frame_drawing(&mut doc, &bounds, page_mm);
+    // The drawing's own view filter: the sheet layers SmartPlant hides start
+    // switched off, and the entities on them go dark by their own `invisible`
+    // bit as well as by sitting on `PID-HIDDEN`. Stored in the document, so
+    // what the user later switches on or off rides every save with the bits.
+    let filter = PidViewFilter::initial(&doc);
+    filter.store(&mut doc);
+    filter.apply(&mut doc);
     // The headline the open-completion handler shows on the command line;
-    // the counts agree with `report_import`'s log lines by construction.
+    // the counts agree with `report_import`'s log lines by construction, and
+    // the sheet-layer line with what the Layer Manager lists.
     let missing: usize = geometry
         .dropped_graphic_records
         .iter()
@@ -616,6 +633,7 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
                 .map(|refused| refused.count),
         )
         .sum();
+    let view = PidViewSummary::of(&doc);
     IMPORT_SUMMARIES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -632,17 +650,10 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
                     .keys()
                     .filter(|(_, _, name)| name.is_none())
                     .count(),
+                sheet_layer_names: view.layers.len(),
+                sheet_layers_off: view.layers.iter().filter(|row| !row.on).count(),
             },
         );
-    draw_page_border(&mut doc, page_mm);
-    frame_drawing(&mut doc, &bounds, page_mm);
-    // The drawing's own view filter: the sheet layers SmartPlant hides start
-    // switched off, and the entities on them go dark by their own `invisible`
-    // bit as well as by sitting on `PID-HIDDEN`. Stored in the document, so
-    // what the user later switches on or off rides every save with the bits.
-    let filter = PidViewFilter::initial(&doc);
-    filter.store(&mut doc);
-    filter.apply(&mut doc);
     doc.source_path = Some(path.to_string_lossy().into_owned());
     Ok(doc)
 }

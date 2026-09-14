@@ -1879,6 +1879,7 @@ common =
     .geometric = Geometrisch
     .dimensional = Maatvoering
     .show-hide = Tonen/Verbergen
+    .pid-sheet-layers-of-which-start-switched-off = P&ID-bladlagen: __ocs_fmt_0__, waarvan __ocs_fmt_1__ bij aanvang uitgeschakeld
 
 errors =
     .save-warning = Waarschuwing opslaan
@@ -4325,6 +4326,7 @@ properties =
     .show-history = { properties.show } · { model.history }
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
+    .role = Rol
 
 styles =
     .blocks = Symbolen: __ocs_fmt_0__

@@ -1867,6 +1867,7 @@ common =
     .geometric = ज्यामितीय
     .dimensional = आयामी
     .show-hide = दिखाएँ/छिपाएँ
+    .pid-sheet-layers-of-which-start-switched-off = P&ID शीट लेयर: __ocs_fmt_0__, जिनमें से __ocs_fmt_1__ शुरू में बंद हैं
 
 errors =
     .save-warning = चेतावनी सहेजें
@@ -4315,6 +4316,7 @@ properties =
     .show-history = { properties.show } · { model.history }
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
+    .role = भूमिका
 
 styles =
     .blocks = ब्लॉक: __ocs_fmt_0__

@@ -1878,6 +1878,7 @@ common =
     .geometric = Geometriset
     .dimensional = Mitalliset
     .show-hide = Näytä/Piilota
+    .pid-sheet-layers-of-which-start-switched-off = P&ID-arkin tasot: __ocs_fmt_0__, joista __ocs_fmt_1__ on aluksi pois päältä
 
 errors =
     .save-warning = Tallenna varoitus
@@ -4326,6 +4327,7 @@ properties =
     .show-history = { properties.show } · { model.history }
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
+    .role = Rooli
 
 styles =
     .blocks =   Lohkot: __ocs_fmt_0__

@@ -1878,6 +1878,7 @@ common =
     .geometric = Geometryczne
     .dimensional = Wymiarowe
     .show-hide = Pokaż/Ukryj
+    .pid-sheet-layers-of-which-start-switched-off = Warstwy arkusza P&ID: __ocs_fmt_0__, z czego __ocs_fmt_1__ początkowo wyłączone
 
 errors =
     .save-warning = Zapisz ostrzeżenie
@@ -4326,6 +4327,7 @@ properties =
     .show-history = { properties.show } · { model.history }
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
+    .role = Rola
 
 styles =
     .blocks =   Bloki: __ocs_fmt_0__

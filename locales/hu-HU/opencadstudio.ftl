@@ -1878,6 +1878,7 @@ common =
     .geometric = Geometriai
     .dimensional = Méretkényszerek
     .show-hide = Megjelenítés/Elrejtés
+    .pid-sheet-layers-of-which-start-switched-off = P&ID lapfóliák: __ocs_fmt_0__, ebből __ocs_fmt_1__ induláskor kikapcsolva
 
 errors =
     .save-warning = Figyelmeztetés mentése
@@ -4326,6 +4327,7 @@ properties =
     .show-history = { properties.show } · { model.history }
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
+    .role = Szerep
 
 styles =
     .blocks =   Blokkok: __ocs_fmt_0__

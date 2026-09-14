@@ -1879,6 +1879,7 @@ common =
     .geometric = Geometrisch
     .dimensional = Bemaßung
     .show-hide = Anzeigen/Ausblenden
+    .pid-sheet-layers-of-which-start-switched-off = P&ID-Blattebenen: __ocs_fmt_0__, davon __ocs_fmt_1__ zu Beginn ausgeschaltet
 
 errors =
     .save-warning = Warnhinweise speichern
@@ -4325,6 +4326,7 @@ properties =
     .show-history = { properties.show } · { model.history }
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
+    .role = Rolle
 
 styles =
     .blocks = Blöcke: __ocs_fmt_0__

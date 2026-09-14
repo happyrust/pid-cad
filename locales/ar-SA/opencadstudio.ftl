@@ -1891,6 +1891,7 @@ common =
     .geometric = هندسي
     .dimensional = بُعدي
     .show-hide = إظهار/إخفاء
+    .pid-sheet-layers-of-which-start-switched-off = طبقات ورقة P&ID: __ocs_fmt_0__، منها __ocs_fmt_1__ مطفأة في البداية
 
 errors =
     .save-warning = تحذير الحفظ
@@ -4339,6 +4340,7 @@ properties =
     .show-history = { properties.show } · { model.history }
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
+    .role = الدور
 
 styles =
     .blocks =   الكتل: __ocs_fmt_0__

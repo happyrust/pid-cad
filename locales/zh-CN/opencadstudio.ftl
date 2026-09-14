@@ -1866,6 +1866,7 @@ common =
     .geometric = 几何
     .dimensional = 标注
     .show-hide = 显示/隐藏
+    .pid-sheet-layers-of-which-start-switched-off = P&ID 图纸图层：__ocs_fmt_0__ 个，其中 __ocs_fmt_1__ 个初始关闭
 
 errors =
     .save-warning = 保存警告
@@ -4310,6 +4311,7 @@ properties =
     .show-history = { properties.show } · { model.history }
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
+    .role = 角色
 
 styles =
     .blocks = 块 : __ocs_fmt_0__

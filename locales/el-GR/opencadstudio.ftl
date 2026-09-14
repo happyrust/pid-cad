@@ -1878,6 +1878,7 @@ common =
     .geometric = Γεωμετρικοί
     .dimensional = Διαστατικοί
     .show-hide = Εμφάνιση/Απόκρυψη
+    .pid-sheet-layers-of-which-start-switched-off = Επίπεδα φύλλου P&ID: __ocs_fmt_0__, από τα οποία __ocs_fmt_1__ ξεκινούν ανενεργά
 
 errors =
     .save-warning = Προειδοποίηση αποθήκευσης
@@ -4327,6 +4328,7 @@ properties =
 
     .model-text-height = { common.model-uppercase } · { common.text-height-sentence-case }
     .insert-unit-scale-is-outside-the-supported-range = Η κλίμακα μονάδας INSERT είναι εκτός του υποστηριζόμενου εύρους.
+    .role = Ρόλος
 
 styles =
     .blocks = Μπλοκ: __ocs_fmt_0__

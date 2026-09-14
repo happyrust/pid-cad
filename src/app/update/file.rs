@@ -1567,6 +1567,13 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     self.command_line.push_info(crate::tf!(
                         "P&ID import: {drawn} entities from {decoded} decoded records; {missing} source records not drawn; {layered} entities on {layers} authored sheet layers ({unresolved} unresolved)"
                     ).as_ref());
+                    // The Layer Manager's sheet-layer view in one line: the
+                    // layers by the names the reader will see there, and how
+                    // many the drawing starts with switched off.
+                    let (names, off) = (summary.sheet_layer_names, summary.sheet_layers_off);
+                    self.command_line.push_info(crate::tf!(
+                        "P&ID sheet layers: {names}, of which {off} start switched off"
+                    ).as_ref());
                     if summary.style_tables_failed {
                         self.command_line.push_error(crate::t!(
                             "P&ID style table did not read; line work keeps the layer defaults."

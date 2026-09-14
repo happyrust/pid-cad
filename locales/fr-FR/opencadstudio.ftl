@@ -1879,6 +1879,7 @@ common =
     .geometric = Géométriques
     .dimensional = Dimensionnelles
     .show-hide = Afficher/Masquer
+    .pid-sheet-layers-of-which-start-switched-off = Calques de feuille P&ID : __ocs_fmt_0__, dont __ocs_fmt_1__ désactivés au départ
 
 errors =
     .save-warning = Enregistrer l' avertissement
@@ -4327,6 +4328,7 @@ properties =
     .show-history = { properties.show } · { model.history }
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
+    .role = Rôle
 
 styles =
     .blocks = Blocs : __ocs_fmt_0__

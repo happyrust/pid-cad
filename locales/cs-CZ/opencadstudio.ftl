@@ -1878,6 +1878,7 @@ common =
     .geometric = Geometrické
     .dimensional = Rozměrové
     .show-hide = Zobrazit/skrýt
+    .pid-sheet-layers-of-which-start-switched-off = Hladiny listu P&ID: __ocs_fmt_0__, z toho __ocs_fmt_1__ na začátku vypnuto
 
 errors =
     .save-warning = Uložit varování
@@ -4324,6 +4325,7 @@ properties =
     .show-history = { properties.show } · { model.history }
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
+    .role = Role
 
 styles =
     .blocks =   Bloky: __ocs_fmt_0__

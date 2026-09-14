@@ -1882,6 +1882,7 @@ common =
     .geometric = Геометрические
     .dimensional = Размерные
     .show-hide = Показать/Скрыть
+    .pid-sheet-layers-of-which-start-switched-off = Слои листа P&ID: __ocs_fmt_0__, из них __ocs_fmt_1__ изначально выключены
 
 errors =
     .save-warning = Спасти предостережение
@@ -4328,6 +4329,7 @@ properties =
     .show-history = { properties.show } · { model.history }
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
+    .role = Роль
 
 styles =
     .blocks = Блоки: __ocs_fmt_0__

@@ -1879,6 +1879,7 @@ common =
     .geometric = Geometric
     .dimensional = Dimensional
     .show-hide = Show/Hide
+    .pid-sheet-layers-of-which-start-switched-off = P&ID sheet layers: __ocs_fmt_0__, of which __ocs_fmt_1__ start switched off
 
 errors =
     .save-warning = Save Warning
@@ -4328,6 +4329,7 @@ properties =
 
     .model-text-height = Model text height
     .insert-unit-scale-is-outside-the-supported-range = INSERT unit scale is outside the supported range.
+    .role = Role
 
 styles =
     .blocks =   Blocks: __ocs_fmt_0__

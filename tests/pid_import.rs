@@ -263,6 +263,19 @@ fn the_import_leaves_a_summary_the_app_can_show() {
         !summary.style_tables_failed,
         "the fixture's style tables read; the palette test depends on it"
     );
+    // The line the Layer Manager's sheet-layer view is summarised by (plan
+    // 2026-09-07, L2 step 4): the layers as the reader sees them -- by name,
+    // which is fewer than by storage-local id -- and how many start off.
+    assert_eq!(
+        summary.sheet_layer_names, 4,
+        "ConsistencyChecks / Default / HiddenObjects / Labels"
+    );
+    assert!(summary.sheet_layer_names <= summary.sheet_layers);
+    assert_eq!(summary.sheet_layers_off, 1, "HiddenObjects");
+    assert_eq!(
+        summary.sheet_layer_names,
+        PidViewSummary::of(&doc).layers.len()
+    );
 }
 
 /// Dashed line work comes in as a named linetype the renderer can dash.

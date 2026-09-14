@@ -1879,6 +1879,7 @@ common =
     .geometric = Geométricas
     .dimensional = Dimensionais
     .show-hide = Mostrar/Ocultar
+    .pid-sheet-layers-of-which-start-switched-off = Camadas da folha P&ID: __ocs_fmt_0__, das quais __ocs_fmt_1__ começam desligadas
 
 errors =
     .save-warning = Aviso de salvamento
@@ -4327,6 +4328,7 @@ properties =
     .show-history = { properties.show } · { model.history }
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
+    .role = Função
 
 styles =
     .blocks =   Blocos: __ocs_fmt_0__

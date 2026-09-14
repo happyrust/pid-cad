@@ -115,6 +115,7 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
         .get_record(crate::io::PID_SEMANTICS_XDATA_APP)?;
 
     let mut class = None;
+    let mut role = None;
     let mut labels = Vec::new();
     let mut lines = Vec::new();
     let mut resolved = None;
@@ -129,6 +130,7 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
         };
         match key {
             "class" => class = Some(val.to_string()),
+            "role" => role = Some(val.to_string()),
             "label" if !val.is_empty() && !labels.iter().any(|old| old == val) => {
                 labels.push(val.to_string());
             }
@@ -156,6 +158,17 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
             label: t!("Type").into_owned(),
             field: "pid_class",
             value: PropValue::ReadOnly(class.to_string()),
+        });
+    }
+    // What the importer read the entity as -- geometry / text / symbol /
+    // symbol-label / point-* / annotation / connectivity / fill / frame --
+    // beside what the published data says it is. The two are different
+    // questions, so both rows show when both keys are there.
+    if let Some(role) = role {
+        props.push(Property {
+            label: t!("Role").into_owned(),
+            field: "pid_role",
+            value: PropValue::ReadOnly(role),
         });
     }
     if let Some(first) = labels.first() {
@@ -345,5 +358,36 @@ mod pid_semantics_tests {
             .iter()
             .find(|property| property.field == "pid_label")
             .is_some_and(|property| property.label == t!("Line number")));
+    }
+
+    /// A `.pid` import writes what it read the entity as (`role=`) beside the
+    /// published object's class (`class=`); both show, as two rows, with the
+    /// role right after the type (plan 2026-09-07, L2 step 4). An entity the
+    /// importer drew itself has a role and nothing else, and still gets its
+    /// P&ID group.
+    #[test]
+    fn an_imported_entity_shows_its_role_beside_its_type() {
+        let section = pid_semantics_section(&entity(&[
+            "class=PIDProcessVessel",
+            "label=V-101",
+            "sheet_layer=Default",
+            "sheet_layer_oid=42",
+            "role=symbol",
+            "style=Equipment",
+        ]))
+        .expect("P&ID section");
+        assert_eq!(value(&section, "pid_class"), "PIDProcessVessel");
+        assert_eq!(value(&section, "pid_role"), "symbol");
+        let fields: Vec<&str> = section.props.iter().map(|p| p.field).collect();
+        assert_eq!(fields[..2], ["pid_class", "pid_role"]);
+        assert!(section
+            .props
+            .iter()
+            .find(|property| property.field == "pid_role")
+            .is_some_and(|property| property.label == t!("Role")));
+
+        let frame = pid_semantics_section(&entity(&["role=frame"])).expect("P&ID section");
+        assert_eq!(value(&frame, "pid_role"), "frame");
+        assert!(frame.props.iter().all(|p| p.field != "pid_class"));
     }
 }

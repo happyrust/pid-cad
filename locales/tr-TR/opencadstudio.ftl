@@ -1863,6 +1863,7 @@ common =
     .geometric = Geometrik
     .dimensional = Boyutsal
     .show-hide = Göster/Gizle
+    .pid-sheet-layers-of-which-start-switched-off = P&ID sayfa katmanları: __ocs_fmt_0__, bunların __ocs_fmt_1__ tanesi başlangıçta kapalı
 
 errors =
     .save-warning = Kaydetme Uyarısı
@@ -4267,6 +4268,7 @@ properties =
 
     .model-text-height = { common.model-uppercase } · { common.text-height-sentence-case }
     .insert-unit-scale-is-outside-the-supported-range = INSERT birim ölçeği desteklenen aralığın dışında.
+    .role = Rol
 
 styles =
     .blocks = Bloklar: __ocs_fmt_0__

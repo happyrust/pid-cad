@@ -1878,6 +1878,7 @@ common =
     .geometric = 기하 구속
     .dimensional = 치수 구속
     .show-hide = 표시/숨기기
+    .pid-sheet-layers-of-which-start-switched-off = P&ID 시트 도면층: __ocs_fmt_0__개, 그중 __ocs_fmt_1__개는 처음부터 꺼짐
 
 errors =
     .save-warning = 경고 저장
@@ -4326,6 +4327,7 @@ properties =
     .show-history = { properties.show } · { model.history }
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
+    .role = 역할
 
 styles =
     .blocks =   블록: __ocs_fmt_0__

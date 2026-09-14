@@ -1869,6 +1869,7 @@ common =
     .geometric = 幾何拘束
     .dimensional = 寸法拘束
     .show-hide = 表示/非表示
+    .pid-sheet-layers-of-which-start-switched-off = P&ID シートレイヤー: __ocs_fmt_0__ 個、うち __ocs_fmt_1__ 個は初期状態でオフ
 
 errors =
     .save-warning = 保存の警告
@@ -4315,6 +4316,7 @@ properties =
     .show-history = { properties.show } · { model.history }
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
+    .role = ロール
 
 styles =
     .blocks =   ブロック: __ocs_fmt_0__
