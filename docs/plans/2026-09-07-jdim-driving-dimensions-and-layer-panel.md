@@ -19,6 +19,10 @@
 > ② L2 第 4 步新词条的覆盖面从「四语言」改为 **21 本目录全覆盖**（`i18n` 的目录守护测试如今对全部目录生效）；
 > ③ L2 第 2 步可见性公式补上**没有图纸图层的实体**怎么算。基线复核：OCS `--test pid_import` 38/38、
 > pid-parse `--lib` 1094 + `parse_real_files` 127 全绿。
+>
+> **补记（2026-09-14 晚，会话 fable-5-1-14）**：**L2 四步全部落地**（`39b1cc72` → `f082393d` → `706e4eb7` → `018314a6`），
+> user-guide `.pid` 一节随 L2 出口写入；`pid_import` 44/44。按 D7 下一项是 **L1**（pid-parse 解 `0x0057` 显示状态，
+> 落地后只换 `is_hidden_sheet_layer` 一处初值）。
 
 ## 决策记录
 
@@ -218,7 +222,22 @@ XRecord `PID_VIEW_FILTER`（每条 `layer_off=<名>` / `role_off=<角色>` 一�
 `tests/pid_import.rs` +4 条：导入即存过滤且 HiddenObjects 全暗、**0202 关 `Labels` → 46 条 text（连同 46 条线 + 5 个填充）暗、
 `Default` 照画、开回来全亮**、role 轴与无图纸图层实体只听 role、记录与 `invisible` 位过 DWG/DXF 往返；38 → 42 全绿。
 **过渡期注意**：隐藏类实体现在同时被 `PID-HIDDEN`（层关）和 `invisible` 位遮住，只开层不再能看见它们，要等第 3 步的开关
-（或一条命令）才能翻回来。第 3–4 步未动。
+（或一条命令）才能翻回来。
+第 3 步 ✅ 2026-09-14 OCS `706e4eb7`（`layers: the Layer Manager shows a .pid import's own sheet layers and roles, each with a switch`）：
+`pid_view_filter.rs` 加 `PidViewSummary`（按名去重的图纸图层 + 词表序的 role，各带实体计数与开关状态）和
+`switch_sheet_layer` / `switch_role`（读记录 → 翻一个名 → 存回 → `apply`）；`ui/window/layers.rs` 加 `LayerView::{Layers, SheetLayers}`
+与工具栏切换（只在图有 P&ID 语义时出现），图纸图层视图 = 名 / 计数 / 眼睛，`Roles` 第二段，搜索框沿用，New / Delete / Set Current 在该视图隐藏；
+`Message::{LayerViewSet, PidSheetLayerToggle, PidRoleToggle}`，每次开关一个撤销步（文档快照，XRecord 与位一起回退）；摘要在开图 /
+撤销重做 / 开窗 / 进视图时重读。**过渡期的解法**：把初始关闭的图纸图层开回来时，连带把 `PID-HIDDEN` 层打开（只在「开」且点亮了
+落在该层上的实体时；「关」从不碰图层表），上面那条过渡期注意随之解除。**验收口径的一处偏差**：四个 fixture 画出的实体只落在
+`ConsistencyChecks` / `Default` / `HiddenObjects` / `Labels` 四个原图图层上，计划里举例的 `HeatTrace` 在这批图里没有画出的实体、
+不会列出；测试改用 `ConsistencyChecks`（0202 上 37 个）代替。新词条 5 条 21 本全覆盖。`pid_import` 42 → 44，模块单测 4 → 6。
+第 4 步 ✅ 2026-09-14 OCS `018314a6`（`pid: the Properties panel shows an entity's role, and the import summary counts the sheet layers by name`）：
+特性面板 P&ID 组加「角色」行（读 `role=`，紧跟「类型」，两键都在时两行都显示，只有 `role=` 的自造实体也有该组）；导入汇总加第二行
+`P&ID sheet layers: N, of which M start switched off`（`ImportSummary` 新增 `sheet_layer_names` / `sheet_layers_off`，从 `PidViewSummary`
+取，与图层管理器所列一致；原按存储 oid 计数的第一行不动；汇总改在过滤存入并应用之后取）。新词条 2 条 21 本全覆盖。
+**L2 出口**：user-guide 补「打开 Smart P&ID（.pid）图纸」一节（只读来源与另存、两行汇总、符号库、`PID-*` 合成层表、图纸图层视图、
+特性面板 P&ID 组），T 项对应条目转「已做」。
 
 ### L3 · 图层槽切换到图纸图层（OCS，选项后置）
 
@@ -245,12 +264,17 @@ XRecord `PID_VIEW_FILTER`（每条 `layer_off=<名>` / `role_off=<角色>` 一�
   两仓工作树 322 + 515 个 CRLF 文件逐字节改回 LF（blob 哈希与 HEAD 相同，无提交）；根因是系统级
   `core.autocrlf=true`，已用用户级 `git config --global core.autocrlf false` 压掉。
 
+**已做（2026-09-14，L2 出口）**：
+
+- **user-guide `.pid` 一节**：`docs/user-guide.md` 新增「打开 Smart P&ID（.pid）图纸」（放在「管理图层和属性」与
+  「校正 P&ID 图例」之间）——只读来源与 Save As 闸门、两行导入汇总、符号库查找与 `PID_SYMBOL_LIBRARY`、`PID-*` 合成层表
+  （含初始开关）、图纸图层视图与 role 开关、特性面板 P&ID 组（类型 / 角色 / 位号 / 管线号 / 匹配方式 / 图纸图层 / 图层 OID）。
+  L3 落地时再补 `OCS_PID_LAYER_MODE`。
+
 **待做（随本轮各项收尾）**：
 
 - pid-parse `task_plan.md`「当前阶段」加本轮指针（L1 / J2 落地时各刷一次）。
-- **user-guide 补 `.pid` 一节**（今天零字，README 只有一行）：只读来源与 Save As 闸门、导入汇总行、
-  `PID-*` 合成层与 `PID-HIDDEN`、特性面板 P&ID 组（`sheet_layer` / `class` / `label` / 匹配方式）；
-  L2 落地时加图纸图层模式与 role 过滤，L3 落地时加 `OCS_PID_LAYER_MODE`。归在 L2 的出口里一起验收。
+- user-guide 在 L3 落地时补 `OCS_PID_LAYER_MODE` 一段。
 - OCS `.context` 会话文件按惯例；每项落地 `remember` 一条。
 
 ---

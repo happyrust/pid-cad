@@ -79,6 +79,33 @@ Ribbon 中的 `Layers` 区域用于管理图层。你可以创建、锁定、冻
 
 典型工作流是先设置当前图层，再绘制对象。这样后续可以按图层批量控制显示、打印和属性。
 
+## 打开 Smart P&ID（.pid）图纸
+
+Open CAD Studio 可以直接打开 SmartPlant / Smart P&ID 的 `.pid` 文件：`Open File...` 的文件类型里选 `Smart P&ID Files`（`CAD Files` 也包含 `.pid`），或者在资源管理器里右键 `.pid` →「打开方式」选 Open CAD Studio。打开就是一次导入：文件里的线、文字、符号、填充和审查标记被读成普通 CAD 实体，可以像其他图纸一样选择、量测、标注和另存。
+
+**`.pid` 是只读来源。** 程序永远不会往 `.pid` 里写字节：按 `Ctrl+S` 会直接弹出「另存为」，默认文件名是同名的 `.dwg`；命令行或脚本里把保存目标写成 `.pid` 会被拒绝并提示 `read-only Smart P&ID source`。要保留修改，另存为 DWG 或 DXF 即可，图纸里的 P&ID 语义（见下文特性面板一段）会一起保存。
+
+**导入汇总。** 打开完成后命令行给出两行信息：第一行是画出了多少实体、来自多少条已解码记录、有多少条源记录没有画出，以及带原图图层的实体数；第二行是 `P&ID sheet layers: N, of which M start switched off`——按名字数的原图图层有几个、其中几个按文件里的隐藏状态初始关闭。若样式表读取失败，还会多一行错误提示，此时线宽和颜色会退回图层默认。逐条明细在日志里。
+
+**符号库。** `.pid` 通过工程参考数据共享路径引用符号库。程序会从图纸所在目录向上查找 SmartPlant 工程的 `Ref\Symbols`；找不到时，把环境变量 `PID_SYMBOL_LIBRARY` 指向本地的符号库副本。没有符号库时，符号会退回文件自带的定义缓存或只显示位置点。
+
+**图层。** 导入后的实体按「角色」放在一组 `PID-*` 合成图层上，在图层管理器里可以像普通图层一样开关：
+
+| 图层 | 内容 | 初始 |
+|---|---|---|
+| `PID-GEOMETRY` / `PID-STYLE-<样式名>` | 线条；有命名样式的线按样式名各占一层 | 开 |
+| `PID-TEXT` | 图纸文字 | 开 |
+| `PID-SYMBOL` / `PID-SYMBOL-LABEL` | 符号本体 / 符号名标签 | 开 / 关 |
+| `PID-FILL` | 填充区域 | 开 |
+| `PID-POINT` / `-WARNING` / `-ERROR` / `-APPROVED` | 审查状态标记 | 开 |
+| `PID-FRAME` | 按文件页面尺寸画出的图框 | 开 |
+| `PID-CONNECTIVITY` / `PID-ANNOTATION` | 连通链诊断线 / 注记占位（当前为空） | 关 |
+| `PID-HIDDEN` | 原图放在 `Hidden` / `HiddenObjects` / `Invisible` 图层上的内容 | 关 |
+
+**图纸图层视图。** 打开 `.pid` 后，图层管理器的工具栏多出 `图层` / `图纸图层`（英文界面为 `Layers` / `Sheet layers`）两个切换按钮。切到 `图纸图层`，表格列出的不再是 `PID-*` 合成层，而是 SmartPlant 自己的图层名（例如 `Default` / `Labels` / `ConsistencyChecks` / `HiddenObjects`）及每层的实体数，下方 `角色`（Roles）一段列出各角色（`geometry` / `text` / `symbol` / `symbol-label` / `point-*` / `connectivity` / `fill` / `frame`）及实体数。点击行尾的眼睛可以单独关掉或打开某个原图图层或某个角色：一个实体只要所属图层或角色任一被关就不显示。这些开关记录在图纸里（`PID_VIEW_FILTER`），另存为 DWG/DXF 后再打开仍然有效，也可以撤销。原图隐藏的图层初始为关；把它打开时，程序会连带打开 `PID-HIDDEN` 层，实体才看得见。搜索框对两种视图都有效。
+
+**特性面板。** 选中导入的实体，左侧特性面板会多出 `P&ID` 一组只读属性：`类型`（已发布数据里的对象类，如 `PIDPipeline`）、`角色`（导入时读到的角色，即上表的分类）、`位号` 或 `管线号`、`匹配方式`（若来自图例识别）、`图纸图层` 与 `图层 OID`（原图图层名及其在文件里的编号）。这些信息写在实体的 `PID_SEMANTICS` 扩展数据里，导出 DXF/DWG 时保留。
+
 ## 校正 P&ID 图例
 
 打开 P&ID 图纸后，在 `Draw` 页签的 `P&ID` 区域点击 `P&ID 图例`，或运行 `PIDLEGEND LIST`。图例面板会列出当前识别到的符号和位号；点击一行可以选中并定位该符号。
