@@ -100,6 +100,10 @@ const SHEET_MARGIN_MM: f64 = 100.0;
 // pairs when `_Data.xml` sits beside the drawing. Every drawn entity carries
 // at least a role; authored layer identity is present without `_Data.xml`.
 pub(crate) use super::PID_SEMANTICS_XDATA_APP;
+// The one name criterion for "SmartPlant hides this sheet layer": it decides
+// both which entities move to `PID-HIDDEN` and which sheet layers the view
+// filter starts with switched off.
+use super::pid_view_filter::{is_hidden_sheet_layer, PidViewFilter};
 
 // Angles cross this module unchanged, because both sides already agree on
 // radians: `pid-parse` states them that way, and so does the in-memory
@@ -629,6 +633,13 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         );
     draw_page_border(&mut doc, page_mm);
     frame_drawing(&mut doc, &bounds, page_mm);
+    // The drawing's own view filter: the sheet layers SmartPlant hides start
+    // switched off, and the entities on them go dark by their own `invisible`
+    // bit as well as by sitting on `PID-HIDDEN`. Stored in the document, so
+    // what the user later switches on or off rides every save with the bits.
+    let filter = PidViewFilter::initial(&doc);
+    filter.store(&mut doc);
+    filter.apply(&mut doc);
     doc.source_path = Some(path.to_string_lossy().into_owned());
     Ok(doc)
 }
@@ -991,19 +1002,6 @@ fn attach_pid_metadata(
     if !record.values.is_empty() {
         entity.common_mut().extended_data.add_record(record);
     }
-}
-
-fn is_hidden_sheet_layer(name: &str) -> bool {
-    let normalized: String = name
-        .trim()
-        .chars()
-        .filter(|ch| !ch.is_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect();
-    matches!(
-        normalized.as_str(),
-        "hidden" | "hiddenobjects" | "invisible"
-    )
 }
 
 /// The style table's entry for one normalized entity, if it has one.
@@ -2442,21 +2440,6 @@ mod tests {
             drawn_extent(&EntityType::Text(text)),
             Some((3.0, 4.0, 3.0, 4.0))
         );
-    }
-
-    #[test]
-    fn hidden_sheet_layer_names_are_trimmed_case_folded_and_space_insensitive() {
-        for name in [
-            "Hidden",
-            " hidden ",
-            "HIDDENOBJECTS",
-            "Hidden Objects",
-            "Hidden\t  Objects",
-            "Invisible",
-        ] {
-            assert!(is_hidden_sheet_layer(name), "{name:?}");
-        }
-        assert!(!is_hidden_sheet_layer("Visible"));
     }
 
     #[test]

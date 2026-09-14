@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 
 use acadrust::{CadDocument, EntityType};
+use OpenCADStudio::io::pid_view_filter::PidViewFilter;
 
 // An A2 sheet is 594 x 420mm. The decoded content of both fixtures sits
 // inside that, so any converted coordinate an order of magnitude past it is a
@@ -1148,6 +1149,231 @@ fn hidden_authored_layers_open_on_pid_hidden_and_metadata_survives_dwg_and_dxf()
                 .any(|entity| pid_value(entity, "role").as_deref() == Some("frame")),
             "{ext} round-trip lost the page border's role=frame"
         );
+    }
+}
+
+/// The entities filed under one authored sheet layer, by the `sheet_layer=`
+/// the importer wrote.
+fn on_sheet_layer<'a>(
+    doc: &'a CadDocument,
+    layer: &'a str,
+) -> impl Iterator<Item = &'a EntityType> {
+    doc.entities()
+        .filter(move |entity| pid_value(entity, "sheet_layer").as_deref() == Some(layer))
+}
+
+fn of_role<'a>(doc: &'a CadDocument, role: &'a str) -> impl Iterator<Item = &'a EntityType> {
+    doc.entities()
+        .filter(move |entity| pid_value(entity, "role").as_deref() == Some(role))
+}
+
+fn dark(doc: &CadDocument) -> usize {
+    doc.entities()
+        .filter(|entity| entity.common().invisible)
+        .count()
+}
+
+/// The import leaves the drawing a view filter of its own (plan 2026-09-07,
+/// L2 step 2): the sheet layers SmartPlant hides -- `Hidden` / `HiddenObjects`
+/// / `Invisible`, by name until L1 reads the file's display state -- start
+/// switched off, and every entity on them carries `invisible`, the same
+/// reading `PID-HIDDEN` gives but on the entity itself. Nothing else is dark,
+/// and no role starts switched off.
+#[test]
+fn the_import_switches_the_hidden_sheet_layers_off_in_a_stored_view_filter() {
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
+        return;
+    };
+    let filter = PidViewFilter::load(&doc).expect("the import stores a PID_VIEW_FILTER record");
+    assert_eq!(filter.layers_off().collect::<Vec<_>>(), ["HiddenObjects"]);
+    assert_eq!(filter.roles_off().count(), 0);
+    assert!(!filter.layer_is_on("HiddenObjects"));
+    assert!(filter.layer_is_on("Labels"));
+
+    let hidden: Vec<_> = on_sheet_layer(&doc, "HiddenObjects").collect();
+    assert_eq!(hidden.len(), 11);
+    assert!(
+        hidden.iter().all(|entity| entity.common().invisible),
+        "an entity on a switched-off sheet layer draws"
+    );
+    assert_eq!(
+        dark(&doc),
+        hidden.len(),
+        "something outside HiddenObjects is dark"
+    );
+}
+
+/// The acceptance the plan names: switch `Labels` off in the record and
+/// 0202's labels go dark -- its 46 text entities, and with them the 46 pieces
+/// of line work and 5 fills the sheet files under the same layer -- while
+/// `Default` keeps drawing; switch it back on and every one of them returns.
+/// The record follows the state, and an all-on filter leaves no record
+/// behind to resurrect anything later.
+#[test]
+fn switching_a_sheet_layer_off_hides_its_entities_and_on_brings_them_back() {
+    let Some(mut doc) = import("DWG-0202GP06-01.pid") else {
+        return;
+    };
+    let mut filter = PidViewFilter::load(&doc).expect("0202 hides HiddenObjects too");
+    assert_eq!(filter.layers_off().collect::<Vec<_>>(), ["HiddenObjects"]);
+    let hidden_objects = on_sheet_layer(&doc, "HiddenObjects").count();
+    assert_eq!(hidden_objects, 16);
+    assert_eq!(dark(&doc), hidden_objects);
+    let labels = on_sheet_layer(&doc, "Labels").count();
+    assert_eq!(labels, 97, "46 text + 46 line work + 5 fills");
+    let label_text = on_sheet_layer(&doc, "Labels")
+        .filter(|entity| matches!(entity, EntityType::Text(_)))
+        .count();
+    assert_eq!(label_text, 46);
+
+    filter.set_layer("Labels", false);
+    filter.store(&mut doc);
+    assert_eq!(
+        filter.apply(&mut doc),
+        labels,
+        "every Labels entity changes"
+    );
+    assert!(
+        on_sheet_layer(&doc, "Labels").all(|entity| entity.common().invisible),
+        "a label still draws with its layer off"
+    );
+    assert!(
+        on_sheet_layer(&doc, "Default").all(|entity| !entity.common().invisible),
+        "Default went dark with Labels"
+    );
+    assert_eq!(dark(&doc), labels + hidden_objects);
+    assert_eq!(
+        PidViewFilter::load(&doc).as_ref(),
+        Some(&filter),
+        "the record does not read back what was set"
+    );
+
+    filter.set_layer("Labels", true);
+    filter.store(&mut doc);
+    assert_eq!(filter.apply(&mut doc), labels);
+    assert!(on_sheet_layer(&doc, "Labels").all(|entity| !entity.common().invisible));
+    assert_eq!(dark(&doc), hidden_objects);
+
+    filter.set_layer("HiddenObjects", true);
+    filter.store(&mut doc);
+    assert_eq!(filter.apply(&mut doc), hidden_objects);
+    assert_eq!(dark(&doc), 0);
+    assert!(filter.is_empty());
+    assert!(
+        PidViewFilter::load(&doc).is_none(),
+        "an all-on filter must not leave a record behind"
+    );
+}
+
+/// Roles are the second axis. `text` off darkens every text entity whatever
+/// sheet layer it sits on -- and only those: a symbol's label is
+/// `symbol-label`, not `text`. The entities the importer drew itself -- the
+/// frame, the connectivity links -- have no sheet layer to answer to and are
+/// governed by role alone: no `sheet_layer=` counts as on (L2 step 2).
+#[test]
+fn a_role_switch_reaches_every_sheet_layer_and_is_all_a_layerless_entity_answers_to() {
+    let Some(mut doc) = import("DWG-0201GP06-01.pid") else {
+        return;
+    };
+    let mut filter = PidViewFilter::load(&doc).unwrap_or_default();
+    let hidden_objects = on_sheet_layer(&doc, "HiddenObjects").count();
+    let text = of_role(&doc, "text").count();
+    assert_eq!(text, 48, "47 on Labels and 1 on HiddenObjects");
+    let text_already_dark = of_role(&doc, "text")
+        .filter(|entity| entity.common().invisible)
+        .count();
+    assert_eq!(
+        text_already_dark, 1,
+        "the HiddenObjects text is dark already"
+    );
+
+    filter.set_role("text", false);
+    filter.store(&mut doc);
+    assert_eq!(filter.apply(&mut doc), text - text_already_dark);
+    assert!(of_role(&doc, "text").all(|entity| entity.common().invisible));
+    assert!(
+        of_role(&doc, "symbol-label").all(|entity| !entity.common().invisible),
+        "a symbol label is not `text` and must keep drawing"
+    );
+    assert_eq!(dark(&doc), hidden_objects + text - text_already_dark);
+
+    let frame: Vec<_> = of_role(&doc, "frame").collect();
+    assert_eq!(frame.len(), 1);
+    assert!(
+        pid_value(frame[0], "sheet_layer").is_none(),
+        "the frame is the importer's own"
+    );
+    assert!(!frame[0].common().invisible);
+    let links = of_role(&doc, "connectivity").count();
+    assert_eq!(links, 25);
+    assert!(of_role(&doc, "connectivity").all(|entity| pid_value(entity, "sheet_layer").is_none()));
+
+    filter.set_role("frame", false);
+    filter.set_role("connectivity", false);
+    filter.store(&mut doc);
+    assert_eq!(filter.apply(&mut doc), 1 + links);
+    assert!(of_role(&doc, "frame").all(|entity| entity.common().invisible));
+    assert!(of_role(&doc, "connectivity").all(|entity| entity.common().invisible));
+    assert_eq!(
+        filter.roles_off().collect::<Vec<_>>(),
+        ["connectivity", "frame", "text"]
+    );
+
+    filter.set_role("text", true);
+    filter.set_role("frame", true);
+    filter.set_role("connectivity", true);
+    filter.store(&mut doc);
+    assert_eq!(filter.apply(&mut doc), text - text_already_dark + 1 + links);
+    assert_eq!(dark(&doc), hidden_objects);
+}
+
+/// The filter and the bits it set travel together: after a DWG or a DXF save
+/// the reopened drawing reads the same record, and the same entities -- and
+/// only those -- are dark.
+#[test]
+fn the_view_filter_and_its_invisible_bits_survive_dwg_and_dxf() {
+    let Some(mut doc) = import("DWG-0202GP06-01.pid") else {
+        return;
+    };
+    let mut filter = PidViewFilter::load(&doc).expect("0202 stores a filter");
+    filter.set_layer("Labels", false);
+    filter.set_role("point-warning", false);
+    filter.store(&mut doc);
+    filter.apply(&mut doc);
+    let expected_dark = dark(&doc);
+    assert_eq!(
+        expected_dark,
+        97 + 16 + 10,
+        "Labels + HiddenObjects + point-warning"
+    );
+
+    for ext in ["dwg", "dxf"] {
+        let bytes = OpenCADStudio::io::save_to_bytes(&doc, ext, doc.version)
+            .unwrap_or_else(|error| panic!("save {ext}: {error}"));
+        let reopened = OpenCADStudio::io::load_bytes(&format!("view-filter.{ext}"), bytes)
+            .unwrap_or_else(|error| panic!("reopen {ext}: {error}"));
+        assert_eq!(
+            PidViewFilter::load(&reopened).as_ref(),
+            Some(&filter),
+            "{ext}: the PID_VIEW_FILTER record did not survive"
+        );
+        assert_eq!(
+            dark(&reopened),
+            expected_dark,
+            "{ext}: the invisible bits changed"
+        );
+        for entity in reopened
+            .entities()
+            .filter(|entity| entity.common().invisible)
+        {
+            let layer = pid_value(entity, "sheet_layer");
+            let role = pid_value(entity, "role");
+            assert!(
+                matches!(layer.as_deref(), Some("Labels" | "HiddenObjects"))
+                    || role.as_deref() == Some("point-warning"),
+                "{ext}: a dark entity the filter does not name: layer={layer:?} role={role:?}"
+            );
+        }
     }
 }
 

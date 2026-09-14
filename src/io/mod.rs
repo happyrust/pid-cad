@@ -12,6 +12,7 @@ pub mod obj;
 pub mod pid;
 pub mod pid_legend;
 pub mod pid_pipes;
+pub mod pid_view_filter;
 
 /// XDATA application name under which a `.pid` import and P&ID legend
 /// recognition publish an entity's identity (`class=…`, `label=…`, … string
