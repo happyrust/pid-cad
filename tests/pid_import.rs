@@ -1078,9 +1078,18 @@ fn a_drawing_without_published_xml_still_carries_authored_sheet_layers() {
         let Some(doc) = import(name) else {
             continue;
         };
+        // Every entity carries a record now (`role=` at least), so the
+        // authored-layer records are the ones that mention a sheet layer at
+        // all -- by oid, which is always written, or by the name the oid
+        // resolved to.
         let records: Vec<_> = doc
             .entities()
             .filter_map(|entity| entity.common().extended_data.get_record("PID_SEMANTICS"))
+            .filter(|record| {
+                record.values.iter().any(|value| {
+                    matches!(value, acadrust::xdata::XDataValue::String(text) if text.starts_with("sheet_layer"))
+                })
+            })
             .collect();
         assert!(
             !records.is_empty(),
@@ -1128,7 +1137,259 @@ fn hidden_authored_layers_open_on_pid_hidden_and_metadata_survives_dwg_and_dxf()
                     matches!(value, acadrust::xdata::XDataValue::String(text) if text == "sheet_layer=HiddenObjects")
                 }))
         }), "authored sheet-layer XDATA was lost across {ext} round-trip");
+        assert_eq!(
+            pid_records_with(&reopened, "role").count(),
+            pid_records_with(&doc, "role").count(),
+            "{ext} round-trip changed how many entities state their role"
+        );
+        assert!(
+            reopened
+                .entities()
+                .any(|entity| pid_value(entity, "role").as_deref() == Some("frame")),
+            "{ext} round-trip lost the page border's role=frame"
+        );
     }
+}
+
+/// The `key=value` pairs of an entity's `PID_SEMANTICS` record, in the order
+/// the importer wrote them; empty when the entity carries none.
+fn pid_pairs(entity: &EntityType) -> Vec<(String, String)> {
+    entity
+        .common()
+        .extended_data
+        .get_record("PID_SEMANTICS")
+        .map(|record| {
+            record
+                .values
+                .iter()
+                .filter_map(|value| match value {
+                    acadrust::xdata::XDataValue::String(text) => text
+                        .split_once('=')
+                        .map(|(key, val)| (key.to_string(), val.to_string())),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The first value written under `key`, if any.
+fn pid_value(entity: &EntityType, key: &str) -> Option<String> {
+    pid_pairs(entity)
+        .into_iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v)
+}
+
+fn pid_records_with<'a>(
+    doc: &'a CadDocument,
+    key: &'a str,
+) -> impl Iterator<Item = &'a EntityType> {
+    doc.entities()
+        .filter(move |entity| pid_value(entity, key).is_some())
+}
+
+/// The vocabulary of `role=`: the importer's own reading of what an entity
+/// is. Written out here rather than shared with the importer, so a new role
+/// has to be added to the test on purpose.
+const ROLES: [&str; 12] = [
+    "geometry",
+    "text",
+    "symbol",
+    "symbol-label",
+    "point-ok",
+    "point-warning",
+    "point-error",
+    "point-approved",
+    "annotation",
+    "connectivity",
+    "fill",
+    "frame",
+];
+
+/// The role an entity's synthetic layer stands for today. The test's own
+/// table, not the importer's: the whole point of `role=` is that the layer
+/// slot may later hold the authored sheet layer instead (plan 2026-09-07 L3),
+/// and this is the yardstick that says the XDATA kept the reading.
+fn role_of_layer(layer: &str) -> Option<&'static str> {
+    Some(match layer {
+        "PID-GEOMETRY" => "geometry",
+        "PID-TEXT" => "text",
+        "PID-SYMBOL" => "symbol",
+        "PID-SYMBOL-LABEL" => "symbol-label",
+        "PID-POINT" => "point-ok",
+        "PID-POINT-WARNING" => "point-warning",
+        "PID-POINT-ERROR" => "point-error",
+        "PID-POINT-APPROVED" => "point-approved",
+        "PID-ANNOTATION" => "annotation",
+        "PID-CONNECTIVITY" => "connectivity",
+        "PID-FILL" => "fill",
+        "PID-FRAME" => "frame",
+        other if other.starts_with(DISCIPLINE_PREFIX) => "geometry",
+        _ => return None,
+    })
+}
+
+/// Every entity the import draws says what it is, in XDATA, independently of
+/// the layer it happens to be filed on: `role=` is the classification the
+/// `PID-*` taxonomy has carried in the layer slot until now, moved to where a
+/// change of layer policy cannot lose it (plan 2026-09-07, D8 / L2). On an
+/// entity that stays on its synthetic layer the two agree; an entity moved to
+/// `PID-HIDDEN` keeps the role of the layer it would otherwise be on.
+#[test]
+fn every_imported_entity_states_its_role_and_the_role_matches_its_layer() {
+    for name in [
+        "DWG-0201GP06-01.pid",
+        "DWG-0202GP06-01.pid",
+        "D06.pid",
+        "工艺管道及仪表流程-1.pid",
+    ] {
+        let Some(doc) = import(name) else {
+            continue;
+        };
+        let mut seen: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for entity in doc.entities() {
+            let layer = layer_of(entity);
+            let role = pid_value(entity, "role")
+                .unwrap_or_else(|| panic!("{name}: an entity on {layer} states no role="));
+            assert!(
+                ROLES.contains(&role.as_str()),
+                "{name}: role={role} on {layer} is not in the vocabulary"
+            );
+            if layer == "PID-HIDDEN" {
+                assert_ne!(
+                    role, "frame",
+                    "{name}: the page border is drawn by the importer and cannot be on an authored hidden layer"
+                );
+            } else {
+                assert_eq!(
+                    role_of_layer(layer),
+                    Some(role.as_str()),
+                    "{name}: role={role} disagrees with the layer {layer} the entity is filed on"
+                );
+            }
+            *seen.entry(role).or_default() += 1;
+        }
+        for expected in ["geometry", "text", "symbol", "frame"] {
+            assert!(
+                seen.contains_key(expected),
+                "{name}: no entity took role={expected}; seen={seen:?}"
+            );
+        }
+        assert_eq!(
+            seen.get("frame"),
+            Some(&1),
+            "{name}: exactly one entity is the page border"
+        );
+    }
+}
+
+/// `role=` and `class=` are two keys with two vocabularies in the same
+/// record: `class` is the published object's XML element name
+/// (`PIDPipeline`, `PIDProcessVessel`, …) and `role` is the importer's
+/// reading. Neither may leak into the other, and the import never writes a
+/// record legend recognition would claim as its own (`resolved=legend:*`).
+#[test]
+fn role_and_class_are_separate_keys_with_disjoint_vocabularies() {
+    let Some(doc) = import("export-test/publish-data/DWG-0202GP06-01/DWG-0202GP06-01.pid") else {
+        return;
+    };
+    const KEYS: [&str; 8] = [
+        "sheet_layer",
+        "sheet_layer_oid",
+        "role",
+        "style",
+        "class",
+        "label",
+        "oid",
+        "resolved",
+    ];
+    let mut both = 0usize;
+    for entity in doc.entities() {
+        let pairs = pid_pairs(entity);
+        for (key, value) in &pairs {
+            assert!(
+                KEYS.contains(&key.as_str()),
+                "the import wrote an unknown PID_SEMANTICS key {key}={value}"
+            );
+            if key == "resolved" {
+                assert!(
+                    !value.starts_with("legend:"),
+                    "the import wrote a legend-owned record; PIDLEGEND PURGE would delete it"
+                );
+            }
+        }
+        let role = pid_value(entity, "role");
+        let class = pid_value(entity, "class");
+        if let (Some(role), Some(class)) = (role, class) {
+            both += 1;
+            assert!(ROLES.contains(&role.as_str()), "role={role} is not a role");
+            assert!(
+                !ROLES.contains(&class.as_str()) && class.starts_with("PID"),
+                "class={class} reads like a role, not a published element name"
+            );
+        }
+    }
+    assert!(
+        both > 0,
+        "no entity carries both a published class= and an import role="
+    );
+}
+
+/// Line work that is filed under a discipline also states, as `style=`, the
+/// authored style name the discipline layer was derived from -- the name is
+/// the fact, the layer is one spelling of it (D8 / L2).
+#[test]
+fn named_line_work_states_the_style_its_discipline_layer_is_derived_from() {
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
+        return;
+    };
+    let mut styles: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for entity in doc
+        .entities()
+        .filter(|entity| layer_of(entity).starts_with(DISCIPLINE_PREFIX))
+    {
+        let style = pid_value(entity, "style").unwrap_or_else(|| {
+            panic!(
+                "an entity on {} names no style= to derive that layer from",
+                layer_of(entity)
+            )
+        });
+        // The layer is the style name's alphanumeric words, upper-cased and
+        // joined with '-', behind the prefix.
+        let mut expected = String::from(DISCIPLINE_PREFIX);
+        let mut gap = false;
+        for character in style.chars() {
+            if character.is_alphanumeric() {
+                if gap && expected.len() > DISCIPLINE_PREFIX.len() {
+                    expected.push('-');
+                }
+                gap = false;
+                expected.extend(character.to_uppercase());
+            } else {
+                gap = true;
+            }
+        }
+        assert_eq!(
+            layer_of(entity),
+            expected,
+            "style={style} and its layer disagree"
+        );
+        styles.insert(style);
+    }
+    assert!(
+        styles.contains("Primary Piping - New"),
+        "DWG-0201's 24 primary piping records must name their style; styles={styles:?}"
+    );
+    // An appearance name stays on PID-GEOMETRY but is still stated: `style=`
+    // records what the drawing calls it, the layer decision is separate.
+    assert!(
+        on_layer(&doc, "PID-GEOMETRY").any(|entity| matches!(
+            pid_value(entity, "style").as_deref(),
+            Some("Normal" | "As Drawn" | "Dashed")
+        )),
+        "an appearance-named record lost its style= on PID-GEOMETRY"
+    );
 }
 
 /// Both fixtures import, and the drawing lands on the layers that open

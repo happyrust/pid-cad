@@ -94,9 +94,11 @@ const CONNECTIVITY_MIN_MM: f64 = 0.1;
 // and the connectivity filter exist to keep out.
 const SHEET_MARGIN_MM: f64 = 100.0;
 
-// XDATA application name carrying an entity's published P&ID identity
-// (`sheet_layer=…`, `sheet_layer_oid=…`, plus optional published semantic
-// pairs). Authored layer identity is present without `_Data.xml`.
+// XDATA application name carrying an entity's P&ID identity: the importer's
+// own reading (`role=…`, `style=…`, see `role_of_layer`), the authored sheet
+// layer (`sheet_layer=…`, `sheet_layer_oid=…`), plus the published semantic
+// pairs when `_Data.xml` sits beside the drawing. Every drawn entity carries
+// at least a role; authored layer identity is present without `_Data.xml`.
 pub(crate) use super::PID_SEMANTICS_XDATA_APP;
 
 // Angles cross this module unchanged, because both sides already agree on
@@ -166,6 +168,42 @@ const APPEARANCE_STYLE_NAMES: [&str; 3] = ["As Drawn", "Dashed", "Normal"];
 // generate: a project style library is free to call a style `Text` or
 // `Point`, and without the prefix that would land on top of `PID-TEXT`.
 const LAYER_DISCIPLINE_PREFIX: &str = "PID-STYLE-";
+
+/// The importer's reading of what an entity is, as the `role=` XDATA value:
+/// `geometry`, `text`, `symbol`, `symbol-label`, `point-ok` / `-warning` /
+/// `-error` / `-approved`, `annotation`, `connectivity`, `fill`, `frame`.
+///
+/// This is the classification the `PID-*` layer names have carried in the
+/// layer slot until now, moved to where a change of layer policy cannot lose
+/// it: the plan (`docs/plans/2026-09-07-jdim-driving-dimensions-and-layer-panel.md`,
+/// D8 / L2) wants the slot free to hold the authored sheet layer instead, and
+/// the role has to survive that. It is derived from the synthetic layer an
+/// entity was built on, so it must be read *before* the hidden-layer override
+/// moves the entity to `PID-HIDDEN` -- which is the one synthetic layer with
+/// no role of its own, because it says where the drawing hid something rather
+/// than what it is.
+///
+/// Not `class=`: that key already holds the published object's XML element
+/// name in the same record (see [`attach_pid_metadata`]), and legend
+/// recognition writes it too.
+fn role_of_layer(layer: &str) -> Option<&'static str> {
+    Some(match layer {
+        LAYER_GEOMETRY => "geometry",
+        LAYER_TEXT => "text",
+        LAYER_SYMBOL => "symbol",
+        LAYER_SYMBOL_LABEL => "symbol-label",
+        LAYER_POINT => "point-ok",
+        LAYER_POINT_WARNING => "point-warning",
+        LAYER_POINT_ERROR => "point-error",
+        LAYER_POINT_APPROVED => "point-approved",
+        LAYER_ANNOTATION => "annotation",
+        LAYER_CONNECTIVITY => "connectivity",
+        LAYER_FILL => "fill",
+        LAYER_FRAME => "frame",
+        discipline if discipline.starts_with(LAYER_DISCIPLINE_PREFIX) => "geometry",
+        _ => return None,
+    })
+}
 
 /// What the import wants the reader to know, sized for one command-line line:
 /// how much of the file became drawing, how much did not, and whether the
@@ -386,13 +424,9 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     let semantics = PidSemanticIndex::load_beside(path, &parsed);
     // The DWG writer skips XDATA whose application is not in the APPID
     // table, so without this registration the identities would survive the
-    // session and silently vanish on save (see `set_entity_xdata`).
-    let has_pid_metadata = semantics.is_some()
-        || geometry
-            .entities
-            .iter()
-            .any(|entity| entity.source_layer.is_some());
-    if has_pid_metadata && !doc.app_ids.contains(PID_SEMANTICS_XDATA_APP) {
+    // session and silently vanish on save (see `set_entity_xdata`). Every
+    // drawn entity states its `role=`, so the registration is unconditional.
+    if !doc.app_ids.contains(PID_SEMANTICS_XDATA_APP) {
         let mut app = acadrust::tables::AppId::new(PID_SEMANTICS_XDATA_APP);
         app.handle = doc.allocate_handle();
         let _ = doc.app_ids.add(app);
@@ -415,11 +449,15 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         // Resolved before building: a point's style decides whether it draws
         // the slash mark SmartPlant shows for a class-coloured point.
         let symbology = style_for(&styles, entity);
-        // Which layer this record's line work belongs on. A record whose
-        // style the drawing does not name keeps `PID-GEOMETRY`, and that
-        // absence is itself a reading: the librarian lists what came from the
-        // project library, so an unnamed style is one drawn in this file.
-        let line_work = discipline_for(&style_names, entity, symbology);
+        // What the drawing calls the style this record draws with, and which
+        // layer that files its line work on. A record whose style the drawing
+        // does not name keeps `PID-GEOMETRY`, and that absence is itself a
+        // reading: the librarian lists what came from the project library, so
+        // an unnamed style is one drawn in this file. The name goes into
+        // XDATA as `style=` whether or not it becomes a layer -- an
+        // appearance name such as `Normal` is still what the drawing said.
+        let style_name = style_name_for(&style_names, entity, symbology);
+        let line_work = style_name.and_then(discipline_layer);
         let line_work = line_work.as_deref().unwrap_or(LAYER_GEOMETRY);
         // The body the drawing itself carries for a placement, for when the
         // library has none. See `build_entities`.
@@ -512,10 +550,16 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
             if let Some(name) = font_style {
                 apply_text_style(&mut one, name);
             }
+            // The role is read off the layer the entity was built on, before
+            // the hidden-layer override below can move it: `PID-HIDDEN` says
+            // where the drawing hid the entity, not what it is.
+            let role = role_of_layer(&one.common().layer);
             attach_pid_metadata(
                 &mut one,
                 semantic_hit.as_ref(),
                 entity.source_layer.as_ref(),
+                role,
+                style_name,
             );
             if entity
                 .source_layer
@@ -614,7 +658,11 @@ fn draw_page_border(doc: &mut CadDocument, page_mm: Option<(f64, f64)>) {
     ]);
     border.is_closed = true;
     border.common.layer = LAYER_FRAME.to_string();
-    let _ = doc.add_entity(EntityType::LwPolyline(border));
+    let mut border = EntityType::LwPolyline(border);
+    // Drawn by the importer, so no authored layer and no published identity;
+    // it still says what it is, like every other entity of the import.
+    attach_pid_metadata(&mut border, None, None, role_of_layer(LAYER_FRAME), None);
+    let _ = doc.add_entity(border);
 }
 
 /// How a drawing's source coordinates become millimetres on its sheet.
@@ -876,16 +924,30 @@ fn report_import(
 /// Write an entity's published P&ID identity into its XDATA, under
 /// [`PID_SEMANTICS_XDATA_APP`] as self-describing `key=value` strings.
 ///
-/// The values come from the drawing's own published `_Data.xml`, joined by
+/// Three sources, three vocabularies, one record. The authored layer pair
+/// (`sheet_layer`, `sheet_layer_oid`) is what the drawing files the entity
+/// under, carried whenever the record declares one. `role` and `style` are
+/// the importer's reading: `role` is what the entity is (see
+/// [`role_of_layer`]), `style` the name the drawing gives the line style it
+/// draws with -- the name `discipline_layer` derives a `PID-STYLE-*` layer
+/// from, stated even when that name is an appearance and earns no layer. The
+/// published pairs come from the drawing's own `_Data.xml`, joined by
 /// `pid-parse`'s semantic index: `class` is the owning object's XML element
 /// name (`PIDPipeline`, `PIDProcessVessel`, …), `label` its `ItemTag` /
 /// `Name`, `oid` the published `GraphicOID`, and `resolved` says which hop
-/// found it (`direct`, or `dependency:<aggregate oid>`). The authored layer
-/// pair is carried independently, including when no published XML exists.
+/// found it (`direct`, or `dependency:<aggregate oid>`).
+///
+/// `class` and `role` are deliberately two keys: the first is the file's
+/// business object, the second this importer's classification, and legend
+/// recognition (`pid_legend::xdata`) writes `class` too. Records it owns are
+/// marked `resolved=legend:*`; nothing written here carries that prefix, so
+/// `PIDLEGEND PURGE` leaves import identity alone.
 fn attach_pid_metadata(
     entity: &mut EntityType,
     hit: Option<&PidSemanticHit<'_>>,
     source_layer: Option<&pid_parse::PidSourceLayer>,
+    role: Option<&str>,
+    style: Option<&str>,
 ) {
     use acadrust::xdata::{ExtendedDataRecord, XDataValue};
 
@@ -901,6 +963,12 @@ fn attach_pid_metadata(
             push_pair(&mut record, "sheet_layer", name);
         }
         push_pair(&mut record, "sheet_layer_oid", &layer.oid.to_string());
+    }
+    if let Some(role) = role {
+        push_pair(&mut record, "role", role);
+    }
+    if let Some(style) = style {
+        push_pair(&mut record, "style", style);
     }
     if let Some(hit) = hit {
         let object = hit.object();
@@ -953,22 +1021,24 @@ fn style_for<'a>(
     styles.get(&(stream.to_string(), oid))
 }
 
-/// The layer one entity's line work belongs on, when the drawing names the
-/// style it draws with.
+/// What the drawing calls the style one entity draws with, when it names it.
 ///
 /// A second join, one hop past [`style_for`]: that one gives the record its
 /// style, this one asks the drawing what it calls that style. The key is
 /// `(stream path, style id)` rather than the graphic oid, because a name
 /// belongs to the style — one `Primary Piping - New` covers thirty-nine
-/// records across this corpus.
-fn discipline_for(
-    names: &StyleNameIndex,
+/// records across this corpus. The name is written to XDATA as `style=` and,
+/// through [`discipline_layer`], decides the line work's layer.
+fn style_name_for<'a>(
+    names: &'a StyleNameIndex,
     entity: &pid_parse::PidGraphicEntity,
     style: Option<&ResolvedLineStyle>,
-) -> Option<String> {
+) -> Option<&'a str> {
     let stream = entity.source.stream_path.as_deref()?;
     let style_id = style?.style_id;
-    discipline_layer(names.get(&(stream.to_string(), style_id))?)
+    names
+        .get(&(stream.to_string(), style_id))
+        .map(String::as_str)
 }
 
 /// The layer name for one authored style name, or `None` when the name is not
