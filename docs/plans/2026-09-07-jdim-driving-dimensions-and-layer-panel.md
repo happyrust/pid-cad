@@ -23,6 +23,11 @@
 > **补记（2026-09-14 晚，会话 fable-5-1-14）**：**L2 四步全部落地**（`39b1cc72` → `f082393d` → `706e4eb7` → `018314a6`），
 > user-guide `.pid` 一节随 L2 出口写入；`pid_import` 44/44。按 D7 下一项是 **L1**（pid-parse 解 `0x0057` 显示状态，
 > 落地后只换 `is_hidden_sheet_layer` 一处初值）。
+>
+> **补记（2026-09-14 夜，会话 opus-5-24）**：**L1 落地**（pid-parse `132604f` + `b61de88`，OCS 消费端 `cf137fb0`）——
+> `0x0057` 的长度账 53/53 做平，显示状态是按图层号索引的位图，图层显隐从此走文件事实，名字判据降为兜底
+> （D6 的第一个分支成立）；`Dimension` / `Construction` 在定义缓存里实测为关，**D2「默认不画」得到文件背书**。
+> `pid_import` 44 → 45，pid-parse `--lib` 1094 → 1097、`parse_real_files` 127 → 128。按 D7 下一项是 **J1**。
 
 ## 决策记录
 
@@ -33,7 +38,7 @@
 | D3 | JDim 取证路线 | 先 `imagdex.dex` 原生读取器（08-31 的 `tools/idalib_imagdex_*.py` 现成，按 `JDim Object` vtable slot 3 → `DoIO` 反编译），字节统计只做互证；`radsrvitem.dll!sub_564BA320`（igDimension 277）作第二对照。**没有原生读法坐实的字段不进 DTO**（保持 `raw`），与曲线族同一纪律 | ⭕ |
 | D4 | 图层槽归谁 | **分两步**：先做「分类过滤机制 + 图层管理器的图纸图层视图」（L2，不动槽），再把槽换成图纸图层（L3，导入选项后置切换）。两步共用同一套按 XDATA 分类的逐实体可见性机制；L3 是否本轮做完见 D5 | ⭕ |
 | D5 | L3 范围 | 本轮**做到「选项可切、默认不切」**：`OCS_PID_LAYER_MODE=sheet` 时槽=图纸图层名（原样，不加前缀），taxonomy 退到 XDATA `role=` / `style=`；探针 / 测试 / 图例线跟着改成按 role 取；默认值翻转另开一轮，等 DXF 下游消费方的要求定下来。变量名与 `OCS_PID_LEGEND_RULES` 同前缀（09-13 改，原写 `PID_LAYER_MODE`） | ⭕ |
-| D6 | 图层显隐的事实源 | `0x0057 Top ViewFilterSet` 的显示状态字节（08-27 记为「`FF 02 00 …` 一段」，未解）→ 解出后**替代**现在按名字猜的隐藏类（`Hidden` / `HiddenObjects` / `Invisible`）；解不出则名字判据保留，登记缺口 | ⭕ |
+| D6 | 图层显隐的事实源 | `0x0057 Top ViewFilterSet` 的显示状态字节（08-27 记为「`FF 02 00 …` 一段」，未解）→ 解出后**替代**现在按名字猜的隐藏类（`Hidden` / `HiddenObjects` / `Invisible`）；解不出则名字判据保留，登记缺口。**2026-09-14 结算**：解出（那「一段」是位图的 `FF` + u16 长度头），第一个分支成立——文件状态当判据、名字判据降为兜底（`PidSourceLayer::displayed` 为 `None` 时才用）；语料里唯一翻案的是 `Invisible`（文件说显示），无画出实体，输出不变。见 L1 进度 | ⭕ |
 | D7 | 执行顺序 | ~~L1 → J1 → J2 → L2 → J3 → L3 → 台账~~ **2026-09-13 改为 L2 → L1 → J1 → J2 → J3 → L3 → T**：L2 是本轮唯一用户看得见的项，且自带「L1 未到之前用名字判据」的兜底，不必等 L1；J 线按 D2 默认不画，产出是证据与特性面板字段，排在 L2 之后不卡屏幕。一项一提交，先红后绿 | ⭕ |
 | D8 | 分类维的 XDATA 键名（2026-09-13 审核发现） | 原稿 L2 要写 `class=`（geometry / text / symbol / …），但 `PID_SEMANTICS` 记录里 **`class=` 已被占用**：`src/io/pid.rs::attach_pid_metadata` 写的是 `_Data.xml` 语义对象的元素名（`PIDPipeline` / `PIDProcessVessel` …），特性面板读它当「类型」；DXF 识别线 W8 的 `pid_legend/xdata.rs` 也往同一记录写 `class=<识别类>`。照原稿写下去两种语义互相覆盖。**改用 `role=`**（值不变：geometry / text / symbol / symbol-label / point-ok\|warning\|error\|approved / annotation / connectivity / fill / frame），`style=` 照旧；术语「分类」相应改「角色（role）」 | ⭕ |
 
@@ -129,6 +134,38 @@ OCS `pid_import` + `pid_panel_localization` 全绿；数值变更随 analysis �
 
 **风险**：显示状态可能不在 `0x0057` 里而在 `SheetView`（`0x0076`）或别处——①的长度账做不平就换目标，
 不硬凑；时间盒一个工作日，无果按 D6 保留名字判据、登记缺口。
+
+**进度**：✅ 2026-09-14 pid-parse `132604f`（`feat(layers): read each sheet's layer display state from its Top ViewFilterSet`）
++ `b61de88`（分析文档 `2026-09-14-viewfilterset-carries-the-layer-display-state.md`、guide 3.4、CHANGELOG、
+task_plan 指针）与 OCS `cf137fb0`（`pid: the file's own display bit decides which sheet layers an import starts with switched off`）。
+**① 长度账做平**：`+32` 是**活动图层号**（恒 = `Default` 的图层号，53/53——08-27 记「没认」的就是这个字）；
+`+38` 起 6 张**按图层号索引的位图**（各自带 `FF` + u16 长度：第一张显示、第二张读作可定位、后四张恒全 1 无读法）；
+随后逐图层显示覆盖（认领状态层灰显，`0.18 mm` 细线）、12 个 0 字节、名字表——**名字后的 u16 是图层号，不是间隙**。
+四主图 49 条 + A01 4 条 **53/53 精确收尾**，多一字节少一字节都没有。**② 原生读取器没读**（`viewfil.dex` 未碰）：
+位图含义靠语料对照组读出，等级 **corpus**，是对 D3「没有原生读法坐实的字段不进 DTO」的一处让步，
+覆盖项的 `kind` / 尾字与位图 3–6 按 raw 留着，已登记在分析文档「还开着的」。**③ 条目落到对象**：经
+「集合的 JSheet → 登记它的 `JSheetLayerManager`（tag 183）→ 同名同号的图层」**309/309 各落唯一对象**
+（`parent_ref` 走不通，0/309）；答案写进 `SheetLayer::displayed` / `locatable` / `view_filter_set_oid`、
+`PidDocument::view_filter_sets`（按存储）与每个几何实体的 `PidSourceLayer::displayed`。**④ `JSheetLayerGroup`**
+16 条逐字节同形，每存储一个单成员 `Default` 组——**不是分组事实**，面板不用它。
+**对照组**：顶层 `Hidden` / `HiddenObjects` 10/10 关、`Default` 53/53 开、定义缓存里 `Dimension` / `Construction`
+各 11/11 关（**D2「默认不画」由文件背书，不必翻案**）、`Label` / `Jacket` / `Heat Trace` 在定义里关；
+**唯一分歧是 `Invisible`**——两个定义缓存里实测为**开**，名字判据说隐藏，文件说显示；语料里没有画出的实体
+落在它上面，OCS 输出因此不变（分歧写进分析文档 §3）。§6 那个空缺（`Default` 从不被 184 边指）也有了形状：
+显示状态是每层一位的位图、不是「只登记偏离基线者」的清单，184 边不再是显示状态的载体候选。
+**消费端（OCS）**：新函数 `pid.rs::sheet_layer_is_hidden` 一处裁决——`PidSourceLayer::displayed` 有值听文件，
+没有才落回 `is_hidden_sheet_layer` 名字判据（名字判据降级为兜底，文档随之改口）；
+`PidViewFilter::initial`（扫成图文档按名字取）删掉，改由导入归层时顺手收集 off 集合交给新的
+`with_layers_off`——初值只有这一条路。**`PID-HIDDEN` 归层照旧不动**：L2 第 3 步的开关依赖「开层连带放开 PID-HIDDEN」，
+按 L3 的口径退役（L2 第 2 步那句「这一步落地那天归层逻辑就可以退役」与执行顺序里的同一说法，一并推迟到 L3，理由记在此）。
+**验证**：pid-parse `--lib` 1094 → 1097、`parse_real_files` 127 → 128（新棘轮
+`view_filter_sets_state_each_sheets_layer_display_and_close_exactly`），金样只多 `displayed` 一个字段重封，
+解码器进 panic-safety 套；OCS `pid_import` **44 → 45**（新断言：过滤初值集合 = 文件说关的那些层，
+且逐实体与 `PID-HIDDEN` / `invisible` 对齐，三张图各跑一遍）、`pid.rs` 新增单测一条、模块单测 6 条改口径，
+`cargo clippy --lib --bins --tests` 零告警、rustfmt 改动文件干净（`tests/pid_import.rs:101` 是 HEAD 既有旧账）。
+`cargo test --lib` 1150 过 / 3 失败——`app::automation::a_dry_run_plot_writes_nothing`、
+`pidlegend::an_svg_plot_groups_a_tagged_symbol_with_its_tag`、`svg_export::a_page_style_table_wins_over_the_job_wide_one`
+**单跑全绿**，是字形图集并行时的老飘忽（09-14 上一轮已记两条），与本项无关。**UI 未手工点过**。
 
 ### J1 · JDim 字节取证与原生读取器（pid-parse）
 
@@ -273,7 +310,7 @@ XRecord `PID_VIEW_FILTER`（每条 `layer_off=<名>` / `role_off=<角色>` 一�
 
 **待做（随本轮各项收尾）**：
 
-- pid-parse `task_plan.md`「当前阶段」加本轮指针（L1 / J2 落地时各刷一次）。
+- pid-parse `task_plan.md`「当前阶段」加本轮指针（L1 已刷，随 `b61de88`；J2 落地时再刷一次）。
 - user-guide 在 L3 落地时补 `OCS_PID_LAYER_MODE` 一段。
 - OCS `.context` 会话文件按惯例；每项落地 `remember` 一条。
 
@@ -286,7 +323,8 @@ XRecord `PID_VIEW_FILTER`（每条 `layer_off=<名>` / `role_off=<角色>` 一�
 - **L2 先行**：本轮唯一用户看得见的项（图层管理器里出现 SmartPlant 自己的图层与开关），不依赖 J，
   也不必等 L1——初值用现有名字判据，L1 到了只换一处初值函数。D8 的键名改动在 L2 第 1 步落地。
 - **L1 紧随**：解出显示状态就把 L2 的初值换成文件事实，`PID-HIDDEN` 归层退役；时间盒一个工作日，
-  无果按 D6 保留名字判据。
+  无果按 D6 保留名字判据。**2026-09-14 结算**：一个工作日内落地（pid-parse `132604f` + `b61de88`、OCS `cf137fb0`），
+  初值已换成文件事实；`PID-HIDDEN` 归层**没有**退役——L2 第 3 步的开关靠它，退役并入 L3。
 - **J1 → J2 → J3**：把 JDim 从盲区拿出来并闭环参数化链。按 D2 默认不画，所以排在屏幕价值之后；
   J1 两个工作日时间盒，原生读取器无果则 J2 只带坐实字段 + raw，不空转。
 - **L3 最后**：选项后置、默认不切，风险隔离。
@@ -305,7 +343,7 @@ XRecord `PID_VIEW_FILTER`（每条 `layer_off=<名>` / `role_off=<角色>` 一�
 | 按视图过滤集分别呈现图层状态 | OCS 单模型空间，取一份（顶层存储、第一个集合）；多视图是另一个产品命题 |
 | `OCS_PID_LAYER_MODE` 默认翻转 | 等 DXF 下游消费方（图例线那批 DXF 的用法）把要求说清 |
 | 缓存 vs 库本体优先级、缓存 `StyleCluster` 接入 | 09-07 上午登记的两条，与本轮无耦合，另排 |
-| A01 `/JSite204` `Default` 计数差 4、`0x0057 +32` 语义 | 未解释记账，等新证据（L1 可能顺带碰到，碰到就记） |
+| A01 `/JSite204` `Default` 计数差 4 | 未解释记账，等新证据。（`0x0057 +32` 那一半 L1 顺带解了：活动图层号；A01 那两个 `Default` 是嵌套「Imagineer Document」正文的层，文件里没有它们的显示状态） |
 
 ## 术语
 
