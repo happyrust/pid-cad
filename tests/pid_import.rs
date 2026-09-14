@@ -1218,6 +1218,77 @@ fn the_import_switches_the_hidden_sheet_layers_off_in_a_stored_view_filter() {
     );
 }
 
+/// The switched-off set is the file's own statement, not a guess from names
+/// (plan 2026-09-07, L1): `pid-parse` reads each sheet layer's display bit
+/// from the sheet's `Top ViewFilterSet`, and the import starts a layer off
+/// exactly when the file draws none of it. On the corpus that is
+/// `HiddenObjects` alone -- the same answer the name criterion gave -- so
+/// this pins the *source* of the answer: for every drawn entity, the layer
+/// it was filed under and the bit its record carries agree with the stored
+/// filter, and no entity with a displayed layer is on `PID-HIDDEN`.
+#[test]
+fn the_import_takes_the_switched_off_layers_from_the_file_not_from_their_names() {
+    for fixture_name in ["DWG-0201GP06-01.pid", "DWG-0202GP06-01.pid", "D06.pid"] {
+        let Some(path) = fixture(fixture_name) else {
+            return;
+        };
+        let parsed = pid_parse::PidParser::new()
+            .parse_file(&path)
+            .unwrap_or_else(|error| panic!("{fixture_name}: pid-parse: {error}"));
+        let geometry = pid_parse::build_normalized_geometry(&parsed);
+        let mut stated_off = std::collections::BTreeSet::new();
+        let mut stated_on = std::collections::BTreeSet::new();
+        for entity in &geometry.entities {
+            let Some(layer) = &entity.source_layer else {
+                continue;
+            };
+            let (Some(name), Some(displayed)) = (layer.name.as_deref(), layer.displayed) else {
+                continue;
+            };
+            if displayed {
+                stated_on.insert(name.to_string());
+            } else {
+                stated_off.insert(name.to_string());
+            }
+        }
+        assert!(
+            !stated_off.is_empty() && !stated_on.is_empty(),
+            "{fixture_name}: the file states both switched-off and displayed layers"
+        );
+        assert!(
+            stated_off.is_disjoint(&stated_on),
+            "{fixture_name}: a name both off and on: {:?}",
+            stated_off.intersection(&stated_on).collect::<Vec<_>>()
+        );
+
+        let doc = OpenCADStudio::io::load_file(&path)
+            .unwrap_or_else(|error| panic!("{fixture_name}: import: {error}"));
+        let filter = PidViewFilter::load(&doc).expect("the import stores a filter");
+        assert_eq!(
+            filter
+                .layers_off()
+                .collect::<std::collections::BTreeSet<_>>(),
+            stated_off
+                .iter()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            "{fixture_name}: the filter starts with the layers the file switches off"
+        );
+        for entity in doc.entities() {
+            let Some(name) = pid_value(entity, "sheet_layer") else {
+                continue;
+            };
+            if stated_off.contains(&name) {
+                assert_eq!(layer_of(entity), "PID-HIDDEN", "{fixture_name}: {name}");
+                assert!(entity.common().invisible, "{fixture_name}: {name} draws");
+            } else if stated_on.contains(&name) {
+                assert_ne!(layer_of(entity), "PID-HIDDEN", "{fixture_name}: {name}");
+                assert!(!entity.common().invisible, "{fixture_name}: {name} is dark");
+            }
+        }
+    }
+}
+
 /// The acceptance the plan names: switch `Labels` off in the record and
 /// 0202's labels go dark -- its 46 text entities, and with them the 46 pieces
 /// of line work and 5 fills the sheet files under the same layer -- while

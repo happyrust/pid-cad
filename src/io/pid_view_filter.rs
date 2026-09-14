@@ -26,10 +26,13 @@
 //! that would say the same as no record. Both the record and the bits ride
 //! DWG and DXF saves on their own, so a reopened drawing needs no re-apply.
 //!
-//! The starting point is the one reading the importer already had: the sheet
-//! layers SmartPlant hides by name (`Hidden` / `HiddenObjects` / `Invisible`)
-//! start switched off -- see [`is_hidden_sheet_layer`], the single function to
-//! change once the file's own display state is decoded (plan 2026-09-07, L1).
+//! The starting point is the file's own: `pid-parse` reads each sheet layer's
+//! display bit from the sheet's `Top ViewFilterSet`, and the importer starts
+//! a layer off when the file draws none of it ([`PidViewFilter::with_layers_off`];
+//! plan 2026-09-07, L1). The name criterion this module carried before the bit
+//! was decoded -- `Hidden` / `HiddenObjects` / `Invisible`,
+//! [`is_hidden_sheet_layer`] -- is the fallback for a layer whose bit the
+//! parser could not read.
 //!
 //! The layer manager's sheet-layer view is a reading of the same two axes:
 //! [`PidViewSummary`] lists what the drawing's entities state along each,
@@ -52,12 +55,17 @@ pub const XRECORD_KEY: &str = "PID_VIEW_FILTER";
 const LAYER_OFF: &str = "layer_off=";
 const ROLE_OFF: &str = "role_off=";
 
-/// Whether an authored sheet layer name means "SmartPlant does not draw this":
-/// `Hidden`, `HiddenObjects` or `Invisible`, trimmed, case-folded and with
-/// inner whitespace ignored, so `Hidden Objects` and `HIDDENOBJECTS` both
-/// count. This name criterion is the filter's starting point and the reason
-/// an import moves such entities to `PID-HIDDEN`; when the view filter set's
-/// display state is decoded it is this one function that changes.
+/// Whether an authored sheet layer name conventionally means "SmartPlant does
+/// not draw this": `Hidden`, `HiddenObjects` or `Invisible`, trimmed,
+/// case-folded and with inner whitespace ignored, so `Hidden Objects` and
+/// `HIDDENOBJECTS` both count.
+///
+/// Since the sheet's own display state is decoded this is the fallback, not
+/// the reading: the importer asks the file first (`pid_parse`'s
+/// `PidSourceLayer::displayed`) and only a layer without a bit is judged by
+/// its name. The corpus's sheets agree with the names on `Hidden` and
+/// `HiddenObjects`; the one `Invisible` the files carry, in two symbol
+/// definitions, they display.
 pub fn is_hidden_sheet_layer(name: &str) -> bool {
     let normalized: String = name
         .trim()
@@ -80,20 +88,14 @@ pub struct PidViewFilter {
 }
 
 impl PidViewFilter {
-    /// The filter the importer starts a drawing with: every authored sheet
-    /// layer named on an entity that [`is_hidden_sheet_layer`] is off, no
-    /// role is.
-    pub fn initial(doc: &CadDocument) -> Self {
+    /// The filter the importer starts a drawing with: the sheet layers the
+    /// file switches off -- as `pid_parse` read them from each sheet's
+    /// `Top ViewFilterSet`, with the name criterion standing in for a layer
+    /// without a bit -- are off, no role is.
+    pub fn with_layers_off<'a>(layers: impl IntoIterator<Item = &'a str>) -> Self {
         let mut filter = Self::default();
-        for entity in doc.entities() {
-            let Some(keys) = pid_keys(entity) else {
-                continue;
-            };
-            if let Some(layer) = keys.sheet_layer {
-                if is_hidden_sheet_layer(layer) {
-                    filter.layers_off.insert(layer.to_string());
-                }
-            }
+        for layer in layers {
+            filter.set_layer(layer, false);
         }
         filter
     }
@@ -551,21 +553,15 @@ mod tests {
     }
 
     #[test]
-    fn the_initial_filter_switches_off_only_the_hidden_sheet_layers_present() {
-        let doc = document_with(vec![
-            line_with(&["sheet_layer=Labels", "role=text"]),
-            line_with(&["sheet_layer=HiddenObjects", "role=geometry"]),
-            line_with(&["sheet_layer=Hidden Objects", "role=geometry"]),
-            line_with(&["role=frame"]),
-        ]);
-        let filter = PidViewFilter::initial(&doc);
+    fn the_starting_filter_switches_off_the_layers_the_importer_hands_it() {
+        let filter = PidViewFilter::with_layers_off(["HiddenObjects", "Hidden Objects"]);
         assert_eq!(
             filter.layers_off().collect::<Vec<_>>(),
             ["Hidden Objects", "HiddenObjects"],
             "each spelling the drawing uses is its own switch"
         );
         assert_eq!(filter.roles_off().count(), 0);
-        assert!(PidViewFilter::initial(&document_with(Vec::new())).is_empty());
+        assert!(PidViewFilter::with_layers_off([]).is_empty());
     }
 
     #[test]
@@ -653,7 +649,7 @@ mod tests {
             .add(hidden)
             .expect("a fresh document has no PID-HIDDEN");
         doc.entities_mut().nth(1).unwrap().common_mut().layer = LAYER_HIDDEN.to_string();
-        let initial = PidViewFilter::initial(&doc);
+        let initial = PidViewFilter::with_layers_off(["HiddenObjects"]);
         initial.store(&mut doc);
         initial.apply(&mut doc);
         let dark = |doc: &CadDocument| -> Vec<bool> {

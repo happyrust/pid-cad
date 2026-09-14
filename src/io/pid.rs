@@ -33,7 +33,7 @@ use pid_parse::style_link::{
 use pid_parse::symbol_library::{PrimitiveStyle, StyledPrimitive, SymbolLibrary, SymbolPrimitive};
 use pid_parse::{
     build_normalized_geometry, NormalizedPidGeometry, PidDrawingUnits, PidGeometryConfidence,
-    PidGraphicKind, PidParser, PidPoint, PidSemanticHit, PidSemanticIndex,
+    PidGraphicKind, PidParser, PidPoint, PidSemanticHit, PidSemanticIndex, PidSourceLayer,
 };
 
 // Millimetres in a metre, which is the unit a `.pid`'s decoded coordinates
@@ -100,9 +100,9 @@ const SHEET_MARGIN_MM: f64 = 100.0;
 // pairs when `_Data.xml` sits beside the drawing. Every drawn entity carries
 // at least a role; authored layer identity is present without `_Data.xml`.
 pub(crate) use super::PID_SEMANTICS_XDATA_APP;
-// The one name criterion for "SmartPlant hides this sheet layer": it decides
-// both which entities move to `PID-HIDDEN` and which sheet layers the view
-// filter starts with switched off.
+// The name criterion for "SmartPlant hides this sheet layer" is the fallback
+// behind [`sheet_layer_is_hidden`]: it speaks only for a layer whose display
+// bit `pid-parse` could not read.
 use super::pid_view_filter::{is_hidden_sheet_layer, PidViewFilter, PidViewSummary};
 
 // Angles cross this module unchanged, because both sides already agree on
@@ -210,6 +210,24 @@ fn role_of_layer(layer: &str) -> Option<&'static str> {
         discipline if discipline.starts_with(LAYER_DISCIPLINE_PREFIX) => "geometry",
         _ => return None,
     })
+}
+
+/// Whether the drawing draws nothing of the sheet layer an entity is filed
+/// under. The answer is the file's own: the display bit of the sheet's
+/// `Top ViewFilterSet`, which `pid-parse` reads onto every entity's source
+/// layer (plan 2026-09-07, L1). Only a layer whose bit the parser could not
+/// read falls back to the three names SmartPlant conventionally hides
+/// under -- the criterion this importer used on its own until the bit was
+/// decoded, and which the corpus's sheets agree with except for `Invisible`,
+/// a definition-cache layer the file displays.
+///
+/// This one function decides both which entities move to `PID-HIDDEN` and
+/// which sheet layers the view filter starts with switched off.
+fn sheet_layer_is_hidden(layer: &PidSourceLayer) -> bool {
+    match layer.displayed {
+        Some(displayed) => !displayed,
+        None => layer.name.as_deref().is_some_and(is_hidden_sheet_layer),
+    }
 }
 
 /// What the import wants the reader to know, sized for one command-line line:
@@ -455,6 +473,9 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     let mut embedded_bodies_drawn = 0usize;
     let mut sheet_layer_distribution: BTreeMap<(String, u32, Option<String>), usize> =
         BTreeMap::new();
+    // The sheet layers the drawing draws nothing of, by name: what the view
+    // filter starts with switched off. Filled as the entities are filed.
+    let mut sheet_layers_off: BTreeSet<String> = BTreeSet::new();
     for entity in &geometry.entities {
         // A boundary ring is the one kind whose style decides its shape rather
         // than its colour: filled, it is an area; unfilled, it is an outline
@@ -575,13 +596,15 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
                 role,
                 style_name,
             );
-            if entity
+            if let Some(layer) = entity
                 .source_layer
                 .as_ref()
-                .and_then(|layer| layer.name.as_deref())
-                .is_some_and(is_hidden_sheet_layer)
+                .filter(|layer| sheet_layer_is_hidden(layer))
             {
                 one.common_mut().layer = LAYER_HIDDEN.to_string();
+                if let Some(name) = layer.name.as_deref() {
+                    sheet_layers_off.insert(name.to_string());
+                }
             }
             // Declared when the first entity lands on it, so the layer list
             // holds the disciplines this drawing actually draws rather than
@@ -612,11 +635,12 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     );
     draw_page_border(&mut doc, page_mm);
     frame_drawing(&mut doc, &bounds, page_mm);
-    // The drawing's own view filter: the sheet layers SmartPlant hides start
-    // switched off, and the entities on them go dark by their own `invisible`
-    // bit as well as by sitting on `PID-HIDDEN`. Stored in the document, so
-    // what the user later switches on or off rides every save with the bits.
-    let filter = PidViewFilter::initial(&doc);
+    // The drawing's own view filter: the sheet layers the file switches off
+    // start switched off here too, and the entities on them go dark by their
+    // own `invisible` bit as well as by sitting on `PID-HIDDEN`. Stored in the
+    // document, so what the user later switches on or off rides every save
+    // with the bits.
+    let filter = PidViewFilter::with_layers_off(sheet_layers_off.iter().map(String::as_str));
     filter.store(&mut doc);
     filter.apply(&mut doc);
     // The headline the open-completion handler shows on the command line;
@@ -2375,6 +2399,32 @@ fn ensure_layer(doc: &mut CadDocument, name: &str, colour: Color, visible: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The file's display bit decides, and the name only speaks when the
+    /// file said nothing (plan 2026-09-07, L1): a layer named `Invisible`
+    /// the sheet displays is drawn, a layer named `Default` the sheet hides
+    /// is hidden, and a layer without a bit falls back to the three names.
+    #[test]
+    fn the_display_bit_outranks_the_name_and_the_name_is_only_the_fallback() {
+        let layer = |name: &str, displayed: Option<bool>| PidSourceLayer {
+            oid: 8,
+            name: Some(name.to_string()),
+            storage_path: "/".to_string(),
+            displayed,
+        };
+        assert!(!sheet_layer_is_hidden(&layer("Invisible", Some(true))));
+        assert!(sheet_layer_is_hidden(&layer("Default", Some(false))));
+        assert!(sheet_layer_is_hidden(&layer("HiddenObjects", Some(false))));
+        assert!(sheet_layer_is_hidden(&layer("Hidden", None)));
+        assert!(sheet_layer_is_hidden(&layer("Invisible", None)));
+        assert!(!sheet_layer_is_hidden(&layer("Labels", None)));
+        assert!(!sheet_layer_is_hidden(&PidSourceLayer {
+            oid: 8,
+            name: None,
+            storage_path: "/".to_string(),
+            displayed: None,
+        }));
+    }
 
     fn marker_at(x: f64, y: f64) -> EntityType {
         let mut marker = Circle::new();
