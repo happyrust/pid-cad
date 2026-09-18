@@ -41,6 +41,11 @@
 > 驱动尺寸挂进定义缓存与 `PidSymbolDefinition::dimensions`。棘轮 D06 5 / 0201 5 / 0202 0 / 工艺 4 / A01 4，
 > golden 不变。pid-parse `--lib` 1097 → 1110、`parse_real_files` 128 → 129。按 D7 下一项是 **J3**。
 > OCS 侧本轮**未动**（D2 写的「进特性面板 / 导入摘要」是 J3 之后的消费，见 J2 结算）。
+>
+> **同夜续**：**J3 落地**（pid-parse `de72157`）——参数化链 17/17 闭合、**公式常数按英寸读**；但**只在未被放置的模板上**
+> 闭合：放置实例零 JDim，副本变量 = 库默认，实例参数不在文件缓存里（D06 Tank 实例是同一公式按毫米再算一遍，
+> Manifold 等被拉过）。计划「实例 JDim = 35.59」的前提被否，棘轮按事实命名。`parse_real_files` 129 → 130。
+> D2 后半句（面板 / 摘要）的口径要改：能给放置的只有模板 / 库默认尺寸或实例实际外框。按 D7 下一项 **L3**。
 
 ## 决策记录
 
@@ -334,6 +339,27 @@ Imagineer Document）与 `/JSite329` sheet 49（Manifold 模板，Server Documen
 **验收**：一条棘轮 `a_parametric_instance_carries_its_own_dimension_values`（0201 Manifold；D06 Cone Roof
 Tank 若同理则一并钉）；不改任何投影输出。
 
+**进度**：**✅ 2026-09-18 pid-parse `de72157`**（`probe(jdim): the parametric chain closes on the template, in inches -- and
+the placed instance carries none of it`）——探针 `examples/probe_parametric_chain_resolves_a_cached_body.rs` 逐存储把四族按 oid
+接到 JDim 上重算公式，再把模板本体与放置本体逐坐标比。**链闭合，17/17**（四主图 13 + A01 4），出参全是同存储的 JDim；
+**公式常数按英寸读**——D06 的 `0E$1+0.01` / `0E$1+0.1` 只在英寸下算得出 35.56 / 63.5（1.39″ + 0.01″、2.4″ + 0.1″），
+按米算差 10 / 97 mm；13 条无常数的与单位无关；入参可以是另一条 JDim。**模板上 JDim 值就是本体尺寸**：Manifold 两弧
+r = Top = JDim 36 = 20.32，弧心在 Left / Right 所量短线的起点，114.3 = 轴线到最外端；Tank 半宽 / 半高 / 顶尖 = JDim 20/21、
+18/24、19。**实例那一半不成立**：语料 22 条 JDim 全在五张**未被放置点名**的模板 sheet 上（D06 15、0201 49 / 501、工艺 72、
+A01 96）；被点名的五个参数化实例本体（`Imagineer Document`）零 JDim、零关系、零 Double Value，只有一份变量值 = 库默认的
+`SymbolInformation` 副本（`value_ref` 指回模板存储）。实例几何：` Line2` 与模板逐坐标相同；**D06 Tank 实例 = 同一公式按
+毫米再算一遍**（60.96 + 0.1 mm、35.306 + 0.01 mm、宽 / 10，1e-9 精确）；Manifold / Black Box / Drum 被拉过，**实例参数不在
+文件缓存里**（Manifold 弧 r = 35.590035，不是任何变量）。分析文档
+`docs/analysis/2026-09-18-the-parametric-chain-closes-on-the-template-not-the-instance.md`；09-07 placement-tail 文档 §4 加
+「参数化」一段；guide 参数化链一节补闭合与单位；CHANGELOG、`task_plan.md`。
+
+**J3 结算（对照验收）**：「模板 JDim = 20.32」✓；「实例 JDim = 35.59」✗——实例没有 JDim，35.59 只在弧里；
+「实例弧落在 JDim 两端点上」✗——关系是弧心在被量短线起点、半径 = Top；「tag-188 边按 oid 对上 `igLine2d`」✓（21/22 线、1 点，
+弧从不被量）。棘轮按事实命名 **`the_parametric_chain_closes_on_the_template_not_on_the_placed_instance`**，计划原名说的是
+被否掉的前提，不用。不改投影，golden 不变；`parse_real_files` 129 → 130。**对 D2 后半句的含义**：放置实例身上没有属于它的
+尺寸值，能挂到放置上的只有模板（库默认）的 JDim——面板上给一个画着 35.59 弧的 Manifold 标 20.32 是误导；OCS 侧若要展示，
+要么明说是模板 / 库默认的驱动尺寸，要么给实例本体的实际外框，导入摘要计数无害。开口：放置实例的实际参数在文件何处。
+
 ### L2 · 分类过滤机制 + 图层管理器「图纸图层」视图（OCS）
 
 **现状**：图纸图层只在 XDATA / 特性面板；图层管理器只有一张 `document.layers` 平表；`common.invisible`
@@ -434,7 +460,7 @@ XRecord `PID_VIEW_FILTER`（每条 `layer_off=<名>` / `role_off=<角色>` 一�
 **待做（随本轮各项收尾）**：
 
 - pid-parse `task_plan.md`「当前阶段」加本轮指针（L1 已刷，随 `b61de88`；J1 已刷，随 `1319f10`；J2 已刷，随 `ea89f96`；
-  J3 落地时再刷一次）。
+  J3 已刷，随 `de72157`）。
 - user-guide 在 L3 落地时补 `OCS_PID_LAYER_MODE` 一段。
 - OCS `.context` 会话文件按惯例；每项落地 `remember` 一条。
 
@@ -456,6 +482,9 @@ XRecord `PID_VIEW_FILTER`（每条 `layer_off=<名>` / `role_off=<角色>` 一�
   **J2 2026-09-18 结算**：四步（pid-parse `15aa915` → `41350ab` → `70554b0` → `ca1fffa`，台账 `ea89f96`）——
   解码器只收种类 1，tag-188 逐条核对把尾字坐实为组、把 `+140` 否掉，DTO 随之定形；注册不画，驱动尺寸进
   `PidSymbolDefinition::dimensions`；棘轮全中，golden 不变。**下一项 J3**（模板 JDim 20.32 vs 实例 35.59 的参数化链闭环）。
+  **J3 2026-09-18 结算**（pid-parse `de72157`）：链 17/17 闭合、公式常数按英寸读；但只在未被放置的模板上闭合，
+  放置实例零 JDim、副本变量 = 库默认，实例参数不在缓存里（D06 Tank 实例是同一公式按毫米再算）。棘轮按事实命名。
+  **下一项 L3**（图层槽切到图纸图层，选项后置）；J 线的 OCS 消费（D2 后半句）按 J3 结算改口径后再排。
 - **L3 最后**：选项后置、默认不切，风险隔离。
 - **T** 随各项收尾，不单独占期。
 
