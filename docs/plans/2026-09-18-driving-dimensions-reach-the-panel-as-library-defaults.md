@@ -10,8 +10,8 @@
 > 事实基础：pid-parse `docs/analysis/2026-09-18-the-parametric-chain-closes-on-the-template-not-the-instance.md`
 > （探针 `probe_parametric_chain_resolves_a_cached_body`，四主图 + A01 逐存储不抽样）、`2026-09-15-tag-188-…`、
 > `2026-09-07-placement-tail-names-the-cached-definition.md`，以及 OCS `pid.rs` / `scene/cache/properties.rs` 现状。
-> 带 ⭕ 的决策按推荐落笔、未经拍板，Plannotator 批注里划一笔即可翻案。
-> 状态：**待门禁**（未过 Plannotator）。
+> 带 ⭕ 的决策按推荐落笔。**2026-09-18 22:58 用户在会话里批准**：七条按推荐执行，唯 **K-D3 改口径**——「本体尺寸」所有符号
+> 放置都写都显示，「驱动尺寸（库默认）」限参数化的（决策表与 K2 已改）。未走 Plannotator；直接开 K1。
 
 ## 决策记录
 
@@ -19,7 +19,7 @@
 |---|------|------|------|
 | K-D1 | 面板上给放置实例看什么 | **两行，缺一不可**：「驱动尺寸（库默认）」= 配对到的**模板**本体上带名字的 JDim 值（`Top 20.32 mm · Left 114.3 mm · Right 114.3 mm`），标题里就写「库默认」，不写成实例的尺寸；「本体尺寸」= **实例**本体画出来的外框 `W × H mm`（Manifold 172.21 × 71.18，模板是 228.6 × 40.64）。两行并排，用户一眼看出「库默认 vs 实际」。**绝不**把 `PidSymbolDefinition::dimensions` 当成放置的尺寸展示（J3 §7） | ⭕ |
 | K-D2 | 名字与配对在哪一层做 | **pid-parse**。名字 = `Standard Relation` 出参 JDim ← 入参 `Double Value` ← `SymbolInformation` 变量名（`Top` / `Left` / …）+ 公式字符串；配对 = 实例那份 `SymbolInformation` 的 `value_ref` 解到**另一存储**的 `Double Value`（4/5 对），解不到时按变量名 + 值全同配（工艺那对；四个 0.0127）。这两件都只靠已解开的四族记录与 `0x0115` 按 oid 接，等级 **corpus**（17/17、5/5），与 J3 的棘轮同一套判据；OCS 只看到 `PidNormalizedGeometry`，看不到存储，做不了 | ⭕ |
-| K-D3 | 没有配对到模板的放置 | **不给任何一行**，也不猜：非参数化符号（`SymbolInformation` 无变量、`(0,0)` 那十几条）与配不上对的实例都没有「驱动尺寸」；「本体尺寸」也只在配上对的放置上给（它的意义是与库默认对照）。是否给所有符号一个外框行另开一轮 | ⭕ |
+| K-D3 | 没有配对到模板的放置 | ~~不给任何一行~~ **2026-09-18 用户改口径**：「本体尺寸」（`extent=`）**所有符号放置都写、都显示**——它是这张图上的事实，与是否参数化无关；「驱动尺寸（库默认）」（`driving=`）**只限配上模板的参数化放置**，非参数化符号（`SymbolInformation` 无变量、`(0,0)` 那十几条）与配不上对的实例不给、不猜 | ✅ 已裁 |
 | K-D4 | 面板数据怎么到实体 | **写进放置每个实体的 `PID_SEMANTICS` XDATA**，两个新键：`driving=<name>:<mm>;<name>:<mm>;…`（模板的、按 JDim 在模板里的 oid 序）、`extent=<W>x<H>`（实例本体外框，mm，两位小数）。理由：特性面板逐实体读这条记录，已有 `class` / `role` / `label` / `oid` / `sheet_layer` 在里面；代价有界（0202 的 181 个符号实体 × 几十字节）；DWG / DXF 往返自然保留。文档级 XRecord + 按 `oid=` 查表被否——`oid=` 只在有 `_Data.xml` 命中时才写，参数化符号未必有 | ⭕ |
 | K-D5 | 单位与精度 | JDim 值在 pid-parse 里是米（`value_m`）；面板与 XDATA 用**毫米、两位小数**（图纸单位；20.32 / 114.3 / 35.56 本来就是英寸整倍换出来的），不显示英寸。公式字符串（`0E$1+0.01`）**不上面板**，只留在 DTO 里给探针 / 测试 | ⭕ |
 | K-D6 | 画不画 | 不变：09-07 计划 D2「默认不画」由 L1 文件事实背书（`Dimension` 层 11/11 关），本计划不动任何投影输出、不动 golden 实体 | ⭕ |
@@ -104,19 +104,21 @@ golden 不变、schema 多字段重封；`--lib` / `parse_real_files` 只增不�
 **现状**：P&ID 组七个键、无尺寸信息。
 
 **改法**：
-1. `pid.rs::build_entities` 的 `SymbolInstance` 分支：取 `symbol_definition(ref)`，若其 `template` 为 `Some` → 取模板的
-   `dimensions` 里 `name.is_some()` 的条目，按 oid 序拼 `driving=Top:20.32;Left:114.30;Right:114.30`（mm，两位）；量本次
-   `built` 实体的外框（不含符号名标签那条 `Text`）拼 `extent=172.21x71.18`；两键经 `attach_pid_metadata` 写进该放置的**每个**
-   实体（本体笔画与标签都写，标签也是这个放置的）。没有 `template` 的放置一个键都不写（K-D3）。
+1. `pid.rs::build_entities` 的 `SymbolInstance` 分支：量本次 `built` 实体的外框（不含符号名标签那条 `Text`；退回 1.5 mm 标记点的
+   放置也量，就是那个点的外框）拼 `extent=172.21x71.18`——**每个符号放置都写**；再取 `symbol_definition(ref)`，若其 `template`
+   为 `Some` → 取模板的 `dimensions` 里 `name.is_some()` 的条目，按 oid 序拼 `driving=Top:20.32;Left:114.30;Right:114.30`
+   （mm，两位）——**只有配上模板的放置写**（K-D3 改后口径）。两键经 `attach_pid_metadata` 写进该放置的**每个**实体
+   （本体笔画与标签都写，标签也是这个放置的）。
 2. `properties.rs::pid_semantics_section` 读 `driving` / `extent`：两行只读——「驱动尺寸（库默认）」值 `Top 20.32 mm · Left
    114.30 mm · Right 114.30 mm`，「本体尺寸」值 `172.21 × 71.18 mm`；紧跟「角色」行之后。新词条 2 条（两种界面语言的标题）
    21 本全覆盖。
 3. `tests/pid_import.rs`：键白名单加 `driving` / `extent`；新断言——0201 Manifold 的放置实体 `driving=Top:20.32;Left:114.30;
    Right:114.30` 且 `extent=172.21x71.18`、` Line2` 只有 `Right:25.40`、D06 Tank 四个名字 + `extent=122.12x82.84`、工艺 Black Box
-   四个 12.70；**所有非参数化符号实体两键皆无**；两键过 DWG / DXF 往返；**两种图层模式下相同**（并入
-   `the_two_layer_modes_agree_on_everything_but_the_slot` 的三键比较，变五键）。
+   四个 12.70；**每个 `role=symbol` / `symbol-label` 实体都有 `extent=`，且同一放置的实体值相同**；**非参数化符号实体无
+   `driving=`**；两键过 DWG / DXF 往返；**两种图层模式下相同**（并入 `the_two_layer_modes_agree_on_everything_but_the_slot`
+   的三键比较，变五键）。
 
-**验收**：上述断言全绿；手工：打开 0201，点 Manifold 任一笔画，P&ID 组多出两行、数字如上；点一个阀门，两行都不出现。
+**验收**：上述断言全绿；手工：打开 0201，点 Manifold 任一笔画，P&ID 组多出两行、数字如上；点一个阀门，只有「本体尺寸」一行。
 
 ### K3 · 导入摘要第三行（OCS）
 
@@ -151,7 +153,7 @@ pid-parse 每项完成后回跑 OCS `pid_import`（两种模式）。总时间�
 | 项 | 理由 |
 |---|---|
 | 找放置实例的真实参数 | J3 开口，K-D7：本计划不依赖它 |
-| 给所有符号一个「本体尺寸」行 | K-D3：先只给参数化的，与库默认成对照；全给另议 |
+| ~~给所有符号一个「本体尺寸」行~~ | 2026-09-18 用户把它拉进本轮（K-D3 改），不再是不做项 |
 | 面板上显示公式 / 英寸值 | K-D5：公式给探针，英寸对用户没意义 |
 | 画驱动尺寸 / 打开 `Dimension` 层 | 09-07 D2 + L1 事实 |
 | 图层管理器 / 导入选项里的任何新开关 | 本计划只读不改行为 |
@@ -166,4 +168,5 @@ pid-parse 每项完成后回跑 OCS `pid_import`（两种模式）。总时间�
 
 ## 门禁记录
 
-- 2026-09-18：初稿，待 Plannotator `annotate --gate --json`。
+- 2026-09-18：初稿（OCS `df95c5b4`）。
+- 2026-09-18 22:58：用户在会话（fable-5-1-11）里批准七条决策，K-D3 改为「本体尺寸全给、驱动尺寸限参数化」；未走 Plannotator。
