@@ -176,6 +176,144 @@ const APPEARANCE_STYLE_NAMES: [&str; 3] = ["As Drawn", "Dashed", "Normal"];
 // `Point`, and without the prefix that would land on top of `PID-TEXT`.
 const LAYER_DISCIPLINE_PREFIX: &str = "PID-STYLE-";
 
+/// Environment variable selecting the [`PidLayerMode`] an import files its
+/// entities under: `taxonomy` (the default, also when unset or empty) or
+/// `sheet`. Same prefix as `OCS_PID_LEGEND_RULES` (plan 2026-09-07, D5).
+pub const LAYER_MODE_ENV: &str = "OCS_PID_LAYER_MODE";
+
+/// What an imported entity's layer slot holds (plan 2026-09-07, D4 / D5 /
+/// L3).
+///
+/// A DXF entity has one layer, and a `.pid` entity has two things that want
+/// it: the importer's own classification (line work, lettering, symbol,
+/// review point …) and the sheet layer the drawing itself filed it under
+/// (`Default`, `Labels`, `ConsistencyChecks` …). Both are written into the
+/// entity's `PID_SEMANTICS` XDATA regardless (`role=`, `sheet_layer=`), so
+/// the mode only decides which one the slot shows -- and therefore which one
+/// a downstream DXF consumer that reads nothing but layer names gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PidLayerMode {
+    /// The importer's taxonomy: `PID-GEOMETRY`, `PID-TEXT`, `PID-SYMBOL`, the
+    /// `PID-POINT-*` review statuses, `PID-STYLE-*` per authored line style,
+    /// and `PID-HIDDEN` for whatever the drawing does not draw. The default;
+    /// what every consumer of these imports has read so far.
+    #[default]
+    Taxonomy,
+    /// The authored sheet layer, by name and verbatim -- no prefix, the same
+    /// name across storages merged into one layer (the storage-local oid is
+    /// still in XDATA), and each layer on or off as the drawing's own view
+    /// filter set draws it. The classification moves entirely to `role=` /
+    /// `style=`: no `PID-STYLE-*` layer is generated, and nothing is moved to
+    /// `PID-HIDDEN` -- a hidden sheet layer is simply off. Entities the
+    /// importer makes itself (the page border, connectivity links, a
+    /// symbol's own label, a style cluster's glyph strokes) were never on a
+    /// sheet layer and keep their `PID-*` layer.
+    Sheet,
+}
+
+impl PidLayerMode {
+    /// The mode [`LAYER_MODE_ENV`] selects, `Taxonomy` when the variable is
+    /// unset or empty. A value that is neither name is logged and read as
+    /// the default rather than failing the open.
+    pub fn from_env() -> Self {
+        match std::env::var(LAYER_MODE_ENV) {
+            Ok(value) => Self::parse(&value).unwrap_or_else(|| {
+                log::warn!(
+                    "{LAYER_MODE_ENV}={value:?} is neither `taxonomy` nor `sheet`; importing with the default taxonomy layers"
+                );
+                Self::Taxonomy
+            }),
+            Err(_) => Self::Taxonomy,
+        }
+    }
+
+    /// `taxonomy` / `sheet`, case-insensitively; an empty value is the
+    /// default.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "taxonomy" => Some(Self::Taxonomy),
+            "sheet" => Some(Self::Sheet),
+            _ => None,
+        }
+    }
+}
+
+/// The taxonomy layers, with the colour and initial visibility each opens
+/// with. In [`PidLayerMode::Taxonomy`] every one is declared up front, so a
+/// present-and-empty layer can say what a missing one would not; in
+/// [`PidLayerMode::Sheet`] a `PID-*` layer is declared only when an entity
+/// the importer made itself lands on it, since the layer table is then the
+/// drawing's own.
+fn taxonomy_layers() -> [(&'static str, Color, bool); 13] {
+    // Colours separate the kinds at a glance: a P&ID is mostly line work, and
+    // an all-white import makes lettering, symbol bodies and the decode's own
+    // loose ends indistinguishable from the piping.
+    [
+        (LAYER_GEOMETRY, Color::WHITE, true),
+        // The sheet's own border. It is part of the drawing rather than
+        // evidence about it, so it opens visible and in the same colour as
+        // the line work it encloses.
+        (LAYER_FRAME, Color::WHITE, true),
+        (LAYER_TEXT, Color::GREEN, true),
+        // Filled areas. Each fill carries its own decoded colour, so the layer
+        // colour is only the default for a fill that states none; white keeps
+        // those consistent with the line work they belong to.
+        (LAYER_FILL, Color::WHITE, true),
+        (LAYER_SYMBOL, Color::CYAN, true),
+        // "Flanged Nozzle with blind" is wider than the equipment it names, so
+        // on a sheet with 58 placements the labels bury the drawing. They ship
+        // switched off: the answer is in the file, one layer toggle away.
+        (LAYER_SYMBOL_LABEL, Color::GRAY, false),
+        (LAYER_POINT, Color::MAGENTA, true),
+        // The review statuses. Each mark keeps the colour its own style
+        // states, so these layer colours only ever show on a mark that states
+        // none — but they are the status colours the drawings themselves use,
+        // so a defaulted mark still reads correctly. `PID-POINT-ERROR` is
+        // empty across this whole corpus, which is the point of declaring it:
+        // every drawing that defines the state defines it and nothing is in
+        // it, and a present empty layer says that where a missing one would
+        // not. There is no `PID-POINT-OK` because a passing item's glyph is
+        // blank by construction and there is nothing to put on it.
+        (LAYER_POINT_WARNING, Color::BLUE, true),
+        (LAYER_POINT_ERROR, Color::RED, true),
+        (LAYER_POINT_APPROVED, Color::GREEN, true),
+        // There is no `PID-UNRESOLVED`. It held the `GLine2d` unit lines,
+        // which turned out not to be records at all: each was the top two
+        // bytes of an `igSmartFrame2d`'s page ratio, matched by a decoder
+        // that scanned rather than walked the record chain. `pid-parse`
+        // emits none now -- see its
+        // `docs/analysis/2026-08-10-gline2d-is-the-iso-page-ratio-not-a-record.md`.
+        // Unlike `PID-ANNOTATION`, whose records really are in the file with
+        // an unread anchor, there is nothing left for an empty layer to
+        // stand for.
+        // Empty since the `JStyleOverride` anchor read was retracted -- see
+        // `build_inferred`. Still declared, and still hidden: the records are
+        // in the file, and a layer that is present and empty says so where a
+        // missing one would not.
+        (LAYER_ANNOTATION, Color::YELLOW, false),
+        (LAYER_CONNECTIVITY, Color::BLUE, false),
+        // Content authored on a hidden/invisible sheet layer remains present
+        // and inspectable, but follows the source visibility on first open.
+        (LAYER_HIDDEN, Color::GRAY, false),
+    ]
+}
+
+/// Declare `layer` with its taxonomy colour and visibility if it is a
+/// taxonomy layer -- one of [`taxonomy_layers`] or a `PID-STYLE-*` discipline
+/// layer -- and not yet in the table. Anything else is left alone: an
+/// authored sheet layer is declared where its state is known.
+fn ensure_taxonomy_layer(doc: &mut CadDocument, layer: &str) {
+    if doc.layers.contains(layer) {
+        return;
+    }
+    if let Some((_, colour, visible)) = taxonomy_layers().iter().find(|(name, _, _)| *name == layer)
+    {
+        ensure_layer(doc, layer, *colour, *visible);
+    } else if layer.starts_with(LAYER_DISCIPLINE_PREFIX) {
+        ensure_layer(doc, layer, Color::WHITE, true);
+    }
+}
+
 /// The importer's reading of what an entity is, as the `role=` XDATA value:
 /// `geometry`, `text`, `symbol`, `symbol-label`, `point-ok` / `-warning` /
 /// `-error` / `-approved`, `annotation`, `connectivity`, `fill`, `frame`.
@@ -282,8 +420,15 @@ pub fn take_import_summary(path: &Path) -> Option<ImportSummary> {
         .remove(path)
 }
 
-/// Parse a `.pid` file and project its decoded Sheet geometry into a document.
+/// Parse a `.pid` file and project its decoded Sheet geometry into a document,
+/// filing the entities under the layers [`LAYER_MODE_ENV`] selects.
 pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
+    load_pid_with_layer_mode(path, PidLayerMode::from_env())
+}
+
+/// [`load_pid`] with the layer mode stated rather than read from the
+/// environment -- what a test that wants both modes in one process calls.
+pub fn load_pid_with_layer_mode(path: &Path, mode: PidLayerMode) -> Result<CadDocument, String> {
     let parsed = PidParser::new()
         .parse_file(path)
         .map_err(|error| error.to_string())?;
@@ -299,58 +444,41 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     // header would look identical on screen, which is the thing reading that
     // table exists to fix.
     doc.header.lineweight_display = true;
-    // Colours separate the kinds at a glance: a P&ID is mostly line work, and
-    // an all-white import makes lettering, symbol bodies and the decode's own
-    // loose ends indistinguishable from the piping.
-    for (layer, colour, visible) in [
-        (LAYER_GEOMETRY, Color::WHITE, true),
-        // The sheet's own border. It is part of the drawing rather than
-        // evidence about it, so it opens visible and in the same colour as
-        // the line work it encloses.
-        (LAYER_FRAME, Color::WHITE, true),
-        (LAYER_TEXT, Color::GREEN, true),
-        // Filled areas. Each fill carries its own decoded colour, so the layer
-        // colour is only the default for a fill that states none; white keeps
-        // those consistent with the line work they belong to.
-        (LAYER_FILL, Color::WHITE, true),
-        (LAYER_SYMBOL, Color::CYAN, true),
-        // "Flanged Nozzle with blind" is wider than the equipment it names, so
-        // on a sheet with 58 placements the labels bury the drawing. They ship
-        // switched off: the answer is in the file, one layer toggle away.
-        (LAYER_SYMBOL_LABEL, Color::GRAY, false),
-        (LAYER_POINT, Color::MAGENTA, true),
-        // The review statuses. Each mark keeps the colour its own style
-        // states, so these layer colours only ever show on a mark that states
-        // none — but they are the status colours the drawings themselves use,
-        // so a defaulted mark still reads correctly. `PID-POINT-ERROR` is
-        // empty across this whole corpus, which is the point of declaring it:
-        // every drawing that defines the state defines it and nothing is in
-        // it, and a present empty layer says that where a missing one would
-        // not. There is no `PID-POINT-OK` because a passing item's glyph is
-        // blank by construction and there is nothing to put on it.
-        (LAYER_POINT_WARNING, Color::BLUE, true),
-        (LAYER_POINT_ERROR, Color::RED, true),
-        (LAYER_POINT_APPROVED, Color::GREEN, true),
-        // There is no `PID-UNRESOLVED`. It held the `GLine2d` unit lines,
-        // which turned out not to be records at all: each was the top two
-        // bytes of an `igSmartFrame2d`'s page ratio, matched by a decoder
-        // that scanned rather than walked the record chain. `pid-parse`
-        // emits none now -- see its
-        // `docs/analysis/2026-08-10-gline2d-is-the-iso-page-ratio-not-a-record.md`.
-        // Unlike `PID-ANNOTATION`, whose records really are in the file with
-        // an unread anchor, there is nothing left for an empty layer to
-        // stand for.
-        // Empty since the `JStyleOverride` anchor read was retracted -- see
-        // `build_inferred`. Still declared, and still hidden: the records are
-        // in the file, and a layer that is present and empty says so where a
-        // missing one would not.
-        (LAYER_ANNOTATION, Color::YELLOW, false),
-        (LAYER_CONNECTIVITY, Color::BLUE, false),
-        // Content authored on a hidden/invisible sheet layer remains present
-        // and inspectable, but follows the source visibility on first open.
-        (LAYER_HIDDEN, Color::GRAY, false),
-    ] {
-        ensure_layer(&mut doc, layer, colour, visible);
+    match mode {
+        PidLayerMode::Taxonomy => {
+            for (layer, colour, visible) in taxonomy_layers() {
+                ensure_layer(&mut doc, layer, colour, visible);
+            }
+        }
+        PidLayerMode::Sheet => {
+            // The layer table is the drawing's own: every sheet layer of the
+            // document storage, on or off as its view filter set draws it,
+            // whether or not anything drawn lands on it -- a present-and-off
+            // `HeatTrace` says what SmartPlant's layer list says. A name two
+            // layer objects share is one layer here, off only when the file
+            // draws neither. Nested-storage names and the `PID-*` layers the
+            // importer's own entities keep are declared as they are met; the
+            // page border is always drawn, so its layer is declared now.
+            let mut hidden_by_name: BTreeMap<&str, bool> = BTreeMap::new();
+            for layer in parsed.sheet_layers.get("/").into_iter().flatten() {
+                let hidden = match layer.displayed {
+                    Some(displayed) => !displayed,
+                    None => is_hidden_sheet_layer(&layer.name),
+                };
+                hidden_by_name
+                    .entry(layer.name.as_str())
+                    .and_modify(|all_hidden| *all_hidden &= hidden)
+                    .or_insert(hidden);
+            }
+            for (name, hidden) in hidden_by_name {
+                ensure_layer(&mut doc, name, Color::WHITE, !hidden);
+            }
+            ensure_taxonomy_layer(&mut doc, LAYER_FRAME);
+            log::info!(
+                "{}: {LAYER_MODE_ENV}=sheet, entities are filed under their authored sheet layers",
+                path.display()
+            );
+        }
     }
 
     let mut library = discover_symbol_library(path);
@@ -586,8 +714,9 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
                 apply_text_style(&mut one, name);
             }
             // The role is read off the layer the entity was built on, before
-            // the hidden-layer override below can move it: `PID-HIDDEN` says
-            // where the drawing hid the entity, not what it is.
+            // either override below can move it: `PID-HIDDEN` says where the
+            // drawing hid the entity, and an authored sheet layer says where
+            // the drawing filed it -- neither says what it is.
             let role = role_of_layer(&one.common().layer);
             attach_pid_metadata(
                 &mut one,
@@ -596,21 +725,61 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
                 role,
                 style_name,
             );
-            if let Some(layer) = entity
-                .source_layer
-                .as_ref()
-                .filter(|layer| sheet_layer_is_hidden(layer))
-            {
-                one.common_mut().layer = LAYER_HIDDEN.to_string();
-                if let Some(name) = layer.name.as_deref() {
+            let source_layer = entity.source_layer.as_ref();
+            let hidden = source_layer.is_some_and(sheet_layer_is_hidden);
+            let authored_name = source_layer.and_then(|layer| layer.name.as_deref());
+            match mode {
+                PidLayerMode::Taxonomy => {
+                    if hidden {
+                        one.common_mut().layer = LAYER_HIDDEN.to_string();
+                    }
+                    // Declared when the first entity lands on it, so the layer
+                    // list holds the disciplines this drawing actually draws
+                    // rather than every name its project library happens to
+                    // define.
+                    if one.common().layer.starts_with(LAYER_DISCIPLINE_PREFIX) {
+                        ensure_layer(&mut doc, &one.common().layer, Color::WHITE, true);
+                    }
+                }
+                PidLayerMode::Sheet => match authored_name {
+                    // The slot holds the authored layer, verbatim. A layer of
+                    // a nested storage, or one the document storage did not
+                    // list, is declared here with the state the file gives
+                    // it; one already declared keeps the state it opened with.
+                    //
+                    // A symbol's own label is the exception: it is lettering
+                    // the importer adds beside a placement, not content the
+                    // drawing has on that sheet layer, and it ships switched
+                    // off for a reason (`LAYER_SYMBOL_LABEL`). It keeps its
+                    // layer, and its `sheet_layer=` still says which
+                    // placement it belongs to.
+                    Some(name) if role != Some("symbol-label") => {
+                        one.common_mut().layer = name.to_string();
+                        ensure_layer(&mut doc, name, Color::WHITE, !hidden);
+                    }
+                    // The label of a placement on a hidden sheet layer is not
+                    // moved either: its layer is already off, and the view
+                    // filter darkens it by its `sheet_layer=` like the body.
+                    Some(_) => {
+                        ensure_taxonomy_layer(&mut doc, &one.common().layer.clone());
+                    }
+                    // No authored layer, or one whose name did not resolve:
+                    // the entity keeps the taxonomy layer it was built on,
+                    // declared on demand. The one thing the taxonomy still
+                    // has to say here is "hidden" for a layer with no name to
+                    // be off under, and `PID-HIDDEN` says it.
+                    None => {
+                        if hidden {
+                            one.common_mut().layer = LAYER_HIDDEN.to_string();
+                        }
+                        ensure_taxonomy_layer(&mut doc, &one.common().layer.clone());
+                    }
+                },
+            }
+            if hidden {
+                if let Some(name) = authored_name {
                     sheet_layers_off.insert(name.to_string());
                 }
-            }
-            // Declared when the first entity lands on it, so the layer list
-            // holds the disciplines this drawing actually draws rather than
-            // every name its project library happens to define.
-            if one.common().layer.starts_with(LAYER_DISCIPLINE_PREFIX) {
-                ensure_layer(&mut doc, &one.common().layer, Color::WHITE, true);
             }
             let _ = doc.add_entity(one);
         }

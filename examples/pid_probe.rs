@@ -9,6 +9,22 @@ use std::collections::BTreeMap;
 use acadrust::EntityType;
 use OpenCADStudio::io;
 
+/// The `role=` the importer wrote into the entity's `PID_SEMANTICS` record.
+fn pid_role(entity: &EntityType) -> Option<String> {
+    entity
+        .common()
+        .extended_data
+        .get_record("PID_SEMANTICS")?
+        .values
+        .iter()
+        .find_map(|value| match value {
+            acadrust::xdata::XDataValue::String(text) => {
+                text.strip_prefix("role=").map(str::to_string)
+            }
+            _ => None,
+        })
+}
+
 fn main() {
     for arg in std::env::args().skip(1) {
         let path = std::path::PathBuf::from(&arg);
@@ -50,6 +66,10 @@ fn main() {
         }
         let mut owned = 0usize;
         let mut per_layer: BTreeMap<String, usize> = BTreeMap::new();
+        // By the importer's own reading rather than the layer slot, which
+        // `OCS_PID_LAYER_MODE=sheet` hands to the authored sheet layer: the
+        // role is what an entity *is* in either mode.
+        let mut per_role: BTreeMap<String, usize> = BTreeMap::new();
         let mut labels: BTreeMap<String, usize> = BTreeMap::new();
         let mut heights: BTreeMap<String, usize> = BTreeMap::new();
         let mut typefaces: BTreeMap<String, usize> = BTreeMap::new();
@@ -58,8 +78,12 @@ fn main() {
                 owned += 1;
             }
             *per_layer.entry(e.common().layer.clone()).or_default() += 1;
+            let role = pid_role(e);
+            *per_role
+                .entry(role.clone().unwrap_or_else(|| "<no role>".to_string()))
+                .or_default() += 1;
             if let EntityType::Text(t) = e {
-                if t.common.layer == "PID-SYMBOL-LABEL" {
+                if role.as_deref() == Some("symbol-label") {
                     *labels.entry(t.value.clone()).or_default() += 1;
                 } else {
                     // `rotation` is stored in radians, which reads as 0 / 2 / 3
@@ -88,9 +112,25 @@ fn main() {
             }
         }
         println!("  owned_by_model_space = {owned}");
-        println!("  layers:");
+        // The table as the Layer Manager lists it, with the state each layer
+        // opens in -- under `OCS_PID_LAYER_MODE=sheet` that is the drawing's
+        // own list, present-and-empty layers included.
+        println!("  layer table ({}):", doc.layers.len());
+        for layer in doc.layers.iter() {
+            println!(
+                "    {:<18} {:<3} {}",
+                layer.name,
+                if layer.flags.off { "off" } else { "on" },
+                per_layer.get(&layer.name).copied().unwrap_or_default()
+            );
+        }
+        println!("  layers (with entities):");
         for (layer, count) in &per_layer {
             println!("    {layer:<18} {count}");
+        }
+        println!("  roles (XDATA role=):");
+        for (role, count) in &per_role {
+            println!("    {role:<18} {count}");
         }
         println!("  symbol labels ({} distinct):", labels.len());
         for (name, count) in &labels {

@@ -306,33 +306,39 @@ fn role_rank(role: &str) -> usize {
 }
 
 /// What one switch did to the drawing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Switched {
     /// Entities whose `invisible` bit changed.
     pub entities: usize,
-    /// The `PID-HIDDEN` layer was turned on so the entities the import filed
-    /// there could show. Only switching a sheet layer on ever does this.
-    pub released_hidden_layer: bool,
+    /// The layer of the table that was off and was turned on so the entities
+    /// the switch just lit could show: `PID-HIDDEN` under the taxonomy layer
+    /// mode, the sheet layer's own DXF layer under the sheet mode. Only
+    /// switching a sheet layer on ever sets this.
+    pub released_layer: Option<String>,
 }
 
 /// Switch one authored sheet layer on or off: the stored record follows and
 /// every entity's bit is set from the result.
 ///
-/// Switching a layer *on* may have to release `PID-HIDDEN` as well: the import
-/// files the entities of the sheet layers it starts off on that layer, with the
-/// layer itself off, so their bit alone would not show them. That layer is the
-/// importer's own hiding device and the bit now carries the same reading, so
-/// the switch turns it on when an entity it just lit sits there. Switching off
-/// never touches the layer table; the bits do the hiding.
+/// Switching a layer *on* may have to release a layer of the table as well,
+/// because the import hides along two lines at once and the bit is only one
+/// of them. Under the taxonomy layer mode the entities of a sheet layer the
+/// file switches off sit on `PID-HIDDEN`, itself off; under the sheet layer
+/// mode they sit on a DXF layer of the sheet layer's own name, itself off.
+/// Either way the bit alone would not show them, so the switch turns that
+/// layer on when an entity it just lit sits there -- and only that layer: a
+/// `PID-SYMBOL-LABEL` the user keeps off, or a sheet layer they switched off
+/// in the layer table, is not this switch's to reopen. Switching off never
+/// touches the layer table; the bits do the hiding.
 pub fn switch_sheet_layer(doc: &mut CadDocument, layer: &str, on: bool) -> Switched {
     let mut filter = PidViewFilter::load(doc).unwrap_or_default();
     filter.set_layer(layer, on);
     let mut switched = Switched {
         entities: store_and_apply(doc, &filter),
-        released_hidden_layer: false,
+        released_layer: None,
     };
     if on {
-        switched.released_hidden_layer = release_hidden_layer(doc);
+        switched.released_layer = release_layer_holding(doc, layer);
     }
     switched
 }
@@ -344,7 +350,7 @@ pub fn switch_role(doc: &mut CadDocument, role: &str, on: bool) -> Switched {
     filter.set_role(role, on);
     Switched {
         entities: store_and_apply(doc, &filter),
-        released_hidden_layer: false,
+        released_layer: None,
     }
 }
 
@@ -353,22 +359,29 @@ fn store_and_apply(doc: &mut CadDocument, filter: &PidViewFilter) -> usize {
     filter.apply(doc)
 }
 
-/// Turn `PID-HIDDEN` on when it is off and holds an entity whose bit says it
-/// should draw. Returns whether the layer changed.
-fn release_hidden_layer(doc: &mut CadDocument) -> bool {
-    let holds_a_lit_entity = doc
+/// Turn on `PID-HIDDEN`, or the DXF layer named like `sheet_layer`, when it
+/// is off and holds a lit entity of that sheet layer. Returns the layer
+/// turned on, if any. The two never both hold such an entity: an import
+/// files a hidden sheet layer's entities on one or the other.
+fn release_layer_holding(doc: &mut CadDocument, sheet_layer: &str) -> Option<String> {
+    let lit_on: BTreeSet<String> = doc
         .entities()
-        .any(|entity| entity.common().layer == LAYER_HIDDEN && !entity.common().invisible);
-    if !holds_a_lit_entity {
-        return false;
-    }
-    match doc.layers.get_mut(LAYER_HIDDEN) {
-        Some(hidden) if hidden.flags.off => {
-            hidden.flags.off = false;
-            true
+        .filter(|entity| !entity.common().invisible)
+        .filter(|entity| pid_keys(entity).is_some_and(|keys| keys.sheet_layer == Some(sheet_layer)))
+        .map(|entity| entity.common().layer.as_str())
+        .filter(|layer| *layer == LAYER_HIDDEN || *layer == sheet_layer)
+        .map(str::to_string)
+        .collect();
+    let mut released = None;
+    for layer in lit_on {
+        if let Some(table_layer) = doc.layers.get_mut(&layer) {
+            if table_layer.flags.off {
+                table_layer.flags.off = false;
+                released = Some(layer);
+            }
         }
-        _ => false,
     }
+    released
 }
 
 /// The two keys of an entity's `PID_SEMANTICS` record the filter reads.
@@ -662,7 +675,7 @@ mod tests {
             switched,
             Switched {
                 entities: 1,
-                released_hidden_layer: false
+                released_layer: None
             }
         );
         assert_eq!(dark(&doc), [true, true, false]);
@@ -680,7 +693,7 @@ mod tests {
             switched,
             Switched {
                 entities: 1,
-                released_hidden_layer: false
+                released_layer: None
             },
             "nothing lit sits on PID-HIDDEN, so the layer stays as it was"
         );
@@ -691,7 +704,7 @@ mod tests {
             switched,
             Switched {
                 entities: 1,
-                released_hidden_layer: true
+                released_layer: Some(LAYER_HIDDEN.to_string())
             }
         );
         assert_eq!(dark(&doc), [false, false, false]);
@@ -706,7 +719,7 @@ mod tests {
             switched,
             Switched {
                 entities: 1,
-                released_hidden_layer: false
+                released_layer: None
             }
         );
         assert!(
@@ -719,7 +732,7 @@ mod tests {
             switched,
             Switched {
                 entities: 1,
-                released_hidden_layer: false
+                released_layer: None
             }
         );
         assert_eq!(dark(&doc), [false, true, true]);

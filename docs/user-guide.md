@@ -102,7 +102,9 @@ Open CAD Studio 可以直接打开 SmartPlant / Smart P&ID 的 `.pid` 文件：`
 | `PID-CONNECTIVITY` / `PID-ANNOTATION` | 连通链诊断线 / 注记占位（当前为空） | 关 |
 | `PID-HIDDEN` | 原图放在 `Hidden` / `HiddenObjects` / `Invisible` 图层上的内容 | 关 |
 
-**图纸图层视图。** 打开 `.pid` 后，图层管理器的工具栏多出 `图层` / `图纸图层`（英文界面为 `Layers` / `Sheet layers`）两个切换按钮。切到 `图纸图层`，表格列出的不再是 `PID-*` 合成层，而是 SmartPlant 自己的图层名（例如 `Default` / `Labels` / `ConsistencyChecks` / `HiddenObjects`）及每层的实体数，下方 `角色`（Roles）一段列出各角色（`geometry` / `text` / `symbol` / `symbol-label` / `point-*` / `connectivity` / `fill` / `frame`）及实体数。点击行尾的眼睛可以单独关掉或打开某个原图图层或某个角色：一个实体只要所属图层或角色任一被关就不显示。这些开关记录在图纸里（`PID_VIEW_FILTER`），另存为 DWG/DXF 后再打开仍然有效，也可以撤销。原图隐藏的图层初始为关；把它打开时，程序会连带打开 `PID-HIDDEN` 层，实体才看得见。搜索框对两种视图都有效。
+**用原图图层名作图层（`OCS_PID_LAYER_MODE`）。** 上表是默认的「分类」模式（`taxonomy`）。把环境变量 `OCS_PID_LAYER_MODE` 设为 `sheet` 再启动程序（或运行命令行工具），导入时每个实体的图层就直接是 SmartPlant 里它所在的图层名——`Default` / `Labels` / `HeatTrace` / `HiddenObjects` 等，不加前缀，同名图层跨存储合并为一层；图层表列出的是原图自己的全部图层（包括没有画出实体的），每层的开关按文件里的显示状态设定，原图隐藏的层直接为关，不再生成 `PID-HIDDEN` 与 `PID-STYLE-*`。程序自己造出的实体（图框 `PID-FRAME`、符号名标签 `PID-SYMBOL-LABEL`、连通链 `PID-CONNECTIVITY`、没有原图图层的字形线 `PID-GEOMETRY`）仍留在各自的 `PID-*` 层上。分类信息并没有丢：两种模式下实体的 `PID_SEMANTICS` 扩展数据里都写着 `role=`（角色）与 `style=`（样式名），特性面板的「角色」行和图层管理器的「图纸图层」视图两种模式下读数相同；另存为 DWG/DXF 后，第三方查看器里看到的图层名就是原图图层名。变量未设置、为空或值不认识时按默认模式导入（值不认识会在日志里提示一行）。默认值暂不翻转，等 DXF 下游消费方的用法定下来再议。
+
+**图纸图层视图。** 打开 `.pid` 后，图层管理器的工具栏多出 `图层` / `图纸图层`（英文界面为 `Layers` / `Sheet layers`）两个切换按钮。切到 `图纸图层`，表格列出的不再是 `PID-*` 合成层，而是 SmartPlant 自己的图层名（例如 `Default` / `Labels` / `ConsistencyChecks` / `HiddenObjects`）及每层的实体数，下方 `角色`（Roles）一段列出各角色（`geometry` / `text` / `symbol` / `symbol-label` / `point-*` / `connectivity` / `fill` / `frame`）及实体数。点击行尾的眼睛可以单独关掉或打开某个原图图层或某个角色：一个实体只要所属图层或角色任一被关就不显示。这些开关记录在图纸里（`PID_VIEW_FILTER`），另存为 DWG/DXF 后再打开仍然有效，也可以撤销。原图隐藏的图层初始为关；把它打开时，程序会连带打开承载这些实体的那个图层（默认模式下是 `PID-HIDDEN`，`OCS_PID_LAYER_MODE=sheet` 下是同名的原图图层），实体才看得见。搜索框对两种视图都有效。
 
 **特性面板。** 选中导入的实体，左侧特性面板会多出 `P&ID` 一组只读属性：`类型`（已发布数据里的对象类，如 `PIDPipeline`）、`角色`（导入时读到的角色，即上表的分类）、`位号` 或 `管线号`、`匹配方式`（若来自图例识别）、`图纸图层` 与 `图层 OID`（原图图层名及其在文件里的编号）。这些信息写在实体的 `PID_SEMANTICS` 扩展数据里，导出 DXF/DWG 时保留。
 

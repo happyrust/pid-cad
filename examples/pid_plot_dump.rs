@@ -25,9 +25,12 @@
 //! Arcs are emitted as sampled polylines rather than as their own row, which
 //! keeps the plotter from having to know this crate's angle convention.
 //!
-//! Usage: `pid_plot_dump <file> [layer,layer,...]`
+//! Usage: `pid_plot_dump <file> [selector,selector,...]`
 //!
-//! The layer list is exact names, not a prefix: `PID-SYMBOL` and
+//! A selector is an exact layer name (`PID-SYMBOL`, or `Labels` under
+//! `OCS_PID_LAYER_MODE=sheet`) or `role=<role>` for the importer's own
+//! reading of the entity (`role=geometry`, `role=symbol-label`), which is the
+//! same in either layer mode. Names are exact, not a prefix: `PID-SYMBOL` and
 //! `PID-SYMBOL-LABEL` are different things and the latter ships hidden.
 
 use acadrust::types::{Color, LineWeight};
@@ -36,15 +39,53 @@ use OpenCADStudio::io;
 
 const ARC_STEPS: usize = 48;
 
+/// One `layer` or `role=<role>` selector of the command line.
+enum Selector {
+    Layer(String),
+    Role(String),
+}
+
+impl Selector {
+    fn parse(text: &str) -> Self {
+        match text.strip_prefix("role=") {
+            Some(role) => Self::Role(role.to_string()),
+            None => Self::Layer(text.to_string()),
+        }
+    }
+
+    fn admits(&self, entity: &EntityType) -> bool {
+        match self {
+            Self::Layer(layer) => layer_of(entity) == Some(layer.as_str()),
+            Self::Role(role) => role_of(entity).as_deref() == Some(role.as_str()),
+        }
+    }
+}
+
+/// The `role=` the importer wrote into the entity's `PID_SEMANTICS` record.
+fn role_of(entity: &EntityType) -> Option<String> {
+    entity
+        .common()
+        .extended_data
+        .get_record("PID_SEMANTICS")?
+        .values
+        .iter()
+        .find_map(|value| match value {
+            acadrust::xdata::XDataValue::String(text) => {
+                text.strip_prefix("role=").map(str::to_string)
+            }
+            _ => None,
+        })
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let Some(path) = args.next() else {
-        eprintln!("usage: pid_plot_dump <file> [layer,layer,...]");
+        eprintln!("usage: pid_plot_dump <file> [layer|role=<role>,...]");
         return;
     };
-    let wanted: Option<Vec<String>> = args
+    let wanted: Option<Vec<Selector>> = args
         .next()
-        .map(|list| list.split(',').map(str::to_owned).collect());
+        .map(|list| list.split(',').map(Selector::parse).collect());
     let doc = match io::load_file(&std::path::PathBuf::from(&path)) {
         Ok(doc) => doc,
         Err(error) => {
@@ -54,8 +95,8 @@ fn main() {
     };
 
     for entity in doc.entities() {
-        if let Some(layers) = &wanted {
-            if !layer_of(entity).is_some_and(|l| layers.iter().any(|w| w == l)) {
+        if let Some(selectors) = &wanted {
+            if !selectors.iter().any(|selector| selector.admits(entity)) {
                 continue;
             }
         }

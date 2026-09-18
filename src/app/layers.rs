@@ -59,8 +59,9 @@ impl OpenCADStudio {
 
     /// Bring the scene and the panels up to date after a sheet-layer or role
     /// switch changed entities' `invisible` bits -- and, when switching a
-    /// hidden sheet layer on had to turn `PID-HIDDEN` on with it, the layer
-    /// table's mirrors too.
+    /// hidden sheet layer on had to turn a layer of the table on with it
+    /// (`PID-HIDDEN`, or the sheet layer's own layer under
+    /// `OCS_PID_LAYER_MODE=sheet`), the layer table's mirrors too.
     pub(super) fn after_pid_view_switch(
         &mut self,
         i: usize,
@@ -69,7 +70,7 @@ impl OpenCADStudio {
         self.sync_pid_view(i);
         self.tabs[i].scene.bump_geometry();
         self.tabs[i].dirty = true;
-        if switched.released_hidden_layer {
+        if let Some(released) = switched.released_layer {
             let doc_layers = self.tabs[i].scene.document.layers.clone();
             let vp_info = self.tabs[i].scene.viewport_list();
             self.tabs[i]
@@ -79,7 +80,7 @@ impl OpenCADStudio {
             self.command_line.push_output(
                 crate::tf!(
                     "Layer {} turned on so the sheet layer can show",
-                    crate::io::pid::LAYER_HIDDEN
+                    released
                 )
                 .as_ref(),
             );

@@ -2649,13 +2649,14 @@ impl OpenCADStudio {
                     &row.name,
                     on,
                 );
+                let entities = switched.entities;
                 self.after_pid_view_switch(i, switched);
                 self.command_line.push_output(
                     crate::tf!(
                         "Sheet layer {} turned {} ({} entities)",
                         row.name,
                         if on { crate::t!("On") } else { crate::t!("Off") },
-                        switched.entities
+                        entities
                     )
                     .as_ref(),
                 );
@@ -2674,13 +2675,14 @@ impl OpenCADStudio {
                     &row.name,
                     on,
                 );
+                let entities = switched.entities;
                 self.after_pid_view_switch(i, switched);
                 self.command_line.push_output(
                     crate::tf!(
                         "Role {} turned {} ({} entities)",
                         row.name,
                         if on { crate::t!("On") } else { crate::t!("Off") },
-                        switched.entities
+                        entities
                     )
                     .as_ref(),
                 );
