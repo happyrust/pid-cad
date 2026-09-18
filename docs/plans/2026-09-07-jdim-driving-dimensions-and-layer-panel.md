@@ -46,6 +46,12 @@
 > 闭合：放置实例零 JDim，副本变量 = 库默认，实例参数不在文件缓存里（D06 Tank 实例是同一公式按毫米再算一遍，
 > Manifold 等被拉过）。计划「实例 JDim = 35.59」的前提被否，棘轮按事实命名。`parse_real_files` 129 → 130。
 > D2 后半句（面板 / 摘要）的口径要改：能给放置的只有模板 / 库默认尺寸或实例实际外框。按 D7 下一项 **L3**。
+>
+> **同夜续（会话 fable-5-1-10 → fable-5-1-11 接手）**：**L3 落地**（OCS `d0750567`）——`OCS_PID_LAYER_MODE`（`taxonomy` 默认 /
+> `sheet`），`sheet` 下槽 = 图纸图层名原样、图层表 = 原图自己的全部图层（含空层，状态按 `0x0057`），不生成 `PID-STYLE-*` /
+> `PID-HIDDEN`；自造实体留 `PID-*`。过滤开关的「连带开层」泛化为「开承载它的那一层」。`pid_import` 消费者改按 `role=` 取，
+> **两种模式下 50/50 全绿**；`pid_probe` / `pid_plot_dump` 按 role。user-guide 补 `OCS_PID_LAYER_MODE` 一段。默认不翻转（D5）。
+> **D7 的七项到此全部落地**；本轮剩下的都是登记项（见 L3 结算与「登记不做」）。
 
 ## 决策记录
 
@@ -440,6 +446,41 @@ XRecord `PID_VIEW_FILTER`（每条 `layer_off=<名>` / `role_off=<角色>` 一�
 **验收**：两种模式下 `pid_import` 全绿；`sheet` 模式打开 0202：图层表就是 SmartPlant 的 16 个名字
 （含状态），DXF 另存后在第三方查看器里图层名一致；默认值不翻转（D5）。
 
+**进度**：**✅ 2026-09-18 OCS `d0750567`**（`pid: OCS_PID_LAYER_MODE=sheet files each entity under its authored sheet layer, and
+the default stays the taxonomy`；上一段会话写到一半、本段接手收尾）——
+- **选项**：`pid.rs` 加 `LAYER_MODE_ENV = "OCS_PID_LAYER_MODE"`、`PidLayerMode::{Taxonomy, Sheet}`（`from_env` / `parse`，
+  未设 / 空 / 不认识的值都按默认，不认识的记一行 warning、不让打开失败）；`load_pid` 读环境，`load_pid_with_layer_mode` 供测试
+  在一个进程里跑两种模式。原来内联的 13 行合成层表抽成 `taxonomy_layers()`，`sheet` 模式下只在自造实体落上去时按需声明
+  （`ensure_taxonomy_layer`）。
+- **`sheet` 模式**：槽 = `sheet_layer=` 那个名字**原样**；图层表先按 `parsed.sheet_layers["/"]` 声明文档存储的**全部**图纸图层
+  （同名合并，只有两份都不画才关；状态取 `displayed`，缺才落名字判据），空层也在——0202 是 `ConsistencyChecks / Default /
+  DrawingBorder / HeatTrace / Hidden / HiddenObjects / Label / Labels / NotClaimed / Notes / WaterMark` 11 个名字（`Hidden` /
+  `HiddenObjects` / `Label` 关），不是验收里估的 16（那是按对象数）；嵌套存储的名字遇到时补声明。不生成 `PID-STYLE-*`，
+  不往 `PID-HIDDEN` 挪——隐藏层直接关，实体的 `invisible` 位照旧由过滤器置。**自造实体留 `PID-*`**：图框、连通链、符号名标签
+  （放置在隐藏层上的标签也留 `PID-SYMBOL-LABEL`，那层本来就关、位由过滤器管）、无图纸图层的字形线（0202 有 4 条落 `PID-GEOMETRY`）；
+  只有「有 `displayed=false` 却没有名字」的才还去 `PID-HIDDEN`（语料里没有）。
+- **过滤开关**：`Switched::released_hidden_layer: bool` → `released_layer: Option<String>`；`release_layer_holding(doc, sheet_layer)`
+  只开「刚点亮的、属于这个图纸图层的实体所在的那一层」——taxonomy 下是 `PID-HIDDEN`，`sheet` 下是同名图层，用户自己关掉的
+  别的层不碰；命令行那句改报实际开的层名。`app/layers.rs` / `update/mod.rs` 随之改（`Switched` 不再 `Copy`）。
+- **消费者**：`tests/pid_import.rs` 里取「实体是什么」的地方全改 `of_role`（线 / 字 / 符号 / 标签 / 填充 / 审查标记 / 点），
+  两种模式同一套断言；明说「合成层表本身」的 8 条（声明与显隐、`PID-HIDDEN` 11 条、`PID-STYLE-*` 派生与普查、role↔层一致、
+  开关连带开 `PID-HIDDEN`）改用 `import_in_taxonomy_mode` 钉在 taxonomy；`the_import_takes_the_switched_off_layers…` 改成两模式
+  皆过的口径（关掉的层的实体：所在层是 `PID-HIDDEN` 或同名层、且那层关、且位暗）。新增 5 条：默认值与两个名字（并按当前环境
+  验实际模式）、`sheet` 槽与表（0202 / 0201 / D06）、两模式除槽外全同（实体数、role / sheet_layer / style 三键、暗数、过滤记录、
+  `PidViewSummary`）、`sheet` 下开关连带开同名层、图层名过 DWG / DXF 往返。`pid_probe` 加「layer table（含 on/off）」与按 role 的
+  普查、标签按 role 取；`pid_plot_dump` 选择器支持 `role=<role>`。
+- **台账**：user-guide `.pid` 一节加 `OCS_PID_LAYER_MODE` 一段，「连带打开 `PID-HIDDEN`」那句改成按模式说。
+
+**L3 结算（对照验收）**：① `pid_import` **50/50 两种模式全绿**（变量未设 / `=sheet`；`=bogus` 也验了按默认走）；② `sheet`
+打开 0202：图层表 = 原图 11 个名字（含状态）+ `0` + 自造实体的 3 个 `PID-*`（`pid_probe` 实跑），**11 不是 16**——验收里的 16
+是按图层对象数（每个视图过滤集一份），按名去重后 11，与 L2 第 4 步汇总的「按名字数」同口径；③ 图层名过 DWG / DXF 往返
+由测试钉住，**第三方查看器没有实开**（未验证）；④ 默认不翻转。**`PID-HIDDEN` 归层的退役**（L1 结算并入本项）：`sheet` 模式
+下已退役（不生成）；taxonomy 模式**保留**——L2 第 3 步的开关和现有消费者仍读它，等默认值翻转那一轮一起退。**UI 未手工点过**
+（图层管理器在 `sheet` 模式下的「图层」视图与「图纸图层」视图会列出同一批名字，行为按代码推断一致，未截图核对）。
+**顺手记的账**：`cargo fmt -- <files>` 在这个仓会把**整个工作区**格式化（410 个无关文件被改），本段用 `git checkout` 全部还原后
+逐文件 `rustfmt`；`tests/pid_import.rs:101` 的旧账保持原样。全仓 `clippy --all-targets -D warnings` 有 1218 条**既有**告警
+（`scene` / `ui` 等），本项触碰的 7 个文件在 `clippy --lib --examples --test pid_import` 下零告警。
+
 ### T · 台账与共享记忆（双仓）
 
 **已做（2026-09-13，收账一轮）**：
@@ -457,12 +498,16 @@ XRecord `PID_VIEW_FILTER`（每条 `layer_off=<名>` / `role_off=<角色>` 一�
   （含初始开关）、图纸图层视图与 role 开关、特性面板 P&ID 组（类型 / 角色 / 位号 / 管线号 / 匹配方式 / 图纸图层 / 图层 OID）。
   L3 落地时再补 `OCS_PID_LAYER_MODE`。
 
+**已做（2026-09-18，L3 出口）**：
+
+- user-guide `.pid` 一节补 `OCS_PID_LAYER_MODE` 一段（随 OCS `d0750567`），图纸图层视图那句「连带打开 `PID-HIDDEN`」改成按模式说。
+- pid-parse `task_plan.md`「当前阶段」指针：L3 已刷、本轮七项齐（随本次收尾）。
+
 **待做（随本轮各项收尾）**：
 
 - pid-parse `task_plan.md`「当前阶段」加本轮指针（L1 已刷，随 `b61de88`；J1 已刷，随 `1319f10`；J2 已刷，随 `ea89f96`；
-  J3 已刷，随 `de72157`）。
-- user-guide 在 L3 落地时补 `OCS_PID_LAYER_MODE` 一段。
-- OCS `.context` 会话文件按惯例；每项落地 `remember` 一条。
+  J3 已刷，随 `de72157`；L3 已刷，见上）。
+- OCS `.context` 会话文件按惯例（08-31 之后各项都没写，本轮也没补）；每项落地 `remember` 一条（L3：`mem-` 见共享记忆）。
 
 ---
 
@@ -485,7 +530,10 @@ XRecord `PID_VIEW_FILTER`（每条 `layer_off=<名>` / `role_off=<角色>` 一�
   **J3 2026-09-18 结算**（pid-parse `de72157`）：链 17/17 闭合、公式常数按英寸读；但只在未被放置的模板上闭合，
   放置实例零 JDim、副本变量 = 库默认，实例参数不在缓存里（D06 Tank 实例是同一公式按毫米再算）。棘轮按事实命名。
   **下一项 L3**（图层槽切到图纸图层，选项后置）；J 线的 OCS 消费（D2 后半句）按 J3 结算改口径后再排。
-- **L3 最后**：选项后置、默认不切，风险隔离。
+- **L3 最后**：选项后置、默认不切，风险隔离。**2026-09-18 结算**（OCS `d0750567`）：选项可切、默认不切；`sheet` 下槽 = 图纸图层名、
+  表 = 原图全部图层含状态；消费者按 `role=`，`pid_import` 两模式 50/50。**D7 七项到此全部落地。** 本轮之后还开着的：
+  J 线的 OCS 消费（D2 后半句，按 J3 结算改口径）、`OCS_PID_LAYER_MODE` 默认翻转（等 DXF 下游）、放置实例的实际参数在文件何处
+  （J3 开口）、taxonomy 模式下 `PID-HIDDEN` 归层的退役（随默认翻转）。
 - **T** 随各项收尾，不单独占期。
 
 原稿 L1 → J1 → J2 → L2 的理由是「J 的 D2 裁决与 L 的显隐初值都吃 L1」——D2 裁决只影响 J 线画不画
