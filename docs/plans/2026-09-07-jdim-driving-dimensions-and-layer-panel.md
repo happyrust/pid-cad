@@ -33,6 +33,14 @@
 > 并由 radsrvitem 的原生读取器背书，`+14` 是尺寸种类而非 index，引用槽 `+92` / `+140` 具名；
 > 但 **imagdex 的 DoIO 没找到**，块内文法按 D3 留 raw，**J1 落地时不写解码器**（结算见 J1 进度末尾）。
 > 按 D7 下一项是 **J2**。
+>
+> **补记（2026-09-15 → 09-18，会话 fable-5-1-49 / fable-5-1-10）**：**J2 落地**（pid-parse `15aa915` → `41350ab` →
+> `70554b0` → `ca1fffa` → `ea89f96`）——`0x0115` 有了解码器（只收种类 1，其余拒收），tag-188 46 条逐条对槽把
+> J1 结算 ③ 关掉，并**改了 DTO 的形状**：尾字坐实为所属 `JDimGroup` 的 oid，`+140` 被否掉不是引用（09-14 的
+> 「归属」读法撤下），DTO 只带帧 / 种类 / 值 / `+92` / `group_ref` / `raw_tail`。注册进家族表（不画），
+> 驱动尺寸挂进定义缓存与 `PidSymbolDefinition::dimensions`。棘轮 D06 5 / 0201 5 / 0202 0 / 工艺 4 / A01 4，
+> golden 不变。pid-parse `--lib` 1097 → 1110、`parse_real_files` 128 → 129。按 D7 下一项是 **J3**。
+> OCS 侧本轮**未动**（D2 写的「进特性面板 / 导入摘要」是 J3 之后的消费，见 J2 结算）。
 
 ## 决策记录
 
@@ -269,6 +277,49 @@ imagdex 为它们准备的是 `tagDimPersistData` / `tagDimGrpPersistData` / `ta
 （A01 4 软跳）；每条的 `parent_ref` 就是某个放置点名的定义 sheet（或未被点名的模板 sheet，如 `/JSite329`
 sheet 49）；尺寸值集合 = 英寸整倍数；golden 只多字段不改实体。
 
+**进度**：**① ✅** 2026-09-15 pid-parse `15aa915`（`feat(jdim): 0x0115 reads its frame, its value and its two reference
+slots -- and refuses the seven kinds nobody has bytes for`）——`decode_igdimensions` / `IgDimensionDecoder` 走
+`PsmRecordDecoder`：帧按 radsrvitem 的算术收尾（尾字只看 `0x100`），**只收种类 1 且块首无 `0x2000`**，其余七种与
+80 字节块**拒收不猜**（拒收不认领字节，注册后进拒收普查）；DTO 带帧 / `+14` / `+42` / `+92` / `+140` / 尾字 / `raw_tail`。
+18/18 解开；`parser_panic_safety` 收入口。只有解码器与 DTO，未注册、未挂几何。
+
+**② ✅ 2026-09-18 pid-parse `41350ab`**（`probe(jdim): the 46 tag-188 members land in the geometry slots, the closing dword
+is the group, and +140 is not a reference`）——J1 结算 ③ 留的活：`examples/probe_tag188_members_land_in_jdim_slots.rs`
+把 08-27 的 46 条 tag-188 成员与 09-14 的引用槽读法**逐条 join**（09-15 写好、09-18 跑通出账）。整账：**40 落槽**
+（`+92` ×29 / `+202` ×10 / `+280` ×4，槽预言类零反例：`0x00CB → Line` 31/31、`0x00F0 → Point` 8/8）+ **2 假命中**
+（D06 oid 63 撞上 f64 指数字节 `0x3F` 后三个零）+ **6 组共享**（无槽成员 6/6 都是同一 `JDimGroup` 里另一条尺寸量的
+几何）；08-27 的「42/46、4 条无解释」到此关账。**两条改了 DTO 形状的发现**：(a) **尾字 = 所属 `JDimGroup` 的 oid**——
+13/13 解到组，组记录的成员表（`+24` u16 数、`+26` 起每 4 字节一个 u16）回指 6/6 组一致（含 A01）；(b) **`+140` 不是引用**
+——四个独立索引空间里只取 48 / 16 两个值、解到的类各不相同（Vertical Constraint / JDimGroup / JSheet / 解不到），
+09-14 §5 的 14/18 是小整数碰巧撞上 oid。`+280` 是主区末尾不带标记字的裸引用，其后的 u16 就是尾字。空间图**不记**
+JDim → 组这条边（尾字也过不了那一关），所以空间图不能当「是不是引用」的判据。分析文档
+`docs/analysis/2026-09-15-tag-188-members-land-in-jdim-reference-slots.md`；09-14 文档 §5 / §7 加更正；guide tag-188 行改
+40/46；`rad_class_name()` 补五个名字。
+
+**③ ✅ 2026-09-18 pid-parse `70554b0`**（`refactor(jdim): the closing dword is the group reference, and +140 is no longer a
+field`）——按 ② 定形（用户 09-18 选方案 A）：`owner` 去掉（字节留 `raw_tail`，测试钉住 `+140` 的 48 就在那里），
+`tail_word` 改名 `group_ref: Option<u32>`（语料互证等级，不解析）。行为不变，18/18。
+
+**④ ✅ 2026-09-18 pid-parse `ca1fffa`**（`feat(jdim): register igDimension, carry the driving dimensions into the symbol
+bodies, and draw none of them`）——`SHEET_RECORD_FAMILIES` 加 `igDimension` 行（`emits_geometry: false`、Decoded、字段
+`decoded_igdimensions`、DTO `DecodedIgDimensionRecord`），`DECODED_TYPE_CODES` 13 → 14，普查测试里拿 `0x0115` 当
+「无解码器」例子的改用 `0x0117`，并钉「被拒收的 JDim 是拒收不是缺解码器」；`IgDimensionEmitter` 登记为空发射器。
+定义缓存 `decode_nested_geometry` 同一记录链门收 `0x0115` → `JSiteNestedGeometry::dimensions`，缓存汇总 warning 多一格
+`{n} dimensions`；`PidSymbolDefinition::dimensions: Vec<PidSymbolDimension>`（oid、图层、值、被量 oid、
+**两端点只在 `+92` 解到同存储的 `igLine2d` 时给**——点不给、缓存不带的不给——以及 `group_ref`），不进 `primitives`。
+棘轮 `jdims_are_the_driving_dimensions_of_parametric_bodies`：D06 5 / 0201 5 / 0202 0 / 工艺 4 / A01 4；`parent_ref`
+是本存储的 `JSheet`、图层名 `Dimension`、值是 0.05″ 的整倍、`0x00CB` 槽指向缓存里的线、每条恰归一个本体、量线的才有
+端点、缓存内容不上页。golden 快照不变（本族不发实体）；`render_gap_census` 不受影响（顶层 `Sheet*` 无此族）。
+台账 `ea89f96`（CHANGELOG、guide `0x0115` 行、`task_plan.md` 指针）。全量 `cargo test` 绿：`--lib` 1110、
+`parse_real_files` 129、其余各目标全过；`clippy --all-targets -D warnings` / `fmt --check` 干净。
+
+**J2 结算（对照验收）**：① 棘轮四主图 + A01 计数**全部命中**；② `parent_ref` 验的是「本存储的 `JSheet`」——
+「被放置点名 / 未被点名的模板」两档没有分开数（都是 JSheet，语义一致，分档留给 J3 对 Manifold 时顺带）；
+③ 「尺寸值集合 = 英寸整倍数」实测是 **0.05″ 的整倍**（0.15″…4.5″），棘轮按此钉；④ golden 不变，比「只多字段」更严。
+**计划外的变化**：DTO 少了 `+140`、多了 `group_ref`（依据见 ②）；「两端点」不是从 JDim 块内读的，是从 `+92` 指向的
+`igLine2d` 取的（用户 09-15 13:28 口径），量点的 1 条（D06 JDim 24）没有端点。**OCS 侧未动**：D2 里「进特性面板 /
+导入摘要」是消费，等 J3 把参数化链闭合后一并做，免得面板先展示一个还没和公式对上的数。
+
 ### J3 · 参数化链闭环（pid-parse，证据）
 
 **现状**：`0x006F` 已解（公式 + 操作数 oid），`0x00C7` 已解（值 + 名），JDim 是链上唯一没解的节点；
@@ -382,7 +433,8 @@ XRecord `PID_VIEW_FILTER`（每条 `layer_off=<名>` / `role_off=<角色>` 一�
 
 **待做（随本轮各项收尾）**：
 
-- pid-parse `task_plan.md`「当前阶段」加本轮指针（L1 已刷，随 `b61de88`；J1 已刷，随 `1319f10`；J2 落地时再刷一次）。
+- pid-parse `task_plan.md`「当前阶段」加本轮指针（L1 已刷，随 `b61de88`；J1 已刷，随 `1319f10`；J2 已刷，随 `ea89f96`；
+  J3 落地时再刷一次）。
 - user-guide 在 L3 落地时补 `OCS_PID_LAYER_MODE` 一段。
 - OCS `.context` 会话文件按惯例；每项落地 `remember` 一条。
 
@@ -401,6 +453,9 @@ XRecord `PID_VIEW_FILTER`（每条 `layer_off=<名>` / `role_off=<角色>` 一�
   J1 两个工作日时间盒，原生读取器无果则 J2 只带坐实字段 + raw，不空转。**J1 2026-09-14 结算**：一天多走完四步
   （pid-parse `a8b8dd1` → `1b30dff` → `477fb72` → `1319f10`），帧由 radsrvitem 背书、块内无原生读法——
   正是「原生读取器无果」那个分支，**J2 只带坐实字段 + raw**（坐实 / 留 raw 两栏见 J1 进度末尾）。
+  **J2 2026-09-18 结算**：四步（pid-parse `15aa915` → `41350ab` → `70554b0` → `ca1fffa`，台账 `ea89f96`）——
+  解码器只收种类 1，tag-188 逐条核对把尾字坐实为组、把 `+140` 否掉，DTO 随之定形；注册不画，驱动尺寸进
+  `PidSymbolDefinition::dimensions`；棘轮全中，golden 不变。**下一项 J3**（模板 JDim 20.32 vs 实例 35.59 的参数化链闭环）。
 - **L3 最后**：选项后置、默认不切，风险隔离。
 - **T** 随各项收尾，不单独占期。
 
