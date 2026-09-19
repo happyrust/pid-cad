@@ -208,7 +208,15 @@ primitives.len()`、每个 oid 都在 `sheet_layers` 里、`sheet_layers` 的 oi
 向外凸、罐内没有轴线短线，顶上三个法兰短管 / 人孔 / 量油孔与 LG / LT 量表都在；打开 工艺，`注：` / `1、仪表位…` 每行行首是一个 1.27 mm
 的三线小标记，全图没有云线；打开 D06，Ball Valve Type 1 只有一圈 r 1.27、2 Way Ball 一圈 r 1.59、PT 气泡一圈 r 6.35，没有 7.57 的外圈。
 同一份导入的 `--export` DXF 对数：D06 全图恰三个圆（1.27 / 1.59 / 6.35），0201 两条 r 35.59 的端帽弧 `90° → 270°` / `270° → 90°`
-分别在壳体左右两侧向外。SmartPlant 截图仍没有（P-D8）。
+分别在壳体左右两侧向外。六张截图与对数留档在 [`docs/evidence/2026-09-20-cached-body-gui-check/`](../evidence/2026-09-20-cached-body-gui-check/README.md)：
+
+![0201 Manifold 实例：拉长罐、端帽向外、无轴线](../evidence/2026-09-20-cached-body-gui-check/0201-manifold.png)
+
+![工艺 Remarks：行首的三线小标记，不是云线](../evidence/2026-09-20-cached-body-gui-check/gongyi-remarks.png)
+
+![D06：球阀各一圈、PT 一圈](../evidence/2026-09-20-cached-body-gui-check/d06-valves.png)
+
+SmartPlant 截图仍没有（P-D8）。
 
 ### C3 · 台账（双仓）
 
@@ -237,7 +245,7 @@ Remarks 是 1.27 mm 的小标记而不是 27 mm 的云线；D06 球阀只有一�
 | 项 | 提交 | 验收 |
 |---|---|---|
 | C1 | pid-parse `08fc95a` + `fec5d19` | 五图棘轮；`parse_real_files` 131 → 132、`--lib` 1110、golden 不变、fmt 干净 |
-| C2 | OCS `641cec3b`；pid-parse `b6a70a7`（弧向） | `pid_import` 54/54 × 四种组合；四图 81 / 120 / 32 / 237 逐数；`extent=` == 画出的外框；弧向棘轮 `parse_real_files` 132 → 133 |
+| C2 | OCS `641cec3b`；pid-parse `b6a70a7`（弧向） | `pid_import` 54/54 × 四种组合；四图 81 / 120 / 32 / 237 逐数；`extent=` == 画出的外框；弧向棘轮 `parse_real_files` 132 → 133；GUI 手工三例（[`docs/evidence/2026-09-20-cached-body-gui-check/`](../evidence/2026-09-20-cached-body-gui-check/README.md)） |
 | C3 | 本提交 + 上列 | 双仓台账齐 |
 
 **与计划字面不同的三处**（都已写进各项进度）：P-D7 `extent=` 变的是 0201 的 11 个放置而不只 ` Line2`；`igArc2d` 弧向是计划外的发现，
@@ -285,4 +293,5 @@ pid-parse 多一条提交、OCS 对调两角；C1 风险项「没有显示位的
 - 2026-09-19：C2 途中裁出 `igArc2d` 顺时针（pid-parse `b6a70a7`，会话 fable-5-1-30，接手上一会话未提交的现场）。
 - 2026-09-19：C2 落地（OCS `641cec3b`，同一会话）；P-D7 数字更正（11 个放置）；`pid_import` 54/54 × 四种组合。
 - 2026-09-19：C3 收口（OCS `ef93f6ba`，同一会话）——user-guide、双仓台账、2026-09-18 计划开口改标、`remember`；三项齐，计划关闭。
-- 2026-09-20：C2 手工验收补记（本提交，同一会话）——GUI 打开 0201 / 工艺 / D06 三图，Manifold / Remarks / 球阀三例与测试钉的一致。
+- 2026-09-20：C2 手工验收补记（OCS `1ff0f4af`，同一会话）——GUI 打开 0201 / 工艺 / D06 三图，Manifold / Remarks / 球阀三例与测试钉的一致；
+  六张截图 + README 留档 `docs/evidence/2026-09-20-cached-body-gui-check/`（本提交）。
