@@ -204,8 +204,11 @@ primitives.len()`、每个 oid 都在 `sheet_layers` 里、`sheet_layers` 的 oi
 `--lib` 的 `io::pid::tests` 8/8、`i18n` 目录守护全绿（本轮无新词条）；`pid.rs` rustfmt 干净、`pid_import.rs` 只剩 HEAD 就有的那一处
 （123 → 174 行，同一 hunk）；`clippy --lib --test pid_import` 两文件零告警。`--lib` 全跑 1154 通过、3 失败——`pidlegend::an_svg_plot_groups…`
 （`MissingGlyphs`，字体）、`plugin_manager::certificate_errors…`（系统语言中文）、`svg_export::a_page_style_table…`——三处都不碰 `io::pid`，
-是环境，未在 HEAD 上复跑。**未验证**：手工打开看 Manifold / Remarks / 球阀（GUI 未开）——形由 `a_placement_draws_the_body…` 逐笔钉住；
-SmartPlant 截图仍没有（P-D8）。
+是环境，未在 HEAD 上复跑。**手工验收（2026-09-20 00:30，debug 版 GUI，`641cec3b`）**：打开 0201，A3-06D01 是 172 × 71 的拉长罐，两端帽
+向外凸、罐内没有轴线短线，顶上三个法兰短管 / 人孔 / 量油孔与 LG / LT 量表都在；打开 工艺，`注：` / `1、仪表位…` 每行行首是一个 1.27 mm
+的三线小标记，全图没有云线；打开 D06，Ball Valve Type 1 只有一圈 r 1.27、2 Way Ball 一圈 r 1.59、PT 气泡一圈 r 6.35，没有 7.57 的外圈。
+同一份导入的 `--export` DXF 对数：D06 全图恰三个圆（1.27 / 1.59 / 6.35），0201 两条 r 35.59 的端帽弧 `90° → 270°` / `270° → 90°`
+分别在壳体左右两侧向外。SmartPlant 截图仍没有（P-D8）。
 
 ### C3 · 台账（双仓）
 
@@ -281,4 +284,5 @@ pid-parse 多一条提交、OCS 对调两角；C1 风险项「没有显示位的
 - 2026-09-19：C1 落地（pid-parse `08fc95a` / `fec5d19`，同一会话）；风险项「没有显示位的层」出现在无图元、无人点名的本体上，钉成清单。
 - 2026-09-19：C2 途中裁出 `igArc2d` 顺时针（pid-parse `b6a70a7`，会话 fable-5-1-30，接手上一会话未提交的现场）。
 - 2026-09-19：C2 落地（OCS `641cec3b`，同一会话）；P-D7 数字更正（11 个放置）；`pid_import` 54/54 × 四种组合。
-- 2026-09-19：C3 收口（本提交，同一会话）——user-guide、双仓台账、2026-09-18 计划开口改标、`remember`；三项齐，计划关闭。
+- 2026-09-19：C3 收口（OCS `ef93f6ba`，同一会话）——user-guide、双仓台账、2026-09-18 计划开口改标、`remember`；三项齐，计划关闭。
+- 2026-09-20：C2 手工验收补记（本提交，同一会话）——GUI 打开 0201 / 工艺 / D06 三图，Manifold / Remarks / 球阀三例与测试钉的一致。
