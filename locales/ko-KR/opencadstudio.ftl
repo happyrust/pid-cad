@@ -1879,6 +1879,7 @@ common =
     .dimensional = 치수 구속
     .show-hide = 표시/숨기기
     .pid-sheet-layers-of-which-start-switched-off = P&ID 시트 도면층: __ocs_fmt_0__개, 그중 __ocs_fmt_1__개는 처음부터 꺼짐
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = P&ID 구동 치수: 템플릿 본체 __ocs_fmt_1__개에 __ocs_fmt_0__개; 배치된 파라메트릭 본체 __ocs_fmt_2__개가 라이브러리 기본값을 가짐
 
 errors =
     .save-warning = 경고 저장

@@ -1864,6 +1864,7 @@ common =
     .dimensional = Boyutsal
     .show-hide = Göster/Gizle
     .pid-sheet-layers-of-which-start-switched-off = P&ID sayfa katmanları: __ocs_fmt_0__, bunların __ocs_fmt_1__ tanesi başlangıçta kapalı
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = P&ID sürücü ölçüler: __ocs_fmt_1__ şablon gövdesinde __ocs_fmt_0__; yerleştirilmiş __ocs_fmt_2__ parametrik gövde kitaplık varsayılanlarını taşıyor
 
 errors =
     .save-warning = Kaydetme Uyarısı

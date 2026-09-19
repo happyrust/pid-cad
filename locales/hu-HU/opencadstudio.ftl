@@ -1879,6 +1879,7 @@ common =
     .dimensional = Méretkényszerek
     .show-hide = Megjelenítés/Elrejtés
     .pid-sheet-layers-of-which-start-switched-off = P&ID lapfóliák: __ocs_fmt_0__, ebből __ocs_fmt_1__ induláskor kikapcsolva
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = P&ID vezérlő méretek: __ocs_fmt_0__ db __ocs_fmt_1__ sablontesten; __ocs_fmt_2__ elhelyezett parametrikus test hordozza a könyvtári alapértelmezéseket
 
 errors =
     .save-warning = Figyelmeztetés mentése

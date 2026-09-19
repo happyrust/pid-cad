@@ -300,6 +300,58 @@ fn the_import_leaves_a_summary_the_app_can_show() {
         summary.sheet_layer_names,
         PidViewSummary::of(&doc).layers.len()
     );
+
+    // The third line (plan 2026-09-18, K3): the named driving dimensions on
+    // the drawing's cached library templates, how many templates, and how
+    // many placements carry those defaults -- one `driving=` group per
+    // placement, so the last number is the count of lettered names that
+    // state one. DWG-0201: the Manifold's three and ` Line2`'s one named
+    // dimension (JDim 503 has no name and is not counted) on two templates,
+    // both placed once.
+    assert_eq!(
+        (
+            summary.driving_dimensions,
+            summary.template_bodies,
+            summary.parametric_placements
+        ),
+        (4, 2, 2),
+        "DWG-0201: named driving dimensions / template bodies / parametric placements"
+    );
+    let names_with_defaults = |doc: &CadDocument| {
+        of_role(doc, "symbol-label")
+            .filter(|entity| pid_value(entity, "driving").is_some())
+            .count()
+    };
+    assert_eq!(summary.parametric_placements, names_with_defaults(&doc));
+    // The tank's fifth dimension (`0E($1+$2)/10`) has no name; the Black Box
+    // is one template placed twice; DWG-0202 places no parametric symbol and
+    // gets no line at all.
+    for (name, expected) in [
+        ("D06.pid", (4, 1, 1)),
+        ("工艺管道及仪表流程-1.pid", (4, 1, 2)),
+        ("DWG-0202GP06-01.pid", (0, 0, 0)),
+    ] {
+        let Some(path) = fixture(name) else {
+            continue;
+        };
+        let doc = OpenCADStudio::io::load_file(&path).expect("the fixture imports");
+        let summary = OpenCADStudio::io::pid::take_import_summary(&path)
+            .expect("an import leaves its summary behind");
+        assert_eq!(
+            (
+                summary.driving_dimensions,
+                summary.template_bodies,
+                summary.parametric_placements
+            ),
+            expected,
+            "{name}: named driving dimensions / template bodies / parametric placements"
+        );
+        assert_eq!(
+            summary.parametric_placements,
+            names_with_defaults(&doc),
+            "{name}: one driving= group per parametric placement"
+        );
+    }
 }
 
 /// Dashed line work comes in as a named linetype the renderer can dash.

@@ -1879,6 +1879,7 @@ common =
     .dimensional = Dimensionali
     .show-hide = Mostra/Nascondi
     .pid-sheet-layers-of-which-start-switched-off = Layer del foglio P&ID: __ocs_fmt_0__, di cui __ocs_fmt_1__ inizialmente disattivati
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = Quote guida P&ID: __ocs_fmt_0__ su __ocs_fmt_1__ corpi modello; __ocs_fmt_2__ corpi parametrici posizionati portano i valori predefiniti della libreria
 
 errors =
     .save-warning = Salva avviso

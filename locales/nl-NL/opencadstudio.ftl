@@ -1880,6 +1880,7 @@ common =
     .dimensional = Maatvoering
     .show-hide = Tonen/Verbergen
     .pid-sheet-layers-of-which-start-switched-off = P&ID-bladlagen: __ocs_fmt_0__, waarvan __ocs_fmt_1__ bij aanvang uitgeschakeld
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = P&ID sturende maten: __ocs_fmt_0__ op __ocs_fmt_1__ sjabloonlichamen; __ocs_fmt_2__ geplaatste parametrische lichamen dragen bibliotheekstandaarden
 
 errors =
     .save-warning = Waarschuwing opslaan

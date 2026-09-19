@@ -1880,6 +1880,7 @@ common =
     .dimensional = Bemaßung
     .show-hide = Anzeigen/Ausblenden
     .pid-sheet-layers-of-which-start-switched-off = P&ID-Blattebenen: __ocs_fmt_0__, davon __ocs_fmt_1__ zu Beginn ausgeschaltet
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = P&ID treibende Bemaßungen: __ocs_fmt_0__ auf __ocs_fmt_1__ Vorlagenkörpern; __ocs_fmt_2__ platzierte parametrische Körper tragen Bibliotheksstandards
 
 errors =
     .save-warning = Warnhinweise speichern

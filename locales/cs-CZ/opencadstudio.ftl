@@ -1879,6 +1879,7 @@ common =
     .dimensional = Rozměrové
     .show-hide = Zobrazit/skrýt
     .pid-sheet-layers-of-which-start-switched-off = Hladiny listu P&ID: __ocs_fmt_0__, z toho __ocs_fmt_1__ na začátku vypnuto
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = Řídicí kóty P&ID: __ocs_fmt_0__ na __ocs_fmt_1__ tělesech šablon; __ocs_fmt_2__ umístěných parametrických těles nese výchozí hodnoty z knihovny
 
 errors =
     .save-warning = Uložit varování

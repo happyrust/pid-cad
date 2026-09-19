@@ -1867,6 +1867,7 @@ common =
     .dimensional = 标注
     .show-hide = 显示/隐藏
     .pid-sheet-layers-of-which-start-switched-off = P&ID 图纸图层：__ocs_fmt_0__ 个，其中 __ocs_fmt_1__ 个初始关闭
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = P&ID 驱动尺寸：__ocs_fmt_0__ 条，在 __ocs_fmt_1__ 个模板本体上；__ocs_fmt_2__ 个放置的参数化本体带库默认值
 
 errors =
     .save-warning = 保存警告

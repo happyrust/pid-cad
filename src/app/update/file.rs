@@ -1574,6 +1574,22 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     self.command_line.push_info(crate::tf!(
                         "P&ID sheet layers: {names}, of which {off} start switched off"
                     ).as_ref());
+                    // The parametric symbols in one line (plan 2026-09-18,
+                    // K3): how many named driving dimensions the drawing's
+                    // cached library templates carry, on how many templates,
+                    // and how many placements the panel can show those
+                    // library defaults for. A drawing with no parametric
+                    // symbol gets no line rather than a row of zeros.
+                    let (dims, templates, placements) = (
+                        summary.driving_dimensions,
+                        summary.template_bodies,
+                        summary.parametric_placements,
+                    );
+                    if dims + templates + placements > 0 {
+                        self.command_line.push_info(crate::tf!(
+                            "P&ID driving dimensions: {dims} on {templates} template bodies; {placements} placed parametric bodies carry library defaults"
+                        ).as_ref());
+                    }
                     if summary.style_tables_failed {
                         self.command_line.push_error(crate::t!(
                             "P&ID style table did not read; line work keeps the layer defaults."

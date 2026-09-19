@@ -1870,6 +1870,7 @@ common =
     .dimensional = 寸法拘束
     .show-hide = 表示/非表示
     .pid-sheet-layers-of-which-start-switched-off = P&ID シートレイヤー: __ocs_fmt_0__ 個、うち __ocs_fmt_1__ 個は初期状態でオフ
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = P&ID 駆動寸法: __ocs_fmt_0__ 件、テンプレート本体 __ocs_fmt_1__ 個上; 配置済みパラメトリック本体 __ocs_fmt_2__ 個がライブラリ既定値を保持
 
 errors =
     .save-warning = 保存の警告

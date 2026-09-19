@@ -1677,6 +1677,7 @@ pub(super) fn message_attribute(source: &str) -> Option<(&'static str, &'static 
         "Role {} turned {} ({} entities)" => Some(("layers", "role-turned-entities")),
         "Layer {} turned on so the sheet layer can show" => Some(("layers", "layer-turned-on-so-the-sheet-layer-can-show")),
         "P&ID sheet layers: {names}, of which {off} start switched off" => Some(("common", "pid-sheet-layers-of-which-start-switched-off")),
+        "P&ID driving dimensions: {dims} on {templates} template bodies; {placements} placed parametric bodies carry library defaults" => Some(("common", "pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults")),
         "Layer OID" => Some(("properties", "layer-oid")),
         "Driving dimensions (library default)" => Some(("properties", "driving-dimensions-library-default")),
         "Body extent" => Some(("properties", "body-extent")),

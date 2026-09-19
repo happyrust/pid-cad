@@ -1868,6 +1868,7 @@ common =
     .dimensional = आयामी
     .show-hide = दिखाएँ/छिपाएँ
     .pid-sheet-layers-of-which-start-switched-off = P&ID शीट लेयर: __ocs_fmt_0__, जिनमें से __ocs_fmt_1__ शुरू में बंद हैं
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = P&ID ड्राइविंग आयाम: __ocs_fmt_1__ टेम्पलेट बॉडी पर __ocs_fmt_0__; __ocs_fmt_2__ रखी गई पैरामीट्रिक बॉडी लाइब्रेरी डिफ़ॉल्ट रखती हैं
 
 errors =
     .save-warning = चेतावनी सहेजें

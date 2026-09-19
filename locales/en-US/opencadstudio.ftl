@@ -1880,6 +1880,7 @@ common =
     .dimensional = Dimensional
     .show-hide = Show/Hide
     .pid-sheet-layers-of-which-start-switched-off = P&ID sheet layers: __ocs_fmt_0__, of which __ocs_fmt_1__ start switched off
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = P&ID driving dimensions: __ocs_fmt_0__ on __ocs_fmt_1__ template bodies; __ocs_fmt_2__ placed parametric bodies carry library defaults
 
 errors =
     .save-warning = Save Warning

@@ -1879,6 +1879,7 @@ common =
     .dimensional = Mitalliset
     .show-hide = Näytä/Piilota
     .pid-sheet-layers-of-which-start-switched-off = P&ID-arkin tasot: __ocs_fmt_0__, joista __ocs_fmt_1__ on aluksi pois päältä
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = P&ID ohjaavat mitat: __ocs_fmt_0__ __ocs_fmt_1__ mallikappaleessa; __ocs_fmt_2__ sijoitettua parametrista kappaletta kantaa kirjaston oletuksia
 
 errors =
     .save-warning = Tallenna varoitus

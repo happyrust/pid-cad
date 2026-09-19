@@ -1892,6 +1892,7 @@ common =
     .dimensional = بُعدي
     .show-hide = إظهار/إخفاء
     .pid-sheet-layers-of-which-start-switched-off = طبقات ورقة P&ID: __ocs_fmt_0__، منها __ocs_fmt_1__ مطفأة في البداية
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = الأبعاد المحرِّكة في P&ID: __ocs_fmt_0__ على __ocs_fmt_1__ من أجسام القوالب؛ __ocs_fmt_2__ من الأجسام البارامترية الموضوعة تحمل الافتراضيات من المكتبة
 
 errors =
     .save-warning = تحذير الحفظ

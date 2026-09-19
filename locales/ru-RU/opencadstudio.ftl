@@ -1883,6 +1883,7 @@ common =
     .dimensional = Размерные
     .show-hide = Показать/Скрыть
     .pid-sheet-layers-of-which-start-switched-off = Слои листа P&ID: __ocs_fmt_0__, из них __ocs_fmt_1__ изначально выключены
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = Управляющие размеры P&ID: __ocs_fmt_0__ на __ocs_fmt_1__ телах шаблонов; __ocs_fmt_2__ размещённых параметрических тел несут значения по умолчанию из библиотеки
 
 errors =
     .save-warning = Спасти предостережение

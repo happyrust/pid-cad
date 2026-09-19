@@ -1879,6 +1879,7 @@ common =
     .dimensional = Размерни
     .show-hide = Показване/скриване
     .pid-sheet-layers-of-which-start-switched-off = P&ID слоеве на листа: __ocs_fmt_0__, от които __ocs_fmt_1__ са изключени в началото
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = Управляващи размери P&ID: __ocs_fmt_0__ върху __ocs_fmt_1__ тела на шаблони; __ocs_fmt_2__ поставени параметрични тела носят стойности по подразбиране от библиотеката
 
 errors =
     .save-warning = Предупреждение при запазване

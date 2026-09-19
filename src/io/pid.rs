@@ -398,6 +398,19 @@ pub struct ImportSummary {
     /// How many of those names the import starts switched off in the
     /// drawing's view filter.
     pub sheet_layers_off: usize,
+    /// Named driving dimensions over every symbol body the drawing caches --
+    /// all of them on library templates no placement draws (pid-parse
+    /// `docs/analysis/2026-09-18-the-parametric-chain-closes-on-the-template-
+    /// not-the-instance.md`). A dimension without a name is not counted: the
+    /// panel cannot show it.
+    pub driving_dimensions: usize,
+    /// Cached bodies carrying at least one driving dimension: the templates.
+    pub template_bodies: usize,
+    /// Placements whose cached body names a template with named dimensions,
+    /// so whose entities carry `driving=` -- what the panel can show library
+    /// defaults for. Zero on a drawing without parametric symbols, in which
+    /// case the headline says nothing about dimensions at all.
+    pub parametric_placements: usize,
 }
 
 /// Mailbox carrying each import's summary out of the io layer, keyed by the
@@ -599,6 +612,8 @@ pub fn load_pid_with_layer_mode(path: &Path, mode: PidLayerMode) -> Result<CadDo
     let mut drawn = 0usize;
     let mut lettering_on_fallback = 0usize;
     let mut embedded_bodies_drawn = 0usize;
+    // Placements whose entities carry `driving=`; see `ImportSummary`.
+    let mut parametric_placements = 0usize;
     let mut sheet_layer_distribution: BTreeMap<(String, u32, Option<String>), usize> =
         BTreeMap::new();
     // The sheet layers the drawing draws nothing of, by name: what the view
@@ -701,6 +716,9 @@ pub fn load_pid_with_layer_mode(path: &Path, mode: PidLayerMode) -> Result<CadDo
         // defaults, the same on every entity it drew. See
         // `PlacementMeasures`.
         let measures = PlacementMeasures::of(&entity.kind, &geometry, projection, &built);
+        if measures.as_ref().is_some_and(|m| m.driving.is_some()) {
+            parametric_placements += 1;
+        }
         for mut one in built {
             if let Some(style) = symbology {
                 apply_symbology(&mut one, style, &dash_linetypes);
@@ -850,6 +868,21 @@ pub fn load_pid_with_layer_mode(path: &Path, mode: PidLayerMode) -> Result<CadDo
                     .count(),
                 sheet_layer_names: view.layers.len(),
                 sheet_layers_off: view.layers.iter().filter(|row| !row.on).count(),
+                // The templates and their named dimensions are counted over
+                // the cache rather than over what was drawn: no placement
+                // draws a template, so the entity loop never meets them.
+                driving_dimensions: geometry
+                    .symbol_definitions
+                    .iter()
+                    .flat_map(|body| body.dimensions.iter())
+                    .filter(|dimension| dimension.name.is_some())
+                    .count(),
+                template_bodies: geometry
+                    .symbol_definitions
+                    .iter()
+                    .filter(|body| !body.dimensions.is_empty())
+                    .count(),
+                parametric_placements,
             },
         );
     doc.source_path = Some(path.to_string_lossy().into_owned());

@@ -1879,6 +1879,7 @@ common =
     .dimensional = Διαστατικοί
     .show-hide = Εμφάνιση/Απόκρυψη
     .pid-sheet-layers-of-which-start-switched-off = Επίπεδα φύλλου P&ID: __ocs_fmt_0__, από τα οποία __ocs_fmt_1__ ξεκινούν ανενεργά
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = Οδηγούσες διαστάσεις P&ID: __ocs_fmt_0__ σε __ocs_fmt_1__ σώματα προτύπων· __ocs_fmt_2__ τοποθετημένα παραμετρικά σώματα φέρουν προεπιλογές βιβλιοθήκης
 
 errors =
     .save-warning = Προειδοποίηση αποθήκευσης

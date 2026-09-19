@@ -1880,6 +1880,7 @@ common =
     .dimensional = Dimensionais
     .show-hide = Mostrar/Ocultar
     .pid-sheet-layers-of-which-start-switched-off = Camadas da folha P&ID: __ocs_fmt_0__, das quais __ocs_fmt_1__ começam desligadas
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = Cotas condutoras P&ID: __ocs_fmt_0__ em __ocs_fmt_1__ corpos de modelo; __ocs_fmt_2__ corpos paramétricos posicionados carregam os padrões da biblioteca
 
 errors =
     .save-warning = Aviso de salvamento

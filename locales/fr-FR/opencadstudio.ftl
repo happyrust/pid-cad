@@ -1880,6 +1880,7 @@ common =
     .dimensional = Dimensionnelles
     .show-hide = Afficher/Masquer
     .pid-sheet-layers-of-which-start-switched-off = Calques de feuille P&ID : __ocs_fmt_0__, dont __ocs_fmt_1__ désactivés au départ
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = Cotes directrices P&ID : __ocs_fmt_0__ sur __ocs_fmt_1__ corps de modèle ; __ocs_fmt_2__ corps paramétriques placés portent les valeurs par défaut de la bibliothèque
 
 errors =
     .save-warning = Enregistrer l' avertissement

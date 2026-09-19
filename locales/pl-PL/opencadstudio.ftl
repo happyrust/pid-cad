@@ -1879,6 +1879,7 @@ common =
     .dimensional = Wymiarowe
     .show-hide = Pokaż/Ukryj
     .pid-sheet-layers-of-which-start-switched-off = Warstwy arkusza P&ID: __ocs_fmt_0__, z czego __ocs_fmt_1__ początkowo wyłączone
+    .pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults = Wymiary sterujące P&ID: __ocs_fmt_0__ na __ocs_fmt_1__ bryłach szablonów; __ocs_fmt_2__ umieszczonych brył parametrycznych ma wartości domyślne z biblioteki
 
 errors =
     .save-warning = Zapisz ostrzeżenie
