@@ -12,7 +12,8 @@
 > `2026-09-07-placement-tail-names-the-cached-definition.md`，以及 OCS `pid.rs` / `scene/cache/properties.rs` 现状。
 > 带 ⭕ 的决策按推荐落笔。**2026-09-18 22:58 用户在会话里批准**：七条按推荐执行，唯 **K-D3 改口径**——「本体尺寸」所有符号
 > 放置都写都显示，「驱动尺寸（库默认）」限参数化的（决策表与 K2 已改）。未走 Plannotator；直接开 K1。
-> **2026-09-19 K1 落地**：pid-parse `223b26d` + `5d64d7c`，5/5 配上、15/18 有名（见 K1 进度与结算）。下一项 K2。
+> **2026-09-19 K1 落地**：pid-parse `223b26d` + `5d64d7c`，5/5 配上、15/18 有名（见 K1 进度与结算）。**K2 落地**：OCS `39398579`，
+> `extent=` 量缓存实例本体、`driving=` 限配上模板的放置，`pid_import` 51/51 × 两模式（见 K2 进度与结算）。下一项 K3。
 
 ## 决策记录
 
@@ -138,6 +139,31 @@ Right 114.3`、` Line2` 一变量一有名尺寸、`0E$1` ⇒ 尺寸值 = 变量
 
 **验收**：上述断言全绿；手工：打开 0201，点 Manifold 任一笔画，P&ID 组多出两行、数字如上；点一个阀门，只有「本体尺寸」一行。
 
+**进度（2026-09-19，fable-5-1-17）**：OCS **`39398579`**（代码 + 测试 + 21 本词条 + user-guide）。
+
+- `extent=` 的量法与改法 1 的字面不同，按 K-D1 的定义走：**量 `.pid` 自己缓存的那份实例本体**（`symbol_definition(ref).primitives`
+  经同一 `Placement` 变换后的外框，弧按实际扫过的角度算，不按整圆），而不是量 `built`——测试套件里符号库在场，`built` 是库
+  `.sym` 本体（Manifold 画的是 228.6 × 40.64 的模板形），量它得到的是库默认而不是这张图的实际；缓存本体才是 SmartPlant 画的
+  那个实例（172.21 × 71.18）。文件没缓存本体的放置才退回量 `built`（库本体或 1.5 mm 标记）；语料 107/107 有缓存，退路没走到。
+  由此面板上「本体尺寸」与屏幕上画的库本体尺寸可能不一致——那是既有的「缓存 vs 库显示优先级」开口，本项不动。
+- `PlacementMeasures { extent, driving }` 每个放置算一次，经 `attach_pid_metadata` 写进该放置每个实体（含符号名标签）；键序
+  `… role, style, extent, driving, class …`。`driving=` 取 `template.dimensions` 里 `name.is_some()` 的条目按 on-disk 序、
+  `projection.mm(value_m)` 两位。
+- `properties.rs`：`pid_driving`（`Top 20.32 mm · Left 114.30 mm · Right 114.30 mm`）/ `pid_extent`（`172.21 × 71.18 mm`）
+  两行紧跟「角色」；格式不合的值原样显示不丢。词条 `Driving dimensions (library default)` / `Body extent` 进 `locale_catalog` +
+  21 本 ftl（`properties.driving-dimensions-library-default` / `.body-extent`），目录守护全绿。
+- 测试：键白名单 8 → 10；新测 `a_placement_states_its_extent_and_a_parametric_one_its_library_defaults`（每个 `role=symbol` /
+  `symbol-label` 实体有 `extent=` 且格式 `W.WWxH.HH`、其它角色两键皆无；`driving=` 值集合恰为预期；四个参数化放置按符号名标签
+  钉值——Manifold `Top:20.32;Left:114.30;Right:114.30` / `172.21x71.18`、` Line2` `Right:25.40` / `25.40x3.81`、D06 Tank
+  `Bottom:35.56;Left:63.50;Right:63.50;Top:35.56` / `122.12x82.84`、工艺 Black Box `Top:12.70;Right:12.70;Bottom:12.70;Left:12.70` /
+  `126.63x90.77`（两处放置同值）——且同值笔画数 ≥ 标签数；非参数化标签无 `driving=`；0202 无任何 `driving=`；两键过 DWG / DXF）；
+  `the_two_layer_modes_agree_on_everything_but_the_slot` 三键比较变五键；`pid.rs` 单测 `an_arcs_extent_is_the_sweep_it_draws…`；
+  `properties.rs` 单测 `a_placed_symbol_shows_its_library_defaults_and_its_extent_as_two_rows`。
+
+**验收结算**：`pid_import` **51/51 × 两种 `OCS_PID_LAYER_MODE`**；`--lib` 的 i18n 目录守护 / `pid_semantics_tests` / `io::pid::tests`
+全绿；触碰的 4 个 rust 文件 rustfmt 干净（`properties.rs` 头两处与 `pid_import.rs:126` 的旧账保持原样）、`clippy --lib --test pid_import`
+下零告警。**未验证**：手工点选（GUI 未开）——面板两行的渲染由 `properties.rs` 单测钉住。
+
 ### K3 · 导入摘要第三行（OCS）
 
 **现状**：两行。
@@ -190,3 +216,5 @@ pid-parse 每项完成后回跑 OCS `pid_import`（两种模式）。总时间�
 - 2026-09-18 22:58：用户在会话（fable-5-1-11）里批准七条决策，K-D3 改为「本体尺寸全给、驱动尺寸限参数化」；未走 Plannotator。
 - 2026-09-19：K1 落地（pid-parse `223b26d` / `5d64d7c`，会话 fable-5-1-17）；OCS `pid_import` 对着新 pid-parse 回跑，两种
   `OCS_PID_LAYER_MODE` 下各 50/50。
+- 2026-09-19：K2 落地（OCS `39398579`，同一会话）；`extent=` 的量法按 K-D1 定义改为量缓存实例本体（见 K2 进度）；
+  `pid_import` 51/51 × 两模式。
