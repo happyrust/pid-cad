@@ -254,7 +254,8 @@ pid-parse 多一条提交、OCS 对调两角；C1 风险项「没有显示位的
 **本轮之后还开着的：**
 
 - `OCS_PID_SYMBOL_SOURCE=library` 的退役（下一轮没人用就删；连带 `a_placement_without_a_library_body…` 后半段、
-  `the_two_symbol_sources_differ…`、`a_symbols_lettering_follows…` 里靠 library 源钉的旧数字一起删）。
+  `the_two_symbol_sources_differ…`、`a_symbols_lettering_follows…` 里靠 library 源钉的旧数字一起删）——
+  **2026-09-20 已开单** `2026-09-20-retire-the-library-first-symbol-source.md`（要拆的清单、两条开单条件、验收）。
 - 缓存存储自己的 `StyleCluster`（09-07 开口，登记不做）。
 - ~~pid-parse nightly clippy `map_unwrap_or` 29 处旧代码的清理提交（task_plan 已记）。~~ **2026-09-20 已清**（pid-parse `aeacd4c`）：
   不改那 29 处——nightly 建议的 `Option::map_or_default` 在稳定版仍 unstable——而是声明 `rust-version = "1.95"` 让 clippy 按 MSRV 门控；
