@@ -12,6 +12,7 @@
 > `2026-09-07-placement-tail-names-the-cached-definition.md`，以及 OCS `pid.rs` / `scene/cache/properties.rs` 现状。
 > 带 ⭕ 的决策按推荐落笔。**2026-09-18 22:58 用户在会话里批准**：七条按推荐执行，唯 **K-D3 改口径**——「本体尺寸」所有符号
 > 放置都写都显示，「驱动尺寸（库默认）」限参数化的（决策表与 K2 已改）。未走 Plannotator；直接开 K1。
+> **2026-09-19 K1 落地**：pid-parse `223b26d` + `5d64d7c`，5/5 配上、15/18 有名（见 K1 进度与结算）。下一项 K2。
 
 ## 决策记录
 
@@ -99,6 +100,23 @@ golden 不变、schema 多字段重封；`--lib` / `parse_real_files` 只增不�
 **风险**：`value_ref` 跨存储解析要在 `PidDocument` 级而不是单存储级做——J3 探针已经这么做过，照搬；工艺那对靠名 + 值配是
 弱证据，写进文档并在 DTO 文档注释里标 corpus。时间盒一个工作日。
 
+**进度（2026-09-19，会话 fable-5-1-17 接手 fable-5-1-11 的半成品）**：pid-parse **`223b26d`**（代码 + 棘轮 + 探针 + 分析文档）、
+**`5d64d7c`**（CHANGELOG / guide / task_plan）。
+
+- 四个字段如改法 1–2 落地；`PidSymbolVariable` 多带一个 `value_ref`（配对靠它，面板不用）。
+- **配对的第三步改了口径**：模板存储与模板本体按 K-D2 两步定；但「实例存储里哪个本体归这份记录」文件没写下来——记录的
+  `parent_ref` 为 0，也**不总写在本体之前**（工艺 `/JSite6963` 的记录 27 在 sheet 21 之后，其余四对在前），半成品按
+  「记录写在本体之前」配只得 4/5。改成按**模板本体的线数与弧数**在实例存储里挑（J3 §5：被拉过的实例每一笔都还在），
+  挑不出唯一的不配、同一模板被多份记录认领时按 oid 序对位（语料无）。**5/5**。
+- 探针第 4 节改从 DTO 读（−270 行）；分析文档 §2 表加「配对依据」列并补 K1 一段。
+
+**验收结算**：棘轮 `a_placed_parametric_body_names_its_template_and_the_template_names_its_dimensions` 全绿——五对 5/5
+（4 by `value_ref`、工艺 by 名 + 值，A01 软跳）；**15/18 有名**，无名恰 0201 JDim 503（`formula` 也 `None`）、D06 JDim 19、
+A01 JDim 82（有 `formula` 无 `name`）；实例 `variables` 逐条 = 模板；模板 `template: None`、非参数化 `variables` 空且
+`template: None`；D06 五条名 = {Top, Bottom, Left, Right} ∪ 一条 `None`；另钉 Manifold 三条按 oid 序 `Top 20.32 / Left 114.3 /
+Right 114.3`、` Line2` 一变量一有名尺寸、`0E$1` ⇒ 尺寸值 = 变量值、从放置两跳到库默认。golden 不变；`--lib` 1110、
+`parse_real_files` 130 → 131、`cargo test --all-targets` 全绿、clippy `--all-targets -D warnings` 零告警、fmt 干净。
+
 ### K2 · 特性面板两行（OCS）
 
 **现状**：P&ID 组七个键、无尺寸信息。
@@ -170,3 +188,5 @@ pid-parse 每项完成后回跑 OCS `pid_import`（两种模式）。总时间�
 
 - 2026-09-18：初稿（OCS `df95c5b4`）。
 - 2026-09-18 22:58：用户在会话（fable-5-1-11）里批准七条决策，K-D3 改为「本体尺寸全给、驱动尺寸限参数化」；未走 Plannotator。
+- 2026-09-19：K1 落地（pid-parse `223b26d` / `5d64d7c`，会话 fable-5-1-17）；OCS `pid_import` 对着新 pid-parse 回跑，两种
+  `OCS_PID_LAYER_MODE` 下各 50/50。
