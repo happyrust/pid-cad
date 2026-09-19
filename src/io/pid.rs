@@ -34,6 +34,7 @@ use pid_parse::symbol_library::{PrimitiveStyle, StyledPrimitive, SymbolLibrary, 
 use pid_parse::{
     build_normalized_geometry, NormalizedPidGeometry, PidDrawingUnits, PidGeometryConfidence,
     PidGraphicKind, PidParser, PidPoint, PidSemanticHit, PidSemanticIndex, PidSourceLayer,
+    PidSymbolDefinition,
 };
 
 // Millimetres in a metre, which is the unit a `.pid`'s decoded coordinates
@@ -238,6 +239,107 @@ impl PidLayerMode {
     }
 }
 
+/// Environment variable selecting the [`PidSymbolSource`] an import draws
+/// its symbol placements from: `cache` (the default, also when unset or
+/// empty) or `library` (plan 2026-09-19, P-D3). Same prefix and the same
+/// reading as [`LAYER_MODE_ENV`].
+pub const SYMBOL_SOURCE_ENV: &str = "OCS_PID_SYMBOL_SOURCE";
+
+/// Which body a symbol placement draws when the drawing caches one and the
+/// library holds one too (plan 2026-09-19, P-D1 / P-D3).
+///
+/// A `.pid` caches, for every symbol it places, the body SmartPlant actually
+/// put on the sheet -- the flavour its `JFlavorManager` picked, resized where
+/// the symbol is parametric -- and the reference share's `.sym` holds the
+/// template that body was made from, every `Sheet*` of the file merged. On
+/// the corpus all 109 placements have a cached body and the library has 97;
+/// of those 97 pairs only 26 draw stroke for stroke the same, and in none
+/// of the other 71 is the library the one that matches the sheet: it draws
+/// a second sheet or another revision, a different symbol under the same
+/// name (工艺's 35 `Remarks` are a 27mm cloud in the library and a 1.3mm
+/// mark on the sheet), or the template of a parametric body the drawing
+/// resized. Measured in pid-parse's
+/// `docs/analysis/2026-09-07-placement-tail-names-the-cached-definition.md`
+/// and the plan's corpus table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PidSymbolSource {
+    /// The drawing's own cached body, with the strokes on the symbol's
+    /// switched-off internal layers left out (P-D2: the heat tracing, the
+    /// jacket, the `NULL` placeholder lettering, a parametric body's
+    /// construction lines -- what SmartPlant does not put on the screen);
+    /// the library only for a placement the drawing caches nothing drawable
+    /// for; the marker dot when neither has a body. The default.
+    #[default]
+    Cache,
+    /// The import as it was before plan 2026-09-19: the library body first,
+    /// the cached body whole -- switched-off layers included -- where the
+    /// library has none, the marker dot after that, and `extent=` measured
+    /// over the whole cached body. Kept for one round as the way back to the
+    /// old picture, to be retired when nobody has used it.
+    Library,
+}
+
+impl PidSymbolSource {
+    /// The source [`SYMBOL_SOURCE_ENV`] selects, `Cache` when the variable is
+    /// unset or empty. A value that is neither name is logged and read as
+    /// the default rather than failing the open.
+    pub fn from_env() -> Self {
+        match std::env::var(SYMBOL_SOURCE_ENV) {
+            Ok(value) => Self::parse(&value).unwrap_or_else(|| {
+                log::warn!(
+                    "{SYMBOL_SOURCE_ENV}={value:?} is neither `cache` nor `library`; drawing symbols from the drawing's own definition cache"
+                );
+                Self::Cache
+            }),
+            Err(_) => Self::Cache,
+        }
+    }
+
+    /// `cache` / `library`, case-insensitively; an empty value is the
+    /// default.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "cache" => Some(Self::Cache),
+            "library" => Some(Self::Library),
+            _ => None,
+        }
+    }
+
+    /// The strokes of a cached body this source draws and measures: the
+    /// ones on layers the file displays, or under `Library` every one, in
+    /// the body's own order either way. The same selection feeds
+    /// [`build_entities`] and [`PlacementMeasures`], so what is on screen
+    /// and what the panel says is the size of are one set of strokes.
+    fn strokes(self, body: &PidSymbolDefinition) -> Vec<&SymbolPrimitive> {
+        match self {
+            Self::Cache => body.visible_primitives().collect(),
+            Self::Library => body.primitives.iter().collect(),
+        }
+    }
+}
+
+/// What an import reads from the environment when the application opens a
+/// `.pid`, for a caller that wants either stated instead -- a test that runs
+/// several combinations in one process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PidImportOptions {
+    /// Which layer the slot of each entity shows; see [`PidLayerMode`].
+    pub layer_mode: PidLayerMode,
+    /// Which body a symbol placement draws; see [`PidSymbolSource`].
+    pub symbol_source: PidSymbolSource,
+}
+
+impl PidImportOptions {
+    /// Both options as [`LAYER_MODE_ENV`] and [`SYMBOL_SOURCE_ENV`] select
+    /// them.
+    pub fn from_env() -> Self {
+        Self {
+            layer_mode: PidLayerMode::from_env(),
+            symbol_source: PidSymbolSource::from_env(),
+        }
+    }
+}
+
 /// The taxonomy layers, with the colour and initial visibility each opens
 /// with. In [`PidLayerMode::Taxonomy`] every one is declared up front, so a
 /// present-and-empty layer can say what a missing one would not; in
@@ -411,6 +513,33 @@ pub struct ImportSummary {
     /// defaults for. Zero on a drawing without parametric symbols, in which
     /// case the headline says nothing about dimensions at all.
     pub parametric_placements: usize,
+    /// Symbol placements drawn from the body the drawing caches for them --
+    /// under [`PidSymbolSource::Cache`] every placement the drawing has a
+    /// drawable body for, under `Library` only those the library has none
+    /// for. Logged, not shown: the shape being right is what the user sees.
+    pub cache_bodies: usize,
+    /// Symbol placements drawn from the library's `.sym`.
+    pub library_bodies: usize,
+    /// Strokes of cached bodies left undrawn because the file switches the
+    /// symbol-internal layer they sit on off (P-D2), summed over the
+    /// placements whose cache was consulted. Zero under `Library`, which
+    /// draws the cached body whole.
+    pub hidden_strokes_skipped: usize,
+}
+
+/// How the symbol placements of one import were drawn, tallied as
+/// [`build_entities`] draws them; the last three numbers of
+/// [`ImportSummary`] and one line of [`report_import`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SymbolBodies {
+    /// Placements drawn from the drawing's own definition cache.
+    cache: usize,
+    /// Placements drawn from the library.
+    library: usize,
+    /// Placements neither body reached, drawn as the marker dot.
+    markers: usize,
+    /// Cached strokes left out for sitting on a switched-off symbol layer.
+    hidden_strokes_skipped: usize,
 }
 
 /// Mailbox carrying each import's summary out of the io layer, keyed by the
@@ -434,14 +563,34 @@ pub fn take_import_summary(path: &Path) -> Option<ImportSummary> {
 }
 
 /// Parse a `.pid` file and project its decoded Sheet geometry into a document,
-/// filing the entities under the layers [`LAYER_MODE_ENV`] selects.
+/// filing the entities under the layers [`LAYER_MODE_ENV`] selects and
+/// drawing its symbols from the body [`SYMBOL_SOURCE_ENV`] selects.
 pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
-    load_pid_with_layer_mode(path, PidLayerMode::from_env())
+    load_pid_with_options(path, PidImportOptions::from_env())
 }
 
 /// [`load_pid`] with the layer mode stated rather than read from the
-/// environment -- what a test that wants both modes in one process calls.
+/// environment, the symbol source still the environment's -- what a test
+/// that wants both layer modes in one process calls.
 pub fn load_pid_with_layer_mode(path: &Path, mode: PidLayerMode) -> Result<CadDocument, String> {
+    load_pid_with_options(
+        path,
+        PidImportOptions {
+            layer_mode: mode,
+            ..PidImportOptions::from_env()
+        },
+    )
+}
+
+/// [`load_pid`] with both options stated.
+pub fn load_pid_with_options(
+    path: &Path,
+    options: PidImportOptions,
+) -> Result<CadDocument, String> {
+    let PidImportOptions {
+        layer_mode: mode,
+        symbol_source: source,
+    } = options;
     let parsed = PidParser::new()
         .parse_file(path)
         .map_err(|error| error.to_string())?;
@@ -495,6 +644,12 @@ pub fn load_pid_with_layer_mode(path: &Path, mode: PidLayerMode) -> Result<CadDo
     }
 
     let mut library = discover_symbol_library(path);
+    if source == PidSymbolSource::Library {
+        log::info!(
+            "{}: {SYMBOL_SOURCE_ENV}=library, symbol placements draw the library body first and the drawing's own cached body only where the library has none",
+            path.display()
+        );
+    }
 
     // Line width and colour are the drawing's own, read from its style table:
     // each geometry record names a style id, and that record carries a width
@@ -611,7 +766,7 @@ pub fn load_pid_with_layer_mode(path: &Path, mode: PidLayerMode) -> Result<CadDo
     let mut decoded = 0usize;
     let mut drawn = 0usize;
     let mut lettering_on_fallback = 0usize;
-    let mut embedded_bodies_drawn = 0usize;
+    let mut symbol_bodies = SymbolBodies::default();
     // Placements whose entities carry `driving=`; see `ImportSummary`.
     let mut parametric_placements = 0usize;
     let mut sheet_layer_distribution: BTreeMap<(String, u32, Option<String>), usize> =
@@ -637,15 +792,14 @@ pub fn load_pid_with_layer_mode(path: &Path, mode: PidLayerMode) -> Result<CadDo
         let style_name = style_name_for(&style_names, entity, symbology);
         let line_work = style_name.and_then(discipline_layer);
         let line_work = line_work.as_deref().unwrap_or(LAYER_GEOMETRY);
-        // The body the drawing itself carries for a placement, for when the
-        // library has none. See `build_entities`.
-        let embedded_body = match &entity.kind {
+        // The body the drawing itself caches for a placement: what it draws
+        // by default, and what the library stands in for when the file
+        // carries none. See `build_entities`.
+        let cached_body = match &entity.kind {
             PidGraphicKind::SymbolInstance {
                 definition: Some(definition),
                 ..
-            } => geometry
-                .symbol_definition(*definition)
-                .map(|body| body.primitives.as_slice()),
+            } => geometry.symbol_definition(*definition),
             _ => None,
         };
         let built = match entity.confidence {
@@ -653,12 +807,15 @@ pub fn load_pid_with_layer_mode(path: &Path, mode: PidLayerMode) -> Result<CadDo
                 Some(fill) => build_fill(&entity.kind, fill, projection),
                 None => build_entities(
                     &entity.kind,
-                    library.as_mut(),
-                    embedded_body,
+                    BodySources {
+                        cached: cached_body,
+                        library: library.as_mut(),
+                        source,
+                    },
                     projection,
                     symbology,
                     line_work,
-                    &mut embedded_bodies_drawn,
+                    &mut symbol_bodies,
                 ),
             },
             PidGeometryConfidence::Inferred => build_inferred(&entity.kind, projection),
@@ -715,7 +872,7 @@ pub fn load_pid_with_layer_mode(path: &Path, mode: PidLayerMode) -> Result<CadDo
         // A placement's size on this sheet and its template's library
         // defaults, the same on every entity it drew. See
         // `PlacementMeasures`.
-        let measures = PlacementMeasures::of(&entity.kind, &geometry, projection, &built);
+        let measures = PlacementMeasures::of(&entity.kind, &geometry, source, projection, &built);
         if measures.as_ref().is_some_and(|m| m.driving.is_some()) {
             parametric_placements += 1;
         }
@@ -822,7 +979,7 @@ pub fn load_pid_with_layer_mode(path: &Path, mode: PidLayerMode) -> Result<CadDo
         library.as_ref(),
         drawn,
         lettering_on_fallback,
-        embedded_bodies_drawn,
+        symbol_bodies,
         &sheet_layer_distribution,
     );
     draw_page_border(&mut doc, page_mm);
@@ -883,6 +1040,9 @@ pub fn load_pid_with_layer_mode(path: &Path, mode: PidLayerMode) -> Result<CadDo
                     .filter(|body| !body.dimensions.is_empty())
                     .count(),
                 parametric_placements,
+                cache_bodies: symbol_bodies.cache,
+                library_bodies: symbol_bodies.library,
+                hidden_strokes_skipped: symbol_bodies.hidden_strokes_skipped,
             },
         );
     doc.source_path = Some(path.to_string_lossy().into_owned());
@@ -1052,17 +1212,21 @@ fn report_import(
     library: Option<&SymbolLibrary>,
     drawn: usize,
     lettering_on_fallback: usize,
-    embedded_bodies_drawn: usize,
+    symbol_bodies: SymbolBodies,
     sheet_layer_distribution: &BTreeMap<(String, u32, Option<String>), usize>,
 ) {
-    // Placements the library could not supply a body for, drawn from the
-    // copy the drawing carries inside itself instead. Information rather
-    // than a warning: the body is the drawing's own, and it is the same
-    // body the library would have drawn.
-    if embedded_bodies_drawn > 0 {
+    // Where the symbol bodies came from, and how many cached strokes the
+    // file itself switches off were left out (plan 2026-09-19, P-D2).
+    // Information rather than a warning: by default the cached body is the
+    // one SmartPlant placed, and the strokes left out are ones its screen
+    // does not show either.
+    if symbol_bodies.cache + symbol_bodies.library > 0 {
         log::info!(
-            "{}: {embedded_bodies_drawn} symbol placement(s) drew the body the drawing carries in its own definition cache, the library having none for them",
-            path.display()
+            "{}: {} symbol placement(s) drew the body the drawing caches for them and {} the library's; {} cached stroke(s) on switched-off symbol layers were left undrawn",
+            path.display(),
+            symbol_bodies.cache,
+            symbol_bodies.library,
+            symbol_bodies.hidden_strokes_skipped
         );
     }
     for warning in &geometry.warnings {
@@ -1158,9 +1322,30 @@ fn report_import(
         );
     }
 
-    let Some(library) = library else {
+    // A marker dot is a placement neither body reached: the drawing caches
+    // nothing drawable for it and the library has no `.sym` for it (or was
+    // not found). On the corpus every placement has a cached body, so this
+    // is the line that says why a dot appeared when one does.
+    if symbol_bodies.markers > 0 {
         log::warn!(
-            "{}: no symbol library found; every symbol is drawn as a marker. Set {SYMBOL_LIBRARY_ENV} to a local copy of the project's reference-data Symbols share.",
+            "{}: {} symbol placement(s) drew as a marker dot, the drawing caching no drawable body for them and the library having none{}",
+            path.display(),
+            symbol_bodies.markers,
+            if library.is_none() {
+                format!(
+                    ". Set {SYMBOL_LIBRARY_ENV} to a local copy of the project's reference-data Symbols share"
+                )
+            } else {
+                String::new()
+            }
+        );
+    }
+    // The library is the stand-in for a placement the drawing caches no body
+    // for, so its absence is information: the bodies on screen are the
+    // drawing's own.
+    let Some(library) = library else {
+        log::info!(
+            "{}: no symbol library found; placements draw the body the drawing caches for them, and a marker where it caches none",
             path.display()
         );
         return;
@@ -1169,8 +1354,8 @@ fn report_import(
     if missing.is_empty() {
         return;
     }
-    log::warn!(
-        "{}: {} of {} symbol(s) are not in the library at {:?}; they are drawn as markers. First missing: {}",
+    log::info!(
+        "{}: {} of {} symbol(s) looked up are not in the library at {:?}; the drawing's own cached body stands in where it has one. First missing: {}",
         path.display(),
         missing.len(),
         library.lookups(),
@@ -1286,12 +1471,15 @@ struct PlacementMeasures {
     /// `<W>x<H>`, millimetres to two places: the rectangle the placement's
     /// body covers on the sheet, rotation, scale and mirror applied. Measured
     /// on the body the drawing itself caches for the placement -- the
-    /// instance as SmartPlant last drew it -- even when the library's `.sym`
-    /// is what this import put on screen, since the library body is the
-    /// template's shape and the question is this drawing's. A placement the
-    /// drawing carries no body for is measured on what was drawn instead,
-    /// which is the library body or the marker dot. Every placement writes
-    /// it (K-D3).
+    /// instance as SmartPlant last drew it -- over the strokes the
+    /// [`PidSymbolSource`] draws of it, so by default it is the size of the
+    /// very strokes on screen (plan 2026-09-19, P-D7: ` Line2` reads
+    /// `25.40x0.00` once its construction tick on a switched-off layer is
+    /// left out), and under `Library` the whole cached body as K2 measured
+    /// it, though the library's `.sym` is then what is on screen. A
+    /// placement the drawing carries no drawable body for is measured on
+    /// what was drawn instead, which is the library body or the marker dot.
+    /// Every placement writes it (K-D3).
     extent: Option<String>,
     /// `<name>:<mm>;<name>:<mm>;…`, two places, in the template's on-disk
     /// order: the named driving dimensions of the library template the
@@ -1308,6 +1496,7 @@ impl PlacementMeasures {
     fn of(
         kind: &PidGraphicKind,
         geometry: &NormalizedPidGeometry,
+        source: PidSymbolSource,
         projection: Projection,
         drawn: &[EntityType],
     ) -> Option<Self> {
@@ -1332,8 +1521,9 @@ impl PlacementMeasures {
             .filter(|body| !body.primitives.is_empty());
         let extent = cached
             .and_then(|body| {
-                body.primitives
-                    .iter()
+                source
+                    .strokes(body)
+                    .into_iter()
                     .filter_map(|primitive| shape_primitive(primitive, &placement))
                     .filter_map(|entity| stroke_extent(&entity))
                     .reduce(union_extent)
@@ -1990,12 +2180,11 @@ fn build_dash_linetype(name: &str, dash: &DashPattern) -> LineType {
 /// answers "which layer is this line on".
 fn build_entities(
     kind: &PidGraphicKind,
-    library: Option<&mut SymbolLibrary>,
-    embedded_body: Option<&[SymbolPrimitive]>,
+    bodies: BodySources<'_>,
     projection: Projection,
     symbology: Option<&ResolvedLineStyle>,
     line_work: &str,
-    embedded_bodies_drawn: &mut usize,
+    symbol_bodies: &mut SymbolBodies,
 ) -> Vec<EntityType> {
     match kind {
         PidGraphicKind::Line { start, end } => {
@@ -2032,9 +2221,14 @@ fn build_entities(
             let mut arc = acadrust::entities::Arc::new();
             arc.center = projection.point(center);
             arc.radius = projection.mm(*radius);
-            // Radians on both sides -- see the angle-unit note by the layer constants.
-            arc.start_angle = *start_angle;
-            arc.end_angle = *end_angle;
+            // Radians on both sides -- see the angle-unit note by the layer
+            // constants. The file's arc runs clockwise from start to end and
+            // a DXF arc counter-clockwise, so the ends swap (see
+            // `shape_primitive`); no sheet of the corpus carries an arc of
+            // its own, so this arm follows the record's convention rather
+            // than a measured case.
+            arc.start_angle = *end_angle;
+            arc.end_angle = *start_angle;
             arc.common.layer = line_work.to_string();
             vec![EntityType::Arc(arc)]
         }
@@ -2073,46 +2267,45 @@ fn build_entities(
                 scale: *scale,
                 projection,
             };
-            let body = library
-                .zip(symbol_path.as_deref())
-                .and_then(|(library, path)| library.resolve(path))
-                .filter(|body| !body.primitives.is_empty())
-                .map(|body| {
-                    body.primitives
-                        .iter()
-                        .filter_map(|primitive| place_primitive(primitive, &placement))
-                        .collect::<Vec<_>>()
-                });
-
-            // Without a library body, the drawing's own copy of the
-            // definition. A `.pid` caches every symbol it places inside
-            // itself -- the same records the `.sym` holds, in the same
-            // symbol-local coordinates -- and `pid-parse` hands that body over
-            // keyed by the placement's own definition reference. It carries no
-            // stroke style of its own; `apply_symbology` repaints the body in
-            // the placement's style afterwards, exactly as it does a library
-            // body, so the two routes end up in the same colour and width.
-            // Measured in pid-parse's `docs/analysis/
+            // Two bodies can answer for a placement, and the source says
+            // which is asked first (plan 2026-09-19, P-D1 / P-D3). By
+            // default the drawing's own: a `.pid` caches every symbol it
+            // places inside itself, keyed by the placement's own definition
+            // reference, and that copy is the flavour SmartPlant placed and
+            // the instance as it was resized -- where the library `.sym` is
+            // the template, every sheet of it merged. The library stands in
+            // where the drawing caches nothing drawable. Under `Library` the
+            // order is the one this importer had before the plan. Either
+            // body carries no style that survives: `apply_symbology`
+            // repaints it in the placement's style afterwards, so the two
+            // routes end up in the same colour and width. Measured in
+            // pid-parse's `docs/analysis/
             // 2026-09-07-placement-tail-names-the-cached-definition.md`.
-            let body = body.or_else(|| {
-                let primitives = embedded_body?;
-                let entities: Vec<EntityType> = primitives
-                    .iter()
-                    .filter_map(|primitive| shape_primitive(primitive, &placement))
-                    .collect();
-                if entities.is_empty() {
-                    return None;
+            let symbol_path = symbol_path.as_deref();
+            let BodySources {
+                cached,
+                library,
+                source,
+            } = bodies;
+            let body = match source {
+                PidSymbolSource::Cache => {
+                    cached_body_entities(cached, source, &placement, symbol_bodies).or_else(|| {
+                        library_body_entities(library, symbol_path, &placement, symbol_bodies)
+                    })
                 }
-                *embedded_bodies_drawn += 1;
-                Some(entities)
-            });
+                PidSymbolSource::Library => {
+                    library_body_entities(library, symbol_path, &placement, symbol_bodies)
+                        .or_else(|| cached_body_entities(cached, source, &placement, symbol_bodies))
+                }
+            };
 
             // Only fall back to the marker when the body is genuinely
             // unavailable. A symbol that resolved to real geometry should not
             // also carry a dot -- that reads as a second object.
             let mut built = match body {
-                Some(entities) if !entities.is_empty() => entities,
-                _ => {
+                Some(entities) => entities,
+                None => {
+                    symbol_bodies.markers += 1;
                     let mut marker = Circle::new();
                     marker.center = projection.point(insertion);
                     marker.radius = SYMBOL_MARKER_RADIUS_MM;
@@ -2121,7 +2314,7 @@ fn build_entities(
                 }
             };
 
-            if let Some(name) = symbol_path.as_deref().and_then(symbol_name) {
+            if let Some(name) = symbol_path.and_then(symbol_name) {
                 let mut label = Text::new();
                 label.value = name;
                 label.height = SYMBOL_LABEL_HEIGHT_MM;
@@ -2461,6 +2654,71 @@ fn union_extent(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> (f64, f64, 
     (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
 }
 
+/// Where a symbol placement's body can come from: the body the drawing
+/// caches for this placement, the library, and which of the two
+/// [`build_entities`] asks first. Handed over per entity, since the cached
+/// body is the placement's own.
+struct BodySources<'a> {
+    /// The drawing's own definition for the placement, when it has one.
+    cached: Option<&'a PidSymbolDefinition>,
+    /// The library found beside the drawing, when one was.
+    library: Option<&'a mut SymbolLibrary>,
+    /// Which of the two is asked first.
+    source: PidSymbolSource,
+}
+
+/// The body the drawing caches for a placement, drawn at it: the strokes the
+/// source selects (see [`PidSymbolSource::strokes`]), or `None` when the
+/// drawing caches nothing for the placement or nothing of it draws. Tallies
+/// the body and, by default, the strokes left out for sitting on a layer the
+/// file switches off (plan 2026-09-19, P-D2) -- a count the placement earns
+/// whether or not what remains is enough to draw, since those strokes are
+/// not drawn either way.
+fn cached_body_entities(
+    body: Option<&PidSymbolDefinition>,
+    source: PidSymbolSource,
+    at: &Placement<'_>,
+    symbol_bodies: &mut SymbolBodies,
+) -> Option<Vec<EntityType>> {
+    let body = body?;
+    let strokes = source.strokes(body);
+    symbol_bodies.hidden_strokes_skipped += body.primitives.len() - strokes.len();
+    let entities: Vec<EntityType> = strokes
+        .into_iter()
+        .filter_map(|primitive| shape_primitive(primitive, at))
+        .collect();
+    if entities.is_empty() {
+        return None;
+    }
+    symbol_bodies.cache += 1;
+    Some(entities)
+}
+
+/// The library's body for a placement, drawn at it in the `.sym`'s own
+/// stroke styles (the coat [`apply_symbology`] paints over), or `None` when
+/// no library was found, the library has no `.sym` for the path, or the body
+/// draws nothing.
+fn library_body_entities(
+    library: Option<&mut SymbolLibrary>,
+    symbol_path: Option<&str>,
+    at: &Placement<'_>,
+    symbol_bodies: &mut SymbolBodies,
+) -> Option<Vec<EntityType>> {
+    let body = library
+        .zip(symbol_path)
+        .and_then(|(library, path)| library.resolve(path))?;
+    let entities: Vec<EntityType> = body
+        .primitives
+        .iter()
+        .filter_map(|primitive| place_primitive(primitive, at))
+        .collect();
+    if entities.is_empty() {
+        return None;
+    }
+    symbol_bodies.library += 1;
+    Some(entities)
+}
+
 /// Where a symbol placement puts its library body on the sheet.
 struct Placement<'a> {
     insertion: &'a PidPoint,
@@ -2575,13 +2833,20 @@ fn shape_primitive(primitive: &SymbolPrimitive, at: &Placement<'_>) -> Option<En
             if !radius.is_finite() || radius <= 0.0 {
                 return None;
             }
-            // An arc always runs counter-clockwise from start to end, so a
-            // mirrored placement has to swap the ends as well as reflect the
-            // angles -- otherwise the arc is drawn as its own complement.
+            // The file's arc runs **clockwise** from its start angle to its
+            // end angle (pid-parse `docs/analysis/2026-09-19-igarc2d-sweeps-
+            // clockwise-from-start-to-end.md`: the Manifold's caps bulge out
+            // of its shell, to where its construction axes end, only read
+            // that way), and a DXF arc always runs counter-clockwise from
+            // start to end -- so the same arc is drawn from the file's end
+            // angle to its start angle. A mirrored placement reverses the
+            // sense once more and reflects the angles, which lands it back
+            // on the file's own order. Either way round the other, and the
+            // arc is drawn as its own complement.
             let (start_angle, end_angle) = if at.mirrored() {
-                (at.rotation - end_angle, at.rotation - start_angle)
+                (at.rotation - start_angle, at.rotation - end_angle)
             } else {
-                (at.rotation + start_angle, at.rotation + end_angle)
+                (at.rotation + end_angle, at.rotation + start_angle)
             };
             let mut arc = acadrust::entities::Arc::new();
             arc.center = at.apply(center.0, center.1);
@@ -2919,6 +3184,129 @@ mod tests {
         assert_eq!(
             drawn_extent(&EntityType::Text(text)),
             Some((3.0, 4.0, 3.0, 4.0))
+        );
+    }
+
+    /// The default source draws a cached body's strokes on the layers the
+    /// file displays and none of the others; the `library` source draws the
+    /// body whole, as the import did before plan 2026-09-19. A stroke on a
+    /// layer the file says nothing about is drawn, and one with no layer
+    /// entry at all (a body from before the field existed) too.
+    #[test]
+    fn the_source_decides_which_cached_strokes_are_drawn() {
+        use pid_parse::{PidSymbolDefinitionRef, PidSymbolSheetLayer};
+        let line = |x: f64| SymbolPrimitive::Line {
+            start: (x, 0.0),
+            end: (x, 0.01),
+        };
+        let body = PidSymbolDefinition {
+            reference: PidSymbolDefinitionRef {
+                site: 396,
+                sheet: 113,
+            },
+            layers: vec![8, 9, 10],
+            sheet_layers: vec![
+                PidSymbolSheetLayer {
+                    oid: 8,
+                    name: Some("Default".to_string()),
+                    displayed: Some(true),
+                },
+                PidSymbolSheetLayer {
+                    oid: 9,
+                    name: Some("Construction".to_string()),
+                    displayed: Some(false),
+                },
+                PidSymbolSheetLayer {
+                    oid: 10,
+                    name: None,
+                    displayed: None,
+                },
+            ],
+            primitives: vec![line(0.0), line(0.1), line(0.2), line(0.3), line(0.4)],
+            primitive_layers: vec![8, 9, 10, 9],
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+            template: None,
+        };
+        let xs = |strokes: Vec<&SymbolPrimitive>| -> Vec<f64> {
+            strokes
+                .into_iter()
+                .map(|stroke| match stroke {
+                    SymbolPrimitive::Line { start, .. } => start.0,
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
+        assert_eq!(
+            xs(PidSymbolSource::Cache.strokes(&body)),
+            vec![0.0, 0.2, 0.4],
+            "Default on, Construction off, an unlisted layer and a stroke with no layer entry drawn"
+        );
+        assert_eq!(
+            xs(PidSymbolSource::Library.strokes(&body)),
+            vec![0.0, 0.1, 0.2, 0.3, 0.4]
+        );
+    }
+
+    /// A body's arc runs clockwise from its start angle to its end angle,
+    /// and lands on the sheet as the DXF arc that covers the same points:
+    /// the Manifold's left cap, `270° -> 90°` about a centre on the shell's
+    /// left edge, is drawn as the counter-clockwise arc `90° -> 270°`, whose
+    /// midpoint bulges left out of the shell -- and a mirrored placement,
+    /// which reverses the sense again, keeps the bulge on the outside.
+    #[test]
+    fn a_bodys_arc_is_drawn_as_the_counter_clockwise_arc_over_the_same_points() {
+        use std::f64::consts::{FRAC_PI_2, PI};
+        let insertion = PidPoint { x: 0.0, y: 0.0 };
+        let placement = |scale_y: f64| Placement {
+            insertion: &insertion,
+            rotation: 0.0,
+            scale: [1.0, scale_y],
+            projection: Projection {
+                mm_per_unit: 1000.0,
+                band: SheetBand::for_page(None),
+            },
+        };
+        let left_cap = SymbolPrimitive::Arc {
+            center: (0.04118, 0.08890),
+            radius: 0.03559,
+            start_angle: 3.0 * FRAC_PI_2,
+            end_angle: FRAC_PI_2,
+        };
+        let midpoint = |arc: &acadrust::entities::Arc| {
+            let sweep = (arc.end_angle - arc.start_angle).rem_euclid(2.0 * PI);
+            let angle = arc.start_angle + sweep / 2.0;
+            (
+                arc.center.x + arc.radius * angle.cos(),
+                arc.center.y + arc.radius * angle.sin(),
+            )
+        };
+
+        let Some(EntityType::Arc(upright)) = shape_primitive(&left_cap, &placement(1.0)) else {
+            panic!("the cap did not build");
+        };
+        assert!((upright.start_angle - FRAC_PI_2).abs() < 1e-12);
+        assert!((upright.end_angle - 3.0 * FRAC_PI_2).abs() < 1e-12);
+        let (x, y) = midpoint(&upright);
+        assert!(
+            (x - (41.18 - 35.59)).abs() < 1e-6 && (y - 88.90).abs() < 1e-6,
+            "the cap's midpoint is the shell's left edge less the radius: ({x}, {y})"
+        );
+        let cap = stroke_extent(&EntityType::Arc(upright)).expect("an arc is a stroke");
+        assert!(
+            (cap.0 - (41.18 - 35.59)).abs() < 1e-6 && (cap.2 - 41.18).abs() < 1e-6,
+            "the cap reaches from the shell's edge out to its apex: {cap:?}"
+        );
+
+        // Mirrored about x: the same cap on a body flipped upside down still
+        // bulges left, with its ends swapped top for bottom.
+        let Some(EntityType::Arc(mirrored)) = shape_primitive(&left_cap, &placement(-1.0)) else {
+            panic!("the mirrored cap did not build");
+        };
+        let (x, y) = midpoint(&mirrored);
+        assert!(
+            (x - (41.18 - 35.59)).abs() < 1e-6 && (y + 88.90).abs() < 1e-6,
+            "the mirrored cap still bulges out of the shell: ({x}, {y})"
         );
     }
 
