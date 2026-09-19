@@ -533,8 +533,10 @@ the default stays the taxonomy`；上一段会话写到一半、本段接手收�
 - **L3 最后**：选项后置、默认不切，风险隔离。**2026-09-18 结算**（OCS `d0750567`）：选项可切、默认不切；`sheet` 下槽 = 图纸图层名、
   表 = 原图全部图层含状态；消费者按 `role=`，`pid_import` 两模式 50/50。**D7 七项到此全部落地。** 本轮之后还开着的：
   J 线的 OCS 消费（D2 后半句，按 J3 结算改口径——**已排入计划
-  `2026-09-18-driving-dimensions-reach-the-panel-as-library-defaults.md`**，待门禁）、`OCS_PID_LAYER_MODE` 默认翻转（等 DXF 下游）、
-  放置实例的实际参数在文件何处（J3 开口）、taxonomy 模式下 `PID-HIDDEN` 归层的退役（随默认翻转）。
+  `2026-09-18-driving-dimensions-reach-the-panel-as-library-defaults.md`**，待门禁；**2026-09-19 该计划 K1 → K4 全部落地**：
+  pid-parse `223b26d` 名字与配对进 DTO，OCS `39398579` 面板两行「驱动尺寸（库默认）」/「本体尺寸」+ `06c95ce1` 摘要第三行——
+  D2 后半句到此结清）、`OCS_PID_LAYER_MODE` 默认翻转（等 DXF 下游）、
+  放置实例的实际参数在文件何处（J3 开口，未动）、taxonomy 模式下 `PID-HIDDEN` 归层的退役（随默认翻转）。
 - **T** 随各项收尾，不单独占期。
 
 原稿 L1 → J1 → J2 → L2 的理由是「J 的 D2 裁决与 L 的显隐初值都吃 L1」——D2 裁决只影响 J 线画不画
