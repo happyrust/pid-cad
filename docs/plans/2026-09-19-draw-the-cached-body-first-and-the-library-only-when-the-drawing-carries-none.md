@@ -11,7 +11,11 @@
 > 它就是放置点名的 `JSite<jsite_ref>` 本人——**缓存里的是 SmartPlant 实际放置的那一个 flavor**（09-07 文档）；J3——四个参数化实例
 > 的几何只在缓存里；L1——嵌套存储的图层显示状态 `SheetLayer::displayed` 已解开，缓存本体每个图元的 `sheet_layer_ref` 都能查到
 > 它在哪层、那层开不开。
-> 带 ⭕ 的决策按推荐落笔。**状态：待门禁。**
+> 带 ⭕ 的决策按推荐落笔。**2026-09-19 14:09 用户在会话（fable-5-1-33）里批准**：八条全按推荐执行，未走 Plannotator；直接开 C1。
+> **2026-09-19 C1 落地**：pid-parse `08fc95a` + `fec5d19`（同一会话）——`sheet_layers` / `primitive_layers` / `visible_primitives()`，
+> 五图棘轮钉住（见 C1 进度）。**C2 落地**：OCS `641cec3b`（会话 fable-5-1-30，接手上一会话未提交的现场）——先缓存后库、关闭层不画、
+> `OCS_PID_SYMBOL_SOURCE` 一轮、`extent=` 改量可见笔画；顺带裁出 **`igArc2d` 顺时针**（pid-parse `b6a70a7`），弧从此不再画成补弧；
+> `pid_import` 54/54 × 四种环境组合（见 C2 进度）。**C3 收口**：双仓台账齐，本计划关闭；开口见「结算」。
 
 ## 决策记录
 
@@ -23,7 +27,7 @@
 | P-D4 | 缓存本体里的文字 | 与图元同规则：在关闭层（`Label`）上的不画——语料里缓存本体的文字**全部**在关闭层上（按放置累计 0201 14 条 / 0202 22 / D06 2 / 工艺 42 / A01 0），内容是 `NULL` / `NULLNULL` 占位，外加 Drawing Description 那条 `说 明`（0201 / 0202 各 1）；`carries_a_label` 的过滤对开着的层上的文字继续适用（语料里没有）。库路径多画的 `LGM` / `LTM` / `PT` 字样随之不再出现——它们是 `.sym` 的模板字，SmartPlant 屏幕上的仪表位号来自图纸自己的文字记录，不是符号本体 | ⭕ |
 | P-D5 | 样式 | 不变：`apply_symbology` 按放置样式重涂，两条路今天就都这样（调色板测试的四个类颜色全来自放置）。缓存存储自己的 `StyleCluster` 仍不接（09-07 开口，另议） | ⭕ |
 | P-D6 | 变换 | 不变：缓存本体走同一个 `Placement::apply`（旋转 / 缩放 / 镜像）——K2 的 `extent=` 已经这样量，本轮之后画出来的与面板说的同一份几何 | ⭕ |
-| P-D7 | 与 K2 `extent=` 的关系 | `PlacementMeasures` 改量**可见**图元（P-D2 同一过滤），画出来的与面板说的从此是同一份几何。语料里只有 **` Line2` 的数字变**：它的缓存本体是 `Default` 上一条 25.4 mm 的横线加 `Construction[OFF]` 上一条 3.81 mm 的竖向刻线（右端 x = 0.12705），K2 钉的 `25.40x3.81` 是把那条关闭层刻线也量了进去，改后为 **`25.40x0.00`**（一条线的外框，高 0）——K2 测试重钉并说明；Manifold（构造短线都在轮廓之内）、Tank、Black Box 不变 | ⭕ |
+| P-D7 | 与 K2 `extent=` 的关系 | `PlacementMeasures` 改量**可见**图元（P-D2 同一过滤），画出来的与面板说的从此是同一份几何。语料里只有 **` Line2` 的数字变**：它的缓存本体是 `Default` 上一条 25.4 mm 的横线加 `Construction[OFF]` 上一条 3.81 mm 的竖向刻线（右端 x = 0.12705），K2 钉的 `25.40x3.81` 是把那条关闭层刻线也量了进去，改后为 **`25.40x0.00`**（一条线的外框，高 0）——K2 测试重钉并说明；Manifold（构造短线都在轮廓之内）、Tank、Black Box 不变。**C2 实测更正**：0201 二十个放置里 `extent=` 变的有 **11 个**，不止 ` Line2`——预估只看了四个参数化本体，而非参数化本体的伴热 / 夹套线、量表 7.57 mm 外圈、法兰短管的关闭层笔画同样伸出可见轮廓之外（Ball Valve Type 2 `8.89x6.35 → 8.89x3.81`、LG / LT 量表 `15.14x15.14 → 12.70x12.70`、Flanged Nozzle ×3 `5.08x3.18 → 3.81x2.54`、Flanged Nozzle with blind、Cap、jinchuzhan2、flame arrester breather valve）；口径不变（可见笔画就是屏幕上的），名单钉在 `the_two_symbol_sources_differ_only_in_the_body_drawn` | ⭕ |
 | P-D8 | 没有 SmartPlant 截图怎么裁 | 09-07 文档说「要拿 SmartPlant 截图裁 Ball Valve Type 1」。本计划**不等截图**：文件自身的证据（`JFlavorManager` 点名的就是缓存、显示位说明哪些不显示）已经够裁；截图若有，作 C2 的手工验收补充（Ball Valve Type 1 / Remarks / Item Note & Label 三例），有出入则回到 P-D3 的开关并登记 | ⭕ |
 
 ## 背景
@@ -119,6 +123,23 @@ primitives.len()`、每个 oid 都在 `sheet_layers` 里、`sheet_layers` 的 oi
 **风险**：`displayed` 对嵌套存储的层是否全部解得到——L1 时按存储解的 `0x0057` 应覆盖 `/JSite*`；探针里五图所有出现的层都有位，
 但棘轮要把 `None` 的层数钉成 0，出现再议。时间盒半个工作日。
 
+**进度（2026-09-19，fable-5-1-33）**：pid-parse **`08fc95a`**（DTO + 棘轮）+ **`fec5d19`**（台账）。
+
+- `PidSymbolDefinition` 加 `sheet_layers: Vec<PidSymbolSheetLayer { oid, name, displayed }>`（`layers` 每个 oid 一条、同序；名字与显示位
+  来自该存储自己的层表与 `0x0057` 视图过滤集）、`primitive_layers`（与 `primitives` 同长同序）、`visible_primitives()`
+  （`displayed != Some(false)` 的层上的图元）与 `layer_is_displayed(oid)`；加法，golden 不变，OCS 不改一行照旧编译。
+- 语料：被放置点名的 43 个本体里 **33 个**带关闭层图元（0201 15/17、0202 8/11、D06 4/6、工艺 4/7、A01 2/2），只出现在
+  `Heat Trace` / `Label` / `Jacket` / `Construction` / `Dimension`；缓存本体的文字全部在关闭层。按放置累计 整体 → 可见：0201 112 → 81、
+  0202 146 → 120、D06 40 → 32、工艺 287 → 237、A01 12 → 6。Manifold 实例可见 4 线 2 弧、` Line2` 1 线、D06 Ball Valve Type 1 6 线 1 圆、
+  工艺 Remarks 3 线。
+- 风险项「没有显示位的层」**出现了但无害**：各缓存存储自己的基 sheet（JSheet 6）上的 `Default`（oid 8，没有 `0x0057` 集管它）与 A01
+  OLE 站点 `/JSite204` 的两张 sheet——这些本体没有图元、也没有放置点名它们（0201 2 / 0202 1 / D06 2 / 工艺 2 / A01 4，钉住）。
+  棘轮没把 `None` 的层数钉成 0，钉的是这份清单。
+
+**验收结算**：棘轮 `a_cached_body_says_which_layer_each_stroke_is_on_and_which_are_hidden` 五图全钉；`parse_real_files` 131 → 132、
+`--lib` 1110、golden 不变、fmt 干净。**clippy `-D warnings` 在 HEAD 上就红**：当天装的 nightly（rustc 1.100.0-nightly 2026-09-18）把
+`map_unwrap_or` 扩到 `.map(f).unwrap_or_default()`，9 个文件 29 处旧代码中招，本项一处没碰——留一条清理提交（pid-parse task_plan 已记）。
+
 ### C2 · OCS 先画缓存、关闭层不画、库退为补位
 
 **现状**：见「OCS 现在有的」。
@@ -148,6 +169,44 @@ primitives.len()`、每个 oid 都在 `sheet_layers` 里、`sheet_layers` 的 oi
 **验收**：上述测试全绿，四种环境组合各 5x/5x；手工：打开 0201 看 Manifold 是 172 × 71 的拉长罐、无轴线短线；打开 工艺 看 Remarks
 是 35 个小标记而非云线；D06 球阀只有一圈；（有截图则对三例）。时间盒一个工作日。
 
+**进度（2026-09-19，fable-5-1-30，接手 fable-5-1-33 的未提交现场）**：OCS **`641cec3b`**（代码 + 测试 + user-guide）；pid-parse **`b6a70a7`**（弧向）。
+
+- `PidSymbolSource { Cache（默认）, Library }` + `SYMBOL_SOURCE_ENV = OCS_PID_SYMBOL_SOURCE`（读法 / 日志 / 不认识按默认，与 `PidLayerMode`
+  同款）；`PidImportOptions { layer_mode, symbol_source }` + `load_pid_with_options`，`load_pid_with_layer_mode` 保留（source 仍读环境）。
+- `build_entities` 的 `SymbolInstance` 分支改序：`cached_body_entities`（`source.strokes(body)`：Cache 下 `visible_primitives()`、Library 下
+  整个本体）→ `library_body_entities` → 标记圆；Library 下反序。三样东西装进 `BodySources { cached, library, source }` 一个参数进去。
+  计数 `SymbolBodies { cache, library, markers, hidden_strokes_skipped }`，`report_import` 一行 info 说三件事；「没找到库」由 warn 降为
+  info（库只是补位），标记圆有专门一行 warn。`ImportSummary` 加 `cache_bodies` / `library_bodies` / `hidden_strokes_skipped`，只进日志，
+  命令行不加行。
+- `PlacementMeasures::of` 改量 `source.strokes(body)`——屏幕上的与面板说的是同一份笔画。
+- **弧向**（计划外，C2 途中露出）：缓存 Manifold 实例画上屏幕后端帽向内、`extent=` 从 172.21 掉到 101.03——`igArc2d` 的两个角是绝对角
+  没错，但弧从 `start` **顺时针**走到 `end`，`symbol_library.rs` 注释里的「逆时针」是假设。本体自己的 `Construction[OFF]` 轴线指向
+  顺时针顶点、`Remarks.sym` 云线凸弧朝外，三处一致；尾字节 `+58` 不是方向位。pid-parse `b6a70a7`：改注释（字段值不动）+ 棘轮
+  `a_cached_arc_sweeps_clockwise_from_its_start_angle_to_its_end_angle`（`parse_real_files` 132 → 133）+ 分析文档
+  `2026-09-19-igarc2d-sweeps-clockwise-from-start-to-end.md`；OCS `shape_primitive` 对调两角（镜像放置反过来，落回文件原序）、图纸自身
+  `PidGraphicKind::Arc` 同样对调（语料零条，按同一记录同一读法）。此前库画的 Manifold 模板（228.6 × 40.64）两端帽也是凹口——没人看出来
+  是因为它从没和任何逐数钉住的外框对过。
+- 测试（`tests/pid_import.rs` 51 → 54）：**新** `the_symbol_source_defaults_to_the_cache_and_names_its_two_sources`；
+  `a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers`（四图 `role=symbol` 实体恰 **81 / 120 / 32 / 237**、标签
+  20 / 23 / 6 / 58、无文字无标记圆、摘要三数 (放置数, 0, 31 / 26 / 8 / 50)；Manifold 4 线 2 弧、71.18 × 2 + 101.03 × 2、弧 r 35.59 且
+  中点在壳外、外框 `172.21x71.18` == `extent=`；D06 Tank 6 线 `122.12x82.84`、圆半径恰 [1.27, 1.59, 6.35]；工艺 Remarks 35 处、符号层无弧）；
+  `the_two_symbol_sources_differ_only_in_the_body_drawn`（非 symbol 实体两值下逐个相同、标签与 `driving=` 相同、`extent=` 差 11 个的名单、
+  81 vs 123、摘要 (20, 0, 31) / (0, 20, 0)、库下 188 mm 两条与 `LGM` / `LTM` / `说 明`）。**重钉**：调色板 11 / 28 / 29 / 52 →
+  **9 / 9 / 25 / 38**、内部文字 3 → 0；`the_vessel…` 188 → **101.03**；`a_symbols_lettering_follows…` 改在 library 源上钉颜色 + cache 下
+  符号层零文字、标签仍在；`a_symbols_bspline_lip…` 两路在 library 源下比、再钉 cache 画出同一条 S1；`a_placement_without_a_library_body…`
+  改为「有库无库**相同**」（圆半径 [1.27, 1.59, 6.35]、笔画集合相等）+ library 源下旧数字 [1.27, 1.59, 1.59, 6.35, 7.57] /
+  [1.27, 1.59, 6.35, 7.57]；K2 ` Line2` `25.40x3.81` → `25.40x0.00`。**不用动**：图纸图层绝对数 11 / 16（隐藏图纸图层上没有符号放置）、
+  ElecTraceLine 落在管线上、标签挂点、`the_two_layer_modes_agree…`。`pid.rs` 单测 `the_source_decides_which_cached_strokes_are_drawn`、
+  `a_bodys_arc_is_drawn_as_the_counter_clockwise_arc_over_the_same_points`。测试里加 `SUMMARY_MAILBOX` 互斥：摘要邮箱按路径键、后写覆盖，
+  三个读摘要的测试串行（同图另一源的并行导入恰在「导入完 → 取走」的微秒窗口里落地的概率极小，未另做隔离）。
+
+**验收结算**：`pid_import` **54/54 × 四种组合**（`OCS_PID_LAYER_MODE` ∈ {taxonomy, sheet} × `OCS_PID_SYMBOL_SOURCE` ∈ {cache, library}）；
+`--lib` 的 `io::pid::tests` 8/8、`i18n` 目录守护全绿（本轮无新词条）；`pid.rs` rustfmt 干净、`pid_import.rs` 只剩 HEAD 就有的那一处
+（123 → 174 行，同一 hunk）；`clippy --lib --test pid_import` 两文件零告警。`--lib` 全跑 1154 通过、3 失败——`pidlegend::an_svg_plot_groups…`
+（`MissingGlyphs`，字体）、`plugin_manager::certificate_errors…`（系统语言中文）、`svg_export::a_page_style_table…`——三处都不碰 `io::pid`，
+是环境，未在 HEAD 上复跑。**未验证**：手工打开看 Manifold / Remarks / 球阀（GUI 未开）——形由 `a_placement_draws_the_body…` 逐笔钉住；
+SmartPlant 截图仍没有（P-D8）。
+
 ### C3 · 台账（双仓）
 
 - user-guide `.pid` 一节：「符号从哪来」一段——先缓存后库、关闭层不画、`OCS_PID_SYMBOL_SOURCE` 一句；「符号的两个尺寸」段末
@@ -156,6 +215,39 @@ primitives.len()`、每个 oid 都在 `sheet_layers` 里、`sheet_layers` 的 oi
   第一条标已裁（本计划）。
 - 本计划头部补记 + 进度 + 结算；2026-09-18 计划结算段第一条开口标已排入本计划。
 - `remember`：缓存优先、关闭层不画、开关名。
+
+**进度（2026-09-19，fable-5-1-30）**：user-guide「符号库」段改成「符号从哪来」（先缓存后库、关闭层不画、`OCS_PID_SYMBOL_SOURCE=library`
+一轮、日志一行），「符号的两个尺寸」的括号改说「量的就是屏幕上画出的那些笔画」（随 `641cec3b`）；那句「与屏幕上画的库本体可能不一致」K2 时
+就没写进 guide，无可删。pid-parse：CHANGELOG（C1 `fec5d19`、弧向 `b6a70a7`）、guide §5 嵌套存储一节「图元带层与显示位」（`fec5d19`）+
+`igArc2d` 布局注（`b6a70a7`）、`task_plan.md` 指针、09-07 placement-tail 文档「还没做的」第一条标已裁（`b6a70a7`）。本计划头部 /
+P-D7 更正 / 三项进度 / 结算 / 门禁记录（本提交）；2026-09-18 计划结算段第一条开口由「待门禁」改「已落地」（本提交）；`remember`
+`mem-99`（缓存优先、关闭层不画、开关名、`extent=` 量可见笔画）与 `mem-101`（`igArc2d` 顺时针及其判据）。
+
+---
+
+## 结算（2026-09-19）
+
+**三项齐。** 目标那句话兑现到什么程度：打开 0201，Manifold 是 172.21 × 71.18 的拉长罐、两端帽向外凸、没有轴线短线；打开工艺，35 处
+Remarks 是 1.27 mm 的小标记而不是 27 mm 的云线；D06 球阀只有一圈；符号层上一个 `NULL` 也没有；每个放置画出的外框就是面板「本体尺寸」
+说的那个数——同一份几何。库只在文件没缓存时补位（语料里没有这样的放置）；`OCS_PID_SYMBOL_SOURCE=library` 回到旧图一轮。
+
+| 项 | 提交 | 验收 |
+|---|---|---|
+| C1 | pid-parse `08fc95a` + `fec5d19` | 五图棘轮；`parse_real_files` 131 → 132、`--lib` 1110、golden 不变、fmt 干净 |
+| C2 | OCS `641cec3b`；pid-parse `b6a70a7`（弧向） | `pid_import` 54/54 × 四种组合；四图 81 / 120 / 32 / 237 逐数；`extent=` == 画出的外框；弧向棘轮 `parse_real_files` 132 → 133 |
+| C3 | 本提交 + 上列 | 双仓台账齐 |
+
+**与计划字面不同的三处**（都已写进各项进度）：P-D7 `extent=` 变的是 0201 的 11 个放置而不只 ` Line2`；`igArc2d` 弧向是计划外的发现，
+pid-parse 多一条提交、OCS 对调两角；C1 风险项「没有显示位的层」出现了，但只在没有图元、无人点名的本体上。
+
+**本轮之后还开着的：**
+
+- `OCS_PID_SYMBOL_SOURCE=library` 的退役（下一轮没人用就删；连带 `a_placement_without_a_library_body…` 后半段、
+  `the_two_symbol_sources_differ…`、`a_symbols_lettering_follows…` 里靠 library 源钉的旧数字一起删）。
+- 缓存存储自己的 `StyleCluster`（09-07 开口，登记不做）。
+- pid-parse nightly clippy `map_unwrap_or` 29 处旧代码的清理提交（task_plan 已记）。
+- SmartPlant 截图对 Ball Valve Type 1 / Remarks / Item Note & Label 三例的手工复核（P-D8：不等它，来了补）。
+- OCS `--lib` 全跑的三处环境失败（字体 glyph / 系统语言）与本计划无关，另议。
 
 ---
 
@@ -184,4 +276,9 @@ primitives.len()`、每个 oid 都在 `sheet_layers` 里、`sheet_layers` 的 oi
 
 ## 门禁记录
 
-- 2026-09-19：初稿（本提交），待门禁。
+- 2026-09-19：初稿（OCS `291c284e`），待门禁。
+- 2026-09-19 14:09：用户在会话（fable-5-1-33）里批准八条决策，全按推荐；未走 Plannotator。
+- 2026-09-19：C1 落地（pid-parse `08fc95a` / `fec5d19`，同一会话）；风险项「没有显示位的层」出现在无图元、无人点名的本体上，钉成清单。
+- 2026-09-19：C2 途中裁出 `igArc2d` 顺时针（pid-parse `b6a70a7`，会话 fable-5-1-30，接手上一会话未提交的现场）。
+- 2026-09-19：C2 落地（OCS `641cec3b`，同一会话）；P-D7 数字更正（11 个放置）；`pid_import` 54/54 × 四种组合。
+- 2026-09-19：C3 收口（本提交，同一会话）——user-guide、双仓台账、2026-09-18 计划开口改标、`remember`；三项齐，计划关闭。

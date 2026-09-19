@@ -230,7 +230,9 @@ K2 `extent=` 量缓存实例本体而不是 `built`（库在场时 `built` 是�
 - **缓存 vs 库的显示优先级**（08-31 起的老开口，本轮让它可见了）：库在场时屏幕画的是库 `.sym` 的模板形（Manifold 228.6 × 40.64），
   面板「本体尺寸」说的是缓存实例（172.21 × 71.18），两者不一致——按 J3 的事实，缓存才是 SmartPlant 画的那个实例，
   值得单开一项定「有缓存本体时优先画缓存」，连带 `a_symbol_body_draws_in_the_style_its_placement_names` 那类按库本体钉的调色板数字要重钉。
-  **2026-09-19 已排入计划 `2026-09-19-draw-the-cached-body-first-and-the-library-only-when-the-drawing-carries-none.md`**（待门禁）。
+  **2026-09-19 已排入计划 `2026-09-19-draw-the-cached-body-first-and-the-library-only-when-the-drawing-carries-none.md`**，同日批准并落地
+  （pid-parse `08fc95a` / `b6a70a7`、OCS `641cec3b`）：有缓存本体就画缓存、关闭层不画，`extent=` 改量画出来的可见笔画——屏幕与面板从此同一份几何；
+  顺带发现 `igArc2d` 顺时针，此前库画的 Manifold 端帽是向内的。
 - 放置实例的实际参数在文件何处（J3 开口，K-D7 不找）；找到那天面板多一行「实例参数」。
 - `OCS_PID_LAYER_MODE` 默认翻转与 taxonomy 下 `PID-HIDDEN` 归层的退役（09-07 计划遗留，与本计划无关）。
 - 手工点选与命令行三行的实际显示没有开 GUI 看过——面板两行由 `properties.rs` 单测钉住，第三行走与前两行同一条 `tf!`。
