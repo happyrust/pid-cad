@@ -13,7 +13,7 @@
 > 带 ⭕ 的决策按推荐落笔。**2026-09-18 22:58 用户在会话里批准**：七条按推荐执行，唯 **K-D3 改口径**——「本体尺寸」所有符号
 > 放置都写都显示，「驱动尺寸（库默认）」限参数化的（决策表与 K2 已改）。未走 Plannotator；直接开 K1。
 > **2026-09-19 K1 落地**：pid-parse `223b26d` + `5d64d7c`，5/5 配上、15/18 有名（见 K1 进度与结算）。**K2 落地**：OCS `39398579`，
-> `extent=` 量缓存实例本体、`driving=` 限配上模板的放置，`pid_import` 51/51 × 两模式（见 K2 进度与结算）。下一项 K3。
+> `extent=` 量缓存实例本体、`driving=` 限配上模板的放置，`pid_import` 51/51 × 两模式（见 K2 进度与结算）。**K3 落地**：OCS `06c95ce1`，摘要第三行全零不推，0201 (4, 2, 2)（见 K3 进度与结算）。下一项 K4。
 
 ## 决策记录
 
@@ -177,6 +177,22 @@ Right 114.3`、` Line2` 一变量一有名尺寸、`0E$1` ⇒ 尺寸值 = 变量
 **验收**：`the_import_leaves_a_summary_the_app_can_show` 加三个数的断言（0201：4 / 2 / 2）；0202 三个数为零；
 计数与 K2 写出的 `driving=` 键数一致（每个配上对的放置恰一组）。
 
+**进度（2026-09-19，fable-5-1-17）**：OCS **`06c95ce1`**（代码 + 21 本词条 + user-guide）。
+
+- `ImportSummary` 加 `driving_dimensions` / `template_bodies` / `parametric_placements`：前两个数**按缓存本体算**（模板没有任何放置
+  画它，实体循环碰不到），`driving_dimensions` 只数 `name.is_some()` 的；第三个在实体循环里数「`PlacementMeasures.driving` 为
+  `Some`」的放置——与 K2 写出的 `driving=` 组数按定义一致。
+- `file.rs` 第三行 `P&ID driving dimensions: {dims} on {templates} template bodies; {placements} placed parametric bodies carry
+  library defaults`，三数之和为零不推；词条进 `locale_catalog`（`common.pid-driving-dimensions-on-template-bodies-placed-carry-
+  library-defaults`）+ 21 本 ftl（三个 `__ocs_fmt_N__` 占位按模板出现序）。
+- `the_import_leaves_a_summary_the_app_can_show` 扩成四图：0201 **(4, 2, 2)**、D06 **(4, 1, 1)**（无名的 `0E($1+$2)/10` 出参不计）、
+  工艺 **(4, 1, 2)**（一个模板放置两次——数的是放置不是本体）、0202 **(0, 0, 0)**；每图 `parametric_placements` = 带 `driving=` 的
+  符号名标签数。user-guide「导入汇总」加第三行的说明。
+
+**验收结算**：`pid_import` 51/51 × 两种 `OCS_PID_LAYER_MODE`；i18n 目录守护全绿；`file.rs` 本就不 fmt-clean（125 处旧账），
+本次改动前后 hunk 数相同、未新增；`pid.rs` / `locale_catalog.rs` fmt 干净；`clippy --lib --test pid_import` 触碰处零告警。
+**未验证**：命令行那一行的实际显示（GUI 未开）——推与不推的条件在代码里，格式化路径与前两行同一条 `tf!`。
+
 ### K4 · 台账（双仓）
 
 - user-guide `.pid` 一节：特性面板那句的括号里加「驱动尺寸（库默认）」「本体尺寸」两项并说明**前者是符号库默认值不是
@@ -218,3 +234,4 @@ pid-parse 每项完成后回跑 OCS `pid_import`（两种模式）。总时间�
   `OCS_PID_LAYER_MODE` 下各 50/50。
 - 2026-09-19：K2 落地（OCS `39398579`，同一会话）；`extent=` 的量法按 K-D1 定义改为量缓存实例本体（见 K2 进度）；
   `pid_import` 51/51 × 两模式。
+- 2026-09-19：K3 落地（OCS `06c95ce1`，同一会话）；四图三数钉住，`pid_import` 51/51 × 两模式。
