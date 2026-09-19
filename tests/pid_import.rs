@@ -1834,11 +1834,13 @@ fn role_and_class_are_separate_keys_with_disjoint_vocabularies() {
     let Some(doc) = import("export-test/publish-data/DWG-0202GP06-01/DWG-0202GP06-01.pid") else {
         return;
     };
-    const KEYS: [&str; 8] = [
+    const KEYS: [&str; 10] = [
         "sheet_layer",
         "sheet_layer_oid",
         "role",
         "style",
+        "extent",
+        "driving",
         "class",
         "label",
         "oid",
@@ -3048,6 +3050,204 @@ fn sheet_mode_files_every_entity_under_its_authored_layer_and_declares_the_drawi
     }
 }
 
+/// Every symbol placement says how big this drawing draws it, and a placed
+/// parametric symbol says what its library template was authored with -- two
+/// keys on every entity of the placement, body strokes and name alike, for
+/// the properties panel's two rows (plan 2026-09-18, K2).
+///
+/// `extent=` is the rectangle the drawing's own cached body for the
+/// placement covers on the sheet, so it is the instance as SmartPlant drew
+/// it even when the import put the library `.sym` on screen: `DWG-0201`'s
+/// Parametric Manifold is 172.21 x 71.18 here although the library body this
+/// suite draws is 228.6 x 40.64. `driving=` is the template's named driving
+/// dimensions, in the template's order -- and only where pid-parse paired
+/// the cached body with a template (K-D3): a valve has an extent and no
+/// defaults, and `DWG-0202`, which places no parametric symbol, has no
+/// `driving=` anywhere. Both keys ride DWG and DXF like the rest of the
+/// record.
+#[test]
+fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
+    struct Parametric {
+        /// The name lettered beside the placement, `role=symbol-label`.
+        label: &'static str,
+        driving: &'static str,
+        extent: &'static str,
+    }
+    const EXPECTED: &[(&str, &[Parametric])] = &[
+        (
+            "DWG-0201GP06-01.pid",
+            &[
+                Parametric {
+                    label: "Parametric Manifold",
+                    driving: "Top:20.32;Left:114.30;Right:114.30",
+                    extent: "172.21x71.18",
+                },
+                Parametric {
+                    label: "Line2",
+                    driving: "Right:25.40",
+                    extent: "25.40x3.81",
+                },
+            ],
+        ),
+        ("DWG-0202GP06-01.pid", &[]),
+        (
+            "D06.pid",
+            &[Parametric {
+                label: "Cone Roof Parametric Tank",
+                driving: "Bottom:35.56;Left:63.50;Right:63.50;Top:35.56",
+                extent: "122.12x82.84",
+            }],
+        ),
+        (
+            "工艺管道及仪表流程-1.pid",
+            &[Parametric {
+                label: "Parametric Black Box",
+                driving: "Top:12.70;Right:12.70;Bottom:12.70;Left:12.70",
+                extent: "126.63x90.77",
+            }],
+        ),
+    ];
+    let is_extent = |value: &str| {
+        value.split_once('x').is_some_and(|(w, h)| {
+            [w, h].iter().all(|n| {
+                n.parse::<f64>().is_ok_and(|v| v >= 0.0)
+                    && n.rsplit_once('.').is_some_and(|(_, d)| d.len() == 2)
+            })
+        })
+    };
+    let label_of = |entity: &EntityType| -> Option<String> {
+        match entity {
+            EntityType::Text(text)
+                if pid_value(entity, "role").as_deref() == Some("symbol-label") =>
+            {
+                Some(text.value.clone())
+            }
+            _ => None,
+        }
+    };
+
+    for (name, parametric) in EXPECTED {
+        let Some(doc) = import(name) else {
+            continue;
+        };
+
+        // 1. Every entity of a placement has an extent in the shape the
+        //    panel formats, and nothing else has either key.
+        let mut placements = 0usize;
+        for entity in doc.entities() {
+            let role = pid_value(entity, "role").unwrap_or_default();
+            let extent = pid_value(entity, "extent");
+            let driving = pid_value(entity, "driving");
+            if role == "symbol" || role == "symbol-label" {
+                placements += 1;
+                let extent = extent
+                    .unwrap_or_else(|| panic!("{name}: a role={role} entity states no extent="));
+                assert!(
+                    is_extent(&extent),
+                    "{name}: extent={extent} is not <W>x<H> to two places"
+                );
+            } else {
+                assert!(
+                    extent.is_none() && driving.is_none(),
+                    "{name}: a role={role} entity carries a placement's measures"
+                );
+            }
+        }
+        assert!(placements > 0, "{name}: no placement drawn");
+
+        // 2. Exactly the expected library defaults, each on the placement's
+        //    name and on at least one of its strokes with the same extent.
+        let defaults: std::collections::BTreeSet<String> = pid_records_with(&doc, "driving")
+            .filter_map(|e| pid_value(e, "driving"))
+            .collect();
+        let expected_defaults: std::collections::BTreeSet<String> =
+            parametric.iter().map(|p| p.driving.to_string()).collect();
+        assert_eq!(
+            defaults, expected_defaults,
+            "{name}: the driving= values written"
+        );
+        for expected in *parametric {
+            let labels: Vec<&EntityType> = doc
+                .entities()
+                .filter(|entity| label_of(entity).as_deref() == Some(expected.label))
+                .collect();
+            assert!(
+                !labels.is_empty(),
+                "{name}: no placement is lettered {:?}",
+                expected.label
+            );
+            for label in &labels {
+                assert_eq!(
+                    pid_value(label, "driving").as_deref(),
+                    Some(expected.driving),
+                    "{name} {:?}: library defaults on the name",
+                    expected.label
+                );
+                assert_eq!(
+                    pid_value(label, "extent").as_deref(),
+                    Some(expected.extent),
+                    "{name} {:?}: extent on the name",
+                    expected.label
+                );
+            }
+            let strokes = of_role(&doc, "symbol")
+                .filter(|entity| {
+                    pid_value(entity, "driving").as_deref() == Some(expected.driving)
+                        && pid_value(entity, "extent").as_deref() == Some(expected.extent)
+                })
+                .count();
+            assert!(
+                strokes >= labels.len(),
+                "{name} {:?}: {} placement(s) but only {strokes} stroke(s) carry the same measures",
+                expected.label,
+                labels.len()
+            );
+        }
+        // A placement that is not parametric has no defaults to show.
+        for entity in doc.entities() {
+            let Some(label) = label_of(entity) else {
+                continue;
+            };
+            if !parametric.iter().any(|p| p.label == label) {
+                assert!(
+                    pid_value(entity, "driving").is_none(),
+                    "{name}: {label:?} is not parametric yet states driving="
+                );
+            }
+        }
+
+        // 3. Both keys survive DWG and DXF.
+        let measures =
+            |doc: &CadDocument| -> Vec<(Option<String>, Option<String>, Option<String>)> {
+                let mut all: Vec<_> = doc
+                    .entities()
+                    .filter(|entity| pid_value(entity, "extent").is_some())
+                    .map(|entity| {
+                        (
+                            pid_value(entity, "role"),
+                            pid_value(entity, "extent"),
+                            pid_value(entity, "driving"),
+                        )
+                    })
+                    .collect();
+                all.sort();
+                all
+            };
+        let before = measures(&doc);
+        for ext in ["dwg", "dxf"] {
+            let bytes = OpenCADStudio::io::save_to_bytes(&doc, ext, doc.version)
+                .unwrap_or_else(|error| panic!("save {ext}: {error}"));
+            let reopened = OpenCADStudio::io::load_bytes(&format!("measures.{ext}"), bytes)
+                .unwrap_or_else(|error| panic!("reopen {ext}: {error}"));
+            assert_eq!(
+                measures(&reopened),
+                before,
+                "{name}: the placement measures changed across {ext}"
+            );
+        }
+    }
+}
+
 /// The two modes disagree about the layer slot and nothing else: same
 /// entities, same roles, same sheet layers in XDATA, same view filter, same
 /// dark count, and the layer manager's sheet-layer view reads the same. The
@@ -3062,15 +3262,20 @@ fn the_two_layer_modes_agree_on_everything_but_the_slot() {
         return;
     };
     assert_eq!(taxonomy.entities().count(), sheet.entities().count());
-    let keys = |doc: &CadDocument| -> Vec<(Option<String>, Option<String>, Option<String>)> {
+    // Five keys: the three the modes were first compared on, plus a
+    // placement's two measures (plan 2026-09-18, K2), which read the cached
+    // body and its template and never the layer slot.
+    let keys = |doc: &CadDocument| -> Vec<[Option<String>; 5]> {
         let mut keys: Vec<_> = doc
             .entities()
             .map(|entity| {
-                (
+                [
                     pid_value(entity, "role"),
                     pid_value(entity, "sheet_layer"),
                     pid_value(entity, "style"),
-                )
+                    pid_value(entity, "extent"),
+                    pid_value(entity, "driving"),
+                ]
             })
             .collect();
         keys.sort();

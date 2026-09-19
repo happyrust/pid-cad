@@ -1678,6 +1678,8 @@ pub(super) fn message_attribute(source: &str) -> Option<(&'static str, &'static 
         "Layer {} turned on so the sheet layer can show" => Some(("layers", "layer-turned-on-so-the-sheet-layer-can-show")),
         "P&ID sheet layers: {names}, of which {off} start switched off" => Some(("common", "pid-sheet-layers-of-which-start-switched-off")),
         "Layer OID" => Some(("properties", "layer-oid")),
+        "Driving dimensions (library default)" => Some(("properties", "driving-dimensions-library-default")),
+        "Body extent" => Some(("properties", "body-extent")),
         "Material" => Some(("properties", "material")),
         "Material Bindings" => Some(("model", "material-bindings")),
         "Material Details" => Some(("properties", "material-details")),

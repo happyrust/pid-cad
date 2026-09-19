@@ -116,6 +116,8 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
 
     let mut class = None;
     let mut role = None;
+    let mut driving = None;
+    let mut extent = None;
     let mut labels = Vec::new();
     let mut lines = Vec::new();
     let mut resolved = None;
@@ -131,6 +133,8 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
         match key {
             "class" => class = Some(val.to_string()),
             "role" => role = Some(val.to_string()),
+            "driving" => driving = driving_dimensions_caption(val),
+            "extent" => extent = body_extent_caption(val),
             "label" if !val.is_empty() && !labels.iter().any(|old| old == val) => {
                 labels.push(val.to_string());
             }
@@ -169,6 +173,27 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
             label: t!("Role").into_owned(),
             field: "pid_role",
             value: PropValue::ReadOnly(role),
+        });
+    }
+    // A symbol placement's two sizes, kept apart on purpose: the driving
+    // dimensions are the symbol library's template values -- a placed
+    // instance carries none of its own -- and the extent is what this
+    // drawing draws the placement at. The caption says "library default" so
+    // nobody reads 20.32 off a Manifold drawn 35.59 wide (plan 2026-09-18,
+    // K-D1 / K-D3). Every placement has an extent; only one paired with its
+    // template has driving dimensions.
+    if let Some(driving) = driving {
+        props.push(Property {
+            label: t!("Driving dimensions (library default)").into_owned(),
+            field: "pid_driving",
+            value: PropValue::ReadOnly(driving),
+        });
+    }
+    if let Some(extent) = extent {
+        props.push(Property {
+            label: t!("Body extent").into_owned(),
+            field: "pid_extent",
+            value: PropValue::ReadOnly(extent),
         });
     }
     if let Some(first) = labels.first() {
@@ -233,6 +258,43 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
     Some(PropSection {
         title: "P&ID".to_string(),
         props,
+    })
+}
+
+/// `Top:20.32;Left:114.30;Right:114.30` as the panel shows it:
+/// `Top 20.32 mm · Left 114.30 mm · Right 114.30 mm`. The import wrote the
+/// values in millimetres already, so nothing is converted here; a value that
+/// is not `name:number` is shown as written rather than dropped, and an
+/// empty key shows nothing.
+fn driving_dimensions_caption(value: &str) -> Option<String> {
+    let parts: Vec<String> = value
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| match part.split_once(':') {
+            Some((name, millimetres)) if millimetres.parse::<f64>().is_ok() => {
+                format!("{} {} mm", name.trim(), millimetres.trim())
+            }
+            _ => part.to_string(),
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// `172.21x71.18` as the panel shows it: `172.21 × 71.18 mm`. Anything that
+/// is not two numbers around an `x` is shown as written.
+fn body_extent_caption(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(match value.split_once('x') {
+        Some((width, height))
+            if width.trim().parse::<f64>().is_ok() && height.trim().parse::<f64>().is_ok() =>
+        {
+            format!("{} × {} mm", width.trim(), height.trim())
+        }
+        _ => value.to_string(),
     })
 }
 
@@ -389,5 +451,60 @@ mod pid_semantics_tests {
         let frame = pid_semantics_section(&entity(&["role=frame"])).expect("P&ID section");
         assert_eq!(value(&frame, "pid_role"), "frame");
         assert!(frame.props.iter().all(|p| p.field != "pid_class"));
+    }
+
+    /// A placed parametric symbol shows two sizes, right after its role: the
+    /// library template's driving dimensions, captioned as the library
+    /// default, and the extent this drawing draws it at (plan 2026-09-18, K2).
+    /// A symbol that is not parametric has the extent row alone (K-D3).
+    #[test]
+    fn a_placed_symbol_shows_its_library_defaults_and_its_extent_as_two_rows() {
+        let manifold = pid_semantics_section(&entity(&[
+            "sheet_layer=Default",
+            "role=symbol",
+            "style=Equipment - New",
+            "extent=172.21x71.18",
+            "driving=Top:20.32;Left:114.30;Right:114.30",
+            "class=PIDProcessVessel",
+            "label=V-101",
+        ]))
+        .expect("P&ID section");
+        assert_eq!(
+            value(&manifold, "pid_driving"),
+            "Top 20.32 mm · Left 114.30 mm · Right 114.30 mm"
+        );
+        assert_eq!(value(&manifold, "pid_extent"), "172.21 × 71.18 mm");
+        let fields: Vec<&str> = manifold.props.iter().map(|p| p.field).collect();
+        assert_eq!(
+            fields[..4],
+            ["pid_class", "pid_role", "pid_driving", "pid_extent"]
+        );
+        assert!(manifold
+            .props
+            .iter()
+            .find(|property| property.field == "pid_driving")
+            .is_some_and(|property| {
+                property.label == t!("Driving dimensions (library default)")
+            }));
+        assert!(manifold
+            .props
+            .iter()
+            .find(|property| property.field == "pid_extent")
+            .is_some_and(|property| property.label == t!("Body extent")));
+
+        let valve = pid_semantics_section(&entity(&["role=symbol", "extent=12.70x8.00"]))
+            .expect("P&ID section");
+        assert_eq!(value(&valve, "pid_extent"), "12.70 × 8.00 mm");
+        assert!(valve.props.iter().all(|p| p.field != "pid_driving"));
+
+        // Whatever the import wrote is shown rather than dropped when it is
+        // not in the shape the panel formats.
+        assert_eq!(
+            driving_dimensions_caption("Right:25.40;odd"),
+            Some("Right 25.40 mm · odd".to_string())
+        );
+        assert_eq!(driving_dimensions_caption(""), None);
+        assert_eq!(body_extent_caption("wide"), Some("wide".to_string()));
+        assert_eq!(body_extent_caption(" "), None);
     }
 }

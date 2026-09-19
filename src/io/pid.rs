@@ -697,6 +697,10 @@ pub fn load_pid_with_layer_mode(path: &Path, mode: PidLayerMode) -> Result<CadDo
                 .graphic_oid
                 .and_then(|graphic_oid| index.resolve(graphic_oid))
         });
+        // A placement's size on this sheet and its template's library
+        // defaults, the same on every entity it drew. See
+        // `PlacementMeasures`.
+        let measures = PlacementMeasures::of(&entity.kind, &geometry, projection, &built);
         for mut one in built {
             if let Some(style) = symbology {
                 apply_symbology(&mut one, style, &dash_linetypes);
@@ -724,6 +728,7 @@ pub fn load_pid_with_layer_mode(path: &Path, mode: PidLayerMode) -> Result<CadDo
                 entity.source_layer.as_ref(),
                 role,
                 style_name,
+                measures.as_ref(),
             );
             let source_layer = entity.source_layer.as_ref();
             let hidden = source_layer.is_some_and(sheet_layer_is_hidden);
@@ -879,7 +884,14 @@ fn draw_page_border(doc: &mut CadDocument, page_mm: Option<(f64, f64)>) {
     let mut border = EntityType::LwPolyline(border);
     // Drawn by the importer, so no authored layer and no published identity;
     // it still says what it is, like every other entity of the import.
-    attach_pid_metadata(&mut border, None, None, role_of_layer(LAYER_FRAME), None);
+    attach_pid_metadata(
+        &mut border,
+        None,
+        None,
+        role_of_layer(LAYER_FRAME),
+        None,
+        None,
+    );
     let _ = doc.add_entity(border);
 }
 
@@ -1142,13 +1154,15 @@ fn report_import(
 /// Write an entity's published P&ID identity into its XDATA, under
 /// [`PID_SEMANTICS_XDATA_APP`] as self-describing `key=value` strings.
 ///
-/// Three sources, three vocabularies, one record. The authored layer pair
+/// Four sources, four vocabularies, one record. The authored layer pair
 /// (`sheet_layer`, `sheet_layer_oid`) is what the drawing files the entity
 /// under, carried whenever the record declares one. `role` and `style` are
 /// the importer's reading: `role` is what the entity is (see
 /// [`role_of_layer`]), `style` the name the drawing gives the line style it
 /// draws with -- the name `discipline_layer` derives a `PID-STYLE-*` layer
-/// from, stated even when that name is an appearance and earns no layer. The
+/// from, stated even when that name is an appearance and earns no layer.
+/// `extent` and `driving` are a symbol placement's measures, the same on
+/// every entity the placement drew (see [`PlacementMeasures`]). The
 /// published pairs come from the drawing's own `_Data.xml`, joined by
 /// `pid-parse`'s semantic index: `class` is the owning object's XML element
 /// name (`PIDPipeline`, `PIDProcessVessel`, …), `label` its `ItemTag` /
@@ -1166,6 +1180,7 @@ fn attach_pid_metadata(
     source_layer: Option<&pid_parse::PidSourceLayer>,
     role: Option<&str>,
     style: Option<&str>,
+    measures: Option<&PlacementMeasures>,
 ) {
     use acadrust::xdata::{ExtendedDataRecord, XDataValue};
 
@@ -1188,6 +1203,14 @@ fn attach_pid_metadata(
     if let Some(style) = style {
         push_pair(&mut record, "style", style);
     }
+    if let Some(measures) = measures {
+        if let Some(extent) = measures.extent.as_deref() {
+            push_pair(&mut record, "extent", extent);
+        }
+        if let Some(driving) = measures.driving.as_deref() {
+            push_pair(&mut record, "driving", driving);
+        }
+    }
     if let Some(hit) = hit {
         let object = hit.object();
         push_pair(&mut record, "class", &object.class);
@@ -1209,6 +1232,158 @@ fn attach_pid_metadata(
     if !record.values.is_empty() {
         entity.common_mut().extended_data.add_record(record);
     }
+}
+
+/// What a symbol placement says about its size, written into the
+/// `PID_SEMANTICS` record of every entity the placement drew -- body strokes
+/// and the name lettered beside them alike -- so the properties panel can
+/// answer for any of them (plan `2026-09-18-driving-dimensions-reach-the-
+/// panel-as-library-defaults`, K2).
+///
+/// The two are different facts and the panel shows them as two rows. The
+/// extent is what this drawing actually draws the placement at; the driving
+/// dimensions are what the symbol library's template was authored with. They
+/// agree only for an instance nobody resized: `DWG-0201`'s Parametric
+/// Manifold is placed 172.21 x 71.18 mm while its template's `Left` / `Right`
+/// / `Top` say 228.6 x 40.64, and a placed instance carries no dimension
+/// values of its own (pid-parse `docs/analysis/2026-09-18-the-parametric-
+/// chain-closes-on-the-template-not-the-instance.md`). So the second row is
+/// captioned as the library default, and never as the instance's size.
+struct PlacementMeasures {
+    /// `<W>x<H>`, millimetres to two places: the rectangle the placement's
+    /// body covers on the sheet, rotation, scale and mirror applied. Measured
+    /// on the body the drawing itself caches for the placement -- the
+    /// instance as SmartPlant last drew it -- even when the library's `.sym`
+    /// is what this import put on screen, since the library body is the
+    /// template's shape and the question is this drawing's. A placement the
+    /// drawing carries no body for is measured on what was drawn instead,
+    /// which is the library body or the marker dot. Every placement writes
+    /// it (K-D3).
+    extent: Option<String>,
+    /// `<name>:<mm>;<name>:<mm>;…`, two places, in the template's on-disk
+    /// order: the named driving dimensions of the library template the
+    /// cached body names (`PidSymbolDefinition::template`). `None` for a
+    /// placement whose body names no template -- every symbol that is not
+    /// parametric, and a parametric one pid-parse could not pair -- so the
+    /// panel shows no default it cannot vouch for. A dimension without a name
+    /// (a derived one, or one no relation writes) is left out.
+    driving: Option<String>,
+}
+
+impl PlacementMeasures {
+    /// The measures of one placement, or `None` for any other kind of record.
+    fn of(
+        kind: &PidGraphicKind,
+        geometry: &NormalizedPidGeometry,
+        projection: Projection,
+        drawn: &[EntityType],
+    ) -> Option<Self> {
+        let PidGraphicKind::SymbolInstance {
+            insertion,
+            rotation,
+            scale,
+            definition,
+            ..
+        } = kind
+        else {
+            return None;
+        };
+        let placement = Placement {
+            insertion,
+            rotation: *rotation,
+            scale: *scale,
+            projection,
+        };
+        let cached = definition
+            .and_then(|reference| geometry.symbol_definition(reference))
+            .filter(|body| !body.primitives.is_empty());
+        let extent = cached
+            .and_then(|body| {
+                body.primitives
+                    .iter()
+                    .filter_map(|primitive| shape_primitive(primitive, &placement))
+                    .filter_map(|entity| stroke_extent(&entity))
+                    .reduce(union_extent)
+            })
+            .or_else(|| drawn.iter().filter_map(stroke_extent).reduce(union_extent))
+            .map(|(min_x, min_y, max_x, max_y)| {
+                format!("{:.2}x{:.2}", max_x - min_x, max_y - min_y)
+            });
+        let driving = cached
+            .and_then(|body| body.template)
+            .and_then(|template| geometry.symbol_definition(template))
+            .map(|template| {
+                template
+                    .dimensions
+                    .iter()
+                    .filter_map(|dimension| {
+                        dimension
+                            .name
+                            .as_deref()
+                            .map(|name| format!("{name}:{:.2}", projection.mm(dimension.value_m)))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(";")
+            })
+            .filter(|driving| !driving.is_empty());
+        Some(Self { extent, driving })
+    }
+}
+
+/// The rectangle one stroke of a body covers, in millimetres, as
+/// `(min_x, min_y, max_x, max_y)`; `None` for lettering and for anything
+/// that is not a stroke.
+///
+/// Unlike [`drawn_extent`], which hangs labels and frames views and may take
+/// an arc as its whole circle, this is a number a user reads off the panel,
+/// so an arc contributes exactly the sweep it draws: its two ends and
+/// whichever quadrant points the sweep passes.
+fn stroke_extent(entity: &EntityType) -> Option<(f64, f64, f64, f64)> {
+    match entity {
+        EntityType::Line(_) | EntityType::Circle(_) | EntityType::LwPolyline(_) => {
+            drawn_extent(entity)
+        }
+        EntityType::Arc(arc) => Some(arc_extent(
+            (arc.center.x, arc.center.y),
+            arc.radius,
+            arc.start_angle,
+            arc.end_angle,
+        )),
+        _ => None,
+    }
+}
+
+/// The rectangle an arc sweeping counter-clockwise from `start_angle` to
+/// `end_angle` (radians) covers. Equal angles are read as the whole circle,
+/// which is what a DXF arc with coincident ends draws.
+fn arc_extent(
+    center: (f64, f64),
+    radius: f64,
+    start_angle: f64,
+    end_angle: f64,
+) -> (f64, f64, f64, f64) {
+    use std::f64::consts::{FRAC_PI_2, TAU};
+    let start = start_angle.rem_euclid(TAU);
+    let mut sweep = (end_angle - start_angle).rem_euclid(TAU);
+    if sweep == 0.0 {
+        sweep = TAU;
+    }
+    let end = start + sweep;
+    let mut angles = vec![start, end];
+    let mut quadrant = (start / FRAC_PI_2).ceil() * FRAC_PI_2;
+    while quadrant <= end + 1e-12 {
+        angles.push(quadrant);
+        quadrant += FRAC_PI_2;
+    }
+    angles
+        .into_iter()
+        .map(|angle| {
+            let (sin, cos) = angle.sin_cos();
+            let (x, y) = (center.0 + radius * cos, center.1 + radius * sin);
+            (x, y, x, y)
+        })
+        .reduce(union_extent)
+        .expect("two ends at least")
 }
 
 /// The style table's entry for one normalized entity, if it has one.
@@ -2593,6 +2768,45 @@ mod tests {
             storage_path: "/".to_string(),
             displayed: None,
         }));
+    }
+
+    /// The extent a user reads off the panel follows the arc's sweep rather
+    /// than its whole circle (plan 2026-09-18, K2): a quarter reaches one
+    /// corner, a half one side, a sweep across the x axis takes in the point
+    /// at angle zero, and coincident ends are the full circle.
+    #[test]
+    fn an_arcs_extent_is_the_sweep_it_draws_and_not_its_circle() {
+        use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+        let close = |a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)| {
+            (a.0 - b.0).abs() < 1e-9
+                && (a.1 - b.1).abs() < 1e-9
+                && (a.2 - b.2).abs() < 1e-9
+                && (a.3 - b.3).abs() < 1e-9
+        };
+        let quarter = arc_extent((0.0, 0.0), 1.0, 0.0, FRAC_PI_2);
+        assert!(close(quarter, (0.0, 0.0, 1.0, 1.0)), "{quarter:?}");
+        let half = arc_extent((0.0, 0.0), 1.0, FRAC_PI_2, 3.0 * FRAC_PI_2);
+        assert!(close(half, (-1.0, -1.0, 0.0, 1.0)), "{half:?}");
+        let across_zero = arc_extent((0.0, 0.0), 1.0, 7.0 * FRAC_PI_4, FRAC_PI_4);
+        let c = FRAC_PI_4.cos();
+        assert!(close(across_zero, (c, -c, 1.0, c)), "{across_zero:?}");
+        let whole = arc_extent((2.0, 3.0), 1.0, PI, PI);
+        assert!(close(whole, (1.0, 2.0, 3.0, 4.0)), "{whole:?}");
+        // The Manifold's end caps: two semicircles of r 35.59 facing outward
+        // reach exactly the body's top and bottom and one end each.
+        let mut arc = acadrust::entities::Arc::new();
+        arc.center = Vector3::new(10.0, 10.0, 0.0);
+        arc.radius = 35.59;
+        arc.start_angle = FRAC_PI_2;
+        arc.end_angle = 3.0 * FRAC_PI_2;
+        let cap = stroke_extent(&EntityType::Arc(arc)).expect("an arc is a stroke");
+        assert!(
+            close(cap, (10.0 - 35.59, 10.0 - 35.59, 10.0, 10.0 + 35.59)),
+            "{cap:?}"
+        );
+        let mut label = Text::new();
+        label.value = "Parametric Manifold".to_string();
+        assert!(stroke_extent(&EntityType::Text(label)).is_none());
     }
 
     fn marker_at(x: f64, y: f64) -> EntityType {
