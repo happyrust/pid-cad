@@ -1,0 +1,130 @@
+# 缓存本体带上自己的逐笔样式 · 接缓存存储的 `StyleCluster` · 小计划（2026-09-20 开单）
+
+> 承接 pid-parse `docs/analysis/2026-09-07-placement-tail-names-the-cached-definition.md`「还没做的」第二条
+> （「缓存存储自己的 `StyleCluster` 未接：缓存本体现在不带自身笔画样式，只靠放置样式重涂；放置样式解析不到的那几条会落 `ByLayer`」）
+> 与 `2026-09-19-draw-the-cached-body-first-and-the-library-only-when-the-drawing-carries-none.md` 的 P-D5 / 结算开口。
+> 现状：`pid.rs::cached_body_entities` 拿 `PidSymbolDefinition::visible_primitives()` 直接 `shape_primitive`，**没有底涂**；库路径
+> `place_primitive` 先按 `.sym` 自己的 `PrimitiveStyle`（颜色 / 线宽，**无 dash**）涂一层，再由 `apply_symbology` 按放置样式压掉颜色与线宽。
+> 两条路今天都画不出符号内部的虚线。
+> 事实基础：2026-09-20 开单时对四图逐本体实测（临时探针，未入库；数字见「事实」）。带 ⭕ 的决策按推荐落笔。
+> **状态：待办，未排期；不动代码。**
+
+## 一句话
+
+缓存本体的每一笔带上它自己存储 `/JSite<N>/StyleCluster` 里的颜色 / 线宽 / **虚线**，与库本体的 `StyledPrimitive` 是同一套词汇；
+OCS 拿它做放置样式之下的**底涂**——放置的颜色 / 线宽照旧压在上面（P-D5 不变）。净效果两条：**符号内部的虚线第一次画对**
+（语料 11 个放置 57 笔）；放置样式解析不到时的退路从 `ByLayer` 变成符号自己说的样式（语料 0 例，是正确性不是画面）。
+
+## 事实（2026-09-20 实测，四图 107 个放置点名的 41 个本体）
+
+| 图 | 放置 | 被点名本体 | 可见笔画（按放置） | 其中 `index` 在本存储 `StyleCluster` 解析 | 其中**虚线** | 放置样式解析 |
+|---|---:|---:|---:|---:|---|---:|
+| D06 | 6 | 6 | 32 | 32 | 0 | 6/6 |
+| 0201 | 20 | 17 | 81 | 81 | 0 | 20/20 |
+| 0202 | 23 | 11 | 120 | 120 | **12**：arrester breather valve(RD) 21 笔可见里 8 笔（7 线 + 那条 B 样条唇）、Wastewater Pit 7 笔可见里 4 笔 | 23/23 |
+| 工艺 | 58 | 7 | 237 | 237 | **45**：`Xa.sym` ×3 与 `Xa chu.sym` ×6，每个放置 9 笔可见里 5 笔（1 圆 + 4 线） | 58/58 |
+
+- **全部解析**：470/470 可见笔画的 `index` 在各自存储的 `StyleCluster` 里落到 `0x002E JStyleSimpleLine`，直接或经 `0x0030 JStyleOverride`
+  一跳——与图纸几何同一条「看它落在哪种记录上」的规则（`style_link` 模块文档）。关闭层上的笔画也全部解析（伴热线是 3.5/1.75 mm 虚线，
+  与 P-D2 的「SmartPlant 不画」相容）。
+- **与库逐笔一致**：库里有同名 `.sym` 的本体，缓存逐笔的颜色 / 线宽与 `.sym` 自己 `StyleCluster` 给的相同——Ball Valve Type 1 六线 0.13 +
+  一圈 0.35（经 override 19 / 20）、Cap 两笔 `#00FFFF` 0.50、Off-Unit 五笔 `#00FEA0` 0.50 + 两笔黑 0.35、Dual Action Cyl Act 七笔
+  `#00FEA0` 0.50、Parametric Manifold 六笔黑 0.35；库多出的只是 `.sym` 第二张 sheet 的笔画。库没有的 `Xa*.sym` 三种（工艺 12 个放置），
+  缓存是唯一的样式来源。
+- **虚线是缓存独有的信息**：`.sym` 读取器的 `PrimitiveStyle` 明写「dash 不带」；缓存这边 `resolve_line_style` 的 `dash` 现成。语料可见虚线
+  57 笔 / 11 个放置全是 3.5/1.75 mm 一种图样，今天 OCS 都画成实线；D06 / 0201 的虚线只在 `Heat Trace[OFF]` 上，屏幕上本来就没有。
+- **放置样式 107/107 解析**（`igSymbol2d +25`，全部实线；Wastewater Pit 的经 override 109）。09-07 文档担心的「解析不到落 `ByLayer`」在语料里
+  是 0 个放置。
+- **线宽**：放置线宽（0.18 / 0.35 / 0.50）与逐笔线宽（0.13 / 0.35 / 0.50）在多数本体上不同（球阀六线 0.13 压成放置的 0.35；DCS Field
+  Mounted 0.13 / 0.35 压成 0.18）。08-24 文档在 SmartPlant 截图上**实测的是颜色**，线宽没测过。
+- **文字**：缓存文字 100% 在关闭层（P-D4）；缓存 `JStyleTextPara` 解得出高度 1.50 / 2.46 / 2.50 / 3.17 / 6.35 mm、对齐 Left / Center、黑色，
+  没有一条上屏。
+- **模型缺口**：`DecodedIgCircle2dRecord` / `DecodedIgArc2dRecord` 两个 DTO 没带 `index`（解析层 `SheetIgCircle2dDecoded` /
+  `SheetIgArc2dDecoded` 读了，`From` 里丢了）；线 / 折线 / 文字 / B 样条都带。
+- **顺手发现**：`style_link::for_each_document` 用 `rsplit('/')` 找 `Sheet*` 叶子，但 `cfb` 0.14 在 Windows 上给的嵌套路径是
+  `/JSite145\PSMcluster0`（只有第一段是 `/`），与 `cfb/reader.rs:80`、`streams/psm_tables.rs` 那几处的 `replace('\\', "/")` 不一致。
+  今天无影响——四图的嵌套存储**一个 `Sheet*` 流都没有**（本体在 `PSMcluster0`）——但同一份文件在 Windows / Unix 上不该给不同结果，
+  模块文档那句「每个 `JSite<n>/` 都是带自己 `Sheet*` + `StyleCluster` 的嵌套文档」也该按语料改成 `PSMcluster0` + `StyleCluster`。
+
+## 决策
+
+| # | 决策 | 结论 | 状态 |
+|---|------|------|------|
+| P-E1 | 放置样式与逐笔样式谁压谁 | **不变**（P-D5）：`apply_symbology` 的放置颜色 / 线宽仍压在整个本体上；逐笔样式做底涂，与库路径 `paint_symbol_stroke` 同一个位置。**虚线由逐笔样式决定**——放置样式自己带 dash 才覆盖（语料 107 个放置样式全是实线，所以不会发生）。理由：颜色是截图实测的、线宽没测，维持现状；虚线今天两条路都错，缓存是唯一带 dash 的源。备选「逐笔线宽压过放置线宽」要 SmartPlant 打印件或高倍截图量线宽，登记为开口 | ⭕ |
+| P-E2 | 样式放在 `PidSymbolDefinition` 的哪 | **平行表** `primitive_styles: Vec<Option<PrimitiveStyle>>`——与 `primitive_layers` 同款（同长同序、`serde(default)`、旧数据缺项按 `None`），`primitives` 保持 `Vec<SymbolPrimitive>`；加 `visible_strokes()` 迭代 `(primitive, style)`，`visible_primitives()` 保留给只要形的调用方。备选：`primitives` 改成 `Vec<StyledPrimitive>`——OCS `PidSymbolSource::strokes` / `PlacementMeasures` / C1 棘轮全要跟着动，golden JSON 大改 | ⭕ |
+| P-E3 | dash 进不进 `PrimitiveStyle` | **进**：`PrimitiveStyle { rgb, width_mm, dash_mm: Vec<f64> }`，空 = 实线；`.sym` 读取器 `style_of` 同时填上（`resolved.dash` 现成）——两个源一个词汇，库补位时虚线也顺带对了。代价：`Copy` 变 `Clone`（OCS `paint_symbol_stroke` 改收引用），加 `JsonSchema` 派生 | ⭕ |
+| P-E4 | 样式表从哪来、存哪 | `parse_jsites` 读 `{base}/StyleCluster` → `DocumentStyleTable::from_stylecluster_bytes`（与 `.sym` 读取器同一个类型），用完即弃；解析结果落 **`JSite.stroke_styles: BTreeMap<u32, PrimitiveStyle>`**（style id → 样式，只收嵌套记录点名到的 id），可序列化，JSON 回读不丢；`embedded_symbol_definitions` 按 `record.index` 查表。备选：`#[serde(skip)]` 挂整张表——回读丢样式 | ⭕ |
+| P-E5 | 圆 / 弧 DTO 没有 `index` | 补上 `index: u32`（`serde(default)`，`From` 透传）。语料圆 / 弧的 `index` 全解析——D06 球阀那圈 r 1.27 经 override 19 → 黑 0.35 | ⭕ |
+| P-E6 | 文字样式 | **本单不做**：缓存文字 100% 在关闭层，接了也没有一条上屏；出现在开着的层上时再接（`resolve_text_height` 一次调用）。`primitive_styles` 里文字项为 `None` | ⭕ |
+| P-E7 | 与退役单 `2026-09-20-retire-the-library-first-symbol-source.md` 的先后 | **本单先做也行、后做也行**：本单只给 `cached_body_entities` 多一行底涂，不碰 `source` 参数；谁后动谁照当时的签名改 | ⭕ |
+| P-E8 | 虚线的 linetype 从哪来 | `register_dash_linetypes` 今天只收图纸自己的 `LineStyleIndex`；加一遍缓存本体（`geometry.symbol_definitions[*].primitive_styles`），同一个 `PID-DASH-<n>` 池、同一个 `dash_key`。库本体是懒解析（`build_entities` 里才知道用哪个 `.sym`），它的 dash 只在池里已有同一图样时画出，否则照旧实线并记一行日志——语料里库补位的放置是 0 个 | ⭕ |
+
+## 工作项
+
+### E1 pid-parse：缓存本体带样式（加法，一提交）
+
+- P-E5：`DecodedIgCircle2dRecord` / `DecodedIgArc2dRecord` 加 `index`。
+- P-E3：`PrimitiveStyle` 加 `dash_mm` + `JsonSchema`；`symbol_library::style_of` 填 dash；文档那句「dash 不带」改掉。
+- P-E4：`streams/jsite.rs::parse_jsites` 读 `StyleCluster`（`cfb.open_stream` 接受 `/` 路径），只对 `nested_geometry` 里出现过的
+  `index` 调 `resolve_line_style`，落 `JSite.stroke_styles`。
+- P-E2：`geometry.rs::embedded_symbol_definitions` 的 `push` 多带一个 `style`，`PidSymbolDefinition::primitive_styles` +
+  `visible_strokes()`；`schema.rs` 的 JSON Schema 随派生更新。
+- 棘轮 `tests/parse_real_files.rs`：`a_cached_body_carries_the_stroke_styles_its_own_storage_states`——四图被点名本体的可见笔画
+  **全部**有样式（按放置累计 32 / 81 / 120 / 237）；可见虚线 D06 0 / 0201 0 / 0202 12 / 工艺 45，图样都是 `[3.5, 1.75]`；
+  缓存 vs 库颜色线宽逐笔一致钉三例（Ball Valve Type 1、Cap、Off-Unit）；D06 球阀那圈 r 1.27 → 黑 0.35。
+- golden JSON：新字段非空，期望文件重生成，逐项看 diff **只多不改**。
+- 顺手：`style_link::for_each_document` 路径分隔符归一（`replace('\\', "/")`），模块文档那句按语料改；`style_link_ratchet` 数字不应变
+  （嵌套存储无 `Sheet*`），变了就是发现了新东西，停下来看。
+- CHANGELOG 一节；`task_plan.md` 指针；09-07 文档「还没做的」第二条改标已接。
+
+### E2 OCS：底涂 + 虚线（一提交）
+
+- `paint_symbol_stroke(entity, style: Option<&PrimitiveStyle>, dash_linetypes)`：颜色 / 线宽照旧，`dash_mm` 非空且池里有 → `common.linetype`。
+- `cached_body_entities`：改走 `visible_strokes()`，每笔先 `paint_symbol_stroke` 再交给 `apply_symbology`（调用处不变）；`library_body_entities`
+  的 `place_primitive` 用同一个函数——库的 dash 顺带。
+- `register_dash_linetypes(&mut doc, &styles, &geometry.symbol_definitions)`（P-E8）。
+- 单测 `io::pid::tests`：合成一条——放置样式实线 + 笔画 `dash_mm=[3.5,1.75]` → 实体带 `PID-DASH-*` 且颜色 = 放置颜色、线宽 = 放置线宽；
+  放置样式自己带 dash → 放置的赢。
+- `tests/pid_import.rs`：`a_cached_strokes_dash_is_its_own_storages_not_its_placements`——工艺 `PID-SYMBOL` 上带 `PID-DASH-*` 的实体 = 45
+  （9 个放置 × 5）、0202 = 12、D06 / 0201 = 0；颜色仍是放置的（Xa 的 `#00FEA0` 底涂被 `#808000` 压掉，
+  `a_symbol_body_draws_in_the_style_its_placement_names` 继续绿）；`extent=` 一个都不变。
+- user-guide「符号从哪来」补一句：缓存本体的笔画按符号自己的样式表决定虚实，颜色与线宽仍按放置。
+- 手工：GUI 打开工艺放大一个 `Xa` OPC（虚线圆 + 四条虚线）、0202 的 arrester breather valve(RD) 唇是虚线；两张特写入
+  `docs/evidence/2026-xx-xx-cached-stroke-dash/`。
+
+### E3 台账
+
+- 本单头部写落地哈希；09-19 计划结算「还开着的」那条改标已落；`remember` 一条（供以后 `supersedes`）；pid-parse `task_plan.md` 收口指针。
+
+## 验收
+
+- pid-parse：`cargo test --all-targets` 全绿（`parse_real_files` 133 → 134；golden 重生成后 diff 只多不改）；`cargo fmt --check` 干净；
+  nightly 与 stable 的 `cargo clippy --all-targets -- -D warnings` 零告警；`cargo +1.95 check` 绿。
+- OCS：`pid_import` 在 `OCS_PID_LAYER_MODE` 两值（退役单未动时再 × `OCS_PID_SYMBOL_SOURCE` 两值）全绿（54 → 55，以当时实数为准）；
+  `--lib io::pid::tests` 全绿；`clippy --lib --test pid_import` 触碰处零告警；`rustfmt --check` 两文件干净。
+- 时间盒：pid-parse 半个工作日 + OCS 半个工作日。
+
+## 登记不做
+
+| 项 | 理由 |
+|---|---|
+| 逐笔线宽压过放置线宽 | 没测过（08-24 只测了颜色）。要 SmartPlant 打印件或高倍截图量线宽；有了再议，一处 `apply_symbology` 的事 |
+| 缓存文字的样式（高度 / 对齐 / 字色） | P-E6：语料没有一条上屏 |
+| 缓存本体的填充 | 各存储 `StyleCluster` 里 `0x002A JStyleSimpleFill` 1–3 条，但嵌套几何族里没有 `igBoundary2d`，没有消费者 |
+| 放置样式解析不到的专门夹具 | 语料 0 例；合成单测覆盖底涂即可 |
+| 把探针入库 | E1 的棘轮就是复现；数字全在本单「事实」里 |
+
+## 开单条件
+
+无硬门槛，排期即做。退役单若先动，E2 的签名以退役后为准（P-E7）。
+
+## 术语
+
+- **底涂（undercoat）**：`paint_symbol_stroke` 按符号自己的样式先涂的那一层；`apply_symbology` 按放置样式在其上重涂颜色与线宽，
+  不碰 linetype（除非放置样式自己带 dash）。
+- **逐笔样式（per-stroke style）**：本体每个图元 `index` 在**本存储** `StyleCluster` 里解出的 `PrimitiveStyle`；样式 id 每个存储从 1 重数，
+  跨存储查是 `style_link` 模块文档点名的那个错误。
+
+## 门禁记录
+
+- 2026-09-20：开单（本提交，会话 fable-5-1-45），四图实测数字见「事实」；待门禁（P-E1 … P-E8 按推荐）。

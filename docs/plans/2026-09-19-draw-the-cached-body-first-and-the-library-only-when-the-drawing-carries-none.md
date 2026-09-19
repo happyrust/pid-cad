@@ -256,7 +256,10 @@ pid-parse 多一条提交、OCS 对调两角；C1 风险项「没有显示位的
 - `OCS_PID_SYMBOL_SOURCE=library` 的退役（下一轮没人用就删；连带 `a_placement_without_a_library_body…` 后半段、
   `the_two_symbol_sources_differ…`、`a_symbols_lettering_follows…` 里靠 library 源钉的旧数字一起删）——
   **2026-09-20 已开单** `2026-09-20-retire-the-library-first-symbol-source.md`（要拆的清单、两条开单条件、验收）。
-- 缓存存储自己的 `StyleCluster`（09-07 开口，登记不做）。
+- 缓存存储自己的 `StyleCluster`（09-07 开口，登记不做）——**2026-09-20 已开单** `2026-09-20-a-cached-body-carries-its-own-stroke-styles.md`
+  （四图实测：被点名本体的 470 笔可见笔画在各自存储的 `StyleCluster` 里全部解析、颜色线宽与 `.sym` 逐笔一致；放置样式 107/107 解析，
+  「落 `ByLayer`」语料 0 例；差的是**虚线**——0202 / 工艺 11 个放置的 57 笔可见虚线今天画成实线。P-D5 的「放置样式压在上面」不变，
+  逐笔样式只做底涂 + 虚线）。
 - ~~pid-parse nightly clippy `map_unwrap_or` 29 处旧代码的清理提交（task_plan 已记）。~~ **2026-09-20 已清**（pid-parse `aeacd4c`）：
   不改那 29 处——nightly 建议的 `Option::map_or_default` 在稳定版仍 unstable——而是声明 `rust-version = "1.95"` 让 clippy 按 MSRV 门控；
   两个工具链 `-D warnings` 都零告警。
