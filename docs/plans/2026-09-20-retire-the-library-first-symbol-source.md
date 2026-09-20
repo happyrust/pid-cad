@@ -60,7 +60,7 @@
 | 项 | 理由 |
 |---|---|
 | 把开关改成导入选项 / UI 保留下来 | 09-19 计划已登记不做：与 `OCS_PID_LAYER_MODE` 同一口径，环境变量一轮即退 |
-| 顺手退役 `OCS_PID_LAYER_MODE` | 另一条线（09-07 计划遗留，等 DXF 下游消费方定用法），不混进来 |
+| 顺手退役 `OCS_PID_LAYER_MODE` | 另一条线（09-07 计划遗留，等 DXF 下游消费方定用法），不混进来。**2026-09-21 另开单** `2026-09-21-the-layer-slot-takes-the-sheet-layer-by-default-and-the-switch-retires.md` |
 
 ## 进度（2026-09-20，OCS `fbcd321b`）
 

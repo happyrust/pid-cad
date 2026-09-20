@@ -550,7 +550,7 @@ the default stays the taxonomy`；上一段会话写到一半、本段接手收�
 | `JBalloon`（0x0117）/ `JLeader`（0x0118）/ `0x00FF` | 全语料 0 条，无 fixture 不写；08-07 的图形类点名告警已覆盖 |
 | `0x0010` 子记录语义（638 条） | 与 JDim 同 GUID，可能随 J1 顺带落地，但不作验收项 |
 | 按视图过滤集分别呈现图层状态 | OCS 单模型空间，取一份（顶层存储、第一个集合）；多视图是另一个产品命题 |
-| `OCS_PID_LAYER_MODE` 默认翻转 | 等 DXF 下游消费方（图例线那批 DXF 的用法）把要求说清 |
+| `OCS_PID_LAYER_MODE` 默认翻转 | 等 DXF 下游消费方（图例线那批 DXF 的用法）把要求说清。**2026-09-21 已开单** `2026-09-21-the-layer-slot-takes-the-sheet-layer-by-default-and-the-switch-retires.md`：两模式在语料上量出来只差图层表与槽，屏幕一致；建议翻到 `sheet` 并退役开关，等批 |
 | 缓存 vs 库本体优先级、缓存 `StyleCluster` 接入 | 09-07 上午登记的两条，与本轮无耦合，另排 |
 | A01 `/JSite204` `Default` 计数差 4 | 未解释记账，等新证据。（`0x0057 +32` 那一半 L1 顺带解了：活动图层号；A01 那两个 `Default` 是嵌套「Imagineer Document」正文的层，文件里没有它们的显示状态） |
 
