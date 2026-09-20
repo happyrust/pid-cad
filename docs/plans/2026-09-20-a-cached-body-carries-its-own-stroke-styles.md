@@ -7,7 +7,13 @@
 > `place_primitive` 先按 `.sym` 自己的 `PrimitiveStyle`（颜色 / 线宽，**无 dash**）涂一层，再由 `apply_symbology` 按放置样式压掉颜色与线宽。
 > 两条路今天都画不出符号内部的虚线。
 > 事实基础：2026-09-20 开单时对四图逐本体实测（临时探针，未入库；数字见「事实」）。带 ⭕ 的决策按推荐落笔。
-> **状态：待办，未排期；不动代码。**
+> **2026-09-20 用户在会话（fable-5-1-45）里批准 P-E1 … P-E8**，全按推荐；直接开 E1。
+> **E1 落地**：pid-parse `7e69b8a`（同一会话）——`primitive_styles` / `visible_strokes()` / `JSite::stroke_styles` / `PrimitiveStyle::dash_mm` /
+> 圆弧 `index` / `for_each_document` 分隔符；棘轮 `parse_real_files` 133 → 134，「事实」里的数字全部钉住。
+> **E2 落地**：OCS `3b8af2ed` + pid-parse `1fd69db`（`DashPattern::from_segments_m`，单测造放置样式用；会话 fable-5-1-8 接手）——
+> 缓存本体走 `place_primitive` 底涂、`paint_symbol_stroke` 按 `dash_mm` 点名 `PID-DASH-*`、`register_dash_linetypes` 多收一遍缓存本体；
+> `pid_import` 54 → 55（工艺 45 / 0202 12 / D06 0 / 0201 0，四种环境组合全绿），`--lib io::pid::tests` 8 → 9。
+> **状态：E1 / E2 已落地，E3 台账随本提交；只剩 E2 的手工 GUI 特写两张（未截）。**
 
 ## 一句话
 
@@ -125,6 +131,46 @@ OCS 拿它做放置样式之下的**底涂**——放置的颜色 / 线宽照旧
 - **逐笔样式（per-stroke style）**：本体每个图元 `index` 在**本存储** `StyleCluster` 里解出的 `PrimitiveStyle`；样式 id 每个存储从 1 重数，
   跨存储查是 `style_link` 模块文档点名的那个错误。
 
+## 进度
+
+### E1（pid-parse `7e69b8a`，2026-09-20）
+
+照工作项做，无偏离。棘轮 `a_cached_body_carries_the_stroke_styles_its_own_storage_states` 钉住：五图（含 A01）可见笔画按放置 81 / 120 /
+32 / 237 / 6 全部有样式；虚线 0 / 12 / 0 / 45 / 0，图样都是 3.5 / 1.75；虚线本体恰是 0202 (793, 2817) 8/21、(793, 3934) 4/7 与工艺
+(7559, 155) / (7559, 219) 各 5/9；Cap / Off-Unit / Manifold / Ball Valve Type 1 / Xa 的调色板按「事实」；缓存的每个 `(颜色, 线宽, 虚线)`
+都是同名 `.sym` 某一笔画的（库容纳缓存，反向不成立——库合并了所有 sheet）。`.sym` 侧单测钉 arrester breather valve(RD).sym 七线一唇虚线。
+golden 不变（快照只钉 `entities`），`style_link_ratchet` 15 不变，`--lib` 1110 → 1111。nightly 1.100 与 stable 1.97 `clippy -D warnings`
+零告警、`+1.95 check` 绿、fmt 干净。A01 顺带进了棘轮（开单时没量它：6 笔可见、0 虚线）。
+
+### E2（OCS `3b8af2ed` + pid-parse `1fd69db`，2026-09-20）
+
+照工作项做，两处小偏离：
+
+- `dash_key` / `build_dash_linetype` 改收**毫米段长切片**而不是 `&DashPattern`——两个源的共同词汇正是 `segments_mm()` / `dash_mm`，
+  池子一把钥匙；`apply_symbology` 调用处改成 `dash_key(&dash.segments_mm())`。
+- pid-parse 多一条 `DashPattern::from_segments_m`（`1fd69db`，上一会话已写好未提交）：`DashPattern` 字段私有，OCS 单测要造一个
+  「放置样式自己带 dash」的 `ResolvedLineStyle` 只能这样来；读取器行为不变。
+
+落地：`PidSymbolSource::styled_strokes`（`Cache` 走 `visible_strokes()`，`Library` 全部 + 平行表；`strokes` 改为它的投影，
+`PlacementMeasures` 不变）；`place_primitive(primitive, style, at, pool)` 成为缓存 / 库两条路共用的一步；`paint_symbol_stroke` 多收池子，
+`dash_mm` 非空且池里有 → `common.linetype`，池里没有 → `log::debug!` 一行、照旧实线（只有库本体会走到——缓存本体开头就全池了）；
+`register_dash_linetypes(doc, styles, &geometry.symbol_definitions)` 先图纸后缓存，图纸原有的 `PID-DASH-n` 名字不动；`apply_symbology`
+不改代码，只补文档（linetype 只在放置样式自己带 dash 时覆盖）；user-guide「符号从哪来」补一句。
+
+验证：`--lib io::pid::tests` 8 → 9（合成本体三笔：底涂 `#00FEA0` 0.50 虚 / 实 / 无样式；实线橄榄放置样式压掉颜色线宽、留下虚线；
+放置样式自己带 dash 时它赢；图纸图样先入池占 `PID-DASH-1`、本体图样 `PID-DASH-2`）；`pid_import` 54 → 55——
+`a_cached_strokes_dash_is_its_own_storages_not_its_placements` 钉住 `PID-SYMBOL` 上带 `PID-DASH-*` 的实体：工艺 **45**（全部 ` 35 #808000`，
+`#00FEA0` 底涂被压掉）、0202 **12**、D06 **0**、0201 **0**，图样全是 3.5 / 1.75；`OCS_PID_LAYER_MODE` × `OCS_PID_SYMBOL_SOURCE` 四种组合
+55/55 全绿（`extent=` 与 0201 调色板测试原样通过）。`rustfmt --check` 两文件干净；`clippy --lib --test pid_import` 在 `pid.rs` / `pid_import.rs`
+零命中（整仓另有 1142 条旧告警，与本单无关）。pid-parse 侧 `1fd69db`：单测 1 条、`clippy --all-targets -D warnings` 零告警、fmt 干净。
+
+**未做**：工作项里的手工 GUI 两张特写（工艺 `Xa` OPC 虚线圆 + 四腿、0202 呼吸阀虚线唇）——集成测试已钉住数字，截图待有 GUI 的一轮补进
+`docs/evidence/`。
+
 ## 门禁记录
 
-- 2026-09-20：开单（本提交，会话 fable-5-1-45），四图实测数字见「事实」；待门禁（P-E1 … P-E8 按推荐）。
+- 2026-09-20：开单（OCS `6a4cbbad`，会话 fable-5-1-45），四图实测数字见「事实」；待门禁（P-E1 … P-E8 按推荐）。
+- 2026-09-20：用户在同一会话批准 P-E1 … P-E8，全按推荐，直接开 E1。
+- 2026-09-20：E1 落地（pid-parse `7e69b8a`，同一会话）；OCS 跟随编译的最小改动随 E2 提交。
+- 2026-09-20：E2 落地（OCS `3b8af2ed`，pid-parse `1fd69db`；会话 fable-5-1-8 接手 fable-5-1-45 的交接）；E3 台账随本提交。
+  手工 GUI 特写两张未截。
