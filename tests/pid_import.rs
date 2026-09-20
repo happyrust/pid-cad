@@ -174,7 +174,8 @@ fn placement_assignments_render_as_sheet_text_without_null_placeholders() {
         );
     }
     assert!(
-        doc.entities().all(|entity| !matches!(entity, EntityType::Text(text) if text.value.contains("NULL"))),
+        doc.entities()
+            .all(|entity| !matches!(entity, EntityType::Text(text) if text.value.contains("NULL"))),
         "a symbol-library NULL template leaked into visible drawing text"
     );
 }
@@ -479,6 +480,87 @@ fn dashed_line_work_carries_a_linetype_matching_the_decoded_pattern() {
         seen.iter().all(|m| *m == metric || *m == imperial),
         "an unexpected dash pattern reached the drawing: {seen:?}"
     );
+}
+
+/// A cached body's stroke dashes the way its own storage's `StyleCluster`
+/// says, under the solid style its placement names (plan 2026-09-20, P-E1 /
+/// P-E8). The placement style repaints colour and width -- the off-page
+/// connector's `#00FEA0` undercoat is olive on the sheet, as
+/// `a_symbol_body_draws_in_the_style_its_placement_names` pins for DWG-0201
+/// -- and leaves the dash, which no placement style of the corpus names, to
+/// the stroke.
+///
+/// Measured on 2026-09-20 over the 41 bodies the four fixtures' 107
+/// placements name: 57 visible dashed strokes, all 3.5 / 1.75 mm -- 工艺's
+/// nine off-page connectors (`Xa` x3, `Xa chu` x6: a dashed circle and four
+/// dashed legs each), DWG-0202's arrester breather valve(RD) (8, one of them
+/// the B-spline lip) and Wastewater Pit (4). D06 and DWG-0201 dash only on
+/// the heat tracing the file switches off, so nothing dashed reaches their
+/// symbol layer. Before this every one of the 57 drew solid.
+#[test]
+fn a_cached_strokes_dash_is_its_own_storages_not_its_placements() {
+    let metric = vec![3500_i64, 1750];
+    for (name, expected, placement_palette) in [
+        ("工艺管道及仪表流程-1.pid", 45usize, Some(" 35 #808000")),
+        ("DWG-0202GP06-01.pid", 12, None),
+        ("D06.pid", 0, None),
+        ("DWG-0201GP06-01.pid", 0, None),
+    ] {
+        let Some(doc) = import_from_cache(name) else {
+            continue;
+        };
+        let mut dashed = 0usize;
+        let mut patterns: std::collections::BTreeSet<Vec<i64>> = std::collections::BTreeSet::new();
+        let mut palette: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for entity in of_role(&doc, "symbol") {
+            let common = entity.common();
+            let linetype = common.linetype.as_str();
+            if !linetype.starts_with("PID-DASH-") {
+                continue;
+            }
+            dashed += 1;
+            let lt = doc.line_types.get(linetype).unwrap_or_else(|| {
+                panic!("{name}: {linetype} is named by a symbol stroke but absent from the table")
+            });
+            patterns.insert(
+                lt.elements
+                    .iter()
+                    .map(|e| (e.length.abs() * 1000.0).round() as i64)
+                    .collect(),
+            );
+            match (common.color, common.line_weight) {
+                (
+                    acadrust::types::Color::Rgb { r, g, b },
+                    acadrust::types::LineWeight::Value(w),
+                ) => {
+                    palette.insert(format!("{w:>3} #{r:02X}{g:02X}{b:02X}"));
+                }
+                other => panic!("{name}: a dashed symbol stroke is not painted: {other:?}"),
+            }
+        }
+        assert_eq!(
+            dashed, expected,
+            "{name}: symbol strokes drawing dashed (palette {palette:?}, patterns {patterns:?})"
+        );
+        if expected == 0 {
+            continue;
+        }
+        let one_pattern: std::collections::BTreeSet<Vec<i64>> =
+            std::iter::once(metric.clone()).collect();
+        assert_eq!(
+            patterns, one_pattern,
+            "{name}: the corpus dashes its symbol strokes one way, 3.5 / 1.75 mm"
+        );
+        if let Some(placement_palette) = placement_palette {
+            let one_paint: std::collections::BTreeSet<String> =
+                std::iter::once(placement_palette.to_string()).collect();
+            assert_eq!(
+                palette, one_paint,
+                "{name}: the dashed strokes are painted in their placements' style, \
+                 not the `#00FEA0` 0.50 their own storage authors them in"
+            );
+        }
+    }
 }
 
 /// Lettering comes in at the height the drawing's character style states.

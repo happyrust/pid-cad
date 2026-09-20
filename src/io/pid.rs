@@ -30,7 +30,7 @@ use pid_parse::style_link::{
     DashPattern, LineStyleIndex, MarkerStatus, PointMarker, ResolvedFill, ResolvedLineStyle,
     StyleNameIndex, TextAlignment,
 };
-use pid_parse::symbol_library::{PrimitiveStyle, StyledPrimitive, SymbolLibrary, SymbolPrimitive};
+use pid_parse::symbol_library::{PrimitiveStyle, SymbolLibrary, SymbolPrimitive};
 use pid_parse::{
     build_normalized_geometry, NormalizedPidGeometry, PidDrawingUnits, PidGeometryConfidence,
     PidGraphicKind, PidParser, PidPoint, PidSemanticHit, PidSemanticIndex, PidSourceLayer,
@@ -311,9 +311,34 @@ impl PidSymbolSource {
     /// [`build_entities`] and [`PlacementMeasures`], so what is on screen
     /// and what the panel says is the size of are one set of strokes.
     fn strokes(self, body: &PidSymbolDefinition) -> Vec<&SymbolPrimitive> {
+        self.styled_strokes(body)
+            .into_iter()
+            .map(|(primitive, _)| primitive)
+            .collect()
+    }
+
+    /// [`Self::strokes`], each with the style the body's own storage states
+    /// for it -- the coat [`paint_symbol_stroke`] lays under the placement's
+    /// (plan 2026-09-20, P-E1) -- or `None` where the body carries none for
+    /// the stroke: its lettering, or a body read back from before the field
+    /// existed.
+    fn styled_strokes(
+        self,
+        body: &PidSymbolDefinition,
+    ) -> Vec<(&SymbolPrimitive, Option<&PrimitiveStyle>)> {
         match self {
-            Self::Cache => body.visible_primitives().collect(),
-            Self::Library => body.primitives.iter().collect(),
+            Self::Cache => body.visible_strokes().collect(),
+            Self::Library => body
+                .primitives
+                .iter()
+                .enumerate()
+                .map(|(index, primitive)| {
+                    (
+                        primitive,
+                        body.primitive_styles.get(index).and_then(Option::as_ref),
+                    )
+                })
+                .collect(),
         }
     }
 }
@@ -739,7 +764,10 @@ pub fn load_pid_with_options(
     // into named document linetypes now, so `apply_symbology` can name each
     // dashed line to one and the renderer dashes it like any other linetype.
     // See pid-parse's `docs/analysis/2026-08-07-jstyle-simple-dash-type-linetype.md`.
-    let dash_linetypes = register_dash_linetypes(&mut doc, &styles);
+    // The bodies the drawing caches state a dash of their own per stroke
+    // (plan 2026-09-20, P-E8), pooled into the same table so a symbol's
+    // internal dash draws through the same path.
+    let dash_linetypes = register_dash_linetypes(&mut doc, &styles, &geometry.symbol_definitions);
     // Same pooling for the typefaces the character styles name, so a label can
     // reference a document text style the way any other text entity does.
     let font_styles = register_text_styles(&mut doc, &text_heights);
@@ -816,6 +844,7 @@ pub fn load_pid_with_options(
                     symbology,
                     line_work,
                     &mut symbol_bodies,
+                    &dash_linetypes,
                 ),
             },
             PidGeometryConfidence::Inferred => build_inferred(&entity.kind, projection),
@@ -1961,9 +1990,12 @@ fn apply_text_style(entity: &mut EntityType, style_name: &str) {
 /// why the test is a prefix — and the placed symbol bodies (`PID-SYMBOL`),
 /// whose placement
 /// record names one style for the whole body — `igSymbol2d +25` — that wins
-/// over the per-stroke styles the `.sym` states (see [`paint_symbol_stroke`],
+/// over the per-stroke styles the body states (see [`paint_symbol_stroke`],
 /// which ran first and is overwritten here exactly when the placement names a
-/// style). `PID-CONNECTIVITY` is a diagnostic whose layer colour *is* the
+/// style). Colour and width are what it overwrites; the linetype only when
+/// the placement's style names a dash of its own, so a stroke the body dashes
+/// stays dashed under a solid placement style (plan 2026-09-20, P-E1).
+/// `PID-CONNECTIVITY` is a diagnostic whose layer colour *is* the
 /// diagnosis, and repainting it in the drawing's palette would hide the thing
 /// it exists to show.
 fn apply_symbology(
@@ -2009,20 +2041,23 @@ fn apply_symbology(
     // as every other linetype so the renderer dashes it with no special case.
     // A solid line names none and keeps the layer's Continuous default.
     if let Some(dash) = style.dash.as_ref() {
-        if let Some(name) = dash_linetypes.get(&dash_key(dash)) {
+        if let Some(name) = dash_linetypes.get(&dash_key(&dash.segments_mm())) {
             common.linetype = name.clone();
         }
     }
 }
 
-/// A dedup key for a dash pattern: its segment magnitudes, in micrometres.
+/// A dedup key for a dash pattern stated as segment lengths in millimetres:
+/// its segment magnitudes, in micrometres.
 ///
 /// Two patterns that differ only in sign render identically — see
 /// [`build_dash_linetype`] — so the key is built from magnitudes, and the
 /// micrometre rounding folds together patterns that agree to within a
-/// nanometre of float noise.
-fn dash_key(dash: &DashPattern) -> Vec<i64> {
-    dash.segments_mm()
+/// nanometre of float noise. Both sources of a dash speak this vocabulary:
+/// the drawing's line styles through [`DashPattern::segments_mm`], a cached
+/// body's strokes through [`PrimitiveStyle::dash_mm`].
+fn dash_key(segments_mm: &[f64]) -> Vec<i64> {
+    segments_mm
         .iter()
         .map(|mm| (mm.abs() * 1_000.0).round() as i64)
         .collect()
@@ -2035,24 +2070,37 @@ fn dash_key(dash: &DashPattern) -> Vec<i64> {
 /// named entries in the same table [`crate::io::linetypes::populate_document`]
 /// fills lets [`apply_symbology`] name a line to one and the renderer dash it
 /// through its ordinary `resolve_pattern` path — no differently from a linetype
-/// a DWG shipped. The names are assigned over a `BTreeMap`, so they are stable
-/// for a given file.
+/// a DWG shipped. The drawing's own line styles are pooled first, over a
+/// `BTreeMap`, then the dash each stroke of the bodies the drawing caches
+/// states for itself (plan 2026-09-20, P-E8), in the cache's order -- so the
+/// names are stable for a given file, and the ones the sheet's line work was
+/// given do not move when a body's dash joins the pool. A library body's dash
+/// is not registered here: which `.sym` a placement falls back to is only
+/// known as it is drawn, so its dash draws exactly when the pool already holds
+/// the pattern (see [`paint_symbol_stroke`]).
 fn register_dash_linetypes(
     doc: &mut CadDocument,
     styles: &LineStyleIndex,
+    cached_bodies: &[PidSymbolDefinition],
 ) -> HashMap<Vec<i64>, String> {
     let mut names: HashMap<Vec<i64>, String> = HashMap::new();
-    for style in styles.values() {
-        let Some(dash) = style.dash.as_ref() else {
-            continue;
-        };
-        let key = dash_key(dash);
+    let drawing = styles
+        .values()
+        .filter_map(|style| style.dash.as_ref())
+        .map(DashPattern::segments_mm);
+    let cached = cached_bodies
+        .iter()
+        .flat_map(|body| body.primitive_styles.iter().flatten())
+        .filter(|style| !style.dash_mm.is_empty())
+        .map(|style| style.dash_mm.clone());
+    for segments_mm in drawing.chain(cached) {
+        let key = dash_key(&segments_mm);
         if key.is_empty() || names.contains_key(&key) {
             continue;
         }
         let name = format!("PID-DASH-{}", names.len() + 1);
         if !doc.line_types.contains(&name) {
-            let mut lt = build_dash_linetype(&name, dash);
+            let mut lt = build_dash_linetype(&name, &segments_mm);
             lt.set_handle(doc.allocate_handle());
             let _ = doc.line_types.add(lt);
         }
@@ -2140,7 +2188,8 @@ fn text_style_name(font: &str) -> String {
     format!("PID-{body}")
 }
 
-/// Build a document linetype from a decoded dash pattern.
+/// Build a document linetype from a decoded dash pattern, stated as its
+/// segment lengths in millimetres.
 ///
 /// The segment lengths are the drawing's own, in millimetres — the unit the
 /// geometry is projected into — so a 3.5 mm dash is 3.5 mm on the sheet. The
@@ -2153,11 +2202,11 @@ fn text_style_name(font: &str) -> String {
 /// only the magnitudes carry over and the alternation is the linetype
 /// convention rather than the file's. That is the one interpretive step
 /// between the decode and the screen.
-fn build_dash_linetype(name: &str, dash: &DashPattern) -> LineType {
+fn build_dash_linetype(name: &str, segments_mm: &[f64]) -> LineType {
     let mut lt = LineType::new(name);
-    lt.description = format!("P&ID dash pattern ({} segments)", dash.len());
+    lt.description = format!("P&ID dash pattern ({} segments)", segments_mm.len());
     let mut pattern_length = 0.0;
-    for (i, mm) in dash.segments_mm().iter().enumerate() {
+    for (i, mm) in segments_mm.iter().enumerate() {
         let len = mm.abs();
         pattern_length += len;
         let element = if len < 1e-9 {
@@ -2178,6 +2227,9 @@ fn build_dash_linetype(name: &str, dash: &DashPattern) -> LineType {
 /// they draw with (see [`discipline_layer`]). It is decided by the caller and
 /// passed in rather than patched afterwards, so there is one place that
 /// answers "which layer is this line on".
+///
+/// `dash_linetypes` is the pool [`register_dash_linetypes`] filled, for the
+/// dash a symbol body's own stroke style names (see [`paint_symbol_stroke`]).
 fn build_entities(
     kind: &PidGraphicKind,
     bodies: BodySources<'_>,
@@ -2185,6 +2237,7 @@ fn build_entities(
     symbology: Option<&ResolvedLineStyle>,
     line_work: &str,
     symbol_bodies: &mut SymbolBodies,
+    dash_linetypes: &HashMap<Vec<i64>, String>,
 ) -> Vec<EntityType> {
     match kind {
         PidGraphicKind::Line { start, end } => {
@@ -2276,10 +2329,11 @@ fn build_entities(
             // the template, every sheet of it merged. The library stands in
             // where the drawing caches nothing drawable. Under `Library` the
             // order is the one this importer had before the plan. Either
-            // body carries no style that survives: `apply_symbology`
-            // repaints it in the placement's style afterwards, so the two
-            // routes end up in the same colour and width. Measured in
-            // pid-parse's `docs/analysis/
+            // body arrives painted in its own per-stroke styles, and only
+            // the dash of that coat survives: `apply_symbology` repaints the
+            // colour and width in the placement's style afterwards, so the
+            // two routes end up in the same colour and width (plan
+            // 2026-09-20, P-E1). Measured in pid-parse's `docs/analysis/
             // 2026-09-07-placement-tail-names-the-cached-definition.md`.
             let symbol_path = symbol_path.as_deref();
             let BodySources {
@@ -2289,14 +2343,27 @@ fn build_entities(
             } = bodies;
             let body = match source {
                 PidSymbolSource::Cache => {
-                    cached_body_entities(cached, source, &placement, symbol_bodies).or_else(|| {
-                        library_body_entities(library, symbol_path, &placement, symbol_bodies)
-                    })
+                    cached_body_entities(cached, source, &placement, symbol_bodies, dash_linetypes)
+                        .or_else(|| {
+                            library_body_entities(
+                                library,
+                                symbol_path,
+                                &placement,
+                                symbol_bodies,
+                                dash_linetypes,
+                            )
+                        })
                 }
-                PidSymbolSource::Library => {
-                    library_body_entities(library, symbol_path, &placement, symbol_bodies)
-                        .or_else(|| cached_body_entities(cached, source, &placement, symbol_bodies))
-                }
+                PidSymbolSource::Library => library_body_entities(
+                    library,
+                    symbol_path,
+                    &placement,
+                    symbol_bodies,
+                    dash_linetypes,
+                )
+                .or_else(|| {
+                    cached_body_entities(cached, source, &placement, symbol_bodies, dash_linetypes)
+                }),
             };
 
             // Only fall back to the marker when the body is genuinely
@@ -2668,24 +2735,26 @@ struct BodySources<'a> {
 }
 
 /// The body the drawing caches for a placement, drawn at it: the strokes the
-/// source selects (see [`PidSymbolSource::strokes`]), or `None` when the
-/// drawing caches nothing for the placement or nothing of it draws. Tallies
-/// the body and, by default, the strokes left out for sitting on a layer the
-/// file switches off (plan 2026-09-19, P-D2) -- a count the placement earns
-/// whether or not what remains is enough to draw, since those strokes are
-/// not drawn either way.
+/// source selects (see [`PidSymbolSource::strokes`]), each in the style its
+/// own storage states for it (the coat [`apply_symbology`] paints over), or
+/// `None` when the drawing caches nothing for the placement or nothing of it
+/// draws. Tallies the body and, by default, the strokes left out for sitting
+/// on a layer the file switches off (plan 2026-09-19, P-D2) -- a count the
+/// placement earns whether or not what remains is enough to draw, since
+/// those strokes are not drawn either way.
 fn cached_body_entities(
     body: Option<&PidSymbolDefinition>,
     source: PidSymbolSource,
     at: &Placement<'_>,
     symbol_bodies: &mut SymbolBodies,
+    dash_linetypes: &HashMap<Vec<i64>, String>,
 ) -> Option<Vec<EntityType>> {
     let body = body?;
-    let strokes = source.strokes(body);
+    let strokes = source.styled_strokes(body);
     symbol_bodies.hidden_strokes_skipped += body.primitives.len() - strokes.len();
     let entities: Vec<EntityType> = strokes
         .into_iter()
-        .filter_map(|primitive| shape_primitive(primitive, at))
+        .filter_map(|(primitive, style)| place_primitive(primitive, style, at, dash_linetypes))
         .collect();
     if entities.is_empty() {
         return None;
@@ -2703,6 +2772,7 @@ fn library_body_entities(
     symbol_path: Option<&str>,
     at: &Placement<'_>,
     symbol_bodies: &mut SymbolBodies,
+    dash_linetypes: &HashMap<Vec<i64>, String>,
 ) -> Option<Vec<EntityType>> {
     let body = library
         .zip(symbol_path)
@@ -2710,7 +2780,9 @@ fn library_body_entities(
     let entities: Vec<EntityType> = body
         .primitives
         .iter()
-        .filter_map(|primitive| place_primitive(primitive, at))
+        .filter_map(|styled| {
+            place_primitive(&styled.primitive, styled.style.as_ref(), at, dash_linetypes)
+        })
         .collect();
     if entities.is_empty() {
         return None;
@@ -2765,29 +2837,46 @@ impl Placement<'_> {
     }
 }
 
-/// Draw one primitive of a symbol body at its placement, in the colour and
-/// width the symbol states for it.
-fn place_primitive(styled: &StyledPrimitive, at: &Placement<'_>) -> Option<EntityType> {
-    let mut entity = shape_primitive(&styled.primitive, at)?;
-    paint_symbol_stroke(&mut entity, styled.style);
+/// Draw one primitive of a symbol body at its placement, in the colour,
+/// width and dash the symbol states for it -- the one route both bodies
+/// take, the drawing's cached one and the library's.
+fn place_primitive(
+    primitive: &SymbolPrimitive,
+    style: Option<&PrimitiveStyle>,
+    at: &Placement<'_>,
+    dash_linetypes: &HashMap<Vec<i64>, String>,
+) -> Option<EntityType> {
+    let mut entity = shape_primitive(primitive, at)?;
+    paint_symbol_stroke(&mut entity, style, dash_linetypes);
     Some(entity)
 }
 
-/// Give a symbol's stroke the colour and width its own `.sym` states.
+/// Give a symbol's stroke the colour, width and dash its own body states --
+/// the `.sym`'s style table for a library body, the storage's own
+/// `StyleCluster` for a cached one.
 ///
-/// This is the fallback coat, not the final one. A placement record *does*
+/// This is the undercoat, not the final one. A placement record *does*
 /// name a style — `igSymbol2d +25`, a slot this route once believed absent —
 /// and where it resolves, [`apply_symbology`] repaints the whole body over
 /// what is painted here: DWG-0201's vessel is authored black in
 /// `Parametric Manifold.sym` and SmartPlant screens it in the placement's
 /// `#800000`. What this coat still decides is the body of a placement whose
-/// style does not resolve, and the strokes' dash question either way. A
-/// symbol whose own style index names no line style keeps `ByLayer`, which
-/// is what it drew as before this.
+/// style does not resolve, and the strokes' dash either way (plan
+/// 2026-09-20, P-E1): the placement styles of the corpus are all solid, and
+/// the dashed circle and legs of an off-page connector are dashed by the
+/// symbol's own style alone. A symbol whose own style index names no line
+/// style keeps `ByLayer`, which is what it drew as before this.
 ///
-/// The dash such a style can also name is not carried across yet; a dashed
-/// symbol stroke still draws solid.
-fn paint_symbol_stroke(entity: &mut EntityType, style: Option<PrimitiveStyle>) {
+/// The dash is named to the `PID-DASH-<n>` linetype
+/// [`register_dash_linetypes`] pooled for its pattern. A pattern the pool
+/// does not hold -- only a library body can state one, since the cached
+/// bodies were pooled up front -- draws solid, as it did before, and says
+/// so in the log.
+fn paint_symbol_stroke(
+    entity: &mut EntityType,
+    style: Option<&PrimitiveStyle>,
+    dash_linetypes: &HashMap<Vec<i64>, String>,
+) {
     let Some(style) = style else {
         return;
     };
@@ -2801,6 +2890,16 @@ fn paint_symbol_stroke(entity: &mut EntityType, style: Option<PrimitiveStyle>) {
     let hundredths = (style.width_mm * 100.0).round();
     if (0.0..=211.0).contains(&hundredths) {
         common.line_weight = LineWeight::Value(hundredths as i16);
+    }
+    if style.dash_mm.is_empty() {
+        return;
+    }
+    match dash_linetypes.get(&dash_key(&style.dash_mm)) {
+        Some(name) => common.linetype = name.clone(),
+        None => log::debug!(
+            "a symbol stroke names a dash pattern {:?} mm the drawing did not pool; drawing it solid",
+            style.dash_mm
+        ),
     }
 }
 
@@ -3224,6 +3323,7 @@ mod tests {
             ],
             primitives: vec![line(0.0), line(0.1), line(0.2), line(0.3), line(0.4)],
             primitive_layers: vec![8, 9, 10, 9],
+            primitive_styles: Vec::new(),
             dimensions: Vec::new(),
             variables: Vec::new(),
             template: None,
@@ -3245,6 +3345,153 @@ mod tests {
         assert_eq!(
             xs(PidSymbolSource::Library.strokes(&body)),
             vec![0.0, 0.1, 0.2, 0.3, 0.4]
+        );
+    }
+
+    /// A cached stroke's dash is its own storage's, and its colour and width
+    /// are its placement's (plan 2026-09-20, P-E1 / P-E8): an off-page
+    /// connector's dashed circle, authored `#00FEA0` 0.50 with a 3.5 / 1.75
+    /// dash, is repainted olive 0.35 by the solid placement style and stays
+    /// dashed; its solid leg stays solid; a stroke with no style of its own
+    /// takes only the placement's paint. The body's pattern joins the pool
+    /// after the sheet's own, whose name does not move. A placement style
+    /// that names a dash of its own wins over the stroke's.
+    #[test]
+    fn a_cached_strokes_dash_is_its_own_and_its_colour_its_placements() {
+        use pid_parse::style_link::{LineSymbology, StyleHop};
+        use pid_parse::{PidSymbolDefinitionRef, PidSymbolSheetLayer};
+
+        let own = |dash_mm: Vec<f64>| PrimitiveStyle {
+            rgb: [0x00, 0xFE, 0xA0],
+            width_mm: 0.5,
+            dash_mm,
+        };
+        let body = PidSymbolDefinition {
+            reference: PidSymbolDefinitionRef {
+                site: 7559,
+                sheet: 155,
+            },
+            layers: vec![8],
+            sheet_layers: vec![PidSymbolSheetLayer {
+                oid: 8,
+                name: Some("Default".to_string()),
+                displayed: Some(true),
+            }],
+            primitives: vec![
+                SymbolPrimitive::Circle {
+                    center: (0.0, 0.0),
+                    radius: 0.005,
+                },
+                SymbolPrimitive::Line {
+                    start: (0.0, 0.0),
+                    end: (0.01, 0.0),
+                },
+                SymbolPrimitive::Line {
+                    start: (0.0, 0.0),
+                    end: (0.0, 0.01),
+                },
+            ],
+            primitive_layers: vec![8, 8, 8],
+            primitive_styles: vec![Some(own(vec![3.5, 1.75])), Some(own(Vec::new())), None],
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+            template: None,
+        };
+        // The placement's style: olive 0.35, `COLORREF` `0x00BBGGRR`.
+        let placement_style = |dash: Option<DashPattern>| ResolvedLineStyle {
+            style_id: 25,
+            symbology: LineSymbology {
+                width_m: 0.000_35,
+                colour: 0x0000_8080,
+            },
+            dash,
+            marker: None,
+            hop: StyleHop::Direct,
+        };
+        let sheet_dash = || DashPattern::from_segments_m(&[0.001, 0.001]);
+
+        let mut styles = LineStyleIndex::new();
+        styles.insert(("/".to_string(), 1), placement_style(sheet_dash()));
+        let mut doc = CadDocument::new();
+        let pool = register_dash_linetypes(&mut doc, &styles, std::slice::from_ref(&body));
+        assert_eq!(
+            pool.get(&vec![1000, 1000]).map(String::as_str),
+            Some("PID-DASH-1"),
+            "the sheet's own pattern is pooled first and keeps its name"
+        );
+        assert_eq!(
+            pool.get(&vec![3500, 1750]).map(String::as_str),
+            Some("PID-DASH-2"),
+            "the cached body's pattern joins the pool after it"
+        );
+        assert!(doc.line_types.contains("PID-DASH-2"));
+
+        let insertion = PidPoint { x: 0.0, y: 0.0 };
+        let at = Placement {
+            insertion: &insertion,
+            rotation: 0.0,
+            scale: [1.0, 1.0],
+            projection: Projection {
+                mm_per_unit: 1000.0,
+                band: SheetBand::for_page(None),
+            },
+        };
+        let mut tally = SymbolBodies::default();
+        let mut drawn =
+            cached_body_entities(Some(&body), PidSymbolSource::Cache, &at, &mut tally, &pool)
+                .expect("three strokes draw");
+        assert_eq!(drawn.len(), 3);
+        let coat = |entity: &EntityType| {
+            let common = entity.common();
+            (common.color, common.line_weight, common.linetype.clone())
+        };
+        let fresh =
+            Line::from_points(Vector3::new(0.0, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0)).common;
+        let as_built = fresh.linetype.clone();
+        let olive = Color::from_rgb(0x80, 0x80, 0x00);
+        assert_eq!(
+            coat(&drawn[0]),
+            (
+                Color::from_rgb(0x00, 0xFE, 0xA0),
+                LineWeight::Value(50),
+                "PID-DASH-2".to_string()
+            ),
+            "the undercoat is the body's own colour, width and dash"
+        );
+        assert_eq!(
+            coat(&drawn[1]).2,
+            as_built,
+            "a solid stroke names no linetype"
+        );
+        assert_eq!(
+            coat(&drawn[2]),
+            (fresh.color, fresh.line_weight, as_built.clone()),
+            "a stroke with no style of its own is left as built"
+        );
+
+        for entity in &mut drawn {
+            apply_symbology(entity, &placement_style(None), &pool);
+        }
+        assert_eq!(
+            coat(&drawn[0]),
+            (olive, LineWeight::Value(35), "PID-DASH-2".to_string()),
+            "a solid placement style repaints colour and width and leaves the dash"
+        );
+        assert_eq!(
+            coat(&drawn[1]),
+            (olive, LineWeight::Value(35), as_built.clone())
+        );
+        assert_eq!(coat(&drawn[2]), (olive, LineWeight::Value(35), as_built));
+
+        for entity in &mut drawn {
+            apply_symbology(entity, &placement_style(sheet_dash()), &pool);
+        }
+        assert!(
+            drawn
+                .iter()
+                .all(|entity| entity.common().linetype == "PID-DASH-1"),
+            "a placement style that names a dash of its own wins over the stroke's: {:?}",
+            drawn.iter().map(coat).collect::<Vec<_>>()
         );
     }
 
