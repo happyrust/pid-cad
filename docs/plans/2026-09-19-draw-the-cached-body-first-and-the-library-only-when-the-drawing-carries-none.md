@@ -16,6 +16,7 @@
 > 五图棘轮钉住（见 C1 进度）。**C2 落地**：OCS `641cec3b`（会话 fable-5-1-30，接手上一会话未提交的现场）——先缓存后库、关闭层不画、
 > `OCS_PID_SYMBOL_SOURCE` 一轮、`extent=` 改量可见笔画；顺带裁出 **`igArc2d` 顺时针**（pid-parse `b6a70a7`），弧从此不再画成补弧；
 > `pid_import` 54/54 × 四种环境组合（见 C2 进度）。**C3 收口**：双仓台账齐，本计划关闭；开口见「结算」。
+> **P-D3 的开关已于 2026-09-20 退役**（OCS `fbcd321b`，退役单 `2026-09-20-retire-the-library-first-symbol-source.md`）。
 
 ## 决策记录
 
@@ -23,7 +24,7 @@
 |---|------|------|------|
 | P-D1 | 谁先上屏幕 | **有缓存本体（非空）就画缓存，库只在缓存缺失或为空时用**——翻转现状。理由：缓存是 SmartPlant 放置的那个 flavor（`JFlavorManager`），语料 109 个放置 **109/109 有缓存**、库只有 97/109；两者都有的 97 个里 **仅 26 个逐图元相同**，其余 71 个不同的四类（见背景）里没有一类是「库对、缓存错」——库多画的是 `.sym` 的另一张 sheet、另一个修订版、或同名不同物；缓存独有的是四个参数化实例的实际几何。库仍是退路：站点自定义符号（工艺 `Xa*.sym` 12 个放置）今天已经只能靠缓存 | ⭕ |
 | P-D2 | 缓存本体里处于**关闭图层**上的图元 | **不画**。缓存本体的图元各在符号内部的一层（`Default` / `Heat Trace` / `Jacket` / `Label` / `Construction` / `Dimension`），文件给每层一个显示位；`Heat Trace` / `Jacket` / `Label` / `Construction` / `Dimension` 在五图全部为关。SmartPlant 屏幕上看不见它们，OCS 也不画：伴热线、夹套线、`NULL` 占位文字、参数化本体的构造短线（Manifold 4 条、Drum 4 + 1 条）。**不**进 `PID-HIDDEN`、**不**进视图过滤器、**不**按同名图纸图层归层——符号内部层不是图纸图层，`Heat Trace` 是符号作者的分层，不是这张图的；跳过的数量进日志。库路径今天两类都画（`.sym` 读取器不带层），所以这一条是缓存优先带来的**净增保真**，不是补偿 | ⭕ |
-| P-D3 | 要不要留旧行为的开关 | **留一轮**：环境变量 `OCS_PID_SYMBOL_SOURCE=library` 恢复「先库后缓存」，默认（未设 / 空 / 不认识）= `cache`；与 `OCS_PID_LAYER_MODE` 同款读法与日志；`pid_import` 两值都跑。下一轮若没人用就退役。备选「不留开关」：省一个环境变量，但 Remarks / Item Note & Label 那类注记符号在 工艺 / 0201 上形状变化很大，留一条回到旧图的路一轮，代价小 | ⭕ |
+| P-D3 | 要不要留旧行为的开关 | **留一轮**：环境变量 `OCS_PID_SYMBOL_SOURCE=library` 恢复「先库后缓存」，默认（未设 / 空 / 不认识）= `cache`；与 `OCS_PID_LAYER_MODE` 同款读法与日志；`pid_import` 两值都跑。下一轮若没人用就退役。备选「不留开关」：省一个环境变量，但 Remarks / Item Note & Label 那类注记符号在 工艺 / 0201 上形状变化很大，留一条回到旧图的路一轮，代价小。**2026-09-20 已退役**（OCS `fbcd321b`，用户指示不等 P-D8 截图） | ⭕ |
 | P-D4 | 缓存本体里的文字 | 与图元同规则：在关闭层（`Label`）上的不画——语料里缓存本体的文字**全部**在关闭层上（按放置累计 0201 14 条 / 0202 22 / D06 2 / 工艺 42 / A01 0），内容是 `NULL` / `NULLNULL` 占位，外加 Drawing Description 那条 `说 明`（0201 / 0202 各 1）；`carries_a_label` 的过滤对开着的层上的文字继续适用（语料里没有）。库路径多画的 `LGM` / `LTM` / `PT` 字样随之不再出现——它们是 `.sym` 的模板字，SmartPlant 屏幕上的仪表位号来自图纸自己的文字记录，不是符号本体 | ⭕ |
 | P-D5 | 样式 | 不变：`apply_symbology` 按放置样式重涂，两条路今天就都这样（调色板测试的四个类颜色全来自放置）。缓存存储自己的 `StyleCluster` 仍不接（09-07 开口，另议） | ⭕ |
 | P-D6 | 变换 | 不变：缓存本体走同一个 `Placement::apply`（旋转 / 缩放 / 镜像）——K2 的 `extent=` 已经这样量，本轮之后画出来的与面板说的同一份几何 | ⭕ |
@@ -253,9 +254,10 @@ pid-parse 多一条提交、OCS 对调两角；C1 风险项「没有显示位的
 
 **本轮之后还开着的：**
 
-- `OCS_PID_SYMBOL_SOURCE=library` 的退役（下一轮没人用就删；连带 `a_placement_without_a_library_body…` 后半段、
-  `the_two_symbol_sources_differ…`、`a_symbols_lettering_follows…` 里靠 library 源钉的旧数字一起删）——
-  **2026-09-20 已开单** `2026-09-20-retire-the-library-first-symbol-source.md`（要拆的清单、两条开单条件、验收）。
+- ~~`OCS_PID_SYMBOL_SOURCE=library` 的退役（下一轮没人用就删；连带 `a_placement_without_a_library_body…` 后半段、
+  `the_two_symbol_sources_differ…`、`a_symbols_lettering_follows…` 里靠 library 源钉的旧数字一起删）~~——
+  **2026-09-20 已开单并退役** `2026-09-20-retire-the-library-first-symbol-source.md`（OCS `fbcd321b`；P-D7 那张 11 个放置的
+  `extent=` 名单挪进 `a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers`，文字颜色规则改成 `apply_symbology` 单测）。
 - ~~缓存存储自己的 `StyleCluster`（09-07 开口，登记不做）~~——**2026-09-20 已开单并落地** `2026-09-20-a-cached-body-carries-its-own-stroke-styles.md`
   （四图实测：被点名本体的 470 笔可见笔画在各自存储的 `StyleCluster` 里全部解析、颜色线宽与 `.sym` 逐笔一致；放置样式 107/107 解析，
   「落 `ByLayer`」语料 0 例；差的是**虚线**——0202 / 工艺 11 个放置的 57 笔可见虚线今天画成实线。P-D5 的「放置样式压在上面」不变，

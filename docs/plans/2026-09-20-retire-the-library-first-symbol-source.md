@@ -2,7 +2,9 @@
 
 > 承接 `2026-09-19-draw-the-cached-body-first-and-the-library-only-when-the-drawing-carries-none.md` 的 P-D3：开关**留一轮**，
 > 「下一轮若没人用就退役」。那份计划 2026-09-19 关闭（OCS `641cec3b` / `ef93f6ba` / `1ff0f4af` / `3ce6662e`，pid-parse `08fc95a` /
-> `b6a70a7`），本单把退役要动的东西一次列清，到时候照单做。**状态：待办，未排期；不动代码。**
+> `b6a70a7`），本单把退役要动的东西一次列清，到时候照单做。
+> **状态：已退役（2026-09-20，OCS `fbcd321b`，会话 fable-5-1-8）。** 用户在逐笔样式计划（`2026-09-20-a-cached-body-carries-its-own-stroke-styles.md`）
+> 收口后直接指示开本单；开单条件第 2 条（P-D8 截图）按用户指示**不等**，在此登记。进度见文末。
 
 ## 开单条件（两条都满足才动）
 
@@ -60,6 +62,27 @@
 | 把开关改成导入选项 / UI 保留下来 | 09-19 计划已登记不做：与 `OCS_PID_LAYER_MODE` 同一口径，环境变量一轮即退 |
 | 顺手退役 `OCS_PID_LAYER_MODE` | 另一条线（09-07 计划遗留，等 DXF 下游消费方定用法），不混进来 |
 
+## 进度（2026-09-20，OCS `fbcd321b`）
+
+照「要拆的」做，两处按单上留的选择落笔：
+
+- `PidImportOptions` / `load_pid_with_options` **删**，折回 `load_pid_with_layer_mode`（没有第二个选项要进来）；测试侧 `import_with` 换成
+  `import_in_mode(name, PidLayerMode)`，`import_from_cache` 全部折回 `import`，`import_without_library` 去掉 `source`。
+- `a_symbols_lettering_follows…` 走 **(a)**：颜色规则改成 `io::pid::tests::a_symbols_lettering_takes_its_placements_colour_and_nothing_else`
+  （合成 `PID-SYMBOL` 上的 `Text` + `#008000` 放置样式 → 取放置颜色、不带线宽、字高字面不动；`PID-TEXT` 上的不碰）；集成测试留下缓存那一半，
+  改名 `a_cached_bodys_lettering_stays_on_its_switched_off_layer`。
+- P-D7 的 11 个放置名单挪进 `a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers` 第 5 段（只钉现值，旧的整体值写在注释里）。
+- `pid.rs`：`SYMBOL_SOURCE_ENV` / `PidSymbolSource`（含 E2 刚加的 `styled_strokes`）/ `PidImportOptions` 全删，缓存路径恒取 `visible_strokes()`、
+  `PlacementMeasures` 恒量 `visible_primitives()`；`BodySources` 去 `source`；`build_entities` 只剩缓存 → 库 → 标记圆；那行 info 日志删；
+  `cache_bodies` / `library_bodies` / `hidden_strokes_skipped` 保留。单测 `the_source_decides…` 改名
+  `a_cached_body_draws_only_the_strokes_on_its_displayed_layers`，顺带钉 `cached_body_entities` 的计数（1 个本体、2 笔跳过）。
+- user-guide 两处删；09-19 计划头部 / P-D3 行 / 结算第一条改标；`remember` 一条替代 `mem-99`。
+
+验证：`--lib io::pid::tests` 9 → **10**；`pid_import` 55 → **53**（删 `the_symbol_source_defaults…`、`the_two_symbol_sources_differ…`
+两条），`OCS_PID_LAYER_MODE` 两值全绿；`rg OCS_PID_SYMBOL_SOURCE|PidSymbolSource|import_from_library` 在 `src/` `tests/` `docs/user-guide.md`
+零命中；`rustfmt --check` 两文件干净；`clippy --lib --test pid_import` 触碰处零命中。
+
 ## 门禁记录
 
 - 2026-09-20：开单（本提交，会话 fable-5-1-30），待排期。
+- 2026-09-20：用户指示直接退役（不等 P-D8 截图）；落地 OCS `fbcd321b`（会话 fable-5-1-8）。
