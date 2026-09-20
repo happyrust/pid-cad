@@ -11,10 +11,7 @@
 use std::path::PathBuf;
 
 use acadrust::{CadDocument, EntityType};
-use OpenCADStudio::io::pid::{
-    load_pid_with_options, PidImportOptions, PidLayerMode, PidSymbolSource, LAYER_MODE_ENV,
-    SYMBOL_SOURCE_ENV,
-};
+use OpenCADStudio::io::pid::{load_pid_with_layer_mode, PidLayerMode, LAYER_MODE_ENV};
 use OpenCADStudio::io::pid_view_filter::{
     switch_role, switch_sheet_layer, PidViewFilter, PidViewSummary,
 };
@@ -35,11 +32,11 @@ fn fixture(name: &str) -> Option<PathBuf> {
 
 /// The fixture as the application opens it: under the layer mode
 /// `OCS_PID_LAYER_MODE` selects, the taxonomy unless whoever runs the suite
-/// set `sheet`, and drawing its symbols from the body `OCS_PID_SYMBOL_SOURCE`
-/// selects, the drawing's own cache unless the suite is run with `library`.
-/// A test that reaches its entities by `role=` and pins nothing read off a
-/// symbol body passes every way, which is how the suite runs green under all
-/// four combinations (plans 2026-09-07 L3 and 2026-09-19 C2).
+/// set `sheet`, and drawing its symbols from the bodies the drawing itself
+/// caches (plan 2026-09-19; the `library` way back was retired by plan
+/// 2026-09-20-retire-the-library-first-symbol-source). A test that reaches
+/// its entities by `role=` passes either way, which is how the suite runs
+/// green under both layer modes (plan 2026-09-07 L3).
 fn import(name: &str) -> Option<CadDocument> {
     let path = fixture(name)?;
     Some(
@@ -48,54 +45,21 @@ fn import(name: &str) -> Option<CadDocument> {
     )
 }
 
-/// The fixture with both options stated.
-fn import_with(name: &str, options: PidImportOptions) -> Option<CadDocument> {
+/// The fixture with the layer mode stated rather than read from the
+/// environment.
+fn import_in_mode(name: &str, mode: PidLayerMode) -> Option<CadDocument> {
     let path = fixture(name)?;
     Some(
-        load_pid_with_options(&path, options)
-            .unwrap_or_else(|error| panic!("load {} with {options:?}: {error}", path.display())),
+        load_pid_with_layer_mode(&path, mode)
+            .unwrap_or_else(|error| panic!("load {} in {mode:?}: {error}", path.display())),
     )
 }
 
-/// The fixture with the body source stated and the layer mode whatever the
-/// environment selects: what a test that pins numbers read off a symbol body
-/// -- a stroke count, a shell length, an `extent=` -- imports with, since the
-/// two sources draw different strokes (plan 2026-09-19).
-fn import_from(name: &str, source: PidSymbolSource) -> Option<CadDocument> {
-    import_with(
-        name,
-        PidImportOptions {
-            layer_mode: PidLayerMode::from_env(),
-            symbol_source: source,
-        },
-    )
-}
-
-/// The fixture drawn from the bodies the drawing itself caches -- the
-/// default, and the import every number about a symbol body is pinned on.
-fn import_from_cache(name: &str) -> Option<CadDocument> {
-    import_from(name, PidSymbolSource::Cache)
-}
-
-/// The fixture drawn from the library's `.sym` bodies first -- the import as
-/// it was before plan 2026-09-19, kept one round behind
-/// `OCS_PID_SYMBOL_SOURCE=library`.
-fn import_from_library(name: &str) -> Option<CadDocument> {
-    import_from(name, PidSymbolSource::Library)
-}
-
-/// The fixture under the taxonomy layer mode whatever the environment says,
-/// drawn from the cache: what a test about the `PID-*` layers themselves --
-/// which is declared, which opens off, what `PID-HIDDEN` holds -- imports
-/// with.
+/// The fixture under the taxonomy layer mode whatever the environment says:
+/// what a test about the `PID-*` layers themselves -- which is declared,
+/// which opens off, what `PID-HIDDEN` holds -- imports with.
 fn import_in_taxonomy_mode(name: &str) -> Option<CadDocument> {
-    import_with(
-        name,
-        PidImportOptions {
-            layer_mode: PidLayerMode::Taxonomy,
-            symbol_source: PidSymbolSource::Cache,
-        },
-    )
+    import_in_mode(name, PidLayerMode::Taxonomy)
 }
 
 fn layer_of(entity: &EntityType) -> &str {
@@ -506,7 +470,7 @@ fn a_cached_strokes_dash_is_its_own_storages_not_its_placements() {
         ("D06.pid", 0, None),
         ("DWG-0201GP06-01.pid", 0, None),
     ] {
-        let Some(doc) = import_from_cache(name) else {
+        let Some(doc) = import(name) else {
             continue;
         };
         let mut dashed = 0usize;
@@ -2276,13 +2240,10 @@ fn a_symbol_name_is_lettered_beside_the_symbol_it_names() {
 /// balloon at its radius. Its second, 7.57mm ring sits on the symbol's
 /// `Heat Trace` layer, which the file switches off, so neither import draws
 /// it (P-D2) -- the first draft of this test, which drew the whole cache,
-/// looked for both rings.
-///
-/// Under the `library` source the two imports still differ, as they did
-/// before the plan: the library reader merges every `Sheet*` stream of a
-/// `.sym`, so `Ball Valve Type 1` gains a second sheet's 1.59mm circle and
-/// six lines, and the PT's off-layer ring comes back with the cache drawn
-/// whole where the library has no body.
+/// looked for both rings. (The library-first import, which merged every
+/// `Sheet*` of a `.sym` and so drew `Ball Valve Type 1` a second sheet's
+/// 1.59mm circle and six lines, was kept one round behind an environment
+/// switch and is retired -- plan 2026-09-20-retire-the-library-first-symbol-source.)
 ///
 /// The library is found by walking up from the drawing, so the fixture is
 /// copied into a fresh temp directory to take it away. Skips when
@@ -2293,10 +2254,10 @@ fn a_placement_without_a_library_body_draws_the_body_the_drawing_carries() {
         eprintln!("skipping: PID_SYMBOL_LIBRARY is set, so no import is library-less");
         return;
     }
-    let Some(with_library) = import_from_cache("D06.pid") else {
+    let Some(with_library) = import("D06.pid") else {
         return;
     };
-    let Some(without_library) = import_without_library("D06.pid", PidSymbolSource::Cache) else {
+    let Some(without_library) = import_without_library("D06.pid") else {
         return;
     };
 
@@ -2332,32 +2293,6 @@ fn a_placement_without_a_library_body_draws_the_body_the_drawing_carries() {
     assert!(
         embedded >= 30,
         "the cached bodies drew {embedded} entities over six placements"
-    );
-
-    // The old order, for one more round: the library body first, the cache
-    // whole where the library has none.
-    let (Some(library_first), Some(cache_whole)) = (
-        import_from_library("D06.pid"),
-        import_without_library("D06.pid", PidSymbolSource::Library),
-    ) else {
-        return;
-    };
-    let library_radii = radii(&library_first);
-    let whole_radii = radii(&cache_whole);
-    assert_eq!(
-        library_radii,
-        vec![1.27, 1.59, 1.59, 6.35, 7.57],
-        "the library's merged sheets and the PT's ring, as before the plan"
-    );
-    assert_eq!(
-        whole_radii,
-        vec![1.27, 1.59, 6.35, 7.57],
-        "the cache drawn whole keeps the ring on the switched-off layer"
-    );
-    assert_ne!(
-        symbol_strokes(&library_first),
-        symbol_strokes(&cache_whole),
-        "under the library source the two imports differ, as they did"
     );
 }
 
@@ -2412,9 +2347,9 @@ fn symbol_strokes(doc: &CadDocument) -> Vec<String> {
 }
 
 /// The fixture imported from a fresh temp directory, where the walk up from
-/// the drawing finds no symbol library, with the body source stated and the
-/// layer mode the environment's. `None` when the fixture is absent.
-fn import_without_library(name: &str, source: PidSymbolSource) -> Option<CadDocument> {
+/// the drawing finds no symbol library, the layer mode the environment's.
+/// `None` when the fixture is absent.
+fn import_without_library(name: &str) -> Option<CadDocument> {
     let fixture = fixture(name)?;
     let dir = std::env::temp_dir().join(format!(
         "ocs-pid-no-library-{}-{}",
@@ -2427,12 +2362,8 @@ fn import_without_library(name: &str, source: PidSymbolSource) -> Option<CadDocu
     std::fs::create_dir_all(&dir).expect("temp dir");
     let copy = dir.join(name);
     std::fs::copy(&fixture, &copy).expect("copy fixture");
-    let options = PidImportOptions {
-        layer_mode: PidLayerMode::from_env(),
-        symbol_source: source,
-    };
-    let doc = load_pid_with_options(&copy, options)
-        .unwrap_or_else(|error| panic!("load copy with {options:?}: {error}"));
+    let doc = load_pid_with_layer_mode(&copy, PidLayerMode::from_env())
+        .unwrap_or_else(|error| panic!("load copy: {error}"));
     let _ = std::fs::remove_dir_all(&dir);
     Some(doc)
 }
@@ -2452,33 +2383,21 @@ fn bends_one_way(points: &[(f64, f64)]) -> bool {
         && (turns.iter().all(|turn| *turn > 0.0) || turns.iter().all(|turn| *turn < 0.0))
 }
 
-/// The curved lip of `arrester breather valve(RD)` is a B-spline record, and
-/// it reaches the drawing by both routes: the `.sym` reader carries the curve
-/// the library body holds, and the drawing's own cached copy of that body
-/// holds the same curve. Either way it draws as one open polyline of
-/// seventeen vertices -- two knot spans of eight segments, plus the end --
-/// bending one way for its whole length and spanning about a millimetre and
-/// a half, and the two routes put every vertex in the same place. DWG-0202
-/// places the valve once, so there is one such run on `PID-SYMBOL` and no
-/// other.
+/// The curved lip of `arrester breather valve(RD)` is a B-spline record in
+/// the drawing's own cached copy of the body, and it reaches the drawing: one
+/// open polyline of seventeen vertices -- two knot spans of eight segments,
+/// plus the end -- bending one way for its whole length and spanning about a
+/// millimetre and a half. DWG-0202 places the valve once, so there is one
+/// such run on `PID-SYMBOL` and no other, and the curve is on the body's
+/// `Default` layer, so the import that leaves the switched-off layers out
+/// still draws it.
 ///
-/// Before the two readers carried the record, both routes stepped over it
-/// and the valve drew without its lip. Skips when `PID_SYMBOL_LIBRARY` is
-/// set, since the library-less import would not be.
+/// Before the readers carried the record the valve drew without its lip.
+/// (The `.sym` reader carries the same curve, vertex for vertex; it was
+/// pinned against this one under the retired library-first import.)
 #[test]
-fn a_symbols_bspline_lip_reaches_the_drawing_from_either_body() {
-    if std::env::var_os("PID_SYMBOL_LIBRARY").is_some() {
-        eprintln!("skipping: PID_SYMBOL_LIBRARY is set, so no import is library-less");
-        return;
-    }
-    // The library body first, so the two imports still draw two bodies:
-    // under the default source both would draw the cache (plan 2026-09-19).
-    let Some(with_library) = import_from_library("DWG-0202GP06-01.pid") else {
-        return;
-    };
-    let Some(without_library) =
-        import_without_library("DWG-0202GP06-01.pid", PidSymbolSource::Library)
-    else {
+fn a_symbols_bspline_lip_reaches_the_drawing() {
+    let Some(doc) = import("DWG-0202GP06-01.pid") else {
         return;
     };
 
@@ -2516,46 +2435,20 @@ fn a_symbols_bspline_lip_reaches_the_drawing_from_either_body() {
             .filter(|points| bends_one_way(points))
             .collect()
     };
-    let library_lips = lips(&with_library);
-    let embedded_lips = lips(&without_library);
+    let lips = lips(&doc);
     assert_eq!(
-        library_lips.len(),
+        lips.len(),
         1,
-        "the library body draws the valve's lip once: {library_lips:?}"
+        "the drawing's own body draws the valve's lip once: {lips:?}"
     );
-    assert_eq!(
-        embedded_lips.len(),
-        1,
-        "the drawing's own body draws the valve's lip once: {embedded_lips:?}"
-    );
-    for (index, (from_library, from_cache)) in
-        library_lips[0].iter().zip(&embedded_lips[0]).enumerate()
-    {
-        assert!(
-            (from_library.0 - from_cache.0).abs() < 1e-6
-                && (from_library.1 - from_cache.1).abs() < 1e-6,
-            "vertex {index}: library {from_library:?} vs cache {from_cache:?}"
-        );
-    }
     // A run of about the lip's size, not a degenerate one.
-    let reach = library_lips[0]
+    let reach = lips[0]
         .windows(2)
         .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
         .sum::<f64>();
     assert!(
         (1.5..3.0).contains(&reach),
         "the lip's sampled length is {reach:.3}mm; the curve is about 2mm long"
-    );
-    // And the default import, which draws the cached body with its
-    // switched-off layers left out, still draws the lip: the curve is on
-    // the body's `Default` layer.
-    let Some(from_cache) = import_from_cache("DWG-0202GP06-01.pid") else {
-        return;
-    };
-    assert_eq!(
-        lips(&from_cache),
-        embedded_lips,
-        "the default import draws the lip the cached body carries"
     );
 }
 
@@ -2685,7 +2578,7 @@ fn a_symbol_authored_away_from_its_origin_lands_on_the_line_work_it_marks() {
 /// cached body carries is on a switched-off layer.
 #[test]
 fn a_symbol_body_draws_in_the_style_its_placement_names() {
-    let Some(doc) = import_from_cache("DWG-0201GP06-01.pid") else {
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
         return;
     };
 
@@ -2748,7 +2641,7 @@ fn a_symbol_body_draws_in_the_style_its_placement_names() {
 /// under the `library` source.
 #[test]
 fn the_vessel_draws_in_its_placements_maroon_not_its_syms_black() {
-    let Some(doc) = import_from_cache("DWG-0201GP06-01.pid") else {
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
         return;
     };
 
@@ -3030,68 +2923,32 @@ fn named_line_work_files_under_the_discipline_the_drawing_names() {
     );
 }
 
-/// A symbol's lettering follows its placement's colour, not the colour its
-/// `.sym` character style states.
+/// A cached body's lettering sits on the symbol's `Label` layer, which the
+/// file switches off, so the import letters nothing on the symbol layer at
+/// all (plan 2026-09-19, P-D4) -- the tag beside a gauge is the sheet's own
+/// text record -- and the placement's name beside it stays.
 ///
-/// The discriminating pair is the level-gauge bubbles: `LG-Magnetic Float
-/// Gauge.sym` and `LT-Magnetostrictive Level Gauge.sym` both author their
-/// bubble letters in a `#FF0000` character style, their placements name the
-/// instrument class colour `#008000`, and the screenshot letters them green.
-/// `Drawing Description`'s `说 明` letters black on a black-styled placement,
-/// which agrees with either reading and is pinned as the control. Reverting
-/// the lettering branch in `apply_symbology` leaves these texts `ByLayer`
-/// and this test red.
-///
-/// Those three texts are the library's: the `LGM` / `LTM` template letters
-/// and the description's caption. The bodies the drawing caches carry their
-/// lettering on the symbol's `Label` layer, which the file switches off, so
-/// the default import letters nothing on the symbol layer at all (plan
-/// 2026-09-19, P-D4) -- the tag beside a gauge is the sheet's own text
-/// record -- and the placement's name beside it stays. The colour rule is
-/// pinned on the `library` source, the one import that still letters.
+/// The colour a symbol's lettering would take if it did draw -- the
+/// placement's, not its `.sym` character style's (DWG-0201's LG / LT bubble
+/// letters are authored `#FF0000` and screen `#008000`) -- used to be pinned
+/// here on the library-first import, the one that still lettered; that
+/// import is retired, and the rule is pinned as a unit test of
+/// `apply_symbology`'s lettering branch in `io::pid::tests` instead.
 #[test]
-fn a_symbols_lettering_follows_its_placement_colour_not_its_syms() {
-    let Some(from_cache) = import_from_cache("DWG-0201GP06-01.pid") else {
+fn a_cached_bodys_lettering_stays_on_its_switched_off_layer() {
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
         return;
     };
-    let symbol_texts = |doc: &CadDocument| {
-        of_role(doc, "symbol")
-            .filter(|entity| matches!(entity, EntityType::Text(_)))
-            .count()
-    };
+    let symbol_texts = of_role(&doc, "symbol")
+        .filter(|entity| matches!(entity, EntityType::Text(_)))
+        .count();
     assert_eq!(
-        symbol_texts(&from_cache),
-        0,
+        symbol_texts, 0,
         "a cached body's lettering is on switched-off layers and is not drawn"
     );
     assert!(
-        of_role(&from_cache, "symbol-label").count() >= 20,
+        of_role(&doc, "symbol-label").count() >= 20,
         "every placement is still named beside its body"
-    );
-
-    let Some(doc) = import_from_library("DWG-0201GP06-01.pid") else {
-        return;
-    };
-    let mut seen: std::collections::BTreeMap<String, acadrust::types::Color> =
-        std::collections::BTreeMap::new();
-    for entity in of_role(&doc, "symbol") {
-        if let EntityType::Text(text) = entity {
-            seen.insert(text.value.clone(), text.common.color);
-        }
-    }
-
-    let expected: std::collections::BTreeMap<String, acadrust::types::Color> = [
-        ("LGM", acadrust::types::Color::Rgb { r: 0, g: 128, b: 0 }),
-        ("LTM", acadrust::types::Color::Rgb { r: 0, g: 128, b: 0 }),
-        ("说 明", acadrust::types::Color::Rgb { r: 0, g: 0, b: 0 }),
-    ]
-    .iter()
-    .map(|(value, colour)| ((*value).to_string(), *colour))
-    .collect();
-    assert_eq!(
-        seen, expected,
-        "a symbol's lettering takes the placement's colour -- the LG/LT \
-         letters are authored #FF0000 in their own .sym and screen green"
     );
 }
 
@@ -3154,15 +3011,9 @@ fn the_opening_view_is_framed_on_geometry_that_exists() {
 
 /// The same import with the layer slot holding the authored sheet layer,
 /// stated rather than read from `OCS_PID_LAYER_MODE` so both modes can run
-/// in one process; the bodies from the cache, like `import_in_taxonomy_mode`.
+/// in one process.
 fn import_in_sheet_mode(name: &str) -> Option<CadDocument> {
-    import_with(
-        name,
-        PidImportOptions {
-            layer_mode: PidLayerMode::Sheet,
-            symbol_source: PidSymbolSource::Cache,
-        },
-    )
+    import_in_mode(name, PidLayerMode::Sheet)
 }
 
 /// What `pid-parse` says the document storage's sheet layers are, by name,
@@ -3433,7 +3284,7 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
     };
 
     for (name, parametric) in EXPECTED {
-        let Some(doc) = import_from_cache(name) else {
+        let Some(doc) = import(name) else {
             continue;
         };
 
@@ -3609,46 +3460,8 @@ fn the_two_layer_modes_agree_on_everything_but_the_slot() {
     );
 }
 
-// ── Symbol source (plan 2026-09-19, P-D1 / P-D2 / P-D3 / P-D7) ─────────────
-
-/// `OCS_PID_SYMBOL_SOURCE` names two sources and defaults to the drawing's
-/// own cache (P-D1); `library` is the old order, kept one round (P-D3). An
-/// unknown value is the default too, not a failed open, and the two options
-/// together default to what the application opens with.
-#[test]
-fn the_symbol_source_defaults_to_the_cache_and_names_its_two_sources() {
-    assert_eq!(PidSymbolSource::default(), PidSymbolSource::Cache);
-    assert_eq!(PidSymbolSource::parse(""), Some(PidSymbolSource::Cache));
-    assert_eq!(
-        PidSymbolSource::parse("cache"),
-        Some(PidSymbolSource::Cache)
-    );
-    assert_eq!(
-        PidSymbolSource::parse(" Library "),
-        Some(PidSymbolSource::Library)
-    );
-    assert_eq!(PidSymbolSource::parse("sym"), None);
-    assert_eq!(SYMBOL_SOURCE_ENV, "OCS_PID_SYMBOL_SOURCE");
-    assert_eq!(
-        PidImportOptions::default(),
-        PidImportOptions {
-            layer_mode: PidLayerMode::Taxonomy,
-            symbol_source: PidSymbolSource::Cache,
-        }
-    );
-    let source = PidSymbolSource::from_env();
-    match std::env::var(SYMBOL_SOURCE_ENV) {
-        Ok(value) if PidSymbolSource::parse(&value).is_some() => {
-            assert_eq!(Some(source), PidSymbolSource::parse(&value));
-        }
-        _ => assert_eq!(
-            source,
-            PidSymbolSource::Cache,
-            "unset, empty or unknown reads as the default"
-        ),
-    }
-    assert_eq!(PidImportOptions::from_env().symbol_source, source);
-}
+// ── Symbol bodies (plan 2026-09-19, P-D1 / P-D2 / P-D7; the `library`
+// source of P-D3 retired by plan 2026-09-20-retire-the-library-first-symbol-source) ──
 
 /// A placement draws the body the drawing itself caches for it -- the
 /// flavour SmartPlant placed, resized where the symbol is parametric -- and
@@ -3705,7 +3518,7 @@ fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() 
         let Some(path) = fixture(name) else {
             continue;
         };
-        let doc = import_from_cache(name).expect("the fixture is present");
+        let doc = import(name).expect("the fixture is present");
         let summary = OpenCADStudio::io::pid::take_import_summary(&path)
             .expect("an import leaves its summary behind");
         assert_eq!(
@@ -3741,7 +3554,7 @@ fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() 
     }
 
     // 2. The Manifold, stroke by stroke: its `driving=` names its strokes.
-    if let Some(doc) = import_from_cache("DWG-0201GP06-01.pid") {
+    if let Some(doc) = import("DWG-0201GP06-01.pid") {
         const MANIFOLD: &str = "Top:20.32;Left:114.30;Right:114.30";
         let strokes: Vec<&EntityType> = of_role(&doc, "symbol")
             .filter(|entity| pid_value(entity, "driving").as_deref() == Some(MANIFOLD))
@@ -3810,7 +3623,7 @@ fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() 
 
     // 3. D06's tank the same way -- six lines, box = extent -- and its ball
     //    valve's single circle: no second ring from a merged library sheet.
-    if let Some(doc) = import_from_cache("D06.pid") {
+    if let Some(doc) = import("D06.pid") {
         const TANK: &str = "Bottom:35.56;Left:63.50;Right:63.50;Top:35.56";
         let strokes: Vec<&EntityType> = of_role(&doc, "symbol")
             .filter(|entity| pid_value(entity, "driving").as_deref() == Some(TANK))
@@ -3841,7 +3654,7 @@ fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() 
     }
 
     // 4. 工艺's Remarks: 35 three-line marks and not one arc on the layer.
-    if let Some(doc) = import_from_cache("工艺管道及仪表流程-1.pid") {
+    if let Some(doc) = import("工艺管道及仪表流程-1.pid") {
         let remarks = of_role(&doc, "symbol-label")
             .filter(|entity| matches!(entity, EntityType::Text(text) if text.value == "Remarks"))
             .count();
@@ -3851,181 +3664,56 @@ fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() 
             "no cached body of 工艺 carries an arc; the library's Remarks cloud is not drawn"
         );
     }
-}
 
-/// The two sources disagree about the bodies on the symbol layer and nothing
-/// else: the sheet's own line work, lettering, fills, points and border are
-/// the same entities in the same places, the placements are named the same
-/// and carry the same library defaults, and the view filter reads the same.
-/// Under `library` the numbers this suite pinned before plan 2026-09-19 are
-/// still there -- the two 188mm shell runs of the template vessel, the three
-/// template texts, ` Line2`'s `25.40x3.81` measured over the whole cached
-/// body -- which is what the switch is kept one round for (P-D3).
-#[test]
-fn the_two_symbol_sources_differ_only_in_the_body_drawn() {
-    let _mailbox = SUMMARY_MAILBOX
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let Some(path) = fixture("DWG-0201GP06-01.pid") else {
-        return;
-    };
-    let cache = import_from_cache("DWG-0201GP06-01.pid").expect("the fixture is present");
-    let cache_summary =
-        OpenCADStudio::io::pid::take_import_summary(&path).expect("summary of the cache import");
-    let library = import_from_library("DWG-0201GP06-01.pid").expect("the fixture is present");
-    let library_summary =
-        OpenCADStudio::io::pid::take_import_summary(&path).expect("summary of the library import");
-
-    // Everything that is not a symbol body or its name: identical.
-    let rest = |doc: &CadDocument| -> Vec<String> {
-        let mut rest: Vec<String> = doc
-            .entities()
-            .filter(|entity| {
-                !matches!(
-                    pid_value(entity, "role").as_deref(),
-                    Some("symbol") | Some("symbol-label")
-                )
-            })
-            .map(|entity| {
-                format!(
-                    "{:?} {:?} {:?} {} {:?}",
-                    pid_value(entity, "role"),
-                    pid_value(entity, "sheet_layer"),
-                    pid_value(entity, "style"),
-                    layer_of(entity),
-                    drawn_box(entity).map(|b| {
-                        let mm = |v: f64| (v * 100.0).round() / 100.0;
-                        (mm(b.0), mm(b.1), mm(b.2), mm(b.3))
-                    })
-                )
-            })
-            .collect();
-        rest.sort();
-        rest
-    };
-    assert_eq!(rest(&cache), rest(&library));
-    // The names and their defaults: identical; the extents too but for the
-    // one the construction tick changes (P-D7).
-    let names = |doc: &CadDocument| -> Vec<(String, Option<String>, Option<String>)> {
-        let mut names: Vec<_> = of_role(doc, "symbol-label")
+    // 5. The eleven DWG-0201 placements whose `extent=` the switched-off
+    //    strokes change (P-D7): the plan expected ` Line2` alone, on the
+    //    strength of the four parametric bodies, but a heat-trace or jacket
+    //    line drawn 3.17mm off a valve's axis, a nozzle's, or the gauges'
+    //    7.57mm outer ring, all on switched-off layers, reach past the
+    //    displayed outline too. The displayed strokes are what is on screen,
+    //    so these are the panel's numbers -- measured over the whole body
+    //    they were 8.89x6.35, 3.82x5.08, 5.08x3.18, 3.81x5.08, 15.14x15.14,
+    //    25.40x3.81, 5.82x19.75 and 5.21x4.94, the figures the retired
+    //    library-first import kept.
+    if let Some(doc) = import("DWG-0201GP06-01.pid") {
+        let expected: Vec<(String, String)> = [
+            ("Ball Valve Type 2", "8.89x3.81"),
+            ("Cap", "1.91x3.84"),
+            ("Flanged Nozzle", "3.81x2.54"),
+            ("Flanged Nozzle", "3.81x2.54"),
+            ("Flanged Nozzle", "3.81x2.54"),
+            ("Flanged Nozzle with blind", "3.81x3.81"),
+            ("LG-Magnetic Float Gauge", "12.70x12.70"),
+            ("LT-Magnetostrictive Level Gauge", "12.70x12.70"),
+            ("Line2", "25.40x0.00"),
+            ("flame arrester breather valve", "5.19x18.48"),
+            ("jinchuzhan2", "4.83x3.56"),
+        ]
+        .iter()
+        .map(|(name, extent)| (name.to_string(), extent.to_string()))
+        .collect();
+        let named: std::collections::BTreeSet<&str> =
+            expected.iter().map(|(name, _)| name.as_str()).collect();
+        let mut measured: Vec<(String, String)> = of_role(&doc, "symbol-label")
             .filter_map(|entity| match entity {
-                EntityType::Text(text) => Some((
+                EntityType::Text(text) if named.contains(text.value.as_str()) => Some((
                     text.value.clone(),
-                    pid_value(entity, "driving"),
-                    pid_value(entity, "extent"),
+                    pid_value(entity, "extent").unwrap_or_default(),
                 )),
                 _ => None,
             })
             .collect();
-        names.sort();
-        names
-    };
-    let (cache_names, library_names) = (names(&cache), names(&library));
-    assert_eq!(cache_names.len(), 20);
-    let mut extents_differ: Vec<(String, String, String)> = Vec::new();
-    for (from_cache, from_library) in cache_names.iter().zip(&library_names) {
+        measured.sort();
         assert_eq!(
-            from_cache.0, from_library.0,
-            "the same placements, named the same"
+            measured, expected,
+            "the extents of the placements whose hidden strokes reach past the displayed outline"
         );
         assert_eq!(
-            from_cache.1, from_library.1,
-            "{}: the same library defaults",
-            from_cache.0
+            of_role(&doc, "symbol-label").count(),
+            20,
+            "the other nine of DWG-0201's twenty measure the same either way"
         );
-        if from_cache.2 != from_library.2 {
-            extents_differ.push((
-                from_cache.0.clone(),
-                from_cache.2.clone().unwrap_or_default(),
-                from_library.2.clone().unwrap_or_default(),
-            ));
-        }
     }
-    // Eleven of the twenty: the plan expected ` Line2` alone to change, on
-    // the strength of the four parametric bodies, but a heat-trace or
-    // jacket line drawn 3.17mm off a valve's axis, a nozzle's, or the
-    // gauges' 7.57mm outer ring, all on switched-off layers, reach past the
-    // displayed outline too. The displayed strokes are what is on screen
-    // (P-D7), so these are the panel's numbers now; the whole-body figures
-    // stay under `library`.
-    let expected: Vec<(String, String, String)> = [
-        ("Ball Valve Type 2", "8.89x3.81", "8.89x6.35"),
-        ("Cap", "1.91x3.84", "3.82x5.08"),
-        ("Flanged Nozzle", "3.81x2.54", "5.08x3.18"),
-        ("Flanged Nozzle", "3.81x2.54", "5.08x3.18"),
-        ("Flanged Nozzle", "3.81x2.54", "5.08x3.18"),
-        ("Flanged Nozzle with blind", "3.81x3.81", "3.81x5.08"),
-        ("LG-Magnetic Float Gauge", "12.70x12.70", "15.14x15.14"),
-        (
-            "LT-Magnetostrictive Level Gauge",
-            "12.70x12.70",
-            "15.14x15.14",
-        ),
-        ("Line2", "25.40x0.00", "25.40x3.81"),
-        ("flame arrester breather valve", "5.19x18.48", "5.82x19.75"),
-        ("jinchuzhan2", "4.83x3.56", "5.21x4.94"),
-    ]
-    .iter()
-    .map(|(name, displayed, whole)| (name.to_string(), displayed.to_string(), whole.to_string()))
-    .collect();
-    assert_eq!(
-        extents_differ, expected,
-        "placements whose extent the hidden strokes change: (name, over displayed strokes, over the whole body)"
-    );
-    assert_eq!(PidViewFilter::load(&cache), PidViewFilter::load(&library));
-    assert_eq!(
-        PidViewSummary::of(&cache)
-            .layers
-            .iter()
-            .map(|row| (row.name.clone(), row.on))
-            .collect::<Vec<_>>(),
-        PidViewSummary::of(&library)
-            .layers
-            .iter()
-            .map(|row| (row.name.clone(), row.on))
-            .collect::<Vec<_>>()
-    );
-
-    // The bodies: the cache's 81 displayed strokes against the library's 132
-    // primitives less the nine `NULL` template runs `carries_a_label` never
-    // lettered, and the import's tally of where each placement's body came
-    // from.
-    assert_eq!(of_role(&cache, "symbol").count(), 81);
-    assert_eq!(of_role(&library, "symbol").count(), 123);
-    assert_eq!(
-        (
-            cache_summary.cache_bodies,
-            cache_summary.library_bodies,
-            cache_summary.hidden_strokes_skipped
-        ),
-        (20, 0, 31)
-    );
-    assert_eq!(
-        (
-            library_summary.cache_bodies,
-            library_summary.library_bodies,
-            library_summary.hidden_strokes_skipped
-        ),
-        (0, 20, 0)
-    );
-
-    // The old numbers under the old order.
-    let shell_runs = of_role(&library, "symbol")
-        .filter(|entity| matches!(entity, EntityType::Line(line) if (187.0..190.0).contains(&line.start.distance(&line.end))))
-        .count();
-    assert_eq!(shell_runs, 2, "the library template's two 188mm shell runs");
-    let mut texts: Vec<String> = of_role(&library, "symbol")
-        .filter_map(|entity| match entity {
-            EntityType::Text(text) => Some(text.value.clone()),
-            _ => None,
-        })
-        .collect();
-    texts.sort();
-    assert_eq!(
-        texts,
-        vec!["LGM", "LTM", "说 明"],
-        "the library's template lettering"
-    );
 }
 
 /// Switching a hidden sheet layer on under the sheet mode releases the sheet
