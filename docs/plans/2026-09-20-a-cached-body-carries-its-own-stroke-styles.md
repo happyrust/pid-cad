@@ -13,7 +13,8 @@
 > **E2 落地**：OCS `3b8af2ed` + pid-parse `1fd69db`（`DashPattern::from_segments_m`，单测造放置样式用；会话 fable-5-1-8 接手）——
 > 缓存本体走 `place_primitive` 底涂、`paint_symbol_stroke` 按 `dash_mm` 点名 `PID-DASH-*`、`register_dash_linetypes` 多收一遍缓存本体；
 > `pid_import` 54 → 55（工艺 45 / 0202 12 / D06 0 / 0201 0，四种环境组合全绿），`--lib io::pid::tests` 8 → 9。
-> **状态：E1 / E2 已落地，E3 台账随本提交；只剩 E2 的手工 GUI 特写两张（未截）。**
+> **状态：E1 / E2 / E3 全部落地。** 手工 GUI 特写已补：`docs/evidence/2026-09-20-cached-stroke-dash/`（工艺 `Xa` OPC 虚线圆 + 箭杆、
+> 0202 阻火呼吸阀旁通与唇；同一提交 `--export` DXF 里 `PID-SYMBOL` 上带 `PID-DASH-*` 的实体工艺 45 / 0202 12，与集成测试一致）。
 
 ## 一句话
 
@@ -164,13 +165,15 @@ golden 不变（快照只钉 `entities`），`style_link_ratchet` 15 不变，`-
 55/55 全绿（`extent=` 与 0201 调色板测试原样通过）。`rustfmt --check` 两文件干净；`clippy --lib --test pid_import` 在 `pid.rs` / `pid_import.rs`
 零命中（整仓另有 1142 条旧告警，与本单无关）。pid-parse 侧 `1fd69db`：单测 1 条、`clippy --all-targets -D warnings` 零告警、fmt 干净。
 
-**未做**：工作项里的手工 GUI 两张特写（工艺 `Xa` OPC 虚线圆 + 四腿、0202 呼吸阀虚线唇）——集成测试已钉住数字，截图待有 GUI 的一轮补进
-`docs/evidence/`。
+手工验收（同日补，`docs/evidence/2026-09-20-cached-stroke-dash/`）：debug 版 GUI 打开工艺 `ZOOM` 到 (585,204)–(625,232)——`Xa` OPC 的
+r 3.81 圆是虚线、箭杆两横两竖是虚线（4.86 mm 上一段实 + 一个断口）、箭头斜边实线、颜色是放置的橄榄；0202 `ZOOM` 到 (292,252)–(318,281) 与
+(298,256)–(312,277)——阻火呼吸阀 `RD060201` 左侧旁通竖线中段断口、唇是虚线、主体实线。同一提交 `--export` 的 DXF 用 PowerShell 解析组码：
+`PID-SYMBOL` 上 `PID-DASH-*` 的实体工艺 **45**（`PID-DASH-1`）、0202 **12**（`PID-DASH-2`），与集成测试在内存文档上钉的一致。
 
 ## 门禁记录
 
 - 2026-09-20：开单（OCS `6a4cbbad`，会话 fable-5-1-45），四图实测数字见「事实」；待门禁（P-E1 … P-E8 按推荐）。
 - 2026-09-20：用户在同一会话批准 P-E1 … P-E8，全按推荐，直接开 E1。
 - 2026-09-20：E1 落地（pid-parse `7e69b8a`，同一会话）；OCS 跟随编译的最小改动随 E2 提交。
-- 2026-09-20：E2 落地（OCS `3b8af2ed`，pid-parse `1fd69db`；会话 fable-5-1-8 接手 fable-5-1-45 的交接）；E3 台账随本提交。
-  手工 GUI 特写两张未截。
+- 2026-09-20：E2 落地（OCS `3b8af2ed`，pid-parse `1fd69db`；会话 fable-5-1-8 接手 fable-5-1-45 的交接）；E3 台账 `827f1f57`。
+- 2026-09-20：手工 GUI 特写补齐（`docs/evidence/2026-09-20-cached-stroke-dash/`），DXF 对数 45 / 12；计划收口。
