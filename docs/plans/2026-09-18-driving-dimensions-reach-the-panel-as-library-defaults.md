@@ -19,7 +19,7 @@
 
 | # | 决策 | 结论 | 状态 |
 |---|------|------|------|
-| K-D1 | 面板上给放置实例看什么 | **两行，缺一不可**：「驱动尺寸（库默认）」= 配对到的**模板**本体上带名字的 JDim 值（`Top 20.32 mm · Left 114.3 mm · Right 114.3 mm`），标题里就写「库默认」，不写成实例的尺寸；「本体尺寸」= **实例**本体画出来的外框 `W × H mm`（Manifold 172.21 × 71.18，模板是 228.6 × 40.64）。两行并排，用户一眼看出「库默认 vs 实际」。**绝不**把 `PidSymbolDefinition::dimensions` 当成放置的尺寸展示（J3 §7） | ⭕ |
+| K-D1 | 面板上给放置实例看什么 | **两行，缺一不可**：「驱动尺寸（库默认）」= 配对到的**模板**本体上带名字的 JDim 值（`Top 20.32 mm · Left 114.3 mm · Right 114.3 mm`），标题里就写「库默认」，不写成实例的尺寸；「本体尺寸」= **实例**本体画出来的外框 `W × H mm`（Manifold 172.21 × 71.18，模板是 228.6 × 40.64）。两行并排，用户一眼看出「库默认 vs 实际」。**绝不**把 `PidSymbolDefinition::dimensions` 当成放置的尺寸展示（J3 §7）。**2026-09-20 补第三行**「驱动尺寸（本图实例）」：实例的实际参数找到了（实例存储的 `0x00ED JFlavorHolder`），见 `2026-09-20-a-placed-instance-states-its-own-driving-dimensions.md`（OCS `cedaecd5`） | ⭕ |
 | K-D2 | 名字与配对在哪一层做 | **pid-parse**。名字 = `Standard Relation` 出参 JDim ← 入参 `Double Value` ← `SymbolInformation` 变量名（`Top` / `Left` / …）+ 公式字符串；配对 = 实例那份 `SymbolInformation` 的 `value_ref` 解到**另一存储**的 `Double Value`（4/5 对），解不到时按变量名 + 值全同配（工艺那对；四个 0.0127）。这两件都只靠已解开的四族记录与 `0x0115` 按 oid 接，等级 **corpus**（17/17、5/5），与 J3 的棘轮同一套判据；OCS 只看到 `PidNormalizedGeometry`，看不到存储，做不了 | ⭕ |
 | K-D3 | 没有配对到模板的放置 | ~~不给任何一行~~ **2026-09-18 用户改口径**：「本体尺寸」（`extent=`）**所有符号放置都写、都显示**——它是这张图上的事实，与是否参数化无关；「驱动尺寸（库默认）」（`driving=`）**只限配上模板的参数化放置**，非参数化符号（`SymbolInformation` 无变量、`(0,0)` 那十几条）与配不上对的实例不给、不猜 | ✅ 已裁 |
 | K-D4 | 面板数据怎么到实体 | **写进放置每个实体的 `PID_SEMANTICS` XDATA**，两个新键：`driving=<name>:<mm>;<name>:<mm>;…`（模板的、按 JDim 在模板里的 oid 序）、`extent=<W>x<H>`（实例本体外框，mm，两位小数）。理由：特性面板逐实体读这条记录，已有 `class` / `role` / `label` / `oid` / `sheet_layer` 在里面；代价有界（0202 的 181 个符号实体 × 几十字节）；DWG / DXF 往返自然保留。文档级 XRecord + 按 `oid=` 查表被否——`oid=` 只在有 `_Data.xml` 命中时才写，参数化符号未必有 | ⭕ |
