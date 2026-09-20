@@ -60,3 +60,11 @@ docs/screenshots/*
 .cursor/kc-mcp/
 .cursor/kc-mcp-messages/
 .cursor/kc-chat-exports/
+
+# 2026-08 的三个本地工作区残留，不是项目内容：
+# .context/    agent 会话纪要（会话-2026-08-29.md 等）
+# .m1-verify/  M1 手工验收时的窗口截图（00_startup_wireframe.png 等）
+# teach/       教学 / 学习记录脚手架（MISSION.md、learning-records/ 等）
+.context/
+.m1-verify/
+teach/
