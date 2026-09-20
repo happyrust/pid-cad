@@ -78,8 +78,9 @@ pid-parse 解码它落到 `PidSymbolVariable::instance_value_m`；OCS 把它写�
 **手工验收（2026-09-20，用户指示）**：起同一提交的 debug GUI 打开 0201，`ZOOM` 到 Manifold、点选壳体下底线，特性面板 P&ID 一节三行并排——
 `驱动尺寸（库默认） Top 20.32 mm · Left 114.30 mm · Right 114.30 mm` / `驱动尺寸（本图实例） Left 57.91 mm · Right 114.30 mm · Top 35.59 mm` /
 `本体尺寸 172.21 × 71.18 mm`。整窗 + P&ID 一节 2× 放大两张入 `docs/evidence/2026-09-20-instance-driving-dimensions/`（README 记了
-`--export` DXF 对数：带 `instance=` 的实体恰 9 = Manifold 六笔 + 名字、` Line2` 一笔 + 名字）。一处观察：特性面板默认停靠宽度 250 下值列约 70 pt，
-三行都截成 `Top 20.32 mm · Left 11…`，截图时把宽度改到 560 才看全；面板文案本身没改。
+`--export` DXF 对数：带 `instance=` 的实体恰 9 = Manifold 六笔 + 名字、` Line2` 一笔 + 名字）。一处观察：特性面板默认停靠宽度 250 下值列文字约 118 pt（≈ 19–20 个 ASCII），
+三行都截成 `Top 20.32 mm · Left 11…`，截图时把宽度改到 560 才看全；面板文案本身没改 → 已开单
+`2026-09-20-a-long-read-only-value-shows-itself-whole-on-hover.md`（放不下的只读值悬停给全文）。
 
 ## 门禁记录
 

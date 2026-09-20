@@ -13,7 +13,8 @@ Parametric Manifold 实例，点选它壳体的**下底线**（(322.36, 167.42) 
 | `0201-manifold-panel-crop.png` | 同上 P&ID 一节 2×：三行尺寸并排——库默认与本图实例的 `Left` 一个 114.30 一个 57.91、`Top` 一个 20.32 一个 35.59，`Right` 同为 114.30；`本体尺寸` 172.21 = 57.91 + 114.30，71.18 = 2 × 35.59 |
 
 为了三行数值不被截断，截图前把特性面板的停靠宽度从默认 250 改到 560（`%APPDATA%\OpenCADStudio\settings.json` 的
-`dock.panels.properties.width`，截完已还原）：默认宽度下值列只有约 70 pt，三行都只露出前半句（`Top 20.32 mm · Left 11…`）。
+`dock.panels.properties.width`，截完已还原）：默认宽度下值列文字只有约 118 pt（停靠宽的 6/11 减内边距，约 19–20 个 ASCII 字符），
+三行都只露出前半句（`Top 20.32 mm · Left 11…`），47 字符的那行要停靠宽 ≥ ~545 才看全。已开单 `docs/plans/2026-09-20-a-long-read-only-value-shows-itself-whole-on-hover.md`。
 
 同一提交的 `--export DWG-0201GP06-01.pid <out>.dxf` 对数（与截图同一份几何，PowerShell 直接解析 DXF 组码 1000）：带 `instance=` 的实体恰 **9**——
 Manifold 的六笔（`PID-SYMBOL` 上 4 LINE + 2 ARC）与它的名字（`PID-SYMBOL-LABEL` 上 1 TEXT）同写 `instance=Left:57.91;Right:114.30;Top:35.59`
