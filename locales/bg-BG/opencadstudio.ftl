@@ -4036,6 +4036,7 @@ properties =
     .sheet-layer = Слой на листа
     .layer-oid = OID на слоя
     .driving-dimensions-library-default = Управляващи размери (по подразбиране от библиотеката)
+    .driving-dimensions-instance = Управляващи размери (екземпляр от този чертеж)
     .body-extent = Габарити на тялото
     .material = Материал
     .material-details = Детайли на материал

@@ -3745,6 +3745,7 @@ properties =
     .sheet-layer = Sheet layer
     .layer-oid = Layer OID
     .driving-dimensions-library-default = الأبعاد المحرِّكة (الافتراضي في المكتبة)
+    .driving-dimensions-instance = الأبعاد المحرِّكة (نسخة هذا الرسم)
     .body-extent = امتداد الجسم
     .scope-visual-style = النمط المرئي __ocs_arg_scope__
     .value-3d-face = وجه ثلاثي الأبعاد

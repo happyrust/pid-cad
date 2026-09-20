@@ -4024,6 +4024,7 @@ properties =
     .sheet-layer = Sheet layer
     .layer-oid = Layer OID
     .driving-dimensions-library-default = ड्राइविंग आयाम (लाइब्रेरी डिफ़ॉल्ट)
+    .driving-dimensions-instance = ड्राइविंग आयाम (इस ड्रॉइंग का इंस्टेंस)
     .body-extent = बॉडी विस्तार
     .material = सामग्री
     .material-details = सामग्री विवरण

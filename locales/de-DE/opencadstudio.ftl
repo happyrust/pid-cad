@@ -4034,6 +4034,7 @@ properties =
     .sheet-layer = Sheet layer
     .layer-oid = Layer OID
     .driving-dimensions-library-default = Treibende Bemaßungen (Bibliotheksstandard)
+    .driving-dimensions-instance = Treibende Bemaßungen (Instanz dieser Zeichnung)
     .body-extent = Körperausdehnung
     .material = Material
     .material-details = Materialangaben

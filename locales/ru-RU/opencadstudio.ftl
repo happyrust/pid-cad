@@ -4037,6 +4037,7 @@ properties =
     .sheet-layer = Sheet layer
     .layer-oid = Layer OID
     .driving-dimensions-library-default = Управляющие размеры (по умолчанию из библиотеки)
+    .driving-dimensions-instance = Управляющие размеры (экземпляр этого чертежа)
     .body-extent = Габариты тела
     .material = Материал
     .material-details = Подробности материала

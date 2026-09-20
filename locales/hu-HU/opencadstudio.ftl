@@ -4035,6 +4035,7 @@ properties =
     .sheet-layer = Lap fóliája
     .layer-oid = Fólia-OID
     .driving-dimensions-library-default = Vezérlő méretek (könyvtári alapértelmezés)
+    .driving-dimensions-instance = Vezérlő méretek (e rajz példánya)
     .body-extent = Test kiterjedése
     .material = Anyag
     .material-details = Anyag Részletek

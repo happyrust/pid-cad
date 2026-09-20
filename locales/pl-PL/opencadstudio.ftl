@@ -4035,6 +4035,7 @@ properties =
     .sheet-layer = Warstwa arkusza
     .layer-oid = OID warstwy
     .driving-dimensions-library-default = Wymiary sterujące (domyślne z biblioteki)
+    .driving-dimensions-instance = Wymiary sterujące (instancja tego rysunku)
     .body-extent = Rozmiar bryły
     .material = Materiał
     .material-details = Szczegóły materiału

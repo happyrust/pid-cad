@@ -1680,6 +1680,7 @@ pub(super) fn message_attribute(source: &str) -> Option<(&'static str, &'static 
         "P&ID driving dimensions: {dims} on {templates} template bodies; {placements} placed parametric bodies carry library defaults" => Some(("common", "pid-driving-dimensions-on-template-bodies-placed-carry-library-defaults")),
         "Layer OID" => Some(("properties", "layer-oid")),
         "Driving dimensions (library default)" => Some(("properties", "driving-dimensions-library-default")),
+        "Driving dimensions (this drawing's instance)" => Some(("properties", "driving-dimensions-instance")),
         "Body extent" => Some(("properties", "body-extent")),
         "Material" => Some(("properties", "material")),
         "Material Bindings" => Some(("model", "material-bindings")),

@@ -3721,6 +3721,7 @@ properties =
     .sheet-layer = Sheet layer
     .layer-oid = Layer OID
     .driving-dimensions-library-default = 駆動寸法（ライブラリ既定値）
+    .driving-dimensions-instance = 駆動寸法（この図面のインスタンス）
     .body-extent = 本体サイズ
     .scope-visual-style = __ocs_arg_scope__ 表示スタイル
     .value-3d-face = 3D 面

@@ -4035,6 +4035,7 @@ properties =
     .sheet-layer = Arkin taso
     .layer-oid = Tason OID
     .driving-dimensions-library-default = Ohjaavat mitat (kirjaston oletus)
+    .driving-dimensions-instance = Ohjaavat mitat (tämän piirustuksen instanssi)
     .body-extent = Kappaleen laajuus
     .material = Materiaali
     .material-details = Materiaalin tiedot

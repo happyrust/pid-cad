@@ -3733,6 +3733,7 @@ properties =
     .sheet-layer = Sheet layer
     .layer-oid = Layer OID
     .driving-dimensions-library-default = Cotas directrices (valor predeterminado de la biblioteca)
+    .driving-dimensions-instance = Cotas directrices (instancia de este dibujo)
     .body-extent = Extensión del cuerpo
     .scope-visual-style = Estilo visual de __ocs_arg_scope__
     .value-3d-face = Cara 3D

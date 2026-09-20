@@ -3733,6 +3733,7 @@ properties =
     .sheet-layer = Sheet layer
     .layer-oid = Layer OID
     .driving-dimensions-library-default = Cotas condutoras (padrão da biblioteca)
+    .driving-dimensions-instance = Cotas condutoras (instância deste desenho)
     .body-extent = Extensão do corpo
     .scope-visual-style = Estilo visual de __ocs_arg_scope__
     .value-3d-face = Face 3D

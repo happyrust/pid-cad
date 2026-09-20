@@ -4035,6 +4035,7 @@ properties =
     .sheet-layer = 시트 도면층
     .layer-oid = 도면층 OID
     .driving-dimensions-library-default = 구동 치수(라이브러리 기본값)
+    .driving-dimensions-instance = 구동 치수(이 도면의 인스턴스)
     .body-extent = 본체 크기
     .material = 소재
     .material-details = 소재 세부정보

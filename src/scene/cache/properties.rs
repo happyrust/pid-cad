@@ -1,5 +1,5 @@
-use acadrust::{EntityType, Handle, Transparency};
 use crate::t;
+use acadrust::{EntityType, Handle, Transparency};
 
 use crate::scene::model::object::{PropSection, PropValue, Property};
 
@@ -30,7 +30,9 @@ pub fn general_section(entity: &EntityType) -> PropSection {
         },
     );
 
-    let hyperlink = crate::scene::pe_url_of(entity).unwrap_or_default().to_owned();
+    let hyperlink = crate::scene::pe_url_of(entity)
+        .unwrap_or_default()
+        .to_owned();
 
     let mut section = PropSection {
         title: t!("General").into_owned(),
@@ -117,6 +119,7 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
     let mut class = None;
     let mut role = None;
     let mut driving = None;
+    let mut instance = None;
     let mut extent = None;
     let mut labels = Vec::new();
     let mut lines = Vec::new();
@@ -134,6 +137,7 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
             "class" => class = Some(val.to_string()),
             "role" => role = Some(val.to_string()),
             "driving" => driving = driving_dimensions_caption(val),
+            "instance" => instance = driving_dimensions_caption(val),
             "extent" => extent = body_extent_caption(val),
             "label" if !val.is_empty() && !labels.iter().any(|old| old == val) => {
                 labels.push(val.to_string());
@@ -175,18 +179,27 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
             value: PropValue::ReadOnly(role),
         });
     }
-    // A symbol placement's two sizes, kept apart on purpose: the driving
-    // dimensions are the symbol library's template values -- a placed
-    // instance carries none of its own -- and the extent is what this
-    // drawing draws the placement at. The caption says "library default" so
-    // nobody reads 20.32 off a Manifold drawn 35.59 wide (plan 2026-09-18,
-    // K-D1 / K-D3). Every placement has an extent; only one paired with its
-    // template has driving dimensions.
+    // A symbol placement's sizes, kept apart on purpose: the driving
+    // dimensions are the symbol library's template values, the instance row
+    // is the parameters this drawing's placement was actually drawn with
+    // (its storage's `JFlavorHolder`; plan 2026-09-20), and the extent is
+    // what this drawing draws the placement at. The captions say which is
+    // which so nobody reads 20.32 off a Manifold placed with Top 35.59
+    // (plan 2026-09-18, K-D1 / K-D3). Every placement has an extent; only
+    // one paired with its template has driving dimensions, and only a
+    // parametric one has instance parameters.
     if let Some(driving) = driving {
         props.push(Property {
             label: t!("Driving dimensions (library default)").into_owned(),
             field: "pid_driving",
             value: PropValue::ReadOnly(driving),
+        });
+    }
+    if let Some(instance) = instance {
+        props.push(Property {
+            label: t!("Driving dimensions (this drawing's instance)").into_owned(),
+            field: "pid_instance",
+            value: PropValue::ReadOnly(instance),
         });
     }
     if let Some(extent) = extent {
@@ -491,11 +504,45 @@ mod pid_semantics_tests {
             .iter()
             .find(|property| property.field == "pid_extent")
             .is_some_and(|property| property.label == t!("Body extent")));
+        assert!(
+            manifold.props.iter().all(|p| p.field != "pid_instance"),
+            "no instance= pair, no instance row"
+        );
+
+        // With the instance's own parameters (plan 2026-09-20): a third
+        // row between the library default and the extent, captioned as this
+        // drawing's instance.
+        let stretched = pid_semantics_section(&entity(&[
+            "role=symbol",
+            "extent=172.21x71.18",
+            "driving=Top:20.32;Left:114.30;Right:114.30",
+            "instance=Left:57.91;Right:114.30;Top:35.59",
+        ]))
+        .expect("P&ID section");
+        assert_eq!(
+            value(&stretched, "pid_instance"),
+            "Left 57.91 mm · Right 114.30 mm · Top 35.59 mm"
+        );
+        let fields: Vec<&str> = stretched.props.iter().map(|p| p.field).collect();
+        assert_eq!(
+            fields[..4],
+            ["pid_role", "pid_driving", "pid_instance", "pid_extent"]
+        );
+        assert!(stretched
+            .props
+            .iter()
+            .find(|property| property.field == "pid_instance")
+            .is_some_and(|property| {
+                property.label == t!("Driving dimensions (this drawing's instance)")
+            }));
 
         let valve = pid_semantics_section(&entity(&["role=symbol", "extent=12.70x8.00"]))
             .expect("P&ID section");
         assert_eq!(value(&valve, "pid_extent"), "12.70 × 8.00 mm");
-        assert!(valve.props.iter().all(|p| p.field != "pid_driving"));
+        assert!(valve
+            .props
+            .iter()
+            .all(|p| p.field != "pid_driving" && p.field != "pid_instance"));
 
         // Whatever the import wrote is shown rather than dropped when it is
         // not in the shape the panel formats.

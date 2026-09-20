@@ -4035,6 +4035,7 @@ properties =
     .sheet-layer = Layer del foglio
     .layer-oid = OID layer
     .driving-dimensions-library-default = Quote guida (valore predefinito della libreria)
+    .driving-dimensions-instance = Quote guida (istanza di questo disegno)
     .body-extent = Estensione del corpo
     .material = Materiale
     .material-details = Dettagli sui materiali

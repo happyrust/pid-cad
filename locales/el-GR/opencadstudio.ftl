@@ -4037,6 +4037,7 @@ properties =
     .sheet-layer = Επίπεδο φύλλου
     .layer-oid = OID επιπέδου
     .driving-dimensions-library-default = Οδηγούσες διαστάσεις (προεπιλογή βιβλιοθήκης)
+    .driving-dimensions-instance = Οδηγούσες διαστάσεις (στιγμιότυπο αυτού του σχεδίου)
     .body-extent = Έκταση σώματος
     .material = Υλικό
     .material-details = Λεπτομέρειες υλικού

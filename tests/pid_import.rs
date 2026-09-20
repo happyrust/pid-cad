@@ -3228,6 +3228,10 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
         /// The name lettered beside the placement, `role=symbol-label`.
         label: &'static str,
         driving: &'static str,
+        /// The parameters this drawing's instance was placed with, from its
+        /// storage's `JFlavorHolder` (plan 2026-09-20); the defaults again
+        /// where the instance was not stretched.
+        instance: &'static str,
         extent: &'static str,
     }
     const EXPECTED: &[(&str, &[Parametric])] = &[
@@ -3237,11 +3241,13 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
                 Parametric {
                     label: "Parametric Manifold",
                     driving: "Top:20.32;Left:114.30;Right:114.30",
+                    instance: "Left:57.91;Right:114.30;Top:35.59",
                     extent: "172.21x71.18",
                 },
                 Parametric {
                     label: "Line2",
                     driving: "Right:25.40",
+                    instance: "Right:25.40",
                     extent: "25.40x0.00",
                 },
             ],
@@ -3252,6 +3258,7 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
             &[Parametric {
                 label: "Cone Roof Parametric Tank",
                 driving: "Bottom:35.56;Left:63.50;Right:63.50;Top:35.56",
+                instance: "Left:60.96;Right:60.96;Bottom:35.31;Top:35.31",
                 extent: "122.12x82.84",
             }],
         ),
@@ -3260,6 +3267,7 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
             &[Parametric {
                 label: "Parametric Black Box",
                 driving: "Top:12.70;Right:12.70;Bottom:12.70;Left:12.70",
+                instance: "Left:12.70;Right:113.93;Bottom:12.70;Top:78.07",
                 extent: "126.63x90.77",
             }],
         ),
@@ -3295,6 +3303,7 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
             let role = pid_value(entity, "role").unwrap_or_default();
             let extent = pid_value(entity, "extent");
             let driving = pid_value(entity, "driving");
+            let instance = pid_value(entity, "instance");
             if role == "symbol" || role == "symbol-label" {
                 placements += 1;
                 let extent = extent
@@ -3305,7 +3314,7 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
                 );
             } else {
                 assert!(
-                    extent.is_none() && driving.is_none(),
+                    extent.is_none() && driving.is_none() && instance.is_none(),
                     "{name}: a role={role} entity carries a placement's measures"
                 );
             }
@@ -3322,6 +3331,15 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
         assert_eq!(
             defaults, expected_defaults,
             "{name}: the driving= values written"
+        );
+        let instances: std::collections::BTreeSet<String> = pid_records_with(&doc, "instance")
+            .filter_map(|e| pid_value(e, "instance"))
+            .collect();
+        let expected_instances: std::collections::BTreeSet<String> =
+            parametric.iter().map(|p| p.instance.to_string()).collect();
+        assert_eq!(
+            instances, expected_instances,
+            "{name}: the instance= values written"
         );
         for expected in *parametric {
             let labels: Vec<&EntityType> = doc
@@ -3346,6 +3364,12 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
                     "{name} {:?}: extent on the name",
                     expected.label
                 );
+                assert_eq!(
+                    pid_value(label, "instance").as_deref(),
+                    Some(expected.instance),
+                    "{name} {:?}: the instance's own parameters on the name",
+                    expected.label
+                );
             }
             let strokes = of_role(&doc, "symbol")
                 .filter(|entity| {
@@ -3367,8 +3391,9 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
             };
             if !parametric.iter().any(|p| p.label == label) {
                 assert!(
-                    pid_value(entity, "driving").is_none(),
-                    "{name}: {label:?} is not parametric yet states driving="
+                    pid_value(entity, "driving").is_none()
+                        && pid_value(entity, "instance").is_none(),
+                    "{name}: {label:?} is not parametric yet states driving= or instance="
                 );
             }
         }

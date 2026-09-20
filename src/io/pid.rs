@@ -1328,6 +1328,9 @@ fn attach_pid_metadata(
         if let Some(driving) = measures.driving.as_deref() {
             push_pair(&mut record, "driving", driving);
         }
+        if let Some(instance) = measures.instance.as_deref() {
+            push_pair(&mut record, "instance", instance);
+        }
     }
     if let Some(hit) = hit {
         let object = hit.object();
@@ -1387,6 +1390,16 @@ struct PlacementMeasures {
     /// panel shows no default it cannot vouch for. A dimension without a name
     /// (a derived one, or one no relation writes) is left out.
     driving: Option<String>,
+    /// `<name>:<mm>;<name>:<mm>;…`, two places, in the symbol's variable
+    /// order: the parameters this drawing's instance was actually placed
+    /// with, read off the instance storage's `JFlavorHolder`
+    /// (`PidSymbolVariable::instance_value_m`; pid-parse
+    /// `docs/analysis/2026-09-20-jflavorholder-carries-the-placed-instances-parameters.md`).
+    /// DWG-0201's Manifold reads `Left:57.91;Right:114.30;Top:35.59` here
+    /// against `Top:20.32;Left:114.30;Right:114.30` in [`Self::driving`]. An
+    /// unstretched instance repeats the defaults. `None` for a placement
+    /// whose body carries no variables with an instance value.
+    instance: Option<String>,
 }
 
 impl PlacementMeasures {
@@ -1444,7 +1457,24 @@ impl PlacementMeasures {
                     .join(";")
             })
             .filter(|driving| !driving.is_empty());
-        Some(Self { extent, driving })
+        let instance = cached
+            .map(|body| {
+                body.variables
+                    .iter()
+                    .filter_map(|variable| {
+                        variable.instance_value_m.map(|value_m| {
+                            format!("{}:{:.2}", variable.name, projection.mm(value_m))
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .join(";")
+            })
+            .filter(|instance| !instance.is_empty());
+        Some(Self {
+            extent,
+            driving,
+            instance,
+        })
     }
 }
 

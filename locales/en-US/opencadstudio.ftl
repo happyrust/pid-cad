@@ -4035,6 +4035,7 @@ properties =
     .sheet-layer = Sheet layer
     .layer-oid = Layer OID
     .driving-dimensions-library-default = Driving dimensions (library default)
+    .driving-dimensions-instance = Driving dimensions (this drawing's instance)
     .body-extent = Body extent
     .material = Material
     .material-details = Material Details

@@ -4034,6 +4034,7 @@ properties =
     .sheet-layer = Sheet layer
     .layer-oid = Layer OID
     .driving-dimensions-library-default = Sturende maten (bibliotheekstandaard)
+    .driving-dimensions-instance = Sturende maten (instantie van deze tekening)
     .body-extent = Omvang van het lichaam
     .material = Materiaal
     .material-details = Materiaaldetails

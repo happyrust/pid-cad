@@ -3974,6 +3974,7 @@ properties =
     .sheet-layer = Sheet layer
     .layer-oid = Layer OID
     .driving-dimensions-library-default = Sürücü ölçüler (kitaplık varsayılanı)
+    .driving-dimensions-instance = Sürücü ölçüler (bu çizimdeki örnek)
     .body-extent = Gövde boyutu
     .material = Malzeme
     .material-details = Malzeme Ayrıntıları

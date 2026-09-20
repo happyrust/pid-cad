@@ -4036,6 +4036,7 @@ properties =
     .sheet-layer = Sheet layer
     .layer-oid = Layer OID
     .driving-dimensions-library-default = Cotes directrices (valeur par défaut de la bibliothèque)
+    .driving-dimensions-instance = Cotes directrices (instance de ce dessin)
     .body-extent = Étendue du corps
     .material = Matériau
     .material-details = Détails du matériau

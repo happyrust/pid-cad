@@ -4031,6 +4031,7 @@ properties =
     .sheet-layer = 圖面圖層
     .layer-oid = 圖層 OID
     .driving-dimensions-library-default = 驅動尺寸（庫預設）
+    .driving-dimensions-instance = 驅動尺寸（本圖實例）
     .body-extent = 本體尺寸
     .material = 材質
     .material-details = 材質詳細資訊

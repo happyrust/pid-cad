@@ -4033,6 +4033,7 @@ properties =
     .sheet-layer = Hladina listu
     .layer-oid = OID hladiny
     .driving-dimensions-library-default = Řídicí kóty (výchozí z knihovny)
+    .driving-dimensions-instance = Řídicí kóty (instance tohoto výkresu)
     .body-extent = Rozměr tělesa
     .material = Materiál
     .material-details = Podrobnosti o materiálu
