@@ -652,10 +652,10 @@ impl PropertiesPanel {
         } else {
             let mut col = column![].spacing(0);
             for section in &self.sections {
-                col = col.push(self.render_section(section));
+                col = col.push(self.render_section(section, width));
             }
             scrollable(col.width(Length::Fill))
-                .spacing(8)
+                .spacing(SCROLLBAR_SPACING)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
@@ -708,11 +708,11 @@ impl PropertiesPanel {
 
         let mut sections = column![].spacing(0);
         for section in &self.sections {
-            sections = sections.push(self.render_section(section));
+            sections = sections.push(self.render_section(section, QUICK_VIEW_W));
         }
 
         let content = scrollable(sections.width(Length::Fill))
-            .spacing(8)
+            .spacing(SCROLLBAR_SPACING)
             .width(Length::Fill)
             .height(Length::Shrink);
 
@@ -730,14 +730,21 @@ impl PropertiesPanel {
                     ..Default::default()
                     }
                 })
-                .width(230)
+                .width(Length::Fixed(QUICK_VIEW_W))
                 .into(),
         )
     }
 
     // ── Section renderer ──────────────────────────────────────────────────
 
-    fn render_section<'a>(&'a self, section: &'a PropSection) -> Element<'a, Message> {
+    /// `panel_width` is the width the section is laid out in (the dock width,
+    /// or `QUICK_VIEW_W`): the read-only rows use it to tell whether a value
+    /// fits its column or needs a tooltip carrying the whole of it.
+    fn render_section<'a>(
+        &'a self,
+        section: &'a PropSection,
+        panel_width: f32,
+    ) -> Element<'a, Message> {
         let collapsed = self.collapsed_sections.contains(&section.title);
         let toggle = button(if collapsed {
             crate::ui::icons::themed_arrow_right(10.0)
@@ -801,16 +808,20 @@ impl PropertiesPanel {
                     .map(prop_text_value)
                     .collect::<Vec<_>>()
                     .join(", ");
-                col = col.push(render_group_row(base, key, expanded, joined));
+                col = col.push(render_group_row(base, key, expanded, joined, panel_width));
                 if expanded {
                     for prop in &section.props[idx..idx + group_len] {
-                        col = col.push(self.render_prop_row(prop, coord_component(&prop.label)));
+                        col = col.push(self.render_prop_row(
+                            prop,
+                            coord_component(&prop.label),
+                            panel_width,
+                        ));
                     }
                 }
                 idx += group_len;
             } else {
                 let prop = &section.props[idx];
-                col = col.push(self.render_prop_row(prop, &prop.label));
+                col = col.push(self.render_prop_row(prop, &prop.label, panel_width));
                 idx += 1;
             }
         }
@@ -819,11 +830,13 @@ impl PropertiesPanel {
     }
 
     /// Render one property row with an explicit display label (the grouped
-    /// coordinate rows shorten "Position X" to "X").
+    /// coordinate rows shorten "Position X" to "X"). `panel_width` is what
+    /// the row is laid out in — see `render_section`.
     fn render_prop_row<'a>(
         &'a self,
         prop: &'a crate::scene::model::object::Property,
         label: &'a str,
+        panel_width: f32,
     ) -> Element<'a, Message> {
         match &prop.value {
             PropValue::ColorChoice(color) => {
@@ -844,7 +857,7 @@ impl PropertiesPanel {
             PropValue::LwVaries => self.render_lw_varies_row(label),
             PropValue::LinetypeChoice(lt) => self.render_linetype_row(label, lt),
             PropValue::Choice { selected, options } => {
-                self.render_choice_row(label, prop.field, selected, options)
+                self.render_choice_row(label, prop.field, selected, options, panel_width)
             }
             PropValue::EditChoice { value, options } => {
                 self.render_edit_choice_row(label, prop.field, value, options)
@@ -855,11 +868,11 @@ impl PropertiesPanel {
                 self.render_edit_row(label, prop.field, val)
             }
             PropValue::ReadOnly(val) if prop.field == "annotative_scale" => {
-                render_annotative_scale_row(label, val)
+                render_annotative_scale_row(label, val, panel_width)
             }
-            PropValue::ReadOnly(val) => render_ro_row(label, val),
+            PropValue::ReadOnly(val) => render_ro_row(label, val, panel_width),
             PropValue::ReadOnlyWithTooltip { value, tooltip } => {
-                render_ro_with_tooltip_row(label, value, tooltip)
+                render_ro_with_tooltip_row(label, value, tooltip, panel_width)
             }
             PropValue::HatchPatternChoice(current) => {
                 self.render_hatch_pattern_row(label, current)
@@ -1176,9 +1189,10 @@ impl PropertiesPanel {
         field: &'static str,
         current: &'a str,
         _options: &'a [String],
+        panel_width: f32,
     ) -> Element<'a, Message> {
         let Some(state) = self.choice_combos.get(field) else {
-            return render_ro_row(label, current);
+            return render_ro_row(label, current, panel_width);
         };
 
         let selected = if current == VARIES_LABEL {
@@ -1798,6 +1812,7 @@ fn render_group_row(
     key: String,
     expanded: bool,
     joined: String,
+    panel_width: f32,
 ) -> Element<'_, Message> {
     let label_btn = button(
         container(
@@ -1839,7 +1854,7 @@ fn render_group_row(
         .align_y(iced::Center);
 
     // The field copies the value, so the locally-built `joined` is fine here.
-    let value_field = crate::ui::read_only::field(&joined, FONT_SZ, Length::Fill);
+    let value_field = ro_value_field(&joined, panel_width);
     let value_col = container(value_field)
         .style(|theme: &Theme| container::Style {
             background: Some(Background::Color(
@@ -1872,8 +1887,11 @@ fn render_group_row(
 fn render_annotative_scale_row<'a>(
     label: &'a str,
     value: &'a str,
+    panel_width: f32,
 ) -> Element<'a, Message> {
-    let field = crate::ui::read_only::field(value, FONT_SZ, Length::Fill);
+    // The "..." button and its spacer take a little off this field's width;
+    // scale lists are short, so the plain column estimate is close enough.
+    let field = ro_value_field(value, panel_width);
 
     let manage = button(text("...").size(FONT_SZ))
         .on_press(Message::AnnoObjectScaleOpen)
@@ -1891,11 +1909,12 @@ fn render_annotative_scale_row<'a>(
 
     prop_row_widget(label, controls.into())
 }
-fn render_ro_row<'a>(label: &'a str, value: &'a str) -> Element<'a, Message> {
+fn render_ro_row<'a>(label: &'a str, value: &'a str, panel_width: f32) -> Element<'a, Message> {
     // A read-only value is shown as a non-editable but selectable field: no
     // on_input means the caret never appears, but the text can be selected
-    // (carrying the full, un-truncated value) and copied with Ctrl+C.
-    let field = crate::ui::read_only::field(value, FONT_SZ, Length::Fill);
+    // (carrying the full, un-truncated value) and copied with Ctrl+C. A value
+    // the column cannot show whole also carries itself in a tooltip.
+    let field = ro_value_field(value, panel_width);
     prop_row_widget(label, field)
 }
 
@@ -1903,25 +1922,147 @@ fn render_ro_with_tooltip_row<'a>(
     label: &'a str,
     value: &'a str,
     tooltip_text: &'a str,
+    panel_width: f32,
 ) -> Element<'a, Message> {
     let field = crate::ui::read_only::field(value, FONT_SZ, Length::Fill);
-    let wrapped = tooltip(field, text(tooltip_text).size(FONT_SZ), tooltip::Position::Top)
+    // The tip explains why the value cannot be edited; when the value does
+    // not fit its column either, the tip leads with the whole value.
+    let tip = if ro_value_fits(value, panel_width) {
+        tooltip_text.to_string()
+    } else {
+        format!("{value}\n{tooltip_text}")
+    };
+    let wrapped = ro_tip(field, tip, tooltip::Position::Top);
+    prop_row_widget(label, wrapped)
+}
+
+// ── Read-only values the column cannot show whole ─────────────────────────
+//
+// A read-only row's value box is a single-line field that clips what it
+// cannot fit, and the panel is 250 wide by default: a P&ID placement's
+// `Top 20.32 mm · Left 114.30 mm · Right 114.30 mm` shows as
+// `Top 20.32 mm · Left 11…` there, a coordinate group's summary as
+// `322.3602, 167.4175, 0.0`, and an XDATA record never showed whole at any
+// dock width (plan 2026-09-20-a-long-read-only-value-shows-itself-whole-on-
+// hover). The view cannot measure text, so a per-character estimate decides
+// whether the value fits the room its column has at the panel's width; a
+// value that does not gets a tooltip that follows the cursor and carries all
+// of it. The estimate is deliberately on the wide side: an extra tooltip on
+// a value that just fits costs nothing, a missing one is the bug.
+
+/// Advance charged to an ASCII character (lowercase, digits, punctuation,
+/// space), as a fraction of the font size. The UI font runs 0.47–0.51 em on
+/// the panel's typical values (measured 2026-09-20); 0.55 rounds up.
+const ASCII_EM: f32 = 0.55;
+/// Advance charged to an uppercase ASCII letter, which runs wider.
+const UPPER_EM: f32 = 0.65;
+/// Advance charged to a full-width character (CJK ideographs, Hangul,
+/// full-width forms).
+const WIDE_EM: f32 = 1.0;
+/// The panel's `scrollable` embeds its scrollbar: `spacing(…)` plus the
+/// default 10 px bar are taken off the content width whenever the bar shows.
+const SCROLLBAR_SPACING: f32 = 8.0;
+const SCROLLBAR_W: f32 = 10.0;
+/// What a row's value column takes off its width before any text: the
+/// column's padding (2 + 2), the read-only field's padding (6 + 6) and border
+/// (1 + 1). See `prop_row_with_active` and `ui::read_only::field`.
+const RO_VALUE_CHROME: f32 = 18.0;
+/// Widest a full-value tooltip grows before its text wraps.
+const RO_TIP_MAX_W: f32 = 360.0;
+/// Width of the floating Quick Properties panel (`quick_view`).
+const QUICK_VIEW_W: f32 = 230.0;
+
+/// Whether `c` takes a full em: the East Asian Wide / Fullwidth ranges.
+fn is_wide(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x1100..=0x115F
+            | 0x2E80..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE4F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x20000..=0x3FFFD
+    )
+}
+
+/// Estimated width of `value` set at `font_size`, per the constants above.
+fn estimated_text_width(value: &str, font_size: f32) -> f32 {
+    value
+        .chars()
+        .map(|c| {
+            if is_wide(c) {
+                WIDE_EM
+            } else if c.is_ascii_uppercase() {
+                UPPER_EM
+            } else {
+                ASCII_EM
+            }
+        })
+        .sum::<f32>()
+        * font_size
+}
+
+/// The room a read-only row's value column has for text when the panel is
+/// `panel_width` wide: the label and value columns split the content 5 : 6,
+/// the content is the panel less the embedded scrollbar, and the column's own
+/// chrome comes off the value's share.
+fn ro_value_column_width(panel_width: f32) -> f32 {
+    let content = (panel_width - SCROLLBAR_W - SCROLLBAR_SPACING).max(0.0);
+    (content * 6.0 / 11.0 - RO_VALUE_CHROME).max(0.0)
+}
+
+/// Whether a read-only `value` is expected to show whole in its column.
+fn ro_value_fits(value: &str, panel_width: f32) -> bool {
+    estimated_text_width(value, FONT_SZ) <= ro_value_column_width(panel_width)
+}
+
+/// The read-only value field every read-only row uses, with a tooltip
+/// carrying the whole value when the column cannot show it.
+fn ro_value_field<'a>(value: &str, panel_width: f32) -> Element<'a, Message> {
+    let field = crate::ui::read_only::field(value, FONT_SZ, Length::Fill);
+    if ro_value_fits(value, panel_width) {
+        field
+    } else {
+        ro_tip(field, value.to_string(), tooltip::Position::FollowCursor)
+    }
+}
+
+/// `content` with a tooltip reading `tip`, in the panel's tooltip style. The
+/// tip text wraps at `RO_TIP_MAX_W` so a long XDATA value folds into a block
+/// instead of running across the screen.
+fn ro_tip<'a>(
+    content: Element<'a, Message>,
+    tip: String,
+    position: tooltip::Position,
+) -> Element<'a, Message> {
+    // A little slack keeps a one-line tip on one line if the estimate is
+    // ever a hair short of the real advance.
+    let tip_width = (estimated_text_width(&tip, FONT_SZ) + 8.0).min(RO_TIP_MAX_W);
+    let body = text(tip)
+        .size(FONT_SZ)
+        .width(Length::Fixed(tip_width))
+        .wrapping(iced::advanced::text::Wrapping::WordOrGlyph);
+    tooltip(content, body, position)
         .gap(4.0)
         .padding(6.0)
-        .style(|theme: &Theme| {
-            let palette = theme.palette();
-            container::Style {
-                background: Some(Background::Color(palette.background.base.color)),
-                text_color: Some(palette.background.base.text),
-                border: Border {
-                    color: palette.background.neutral.color,
-                    width: 1.0,
-                    radius: 4.0.into(),
-                },
-                ..Default::default()
-            }
-        });
-    prop_row_widget(label, wrapped.into())
+        .style(ro_tip_style)
+        .into()
+}
+
+fn ro_tip_style(theme: &Theme) -> container::Style {
+    let palette = theme.palette();
+    container::Style {
+        background: Some(Background::Color(palette.background.base.color)),
+        text_color: Some(palette.background.base.text),
+        border: Border {
+            color: palette.background.neutral.color,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..Default::default()
+    }
 }
 
 // ── Constraints section row (clickable entity link) ───────────────────────
@@ -2254,5 +2395,80 @@ mod tests {
 
         assert!(scale.is_finite());
         assert!((0.01..=100.0).contains(&scale));
+    }
+
+    /// Plan 2026-09-20-a-long-read-only-value-shows-itself-whole-on-hover:
+    /// the estimate that decides whether a read-only value gets a tooltip
+    /// carrying the whole of it. Pinned against the panel's default dock
+    /// width (250) and the width the 2026-09-20 screenshot needed (560), on
+    /// the three P&ID rows of DWG-0201's Parametric Manifold.
+    #[test]
+    fn a_read_only_value_the_column_cannot_show_whole_is_told_from_one_it_can() {
+        use super::{estimated_text_width, ro_value_column_width, ro_value_fits, FONT_SZ};
+
+        // The estimate grows with the text; an uppercase letter costs more
+        // than a lowercase one and a CJK character more than either.
+        assert_eq!(estimated_text_width("", FONT_SZ), 0.0);
+        assert!(
+            estimated_text_width("symbol", FONT_SZ) < estimated_text_width("symbol-label", FONT_SZ)
+        );
+        assert!(estimated_text_width("ABCD", FONT_SZ) > estimated_text_width("abcd", FONT_SZ));
+        assert!(estimated_text_width("驱动尺寸", FONT_SZ) > estimated_text_width("ABCD", FONT_SZ));
+        assert!(
+            (estimated_text_width("abcde", FONT_SZ) - 5.0 * 0.55 * FONT_SZ).abs() < 1e-3,
+            "five lowercase letters are five ASCII advances"
+        );
+        // Latin-1 punctuation is not full-width: the P&ID captions' `·` and
+        // `×` are charged like ASCII.
+        assert_eq!(
+            estimated_text_width("·×", FONT_SZ),
+            estimated_text_width("ab", FONT_SZ)
+        );
+
+        // The value column at the default and a widened dock, and at no
+        // width at all (a minimized window reports 0).
+        let default_w = ro_value_column_width(250.0);
+        assert!((100.0..=115.0).contains(&default_w), "{default_w}");
+        let wide_w = ro_value_column_width(560.0);
+        assert!((270.0..=285.0).contains(&wide_w), "{wide_w}");
+        assert_eq!(ro_value_column_width(0.0), 0.0);
+        assert!(!ro_value_fits("8", 0.0));
+
+        // The Manifold's rows: the two driving-dimension captions (47 and 46
+        // characters) do not fit the default dock and the extent does. At
+        // 560 -- where the screenshot showed both captions whole, by 35 and
+        // 50 pt -- the estimate still calls them long (it rounds up, by
+        // design); at the widest dock (600) every one fits.
+        const DRIVING: &str = "Top 20.32 mm · Left 114.30 mm · Right 114.30 mm";
+        const INSTANCE: &str = "Left 57.91 mm · Right 114.30 mm · Top 35.59 mm";
+        const EXTENT: &str = "172.21 × 71.18 mm";
+        for long in [DRIVING, INSTANCE] {
+            assert!(!ro_value_fits(long, 250.0), "{long} at 250");
+            assert!(!ro_value_fits(long, 560.0), "{long} at 560");
+            assert!(ro_value_fits(long, 600.0), "{long} at 600");
+        }
+        for short in [EXTENT, "symbol", "Default", "8", "PID-SYMBOL", "0.35 mm"] {
+            assert!(ro_value_fits(short, 250.0), "{short} at 250");
+        }
+
+        // A coordinate group's summary at the default dock (seen clipped to
+        // `322.3602, 167.4175, 0.0` in the 2026-09-20 screenshot), and an
+        // XDATA record, which fits no dock width.
+        assert!(!ro_value_fits("322.3602, 167.4175, 0.0000", 250.0));
+        assert!(ro_value_fits("322.3602, 167.4175, 0.0000", 560.0));
+        let xdata = format!(
+            "PID_SEMANTICS: {}",
+            [
+                "sheet_layer=Default",
+                "sheet_layer_oid=8",
+                "role=symbol",
+                "style=Equipment - New"
+            ]
+            .iter()
+            .map(|s| format!("String({s:?})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+        );
+        assert!(!ro_value_fits(&xdata, 600.0));
     }
 }
