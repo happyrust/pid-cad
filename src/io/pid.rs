@@ -32,9 +32,9 @@ use pid_parse::style_link::{
 };
 use pid_parse::symbol_library::{PrimitiveStyle, SymbolLibrary, SymbolPrimitive};
 use pid_parse::{
-    build_normalized_geometry, NormalizedPidGeometry, PidDrawingUnits, PidGeometryConfidence,
-    PidGraphicKind, PidParser, PidPoint, PidSemanticHit, PidSemanticIndex, PidSourceLayer,
-    PidSymbolDefinition,
+    build_normalized_geometry, NormalizedPidGeometry, ParseOptions, PidDrawingUnits,
+    PidGeometryConfidence, PidGraphicKind, PidParser, PidPoint, PidSemanticHit, PidSemanticIndex,
+    PidSourceLayer, PidSymbolDefinition,
 };
 
 // Millimetres in a metre, which is the unit a `.pid`'s decoded coordinates
@@ -458,7 +458,15 @@ pub fn take_import_summary(path: &Path) -> Option<ImportSummary> {
 /// (plan 2026-09-07 L3; the only reading since plan 2026-09-21, which retired
 /// the layer-mode environment switch and the taxonomy layers it could select).
 pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
-    let parsed = PidParser::new()
+    // The Geometry profile: every pass whose output reaches this document
+    // -- the record families, the cached symbol bodies and their stroke
+    // styles, the sheet layers and their display state, the style tables,
+    // the endpoint links behind `PID-CONNECTIVITY` -- and none of the
+    // probes and derived views only `pid_inspect` reads (pid-parse plan
+    // 2026-09-21-a-geometry-parse-profile). On the corpus the drawn
+    // entities are identical to a Full parse's; `pid_probe` and
+    // `pid_plot_dump` stay on Full because they look at the probes.
+    let parsed = PidParser::with_options(ParseOptions::geometry())
         .parse_file(path)
         .map_err(|error| error.to_string())?;
     let geometry = build_normalized_geometry(&parsed);
