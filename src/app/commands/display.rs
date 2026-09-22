@@ -869,6 +869,24 @@ impl OpenCADStudio {
             "PRINTALL" => {
                 return Some(Task::done(Message::PrintAllOpen));
             }
+            // PRINTERS — what the system reports about printing, on the
+            // command line: the default printer, every printer it lists (or
+            // why it could not), and how a plot will reach them. The report
+            // a user pastes into a bug report instead of a screenshot.
+            "PRINTERS" => {
+                for line in crate::io::print_to_printer::printer_report() {
+                    self.command_line.push_output(&line);
+                }
+            }
+            // PRINTERS <name> — what that printer reports about its sheets
+            // and printable area (asks the driver; may take a moment for an
+            // offline network queue).
+            cmd if cmd.starts_with("PRINTERS ") => {
+                let name = cmd["PRINTERS ".len()..].trim();
+                for line in crate::io::print_to_printer::printer_media_report(name) {
+                    self.command_line.push_output(&line);
+                }
+            }
             "EXPORT" | "EXPORTPDF" => {
                 return Some(Task::done(Message::PlotExport));
             }
@@ -1047,55 +1065,110 @@ impl OpenCADStudio {
                 return Some(Task::done(Message::PlotDialogOpen));
             }
 
-            // ── Recognized commands whose full implementation is pending ─────────
-            // These verbs are surfaced by the ribbon / menus but their feature is
-            // still being built. Acknowledge them with an honest status so the
-            // button responds instead of reporting an unknown command; each is
-            // replaced by its real handler as the feature lands.
-            // OBJECTSCALE ADD — add the active scale representation to every
-            // selected object that supports per-scale context data.
-            "OBJECTSCALE ADD" => {
-                let handles: Vec<acadrust::Handle> = self.tabs[i]
+            // Add or remove the current representation on the selected
+            // annotative objects. With no preselection, gather one through the
+            // regular selection engine before applying the action.
+            action @ ("OBJECTSCALE ADD" | "OBJECTSCALE DELETE") => {
+                let selected: Vec<acadrust::Handle> = self.tabs[i]
                     .scene
                     .selected_entities()
                     .iter()
                     .map(|(h, _)| *h)
                     .filter(|handle| !self.tabs[i].scene.is_layer_locked(*handle))
                     .collect();
-                if handles.is_empty() {
+                if selected.is_empty() {
+                    let action = if action.ends_with("ADD") {
+                        "OBJECTSCALE ADD"
+                    } else {
+                        "OBJECTSCALE DELETE"
+                    };
+                    let command = crate::modules::annotate::annotation_scale::AnnotationScaleSelectionCommand::new(
+                        "OBJECTSCALE",
+                        action,
+                    );
                     self.command_line
-                        .push_error(crate::t!("OBJECTSCALE: select objects first.").as_ref());
+                        .push_info(&crate::command::CadCommand::prompt(&command));
+                    self.tabs[i].active_cmd = Some(Box::new(command));
                     return Some(Task::none());
                 }
-                self.push_undo_snapshot(i, "OBJECTSCALE");
                 let Some(scale) = self.tabs[i].scene.creation_annotation_scale_handle() else {
                     self.command_line
                         .push_error(crate::t!("OBJECTSCALE: the active annotation scale is unavailable.").as_ref());
                     return Some(Task::none());
                 };
-                let mut n = 0usize;
-                for h in &handles {
-                    if crate::scene::annotative::create_annotation_context(
-                        &mut self.tabs[i].scene.document,
-                        *h,
-                        scale,
-                    ) {
-                        crate::scene::annotative::set_entity_annotative(
-                            &mut self.tabs[i].scene.document,
-                            *h,
-                            true,
+
+                let adding = action.ends_with("ADD");
+                let handles: Vec<_> = selected
+                    .into_iter()
+                    .filter(|handle| {
+                        let memberships = crate::scene::annotative::object_scale_memberships(
+                            &self.tabs[i].scene.document,
+                            *handle,
                         );
-                        n += 1;
+                        let member = memberships.iter().any(|(_, current)| *current == scale);
+                        if adding {
+                            !member
+                                && self.tabs[i]
+                                    .scene
+                                    .document
+                                    .get_entity(*handle)
+                                    .is_some_and(crate::scene::annotative::supports_annotation_context)
+                        } else {
+                            member
+                        }
+                    })
+                    .collect();
+                if handles.is_empty() {
+                    self.command_line.push_info(
+                        if adding {
+                            crate::t!("OBJECTSCALE: the selected objects already have the current scale, or do not support annotation scales.")
+                        } else {
+                            crate::t!("OBJECTSCALE: the selected objects do not have the current scale.")
+                        }
+                        .as_ref(),
+                    );
+                    return Some(Task::none());
+                }
+
+                self.push_undo_snapshot(i, "OBJECTSCALE");
+                let mut changed = Vec::new();
+                for handle in handles {
+                    let ok = if adding {
+                        let created = crate::scene::annotative::create_annotation_context(
+                            &mut self.tabs[i].scene.document,
+                            handle,
+                            scale,
+                        );
+                        if created {
+                            crate::scene::annotative::set_entity_annotative(
+                                &mut self.tabs[i].scene.document,
+                                handle,
+                                true,
+                            );
+                        }
+                        created
+                    } else {
+                        crate::scene::annotative::remove_annotation_context_for_scale(
+                            &mut self.tabs[i].scene.document,
+                            handle,
+                            scale,
+                        )
+                    };
+                    if ok {
+                        changed.push(handle);
                     }
                 }
-                let changes: Vec<_> = handles
-                    .into_iter()
+                let changes: Vec<_> = changed
+                    .iter()
+                    .copied()
                     .map(|handle| (handle, crate::scene::ChangeKind::Modified))
                     .collect();
                 self.tabs[i].scene.bump_entities(&changes);
                 self.tabs[i].dirty = true;
                 self.command_line.push_output(crate::tf!(
-                    "OBJECTSCALE: added the active scale to {n} object(s)."
+                    "OBJECTSCALE: {} the current scale on {} object(s).",
+                    if adding { "added" } else { "removed" },
+                    changed.len()
                 ).as_ref());
                 return Some(Task::none());
             }
@@ -1114,7 +1187,7 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(c));
             }
             cmd if cmd.starts_with("HYPERLINK ") => {
-                use acadrust::xdata::{ExtendedDataRecord, XDataValue};
+                use acadrust::xdata::XDataValue;
                 let url = cmd.strip_prefix("HYPERLINK").unwrap_or("").trim().to_string();
                 if url.is_empty() {
                     self.command_line.push_info(crate::t!("Usage: HYPERLINK <url>   (select objects first)").as_ref());
@@ -1134,15 +1207,19 @@ impl OpenCADStudio {
                 self.push_undo_snapshot(i, "HYPERLINK");
                 let mut n = 0usize;
                 for h in &handles {
-                    if let Some(e) = self.tabs[i].scene.document.get_entity_mut(*h) {
-                        let xd = &mut e.common_mut().extended_data;
-                        let mut rec = ExtendedDataRecord::new("PE_URL");
-                        rec.add_value(XDataValue::String(url.clone()));
-                        xd.add_record(rec);
+                    if self.tabs[i].scene.document.get_entity(*h).is_some() {
+                        crate::scene::view::dispatch::set_entity_xdata(
+                            &mut self.tabs[i].scene.document,
+                            *h,
+                            "PE_URL",
+                            Some(vec![XDataValue::String(url.clone())]),
+                        );
                         n += 1;
                     }
                 }
+                self.invalidate_property_targets(i, &handles);
                 self.tabs[i].dirty = true;
+                self.refresh_properties();
                 self.command_line
                     .push_output(crate::tf!("HYPERLINK: attached to {n} object(s).").as_ref());
                 return Some(Task::none());
@@ -1465,12 +1542,78 @@ impl OpenCADStudio {
                 return Some(Task::done(Message::AnnoObjectScaleOpen));
             }
 
+            // Reset every alternate scale representation to the position of
+            // the representation visible at the current annotation scale.
+            "ANNORESET" => {
+                let handles: Vec<acadrust::Handle> = self.tabs[i]
+                    .scene
+                    .selected_entities()
+                    .iter()
+                    .map(|(handle, _)| *handle)
+                    .filter(|handle| !self.tabs[i].scene.is_layer_locked(*handle))
+                    .collect();
+                if handles.is_empty() {
+                    let command = crate::modules::annotate::annotation_scale::AnnotationScaleSelectionCommand::new(
+                        "ANNORESET",
+                        "ANNORESET",
+                    );
+                    self.command_line
+                        .push_info(&crate::command::CadCommand::prompt(&command));
+                    self.tabs[i].active_cmd = Some(Box::new(command));
+                    return Some(Task::none());
+                }
+                let scale = self.tabs[i].scene.creation_annotation_scale_handle();
+                let candidates: Vec<_> = handles
+                    .into_iter()
+                    .filter(|handle| {
+                        crate::scene::annotative::object_scale_memberships(
+                            &self.tabs[i].scene.document,
+                            *handle,
+                        )
+                        .len()
+                            > 1
+                    })
+                    .collect();
+                if candidates.is_empty() {
+                    self.command_line.push_info(
+                        crate::t!("ANNORESET: no selected object has alternate scale representations.")
+                            .as_ref(),
+                    );
+                    return Some(Task::none());
+                }
+                self.push_undo_snapshot(i, "ANNORESET");
+                let mut changed = Vec::new();
+                for handle in candidates {
+                    if crate::scene::annotative::reset_annotation_context_positions(
+                        &mut self.tabs[i].scene.document,
+                        handle,
+                        scale,
+                    ) {
+                        changed.push(handle);
+                    }
+                }
+                if !changed.is_empty() {
+                    let changes: Vec<_> = changed
+                        .iter()
+                        .copied()
+                        .map(|handle| (handle, crate::scene::ChangeKind::Modified))
+                        .collect();
+                    self.tabs[i].scene.bump_entities(&changes);
+                    self.tabs[i].dirty = true;
+                }
+                self.command_line.push_output(
+                    crate::tf!(
+                        "ANNORESET: synchronized {} object(s) from the current scale.",
+                        changed.len()
+                    )
+                    .as_ref(),
+                );
+                return Some(Task::none());
+            }
+
             // DATALINK <path.csv> — create a persistent linked table.
             "DATALINK" => {
-                use crate::command::ValuePromptCommand;
-                let c = ValuePromptCommand::new("DATALINK", "DATALINK  path to the .csv file:");
-                self.command_line.push_info(&c.prompt());
-                self.tabs[i].active_cmd = Some(Box::new(c));
+                self.open_data_link_manager(false);
             }
             cmd if cmd.starts_with("DATALINK ") => {
                 let path = cmd.trim_start_matches("DATALINK").trim();
@@ -1572,20 +1715,7 @@ impl OpenCADStudio {
                     let Some(link_handle) = link_handle else {
                         continue;
                     };
-                    let path = match self.tabs[i].scene.document.objects.get(&link_handle) {
-                        Some(acadrust::objects::ObjectType::ClassObject(object)) => {
-                            match &object.data {
-                                acadrust::objects::ClassObjectData::DataLink(link) => {
-                                    Some(link.connection_string.clone())
-                                }
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    };
-                    if let Some(path) = path {
-                        jobs.push((*handle, link_handle, path));
-                    }
+                    jobs.push((*handle, link_handle));
                 }
                 if jobs.is_empty() {
                     self.command_line
@@ -1594,28 +1724,43 @@ impl OpenCADStudio {
                 }
                 if write_back {
                     let mut written = 0usize;
-                    for (table_handle, _, path) in &jobs {
+                    let mut errors = Vec::new();
+                    for (table_handle, link_handle) in &jobs {
                         let Some(acadrust::EntityType::Table(table)) =
                             self.tabs[i].scene.document.get_entity(*table_handle)
                         else {
                             continue;
                         };
                         let csv = table_to_csv(table);
-                        if std::fs::write(path, csv).is_ok() {
-                            written += 1;
+                        match crate::app::annotation_data::data_link_write_path(
+                            &self.tabs[i].scene.document,
+                            *link_handle,
+                        )
+                        .and_then(|path| std::fs::write(path, csv).map_err(|error| error.to_string()))
+                        {
+                            Ok(()) => written += 1,
+                            Err(error) => errors.push(error),
                         }
                     }
-                    self.command_line.push_output(
-                        crate::tf!("DATALINKUPDATE: wrote {} linked source(s).", written).as_ref(),
-                    );
+                    if written > 0 {
+                        self.command_line.push_output(
+                            crate::tf!("DATALINKUPDATE: wrote {} linked source(s).", written).as_ref(),
+                        );
+                    }
+                    for error in errors {
+                        self.command_line.push_error(&error);
+                    }
                     return Some(Task::none());
                 }
                 let updates: Vec<_> = jobs
                     .into_iter()
-                    .filter_map(|(table_handle, link_handle, path)| {
-                        std::fs::read_to_string(&path)
-                            .ok()
-                            .map(|text| (table_handle, link_handle, parse_csv_table(&text)))
+                    .filter_map(|(table_handle, link_handle)| {
+                        crate::app::annotation_data::read_data_link(
+                            &self.tabs[i].scene.document,
+                            link_handle,
+                        )
+                        .ok()
+                        .map(|rows| (table_handle, link_handle, rows))
                     })
                     .filter(|(_, _, rows)| !rows.is_empty())
                     .collect();
@@ -1770,7 +1915,7 @@ fn parse_landxml_cgpoints(xml: &str) -> Vec<[f64; 3]> {
     out
 }
 
-fn parse_csv_table(text: &str) -> Vec<Vec<String>> {
+pub(crate) fn parse_csv_table(text: &str) -> Vec<Vec<String>> {
     let mut rows = Vec::new();
     let mut row = Vec::new();
     let mut field = String::new();
@@ -1810,7 +1955,7 @@ fn parse_csv_table(text: &str) -> Vec<Vec<String>> {
     rows
 }
 
-fn table_to_csv(table: &acadrust::entities::Table) -> String {
+pub(crate) fn table_to_csv(table: &acadrust::entities::Table) -> String {
     fn escape(value: &str) -> String {
         if value.contains([',', '"', '\r', '\n']) {
             format!("\"{}\"", value.replace('"', "\"\""))
@@ -1975,5 +2120,25 @@ mod tests {
             instance_color: None,
             instance_aabb: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod printers_command_tests {
+    use crate::app::OpenCADStudio;
+
+    #[test]
+    fn printers_reports_the_default_and_the_list() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let before = app.command_line.history.len();
+        let _ = app.run_command_line("PRINTERS");
+        let lines: Vec<String> = app.command_line.history[before..]
+            .iter()
+            .map(|line| line.text.clone())
+            .collect();
+        // One line for the default printer, at least one for the list (a
+        // count and names, "none", or the system's error).
+        assert!(lines.len() >= 2, "{lines:?}");
     }
 }

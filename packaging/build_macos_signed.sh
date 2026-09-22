@@ -93,8 +93,14 @@ sed "s/__VERSION__/$VERSION/g" packaging/Info.plist > "$APP/Contents/Info.plist"
 
 echo "==> codesign"
 if [ "$DEVELOPER_ID" = "-" ]; then
-    # CI-parity ad-hoc signature; cannot be notarized.
-    codesign --force --deep --sign - --timestamp=none "$APP"
+    # Sign inside out so the extension retains its sandbox entitlement.
+    # Ad-hoc signing cannot be notarized.
+    codesign --force --sign - --timestamp=none \
+        "$APP/Contents/MacOS/OpenCADStudio-App"
+    codesign --force --sign - --timestamp=none \
+        --entitlements crates/dwg-thumbnailer/macos/entitlements.plist \
+        "$APP/Contents/PlugIns/DWGThumbnail.appex"
+    codesign --force --sign - --timestamp=none "$APP"
 else
     # Sign nested code before the outer bundle. The sandbox entitlement is
     # required for the QuickLook extension. Use hardened runtime
@@ -107,18 +113,30 @@ else
     codesign --force --timestamp --options runtime \
         -s "$DEVELOPER_ID" "$APP"
 fi
-codesign --verify --strict --verbose=2 "$APP"
+codesign --verify --deep --strict --verbose=2 "$APP"
+codesign -d --entitlements - "$APP/Contents/PlugIns/DWGThumbnail.appex" \
+    | python3 -c 'import plistlib, sys; assert plistlib.load(sys.stdin.buffer).get("com.apple.security.app-sandbox") is True'
 
 echo "==> dmg"
 DMG="$DIST/OpenCADStudio-v$VERSION-macos-arm64.dmg"
 rm -f "$DMG"
+
+# Stage the app next to the install-location shortcut (#769).
+STAGING="$DIST/dmg-staging"
+rm -rf "$STAGING"
+mkdir -p "$STAGING"
+cp -R "$APP" "$STAGING/"
+ln -s /Applications "$STAGING/Applications"
+
 for i in 1 2 3 4 5; do
-    if hdiutil create -volname "Open CAD Studio" -srcfolder "$APP" -ov -format UDZO "$DMG"; then
+    if hdiutil create -volname "Open CAD Studio" -srcfolder "$STAGING" -ov -format UDZO "$DMG"; then
         break
     fi
+    rm -f "$DMG"
     echo "hdiutil failed (attempt $i), retrying..." >&2
     sleep 3
 done
+rm -rf "$STAGING"
 [ -f "$DMG" ] || { echo "hdiutil failed permanently" >&2; exit 1; }
 
 if [ -n "${NOTARY_PROFILE:-}" ] && [ "$DEVELOPER_ID" != "-" ]; then

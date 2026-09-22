@@ -15,7 +15,9 @@
 // lopdf → nom_locate) and no filesystem, so PDF export is native-only; the web
 // build gets stubs so the call sites still compile.
 
-pub use crate::io::plot_types::{PdfPageInput, PdfPlotOptions, PlotGroupSplits, PlotWire};
+pub use crate::io::plot_types::{
+    PdfPageInput, PdfPlotOptions, PlotContent, PlotGroupSplits, PlotImage, PlotWire,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::io::plot_emit::{
@@ -23,32 +25,25 @@ use crate::io::plot_emit::{
     PlotPage, PlotPoint, PlotSink,
 };
 use crate::io::plot_style::PlotStyleTable;
-use crate::scene::model::hatch_model::HatchModel;
 #[cfg(not(target_arch = "wasm32"))]
 use printpdf::{
     BlendMode, BuiltinFont, Color, CurTransMat, ExtendedGraphicsState, ExtendedGraphicsStateId,
     Line, LineCapStyle, LineDashPattern, LineJoinStyle, LinePoint, Mm, Op, PaintMode, PdfDocument,
     PdfFontHandle, PdfPage, PdfSaveOptions, Point, Polygon, PolygonRing, Pt, Rect, Rgb, TextItem,
-    WindingOrder,
+    WindingOrder, XObjectId,
 };
 use std::path::Path;
 
+/// The XObject each distinct bitmap was registered under, keyed by its pixel
+/// buffer's address and size. Shared by every page of one document so a
+/// raster placed on several layouts is stored once; the pages' pixel `Arc`s
+/// outlive the map, so an address is never reused by another bitmap while
+/// the map is alive.
+#[cfg(not(target_arch = "wasm32"))]
+pub type ImageResources = std::collections::HashMap<(usize, u32, u32), XObjectId>;
+
 #[cfg(target_arch = "wasm32")]
-pub fn export_pdf(
-    _wires: &[PlotWire],
-    _hatches: &[HatchModel],
-    _wipeouts: &[HatchModel],
-    _paper_w: f64,
-    _paper_h: f64,
-    _offset_x: f64,
-    _offset_y: f64,
-    _rotation_deg: i32,
-    _scale: f32,
-    _clip: Option<(f32, f32, f32, f32)>,
-    _path: &Path,
-    _plot_style: Option<&PlotStyleTable>,
-    _options: PdfPlotOptions,
-) -> Result<(), String> {
+pub fn export_pdf(_page: &PdfPageInput, _path: &Path) -> Result<(), String> {
     Err("PDF export is not available in the web version.".into())
 }
 
@@ -68,44 +63,10 @@ pub async fn pick_pdf_path_owned(_stem: String) -> Option<std::path::PathBuf> {
 
 // ── Public entry point ────────────────────────────────────────────────────
 
-/// Export `wires` to a PDF file.
-///
-/// - `paper_w` / `paper_h`: page dimensions in mm (already swapped for 90°/270° by caller).
-/// - `offset_x` / `offset_y`: added to every wire coordinate so the drawing
-///   origin maps to the bottom-left corner of the page.
-/// - `rotation_deg`: 0 | 90 | 180 | 270 — rotates the entire drawing on the page.
+/// Export one page to a PDF file.
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::too_many_arguments)]
-pub fn export_pdf(
-    wires: &[PlotWire],
-    hatches: &[HatchModel],
-    wipeouts: &[HatchModel],
-    paper_w: f64,
-    paper_h: f64,
-    offset_x: f64,
-    offset_y: f64,
-    rotation_deg: i32,
-    scale: f32,
-    clip: Option<(f32, f32, f32, f32)>,
-    path: &Path,
-    plot_style: Option<&PlotStyleTable>,
-    options: PdfPlotOptions,
-) -> Result<(), String> {
-    let bytes = build_pdf(
-        wires,
-        hatches,
-        wipeouts,
-        paper_w as f32,
-        paper_h as f32,
-        offset_x,
-        offset_y,
-        rotation_deg,
-        scale,
-        clip,
-        plot_style,
-        options,
-    );
-    write_pdf_atomically(path, &bytes)
+pub fn export_pdf(page: &PdfPageInput, path: &Path) -> Result<(), String> {
+    export_pdf_pages(std::slice::from_ref(page), path, None)
 }
 
 /// Export several independently sized pages into one PDF file.
@@ -118,7 +79,7 @@ pub fn export_pdf_pages(
     if pages.is_empty() {
         return Err("No pages were selected.".into());
     }
-    let bytes = build_pdf_pages(pages, plot_style);
+    let bytes = build_pdf_pages(pages, plot_style)?;
     write_pdf_atomically(path, &bytes)
 }
 
@@ -142,7 +103,7 @@ fn write_pdf_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// The parent comes from `iced::window::run`, keeping the portal request tied
 /// to the visible app window on Wayland instead of silently resolving to
 /// `None` on desktops that reject a parentless save dialog (#537).
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "windows")))]
 pub fn pick_pdf_path_owned(
     stem: String,
     parent: &dyn iced::window::Window,
@@ -158,79 +119,86 @@ pub fn pick_pdf_path_owned(
     Some(path)
 }
 
+/// Windows: pick the PDF destination with the async dialog on a worker
+/// thread. The parented blocking dialog ran `IFileDialog::Show` on the UI
+/// thread inside the window callback, and when the target name already
+/// existed the overwrite-confirmation popup is a second nested modal that
+/// never gets pumped there — the app froze instead of asking. The async
+/// backend runs the dialog off-thread; it is the same pattern the DWG
+/// Save As flow uses, whose confirm popup works.
+#[cfg(all(not(target_arch = "wasm32"), target_os = "windows"))]
+pub async fn pick_pdf_path_async(stem: String) -> Option<std::path::PathBuf> {
+    let handle = crate::sys::file_dialog()
+        .set_title(crate::t!("Export as PDF").as_ref())
+        .set_file_name(format!("{stem}.pdf"))
+        .add_filter(crate::t!("PDF Files").as_ref(), &["pdf"])
+        .add_filter(crate::t!("All Files").as_ref(), &["*"])
+        .save_file()
+        .await?;
+    Some(crate::sys::handle_path(&handle))
+}
+
 // ── PDF builder ───────────────────────────────────────────────────────────
 
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::too_many_arguments)]
-fn build_pdf(
-    wires: &[PlotWire],
-    hatches: &[HatchModel],
-    wipeouts: &[HatchModel],
-    paper_w: f32,
-    paper_h: f32,
-    // Absolute-world offsets, kept in f64: at UTM the drawing sits at ~5e5/4.5e6
-    // where an f32 has ~0.03 m / ~0.5 m of resolution, so an f32 offset is itself
-    // already quantised before it can cancel the coordinate it is meant to cancel.
-    ox: f64,
-    oy: f64,
-    rotation_deg: i32,
-    scale: f32,
-    clip: Option<(f32, f32, f32, f32)>,
+fn build_pdf_pages(
+    pages: &[PdfPageInput],
     plot_style: Option<&PlotStyleTable>,
-    options: PdfPlotOptions,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, String> {
     let mut doc = PdfDocument::new("Open CAD Studio Export");
-    append_pdf_page(
-        &mut doc,
-        &PlotPage {
-            wires,
-            hatches,
-            wipeouts,
-            paper_w,
-            paper_h,
-            offset_x: ox,
-            offset_y: oy,
-            rotation_deg,
-            scale,
-            clip,
-            plot_style,
-            options,
-        },
-    );
-    let mut warnings = Vec::new();
-    doc.save(&PdfSaveOptions::default(), &mut warnings)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn build_pdf_pages(pages: &[PdfPageInput], plot_style: Option<&PlotStyleTable>) -> Vec<u8> {
-    let mut doc = PdfDocument::new("Open CAD Studio Export");
-    for page in pages {
-        append_pdf_page(&mut doc, &page.as_plot_page(plot_style));
+    // Borrowing all pages keeps their pixel Arcs alive until this cache is
+    // dropped, so an allocation address cannot be reused by another bitmap
+    // during this export.
+    let mut image_resources = ImageResources::new();
+    for (index, page) in pages.iter().enumerate() {
+        append_pdf_page(
+            &mut doc,
+            &mut image_resources,
+            &page.as_plot_page(plot_style),
+        )
+        .map_err(|error| format!("Page {}: {error}", index + 1))?;
     }
     let mut warnings = Vec::new();
-    doc.save(&PdfSaveOptions::default(), &mut warnings)
+    Ok(doc.save(&PdfSaveOptions::default(), &mut warnings))
 }
 
 /// Run the shared emitter for one page and append the result to `doc`.
 #[cfg(not(target_arch = "wasm32"))]
-fn append_pdf_page(doc: &mut PdfDocument, page: &PlotPage<'_>) {
-    let ops = page_ops(doc, page, &PlotAssets::default());
+fn append_pdf_page(
+    doc: &mut PdfDocument,
+    image_resources: &mut ImageResources,
+    page: &PlotPage<'_>,
+) -> Result<(), String> {
+    let ops = page_ops(doc, image_resources, page, &PlotAssets::default())?;
     doc.pages
         .push(PdfPage::new(Mm(page.paper_w), Mm(page.paper_h), ops));
+    Ok(())
 }
 
 /// The `Op`s of one page: the shared traversal, translated by `PdfSink`.
+///
+/// A bitmap the emitter could not draw is an error here, as it always was
+/// for the PDF exporter: a plot with a raster missing is not the plot that
+/// was asked for.
 #[cfg(not(target_arch = "wasm32"))]
-fn page_ops(doc: &mut PdfDocument, page: &PlotPage<'_>, assets: &PlotAssets) -> Vec<Op> {
-    let mut sink = PdfSink::new(doc);
+fn page_ops(
+    doc: &mut PdfDocument,
+    image_resources: &mut ImageResources,
+    page: &PlotPage<'_>,
+    assets: &PlotAssets,
+) -> Result<Vec<Op>, String> {
+    let mut sink = PdfSink::new(doc, image_resources);
     // The PDF backend has always published a page whose text the atlas could
     // not supply; the report says so, and turning that into a refusal is a
     // change to PDF behaviour, not to the SVG work that added the report.
-    match emit_plot_content(page, assets, &mut sink) {
-        Ok(_report) => {}
+    let report = match emit_plot_content(page, assets, &mut sink) {
+        Ok(report) => report,
         Err(never) => match never {},
+    };
+    if let Some(reason) = report.first_refused_image {
+        return Err(reason);
     }
-    sink.finish()
+    Ok(sink.finish())
 }
 
 // ── PlotSink → printpdf ───────────────────────────────────────────────────
@@ -247,15 +215,18 @@ fn page_ops(doc: &mut PdfDocument, page: &PlotPage<'_>, assets: &PlotAssets) -> 
 #[cfg(not(target_arch = "wasm32"))]
 pub struct PdfSink<'d> {
     doc: &'d mut PdfDocument,
+    /// Bitmaps already registered on `doc`, shared across its pages.
+    image_resources: &'d mut ImageResources,
     ops: Vec<Op>,
     blend_states: Option<(ExtendedGraphicsStateId, ExtendedGraphicsStateId)>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl<'d> PdfSink<'d> {
-    pub fn new(doc: &'d mut PdfDocument) -> Self {
+    pub fn new(doc: &'d mut PdfDocument, image_resources: &'d mut ImageResources) -> Self {
         Self {
             doc,
+            image_resources,
             ops: Vec::new(),
             blend_states: None,
         }
@@ -264,6 +235,30 @@ impl<'d> PdfSink<'d> {
     /// The collected ops, in emission order.
     pub fn finish(self) -> Vec<Op> {
         self.ops
+    }
+
+    /// The XObject for a bitmap, registered on the document the first time
+    /// it is seen. `add_image` clones its argument; the public map accepts
+    /// owned pixels.
+    fn image_xobject(&mut self, pixels: &std::sync::Arc<Vec<u8>>, width: u32, height: u32) -> XObjectId {
+        let key = (std::sync::Arc::as_ptr(pixels) as usize, width, height);
+        self.image_resources
+            .entry(key)
+            .or_insert_with(|| {
+                let id = XObjectId::new();
+                self.doc.resources.xobjects.map.insert(
+                    id.clone(),
+                    printpdf::XObject::Image(printpdf::RawImage {
+                        pixels: printpdf::RawImageData::U8(pixels.as_ref().clone()),
+                        width: width as usize,
+                        height: height as usize,
+                        data_format: printpdf::RawImageFormat::RGBA8,
+                        tag: Vec::new(),
+                    }),
+                );
+                id
+            })
+            .clone()
     }
 
     fn blend_state(&mut self, blend: PlotBlend) -> ExtendedGraphicsStateId {
@@ -422,6 +417,41 @@ impl PlotSink for PdfSink<'_> {
             // A named group is structure for a backend that has it (SVG);
             // a PDF content stream has nowhere to put the name.
             PlotOp::BeginGroup { .. } | PlotOp::EndGroup => {}
+            PlotOp::Image {
+                pixels,
+                width,
+                height,
+                matrix,
+                alpha,
+            } => {
+                if let Some(alpha) = alpha {
+                    // printpdf 0.9.1 swaps the serialized CA/ca keys. Set both
+                    // inside this image's saved state so the nonstroking alpha
+                    // is correct.
+                    let gs = self.doc.add_graphics_state(
+                        ExtendedGraphicsState::default()
+                            .with_current_fill_alpha(alpha)
+                            .with_current_stroke_alpha(alpha),
+                    );
+                    self.ops.push(Op::LoadGraphicsState { gs });
+                }
+                let id = self.image_xobject(&pixels, width, height);
+                self.ops.push(Op::SetTransformationMatrix {
+                    matrix: CurTransMat::Raw(matrix),
+                });
+                self.ops.push(Op::UseXobject {
+                    id,
+                    // Cancel printpdf's pixel-size transform: `matrix` maps the
+                    // PDF image's unit square directly onto the CAD quad in
+                    // page points.
+                    transform: printpdf::XObjectTransform {
+                        dpi: Some(72.0),
+                        scale_x: Some(1.0 / width as f32),
+                        scale_y: Some(1.0 / height as f32),
+                        ..Default::default()
+                    },
+                });
+            }
         }
         Ok(())
     }
@@ -436,6 +466,25 @@ mod tests {
     use crate::io::plot_corpus::{corpus, text_wire, Case};
     use crate::io::plot_emit::{geometry_pt, GEOMETRY_MM_TO_PT};
     use crate::scene::WireModel;
+
+    /// One A4 portrait page at 1:1 carrying `wires` and nothing else.
+    fn test_page(wires: Vec<PlotWire>) -> PdfPageInput {
+        PdfPageInput {
+            content: PlotContent {
+                wires: std::sync::Arc::new(wires),
+                ..Default::default()
+            },
+            paper_w: 210.0,
+            paper_h: 297.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            rotation_deg: 0,
+            scale: 1.0,
+            clip: None,
+            options: PdfPlotOptions::default(),
+            plot_style: None,
+        }
+    }
 
     #[test]
     fn atomic_write_replaces_an_existing_pdf() {
@@ -466,20 +515,10 @@ mod tests {
             ),
             draw_depth: 0.0,
         };
-        let bytes = build_pdf(
-            &[w],
-            &[],
-            &[],
-            210.0,
-            297.0,
-            0.0,
-            0.0,
-            0,
-            2.0,
-            Some((10.0, 10.0, 100.0, 100.0)),
-            None,
-            PdfPlotOptions::default(),
-        );
+        let mut page = test_page(vec![w]);
+        page.scale = 2.0;
+        page.clip = Some((10.0, 10.0, 100.0, 100.0));
+        let bytes = build_pdf_pages(&[page], None).unwrap();
         // A valid PDF is produced (starts with the PDF header) and is non-trivial.
         assert!(bytes.starts_with(b"%PDF"), "not a PDF");
         assert!(bytes.len() > 200, "suspiciously small: {}", bytes.len());
@@ -493,34 +532,8 @@ mod tests {
         let mut blank = wire.clone();
         blank.wire.text_verts.clear();
 
-        let with_text = build_pdf(
-            &[wire],
-            &[],
-            &[],
-            210.0,
-            297.0,
-            0.0,
-            0.0,
-            0,
-            1.0,
-            None,
-            None,
-            PdfPlotOptions::default(),
-        );
-        let no_text = build_pdf(
-            &[blank],
-            &[],
-            &[],
-            210.0,
-            297.0,
-            0.0,
-            0.0,
-            0,
-            1.0,
-            None,
-            None,
-            PdfPlotOptions::default(),
-        );
+        let with_text = build_pdf_pages(&[test_page(vec![wire])], None).unwrap();
+        let no_text = build_pdf_pages(&[test_page(vec![blank])], None).unwrap();
         assert!(with_text.starts_with(b"%PDF"));
         assert!(
             with_text.len() > no_text.len(),
@@ -610,13 +623,15 @@ mod tests {
             case.clip,
             case.plot_style.as_ref(),
             case.options,
+            case.group_splits,
         )
     }
 
     /// The same page through the shared emitter and `PdfSink`.
     fn new_ops(case: &Case) -> Vec<Op> {
         let mut doc = PdfDocument::new("new");
-        page_ops(&mut doc, &case.page(), &PlotAssets::default())
+        let mut resources = ImageResources::new();
+        page_ops(&mut doc, &mut resources, &case.page(), &PlotAssets::default()).unwrap()
     }
 
     /// Bit-exact text of each op. printpdf's own `PartialEq` is no use for a
@@ -801,14 +816,17 @@ mod tests {
         let mut case = Case::new("stamp");
         case.options.stamp = true;
         let mut doc = PdfDocument::new("stamp");
+        let mut resources = ImageResources::new();
         let ops = page_ops(
             &mut doc,
+            &mut resources,
             &case.page(),
             &PlotAssets {
                 stamp_label: Some("PINNED".into()),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let shown: Vec<&Op> = ops
             .iter()
             .filter(|op| matches!(op, Op::ShowText { .. }))
@@ -849,22 +867,7 @@ mod tests {
     #[test]
     fn pdf_bytes_repeat_except_for_the_random_trailer_id() {
         let case = &corpus()[0];
-        let render = || {
-            build_pdf(
-                &case.wires,
-                &case.hatches,
-                &case.wipeouts,
-                case.paper.0,
-                case.paper.1,
-                case.offset.0,
-                case.offset.1,
-                case.rotation_deg,
-                case.scale,
-                case.clip,
-                case.plot_style.as_ref(),
-                case.options,
-            )
-        };
+        let render = || build_pdf_pages(&[case.page_input()], None).unwrap();
         let a = render();
         let b = render();
         let (a_before, a_id, a_after) = split_at_trailer_id(&a);

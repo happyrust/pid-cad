@@ -28,7 +28,7 @@
 // another convention applies its own transform on top.
 
 use crate::io::plot_style::PlotStyleTable;
-use crate::io::plot_types::{PdfPlotOptions, PlotWire};
+use crate::io::plot_types::{PdfPlotOptions, PlotGroupSplits, PlotImage, PlotWire};
 use crate::scene::model::hatch_model::{HatchModel, HatchPattern};
 use crate::scene::WireModel;
 
@@ -170,6 +170,21 @@ pub enum PlotOp {
         tag: String,
     },
     EndGroup,
+    /// A raster image placed on the page. `pixels` are RGBA8 samples, rows
+    /// top-down, `width × height` of them; `matrix` maps the image's unit
+    /// square — `(0,0)` its bottom-left corner, `(1,1)` its top-right, the
+    /// way a PDF image space is laid out — onto the page, translation in
+    /// points; `alpha` is a constant opacity to draw it with, `None` for
+    /// opaque. Whatever clip the image needs (its own boundary, the block or
+    /// viewport it is seen through) has been emitted as `Clip` ops before it,
+    /// inside the `Save` / `Restore` that brackets the image.
+    Image {
+        pixels: std::sync::Arc<Vec<u8>>,
+        width: u32,
+        height: u32,
+        matrix: [f32; 6],
+        alpha: Option<f32>,
+    },
 }
 
 /// Entities that plot as one named group.
@@ -217,6 +232,9 @@ pub struct PlotPage<'a> {
     pub wires: &'a [PlotWire],
     pub hatches: &'a [HatchModel],
     pub wipeouts: &'a [HatchModel],
+    pub images: &'a [PlotImage],
+    /// Where the first render group ends in each of the four lists.
+    pub group_splits: PlotGroupSplits,
     pub paper_w: f32,
     pub paper_h: f32,
     pub offset_x: f64,
@@ -319,9 +337,12 @@ impl PlotAssets {
     /// Whether the snapshot actually covers the text is a separate question,
     /// answered by [`Self::stale_glyphs`].
     pub fn for_pages(pages: &[crate::io::plot_types::PdfPageInput]) -> Self {
-        let has_text = pages
-            .iter()
-            .any(|page| page.wires.iter().any(|wire| !wire.text_verts.is_empty()));
+        let has_text = pages.iter().any(|page| {
+            page.content
+                .wires
+                .iter()
+                .any(|wire| !wire.text_verts.is_empty())
+        });
         Self {
             stamp_label: None,
             glyphs: has_text.then(GlyphSnapshot::capture).flatten(),
@@ -338,7 +359,7 @@ impl PlotAssets {
         };
         pages
             .iter()
-            .map(|page| snapshot.missing_in(page.wires.iter().map(|wire| &wire.wire)))
+            .map(|page| snapshot.missing_in(page.content.wires.iter().map(|wire| &wire.wire)))
             .sum()
     }
 }
@@ -367,12 +388,23 @@ pub struct PlotReport {
     pub first_missing: Option<MissingGlyph>,
     /// The atlas could not be read at all, so no text was drawn.
     pub atlas_unavailable: bool,
+    /// Rasters the page could not draw — malformed pixels, geometry or clip.
+    pub images_refused: usize,
+    /// Why the first of them was refused.
+    pub first_refused_image: Option<String>,
 }
 
 impl PlotReport {
     /// Whether text was lost — the thing a strict backend refuses to publish.
     pub fn text_is_incomplete(&self) -> bool {
         self.atlas_unavailable || self.missing_glyphs > 0
+    }
+
+    fn refuse_image(&mut self, why: &str) {
+        self.images_refused += 1;
+        if self.first_refused_image.is_none() {
+            self.first_refused_image = Some(why.to_string());
+        }
     }
 }
 
@@ -393,6 +425,8 @@ pub fn emit_plot_content<S: PlotSink>(
         wires,
         hatches,
         wipeouts,
+        images,
+        group_splits,
         paper_w,
         paper_h,
         offset_x: ox,
@@ -481,11 +515,12 @@ pub fn emit_plot_content<S: PlotSink>(
         }
     }
 
-    let (first_wires, second_wires) = wires.split_at(options.group_splits.wires.min(wires.len()));
+    let (first_wires, second_wires) = wires.split_at(group_splits.wires.min(wires.len()));
     let (first_hatches, second_hatches) =
-        hatches.split_at(options.group_splits.hatches.min(hatches.len()));
+        hatches.split_at(group_splits.hatches.min(hatches.len()));
     let (first_wipeouts, second_wipeouts) =
-        wipeouts.split_at(options.group_splits.wipeouts.min(wipeouts.len()));
+        wipeouts.split_at(group_splits.wipeouts.min(wipeouts.len()));
+    let (first_images, second_images) = images.split_at(group_splits.images.min(images.len()));
     // Cap and join are the graphics state's, and nothing between the two
     // render groups saves or restores it: the second group starts with
     // whatever the first left set. So the tracker lives outside the loop,
@@ -504,14 +539,15 @@ pub fn emit_plot_content<S: PlotSink>(
         .enumerate()
         .flat_map(|(g, group)| group.members.iter().map(move |m| (m.as_str(), g)))
         .collect();
-    for (wires, hatches, wipeouts) in [
-        (first_wires, first_hatches, first_wipeouts),
-        (second_wires, second_hatches, second_wipeouts),
+    for (wires, hatches, wipeouts, images) in [
+        (first_wires, first_hatches, first_wipeouts, first_images),
+        (second_wires, second_hatches, second_wipeouts, second_images),
     ] {
         #[derive(Clone, Copy)]
         enum DrawItem<'a> {
             WireFill(&'a PlotWire),
             Hatch(&'a HatchModel),
+            Image(&'a PlotImage),
             Wire(&'a PlotWire),
             Text(&'a PlotWire),
         }
@@ -521,11 +557,14 @@ pub fn emit_plot_content<S: PlotSink>(
                 match self {
                     DrawItem::WireFill(w) | DrawItem::Wire(w) | DrawItem::Text(w) => &w.name,
                     DrawItem::Hatch(h) => &h.name,
+                    // A raster is never a member of a tagged symbol.
+                    DrawItem::Image(_) => "",
                 }
             }
         }
 
-        let mut draw_items = Vec::with_capacity(wires.len() * 2 + hatches.len() + wipeouts.len());
+        let mut draw_items =
+            Vec::with_capacity(wires.len() * 2 + hatches.len() + wipeouts.len() + images.len());
         let mut sequence = 0usize;
         for wire in wires {
             if !wire.fill_tris.is_empty() {
@@ -541,6 +580,10 @@ pub fn emit_plot_content<S: PlotSink>(
         }
         for hatch in wipeouts.iter().chain(hatches.iter()) {
             draw_items.push((hatch.draw_depth, 1u8, sequence, DrawItem::Hatch(hatch)));
+            sequence += 1;
+        }
+        for image in images {
+            draw_items.push((image.image.draw_depth, 1u8, sequence, DrawItem::Image(image)));
             sequence += 1;
         }
         draw_items.sort_by(|a, b| {
@@ -608,6 +651,7 @@ pub fn emit_plot_content<S: PlotSink>(
                     emit_wire_fills(
                         sink,
                         std::slice::from_ref(&wire.wire),
+                        wire.draw_depth,
                         ox,
                         oy,
                         plot_style,
@@ -618,6 +662,12 @@ pub fn emit_plot_content<S: PlotSink>(
                     last_color = None;
                     last_lw = None;
                     last_dash = None;
+                    continue;
+                }
+                DrawItem::Image(image) => {
+                    // A raster leaves the pen where it was: it saves and
+                    // restores its own state around the clip and the draw.
+                    emit_image(sink, image, ox, oy, options, &mut glyphs.report)?;
                     continue;
                 }
                 DrawItem::Hatch(hatch) => {
@@ -1252,6 +1302,7 @@ fn plotted_color(rgb: [f32; 3], alpha: f32, screening: f32, options: PdfPlotOpti
 fn emit_wire_fills<S: PlotSink>(
     sink: &mut S,
     wires: &[WireModel],
+    wire_depth: f32,
     ox: f64,
     oy: f64,
     plot_style: Option<&PlotStyleTable>,
@@ -1306,7 +1357,11 @@ fn emit_wire_fills<S: PlotSink>(
                     line_weight_px: wire.line_weight_px,
                     angle_offset: 0.0,
                     scale: 1.0 / scale.max(1.0e-6),
-                    draw_depth: wire.depth_override.unwrap_or(0.0),
+                    // The host wire's composed draw depth (PlotWire carries
+                    // wire_draw_depth). depth_override alone is a per-block
+                    // child label and would sort the fill outside its block's
+                    // band; keep the pattern fill co-sorted with its wire.
+                    draw_depth: wire_depth,
                 };
                 emit_hatch(
                     sink,
@@ -1391,6 +1446,156 @@ fn emit_wire_fills<S: PlotSink>(
 /// "Open CAD Studio | <user> | <unix seconds>" — the stamp the exporter has
 /// always printed. Reads the clock and the environment, so two exports of the
 /// same page differ; `PlotAssets::stamp_label` pins it for tests.
+/// A raster on the page, the way the PDF exporter draws it: the clip
+/// boundaries it inherited (block, viewport), then its own visible region,
+/// then the bitmap mapped from its unit square onto the quad. An affine quad
+/// is one draw; a quad in perspective (a raster seen through a rotated 3D
+/// view) is drawn a triangle at a time, each clipped to itself, with the
+/// texture mapping that triangle states — an approximation, since the page
+/// transform is affine. A raster that cannot be drawn — malformed pixels,
+/// geometry or clip — is counted in the report rather than guessed at; the
+/// PDF backend refuses the job over it, as its exporter did.
+fn emit_image<S: PlotSink>(
+    sink: &mut S,
+    plot: &PlotImage,
+    ox: f64,
+    oy: f64,
+    options: PdfPlotOptions,
+    report: &mut PlotReport,
+) -> Result<(), S::Error> {
+    let image = &plot.image;
+    let expected_byte_count = (image.width as usize)
+        .checked_mul(image.height as usize)
+        .and_then(|n| n.checked_mul(4));
+    if image.width == 0 || image.height == 0 || expected_byte_count != Some(image.pixels.len()) {
+        report.refuse_image("Cannot plot bitmap: dimensions do not match its RGBA pixels.");
+        return Ok(());
+    }
+    if image.verts.len() < 3 || image.verts.len() % 3 != 0 {
+        report.refuse_image("Cannot plot bitmap: incomplete triangle geometry.");
+        return Ok(());
+    }
+    if options.transparency && image.opacity <= 0.0 {
+        return Ok(());
+    }
+    // Sheet mm → points with `MM_TO_PT`, as the exporter's image path did
+    // (its geometry went through `Pt` directly, not `Point::new(Mm(..))`).
+    let to_page = |high: [f32; 3], low: [f32; 3]| PlotPoint {
+        x: ((high[0] as f64 + low[0] as f64 + ox) * MM_TO_PT as f64) as f32,
+        y: ((high[1] as f64 + low[1] as f64 + oy) * MM_TO_PT as f64) as f32,
+    };
+    let finite = |p: PlotPoint| p.x.is_finite() && p.y.is_finite();
+    let corners: [PlotPoint; 4] =
+        std::array::from_fn(|i| to_page(image.corners[i], image.corners_low[i]));
+    if !corners.iter().all(|p| finite(*p))
+        || !image.verts.iter().all(|v| {
+            finite(to_page(v.pos, v.pos_low)) && v.uv.iter().all(|c| c.is_finite())
+        })
+        || !plot
+            .clips
+            .iter()
+            .all(|ring| ring.len() >= 3 && ring.iter().flatten().all(|v| v.is_finite()))
+        || !image.opacity.is_finite()
+    {
+        report.refuse_image("Cannot plot bitmap: invalid coordinates, clip boundary, or opacity.");
+        return Ok(());
+    }
+    let alpha = (options.transparency && image.opacity < 1.0)
+        .then(|| image.opacity.clamp(0.0, 1.0));
+    sink.emit(PlotOp::Save)?;
+    for clip in &plot.clips {
+        sink.emit(PlotOp::Clip {
+            rings: vec![clip
+                .iter()
+                .map(|p| PlotPoint {
+                    x: ((p[0] + ox) * MM_TO_PT as f64) as f32,
+                    y: ((p[1] + oy) * MM_TO_PT as f64) as f32,
+                })
+                .collect()],
+            rule: FillRule::EvenOdd,
+        })?;
+    }
+    let draw = |sink: &mut S, matrix: [f32; 6]| {
+        sink.emit(PlotOp::Image {
+            pixels: image.pixels.clone(),
+            width: image.width,
+            height: image.height,
+            matrix,
+            alpha,
+        })
+    };
+    let u = [corners[1].x - corners[0].x, corners[1].y - corners[0].y];
+    let v = [corners[3].x - corners[0].x, corners[3].y - corners[0].y];
+    let axis = |p: PlotPoint, i: usize| if i == 0 { p.x } else { p.y };
+    let affine = (0..2).all(|i| {
+        (axis(corners[2], i) - axis(corners[0], i) - u[i] - v[i]).abs()
+            <= 1e-5 * (u[i].abs() + v[i].abs()).max(1.0)
+    });
+    if affine {
+        // A single draw preserves intrinsic IMAGE clipping without overlapping
+        // image draws.
+        sink.emit(PlotOp::Clip {
+            rings: image
+                .verts
+                .chunks_exact(3)
+                .map(|tri| tri.iter().map(|v| to_page(v.pos, v.pos_low)).collect())
+                .collect(),
+            rule: FillRule::EvenOdd,
+        })?;
+        draw(sink, [u[0], u[1], v[0], v[1], corners[0].x, corners[0].y])?;
+    } else {
+        // Page transforms are affine; perspective sampling is approximate.
+        for triangle in image.verts.chunks_exact(3) {
+            let page: [PlotPoint; 3] =
+                std::array::from_fn(|i| to_page(triangle[i].pos, triangle[i].pos_low));
+            let uv: [[f32; 2]; 3] =
+                std::array::from_fn(|i| [triangle[i].uv[0], 1.0 - triangle[i].uv[1]]);
+            let Some(matrix) = image_triangle_matrix(page.map(|p| [p.x, p.y]), uv)
+                .filter(|matrix| matrix.iter().all(|v| v.is_finite()))
+            else {
+                report.refuse_image("Cannot plot bitmap: degenerate texture mapping.");
+                sink.emit(PlotOp::Restore)?;
+                return Ok(());
+            };
+            sink.emit(PlotOp::Save)?;
+            sink.emit(PlotOp::Clip {
+                rings: vec![page.to_vec()],
+                rule: FillRule::EvenOdd,
+            })?;
+            draw(sink, matrix)?;
+            sink.emit(PlotOp::Restore)?;
+        }
+    }
+    sink.emit(PlotOp::Restore)?;
+    Ok(())
+}
+
+/// The affine map that takes texture coordinates `uv` onto page points `p`
+/// for one triangle, as `[a b c d e f]`; `None` when the triangle's texture
+/// mapping is degenerate.
+fn image_triangle_matrix(p: [[f32; 2]; 3], uv: [[f32; 2]; 3]) -> Option<[f32; 6]> {
+    let u = [uv[1][0] - uv[0][0], uv[1][1] - uv[0][1]];
+    let v = [uv[2][0] - uv[0][0], uv[2][1] - uv[0][1]];
+    let determinant = u[0] * v[1] - v[0] * u[1];
+    if determinant.abs() < 1e-12 {
+        return None;
+    }
+    let axes: [[f32; 2]; 2] = std::array::from_fn(|i| {
+        [
+            ((p[1][i] - p[0][i]) * v[1] - (p[2][i] - p[0][i]) * u[1]) / determinant,
+            (u[0] * (p[2][i] - p[0][i]) - v[0] * (p[1][i] - p[0][i])) / determinant,
+        ]
+    });
+    Some([
+        axes[0][0],
+        axes[1][0],
+        axes[0][1],
+        axes[1][1],
+        p[0][0] - axes[0][0] * uv[0][0] - axes[0][1] * uv[0][1],
+        p[0][1] - axes[1][0] * uv[0][0] - axes[1][1] * uv[0][1],
+    ])
+}
+
 fn live_stamp_label() -> String {
     #[cfg(not(target_arch = "wasm32"))]
     let timestamp = std::time::SystemTime::now()

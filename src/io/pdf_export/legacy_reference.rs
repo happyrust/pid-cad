@@ -16,7 +16,7 @@
     clippy::clone_on_copy
 )]
 
-use super::{PdfPlotOptions, PlotWire};
+use super::{PdfPlotOptions, PlotGroupSplits, PlotWire};
 use crate::io::plot_style::PlotStyleTable;
 use crate::scene::model::hatch_model::{HatchModel, HatchPattern};
 use crate::scene::WireModel;
@@ -43,6 +43,10 @@ pub(super) fn legacy_page_ops(
     clip: Option<(f32, f32, f32, f32)>,
     plot_style: Option<&PlotStyleTable>,
     options: PdfPlotOptions,
+    // Upstream moved the render-group splits from the options onto the page
+    // content (2026-09, images in plots); the frozen body reads them from
+    // this argument instead of options.group_splits, nothing else moved.
+    group_splits: PlotGroupSplits,
 ) -> Vec<Op> {
     let mut ops: Vec<Op> = Vec::new();
 
@@ -155,11 +159,11 @@ pub(super) fn legacy_page_ops(
         }
     }
 
-    let (first_wires, second_wires) = wires.split_at(options.group_splits.wires.min(wires.len()));
+    let (first_wires, second_wires) = wires.split_at(group_splits.wires.min(wires.len()));
     let (first_hatches, second_hatches) =
-        hatches.split_at(options.group_splits.hatches.min(hatches.len()));
+        hatches.split_at(group_splits.hatches.min(hatches.len()));
     let (first_wipeouts, second_wipeouts) =
-        wipeouts.split_at(options.group_splits.wipeouts.min(wipeouts.len()));
+        wipeouts.split_at(group_splits.wipeouts.min(wipeouts.len()));
     // The one deliberate change since the freeze (2026-09-08, R4 of
     // docs/plans/2026-09-08-svg-export-next-steps.md): cap and join are
     // tracked across both render groups instead of being presumed Round at

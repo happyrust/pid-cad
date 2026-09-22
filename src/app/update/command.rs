@@ -203,16 +203,11 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                             .buffer
                             .get_or_insert_with(String::new)
                             .push_str(&s);
-                        if self.tabs[i].active_grip.as_ref().is_some_and(|grip| {
-                            matches!(
-                                grip.mode,
-                                GripEditMode::Lengthen
-                                    | GripEditMode::Radius
-                                    | GripEditMode::ArcLength
-                                    | GripEditMode::RectangleWidth
-                                    | GripEditMode::RectangleHeight
-                            )
-                        }) {
+                        if self.tabs[i]
+                            .active_grip
+                            .as_ref()
+                            .is_some_and(|grip| grip.mode.uses_scalar_dynamic_input())
+                        {
                             self.command_line.input.push_str(&s);
                         }
                     } else {
@@ -258,16 +253,11 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                         if buf.is_empty() {
                             self.tabs[i].dyn_fields[a].buffer = None;
                         }
-                        if self.tabs[i].active_grip.as_ref().is_some_and(|grip| {
-                            matches!(
-                                grip.mode,
-                                GripEditMode::Lengthen
-                                    | GripEditMode::Radius
-                                    | GripEditMode::ArcLength
-                                    | GripEditMode::RectangleWidth
-                                    | GripEditMode::RectangleHeight
-                            )
-                        }) {
+                        if self.tabs[i]
+                            .active_grip
+                            .as_ref()
+                            .is_some_and(|grip| grip.mode.uses_scalar_dynamic_input())
+                        {
                             self.command_line.input.pop();
                         }
                         return self.focus_cmd_input();
@@ -325,6 +315,9 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                         }
                         crate::scene::model::object::GripMenuAction::RectangleHeight => {
                             Some(GripEditMode::RectangleHeight)
+                        }
+                        crate::scene::model::object::GripMenuAction::MoveParallel => {
+                            Some(GripEditMode::MoveParallel)
                         }
                         _ => None,
                     };
@@ -384,6 +377,9 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                                 ) | (
                                     GripEditMode::RectangleHeight,
                                     crate::scene::model::object::GripMenuAction::RectangleHeight,
+                                ) | (
+                                    GripEditMode::MoveParallel,
+                                    crate::scene::model::object::GripMenuAction::MoveParallel,
                                 )
                             )
                                 && grip.handle == pending.handle
@@ -577,6 +573,7 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                                         .scene
                                         .apply_grip(handle, grip_id, apply);
                                 }
+                                self.solve_grip_constraints(i, &grip);
 
                                 // Keep GripEdit synchronized so the normal commit
                                 // path records the exact final position.
@@ -730,6 +727,16 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                         crate::app::expr_eval::eval_to_string(&raw)
                     };
                     self.command_line.input.clear();
+                    // Remember the token for the context menu's Recent Input
+                    // list (prose steps excluded: a table cell or text body
+                    // is not a reusable value).
+                    let is_prose = self.tabs[i]
+                        .active_cmd
+                        .as_ref()
+                        .is_some_and(|c| c.input_kind().is_free_text());
+                    if !is_prose {
+                        self.command_line.record_recent_input(&text);
+                    }
 
                     // Offer the typed text to the command's option handler
                     // first (keywords like PLINE's A/L/C, a radius, …). If it
@@ -934,6 +941,12 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
 
                 if grip_dyn_locked {
                     return self.update(Message::CommandSubmit);
+                }
+                // Enter while a grip is hot places it where it is (or keeps
+                // it hot when it has not moved) — it must not fall through to
+                // "repeat the last command", which would discard the edit.
+                if self.tabs[i].active_grip.is_some() && self.tabs[i].active_cmd.is_none() {
+                    return self.commit_active_grip_edit();
                 }
 
                 // Normal command Dynamic Input commit.
@@ -1523,6 +1536,7 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                             | GripMenuAction::ArcLength
                             | GripMenuAction::RectangleWidth
                             | GripMenuAction::RectangleHeight
+                            | GripMenuAction::MoveParallel
                     ) {
                         if let Some((_, grip)) = self.tabs[i]
                             .selected_grip_handles
@@ -1562,6 +1576,11 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                                     popup.grip_id,
                                     grip.world,
                                 ),
+                                GripMenuAction::MoveParallel => GripEdit::move_parallel(
+                                    popup.handle,
+                                    popup.grip_id,
+                                    grip.world,
+                                ),
                                 _ => GripEdit::lengthen(
                                     popup.handle,
                                     popup.grip_id,
@@ -1587,6 +1606,8 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                             self.command_line.push_info("Specify point or enter width:");
                         } else if matches!(item.action, GripMenuAction::RectangleHeight) {
                             self.command_line.push_info("Specify point or enter height:");
+                        } else if matches!(item.action, GripMenuAction::MoveParallel) {
+                            self.command_line.push_info("Specify point or enter parallel offset:");
                         } else {
                             self.command_line.push_info(
                                 crate::t!("Specify point or enter distance:").as_ref(),
@@ -1719,15 +1740,13 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                         .get_entity(popup.handle)
                         .is_some_and(|entity| match (item.action, entity) {
                             (GripMenuAction::ShowFit, acadrust::EntityType::Spline(spline)) => {
-                                !spline.cv_frame_visible
-                                    && crate::entities::spline::uses_fit_method(spline)
+                                crate::entities::spline::shows_fit_points(spline)
                             }
                             (
                                 GripMenuAction::ShowControlVertices,
                                 acadrust::EntityType::Spline(spline),
                             ) => {
-                                spline.cv_frame_visible
-                                    || !crate::entities::spline::uses_fit_method(spline)
+                                crate::entities::spline::shows_control_vertices(spline)
                             }
                             _ => false,
                         });
@@ -1996,10 +2015,11 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
     }
 
     pub(super) fn on_ribbon_color_changed(&mut self, color: AcadColor) -> Task<Message> {
-                let i = self.active_tab;
-                self.ribbon.prop_color_palette_open = false;
-                self.ribbon.close_dropdown();
-                let handles = self.property_target_handles(i);
+        let i = self.active_tab;
+        self.ribbon.prop_color_palette_open = false;
+        self.ribbon.close_dropdown();
+        self.note_recent_color(color);
+        let handles = self.property_target_handles(i);
                 if handles.is_empty() {
                     if self.has_property_selection(i) {
                         return Task::none();
@@ -2994,6 +3014,245 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                             self.tabs[i].dirty = true;
                             self.refresh_properties();
                         }
+                        "view_plot_style_table" => {
+                            let next = if value.eq_ignore_ascii_case("None") {
+                                String::new()
+                            } else {
+                                value.clone()
+                            };
+                            let layout_name = self.tabs[i].scene.current_layout.clone();
+                            let current = self.tabs[i]
+                                .scene
+                                .document
+                                .objects
+                                .values()
+                                .find_map(|object| {
+                                    let acadrust::objects::ObjectType::Layout(layout) = object
+                                    else {
+                                        return None;
+                                    };
+                                    layout
+                                        .name
+                                        .eq_ignore_ascii_case(&layout_name)
+                                        .then(|| layout.plot_style_sheet.clone())
+                                })
+                                .unwrap_or_else(|| {
+                                    self.tabs[i].scene.document.header.stylesheet.clone()
+                                });
+                            if current != next {
+                                self.push_undo_snapshot(i, "PLOTSTYLE");
+                                for object in self.tabs[i].scene.document.objects.values_mut() {
+                                    if let acadrust::objects::ObjectType::Layout(layout) = object {
+                                        if layout.name.eq_ignore_ascii_case(&layout_name) {
+                                            layout.plot_style_sheet = next.clone();
+                                            layout.plot_flags.plot_plot_styles = !next.is_empty();
+                                            layout.plot_flags.show_plot_styles = !next.is_empty();
+                                        }
+                                    }
+                                }
+                                self.tabs[i].scene.document.header.stylesheet = next;
+                                self.tabs[i].dirty = true;
+                            }
+                            self.refresh_properties();
+                        }
+                        "view_annotation_scale" => {
+                            let current = self.tabs[i]
+                                .scene
+                                .document
+                                .header
+                                .current_annotation_scale
+                                .clone();
+                            if !current.eq_ignore_ascii_case(&value) {
+                                self.push_undo_snapshot(i, "CANNOSCALE");
+                                if self.tabs[i].scene.set_annotation_scale_named(&value).is_some() {
+                                    self.tabs[i].dirty = true;
+                                } else {
+                                    self.discard_last_undo_entry(i);
+                                }
+                            }
+                            self.refresh_properties();
+                        }
+                        "view_ucs_icon_on" => {
+                            let next = value.eq_ignore_ascii_case("Yes");
+                            let active_viewport = self.tabs[i].scene.active_viewport;
+                            let current = active_viewport
+                                .and_then(|handle| self.tabs[i].scene.document.get_entity(handle))
+                                .and_then(|entity| match entity {
+                                    acadrust::EntityType::Viewport(viewport) => {
+                                        Some(viewport.ucs_icon_visible)
+                                    }
+                                    _ => None,
+                                })
+                                .or_else(|| {
+                                    self.tabs[i]
+                                        .scene
+                                        .document
+                                        .vports
+                                        .iter()
+                                        .find(|viewport| {
+                                            viewport
+                                                .name
+                                                .trim_start_matches('*')
+                                                .eq_ignore_ascii_case("active")
+                                        })
+                                        .map(|viewport| viewport.ucsicon_lower)
+                                })
+                                .unwrap_or(self.show_ucs_icon);
+                            if current != next {
+                                self.push_undo_snapshot(i, "UCSICON");
+                                if let Some(handle) = active_viewport {
+                                    if let Some(acadrust::EntityType::Viewport(viewport)) =
+                                        self.tabs[i].scene.document.get_entity_mut(handle)
+                                    {
+                                        viewport.ucs_icon_visible = next;
+                                    }
+                                } else if let Some(viewport) = self.tabs[i]
+                                    .scene
+                                    .document
+                                    .vports
+                                    .iter_mut()
+                                    .find(|viewport| {
+                                        viewport
+                                            .name
+                                            .trim_start_matches('*')
+                                            .eq_ignore_ascii_case("active")
+                                    })
+                                {
+                                    viewport.ucsicon_lower = next;
+                                }
+                                self.show_ucs_icon = next;
+                                self.persist_settings_if_changed();
+                                self.tabs[i].dirty = true;
+                            }
+                            self.refresh_properties();
+                        }
+                        "view_ucs_icon_at_origin" => {
+                            let next = value.eq_ignore_ascii_case("Yes");
+                            let active_viewport = self.tabs[i].scene.active_viewport;
+                            let current = active_viewport
+                                .and_then(|handle| self.tabs[i].scene.document.get_entity(handle))
+                                .and_then(|entity| match entity {
+                                    acadrust::EntityType::Viewport(viewport) => {
+                                        Some(viewport.status.ucs_icon_at_origin)
+                                    }
+                                    _ => None,
+                                })
+                                .or_else(|| {
+                                    self.tabs[i]
+                                        .scene
+                                        .document
+                                        .vports
+                                        .iter()
+                                        .find(|viewport| {
+                                            viewport
+                                                .name
+                                                .trim_start_matches('*')
+                                                .eq_ignore_ascii_case("active")
+                                        })
+                                        .map(|viewport| viewport.ucsicon_origin)
+                                })
+                                .unwrap_or(self.ucs_icon_at_origin);
+                            if current != next {
+                                self.push_undo_snapshot(i, "UCSICON");
+                                if let Some(handle) = active_viewport {
+                                    if let Some(acadrust::EntityType::Viewport(viewport)) =
+                                        self.tabs[i].scene.document.get_entity_mut(handle)
+                                    {
+                                        viewport.status.ucs_icon_at_origin = next;
+                                    }
+                                } else if let Some(viewport) = self.tabs[i]
+                                    .scene
+                                    .document
+                                    .vports
+                                    .iter_mut()
+                                    .find(|viewport| {
+                                        viewport
+                                            .name
+                                            .trim_start_matches('*')
+                                            .eq_ignore_ascii_case("active")
+                                    })
+                                {
+                                    viewport.ucsicon_origin = next;
+                                }
+                                self.ucs_icon_at_origin = next;
+                                self.persist_settings_if_changed();
+                                self.tabs[i].dirty = true;
+                            }
+                            self.refresh_properties();
+                        }
+                        "view_ucs_per_viewport" => {
+                            let next = value.eq_ignore_ascii_case("Yes");
+                            let active_viewport = self.tabs[i].scene.active_viewport;
+                            let current = active_viewport
+                                .and_then(|handle| self.tabs[i].scene.document.get_entity(handle))
+                                .and_then(|entity| match entity {
+                                    acadrust::EntityType::Viewport(viewport) => {
+                                        Some(viewport.ucs_per_viewport)
+                                    }
+                                    _ => None,
+                                })
+                                .or_else(|| {
+                                    self.tabs[i]
+                                        .scene
+                                        .document
+                                        .vports
+                                        .iter()
+                                        .find(|viewport| {
+                                            viewport
+                                                .name
+                                                .trim_start_matches('*')
+                                                .eq_ignore_ascii_case("active")
+                                        })
+                                        .map(|viewport| viewport.ucs_per_viewport)
+                                })
+                                .unwrap_or(true);
+                            if current != next {
+                                self.push_undo_snapshot(i, "UCSVP");
+                                if let Some(handle) = active_viewport {
+                                    if let Some(acadrust::EntityType::Viewport(viewport)) =
+                                        self.tabs[i].scene.document.get_entity_mut(handle)
+                                    {
+                                        viewport.ucs_per_viewport = next;
+                                    }
+                                } else if let Some(viewport) = self.tabs[i]
+                                    .scene
+                                    .document
+                                    .vports
+                                    .iter_mut()
+                                    .find(|viewport| {
+                                        viewport
+                                            .name
+                                            .trim_start_matches('*')
+                                            .eq_ignore_ascii_case("active")
+                                    })
+                                {
+                                    viewport.ucs_per_viewport = next;
+                                }
+                                self.tabs[i].dirty = true;
+                            }
+                            self.refresh_properties();
+                        }
+                        "view_visual_style" => {
+                            use acadrust::entities::ViewportRenderMode as Mode;
+                            let mode = match value.as_str() {
+                                "2D Wireframe" | "Wireframe 2D" => Some(Mode::Wireframe2D),
+                                "3D Wireframe" | "Wireframe 3D" => Some(Mode::Wireframe3D),
+                                "Hidden Line" => Some(Mode::HiddenLine),
+                                "Flat Shaded" => Some(Mode::FlatShaded),
+                                "Gouraud Shaded" => Some(Mode::GouraudShaded),
+                                "Flat Shaded + Edges" => Some(Mode::FlatShadedWithEdges),
+                                "Gouraud Shaded + Edges" => {
+                                    Some(Mode::GouraudShadedWithEdges)
+                                }
+                                _ => None,
+                            };
+                            if let Some(mode) = mode {
+                                let task = self.on_set_render_mode(mode);
+                                self.refresh_properties();
+                                return task;
+                            }
+                            self.refresh_properties();
+                        }
                         _ => {}
                     }
                 }
@@ -3005,6 +3264,31 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 self.tabs[i].properties.active_field = None;
                 let handles = self.property_target_handles(i);
                 if !handles.is_empty() {
+                    let driven_reference = match field {
+                        "start_x" | "start_y" | "start_z" => Some(Some(0)),
+                        "end_x" | "end_y" | "end_z" => Some(Some(1)),
+                        "center_x" | "center_y" | "center_z" => Some(Some(-3)),
+                        "radius" | "diameter" | "circumference" | "area"
+                        | "major_r" | "minor_r" | "ratio" => Some(None),
+                        _ => None,
+                    };
+                    let retain_size = self.constraint_solve_mode
+                        && driven_reference.is_some_and(|marker| marker.is_some());
+                    let retained_originals: Vec<_> = if retain_size {
+                        handles
+                            .iter()
+                            .filter_map(|handle| {
+                                self.tabs[i]
+                                    .scene
+                                    .document
+                                    .get_entity(*handle)
+                                    .cloned()
+                                    .map(|entity| (*handle, entity))
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     let evaluates_expression = self.tabs[i]
                         .properties
                         .sections
@@ -3326,7 +3610,30 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                                 }
                             }
                         }
-                        self.invalidate_property_targets(i, &handles);
+                        let driven_refs: Vec<_> = driven_reference
+                            .into_iter()
+                            .flat_map(|marker| {
+                                handles.iter().copied().map(move |handle| match marker {
+                                    Some(marker) => {
+                                        crate::scene::parametric_constraints::ParametricRef::point(
+                                            handle, marker,
+                                        )
+                                    }
+                                    None => {
+                                        crate::scene::parametric_constraints::ParametricRef::whole(
+                                            handle,
+                                        )
+                                    }
+                                })
+                            })
+                            .collect();
+                        self.invalidate_property_targets_with_originals(
+                            i,
+                            &handles,
+                            &driven_refs,
+                            retain_size,
+                            &retained_originals,
+                        );
                         self.tabs[i].dirty = true;
                         self.refresh_properties();
                     }

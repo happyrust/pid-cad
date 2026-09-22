@@ -14,6 +14,9 @@ pub enum PropValue {
     EditText(String),
     /// Editable text that must not be expression-evaluated.
     PlainText(String),
+    /// Hyperlink collection summary. The value is display-only in the row;
+    /// the adjacent collection button opens the URL/description editor.
+    Hyperlink(String),
     /// Layer name — rendered as a combo_box.
     LayerChoice(String),
     /// Generic string choice rendered as a combo_box.
@@ -24,10 +27,7 @@ pub enum PropValue {
     /// Editable text plus a dropdown of existing options (block reference
     /// Name row): picking an option re-points the reference, submitting a
     /// new name renames the definition.
-    EditChoice {
-        value: String,
-        options: Vec<String>,
-    },
+    EditChoice { value: String, options: Vec<String> },
     /// ACI/RGB/ByLayer/ByBlock color — rendered as a color picker.
     ColorChoice(AcadColor),
     /// Color-book color with its file-provided display name.
@@ -51,7 +51,10 @@ pub enum PropValue {
     BoolToggle { field: &'static str, value: bool },
     /// A 0-based index navigated with ◀ / ▶ buttons (e.g. a polyline's Current
     /// Vertex). `display` is the label shown between the arrows (e.g. "2 / 7").
-    Stepper { field: &'static str, display: String },
+    Stepper {
+        field: &'static str,
+        display: String,
+    },
     /// Hatch pattern name — rendered as a combo_box from the catalog.
     HatchPatternChoice(String),
     /// Block attribute value keyed by its (dynamic, runtime) tag — rendered as
@@ -59,11 +62,16 @@ pub enum PropValue {
     /// tag carried here, not the row's `&'static str` field.
     AttrText { tag: String, value: String },
     /// A clickable link to one or more entities — the Constraints section's
-    /// row for one persistent sketch constraint. Clicking it selects every
+    /// row for one parametric constraint. Clicking it selects every
     /// entity in `handles` in the viewport. `conflicting` mirrors
-    /// `SketchConstraintSet::conflicts`, tinting the row the same danger
-    /// color the constraint's glyph pill already uses.
-    EntityLink { handles: Vec<Handle>, conflicting: bool },
+    /// `ParametricConstraintSet::conflicts`, tinting the row the same danger
+    /// color the constraint's glyph pill already uses. `id` routes the row's
+    /// delete action back to that constraint in the active scope.
+    EntityLink {
+        id: crate::scene::parametric_constraints::ConstraintId,
+        handles: Vec<Handle>,
+        conflicting: bool,
+    },
     /// One row of the document-wide named-parameter table (Parameters
     /// section, shown when nothing is selected). `index` is the row's
     /// position in `ParameterTable::iter()` order — stable across edits to
@@ -80,6 +88,11 @@ pub enum PropValue {
     },
     /// The trailing "+ Add parameter" row in the Parameters section.
     ParamAddRow,
+    /// The Parameters section's leading header row (no-selection page only):
+    /// a global on/off toggle for whether any constraint pill in the
+    /// viewport shows its driven value/parameter-name text. Mirrors
+    /// `App::show_constraint_values`.
+    ParamsVisibilityToggle(bool),
 }
 
 /// A single property row in the Properties panel.
@@ -178,6 +191,7 @@ pub enum GripMenuAction {
     RectangleWidth,
     RectangleHeight,
     RectangleResize,
+    MoveParallel,
     AddVertex,
     RemoveVertex,
     ConvertToArc,

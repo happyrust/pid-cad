@@ -1,6 +1,6 @@
 [package]
 name = "OpenCADStudio"
-version = "2026.37.0"
+version = "2026.38.0"
 edition = "2021"
 build = "build.rs"
 default-run = "OpenCADStudio"
@@ -26,6 +26,7 @@ winresource = "0.1"
 [dependencies]
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
+calamine = "0.36.1"
 base64 = "0.22"
 semver = "1"
 url = "2"
@@ -45,13 +46,14 @@ log = "0.4"
 # Line-number patterns of the P&ID rules (io::pid_pipes); already in the tree
 # via env_logger's env_filter.
 regex = "1"
-acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "5eea24cf35ba1739c22e982fc398ddb6c285def5", features = ["serde"] }
-cadkernel = { git = "https://github.com/HakanSeven12/cadkernel.git", rev = "5f0cdffc0faa9db03346aa794e22285c365b5f7f", features = ["acis", "offset"] }
-cadkernel-constraints = { git = "https://github.com/HakanSeven12/cadkernel.git", rev = "5f0cdffc0faa9db03346aa794e22285c365b5f7f" }
+acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "5b682ed", features = ["serde"] }
+cadkernel = { git = "https://github.com/HakanSeven12/cadkernel.git", rev = "6f046af", features = ["acis", "offset"] }
+cadkernel-constraints = { git = "https://github.com/HakanSeven12/cadkernel.git", rev = "6f046af" }
 acadifc = { git = "https://github.com/OpenAEC-Foundation/acadifc.git", rev = "47b5603", optional = true }
 dwg-thumbnailer = { path = "crates/dwg-thumbnailer" }
 flate2 = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
+hayro = "0.7.1"
 # Rasterises assets/logo.svg into the window icon at startup, so the taskbar
 # icon comes from the same file every other build target does. Already in the
 # tree behind iced's svg feature; named here only to use it directly.
@@ -67,14 +69,20 @@ ttf-parser = "0.25"
 cosmic-text = "0.15"
 unicode-bidi = "0.3"
 lyon_tessellation = "1.0.20"
+pollster = "0.4"
 
 [dev-dependencies]
 fluent-syntax = "0.12"
+# Headless simulator for the xref_manager menu tests; taken from the same
+# local wgpu-30 fork as `iced`, so the types line up (upstream pins the git
+# rev 23604ff the fork branches from).
+iced_test = { path = "../iced/test" }
 # naga follows the wgpu-30 port (local iced fork); upstream still sits on 27.
 naga = { version = "30", features = ["wgsl-in"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Com", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_Foundation"] }
+libloading = "0.8"
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_Security", "Win32_System_Com", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Graphics_Printing", "Win32_Graphics_Gdi", "Win32_Storage_Xps"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "wayland"] }
@@ -99,7 +107,7 @@ meshopt = "0.6.2"
 i18n-embed = { version = "0.16", features = ["desktop-requester"] }
 rayon = "1"
 open = "5"
-printpdf = { version = "0.9.1", default-features = false }
+printpdf = { version = "0.9.1", default-features = false, features = ["images"] }
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "win-system-proxy"] }
 # SmartPlant / Smart P&ID `.pid` reader. Native-only: it reaches SQL Server
 # backups through a bundled sqlite3 and the vendored `oxidized-mdf`, neither

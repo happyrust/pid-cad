@@ -3,8 +3,26 @@
 /// a composite pass folds its color + depth under the in-house overlays.
 #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
 pub mod bevy_bridge;
+
+// WGSL has no includes. Compose one shared draw-order function into each 2D
+// shader at compile time, including the sources used by shader validation tests.
+macro_rules! draw_order_shader {
+    ($file:literal) => {
+        concat!(
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/shaders/draw_order.wgsl"
+            )),
+            "\n",
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/shaders/", $file))
+        )
+    };
+}
+
 #[cfg(test)]
 mod gpu_tests;
+#[cfg(test)]
+mod depth_tests;
 mod device_capabilities;
 pub mod circle_gpu;
 pub mod ellipse_gpu;
@@ -40,6 +58,13 @@ use crate::scene::model::hatch_model::HatchModel;
 use crate::scene::model::image_model::ImageModel;
 use crate::scene::model::mesh_model::MeshLodSet;
 use crate::scene::model::wire_model::WireModel;
+
+/// Worst-case raster depth bias (in 24-bit quanta, toward the camera) block
+/// text is required to clear. The wipeout pipeline currently carries no bias
+/// (a raster bias can jump a block's narrow depth band and erase its
+/// foreground), so this is a safety budget: the block-text regression asserts
+/// a larger margin over whatever bias the pipeline could reintroduce.
+pub const WIPEOUT_DEPTH_BIAS_QUANTA: i32 = 2;
 
 struct SilhouetteChunk {
     vertex_buffer: wgpu::Buffer,
@@ -206,6 +231,7 @@ pub struct Pipeline {
     /// geometry passes render at this size; the blit UV is scaled by
     /// `depth_texture_size / alloc_size` so it samples only the filled region.
     depth_texture_size: Size<u32>,
+    pub(in crate::scene) viewport: Option<crate::scene::view::render::PhysicalViewport>,
     /// Actual allocated size of the depth / MSAA / resolve textures. Rounded
     /// up from the requested size to a coarse grid so a divider drag (which
     /// changes the pane size a few pixels every frame) doesn't recreate these
@@ -632,18 +658,18 @@ impl Pipeline {
             label: Some("wire.shader"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(match wire_mode {
                 wire_gpu::WirePipelineMode::IndexedStorage => {
-                    include_str!("../../shaders/wire_indexed.wgsl")
+                    draw_order_shader!("wire_indexed.wgsl")
                 }
-                wire_gpu::WirePipelineMode::Packed => include_str!("../../shaders/wire.wgsl"),
+                wire_gpu::WirePipelineMode::Packed => draw_order_shader!("wire.wgsl"),
             })),
         });
         let block_wire_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("block_wire.shader"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
                 if wire_mode.uses_storage() {
-                    include_str!("../../shaders/block_wire_storage.wgsl")
+                    draw_order_shader!("block_wire_storage.wgsl")
                 } else {
-                    include_str!("../../shaders/block_wire.wgsl")
+                    draw_order_shader!("block_wire.wgsl")
                 },
             )),
         });
@@ -1032,8 +1058,8 @@ impl Pipeline {
 
         let wipeout_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("wipeout.shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
-                "../../shaders/wipeout.wgsl"
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(draw_order_shader!(
+                "wipeout.wgsl"
             ))),
         });
 
@@ -1059,16 +1085,15 @@ impl Pipeline {
                 depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: content_stencil.clone(),
-                // Bias TOWARD the camera: a wipeout must win against geometry at
-                // its own depth (a block's wipeout + shapes are coincident at
-                // Z=0). A positive bias pushed the mask behind, so LessEqual
-                // rejected it and the geometry showed through. Tiny enough that
-                // meaningfully-nearer geometry still occludes the mask.
-                bias: wgpu::DepthBiasState {
-                    constant: -8,
-                    slope_scale: -1.0,
-                    clamp: 0.0,
-                },
+                // The shader already applies draw order. A raster bias can
+                // jump across a block's narrow range and erase its foreground
+                // — block text clears its siblings' wipes by only 9-16 depth
+                // quanta, so the pipeline must stay bias-free. Coincident ties
+                // still resolve toward the mask, which draws later under
+                // LessEqual. WIPEOUT_DEPTH_BIAS_QUANTA is the budget the
+                // block-text regression asserts against if a bias ever
+                // returns.
+                bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState {
                 count: MSAA_SAMPLES,
@@ -1847,14 +1872,14 @@ impl Pipeline {
         // ── Face3D pipeline ────────────────────────────────────────────────
         let face3d_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("face3d.shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
-                "../../shaders/face3d.wgsl"
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(draw_order_shader!(
+                "face3d.wgsl"
             ))),
         });
         let block_face3d_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("block_face3d.shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
-                "../../shaders/block_face3d.wgsl"
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(draw_order_shader!(
+                "block_face3d.wgsl"
             ))),
         });
 
@@ -2059,8 +2084,8 @@ impl Pipeline {
 
         let image_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("image.shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
-                "../../shaders/image.wgsl"
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(draw_order_shader!(
+                "image.wgsl"
             ))),
         });
 
@@ -2431,6 +2456,7 @@ impl Pipeline {
             wipeout_bgl1,
             image_bgl1,
             depth_texture_size: Size::new(1, 1),
+            viewport: None,
             // (0, 0) forces the first `ensure_depth_texture` to allocate at the
             // real rounded size — the constructor textures above are placeholders.
             alloc_size: Size::new(0, 0),
@@ -4085,8 +4111,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
         );
     }
 
-    /// Render the geometry passes at `vp_size` (the full viewport size — the
-    /// MSAA / resolve textures are this size) and blit the resulting resolve
+    /// Render geometry at its fractional pixel rectangle and blit the resolve
     /// to `surface_dest` on the swap-chain. The UV crop is read from the
     /// blit uniform buffer (written by `upload_blit_uv` during `prepare`)
     /// so a viewport that hangs off the canvas still composites the correct
@@ -4095,19 +4120,14 @@ analytic={:.1} regular={:.1} blocks={:.1}",
         &self,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
-        vp_size: Size<u32>,
+        raster: Rectangle,
         surface_dest: Rectangle<u32>,
+        surface_clip: Rectangle<u32>,
         bg_color: [f32; 4],
         mesh_wireframe: bool,
         hidden_line: bool,
         show_3d_edges: bool,
     ) {
-        let vp = Rectangle::<u32> {
-            x: 0,
-            y: 0,
-            width: vp_size.width,
-            height: vp_size.height,
-        };
         let msaa = &self.msaa_view;
         let [r, g, b, a] = bg_color;
         let clear_color = if self.clip_boundary.is_some() || self.skip_background {
@@ -4219,8 +4239,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            // MSAA texture is clip-bounds-sized, so viewport starts at (0, 0).
-            pass.set_viewport(0.0, 0.0, vp.width as f32, vp.height as f32, 0.0, 1.0);
+            pass.set_viewport(raster.x, raster.y, raster.width, raster.height, 0.0, 1.0);
             // Stamp the viewport clip boundary into the just-cleared stencil
             // (interior → 1) before any content draws, so every pass below can
             // clip to the shape with reference 1.
@@ -4311,7 +4330,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_viewport(0.0, 0.0, vp.width as f32, vp.height as f32, 0.0, 1.0);
+            pass.set_viewport(raster.x, raster.y, raster.width, raster.height, 0.0, 1.0);
             pass.set_pipeline(&self.image_pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             pass.set_stencil_reference(stencil_ref);
@@ -4348,7 +4367,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_viewport(0.0, 0.0, vp.width as f32, vp.height as f32, 0.0, 1.0);
+            pass.set_viewport(raster.x, raster.y, raster.width, raster.height, 0.0, 1.0);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             pass.set_stencil_reference(stencil_ref);
             // Four draw paths share this pass:
@@ -4647,7 +4666,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_viewport(0.0, 0.0, vp.width as f32, vp.height as f32, 0.0, 1.0);
+                pass.set_viewport(raster.x, raster.y, raster.width, raster.height, 0.0, 1.0);
                 pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 pass.set_stencil_reference(stencil_ref);
                 if !fill.chunks_3d.is_empty() {
@@ -4718,7 +4737,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_viewport(0.0, 0.0, vp.width as f32, vp.height as f32, 0.0, 1.0);
+            pass.set_viewport(raster.x, raster.y, raster.width, raster.height, 0.0, 1.0);
             pass.set_pipeline(&self.wire_pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             pass.set_stencil_reference(stencil_ref);
@@ -4761,7 +4780,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_viewport(0.0, 0.0, vp.width as f32, vp.height as f32, 0.0, 1.0);
+            pass.set_viewport(raster.x, raster.y, raster.width, raster.height, 0.0, 1.0);
             pass.set_pipeline(&self.wire_pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             // In a filled-with-edges mode the mesh outline edges frame the shaded
@@ -4912,7 +4931,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_viewport(0.0, 0.0, vp.width as f32, vp.height as f32, 0.0, 1.0);
+                pass.set_viewport(raster.x, raster.y, raster.width, raster.height, 0.0, 1.0);
                 pass.set_pipeline(&self.text_pipeline);
                 pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 pass.set_stencil_reference(stencil_ref);
@@ -4965,7 +4984,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_viewport(0.0, 0.0, vp.width as f32, vp.height as f32, 0.0, 1.0);
+            pass.set_viewport(raster.x, raster.y, raster.width, raster.height, 0.0, 1.0);
             pass.set_pipeline(&self.wipeout_pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             pass.set_stencil_reference(stencil_ref);
@@ -5015,7 +5034,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_viewport(0.0, 0.0, vp.width as f32, vp.height as f32, 0.0, 1.0);
+            pass.set_viewport(raster.x, raster.y, raster.width, raster.height, 0.0, 1.0);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             pass.set_stencil_reference(stencil_ref);
             if !self.gpu_selected_wires.is_empty() {
@@ -5158,6 +5177,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                 1.0,
             );
             pass.set_pipeline(&self.blit_pipeline);
+            pass.set_scissor_rect(surface_clip.x, surface_clip.y, surface_clip.width, surface_clip.height);
             pass.set_bind_group(0, &self.blit_bind_group, &[]);
             pass.draw(0..6, 0..1);
         }

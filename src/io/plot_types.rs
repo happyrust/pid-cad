@@ -1,15 +1,17 @@
 // Paper-space plot inputs shared by every plot backend.
 //
-// These types describe *what* is on a plotted page — the wires, hatches and
-// wipeouts already flattened to sheet coordinates, plus the page geometry and
-// output options — without saying which file format receives it. They used to
-// be defined in `pdf_export.rs` (hence the `Pdf…` names, kept so the existing
-// call sites in `app/update/file.rs` and `io/print_to_printer.rs` do not have
-// to change); `pdf_export` re-exports them.
+// These types describe *what* is on a plotted page — the wires, hatches,
+// wipeouts and raster images already flattened to sheet coordinates, plus the
+// page geometry and output options — without saying which file format
+// receives it. They used to be defined in `pdf_export.rs` (hence the `Pdf…`
+// names, kept so the existing call sites in `app/update/file.rs` and
+// `io/print_to_printer.rs` do not have to change); `pdf_export` re-exports
+// them.
 
 use crate::io::plot_emit::PlotPage;
 use crate::io::plot_style::PlotStyleTable;
 use crate::scene::model::hatch_model::HatchModel;
+use crate::scene::model::image_model::ImageModel;
 use crate::scene::WireModel;
 
 /// A wire plus the draw-order depth the plot sorts it by.
@@ -28,6 +30,13 @@ impl std::ops::Deref for PlotWire {
     }
 }
 
+/// Decoded image geometry plus inherited block/viewport clip boundaries.
+#[derive(Clone, Debug)]
+pub struct PlotImage {
+    pub image: ImageModel,
+    pub clips: Vec<Vec<[f64; 2]>>,
+}
+
 /// Output controls shared by preview, PDF export, and printer rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PdfPlotOptions {
@@ -36,7 +45,6 @@ pub struct PdfPlotOptions {
     pub transparency: bool,
     pub stamp: bool,
     pub merge_lines: bool,
-    pub group_splits: PlotGroupSplits,
 }
 
 /// End indexes of the first paper/model render group in each flat input list.
@@ -45,16 +53,30 @@ pub struct PlotGroupSplits {
     pub wires: usize,
     pub hatches: usize,
     pub wipeouts: usize,
+    pub images: usize,
 }
 
-/// Owned render data for one page in a multi-page PDF.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub struct PdfPageInput {
+/// Everything drawn on one page, flattened to sheet coordinates: the two
+/// render groups (paper space, then the model seen through its viewports)
+/// laid end to end in each list, with `group_splits` saying where the first
+/// group ends.
+#[derive(Default)]
+pub struct PlotContent {
     pub wires: std::sync::Arc<Vec<PlotWire>>,
     pub hatches: Vec<HatchModel>,
     pub wipeouts: Vec<HatchModel>,
+    pub images: Vec<PlotImage>,
+    pub group_splits: PlotGroupSplits,
+}
+
+/// Owned geometry and settings for one page in a (multi-page) plot job.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub struct PdfPageInput {
+    pub content: PlotContent,
+    /// Page dimensions in mm, after any 90/270-degree rotation.
     pub paper_w: f64,
     pub paper_h: f64,
+    /// Absolute-world offsets stay f64 to preserve local detail at UTM coordinates.
     pub offset_x: f64,
     pub offset_y: f64,
     pub rotation_deg: i32,
@@ -70,9 +92,11 @@ impl PdfPageInput {
     /// the PDF exporter has always used and every backend has to keep.
     pub fn as_plot_page<'a>(&'a self, fallback: Option<&'a PlotStyleTable>) -> PlotPage<'a> {
         PlotPage {
-            wires: &self.wires,
-            hatches: &self.hatches,
-            wipeouts: &self.wipeouts,
+            wires: &self.content.wires,
+            hatches: &self.content.hatches,
+            wipeouts: &self.content.wipeouts,
+            images: &self.content.images,
+            group_splits: self.content.group_splits,
             paper_w: self.paper_w as f32,
             paper_h: self.paper_h as f32,
             offset_x: self.offset_x,
@@ -94,7 +118,6 @@ impl Default for PdfPlotOptions {
             transparency: false,
             stamp: false,
             merge_lines: false,
-            group_splits: PlotGroupSplits::default(),
         }
     }
 }

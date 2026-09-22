@@ -26,6 +26,8 @@ pub struct Case {
     pub clip: Option<(f32, f32, f32, f32)>,
     pub plot_style: Option<PlotStyleTable>,
     pub options: PdfPlotOptions,
+    /// Where the first render group ends in each list.
+    pub group_splits: PlotGroupSplits,
 }
 
 impl Case {
@@ -42,6 +44,7 @@ impl Case {
             clip: None,
             plot_style: None,
             options: PdfPlotOptions::default(),
+            group_splits: PlotGroupSplits::default(),
         }
     }
 
@@ -50,6 +53,8 @@ impl Case {
             wires: &self.wires,
             hatches: &self.hatches,
             wipeouts: &self.wipeouts,
+            images: &[],
+            group_splits: self.group_splits,
             paper_w: self.paper.0,
             paper_h: self.paper.1,
             offset_x: self.offset.0,
@@ -65,9 +70,13 @@ impl Case {
     /// The same page as one entry of a multi-page job.
     pub fn page_input(&self) -> crate::io::plot_types::PdfPageInput {
         crate::io::plot_types::PdfPageInput {
-            wires: std::sync::Arc::new(self.wires.clone()),
-            hatches: self.hatches.clone(),
-            wipeouts: self.wipeouts.clone(),
+            content: crate::io::plot_types::PlotContent {
+                wires: std::sync::Arc::new(self.wires.clone()),
+                hatches: self.hatches.clone(),
+                wipeouts: self.wipeouts.clone(),
+                images: Vec::new(),
+                group_splits: self.group_splits,
+            },
             paper_w: self.paper.0 as f64,
             paper_h: self.paper.1 as f64,
             offset_x: self.offset.0,
@@ -93,6 +102,7 @@ impl Case {
             clip: self.clip,
             plot_style: self.plot_style.clone(),
             options: self.options,
+            group_splits: self.group_splits,
         }
     }
 }
@@ -615,17 +625,19 @@ pub fn corpus() -> Vec<Case> {
         HatchPattern::Solid,
         [0.0, 0.0, 0.0, 1.0],
     ));
-    c.options.group_splits = PlotGroupSplits {
+    c.group_splits = PlotGroupSplits {
         wires: 3,
         hatches: 1,
         wipeouts: 1,
+        images: 0,
     };
     // Splits past the end must clamp, not panic.
     let mut clamped = c.clone_for("two groups, splits past the end");
-    clamped.options.group_splits = PlotGroupSplits {
+    clamped.group_splits = PlotGroupSplits {
         wires: 99,
         hatches: 99,
         wipeouts: 99,
+        images: 99,
     };
     let mut m = c.clone_for("two groups, merge_lines + stamp");
     m.options.merge_lines = true;
@@ -666,7 +678,7 @@ pub fn corpus() -> Vec<Case> {
     );
     butt_again.wire.aci = 1;
     c.wires.push(butt_again);
-    c.options.group_splits = PlotGroupSplits {
+    c.group_splits = PlotGroupSplits {
         wires: 1,
         ..Default::default()
     };

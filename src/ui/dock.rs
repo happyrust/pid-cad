@@ -42,6 +42,9 @@ pub enum PanelId {
     Properties,
     BlockPalette,
     PidLegend,
+    ExternalReferences,
+    /// Outline of the drawing's origin planes, open sketch and solid bodies.
+    Browser,
 }
 
 impl PanelId {
@@ -51,6 +54,8 @@ impl PanelId {
             PanelId::Properties => "Properties",
             PanelId::BlockPalette => "Block Palette",
             PanelId::PidLegend => "P&ID 图例",
+            PanelId::ExternalReferences => "External References",
+            PanelId::Browser => "Browser",
         }
     }
 
@@ -60,6 +65,17 @@ impl PanelId {
             PanelId::Properties => 250.0,
             PanelId::BlockPalette => 260.0,
             PanelId::PidLegend => 280.0,
+            PanelId::ExternalReferences => 460.0,
+            PanelId::Browser => 230.0,
+        }
+    }
+
+    /// Widest a panel may be dragged or sized to. The references table is
+    /// column-rich, so it allows double the shared maximum.
+    fn max_width(self) -> f32 {
+        match self {
+            PanelId::ExternalReferences => DOCK_MAX_W * 2.0,
+            _ => DOCK_MAX_W,
         }
     }
 }
@@ -134,7 +150,13 @@ impl DockState {
     /// resize never hit a missing configuration. Also a cheap heal for configs
     /// written by an older version.
     pub fn ensure_settings(&mut self) {
-        for id in [PanelId::Properties, PanelId::BlockPalette, PanelId::PidLegend] {
+        for id in [
+            PanelId::Properties,
+            PanelId::BlockPalette,
+            PanelId::PidLegend,
+            PanelId::ExternalReferences,
+            PanelId::Browser,
+        ] {
             self.panels.entry(id).or_insert_with(|| DockPanel::for_id(id));
         }
     }
@@ -169,7 +191,7 @@ impl DockState {
     pub fn width(&self, id: PanelId, win_w: f32) -> f32 {
         self.settings(id)
             .width
-            .clamp(DOCK_MIN_W, DOCK_MAX_W.min(win_w * 0.45).max(DOCK_MIN_W))
+            .clamp(DOCK_MIN_W, id.max_width().min(win_w * 0.45).max(DOCK_MIN_W))
     }
 
     pub fn auto_collapse(&self, id: PanelId) -> bool {
@@ -179,7 +201,7 @@ impl DockState {
     /// Set the persisted width, clamped.
     pub fn set_width(&mut self, id: PanelId, width: f32) {
         let entry = self.panels.entry(id).or_insert_with(|| DockPanel::for_id(id));
-        entry.width = width.clamp(DOCK_MIN_W, DOCK_MAX_W);
+        entry.width = width.clamp(DOCK_MIN_W, id.max_width());
     }
 
     /// Reset width to the panel's default.
@@ -234,6 +256,20 @@ pub const DOCK_MAX_W: f32 = 600.0;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_references_allows_double_max_width() {
+        let mut state = DockState::default();
+        state.ensure_settings();
+        // Wider default for the column-rich references table, double the maximum.
+        // (The 45%-of-window rule still dominates on narrow windows.)
+        assert_eq!(state.width(PanelId::ExternalReferences, 3000.0), 460.0);
+        state.set_width(PanelId::ExternalReferences, 5000.0);
+        assert_eq!(state.width(PanelId::ExternalReferences, 3000.0), DOCK_MAX_W * 2.0);
+        // Other panels keep the shared maximum.
+        state.set_width(PanelId::BlockPalette, 5000.0);
+        assert_eq!(state.width(PanelId::BlockPalette, 3000.0), DOCK_MAX_W);
+    }
 
     #[test]
     fn default_docks_each_known_panel_on_an_edge() {

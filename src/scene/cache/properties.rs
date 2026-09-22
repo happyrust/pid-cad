@@ -30,11 +30,12 @@ pub fn general_section(entity: &EntityType) -> PropSection {
         },
     );
 
-    let hyperlink = crate::scene::pe_url_of(entity)
+    let hyperlink = crate::scene::pe_url_description_of(entity)
+        .or_else(|| crate::scene::pe_url_of(entity))
         .unwrap_or_default()
         .to_owned();
 
-    let mut section = PropSection {
+    let section = PropSection {
         title: t!("General").into_owned(),
         props: vec![
             Property {
@@ -85,21 +86,10 @@ pub fn general_section(entity: &EntityType) -> PropSection {
             Property {
                 label: t!("Hyperlink").into_owned(),
                 field: "hyperlink",
-                value: PropValue::PlainText(hyperlink),
+                value: PropValue::Hyperlink(hyperlink),
             },
         ],
     };
-
-    // Thickness (DXF 39) is a General-group property, but only the entity
-    // types that carry an extrusion thickness expose it (line, circle, arc,
-    // polyline, text, 2D solid, …). Show it right after Hyperlink for those.
-    if let Some(t) = crate::scene::view::dispatch::entity_thickness(entity) {
-        section.props.push(crate::entities::common::edit_prop(
-            t!("Thickness").as_ref(),
-            "thickness",
-            t,
-        ));
-    }
 
     section
 }

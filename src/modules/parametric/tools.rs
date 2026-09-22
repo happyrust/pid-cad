@@ -6,12 +6,12 @@ pub mod horizontal {
     use super::*;
     pub fn tool() -> ToolDef {
         ToolDef {
-            id: "HCONSTRAINT",
+            id: "GCHORIZONTAL",
             label: "Horizontal",
             icon: IconKind::Svg(include_bytes!(
                 "../../../assets/icons/constrain/horizontal.svg"
             )),
-            event: ModuleEvent::Command("HCONSTRAINT".to_string()),
+            event: ModuleEvent::Command("GCHORIZONTAL".to_string()),
         }
     }
 }
@@ -53,7 +53,7 @@ pub mod perpendicular {
             icon: IconKind::Svg(include_bytes!(
                 "../../../assets/icons/constrain/perpendicular.svg"
             )),
-            event: ModuleEvent::Command("QCONSTRAINT".to_string()),
+            event: ModuleEvent::Command("GCPERPENDICULAR".to_string()),
         }
     }
 }
@@ -64,9 +64,7 @@ pub mod equal {
         ToolDef {
             id: "ECONSTRAINT",
             label: "Equal",
-            icon: IconKind::Svg(include_bytes!(
-                "../../../assets/icons/constrain/equal.svg"
-            )),
+            icon: IconKind::Svg(include_bytes!("../../../assets/icons/constrain/equal.svg")),
             event: ModuleEvent::Command("ECONSTRAINT".to_string()),
         }
     }
@@ -90,12 +88,12 @@ pub mod concentric {
     use super::*;
     pub fn tool() -> ToolDef {
         ToolDef {
-            id: "NCONSTRAINT",
+            id: "GCCONCENTRIC",
             label: "Concentric",
             icon: IconKind::Svg(include_bytes!(
                 "../../../assets/icons/constrain/concentric.svg"
             )),
-            event: ModuleEvent::Command("NCONSTRAINT".to_string()),
+            event: ModuleEvent::Command("GCCONCENTRIC".to_string()),
         }
     }
 }
@@ -105,7 +103,7 @@ pub mod concentric {
 /// "the line passes through the circle's center" (a circle's radius is
 /// always normal to its own tangent), so it's built from the same
 /// `PointOnLine` primitive `PointOnCurve` already uses for a point-on-line
-/// case (`sketch_solve.rs`). Distinct from `Perpendicular`, which only
+/// case (`parametric_solve.rs`). Distinct from `Perpendicular`, which only
 /// covers line-to-line.
 pub mod normal {
     use super::*;
@@ -113,9 +111,7 @@ pub mod normal {
         ToolDef {
             id: "NRCONSTRAINT",
             label: "Normal",
-            icon: IconKind::Svg(include_bytes!(
-                "../../../assets/icons/constrain/normal.svg"
-            )),
+            icon: IconKind::Svg(include_bytes!("../../../assets/icons/constrain/normal.svg")),
             event: ModuleEvent::Command("NRCONSTRAINT".to_string()),
         }
     }
@@ -140,10 +136,8 @@ pub mod fixed {
     pub fn tool() -> ToolDef {
         ToolDef {
             id: "FXCONSTRAINT",
-            label: "Fixed",
-            icon: IconKind::Svg(include_bytes!(
-                "../../../assets/icons/constrain/fixed.svg"
-            )),
+            label: "Fix",
+            icon: IconKind::Svg(include_bytes!("../../../assets/icons/constrain/fixed.svg")),
             event: ModuleEvent::Command("FXCONSTRAINT".to_string()),
         }
     }
@@ -166,16 +160,19 @@ pub mod symmetric {
 // ── Autocomplete registry ─────────────────────────────────
 inventory::submit!(crate::command::CommandRegistration {
     names: &[
-        "HCONSTRAINT",
+        "GCHORIZONTAL",
         "VCONSTRAINT",
         "PCONSTRAINT",
         "QCONSTRAINT",
+        "GCPERPENDICULAR",
         "ECONSTRAINT",
+        "GCEQUAL",
         "TCONSTRAINT",
-        "NCONSTRAINT",
+        "GCCONCENTRIC",
         "NRCONSTRAINT",
         "LCONSTRAINT",
         "FXCONSTRAINT",
+        "GCFIX",
         "SYCONSTRAINT",
     ]
 });

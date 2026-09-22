@@ -9,9 +9,7 @@ struct TextOrient {
     x_scale: f64,
 }
 
-fn inverse_affine(
-    transform: &acadrust::types::Transform,
-) -> Option<acadrust::types::Transform> {
+fn inverse_affine(transform: &acadrust::types::Transform) -> Option<acadrust::types::Transform> {
     use acadrust::types::{Matrix3, Matrix4, Transform, Vector3};
     let matrix = &transform.matrix.m;
     let linear = Matrix3::from_rows(
@@ -163,6 +161,80 @@ impl Scene {
             .filter(|&h| !self.is_layer_locked(h))
             .collect();
         let handles = &handles[..];
+        let retained_originals: Vec<(Handle, EntityType)> = handles
+            .iter()
+            .filter_map(|handle| {
+                self.document
+                    .get_entity(*handle)
+                    .cloned()
+                    .map(|entity| (*handle, entity))
+            })
+            .collect();
+        let transformed_refs: Vec<_> = handles
+            .iter()
+            .copied()
+            .map(parametric_constraints::ParametricRef::whole)
+            .collect();
+        let mut driven_refs = Vec::new();
+        if !matches!(t, EntityTransform::Translate(_)) {
+            for set in &self.parametric_constraints {
+                for constraint in &set.constraints {
+                    if !constraint.enabled
+                        || !matches!(
+                            constraint.kind,
+                            parametric_constraints::ConstraintKind::Parallel
+                                | parametric_constraints::ConstraintKind::Perpendicular
+                                | parametric_constraints::ConstraintKind::Colinear
+                        )
+                    {
+                        continue;
+                    }
+                    let selected_refs = constraint
+                        .refs
+                        .iter()
+                        .filter(|reference| handles.contains(&reference.entity))
+                        .count();
+                    if selected_refs == 0 || selected_refs == constraint.refs.len() {
+                        continue;
+                    }
+                    for reference in constraint
+                        .refs
+                        .iter()
+                        .copied()
+                        .filter(|reference| !handles.contains(&reference.entity))
+                    {
+                        let anchor = if let Some(index) = reference.segment_index() {
+                            parametric_constraints::ParametricRef::point(
+                                reference.entity,
+                                index as i32,
+                            )
+                        } else if reference.directional_axis().is_some()
+                            && matches!(
+                                self.document.get_entity(reference.entity),
+                                Some(EntityType::Ellipse(_))
+                            )
+                        {
+                            parametric_constraints::ParametricRef::center(reference.entity)
+                        } else {
+                            parametric_constraints::ParametricRef::point(reference.entity, 0)
+                        };
+                        let follows_selected_point = set.constraints.iter().any(|link| {
+                            link.enabled
+                                && link.kind
+                                    == parametric_constraints::ConstraintKind::Coincident
+                                && link.refs.contains(&anchor)
+                                && link
+                                    .refs
+                                    .iter()
+                                    .any(|item| handles.contains(&item.entity))
+                        });
+                        if !follows_selected_point && !driven_refs.contains(&anchor) {
+                            driven_refs.push(anchor);
+                        }
+                    }
+                }
+            }
+        }
         // Preserve readable text orientation when MIRRTEXT is disabled.
         let preserve_text_orientation =
             matches!(t, EntityTransform::Mirror { .. }) && !self.document.header.mirror_text;
@@ -248,9 +320,7 @@ impl Scene {
             let image_bearing = self.document.get_entity(h).is_some_and(|entity| {
                 matches!(
                     entity,
-                    EntityType::RasterImage(_)
-                        | EntityType::Ole2Frame(_)
-                        | EntityType::Underlay(_)
+                    EntityType::RasterImage(_) | EntityType::Ole2Frame(_) | EntityType::Underlay(_)
                 )
             });
             if image_bearing {
@@ -294,17 +364,19 @@ impl Scene {
         // per-handle, keeping the block cache + all other memoized wires.
         let changes: Vec<(Handle, ChangeKind)> =
             handles.iter().map(|&h| (h, ChangeKind::Modified)).collect();
-        self.bump_entities(&changes);
+        self.bump_entities_with_parametric_transform_policy(
+            &changes,
+            &driven_refs,
+            &transformed_refs,
+            &retained_originals,
+        );
         self.refresh_meshes_for_handles(&refresh_solid_handles);
     }
 
     /// Entities in anonymous dimension blocks that visually belong to
     /// dimensions inside `block_record`. They must follow a block-coordinate
     /// reframe and be included in BEDIT's discard snapshot.
-    pub(crate) fn block_definition_dependent_handles(
-        &self,
-        block_record: Handle,
-    ) -> Vec<Handle> {
+    pub(crate) fn block_definition_dependent_handles(&self, block_record: Handle) -> Vec<Handle> {
         let Some(record) = self
             .document
             .block_records
@@ -367,17 +439,16 @@ impl Scene {
         let owned: HashSet<Handle> = handles.iter().copied().collect();
         let transform = EntityTransform::Affine(*local_from_old);
         let matrix = &local_from_old.matrix.m;
-        let dependent_transform =
-            EntityTransform::Affine(acadrust::types::Transform::from_matrix(
-                acadrust::types::Matrix4 {
-                    m: [
-                        [matrix[0][0], matrix[0][1], matrix[0][2], 0.0],
-                        [matrix[1][0], matrix[1][1], matrix[1][2], 0.0],
-                        [matrix[2][0], matrix[2][1], matrix[2][2], 0.0],
-                        [0.0, 0.0, 0.0, 1.0],
-                    ],
-                },
-            ));
+        let dependent_transform = EntityTransform::Affine(acadrust::types::Transform::from_matrix(
+            acadrust::types::Matrix4 {
+                m: [
+                    [matrix[0][0], matrix[0][1], matrix[0][2], 0.0],
+                    [matrix[1][0], matrix[1][1], matrix[1][2], 0.0],
+                    [matrix[2][0], matrix[2][1], matrix[2][2], 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+            },
+        ));
         let mut changed = Vec::new();
 
         for handle in handles {
@@ -596,10 +667,7 @@ impl Scene {
                 let entity = self.document.get_entity(h)?.clone();
 
                 let annotation_scales = if leader_pair_handles.contains(&h) {
-                    crate::scene::annotative::annotation_scale_handles_for_entity(
-                        &self.document,
-                        h,
-                    )
+                    crate::scene::annotative::annotation_scale_handles_for_entity(&self.document, h)
                 } else {
                     Vec::new()
                 };
@@ -691,8 +759,8 @@ impl Scene {
                 if let Some(model) = new_model {
                     self.hatches.insert(h, model);
                 }
-                let rebuilt_history = self.copy_solid_history(src_handle, h)
-                    && self.transform_solid_history(h, t);
+                let rebuilt_history =
+                    self.copy_solid_history(src_handle, h) && self.transform_solid_history(h, t);
                 if !rebuilt_history
                     && self.document.get_entity(h).is_some_and(|entity| {
                         matches!(
@@ -717,8 +785,7 @@ impl Scene {
         let leader_links: Vec<(Handle, Handle)> = handle_map
             .iter()
             .filter_map(|(&source_handle, &copied_handle)| {
-                let EntityType::Leader(source_leader) =
-                    self.document.get_entity(source_handle)?
+                let EntityType::Leader(source_leader) = self.document.get_entity(source_handle)?
                 else {
                     return None;
                 };
@@ -733,9 +800,7 @@ impl Scene {
             .collect();
 
         for (leader_handle, annotation_handle) in leader_links {
-            if let Some(EntityType::Leader(leader)) =
-                self.document.get_entity_mut(leader_handle)
-            {
+            if let Some(EntityType::Leader(leader)) = self.document.get_entity_mut(leader_handle) {
                 leader.annotation_handle = annotation_handle;
             }
 
@@ -744,6 +809,7 @@ impl Scene {
         // Complete group copies record their new Group objects and dictionary
         // entry as targeted object deltas inside copy_complete_groups.
         self.copy_complete_groups(&handle_map);
+        self.copy_dimension_associations(&handle_map);
         // The copies are new handles (natural memo misses, tessellated fresh)
         // and reference only already-cached blocks — no block defn changes.
         // Report them as additions so derived caches patch in exactly the copies.
@@ -753,7 +819,7 @@ impl Scene {
             .collect();
         self.bump_entities(&changes);
         // Constraints wholly within the duplicated selection follow it.
-        self.duplicate_sketch_constraints_for(&handle_map);
+        self.duplicate_parametric_constraints_for(&handle_map);
         self.refresh_meshes_for_handles(&refresh_solid_handles);
         new_handles
     }
@@ -840,11 +906,7 @@ impl Scene {
         let Some(reference) = reference else {
             return;
         };
-        let point = acadrust::types::Vector3::new(
-            reference.x,
-            reference.y,
-            reference.z,
-        );
+        let point = acadrust::types::Vector3::new(reference.x, reference.y, reference.z);
         match self.document.get_entity_mut(handle) {
             Some(EntityType::Solid3D(entity)) => entity.point_of_reference = point,
             Some(EntityType::Surface(entity)) => entity.point_of_reference = point,
@@ -928,7 +990,9 @@ impl Scene {
             (EntityType::Surface(_), SolidHistoryOperation::Loft(value)) => {
                 let EntityType::Surface(surface) =
                     crate::scene::model::loft_command_model::surface_entity(value)
-                else { return None; };
+                else {
+                    return None;
+                };
                 Some(Some(surface.surface_data))
             }
             (EntityType::Solid3D(_), _) => Some(None),
@@ -953,9 +1017,11 @@ impl Scene {
         let Some(display) = self.prepare_solid_model_display(handle, &body) else {
             return false;
         };
-        if matches!(&operation, acadrust::objects::SolidHistoryOperation::Loft(_)
-            | acadrust::objects::SolidHistoryOperation::Extrusion(_))
-            && !display.0.complete
+        if matches!(
+            &operation,
+            acadrust::objects::SolidHistoryOperation::Loft(_)
+                | acadrust::objects::SolidHistoryOperation::Extrusion(_)
+        ) && !display.0.complete
         {
             return false;
         }
@@ -970,7 +1036,8 @@ impl Scene {
         match self.document.get_entity_mut(handle) {
             Some(EntityType::Solid3D(entity)) => entity.set_sat_document(&document),
             Some(EntityType::Surface(entity)) => {
-                entity.acis_data = acadrust::entities::AcisData::from_sat(&document.to_sat_string());
+                entity.acis_data =
+                    acadrust::entities::AcisData::from_sat(&document.to_sat_string());
                 if let Some(data) = surface_data {
                     if matches!(&data, acadrust::entities::SurfaceData::Extruded { .. }) {
                         entity.kind = acadrust::entities::SurfaceKind::Extruded;
@@ -1001,16 +1068,19 @@ impl Scene {
         let Some(display) = self.prepare_solid_model_display(handle, &body) else {
             return false;
         };
-        if matches!(&operation, acadrust::objects::SolidHistoryOperation::Loft(_)
-            | acadrust::objects::SolidHistoryOperation::Extrusion(_))
-            && !display.0.complete
+        if matches!(
+            &operation,
+            acadrust::objects::SolidHistoryOperation::Loft(_)
+                | acadrust::objects::SolidHistoryOperation::Extrusion(_)
+        ) && !display.0.complete
         {
             return false;
         }
         match self.document.get_entity_mut(handle) {
             Some(EntityType::Solid3D(entity)) => entity.set_sat_document(&document),
             Some(EntityType::Surface(entity)) => {
-                entity.acis_data = acadrust::entities::AcisData::from_sat(&document.to_sat_string());
+                entity.acis_data =
+                    acadrust::entities::AcisData::from_sat(&document.to_sat_string());
                 if let Some(data) = surface_data {
                     if matches!(&data, acadrust::entities::SurfaceData::Extruded { .. }) {
                         entity.kind = acadrust::entities::SurfaceKind::Extruded;
@@ -1062,24 +1132,22 @@ impl Scene {
         true
     }
 
-    fn transform_solid_history(
-        &mut self,
-        handle: Handle,
-        transform: &EntityTransform,
-    ) -> bool {
+    fn transform_solid_history(&mut self, handle: Handle, transform: &EntityTransform) -> bool {
         let Some(mut operation) = self.document.solid_history_operation(handle).cloned() else {
             return false;
         };
-        if !crate::scene::model::solid_history::transform_operation(
-            &mut operation,
-            transform,
-        ) {
+        if !crate::scene::model::solid_history::transform_operation(&mut operation, transform) {
             return false;
         }
         if let EntityTransform::Translate(delta) = transform {
             let surface_data = match (&operation, self.document.get_entity(handle)) {
-                (acadrust::objects::SolidHistoryOperation::Extrusion(value), Some(EntityType::Surface(_))) => {
-                    let Some(data) = crate::scene::model::solid_history::extrusion_surface_data(value) else {
+                (
+                    acadrust::objects::SolidHistoryOperation::Extrusion(value),
+                    Some(EntityType::Surface(_)),
+                ) => {
+                    let Some(data) =
+                        crate::scene::model::solid_history::extrusion_surface_data(value)
+                    else {
                         return false;
                     };
                     Some(data)
@@ -1104,12 +1172,7 @@ impl Scene {
         self.rebuild_solid_history(handle, operation)
     }
 
-    pub fn apply_solid_history_choice(
-        &mut self,
-        handle: Handle,
-        field: &str,
-        value: &str,
-    ) -> bool {
+    pub fn apply_solid_history_choice(&mut self, handle: Handle, field: &str, value: &str) -> bool {
         self.record_solid_history_before(handle);
         let mut created = false;
         if self.document.solid_history_graph(handle).is_none() {
@@ -1137,7 +1200,10 @@ impl Scene {
                 _ => return false,
             };
             if create {
-                if !matches!(self.document.get_entity(handle), Some(EntityType::Solid3D(_))) {
+                if !matches!(
+                    self.document.get_entity(handle),
+                    Some(EntityType::Solid3D(_))
+                ) {
                     return false;
                 }
                 self.restore_solid_models(&[handle]);
@@ -1195,13 +1261,9 @@ impl Scene {
                 return false;
             };
             self.restore_solid_models(&[handle]);
-            let Some(definition) = self
-                .solid_models
-                .get(&handle)
-                .and_then(|body| {
-                    crate::scene::model::solid_history::fillet_radius_grip(body, radius)
-                })
-            else {
+            let Some(definition) = self.solid_models.get(&handle).and_then(|body| {
+                crate::scene::model::solid_history::fillet_radius_grip(body, radius)
+            }) else {
                 return false;
             };
             let Some(axis) = definition.axis else {
@@ -1247,8 +1309,7 @@ impl Scene {
             let acadrust::objects::SolidHistoryOperation::Chamfer(value) = &mut operation else {
                 return false;
             };
-            let distance = if grip_id
-                == crate::scene::model::solid_history::GRIP_CHAMFER_DISTANCE1
+            let distance = if grip_id == crate::scene::model::solid_history::GRIP_CHAMFER_DISTANCE1
             {
                 &mut value.base_distance
             } else {
@@ -1260,11 +1321,8 @@ impl Scene {
             }
             return self.preview_solid_history(handle, operation);
         }
-        if !crate::scene::model::solid_history::apply_primitive_grip(
-            &mut operation,
-            grip_id,
-            apply,
-        ) {
+        if !crate::scene::model::solid_history::apply_primitive_grip(&mut operation, grip_id, apply)
+        {
             return false;
         }
         self.preview_solid_history(handle, operation)
@@ -1276,12 +1334,10 @@ impl Scene {
         field: &str,
         value: &str,
     ) -> bool {
-        let Some(mut operation) =
-            crate::scene::model::solid_history::primitive_property_operation(
-                &self.document,
-                handle,
-            )
-        else {
+        let Some(mut operation) = crate::scene::model::solid_history::primitive_property_operation(
+            &self.document,
+            handle,
+        ) else {
             return false;
         };
         if !crate::scene::model::solid_history::apply_primitive_property(
@@ -1387,6 +1443,17 @@ impl Scene {
         if self.is_layer_locked(handle) {
             return;
         }
+        // An attribute grip sits on the displayed (annotation-scaled)
+        // attribute; the stored one is unscaled.
+        let apply = match self.document.get_entity(handle) {
+            Some(EntityType::Insert(insert)) => crate::entities::insert::unscale_attribute_grip(
+                insert,
+                self.annotation_scale,
+                grip_id,
+                apply,
+            ),
+            _ => apply,
+        };
         if self.apply_solid_history_grip(handle, grip_id, apply.clone()) {
             return;
         }
@@ -1407,7 +1474,8 @@ impl Scene {
             };
 
             let n = leader.vertices.len();
-            if n < 3 || (grip_id != n - 1 && grip_id != n - 2) || leader.annotation_handle.is_null() {
+            if n < 3 || (grip_id != n - 1 && grip_id != n - 2) || leader.annotation_handle.is_null()
+            {
                 return None;
             }
 
@@ -1421,6 +1489,7 @@ impl Scene {
         if let Some(entity) = self.document.get_entity_mut(handle) {
             view::dispatch::apply_grip(entity, grip_id, apply);
         }
+        self.sync_diameter_association_angle(handle);
         if let Some((annotation_handle, old_landing)) = leader_landing_before {
             let new_landing = self.document.get_entity(handle).and_then(|entity| {
                 let EntityType::Leader(leader) = entity else {
@@ -1451,10 +1520,7 @@ impl Scene {
                     if self.sync_displayed_annotation_context(annotation_handle) {
                         self.poison_undo_recording();
                     }
-                    self.bump_entities(&[(
-                        annotation_handle,
-                        crate::scene::ChangeKind::Modified,
-                    )]);
+                    self.bump_entities(&[(annotation_handle, crate::scene::ChangeKind::Modified)]);
                 }
             }
         }
@@ -1510,9 +1576,7 @@ impl Scene {
         let image_bearing = self.document.get_entity(handle).is_some_and(|entity| {
             matches!(
                 entity,
-                EntityType::RasterImage(_)
-                    | EntityType::Ole2Frame(_)
-                    | EntityType::Underlay(_)
+                EntityType::RasterImage(_) | EntityType::Ole2Frame(_) | EntityType::Underlay(_)
             )
         });
 

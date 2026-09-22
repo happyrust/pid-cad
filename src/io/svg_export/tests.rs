@@ -266,6 +266,7 @@ fn expected_shapes(ops: &[PlotOp], paper_h: f32) -> Vec<Shape> {
                 shapes.push(fill_shape(&state, rings, true));
             }
             PlotOp::BuiltinText { .. } => unreachable!("the corpus stamp cases are excluded"),
+            PlotOp::Image { .. } => unreachable!("the corpus carries no rasters"),
             // Structure, not ink: the shapes inside a group are compared like
             // any other.
             PlotOp::BeginGroup { .. } | PlotOp::EndGroup => {}
@@ -2246,17 +2247,19 @@ fn the_raster_comparison_catches_the_planted_faults() {
         // Two render groups; the second is drawn after the first, so which
         // group holds the wipeout decides whether it masks the ink or the
         // ink paints over it.
-        case.options.group_splits = if wipeout_first {
+        case.group_splits = if wipeout_first {
             crate::io::plot_types::PlotGroupSplits {
                 wires: 0,
                 hatches: 0,
                 wipeouts: 1,
+                images: 0,
             }
         } else {
             crate::io::plot_types::PlotGroupSplits {
                 wires: 0,
                 hatches: 1,
                 wipeouts: 0,
+                images: 0,
             }
         };
         case

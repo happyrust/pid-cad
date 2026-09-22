@@ -1,16 +1,15 @@
 use crate::command::CadCommand;
-use crate::io::linetypes;
 use crate::modules::draw::modify::block_edit::BlockEditSession;
 use crate::modules::draw::modify::refedit::RefEditSession;
 use crate::scene::pick::grip::GripEdit;
 use crate::scene::GripDef;
 use crate::scene::{ObjectIsolationState, Scene};
 use crate::snap::SnapResult;
+use crate::t;
 use crate::ui::{LayerPanel, PropertiesPanel};
 use acadrust::tables::{normalize_name, Ucs};
 use acadrust::{CadDocument, EntityType, Handle};
 use iced;
-use crate::t;
 use std::any::Any;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -33,7 +32,7 @@ pub(super) enum DynComponent {
     Z,
     /// Linear distance from the last point.
     Distance,
-    /// Angle from the last point, in degrees.
+    /// Angle from the last point, displayed and entered in the drawing's units.
     Angle,
     /// A scalar the command reads from the command line (a count, a radius,
     /// a delta). Typed-only — it has no geometric live value derived from
@@ -101,6 +100,27 @@ fn default_role_for(component: DynComponent) -> crate::command::DynRole {
     }
 }
 
+/// An open sketch — the state CREATESKETCH parks so FINISHSKETCH can put it
+/// back.
+///
+/// A sketch here is a *mode*, not a document object: the drawing plane, a
+/// square-on view, and snapping forced live. The geometry it produces is
+/// ordinary model-space entities, which is what keeps the result a normal
+/// DWG that other software can open. `opened_with` is the handle set at the
+/// moment the sketch opened, so the difference on finish is exactly what the
+/// user drew — that difference is what gets offered to EXTRUDE.
+pub(super) struct SketchSession {
+    /// Display name, e.g. `"Sketch1"`.
+    pub(super) name: String,
+    /// UCS active before the sketch opened. Restored on finish.
+    pub(super) previous_ucs: Option<Ucs>,
+    /// Snap master state before the sketch forced it on, so a user who works
+    /// with snapping off gets that back rather than silently keeping it.
+    pub(super) previous_snap_enabled: bool,
+    /// Entity handles already present when the sketch opened.
+    pub(super) opened_with: std::collections::HashSet<acadrust::Handle>,
+}
+
 // ── Per-document tab state ─────────────────────────────────────────────────
 
 pub(super) struct DocumentTab {
@@ -146,6 +166,12 @@ pub(super) struct DocumentTab {
     pub(super) selected_grip_handles: Vec<Handle>,
     /// Shift-selected grips, keyed by entity and object-local grip id.
     pub(super) hot_grips: rustc_hash::FxHashSet<(Handle, usize)>,
+    /// Grip-mode "Copy" toggle (context menu): each grip placement leaves the
+    /// original in place and adds a modified copy, until Enter / Esc.
+    pub(super) grip_copy: bool,
+    /// Grip-mode "Base Point" (context menu): the next left-click re-bases
+    /// the active grip edit instead of committing it.
+    pub(super) grip_base_pending: bool,
     pub(super) selected_handle: Option<Handle>,
     /// Dynamic-block visibility grip for the current single selection.
     pub(super) visibility_grip: Option<super::visibility::VisibilityGrip>,
@@ -180,6 +206,11 @@ pub(super) struct DocumentTab {
     pub(super) active_layer: String,
     /// Currently active UCS. `None` means WCS (identity transform).
     pub(super) active_ucs: Option<Ucs>,
+    /// Open sketch, if CREATESKETCH is in effect. `None` is the normal
+    /// direct-modelling state.
+    pub(super) sketch_session: Option<SketchSession>,
+    /// Sketches opened in this tab so far, so each gets a distinct name.
+    pub(super) sketch_count: u32,
     /// Custom model-space background color.  `None` = default dark grey.
     pub(super) bg_color: Option<[f32; 4]>,
     /// Custom paper-space background color.  `None` = default off-white grey.
@@ -195,6 +226,16 @@ pub(super) struct DocumentTab {
     pub(super) active_mleader_style: String,
     /// Last camera_generation value written back to the document.
     pub(super) last_synced_camera_gen: u64,
+    /// Session set of unloaded reference keys (Task 8b). Owns the set that
+    /// `collect_entries` takes as `unloaded`, so CLI and palette agree.
+    pub(super) xref_unloaded: crate::io::xref_model::UnloadSet,
+    /// Load-time mtimes per reference key (Task 8b). Written on every
+    /// palette refresh; `Stale` is detectable from the second refresh on.
+    pub(super) xref_stat_cache: crate::io::xref_model::RefStatCache,
+    /// NotFound count from the last file-open xref resolution (Task 8b).
+    /// The palette renders a neutral "open EXTERNALREFERENCES" notice while non-zero;
+    /// never auto-opens a modal. Cleared by a clean palette refresh.
+    pub(super) xref_missing: usize,
     /// Sentinel "Welcome / Start" tab. Always at index 0 when present.
     /// Cannot be closed; the viewport area renders a welcome page instead
     /// of the model-space shader. The scene is still constructed so the
@@ -215,6 +256,9 @@ pub(super) struct DocumentTab {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(super) plugin_state: HashMap<&'static str, Box<dyn Any + Send + Sync>>,
     pub(super) suspended_cmd: Option<Box<dyn CadCommand>>,
+    /// `suspended_cmd` was parked by a transparent command (`'ZOOM`) and is
+    /// restored as soon as the transparent one ends.
+    pub(super) transparent_resume: bool,
     /// What PIDLEGEND last recognised on this sheet — the legend list panel's
     /// data and PIDLINE's index — with the scene epoch it was read at. Kept
     /// through PIDLEGEND OFF so the list stays browsable after the drawn
@@ -293,14 +337,18 @@ impl DocumentTab {
             .and_then(|index| self.block_edits.get_mut(index))
     }
 
-    /// The [`crate::scene::sketch_constraints::SketchScope`] a new persistent
+    /// The [`crate::scene::parametric_constraints::ParametricScope`] a new persistent
     /// constraint should attach to right now — whatever's actually being
     /// edited: the open block definition if a BEDIT session is active, model
     /// space otherwise.
-    pub(super) fn current_sketch_scope(&self) -> crate::scene::sketch_constraints::SketchScope {
+    pub(super) fn current_parametric_scope(
+        &self,
+    ) -> crate::scene::parametric_constraints::ParametricScope {
         match self.active_block_edit_session() {
-            Some(session) => crate::scene::sketch_constraints::SketchScope::Block(session.br_handle),
-            None => crate::scene::sketch_constraints::SketchScope::ModelSpace,
+            Some(session) => {
+                crate::scene::parametric_constraints::ParametricScope::Block(session.br_handle)
+            }
+            None => crate::scene::parametric_constraints::ParametricScope::ModelSpace,
         }
     }
 
@@ -344,8 +392,7 @@ impl DocumentTab {
         u.origin = h.model_space_ucs_origin;
         u.x_axis = h.model_space_ucs_x_axis;
         u.y_axis = h.model_space_ucs_y_axis;
-        if h.model_space_ucs_name.is_empty()
-            && super::helpers::UcsXform::from_ucs(&u).is_identity()
+        if h.model_space_ucs_name.is_empty() && super::helpers::UcsXform::from_ucs(&u).is_identity()
         {
             None
         } else {
@@ -528,31 +575,30 @@ impl DocumentTab {
                 }
             }
         } else {
-            let (origin, x_axis, y_axis, elevation, ortho, named, base) =
-                match &self.active_ucs {
-                    Some(ucs) => (
-                        ucs.origin,
-                        ucs.x_axis,
-                        ucs.y_axis,
-                        ucs.elevation,
-                        ucs.ortho_type,
-                        if ucs.named_ucs_handle.is_valid() {
-                            ucs.named_ucs_handle
-                        } else {
-                            ucs.handle
-                        },
-                        ucs.base_ucs_handle,
-                    ),
-                    None => (
-                        Vector3::ZERO,
-                        Vector3::UNIT_X,
-                        Vector3::UNIT_Y,
-                        0.0,
-                        0,
-                        Handle::NULL,
-                        Handle::NULL,
-                    ),
-                };
+            let (origin, x_axis, y_axis, elevation, ortho, named, base) = match &self.active_ucs {
+                Some(ucs) => (
+                    ucs.origin,
+                    ucs.x_axis,
+                    ucs.y_axis,
+                    ucs.elevation,
+                    ucs.ortho_type,
+                    if ucs.named_ucs_handle.is_valid() {
+                        ucs.named_ucs_handle
+                    } else {
+                        ucs.handle
+                    },
+                    ucs.base_ucs_handle,
+                ),
+                None => (
+                    Vector3::ZERO,
+                    Vector3::UNIT_X,
+                    Vector3::UNIT_Y,
+                    0.0,
+                    0,
+                    Handle::NULL,
+                    Handle::NULL,
+                ),
+            };
             for object in self.scene.document.objects.values_mut() {
                 let acadrust::objects::ObjectType::Layout(layout) = object else {
                     continue;
@@ -599,24 +645,7 @@ impl DocumentTab {
 
     pub(super) fn new_drawing(n: usize) -> Self {
         let mut scene = Scene::new();
-        linetypes::populate_document(&mut scene.document);
-        // Paper layouts start as A4 landscape.
-        for obj in scene.document.objects.values_mut() {
-            if let acadrust::objects::ObjectType::Layout(l) = obj {
-                if l.name != "Model" {
-                    l.min_limits = (0.0, 0.0);
-                    l.max_limits = (297.0, 210.0);
-                    l.min_extents = (0.0, 0.0, 0.0);
-                    l.max_extents = (297.0, 210.0, 0.0);
-                    l.paper_width = 297.0;
-                    l.paper_height = 210.0;
-                    l.plot_paper_units = 1;
-                    l.plot_scale_numerator = 1.0;
-                    l.plot_scale_denominator = 1.0;
-                    l.paper_size = "ISO_A4_(297.00_x_210.00_MM)".into();
-                }
-            }
-        }
+        scene.populate_new_drawing_defaults();
         Self {
             id: NEXT_DOCUMENT_TAB_ID.fetch_add(1, Ordering::Relaxed),
             scene,
@@ -642,6 +671,8 @@ impl DocumentTab {
             selected_grips: vec![],
             selected_grip_handles: vec![],
             hot_grips: rustc_hash::FxHashSet::default(),
+            grip_copy: false,
+            grip_base_pending: false,
             selected_handle: None,
             visibility_grip: None,
             wireframe: false,
@@ -659,6 +690,8 @@ impl DocumentTab {
             history: HistoryState::default(),
             active_layer: "0".to_string(),
             active_ucs: None,
+            sketch_session: None,
+            sketch_count: 0,
             bg_color: None,
             paper_bg_color: None,
             refedit_session: None,
@@ -666,12 +699,16 @@ impl DocumentTab {
             active_block_edit: None,
             active_mleader_style: "Standard".to_string(),
             last_synced_camera_gen: 0,
+            xref_unloaded: crate::io::xref_model::UnloadSet::default(),
+            xref_stat_cache: crate::io::xref_model::RefStatCache::default(),
+            xref_missing: 0,
             is_start: false,
             pan_mode: false,
             orbit_mode: false,
             zoom_dynamic_mode: false,
             plugin_state: HashMap::new(),
             suspended_cmd: None,
+            transparent_resume: false,
             pid_legend: None,
         }
     }
@@ -710,7 +747,7 @@ impl DocumentTab {
 #[derive(Clone)]
 pub(super) enum HistorySnapshot {
     // Boxed: `DeltaSnapshot` grew past the other variants once
-    // `sketch_constraints` (ERASE-undo fix) was added, and every undo/redo
+    // `parametric_constraints` (ERASE-undo fix) was added, and every undo/redo
     // stack slot costs as much as this enum's largest variant regardless of
     // which one it actually holds.
     Delta(Box<DeltaSnapshot>),
@@ -741,41 +778,33 @@ impl HistorySnapshot {
                 )
                 .saturating_add(d.selected_before.len().saturating_mul(16))
                 .saturating_add(d.selected_after.len().saturating_mul(16))
+                .saturating_add(d.active_layer.as_ref().map_or(0, |(before, after)| {
+                    before.len().saturating_add(after.len())
+                }))
                 .saturating_add(
-                    d.active_layer
-                        .as_ref()
-                        .map_or(0, |(before, after)| before.len().saturating_add(after.len())),
-                )
-                .saturating_add(
-                    d.sketch_constraints
+                    d.parametric_constraints
                         .iter()
-                        .map(|entry| entry.before.constraints.len().saturating_add(entry.after.constraints.len()))
+                        .map(|entry| {
+                            entry
+                                .before
+                                .constraints
+                                .len()
+                                .saturating_add(entry.after.constraints.len())
+                        })
                         .sum::<usize>()
                         .saturating_mul(96),
                 )
-                .saturating_add(
-                    d.named_parameters
-                        .as_ref()
-                        .map_or(0, |(before, after)| before.len().saturating_add(after.len()).saturating_mul(128)),
-                )
+                .saturating_add(d.named_parameters.as_ref().map_or(0, |(before, after)| {
+                    before.len().saturating_add(after.len()).saturating_mul(128)
+                }))
                 .saturating_add(d.label.len()),
             HistorySnapshot::ObjectVisibility(v) => v
                 .before
                 .hidden
                 .len()
-                .saturating_add(
-                    v.before
-                        .keep
-                        .as_ref()
-                        .map_or(0, rustc_hash::FxHashSet::len),
-                )
+                .saturating_add(v.before.keep.as_ref().map_or(0, rustc_hash::FxHashSet::len))
                 .saturating_add(v.after.hidden.len())
-                .saturating_add(
-                    v.after
-                        .keep
-                        .as_ref()
-                        .map_or(0, rustc_hash::FxHashSet::len),
-                )
+                .saturating_add(v.after.keep.as_ref().map_or(0, rustc_hash::FxHashSet::len))
                 .saturating_add(v.selected_before.len())
                 .saturating_add(v.selected_after.len())
                 .saturating_mul(16)
@@ -814,12 +843,12 @@ pub(super) struct DeltaSnapshot {
     /// Opposite non-entity document state. `apply_delta_state` swaps this with
     /// the live structure, so the same allocation shuttles between undo/redo.
     pub(super) structure: Option<StructureSnapshot>,
-    /// Sketch-constraint scopes this same command changed alongside its
+    /// Parametric-constraint scopes this same command changed alongside its
     /// entities (e.g. ERASE removing a constraint set's touched constraints)
-    /// — `sketch_constraints` lives on `Scene`, not in `document`/
+    /// — `parametric_constraints` lives on `Scene`, not in `document`/
     /// `document.objects`, so it needs its own channel here rather than
     /// riding along with `entities`/`structure`. Almost always empty.
-    pub(super) sketch_constraints: Vec<SketchConstraintsEntryDelta>,
+    pub(super) parametric_constraints: Vec<ParametricConstraintsEntryDelta>,
     /// Drawing-wide parameter table changed by this transaction.
     pub(super) named_parameters: Option<(
         crate::scene::named_parameters::ParameterTable,
@@ -885,13 +914,13 @@ pub(super) struct ObjectEntryDelta {
     pub(super) after: Option<acadrust::objects::ObjectType>,
 }
 
-/// One sketch-constraint scope's before/after image within an entity delta.
+/// One parametric-constraint scope's before/after image within an entity delta.
 /// This keeps constraint cleanup atomic with edits such as entity erasure.
 #[derive(Clone)]
-pub(super) struct SketchConstraintsEntryDelta {
-    pub(super) scope: crate::scene::sketch_constraints::SketchScope,
-    pub(super) before: crate::scene::sketch_constraints::SketchConstraintSet,
-    pub(super) after: crate::scene::sketch_constraints::SketchConstraintSet,
+pub(super) struct ParametricConstraintsEntryDelta {
+    pub(super) scope: crate::scene::parametric_constraints::ParametricScope,
+    pub(super) before: crate::scene::parametric_constraints::ParametricConstraintSet,
+    pub(super) after: crate::scene::parametric_constraints::ParametricConstraintSet,
 }
 
 #[derive(Default)]

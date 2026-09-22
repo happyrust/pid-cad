@@ -1,6 +1,82 @@
 use super::*;
 
 impl OpenCADStudio {
+    /// Align every selected object or complete group by one edge or center.
+    fn align_selected_bounds(&mut self, i: usize, command: &str) {
+        use crate::command::EntityTransform;
+        use cadkernel::space::BoundsAlignment;
+        use glam::DVec3;
+
+        let (alignment, label) = match command {
+            "ALIGNLEFT" => (BoundsAlignment::Left, "Align Left"),
+            "ALIGNHCENTER" => (BoundsAlignment::HorizontalCenter, "Align Horizontal Centers"),
+            "ALIGNRIGHT" => (BoundsAlignment::Right, "Align Right"),
+            "ALIGNTOP" => (BoundsAlignment::Top, "Align Top"),
+            "ALIGNVCENTER" => (BoundsAlignment::VerticalCenter, "Align Vertical Centers"),
+            "ALIGNBOTTOM" => (BoundsAlignment::Bottom, "Align Bottom"),
+            _ => return,
+        };
+
+        let handles: Vec<_> = self.tabs[i]
+            .scene
+            .selected_handles_in_order()
+            .into_iter()
+            .filter(|handle| !self.tabs[i].scene.is_layer_locked(*handle))
+            .collect();
+        if handles.len() < 2 {
+            self.command_line
+                .push_info(crate::t!("Select objects").as_ref());
+            return;
+        }
+
+        let bounds: Vec<_> = self.tabs[i]
+            .scene
+            .selected_object_units(&handles)
+            .into_iter()
+            .filter_map(|unit| {
+                let mut min_x = f64::INFINITY;
+                let mut min_y = f64::INFINITY;
+                let mut max_x = f64::NEG_INFINITY;
+                let mut max_y = f64::NEG_INFINITY;
+                for handle in &unit {
+                    let entity = self.tabs[i].scene.document.get_entity(*handle)?;
+                    let bb = entity.as_entity().bounding_box();
+                    min_x = min_x.min(bb.min.x);
+                    min_y = min_y.min(bb.min.y);
+                    max_x = max_x.max(bb.max.x);
+                    max_y = max_y.max(bb.max.y);
+                }
+                let bounds = [min_x, min_y, max_x, max_y];
+                bounds
+                    .iter()
+                    .all(|value| value.is_finite())
+                    .then_some((unit, bounds))
+            })
+            .collect();
+        if bounds.len() < 2 {
+            return;
+        }
+
+        let extents: Vec<_> = bounds.iter().map(|(_, bounds)| *bounds).collect();
+        let offsets = cadkernel::space::align_aabbs_2d(&extents, alignment)
+            .expect("validated at least two finite bounds");
+        let pending = self.begin_undo(i, label, handles.len(), true);
+        for ((unit, _), [dx, dy]) in bounds.iter().zip(offsets) {
+            self.tabs[i].scene.transform_entities(
+                unit,
+                &EntityTransform::Translate(DVec3::new(dx, dy, 0.0)),
+            );
+        }
+        self.tabs[i].dirty = true;
+        self.refresh_properties();
+        if let Some(pending) = pending {
+            self.commit_undo_delta(i, pending);
+        }
+        self.command_line.push_output(
+            crate::tf!("{command}: aligned {} object(s).", bounds.len()).as_ref(),
+        );
+    }
+
     pub(super) fn dispatch_inquiry(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         match cmd {
             "3DORBIT" => {
@@ -980,6 +1056,11 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(cmd));
             }
 
+            "ALIGNLEFT" | "ALIGNHCENTER" | "ALIGNRIGHT" | "ALIGNTOP" | "ALIGNVCENTER"
+            | "ALIGNBOTTOM" => {
+                self.align_selected_bounds(i, cmd);
+            }
+
             "LENGTHEN" => {
                 use crate::modules::draw::modify::lengthen::LengthenCommand;
                 let cmd = LengthenCommand::new();
@@ -1198,8 +1279,7 @@ impl OpenCADStudio {
             }
 
             "DATAEXTRACTION" | "EATTEXT" | "ATTEXT" => {
-                let csv = build_data_extraction_csv(&self.tabs[i].scene.document);
-                return Some(Task::done(Message::DataExtractionSave(csv)));
+                self.open_data_extraction();
             }
 
             // ── Find / Replace ────────────────────────────────────────────────
@@ -1222,8 +1302,9 @@ impl OpenCADStudio {
                 let all_mode = cmd.starts_with("FINDALL");
                 let rest = cmd.split_once(' ').map(|(_, r)| r.trim()).unwrap_or("");
 
-                // Split at " REPLACE " keyword (case-insensitive)
-                let (search, replacement) = if let Some(pos) = rest.to_uppercase().find(" REPLACE ")
+                // Split at " REPLACE " keyword (case-insensitive). ASCII case
+                // mapping keeps byte offsets valid for slicing `rest`.
+                let (search, replacement) = if let Some(pos) = rest.to_ascii_uppercase().find(" REPLACE ")
                 {
                     (&rest[..pos], Some(rest[pos + 9..].trim()))
                 } else {
@@ -1935,82 +2016,6 @@ fn z_axis_normal(normal: acadrust::types::Vector3) -> bool {
     normal.x == 0.0 && normal.y == 0.0 && normal.z != 0.0
 }
 
-// ── DATAEXTRACTION ─────────────────────────────────────────────────────────
-
-/// Build a CSV string with one row per entity in model space.
-/// Columns: Type, Handle, Layer, Color, Linetype, ExtraInfo
-fn build_data_extraction_csv(doc: &acadrust::CadDocument) -> String {
-    use acadrust::EntityType;
-
-    let mut out = String::from("Type,Handle,Layer,Color,Linetype,ExtraInfo\n");
-
-    let ms_handle = doc.header.model_space_block_handle;
-    for e in doc.entities() {
-        // Skip Block/EndBlock sentinels and paper-space entities.
-        if matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_)) {
-            continue;
-        }
-        if !ms_handle.is_null() && e.common().owner_handle != ms_handle {
-            continue;
-        }
-        let type_name = crate::entities::names::dxf_name(e);
-        let handle = format!("{:X}", e.common().handle.value());
-        let layer = csv_escape(&e.common().layer);
-        let color = format!("{}", e.common().color);
-        let lt = csv_escape(&e.common().linetype);
-        let extra = csv_escape(&entity_extra_info(e));
-        out.push_str(&format!(
-            "{type_name},{handle},{layer},{color},{lt},{extra}\n"
-        ));
-    }
-    out
-}
-
-/// Return a short geometry summary for CSV ExtraInfo column.
-fn entity_extra_info(entity: &acadrust::EntityType) -> String {
-    use acadrust::EntityType;
-    match entity {
-        EntityType::Line(e) => format!(
-            "({:.3},{:.3})-({:.3},{:.3})",
-            e.start.x, e.start.y, e.end.x, e.end.y
-        ),
-        EntityType::Circle(e) => {
-            format!("C({:.3},{:.3}) R={:.3}", e.center.x, e.center.y, e.radius)
-        }
-        EntityType::Arc(e) => format!(
-            "C({:.3},{:.3}) R={:.3} {:.1}°-{:.1}°",
-            e.center.x,
-            e.center.y,
-            e.radius,
-            e.start_angle.to_degrees(),
-            e.end_angle.to_degrees()
-        ),
-        EntityType::Text(e) => e.value.clone(),
-        EntityType::MText(e) => e.value.chars().take(60).collect(),
-        EntityType::Insert(e) => format!(
-            "BLK={} @({:.3},{:.3})",
-            e.block_name, e.insert_point.x, e.insert_point.y
-        ),
-        EntityType::LwPolyline(e) => crate::tf!("{} vertices", e.vertices.len()).into_owned(),
-        EntityType::Polyline(e) => crate::tf!("{} vertices", e.vertices.len()).into_owned(),
-        EntityType::Polyline2D(e) => crate::tf!("{} vertices", e.vertices.len()).into_owned(),
-        EntityType::Polyline3D(e) => crate::tf!("{} vertices", e.vertices.len()).into_owned(),
-        EntityType::Hatch(e) => format!("PAT={}", e.pattern.name),
-        EntityType::Dimension(e) => format!("{:.3}", e.base().actual_measurement),
-        EntityType::Spline(e) => crate::tf!("{} ctrl pts", e.control_points.len()).into_owned(),
-        _ => String::new(),
-    }
-}
-
-/// Escape a string for a CSV field (wrap in quotes if it contains comma/quote/newline).
-fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
-
 // ── CAL — arithmetic expression evaluator ──────────────────────────────────
 // A small recursive-descent parser for `+ - * /`, parentheses, unary signs and
 // decimal numbers. Self-contained (no external dependency).
@@ -2286,5 +2291,116 @@ mod flatten_tests {
             ],
             [0.0; 4]
         );
+    }
+}
+
+#[cfg(test)]
+mod align_selected_bounds_tests {
+    use super::*;
+    use acadrust::entities::{EntityType, Line};
+    use acadrust::types::Vector3;
+
+    fn add_line(app: &mut OpenCADStudio, x1: f64, y1: f64, x2: f64, y2: f64) -> acadrust::Handle {
+        app.tabs[app.active_tab]
+            .scene
+            .add_entity(EntityType::Line(Line::from_points(
+                Vector3::new(x1, y1, 0.0),
+                Vector3::new(x2, y2, 0.0),
+            )))
+    }
+
+    fn line_start_x(app: &OpenCADStudio, handle: acadrust::Handle) -> f64 {
+        match app.tabs[app.active_tab].scene.document.get_entity(handle) {
+            Some(EntityType::Line(l)) => l.start.x.min(l.end.x),
+            other => panic!("expected a Line, got {other:?}"),
+        }
+    }
+
+    fn line_max_y(app: &OpenCADStudio, handle: acadrust::Handle) -> f64 {
+        match app.tabs[app.active_tab].scene.document.get_entity(handle) {
+            Some(EntityType::Line(l)) => l.start.y.max(l.end.y),
+            other => panic!("expected a Line, got {other:?}"),
+        }
+    }
+
+    /// A single selected object has no "other object" to align to — refuse
+    /// with an informational message rather than silently moving nothing
+    /// (or panicking on the empty-bounds case).
+    #[test]
+    fn refuses_with_fewer_than_two_selected_objects() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let a = add_line(&mut app, 0.0, 0.0, 2.0, 1.0);
+        app.tabs[app.active_tab].scene.select_entities(&[a]);
+        let i = app.active_tab;
+
+        app.dispatch_inquiry("ALIGNLEFT", i);
+        assert_eq!(line_start_x(&app, a), 0.0, "the lone object must not move");
+    }
+
+    /// ALIGNLEFT moves every selected object's left edge to the leftmost
+    /// edge already present in the selection; ALIGNTOP does the same for
+    /// the topmost edge. Both are undoable as one step.
+    #[test]
+    fn aligns_left_and_top_edges_and_is_undoable() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let left = add_line(&mut app, 0.0, 0.0, 1.0, 1.0); // leftmost & topmost already
+        let right = add_line(&mut app, 5.0, -3.0, 8.0, -2.0); // further right and lower
+        app.tabs[app.active_tab].scene.select_entities(&[left, right]);
+        let i = app.active_tab;
+
+        app.dispatch_inquiry("ALIGNLEFT", i);
+        assert_eq!(line_start_x(&app, left), 0.0, "the already-leftmost object must not move");
+        assert_eq!(line_start_x(&app, right), 0.0, "the other object's left edge should meet it");
+
+        app.dispatch_inquiry("ALIGNTOP", i);
+        assert_eq!(line_max_y(&app, left), 1.0, "the already-topmost object must not move");
+        assert_eq!(line_max_y(&app, right), 1.0, "the other object's top edge should meet it");
+
+        app.undo_steps(1); // undo ALIGNTOP
+        assert_eq!(line_max_y(&app, right), -2.0, "undo should restore the pre-ALIGNTOP position");
+        app.undo_steps(1); // undo ALIGNLEFT
+        assert_eq!(line_start_x(&app, right), 5.0, "undo should restore the original geometry");
+    }
+
+    /// A complete, fully-selected group (`Scene::selected_object_units`)
+    /// moves as one rigid unit instead of each member line sliding to meet
+    /// the *other* members of its own group.
+    #[test]
+    fn a_complete_group_aligns_as_one_rigid_unit() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let a = add_line(&mut app, 5.0, 0.0, 6.0, 1.0);
+        let b = add_line(&mut app, 7.0, 0.0, 8.0, 1.0);
+        let other = add_line(&mut app, 0.0, 0.0, 1.0, 1.0);
+        app.tabs[app.active_tab].scene.create_group("pair".to_string(), vec![a, b]);
+        app.tabs[app.active_tab].scene.select_entities(&[a, b, other]);
+        let i = app.active_tab;
+
+        app.dispatch_inquiry("ALIGNLEFT", i);
+        // The group's own left edge (a's, at x=5) moves to meet `other`'s
+        // left edge (x=0): a shifts by -5, and b — sharing the same
+        // transform — must shift by exactly the same amount, not collapse
+        // onto `a`.
+        assert_eq!(line_start_x(&app, a), 0.0);
+        assert_eq!(line_start_x(&app, b), 2.0, "b must keep its offset from a, not collapse onto it");
+    }
+}
+
+#[cfg(test)]
+mod find_replace_command_tests {
+    use super::*;
+
+    /// Unicode case mapping can change a string's byte length (`ı` uppercases
+    /// to `I`), so the REPLACE keyword split must not slice with offsets
+    /// taken from a case-mapped copy.
+    #[test]
+    fn find_replace_accepts_search_text_whose_case_mapping_changes_length() {
+        for cmd in ["FIND ı REPLACE x", "FINDALL ﬁ REPLACE fi", "FIND ŉ replace n"] {
+            let mut app = OpenCADStudio::new_for_test();
+            let i = app.active_tab;
+            let _ = app.dispatch_inquiry(cmd, i);
+        }
     }
 }

@@ -199,6 +199,8 @@ pub struct SvgReport {
     /// Tagged symbol groups written — one `<g tagName="…">` each
     /// ([`crate::io::plot_emit::PlotGroup`]).
     pub groups: usize,
+    /// Rasters written, each as one `<image>` carrying its PNG inline.
+    pub images: usize,
 }
 
 /// Write one plotted page as an SVG document.
@@ -210,6 +212,11 @@ pub fn write_svg_page<W: std::io::Write>(
 ) -> Result<SvgReport, SvgError> {
     let mut sink = SvgSink::new(page, options)?;
     let plot = emit_plot_content(page, assets, &mut sink)?;
+    // A raster the emitter could not draw is malformed data, not a choice;
+    // the PDF backend refuses the page over it and so does this one.
+    if let Some(reason) = plot.first_refused_image {
+        return Err(SvgError::Invalid(reason));
+    }
     // Before a byte reaches the caller: the sink cannot see text that was
     // never drawn, so this is the only place that can refuse it (R1).
     if options.missing_glyphs == MissingGlyphs::Refuse && plot.text_is_incomplete() {
@@ -927,6 +934,64 @@ impl PlotSink for SvgSink {
                 self.end_style_run();
                 self.body.push_str("</g>\n");
                 self.state.open_groups -= 1;
+            }
+            // A raster: one `<image>` with its PNG inline, placed by the
+            // emitter's matrix. The unit square that matrix places has its
+            // origin at the bitmap's bottom-left corner, as PDF image space
+            // does; an SVG `<image>` puts its first row at y = 0, so it is
+            // flipped into that square first (transforms apply right to
+            // left). The clip the emitter put around it is already open.
+            PlotOp::Image {
+                pixels,
+                width,
+                height,
+                matrix,
+                alpha,
+            } => {
+                use base64::Engine as _;
+                use image::ImageEncoder as _;
+                for v in matrix {
+                    finite(v, "image placement")?;
+                }
+                let expected = (width as usize)
+                    .checked_mul(height as usize)
+                    .and_then(|n| n.checked_mul(4));
+                if width == 0 || height == 0 || expected != Some(pixels.len()) {
+                    return Err(SvgError::Invalid(format!(
+                        "a {width} × {height} bitmap with {} bytes of RGBA",
+                        pixels.len()
+                    )));
+                }
+                let mut png = Vec::new();
+                image::codecs::png::PngEncoder::new(&mut png)
+                    .write_image(&pixels, width, height, image::ExtendedColorType::Rgba8)
+                    .map_err(|error| {
+                        SvgError::Invalid(format!("cannot encode a bitmap as PNG: {error}"))
+                    })?;
+                self.end_style_run();
+                self.body.push_str(
+                    "<image x=\"0\" y=\"0\" width=\"1\" height=\"1\" preserveAspectRatio=\"none\"",
+                );
+                if let Some(alpha) = alpha {
+                    finite(alpha, "image opacity")?;
+                    self.body.push_str(" opacity=\"");
+                    num(&mut self.body, alpha.clamp(0.0, 1.0) as f64, 4);
+                    self.body.push('"');
+                }
+                self.blend_attribute();
+                self.body.push_str(" transform=\"matrix(");
+                for (i, v) in matrix.iter().enumerate() {
+                    if i > 0 {
+                        self.body.push(',');
+                    }
+                    num(&mut self.body, *v as f64, 9);
+                }
+                self.body.push_str(") matrix(1,0,0,-1,0,1)\" href=\"data:image/png;base64,");
+                self.body
+                    .push_str(&base64::engine::general_purpose::STANDARD.encode(&png));
+                self.body.push_str("\"/>\n");
+                self.report.images += 1;
+                self.report.elements += 1;
             }
         }
         Ok(())

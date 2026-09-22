@@ -22,7 +22,7 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::OpenCADStudio;
 
@@ -76,8 +76,12 @@ impl OpenCADStudio {
         let i = self.active_tab;
         self.tabs[i].scene.clear();
         self.tabs[i].scene.document = document;
-        self.tabs[i].scene.load_sketch_constraints_from_document();
+        // Parameters first, so imported dimensional constraints can resolve
+        // their named driving values.
         self.tabs[i].scene.load_named_parameters_from_document();
+        self.tabs[i]
+            .scene
+            .load_parametric_constraints_from_document();
         self.tabs[i].scene.material_base_dir = path.parent().map(PathBuf::from);
         crate::app::style_ops::ensure_standard_styles(&mut self.tabs[i].scene.document);
         self.tabs[i].adopt_active_ucs_from_header();
@@ -560,9 +564,15 @@ pub(crate) fn plot_svg_with(
             ),
             None => "no margins".to_string(),
         };
+        // The sheet by the name the command line gave it: the dialog stores
+        // the catalogue's canonical spelling (`ISO_A3_(297.00_x_420.00_MM)`),
+        // which is for other applications to read, not for the plan.
+        let sheet = match spec {
+            crate::io::paper_sizes::PaperSpec::Standard(size) => size.label().to_string(),
+            crate::io::paper_sizes::PaperSpec::Custom { .. } => paper.trim().to_string(),
+        };
         plan.push(format!(
-            "model space on {} {}, {margins_said}, 1 drawing unit = {} mm ({unit_source})",
-            app.plot_dialog.paper,
+            "model space on {sheet} {}, {margins_said}, 1 drawing unit = {} mm ({unit_source})",
             if landscape { "landscape" } else { "portrait" },
             plan_num(unit_mm),
         ));
@@ -925,7 +935,7 @@ impl OpenCADStudio {
         match req["op"].as_str().unwrap_or("") {
             "new" => {
                 let i = self.active_tab;
-                self.tabs[i].scene.clear();
+                self.tabs[i].scene.reset_to_new_drawing();
                 self.tabs[i].scene.material_base_dir = None;
                 self.tabs[i].current_path = None;
                 // The headless session starts on the welcome (Start) tab, which
@@ -961,6 +971,14 @@ impl OpenCADStudio {
                 let i = self.active_tab;
                 let before = self.tabs[i].scene.document.entities().count();
                 let error_revision = self.command_line.error_revision;
+                // Surfaces that are already open belong to an earlier line (or
+                // another tab, or startup). Only what *this* line left open is
+                // reported as a blocker, otherwise a finished command would keep
+                // answering `waiting_input` because of someone else's editor and
+                // a caller polling for `completed` would never get there.
+                let editor_before = self.text_inline.is_some();
+                let mtext_before = self.mtext_editor.is_some();
+                let modal_before = self.active_modal.is_some();
                 if let Err(error) = self.run_headless(&cmd) {
                     return err(error);
                 }
@@ -968,12 +986,32 @@ impl OpenCADStudio {
                     return err(self.command_line.last_error.clone().unwrap_or_default());
                 }
                 let after = self.tabs[i].scene.document.entities().count();
+                // A command can finish with an interactive surface still open:
+                // the in-place text editor (the `TEXT` content step), the MTEXT
+                // editor, or a modal. Reporting `completed` there hides the fact
+                // that nothing was committed, so reuse the `waiting_input`
+                // vocabulary and name the blocker.
+                let blocked_by: Option<String> = if self.tabs[i].active_cmd.is_some() {
+                    Some("command".to_string())
+                } else if let (false, Some(modal)) = (modal_before, self.active_modal.as_ref()) {
+                    Some(format!("modal:{modal:?}"))
+                } else if !editor_before && self.text_inline.is_some() {
+                    Some("text_editor".to_string())
+                } else if !mtext_before && self.mtext_editor.is_some() {
+                    Some("mtext_editor".to_string())
+                } else {
+                    None
+                };
                 json!({
                     "ok": true,
                     "cmd": cmd,
-                    "status": if self.tabs[i].active_cmd.is_some() { "waiting_input" } else { "completed" },
+                    "status": if blocked_by.is_some() { "waiting_input" } else { "completed" },
+                    "blocked_by": blocked_by,
                     "entities": after,
                     "added": after as i64 - before as i64,
+                    // Tokens no prompt ever asked for: leftover input is
+                    // reported rather than dropped on the floor.
+                    "unconsumed": self.command_line.unconsumed.clone(),
                 })
             }
             "entities" => self.entity_summary(),
@@ -2653,6 +2691,128 @@ mod tests {
     }
 
     #[test]
+    fn batch_text_line_creates_text_and_consumes_every_token() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+
+        // Regression: the content token used to be dropped once the in-place
+        // editor took over, so this line created nothing while reporting ok.
+        let r = app.automation_op(r#"{"op":"run","cmd":"TEXT 0,0 5 0 hello"}"#);
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["status"], "completed", "{r}");
+        assert_eq!(r["added"], 1, "{r}");
+        assert_eq!(r["unconsumed"].as_array().map(|v| v.len()), Some(0), "{r}");
+
+        let counts = app.automation_op(r#"{"op":"entities"}"#);
+        assert_eq!(counts["by_type"]["Text"], 1, "{counts}");
+        assert_eq!(counts["total"], 1, "no phantom entity: {counts}");
+        assert_eq!(assert_one_text(&app), "hello");
+    }
+
+    #[test]
+    fn multi_word_text_keeps_the_spaces() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+
+        let r = app.automation_op(r#"{"op":"run","cmd":"TEXT 0,0 5 0 hello world"}"#);
+        assert_eq!(r["status"], "completed", "{r}");
+        assert_eq!(r["added"], 1, "{r}");
+        assert_eq!(r["unconsumed"].as_array().map(|v| v.len()), Some(0), "{r}");
+        let counts = app.automation_op(r#"{"op":"entities"}"#);
+        assert_eq!(counts["by_type"]["Text"], 1, "{counts}");
+
+        // The spaces between the words have to survive the token split, and the
+        // whole tail (not just its first token) has to land in the entity — an
+        // off-by-one in the consumed index would still pass the checks above.
+        assert_eq!(assert_one_text(&app), "hello world");
+    }
+
+    #[test]
+    fn a_stray_editor_is_not_hijacked_by_the_next_line() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+
+        // Line 1 stops at the content step and leaves the editor open.
+        let r = app.automation_op(r#"{"op":"run","cmd":"TEXT 30,0 5 0"}"#);
+        assert_eq!(r["blocked_by"], "text_editor", "{r}");
+
+        // Line 2 must not type its leftover token into that unrelated editor,
+        // and — since line 2 did not open anything itself — it must not inherit
+        // line 1's blocker either: a caller that polls for `completed` would
+        // otherwise never get there.
+        let r = app.automation_op(r#"{"op":"run","cmd":"CIRCLE 0,0 5 9"}"#);
+        assert_eq!(r["added"], 1, "{r}");
+        assert_eq!(r["unconsumed"][0], "9", "{r}");
+        assert_eq!(r["blocked_by"], serde_json::Value::Null, "{r}");
+        assert_eq!(r["status"], "completed", "{r}");
+        let counts = app.automation_op(r#"{"op":"entities"}"#);
+        assert_eq!(counts["by_type"]["Circle"], 1, "{counts}");
+        assert!(
+            counts["by_type"].get("Text").is_none(),
+            "phantom text from stray editor: {counts}"
+        );
+    }
+
+    #[test]
+    fn run_reports_leftover_tokens_instead_of_dropping_them() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+
+        // The radius step ends the command, so the extra token is never asked for.
+        let r = app.automation_op(r#"{"op":"run","cmd":"CIRCLE 0,0 5 9"}"#);
+        assert_eq!(r["added"], 1, "{r}");
+        assert_eq!(r["unconsumed"][0], "9", "{r}");
+
+        // A fully consumed line reports nothing left over.
+        let r = app.automation_op(r#"{"op":"run","cmd":"LINE 0,0 10,10"}"#);
+        assert_eq!(r["unconsumed"].as_array().map(|v| v.len()), Some(0), "{r}");
+    }
+
+    #[test]
+    fn text_without_content_reports_the_open_editor() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+
+        let r = app.automation_op(r#"{"op":"run","cmd":"TEXT 0,0 5 0"}"#);
+        assert_eq!(r["status"], "waiting_input", "{r}");
+        assert_eq!(r["blocked_by"], "text_editor", "{r}");
+        let counts = app.automation_op(r#"{"op":"entities"}"#);
+        assert_eq!(counts["total"], 0, "{counts}");
+
+        // The same editor can be finished through the control-surface messages.
+        let _ = app.update(crate::app::Message::TextInlineInput("hello".into()));
+        let _ = app.update(crate::app::Message::TextInlineOk);
+        let counts = app.automation_op(r#"{"op":"entities"}"#);
+        assert_eq!(counts["by_type"]["Text"], 1, "{counts}");
+    }
+
+    #[test]
+    fn a_command_still_waiting_is_named_as_the_blocker() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+
+        let r = app.automation_op(r#"{"op":"run","cmd":"LINE"}"#);
+        assert_eq!(r["status"], "waiting_input", "{r}");
+        assert_eq!(r["blocked_by"], "command", "{r}");
+    }
+
+    /// The text of the single `Text` entity in the drawing (panics otherwise).
+    fn assert_one_text(app: &OpenCADStudio) -> String {
+        let i = app.active_tab;
+        let texts: Vec<String> = app.tabs[i]
+            .scene
+            .document
+            .entities()
+            .filter_map(|e| match e {
+                acadrust::EntityType::Text(t) => Some(t.value.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.len(), 1, "expected exactly one Text entity, got {texts:?}");
+        texts.into_iter().next().unwrap()
+    }
+
+    #[test]
     fn automation_ops_round_trip() {
         let mut app = OpenCADStudio::new_for_test();
 
@@ -3444,7 +3604,8 @@ mod tests {
         let mut app = OpenCADStudio::new_for_test();
         let stale = acadrust::Handle::from(9999);
         app.tabs[app.active_tab].scene.solid_models.insert(
-            stale, cadkernel::brep::make::cuboid([0.0; 3], [1.0; 3]).unwrap(),
+            stale,
+            cadkernel::brep::make::cuboid([0.0; 3], [1.0; 3]).unwrap(),
         );
         let path = std::env::temp_dir().join(format!(
             "ocs_automation_finalize_test_{}.dxf",
@@ -3459,8 +3620,10 @@ mod tests {
         doc.add_entity(acadrust::EntityType::Circle(good)).unwrap();
         let mut corrupt = acadrust::entities::Circle::new();
         corrupt.center = acadrust::types::Vector3::new(1.0, 1.0, 0.0);
-        corrupt.radius = 0.0; // io::is_entity_corrupt rejects a zero-radius circle
-        doc.add_entity(acadrust::EntityType::Circle(corrupt)).unwrap();
+        // An absurd radius is rejected; a zero radius is valid.
+        corrupt.radius = 1.0e11;
+        doc.add_entity(acadrust::EntityType::Circle(corrupt))
+            .unwrap();
         let bytes = crate::io::save_to_bytes(&doc, "dxf", doc.version)
             .expect("save a document containing a corrupt entity");
         std::fs::write(&path, bytes).unwrap();
@@ -3468,19 +3631,29 @@ mod tests {
         let p = path.to_string_lossy().replace('\\', "\\\\");
         let result = app.automation_op(&format!(r#"{{"op":"open","path":"{p}"}}"#));
         assert_eq!(result["ok"], true, "{}", result["error"]);
-        assert_eq!(result["total"], 1, "the corrupt circle must not survive the open");
-        assert_eq!(result["purged"], 1, "the purge count must be reported, matching the UI open path's diagnostics");
+        assert_eq!(
+            result["total"], 1,
+            "the corrupt circle must not survive the open"
+        );
+        assert_eq!(
+            result["purged"], 1,
+            "the purge count must be reported, matching the UI open path's diagnostics"
+        );
 
         let i = app.active_tab;
         assert!(!app.tabs[i].scene.solid_models.contains_key(&stale));
-        assert_eq!(app.tabs[i].scene.material_base_dir.as_deref(), path.parent());
+        assert_eq!(
+            app.tabs[i].scene.material_base_dir.as_deref(),
+            path.parent()
+        );
         assert!(
             app.tabs[i].scene.document.source_path.is_some(),
             "automation open must run the same finalization as a path-based open, which sets source_path (load_bytes alone never does)"
         );
 
         app.tabs[i].scene.solid_models.insert(
-            stale, cadkernel::brep::make::cuboid([0.0; 3], [1.0; 3]).unwrap(),
+            stale,
+            cadkernel::brep::make::cuboid([0.0; 3], [1.0; 3]).unwrap(),
         );
         assert_eq!(app.automation_op(r#"{"op":"new"}"#)["ok"], true);
         assert!(app.tabs[i].scene.solid_models.is_empty());
@@ -3568,26 +3741,41 @@ mod tests {
         // Start LINE
         let _ = app.update(Message::CommandInput("LINE".to_string()));
         let _ = app.update(Message::CommandSubmit);
-        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("LINE"));
+        assert_eq!(
+            app.tabs[0].active_cmd.as_ref().map(|c| c.name()),
+            Some("LINE")
+        );
 
         // Type M2P
         let _ = app.update(Message::CommandInput("M2P".to_string()));
         let _ = app.update(Message::CommandSubmit);
-        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("MTP"));
+        assert_eq!(
+            app.tabs[0].active_cmd.as_ref().map(|c| c.name()),
+            Some("MTP")
+        );
         assert!(app.tabs[0].suspended_cmd.is_some());
-        assert_eq!(app.tabs[0].suspended_cmd.as_ref().map(|c| c.name()), Some("LINE"));
+        assert_eq!(
+            app.tabs[0].suspended_cmd.as_ref().map(|c| c.name()),
+            Some("LINE")
+        );
 
         // Point 1: 0,0
         let _ = app.update(Message::CommandInput("0,0".to_string()));
         let _ = app.update(Message::CommandSubmit);
-        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("MTP"));
+        assert_eq!(
+            app.tabs[0].active_cmd.as_ref().map(|c| c.name()),
+            Some("MTP")
+        );
 
         // Point 2: 10,20
         let _ = app.update(Message::CommandInput("10,20".to_string()));
         let _ = app.update(Message::CommandSubmit);
 
         // MTP should have finished and restored LINE, with midpoint (5, 10, 0)
-        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("LINE"));
+        assert_eq!(
+            app.tabs[0].active_cmd.as_ref().map(|c| c.name()),
+            Some("LINE")
+        );
         assert!(app.tabs[0].suspended_cmd.is_none());
         assert_eq!(app.last_point, Some(glam::DVec3::new(5.0, 10.0, 0.0)));
 
@@ -3606,7 +3794,10 @@ mod tests {
         let _ = app.update(Message::CommandSubmit);
         let _ = app.update(Message::SnapOverrideMtp);
 
-        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("MTP"));
+        assert_eq!(
+            app.tabs[0].active_cmd.as_ref().map(|c| c.name()),
+            Some("MTP")
+        );
         assert_eq!(
             app.tabs[0].suspended_cmd.as_ref().map(|c| c.name()),
             Some("LINE")
@@ -3622,17 +3813,26 @@ mod tests {
         // Start LINE
         let _ = app.update(Message::CommandInput("LINE".to_string()));
         let _ = app.update(Message::CommandSubmit);
-        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("LINE"));
+        assert_eq!(
+            app.tabs[0].active_cmd.as_ref().map(|c| c.name()),
+            Some("LINE")
+        );
 
         // Type MTP
         let _ = app.update(Message::CommandInput("MTP".to_string()));
         let _ = app.update(Message::CommandSubmit);
-        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("MTP"));
+        assert_eq!(
+            app.tabs[0].active_cmd.as_ref().map(|c| c.name()),
+            Some("MTP")
+        );
 
         // Escape during MTP
         let _ = app.update(Message::CommandEscape);
         // Parent LINE must be restored, not cancelled!
-        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("LINE"));
+        assert_eq!(
+            app.tabs[0].active_cmd.as_ref().map(|c| c.name()),
+            Some("LINE")
+        );
         assert!(app.tabs[0].suspended_cmd.is_none());
 
         // Escape again cancels LINE
@@ -3650,7 +3850,10 @@ mod tests {
         // Start LINE
         let _ = app.update(Message::CommandInput("LINE".to_string()));
         let _ = app.update(Message::CommandSubmit);
-        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("LINE"));
+        assert_eq!(
+            app.tabs[0].active_cmd.as_ref().map(|c| c.name()),
+            Some("LINE")
+        );
 
         // Simulate typing 'm', '2', 'p' character by character
         let _ = app.update(Message::CommandAppendChar("m".to_string()));
@@ -3665,6 +3868,20 @@ mod tests {
 
         // Submit triggers MTP
         let _ = app.update(Message::CommandSubmit);
-        assert_eq!(app.tabs[0].active_cmd.as_ref().map(|c| c.name()), Some("MTP"));
+        assert_eq!(
+            app.tabs[0].active_cmd.as_ref().map(|c| c.name()),
+            Some("MTP")
+        );
+    }
+
+    #[test]
+    fn test_open_color_dropdown() {
+        use crate::app::Message;
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let wid = app.main_window.unwrap_or_else(iced::window::Id::unique);
+        let _ = app.view(wid);
+        let _ = app.update(Message::ToggleRibbonDropdown("PROP_COLOR".to_string()));
+        let _ = app.view(wid);
     }
 }
