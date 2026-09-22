@@ -733,6 +733,7 @@ common =
     .perpendicular = عمودي
     .photometric = ضوئي
     .pid-import-drawn-decoded-missing = استيراد P&ID: __ocs_fmt_0__ عنصرًا من __ocs_fmt_1__ سجلًا مفكوك الترميز؛ __ocs_fmt_2__ سجل مصدر لم يُرسم
+    .pid-import-unit-assumed-metre = استيراد P&ID: لا يحدد الرسم وحدة إحداثيات؛ تم افتراض المتر.
     .pid-style-table-did-not-read = تعذّرت قراءة جدول أنماط P&ID؛ تحتفظ الخطوط بالإعدادات الافتراضية للطبقة.
     .pick-a-point = اختر نقطة
     .pick-an-object = اختر كائنًا

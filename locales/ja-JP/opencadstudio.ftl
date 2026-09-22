@@ -711,6 +711,7 @@ common =
     .perpendicular = 垂直
     .photometric = 測光
     .pid-import-drawn-decoded-missing = P&ID 読み込み: デコード済みレコード __ocs_fmt_1__ 件から __ocs_fmt_0__ 個のエンティティを描画。__ocs_fmt_2__ 件のソースレコードは未描画
+    .pid-import-unit-assumed-metre = P&ID 読み込み: 図面に座標単位の指定がないため、メートルとみなしました。
     .pid-style-table-did-not-read = P&ID スタイルテーブルを読み取れませんでした。線は画層の既定値のままです。
     .pick-a-point = 点を選択
     .pick-an-object = オブジェクトを選択

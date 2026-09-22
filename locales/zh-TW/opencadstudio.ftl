@@ -720,6 +720,7 @@ common =
     .perpendicular = 垂直
     .photometric = 光度
     .pid-import-drawn-decoded-missing = P&ID 匯入：從 __ocs_fmt_1__ 筆已解碼記錄繪出 __ocs_fmt_0__ 個實體；__ocs_fmt_2__ 筆來源記錄未繪製
+    .pid-import-unit-assumed-metre = P&ID 匯入：圖紙未聲明座標單位，已按公尺處理。
     .pid-style-table-did-not-read = P&ID 樣式表讀取失敗；線條沿用圖層預設樣式。
     .pick-a-point = 挑個點
     .pick-an-object = 選擇物件

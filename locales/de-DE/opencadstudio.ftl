@@ -721,6 +721,7 @@ common =
     .perpendicular = Rechtwinklig
     .photometric = Photometrisch
     .pid-import-drawn-decoded-missing = P&ID-Import: __ocs_fmt_0__ Objekte aus __ocs_fmt_1__ dekodierten Datensätzen; __ocs_fmt_2__ Quelldatensätze nicht gezeichnet
+    .pid-import-unit-assumed-metre = P&ID-Import: Die Zeichnung nennt keine Koordinateneinheit; es wurde Meter angenommen.
     .pid-style-table-did-not-read = Die P&ID-Stiltabelle konnte nicht gelesen werden; Linien behalten die Layer-Vorgaben.
     .pick-a-point = Wählen Sie einen Punkt
     .pick-an-object = Wählen Sie ein Objekt

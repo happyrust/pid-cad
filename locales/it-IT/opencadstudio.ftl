@@ -720,6 +720,7 @@ common =
     .perpendicular = Perpendicolare
     .photometric = Fotometrico
     .pid-import-drawn-decoded-missing = Importazione P&ID: __ocs_fmt_0__ entità da __ocs_fmt_1__ record decodificati; __ocs_fmt_2__ record di origine non disegnati
+    .pid-import-unit-assumed-metre = Importazione P&ID: il disegno non dichiara alcuna unità di coordinate; è stato assunto il metro.
     .pid-style-table-did-not-read = Impossibile leggere la tabella degli stili P&ID; le linee mantengono le impostazioni predefinite del layer.
     .pick-a-point = Scegli un punto
     .pick-an-object = Scegli un oggetto

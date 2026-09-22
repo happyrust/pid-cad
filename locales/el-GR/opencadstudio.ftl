@@ -722,6 +722,7 @@ common =
     .perpendicular = Κάθετα
     .photometric = Φωτομετρικές
     .pid-import-drawn-decoded-missing = Εισαγωγή P&ID: __ocs_fmt_0__ οντότητες από __ocs_fmt_1__ αποκωδικοποιημένες εγγραφές· __ocs_fmt_2__ εγγραφές προέλευσης δεν σχεδιάστηκαν
+    .pid-import-unit-assumed-metre = Εισαγωγή P&ID: το σχέδιο δεν δηλώνει μονάδα συντεταγμένων· θεωρήθηκε το μέτρο.
     .pid-style-table-did-not-read = Ο πίνακας στυλ P&ID δεν διαβάστηκε· οι γραμμές διατηρούν τις προεπιλογές του επιπέδου.
     .pick-a-point = Επιλέξτε σημείο
     .pick-an-object = Επιλέξτε αντικείμενο

@@ -708,6 +708,7 @@ common =
     .perpendicular = 垂直
     .photometric = 光度
     .pid-import-drawn-decoded-missing = P&ID 导入：从 __ocs_fmt_1__ 条已解码记录画出 __ocs_fmt_0__ 个实体；__ocs_fmt_2__ 条源记录未绘制
+    .pid-import-unit-assumed-metre = P&ID 导入：图纸未声明坐标单位，已按米处理。
     .pid-style-table-did-not-read = P&ID 样式表读取失败；线条沿用图层默认样式。
     .pick-a-point = 挑个点
     .pick-an-object = 选择对象

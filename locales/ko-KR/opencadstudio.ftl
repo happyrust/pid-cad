@@ -720,6 +720,7 @@ common =
     .perpendicular = 수직
     .photometric = 광도계
     .pid-import-drawn-decoded-missing = P&ID 가져오기: 디코딩된 레코드 __ocs_fmt_1__개에서 엔티티 __ocs_fmt_0__개 작성; 원본 레코드 __ocs_fmt_2__개는 그려지지 않음
+    .pid-import-unit-assumed-metre = P&ID 가져오기: 도면에 좌표 단위가 지정되지 않아 미터로 간주했습니다.
     .pid-style-table-did-not-read = P&ID 스타일 테이블을 읽지 못했습니다. 선은 도면층 기본값을 유지합니다.
     .pick-a-point = 포인트를 선택하세요
     .pick-an-object = 개체 선택

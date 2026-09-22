@@ -720,6 +720,7 @@ common =
     .perpendicular = Kolmý
     .photometric = Fotometrické
     .pid-import-drawn-decoded-missing = Import P&ID: __ocs_fmt_0__ entit z __ocs_fmt_1__ dekódovaných záznamů; __ocs_fmt_2__ zdrojových záznamů nevykresleno
+    .pid-import-unit-assumed-metre = Import P&ID: výkres neuvádí jednotku souřadnic; byl předpokládán metr.
     .pid-style-table-did-not-read = Tabulku stylů P&ID se nepodařilo načíst; čáry si ponechávají výchozí hodnoty hladiny.
     .pick-a-point = Vyberte bod
     .pick-an-object = Vyberte objekt

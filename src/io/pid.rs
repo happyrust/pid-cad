@@ -366,7 +366,14 @@ fn sheet_layer_is_hidden(layer: &PidSourceLayer) -> bool {
 /// how much of the file became drawing, how much did not, and whether the
 /// style tables were readable at all. The detail behind each number stays in
 /// the log (see [`report_import`]); this is the headline.
-#[derive(Clone, Copy)]
+///
+/// Returned by [`load_pid`] beside the document ([`PidImport`]), and carried
+/// across the format-agnostic open pipeline inside the document itself
+/// ([`ImportSummary::store`] / [`ImportSummary::take`]), since the pipeline's
+/// `acadrust::ReadOutcome` has no room for it. Until plan
+/// 2026-09-21-load-pid-returns-its-summary it travelled through a
+/// process-wide mailbox keyed by path instead.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ImportSummary {
     /// Entities handed to the document.
     pub drawn: usize,
@@ -416,6 +423,290 @@ pub struct ImportSummary {
     /// symbol-internal layer they sit on off (P-D2), summed over the
     /// placements whose cache was consulted.
     pub hidden_strokes_skipped: usize,
+    /// The symbol library roots the import found -- `PID_SYMBOL_LIBRARY` or
+    /// the `.sym` tree above the drawing -- and drew its library bodies
+    /// from. Empty when no library was found. Where a placement's body came
+    /// from otherwise depends on where the file sits, so the summary says
+    /// which library it was (audit 2026-09-21, item 3).
+    pub symbol_library: Vec<PathBuf>,
+    /// The unit the drawing's coordinates were read in, or the fact that
+    /// none was decoded and the metre was assumed -- a whole-drawing factor
+    /// of 25.4 if the assumption is wrong on an imperial project, so it is
+    /// stated here and not only in the log (audit 2026-09-21, item 6).
+    pub unit: ImportUnit,
+}
+
+/// How a `.pid`'s source coordinates were scaled to millimetres.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportUnit {
+    /// A decoded record stated its unit; `mm_per_unit` is what it is worth.
+    Stated {
+        /// The label as `pid-parse` states it (`m`, `mm`).
+        unit: String,
+        /// Millimetres per source unit.
+        mm_per_unit: f64,
+    },
+    /// No decoded record stated a unit this importer knows; the metre --
+    /// what every fixture measures -- was assumed.
+    AssumedMetre,
+}
+
+impl ImportUnit {
+    /// The unit the drawing's decoded records state, read off the first one
+    /// that states a unit this importer knows.
+    ///
+    /// `pid-parse` puts the unit on each entity's coordinate context rather
+    /// than on the document, and only decoded records carry one, so those
+    /// are what is read. They agree with each other by construction,
+    /// because the unit comes from the sheet's single page frame. A drawing
+    /// whose frame the parser could not decode says nothing about units and
+    /// falls back to the metre, which is what every fixture measured before
+    /// the parser could say so -- and the log then records having assumed
+    /// it, at `warn`: an imperial drawing read this way is off by 25.4
+    /// everywhere and looks fine.
+    fn read(geometry: &NormalizedPidGeometry, path: &Path) -> Self {
+        let stated = geometry
+            .entities
+            .iter()
+            .filter(|entity| entity.confidence == PidGeometryConfidence::Decoded)
+            .find_map(|entity| {
+                let PidDrawingUnits::Known { unit } = &entity.coordinate_context.units else {
+                    return None;
+                };
+                millimetres_in(&entity.coordinate_context.units).map(|mm| (unit.clone(), mm))
+            });
+        match stated {
+            Some((unit, mm_per_unit)) => Self::Stated { unit, mm_per_unit },
+            None => {
+                log::warn!(
+                    "{}: no decoded coordinate unit; assuming the metre, {MM_PER_METRE}mm per source unit",
+                    path.display()
+                );
+                Self::AssumedMetre
+            }
+        }
+    }
+
+    /// Millimetres per source unit under this reading.
+    pub fn mm_per_unit(&self) -> f64 {
+        match self {
+            Self::Stated { mm_per_unit, .. } => *mm_per_unit,
+            Self::AssumedMetre => MM_PER_METRE,
+        }
+    }
+
+    /// Whether the unit was assumed rather than read.
+    pub fn is_assumed(&self) -> bool {
+        matches!(self, Self::AssumedMetre)
+    }
+}
+
+/// What [`load_pid`] hands back: the drawing, and the summary of how it was
+/// read.
+#[derive(Debug)]
+pub struct PidImport {
+    /// The imported drawing.
+    pub document: CadDocument,
+    /// The headline of the import: what was drawn, what was not, where the
+    /// bodies and the unit came from.
+    pub summary: ImportSummary,
+}
+
+/// The tag prefix the summary rides under while a document crosses the open
+/// pipeline: one custom document property per field
+/// (`PID_IMPORT_SUMMARY.drawn`, …) in the document's `summary_info`. Taken
+/// off again by the open-completion handler ([`ImportSummary::take`]), so a
+/// saved drawing never carries it: the summary describes this import, not the
+/// drawing.
+///
+/// A property rather than an XRecord beside `PID_VIEW_FILTER` (the plan's
+/// first choice) because an XRecord costs a handle the allocator never gives
+/// back: taken off again, it still left `$HANDSEED` and the handle of every
+/// object allocated after the import one higher, so a `.pid` saved as DWG or
+/// DXF no longer matched the same save from before the record existed. A
+/// property costs the document nothing, and taking it off restores the
+/// document exactly.
+pub const SUMMARY_PROPERTY_PREFIX: &str = "PID_IMPORT_SUMMARY.";
+
+impl ImportSummary {
+    /// Write the summary into `doc` as custom document properties, one per
+    /// field under [`SUMMARY_PROPERTY_PREFIX`], replacing any already there.
+    pub fn store(&self, doc: &mut CadDocument) {
+        Self::remove(doc);
+        let properties = &mut doc.summary_info.custom_properties;
+        let mut push = |key: &str, value: String| {
+            properties.push((format!("{SUMMARY_PROPERTY_PREFIX}{key}"), value));
+        };
+        for (key, value) in self.counts() {
+            push(key, value.to_string());
+        }
+        push("style_tables_failed", self.style_tables_failed.to_string());
+        for root in &self.symbol_library {
+            push("symbol_library", root.to_string_lossy().into_owned());
+        }
+        match &self.unit {
+            ImportUnit::Stated { unit, mm_per_unit } => {
+                push("unit", unit.clone());
+                push("mm_per_unit", format!("{mm_per_unit:?}"));
+            }
+            ImportUnit::AssumedMetre => push("unit", "assumed-metre".to_string()),
+        }
+    }
+
+    /// The summary `doc` carries, if any, leaving it in place.
+    pub fn load(doc: &CadDocument) -> Option<Self> {
+        let mut carried = false;
+        let mut summary = Self::empty();
+        let mut unit: Option<String> = None;
+        let mut mm_per_unit: Option<f64> = None;
+        for (tag, value) in &doc.summary_info.custom_properties {
+            let Some(key) = tag.strip_prefix(SUMMARY_PROPERTY_PREFIX) else {
+                continue;
+            };
+            carried = true;
+            match key {
+                "style_tables_failed" => summary.style_tables_failed = value == "true",
+                "symbol_library" => summary.symbol_library.push(PathBuf::from(value)),
+                "unit" => unit = Some(value.to_string()),
+                "mm_per_unit" => mm_per_unit = value.parse().ok(),
+                _ => {
+                    if let (Ok(count), Some(slot)) =
+                        (value.parse::<usize>(), summary.count_mut(key))
+                    {
+                        *slot = count;
+                    }
+                }
+            }
+        }
+        if !carried {
+            return None;
+        }
+        summary.unit = match (unit.as_deref(), mm_per_unit) {
+            (Some("assumed-metre"), _) | (None, _) => ImportUnit::AssumedMetre,
+            (Some(label), Some(mm_per_unit)) => ImportUnit::Stated {
+                unit: label.to_string(),
+                mm_per_unit,
+            },
+            (Some(label), None) => ImportUnit::Stated {
+                unit: label.to_string(),
+                mm_per_unit: millimetres_in(&PidDrawingUnits::Known {
+                    unit: label.to_string(),
+                })
+                .unwrap_or(MM_PER_METRE),
+            },
+        };
+        Some(summary)
+    }
+
+    /// The summary `doc` carries, taken off it: what the open-completion
+    /// handler calls, so the headline is shown once and never saved. Leaves
+    /// the document exactly as it was before [`ImportSummary::store`].
+    pub fn take(doc: &mut CadDocument) -> Option<Self> {
+        let summary = Self::load(doc)?;
+        Self::remove(doc);
+        Some(summary)
+    }
+
+    /// Drop the summary's properties from `doc`, if any are there.
+    fn remove(doc: &mut CadDocument) {
+        doc.summary_info
+            .custom_properties
+            .retain(|(tag, _)| !tag.starts_with(SUMMARY_PROPERTY_PREFIX));
+    }
+
+    /// The headline, to the log: what a reader without a command line -- the
+    /// headless export, a script -- gets instead of the editor's three lines.
+    pub fn log(&self, path: &Path) {
+        log::info!(
+            "{}: P&ID import: {} entities from {} decoded records; {} source records not drawn; {} entities on {} authored sheet layers ({} unresolved); {} sheet layer names, {} off; {} cached / {} library bodies{}{}",
+            path.display(),
+            self.drawn,
+            self.decoded,
+            self.missing,
+            self.layered_entities,
+            self.sheet_layers,
+            self.unresolved_sheet_layers,
+            self.sheet_layer_names,
+            self.sheet_layers_off,
+            self.cache_bodies,
+            self.library_bodies,
+            if self.style_tables_failed {
+                "; the style table did not read"
+            } else {
+                ""
+            },
+            if self.unit.is_assumed() {
+                "; no coordinate unit stated, the metre was assumed"
+            } else {
+                ""
+            },
+        );
+    }
+
+    /// The counted fields, by the keys they are stored under.
+    fn counts(&self) -> [(&'static str, usize); 14] {
+        [
+            ("drawn", self.drawn),
+            ("decoded", self.decoded),
+            ("missing", self.missing),
+            ("sheet_layers", self.sheet_layers),
+            ("layered_entities", self.layered_entities),
+            ("unresolved_sheet_layers", self.unresolved_sheet_layers),
+            ("sheet_layer_names", self.sheet_layer_names),
+            ("sheet_layers_off", self.sheet_layers_off),
+            ("driving_dimensions", self.driving_dimensions),
+            ("template_bodies", self.template_bodies),
+            ("parametric_placements", self.parametric_placements),
+            ("cache_bodies", self.cache_bodies),
+            ("library_bodies", self.library_bodies),
+            ("hidden_strokes_skipped", self.hidden_strokes_skipped),
+        ]
+    }
+
+    /// The counted field stored under `key`, for reading a record back.
+    fn count_mut(&mut self, key: &str) -> Option<&mut usize> {
+        Some(match key {
+            "drawn" => &mut self.drawn,
+            "decoded" => &mut self.decoded,
+            "missing" => &mut self.missing,
+            "sheet_layers" => &mut self.sheet_layers,
+            "layered_entities" => &mut self.layered_entities,
+            "unresolved_sheet_layers" => &mut self.unresolved_sheet_layers,
+            "sheet_layer_names" => &mut self.sheet_layer_names,
+            "sheet_layers_off" => &mut self.sheet_layers_off,
+            "driving_dimensions" => &mut self.driving_dimensions,
+            "template_bodies" => &mut self.template_bodies,
+            "parametric_placements" => &mut self.parametric_placements,
+            "cache_bodies" => &mut self.cache_bodies,
+            "library_bodies" => &mut self.library_bodies,
+            "hidden_strokes_skipped" => &mut self.hidden_strokes_skipped,
+            _ => return None,
+        })
+    }
+
+    /// Every count zero, no library, the metre assumed: what a record is
+    /// read into.
+    fn empty() -> Self {
+        Self {
+            drawn: 0,
+            decoded: 0,
+            missing: 0,
+            style_tables_failed: false,
+            sheet_layers: 0,
+            layered_entities: 0,
+            unresolved_sheet_layers: 0,
+            sheet_layer_names: 0,
+            sheet_layers_off: 0,
+            driving_dimensions: 0,
+            template_bodies: 0,
+            parametric_placements: 0,
+            cache_bodies: 0,
+            library_bodies: 0,
+            hidden_strokes_skipped: 0,
+            symbol_library: Vec::new(),
+            unit: ImportUnit::AssumedMetre,
+        }
+    }
 }
 
 /// How the symbol placements of one import were drawn, tallied as
@@ -433,31 +724,12 @@ struct SymbolBodies {
     hidden_strokes_skipped: usize,
 }
 
-/// Mailbox carrying each import's summary out of the io layer, keyed by the
-/// drawing's path.
-///
-/// `acadrust::ReadOutcome` is a foreign type with no room for extra freight,
-/// so the summary rides beside it: written when the import finishes, taken by
-/// the open-completion handler that installs the tab. Keying by path keeps
-/// concurrent imports (tests run them in parallel) out of each other's slots;
-/// an entry an abandoned open leaves behind is overwritten by the next import
-/// of that path rather than shown against the wrong drawing.
-static IMPORT_SUMMARIES: std::sync::Mutex<std::collections::BTreeMap<PathBuf, ImportSummary>> =
-    std::sync::Mutex::new(std::collections::BTreeMap::new());
-
-/// The summary the last [`load_pid`] of `path` left behind, draining it.
-pub fn take_import_summary(path: &Path) -> Option<ImportSummary> {
-    IMPORT_SUMMARIES
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(path)
-}
-
 /// Parse a `.pid` file and project its decoded Sheet geometry into a document,
 /// filing each entity under the sheet layer the drawing itself filed it under
 /// (plan 2026-09-07 L3; the only reading since plan 2026-09-21, which retired
 /// the layer-mode environment switch and the taxonomy layers it could select).
-pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
+/// Hands back the document and the import's [`ImportSummary`] together.
+pub fn load_pid(path: &Path) -> Result<PidImport, String> {
     // The Geometry profile: every pass whose output reaches this document
     // -- the record families, the cached symbol bodies and their stroke
     // styles, the sheet layers and their display state, the style tables,
@@ -608,7 +880,8 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     }
 
     let page_mm = geometry.page_dimensions_mm;
-    let projection = Projection::for_geometry(&geometry, path);
+    let unit = ImportUnit::read(&geometry, path);
+    let projection = Projection::for_geometry(&geometry, &unit);
     let mut bounds = Bounds::new(projection);
     let mut decoded = 0usize;
     let mut drawn = 0usize;
@@ -844,46 +1117,48 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
         )
         .sum();
     let view = PidViewSummary::of(&doc);
-    IMPORT_SUMMARIES
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(
-            path.to_path_buf(),
-            ImportSummary {
-                drawn,
-                decoded,
-                missing,
-                style_tables_failed,
-                sheet_layers: sheet_layer_distribution.len(),
-                layered_entities: sheet_layer_distribution.values().sum(),
-                unresolved_sheet_layers: sheet_layer_distribution
-                    .keys()
-                    .filter(|(_, _, name)| name.is_none())
-                    .count(),
-                sheet_layer_names: view.layers.len(),
-                sheet_layers_off: view.layers.iter().filter(|row| !row.on).count(),
-                // The templates and their named dimensions are counted over
-                // the cache rather than over what was drawn: no placement
-                // draws a template, so the entity loop never meets them.
-                driving_dimensions: geometry
-                    .symbol_definitions
-                    .iter()
-                    .flat_map(|body| body.dimensions.iter())
-                    .filter(|dimension| dimension.name.is_some())
-                    .count(),
-                template_bodies: geometry
-                    .symbol_definitions
-                    .iter()
-                    .filter(|body| !body.dimensions.is_empty())
-                    .count(),
-                parametric_placements,
-                cache_bodies: symbol_bodies.cache,
-                library_bodies: symbol_bodies.library,
-                hidden_strokes_skipped: symbol_bodies.hidden_strokes_skipped,
-            },
-        );
+    let summary = ImportSummary {
+        drawn,
+        decoded,
+        missing,
+        style_tables_failed,
+        sheet_layers: sheet_layer_distribution.len(),
+        layered_entities: sheet_layer_distribution.values().sum(),
+        unresolved_sheet_layers: sheet_layer_distribution
+            .keys()
+            .filter(|(_, _, name)| name.is_none())
+            .count(),
+        sheet_layer_names: view.layers.len(),
+        sheet_layers_off: view.layers.iter().filter(|row| !row.on).count(),
+        // The templates and their named dimensions are counted over the
+        // cache rather than over what was drawn: no placement draws a
+        // template, so the entity loop never meets them.
+        driving_dimensions: geometry
+            .symbol_definitions
+            .iter()
+            .flat_map(|body| body.dimensions.iter())
+            .filter(|dimension| dimension.name.is_some())
+            .count(),
+        template_bodies: geometry
+            .symbol_definitions
+            .iter()
+            .filter(|body| !body.dimensions.is_empty())
+            .count(),
+        parametric_placements,
+        cache_bodies: symbol_bodies.cache,
+        library_bodies: symbol_bodies.library,
+        hidden_strokes_skipped: symbol_bodies.hidden_strokes_skipped,
+        symbol_library: library
+            .as_ref()
+            .map(|library| library.roots().to_vec())
+            .unwrap_or_default(),
+        unit,
+    };
     doc.source_path = Some(path.to_string_lossy().into_owned());
-    Ok(doc)
+    Ok(PidImport {
+        document: doc,
+        summary,
+    })
 }
 
 /// Draw the sheet the drawing states it is on.
@@ -938,9 +1213,9 @@ struct Projection {
 }
 
 impl Projection {
-    fn for_geometry(geometry: &NormalizedPidGeometry, path: &Path) -> Self {
+    fn for_geometry(geometry: &NormalizedPidGeometry, unit: &ImportUnit) -> Self {
         Self {
-            mm_per_unit: mm_per_source_unit(geometry, path),
+            mm_per_unit: unit.mm_per_unit(),
             band: SheetBand::for_page(geometry.page_dimensions_mm),
         }
     }
@@ -954,30 +1229,6 @@ impl Projection {
     fn point(self, point: &PidPoint) -> Vector3 {
         Vector3::new(self.mm(point.x), self.mm(point.y), 0.0)
     }
-}
-
-/// The millimetres a source unit is worth, as the parser states it.
-///
-/// `pid-parse` puts the unit on each entity's coordinate context rather than
-/// on the document, and only decoded records carry one, so those are what is
-/// read. They agree with each other by construction, because the unit comes
-/// from the sheet's single page frame. A drawing whose frame the parser could
-/// not decode says nothing about units and falls back to the metre, which is
-/// what every fixture measured before the parser could say so -- and the log
-/// then records having assumed it.
-fn mm_per_source_unit(geometry: &NormalizedPidGeometry, path: &Path) -> f64 {
-    let stated = geometry
-        .entities
-        .iter()
-        .filter(|entity| entity.confidence == PidGeometryConfidence::Decoded)
-        .find_map(|entity| millimetres_in(&entity.coordinate_context.units));
-    stated.unwrap_or_else(|| {
-        log::info!(
-            "{}: no decoded coordinate unit; assuming the metre, {MM_PER_METRE}mm per source unit",
-            path.display()
-        );
-        MM_PER_METRE
-    })
 }
 
 /// Millimetres in one of the units `pid-parse` can state.
@@ -2957,6 +3208,172 @@ fn ensure_layer(doc: &mut CadDocument, name: &str, colour: Color, visible: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A summary stored into a document reads back field for field --
+    /// counts, the failed flag, several library roots, and both unit
+    /// readings -- and `take` leaves nothing behind for a second reader: the
+    /// document is the one it was before `store`, allocator included, which
+    /// is what keeps a `.pid` saved after its open byte-identical to one
+    /// saved before the summary rode this way.
+    #[test]
+    fn the_summary_round_trips_through_its_properties_and_take_removes_them() {
+        let mut summary = ImportSummary::empty();
+        summary.drawn = 335;
+        summary.decoded = 310;
+        summary.missing = 12;
+        summary.style_tables_failed = true;
+        summary.sheet_layers = 7;
+        summary.layered_entities = 300;
+        summary.unresolved_sheet_layers = 1;
+        summary.sheet_layer_names = 4;
+        summary.sheet_layers_off = 1;
+        summary.driving_dimensions = 4;
+        summary.template_bodies = 2;
+        summary.parametric_placements = 2;
+        summary.cache_bodies = 20;
+        summary.library_bodies = 3;
+        summary.hidden_strokes_skipped = 31;
+        summary.symbol_library = vec![
+            PathBuf::from(r"\\server\Plant\Ref\Symbols"),
+            PathBuf::from("D:/sym with spaces/=and=equals"),
+        ];
+        summary.unit = ImportUnit::Stated {
+            unit: "m".to_string(),
+            mm_per_unit: MM_PER_METRE,
+        };
+
+        let mut doc = CadDocument::new();
+        doc.summary_info
+            .custom_properties
+            .push(("Client".to_string(), "kept".to_string()));
+        let before = doc.clone();
+        assert!(
+            ImportSummary::load(&doc).is_none(),
+            "a document with only its own properties carries none"
+        );
+        summary.store(&mut doc);
+        assert_eq!(ImportSummary::load(&doc).as_ref(), Some(&summary));
+        assert_ne!(doc, before, "stored, it is in the document");
+        assert_eq!(ImportSummary::take(&mut doc), Some(summary.clone()));
+        assert!(
+            ImportSummary::take(&mut doc).is_none(),
+            "take drains the properties"
+        );
+        assert_eq!(
+            doc, before,
+            "taken, the document is exactly what it was -- other properties kept, no handle spent"
+        );
+
+        // Storing again replaces rather than appends, and the assumed unit
+        // reads back as itself.
+        summary.unit = ImportUnit::AssumedMetre;
+        summary.symbol_library.clear();
+        summary.store(&mut doc);
+        summary.store(&mut doc);
+        let read = ImportSummary::load(&doc).expect("stored");
+        assert_eq!(read, summary);
+        assert!(read.unit.is_assumed());
+        assert_eq!(read.unit.mm_per_unit(), MM_PER_METRE);
+        assert_eq!(
+            doc.summary_info
+                .custom_properties
+                .iter()
+                .filter(|(tag, _)| tag.starts_with(SUMMARY_PROPERTY_PREFIX))
+                .count(),
+            summary.counts().len() + 2,
+            "one property per field: the counts, the failed flag, the unit"
+        );
+    }
+
+    /// The unit is read off the first decoded record that states one this
+    /// importer knows; a drawing whose records state none, or an unknown
+    /// label, is scaled as metres and says so.
+    #[test]
+    fn the_unit_is_read_from_a_decoded_record_or_assumed_to_be_the_metre() {
+        let entity = |confidence: PidGeometryConfidence, units: PidDrawingUnits| {
+            pid_parse::PidGraphicEntity {
+                id: "e".to_string(),
+                drawing_id: None,
+                graphic_oid: None,
+                source_layer: None,
+                kind: PidGraphicKind::Point {
+                    position: PidPoint { x: 0.0, y: 0.0 },
+                },
+                coordinate_context: pid_parse::PidCoordinateContext {
+                    units,
+                    ..Default::default()
+                },
+                source: pid_parse::PidGraphicProvenance {
+                    stream_path: None,
+                    byte_range: None,
+                    record_id: None,
+                    record_kind: None,
+                    field_x: None,
+                    note: None,
+                },
+                confidence,
+            }
+        };
+        let known = |unit: &str| PidDrawingUnits::Known {
+            unit: unit.to_string(),
+        };
+        let unknown = || PidDrawingUnits::Unknown {
+            diagnostic: "no frame".to_string(),
+        };
+        let path = Path::new("unit-test.pid");
+        let geometry = |entities: Vec<pid_parse::PidGraphicEntity>| NormalizedPidGeometry {
+            entities,
+            ..Default::default()
+        };
+
+        // A stated metre, even after an inferred record with no unit.
+        let stated = ImportUnit::read(
+            &geometry(vec![
+                entity(PidGeometryConfidence::Inferred, unknown()),
+                entity(PidGeometryConfidence::Decoded, known("m")),
+            ]),
+            path,
+        );
+        assert_eq!(
+            stated,
+            ImportUnit::Stated {
+                unit: "m".to_string(),
+                mm_per_unit: MM_PER_METRE
+            }
+        );
+        assert!(!stated.is_assumed());
+        // Millimetres are the identity.
+        assert_eq!(
+            ImportUnit::read(
+                &geometry(vec![entity(PidGeometryConfidence::Decoded, known("mm"))]),
+                path
+            )
+            .mm_per_unit(),
+            1.0
+        );
+        // Nothing decoded states a unit: assumed, and a metre's worth.
+        let assumed = ImportUnit::read(
+            &geometry(vec![entity(PidGeometryConfidence::Decoded, unknown())]),
+            path,
+        );
+        assert_eq!(assumed, ImportUnit::AssumedMetre);
+        assert_eq!(assumed.mm_per_unit(), MM_PER_METRE);
+        // A label this importer has not been shown is not guessed at.
+        assert!(ImportUnit::read(
+            &geometry(vec![entity(
+                PidGeometryConfidence::Decoded,
+                known("furlong")
+            )]),
+            path
+        )
+        .is_assumed());
+        // Only decoded records are asked; a probe's unit is not a reading.
+        assert!(ImportUnit::read(
+            &geometry(vec![entity(PidGeometryConfidence::ProbeOnly, known("mm"))]),
+            path
+        )
+        .is_assumed());
+    }
 
     /// The file's display bit decides, and the name only speaks when the
     /// file said nothing (plan 2026-09-07, L1): a layer named `Invisible`

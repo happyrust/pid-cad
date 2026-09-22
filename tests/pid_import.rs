@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use acadrust::{CadDocument, EntityType};
-use OpenCADStudio::io::pid::load_pid;
+use OpenCADStudio::io::pid::{load_pid, ImportSummary, ImportUnit, SUMMARY_PROPERTY_PREFIX};
 use OpenCADStudio::io::pid_view_filter::{
     switch_role, switch_sheet_layer, PidViewFilter, PidViewSummary,
 };
@@ -75,11 +75,20 @@ fn on_sheet_text(doc: &CadDocument) -> impl Iterator<Item = &EntityType> {
     of_role(doc, "text").filter(|entity| matches!(entity, EntityType::Text(_)))
 }
 
-/// Held by a test for as long as it imports a fixture and reads the
-/// `ImportSummary` that import left behind. The mailbox is keyed by path,
-/// and the tests of one binary run in parallel, so two of them importing the
-/// same fixture would otherwise take each other's summary.
-static SUMMARY_MAILBOX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The fixture as the application opens it, beside the `ImportSummary` of
+/// the same import as `load_pid` hands it back. Each import owns its
+/// summary, so two tests importing the same fixture in parallel cannot read
+/// each other's (which the path-keyed mailbox this replaced needed a lock
+/// against). `io::load_file` itself hands the summary to the log rather than
+/// leaving it in the document -- see `the_summary_rides_the_document_once…`.
+fn import_with_summary(name: &str) -> Option<(CadDocument, ImportSummary)> {
+    let path = fixture(name)?;
+    let doc = import(name)?;
+    let summary = load_pid(&path)
+        .unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
+        .summary;
+    Some((doc, summary))
+}
 
 /// Placement-time values are separate sheet text records, not the `NULL`
 /// placeholders embedded in the reusable symbol body. Both halves must meet
@@ -241,25 +250,20 @@ fn saving_refuses_a_pid_destination() {
     }
 }
 
-/// The import leaves its command-line headline behind, keyed by path.
+/// The import hands its command-line headline back with the document.
 ///
-/// The open-completion handler takes it and shows the reader one line: how
-/// much of the file became drawing, how much did not, and whether the style
-/// tables read. A headline that disagreed with the document would be worse
-/// than none, so the numbers are checked against the import itself rather
-/// than pinned: everything the summary counts as drawn went through the
-/// entity loop, and the only entity added outside it is the sheet border.
+/// The open-completion handler takes it off the document and shows the
+/// reader one line: how much of the file became drawing, how much did not,
+/// and whether the style tables read. A headline that disagreed with the
+/// document would be worse than none, so the numbers are checked against the
+/// import itself rather than pinned: everything the summary counts as drawn
+/// went through the entity loop, and the only entity added outside it is the
+/// sheet border.
 #[test]
 fn the_import_leaves_a_summary_the_app_can_show() {
-    let _mailbox = SUMMARY_MAILBOX
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let Some(path) = fixture("DWG-0201GP06-01.pid") else {
+    let Some((doc, summary)) = import_with_summary("DWG-0201GP06-01.pid") else {
         return;
     };
-    let doc = OpenCADStudio::io::load_file(&path).expect("the fixture imports");
-    let summary = OpenCADStudio::io::pid::take_import_summary(&path)
-        .expect("an import leaves its summary behind");
     assert_eq!(
         summary.drawn + 1,
         doc.entities().count(),
@@ -322,12 +326,9 @@ fn the_import_leaves_a_summary_the_app_can_show() {
         ("工艺管道及仪表流程-1.pid", (4, 1, 2)),
         ("DWG-0202GP06-01.pid", (0, 0, 0)),
     ] {
-        let Some(path) = fixture(name) else {
+        let Some((doc, summary)) = import_with_summary(name) else {
             continue;
         };
-        let doc = OpenCADStudio::io::load_file(&path).expect("the fixture imports");
-        let summary = OpenCADStudio::io::pid::take_import_summary(&path)
-            .expect("an import leaves its summary behind");
         assert_eq!(
             (
                 summary.driving_dimensions,
@@ -2291,9 +2292,13 @@ fn import_without_library(name: &str) -> Option<CadDocument> {
     std::fs::create_dir_all(&dir).expect("temp dir");
     let copy = dir.join(name);
     std::fs::copy(&fixture, &copy).expect("copy fixture");
-    let doc = load_pid(&copy).unwrap_or_else(|error| panic!("load copy: {error}"));
+    let import = load_pid(&copy).unwrap_or_else(|error| panic!("load copy: {error}"));
     let _ = std::fs::remove_dir_all(&dir);
-    Some(doc)
+    assert!(
+        import.summary.symbol_library.is_empty(),
+        "{name}: no library above a fresh temp directory, and the summary says so"
+    );
+    Some(import.document)
 }
 
 /// Whether an open run turns the same way at every vertex: what a sampled
@@ -3332,9 +3337,6 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
 /// library, 31 hidden strokes left out on DWG-0201.
 #[test]
 fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() {
-    let _mailbox = SUMMARY_MAILBOX
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let arc_midpoint = |arc: &acadrust::entities::Arc| {
         let sweep = (arc.end_angle - arc.start_angle).rem_euclid(std::f64::consts::TAU);
         let angle = arc.start_angle + sweep / 2.0;
@@ -3362,12 +3364,9 @@ fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() 
         ("D06.pid", 32, 6, 8),
         ("工艺管道及仪表流程-1.pid", 237, 58, 50),
     ] {
-        let Some(path) = fixture(name) else {
+        let Some((doc, summary)) = import_with_summary(name) else {
             continue;
         };
-        let doc = import(name).expect("the fixture is present");
-        let summary = OpenCADStudio::io::pid::take_import_summary(&path)
-            .expect("an import leaves its summary behind");
         assert_eq!(
             of_role(&doc, "symbol").count(),
             strokes,
@@ -3560,6 +3559,98 @@ fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() 
             20,
             "the other nine of DWG-0201's twenty measure the same either way"
         );
+    }
+}
+
+/// The summary rides inside the document across the open path and comes off
+/// it once (plan 2026-09-21-load-pid-returns-its-summary, Q-D2 / Q-D3):
+/// `load_pid` hands it back beside the document; stored into the document
+/// it reads back field for field, a second take finds nothing, and the
+/// document taken from is the one that was stored into -- no handle spent,
+/// so the DXF it saves to is byte for byte the DXF of a document that never
+/// carried it; the plain `io::load_file` -- the export's, an insert's, a
+/// test's route, with no command line to show it on -- hands a document that
+/// carries none; and neither DWG nor DXF carries a `PID_IMPORT_SUMMARY`
+/// property out of either route. The library the import drew from and the
+/// unit it read are in the summary too: the fixture states the metre, and
+/// its bodies came from the drawing's cache with no library needed.
+#[test]
+fn the_summary_rides_the_document_once_and_is_never_saved() {
+    let Some(path) = fixture("DWG-0202GP06-01.pid") else {
+        return;
+    };
+    let direct = load_pid(&path).expect("the fixture imports");
+    let mut carrier = direct.document.clone();
+    direct.summary.store(&mut carrier);
+    assert!(
+        ImportSummary::load(&carrier).is_some(),
+        "stored, the summary is in the document"
+    );
+    assert_ne!(carrier, direct.document);
+    assert_eq!(
+        ImportSummary::take(&mut carrier).as_ref(),
+        Some(&direct.summary),
+        "the carried summary is the import's own"
+    );
+    assert!(
+        ImportSummary::take(&mut carrier).is_none(),
+        "taken once, the summary is gone"
+    );
+    assert_eq!(
+        carrier, direct.document,
+        "taken, the document is exactly the one stored into"
+    );
+    assert_eq!(
+        OpenCADStudio::io::save_to_bytes(&carrier, "dxf", carrier.version).expect("save dxf"),
+        OpenCADStudio::io::save_to_bytes(&direct.document, "dxf", direct.document.version)
+            .expect("save dxf"),
+        "the ride leaves no trace in a save -- not a handle"
+    );
+    let mut opened = OpenCADStudio::io::load_file(&path).expect("the fixture opens");
+    assert!(
+        ImportSummary::take(&mut opened).is_none(),
+        "the plain load_file route hands its summary to the log, not to the document"
+    );
+    assert_eq!(
+        direct.summary.unit,
+        ImportUnit::Stated {
+            unit: "m".to_string(),
+            mm_per_unit: 1000.0
+        },
+        "the fixture states its unit"
+    );
+    assert!(
+        !direct.summary.unit.is_assumed(),
+        "a stated unit is not an assumption"
+    );
+    assert_eq!(
+        direct.summary.library_bodies, 0,
+        "every DWG-0202 placement draws from the drawing's own cache"
+    );
+
+    // What the plain route hands out, and what the editor holds after its
+    // handler took the summary: neither carries a property of the import's,
+    // and neither DWG nor DXF gets one. (A summary nobody took would stay in
+    // the document's properties for anything that reads them -- the reason
+    // both routes take it.)
+    for (label, doc) in [("load_file", &opened), ("taken", &carrier)] {
+        assert!(
+            !doc.summary_info
+                .custom_properties
+                .iter()
+                .any(|(tag, _)| tag.starts_with(SUMMARY_PROPERTY_PREFIX)),
+            "{label}: no property of the import's stays on the document"
+        );
+        for ext in ["dwg", "dxf"] {
+            let bytes = OpenCADStudio::io::save_to_bytes(doc, ext, doc.version)
+                .unwrap_or_else(|error| panic!("save {ext}: {error}"));
+            let reopened = OpenCADStudio::io::load_bytes(&format!("summary-{label}.{ext}"), bytes)
+                .unwrap_or_else(|error| panic!("reopen {ext}: {error}"));
+            assert!(
+                ImportSummary::load(&reopened).is_none(),
+                "{label} / {ext}: the summary is not in the saved drawing"
+            );
+        }
     }
 }
 

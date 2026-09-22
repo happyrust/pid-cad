@@ -1818,9 +1818,14 @@ impl OpenCADStudio {
         // A `.pid` import leaves a one-line report behind: the log
         // holds the details, the command line gets the headline —
         // without it a thin-looking sheet and a complete one are
-        // indistinguishable from inside the application.
+        // indistinguishable from inside the application. The summary
+        // rode here inside the document (custom document properties
+        // the reader put on it); taking it off keeps it out of any
+        // save and any properties view, since it describes this import
+        // and not the drawing.
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(summary) = crate::io::pid::take_import_summary(&path) {
+        if let Some(summary) = crate::io::pid::ImportSummary::take(&mut self.tabs[i].scene.document)
+        {
             let (drawn, decoded, missing) = (summary.drawn, summary.decoded, summary.missing);
             let (layered, layers, unresolved) = (
                 summary.layered_entities,
@@ -1857,6 +1862,17 @@ impl OpenCADStudio {
                 self.command_line.push_error(crate::t!(
                     "P&ID style table did not read; line work keeps the layer defaults."
                 ).as_ref());
+            }
+            // Said only when it happened: a drawing that states its unit
+            // gets no line, one that did not is scaled by an assumption
+            // that is off by 25.4 on an imperial project.
+            if summary.unit.is_assumed() {
+                self.command_line.push_info(
+                    crate::t!(
+                    "P&ID import: the drawing states no coordinate unit; the metre was assumed."
+                )
+                    .as_ref(),
+                );
             }
         }
         self.tabs[i].active_layer = self.tabs[i]

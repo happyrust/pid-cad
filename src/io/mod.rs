@@ -856,7 +856,17 @@ fn sniff_dwg_or_dxf_bytes(bytes: &[u8]) -> &'static str {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_file(path: &Path) -> Result<CadDocument, String> {
-    load_file_with_progress(path, None).map(|outcome| outcome.document)
+    let mut document = load_file_with_progress(path, None)?.document;
+    // A `.pid` import's summary rides in the document for the editor's
+    // open-completion handler (`load_file_for_open` is that route). A caller
+    // reading a drawing through this plain API -- the headless export, a
+    // block insert, a test -- has no such handler, so the summary comes off
+    // here and goes to the log instead, and never into anything the caller
+    // saves.
+    if let Some(summary) = pid::ImportSummary::take(&mut document) {
+        summary.log(path);
+    }
+    Ok(document)
 }
 
 /// Opening a drawing by path is a desktop affair. In the browser a file
@@ -1242,7 +1252,16 @@ fn read_dxf_path(path: &Path, failsafe: bool) -> Result<acadrust::ReadOutcome, R
 /// to offer, so there is no second attempt worth prompting for.
 #[cfg(not(target_arch = "wasm32"))]
 fn read_pid_path(path: &Path) -> Result<acadrust::ReadOutcome, ReaderFailure> {
-    let document = pid::load_pid(path).map_err(ReaderFailure::terminal)?;
+    let pid::PidImport {
+        mut document,
+        summary,
+    } = pid::load_pid(path).map_err(ReaderFailure::terminal)?;
+    // `ReadOutcome` is the format-agnostic shape every reader returns and
+    // has no room for the summary, so it rides inside the document -- as
+    // custom document properties, which cost it nothing -- until the
+    // open-completion handler takes it off (`pid::ImportSummary::take`). A
+    // saved drawing never carries it.
+    summary.store(&mut document);
     let entities = document.entities().count();
     let stats = acadrust::ReadStats {
         // The format enum is DWG or DXF, so a `.pid` states neither -- which

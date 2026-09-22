@@ -707,6 +707,7 @@ common =
     .perpendicular = Dik
     .photometric = Fotometrik
     .pid-import-drawn-decoded-missing = P&ID içe aktarma: __ocs_fmt_1__ çözülmüş kayıttan __ocs_fmt_0__ nesne; __ocs_fmt_2__ kaynak kayıt çizilmedi
+    .pid-import-unit-assumed-metre = P&ID içe aktarma: çizim bir koordinat birimi belirtmiyor; metre varsayıldı.
     .pid-style-table-did-not-read = P&ID stil tablosu okunamadı; çizgiler katman varsayılanlarını korur.
     .pick-a-point = Bir nokta seçin
     .pick-an-object = Bir nesne seçin

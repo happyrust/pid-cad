@@ -709,6 +709,7 @@ common =
     .perpendicular = लंबवत
     .photometric = फोटोमीट्रिक
     .pid-import-drawn-decoded-missing = P&ID आयात: __ocs_fmt_1__ डिकोड किए गए रिकॉर्ड से __ocs_fmt_0__ इकाइयाँ; __ocs_fmt_2__ स्रोत रिकॉर्ड नहीं बनाए गए
+    .pid-import-unit-assumed-metre = P&ID आयात: ड्रॉइंग में निर्देशांक इकाई नहीं दी गई है; मीटर मान लिया गया।
     .pid-style-table-did-not-read = P&ID शैली तालिका पढ़ी नहीं जा सकी; रेखाएँ लेयर डिफ़ॉल्ट पर बनी रहेंगी।
     .pick-a-point = एक बिंदु चुनें
     .pick-an-object = एक ऑब्जेक्ट चुनें

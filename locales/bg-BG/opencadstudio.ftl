@@ -720,6 +720,7 @@ common =
     .perpendicular = Перпендикулярно
     .photometric = Фотометрично
     .pid-import-drawn-decoded-missing = Импорт на P&ID: __ocs_fmt_0__ обекта от __ocs_fmt_1__ декодирани записа; __ocs_fmt_2__ изходни записа не са начертани
+    .pid-import-unit-assumed-metre = Импорт на P&ID: чертежът не посочва единица за координати; приет е метърът.
     .pid-style-table-did-not-read = Таблицата със стилове на P&ID не можа да бъде прочетена; линиите запазват настройките по подразбиране на слоя.
     .pick-a-point = Избери точка
     .pick-an-object = Избери обект

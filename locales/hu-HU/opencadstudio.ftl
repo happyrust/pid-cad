@@ -720,6 +720,7 @@ common =
     .perpendicular = Merőleges
     .photometric = Fotometriai
     .pid-import-drawn-decoded-missing = P&ID-importálás: __ocs_fmt_0__ elem __ocs_fmt_1__ dekódolt rekordból; __ocs_fmt_2__ forrásrekord nincs megrajzolva
+    .pid-import-unit-assumed-metre = P&ID-import: a rajz nem ad meg koordináta-egységet; métert feltételeztünk.
     .pid-style-table-did-not-read = A P&ID-stílustáblát nem sikerült beolvasni; a vonalak a fólia alapértékeit tartják meg.
     .pick-a-point = Válassz egy pontot
     .pick-an-object = Válasszon egy tárgyat

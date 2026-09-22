@@ -720,6 +720,7 @@ common =
     .perpendicular = Prostopadły
     .photometric = Fotometryczne
     .pid-import-drawn-decoded-missing = Import P&ID: __ocs_fmt_0__ obiektów z __ocs_fmt_1__ zdekodowanych rekordów; __ocs_fmt_2__ rekordów źródłowych nie narysowano
+    .pid-import-unit-assumed-metre = Import P&ID: rysunek nie podaje jednostki współrzędnych; przyjęto metr.
     .pid-style-table-did-not-read = Nie udało się odczytać tabeli stylów P&ID; linie zachowują ustawienia domyślne warstwy.
     .pick-a-point = Wybierz punkt
     .pick-an-object = Wybierz obiekt

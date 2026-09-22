@@ -719,6 +719,7 @@ common =
     .perpendicular = Loodrecht
     .photometric = Fotometrisch
     .pid-import-drawn-decoded-missing = P&ID-import: __ocs_fmt_0__ entiteiten uit __ocs_fmt_1__ gedecodeerde records; __ocs_fmt_2__ bronrecords niet getekend
+    .pid-import-unit-assumed-metre = P&ID-import: de tekening geeft geen coördinaateenheid op; de meter is aangenomen.
     .pid-style-table-did-not-read = De P&ID-stijltabel kon niet worden gelezen; lijnen behouden de laagstandaarden.
     .pick-a-point = Kies een punt
     .pick-an-object = Kies een object

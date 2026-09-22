@@ -720,6 +720,7 @@ common =
     .perpendicular = kohtisuorassa
     .photometric = Fotometrinen
     .pid-import-drawn-decoded-missing = P&ID-tuonti: __ocs_fmt_0__ entiteettiä __ocs_fmt_1__ dekoodatusta tietueesta; __ocs_fmt_2__ lähdetietuetta jäi piirtämättä
+    .pid-import-unit-assumed-metre = P&ID-tuonti: piirustus ei ilmoita koordinaattiyksikköä; oletettiin metri.
     .pid-style-table-did-not-read = P&ID-tyylitaulukkoa ei voitu lukea; viivat säilyttävät tason oletusarvot.
     .pick-a-point = Valitse kohta
     .pick-an-object = Valitse esine
