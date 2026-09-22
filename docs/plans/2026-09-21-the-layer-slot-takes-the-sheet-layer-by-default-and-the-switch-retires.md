@@ -1,9 +1,11 @@
-# 图层槽默认取图纸图层，`OCS_PID_LAYER_MODE` 退役 · 小计划（2026-09-21 开单，只分析）
+# 图层槽默认取图纸图层，`OCS_PID_LAYER_MODE` 退役 · 小计划（2026-09-21 开单，2026-09-22 落地）
 
 > 承接 `2026-09-07-jdim-driving-dimensions-and-layer-panel.md` L3 / D5（OCS `d0750567`，09-18）：开关 `OCS_PID_LAYER_MODE`
 > 上线时定的是「选项可切、默认不切；默认值翻转另开一轮，等 DXF 下游消费方的要求定下来」。09-19 / 09-20 两单退役开关时都把它
 > 登记不做（「另一条线，不混进来」）。**2026-09-21 用户指示「继续分析：接台账上还开着的口子（OCS_PID_LAYER_MODE 退役 …）」**，
-> 本单把两种模式在语料上的差别量出来、把翻转与退役要动的地方列出来。**只分析，未开工；带 ⭕ 的决策按推荐落笔，等批。**
+> 本单把两种模式在语料上的差别量出来、把翻转与退役要动的地方列出来。
+> **2026-09-22 H1 + H2 + H3 已落地**（OCS `61153b6c`，见「进度」）：用户点选「收掉上游合并、弹回 stash@{0} 把 09-21 H1/H2 落地」即放行，
+> 七条决策按推荐执行。H4 的 `--export` 对数已做、四图对上事实表；GUI 截图未截（桌面被占，见进度），留待补。
 
 ## 一句话
 
@@ -55,7 +57,7 @@ SmartPlant 的名字——它没在等这个默认值。本单建议：**默认�
 
 ## 验收
 
-- `pid_import` 53 → **50**（删 2 合 1，见 H-D6；数字以落地为准）全绿，环境变量设不设都一样；`pid_panel_localization` 绿；`--lib io::pid::tests` 数字不变。
+- `pid_import` 53 → **50**（删 2 合 1，见 H-D6；数字以落地为准——**实落 49**：删 2、合 2）全绿，环境变量设不设都一样；`pid_panel_localization` 绿；`--lib io::pid::tests` 数字不变（52）。
 - `rg OCS_PID_LAYER_MODE|PidLayerMode|load_pid_with_layer_mode|LAYER_MODE_ENV` 在 `src/` `tests/` `docs/user-guide.md` 零命中。
 - 四图 `--export` 的图层表 = 本单事实表 sheet 那行。
 
@@ -70,8 +72,48 @@ SmartPlant 的名字——它没在等这个默认值。本单建议：**默认�
 
 ## 进度
 
-（只分析，未开工。事实表的对数临时文件已清。）
+- **2026-09-21**：只分析；事实表的对数临时文件已清。H1 / H2 的代码当晚做了一截，因 OCS 树开始合并上游（`fd2062bd`，386 文件）而停在
+  `stash@{0}`（"wip before upstream merge 20260921"：`pid.rs` −309 / `pid_import.rs` −684 行净减、user-guide、`layers.rs` / `pid_view_filter.rs` 注释）。
+- **2026-09-22（会话 fable-5-1-47）✅ H1 + H2 + H3 落地**。
+  - 先收合并：`f417782a`（Merge upstream main `fd2062bd`；两处合并后校正——`automation.rs` 无头模型空间打印计划行按命令行给的纸名而非对话框存的
+    目录拼法、`plot_destination_tests` 的 PDF / 无打印机按 `io::plot_device` 的设备拼法；`cargo check --lib --tests --examples` 干净，
+    lib `plot_destination_tests` + `automation::tests` 49/49，`--test pid_import` 53/53 —— 合并后、H1 之前的基线）。
+  - `git stash apply stash@{0}` 零冲突。**H1 `src/io/pid.rs`**（`61153b6c`）：删 `LAYER_MODE_ENV` / `PidLayerMode` / `load_pid_with_layer_mode`，
+    `load_pid` 只走 sheet 口径；末尾槽的三支：有 authored name（非 `symbol-label`）→ 槽 = 原名、按文件状态声明；`symbol-label` → 留
+    `PID-SYMBOL-LABEL`；无 authored name → 隐藏的去 `PID-HIDDEN`，`PID-STYLE-*` 工作键**回落 `PID-GEOMETRY`**（样式名在 `style=`），其余留
+    自己的 `PID-*` 层按需声明（H-D3 / H-D4 / H-D5）。`taxonomy_layers()` 13 条保留为按需声明表（只在有实体落上去时声明），`ensure_taxonomy_layer`
+    不再声明 `PID-STYLE-*`；`LAYER_DISCIPLINE_PREFIX` / `discipline_layer` / `style_name_for` 的文档改成「构建期工作键」。`log::info!("… =sheet …")` 随
+    模式一起删。`pid_view_filter.rs` / `app/layers.rs` 两处注释改成「同名图纸层，或无名隐藏内容的 `PID-HIDDEN`」。
+  - **H2 `tests/pid_import.rs`**：`import_in_mode` / `import_in_sheet_mode` / `import_in_taxonomy_mode` / `is_line_work` 删；
+    `the_layer_mode_defaults_to_taxonomy_and_names_its_two_modes`、`the_two_layer_modes_agree_on_everything_but_the_slot` 删；
+    三条 `sheet_mode_*` 去前缀成默认口径（`every_entity_is_filed_under_its_authored_layer_and_the_table_is_the_drawings_own` /
+    `authored_layer_names_survive_dwg_and_dxf` / 放开隐藏层那条并进原有的 `switching_a_row_reaches_the_document_and_releases_the_hidden_layer_when_needed`，
+    释放的是同名图纸层而非 `PID-HIDDEN`）；`hidden_authored_layers_open_on_pid_hidden_…` 改成 `hidden_authored_layers_open_off_under_their_own_name_and_metadata_survives_dwg_and_dxf`
+    （并断言 `PID-HIDDEN` 未声明）；
+    按 `PID-TEXT` / `PID-SYMBOL` / `PID-STYLE-*` 输出层名断言的五条改按 `role=` / `style=`
+    （`import_declares_only_the_layers_its_own_entities_land_on_and_hides_the_evidence_ones` / `nothing_takes_the_annotation_role_and_its_layer_is_not_declared` /
+    `every_imported_entity_states_its_role_and_exactly_one_is_the_page_border` / `named_line_work_states_the_style_the_drawing_names_and_unnamed_work_stays_unnamed`）。
+    **53 → 49**（删 2、合 2；本单原估 50）。
+  - **H3 台账**：user-guide `.pid` 一节「图层」段重写为原图图层 + 五条合成层表，`OCS_PID_LAYER_MODE` 段换成 H-D7 那句
+    （「导出的 DWG / DXF 图层名 = SmartPlant 原图图层名；要按导入器的分类取实体，读 XDATA `PID_SEMANTICS` 的 `role=` / `style=`」），
+    「图纸图层视图」段的「连带开层」改成「同名图层（无名隐藏内容则 `PID-HIDDEN`）」；09-07 计划 D5 / L3 结算 / 登记不做三处、09-19 计划登记不做、
+    09-20 退役单登记不做各改标「2026-09-22 已落地」。
+  - **验证**：`cargo check --lib --tests --examples` 干净；`--test pid_import` **49/49**、`--test pid_panel_localization` 1/1、`--lib io::pid` **52/52**；
+    clippy 在四个改动文件零告警；rustfmt `pid.rs` / `pid_view_filter.rs` / `pid_import.rs` 干净、`layers.rs` 只剩 HEAD 就有的五处旧差；
+    `rg OCS_PID_LAYER_MODE|PidLayerMode|load_pid_with_layer_mode|LAYER_MODE_ENV` 在 `src/` `tests/` `examples/` `docs/user-guide.md` **零命中**。
+  - **H4 `--export` 对数**（debug 版 `61153b6c`，四图，PowerShell 解 DXF 组码）：图层表 = 本单事实表 sheet 那行——0201 **16 层 / 335 实体**
+    （`Default` 120 / `Labels` 72 / `ConsistencyChecks` 86 / `HiddenObjects`（关）11 / `PID-CONNECTIVITY`（关）25 / `PID-SYMBOL-LABEL`（关）20 / `PID-FRAME` 1；
+    角色 connectivity 25 / frame 1 / geometry 63 / point-ok 75 / point-warning 22 / symbol 81 / symbol-label 20 / text 48），0202 **15 / 314**（含 `PID-GEOMETRY` 4），
+    D06 **15 / 60**，工艺 **17 / 687**；四图**无一处 `PID-STYLE-*`、无一处 `PID-HIDDEN`**。`OCS_PID_LAYER_MODE=taxonomy` 设了再导 0201：
+    与未设那份**字节相同**，日志无一行提到变量。
+  - **H4 GUI 截图未截**：debug 版在后台开了 0201（标题栏换成文件名、相机取景到 A2 页幅），但用户桌面正被别的窗口全屏占着，后台窗口的
+    wgpu 视口截出来是黑的，把窗口抬到前台会打断用户，作罢。图层管理器「图层」视图列 `Default` / `Labels` / `ConsistencyChecks` /
+    `HiddenObjects`（关）… 这一条由 `every_entity_is_filed_under_its_authored_layer_and_the_table_is_the_drawings_own` 与上面的 `--export`
+    图层表钉住；`HiddenObjects` 打开后 10 笔几何 + 1 条文字显出来，由 `switching_a_row_reaches_the_document_and_releases_the_hidden_layer_when_needed`
+    钉住。**截图留给下次有空桌面时补**（`docs/evidence/` 目录名建议 `2026-09-22-sheet-layer-slot`）。
 
 ## 门禁记录
 
 - 2026-09-21：用户「继续分析：接台账上还开着的口子（OCS_PID_LAYER_MODE 退役 / …）」→ 本单（会话 fable-5-1-28）。七条决策等批。
+- 2026-09-22：用户在进度简报的建议里点选「把 OCS 的上游合并收尾（处理 automation.rs / file.rs 两处），然后弹回 stash@{0} 把 09-21 H1/H2 落地」
+  → 视为放行，七条决策按推荐执行（会话 fable-5-1-47）。

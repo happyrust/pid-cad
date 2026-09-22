@@ -61,7 +61,7 @@
 | D2 | JDim 画不画 | 默认**不画**：它在定义缓存的 `Dimension` 层上，与 `Construction` 同属定义内部构造几何；是否上屏由 L1 解出的视图过滤集显示状态裁决，不由名字猜。解码结果进 `JSiteNestedGeometry::dimensions` 作证据 + 进 OCS 特性面板 / 导入摘要 | ⭕ |
 | D3 | JDim 取证路线 | 先 `imagdex.dex` 原生读取器（08-31 的 `tools/idalib_imagdex_*.py` 现成，按 `JDim Object` vtable slot 3 → `DoIO` 反编译），字节统计只做互证；`radsrvitem.dll!sub_564BA320`（igDimension 277）作第二对照。**没有原生读法坐实的字段不进 DTO**（保持 `raw`），与曲线族同一纪律 | ⭕ |
 | D4 | 图层槽归谁 | **分两步**：先做「分类过滤机制 + 图层管理器的图纸图层视图」（L2，不动槽），再把槽换成图纸图层（L3，导入选项后置切换）。两步共用同一套按 XDATA 分类的逐实体可见性机制；L3 是否本轮做完见 D5 | ⭕ |
-| D5 | L3 范围 | 本轮**做到「选项可切、默认不切」**：`OCS_PID_LAYER_MODE=sheet` 时槽=图纸图层名（原样，不加前缀），taxonomy 退到 XDATA `role=` / `style=`；探针 / 测试 / 图例线跟着改成按 role 取；默认值翻转另开一轮，等 DXF 下游消费方的要求定下来。变量名与 `OCS_PID_LEGEND_RULES` 同前缀（09-13 改，原写 `PID_LAYER_MODE`） | ⭕ |
+| D5 | L3 范围 | 本轮**做到「选项可切、默认不切」**：`OCS_PID_LAYER_MODE=sheet` 时槽=图纸图层名（原样，不加前缀），taxonomy 退到 XDATA `role=` / `style=`；探针 / 测试 / 图例线跟着改成按 role 取；默认值翻转另开一轮，等 DXF 下游消费方的要求定下来。变量名与 `OCS_PID_LEGEND_RULES` 同前缀（09-13 改，原写 `PID_LAYER_MODE`）。**2026-09-22 结算**：那一轮是 `2026-09-21-the-layer-slot-takes-the-sheet-layer-by-default-and-the-switch-retires.md`——默认翻到 `sheet`，开关与 taxonomy 输出模式一并退役 | ⭕ |
 | D6 | 图层显隐的事实源 | `0x0057 Top ViewFilterSet` 的显示状态字节（08-27 记为「`FF 02 00 …` 一段」，未解）→ 解出后**替代**现在按名字猜的隐藏类（`Hidden` / `HiddenObjects` / `Invisible`）；解不出则名字判据保留，登记缺口。**2026-09-14 结算**：解出（那「一段」是位图的 `FF` + u16 长度头），第一个分支成立——文件状态当判据、名字判据降为兜底（`PidSourceLayer::displayed` 为 `None` 时才用）；语料里唯一翻案的是 `Invisible`（文件说显示），无画出实体，输出不变。见 L1 进度 | ⭕ |
 | D7 | 执行顺序 | ~~L1 → J1 → J2 → L2 → J3 → L3 → 台账~~ **2026-09-13 改为 L2 → L1 → J1 → J2 → J3 → L3 → T**：L2 是本轮唯一用户看得见的项，且自带「L1 未到之前用名字判据」的兜底，不必等 L1；J 线按 D2 默认不画，产出是证据与特性面板字段，排在 L2 之后不卡屏幕。一项一提交，先红后绿 | ⭕ |
 | D8 | 分类维的 XDATA 键名（2026-09-13 审核发现） | 原稿 L2 要写 `class=`（geometry / text / symbol / …），但 `PID_SEMANTICS` 记录里 **`class=` 已被占用**：`src/io/pid.rs::attach_pid_metadata` 写的是 `_Data.xml` 语义对象的元素名（`PIDPipeline` / `PIDProcessVessel` …），特性面板读它当「类型」；DXF 识别线 W8 的 `pid_legend/xdata.rs` 也往同一记录写 `class=<识别类>`。照原稿写下去两种语义互相覆盖。**改用 `role=`**（值不变：geometry / text / symbol / symbol-label / point-ok\|warning\|error\|approved / annotation / connectivity / fill / frame），`style=` 照旧；术语「分类」相应改「角色（role）」 | ⭕ |
@@ -535,8 +535,9 @@ the default stays the taxonomy`；上一段会话写到一半、本段接手收�
   J 线的 OCS 消费（D2 后半句，按 J3 结算改口径——**已排入计划
   `2026-09-18-driving-dimensions-reach-the-panel-as-library-defaults.md`**，待门禁；**2026-09-19 该计划 K1 → K4 全部落地**：
   pid-parse `223b26d` 名字与配对进 DTO，OCS `39398579` 面板两行「驱动尺寸（库默认）」/「本体尺寸」+ `06c95ce1` 摘要第三行——
-  D2 后半句到此结清）、`OCS_PID_LAYER_MODE` 默认翻转（等 DXF 下游）、
-  放置实例的实际参数在文件何处（J3 开口，未动）、taxonomy 模式下 `PID-HIDDEN` 归层的退役（随默认翻转）。
+  D2 后半句到此结清）、`OCS_PID_LAYER_MODE` 默认翻转（等 DXF 下游——**2026-09-22 已随
+  `2026-09-21-the-layer-slot-takes-the-sheet-layer-by-default-and-the-switch-retires.md` 落地：槽一律取图纸图层，开关与 taxonomy 输出退役**）、
+  放置实例的实际参数在文件何处（J3 开口，未动）、taxonomy 模式下 `PID-HIDDEN` 归层的退役（随默认翻转——**同日结清，只留「隐藏且无名」兜底**）。
 - **T** 随各项收尾，不单独占期。
 
 原稿 L1 → J1 → J2 → L2 的理由是「J 的 D2 裁决与 L 的显隐初值都吃 L1」——D2 裁决只影响 J 线画不画
@@ -550,7 +551,7 @@ the default stays the taxonomy`；上一段会话写到一半、本段接手收�
 | `JBalloon`（0x0117）/ `JLeader`（0x0118）/ `0x00FF` | 全语料 0 条，无 fixture 不写；08-07 的图形类点名告警已覆盖 |
 | `0x0010` 子记录语义（638 条） | 与 JDim 同 GUID，可能随 J1 顺带落地，但不作验收项 |
 | 按视图过滤集分别呈现图层状态 | OCS 单模型空间，取一份（顶层存储、第一个集合）；多视图是另一个产品命题 |
-| `OCS_PID_LAYER_MODE` 默认翻转 | 等 DXF 下游消费方（图例线那批 DXF 的用法）把要求说清。**2026-09-21 已开单** `2026-09-21-the-layer-slot-takes-the-sheet-layer-by-default-and-the-switch-retires.md`：两模式在语料上量出来只差图层表与槽，屏幕一致；建议翻到 `sheet` 并退役开关，等批 |
+| `OCS_PID_LAYER_MODE` 默认翻转 | 等 DXF 下游消费方（图例线那批 DXF 的用法）把要求说清。**2026-09-21 已开单** `2026-09-21-the-layer-slot-takes-the-sheet-layer-by-default-and-the-switch-retires.md`：两模式在语料上量出来只差图层表与槽，屏幕一致；建议翻到 `sheet` 并退役开关。**2026-09-22 已落地**：槽一律取图纸图层，taxonomy 输出模式与开关一起退役，`PID-HIDDEN` 只留「隐藏且无名」的兜底（见该单进度） |
 | 缓存 vs 库本体优先级、缓存 `StyleCluster` 接入 | 09-07 上午登记的两条，与本轮无耦合，另排 |
 | A01 `/JSite204` `Default` 计数差 4 | 未解释记账，等新证据。（`0x0057 +32` 那一半 L1 顺带解了：活动图层号；A01 那两个 `Default` 是嵌套「Imagineer Document」正文的层，文件里没有它们的显示状态） |
 

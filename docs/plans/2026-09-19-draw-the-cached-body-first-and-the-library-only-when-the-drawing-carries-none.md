@@ -284,7 +284,7 @@ pid-parse 多一条提交、OCS 对调两角；C1 风险项「没有显示位的
 | 库读取器改成只读第一张 `Sheet*` | 库退为补位后，多画一张 sheet 只在「文件没缓存」时出现，语料里没有这种放置 |
 | 找放置实例的真实参数 | J3 开口，与画谁无关 |
 | 等 SmartPlant 截图再动 | P-D8：文件证据够裁；截图作补充验收 |
-| 把 `OCS_PID_SYMBOL_SOURCE` 做成导入选项 / UI | 与 `OCS_PID_LAYER_MODE` 同一口径：环境变量一轮，下一轮退役 |
+| 把 `OCS_PID_SYMBOL_SOURCE` 做成导入选项 / UI | 与 `OCS_PID_LAYER_MODE` 同一口径：环境变量一轮，下一轮退役（前者 09-20 退役；后者 2026-09-22 随 `2026-09-21-the-layer-slot-takes-the-sheet-layer-by-default-and-the-switch-retires.md` 退役） |
 
 ## 术语
 
