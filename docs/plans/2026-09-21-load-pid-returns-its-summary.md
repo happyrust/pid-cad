@@ -1,4 +1,4 @@
-# `load_pid` 把导入摘要交出来，不再经全局 `Mutex` 按路径回传 · 小计划（2026-09-22 开单、同日批准；Q1–Q3 已落地，Q4 / Q5 待做）
+# `load_pid` 把导入摘要交出来，不再经全局 `Mutex` 按路径回传 · 小计划（2026-09-22 开单、同日批准；Q1–Q4 已落地，Q5 待做）
 
 > 承接 pid-parse `docs/analysis/2026-09-21-parsing-pipeline-audit.md` ⑤（并顺手收 ③ 符号库路径、④ 460 行一口气、⑥ 单位判定无声）。
 > 审核当日点了名（「OCS `docs/plans/2026-09-21-load-pid-returns-its-summary.md`（⑤）」）但没写出来；**2026-09-22 用户点选「补写 OCS ⑤ 单」→ 本单**。
@@ -6,7 +6,7 @@
 > **2026-09-22 用户「批准 ⑤ 单九条决策并开工 Q1–Q3」→ 九条按推荐放行；Q1–Q3 已落地（OCS `edc6b495`，见「进度」）。**
 > 落地时 **Q-D2 的载体改了**：不是 XRecord，而是文档自定义属性（`summary_info.custom_properties`，`PID_IMPORT_SUMMARY.<字段>`）——
 > XRecord 要花一个句柄、分配器不退，取走后 `$HANDSEED` 与导入后所有对象句柄整体 +1，四图 `--export` 对不上字节；属性不花句柄，取走后文档一字不差。
-> 决策的本意（随文档穿通用管线、开图完成时取走、不落盘）不变。Q4 拆段、Q5 台账待做。
+> 决策的本意（随文档穿通用管线、开图完成时取走、不落盘）不变。**Q4 拆段已落地（OCS `ec14ce55`，四图 `--export` 与 `edc6b495` 字节相同）**；Q5 台账待做。
 
 ## 一句话
 
@@ -40,7 +40,7 @@
 | Q-D5 | `IMPORT_SUMMARIES` / `take_import_summary` | **删**，不留兼容壳：`rg` 全仓只有 `file.rs:1823` 与三条测试用它 | ✅ |
 | Q-D6 | 顺手 ③：符号库路径进摘要 | `ImportSummary.symbol_library: Vec<PathBuf>`（= `library.roots()`，无库为空）；命令行第一行末尾不加字（够长了），`report_import` 的「no symbol library found / looked up … at {:?}」两条日志已在说，摘要只是让测试与自动化读得到 | ✅ |
 | Q-D7 | 顺手 ⑥：单位判定 | `mm_per_source_unit` 回退到米那条 `info` 升 **`warn`**；`ImportSummary.units: PidUnits { Stated(String), AssumedMetre }`（或 `unit_source: &'static str`——实现时定），命令行**只在回退时**多半句「units assumed metre」。不改判定逻辑（语料全是米）。<br>实现定为 `ImportSummary.unit: ImportUnit { Stated { unit, mm_per_unit }, AssumedMetre }`（`ImportUnit::read` 取代 `mm_per_source_unit`，`Projection::for_geometry` 吃它）；命令行那半句是独立一行 `P&ID import: the drawing states no coordinate unit; the metre was assumed.`，进 `locale_catalog` + 21 语种 | ✅ |
-| Q-D8 | 顺手 ④：拆段 | `load_pid` 切成四个私有函数，**只搬不改**：`prepare_document(parsed, path) -> (CadDocument, Vec<String> sheet_layers_off, page_mm…)`（备文档 / 图层表）、`resolve_styles(parsed, path, &mut doc) -> Styles { styles, style_names, text_heights, fills, dash_linetypes, fonts, style_tables_failed }`（五索引 + 线型 / 字体注册）、`build_document_entities(…) -> Built { drawn, decoded, symbol_bodies, sheet_layer_distribution, bounds, lettering_on_fallback, parametric_placements }`（实体循环）、`finish(…) -> ImportSummary`（`report_import` / 页框 / 取景 / 过滤 / 摘要）。验收是**四图 `--export` 字节相同**——搬家不许改一个数 | ✅ 批；Q4 待做 |
+| Q-D8 | 顺手 ④：拆段 | `load_pid` 切成四个私有函数，**只搬不改**：`prepare_document(parsed, path) -> (CadDocument, Vec<String> sheet_layers_off, page_mm…)`（备文档 / 图层表）、`resolve_styles(parsed, path, &mut doc) -> Styles { styles, style_names, text_heights, fills, dash_linetypes, fonts, style_tables_failed }`（五索引 + 线型 / 字体注册）、`build_document_entities(…) -> Built { drawn, decoded, symbol_bodies, sheet_layer_distribution, bounds, lettering_on_fallback, parametric_placements }`（实体循环）、`finish(…) -> ImportSummary`（`report_import` / 页框 / 取景 / 过滤 / 摘要）。验收是**四图 `--export` 字节相同**——搬家不许改一个数。<br>落地签名以代码为准，与草案的出入：`prepare_document(parsed) -> CadDocument`（`sheet_layers_off` 本来就是实体循环填的，`page_mm` 在 `finish` 里从 `geometry` 读，都不归它）；`resolve_styles(parsed, geometry, path, doc) -> Styles`（多带 `semantics` 与 APPID 注册——它们是循环开始前要备好的东西，与五索引同段）；`build_document_entities(geometry, &Styles, &mut Option<SymbolLibrary>, &ImportUnit, doc) -> Built`（`Built` 多带 `sheet_layers_off`、`bounds`）；`finish(path, geometry, Option<&SymbolLibrary>, style_tables_failed, unit, Built, doc) -> ImportSummary`。`discover_symbol_library` 与 `ImportUnit::read` 留在 `load_pid` 里两段之间的原位（日志顺序不动）；`decoded == 0` 的错误留在循环之后、`finish` 之前的原位 | ✅ `ec14ce55` |
 | Q-D9 | 测试口径 | 三条按路径取摘要的测试改 `load_pid(&path)?.summary`，`SUMMARY_MAILBOX` 删；新增 ① `PidImport` 走 `io::load_file` 路时 `ImportSummary::take` 从文档读回与 `.summary` 逐字段相等、再 `take` 一次为 `None`；② 另存 DWG / DXF 再打开，字典里无 `PID_IMPORT_SUMMARY`；③ 回退单位那条：构造一张无单位的内存几何，摘要说 `AssumedMetre`、日志级别 warn（现有单测 `mm_per_source_unit` 若有就扩）。<br>落地口径：① 改为 `store` 进克隆再 `take` 回来逐字段相等、二次 `take` 为 `None`、**`take` 后文档与克隆前相等、两者另存 DXF 字节相同**；`io::load_file` 交出的文档不带任何 `PID_IMPORT_SUMMARY.` 属性（它自己取走交给日志）；② 两条路另存 DWG / DXF 再读回 `ImportSummary::load` 为 `None`；③ 单测构造五种内存实体组合（Inferred 无单位 + Decoded `m` / Decoded `mm` / Decoded 无单位 / 未知标签 `furlong` / ProbeOnly `mm`），级别 warn 由代码 `log::warn!` 定、未用日志捕获断言 | ✅ |
 
 ## 工作项
@@ -48,14 +48,14 @@
 - ✅ **Q1 `src/io/pid.rs`**（`edc6b495`，按 Q-D1 / Q-D5 / Q-D6 / Q-D7）：`PidImport`；`load_pid -> Result<PidImport, String>`；`ImportSummary` 加 `symbol_library` / `unit`（并派生 `Debug / Clone / PartialEq`，不再 `Copy`）；`ImportUnit::read` 取代 `mm_per_source_unit`、回退升 warn；删 `IMPORT_SUMMARIES` / `take_import_summary`；`ImportSummary::store / load / take / log`（属性 `PID_IMPORT_SUMMARY.<字段>`，留在 `pid.rs`——`counts()` / `count_mut()` 两张表 + 三个小函数，不到 200 行，没到独立文件的分量）。
 - ✅ **Q2 `src/io/mod.rs` + `src/app/update/file.rs`**（同一提交）：`read_pid_path` 解构 `PidImport`、`summary.store(&mut document)`；`on_file_opened` 改 `ImportSummary::take(&mut self.tabs[i].scene.document)`，回退单位时多一行；**`io::load_file` 也 `take`**——无头导出 / 块插入 / 测试走这条路，没有命令行给它显示，摘要转交 `ImportSummary::log`，文档交出去时干净。
 - ✅ **Q3 `tests/pid_import.rs`**（同一提交，Q-D9）：`import_with_summary(name)` 取代三处 `SUMMARY_MAILBOX` 段；`import_without_library` 顺带断言 `symbol_library` 为空；新增 `the_summary_rides_the_document_once_and_is_never_saved`；`pid.rs` 单测新增 `the_summary_round_trips_through_its_properties_and_take_removes_them` / `the_unit_is_read_from_a_decoded_record_or_assumed_to_be_the_metre`。
-- **Q4 拆段**（**第二个提交**，Q-D8）：基线 = `edc6b495` 的四图 `--export`；搬完对字节。**待做。**
+- ✅ **Q4 拆段**（`ec14ce55`，Q-D8）：`load_pid` 431 行 → 编排 41 行 + `prepare_document` 36 / `resolve_styles` 116 / `build_document_entities` 221 / `finish` 91 行四个私有函数 + `Styles` / `Built` 两个私有结构；只搬不改，`&parsed` / `&mut doc` 这类借用拼法随参数类型改、六处 `needless_borrow` 按 clippy 去掉。基线 = `edc6b495` 的四图 `--export`，搬完 SHA-256 逐一相等。
 - **Q5 台账**：user-guide `.pid` 一节「日志里另有一行说明…」处补一句摘要含符号库路径与单位；pid-parse 审核 ③ / ④ / ⑤ / ⑥ 四条改标已落地；本单头部写哈希。**待做**（本单头部 / 决策表 / 进度已随 Q1–Q3 更新）。
 
 ## 验收
 
 - `rg "IMPORT_SUMMARIES|take_import_summary|SUMMARY_MAILBOX" src tests examples` 零命中。**✅ 09-22 零命中**（`docs/user-guide.md` 也零）。
 - `pid_import` 全绿，条数 49 + 新增（Q-D9 ①②③）；`--lib io::pid` 不降。**✅ `pid_import` 49 → 50、`--lib io::pid` 52 → 54、`--lib i18n::` 3/3（21 语种键齐）。**
-- 四图 `--export` DXF 与 `bbdc3d80` 的二进制**字节相同**（Q1–Q3 后一次、Q4 后再一次）；另存 DWG 的字典里无 `PID_IMPORT_SUMMARY`。**✅ Q1–Q3 后一次：基线取 `2e9e10f5`（G4 已证与 `bbdc3d80` 字节相同）debug 版四图，`edc6b495` 四图 SHA-256 逐一相等**（0201 188 308 B / 0202 189 053 B / D06 90 882 B / 工艺 319 578 B）；另存无记录由 `the_summary_rides_the_document_once_and_is_never_saved` 钉（DWG / DXF 各一次）。Q4 后再一次待做。
+- 四图 `--export` DXF 与 `bbdc3d80` 的二进制**字节相同**（Q1–Q3 后一次、Q4 后再一次）；另存 DWG 的字典里无 `PID_IMPORT_SUMMARY`。**✅ Q1–Q3 后一次：基线取 `2e9e10f5`（G4 已证与 `bbdc3d80` 字节相同）debug 版四图，`edc6b495` 四图 SHA-256 逐一相等**（0201 188 308 B / 0202 189 053 B / D06 90 882 B / 工艺 319 578 B）；另存无记录由 `the_summary_rides_the_document_once_and_is_never_saved` 钉（DWG / DXF 各一次）。**✅ Q4 后再一次：`ec14ce55` 四图与 `edc6b495` 四图 SHA-256 逐一相等**（`2B1022B5…` / `340ED098…` / `763CAD1A…` / `B04C7215…`，与 `2e9e10f5` 那份同值——三版一条线）。
 - GUI：打开 0201，命令行三行摘要与今天一字不差（单位是米，不多半句）；打开后立即另存 `.dwg` 再打开，命令行不再出 P&ID 导入行。**未验证**（会话无桌面；三行文案与 `t!` 键未动，多出的一行只在 `unit.is_assumed()` 时出，四图都 `Stated m`——由 `import_with_summary` 三处与新测试的 `unit` 断言钉）。
 
 ## 登记不做
@@ -76,6 +76,11 @@
   - 顺手：新命令行行「P&ID import: the drawing states no coordinate unit; the metre was assumed.」进 `locale_catalog`（`common.pid-import-unit-assumed-metre`）与 21 个 `.ftl`，`--lib i18n::` 3/3。
   - **验证**：`--lib io::pid` **54/54**（+2）、`--test pid_import` **50/50**（+1）、`--lib i18n::` 3/3；`rg IMPORT_SUMMARIES|take_import_summary|SUMMARY_MAILBOX|SUMMARY_XRECORD_KEY` 在 `src` `tests` `examples` `docs/user-guide.md` 零命中；rustfmt 在 `pid.rs` / `pid_import.rs` 干净（`mod.rs` / `file.rs` 只剩 HEAD 就有的旧差）；clippy `--lib --tests` 在改动处零新增（`mod.rs:901 result_large_err` 等为 HEAD 旧告警）；**四图 `--export` 与 `2e9e10f5` 基线 SHA-256 逐一相等**（基线：`git stash` 回 HEAD 编 debug 版导出，再 `stash pop` 编本版导出）。
   - 未做：GUI 三行核对（无桌面）；Q4 拆段；Q5 user-guide 一句 + pid-parse 审核 ③④⑤⑥ 改标；两仓未 push。
+- **2026-09-22（会话 fable-5-1-19）✅ Q4 落地，OCS `ec14ce55`**（`pid.rs` 一文件，+193 / −46）。
+  - 先用 `edc6b495` 的 debug 版导四图存基线，再切：`load_pid` = 解析 → `prepare_document` → `discover_symbol_library` → `resolve_styles` → `ImportUnit::read` → `build_document_entities` → `decoded == 0` 报错 → `finish` → `source_path`。四个函数的正文是原文搬过去的，注释随代码走；改动只有借用拼法（`&parsed → parsed`、`&mut doc → doc`、`&geometry → geometry`）与 `Styles` / `Built` 的构造 / 解构。
+  - **验证**：`cargo check --lib` 干净；`--lib io::pid` 54/54、`--test pid_import` 50/50；rustfmt 干净；clippy 在 `pid.rs` 零告警（切完先出六条 `needless_borrow`，去掉后再对一次字节）；**四图 `--export` 与 `edc6b495` 基线 SHA-256 逐一相等**（两次：去 `needless_borrow` 前后各一次）。
+  - 过程事故：切到一半 D 盘满（0 B 可用；`D:\Rust\target\debug\incremental` 57.9 GB，其中 1330 个 12 小时以上未动的陈旧缓存目录），一次写盘失败把工作区的 `pid.rs` 截成 0 字节。删陈旧增量缓存回收 34.7 GB，`git checkout -- src/io/pid.rs` 从 `edc6b495` 恢复后重做切分；Q1–Q3 已在提交里，无损失。
+  - 未做：GUI 三行核对；Q5；两仓未 push。
 
 ## 门禁记录
 
