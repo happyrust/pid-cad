@@ -1,4 +1,4 @@
-# `load_pid` 把导入摘要交出来，不再经全局 `Mutex` 按路径回传 · 小计划（2026-09-22 开单、同日批准；Q1–Q4 已落地，Q5 待做）
+# `load_pid` 把导入摘要交出来，不再经全局 `Mutex` 按路径回传 · 小计划（2026-09-22 开单、同日批准、同日落地关闭）
 
 > 承接 pid-parse `docs/analysis/2026-09-21-parsing-pipeline-audit.md` ⑤（并顺手收 ③ 符号库路径、④ 460 行一口气、⑥ 单位判定无声）。
 > 审核当日点了名（「OCS `docs/plans/2026-09-21-load-pid-returns-its-summary.md`（⑤）」）但没写出来；**2026-09-22 用户点选「补写 OCS ⑤ 单」→ 本单**。
@@ -6,7 +6,7 @@
 > **2026-09-22 用户「批准 ⑤ 单九条决策并开工 Q1–Q3」→ 九条按推荐放行；Q1–Q3 已落地（OCS `edc6b495`，见「进度」）。**
 > 落地时 **Q-D2 的载体改了**：不是 XRecord，而是文档自定义属性（`summary_info.custom_properties`，`PID_IMPORT_SUMMARY.<字段>`）——
 > XRecord 要花一个句柄、分配器不退，取走后 `$HANDSEED` 与导入后所有对象句柄整体 +1，四图 `--export` 对不上字节；属性不花句柄，取走后文档一字不差。
-> 决策的本意（随文档穿通用管线、开图完成时取走、不落盘）不变。**Q4 拆段已落地（OCS `ec14ce55`，四图 `--export` 与 `edc6b495` 字节相同）**；Q5 台账待做。
+> 决策的本意（随文档穿通用管线、开图完成时取走、不落盘）不变。**Q4 拆段已落地（OCS `ec14ce55`，四图 `--export` 与 `edc6b495` 字节相同）**；Q5 台账已落地（本次提交 + pid-parse 审核 / task_plan）。**本单关闭**；只剩 GUI 三行核对等空桌面。
 
 ## 一句话
 
@@ -49,7 +49,7 @@
 - ✅ **Q2 `src/io/mod.rs` + `src/app/update/file.rs`**（同一提交）：`read_pid_path` 解构 `PidImport`、`summary.store(&mut document)`；`on_file_opened` 改 `ImportSummary::take(&mut self.tabs[i].scene.document)`，回退单位时多一行；**`io::load_file` 也 `take`**——无头导出 / 块插入 / 测试走这条路，没有命令行给它显示，摘要转交 `ImportSummary::log`，文档交出去时干净。
 - ✅ **Q3 `tests/pid_import.rs`**（同一提交，Q-D9）：`import_with_summary(name)` 取代三处 `SUMMARY_MAILBOX` 段；`import_without_library` 顺带断言 `symbol_library` 为空；新增 `the_summary_rides_the_document_once_and_is_never_saved`；`pid.rs` 单测新增 `the_summary_round_trips_through_its_properties_and_take_removes_them` / `the_unit_is_read_from_a_decoded_record_or_assumed_to_be_the_metre`。
 - ✅ **Q4 拆段**（`ec14ce55`，Q-D8）：`load_pid` 431 行 → 编排 41 行 + `prepare_document` 36 / `resolve_styles` 116 / `build_document_entities` 221 / `finish` 91 行四个私有函数 + `Styles` / `Built` 两个私有结构；只搬不改，`&parsed` / `&mut doc` 这类借用拼法随参数类型改、六处 `needless_borrow` 按 clippy 去掉。基线 = `edc6b495` 的四图 `--export`，搬完 SHA-256 逐一相等。
-- **Q5 台账**：user-guide `.pid` 一节「日志里另有一行说明…」处补一句摘要含符号库路径与单位；pid-parse 审核 ③ / ④ / ⑤ / ⑥ 四条改标已落地；本单头部写哈希。**待做**（本单头部 / 决策表 / 进度已随 Q1–Q3 更新）。
+- ✅ **Q5 台账**：user-guide `.pid` 一节「导入汇总」段补单位那一行、摘要随文档不落盘、无头路转日志三句，「符号从哪来」段末补符号库目录与单位进摘要一句；pid-parse `docs/analysis/2026-09-21-parsing-pipeline-audit.md` 头部结算改「③ ④ ⑤ ⑥ 落地」、四条各加「已落地」一行，`task_plan.md` 加 ⑤ 单关闭一段；本单头部 / 决策表 / 工作项 / 验收 / 进度写齐哈希。
 
 ## 验收
 
@@ -81,6 +81,7 @@
   - **验证**：`cargo check --lib` 干净；`--lib io::pid` 54/54、`--test pid_import` 50/50；rustfmt 干净；clippy 在 `pid.rs` 零告警（切完先出六条 `needless_borrow`，去掉后再对一次字节）；**四图 `--export` 与 `edc6b495` 基线 SHA-256 逐一相等**（两次：去 `needless_borrow` 前后各一次）。
   - 过程事故：切到一半 D 盘满（0 B 可用；`D:\Rust\target\debug\incremental` 57.9 GB，其中 1330 个 12 小时以上未动的陈旧缓存目录），一次写盘失败把工作区的 `pid.rs` 截成 0 字节。删陈旧增量缓存回收 34.7 GB，`git checkout -- src/io/pid.rs` 从 `edc6b495` 恢复后重做切分；Q1–Q3 已在提交里，无损失。
   - 未做：GUI 三行核对；Q5；两仓未 push。
+- **2026-09-22（会话 fable-5-1-19）✅ Q5 台账，本单关闭**：OCS user-guide 两处（见工作项 Q5）+ 本单；pid-parse 审核文档头部与 ③ ④ ⑤ ⑥ 四条、`task_plan.md`（只改文档，pid-parse 无代码改动）。**还开着的只有 GUI 三行核对**（等空桌面：打开 0201 三行与今天一字不差、不多单位那行；另存 `.dwg` 再打开不再出 P&ID 导入行——后者由 `the_summary_rides_the_document_once_and_is_never_saved` 钉住）。两仓未 push。
 
 ## 门禁记录
 
