@@ -509,15 +509,25 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     // than failing the import -- but says so, in the log and in the summary,
     // because an all-default sheet is otherwise indistinguishable from a
     // drawing that genuinely states no styles.
-    let mut style_tables_failed = false;
-    let styles = pid_parse::style_link::line_styles_for_file(path).unwrap_or_else(|error| {
-        style_tables_failed = true;
+    //
+    // The table was read with the document: `parsed.style_tables` holds each
+    // storage's `StyleCluster`, and the five indexes below join the sheets'
+    // decoded records to it without opening the file again (pid-parse plan
+    // 2026-09-21-style-link-reads-the-parsed-document). So "failed" here
+    // means what the flag always meant to say -- the document's own table is
+    // missing or did not walk -- rather than "the file would not open a
+    // second time", and the indexes themselves cannot fail.
+    let style_tables_failed = parsed
+        .style_tables
+        .get("/")
+        .is_none_or(pid_parse::style_link::DocumentStyleTable::is_empty);
+    if style_tables_failed {
         log::warn!(
-            "{}: the line style table did not read; line work keeps the layer defaults: {error}",
+            "{}: the style table did not read; line work keeps the layer defaults, lettering keeps the {TEXT_HEIGHT_MM}mm fallback, and boundary rings import as outlines",
             path.display()
         );
-        Default::default()
-    });
+    }
+    let styles = pid_parse::style_link::line_styles_for_document(&parsed);
     // What the drawing calls each of those styles. The same table carries it,
     // one field further: every `StyleCluster` opens with a style librarian
     // holding the authored name of every style the project library gave the
@@ -531,56 +541,34 @@ pub fn load_pid(path: &Path) -> Result<CadDocument, String> {
     // states the family of each. `Electric Signal` reads like a discipline and
     // is a dash pattern, so nothing is ever filed under it.
     //
-    // A drawing whose names do not read is not a failed import: the line work
-    // stays on `PID-GEOMETRY` exactly as it did before this landed, which is
-    // why this one does not set `style_tables_failed`.
-    let style_names = pid_parse::style_link::style_names_for_file(path).unwrap_or_else(|error| {
-        log::warn!(
-            "{}: the style librarian did not read; line work stays on {LAYER_GEOMETRY}: {error}",
-            path.display()
-        );
-        Default::default()
-    });
+    // A drawing whose librarian names nothing is not a failed import: the line
+    // work stays keyed to `PID-GEOMETRY` exactly as it did before this landed,
+    // and the names' absence is itself the reading.
+    let style_names = pid_parse::style_link::style_names_for_document(&parsed);
     // Which project standards file those names came from. It bounds them: a
     // name means the same thing across two drawings only as far as they were
     // drawn against the same library, and on the reference corpus the two
     // drawings sharing a `.SPP` are exactly the two whose vocabularies agree.
     // Logged rather than drawn -- it is provenance for the layer names above.
-    if let Ok(libraries) = pid_parse::style_link::style_libraries_for_file(path) {
-        let sources: std::collections::BTreeSet<&str> =
-            libraries.values().map(String::as_str).collect();
-        for source in sources {
-            log::info!("{}: styles were read from {source}", path.display());
-        }
+    let libraries = pid_parse::style_link::style_libraries_for_document(&parsed);
+    let sources: std::collections::BTreeSet<&str> =
+        libraries.values().map(String::as_str).collect();
+    for source in sources {
+        log::info!("{}: styles were read from {source}", path.display());
     }
     // Character height comes from the same table, one hop further along: a
     // text record names a paragraph style, and the height is on the character
     // style that paragraph style names. Most of a P&ID's lettering turns out
     // to be 1/8 inch, so `TEXT_HEIGHT_MM` was reading a quarter too small.
     // Records whose height does not resolve keep that fallback.
-    let text_heights =
-        pid_parse::style_link::text_heights_for_file(path).unwrap_or_else(|error| {
-            style_tables_failed = true;
-            log::warn!(
-                "{}: the text style table did not read; lettering keeps the {TEXT_HEIGHT_MM}mm fallback: {error}",
-                path.display()
-            );
-            Default::default()
-        });
+    let text_heights = pid_parse::style_link::text_heights_for_document(&parsed);
     // Which areas the drawing fills. `pid-parse` resolves an `igBoundary2d`
     // ring through its `JStyleOverride` to a `JStyleSimpleFill`; the fill's
     // own colour is not decoded, so a filled ring is drawn in its layer's
     // colour. On the reference corpus these are the solid flow arrowheads on
     // the pipelines -- 5 on DWG-0202 and 10 on the gongyi drawing, all of
     // which used to import as hollow triangles.
-    let fills = pid_parse::style_link::fill_styles_for_file(path).unwrap_or_else(|error| {
-        style_tables_failed = true;
-        log::warn!(
-            "{}: the fill style table did not read; boundary rings import as outlines: {error}",
-            path.display()
-        );
-        Default::default()
-    });
+    let fills = pid_parse::style_link::fill_styles_for_document(&parsed);
     // A line's dash pattern comes from the same style table, one reference
     // further along: a JStyleSimpleLine names a JStyleSimpleDashType, and
     // style_link hands the decoded segments back. Pool the distinct patterns
