@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use acadrust::{CadDocument, EntityType};
-use OpenCADStudio::io::pid::{load_pid_with_layer_mode, PidLayerMode, LAYER_MODE_ENV};
+use OpenCADStudio::io::pid::load_pid;
 use OpenCADStudio::io::pid_view_filter::{
     switch_role, switch_sheet_layer, PidViewFilter, PidViewSummary,
 };
@@ -30,36 +30,20 @@ fn fixture(name: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// The fixture as the application opens it: under the layer mode
-/// `OCS_PID_LAYER_MODE` selects, the taxonomy unless whoever runs the suite
-/// set `sheet`, and drawing its symbols from the bodies the drawing itself
-/// caches (plan 2026-09-19; the `library` way back was retired by plan
-/// 2026-09-20-retire-the-library-first-symbol-source). A test that reaches
-/// its entities by `role=` passes either way, which is how the suite runs
-/// green under both layer modes (plan 2026-09-07 L3).
+/// The fixture as the application opens it: each entity filed under the
+/// sheet layer the drawing itself filed it under (plan 2026-09-07 L3, the
+/// only reading since plan 2026-09-21 retired the taxonomy layer mode and its
+/// environment switch), and drawing its symbols from the bodies the
+/// drawing itself caches (plan 2026-09-19; the `library` way back was retired
+/// by plan 2026-09-20-retire-the-library-first-symbol-source). A test reaches
+/// the drawing's content by `role=`, never by a `PID-*` layer name: the slot
+/// holds the authored layer, and the classification lives in XDATA.
 fn import(name: &str) -> Option<CadDocument> {
     let path = fixture(name)?;
     Some(
         OpenCADStudio::io::load_file(&path)
             .unwrap_or_else(|error| panic!("load {}: {error}", path.display())),
     )
-}
-
-/// The fixture with the layer mode stated rather than read from the
-/// environment.
-fn import_in_mode(name: &str, mode: PidLayerMode) -> Option<CadDocument> {
-    let path = fixture(name)?;
-    Some(
-        load_pid_with_layer_mode(&path, mode)
-            .unwrap_or_else(|error| panic!("load {} in {mode:?}: {error}", path.display())),
-    )
-}
-
-/// The fixture under the taxonomy layer mode whatever the environment says:
-/// what a test about the `PID-*` layers themselves -- which is declared,
-/// which opens off, what `PID-HIDDEN` holds -- imports with.
-fn import_in_taxonomy_mode(name: &str) -> Option<CadDocument> {
-    import_in_mode(name, PidLayerMode::Taxonomy)
 }
 
 fn layer_of(entity: &EntityType) -> &str {
@@ -70,34 +54,23 @@ fn on_layer<'a>(doc: &'a CadDocument, layer: &'a str) -> impl Iterator<Item = &'
     doc.entities().filter(move |e| layer_of(e) == layer)
 }
 
-/// Prefix of the layers named line work files under, one per authored style
-/// name the drawing's project library states.
+/// Prefix of the working keys the importer builds named line work under, one
+/// per authored style name the drawing's project library states. A key only:
+/// until plan 2026-09-21 retired the taxonomy layer mode these were output
+/// layers, and the tests below pin that none reaches the layer table now.
 const DISCIPLINE_PREFIX: &str = "PID-STYLE-";
 
-/// Whether a layer carries the sheet's own line work under the taxonomy
-/// layer mode.
-///
-/// The family, not one member: a record whose style the drawing names is on a
-/// `PID-STYLE-*` layer and one it does not name is on `PID-GEOMETRY`. Same
-/// shape as `PID-POINT*`, and for the same reason -- a test that means "the
-/// drawing's line work" would otherwise quietly narrow to the unnamed part of
-/// it as soon as the disciplines landed.
-fn is_line_work(layer: &str) -> bool {
-    layer == "PID-GEOMETRY" || layer.starts_with(DISCIPLINE_PREFIX)
-}
-
 /// The sheet's own line work, by the `role=` the importer wrote rather than
-/// the layer it filed the entity on: the same set as [`is_line_work`] under
-/// the taxonomy layer mode, and still the line work when the slot holds the
-/// authored sheet layer instead (plan 2026-09-07, L3).
+/// the layer it filed the entity on -- the slot holds the authored sheet
+/// layer, which says where the drawing filed it and not what it is (plan
+/// 2026-09-07, L3).
 fn on_line_work(doc: &CadDocument) -> impl Iterator<Item = &EntityType> {
     of_role(doc, "geometry")
 }
 
 /// The sheet's own lettering -- `role=text`, which a label the importer made
 /// for a symbol (`symbol-label`) is not. Independent of the layer slot, so a
-/// hidden text is included whether it sits on `PID-HIDDEN` or on its own
-/// authored layer.
+/// text on a switched-off sheet layer is included like any other.
 fn on_sheet_text(doc: &CadDocument) -> impl Iterator<Item = &EntityType> {
     of_role(doc, "text").filter(|entity| matches!(entity, EntityType::Text(_)))
 }
@@ -134,7 +107,7 @@ fn placement_assignments_render_as_sheet_text_without_null_placeholders() {
     ] {
         assert!(
             values.contains(expected),
-            "assigned value {expected:?} did not reach PID-TEXT; values={values:?}"
+            "assigned value {expected:?} did not reach the sheet text; values={values:?}"
         );
     }
     assert!(
@@ -169,9 +142,8 @@ fn line_work_carries_the_width_and_colour_the_drawing_states() {
     let mut palette: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut unstyled = 0usize;
     // The drawing's own line work and every point's mark, by role rather
-    // than by layer: a named line files under its discipline, a mark under
-    // its review status, a hidden stroke under `PID-HIDDEN` or its authored
-    // layer, and the style has to survive every one of those moves.
+    // than by layer: the slot holds whichever authored sheet layer the
+    // drawing filed each on, and the style has to survive that move.
     let drawing = doc.entities().filter(|entity| {
         let role = pid_value(entity, "role");
         role.as_deref() == Some("geometry")
@@ -664,7 +636,9 @@ fn a_multi_line_label_stacks_at_the_spacing_its_paragraph_states() {
                 EntityType::Text(text) if text.value == value => Some(text),
                 _ => None,
             })
-            .unwrap_or_else(|| panic!("`{value}` did not reach PID-TEXT as a line of its own"))
+            .unwrap_or_else(|| {
+                panic!("`{value}` did not reach the sheet text as a line of its own")
+            })
     };
 
     let lines: Vec<&acadrust::entities::Text> = TITLE.iter().map(|value| line_of(value)).collect();
@@ -918,84 +892,89 @@ fn lettering_names_the_typeface_the_drawing_states() {
     );
 }
 
-/// Every layer the importer names exists, and the ones carrying evidence
-/// rather than drawing ship switched off. A statement about the taxonomy's
-/// layer table, so it imports under that mode.
+/// The importer declares only the `PID-*` layers its own entities land on --
+/// the layer table is the drawing's own (plan 2026-09-21, H-D3) -- and the
+/// ones carrying evidence rather than drawing ship switched off. On DWG-0201
+/// that is the page border, the symbols' own labels and the connectivity
+/// links; none of the retired taxonomy's content layers is declared up
+/// front, and no `PID-STYLE-*` working key or `PID-HIDDEN` reaches the table.
 #[test]
-fn import_declares_its_layers_and_hides_the_evidence_ones() {
-    let Some(doc) = import_in_taxonomy_mode("DWG-0201GP06-01.pid") else {
+fn import_declares_only_the_layers_its_own_entities_land_on_and_hides_the_evidence_ones() {
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
         return;
     };
 
-    for visible in [
+    assert!(!is_hidden(&doc, "PID-FRAME"), "PID-FRAME must open visible");
+    for hidden in ["PID-SYMBOL-LABEL", "PID-CONNECTIVITY"] {
+        assert!(is_hidden(&doc, hidden), "{hidden} must open hidden");
+    }
+    let mut own: Vec<&str> = doc
+        .layers
+        .iter()
+        .map(|layer| layer.name.as_str())
+        .filter(|name| name.starts_with("PID-"))
+        .collect();
+    own.sort_unstable();
+    assert_eq!(
+        own,
+        ["PID-CONNECTIVITY", "PID-FRAME", "PID-SYMBOL-LABEL"],
+        "the importer's own layers on DWG-0201 are the three its own entities land on"
+    );
+    for retired in [
         "PID-GEOMETRY",
-        "PID-FRAME",
         "PID-TEXT",
         "PID-FILL",
         "PID-SYMBOL",
         "PID-POINT",
-        // The review statuses are drawing content the source shows, so they
-        // open visible even though `PID-POINT-ERROR` is empty on every
-        // fixture -- see
-        // `a_points_mark_files_under_the_review_status_the_drawing_names`.
         "PID-POINT-WARNING",
         "PID-POINT-ERROR",
         "PID-POINT-APPROVED",
+        "PID-ANNOTATION",
+        "PID-HIDDEN",
     ] {
-        assert!(!is_hidden(&doc, visible), "{visible} must open visible");
-    }
-    for hidden in ["PID-SYMBOL-LABEL", "PID-ANNOTATION", "PID-CONNECTIVITY"] {
-        assert!(is_hidden(&doc, hidden), "{hidden} must open hidden");
+        assert!(
+            doc.layers.get(retired).is_none(),
+            "{retired} is declared, but nothing of DWG-0201 lands on it now that the slot holds the authored layer"
+        );
     }
 }
 
-/// `PID-ANNOTATION` is declared, hidden, and empty.
+/// Nothing takes `role=annotation`, and `PID-ANNOTATION` is not declared.
 ///
-/// It used to carry one stub per `JStyleOverride` record (PSM `0x0030`),
-/// placed at an anchor read from payload `+0..15` as two f64. `style.dll`'s
-/// own version-3 serialiser reads those same sixteen bytes as four
-/// independent u32, so the anchor was never a coordinate; `pid-parse` emits
-/// the family as `ProbeOnly` evidence now, and probe evidence carries no
-/// position to draw. Settled in pid-parse's
+/// The role used to carry one stub per `JStyleOverride` record (PSM
+/// `0x0030`), placed at an anchor read from payload `+0..15` as two f64.
+/// `style.dll`'s own version-3 serialiser reads those same sixteen bytes as
+/// four independent u32, so the anchor was never a coordinate; `pid-parse`
+/// emits the family as `ProbeOnly` evidence now, and probe evidence carries
+/// no position to draw. Settled in pid-parse's
 /// `docs/analysis/2026-08-04-jstyleoverride-native-reader-settles-it.md`.
 ///
-/// The layer keeps its declaration rather than going away with its contents.
-/// The records are still in the file and still reach the importer, so an
-/// empty layer states a decode gap that a missing one would hide -- and if
-/// the anchor's real offset is ever found, the stubs come back here. The
-/// declaration is the taxonomy's, so that mode is imported; that nothing
-/// takes the role holds in either.
+/// The role stays in the vocabulary rather than going away with its
+/// contents: the records are still in the file and still reach the importer,
+/// and if the anchor's real offset is ever found the stubs come back under it
+/// -- and then, since the importer declares its own layers only as its
+/// entities land on them (plan 2026-09-21), `PID-ANNOTATION` comes back with
+/// them. Until then a declared `PID-ANNOTATION` would be a stub that slipped
+/// through.
 #[test]
-fn the_annotation_layer_is_declared_but_draws_nothing() {
+fn nothing_takes_the_annotation_role_and_its_layer_is_not_declared() {
     for name in [
         "DWG-0201GP06-01.pid",
         "DWG-0202GP06-01.pid",
         "D06.pid",
         "工艺管道及仪表流程-1.pid",
     ] {
-        let Some(doc) = import_in_taxonomy_mode(name) else {
-            continue;
-        };
-        assert!(
-            doc.layers.get("PID-ANNOTATION").is_some(),
-            "{name}: PID-ANNOTATION stays declared even while it is empty"
-        );
-        assert!(
-            is_hidden(&doc, "PID-ANNOTATION"),
-            "{name}: PID-ANNOTATION must open hidden"
-        );
-        assert_eq!(
-            on_layer(&doc, "PID-ANNOTATION").count(),
-            0,
-            "{name}: the JStyleOverride anchor read is retracted, so nothing may reach PID-ANNOTATION"
-        );
         let Some(doc) = import(name) else {
             continue;
         };
         assert_eq!(
             of_role(&doc, "annotation").count(),
             0,
-            "{name}: nothing may take role=annotation in either layer mode"
+            "{name}: the JStyleOverride anchor read is retracted, so nothing may take role=annotation"
+        );
+        assert!(
+            doc.layers.get("PID-ANNOTATION").is_none(),
+            "{name}: PID-ANNOTATION is declared while nothing lands on it"
         );
     }
 }
@@ -1310,18 +1289,27 @@ fn a_drawing_without_published_xml_still_carries_authored_sheet_layers() {
     }
 }
 
-/// Under the taxonomy layer mode the entities of a hidden sheet layer sit on
-/// `PID-HIDDEN`, off, and keep the sheet layer they came from in XDATA
-/// through DWG and DXF. (The sheet layer mode's counterpart is
-/// `sheet_mode_layer_names_survive_dwg_and_dxf`.)
+/// The entities of a hidden sheet layer sit on a layer of that sheet layer's
+/// own name, off -- `HiddenObjects` on DWG-0201, eleven of them, and nothing
+/// on `PID-HIDDEN`, which is only for a hidden layer the file gave no name
+/// for -- and keep the sheet layer they came from in XDATA through DWG and
+/// DXF. (`authored_layer_names_survive_dwg_and_dxf` pins the layer table
+/// itself across the same round-trip.)
 #[test]
-fn hidden_authored_layers_open_on_pid_hidden_and_metadata_survives_dwg_and_dxf() {
-    let Some(doc) = import_in_taxonomy_mode("DWG-0201GP06-01.pid") else {
+fn hidden_authored_layers_open_off_under_their_own_name_and_metadata_survives_dwg_and_dxf() {
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
         return;
     };
-    assert!(is_hidden(&doc, "PID-HIDDEN"), "PID-HIDDEN must default off");
-    assert_eq!(on_layer(&doc, "PID-HIDDEN").count(), 11);
-    for entity in on_layer(&doc, "PID-HIDDEN") {
+    assert!(
+        is_hidden(&doc, "HiddenObjects"),
+        "HiddenObjects must open off, as the file draws none of it"
+    );
+    assert_eq!(on_layer(&doc, "HiddenObjects").count(), 11);
+    assert!(
+        doc.layers.get("PID-HIDDEN").is_none(),
+        "every hidden sheet layer of DWG-0201 has a name to be off under"
+    );
+    for entity in on_layer(&doc, "HiddenObjects") {
         let record = entity
             .common()
             .extended_data
@@ -1330,6 +1318,10 @@ fn hidden_authored_layers_open_on_pid_hidden_and_metadata_survives_dwg_and_dxf()
         assert!(record.values.iter().any(|value| {
             matches!(value, acadrust::xdata::XDataValue::String(text) if text == "sheet_layer=HiddenObjects")
         }));
+        assert!(
+            entity.common().invisible,
+            "an entity of a switched-off sheet layer is dark by its own bit too"
+        );
     }
 
     for ext in ["dwg", "dxf"] {
@@ -1419,10 +1411,9 @@ fn the_import_switches_the_hidden_sheet_layers_off_in_a_stored_view_filter() {
 /// `HiddenObjects` alone -- the same answer the name criterion gave -- so
 /// this pins the *source* of the answer: for every drawn entity, the layer
 /// it was filed under and the bit its record carries agree with the stored
-/// filter. Which layer that is depends on the layer mode -- `PID-HIDDEN`
-/// under the taxonomy, the sheet layer's own name under the sheet mode -- and
-/// either way it opens off; no entity with a displayed layer is on
-/// `PID-HIDDEN`.
+/// filter. That layer is the sheet layer's own name (a symbol's own label
+/// keeps `PID-SYMBOL-LABEL`), and it opens off; no entity with a displayed
+/// layer is dark or on `PID-HIDDEN`.
 #[test]
 fn the_import_takes_the_switched_off_layers_from_the_file_not_from_their_names() {
     for fixture_name in ["DWG-0201GP06-01.pid", "DWG-0202GP06-01.pid", "D06.pid"] {
@@ -1479,10 +1470,8 @@ fn the_import_takes_the_switched_off_layers_from_the_file_not_from_their_names()
                 let layer = layer_of(entity);
                 let is_label = pid_value(entity, "role").as_deref() == Some("symbol-label");
                 assert!(
-                    layer == "PID-HIDDEN"
-                        || layer == name
-                        || (is_label && layer == "PID-SYMBOL-LABEL"),
-                    "{fixture_name}: {name} is filed on {layer}, which neither mode does"
+                    layer == name || (is_label && layer == "PID-SYMBOL-LABEL"),
+                    "{fixture_name}: {name} is filed on {layer}, not under its own name"
                 );
                 assert!(
                     is_hidden(&doc, layer),
@@ -1748,15 +1737,16 @@ fn the_layer_manager_summary_lists_sheet_layers_and_roles_with_their_counts() {
 /// call and the record follows (the plan's acceptance names `HeatTrace`; the
 /// fixtures draw nothing on it, so `ConsistencyChecks` -- 0202's 37 check
 /// marks -- stands in); and switching a hidden sheet layer back on shows its
-/// entities -- which means turning `PID-HIDDEN` on as well, since the import
-/// files them there with that layer off. The layer is the importer's own
-/// hiding device and the entity bit now carries the same reading, so the
-/// switch is allowed to release it. That is the taxonomy layer mode's
-/// arrangement, so it is imported here; the sheet mode's is pinned by
-/// `sheet_mode_switching_a_hidden_sheet_layer_on_releases_its_own_layer`.
+/// entities -- which means turning the layer of that sheet layer's own name
+/// on as well, since the import files them there with that layer off. The
+/// layer opened off because the file drew none of it and the entity bit now
+/// carries the same reading, so the switch is allowed to release it -- and
+/// only it: switching off never touches the table, and a layer the user
+/// switched off in the table is not this switch's to reopen when some other
+/// sheet layer is switched on.
 #[test]
 fn switching_a_row_reaches_the_document_and_releases_the_hidden_layer_when_needed() {
-    let Some(mut doc) = import_in_taxonomy_mode("DWG-0202GP06-01.pid") else {
+    let Some(mut doc) = import("DWG-0202GP06-01.pid") else {
         return;
     };
     let checks = on_sheet_layer(&doc, "ConsistencyChecks").count();
@@ -1764,12 +1754,10 @@ fn switching_a_row_reaches_the_document_and_releases_the_hidden_layer_when_neede
     let hidden_objects = on_sheet_layer(&doc, "HiddenObjects").count();
     assert_eq!(hidden_objects, 16);
     assert!(
-        doc.layers
-            .get("PID-HIDDEN")
-            .is_some_and(|layer| layer.flags.off),
-        "PID-HIDDEN opens switched off"
+        is_hidden(&doc, "HiddenObjects"),
+        "HiddenObjects opens switched off"
     );
-    assert!(on_sheet_layer(&doc, "HiddenObjects").all(|entity| layer_of(entity) == "PID-HIDDEN"));
+    assert!(on_sheet_layer(&doc, "HiddenObjects").all(|entity| layer_of(entity) == "HiddenObjects"));
 
     let switched = switch_sheet_layer(&mut doc, "ConsistencyChecks", false);
     assert_eq!(switched.entities, checks);
@@ -1793,13 +1781,10 @@ fn switching_a_row_reaches_the_document_and_releases_the_hidden_layer_when_neede
     let switched = switch_sheet_layer(&mut doc, "HiddenObjects", true);
     assert_eq!(switched.entities, hidden_objects);
     assert!(
-        switched.released_layer.as_deref() == Some("PID-HIDDEN"),
-        "the hidden layer must be turned on for the entities to show"
+        switched.released_layer.as_deref() == Some("HiddenObjects"),
+        "the sheet layer's own layer must be turned on for the entities to show"
     );
-    assert!(doc
-        .layers
-        .get("PID-HIDDEN")
-        .is_some_and(|layer| !layer.flags.off));
+    assert!(!is_hidden(&doc, "HiddenObjects"));
     assert!(on_sheet_layer(&doc, "HiddenObjects").all(|entity| !entity.common().invisible));
     assert_eq!(dark(&doc), checks);
 
@@ -1810,11 +1795,19 @@ fn switching_a_row_reaches_the_document_and_releases_the_hidden_layer_when_neede
         "switching off never touches the layer table"
     );
     assert!(
-        doc.layers
-            .get("PID-HIDDEN")
-            .is_some_and(|layer| !layer.flags.off),
+        !is_hidden(&doc, "HiddenObjects"),
         "the released layer stays released; the bits do the hiding now"
     );
+    assert!(on_sheet_layer(&doc, "HiddenObjects").all(|entity| entity.common().invisible));
+
+    // A layer the user switched off in the table is not this switch's to
+    // reopen when some other sheet layer is switched on.
+    doc.layers.get_mut("Default").expect("Default").flags.off = true;
+    let switched = switch_sheet_layer(&mut doc, "Labels", false);
+    let switched_back = switch_sheet_layer(&mut doc, "Labels", true);
+    assert!(switched.released_layer.is_none() && switched_back.released_layer.is_none());
+    assert!(is_hidden(&doc, "Default"));
+    doc.layers.get_mut("Default").expect("Default").flags.off = false;
 
     let text = of_role(&doc, "text").count();
     let text_dark = of_role(&doc, "text")
@@ -1895,10 +1888,12 @@ const ROLES: [&str; 12] = [
     "frame",
 ];
 
-/// The role an entity's synthetic layer stands for today. The test's own
-/// table, not the importer's: the whole point of `role=` is that the layer
-/// slot may later hold the authored sheet layer instead (plan 2026-09-07 L3),
-/// and this is the yardstick that says the XDATA kept the reading.
+/// The role one of the importer's own layers stands for. The test's own
+/// table, not the importer's: the layer slot holds the authored sheet layer
+/// (plan 2026-09-07 L3), so this is the yardstick for the entities that have
+/// none -- the ones the importer made itself, which keep the `PID-*` layer
+/// that spells their role. No `PID-STYLE-*` working key is a layer any more
+/// (plan 2026-09-21), so one in the slot is a bug, not a geometry.
 fn role_of_layer(layer: &str) -> Option<&'static str> {
     Some(match layer {
         "PID-GEOMETRY" => "geometry",
@@ -1913,30 +1908,28 @@ fn role_of_layer(layer: &str) -> Option<&'static str> {
         "PID-CONNECTIVITY" => "connectivity",
         "PID-FILL" => "fill",
         "PID-FRAME" => "frame",
-        other if other.starts_with(DISCIPLINE_PREFIX) => "geometry",
         _ => return None,
     })
 }
 
 /// Every entity the import draws says what it is, in XDATA, independently of
 /// the layer it happens to be filed on: `role=` is the classification the
-/// `PID-*` taxonomy has carried in the layer slot until now, moved to where a
-/// change of layer policy cannot lose it (plan 2026-09-07, D8 / L2). On an
-/// entity that stays on its synthetic layer the two agree; an entity moved to
-/// `PID-HIDDEN` keeps the role of the layer it would otherwise be on. The
-/// agreement is with the taxonomy's layers, so that mode is imported; under
-/// the sheet mode the slot holds the authored layer and
-/// `sheet_mode_files_every_entity_under_its_authored_layer_and_declares_the_drawings_layers`
-/// checks the roles instead.
+/// `PID-*` taxonomy carried in the layer slot until plan 2026-09-21, moved to
+/// where a change of layer policy cannot lose it (plan 2026-09-07, D8 / L2).
+/// Every role is in the vocabulary, every drawing takes the four that make a
+/// P&ID, and exactly one entity is the page border -- which, being the
+/// importer's own, is never on a switched-off sheet layer. (That an
+/// importer-made entity's layer spells its role is pinned by
+/// `every_entity_is_filed_under_its_authored_layer_and_the_table_is_the_drawings_own`.)
 #[test]
-fn every_imported_entity_states_its_role_and_the_role_matches_its_layer() {
+fn every_imported_entity_states_its_role_and_exactly_one_is_the_page_border() {
     for name in [
         "DWG-0201GP06-01.pid",
         "DWG-0202GP06-01.pid",
         "D06.pid",
         "工艺管道及仪表流程-1.pid",
     ] {
-        let Some(doc) = import_in_taxonomy_mode(name) else {
+        let Some(doc) = import(name) else {
             continue;
         };
         let mut seen: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
@@ -1948,16 +1941,10 @@ fn every_imported_entity_states_its_role_and_the_role_matches_its_layer() {
                 ROLES.contains(&role.as_str()),
                 "{name}: role={role} on {layer} is not in the vocabulary"
             );
-            if layer == "PID-HIDDEN" {
-                assert_ne!(
-                    role, "frame",
+            if role == "frame" {
+                assert!(
+                    layer == "PID-FRAME" && !entity.common().invisible,
                     "{name}: the page border is drawn by the importer and cannot be on an authored hidden layer"
-                );
-            } else {
-                assert_eq!(
-                    role_of_layer(layer),
-                    Some(role.as_str()),
-                    "{name}: role={role} disagrees with the layer {layer} the entity is filed on"
                 );
             }
             *seen.entry(role).or_default() += 1;
@@ -2027,63 +2014,6 @@ fn role_and_class_are_separate_keys_with_disjoint_vocabularies() {
     assert!(
         both > 0,
         "no entity carries both a published class= and an import role="
-    );
-}
-
-/// Line work that is filed under a discipline also states, as `style=`, the
-/// authored style name the discipline layer was derived from -- the name is
-/// the fact, the layer is one spelling of it (D8 / L2). The spelling is the
-/// taxonomy's, so that mode is imported.
-#[test]
-fn named_line_work_states_the_style_its_discipline_layer_is_derived_from() {
-    let Some(doc) = import_in_taxonomy_mode("DWG-0201GP06-01.pid") else {
-        return;
-    };
-    let mut styles: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for entity in doc
-        .entities()
-        .filter(|entity| layer_of(entity).starts_with(DISCIPLINE_PREFIX))
-    {
-        let style = pid_value(entity, "style").unwrap_or_else(|| {
-            panic!(
-                "an entity on {} names no style= to derive that layer from",
-                layer_of(entity)
-            )
-        });
-        // The layer is the style name's alphanumeric words, upper-cased and
-        // joined with '-', behind the prefix.
-        let mut expected = String::from(DISCIPLINE_PREFIX);
-        let mut gap = false;
-        for character in style.chars() {
-            if character.is_alphanumeric() {
-                if gap && expected.len() > DISCIPLINE_PREFIX.len() {
-                    expected.push('-');
-                }
-                gap = false;
-                expected.extend(character.to_uppercase());
-            } else {
-                gap = true;
-            }
-        }
-        assert_eq!(
-            layer_of(entity),
-            expected,
-            "style={style} and its layer disagree"
-        );
-        styles.insert(style);
-    }
-    assert!(
-        styles.contains("Primary Piping - New"),
-        "DWG-0201's 24 primary piping records must name their style; styles={styles:?}"
-    );
-    // An appearance name stays on PID-GEOMETRY but is still stated: `style=`
-    // records what the drawing calls it, the layer decision is separate.
-    assert!(
-        on_layer(&doc, "PID-GEOMETRY").any(|entity| matches!(
-            pid_value(entity, "style").as_deref(),
-            Some("Normal" | "As Drawn" | "Dashed")
-        )),
-        "an appearance-named record lost its style= on PID-GEOMETRY"
     );
 }
 
@@ -2347,8 +2277,7 @@ fn symbol_strokes(doc: &CadDocument) -> Vec<String> {
 }
 
 /// The fixture imported from a fresh temp directory, where the walk up from
-/// the drawing finds no symbol library, the layer mode the environment's.
-/// `None` when the fixture is absent.
+/// the drawing finds no symbol library. `None` when the fixture is absent.
 fn import_without_library(name: &str) -> Option<CadDocument> {
     let fixture = fixture(name)?;
     let dir = std::env::temp_dir().join(format!(
@@ -2362,8 +2291,7 @@ fn import_without_library(name: &str) -> Option<CadDocument> {
     std::fs::create_dir_all(&dir).expect("temp dir");
     let copy = dir.join(name);
     std::fs::copy(&fixture, &copy).expect("copy fixture");
-    let doc = load_pid_with_layer_mode(&copy, PidLayerMode::from_env())
-        .unwrap_or_else(|error| panic!("load copy: {error}"));
+    let doc = load_pid(&copy).unwrap_or_else(|error| panic!("load copy: {error}"));
     let _ = std::fs::remove_dir_all(&dir);
     Some(doc)
 }
@@ -2790,9 +2718,9 @@ fn a_points_mark_files_under_the_review_status_the_drawing_names() {
         let Some(doc) = import(fixture) else {
             continue;
         };
-        // Two strokes per mark, so these are stroke counts. By role, which
-        // under the taxonomy layer mode is the `PID-POINT-*` layer the mark
-        // files on and under the sheet mode is the only place the status is.
+        // Two strokes per mark, so these are stroke counts. By role: the slot
+        // holds the sheet layer the mark is filed on, so `role=point-*` is
+        // the one place the status is.
         assert_eq!(
             of_role(&doc, "point-warning").count(),
             warning,
@@ -2815,67 +2743,64 @@ fn a_points_mark_files_under_the_review_status_the_drawing_names() {
     }
 }
 
-/// Named line work files under the drawing's own word for what it is.
+/// Named line work states, as `style=`, the drawing's own word for what it
+/// is -- and that is the one place the word is.
 ///
 /// Every `StyleCluster` opens with a style librarian holding the authored name
 /// of each style the project library gave the document, and those names are a
 /// classification the import cannot recover any other way: `0.350mm #800000`
 /// is both `Nozzle - New` and the `Equipment - New` the nozzle sits on, and
-/// `0.350mm #808000` is three separate roles of piping. So the layer is the
-/// name.
+/// `0.350mm #808000` is three separate roles of piping. Until plan 2026-09-21
+/// the name was also spelt as a `PID-STYLE-*` layer under the taxonomy layer
+/// mode; the slot holds the authored sheet layer now, the `PID-STYLE-*` key
+/// is a working key while the document is built, and none reaches the table
+/// (D8 / L2; H-D3 / H-D4).
 ///
 /// Three things are pinned, because they fail differently:
 ///
-/// * the census is exact, so a change that starts filing lines under the wrong
-///   name shows up even though the entity total does not move;
-/// * `PID-GEOMETRY` keeps a share of the line work rather than emptying. Those
-///   are the records whose style the librarian does not name, and their
-///   absence from it is the reading -- the librarian lists what came from the
-///   project library, so an unnamed style is one drawn in this file. The
-///   gongyi drawing is the fixture that would notice: 182 of its lines are on
-///   one unnamed style;
-/// * no review status becomes a discipline. All 107 `lsOk` and 18 `lsWarning`
-///   records in the corpus are points, whose marks belong on `PID-POINT-*`,
+/// * the census is exact, so a change that starts naming lines wrong shows up
+///   even though the entity total does not move;
+/// * a share of the line work stays unnamed rather than every record getting
+///   a name. Those are the records whose style the librarian does not name,
+///   and their absence from it is the reading -- the librarian lists what
+///   came from the project library, so an unnamed style is one drawn in this
+///   file. The gongyi drawing is the fixture that would notice: 182 of its
+///   lines are on one unnamed style;
+/// * no review status is a line's style. All 107 `lsOk` and 18 `lsWarning`
+///   records in the corpus are points, whose marks take the `point-*` roles,
 ///   and letting that vocabulary through would file them twice.
 ///
-/// Nor does an appearance name. `Normal`, `As Drawn` and `Dashed` say how a
-/// line is drawn, not what it is — the librarian files `Normal` under five
-/// different families — so they stay on `PID-GEOMETRY` with the unnamed work.
+/// An appearance name -- `Normal`, `As Drawn`, `Dashed` -- says how a line is
+/// drawn rather than what it is, which is why it never was a discipline of
+/// its own; but it is still what the drawing called the style, and `style=`
+/// records it.
 #[test]
-fn named_line_work_files_under_the_discipline_the_drawing_names() {
-    // DWG-0201's 63 lines and linestrings, whole. Points and symbol bodies are
-    // not here: a point's style names a review status, and a placement's body
-    // stays on `PID-SYMBOL`. `PID-GEOMETRY` holds three records on this
-    // drawing's own unnamed style plus the 32 whose name is an appearance.
-    let expected: std::collections::BTreeMap<String, usize> = [
-        // Ten otherwise-geometry strokes are authored on HiddenObjects and
-        // intentionally move to the default-off PID-HIDDEN layer.
-        ("PID-GEOMETRY", 25usize),
-        ("PID-STYLE-CONNECT-TO-PROCESS", 3),
-        ("PID-STYLE-ELECTRIC", 1),
-        ("PID-STYLE-PRIMARY-PIPING-NEW", 24),
+fn named_line_work_states_the_style_the_drawing_names_and_unnamed_work_stays_unnamed() {
+    // DWG-0201's 63 lines and linestrings, whole -- the ten authored on
+    // `HiddenObjects` included, since a switched-off sheet layer does not
+    // change what a record is. Points and symbol bodies are not here: a
+    // point's style names a review status, and a placement's body takes the
+    // symbol role. Three records are on this drawing's own unnamed style,
+    // 32 name an appearance, 28 name a discipline.
+    let expected: std::collections::BTreeMap<Option<String>, usize> = [
+        (None, 3usize),
+        (Some("Connect To Process"), 3),
+        (Some("Dashed"), 14),
+        (Some("Electric"), 1),
+        (Some("Normal"), 18),
+        (Some("Primary Piping - New"), 24),
     ]
-    .iter()
-    .map(|(layer, count)| ((*layer).to_string(), *count))
+    .into_iter()
+    .map(|(style, count)| (style.map(str::to_string), count))
     .collect();
 
-    // The whole test is about where the taxonomy files the line work, so it
-    // imports under that mode whatever the environment says.
-    if let Some(doc) = import_in_taxonomy_mode("DWG-0201GP06-01.pid") {
-        // By layer, deliberately: the ten strokes moved to `PID-HIDDEN` are
-        // outside the census the way they are outside these layers.
-        let mut census: std::collections::BTreeMap<String, usize> =
+    if let Some(doc) = import("DWG-0201GP06-01.pid") {
+        let mut census: std::collections::BTreeMap<Option<String>, usize> =
             std::collections::BTreeMap::new();
-        for entity in doc.entities().filter(|e| is_line_work(layer_of(e))) {
-            *census.entry(layer_of(entity).to_string()).or_default() += 1;
+        for entity in on_line_work(&doc) {
+            *census.entry(pid_value(entity, "style")).or_default() += 1;
         }
-        assert_eq!(census, expected);
-        for layer in census.keys() {
-            assert!(
-                !is_hidden(&doc, layer),
-                "{layer} carries drawing content and must open visible"
-            );
-        }
+        assert_eq!(census, expected, "DWG-0201's line work by style=");
     }
 
     for fixture in [
@@ -2884,42 +2809,45 @@ fn named_line_work_files_under_the_discipline_the_drawing_names() {
         "D06.pid",
         "工艺管道及仪表流程-1.pid",
     ] {
-        let Some(doc) = import_in_taxonomy_mode(fixture) else {
+        let Some(doc) = import(fixture) else {
             continue;
         };
-        let statuses: Vec<&str> = doc
-            .entities()
-            .map(layer_of)
-            .filter(|layer| layer.starts_with("PID-STYLE-LS") || layer.starts_with("PID-STYLE-PS"))
+        let statuses: Vec<String> = on_line_work(&doc)
+            .filter_map(|entity| pid_value(entity, "style"))
+            .filter(|style| style.starts_with("ls") || style.starts_with("ps"))
             .collect();
         assert!(
             statuses.is_empty(),
-            "{fixture}: a review status became a discipline layer: {statuses:?}"
+            "{fixture}: a review status names a line's style: {statuses:?}"
         );
-        let appearances: Vec<&str> = doc
+        let keys: Vec<&str> = doc
             .entities()
             .map(layer_of)
-            .filter(|layer| {
-                matches!(
-                    *layer,
-                    "PID-STYLE-NORMAL" | "PID-STYLE-AS-DRAWN" | "PID-STYLE-DASHED"
-                )
-            })
+            .filter(|layer| layer.starts_with(DISCIPLINE_PREFIX))
             .collect();
         assert!(
-            appearances.is_empty(),
-            "{fixture}: an appearance name became a discipline layer: {appearances:?}"
+            keys.is_empty(),
+            "{fixture}: a PID-STYLE-* working key reached the layer slot: {keys:?}"
+        );
+        assert!(
+            !doc.layers
+                .iter()
+                .any(|layer| layer.name.starts_with(DISCIPLINE_PREFIX)),
+            "{fixture}: a PID-STYLE-* layer was declared"
         );
     }
 
-    let Some(doc) = import_in_taxonomy_mode("工艺管道及仪表流程-1.pid") else {
+    let Some(doc) = import("工艺管道及仪表流程-1.pid") else {
         return;
     };
     assert!(
-        on_layer(&doc, "PID-GEOMETRY").count() >= 182,
-        "the 182 lines on this drawing's own unnamed style must stay on \
-         PID-GEOMETRY: being unnamed is what says they did not come from the \
-         project style library"
+        on_line_work(&doc)
+            .filter(|entity| pid_value(entity, "style").is_none())
+            .count()
+            >= 182,
+        "the 182 lines on this drawing's own unnamed style must stay unnamed: \
+         being unnamed is what says they did not come from the project style \
+         library"
     );
 }
 
@@ -3007,18 +2935,12 @@ fn the_opening_view_is_framed_on_geometry_that_exists() {
     }
 }
 
-// ── Layer mode (plan 2026-09-07, D4 / D5 / L3) ──────────────────────────────
-
-/// The same import with the layer slot holding the authored sheet layer,
-/// stated rather than read from `OCS_PID_LAYER_MODE` so both modes can run
-/// in one process.
-fn import_in_sheet_mode(name: &str) -> Option<CadDocument> {
-    import_in_mode(name, PidLayerMode::Sheet)
-}
+// ── The layer slot (plan 2026-09-07, D4 / L3; the only reading since plan
+// 2026-09-21 retired the taxonomy layer mode and its switch) ────────────────
 
 /// What `pid-parse` says the document storage's sheet layers are, by name,
 /// with whether the file draws each -- the yardstick for the layer table the
-/// sheet mode opens with. A name two layer objects share is hidden only when
+/// import opens with. A name two layer objects share is hidden only when
 /// neither is drawn, which is how the importer merges them.
 fn authored_layers(name: &str) -> Option<std::collections::BTreeMap<String, bool>> {
     let path = fixture(name)?;
@@ -3039,63 +2961,17 @@ fn authored_layers(name: &str) -> Option<std::collections::BTreeMap<String, bool
     Some(hidden)
 }
 
-/// `OCS_PID_LAYER_MODE` names two modes and defaults to the taxonomy (D5:
-/// the option can be switched, the default is not flipped). An unknown value
-/// is the default too, not a failed open.
+/// The layer slot holds the sheet layer the drawing itself filed the entity
+/// under, verbatim and with no prefix; the layer table is the drawing's own
+/// list -- every sheet layer of the document storage, on or off as the file
+/// draws it, drawn on or not -- plus only the `PID-*` layers the importer's
+/// own entities keep. No `PID-STYLE-*` layer is generated and nothing sits
+/// on `PID-HIDDEN`: a hidden sheet layer is simply off, and its entities dark
+/// by their bit as well.
 #[test]
-fn the_layer_mode_defaults_to_taxonomy_and_names_its_two_modes() {
-    assert_eq!(PidLayerMode::default(), PidLayerMode::Taxonomy);
-    assert_eq!(PidLayerMode::parse(""), Some(PidLayerMode::Taxonomy));
-    assert_eq!(
-        PidLayerMode::parse("taxonomy"),
-        Some(PidLayerMode::Taxonomy)
-    );
-    assert_eq!(PidLayerMode::parse("sheet"), Some(PidLayerMode::Sheet));
-    assert_eq!(PidLayerMode::parse(" Sheet "), Some(PidLayerMode::Sheet));
-    assert_eq!(PidLayerMode::parse("layers"), None);
-    assert_eq!(LAYER_MODE_ENV, "OCS_PID_LAYER_MODE");
-    // The import every other test in this file exercises is whatever the
-    // environment selects, and that is the default mode unless whoever runs
-    // the suite has switched it -- the suite is meant to be run both ways.
-    let Some(doc) = import("DWG-0202GP06-01.pid") else {
-        return;
-    };
-    let mode = PidLayerMode::from_env();
-    match std::env::var(LAYER_MODE_ENV) {
-        Ok(value) if PidLayerMode::parse(&value).is_some() => {
-            assert_eq!(Some(mode), PidLayerMode::parse(&value));
-        }
-        _ => assert_eq!(
-            mode,
-            PidLayerMode::Taxonomy,
-            "unset, empty or unknown reads as the default"
-        ),
-    }
-    match mode {
-        PidLayerMode::Taxonomy => {
-            assert!(doc.layers.contains("PID-GEOMETRY"));
-            assert!(doc.layers.contains("PID-HIDDEN"));
-            assert!(!doc.layers.contains("Default"));
-        }
-        PidLayerMode::Sheet => {
-            assert!(doc.layers.contains("Default"));
-            assert!(!doc.layers.contains("PID-HIDDEN"));
-        }
-    }
-}
-
-/// Under `OCS_PID_LAYER_MODE=sheet` the layer slot holds the sheet layer the
-/// drawing itself filed the entity under, verbatim and with no prefix; the
-/// layer table is the drawing's own list -- every sheet layer of the document
-/// storage, on or off as the file draws it, drawn on or not -- plus only the
-/// `PID-*` layers the importer's own entities keep. No `PID-STYLE-*` layer is
-/// generated and nothing sits on `PID-HIDDEN`: a hidden sheet layer is simply
-/// off, and its entities dark by their bit as well.
-#[test]
-fn sheet_mode_files_every_entity_under_its_authored_layer_and_declares_the_drawings_layers() {
+fn every_entity_is_filed_under_its_authored_layer_and_the_table_is_the_drawings_own() {
     for name in ["DWG-0202GP06-01.pid", "DWG-0201GP06-01.pid", "D06.pid"] {
-        let (Some(doc), Some(authored)) = (import_in_sheet_mode(name), authored_layers(name))
-        else {
+        let (Some(doc), Some(authored)) = (import(name), authored_layers(name)) else {
             continue;
         };
         assert!(
@@ -3130,7 +3006,7 @@ fn sheet_mode_files_every_entity_under_its_authored_layer_and_declares_the_drawi
             );
             assert!(
                 !layer_name.starts_with(DISCIPLINE_PREFIX),
-                "{name}: sheet mode generated a discipline layer {layer_name:?}"
+                "{name}: a PID-STYLE-* working key was declared as a layer: {layer_name:?}"
             );
             if is_pid {
                 assert!(
@@ -3144,8 +3020,9 @@ fn sheet_mode_files_every_entity_under_its_authored_layer_and_declares_the_drawi
             "{name}: every hidden sheet layer of this drawing has a name to be off under"
         );
 
-        // The slot: the authored layer when there is one, the taxonomy layer
-        // when the importer made the entity itself.
+        // The slot: the authored layer when there is one, the importer's own
+        // layer -- the one that spells the role -- when the importer made the
+        // entity itself.
         let mut layered = 0usize;
         for entity in doc.entities() {
             let role = pid_value(entity, "role").unwrap_or_else(|| {
@@ -3174,7 +3051,7 @@ fn sheet_mode_files_every_entity_under_its_authored_layer_and_declares_the_drawi
                 None => assert_eq!(
                     role_of_layer(layer_of(entity)).map(str::to_string),
                     Some(role.clone()),
-                    "{name}: an importer-made entity keeps its taxonomy layer: {:?} vs role {role:?}",
+                    "{name}: an importer-made entity keeps the layer that spells its role: {:?} vs role {role:?}",
                     layer_of(entity)
                 ),
             }
@@ -3428,61 +3305,6 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
             );
         }
     }
-}
-
-/// The two modes disagree about the layer slot and nothing else: same
-/// entities, same roles, same sheet layers in XDATA, same view filter, same
-/// dark count, and the layer manager's sheet-layer view reads the same. The
-/// slot is the only thing a consumer that reads layer names sees, which is
-/// why it is an option; everything the import knows is in XDATA either way.
-#[test]
-fn the_two_layer_modes_agree_on_everything_but_the_slot() {
-    let (Some(taxonomy), Some(sheet)) = (
-        import_in_taxonomy_mode("DWG-0202GP06-01.pid"),
-        import_in_sheet_mode("DWG-0202GP06-01.pid"),
-    ) else {
-        return;
-    };
-    assert_eq!(taxonomy.entities().count(), sheet.entities().count());
-    // Five keys: the three the modes were first compared on, plus a
-    // placement's two measures (plan 2026-09-18, K2), which read the cached
-    // body and its template and never the layer slot.
-    let keys = |doc: &CadDocument| -> Vec<[Option<String>; 5]> {
-        let mut keys: Vec<_> = doc
-            .entities()
-            .map(|entity| {
-                [
-                    pid_value(entity, "role"),
-                    pid_value(entity, "sheet_layer"),
-                    pid_value(entity, "style"),
-                    pid_value(entity, "extent"),
-                    pid_value(entity, "driving"),
-                ]
-            })
-            .collect();
-        keys.sort();
-        keys
-    };
-    assert_eq!(keys(&taxonomy), keys(&sheet));
-    assert_eq!(dark(&taxonomy), dark(&sheet));
-    assert_eq!(PidViewFilter::load(&taxonomy), PidViewFilter::load(&sheet));
-    assert_eq!(PidViewSummary::of(&taxonomy), PidViewSummary::of(&sheet));
-    // The slot itself differs: the taxonomy spells the disciplines as layers,
-    // the sheet mode leaves them to `style=`.
-    assert!(
-        taxonomy
-            .layers
-            .iter()
-            .any(|layer| layer.name.starts_with(DISCIPLINE_PREFIX)),
-        "the taxonomy files named line work under discipline layers"
-    );
-    assert!(
-        !sheet
-            .layers
-            .iter()
-            .any(|layer| layer.name.starts_with(DISCIPLINE_PREFIX)),
-        "the sheet mode generates no discipline layer"
-    );
 }
 
 // ── Symbol bodies (plan 2026-09-19, P-D1 / P-D2 / P-D7; the `library`
@@ -3741,48 +3563,12 @@ fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() 
     }
 }
 
-/// Switching a hidden sheet layer on under the sheet mode releases the sheet
-/// layer's own layer -- what `PID-HIDDEN` is to the taxonomy mode -- and
-/// nothing else; switching off leaves the table alone.
-#[test]
-fn sheet_mode_switching_a_hidden_sheet_layer_on_releases_its_own_layer() {
-    let Some(mut doc) = import_in_sheet_mode("DWG-0202GP06-01.pid") else {
-        return;
-    };
-    let hidden_objects = on_sheet_layer(&doc, "HiddenObjects").count();
-    assert_eq!(hidden_objects, 16);
-    assert!(is_hidden(&doc, "HiddenObjects"));
-    assert!(on_sheet_layer(&doc, "HiddenObjects").all(|entity| layer_of(entity) == "HiddenObjects"));
-
-    let switched = switch_sheet_layer(&mut doc, "HiddenObjects", true);
-    assert_eq!(switched.entities, hidden_objects);
-    assert_eq!(switched.released_layer.as_deref(), Some("HiddenObjects"));
-    assert!(!is_hidden(&doc, "HiddenObjects"));
-    assert!(on_sheet_layer(&doc, "HiddenObjects").all(|entity| !entity.common().invisible));
-
-    let switched = switch_sheet_layer(&mut doc, "HiddenObjects", false);
-    assert_eq!(switched.entities, hidden_objects);
-    assert!(switched.released_layer.is_none());
-    assert!(
-        !is_hidden(&doc, "HiddenObjects"),
-        "off never touches the table"
-    );
-    assert!(on_sheet_layer(&doc, "HiddenObjects").all(|entity| entity.common().invisible));
-
-    // A layer the user switched off in the table is not this switch's to
-    // reopen when some other sheet layer is switched on.
-    doc.layers.get_mut("Default").expect("Default").flags.off = true;
-    let switched = switch_sheet_layer(&mut doc, "Labels", false);
-    let switched_back = switch_sheet_layer(&mut doc, "Labels", true);
-    assert!(switched.released_layer.is_none() && switched_back.released_layer.is_none());
-    assert!(is_hidden(&doc, "Default"));
-}
-
 /// The authored layer names are what a third-party viewer sees after Save As:
-/// the slot survives DWG and DXF as a layer name, with the table's on/off state.
+/// the slot survives DWG and DXF as a layer name, with the table's on/off
+/// state and its count of entities.
 #[test]
-fn sheet_mode_layer_names_survive_dwg_and_dxf() {
-    let Some(doc) = import_in_sheet_mode("DWG-0202GP06-01.pid") else {
+fn authored_layer_names_survive_dwg_and_dxf() {
+    let Some(doc) = import("DWG-0202GP06-01.pid") else {
         return;
     };
     let expected: std::collections::BTreeMap<String, (bool, usize)> = doc

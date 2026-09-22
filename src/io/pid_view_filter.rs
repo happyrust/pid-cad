@@ -322,10 +322,11 @@ pub struct Switched {
 ///
 /// Switching a layer *on* may have to release a layer of the table as well,
 /// because the import hides along two lines at once and the bit is only one
-/// of them. Under the taxonomy layer mode the entities of a sheet layer the
-/// file switches off sit on `PID-HIDDEN`, itself off; under the sheet layer
-/// mode they sit on a DXF layer of the sheet layer's own name, itself off.
-/// Either way the bit alone would not show them, so the switch turns that
+/// of them. The entities of a sheet layer the file switches off sit on a DXF
+/// layer of the sheet layer's own name, itself off -- or, for a hidden layer
+/// the file gave no name for (and, until plan 2026-09-21 retired the taxonomy
+/// layer mode, for every hidden one), on `PID-HIDDEN`, itself off. Either
+/// way the bit alone would not show them, so the switch turns that
 /// layer on when an entity it just lit sits there -- and only that layer: a
 /// `PID-SYMBOL-LABEL` the user keeps off, or a sheet layer they switched off
 /// in the layer table, is not this switch's to reopen. Switching off never
