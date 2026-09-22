@@ -729,6 +729,15 @@ struct SymbolBodies {
 /// (plan 2026-09-07 L3; the only reading since plan 2026-09-21, which retired
 /// the layer-mode environment switch and the taxonomy layers it could select).
 /// Hands back the document and the import's [`ImportSummary`] together.
+///
+/// Four steps, each a function below (plan 2026-09-21-load-pid-returns-its-
+/// summary, Q-D8): [`prepare_document`] readies the document and its layer
+/// table, [`resolve_styles`] reads the style indexes and registers what they
+/// need in the document, [`build_document_entities`] files every drawn
+/// entity, and [`finish`] reports, frames and summarises. The order of what
+/// each does to the document -- every layer, linetype, entity and record it
+/// adds -- is the order handles are issued in, and so the order a saved
+/// drawing comes out in.
 pub fn load_pid(path: &Path) -> Result<PidImport, String> {
     // The Geometry profile: every pass whose output reaches this document
     // -- the record families, the cached symbol bodies and their stroke
@@ -743,6 +752,38 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
         .map_err(|error| error.to_string())?;
     let geometry = build_normalized_geometry(&parsed);
 
+    let mut doc = prepare_document(&parsed);
+    let mut library = discover_symbol_library(path);
+    let styles = resolve_styles(&parsed, &geometry, path, &mut doc);
+    let unit = ImportUnit::read(&geometry, path);
+    let built = build_document_entities(&geometry, &styles, &mut library, &unit, &mut doc);
+    if built.decoded == 0 {
+        return Err(format!(
+            "No decoded geometry in {}: pid-parse produced {} evidence item(s), none of them source-backed",
+            path.display(),
+            geometry.entities.len()
+        ));
+    }
+    let summary = finish(
+        path,
+        &geometry,
+        library.as_ref(),
+        styles.style_tables_failed,
+        unit,
+        built,
+        &mut doc,
+    );
+    doc.source_path = Some(path.to_string_lossy().into_owned());
+    Ok(PidImport {
+        document: doc,
+        summary,
+    })
+}
+
+/// The document an import fills: a fresh one with the standard linetypes,
+/// lineweights shown, and the drawing's own layer table declared -- every
+/// sheet layer of the document storage, on or off as the file draws it.
+fn prepare_document(parsed: &pid_parse::PidDocument) -> CadDocument {
     let mut doc = CadDocument::new();
     crate::io::linetypes::populate_document(&mut doc);
     // A DWG carries `$LWDISPLAY` in its header; a `.pid` has no header to read
@@ -776,9 +817,43 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
         ensure_layer(&mut doc, name, Color::WHITE, !hidden);
     }
     ensure_taxonomy_layer(&mut doc, LAYER_FRAME);
+    doc
+}
 
-    let mut library = discover_symbol_library(path);
+/// What [`resolve_styles`] reads off the parsed document for the entity
+/// loop: the style indexes, the document linetypes and text styles
+/// registered for the dash patterns and typefaces they name, and the
+/// published semantic model when the drawing ships one.
+struct Styles {
+    /// The document's own style table is missing or did not walk, so line
+    /// work, lettering and fills are on their fallbacks. See
+    /// [`ImportSummary::style_tables_failed`].
+    style_tables_failed: bool,
+    /// Width and colour per line style.
+    styles: LineStyleIndex,
+    /// What the drawing calls each style.
+    style_names: StyleNameIndex,
+    /// Character height, colour, alignment and typeface per text record.
+    text_heights: pid_parse::style_link::TextHeightIndex,
+    /// Which boundary rings the drawing fills.
+    fills: pid_parse::style_link::FillIndex,
+    /// The document linetype registered for each pooled dash pattern.
+    dash_linetypes: HashMap<Vec<i64>, String>,
+    /// The document text style registered for each typeface.
+    font_styles: HashMap<String, String>,
+    /// The semantic model published beside the drawing, if any.
+    semantics: Option<PidSemanticIndex>,
+}
 
+/// Read the style indexes off the parsed document and register in `doc`
+/// what drawing from them needs: the pooled dash linetypes, the text styles,
+/// and the APPID the entities' XDATA is filed under.
+fn resolve_styles(
+    parsed: &pid_parse::PidDocument,
+    geometry: &NormalizedPidGeometry,
+    path: &Path,
+    doc: &mut CadDocument,
+) -> Styles {
     // Line width and colour are the drawing's own, read from its style table:
     // each geometry record names a style id, and that record carries a width
     // in metres and a Win32 COLORREF. See `pid-parse`'s `style_link` module
@@ -807,7 +882,7 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
             path.display()
         );
     }
-    let styles = pid_parse::style_link::line_styles_for_document(&parsed);
+    let styles = pid_parse::style_link::line_styles_for_document(parsed);
     // What the drawing calls each of those styles. The same table carries it,
     // one field further: every `StyleCluster` opens with a style librarian
     // holding the authored name of every style the project library gave the
@@ -824,13 +899,13 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
     // A drawing whose librarian names nothing is not a failed import: the line
     // work stays keyed to `PID-GEOMETRY` exactly as it did before this landed,
     // and the names' absence is itself the reading.
-    let style_names = pid_parse::style_link::style_names_for_document(&parsed);
+    let style_names = pid_parse::style_link::style_names_for_document(parsed);
     // Which project standards file those names came from. It bounds them: a
     // name means the same thing across two drawings only as far as they were
     // drawn against the same library, and on the reference corpus the two
     // drawings sharing a `.SPP` are exactly the two whose vocabularies agree.
     // Logged rather than drawn -- it is provenance for the layer names above.
-    let libraries = pid_parse::style_link::style_libraries_for_document(&parsed);
+    let libraries = pid_parse::style_link::style_libraries_for_document(parsed);
     let sources: std::collections::BTreeSet<&str> =
         libraries.values().map(String::as_str).collect();
     for source in sources {
@@ -841,14 +916,14 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
     // style that paragraph style names. Most of a P&ID's lettering turns out
     // to be 1/8 inch, so `TEXT_HEIGHT_MM` was reading a quarter too small.
     // Records whose height does not resolve keep that fallback.
-    let text_heights = pid_parse::style_link::text_heights_for_document(&parsed);
+    let text_heights = pid_parse::style_link::text_heights_for_document(parsed);
     // Which areas the drawing fills. `pid-parse` resolves an `igBoundary2d`
     // ring through its `JStyleOverride` to a `JStyleSimpleFill`; the fill's
     // own colour is not decoded, so a filled ring is drawn in its layer's
     // colour. On the reference corpus these are the solid flow arrowheads on
     // the pipelines -- 5 on DWG-0202 and 10 on the gongyi drawing, all of
     // which used to import as hollow triangles.
-    let fills = pid_parse::style_link::fill_styles_for_document(&parsed);
+    let fills = pid_parse::style_link::fill_styles_for_document(parsed);
     // A line's dash pattern comes from the same style table, one reference
     // further along: a JStyleSimpleLine names a JStyleSimpleDashType, and
     // style_link hands the decoded segments back. Pool the distinct patterns
@@ -858,17 +933,17 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
     // The bodies the drawing caches state a dash of their own per stroke
     // (plan 2026-09-20, P-E8), pooled into the same table so a symbol's
     // internal dash draws through the same path.
-    let dash_linetypes = register_dash_linetypes(&mut doc, &styles, &geometry.symbol_definitions);
+    let dash_linetypes = register_dash_linetypes(doc, &styles, &geometry.symbol_definitions);
     // Same pooling for the typefaces the character styles name, so a label can
     // reference a document text style the way any other text entity does.
-    let font_styles = register_text_styles(&mut doc, &text_heights);
+    let font_styles = register_text_styles(doc, &text_heights);
     // The published semantic model, when the drawing ships one: SmartPlant
     // publishes `<stem>_Data.xml` beside the `.pid`, and pid-parse joins its
     // GraphicOIDs onto the decoded records (two-hop rule, see pid-parse's
     // `docs/analysis/2026-08-07-graphic-oid-is-the-semantic-join.md`). A
     // drawing without one imports exactly as before -- the XML is an
     // enrichment, never a prerequisite.
-    let semantics = PidSemanticIndex::load_beside(path, &parsed);
+    let semantics = PidSemanticIndex::load_beside(path, parsed);
     // The DWG writer skips XDATA whose application is not in the APPID
     // table, so without this registration the identities would survive the
     // session and silently vanish on save (see `set_entity_xdata`). Every
@@ -878,10 +953,63 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
         app.handle = doc.allocate_handle();
         let _ = doc.app_ids.add(app);
     }
+    Styles {
+        style_tables_failed,
+        styles,
+        style_names,
+        text_heights,
+        fills,
+        dash_linetypes,
+        font_styles,
+        semantics,
+    }
+}
 
-    let page_mm = geometry.page_dimensions_mm;
-    let unit = ImportUnit::read(&geometry, path);
-    let projection = Projection::for_geometry(&geometry, &unit);
+/// What [`build_document_entities`] tallied while filing the drawing's
+/// entities: the counts the report and the summary state, and the extent
+/// the camera is framed on.
+struct Built {
+    /// Entities handed to the document.
+    drawn: usize,
+    /// Decoded source records those entities came from.
+    decoded: usize,
+    /// Text records whose height did not resolve and kept the fallback.
+    lettering_on_fallback: usize,
+    /// Where the symbol placements' bodies came from.
+    symbol_bodies: SymbolBodies,
+    /// Placements whose entities carry `driving=`; see [`ImportSummary`].
+    parametric_placements: usize,
+    /// Drawn entities per authored sheet layer, keyed by storage path, oid
+    /// and name.
+    sheet_layer_distribution: BTreeMap<(String, u32, Option<String>), usize>,
+    /// The sheet layers the drawing draws nothing of, by name: what the view
+    /// filter starts with switched off.
+    sheet_layers_off: BTreeSet<String>,
+    /// The extent of the decoded geometry, for framing.
+    bounds: Bounds,
+}
+
+/// Build every entity of the drawing and file it into `doc` under the layer
+/// the drawing filed it under, styled from `lookups` and drawn from the
+/// bodies the drawing caches or `library` stands in with.
+fn build_document_entities(
+    geometry: &NormalizedPidGeometry,
+    lookups: &Styles,
+    library: &mut Option<SymbolLibrary>,
+    unit: &ImportUnit,
+    doc: &mut CadDocument,
+) -> Built {
+    let Styles {
+        styles,
+        style_names,
+        text_heights,
+        fills,
+        dash_linetypes,
+        font_styles,
+        semantics,
+        ..
+    } = lookups;
+    let projection = Projection::for_geometry(geometry, unit);
     let mut bounds = Bounds::new(projection);
     let mut decoded = 0usize;
     let mut drawn = 0usize;
@@ -898,10 +1026,10 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
         // A boundary ring is the one kind whose style decides its shape rather
         // than its colour: filled, it is an area; unfilled, it is an outline
         // the member lines already drew. See `build_fill`.
-        let fill = fill_for(&fills, entity);
+        let fill = fill_for(fills, entity);
         // Resolved before building: a point's style decides whether it draws
         // the slash mark SmartPlant shows for a class-coloured point.
-        let symbology = style_for(&styles, entity);
+        let symbology = style_for(styles, entity);
         // What the drawing calls the style this record draws with, and the
         // working key its line work is built under. A record whose style the
         // drawing does not name keeps `PID-GEOMETRY`, and that absence is
@@ -909,7 +1037,7 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
         // library, so an unnamed style is one drawn in this file. The name
         // goes into XDATA as `style=` whether or not it becomes a key -- an
         // appearance name such as `Normal` is still what the drawing said.
-        let style_name = style_name_for(&style_names, entity, symbology);
+        let style_name = style_name_for(style_names, entity, symbology);
         let line_work = style_name.and_then(discipline_layer);
         let line_work = line_work.as_deref().unwrap_or(LAYER_GEOMETRY);
         // The body the drawing itself caches for a placement: what it draws
@@ -935,7 +1063,7 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
                     symbology,
                     line_work,
                     &mut symbol_bodies,
-                    &dash_linetypes,
+                    dash_linetypes,
                 ),
             },
             PidGeometryConfidence::Inferred => build_inferred(&entity.kind, projection),
@@ -951,7 +1079,7 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
             decoded += 1;
             accumulate_bounds(&entity.kind, &built, &mut bounds);
         }
-        let text_style = height_for(&text_heights, entity);
+        let text_style = height_for(text_heights, entity);
         let height_mm = text_style.map(|h| projection.mm(h.height_m));
         // The same character style states the colour, so it comes off the
         // join already made rather than a second one.
@@ -992,13 +1120,13 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
         // A placement's size on this sheet and its template's library
         // defaults, the same on every entity it drew. See
         // `PlacementMeasures`.
-        let measures = PlacementMeasures::of(&entity.kind, &geometry, projection, &built);
+        let measures = PlacementMeasures::of(&entity.kind, geometry, projection, &built);
         if measures.as_ref().is_some_and(|m| m.driving.is_some()) {
             parametric_placements += 1;
         }
         for mut one in built {
             if let Some(style) = symbology {
-                apply_symbology(&mut one, style, &dash_linetypes);
+                apply_symbology(&mut one, style, dash_linetypes);
             }
             if let Some(mm) = height_mm {
                 apply_text_height(&mut one, mm);
@@ -1041,13 +1169,13 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
                 // `sheet_layer=` still says which placement it belongs to.
                 Some(name) if role != Some("symbol-label") => {
                     one.common_mut().layer = name.to_string();
-                    ensure_layer(&mut doc, name, Color::WHITE, !hidden);
+                    ensure_layer(doc, name, Color::WHITE, !hidden);
                 }
                 // The label of a placement on a hidden sheet layer is not
                 // moved either: its layer is already off, and the view filter
                 // darkens it by its `sheet_layer=` like the body.
                 Some(_) => {
-                    ensure_taxonomy_layer(&mut doc, &one.common().layer.clone());
+                    ensure_taxonomy_layer(doc, &one.common().layer.clone());
                 }
                 // No authored layer, or one whose name did not resolve: the
                 // entity keeps the importer's own layer it was built on,
@@ -1063,7 +1191,7 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
                     } else if one.common().layer.starts_with(LAYER_DISCIPLINE_PREFIX) {
                         one.common_mut().layer = LAYER_GEOMETRY.to_string();
                     }
-                    ensure_taxonomy_layer(&mut doc, &one.common().layer.clone());
+                    ensure_taxonomy_layer(doc, &one.common().layer.clone());
                 }
             }
             if hidden {
@@ -1074,34 +1202,59 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
             let _ = doc.add_entity(one);
         }
     }
-
-    if decoded == 0 {
-        return Err(format!(
-            "No decoded geometry in {}: pid-parse produced {} evidence item(s), none of them source-backed",
-            path.display(),
-            geometry.entities.len()
-        ));
+    Built {
+        drawn,
+        decoded,
+        lettering_on_fallback,
+        symbol_bodies,
+        parametric_placements,
+        sheet_layer_distribution,
+        sheet_layers_off,
+        bounds,
     }
+}
 
+/// Close the import: log the report, draw the page border, frame the camera,
+/// store and apply the drawing's own view filter, and state the headline.
+fn finish(
+    path: &Path,
+    geometry: &NormalizedPidGeometry,
+    library: Option<&SymbolLibrary>,
+    style_tables_failed: bool,
+    unit: ImportUnit,
+    built: Built,
+    doc: &mut CadDocument,
+) -> ImportSummary {
+    let Built {
+        drawn,
+        decoded,
+        lettering_on_fallback,
+        symbol_bodies,
+        parametric_placements,
+        sheet_layer_distribution,
+        sheet_layers_off,
+        bounds,
+    } = built;
     report_import(
         path,
-        &geometry,
-        library.as_ref(),
+        geometry,
+        library,
         drawn,
         lettering_on_fallback,
         symbol_bodies,
         &sheet_layer_distribution,
     );
-    draw_page_border(&mut doc, page_mm);
-    frame_drawing(&mut doc, &bounds, page_mm);
+    let page_mm = geometry.page_dimensions_mm;
+    draw_page_border(doc, page_mm);
+    frame_drawing(doc, &bounds, page_mm);
     // The drawing's own view filter: the sheet layers the file switches off
     // start switched off here too, and the entities on them go dark by their
     // own `invisible` bit as well as by sitting on `PID-HIDDEN`. Stored in the
     // document, so what the user later switches on or off rides every save
     // with the bits.
     let filter = PidViewFilter::with_layers_off(sheet_layers_off.iter().map(String::as_str));
-    filter.store(&mut doc);
-    filter.apply(&mut doc);
+    filter.store(doc);
+    filter.apply(doc);
     // The headline the open-completion handler shows on the command line;
     // the counts agree with `report_import`'s log lines by construction, and
     // the sheet-layer line with what the Layer Manager lists.
@@ -1116,8 +1269,8 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
                 .map(|refused| refused.count),
         )
         .sum();
-    let view = PidViewSummary::of(&doc);
-    let summary = ImportSummary {
+    let view = PidViewSummary::of(doc);
+    ImportSummary {
         drawn,
         decoded,
         missing,
@@ -1149,16 +1302,10 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
         library_bodies: symbol_bodies.library,
         hidden_strokes_skipped: symbol_bodies.hidden_strokes_skipped,
         symbol_library: library
-            .as_ref()
             .map(|library| library.roots().to_vec())
             .unwrap_or_default(),
         unit,
-    };
-    doc.source_path = Some(path.to_string_lossy().into_owned());
-    Ok(PidImport {
-        document: doc,
-        summary,
-    })
+    }
 }
 
 /// Draw the sheet the drawing states it is on.
