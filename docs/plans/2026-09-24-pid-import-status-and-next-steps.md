@@ -184,6 +184,10 @@ run 的形状：`igTextBox` 形状 2 / 3 带 `(u16 长度, u16 选择子, u32 �
 - **0201 的一条 `DependencyObject`：规则过紧，是小的解码器缺口。** 被 `group_kind_word ∈ 1..=16` 拒，可这个字是成员数：同图接受的 135 条最短长度恰是
   `36 + 8·k`（k = 1 / 2 / 4 → 44 / 52 / 68），这条 212 = 36 + 8·22，字节是 16 字节头 + 22 个 `(成员 oid, 1)` + 22 个 `u16 1` + 20 字节属性块。
   该族不出几何，拒收不丢笔画，但 census 与 OCS 摘要因此多报 0201「1 条没画」。**按 N-D11 另开小单**（把上限换成 `36 + 8·k ≤ btf` 的自洽校验；放行后 0201 的「没画」1 → 0、几何不变），本单不改。
+- **小单同日批准并落地**：pid-parse `docs/plans/2026-09-24-dependency-object-member-count-bound.md`（开单 `7a1a532`，Plannotator 批准；实施 `686c9d5`）。
+  census 变成 0 / 4 / 8 / 0 / 0（无解码器 A01 仍 1 条 `igGroup`），`DependencyObject` 四图 352 → 353，pid-parse `--lib` 1119。OCS 侧代码未动：主工作树当时被另一会话的
+  `rvt` 接入改着（未提交、编不过），在 `72ae8f42` 的干净 worktree 里验——`pid_import` 51/51、`--lib io::pid` 54/54，批量报告六张图 DXF 哈希全部不变，只有 0201 的
+  `missing` 1 → 0；批量基线 CSV 随本次提交更新。
 
 ### B1（OCS，本次提交）
 
