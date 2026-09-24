@@ -175,6 +175,25 @@ run 的形状：`igTextBox` 形状 2 / 3 带 `(u16 长度, u16 选择子, u32 �
 - 台账已落：user-guide「文字」一段随 T2（`fde369e8`）；pid-parse `b1a4df4`——CHANGELOG 一条、08-22 分析头部标「已接线」、`task_plan.md` 指针。本单各项写了哈希。
 - **还差改前 / 改后标签特写**：`--export` 只写 DWG / DXF（试过 `.svg`：`unsupported output format`），截图只能走 GUI——与 V1 一起等桌面（会在桌面上开 OCS 窗口，先问过再做）。改前的图用今天存下的基线 DXF（与 `dbf62cb5` 导入字节相同）打开即可，不必回退代码。
 
+### H2（pid-parse `8a83602`，只定性不改码）
+
+- 探针 `examples/probe_the_last_refusals.rs`（照 `undecoded_census` 的链走法找出没被解码的 `0x0084` / `0x00FA`，逐条重放该族规则报第一条不过的）+ 分析
+  `docs/analysis/2026-09-24-the-last-five-refusals.md`；`render_gap_census` 注释写上裁定，数字不动（4/4 绿）。
+- **0202 的四条 `igLineString2d`：正确拒收。** 两个顶点重合的零长折线，form 1 / scope 3 / index 1，全在原图关闭的 `HiddenObjects`（oid 17）上；
+  与工艺那八条（在 `Labels` 上）是同一个总体——语料里 scope 3 的 12 条全是两点重合，没有一条被接受。
+- **0201 的一条 `DependencyObject`：规则过紧，是小的解码器缺口。** 被 `group_kind_word ∈ 1..=16` 拒，可这个字是成员数：同图接受的 135 条最短长度恰是
+  `36 + 8·k`（k = 1 / 2 / 4 → 44 / 52 / 68），这条 212 = 36 + 8·22，字节是 16 字节头 + 22 个 `(成员 oid, 1)` + 22 个 `u16 1` + 20 字节属性块。
+  该族不出几何，拒收不丢笔画，但 census 与 OCS 摘要因此多报 0201「1 条没画」。**按 N-D11 另开小单**（把上限换成 `36 + 8·k ≤ btf` 的自洽校验；放行后 0201 的「没画」1 → 0、几何不变），本单不改。
+
+### B1（OCS，本次提交）
+
+- `examples/pid_batch_report.rs`：对给定目录递归找 `.pid`（按 CFB 魔数跳过进程号文件），每张一行 CSV——`load_pid` 摘要各项、同一次解析的拒收 / 无解码器按类型码计数、
+  单位、页幅；`--export-dir` 时再照 `--export` 的路另存 DXF 并记 SHA-256；失败或 panic 的图写一行原因、不中断。行名取相对输入目录的路径，跨机器可比。
+- 基线 `docs/evidence/2026-09-24-pid-batch-baseline/report.csv`（六张：四主图 + A01 + publish 副本）：**与本单事实表逐数一致**（0201 334 / 206 / 1 `0x00FA:1`、
+  0202 313 / 179 / 4 `0x0084:4`、D06 59 / 25 / 0、工艺 686 / 427 / 8 `0x0084:8`、A01 126 / 116 / 1 无解码器 `0x007B:1`），四主图 `dxf_sha256` = T2 新基线；
+  publish 副本旁有 `_Data.xml`，哈希另是一份。单图导入 27–297 ms（debug）。clippy / rustfmt 干净。
+- B2 等新语料。
+
 ## 门禁记录
 
 - 2026-09-24：用户经 zhimo「分析 … PID文件解析和显示的实现进度。并使用plannator 制定下一步的计划」→ 本单（会话 opus-5-5-1），送 Plannotator 批注。N-D1 – N-D11 等批。
