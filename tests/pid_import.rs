@@ -964,6 +964,68 @@ fn lettering_names_the_typeface_the_drawing_states() {
     );
 }
 
+/// A `.pid` text style keeps its typeface through a save: reopened from DXF,
+/// each `PID-*` style letters in the face it did when the `.pid` opened
+/// (plan 2026-09-24-pid-text-styles-keep-their-truetype-face-when-saved).
+///
+/// The writers keep a `STYLE` record's font file and drop the family, so the
+/// importer names the typeface's file -- the field every reader honours --
+/// beside the family. Before, the file was acadrust's default `txt` and every
+/// label of a saved `.pid` reopened in a stroke font. A typeface this machine
+/// does not have keeps `txt` (nothing to name), which is checked too.
+#[test]
+fn a_pid_text_style_keeps_its_typeface_through_a_dxf_round_trip() {
+    use OpenCADStudio::entities::text_support::resolve_text_style;
+    use OpenCADStudio::scene::text::sysfont;
+
+    let Some(doc) = import("DWG-0201GP06-01.pid") else {
+        return;
+    };
+    let target = std::env::temp_dir().join(format!(
+        "ocs-pid-typeface-round-trip-{}.dxf",
+        std::process::id()
+    ));
+    OpenCADStudio::io::save(&doc, &target).expect("save the import as DXF");
+    let reopened = OpenCADStudio::io::load_file(&target).expect("reopen the saved DXF");
+    let _ = std::fs::remove_file(&target);
+
+    let mut kept = 0usize;
+    for style in doc
+        .text_styles
+        .iter()
+        .filter(|style| style.name.starts_with("PID-"))
+    {
+        let Some(file) = sysfont::face_file_name(&style.true_type_font) else {
+            assert_eq!(
+                style.font_file, "txt",
+                "{} names {:?}, which is not installed, so its file stays txt",
+                style.name, style.true_type_font
+            );
+            continue;
+        };
+        assert_eq!(
+            style.font_file, file,
+            "{} names its typeface's file",
+            style.name
+        );
+        // Compared by the face each name lands on rather than by spelling: a
+        // CJK face answers to its localized name as imported (`宋体`) and may
+        // come back under its English one (`SimSun`) -- the same face.
+        let before = resolve_text_style(&style.name, &doc).font_name;
+        let after = resolve_text_style(&style.name, &reopened).font_name;
+        assert_eq!(
+            sysfont::face_file_name(&after),
+            Some(file.clone()),
+            "{} letters in {before:?} ({file}) as imported and in {after:?} once saved and reopened",
+            style.name
+        );
+        kept += 1;
+    }
+    if kept == 0 {
+        eprintln!("SKIPPED: none of DWG-0201's typefaces is installed here");
+    }
+}
+
 /// The importer declares only the `PID-*` layers its own entities land on --
 /// the layer table is the drawing's own (plan 2026-09-21, H-D3) -- and the
 /// ones carrying evidence rather than drawing ship switched off. On DWG-0201

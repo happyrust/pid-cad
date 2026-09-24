@@ -47,10 +47,21 @@ pub fn resolve_text_style(style_name: &str, document: &CadDocument) -> ResolvedT
                     })
                 })
                 .flatten();
+            let basename = file.rsplit(['/', '\\']).next().unwrap_or(file);
+            // A TrueType style named by its font file -- what AutoCAD writes,
+            // and what a `.pid` import writes so its faces survive a save --
+            // letters in the family that file holds, which the stem alone
+            // does not name (`arialn.ttf` is Arial Narrow).
+            let truetype_family = [".ttf", ".ttc", ".otf"]
+                .iter()
+                .any(|ext| basename.to_ascii_lowercase().ends_with(ext))
+                .then(|| crate::scene::text::sysfont::family_of_file(basename))
+                .flatten();
             if let Some(p) = shx_path {
                 p
+            } else if let Some(family) = truetype_family {
+                family
             } else {
-                let basename = file.rsplit(['/', '\\']).next().unwrap_or(file);
                 let stem = basename.split('.').next().unwrap_or(basename).trim();
                 if !stem.is_empty() {
                     stem.to_string()

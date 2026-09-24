@@ -4,6 +4,10 @@
 > 基线：OCS `dbf62cb5`（= `pid-cad/main`；`ec14ce55` 之后只有文档提交）；pid-parse `681681c`（`codex/phase32c-bundle-closeout`，= origin）。
 > 开单时只做分析与计划，**没改任何代码**。
 > **2026-09-24 Plannotator 批准**（`{"decision":"approved"}`，无批注）：N-D1 – N-D11 按推荐放行；用户「按推荐顺序开工（T1 与 S 并行起步）」。
+> **同日结算**：T1（pid-parse `886c431`）/ S（OCS `9eaf8593`）/ T2（`fde369e8`）/ T3（台账 pid-parse `b1a4df4`，截图 OCS `84be5460`）/ V1（`84be5460`）/ H2（pid-parse `8a83602`，
+> 由此开的小单 `7a1a532` → `686c9d5` 同日批准落地）/ B1（`72ae8f42`）/ H1（pid-parse `main` 快进到工作分支并推，两仓均已推送）全部落地；**还开着的只有 V2（等 SmartPlant 截图）与 B2（等新语料）**。
+> 顺带登记一条新发现：另存 DXF 重开时 PID 文字样式退成 `txt` 笔画字体（证据 README），DXF 往返问题——**同日开小单**
+> `2026-09-24-pid-text-styles-keep-their-truetype-face-when-saved.md` **并落地**（STYLE 组码 3 写字体文件名，读回按文件查族名）。
 > 本单只管 SmartPlant `.pid` 这条线；DXF 图例识别（`PIDLEGEND` / `PIDGROUP`）有 09-09 / 09-10 两单，W0–W8、M0–M6 已全部落地，不在这里。
 
 ## 一句话

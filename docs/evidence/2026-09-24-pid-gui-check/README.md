@@ -10,5 +10,6 @@
 | `0201-layer-manager.png` | 图层管理器「图层」视图（图层槽单 H4） | 列的是原图自己的图层名（`ConsistencyChecks` / `Default` / `DrawingBorder` / `Labels` …），`Heat Trace` / `Hidden` / `HiddenObjects` / `Label` 按文件的显示位为关；`0201-layer-table-command-line.png` 是 `LAYER` 命令打印的同一张表，另有 `PID-FRAME` 开、`PID-CONNECTIVITY` / `PID-SYMBOL-LABEL` 关 |
 | `0201-tags-before-after.png`（及三张单图） | 仪表位号特写，窗口 (350, 248)–(395, 292) mm。左：改前（`dbf62cb5` 导入另存的 DXF 重新打开）；中：改后、同一条路（T2 导入另存的 DXF 重新打开）；右：改后直接打开 `.pid` | 改前字高是段落默认 3.175 mm，`060101` 比气泡还宽、`LIA` 被 `L=300 mm` 压住；改后是 run 说的 7 pt = 2.469 mm，放得进气泡；直接打开 `.pid` 时按 run 的 Arial Narrow 画 |
 
-顺带看到的（与本单无关，登记待查）：另存的 DXF 重新打开时，文字按 `txt` 笔画字体画（左、中），直接打开 `.pid` 才是 TrueType（右）——
-DXF 的 STYLE 组码 3 写的是 `txt`，TrueType 字体名在重读时没有接回来。是 DXF 往返的问题，不是 `.pid` 导入的问题。
+顺带看到的：另存的 DXF 重新打开时，文字按 `txt` 笔画字体画（左、中），直接打开 `.pid` 才是 TrueType（右）——
+DXF 的 STYLE 组码 3 写的是 `txt`，TrueType 字体名在重读时没有接回来。**同日已修**（小计划 `2026-09-24-pid-text-styles-keep-their-truetype-face-when-saved.md`）：
+`0201-saved-dxf-font-before-after.png` 左是修前另存的 DXF 重开（`txt`），右是修后另存的 DXF 重开（组码 3 = `ARIALN.TTF`，按 Arial Narrow 画，与直接开 `.pid` 一致）。

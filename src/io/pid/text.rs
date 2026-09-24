@@ -224,10 +224,19 @@ pub(super) fn apply_text_style(entity: &mut EntityType, style_name: &str) {
 /// falls back, which is the intended outcome: better than writing a
 /// reconstructed name nobody measured.
 ///
+/// **`font_file` names the typeface's file** (`ARIALN.TTF`) when it is
+/// installed. `true_type_font` lives only in memory -- the DWG / DXF writers
+/// keep a `STYLE` record's font file and drop the family -- so a style carrying
+/// the family alone saves as `txt` and reopens as a stroke font, in this editor
+/// and in every other reader. A typeface not installed here keeps `txt` and is
+/// named in the log, rather than a guessed file name (plan
+/// 2026-09-24-pid-text-styles-keep-their-truetype-face-when-saved).
+///
 /// Names are assigned over a `BTreeSet`, so they are stable for a given file.
 pub(super) fn register_text_styles(
     doc: &mut CadDocument,
     text_heights: &pid_parse::style_link::TextHeightIndex,
+    path: &Path,
 ) -> HashMap<String, String> {
     let fonts: BTreeSet<&str> = text_heights
         .values()
@@ -246,6 +255,13 @@ pub(super) fn register_text_styles(
         }
         let mut style = acadrust::tables::TextStyle::new(&name);
         style.true_type_font = font.to_string();
+        match crate::scene::text::sysfont::face_file_name(font) {
+            Some(file) => style.font_file = file,
+            None => log::info!(
+                "{}: typeface {font:?} is not installed here; its text style keeps the txt font file, so a saved copy letters in txt",
+                path.display()
+            ),
+        }
         style.set_handle(doc.allocate_handle());
         if doc.text_styles.add(style).is_ok() {
             names.insert(font.to_string(), name);

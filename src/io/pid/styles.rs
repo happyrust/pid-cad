@@ -152,7 +152,7 @@ pub(super) fn resolve_styles(
     let dash_linetypes = register_dash_linetypes(doc, &styles, &geometry.symbol_definitions);
     // Same pooling for the typefaces the character styles name, so a label can
     // reference a document text style the way any other text entity does.
-    let font_styles = register_text_styles(doc, &text_heights);
+    let font_styles = register_text_styles(doc, &text_heights, path);
     // The published semantic model, when the drawing ships one: SmartPlant
     // publishes `<stem>_Data.xml` beside the `.pid`, and pid-parse joins its
     // GraphicOIDs onto the decoded records (two-hop rule, see pid-parse's

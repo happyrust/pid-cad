@@ -1,7 +1,8 @@
-# 另存 DWG / DXF 后 `.pid` 文字的 TrueType 字体丢了：STYLE 只写了 `txt` · 小计划（2026-09-24 开单，等批）
+# 另存 DWG / DXF 后 `.pid` 文字的 TrueType 字体丢了：STYLE 只写了 `txt` · 小计划（2026-09-24 开单，同日批准并落地）
 
 > 起因：计划 `2026-09-24-pid-import-status-and-next-steps.md` T3 截图时顺带看到（`docs/evidence/2026-09-24-pid-gui-check/0201-tags-before-after.png` 中栏 vs 右栏）；
-> 用户「开一张小单：另存 DXF 后 PID 文字退成 txt 字体的问题」→ 本单（会话 opus-5-5-1）。只开单，**没改代码**。带 ⭕ 的决策按推荐落笔，批注里划一笔即可翻案。
+> 用户「开一张小单：另存 DXF 后 PID 文字退成 txt 字体的问题」→ 本单（会话 opus-5-5-1）。开单时没改代码。
+> **2026-09-24 Plannotator 批准**（`{"decision":"approved"}`，无批注），F-D1 – F-D4 按推荐执行；F1 – F4 见「进度」。
 
 ## 一句话
 
@@ -46,6 +47,40 @@
 | 字体替换表（没装时换成相近字体） | 另一个产品命题；F-D2 只要求说出来 |
 | 恢复已另存的图 | F-D4 |
 
+## 进度（2026-09-24，本次提交）
+
+- **F1 导入侧**（`src/io/pid/text.rs`）：`register_text_styles` 多收 `path`，用 `sysfont::face_file_name` 把 `font_file` 写成字体文件名；本机没有的字体保持 `txt`，记一行 info 日志。
+- **F2 读回侧**：`sysfont` 加 `face_file_name` / `family_of_file`（按文件名不分大小写找面，宽度变体回到它自己的名字——`ARIALN.TTF` → `Arial Narrow`，集合取第一个面）；
+  `resolve_text_style` 对 `.ttf` / `.ttc` / `.otf` 的 `font_file` 先按文件查族名，查不到退回原来的「文件名主干」。
+- **F3 验收**：
+  - 四图 `--export` 与 T2 基线逐项比：**实体、头变量零差异**，只有 STYLE 记录的组码 3 变——0201 / 0202：`arial.ttf` / `ARIALN.TTF` / `simsunb.ttf` / `simfang.ttf` / `simsun.ttc`；
+    D06：`ARIALN.TTF`；工艺：`arial.ttf` / `ARIALN.TTF`，`仿宋_GB2312` 本机没装、保持 `txt`（导入日志点名）。新哈希（本机字体下）：0201 `B9C0890C…` / 0202 `84743800…` / D06 `240B3785…` / 工艺 `E4B45DDA…`；
+    **这些哈希随本机装了哪些字体而变**，换机器对哈希前先看 STYLE 组码 3。
+  - 测试：`pid_import` 51 → **52**（新增 `a_pid_text_style_keeps_its_typeface_through_a_dxf_round_trip`：0201 另存 DXF 再开，每个装了字体的 `PID-*` 样式落到同一个字体文件，没装的保持 `txt`）；
+    `--lib` 过滤 `sysfont` / `io::pid` / `text_support` **72/72**（`sysfont` 新增 `a_face_file_leads_back_to_its_family`，Arial / Arial Narrow / Times New Roman 往返）；clippy 在改动处零新增（`text_support.rs` 另有五条旧告警不在改动行）；rustfmt 干净。
+  - 批量基线 CSV 重出（六张图哈希全换、其余列不变）；GUI：`docs/evidence/2026-09-24-pid-gui-check/0201-saved-dxf-font-before-after.png`，修后另存的 DXF 重开按 Arial Narrow 画。
+  - 过程记录：一次 `--lib` 测试链接失败（`link.exe` 1104，测试可执行被占），重跑通过；OCS 主工作树里另一会话的 `rvt` 改动这时已能编译，本单在主树里验，只提交自己的文件。
+- **F4 上游**：issue 草稿见下节，未提交到上游。
+- **F-D4**：user-guide `.pid` 一节「文字」段补了另存字体与 2026-09-24 前旧图的说明。
+
+## 附：给 acadrust 上游的 issue 草稿（F4，未提交）
+
+> **STYLE records drop `TextStyle::true_type_font` on DXF and DWG write and read**
+>
+> `TextStyle::true_type_font` is kept in memory only. The DXF writer emits code 3 (`font_file`), code 4 (`big_font_file`) and the
+> `AcadAnnotative` XDATA (`src/io/dxf/writer/section_writer.rs`, STYLE writer); the DWG writer likewise writes the two font files and the
+> annotative EED (`src/io/dwg/dwg_stream_writers/object_writer/mod.rs`); neither reader fills `true_type_font`
+> (`src/io/dxf/reader/section_reader.rs`, `src/io/dwg/dwg_document_builder.rs`). A style built with
+> `TextStyle::with_truetype("T", "Arial Narrow")` therefore saves as `txt` and reads back with an empty face.
+>
+> Minimal repro: add that style to a `CadDocument`, write DXF, read it back, and `true_type_font` is `""` while `font_file` is `"txt"`.
+>
+> AutoCAD keeps a TrueType style's face on the STYLE record itself: code 3 holds the font file name (e.g. `arialn.ttf`) and an `ACAD`
+> XDATA group carries the family (`1000`) with a `1071` word of pitch-and-family / charset / bold / italic bits (DWG: the same as EED under
+> the `ACAD` appid). Proposal: when `true_type_font` is set, write that group beside the annotative one, and read it back into
+> `true_type_font` (the `1071` word can be carried raw until it is modelled). Exact bit layout to be checked against an AutoCAD-saved file.
+
 ## 门禁记录
 
 - 2026-09-24：用户经 zhimo「开一张小单：另存 DXF 后 PID 文字退成 txt 字体的问题」→ 本单（会话 opus-5-5-1），送 Plannotator 批注。F-D1 – F-D4 等批。
+- 2026-09-24：Plannotator 批准，用户「Plannotator 里批准了，开工 F1 到 F4」→ 开工并同日落地（会话 opus-5-5-1）。

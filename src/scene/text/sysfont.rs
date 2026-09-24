@@ -279,6 +279,55 @@ pub fn has_family(family: &str) -> bool {
     face_id(family).is_some()
 }
 
+/// The file name a face was loaded from, when it was loaded from a file.
+fn source_file_name(source: &fontdb::Source) -> Option<String> {
+    let path = match source {
+        fontdb::Source::File(path) => path,
+        fontdb::Source::SharedFile(path, _) => path,
+        fontdb::Source::Binary(_) => return None,
+    };
+    Some(path.file_name()?.to_string_lossy().into_owned())
+}
+
+/// The file the face `name` resolves to lives in, as a DXF / DWG `STYLE`
+/// record's font file names a TrueType font (`ARIALN.TTF` for Arial Narrow).
+/// `None` when `name` matches no installed face.
+///
+/// A `STYLE` record has no field for a family name that every reader honours;
+/// the font file is the one they all read, so a style written with only its
+/// family comes back as `txt`.
+pub fn face_file_name(name: &str) -> Option<String> {
+    let sys = fonts();
+    source_file_name(&sys.db.face(face_id(name)?)?.source)
+}
+
+/// The family a font file holds, for a `STYLE` record that names its font by
+/// file (`arialn.ttf`) rather than by family -- the name a user would type for
+/// it, so a width variant answers with its own name (`Arial Narrow`) rather
+/// than the wider family fontdb filed it under. Matched on the file name alone,
+/// case-insensitively; a collection answers with its first face. `None` when no
+/// installed font lives in a file of that name.
+pub fn family_of_file(file: &str) -> Option<String> {
+    let sys = fonts();
+    let wanted = file.rsplit(['/', '\\']).next()?.to_lowercase();
+    let face = sys
+        .db
+        .faces()
+        .filter(|face| {
+            source_file_name(&face.source).is_some_and(|name| name.to_lowercase() == wanted)
+        })
+        .min_by_key(|face| face.index)?;
+    if face.stretch != fontdb::Stretch::Normal {
+        if let Some(entry) = sys.recovered.iter().find(|entry| entry.id == face.id) {
+            return Some(entry.name.clone());
+        }
+        if let Some(legacy) = legacy_family(&sys.db, face) {
+            return Some(legacy);
+        }
+    }
+    face.families.first().map(|(name, _)| name.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +391,36 @@ mod tests {
         if checked == 0 {
             eprintln!("SKIPPED: no system fonts installed");
         }
+    }
+
+    /// A face's file leads back to the name that asked for it, width variants
+    /// included: the file is what a saved `STYLE` record keeps, so this round
+    /// trip is what keeps a TrueType style's face across a DWG / DXF save.
+    #[test]
+    fn a_face_file_leads_back_to_its_family() {
+        let mut checked = 0usize;
+        for name in ["Arial", "Arial Narrow", "Times New Roman"] {
+            let Some(file) = face_file_name(name) else {
+                continue;
+            };
+            let family = family_of_file(&file)
+                .unwrap_or_else(|| panic!("{name} lives in {file}, which resolves to no family"));
+            assert_eq!(
+                fold_name(&family),
+                fold_name(&canonical_family_name(name).unwrap_or_else(|| name.to_string())),
+                "{name} -> {file} -> {family}"
+            );
+            assert_eq!(
+                family_of_file(&file.to_uppercase()),
+                Some(family.clone()),
+                "the file name matches case-insensitively"
+            );
+            checked += 1;
+        }
+        if checked == 0 {
+            eprintln!("SKIPPED: none of the probe families is installed");
+        }
+        assert_eq!(family_of_file("no-such-font-file.ttf"), None);
     }
 
     #[test]
