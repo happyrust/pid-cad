@@ -1231,6 +1231,17 @@ pub fn tessellate(
                 // transform — no separate document-wide collector.
                 let mut sdf_verts: Vec<crate::scene::pipeline::text_gpu::TextVertex> = Vec::new();
                 {
+                    crate::scene::text::glyph_quads::prebake_runs(
+                        stroke_groups
+                            .iter()
+                            .filter_map(|group| group.run.as_ref())
+                            .filter(|run| {
+                                !crate::scene::text::web_font::requires_shaping(&run.text)
+                            })
+                            .map(|run| {
+                                (run.font.as_str(), run.bold, run.height, run.text.as_str())
+                            }),
+                    );
                     if let Ok(mut atlas) = crate::scene::text::sdf_atlas::text_atlas().lock() {
                         // Selection tints the whole run; otherwise inline `\C`
                         // colours (bin key) win, falling back to entity colour.

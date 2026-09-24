@@ -1959,6 +1959,14 @@ pub fn tessellate_table(
                 } else {
                     entity_color
                 };
+                crate::scene::text::glyph_quads::prebake_runs(
+                    layout
+                        .strokes
+                        .iter()
+                        .filter_map(|stroke| stroke.run.as_ref())
+                        .filter(|run| !crate::scene::text::web_font::requires_shaping(&run.text))
+                        .map(|run| (run.font.as_str(), run.bold, run.height, run.text.as_str())),
+                );
                 if let Ok(mut atlas) = crate::scene::text::sdf_atlas::text_atlas().lock() {
                     for stroke in &layout.strokes {
                         let Some(run) = &stroke.run else {

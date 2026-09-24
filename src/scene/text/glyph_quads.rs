@@ -31,9 +31,41 @@ pub struct GlyphQuad {
     pub uv_max: [f32; 2],
 }
 
+/// Bake the glyphs [`layout_glyph_quads`] will look up for these
+/// `(font, bold, height, text)` runs — the same tokens it walks, each distinct
+/// glyph once, in text order — *before* the caller takes the atlas lock for
+/// the layout, so the SDF work happens outside the lock and in parallel; see
+/// [`crate::scene::text::sdf_atlas::ensure_baked`]. Runs the layout skips
+/// (empty text, no height) are skipped here too.
+pub fn prebake_runs<'a>(runs: impl IntoIterator<Item = (&'a str, bool, f32, &'a str)>) {
+    use crate::scene::text::lff::{tokenize_run, Tok};
+
+    let mut seen = std::collections::HashSet::new();
+    let mut wanted = Vec::new();
+    for (font, bold, height, text) in runs {
+        if text.is_empty() || height <= 0.0 {
+            continue;
+        }
+        for tok in tokenize_run(text) {
+            if let Tok::Glyph(ch) = tok {
+                if seen.insert((font, ch, bold)) {
+                    wanted.push((font.to_string(), ch, bold));
+                }
+            }
+        }
+    }
+    if !wanted.is_empty() {
+        crate::scene::text::sdf_atlas::ensure_baked(wanted);
+    }
+}
+
 /// Lay `text` out as per-glyph quads. Mirrors `tessellate_text_run`'s transform
 /// and per-character advance so the quads land exactly where the strokes would.
 /// Whitespace and glyphs with no ink advance the pen but emit no quad.
+///
+/// Glyphs the atlas lacks are baked here, under the caller's lock. Callers on
+/// the parallel tessellation paths call [`prebake_runs`] for their runs first,
+/// so this normally only looks the tiles up.
 #[allow(clippy::too_many_arguments)]
 pub fn layout_glyph_quads(
     atlas: &mut GlyphAtlas,

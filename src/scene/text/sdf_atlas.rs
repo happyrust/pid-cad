@@ -25,8 +25,8 @@
 // this allow once `GlyphAtlas` is consumed by the renderer.
 #![allow(dead_code)]
 
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 
 use crate::scene::text::font_face::Face;
 use crate::scene::text::lff::Glyph;
@@ -196,6 +196,13 @@ pub struct GlyphAtlas {
     solid_uv: [f32; 2],
     /// Set when `data` changed since the last upload; the GPU side clears it.
     dirty: bool,
+    /// How many times [`Self::reset`] has run: glyphs baked outside the lock are
+    /// dropped if it moved while they were baking.
+    resets: u64,
+    /// Glyphs some worker is baking outside the lock right now
+    /// ([`ensure_baked_in`]): a second worker wanting one of these waits for
+    /// that bake instead of repeating it.
+    baking: HashSet<GlyphKey>,
 }
 
 /// A freshly baked, not-yet-packed glyph tile.
@@ -236,6 +243,8 @@ impl GlyphAtlas {
                 (solid as f32 * 0.5) / height as f32,
             ],
             dirty: true,
+            resets: 0,
+            baking: HashSet::new(),
         }
     }
 
@@ -265,7 +274,9 @@ impl GlyphAtlas {
     /// Drop every cached glyph and re-init the texture, so glyphs re-bake on
     /// next use (e.g. after TEXTFILL toggles between fill and outline).
     pub fn reset(&mut self) {
+        let resets = self.resets + 1;
         *self = GlyphAtlas::new(self.width, self.height);
+        self.resets = resets;
         // The packer rewound, so every previously handed-out UV is now stale.
         bump_generation();
     }
@@ -402,6 +413,186 @@ impl GlyphAtlas {
             plane_max: tile.plane_max,
             advance: tile.advance,
         })
+    }
+}
+
+/// Cache key of one baked glyph: the font name as the run names it, the
+/// character, and whether it bakes with the bold pen.
+pub type GlyphKey = (String, char, bool);
+
+/// Signalled with [`text_atlas`]'s mutex whenever a worker publishes (or gives
+/// up) a glyph it claimed in [`ensure_baked_in`], so workers waiting for that
+/// glyph re-check the cache.
+fn atlas_baked() -> &'static Condvar {
+    static BAKED: Condvar = Condvar::new();
+    &BAKED
+}
+
+/// Bake the glyphs among `wanted` that the process-wide atlas lacks, with the
+/// SDF work outside its lock, and pack them in `wanted` order. See
+/// [`ensure_baked_in`].
+pub fn ensure_baked(wanted: Vec<GlyphKey>) {
+    ensure_baked_in(text_atlas(), atlas_baked(), wanted);
+}
+
+/// [`ensure_baked`] against a given atlas and its condition variable.
+///
+/// [`GlyphAtlas::get_or_insert`] bakes a miss while its caller holds the atlas
+/// lock, which serialises every tessellation worker behind one glyph's SDF:
+/// on a text-heavy drawing the brute-force `bake_glyph` was ~80 % of the scene
+/// build and ran on one core while the other workers queued for the lock. Here
+/// the lock is only held for bookkeeping — to find the misses, and to pack each
+/// tile once baked — and the baking runs unlocked, so the workers bake
+/// different glyphs on different cores.
+///
+/// A miss is *claimed* under the lock just before it is baked, one glyph at a
+/// time: a worker that finds a glyph another worker is baking right now does
+/// not bake it again but goes on to the next one it needs, and waits for the
+/// claimed ones after its own — so its locked layout still finds every tile
+/// cached. Claiming one glyph at a time (rather than a worker's whole list)
+/// is what spreads the work: with whole lists claimed, on the 5 MB HVAC
+/// drawing most workers ended up waiting on a few long lists (scene 18 s);
+/// with no claims at all, two out of three bakes repeated another worker's
+/// (13.5 s); one at a time, every worker bakes something nobody else is.
+/// Claims are released even if a bake panics.
+///
+/// A worker's tiles pack in its `wanted` order (its text order), not the order
+/// anything finishes in, so a run's tiles keep the same relative order on every
+/// build; across workers the order is the order they reach the atlas. If the
+/// atlas was reset meanwhile (TEXTFILL toggled) the tile is dropped, since it
+/// was baked for a setting that no longer holds — the caller's locked layout
+/// then bakes what it needs.
+///
+/// A bake runs on the claiming thread with no rayon join in between: a worker
+/// parked in a join services other tasks, and one of those could wait here for
+/// a glyph the parked frame has claimed and will not finish — a deadlock.
+pub fn ensure_baked_in(atlas: &Mutex<GlyphAtlas>, baked: &Condvar, wanted: Vec<GlyphKey>) {
+    // One lock for the common case: a warm atlas has all of them already.
+    let missing: Vec<GlyphKey> = {
+        let Ok(atlas) = atlas.lock() else {
+            return;
+        };
+        wanted
+            .into_iter()
+            .filter(|key| !atlas.entries.contains_key(key))
+            .collect()
+    };
+    if missing.is_empty() {
+        return;
+    }
+    // `Face::resolve` reparses a font, so resolve once per font, not per glyph.
+    let mut faces: HashMap<String, Face> = HashMap::new();
+    let mut in_flight: Vec<GlyphKey> = Vec::new();
+    for key in missing {
+        let resets = {
+            let Ok(mut atlas) = atlas.lock() else {
+                return;
+            };
+            if atlas.entries.contains_key(&key) {
+                continue; // baked by someone meanwhile
+            }
+            if atlas.baking.contains(&key) {
+                in_flight.push(key); // being baked right now: wait for it below
+                continue;
+            }
+            atlas.baking.insert(key.clone());
+            atlas.resets
+        };
+        let claim = Claim {
+            atlas,
+            baked,
+            key: &key,
+            resets,
+            published: false,
+        };
+        if !faces.contains_key(&key.0) {
+            faces.insert(key.0.clone(), Face::resolve(&key.0));
+        }
+        let tile = faces[&key.0]
+            .glyph(key.1)
+            .and_then(|g| bake_glyph(&g, stroke_pen_half_units(key.2)));
+        claim.publish(tile);
+    }
+    if !in_flight.is_empty() {
+        wait_for_baked(atlas, baked, &in_flight);
+    }
+}
+
+/// One glyph a worker has claimed in [`ensure_baked_in`] and is baking. If it
+/// drops unpublished (a panicking bake) the claim is released so waiters move
+/// on.
+struct Claim<'a> {
+    atlas: &'a Mutex<GlyphAtlas>,
+    baked: &'a Condvar,
+    key: &'a GlyphKey,
+    /// The atlas's reset count when the key was claimed.
+    resets: u64,
+    published: bool,
+}
+
+impl Claim<'_> {
+    /// Pack the baked tile, release the claim and wake the waiters. The pack
+    /// is skipped (the claim still released) if the atlas was reset since the
+    /// claim, or the mutex is poisoned.
+    fn publish(mut self, tile: Option<BakedTile>) {
+        let mut atlas = lock_even_if_poisoned(self.atlas);
+        if atlas.resets == self.resets && !atlas.entries.contains_key(self.key) {
+            let entry = tile.and_then(|tile| atlas.pack(tile));
+            atlas.entries.insert(self.key.clone(), entry);
+        }
+        atlas.baking.remove(self.key);
+        drop(atlas);
+        self.published = true;
+        self.baked.notify_all();
+    }
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        if self.published {
+            return;
+        }
+        let mut atlas = lock_even_if_poisoned(self.atlas);
+        atlas.baking.remove(self.key);
+        drop(atlas);
+        self.baked.notify_all();
+    }
+}
+
+/// Claims must be released even after a panic under the lock poisoned it.
+fn lock_even_if_poisoned(atlas: &Mutex<GlyphAtlas>) -> MutexGuard<'_, GlyphAtlas> {
+    atlas
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Longest a worker waits for glyphs other workers are baking before it goes
+/// on regardless (its locked layout then bakes whatever is still missing).
+/// A wait normally lasts one glyph bake — tens of milliseconds, a couple of
+/// seconds for a `MAX_TILE_PX` glyph in a debug build — so this only bounds
+/// the damage should a claim ever go unreleased.
+const WAIT_FOR_BAKED: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Block until every key in `keys` is either cached or no longer being baked
+/// by anyone (its baker gave up: a reset, or a panic).
+fn wait_for_baked(atlas: &Mutex<GlyphAtlas>, baked: &Condvar, keys: &[GlyphKey]) {
+    let settled = |atlas: &GlyphAtlas| {
+        keys.iter()
+            .all(|key| atlas.entries.contains_key(key) || !atlas.baking.contains(key))
+    };
+    let Ok(mut guard) = atlas.lock() else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + WAIT_FOR_BAKED;
+    while !settled(&guard) {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return;
+        }
+        match baked.wait_timeout(guard, deadline - now) {
+            Ok((next, _)) => guard = next,
+            Err(_) => return,
+        }
     }
 }
 
@@ -682,5 +873,210 @@ mod tests {
         let e2 = atlas.get_or_insert("txt", 'A', false).expect("cached");
         assert_eq!(e.uv_min, e2.uv_min);
         assert_eq!(e.uv_max, e2.uv_max);
+    }
+
+    fn key(ch: char) -> GlyphKey {
+        ("txt".to_string(), ch, false)
+    }
+
+    // `ensure_baked` must file a glyph under the key `get_or_insert` looks up,
+    // or the locked layout would bake it again.
+    #[test]
+    fn ensure_baked_packs_what_get_or_insert_then_finds() {
+        let (atlas, cv) = (Mutex::new(GlyphAtlas::new(512, 512)), Condvar::new());
+        let key = ("txt".to_string(), 'Q', true);
+        ensure_baked_in(&atlas, &cv, vec![key.clone()]);
+        let mut atlas = atlas.lock().unwrap();
+        assert!(atlas.baking.is_empty(), "no claim left behind");
+        let prebaked = atlas
+            .entries
+            .get(&key)
+            .copied()
+            .flatten()
+            .expect("the bold LFF 'Q' was baked into the atlas");
+        let cursor = (atlas.cursor_x, atlas.cursor_y);
+        let found = atlas.get_or_insert(&key.0, key.1, key.2).expect("cached");
+        assert_eq!(prebaked.uv_min, found.uv_min);
+        assert_eq!(prebaked.uv_max, found.uv_max);
+        assert_eq!(
+            (atlas.cursor_x, atlas.cursor_y),
+            cursor,
+            "the cached glyph was not packed a second time"
+        );
+    }
+
+    // Tiles pack in `wanted` order — so two atlases fed the same glyphs lay
+    // them out identically, and a glyph wanted first sits before one wanted
+    // second on the shelf.
+    #[test]
+    fn ensure_baked_packs_in_wanted_order() {
+        let wanted: Vec<GlyphKey> = "GLYPHS".chars().map(key).collect();
+        let (a, cv_a) = (Mutex::new(GlyphAtlas::new(512, 512)), Condvar::new());
+        let (b, cv_b) = (Mutex::new(GlyphAtlas::new(512, 512)), Condvar::new());
+        ensure_baked_in(&a, &cv_a, wanted.clone());
+        ensure_baked_in(&b, &cv_b, wanted.clone());
+        let (a, b) = (a.lock().unwrap(), b.lock().unwrap());
+        let mut prev_u = f32::NEG_INFINITY;
+        for key in &wanted {
+            let ea = a.entries[key].expect("LFF glyph bakes");
+            let eb = b.entries[key].expect("LFF glyph bakes");
+            assert_eq!(ea.uv_min, eb.uv_min, "{:?} placed alike", key.1);
+            assert_eq!(ea.uv_max, eb.uv_max, "{:?} placed alike", key.1);
+            // Six small tiles share the first shelf: U advances in text order.
+            assert!(ea.uv_min[0] > prev_u, "{:?} follows its predecessor", key.1);
+            prev_u = ea.uv_min[0];
+        }
+        assert_eq!(a.data, b.data, "identical texels");
+    }
+
+    // A glyph already in the atlas keeps its tile: a second call must not pack
+    // it again, and a call that adds nothing must not move the packer.
+    #[test]
+    fn ensure_baked_keeps_an_existing_tile() {
+        let (atlas, cv) = (Mutex::new(GlyphAtlas::new(512, 512)), Condvar::new());
+        let (a, b) = (key('A'), key('B'));
+        ensure_baked_in(&atlas, &cv, vec![a.clone()]);
+        let first = atlas.lock().unwrap().entries[&a].expect("bakes");
+        ensure_baked_in(&atlas, &cv, vec![a.clone(), b.clone()]);
+        let atlas = atlas.lock().unwrap();
+        let again = atlas.entries[&a].expect("still cached");
+        assert_eq!(first.uv_min, again.uv_min);
+        assert_eq!(first.uv_max, again.uv_max);
+        let eb = atlas.entries[&b].expect("bakes");
+        assert!(
+            eb.uv_min[0] > first.uv_max[0],
+            "'B' packed after 'A', not over it"
+        );
+    }
+
+    // A glyph another worker has claimed is not baked again: the second worker
+    // waits for the first one's tile, then finds it cached. Driven by hand:
+    // claim 'A' as worker 1 would, run worker 2 on a thread, publish, join.
+    #[test]
+    fn a_claimed_glyph_is_waited_for_not_rebaked() {
+        let atlas = std::sync::Arc::new(Mutex::new(GlyphAtlas::new(512, 512)));
+        let cv = std::sync::Arc::new(Condvar::new());
+        let a = key('A');
+        // Worker 1 has claimed 'A' and is "baking" it.
+        let resets = {
+            let mut g = atlas.lock().unwrap();
+            g.baking.insert(a.clone());
+            g.resets
+        };
+        // Worker 2 wants 'A' and 'B': it bakes 'B' itself and waits for 'A'.
+        let worker2 = {
+            let (atlas, cv, a) = (atlas.clone(), cv.clone(), a.clone());
+            std::thread::spawn(move || {
+                let t0 = std::time::Instant::now();
+                ensure_baked_in(&atlas, &cv, vec![a, key('B')]);
+                t0.elapsed()
+            })
+        };
+        // Give worker 2 time to bake 'B' and start waiting on 'A'.
+        let waited_for_b = std::time::Instant::now();
+        while atlas.lock().unwrap().entries.get(&key('B')).is_none() {
+            assert!(
+                waited_for_b.elapsed() < WAIT_FOR_BAKED,
+                "worker 2 baked 'B'"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !worker2.is_finished(),
+            "worker 2 waits for the claimed 'A' instead of going on"
+        );
+        // Worker 1 publishes 'A'.
+        let tile = bake_glyph(&Face::resolve("txt").glyph('A').unwrap(), PEN_HALF_UNITS);
+        Claim {
+            atlas: &atlas,
+            baked: &cv,
+            key: &a,
+            resets,
+            published: false,
+        }
+        .publish(tile);
+        let took = worker2
+            .join()
+            .expect("worker 2 returns once 'A' is published");
+        assert!(took < WAIT_FOR_BAKED, "woken by the publish, not the cap");
+        let atlas = atlas.lock().unwrap();
+        assert!(atlas.entries[&a].is_some(), "'A' packed once, by worker 1");
+        assert!(atlas.baking.is_empty(), "no claim left behind");
+    }
+
+    // A claim dropped unpublished — a bake that panicked — is released, so
+    // waiters do not hang on it; a published one caches its tile.
+    #[test]
+    fn a_dropped_claim_is_released_and_a_published_one_cached() {
+        let (atlas, cv) = (Mutex::new(GlyphAtlas::new(512, 512)), Condvar::new());
+        let (a, b) = (key('A'), key('B'));
+        {
+            let mut g = atlas.lock().unwrap();
+            g.baking.insert(a.clone());
+            g.baking.insert(b.clone());
+        }
+        Claim {
+            atlas: &atlas,
+            baked: &cv,
+            key: &a,
+            resets: 0,
+            published: false,
+        }
+        .publish(None);
+        drop(Claim {
+            atlas: &atlas,
+            baked: &cv,
+            key: &b,
+            resets: 0,
+            published: false,
+        });
+        let g = atlas.lock().unwrap();
+        assert!(g.entries.contains_key(&a), "'A' was published (inkless)");
+        assert!(!g.entries.contains_key(&b), "'B' never was");
+        assert!(g.baking.is_empty(), "both claims released");
+    }
+
+    // The guard `ensure_baked_in` packs behind: a reset drops the cache and
+    // moves the counter, and only the counter survives the re-init — so a bake
+    // that started before a reset can tell it must not pack.
+    #[test]
+    fn reset_clears_the_cache_and_advances_the_reset_counter() {
+        let (atlas, cv) = (Mutex::new(GlyphAtlas::new(512, 512)), Condvar::new());
+        ensure_baked_in(&atlas, &cv, vec![key('A')]);
+        let mut atlas = atlas.lock().unwrap();
+        assert_eq!(atlas.resets, 0);
+        assert_eq!(atlas.entries.len(), 1);
+        atlas.reset();
+        assert_eq!(atlas.resets, 1, "the counter moved");
+        assert!(atlas.entries.is_empty(), "the cache is gone");
+        atlas.reset();
+        assert_eq!(atlas.resets, 2, "and keeps counting across re-inits");
+    }
+
+    // A tile baked before a reset is not packed after it: the claim is still
+    // released, and the key stays absent for the locked layout to re-bake.
+    #[test]
+    fn a_tile_baked_across_a_reset_is_dropped() {
+        let (atlas, cv) = (Mutex::new(GlyphAtlas::new(512, 512)), Condvar::new());
+        let a = key('A');
+        let resets = {
+            let mut g = atlas.lock().unwrap();
+            g.baking.insert(a.clone());
+            g.resets
+        };
+        atlas.lock().unwrap().reset();
+        let tile = bake_glyph(&Face::resolve("txt").glyph('A').unwrap(), PEN_HALF_UNITS);
+        Claim {
+            atlas: &atlas,
+            baked: &cv,
+            key: &a,
+            resets,
+            published: false,
+        }
+        .publish(tile);
+        let g = atlas.lock().unwrap();
+        assert!(!g.entries.contains_key(&a), "stale tile dropped");
+        assert!(g.baking.is_empty(), "claim released all the same");
     }
 }

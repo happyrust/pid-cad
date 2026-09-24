@@ -2298,6 +2298,14 @@ impl MultiLeaderTess for MultiLeader {
                 // cluster-position data.
                 let mut deco_pts: Vec<[f32; 3]> = Vec::new();
                 let mut deco_fill: Vec<[f32; 3]> = Vec::new();
+                crate::scene::text::glyph_quads::prebake_runs(
+                    layout
+                        .strokes
+                        .iter()
+                        .filter_map(|ts| ts.run.as_ref())
+                        .filter(|run| !crate::scene::text::web_font::requires_shaping(&run.text))
+                        .map(|run| (run.font.as_str(), run.bold, run.height, run.text.as_str())),
+                );
                 if let Ok(mut atlas) = crate::scene::text::sdf_atlas::text_atlas().lock() {
                     for ts in &layout.strokes {
                         let is_shaped = ts

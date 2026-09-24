@@ -268,6 +268,12 @@ pub fn apply_along(
                     let resolved = resolve_dxf_special_chars(text);
                     // SDF: glyph quads at the insert point (rotation baked in by
                     // layout_glyph_quads), collected for the text wire.
+                    crate::scene::text::glyph_quads::prebake_runs([(
+                        style.as_str(),
+                        false,
+                        *tx_scale,
+                        resolved.as_str(),
+                    )]);
                     if let Ok(mut atlas) = crate::scene::text::sdf_atlas::text_atlas().lock() {
                         let quads = crate::scene::text::glyph_quads::layout_glyph_quads(
                             &mut atlas,
