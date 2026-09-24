@@ -185,6 +185,11 @@ strip = true
 [profile.dev.package.pid-parse]
 opt-level = 2
 
+# acadrust unoptimized reads a 5 MB DWG in ~240 ms and writes it back as DXF
+# in ~570 ms; at opt-level 2 in ~90 / ~450 ms.
+[profile.dev.package.acadrust]
+opt-level = 2
+
 [[bench]]
 name = "performance_benchmarks"
 harness = false
