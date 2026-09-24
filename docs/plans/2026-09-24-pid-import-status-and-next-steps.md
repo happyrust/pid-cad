@@ -167,7 +167,13 @@ run 的形状：`igTextBox` 形状 2 / 3 带 `(u16 长度, u16 选择子, u32 �
 - **四图 `--export` 逐实体比**（脚本按实体顺序比、去掉句柄类组码——换了文字样式表的图句柄会整体挪）：**非文字实体零差异，头变量零差异**；变的只有 TEXT：0201 23 条（字高 11、字高 + 样式 12）、0202 27 条（字高 13、字高 + 样式 12、只换样式 1、颜色 1）、D06 3 条（字高 2、字高 + 样式 1）、工艺 38 条（字高 11、字高 + 样式 27）；STYLE 表 D06 少了没人再用的 `PID-Arial`，工艺的 `PID-Braggadocio` 换成 `PID-Arial-Narrow`。比探针口径（30 / 33 / 4 / 39 条索引）少，是因为导入器只重设 `role=text` 的文字，落在符号名标签上的那几条照旧不动（`lettering_names_the_typeface…` 写着的范围）；0201 那一处颜色变化就在其中。
 - **新基线**（debug）：0201 `5F082D23…` 188 539 B / 0202 `6FABDF0F…` 189 298 B / D06 `907EB0A9…` 90 714 B / 工艺 `9D0A54BD…` 319 848 B。日志：0202 压平 1 条、工艺 10 条；字高回退 0201 1 / 0202 4 / 工艺 16 条（没变——那些记录两条路都落在 0.254 mm 哨兵上）。
 - `pid_import` 50 → **51**：`lettering_carries_the_height…`（0201：3.175 ×30 → ×21，2.469 ×15，另有 1.588 / 2.293 / 3.528 三个半磅值）与 `lettering_names_the_typeface…`（Arial 21 / Arial Narrow 8 → 9 / 20）按 run 重钉；颜色、对齐两条原样通过（对齐仍取段落）；新增 `a_label_letters_in_its_own_run_and_a_mixed_one_in_its_widest`（0201 `LIA` 2.469 mm、`PID-Arial-Narrow`、压平 0；工艺压平 10，管道号 `250-LNG-57602` 2.822 mm、`PID-Arial-Narrow`）。`--lib io::pid` **54/54**（往返单测多带 `lettering_flattened`）；clippy 在 `io::pid` 与 `pid_import` 零告警；rustfmt 干净。user-guide `.pid` 一节加「文字」一段。
+- 提交 OCS `fde369e8`。
 - 过程事故：第二遍 `pid_import` 编进了另一会话当时在 pid-parse `sheet_probe.rs` 上的临时改动（11:53 写入、随后还原成 HEAD），连通线相关三条测试红；确认 pid-parse `src` 干净后重跑全绿，前后各查一次 `git status -- src`。**OCS 按路径依赖 `../pid-parse`，别的会话正在改那棵树时本仓的验证会吃到半成品**——验证前后都看一眼 pid-parse `src` 是否干净。
+
+### T3（部分）
+
+- 台账已落：user-guide「文字」一段随 T2（`fde369e8`）；pid-parse `b1a4df4`——CHANGELOG 一条、08-22 分析头部标「已接线」、`task_plan.md` 指针。本单各项写了哈希。
+- **还差改前 / 改后标签特写**：`--export` 只写 DWG / DXF（试过 `.svg`：`unsupported output format`），截图只能走 GUI——与 V1 一起等桌面（会在桌面上开 OCS 窗口，先问过再做）。改前的图用今天存下的基线 DXF（与 `dbf62cb5` 导入字节相同）打开即可，不必回退代码。
 
 ## 门禁记录
 
