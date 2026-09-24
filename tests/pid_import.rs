@@ -500,11 +500,13 @@ fn a_cached_strokes_dash_is_its_own_storages_not_its_placements() {
     }
 }
 
-/// Lettering comes in at the height the drawing's character style states.
+/// Lettering comes in at the height the drawing states for it: the label's
+/// own character-style run, over its paragraph style's default.
 ///
-/// It used to be a flat ISO 2.5mm for every label, because the height was not
-/// reachable. Most of a P&ID's lettering turns out to be 1/8 inch, so that
-/// default was a quarter too small across the sheet.
+/// It used to be a flat ISO 2.5mm for every label, because no height was
+/// reachable; then the paragraph default, most of which is 1/8 inch; and
+/// since plan 2026-09-24 (T2) the run, which is what SmartPlant letters with
+/// wherever a label has one.
 #[test]
 fn lettering_carries_the_height_the_drawing_states() {
     let Some(doc) = import("DWG-0201GP06-01.pid") else {
@@ -534,19 +536,83 @@ fn lettering_carries_the_height_the_drawing_states() {
     // from the sheet before. See that crate's
     // `docs/analysis/2026-08-12-igtextbox-overhead-is-a-floor-not-a-constant.md`
     // and `docs/analysis/2026-08-13-igtextbox-has-three-shapes.md`.
+    //
+    // Then the runs (plan 2026-09-24, T2). Those were paragraph defaults:
+    // 3.175 held 30 labels and 2.500 nine; read off each label's own run,
+    // fifteen of them letter at 7 pt (2.469) and the defaults that stay are
+    // the labels whose run names the same style. 1.588 is 4.5 pt, 2.293 is
+    // 6.5 pt, 3.528 is 10 pt -- half points, the unit a text editor sets a
+    // size in. Of the two 2.500 left, one is the record whose style is
+    // refused outright (the fallback) and the other a run stating 2.5mm
+    // itself; see `pid-parse`'s
+    // `docs/analysis/2026-08-22-run-beats-paragraph-default.md`.
     let expected: std::collections::BTreeMap<String, usize> = [
-        ("1.500", 2),
+        ("1.500", 1),
         ("1.524", 1),
+        ("1.588", 1),
+        ("2.293", 1),
         ("2.464", 3),
-        ("2.500", 9),
-        ("3.175", 30),
-        ("3.500", 2),
+        ("2.469", 15),
+        ("2.500", 2),
+        ("3.175", 21),
+        ("3.528", 2),
         ("6.350", 1),
     ]
     .iter()
     .map(|(key, count)| ((*key).to_string(), *count))
     .collect();
     assert_eq!(heights, expected);
+}
+
+/// A label letters in its own character-style run rather than its paragraph
+/// style's default, and a label whose runs disagree letters in the widest one
+/// and is counted (plan 2026-09-24, T2 / N-D3).
+///
+/// `LIA` on DWG-0201 is the common case: its paragraph style defaults to 9 pt
+/// Arial (3.175mm), its run states 7 pt Arial Narrow (2.469mm), and the run is
+/// what SmartPlant letters it in. The gongyi sheet's line numbers are the
+/// flattening: segments in one character style and separators in another, so
+/// the one TEXT entity each becomes takes the segments' style, which covers
+/// most of the characters -- ten such labels there, none on DWG-0201.
+#[test]
+fn a_label_letters_in_its_own_run_and_a_mixed_one_in_its_widest() {
+    let Some((doc, summary)) = import_with_summary("DWG-0201GP06-01.pid") else {
+        return;
+    };
+    let lia: Vec<&acadrust::entities::Text> = on_sheet_text(&doc)
+        .filter_map(|entity| match entity {
+            EntityType::Text(text) if text.value == "LIA" => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lia.len(), 1, "DWG-0201 letters one LIA");
+    assert!(
+        (lia[0].height - 2.469).abs() < 0.001,
+        "LIA letters at its run's 7 pt, not the paragraph's 9 pt: {}",
+        lia[0].height
+    );
+    assert_eq!(lia[0].style, "PID-Arial-Narrow", "the run's face");
+    assert_eq!(
+        summary.lettering_flattened, 0,
+        "no label on DWG-0201 mixes letterings"
+    );
+
+    let Some((doc, summary)) = import_with_summary("工艺管道及仪表流程-1.pid") else {
+        return;
+    };
+    assert_eq!(summary.lettering_flattened, 10);
+    let line_number = on_sheet_text(&doc)
+        .find_map(|entity| match entity {
+            EntityType::Text(text) if text.value.starts_with("250-LNG-57602") => Some(text),
+            _ => None,
+        })
+        .expect("the gongyi sheet letters line number 250-LNG-57602");
+    assert!(
+        (line_number.height - 2.822).abs() < 0.001,
+        "the line number letters at its segments' 8 pt: {}",
+        line_number.height
+    );
+    assert_eq!(line_number.style, "PID-Arial-Narrow");
 }
 
 /// Rotated lettering arrives in the unit the drawing model uses: radians.
@@ -866,9 +932,14 @@ fn lettering_names_the_typeface_the_drawing_states() {
     // carries any style nothing currently names. `Standard` is the one label
     // whose style resolution fails outright, keeping the fallback height,
     // colour and alignment along with the default face.
+    //
+    // Arial Narrow letters most of the sheet since the face comes from each
+    // label's own run (plan 2026-09-24, T2): twelve labels whose paragraph
+    // default is Arial -- tag letters, line numbers, `H=` / `L=` notes --
+    // state Arial Narrow in their runs. It was 21 Arial / 8 Arial Narrow.
     let expected_used: std::collections::BTreeMap<String, usize> = [
-        ("PID-Arial", 21),
-        ("PID-Arial-Narrow", 8),
+        ("PID-Arial", 9),
+        ("PID-Arial-Narrow", 20),
         ("PID-宋体", 18),
         ("Standard", 1),
     ]

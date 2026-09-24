@@ -24,6 +24,7 @@ fn the_summary_round_trips_through_its_properties_and_take_removes_them() {
     summary.cache_bodies = 20;
     summary.library_bodies = 3;
     summary.hidden_strokes_skipped = 31;
+    summary.lettering_flattened = 10;
     summary.symbol_library = vec![
         PathBuf::from(r"\\server\Plant\Ref\Symbols"),
         PathBuf::from("D:/sym with spaces/=and=equals"),

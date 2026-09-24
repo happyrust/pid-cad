@@ -434,7 +434,7 @@ pub fn load_pid(path: &Path) -> Result<PidImport, String> {
         path,
         &geometry,
         library.as_ref(),
-        styles.style_tables_failed,
+        &styles,
         unit,
         built,
         &mut doc,
@@ -492,7 +492,7 @@ fn finish(
     path: &Path,
     geometry: &NormalizedPidGeometry,
     library: Option<&SymbolLibrary>,
-    style_tables_failed: bool,
+    styles: &Styles,
     unit: ImportUnit,
     built: Built,
     doc: &mut CadDocument,
@@ -546,7 +546,7 @@ fn finish(
         drawn,
         decoded,
         missing,
-        style_tables_failed,
+        style_tables_failed: styles.style_tables_failed,
         sheet_layers: sheet_layer_distribution.len(),
         layered_entities: sheet_layer_distribution.values().sum(),
         unresolved_sheet_layers: sheet_layer_distribution
@@ -573,6 +573,7 @@ fn finish(
         cache_bodies: symbol_bodies.cache,
         library_bodies: symbol_bodies.library,
         hidden_strokes_skipped: symbol_bodies.hidden_strokes_skipped,
+        lettering_flattened: styles.lettering_flattened,
         symbol_library: library
             .map(|library| library.roots().to_vec())
             .unwrap_or_default(),

@@ -63,6 +63,11 @@ pub struct ImportSummary {
     /// symbol-internal layer they sit on off (P-D2), summed over the
     /// placements whose cache was consulted.
     pub hidden_strokes_skipped: usize,
+    /// Text records whose own character-style runs disagree -- a line number
+    /// alternating two styles between its segments and its separators -- so
+    /// the one TEXT entity each becomes letters in the run covering most of
+    /// its characters (plan 2026-09-24, N-D3). Logged, not shown.
+    pub lettering_flattened: usize,
     /// The symbol library roots the import found -- `PID_SYMBOL_LIBRARY` or
     /// the `.sym` tree above the drawing -- and drew its library bodies
     /// from. Empty when no library was found. Where a placement's body came
@@ -273,7 +278,7 @@ impl ImportSummary {
     }
 
     /// The counted fields, by the keys they are stored under.
-    pub(super) fn counts(&self) -> [(&'static str, usize); 14] {
+    pub(super) fn counts(&self) -> [(&'static str, usize); 15] {
         [
             ("drawn", self.drawn),
             ("decoded", self.decoded),
@@ -289,6 +294,7 @@ impl ImportSummary {
             ("cache_bodies", self.cache_bodies),
             ("library_bodies", self.library_bodies),
             ("hidden_strokes_skipped", self.hidden_strokes_skipped),
+            ("lettering_flattened", self.lettering_flattened),
         ]
     }
 
@@ -309,6 +315,7 @@ impl ImportSummary {
             "cache_bodies" => &mut self.cache_bodies,
             "library_bodies" => &mut self.library_bodies,
             "hidden_strokes_skipped" => &mut self.hidden_strokes_skipped,
+            "lettering_flattened" => &mut self.lettering_flattened,
             _ => return None,
         })
     }
@@ -332,6 +339,7 @@ impl ImportSummary {
             cache_bodies: 0,
             library_bodies: 0,
             hidden_strokes_skipped: 0,
+            lettering_flattened: 0,
             symbol_library: Vec::new(),
             unit: ImportUnit::AssumedMetre,
         }
@@ -461,7 +469,6 @@ pub(super) fn report_import(
             path.display()
         );
     }
-
     // A marker dot is a placement neither body reached: the drawing caches
     // nothing drawable for it and the library has no `.sym` for it (or was
     // not found). On the corpus every placement has a cached body, so this

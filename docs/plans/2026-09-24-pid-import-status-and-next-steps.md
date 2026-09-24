@@ -158,7 +158,16 @@ run 的形状：`igTextBox` 形状 2 / 3 带 `(u16 长度, u16 选择子, u32 �
 
 - `src/io/pid.rs` → `src/io/pid/`：`mod.rs`（常量 / 图层分类 / `PidImport` / `load_pid` / `prepare_document` / `finish` / `ensure_layer`）、`summary.rs`（`ImportSummary` / `ImportUnit` / `report_import`）、`styles.rs`（`Styles` / `resolve_styles` / 线型 / 填充 / `apply_symbology`）、`text.rs`（字高 / 颜色 / 对齐 / 拆行 / 文字样式）、`build.rs`（`Built` / `build_document_entities` / `build_entities` / `build_inferred`）、`metadata.rs`（`attach_pid_metadata` / `PlacementMeasures`）、`page.rs`（页框 / `Projection` / `Bounds` / 取景）、`symbols.rs`（缓存 / 库本体与笔画）、`tests.rs`。
 - 只搬不改：脚本按顶层条目切（条目前紧贴的注释 / 属性随条目走），挪出去的条目、结构字段与方法一律 `pub(super)`，`mod.rs` 逐个 `use self::<子模块>::*`、子模块 `use super::*`；对外的 `ImportSummary` / `ImportUnit` / `SUMMARY_PROPERTY_PREFIX` 由 `mod.rs` `pub use` 出去，`crate::io::pid::…` 路径不变；随后 rustfmt（只有换行）。
-- 验证：`cargo check --lib --tests` 干净；`--lib io::pid` **54/54**、`--test pid_import` **50/50**；**四图 `--export` 与基线 SHA-256 逐一相等**（`2B1022B5…` / `340ED098…` / `763CAD1A…` / `B04C7215…`，此时 pid-parse 已含 T1——T1 是加法，不改输出）。
+- 验证：`cargo check --lib --tests` 干净；`--lib io::pid` **54/54**、`--test pid_import` **50/50**；**四图 `--export` 与基线 SHA-256 逐一相等**（`2B1022B5…` / `340ED098…` / `763CAD1A…` / `B04C7215…`，此时 pid-parse 已含 T1——T1 是加法，不改输出）。提交 OCS `9eaf8593`。
+- 顺带的可见变化：日志的 target 从 `OpenCADStudio::io::pid` 变成 `…::io::pid::summary` / `…::styles` 等子模块；`RUST_LOG=OpenCADStudio::io::pid=info` 这类按前缀的过滤照旧生效。
+
+### T2（OCS，本次提交）
+
+- `resolve_styles` 改吃 `text_styles_for_document`，`Styles.text_heights` 装每条的 `effective()`（run 的字高 / 颜色 / 字体 + 段落的对齐 / 行距）——下游 `height_for` / `register_text_styles` / 实体循环一行没改。`ImportSummary.lettering_flattened`（随文档属性穿管线，`counts()` 14 → 15）+ `resolve_styles` 里一行 info 日志（N-D3）。`finish` 改收 `&Styles`，免得参数过 clippy 的七个。
+- **四图 `--export` 逐实体比**（脚本按实体顺序比、去掉句柄类组码——换了文字样式表的图句柄会整体挪）：**非文字实体零差异，头变量零差异**；变的只有 TEXT：0201 23 条（字高 11、字高 + 样式 12）、0202 27 条（字高 13、字高 + 样式 12、只换样式 1、颜色 1）、D06 3 条（字高 2、字高 + 样式 1）、工艺 38 条（字高 11、字高 + 样式 27）；STYLE 表 D06 少了没人再用的 `PID-Arial`，工艺的 `PID-Braggadocio` 换成 `PID-Arial-Narrow`。比探针口径（30 / 33 / 4 / 39 条索引）少，是因为导入器只重设 `role=text` 的文字，落在符号名标签上的那几条照旧不动（`lettering_names_the_typeface…` 写着的范围）；0201 那一处颜色变化就在其中。
+- **新基线**（debug）：0201 `5F082D23…` 188 539 B / 0202 `6FABDF0F…` 189 298 B / D06 `907EB0A9…` 90 714 B / 工艺 `9D0A54BD…` 319 848 B。日志：0202 压平 1 条、工艺 10 条；字高回退 0201 1 / 0202 4 / 工艺 16 条（没变——那些记录两条路都落在 0.254 mm 哨兵上）。
+- `pid_import` 50 → **51**：`lettering_carries_the_height…`（0201：3.175 ×30 → ×21，2.469 ×15，另有 1.588 / 2.293 / 3.528 三个半磅值）与 `lettering_names_the_typeface…`（Arial 21 / Arial Narrow 8 → 9 / 20）按 run 重钉；颜色、对齐两条原样通过（对齐仍取段落）；新增 `a_label_letters_in_its_own_run_and_a_mixed_one_in_its_widest`（0201 `LIA` 2.469 mm、`PID-Arial-Narrow`、压平 0；工艺压平 10，管道号 `250-LNG-57602` 2.822 mm、`PID-Arial-Narrow`）。`--lib io::pid` **54/54**（往返单测多带 `lettering_flattened`）；clippy 在 `io::pid` 与 `pid_import` 零告警；rustfmt 干净。user-guide `.pid` 一节加「文字」一段。
+- 过程事故：第二遍 `pid_import` 编进了另一会话当时在 pid-parse `sheet_probe.rs` 上的临时改动（11:53 写入、随后还原成 HEAD），连通线相关三条测试红；确认 pid-parse `src` 干净后重跑全绿，前后各查一次 `git status -- src`。**OCS 按路径依赖 `../pid-parse`，别的会话正在改那棵树时本仓的验证会吃到半成品**——验证前后都看一眼 pid-parse `src` 是否干净。
 
 ## 门禁记录
 

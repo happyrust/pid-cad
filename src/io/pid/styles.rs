@@ -15,8 +15,12 @@ pub(super) struct Styles {
     pub(super) styles: LineStyleIndex,
     /// What the drawing calls each style.
     pub(super) style_names: StyleNameIndex,
-    /// Character height, colour, alignment and typeface per text record.
+    /// Character height, colour, alignment and typeface per text record: the
+    /// record's own run lettering over its paragraph default.
     pub(super) text_heights: pid_parse::style_link::TextHeightIndex,
+    /// Text records whose runs disagree and were lettered in the widest one.
+    /// See [`ImportSummary::lettering_flattened`].
+    pub(super) lettering_flattened: usize,
     /// Which boundary rings the drawing fills.
     pub(super) fills: pid_parse::style_link::FillIndex,
     /// The document linetype registered for each pooled dash pattern.
@@ -93,12 +97,42 @@ pub(super) fn resolve_styles(
     for source in sources {
         log::info!("{}: styles were read from {source}", path.display());
     }
-    // Character height comes from the same table, one hop further along: a
-    // text record names a paragraph style, and the height is on the character
-    // style that paragraph style names. Most of a P&ID's lettering turns out
-    // to be 1/8 inch, so `TEXT_HEIGHT_MM` was reading a quarter too small.
-    // Records whose height does not resolve keep that fallback.
-    let text_heights = pid_parse::style_link::text_heights_for_document(parsed);
+    // Lettering comes from the same table, by two routes. A text record names
+    // a paragraph style whose character style is the paragraph's *default*;
+    // the record's own character-style runs override it, and where a record
+    // has runs they cover every character. So height, colour and typeface
+    // come from the run and alignment and line spacing from the paragraph,
+    // which only it states (plan 2026-09-24, N-D2; pid-parse's
+    // `docs/analysis/2026-08-22-run-beats-paragraph-default.md`). Until then
+    // the default was all that was read, and 106 of the corpus's 155 labels
+    // lettered in the wrong size or face -- 7 pt line numbers drawn at 9 pt,
+    // Arial Narrow drawn as Braggadocio. Records neither route resolves keep
+    // the `TEXT_HEIGHT_MM` fallback.
+    let text_styles = pid_parse::style_link::text_styles_for_document(parsed);
+    let text_heights: pid_parse::style_link::TextHeightIndex = text_styles
+        .iter()
+        .filter_map(|(key, style)| style.effective().map(|lettering| (key.clone(), lettering)))
+        .collect();
+    // Labels lettered in more than one character style -- a line number's
+    // segments in one and its separators in another, a superscript `3` in
+    // `m^3`. A TEXT entity carries one style, so each is drawn in the run that
+    // covers most of its characters, and the flattening is said rather than
+    // made quietly.
+    let lettering_flattened = text_styles
+        .values()
+        .filter(|style| {
+            matches!(
+                style.runs,
+                pid_parse::style_link::TextRunStatus::Flattened { .. }
+            )
+        })
+        .count();
+    if lettering_flattened > 0 {
+        log::info!(
+            "{}: {lettering_flattened} text record(s) carry character-style runs in more than one lettering; each is lettered in the run covering most of its characters",
+            path.display()
+        );
+    }
     // Which areas the drawing fills. `pid-parse` resolves an `igBoundary2d`
     // ring through its `JStyleOverride` to a `JStyleSimpleFill`; the fill's
     // own colour is not decoded, so a filled ring is drawn in its layer's
@@ -140,6 +174,7 @@ pub(super) fn resolve_styles(
         styles,
         style_names,
         text_heights,
+        lettering_flattened,
         fills,
         dash_linetypes,
         font_styles,
