@@ -174,6 +174,15 @@ run 的形状：`igTextBox` 形状 2 / 3 带 `(u16 长度, u16 选择子, u32 �
 
 - 台账已落：user-guide「文字」一段随 T2（`fde369e8`）；pid-parse `b1a4df4`——CHANGELOG 一条、08-22 分析头部标「已接线」、`task_plan.md` 指针。本单各项写了哈希。
 - **还差改前 / 改后标签特写**：`--export` 只写 DWG / DXF（试过 `.svg`：`unsupported output format`），截图只能走 GUI——与 V1 一起等桌面（会在桌面上开 OCS 窗口，先问过再做）。改前的图用今天存下的基线 DXF（与 `dbf62cb5` 导入字节相同）打开即可，不必回退代码。
+- **✅ 同日补齐**（用户「可以用桌面」）：`docs/evidence/2026-09-24-pid-gui-check/0201-tags-before-after.png`——仪表位号窗口 (350, 248)–(395, 292)，改前 DXF / 改后 DXF / 改后直接开 `.pid` 三联：
+  改前 3.175 mm 的 `060101` 比气泡还宽，改后 2.469 mm 放得进气泡，直接开 `.pid` 按 Arial Narrow 画。顺带看到另存 DXF 重开时文字退成 `txt` 笔画字体（STYLE 组码 3 为 `txt`），
+  是 DXF 往返的旧问题，登记在证据 README，不在本单。**T3 完成。**
+
+### V1（同日，桌面自动化）
+
+- ⑤ 单三行：打开 0201 的 `.pid`，F2 看命令行——三行文案照旧、没有单位回退那一行，第一行「没画」为 0（pid-parse `686c9d5` 之后）；另存的 DXF 重新打开无 P&ID 导入行。⑤ 单验收行改标 ✅。
+- 图层槽单 H4：图层管理器「图层」视图截图——原图图层名、`Heat Trace` / `Hidden` / `HiddenObjects` / `Label` 为关；`LAYER` 命令打印的表另有 `PID-FRAME` 开、`PID-CONNECTIVITY` / `PID-SYMBOL-LABEL` 关。该单头部改标。
+- 证据全在 `docs/evidence/2026-09-24-pid-gui-check/`。**V1 完成**；V2（逐笔线宽、SmartPlant 三例）仍等 SmartPlant 截图。
 
 ### H2（pid-parse `8a83602`，只定性不改码）
 

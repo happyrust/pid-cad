@@ -6,7 +6,7 @@
 > **2026-09-22 用户「批准 ⑤ 单九条决策并开工 Q1–Q3」→ 九条按推荐放行；Q1–Q3 已落地（OCS `edc6b495`，见「进度」）。**
 > 落地时 **Q-D2 的载体改了**：不是 XRecord，而是文档自定义属性（`summary_info.custom_properties`，`PID_IMPORT_SUMMARY.<字段>`）——
 > XRecord 要花一个句柄、分配器不退，取走后 `$HANDSEED` 与导入后所有对象句柄整体 +1，四图 `--export` 对不上字节；属性不花句柄，取走后文档一字不差。
-> 决策的本意（随文档穿通用管线、开图完成时取走、不落盘）不变。**Q4 拆段已落地（OCS `ec14ce55`，四图 `--export` 与 `edc6b495` 字节相同）**；Q5 台账已落地（本次提交 + pid-parse 审核 / task_plan）。**本单关闭**；只剩 GUI 三行核对等空桌面。
+> 决策的本意（随文档穿通用管线、开图完成时取走、不落盘）不变。**Q4 拆段已落地（OCS `ec14ce55`，四图 `--export` 与 `edc6b495` 字节相同）**；Q5 台账已落地（本次提交 + pid-parse 审核 / task_plan）。**本单关闭**；只剩 GUI 三行核对等空桌面——**2026-09-24 已补**（OCS `docs/evidence/2026-09-24-pid-gui-check/`，计划 `2026-09-24-pid-import-status-and-next-steps.md` V1）。
 
 ## 一句话
 
@@ -56,7 +56,9 @@
 - `rg "IMPORT_SUMMARIES|take_import_summary|SUMMARY_MAILBOX" src tests examples` 零命中。**✅ 09-22 零命中**（`docs/user-guide.md` 也零）。
 - `pid_import` 全绿，条数 49 + 新增（Q-D9 ①②③）；`--lib io::pid` 不降。**✅ `pid_import` 49 → 50、`--lib io::pid` 52 → 54、`--lib i18n::` 3/3（21 语种键齐）。**
 - 四图 `--export` DXF 与 `bbdc3d80` 的二进制**字节相同**（Q1–Q3 后一次、Q4 后再一次）；另存 DWG 的字典里无 `PID_IMPORT_SUMMARY`。**✅ Q1–Q3 后一次：基线取 `2e9e10f5`（G4 已证与 `bbdc3d80` 字节相同）debug 版四图，`edc6b495` 四图 SHA-256 逐一相等**（0201 188 308 B / 0202 189 053 B / D06 90 882 B / 工艺 319 578 B）；另存无记录由 `the_summary_rides_the_document_once_and_is_never_saved` 钉（DWG / DXF 各一次）。**✅ Q4 后再一次：`ec14ce55` 四图与 `edc6b495` 四图 SHA-256 逐一相等**（`2B1022B5…` / `340ED098…` / `763CAD1A…` / `B04C7215…`，与 `2e9e10f5` 那份同值——三版一条线）。
-- GUI：打开 0201，命令行三行摘要与今天一字不差（单位是米，不多半句）；打开后立即另存 `.dwg` 再打开，命令行不再出 P&ID 导入行。**未验证**（会话无桌面；三行文案与 `t!` 键未动，多出的一行只在 `unit.is_assumed()` 时出，四图都 `Stated m`——由 `import_with_summary` 三处与新测试的 `unit` 断言钉）。
+- GUI：打开 0201，命令行三行摘要与今天一字不差（单位是米，不多半句）；打开后立即另存 `.dwg` 再打开，命令行不再出 P&ID 导入行。**✅ 2026-09-24 补验**（桌面自动化截图，
+  `docs/evidence/2026-09-24-pid-gui-check/`）：三行文案照旧、没有单位那半句，只有第一行的「没画」因 pid-parse `686c9d5` 从 1 变 0；由 `.pid` 另存的 DXF（与另存 DWG 同一条
+  `io::save`）重新打开，命令行只有「打开了 … 实体」，无 P&ID 导入行。以下是当时的记录：**未验证**（会话无桌面；三行文案与 `t!` 键未动，多出的一行只在 `unit.is_assumed()` 时出，四图都 `Stated m`——由 `import_with_summary` 三处与新测试的 `unit` 断言钉）。
 
 ## 登记不做
 
