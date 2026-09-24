@@ -180,6 +180,11 @@ iced = { path = "../iced", features = ["webgl", "fira-sans"] }
 [profile.release]
 strip = true
 
+# pid-parse's sheet probe is hash-map heavy; unoptimized it takes ~290 ms to
+# parse a dense drawing like DWG-0201 in a debug build, ~80 ms at opt-level 2.
+[profile.dev.package.pid-parse]
+opt-level = 2
+
 [[bench]]
 name = "performance_benchmarks"
 harness = false
