@@ -1,4 +1,4 @@
-# `.pid` 解析与显示 · 现状盘点与下一步 · 开发计划（2026-09-24 开单，同日批准）
+# `.pid` 解析与显示 · 现状盘点与下一步 · 开发计划（2026-09-24 开单，同日批准；除 V2 / B2 外同日落地）
 
 > 用户 2026-09-24（zhimo 会话 opus-5-5-1）：「分析 D:\work\plant-code\cad\OpenCADStudio 现在PID文件解析和显示的实现进度。并使用plannator 制定下一步的计划」。
 > 基线：OCS `dbf62cb5`（= `pid-cad/main`；`ec14ce55` 之后只有文档提交）；pid-parse `681681c`（`codex/phase32c-bundle-closeout`，= origin）。
