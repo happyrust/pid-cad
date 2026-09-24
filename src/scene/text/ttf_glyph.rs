@@ -540,35 +540,57 @@ fn build_shaped(family: &str, text: &str) -> Option<ShapedRun> {
         None => Attrs::new().family(Family::Name(family)),
     };
 
-    let mut fs = font_system().lock().unwrap();
-    let mut buf = Buffer::new(&mut fs, Metrics::new(SHAPE_FS, SHAPE_FS));
-    // No wrapping: a run is a single line.
-    buf.set_size(&mut fs, None, None);
-    buf.set_text(&mut fs, text, &attrs, Shaping::Advanced, None);
-    buf.shape_until_scroll(&mut fs, false);
+    // Under the shared FontSystem's lock only what needs it: the shaping, and
+    // the shaper's answer per glyph — where it goes, which glyph of which font
+    // (an `Arc`, so the face bytes outlive the lock). Outlining and
+    // triangulating the glyphs used to happen under this lock as well, which
+    // queued every tessellation worker's text behind one core: on a 5 MB
+    // drawing the lock was held 6.8 s for 1 970 runs, 0.6 s of it shaping,
+    // while the other workers waited a summed 150 s. That work now runs
+    // unlocked, on the worker that asked.
+    let (line_widths, shaped): (Vec<f32>, Vec<ShapedGlyph>) = {
+        let mut fs = font_system().lock().unwrap();
+        let mut buf = Buffer::new(&mut fs, Metrics::new(SHAPE_FS, SHAPE_FS));
+        // No wrapping: a run is a single line.
+        buf.set_size(&mut fs, None, None);
+        buf.set_text(&mut fs, text, &attrs, Shaping::Advanced, None);
+        buf.shape_until_scroll(&mut fs, false);
+
+        let mut line_widths = Vec::new();
+        let mut shaped = Vec::new();
+        for run in buf.layout_runs() {
+            line_widths.push(run.line_w);
+            for g in run.glyphs.iter() {
+                let face_index = fs.db_mut().face(g.font_id).map(|f| f.index).unwrap_or(0);
+                shaped.push(ShapedGlyph {
+                    glyph_id: g.glyph_id,
+                    x: g.x,
+                    x_offset: g.x_offset,
+                    y_offset: g.y_offset,
+                    font: fs.get_font(g.font_id, g.font_weight),
+                    face_index,
+                });
+            }
+        }
+        (line_widths, shaped)
+    };
 
     if primary_metrics.is_none() {
-        for run in buf.layout_runs() {
-            for g in run.glyphs.iter() {
-                if g.glyph_id == 0 {
-                    continue;
-                }
-                let face_index = fs.db_mut().face(g.font_id).map(|f| f.index).unwrap_or(0);
-                if let Some(font) = fs.get_font(g.font_id, g.font_weight) {
-                    if let Ok(face) = ttf_parser::Face::parse(font.data(), face_index) {
-                        let upem = face.units_per_em() as f32;
-                        let cap = face
-                            .capital_height()
-                            .filter(|&c| c > 0)
-                            .map(|c| c as f32)
-                            .unwrap_or(0.7 * upem);
-                        primary_metrics = Some((upem, cap));
-                        break;
-                    }
-                }
+        for g in &shaped {
+            if g.glyph_id == 0 {
+                continue;
             }
-            if primary_metrics.is_some() {
-                break;
+            if let Some(font) = &g.font {
+                if let Ok(face) = ttf_parser::Face::parse(font.data(), g.face_index) {
+                    let upem = face.units_per_em() as f32;
+                    let cap = face
+                        .capital_height()
+                        .filter(|&c| c > 0)
+                        .map(|c| c as f32)
+                        .unwrap_or(0.7 * upem);
+                    primary_metrics = Some((upem, cap));
+                    break;
+                }
             }
         }
     }
@@ -577,37 +599,36 @@ fn build_shaped(family: &str, text: &str) -> Option<ShapedRun> {
     // Pixel (at SHAPE_FS) → 9-unit cap-height factor.
     let px_to_9 = CAP_UNITS * upem_p / (SHAPE_FS * cap_p);
 
-    let mut glyphs: Vec<PlacedGlyph> = Vec::new();
     let mut advance = 0.0_f32;
-    for run in buf.layout_runs() {
-        advance = advance.max(run.line_w * px_to_9);
-        for g in run.glyphs.iter() {
-            let face_index = fs.db_mut().face(g.font_id).map(|f| f.index).unwrap_or(0);
-            let Some(font) = fs.get_font(g.font_id, g.font_weight) else {
-                continue;
-            };
-            let Ok(face) = ttf_parser::Face::parse(font.data(), face_index) else {
-                continue;
-            };
-            let upem_g = face.units_per_em() as f32;
-            // Glyph font-units → 9-unit: to pixels (at SHAPE_FS) then to units.
-            let scale_g = (SHAPE_FS / upem_g) * px_to_9;
-            // Absolute pen position (px) → 9-unit. `physical()` shows x_offset /
-            // y_offset are fractions of font size.
-            let pen_x = (g.x + SHAPE_FS * g.x_offset) * px_to_9;
-            let pen_y = -(SHAPE_FS * g.y_offset) * px_to_9; // outlines are y-up
+    for line_w in line_widths {
+        advance = advance.max(line_w * px_to_9);
+    }
+    let mut glyphs: Vec<PlacedGlyph> = Vec::new();
+    for g in &shaped {
+        let Some(font) = &g.font else {
+            continue;
+        };
+        let Ok(face) = ttf_parser::Face::parse(font.data(), g.face_index) else {
+            continue;
+        };
+        let upem_g = face.units_per_em() as f32;
+        // Glyph font-units → 9-unit: to pixels (at SHAPE_FS) then to units.
+        let scale_g = (SHAPE_FS / upem_g) * px_to_9;
+        // Absolute pen position (px) → 9-unit. `physical()` shows x_offset /
+        // y_offset are fractions of font size.
+        let pen_x = (g.x + SHAPE_FS * g.x_offset) * px_to_9;
+        let pen_y = -(SHAPE_FS * g.y_offset) * px_to_9; // outlines are y-up
 
-            let mut fl = OutlineFlattener::new(scale_g);
-            fl.offset = [pen_x, pen_y];
-            face.outline_glyph(ttf_parser::GlyphId(g.glyph_id), &mut fl);
-            fl.flush();
-            if !fl.contours.is_empty() {
-                let fill_tris = triangulate_contours(&fl.contours);
-                glyphs.push(PlacedGlyph {
-                    strokes: fl.contours,
-                    fill_tris,
-                });
-            }
+        let mut fl = OutlineFlattener::new(scale_g);
+        fl.offset = [pen_x, pen_y];
+        face.outline_glyph(ttf_parser::GlyphId(g.glyph_id), &mut fl);
+        fl.flush();
+        if !fl.contours.is_empty() {
+            let fill_tris = triangulate_contours(&fl.contours);
+            glyphs.push(PlacedGlyph {
+                strokes: fl.contours,
+                fill_tris,
+            });
         }
     }
 
@@ -615,6 +636,21 @@ fn build_shaped(family: &str, text: &str) -> Option<ShapedRun> {
         return None;
     }
     Some(ShapedRun { glyphs, advance })
+}
+
+/// What the shaper decided for one glyph of a run, carried out of the
+/// `font_system` lock so the outline work can happen without it: the pen
+/// position (px at `SHAPE_FS`, offsets as fractions of the font size), the
+/// glyph id, and the resolved font with its face index — `None` when the
+/// FontSystem could not load that font (the glyph is then skipped, as before).
+#[cfg(not(target_arch = "wasm32"))]
+struct ShapedGlyph {
+    glyph_id: u16,
+    x: f32,
+    x_offset: f32,
+    y_offset: f32,
+    font: Option<Arc<cosmic_text::Font>>,
+    face_index: u32,
 }
 
 #[cfg(test)]
