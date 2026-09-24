@@ -35,7 +35,7 @@
 
 | 项 | 现状 | 出处 |
 |---|---|---|
-| 入口 | `src/io/pid.rs` 3 879 行；`load_pid` 41 行编排：`prepare_document` → 找符号库 → `resolve_styles` → 读单位 → `build_document_entities` → `finish`，返回 `PidImport { document, summary }` | ⑤ 单 |
+| 入口 | `src/io/pid.rs` 4 033 行（开单时误记为非空行数 3 879；S 之后拆成 `src/io/pid/` 九个文件）；`load_pid` 41 行编排：`prepare_document` → 找符号库 → `resolve_styles` → 读单位 → `build_document_entities` → `finish`，返回 `PidImport { document, summary }` | ⑤ 单 |
 | 四图今天实测 | 0201 334 实体 / 206 条记录 / 1 条没画；0202 313 / 179 / 4；D06 59 / 25 / 0；工艺 686 / 427 / 8；缓存本体 20 / 23 / 6 / 58，库本体全 0 | 本单「验证」 |
 | 字节基线 | 四图 `--export` SHA-256 = `2B1022B5…` / `340ED098…` / `763CAD1A…` / `B04C7215…`，与 `2e9e10f5` / `edc6b495` / `ec14ce55` 三版相同；单图导入 + 导出 0.4–0.9 s（debug） | 本单「验证」；⑤ 单 |
 | 用户看得到的 | 只读源（`Ctrl+S` 改另存 DWG）；文件关联；导入摘要三行 + 单位回退一行（21 语种）；原图图层名与显隐；图层管理器「图纸图层」视图与 `PID_VIEW_FILTER`；特性面板 P&ID 组（类型 / 角色 / 本体尺寸 / 驱动尺寸库默认 / 本图实例 / 位号 / 图纸图层）；XDATA `PID_SEMANTICS` 随 DWG / DXF 保存 | user-guide `.pid` 一节 |
@@ -49,7 +49,7 @@
 | 2 | ⑤ 单 GUI 三行核对；图层槽单 H4 截图 | 验收欠账 | 当时无桌面 / 桌面被占 |
 | 3 | 逐笔线宽 vs 放置线宽；SmartPlant 截图对三例复核（09-19 P-D8） | 待裁 | 要一张 SmartPlant 截图 |
 | 4 | 0202 四条 `0x0084`、0201 一条 `0x00FA` 拒收 | 未定性 | 没人量过（工艺八条已判正确） |
-| 5 | `src/io/pid.rs` 3.9k 行拆不拆模块 | 结构 | ⑤ 单说「等 G4 / ⑤ 都落地后看」——已落地 |
+| 5 | `src/io/pid.rs` 4k 行拆不拆模块 | 结构 | ⑤ 单说「等 G4 / ⑤ 都落地后看」——已落地 |
 | 6 | pid-parse `main` 落后工作分支 181 个提交（无分叉、可快进；本地 `main` 另有 5 个未推，都已含在工作分支里） | 仓库卫生 | OCS 按路径依赖 `../pid-parse`，谁把它切回 `main` 谁编不过 |
 | 7 | B 系 / ANSI 页幅、英制单位、`igDimension` / `igBalloon` / `igLeader`、JDim 其余 7 种、`0x0010` 子记录、A01 `Default` 计数差 4 | 语料缺口 | 本机只有 4 张不同的 `.pid`（全盘按 CFB 魔数扫过）+ A01 |
 
@@ -143,6 +143,22 @@ run 的形状：`igTextBox` 形状 2 / 3 带 `(u16 长度, u16 选择子, u32 �
 - 全盘（`D:\work`，深 6 层）按 CFB 魔数找 `.pid`：12 个文件，只有 4 张不同的图（0201 / 0202 / D06 / 工艺），外加 publish 目录的 A01。
 - **未重跑**：OCS `pid_import` / `--lib io::pid`——共享 target 的 `deps` 已被清空，冷编译太久，本轮不插队；数字取 ⑤ 单 09-22 的记录。
   08-22 run 探针的数字取自分析文档，T1 第一步复现。
+
+## 进度
+
+### T1（pid-parse `886c431`）
+
+- `IgTextBoxRun` / `DecodedTextRun`：解码器把形状 2 的那一条（`+22`，即它本来就在校验的 `count | 0x10000` 加 `+26` 样式 id）与形状 3 文本之后的 `A + B` 条交出来，DTO `runs`（`serde` 空则不写，`geometry.entities` 的 golden 不受影响）。
+- `DocumentStyleTable::resolve_run_style`（一跳、只认 `JStyleTextChar`，N-D4）/ `::paragraph_layout`（段落的对齐 / 行距，不经第二跳）；`text_styles_for_document` / `_for_file` → `ResolvedTextStyle { paragraph, run, runs: TextRunStatus, alignment, line_spacing }`，`effective()` = run 的字高 / 颜色 / 字体 + 段落的对齐 / 行距（N-D2）；打架时取覆盖字符最多的样式（平局取先出现的，N-D3）。`text_heights_for_document` 一字未动（N-D5：留一轮）。
+- 棘轮（`style_link_ratchet` 15 → 17）：四图 177 条 `igTextBox`（形状 1 / 2 / 3 = 10 / 155 / 12），选择子 1 / 2 = 257 / 12，选择子 1 全部指 `JStyleTextChar`（08-22 在六个 fixture 上数到的 7 条异类不在这四张图里），带 run 的 167 条 run 长度和全部等于字符数；155 条索引里 `uniform` 134 / `flattened x2` 11 / 无 run 10，**会变 106（字高 103、字体 54、颜色 2）、不变 49**，字体迁移 `Arial → Arial Narrow` 40 / `Arial → 仿宋_GB2312` 3 / `Braggadocio → Arial Narrow` 11——与 08-22 探针逐数相同；段落解不出、靠 run 救回来的 0 条（0.254 mm 那几条两条路都落在哨兵上）。`3.175 mm 是最常见字高` 那条注释改成「这是段落默认」。
+- 验证：`--lib` 1118、`parse_real_files` 135、`render_gap_census` 4、`geometry_profile` 2、golden 1、`semantic_join` 2、`sheet_family_wiring` 1 全绿；`clippy --all-targets -D warnings` 零告警；rustfmt 干净。
+- 过程记录：同一时段另一会话在 pid-parse 提交了 `8968bd7`（`sheet_probe` 性能），T1 叠在它上面，文件不相交。
+
+### S（OCS，本次提交）
+
+- `src/io/pid.rs` → `src/io/pid/`：`mod.rs`（常量 / 图层分类 / `PidImport` / `load_pid` / `prepare_document` / `finish` / `ensure_layer`）、`summary.rs`（`ImportSummary` / `ImportUnit` / `report_import`）、`styles.rs`（`Styles` / `resolve_styles` / 线型 / 填充 / `apply_symbology`）、`text.rs`（字高 / 颜色 / 对齐 / 拆行 / 文字样式）、`build.rs`（`Built` / `build_document_entities` / `build_entities` / `build_inferred`）、`metadata.rs`（`attach_pid_metadata` / `PlacementMeasures`）、`page.rs`（页框 / `Projection` / `Bounds` / 取景）、`symbols.rs`（缓存 / 库本体与笔画）、`tests.rs`。
+- 只搬不改：脚本按顶层条目切（条目前紧贴的注释 / 属性随条目走），挪出去的条目、结构字段与方法一律 `pub(super)`，`mod.rs` 逐个 `use self::<子模块>::*`、子模块 `use super::*`；对外的 `ImportSummary` / `ImportUnit` / `SUMMARY_PROPERTY_PREFIX` 由 `mod.rs` `pub use` 出去，`crate::io::pid::…` 路径不变；随后 rustfmt（只有换行）。
+- 验证：`cargo check --lib --tests` 干净；`--lib io::pid` **54/54**、`--test pid_import` **50/50**；**四图 `--export` 与基线 SHA-256 逐一相等**（`2B1022B5…` / `340ED098…` / `763CAD1A…` / `B04C7215…`，此时 pid-parse 已含 T1——T1 是加法，不改输出）。
 
 ## 门禁记录
 
