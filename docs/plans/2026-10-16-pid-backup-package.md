@@ -156,3 +156,15 @@ flowchart TD
 - **Oracle exp 包**：`Export.dmp` 为 Oracle 导出文本流的包（本次实测语料的形态）。
 - **MTF/SQL Server 包**：`Export.dmp` 为磁带格式包 SQL Server MDF 的包（v1 提示不支持）。
 - **图纸行**：`PackageDrawingRow` = `BackupDrawing`（库登记）+ 图体定位（zip 成员/散放文件）+ 物项加载态。
+
+## 8. 进度 / 门禁记录
+
+> 2026-10-19 补记。实施在工作树 `ocs-pkg-1016`（分支 `pid-backup-package`，父 `fd3998788`），非计划里的「主工作树新分支」——D6 的落点是同名分支挂独立工作树。
+
+- **阶段 A（pid-parse，`codex/phase32c-bundle-closeout`）**：P1 feature 拆分与 P2 `BackupDrawing` 扩字段（`description`/`title`/`revision`/`version`/`document_type`/`document_category`/`item_status`/`template`/`design_phase`/`project_number`/`date_created`/`drawing_date`）都已落，含在 `ea15e5d` 里。OCS 侧 `Cargo.toml` 已换 `default-features = false, features = ["backup-exp"]`，`Cargo.lock` 净删 206 行（oxidized-mdf/rusqlite 出树）。
+- **阶段 B/C（OCS）**：压成一个提交 `e2856363d`「P&ID: browse SmartPlant backup packages (Oracle exp) (pid-cad#5)」，`+1664/−215`、21 文件。T1–T9 全在里面：`io/plant_package.rs`（733 行，含 7 个模块内单测）、`PidImportOptions.symbol_roots`（Copy 已放掉）、`Message::PlantPackage` 流、`PanelId::PlantPackage`（FOLDER 图标、宽 300）、`ui/window/plant_package.rs`（484 行）、`OPENPACKAGE`/`PLANTPACKAGE`/`PLANTPACKAGECLOSE` 命令族、`AppConfig.packages` 最近包列表、File 菜单项。
+- **i18n 偏差**：T8 写的「21 locale 新键」没走 `tr!` 键路——实现用的是 `t!`/`tf!` 源串兼容路（`locale_catalog::message_attribute` 查表、查不到回退英文原文），零新增 ftl 键；`--lib i18n::tests` 60/60 绿，门禁不挡。未入源目录的串在非英文界面显示英文。
+- **T10/T11（提交 `129eb3e43`）**：新增 `tests/plant_package.rs`（已登记 `[[test]]`，`autotests = false` 下必需），软跳过 `../pid-parse/test-file/backup-test/DWG-0202GP06-01_p`：配对/解出/`load_pid_with`+`symbol_roots` 导入/物项懒加载/无 dump 降级目录共 **5/5 过**。门禁跑出来的真问题并已修：`tests/pid_import.rs:4028` 的 `PidImportOptions` 字面量缺 `symbol_roots`，`--tests` 编译断裂，补 `..Default::default()`。
+- **门禁数字（2026-10-19，`ocs-pkg-1016`）**：`cargo check --lib --tests --examples` 绿（两条既有告警在非本分支文件：`io/plot.rs` `target_dpi`、`command.rs:5182` unused `Task`）；`cargo check --locked --target wasm32-unknown-unknown` 绿（清单级 unused-dependency 告警为上游既有，零新增 wasm 面，`io/mod.rs:34` 已 cfg 门）；`cargo test --lib i18n::tests io::pid` 60/60；触碰文件 rustfmt 干净（`ocs_save` drift 属上游）。
+- **T12 部分**：`real_package_acceptance -- --ignored` 对 `D:\work\cad\pid-test-data` **过**——74 489 856 B dump、`T_GLOBALDRAWING` 53 行、`load_package` 自报约 0.08 s（包内 `Ref` 符号树已在盘上，不碰 RefData 解压）。**GUI 人工验收未做**：分组列表/属性页签/双击开图的画面核对需要人在机器前，见 `docs/evidence/2026-10-16-pid-backup-package/README.md`。
+- **落地前注意**：分支落后 main 2 个提交（`d6c065978`、`f37fc2628`，都碰 `src/io/pid/`），合并前先解；`pid-parse` 检出带另一会话未提交的 igtextbox 改动，本次所有数字是在该实情下跑出来的。
