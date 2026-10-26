@@ -57,18 +57,13 @@ impl OpenCADStudio {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn start_pid_pdf(&mut self, i: usize, arg: &str) -> Task<Message> {
-        use crate::io::pid_pdf;
-        let Some(drawing) = self.tabs[i]
-            .current_path
-            .clone()
-            .filter(|path| pid_pdf::is_pid(path))
-        else {
+        let Some(drawing) = self.pid_source(i) else {
             self.command_line
                 .push_error("PIDPLOT: the active drawing was not opened from a .pid file.");
             return Task::none();
         };
         let target = if arg.is_empty() {
-            pid_pdf::default_target(&drawing)
+            crate::io::pid_pdf::default_target(&drawing)
         } else {
             let mut target = std::path::PathBuf::from(arg);
             if target.is_relative() {
@@ -81,20 +76,58 @@ impl OpenCADStudio {
             }
             target
         };
+        self.plot_pid_pdf(drawing, target)
+    }
+
+    /// The `.pid` file tab `i` was opened from, if it was.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn pid_source(&self, i: usize) -> Option<std::path::PathBuf> {
+        self.tabs[i]
+            .current_path
+            .clone()
+            .filter(|path| crate::io::pid_pdf::is_pid(path))
+    }
+
+    /// EXPORT / EXPORTPDF / Plot to a PDF file, for a drawing opened from a
+    /// `.pid`: pid-parse's plotter makes the file, as PIDPLOT does, so the
+    /// export is the sheet SmartPlant prints. An SVG target, or any other
+    /// drawing, stays with the plot pipeline (`None`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn export_pid_pdf(
+        &mut self,
+        i: usize,
+        target: &std::path::Path,
+    ) -> Option<Task<Message>> {
+        let drawing = self.pid_source(i)?;
+        if !target
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+        {
+            return None;
+        }
+        self.command_line.push_info(
+            "PDF export of a .pid: pid-parse's plotter draws the sheet; the plot dialog's paper, scale and plot style settings do not apply.",
+        );
+        Some(self.plot_pid_pdf(drawing, target.to_path_buf()))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn plot_pid_pdf(
+        &mut self,
+        drawing: std::path::PathBuf,
+        target: std::path::PathBuf,
+    ) -> Task<Message> {
         if target == drawing {
             self.command_line
                 .push_error("PIDPLOT: the PDF cannot replace the drawing itself.");
             return Task::none();
         }
-        if self.tabs[i].dirty {
-            self.command_line.push_info(
-                "PIDPLOT: the plot is made from the .pid on disk; edits made here are not in it.",
-            );
-        }
-        self.command_line
-            .push_output(&format!("PIDPLOT: plotting {} ...", drawing.display()));
+        self.command_line.push_output(&format!(
+            "PIDPLOT: plotting {} (the .pid on disk; edits made here are not in it) ...",
+            drawing.display()
+        ));
         Task::perform(
-            pid_pdf::plot_pdf_in_background(drawing, target),
+            crate::io::pid_pdf::plot_pdf_in_background(drawing, target),
             Message::PidPdfFinished,
         )
     }

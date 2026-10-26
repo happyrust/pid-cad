@@ -5540,6 +5540,10 @@ impl OpenCADStudio {
         path: std::path::PathBuf,
     ) -> Task<Message> {
         let i = self.active_tab;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(task) = self.export_pid_pdf(i, &path) {
+            return task;
+        }
         if self.tabs[i].scene.current_layout != "Model" {
             self.plot_dialog.paper_space = true;
             self.plot_dialog.scales = self.tabs[i]

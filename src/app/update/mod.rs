@@ -11720,6 +11720,14 @@ impl OpenCADStudio {
                     .and_then(|p: &std::path::Path| p.file_stem())
                     .map(|s: &std::ffi::OsStr| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "drawing".into());
+                // A `.pid` usually sits next to SmartPlant's own print of the
+                // sheet under `<name>.pdf`; offer a name that leaves it alone.
+                #[cfg(not(target_arch = "wasm32"))]
+                let stem = if self.pid_source(i).is_some() {
+                    format!("{stem}.pidplot")
+                } else {
+                    stem
+                };
                 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "windows")))]
                 {
                     let Some(window_id) = self.main_window else {
