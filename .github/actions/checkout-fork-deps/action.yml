@@ -17,6 +17,12 @@ inputs:
 runs:
   using: composite
   steps:
+    # Git for Windows defaults to core.autocrlf=true, which rewrites the
+    # checked-out sources to CRLF and makes the LF patches below miss.
+    - name: Disable CRLF conversion
+      shell: bash
+      run: git config --global core.autocrlf false
+
     # iced is used through a three-commit fork of iced-rs/iced. The branch
     # lives only in the developer checkout, so CI rebuilds it from the
     # upstream base plus .github/ci/iced-wgpu-30.patch.
@@ -46,9 +52,13 @@ runs:
         patches="$GITHUB_WORKSPACE/${{ inputs.workspace }}/.github/ci"
         for pair in "iced iced-wgpu-30.patch" "cryoglyph cryoglyph-wgpu-30.patch"; do
           set -- $pair
-          git -C "$GITHUB_WORKSPACE/$1" config core.autocrlf false
-          git -C "$GITHUB_WORKSPACE/$1" apply --check "$patches/$2"
-          git -C "$GITHUB_WORKSPACE/$1" apply "$patches/$2"
+          repo="$GITHUB_WORKSPACE/$1"
+          git -C "$repo" config core.autocrlf false
+          # Rewrite the worktree from the (LF) index in case the checkout
+          # happened before the global setting above took effect.
+          git -C "$repo" checkout-index --force --all
+          git -C "$repo" apply --check "$patches/$2"
+          git -C "$repo" apply "$patches/$2"
         done
 
     - name: Checkout bevy
