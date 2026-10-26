@@ -10,7 +10,7 @@ inputs:
     required: false
     default: pid-cad
   native-deps:
-    description: Also clone bevy and the e3d-* readers (needed by native builds).
+    description: Also clone the e3d-* readers (needed by native builds).
     required: false
     default: 'true'
 
@@ -61,8 +61,9 @@ runs:
           git -C "$repo" apply "$patches/$2"
         done
 
+    # Cargo loads the optional bevy manifest for every target, even when the
+    # bevy3d feature is off, so this checkout cannot be native-gated.
     - name: Checkout bevy
-      if: inputs.native-deps == 'true'
       uses: actions/checkout@v4
       with:
         repository: bevyengine/bevy
