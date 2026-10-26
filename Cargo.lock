@@ -3724,6 +3724,7 @@ dependencies = [
 [[package]]
 name = "hayro"
 version = "0.7.1"
+source = "git+https://github.com/happyrust/pid-parse?rev=d0a58c64c413fce57fd78a5816857648c7aacbbb#d0a58c64c413fce57fd78a5816857648c7aacbbb"
 dependencies = [
  "bytemuck",
  "hayro-interpret",
@@ -3753,6 +3754,7 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.7.0"
+source = "git+https://github.com/happyrust/pid-parse?rev=d0a58c64c413fce57fd78a5816857648c7aacbbb#d0a58c64c413fce57fd78a5816857648c7aacbbb"
 dependencies = [
  "bitflags 2.13.1",
  "hayro-cmap",
@@ -3795,6 +3797,7 @@ checksum = "885c5ef0654933139a9b9546fc2c69e18d37f38aa2520f079092b1be18f1fcaa"
 [[package]]
 name = "hayro-syntax"
 version = "0.7.2"
+source = "git+https://github.com/happyrust/pid-parse?rev=d0a58c64c413fce57fd78a5816857648c7aacbbb#d0a58c64c413fce57fd78a5816857648c7aacbbb"
 dependencies = [
  "flate2",
  "hayro-ccitt",
@@ -5038,6 +5041,7 @@ dependencies = [
 [[package]]
 name = "lopdf"
 version = "0.45.0"
+source = "git+https://github.com/happyrust/pid-parse?rev=d0a58c64c413fce57fd78a5816857648c7aacbbb#d0a58c64c413fce57fd78a5816857648c7aacbbb"
 dependencies = [
  "aes 0.9.3",
  "bitflags 2.13.1",
@@ -6183,6 +6187,7 @@ dependencies = [
 [[package]]
 name = "oxidized-mdf"
 version = "0.3.1"
+source = "git+https://github.com/happyrust/pid-parse?rev=d0a58c64c413fce57fd78a5816857648c7aacbbb#d0a58c64c413fce57fd78a5816857648c7aacbbb"
 dependencies = [
  "bitvec",
  "chrono",
@@ -6430,6 +6435,7 @@ checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
 [[package]]
 name = "pid-parse"
 version = "0.11.7"
+source = "git+https://github.com/happyrust/pid-parse?rev=d0a58c64c413fce57fd78a5816857648c7aacbbb#d0a58c64c413fce57fd78a5816857648c7aacbbb"
 dependencies = [
  "base64",
  "cfb",
@@ -6452,6 +6458,7 @@ dependencies = [
 [[package]]
 name = "pid-plot"
 version = "0.1.0"
+source = "git+https://github.com/happyrust/pid-parse?rev=d0a58c64c413fce57fd78a5816857648c7aacbbb#d0a58c64c413fce57fd78a5816857648c7aacbbb"
 dependencies = [
  "fontcull-klippa",
  "fontcull-read-fonts",
