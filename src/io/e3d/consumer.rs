@@ -1,4 +1,4 @@
-//! Pour an [`E3dSceneBatch`] into `CadDocument` and `Scene`.
+//! Pour an [`E3dSceneBatch`] into `Document` and `Scene`.
 //!
 //! Compiles on native and `wasm32`. The only input is the platform-neutral
 //! batch (`contract`), so this module does not link `e3d-model`.
@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use codec::entities::{EntityType, Line, Point, Polyline3D, Vertex3DPolyline};
 use codec::types::{Matrix4, Transform, Vector3};
 use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::CadDocument;
+use codec::Document;
 
 use crate::io::E3D_SEMANTICS_XDATA_APP;
 use crate::scene::model::mesh_model::{MeshLodSet, MeshModel};
@@ -148,7 +148,7 @@ fn clear_ingested(scene: &mut Scene) {
     }
 }
 
-fn ensure_dashed_linetype(document: &mut CadDocument) {
+fn ensure_dashed_linetype(document: &mut Document) {
     if document.line_types.contains(E3D_DASH_LINETYPE) {
         return;
     }

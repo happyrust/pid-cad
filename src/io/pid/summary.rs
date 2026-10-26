@@ -186,7 +186,7 @@ pub const SUMMARY_PROPERTY_PREFIX: &str = "PID_IMPORT_SUMMARY.";
 impl ImportSummary {
     /// Write the summary into `doc` as custom document properties, one per
     /// field under [`SUMMARY_PROPERTY_PREFIX`], replacing any already there.
-    pub fn store(&self, doc: &mut CadDocument) {
+    pub fn store(&self, doc: &mut Document) {
         Self::remove(doc);
         let properties = &mut doc.summary_info.custom_properties;
         let mut push = |key: &str, value: String| {
@@ -212,7 +212,7 @@ impl ImportSummary {
     }
 
     /// The summary `doc` carries, if any, leaving it in place.
-    pub fn load(doc: &CadDocument) -> Option<Self> {
+    pub fn load(doc: &Document) -> Option<Self> {
         let mut carried = false;
         let mut summary = Self::empty();
         let mut unit: Option<String> = None;
@@ -260,14 +260,14 @@ impl ImportSummary {
     /// The summary `doc` carries, taken off it: what the open-completion
     /// handler calls, so the headline is shown once and never saved. Leaves
     /// the document exactly as it was before [`ImportSummary::store`].
-    pub fn take(doc: &mut CadDocument) -> Option<Self> {
+    pub fn take(doc: &mut Document) -> Option<Self> {
         let summary = Self::load(doc)?;
         Self::remove(doc);
         Some(summary)
     }
 
     /// Drop the summary's properties from `doc`, if any are there.
-    pub(super) fn remove(doc: &mut CadDocument) {
+    pub(super) fn remove(doc: &mut Document) {
         doc.summary_info
             .custom_properties
             .retain(|(tag, _)| !tag.starts_with(SUMMARY_PROPERTY_PREFIX));

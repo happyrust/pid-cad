@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::OnceLock;
 
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 use regex::Regex;
 use serde::Deserialize;
 
@@ -345,7 +345,7 @@ fn point_segment_distance(p: Point, a: Point, b: Point) -> f64 {
 
 /// The pipe strokes of the sheet as two-point segments with the handle of
 /// the entity each was read from, drawing units.
-fn pipe_segments(doc: &CadDocument, rules: &PipeRules) -> Vec<PipeStroke> {
+fn pipe_segments(doc: &Document, rules: &PipeRules) -> Vec<PipeStroke> {
     let mut segments = Vec::new();
     for entity in doc.model_space_entities() {
         if !rules.is_pipe_layer(&entity.common().layer) {
@@ -517,7 +517,7 @@ fn snap_vertices(segments: &[(Point, Point)], snap: f64) -> (Vec<Point>, Vec<(us
 /// symbols' connection points by symbol index; `lettering` is the sheet's
 /// text with its anchor.
 pub fn trace(
-    doc: &CadDocument,
+    doc: &Document,
     upm: f64,
     rules: &PipeRules,
     ports: &[(usize, Port)],

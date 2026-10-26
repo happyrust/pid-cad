@@ -1,4 +1,4 @@
-use codec::CadDocument;
+use codec::Document;
 use std::path::PathBuf;
 use OpenCADStudio::io::{load_file, save_as_version};
 
@@ -14,12 +14,12 @@ fn sample_path(name: &str) -> Option<PathBuf> {
     Some(acadsharp_samples_dir()?.join(name))
 }
 
-fn read_sample(name: &str) -> Option<CadDocument> {
+fn read_sample(name: &str) -> Option<Document> {
     let path = sample_path(name)?;
     Some(load_file(&path).unwrap_or_else(|e| panic!("load {}: {e}", path.display())))
 }
 
-fn assert_core_tables(doc: &CadDocument, sample: &str) {
+fn assert_core_tables(doc: &Document, sample: &str) {
     // Some samples are legitimately entity-less: `empty.dwg` is an empty
     // drawing, and `geoloc.dwg` only carries GeoData objects (ACadSharp's own
     // test asserts just the GeoData dictionary entry). Core tables must still

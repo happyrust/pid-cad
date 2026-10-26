@@ -41,7 +41,7 @@ use std::time::Instant;
 
 use codec::entities::{Arc as AcadArc, Circle, Ellipse, Line, LwPolyline, LwVertex};
 use codec::types::{Vector2, Vector3};
-use codec::{CadDocument, DxfReader, DxfWriter, EntityType};
+use codec::{Document, DxfReader, DxfWriter, EntityType};
 use glam::{DVec3, Mat4, Vec3};
 use iced::{Color, Point, Rectangle};
 
@@ -641,7 +641,7 @@ fn bench_dxf_io_throughput(runner: &mut BenchmarkRunner) {
     }
 
     let n_entities = if runner.quick_mode { 1_000 } else { 5_000 };
-    let mut doc = CadDocument::new();
+    let mut doc = Document::new();
 
     for i in 0..n_entities {
         let x = (i % 100) as f64 * 20.0;
@@ -701,7 +701,7 @@ fn bench_dxf_io_throughput(runner: &mut BenchmarkRunner) {
 
     runner.record(
         "dxf_import_parse_throughput",
-        "Parsing DXF stream of 5,000 entities into CadDocument",
+        "Parsing DXF stream of 5,000 entities into Document",
         "ms",
         read_samples,
         Some((read_throughput_mb, "MB/s")),
@@ -853,7 +853,7 @@ fn bench_ui_ribbon_view_construction(runner: &mut BenchmarkRunner) {
 
     // Warm-up for allocator and tree settling
     for _ in 0..10 {
-        let _ = black_box(ribbon.view(false, false, 0, 0, false));
+        let _ = black_box(ribbon.view(false, false, 0, 0, false, None));
     }
 
     let n = if runner.quick_mode { 20 } else { 100 };
@@ -863,7 +863,7 @@ fn bench_ui_ribbon_view_construction(runner: &mut BenchmarkRunner) {
     for _ in 0..runs {
         let t0 = Instant::now();
         for _ in 0..n {
-            let elem = ribbon.view(false, false, 0, 0, false);
+            let elem = ribbon.view(false, false, 0, 0, false, None);
             black_box(elem);
         }
         let per_us = (t0.elapsed().as_micros() as f64) / (n as f64);
@@ -1133,7 +1133,7 @@ fn bench_ui_plotstyle_layer_usage(runner: &mut BenchmarkRunner) {
         return;
     }
 
-    let mut doc = CadDocument::new();
+    let mut doc = Document::new();
     for i in 0..200 {
         let mut layer = codec::tables::Layer::new(&format!("LAYER_{i:03}"));
         layer.handle = doc.allocate_handle();
@@ -1535,6 +1535,9 @@ fn build_selection_overlay_element(
             is_hot: false,
             is_hovered: false,
             dir: None,
+            is_plugin: false,
+            is_authoring: false,
+            is_dynamic: false,
         })
         .collect();
     let ucs_icons = vec![UcsIconParams {
@@ -1555,6 +1558,7 @@ fn build_selection_overlay_element(
     selection_overlay(
         selection,
         Some((Point::new(400.0, 300.0), SnapType::Endpoint)),
+        None,
         None,
         None,
         grips,
@@ -1584,14 +1588,32 @@ fn build_selection_overlay_element(
             snap_angle_deg: 0.0,
             point_mode: false,
             pick_pending: false,
+            matchprop_source_pick: false,
+            matchprop_pickbox: false,
             hide_arms: false,
+            short_arms: false,
             snap_color: None,
+            snap_size: Default::default(),
         },
+        false,
         SelectionVisualOptions::default(),
         empty_glyphs,
         empty_selected,
         None,
         None,
+        None,
+        vec![],
+        vec![],
+        OpenCADStudio::ui::overlay::authoring::AuthoringVisualOptions {
+            action: iced::Color::WHITE,
+            parameter: iced::Color::WHITE,
+            grip: iced::Color::WHITE,
+            grip_size: 8.0,
+            text_size: 12.0,
+            font: String::new(),
+            horizontal: true,
+        },
+        Default::default(),
     )
 }
 

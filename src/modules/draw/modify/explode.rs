@@ -11,6 +11,9 @@
 //     Insert      → constituent entities (via opencadcodec explode_from_document)
 //     MLine       → Lines (spine + offset lines per miter direction)
 //     Dimension   → Lines (extension + dimension + arrows) + Text
+//     MText       → Text lines
+//     Region      → Lines, Arcs, Circles, Ellipses, Splines (from ACIS B-Rep loops or wires)
+//     Hatch       → Lines of its pattern, clipped to the boundary (not solid/gradient)
 //
 //   Unsupported entity types are skipped silently.
 
@@ -24,7 +27,7 @@ use codec::entities::{
 use codec::entities::{Polyline, Polyline2D};
 use codec::tables::BlockRecord;
 use codec::types::Vector3;
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 
 use crate::command::{CadCommand, CmdResult, WorkingPlane};
 use crate::entities::curve::lwpolyline_world_xy;
@@ -61,7 +64,7 @@ pub fn explode_polyline_segments(entity: &EntityType) -> Vec<EntityType> {
 
 /// Decompose an entity into its constituent simple entities.
 /// Returns an empty vec if the entity cannot be exploded.
-pub fn explode_entity(entity: &EntityType, document: &CadDocument) -> Vec<EntityType> {
+pub fn explode_entity(entity: &EntityType, document: &Document) -> Vec<EntityType> {
     match entity {
         EntityType::Line(line) => {
             let Some(association) =
@@ -98,21 +101,28 @@ pub fn explode_entity(entity: &EntityType, document: &CadDocument) -> Vec<Entity
         {
             vec![]
         }
+        // The codec's explode_from_document refuses a MINSERT; expand it cell
+        // by cell from the block's entities instead.
         EntityType::Insert(ins) => ins
-            .explode_from_document(document)
+            .block_entities_from_document(document)
+            .map(|entities| ins.explode(&entities))
+            .unwrap_or_default()
             .into_iter()
+            .filter(|entity| !crate::scene::block_construction::is_construction(entity.common()))
             .map(normalize_insert_entity)
             .collect(),
         EntityType::MLine(ml) => explode_mline(ml),
         EntityType::Dimension(dim) => explode_dimension(dim, document),
         EntityType::MText(t) => crate::entities::mtext::explode_mtext(t, document),
+        EntityType::Region(region) => explode_region(region),
+        EntityType::Hatch(hatch) => explode_hatch(hatch),
         _ => vec![],
     }
 }
 
 /// Explode every entity; one piece list per input, input order preserved,
 /// empty lists kept. Used by benchmarks and regression tests.
-pub fn explode_batch(items: &[(Handle, &EntityType)], doc: &CadDocument) -> Vec<Vec<EntityType>> {
+pub fn explode_batch(items: &[(Handle, &EntityType)], doc: &Document) -> Vec<Vec<EntityType>> {
     items.iter().map(|(_, e)| explode_entity(e, doc)).collect()
 }
 
@@ -120,7 +130,7 @@ pub fn explode_batch(items: &[(Handle, &EntityType)], doc: &CadDocument) -> Vec<
 /// order-preserving, empty pieces dropped (matching the command arm).
 pub fn plan_explode(
     selected: &[(Handle, &EntityType)],
-    doc: &CadDocument,
+    doc: &Document,
 ) -> Vec<(Handle, Vec<EntityType>)> {
     selected
         .iter()
@@ -427,6 +437,477 @@ fn explode_mline(ml: &MLine) -> Vec<EntityType> {
     result
 }
 
+// ── Hatch explode ──────────────────────────────────────────────────────────
+
+/// The pattern lines exactly as the renderer draws them, lifted from world XY
+/// back onto the hatch plane. Solid and gradient fills yield nothing, so they
+/// stay intact and are reported as not explodable.
+fn explode_hatch(hatch: &codec::entities::Hatch) -> Vec<EntityType> {
+    let Some(model) = crate::scene::Scene::hatch_model_from_dxf(hatch, [1.0; 4]) else {
+        return vec![];
+    };
+    let plane = crate::entities::curve::ocs_plane(hatch.normal, hatch.elevation);
+    let lift = |xy: [f64; 2]| plane.coordinates_at_xy(xy).map(|uv| plane.point_at(uv));
+    let mut common = hatch.common.clone();
+    common.handle = Handle::NULL;
+    common.owner_handle = Handle::NULL;
+    common.xdictionary_handle = None;
+    common.reactors.clear();
+    model
+        .pattern_segments()
+        .into_iter()
+        .filter_map(|[a, b]| {
+            let (a, b) = (lift(a)?, lift(b)?);
+            Some(EntityType::Line(LineEnt {
+                common: common.clone(),
+                start: Vector3::new(a[0], a[1], a[2]),
+                end: Vector3::new(b[0], b[1], b[2]),
+                ..LineEnt::new()
+            }))
+        })
+        .collect()
+}
+
+// ── Region explode ─────────────────────────────────────────────────────────
+
+fn region_piece_common(region: &codec::entities::Region) -> EntityCommon {
+    let mut common = region.common.clone();
+    common.handle = Handle::NULL;
+    common.owner_handle = Handle::NULL;
+    common.xdictionary_handle = None;
+    common.reactors.clear();
+    common
+}
+
+fn explode_region(region: &codec::entities::Region) -> Vec<EntityType> {
+    let common = region_piece_common(region);
+    let mut out = Vec::new();
+
+    if region.acis_data.has_data() {
+        let sat = region.parse_sat().or_else(|| {
+            (region.acis_data.is_binary && !region.acis_data.sab_data.is_empty())
+                .then(|| codec::entities::acis::SabReader::read(&region.acis_data.sab_data).ok())
+                .flatten()
+        });
+        if let Some(sat) = sat {
+            let (bodies, _loss) = kernel::acis::lift(&sat);
+            for body in &bodies {
+                for face in body.face_keys() {
+                    if let Some(profile) = kernel::brep::planar_face_profile(body, face) {
+                        append_region_loops(&profile.plane, &profile.loops, &common, &mut out);
+                    }
+                }
+            }
+        }
+        if out.is_empty() {
+            if let Some((plane, loops, _)) = crate::scene::model::presspull_model::profile_geometry(
+                &EntityType::Region(region.clone()),
+            ) {
+                append_region_loops(&plane, &loops, &common, &mut out);
+            }
+        }
+        return out;
+    }
+
+    // Fallback for synthetic/legacy wire-only regions without ACIS payload.
+    for wire in &region.wires {
+        for pair in wire.points.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            if (b - a).length() <= 1e-12 {
+                continue;
+            }
+            out.push(EntityType::Line(LineEnt {
+                common: common.clone(),
+                start: a,
+                end: b,
+                ..LineEnt::new()
+            }));
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone)]
+struct CircularPiece {
+    centre: [f64; 2],
+    radius: f64,
+    start_pt: [f64; 2],
+    mid_pt: [f64; 2],
+    end_pt: [f64; 2],
+    sweep: f64,
+}
+
+fn as_circular_piece(curve: &kernel::geom2d::Curve) -> Option<CircularPiece> {
+    use kernel::geom2d::Curve;
+    match curve {
+        Curve::Circle(circle) if circle.radius > 1e-12 => {
+            let centre = circle.centre;
+            let radius = circle.radius;
+            let start_pt = [centre[0] + radius, centre[1]];
+            let mid_pt = [centre[0] - radius, centre[1]];
+            let end_pt = start_pt;
+            Some(CircularPiece {
+                centre,
+                radius,
+                start_pt,
+                mid_pt,
+                end_pt,
+                sweep: std::f64::consts::TAU,
+            })
+        }
+        Curve::Arc(arc) if arc.radius > 1e-12 => {
+            let centre = arc.centre;
+            let radius = arc.radius;
+            let pt_at = |ang: f64| [centre[0] + radius * ang.cos(), centre[1] + radius * ang.sin()];
+            let start_pt = pt_at(arc.start_angle);
+            let end_pt = pt_at(arc.end_angle);
+            let diff = (arc.end_angle - arc.start_angle).abs();
+            let sweep = if diff <= 1e-12 || (diff - std::f64::consts::TAU).abs() <= 1e-6 {
+                std::f64::consts::TAU
+            } else {
+                diff
+            };
+            let mid_pt = if (sweep - std::f64::consts::TAU).abs() <= 1e-6 {
+                pt_at(arc.start_angle + std::f64::consts::PI)
+            } else {
+                pt_at((arc.start_angle + arc.end_angle) * 0.5)
+            };
+            Some(CircularPiece {
+                centre,
+                radius,
+                start_pt,
+                mid_pt,
+                end_pt,
+                sweep,
+            })
+        }
+        Curve::Ellipse(arc) => {
+            let maj = arc.ellipse.major_radius;
+            let min = arc.ellipse.minor_radius;
+            if maj > 1e-12 && (min - maj).abs() <= 1e-6 * (1.0 + maj) {
+                let centre = arc.ellipse.centre;
+                let radius = (maj + min) * 0.5;
+                let start_pt = arc.ellipse.point_at(arc.start_parameter);
+                let end_pt = arc.ellipse.point_at(arc.end_parameter);
+                let diff = (arc.end_parameter - arc.start_parameter).abs();
+                let sweep = if (arc.sweep() - std::f64::consts::TAU).abs() <= 1e-6
+                    || diff <= 1e-12
+                    || (diff - std::f64::consts::TAU).abs() <= 1e-6
+                {
+                    std::f64::consts::TAU
+                } else {
+                    diff
+                };
+                let mid_pt = if (sweep - std::f64::consts::TAU).abs() <= 1e-6 {
+                    arc.ellipse.point_at(arc.start_parameter + std::f64::consts::PI)
+                } else {
+                    arc.ellipse.point_at((arc.start_parameter + arc.end_parameter) * 0.5)
+                };
+                Some(CircularPiece {
+                    centre,
+                    radius,
+                    start_pt,
+                    mid_pt,
+                    end_pt,
+                    sweep,
+                })
+            } else {
+                None
+            }
+        }
+        Curve::Nurbs(nurbs) => {
+            let p0 = nurbs.point_at(0.0);
+            let p1 = nurbs.point_at(0.5);
+            let p2 = nurbs.point_at(1.0);
+            let d = 2.0 * (p0[0] * (p1[1] - p2[1]) + p1[0] * (p2[1] - p0[1]) + p2[0] * (p0[1] - p1[1]));
+            if d.abs() > 1e-12 {
+                let p0_sq = p0[0] * p0[0] + p0[1] * p0[1];
+                let p1_sq = p1[0] * p1[0] + p1[1] * p1[1];
+                let p2_sq = p2[0] * p2[0] + p2[1] * p2[1];
+                let cx = (p0_sq * (p1[1] - p2[1]) + p1_sq * (p2[1] - p0[1]) + p2_sq * (p0[1] - p1[1])) / d;
+                let cy = (p0_sq * (p2[0] - p1[0]) + p1_sq * (p0[0] - p2[0]) + p2_sq * (p1[0] - p0[0])) / d;
+                let r = (p0[0] - cx).hypot(p0[1] - cy);
+                if r > 1e-12 {
+                    let tol = 1e-5 * (1.0 + r);
+                    let mut is_circle = true;
+                    for step in 1..16 {
+                        let t = step as f64 / 16.0;
+                        let pt = nurbs.point_at(t);
+                        if ((pt[0] - cx).hypot(pt[1] - cy) - r).abs() > tol {
+                            is_circle = false;
+                            break;
+                        }
+                    }
+                    if is_circle {
+                        let th0 = (p0[1] - cy).atan2(p0[0] - cx);
+                        let th1 = (p1[1] - cy).atan2(p1[0] - cx);
+                        let th2 = (p2[1] - cy).atan2(p2[0] - cx);
+                        let ccw_span = |from: f64, to: f64| {
+                            let mut s = to - from;
+                            while s < 0.0 {
+                                s += std::f64::consts::TAU;
+                            }
+                            while s >= std::f64::consts::TAU {
+                                s -= std::f64::consts::TAU;
+                            }
+                            s
+                        };
+                        let sweep = if ccw_span(th0, th1) <= ccw_span(th0, th2) {
+                            ccw_span(th0, th2)
+                        } else {
+                            ccw_span(th2, th0)
+                        };
+                        let sweep = if sweep <= 1e-12 {
+                            std::f64::consts::TAU
+                        } else {
+                            sweep
+                        };
+                        return Some(CircularPiece {
+                            centre: [cx, cy],
+                            radius: r,
+                            start_pt: p0,
+                            mid_pt: p1,
+                            end_pt: p2,
+                            sweep,
+                        });
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn append_region_loops(
+    plane: &kernel::space::Plane,
+    loops: &[Vec<kernel::geom2d::Curve>],
+    common: &EntityCommon,
+    out: &mut Vec<EntityType>,
+) {
+    use kernel::geom2d::Curve;
+    let Some(normal_arr) = plane.normal() else {
+        return;
+    };
+    let normal = Vector3::new(normal_arr[0], normal_arr[1], normal_arr[2]);
+    let normal_tuple = (normal.x, normal.y, normal.z);
+    let (ax, ay) = crate::scene::view::transform::ocs_axes(normal_tuple);
+    let ocs_x = DVec3::new(ax.0, ax.1, ax.2);
+    let ocs_y = DVec3::new(ay.0, ay.1, ay.2);
+
+    let make_circle = |centre: [f64; 2], radius: f64| -> EntityType {
+        let wcs_c = plane.point_at(centre);
+        let (ox, oy, oz) = crate::scene::view::transform::wcs_point_to_ocs(
+            (wcs_c[0], wcs_c[1], wcs_c[2]),
+            normal_tuple,
+        );
+        let mut circle = CircleEnt::new();
+        circle.common = common.clone();
+        circle.center = Vector3::new(ox, oy, oz);
+        circle.radius = radius;
+        circle.normal = normal;
+        EntityType::Circle(circle)
+    };
+
+    let make_ellipse = |ellipse: &kernel::geom2d::Ellipse, start_param: f64, end_param: f64| -> Option<EntityType> {
+        if ellipse.major_radius <= 1e-12 || ellipse.minor_radius <= 1e-12 {
+            return None;
+        }
+        let wcs_c = plane.point_at(ellipse.centre);
+        let tip = plane.point_at([
+            ellipse.centre[0] + ellipse.major_axis[0] * ellipse.major_radius,
+            ellipse.centre[1] + ellipse.major_axis[1] * ellipse.major_radius,
+        ]);
+        let mut ent = codec::entities::Ellipse::new();
+        ent.common = common.clone();
+        ent.center = Vector3::new(wcs_c[0], wcs_c[1], wcs_c[2]);
+        ent.major_axis = Vector3::new(tip[0] - wcs_c[0], tip[1] - wcs_c[1], tip[2] - wcs_c[2]);
+        ent.minor_axis_ratio = ellipse.minor_radius / ellipse.major_radius;
+        ent.start_parameter = start_param;
+        ent.end_parameter = end_param;
+        ent.normal = normal;
+        Some(EntityType::Ellipse(ent))
+    };
+
+    let make_arc_from_piece = |piece: &CircularPiece| -> EntityType {
+        let wcs_c = DVec3::from_array(plane.point_at(piece.centre));
+        let (ox, oy, oz) = crate::scene::view::transform::wcs_point_to_ocs(
+            (wcs_c.x, wcs_c.y, wcs_c.z),
+            normal_tuple,
+        );
+        let wcs_start = DVec3::from_array(plane.point_at(piece.start_pt));
+        let wcs_mid = DVec3::from_array(plane.point_at(piece.mid_pt));
+        let wcs_end = DVec3::from_array(plane.point_at(piece.end_pt));
+
+        let start_dir = wcs_start - wcs_c;
+        let mid_dir = wcs_mid - wcs_c;
+        let end_dir = wcs_end - wcs_c;
+
+        let ang_start = norm_angle(start_dir.dot(ocs_y).atan2(start_dir.dot(ocs_x)));
+        let ang_mid = norm_angle(mid_dir.dot(ocs_y).atan2(mid_dir.dot(ocs_x)));
+        let ang_end = norm_angle(end_dir.dot(ocs_y).atan2(end_dir.dot(ocs_x)));
+
+        let ccw_span = |from: f64, to: f64| {
+            let mut d = to - from;
+            while d < 0.0 {
+                d += std::f64::consts::TAU;
+            }
+            while d >= std::f64::consts::TAU {
+                d -= std::f64::consts::TAU;
+            }
+            d
+        };
+
+        let total_ccw = ccw_span(ang_start, ang_end);
+        let mid_ccw = ccw_span(ang_start, ang_mid);
+
+        let (start_angle, end_angle) = if mid_ccw <= total_ccw {
+            (ang_start, ang_end)
+        } else {
+            (ang_end, ang_start)
+        };
+
+        let mut arc = ArcEnt::new();
+        arc.common = common.clone();
+        arc.center = Vector3::new(ox, oy, oz);
+        arc.radius = piece.radius;
+        arc.start_angle = start_angle;
+        arc.end_angle = end_angle;
+        arc.normal = normal;
+        EntityType::Arc(arc)
+    };
+
+    for ring in loops {
+        // Collapse a closed loop of circular arcs/curves into one Circle.
+        let circular_pieces: Vec<CircularPiece> = ring.iter().filter_map(as_circular_piece).collect();
+        if circular_pieces.len() == ring.len() && !circular_pieces.is_empty() {
+            let first = &circular_pieces[0];
+            let tol = 1e-5 * (1.0 + first.radius);
+            let same_circle = circular_pieces.iter().all(|p| {
+                (p.centre[0] - first.centre[0]).hypot(p.centre[1] - first.centre[1]) <= tol
+                    && (p.radius - first.radius).abs() <= tol
+            });
+            let total_sweep: f64 = circular_pieces.iter().map(|p| p.sweep).sum();
+            if same_circle && (total_sweep - std::f64::consts::TAU).abs() <= 1e-4 {
+                out.push(make_circle(first.centre, first.radius));
+                continue;
+            }
+        }
+
+        // Collapse a closed loop of coaxial equal-axes elliptical arcs into one full Ellipse.
+        if let [Curve::Ellipse(first), rest @ ..] = ring.as_slice() {
+            let tol = 1e-6 * (1.0 + first.ellipse.major_radius);
+            let same_ellipse = rest.iter().all(|piece| {
+                matches!(
+                    piece,
+                    Curve::Ellipse(arc)
+                        if (arc.ellipse.centre[0] - first.ellipse.centre[0])
+                            .hypot(arc.ellipse.centre[1] - first.ellipse.centre[1])
+                            <= tol
+                            && (arc.ellipse.major_radius - first.ellipse.major_radius).abs() <= tol
+                            && (arc.ellipse.minor_radius - first.ellipse.minor_radius).abs() <= tol
+                            && (arc.ellipse.major_axis[0] * first.ellipse.major_axis[0]
+                                + arc.ellipse.major_axis[1] * first.ellipse.major_axis[1]
+                                - 1.0)
+                                .abs()
+                                <= 1e-6
+                )
+            });
+            let total_sweep: f64 = ring
+                .iter()
+                .map(|piece| match piece {
+                    Curve::Ellipse(arc) => {
+                        let diff = (arc.end_parameter - arc.start_parameter).abs();
+                        if (arc.sweep() - std::f64::consts::TAU).abs() <= 1e-6
+                            || diff <= 1e-12
+                            || (diff - std::f64::consts::TAU).abs() <= 1e-6
+                        {
+                            std::f64::consts::TAU
+                        } else {
+                            diff
+                        }
+                    }
+                    _ => 0.0,
+                })
+                .sum();
+            if same_ellipse && (total_sweep - std::f64::consts::TAU).abs() <= 1e-5 {
+                if let Some(ent) = make_ellipse(&first.ellipse, 0.0, std::f64::consts::TAU) {
+                    out.push(ent);
+                    continue;
+                }
+            }
+        }
+
+        for piece in ring {
+            if let Some(circ) = as_circular_piece(piece) {
+                if (circ.sweep - std::f64::consts::TAU).abs() <= 1e-6 {
+                    out.push(make_circle(circ.centre, circ.radius));
+                } else {
+                    out.push(make_arc_from_piece(&circ));
+                }
+                continue;
+            }
+            match piece {
+                Curve::Line(line) => {
+                    let start = plane.point_at(line.start);
+                    let end = plane.point_at(line.end);
+                    let s = Vector3::new(start[0], start[1], start[2]);
+                    let e = Vector3::new(end[0], end[1], end[2]);
+                    if (e - s).length() <= 1e-12 {
+                        continue;
+                    }
+                    out.push(EntityType::Line(LineEnt {
+                        common: common.clone(),
+                        start: s,
+                        end: e,
+                        normal,
+                        ..LineEnt::new()
+                    }));
+                }
+                Curve::Ellipse(arc) => {
+                    let (start_param, end_param) =
+                        if (arc.sweep() - std::f64::consts::TAU).abs() <= 1e-6 {
+                            (0.0, std::f64::consts::TAU)
+                        } else if arc.end_parameter > arc.start_parameter {
+                            (arc.start_parameter, arc.end_parameter)
+                        } else {
+                            (
+                                arc.start_parameter,
+                                arc.end_parameter + std::f64::consts::TAU,
+                            )
+                        };
+                    if let Some(ent) = make_ellipse(&arc.ellipse, start_param, end_param) {
+                        out.push(ent);
+                    }
+                }
+                Curve::Nurbs(nurbs) => {
+                    let mut spline = codec::entities::Spline::new();
+                    spline.common = common.clone();
+                    spline.degree = nurbs.degree() as i32;
+                    spline.knots = nurbs.knots().to_vec();
+                    spline.control_points = nurbs
+                        .control_points()
+                        .iter()
+                        .map(|&uv| {
+                            let p = plane.point_at(uv);
+                            Vector3::new(p[0], p[1], p[2])
+                        })
+                        .collect();
+                    if nurbs.is_rational() {
+                        spline.weights = nurbs.weights().to_vec();
+                        spline.flags.rational = true;
+                    }
+                    spline.flags.planar = true;
+                    spline.flags.closed = nurbs.is_closed();
+                    spline.normal = normal;
+                    out.push(EntityType::Spline(spline));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 // ── Dimension explode ──────────────────────────────────────────────────────
 
 /// Convert a Dimension entity into Lines (geometry) + Text (label).
@@ -521,16 +1002,25 @@ fn dim_terminator(
                 out.push(dim_seg(r, tip, common));
             }
         }
-        A::Tick { size } => {
+        A::Tick { size, width } => {
             let s = *size as f64;
             let (ox, oy) = (dx + px, dy + py);
             let m = (ox * ox + oy * oy).sqrt().max(1e-9);
-            let (ox, oy) = (ox / m * s, oy / m * s);
-            out.push(dim_seg(
+            let (ux, uy) = (ox / m, oy / m);
+            let (ox, oy) = (ux * s, uy * s);
+            let (a, b) = (
                 Vector3::new(tip.x - ox, tip.y - oy, tip.z),
                 Vector3::new(tip.x + ox, tip.y + oy, tip.z),
-                common,
-            ));
+            );
+            out.push(dim_seg(a, b, common));
+            if *width > 0.0 {
+                // The architectural tick's band, as filled triangles.
+                let h = *width as f64 * 0.5;
+                let side =
+                    |p: Vector3, k: f64| Vector3::new(p.x - uy * h * k, p.y + ux * h * k, p.z);
+                tri(side(a, -1.0), side(a, 1.0), side(b, 1.0), &mut out);
+                tri(side(a, -1.0), side(b, 1.0), side(b, -1.0), &mut out);
+            }
         }
         A::Open { size, half_angle } => {
             let size = *size as f64;
@@ -542,10 +1032,16 @@ fn dim_terminator(
             let r = *size as f64 * 0.5;
             terminator_circle(tip, r, *filled, common, &mut out);
         }
-        A::Origin { size } => {
-            terminator_circle(tip, *size as f64 * 0.25, true, common, &mut out);
-            let half = *size as f64 * 0.5;
-            out.push(dim_seg(pt(0.0, -half), pt(0.0, half), common));
+        A::Origin { size, inner } => {
+            // Same geometry as the "_Origin" / "_Origin2" blocks; see
+            // `ArrowKind::Origin`.
+            let size = *size as f64;
+            terminator_circle(tip, size * 0.5, false, common, &mut out);
+            if *inner {
+                terminator_circle(tip, size * 0.25, false, common, &mut out);
+            }
+            let start = if *inner { size * 0.5 } else { 0.0 };
+            out.push(dim_seg(pt(start, 0.0), pt(size, 0.0), common));
         }
         A::Box_ { size, filled } => {
             let h = *size as f64 * 0.5;
@@ -759,7 +1255,7 @@ struct DimMetrics {
 }
 
 /// Resolve style metrics used by saved dimension geometry.
-fn dim_metrics(dim: &Dimension, doc: &CadDocument) -> DimMetrics {
+fn dim_metrics(dim: &Dimension, doc: &Document) -> DimMetrics {
     let name = dim.base().style_name.as_str();
     let effective_style = doc
         .dim_styles
@@ -783,6 +1279,7 @@ fn dim_metrics(dim: &Dimension, doc: &CadDocument) -> DimMetrics {
     let (arrow1, arrow2) = if dimtsz > 1e-9 {
         let t = ArrowKind::Tick {
             size: dimtsz as f32,
+            width: 0.0,
         };
         (t.clone(), t)
     } else if let Some(s) = style {
@@ -877,7 +1374,7 @@ fn dim_common(
 
 fn with_dim_linetype(
     mut common: codec::entities::EntityCommon,
-    doc: &CadDocument,
+    doc: &Document,
     handle: Handle,
 ) -> codec::entities::EntityCommon {
     common.linetype = doc
@@ -1025,7 +1522,7 @@ fn norm2(dx: f64, dy: f64, fx: f64, fy: f64) -> (f64, f64) {
     }
 }
 
-fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
+fn explode_dimension(dim: &Dimension, doc: &Document) -> Vec<EntityType> {
     if let Dimension::Arc(arc) = dim {
         if let Some((local_arc, normal)) = crate::entities::dimension::arc_dimension_in_ocs(arc) {
             let (x_axis, y_axis) =
@@ -1427,7 +1924,7 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
 /// field but not `base`, so without this the saved group 10 goes stale and the
 /// dimension's line / leader / origin jumps on reload (#181). Angular-2-line
 /// keeps a distinct base point (the second line's point) and is left alone.
-fn sync_dimension_base_points_and_collect_pending(doc: &mut CadDocument) -> Vec<Handle> {
+fn sync_dimension_base_points_and_collect_pending(doc: &mut Document) -> Vec<Handle> {
     let existing_blocks: rustc_hash::FxHashSet<String> = doc
         .block_records
         .iter()
@@ -1439,7 +1936,7 @@ fn sync_dimension_base_points_and_collect_pending(doc: &mut CadDocument) -> Vec<
             let EntityType::Dimension(dimension) = entity else {
                 return None;
             };
-            let definition_point = match dimension {
+            let definition_point = match &**dimension {
                 Dimension::Linear(value) => Some(value.definition_point),
                 Dimension::Aligned(value) => Some(value.definition_point),
                 Dimension::Radius(value) => Some(value.definition_point),
@@ -1472,8 +1969,49 @@ fn sync_dimension_base_points_and_collect_pending(doc: &mut CadDocument) -> Vec<
     pending
 }
 
+/// Remove `*D` pictures no dimension or insert names any more: a rotated
+/// or mirrored dimension detaches its old one (kept in the open drawing so an
+/// undo can point back to it), which a saved file should not carry.
+fn drop_detached_dimension_blocks(doc: &mut Document) {
+    let named: std::collections::HashSet<String> = doc
+        .entities()
+        .chain(
+            doc.block_records
+                .iter()
+                .flat_map(|record| record.entity_handles.iter())
+                .filter_map(|handle| doc.get_entity(*handle)),
+        )
+        .filter_map(|entity| match entity {
+            EntityType::Dimension(d) => Some(d.base().block_name.to_ascii_uppercase()),
+            EntityType::Insert(insert) => Some(insert.block_name.to_ascii_uppercase()),
+            _ => None,
+        })
+        .collect();
+    let detached: Vec<String> = doc
+        .block_records
+        .iter()
+        .map(|record| record.name.clone())
+        .filter(|name| {
+            let upper = name.to_ascii_uppercase();
+            upper.starts_with("*D") && !named.contains(&upper)
+        })
+        .collect();
+    for name in detached {
+        if let Some(record) = doc.block_records.remove(&name) {
+            let mut owned = record.entity_handles.clone();
+            owned.push(record.block_entity_handle);
+            owned.push(record.block_end_handle);
+            for handle in owned {
+                if !handle.is_null() {
+                    doc.remove_entity(handle);
+                }
+            }
+        }
+    }
+}
+
 /// Smallest free `*D<n>` anonymous block name in `doc`.
-fn next_dimension_block_name(doc: &CadDocument, next: &mut u64) -> String {
+fn next_dimension_block_name(doc: &Document, next: &mut u64) -> String {
     loop {
         let n = *next;
         *next = (*next).saturating_add(1);
@@ -1485,7 +2023,8 @@ fn next_dimension_block_name(doc: &CadDocument, next: &mut u64) -> String {
 }
 
 /// Build missing anonymous dimension geometry blocks before writing.
-pub fn bake_dimension_blocks(doc: &mut CadDocument) {
+pub fn bake_dimension_blocks(doc: &mut Document) {
+    drop_detached_dimension_blocks(doc);
     // Keep group-10 in step and find missing blocks in one entity pass. Existing
     // `*D` blocks are the save cache: only invalidated/new dimensions enter the
     // relatively expensive geometry generation below.
@@ -1493,13 +2032,13 @@ pub fn bake_dimension_blocks(doc: &mut CadDocument) {
     let dimensions: Vec<(Handle, Dimension)> = pending
         .into_iter()
         .filter_map(|handle| match doc.get_entity(handle) {
-            Some(EntityType::Dimension(d)) => Some((handle, d.clone())),
+            Some(EntityType::Dimension(d)) => Some((handle, (**d).clone())),
             _ => None,
         })
         .collect();
 
     use crate::par::prelude::*;
-    let doc_ref: &CadDocument = doc;
+    let doc_ref: &Document = doc;
     let generated: Vec<(Handle, Vec<EntityType>)> = dimensions
         .par_iter()
         .map(|(handle, dim)| (*handle, explode_dimension(dim, doc_ref)))
@@ -1555,7 +2094,7 @@ pub fn bake_dimension_blocks(doc: &mut CadDocument) {
 }
 
 /// Drop baked dimension geometry so the next save regenerates it.
-pub fn invalidate_dim_block(doc: &mut CadDocument, handle: Handle) {
+pub fn invalidate_dim_block(doc: &mut Document, handle: Handle) {
     let bn = match doc.get_entity(handle) {
         Some(EntityType::Dimension(d)) => d.base().block_name.clone(),
         _ => return,
@@ -1620,7 +2159,7 @@ mod tests {
 
     #[test]
     fn minsert_too_large_to_materialize_is_left_intact() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut block = codec::tables::BlockRecord::new("B1");
         block.handle = doc.allocate_handle();
         doc.block_records.add(block).unwrap();
@@ -1630,9 +2169,136 @@ mod tests {
         assert!(explode_entity(&EntityType::Insert(insert), &doc).is_empty());
     }
 
+    /// A pattern hatch explodes into its pattern lines on the hatch plane,
+    /// inside the boundary; a solid fill does not explode.
+    #[test]
+    fn pattern_hatch_explodes_to_clipped_lines() {
+        use codec::entities::hatch::{BoundaryEdge, BoundaryPath, HatchPatternLine, LineEdge};
+        use codec::types::Vector2;
+        let mut path = BoundaryPath::new();
+        for (s, e) in [((0.0, 0.0), (10.0, 0.0)), ((10.0, 0.0), (10.0, 10.0))]
+            .into_iter()
+            .chain([((10.0, 10.0), (0.0, 10.0)), ((0.0, 10.0), (0.0, 0.0))])
+        {
+            path.edges.push(BoundaryEdge::Line(LineEdge {
+                start: Vector2::new(s.0, s.1),
+                end: Vector2::new(e.0, e.1),
+            }));
+        }
+        let mut hatch = codec::entities::Hatch::new();
+        hatch.paths.push(path);
+        hatch.elevation = 3.0;
+        hatch.common.layer = "HATCH".into();
+        let doc = Document::new();
+        assert!(explode_entity(&EntityType::Hatch(Box::new(hatch.clone())), &doc).is_empty());
+
+        hatch.is_solid = false;
+        hatch.pattern.name = "ANSI31".into();
+        hatch.pattern.lines = vec![HatchPatternLine {
+            angle: std::f64::consts::FRAC_PI_4,
+            base_point: Vector2::new(0.0, 0.0),
+            offset: Vector2::new(-1.0, 1.0),
+            dash_lengths: vec![],
+        }];
+        let pieces = explode_entity(&EntityType::Hatch(Box::new(hatch)), &doc);
+        assert!(pieces.len() > 5);
+        for piece in &pieces {
+            let EntityType::Line(line) = piece else {
+                panic!("hatch exploded into a non-line");
+            };
+            assert_eq!(line.common.layer, "HATCH");
+            for p in [line.start, line.end] {
+                assert!((p.z - 3.0).abs() < 1e-9);
+                assert!((-1e-6..=10.0 + 1e-6).contains(&p.x));
+                assert!((-1e-6..=10.0 + 1e-6).contains(&p.y));
+            }
+        }
+    }
+
+    /// EXPLODE resolves ByBlock transparency and linetype on the children it
+    /// produces, the same way the render path does, so an exploded entity does
+    /// not keep a ByBlock sentinel that nothing downstream resolves.
+    #[test]
+    fn explode_resolves_byblock_transparency_and_linetype() {
+        let mut doc = Document::new();
+
+        let mut block = BlockRecord::new("BYBLOCK_STYLE");
+        block.handle = doc.allocate_handle();
+
+        let mut child = codec::entities::Line::from_points(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(10.0, 0.0, 0.0),
+        );
+        child.common.color = codec::types::Color::ByBlock;
+        child.common.transparency = codec::types::Transparency::ByBlock;
+        child.common.linetype = "ByBlock".to_string();
+        let child_handle = doc.add_entity(EntityType::Line(child)).unwrap();
+        block.entity_handles.push(child_handle);
+        doc.block_records.add(block).unwrap();
+
+        let mut insert = codec::entities::Insert::new("BYBLOCK_STYLE", Vector3::new(0.0, 0.0, 0.0));
+        insert.common.color = codec::types::Color::from_index(1);
+        insert.common.transparency = codec::types::Transparency::new(96);
+        insert.common.linetype = "DASHED".to_string();
+
+        let out = explode_entity(&EntityType::Insert(insert), &doc);
+        assert_eq!(out.len(), 1, "the block's one child should come out");
+
+        let c = out[0].common();
+        assert_eq!(c.color, codec::types::Color::from_index(1));
+        assert_eq!(
+            c.transparency,
+            codec::types::Transparency::new(96),
+            "ByBlock transparency should take the insert's value"
+        );
+        assert_eq!(
+            c.linetype, "DASHED",
+            "ByBlock linetype should take the insert's linetype"
+        );
+    }
+
+    /// A child that already names its own transparency/linetype keeps them;
+    /// only the ByBlock sentinel is replaced.
+    #[test]
+    fn explode_keeps_explicit_child_transparency_and_linetype() {
+        let mut doc = Document::new();
+
+        let mut block = BlockRecord::new("EXPLICIT_STYLE");
+        block.handle = doc.allocate_handle();
+
+        let mut child = codec::entities::Line::from_points(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(10.0, 0.0, 0.0),
+        );
+        child.common.transparency = codec::types::Transparency::new(25);
+        child.common.linetype = "CONTINUOUS".to_string();
+        let child_handle = doc.add_entity(EntityType::Line(child)).unwrap();
+        block.entity_handles.push(child_handle);
+        doc.block_records.add(block).unwrap();
+
+        let mut insert =
+            codec::entities::Insert::new("EXPLICIT_STYLE", Vector3::new(0.0, 0.0, 0.0));
+        insert.common.transparency = codec::types::Transparency::new(96);
+        insert.common.linetype = "DASHED".to_string();
+
+        let out = explode_entity(&EntityType::Insert(insert), &doc);
+        assert_eq!(out.len(), 1);
+
+        let c = out[0].common();
+        assert_eq!(
+            c.transparency,
+            codec::types::Transparency::new(25),
+            "an explicit child transparency must survive"
+        );
+        assert_eq!(
+            c.linetype, "CONTINUOUS",
+            "an explicit child linetype must survive"
+        );
+    }
+
     #[test]
     fn unexplodable_block_is_not_exploded() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut block = codec::tables::BlockRecord::new("NO_EXPLODE");
         block.handle = doc.allocate_handle();
         block.explodable = false;
@@ -1647,14 +2313,14 @@ mod tests {
     /// no-op (already has a valid block).
     #[test]
     fn bakes_block_for_blockless_dimension_and_is_idempotent() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
 
         let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
         d.definition_point = Vector3::new(0.0, 5.0, 0.0);
         d.base.text_middle_point = Vector3::new(5.0, 5.0, 0.0);
         // block_name is left empty — exactly what OCS-created dimensions carry.
         let handle = doc
-            .add_entity(EntityType::Dimension(Dimension::Linear(d)))
+            .add_entity(EntityType::Dimension(Box::new(Dimension::Linear(d))))
             .unwrap();
 
         bake_dimension_blocks(&mut doc);
@@ -1685,7 +2351,7 @@ mod tests {
     /// dimension shifted. Regression test for #181.
     #[test]
     fn bake_zeroes_insertion_point() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
 
         let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
         d.definition_point = Vector3::new(0.0, 5.0, 0.0);
@@ -1693,7 +2359,7 @@ mod tests {
         // Exactly what OCS-created dimensions carry: insertion == text anchor.
         d.base.insertion_point = d.base.text_middle_point;
         let handle = doc
-            .add_entity(EntityType::Dimension(Dimension::Linear(d)))
+            .add_entity(EntityType::Dimension(Box::new(Dimension::Linear(d))))
             .unwrap();
 
         bake_dimension_blocks(&mut doc);
@@ -1714,13 +2380,13 @@ mod tests {
     /// save re-bakes a fresh block. Guards the stale-export fix for #181.
     #[test]
     fn invalidate_removes_block_and_leaves_no_orphan() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
 
         let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
         d.definition_point = Vector3::new(0.0, 5.0, 0.0);
         d.base.text_middle_point = Vector3::new(5.0, 5.0, 0.0);
         let handle = doc
-            .add_entity(EntityType::Dimension(Dimension::Linear(d)))
+            .add_entity(EntityType::Dimension(Box::new(Dimension::Linear(d))))
             .unwrap();
 
         bake_dimension_blocks(&mut doc);
@@ -1775,7 +2441,7 @@ mod tests {
     }
 
     // Collect the line segments baked into the dimension's `*D` block.
-    fn baked_segments(doc: &CadDocument, block_name: &str) -> Vec<(Vector3, Vector3)> {
+    fn baked_segments(doc: &Document, block_name: &str) -> Vec<(Vector3, Vector3)> {
         let rec = doc.block_records.get(block_name).expect("block record");
         doc.entities()
             .filter_map(|e| match e {
@@ -1793,12 +2459,12 @@ mod tests {
     // where a shared offset tilted the dimension line.
     #[test]
     fn linear_dim_line_stays_level_over_sloped_points() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 5.0, 0.0));
         d.rotation = 0.0;
         d.definition_point = Vector3::new(0.0, 8.0, 0.0);
         let handle = doc
-            .add_entity(EntityType::Dimension(Dimension::Linear(d)))
+            .add_entity(EntityType::Dimension(Box::new(Dimension::Linear(d))))
             .unwrap();
         bake_dimension_blocks(&mut doc);
         let name = match doc.get_entity(handle) {
@@ -1823,11 +2489,11 @@ mod tests {
     // type. (Default style: DIMTSZ=0 -> arrows, two of them.)
     #[test]
     fn linear_dim_bakes_filled_arrowheads() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
         d.definition_point = Vector3::new(0.0, 5.0, 0.0);
         let handle = doc
-            .add_entity(EntityType::Dimension(Dimension::Linear(d)))
+            .add_entity(EntityType::Dimension(Box::new(Dimension::Linear(d))))
             .unwrap();
         bake_dimension_blocks(&mut doc);
         let name = match doc.get_entity(handle) {
@@ -1846,7 +2512,7 @@ mod tests {
     }
 
     /// The line segments EXPLODE turns the dimension into.
-    fn exploded_segments(dim: &Dimension, doc: &CadDocument) -> Vec<(DVec3, DVec3)> {
+    fn exploded_segments(dim: &Dimension, doc: &Document) -> Vec<(DVec3, DVec3)> {
         let point = |v: Vector3| DVec3::new(v.x, v.y, v.z);
         explode_dimension(dim, doc)
             .into_iter()
@@ -1864,7 +2530,7 @@ mod tests {
     #[test]
     fn exploding_a_linear_dimension_off_world_z_keeps_its_plane() {
         use crate::command::EntityTransform;
-        let doc = CadDocument::new();
+        let doc = Document::new();
         let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
         d.definition_point = Vector3::new(0.0, 5.0, 0.0);
         let flat = Dimension::Linear(d);
@@ -1875,7 +2541,7 @@ mod tests {
             .collect();
         assert!(!expected.is_empty(), "the dimension explodes into no lines");
 
-        let mut turned = EntityType::Dimension(flat);
+        let mut turned = EntityType::Dimension(Box::new(flat));
         crate::scene::view::dispatch::apply_transform(
             &mut turned,
             &EntityTransform::Rotate {
@@ -1903,7 +2569,7 @@ mod tests {
     #[test]
     fn angular_dim_bakes_an_arc() {
         use codec::entities::DimensionAngular3Pt;
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut d = DimensionAngular3Pt::new(
             Vector3::new(0.0, 0.0, 0.0),
             Vector3::new(10.0, 0.0, 0.0),
@@ -1911,7 +2577,7 @@ mod tests {
         );
         d.definition_point = Vector3::new(5.0, 5.0, 0.0); // arc location
         let handle = doc
-            .add_entity(EntityType::Dimension(Dimension::Angular3Pt(d)))
+            .add_entity(EntityType::Dimension(Box::new(Dimension::Angular3Pt(d))))
             .unwrap();
         bake_dimension_blocks(&mut doc);
         let name = match doc.get_entity(handle) {
@@ -1933,14 +2599,14 @@ mod tests {
     #[test]
     fn diameter_dim_bakes_through_center() {
         use codec::entities::DimensionDiameter;
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let center = Vector3::new(3.0, 4.0, 0.0);
         let edge = Vector3::new(8.0, 4.0, 0.0); // radius 5 along +x
         let far = Vector3::new(-2.0, 4.0, 0.0);
         let mut d = DimensionDiameter::new(edge, far);
         d.base.text_middle_point = Vector3::new(3.0, 9.0, 0.0);
         let handle = doc
-            .add_entity(EntityType::Dimension(Dimension::Diameter(d)))
+            .add_entity(EntityType::Dimension(Box::new(Dimension::Diameter(d))))
             .unwrap();
         bake_dimension_blocks(&mut doc);
         let name = match doc.get_entity(handle) {
@@ -1966,12 +2632,12 @@ mod tests {
     // line instead of a vertical one.
     #[test]
     fn rotated_linear_dim_bakes_at_its_angle() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 10.0, 0.0));
         d.rotation = std::f64::consts::FRAC_PI_2; // 90°, vertical dimension line
         d.definition_point = Vector3::new(8.0, 0.0, 0.0);
         let handle = doc
-            .add_entity(EntityType::Dimension(Dimension::Linear(d)))
+            .add_entity(EntityType::Dimension(Box::new(Dimension::Linear(d))))
             .unwrap();
         bake_dimension_blocks(&mut doc);
         let name = match doc.get_entity(handle) {
@@ -2059,12 +2725,12 @@ mod tests {
     fn dimlinear_survives_save_reload_with_baked_geometry() {
         let mut failures = Vec::new();
         for ext in ["dxf", "dwg"] {
-            let mut doc = CadDocument::new();
+            let mut doc = Document::new();
             let mut d =
                 DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
             d.definition_point = Vector3::new(0.0, 5.0, 0.0);
             d.base.text_middle_point = Vector3::new(5.0, 5.0, 0.0);
-            doc.add_entity(EntityType::Dimension(Dimension::Linear(d)))
+            doc.add_entity(EntityType::Dimension(Box::new(Dimension::Linear(d))))
                 .unwrap();
 
             let path =
@@ -2126,7 +2792,7 @@ mod tests {
     /// No extension dictionary may be referenced by more than one entity.
     /// Shared xdict ownership fails file validation as
     /// "Extension dictionary <H> Cannot access".
-    fn assert_no_shared_xdicts(doc: &CadDocument) {
+    fn assert_no_shared_xdicts(doc: &Document) {
         use std::collections::HashMap;
         let mut owners: HashMap<codec::Handle, usize> = HashMap::new();
         for entity in doc.entities() {
@@ -2155,7 +2821,7 @@ mod tests {
     /// with exactly N "Cannot access" errors.
     #[test]
     fn baked_children_do_not_share_dimension_xdict() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
 
         // Made-up dictionary object for the dimension to own.
         let dict_handle = doc.allocate_handle();
@@ -2171,7 +2837,7 @@ mod tests {
         d.base.text_middle_point = Vector3::new(5.0, 5.0, 0.0);
         d.base.common.xdictionary_handle = Some(dict_handle);
         let dim_handle = doc
-            .add_entity(EntityType::Dimension(Dimension::Linear(d)))
+            .add_entity(EntityType::Dimension(Box::new(Dimension::Linear(d))))
             .unwrap();
 
         bake_dimension_blocks(&mut doc);

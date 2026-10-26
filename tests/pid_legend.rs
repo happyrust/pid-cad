@@ -12,7 +12,7 @@ use codec::entities::{Block, BlockEnd, Circle, Insert, Line, Point, Text};
 use codec::objects::{Group, ObjectType};
 use codec::tables::BlockRecord;
 use codec::types::{Color, Vector3};
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 use OpenCADStudio::io;
 use OpenCADStudio::io::pid_legend::{self, Rules};
 use OpenCADStudio::io::pid_pipes;
@@ -21,7 +21,7 @@ use OpenCADStudio::io::pid_pipes;
 
 /// Define `name` as a block whose body is `members` (block-local, base at the
 /// origin), the way the scene's own block definer does it.
-fn define_block(doc: &mut CadDocument, name: &str, members: Vec<EntityType>) {
+fn define_block(doc: &mut Document, name: &str, members: Vec<EntityType>) {
     let next = doc.next_handle();
     let br_handle = Handle::new(next);
     let block_handle = Handle::new(next + 1);
@@ -76,7 +76,7 @@ fn insert(name: &str, x: f64, y: f64, layer: &str) -> EntityType {
 }
 
 /// Register a DXF GROUP over `members`, carrying a P&ID description.
-fn group(doc: &mut CadDocument, name: &str, description: &str, members: Vec<Handle>) -> Handle {
+fn group(doc: &mut Document, name: &str, description: &str, members: Vec<Handle>) -> Handle {
     let dictionary = doc.header.acad_group_dict_handle;
     let mut group = Group::new(name);
     group.handle = doc.allocate_handle();
@@ -95,8 +95,8 @@ fn group(doc: &mut CadDocument, name: &str, description: &str, members: Vec<Hand
 /// two BUV tags between them (the ambiguity one-to-one pairing must
 /// resolve), a motorised valve with an XV bubble, a panel-mounted HS bubble
 /// in its square, a tank, and a block id the rules have never met.
-fn synthetic_sheet() -> CadDocument {
-    let mut doc = CadDocument::new();
+fn synthetic_sheet() -> Document {
+    let mut doc = Document::new();
     define_block(
         &mut doc,
         "$VALVE$00000316",
@@ -406,7 +406,7 @@ fn unclaimed_lettering_is_sorted_into_ranges_duplicates_and_orphans() {
 /// as possible, then shortest, names all three.
 #[test]
 fn a_column_of_loading_arms_lettered_under_their_bodies_is_paired_arm_by_arm() {
-    let mut doc = CadDocument::new();
+    let mut doc = Document::new();
     doc.add_entity(line(0.0, 0.0, 420.0, 0.0)).unwrap();
     doc.add_entity(line(0.0, 0.0, 0.0, 297.0)).unwrap();
     define_block(
@@ -542,8 +542,8 @@ fn insert_turned(name: &str, x: f64, y: f64, layer: &str, rotation: f64) -> Enti
 /// quarter, so its connection points face up and down) to an S point --
 /// BUV-3101's branch lettered `80-FW` below the valve, BUV-3102's lettered
 /// nowhere.
-fn piped_block_sheet() -> CadDocument {
-    let mut doc = CadDocument::new();
+fn piped_block_sheet() -> Document {
+    let mut doc = Document::new();
     define_block(
         &mut doc,
         "$VALVE$00000316",
@@ -565,7 +565,7 @@ fn piped_block_sheet() -> CadDocument {
     doc.add_entity(line(0.0, 0.0, 420.0, 0.0)).unwrap();
     doc.add_entity(line(0.0, 0.0, 0.0, 297.0)).unwrap();
 
-    let pipe = |doc: &mut CadDocument, x0: f64, y0: f64, x1: f64, y1: f64| {
+    let pipe = |doc: &mut Document, x0: f64, y0: f64, x1: f64, y1: f64| {
         doc.add_entity(layered(line(x0, y0, x1, y1), "PIPE-消防"))
             .unwrap();
     };
@@ -788,7 +788,7 @@ fn pipe_runs_are_drawn_on_a_layer_per_line_number_and_come_off_again() {
     // two lines here), a ring at each of the two open ends.
     assert_eq!(added, recognition.symbols.len() * 2 + 9 + 2);
 
-    let on = |doc: &CadDocument, layer: &str| -> Vec<EntityType> {
+    let on = |doc: &Document, layer: &str| -> Vec<EntityType> {
         doc.model_space_entities()
             .filter(|e| e.common().layer == layer)
             .cloned()
@@ -882,8 +882,8 @@ fn pipe_runs_are_drawn_on_a_layer_per_line_number_and_come_off_again() {
 /// to point down and drawn the way TWT draws it -- a 12.15 mm stem from the
 /// insertion point and a cup closed 1.23 mm past the stem's end -- with the
 /// pipe stroke drawn over the stem right through to the cup's closed end.
-fn vented_block_sheet() -> CadDocument {
-    let mut doc = CadDocument::new();
+fn vented_block_sheet() -> Document {
+    let mut doc = Document::new();
     define_block(
         &mut doc,
         "$Standard$00000144",
@@ -896,7 +896,7 @@ fn vented_block_sheet() -> CadDocument {
     );
     doc.add_entity(line(0.0, 0.0, 420.0, 0.0)).unwrap();
     doc.add_entity(line(0.0, 0.0, 0.0, 297.0)).unwrap();
-    let pipe = |doc: &mut CadDocument, x0: f64, y0: f64, x1: f64, y1: f64| {
+    let pipe = |doc: &mut Document, x0: f64, y0: f64, x1: f64, y1: f64| {
         doc.add_entity(layered(line(x0, y0, x1, y1), "PIPE-消防"))
             .unwrap();
     };
@@ -971,8 +971,8 @@ fn a_vent_stub_joins_the_pipe_at_the_far_end_of_its_stem() {
 /// the islands' spelling, a 4-digit sequence number -- with the bare
 /// `100-CGA-0319` written under the right piece; and below it a second
 /// header lettered `200-FS-31001-A2`, the tank farms' 5-digit spelling.
-fn loading_island_pipe_sheet() -> CadDocument {
-    let mut doc = CadDocument::new();
+fn loading_island_pipe_sheet() -> Document {
+    let mut doc = Document::new();
     define_block(
         &mut doc,
         "$VALVE$00000316",
@@ -988,7 +988,7 @@ fn loading_island_pipe_sheet() -> CadDocument {
     );
     doc.add_entity(line(0.0, 0.0, 420.0, 0.0)).unwrap();
     doc.add_entity(line(0.0, 0.0, 0.0, 297.0)).unwrap();
-    let pipe = |doc: &mut CadDocument, x0: f64, y0: f64, x1: f64, y1: f64| {
+    let pipe = |doc: &mut Document, x0: f64, y0: f64, x1: f64, y1: f64| {
         doc.add_entity(layered(line(x0, y0, x1, y1), "PIPE-工艺"))
             .unwrap();
     };
@@ -1097,7 +1097,7 @@ fn layered(mut entity: EntityType, layer: &str) -> EntityType {
 
 /// A bowtie valve of four touching lines, 2.4 x 1.2 mm about (x, y), turned
 /// by `turn`.
-fn bowtie(doc: &mut CadDocument, x: f64, y: f64, turn: fn((f64, f64)) -> (f64, f64)) {
+fn bowtie(doc: &mut Document, x: f64, y: f64, turn: fn((f64, f64)) -> (f64, f64)) {
     let p = |dx: f64, dy: f64| {
         let (tx, ty) = turn((dx, dy));
         (x + tx, y + ty)
@@ -1117,12 +1117,12 @@ fn bowtie(doc: &mut CadDocument, x: f64, y: f64, turn: fn((f64, f64)) -> (f64, f
 /// 2.8 mm apart, a 0.4 mm ball in the middle, and four half-diagonals from
 /// the corners to the ball's rim. Seven strokes about (x, y), turned by
 /// `turn`.
-fn ball_valve(doc: &mut CadDocument, x: f64, y: f64, turn: fn((f64, f64)) -> (f64, f64)) {
+fn ball_valve(doc: &mut Document, x: f64, y: f64, turn: fn((f64, f64)) -> (f64, f64)) {
     let _handles = ball_valve_handles(doc, x, y, turn);
 }
 
 fn ball_valve_handles(
-    doc: &mut CadDocument,
+    doc: &mut Document,
     x: f64,
     y: f64,
     turn: fn((f64, f64)) -> (f64, f64),
@@ -1156,7 +1156,7 @@ fn ball_valve_handles(
 }
 
 /// A triangle of three touching lines, 2 mm, about (x, y).
-fn triangle(doc: &mut CadDocument, x: f64, y: f64) {
+fn triangle(doc: &mut Document, x: f64, y: f64) {
     for (a, b) in [
         ((x - 1.0, y - 1.0), (x + 1.0, y - 1.0)),
         ((x + 1.0, y - 1.0), (x, y + 1.0)),
@@ -1171,8 +1171,8 @@ fn triangle(doc: &mut CadDocument, x: f64, y: f64) {
 /// loading-island sheets are drawn: ball valves lettered BV, a check valve,
 /// an XV bubble and a motor mark, a pump with its number, a shape the rules
 /// do not name repeated three times, and one that occurs once.
-fn exploded_sheet() -> CadDocument {
-    let mut doc = CadDocument::new();
+fn exploded_sheet() -> Document {
+    let mut doc = Document::new();
     // Frame, so the extent is an A3 in paper mm; "A" is a skipped layer.
     doc.add_entity(layered(line(0.0, 0.0, 420.0, 0.0), "A"))
         .unwrap();
@@ -1311,7 +1311,7 @@ fn exploded_sheet_symbols_are_named_by_their_tags_or_boxed_by_shape() {
 /// group with an empty tag remains one explicit UNTAGGED symbol.
 #[test]
 fn manual_groups_override_exploded_pairing_and_leave_other_shapes_automatic() {
-    let mut doc = CadDocument::new();
+    let mut doc = Document::new();
     doc.add_entity(layered(line(0.0, 0.0, 420.0, 0.0), "A"))
         .unwrap();
     doc.add_entity(layered(line(0.0, 0.0, 0.0, 297.0), "A"))
@@ -1420,8 +1420,8 @@ fn the_shape_dictionary_names_or_drops_a_shape_by_its_id() {
 /// ball valve joined by a 1.5 mm piece of pipe, three ball valves each with a
 /// different length of pipe stub left touching them, and a valve with a stem
 /// up to a two-stroke actuator, on a pipe run.
-fn piped_sheet() -> CadDocument {
-    let mut doc = CadDocument::new();
+fn piped_sheet() -> Document {
+    let mut doc = Document::new();
     doc.add_entity(layered(line(0.0, 0.0, 420.0, 0.0), "A"))
         .unwrap();
     doc.add_entity(layered(line(0.0, 0.0, 0.0, 297.0), "A"))
@@ -1584,7 +1584,7 @@ fn pipe_is_cut_away_from_exploded_symbols_and_a_stem_is_not() {
 /// its tag.
 #[test]
 fn another_symbols_stroke_at_the_edge_does_not_hold_two_valves_together() {
-    let mut doc = CadDocument::new();
+    let mut doc = Document::new();
     doc.add_entity(layered(line(0.0, 0.0, 420.0, 0.0), "A"))
         .unwrap();
     doc.add_entity(layered(line(0.0, 0.0, 0.0, 297.0), "A"))
@@ -1648,7 +1648,7 @@ fn another_symbols_stroke_at_the_edge_does_not_hold_two_valves_together() {
 /// 1.81 mm lines through the middle -- every stroke of the frame longer than
 /// a pipe stub -- on a vertical pipe, 3.6 mm of stub from each bar to the
 /// run.
-fn flame_arrester(doc: &mut CadDocument, x: f64, y: f64) {
+fn flame_arrester(doc: &mut Document, x: f64, y: f64) {
     for (a, b) in [
         ((x - 0.905, y - 1.59), (x - 0.905, y + 1.59)),
         ((x + 0.905, y - 1.59), (x + 0.905, y + 1.59)),
@@ -1669,8 +1669,8 @@ fn flame_arrester(doc: &mut CadDocument, x: f64, y: f64) {
 /// A sheet with a flame arrester lettered FA0301 on a riser and another,
 /// unlettered, on a second riser; and two ball valves 8 mm apart joined by
 /// 5.6 mm of pipe with a stray FA0302 lettered over the pipe.
-fn framed_sheet() -> CadDocument {
-    let mut doc = CadDocument::new();
+fn framed_sheet() -> Document {
+    let mut doc = Document::new();
     doc.add_entity(layered(line(0.0, 0.0, 420.0, 0.0), "A"))
         .unwrap();
     doc.add_entity(layered(line(0.0, 0.0, 0.0, 297.0), "A"))
@@ -1856,7 +1856,7 @@ fn skip_sheet(name: &str, why: &str) {
     eprintln!("skipping {name}: {why}");
 }
 
-fn load_sheet(name: &str) -> Option<CadDocument> {
+fn load_sheet(name: &str) -> Option<Document> {
     let Some(path) = sheet(name) else {
         skip_sheet(name, "not present");
         return None;
@@ -1889,7 +1889,7 @@ impl Ran {
     }
 
     /// [`load_sheet`], counted.
-    fn sheet(&mut self, name: &str) -> Option<CadDocument> {
+    fn sheet(&mut self, name: &str) -> Option<Document> {
         self.asked += 1;
         let doc = load_sheet(name);
         if doc.is_none() {

@@ -142,6 +142,9 @@ pub fn apply_geom_prop_in_working_plane(
 }
 
 pub fn apply_common_prop(entity: &mut EntityType, field: &str, value: &str) {
+    if matches!(field, "layer" | "linetype") && crate::scene::block_construction::is_construction(entity.common()) {
+        return;
+    }
     let e = entity.as_entity_mut();
     match field {
         "layer" => e.set_layer(value.to_string()),
@@ -238,7 +241,7 @@ pub fn apply_common_prop(entity: &mut EntityType, field: &str, value: &str) {
 ///     stale verbatim block (matched by APPID handle) so the new value wins.
 /// Other applications' verbatim blocks are preserved for round-trip fidelity.
 pub fn set_entity_xdata(
-    doc: &mut codec::CadDocument,
+    doc: &mut codec::Document,
     handle: codec::Handle,
     app: &str,
     values: Option<Vec<codec::xdata::XDataValue>>,
@@ -314,15 +317,24 @@ pub fn set_entity_thickness(entity: &mut EntityType, v: f64) {
 }
 
 pub fn toggle_invisible(entity: &mut EntityType) {
+    if crate::scene::block_construction::is_construction(entity.common()) { return }
     let cur = entity.as_entity_mut().is_invisible();
     entity.as_entity_mut().set_invisible(!cur);
 }
 
 pub fn apply_color(entity: &mut EntityType, color: AcadColor) {
+    if crate::scene::block_construction::is_construction(entity.common()) { return }
     entity.as_entity_mut().set_color(color);
     let common = entity.common_mut();
     common.color_name = None;
     common.color_book_handle = None;
+}
+
+/// Like [`apply_color`], but keeps a colour-book identity (`BOOK$NAME`).
+pub fn apply_named_color(entity: &mut EntityType, color: AcadColor, name: Option<String>) {
+    if crate::scene::block_construction::is_construction(entity.common()) { return }
+    apply_color(entity, color);
+    entity.common_mut().color_name = name;
 }
 
 pub fn apply_line_weight(entity: &mut EntityType, lw: LineWeight) {

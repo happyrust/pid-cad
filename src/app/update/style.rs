@@ -4,7 +4,7 @@
 use super::util::*;
 use super::{format_size, VIEWCUBE_HIT_SIZE};
 use crate::app::helpers::{
-    parse_coord, polar_constrain_near, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis, CoordKind,
+    parse_coord, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis, CoordKind,
 };
 use crate::app::{Message, OpenCADStudio, POLY_START_DELAY_MS};
 use crate::modules::ModuleEvent;
@@ -21,6 +21,18 @@ use iced::time::Instant;
 use iced::{mouse, Point, Task};
 
 impl OpenCADStudio {
+    pub(in crate::app) fn selected_dimstyle_is_read_only(&self) -> bool {
+        let Some(style) = self.tabs[self.active_tab]
+            .scene
+            .document
+            .dim_styles
+            .get(&self.dimstyle_selected)
+        else {
+            return true;
+        };
+        style.xref_dependent || style.name.contains('|')
+    }
+
     pub(in crate::app) fn mlstyle_mut(
         &mut self,
         tab: usize,
@@ -364,6 +376,17 @@ impl OpenCADStudio {
     pub(in crate::app) fn apply_dimstyle_bufs(&mut self, tab: usize) {
         let doc = &mut self.tabs[tab].scene.document;
 
+        // Merged xref dimstyles are identified by their `xref|style` name.
+        // The codec's dependency bit is cleared during merge, so use the
+        // stable imported-name marker here as well as the DWG/DXF flag.
+        let selected_name = self.dimstyle_selected.clone();
+        let Some(selected) = doc.dim_styles.get(&selected_name) else {
+            return;
+        };
+        if selected.xref_dependent || selected.name.contains('|') {
+            return;
+        }
+
         let text_style_handle = doc
             .text_styles
             .get(&self.ds_dimtxsty)
@@ -499,6 +522,9 @@ impl OpenCADStudio {
     /// Update a single string buffer field.
 
     pub(in crate::app) fn apply_ds_edit(&mut self, field: crate::app::DsField, val: String) {
+        if self.selected_dimstyle_is_read_only() {
+            return;
+        }
         use crate::app::DsField::*;
         match field {
             Dimdle => self.ds_dimdle = val,
@@ -570,6 +596,9 @@ impl OpenCADStudio {
     /// Toggle a boolean buffer field.
 
     pub(in crate::app) fn apply_ds_toggle(&mut self, field: crate::app::DsField) {
+        if self.selected_dimstyle_is_read_only() {
+            return;
+        }
         use crate::app::DsField::*;
         match field {
             Dimsd1 => self.ds_dimsd1 = !self.ds_dimsd1,
@@ -976,6 +1005,17 @@ impl OpenCADStudio {
         value: String,
     ) -> Task<Message> {
         let i = self.active_tab;
+        if field == "arrowhead_handle" {
+            let handle = crate::entities::arrowheads::resolve(
+                &mut self.tabs[i].scene.document,
+                &value,
+            )
+            .filter(|h| !h.is_null());
+            if let Some(s) = self.mleaderstyle_mut(i) {
+                s.arrowhead_handle = handle;
+            }
+            return Task::none();
+        }
         let doc = &self.tabs[i].scene.document;
         let handle: Option<codec::types::Handle> =
             if value == "None" || value == "ByBlock" || value == "Closed filled" {
@@ -1136,43 +1176,59 @@ impl OpenCADStudio {
         Task::none()
     }
 
-    pub(super) fn on_color_window_pick(&mut self, color: codec::types::Color) -> Task<Message> {
+    pub(super) fn on_color_window_pick(
+        &mut self,
+        color: codec::types::Color,
+        name: Option<String>,
+    ) -> Task<Message> {
+        if let Some(crate::app::ColorPickTarget::Interface(target)) = self
+            .color_picker
+            .as_ref()
+            .map(|picker| picker.target.clone())
+        {
+            self.color_picker = None;
+            let Some((r, g, b)) = crate::ui::color_select::math::color_rgb(color) else {
+                return Task::none();
+            };
+            // Hand the result to the same handler the typed hex field uses, so
+            // the picker and the field cannot drift apart on validation or
+            // persistence.
+            let hex = crate::app::config::rgb_to_hex([r, g, b]);
+            use crate::app::UiColor;
+            return Task::done(match target {
+                UiColor::ModelBackground => Message::ModelSpaceBgChanged(hex),
+                UiColor::PaperBackground => Message::PaperSpaceBgChanged(hex),
+                UiColor::DeskBackground => Message::DeskSpaceBgChanged(hex),
+                UiColor::Theme(index) => Message::OptionsThemeColorChanged(index, hex),
+                UiColor::Crosshair => Message::CrosshairColorChanged(hex),
+                UiColor::SnapMarker => Message::SnapMarkerColorChanged(hex),
+                UiColor::CommandText => Message::CommandTextColorChanged(hex),
+            });
+        }
         if matches!(
-            self.color_pick_target.as_ref().map(|(target, _)| target),
+            self.color_picker.as_ref().map(|picker| &picker.target),
             Some(crate::app::ColorPickTarget::PlotStyle)
         ) {
-            self.color_pick_target = None;
+            self.color_picker = None;
 
-            let rgb = match color {
-                codec::types::Color::Rgb { r, g, b } => Some((r, g, b)),
-                codec::types::Color::Index(index) => codec::types::aci_table::aci_to_rgb(index),
-                _ => None,
-            };
-
-            if let Some((r, g, b)) = rgb {
-                self.ps_color_buf = format!("#{r:02X}{g:02X}{b:02X}");
+            if let Some((r, g, b)) = crate::ui::color_select::math::color_rgb(color) {
+                self.ps_color_buf = crate::ui::color_select::math::hex_string(r, g, b);
             }
 
             return self.on_plot_style_panel_apply();
         }
         let s = crate::ui::color_select::color_to_aci_string(color);
-        let edit = match self.color_pick_target.take().map(|(target, _)| target) {
+        let edit = match self.color_picker.take().map(|picker| picker.target) {
             Some(crate::app::ColorPickTarget::Gradient(index)) => {
                 Some(Message::GraphicAttributes(GraphicAttributesMsg::Gradient(
                     crate::ui::window::gradient_editor::GradientMsg::Color(index, color),
                 )))
             }
             Some(crate::app::ColorPickTarget::ViewBackground(slot)) => {
-                let rgb = match color {
-                    codec::types::Color::Rgb { r, g, b } => Some([r, g, b]),
-                    codec::types::Color::Index(index) => {
-                        codec::types::aci_table::aci_to_rgb(index).map(|(r, g, b)| [r, g, b])
-                    }
-                    _ => None,
-                };
-                rgb.map(|rgb| {
+                crate::ui::color_select::math::color_rgb(color).map(|(r, g, b)| {
                     Message::PdfDialog(crate::ui::window::pdf_dialogs::PdfDialogMsg::BgColor(
-                        slot, rgb,
+                        slot,
+                        [r, g, b],
                     ))
                 })
             }
@@ -1191,7 +1247,9 @@ impl OpenCADStudio {
                 field: f,
                 value: s,
             }),
-            Some(crate::app::ColorPickTarget::Properties) => Some(Message::PropColorChanged(color)),
+            Some(crate::app::ColorPickTarget::Properties) => {
+                return self.set_property_color(color, name);
+            }
             Some(crate::app::ColorPickTarget::PropertiesBg) => {
                 Some(Message::PropBgColorChanged(color))
             }
@@ -1199,13 +1257,17 @@ impl OpenCADStudio {
                 Some(Message::PropColorFieldChanged { field, color })
             }
             Some(crate::app::ColorPickTarget::MText) => Some(Message::MTextColorChanged(color)),
-            Some(crate::app::ColorPickTarget::Ribbon) => Some(Message::RibbonColorChanged(color)),
-            Some(crate::app::ColorPickTarget::Layer(name)) => {
+            Some(crate::app::ColorPickTarget::Ribbon) => {
+                let task = self.update(Message::RibbonColorChanged(color));
+                self.ribbon.active_color_book = name.map(|name| (color, name));
+                return task;
+            }
+            Some(crate::app::ColorPickTarget::Layer(layer)) => {
                 let i = self.active_tab;
-                match self.layer_panel_index(i, &name) {
+                match self.layer_panel_index(i, &layer) {
                     Some(idx) => {
                         self.tabs[i].layers.selected = Some(idx);
-                        Some(Message::LayerColorSet(color))
+                        return self.set_layer_color(color, name.as_deref());
                     }
                     None => None,
                 }
@@ -1213,7 +1275,10 @@ impl OpenCADStudio {
             Some(crate::app::ColorPickTarget::LayerState(idx)) => {
                 Some(Message::LayerStateEditorLayerColor(idx, color))
             }
-            Some(crate::app::ColorPickTarget::PlotStyle) => None,
+            // Handled before this match.
+            Some(
+                crate::app::ColorPickTarget::PlotStyle | crate::app::ColorPickTarget::Interface(_),
+            ) => None,
             None => None,
         };
         if let Some(m) = edit {
@@ -1224,13 +1289,16 @@ impl OpenCADStudio {
     }
 
     pub(super) fn on_ds_set_handle(&mut self, field: &'static str, value: String) -> Task<Message> {
+        if self.selected_dimstyle_is_read_only() {
+            return Task::none();
+        }
         let i = self.active_tab;
         let name = self.dimstyle_selected.clone();
         let is_lt = matches!(
             field,
             "dimltex_handle" | "dimltex1_handle" | "dimltex2_handle"
         );
-        let doc = &self.tabs[i].scene.document;
+        let doc = &mut self.tabs[i].scene.document;
         let handle = if value == "Default" || value == "ByBlock" {
             codec::types::Handle::NULL
         } else if is_lt {
@@ -1240,11 +1308,8 @@ impl OpenCADStudio {
                 .map(|lt| lt.handle)
                 .unwrap_or(codec::types::Handle::NULL)
         } else {
-            doc.block_records
-                .iter()
-                .find(|b| b.name == value)
-                .map(|b| b.handle)
-                .unwrap_or(codec::types::Handle::NULL)
+            // A standard arrowhead's block is created on first use.
+            crate::entities::arrowheads::resolve(doc, &value).unwrap_or(codec::types::Handle::NULL)
         };
         // Staged: persists on Apply.
         if let Some(ds) = self.tabs[i].scene.document.dim_styles.get_mut(&name) {
@@ -1323,6 +1388,87 @@ mod ds_set_handle_tests {
         assert_eq!(
             ds.dimblk2, hb,
             "picking the first arrowhead must not touch the second"
+        );
+    }
+
+    #[test]
+    fn xref_dimstyle_is_read_only_and_rejects_direct_edits() {
+        let mut app = app_with_arrow_blocks();
+        let i = app.active_tab;
+        let name = app.dimstyle_selected.clone();
+        let before = app.tabs[i]
+            .scene
+            .document
+            .dim_styles
+            .get(&name)
+            .unwrap()
+            .dimdle;
+        app.tabs[i]
+            .scene
+            .document
+            .dim_styles
+            .get_mut(&name)
+            .unwrap()
+            .xref_dependent = true;
+        assert!(app.selected_dimstyle_is_read_only());
+
+        app.ds_dimdle = "123".to_string();
+        app.apply_dimstyle_bufs(i);
+        let _ = app.on_ds_set_handle("dimblk1", "ARROW_A".to_string());
+
+        assert_eq!(
+            app.tabs[i]
+                .scene
+                .document
+                .dim_styles
+                .get(&name)
+                .unwrap()
+                .dimdle,
+            before
+        );
+        assert_eq!(
+            app.tabs[i]
+                .scene
+                .document
+                .dim_styles
+                .get(&name)
+                .unwrap()
+                .dimblk1,
+            codec::types::Handle::NULL
+        );
+    }
+
+    #[test]
+    fn merged_xref_dimstyle_name_is_read_only() {
+        let mut app = app_with_arrow_blocks();
+        let i = app.active_tab;
+        let old_name = app.dimstyle_selected.clone();
+        let mut style = app.tabs[i]
+            .scene
+            .document
+            .dim_styles
+            .get(&old_name)
+            .unwrap()
+            .clone();
+        style.dimdle = 7.0;
+        let before = style.dimdle;
+        app.tabs[i].scene.document.dim_styles.remove(&old_name);
+        style.name = "ARCH|Imported".to_string();
+        app.tabs[i].scene.document.dim_styles.add_or_replace(style);
+        app.dimstyle_selected = "ARCH|Imported".to_string();
+
+        assert!(app.selected_dimstyle_is_read_only());
+        app.ds_dimdle = "456".to_string();
+        app.apply_dimstyle_bufs(i);
+        assert_eq!(
+            app.tabs[i]
+                .scene
+                .document
+                .dim_styles
+                .get("ARCH|Imported")
+                .unwrap()
+                .dimdle,
+            before
         );
     }
 }

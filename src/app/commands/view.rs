@@ -2,7 +2,7 @@ use super::*;
 
 // Sort tables belong to the block's extension dictionary. Reserve real handles
 // and reconnect older unattached tables without losing their existing entries.
-fn ensure_draw_order_table(doc: &mut codec::CadDocument, block: codec::Handle) -> codec::Handle {
+fn ensure_draw_order_table(doc: &mut codec::Document, block: codec::Handle) -> codec::Handle {
     use codec::objects::{Dictionary, ObjectType, SortEntitiesTable};
 
     // Older commands inserted objects using the unreserved next-handle value.
@@ -319,10 +319,12 @@ impl OpenCADStudio {
 
             "REPORT" => {
                 // Pre-fill the GitHub issue body with version + platform so
-                // reports arrive with the basics already filled in.
+                // reports arrive with the basics already filled in. The rule
+                // is `***`: text typed right above a `---` line turns into a
+                // Markdown heading.
                 let body = format!(
                     "<!-- Describe the issue and the steps to reproduce it. -->\n\n\n\
-                     ---\n- Open CAD Studio: v{}\n- Revision: {} ({}, {})\n- Platform: {}\n",
+                     ***\n- Open CAD Studio: v{}\n- Revision: {} ({}, {})\n- Platform: {}\n",
                     env!("OCS_FULL_VERSION"),
                     env!("OCS_GIT_REV"),
                     env!("OCS_COMMIT_DATE"),
@@ -377,6 +379,14 @@ impl OpenCADStudio {
 
             "PARAMETERS" => {
                 return Some(Task::done(Message::NamedParametersOpen));
+            }
+            "PARAMETERSCLOSE" => {
+                if self.active_modal == Some(crate::app::ModalKind::NamedParameters) {
+                    self.active_modal = None;
+                    self.named_parameter_editor_rows.clear();
+                    self.reset_modal_geometry();
+                }
+                return Some(Task::none());
             }
 
             // CUIEXPORT <path> — write the keyboard-shortcut customizations
@@ -1000,7 +1010,10 @@ impl OpenCADStudio {
                             match self.tabs[i]
                                 .scene
                                 .document
-                                .add_entity_to_layout(codec::EntityType::Viewport(vp), &layout_name)
+                                .add_entity_to_layout(
+                                    codec::EntityType::Viewport(Box::new(vp)),
+                                    &layout_name,
+                                )
                             {
                                 Ok(handle) => {
                                     self.tabs[i].scene.auto_fit_viewport(handle);
@@ -1760,7 +1773,7 @@ impl CadCommand for DrawOrderCommand {
 /// Insert the selected block next to the extremal reference in effective draw
 /// order. Renumber the ordered siblings to avoid ties or saturated sort keys.
 fn assign_relative_group_keys(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     block: codec::Handle,
     selected: &[codec::Handle],
     references: &[codec::Handle],
@@ -1841,7 +1854,7 @@ fn assign_relative_group_keys(
 /// shifted by `n` so lifted siblings keep their relative order. Locked-layer
 /// entities are never moved or lifted.
 fn assign_back_group_keys(
-    doc: &codec::CadDocument,
+    doc: &codec::Document,
     block_handle: codec::Handle,
     group: &[codec::Handle],
     floor: u64,
@@ -2207,7 +2220,7 @@ mod tests {
         locked_hatch.common.layer = "LOCKED_LAYER".into();
         let h_locked_hatch = app.tabs[i]
             .scene
-            .add_entity_clone(EntityType::Hatch(locked_hatch));
+            .add_entity_clone(EntityType::Hatch(Box::new(locked_hatch)));
 
         let h_line = app.tabs[i]
             .scene

@@ -4,7 +4,7 @@
 use codec::entities::{Block, BlockEnd};
 use codec::tables::TableEntry;
 use codec::types::{Handle, Vector3};
-use codec::{CadDocument, EntityType};
+use codec::{Document, EntityType};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -223,7 +223,6 @@ fn finalize_xref_outcome(outcome: &mut codec::ReadOutcome) {
     let doc = &mut outcome.document;
     super::normalize_block_origins(doc);
     if outcome.stats.source_format == Some(codec::SourceFormat::Dxf) {
-        super::fix_dxf_dimension_rotations(doc);
         super::fix_dxf_layout_plot_settings(doc);
     }
     super::fix_viewport_status_flags(doc);
@@ -240,7 +239,7 @@ fn read_outcome_from_bytes(
     bytes: Arc<Vec<u8>>,
     progress: Option<Arc<dyn Fn(u16) + Send + Sync>>,
 ) -> Result<codec::ReadOutcome, String> {
-    use codec::io::dwg::DwgReader;
+    use codec::DwgReader;
     use codec::DxfReader;
     // The readers keep their stream and want an owned, 'static buffer —
     // take the registry `Arc`'s contents by value (one copy; the worker
@@ -277,12 +276,8 @@ fn read_outcome_from_bytes(
 /// `base_dir`, and populate each xref block with entities from the
 /// referenced file.
 ///
-/// Returns a list of [`XrefInfo`] describing each xref block found, plus the
-/// number of corrupt xref entities dropped during merge. Purging happens
-/// inline as each xref's entities are merged — xref content is parser output
-/// just like the host doc, so it gets the same corrupt-entity guard. Folding
-/// it in here avoids a second full-document `entities()` walk after resolve.
-pub fn resolve_xrefs(doc: &mut CadDocument, base_dir: &Path) -> (Vec<XrefInfo>, usize) {
+/// Returns a list of [`XrefInfo`] describing each xref block found.
+pub fn resolve_xrefs(doc: &mut Document, base_dir: &Path) -> Vec<XrefInfo> {
     resolve_xrefs_with_filter(doc, base_dir, None, None)
 }
 
@@ -292,10 +287,10 @@ pub fn resolve_xrefs(doc: &mut CadDocument, base_dir: &Path) -> (Vec<XrefInfo>, 
 /// the operation behind `XREF Reload <name>`: a targeted reload must not
 /// silently reload (or alter the stale baseline of) every other reference.
 pub fn resolve_xrefs_for_keys(
-    doc: &mut CadDocument,
+    doc: &mut Document,
     base_dir: &Path,
     keys: &HashSet<Handle>,
-) -> (Vec<XrefInfo>, usize) {
+) -> Vec<XrefInfo> {
     resolve_xrefs_with_filter(doc, base_dir, None, Some(keys))
 }
 
@@ -305,19 +300,19 @@ pub fn resolve_xrefs_for_keys(
 /// progress comes directly from the DWG reader when available, so one large
 /// XREF advances smoothly instead of making the file-open bar appear frozen.
 pub fn resolve_xrefs_with_progress(
-    doc: &mut CadDocument,
+    doc: &mut Document,
     base_dir: &Path,
     progress: Option<std::sync::Arc<dyn Fn(usize, usize) + Send + Sync>>,
-) -> (Vec<XrefInfo>, usize) {
+) -> Vec<XrefInfo> {
     resolve_xrefs_with_filter(doc, base_dir, progress, None)
 }
 
 fn resolve_xrefs_with_filter(
-    doc: &mut CadDocument,
+    doc: &mut Document,
     base_dir: &Path,
     progress: Option<std::sync::Arc<dyn Fn(usize, usize) + Send + Sync>>,
     only: Option<&HashSet<Handle>>,
-) -> (Vec<XrefInfo>, usize) {
+) -> Vec<XrefInfo> {
     // Auto-resolve every xref — frustum + LOD culling keep GPU cost bounded.
     let xref_entries: Vec<(String, String, Handle)> = doc
         .block_records
@@ -432,7 +427,6 @@ fn resolve_xrefs_with_filter(
     // Phase 2 — merge each parsed xref into the host document, in the original
     // block order (par_iter preserves it), so handle allocation is deterministic.
     let mut result = Vec::with_capacity(parsed.len());
-    let mut dropped = 0usize;
     #[allow(unused_mut, unused_variables)]
     for (
         merge_index,
@@ -468,19 +462,7 @@ fn resolve_xrefs_with_filter(
                         .iter()
                         .map(|diagnostic| diagnostic.message.clone()),
                 );
-                let invalid = super::purge_corrupt_entities(&mut outcome.document);
-                if invalid > 0 {
-                    diagnostics.push(format!(
-                        "normal read found {invalid} structurally invalid reference records"
-                    ));
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if source_sha256.is_none() {
-                        source_sha256 = resolved.as_ref().and_then(|path| {
-                            super::stable_sha256_file(path, initial_fingerprint.as_ref())
-                        });
-                    }
-                }
-                if recovered || invalid > 0 {
+                if recovered {
                     (XrefStatus::Failed, diagnostics, Some(outcome.stats))
                 } else {
                     // Reload is replacement, never append. Keep the prior merge
@@ -502,7 +484,7 @@ fn resolve_xrefs_with_filter(
                     let _ = unload_reference(doc, br_handle.value());
                     remove_pipe_symbols(doc, &block_name);
                     ensure_block_entities(doc, &block_name);
-                    dropped += merge_xref_into_block(doc, &block_name, br_handle, outcome.document);
+                    merge_xref_into_block(doc, &block_name, br_handle, outcome.document);
                     if visretain {
                         restore_dependent_layers(doc, &block_name, kept_layers);
                     }
@@ -533,14 +515,14 @@ fn resolve_xrefs_with_filter(
         }
     }
 
-    (result, dropped)
+    result
 }
 
 /// Underlay files named by a relative (or moved) path: read them from where
 /// the drawing is and register the bytes under the stored path, which is
 /// what the underlay's definition names.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn register_underlay_sources(doc: &CadDocument, base_dir: &Path) {
+pub fn register_underlay_sources(doc: &Document, base_dir: &Path) {
     for object in doc.objects.values() {
         let codec::objects::ObjectType::UnderlayDefinition(def) = object else {
             continue;
@@ -628,7 +610,7 @@ fn source_layers(path: &Path) -> Option<HashMap<String, LayerLook>> {
 /// Whether any of reference `name`'s layers was changed in the host — the
 /// Properties "Layer property overrides" row. Compares the host's dependent
 /// layers with the source file's own.
-pub fn layer_overrides(doc: &CadDocument, name: &str, raw_path: &str, base_dir: &Path) -> bool {
+pub fn layer_overrides(doc: &Document, name: &str, raw_path: &str, base_dir: &Path) -> bool {
     let Some(source) = resolve_path(raw_path, base_dir).and_then(|p| source_layers(&p)) else {
         return false;
     };
@@ -700,7 +682,7 @@ pub(crate) fn resolve_path(raw: &str, base_dir: &Path) -> Option<PathBuf> {
 /// record's marker handles. The DWG writer emits the markers the record
 /// points at; a record left pointing at a null handle is written with
 /// handle 0, which makes the whole drawing unreadable elsewhere.
-pub(crate) fn ensure_block_entities(doc: &mut CadDocument, block_name: &str) {
+pub(crate) fn ensure_block_entities(doc: &mut Document, block_name: &str) {
     let Some((owner, begin, end, path)) = doc.block_records.get(block_name).map(|br| {
         (
             br.handle,
@@ -783,7 +765,7 @@ struct BindTaken {
 }
 
 impl BindTaken {
-    fn capture(doc: &CadDocument) -> Self {
+    fn capture(doc: &Document) -> Self {
         let upper_names =
             |names: Vec<String>| names.into_iter().map(|n| n.to_uppercase()).collect();
         Self {
@@ -861,8 +843,8 @@ struct XrefSymbolMaps {
 /// definition (fresh handle, detached owner, verbatim path — BIND retargets
 /// image paths via COLLECT before merging).
 fn import_xref_symbols(
-    doc: &mut CadDocument,
-    xref_doc: &CadDocument,
+    doc: &mut Document,
+    xref_doc: &Document,
     naming: &mut SymbolNaming,
 ) -> XrefSymbolMaps {
     let mut maps = XrefSymbolMaps::default();
@@ -880,6 +862,23 @@ fn import_xref_symbols(
 
     for layer in xref_doc.layers.iter() {
         let old = layer.name.clone();
+        // Layer 0 and Defpoints are never dependent symbols: the reference's
+        // objects on them use the host's layer of the same name (made from
+        // the reference's when the host has none), on load and on bind.
+        if old == "0" || old.eq_ignore_ascii_case("Defpoints") {
+            if !doc.layers.contains(&old) {
+                let mut cloned = layer.clone();
+                cloned.plotstyle_handle = host_plotstyle;
+                cloned.material = host_material;
+                cloned.flags.xref_dependent = false;
+                cloned.xref_block_record_handle = Handle::NULL;
+                cloned.set_handle(doc.allocate_handle());
+                let _ = doc.layers.add(cloned);
+            }
+            let host = doc.layers.get(&old).map_or(old.clone(), |l| l.name.clone());
+            maps.layers.insert(old.to_uppercase(), host);
+            continue;
+        }
         let new = naming.name_for(SymbolKind::Layer, &old);
         let mut cloned = layer.clone();
         cloned.name = new.clone();
@@ -1001,6 +1000,9 @@ fn import_xref_symbols(
                     let new_h = doc.allocate_handle();
                     cloned.handle = new_h;
                     cloned.owner = Handle::NULL;
+                    // The source drawing's reactors; the bound images
+                    // drop their reactor links too.
+                    cloned.reactors.clear();
                     doc.objects
                         .insert(new_h, ObjectType::ImageDefinition(cloned));
                     maps.image_defs.insert(*handle, new_h);
@@ -1037,7 +1039,7 @@ fn null_handle(handle: &mut Option<Handle>) -> usize {
 /// Rewrite one entity's symbol references to the imported copies in place.
 /// Returns the count of unremappable foreign handles (see
 /// `bind_limitations` above) — ignored on the load path, reported per BIND.
-fn remap_xref_entity(host: &CadDocument, entity: &mut EntityType, maps: &XrefSymbolMaps) -> usize {
+fn remap_xref_entity(host: &Document, entity: &mut EntityType, maps: &XrefSymbolMaps) -> usize {
     let mut unremapped = 0usize;
     let rename = |map: &HashMap<String, String>, name: &mut String| {
         if let Some(new) = map.get(&name.to_uppercase()) {
@@ -1149,8 +1151,8 @@ fn remap_xref_entity(host: &CadDocument, entity: &mut EntityType, maps: &XrefSym
 /// Re-point a source doc's draw-order tables at the merged blocks/handles, so
 /// an explicit DRAWORDER inside the source survives the merge.
 fn copy_xref_sortents(
-    doc: &mut CadDocument,
-    xref_doc: &CadDocument,
+    doc: &mut Document,
+    xref_doc: &Document,
     target_owner: Handle,
     br_handle_map: &HashMap<Handle, Handle>,
     entity_handle_map: &HashMap<Handle, Handle>,
@@ -1201,13 +1203,12 @@ fn copy_xref_sortents(
 /// — which doesn't know about the xref's layers — and silently falls
 /// back to WHITE / 1 px line weight. AutoCAD's BIND command uses the
 /// same naming scheme.
-/// Returns the number of corrupt entities skipped during the merge.
 fn merge_xref_into_block(
-    doc: &mut CadDocument,
+    doc: &mut Document,
     xref_block_name: &str,
     br_handle: Handle,
-    xref_doc: CadDocument,
-) -> usize {
+    xref_doc: Document,
+) {
     let prefix = xref_block_name;
 
     // Carry the xref's INSUNITS onto the host BlockRecord. Used at INSERT
@@ -1227,7 +1228,11 @@ fn merge_xref_into_block(
     // Dependent layers and linetypes carry the xref flag and their owning
     // reference, the way the file stores them; without it the host writes
     // plain records with a "|" in the name, which other readers reject.
-    for name in maps.layers.values() {
+    // Layer 0 and Defpoints map to the host's own layers, which stay plain.
+    for (source, name) in &maps.layers {
+        if name.eq_ignore_ascii_case(source) {
+            continue;
+        }
         if let Some(layer) = doc.layers.get_mut(name) {
             layer.flags.xref_dependent = true;
             layer.xref_block_record_handle = br_handle;
@@ -1243,7 +1248,7 @@ fn merge_xref_into_block(
     // ── Entities (shared helper) ────────────────────────────────────────
     // The unremapped-handle count is ignored on the load path (BIND reports
     // it per bind).
-    let (dropped, _, entity_handle_map) = merge_source_entities(doc, &xref_doc, br_handle, &maps);
+    let (_, entity_handle_map) = merge_source_entities(doc, &xref_doc, br_handle, &maps);
 
     // ── Draw-order overrides (shared helper) ──────────────────────────────
     copy_xref_sortents(
@@ -1253,7 +1258,6 @@ fn merge_xref_into_block(
         &maps.br_handles,
         &entity_handle_map,
     );
-    dropped
 }
 
 /// Source entities in display order: each block record's `entity_handles`
@@ -1262,7 +1266,7 @@ fn merge_xref_into_block(
 /// (fills over outlines etc.), since the host ranks draw order by the
 /// freshly-allocated handles. Entities missing from every chain keep their
 /// stream order at the end. BLOCK/BlockEnd markers are excluded.
-fn ordered_source_entities(xref_doc: &CadDocument) -> Vec<(Handle, EntityType)> {
+fn ordered_source_entities(xref_doc: &Document) -> Vec<(Handle, EntityType)> {
     let mut ordered: Vec<Handle> = Vec::new();
     let mut seen: HashSet<Handle> = HashSet::default();
     for br in xref_doc.block_records.iter() {
@@ -1287,26 +1291,18 @@ fn ordered_source_entities(xref_doc: &CadDocument) -> Vec<(Handle, EntityType)> 
 
 /// Merge one source doc's entities into `target`, routing model-space content
 /// into `target_br` and nested-block content into its imported counterpart
-/// (`maps.br_handles`). Returns corrupt-drop count, unremapped-handle count,
-/// and the old→new entity handle map for the sortents copy.
+/// (`maps.br_handles`). Returns the unremapped-handle count and the old→new
+/// entity handle map for the sortents copy.
 fn merge_source_entities(
-    target: &mut CadDocument,
-    source: &CadDocument,
+    target: &mut Document,
+    source: &Document,
     target_br: Handle,
     maps: &XrefSymbolMaps,
-) -> (usize, usize, HashMap<Handle, Handle>) {
+) -> (usize, HashMap<Handle, Handle>) {
     let source_ms_handle = source.header.model_space_block_handle;
     let mut entity_handle_map: HashMap<Handle, Handle> = HashMap::default();
-    let mut dropped = 0usize;
     let mut unremapped = 0usize;
     for (old_h, mut entity) in ordered_source_entities(source) {
-        // Drop parser-garbage entities (bad normals / vertex counts / inf
-        // coords) before they enter the host doc — they trigger huge
-        // allocations and unbounded recursion in the wire pipeline.
-        if super::is_entity_corrupt(&entity) {
-            dropped += 1;
-            continue;
-        }
         // Remap every symbol reference so the host's resolver hits the copies
         // just imported (load path ignores the unremapped count; BIND reports
         // it per bind).
@@ -1330,7 +1326,7 @@ fn merge_source_entities(
             entity_handle_map.insert(old_h, new_h);
         }
     }
-    (dropped, unremapped, entity_handle_map)
+    (unremapped, entity_handle_map)
 }
 
 fn is_sentinel_linetype(name: &str) -> bool {
@@ -1378,7 +1374,7 @@ pub use crate::io::xref_model::child_key;
 /// nested file that fails to parse is skipped silently. Synchronous by
 /// design; async stat is Task 8.
 pub fn collect_entries(
-    doc: &codec::CadDocument,
+    doc: &codec::Document,
     base_dir: &Path,
     unloaded: &std::collections::HashSet<crate::io::xref_model::UnloadKey>,
 ) -> Vec<crate::io::xref_model::ReferenceEntry> {
@@ -1388,7 +1384,7 @@ pub fn collect_entries(
 /// [`collect_entries`] with a load-time mtime baseline for `Stale` detection.
 /// See [`collect_entries`] for the full contract.
 pub fn collect_entries_with_prev(
-    doc: &codec::CadDocument,
+    doc: &codec::Document,
     base_dir: &Path,
     unloaded: &std::collections::HashSet<crate::io::xref_model::UnloadKey>,
     prev: &std::collections::HashMap<u64, std::time::SystemTime>,
@@ -1621,16 +1617,20 @@ pub fn collect_entries_with_prev(
             }
         }
     }
-    let mut nested_cache: HashMap<String, CadDocument> = HashMap::default();
+    // Cached nested documents are shared via `Arc`: the enumeration below is
+    // strictly read-only, so a hit clones the pointer instead of deep-copying
+    // the whole document (entities, objects, block records) per access.
+    let mut nested_cache: HashMap<String, Arc<Document>> = HashMap::default();
     while let Some((parent_key, parent_path)) = work.pop() {
         let cache_key = normalize_lexical(&parent_path.to_string_lossy());
         let nested_doc = if let Some(cached) = nested_cache.get(&cache_key) {
-            cached.clone()
+            Arc::clone(cached)
         } else {
             match super::load_file(&parent_path) {
                 Ok(nested) => {
-                    nested_cache.insert(cache_key, nested.clone());
-                    nested
+                    let shared = Arc::new(nested);
+                    nested_cache.insert(cache_key, Arc::clone(&shared));
+                    shared
                 }
                 Err(_) => continue,
             }
@@ -1708,7 +1708,7 @@ enum RefTarget {
     PointCloud { handle: Handle, name: String },
 }
 
-fn find_target(doc: &CadDocument, key: u64) -> Option<RefTarget> {
+fn find_target(doc: &Document, key: u64) -> Option<RefTarget> {
     for br in doc.block_records.iter() {
         if (br.flags.is_xref || br.flags.is_xref_overlay) && br.handle.value() == key {
             return Some(RefTarget::DwgXref {
@@ -1757,7 +1757,7 @@ fn find_target(doc: &CadDocument, key: u64) -> Option<RefTarget> {
 /// Image/PDF keys need no doc mutation (session-unloaded covers them) and
 /// return `Ok`. Unknown (nested-hash) keys error — nested rows are never
 /// directly unloadable.
-pub fn unload_reference(doc: &mut CadDocument, key: u64) -> Result<String, String> {
+pub fn unload_reference(doc: &mut Document, key: u64) -> Result<String, String> {
     let Some(target) = find_target(doc, key) else {
         return Err(crate::t!("XREF: no loaded reference with that key.").to_string());
     };
@@ -1814,7 +1814,7 @@ pub fn unload_reference(doc: &mut CadDocument, key: u64) -> Result<String, Strin
 }
 
 /// A point cloud definition's loaded flag (Unload / Reload).
-pub fn set_point_cloud_loaded(doc: &mut CadDocument, handle: Handle, loaded: bool) {
+pub fn set_point_cloud_loaded(doc: &mut Document, handle: Handle, loaded: bool) {
     if let Some(codec::objects::ObjectType::ClassObject(object)) = doc.objects.get_mut(&handle) {
         if let codec::objects::ClassObjectData::PointCloudDefinitionEx(def) = &mut object.data {
             def.is_loaded = loaded;
@@ -1832,7 +1832,7 @@ pub fn set_point_cloud_loaded(doc: &mut CadDocument, handle: Handle, loaded: boo
 ///   (SPIKE2 item 6), so instances inside other block definitions are covered.
 /// - Images/PDFs: remove the definition object plus every entity referencing
 ///   it by handle.
-pub fn detach_reference(doc: &mut CadDocument, key: u64) -> Result<String, String> {
+pub fn detach_reference(doc: &mut Document, key: u64) -> Result<String, String> {
     let Some(target) = find_target(doc, key) else {
         return Err(crate::t!("XREF: no loaded reference with that key.").to_string());
     };
@@ -1974,7 +1974,7 @@ pub struct BindOutcome {
 /// - Nested keys have no host definition and never reach here (callers map
 ///   them to the "bind it in its host drawing" message, mirroring Detach).
 pub fn bind_reference(
-    doc: &mut CadDocument,
+    doc: &mut Document,
     key: u64,
     base_dir: &Path,
     host_dir: &Path,
@@ -2006,7 +2006,7 @@ fn bind_failed(name: &str, reason: impl std::fmt::Display) -> String {
 }
 
 fn bind_dwg(
-    doc: &mut CadDocument,
+    doc: &mut Document,
     br_handle: Handle,
     name: &str,
     base_dir: &Path,
@@ -2057,7 +2057,7 @@ fn bind_dwg(
     })
 }
 
-fn load_bind_source(ref_name: &str, found: &Path) -> Result<CadDocument, String> {
+fn load_bind_source(ref_name: &str, found: &Path) -> Result<Document, String> {
     match super::load_file(found) {
         Ok(doc) => Ok(doc),
         Err(e) => Err(bind_failed(ref_name, e)),
@@ -2066,7 +2066,7 @@ fn load_bind_source(ref_name: &str, found: &Path) -> Result<CadDocument, String>
 
 /// Reject PDF underlays anywhere in a bind closure: vector import is
 /// unavailable, and silently dropping them would lose data.
-fn check_no_pdf_underlays(source: &CadDocument) -> Result<(), String> {
+fn check_no_pdf_underlays(source: &Document) -> Result<(), String> {
     use codec::entities::UnderlayType;
     use codec::objects::ObjectType;
     let has_pdf = source.objects.values().any(
@@ -2086,7 +2086,7 @@ fn check_no_pdf_underlays(source: &CadDocument) -> Result<(), String> {
 /// Unresolvable nested files error the whole bind; cyclic closures enumerate
 /// once (mirroring `collect_entries`). Returns the nested unremapped count.
 fn bind_nested_closure(
-    source: &mut CadDocument,
+    source: &mut Document,
     source_dir: &Path,
     host_dir: &Path,
     stack: &mut Vec<String>,
@@ -2137,10 +2137,10 @@ fn bind_nested_closure(
 /// (`{parent}$N${sym}`), threading `taken` through for collision dedup.
 /// Returns the merge's unremapped count plus the updated taken sets.
 fn merge_bound_doc(
-    target: &mut CadDocument,
+    target: &mut Document,
     parent: &str,
     target_br: Handle,
-    source: &CadDocument,
+    source: &Document,
     taken: BindTaken,
 ) -> (usize, BindTaken) {
     ensure_block_entities(target, parent);
@@ -2149,8 +2149,7 @@ fn merge_bound_doc(
         taken,
     };
     let maps = import_xref_symbols(target, source, &mut naming);
-    let (_, unremapped, entity_handle_map) =
-        merge_source_entities(target, source, target_br, &maps);
+    let (unremapped, entity_handle_map) = merge_source_entities(target, source, target_br, &maps);
     copy_xref_sortents(
         target,
         source,
@@ -2172,7 +2171,7 @@ fn merge_bound_doc(
 /// partial document state. `only` restricts the pass to one definition
 /// (direct image bind); `None` collects the whole closure.
 fn collect_bind_images(
-    source: &mut CadDocument,
+    source: &mut Document,
     ref_name: &str,
     source_dir: &Path,
     host_dir: &Path,
@@ -2275,7 +2274,7 @@ pub const POINT_CLOUD_KEY: &str = "pointcloud:";
 
 /// Make the named references' paths relative to `host` (their drawing's
 /// first save); a reference that cannot be relative keeps its full path.
-pub fn make_relative(doc: &mut CadDocument, names: &rustc_hash::FxHashSet<String>, host: &Path) {
+pub fn make_relative(doc: &mut Document, names: &rustc_hash::FxHashSet<String>, host: &Path) {
     for name in names {
         if let Some(handle) = name.strip_prefix(POINT_CLOUD_KEY) {
             if let Ok(handle) = u64::from_str_radix(handle, 16) {
@@ -2294,7 +2293,7 @@ pub fn make_relative(doc: &mut CadDocument, names: &rustc_hash::FxHashSet<String
 /// the file never stores: the reference's own geometry, its nested block
 /// definitions and its text and dimension styles. Dependent layers and
 /// linetypes stay (flagged), so layer overrides kept under VISRETAIN persist.
-pub fn strip_resolved_xref_content(doc: &mut CadDocument) {
+pub fn strip_resolved_xref_content(doc: &mut Document) {
     let xrefs: Vec<(String, Handle)> = doc
         .block_records
         .iter()
@@ -2324,7 +2323,7 @@ pub fn strip_resolved_xref_content(doc: &mut CadDocument) {
 }
 
 /// Text styles a kept linetype draws its shapes or text with.
-fn linetype_styles(doc: &CadDocument) -> HashSet<Handle> {
+fn linetype_styles(doc: &Document) -> HashSet<Handle> {
     doc.line_types
         .iter()
         .flat_map(|linetype| linetype.elements.iter())
@@ -2340,11 +2339,11 @@ fn linetype_styles(doc: &CadDocument) -> HashSet<Handle> {
 /// Shared by Detach (which then also erases the BlockRecord itself) and BIND
 /// (which drops the previous merge before re-merging under `$N$` names). The
 /// xref BlockRecord itself, its INSERTs, and non-prefixed symbols stay.
-fn remove_pipe_symbols(doc: &mut CadDocument, name: &str) {
+fn remove_pipe_symbols(doc: &mut Document, name: &str) {
     remove_dependent_symbols(doc, name, true);
 }
 
-fn remove_dependent_symbols(doc: &mut CadDocument, name: &str, layers_too: bool) {
+fn remove_dependent_symbols(doc: &mut Document, name: &str, layers_too: bool) {
     let prefix = format!("{}|", name.to_uppercase());
     let is_dep = |n: &str| n.to_uppercase().starts_with(&prefix);
     // Dependent blocks first — their handles route the owned-entity cleanup.
@@ -2448,7 +2447,7 @@ fn remove_dependent_symbols(doc: &mut CadDocument, name: &str, layers_too: bool)
 /// these entries and re-merges file defaults; without the snapshot the
 /// user's frozen/off/color tweaks would be silently lost on every reload.
 fn snapshot_dependent_layers(
-    doc: &CadDocument,
+    doc: &Document,
     name: &str,
 ) -> HashMap<String, codec::tables::Layer> {
     let prefix = format!("{}|", name.to_uppercase());
@@ -2470,7 +2469,7 @@ fn snapshot_dependent_layers(
 /// xref block-record pointer) stay on the fresh entries — everything a user
 /// can tweak in a layer UI is restored.
 fn restore_dependent_layers(
-    doc: &mut CadDocument,
+    doc: &mut Document,
     name: &str,
     kept: HashMap<String, codec::tables::Layer>,
 ) {
@@ -2501,7 +2500,7 @@ fn restore_dependent_layers(
 }
 
 /// Store `new_raw` verbatim on the definition (no synthesis).
-pub fn set_ref_path(doc: &mut CadDocument, key: u64, new_raw: &str) -> Result<String, String> {
+pub fn set_ref_path(doc: &mut Document, key: u64, new_raw: &str) -> Result<String, String> {
     let Some(target) = find_target(doc, key) else {
         return Err(crate::t!("XREF: no loaded reference with that key.").to_string());
     };
@@ -2552,7 +2551,7 @@ pub fn set_ref_path(doc: &mut CadDocument, key: u64, new_raw: &str) -> Result<St
 /// Convert one reference's stored path to `pathtype` against `host_path`.
 /// Verbatim store on success; neutral errors otherwise.
 pub fn apply_pathtype(
-    doc: &mut CadDocument,
+    doc: &mut Document,
     key: u64,
     pathtype: crate::io::xref_model::Pathtype,
     host_path: &Path,
@@ -2620,7 +2619,7 @@ pub fn apply_pathtype(
 /// forms and the result is rejoined from normalized components, so `..`-laden
 /// or case-folded saved paths rewrite correctly and multibyte paths can never
 /// panic on a mid-char cut.
-pub fn replace_path_prefix(doc: &mut CadDocument, old: &str, new: &str) -> usize {
+pub fn replace_path_prefix(doc: &mut Document, old: &str, new: &str) -> usize {
     use crate::io::xref_model::normalize_lexical;
     let old_n = normalize_lexical(old);
     if old_n.is_empty() {
@@ -2683,7 +2682,7 @@ pub fn replace_path_prefix(doc: &mut CadDocument, old: &str, new: &str) -> usize
 /// The flip affects future nesting propagation (overlays do not re-export
 /// through the host); current geometry is untouched.
 pub fn set_ref_type(
-    doc: &mut CadDocument,
+    doc: &mut Document,
     key: u64,
     ref_type: crate::io::xref_model::RefType,
 ) -> Result<String, String> {
@@ -2724,7 +2723,7 @@ pub fn set_ref_type(
 /// the live document are rebased so the running session agrees with the file
 /// just written.
 pub fn rebase_relative_paths_for_save_as(
-    doc: &mut CadDocument,
+    doc: &mut Document,
     old_base: &Path,
     new_base: &Path,
 ) -> usize {
@@ -2806,7 +2805,7 @@ mod tests {
         std::fs::write(&tmp, b"").unwrap();
         let saved = tmp.to_string_lossy().into_owned();
 
-        let mut doc = codec::CadDocument::new();
+        let mut doc = codec::Document::new();
         let mut br = codec::tables::BlockRecord::new("PLAN");
         br.flags.is_xref = true;
         br.xref_path = saved.clone();
@@ -2824,8 +2823,8 @@ mod tests {
         assert_eq!(entries[0].kind, RefKind::DwgXref);
     }
 
-    fn xref_doc_with(name: &str, saved: &str) -> (codec::CadDocument, u64) {
-        let mut doc = codec::CadDocument::new();
+    fn xref_doc_with(name: &str, saved: &str) -> (codec::Document, u64) {
+        let mut doc = codec::Document::new();
         let mut br = codec::tables::BlockRecord::new(name);
         br.flags.is_xref = true;
         br.xref_path = saved.to_string();
@@ -2852,7 +2851,7 @@ mod tests {
         // mid.dwgxrefs inner.dwg; both must parse (enumeration reads the
         // mid file's block-record table). Returns (mid, inner) abs paths.
         std::fs::write(dir.join("inner.dwg"), b"inner-bytes").unwrap();
-        let mut mid = codec::CadDocument::new();
+        let mut mid = codec::Document::new();
         let mut br = codec::tables::BlockRecord::new("INNER");
         br.flags.is_xref = true;
         br.xref_path = dir.join("inner.dwg").to_string_lossy().into_owned();
@@ -2949,7 +2948,7 @@ mod tests {
         // 3. Targeted reload: back to Loaded.
         let mut handles = HashSet::default();
         handles.insert(doc.block_records.get("MID").unwrap().handle);
-        let (infos, _) = resolve_xrefs_for_keys(&mut doc, &dir, &handles);
+        let infos = resolve_xrefs_for_keys(&mut doc, &dir, &handles);
         assert!(infos.iter().any(|i| i.name == "MID"));
         let listed = collect_entries_with_prev(&doc, &dir, &empty, &no_prev);
         assert!(listed
@@ -3000,7 +2999,7 @@ mod tests {
     #[test]
     fn overlay_on_image_errors() {
         use codec::objects::{ImageDefinition, ObjectType};
-        let mut doc = codec::CadDocument::new();
+        let mut doc = codec::Document::new();
         let h = doc.allocate_handle();
         let mut def = ImageDefinition::with_dimensions("img.png", 8, 8);
         def.handle = h;
@@ -3195,9 +3194,9 @@ mod tests {
         fn write_xref_file(
             dir: &std::path::Path,
             name: &str,
-            build: impl FnOnce(&mut codec::CadDocument),
+            build: impl FnOnce(&mut codec::Document),
         ) -> String {
-            let mut doc = codec::CadDocument::new();
+            let mut doc = codec::Document::new();
             build(&mut doc);
             let bytes = crate::io::save_to_bytes(&doc, "dwg", doc.version).expect("save xref");
             let path = dir.join(name);
@@ -3211,7 +3210,7 @@ mod tests {
             codec::EntityType::Line(line)
         }
 
-        fn add_layer(doc: &mut codec::CadDocument, name: &str) {
+        fn add_layer(doc: &mut codec::Document, name: &str) {
             doc.layers
                 .add(codec::tables::Layer::new(name))
                 .expect("add layer");
@@ -3315,7 +3314,7 @@ mod tests {
                 // Hatch (pattern names have no table — preserved verbatim).
                 let mut hatch = codec::entities::Hatch::new();
                 hatch.pattern.name = "ANSI31".to_string();
-                doc.add_entity(codec::EntityType::Hatch(hatch)).unwrap();
+                doc.add_entity(codec::EntityType::Hatch(Box::new(hatch))).unwrap();
                 // Dim-style reference via a tolerance entity.
                 doc.dim_styles
                     .add(codec::tables::DimStyle::new("ARCH"))
@@ -3486,7 +3485,7 @@ mod tests {
         #[test]
         fn bind_pdf_errors() {
             use codec::objects::{ObjectType, UnderlayDefinition};
-            let mut host = codec::CadDocument::new();
+            let mut host = codec::Document::new();
             let h = host.allocate_handle();
             let mut def = UnderlayDefinition::pdf("doc.pdf", "1");
             def.handle = h;
@@ -3522,7 +3521,7 @@ mod tests {
 /// A point cloud definition's full path made relative to the drawing
 /// (".\rcs\scan.rcs", as the reference writes it); on another drive it
 /// stays full.
-fn relative_point_cloud_path(doc: &mut CadDocument, handle: Handle, host: &Path) {
+fn relative_point_cloud_path(doc: &mut Document, handle: Handle, host: &Path) {
     use crate::io::xref_model::{to_pathtype_result, Pathtype};
     let Some(codec::objects::ObjectType::ClassObject(object)) = doc.objects.get_mut(&handle) else {
         return;
@@ -3557,7 +3556,7 @@ mod web_registry_tests {
     }
 
     fn outcome() -> codec::ReadOutcome {
-        codec::ReadOutcome::new(CadDocument::new(), codec::ReadStats::default())
+        codec::ReadOutcome::new(Document::new(), codec::ReadStats::default())
     }
 
     #[test]

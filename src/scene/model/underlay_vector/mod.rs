@@ -20,9 +20,34 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use codec::entities::UnderlayType;
 
-pub use model::{Path, Segment, Sheet, SubPath};
+pub use model::{
+    scaled_elements, By, DgnColor, DgnDimLook, DgnDimStyle, DgnElement, DgnGeom, DgnImport,
+    DgnReference, Path, Segment, Sheet, SubPath, P3,
+};
 
 use super::pdf_raster::{source_bytes, PdfPage};
+
+/// A DGN model element by element, for DGNIMPORT; `None` when the file is
+/// not a V7 or V8 design file.
+pub fn dgn_import(path: &str, item: &str) -> Option<DgnImport> {
+    let bytes = source_bytes(path)?;
+    if dgn7::is_v7(&bytes) {
+        dgn7::import(&bytes)
+    } else {
+        dgn8::import(&bytes, item)
+    }
+}
+
+/// The models DGNIMPORT offers: a V7 file's one model, a V8 file's design
+/// models (sheet models are not imported).
+pub fn dgn_import_models(path: &str) -> Option<Vec<String>> {
+    let bytes = source_bytes(path)?;
+    if dgn7::is_v7(&bytes) {
+        dgn7::model_names(&bytes)
+    } else {
+        dgn8::design_model_names(&bytes)
+    }
+}
 
 /// Sheet names (DWF) or model names (DGN) of a file.
 pub fn item_names(kind: UnderlayType, path: &str) -> Option<Vec<String>> {
@@ -563,6 +588,9 @@ fn to_page_vectors(sheet: &Sheet) -> super::pdf_vector::PageVectors {
                 .collect(),
             stroke: p.stroke.map(|(c, w)| (c, w.max(0.0))),
             fill: p.fill,
+            pen: None,
+            closes: Vec::new(),
+            clip: None,
         })
         .collect();
     pv::PageVectors {

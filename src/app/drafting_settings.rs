@@ -25,6 +25,7 @@ impl DraftingSettingsState {
             grid_major_input: format!("{}", app.grid_major_every),
             grid_adaptive: app.grid_adaptive,
             grid_beyond_limits: app.grid_beyond_limits,
+            grid_axes: app.grid_axes,
             isometric: app.isometric_drafting,
             iso_plane: app.iso_plane,
             snap_angle_deg: app.snap_angle_deg,
@@ -32,6 +33,7 @@ impl DraftingSettingsState {
             ortho_on: app.ortho_mode,
             polar_increment_deg: app.polar_increment_deg,
             osnap_on: app.snapper.snap_enabled,
+            osnap_aperture_input: format!("{}", app.snapper.osnap_radius_px),
             otrack_on: app.snapper.otrack_enabled,
             snap_modes: app.snapper.enabled.clone(),
             osnap3d_on: app.snapper.snap3d_enabled,
@@ -98,6 +100,7 @@ impl OpenCADStudio {
         self.grid_major_every = gm;
         self.grid_adaptive = state.grid_adaptive;
         self.grid_beyond_limits = state.grid_beyond_limits;
+        self.grid_axes = state.grid_axes;
         self.snapper.grid_snap_on = state.snap_on;
         self.snapper.snap_spacing_x = sx;
         self.snapper.snap_spacing_y = sy;
@@ -107,6 +110,20 @@ impl OpenCADStudio {
         self.polar_mode = state.polar_on;
         self.ortho_mode = state.ortho_on;
         self.polar_increment_deg = state.polar_increment_deg;
+        let aperture = state
+            .osnap_aperture_input
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|v| {
+                (crate::snap::MIN_OSNAP_RADIUS_PX..=crate::snap::MAX_OSNAP_RADIUS_PX).contains(v)
+            });
+        let Some(aperture) = aperture else {
+            self.command_line
+                .push_error("OSNAP capture radius must be between 4 and 40 pixels.");
+            return false;
+        };
+        self.snapper.osnap_radius_px = aperture;
         self.snapper.snap_enabled = state.osnap_on;
         self.snapper.otrack_enabled = state.otrack_on;
         self.snapper.enabled = state.snap_modes.clone();
@@ -138,6 +155,7 @@ mod tests {
             grid_major_input: "5".to_string(),
             grid_adaptive: true,
             grid_beyond_limits: true,
+            grid_axes: true,
             isometric: false,
             iso_plane: crate::app::settings::IsoPlane::Left,
             snap_angle_deg: 0.0,
@@ -145,6 +163,7 @@ mod tests {
             ortho_on: false,
             polar_increment_deg: 15.0,
             osnap_on: true,
+            osnap_aperture_input: "15".to_string(),
             otrack_on: false,
             snap_modes: rustc_hash::FxHashSet::default(),
             osnap3d_on: false,
@@ -179,6 +198,7 @@ mod tests {
             grid_major_input: "5".to_string(),
             grid_adaptive: true,
             grid_beyond_limits: true,
+            grid_axes: true,
             isometric: false,
             iso_plane: crate::app::settings::IsoPlane::Left,
             snap_angle_deg: 0.0,
@@ -186,6 +206,7 @@ mod tests {
             ortho_on: false,
             polar_increment_deg: 15.0,
             osnap_on: true,
+            osnap_aperture_input: "15".to_string(),
             otrack_on: false,
             snap_modes: rustc_hash::FxHashSet::default(),
             osnap3d_on: false,

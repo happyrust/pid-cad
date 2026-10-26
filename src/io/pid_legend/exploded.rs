@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use codec::types::Vector3;
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 
 use super::blocks::{grow, sane};
 use super::pairing::match_pairs;
@@ -211,7 +211,7 @@ pub(super) struct ExplodedExclusions<'a> {
 }
 
 fn loose_prims(
-    doc: &CadDocument,
+    doc: &Document,
     upm: f64,
     rules: &ShapeRules,
     excluded: &ExplodedExclusions<'_>,
@@ -1014,7 +1014,7 @@ pub(super) struct Exploded {
 /// Components of loose geometry, named by the tag beside them or by the
 /// shape dictionary, or boxed as repeated unknowns.
 pub(super) fn exploded_symbols(
-    doc: &CadDocument,
+    doc: &Document,
     upm: f64,
     rules: &Rules,
     shape_rules: &ShapeRules,

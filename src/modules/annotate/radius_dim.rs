@@ -93,7 +93,7 @@ pub(crate) fn radial_dimension_entity(
     if let Some(angle) = text_angle {
         dim.base.text_rotation = angle;
     }
-    plane.place_entity(EntityType::Dimension(Dimension::Radius(dim)))
+    plane.place_entity(EntityType::Dimension(Box::new(Dimension::Radius(dim))))
 }
 
 /// A radius dimension for a dimensional constraint: the leader leaves the
@@ -111,7 +111,7 @@ pub(crate) fn radius_constraint_entity(
     dim.leader_length = chord.distance(location).max(radius * 0.5);
     dim.base.actual_measurement = dim.measurement();
     crate::entities::dimension::set_dimension_text_override(&mut dim.base, text);
-    Some(EntityType::Dimension(Dimension::Radius(dim)))
+    Some(EntityType::Dimension(Box::new(Dimension::Radius(dim))))
 }
 
 /// The unit direction a radial constraint's dimension points in, from the
@@ -137,7 +137,8 @@ impl CadCommand for RadiusDimensionCommand {
         }
         match self.step {
             Step::SelectObject => {
-                t!("DIMRADIUS  Select arc, circle, or polyline arc:").into_owned()
+                t!("DIMRADIUS  Select arc, circle, polyline arc, or circular region edge:")
+                    .into_owned()
             }
             Step::DimLine(_) => {
                 t!("DIMRADIUS  Specify dimension line location  [Mtext/Text/Angle]:").into_owned()

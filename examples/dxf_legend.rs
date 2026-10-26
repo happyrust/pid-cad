@@ -166,7 +166,7 @@ fn main() {
     }
 }
 
-fn write_dxf(doc: &codec::CadDocument, out: &Path) -> Result<(), String> {
+fn write_dxf(doc: &codec::Document, out: &Path) -> Result<(), String> {
     if let Some(dir) = out.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }

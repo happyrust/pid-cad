@@ -1,6 +1,8 @@
 // Small platform shims for things the desktop build does natively but the web
 // (wasm) build must handle differently or skip.
 
+pub mod ui_font;
+
 /// Drawing hyperlinks may open web pages, never local files or custom handlers.
 pub(crate) fn web_hyperlink(value: &str) -> Option<String> {
     if value.chars().any(char::is_control) {
@@ -598,6 +600,18 @@ pub fn file_dia() -> bool {
 
 pub fn set_file_dia(on: bool) {
     FILE_DIA.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A file the next PDF import picker returns without showing itself (set
+/// by automation, used once).
+static PDF_IMPORT_PICK: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+pub fn set_pdf_import_pick(path: std::path::PathBuf) {
+    *PDF_IMPORT_PICK.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+}
+
+pub fn take_pdf_import_pick() -> Option<std::path::PathBuf> {
+    PDF_IMPORT_PICK.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
 /// The file type ATTACH's picker was last left on (1-based; 7 = Drawing).
@@ -1372,4 +1386,35 @@ pub mod web_diag {
             let _ = pre.append_child(&line);
         }
     }
+}
+
+/// The user's Documents folder (the known folder, wherever it is
+/// redirected), else the home folder.
+#[cfg(target_os = "windows")]
+pub fn documents_dir() -> Option<std::path::PathBuf> {
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_Documents, SHGetKnownFolderPath};
+    let mut raw: windows_sys::core::PWSTR = std::ptr::null_mut();
+    // SAFETY: SHGetKnownFolderPath writes a CoTaskMemAlloc'd, NUL-terminated
+    // wide string to `raw`, freed below.
+    let hr =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_Documents, 0, std::ptr::null_mut(), &mut raw) };
+    let path = if hr == 0 && !raw.is_null() {
+        // SAFETY: `raw` is a valid NUL-terminated wide string from the call above.
+        let len = unsafe { (0..).take_while(|&k| *raw.add(k) != 0).count() };
+        let wide = unsafe { std::slice::from_raw_parts(raw, len) };
+        Some(std::path::PathBuf::from(String::from_utf16_lossy(wide)))
+    } else {
+        None
+    };
+    // SAFETY: freeing the buffer SHGetKnownFolderPath allocated (null is a no-op).
+    unsafe { CoTaskMemFree(raw as *const core::ffi::c_void) };
+    path.or_else(|| std::env::var_os("USERPROFILE").map(std::path::PathBuf::from))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn documents_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    let documents = home.join("Documents");
+    Some(if documents.is_dir() { documents } else { home })
 }

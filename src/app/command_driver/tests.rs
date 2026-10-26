@@ -1,4 +1,8 @@
 #[cfg(test)]
+#[path = "trim_hatch_tests.rs"]
+mod trim_hatch_tests;
+
+#[cfg(test)]
 mod command_replacement_tests {
     use super::super::*;
     use codec::entities::{Circle, Line};
@@ -83,6 +87,135 @@ mod command_replacement_tests {
         assert_eq!(updated.common().invisible, expected.invisible);
         assert_eq!(updated.common().linetype_scale, expected.linetype_scale);
         assert!(matches!(updated, codec::EntityType::Line(line) if line.end.x == 4.0));
+    }
+}
+
+#[cfg(test)]
+mod trim_extend_history_tests {
+    use super::super::*;
+    use crate::modules::draw::modify::trim::{ExtendCommand, TrimCommand};
+    use codec::entities::Line;
+    use codec::types::Vector3;
+
+    fn add_line(app: &mut OpenCADStudio, a: [f64; 2], b: [f64; 2]) -> Handle {
+        app.tabs[app.active_tab]
+            .scene
+            .add_entity(codec::EntityType::Line(Line::from_points(
+                Vector3::new(a[0], a[1], 0.0),
+                Vector3::new(b[0], b[1], 0.0),
+            )))
+    }
+
+    fn assert_line_exists(app: &OpenCADStudio, a: [f64; 2], b: [f64; 2]) {
+        assert!(
+            app.tabs[app.active_tab]
+                .scene
+                .document
+                .entities()
+                .any(|entity| {
+                    matches!(entity, codec::EntityType::Line(line)
+                if (line.start.x - a[0]).abs() < 1e-9
+                    && (line.start.y - a[1]).abs() < 1e-9
+                    && (line.end.x - b[0]).abs() < 1e-9
+                    && (line.end.y - b[1]).abs() < 1e-9)
+                }),
+            "line from {a:?} to {b:?} should exist"
+        );
+    }
+
+    #[test]
+    fn trim_command_dispatch_includes_fill_only_hatch_targets() {
+        use codec::entities::{BoundaryEdge, BoundaryPath, Hatch, PolylineEdge};
+        use codec::types::Vector2;
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let mut hatch = Hatch::new();
+        hatch.is_solid = true;
+        let mut path = BoundaryPath::new();
+        path.add_edge(BoundaryEdge::Polyline(PolylineEdge::new(
+            [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]
+                .into_iter()
+                .map(|p| Vector2::new(p[0], p[1]))
+                .collect(),
+            true,
+        )));
+        hatch.paths.push(path);
+        let i = app.active_tab;
+        let hatch_handle = app.tabs[i]
+            .scene
+            .add_entity(codec::EntityType::Hatch(Box::new(hatch)));
+        let boundary = add_line(&mut app, [5.0, -2.0], [5.0, 12.0]);
+        // Pick-first supplies a deterministic Standard-mode cutting edge,
+        // regardless of the global TRIMMODE setting from other tests.
+        app.tabs[i].scene.select_entity(boundary, false);
+        assert!(app.tabs[i]
+            .scene
+            .visible_hatch_handles_for_edit()
+            .contains(&hatch_handle));
+
+        // This exercises command dispatch, not just TrimCommand::new().
+        // A filled hatch does not appear in entity_wires(): previously the
+        // command snapshot omitted it, making every inside click a no-op.
+        let _ = app.dispatch_command("TRIM");
+        let cmd = app.tabs[i].active_cmd.as_mut().expect("TRIM command active");
+        assert_eq!(cmd.name(), "TRIM");
+        let result = cmd.on_entity_pick(hatch_handle, glam::DVec3::new(2.0, 5.0, 0.0));
+        assert!(matches!(result, CmdResult::ReplaceEntity(h, edited)
+            if h == hatch_handle && matches!(edited.first(), Some(codec::EntityType::Hatch(_)))));
+    }
+
+    #[test]
+    fn trim_replacement_survives_undo_and_redo() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let target = add_line(&mut app, [0.0, 0.0], [10.0, 0.0]);
+        let _boundary = add_line(&mut app, [6.0, -2.0], [6.0, 2.0]);
+        let all: Vec<_> = app.tabs[app.active_tab]
+            .scene
+            .document
+            .entities()
+            .cloned()
+            .collect();
+        app.tabs[app.active_tab].active_cmd = Some(Box::new(TrimCommand::new(all)));
+        let result = app.tabs[app.active_tab]
+            .active_cmd
+            .as_mut()
+            .unwrap()
+            .on_entity_pick(target, glam::DVec3::new(8.0, 0.0, 0.0));
+        let _ = app.apply_cmd_result(result);
+        assert_line_exists(&app, [0.0, 0.0], [6.0, 0.0]);
+
+        app.undo_active_tab();
+        assert_line_exists(&app, [0.0, 0.0], [10.0, 0.0]);
+        app.redo_active_tab();
+        assert_line_exists(&app, [0.0, 0.0], [6.0, 0.0]);
+    }
+
+    #[test]
+    fn extend_replacement_survives_undo_and_redo() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let target = add_line(&mut app, [0.0, 0.0], [4.0, 0.0]);
+        let _boundary = add_line(&mut app, [8.0, -2.0], [8.0, 2.0]);
+        let all: Vec<_> = app.tabs[app.active_tab]
+            .scene
+            .document
+            .entities()
+            .cloned()
+            .collect();
+        app.tabs[app.active_tab].active_cmd = Some(Box::new(ExtendCommand::new(all)));
+        let result = app.tabs[app.active_tab]
+            .active_cmd
+            .as_mut()
+            .unwrap()
+            .on_entity_pick(target, glam::DVec3::new(3.5, 0.0, 0.0));
+        let _ = app.apply_cmd_result(result);
+        assert_line_exists(&app, [0.0, 0.0], [8.0, 0.0]);
+
+        app.undo_active_tab();
+        assert_line_exists(&app, [0.0, 0.0], [4.0, 0.0]);
+        app.redo_active_tab();
+        assert_line_exists(&app, [0.0, 0.0], [8.0, 0.0]);
     }
 }
 
@@ -1130,6 +1263,65 @@ mod dispatched_command_task_tests {
             "Relaunch dropped the dispatched command's task"
         );
     }
+
+    #[test]
+    fn test_dispatch_move_with_handle_enter_and_points() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+
+        let handle = app.tabs[i].scene.add_entity(codec::EntityType::Line(codec::entities::Line::from_points(
+            codec::types::Vector3::new(10.0, 20.0, 0.0),
+            codec::types::Vector3::new(30.0, 40.0, 0.0),
+        )));
+
+        // Unselected entity - AutoLISP (command "_MOVE" ss "" "_NONE" pt "_NONE" '(0 0 0)) produces:
+        assert!(app.tabs[i].scene.selected_entities().is_empty());
+        let cmd = format!("_MOVE {:X} ENTER _NONE 10,20,0 _NONE 0,0,0", handle.value());
+        let task = app.apply_cmd_result(CmdResult::Script(cmd));
+        let _ = app.drive_headless_task(task);
+
+        let moved = app.tabs[i].scene.document.get_entity(handle).unwrap();
+        if let codec::EntityType::Line(l) = moved {
+            assert!((l.start.x - 0.0).abs() < 1e-4, "Expected start.x == 0, got {}", l.start.x);
+            assert!((l.start.y - 0.0).abs() < 1e-4, "Expected start.y == 0, got {}", l.start.y);
+            assert!((l.end.x - 20.0).abs() < 1e-4, "Expected end.x == 20, got {}", l.end.x);
+            assert!((l.end.y - 20.0).abs() < 1e-4, "Expected end.y == 20, got {}", l.end.y);
+        } else {
+            panic!("Expected line entity");
+        }
+    }
+
+    #[test]
+    fn test_preselection_move_with_base_and_dest_points() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+
+        let handle = app.tabs[i].scene.add_entity(codec::EntityType::Line(codec::entities::Line::from_points(
+            codec::types::Vector3::new(10.0, 20.0, 0.0),
+            codec::types::Vector3::new(30.0, 40.0, 0.0),
+        )));
+
+        // User pre-selects the entity in the GUI
+        app.tabs[i].scene.select_entity(handle, true);
+        assert_eq!(app.tabs[i].scene.selected_entities().len(), 1);
+
+        // Pre-selection MOVE command only takes base and destination points
+        let cmd = "_MOVE _NONE 10,20,0 _NONE 0,0,0";
+        let task = app.apply_cmd_result(CmdResult::Script(cmd.to_string()));
+        let _ = app.drive_headless_task(task);
+
+        let moved = app.tabs[i].scene.document.get_entity(handle).unwrap();
+        if let codec::EntityType::Line(l) = moved {
+            assert!((l.start.x - 0.0).abs() < 1e-4, "Expected start.x == 0, got {}", l.start.x);
+            assert!((l.start.y - 0.0).abs() < 1e-4, "Expected start.y == 0, got {}", l.start.y);
+            assert!((l.end.x - 20.0).abs() < 1e-4, "Expected end.x == 20, got {}", l.end.x);
+            assert!((l.end.y - 20.0).abs() < 1e-4, "Expected end.y == 20, got {}", l.end.y);
+        } else {
+            panic!("Expected line entity");
+        }
+    }
 }
 
 /// PW-1 BEDIT characterization tests.
@@ -1318,6 +1510,115 @@ mod bedit_characterization_tests {
         assert!(app.tabs[tab].block_edits.is_empty());
     }
 
+    /// V7 (reference check): while a block editor session is open this
+    /// command set is refused outright with "not allowed in block editor";
+    /// the refusal pushes no undo entry and starts no command.
+    #[test]
+    fn locked_deny_list_refuses_while_session_open() {
+        let mut app = OpenCADStudio::new_for_test();
+        let (insert, _) = setup_block_and_insert(&mut app);
+        let tab = app.active_tab;
+        let _ = app.dispatch_command(&format!("BEDIT_BEGIN:{}", insert.value()));
+        assert!(
+            app.tabs[tab].active_block_edit.is_some(),
+            "setup: BEDIT_BEGIN should open a session"
+        );
+        let undo_depth = app.tabs[tab].history.undo_stack.len();
+        for verb in [
+            "LAYOUT",
+            "VPORTS",
+            "MVIEW",
+            "WBLOCK",
+            "PURGE",
+            "RENAME",
+            "REFEDIT",
+            "REFEDIT_BEGIN",
+            "PLOT",
+        ] {
+            let revision = app.command_line.error_revision;
+            let _ = app.dispatch_command(verb);
+            assert_eq!(
+                app.command_line.error_revision,
+                revision.wrapping_add(1),
+                "{verb} must refuse with a command-line error"
+            );
+            assert!(
+                app.command_line
+                    .last_error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("command not allowed in block editor"),
+                "{verb}: got {:?}",
+                app.command_line.last_error
+            );
+            assert!(
+                app.tabs[tab].active_block_edit.is_some(),
+                "{verb} must keep the session open"
+            );
+            assert!(
+                app.tabs[tab].active_cmd.is_none(),
+                "{verb} must not install a command"
+            );
+            assert_eq!(
+                app.tabs[tab].history.undo_stack.len(),
+                undo_depth,
+                "{verb} must push no undo entry"
+            );
+        }
+    }
+
+    /// Spec 8: a rejected command must not cancel a running command — the
+    /// deny hook sits before the running-command teardown.
+    #[test]
+    fn locked_deny_list_does_not_cancel_a_running_command() {
+        let mut app = OpenCADStudio::new_for_test();
+        let (insert, _) = setup_block_and_insert(&mut app);
+        let tab = app.active_tab;
+        let _ = app.dispatch_command(&format!("BEDIT_BEGIN:{}", insert.value()));
+        assert!(app.tabs[tab].active_block_edit.is_some());
+        let _ = app.dispatch_command("LINE");
+        assert_eq!(
+            app.tabs[tab].active_cmd.as_deref().map(|cmd| cmd.name()),
+            Some("LINE"),
+            "setup: LINE should be running inside the session"
+        );
+        let _ = app.dispatch_command("LAYOUT");
+        assert!(app
+            .command_line
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("command not allowed in block editor"));
+        assert_eq!(
+            app.tabs[tab].active_cmd.as_deref().map(|cmd| cmd.name()),
+            Some("LINE"),
+            "the refused command must leave the running LINE untouched"
+        );
+    }
+
+    /// V7: the reference keeps XREF, NEW, OPEN, SAVEAS and BEDIT available
+    /// inside the editor — the deny list must not touch them.
+    #[test]
+    fn locked_deny_list_leaves_v7_allowed_commands_alone() {
+        for verb in ["XREF", "NEW", "OPEN", "SAVEAS", "BEDIT"] {
+            let mut app = OpenCADStudio::new_for_test();
+            let (insert, _) = setup_block_and_insert(&mut app);
+            let tab = app.active_tab;
+            let _ = app.dispatch_command(&format!("BEDIT_BEGIN:{}", insert.value()));
+            assert!(app.tabs[tab].active_block_edit.is_some());
+            let _ = app.dispatch_command(verb);
+            assert!(
+                !app.command_line
+                    .last_error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("not allowed in block editor"),
+                "{verb} is available in the reference session and must not be denied: {:?}",
+                app.command_line.last_error
+            );
+        }
+    }
+
     // ---- documenting: today's behavior, expected to flip in Phase 1 ----
 
     /// Discard removes local before-images before drawing undo resumes.
@@ -1464,6 +1765,97 @@ mod bedit_characterization_tests {
             "discard pushes no undo entry (not undoable)"
         );
     }
+
+    #[test]
+    fn test_locked_layer_selection_rejection() {
+        use crate::command::{CadCommand, CmdResult};
+
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let tab = app.active_tab;
+
+        // Create line1 on layer "0" (unlocked)
+        let h_unlocked = app.tabs[tab]
+            .scene
+            .add_entity(codec::EntityType::Line(Line::from_points(
+                Vector3::ZERO,
+                Vector3::new(10.0, 0.0, 0.0),
+            )));
+
+        // Create line2 on layer "LOCKED_LAYER" and lock it
+        let mut line2 = Line::from_points(
+            Vector3::new(0.0, 10.0, 0.0),
+            Vector3::new(10.0, 10.0, 0.0),
+        );
+        line2.common.layer = "LOCKED_LAYER".to_string();
+        let h_locked = app.tabs[tab]
+            .scene
+            .add_entity(codec::EntityType::Line(line2));
+
+        app.tabs[tab]
+            .scene
+            .document
+            .layers
+            .get_mut("LOCKED_LAYER")
+            .expect("LOCKED_LAYER must exist")
+            .flags
+            .locked = true;
+
+        assert!(!app.tabs[tab].scene.is_layer_locked(h_unlocked));
+        assert!(app.tabs[tab].scene.is_layer_locked(h_locked));
+
+        struct MockCmd {
+            rejects: bool,
+        }
+
+        impl CadCommand for MockCmd {
+            fn name(&self) -> &'static str {
+                "MOCK_REJECT"
+            }
+            fn prompt(&self) -> String {
+                "Select objects: ".into()
+            }
+            fn on_point(&mut self, _pt: glam::DVec3) -> CmdResult {
+                CmdResult::Done
+            }
+            fn on_enter(&mut self) -> CmdResult {
+                CmdResult::Done
+            }
+            fn selection_rejects_locked_layers(&self) -> bool {
+                self.rejects
+            }
+        }
+
+        // Test 1: Command with rejects = true drops locked handles and reports count
+        app.tabs[tab].active_cmd = Some(Box::new(MockCmd { rejects: true }));
+
+        let mut handles = vec![h_unlocked, h_locked];
+        app.filter_handles_reject_locked(tab, &mut handles);
+        assert_eq!(handles, vec![h_unlocked]);
+        assert!(app
+            .command_line
+            .history
+            .last()
+            .unwrap()
+            .text
+            .contains("1 was on a locked layer."));
+
+        // Test 2: Command with rejects = false keeps all handles
+        app.tabs[tab].active_cmd = Some(Box::new(MockCmd { rejects: false }));
+
+        let mut handles2 = vec![h_unlocked, h_locked];
+        app.filter_handles_reject_locked(tab, &mut handles2);
+        assert_eq!(handles2, vec![h_unlocked, h_locked]);
+
+        // Test 3: filter_locked_layer_selection drops locked handles from SelectionComplete
+        app.tabs[tab].active_cmd = Some(Box::new(MockCmd { rejects: true }));
+        let input = StepInput::SelectionComplete(vec![h_unlocked, h_locked]);
+        let filtered = app.filter_locked_layer_selection(input);
+        match filtered {
+            StepInput::SelectionComplete(res) => assert_eq!(res, vec![h_unlocked]),
+            _ => panic!("Expected SelectionComplete"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1582,8 +1974,8 @@ mod block_base_point_tests {
             app.block_definition
                 .as_ref()
                 .map(|s| s.base_point_y.as_str()),
-            Some("0.0000"),
-            "a new block still starts at 0.0000"
+            Some("0"),
+            "a new block starts at 0"
         );
 
         let _ = app.update(Message::BlockDefNameSelect("DEF_BASE".to_string()));
@@ -1738,5 +2130,56 @@ mod block_base_point_tests {
             app.tabs[i].visibility_grip.is_some(),
             "the selection is a dynamic-block reference"
         );
+    }
+}
+
+#[cfg(test)]
+mod sweep_path_end_tests {
+    use crate::app::OpenCADStudio;
+    use crate::command::CmdResult;
+    use codec::entities::{LwPolyline, LwVertex};
+    use codec::types::Vector2;
+
+    /// Picked near its far end, a path is swept from that end. A path whose
+    /// start lies farther from the world origin than its end used to fail.
+    #[test]
+    fn sweep_from_the_picked_end_of_a_bent_path() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let mut hexagon = LwPolyline::new();
+        for k in 0..6 {
+            let a = (60.0 * k as f64).to_radians();
+            hexagon.vertices.push(LwVertex::new(Vector2::new(5.0 * a.cos(), 5.0 * a.sin())));
+        }
+        hexagon.is_closed = true;
+        let profile = app.tabs[i].scene.add_entity(codec::EntityType::LwPolyline(hexagon));
+        let mut path = LwPolyline::new();
+        path.vertices.push(LwVertex::new(Vector2::new(20.0, 0.0)));
+        path.vertices.push(LwVertex::with_bulge(
+            Vector2::new(60.0, 0.0),
+            22.5f64.to_radians().tan(),
+        ));
+        path.vertices.push(LwVertex::new(Vector2::new(80.0, 20.0)));
+        path.vertices.push(LwVertex::new(Vector2::new(80.0, 60.0)));
+        let path = app.tabs[i].scene.add_entity(codec::EntityType::LwPolyline(path));
+        let options = crate::command::SweepOptions {
+            path_pick: Some(glam::DVec3::new(80.0, 40.0, 0.0)),
+            ..crate::command::SweepOptions::default()
+        };
+        let _ = app.apply_cmd_result(CmdResult::SweepEntities {
+            handles: vec![profile],
+            path_handle: path,
+            mode: crate::command::ExtrudeMode::Solid,
+            options,
+            color: [1.0; 4],
+            expressions: [None, None],
+        });
+        let swept = app.tabs[i]
+            .scene
+            .document
+            .entities()
+            .any(|entity| matches!(entity, codec::EntityType::Solid3D(_)));
+        assert!(swept, "the sweep from the picked end makes a solid");
     }
 }

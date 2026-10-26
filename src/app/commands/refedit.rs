@@ -271,7 +271,7 @@ impl OpenCADStudio {
                         .map(|l| l.insert.value().to_string())
                         .collect();
                     return self.dispatch_command(&format!(
-                        "REFEDIT_BEGIN:{}:{}:{}::{}:{}",
+                        "REFEDIT_BEGIN:{}:{}:{}::{}:{}:1",
                         state.top.value(),
                         path.join(","),
                         attributes as u8,
@@ -308,6 +308,8 @@ impl OpenCADStudio {
         let unique = parts
             .next()
             .map_or(self.refedit_options.unique_names, |v| v == "1");
+        // Opened from the Reference Edit dialog (REFEDIT, not -REFEDIT).
+        let from_dialog = parts.next() == Some("1");
         if self.tabs[i].refedit_session.is_some() || self.reject_locked_edit(i, top) {
             return;
         }
@@ -414,6 +416,21 @@ impl OpenCADStudio {
         self.tabs[i].scene.refedit_lock = lock;
         self.tabs[i].scene.deselect_all();
         self.tabs[i].dirty = true;
+        if from_dialog {
+            match nested.len() {
+                0 => {}
+                1 => self
+                    .command_line
+                    .push_output(crate::t!("1 item selected").as_ref()),
+                n => self
+                    .command_line
+                    .push_output(crate::tf!("{} items selected", n).as_ref()),
+            }
+            self.command_line.push_output(
+                crate::t!("Use REFCLOSE or the Refedit toolbar to end reference editing session.")
+                    .as_ref(),
+            );
+        }
         // No active command — the definition's objects are edited freely
         // (move, grips, draw, erase…) until REFCLOSE.
         self.tabs[i].active_cmd = None;
@@ -779,7 +796,7 @@ impl OpenCADStudio {
                 && name[..prefix.len()].eq_ignore_ascii_case(prefix))
             .then(|| name[prefix.len()..].to_string())
         };
-        let exists = |document: &codec::CadDocument, kind: SymbolKind, name: &str| match kind {
+        let exists = |document: &codec::Document, kind: SymbolKind, name: &str| match kind {
             SymbolKind::Layer => document.layers.contains(name),
             SymbolKind::Linetype => document.line_types.contains(name),
             SymbolKind::TextStyle => document.text_styles.contains(name),
@@ -898,14 +915,23 @@ impl OpenCADStudio {
                 }
                 Some(crate::app::BlockDef {
                     name: used,
-                    base_point: def.base_point,
                     entities,
+                    ..def.clone()
                 })
             })
             .collect();
-        crate::app::command_driver::clipboard::merge_block_defs(document, &blocks);
+        use crate::app::command_driver::clipboard::{eed_app_map, merge_app_ids, remap_eed_apps};
+        merge_app_ids(document, &deps);
+        let apps = eed_app_map(document, &deps);
+        crate::app::command_driver::clipboard::merge_block_defs(
+            document,
+            &blocks,
+            &apps,
+            &Default::default(),
+        );
         for entity in &mut copies {
             rename_symbols(entity, &rename);
+            remap_eed_apps(entity, &apps);
         }
         (copies, names)
     }

@@ -224,7 +224,7 @@ fn fixture_dimension_reference(app: &mut OpenCADStudio) -> String {
     dimension.base.style_name = "BO_ARROWSTYLE".to_string();
     app.tabs[i]
         .scene
-        .add_entity(EntityType::Dimension(Dimension::Aligned(dimension)));
+        .add_entity(EntityType::Dimension(Box::new(Dimension::Aligned(dimension))));
     name.to_string()
 }
 
@@ -244,7 +244,7 @@ fn fixture_dimension_name_reference(app: &mut OpenCADStudio) -> String {
     dimension.base.style_name = "BO_ARROWNAMESTYLE".to_string();
     app.tabs[i]
         .scene
-        .add_entity(EntityType::Dimension(Dimension::Aligned(dimension)));
+        .add_entity(EntityType::Dimension(Box::new(Dimension::Aligned(dimension))));
     name.to_string()
 }
 
@@ -626,6 +626,9 @@ fn locked_rename_refuses_anonymous_and_layout_records_with_the_shared_text() {
 }
 
 /// A rename refuses a block with an open BEDIT session, whatever the new name.
+/// V7: the RENAME verb itself is refused at the command choke point while a
+/// session is open; the block service keeps its own refusal as defense in
+/// depth for the non-command paths (control op, palette).
 #[test]
 fn locked_rename_refuses_a_block_with_an_open_bedit_session() {
     let mut app = app();
@@ -639,9 +642,9 @@ fn locked_rename_refuses_a_block_with_an_open_bedit_session() {
     assert_eq!(undo_entry_count(&app), before);
     assert_eq!(
         errors(&app),
-        vec![command_line_error(&format!(
-            "block \"{name}\" is open in the block editor; close the editor first"
-        ))]
+        vec![command_line_error(
+            "RENAME command not allowed in block editor"
+        )]
     );
     let _ = app.dispatch_command("BEDIT_DISCARD");
 }
@@ -1227,6 +1230,47 @@ fn locked_mcp_block_delete_with_force_still_refuses_an_open_bedit_session() {
     let _ = app.dispatch_command("BEDIT_DISCARD");
 }
 
+/// Control/MCP `entities_create` must not route new entities into the open
+/// block while pushing a main-stack entry (same policy as the plugin guard).
+#[test]
+fn locked_control_entities_create_refused_while_block_editor_open() {
+    let mut app = app();
+    let name = fixture_unreferenced(&mut app);
+    let insert = add_insert(&mut app, &name);
+    begin_bedit(&mut app, insert);
+    assert!(bedit_open(&app));
+    let depth = entity_count(&app);
+    let main_depth = app.tabs[app.active_tab]
+        .block_edit_history
+        .as_ref()
+        .map(|h| h.main.undo_stack.len())
+        .unwrap_or(app.tabs[app.active_tab].history.undo_stack.len());
+    let doc = app.automation_op(r#"{"protocol":1,"op":"state"}"#)["document_id"]
+        .as_u64()
+        .unwrap();
+    let response = app.automation_op(&format!(
+        r#"{{"protocol":1,"op":"entities_create","request_id":"p11s15","document_id":{doc},"entities":[{{"type":"Point","location":[5,5]}}]}}"#
+    ));
+    assert_eq!(response["ok"], false, "{response}");
+    assert_eq!(response["code"], "block_editor_open", "{response}");
+    assert_eq!(
+        response["error"], "finish the open block editor before adding entities to a block",
+        "{response}"
+    );
+    assert_eq!(
+        entity_count(&app),
+        depth,
+        "no entity may be created through the control path"
+    );
+    let main_depth_after = app.tabs[app.active_tab]
+        .block_edit_history
+        .as_ref()
+        .map(|h| h.main.undo_stack.len())
+        .unwrap_or(app.tabs[app.active_tab].history.undo_stack.len());
+    assert_eq!(main_depth_after, main_depth, "no undo entry may be pushed");
+    let _ = app.dispatch_command("BEDIT_DISCARD");
+}
+
 // ── PURGE ────────────────────────────────────────────────────────────────
 
 #[test]
@@ -1245,6 +1289,109 @@ fn locked_purge_removes_an_unreferenced_block_and_undo_restores_it() {
     );
     undo(&mut app);
     assert!(record_exists(&app, &name));
+}
+
+#[test]
+fn locked_purge_keeps_unresolved_xref_dependent_symbols() {
+    use codec::tables::{Layer, LineType, TextStyle};
+    let mut app = app();
+    let i = tab(&app);
+    let doc = &mut app.tabs[i].scene.document;
+    for name in ["Grid Plan|GRID", "Unused"] {
+        doc.layers.add(Layer::new(name)).unwrap();
+    }
+    doc.line_types.add(LineType::new("Grid Plan|DASHED")).unwrap();
+    doc.text_styles.add(TextStyle::new("Grid Plan|NOTES")).unwrap();
+    let _ = app.dispatch_command("PURGE ALL");
+    let doc = &app.tabs[i].scene.document;
+    assert!(doc.layers.get("Grid Plan|GRID").is_some());
+    assert!(doc.line_types.get("Grid Plan|DASHED").is_some());
+    assert!(doc.text_styles.get("Grid Plan|NOTES").is_some());
+    assert!(doc.layers.get("Unused").is_none(), "a plain unused layer still purges");
+}
+
+#[test]
+fn purge_keeps_symbols_used_only_by_an_inserted_attribute() {
+    use codec::entities::AttributeEntity;
+    use codec::tables::{Layer, LineType, TextStyle};
+    let mut app = app();
+    let i = tab(&app);
+    {
+        let doc = &mut app.tabs[i].scene.document;
+        doc.layers.add(Layer::new("TITLE")).unwrap();
+        doc.line_types.add(LineType::new("TITLE_DASH")).unwrap();
+        doc.text_styles.add(TextStyle::new("TITLE_TEXT")).unwrap();
+    }
+    define_block(&mut app, "BO_TITLE");
+    let mut attribute = AttributeEntity::new("CLIENT".to_string(), "ACME".to_string());
+    attribute.common.layer = "TITLE".to_string();
+    attribute.common.linetype = "TITLE_DASH".to_string();
+    attribute.text_style = "TITLE_TEXT".to_string();
+    let mut insert = Insert::new("BO_TITLE".to_string(), Vector3::ZERO);
+    insert.attributes.push(attribute);
+    app.tabs[i].scene.add_entity(EntityType::Insert(insert));
+    let _ = app.dispatch_command("PURGE ALL");
+    let doc = &app.tabs[i].scene.document;
+    assert!(doc.layers.get("TITLE").is_some(), "purged the attribute's layer");
+    assert!(doc.line_types.get("TITLE_DASH").is_some(), "purged the attribute's linetype");
+    assert!(doc.text_styles.get("TITLE_TEXT").is_some(), "purged the attribute's text style");
+}
+
+#[test]
+fn purge_keeps_the_current_layer_and_dimstyle_linetypes() {
+    use codec::tables::{Layer, LineType};
+    let mut app = app();
+    let i = tab(&app);
+    {
+        let doc = &mut app.tabs[i].scene.document;
+        doc.layers.add(Layer::new("WORK")).unwrap();
+        doc.header.current_layer_name = "WORK".to_string();
+        let mut dash_type = LineType::new("DIM_DASH");
+        dash_type.handle = doc.allocate_handle();
+        let dash = dash_type.handle;
+        doc.line_types.add(dash_type).unwrap();
+        let mut style = DimStyle::new("BO_DASHED");
+        style.dimltex1_handle = dash;
+        doc.dim_styles.add(style).unwrap();
+        doc.layers.add(Layer::new("Unused")).unwrap();
+    }
+    let _ = app.dispatch_command("PURGE ALL");
+    let doc = &app.tabs[i].scene.document;
+    assert!(doc.layers.get("WORK").is_some(), "purged the current layer");
+    assert!(doc.line_types.get("DIM_DASH").is_some(), "purged a dimstyle's linetype");
+    assert!(doc.layers.get("Unused").is_none(), "a plain unused layer still purges");
+}
+
+#[test]
+fn purge_keeps_text_styles_used_only_by_leader_and_table_styles() {
+    use codec::objects::{MultiLeaderStyle, ObjectType, TableStyle};
+    use codec::tables::TextStyle;
+    let mut app = app();
+    let i = tab(&app);
+    {
+        let doc = &mut app.tabs[i].scene.document;
+        let mut leader_text = TextStyle::new("LEADER_TEXT");
+        leader_text.handle = doc.allocate_handle();
+        let leader_text_handle = leader_text.handle;
+        doc.text_styles.add(leader_text).unwrap();
+        doc.text_styles.add(TextStyle::new("TABLE_TEXT")).unwrap();
+        doc.text_styles.add(TextStyle::new("UNUSED_TEXT")).unwrap();
+        let mut leader_style = MultiLeaderStyle::new("BO_LEADER");
+        leader_style.handle = doc.allocate_handle();
+        leader_style.text_style_handle = Some(leader_text_handle);
+        doc.objects
+            .insert(leader_style.handle, ObjectType::MultiLeaderStyle(leader_style));
+        let mut table_style = TableStyle::new("BO_TABLE");
+        table_style.handle = doc.allocate_handle();
+        table_style.data_row_style.text_style_name = "TABLE_TEXT".to_string();
+        doc.objects
+            .insert(table_style.handle, ObjectType::TableStyle(table_style));
+    }
+    let _ = app.dispatch_command("PURGE ALL");
+    let doc = &app.tabs[i].scene.document;
+    assert!(doc.text_styles.get("LEADER_TEXT").is_some(), "purged a multileader style's text style");
+    assert!(doc.text_styles.get("TABLE_TEXT").is_some(), "purged a table style's text style");
+    assert!(doc.text_styles.get("UNUSED_TEXT").is_none(), "a plain unused text style still purges");
 }
 
 #[test]
@@ -1404,8 +1551,8 @@ fn locked_attedit_attribute_flags_cases() {
     preset_row.value = "edited_preset".to_string();
     preset_row.is_constant = false;
 
-    // Verify metadata mapping from CadDocument
-    let mut doc = codec::CadDocument::new();
+    // Verify metadata mapping from Document
+    let mut doc = codec::Document::new();
     let next = doc.next_handle();
     let br_h = Handle::new(next);
     let mut br = BlockRecord::new("FLAG_BLOCK");

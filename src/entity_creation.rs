@@ -7,7 +7,7 @@ mod tests {
 
     #[test]
     fn published_examples_build_with_the_real_factory() {
-        let document = codec::CadDocument::new();
+        let document = codec::Document::new();
         for kind in TYPES {
             let contract = schema(kind).unwrap();
             for example in contract["examples"].as_array().unwrap() {
@@ -84,7 +84,7 @@ mod tests {
         let spec = json!({"type":"Text","value":"Label","position":[0,0],"style":"missing_style"});
         assert!(validate_entity(&spec, "").is_ok());
         assert_eq!(
-            build_entity(&spec, Some(&codec::CadDocument::new())).unwrap_err()["code"],
+            build_entity(&spec, Some(&codec::Document::new())).unwrap_err()["code"],
             "invalid_text_style"
         );
     }
@@ -421,7 +421,7 @@ fn apply_common_properties(spec: &Value, entity: &mut codec::EntityType) -> Pars
 
 /// An explicit text style must exist in the current document; otherwise a
 /// typo would silently fall back to the default style.
-fn text_style_field(spec: &Value, document: Option<&codec::CadDocument>) -> Parsed<Option<String>> {
+fn text_style_field(spec: &Value, document: Option<&codec::Document>) -> Parsed<Option<String>> {
     let Some(style) = spec["style"].as_str().filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
@@ -438,7 +438,7 @@ fn text_style_field(spec: &Value, document: Option<&codec::CadDocument>) -> Pars
 /// here so a bad definition aborts the whole batch before anything commits.
 pub(crate) fn build_entity(
     spec: &Value,
-    document: Option<&codec::CadDocument>,
+    document: Option<&codec::Document>,
 ) -> Parsed<codec::EntityType> {
     use codec::entities::*;
     use codec::types::Vector3;
@@ -638,7 +638,7 @@ pub(crate) fn build_entity(
             if let Some(style) = text_style_field(spec, document)? {
                 mtext.style = style;
             }
-            EntityType::MText(mtext)
+            EntityType::MText(Box::new(mtext))
         }
         "INSERT" => {
             let block = spec["block"].as_str().unwrap_or("");
@@ -724,7 +724,7 @@ pub(crate) fn build_entity(
             let mut path = BoundaryPath::external();
             path.add_edge(BoundaryEdge::Polyline(PolylineEdge::new(vertices, true)));
             hatch.paths.push(path);
-            EntityType::Hatch(hatch)
+            EntityType::Hatch(Box::new(hatch))
         }
         other => {
             return Err(failure(

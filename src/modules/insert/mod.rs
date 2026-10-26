@@ -2,18 +2,20 @@
 
 mod attdef;
 pub(crate) mod attedit;
-mod attman;
+pub(crate) mod attman;
 pub mod base_point;
+pub(crate) mod block_cmdline;
 mod content_browser;
 pub(crate) mod create_block;
 mod design_center;
+pub(crate) mod dgn_import;
+pub(crate) mod tds_import;
 pub(crate) mod edit_block;
+pub(crate) mod hyperlink_cmd;
 pub(crate) mod image_transparency;
 pub(crate) mod insert_block;
-mod landxml;
 pub mod minsert;
 mod mview_block;
-mod open_obj;
 pub(crate) mod pc_attach;
 pub(crate) mod pc_crop;
 pub(crate) mod pc_extract;
@@ -21,6 +23,7 @@ pub(crate) mod pc_stylize;
 pub(crate) mod pdf_attach;
 pub(crate) mod pdf_clip;
 pub(crate) mod pdf_import;
+pub(crate) mod pdf_shx_text;
 pub(crate) mod picker;
 mod snap_underlays;
 pub(crate) mod solid3d_cmds;
@@ -31,7 +34,12 @@ pub(crate) mod xattach;
 pub(crate) mod xclip;
 pub(crate) mod xref_cmd;
 
-use crate::modules::{CadModule, IconKind, RibbonGroup, RibbonItem};
+use crate::modules::{CadModule, IconKind, ModuleEvent, RibbonGroup, RibbonItem, ToolDef};
+
+/// Insert > Block Definition: the Create Block / Write Block split button.
+pub(crate) const CREATE_BLOCK_DROPDOWN: &str = "CREATE_BLOCK_DROPDOWN";
+
+const IMPORT_ICON: IconKind = IconKind::Svg(include_bytes!("../../../assets/icons/import_obj.svg"));
 
 const FRAMES_ICON: IconKind =
     IconKind::Svg(include_bytes!("../../../assets/icons/underlay_frames.svg"));
@@ -84,10 +92,26 @@ impl CadModule for InsertModule {
                 RibbonGroup {
                     title: "Block Definition",
                     tools: vec![
-                        RibbonItem::LargeTool(create_block::tool()),
+                        // Split button: the face runs the last one chosen.
+                        RibbonItem::LargeDropdown {
+                            id: CREATE_BLOCK_DROPDOWN,
+                            label: "Create Block",
+                            icon: create_block::tool().icon,
+                            items: vec![
+                                ("BLOCK", "Create Block", create_block::tool().icon),
+                                ("WBLOCK", "Write Block", wblock::tool().icon),
+                            ],
+                            default: "BLOCK",
+                        },
                         RibbonItem::LargeTool(attdef::tool()),
-                        RibbonItem::LargeTool(attman::tool()),
-                        RibbonItem::LargeTool(edit_block::tool()),
+                        RibbonItem::LargeTool(ToolDef {
+                            label: "Manage Attributes",
+                            ..attman::tool()
+                        }),
+                        RibbonItem::LargeTool(ToolDef {
+                            label: "Block Editor",
+                            ..edit_block::tool()
+                        }),
                     ],
                 },
                 // ── Reference ────────────────────────────────────────────────────
@@ -95,14 +119,15 @@ impl CadModule for InsertModule {
                     title: "Reference",
                     tools: vec![
                         RibbonItem::LargeTool(xattach::tool()),
-                        // PDF, DWF, DGN or a point cloud; the face runs the
-                        // last one chosen.
+                        // PDF, a raster image, DWF, DGN or a point cloud;
+                        // the face runs the last one chosen.
                         RibbonItem::LargeDropdown {
                             id: "UNDERLAY_ATTACH",
                             label: "Attach Underlay",
                             icon: pdf_attach::ICON,
                             items: vec![
                                 ("PDFATTACH", "Attach PDF", pdf_attach::ICON),
+                                ("IMAGEATTACH", "Attach Image", pdf_attach::ICON),
                                 ("DWFATTACH", "Attach DWF", pdf_attach::ICON),
                                 ("DGNATTACH", "Attach DGN", pdf_attach::ICON),
                                 ("POINTCLOUDATTACH", "Attach Point Cloud", pc_attach::ICON),
@@ -143,12 +168,108 @@ impl CadModule for InsertModule {
                         },
                     ],
                 },
-                // ── Import ────────────────────────────────────────────────────────
+                // ── Import (slide-out: Land XML) ──────────────────────────────────
                 RibbonGroup {
                     title: "Import",
                     tools: vec![
-                        RibbonItem::LargeTool(open_obj::tool()),
-                        RibbonItem::LargeTool(landxml::tool()),
+                        // The face names and runs the last one chosen. A `;`
+                        // answers the started command's prompt, as in a menu
+                        // macro.
+                        RibbonItem::LargeDropdown {
+                            id: "IMPORT_FILE",
+                            label: "",
+                            icon: IMPORT_ICON,
+                            items: vec![
+                                ("PDFIMPORT;FILE", "PDF Import", underlay_layers::ICON),
+                                ("DGNIMPORT", "DGN Import", underlay_layers::ICON),
+                                ("IMPORT", "Import…", IMPORT_ICON),
+                            ],
+                            default: "PDFIMPORT;FILE",
+                        },
+                        RibbonItem::LabeledTool(ToolDef {
+                            id: "PDFSHXTEXT",
+                            label: "Recognize SHX Text",
+                            icon: IconKind::Svg(include_bytes!("../../../assets/icons/text.svg")),
+                            event: ModuleEvent::Command("PDFSHXTEXT".to_string()),
+                        }),
+                        RibbonItem::LabeledTool(ToolDef {
+                            id: "PDFSHXTEXT_SETTINGS",
+                            label: "Recognition Settings",
+                            icon: IconKind::Svg(include_bytes!(
+                                "../../../assets/icons/options_tool.svg"
+                            )),
+                            event: ModuleEvent::Command(
+                                "PDFSHXTEXT;SETTINGS".to_string(),
+                            ),
+                        }),
+                        RibbonItem::LargeTool(ToolDef {
+                            id: "TXT2MTXT",
+                            label: "Combine Text",
+                            icon: IconKind::Svg(include_bytes!("../../../assets/icons/mtext.svg")),
+                            event: ModuleEvent::Command("TXT2MTXT".to_string()),
+                        }),
+                    ],
+                },
+                // ── Data ─────────────────────────────────────────────────────────
+                RibbonGroup {
+                    title: "Data",
+                    tools: vec![
+                        RibbonItem::LargeTool(ToolDef {
+                            id: "FIELD",
+                            label: "Field",
+                            icon: IconKind::Svg(include_bytes!("../../../assets/icons/text.svg")),
+                            event: ModuleEvent::Command("FIELD".to_string()),
+                        }),
+                        RibbonItem::LabeledTool(ToolDef {
+                            id: "UPDATEFIELD",
+                            label: "Update Fields",
+                            icon: IconKind::Svg(include_bytes!(
+                                "../../../assets/icons/ui/refresh.svg"
+                            )),
+                            event: ModuleEvent::Command("UPDATEFIELD".to_string()),
+                        }),
+                        RibbonItem::LabeledTool(ToolDef {
+                            id: "INSERTOBJ",
+                            label: "OLE Object",
+                            icon: IconKind::Svg(include_bytes!("../../../assets/icons/paste.svg")),
+                            event: ModuleEvent::Command("INSERTOBJ".to_string()),
+                        }),
+                        RibbonItem::LabeledTool(ToolDef {
+                            id: "HYPERLINK",
+                            label: "Hyperlink",
+                            icon: IconKind::Svg(include_bytes!(
+                                "../../../assets/icons/ui/arrow_long_right.svg"
+                            )),
+                            event: ModuleEvent::Command("HYPERLINK".to_string()),
+                        }),
+                    ],
+                },
+                // ── Linking & Extraction ─────────────────────────────────────────
+                RibbonGroup {
+                    title: "Linking & Extraction",
+                    tools: vec![
+                        RibbonItem::LargeTool(ToolDef {
+                            label: "Data\nLink",
+                            ..crate::modules::annotate::data_link::tool()
+                        }),
+                        RibbonItem::LabeledTool(ToolDef {
+                            id: "DATALINKUPDATE",
+                            label: "Download from Source",
+                            icon: IconKind::Svg(include_bytes!("../../../assets/icons/sync.svg")),
+                            event: ModuleEvent::Command("DATALINKUPDATE;_U".to_string()),
+                        }),
+                        RibbonItem::LabeledTool(ToolDef {
+                            id: "DATALINKUPDATE_WRITE",
+                            label: "Upload to Source",
+                            icon: IconKind::Svg(include_bytes!(
+                                "../../../assets/icons/ui/file_export.svg"
+                            )),
+                            event: ModuleEvent::Command("DATALINKUPDATE;_W".to_string()),
+                        }),
+                        RibbonItem::LabeledTool(ToolDef {
+                            label: "Extract Data",
+                            ..crate::modules::annotate::data_extract::tool()
+                        }),
                     ],
                 },
                 // ── Content ───────────────────────────────────────────────────────

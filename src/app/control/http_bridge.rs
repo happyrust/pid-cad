@@ -70,6 +70,9 @@ fn listen(
     // the id — the same ergonomics as the headless server.
     let document_cache: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
     for stream in listener.incoming().flatten() {
+        // Same request/response-line shape as the native control transport:
+        // disable Nagle so reply tails never wait on the peer's delayed ACK.
+        let _ = stream.set_nodelay(true);
         if clients.fetch_add(1, Ordering::SeqCst) >= 8 {
             clients.fetch_sub(1, Ordering::SeqCst);
             continue;
@@ -309,6 +312,12 @@ fn mutate_request(op: &str, fields: &Value, document_id: Option<u64>) -> Value {
         for (key, value) in object {
             envelope[key] = value.clone();
         }
+    }
+    // The cached id stands for "the drawing on screen": once the person has
+    // switched tabs, it must be refused (and refreshed), not edited in the
+    // background like a document the caller named itself.
+    if document_id.is_some() && fields.get("document_id").is_none() {
+        envelope["active_only"] = json!(true);
     }
     if envelope["request_id"].as_str().is_none_or(str::is_empty) {
         let serial = REQUEST_COUNTER.fetch_add(1, Ordering::SeqCst);

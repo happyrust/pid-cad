@@ -36,7 +36,7 @@ use crate::scene::{CreateBlockOptions, Scene};
 use crate::ui::window::block_definition::{BlockDefinitionState, BlockObjectMode};
 use codec::entities::{AttributeDefinition, AttributeEntity, Circle, Insert, Line};
 use codec::types::{Handle, Matrix4, Transform, Vector3};
-use codec::{CadDocument, EntityType};
+use codec::{Document, EntityType};
 use glam::DVec3;
 
 const BP_TEST: &str = "BP_TEST";
@@ -113,7 +113,7 @@ fn scene_with_bp_test() -> Scene {
 }
 
 /// The LINE stored in `block`, in block-local coordinates.
-fn block_line(document: &CadDocument, block: &str) -> Line {
+fn block_line(document: &Document, block: &str) -> Line {
     document
         .block_records
         .get(block)
@@ -127,7 +127,7 @@ fn block_line(document: &CadDocument, block: &str) -> Line {
         .expect("the block's LINE")
 }
 
-fn block_attdefs(document: &CadDocument, block: &str) -> Vec<AttributeDefinition> {
+fn block_attdefs(document: &Document, block: &str) -> Vec<AttributeDefinition> {
     let Some(br) = document.block_records.get(block) else {
         return Vec::new();
     };
@@ -643,7 +643,7 @@ fn locked_noop_redefine_leaves_the_instance_where_it_is() {
 fn locked_block_definition_dialog_prefills_the_existing_definition_base_point() {
     // base-point fix (D): choosing an existing block in the Block Definition dialog
     // prefills the base point from that definition, so a redefine starts from
-    // the base it already has. A new block still starts at 0.0000.
+    // the base it already has. A new block starts at 0.
     let scene = scene_with_bp_test();
     assert_close(
         block_base_point(&scene.document, BP_TEST),
@@ -652,11 +652,11 @@ fn locked_block_definition_dialog_prefills_the_existing_definition_base_point() 
         "the drawing's block base point",
     );
 
-    // A new block: the fields stay at 0.0000.
+    // A new block: the fields start at 0.
     let fresh = BlockDefinitionState::new(vec![BP_TEST.to_string()], Vec::new(), 0);
-    assert_eq!(fresh.base_point_x, "0.0000");
-    assert_eq!(fresh.base_point_y, "0.0000");
-    assert_eq!(fresh.base_point_z, "0.0000");
+    assert_eq!(fresh.base_point_x, "0");
+    assert_eq!(fresh.base_point_y, "0");
+    assert_eq!(fresh.base_point_z, "0");
     assert_eq!(fresh.parse_base_point(), DVec3::ZERO);
 
     // Picking the existing block (what `Message::BlockDefNameSelect` does).
@@ -1254,4 +1254,72 @@ fn locked_redefine_block_raw_refuses_cycle() {
         err.contains("circular dependency detected"),
         "expected cycle error, got: {err}"
     );
+}
+
+#[test]
+fn locked_redefine_block_raw_refuses_open_block() {
+    let mut scene = Scene::new();
+    let open_name = "REDEF_OPEN";
+    let other_name = "REDEF_CLOSED";
+
+    scene.define_block_raw(
+        open_name,
+        Vector3::ZERO,
+        vec![EntityType::Line(Line::from_points(
+            Vector3::ZERO,
+            Vector3::new(1.0, 0.0, 0.0),
+        ))],
+    );
+    scene.define_block_raw(
+        other_name,
+        Vector3::ZERO,
+        vec![EntityType::Line(Line::from_points(
+            Vector3::ZERO,
+            Vector3::new(2.0, 0.0, 0.0),
+        ))],
+    );
+
+    let open_record = scene.document.block_records.get(open_name).unwrap().handle;
+    let members_before = scene
+        .document
+        .block_records
+        .get(open_name)
+        .unwrap()
+        .entity_handles
+        .clone();
+    scene.block_edit_block = Some(open_record);
+
+    let res = scene.redefine_block_raw(
+        open_name,
+        Vector3::ZERO,
+        vec![EntityType::Line(Line::from_points(
+            Vector3::ZERO,
+            Vector3::new(9.0, 9.0, 0.0),
+        ))],
+    );
+    let err = res.expect_err("redefining the open block must be refused");
+    assert!(
+        err.contains(open_name) && err.contains("Block Editor"),
+        "expected refusal naming the block and the editor, got: {err}"
+    );
+    assert_eq!(
+        scene
+            .document
+            .block_records
+            .get(open_name)
+            .unwrap()
+            .entity_handles,
+        members_before,
+        "the open definition must be untouched"
+    );
+
+    let res = scene.redefine_block_raw(
+        other_name,
+        Vector3::ZERO,
+        vec![EntityType::Line(Line::from_points(
+            Vector3::ZERO,
+            Vector3::new(8.0, 0.0, 0.0),
+        ))],
+    );
+    assert!(res.is_ok(), "a closed block must still redefine: {res:?}");
 }

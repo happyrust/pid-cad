@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use codec::entities::{Underlay, UnderlayDisplayFlags, UnderlayType};
 use codec::objects::{Dictionary, ObjectType, UnderlayDefinition};
 use codec::types::{Handle, Vector3};
-use codec::{CadDocument, EntityType};
+use codec::{Document, EntityType};
 use glam::DVec3;
 
 use crate::command::{CadCommand, CmdOption, CmdResult, InputKind, WorkingPlane};
@@ -276,8 +276,15 @@ impl PdfAttachCommand {
                 UnderlayType::Dgn => ".dgn",
             });
         }
+        let mut notice = None;
+        if self.kind == UnderlayType::Pdf {
+            match crate::scene::model::pdf_password::prompt_gate(&path, text, true) {
+                Ok(n) => notice = n,
+                Err(ask) => return ask,
+            }
+        }
         match self.open(&path) {
-            true => CmdResult::NeedPoint,
+            true => notice.map_or(CmdResult::NeedPoint, CmdResult::ReportMeasurement),
             false => CmdResult::ReportError(format!(
                 "{} not found.",
                 crate::entities::underlay::display_path(&path)
@@ -628,7 +635,7 @@ pub fn underlays_for_pages(
 
 /// The kind's definitions dictionary (`ACAD_PDFDEFINITIONS` …) under the
 /// named-objects root, created when the drawing has none.
-fn ensure_definitions_dictionary(document: &mut CadDocument, kind: UnderlayType) -> Option<Handle> {
+fn ensure_definitions_dictionary(document: &mut Document, kind: UnderlayType) -> Option<Handle> {
     let name = match kind {
         UnderlayType::Pdf => "ACAD_PDFDEFINITIONS",
         UnderlayType::Dwf => "ACAD_DWFDEFINITIONS",
@@ -668,7 +675,7 @@ fn same_path(a: &str, b: &str) -> bool {
 /// existing one, or a new one registered in its dictionary as
 /// "<file> - <page>".
 pub fn ensure_underlay_definition(
-    document: &mut CadDocument,
+    document: &mut Document,
     kind: UnderlayType,
     path: &str,
     page: &str,

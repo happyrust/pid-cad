@@ -334,7 +334,7 @@ impl Default for ShapeRules {
 
 impl ShapeRules {
     /// Whether this sheet is one to cluster.
-    pub(super) fn applies(&self, doc: &CadDocument) -> bool {
+    pub(super) fn applies(&self, doc: &Document) -> bool {
         self.layers_any.is_empty()
             || doc
                 .model_space_entities()

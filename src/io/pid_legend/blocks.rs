@@ -3,7 +3,7 @@
 //! text composes into a tag.
 
 use codec::entities::Insert;
-use codec::{CadDocument, EntityType};
+use codec::{Document, EntityType};
 
 use super::*;
 
@@ -116,7 +116,7 @@ pub(super) struct PlacedBlock {
 }
 
 pub(super) fn placed_block(
-    doc: &CadDocument,
+    doc: &Document,
     insert: &Insert,
     upm: f64,
     port_rule: Option<PortRule>,
@@ -242,7 +242,7 @@ pub(super) fn lettering_value(entity: &EntityType) -> Option<Lettering> {
     }
 }
 
-pub(super) fn lettering_of(doc: &CadDocument) -> Vec<Lettering> {
+pub(super) fn lettering_of(doc: &Document) -> Vec<Lettering> {
     doc.model_space_entities()
         .filter_map(lettering_value)
         .collect()
@@ -251,7 +251,7 @@ pub(super) fn lettering_of(doc: &CadDocument) -> Vec<Lettering> {
 /// The model-space extent over drawn entities, inserts left out (their box
 /// is just the insertion point, which for a title block is nowhere near what
 /// it draws).
-fn drawn_extent(doc: &CadDocument) -> Option<(f64, f64, f64, f64)> {
+fn drawn_extent(doc: &Document) -> Option<(f64, f64, f64, f64)> {
     let mut bbox = None;
     for entity in doc.model_space_entities() {
         if skip_for_box(entity) {
@@ -268,7 +268,7 @@ fn drawn_extent(doc: &CadDocument) -> Option<(f64, f64, f64, f64)> {
 }
 
 /// Drawing units per paper millimetre, from the sheet's drawn extent.
-pub fn guess_units_per_mm(doc: &CadDocument) -> f64 {
+pub fn guess_units_per_mm(doc: &Document) -> f64 {
     let width = drawn_extent(doc).map_or(0.0, |(x0, _, x1, _)| x1 - x0);
     if width > MODEL_SPACE_SHEET_UNITS {
         100.0

@@ -16,7 +16,7 @@ mod report;
 pub mod select;
 pub mod units;
 
-use crate::modules::{CadModule, RibbonGroup, RibbonItem};
+use crate::modules::{CadModule, IconKind, ModuleEvent, RibbonGroup, RibbonItem, ToolDef};
 
 pub struct DrawModule;
 
@@ -29,14 +29,12 @@ impl CadModule for DrawModule {
     }
 
     fn ribbon_groups(&self) -> &[RibbonGroup] {
-        use crate::modules::annotate::{
-            angular_dim, leader_cmd, linear_dim, mleader_cmd, mtext, radius_dim, text,
-        };
+        use crate::modules::annotate::{leader_cmd, linear_dim, mleader_cmd, mtext, text};
         use crate::modules::insert::{attedit, create_block, edit_block, insert_block};
         use clipboard::{copy_clip, cut, paste};
         use draw::{arc, circle, ellipse, hatch, line, polyline, shapes};
         use groups::{group, ungroup};
-        use inquiry::{area, dist};
+        use inquiry::{area, dist, measuregeom};
         use layers::{
             layfrz, layiso, laylck, layoff, layon, laythw, layulk, layuniso, make_current,
             match_layer, panel,
@@ -139,23 +137,7 @@ impl CadModule for DrawModule {
                             id: "ANNOTATION_DIMENSIONS",
                             label: "Dimensions",
                             icon: linear_dim::ICON,
-                            items: vec![
-                                (
-                                    linear_dim::tool().id,
-                                    linear_dim::tool().label,
-                                    linear_dim::tool().icon,
-                                ),
-                                (
-                                    radius_dim::tool().id,
-                                    radius_dim::tool().label,
-                                    radius_dim::tool().icon,
-                                ),
-                                (
-                                    angular_dim::tool().id,
-                                    angular_dim::tool().label,
-                                    angular_dim::tool().icon,
-                                ),
-                            ],
+                            items: crate::modules::annotate::dimension_menu_items(),
                             default: "DIMLINEAR",
                         },
                         RibbonItem::LargeDropdown {
@@ -255,10 +237,21 @@ impl CadModule for DrawModule {
                         icon: dist::ICON,
                         items: vec![
                             ("DIST", "Distance", dist::ICON),
+                            ("MEASURERADIUS", "Radius", measuregeom::RADIUS_ICON),
+                            ("MEASUREANGLE", "Angle", measuregeom::ANGLE_ICON),
                             ("AREA", "Area", area::ICON),
                         ],
                         default: "DIST",
                     }],
+                },
+                RibbonGroup {
+                    title: "Close",
+                    tools: vec![RibbonItem::LargeTool(ToolDef {
+                        id: "BCLOSETESTBLOCK",
+                        label: "Close Test Block",
+                        icon: IconKind::Svg(include_bytes!("../../../assets/icons/mt_ok.svg")),
+                        event: ModuleEvent::Command("BCLOSETESTBLOCK".into()),
+                    })],
                 },
                 // Support group lives on the Start tab now (see view.rs:
                 // start_page_view). Removed from the Draw ribbon to declutter.

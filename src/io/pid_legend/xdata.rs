@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::{CadDocument, Handle};
+use codec::{Document, Handle};
 
 use super::{Recognition, Recognized};
 use crate::io::PID_SEMANTICS_XDATA_APP;
@@ -132,7 +132,7 @@ fn desired_records(recognition: &Recognition) -> BTreeMap<Handle, ExtendedDataRe
         .collect()
 }
 
-fn ensure_app_id(document: &mut CadDocument) -> u64 {
+fn ensure_app_id(document: &mut Document) -> u64 {
     if !document.app_ids.contains(PID_SEMANTICS_XDATA_APP) {
         let mut app = codec::tables::AppId::new(PID_SEMANTICS_XDATA_APP);
         app.handle = document.allocate_handle();
@@ -152,7 +152,7 @@ fn ensure_app_id(document: &mut CadDocument) -> u64 {
 /// `.pid` importer (`resolved=direct` / `dependency:…`) wins over recognition
 /// on the same entity and is not overwritten. Returns the number of entity
 /// records changed.
-pub fn attach(document: &mut CadDocument, recognition: &Recognition) -> usize {
+pub fn attach(document: &mut Document, recognition: &Recognition) -> usize {
     let desired = desired_records(recognition);
     let app_handle = if desired.is_empty() {
         document
@@ -203,7 +203,7 @@ pub fn attach(document: &mut CadDocument, recognition: &Recognition) -> usize {
 }
 
 /// Handles currently carrying legend-owned `PID_SEMANTICS` records, sorted.
-pub fn attached_handles(document: &CadDocument) -> Vec<Handle> {
+pub fn attached_handles(document: &Document) -> Vec<Handle> {
     let mut handles: Vec<Handle> = document
         .entities()
         .filter(|entity| {
@@ -221,7 +221,7 @@ pub fn attached_handles(document: &CadDocument) -> Vec<Handle> {
 
 /// Remove legend-owned XDATA without touching `.pid` identity or GROUP
 /// descriptions. Returns the number of entity records removed.
-pub fn purge(document: &mut CadDocument) -> usize {
+pub fn purge(document: &mut Document) -> usize {
     let app_handle = document
         .app_ids
         .get(PID_SEMANTICS_XDATA_APP)
@@ -282,7 +282,7 @@ mod tests {
         }
     }
 
-    fn strings(document: &CadDocument, handle: Handle) -> Vec<String> {
+    fn strings(document: &Document, handle: Handle) -> Vec<String> {
         document
             .get_entity(handle)
             .and_then(|entity| {

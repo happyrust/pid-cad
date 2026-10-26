@@ -8,18 +8,18 @@ use codec::entities::{Dimension, DimensionLinear, Leader, Line};
 use codec::tables::BlockRecord;
 use codec::types::{Color, Vector3};
 use codec::xdata::XDataValue;
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 use OpenCADStudio::entities::dim_override as dov;
 use OpenCADStudio::scene::Scene;
 
-fn roundtrip(doc: &CadDocument, ext: &str) -> CadDocument {
+fn roundtrip(doc: &Document, ext: &str) -> Document {
     let bytes = OpenCADStudio::io::save_to_bytes(doc, ext, doc.version)
         .unwrap_or_else(|e| panic!("save to {ext}: {e}"));
     OpenCADStudio::io::load_bytes(&format!("rt.{ext}"), bytes)
         .unwrap_or_else(|e| panic!("reload {ext}: {e}"))
 }
 
-fn leader_color(doc: &CadDocument) -> Option<Color> {
+fn leader_color(doc: &Document) -> Option<Color> {
     doc.entities()
         .find_map(|e| match e {
             EntityType::Leader(l) => Some(dov::color(&l.common.extended_data, dov::DIMCLRD)),
@@ -28,7 +28,7 @@ fn leader_color(doc: &CadDocument) -> Option<Color> {
         .flatten()
 }
 
-fn dim_color(doc: &CadDocument) -> Option<Color> {
+fn dim_color(doc: &Document) -> Option<Color> {
     doc.entities()
         .find_map(|e| match e {
             EntityType::Dimension(d) => {
@@ -70,7 +70,7 @@ fn dimension_scene(aci: i16) -> Scene {
 
     let mut dim = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
     dim.base.block_name = "*D0".to_string();
-    let h = scene.add_entity(EntityType::Dimension(Dimension::Linear(dim)));
+    let h = scene.add_entity(EntityType::Dimension(Box::new(Dimension::Linear(dim))));
     dov::set(
         &mut scene.document,
         h,

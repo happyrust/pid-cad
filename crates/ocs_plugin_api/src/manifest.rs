@@ -24,8 +24,42 @@
 /// undoable replacement of a set of existing entities. v8 appends name-addressed
 /// XRecord object CRUD under named-object-dictionary paths
 /// (`HostApi::create_xrecord` / `read_xrecord` / `update_xrecord` /
-/// `delete_xrecord` / `list_xrecords`).
-pub const API_VERSION: u32 = 8;
+/// `delete_xrecord` / `list_xrecords`). v9 appends the reference-only entity
+/// designation (`HostApi::set_reference_only`): display-only geometry a plugin
+/// still owns and refreshes while the built-in edit paths treat it like a
+/// locked layer. v10 appends `BuiltinPlugin::entity_classes`: plugin-declared
+/// XDATA class-identity display labels, folded into the registered manifest.
+/// Display-only; the host consults the declaration only while the declaring
+/// plugin is loaded, and entities without one keep their native type names.
+/// v11 appends the plugin grip surface: `HostApi::entity_grips` (built-in
+/// grip enumeration with viewport parity), `HostApi::grip_drag` (the same
+/// one-undo-step edit the interactive viewport performs), and
+/// `HostApi::set_plugin_grips` plus `BuiltinPlugin::on_custom_grip_event`
+/// (plugin-declared, plugin-owned custom grip points: session display state
+/// the host renders, hit-tests and drags but never interprets). v12 lands
+/// the consumer-validation hardening: the plugin-directed LIVE-GEOMETRY
+/// channel (CustomGripResponse::live_entities, capped), grip deliveries
+/// that never block the UI loop (bounded polls plus the settle watchdog
+/// that tears a silent plugin connection down), nested COMMAND frames
+/// refused inside grip deliveries (their execution would need the message
+/// loop the blocked delivery cannot pump — the UI-freeze wedge), cheap
+/// per-entity reads (HostApi::entities_batch) so refresh passes never
+/// re-clone invalidated document snapshots, and the deterministic-boot
+/// retry for plugin command dispatch. v13 closes the consumer's validation
+/// round: live geometry is VISUAL-ONLY against the parametric solver too
+/// (the restyled bump policy — bonded partners no longer move by host
+/// action mid-drag), constraint creation is a first-class HostApi write
+/// (`HostApi::constraint_create`, joining the caller's open scope like
+/// every other write; the driver's `begin_undo` joins plugin scopes
+/// instead of closing them — a re-bond composed of writes + constraints +
+/// replays is ONE plugin-labeled step), `CommandRequest::RunQuiet` replays
+/// commands with the command-line echo suppressed, the notification channel
+/// attaches deterministically (`PluginNotification::ChannelReady` ack;
+/// boot-window broadcasts defer then flush), boundary notifications carry
+/// DIRTY REGIONS (`DocumentChangedRegions`: touched entities + record
+/// pairs), and record walks batch (`read_xrecords` / `update_xrecords` /
+/// `list_xrecords_with_entries` — one frame per pass, not per record).
+pub const API_VERSION: u32 = 13;
 
 /// Oldest plugin API major the current host still loads. This keeps previously
 /// compiled cdylibs usable as long as their vtable layout is a prefix of the
@@ -74,6 +108,35 @@ pub fn host_accepts_plugin_version(plugin_major: u32) -> bool {
     plugin_major >= API_VERSION_MIN_SUPPORTED && plugin_major <= effective_max_api_version()
 }
 
+/// A plugin's declaration of the entity classes it identifies via XDATA,
+/// surfaced by the host as display-only type labels (the Properties panel
+/// title and the automation `display_type` field).
+///
+/// The split is deliberate: the *identity* is a stable class KEY stamped into
+/// the entity's XDATA (one string value per entity, e.g. `"MYAPP-CLASS:LINE"`)
+/// and round-trips with the drawing; the *display labels* live in this
+/// declaration, so they are plugin-localizable and fixable without rewriting
+/// drawings. The declaration is consulted only while the declaring plugin is
+/// loaded — a plugin that is not installed, disabled, failed to load, or whose
+/// process has died contributes nothing, and its entities display as their
+/// bare native type.
+///
+/// Declared through [`crate::host::BuiltinPlugin::entity_classes`] (API v10);
+/// see `docs/plugin-architecture.md` for the full convention.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntityClasses {
+    /// XDATA application name whose records carry the class-identity keys
+    /// (e.g. `"CVIFC"`). Should be one of the manifest's `xdata_apps` so the
+    /// host knows the plugin writes under this id.
+    pub app_id: &'static str,
+    /// Prefix that marks a string XDATA value as a class-identity key
+    /// (e.g. `"CVIFC-CLASS:"`). The remainder of the value is the class key.
+    pub class_prefix: &'static str,
+    /// Class key → display label (e.g. `"LINE"` → `"Linear Element"`), in
+    /// declaration order. Display text never round-trips the drawing.
+    pub labels: &'static [(&'static str, &'static str)],
+}
+
 #[cfg(test)]
 mod tests {
     use crate::test_lock::ENV_LOCK;
@@ -105,14 +168,14 @@ mod tests {
 
     #[test]
     fn effective_max_defaults_to_api_version() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var(MAX_API_VERSION_ENV);
         assert_eq!(effective_max_api_version(), API_VERSION);
     }
 
     #[test]
     fn effective_max_can_disable_v4() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var(MAX_API_VERSION_ENV, "3");
         assert_eq!(effective_max_api_version(), 3);
         assert!(!host_accepts_plugin_version(4));
@@ -123,7 +186,7 @@ mod tests {
 
     #[test]
     fn effective_max_below_minimum_is_v3_only_mode() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var(MAX_API_VERSION_ENV, "2");
         assert_eq!(effective_max_api_version(), 3);
         assert!(!host_accepts_plugin_version(4));
@@ -134,7 +197,7 @@ mod tests {
 
     #[test]
     fn effective_max_clamps_to_supported_range() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var(MAX_API_VERSION_ENV, "99");
         assert_eq!(effective_max_api_version(), API_VERSION);
         std::env::set_var(MAX_API_VERSION_ENV, "1");
@@ -144,7 +207,7 @@ mod tests {
 
     #[test]
     fn host_accepts_supported_range() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var(MAX_API_VERSION_ENV);
         assert!(host_accepts_plugin_version(API_VERSION_MIN_SUPPORTED));
         assert!(host_accepts_plugin_version(API_VERSION));

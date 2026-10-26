@@ -404,6 +404,12 @@ impl Scene {
                 self.images.insert(handle, model);
             }
             if let Some(mut model) = mesh_seed {
+                // Tessellated before the document assigned the handle, so the
+                // mesh still carries handle 0 as its name — the entity key that
+                // picking and plotting read back through `entity_handle`.
+                for mesh in &mut model.lods {
+                    mesh.name = handle.value().to_string();
+                }
                 if let Some(entity) = self.document.get_entity(handle) {
                     let color = self.render_style(entity).0;
                     let material = crate::scene::model::material_model::resolve_material_with_base(
@@ -519,23 +525,47 @@ impl Scene {
     /// existing entity.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn update_entity(&mut self, entity: EntityType) -> bool {
-        let mut changed = Vec::with_capacity(1);
-        let mut block_change = false;
-        if !self.update_entity_impl(entity, &mut changed, &mut block_change) {
-            return false;
-        }
-        self.publish_entity_updates(changed, block_change);
-        true
+        self.update_entities_policy(vec![entity], false) == 1
     }
 
     /// Batched variant of [`update_entity`]: writes every replacement, then
     /// issues a single geometry bump for the whole set instead of one bump per
     /// entity.
     pub fn update_entities(&mut self, updates: Vec<EntityType>) -> usize {
+        self.update_entities_policy(updates, false)
+    }
+
+    /// Like [`update_entity`](Self::update_entity) but without the
+    /// reference-only refusal. The plugin owns reference-only entities and
+    /// keeps full write access through the plugin host API, so a plugin's own
+    /// refresh of derived display geometry must not be refused. Locked-layer
+    /// policy stays enforced either way.
+    pub fn update_entity_plugin(&mut self, entity: EntityType) -> bool {
+        self.update_entities_policy(vec![entity], true) == 1
+    }
+
+    /// Like [`update_entities`](Self::update_entities) but without the
+    /// reference-only refusal (see [`update_entity_plugin`](Self::update_entity_plugin)).
+    pub fn update_entities_plugin(&mut self, updates: Vec<EntityType>) -> usize {
+        self.update_entities_policy(updates, true)
+    }
+
+    /// Shared write path of the four `update_entity*` entry points. Locked
+    /// layers always refuse (inside `update_entity_impl`); reference-only
+    /// entities refuse every caller except the plugin-owned `_plugin`
+    /// variants, mirroring the `remove_entities` edit-policy split.
+    fn update_entities_policy(
+        &mut self,
+        updates: Vec<EntityType>,
+        allow_reference_only: bool,
+    ) -> usize {
         let mut moved = 0usize;
         let mut changed = Vec::with_capacity(updates.len());
         let mut block_change = false;
         for entity in updates {
+            if !allow_reference_only && self.is_reference_only(entity.common().handle) {
+                continue;
+            }
             if self.update_entity_impl(entity, &mut changed, &mut block_change) {
                 moved += 1;
             }
@@ -969,7 +999,7 @@ impl Scene {
             .get(name)
             .map(|br| (br.handle, br.block_entity_handle));
 
-        let (br_handle, _block_handle) = if let Some((existing_br_h, existing_blk_h)) = existing {
+        let (br_handle, block_handle) = if let Some((existing_br_h, existing_blk_h)) = existing {
             if !options.redefine {
                 return Err(format!("Block \"{name}\" already exists."));
             }
@@ -991,7 +1021,7 @@ impl Scene {
                 br.units = options.unit;
                 br.description = options.description.clone();
                 br.explodable = options.allow_exploding;
-                br.scale_uniformly = options.scale_uniformly;
+                br.scale_uniformly = options.scale_uniformly || options.annotative;
             }
             // Update existing Block entity fields
             if let Some(EntityType::Block(b)) = self.document.get_entity_mut(existing_blk_h) {
@@ -1001,26 +1031,6 @@ impl Scene {
                 // go back to ZERO. Leaving an imported definition's non-zero
                 // base point here would subtract the picked base twice.
                 b.base_point = codec::types::Vector3::ZERO;
-            }
-            if options.annotative {
-                let annotative_vals = vec![codec::xdata::XDataValue::Integer16(1)];
-                view::dispatch::set_entity_xdata(
-                    &mut self.document,
-                    existing_blk_h,
-                    "AcadAnnotative",
-                    Some(annotative_vals),
-                );
-            }
-            if !options.hyperlink_url.is_empty() {
-                let link_vals = vec![codec::xdata::XDataValue::String(
-                    options.hyperlink_url.clone(),
-                )];
-                view::dispatch::set_entity_xdata(
-                    &mut self.document,
-                    existing_blk_h,
-                    "PE_URL",
-                    Some(link_vals),
-                );
             }
             (existing_br_h, existing_blk_h)
         } else {
@@ -1036,7 +1046,7 @@ impl Scene {
             block_record.units = options.unit;
             block_record.description = options.description.clone();
             block_record.explodable = options.allow_exploding;
-            block_record.scale_uniformly = options.scale_uniformly;
+            block_record.scale_uniformly = options.scale_uniformly || options.annotative;
             self.document
                 .block_records
                 .add(block_record)
@@ -1056,36 +1066,19 @@ impl Scene {
             self.document
                 .add_entity(EntityType::BlockEnd(block_end))
                 .map_err(|e| e.to_string())?;
-
-            if options.annotative {
-                let annotative_vals = vec![codec::xdata::XDataValue::Integer16(1)];
-                view::dispatch::set_entity_xdata(
-                    &mut self.document,
-                    block_handle,
-                    "AcadAnnotative",
-                    Some(annotative_vals),
-                );
-            }
-            if !options.hyperlink_url.is_empty() {
-                let link_vals = vec![codec::xdata::XDataValue::String(
-                    options.hyperlink_url.clone(),
-                )];
-                view::dispatch::set_entity_xdata(
-                    &mut self.document,
-                    block_handle,
-                    "PE_URL",
-                    Some(link_vals),
-                );
-            }
             (br_handle, block_handle)
         };
+        self.write_block_definition_xdata(br_handle, block_handle, &options);
 
         let source_entities: Vec<_> = options
             .handles
             .iter()
             .filter_map(|&h| self.document.get_entity(h).cloned().map(|e| (h, e)))
             .collect();
-        if source_entities.is_empty() {
+        // No objects at all defines an empty block (the reference's
+        // "Continue" / an empty selection at -BLOCK); objects that all vanished
+        // are an error.
+        if source_entities.is_empty() && !options.handles.is_empty() {
             return Err("No valid entities selected for block creation.".into());
         }
 
@@ -1104,15 +1097,167 @@ impl Scene {
         }
 
         let mut insert_handle = Handle::NULL;
-        if options.mode == crate::ui::window::block_definition::BlockObjectMode::Convert {
+        // An empty definition has nothing to convert into a reference.
+        if options.mode == crate::ui::window::block_definition::BlockObjectMode::Convert
+            && !options.handles.is_empty()
+        {
             let mut insert = DxfInsert::new(name, codec::types::Vector3::ZERO);
             codec::Entity::apply_transform(&mut insert, &options.block_to_world);
             insert_handle = self.add_entity(EntityType::Insert(insert));
         }
 
+        // The definition's thumbnail (BLOCK_RECORD 310), as the format keeps it.
+        let thumbnail = self.block_thumbnail(name);
+        if let Some(br) = self.document.block_records.get_mut(name) {
+            br.preview_data = thumbnail;
+        }
+
         // Advance the block epoch so all consumers and viewport renderers re-tessellate
         self.bump_geometry();
         Ok(insert_handle)
+    }
+
+    /// A 40 × 40, 32-bit bottom-up DIB of the block's geometry: white strokes
+    /// on the dark preview background, fitted with a one-pixel margin. Empty
+    /// for a block without drawable geometry.
+    pub fn block_thumbnail(&self, name: &str) -> Vec<u8> {
+        const SIZE: usize = 40;
+        let wires = self.block_preview_wires(name);
+        let mut lo = [f64::INFINITY; 2];
+        let mut hi = [f64::NEG_INFINITY; 2];
+        for wire in &wires {
+            for p in &wire.points {
+                if p[0].is_finite() && p[1].is_finite() {
+                    lo = [lo[0].min(p[0] as f64), lo[1].min(p[1] as f64)];
+                    hi = [hi[0].max(p[0] as f64), hi[1].max(p[1] as f64)];
+                }
+            }
+        }
+        if !lo[0].is_finite() {
+            return Vec::new();
+        }
+        let span = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(1e-9);
+        let scale = (SIZE as f64 - 3.0) / span;
+        let offset = [
+            (SIZE as f64 - (hi[0] - lo[0]) * scale) / 2.0,
+            (SIZE as f64 - (hi[1] - lo[1]) * scale) / 2.0,
+        ];
+        let to_px = |p: &[f32; 3]| {
+            (
+                ((p[0] as f64 - lo[0]) * scale + offset[0]).floor() as i64,
+                ((p[1] as f64 - lo[1]) * scale + offset[1]).floor() as i64,
+            )
+        };
+        // Bottom-up rows of BGRA pixels.
+        let mut pixels = vec![[0x30u8, 0x28, 0x21, 0xFF]; SIZE * SIZE];
+        let mut plot = |x: i64, y: i64| {
+            if (0..SIZE as i64).contains(&x) && (0..SIZE as i64).contains(&y) {
+                pixels[y as usize * SIZE + x as usize] = [0xFF; 4];
+            }
+        };
+        for wire in &wires {
+            let mut prev: Option<(i64, i64)> = None;
+            for p in &wire.points {
+                if !(p[0].is_finite() && p[1].is_finite()) {
+                    prev = None;
+                    continue;
+                }
+                let (x1, y1) = to_px(p);
+                let (mut x0, mut y0) = prev.unwrap_or((x1, y1));
+                let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
+                let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
+                let mut err = dx + dy;
+                loop {
+                    plot(x0, y0);
+                    if x0 == x1 && y0 == y1 {
+                        break;
+                    }
+                    let e2 = 2 * err;
+                    if e2 >= dy {
+                        err += dy;
+                        x0 += sx;
+                    }
+                    if e2 <= dx {
+                        err += dx;
+                        y0 += sy;
+                    }
+                }
+                prev = Some((x1, y1));
+            }
+        }
+        let mut dib = Vec::with_capacity(40 + SIZE * SIZE * 4);
+        for value in [40u32, SIZE as u32, SIZE as u32] {
+            dib.extend_from_slice(&value.to_le_bytes());
+        }
+        dib.extend_from_slice(&1u16.to_le_bytes());
+        dib.extend_from_slice(&32u16.to_le_bytes());
+        for value in [0u32, (SIZE * SIZE * 4) as u32, 1, 1, 0, 0] {
+            dib.extend_from_slice(&value.to_le_bytes());
+        }
+        for pixel in pixels {
+            dib.extend_from_slice(&pixel);
+        }
+        dib
+    }
+
+    /// The definition-level xdata of a block, kept on its block record the
+    /// way the format stores it: `AcadAnnotative` (`AnnotativeData { 1 1 }`)
+    /// for an annotative block, `AcadAnnoPO` when its orientation matches the
+    /// layout, and the `PE_URL` hyperlink. Markers an older definition kept
+    /// on its BLOCK entity are dropped.
+    pub fn write_block_definition_xdata(
+        &mut self,
+        br_handle: Handle,
+        block_handle: Handle,
+        options: &CreateBlockOptions,
+    ) {
+        use codec::xdata::{ExtendedDataRecord, XDataValue as V};
+        for app in ["AcadAnnotative", "AcadAnnoPO", "PE_URL"] {
+            view::dispatch::set_entity_xdata(&mut self.document, block_handle, app, None);
+            self.document.remove_object_xdata_record(br_handle, app);
+        }
+        let mut records = Vec::new();
+        if options.annotative {
+            let mut anno = ExtendedDataRecord::new("AcadAnnotative");
+            for value in [
+                V::String("AnnotativeData".into()),
+                V::ControlString("{".into()),
+                V::Integer16(1),
+                V::Integer16(1),
+                V::ControlString("}".into()),
+            ] {
+                anno.add_value(value);
+            }
+            records.push(anno);
+            if options.match_orientation {
+                let mut po = ExtendedDataRecord::new("AcadAnnoPO");
+                po.add_value(V::Integer16(1));
+                records.push(po);
+            }
+        }
+        let url = options.hyperlink_url.trim();
+        if !url.is_empty() {
+            let mut link = ExtendedDataRecord::new("PE_URL");
+            link.add_value(V::String(url.to_string()));
+            link.add_value(V::ControlString("{".into()));
+            let description = options.hyperlink_desc.trim();
+            if !description.is_empty() {
+                link.add_value(V::String(description.to_string()));
+            }
+            link.add_value(V::ControlString("{".into()));
+            link.add_value(V::Integer32(0));
+            link.add_value(V::ControlString("}".into()));
+            link.add_value(V::ControlString("}".into()));
+            records.push(link);
+        }
+        for record in records {
+            if !self.document.app_ids.contains(&record.application_name) {
+                let mut app = codec::tables::AppId::new(&record.application_name);
+                app.handle = self.document.allocate_handle();
+                let _ = self.document.app_ids.add(app);
+            }
+            self.document.set_object_xdata_record(br_handle, record);
+        }
     }
 
     /// Define a new block named `name` from `entities` (owned, not yet in the
@@ -1210,6 +1355,9 @@ impl Scene {
                 .map_err(|e| e.to_string())?;
             entity_handles.push(handle);
         }
+        // Solids, surfaces and meshes of a definition draw through their
+        // instanced block meshes, which only a tessellation pass creates.
+        self.refresh_meshes_for_handles(&entity_handles);
         // Block defns don't render on their own, but the geometry cache must
         // pick up the new definition so the interactive insert can preview it.
         self.bump_geometry();
@@ -1235,6 +1383,8 @@ impl Scene {
         let end_handle = Handle::new(next + 2);
 
         let mut block_record = codec::tables::BlockRecord::new(name);
+        block_record.flags.anonymous = name.starts_with('*')
+            && !(block_record.is_model_space() || block_record.is_paper_space());
         block_record.handle = br_handle;
         block_record.block_entity_handle = block_handle;
         block_record.block_end_handle = end_handle;
@@ -1252,12 +1402,14 @@ impl Scene {
         block_end.common.owner_handle = br_handle;
         let _ = self.document.add_entity(EntityType::BlockEnd(block_end));
 
+        let mut added = Vec::new();
         for mut entity in entities {
             Self::reset_clone_subhandles(&mut self.document, &mut entity);
             entity.common_mut().handle = Handle::NULL;
             entity.common_mut().owner_handle = br_handle;
-            let _ = self.document.add_entity(entity);
+            added.extend(self.document.add_entity(entity).ok());
         }
+        self.refresh_meshes_for_handles(&added);
         self.bump_geometry();
     }
 
@@ -1293,6 +1445,11 @@ impl Scene {
             self.define_block_raw(name, base_point, entities);
             return Ok(());
         };
+        if self.block_edit_block == Some(br_handle) {
+            return Err(format!(
+                "block \"{name}\" is open in the Block Editor; close it before redefining"
+            ));
+        }
         let owned: Vec<Handle> = self
             .document
             .entities()
@@ -1302,20 +1459,204 @@ impl Scene {
             })
             .map(|e| e.common().handle)
             .collect();
-        for h in owned {
-            self.document.remove_entity(h);
+        for h in &owned {
+            self.document.remove_entity(*h);
         }
         if let Some(EntityType::Block(block)) = self.document.get_entity_mut(block_handle) {
             block.base_point = base_point;
         }
+        // The old contents' meshes go with them; the new ones are built.
+        let mut changed = owned;
         for mut entity in entities {
             Self::reset_clone_subhandles(&mut self.document, &mut entity);
             entity.common_mut().handle = Handle::NULL;
             entity.common_mut().owner_handle = br_handle;
-            let _ = self.document.add_entity(entity);
+            changed.extend(self.document.add_entity(entity).ok());
         }
+        self.refresh_meshes_for_handles(&changed);
         self.bump_geometry();
         Ok(())
+    }
+
+    /// Whether the resident hatch set draws `handle`'s own fill.
+    pub(super) fn hatch_fill_shown(
+        &self,
+        handle: Handle,
+        target_block: Handle,
+        frozen: Option<&rustc_hash::FxHashSet<Handle>>,
+        annotation_scale_handle: Option<Handle>,
+        all_visible: bool,
+    ) -> bool {
+        let Some(entity) = self.document.get_entity(handle) else {
+            return true;
+        };
+        // SOLID already renders through its WCS-aware fill triangles.
+        // Its cached HatchModel is an XY-only plot fallback; sending
+        // that to the screen too adds a flattened, grip-less copy at
+        // z=0 for elevated or angled geometry (#617).
+        if matches!(entity, EntityType::Solid(_)) {
+            return false;
+        }
+        let c = entity.common();
+        if self.display_entity_invisible(c)
+            || self.entity_temporarily_hidden(handle)
+            || self.layer_hidden(&c.layer)
+            || crate::scene::annotative::annotative_offscale_for(
+                &self.document,
+                c,
+                annotation_scale_handle,
+                all_visible,
+            )
+        {
+            return false;
+        }
+        // Per-viewport layer freeze: a content viewport that freezes
+        // this layer hides its fills too, not just its wires.
+        if self.layer_frozen_in(&c.layer, frozen) {
+            return false;
+        }
+        // Reject block-defn-only hatches (entities owned by a
+        // BLOCK record that's neither model nor a paper layout
+        // block) — the scene graph emits only their laid-out copies.
+        self.belongs_to_visible_block(handle, c.owner_handle, target_block)
+    }
+
+    /// Solid backdrop for a hatch's HATCHBACKGROUNDCOLOR, drawn behind `fill`;
+    /// `style` is the fill's resolved (colour, ACI), which ByBlock takes.
+    pub(super) fn hatch_backdrop(
+        &self,
+        dxf: &DxfHatch,
+        fill: &HatchModel,
+        style: ([f32; 4], u8),
+        viewport: Option<Handle>,
+    ) -> Option<HatchModel> {
+        let bg = crate::entities::hatch::background_color(dxf)?;
+        let mut b = fill.clone();
+        b.pattern = model::hatch_model::HatchPattern::Solid;
+        // ByLayer / ByBlock backgrounds resolve through the normal style chain
+        // instead of the raw ACI table (#415).
+        let (bg_color, bg_aci) = match bg {
+            codec::types::Color::ByLayer => {
+                let layer = self.document.layers.get(&dxf.common.layer);
+                let aci = layer
+                    .and_then(|layer| match &layer.color {
+                        codec::types::Color::Index(index) => Some(*index),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                (
+                    crate::scene::view::render::layer_render_style_viewport(
+                        &self.document,
+                        &dxf.common.layer,
+                        viewport,
+                    )
+                    .color,
+                    aci,
+                )
+            }
+            codec::types::Color::ByBlock => style,
+            codec::types::Color::Index(index) => {
+                let color = codec::types::Color::Index(index);
+                (crate::scene::convert::tess_util::aci_to_rgba(&color), index)
+            }
+            other => (crate::scene::convert::tess_util::aci_to_rgba(&other), 0),
+        };
+        b.color = bg_color;
+        b.aci = bg_aci;
+        b.name = "SOLID".into();
+        Some(b)
+    }
+
+    /// `model` synced to its entity's current display style: the fill and
+    /// its optional background (HATCHBACKGROUNDCOLOR) backdrop.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn synced_hatch_model(
+        &self,
+        handle: Handle,
+        model: &HatchModel,
+        annotation_scale_handle: Option<Handle>,
+        viewport: Option<Handle>,
+        hatch_bg: [f32; 4],
+        depth_map: &HashMap<u64, [f32; 2]>,
+        tint_selected: bool,
+    ) -> (Option<HatchModel>, HatchModel) {
+        let contextual = self.document.get_entity(handle).map(|entity| {
+            crate::scene::annotative::entity_for_annotation_context(
+                &self.document,
+                entity,
+                annotation_scale_handle,
+            )
+        });
+        let entity = contextual.as_deref();
+        let mut m = match entity {
+            Some(EntityType::Hatch(dxf))
+                if crate::scene::annotative::active_object_context_for_scale(
+                    &self.document,
+                    handle,
+                    annotation_scale_handle,
+                )
+                .is_some() =>
+            {
+                Self::hatch_model_from_dxf(dxf, model.color).unwrap_or_else(|| model.clone())
+            }
+            _ => model.clone(),
+        };
+        // Optional solid backdrop drawn behind the pattern/gradient when
+        // the hatch carries a HATCHBACKGROUNDCOLOR. Same draw_depth +
+        // emitted first so LessEqual layering keeps it underneath.
+        let mut backdrop: Option<HatchModel> = None;
+        if let Some(e) = entity {
+            let mut style = crate::scene::view::render::render_style_for_viewport(
+                &self.document,
+                e,
+                viewport,
+            );
+            style.0 = crate::scene::view::render::adapt_to_bg(style.0, hatch_bg);
+            m.aci = style.4;
+            m.line_weight_px = style.3;
+            // Gradient RGB comes from its own colour stops, while
+            // transparency remains an entity property shared by both
+            // stops. Solid/pattern fills take the complete style.
+            if matches!(m.pattern, model::hatch_model::HatchPattern::Gradient { .. }) {
+                m.set_alpha(style.0[3]);
+            } else {
+                m.color = style.0;
+            }
+            if let EntityType::Hatch(dxf) = e {
+                backdrop = self.hatch_backdrop(dxf, &m, (style.0, style.4), viewport);
+                match &mut m.pattern {
+                    // Pattern built from the hatch's own stored lines is
+                    // already final (scale 1 / angle 0) — don't re-apply
+                    // pattern_scale/angle. Only the catalog-derived path
+                    // (empty stored lines) needs the override.
+                    model::hatch_model::HatchPattern::Pattern(_)
+                        if dxf.pattern.lines.is_empty() =>
+                    {
+                        m.angle_offset = dxf.pattern_angle as f32;
+                        m.scale = dxf.pattern_scale as f32;
+                    }
+                    model::hatch_model::HatchPattern::Gradient { angle_deg, shift, .. } => {
+                        *angle_deg = dxf.gradient_color.angle.to_degrees() as f32;
+                        *shift = dxf.gradient_color.shift as f32;
+                    }
+                    model::hatch_model::HatchPattern::Pattern(_)
+                    | model::hatch_model::HatchPattern::Solid => {}
+                }
+            }
+        }
+        m.color = self.count_color(handle, m.color, self.current_bg());
+        if let Some(b) = &mut backdrop {
+            b.color = self.count_color(handle, b.color, self.current_bg());
+        }
+        if tint_selected && self.selected.contains(&handle) {
+            m.color = [0.15, 0.55, 1.00, m.color[3]];
+        }
+        let d = depth_map.get(&handle.value()).map_or(0.0, |d| d[0]);
+        m.draw_depth = d;
+        if let Some(b) = &mut backdrop {
+            b.draw_depth = d;
+        }
+        (backdrop, m)
     }
 
     pub(super) fn synced_hatch_models(
@@ -1327,14 +1668,6 @@ impl Scene {
         viewport: Option<Handle>,
         tint_selected: bool,
     ) -> Vec<HatchModel> {
-        let layer_hidden = |layer: &str| {
-            self.document
-                .layers
-                .get(layer)
-                .map(|l| l.flags.off || l.flags.frozen)
-                .unwrap_or(false)
-        };
-
         // synced_hatch_models is cached on geometry_epoch and the GPU
         // upload is keyed on geometry_epoch only (see render.rs — hatch
         // buffers are "static"). Don't view-cull here; the per-frame
@@ -1351,162 +1684,38 @@ impl Scene {
             self.bg_color
         };
         let depth_map = self.draw_depth_map();
+        let constraint_display = (self.constraint_shading_active() && self.block_edit_block == Some(target_block))
+            .then(|| (self.block_constraint_report(target_block), self.constraint_palette()));
         let mut models: Vec<HatchModel> = self
             .hatches
             .iter()
             .filter(|(&handle, _)| {
-                let Some(entity) = self.document.get_entity(handle) else {
-                    return true;
-                };
-                // SOLID already renders through its WCS-aware fill triangles.
-                // Its cached HatchModel is an XY-only plot fallback; sending
-                // that to the screen too adds a flattened, grip-less copy at
-                // z=0 for elevated or angled geometry (#617).
-                if matches!(entity, EntityType::Solid(_)) {
-                    return false;
-                }
-                let c = entity.common();
-                if c.invisible
-                    || self.entity_temporarily_hidden(handle)
-                    || layer_hidden(&c.layer)
-                    || crate::scene::annotative::annotative_offscale_for(
-                        &self.document,
-                        c,
-                        annotation_scale_handle,
-                        all_visible,
-                    )
-                {
-                    return false;
-                }
-                // Per-viewport layer freeze: a content viewport that freezes
-                // this layer hides its fills too, not just its wires.
-                if self.layer_frozen_in(&c.layer, frozen) {
-                    return false;
-                }
-                // Reject block-defn-only hatches (entities owned by a
-                // BLOCK record that's neither model nor a paper layout
-                // block) — the scene graph emits only their laid-out copies.
-                self.belongs_to_visible_block(handle, c.owner_handle, target_block)
+                self.hatch_fill_shown(
+                    handle,
+                    target_block,
+                    frozen,
+                    annotation_scale_handle,
+                    all_visible,
+                )
             })
             .flat_map(|(&handle, model)| {
-                let contextual = self.document.get_entity(handle).map(|entity| {
-                    crate::scene::annotative::entity_for_annotation_context(
-                        &self.document,
-                        entity,
-                        annotation_scale_handle,
-                    )
-                });
-                let entity = contextual.as_deref();
-                let mut m = match entity {
-                    Some(EntityType::Hatch(dxf))
-                        if crate::scene::annotative::active_object_context_for_scale(
-                            &self.document,
-                            handle,
-                            annotation_scale_handle,
-                        )
-                        .is_some() =>
-                    {
-                        Self::hatch_model_from_dxf(dxf, model.color)
-                            .unwrap_or_else(|| model.clone())
-                    }
-                    _ => model.clone(),
-                };
-                // Optional solid backdrop drawn behind the pattern/gradient when
-                // the hatch carries a HATCHBACKGROUNDCOLOR. Same draw_depth +
-                // emitted first so LessEqual layering keeps it underneath.
-                let mut backdrop: Option<HatchModel> = None;
-                if let Some(e) = entity {
-                    let mut style = crate::scene::view::render::render_style_for_viewport(
-                        &self.document,
-                        e,
-                        viewport,
-                    );
-                    style.0 = crate::scene::view::render::adapt_to_bg(style.0, hatch_bg);
-                    m.aci = style.4;
-                    m.line_weight_px = style.3;
-                    // Gradient RGB comes from its own colour stops, while
-                    // transparency remains an entity property shared by both
-                    // stops. Solid/pattern fills take the complete style.
-                    if matches!(m.pattern, model::hatch_model::HatchPattern::Gradient { .. }) {
-                        m.set_alpha(style.0[3]);
-                    } else {
-                        m.color = style.0;
-                    }
-                    if let EntityType::Hatch(dxf) = e {
-                        if let Some(bg) = crate::entities::hatch::background_color(dxf) {
-                            let mut b = m.clone();
-                            b.pattern = model::hatch_model::HatchPattern::Solid;
-                            // ByLayer / ByBlock backgrounds resolve through the
-                            // normal style chain instead of the raw ACI table
-                            // (#415).
-                            let (bg_color, bg_aci) = match bg {
-                                codec::types::Color::ByLayer => {
-                                    let layer = self.document.layers.get(&dxf.common.layer);
-                                    let aci = layer
-                                        .and_then(|layer| match &layer.color {
-                                            codec::types::Color::Index(index) => Some(*index),
-                                            _ => None,
-                                        })
-                                        .unwrap_or(0);
-                                    (
-                                        crate::scene::view::render::layer_render_style_viewport(
-                                            &self.document,
-                                            &dxf.common.layer,
-                                            viewport,
-                                        )
-                                        .color,
-                                        aci,
-                                    )
-                                }
-                                codec::types::Color::ByBlock => (style.0, style.4),
-                                codec::types::Color::Index(index) => (
-                                    crate::scene::convert::tess_util::aci_to_rgba(
-                                        &codec::types::Color::Index(index),
-                                    ),
-                                    index,
-                                ),
-                                other => (crate::scene::convert::tess_util::aci_to_rgba(&other), 0),
-                            };
-                            b.color = bg_color;
-                            b.aci = bg_aci;
-                            b.name = "SOLID".into();
-                            backdrop = Some(b);
-                        }
-                        match &mut m.pattern {
-                            // Pattern built from the hatch's own stored lines is
-                            // already final (scale 1 / angle 0) — don't re-apply
-                            // pattern_scale/angle. Only the catalog-derived path
-                            // (empty stored lines) needs the override.
-                            model::hatch_model::HatchPattern::Pattern(_)
-                                if dxf.pattern.lines.is_empty() =>
-                            {
-                                m.angle_offset = dxf.pattern_angle as f32;
-                                m.scale = dxf.pattern_scale as f32;
-                            }
-                            model::hatch_model::HatchPattern::Gradient {
-                                angle_deg, shift, ..
-                            } => {
-                                *angle_deg = dxf.gradient_color.angle.to_degrees() as f32;
-                                *shift = dxf.gradient_color.shift as f32;
-                            }
-                            model::hatch_model::HatchPattern::Pattern(_)
-                            | model::hatch_model::HatchPattern::Solid => {}
-                        }
+                let (backdrop, mut model) = self.synced_hatch_model(
+                    handle,
+                    model,
+                    annotation_scale_handle,
+                    viewport,
+                    hatch_bg,
+                    &depth_map,
+                    tint_selected,
+                );
+                if let Some((report, palette)) = &constraint_display {
+                    if let Some(mut color) = self.constraint_display_color(report, handle, palette) {
+                        color[3] = model.color[3];
+                        model.color = color;
+                        if let crate::scene::model::hatch_model::HatchPattern::Gradient { color2, .. } = &mut model.pattern { *color2 = color; }
                     }
                 }
-                m.color = self.count_color(handle, m.color, self.current_bg());
-                if let Some(b) = &mut backdrop {
-                    b.color = self.count_color(handle, b.color, self.current_bg());
-                }
-                if tint_selected && self.selected.contains(&handle) {
-                    m.color = [0.15, 0.55, 1.00, m.color[3]];
-                }
-                let d = depth_map.get(&handle.value()).map_or(0.0, |d| d[0]);
-                m.draw_depth = d;
-                if let Some(b) = &mut backdrop {
-                    b.draw_depth = d;
-                }
-                backdrop.into_iter().chain(std::iter::once(m))
+                backdrop.into_iter().chain(std::iter::once(model))
             })
             .collect();
 
@@ -1666,14 +1875,51 @@ impl Scene {
         include_preview_hidden: bool,
         plot_only: bool,
     ) -> Vec<HatchModel> {
-        let depth_map = self.draw_depth_map();
-        let graph = crate::scene::render_graph::RenderSceneGraph::new(
+        self.instanced_hatch_models_for_document(
             &self.document,
+            layout_block,
+            hatch_bg,
+            tint_selected,
+            frozen,
+            annotation_scale_handle,
+            all_visible,
+            viewport,
+            targets,
+            include_preview_hidden,
+            plot_only,
+        )
+    }
+
+    pub(super) fn instanced_hatch_models_for_document(
+        &self,
+        document: &Document,
+        layout_block: Handle,
+        hatch_bg: [f32; 4],
+        tint_selected: bool,
+        frozen: Option<&rustc_hash::FxHashSet<Handle>>,
+        annotation_scale_handle: Option<Handle>,
+        all_visible: bool,
+        viewport: Option<Handle>,
+        targets: Option<&rustc_hash::FxHashSet<Handle>>,
+        include_preview_hidden: bool,
+        plot_only: bool,
+    ) -> Vec<HatchModel> {
+        let constraint_display = (!plot_only && self.constraint_shading_active() && self.block_edit_block == Some(layout_block))
+            .then(|| (self.block_constraint_report(layout_block), self.constraint_palette()));
+        let depth_map = self.draw_depth_map();
+        let visibility_reveal = if plot_only {
+            rustc_hash::FxHashSet::default()
+        } else {
+            self.visibility_reveal_handles()
+        };
+        let graph = crate::scene::render_graph::RenderSceneGraph::new(
+            document,
             frozen,
             annotation_scale_handle,
             all_visible,
             depth_map.as_ref(),
         )
+        .with_visibility_reveal(&visibility_reveal)
         .with_annotation_scale(self.annotation_scale)
         .with_viewport(viewport);
         let mut hatch_block_memo = std::collections::HashMap::new();
@@ -1704,7 +1950,7 @@ impl Scene {
                         && targets.contains(&common.handle);
                 }
                 let block_uses: Vec<_> = crate::scene::render_graph::entity_render_block_uses(
-                    &self.document,
+                    document,
                     entity,
                     1.0,
                 )
@@ -1716,7 +1962,7 @@ impl Scene {
                 } else {
                     block_uses.into_iter().any(|block_use| {
                         crate::scene::render_graph::block_contains_hatch(
-                            &self.document,
+                            document,
                             &block_use.insert.block_name,
                             &mut hatch_block_memo,
                         )
@@ -1733,7 +1979,7 @@ impl Scene {
                 if plot_only && !self.layer_plottable_in_context(entity, context) {
                     return;
                 }
-                let style = context.style_for(&self.document, entity);
+                let style = context.style_for(document, entity);
                 let preserve_white_mask = source_hatch.is_solid
                     && matches!(source_hatch.common.color, codec::types::Color::Index(7));
                 let color = if preserve_white_mask {
@@ -1750,6 +1996,13 @@ impl Scene {
                 let Some(mut model) = Self::hatch_model_from_dxf(&hatch, color) else {
                     return;
                 };
+                if let Some((report, palette)) = &constraint_display {
+                    if let Some(mut color) = self.constraint_display_color(report, context.root_handle, palette) {
+                        color[3] = model.color[3];
+                        model.color = color;
+                        if let crate::scene::model::hatch_model::HatchPattern::Gradient { color2, .. } = &mut model.pattern { *color2 = color; }
+                    }
+                }
                 model.aci = style.4;
                 model.line_weight_px = style.3;
                 model.draw_depth =
@@ -1878,6 +2131,11 @@ impl Scene {
         plot_only: bool,
     ) -> Vec<HatchModel> {
         let depth_map = self.draw_depth_map();
+        let visibility_reveal = if plot_only {
+            rustc_hash::FxHashSet::default()
+        } else {
+            self.visibility_reveal_handles()
+        };
         let graph = crate::scene::render_graph::RenderSceneGraph::new(
             &self.document,
             frozen,
@@ -1885,6 +2143,7 @@ impl Scene {
             all_visible,
             depth_map.as_ref(),
         )
+        .with_visibility_reveal(&visibility_reveal)
         .with_annotation_scale(self.annotation_scale);
         let mut models = Vec::new();
         let mut wipeout_sources = rustc_hash::FxHashMap::default();
@@ -3032,10 +3291,12 @@ impl Scene {
                 codec::entities::hatch::GradientColorEntry {
                     value: 0.0,
                     color: to_color(c0),
+                    ..Default::default()
                 },
                 codec::entities::hatch::GradientColorEntry {
                     value: 1.0,
                     color: to_color(c1),
+                    ..Default::default()
                 },
             ];
         }
@@ -3048,7 +3309,7 @@ impl Scene {
         if let Some(origin) = model.pattern_origin {
             dxf.record_pattern_origin(Vector2::new(origin[0], origin[1]));
         }
-        let mut entity = EntityType::Hatch(dxf);
+        let mut entity = EntityType::Hatch(Box::new(dxf));
 
         if let Some(layer) = layer {
             entity.as_entity_mut().set_layer(layer.to_string());
@@ -3065,7 +3326,7 @@ impl Scene {
 
     pub fn clear(&mut self) {
         self.document.record_all_entities_for_transaction();
-        self.document = CadDocument::new();
+        self.document = Document::new();
         self.replace_selection(HashSet::default());
         self.preview_wires = vec![];
         self.preview_text = vec![];
@@ -3109,6 +3370,8 @@ impl Scene {
         // current. Standard stays available for imperial work.
         self.document.header.measurement = 1;
         self.document.header.insertion_units = 6;
+        // Its solids are drawn with eight isolines.
+        self.document.header.isolines = 8;
         let iso = crate::scene::creation_style::ensure_iso_dim_style(&mut self.document);
         self.document.header.current_dimstyle_name = "ISO-25".to_string();
         // The name alone leaves the header pointing at the previous style, and
@@ -3119,11 +3382,25 @@ impl Scene {
         // large until the first CANNOSCALE change shrank them. (#1674)
         self.sync_annotation_scale_from_header();
         for obj in self.document.objects.values_mut() {
-            if let codec::objects::ObjectType::Layout(l) = obj {
-                if l.name != "Model" {
+            match obj {
+                codec::objects::ObjectType::Layout(l) if l.name != "Model" => {
                     crate::scene::apply_default_page_setup(l, "");
                     self.unopened_layouts.insert(l.name.clone());
                 }
+                // The codec's Standard multileader style is sized in inches;
+                // the metric template's is in millimetres. Left as-is, a new
+                // leader's arrow and landing were a fraction of a millimetre,
+                // invisible on a sheet. (#2027)
+                codec::objects::ObjectType::MultiLeaderStyle(s)
+                    if s.name.eq_ignore_ascii_case("Standard") =>
+                {
+                    s.text_height = 4.0;
+                    s.arrowhead_size = 4.0;
+                    s.landing_gap = 2.0;
+                    s.landing_distance = 8.0;
+                    s.break_gap_size = 3.75;
+                }
+                _ => {}
             }
         }
     }

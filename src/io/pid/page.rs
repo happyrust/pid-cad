@@ -12,7 +12,7 @@ use super::*;
 /// Only the rectangle is drawn. The title block, the revision table and the
 /// grid divisions inside a real border are the template's own drafting, and
 /// synthesising them would be inventing content the file does not carry.
-pub(super) fn draw_page_border(doc: &mut CadDocument, page_mm: Option<(f64, f64)>) {
+pub(super) fn draw_page_border(doc: &mut Document, page_mm: Option<(f64, f64)>) {
     let Some((width, height)) = page_mm else {
         return;
     };
@@ -131,7 +131,7 @@ impl SheetBand {
 ///
 /// `Scene::restore_saved_camera` reads the `*Active` VPORT and only falls back
 /// to `fit_all` when there is none. Neither default is usable here: a fresh
-/// `CadDocument` ships an `*Active` entry parked at the origin with a 10-unit
+/// `Document` ships an `*Active` entry parked at the origin with a 10-unit
 /// height, and `fit_all` fits every wire including the off-sheet strays that
 /// [`SheetBand`] keeps out of the framing box. So the importer states the view
 /// itself, over the filtered bounds.
@@ -141,7 +141,7 @@ impl SheetBand {
 /// stops short of the border opening zoomed past its own title block. The
 /// page is where the border is drawn, so the view and the border agree by
 /// construction.
-pub(super) fn frame_drawing(doc: &mut CadDocument, bounds: &Bounds, page_mm: Option<(f64, f64)>) {
+pub(super) fn frame_drawing(doc: &mut Document, bounds: &Bounds, page_mm: Option<(f64, f64)>) {
     if bounds.is_empty() {
         return;
     }

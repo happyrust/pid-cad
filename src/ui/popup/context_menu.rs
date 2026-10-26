@@ -378,6 +378,8 @@ pub enum MenuContext {
         /// Some selected entity already belongs to a P&ID symbol group, so
         /// the menu offers to take it apart (PIDGROUP OFF).
         selection_in_group: bool,
+        /// Exactly one hatch is selected: its edit row is offered.
+        single_hatch: bool,
         selected_constraint: Option<ConstraintId>,
         isolation_active: bool,
         /// Recently run commands, newest first.
@@ -402,6 +404,7 @@ pub fn build_context_menu(ctx: &MenuContext, open_submenu: Option<SubmenuId>) ->
         MenuContext::Idle {
             has_selection,
             selection_in_group,
+            single_hatch,
             selected_constraint,
             isolation_active,
             recent_cmds,
@@ -412,6 +415,7 @@ pub fn build_context_menu(ctx: &MenuContext, open_submenu: Option<SubmenuId>) ->
         } => idle_rows(
             *has_selection,
             *selection_in_group,
+            *single_hatch,
             *selected_constraint,
             *isolation_active,
             recent_cmds,
@@ -575,6 +579,7 @@ fn navigation_rows(transparent: bool) -> Vec<MenuRow> {
 fn idle_rows(
     has_selection: bool,
     selection_in_group: bool,
+    single_hatch: bool,
     selected_constraint: Option<ConstraintId>,
     isolation_active: bool,
     recent_cmds: &[String],
@@ -658,6 +663,14 @@ fn idle_rows(
 
     // ── Selection edit block (the "Edit" shortcut menu of commercial solutions) ──
     if has_selection {
+        // An object-specific edit leads the block, as commercial solutions
+        // list "Hatch Edit..." first for a selected hatch.
+        if single_hatch {
+            rows.push(MenuRow::Item(cmd(
+                t!("Edit Hatch").into_owned(),
+                "HATCHEDIT",
+            )));
+        }
         rows.push(MenuRow::Item(
             MenuItem::new(t!("Erase").into_owned(), MenuAction::DeleteSelected)
                 .command_icon("ERASE"),
@@ -1012,6 +1025,7 @@ mod tests {
         MenuContext::Idle {
             has_selection,
             selection_in_group: false,
+            single_hatch: false,
             selected_constraint: None,
             isolation_active: false,
             recent_cmds: vec!["LINE".into(), "CIRCLE".into()],
@@ -1034,6 +1048,28 @@ mod tests {
         assert!(acts.contains(&MenuAction::Options));
         assert!(!acts.contains(&MenuAction::DeleteSelected));
         assert!(!acts.contains(&MenuAction::DeselectAll));
+    }
+
+    #[test]
+    fn a_single_selected_hatch_offers_edit_hatch_first() {
+        let mut ctx = idle_ctx(true);
+        let MenuContext::Idle { single_hatch, .. } = &mut ctx else {
+            unreachable!()
+        };
+        *single_hatch = true;
+        let acts = actions(&build_context_menu(&ctx, None));
+        let edit = acts
+            .iter()
+            .position(|a| *a == MenuAction::Command("HATCHEDIT".into()))
+            .expect("Edit Hatch offered");
+        let erase = acts
+            .iter()
+            .position(|a| *a == MenuAction::DeleteSelected)
+            .unwrap();
+        assert!(edit < erase, "Edit Hatch leads the selection block");
+
+        let other = actions(&build_context_menu(&idle_ctx(true), None));
+        assert!(!other.contains(&MenuAction::Command("HATCHEDIT".into())));
     }
 
     #[test]

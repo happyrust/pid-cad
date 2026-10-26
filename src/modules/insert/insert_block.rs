@@ -22,6 +22,8 @@ use crate::command::{CadCommand, CmdResult, DynField, InputKind, WorkingPlane};
 use crate::modules::IconKind;
 use crate::scene::model::wire_model::WireModel;
 
+mod alignment;
+
 /// The ribbon's Insert button: its face opens the Blocks palette, its arrow
 /// the gallery of the drawing's blocks.
 pub const GALLERY_ID: &str = "INSERT_GALLERY";
@@ -49,6 +51,8 @@ pub struct BlockCatalog {
     pub units: rustc_hash::FxHashMap<String, String>,
     /// The folder `-INSERT` reports as its search path.
     pub search_path: String,
+    /// Native base and ordered, enabled insertion grips for each definition.
+    pub insertion_points: rustc_hash::FxHashMap<String, (Vector3, Vec<Vector3>)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -134,6 +138,10 @@ pub struct InsertBlockCommand {
     /// the definition, the clipboard base for paste-as-block, whose preview
     /// is the clipboard in world coordinates.
     preview_origin: DVec3,
+    cycle_points: Vec<DVec3>,
+    cycle_index: usize,
+    alignment: Option<alignment::InsertionAlignment>,
+    pick_context: Option<crate::command::PointPickContext>,
 }
 
 impl InsertBlockCommand {
@@ -162,6 +170,10 @@ impl InsertBlockCommand {
             plane: WorkingPlane::default(),
             block_base: Vector3::ZERO,
             preview_origin: DVec3::ZERO,
+            cycle_points: vec![DVec3::ZERO],
+            cycle_index: 0,
+            alignment: None,
+            pick_context: None,
         }
     }
 
@@ -303,6 +315,8 @@ impl InsertBlockCommand {
         let Some(point) = self.point.take() else {
             return CmdResult::NeedPoint;
         };
+        let (point, rotation) = self.aligned_pose(point, self.scale, self.rotation);
+        self.rotation = rotation;
         let local = self.plane.to_local(point);
         let offset = self.local_offset(self.base);
         let mut ins = Insert::new(
@@ -393,6 +407,14 @@ impl InsertBlockCommand {
 
     /// The block name chosen at the name step.
     fn choose(&mut self, name: String) -> CmdResult {
+        if let Some((base, points)) = self
+            .catalog
+            .insertion_points
+            .get(&name.to_ascii_uppercase())
+            .cloned()
+        {
+            self.set_insertion_points(base, points);
+        }
         let units = self
             .catalog
             .units
@@ -426,6 +448,29 @@ impl InsertBlockCommand {
 }
 
 impl CadCommand for InsertBlockCommand {
+    fn wants_point_pick_context(&self) -> bool {
+        self.mode != Mode::Paste && (matches!(self.step, Step::Point) || self.point.is_some())
+    }
+    fn set_point_pick_context(&mut self, context: Option<crate::command::PointPickContext>) {
+        self.pick_context = context;
+    }
+    fn refresh_point_pick_scene(&mut self, scene: &crate::scene::Scene) {
+        if self.mode == Mode::Classic {
+            self.preview = scene.block_preview_wires(&self.name);
+        }
+        self.alignment = alignment::InsertionAlignment::from_scene(scene, &self.name, self.plane);
+    }
+    fn cycle_insertion_point(&mut self) -> bool {
+        if !matches!(self.step, Step::Point)
+            || self.mode == Mode::Paste
+            || self.cycle_points.len() < 2
+        {
+            return false;
+        }
+        self.cycle_index = (self.cycle_index + 1) % self.cycle_points.len();
+        self.base = self.cycle_points[self.cycle_index];
+        true
+    }
     fn set_working_plane(&mut self, plane: WorkingPlane) {
         self.plane = plane;
     }
@@ -447,14 +492,28 @@ impl CadCommand for InsertBlockCommand {
                 }
             }
             Step::ListPattern => "Enter block(s) to list <*>:".to_string(),
-            Step::Point => match self.mode {
-                Mode::Paste => t!(
-                    "INSERT  Specify insertion point for \"%{name}\"  [Scale/Rotate]:",
-                    name = self.name
-                )
-                .into_owned(),
-                _ => format!("Specify insertion point or {}:", self.options_text()),
-            },
+            Step::Point => {
+                let prompt = match self.mode {
+                    Mode::Paste => t!(
+                        "INSERT  Specify insertion point for \"%{name}\"  [Scale/Rotate]:",
+                        name = self.name
+                    )
+                    .into_owned(),
+                    _ => format!("Specify insertion point or {}:", self.options_text()),
+                };
+                if self.cycle_points.len() > 1 {
+                    format!(
+                        "{prompt} {}",
+                        crate::tf!(
+                            "Ctrl cycles insertion points ({}/{}).",
+                            self.cycle_index + 1,
+                            self.cycle_points.len()
+                        )
+                    )
+                } else {
+                    prompt
+                }
+            }
             Step::Preset(Preset::Base) => "Specify base point:".to_string(),
             Step::Preset(Preset::Scale) => match self.mode {
                 Mode::Paste => t!("INSERT  Specify scale factor <1>:").into_owned(),
@@ -517,6 +576,8 @@ impl CadCommand for InsertBlockCommand {
             }
             Step::Preset(Preset::Base) => {
                 self.base = self.plane.to_local(pt);
+                self.cycle_points[0] = self.base;
+                self.cycle_index = 0;
                 self.step = Step::Point;
                 CmdResult::NeedPoint
             }
@@ -827,7 +888,8 @@ impl CadCommand for InsertBlockCommand {
             self.preset_scale[1].unwrap_or(1.0),
             self.preset_scale[2].unwrap_or(1.0),
         ];
-        let (sin, cos) = self.preset_rotation.unwrap_or(0.0).sin_cos();
+        let (pt, rotation) = self.aligned_pose(pt, scale, self.preset_rotation.unwrap_or(0.0));
+        let (sin, cos) = rotation.sin_cos();
         let base = self.preview_origin + self.base;
         let origin = self.plane.to_local(pt);
         let plane = self.plane;
@@ -870,6 +932,22 @@ impl CadCommand for InsertBlockCommand {
 }
 
 impl InsertBlockCommand {
+    pub(crate) fn set_insertion_points(&mut self, base: Vector3, points: Vec<Vector3>) {
+        if self.mode == Mode::Paste {
+            return;
+        }
+        self.block_base = base;
+        self.preview_origin = DVec3::new(base.x, base.y, base.z);
+        self.cycle_points = vec![DVec3::ZERO];
+        for point in points {
+            let offset = DVec3::new(point.x, point.y, point.z) - self.preview_origin;
+            if offset.is_finite() && !self.cycle_points.iter().any(|p| p.distance(offset) < 1e-12) {
+                self.cycle_points.push(offset);
+            }
+        }
+        self.cycle_index = 0;
+        self.base = DVec3::ZERO;
+    }
     /// The referenced block's insertion base point, for attribute placement.
     pub fn set_block_base(&mut self, base: Vector3) {
         self.block_base = base;
@@ -996,3 +1074,78 @@ impl InsertBlockCommand {
 inventory::submit!(crate::command::CommandRegistration {
     names: &["INSERT", "-INSERT"]
 });
+
+#[cfg(test)]
+mod cycling_tests {
+    use super::*;
+
+    #[test]
+    fn block_grip_cycling_aligns_preview_and_placement_with_native_base_scale_and_rotation() {
+        let native_base = Vector3::new(5.0, 7.0, 0.0);
+        let anchor = Vector3::new(15.0, 17.0, 0.0);
+        let wire = WireModel::solid_f64(
+            "cycle_preview".into(),
+            vec![[anchor.x, anchor.y, anchor.z], [16.0, 17.0, 0.0]],
+            WireModel::CYAN,
+            false,
+        );
+        let options = BlockInsertOptions {
+            x: 2.0,
+            y: 3.0,
+            z: 1.0,
+            angle: 90.0,
+            ..Default::default()
+        };
+        let mut cmd = InsertBlockCommand::palette("CYCLE".into(), vec![wire], &options);
+        cmd.set_insertion_points(native_base, vec![anchor, anchor]);
+        let point = DVec3::new(100.0, 200.0, 0.0);
+        let original = cmd.on_preview_wires(point);
+        assert!(cmd.cycle_insertion_point());
+        assert_eq!(cmd.cycle_points.len(), 2);
+        let preview = cmd.on_preview_wires(point);
+        assert_ne!(preview[0].points, original[0].points);
+        assert!((preview[0].points[0][0] as f64 - point.x).abs() < 1e-6);
+        assert!((preview[0].points[0][1] as f64 - point.y).abs() < 1e-6);
+        assert!(matches!(
+            cmd.on_point(point),
+            CmdResult::AttreqNeeded { .. }
+        ));
+        let EntityType::Insert(insert) = cmd.attreq_set_attdefs(vec![]).unwrap() else {
+            panic!()
+        };
+        let actual = crate::scene::render_graph::insert_transform_with_base(&insert, native_base)
+            .apply(anchor);
+        assert!((actual.x - point.x).abs() < 1e-10 && (actual.y - point.y).abs() < 1e-10);
+        assert!(!cmd.cycle_insertion_point());
+    }
+
+    #[test]
+    fn block_grip_cycling_is_available_after_classic_name_selection_and_wraps_to_default() {
+        let mut catalog = BlockCatalog::default();
+        catalog.insertion_points.insert(
+            "CYCLE".into(),
+            (
+                Vector3::new(5.0, 7.0, 0.0),
+                vec![Vector3::new(15.0, 7.0, 0.0), Vector3::new(5.0, 17.0, 0.0)],
+            ),
+        );
+        let mut cmd = InsertBlockCommand::classic(
+            vec!["CYCLE".into()],
+            Default::default(),
+            8,
+            catalog,
+            String::new(),
+        );
+        assert!(!cmd.cycle_insertion_point());
+        cmd.on_text_input("CYCLE");
+        assert!(cmd.cycle_insertion_point());
+        assert_eq!(cmd.base, DVec3::new(10.0, 0.0, 0.0));
+        assert!(cmd.cycle_insertion_point());
+        assert_eq!(cmd.base, DVec3::new(0.0, 10.0, 0.0));
+        assert!(cmd.cycle_insertion_point());
+        assert_eq!(cmd.base, DVec3::ZERO);
+        let mut paste = InsertBlockCommand::new_for_block("PASTE".into(), vec![], DVec3::ZERO);
+        paste.set_insertion_points(Vector3::ZERO, vec![Vector3::UNIT_X]);
+        assert!(!paste.cycle_insertion_point());
+    }
+}

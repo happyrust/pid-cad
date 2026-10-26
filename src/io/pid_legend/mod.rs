@@ -94,7 +94,7 @@ pub use xdata::{attach, attached_handles, purge};
 
 use std::collections::{BTreeMap, HashSet};
 
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 
 use super::pid_pipes::{self, End, Pipes, Port};
 use blocks::{lettering_of, placed_block};
@@ -312,12 +312,12 @@ struct Lettering {
 }
 
 /// Recognise the symbols on `doc` with `rules`, detecting the sheet's units.
-pub fn recognise(doc: &CadDocument, rules: &Rules) -> Recognition {
+pub fn recognise(doc: &Document, rules: &Rules) -> Recognition {
     recognise_with_units(doc, rules, guess_units_per_mm(doc))
 }
 
 /// [`recognise`] with the drawing-units-per-millimetre given.
-pub fn recognise_with_units(doc: &CadDocument, rules: &Rules, units_per_mm: f64) -> Recognition {
+pub fn recognise_with_units(doc: &Document, rules: &Rules, units_per_mm: f64) -> Recognition {
     let upm = units_per_mm;
     let radius = rules.radius_mm * upm;
     let lettering = lettering_of(doc);

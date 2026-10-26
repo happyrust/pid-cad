@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use codec::CadDocument;
+use codec::Document;
 
 /// The community folder's GitHub contents API (lists name + download URL).
 #[cfg(not(target_arch = "wasm32"))]
@@ -18,11 +18,29 @@ const REPO_API_URL: &str = "https://api.github.com/repos/HakanSeven12/OpenCADStu
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_FONT_BYTES: u64 = 16 * 1024 * 1024;
 
+#[cfg(not(target_arch = "wasm32"))]
+static FONTS_FOLDER: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// A folder chosen in Options to hold the fonts instead of the default one,
+/// such as a share on the office network.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn fonts_folder() -> Option<PathBuf> {
+    FONTS_FOLDER
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_fonts_folder(folder: Option<PathBuf>) {
+    *FONTS_FOLDER.write().unwrap_or_else(|e| e.into_inner()) = folder;
+}
+
 /// Local store for fonts downloaded from the community repository. Text
 /// resolution searches here after the drawing folder.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fonts_dir() -> Option<PathBuf> {
-    crate::config::config_dir().map(|dir| dir.join("fonts"))
+    fonts_folder().or_else(|| crate::config::config_dir().map(|dir| dir.join("fonts")))
 }
 
 /// Web builds have no filesystem to cache fonts into.
@@ -70,7 +88,7 @@ pub struct RepoFont {
 /// Referenced-but-unresolvable `.shx` font files across the document's text
 /// styles. Names are deduplicated case-insensitively and reduced to the bare
 /// file name (`C:\Fonts\VNArial.shx` → `VNArial.shx`).
-pub fn missing_shx_fonts(doc: &CadDocument) -> Vec<String> {
+pub fn missing_shx_fonts(doc: &Document) -> Vec<String> {
     let mut missing: Vec<String> = Vec::new();
     let base = doc
         .source_path
@@ -299,7 +317,7 @@ mod tests {
         let dir = std::env::temp_dir().join("ocs_font_repo_tests");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("exists.shx"), b"stub").unwrap();
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mk = |name: &str, file: &str| {
             let mut style = codec::TextStyle::new(name);
             style.font_file = file.into();

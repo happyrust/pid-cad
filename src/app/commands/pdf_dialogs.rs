@@ -66,9 +66,15 @@ impl OpenCADStudio {
         }
     }
 
-    /// PDFATTACH after the file is chosen.
-    pub(in crate::app) fn open_pdf_attach_dialog(&mut self, path: &str) {
+    /// PDFATTACH after the file is chosen; an encrypted file asks for its
+    /// password first.
+    pub(in crate::app) fn open_pdf_attach_dialog(&mut self, path: &str) -> Task<Message> {
+        use crate::ui::window::pdf_password_dialog::PdfPasswordThen;
+        if let Some(ask) = self.pdf_locked(path, PdfPasswordThen::Attach) {
+            return ask;
+        }
         self.open_underlay_attach_dialog(codec::entities::UnderlayType::Pdf, path);
+        Task::none()
     }
 
     /// PDFATTACH / DWFATTACH / DGNATTACH after the file is chosen.
@@ -348,8 +354,19 @@ impl OpenCADStudio {
         self.active_modal = Some(crate::app::ModalKind::PdfImportSettings);
     }
 
-    /// PDFIMPORT's File option after the file is chosen.
-    pub(in crate::app) fn open_pdf_import_file(&mut self, path: &str) {
+    /// TXT2MTXT's SEttings option: the dialog over the running command.
+    pub(in crate::app) fn open_txt2mtxt_settings(&mut self) {
+        self.txt2mtxt_dialog = Some(self.txt2mtxt_settings);
+        self.active_modal = Some(crate::app::ModalKind::Txt2MtxtSettings);
+    }
+
+    /// PDFIMPORT's File option after the file is chosen; an encrypted file
+    /// asks for its password first.
+    pub(in crate::app) fn open_pdf_import_file(&mut self, path: &str) -> Task<Message> {
+        use crate::ui::window::pdf_password_dialog::PdfPasswordThen;
+        if let Some(ask) = self.pdf_locked(path, PdfPasswordThen::ImportFile) {
+            return ask;
+        }
         self.pdf_import_file = Some(PdfImportFileState {
             path: path.to_string(),
             pages: page_thumbs(path),
@@ -362,6 +379,7 @@ impl OpenCADStudio {
             settings: pdf_import::import_settings(),
         });
         self.active_modal = Some(crate::app::ModalKind::PdfImportFile);
+        Task::none()
     }
 
     /// Writes the layers each underlay turns off, as one undo step.
@@ -442,6 +460,7 @@ impl OpenCADStudio {
                         crate::t!("Sets the color schemes and ranges a point cloud is colored by intensity or elevation.")
                     }
                     "layers" => crate::t!("Turns the layers of a PDF underlay on or off."),
+                    "txt2mtxt" => std::borrow::Cow::Owned(crate::tr!("txt2mtxt", "help")),
                     _ => crate::t!("Imports the geometry, fills, raster images and text of a PDF file as drawing objects."),
                 };
                 self.command_line.push_info(text.as_ref());
@@ -722,6 +741,37 @@ impl OpenCADStudio {
             PdfDialogMsg::SettingsOk => {
                 if let Some(s) = self.pdf_import_settings.take() {
                     pdf_import::set_import_settings(s);
+                }
+                self.close_active_modal();
+            }
+
+            // ── Text to MText Settings ────────────────────────────────────
+            PdfDialogMsg::T2mCombine(on) => {
+                if let Some(s) = self.txt2mtxt_dialog.as_mut() {
+                    s.combine = on;
+                }
+            }
+            PdfDialogMsg::T2mSelectOrder(on) => {
+                if let Some(s) = self.txt2mtxt_dialog.as_mut() {
+                    s.select_order = on;
+                }
+            }
+            PdfDialogMsg::T2mWrap(on) => {
+                if let Some(s) = self.txt2mtxt_dialog.as_mut() {
+                    s.word_wrap = on;
+                }
+            }
+            PdfDialogMsg::T2mUniform(on) => {
+                if let Some(s) = self.txt2mtxt_dialog.as_mut() {
+                    s.uniform_spacing = on;
+                }
+            }
+            PdfDialogMsg::T2mOk => {
+                if let Some(s) = self.txt2mtxt_dialog {
+                    if s != self.txt2mtxt_settings {
+                        self.txt2mtxt_settings = s;
+                        self.save_config();
+                    }
                 }
                 self.close_active_modal();
             }

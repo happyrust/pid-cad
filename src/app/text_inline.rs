@@ -52,7 +52,12 @@ pub fn read_text_field(entity: &EntityType) -> Option<(String, TextEntityField)>
         EntityType::AttributeEntity(a) => {
             Some((a.get_value().to_string(), TextEntityField::AttEnt))
         }
-        EntityType::Dimension(d) => Some((d.base().text.clone(), TextEntityField::Dim)),
+        EntityType::Dimension(d) => Some((
+            crate::entities::dimension::dimension_text_override(d.base())
+                .unwrap_or_default()
+                .to_string(),
+            TextEntityField::Dim,
+        )),
         EntityType::Tolerance(t) => Some((t.text.clone(), TextEntityField::Tolerance)),
         EntityType::MultiLeader(ml) => {
             Some((ml.context.text_string.clone(), TextEntityField::MLeader))
@@ -68,7 +73,14 @@ pub fn write_text_field(entity: &mut EntityType, field: TextEntityField, value: 
         (EntityType::MText(m), TextEntityField::MText) => m.value = value,
         (EntityType::AttributeDefinition(a), TextEntityField::AttDef) => a.default_value = value,
         (EntityType::AttributeEntity(a), TextEntityField::AttEnt) => a.set_value(value),
-        (EntityType::Dimension(d), TextEntityField::Dim) => d.base_mut().text = value,
+        (EntityType::Dimension(d), TextEntityField::Dim) => {
+            // Both override slots, as the Properties row writes them: a stale
+            // `user_text` would otherwise keep winning over the new text.
+            crate::entities::dimension::set_dimension_text_override(
+                d.base_mut(),
+                (!value.trim().is_empty()).then_some(value),
+            );
+        }
         (EntityType::Tolerance(t), TextEntityField::Tolerance) => t.text = value,
         (EntityType::MultiLeader(ml), TextEntityField::MLeader) => {
             ml.context.text_string = value;
@@ -101,7 +113,7 @@ pub struct TextInlineState {
     /// Canvas-space anchor where the field is drawn (the insertion-point click).
     pub screen_anchor: iced::Point,
 }
-pub(super) fn can_edit_text(mut handle: Handle, document: &codec::CadDocument) -> bool {
+pub(super) fn can_edit_text(mut handle: Handle, document: &codec::Document) -> bool {
     for _ in 0..8 {
         match document.get_entity(handle) {
             Some(codec::EntityType::Leader(l)) => {
@@ -244,6 +256,11 @@ impl super::OpenCADStudio {
             if let Some(entity) = self.tabs[i].scene.document.get_entity_mut(h) {
                 write_text_field(entity, ed.field, ed.value.clone());
             }
+            if ed.field == TextEntityField::Dim {
+                // The dimension draws from its baked block; drop it so the
+                // new text is drawn (and re-baked on save).
+                self.tabs[i].scene.invalidate_dim_block_recorded(h);
+            }
             self.tabs[i]
                 .scene
                 .bump_entities(&[(h, crate::scene::ChangeKind::Modified)]);
@@ -276,22 +293,24 @@ impl super::OpenCADStudio {
                     t.style = cur_style;
                 }
             }
-            if command_creation {
-                let annotation_multiplier = if crate::scene::annotative::text_style_is_annotative(
+            // TEXT asks an annotative style for the paper height; the entity
+            // stores the model height of the scale it is created at.
+            let annotative = command_creation
+                && crate::scene::annotative::text_style_is_annotative(
                     &self.tabs[i].scene.document,
                     &t.style,
-                ) {
-                    self.tabs[i].scene.creation_annotation_multiplier()
-                } else {
-                    1.0
-                };
+                );
+            let paper_height = t.height;
+            if annotative {
+                t.height *= self.tabs[i].scene.creation_annotation_multiplier();
+            }
+            if command_creation {
                 let display_height = crate::entities::text::text_run_placement_at_scale(
                     &t,
                     &self.tabs[i].scene.document,
-                    annotation_multiplier as f32,
+                    1.0,
                 )
-                .height as f64
-                    * annotation_multiplier;
+                .height as f64;
                 if let Some(command) = self.tabs[i].suspended_cmd.as_mut() {
                     command.on_editor_display_height(display_height);
                 }
@@ -311,9 +330,22 @@ impl super::OpenCADStudio {
                     codec::entities::TextHorizontalAlignment::Aligned
                 )
             {
-                self.tabs[i].scene.document.header.text_height = t.height;
+                self.tabs[i].scene.document.header.text_height = paper_height;
             }
-            let _ = self.commit_entity_handle(plane.place_entity(EntityType::Text(t)));
+            let handle = self.commit_entity_handle(plane.place_entity(EntityType::Text(t)));
+            if annotative {
+                let scale = self.tabs[i].scene.creation_annotation_scale_handle();
+                if let (Some(handle), Some(scale)) = (handle, scale) {
+                    crate::scene::annotative::create_annotation_context(
+                        &mut self.tabs[i].scene.document,
+                        handle,
+                        scale,
+                    );
+                    self.tabs[i]
+                        .scene
+                        .bump_entities(&[(handle, crate::scene::ChangeKind::Modified)]);
+                }
+            }
             self.tabs[i].dirty = true;
         }
         self.refresh_properties();

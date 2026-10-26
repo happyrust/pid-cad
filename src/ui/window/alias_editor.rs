@@ -9,6 +9,7 @@
 use crate::app::Message;
 use crate::t;
 use crate::ui::style::common::muted_style;
+use crate::ui::style::editor_table::{danger_input_style, danger_text_style, EDITOR_TABLE_GUTTER};
 use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
 use iced::{Background, Element, Length, Theme};
 
@@ -19,44 +20,10 @@ pub enum AliasField {
     Command,
 }
 
-/// Right-hand lane reserved for the scrollbar so it never overlaps the ✕ column.
-const GUTTER: f32 = 16.0;
-
-fn danger_text_style(theme: &Theme) -> iced::widget::text::Style {
-    iced::widget::text::Style {
-        color: Some(theme.palette().danger.base.color),
-    }
-}
-
-/// Text-input variant flagging an invalid value: danger border and value
-/// color on the theme's danger weak background.
-fn danger_input_style(
-    theme: &Theme,
-    status: iced::widget::text_input::Status,
-) -> iced::widget::text_input::Style {
-    let danger = theme.palette().danger.base;
-    iced::widget::text_input::Style {
-        background: Background::Color(theme.palette().danger.weak.color),
-        border: iced::border::rounded(4).color(danger.color).width(
-            if matches!(
-                status,
-                iced::widget::text_input::Status::Focused { is_hovered: _ }
-            ) {
-                1.5
-            } else {
-                1.0
-            },
-        ),
-        icon: danger.color,
-        placeholder: danger.color.scale_alpha(0.7),
-        value: danger.text,
-        selection: danger.color,
-    }
-}
-
 /// Build the alias editor content. `rows` is the live working buffer.
 pub fn view_window<'a>(
     rows: &'a [(String, String)],
+    import_report: &'a str,
     pending_add: bool,
     reset_confirm: bool,
     duplicate_aliases: &rustc_hash::FxHashSet<String>,
@@ -77,7 +44,7 @@ pub fn view_window<'a>(
     // scrollable rows so the columns stay aligned.
     let gutter = iced::Padding {
         top: 0.0,
-        right: GUTTER,
+        right: EDITOR_TABLE_GUTTER,
         bottom: 0.0,
         left: 0.0,
     };
@@ -220,7 +187,14 @@ pub fn view_window<'a>(
                 .style(button::secondary)]
             .spacing(8)
             .align_y(iced::Center),
-            row![add],
+            row![
+                add,
+                button(text(t!("Import PGP…")).size(12))
+                    .on_press_maybe((!pending_add).then_some(Message::AliasEditorImport))
+                    .padding([4, 10])
+                    .style(button::secondary)
+            ]
+            .spacing(8),
         )
     };
     // Apply — primary action; commits the rows to ocad.pgp and stays open.
@@ -265,21 +239,17 @@ pub fn view_window<'a>(
         column![
             title,
             hint,
+            text(import_report).size(11).style(muted_style),
             Space::new().height(6),
             head,
             scrollable(container(list).padding(gutter)).height(sizing.height),
             Space::new().height(6),
-            conflict_banner,
+            scrollable(conflict_banner).height(Length::Fit.max(72)),
             Space::new().height(4),
-            row![
-                stats,
-                add_area,
-                reset_area,
-                Space::new().width(sizing.width),
-                apply_area
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
+            row![add_area, reset_area,].spacing(8).align_y(iced::Center),
+            row![stats, Space::new().width(Length::Fill), apply_area]
+                .spacing(8)
+                .align_y(iced::Center),
         ]
         .spacing(6)
         .width(sizing.width)

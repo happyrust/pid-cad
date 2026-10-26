@@ -3,7 +3,7 @@
 use crate::app::Message;
 use crate::t;
 use crate::ui::style::common::muted_style;
-use crate::ui::style::form::{hdivider, vsep};
+use crate::ui::style::form::{field_style, hdivider, vsep};
 use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
 use iced::{Background, Border, Element, Theme};
 use std::borrow::Cow;
@@ -62,26 +62,6 @@ fn btn_s(accent: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     }
 }
 
-fn field_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
-    let palette = theme.palette();
-    let border = match status {
-        text_input::Status::Focused { .. } => palette.primary.base.color,
-        _ => palette.background.neutral.color,
-    };
-    text_input::Style {
-        background: Background::Color(palette.background.base.color),
-        border: Border {
-            color: border,
-            width: 1.0,
-            radius: 3.0.into(),
-        },
-        icon: palette.background.base.text,
-        placeholder: palette.background.base.text.scale_alpha(0.48),
-        value: palette.background.base.text,
-        selection: palette.primary.base.color.scale_alpha(0.5),
-    }
-}
-
 /// Layer names bucketed by ACI (AutoCAD Color Index), index = ACI.
 ///
 /// Pure function of `document.layers`: one entry per layer whose color is
@@ -90,7 +70,7 @@ fn field_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
 /// unit-tested and benched without building widgets. `pub` (not
 /// `pub(crate)`) so the `cargo bench` harness (`benches/`, an external
 /// crate) can measure it as `ui_plotstyle_layer_usage`.
-pub fn build_layer_usage(document: &codec::CadDocument) -> Vec<Vec<String>> {
+pub fn build_layer_usage(document: &codec::Document) -> Vec<Vec<String>> {
     let mut layer_usage = vec![Vec::<String>::new(); 256];
 
     for layer in document.layers.iter() {
@@ -112,7 +92,7 @@ pub fn build_layer_usage(document: &codec::CadDocument) -> Vec<Vec<String>> {
 }
 
 pub fn view_window<'a>(
-    document: &'a codec::CadDocument,
+    document: &'a codec::Document,
     table: Option<&'a crate::io::plot_style::PlotStyleTable>,
     selected_aci: u8,
     color_buf: &'a str,
@@ -482,7 +462,7 @@ pub fn view_window<'a>(
 mod layer_usage_tests {
     use super::*;
 
-    fn indexed_layer(doc: &mut codec::CadDocument, name: &str, aci: u8) -> codec::tables::Layer {
+    fn indexed_layer(doc: &mut codec::Document, name: &str, aci: u8) -> codec::tables::Layer {
         let mut layer = codec::tables::Layer::new(name);
         layer.handle = doc.allocate_handle();
         layer.color = codec::types::Color::Index(aci);
@@ -491,7 +471,7 @@ mod layer_usage_tests {
 
     #[test]
     fn build_layer_usage_buckets_index_colors() {
-        let mut doc = codec::CadDocument::new();
+        let mut doc = codec::Document::new();
         let a = indexed_layer(&mut doc, "WALLS", 1);
         let b = indexed_layer(&mut doc, "doors", 1);
         let c = indexed_layer(&mut doc, "ROOF", 3);
@@ -509,7 +489,7 @@ mod layer_usage_tests {
 
     #[test]
     fn build_layer_usage_ignores_non_index_colors() {
-        let mut doc = codec::CadDocument::new();
+        let mut doc = codec::Document::new();
         let mut truecolor = codec::tables::Layer::new("TRUECOLOR");
         truecolor.handle = doc.allocate_handle();
         truecolor.color = codec::types::Color::Rgb {

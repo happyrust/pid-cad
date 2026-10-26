@@ -210,7 +210,7 @@ pub(crate) fn directional_axis_endpoints(
 /// axis end that moves, and for a polyline the vertex to move instead of
 /// turning the whole entity.
 pub(crate) fn axis_alignment_target(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     refs: &[ParametricRef],
 ) -> Option<(Handle, Vector3, Vector3, Option<usize>)> {
     let (handle, start_marker, end_marker) = match refs {
@@ -281,7 +281,7 @@ pub(crate) enum EqualSize {
 }
 
 pub(crate) fn equal_size(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     reference: ParametricRef,
 ) -> Option<EqualSize> {
     let entity = document.get_entity(reference.entity)?;
@@ -310,7 +310,7 @@ pub(crate) fn equal_size(
 /// a circle or arc keeps its center and takes the radius. `None` when the
 /// two do not share a size kind.
 pub(crate) fn equal_size_follower(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     first: ParametricRef,
     follower: ParametricRef,
 ) -> Option<codec::EntityType> {
@@ -398,7 +398,7 @@ pub(crate) fn normalize_angle_display(degrees: f64) -> f64 {
 
 /// The angular precision (DIMADEC, or DIMDEC when unset) of a dimension
 /// style, by name or the drawing's current one.
-pub(crate) fn angle_decimals(document: &codec::CadDocument, style_name: Option<&str>) -> usize {
+pub(crate) fn angle_decimals(document: &codec::Document, style_name: Option<&str>) -> usize {
     let requested = style_name
         .map(str::trim)
         .filter(|name| !name.is_empty())
@@ -434,6 +434,13 @@ pub const DYNAMIC_DIMENSION_TEXT_PX: f32 = 12.0;
 /// The layer the reference keeps dynamic dimensions on; an annotational
 /// dimensional constraint sits on an ordinary layer instead.
 pub(crate) const DYNAMIC_DIMENSION_LAYER: &str = "*ADSK_CONSTRAINTS";
+
+/// Whether `layer` holds dynamic dimensions. Drawings from the first
+/// parametric release keep them on `*LayerNameForDynamicConstraint`.
+pub(crate) fn is_dynamic_dimension_layer(layer: &str) -> bool {
+    layer.eq_ignore_ascii_case(DYNAMIC_DIMENSION_LAYER)
+        || layer.eq_ignore_ascii_case("*LayerNameForDynamicConstraint")
+}
 
 /// The text a dynamic dimension shows: CONSTRAINTNAMEFORMAT 0 = name,
 /// 1 = value, 2 = name=value, the value with its trailing zeros dropped
@@ -617,7 +624,7 @@ pub(crate) fn two_lines_placement(
 /// every click, and an `EntityType` held there is paid for on each of them.
 #[inline(never)]
 pub(crate) fn two_lines_placed_entity(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     first_ends: [ParametricRef; 2],
     first_pick: glam::DVec3,
     second_line: ParametricRef,
@@ -689,7 +696,7 @@ fn dynamic_dimension_follow_points(
     target.attachment_point = base.attachment_point;
     target.line_spacing_style = base.line_spacing_style;
     target.line_spacing_factor = base.line_spacing_factor;
-    *dimension = rebuilt;
+    *dimension = *rebuilt;
     true
 }
 
@@ -710,7 +717,7 @@ fn line_ends(entity: &codec::EntityType, reference: ParametricRef) -> Option<(Ve
 /// Where an angular constraint's sides are now: both lines' ends for a
 /// two-line angle, `[vertex, first, second]` for a three-point one.
 fn angular_follow_points(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     constraint: &ParametricConstraint,
 ) -> Option<Vec<Vector3>> {
     match (constraint.kind, constraint.refs.as_slice()) {
@@ -731,7 +738,7 @@ fn angular_follow_points(
 
 /// A radial constraint's circle or arc: its centre and radius now.
 fn radial_geometry(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     constraint: &ParametricConstraint,
 ) -> Option<(glam::DVec3, f64)> {
     let reference = constraint.refs.first()?;
@@ -787,7 +794,7 @@ fn dynamic_dimension_follow_radial(
     let Some(codec::EntityType::Dimension(mut rebuilt)) = rebuilt else {
         return false;
     };
-    let unchanged = match (&*dimension, &rebuilt) {
+    let unchanged = match (&*dimension, &*rebuilt) {
         (Dimension::Radius(old), Dimension::Radius(new)) => {
             same(old.angle_vertex, new.angle_vertex)
                 && same(old.definition_point, new.definition_point)
@@ -801,7 +808,7 @@ fn dynamic_dimension_follow_radial(
     if unchanged {
         return false;
     }
-    match &mut rebuilt {
+    match &mut *rebuilt {
         Dimension::Radius(new) => new.leader_length = leader,
         Dimension::Diameter(new) => new.leader_length = leader,
         _ => {}
@@ -814,7 +821,7 @@ fn dynamic_dimension_follow_radial(
     target.attachment_point = base.attachment_point;
     target.line_spacing_style = base.line_spacing_style;
     target.line_spacing_factor = base.line_spacing_factor;
-    *dimension = rebuilt;
+    *dimension = *rebuilt;
     true
 }
 
@@ -874,7 +881,7 @@ fn dynamic_dimension_follow_angle(
     target.attachment_point = base.attachment_point;
     target.line_spacing_style = base.line_spacing_style;
     target.line_spacing_factor = base.line_spacing_factor;
-    *dimension = rebuilt;
+    *dimension = *rebuilt;
     true
 }
 
@@ -884,7 +891,7 @@ fn dynamic_dimension_follow_angle(
 /// other object moves, as in the reference. An angle keeps its first side
 /// (a two-line angle) or its vertex and first point (a three-point one).
 pub(crate) fn dimensional_anchor_refs(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     refs: &[ParametricRef],
 ) -> Vec<ParametricRef> {
     let Some(&first) = refs.first() else {
@@ -1180,7 +1187,7 @@ pub enum ParametricScope {
 
 impl ParametricScope {
     /// The owner handle under which this scope is persisted.
-    pub fn owner_handle(&self, document: &codec::CadDocument) -> Handle {
+    pub fn owner_handle(&self, document: &codec::Document) -> Handle {
         match self {
             ParametricScope::ModelSpace => document.header.model_space_block_handle,
             ParametricScope::Block(handle) => *handle,
@@ -1188,9 +1195,13 @@ impl ParametricScope {
     }
 }
 
+/// Lazy reverse index snapshot for [`ParametricConstraintSet::touch_index`]:
+/// `(recorded constraint count, entity handle → positions into `constraints`)`.
+type TouchIndex = std::cell::RefCell<Option<(usize, std::collections::HashMap<Handle, Vec<u32>>)>>;
+
 /// Every constraint decoded from one standard graph scope. Solver state is rebuilt
 /// on demand and is not stored here.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ParametricConstraintSet {
     pub scope: ParametricScope,
     pub constraints: Vec<ParametricConstraint>,
@@ -1216,6 +1227,68 @@ pub struct ParametricConstraintSet {
     /// persisted; a `ConflictResolverPanel` reads this rather than calling
     /// `kernel_constraints::diagnosis::classify_redundant` itself.
     pub conflicts: Vec<(ConstraintId, kernel_constraints::diagnosis::RedundancyKind)>,
+    /// Lazy reverse index for [`Self::constraints_touching`]: entity handle →
+    /// positions into `constraints`. `None` means "not built yet" and is
+    /// rebuilt unconditionally on the next query; a built index is rebuilt
+    /// whenever `constraints.len()` differs from the recorded length (the
+    /// `constraints` field is `pub`, so external pushes/removes are covered
+    /// by the length check; `enabled` is filtered at query time, so in-place
+    /// enable toggles never stale the recorded positions). The only known
+    /// in-place mutation of `refs` (and hence of the handle keys) is the
+    /// Save Block As path in `app/block_editor.rs`, which rewrites
+    /// `refs[].entity` on *clones* of live sets and then installs them; the
+    /// manual `Clone` impl resets this field to `None` so a clone always
+    /// rebuilds from its own (possibly rewritten) contents. Derived cache,
+    /// not persisted.
+    touch_index: TouchIndex,
+    /// Cached [`Self::connected_handles`] result, keyed by the seed list, the
+    /// curve-relation mode, and a cheap content fingerprint of the whole
+    /// constraint list: per constraint `(id, kind, enabled, refs)`. The
+    /// fingerprint is O(total constraints + total refs) per validation —
+    /// negligible next to a solve — and makes enable/disable *swaps* of
+    /// equal count (properties-panel toggles between drags) a guaranteed
+    /// miss, unlike a mere enabled-count key. `refs`/`kind` are never
+    /// mutated in place on live sets (grep-verified: only clones get their
+    /// refs rewritten, in `app/block_editor.rs`), but fingerprinting them
+    /// anyway keeps the key airtight without needing invalidation hooks.
+    /// Lets a grip drag reuse the previous frame's connectivity while the
+    /// touched handle set and the constraint set are unchanged. Derived
+    /// cache, not persisted.
+    connected_cache: std::cell::RefCell<Option<ConnectedHandles>>,
+}
+
+/// See [`ParametricConstraintSet::connected_cache`].
+#[derive(Debug)]
+struct ConnectedHandles {
+    /// `(id, kind, enabled, refs)` for every constraint in list order —
+    /// the content fingerprint the cache is keyed on.
+    fingerprint: Vec<(ConstraintId, ConstraintKind, bool, Vec<ParametricRef>)>,
+    include_curve_relations: bool,
+    seeds: Vec<Handle>,
+    connected: Vec<Handle>,
+}
+
+impl Clone for ParametricConstraintSet {
+    /// Copies every state field; the two derived caches (`touch_index`,
+    /// `connected_cache`) are reset to `None` and rebuild lazily from this
+    /// clone's own contents on first query. Required because the Save Block
+    /// As path (`app/block_editor.rs`) clones live sets, rewrites
+    /// `refs[].entity` in place (length unchanged, so a length-keyed rebuild
+    /// would miss), then installs the clones as the live sets.
+    fn clone(&self) -> Self {
+        Self {
+            scope: self.scope,
+            constraints: self.constraints.clone(),
+            next_id: self.next_id,
+            local_parameters: self.local_parameters.clone(),
+            retained_standard_groups: self.retained_standard_groups.clone(),
+            dimensions: self.dimensions.clone(),
+            dof: self.dof,
+            conflicts: self.conflicts.clone(),
+            touch_index: std::cell::RefCell::new(None),
+            connected_cache: std::cell::RefCell::new(None),
+        }
+    }
 }
 
 impl ParametricConstraintSet {
@@ -1229,6 +1302,8 @@ impl ParametricConstraintSet {
             dimensions: std::collections::HashMap::new(),
             dof: None,
             conflicts: Vec::new(),
+            touch_index: std::cell::RefCell::new(None),
+            connected_cache: std::cell::RefCell::new(None),
         }
     }
 
@@ -1329,13 +1404,44 @@ impl ParametricConstraintSet {
     }
 
     /// Every enabled constraint referencing `entity`.
+    ///
+    /// Backed by a lazily built reverse index (`touch_index`), so a query is
+    /// O(1) index lookup plus O(k) for the `k` constraints referencing the
+    /// entity, instead of the previous linear scan over every constraint.
     pub fn constraints_touching(
         &self,
         entity: Handle,
     ) -> impl Iterator<Item = &ParametricConstraint> {
-        self.constraints
-            .iter()
-            .filter(move |c| c.enabled && c.refs.iter().any(|r| r.entity == entity))
+        {
+            let mut index = self.touch_index.borrow_mut();
+            let stale = index
+                .as_ref()
+                .is_none_or(|(len, _)| *len != self.constraints.len());
+            if stale {
+                let mut built: std::collections::HashMap<Handle, Vec<u32>> =
+                    std::collections::HashMap::new();
+                for (position, constraint) in self.constraints.iter().enumerate() {
+                    for reference in &constraint.refs {
+                        built
+                            .entry(reference.entity)
+                            .or_default()
+                            .push(position as u32);
+                    }
+                }
+                *index = Some((self.constraints.len(), built));
+            }
+        }
+        let positions = self
+            .touch_index
+            .borrow()
+            .as_ref()
+            .and_then(|(_, index)| index.get(&entity))
+            .cloned()
+            .unwrap_or_default();
+        positions
+            .into_iter()
+            .filter_map(move |position| self.constraints.get(position as usize))
+            .filter(|constraint| constraint.enabled)
     }
 
     /// Drops every constraint that references `entity` and returns the
@@ -1347,6 +1453,75 @@ impl ParametricConstraintSet {
             .partition(|c| c.refs.iter().any(|r| r.entity == entity));
         self.constraints = kept;
         removed.into_iter().map(|c| c.id).collect()
+    }
+
+    /// Expand through enabled constraints from `seeds`. Whole-object
+    /// translations follow point connections; grip previews include curve
+    /// relations as well. The result depends only on the constraint list and
+    /// the seeds — never on geometry — so it is memoised across grip-drag
+    /// frames while those are unchanged (see `connected_cache`).
+    pub(crate) fn connected_handles(
+        &self,
+        seeds: &[Handle],
+        include_curve_relations: bool,
+    ) -> Vec<Handle> {
+        let fingerprint: Vec<(ConstraintId, ConstraintKind, bool, Vec<ParametricRef>)> = self
+            .constraints
+            .iter()
+            .map(|constraint| {
+                (
+                    constraint.id,
+                    constraint.kind,
+                    constraint.enabled,
+                    constraint.refs.clone(),
+                )
+            })
+            .collect();
+        if let Some(cached) = self.connected_cache.borrow().as_ref() {
+            if cached.fingerprint == fingerprint
+                && cached.include_curve_relations == include_curve_relations
+                && cached.seeds == seeds
+            {
+                return cached.connected.clone();
+            }
+        }
+        let mut ordered = seeds.to_vec();
+        let mut found: std::collections::HashSet<_> = seeds.iter().copied().collect();
+        loop {
+            let mut added = false;
+            for constraint in self.constraints.iter().filter(|constraint| {
+                constraint.enabled
+                    && (include_curve_relations
+                        || matches!(
+                            constraint.kind,
+                            ConstraintKind::Coincident | ConstraintKind::PointOnCurve
+                        ))
+            }) {
+                if !constraint
+                    .refs
+                    .iter()
+                    .any(|reference| found.contains(&reference.entity))
+                {
+                    continue;
+                }
+                for reference in &constraint.refs {
+                    if found.insert(reference.entity) {
+                        ordered.push(reference.entity);
+                        added = true;
+                    }
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+        *self.connected_cache.borrow_mut() = Some(ConnectedHandles {
+            fingerprint,
+            include_curve_relations,
+            seeds: seeds.to_vec(),
+            connected: ordered.clone(),
+        });
+        ordered
     }
 }
 
@@ -1521,7 +1696,7 @@ pub(crate) fn is_parametric_point_near(entity: &codec::EntityType, point: Vector
 /// Returns `None` when no point in the scope is within the coincidence
 /// tolerance.
 pub(crate) fn nearest_parametric_point(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     scope: ParametricScope,
     world_point: Vector3,
     exclude: Option<Handle>,
@@ -1552,7 +1727,7 @@ pub(crate) fn nearest_parametric_point(
 /// Resolve a point pick within one explicitly selected entity.  This keeps two
 /// different endpoints at the same world coordinate distinguishable.
 pub(crate) fn nearest_parametric_point_on_entity(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     scope: ParametricScope,
     handle: Handle,
     world_point: Vector3,
@@ -1575,7 +1750,7 @@ pub(crate) fn nearest_parametric_point_on_entity(
 /// Resolve the whole curve or the picked polyline segment used by a
 /// point-to-curve Coincident relation.
 pub(crate) fn parametric_curve_ref_for_pick(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     scope: ParametricScope,
     handle: Handle,
     world_point: Vector3,
@@ -1744,14 +1919,14 @@ pub(crate) fn glyph_label(constraint: &ParametricConstraint) -> String {
 
 /// World-space anchor and outward direction for a constraint glyph.
 pub(crate) fn glyph_placement(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     constraint: &ParametricConstraint,
 ) -> Option<(Vector3, Vector3)> {
     glyph_placements(document, constraint).into_iter().next()
 }
 
 fn glyph_placement_for_reference(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     r: ParametricRef,
 ) -> Option<(Vector3, Vector3)> {
     let entity = document.get_entity(r.entity)?;
@@ -1839,7 +2014,7 @@ fn glyph_placement_for_reference(
 }
 
 fn glyph_placements(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     constraint: &ParametricConstraint,
 ) -> Vec<(Vector3, Vector3)> {
     // Relations the reference marks on every object they join.
@@ -1892,7 +2067,7 @@ fn glyph_placements(
 /// Point constraints expose their referenced point directly; curve relations
 /// expose the contact or intersection that makes the relation visible.
 fn constraint_segment_endpoints(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     reference: ParametricRef,
 ) -> Option<[Vector3; 2]> {
     let segment = reference.segment_index()?;
@@ -1915,7 +2090,7 @@ fn constraint_segment_endpoints(
 }
 
 fn constraint_reference_curve_xy(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     reference: ParametricRef,
 ) -> Option<kernel::geom2d::Curve> {
     let entity = document.get_entity(reference.entity)?;
@@ -1934,7 +2109,7 @@ fn constraint_reference_curve_xy(
 }
 
 pub(crate) fn constraint_hover_points(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     constraint: &ParametricConstraint,
 ) -> Vec<Vector3> {
     let mut points = Vec::new();
@@ -2152,46 +2327,19 @@ pub(crate) fn glyph_hit_test_entries(entries: &[GlyphEntry], p: iced::Point) -> 
 impl super::Scene {
     /// Expand through enabled constraints. Whole-object translations follow
     /// point connections; grip previews include curve relations as well.
+    /// Delegates to [`ParametricConstraintSet::connected_handles`], which
+    /// memoises the walk across grip-drag frames while the constraint set
+    /// and the seed handles are unchanged.
     pub(crate) fn parametric_connected_handles(
         &self,
         scope: ParametricScope,
         seeds: &[Handle],
         include_curve_relations: bool,
     ) -> Vec<Handle> {
-        let mut ordered = seeds.to_vec();
-        let mut found: std::collections::HashSet<_> = seeds.iter().copied().collect();
         let Some(set) = self.parametric_constraint_set(scope) else {
-            return ordered;
+            return seeds.to_vec();
         };
-        loop {
-            let mut added = false;
-            for constraint in set.constraints.iter().filter(|constraint| {
-                constraint.enabled
-                    && (include_curve_relations
-                        || matches!(
-                            constraint.kind,
-                            ConstraintKind::Coincident | ConstraintKind::PointOnCurve
-                        ))
-            }) {
-                if !constraint
-                    .refs
-                    .iter()
-                    .any(|reference| found.contains(&reference.entity))
-                {
-                    continue;
-                }
-                for reference in &constraint.refs {
-                    if found.insert(reference.entity) {
-                        ordered.push(reference.entity);
-                        added = true;
-                    }
-                }
-            }
-            if !added {
-                break;
-            }
-        }
-        ordered
+        set.connected_handles(seeds, include_curve_relations)
     }
 
     pub fn is_parametric_constraint_visible(
@@ -2257,10 +2405,14 @@ impl super::Scene {
                 });
                 let measured = points.filter(|_| !angular).map(|(first, second)| {
                     let delta = second - first;
-                    let axis = match self.document.get_entity(*dimension) {
-                        Some(codec::EntityType::Dimension(codec::entities::Dimension::Linear(
-                            linear,
-                        ))) => Some((linear.rotation.cos(), linear.rotation.sin())),
+                    let axis = match self
+                        .document
+                        .get_entity(*dimension)
+                        .and_then(crate::entities::dimension::as_dimension)
+                    {
+                        Some(codec::entities::Dimension::Linear(linear)) => {
+                            Some((linear.rotation.cos(), linear.rotation.sin()))
+                        }
                         _ => None,
                     };
                     match (constraint.kind, axis) {
@@ -2499,19 +2651,16 @@ impl super::Scene {
     /// form: on an ordinary layer instead of the reference's constraints
     /// layer, drawn with its style, plotted, never rescaled to the screen.
     pub(crate) fn dimension_is_annotational(&self, handle: Handle) -> bool {
-        self.document.get_entity(handle).is_some_and(|entity| {
-            !entity
-                .common()
-                .layer
-                .eq_ignore_ascii_case(DYNAMIC_DIMENSION_LAYER)
-        })
+        self.document
+            .get_entity(handle)
+            .is_some_and(|entity| !is_dynamic_dimension_layer(&entity.common().layer))
     }
 
     /// The document as written to a file: a dynamic dimension's screen-size
     /// overrides are a display matter and stay out of the file, and so does
     /// what resolving an external reference merged in (its geometry, nested
     /// blocks and styles), which the file never stores.
-    pub(crate) fn document_for_save(&self) -> codec::CadDocument {
+    pub(crate) fn document_for_save(&self) -> codec::Document {
         use crate::entities::dim_override as ov;
         let mut document = self.document.clone();
         for set in &self.parametric_constraints {
@@ -2537,6 +2686,13 @@ impl super::Scene {
         crate::entities::field::stamp_save_dates(&mut document);
         for name in &self.unopened_layouts {
             crate::scene::write_layout_unopened(&mut document, name);
+        }
+        // EXTMIN / EXTMAX: the model's extents as it is saved (an empty
+        // model keeps the unset values).
+        if let Some((min, max)) = self.visible_block_bounds(self.model_space_block_handle()) {
+            let header = &mut document.header;
+            header.model_space_extents_min = codec::types::Vector3::new(min.x, min.y, min.z);
+            header.model_space_extents_max = codec::types::Vector3::new(max.x, max.y, max.z);
         }
         document
     }
@@ -2601,7 +2757,7 @@ impl super::Scene {
             // line, which breaks around the text, so the text is centred on
             // it rather than lifted above it.
             let radial = matches!(
-                dimension,
+                &**dimension,
                 codec::entities::Dimension::Radius(_) | codec::entities::Dimension::Diameter(_)
             );
             let centred = !radial || ov::int(xdata, ov::DIMTAD) == Some(0);
@@ -2611,7 +2767,7 @@ impl super::Scene {
             // The reference draws dynamic distance text horizontally; an
             // angle's text keeps its style's alignment.
             let angular = matches!(
-                dimension,
+                &**dimension,
                 codec::entities::Dimension::Angular2Ln(_)
                     | codec::entities::Dimension::Angular3Pt(_)
             );
@@ -2669,7 +2825,24 @@ impl super::Scene {
     /// DYNCONSTRAINTDISPLAY 0 for all of them) and redraws the ones that
     /// changed.
     pub(crate) fn refresh_hidden_dynamic_dimensions(&mut self) {
-        let desired: rustc_hash::FxHashSet<Handle> = self
+        let linked: rustc_hash::FxHashSet<Handle> = self
+            .parametric_constraints
+            .iter()
+            .flat_map(|set| set.dimensions.values().copied())
+            .collect();
+        // A dynamic dimension whose constraint did not load cannot be driven
+        // or placed on screen; like a viewer, leave it undrawn.
+        let orphans: Vec<Handle> = self
+            .document
+            .entities()
+            .filter(|entity| {
+                matches!(entity, codec::EntityType::Dimension(_))
+                    && is_dynamic_dimension_layer(&entity.common().layer)
+                    && !linked.contains(&entity.common().handle)
+            })
+            .map(|entity| entity.common().handle)
+            .collect();
+        let mut desired: rustc_hash::FxHashSet<Handle> = self
             .parametric_constraints
             .iter()
             .flat_map(|set| {
@@ -2681,6 +2854,7 @@ impl super::Scene {
                 })
             })
             .collect();
+        desired.extend(orphans);
         if desired == self.hidden_dynamic_dimensions {
             return;
         }
@@ -3536,7 +3710,7 @@ mod tests {
 
     #[test]
     fn glyph_placement_points_away_from_its_geometry() {
-        let mut document = codec::CadDocument::new();
+        let mut document = codec::Document::new();
         let mut line = codec::entities::Line::from_points(
             Vector3::new(0.0, 0.0, 0.0),
             Vector3::new(10.0, 0.0, 0.0),
@@ -3769,6 +3943,85 @@ mod tests {
     }
 
     #[test]
+    fn cloned_set_rebuilds_touch_index_after_refs_rewrite() {
+        let mut set = ParametricConstraintSet::new(ParametricScope::ModelSpace);
+        set.add(
+            ConstraintKind::Coincident,
+            vec![ParametricRef::point(h(1), 0), ParametricRef::point(h(2), 1)],
+            None,
+        );
+        // Populate the reverse index on the original.
+        assert_eq!(set.constraints_touching(h(2)).count(), 1);
+
+        // Save Block As (app/block_editor.rs) clones live sets, rewrites
+        // refs[].entity in place (constraint count unchanged), then installs
+        // the clone as the live set.
+        let mut clone = set.clone();
+        for constraint in &mut clone.constraints {
+            for reference in &mut constraint.refs {
+                if reference.entity == h(2) {
+                    reference.entity = h(9);
+                }
+            }
+        }
+
+        assert_eq!(clone.constraints_touching(h(9)).count(), 1);
+        assert_eq!(
+            clone.constraints_touching(h(2)).count(),
+            0,
+            "the clone must not answer for the pre-rewrite handle"
+        );
+        // The original's index is untouched by the clone's rewrite.
+        assert_eq!(set.constraints_touching(h(2)).count(), 1);
+        assert_eq!(set.constraints_touching(h(9)).count(), 0);
+    }
+
+    #[test]
+    fn connected_handles_cache_misses_on_enabled_swap_of_equal_count() {
+        let mut set = ParametricConstraintSet::new(ParametricScope::ModelSpace);
+        let a = set.add(
+            ConstraintKind::Coincident,
+            vec![ParametricRef::point(h(1), 0), ParametricRef::point(h(2), 0)],
+            None,
+        );
+        let b = set.add(
+            ConstraintKind::Coincident,
+            vec![ParametricRef::point(h(3), 0), ParametricRef::point(h(4), 0)],
+            None,
+        );
+        set.constraints
+            .iter_mut()
+            .find(|c| c.id == b)
+            .unwrap()
+            .enabled = false;
+
+        assert_eq!(
+            set.connected_handles(&[h(1)], true),
+            vec![h(1), h(2)],
+            "baseline: only constraint A reaches from the seed"
+        );
+
+        // Properties-panel toggles between drags: disable A, enable B — same
+        // enabled count, different reachable component. The memo must miss.
+        set.constraints
+            .iter_mut()
+            .find(|c| c.id == a)
+            .unwrap()
+            .enabled = false;
+        set.constraints
+            .iter_mut()
+            .find(|c| c.id == b)
+            .unwrap()
+            .enabled = true;
+
+        assert_eq!(
+            set.connected_handles(&[h(1)], true),
+            vec![h(1)],
+            "equal-count enable swap must recompute, not serve the stale component"
+        );
+    }
+
+    #[test]
     fn remove_all_touching_drops_every_constraint_referencing_the_entity() {
         let mut set = ParametricConstraintSet::new(ParametricScope::ModelSpace);
         let coincident = set.add(
@@ -3918,7 +4171,7 @@ mod tests {
     fn scope_owner_handle_resolves_block_directly() {
         let block_handle = h(42);
         let scope = ParametricScope::Block(block_handle);
-        let doc = codec::CadDocument::new();
+        let doc = codec::Document::new();
         assert_eq!(scope.owner_handle(&doc), block_handle);
     }
 
@@ -4220,7 +4473,7 @@ mod tests {
 
     #[test]
     fn hover_geometry_keeps_a_bulged_polyline_segment_curved() {
-        let mut document = codec::CadDocument::new();
+        let mut document = codec::Document::new();
         let mut polyline = codec::entities::LwPolyline::new();
         polyline.common.handle = h(1);
         polyline.vertices = vec![

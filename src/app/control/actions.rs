@@ -1,3 +1,5 @@
+#[cfg(not(target_arch = "wasm32"))]
+use crate::io::plot_style::PlotStyleTableExt as _;
 use super::*;
 use crate::scene::model::object::PropValue;
 
@@ -92,6 +94,8 @@ pub(crate) fn property_json(p: &crate::scene::model::object::Property) -> Value 
 }
 pub(super) const NAMES: &[&str] = &[
     "close_modal",
+    "conversion_loss_save_anyway",
+    "conversion_loss_back",
     // Native-only: the "changed outside" dialog does not exist in the web
     // build, so neither does its action set.
     #[cfg(not(target_arch = "wasm32"))]
@@ -103,9 +107,20 @@ pub(super) const NAMES: &[&str] = &[
     #[cfg(not(target_arch = "wasm32"))]
     "external_change_cancel",
     "pdf_dialog_ok",
+    "txt2mtxt_settings",
     "view_background",
     "image_adjust",
+    "import_file_dialog",
+    "pdf_import_pick",
+    "pdf_import_dialog",
+    "dgn_import_dialog",
+    "tds_import_dialog",
+    "tds_material_dialog",
+    "tds_map_dialog",
     "refedit_dialog",
+    "pdf_password_dialog",
+    "hyperlink_dialog",
+    "pdf_shx_settings",
     "pdf_layer_toggle",
     "pc_manager_toggle",
     "pc_manager",
@@ -118,8 +133,10 @@ pub(super) const NAMES: &[&str] = &[
     "ribbon_dropdown",
     "keytips",
     "dialog_ok",
+    "block_def_dialog",
     "attdef_dialog",
     "field_dialog",
+    "attman_dialog",
     "sheet_set",
     "close_document",
     "toggle_properties",
@@ -410,6 +427,12 @@ impl OpenCADStudio {
     /// this needs no undo snapshot. Format follows the path extension.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn control_wblock(&mut self, req: &Value) -> Result<Task<Message>, Value> {
+        if self.tabs[self.active_tab].block_test.is_some() {
+            return Err(failure(
+                "temporary_document",
+                "Test Block is temporary and cannot be saved",
+            ));
+        }
         let path = string(req, "path")?;
         let document = &self.tabs[self.active_tab].scene.document;
         // A template base keeps its tables/styles in the exported file
@@ -511,7 +534,7 @@ impl OpenCADStudio {
     /// fields win over a layout's stored page setup; unspecified fields keep
     /// the stored setup (layouts) or the app's plot defaults (Model).
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn control_plot(&mut self, req: &Value) -> Result<Task<Message>, Value> {
+    pub(in crate::app) fn control_plot(&mut self, req: &Value) -> Result<Task<Message>, Value> {
         use crate::io::pdf_export::PdfPageInput;
 
         let path = string(req, "path")?;
@@ -705,6 +728,20 @@ impl OpenCADStudio {
                     if req.get("upside_down").is_some() {
                         page_dialog.upside_down = request.upside_down;
                     }
+                    // Explicit output flags win over the stored page setup too,
+                    // like paper, scale and area above.
+                    if req["transparency"].is_boolean() {
+                        page_dialog.transparency = request.transparency;
+                    }
+                    if req["lineweights"].is_boolean() {
+                        page_dialog.lineweights = request.lineweights;
+                    }
+                    if req["merge_lines"].is_boolean() {
+                        page_dialog.merge_lines = request.merge_lines;
+                    }
+                    if req["stamp"].is_boolean() {
+                        page_dialog.stamp = request.stamp;
+                    }
                     // The requested table wins over the layout's own, which
                     // the stored page setup just loaded (or failed to find).
                     if let Some(table) = &loaded_style {
@@ -863,7 +900,32 @@ impl OpenCADStudio {
                 })
             })
             .collect::<Vec<_>>();
-        json!({"ok": true, "grips": grips})
+        // API v11: plugin-declared custom grips of the active tab, each marked
+        // with its owning plugin. `moves_entity` is false by construction —
+        // the host never moves anything for a custom grip; any edit is the
+        // plugin's own, at settle.
+        #[cfg(target_arch = "wasm32")]
+        let plugin_grips: Vec<Value> = Vec::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        let visible = crate::plugin::grip_points::visibility(&self.disabled_plugins);
+        #[cfg(not(target_arch = "wasm32"))]
+        let plugin_grips = tab
+            .plugin_grips
+            .query_all(&visible)
+            .iter()
+            .map(|grip| {
+                json!({
+                    "plugin": grip.plugin,
+                    "grip_id": grip.grip_id,
+                    "handle": grip.anchor.map(|handle| format!("{:X}", handle.value())),
+                    "point": [grip.point.x, grip.point.y, grip.point.z],
+                    "shape": format!("{:?}", grip.shape),
+                    "moves_entity": false,
+                    "axis": grip.axis.map(|a| [a.x, a.y, a.z]),
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({"ok": true, "grips": grips, "plugin_grips": plugin_grips})
     }
 
     /// Drag one grip of an entity to a world point through the viewport's
@@ -872,12 +934,96 @@ impl OpenCADStudio {
     /// the grip lands on `point`.
     pub(super) fn control_grip_drag(&mut self, req: &Value) -> Result<Task<Message>, Value> {
         let i = self.active_tab;
+        // API v11: a `plugin` names the owner of a custom grip — the drag
+        // routes to the plugin through the same live machinery the viewport
+        // uses (begin → move → settle; preview frames flow; the settle is
+        // the plugin's own one-undo-step write).
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(plugin) = req["plugin"].as_str() {
+            let grip_id = req["grip_id"]
+                .as_u64()
+                .ok_or_else(|| failure("invalid_request", "Missing grip_id"))?;
+            let to = point(req)?;
+            return self.control_plugin_grip_drag(i, plugin, grip_id, to.to_array());
+        }
         let target = handle(req)?;
         let grip_id = req["grip_id"]
             .as_u64()
             .ok_or_else(|| failure("invalid_request", "Missing grip_id"))?
             as usize;
         let to = point(req)?;
+        self.perform_grip_drag(i, target, grip_id, to.to_array())
+            .map_err(|(code, message)| failure(code, message))
+    }
+
+    /// The MCP/automation entry for a custom-grip drag (API v11/v12): drive
+    /// begin → move → settle through the same lifecycle the viewport runs,
+    /// so end-to-end tests exercise exactly one pipeline — including the
+    /// v11.1 hardening (deliveries never inline command frames; the settle
+    /// is issued without waiting; the watchdog bounds a plugin that never
+    /// answers). The op waits, bounded by the settle floor, for the final
+    /// result: the settle is the plugin's own one-undo-step write window,
+    /// and cancel paths are identical to interactive drags.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn control_plugin_grip_drag(
+        &mut self,
+        i: usize,
+        plugin: &str,
+        grip_id: u64,
+        to: [f64; 3],
+    ) -> Result<Task<Message>, Value> {
+        let candidate = {
+            let visible = crate::plugin::grip_points::visibility(&self.disabled_plugins);
+            self.tabs[i]
+                .plugin_grips
+                .find(plugin, grip_id, &visible)
+                .ok_or_else(|| {
+                    failure(
+                        "unknown_grip",
+                        "Read plugin_grips for the declaring plugin's grip ids",
+                    )
+                })?
+        };
+        // begin → move → settle(issued) → drive pump ticks until the settle
+        // finalizes (or the watchdog abandons it). Bounded — the UI route
+        // never waits, this automation route may.
+        let _ = self.begin_plugin_grip_drag(i, &candidate);
+        let _ = self.move_plugin_grip_drag(i, glam::DVec3::new(to[0], to[1], to[2]));
+        let _ = self.settle_plugin_grip_drag();
+        let completed =
+            self.drive_plugin_grip_settle_to_completion(std::time::Duration::from_secs(12));
+        if !completed {
+            return Err(failure(
+                "plugin_settle_timeout",
+                "The plugin did not settle its grip drag in time; the delivery was abandoned",
+            ));
+        }
+        Ok(iced::Task::none())
+    }
+
+    /// The shared programmatic grip-drag core — one pipeline, three
+    /// consumers: the interactive viewport itself (the same
+    /// `grip_edit_for_hit` / `on_viewport_move` / `commit_active_grip_edit`
+    /// machinery), the MCP `grip_drag` op, and the HostApi `grip_drag`
+    /// (API v11). Selects `handle`, engages its grip `grip_id`, moves to
+    /// `to` with snaps / ortho / polar / tracking off, and commits: exactly
+    /// one undo step labeled like the interactive grip step, byte-exact
+    /// restore on undo. Refusal parity with the interactive path: unknown
+    /// entity, reference-only designation (gripless), locked layer, unknown
+    /// grip id, point out of view.
+    pub(in crate::app) fn perform_grip_drag(
+        &mut self,
+        i: usize,
+        target: codec::Handle,
+        grip_id: usize,
+        to: [f64; 3],
+    ) -> Result<Task<Message>, (&'static str, &'static str)> {
+        if self.tabs.len() <= i {
+            return Err(("invalid_request", "Tab does not exist"));
+        }
+        if self.tabs[i].scene.document.get_entity(target).is_none() {
+            return Err(("entity_absent", "No entity with that handle"));
+        }
         self.tabs[i].scene.deselect_all();
         self.tabs[i].scene.select_entity(target, false);
         self.refresh_properties();
@@ -887,7 +1033,15 @@ impl OpenCADStudio {
             .zip(&self.tabs[i].selected_grips)
             .find(|(owner, grip)| **owner == target && grip.id == grip_id)
             .map(|(_, grip)| (grip.world, grip.is_midpoint))
-            .ok_or_else(|| failure("unknown_grip", "Read grips for the entity's grip ids"))?;
+            .ok_or_else(|| {
+                if self.tabs[i].scene.is_reference_only(target) {
+                    ("reference_only", "The entity is reference-only")
+                } else if self.tabs[i].scene.is_layer_locked(target) {
+                    ("layer_locked", "The entity's layer is locked")
+                } else {
+                    ("unknown_grip", "Read grips for the entity's grip ids")
+                }
+            })?;
         let edit = self.grip_edit_for_hit(i, target, grip_id, moves_entity, world);
         self.tabs[i].active_grip = Some(edit);
 
@@ -898,9 +1052,14 @@ impl OpenCADStudio {
             height: tile.height,
             ..iced::Rectangle::default()
         };
-        let Some(screen) = self.tabs[i].scene.camera.borrow().project(to, local) else {
+        let Some(screen) = self.tabs[i]
+            .scene
+            .camera
+            .borrow()
+            .project(glam::DVec3::new(to[0], to[1], to[2]), local)
+        else {
             self.cancel_active_grip_edit();
-            return Err(failure("invalid_point", "The point is not in view"));
+            return Err(("invalid_point", "The point is not in view"));
         };
         let saved = (
             self.snapper.snap_enabled,
@@ -1030,10 +1189,12 @@ impl OpenCADStudio {
                     x: 0.0,
                     y: lines as f32,
                 })
+            } else if event.get("leave").and_then(Value::as_bool) == Some(true) {
+                Message::ViewportExit
             } else {
                 outcome = Err(failure(
                     "invalid_request",
-                    "Each event is move, move_world, press, release or wheel",
+                    "Each event is move, move_world, press, release, wheel or leave",
                 ));
                 break;
             };
@@ -1180,6 +1341,12 @@ impl OpenCADStudio {
         let name = string(req, "name")?;
         let msg = match name {
             "close_modal" => Message::CloseModal,
+            // The conversion-loss warning's choices: save with the losses it
+            // lists, or drop the held-back save.
+            "conversion_loss_save_anyway" => Message::ConversionLossProceed,
+            "conversion_loss_back" => Message::ConversionLossBack,
+            // Show a layout (or "Model"), as clicking its tab does.
+            "layout_switch" => Message::LayoutSwitch(string(req, "value")?.into()),
             // The "changed outside" modal's suggested actions (D6): reload
             // the disk copy, keep the in-memory one and overwrite, save as,
             // or dismiss. Native only — the web build has no such dialog.
@@ -1508,6 +1675,26 @@ impl OpenCADStudio {
                 }
                 return Ok(Task::none());
             }
+            // The open Block Definition dialog: `name=…`, `open_in_editor=0|1`,
+            // `base_on_screen=0|1`, `objects_on_screen=0|1`, `create_empty`,
+            // `select_objects`.
+            "block_def_dialog" => {
+                if self.block_definition.is_none() {
+                    return Err(failure("no_dialog", "The Block Definition dialog is not open"));
+                }
+                let value = string(req, "value")?;
+                let (key, v) = value.split_once('=').unwrap_or((value, ""));
+                let on = v == "1";
+                match key {
+                    "name" => Message::BlockDefNameSelect(v.to_string()),
+                    "open_in_editor" => Message::BlockDefOpenInEditor(on),
+                    "base_on_screen" => Message::BlockDefBaseOnScreen(on),
+                    "objects_on_screen" => Message::BlockDefObjectsOnScreen(on),
+                    "create_empty" => Message::BlockDefCreateEmpty,
+                    "select_objects" => Message::BlockDefSelectObjects,
+                    _ => return Err(failure("invalid_value", "Unknown block definition field")),
+                }
+            }
             // One field of the open attribute definition dialog: `tag=…`,
             // `prompt=…`, `default=…`, `justify=MC`, `style=…`, `height=…`,
             // `rotation=…`, `width=…`, `on_screen=0|1`, `x=…` / `y=…` / `z=…`,
@@ -1551,6 +1738,96 @@ impl OpenCADStudio {
                         M::Mode(bit, state == "1")
                     }
                     _ => return Err(failure("invalid_value", "Unknown attdef dialog field")),
+                })
+            }
+            // The open Block Attribute Manager: `block=<name>`, `select=<row>`,
+            // `up`, `down`, `remove`, `edit`, `tab=attribute|text|properties`,
+            // `tag=…`, `prompt=…`, `default=…`, `mode=<invisible|verify|preset|multiline>:0|1`,
+            // `style=…`, `justify=MC`, `height=…`, `rotation=…`, `width=…`, `oblique=…`,
+            // `boundary=…`, `annotative=0|1`, `backwards=0|1`, `upside_down=0|1`,
+            // `layer=…`, `linetype=…`, `color=…`, `lineweight=…`, `column=<name>:0|1`,
+            // `more_columns`, `apply_existing=0|1`, `emphasize=0|1`, `live=0|1`,
+            // `pick`, `sync`, `apply`, `ok`, `cancel`.
+            "attman_dialog" => {
+                use crate::ui::window::attman_dialog::{AttManMsg as A, Column, EditTab};
+                let Some(state) = self.attman.as_ref() else {
+                    return Err(failure("no_dialog", "The attribute manager is not open"));
+                };
+                let value = string(req, "value")?;
+                let (key, v) = value.split_once('=').unwrap_or((value, ""));
+                let on = v == "1";
+                Message::AttMan(match key {
+                    "block" => A::Block(
+                        state
+                            .blocks
+                            .iter()
+                            .position(|b| b.name.eq_ignore_ascii_case(v))
+                            .ok_or_else(|| failure("invalid_value", "No such attributed block"))?,
+                    ),
+                    "select" => A::Select(
+                        v.parse()
+                            .ok()
+                            .filter(|r: &usize| *r < state.rows.len())
+                            .ok_or_else(|| failure("invalid_value", "No such row"))?,
+                    ),
+                    "up" => A::MoveUp,
+                    "down" => A::MoveDown,
+                    "remove" => A::Remove,
+                    "edit" => A::ToggleEdit,
+                    "tab" => A::Tab(match v {
+                        "text" => EditTab::Text,
+                        "properties" => EditTab::Properties,
+                        _ => EditTab::Attribute,
+                    }),
+                    "tag" => A::Tag(v.into()),
+                    "prompt" => A::Prompt(v.into()),
+                    "default" => A::Default(v.into()),
+                    "mode" => {
+                        let (mode, state) = v.split_once(':').unwrap_or((v, "1"));
+                        let mode = match mode {
+                            "invisible" => "invisible",
+                            "verify" => "verify",
+                            "preset" => "preset",
+                            "multiline" => "multiline",
+                            _ => return Err(failure("invalid_value", "Unknown mode")),
+                        };
+                        A::Mode(mode, state == "1")
+                    }
+                    "style" => A::Style(v.into()),
+                    "justify" => A::Justify(
+                        crate::modules::draw::draw::attdef::Justify::from_keyword(v)
+                            .ok_or_else(|| failure("invalid_value", "Unknown justification"))?,
+                    ),
+                    "height" => A::Height(v.into()),
+                    "rotation" => A::Rotation(v.into()),
+                    "width" => A::Width(v.into()),
+                    "oblique" => A::Oblique(v.into()),
+                    "boundary" => A::Boundary(v.into()),
+                    "annotative" => A::Annotative(on),
+                    "backwards" => A::Backwards(on),
+                    "upside_down" => A::UpsideDown(on),
+                    "layer" => A::Layer(v.into()),
+                    "linetype" => A::Linetype(v.into()),
+                    "color" => A::Color(v.into()),
+                    "lineweight" => A::Lineweight(v.into()),
+                    "column" => {
+                        let (name, state) = v.split_once(':').unwrap_or((v, "1"));
+                        A::Column(
+                            Column::from_name(name)
+                                .ok_or_else(|| failure("invalid_value", "Unknown column"))?,
+                            state == "1",
+                        )
+                    }
+                    "more_columns" => A::MoreColumns,
+                    "apply_existing" => A::ApplyExisting(on),
+                    "emphasize" => A::Emphasize(on),
+                    "live" => A::Live(on),
+                    "pick" => A::PickBlock,
+                    "sync" => A::Sync,
+                    "apply" => A::Apply,
+                    "ok" => A::Ok,
+                    "cancel" => A::Cancel,
+                    _ => return Err(failure("invalid_value", "Unknown attribute manager field")),
                 })
             }
             // One field of the open Field dialog: `category=<index>`, `name=Date`,
@@ -1907,6 +2184,74 @@ impl OpenCADStudio {
                 })
             }
             "ribbon_dropdown" => Message::ToggleRibbonDropdown(string(req, "value")?.into()),
+            // The Password Protected PDF window, one field per call:
+            // "password=<text>", "show=0|1", "remember=0|1", "ok", "cancel" or
+            // "help".
+            "pdf_password_dialog" => {
+                use crate::ui::window::pdf_password_dialog::PdfPasswordMsg as P;
+                if self.active_modal != Some(crate::app::ModalKind::PdfPassword) {
+                    return Err(failure(
+                        "no_dialog",
+                        "The Password Protected PDF window is not open",
+                    ));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let flag = || match value {
+                    "1" => Ok(true),
+                    "0" => Ok(false),
+                    _ => Err(failure("invalid_value", spec)),
+                };
+                if key == "cancel" {
+                    Message::CloseModal
+                } else {
+                    Message::PdfPassword(match key {
+                        "password" => P::Input(value.to_string()),
+                        "show" => P::Show(flag()?),
+                        "remember" => P::Remember(flag()?),
+                        "ok" => P::Ok,
+                        "help" => P::Help,
+                        _ => {
+                            return Err(failure(
+                                "invalid_value",
+                                "Unknown Password Protected PDF field",
+                            ))
+                        }
+                    })
+                }
+            }
+            // The Insert / Edit Hyperlink window, one field per call:
+            // "address=<file, web address or file#location>", "text=<text>",
+            // "target=file|view", "view=<name>", "relative=0|1", "dwf=0|1",
+            // "browse", "ok", "remove" or "cancel".
+            "hyperlink_dialog" => {
+                use crate::ui::window::hyperlink_dialog::HyperlinkMsg as H;
+                if self.active_modal != Some(crate::app::ModalKind::Hyperlink) {
+                    return Err(failure("no_dialog", "The Hyperlink window is not open"));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let flag = || match value {
+                    "1" => Ok(true),
+                    "0" => Ok(false),
+                    _ => Err(failure("invalid_value", spec)),
+                };
+                match key {
+                    "address" => Message::HyperlinkUrlChanged(value.to_string()),
+                    "text" => Message::HyperlinkDescriptionChanged(value.to_string()),
+                    "target" => Message::HyperlinkDialog(H::ViewTarget(value == "view")),
+                    "view" => Message::HyperlinkDialog(H::View(value.to_string())),
+                    "relative" => Message::HyperlinkDialog(H::Relative(flag()?)),
+                    "dwf" => Message::HyperlinkDialog(H::Dwf(flag()?)),
+                    "browse" => Message::HyperlinkDialog(H::Browse),
+                    "ok" => Message::HyperlinkApply,
+                    "remove" => Message::HyperlinkRemove,
+                    "cancel" => Message::HyperlinkCancel,
+                    _ => {
+                        return Err(failure("invalid_value", "Unknown Hyperlink window field"))
+                    }
+                }
+            }
             // The Edit Reference dialog, one field per call: "level=<n>" (0 =
             // the picked reference), "nested=0|1" (pick the working set in the
             // drawing), "attributes=0|1", "lock=0|1", "unique=0|1", "ok" or
@@ -2052,6 +2397,228 @@ impl OpenCADStudio {
                     _ => return Err(bad()),
                 }
             }
+            // The file the next PDF import picker returns, without showing
+            // it (value: the path).
+            "pdf_import_pick" => {
+                crate::sys::set_pdf_import_pick(string(req, "value")?.into());
+                return Ok(Task::none());
+            }
+            // The Import PDF window, one field per call: "page=<n>" (1-based),
+            // "on_screen=0|1" (insertion point asked after OK), "scale=<value>",
+            // "rotation=0|90|180|270", "ok" or "cancel".
+            "pdf_import_dialog" => {
+                use crate::ui::window::pdf_dialogs::{PdfDialogMsg as P, RotationChoice};
+                if self.active_modal != Some(crate::app::ModalKind::PdfImportFile) {
+                    return Err(failure("no_dialog", "The Import PDF window is not open"));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let bad = || failure("invalid_value", spec);
+                if key == "cancel" {
+                    return Ok(Task::done(Message::CloseModal));
+                }
+                Message::PdfDialog(match key {
+                    "ok" => P::ImportOk,
+                    "page" => P::ImportPageText(value.to_string()),
+                    "on_screen" => P::ImportInsertOnScreen(value == "1"),
+                    "scale" => P::ImportScale(value.to_string()),
+                    "rotation" => P::ImportRotation(
+                        RotationChoice::ALL
+                            .into_iter()
+                            .find(|r| value.trim().parse() == Ok(r.0))
+                            .ok_or_else(bad)?,
+                    ),
+                    _ => return Err(bad()),
+                })
+            }
+            // The Import File window, one field per call: "path=<file>",
+            // "format=<index or name>", "search=<text>", "filter=all|supported",
+            // "recent=<n>", "ok" or "cancel".
+            "import_file_dialog" => {
+                use crate::ui::window::import_dialogs::{ImportDialogMsg as I, FORMATS};
+                if self.active_modal != Some(crate::app::ModalKind::ImportFile) {
+                    return Err(failure("no_dialog", "The Import File window is not open"));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let bad = || failure("invalid_value", spec);
+                if key == "cancel" {
+                    return Ok(Task::done(Message::CloseModal));
+                }
+                Message::ImportDialog(match key {
+                    "ok" => I::ImportOk,
+                    "path" => I::Path(value.to_string()),
+                    "search" => I::Search(value.to_string()),
+                    "filter" => I::OnlySupported(match value {
+                        "all" => false,
+                        "supported" => true,
+                        _ => return Err(bad()),
+                    }),
+                    "recent" => I::Recent(value.trim().parse().map_err(|_| bad())?),
+                    "format" => I::Format(match value.trim().parse::<usize>() {
+                        Ok(k) if k < FORMATS.len() => k,
+                        _ => FORMATS
+                            .iter()
+                            .position(|f| f.name.eq_ignore_ascii_case(value.trim()))
+                            .ok_or_else(bad)?,
+                    }),
+                    _ => return Err(bad()),
+                })
+            }
+            // The 3D Studio Import window, one field per call: "check=<name>"
+            // and "uncheck=<name>" (the object's name, or "Global Settings"),
+            // "all", "clear", "filter=all|mesh|light|camera|general",
+            // "search=<text>", "layers=object|material|color|single",
+            // "multi=ask|split|first|none", "path=<file>" (as Change… picks
+            // it), "ok" or "cancel".
+            "tds_import_dialog" => {
+                use crate::ui::window::import_dialogs::ImportDialogMsg as I;
+                if self.active_modal != Some(crate::app::ModalKind::TdsImport) {
+                    return Err(failure("no_dialog", "The 3D Studio Import window is not open"));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let bad = || failure("invalid_value", spec);
+                if key == "cancel" {
+                    return Ok(Task::done(Message::CloseModal));
+                }
+                let pick = |options: &[&str]| options.iter().position(|o| *o == value).ok_or_else(bad);
+                Message::ImportDialog(match key {
+                    "ok" => I::TdsOk,
+                    "all" => I::TdsAll,
+                    "clear" => I::TdsClear,
+                    "check" | "uncheck" => {
+                        let k = self
+                            .import_dialogs
+                            .tds
+                            .as_ref()
+                            .and_then(|s| s.objects.iter().position(|(name, _, _)| name.eq_ignore_ascii_case(value)))
+                            .ok_or_else(bad)?;
+                        I::TdsCheck(k, key == "check")
+                    }
+                    "filter" => I::TdsFilter(pick(&["all", "mesh", "light", "camera", "general"])?),
+                    "search" => I::TdsSearch(value.to_string()),
+                    "layers" => I::TdsLayers(pick(&["object", "material", "color", "single"])?),
+                    "multi" => I::TdsMulti(pick(&["ask", "split", "first", "none"])?),
+                    "path" => I::TdsPicked(Some(value.to_string())),
+                    _ => return Err(bad()),
+                })
+            }
+            // The multiple-material mesh window of a 3D Studio import, one
+            // field per call: "split", "first", "select",
+            // "material=<name>" ("material=" for no material; selects the
+            // choice too), "remember=on|off", "apply" or "cancel".
+            "tds_material_dialog" => {
+                use crate::ui::window::import_dialogs::ImportDialogMsg as I;
+                if self.active_modal != Some(crate::app::ModalKind::TdsMaterial) {
+                    return Err(failure("no_dialog", "The multiple-material window is not open"));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let bad = || failure("invalid_value", spec);
+                Message::ImportDialog(match key {
+                    "split" => I::TdsMatChoice(0),
+                    "first" => I::TdsMatChoice(1),
+                    "select" => I::TdsMatChoice(2),
+                    "material" => {
+                        let k = if value.is_empty() {
+                            0
+                        } else {
+                            self.import_dialogs
+                                .tds_material
+                                .as_ref()
+                                .and_then(|s| s.queue.first())
+                                .and_then(|(_, m)| m.iter().position(|(name, _)| name.eq_ignore_ascii_case(value)))
+                                .map(|k| k + 1)
+                                .ok_or_else(bad)?
+                        };
+                        I::TdsMatPick(k)
+                    }
+                    "remember" => I::TdsMatRemember(match value {
+                        "on" | "1" | "true" => true,
+                        "off" | "0" | "false" => false,
+                        _ => return Err(bad()),
+                    }),
+                    "apply" | "ok" => I::TdsMatApply,
+                    "cancel" => return Ok(Task::done(Message::CloseModal)),
+                    _ => return Err(bad()),
+                })
+            }
+            // The missing texture map window of a 3D Studio import: "ok"
+            // (or "close") dismisses the shown map; the next one follows.
+            "tds_map_dialog" => {
+                if self.active_modal != Some(crate::app::ModalKind::TdsMissingMap) {
+                    return Err(failure("no_dialog", "The missing texture map window is not open"));
+                }
+                let spec = string(req, "value")?;
+                match spec {
+                    "ok" | "close" => Message::CloseModal,
+                    _ => return Err(failure("invalid_value", spec)),
+                }
+            }
+            // The DGN Import window, one field per call: "path=<file>" (as
+            // Change… picks it), "model=<n>", "target=new|current",
+            // "conflict=prefix|ignore", "units=master|sub", "explode=on|off",
+            // "references=translate|ignore|underlay", "existing=prompt|overwrite|keep",
+            // "mapping=layer|linetype|lineweight|color", "ok" or "cancel".
+            "dgn_import_dialog" => {
+                use crate::ui::window::import_dialogs::ImportDialogMsg as I;
+                if self.active_modal != Some(crate::app::ModalKind::DgnImport) {
+                    return Err(failure("no_dialog", "The DGN Import window is not open"));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let bad = || failure("invalid_value", spec);
+                let on = |v: &str| match v {
+                    "on" | "1" | "true" => Ok(true),
+                    "off" | "0" | "false" => Ok(false),
+                    _ => Err(bad()),
+                };
+                if key == "cancel" {
+                    return Ok(Task::done(Message::CloseModal));
+                }
+                Message::ImportDialog(match key {
+                    "ok" => I::DgnOk,
+                    "path" => I::DgnPicked(Some(value.to_string())),
+                    "model" => I::DgnModel(value.trim().parse().map_err(|_| bad())?),
+                    "target" => I::DgnCurrent(match value {
+                        "new" => false,
+                        "current" => true,
+                        _ => return Err(bad()),
+                    }),
+                    "conflict" => I::DgnPrefix(match value {
+                        "prefix" => true,
+                        "ignore" => false,
+                        _ => return Err(bad()),
+                    }),
+                    "units" => I::DgnSub(match value {
+                        "master" => false,
+                        "sub" => true,
+                        _ => return Err(bad()),
+                    }),
+                    "explode" => I::DgnExplode(on(value)?),
+                    "references" => I::DgnReferences(match value {
+                        "translate" => crate::modules::insert::dgn_import::ReferenceMode::Translate,
+                        "ignore" => crate::modules::insert::dgn_import::ReferenceMode::Ignore,
+                        "underlay" => crate::modules::insert::dgn_import::ReferenceMode::Underlay,
+                        _ => return Err(bad()),
+                    }),
+                    "existing" => I::DgnExisting(match value {
+                        "prompt" => crate::modules::insert::dgn_import::ExistingReference::Prompt,
+                        "overwrite" => crate::modules::insert::dgn_import::ExistingReference::Overwrite,
+                        "keep" => crate::modules::insert::dgn_import::ExistingReference::Keep,
+                        _ => return Err(bad()),
+                    }),
+                    "mapping" => I::DgnMappingTab(match value {
+                        "layer" => 0,
+                        "linetype" => 1,
+                        "lineweight" => 2,
+                        "color" => 3,
+                        _ => return Err(bad()),
+                    }),
+                    _ => return Err(bad()),
+                })
+            }
             // The Image Adjust dialog, one field per call: "brightness=70",
             // "contrast=40", "fade=20" (the bar), "type=fade,abc" (typed into
             // the box), "step=brightness,+1|-1", "reset", "apply" or "cancel".
@@ -2094,6 +2661,93 @@ impl OpenCADStudio {
                     _ => return Err(bad()),
                 }
             }
+            // Text to MText Settings (TXT2MTXT SEttings): "combine=0",
+            // "order=select" / "order=top", "wrap=0", "uniform=1", "ok",
+            // "cancel".
+            "txt2mtxt_settings" => {
+                use crate::ui::window::pdf_dialogs::PdfDialogMsg as M;
+                if self.active_modal != Some(crate::app::ModalKind::Txt2MtxtSettings) {
+                    return Err(failure("no_dialog", "Text to MText Settings is not open"));
+                }
+                let value = string(req, "value")?;
+                let (key, arg) = value.split_once('=').unwrap_or((value, ""));
+                let on = arg != "0";
+                match key {
+                    "combine" => Message::PdfDialog(M::T2mCombine(on)),
+                    "order" => Message::PdfDialog(M::T2mSelectOrder(arg == "select")),
+                    "wrap" => Message::PdfDialog(M::T2mWrap(on)),
+                    "uniform" => Message::PdfDialog(M::T2mUniform(on)),
+                    "ok" => Message::PdfDialog(M::T2mOk),
+                    "cancel" => Message::CloseModal,
+                    _ => return Err(failure("invalid_value", "Unknown setting")),
+                }
+            }
+            // The PDF Text Recognition Settings dialog, one edit per call:
+            // "select=<n>", "toggle=<n>,0|1", "up", "down", "remove",
+            // "add=<path to .shx>", "move=<from>,<to>" (dragging a row),
+            // "threshold=<1-100>", "threshold_text=<typed>", "step=+1|-1",
+            // "layer=current|geometry", "best=0|1", "sample=<text>",
+            // "defaults", "apply" or "cancel" (rows count from 0).
+            "pdf_shx_settings" => {
+                use crate::ui::window::pdf_shx_dialog::ShxDialogMsg as S;
+                if self.active_modal != Some(crate::app::ModalKind::PdfShxSettings) {
+                    return Err(failure(
+                        "no_dialog",
+                        "The PDF Text Recognition Settings dialog is not open",
+                    ));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let bad = || failure("invalid_value", spec);
+                let index = |v: &str| v.trim().parse::<usize>().map_err(|_| bad());
+                let flag = |v: &str| match v.trim() {
+                    "1" => Ok(true),
+                    "0" => Ok(false),
+                    _ => Err(bad()),
+                };
+                match key {
+                    "cancel" => Message::CloseModal,
+                    "move" => {
+                        let (from, to) = value.split_once(',').ok_or_else(bad)?;
+                        let (from, to) = (index(from)?, index(to)?);
+                        return Ok(Task::batch([
+                            self.update(Message::PdfShxDialog(S::DragStart(from))),
+                            self.update(Message::PdfShxDialog(S::DragDrop(to))),
+                        ]));
+                    }
+                    _ => Message::PdfShxDialog(match key {
+                        "apply" => S::Apply,
+                        "defaults" => S::Defaults,
+                        "up" => S::Up,
+                        "down" => S::Down,
+                        "remove" => S::Remove,
+                        "select" => S::Select(index(value)?),
+                        "toggle" => {
+                            let (row, on) = value.split_once(',').ok_or_else(bad)?;
+                            S::Toggle(index(row)?, flag(on)?)
+                        }
+                        "add" => S::Added(Some(std::path::PathBuf::from(value.trim()))),
+                        "threshold" => S::Threshold(
+                            value
+                                .trim()
+                                .parse::<u8>()
+                                .ok()
+                                .filter(|v| (1..=100).contains(v))
+                                .ok_or_else(bad)?,
+                        ),
+                        "threshold_text" => S::ThresholdText(value.to_string()),
+                        "step" => S::Step(value.trim().parse::<i8>().map_err(|_| bad())?),
+                        "layer" => match value.trim() {
+                            "current" => S::CurrentLayer(true),
+                            "geometry" => S::CurrentLayer(false),
+                            _ => return Err(bad()),
+                        },
+                        "best" => S::BestFont(flag(value)?),
+                        "sample" => S::Sample(value.to_string()),
+                        _ => return Err(bad()),
+                    }),
+                }
+            }
             "pdf_dialog_ok" => {
                 use crate::ui::window::pdf_dialogs::PdfDialogMsg;
                 Message::PdfDialog(match self.active_modal {
@@ -2124,6 +2778,9 @@ impl OpenCADStudio {
                 }
                 Some(crate::app::ModalKind::Field) => {
                     Message::FieldDialog(crate::ui::window::field_dialog::FieldDialogMsg::Ok)
+                }
+                Some(crate::app::ModalKind::AttMan) => {
+                    Message::AttMan(crate::ui::window::attman_dialog::AttManMsg::Ok)
                 }
                 _ => return Err(failure("no_dialog", "No dialog with an OK button is open")),
             },

@@ -4,7 +4,7 @@
 use super::util::*;
 use super::{format_size, VIEWCUBE_HIT_SIZE};
 use crate::app::helpers::{
-    parse_coord, polar_constrain_near, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis, CoordKind,
+    parse_coord, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis, CoordKind,
 };
 use crate::app::{Message, OpenCADStudio, POLY_START_DELAY_MS};
 use crate::modules::ModuleEvent;
@@ -785,6 +785,9 @@ impl OpenCADStudio {
     /// dangling from the previous `last_point` until the user actually
     /// moves the mouse. See #32.
     pub(in crate::app) fn refresh_active_cmd_preview(&mut self, i: usize) {
+        self.refresh_command_point_pick_context(i);
+        let perf_preview = crate::perf::enabled();
+        let preview_started = perf_preview.then(Instant::now);
         if self.tabs[i].active_cmd.is_none() {
             return;
         }
@@ -798,20 +801,103 @@ impl OpenCADStudio {
             }
         }
         let cur = self.tabs[i].last_cursor_world;
-        let previews = self.tabs[i]
-            .active_cmd
-            .as_mut()
-            .map(|c| c.on_preview_wires(cur))
-            .unwrap_or_default();
-        let preview_hidden = self.tabs[i]
+        let compute_started = perf_preview.then(Instant::now);
+        let tab = &mut self.tabs[i];
+        // Selection-hover previews are maintained by the viewport move path.
+        // A generic command refresh (for example SnapDwellTick) has no hovered
+        // entity and would replace MATCHPROP's persistent source glow with an
+        // empty rubber-band. Preserve the current overlay; seed the source glow
+        // only if phase 2 began before any move had produced one.
+        let selection_hover_preview = tab
             .active_cmd
             .as_ref()
-            .map(|command| command.preview_hidden_handles().to_vec())
-            .unwrap_or_default();
+            .is_some_and(|command| command.selection_hover_preview_enabled());
+        if selection_hover_preview {
+            if tab.scene.preview_wires.is_empty() {
+                if let Some(preview) = tab
+                    .active_cmd
+                    .as_ref()
+                    .and_then(|command| command.selection_hover_preview(&tab.scene, None))
+                {
+                    tab.scene.set_command_preview_hatches(preview.hatches);
+                    tab.scene.set_preview_wires(preview.wires);
+                }
+            }
+            return;
+        }
+        let parameter_preview = self.block_parameter_geometry_preview(i, cur);
+        let mut parameter_hidden = None;
+        let mut previews = if let Some(preview) = parameter_preview {
+            self.tabs[i].scene.set_command_preview_hatches(preview.hatches);
+            parameter_hidden = Some(preview.hidden);
+            preview.wires
+        } else if let Some(wires) = self.dimension_preview_wires(i, cur) {
+            wires
+        } else {
+            let tab = &mut self.tabs[i];
+            tab.active_cmd
+                .as_mut()
+                .map(|c| {
+                    let mut wires = c.on_preview_wires(cur);
+                    wires.extend(c.persistent_preview_wires());
+                    let entities = c.preview_entities(&tab.scene.document, cur);
+                    wires.extend(tab.scene.wires_for_entities(&entities));
+                    wires
+                })
+                .unwrap_or_default()
+        };
+        if self.polar_mode {
+            if let Some(base) = self.last_point {
+                let base = base.as_vec3();
+                let effective = cur.as_vec3();
+                let dx = effective.x - base.x;
+                let dy = effective.y - base.y;
+                let step = self.polar_increment_deg.to_radians();
+                let angle = dy.atan2(dx);
+                let snapped = step > 1e-6 && ((angle / step).round() * step - angle).abs() < 1e-3;
+                if snapped && (dx * dx + dy * dy).sqrt() > 1e-4 {
+                    let far = 1e5_f32;
+                    let dir = glam::Vec3::new(dx, dy, 0.0).normalize();
+                    let far_pos = base + dir * far;
+                    let far_neg = base - dir * far;
+                    previews.push(crate::scene::WireModel {
+                        display_visible: true,
+                        plot_visible: true,
+                        name: "__polar_guide__".into(),
+                        points: vec![
+                            [far_neg.x, far_neg.y, far_neg.z],
+                            [far_pos.x, far_pos.y, far_pos.z],
+                        ],
+                        color: [0.2, 0.7, 0.9, 0.6],
+                        pattern_length: 0.8,
+                        pattern: [0.5, -0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                        line_weight_px: 1.0,
+                        aabb: crate::scene::WireModel::UNBOUNDED_AABB,
+                        plinegen: true,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        let preview_count = previews.len();
+        let compute_ms = crate::perf::elapsed_ms(compute_started);
+        let preview_hidden = parameter_hidden.unwrap_or_else(|| {
+            self.tabs[i]
+                .active_cmd
+                .as_ref()
+                .map(|command| command.preview_hidden_handles().to_vec())
+                .unwrap_or_default()
+        });
         self.tabs[i]
             .scene
             .set_command_preview_hidden(&preview_hidden);
         self.tabs[i].scene.set_preview_wires(previews);
+        let total_ms = crate::perf::elapsed_ms(preview_started);
+        if total_ms >= 1.0 || compute_ms >= 1.0 {
+            crate::perf_record!(
+                "[perf] command-preview total={total_ms:.2}ms compute={compute_ms:.2}ms wires={preview_count}",
+            );
+        }
     }
 }
 

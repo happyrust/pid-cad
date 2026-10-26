@@ -4,7 +4,7 @@
 use super::util::*;
 use super::{format_size, VIEWCUBE_HIT_SIZE};
 use crate::app::helpers::{
-    parse_coord, polar_constrain_near, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis, CoordKind,
+    parse_coord, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis, CoordKind,
 };
 use crate::app::{Message, OpenCADStudio, POLY_START_DELAY_MS};
 use crate::modules::ModuleEvent;
@@ -22,6 +22,9 @@ use iced::{mouse, Point, Task};
 
 impl OpenCADStudio {
     pub(in crate::app) fn open_save_dialog_window(&mut self, tab_idx: usize) -> Task<Message> {
+        if self.refuse_block_test_save(tab_idx) {
+            return Task::none();
+        }
         // Every entry here is Save-As semantics (the SAVEAS command, the
         // recovery save-as, the native failure redirects): the user is
         // choosing a destination, so on the web the FS Access picker must
@@ -36,25 +39,32 @@ impl OpenCADStudio {
         // document) — so Save-As round-trips the format instead of silently
         // re-targeting it. A new/unsaved drawing has no source format, so it
         // uses the application-wide default chosen in Options (#529).
-        self.save_dialog_format = match &self.tabs[tab_idx].current_path {
+        let converter = self.tabs[tab_idx]
+            .current_path
+            .as_ref()
+            .and_then(|path| path.extension())
+            .and_then(|ext| ocs_save::external_format(&ext.to_string_lossy()));
+        self.save_dialog_format = if let Some(converter) = converter {
+            converter.name().to_string()
+        } else if let Some(path) = self.tabs[tab_idx]
+            .current_path
+            .as_ref()
             // A read-only source (`.pid`) has no writable format to
             // round-trip — `source_is_dxf` would misread its absent DWG
             // source version as "DXF". Offer the application default the way
             // an unsaved drawing does.
-            Some(path) if crate::io::is_read_only_source_path(path) => {
-                self.default_save_format.clone()
-            }
-            Some(path) => {
-                let document = &self.tabs[tab_idx].scene.document;
-                let is_dxf = crate::io::source_is_dxf(Some(path), document);
-                let version = if is_dxf {
-                    document.version
-                } else {
-                    document.dwg_source_version.unwrap_or(document.version)
-                };
-                crate::io::format_for_version(version, is_dxf)
-            }
-            None => self.default_save_format.clone(),
+            .filter(|path| !crate::io::is_read_only_source_path(path))
+        {
+            let document = &self.tabs[tab_idx].scene.document;
+            let is_dxf = crate::io::source_is_dxf(Some(path), document);
+            let version = if is_dxf {
+                document.version
+            } else {
+                document.dwg_source_version.unwrap_or(document.version)
+            };
+            crate::io::format_for_version(version, is_dxf)
+        } else {
+            self.default_save_format.clone()
         };
 
         // Pre-fill the default file name from the current path or the tab name;
@@ -147,7 +157,7 @@ impl OpenCADStudio {
         match event {
             // `dispatch_command` turns a one-shot tool's highlight off
             // again once nothing is left running (#355).
-            ModuleEvent::Command(cmd) => return self.dispatch_command(&cmd),
+            ModuleEvent::Command(cmd) => return self.dispatch_ribbon_command(&cmd),
             ModuleEvent::OpenFileDialog => {
                 self.command_line
                     .push_info(crate::t!("Open DWG/DXF: not yet implemented.").as_ref());
@@ -463,12 +473,12 @@ impl OpenCADStudio {
         ))
     }
 
-    /// Define one block in the active drawing from a loaded `CadDocument`'s
+    /// Define one block in the active drawing from a loaded `Document`'s
     /// model-space entities (base = the file's model-space insertion base).
     #[cfg(test)]
     fn import_document_as_block(
         &mut self,
-        doc: codec::CadDocument,
+        doc: codec::Document,
         stem: String,
     ) -> Result<String, String> {
         self.import_document_block(doc, stem, false)
@@ -476,7 +486,7 @@ impl OpenCADStudio {
 
     pub(super) fn import_document_block(
         &mut self,
-        doc: codec::CadDocument,
+        doc: codec::Document,
         stem: String,
         redefine: bool,
     ) -> Result<String, String> {
@@ -613,27 +623,56 @@ impl OpenCADStudio {
                 def.name = new_name.clone();
             }
         }
+        // A drawing written out from a dynamic block keeps the block's
+        // parameters and actions on its model space; the new definition
+        // takes them over, as the file's nested definitions do theirs.
+        let base_point = codec::types::Vector3::new(base.x, base.y, base.z);
+        let file_def = (!redefine)
+            .then(|| crate::scene::block_authoring::export_graph(&doc, model_br))
+            .flatten()
+            .map(|graph| crate::app::BlockDef {
+                name: name.clone(),
+                base_point,
+                entities: entities.clone(),
+                source: model_br,
+                graph: Some(graph),
+            });
         // Every mutation below belongs to the one INSERT FILE undo step.
         self.push_undo_snapshot(i, "INSERT FILE");
         self.merge_dependencies(i, &deps);
-        for def in defs {
+        for def in &defs {
             self.tabs[i]
                 .scene
-                .define_block_raw(&def.name, def.base_point, def.entities);
+                .define_block_raw(&def.name, def.base_point, def.entities.clone());
         }
         if redefine {
-            if let Err(err) = self.tabs[i].scene.redefine_block_raw(
-                &name,
-                codec::types::Vector3::new(base.x, base.y, base.z),
-                entities,
-            ) {
+            if let Err(err) = self.tabs[i].scene.redefine_block_raw(&name, base_point, entities) {
                 self.command_line.push_error(&err);
                 return Err(err);
+            }
+        } else if file_def.is_some() {
+            // The graph is in the file's model-space coordinates: keep the
+            // geometry there and put the insertion base on the block.
+            let scene = &mut self.tabs[i].scene;
+            scene.define_block_from_owned_entities(entities, &name, glam::DVec3::ZERO)?;
+            let block = scene.document.block_records.get(&name).map(|r| r.block_entity_handle);
+            if let Some(codec::EntityType::Block(block)) =
+                block.and_then(|h| scene.document.get_entity_mut(h))
+            {
+                block.base_point = base_point;
             }
         } else {
             self.tabs[i]
                 .scene
                 .define_block_from_owned_entities(entities, &name, base)?;
+        }
+        {
+            use crate::app::command_driver::clipboard::{block_record_map, import_block_def_graph};
+            let document = &mut self.tabs[i].scene.document;
+            let records = block_record_map(document, &defs);
+            for def in defs.iter().chain(file_def.iter()) {
+                import_block_def_graph(document, def, &records);
+            }
         }
         self.tabs[i].scene.populate_meshes_from_document();
         self.tabs[i].dirty = true;
@@ -925,7 +964,7 @@ impl OpenCADStudio {
                     .filter(|br| dwg_picked.iter().any(|(key, _)| *key == br.handle.value()))
                     .map(|br| br.handle)
                     .collect();
-                let (infos, _dropped) = crate::io::xref::resolve_xrefs_for_keys(
+                let infos = crate::io::xref::resolve_xrefs_for_keys(
                     &mut self.tabs[i].scene.document,
                     &base_dir,
                     &handles,
@@ -1132,7 +1171,7 @@ impl OpenCADStudio {
             self.tabs[i].xref_unloaded.remove(key);
             self.tabs[i].xref_stat_cache.remove(key);
         }
-        let (infos, _dropped) =
+        let infos =
             crate::io::xref::resolve_xrefs(&mut self.tabs[i].scene.document, &base_dir);
         let fresh = crate::io::xref::collect_entries_with_prev(
             &self.tabs[i].scene.document,
@@ -1170,7 +1209,7 @@ mod tests {
     }
 
     /// A foreign document: the fresh scene's document plus one model-space LINE.
-    fn foreign_doc(app: &OpenCADStudio) -> codec::CadDocument {
+    fn foreign_doc(app: &OpenCADStudio) -> codec::Document {
         let mut doc = app.tabs[app.active_tab].scene.document.clone();
         let model_br = doc
             .objects
@@ -1244,7 +1283,7 @@ mod tests {
     /// definition itself INSERTs a `Door` block — so the imported `Door` is a
     /// *nested dependency*, not a top-level entity. The `Door` in this file is
     /// unrelated to any `Door` in the destination drawing.
-    fn nested_foreign_doc(app: &OpenCADStudio) -> codec::CadDocument {
+    fn nested_foreign_doc(app: &OpenCADStudio) -> codec::Document {
         use codec::entities::Insert;
         use codec::tables::BlockRecord;
         use codec::Handle;
@@ -1291,7 +1330,7 @@ mod tests {
     }
 
     /// The nested-INSERT's block name inside a defined block record.
-    fn nested_insert_target(doc: &codec::CadDocument, block: &str) -> Option<String> {
+    fn nested_insert_target(doc: &codec::Document, block: &str) -> Option<String> {
         let br = doc.block_records.get(block)?;
         br.entity_handles
             .iter()
@@ -1304,7 +1343,7 @@ mod tests {
     /// A foreign document whose model space INSERTs a `Fixture` block whose
     /// definition INSERTs `Door (2)`, whose definition in turn INSERTs `Door`.
     /// The file therefore carries *both* `Door` and `Door (2)` as nested deps.
-    fn doubly_nested_foreign_doc(app: &OpenCADStudio) -> codec::CadDocument {
+    fn doubly_nested_foreign_doc(app: &OpenCADStudio) -> codec::Document {
         use codec::entities::Insert;
         use codec::tables::BlockRecord;
         use codec::Handle;
@@ -1650,7 +1689,7 @@ mod tests {
         use crate::ui::window::xref_manager::{XrefPaletteOp, XrefRowId};
         use codec::tables::BlockRecord;
         let dir = palette_tmpdir("nestedmatrix");
-        let mut host_doc = codec::CadDocument::new();
+        let mut host_doc = codec::Document::new();
         let mut inner = BlockRecord::new("INNER");
         inner.flags.is_xref = true;
         inner.xref_path = "inner.dwg".to_string();
@@ -1833,7 +1872,7 @@ mod tests {
         // resolve, per-ref report, entry back to Loaded.
         use codec::tables::BlockRecord;
         let dir = palette_tmpdir("reloadall");
-        let ref_doc = codec::CadDocument::new();
+        let ref_doc = codec::Document::new();
         let bytes = crate::io::save_to_bytes(&ref_doc, "dwg", ref_doc.version).unwrap();
         std::fs::write(dir.join("plan.dwg"), &bytes).unwrap();
         let mut app = fresh();
@@ -1882,7 +1921,7 @@ mod tests {
         use crate::ui::window::xref_manager::XrefPaletteOp;
         use codec::tables::BlockRecord;
         let dir = palette_tmpdir("nested");
-        let mut host_doc = codec::CadDocument::new();
+        let mut host_doc = codec::Document::new();
         let mut inner = BlockRecord::new("INNER");
         inner.flags.is_xref = true;
         inner.xref_path = "inner.dwg".to_string();

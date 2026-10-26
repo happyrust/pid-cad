@@ -9,14 +9,14 @@
 //!
 //! The module lives next to [`crate::scene::entity`] rather than in
 //! `src/app` because everything it needs is document/scene level: a
-//! [`CadDocument`] for the reference scan and a [`Scene`] for the erase. The
+//! [`Document`] for the reference scan and a [`Scene`] for the erase. The
 //! callers own the app-level concerns (undo snapshots, command-line output,
 //! panel refreshes).
 
 use codec::objects::ObjectType;
 use codec::tables::BlockRecord;
 use codec::types::Handle;
-use codec::{CadDocument, EntityType};
+use codec::{Document, EntityType, TableEntry};
 use std::collections::HashSet;
 use std::fmt;
 
@@ -65,7 +65,7 @@ pub struct BlockReference {
 ///   * dimension-style / leader / multi-leader arrow blocks, by handle and by
 ///     name, plus multi-leader styles — the plugin's extra scan,
 ///   * dynamic-block variant families, through the extension point below.
-pub fn references_of(document: &CadDocument, name: &str) -> Vec<BlockReference> {
+pub fn references_of(document: &Document, name: &str) -> Vec<BlockReference> {
     let Some(record) = document.block_records.get(name.trim()) else {
         return Vec::new();
     };
@@ -93,7 +93,7 @@ pub fn references_of(document: &CadDocument, name: &str) -> Vec<BlockReference> 
 /// [`dynamic_block_handles`], which is the conservative fallback while a
 /// family has no detector.
 pub fn dynamic_variant_references(
-    _document: &CadDocument,
+    _document: &Document,
     _record: &BlockRecord,
 ) -> Vec<BlockReference> {
     Vec::new()
@@ -123,7 +123,7 @@ impl BlockUse {
 /// multi-leader styles and DGN line-style symbols. Each entry names the
 /// object that holds the reference so a caller can report or repoint it.
 fn collect_style_references(
-    document: &CadDocument,
+    document: &Document,
     target: Handle,
     stored: &str,
     out: &mut Vec<BlockReference>,
@@ -247,7 +247,7 @@ pub fn validate_block_name(raw: &str) -> Result<String, BlockServiceError> {
 /// containers and layout blocks, externally referenced records and
 /// dynamic-block records.
 fn protected_reason(
-    document: &CadDocument,
+    document: &Document,
     record: &BlockRecord,
     dynamic: &HashSet<Handle>,
 ) -> Option<String> {
@@ -274,7 +274,7 @@ fn protected_reason(
 
 /// A layout record: a named `*`-space container or one backed by a Layout
 /// object (paper space layouts and any orphaned layout record).
-fn is_layout_record(document: &CadDocument, record: &BlockRecord) -> bool {
+fn is_layout_record(document: &Document, record: &BlockRecord) -> bool {
     let upper = record.name.to_ascii_uppercase();
     upper.starts_with("*MODEL_SPACE")
         || upper.starts_with("*PAPER_SPACE")
@@ -283,6 +283,29 @@ fn is_layout_record(document: &CadDocument, record: &BlockRecord) -> bool {
             document.objects.get(&record.layout),
             Some(ObjectType::Layout(_))
         )
+}
+
+/// Candidate block names for the Edit Block Definition (BEDIT) dialog:
+/// excludes standard layouts (*MODEL_SPACE, *PAPER_SPACE), layout records,
+/// anonymous blocks (*U, *D, *T, etc.), and externally referenced blocks.
+/// Sorted alphabetically, case-insensitive.
+pub fn bedit_candidate_block_names(document: &Document) -> Vec<String> {
+    let mut names: Vec<String> = document
+        .block_records
+        .iter()
+        .filter(|record| {
+            !record.is_standard()
+                && !is_layout_record(document, record)
+                && !record.is_anonymous()
+                && !record.name.starts_with('*')
+                && !record.flags.is_xref
+                && !record.flags.is_xref_overlay
+                && !record.name.contains('|')
+        })
+        .map(|record| record.name.clone())
+        .collect();
+    names.sort_by_key(|n| n.to_ascii_lowercase());
+    names
 }
 
 /// The extension-dictionary key on a dynamic block's record.
@@ -299,7 +322,7 @@ fn is_enhanced_block_key(key: &str) -> bool {
 
 /// Handles PURGE may not remove either: dynamic blocks (above), plus every
 /// anonymous record a dynamic block sources its `*U` variants from.
-fn dynamic_block_handles(document: &CadDocument) -> HashSet<Handle> {
+fn dynamic_block_handles(document: &Document) -> HashSet<Handle> {
     let mut protected: HashSet<Handle> = HashSet::new();
     for record in document.block_records.iter() {
         let Some(dictionary) = extension_dictionary(document, record.handle) else {
@@ -323,7 +346,7 @@ fn dynamic_block_handles(document: &CadDocument) -> HashSet<Handle> {
 /// Every handle reachable from a dynamic block's extension dictionary: the
 /// record itself plus the anonymous records its visibility-state dictionary
 /// points at, so a `*U` record is never purged out from under its block.
-fn collect_dictionary_tree(document: &CadDocument, handle: Handle, out: &mut HashSet<Handle>) {
+fn collect_dictionary_tree(document: &Document, handle: Handle, out: &mut HashSet<Handle>) {
     if !out.insert(handle) {
         return;
     }
@@ -336,7 +359,7 @@ fn collect_dictionary_tree(document: &CadDocument, handle: Handle, out: &mut Has
 }
 
 fn extension_dictionary(
-    document: &CadDocument,
+    document: &Document,
     owner: Handle,
 ) -> Option<&codec::objects::Dictionary> {
     match document
@@ -352,7 +375,7 @@ fn extension_dictionary(
 /// by any kind and not open in a block editor. The pass repeats through the
 /// caller's loop (a removed definition frees whatever only its members
 /// referenced), so this is one evaluation of the fixed point.
-pub fn purge_candidates(document: &CadDocument, open_edits: &[Handle]) -> Vec<String> {
+pub fn purge_candidates(document: &Document, open_edits: &[Handle]) -> Vec<String> {
     let dynamic = dynamic_block_handles(document);
     document
         .block_records
@@ -482,7 +505,7 @@ fn erase_definition(scene: &mut Scene, stored: &str, references: &[BlockReferenc
 
 /// Drop `SortEntitiesTable` objects whose owning block record is gone (a
 /// stale draw-order table points at a block that no longer exists).
-fn drop_orphaned_draw_order_tables(document: &mut CadDocument) {
+fn drop_orphaned_draw_order_tables(document: &mut Document) {
     let live: HashSet<Handle> = document.block_records.iter().map(|r| r.handle).collect();
     let orphans: Vec<Handle> = document
         .objects
@@ -584,7 +607,7 @@ fn repoint_name_references(scene: &mut Scene, stored: &str, new: &str) {
 }
 
 fn record_of<'a>(
-    document: &'a CadDocument,
+    document: &'a Document,
     name: &str,
 ) -> Result<&'a BlockRecord, BlockServiceError> {
     let name = name.trim();
@@ -611,7 +634,7 @@ fn record_of<'a>(
 ///   are not edited inline in the host document, but if an xref name is tested, it is matched
 ///   case-insensitively and its local block record entities (if any) are traversed.
 pub fn would_create_cycle(
-    document: &CadDocument,
+    document: &Document,
     container_block: &str,
     inserted_block: &str,
 ) -> bool {
@@ -765,7 +788,7 @@ mod tests {
         dimension.base.block_name = "SVC_TARGET".to_string();
         scene
             .document
-            .add_entity(EntityType::Dimension(Dimension::Aligned(dimension)))
+            .add_entity(EntityType::Dimension(Box::new(Dimension::Aligned(dimension))))
             .unwrap();
 
         // A table's picture block and a block-valued cell, by handle.
@@ -871,7 +894,7 @@ mod tests {
         dimension.base.block_name = "SVC_RENAMED".to_string();
         scene
             .document
-            .add_entity(EntityType::Dimension(Dimension::Aligned(dimension)))
+            .add_entity(EntityType::Dimension(Box::new(Dimension::Aligned(dimension))))
             .unwrap();
         let mut style = DimStyle::new("SVC_STYLE");
         style.dimblk = target;
@@ -1237,5 +1260,33 @@ mod tests {
         add_insert(&mut scene, "BlockB", Some(blk_a));
         assert!(would_create_cycle(&scene.document, "blockb", "BLOCKA"));
         assert!(!would_create_cycle(&scene.document, "blocka", "BLOCKB"));
+    }
+
+    #[test]
+    fn locked_bedit_candidate_block_names_filters_and_sorts() {
+        let mut scene = scene();
+        define(&mut scene, "zebra");
+        define(&mut scene, "Alpha");
+        define(&mut scene, "Beta");
+
+        // Anonymous block
+        let mut anon = BlockRecord::new("*U1");
+        anon.handle = Handle::new(9901);
+        anon.flags.anonymous = true;
+        scene.document.block_records.add(anon).unwrap();
+
+        // Xref block
+        let mut xref = BlockRecord::new("XrefBlock");
+        xref.handle = Handle::new(9902);
+        xref.flags.is_xref = true;
+        scene.document.block_records.add(xref).unwrap();
+
+        // Xref dependent symbol
+        let mut xref_dep = BlockRecord::new("HOST|CHILD");
+        xref_dep.handle = Handle::new(9903);
+        scene.document.block_records.add(xref_dep).unwrap();
+
+        let candidates = bedit_candidate_block_names(&scene.document);
+        assert_eq!(candidates, vec!["Alpha", "Beta", "zebra"]);
     }
 }

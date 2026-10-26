@@ -1032,7 +1032,9 @@ fn build_shaped(family: &str, text: &str) -> Option<ShapedRun> {
     // `sysfont` what the requested name actually resolves to and pass the
     // whole thing on. An ordinary family answers with the CSS defaults, which
     // is what `Attrs::new()` already carried.
-    let requested = sysfont::face_attributes(family);
+    // A styled family shapes with the bold / italic face it names.
+    let (name, bold, italic) = sysfont::split_style(family);
+    let requested = sysfont::face_attributes(name);
     let attrs = match &requested {
         Some(face) => Attrs::new()
             .family(Family::Name(&face.family))
@@ -1040,8 +1042,18 @@ fn build_shaped(family: &str, text: &str) -> Option<ShapedRun> {
             .weight(face.weight)
             .style(face.style),
         // No family named: cosmic's own fallback search picks a covering font.
-        None if family.is_empty() => Attrs::new(),
-        None => Attrs::new().family(Family::Name(family)),
+        None if name.is_empty() => Attrs::new(),
+        None => Attrs::new().family(Family::Name(name)),
+    };
+    let attrs = if bold {
+        attrs.weight(cosmic_text::Weight::BOLD)
+    } else {
+        attrs
+    };
+    let attrs = if italic {
+        attrs.style(cosmic_text::Style::Italic)
+    } else {
+        attrs
     };
 
     // Under the shared FontSystem's lock only what needs it: the shaping, and

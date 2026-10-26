@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use codec::{CadDocument, EntityType};
+use codec::{Document, EntityType};
 use OpenCADStudio::io::pid::{
     load_pid, load_pid_with, ImportSummary, ImportUnit, PidImportOptions, SUMMARY_PROPERTY_PREFIX,
 };
@@ -40,7 +40,7 @@ fn fixture(name: &str) -> Option<PathBuf> {
 /// by plan 2026-09-20-retire-the-library-first-symbol-source). A test reaches
 /// the drawing's content by `role=`, never by a `PID-*` layer name: the slot
 /// holds the authored layer, and the classification lives in XDATA.
-fn import(name: &str) -> Option<CadDocument> {
+fn import(name: &str) -> Option<Document> {
     let path = fixture(name)?;
     Some(
         OpenCADStudio::io::load_file(&path)
@@ -52,7 +52,7 @@ fn layer_of(entity: &EntityType) -> &str {
     entity.common().layer.as_str()
 }
 
-fn on_layer<'a>(doc: &'a CadDocument, layer: &'a str) -> impl Iterator<Item = &'a EntityType> {
+fn on_layer<'a>(doc: &'a Document, layer: &'a str) -> impl Iterator<Item = &'a EntityType> {
     doc.entities().filter(move |e| layer_of(e) == layer)
 }
 
@@ -66,14 +66,14 @@ const DISCIPLINE_PREFIX: &str = "PID-STYLE-";
 /// the layer it filed the entity on -- the slot holds the authored sheet
 /// layer, which says where the drawing filed it and not what it is (plan
 /// 2026-09-07, L3).
-fn on_line_work(doc: &CadDocument) -> impl Iterator<Item = &EntityType> {
+fn on_line_work(doc: &Document) -> impl Iterator<Item = &EntityType> {
     of_role(doc, "geometry")
 }
 
 /// The sheet's own lettering -- `role=text`, which a label the importer made
 /// for a symbol (`symbol-label`) is not. Independent of the layer slot, so a
 /// text on a switched-off sheet layer is included like any other.
-fn on_sheet_text(doc: &CadDocument) -> impl Iterator<Item = &EntityType> {
+fn on_sheet_text(doc: &Document) -> impl Iterator<Item = &EntityType> {
     of_role(doc, "text").filter(|entity| matches!(entity, EntityType::Text(_)))
 }
 
@@ -83,7 +83,7 @@ fn on_sheet_text(doc: &CadDocument) -> impl Iterator<Item = &EntityType> {
 /// each other's (which the path-keyed mailbox this replaced needed a lock
 /// against). `io::load_file` itself hands the summary to the log rather than
 /// leaving it in the document -- see `the_summary_rides_the_document_once…`.
-fn import_with_summary(name: &str) -> Option<(CadDocument, ImportSummary)> {
+fn import_with_summary(name: &str) -> Option<(Document, ImportSummary)> {
     let path = fixture(name)?;
     let doc = import(name)?;
     let summary = load_pid(&path)
@@ -128,7 +128,7 @@ fn placement_assignments_render_as_sheet_text_without_null_placeholders() {
     );
 }
 
-fn is_hidden(doc: &CadDocument, layer: &str) -> bool {
+fn is_hidden(doc: &Document, layer: &str) -> bool {
     doc.layers
         .get(layer)
         .unwrap_or_else(|| panic!("{layer} is not in the layer table"))
@@ -216,7 +216,7 @@ fn line_work_carries_the_width_and_colour_the_drawing_states() {
 ///
 /// The wire shader reads `$LWDISPLAY` from the header and collapses every
 /// line to a hairline while it is off, and a `.pid` has no header of its own
-/// to turn it on -- a fresh `CadDocument` ships it off. So the width test
+/// to turn it on -- a fresh `Document` ships it off. So the width test
 /// above passed on a sheet that drew every line identically, which is the
 /// state reading the style table was meant to end. The importer states the
 /// flag itself; this pins that, because nothing in an entity count or a
@@ -249,7 +249,7 @@ fn the_widths_the_drawing_states_are_switched_on_for_display() {
 /// must hold for any document aimed at any `.pid` path.
 #[test]
 fn saving_refuses_a_pid_destination() {
-    let doc = codec::CadDocument::new();
+    let doc = codec::Document::new();
     for case in ["pid", "PID"] {
         let target =
             std::env::temp_dir().join(format!("ocs-save-gate-{}.{case}", std::process::id()));
@@ -328,7 +328,7 @@ fn the_import_leaves_a_summary_the_app_can_show() {
         (4, 2, 2),
         "DWG-0201: named driving dimensions / template bodies / parametric placements"
     );
-    let names_with_defaults = |doc: &CadDocument| {
+    let names_with_defaults = |doc: &Document| {
         of_role(doc, "symbol-label")
             .filter(|entity| pid_value(entity, "driving").is_some())
             .count()
@@ -1311,7 +1311,7 @@ fn import_frames_the_drawing_on_its_sheet() {
         .vports
         .get("*Active")
         .expect("importer states the opening viewport");
-    // The default `CadDocument` entry is parked at the origin with a 10-unit
+    // The default `Document` entry is parked at the origin with a 10-unit
     // height; anything sheet-sized means the importer replaced it.
     assert!(
         vport.view_height > 100.0,
@@ -1556,19 +1556,19 @@ fn hidden_authored_layers_open_off_under_their_own_name_and_metadata_survives_dw
 /// The entities filed under one authored sheet layer, by the `sheet_layer=`
 /// the importer wrote.
 fn on_sheet_layer<'a>(
-    doc: &'a CadDocument,
+    doc: &'a Document,
     layer: &'a str,
 ) -> impl Iterator<Item = &'a EntityType> {
     doc.entities()
         .filter(move |entity| pid_value(entity, "sheet_layer").as_deref() == Some(layer))
 }
 
-fn of_role<'a>(doc: &'a CadDocument, role: &'a str) -> impl Iterator<Item = &'a EntityType> {
+fn of_role<'a>(doc: &'a Document, role: &'a str) -> impl Iterator<Item = &'a EntityType> {
     doc.entities()
         .filter(move |entity| pid_value(entity, "role").as_deref() == Some(role))
 }
 
-fn dark(doc: &CadDocument) -> usize {
+fn dark(doc: &Document) -> usize {
     doc.entities()
         .filter(|entity| entity.common().invisible)
         .count()
@@ -2063,7 +2063,7 @@ fn pid_value(entity: &EntityType, key: &str) -> Option<String> {
 }
 
 fn pid_records_with<'a>(
-    doc: &'a CadDocument,
+    doc: &'a Document,
     key: &'a str,
 ) -> impl Iterator<Item = &'a EntityType> {
     doc.entities()
@@ -2412,7 +2412,7 @@ fn a_placement_without_a_library_body_draws_the_body_the_drawing_carries() {
         return;
     };
 
-    let radii = |doc: &CadDocument| -> Vec<f64> {
+    let radii = |doc: &Document| -> Vec<f64> {
         let mut radii: Vec<f64> = of_role(doc, "symbol")
             .filter_map(|entity| match entity {
                 EntityType::Circle(circle) => Some((circle.radius * 100.0).round() / 100.0),
@@ -2450,7 +2450,7 @@ fn a_placement_without_a_library_body_draws_the_body_the_drawing_carries() {
 /// The `role=symbol` strokes of a document as comparable values: the entity
 /// kind and its geometry to a hundredth of a millimetre, sorted, so two
 /// imports can be asserted to have drawn the same bodies.
-fn symbol_strokes(doc: &CadDocument) -> Vec<String> {
+fn symbol_strokes(doc: &Document) -> Vec<String> {
     let mm = |value: f64| (value * 100.0).round() / 100.0;
     let mut strokes: Vec<String> = of_role(doc, "symbol")
         .map(|entity| match entity {
@@ -2499,7 +2499,7 @@ fn symbol_strokes(doc: &CadDocument) -> Vec<String> {
 
 /// The fixture imported from a fresh temp directory, where the walk up from
 /// the drawing finds no symbol library. `None` when the fixture is absent.
-fn import_without_library(name: &str) -> Option<CadDocument> {
+fn import_without_library(name: &str) -> Option<Document> {
     let fixture = fixture(name)?;
     let dir = std::env::temp_dir().join(format!(
         "ocs-pid-no-library-{}-{}",
@@ -2558,7 +2558,7 @@ fn a_symbols_bspline_lip_reaches_the_drawing() {
     // and this finely divided is the sampled curve and nothing else on the
     // symbol layer.
     const LIP_REACH_MM: f64 = 3.0;
-    let lips = |doc: &CadDocument| -> Vec<Vec<(f64, f64)>> {
+    let lips = |doc: &Document| -> Vec<Vec<(f64, f64)>> {
         of_role(doc, "symbol")
             .filter_map(|entity| match entity {
                 EntityType::LwPolyline(polyline)
@@ -3511,7 +3511,7 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
 
         // 3. Both keys survive DWG and DXF.
         let measures =
-            |doc: &CadDocument| -> Vec<(Option<String>, Option<String>, Option<String>)> {
+            |doc: &Document| -> Vec<(Option<String>, Option<String>, Option<String>)> {
                 let mut all: Vec<_> = doc
                     .entities()
                     .filter(|entity| pid_value(entity, "extent").is_some())

@@ -335,11 +335,7 @@ impl OpenCADStudio {
                                 .map(|layer| layer.name.clone())
                                 .collect();
                             self.push_undo_snapshot(i, "LAYERSTATE RESTORE");
-                            let n = self.tabs[i]
-                                .scene
-                                .document
-                                .restore_layer_state(arg)
-                                .unwrap_or(0);
+                            let n = self.restore_layer_state_here(i, arg);
                             self.tabs[i].active_layer = self.tabs[i]
                                 .scene
                                 .document
@@ -538,26 +534,26 @@ impl OpenCADStudio {
                     .map(|(_, e)| e.common().layer.clone())
                     .collect();
                 if sel_layers.is_empty() {
-                    self.command_line.push_error(
-                        crate::t!("LAYISO: select entities on the layers to isolate first.")
-                            .as_ref(),
-                    );
+                    use crate::modules::draw::select::SelectObjectsCommand;
+                    let cmd = SelectObjectsCommand::new("LAYISO");
+                    self.command_line.push_info(&cmd.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(cmd));
                 } else {
                     let names: Vec<String> = self.tabs[i]
                         .scene
                         .document
                         .layers
                         .iter()
+                        .filter(|l| !sel_layers.contains(&l.name) && !l.is_off())
                         .map(|l| l.name.clone())
                         .collect();
                     let undo = self.begin_layer_undo(i, "LAYISO", &names);
                     for name in &names {
-                        if !sel_layers.contains(name) {
-                            if let Some(dl) = self.tabs[i].scene.document.layers.get_mut(name) {
-                                dl.turn_off();
-                            }
+                        if let Some(dl) = self.tabs[i].scene.document.layers.get_mut(name) {
+                            dl.turn_off();
                         }
                     }
+                    self.tabs[i].layiso_turned_off = Some(names.clone());
                     self.tabs[i].scene.invalidate_layer_visibility(&names);
                     self.tabs[i].dirty = true;
                     self.commit_layer_undo(i, undo);
@@ -630,18 +626,17 @@ impl OpenCADStudio {
                 }
             }
 
-            // LAYUNISO — restore all layers that were turned off by LAYISO (turn all on)
+            // LAYUNISO — turn back on the layers the last LAYISO turned off
             "LAYUNISO" => {
-                let names: Vec<String> = self.tabs[i]
-                    .scene
-                    .document
-                    .layers
-                    .iter()
-                    .map(|l| l.name.clone())
-                    .collect();
+                let Some(names) = self.tabs[i].layiso_turned_off.take() else {
+                    self.command_line.push_info(
+                        crate::t!("LAYUNISO: no layers were isolated by LAYISO.").as_ref(),
+                    );
+                    return Some(Task::none());
+                };
                 let undo = self.begin_layer_undo(i, "LAYUNISO", &names);
                 for name in &names {
-                    if let Some(dl) = self.tabs[i].scene.document.layers.get_mut(&name) {
+                    if let Some(dl) = self.tabs[i].scene.document.layers.get_mut(name) {
                         dl.turn_on();
                     }
                 }
@@ -744,6 +739,48 @@ impl OpenCADStudio {
 
                     self.command_line.push_info(
                         crate::tf!("QLAYER: moved {count} object(s) to layer \"{layer}\".")
+                            .as_ref(),
+                    );
+                }
+            }
+
+            // LAYCUR: the selected objects move to the current layer.
+            "LAYCUR" => {
+                let handles: Vec<_> = self.tabs[i]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                if handles.is_empty() {
+                    use crate::modules::draw::select::SelectObjectsCommand;
+                    let cmd = SelectObjectsCommand::new("LAYCUR");
+                    self.command_line.push_info(&cmd.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(cmd));
+                } else {
+                    let layer = self.tabs[i]
+                        .scene
+                        .document
+                        .header
+                        .current_layer_name
+                        .clone();
+                    let editable: Vec<_> = handles
+                        .into_iter()
+                        .filter(|handle| !self.tabs[i].scene.is_layer_locked(*handle))
+                        .collect();
+                    self.push_undo_snapshot(i, "LAYCUR");
+                    for handle in &editable {
+                        if let Some(entity) = self.tabs[i].scene.document.get_entity_mut(*handle) {
+                            entity.common_mut().layer = layer.clone();
+                        }
+                    }
+                    // The new layer's ByLayer colour, linetype and lineweight
+                    // show at once.
+                    self.invalidate_property_targets(i, &editable);
+                    self.tabs[i].dirty = true;
+                    self.tabs[i].scene.deselect_all();
+                    self.command_line.push_info(
+                        crate::tf!("{} object(s) changed to layer \"{layer}\".", editable.len())
                             .as_ref(),
                     );
                 }
@@ -1141,5 +1178,144 @@ impl OpenCADStudio {
         );
         self.last_layer_translation = Some(report);
         Task::none()
+    }
+}
+
+impl OpenCADStudio {
+    /// Restore the saved layer state `name`, returning how many layers it
+    /// touched. Inside a layout viewport the state applies to that viewport
+    /// alone: its frozen layers become the viewport's freezes, and colour,
+    /// linetype, lineweight and transparency become viewport overrides where
+    /// they differ from the layer. Layers the state turns off are frozen in
+    /// the viewport; lock and plot have no per-viewport form and apply to the
+    /// drawing.
+    pub(in crate::app) fn restore_layer_state_here(&mut self, i: usize, name: &str) -> usize {
+        use codec::layer_state::LayerStateMask as Mask;
+        use codec::objects::{KnownXRecordKind as Kind, XRecordValue as Value};
+        use codec::EntityType;
+        let scene = &mut self.tabs[i].scene;
+        let viewport = scene.active_viewport.filter(|handle| {
+            scene.current_layout != "Model"
+                && matches!(
+                    scene.document.get_entity(*handle),
+                    Some(EntityType::Viewport(_))
+                )
+        });
+        let document = &mut scene.document;
+        let Some(viewport) = viewport else {
+            return document.restore_layer_state(name).unwrap_or(0);
+        };
+        let Some(state) = document.layer_state(name) else {
+            return 0;
+        };
+        let mut restored = 0;
+        let (mut freeze, mut thaw) = (Vec::new(), Vec::new());
+        for saved in &state.layers {
+            let found = document
+                .layers
+                .iter()
+                .find(|layer| !saved.layer_handle.is_null() && layer.handle == saved.layer_handle)
+                .or_else(|| document.layers.get(&saved.layer_name))
+                .map(|layer| layer.name.clone());
+            let Some(layer_name) = found else {
+                continue;
+            };
+            let line_type_handle = document
+                .line_types
+                .iter()
+                .find(|line_type| line_type.name.eq_ignore_ascii_case(&saved.line_type))
+                .map(|line_type| line_type.handle);
+            let Some(layer) = document.layers.get_mut(&layer_name) else {
+                continue;
+            };
+            restored += 1;
+            if state.mask.contains(Mask::LOCKED) {
+                layer.flags.locked = saved.locked;
+            }
+            if state.mask.contains(Mask::PLOT) {
+                layer.is_plottable = saved.plottable;
+            }
+            if state.mask.contains(Mask::NEW_VIEWPORT) {
+                layer.flags.frozen_in_new_viewport = saved.new_viewport_frozen;
+            }
+            let layer = layer.clone();
+            // On / off has no per-viewport form; a layer the state turns off
+            // is frozen in this viewport instead, so other viewports keep
+            // their own visibility.
+            let (by_freeze, by_off) =
+                (state.mask.contains(Mask::FROZEN), state.mask.contains(Mask::ON));
+            if by_freeze || by_off {
+                let hidden = (by_freeze && saved.frozen) || (by_off && saved.off);
+                if hidden { &mut freeze } else { &mut thaw }.push(layer.handle);
+            }
+            // (kind, saved value, whether it differs from the layer's own)
+            let mut overrides: Vec<(Kind, Option<Value>, bool)> = Vec::new();
+            if state.mask.contains(Mask::COLOR) {
+                let packed = crate::scene::view::render::pack_layer_override_color(&saved.color);
+                overrides.push((
+                    Kind::LayerViewportColorOverride,
+                    packed.map(Value::Int32),
+                    saved.color != layer.color,
+                ));
+            }
+            if state.mask.contains(Mask::LINE_TYPE) {
+                overrides.push((
+                    Kind::LayerViewportLinetypeOverride,
+                    line_type_handle.map(Value::Handle),
+                    !saved.line_type.eq_ignore_ascii_case(&layer.line_type),
+                ));
+            }
+            if state.mask.contains(Mask::LINE_WEIGHT) {
+                overrides.push((
+                    Kind::LayerViewportLineweightOverride,
+                    Some(Value::Int32(saved.line_weight.value() as i32)),
+                    saved.line_weight != layer.line_weight,
+                ));
+            }
+            if let (true, Some(transparency)) =
+                (state.mask.contains(Mask::TRANSPARENCY), saved.transparency)
+            {
+                // The opacity byte under the "by alpha" method, as the format packs it.
+                let packed = 0x0200_0000u32 | (255 - transparency.alpha()) as u32;
+                overrides.push((
+                    Kind::LayerViewportAlphaOverride,
+                    Some(Value::Int32(packed as i32)),
+                    transparency != layer.transparency,
+                ));
+            }
+            // An override is written where the state differs from the layer,
+            // and where one already exists for this viewport, so it cannot
+            // keep an older value.
+            let overrides: Vec<(Kind, Value)> = overrides
+                .into_iter()
+                .filter_map(|(kind, value, differs)| {
+                    let existing = document
+                        .layer_viewport_overrides(layer.handle, kind)
+                        .iter()
+                        .any(|(handle, _)| *handle == viewport);
+                    value
+                        .filter(|_| differs || existing)
+                        .map(|value| (kind, value))
+                })
+                .collect();
+            for (kind, value) in overrides {
+                document.set_layer_viewport_override(layer.handle, kind, viewport, value);
+            }
+        }
+        if let Some(EntityType::Viewport(vp)) = document.get_entity_mut(viewport) {
+            vp.frozen_layers.retain(|handle| !thaw.contains(handle));
+            for handle in freeze {
+                if !vp.frozen_layers.contains(&handle) {
+                    vp.frozen_layers.push(handle);
+                }
+            }
+        }
+        scene.bump_geometry();
+        let doc_layers = self.tabs[i].scene.document.layers.clone();
+        let vp_info = self.tabs[i].scene.viewport_list();
+        self.tabs[i]
+            .layers
+            .sync_with_viewports(&doc_layers, vp_info);
+        restored
     }
 }

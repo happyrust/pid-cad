@@ -189,6 +189,26 @@ fn failure(code: &str, error: impl ToString) -> Value {
 /// `{"op":"open","name":"plan.dwg","data_base64":"…"}`: the web build has no
 /// filesystem path to open, so the caller sends the file itself. `name` is
 /// reduced to its file name; it labels the tab and the recent-files entry.
+/// Edits that only touch a document's records, so they can address an
+/// open document behind another tab (#2032). Interactive commands, input,
+/// picks, view and UI actions, plotting and saving still need the tab active.
+fn background_mutation(op: &str) -> bool {
+    matches!(
+        op,
+        "set_properties"
+            | "entities_create"
+            | "entities_delete"
+            | "entities_transform"
+            | "text_replace"
+            | "xdata_set"
+            | "block_define"
+            | "block_delete"
+            | "group_create"
+            | "undo"
+            | "redo"
+    )
+}
+
 fn open_bytes_request(req: &Value) -> Result<(String, Vec<u8>), Value> {
     use base64::Engine as _;
     let name = string(req, "name")?;
@@ -308,7 +328,17 @@ fn command_category(name: &str) -> &'static str {
     .contains(&name)
     {
         "modify"
-    } else if ["DIST", "ID", "AREA", "MEASURE", "MEASUREGEOM"].contains(&name) {
+    } else if [
+        "DIST",
+        "ID",
+        "AREA",
+        "MEASURE",
+        "MEASUREGEOM",
+        "MEASURERADIUS",
+        "MEASUREANGLE",
+    ]
+    .contains(&name)
+    {
         "inspect"
     } else if ["ZOOM", "PAN", "UCS", "PLAN", "VPORTS", "3DORBIT"].contains(&name) {
         "view"
@@ -368,12 +398,17 @@ fn command_selection_policy(name: &str) -> &'static str {
         "COPY",
         "COPYCLIP",
         "CUTCLIP",
+        "DCDISPLAY",
+        "DIMDISASSOCIATE",
+        "DIMREASSOCIATE",
         "ERASE",
         "EXPLODE",
         "TXTEXP",
+        "TXT2MTXT",
         "GROUP",
         "LAYFRZ",
         "LAYLCK",
+        "LAYCUR",
         "LAYMCUR",
         "LAYOFF",
         "LAYULK",
@@ -460,9 +495,37 @@ pub(super) fn active_command_metadata(command: &dyn crate::command::CadCommand) 
     })
 }
 
+fn xref_status_name(status: &crate::io::xref::XrefStatus) -> &'static str {
+    use crate::io::xref::XrefStatus as S;
+    match status {
+        S::Loaded => "loaded",
+        S::Recovered => "recovered",
+        S::Failed => "failed",
+        S::NotFound => "not_found",
+        S::Unloaded => "unloaded",
+    }
+}
+
 impl OpenCADStudio {
     pub(super) fn control_busy(&self) -> bool {
         self.control.pending.is_some()
+    }
+
+    /// A client's `cancel`: Esc, repeated while a command is still active.
+    /// One Esc may only dismiss what sits in front of the command (an open
+    /// dialog, a popup, typed text) or step a command back a level, and the
+    /// client has no other way to finish the job. (#1930)
+    fn control_cancel(&mut self) -> Task<Message> {
+        let mut tasks = vec![self.update(Message::CommandEscape)];
+        // ponytail: fixed Esc budget; covers every overlay + step-back chain
+        // in the escape path today, raise it if a deeper chain appears.
+        for _ in 0..8 {
+            if self.tabs[self.active_tab].active_cmd.is_none() {
+                break;
+            }
+            tasks.push(self.update(Message::CommandEscape));
+        }
+        Task::batch(tasks)
     }
 
     /// Mirror a real selection change into the automation event stream. The
@@ -501,6 +564,7 @@ impl OpenCADStudio {
         json!({"ok":true,"protocol":1,"session_id":session_id(),"version":env!("OCS_APP_VERSION"),
             "mode":if self.main_window.is_some(){"gui"}else{"headless"},"enabled":self.control.enabled,
             "read_only":self.read_only,"missing_fonts":missing_fonts,
+            "xrefs":tab.xref_report.iter().map(|(name,path,status)|json!({"name":name,"path":path,"status":xref_status_name(status)})).collect::<Vec<_>>(),
             "document_id":tab.id,"revision":tab.edit_revision,"geometry_revision":tab.scene.geometry_epoch,"camera_revision":tab.scene.camera_generation,
             "hand_seed":format!("{:X}",tab.scene.document.header.handle_seed.max(tab.scene.document.next_handle())),
             "plugins":plugin_ids(),
@@ -560,6 +624,10 @@ impl OpenCADStudio {
                 | "audit"
                 | "text_search"
                 | "text_audit"
+                | "blocks"
+                | "block_instances"
+                | "cad_get_blocks"
+                | "cad_extract_block_instances"
                 | "keytips"
         );
         if !query && !self.control.enabled {
@@ -767,6 +835,30 @@ impl OpenCADStudio {
                         Task::none(),
                     );
                 }
+                // Any other request settles once the work it started reports
+                // back. When that never happens (a save or open whose result
+                // never arrives) the bridge would stay busy until the app is
+                // killed, so `cancel` ends the active command and closes the
+                // request as cancelled. (#1801)
+                if op == "cancel" {
+                    let task = self.control_cancel();
+                    if let Some(p) = self.control.pending.as_mut() {
+                        p.cancelled = true;
+                        p.pending = 0;
+                    }
+                    self.control_settle_inner(true);
+                    let response = self
+                        .control
+                        .completed
+                        .iter()
+                        .find(|(i, _, _)| *i == pending_id)
+                        .map(|(_, _, r)| r.clone());
+                    return (
+                        response
+                            .unwrap_or_else(|| failure("busy", "Wait for the running operation")),
+                        task,
+                    );
+                }
                 return (
                     failure("busy", "Wait for the running operation"),
                     Task::none(),
@@ -787,13 +879,18 @@ impl OpenCADStudio {
                     "activate" | "switch_document" | "close" | "entities_copy_to"
                 )
             {
-                return (
-                    failure(
-                        "document_not_active",
-                        "Activate the requested document first",
-                    ),
-                    Task::none(),
-                );
+                if req["active_only"].as_bool() == Some(true)
+                    || !query && !background_mutation(op)
+                {
+                    return (
+                        failure(
+                            "document_not_active",
+                            "This operation needs the document's tab active; activate it first",
+                        ),
+                        Task::none(),
+                    );
+                }
+                return self.control_request_in_background(id, req);
             }
         // Interactive requests operate on the active tab by definition, so
         // a client may omit document_id (the GUI-hosted REST channel does).
@@ -859,6 +956,10 @@ impl OpenCADStudio {
                 "get_selection" => self.control_get_selection(),
                 "text_search" => self.control_text_search(&req).unwrap_or_else(|e| e),
                 "text_audit" => self.control_text_audit(&req).unwrap_or_else(|e| e),
+                "blocks"
+                | "block_instances"
+                | "cad_get_blocks"
+                | "cad_extract_block_instances" => self.control_blocks(&req).unwrap_or_else(|e| e),
                 "history" => {
                     json!({"ok":true,"entries":self.command_line.history.iter().map(|e|json!({"kind":format!("{:?}",e.kind),"text":e.text})).collect::<Vec<_>>()})
                 }
@@ -968,16 +1069,38 @@ impl OpenCADStudio {
         (response, task)
     }
 
+    /// Serve a read or semantic edit addressed to an open document that is
+    /// not the visible tab (#2032): the request runs against that document's
+    /// live scene (its undo history, revision and dirty state), and the
+    /// visible tab, its command, selection and camera stay as they were. The
+    /// document is only made current for the duration of this call, so the
+    /// GUI never draws it.
+    fn control_request_in_background(&mut self, id: u64, req: Value) -> (Value, Task<Message>) {
+        let visible = self.tabs[self.active_tab].id;
+        let Some(target) = self.tabs.iter().position(|t| t.id == id) else {
+            return (failure("document_closed", "Document no longer exists"), Task::none());
+        };
+        self.active_tab = target;
+        let (response, task) = self.control_request(req);
+        if let Some(index) = self.tabs.iter().position(|t| t.id == visible) {
+            self.active_tab = index;
+        }
+        // Panels the edit refreshed follow the visible document again.
+        self.refresh_properties();
+        self.sync_ribbon_layers();
+        self.sync_ribbon_styles();
+        (response, task)
+    }
+
     fn control_action(&mut self, req: &Value) -> Result<Task<Message>, Value> {
         let i = self.active_tab;
         Ok(match req["op"].as_str().unwrap_or("") {
             "new" => {
                 if let Some(template) = req["template"].as_str() {
                     match self.apply_template(template) {
-                        Ok(purged) => {
+                        Ok(()) => {
                             self.set_control_result(json!({
                                 "template": template,
-                                "purged": purged,
                                 "total": self.tabs[i].scene.document.entities().count(),
                             }));
                             Task::none()
@@ -1090,7 +1213,7 @@ impl OpenCADStudio {
                     _ => return Err(failure("invalid_input", "Unknown input kind")),
                 }
             }
-            "cancel" => self.update(Message::CommandEscape),
+            "cancel" => self.control_cancel(),
             "undo" => self.update(Message::Undo),
             "redo" => self.update(Message::Redo),
             "select" => {
@@ -1151,6 +1274,15 @@ impl OpenCADStudio {
             "view_focus" => self.control_view_focus(req)?,
             #[cfg(not(target_arch = "wasm32"))]
             "save" => {
+                if let Some(refusal) = self.read_only_save_refusal() {
+                    return Err(refusal);
+                }
+                if self.tabs[i].block_test.is_some() {
+                    return Err(failure(
+                        "temporary_document",
+                        "Test Block is temporary and cannot be saved",
+                    ));
+                }
                 let path = req["path"]
                     .as_str()
                     .map(std::path::PathBuf::from)
@@ -1201,6 +1333,12 @@ impl OpenCADStudio {
             // Web: no filesystem path; the drawing comes back in the reply.
             #[cfg(target_arch = "wasm32")]
             "save" => {
+                if self.tabs[i].block_test.is_some() {
+                    return Err(failure(
+                        "temporary_document",
+                        "Test Block is temporary and cannot be saved",
+                    ));
+                }
                 use base64::Engine as _;
                 let default_is_dxf = crate::io::source_is_dxf(None, &self.tabs[i].scene.document);
                 let (version, is_dxf) = super::automation::requested_save_target(
@@ -1243,6 +1381,9 @@ impl OpenCADStudio {
             }
             #[cfg(not(target_arch = "wasm32"))]
             "save_verified" => {
+                if let Some(refusal) = self.read_only_save_refusal() {
+                    return Err(refusal);
+                }
                 let result = self.save_verified_request(req)?;
                 self.set_control_result(result);
                 Task::none()
@@ -1418,11 +1559,22 @@ impl OpenCADStudio {
         }
     }
     pub(super) fn control_settle(&mut self) {
-        if self.control.pending.as_ref().is_none_or(|p| p.pending != 0) || self.opening.is_some() {
+        self.control_settle_inner(false);
+    }
+
+    /// `force` closes the request even while an open or a save it may have
+    /// started is still running.
+    fn control_settle_inner(&mut self, force: bool) {
+        if self.control.pending.as_ref().is_none_or(|p| p.pending != 0) {
+            return;
+        }
+        if !force && self.opening.is_some() {
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if !self.active_save_jobs.is_empty() || self.pending_native_thumbnail_save.is_some() {
+        if !force
+            && (!self.active_save_jobs.is_empty() || self.pending_native_thumbnail_save.is_some())
+        {
             return;
         }
         let p = self.control.pending.take().unwrap();
@@ -1798,6 +1950,7 @@ pub(crate) mod http_bridge;
 mod interactive;
 mod sheets;
 pub(crate) use sheets::new_guid_v4;
+pub(crate) mod block_ops;
 pub(crate) mod spellcheck;
 pub(crate) mod text_ops;
 
@@ -1828,6 +1981,45 @@ mod tests {
             r
         }
     }
+    #[test]
+    fn edits_reach_an_inactive_document_without_switching_tabs() {
+        let mut app = OpenCADStudio::new_for_test();
+        assert_eq!(request(&mut app, json!({"op":"new"}))["ok"], true);
+        let target = app.tabs[app.active_tab].id;
+        assert_eq!(request(&mut app, json!({"op":"new"}))["ok"], true);
+        let visible = app.active_tab;
+        let revision = |app: &OpenCADStudio| {
+            app.tabs.iter().find(|t| t.id == target).unwrap().edit_revision
+        };
+        let send = |app: &mut OpenCADStudio, mut req: Value| {
+            req["protocol"] = json!(1);
+            req["document_id"] = json!(target);
+            req["revision"] = json!(revision(app));
+            req["client_id"] = json!("test");
+            req["request_id"] = json!(format!("bg-{}", app.control.serial));
+            app.control_request(req).0
+        };
+        let created = send(
+            &mut app,
+            json!({"op":"entities_create","entities":[{"type":"Line","start":[0,0],"end":[5,0]}]}),
+        );
+        assert_eq!(created["ok"], true, "{created}");
+        assert_eq!(app.active_tab, visible, "the visible tab must not change");
+        let count = |app: &OpenCADStudio, id: u64| {
+            let tab = app.tabs.iter().find(|t| t.id == id).unwrap();
+            tab.scene.document.entities().count()
+        };
+        assert_eq!(count(&app, target), 1);
+        assert_eq!(count(&app, app.tabs[visible].id), 0);
+        let records = send(&mut app, json!({"op":"entities"}));
+        assert_eq!(records["ok"], true, "{records}");
+        assert_eq!(send(&mut app, json!({"op":"undo"}))["ok"], true);
+        assert_eq!(count(&app, target), 0);
+        assert_eq!(app.active_tab, visible);
+        let run = send(&mut app, json!({"op":"run","cmd":"LINE 0,0 1,1"}));
+        assert_eq!(run["code"], "document_not_active", "{run}");
+    }
+
     #[test]
     fn qsave_completion_reports_clean_document_state() {
         let mut app = OpenCADStudio::new_for_test();
@@ -2316,6 +2508,19 @@ mod tests {
         );
     }
     #[test]
+    fn cancel_ends_the_started_command() {
+        let mut app = OpenCADStudio::new_for_test();
+        request(&mut app, json!({"op":"new"}));
+        let started = request(&mut app, json!({"op":"start","cmd":"PURGE"}));
+        assert_eq!(started["status"], "waiting_input", "{started}");
+        // A dialog left open by the load (missing fonts) takes the first Esc.
+        app.active_modal = Some(crate::app::ModalKind::MissingFonts);
+        let cancelled = request(&mut app, json!({"op":"cancel"}));
+        assert_eq!(cancelled["state"]["command"], Value::Null, "{cancelled}");
+        let next = request(&mut app, json!({"op":"start","cmd":"LINE"}));
+        assert_eq!(next["status"], "waiting_input", "{next}");
+    }
+    #[test]
     fn direct_user_input_takes_command_ownership() {
         let mut app = OpenCADStudio::new_for_test();
         request(&mut app, json!({"op":"new"}));
@@ -2347,6 +2552,27 @@ mod tests {
             1
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn open_with_missing_xrefs_succeeds_and_lists_every_reference() {
+        let mut doc = codec::Document::new();
+        for name in ["Grid Plan", "Wall Base"] {
+            let mut record = codec::tables::BlockRecord::new(name);
+            record.flags.is_xref = true;
+            record.xref_path = format!("missing-dir/{name}.dwg");
+            doc.block_records.add(record).unwrap();
+        }
+        let bytes = crate::io::save_to_bytes(&doc, "dwg", doc.version).unwrap();
+        let path = std::env::temp_dir().join(format!("ocs-xref-open-{}.dwg", session_id()));
+        std::fs::write(&path, bytes).unwrap();
+        let mut app = OpenCADStudio::new_for_test();
+        let opened = request(&mut app, json!({"op":"open","path":path}));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(opened["ok"], true, "{opened}");
+        let xrefs = opened["state"]["xrefs"].as_array().unwrap();
+        assert_eq!(xrefs.len(), 2, "{opened}");
+        assert!(xrefs.iter().all(|x| x["status"] == "not_found"), "{opened}");
     }
 
     #[test]
@@ -3049,8 +3275,8 @@ mod tests {
                 .all(|(channel, expected)| (channel - expected).abs() < 0.02)
         };
         assert!(
-            color_ops.iter().any(|c| near(c, [0.0, 0.15, 0.5])),
-            "unstyled cyan frame plots as the dark-blue print remap: {color_ops:?}"
+            color_ops.iter().any(|c| near(c, [0.0, 1.0, 1.0])),
+            "unstyled cyan frame keeps its colour on paper (#1926): {color_ops:?}"
         );
         assert!(
             color_ops.iter().any(|c| near(c, [1.0, 0.0, 0.0])),

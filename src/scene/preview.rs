@@ -19,6 +19,8 @@ pub(crate) struct PidGroupHighlight {
     pub(crate) wires: Vec<WireModel>,
 }
 
+mod block_parameter;
+
 impl Scene {
     // ── P&ID tag-group highlight ──────────────────────────────────────────
 
@@ -181,6 +183,111 @@ impl Scene {
 
     pub fn set_command_preview_hatches(&mut self, models: Vec<HatchModel>) {
         self.preview_hatches = std::sync::Arc::new(models);
+    }
+
+    /// Selected Model-space hatches use a small overlay instead of baking the
+    /// selection colour into the resident hatch list. This keeps selection
+    /// changes from regenerating and uploading every hatch in a large drawing.
+    pub(super) fn selected_hatch_overlay_models(&self) -> std::sync::Arc<Vec<HatchModel>> {
+        if self.current_layout != "Model" || !self.document.header.fill_mode {
+            return std::sync::Arc::new(Vec::new());
+        }
+        let selection_sig = self.selected_hatch_sig();
+        if selection_sig == 0 {
+            return std::sync::Arc::new(Vec::new());
+        }
+        if let Some((epoch, sig, models)) = self.selected_hatch_overlay_cache.borrow().as_ref() {
+            if *epoch == self.geometry_epoch && *sig == selection_sig {
+                return std::sync::Arc::clone(models);
+            }
+        }
+
+        let started = crate::perf::enabled().then(iced::time::Instant::now);
+        let depth_map = self.draw_depth_map();
+        let target_block = self.content_render_block_handle();
+        let annotation_scale = self.displayed_annotation_scale_handle();
+        let all_visible = self.annotation_all_visible();
+        // Same visibility and style sync as the resident set, so the tinted
+        // copy lands exactly on the fill it covers.
+        let mut models: Vec<HatchModel> = self
+            .selected
+            .iter()
+            .filter_map(|&handle| Some((handle, self.hatches.get(&handle)?)))
+            .filter(|&(handle, _)| {
+                self.hatch_fill_shown(handle, target_block, None, annotation_scale, all_visible)
+            })
+            .map(|(handle, model)| {
+                self.synced_hatch_model(
+                    handle,
+                    model,
+                    annotation_scale,
+                    None,
+                    self.bg_color,
+                    &depth_map,
+                    true,
+                )
+                .1
+            })
+            .collect();
+        let selected_inserts: Vec<Handle> = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|&handle| {
+                let Some(codec::EntityType::Insert(insert)) = self.document.get_entity(handle)
+                else {
+                    return false;
+                };
+                let common = &insert.common;
+                !self.display_entity_invisible(common)
+                    && !self.entity_temporarily_hidden(handle)
+                    && !self.layer_hidden(&common.layer)
+            })
+            .collect();
+        models.extend(self.preview_insert_hatch_models(&selected_inserts));
+        let models = std::sync::Arc::new(models);
+        let elapsed_ms = crate::perf::elapsed_ms(started);
+        if elapsed_ms >= 1.0 {
+            crate::perf_record!(
+                "[perf] hatch-selection-overlay build={elapsed_ms:.1}ms selected={} models={}",
+                self.selected.len(),
+                models.len(),
+            );
+        }
+        *self.selected_hatch_overlay_cache.borrow_mut() = Some((
+            self.geometry_epoch,
+            selection_sig,
+            std::sync::Arc::clone(&models),
+        ));
+        models
+    }
+
+    /// Merge command/grip previews with the selected-hatch tint overlay and
+    /// reuse the result until either source changes.
+    pub(super) fn render_preview_hatches(&self) -> std::sync::Arc<Vec<HatchModel>> {
+        let selected = self.selected_hatch_overlay_models();
+        if selected.is_empty() {
+            return std::sync::Arc::clone(&self.preview_hatches);
+        }
+        if let Some((preview, overlay, combined)) =
+            self.combined_preview_hatch_cache.borrow().as_ref()
+        {
+            if std::sync::Arc::ptr_eq(preview, &self.preview_hatches)
+                && std::sync::Arc::ptr_eq(overlay, &selected)
+            {
+                return std::sync::Arc::clone(combined);
+            }
+        }
+        let mut models = Vec::with_capacity(self.preview_hatches.len() + selected.len());
+        models.extend(self.preview_hatches.iter().cloned());
+        models.extend(selected.iter().cloned());
+        let combined = std::sync::Arc::new(models);
+        *self.combined_preview_hatch_cache.borrow_mut() = Some((
+            std::sync::Arc::clone(&self.preview_hatches),
+            selected,
+            std::sync::Arc::clone(&combined),
+        ));
+        combined
     }
 
     pub fn set_area_preview_regions(&mut self, regions: &[AreaPreviewRegion]) {
@@ -371,41 +478,7 @@ impl Scene {
             .map_or(0.0, |depth| depth[0]);
 
         if let EntityType::Hatch(hatch) = entity {
-            if let Some(background) = crate::entities::hatch::background_color(hatch) {
-                let mut backdrop = model.clone();
-                backdrop.pattern = crate::scene::model::hatch_model::HatchPattern::Solid;
-                let (background_color, background_aci) = match background {
-                    codec::types::Color::ByLayer => {
-                        let layer = self.document.layers.get(&hatch.common.layer);
-                        let aci = layer
-                            .and_then(|layer| match &layer.color {
-                                codec::types::Color::Index(index) => Some(*index),
-                                _ => None,
-                            })
-                            .unwrap_or(0);
-                        (
-                            crate::scene::view::render::layer_render_style(
-                                &self.document,
-                                &hatch.common.layer,
-                            )
-                            .color,
-                            aci,
-                        )
-                    }
-                    codec::types::Color::ByBlock => (style.0, style.4),
-                    codec::types::Color::Index(index) => (
-                        crate::scene::convert::tess_util::aci_to_rgba(&codec::types::Color::Index(
-                            index,
-                        )),
-                        index,
-                    ),
-                    other => (crate::scene::convert::tess_util::aci_to_rgba(&other), 0),
-                };
-                backdrop.color = background_color;
-                backdrop.aci = background_aci;
-                backdrop.name = "SOLID".into();
-                models.push(backdrop);
-            }
+            models.extend(self.hatch_backdrop(hatch, &model, (style.0, style.4), None));
         }
         models.push(model);
     }
@@ -417,6 +490,7 @@ impl Scene {
     }
 
     pub fn clear_preview_wire(&mut self) {
+        self.set_command_preview_hidden(&[]);
         // No geometry bump — see `set_preview_wires`. Dropping the overlay
         // flips the wire content id back to the base tessellation id, which
         // re-uploads the base wires (without the preview) on the next frame.
@@ -564,6 +638,90 @@ impl Scene {
         wires
     }
 
+    /// Highlight a MATCHPROP source while the command gathers its first target.
+    pub fn matchprop_source_highlight_wires(&self, handle: Handle) -> Vec<WireModel> {
+        let Some(entity) = self.document.get_entity(handle).cloned() else {
+            return Vec::new();
+        };
+        let mut wires = self.wires_for_entities(&[entity]);
+        // Hatch fills and nested insert fills have no resident outline wire,
+        // so include their transient boundary geometry as well.
+        wires.extend(self.fill_hover_preview_wires(handle));
+        Self::matchprop_glow_with_layers(&wires, [(10.0, 0.11), (6.0, 0.22), (2.5, 0.48)])
+    }
+
+    /// Add a faint aura behind the property preview, leaving its matched style
+    /// easy to read. The original wires should be appended after these layers.
+    pub fn matchprop_target_glow_wires(&self, wires: &[WireModel]) -> Vec<WireModel> {
+        Self::matchprop_glow_with_layers(wires, [(8.0, 0.035), (5.0, 0.065), (2.5, 0.11)])
+    }
+
+    fn matchprop_glow_with_layers(
+        wires: &[WireModel],
+        layers: [(f32, f32); 3],
+    ) -> Vec<WireModel> {
+        let mut glow = Vec::with_capacity(wires.len() * 3);
+        for wire in wires {
+            // Layer translucent, widened copies over the resident entity. Its
+            // original color remains visible through the blue hover aura.
+            for (width, alpha) in layers {
+                let mut layer = wire.clone();
+                layer.color = [0.22, 0.60, 1.0, alpha];
+                layer.line_weight_px = layer.line_weight_px.max(width);
+                layer.selected = false;
+                glow.push(layer);
+            }
+        }
+        glow
+    }
+
+    /// Build a non-mutating MATCHPROP target preview using the same property
+    /// kernel as the eventual apply, including the fill style for hatches.
+    pub fn matchprop_target_preview(
+        &self,
+        source: Handle,
+        target: Handle,
+    ) -> Option<(Vec<WireModel>, Vec<HatchModel>)> {
+        let source_entity = self.document.get_entity(source)?.clone();
+        let mut target_entity = self.document.get_entity(target)?.clone();
+        crate::entities::match_props::match_properties_kernel(
+            &source_entity,
+            &mut target_entity,
+            &crate::entities::match_props::MatchOpts::all(),
+        );
+
+        // The interactive handler also transfers this hatch-specific xdata
+        // outside the shared entity kernel. Mirror it on the preview clone so
+        // the fill reflects the same background that a click will apply.
+        if let (EntityType::Hatch(source_hatch), EntityType::Hatch(target_hatch)) =
+            (&source_entity, &mut target_entity)
+        {
+            match crate::entities::hatch::background_color(source_hatch) {
+                Some(color) => crate::entities::hatch::set_background_color(target_hatch, &color),
+                None => crate::entities::hatch::clear_background_color(target_hatch),
+            }
+        }
+
+        let mut wires = self.wires_for_entities(std::slice::from_ref(&target_entity));
+        for wire in &mut wires {
+            wire.selected = false;
+        }
+
+        let color = self.render_style(&target_entity).0;
+        let hatch = match &target_entity {
+            EntityType::Hatch(dxf) => Self::hatch_model_from_dxf(dxf, color),
+            EntityType::Solid(solid) => Some(Self::solid_hatch_model(solid, color)),
+            _ => None,
+        };
+        let hatches = hatch.into_iter().collect::<Vec<_>>();
+        for model in &hatches {
+            if let Some(outline) = Self::hatch_model_outline_wire(target, model) {
+                wires.push(outline);
+            }
+        }
+        Some((wires, hatches))
+    }
+
     /// Build wire models for an arbitrary slice of entities (e.g. clipboard contents).
     /// Entities need not be in the document — they are tessellated directly.
     pub fn wires_for_entities(&self, entities: &[codec::EntityType]) -> Vec<WireModel> {
@@ -581,7 +739,8 @@ impl Scene {
 
     /// Tessellate one block definition's entities into block-local wire models
     /// (insertion base at origin) for the block-palette thumbnail. Nested INSERTs
-    /// expand through the block cache. Unknown / empty block → `vec![]`.
+    /// expand through the block cache; invisible members (another visibility
+    /// state) are left out, as on the canvas. Unknown / empty block → `vec![]`.
     pub(crate) fn block_preview_wires(&self, name: &str) -> Vec<WireModel> {
         use codec::EntityType;
         let Some(br) = self.document.block_records.get(name) else {
@@ -592,7 +751,9 @@ impl Scene {
             let Some(e) = self.document.get_entity(eh) else {
                 continue;
             };
-            if matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_)) {
+            if matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_))
+                || e.common().invisible
+            {
                 continue;
             }
             out.extend(self.tessellate_one(e));

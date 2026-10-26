@@ -445,14 +445,32 @@ pub fn decide_backend(
 }
 
 fn failover_reason(failed: &[&String], excluded: &[String], chosen: &str) -> String {
-    let mut parts: Vec<String> = failed.iter().map(|b| b.to_string()).collect();
-    parts.extend(excluded.iter().cloned());
-    parts.sort();
-    parts.dedup();
-    let what_failed = if parts.is_empty() {
-        "the preferred backend was skipped after the previous crash".to_string()
+    let list = |mut names: Vec<String>| {
+        names.sort();
+        names.dedup();
+        names.join(", ")
+    };
+    let failed: Vec<String> = failed
+        .iter()
+        .map(|b| b.to_string())
+        .filter(|b| !excluded.contains(b))
+        .collect();
+    // A backend skipped for the previous run's crash is not one that fails
+    // here: say which of the two happened.
+    let mut causes = Vec::new();
+    if !failed.is_empty() {
+        causes.push(format!("{} is not usable on this GPU", list(failed)));
+    }
+    if !excluded.is_empty() {
+        causes.push(format!(
+            "the previous session on {} ended unexpectedly",
+            list(excluded.to_vec())
+        ));
+    }
+    let what_failed = if causes.is_empty() {
+        "the preferred backend was skipped".to_string()
     } else {
-        format!("{} {}", parts.join(", "), "is not usable on this GPU")
+        causes.join(" and ")
     };
     let chosen_text = match chosen {
         "gl" => "the GL compatibility backend",
@@ -467,15 +485,15 @@ fn failover_reason(failed: &[&String], excluded: &[String], chosen: &str) -> Str
 pub fn fallback_notice(reason: &str) -> String {
     format!(
         "Graphics compatibility mode: {reason}. \
-         If drawings render slowly, update the GPU driver; \
-         override with --backend <dx12|vulkan|gl>."
+         If drawings render slowly, update the GPU driver, \
+         or choose another backend in Options > Graphics."
     )
 }
 
 /// Notice text when the packed compatibility renderer was auto-enabled.
 pub fn compat_notice() -> String {
     "Older GPU detected: using the packed compatibility renderer \
-     (no shader storage buffers). Override with --compat-renderer / --backend."
+     (no shader storage buffers). Change it in Options > Graphics."
         .to_string()
 }
 
@@ -669,7 +687,7 @@ fn run_probe_for(arg: &str) -> Option<ProbeCaps> {
 pub fn resolve_gpu(cli_backend: Option<&str>, safe_mode: bool) -> GpuResolution {
     let prefs = load_prefs();
     let env_backend = std::env::var("WGPU_BACKEND").ok();
-    let excluded = if previous_run_crashed() {
+    let mut excluded = if previous_run_crashed() {
         crashed_backends()
     } else {
         Vec::new()
@@ -771,6 +789,33 @@ pub fn resolve_gpu(cli_backend: Option<&str>, safe_mode: bool) -> GpuResolution 
     } else {
         None
     };
+    // A run killed before the proof delay leaves a sentinel naming a backend
+    // that may never have failed. When nothing else can draw, the last resort
+    // is a GL that has just failed its own probe, so probe the suspect too
+    // (out of process, like every probe) unless the previous run's crash
+    // report says the graphics device itself failed.
+    if sw.is_none()
+        && results.iter().all(|(_, c)| c.is_none())
+        && !excluded.is_empty()
+        && !sentinel_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .is_some_and(|text| crash_report_blames_the_device(&text))
+    {
+        for backend in std::mem::take(&mut excluded) {
+            let caps = run_probe_for(&backend);
+            eprintln!(
+                "[gpu] nothing else passed; retry {backend} from the previous run: {}",
+                caps.as_ref()
+                    .map(|c| c.adapter.as_str())
+                    .unwrap_or("FAILED")
+            );
+            let passed = caps.is_some();
+            results.push((backend, caps));
+            if passed {
+                break;
+            }
+        }
+    }
     let d = decide_backend(
         None,
         None,
@@ -965,6 +1010,17 @@ fn exercise_adapter(adapter: &iced::wgpu::Adapter) -> Option<ProbeCaps> {
         "[gpu-probe] trying {} ({:?}, {:?})",
         info.name, info.backend, info.device_type
     );
+    // iced's quad shader packs colours with `unpack2x16float`; wgpu refuses
+    // it where the adapter lacks F16-in-F32 (llvmpipe without SHADER_F16),
+    // and the first UI frame would panic on it.
+    if !adapter
+        .get_downlevel_capabilities()
+        .flags
+        .contains(wgpu::DownlevelFlags::SHADER_F16_IN_F32)
+    {
+        eprintln!("[gpu-probe] {}: no F16-in-F32 shader support", info.name);
+        return None;
+    }
     // Mirror iced's compositor: full limits first, then the downlevel set.
     let limits = [
         wgpu::Limits::default().using_resolution(adapter.limits()),
@@ -1274,7 +1330,7 @@ mod tests {
         let reason = d.reason.unwrap();
         assert!(reason.contains("dx12"), "{reason}");
         let notice = fallback_notice(&reason);
-        assert!(notice.contains("--backend"), "{notice}");
+        assert!(notice.contains("Options > Graphics"), "{notice}");
     }
 
     #[test]

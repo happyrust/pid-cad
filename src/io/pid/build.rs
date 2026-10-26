@@ -34,7 +34,7 @@ pub(super) fn build_document_entities(
     lookups: &Styles,
     library: &mut Option<SymbolLibrary>,
     unit: &ImportUnit,
-    doc: &mut CadDocument,
+    doc: &mut Document,
     paper_style_scale: f64,
 ) -> Built {
     let Styles {
@@ -363,6 +363,7 @@ pub(super) fn build_entities(
             radius,
             start_angle,
             end_angle,
+            clockwise: _,
         } => {
             let mut arc = codec::entities::Arc::new();
             arc.center = projection.point(center);

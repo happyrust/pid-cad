@@ -9,7 +9,7 @@ use codec::objects::{
     AssociativeData, BlockEvalValue, DynamicBlockData, ObjectType, SolidHistoryNodeBase,
     SolidHistoryOperation,
 };
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 
 use crate::scene::model::object::{PropSection, PropValue, Property};
 
@@ -25,7 +25,7 @@ pub struct ObjectDataCache {
     render_settings: std::sync::Arc<Vec<Handle>>,
 }
 
-pub fn build_cache(document: &CadDocument) -> ObjectDataCache {
+pub fn build_cache(document: &Document) -> ObjectDataCache {
     let mut dynamic_objects = Vec::new();
     let mut associative_objects = Vec::new();
     let mut ordered_lights = Vec::new();
@@ -350,7 +350,7 @@ fn history_operation_text(operation: &SolidHistoryOperation) -> String {
 }
 
 fn solid_history_sections(
-    document: &CadDocument,
+    document: &Document,
     cache: &ObjectDataCache,
     entity: &EntityType,
 ) -> Vec<PropSection> {
@@ -532,6 +532,11 @@ fn dynamic_data_text(data: &DynamicBlockData) -> String {
             value.value_set.increment,
             value.value_set.values.len()
         ),
+        DynamicBlockData::PropertiesTable(value) => format!(
+            "{}; fields {}",
+            value.parameter.parameter.element.name,
+            value.fields.len()
+        ),
         DynamicBlockData::LookupParameter(value) => format!(
             "{}; {} index {}; description {}",
             value.parameter.parameter.element.name,
@@ -620,7 +625,7 @@ fn dynamic_data_text(data: &DynamicBlockData) -> String {
             "{}; dependencies {}; parameters {}; distance multiplier {:.6}; angle {:.6}",
             value.action.element.name,
             value.action.dependencies.len(),
-            value.action.parameter_ids.len(),
+            value.action.action_ids.len(),
             value.offsets.distance_multiplier,
             value.offsets.angle_offset
         ),
@@ -628,14 +633,14 @@ fn dynamic_data_text(data: &DynamicBlockData) -> String {
             "{}; dependencies {}; parameters {}; connections {}",
             value.action.element.name,
             value.action.dependencies.len(),
-            value.action.parameter_ids.len(),
+            value.action.action_ids.len(),
             value.connections.len()
         ),
         DynamicBlockData::RotateAction(value) | DynamicBlockData::ScaleAction(value) => format!(
             "{}; dependencies {}; parameters {}; base {:.6},{:.6},{:.6}; dependent {}",
             value.action.action.element.name,
             value.action.action.dependencies.len(),
-            value.action.action.parameter_ids.len(),
+            value.action.action.action_ids.len(),
             value.action.base_point.x,
             value.action.base_point.y,
             value.action.base_point.z,
@@ -712,7 +717,7 @@ fn dynamic_data_text(data: &DynamicBlockData) -> String {
 }
 
 fn dynamic_block_sections(
-    document: &CadDocument,
+    document: &Document,
     cache: &ObjectDataCache,
     handle: Handle,
 ) -> Vec<PropSection> {
@@ -909,7 +914,7 @@ fn associative_data_name(data: &AssociativeData) -> &'static str {
 }
 
 fn associative_sections(
-    document: &CadDocument,
+    document: &Document,
     cache: &ObjectDataCache,
     handle: Handle,
 ) -> Vec<PropSection> {
@@ -951,7 +956,7 @@ fn associative_sections(
 
 /// Semantic DWG object sections connected to one selected entity.
 pub fn sections(
-    document: &CadDocument,
+    document: &Document,
     cache: &ObjectDataCache,
     handle: Handle,
     entity: &EntityType,
@@ -2235,7 +2240,7 @@ fn auxiliary_object_property(object: &ObjectType) -> Option<Property> {
 }
 
 /// Drawing-level standard object data prepared on the file-open worker.
-fn build_document_sections(document: &CadDocument) -> Vec<PropSection> {
+fn build_document_sections(document: &Document) -> Vec<PropSection> {
     use codec::objects::ClassObjectData;
 
     let mut sections = vec![PropSection {

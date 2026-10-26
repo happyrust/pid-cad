@@ -273,7 +273,7 @@ pub(super) fn apply_text_style(entity: &mut EntityType, style_name: &str) {
 ///
 /// Names are assigned over a `BTreeSet`, so they are stable for a given file.
 pub(super) fn register_text_styles(
-    doc: &mut CadDocument,
+    doc: &mut Document,
     text_heights: &pid_parse::style_link::TextHeightIndex,
     symbol_fonts: impl Iterator<Item = String>,
     path: &Path,

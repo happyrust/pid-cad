@@ -4,7 +4,7 @@
 use super::util::*;
 use super::{format_size, VIEWCUBE_HIT_SIZE};
 use crate::app::helpers::{
-    parse_coord, polar_constrain_near, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis, CoordKind,
+    parse_coord, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis, CoordKind,
 };
 use crate::app::TextEntryMode;
 use crate::app::{Message, OpenCADStudio, POLY_START_DELAY_MS};
@@ -160,7 +160,7 @@ impl OpenCADStudio {
             if self.tabs[idx].is_start {
                 continue;
             }
-            if self.tabs[idx].active_block_edit.is_some() {
+            if self.tabs[idx].active_block_edit.is_some() || self.tabs[idx].block_test.is_some() {
                 tasks.push(self.on_tab_close(idx));
                 if self.pending_block_close.is_some() || self.pending_close.is_some() {
                     break;
@@ -178,6 +178,28 @@ impl OpenCADStudio {
     }
 
     pub(in crate::app) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
+        let test_return_id = self
+            .tabs
+            .get(idx)
+            .and_then(|tab| tab.block_test.as_ref())
+            .map(|test| {
+                if idx == self.active_tab {
+                    test.source_id
+                } else {
+                    self.tabs[self.active_tab].id
+                }
+            });
+        if test_return_id.is_some() {
+            if idx == self.active_tab {
+                self.cancel_active_grip_edit();
+                self.grip_pending = None;
+                self.visibility_popup = None;
+                self.table_popup = None;
+                self.grip_popup = None;
+                self.grip_hover = None;
+            }
+            self.tabs[idx].dirty = false;
+        }
         // Start tab is fixed — close requests on it are no-ops.
         if self.tabs.get(idx).map_or(false, |t| t.is_start) {
             return Task::none();
@@ -249,6 +271,16 @@ impl OpenCADStudio {
         // The active tab is now either a brand-new blank or a
         // different existing tab; in both cases the ribbon needs
         // to track that doc's defaults / selection. #21.
+        if let Some(index) =
+            test_return_id.and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+        {
+            self.active_tab = index;
+            self.adopt_header_sysvars(index);
+        }
+        self.ribbon
+            .set_block_testing(self.tabs[self.active_tab].block_test.is_some());
+        self.ribbon
+            .set_block_editing(self.tabs[self.active_tab].active_block_edit.is_some());
         self.sync_ribbon_layers();
         self.sync_ribbon_styles();
         self.sync_ribbon_from_selection();
@@ -269,6 +301,11 @@ impl OpenCADStudio {
             if s.chars().all(|c| !c.is_control()) {
                 self.mtext_type(&s);
             }
+            return Task::none();
+        }
+        // A dialog owns the keyboard: typing while one is open (an open list
+        // in it included) must not land in the command line behind it.
+        if self.active_modal.is_some() || self.qselect.is_some() {
             return Task::none();
         }
         // Filter out control characters — only push the typed
@@ -333,10 +370,15 @@ impl OpenCADStudio {
                     self.command_line.input.push_str(&s);
                 }
             } else {
-                // Command-line entry is shown uppercase — except in
-                // free-form text prompts, where the typed case is the
-                // content (matches the CommandInput route).
-                if self.is_free_text_active() {
+                // Preserve case while entering a command or literal/free-text
+                // value. Active single-token prompt keywords keep their
+                // established uppercase normalization.
+                let preserve_case = self.tabs[i].active_cmd.is_none()
+                    || self.is_free_text_active()
+                    || self.command_line.literal_spaces
+                    || self.command_line.input.starts_with('>')
+                    || s.starts_with('>');
+                if preserve_case {
                     self.command_line.input.push_str(&s);
                 } else {
                     self.command_line.input.push_str(&s.to_uppercase());
@@ -380,6 +422,15 @@ impl OpenCADStudio {
             return Task::none();
         }
         let i = self.active_tab;
+        // A Mac keyboard's Delete key sends Backspace: with nothing typed and
+        // no command running it erases the selection, as Delete does.
+        if cfg!(target_os = "macos")
+            && self.command_line.input.is_empty()
+            && self.tabs[i].active_cmd.is_none()
+            && !self.tabs[i].scene.selected.is_empty()
+        {
+            return Task::done(Message::DeleteSelected);
+        }
         // Backspace edits the focused dynamic-input field first;
         // emptying it unlocks the field (back to cursor tracking).
         if self.dyn_input && !self.tabs[i].dyn_fields.is_empty() {
@@ -1218,7 +1269,12 @@ impl OpenCADStudio {
         }
     }
 
-    pub(super) fn on_command_escape(&mut self) -> Task<Message> {
+    pub(in crate::app) fn on_command_escape(&mut self) -> Task<Message> {
+        self.tabs[self.active_tab].measurement.clear();
+        // Escape also closes the overlapping-objects list.
+        if self.cycle_candidates.take().is_some() {
+            self.tabs[self.active_tab].scene.set_hover_highlight(None);
+        }
         // Escape answers a pending client getpoint request first: no point.
         if self.control.get_point.is_some() {
             self.resolve_get_point(None);
@@ -1242,6 +1298,8 @@ impl OpenCADStudio {
         // its menu (#337). Falls through — Esc keeps its usual effect.
         self.snap_override_popup = None;
         self.snapper.clear_override();
+        // Clear the deferred snap dwell — the command is being cancelled.
+        self.snap_dwell = None;
         // Open MText editor swallows Escape (cancel without committing).
         if self.mtext_editor.is_some() {
             self.mtext_cancel();
@@ -1312,7 +1370,11 @@ impl OpenCADStudio {
             self.grip_hover = None;
             return Task::none();
         }
+        if self.table_popup.take().is_some() {
+            return Task::none();
+        }
         if self.visibility_popup.take().is_some() {
+            self.table_popup = None;
             return Task::none();
         }
         if self.tabs[self.active_tab].active_grip.is_some() {
@@ -1373,6 +1435,7 @@ impl OpenCADStudio {
             // ESC while in MSPACE → exit back to paper space.
             return Task::done(Message::ExitViewport);
         } else {
+            self.tabs[i].selected_authoring = None;
             self.tabs[i].scene.deselect_all();
             self.refresh_properties();
             let mut sel = self.tabs[i].scene.selection.borrow_mut();
@@ -2488,7 +2551,7 @@ impl OpenCADStudio {
         Task::none()
     }
 
-    pub(super) fn on_ribbon_style_changed(
+    pub(in crate::app) fn on_ribbon_style_changed(
         &mut self,
         key: crate::modules::StyleKey,
         name: String,
@@ -2619,10 +2682,36 @@ impl OpenCADStudio {
         field: &'static str,
         value: String,
     ) -> Task<Message> {
+        let value = if field == "transparency" {
+            let Some(transparency) = crate::scene::creation_style::parse_current_transparency(&value)
+            else {
+                self.command_line.push_error(
+                    "Transparency: expected ByLayer, ByBlock, or an integer from 0 to 90.",
+                );
+                return Task::none();
+            };
+            let panel = &mut self.tabs[self.active_tab].properties;
+            panel
+                .edit_buf
+                .remove(&crate::ui::properties::FieldKey::Geom(field));
+            panel.edit_choice_open = false;
+            crate::scene::creation_style::current_transparency_label(transparency)
+        } else {
+            value
+        };
+        if field == "authoring_alignment_type" { return self.set_authoring_alignment_type(&value); }
+        if field.starts_with("bedit_") {
+            return self.set_block_property(field, &value);
+        }
         if matches!(field, "dyn_constraint_form" | "dyn_constraint_reference") {
             return self.on_dynamic_dimension_choice(field, &value);
         }
         let i = self.active_tab;
+        if field == "ole_lock_aspect" {
+            self.set_ole_lock_aspect(i, &value);
+            self.tabs[i].properties.edit_choice_open = false;
+            return Task::none();
+        }
         if field == "ext_pcx_locked" {
             let handles = self.point_cloud_lock_targets(i);
             self.apply_property_op(i, "CHPROP", &handles, |app, handle| {
@@ -2648,18 +2737,11 @@ impl OpenCADStudio {
             let document = &self.tabs[i].scene.document;
             let (toggle, current) = match document.get_entity(handle) {
                 Some(codec::EntityType::MText(text)) => ("is_annotative", text.is_annotative),
+                // The same per-object state the row shows and the toggle
+                // flips; a dimension's style only seeds it. (#1917)
                 Some(entity) => (
                     "annotative_ctx",
-                    crate::scene::annotative::is_annotative(document, entity)
-                        || match entity {
-                            codec::EntityType::Dimension(dimension) => {
-                                crate::scene::annotative::dim_style_is_annotative(
-                                    document,
-                                    &dimension.base().style_name,
-                                )
-                            }
-                            _ => false,
-                        },
+                    crate::scene::annotative::is_annotative(document, entity),
                 ),
                 None => return Task::none(),
             };
@@ -2874,9 +2956,12 @@ impl OpenCADStudio {
                             &value,
                         );
                         if applied && field == "dim_text_inside" {
-                            if let Some(codec::EntityType::Dimension(
-                                codec::entities::Dimension::LargeRadial(dimension),
-                            )) = app.tabs[i].scene.document.get_entity_mut(handle)
+                            let radial = app.tabs[i]
+                                .scene
+                                .document
+                                .get_entity_mut(handle)
+                                .and_then(crate::entities::dimension::as_dimension_mut);
+                            if let Some(codec::entities::Dimension::LargeRadial(dimension)) = radial
                             {
                                 dimension.base.text_user_positioned = false;
                             }
@@ -3145,6 +3230,16 @@ impl OpenCADStudio {
                 // handle on a failed lookup; the arrowhead/linetype rows
                 // take the resolved value directly (None = the default
                 // "Closed filled" / "ByBlock" option).
+                // A standard arrowhead's block is created on first use.
+                let picked_arrow = (field == "arrowhead_handle")
+                    .then(|| {
+                        crate::entities::arrowheads::resolve(
+                            &mut self.tabs[i].scene.document,
+                            &value,
+                        )
+                    })
+                    .flatten()
+                    .filter(|h| !h.is_null());
                 let doc = &self.tabs[i].scene.document;
                 let resolved_mleader_style = (field == "mleader_style")
                     .then(|| {
@@ -3165,16 +3260,7 @@ impl OpenCADStudio {
                         .iter()
                         .find(|s| s.name == value)
                         .map(|s| s.handle),
-                    "arrowhead_handle" => {
-                        if value == "Closed filled" {
-                            None
-                        } else {
-                            doc.block_records
-                                .iter()
-                                .find(|b| b.name == value)
-                                .map(|b| b.handle)
-                        }
-                    }
+                    "arrowhead_handle" => picked_arrow,
                     "line_type_handle" => {
                         if value == "ByBlock" {
                             None
@@ -3350,6 +3436,44 @@ impl OpenCADStudio {
                         _ => {}
                     }
                 }
+            } else if field == "dyn_visibility" {
+                // A visibility state picked in Properties, applied like a
+                // pick from the reference's visibility grip.
+                self.tabs[i].properties.edit_choice_open = false;
+                for &handle in &handles {
+                    let state = self.tabs[i]
+                        .scene
+                        .document
+                        .dynamic_visibility_for_insert(handle)
+                        .and_then(|(_, param)| param.states.iter().position(|s| s.name == value));
+                    if let Some(state) = state {
+                        self.apply_visibility_state(handle, state);
+                    }
+                }
+            } else if field == "dyn_lookup" {
+                self.tabs[i].properties.edit_choice_open = false;
+                let mut changed = false;
+                for &handle in &handles {
+                    if self.tabs[i].scene.is_layer_locked(handle) {
+                        continue;
+                    }
+                    let result = if let Some(test) = self.tabs[i].block_test.as_ref().filter(|test| test.insert == handle) {
+                        crate::scene::block_lookup::evaluate_test_choice(&self.tabs[i].scene.document, &test.baseline, handle, &value)
+                    } else { crate::scene::block_lookup::evaluate_reference_choice(&self.tabs[i].scene.document, handle, &value) };
+                    match result {
+                        Ok(Some(staged)) => {
+                            self.apply_action_document(i, staged);
+                            self.tabs[i].scene.bump_geometry();
+                            self.tabs[i].dirty = true;
+                            changed = true;
+                        }
+                        Ok(None) => {}
+                        Err(error) => self.command_line.push_error(crate::t!(error).as_ref()),
+                    }
+                }
+                if changed {
+                    self.finish_pending_history(i);
+                }
             } else if field == "block" {
                 // Name dropdown on a block reference: re-point the
                 // selected inserts to the picked definition. A stale
@@ -3431,6 +3555,27 @@ impl OpenCADStudio {
                 } else {
                     crate::command::WorkingPlane::default()
                 };
+                // A text taking a style takes what the style fixes: its height
+                // when the style sets one, its width factor and oblique angle.
+                let text_style = (field == "style")
+                    .then(|| self.tabs[i].scene.document.text_styles.get(&value).cloned())
+                    .flatten();
+                // A dimension taking a style takes its annotative state, as a
+                // new dimension would. (#1917)
+                let dim_style_annotative = (field == "style_name")
+                    .then(|| {
+                        self.tabs[i]
+                            .scene
+                            .document
+                            .dim_styles
+                            .iter()
+                            .find(|style| style.name.eq_ignore_ascii_case(&value))
+                            .map(|style| style.annotative)
+                    })
+                    .flatten();
+                let dim_scale = dim_style_annotative
+                    .filter(|annotative| *annotative)
+                    .and_then(|_| self.tabs[i].scene.creation_annotation_scale_handle());
                 for &handle in &handles {
                     let mline_style =
                         self.tabs[i]
@@ -3458,12 +3603,49 @@ impl OpenCADStudio {
                         crate::scene::view::dispatch::apply_geom_prop_in_working_plane(
                             entity, field, &value, plane,
                         );
+                        match (entity as &mut codec::EntityType, text_style.as_ref()) {
+                            (codec::EntityType::Text(text), Some(style)) => {
+                                if style.height > 0.0 {
+                                    text.height = style.height;
+                                }
+                                text.width_factor = style.width_factor;
+                                text.oblique_angle = style.oblique_angle;
+                            }
+                            (codec::EntityType::MText(text), Some(style)) if style.height > 0.0 => {
+                                text.height = style.height;
+                            }
+                            _ => {}
+                        }
                         if matches!(field, "ml_justification" | "ml_scale") {
                             if let (codec::EntityType::MLine(mline), Some(style)) =
                                 (entity, mline_style.as_ref())
                             {
                                 crate::modules::draw::draw::mline::sync_mline_element_parameters(
                                     mline, style,
+                                );
+                            }
+                        }
+                    }
+                    if let Some(annotative) = dim_style_annotative {
+                        let document = &mut self.tabs[i].scene.document;
+                        let current = match document.get_entity(handle) {
+                            Some(codec::EntityType::Dimension(dimension))
+                                if !matches!(**dimension, codec::entities::Dimension::Arc(_)) =>
+                            {
+                                crate::scene::annotative::object_is_annotative(
+                                    document,
+                                    &dimension.base().common,
+                                )
+                            }
+                            _ => continue,
+                        };
+                        if current != annotative {
+                            crate::scene::annotative::set_entity_annotative(
+                                document, handle, annotative,
+                            );
+                            if let Some(scale) = dim_scale {
+                                crate::scene::annotative::create_annotation_context(
+                                    document, handle, scale,
                                 );
                             }
                         }
@@ -3832,6 +4014,36 @@ impl OpenCADStudio {
     }
 
     pub(super) fn on_prop_geom_commit(&mut self, field: &'static str) -> Task<Message> {
+        if field == "transparency" {
+            let panel = &mut self.tabs[self.active_tab].properties;
+            panel.active_field = None;
+            if let Some(value) = panel
+                .edit_buf
+                .remove(&crate::ui::properties::FieldKey::Geom(field))
+            {
+                // Typed values and presets share validation, undo and the
+                // current-entity default when no object is selected.
+                return self.on_prop_geom_choice_changed(field, value);
+            }
+            return Task::none();
+        }
+        if field == "authoring_grip_count" { return self.commit_block_grip_count(); }
+        if field.starts_with("authoring_display_grip_") { return self.commit_native_grip_location(field); }
+        if field.starts_with("authoring_action_") {
+            return self.commit_authoring_action_option(field);
+        }
+        if field == "authoring_name" {
+            return self.commit_authoring_name();
+        }
+        if crate::scene::block_authoring::metadata::Field::from_key(field).is_some() {
+            return self.commit_authoring_metadata(field);
+        }
+        if field.starts_with("authoring_set_") {
+            return self.commit_authoring_value_set(field);
+        }
+        if field.starts_with("bedit_") {
+            return self.commit_block_property(field);
+        }
         use crate::ui::window::named_parameters::ParamField;
         // A dynamic dimension's Name/Expression rows edit its parameter.
         let dynamic_field = match field {
@@ -3902,6 +4114,19 @@ impl OpenCADStudio {
                         crate::entities::extended::validate_point_cloud_property(field, &val)
                     {
                         self.command_line.push_error(message);
+                        return Task::none();
+                    }
+                }
+                if field.starts_with("ole_") {
+                    if let Err(message) = crate::entities::ole2frame::validate_property(field, &val) {
+                        self.command_line.push_error(message);
+                        return Task::none();
+                    }
+                    if matches!(
+                        field,
+                        "ole_width" | "ole_height" | "ole_scale_width" | "ole_scale_height"
+                    ) {
+                        self.resize_ole_frames(i, &handles, field, &val);
                         return Task::none();
                     }
                 }
@@ -4126,28 +4351,49 @@ impl OpenCADStudio {
                                         &val,
                                     );
                                     if applied && field == "dim_text_inside" {
-                                        if let Some(codec::EntityType::Dimension(
-                                            codec::entities::Dimension::LargeRadial(dimension),
-                                        )) = self.tabs[i].scene.document.get_entity_mut(handle)
+                                        if let Some(codec::entities::Dimension::LargeRadial(
+                                            dimension,
+                                        )) = self.tabs[i]
+                                            .scene
+                                            .document
+                                            .get_entity_mut(handle)
+                                            .and_then(crate::entities::dimension::as_dimension_mut)
                                         {
                                             dimension.base.text_user_positioned = false;
                                         }
                                     }
                                 }
                             }
+                            // Annotative text: the row holds the paper height.
+                            "height"
+                                if self.tabs[i]
+                                    .scene
+                                    .annotative_text_height_factor(handle)
+                                    .is_some() =>
+                            {
+                                let factor = self.tabs[i]
+                                    .scene
+                                    .annotative_text_height_factor(handle)
+                                    .unwrap_or(1.0);
+                                if let (Ok(paper), Some(entity)) = (
+                                    val.trim().parse::<f64>(),
+                                    self.tabs[i].scene.document.get_entity_mut(handle),
+                                ) {
+                                    crate::scene::view::dispatch::apply_geom_prop_in_working_plane(
+                                        entity,
+                                        "height",
+                                        &(paper * factor).to_string(),
+                                        plane,
+                                    );
+                                }
+                            }
                             "hyperlink" => {
-                                // Stored in the standard PE_URL XDATA
-                                // record; an empty value clears it.
-                                let vals = if val.trim().is_empty() {
-                                    None
-                                } else {
-                                    Some(vec![codec::xdata::XDataValue::String(val.clone())])
-                                };
-                                crate::scene::view::dispatch::set_entity_xdata(
+                                // The address of the PE_URL record; its
+                                // text and named location stay.
+                                crate::scene::hyperlink::set_url(
                                     &mut self.tabs[i].scene.document,
                                     handle,
-                                    "PE_URL",
-                                    vals,
+                                    &val,
                                 );
                             }
                             "arrow_size" | "text_offset" | "dim_scale_overall" => {
@@ -4525,7 +4771,7 @@ pub(crate) struct BlockAttrMeta {
 /// Map each attribute tag to the metadata (prompt text, constant flag) declared on
 /// the block's matching ATTDEF. Tags with no definition are absent.
 pub(crate) fn block_attr_meta(
-    doc: &codec::CadDocument,
+    doc: &codec::Document,
     block_name: &str,
 ) -> rustc_hash::FxHashMap<String, BlockAttrMeta> {
     let mut map = rustc_hash::FxHashMap::default();
@@ -4650,6 +4896,121 @@ pub(crate) fn apply_attr_row(a: &mut codec::entities::AttributeEntity, row: &Att
         ch = true;
     }
     ch
+}
+
+#[cfg(test)]
+mod transparency_property_tests {
+    use crate::app::{Message, OpenCADStudio};
+    use crate::scene::model::object::PropValue;
+    use crate::ui::properties::FieldKey;
+
+    fn type_value(app: &mut OpenCADStudio, value: &str) {
+        let _ = app.update(Message::PropGeomInput {
+            field: "transparency",
+            value: value.into(),
+        });
+        let _ = app.update(Message::PropGeomCommit("transparency"));
+    }
+
+    #[test]
+    fn transparency_typed_values_and_presets_update_a_solid_hatch() {
+        let mut app = OpenCADStudio::new_for_test();
+        let i = app.active_tab;
+        let handle = app
+            .commit_entity_handle(codec::EntityType::Hatch(Box::new(
+                codec::entities::Hatch::new(),
+            )))
+            .expect("solid hatch");
+        app.tabs[i].scene.select_entity(handle, true);
+        app.refresh_properties();
+
+        for value in ["0", "37", "90"] {
+            type_value(&mut app, value);
+            let common = app.tabs[i]
+                .scene
+                .document
+                .get_entity(handle)
+                .unwrap()
+                .common();
+            assert_eq!(
+                crate::scene::creation_style::current_transparency_label(common.transparency),
+                value
+            );
+        }
+        // A preset must replace an uncommitted custom value in both the
+        // document and the displayed field, and close the menu.
+        let _ = app.update(Message::PropGeomInput {
+            field: "transparency",
+            value: "37".into(),
+        });
+        app.tabs[i].properties.edit_choice_open = true;
+        let _ = app.update(Message::PropGeomChoiceChanged {
+            field: "transparency",
+            value: "50".into(),
+        });
+        assert!(!app.tabs[i].properties.edit_choice_open);
+        assert!(!app.tabs[i]
+            .properties
+            .edit_buf
+            .contains_key(&FieldKey::Geom("transparency")));
+        let property = app.tabs[i]
+            .properties
+            .sections
+            .iter()
+            .flat_map(|s| &s.props)
+            .find(|p| p.field == "transparency")
+            .unwrap();
+        let PropValue::EditChoice { value, options } = &property.value else {
+            panic!("editable transparency");
+        };
+        assert_eq!(value, "50");
+        assert_eq!(
+            options,
+            &crate::scene::creation_style::transparency_options()
+        );
+
+        let before = app.tabs[i]
+            .scene
+            .document
+            .get_entity(handle)
+            .unwrap()
+            .common()
+            .transparency;
+        app.undo_active_tab();
+        assert_ne!(
+            app.tabs[i]
+                .scene
+                .document
+                .get_entity(handle)
+                .unwrap()
+                .common()
+                .transparency,
+            before
+        );
+    }
+
+    #[test]
+    fn transparency_typing_without_selection_updates_the_creation_default() {
+        let mut app = OpenCADStudio::new_for_test();
+        let i = app.active_tab;
+        app.refresh_properties();
+        type_value(&mut app, "37");
+        assert_eq!(
+            crate::scene::creation_style::current_transparency_label(
+                app.tabs[i].scene.document.current_entity_transparency()
+            ),
+            "37"
+        );
+        for invalid in ["91", "-3", "25.5", "abc"] {
+            type_value(&mut app, invalid);
+            assert_eq!(
+                crate::scene::creation_style::current_transparency_label(
+                    app.tabs[i].scene.document.current_entity_transparency()
+                ),
+                "37"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5180,7 +5541,7 @@ mod tablestyle_buffer_tests {
         let mut app = OpenCADStudio::new_for_test();
         app.automation_op(r#"{"op":"new"}"#);
         app.ts_cell_textstyle[0] = "STALE_SENTINEL".to_string();
-        app.style_new(StyleKind::Table);
+        let _ = app.style_new(StyleKind::Table);
         assert_ne!(
             app.ts_cell_textstyle[0], "STALE_SENTINEL",
             "buffers must reload from the fresh style"

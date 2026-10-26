@@ -24,7 +24,7 @@
 
 use std::io::BufRead;
 
-use codec::{CadDocument, Handle};
+use codec::{Document, Handle};
 
 /// One STYLE record's typeface as written in its `ACAD` xdata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,7 +149,7 @@ pub(crate) fn scan_style_typefaces(reader: impl BufRead) -> Vec<StyleTypeface> {
 /// (shape-file flag, or a font file other than `.ttf` / `.ttc` / `.otf`) are
 /// touched; a typeface that decoded with replacement characters is skipped.
 /// Returns how many styles were filled.
-pub(crate) fn apply_style_typefaces(doc: &mut CadDocument, found: &[StyleTypeface]) -> usize {
+pub(crate) fn apply_style_typefaces(doc: &mut Document, found: &[StyleTypeface]) -> usize {
     let mut filled = 0;
     for record in found {
         if record.typeface.is_empty() || record.typeface.contains('\u{FFFD}') {
@@ -183,7 +183,7 @@ pub(crate) fn apply_style_typefaces(doc: &mut CadDocument, found: &[StyleTypefac
 }
 
 /// Scan and apply in one step; the caller hands over the DXF text it just read.
-pub(crate) fn fix_dxf_text_style_typefaces(doc: &mut CadDocument, reader: impl BufRead) -> usize {
+pub(crate) fn fix_dxf_text_style_typefaces(doc: &mut Document, reader: impl BufRead) -> usize {
     let found = scan_style_typefaces(reader);
     if found.is_empty() {
         return 0;
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn apply_fills_only_empty_non_shx_styles() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         doc.text_styles.add_or_replace(style(0x31B, "-宋体", ""));
         doc.text_styles
             .add_or_replace(style(0x319, "黑体", "simhei.ttf"));
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn apply_matches_by_name_when_the_record_had_no_handle() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         doc.text_styles.add_or_replace(style(0, "st", ""));
         let found = vec![StyleTypeface {
             handle: Handle::NULL,
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn end_to_end_on_the_sheet_tables() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         doc.text_styles.add_or_replace(style(0x31B, "-宋体", ""));
         doc.text_styles
             .add_or_replace(style(0x319, "黑体", "simhei.ttf"));

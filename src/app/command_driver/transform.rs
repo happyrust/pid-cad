@@ -149,14 +149,38 @@ impl OpenCADStudio {
         &mut self,
         mut handles: Vec<Handle>,
         windows: Vec<(glam::DVec3, glam::DVec3)>,
+        mut excluded_points: Vec<(Handle, glam::DVec3)>,
+        subtract_window: Option<(glam::DVec3, glam::DVec3)>,
     ) {
+        use crate::modules::draw::modify::stretch::is_excluded;
         let i = self.active_tab;
+        if let Some((min, max)) = subtract_window {
+            // Subtract only the vertex grips that STRETCH actually selected.
+            // Testing whole entities would remove all of their vertices,
+            // including points outside the subtraction rectangle.
+            for (&handle, grip) in self.tabs[i]
+                .selected_grip_handles
+                .iter()
+                .zip(self.tabs[i].selected_grips.iter())
+            {
+                let world = grip.world;
+                let inside = world.x >= min.x - 1e-9
+                    && world.x <= max.x + 1e-9
+                    && world.y >= min.y - 1e-9
+                    && world.y <= max.y + 1e-9;
+                if inside && !is_excluded(&excluded_points, handle, world) {
+                    excluded_points.push((handle, world));
+                }
+            }
+        }
         // Accumulate every entity touched by any crossing window. Keep STRETCH
         // in its selection stage; Enter is what advances to the base point.
         {
             let scene = &self.tabs[i].scene;
 
-            for (win_min, win_max) in &windows {
+            // A subtraction window leaves the current crossing windows
+            // unchanged; do not rerun a large drawing's selection query.
+            for (win_min, win_max) in windows.iter().filter(|_| subtract_window.is_none()) {
                 handles.extend(
                     scene
                         .interaction_handles_in_world_aabb([
@@ -196,13 +220,16 @@ impl OpenCADStudio {
 
             for &handle in &handles {
                 let wires = self.tabs[i].scene.wire_models_for(&[handle]);
+                let active_point = |point: glam::DVec3| {
+                    point_inside(point) && !is_excluded(&excluded_points, handle, point)
+                };
 
                 let affected = wires.iter().any(|wire| {
                     // LINE / LWPOLYLINE / other vertex-based entities.
                     let vertex_hit = wire
                         .key_vertices
                         .iter()
-                        .any(|point| point_inside(glam::DVec3::from_array(*point)));
+                        .any(|point| active_point(glam::DVec3::from_array(*point)));
 
                     if vertex_hit {
                         return true;
@@ -217,7 +244,7 @@ impl OpenCADStudio {
                             crate::scene::model::wire_model::SnapHint::Center
                                 | crate::scene::model::wire_model::SnapHint::Insertion
                                 | crate::scene::model::wire_model::SnapHint::Node
-                        ) && point_inside(*point)
+                        ) && active_point(*point)
                     })
                 });
 
@@ -241,7 +268,10 @@ impl OpenCADStudio {
                 .into_iter()
                 .zip(std::mem::take(&mut self.tabs[i].selected_grips))
             {
-                if !grip.is_midpoint && point_inside(grip.world) {
+                if !grip.is_midpoint
+                    && point_inside(grip.world)
+                    && !is_excluded(&excluded_points, handle, grip.world)
+                {
                     stretch_grip_handles.push(handle);
                     stretch_grips.push(grip);
                 }
@@ -256,7 +286,7 @@ impl OpenCADStudio {
 
         let wires = self.tabs[i].scene.wire_models_for(&handles);
 
-        let cmd = StretchCommand::with_windows(handles, wires, windows);
+        let cmd = StretchCommand::with_windows(handles, wires, windows, excluded_points);
 
         self.command_line.push_info(&CadCommand::prompt(&cmd));
         self.tabs[i].active_cmd = Some(Box::new(cmd));
@@ -266,6 +296,7 @@ impl OpenCADStudio {
         &mut self,
         mut handles: Vec<Handle>,
         windows: Vec<(glam::DVec3, glam::DVec3)>,
+        excluded_points: Vec<(Handle, glam::DVec3)>,
         delta: glam::DVec3,
     ) -> Option<Task<Message>> {
         let i = self.active_tab;
@@ -285,22 +316,21 @@ impl OpenCADStudio {
         let mut changed_handles = Vec::new();
         let mut driven_refs = Vec::new();
 
-        // Helper: is DXF point (x, y) inside the world-space window?
-        // Drawing plane is world XY (= DXF XY).
-        let in_win = |x: f64, y: f64| -> bool {
-            windows.iter().any(|(win_min, win_max)| {
-                x >= win_min.x && x <= win_max.x && y >= win_min.y && y <= win_max.y
-            })
-        };
-
-        let dx = delta.x as f64;
-        let dy = delta.y as f64; // drawing plane is world XY
-        let dz = delta.z as f64;
-
         // Dimensions whose points moved — their baked *D block is
         // stale afterwards and must be dropped (see #398 / #372).
         let mut stretched_dims: Vec<codec::Handle> = Vec::new();
         for handle in &handles {
+            // Subtract only this entity's explicitly removed vertices. The same
+            // predicate gates preview, geometry mutation and inferred constraints.
+            let in_win = |x: f64, y: f64| -> bool {
+                windows.iter().any(|(min, max)| {
+                    x >= min.x && x <= max.x && y >= min.y && y <= max.y
+                }) && !crate::modules::draw::modify::stretch::is_excluded(
+                    &excluded_points,
+                    *handle,
+                    glam::DVec3::new(x, y, 0.0),
+                )
+            };
             let before = self.tabs[i].scene.document.get_entity_arc(*handle);
             if let Some(entity) = before.as_deref() {
                 use crate::scene::parametric_constraints::ParametricRef;
@@ -343,198 +373,15 @@ impl OpenCADStudio {
             let Some(entity) = self.tabs[i].scene.document.get_entity_mut(*handle) else {
                 continue;
             };
-            let mut stretched = false;
-            match entity {
-                codec::EntityType::Line(l) => {
-                    let s_in = in_win(l.start.x, l.start.y);
-                    let e_in = in_win(l.end.x, l.end.y);
-                    if s_in {
-                        l.start.x += dx;
-                        l.start.y += dy;
-                        l.start.z += dz;
-                        stretched = true;
-                    }
-                    if e_in {
-                        l.end.x += dx;
-                        l.end.y += dy;
-                        l.end.z += dz;
-                        stretched = true;
-                    }
-                }
-                codec::EntityType::LwPolyline(p) => {
-                    let Some(mut world) = crate::entities::curve::lwpolyline_world_xy(p) else {
-                        continue;
-                    };
-                    for v in &mut world.vertices {
-                        if in_win(v.location.x, v.location.y) {
-                            v.location.x += dx;
-                            v.location.y += dy;
-                            stretched = true;
-                        }
-                    }
-                    if stretched {
-                        *p = world;
-                    }
-                }
-                codec::EntityType::Polyline2D(p) => {
-                    for v in &mut p.vertices {
-                        if in_win(v.location.x, v.location.y) {
-                            v.location.x += dx;
-                            v.location.y += dy;
-                            stretched = true;
-                        }
-                    }
-                }
-                codec::EntityType::Polyline(p) => {
-                    for v in &mut p.vertices {
-                        if in_win(v.location.x, v.location.z) {
-                            v.location.x += dx;
-                            v.location.z += dy;
-                            stretched = true;
-                        }
-                    }
-                }
-                codec::EntityType::Arc(a) => {
-                    if in_win(a.center.x, a.center.y) {
-                        a.center.x += dx;
-                        a.center.y += dy;
-                        a.center.z += dz;
-                        stretched = true;
-                    }
-                }
-                codec::EntityType::Circle(c) => {
-                    if in_win(c.center.x, c.center.y) {
-                        c.center.x += dx;
-                        c.center.y += dy;
-                        c.center.z += dz;
-                        stretched = true;
-                    }
-                }
-                codec::EntityType::Ellipse(e) => {
-                    if in_win(e.center.x, e.center.y) {
-                        e.center.x += dx;
-                        e.center.y += dy;
-                        e.center.z += dz;
-                        stretched = true;
-                    }
-                }
-                codec::EntityType::Insert(ins) => {
-                    if in_win(ins.insert_point.x, ins.insert_point.y) {
-                        ins.insert_point.x += dx;
-                        ins.insert_point.y += dy;
-                        ins.insert_point.z += dz;
-                        stretched = true;
-                    }
-                }
-                codec::EntityType::Text(t) => {
-                    if in_win(t.insertion_point.x, t.insertion_point.y) {
-                        t.insertion_point.x += dx;
-                        t.insertion_point.y += dy;
-                        t.insertion_point.z += dz;
-                        stretched = true;
-                    }
-                }
-                codec::EntityType::MText(t) => {
-                    if in_win(t.insertion_point.x, t.insertion_point.y) {
-                        t.insertion_point.x += dx;
-                        t.insertion_point.y += dy;
-                        t.insertion_point.z += dz;
-                        stretched = true;
-                    }
-                }
-                codec::EntityType::Viewport(vp) => {
-                    stretched = windows.iter().any(|(win_min, win_max)| {
-                        crate::entities::viewport::stretch(vp, *win_min, *win_max, delta)
-                    });
-                }
-                codec::EntityType::Dimension(dim) => {
-                    use codec::entities::Dimension;
-                    // Move every definition point that falls inside the
-                    // window — the same points the grips expose — then
-                    // refresh the stored measurement so the value tracks
-                    // the stretched geometry.
-                    let mv = |p: &mut codec::types::Vector3| {
-                        if in_win(p.x, p.y) {
-                            p.x += dx;
-                            p.y += dy;
-                            p.z += dz;
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    match dim {
-                        Dimension::Linear(d) => {
-                            stretched |= mv(&mut d.first_point);
-                            stretched |= mv(&mut d.second_point);
-                            stretched |= mv(&mut d.definition_point);
-                        }
-                        Dimension::Aligned(d) => {
-                            stretched |= mv(&mut d.first_point);
-                            stretched |= mv(&mut d.second_point);
-                            stretched |= mv(&mut d.definition_point);
-                        }
-                        Dimension::Radius(d) => {
-                            stretched |= mv(&mut d.angle_vertex);
-                            stretched |= mv(&mut d.definition_point);
-                        }
-                        Dimension::Diameter(d) => {
-                            stretched |= mv(&mut d.angle_vertex);
-                            stretched |= mv(&mut d.definition_point);
-                        }
-                        Dimension::Angular2Ln(d) => {
-                            stretched |= mv(&mut d.angle_vertex);
-                            stretched |= mv(&mut d.first_point);
-                            stretched |= mv(&mut d.second_point);
-                            stretched |= mv(&mut d.definition_point);
-                        }
-                        Dimension::Angular3Pt(d) => {
-                            stretched |= mv(&mut d.angle_vertex);
-                            stretched |= mv(&mut d.first_point);
-                            stretched |= mv(&mut d.second_point);
-                            stretched |= mv(&mut d.definition_point);
-                        }
-                        Dimension::Ordinate(d) => {
-                            stretched |= mv(&mut d.feature_location);
-                            stretched |= mv(&mut d.leader_endpoint);
-                        }
-                        Dimension::Arc(d) => {
-                            stretched |= mv(&mut d.definition_point);
-                            stretched |= mv(&mut d.first_extension_point);
-                            stretched |= mv(&mut d.second_extension_point);
-                            stretched |= mv(&mut d.center_point);
-                            if d.has_leader {
-                                stretched |= mv(&mut d.first_leader_point);
-                                stretched |= mv(&mut d.second_leader_point);
-                            }
-                        }
-                        Dimension::LargeRadial(d) => {
-                            stretched |= mv(&mut d.definition_point);
-                            stretched |= mv(&mut d.chord_point);
-                            stretched |= mv(&mut d.override_center);
-                            stretched |= mv(&mut d.jog_point);
-                        }
-                    }
-                    // Pinned text follows too; the zero sentinel means
-                    // "auto placement" and must not be captured by a
-                    // window that happens to cover the origin.
-                    let t = dim.base().text_middle_point;
-                    if t.x * t.x + t.y * t.y + t.z * t.z > 1e-16 {
-                        let mut t = t;
-                        if mv(&mut t) {
-                            dim.base_mut().text_middle_point = t;
-                            stretched = true;
-                        }
-                    }
-                    if stretched {
-                        dim.base_mut().actual_measurement = dim.measurement();
-                        stretched_dims.push(*handle);
-                    }
-                }
-                _ => {
-                    // Generic: move entire entity (treat as block-level)
-                    stretched = false; // skip generic types
-                }
+            let stretched = crate::modules::draw::modify::stretch::stretch_entity_except(
+                entity,
+                *handle,
+                &windows,
+                &excluded_points,
+                delta,
+            );
+            if stretched && matches!(entity, codec::EntityType::Dimension(_)) {
+                stretched_dims.push(*handle);
             }
             if stretched {
                 if let Some(before) = before {

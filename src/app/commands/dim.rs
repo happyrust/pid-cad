@@ -1036,20 +1036,7 @@ impl OpenCADStudio {
 
             "FILLET" => {
                 use crate::modules::draw::modify::fillet::FilletCommand;
-                let entities: Vec<_> = self.tabs[i]
-                    .scene
-                    .entity_wires()
-                    .iter()
-                    .filter_map(|w| {
-                        let h = Scene::handle_from_wire_name(&w.name)?;
-                        self.tabs[i]
-                            .scene
-                            .document
-                            .get_entity(h)
-                            .cloned()
-                            .map(|e| (h, e))
-                    })
-                    .collect();
+                let entities: Vec<_> = self.tabs[i].scene.visible_entities_for_edit(|_| true);
                 let all_entities: Vec<_> = entities.into_iter().map(|(_, e)| e).collect();
                 let new_cmd = FilletCommand::new(
                     crate::modules::draw::defaults::get_fillet_radius(),
@@ -1063,12 +1050,9 @@ impl OpenCADStudio {
                 use crate::modules::draw::modify::blend::BlendCommand;
                 let all_entities: Vec<_> = self.tabs[i]
                     .scene
-                    .entity_wires()
-                    .iter()
-                    .filter_map(|wire| {
-                        let handle = Scene::handle_from_wire_name(&wire.name)?;
-                        self.tabs[i].scene.document.get_entity(handle).cloned()
-                    })
+                    .visible_entities_for_edit(|_| true)
+                    .into_iter()
+                    .map(|(_, e)| e)
                     .collect();
                 let new_cmd = BlendCommand::new(all_entities);
                 self.command_line.push_info(&new_cmd.prompt());
@@ -1134,12 +1118,9 @@ impl OpenCADStudio {
                     let wires = self.tabs[i].scene.wire_models_for(&handles);
                     let all_entities: Vec<_> = self.tabs[i]
                         .scene
-                        .entity_wires()
-                        .iter()
-                        .filter_map(|w| {
-                            let h = Scene::handle_from_wire_name(&w.name)?;
-                            self.tabs[i].scene.document.get_entity(h).cloned()
-                        })
+                        .visible_entities_for_edit(|_| true)
+                        .into_iter()
+                        .map(|(_, e)| e)
                         .collect();
                     let new_cmd = ArrayPathCommand::new(handles, wires, all_entities);
                     self.command_line.push_info(&new_cmd.prompt());
@@ -1219,20 +1200,7 @@ impl OpenCADStudio {
 
             "CHAMFER" => {
                 use crate::modules::draw::modify::fillet::ChamferCommand;
-                let entities: Vec<_> = self.tabs[i]
-                    .scene
-                    .entity_wires()
-                    .iter()
-                    .filter_map(|w| {
-                        let h = Scene::handle_from_wire_name(&w.name)?;
-                        self.tabs[i]
-                            .scene
-                            .document
-                            .get_entity(h)
-                            .cloned()
-                            .map(|e| (h, e))
-                    })
-                    .collect();
+                let entities: Vec<_> = self.tabs[i].scene.visible_entities_for_edit(|_| true);
                 let all_entities: Vec<_> = entities.into_iter().map(|(_, e)| e).collect();
                 let new_cmd = ChamferCommand::new(
                     crate::modules::draw::defaults::get_chamfer_dist1(),
@@ -1335,16 +1303,37 @@ impl OpenCADStudio {
                 }
             }
 
+            // TXT2MTXT — TEXT / MTEXT combined into MTEXT. A preselection is
+            // used at once; otherwise the selection prompt with SEttings.
+            "TXT2MTXT" => {
+                if !self.tabs[i].scene.selected.is_empty() {
+                    return Some(self.dispatch_command("_TXT2MTXTSEL"));
+                }
+                use crate::modules::draw::select::SelectObjectsCommand;
+                self.command_line
+                    .push_output(crate::t!("Select text objects to combine ...").as_ref());
+                let command = SelectObjectsCommand::with_settings(
+                    "TXT2MTXT",
+                    "_TXT2MTXTSEL",
+                    "Select objects or [SEttings]:",
+                    || crate::command::CmdResult::OpenTxt2MtxtSettings,
+                );
+                self.command_line.push_info(&command.prompt());
+                self.command_line.set_step_options(command.options());
+                self.tabs[i].active_cmd = Some(Box::new(command));
+            }
+            "_TXT2MTXTSEL" => {
+                self.apply_txt2mtxt(i);
+                return Some(self.finish_dispatch("TXT2MTXT"));
+            }
+
             "OFFSET" => {
                 use crate::modules::draw::modify::offset::{is_offsettable, OffsetCommand};
                 let all_entities: Vec<_> = self.tabs[i]
                     .scene
-                    .entity_wires()
-                    .iter()
-                    .filter_map(|w| {
-                        let h = Scene::handle_from_wire_name(&w.name)?;
-                        self.tabs[i].scene.document.get_entity(h).cloned()
-                    })
+                    .visible_entities_for_edit(|_| true)
+                    .into_iter()
+                    .map(|(_, e)| e)
                     .collect();
                 // Pick-first (#422): with offsettable objects already selected,
                 // skip the distance and pick steps and open on the live side
@@ -1366,29 +1355,28 @@ impl OpenCADStudio {
             }
 
             "TRIM" => {
-                use crate::modules::draw::modify::trim::TrimCommand;
-                let entities: Vec<_> = self.tabs[i]
-                    .scene
-                    .entity_wires()
-                    .iter()
-                    .filter_map(|w| {
-                        let h = Scene::handle_from_wire_name(&w.name)?;
-                        self.tabs[i]
-                            .scene
-                            .document
-                            .get_entity(h)
-                            .cloned()
-                            .map(|e| (h, e))
-                    })
-                    .collect();
+                use crate::modules::draw::modify::trim::{is_trim_boundary_entity, TrimCommand};
+                // Only curves cut or get cut: block references, text and the
+                // like stay out of the working copy (#1978). HATCH fills have
+                // their own renderer, so visible top-level hatches are added
+                // for the hatch trim solver.
+                let mut entities =
+                    self.tabs[i].scene.visible_entities_for_edit(is_trim_boundary_entity);
+                let mut seen: std::collections::HashSet<codec::Handle> =
+                    entities.iter().map(|(handle, _)| *handle).collect();
+                for handle in self.tabs[i].scene.visible_hatch_handles_for_edit() {
+                    if seen.insert(handle) {
+                        if let Some(entity) = self.tabs[i].scene.document.get_entity(handle).cloned() {
+                            entities.push((handle, entity));
+                        }
+                    }
+                }
                 let initial_edges: Vec<codec::Handle> = self.tabs[i]
                     .scene
                     .selected_entities()
                     .into_iter()
-                    .filter_map(|(handle, entity)| {
-                        crate::modules::draw::modify::trim::is_trim_boundary_entity(&entity)
-                            .then_some(handle)
-                    })
+                    .filter(|(_, entity)| is_trim_boundary_entity(entity))
+                    .map(|(handle, _)| handle)
                     .collect();
                 let all_entities: Vec<_> = entities.into_iter().map(|(_, e)| e).collect();
                 let new_cmd = TrimCommand::with_cutting_edges(all_entities, initial_edges);
@@ -1397,50 +1385,23 @@ impl OpenCADStudio {
             }
 
             "EXTRIM" => {
-                use crate::modules::draw::modify::trim::ExtrimCommand;
-                let all: Vec<_> = self.tabs[i]
-                    .scene
-                    .entity_wires()
-                    .iter()
-                    .filter_map(|w| {
-                        let h = Scene::handle_from_wire_name(&w.name)?;
-                        self.tabs[i]
-                            .scene
-                            .document
-                            .get_entity(h)
-                            .cloned()
-                            .map(|e| (h, e))
-                    })
-                    .collect();
+                use crate::modules::draw::modify::trim::{is_trim_boundary_entity, ExtrimCommand};
+                let all = self.tabs[i].scene.visible_entities_for_edit(is_trim_boundary_entity);
                 let new_cmd = ExtrimCommand::new(all);
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }
 
             "EXTEND" => {
-                use crate::modules::draw::modify::trim::ExtendCommand;
-                let entities: Vec<_> = self.tabs[i]
-                    .scene
-                    .entity_wires()
-                    .iter()
-                    .filter_map(|w| {
-                        let h = Scene::handle_from_wire_name(&w.name)?;
-                        self.tabs[i]
-                            .scene
-                            .document
-                            .get_entity(h)
-                            .cloned()
-                            .map(|e| (h, e))
-                    })
-                    .collect();
+                use crate::modules::draw::modify::trim::{is_trim_boundary_entity, ExtendCommand};
+                let entities =
+                    self.tabs[i].scene.visible_entities_for_edit(is_trim_boundary_entity);
                 let initial_edges: Vec<codec::Handle> = self.tabs[i]
                     .scene
                     .selected_entities()
                     .into_iter()
-                    .filter_map(|(handle, entity)| {
-                        crate::modules::draw::modify::trim::is_trim_boundary_entity(&entity)
-                            .then_some(handle)
-                    })
+                    .filter(|(_, entity)| is_trim_boundary_entity(entity))
+                    .map(|(handle, _)| handle)
                     .collect();
                 let all_entities: Vec<_> = entities.into_iter().map(|(_, e)| e).collect();
                 let new_cmd = ExtendCommand::with_boundary_edges(all_entities, initial_edges);
@@ -1519,9 +1480,153 @@ impl OpenCADStudio {
                 );
             }
 
+            "DIMOVERRIDE" => {
+                use crate::modules::annotate::dimoverride::DimOverrideCommand;
+                let cmd = DimOverrideCommand::new();
+                self.command_line.push_info(&cmd.prompt());
+                self.command_line.set_step_options(cmd.options());
+                self.tabs[i].active_cmd = Some(Box::new(cmd));
+            }
+
+            cmd if cmd.starts_with("DIMOVERRIDE_APPLY ") => {
+                let spec = cmd.trim_start_matches("DIMOVERRIDE_APPLY ").trim();
+                let values = if spec.eq_ignore_ascii_case("CLEAR") {
+                    Vec::new()
+                } else {
+                    match crate::modules::annotate::dimoverride::parse_spec(spec) {
+                        Ok(values) if !values.is_empty() => values,
+                        Ok(_) => return Some(self.finish_dispatch(cmd)),
+                        Err(entry) => {
+                            self.command_line.push_error(
+                                crate::tf!("DIMOVERRIDE: invalid override \"{entry}\".").as_ref(),
+                            );
+                            return Some(self.finish_dispatch(cmd));
+                        }
+                    }
+                };
+                let handles = self.selected_editable_dimensions(i);
+                if self.tabs[i].scene.selected_handles_in_order().is_empty() {
+                    use crate::modules::draw::select::SelectObjectsCommand;
+                    let sel = SelectObjectsCommand::routed("DIMOVERRIDE", cmd);
+                    self.command_line.push_info(&sel.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(sel));
+                } else if handles.is_empty() {
+                    self.command_line.push_error(
+                        crate::t!("DIMOVERRIDE: no editable dimensions were selected.").as_ref(),
+                    );
+                } else {
+                    use crate::entities::dim_override as dov;
+                    self.push_undo_snapshot(i, "DIMOVERRIDE");
+                    for &handle in &handles {
+                        let doc = &mut self.tabs[i].scene.document;
+                        if values.is_empty() {
+                            dov::replace(doc, handle, Vec::new());
+                        }
+                        for (code, value) in &values {
+                            dov::set(doc, handle, *code, Some(value.clone()));
+                        }
+                    }
+                    self.invalidate_property_targets(i, &handles);
+                    self.tabs[i].dirty = true;
+                    self.refresh_properties();
+                    self.command_line.push_output(
+                        crate::tf!("DIMOVERRIDE: updated {} dimension(s).", handles.len()).as_ref(),
+                    );
+                }
+            }
+
+            "DIMDISASSOCIATE" | "DIMREASSOCIATE" => {
+                let handles = self.selected_editable_dimensions(i);
+                if handles.is_empty() {
+                    use crate::modules::draw::select::SelectObjectsCommand;
+                    self.tabs[i].scene.deselect_all();
+                    let sel = if cmd == "DIMDISASSOCIATE" {
+                        SelectObjectsCommand::associative_dimensions(
+                            cmd,
+                            cmd,
+                            "Select dimensions to disassociate:",
+                        )
+                    } else {
+                        SelectObjectsCommand::new(cmd)
+                    };
+                    self.command_line.push_info(&sel.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(sel));
+                } else if cmd == "DIMDISASSOCIATE" {
+                    self.push_undo_snapshot(i, "DIMDISASSOCIATE");
+                    let count = handles
+                        .iter()
+                        .filter(|&&handle| self.tabs[i].scene.detach_dimension_association(handle))
+                        .count();
+                    self.invalidate_property_targets(i, &handles);
+                    self.tabs[i].dirty |= count > 0;
+                    self.command_line.push_output(
+                        crate::tf!("DIMDISASSOCIATE: {count} dimension(s) disassociated.").as_ref(),
+                    );
+                } else {
+                    self.push_undo_snapshot(i, "DIMREASSOCIATE");
+                    let (mut count, mut partial) = (0, 0);
+                    for &handle in &handles {
+                        let scene = &mut self.tabs[i].scene;
+                        let owner_of = |handle: codec::Handle| {
+                            scene.document.get_entity(handle).map(|e| e.common().owner_handle)
+                        };
+                        // Only geometry in the dimension's own space may anchor it.
+                        let owner = owner_of(handle);
+                        let sources: Vec<_> = scene
+                            .infer_dimension_sources(handle)
+                            .into_iter()
+                            .map(|source| source.filter(|source| owner_of(*source) == owner))
+                            .collect();
+                        if sources.iter().all(Option::is_none) {
+                            continue;
+                        }
+                        let complete = sources.iter().all(Option::is_some);
+                        scene.detach_dimension_association(handle);
+                        scene.attach_dimension_association(handle, sources);
+                        if scene.dimension_association(handle).is_some() {
+                            if complete {
+                                count += 1;
+                            } else {
+                                partial += 1;
+                            }
+                        }
+                    }
+                    self.invalidate_property_targets(i, &handles);
+                    self.tabs[i].dirty |= count + partial > 0;
+                    self.command_line.push_output(
+                        crate::tf!(
+                            "DIMREASSOCIATE: {count} of {} dimension(s) associated.",
+                            handles.len()
+                        )
+                        .as_ref(),
+                    );
+                    if partial > 0 {
+                        self.command_line.push_output(
+                            crate::tf!(
+                                "DIMREASSOCIATE: {partial} dimension(s) only partially associated (no object at some definition points)."
+                            )
+                            .as_ref(),
+                        );
+                    }
+                }
+            }
+
             _ => return None,
         }
         Some(self.finish_dispatch(cmd))
+    }
+
+    /// The selected dimensions that are not on a locked layer.
+    fn selected_editable_dimensions(&self, i: usize) -> Vec<codec::Handle> {
+        let scene = &self.tabs[i].scene;
+        scene
+            .selected_entities()
+            .into_iter()
+            .filter(|(handle, entity)| {
+                matches!(entity, codec::EntityType::Dimension(_)) && !scene.is_layer_locked(*handle)
+            })
+            .map(|(handle, _)| handle)
+            .collect()
     }
 }
 
@@ -1545,4 +1650,53 @@ fn title_case(s: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+impl OpenCADStudio {
+    /// TXT2MTXT on the selection (in selection order), as one undo step.
+    fn apply_txt2mtxt(&mut self, i: usize) {
+        let scene = &self.tabs[i].scene;
+        let handles: Vec<codec::Handle> = scene
+            .selected_handles_in_order()
+            .into_iter()
+            .filter(|handle| !scene.is_layer_locked(*handle))
+            .collect();
+        let plan = {
+            let selected: Vec<(codec::Handle, &codec::EntityType)> = handles
+                .iter()
+                .filter_map(|h| scene.document.get_entity(*h).map(|e| (*h, e)))
+                .collect();
+            crate::modules::annotate::txt2mtxt::plan(
+                &selected,
+                &scene.document,
+                self.txt2mtxt_settings,
+            )
+        };
+        self.tabs[i].scene.deselect_all();
+        // Enter on an empty selection ends quietly.
+        if handles.is_empty() {
+            return;
+        }
+        let Some(plan) = plan else {
+            self.command_line
+                .push_output("  0 Text objects removed, 0 MText objects added.");
+            return;
+        };
+        self.push_undo_snapshot(i, "TXT2MTXT");
+        self.tabs[i].scene.erase_entities(&plan.erase);
+        let added = plan.add.len();
+        for entity in plan.add {
+            self.tabs[i].scene.add_entity(entity);
+        }
+        self.tabs[i].dirty = true;
+        self.refresh_properties();
+        // Every selected object counts as removed text, the way the
+        // reference reports it.
+        let removed = handles.len();
+        self.command_line.push_output(&if added == 1 {
+            format!("  {removed} Text objects removed, 1 MText object added.")
+        } else {
+            format!("  {removed} Text objects removed, {added} MText objects added.")
+        });
+    }
 }

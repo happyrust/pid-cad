@@ -784,6 +784,11 @@ fn section_label<'a>(s: Cow<'static, str>) -> Element<'a, Message> {
     form::section_label(s)
 }
 
+/// The inline page-setup rename field, focused when a rename starts.
+pub fn setup_rename_id() -> iced::widget::Id {
+    iced::widget::Id::new("page-setup-rename-input")
+}
+
 fn setup_row<'a>(
     name: &'a str,
     selected: &str,
@@ -791,13 +796,15 @@ fn setup_row<'a>(
     rename_buf: &'a str,
 ) -> Element<'a, Message> {
     if renaming == Some(name) {
+        // A text field has no content width: Fit collapsed it to a sliver.
         return text_input("", rename_buf)
+            .id(setup_rename_id())
             .on_input(|value| Message::PlotDlg(PlotDlgMsg::NameInput(value)))
             .on_submit(Message::PlotDlg(PlotDlgMsg::NameCommit))
             .style(form::field_style)
             .size(11)
             .padding([4, 8])
-            .width(Fit)
+            .width(Length::Fill)
             .into();
     }
     let is_selected = name == selected;
@@ -1292,8 +1299,10 @@ pub fn view_window(
     } else {
         scrollable(column(rows).spacing(1)).height(height).into()
     };
+    // The name gets the sidebar's full width; beside the buttons it was
+    // squeezed to nothing. (#1817)
     let new_name: Element<'_, Message> = if !s.name_rename && s.name_input.is_some() {
-        row![
+        column![
             text_input("", rename_buf)
                 .on_input(|value| Message::PlotDlg(PlotDlgMsg::NameInput(value)))
                 .on_submit(Message::PlotDlg(PlotDlgMsg::NameCommit))
@@ -1301,14 +1310,19 @@ pub fn view_window(
                 .size(11)
                 .padding([4, 8])
                 .width(Length::Fill),
-            button(text(t!("Save")).size(11))
-                .on_press(Message::PlotDlg(PlotDlgMsg::NameCommit))
-                .style(btn(true))
-                .padding([4, 8]),
-            button(text("×").size(11))
-                .on_press(Message::PlotDlg(PlotDlgMsg::NameCancel))
-                .style(btn(false))
-                .padding([4, 8]),
+            row![
+                Space::new().width(Length::Fill),
+                button(text(t!("Save")).size(11))
+                    .on_press(Message::PlotDlg(PlotDlgMsg::NameCommit))
+                    .style(btn(true))
+                    .padding([4, 8]),
+                button(crate::ui::icons::semantic(crate::ui::icons::CLOSE, 11.0))
+                    .on_press(Message::PlotDlg(PlotDlgMsg::NameCancel))
+                    .style(btn(false))
+                    .padding([4, 8]),
+            ]
+            .spacing(4)
+            .align_y(iced::Center),
         ]
         .spacing(4)
         .into()

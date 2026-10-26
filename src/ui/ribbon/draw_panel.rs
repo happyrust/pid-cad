@@ -123,6 +123,8 @@ const REFERENCE_TOOLS: &[Tool] = &[Tool {
     options: &[],
 }];
 pub(super) const REFERENCE_PANEL_ID: &str = "reference_extension";
+/// Insert > Block Definition slide-out: its tools are listed with labels.
+const BLOCK_DEFINITION_PANEL_ID: &str = "block_definition_extension";
 
 const fn icon_tool(command: &'static str, label: &'static str, icon: &'static [u8]) -> Tool {
     Tool {
@@ -171,6 +173,14 @@ const BLOCK_DEFINITION_TOOLS: &[Tool] = &[
     ),
 ];
 
+/// Insert > Import slide-out, its tools named beside their icons.
+const IMPORT_TOOLS: &[Tool] = &[icon_tool(
+    "LANDXMLIMPORT",
+    "Land XML",
+    include_bytes!("../../../assets/icons/landxml.svg"),
+)];
+const IMPORT_PANEL_ID: &str = "import_extension";
+
 const PANELS: &[Panel] = &[
     Panel {
         id: PANEL_ID,
@@ -201,11 +211,18 @@ const PANELS: &[Panel] = &[
         tools: HOME_BLOCK_TOOLS,
     },
     Panel {
-        id: "block_definition_extension",
+        id: BLOCK_DEFINITION_PANEL_ID,
         anchor: None,
         title_id: "block_definition_extension_title",
         title: "Block Definition",
         tools: BLOCK_DEFINITION_TOOLS,
+    },
+    Panel {
+        id: IMPORT_PANEL_ID,
+        anchor: None,
+        title_id: "import_extension_title",
+        title: "Import",
+        tools: IMPORT_TOOLS,
     },
 ];
 
@@ -306,9 +323,11 @@ pub(super) fn group_title<'a>(
     active_tool: Option<&str>,
 ) -> Element<'a, Message> {
     let Some(panel) = panel_for_group(title, group_ids) else {
-        return container(text(t!(title)).size(9).style(muted_text_style))
-            .padding([1, 4])
-            .into();
+        let label = keytips::label_anchor(
+            || format!("title:{title}"),
+            text(t!(title)).size(9).style(muted_text_style),
+        );
+        return container(label).padding([1, 4]).into();
     };
     let expanded = open.as_deref().and_then(parent_panel) == Some(panel.id);
     // A command running from the closed slide-out lights its title, the way a
@@ -327,7 +346,10 @@ pub(super) fn group_title<'a>(
         panel.id,
         button(
             row![
-                PosReport::new(panel.title_id, text(t!(title)).size(9)),
+                keytips::label_anchor(
+                    || keytips::label_id(panel.id),
+                    PosReport::new(panel.title_id, text(t!(title)).size(9)),
+                ),
                 arrow
             ]
             .spacing(4)
@@ -410,6 +432,30 @@ fn tool_button(tool: &Tool, active: bool, panel_id: &'static str) -> Element<'st
     }
 }
 
+/// A slide-out tool as one row: its icon, then its name.
+fn labeled_row(panel_id: &'static str, tool: &Tool) -> Element<'static, Message> {
+    let command = tool.command;
+    let row = button(
+        row![
+            make_icon(IconKind::Svg(tool.icon), 16.0),
+            keytips::label_anchor(
+                move || keytips::label_id(&keytips::item_anchor(panel_id, command)),
+                text(t!(tool.label)).size(11),
+            ),
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    )
+    .on_press(Message::DropdownSelectItem {
+        dropdown_id: panel_id,
+        cmd: command,
+    })
+    .style(popup_row_style)
+    .width(Fill)
+    .padding([3, 6]);
+    keytips::anchor_with(move || keytips::item_anchor(panel_id, command), row)
+}
+
 /// The Reference slide-out: Edit Reference, and xref fading on/off with its
 /// amount (XDWGFADECTL; the switch keeps the amount as a negative value).
 fn reference_overlay<'a>(ribbon: &Ribbon, panel: Panel, win: (f32, f32)) -> Element<'a, Message> {
@@ -417,23 +463,7 @@ fn reference_overlay<'a>(ribbon: &Ribbon, panel: Panel, win: (f32, f32)) -> Elem
     let (_, x, anchor_top) = ribbon.dd_anchor(panel.id, width, win.0);
     let left = x.clamp(0.0, (win.0 - width).max(0.0));
     let top = anchor_top.min((win.1 - 80.0).max(0.0));
-    let tool = &panel.tools[0];
-    let edit = button(
-        row![
-            make_icon(IconKind::Svg(tool.icon), 16.0),
-            text(t!(tool.label)).size(11)
-        ]
-        .spacing(6)
-        .align_y(iced::Center),
-    )
-    .on_press(Message::DropdownSelectItem {
-        dropdown_id: panel.id,
-        cmd: tool.command,
-    })
-    .style(popup_row_style)
-    .width(Fill)
-    .padding([3, 6]);
-    let edit = keytips::anchor_with(|| keytips::item_anchor(panel.id, tool.command), edit);
+    let edit = labeled_row(panel.id, &panel.tools[0]);
     let fade = ribbon.xref_fade;
     let on = fade > 0;
     let switch = button(make_icon(
@@ -461,7 +491,10 @@ fn reference_overlay<'a>(ribbon: &Ribbon, panel: Panel, win: (f32, f32)) -> Elem
     );
     let fading = row![
         switch,
-        text(t!("Xref fading")).size(11),
+        keytips::label_anchor(
+            || keytips::label_id(&keytips::item_anchor(panel.id, keytips::XREF_FADE)),
+            text(t!("Xref fading")).size(11),
+        ),
         iced::widget::slider(0..=90u8, amount, Message::XrefFadeSlide)
             .on_release(Message::XrefFadeCommit)
             .width(Fill),
@@ -479,10 +512,57 @@ fn reference_overlay<'a>(ribbon: &Ribbon, panel: Panel, win: (f32, f32)) -> Elem
     dropdown_backdrop(position_ribbon_dropdown(body.into(), false, left, top))
 }
 
+/// A slide-out listing each tool as icon and label, one per row.
+fn labeled_overlay<'a>(ribbon: &Ribbon, panel: Panel, win: (f32, f32)) -> Element<'a, Message> {
+    let width: f32 = 200.0_f32.min((win.0 - 8.0).max(120.0));
+    let (_, x, anchor_top) = ribbon.dd_anchor(panel.id, width, win.0);
+    let left = x.clamp(0.0, (win.0 - width).max(0.0));
+    let top = anchor_top.min((win.1 - 80.0).max(0.0));
+    let rows = panel.tools.iter().map(|tool| {
+        let active = tool_is_active(tool, ribbon.active_tool.as_deref());
+        let item = button(
+            row![
+                make_icon(IconKind::Svg(tool.icon), 16.0),
+                keytips::label_anchor(
+                    || keytips::label_id(&keytips::item_anchor(panel.id, tool.command)),
+                    text(t!(tool.label)).size(11),
+                ),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
+        )
+        .on_press(Message::DropdownSelectItem {
+            dropdown_id: panel.id,
+            cmd: tool.command,
+        })
+        .style(move |theme: &Theme, status| {
+            if active {
+                tool_btn_style(theme, true, status)
+            } else {
+                popup_row_style(theme, status)
+            }
+        })
+        .width(Fill)
+        .padding([3, 6]);
+        keytips::anchor_with(|| keytips::item_anchor(panel.id, tool.command), item)
+    });
+    let body = container(column(rows.collect::<Vec<_>>()).spacing(2).padding(6))
+        .width(width)
+        .style(|theme: &Theme| {
+            let mut style = popup_panel_style(theme);
+            style.border.color = theme.palette().primary.base.color;
+            style
+        });
+    dropdown_backdrop(position_ribbon_dropdown(body.into(), false, left, top))
+}
+
 pub(super) fn overlay<'a>(ribbon: &Ribbon, id: &str, win: (f32, f32)) -> Element<'a, Message> {
     let panel = panel_for_dropdown(id).expect("registered ribbon extension");
     if panel.id == REFERENCE_PANEL_ID {
         return reference_overlay(ribbon, panel, win);
+    }
+    if panel.id == BLOCK_DEFINITION_PANEL_ID || panel.id == IMPORT_PANEL_ID {
+        return labeled_overlay(ribbon, panel, win);
     }
     let tools = panel.tools;
     let width = (7.0 * (CELL + GAP) - GAP + 12.0).min((win.0 - 8.0).max(CELL + 12.0));

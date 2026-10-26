@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use codec::entities::{table::CellRange, TableBuilder};
 use codec::objects::{ClassObject, ClassObjectData, DataLink, DataLinkCustomData, ObjectType};
 use codec::types::{Handle, Vector3};
-use codec::{CadDocument, EntityType};
+use codec::{Document, EntityType};
 use iced::Task;
 
 use super::{Message, ModalKind, OpenCADStudio};
@@ -25,6 +25,9 @@ struct ExtractionRecord {
     color: String,
     linetype: String,
     details: String,
+    position: Option<codec::types::Vector3>,
+    /// Rotation in degrees, for the objects the Properties palette shows one for.
+    rotation: Option<f64>,
 }
 
 // ── In-session picked-file registries (web) ───────────────────────────────
@@ -42,8 +45,8 @@ fn picked_sources() -> &'static Mutex<HashMap<String, Arc<Vec<u8>>>> {
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-fn extraction_documents() -> &'static Mutex<HashMap<String, Arc<CadDocument>>> {
-    static DOCUMENTS: OnceLock<Mutex<HashMap<String, Arc<CadDocument>>>> = OnceLock::new();
+fn extraction_documents() -> &'static Mutex<HashMap<String, Arc<Document>>> {
+    static DOCUMENTS: OnceLock<Mutex<HashMap<String, Arc<Document>>>> = OnceLock::new();
     DOCUMENTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -133,7 +136,7 @@ pub(crate) fn picked_source_bytes(path: &str) -> Option<Arc<Vec<u8>>> {
 /// lists. The extraction pipeline reads these on the web instead of calling
 /// the path-based `load_file`.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-pub(crate) fn register_extraction_document(name: &str, document: CadDocument) {
+pub(crate) fn register_extraction_document(name: &str, document: Document) {
     extraction_documents()
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -143,7 +146,7 @@ pub(crate) fn register_extraction_document(name: &str, document: CadDocument) {
 /// The parsed drawing registered under this source reference, matched by exact
 /// key or by file name.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-pub(crate) fn extraction_document(path: &str) -> Option<Arc<CadDocument>> {
+pub(crate) fn extraction_document(path: &str) -> Option<Arc<Document>> {
     let cache = extraction_documents()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -165,12 +168,16 @@ impl ExtractionRecord {
             "color" => self.color.clone(),
             "linetype" => self.linetype.clone(),
             "details" => self.details.clone(),
+            "position_x" => self.position.map_or_else(String::new, |p| format!("{:.3}", p.x)),
+            "position_y" => self.position.map_or_else(String::new, |p| format!("{:.3}", p.y)),
+            "position_z" => self.position.map_or_else(String::new, |p| format!("{:.3}", p.z)),
+            "rotation" => self.rotation.map_or_else(String::new, |r| format!("{r:.3}")),
             _ => String::new(),
         }
     }
 }
 
-fn table_styles(doc: &CadDocument) -> Vec<String> {
+fn table_styles(doc: &Document) -> Vec<String> {
     let mut styles: Vec<String> = doc
         .objects
         .iter()
@@ -198,7 +205,7 @@ fn link_display_name(link: &DataLink) -> String {
         .unwrap_or_else(|| "Data Link".into())
 }
 
-fn resolve_link_path(doc: &CadDocument, link: &DataLink) -> PathBuf {
+fn resolve_link_path(doc: &Document, link: &DataLink) -> PathBuf {
     let stored = PathBuf::from(&link.connection_string);
     if stored.is_absolute() || link.path_option == 1 {
         return stored;
@@ -211,7 +218,7 @@ fn resolve_link_path(doc: &CadDocument, link: &DataLink) -> PathBuf {
         .unwrap_or(stored)
 }
 
-fn data_link_choices(doc: &CadDocument) -> Vec<DataLinkChoice> {
+fn data_link_choices(doc: &Document) -> Vec<DataLinkChoice> {
     let mut links = doc
         .objects
         .iter()
@@ -239,7 +246,7 @@ fn data_link_choices(doc: &CadDocument) -> Vec<DataLinkChoice> {
     links
 }
 
-fn data_link<'a>(doc: &'a CadDocument, handle: Handle) -> Option<&'a DataLink> {
+fn data_link<'a>(doc: &'a Document, handle: Handle) -> Option<&'a DataLink> {
     match doc.objects.get(&handle) {
         Some(ObjectType::ClassObject(object)) => match &object.data {
             ClassObjectData::DataLink(link) => Some(link),
@@ -249,7 +256,7 @@ fn data_link<'a>(doc: &'a CadDocument, handle: Handle) -> Option<&'a DataLink> {
     }
 }
 
-fn data_link_mut<'a>(doc: &'a mut CadDocument, handle: Handle) -> Option<&'a mut DataLink> {
+fn data_link_mut<'a>(doc: &'a mut Document, handle: Handle) -> Option<&'a mut DataLink> {
     match doc.objects.get_mut(&handle) {
         Some(ObjectType::ClassObject(object)) => match &mut object.data {
             ClassObjectData::DataLink(link) => Some(link),
@@ -470,7 +477,7 @@ pub(crate) fn read_tabular_file(
     }
 }
 
-fn table_style_handle(doc: &CadDocument, name: &str) -> Option<Handle> {
+fn table_style_handle(doc: &Document, name: &str) -> Option<Handle> {
     doc.objects
         .iter()
         .find_map(|(handle, object)| match object {
@@ -561,7 +568,7 @@ fn link_custom_data(sheet: &str, kind: LinkRange, range: Option<&str>) -> Vec<Da
     values
 }
 
-fn read_link_rows(doc: &CadDocument, link: &DataLink) -> Result<Vec<Vec<String>>, String> {
+fn read_link_rows(doc: &Document, link: &DataLink) -> Result<Vec<Vec<String>>, String> {
     let (sheet, kind, range) = link_selection(link);
     read_tabular_file(
         &resolve_link_path(doc, link),
@@ -572,7 +579,7 @@ fn read_link_rows(doc: &CadDocument, link: &DataLink) -> Result<Vec<Vec<String>>
 }
 
 pub(crate) fn read_data_link(
-    doc: &CadDocument,
+    doc: &Document,
     handle: Handle,
 ) -> Result<Vec<Vec<String>>, String> {
     let link = data_link(doc, handle)
@@ -580,7 +587,7 @@ pub(crate) fn read_data_link(
     read_link_rows(doc, link)
 }
 
-pub(crate) fn data_link_write_path(doc: &CadDocument, handle: Handle) -> Result<PathBuf, String> {
+pub(crate) fn data_link_write_path(doc: &Document, handle: Handle) -> Result<PathBuf, String> {
     let link = data_link(doc, handle)
         .ok_or_else(|| crate::t!("The data link no longer exists.").into_owned())?;
     if link.option & 1 == 0 {
@@ -631,14 +638,35 @@ fn entity_details(entity: &EntityType) -> String {
         EntityType::Polyline2D(value) => format!("{} vertices", value.vertices.len()),
         EntityType::Polyline3D(value) => format!("{} vertices", value.vertices.len()),
         EntityType::Hatch(value) => value.pattern.name.clone(),
-        EntityType::Dimension(value) => format!("{:.3}", value.base().actual_measurement),
+        EntityType::Dimension(value) => format!("{:.3}", value.measurement()),
         EntityType::Spline(value) => format!("{} control points", value.control_points.len()),
         _ => String::new(),
     }
 }
 
+/// The placement point the Properties palette shows as Position.
+fn entity_position(entity: &EntityType) -> Option<codec::types::Vector3> {
+    match entity {
+        EntityType::Text(value) => Some(crate::entities::text::position(value)),
+        EntityType::MText(value) => Some(value.insertion_point),
+        EntityType::Insert(value) => Some(value.insert_point),
+        EntityType::Point(value) => Some(value.location),
+        _ => None,
+    }
+}
+
+fn entity_rotation(entity: &EntityType) -> Option<f64> {
+    let radians = match entity {
+        EntityType::Insert(value) => value.rotation,
+        EntityType::Text(value) => value.rotation,
+        EntityType::MText(value) => value.rotation,
+        _ => return None,
+    };
+    Some(radians.to_degrees())
+}
+
 fn collect_records(
-    doc: &CadDocument,
+    doc: &Document,
     allowed_handles: Option<&BTreeSet<Handle>>,
     allowed_types: &BTreeSet<String>,
     out: &mut Vec<ExtractionRecord>,
@@ -661,6 +689,8 @@ fn collect_records(
             color: entity.common().color.to_string(),
             linetype: entity.common().linetype.clone(),
             details: entity_details(entity),
+            position: entity_position(entity),
+            rotation: entity_rotation(entity),
         });
     }
 }
@@ -719,7 +749,7 @@ fn extraction_drawing_paths(state: &DataExtractionState) -> Result<Vec<PathBuf>,
 /// every listed source must have been picked, or it asks for the pick again.
 fn for_each_extraction_document(
     state: &DataExtractionState,
-    mut visit: impl FnMut(&CadDocument),
+    mut visit: impl FnMut(&Document),
 ) -> Result<(), String> {
     #[cfg(target_arch = "wasm32")]
     for source in &state.source_files {
@@ -738,7 +768,7 @@ fn for_each_extraction_document(
 }
 
 fn collect_type_counts(
-    doc: &CadDocument,
+    doc: &Document,
     allowed_handles: Option<&BTreeSet<Handle>>,
     counts: &mut BTreeMap<String, usize>,
 ) {
@@ -757,7 +787,7 @@ fn collect_type_counts(
 
 fn extraction_preview(
     state: &DataExtractionState,
-    current: &CadDocument,
+    current: &Document,
 ) -> Result<Vec<Vec<String>>, String> {
     let allowed_types = state
         .objects
@@ -2242,7 +2272,7 @@ mod tests {
     #[test]
     fn registered_extraction_documents_match_by_file_name() {
         let key = format!("ocs-doc-{}-{}.dwg", std::process::id(), line!());
-        register_extraction_document(&key, CadDocument::new());
+        register_extraction_document(&key, Document::new());
         assert!(extraction_document(&key.to_ascii_uppercase()).is_some());
         assert!(extraction_document("ocs-doc-other.dwg").is_none());
     }

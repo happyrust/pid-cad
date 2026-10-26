@@ -35,7 +35,7 @@ fn the_summary_round_trips_through_its_properties_and_take_removes_them() {
         mm_per_unit: MM_PER_METRE,
     };
 
-    let mut doc = CadDocument::new();
+    let mut doc = Document::new();
     doc.summary_info
         .custom_properties
         .push(("Client".to_string(), "kept".to_string()));
@@ -608,7 +608,7 @@ fn a_cached_strokes_dash_is_its_own_and_its_colour_its_placements() {
 
     let mut styles = LineStyleIndex::new();
     styles.insert(("/".to_string(), 1), placement_style(sheet_dash()));
-    let mut doc = CadDocument::new();
+    let mut doc = Document::new();
     let pool = register_dash_linetypes(&mut doc, &styles, std::slice::from_ref(&body), 1.0);
     assert_eq!(
         pool.get(&vec![1000, 1000]).map(String::as_str),
@@ -1205,7 +1205,7 @@ fn paper_style_scale_multiplies_declared_sizes_and_leaves_lettering() {
     let mut styles = LineStyleIndex::new();
     styles.insert(("/".to_string(), 1), dashed(1, &[0.0035, 0.00175]));
     styles.insert(("/".to_string(), 2), dashed(2, &[0.001_905, 0.001_27]));
-    let mut doc = CadDocument::new();
+    let mut doc = Document::new();
     let pool = register_dash_linetypes(&mut doc, &styles, &[], scale);
     assert_eq!(
         pool.get(&vec![3500, 1750]).map(String::as_str),
@@ -1494,7 +1494,7 @@ fn a_linked_igr_overlays_its_drafting_on_pid_frame() {
     let Some(igr) = igr else {
         return; // fixture absent: soft-skip like the corpus tests do
     };
-    let mut doc = CadDocument::new();
+    let mut doc = Document::new();
     // The drawing's own normalized geometry is only consulted for its page:
     // the template's must agree with it.
     let drawing = NormalizedPidGeometry {

@@ -38,7 +38,7 @@ pub(super) fn resolve_styles(
     parsed: &pid_parse::PidDocument,
     geometry: &NormalizedPidGeometry,
     path: &Path,
-    doc: &mut CadDocument,
+    doc: &mut Document,
     paper_style_scale: f64,
 ) -> Styles {
     // Line width and colour are the drawing's own, read from its style table:
@@ -362,7 +362,7 @@ pub(super) fn build_fill(
     if let Some([r, g, b]) = fill.rgb() {
         hatch.common.color = foreground_color(r, g, b);
     }
-    vec![EntityType::Hatch(hatch)]
+    vec![EntityType::Hatch(Box::new(hatch))]
 }
 
 /// What a stated RGB becomes in the drawing.
@@ -511,7 +511,7 @@ pub(super) fn dash_key(segments_mm: &[f64]) -> Vec<i64> {
 /// known as it is drawn, so its dash draws exactly when the pool already holds
 /// the pattern (see [`paint_symbol_stroke`]).
 pub(super) fn register_dash_linetypes(
-    doc: &mut CadDocument,
+    doc: &mut Document,
     styles: &LineStyleIndex,
     cached_bodies: &[PidSymbolDefinition],
     paper_style_scale: f64,

@@ -33,6 +33,12 @@ const LINETYPE_MENU_W: f32 = 220.0;
 use crate::app::Message;
 use crate::scene::model::object::{PropSection, PropValue};
 
+#[derive(Clone, Debug, PartialEq)]
+struct IndexedBlockChoice { index: usize, label: String }
+impl fmt::Display for IndexedBlockChoice {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result { formatter.write_str(&self.label) }
+}
+
 const VARIES_LABEL: &str = "*VARIES*";
 
 // ── Linetype item (name + ASCII art for combo_box) ───────────────────────
@@ -405,6 +411,7 @@ pub fn lw_options() -> Vec<LwItem> {
 pub enum FieldKey {
     /// A geometry / common editable value field, keyed by its field name.
     Geom(&'static str),
+    BlockParameter(crate::scene::model::object::BlockParameterKey),
     /// A block attribute value field, keyed by its tag.
     Attr(String),
     /// One column of one named-parameter row, keyed by its stable
@@ -420,6 +427,7 @@ impl FieldKey {
     pub fn widget_id(&self) -> iced::widget::Id {
         match self {
             FieldKey::Geom(field) => prop_geom_field_id(field),
+            FieldKey::BlockParameter(key) => iced::widget::Id::from(format!("props-block-{}-{}-{}-{}-{:?}", key.document, key.definition, key.insert, key.parameter, key.component)),
             FieldKey::Attr(tag) => prop_attr_field_id(tag),
             FieldKey::Param(index, field) => prop_param_field_id(*index, *field),
         }
@@ -487,6 +495,7 @@ pub fn build_field_key_map(sections: &[PropSection]) -> HashMap<iced::widget::Id
                     Some(FieldKey::Geom(prop.field))
                 }
                 PropValue::AttrText { tag, .. } => Some(FieldKey::Attr(tag.clone())),
+                PropValue::BlockNumber { key, .. } => Some(FieldKey::BlockParameter(*key)),
                 _ => None,
             };
             if let Some(key) = key {
@@ -595,6 +604,8 @@ pub struct PropertiesPanel {
     /// commit onto a different entity (e.g. two title blocks sharing a `REV1`
     /// tag).
     pub source_handles: Vec<Handle>,
+    /// Definition shown by the no-selection Block section, separate from entity targets.
+    pub block_definition: Option<Handle>,
     /// Whether the quick color picker dropdown is open.
     pub color_picker_open: bool,
     /// Whether the MTEXT background-colour picker dropdown is open. Separate
@@ -657,6 +668,7 @@ impl Default for PropertiesPanel {
             hatch_pattern_focus: 0,
             edit_buf: HashMap::default(),
             source_handles: vec![],
+            block_definition: None,
             color_picker_open: false,
             bg_color_picker_open: false,
             open_color_field: None,
@@ -943,6 +955,72 @@ impl PropertiesPanel {
         panel_width: f32,
     ) -> Element<'a, Message> {
         match &prop.value {
+            PropValue::BlockNumber {
+                key,
+                value,
+                description,
+            } => {
+                let field = FieldKey::BlockParameter(*key);
+                let display = self
+                    .edit_buf
+                    .get(&field)
+                    .map(String::as_str)
+                    .unwrap_or(value);
+                let key = *key;
+                let input = text_input("", display)
+                    .id(field.widget_id())
+                    .on_input(move |value| Message::PropBlockInput { key, value })
+                    .on_submit(Message::PropBlockCommit(key))
+                    .size(FONT_SZ)
+                    .style(text_input_style)
+                    .padding([3, 6])
+                    .width(Length::Fill);
+                let row = prop_row_with_active(
+                    label,
+                    input.into(),
+                    self.active_field.as_ref() == Some(&field),
+                );
+                if description.is_empty() {
+                    row
+                } else {
+                    tooltip(row, text(description).size(FONT_SZ), tooltip::Position::Top).into()
+                }
+            }
+            PropValue::BlockChoice {
+                key,
+                selected,
+                options,
+                description,
+            } => {
+                let choices: Vec<_> = options
+                    .iter()
+                    .enumerate()
+                    .map(|(index, label)| IndexedBlockChoice {
+                        index,
+                        label: label.clone(),
+                    })
+                    .collect();
+                let current = choices.get(*selected).cloned();
+                let key = *key;
+                let picker =
+                    iced::widget::pick_list(current, choices, |choice: &IndexedBlockChoice| {
+                        choice.label.clone()
+                    })
+                    .on_select(move |choice| Message::PropBlockChoice {
+                        key,
+                        index: choice.index,
+                    })
+                    .placeholder(t!("Custom"))
+                    .text_size(FONT_SZ)
+                    .padding([3, 6])
+                    .width(Length::Fill);
+                let row = prop_row_widget(label, picker.into());
+                if description.is_empty() {
+                    row
+                } else {
+                    tooltip(row, text(description).size(FONT_SZ), tooltip::Position::Top).into()
+                }
+            }
             PropValue::ColorChoice(color) => self.render_color_row(label, prop.field, *color, None),
             PropValue::NamedColorChoice { color, name } => {
                 self.render_color_row(label, prop.field, *color, Some(name))
@@ -958,6 +1036,14 @@ impl PropertiesPanel {
             PropValue::LinetypeChoice(lt) => self.render_linetype_row(label, lt),
             PropValue::Choice { selected, options } => {
                 self.render_choice_row(label, prop.field, selected, options, panel_width)
+            }
+            PropValue::ChoiceWithTooltip { selected, options, tooltip: description } => {
+                let row = self.render_choice_row(label, prop.field, selected, options, panel_width);
+                if description.is_empty() {
+                    row
+                } else {
+                    tooltip(row, text(description).size(FONT_SZ), tooltip::Position::Top).into()
+                }
             }
             PropValue::EditChoice { value, options } => {
                 self.render_edit_choice_row(label, prop.field, value, options)
@@ -1332,7 +1418,12 @@ impl PropertiesPanel {
             .unwrap_or(entity_val);
 
         let active = self.active_field.as_ref() == Some(&key);
-        let ti = text_input("", display)
+        let placeholder = match field {
+            "authoring_base_state_label" => crate::tr!("block-grip", "not-flipped"),
+            "authoring_flipped_state_label" => crate::tr!("block-grip", "flipped"),
+            _ => String::new(),
+        };
+        let ti = text_input(&placeholder, display)
             .id(prop_geom_field_id(field))
             .on_input(move |v| Message::PropGeomInput { field, value: v })
             .on_submit(Message::PropGeomCommit(field))
@@ -1439,12 +1530,11 @@ impl PropertiesPanel {
             })
             .width(Length::Fill);
 
-        if !(self.edit_choice_open && self.picker_here()) {
-            return prop_row_with_active(label, head.into(), active);
-        }
-
-        // Open list: all definitions, filtered by any typed text.
-        let filter = typed.map(|s| s.to_lowercase());
+        // Transparency presets remain available while entering a custom value.
+        // Definition/name fields still filter their potentially long lists.
+        let filter = typed
+            .filter(|_| field != "transparency")
+            .map(|s| s.to_lowercase());
         let mut list = column![].spacing(1);
         for opt in options {
             if let Some(f) = &filter {
@@ -1467,12 +1557,13 @@ impl PropertiesPanel {
 
         prop_row_with_active(
             label,
-            crate::ui::color_select::drop_down_below(
+            crate::ui::color_select::editable_drop_down_below(
                 head.into(),
                 popup.into(),
                 None,
                 Length::Shrink,
                 Message::PropEditChoiceToggle,
+                self.edit_choice_open && self.picker_here(),
             ),
             active,
         )
@@ -1809,7 +1900,7 @@ fn coord_group_len(props: &[crate::scene::model::object::Property], idx: usize) 
     let groupable = |p: &crate::scene::model::object::Property| {
         matches!(
             p.value,
-            PropValue::EditText(_) | PropValue::ReadOnly(_) | PropValue::ReadOnlyWithTooltip { .. }
+            PropValue::EditText(_) | PropValue::ReadOnly(_) | PropValue::ReadOnlyWithTooltip { .. } | PropValue::BlockNumber { .. }
         )
     };
     let Some((base, 0)) = coord_suffix(&props[idx].label) else {
@@ -1849,7 +1940,8 @@ fn coord_component(label: &str) -> &'static str {
 /// EditText / ReadOnly — see `coord_group_len`).
 fn prop_text_value(prop: &crate::scene::model::object::Property) -> String {
     match &prop.value {
-        PropValue::EditText(s)
+        PropValue::BlockNumber { value: s, .. }
+        | PropValue::EditText(s)
         | PropValue::ReadOnly(s)
         | PropValue::ReadOnlyWithTooltip { value: s, .. } => s.clone(),
         _ => String::new(),
@@ -1902,6 +1994,7 @@ fn render_group_row(
         .width(Length::FillPortion(5))
         .height(Length::Fixed(ROW_H))
         .align_y(iced::Center);
+    let label_col = full_label_tooltip(label_col, base, 16);
 
     // The field copies the value, so the locally-built `joined` is fine here.
     let value_field = ro_value_field(&joined, panel_width);
@@ -2241,6 +2334,35 @@ fn render_params_visibility_toggle_row<'a>(value: bool) -> Element<'a, Message> 
     .into()
 }
 
+/// Wrap a row's name column so hovering it shows the whole name when the
+/// column only fits the first `max` characters of `label`.
+fn full_label_tooltip<'a>(
+    label_col: impl Into<Element<'a, Message>>,
+    label: &'a str,
+    max: usize,
+) -> Element<'a, Message> {
+    if label.chars().count() <= max {
+        return label_col.into();
+    }
+    tooltip(label_col, text(label).size(FONT_SZ), tooltip::Position::Top)
+        .gap(4.0)
+        .padding(6.0)
+        .style(|theme: &Theme| {
+            let palette = theme.palette();
+            container::Style {
+                background: Some(Background::Color(palette.background.base.color)),
+                text_color: Some(palette.background.base.text),
+                border: Border {
+                    color: palette.background.neutral.color,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            }
+        })
+        .into()
+}
+
 /// Build a label | widget property row.
 fn prop_row_widget<'a>(label: &'a str, widget: Element<'a, Message>) -> Element<'a, Message> {
     prop_row_with_active(label, widget, false)
@@ -2276,6 +2398,7 @@ fn prop_row_with_active<'a>(
         left: 6.0,
         right: 6.0,
     });
+    let label_col = full_label_tooltip(label_col, label, 18);
     let value_col = container(widget)
         .style(move |theme: &Theme| container::Style {
             background: Some(Background::Color(if active {
@@ -2408,6 +2531,47 @@ mod tests {
         active_key_focused, attr_edit_key, build_field_key_map, hatch_pattern_matches,
         hatch_preview_scale, prop_attr_field_id, prop_geom_field_id, FieldKey,
     };
+
+    #[test]
+    fn transparency_input_keeps_focus_when_dropdown_opens_and_closes() {
+        use iced::advanced::widget::{tree, Tree};
+        type InputState = iced::widget::text_input::State<
+            <iced::Renderer as iced::advanced::text::Renderer>::Paragraph,
+        >;
+
+        fn input_state(tree: &mut Tree) -> &mut InputState {
+            if tree.tag == tree::Tag::of::<InputState>() {
+                return tree.state.downcast_mut::<InputState>();
+            }
+            let child = tree
+                .children
+                .iter_mut()
+                .find(|child| contains_input(child))
+                .expect("editable transparency input");
+            input_state(child)
+        }
+        fn contains_input(tree: &Tree) -> bool {
+            tree.tag == tree::Tag::of::<InputState>() || tree.children.iter().any(contains_input)
+        }
+
+        let mut panel = super::PropertiesPanel::default();
+        let options = vec!["ByLayer".into(), "ByBlock".into(), "50".into()];
+        let mut row = panel.render_edit_choice_row("Transparency", "transparency", "ByLayer", &options);
+        let mut tree = Tree::new(row.as_widget());
+        tree.diff(row.as_widget_mut());
+        input_state(&mut tree).focus();
+        drop(row);
+        for open in [true, false, true] {
+            panel.edit_choice_open = open;
+            let mut row =
+                panel.render_edit_choice_row("Transparency", "transparency", "ByLayer", &options);
+            tree.diff(row.as_widget_mut());
+            assert!(
+                input_state(&mut tree).is_focused(),
+                "focus lost with dropdown open={open}"
+            );
+        }
+    }
 
     fn sample_sections() -> Vec<crate::scene::model::object::PropSection> {
         use crate::scene::model::object::{PropValue, Property};

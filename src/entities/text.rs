@@ -133,7 +133,7 @@ pub(crate) fn acad_text_encode(value: &str) -> String {
 
 pub(crate) fn to_render_at_scale(
     t: &Text,
-    document: &codec::CadDocument,
+    document: &codec::Document,
     annotation_scale: f32,
 ) -> RenderEntity {
     let p = text_run_placement_at_scale(t, document, annotation_scale);
@@ -157,7 +157,12 @@ pub(crate) fn to_render_at_scale(
             origin: p.origin,
             color: None,
             fill_tris,
-            plane: None,
+            // Text out of the XY plane lies in its own object coordinate plane.
+            plane: crate::scene::convert::acad_to_render::ocs_text_plane(
+                t.normal,
+                p.origin,
+                t.insertion_point.z,
+            ),
             run: Some(GlyphRun {
                 text: value,
                 font: p.font.clone(),
@@ -180,7 +185,7 @@ pub(crate) fn to_render_at_scale(
 /// from `to_render` verbatim so the stroke and SDF-quad paths agree exactly.
 pub fn text_run_placement_at_scale(
     t: &Text,
-    document: &codec::CadDocument,
+    document: &codec::Document,
     annotation_scale: f32,
 ) -> TextPlacement {
     let annotation_scale = if annotation_scale.is_finite() && annotation_scale > 1.0e-9 {
@@ -337,6 +342,21 @@ fn grips(t: &Text) -> Vec<GripDef> {
     grips
 }
 
+/// The placement point the Properties palette shows as Position. Text
+/// alignment is exposed separately as calculated coordinates; for aligned
+/// and fit text Position is the first endpoint, for every other non-left
+/// mode the alignment anchor that actually places the glyph run.
+pub(crate) fn position(t: &Text) -> codec::types::Vector3 {
+    let is_plain_left =
+        matches!(t.horizontal_alignment, HA::Left) && matches!(t.vertical_alignment, VA::Baseline);
+    let is_two_point = matches!(t.horizontal_alignment, HA::Aligned | HA::Fit);
+    if !is_plain_left && !is_two_point {
+        t.alignment_point.unwrap_or(t.insertion_point)
+    } else {
+        t.insertion_point
+    }
+}
+
 fn properties(t: &Text, text_style_names: &[String]) -> Vec<PropSection> {
     // Which geometry rows are live depends on justification. Plain Left text is
     // anchored by the insertion point and has no second alignment point; every
@@ -347,23 +367,13 @@ fn properties(t: &Text, text_style_names: &[String]) -> Vec<PropSection> {
         matches!(t.horizontal_alignment, HA::Left) && matches!(t.vertical_alignment, VA::Baseline);
     let is_aligned = matches!(t.horizontal_alignment, HA::Aligned);
     let is_two_point = matches!(t.horizontal_alignment, HA::Aligned | HA::Fit);
-    // The visible Properties palette exposes Text alignment as calculated
-    // coordinates and Position as the editable placement point. For aligned
-    // and fit text Position targets the first endpoint; for every other
-    // non-left mode it targets the alignment anchor that actually places the
-    // glyph run.
-    let position_uses_alignment = !is_plain_left && !is_two_point;
     let ap = t.alignment_point.unwrap_or(t.insertion_point);
     let (ax, ay, az) = if !is_plain_left {
         (ap.x, ap.y, ap.z)
     } else {
         (0.0, 0.0, 0.0)
     };
-    let position = if position_uses_alignment {
-        ap
-    } else {
-        t.insertion_point
-    };
+    let position = position(t);
     vec![
         PropSection {
             title: t!("Text").into_owned(),
@@ -616,7 +626,7 @@ fn apply_transform(t: &mut Text, tr: &EntityTransform) {
 }
 
 impl RenderConvertible for Text {
-    fn to_render(&self, document: &codec::CadDocument) -> Option<RenderEntity> {
+    fn to_render(&self, document: &codec::Document) -> Option<RenderEntity> {
         Some(to_render_at_scale(self, document, 1.0))
     }
 }
@@ -697,7 +707,7 @@ mod tests {
         t.insertion_point = codec::types::Vector3::new(10.0, 20.0, 0.0);
         t.horizontal_alignment = HA::Left;
 
-        let doc = codec::CadDocument::default();
+        let doc = codec::Document::default();
         let placement = text_run_placement_at_scale(&t, &doc, 1.0);
 
         // Left alignment does not depend on the script: Arabic text starts

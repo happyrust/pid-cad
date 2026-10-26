@@ -83,7 +83,7 @@ impl DiameterDimensionCommand {
         if let Some(angle) = self.text_angle {
             dim.base.text_rotation = angle;
         }
-        plane.place_entity(EntityType::Dimension(Dimension::Diameter(dim)))
+        plane.place_entity(EntityType::Dimension(Box::new(Dimension::Diameter(dim))))
     }
 }
 
@@ -103,7 +103,7 @@ pub(crate) fn diameter_constraint_entity(
     dim.leader_length = chord.distance(location).max(radius * 0.5);
     dim.base.actual_measurement = dim.measurement();
     crate::entities::dimension::set_dimension_text_override(&mut dim.base, text);
-    Some(EntityType::Dimension(Dimension::Diameter(dim)))
+    Some(EntityType::Dimension(Box::new(Dimension::Diameter(dim))))
 }
 
 impl CadCommand for DiameterDimensionCommand {
@@ -122,7 +122,8 @@ impl CadCommand for DiameterDimensionCommand {
         }
         match self.step {
             Step::SelectObject => {
-                t!("DIMDIAMETER  Select arc, circle, or polyline arc:").into_owned()
+                t!("DIMDIAMETER  Select arc, circle, polyline arc, or circular region edge:")
+                    .into_owned()
             }
             Step::DimLine(_) => {
                 t!("DIMDIAMETER  Specify dimension line location  [Mtext/Text/Angle]:").into_owned()

@@ -10,7 +10,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use codec::xdata::ExtendedDataRecord;
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 use interprocess::local_socket::traits::Stream as StreamTrait;
 use interprocess::local_socket::{GenericNamespaced, Stream, ToNsName};
 use interprocess::TryClone;
@@ -268,7 +268,7 @@ pub struct V4PluginHostApi {
     shared: Arc<Shared>,
     notifications: Arc<Mutex<NotificationQueue>>,
     tab_index: usize,
-    document_cache: OnceCell<CadDocument>,
+    document_cache: OnceCell<Document>,
     interactive: Rc<RefCell<HashMap<u64, Box<dyn InteractiveCommand>>>>,
     next_command_id: Cell<u64>,
     record_cache: RefCell<HashMap<(Handle, String), &'static ExtendedDataRecord>>,
@@ -305,16 +305,16 @@ impl V4PluginHostApi {
         send_plugin_request(&self.shared, self.tab_id_cache.get(), req)
     }
 
-    fn fetch_document(&self) -> CadDocument {
+    fn fetch_document(&self) -> Document {
         match self.request(PluginRequest::DocumentSnapshot) {
             Ok(PluginResponse::Document(doc)) => *doc,
             Ok(other) => {
                 eprintln!("[plugin] unexpected DocumentSnapshot response: {other:?}");
-                CadDocument::default()
+                Document::default()
             }
             Err(e) => {
                 eprintln!("[plugin] failed to fetch document snapshot: {e}");
-                CadDocument::default()
+                Document::default()
             }
         }
     }
@@ -384,11 +384,11 @@ impl HostApi for V4PluginHostApi {
         self.tab_index
     }
 
-    fn document(&self) -> &CadDocument {
+    fn document(&self) -> &Document {
         self.document_cache.get_or_init(|| self.fetch_document())
     }
 
-    fn document_mut(&mut self) -> &mut CadDocument {
+    fn document_mut(&mut self) -> &mut Document {
         if self.document_cache.get().is_none() {
             let doc = self.fetch_document();
             let _ = self.document_cache.set(doc);
@@ -987,6 +987,136 @@ impl HostApi for V4PluginHostApi {
             Err(error) => Err(error.to_string()),
         }
     }
+
+    fn set_reference_only(&mut self, handle: Handle, reference_only: bool) -> Result<(), String> {
+        match self.request(PluginRequest::SetReferenceOnly {
+            handle,
+            reference_only,
+        }) {
+            Ok(PluginResponse::SetReferenceOnlyResult(result)) => {
+                if result.is_ok() {
+                    self.document_cache = OnceCell::new();
+                }
+                result
+            }
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected reference-only response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn entity_grips(&self, handle: Handle) -> Result<Vec<crate::host::GripInfo>, String> {
+        match self.request(PluginRequest::EntityGrips { handle }) {
+            Ok(PluginResponse::EntityGripsResult(result)) => result,
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected entity-grips response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn grip_drag(&mut self, handle: Handle, grip_id: usize, to: [f64; 3]) -> Result<(), String> {
+        match self.request(PluginRequest::GripDrag {
+            handle,
+            grip_id,
+            to,
+        }) {
+            Ok(PluginResponse::GripDragResult(result)) => result,
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected grip-drag response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn set_plugin_grips(
+        &mut self,
+        _plugin_id: &str,
+        grips: Vec<crate::host::PluginGrip>,
+    ) -> Result<(), String> {
+        // The plugin id never crosses the wire: the host attaches the serving
+        // process's own manifest id, so a plugin cannot declare grips in
+        // another plugin's name.
+        match self.request(PluginRequest::SetPluginGrips { grips }) {
+            Ok(PluginResponse::SetPluginGripsResult(result)) => result,
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected plugin-grips response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn entities_batch(
+        &self,
+        handles: &[codec::Handle],
+    ) -> Result<Vec<Option<codec::EntityType>>, String> {
+        // API v12: per-entity reads — refresh passes never need to re-clone
+        // the invalidated document snapshot after writes.
+        match self.request(PluginRequest::GetEntitiesBatch {
+            handles: handles.to_vec(),
+        }) {
+            Ok(PluginResponse::GetEntitiesBatchResult(result)) => result,
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected entities-batch response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn constraint_create(
+        &mut self,
+        constraint: crate::host::PluginConstraint,
+    ) -> Result<(), String> {
+        // API v13: the interactive constraint machinery, no command line.
+        match self.request(PluginRequest::CreateConstraint { constraint }) {
+            Ok(PluginResponse::CreateConstraintResult(result)) => result,
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected constraint response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn read_xrecords(
+        &self,
+        reads: &[crate::host::XRecordRead],
+    ) -> Result<Vec<Result<Vec<crate::host::XRecordEntry>, String>>, String> {
+        // API v13: one frame answers the whole store walk.
+        match self.request(PluginRequest::ReadXRecords {
+            reads: reads.to_vec(),
+        }) {
+            Ok(PluginResponse::ReadXRecordsResult(result)) => result,
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected xrecords-batch response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn update_xrecords(
+        &mut self,
+        updates: &[crate::host::XRecordUpdate],
+    ) -> Result<Vec<Result<codec::Handle, String>>, String> {
+        // API v13: one frame (one undo composition) replaces the whole
+        // per-record write loop.
+        match self.request(PluginRequest::UpdateXRecords {
+            updates: updates.to_vec(),
+        }) {
+            Ok(PluginResponse::UpdateXRecordsResult(result)) => result,
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected xrecords-update response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn list_xrecords_with_entries(
+        &self,
+        dictionary_path: &[&str],
+    ) -> Result<Vec<(String, Vec<crate::host::XRecordEntry>)>, String> {
+        // API v13: discovery and content in one answer.
+        match self.request(PluginRequest::ListXRecordsWithEntries {
+            dictionary_path: dictionary_path.iter().map(|s| s.to_string()).collect(),
+        }) {
+            Ok(PluginResponse::ListXRecordsWithEntriesResult(result)) => result,
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected xrecords-list response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1193,7 +1323,7 @@ mod tests {
 
     #[test]
     fn v4_client_notification_queue_size_env_is_honored() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("OCS_PLUGIN_NOTIFY_QUEUE_SIZE").ok();
         std::env::set_var("OCS_PLUGIN_NOTIFY_QUEUE_SIZE", "7");
         assert_eq!(notify_queue_size(), 7);
@@ -1205,7 +1335,7 @@ mod tests {
 
     #[test]
     fn v4_client_notification_queue_drops_newest_on_overflow() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("OCS_PLUGIN_NOTIFY_QUEUE_SIZE").ok();
         std::env::set_var("OCS_PLUGIN_NOTIFY_QUEUE_SIZE", "1");
         let (host_stream, mut runner_stream) = connect_pair();

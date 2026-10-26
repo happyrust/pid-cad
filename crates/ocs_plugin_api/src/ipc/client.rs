@@ -7,7 +7,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 use codec::xdata::ExtendedDataRecord;
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 use interprocess::local_socket::traits::Stream as StreamTrait;
 use interprocess::local_socket::{GenericNamespaced, Stream, ToNsName};
 
@@ -83,7 +83,7 @@ impl IpcClient {
 pub struct PluginHostApi {
     client: IpcClient,
     tab_index: usize,
-    document_cache: OnceCell<CadDocument>,
+    document_cache: OnceCell<Document>,
     interactive: InteractiveRegistry,
     next_command_id: Cell<u64>,
     /// Cache XDATA records so repeated reads for the same (handle, app) return
@@ -108,16 +108,16 @@ impl PluginHostApi {
         }
     }
 
-    fn fetch_document(&self) -> CadDocument {
+    fn fetch_document(&self) -> Document {
         match self.client.request(PluginRequest::DocumentSnapshot) {
             Ok(PluginResponse::Document(doc)) => *doc,
             Ok(other) => {
                 eprintln!("[plugin] unexpected DocumentSnapshot response: {other:?}");
-                CadDocument::default()
+                Document::default()
             }
             Err(e) => {
                 eprintln!("[plugin] failed to fetch document snapshot: {e}");
-                CadDocument::default()
+                Document::default()
             }
         }
     }
@@ -128,11 +128,11 @@ impl HostApi for PluginHostApi {
         self.tab_index
     }
 
-    fn document(&self) -> &CadDocument {
+    fn document(&self) -> &Document {
         self.document_cache.get_or_init(|| self.fetch_document())
     }
 
-    fn document_mut(&mut self) -> &mut CadDocument {
+    fn document_mut(&mut self) -> &mut Document {
         if self.document_cache.get().is_none() {
             let doc = self.fetch_document();
             let _ = self.document_cache.set(doc);
@@ -689,6 +689,23 @@ impl HostApi for PluginHostApi {
             Ok(PluginResponse::XRecordNames(result)) => result,
             Ok(PluginResponse::Error(error)) => Err(error),
             Ok(other) => Err(format!("unexpected XRecord list response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn set_reference_only(&mut self, handle: Handle, reference_only: bool) -> Result<(), String> {
+        match self.client.request(PluginRequest::SetReferenceOnly {
+            handle,
+            reference_only,
+        }) {
+            Ok(PluginResponse::SetReferenceOnlyResult(result)) => {
+                if result.is_ok() {
+                    self.document_cache = OnceCell::new();
+                }
+                result
+            }
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected reference-only response: {other:?}")),
             Err(error) => Err(error.to_string()),
         }
     }

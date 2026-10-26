@@ -818,10 +818,19 @@ pub struct WireModel {
     pub depth_override: Option<f32>,
     /// Whether this wire is drawn in the normal viewport pass.
     pub display_visible: bool,
-    /// Geometry that is never picked: the content of an underlay. Hidden
-    /// (`display_visible` false) it is what object snaps find; drawn, it is
-    /// display only and snaps skip it too ([`Self::is_display_only`]).
+    /// Reference geometry excluded from ordinary picking, such as underlays.
+    /// Hidden (`display_visible` false) it is what object snaps find; drawn,
+    /// it is display only and snaps skip it too ([`Self::is_display_only`]).
+    /// REGION boundary edge clicks opt in separately below.
     pub snap_only: bool,
+    /// Exact decomposed REGION boundary: hidden snap geometry also eligible
+    /// for edge clicks. Does not enable surface hits or other snap-only wires.
+    pub region_boundary_click: bool,
+    /// Plugin-owned reference-only source (API v9): the entity is display
+    /// geometry the built-in edit paths must not pick — clicks fall through
+    /// to the editable entity underneath. Rendering and snapping are
+    /// unaffected.
+    pub reference_only: bool,
     /// Whether this wire is included in plotted output.
     pub plot_visible: bool,
     /// `true` when [`fill_tris`] is a real 3-D surface (PolyfaceMesh /
@@ -910,6 +919,8 @@ impl WireModel {
             depth_override: None,
             display_visible: true,
             snap_only: false,
+            region_boundary_click: false,
+            reference_only: false,
             plot_visible: true,
             fill_is_3d: false,
             fill_is_2d_solid: false,
@@ -1076,75 +1087,6 @@ impl WireModel {
             .map(|tg| tg.scaled(center.as_dvec3(), factor as f64))
             .collect();
         out.searchable_text.clear();
-        out
-    }
-
-    /// Return a clone for a stretch preview: every point whose XY lies inside
-    /// the crossing window `[win_min, win_max]` is translated by `delta`; points
-    /// outside stay put. Exact for line/polyline vertices (the primary stretch
-    /// targets); curve tessellation points may deform where a window edge cuts
-    /// through them, matching the per-vertex nature of the operation.
-    pub fn stretched(&self, win_min: glam::Vec3, win_max: glam::Vec3, delta: glam::Vec3) -> Self {
-        self.stretched_windows(&[(win_min, win_max)], delta)
-    }
-
-    /// Return a clone for a multi-window STRETCH preview. A point moves exactly
-    /// once when it lies inside any of the crossing windows.
-    pub fn stretched_windows(
-        &self,
-        windows: &[(glam::Vec3, glam::Vec3)],
-        delta: glam::Vec3,
-    ) -> Self {
-        let mut out = self.clone();
-        out.name = format!("preview_{}", self.name);
-        out.color = Self::CYAN;
-        out.selected = false;
-
-        let inside = |x: f32, y: f32| {
-            windows.iter().any(|(win_min, win_max)| {
-                x >= win_min.x && x <= win_max.x && y >= win_min.y && y <= win_max.y
-            })
-        };
-
-        if let Some(marker) = out.point_marker {
-            if inside(marker.origin.x as f32, marker.origin.y as f32) {
-                map_points(&mut out.points, &mut out.points_low, |point| {
-                    point + delta.as_dvec3()
-                });
-                if let Some(target) = &mut out.point_marker {
-                    target.origin += delta.as_dvec3();
-                }
-            }
-        } else {
-            for p in &mut out.points {
-                if inside(p[0], p[1]) {
-                    p[0] += delta.x;
-                    p[1] += delta.y;
-                    p[2] += delta.z;
-                }
-            }
-        }
-
-        if !out.text_verts.is_empty() {
-            let (dx, dy, dz) = (delta.x as f64, delta.y as f64, delta.z as f64);
-
-            out.text_verts = map_text_verts(&self.text_verts, |x, y, z| {
-                let inside = windows.iter().any(|(win_min, win_max)| {
-                    x >= win_min.x as f64
-                        && x <= win_max.x as f64
-                        && y >= win_min.y as f64
-                        && y <= win_max.y as f64
-                });
-
-                if inside {
-                    (x + dx, y + dy, z + dz)
-                } else {
-                    (x, y, z)
-                }
-            });
-        }
-        out.searchable_text.clear();
-
         out
     }
 
@@ -1448,6 +1390,8 @@ impl Default for WireModel {
             depth_override: None,
             display_visible: true,
             snap_only: false,
+            region_boundary_click: false,
+            reference_only: false,
             plot_visible: true,
             fill_is_3d: false,
             fill_is_2d_solid: false,

@@ -41,25 +41,23 @@ impl CadCommand for DistCommand {
         }
     }
 
+    fn has_measurement_readout(&self) -> bool {
+        true
+    }
+
+    fn measurement_readout(&self, cursor: DVec3) -> Option<String> {
+        let distance = self.plane.vector_to_local(cursor - self.first?).length();
+        distance
+            .is_finite()
+            .then(|| crate::tr!("measurement", "distance", value = format_length(distance)))
+    }
+
     fn on_point(&mut self, pt: DVec3) -> CmdResult {
         if let Some(p1) = self.first {
-            let delta = self.plane.vector_to_local(pt - p1);
-            let dist = delta.length();
-            let dx = delta.x;
-            let dy = delta.y;
-            let dz = delta.z;
-
-            // Angle in XY plane — a direction, so counted from ANGBASE the
-            // way ANGDIR runs, like every other direction the drawing shows.
-            let ctx = unit_context();
-            let sign = if ctx.angdir_cw { -1.0 } else { 1.0 };
-            let turn = std::f64::consts::TAU;
-            let angle_xy = (sign * (dy.atan2(dx) - ctx.angbase))
-                .rem_euclid(turn)
-                .to_degrees();
-            // Angle from XY plane toward Z (elevation angle)
-            let dist_xy = dx.hypot(dy);
-            let angle_z = dz.atan2(dist_xy).to_degrees();
+            let m = measure(self.plane, p1, pt);
+            let (dist, dx, dy, dz) = (m.distance, m.delta.x, m.delta.y, m.delta.z);
+            let angle_xy = m.angle_xy.to_degrees();
+            let angle_z = m.angle_z.to_degrees();
 
             let aprec = unit_context().auprec.max(0) as usize;
             let dist_s = format_length(dist);
@@ -90,48 +88,82 @@ impl CadCommand for DistCommand {
     }
 
     fn on_mouse_move(&mut self, pt: DVec3) -> Option<WireModel> {
-        let p1 = self.first?;
-        // The preview wire is purely visual, so f32 vertices are fine here.
-        Some(WireModel {
-            bg_adapt: None,
-            point_marker: None,
-            taper_widths: Vec::new(),
-            pattern_stations: Vec::new(),
-            world_width: 0.0,
-            depth_override: None,
-            display_visible: true,
-            snap_only: false,
-            plot_visible: true,
-            fill_is_3d: false,
-            fill_is_2d_solid: false,
-            render_instance: None,
-            pick_tris: Vec::new(),
-            pick_tris_low: Vec::new(),
-            dash_from_start: false,
-            dash_align_end: None,
-            text_verts: Vec::new(),
-            name: "dist_preview".into(),
-            points: vec![
-                [p1.x as f32, p1.y as f32, p1.z as f32],
-                [pt.x as f32, pt.y as f32, pt.z as f32],
-            ],
-            points_low: Vec::new(),
-            color: WireModel::CYAN,
-            selected: false,
-            pattern_length: 0.0,
-            pattern: [0.0; 8],
-            line_weight_px: 1.0,
-            snap_pts: vec![],
-            tangent_geoms: vec![],
-            aci: 0,
-            key_vertices: vec![],
-            aabb: WireModel::UNBOUNDED_AABB,
-            plinegen: true,
-            fill_tris: vec![],
-            fill_tris_low: Vec::new(),
+        Some(rubber_band(self.first?, pt))
+    }
+}
 
-            ..Default::default()
-        })
+/// What DIST reports for two picked points, worked out in the working plane.
+pub struct PointPair {
+    /// `p2 - p1` in working-plane coordinates.
+    pub delta: DVec3,
+    pub distance: f64,
+    /// Direction in the XY plane, radians in `[0, TAU)`: counted from
+    /// ANGBASE the way ANGDIR runs, like every other direction the drawing
+    /// shows.
+    pub angle_xy: f64,
+    /// Elevation from the XY plane toward Z, radians.
+    pub angle_z: f64,
+}
+
+/// The distance and angles between `p1` and `p2` (WCS points) as DIST
+/// measures them. Shared with QuickCalc's distance and angle picks.
+pub fn measure(plane: WorkingPlane, p1: DVec3, p2: DVec3) -> PointPair {
+    let delta = plane.vector_to_local(p2 - p1);
+    let ctx = unit_context();
+    let sign = if ctx.angdir_cw { -1.0 } else { 1.0 };
+    let angle_xy =
+        (sign * (delta.y.atan2(delta.x) - ctx.angbase)).rem_euclid(std::f64::consts::TAU);
+    let angle_z = delta.z.atan2(delta.x.hypot(delta.y));
+    PointPair {
+        delta,
+        distance: delta.length(),
+        angle_xy,
+        angle_z,
+    }
+}
+
+/// The rubber band from the first picked point to the cursor.
+pub fn rubber_band(p1: DVec3, pt: DVec3) -> WireModel {
+    // The preview wire is purely visual, so f32 vertices are fine here.
+    WireModel {
+        bg_adapt: None,
+        point_marker: None,
+        taper_widths: Vec::new(),
+        pattern_stations: Vec::new(),
+        world_width: 0.0,
+        depth_override: None,
+        display_visible: true,
+        snap_only: false,
+        plot_visible: true,
+        fill_is_3d: false,
+        fill_is_2d_solid: false,
+        render_instance: None,
+        pick_tris: Vec::new(),
+        pick_tris_low: Vec::new(),
+        dash_from_start: false,
+        dash_align_end: None,
+        text_verts: Vec::new(),
+        name: "dist_preview".into(),
+        points: vec![
+            [p1.x as f32, p1.y as f32, p1.z as f32],
+            [pt.x as f32, pt.y as f32, pt.z as f32],
+        ],
+        points_low: Vec::new(),
+        color: WireModel::CYAN,
+        selected: false,
+        pattern_length: 0.0,
+        pattern: [0.0; 8],
+        line_weight_px: 1.0,
+        snap_pts: vec![],
+        tangent_geoms: vec![],
+        aci: 0,
+        key_vertices: vec![],
+        aabb: WireModel::UNBOUNDED_AABB,
+        plinegen: true,
+        fill_tris: vec![],
+        fill_tris_low: Vec::new(),
+
+        ..Default::default()
     }
 }
 
@@ -252,5 +284,33 @@ mod tests {
             }
             _ => panic!("Expected CmdResult::Measurement"),
         }
+    }
+}
+
+#[cfg(test)]
+mod measurement_tests {
+    use super::*;
+    #[test]
+    fn live_distance_keeps_f64_and_unit_settings() {
+        let previous = unit_context();
+        let mut ctx = previous;
+        ctx.lunits = 2;
+        ctx.luprec = 4;
+        crate::entities::common::set_unit_context(ctx);
+        let mut command = DistCommand::new();
+        let first = DVec3::new(500000.001, 600000.002, 0.0);
+        assert!(command.measurement_readout(first).is_none());
+        command.on_point(first);
+        assert!(command
+            .measurement_readout(first + DVec3::X * 0.001)
+            .unwrap()
+            .contains("0.0010"));
+        ctx.lunits = 4;
+        crate::entities::common::set_unit_context(ctx);
+        assert!(command
+            .measurement_readout(first + DVec3::X * 18.0)
+            .unwrap()
+            .contains("1'-6\""));
+        crate::entities::common::set_unit_context(previous);
     }
 }

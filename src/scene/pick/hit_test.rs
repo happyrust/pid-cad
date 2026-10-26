@@ -225,7 +225,10 @@ pub fn click_hit<'a, W: WireSource + ?Sized>(
     let mut best_dist = f32::MAX;
     let mut best: Option<&str> = None;
 
-    for wire in wires.iter().filter(|wire| wire.point_marker.is_some()) {
+    for wire in wires
+        .iter()
+        .filter(|wire| wire.point_marker.is_some() && !wire.reference_only)
+    {
         let tolerance = pick_tolerance_px(wire, lw_display, base_radius_px);
         let mut previous = None;
         for (index, point) in wire.points.iter().enumerate() {
@@ -266,7 +269,7 @@ pub fn click_hit<'a, W: WireSource + ?Sized>(
             let Some(wire) = wires.source_wire(segment.wire) else {
                 continue;
             };
-            if wire.snap_only {
+            if (wire.snap_only && !wire.region_boundary_click) || wire.reference_only {
                 continue;
             }
             if wire.point_marker.is_some() {
@@ -299,7 +302,7 @@ pub fn click_hit<'a, W: WireSource + ?Sized>(
     } else {
         // Q: lazy projection — no Vec allocation per wire; NaN resets the segment chain.
         for wire in wires.iter() {
-            if wire.snap_only {
+            if (wire.snap_only && !wire.region_boundary_click) || wire.reference_only {
                 continue;
             }
             if wire.point_marker.is_some() {
@@ -354,7 +357,7 @@ pub fn click_hit<'a, W: WireSource + ?Sized>(
             let Some(wire) = wires.source_wire(triangle.wire) else {
                 continue;
             };
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             if let Some(depth) = triangle_ref_hit_depth(
@@ -373,7 +376,7 @@ pub fn click_hit<'a, W: WireSource + ?Sized>(
         }
     } else {
         for wire in wires.iter() {
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             if wire.fill_tris.is_empty() {
@@ -397,6 +400,53 @@ pub fn click_hit<'a, W: WireSource + ?Sized>(
         return Some(n);
     }
 
+    // SDF text renders as glyph quads, not strokes. Test those exact quads:
+    // block expansion may batch distant same-style text runs into one wire,
+    // whose union AABB includes empty space between them (#438). Real edges
+    // and fills above win; the area-only surfaces below (a paper viewport's
+    // interior, a wide band) must not swallow text drawn over them (#1889).
+    let mut best_area = f32::MAX;
+    let mut best_box: Option<&str> = None;
+    if let Some(glyphs) = wires.glyphs() {
+        for glyph in glyphs {
+            let Some(wire) = wires.source_wire(glyph.wire) else {
+                continue;
+            };
+            if wire.snap_only || wire.reference_only {
+                continue;
+            }
+            let start = glyph.start as usize;
+            let Some(vertices) = wire.text_verts.get(start..start + 6) else {
+                continue;
+            };
+            if let Some(area) = text_quad_hit_area(cursor, vertices, view_rot, eye, bounds) {
+                if area < best_area {
+                    best_area = area;
+                    best_box = Some(wire.name.as_str());
+                }
+            }
+        }
+    } else {
+        for wire in wires.iter() {
+            if wire.snap_only || wire.reference_only {
+                continue;
+            }
+            if wire.text_verts.is_empty() {
+                continue;
+            }
+            if let Some(area) = text_quad_hit_area(cursor, &wire.text_verts, view_rot, eye, bounds)
+            {
+                if area < best_area {
+                    best_area = area;
+                    best_box = Some(wire.name.as_str());
+                }
+            }
+        }
+    }
+    if best_box.is_some() {
+        return best_box;
+    }
+
     // No fill of this wire's own either. `pick_tris` closes the surfaces that
     // `points` only bounds: a thickness wall (drawn as four edges with nothing
     // between them) and a wide polyline's band (drawn, but by the hatch
@@ -412,7 +462,7 @@ pub fn click_hit<'a, W: WireSource + ?Sized>(
             let Some(wire) = wires.source_wire(triangle.wire) else {
                 continue;
             };
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             if let Some(depth) = triangle_ref_hit_depth(
@@ -431,7 +481,7 @@ pub fn click_hit<'a, W: WireSource + ?Sized>(
         }
     } else {
         for wire in wires.iter() {
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             if wire.pick_tris.is_empty() {
@@ -460,53 +510,7 @@ pub fn click_hit<'a, W: WireSource + ?Sized>(
             }
         }
     }
-    if let Some((_, n)) = best_wall {
-        return Some(n);
-    }
-
-    // SDF text renders as glyph quads, not strokes. Test those exact quads:
-    // block expansion may batch distant same-style text runs into one wire,
-    // whose union AABB includes empty space between them (#438). Lowest
-    // priority — real edges and fills above always win.
-    let mut best_area = f32::MAX;
-    let mut best_box: Option<&str> = None;
-    if let Some(glyphs) = wires.glyphs() {
-        for glyph in glyphs {
-            let Some(wire) = wires.source_wire(glyph.wire) else {
-                continue;
-            };
-            if wire.snap_only {
-                continue;
-            }
-            let start = glyph.start as usize;
-            let Some(vertices) = wire.text_verts.get(start..start + 6) else {
-                continue;
-            };
-            if let Some(area) = text_quad_hit_area(cursor, vertices, view_rot, eye, bounds) {
-                if area < best_area {
-                    best_area = area;
-                    best_box = Some(wire.name.as_str());
-                }
-            }
-        }
-    } else {
-        for wire in wires.iter() {
-            if wire.snap_only {
-                continue;
-            }
-            if wire.text_verts.is_empty() {
-                continue;
-            }
-            if let Some(area) = text_quad_hit_area(cursor, &wire.text_verts, view_rot, eye, bounds)
-            {
-                if area < best_area {
-                    best_area = area;
-                    best_box = Some(wire.name.as_str());
-                }
-            }
-        }
-    }
-    best_box
+    best_wall.map(|(_, n)| n)
 }
 
 /// Like `click_hit` but returns every wire within the click threshold,
@@ -526,7 +530,10 @@ pub fn click_hits_all<'a, W: WireSource + ?Sized>(
     }
     let mut hits: Vec<(f32, &str)> = Vec::new();
     let mut marker_hits: HashMap<&str, f32> = HashMap::default();
-    for wire in wires.iter().filter(|wire| wire.point_marker.is_some()) {
+    for wire in wires
+        .iter()
+        .filter(|wire| wire.point_marker.is_some() && !wire.reference_only)
+    {
         let tolerance = pick_tolerance_px(wire, lw_display, base_radius_px);
         let mut previous = None;
         for (index, point) in wire.points.iter().enumerate() {
@@ -563,7 +570,7 @@ pub fn click_hits_all<'a, W: WireSource + ?Sized>(
             let Some(wire) = wires.source_wire(segment.wire) else {
                 continue;
             };
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             if wire.point_marker.is_some() {
@@ -600,7 +607,7 @@ pub fn click_hits_all<'a, W: WireSource + ?Sized>(
         }));
     } else {
         for wire in wires.iter() {
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             if wire.point_marker.is_some() {
@@ -646,7 +653,7 @@ pub fn click_hits_all<'a, W: WireSource + ?Sized>(
             let Some(wire) = wires.source_wire(triangle.wire) else {
                 continue;
             };
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             if hits.iter().any(|&(_, name)| name == wire.name) {
@@ -670,7 +677,7 @@ pub fn click_hits_all<'a, W: WireSource + ?Sized>(
         }
     } else {
         for wire in wires.iter() {
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             if wire.fill_tris.is_empty() || hits.iter().any(|&(_, name)| name == wire.name) {
@@ -706,7 +713,7 @@ pub fn click_hits_all<'a, W: WireSource + ?Sized>(
             let Some(wire) = wires.source_wire(triangle.wire) else {
                 continue;
             };
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             if hits.iter().any(|&(_, name)| name == wire.name) {
@@ -730,7 +737,7 @@ pub fn click_hits_all<'a, W: WireSource + ?Sized>(
         }
     } else {
         for wire in wires.iter() {
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             if wire.pick_tris.is_empty() || hits.iter().any(|&(_, name)| name == wire.name) {
@@ -762,7 +769,7 @@ pub fn click_hits_all<'a, W: WireSource + ?Sized>(
             let Some(wire) = wires.source_wire(glyph.wire) else {
                 continue;
             };
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             if hits.iter().any(|&(_, name)| name == wire.name) {
@@ -780,7 +787,7 @@ pub fn click_hits_all<'a, W: WireSource + ?Sized>(
         }
     } else {
         for wire in wires.iter() {
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             if wire.text_verts.is_empty() || hits.iter().any(|&(_, name)| name == wire.name) {
@@ -911,17 +918,14 @@ pub(crate) fn mesh_click_handle_point<'a>(
         .map(|(_, handle, point)| (handle, point))
 }
 
-fn mesh_click_result<'a>(
+/// The world-space pick ray under `cursor`: its near-plane origin and unit
+/// direction. `None` when the projection is degenerate.
+pub(crate) fn pick_ray(
     cursor: Point,
-    meshes: impl Iterator<Item = MeshPickItem<'a>>,
     view_rot: Mat4,
     eye: glam::DVec3,
     bounds: Rectangle,
-) -> Option<(f64, Handle, glam::DVec3)> {
-    let profile = crate::perf::enabled().then(iced::time::Instant::now);
-    let mut set_count = 0usize;
-    let mut bound_hits = 0usize;
-    let mut exact_triangles = 0usize;
+) -> Option<(glam::DVec3, glam::DVec3)> {
     let ndc = glam::Vec3::new(
         cursor.x / bounds.width * 2.0 - 1.0,
         1.0 - cursor.y / bounds.height * 2.0,
@@ -933,11 +937,92 @@ fn mesh_click_result<'a>(
         + inverse_view
             .project_point3(glam::Vec3::new(ndc.x, ndc.y, 1.0))
             .as_dvec3();
-    let world_direction = (far - near).normalize_or_zero();
-    if !near.is_finite() || !world_direction.is_finite() || world_direction.length_squared() < 1e-18
-    {
+    let direction = (far - near).normalize_or_zero();
+    if !near.is_finite() || !direction.is_finite() || direction.length_squared() < 1e-18 {
         return None;
     }
+    Some((near, direction))
+}
+
+/// The nearest drawn surface under `cursor` — a solid/mesh face or a wire's
+/// shaded triangles (3DFACE, filled SOLID, thickness walls) — and where the
+/// pick ray meets it.
+pub(crate) fn surface_click_point<'a, W: WireSource + ?Sized>(
+    cursor: Point,
+    meshes: impl Iterator<Item = MeshPickItem<'a>>,
+    wires: &W,
+    view_rot: Mat4,
+    eye: glam::DVec3,
+    bounds: Rectangle,
+) -> Option<glam::DVec3> {
+    let (near, direction) = pick_ray(cursor, view_rot, eye, bounds)?;
+    let mut best = mesh_click_result(cursor, meshes, view_rot, eye, bounds)
+        .map(|(distance, _, point)| (distance, point));
+    let mut test = |tris: &[[f32; 3]], low: &[[f32; 3]], start: usize| {
+        let Some(tri) = tris.get(start..start + 3) else {
+            return;
+        };
+        let corner = |k: usize| {
+            let [lx, ly, lz] = low.get(start + k).copied().unwrap_or([0.0; 3]);
+            glam::DVec3::new(
+                tri[k][0] as f64 + lx as f64,
+                tri[k][1] as f64 + ly as f64,
+                tri[k][2] as f64 + lz as f64,
+            )
+        };
+        if let Some(t) = ray_triangle(near, direction, corner(0), corner(1), corner(2)) {
+            if best.is_none_or(|(current, _)| t < current) {
+                best = Some((t, near + direction * t));
+            }
+        }
+    };
+    let surface = |wire: &WireModel| !wire.snap_only && !wire.reference_only;
+    match (wires.fill_triangles(), wires.pick_triangles()) {
+        (Some(fills), Some(walls)) => {
+            for (triangle, pick_only) in fills
+                .iter()
+                .map(|t| (t, false))
+                .chain(walls.iter().map(|t| (t, true)))
+            {
+                let Some(wire) = wires.source_wire(triangle.wire).filter(|w| surface(w)) else {
+                    continue;
+                };
+                let (tris, low) = if pick_only {
+                    (&wire.pick_tris, &wire.pick_tris_low)
+                } else {
+                    (&wire.fill_tris, &wire.fill_tris_low)
+                };
+                test(tris, low, triangle.start as usize);
+            }
+        }
+        _ => {
+            for wire in wires.iter().filter(|w| surface(w)) {
+                for (tris, low) in [
+                    (&wire.fill_tris, &wire.fill_tris_low),
+                    (&wire.pick_tris, &wire.pick_tris_low),
+                ] {
+                    for start in (0..tris.len() / 3).map(|k| k * 3) {
+                        test(tris, low, start);
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, point)| point)
+}
+
+fn mesh_click_result<'a>(
+    cursor: Point,
+    meshes: impl Iterator<Item = MeshPickItem<'a>>,
+    view_rot: Mat4,
+    eye: glam::DVec3,
+    bounds: Rectangle,
+) -> Option<(f64, Handle, glam::DVec3)> {
+    let profile = crate::perf::enabled().then(iced::time::Instant::now);
+    let mut set_count = 0usize;
+    let mut bound_hits = 0usize;
+    let mut exact_triangles = 0usize;
+    let (near, world_direction) = pick_ray(cursor, view_rot, eye, bounds)?;
     let mut best: Option<(f64, Handle, glam::DVec3)> = None;
     for (handle, mesh, transform, aabb) in meshes {
         set_count += 1;
@@ -1324,7 +1409,7 @@ fn indexed_box_crossing_hits<'a, W: WireSource + ?Sized>(
     // path below run identical code.
     let hit_name = |segment: &SegmentRef| -> Option<&'a str> {
         let wire = wires.source_wire(segment.wire)?;
-        if wire.snap_only {
+        if wire.snap_only || wire.reference_only {
             return None;
         }
         let start = segment.start as usize;
@@ -1369,7 +1454,10 @@ fn indexed_box_crossing_hits<'a, W: WireSource + ?Sized>(
             }
         }
     }
-    for wire in wires.iter().filter(|wire| wire.point_marker.is_some()) {
+    for wire in wires
+        .iter()
+        .filter(|wire| wire.point_marker.is_some() && !wire.reference_only)
+    {
         if !seen.contains(wire.name.as_str())
             && marker_segment_hit(wire, view_rot, eye, bounds, |a, b| segment_hits(a, b))
             && seen.insert(wire.name.as_str())
@@ -1385,7 +1473,7 @@ fn indexed_box_crossing_hits<'a, W: WireSource + ?Sized>(
             let Some(wire) = wires.source_wire(triangle.wire) else {
                 continue;
             };
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             if already(&wire_hit, triangle.wire) {
@@ -1412,7 +1500,7 @@ fn indexed_box_crossing_hits<'a, W: WireSource + ?Sized>(
         let Some(wire) = wires.source_wire(glyph.wire) else {
             continue;
         };
-        if wire.snap_only {
+        if wire.snap_only || wire.reference_only {
             continue;
         }
         if already(&wire_hit, glyph.wire) {
@@ -1435,7 +1523,7 @@ fn indexed_box_crossing_hits<'a, W: WireSource + ?Sized>(
 
     // Degenerate point-only wires have no indexed segment or surface primitive.
     for wire in wires.iter() {
-        if wire.snap_only {
+        if wire.snap_only || wire.reference_only {
             continue;
         }
         if wire.points.len() >= 2
@@ -1494,7 +1582,7 @@ pub fn poly_fence_hit<'a, W: WireSource + ?Sized>(
             let Some(wire) = wires.source_wire(segment.wire) else {
                 continue;
             };
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             let start = segment.start as usize;
@@ -1517,7 +1605,10 @@ pub fn poly_fence_hit<'a, W: WireSource + ?Sized>(
                 out.push(wire.name.as_str());
             }
         }
-        for wire in wires.iter().filter(|wire| wire.point_marker.is_some()) {
+        for wire in wires
+            .iter()
+            .filter(|wire| wire.point_marker.is_some() && !wire.reference_only)
+        {
             if !seen.contains(wire.name.as_str())
                 && marker_segment_hit(wire, view_rot, eye, bounds, |a, b| cuts(a, b))
                 && seen.insert(wire.name.as_str())
@@ -1528,7 +1619,7 @@ pub fn poly_fence_hit<'a, W: WireSource + ?Sized>(
         return out;
     }
     for wire in wires.iter() {
-        if wire.snap_only {
+        if wire.snap_only || wire.reference_only {
             continue;
         }
         if wire.points.len() < 2 {
@@ -1569,7 +1660,7 @@ fn indexed_polygon_crossing_hits<'a, W: WireSource + ?Sized>(
         let Some(wire) = wires.source_wire(segment.wire) else {
             continue;
         };
-        if wire.snap_only {
+        if wire.snap_only || wire.reference_only {
             continue;
         }
         let start = segment.start as usize;
@@ -1596,7 +1687,10 @@ fn indexed_polygon_crossing_hits<'a, W: WireSource + ?Sized>(
             out.push(wire.name.as_str());
         }
     }
-    for wire in wires.iter().filter(|wire| wire.point_marker.is_some()) {
+    for wire in wires
+        .iter()
+        .filter(|wire| wire.point_marker.is_some() && !wire.reference_only)
+    {
         if !seen.contains(wire.name.as_str())
             && marker_segment_hit(wire, view_rot, eye, bounds, |a, b| {
                 point_in_polygon(a, poly)
@@ -1616,7 +1710,7 @@ fn indexed_polygon_crossing_hits<'a, W: WireSource + ?Sized>(
             let Some(wire) = wires.source_wire(triangle.wire) else {
                 continue;
             };
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             if seen.contains(wire.name.as_str()) {
@@ -1641,7 +1735,7 @@ fn indexed_polygon_crossing_hits<'a, W: WireSource + ?Sized>(
         let Some(wire) = wires.source_wire(glyph.wire) else {
             continue;
         };
-        if wire.snap_only {
+        if wire.snap_only || wire.reference_only {
             continue;
         }
         if seen.contains(wire.name.as_str()) {
@@ -1662,7 +1756,7 @@ fn indexed_polygon_crossing_hits<'a, W: WireSource + ?Sized>(
         }
     }
     for wire in wires.iter() {
-        if wire.snap_only {
+        if wire.snap_only || wire.reference_only {
             continue;
         }
         if wire.points.len() >= 2
@@ -1738,7 +1832,7 @@ pub fn box_hit<'a, W: WireSource + ?Sized>(
         let mut out = Vec::new();
         let mut seen = HashSet::default();
         for wire in wires.iter() {
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             // Fallback: when wire has no line geometry (e.g. greek text emits
@@ -1826,7 +1920,7 @@ pub fn box_hit<'a, W: WireSource + ?Sized>(
         let mut seen = HashSet::default();
 
         for wire in wires.iter() {
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             let name = wire.name.as_str();
@@ -1939,7 +2033,7 @@ pub fn poly_hit<'a, W: WireSource + ?Sized>(
         let mut out = Vec::new();
         let mut seen = HashSet::default();
         for wire in wires.iter() {
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             // Same AABB fallback as `box_hit`: when a wire has no line
@@ -2029,7 +2123,7 @@ pub fn poly_hit<'a, W: WireSource + ?Sized>(
         let mut seen = HashSet::default();
 
         for wire in wires.iter() {
-            if wire.snap_only {
+            if wire.snap_only || wire.reference_only {
                 continue;
             }
             let aabb_pts: Vec<[f32; 3]>;
@@ -2737,6 +2831,33 @@ mod aabb_reject_tests {
             ),
             Some("5")
         );
+    }
+
+    // Face-only drawings (3DFACE) have no mesh; the orbit pivot must still
+    // land on the nearest shaded triangle under the pointer.
+    #[test]
+    fn surface_click_point_hits_nearest_wire_fill() {
+        let face = |name: &str, z: f32| {
+            let mut w = wire(name, vec![], WireModel::UNBOUNDED_AABB);
+            w.fill_tris = vec![[-1.0, -1.0, z], [1.0, -1.0, z], [0.0, 1.0, z]];
+            w
+        };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 200.0,
+        };
+        let point = surface_click_point(
+            Point::new(100.0, 100.0),
+            std::iter::empty(),
+            &[face("far", 0.75), face("near", 0.25)][..],
+            Mat4::IDENTITY,
+            glam::DVec3::ZERO,
+            bounds,
+        )
+        .expect("the faces under the pointer are hit");
+        assert!(point.distance(glam::DVec3::new(0.0, 0.0, 0.25)) < 1e-5);
     }
 
     #[test]

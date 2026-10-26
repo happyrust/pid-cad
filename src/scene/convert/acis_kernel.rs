@@ -25,7 +25,7 @@ pub fn tessellate_sat(
     facet_res: f64,
     chordal_deflection: Option<f64>,
     isolines: [usize; 2],
-    planar_isolines: bool,
+    planar_isolines: Option<bool>,
 ) -> Option<MeshLodSet> {
     let (bodies, loss) = lift(document);
     if bodies.is_empty() {
@@ -70,13 +70,24 @@ pub fn tessellate_sat(
             (owner >= 0 && handle > 0).then(|| (owner, codec::Handle::new(handle as u64)))
         })
         .collect();
+    // A true colour attribute outranks the index one beside it, which only
+    // holds its nearest index.
     let face_colors: std::collections::HashMap<i32, [f32; 4]> = document
         .records
         .iter()
         .filter(|record| record.entity_type == "color-adesk-attrib")
+        .chain(
+            document
+                .records
+                .iter()
+                .filter(|record| record.entity_type == "truecolor-adesk-attrib"),
+        )
         .filter_map(|record| {
             let owner = record.token_pointer(2)?.0;
-            let value = record.token(3)?.as_integer()?;
+            let mut value = record.token(3)?.as_integer()?;
+            if record.entity_type == "truecolor-adesk-attrib" {
+                value = (value & 0x00FF_FFFF) | 0x0100_0000;
+            }
             let source = if (1..=255).contains(&value) {
                 codec::Color::from_index(value as i16)
             } else if value > 257 {
@@ -105,10 +116,11 @@ pub fn tessellate_sat(
         DEFAULT_FIT_TOLERANCE
     };
     for (body, placement_scale) in &bodies {
-        let mut tolerance =
-            brep::mesh::TessellationTolerance::new(max_angle, source_fit * placement_scale)
-                .with_uv_isolines(isolines[0], isolines[1])
-                .with_planar_isolines(planar_isolines);
+        let mut tolerance = crate::scene::model::solid_model::with_isolines(
+            brep::mesh::TessellationTolerance::new(max_angle, source_fit * placement_scale),
+            isolines,
+            planar_isolines,
+        );
         if let Some(deflection) = chordal_deflection {
             tolerance = tolerance.with_chordal_deflection(deflection);
         }

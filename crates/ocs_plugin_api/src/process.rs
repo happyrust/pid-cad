@@ -32,7 +32,7 @@ use crate::host::{
     CommandSource, CommandStep, ExecutionResult, HostApi, HostNotification, PluginNotification,
 };
 use crate::ipc::protocol::{
-    CadDocument, EntityType, Handle, HostRequest, HostResponse, HostToPlugin, InteractiveEvent,
+    Document, EntityType, Handle, HostRequest, HostResponse, HostToPlugin, InteractiveEvent,
     PluginToHost, RunnerHandshake, PLUGIN_TOKEN_ENV,
 };
 use crate::ipc::server::handle_plugin_request;
@@ -82,10 +82,10 @@ impl HostApi for NullHost {
     fn tab_index(&self) -> usize {
         0
     }
-    fn document(&self) -> &CadDocument {
+    fn document(&self) -> &Document {
         panic!("NullHost: document not available")
     }
-    fn document_mut(&mut self) -> &mut CadDocument {
+    fn document_mut(&mut self) -> &mut Document {
         panic!("NullHost: document_mut not available")
     }
     fn document_reader(&self) -> Box<dyn crate::host::DocumentReader + '_> {
@@ -223,9 +223,10 @@ fn base_max_floor(base: Duration, kind: &'static str) -> Duration {
     }
     let floor = match kind {
         "GetManifest" | "GetRibbon" => Duration::from_secs(5),
-        "Dispatch" => Duration::from_secs(10),
-        "InteractiveEvent" | "GetPrompt" | "NeedsEntityPick" => Duration::from_secs(2),
-        "CursorMove" => Duration::from_millis(500),
+        "Dispatch" | "CustomGripSettle" => Duration::from_secs(10),
+        "InteractiveEvent" | "GetPrompt" | "NeedsEntityPick" | "CustomGripBegin"
+        | "CustomGripCancel" => Duration::from_secs(2),
+        "CursorMove" | "CustomGripMove" => Duration::from_millis(500),
         "ExecuteCode" => execute_code_timeout(),
         _ => Duration::from_secs(1),
     };
@@ -240,9 +241,18 @@ pub(crate) fn request_kind(req: &HostRequest) -> &'static str {
         HostRequest::InteractiveEvent { .. } => "InteractiveEvent",
         HostRequest::GetPrompt { .. } => "GetPrompt",
         HostRequest::NeedsEntityPick { .. } => "NeedsEntityPick",
+        HostRequest::IsSelectionGathering { .. } => "IsSelectionGathering",
+        HostRequest::AcceptsDragSelection { .. } => "AcceptsDragSelection",
+        HostRequest::SelectionRejectsLockedLayers { .. } => "SelectionRejectsLockedLayers",
         HostRequest::ExecuteCode { .. } => "ExecuteCode",
         HostRequest::DropInteractive { .. } => "DropInteractive",
         HostRequest::CursorMove { .. } => "CursorMove",
+        HostRequest::CustomGripEvent { event, .. } => match event.phase {
+            crate::host::CustomGripPhase::Begin => "CustomGripBegin",
+            crate::host::CustomGripPhase::Move => "CustomGripMove",
+            crate::host::CustomGripPhase::Settle => "CustomGripSettle",
+            crate::host::CustomGripPhase::Cancel => "CustomGripCancel",
+        },
         HostRequest::Shutdown => "Shutdown",
     }
 }
@@ -444,6 +454,7 @@ impl PluginProcess {
             *plugin_id_placeholder
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = manifest.id.clone();
+            v4_conn.attach_plugin_id(&manifest.id);
             ribbon = match v4_conn.call(host, HostRequest::GetRibbon, no_op)? {
                 HostResponse::Ribbon(r) => r,
                 other => return Err(PluginError::UnexpectedResponse(Box::new(other))),
@@ -452,11 +463,14 @@ impl PluginProcess {
         } else {
             // The runner first answers GetManifest and GetRibbon so the host can
             // build the UI without keeping the plugin object alive.
-            manifest = match call(&stream, &child, host, HostRequest::GetManifest, no_op)? {
+            // The manifest id is unknown until GetManifest returns, so nested
+            // requests during the handshake serve with an empty identity — no
+            // grip declaration can exist in that window.
+            manifest = match call(&stream, &child, host, "", HostRequest::GetManifest, no_op)? {
                 HostResponse::Manifest(m) => m,
                 other => return Err(PluginError::UnexpectedResponse(Box::new(other))),
             };
-            ribbon = match call(&stream, &child, host, HostRequest::GetRibbon, no_op)? {
+            ribbon = match call(&stream, &child, host, "", HostRequest::GetRibbon, no_op)? {
                 HostResponse::Ribbon(r) => r,
                 other => return Err(PluginError::UnexpectedResponse(Box::new(other))),
             };
@@ -535,6 +549,7 @@ impl PluginProcess {
                 &self.stream,
                 &self.child,
                 host,
+                &self.id,
                 HostRequest::Dispatch {
                     cmd: cmd.to_string(),
                 },
@@ -546,6 +561,71 @@ impl PluginProcess {
         };
         vlog!("[plugin] dispatch {cmd} result: {result:?}");
         result
+    }
+
+    /// Issue a custom-grip drag event WITHOUT waiting (API v12; begin, move,
+    /// settle and cancel alike). The app parks move points and keeps at most
+    /// one move in flight, drops superseded cursor points, and never blocks
+    /// the UI loop on plugin latency — [`Self::custom_grip_poll`] collects the
+    /// answers at pump ticks, and [`Self::custom_grip_abandon`] is the
+    /// watchdog for plugins that never answer. Nested command frames
+    /// (`run_command`/`execute_command`) are REFUSED in this serving context:
+    /// their execution would need the host message loop the grip delivery
+    /// cannot pump (the v11.1 UI-freeze wedge); every other nested request —
+    /// including `push_undo` and direct writes — is served inline, so the
+    /// settle callback keeps its full HostApi write window. V4 transport
+    /// only; V3 connections refuse (no multiplexed link, no nested writes).
+    #[allow(clippy::result_large_err)]
+    pub fn custom_grip_event_send(
+        &self,
+        tab_index: usize,
+        event: crate::host::CustomGripEvent,
+    ) -> Result<u64, PluginError> {
+        let Some(v4) = &self.v4 else {
+            return Err(PluginError::Runner(
+                "custom grips require the V4 protocol".into(),
+            ));
+        };
+        v4.send_grip_event(tab_index, event)
+    }
+
+    /// Poll (bounded) for the next outstanding custom-grip answer, serving
+    /// nested plugin requests inline on the way. `Ok(None)`: not answered
+    /// yet. The poll never marks the connection dead.
+    #[allow(clippy::result_large_err)]
+    pub fn custom_grip_poll(
+        &self,
+        host: &mut dyn HostApi,
+        wait: std::time::Duration,
+    ) -> Result<Option<(u64, crate::host::CustomGripResponse)>, PluginError> {
+        let Some(v4) = &self.v4 else {
+            return Err(PluginError::Runner(
+                "custom grips require the V4 protocol".into(),
+            ));
+        };
+        match v4.poll_grip(host, wait)? {
+            Some((id, HostResponse::CustomGrip(resp))) => Ok(Some((id, resp))),
+            Some((_, other)) => Err(PluginError::UnexpectedResponse(Box::new(other))),
+            None => Ok(None),
+        }
+    }
+
+    /// Whether a custom-grip delivery is still unanswered.
+    pub fn custom_grip_move_in_flight(&self) -> bool {
+        self.v4
+            .as_ref()
+            .is_some_and(|v4| v4.has_grip_move_in_flight())
+    }
+
+    /// The watchdog (API v12): abandon a grip delivery that outlived its
+    /// deadline by tearing the plugin's connection down. The UI loop
+    /// recovers, the drag ends as a cancel, an error line names the plugin;
+    /// the runner reaps the dead connection. The plugin process is the
+    /// untrusted side — never waited on.
+    pub fn custom_grip_abandon(&self) {
+        if let Some(v4) = &self.v4 {
+            v4.abandon("grip-event delivery deadline exceeded");
+        }
     }
 
     /// Execute a REPL code snippet on a V4 plugin. The session is tied to the
@@ -690,6 +770,81 @@ impl PluginProcess {
                 HostRequest::NeedsEntityPick { command_id },
                 "NeedsEntityPick",
                 "needs_entity_pick",
+                |resp| match resp {
+                    HostResponse::Bool(b) => Ok(b),
+                    other => Err(Box::new(other)),
+                },
+            )
+        }
+    }
+
+    /// Ask the plugin process whether an interactive command is in selection-gathering mode.
+    pub fn is_selection_gathering(&self, command_id: u64) -> Result<bool, PluginError> {
+        if let Some(v4) = &self.v4 {
+            let resp = v4.call(
+                &mut NullHost,
+                HostRequest::IsSelectionGathering { command_id },
+                &mut |_| {},
+            )?;
+            match resp {
+                HostResponse::Bool(b) => Ok(b),
+                other => Err(PluginError::UnexpectedResponse(Box::new(other))),
+            }
+        } else {
+            self.call_simple(
+                HostRequest::IsSelectionGathering { command_id },
+                "IsSelectionGathering",
+                "is_selection_gathering",
+                |resp| match resp {
+                    HostResponse::Bool(b) => Ok(b),
+                    other => Err(Box::new(other)),
+                },
+            )
+        }
+    }
+
+    /// Ask the plugin process whether an interactive command accepts drag selections.
+    pub fn accepts_drag_selection(&self, command_id: u64) -> Result<bool, PluginError> {
+        if let Some(v4) = &self.v4 {
+            let resp = v4.call(
+                &mut NullHost,
+                HostRequest::AcceptsDragSelection { command_id },
+                &mut |_| {},
+            )?;
+            match resp {
+                HostResponse::Bool(b) => Ok(b),
+                other => Err(PluginError::UnexpectedResponse(Box::new(other))),
+            }
+        } else {
+            self.call_simple(
+                HostRequest::AcceptsDragSelection { command_id },
+                "AcceptsDragSelection",
+                "accepts_drag_selection",
+                |resp| match resp {
+                    HostResponse::Bool(b) => Ok(b),
+                    other => Err(Box::new(other)),
+                },
+            )
+        }
+    }
+
+    /// Ask the plugin process whether an interactive command rejects locked layers during selection.
+    pub fn selection_rejects_locked_layers(&self, command_id: u64) -> Result<bool, PluginError> {
+        if let Some(v4) = &self.v4 {
+            let resp = v4.call(
+                &mut NullHost,
+                HostRequest::SelectionRejectsLockedLayers { command_id },
+                &mut |_| {},
+            )?;
+            match resp {
+                HostResponse::Bool(b) => Ok(b),
+                other => Err(PluginError::UnexpectedResponse(Box::new(other))),
+            }
+        } else {
+            self.call_simple(
+                HostRequest::SelectionRejectsLockedLayers { command_id },
+                "SelectionRejectsLockedLayers",
+                "selection_rejects_locked_layers",
                 |resp| match resp {
                     HostResponse::Bool(b) => Ok(b),
                     other => Err(Box::new(other)),
@@ -995,11 +1150,14 @@ fn recv_with_deadline<T: DeserializeOwned + Send + 'static>(
 }
 
 /// Send a host request and wait for the response, handling any nested plugin
-/// requests inline using the supplied `HostApi`.
+/// requests inline using the supplied `HostApi`. `plugin_id` identifies the
+/// process whose requests are served (attached to grip declarations; before
+/// the manifest is read it is empty, where no grip traffic can exist).
 fn call(
     stream: &Mutex<Option<Stream>>,
     child: &Mutex<Option<Child>>,
     host: &mut dyn HostApi,
+    plugin_id: &str,
     req: HostRequest,
     on_start_interactive: &mut dyn FnMut(u64),
 ) -> Result<HostResponse, PluginError> {
@@ -1018,7 +1176,8 @@ fn call(
         match msg {
             PluginToHost::Response(resp) => return Ok(resp),
             PluginToHost::Request(plugin_req) => {
-                let resp = handle_plugin_request(host, *plugin_req, on_start_interactive);
+                let resp =
+                    handle_plugin_request(host, plugin_id, *plugin_req, on_start_interactive, true);
                 vlog!("[plugin] host -> runner response: {resp:?}");
                 let mut guard = stream.lock().unwrap_or_else(|e| e.into_inner());
                 let stream = guard.as_mut().ok_or_else(shutdown_error)?;
@@ -1150,6 +1309,74 @@ fn generate_token() -> Result<String, PluginError> {
     Ok(out)
 }
 
+/// In-crate test support: build a `PluginProcess` whose fields are otherwise
+/// private to this module, so sibling test modules (`process::manager`) can
+/// put one in a `PluginManager` without spawning a real runner.
+#[cfg(all(test, feature = "host"))]
+impl PluginProcess {
+    /// A process backed by a real sleeping child process and a local socket
+    /// pair, carrying the given manifest (no cdylib, no runner). The
+    /// runner-side peer socket is dropped immediately; nothing reads it.
+    pub(crate) fn fake(manifest: OwnedPluginManifest) -> Self {
+        use interprocess::local_socket::traits::Stream as StreamTrait;
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let name = format!(
+            "ocs_plugin_fake_process_test_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let name_ref = name
+            .clone()
+            .to_ns_name::<GenericNamespaced>()
+            .expect("valid name");
+        let listener = ListenerOptions::new()
+            .name(name_ref)
+            .create_sync()
+            .expect("listener");
+        let client_name = name.clone();
+        let client_thread: std::thread::JoinHandle<Stream> = std::thread::spawn(move || {
+            StreamTrait::connect(client_name.to_ns_name::<GenericNamespaced>().unwrap())
+                .expect("connect")
+        });
+        let host_stream = listener.accept().expect("accept");
+        drop(client_thread.join().expect("client thread"));
+
+        Self {
+            stream: Mutex::new(Some(host_stream)),
+            v4: None,
+            child: Mutex::new(Some(sleepy_test_child())),
+            id: manifest.id.clone(),
+            manifest,
+            ribbon: vec![],
+            io_lines: Mutex::new(None),
+        }
+    }
+}
+
+/// A child that lives ~30 s — long enough to read as "alive", short enough to
+/// never hang a leaked test. Shared by `PluginProcess::fake` and this module's
+/// own tests.
+#[cfg(all(test, feature = "host"))]
+fn sleepy_test_child() -> Child {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("ping -n 30 127.0.0.1")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleep")
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1200,7 +1427,7 @@ mod timeout_tests {
     use crate::ribbon::owned::OwnedPluginManifest;
     use crate::test_lock::ENV_LOCK;
     use codec::xdata::ExtendedDataRecord;
-    use codec::{CadDocument, EntityType, Handle};
+    use codec::{Document, EntityType, Handle};
     use interprocess::local_socket::{
         traits::{Listener, Stream as StreamTrait},
         GenericNamespaced, ListenerOptions, Stream, ToNsName,
@@ -1226,12 +1453,12 @@ mod timeout_tests {
     }
 
     struct DummyHost {
-        doc: CadDocument,
+        doc: Document,
         push_info_messages: StdMutex<Vec<String>>,
     }
 
     impl DummyHost {
-        fn new(doc: CadDocument) -> Self {
+        fn new(doc: Document) -> Self {
             Self {
                 doc,
                 push_info_messages: StdMutex::new(Vec::new()),
@@ -1246,10 +1473,10 @@ mod timeout_tests {
         fn tab_index(&self) -> usize {
             0
         }
-        fn document(&self) -> &CadDocument {
+        fn document(&self) -> &Document {
             &self.doc
         }
-        fn document_mut(&mut self) -> &mut CadDocument {
+        fn document_mut(&mut self) -> &mut Document {
             &mut self.doc
         }
         fn document_reader(&self) -> Box<dyn DocumentReader + '_> {
@@ -1352,6 +1579,7 @@ mod timeout_tests {
             ribbon_order: 0,
             xdata_apps: vec![],
             command_prefixes: vec![],
+            entity_classes: None,
         }
     }
 
@@ -1390,7 +1618,7 @@ mod timeout_tests {
             let _ = recv::<HostToPlugin>(&mut peer);
         });
 
-        let mut host = DummyHost::new(CadDocument::default());
+        let mut host = DummyHost::new(Document::default());
         let start = Instant::now();
         let result = process.dispatch(&mut host, "HANG", &mut |_| {});
         let elapsed = start.elapsed();
@@ -1455,7 +1683,7 @@ mod timeout_tests {
                 .expect("send final response");
         });
 
-        let mut host = DummyHost::new(CadDocument::default());
+        let mut host = DummyHost::new(Document::default());
         let result = process.dispatch(&mut host, "NESTED", &mut |_| {});
         assert!(result.expect("dispatch succeeds"));
         assert!(process.is_alive(), "process should still be alive");
@@ -1497,7 +1725,7 @@ mod timeout_tests {
 
     #[test]
     fn runner_handshake_correct_token_is_accepted() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("OCS_PLUGIN_MAX_API_VERSION");
         let result = verify_runner_handshake(
             RunnerHandshake::Token("correct-token".to_string()),
@@ -1512,7 +1740,7 @@ mod timeout_tests {
 
     #[test]
     fn runner_handshake_tokenv4_selects_v4_path() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("OCS_PLUGIN_MAX_API_VERSION");
         let result = verify_runner_handshake(
             RunnerHandshake::TokenV4 {
@@ -1530,7 +1758,7 @@ mod timeout_tests {
 
     #[test]
     fn runner_handshake_tokenv4_mismatched_version_is_rejected() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("OCS_PLUGIN_MAX_API_VERSION");
         let result = verify_runner_handshake(
             RunnerHandshake::TokenV4 {
@@ -1547,7 +1775,7 @@ mod timeout_tests {
 
     #[test]
     fn runner_handshake_tokenv4_rejected_when_v4_disabled() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("OCS_PLUGIN_MAX_API_VERSION", "3");
         let result = verify_runner_handshake(
             RunnerHandshake::TokenV4 {

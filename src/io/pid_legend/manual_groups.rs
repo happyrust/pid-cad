@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use codec::objects::{Group, ObjectType};
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 
 use super::blocks::{grow, lettering_value, placed_block, skip_for_box};
 use super::tags::derive_tag_from_texts;
@@ -33,7 +33,7 @@ pub(super) struct ManualGroups {
 /// Recognise every marked GROUP, and claim its model-space members before
 /// the block, circle, exploded-shape and lettering passes run.
 pub(super) fn recognise_manual_groups(
-    doc: &CadDocument,
+    doc: &Document,
     rules: &Rules,
     upm: f64,
     lettering: &[Lettering],
@@ -196,7 +196,7 @@ pub(super) fn recognise_manual_groups(
 /// cheap (only the group's members are inspected) and keeps the Properties
 /// panel's displayed tag and type on the same rules as recognition.
 pub fn group_details(
-    doc: &CadDocument,
+    doc: &Document,
     group_handle: Handle,
     rules: &Rules,
 ) -> Option<GroupDetails> {
@@ -312,7 +312,7 @@ fn classify_group(
 
 /// DXF keeps a GROUP's name on the ACAD_GROUP dictionary key but does not
 /// currently copy it into `Group::name`; DWG and newly-created groups do.
-fn group_name(doc: &CadDocument, group: &Group) -> String {
+fn group_name(doc: &Document, group: &Group) -> String {
     if !group.name.trim().is_empty() {
         return group.name.clone();
     }

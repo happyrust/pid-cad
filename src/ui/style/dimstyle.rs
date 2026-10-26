@@ -4,7 +4,7 @@ use crate::app::{ColorPickTarget, DsField, Message};
 use crate::scene::convert::tessellate::{arrow_from_block_name, ArrowKind};
 use crate::t;
 use crate::ui::style::common::muted_style;
-use crate::ui::style::form::hdivider;
+use crate::ui::style::form::{field_style, hdivider};
 use iced::widget::{
     button, canvas, checkbox, column, container, row, scrollable, text, text_input, Space,
 };
@@ -137,26 +137,6 @@ fn tab_btn_style(active: bool) -> impl Fn(&Theme, button::Status) -> button::Sty
     }
 }
 
-fn field_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
-    let palette = theme.palette();
-    let border = match status {
-        text_input::Status::Focused { .. } => palette.primary.base.color,
-        _ => palette.background.neutral.color,
-    };
-    text_input::Style {
-        background: Background::Color(palette.background.base.color),
-        border: Border {
-            color: border,
-            width: 1.0,
-            radius: 3.0.into(),
-        },
-        icon: palette.background.base.text,
-        placeholder: palette.background.base.text.scale_alpha(0.48),
-        value: palette.background.base.text,
-        selection: palette.primary.base.color.scale_alpha(0.5),
-    }
-}
-
 fn primary_style(theme: &Theme) -> iced::widget::text::Style {
     iced::widget::text::Style {
         color: Some(theme.palette().primary.base.color),
@@ -188,7 +168,9 @@ fn preview_arrow_kinds(
     dimblk2: &str,
     dimasz: f32,
 ) -> (ArrowKind, ArrowKind) {
-    let kind = |name: &str| arrow_from_block_name(Some(name), dimasz);
+    let kind = |name: &str| {
+        arrow_from_block_name(Some(crate::entities::arrowheads::block_name(name)), dimasz)
+    };
     if dimsah {
         (kind(dimblk1), kind(dimblk2))
     } else {
@@ -325,10 +307,12 @@ impl canvas::Program<Message> for DimensionPreview {
                         );
                     }
                 }
-                ArrowKind::Tick { size } => {
+                ArrowKind::Tick { size, width } => {
+                    // The architectural tick reads heavier than the oblique.
+                    let w = if *width > 0.0 { 3.0 } else { 1.6 };
                     frame.stroke(
                         &tick_path(tip_x, *size),
-                        canvas::Stroke::default().with_color(guide).with_width(1.6),
+                        canvas::Stroke::default().with_color(guide).with_width(w),
                     );
                 }
                 ArrowKind::Box_ { size, filled } => {
@@ -364,7 +348,7 @@ impl canvas::Program<Message> for DimensionPreview {
                         );
                     }
                 }
-                ArrowKind::Origin { size } => {
+                ArrowKind::Origin { size, .. } => {
                     let dot =
                         canvas::Path::circle(Point::new(tip_x + sign * size * 0.5, y), size * 0.4);
                     frame.stroke(

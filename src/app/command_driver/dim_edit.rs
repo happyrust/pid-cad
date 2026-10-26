@@ -36,10 +36,12 @@ impl OpenCADStudio {
     ) {
         let i = self.active_tab;
         let valid = matches!(
-            self.tabs[i].scene.document.get_entity(dimension),
-            Some(codec::EntityType::Dimension(
-                codec::entities::Dimension::Linear(_) | codec::entities::Dimension::Aligned(_)
-            ))
+            self.tabs[i]
+                .scene
+                .document
+                .get_entity(dimension)
+                .and_then(crate::entities::dimension::as_dimension),
+            Some(codec::entities::Dimension::Linear(_) | codec::entities::Dimension::Aligned(_))
         );
         if !valid {
             self.command_line.push_error(
@@ -141,7 +143,7 @@ fn segment_intersection_xy(
     ))
 }
 
-fn break_object_handle(document: &codec::CadDocument, dimension: Handle) -> Option<Handle> {
+fn break_object_handle(document: &codec::Document, dimension: Handle) -> Option<Handle> {
     document.objects.iter().find_map(|(handle, object)| {
         let codec::objects::ObjectType::DataObject(object) = object else {
             return None;
@@ -153,7 +155,7 @@ fn break_object_handle(document: &codec::CadDocument, dimension: Handle) -> Opti
     })
 }
 
-fn remove_dimension_break_data(document: &mut codec::CadDocument, dimension: Handle) -> bool {
+fn remove_dimension_break_data(document: &mut codec::Document, dimension: Handle) -> bool {
     let handles: Vec<_> = document
         .objects
         .iter()
@@ -191,7 +193,7 @@ fn remove_dimension_break_data(document: &mut codec::CadDocument, dimension: Han
 }
 
 fn write_dimension_break_data(
-    document: &mut codec::CadDocument,
+    document: &mut codec::Document,
     dimension: Handle,
     reserved_reference: Handle,
     references: Vec<codec::objects::BreakPointReference>,
@@ -415,8 +417,12 @@ fn apply_dimspace(
     requested_spacing: Option<f64>,
 ) -> bool {
     use codec::entities::Dimension;
-    let (axis, normal, definition, auto_spacing) = match scene.document.get_entity(base_h) {
-        Some(codec::EntityType::Dimension(dimension @ Dimension::Linear(d))) => {
+    let base = scene
+        .document
+        .get_entity(base_h)
+        .and_then(crate::entities::dimension::as_dimension);
+    let (axis, normal, definition, auto_spacing) = match base {
+        Some(dimension @ Dimension::Linear(d)) => {
             let spacing = dimension_auto_spacing(
                 &scene.document,
                 dimension,
@@ -433,7 +439,7 @@ fn apply_dimspace(
                 spacing,
             )
         }
-        Some(codec::EntityType::Dimension(dimension @ Dimension::Aligned(d))) => {
+        Some(dimension @ Dimension::Aligned(d)) => {
             let spacing = dimension_auto_spacing(
                 &scene.document,
                 dimension,
@@ -471,7 +477,7 @@ fn apply_dimspace(
                     kernel::space::move_to_dimension_spacing([p.x, p.y, p.z], frame, target);
                 *p = codec::types::Vector3::new(point[0], point[1], point[2]);
             };
-            match dim {
+            match &mut **dim {
                 Dimension::Linear(d) => {
                     slide(&mut d.definition_point);
                     d.base.definition_point = d.definition_point;
@@ -499,7 +505,7 @@ fn apply_dimspace(
 }
 
 fn dimension_auto_spacing(
-    document: &codec::CadDocument,
+    document: &codec::Document,
     dimension: &codec::entities::Dimension,
     annotation_multiplier: f64,
 ) -> f64 {

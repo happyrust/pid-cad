@@ -119,11 +119,15 @@ impl OpenCADStudio {
                 return Some(Task::done(Message::QSelectOpen));
             }
 
-            // CAL / QUICKCALC <expression> — evaluate an arithmetic expression
-            //   (+ - * /, parentheses, unary minus, decimals).
-            "CAL" | "QUICKCALC" | "QC" => {
-                use crate::command::ValuePromptCommand;
-                let c = ValuePromptCommand::new("CAL", "CAL  expression  (e.g. (2+3)*4):");
+            // CAL <expression> — evaluate an expression on the
+            //   shared calculator engine (`app::calc`): arithmetic, points,
+            //   functions, unit suffixes, variables and `ans`. Free text, so
+            //   spaces inside the expression don't end the input.
+            // QUICKCALC / QC show or hide the QuickCalc pallet.
+            "QUICKCALC" | "QC" => return Some(self.toggle_quick_calc()),
+            "CAL" => {
+                use crate::command::FreeTextValuePromptCommand;
+                let c = FreeTextValuePromptCommand::new("CAL", "CAL  expression  (e.g. (2+3)*4):");
                 self.command_line.push_info(&c.prompt());
                 self.tabs[self.active_tab].active_cmd = Some(Box::new(c));
             }
@@ -141,8 +145,14 @@ impl OpenCADStudio {
                         crate::t!("Usage: CAL <expression>   e.g. CAL (2+3)*4").as_ref(),
                     );
                 } else {
-                    match arith_eval(expr) {
-                        Ok(v) => self.command_line.push_output(crate::tf!("= {v}").as_ref()),
+                    self.cal_context.base_unit = crate::app::quick_calc::base_unit(&self.tabs[i]);
+                    self.cal_context.sysvars =
+                        Some(crate::app::quick_calc::sysvars(&self.tabs[i]));
+                    match crate::app::calc::evaluate(expr, &mut self.cal_context) {
+                        Ok(v) => {
+                            let v = v.display();
+                            self.command_line.push_output(crate::tf!("= {v}").as_ref())
+                        }
                         Err(e) => self
                             .command_line
                             .push_error(crate::tf!("CAL: {e}").as_ref()),
@@ -154,9 +164,12 @@ impl OpenCADStudio {
             "LIST" => {
                 let selected: Vec<_> = self.tabs[i].scene.selected_entities();
                 if selected.is_empty() {
-                    self.command_line.push_error(
-                        crate::t!("LIST: no entities selected. Select entities first.").as_ref(),
-                    );
+                    // Without a selection, ask for the objects first.
+                    use crate::modules::draw::select::SelectObjectsCommand;
+                    let cmd = SelectObjectsCommand::new("LIST");
+                    self.command_line.push_info(&cmd.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(cmd));
+                    return Some(Task::none());
                 } else {
                     for (handle, _) in &selected {
                         if let Some(entity) = self.tabs[i].scene.document.get_entity(*handle) {
@@ -458,7 +471,6 @@ impl OpenCADStudio {
             }
 
             "BEDIT" => {
-                use crate::modules::draw::modify::block_edit::BlockEditPickCommand;
                 if self.tabs[i].refedit_session.is_some() {
                     self.command_line.push_error(
                         crate::t!("BEDIT: finish the active REFEDIT (REFCLOSE) first.").as_ref(),
@@ -476,10 +488,47 @@ impl OpenCADStudio {
                             return Some(Task::none());
                         }
                     }
-                    let cmd_obj = BlockEditPickCommand::new();
-                    self.command_line.push_info(&cmd_obj.prompt());
-                    self.tabs[i].active_cmd = Some(Box::new(cmd_obj));
+                    self.open_bedit_dialog(i);
                 }
+            }
+
+            cmd if cmd.starts_with("BEDIT_NEW:") => {
+                if self.tabs[i].refedit_session.is_some() {
+                    self.command_line.push_error(
+                        crate::t!("BEDIT: finish the active REFEDIT (REFCLOSE) first.").as_ref(),
+                    );
+                    return Some(Task::none());
+                }
+                let raw_name = &cmd["BEDIT_NEW:".len()..];
+                let block_name = match crate::scene::block_service::validate_block_name(raw_name) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        self.command_line.push_error(&e.to_string());
+                        return Some(Task::none());
+                    }
+                };
+                if let Some(br) = self.tabs[i].scene.document.block_records.get(&block_name) {
+                    let real_name = br.name.clone();
+                    return Some(self.dispatch_command(&format!("BEDIT_OPEN:{real_name}")));
+                }
+                if self.tabs[i].active_block_edit_session().is_some() {
+                    return Some(self.request_block_edit_close(
+                        i,
+                        crate::app::block_editor::BlockEditContinuation::Create(block_name),
+                    ));
+                }
+                let pre_doc = self.tabs[i].scene.document.clone();
+                self.tabs[i].scene.define_block_raw(
+                    &block_name,
+                    codec::types::Vector3::ZERO,
+                    vec![],
+                );
+                let Some(record) = self.tabs[i].scene.document.block_records.get(&block_name)
+                else {
+                    return Some(Task::none());
+                };
+                let br_handle = record.handle;
+                self.start_block_edit_session(i, block_name, br_handle, Some(pre_doc));
             }
 
             cmd if cmd.starts_with("BEDIT_BEGIN:") || cmd.starts_with("BEDIT_OPEN:") => {
@@ -489,7 +538,6 @@ impl OpenCADStudio {
                     );
                     return Some(Task::none());
                 }
-                use crate::modules::draw::modify::block_edit::BlockEditSession;
                 use codec::Handle;
 
                 let block_name = if let Some(name) = cmd.strip_prefix("BEDIT_OPEN:") {
@@ -501,7 +549,17 @@ impl OpenCADStudio {
                         return Some(Task::none());
                     }
                     match self.tabs[i].scene.document.get_entity(insert_handle) {
-                        Some(codec::EntityType::Insert(ins)) => ins.block_name.clone(),
+                        Some(codec::EntityType::Insert(ins)) => {
+                            // Evaluated INSERTs point at anonymous geometry variants.
+                            // Their authoring graph belongs to the original definition.
+                            let doc = &self.tabs[i].scene.document;
+                            doc.dynamic_definition_for_insert(insert_handle)
+                                .and_then(|definition| {
+                                    doc.block_records.iter().find(|br| br.handle == definition)
+                                })
+                                .map(|br| br.name.clone())
+                                .unwrap_or_else(|| ins.block_name.clone())
+                        }
                         _ => {
                             self.command_line.push_error(
                                 crate::t!("BEDIT: selected object is not a block reference.")
@@ -539,81 +597,14 @@ impl OpenCADStudio {
                     ));
                 }
 
-                // Capture the camera before the editor reframes it, so leaving
-                // the block editor returns the view exactly where it was (#425).
-                let current_camera = self.tabs[i].scene.camera.borrow().clone();
-                let current_ucs = self.tabs[i].active_ucs.clone();
-                let (return_layout, return_block, return_camera) =
-                    if let Some(parent_index) = self.tabs[i].active_block_edit {
-                        let parent = &mut self.tabs[i].block_edits[parent_index];
-                        parent.editor_camera = current_camera.clone();
-                        parent.editor_ucs = current_ucs;
-                        (
-                            parent.return_layout.clone(),
-                            Some(parent.block_name.clone()),
-                            parent.return_camera.clone(),
-                        )
-                    } else {
-                        self.tabs[i].scene.sync_camera_to_document();
-                        (
-                            self.tabs[i].scene.current_layout.clone(),
-                            None,
-                            current_camera.clone(),
-                        )
-                    };
-                // A block editor renders in model style; switch to Model first so
-                // the paper-space code paths stay off, then scope to the block.
-                if self.tabs[i].scene.current_layout != "Model" {
-                    self.tabs[i].scene.set_current_layout("Model".to_string());
-                }
-                self.tabs[i].scene.block_edit_block = Some(br_handle);
-                self.tabs[i].block_edits.push(BlockEditSession {
-                    block_name: block_name.clone(),
-                    br_handle,
-                    return_layout,
-                    return_block,
-                    return_camera,
-                    editor_camera: current_camera,
-                    editor_ucs: None,
-                });
-                self.tabs[i].active_block_edit = Some(self.tabs[i].block_edits.len() - 1);
-                // Every BEDIT tab owns an isolated local UCS. Never inherit or
-                // overwrite the drawing's model-space UCS.
-                self.tabs[i].refresh_active_ucs();
-
-                self.tabs[i].scene.deselect_all();
-                // The first click of a double-click selects the model-space
-                // INSERT and populates the cached grip overlay. Clearing only
-                // Scene::selected leaves that INSERT's grips active inside the
-                // block editor, where dragging one moves the outer reference
-                // instead of block-local geometry (#517).
-                self.tabs[i].active_grip = None;
-                self.grip_hover = None;
-                self.grip_popup = None;
-                self.visibility_popup = None;
-                // Entering BEDIT changes which block is assembled, not the
-                // cached geometry of that block's entities.
-                self.tabs[i].scene.bump_geometry_no_blocks();
-                // Frame the camera on the block's own geometry (block-local, near
-                // origin) — fit_all() goes through current_layout_block_handle so
-                // it already scopes to the edited block. Without this the view
-                // stays wherever model/paper space was. (#261)
-                self.tabs[i].scene.fit_all();
-                let editor_camera = self.tabs[i].scene.camera.borrow().clone();
-                if let Some(session) = self.tabs[i].active_block_edit_session_mut() {
-                    session.editor_camera = editor_camera;
-                }
-                self.tabs[i].last_synced_camera_gen = self.tabs[i].scene.camera_generation;
-                self.refresh_properties();
-                self.tabs[i].active_cmd = None;
-                self.begin_block_edit_history(i);
-                self.command_line
-                    .push_info(crate::tf!("Block Editor: editing {}", block_name).as_ref());
+                self.start_block_edit_session(i, block_name, br_handle, None);
             }
 
             "BSAVE" => {
                 self.save_block_edit(i);
             }
+            "BTESTBLOCK" => return Some(self.open_block_test(i)),
+            "BCLOSETESTBLOCK" => return Some(self.close_block_test(i)),
             "BSAVEAS" => {
                 self.open_block_save_as_dialog(i);
             }
@@ -814,6 +805,14 @@ impl OpenCADStudio {
 
             // ── FLATTEN — move selected (or all) entities to Z=0 ─────────────
             "FLATTEN" => {
+                // Without a selection, ask for the objects first.
+                if self.tabs[i].scene.selected_entities().is_empty() {
+                    use crate::modules::draw::select::SelectObjectsCommand;
+                    let cmd = SelectObjectsCommand::new("FLATTEN");
+                    self.command_line.push_info(&cmd.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(cmd));
+                    return Some(Task::none());
+                }
                 let scene = &self.tabs[i].scene;
                 let handles = crate::modules::draw::modify::flatten::collect_flatten_handles(scene);
                 if handles.is_empty() {
@@ -1025,12 +1024,103 @@ impl OpenCADStudio {
         Some(self.finish_dispatch(cmd))
     }
 
+    pub(in crate::app) fn start_block_edit_session(
+        &mut self,
+        i: usize,
+        block_name: String,
+        br_handle: codec::Handle,
+        unpersisted_pre_document: Option<codec::Document>,
+    ) {
+        if self.block_editor_preferences.locked {
+            self.command_line.push_error(
+                crate::t!("The Block Editor is locked by BLOCKEDITLOCK.").as_ref(),
+            );
+            return;
+        }
+        use crate::modules::draw::modify::block_edit::BlockEditSession;
+        self.tabs[i].action_bars=Default::default();
+        // Capture the camera before the editor reframes it, so leaving
+        // the block editor returns the view exactly where it was (#425).
+        let current_camera = self.tabs[i].scene.camera.borrow().clone();
+        let current_ucs = self.tabs[i].active_ucs.clone();
+        let (return_layout, return_block, return_camera) =
+            if let Some(parent_index) = self.tabs[i].active_block_edit {
+                let parent = &mut self.tabs[i].block_edits[parent_index];
+                parent.editor_camera = current_camera.clone();
+                parent.editor_ucs = current_ucs;
+                (
+                    parent.return_layout.clone(),
+                    Some(parent.block_name.clone()),
+                    parent.return_camera.clone(),
+                )
+            } else {
+                self.tabs[i].scene.sync_camera_to_document();
+                (
+                    self.tabs[i].scene.current_layout.clone(),
+                    None,
+                    current_camera.clone(),
+                )
+            };
+        // A block editor renders in model style; switch to Model first so
+        // the paper-space code paths stay off, then scope to the block.
+        if self.tabs[i].scene.current_layout != "Model" {
+            self.tabs[i].scene.set_current_layout("Model".to_string());
+        }
+        self.tabs[i].scene.block_edit_block = Some(br_handle);
+        self.reset_block_constraint_display(i);
+        self.tabs[i].block_edits.push(BlockEditSession {
+            block_name: block_name.clone(),
+            br_handle,
+            return_layout,
+            return_block,
+            return_camera,
+            editor_camera: current_camera,
+            editor_ucs: None,
+            unpersisted_pre_document,
+        });
+        self.tabs[i].active_block_edit = Some(self.tabs[i].block_edits.len() - 1);
+        // Every BEDIT tab owns an isolated local UCS. Never inherit or
+        // overwrite the drawing's model-space UCS.
+        self.tabs[i].refresh_active_ucs();
+
+        self.tabs[i].scene.deselect_all();
+        // The first click of a double-click selects the model-space
+        // INSERT and populates the cached grip overlay. Clearing only
+        // Scene::selected leaves that INSERT's grips active inside the
+        // block editor, where dragging one moves the outer reference
+        // instead of block-local geometry (#517).
+        self.tabs[i].active_grip = None;
+        self.grip_hover = None;
+        self.grip_popup = None;
+        self.visibility_popup = None;
+        self.table_popup = None;
+        // Entering BEDIT changes which block is assembled, not the
+        // cached geometry of that block's entities.
+        self.tabs[i].scene.bump_geometry_no_blocks();
+        // Frame the camera on the block's own geometry (block-local, near
+        // origin) — fit_all() goes through current_layout_block_handle so
+        // it already scopes to the edited block. Without this the view
+        // stays wherever model/paper space was. (#261)
+        self.tabs[i].scene.fit_all();
+        let editor_camera = self.tabs[i].scene.camera.borrow().clone();
+        if let Some(session) = self.tabs[i].active_block_edit_session_mut() {
+            session.editor_camera = editor_camera;
+        }
+        self.tabs[i].last_synced_camera_gen = self.tabs[i].scene.camera_generation;
+        self.refresh_properties();
+        self.tabs[i].active_cmd = None;
+        self.begin_block_edit_history(i);
+        self.command_line
+            .push_info(crate::tf!("Block Editor: editing {}", block_name).as_ref());
+    }
+
     pub(in crate::app) fn restore_after_block_edit_close(
         &mut self,
         i: usize,
         return_block: Option<&str>,
         return_layout: &str,
         return_camera: &crate::scene::view::camera::Camera,
+        saved: bool,
     ) {
         self.tabs[i].scene.block_edit_block = None;
         self.tabs[i].scene.deselect_all();
@@ -1038,6 +1128,7 @@ impl OpenCADStudio {
         self.grip_hover = None;
         self.grip_popup = None;
         self.visibility_popup = None;
+        self.table_popup = None;
 
         let parent_index = return_block.and_then(|parent_name| {
             self.tabs[i]
@@ -1052,6 +1143,7 @@ impl OpenCADStudio {
             };
             self.tabs[i].scene.set_current_layout("Model".to_string());
             self.tabs[i].scene.block_edit_block = Some(br_handle);
+            self.reset_block_constraint_display(i);
             self.tabs[i].active_block_edit = Some(parent_index);
             *self.tabs[i].scene.camera.borrow_mut() = editor_camera;
         } else {
@@ -1072,7 +1164,9 @@ impl OpenCADStudio {
 
         self.tabs[i].scene.camera_generation += 1;
         self.tabs[i].last_synced_camera_gen = self.tabs[i].scene.camera_generation;
-        self.tabs[i].scene.rebuild_derived_caches();
+        if !saved {
+            self.tabs[i].scene.bump_geometry_no_blocks();
+        }
         let layers = self.tabs[i].scene.document.layers.clone();
         let viewports = self.tabs[i].scene.viewport_list();
         self.tabs[i].layers.sync_with_viewports(&layers, viewports);
@@ -1372,13 +1466,19 @@ fn entity_list_details(entity: &codec::EntityType) -> String {
             a.end_angle.to_degrees()
         )
         .into_owned(),
-        codec::EntityType::LwPolyline(p) => crate::tf!(
-            "{} vertices  closed={}  elevation={:.4}",
-            p.vertices.len(),
-            p.is_closed,
-            p.elevation
-        )
-        .into_owned(),
+        codec::EntityType::LwPolyline(p) => {
+            let mut details = crate::tf!(
+                "{} vertices  closed={}  elevation={:.4}",
+                p.vertices.len(),
+                p.is_closed,
+                p.elevation
+            )
+            .into_owned();
+            for v in &p.vertices {
+                details.push_str(&format!("\n    ({:.4},{:.4})", v.location.x, v.location.y));
+            }
+            details
+        }
         codec::EntityType::Text(t) => crate::tf!(
             "\"{}\"  h={:.4}  at ({:.4},{:.4})",
             t.value,
@@ -1426,21 +1526,6 @@ fn entity_list_details(entity: &codec::EntityType) -> String {
     }
 }
 
-// ── CAL — arithmetic expression evaluator ──────────────────────────────────
-// A small recursive-descent parser for `+ - * /`, parentheses, unary signs and
-// decimal numbers. Self-contained (no external dependency).
-fn arith_eval(expr: &str) -> Result<f64, String> {
-    let mut p = ArithParser {
-        chars: expr.chars().filter(|c| !c.is_whitespace()).collect(),
-        pos: 0,
-    };
-    let v = p.expr()?;
-    if p.pos != p.chars.len() {
-        return Err(crate::tf!("unexpected '{}'", p.chars[p.pos]).into_owned());
-    }
-    Ok(v)
-}
-
 impl OpenCADStudio {
     /// Open the attribute editor. If a single block with attributes is already
     /// selected it opens directly on that block; otherwise it starts the
@@ -1469,94 +1554,6 @@ impl OpenCADStudio {
             self.command_line.push_info(&cmd_obj.prompt());
             self.tabs[i].active_cmd = Some(Box::new(cmd_obj));
         }
-    }
-}
-
-struct ArithParser {
-    chars: Vec<char>,
-    pos: usize,
-}
-
-impl ArithParser {
-    fn peek(&self) -> Option<char> {
-        self.chars.get(self.pos).copied()
-    }
-
-    // expr = term (('+' | '-') term)*
-    fn expr(&mut self) -> Result<f64, String> {
-        let mut v = self.term()?;
-        while let Some(op) = self.peek() {
-            if op == '+' || op == '-' {
-                self.pos += 1;
-                let rhs = self.term()?;
-                v = if op == '+' { v + rhs } else { v - rhs };
-            } else {
-                break;
-            }
-        }
-        Ok(v)
-    }
-
-    // term = factor (('*' | '/') factor)*
-    fn term(&mut self) -> Result<f64, String> {
-        let mut v = self.factor()?;
-        while let Some(op) = self.peek() {
-            if op == '*' || op == '/' {
-                self.pos += 1;
-                let rhs = self.factor()?;
-                if op == '/' {
-                    if rhs == 0.0 {
-                        return Err("division by zero".into());
-                    }
-                    v /= rhs;
-                } else {
-                    v *= rhs;
-                }
-            } else {
-                break;
-            }
-        }
-        Ok(v)
-    }
-
-    // factor = ('+' | '-') factor | '(' expr ')' | number
-    fn factor(&mut self) -> Result<f64, String> {
-        match self.peek() {
-            Some('+') => {
-                self.pos += 1;
-                self.factor()
-            }
-            Some('-') => {
-                self.pos += 1;
-                Ok(-self.factor()?)
-            }
-            Some('(') => {
-                self.pos += 1;
-                let v = self.expr()?;
-                if self.peek() != Some(')') {
-                    return Err("missing ')'".into());
-                }
-                self.pos += 1;
-                Ok(v)
-            }
-            Some(c) if c.is_ascii_digit() || c == '.' => self.number(),
-            Some(c) => Err(crate::tf!("unexpected '{c}'").into_owned()),
-            None => Err("unexpected end of expression".into()),
-        }
-    }
-
-    fn number(&mut self) -> Result<f64, String> {
-        let start = self.pos;
-        while let Some(c) = self.peek() {
-            if c.is_ascii_digit() || c == '.' {
-                self.pos += 1;
-            } else {
-                break;
-            }
-        }
-        let s: String = self.chars[start..self.pos].iter().collect();
-        s.parse::<f64>()
-            .map_err(|_| crate::tf!("bad number '{s}'").into_owned())
     }
 }
 
@@ -1761,5 +1758,36 @@ mod find_replace_command_tests {
             }
             _ => panic!("Expected CmdResult::Measurement"),
         }
+    }
+}
+
+#[cfg(test)]
+mod cal_tests {
+    use super::*;
+
+    #[test]
+    fn cal_evaluates_on_the_shared_engine() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        app.tabs[i].scene.document.header.insertion_units = 4;
+        // The prompt takes free text, spaces included; variables, ans and
+        // the drawing unit carry through every CAL.
+        let _ = app.dispatch_command("CAL");
+        let _ = app.feed_active_cmd("$wall = (2 + 1.6) * 1m");
+        for (cmd, expected) in [
+            ("CAL $wall + 90", "= 3690"),
+            ("CAL *2", "= 7380"),
+            ("CAL dist([0,0],[3,4])", "= 5"),
+            ("CAL 1/0", "CAL:"),
+        ] {
+            let _ = app.dispatch_command(cmd);
+            let last = &app.command_line.history.last().unwrap().text;
+            assert!(last.contains(expected), "{cmd}: {last}");
+        }
+        app.tabs[i].scene.document.header.insertion_units = 6;
+        let _ = app.dispatch_command("CAL 1500mm");
+        let last = &app.command_line.history.last().unwrap().text;
+        assert!(last.ends_with("= 1.5"), "{last}");
     }
 }

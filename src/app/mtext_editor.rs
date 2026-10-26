@@ -538,6 +538,30 @@ fn str_to_cells(
     cells
 }
 
+/// Replace each `%%d` / `%%p` / `%%c` that ends inside the freshly inserted
+/// `start..end` with its symbol (°, ±, ∅), as it is typed; returns the new end.
+/// The cells stay one per visible glyph, so the caret keeps matching the layout.
+fn fold_special_codes(cells: &mut Vec<Cell>, start: usize, mut end: usize) -> usize {
+    let mut i = start.saturating_sub(2);
+    while i + 3 <= end {
+        if let [Cell::Char('%', props), Cell::Char('%', _), Cell::Char(c, _)] = &cells[i..i + 3] {
+            let symbol = match c.to_ascii_lowercase() {
+                'd' => Some('°'),
+                'p' => Some('±'),
+                'c' => Some('∅'),
+                _ => None,
+            };
+            if let Some(symbol) = symbol {
+                let cell = Cell::Char(symbol, props.clone());
+                cells.splice(i..i + 3, [cell]);
+                end -= 2;
+            }
+        }
+        i += 1;
+    }
+    end
+}
+
 /// Properties newly-typed text at `caret` inherits — the cell to its left, or
 /// the default at the start of a paragraph / document.
 fn insert_props(cells: &[Cell], caret: usize) -> SpanProperties {
@@ -841,7 +865,12 @@ impl super::OpenCADStudio {
         // catastrophic cancellation. Insertion is a pure translation, so zeroing
         // it keeps the layout's shape, wrapping and alignment identical.
         mt.insertion_point = Vector3::new(0.0, 0.0, 0.0);
-        let entity = EntityType::MText(mt.clone());
+        // The preview reads upright: the glyph boxes the caret and the
+        // selection use are laid out unrotated, so the strokes must be too.
+        mt.rotation = 0.0;
+        mt.dwg_x_direction = None;
+        mt.normal = Vector3::new(0.0, 0.0, 1.0);
+        let entity = EntityType::MText(Box::new(mt.clone()));
         let anno = 1.0;
         let bg = self.tabs[i].scene.bg_color;
         let wires: Vec<WireModel> = tessellate::tessellate(
@@ -1229,7 +1258,11 @@ impl super::OpenCADStudio {
                     if !ed.font.trim().is_empty() {
                         ed.font.clone()
                     } else {
-                        crate::entities::text_support::resolve_text_style(&ed.style, doc).font_name
+                        // The family, not the style's bold / italic face of it.
+                        let font =
+                            crate::entities::text_support::resolve_text_style(&ed.style, doc)
+                                .font_name;
+                        crate::scene::text::sysfont::split_style(&font).0.to_string()
                     }
                 })
                 .unwrap_or_default()
@@ -1401,7 +1434,7 @@ impl super::OpenCADStudio {
             let ins = str_to_cells(s, &props, &para_props);
             let added = ins.len();
             cells.splice(caret..caret, ins);
-            caret += added;
+            caret = fold_special_codes(&mut cells, caret, caret + added);
             ed.content =
                 text_editor::Content::with_text(&cells_to_doc(&para0, &cells).to_mtext_string());
             ed.caret = caret;
@@ -1530,7 +1563,10 @@ impl super::OpenCADStudio {
             self.mtext_editor
                 .as_ref()
                 .map(|ed| {
-                    crate::entities::text_support::resolve_text_style(&ed.style, doc).font_name
+                    let font =
+                        crate::entities::text_support::resolve_text_style(&ed.style, doc)
+                            .font_name;
+                    crate::scene::text::sysfont::split_style(&font).0.to_string()
                 })
                 .unwrap_or_default()
         } else {
@@ -1721,7 +1757,7 @@ impl super::OpenCADStudio {
                     annotative,
                 );
                 if annotative {
-                    if let Some(scale) = self.tabs[i].scene.current_annotation_scale_handle() {
+                    if let Some(scale) = self.tabs[i].scene.creation_annotation_scale_handle() {
                         crate::scene::annotative::create_annotation_context(
                             &mut self.tabs[i].scene.document,
                             h,
@@ -1753,9 +1789,10 @@ impl super::OpenCADStudio {
             ));
             mt.insertion_point = codec::types::Vector3::new(position.x, position.y, position.z);
             self.push_undo_snapshot(i, "MTEXT");
-            let handle = self.commit_entity_handle(plane.place_entity(EntityType::MText(mt)));
+            let handle =
+                self.commit_entity_handle(plane.place_entity(EntityType::MText(Box::new(mt))));
             if annotative {
-                let scale = self.tabs[i].scene.current_annotation_scale_handle();
+                let scale = self.tabs[i].scene.creation_annotation_scale_handle();
                 if let (Some(handle), Some(scale)) = (handle, scale) {
                     crate::scene::annotative::create_annotation_context(
                         &mut self.tabs[i].scene.document,
@@ -1837,7 +1874,7 @@ impl super::OpenCADStudio {
                     annotative,
                 );
                 if annotative {
-                    if let Some(scale) = self.tabs[i].scene.current_annotation_scale_handle() {
+                    if let Some(scale) = self.tabs[i].scene.creation_annotation_scale_handle() {
                         crate::scene::annotative::create_annotation_context(
                             &mut self.tabs[i].scene.document,
                             h,
@@ -1869,10 +1906,11 @@ impl super::OpenCADStudio {
             ));
             mt.insertion_point = codec::types::Vector3::new(position.x, position.y, position.z);
             self.push_undo_snapshot(i, "MTEXT");
-            let handle = self.commit_entity_handle(plane.place_entity(EntityType::MText(mt)));
+            let handle =
+                self.commit_entity_handle(plane.place_entity(EntityType::MText(Box::new(mt))));
             self.tabs[i].dirty = true;
             if annotative {
-                let scale = self.tabs[i].scene.current_annotation_scale_handle();
+                let scale = self.tabs[i].scene.creation_annotation_scale_handle();
                 if let (Some(handle), Some(scale)) = (handle, scale) {
                     crate::scene::annotative::create_annotation_context(
                         &mut self.tabs[i].scene.document,
@@ -1885,7 +1923,7 @@ impl super::OpenCADStudio {
             if let (Some(h), Some(ed)) = (handle, self.mtext_editor.as_mut()) {
                 ed.editing = Some(h);
                 if let Some(EntityType::MText(mtext)) = self.tabs[i].scene.document.get_entity(h) {
-                    ed.original = Some(mtext.clone());
+                    ed.original = Some((**mtext).clone());
                 }
             }
         }
@@ -1938,6 +1976,28 @@ mod cell_tests {
                 "not idempotent for {s:?}: {once:?} vs {twice:?}"
             );
         }
+    }
+
+    #[test]
+    fn typed_percent_codes_fold_into_symbols() {
+        let props = SpanProperties::default();
+        let mut cells = str_to_cells("x%%c", &props, &ParagraphProperties::default());
+        let end = fold_special_codes(&mut cells, 3, 4);
+        assert_eq!(end, 2);
+        let text = |cells: &[Cell]| -> String {
+            cells
+                .iter()
+                .filter_map(|c| match c {
+                    Cell::Char(ch, _) => Some(*ch),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(text(&cells), "x∅");
+        let mut all = str_to_cells("%%D5 %%p1 %%x", &props, &ParagraphProperties::default());
+        let len = all.len();
+        fold_special_codes(&mut all, 0, len);
+        assert_eq!(text(&all), "°5 ±1 %%x");
     }
 
     #[test]

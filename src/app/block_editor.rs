@@ -3,18 +3,24 @@ use super::document::{
     StructureSnapshot,
 };
 use super::{Message, ModalKind, OpenCADStudio};
-use codec::{CadDocument, EntityType};
+use codec::{Document, EntityType};
 use iced::Task;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 /// A single save checkpoint. Entity payloads remain shared through the
 /// document's Arc storage; only modified entities detach during editing.
 pub(super) struct BlockEditCheckpoint {
-    document: CadDocument,
+    document: Document,
+    structure: Document,
     constraints: Vec<crate::scene::parametric_constraints::ParametricConstraintSet>,
     parameters: crate::scene::named_parameters::ParameterTable,
     dirty: bool,
     active_layer: String,
+    hatches: FxHashMap<codec::Handle, crate::scene::HatchModel>,
+    images: FxHashMap<codec::Handle, crate::scene::ImageModel>,
+    meshes: FxHashMap<codec::Handle, crate::scene::MeshLodSet>,
+    block_meshes: FxHashMap<codec::Handle, crate::scene::MeshLodSet>,
+    solid_models: FxHashMap<codec::Handle, kernel::brep::Body>,
 }
 
 pub(super) struct BlockEditHistory {
@@ -27,6 +33,7 @@ pub(super) struct BlockEditHistory {
 pub(super) enum BlockEditContinuation {
     Close,
     Switch(String),
+    Create(String),
     Layout(String),
     Tab(u64),
     Quit,
@@ -42,7 +49,7 @@ fn same_constraints(
         && before.dimensions == after.dimensions
 }
 
-fn normalize_allocation(document: &mut CadDocument, next: u64) {
+fn normalize_allocation(document: &mut Document, next: u64) {
     if document.next_handle() < next {
         document.header.handle_seed = next - 1;
         document.allocate_handle();
@@ -75,14 +82,21 @@ impl OpenCADStudio {
         }
     }
 
-    fn block_edit_checkpoint(&self, i: usize) -> BlockEditCheckpoint {
-        let tab = &self.tabs[i];
+    fn block_edit_checkpoint(&mut self, i: usize) -> BlockEditCheckpoint {
+        let tab = &mut self.tabs[i];
+        let structure = tab.scene.document.snapshot_structure();
         BlockEditCheckpoint {
             document: tab.scene.document.clone(),
+            structure,
             constraints: tab.scene.parametric_constraints.clone(),
             parameters: tab.scene.named_parameters.clone(),
             dirty: tab.dirty,
             active_layer: tab.active_layer.clone(),
+            hatches: tab.scene.hatches.clone(),
+            images: tab.scene.images.clone(),
+            meshes: tab.scene.meshes.clone(),
+            block_meshes: tab.scene.block_meshes.clone(),
+            solid_models: tab.scene.solid_models.clone(),
         }
     }
 
@@ -98,7 +112,7 @@ impl OpenCADStudio {
         });
     }
 
-    fn block_edit_delta(&mut self, i: usize) -> Option<DeltaSnapshot> {
+    fn block_edit_delta(&mut self, i: usize, for_save: bool) -> Option<DeltaSnapshot> {
         self.reconcile_block_edit_membership(i);
         self.finish_pending_history(i);
         let current_structure = self.tabs[i].scene.document.snapshot_structure();
@@ -106,36 +120,80 @@ impl OpenCADStudio {
         let history = tab.block_edit_history.as_ref()?;
         let checkpoint = &history.checkpoint;
         let session = tab.active_block_edit_session()?;
-        let before: FxHashMap<_, _> = checkpoint
-            .document
-            .entities()
-            .map(|e| {
-                let h = e.common().handle;
-                (h, checkpoint.document.get_entity_arc(h).unwrap())
-            })
-            .collect();
-        let after: FxHashMap<_, _> = tab
-            .scene
-            .document
-            .entities()
-            .map(|e| {
-                let h = e.common().handle;
-                (h, tab.scene.document.get_entity_arc(h).unwrap())
-            })
-            .collect();
-        let mut handles: FxHashSet<_> = before.keys().copied().collect();
-        handles.extend(after.keys().copied());
-        let mut entities: Vec<_> = handles
+        let (before_doc, before_structure_base) = if for_save {
+            if let Some(ref pre_doc) = session.unpersisted_pre_document {
+                let mut pre_clone = pre_doc.clone();
+                let pre_struct = pre_clone.snapshot_structure();
+                (pre_doc, pre_struct)
+            } else {
+                (&checkpoint.document, checkpoint.structure.clone())
+            }
+        } else {
+            (&checkpoint.document, checkpoint.structure.clone())
+        };
+        let mut candidate_handles: FxHashSet<codec::Handle> = FxHashSet::default();
+        if let Some(record) = before_doc.block_records.get(&session.block_name) {
+            candidate_handles.extend(record.entity_handles.iter().copied());
+            if !record.block_entity_handle.is_null() {
+                candidate_handles.insert(record.block_entity_handle);
+            }
+            if !record.block_end_handle.is_null() {
+                candidate_handles.insert(record.block_end_handle);
+            }
+        }
+        if let Some(record) = tab.scene.document.block_records.get(&session.block_name) {
+            candidate_handles.extend(record.entity_handles.iter().copied());
+            if !record.block_entity_handle.is_null() {
+                candidate_handles.insert(record.block_entity_handle);
+            }
+            if !record.block_end_handle.is_null() {
+                candidate_handles.insert(record.block_end_handle);
+            }
+        }
+        // Action-set edits can rebuild anonymous references outside the editor
+        // definition. Include their entities in the single drawing save delta.
+        for document in [before_doc, &tab.scene.document] {
+            for entity in document.entities() {
+                if let EntityType::Insert(insert) = entity {
+                    if document.dynamic_definition_for_insert(insert.common.handle)
+                        == Some(session.br_handle)
+                    {
+                        candidate_handles.insert(insert.common.handle);
+                        if let Some(record) = document.block_records.get(&insert.block_name) {
+                            candidate_handles.extend(record.entity_handles.iter().copied());
+                            candidate_handles.insert(record.block_entity_handle);
+                            candidate_handles.insert(record.block_end_handle);
+                        }
+                    }
+                }
+            }
+        }
+        let mut sub_handles = Vec::new();
+        for &h in &candidate_handles {
+            for document in [before_doc, &tab.scene.document] {
+                if let Some(EntityType::Insert(insert)) = document.get_entity(h) {
+                    sub_handles.extend(insert.attributes.iter().map(|a| a.common.handle));
+                    sub_handles.extend(insert.seqend_handle);
+                }
+            }
+        }
+        candidate_handles.extend(sub_handles);
+
+        let mut entities: Vec<_> = candidate_handles
             .into_iter()
             .filter_map(|h| {
-                let a = before.get(&h);
-                let b = after.get(&h);
-                (a != b).then(|| (h, a.cloned(), b.cloned()))
+                let a = before_doc.get_entity_arc(h);
+                let b = tab.scene.document.get_entity_arc(h);
+                match (&a, &b) {
+                    (Some(a_arc), Some(b_arc)) if std::sync::Arc::ptr_eq(a_arc, b_arc) => None,
+                    (Some(a_arc), Some(b_arc)) if a_arc == b_arc => None,
+                    (None, None) => None,
+                    _ => Some((h, a, b)),
+                }
             })
             .collect();
         entities.sort_by_key(|(handle, _, _)| handle.value());
-        let mut before_structure = checkpoint.document.clone();
-        before_structure = before_structure.snapshot_structure();
+        let mut before_structure = before_structure_base;
         let mut after_structure = current_structure;
         // The editor temporarily uses Model rendering. Drawing history must
         // retain the layout to which the editor returns.
@@ -205,6 +263,7 @@ impl OpenCADStudio {
             return None;
         }
         Some(DeltaSnapshot {
+            visibility_states: None,
             entities,
             current_layout_before: session.return_layout.clone(),
             current_layout_after: session.return_layout.clone(),
@@ -215,13 +274,30 @@ impl OpenCADStudio {
             active_layer,
             structure,
             parametric_constraints,
+            reference_designations: Vec::new(),
             named_parameters,
             label: format!("Edit block {}", session.block_name),
         })
     }
 
     pub(super) fn block_edit_dirty(&mut self, i: usize) -> bool {
-        self.block_edit_delta(i).is_some()
+        let tab = &self.tabs[i];
+        let Some(history) = tab.block_edit_history.as_ref() else {
+            return false;
+        };
+        let Some(session) = tab.active_block_edit_session() else {
+            return false;
+        };
+        if tab.history.undo_stack.is_empty()
+            && tab.history.pending.is_none()
+            && session.unpersisted_pre_document.is_none()
+            && history.checkpoint.active_layer == tab.active_layer
+            && history.checkpoint.dirty == tab.dirty
+            && history.checkpoint.parameters == tab.scene.named_parameters
+        {
+            return false;
+        }
+        self.block_edit_delta(i, false).is_some()
     }
 
     pub(super) fn validate_block_save_as_name(
@@ -243,6 +319,94 @@ impl OpenCADStudio {
             );
         }
         Ok(name)
+    }
+
+    pub(super) fn open_bedit_dialog(&mut self, i: usize) {
+        if self.block_editor_preferences.locked {
+            self.command_line.push_error(
+                crate::t!("The Block Editor is locked by BLOCKEDITLOCK.").as_ref(),
+            );
+            return;
+        }
+        if self.tabs[i].refedit_session.is_some() {
+            self.command_line.push_error(
+                crate::t!("BEDIT: finish the active REFEDIT (REFCLOSE) first.").as_ref(),
+            );
+            return;
+        }
+
+        let existing_names =
+            crate::scene::block_service::bedit_candidate_block_names(&self.tabs[i].scene.document);
+
+        let initial_name = if let Some(session) = self.tabs[i].active_block_edit_session() {
+            session.block_name.clone()
+        } else if let Some(first) = existing_names.first() {
+            first.clone()
+        } else {
+            String::new()
+        };
+
+        let preview = if !initial_name.is_empty() {
+            self.tabs[i].scene.block_preview_wires(&initial_name)
+        } else {
+            Vec::new()
+        };
+
+        let description = if !initial_name.is_empty() {
+            self.tabs[i]
+                .scene
+                .document
+                .block_records
+                .get(&initial_name)
+                .map(|b| b.description.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let error = if initial_name.is_empty() {
+            None
+        } else {
+            crate::scene::block_service::validate_block_name(&initial_name)
+                .err()
+                .map(|e| e.to_string())
+        };
+
+        self.block_edit_picker = Some(crate::ui::window::block_edit_picker::State {
+            document_id: self.tabs[i].id,
+            name: initial_name,
+            existing_names,
+            preview,
+            description,
+            error,
+        });
+        self.active_modal = Some(ModalKind::BlockEditPicker);
+        self.reset_modal_geometry();
+    }
+
+    pub(super) fn apply_bedit_dialog(&mut self) -> Task<Message> {
+        let Some(state) = self.block_edit_picker.as_ref() else {
+            return Task::none();
+        };
+        let id = state.document_id;
+        let name = state.name.trim().to_string();
+        if name.is_empty() || state.error.is_some() {
+            return Task::none();
+        }
+        let Some(i) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return Task::none();
+        };
+        self.active_tab = i;
+        self.block_edit_picker = None;
+        self.active_modal = None;
+        self.reset_modal_geometry();
+
+        if let Some(record) = self.tabs[i].scene.document.block_records.get(&name) {
+            let real_name = record.name.clone();
+            self.dispatch_command(&format!("BEDIT_OPEN:{real_name}"))
+        } else {
+            self.dispatch_command(&format!("BEDIT_NEW:{name}"))
+        }
     }
 
     pub(super) fn open_block_save_as_dialog(&mut self, i: usize) {
@@ -307,6 +471,7 @@ impl OpenCADStudio {
         };
         let source_name = session.block_name.clone();
         let source_handle = session.br_handle;
+        let fresh = !self.block_palette_stale();
         let name = match self.validate_block_save_as_name(i, raw) {
             Ok(name) => name,
             Err(error) => {
@@ -335,13 +500,23 @@ impl OpenCADStudio {
         for mut set in self.tabs[i].scene.parametric_constraints.iter().filter(|set| {
             matches!(set.scope, crate::scene::parametric_constraints::ParametricScope::Block(handle) if copied.handles.contains_key(&handle))
         }).cloned() {
-            if !set.retained_standard_groups.is_empty() || set.constraints.iter().any(|c| c.native_origin.is_some()) {
-                self.command_line.push_error(crate::t!("Save Block As cannot copy retained native constraints yet.").as_ref());
-                return false;
+            for group in &mut set.retained_standard_groups {
+                let Some(new) = copied.handles.get(group) else {
+                    self.command_line.push_error(crate::t!("A retained block constraint group is missing.").as_ref());
+                    return false;
+                };
+                *group = *new;
             }
             let crate::scene::parametric_constraints::ParametricScope::Block(old) = set.scope else { unreachable!() };
             set.scope = crate::scene::parametric_constraints::ParametricScope::Block(copied.handles[&old]);
             for constraint in &mut set.constraints {
+                if let Some(origin) = &mut constraint.native_origin {
+                    let Some(new) = copied.handles.get(&origin.group) else {
+                        self.command_line.push_error(crate::t!("A retained block constraint group is missing.").as_ref());
+                        return false;
+                    };
+                    origin.group = *new;
+                }
                 for reference in constraint.refs.iter_mut().chain(constraint.rigid_points.iter_mut().map(|(r, _)| r)) {
                     let Some(new) = copied.handles.get(&reference.entity) else {
                         self.command_line.push_error(crate::t!("A block constraint refers to geometry outside the definition.").as_ref());
@@ -380,12 +555,17 @@ impl OpenCADStudio {
         }
         let parameters = self.tabs[i].scene.named_parameters.clone();
         let active_layer = self.tabs[i].active_layer.clone();
-        self.tabs[i].scene.document = copied.document;
+        let before = std::mem::replace(&mut self.tabs[i].scene.document, copied.document);
+        let touched = crate::app::update::blocks_palette::changed_block_names(
+            &before,
+            &self.tabs[i].scene.document,
+        );
+        drop(before);
         self.tabs[i].scene.parametric_constraints = constraints;
         self.tabs[i].scene.named_parameters = parameters;
         self.tabs[i].active_layer = active_layer;
         let mut delta = self
-            .block_edit_delta(i)
+            .block_edit_delta(i, true)
             .expect("a new definition changes the document");
         delta.label = format!("Save block as {name}");
         let mut history = self.tabs[i].block_edit_history.take().unwrap();
@@ -398,22 +578,69 @@ impl OpenCADStudio {
         debug_assert_eq!(session.br_handle, source_handle);
         session.br_handle = copied.record;
         session.block_name = name.clone();
+        session.unpersisted_pre_document = None;
         self.tabs[i].scene.block_edit_block = Some(copied.record);
+        self.reset_block_constraint_display(i);
         self.tabs[i].scene.deselect_all();
         self.tabs[i].active_grip = None;
         self.grip_hover = None;
         self.grip_popup = None;
         self.visibility_popup = None;
+        self.table_popup = None;
         history.checkpoint = self.block_edit_checkpoint(i);
         self.tabs[i].block_edit_history = Some(history);
-        self.tabs[i].scene.rebuild_derived_caches();
+        self.tabs[i].scene.bump_geometry();
         self.tabs[i].refresh_active_ucs();
+        self.note_block_changes(fresh, &touched);
         self.refresh_block_palette();
         self.refresh_properties();
         self.sync_ribbon_layers();
         self.command_line
             .push_output(crate::tf!("Block {} saved.", name).as_ref());
         true
+    }
+
+    /// Save-time representation edits belong to the preceding editor command,
+    /// so local Undo cannot leave untracked members or reuse their handles.
+    fn coalesce_saved_representations(&mut self, i: usize, before: &Document) {
+        let tab = &mut self.tabs[i];
+        let doc = &tab.scene.document;
+        if before == doc {
+            return;
+        }
+        let Some(HistorySnapshot::Delta(delta)) = tab.history.undo_stack.last_mut() else {
+            return;
+        };
+        let handles = before
+            .entities()
+            .chain(doc.entities())
+            .map(|e| e.common().handle)
+            .collect::<FxHashSet<_>>();
+        for handle in handles {
+            let a = before.get_entity_arc(handle);
+            let b = doc.get_entity_arc(handle);
+            if a == b {
+                continue;
+            }
+            if let Some((_, _, after)) = delta.entities.iter_mut().find(|(h, _, _)| *h == handle) {
+                *after = b;
+            } else {
+                delta.entities.push((handle, a, b));
+            }
+        }
+        if !delta
+            .structure
+            .as_ref()
+            .is_some_and(StructureSnapshot::is_full)
+        {
+            let mut previous = before.clone();
+            let broad = StructureSnapshot::Full(previous.snapshot_structure());
+            delta.structure = Some(match delta.structure.take() {
+                Some(specialized) => StructureSnapshot::Combined(vec![broad, specialized]),
+                None => broad,
+            });
+        }
+        delta.dirty_after = true;
     }
 
     pub(super) fn save_block_edit(&mut self, i: usize) -> bool {
@@ -423,6 +650,10 @@ impl OpenCADStudio {
             return false;
         };
         let name = session.block_name.clone();
+        // The palette keeps the other blocks' previews when it was up to
+        // date before the save.
+        let fresh = !self.block_palette_stale();
+        let mut touched = vec![name.clone()];
         if let Err(error) = crate::scene::block_service::validate_block_name(&name) {
             // Existing anonymous definitions are editable; name validation
             // applies to named definitions rather than generated variants.
@@ -455,12 +686,39 @@ impl OpenCADStudio {
         // A dynamic block leaves the editor showing its first visibility
         // state, with erased objects dropped from its states.
         let definition = session.br_handle;
-        crate::scene::block_visibility::finish_editing(
-            &mut self.tabs[i].scene.document,
-            definition,
-        );
-        self.tabs[i].scene.visibility_states.remove(&definition);
-        if let Some(delta) = self.block_edit_delta(i) {
+        if self.block_edit_delta(i, true).is_some() {
+            self.reconcile_block_edit_membership(i);
+            self.finish_pending_history(i);
+            let before_sync = self.tabs[i].scene.document.clone();
+            let mut staged = before_sync.clone();
+            crate::scene::block_visibility::finish_editing(&mut staged, definition);
+            crate::scene::block_actions::prune_erased_targets(&mut staged, definition);
+            let before = &self.tabs[i]
+                .block_edit_history
+                .as_ref()
+                .unwrap()
+                .checkpoint
+                .document;
+            match crate::scene::block_actions::instance::refresh_after_edit(
+                &staged, before, definition,
+            ) {
+                Ok(document) => {
+                    self.apply_action_document(i, document);
+                    self.coalesce_saved_representations(i, &before_sync);
+                    // A dynamic block's references are drawn again too.
+                    touched.extend(crate::app::update::blocks_palette::changed_block_names(
+                        &before_sync,
+                        &self.tabs[i].scene.document,
+                    ));
+                }
+                Err(error) => {
+                    self.command_line.push_error(crate::t!(error).as_ref());
+                    return false;
+                }
+            }
+            self.tabs[i].scene.visibility_states.remove(&definition);
+        }
+        if let Some(delta) = self.block_edit_delta(i, true) {
             let mut history = self.tabs[i].block_edit_history.take().unwrap();
             std::mem::swap(&mut self.tabs[i].history, &mut history.main);
             self.push_undo_entry(i, HistorySnapshot::Delta(Box::new(delta)));
@@ -469,6 +727,10 @@ impl OpenCADStudio {
             history.checkpoint = self.block_edit_checkpoint(i);
             self.tabs[i].block_edit_history = Some(history);
             self.tabs[i].scene.bump_geometry();
+            self.note_block_changes(fresh, &touched);
+        }
+        if let Some(session) = self.tabs[i].active_block_edit_session_mut() {
+            session.unpersisted_pre_document = None;
         }
         self.command_line
             .push_output(crate::tf!("Block {} saved.", name).as_ref());
@@ -482,11 +744,20 @@ impl OpenCADStudio {
         };
         if let Some(history) = self.tabs[i].block_edit_history.take() {
             if discard {
-                self.tabs[i].scene.document = history.checkpoint.document;
+                if let Some(pre_doc) = session.unpersisted_pre_document {
+                    self.tabs[i].scene.document = pre_doc;
+                } else {
+                    self.tabs[i].scene.document = history.checkpoint.document;
+                }
                 self.tabs[i].scene.parametric_constraints = history.checkpoint.constraints;
                 self.tabs[i].scene.named_parameters = history.checkpoint.parameters;
                 self.tabs[i].active_layer = history.checkpoint.active_layer;
                 self.tabs[i].dirty = history.checkpoint.dirty;
+                self.tabs[i].scene.hatches = history.checkpoint.hatches;
+                self.tabs[i].scene.images = history.checkpoint.images;
+                self.tabs[i].scene.meshes = history.checkpoint.meshes;
+                self.tabs[i].scene.block_meshes = history.checkpoint.block_meshes;
+                self.tabs[i].scene.solid_models = history.checkpoint.solid_models;
             }
             self.tabs[i].history = history.main;
             self.tabs[i].scene.object_isolation = history.return_isolation;
@@ -497,8 +768,10 @@ impl OpenCADStudio {
             None,
             &session.return_layout,
             &session.return_camera,
+            !discard,
         );
         self.cancel_attr_editor();
+        self.discard_block_tests(self.tabs[i].id);
     }
 
     pub(super) fn request_block_edit_close(
@@ -506,6 +779,7 @@ impl OpenCADStudio {
         i: usize,
         continuation: BlockEditContinuation,
     ) -> Task<Message> {
+        let id = self.tabs[i].id;
         if self.tabs[i].active_block_edit_session().is_some() {
             if self.block_edit_dirty(i) {
                 self.active_tab = i;
@@ -515,6 +789,7 @@ impl OpenCADStudio {
             }
             self.close_block_edit(i, true);
         }
+        let i = self.tabs.iter().position(|tab| tab.id == id).unwrap();
         self.continue_after_block_edit(continuation, i)
     }
 
@@ -528,6 +803,10 @@ impl OpenCADStudio {
             BlockEditContinuation::Switch(name) => {
                 self.active_tab = i;
                 self.dispatch_command(&format!("BEDIT_OPEN:{name}"))
+            }
+            BlockEditContinuation::Create(name) => {
+                self.active_tab = i;
+                self.dispatch_command(&format!("BEDIT_NEW:{name}"))
             }
             BlockEditContinuation::Layout(name) => {
                 self.active_tab = i;
@@ -564,6 +843,7 @@ impl OpenCADStudio {
         self.pending_block_close = None;
         self.active_modal = None;
         self.close_block_edit(i, !save);
+        let i = self.tabs.iter().position(|tab| tab.id == id).unwrap();
         self.continue_after_block_edit(continuation, i)
     }
 
@@ -583,7 +863,11 @@ impl OpenCADStudio {
         {
             return self.request_block_edit_close(i, BlockEditContinuation::Quit);
         }
-        if self.tabs.iter().any(|tab| tab.dirty) {
+        if self
+            .tabs
+            .iter()
+            .any(|tab| tab.dirty && tab.block_test.is_none())
+        {
             self.pending_close = Some(super::PendingClose::Quit);
             self.open_unsaved_dialog_window()
         } else {

@@ -326,7 +326,7 @@ fn shape_boundary(
                 if let Some([r, g, b]) = fill.and_then(|fill| fill.rgb) {
                     hatch.common.color = foreground_color(r, g, b);
                 }
-                hatches.push(EntityType::Hatch(hatch));
+                hatches.push(EntityType::Hatch(Box::new(hatch)));
             }
             SymbolPrimitive::Line { start, end } => {
                 let a = at.apply(start.0, start.1);
@@ -346,7 +346,7 @@ fn shape_boundary(
         if let Some([r, g, b]) = fill.and_then(|fill| fill.rgb) {
             hatch.common.color = foreground_color(r, g, b);
         }
-        hatches.push(EntityType::Hatch(hatch));
+        hatches.push(EntityType::Hatch(Box::new(hatch)));
     }
     (!hatches.is_empty()).then_some(hatches)
 }
@@ -476,6 +476,7 @@ pub(super) fn shape_primitive(
             radius,
             start_angle,
             end_angle,
+            clockwise: _,
         } => {
             let radius = at.scale_radius(*radius);
             if !radius.is_finite() || radius <= 0.0 {

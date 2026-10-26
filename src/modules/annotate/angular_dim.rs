@@ -166,7 +166,7 @@ impl AngularDimensionCommand {
             dim.base.insertion_point = dim.base.text_middle_point;
             dim.base.text_user_positioned = true;
         }
-        dim.base.actual_measurement = dim.measurement_degrees();
+        dim.base.actual_measurement = dim.measurement_radians();
         crate::entities::dimension::set_dimension_text_override(
             &mut dim.base,
             self.text_override.clone(),
@@ -220,7 +220,7 @@ impl AngularDimensionCommand {
             dim.base.insertion_point = dim.base.text_middle_point;
             dim.base.text_user_positioned = true;
         }
-        dim.base.actual_measurement = dim.measurement_degrees();
+        dim.base.actual_measurement = dim.measurement_radians();
         crate::entities::dimension::set_dimension_text_override(
             &mut dim.base,
             self.text_override.clone(),
@@ -232,7 +232,7 @@ impl AngularDimensionCommand {
     }
 
     fn commit(&self, dimension: Dimension) -> CmdResult {
-        let entity = self.plane.place_entity(EntityType::Dimension(dimension));
+        let entity = self.plane.place_entity(EntityType::Dimension(Box::new(dimension)));
         CmdResult::CommitDimension {
             entity,
             association: DimensionAssociationInput::Explicit(self.source_refs.clone()),
@@ -1240,9 +1240,9 @@ pub(crate) fn angular_two_line_entity(
     // No stored text point: the style places the text (DIMTAD) beside the
     // arc at render time, as the reference draws a dynamic dimension.
     dim.base.insertion_point = dim.dimension_arc;
-    dim.base.actual_measurement = dim.measurement_degrees();
+    dim.base.actual_measurement = dim.measurement_radians();
     crate::entities::dimension::set_dimension_text_override(&mut dim.base, text);
-    Some(EntityType::Dimension(Dimension::Angular2Ln(dim)))
+    Some(EntityType::Dimension(Box::new(Dimension::Angular2Ln(dim))))
 }
 
 /// A three-point angular dimension (vertex, two points, arc point), for a
@@ -1259,9 +1259,9 @@ pub(crate) fn angular_three_point_entity(
     dim.base.definition_point = dim.definition_point;
     dim.base.text_middle_point = Vector3::new(0.0, 0.0, 0.0);
     dim.base.insertion_point = dim.definition_point;
-    dim.base.actual_measurement = dim.measurement_degrees();
+    dim.base.actual_measurement = dim.measurement_radians();
     crate::entities::dimension::set_dimension_text_override(&mut dim.base, text);
-    Some(EntityType::Dimension(Dimension::Angular3Pt(dim)))
+    Some(EntityType::Dimension(Box::new(Dimension::Angular3Pt(dim))))
 }
 
 fn v3(point: DVec3) -> Vector3 {

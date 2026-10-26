@@ -43,7 +43,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use codec::objects::{XRecordEntry, XRecordValue};
 use codec::xdata::XDataValue;
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 
 /// Synthetic CAD layer holding entities from hidden Smart P&ID sheet layers.
 /// Shared across native `.pid` import and the cross-platform `pid_view_filter`.
@@ -104,7 +104,7 @@ impl PidViewFilter {
 
     /// The filter the drawing stores, or `None` when it carries no record --
     /// which reads as everything on.
-    pub fn load(doc: &CadDocument) -> Option<Self> {
+    pub fn load(doc: &Document) -> Option<Self> {
         let record = doc.xrecord(owner(doc), XRECORD_KEY)?;
         let mut filter = Self::default();
         for entry in &record.entries {
@@ -122,7 +122,7 @@ impl PidViewFilter {
 
     /// Write the filter into the drawing, replacing whatever record was
     /// there. An empty filter removes the record instead of storing "all on".
-    pub fn store(&self, doc: &mut CadDocument) {
+    pub fn store(&self, doc: &mut Document) {
         let owner = owner(doc);
         if self.is_empty() {
             remove_xrecord(doc, owner);
@@ -147,7 +147,7 @@ impl PidViewFilter {
     /// Set every entity's `invisible` bit from the filter, and return how
     /// many entities changed. Only entities stating a sheet layer or a role
     /// are touched.
-    pub fn apply(&self, doc: &mut CadDocument) -> usize {
+    pub fn apply(&self, doc: &mut Document) -> usize {
         let mut changed = 0;
         for entity in doc.entities_mut() {
             let Some(keys) = pid_keys(entity) else {
@@ -255,7 +255,7 @@ pub struct PidViewSummary {
 impl PidViewSummary {
     /// Read the summary off the drawing: its entities' `sheet_layer=` and
     /// `role=` keys, and the filter it stores (none stored reads as all on).
-    pub fn of(doc: &CadDocument) -> Self {
+    pub fn of(doc: &Document) -> Self {
         let filter = PidViewFilter::load(doc).unwrap_or_default();
         let mut layers: BTreeMap<&str, usize> = BTreeMap::new();
         let mut roles: BTreeMap<&str, usize> = BTreeMap::new();
@@ -333,7 +333,7 @@ pub struct Switched {
 /// `PID-SYMBOL-LABEL` the user keeps off, or a sheet layer they switched off
 /// in the layer table, is not this switch's to reopen. Switching off never
 /// touches the layer table; the bits do the hiding.
-pub fn switch_sheet_layer(doc: &mut CadDocument, layer: &str, on: bool) -> Switched {
+pub fn switch_sheet_layer(doc: &mut Document, layer: &str, on: bool) -> Switched {
     let mut filter = PidViewFilter::load(doc).unwrap_or_default();
     filter.set_layer(layer, on);
     let mut switched = Switched {
@@ -348,7 +348,7 @@ pub fn switch_sheet_layer(doc: &mut CadDocument, layer: &str, on: bool) -> Switc
 
 /// Switch one import role on or off; see [`switch_sheet_layer`]. A role
 /// switch lights nothing the import hid, so the layer table is never touched.
-pub fn switch_role(doc: &mut CadDocument, role: &str, on: bool) -> Switched {
+pub fn switch_role(doc: &mut Document, role: &str, on: bool) -> Switched {
     let mut filter = PidViewFilter::load(doc).unwrap_or_default();
     filter.set_role(role, on);
     Switched {
@@ -357,7 +357,7 @@ pub fn switch_role(doc: &mut CadDocument, role: &str, on: bool) -> Switched {
     }
 }
 
-fn store_and_apply(doc: &mut CadDocument, filter: &PidViewFilter) -> usize {
+fn store_and_apply(doc: &mut Document, filter: &PidViewFilter) -> usize {
     filter.store(doc);
     filter.apply(doc)
 }
@@ -366,7 +366,7 @@ fn store_and_apply(doc: &mut CadDocument, filter: &PidViewFilter) -> usize {
 /// is off and holds a lit entity of that sheet layer. Returns the layer
 /// turned on, if any. The two never both hold such an entity: an import
 /// files a hidden sheet layer's entities on one or the other.
-fn release_layer_holding(doc: &mut CadDocument, sheet_layer: &str) -> Option<String> {
+fn release_layer_holding(doc: &mut Document, sheet_layer: &str) -> Option<String> {
     let lit_on: BTreeSet<String> = doc
         .entities()
         .filter(|entity| !entity.common().invisible)
@@ -418,14 +418,14 @@ fn pid_keys(entity: &EntityType) -> Option<PidKeys<'_>> {
 
 /// The record's owner: the model-space block record, the one object every
 /// drawing has exactly one of.
-fn owner(doc: &CadDocument) -> Handle {
+fn owner(doc: &Document) -> Handle {
     doc.header.model_space_block_handle
 }
 
 /// Drop the filter's XRecord from `owner`'s extension dictionary, if present.
 /// The dictionary itself stays: other records may live there, and an empty
 /// one is harmless bookkeeping.
-fn remove_xrecord(doc: &mut CadDocument, owner: Handle) {
+fn remove_xrecord(doc: &mut Document, owner: Handle) {
     let Some(dictionary_handle) = doc.extension_dictionary_handle(owner) else {
         return;
     };
@@ -483,8 +483,8 @@ mod tests {
         line
     }
 
-    fn document_with(entities: Vec<EntityType>) -> CadDocument {
-        let mut doc = CadDocument::new();
+    fn document_with(entities: Vec<EntityType>) -> Document {
+        let mut doc = Document::new();
         for entity in entities {
             let _ = doc.add_entity(entity);
         }
@@ -533,7 +533,7 @@ mod tests {
             line_with(&["class=蝶阀", "resolved=legend:block"]),
             line_with(&[]),
         ]);
-        let dark = |doc: &CadDocument| -> Vec<bool> {
+        let dark = |doc: &Document| -> Vec<bool> {
             doc.entities().map(|e| e.common().invisible).collect()
         };
 
@@ -668,7 +668,7 @@ mod tests {
         let initial = PidViewFilter::with_layers_off(["HiddenObjects"]);
         initial.store(&mut doc);
         initial.apply(&mut doc);
-        let dark = |doc: &CadDocument| -> Vec<bool> {
+        let dark = |doc: &Document| -> Vec<bool> {
             doc.entities().map(|e| e.common().invisible).collect()
         };
         assert_eq!(dark(&doc), [false, true, false]);

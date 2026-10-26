@@ -10,7 +10,7 @@
 //!   `rvm_read::RvmFile`) to assemble `E3dSceneBatch` payloads both for in-process
 //!   desktop loading and for `OpenCADStudio --http` serving to Web clients.
 //! - [`consumer`] compiles on **all** targets and pours an [`E3dSceneBatch`] into
-//!   `CadDocument` proxies plus `Scene` meshes and centreline wires. It does not
+//!   `Document` proxies plus `Scene` meshes and centreline wires. It does not
 //!   link `e3d-model`.
 
 pub mod consumer;

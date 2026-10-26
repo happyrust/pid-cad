@@ -582,12 +582,13 @@ mod tests {
 
     #[test]
     fn test_donut_polyline_tessellates_to_analytical_arcs() {
-        use codec::CadDocument;
-        let mut doc = CadDocument::new();
+        use codec::Document;
+        let mut doc = Document::new();
         let donut = crate::modules::draw::draw::donut::make_donut(10.0, 20.0, 0.0, 10.0, 30.0);
         let h = doc.add_entity(donut).unwrap();
         let entity = doc.get_entity(h).unwrap();
         let selected = rustc_hash::FxHashSet::default();
+        let reference_only = rustc_hash::FxHashSet::default();
         let wires = crate::scene::convert::tess::tessellate_entity(
             &doc,
             &selected,
@@ -600,6 +601,7 @@ mod tests {
             None,
             None,
             false,
+            &reference_only,
         );
         assert_eq!(
             wires.len(),

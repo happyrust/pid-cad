@@ -29,7 +29,7 @@ pub(super) const SHEET_SET_SYSVARS: &[&str] = &[
 ];
 
 /// Paper-space layouts of a drawing in tab order: name and handle (hex).
-fn paper_layouts(doc: &codec::CadDocument) -> Vec<(String, String)> {
+fn paper_layouts(doc: &codec::Document) -> Vec<(String, String)> {
     let mut layouts: Vec<(i16, String, String)> = doc
         .objects
         .values()
@@ -286,7 +286,7 @@ struct ModelView {
 }
 
 /// Named view `view` of a model drawing, or its extents.
-fn model_view(doc: &codec::CadDocument, view: Option<&str>) -> Option<ModelView> {
+fn model_view(doc: &codec::Document, view: Option<&str>) -> Option<ModelView> {
     use codec::types::Vector3;
     if let Some(name) = view {
         let v = doc
@@ -1949,7 +1949,7 @@ impl OpenCADStudio {
         &mut self,
         path: &str,
         then: SheetSetMsg,
-    ) -> Result<std::sync::Arc<codec::CadDocument>, Task<Message>> {
+    ) -> Result<std::sync::Arc<codec::Document>, Task<Message>> {
         if let Some(doc) = self.sheet_set.drawings.get(path) {
             return Ok(doc);
         }
@@ -2389,7 +2389,7 @@ impl OpenCADStudio {
                     Vector3::new(mv.center.x - mv.target.x, mv.center.y - mv.target.y, 0.0);
                 vp.view_height = mv.height;
                 vp.custom_scale = scale;
-                scene.add_entity(codec::EntityType::Viewport(vp));
+                scene.add_entity(codec::EntityType::Viewport(Box::new(vp)));
                 // A paper-space named view of the same name frames it.
                 let mut named = codec::tables::View::new(title.as_str());
                 named.handle = scene.document.allocate_handle();

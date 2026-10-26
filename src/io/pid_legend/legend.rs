@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use codec::entities::{Circle, LwPolyline, Text};
 use codec::types::{Color, Vector2, Vector3};
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 
 use super::exploded::fnv1a;
 use super::pid_pipes::{self, End};
@@ -163,7 +163,7 @@ pub fn legend_entities(recognition: &Recognition, rules: &Rules) -> Vec<EntityTy
     out
 }
 
-fn ensure_layer(doc: &mut CadDocument, name: &str, color: [u8; 3]) {
+fn ensure_layer(doc: &mut Document, name: &str, color: [u8; 3]) {
     let rgb = Color::Rgb {
         r: color[0],
         g: color[1],
@@ -182,7 +182,7 @@ fn ensure_layer(doc: &mut CadDocument, name: &str, color: [u8; 3]) {
 /// Draw the legend into `doc` (headless path): create the class and pipe
 /// layers in their colours and add the rectangles, labels and runs to model
 /// space. Returns how many entities were added.
-pub fn apply(doc: &mut CadDocument, recognition: &Recognition, rules: &Rules) -> usize {
+pub fn apply(doc: &mut Document, recognition: &Recognition, rules: &Rules) -> usize {
     for (layer, color) in legend_layers(recognition) {
         ensure_layer(doc, &layer, color);
     }
@@ -196,7 +196,7 @@ pub fn apply(doc: &mut CadDocument, recognition: &Recognition, rules: &Rules) ->
 }
 
 /// Handles of every entity on a legend layer.
-pub fn legend_handles(doc: &CadDocument) -> Vec<Handle> {
+pub fn legend_handles(doc: &Document) -> Vec<Handle> {
     doc.entities()
         .filter(|e| is_legend_layer(&e.common().layer))
         .map(|e| e.common().handle)
@@ -205,7 +205,7 @@ pub fn legend_handles(doc: &CadDocument) -> Vec<Handle> {
 
 /// Remove everything [`apply`] added. Returns how many entities went. The
 /// layers stay: empty, they purge like any other.
-pub fn clear(doc: &mut CadDocument) -> usize {
+pub fn clear(doc: &mut Document) -> usize {
     let handles = legend_handles(doc);
     handles
         .into_iter()

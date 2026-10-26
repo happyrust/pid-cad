@@ -29,7 +29,7 @@ use codec::entities::{
 };
 use codec::tables::linetype::{LineType, LineTypeElement};
 use codec::types::{Color, LineWeight, Vector2, Vector3};
-use codec::{CadDocument, EntityType, TableEntry};
+use codec::{Document, EntityType, TableEntry};
 use pid_parse::style_link::{
     ComplexDash, DashPattern, LineStyleIndex, MarkerStatus, PointMarker, ResolvedFill,
     ResolvedLineStyle, StyleNameIndex, TextAlignment,
@@ -326,7 +326,7 @@ fn taxonomy_layers() -> [(&'static str, Color, bool, bool); 13] {
 /// else is left alone: an authored sheet layer is declared where its state is
 /// known, and a `PID-STYLE-*` working key never reaches the slot (see
 /// `load_pid`).
-fn ensure_taxonomy_layer(doc: &mut CadDocument, layer: &str) {
+fn ensure_taxonomy_layer(doc: &mut Document, layer: &str) {
     if doc.layers.contains(layer) {
         return;
     }
@@ -397,7 +397,7 @@ fn sheet_layer_is_hidden(layer: &PidSourceLayer) -> bool {
 #[derive(Debug)]
 pub struct PidImport {
     /// The imported drawing.
-    pub document: CadDocument,
+    pub document: Document,
     /// The headline of the import: what was drawn, what was not, where the
     /// bodies and the unit came from.
     pub summary: ImportSummary,
@@ -519,8 +519,8 @@ pub fn load_pid_with(path: &Path, options: &PidImportOptions) -> Result<PidImpor
 /// The document an import fills: a fresh one with the standard linetypes,
 /// lineweights shown, and the drawing's own layer table declared -- every
 /// sheet layer of the document storage, on or off as the file draws it.
-fn prepare_document(parsed: &pid_parse::PidDocument) -> CadDocument {
-    let mut doc = CadDocument::new();
+fn prepare_document(parsed: &pid_parse::PidDocument) -> Document {
+    let mut doc = Document::new();
     crate::io::linetypes::populate_document(&mut doc);
     // A DWG carries `$LWDISPLAY` in its header; a `.pid` has no header to read
     // it from, so a fresh document's `false` would stand. Every line here comes
@@ -574,7 +574,7 @@ fn finish(
     unit: ImportUnit,
     built: Built,
     template: Option<&TemplateOverlay>,
-    doc: &mut CadDocument,
+    doc: &mut Document,
 ) -> ImportSummary {
     let Built {
         drawn,
@@ -675,7 +675,7 @@ fn finish(
     }
 }
 
-fn ensure_layer(doc: &mut CadDocument, name: &str, colour: Color, visible: bool, plottable: bool) {
+fn ensure_layer(doc: &mut Document, name: &str, colour: Color, visible: bool, plottable: bool) {
     if doc.layers.contains(name) {
         return;
     }

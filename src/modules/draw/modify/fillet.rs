@@ -1600,6 +1600,8 @@ pub struct FilletCommand {
     /// (i.e. "R" pressed after the first object was already picked), so the
     /// command resumes at the second pick instead of restarting selection.
     resume_second: Option<(Handle, FilletEntity, [f64; 2])>,
+    /// Multiple option: keep filleting until Enter / Esc.
+    multiple: bool,
     /// Fillets applied by this command that Undo can still take back.
     made: usize,
 }
@@ -1618,6 +1620,7 @@ impl FilletCommand {
             all_entities,
             entity_index,
             resume_second: None,
+            multiple: false,
             made: 0,
         }
     }
@@ -1658,6 +1661,10 @@ impl FilletCommand {
                 drop_zero_length_segments(poly);
             }
         }
+        // Single mode replaces and ends, like CHAMFER.
+        if !self.multiple {
+            return CmdResult::ReplaceMany(replacements, vec![]);
+        }
         self.all_entities.retain(|entity| {
             !replacements
                 .iter()
@@ -1683,7 +1690,11 @@ impl FilletCommand {
         self.step = FilletStep::First;
         self.resume_second = None;
         self.made += 1;
-        CmdResult::CommitEntities(vec![addition])
+        if self.multiple {
+            CmdResult::CommitEntities(vec![addition])
+        } else {
+            CmdResult::CommitEntitiesAndExit(vec![addition])
+        }
     }
 
     /// Undo option: take back the last fillet of this command. The host
@@ -1760,6 +1771,9 @@ impl CadCommand for FilletCommand {
                 opts.push(CmdOption::new("Polyline", "P"));
                 opts.push(CmdOption::new("Radius", "R"));
                 opts.push(CmdOption::new("Trim", "T"));
+                if !self.multiple {
+                    opts.push(CmdOption::new("Multiple", "M"));
+                }
                 opts
             }
             FilletStep::Second { .. } => {
@@ -1835,6 +1849,11 @@ impl CadCommand for FilletCommand {
                 if upper == "U" || upper == "UNDO" {
                     return self.undo_last();
                 }
+                if matches!(self.step, FilletStep::First) && (upper == "M" || upper == "MULTIPLE")
+                {
+                    self.multiple = true;
+                    return Some(CmdResult::NeedPoint);
+                }
                 if upper == "T" || upper == "TRIM" {
                     self.enter_substep(FilletStep::TrimMode);
                     return Some(CmdResult::NeedPoint);
@@ -1878,7 +1897,7 @@ impl CadCommand for FilletCommand {
         self.undo_last()
     }
 
-    fn on_document_undone(&mut self, document: &codec::CadDocument) {
+    fn on_document_undone(&mut self, document: &codec::Document) {
         self.all_entities = document
             .entities()
             .map(crate::entities::curve::entity_with_lwpolyline_world_xy)
@@ -2608,7 +2627,7 @@ impl CadCommand for ChamferCommand {
         self.undo_last()
     }
 
-    fn on_document_undone(&mut self, document: &codec::CadDocument) {
+    fn on_document_undone(&mut self, document: &codec::Document) {
         self.all_entities = document
             .entities()
             .map(crate::entities::curve::entity_with_lwpolyline_world_xy)
@@ -2910,8 +2929,10 @@ mod tests {
             1.0,
             vec![line(0.0, 0.0, 10.0, 0.0, 1), line(0.0, 0.0, 0.0, 10.0, 2)],
         );
-        assert_eq!(keywords(&command), ["P", "R", "T"]);
+        assert_eq!(keywords(&command), ["P", "R", "T", "M"]);
         assert!(command.on_text_input("U").is_none(), "nothing to undo yet");
+        assert!(matches!(command.on_text_input("M"), Some(CmdResult::NeedPoint)));
+        assert_eq!(keywords(&command), ["P", "R", "T"], "Multiple is not offered twice");
         command.on_entity_pick(Handle::new(1), DVec3::new(5.0, 0.0, 0.0));
         assert!(matches!(
             command.on_entity_pick(Handle::new(2), DVec3::new(0.0, 5.0, 0.0)),
@@ -2924,7 +2945,7 @@ mod tests {
         ));
         assert_eq!(keywords(&command), ["P", "R", "T"]);
         // The host hands the restored document back; the cache follows it.
-        let mut doc = codec::CadDocument::new();
+        let mut doc = codec::Document::new();
         let _ = doc.add_entity(line(0.0, 0.0, 20.0, 0.0, 7));
         command.on_document_undone(&doc);
         assert_eq!(command.all_entities.len(), 1);
@@ -2938,6 +2959,7 @@ mod tests {
         let original = vec![line(0.0, 0.0, 10.0, 0.0, 1), line(0.0, 0.0, 0.0, 10.0, 2)];
         let mut command = FilletCommand::new(1.0, original);
         command.trim = false;
+        command.on_text_input("M");
         assert!(matches!(
             command.on_entity_pick(first, DVec3::new(5.0, 0.0, 0.0)),
             CmdResult::NeedPoint
@@ -3126,6 +3148,7 @@ mod tests {
             1.0,
             vec![line(0.0, 0.0, 10.0, 0.0, 1), line(0.0, 0.0, 0.0, 10.0, 2)],
         );
+        command.on_text_input("M");
 
         assert!(matches!(
             command.on_entity_pick(first, DVec3::new(5.0, 0.0, 0.0)),

@@ -18,6 +18,14 @@ pub(super) struct ModifyEntityIndex {
 }
 
 impl ModifyEntityIndex {
+    pub(super) fn empty() -> Self {
+        Self {
+            by_handle: FxHashMap::default(),
+            tree: None,
+            unbounded: Vec::new(),
+        }
+    }
+
     pub(super) fn build(entities: &[EntityType]) -> Self {
         let mut by_handle = FxHashMap::default();
         let mut bounded = Vec::new();
@@ -76,6 +84,38 @@ impl ModifyEntityIndex {
         self.by_handle
             .get(&handle)
             .and_then(|index| entities.get(*index))
+    }
+
+    /// Take `handle` out of `entities` and the index. The last entity moves
+    /// into its slot, so nothing else is re-indexed.
+    pub(super) fn remove(&mut self, entities: &mut Vec<EntityType>, handle: Handle) {
+        let Some(index) = self.by_handle.remove(&handle) else {
+            return;
+        };
+        entities.swap_remove(index);
+        if let Some(moved) = entities.get(index) {
+            self.by_handle.insert(moved.common().handle, index);
+        }
+        if let Some(tree) = self.tree.as_mut() {
+            tree.remove(handle);
+        }
+        self.unbounded.retain(|other| *other != handle);
+    }
+
+    /// Append `entity` to `entities` and index it in place.
+    pub(super) fn push(&mut self, entities: &mut Vec<EntityType>, entity: EntityType) {
+        let handle = entity.common().handle;
+        self.by_handle.insert(handle, entities.len());
+        match entity_world_aabb_f64(&entity) {
+            // Outside the tree's bounds it lands in the tree's overflow list,
+            // which every query still returns.
+            Some(aabb) => self
+                .tree
+                .get_or_insert_with(|| QuadTree::new(aabb))
+                .insert(handle, aabb),
+            None => self.unbounded.push(handle),
+        }
+        entities.push(entity);
     }
 
     pub(super) fn nearby_handles(

@@ -49,6 +49,13 @@ impl OpenCADStudio {
         MenuContext::Idle {
             has_selection: !tab.scene.selected.is_empty(),
             selection_in_group: tab.scene.selection_in_group(),
+            single_hatch: tab.scene.selected.len() == 1
+                && tab.scene.selected.iter().all(|handle| {
+                    matches!(
+                        tab.scene.document.get_entity(*handle),
+                        Some(codec::EntityType::Hatch(_))
+                    )
+                }),
             selected_constraint: tab.scene.selected_constraint,
             isolation_active: tab.scene.is_isolation_active(),
             recent_cmds: self

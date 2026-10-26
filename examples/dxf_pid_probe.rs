@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use codec::types::Vector3;
-use codec::{CadDocument, EntityType};
+use codec::{Document, EntityType};
 use OpenCADStudio::io;
 
 /// Lettering closer than this to an insertion point is reported as the
@@ -140,7 +140,7 @@ fn grow(bbox: &mut Option<(f64, f64, f64, f64)>, min: Vector3, max: Vector3) {
     });
 }
 
-fn measure_body(doc: &CadDocument, block_name: &str, base_point: Vector3) -> Body {
+fn measure_body(doc: &Document, block_name: &str, base_point: Vector3) -> Body {
     let mut body = Body {
         kinds: BTreeMap::new(),
         bbox: None,
@@ -227,7 +227,7 @@ fn classify(value: &str) -> &'static str {
     "text"
 }
 
-fn lettering_of(doc: &CadDocument) -> Vec<Lettering> {
+fn lettering_of(doc: &Document) -> Vec<Lettering> {
     let mut out = Vec::new();
     for entity in doc.model_space_entities() {
         match entity {
@@ -276,7 +276,7 @@ fn tags_near(lettering: &[Lettering], at: (f64, f64), radius: f64) -> Vec<(f64, 
 /// a title block placed at (977675, 443948) with its body authored at
 /// (-945972, -443947) has an insertion point a kilometre from anything it
 /// draws.
-fn drawn_extent(doc: &CadDocument) -> Option<(f64, f64, f64, f64)> {
+fn drawn_extent(doc: &Document) -> Option<(f64, f64, f64, f64)> {
     let mut bbox = None;
     for entity in doc.model_space_entities() {
         if matches!(
@@ -363,7 +363,7 @@ struct Report {
     lettering_index: Vec<Lettering>,
 }
 
-fn probe(doc: &CadDocument, options: &Options) -> Report {
+fn probe(doc: &Document, options: &Options) -> Report {
     let extent = drawn_extent(doc);
     let (units_per_mm, units_guessed) = match options.units_per_mm {
         Some(value) => (value, false),

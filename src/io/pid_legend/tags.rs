@@ -21,7 +21,7 @@
 //! left as it was.
 
 use codec::objects::Group;
-use codec::CadDocument;
+use codec::Document;
 
 use super::blocks::{compose_tag, lettering_value};
 use super::*;
@@ -297,7 +297,7 @@ fn key_value(piece: &str) -> Option<(&str, &str)> {
 /// a tag (`tag_min_chars`). Several such pieces read as nothing: a group
 /// that letters `DN100` and `1.6MPa` has no tag, not a tag of both. A tag too
 /// short to be one (`S`) is none either.
-pub fn derive_group_tag(doc: &CadDocument, group: &Group, rules: &Rules) -> Option<TagRead> {
+pub fn derive_group_tag(doc: &Document, group: &Group, rules: &Rules) -> Option<TagRead> {
     derive_handles_tag(doc, &group.entities, rules)
 }
 
@@ -305,7 +305,7 @@ pub fn derive_group_tag(doc: &CadDocument, group: &Group, rules: &Rules) -> Opti
 /// is the group rule before a GROUP object exists, used for the friendly
 /// default name shown by the GROUP prompt.
 pub fn derive_handles_tag(
-    doc: &CadDocument,
+    doc: &Document,
     handles: &[codec::Handle],
     rules: &Rules,
 ) -> Option<TagRead> {
@@ -524,8 +524,8 @@ mod tests {
     /// `members` added to a fresh document and grouped under `name` with
     /// `description`, the way `Scene::create_group` does it; returns the
     /// document and the group's handle.
-    fn grouped(name: &str, description: &str, members: Vec<EntityType>) -> (CadDocument, Handle) {
-        let mut doc = CadDocument::new();
+    fn grouped(name: &str, description: &str, members: Vec<EntityType>) -> (Document, Handle) {
+        let mut doc = Document::new();
         let handles: Vec<Handle> = members
             .into_iter()
             .map(|member| doc.add_entity(member).unwrap())
@@ -544,7 +544,7 @@ mod tests {
         (doc, gh)
     }
 
-    fn group_of(doc: &CadDocument, gh: Handle) -> &Group {
+    fn group_of(doc: &Document, gh: Handle) -> &Group {
         match doc.objects.get(&gh) {
             Some(ObjectType::Group(group)) => group,
             other => panic!("no group at {gh:?}: {other:?}"),

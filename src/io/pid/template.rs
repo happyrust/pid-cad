@@ -54,7 +54,7 @@ pub(super) fn overlay_linked_template(
     parsed: &pid_parse::PidDocument,
     geometry: &NormalizedPidGeometry,
     drawing: &Path,
-    doc: &mut CadDocument,
+    doc: &mut Document,
     paper_style_scale: f64,
 ) -> Option<TemplateOverlay> {
     let links = linked_templates(parsed);
@@ -267,7 +267,7 @@ fn collect_igr(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 pub(super) fn overlay_from(
     igr: &Path,
     geometry: &NormalizedPidGeometry,
-    doc: &mut CadDocument,
+    doc: &mut Document,
     paper_style_scale: f64,
 ) -> Option<TemplateOverlay> {
     let parsed = match PidParser::with_options(ParseOptions::geometry()).parse_file(igr) {

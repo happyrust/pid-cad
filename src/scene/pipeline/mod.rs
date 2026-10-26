@@ -126,6 +126,9 @@ pub struct Pipeline {
     /// Same shader as wire_pipeline but depth_compare=Greater, depth_write_enabled=false.
     /// Used to draw ghost copies of selected wires through occluding geometry.
     wire_xray_pipeline: wgpu::RenderPipeline,
+    /// Sample-count-one preview pipeline composited after the cached scene blit.
+    wire_preview_overlay_pipeline: wgpu::RenderPipeline,
+    pub(in crate::scene) preview_overlay_direct: bool,
     circle_xray_pipeline: wgpu::RenderPipeline,
     ellipse_xray_pipeline: wgpu::RenderPipeline,
     block_wire_xray_pipeline: wgpu::RenderPipeline,
@@ -188,6 +191,10 @@ pub struct Pipeline {
     uniform_buffer: wgpu::Buffer,
     frame_bgl: wgpu::BindGroupLayout,
     uniform_bind_group: wgpu::BindGroup,
+    /// The selection overlay's copy of the frame uniforms: transparency on,
+    /// so a translucent highlight colour shows, and lines widened.
+    selection_uniform_buffer: wgpu::Buffer,
+    selection_uniform_bind_group: wgpu::BindGroup,
     shadow_uniform_bind_group: wgpu::BindGroup,
     background_texture: wgpu::Texture,
     environment_texture: wgpu::Texture,
@@ -227,7 +234,7 @@ pub struct Pipeline {
     /// overlay — so its glyphs ride here, re-uploaded every frame like
     /// `gpu_preview_wires`, or the dragged text vanishes until release re-tesses
     /// it back into the base set (issue #316).
-    text_preview_gpu: Vec<text_gpu::TextGpu>,
+    pub(in crate::scene) text_preview_gpu: Vec<text_gpu::TextGpu>,
     /// Per-frame silhouette line lists from the kernel mesh and current view.
     silhouette_chunks: Vec<SilhouetteChunk>,
     silhouette_source_key: (usize, usize, u64),
@@ -301,6 +308,10 @@ pub struct Pipeline {
     pub(crate) wire_arena_fallback_handles: rustc_hash::FxHashSet<codec::Handle>,
     /// The Model content id both arenas currently mirror (`u64::MAX` = none).
     pub(crate) wire_arena_id: u64,
+    /// The draw-depth generation the arenas' slabs baked. A patch rewrites
+    /// only the changed entities, so after a full depth rebuild the arenas
+    /// have to be rebuilt instead of patched.
+    pub(crate) wire_arena_depth_generation: u64,
     /// Handles that contributed to this slot's retained analytical uploads.
     pub(crate) partition_contributors: rustc_hash::FxHashSet<codec::Handle>,
     /// The draw-depth generation those uploads baked. A full depth rebuild
@@ -327,9 +338,11 @@ pub struct Pipeline {
     /// Command-preview / interim / grip-drag overlay wires. Re-uploaded every
     /// frame they are present (small), drawn on top of the base wire pass — so
     /// a live drag never re-uploads the resident base buffer.
-    gpu_preview_wires: Vec<WireGpu>,
-    gpu_preview_circles: Vec<CircleGpu>,
-    gpu_preview_ellipses: Vec<EllipseGpu>,
+    pub(in crate::scene) gpu_preview_wires: Vec<WireGpu>,
+    /// Instanced geometry from INSERT previews must use its block GPU pipeline.
+    pub(in crate::scene) gpu_preview_block_wires: Vec<BlockWireGpu>,
+    pub(in crate::scene) gpu_preview_circles: Vec<CircleGpu>,
+    pub(in crate::scene) gpu_preview_ellipses: Vec<EllipseGpu>,
     /// Wipeout masks — solid fills rendered after wires in a separate pass via
     /// the legacy per-primitive `WipeoutGpu` renderer.
     gpu_wipeouts: Vec<WipeoutGpu>,
@@ -341,8 +354,9 @@ pub struct Pipeline {
     gpu_point_clouds: point_cloud_gpu::PointCloudGpu,
     /// Batched mesh geometry — every solid's LOD0 concatenated into a few large
     /// buffers so the whole set draws in a handful of calls instead of one per
-    /// solid. Hover / selection never re-pack it.
-    gpu_mesh_batch: Vec<mesh_gpu::MeshBatchChunk>,
+    /// solid. Hover / selection never re-pack it. Shared with every other slot
+    /// drawing the same mesh set (`MultiPipeline::mesh_batch_cache`).
+    gpu_mesh_batch: std::sync::Arc<Vec<mesh_gpu::MeshBatchChunk>>,
     /// Small mutable working set rebuilt after entity-only edits. Static chunks
     /// touched by an edit are disabled wholesale and their current handles are
     /// repacked here, keeping the rest of a multi-million-triangle scene resident.
@@ -434,11 +448,48 @@ pub struct Pipeline {
     pub slot_id: u64,
 }
 
+/// The views and samplers the frame bind group carries beside its uniforms.
+struct FrameViews<'a> {
+    background: &'a wgpu::TextureView,
+    environment: &'a wgpu::TextureView,
+    background_sampler: &'a wgpu::Sampler,
+    shadow: &'a wgpu::TextureView,
+    shadow_sampler: &'a wgpu::Sampler,
+}
+
+fn frame_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniforms: &wgpu::Buffer,
+    views: &FrameViews<'_>,
+) -> wgpu::BindGroup {
+    let entry = |binding, resource| wgpu::BindGroupEntry { binding, resource };
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("viewer.bind_group"),
+        layout,
+        entries: &[
+            entry(0, uniforms.as_entire_binding()),
+            entry(1, wgpu::BindingResource::TextureView(views.background)),
+            entry(2, wgpu::BindingResource::Sampler(views.background_sampler)),
+            entry(3, wgpu::BindingResource::TextureView(views.environment)),
+            entry(4, wgpu::BindingResource::Sampler(views.background_sampler)),
+            entry(5, wgpu::BindingResource::TextureView(views.shadow)),
+            entry(6, wgpu::BindingResource::Sampler(views.shadow_sampler)),
+        ],
+    })
+}
+
 impl Pipeline {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         // ── Shared frame uniform buffer (view_proj etc.) ───────────────────
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("viewer.uniform_buffer"),
+            size: std::mem::size_of::<Uniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let selection_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("viewer.selection_uniform_buffer"),
             size: std::mem::size_of::<Uniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -583,40 +634,17 @@ impl Pipeline {
             background_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let environment_view =
             environment_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("viewer.bind_group"),
-            layout: &frame_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&background_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&background_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&environment_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&background_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&shadow_fallback_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
-                },
-            ],
-        });
+        let frame_views = FrameViews {
+            background: &background_view,
+            environment: &environment_view,
+            background_sampler: &background_sampler,
+            shadow: &shadow_fallback_view,
+            shadow_sampler: &shadow_sampler,
+        };
+        let uniform_bind_group =
+            frame_bind_group(device, &frame_bgl, &uniform_buffer, &frame_views);
+        let selection_uniform_bind_group =
+            frame_bind_group(device, &frame_bgl, &selection_uniform_buffer, &frame_views);
         let shadow_uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shadow.frame_bind_group"),
             layout: &shadow_frame_bgl,
@@ -950,6 +978,36 @@ impl Pipeline {
             multiview_mask: None,
             cache: None,
         });
+        let wire_preview_overlay_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("wire_preview_overlay.pipeline"),
+                layout: Some(&wire_layout),
+                vertex: wgpu::VertexState {
+                    module: &wire_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(wire_mode.layout())],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &wire_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
         // wgpu 30 takes each vertex-buffer slot as an `Option`, hence the
         // `Some(..)` around every layout here.
         let block_wire_buffers: &[Option<wgpu::VertexBufferLayout<'_>>] =
@@ -2456,6 +2514,8 @@ impl Pipeline {
             wire_black_pipeline,
             block_wire_black_pipeline,
             wire_xray_pipeline,
+            wire_preview_overlay_pipeline,
+            preview_overlay_direct: false,
             circle_pipeline,
             circle_xray_pipeline,
             ellipse_pipeline,
@@ -2507,6 +2567,8 @@ impl Pipeline {
             uniform_buffer,
             frame_bgl,
             uniform_bind_group,
+            selection_uniform_buffer,
+            selection_uniform_bind_group,
             shadow_uniform_bind_group,
             background_texture,
             environment_texture,
@@ -2552,6 +2614,7 @@ impl Pipeline {
             wire_arena_fallback_kind: None,
             wire_arena_fallback_handles: rustc_hash::FxHashSet::default(),
             wire_arena_id: u64::MAX,
+            wire_arena_depth_generation: u64::MAX,
             partition_contributors: rustc_hash::FxHashSet::default(),
             partition_depth_generation: u64::MAX,
             wire_cull_key: (u64::MAX, u64::MAX, 0, 0),
@@ -2564,13 +2627,14 @@ impl Pipeline {
             gpu_selected_ellipses: vec![],
             gpu_selected_block_wires: vec![],
             gpu_preview_wires: vec![],
+            gpu_preview_block_wires: vec![],
             gpu_preview_circles: vec![],
             gpu_preview_ellipses: vec![],
             gpu_wipeouts: vec![],
             wipeout_skip_flags: vec![],
             gpu_images: vec![],
             gpu_point_clouds,
-            gpu_mesh_batch: vec![],
+            gpu_mesh_batch: Default::default(),
             gpu_mesh_dynamic: vec![],
             mesh_disabled_chunks: rustc_hash::FxHashSet::default(),
             mesh_dynamic_handles: rustc_hash::FxHashSet::default(),
@@ -3217,6 +3281,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
     ) {
         if wires.is_empty() {
             self.gpu_preview_wires.clear();
+            self.gpu_preview_block_wires.clear();
             self.gpu_preview_circles.clear();
             self.gpu_preview_ellipses.clear();
         } else {
@@ -3235,6 +3300,20 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                     self.wire_const_bgl.as_ref(),
                 )
             };
+            // The preview partitioner takes nested/block wires out of the
+            // ordinary buffer. Keep that geometry when STRETCH hides its source.
+            self.gpu_preview_block_wires = BlockWireGpu::from_wires(
+                device,
+                queue,
+                &partitioned.instanced,
+                depth_map,
+                None,
+                wire_gpu::BlockWireTarget {
+                    const_bgl: &self.block_wire_const_bgl,
+                    mode: self.block_wire_mode,
+                },
+                None,
+            );
             self.gpu_preview_circles = if partitioned.circle_instances.is_empty() {
                 vec![]
             } else {
@@ -3316,7 +3395,10 @@ analytic={:.1} regular={:.1} blocks={:.1}",
             let mut slots = rustc_hash::FxHashMap::default();
             let mut groups: Vec<Vec<&crate::scene::model::mesh_model::MeshLodSet>> = Vec::new();
             for (index, set) in sets.iter().enumerate() {
-                let color = set.display_color().unwrap_or([0.0, 0.0, 0.0, 1.0]);
+                let color = set
+                    .edge_color
+                    .or_else(|| set.display_color())
+                    .unwrap_or([0.0, 0.0, 0.0, 1.0]);
                 let key = match (&set.instance_source, set.instance_transform) {
                     (Some(source), Some(transform)) => {
                         let matrix = &transform.matrix.m;
@@ -3679,18 +3761,47 @@ analytic={:.1} regular={:.1} blocks={:.1}",
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        meshes: &[MeshLodSet],
+        meshes: &std::sync::Arc<Vec<MeshLodSet>>,
+        cache: &mut MeshBatchCache,
     ) {
         let started = iced::time::Instant::now();
-        let (mut chunks, triangles) = mesh_gpu::build_mesh_batch(device, queue, meshes);
+        // Release this slot's previous batch, then drop batches no slot draws.
+        self.gpu_mesh_batch = Default::default();
+        cache.retain(|_, (source, chunks)| {
+            source.strong_count() > 0 && std::sync::Arc::strong_count(chunks) > 1
+        });
+        // Several viewports (and panes) showing the same mesh set share one
+        // copy instead of each packing and uploading the whole drawing.
+        let key = std::sync::Arc::as_ptr(meshes) as usize;
+        let shared = cache.get(&key).and_then(|(source, chunks)| {
+            source
+                .upgrade()
+                .is_some_and(|source| std::sync::Arc::ptr_eq(&source, meshes))
+                .then(|| std::sync::Arc::clone(chunks))
+        });
+        let (chunks, triangles) = match shared {
+            Some(chunks) => (chunks, 0),
+            None => {
+                let errors_before = gpu_errors_seen();
+                let (mut chunks, triangles) = mesh_gpu::build_mesh_batch(device, queue, meshes);
+                mesh_gpu::upload_chunk_material_bind_groups(
+                    device,
+                    queue,
+                    &self.mesh_material_bgl,
+                    &mut chunks,
+                );
+                let chunks = std::sync::Arc::new(chunks);
+                // A rejected upload must not be handed to the other slots.
+                if gpu_errors_seen() == errors_before {
+                    cache.insert(
+                        key,
+                        (std::sync::Arc::downgrade(meshes), std::sync::Arc::clone(&chunks)),
+                    );
+                }
+                (chunks, triangles)
+            }
+        };
         let built_at = iced::time::Instant::now();
-        mesh_gpu::upload_chunk_material_bind_groups(
-            device,
-            queue,
-            &self.mesh_material_bgl,
-            &mut chunks,
-        );
-        let materials_at = iced::time::Instant::now();
         self.mesh_ranges_by_handle.clear();
         for (chunk_index, chunk) in chunks.iter().enumerate() {
             for range in &chunk.highlight_ranges {
@@ -3727,11 +3838,10 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                 .filter(|chunk| chunk.compact_vertices)
                 .count();
             crate::perf_record!(
-                "[perf] mesh-batch {:>7.1}ms build={:.1} material={:.1} index={:.1} sets={} chunks={} compact={} instances={} triangles={}",
+                "[perf] mesh-batch {:>7.1}ms build={:.1} index={:.1} sets={} chunks={} compact={} instances={} triangles={}",
                 started.elapsed().as_secs_f64() * 1000.0,
                 built_at.duration_since(started).as_secs_f64() * 1000.0,
-                materials_at.duration_since(built_at).as_secs_f64() * 1000.0,
-                indexed_at.duration_since(materials_at).as_secs_f64() * 1000.0,
+                indexed_at.duration_since(built_at).as_secs_f64() * 1000.0,
                 meshes.len(),
                 self.gpu_mesh_batch.len(),
                 compact_chunks,
@@ -3950,7 +4060,15 @@ analytic={:.1} regular={:.1} blocks={:.1}",
         queue: &wgpu::Queue,
         hatches: &[HatchModel],
     ) {
+        let perf_started = crate::perf::enabled().then(iced::time::Instant::now);
         self.hatch_gpu.upload_preview(device, queue, hatches);
+        let elapsed_ms = crate::perf::elapsed_ms(perf_started);
+        if elapsed_ms >= 1.0 {
+            crate::perf_record!(
+                "[perf] hatch-preview-upload {elapsed_ms:.1}ms models={}",
+                hatches.len(),
+            );
+        }
     }
 
     pub fn upload_wipeouts(
@@ -4048,40 +4166,18 @@ analytic={:.1} regular={:.1} blocks={:.1}",
         let environment_view = self
             .environment_texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        self.uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("viewer.bind_group"),
-            layout: &self.frame_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&background_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.background_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&environment_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&self.background_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(self.shadow_view()),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
-                },
-            ],
-        });
+        let views = FrameViews {
+            background: &background_view,
+            environment: &environment_view,
+            background_sampler: &self.background_sampler,
+            shadow: self.shadow_view(),
+            shadow_sampler: &self.shadow_sampler,
+        };
+        let frame = frame_bind_group(device, &self.frame_bgl, &self.uniform_buffer, &views);
+        let selection =
+            frame_bind_group(device, &self.frame_bgl, &self.selection_uniform_buffer, &views);
+        self.uniform_bind_group = frame;
+        self.selection_uniform_bind_group = selection;
     }
 
     /// Allocate or drop the shadow target to match `shadow_enabled`.
@@ -4117,7 +4213,11 @@ analytic={:.1} regular={:.1} blocks={:.1}",
         if self.shadow_full.is_none() {
             uniforms.shadow_params[0] = 0.0;
         }
+        let mut selection = uniforms;
+        selection.transparency_enable = 1.0;
+        uniforms.highlight_widen = 0.0;
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        queue.write_buffer(&self.selection_uniform_buffer, 0, bytemuck::bytes_of(&selection));
     }
 
     pub fn upload_background_images(
@@ -5135,6 +5235,10 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                 .iter()
                 .any(|wire| wire.instance_count > 0)
                 || self
+                    .gpu_preview_block_wires
+                    .iter()
+                    .any(|wire| wire.instance_count > 0)
+                || self
                     .gpu_preview_circles
                     .iter()
                     .any(|circle| circle.instance_count > 0)
@@ -5144,7 +5248,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                     .any(|ellipse| ellipse.instance_count > 0)
                 || !self.text_preview_gpu.is_empty();
 
-            if have_preview_overlay {
+            if have_preview_overlay && !self.preview_overlay_direct {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("preview_overlay.render_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -5194,6 +5298,19 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                             0..6,
                             wire.first_instance..wire.first_instance + wire.instance_count,
                         );
+                    }
+                }
+
+                if self
+                    .gpu_preview_block_wires
+                    .iter()
+                    .any(|wire| wire.instance_count > 0)
+                {
+                    pass.set_pipeline(&self.block_wire_xray_pipeline);
+                    for wire in &self.gpu_preview_block_wires {
+                        if wire.instance_count > 0 {
+                            bind_and_draw_block_wire(&mut pass, wire);
+                        }
                     }
                 }
 
@@ -5280,7 +5397,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                     multiview_mask: None,
                 });
                 pass.set_viewport(raster.x, raster.y, raster.width, raster.height, 0.0, 1.0);
-                pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                pass.set_bind_group(0, &self.selection_uniform_bind_group, &[]);
                 pass.set_stencil_reference(stencil_ref);
                 if !self.gpu_selected_wires.is_empty() {
                     pass.set_pipeline(if occluded {
@@ -5320,7 +5437,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                     } else {
                         &self.circle_xray_pipeline
                     });
-                    pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                    pass.set_bind_group(0, &self.selection_uniform_bind_group, &[]);
                     for cg in &self.gpu_selected_circles {
                         if cg.instance_count > 0 {
                             pass.set_vertex_buffer(0, cg.instance_buffer.slice(..));
@@ -5334,7 +5451,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                     } else {
                         &self.ellipse_xray_pipeline
                     });
-                    pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                    pass.set_bind_group(0, &self.selection_uniform_bind_group, &[]);
                     for eg in &self.gpu_selected_ellipses {
                         if eg.instance_count > 0 {
                             pass.set_vertex_buffer(0, eg.instance_buffer.slice(..));
@@ -5431,6 +5548,57 @@ analytic={:.1} regular={:.1} blocks={:.1}",
             pass.set_bind_group(0, &self.blit_bind_group, &[]);
             pass.draw(0..6, 0..1);
         }
+
+        // Simple line-command previews live above the cached base scene. The
+        // resolve texture therefore stays clean, and moving an endpoint only
+        // redraws these few instances plus the viewport blit.
+        if self.preview_overlay_direct && surface_dest.width > 0 && surface_dest.height > 0 {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("preview_wire_overlay.render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_viewport(
+                surface_dest.x as f32,
+                surface_dest.y as f32,
+                surface_dest.width as f32,
+                surface_dest.height as f32,
+                0.0,
+                1.0,
+            );
+            pass.set_scissor_rect(
+                surface_clip.x,
+                surface_clip.y,
+                surface_clip.width,
+                surface_clip.height,
+            );
+            pass.set_pipeline(&self.wire_preview_overlay_pipeline);
+            pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            for wire in &self.gpu_preview_wires {
+                if wire.instance_count == 0 {
+                    continue;
+                }
+                if let Some(bg) = &wire.const_bind_group {
+                    pass.set_bind_group(1, bg.as_ref(), &[]);
+                }
+                pass.set_vertex_buffer(0, wire.instance_buffer.slice(..));
+                pass.draw(
+                    0..6,
+                    wire.first_instance..wire.first_instance + wire.instance_count,
+                );
+            }
+        }
     }
 
     /// Reset every cache key that describes this slot's uploaded content.
@@ -5514,6 +5682,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
         self.gpu_selected_circles.clear();
         self.gpu_selected_ellipses.clear();
         self.gpu_preview_wires.clear();
+        self.gpu_preview_block_wires.clear();
         self.gpu_preview_circles.clear();
         self.gpu_preview_ellipses.clear();
         self.hatch_gpu.clear();
@@ -5521,7 +5690,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
         self.gpu_wipeouts.clear();
         self.wipeout_skip_flags.clear();
         self.gpu_images.clear();
-        self.gpu_mesh_batch.clear();
+        self.gpu_mesh_batch = Default::default();
         self.gpu_mesh_dynamic.clear();
         self.mesh_disabled_chunks.clear();
         self.mesh_dynamic_handles.clear();
@@ -5830,6 +5999,8 @@ impl MultiPipeline {
                     || std::sync::Arc::strong_count(&entry.1) > 1
                     || std::sync::Arc::strong_count(&entry.3) > 1
             });
+            self.mesh_batch_cache
+                .retain(|_, entry| std::sync::Arc::strong_count(&entry.1) > 1);
             // Block records are host memory a released slot no longer needs;
             // the next build re-emits what it still draws.
             self.block_geometry.clear();
@@ -5965,6 +6136,16 @@ fn create_msaa_texture(
     })
 }
 
+/// Mesh-set address → (the set, its packed GPU batch). The weak handle proves
+/// the address still names the same set.
+pub(crate) type MeshBatchCache = rustc_hash::FxHashMap<
+    usize,
+    (
+        std::sync::Weak<Vec<MeshLodSet>>,
+        std::sync::Arc<Vec<mesh_gpu::MeshBatchChunk>>,
+    ),
+>;
+
 /// Holds one inner `Pipeline` per viewport drawn this frame. A single
 /// shader widget owns one `MultiPipeline`; the unified renderer grows the
 /// `inners` vector to match the viewport count and draws each into its own
@@ -5985,6 +6166,8 @@ pub struct MultiPipeline {
     pub(crate) gpu_error_epoch: usize,
     /// Definition geometry shared across viewport slots.
     pub(crate) block_geometry: wire_gpu::BlockGeometryCache,
+    /// Solid-mesh batches shared across slots, keyed by mesh-set identity.
+    pub(crate) mesh_batch_cache: MeshBatchCache,
     /// Shared resident batches, keyed by wire content identity.
     pub(crate) wire_buffer_cache: rustc_hash::FxHashMap<
         u64,
@@ -6405,6 +6588,7 @@ impl iced::widget::shader::Pipeline for MultiPipeline {
             slot_clock: 0,
             frame_rendered: std::sync::atomic::AtomicBool::new(false),
             gpu_error_epoch: gpu_errors_seen(),
+            mesh_batch_cache: Default::default(),
             wire_buffer_cache: rustc_hash::FxHashMap::default(),
             #[cfg(all(feature = "bevy3d", not(target_arch = "wasm32")))]
             bevy: None,

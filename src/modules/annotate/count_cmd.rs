@@ -158,17 +158,10 @@ impl CadCommand for CountCommand {
     }
 
     fn on_selection_complete(&mut self, handles: Vec<Handle>) -> CmdResult {
-        // The selection arrives whole after every pick: `1 found`, then
-        // `1 found, 2 total`.
-        let found = handles.iter().filter(|h| !self.targets.contains(h)).count();
-        let first = self.targets.is_empty();
+        // The selection arrives whole after every pick; the driver reports
+        // what each pick found.
         self.targets = handles;
-        let total = self.targets.len();
-        CmdResult::ReportMeasurement(if first {
-            crate::tf!("{found} found").into_owned()
-        } else {
-            crate::tf!("{found} found, {total} total").into_owned()
-        })
+        CmdResult::NeedPoint
     }
 
     fn needs_entity_pick(&self) -> bool {
@@ -477,7 +470,7 @@ impl CadCommand for UpdateFieldCommand {
     }
 
     fn prompt(&self) -> String {
-        "Select objects:".into()
+        crate::t!("Select objects:").into_owned()
     }
 
     fn is_selection_gathering(&self) -> bool {
