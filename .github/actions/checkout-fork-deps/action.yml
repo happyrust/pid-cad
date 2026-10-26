@@ -9,10 +9,6 @@ inputs:
     description: Directory, relative to GITHUB_WORKSPACE, that holds this checkout.
     required: false
     default: pid-cad
-  native-deps:
-    description: Also clone the e3d-* readers (needed by native builds).
-    required: false
-    default: 'true'
 
 runs:
   using: composite
@@ -72,8 +68,9 @@ runs:
         fetch-depth: 1
         persist-credentials: false
 
+    # Cargo also resolves the target-specific e3d manifests on wasm, so
+    # every path dependency has to be present before any cargo command.
     - name: Checkout e3d-model
-      if: inputs.native-deps == 'true'
       uses: actions/checkout@v4
       with:
         repository: happyrust/e3d-model
@@ -83,7 +80,6 @@ runs:
         persist-credentials: false
 
     - name: Checkout e3d-io
-      if: inputs.native-deps == 'true'
       uses: actions/checkout@v4
       with:
         repository: happyrust/e3d-io
@@ -93,7 +89,6 @@ runs:
         persist-credentials: false
 
     - name: Checkout e3d-attlib
-      if: inputs.native-deps == 'true'
       uses: actions/checkout@v4
       with:
         repository: happyrust/e3d-attlib

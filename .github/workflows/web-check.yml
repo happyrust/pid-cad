@@ -25,10 +25,7 @@ jobs:
         with:
           path: pid-cad
 
-      # The wasm target only needs the iced path dependency.
       - uses: ./pid-cad/.github/actions/checkout-fork-deps
-        with:
-          native-deps: 'false'
 
       - uses: dtolnay/rust-toolchain@stable
         with:
