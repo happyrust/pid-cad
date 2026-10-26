@@ -1,0 +1,92 @@
+name: Checkout fork dependencies
+description: >-
+  Materialise the sibling path dependencies of OpenCADStudio and apply the
+  iced wgpu-30 fork patch. The calling job must already have checked this
+  repository out under `workspace`.
+
+inputs:
+  workspace:
+    description: Directory, relative to GITHUB_WORKSPACE, that holds this checkout.
+    required: false
+    default: pid-cad
+  native-deps:
+    description: Also clone bevy and the e3d-* readers (needed by native builds).
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    # iced is used through a three-commit fork of iced-rs/iced. The branch
+    # lives only in the developer checkout, so CI rebuilds it from the
+    # upstream base plus .github/ci/iced-wgpu-30.patch.
+    - name: Checkout iced at the fork base
+      uses: actions/checkout@v4
+      with:
+        repository: iced-rs/iced
+        ref: 23604ff22ab0aad9e00b9327cb7b8546ed84db39
+        path: iced
+        fetch-depth: 1
+        persist-credentials: false
+
+    # iced's wgpu-30 fork also carries one local commit in cryoglyph, its
+    # text stack; the same patch treatment keeps both reproducible.
+    - name: Checkout cryoglyph at the fork base
+      uses: actions/checkout@v4
+      with:
+        repository: iced-rs/cryoglyph
+        ref: 53ba3e879539d19ed8162942126a977ec896cc3b
+        path: cryoglyph
+        fetch-depth: 1
+        persist-credentials: false
+
+    - name: Apply the wgpu-30 fork patches
+      shell: bash
+      run: |
+        patches="$GITHUB_WORKSPACE/${{ inputs.workspace }}/.github/ci"
+        for pair in "iced iced-wgpu-30.patch" "cryoglyph cryoglyph-wgpu-30.patch"; do
+          set -- $pair
+          git -C "$GITHUB_WORKSPACE/$1" config core.autocrlf false
+          git -C "$GITHUB_WORKSPACE/$1" apply --check "$patches/$2"
+          git -C "$GITHUB_WORKSPACE/$1" apply "$patches/$2"
+        done
+
+    - name: Checkout bevy
+      if: inputs.native-deps == 'true'
+      uses: actions/checkout@v4
+      with:
+        repository: bevyengine/bevy
+        ref: e8b3598ff5e5ec40e8ba84edd5750a1c0e4d4e59
+        path: bevy
+        fetch-depth: 1
+        persist-credentials: false
+
+    - name: Checkout e3d-model
+      if: inputs.native-deps == 'true'
+      uses: actions/checkout@v4
+      with:
+        repository: happyrust/e3d-model
+        ref: 5a72d3e364f2680f238228a1327e02fb6a07bf32
+        path: e3d-model
+        fetch-depth: 1
+        persist-credentials: false
+
+    - name: Checkout e3d-io
+      if: inputs.native-deps == 'true'
+      uses: actions/checkout@v4
+      with:
+        repository: happyrust/e3d-io
+        ref: 8a342cbe705aa5d267bf79cf0f8d63ea8412d273
+        path: e3d-io
+        fetch-depth: 1
+        persist-credentials: false
+
+    - name: Checkout e3d-attlib
+      if: inputs.native-deps == 'true'
+      uses: actions/checkout@v4
+      with:
+        repository: happyrust/e3d-attlib
+        ref: f37be2ebe74c21c35842b5b8c5f59d7eb8b85e81
+        path: e3d-attlib
+        fetch-depth: 1
+        persist-credentials: false

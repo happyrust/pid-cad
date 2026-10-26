@@ -22,13 +22,23 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: pid-cad
+
+      # The wasm target only needs the iced path dependency.
+      - uses: ./pid-cad/.github/actions/checkout-fork-deps
+        with:
+          native-deps: 'false'
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pid-cad -> target
 
       # The app and the parse worker that trunk's post-build hook compiles.
       - name: cargo check (wasm32)
+        working-directory: pid-cad
         run: cargo check --locked --target wasm32-unknown-unknown -p OpenCADStudio -p ocs_web_worker

@@ -1,0 +1,47 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index d8c5d71..af71bfd 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -8,7 +8,7 @@ repository = "https://github.com/iced-rs/cryoglyph"
+ license = "MIT OR Apache-2.0 OR Zlib"
+ 
+ [dependencies]
+-wgpu = { version = "29", default-features = false, features = ["wgsl"] }
++wgpu = { version = "30", default-features = false, features = ["wgsl"] }
+ etagere = "0.2"
+ cosmic-text = "0.19"
+ lru = { version = "0.16", default-features = false }
+diff --git a/src/cache.rs b/src/cache.rs
+index a35ceff..46549e7 100644
+--- a/src/cache.rs
++++ b/src/cache.rs
+@@ -22,7 +22,7 @@ pub struct Cache(Arc<Inner>);
+ struct Inner {
+     sampler: Sampler,
+     shader: ShaderModule,
+-    vertex_buffers: [wgpu::VertexBufferLayout<'static>; 1],
++    vertex_buffers: [Option<wgpu::VertexBufferLayout<'static>>; 1],
+     atlas_layout: BindGroupLayout,
+     uniforms_layout: BindGroupLayout,
+     pipeline_layout: PipelineLayout,
+@@ -145,7 +145,7 @@ impl Cache {
+         Self(Arc::new(Inner {
+             sampler,
+             shader,
+-            vertex_buffers: [vertex_buffer_layout],
++            vertex_buffers: [Some(vertex_buffer_layout)],
+             uniforms_layout,
+             atlas_layout,
+             pipeline_layout,
+diff --git a/src/text_render.rs b/src/text_render.rs
+index b925cb6..0af51c8 100644
+--- a/src/text_render.rs
++++ b/src/text_render.rs
+@@ -398,6 +398,7 @@ fn create_oversized_buffer(
+     buffer
+         .slice(..)
+         .get_mapped_range_mut()
++        .expect("map glyph vertex buffer")
+         .slice(..contents.len())
+         .copy_from_slice(contents);
+     buffer.unmap();

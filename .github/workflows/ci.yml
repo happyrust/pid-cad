@@ -26,6 +26,12 @@ jobs:
         os: [ubuntu-22.04, windows-latest, macos-14]
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: pid-cad
+
+      # This fork keeps iced, bevy and the e3d readers beside the repository
+      # as path dependencies; materialise them before cargo runs.
+      - uses: ./pid-cad/.github/actions/checkout-fork-deps
 
       # The same libraries the Linux release build needs (windowing, GL,
       # fonts); the packaging tools are left out.
@@ -40,10 +46,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pid-cad -> target
 
       # LC_ALL=C: a few tests compare English message text. The GPU-backed
       # tests are #[ignore]d and need an adapter, so they do not run here.
       - name: cargo test
+        working-directory: pid-cad
         env:
           LC_ALL: C
         run: cargo test --workspace --locked
@@ -57,6 +66,10 @@ jobs:
     # continue-on-error still shows a red check on every pull request.
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: pid-cad
+
+      - uses: ./pid-cad/.github/actions/checkout-fork-deps
 
       - name: System libraries
         run: |
@@ -70,11 +83,15 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pid-cad -> target
 
       - name: cargo fmt --check
+        working-directory: pid-cad
         continue-on-error: true
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
+        working-directory: pid-cad
         continue-on-error: true
         run: cargo clippy --workspace --all-targets --locked

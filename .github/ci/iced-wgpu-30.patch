@@ -1,0 +1,728 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index ae17e100..c0d3e5f6 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -530,9 +530,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "bit-set"
+-version = "0.9.1"
++version = "0.10.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "34ddef2995421ab6a5c779542c81ee77c115206f4ad9d5a8e05f4ff49716a3dd"
++checksum = "09ec2f926cc3060f09db9ebc5b52823d85268d24bb917e472c0c4bea35780a7d"
+ dependencies = [
+  "bit-vec 0.9.1",
+ ]
+@@ -1121,7 +1121,6 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
+ [[package]]
+ name = "cryoglyph"
+ version = "0.1.0"
+-source = "git+https://github.com/iced-rs/cryoglyph.git?rev=53ba3e879539d19ed8162942126a977ec896cc3b#53ba3e879539d19ed8162942126a977ec896cc3b"
+ dependencies = [
+  "cosmic-text",
+  "etagere",
+@@ -1955,26 +1954,6 @@ dependencies = [
+  "windows 0.62.2",
+ ]
+ 
+-[[package]]
+-name = "gpu-descriptor"
+-version = "0.3.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "b89c83349105e3732062a895becfc71a8f921bb71ecbbdd8ff99263e3b53a0ca"
+-dependencies = [
+- "bitflags 2.13.0",
+- "gpu-descriptor-types",
+- "hashbrown 0.15.5",
+-]
+-
+-[[package]]
+-name = "gpu-descriptor-types"
+-version = "0.2.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "fdf242682df893b86f33a73828fb09ca4b2d3bb6cc95249707fc684d27484b91"
+-dependencies = [
+- "bitflags 2.13.0",
+-]
+-
+ [[package]]
+ name = "gradient"
+ version = "0.1.0"
+@@ -2062,6 +2041,9 @@ name = "hashbrown"
+ version = "0.17.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
++dependencies = [
++ "foldhash 0.2.0",
++]
+ 
+ [[package]]
+ name = "headers"
+@@ -2105,12 +2087,6 @@ version = "0.4.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+ 
+-[[package]]
+-name = "hexf-parse"
+-version = "0.2.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
+-
+ [[package]]
+ name = "http"
+ version = "1.4.2"
+@@ -2875,10 +2851,12 @@ dependencies = [
+ 
+ [[package]]
+ name = "js-sys"
+-version = "0.3.85"
++version = "0.3.92"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "8c942ebf8e95485ca0d52d97da7c5a2c387d0e7f0ba4c35e93bfcaee045955b3"
++checksum = "cc4c90f45aa2e6eacbe8645f77fdea542ac97a494bcd117a67df9ff4d611f995"
+ dependencies = [
++ "cfg-if",
++ "futures-util",
+  "once_cell",
+  "wasm-bindgen",
+ ]
+@@ -3309,22 +3287,22 @@ checksum = "13d2233c9842d08cfe13f9eac96e207ca6a2ea10b80259ebe8ad0268be27d2af"
+ 
+ [[package]]
+ name = "naga"
+-version = "29.0.4"
++version = "30.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "b2bf919621e7975acb27d881bae2fb993e0d45c8e0446e85e6272971e00dc8df"
++checksum = "23bf0a141a9ab6f07dbb492db53245e464bc9db42f407772d9ae03d83a2c1033"
+ dependencies = [
+  "arrayvec",
+- "bit-set 0.9.1",
++ "bit-set 0.10.0",
+  "bitflags 2.13.0",
+  "cfg-if",
+  "cfg_aliases",
+  "codespan-reporting",
+  "half",
+- "hashbrown 0.16.1",
+- "hexf-parse",
++ "hashbrown 0.17.1",
+  "indexmap",
+  "libm",
+  "log",
++ "naga-types",
+  "num-traits",
+  "once_cell",
+  "rustc-hash 1.1.0",
+@@ -3333,6 +3311,18 @@ dependencies = [
+  "unicode-ident",
+ ]
+ 
++[[package]]
++name = "naga-types"
++version = "30.0.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "658200ddc25c6c7b860747516d132d1b284c0fafb7a380233acee9a72fb30e11"
++dependencies = [
++ "hashbrown 0.17.1",
++ "indexmap",
++ "rustc-hash 1.1.0",
++ "thiserror 2.0.18",
++]
++
+ [[package]]
+ name = "native-tls"
+ version = "0.2.18"
+@@ -3811,6 +3801,7 @@ dependencies = [
+  "bitflags 2.13.0",
+  "objc2 0.6.4",
+  "objc2-core-foundation",
++ "objc2-core-graphics",
+  "objc2-foundation 0.3.2",
+  "objc2-metal 0.3.2",
+ ]
+@@ -6442,9 +6433,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "wasm-bindgen"
+-version = "0.2.108"
++version = "0.2.115"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "64024a30ec1e37399cf85a7ffefebdb72205ca1c972291c51512360d90bd8566"
++checksum = "6523d69017b7633e396a89c5efab138161ed5aafcbc8d3e5c5a42ae38f50495a"
+ dependencies = [
+  "cfg-if",
+  "once_cell",
+@@ -6455,23 +6446,19 @@ dependencies = [
+ 
+ [[package]]
+ name = "wasm-bindgen-futures"
+-version = "0.4.58"
++version = "0.4.65"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "70a6e77fd0ae8029c9ea0063f87c46fde723e7d887703d74ad2616d792e51e6f"
++checksum = "2d1faf851e778dfa54db7cd438b70758eba9755cb47403f3496edd7c8fc212f0"
+ dependencies = [
+- "cfg-if",
+- "futures-util",
+  "js-sys",
+- "once_cell",
+  "wasm-bindgen",
+- "web-sys",
+ ]
+ 
+ [[package]]
+ name = "wasm-bindgen-macro"
+-version = "0.2.108"
++version = "0.2.115"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "008b239d9c740232e71bd39e8ef6429d27097518b6b30bdf9086833bd5b6d608"
++checksum = "4e3a6c758eb2f701ed3d052ff5737f5bfe6614326ea7f3bbac7156192dc32e67"
+ dependencies = [
+  "quote",
+  "wasm-bindgen-macro-support",
+@@ -6479,9 +6466,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "wasm-bindgen-macro-support"
+-version = "0.2.108"
++version = "0.2.115"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "5256bae2d58f54820e6490f9839c49780dff84c65aeab9e772f15d5f0e913a55"
++checksum = "921de2737904886b52bcbb237301552d05969a6f9c40d261eb0533c8b055fedf"
+ dependencies = [
+  "bumpalo",
+  "proc-macro2",
+@@ -6492,9 +6479,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "wasm-bindgen-shared"
+-version = "0.2.108"
++version = "0.2.115"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1f01b580c9ac74c8d8f0c0e4afb04eeef2acf145458e52c03845ee9cd23e3d12"
++checksum = "a93e946af942b58934c604527337bad9ae33ba1d5c6900bbb41c2c07c2364a93"
+ dependencies = [
+  "unicode-ident",
+ ]
+@@ -6637,9 +6624,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "web-sys"
+-version = "0.3.85"
++version = "0.3.92"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "312e32e551d92129218ea9a2452120f4aabc03529ef03e4d0d82fb2780608598"
++checksum = "84cde8507f4d7cfcb1185b8cb5890c494ffea65edbe1ba82cfd63661c805ed94"
+ dependencies = [
+  "js-sys",
+  "wasm-bindgen",
+@@ -6698,9 +6685,9 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
+ 
+ [[package]]
+ name = "wgpu"
+-version = "29.0.4"
++version = "30.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "76e8840e1ba2881d4cbb18d2147627a56af426ff064c0401eb0c8410c6325d07"
++checksum = "6d8f4bd44d92da5270f03409dba9f952dab24f128e05d6a554926101d1bf9114"
+ dependencies = [
+  "arrayvec",
+  "bitflags 2.13.0",
+@@ -6708,7 +6695,7 @@ dependencies = [
+  "cfg-if",
+  "cfg_aliases",
+  "document-features",
+- "hashbrown 0.16.1",
++ "hashbrown 0.17.1",
+  "js-sys",
+  "log",
+  "naga",
+@@ -6728,21 +6715,22 @@ dependencies = [
+ 
+ [[package]]
+ name = "wgpu-core"
+-version = "29.0.4"
++version = "30.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "2f519832254e56965a9940c4af57dcb75f702b6f6fa4a0b172f685395843a4d7"
++checksum = "08763620e76fc980bca7bf84de82568614487a53172dd968d89187282eb87fa2"
+ dependencies = [
+  "arrayvec",
+- "bit-set 0.9.1",
++ "bit-set 0.10.0",
+  "bit-vec 0.9.1",
+  "bitflags 2.13.0",
+  "bytemuck",
+  "cfg_aliases",
+  "document-features",
+- "hashbrown 0.16.1",
++ "hashbrown 0.17.1",
+  "indexmap",
+  "log",
+  "naga",
++ "naga-types",
+  "once_cell",
+  "parking_lot",
+  "portable-atomic",
+@@ -6762,50 +6750,50 @@ dependencies = [
+ 
+ [[package]]
+ name = "wgpu-core-deps-apple"
+-version = "29.0.4"
++version = "30.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "f5e39e26c4c0e07589e67d18546cf79ff45383659fc72fca4dd293358a0347f3"
++checksum = "3283b6da70d7fc892de95840215aa36381b5d0cbc479e88ee2b173c7b992b225"
+ dependencies = [
+  "wgpu-hal",
+ ]
+ 
+ [[package]]
+ name = "wgpu-core-deps-emscripten"
+-version = "29.0.4"
++version = "30.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "01e09be551dc939498bdd5f6b2c66e55ab275dad25825267a08605a80fc9f0af"
++checksum = "85dcf2b2e5c2afb9eda64c570a87a4e570304bf39e52eddbaaf222d655b656ad"
+ dependencies = [
+  "wgpu-hal",
+ ]
+ 
+ [[package]]
+ name = "wgpu-core-deps-wasm"
+-version = "29.0.4"
++version = "30.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "af1fb1798be2a912497d4c224f72d39bb0cb34af50e8bcc29865bc339c943059"
++checksum = "2b6c13228950f36a56023976a6c4ee6714b27fb40e3d52a33f7d3bb6d109c0b1"
+ dependencies = [
+  "wgpu-hal",
+ ]
+ 
+ [[package]]
+ name = "wgpu-core-deps-windows-linux-android"
+-version = "29.0.4"
++version = "30.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "4e592c1bbef6ad047647ae6e666ebd8cee7a32bb4544d9700ec96cbf73230257"
++checksum = "f76bc9c1c186ff3d9054e0d224c93c8c1c79d6653907c5249a5c1ea1a2cb1e43"
+ dependencies = [
+  "wgpu-hal",
+ ]
+ 
+ [[package]]
+ name = "wgpu-hal"
+-version = "29.0.4"
++version = "30.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "97ace1c17727311c22a46e4e3faf56ea6de81af99dcc839bdfb54857b94d448d"
++checksum = "cf765132d8d5f50e192e7880464890c13f4e7457aafe8e5466e8174586e9f101"
+ dependencies = [
+  "android_system_properties",
+  "arrayvec",
+  "ash",
+- "bit-set 0.9.1",
++ "bit-set 0.10.0",
+  "bitflags 2.13.0",
+  "block2 0.6.2",
+  "bytemuck",
+@@ -6814,17 +6802,18 @@ dependencies = [
+  "glow",
+  "glutin_wgl_sys",
+  "gpu-allocator",
+- "gpu-descriptor",
+- "hashbrown 0.16.1",
++ "hashbrown 0.17.1",
+  "js-sys",
+  "khronos-egl",
+  "libc",
+  "libloading",
+  "log",
+  "naga",
++ "naga-types",
+  "ndk-sys",
+  "objc2 0.6.4",
+  "objc2-core-foundation",
++ "objc2-core-graphics",
+  "objc2-foundation 0.3.2",
+  "objc2-metal 0.3.2",
+  "objc2-quartz-core 0.3.2",
+@@ -6839,6 +6828,7 @@ dependencies = [
+  "raw-window-metal",
+  "renderdoc-sys",
+  "smallvec",
++ "static_assertions",
+  "thiserror 2.0.18",
+  "wasm-bindgen",
+  "wayland-sys",
+@@ -6852,9 +6842,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "wgpu-naga-bridge"
+-version = "29.0.4"
++version = "30.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "95226013f547544b223281cd16a4fb549aa9dcb562adbda0faae4c73ffbbc161"
++checksum = "c9eaac644e5008925c78567d272b9d66ef83da55a53cc17fc7daade7bb6e66e5"
+ dependencies = [
+  "naga",
+  "wgpu-types",
+@@ -6862,15 +6852,17 @@ dependencies = [
+ 
+ [[package]]
+ name = "wgpu-types"
+-version = "29.0.4"
++version = "30.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "84bf84cd9ca8ca45e2b223a3868f1adf9bfc0c66aeac212e76ee7e40fdadf8f5"
++checksum = "1a9c93c2b35edde326df60ffdee4c0f5864eac3011d6768b70d43f028ad93565"
+ dependencies = [
+  "bitflags 2.13.0",
+  "bytemuck",
+  "js-sys",
+  "log",
++ "naga-types",
+  "raw-window-handle",
++ "static_assertions",
+  "web-sys",
+ ]
+ 
+diff --git a/Cargo.toml b/Cargo.toml
+index 23d4d090..8b6482c1 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -201,7 +201,8 @@ bytemuck = { version = "1.0", features = ["derive"] }
+ bytes = "1.6"
+ cargo-hot = { version = "0.1", package = "cargo-hot-protocol" }
+ cosmic-text = "0.19"
+-cryoglyph = { git = "https://github.com/iced-rs/cryoglyph.git", rev = "53ba3e879539d19ed8162942126a977ec896cc3b" }
++# wgpu-30 port: local fork of iced-rs/cryoglyph @ 53ba3e8 (branch wgpu-30-port)
++cryoglyph = { path = "../cryoglyph" }
+ futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+ glam = "0.33.2"
+ guillotiere = "0.6"
+@@ -241,9 +242,10 @@ unicode-segmentation = "1.0"
+ url = "2.5"
+ wasm-bindgen-futures = "0.4"
+ wasmtimer = "0.4.2"
+-web-sys = "=0.3.85"
++# wgpu 30's vendored WebGPU bindings need the wasm-bindgen 0.2.115 generation
++web-sys = "=0.3.92"
+ web-time = "1.1"
+-wgpu = { version = "29", default-features = false, features = ["std", "wgsl"] }
++wgpu = { version = "30", default-features = false, features = ["std", "wgsl"] }
+ winit = { git = "https://github.com/iced-rs/winit.git", rev = "05b8ff17a06562f0a10bb46e6eaacbe2a95cb5ed", default-features = false, features = ["rwh_06"] }
+ 
+ [workspace.lints.rust]
+diff --git a/examples/custom_shader/src/scene/pipeline.rs b/examples/custom_shader/src/scene/pipeline.rs
+index 577927a5..34e4c081 100644
+--- a/examples/custom_shader/src/scene/pipeline.rs
++++ b/examples/custom_shader/src/scene/pipeline.rs
+@@ -220,7 +220,7 @@ impl Pipeline {
+             vertex: wgpu::VertexState {
+                 module: &shader,
+                 entry_point: Some("vs_main"),
+-                buffers: &[Vertex::desc(), cube::Raw::desc()],
++                buffers: &[Some(Vertex::desc()), Some(cube::Raw::desc())],
+                 compilation_options: wgpu::PipelineCompilationOptions::default(),
+             },
+             primitive: wgpu::PrimitiveState::default(),
+diff --git a/examples/integration/src/main.rs b/examples/integration/src/main.rs
+index b62171e2..860918af 100644
+--- a/examples/integration/src/main.rs
++++ b/examples/integration/src/main.rs
+@@ -129,6 +129,7 @@ pub fn main() -> Result<(), winit::error::EventLoopError> {
+                         present_mode: wgpu::PresentMode::AutoVsync,
+                         alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                         view_formats: vec![],
++                        color_space: wgpu::SurfaceColorSpace::Auto,
+                         desired_maximum_frame_latency: 2,
+                     },
+                 );
+@@ -227,6 +228,7 @@ pub fn main() -> Result<(), winit::error::EventLoopError> {
+                                 present_mode: wgpu::PresentMode::AutoVsync,
+                                 alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                                 view_formats: vec![],
++                                color_space: wgpu::SurfaceColorSpace::Auto,
+                                 desired_maximum_frame_latency: 2,
+                             },
+                         );
+@@ -304,7 +306,7 @@ pub fn main() -> Result<(), winit::error::EventLoopError> {
+                             renderer.present(None, frame.texture.format(), &view, viewport);
+ 
+                             // Present the frame
+-                            frame.present();
++                            queue.present(frame);
+                         }
+                         _ => {
+                             // Try rendering again next frame.
+diff --git a/src/lib.rs b/src/lib.rs
+index fbbb286a..5b760195 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -511,6 +511,11 @@ pub use iced_highlighter as highlighter;
+ #[cfg(feature = "wgpu-bare")]
+ pub use iced_renderer::wgpu::wgpu;
+ 
++/// Shared GPU handles of the running compositor, for embedding an external
++/// renderer on iced's own `wgpu::Device` (see `iced_wgpu::external`).
++#[cfg(all(feature = "wgpu-bare", not(target_arch = "wasm32")))]
++pub use iced_renderer::wgpu::external as wgpu_external;
++
+ mod error;
+ 
+ pub mod application;
+diff --git a/wgpu/src/external.rs b/wgpu/src/external.rs
+new file mode 100644
+index 00000000..345bde72
+--- /dev/null
++++ b/wgpu/src/external.rs
+@@ -0,0 +1,38 @@
++//! Shared GPU handles for embedding an external wgpu renderer.
++//!
++//! The compositor stores clones of its instance / adapter / device / queue
++//! here right after device creation. An embedding application (OpenCADStudio
++//! embeds Bevy this way) can then initialize a second renderer *on the same
++//! `wgpu::Device`*, so its output textures are directly bindable by iced-side
++//! pipelines — no cross-device copies.
++//!
++//! Native only: wgpu handles are not `Send + Sync` on wasm, and the only
++//! consumer (the Bevy bridge) is a desktop feature.
++
++#![cfg(not(target_arch = "wasm32"))]
++
++use std::sync::OnceLock;
++
++/// Clones of the GPU handles the compositor rendered with. All wgpu handles
++/// are internally reference-counted, so these are cheap aliases of the live
++/// objects, valid for the lifetime of the process.
++#[derive(Debug, Clone)]
++pub struct GpuHandles {
++    pub instance: wgpu::Instance,
++    pub adapter: wgpu::Adapter,
++    pub device: wgpu::Device,
++    pub queue: wgpu::Queue,
++}
++
++static SHARED: OnceLock<GpuHandles> = OnceLock::new();
++
++/// Called by the compositor once its device exists. First compositor wins;
++/// iced applications have one compositor per process.
++pub(crate) fn store(handles: GpuHandles) {
++    let _ = SHARED.set(handles);
++}
++
++/// The GPU handles of the running compositor, if one has been created.
++pub fn gpu_handles() -> Option<&'static GpuHandles> {
++    SHARED.get()
++}
+diff --git a/wgpu/src/image/atlas.rs b/wgpu/src/image/atlas.rs
+index ee898e07..62cc0160 100644
+--- a/wgpu/src/image/atlas.rs
++++ b/wgpu/src/image/atlas.rs
+@@ -332,7 +332,9 @@ impl Atlas {
+ 
+         const PIXEL: usize = 4;
+ 
+-        let mut fragment = buffer_slice.get_mapped_range_mut();
++        let mut fragment = buffer_slice
++            .get_mapped_range_mut()
++            .expect("map atlas staging buffer");
+         let w = width as usize;
+         let h = height as usize;
+         let pad_w = padding.width as usize;
+diff --git a/wgpu/src/image/mod.rs b/wgpu/src/image/mod.rs
+index 9c2974b8..aaec1810 100644
+--- a/wgpu/src/image/mod.rs
++++ b/wgpu/src/image/mod.rs
+@@ -114,7 +114,7 @@ impl Pipeline {
+             vertex: wgpu::VertexState {
+                 module: &shader,
+                 entry_point: Some("vs_main"),
+-                buffers: &[wgpu::VertexBufferLayout {
++                buffers: &[Some(wgpu::VertexBufferLayout {
+                     array_stride: mem::size_of::<Instance>() as u64,
+                     step_mode: wgpu::VertexStepMode::Instance,
+                     attributes: &wgpu::vertex_attr_array!(
+@@ -137,7 +137,7 @@ impl Pipeline {
+                         // Layer
+                         8 => Sint32,
+                     ),
+-                }],
++                })],
+                 compilation_options: wgpu::PipelineCompilationOptions::default(),
+             },
+             fragment: Some(wgpu::FragmentState {
+diff --git a/wgpu/src/lib.rs b/wgpu/src/lib.rs
+index b1552fcb..09fa56b2 100644
+--- a/wgpu/src/lib.rs
++++ b/wgpu/src/lib.rs
+@@ -22,6 +22,7 @@
+ )]
+ #![cfg_attr(docsrs, feature(doc_cfg))]
+ #![allow(missing_docs)]
++pub mod external;
+ pub mod layer;
+ pub mod primitive;
+ pub mod window;
+@@ -269,7 +270,9 @@ impl Renderer {
+             timeout: None,
+         });
+ 
+-        let mapped_buffer = slice.get_mapped_range();
++        let mapped_buffer = slice
++            .get_mapped_range()
++            .expect("map offscreen output buffer");
+ 
+         mapped_buffer
+             .chunks(dimensions.padded_bytes_per_row)
+@@ -916,6 +919,7 @@ impl renderer::Headless for Renderer {
+                 power_preference: wgpu::PowerPreference::HighPerformance,
+                 force_fallback_adapter: false,
+                 compatible_surface: None,
++                apply_limit_buckets: false,
+             })
+             .await
+             .ok()?;
+diff --git a/wgpu/src/quad/gradient.rs b/wgpu/src/quad/gradient.rs
+index 58c252ba..8ef505f4 100644
+--- a/wgpu/src/quad/gradient.rs
++++ b/wgpu/src/quad/gradient.rs
+@@ -99,7 +99,7 @@ impl Pipeline {
+                 vertex: wgpu::VertexState {
+                     module: &shader,
+                     entry_point: Some("gradient_vs_main"),
+-                    buffers: &[wgpu::VertexBufferLayout {
++                    buffers: &[Some(wgpu::VertexBufferLayout {
+                         array_stride: std::mem::size_of::<Gradient>() as u64,
+                         step_mode: wgpu::VertexStepMode::Instance,
+                         attributes: &wgpu::vertex_attr_array!(
+@@ -126,7 +126,7 @@ impl Pipeline {
+                             // Snap
+                             10 => Uint32,
+                         ),
+-                    }],
++                    })],
+                     compilation_options: wgpu::PipelineCompilationOptions::default(),
+                 },
+                 fragment: Some(wgpu::FragmentState {
+diff --git a/wgpu/src/quad/solid.rs b/wgpu/src/quad/solid.rs
+index 83d47d4d..02bbe0d9 100644
+--- a/wgpu/src/quad/solid.rs
++++ b/wgpu/src/quad/solid.rs
+@@ -87,7 +87,7 @@ impl Pipeline {
+             vertex: wgpu::VertexState {
+                 module: &shader,
+                 entry_point: Some("solid_vs_main"),
+-                buffers: &[wgpu::VertexBufferLayout {
++                buffers: &[Some(wgpu::VertexBufferLayout {
+                     array_stride: std::mem::size_of::<Solid>() as u64,
+                     step_mode: wgpu::VertexStepMode::Instance,
+                     attributes: &wgpu::vertex_attr_array!(
+@@ -112,7 +112,7 @@ impl Pipeline {
+                         // Snap
+                         9 => Uint32,
+                     ),
+-                }],
++                })],
+                 compilation_options: wgpu::PipelineCompilationOptions::default(),
+             },
+             fragment: Some(wgpu::FragmentState {
+diff --git a/wgpu/src/triangle.rs b/wgpu/src/triangle.rs
+index d8ffd00a..acf04aba 100644
+--- a/wgpu/src/triangle.rs
++++ b/wgpu/src/triangle.rs
+@@ -709,7 +709,7 @@ mod solid {
+                 vertex: wgpu::VertexState {
+                     module: &shader,
+                     entry_point: Some("solid_vs_main"),
+-                    buffers: &[wgpu::VertexBufferLayout {
++                    buffers: &[Some(wgpu::VertexBufferLayout {
+                         array_stride: std::mem::size_of::<mesh::SolidVertex2D>() as u64,
+                         step_mode: wgpu::VertexStepMode::Vertex,
+                         attributes: &wgpu::vertex_attr_array!(
+@@ -718,7 +718,7 @@ mod solid {
+                             // Color
+                             1 => Float32x4,
+                         ),
+-                    }],
++                    })],
+                     compilation_options: wgpu::PipelineCompilationOptions::default(),
+                 },
+                 fragment: Some(wgpu::FragmentState {
+@@ -843,7 +843,7 @@ mod gradient {
+                 vertex: wgpu::VertexState {
+                     module: &shader,
+                     entry_point: Some("gradient_vs_main"),
+-                    buffers: &[wgpu::VertexBufferLayout {
++                    buffers: &[Some(wgpu::VertexBufferLayout {
+                         array_stride: std::mem::size_of::<mesh::GradientVertex2D>() as u64,
+                         step_mode: wgpu::VertexStepMode::Vertex,
+                         attributes: &wgpu::vertex_attr_array!(
+@@ -862,7 +862,7 @@ mod gradient {
+                             // Direction
+                             6 => Float32x4
+                         ),
+-                    }],
++                    })],
+                     compilation_options: wgpu::PipelineCompilationOptions::default(),
+                 },
+                 fragment: Some(wgpu::FragmentState {
+diff --git a/wgpu/src/window/compositor.rs b/wgpu/src/window/compositor.rs
+index 05760dc1..b93d37f3 100644
+--- a/wgpu/src/window/compositor.rs
++++ b/wgpu/src/window/compositor.rs
+@@ -92,6 +92,7 @@ impl Compositor {
+             power_preference: wgpu::PowerPreference::from_env().unwrap_or(power_preference),
+             compatible_surface: compatible_surface.as_ref(),
+             force_fallback_adapter: false,
++            apply_limit_buckets: false,
+         };
+ 
+         let adapter = instance
+@@ -159,7 +160,10 @@ impl Compositor {
+         ];
+ 
+         let limits = limits.into_iter().map(|limits| wgpu::Limits {
+-            max_bind_groups: 2,
++            // 4 (the WebGPU/downlevel default) rather than the 2 iced's own
++            // pipelines need: an embedded external renderer sharing this
++            // device (see `crate::external`) uses bind groups 0..=3.
++            max_bind_groups: 4,
+             max_non_sampler_bindings: 2048,
+             ..limits
+         });
+@@ -187,6 +191,14 @@ impl Compositor {
+ 
+             match result {
+                 Ok((device, queue)) => {
++                    #[cfg(not(target_arch = "wasm32"))]
++                    crate::external::store(crate::external::GpuHandles {
++                        instance: instance.clone(),
++                        adapter: adapter.clone(),
++                        device: device.clone(),
++                        queue: queue.clone(),
++                    });
++
+                     let engine = Engine::new(
+                         &adapter,
+                         device,
+@@ -248,7 +260,7 @@ pub fn present(
+ 
+             // Present the frame
+             on_pre_present();
+-            frame.present();
++            renderer.engine.queue.present(frame);
+ 
+             Ok(())
+         }
+@@ -327,6 +339,7 @@ impl graphics::Compositor for Compositor {
+                 height,
+                 alpha_mode: self.alpha_mode,
+                 view_formats: vec![],
++                color_space: wgpu::SurfaceColorSpace::Auto,
+                 desired_maximum_frame_latency: 1,
+             },
+         );

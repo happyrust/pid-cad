@@ -44,10 +44,14 @@ jobs:
     defaults:
       run:
         shell: bash
+        working-directory: pid-cad
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          path: pid-cad
+
+      - uses: ./pid-cad/.github/actions/checkout-fork-deps
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -55,8 +59,8 @@ jobs:
         with:
           key: python-host-check
           workspaces: |
-            .
-            plugins/opencad-python
+            pid-cad -> target
+            pid-cad/plugins/opencad-python -> target
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
@@ -76,17 +80,17 @@ jobs:
         run: cargo build --locked --bin OpenCADStudio
 
       - name: Plugin crate tests
-        working-directory: plugins/opencad-python
+        working-directory: pid-cad/plugins/opencad-python
         run: cargo test --locked
 
       - name: Python model unit tests
-        working-directory: plugins/opencad-python
+        working-directory: pid-cad/plugins/opencad-python
         run: python3 -m unittest discover -s tests
 
       - name: Host tests over real IPC
         env:
-          OCS_TEST_PYTHON_PLUGIN: ${{ github.workspace }}/work/plugin/${{ matrix.library }}
-          OCS_PLUGIN_RUNNER_EXE: ${{ github.workspace }}/target/debug/${{ matrix.exe }}
+          OCS_TEST_PYTHON_PLUGIN: ${{ github.workspace }}/pid-cad/work/plugin/${{ matrix.library }}
+          OCS_PLUGIN_RUNNER_EXE: ${{ github.workspace }}/pid-cad/target/debug/${{ matrix.exe }}
         run: |
           test -f "$OCS_TEST_PYTHON_PLUGIN" || { echo "staged plugin missing: $OCS_TEST_PYTHON_PLUGIN"; exit 1; }
           test -f "$OCS_PLUGIN_RUNNER_EXE" || { echo "runner missing: $OCS_PLUGIN_RUNNER_EXE"; exit 1; }

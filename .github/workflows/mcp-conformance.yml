@@ -31,6 +31,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: pid-cad
+
+      - uses: ./pid-cad/.github/actions/checkout-fork-deps
 
       # Same libraries the Linux release build needs to start.
       - name: System libraries
@@ -42,16 +46,19 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pid-cad -> target
       - uses: actions/setup-node@v4
         with:
           node-version: 24
 
       - name: Release build
+        working-directory: pid-cad
         run: cargo build --release --locked
 
       - name: Inspector config
         run: |
-          printf '{"mcpServers":{"ocs":{"command":"%s/target/release/OpenCADStudio","args":["--mcp"]}}}' \
+          printf '{"mcpServers":{"ocs":{"command":"%s/pid-cad/target/release/OpenCADStudio","args":["--mcp"]}}}' \
             "${{ github.workspace }}" > "${{ runner.temp }}/mcp-inspector.json"
 
       - name: initialize (pure serverInfo, experimental build)

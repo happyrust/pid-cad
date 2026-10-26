@@ -1,0 +1,40 @@
+name: Compile check
+
+# Native type-check of the fork. This repository is not self-contained: iced,
+# bevy and the three e3d readers live beside it as path dependencies, and
+# iced is a local wgpu-30 fork. checkout-fork-deps materialises those trees at
+# the pinned commits; the iced patch is kept in .github/ci/.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compile-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: cargo check (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pid-cad
+
+      - uses: ./pid-cad/.github/actions/checkout-fork-deps
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pid-cad -> target
+
+      - name: cargo check
+        working-directory: pid-cad
+        run: cargo check --workspace --locked
