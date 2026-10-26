@@ -3476,6 +3476,11 @@ impl OpenCADStudio {
 
             Message::ScriptLine(line) => self.feed_script_line(&line),
             Message::ScriptPump => self.pump_script(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Message::PidPdfFinished(result) => {
+                self.on_pid_pdf_finished(result);
+                Task::none()
+            }
 
             // Web SCRIPT: the picked .scr file arrived — run it through the
             // same runner the native path feeds.

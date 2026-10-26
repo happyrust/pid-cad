@@ -32,6 +32,8 @@ pub mod pdf_export;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pid;
 pub mod pid_legend;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod pid_pdf;
 pub mod pid_pipes;
 pub mod pid_view_filter;
 

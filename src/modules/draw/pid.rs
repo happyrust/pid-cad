@@ -29,6 +29,15 @@ pub fn group_tool() -> ToolDef {
     }
 }
 
+pub fn plot_tool() -> ToolDef {
+    ToolDef {
+        id: "PIDPLOT",
+        label: "P&ID PDF",
+        icon: IconKind::Svg(include_bytes!("../../../assets/icons/plot.svg")),
+        event: ModuleEvent::Command("PIDPLOT".to_string()),
+    }
+}
+
 pub fn ungroup_tool() -> ToolDef {
     ToolDef {
         id: "PIDUNGROUP",

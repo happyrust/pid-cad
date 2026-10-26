@@ -34,6 +34,7 @@ mod pdf_password;
 mod pdf_shx_text;
 mod pdf_underlay;
 mod pidlegend;
+mod pidplot;
 mod plotvars;
 mod point_cloud;
 mod refedit;
@@ -596,6 +597,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidgroup(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidplot(cmd, i) {
             return Some(t);
         }
         None
@@ -1176,10 +1180,12 @@ inventory::submit!(crate::command::CommandRegistration {
         "PERSP",
         // P&ID symbol recognition mark-up (io::pid_legend), selecting a whole
         // pipe line by its coding-rule family, a symbol group by its tag, and
-        // making a group a symbol by hand.
+        // making a group a symbol by hand; and the sheet plotted to PDF by
+        // pid-parse's own plotter.
         "PIDGROUP",
         "PIDLEGEND",
         "PIDLINE",
+        "PIDPLOT",
         "PIDTAG",
         "PLOT",
         "PRINTERS",

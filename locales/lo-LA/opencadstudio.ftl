@@ -1853,6 +1853,7 @@ common =
     .p-id = P&ID
     .p-id-group = ກຸ່ມ P&ID
     .p-id-legend = ຄຳອະທິບາຍສັນຍາລັກ P&ID
+    .p-id-pdf = P&ID PDF
     .property = ຄຸນສົມບັດ
     .first = ທຳອິດ
     .recreate = ສ້າງຄືນໃໝ່

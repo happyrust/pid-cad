@@ -132,6 +132,15 @@ objc2-foundation = { version = "0.2", features = ["NSArray", "NSURL", "NSString"
 [patch.crates-io]
 iced_core = { path = "../iced/core" }
 iced_widget = { path = "../iced/widget" }
+# pid-plot's pdfcraft (0e55d07) only builds against the hayro and lopdf
+# copies patched inside that commit, which pid-parse mirrors under
+# vendor/pdfcraft-pin. A dependency's own [patch] does not reach this graph,
+# so the same four trees are named here. hayro* are the versions the PDF
+# import already uses; lopdf 0.45 is pdfcraft's alone (printpdf stays on 0.39).
+hayro = { path = "../pid-parse/vendor/pdfcraft-pin/hayro" }
+hayro-interpret = { path = "../pid-parse/vendor/pdfcraft-pin/hayro-interpret" }
+hayro-syntax = { path = "../pid-parse/vendor/pdfcraft-pin/hayro-syntax" }
+lopdf = { path = "../pid-parse/vendor/pdfcraft-pin/lopdf" }
 
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -147,6 +156,9 @@ ureq = { version = "3", default-features = false, features = ["rustls", "platfor
 # backups through a bundled sqlite3 and the vendored `oxidized-mdf`, neither
 # of which builds for wasm.
 pid-parse = { path = "../pid-parse" }
+# PIDPLOT: pid-parse's own paper plot of a `.pid` (border template, library
+# symbol bodies, the sheet's typefaces subset in) written to PDF by pdfcraft.
+pid-plot = { path = "../pid-parse/pid-plot" }
 # AVEVA E3D / PDMS Dabacon reader and Core3D-compatible 3D model generator
 # (ADR-0001). Native-only: `e3d-model` links C++ `manifold-csg` and `e3d-io`
 # reads local multi-file Dabacon project directories. The web build consumes

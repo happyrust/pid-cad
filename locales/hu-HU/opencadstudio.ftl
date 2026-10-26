@@ -1852,6 +1852,7 @@ common =
     .p-id = P&ID
     .p-id-group = P&ID csoport
     .p-id-legend = P&ID jelmagyarázat
+    .p-id-pdf = P&ID PDF
     .property = Tulajdonság
     .first = Első
     .recreate = Újralétrehozás

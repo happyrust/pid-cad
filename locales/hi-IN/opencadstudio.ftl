@@ -1835,6 +1835,7 @@ common =
     .p-id = P&ID
     .p-id-group = P&ID समूह
     .p-id-legend = P&ID लेजेंड
+    .p-id-pdf = P&ID PDF
     .property = गुण
     .first = पहला
     .recreate = फिर से बनाएँ

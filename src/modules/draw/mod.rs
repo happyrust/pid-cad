@@ -43,7 +43,7 @@ impl CadModule for DrawModule {
             array, copy, delete, explode, fillet, mirror, offset, rotate, scale, stretch,
             translate, trim,
         };
-        use pid::{group_tool, legend_tool, tag_tool, ungroup_tool};
+        use pid::{group_tool, legend_tool, plot_tool, tag_tool, ungroup_tool};
         use properties::match_prop;
 
         static GROUPS: std::sync::OnceLock<Vec<RibbonGroup>> = std::sync::OnceLock::new();
@@ -213,6 +213,7 @@ impl CadModule for DrawModule {
                         tag_tool().into(),
                         group_tool().into(),
                         ungroup_tool().into(),
+                        plot_tool().into(),
                     ],
                 },
                 RibbonGroup {
@@ -281,7 +282,7 @@ mod tests {
             .collect();
         assert_eq!(
             tools.iter().map(|tool| tool.id).collect::<Vec<_>>(),
-            ["PIDLEGEND", "PIDTAG", "PIDGROUP", "PIDUNGROUP"]
+            ["PIDLEGEND", "PIDTAG", "PIDGROUP", "PIDUNGROUP", "PIDPLOT"]
         );
         assert_eq!(
             tools
@@ -291,7 +292,13 @@ mod tests {
                     _ => panic!("P&ID ribbon tools must dispatch commands"),
                 })
                 .collect::<Vec<_>>(),
-            ["PIDLEGEND LIST", "PIDTAG", "PIDGROUP GROUP", "PIDGROUP OFF"]
+            [
+                "PIDLEGEND LIST",
+                "PIDTAG",
+                "PIDGROUP GROUP",
+                "PIDGROUP OFF",
+                "PIDPLOT"
+            ]
         );
     }
 }

@@ -1848,6 +1848,7 @@ common =
     .p-id = P&ID
     .p-id-group = P&ID Group
     .p-id-legend = P&ID Legend
+    .p-id-pdf = P&ID PDF
     .property = Property
     .first = First
     .recreate = Recreate

@@ -3581,6 +3581,9 @@ pub enum Message {
     ScriptLine(String),
     /// Run the next queued script row (see `script_queue`).
     ScriptPump,
+    /// PIDPLOT's worker finished: the PDF it wrote, or why it could not.
+    #[cfg(not(target_arch = "wasm32"))]
+    PidPdfFinished(Result<crate::io::pid_pdf::PidPdfReceipt, String>),
     /// Web SCRIPT: the picked .scr file's name and text. `None` = the
     /// browser dialog was cancelled.
     #[cfg(target_arch = "wasm32")]

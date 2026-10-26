@@ -1833,6 +1833,7 @@ common =
     .p-id = P&ID
     .p-id-group = P&ID grubu
     .p-id-legend = P&ID lejantı
+    .p-id-pdf = P&ID PDF
     .property = Özellik
     .first = İlk
     .recreate = Yeniden oluştur

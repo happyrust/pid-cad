@@ -1846,6 +1846,7 @@ common =
     .p-id = P&ID
     .p-id-group = P&ID 그룹
     .p-id-legend = P&ID 범례
+    .p-id-pdf = P&ID PDF
     .property = 속성
     .first = 첫 번째
     .recreate = 다시 작성

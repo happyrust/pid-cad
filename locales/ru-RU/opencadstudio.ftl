@@ -1850,6 +1850,7 @@ common =
     .p-id = P&ID
     .p-id-group = Группа P&ID
     .p-id-legend = Легенда P&ID
+    .p-id-pdf = P&ID PDF
     .property = Свойство
     .first = Первое
     .recreate = Создать заново

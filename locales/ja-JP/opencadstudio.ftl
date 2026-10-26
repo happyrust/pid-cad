@@ -1837,6 +1837,7 @@ common =
     .p-id = P&ID
     .p-id-group = P&ID グループ
     .p-id-legend = P&ID 凡例
+    .p-id-pdf = P&ID PDF
     .property = プロパティ
     .first = 最初
     .recreate = 再作成

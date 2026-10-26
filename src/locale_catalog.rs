@@ -5495,6 +5495,7 @@ pub(super) fn message_attribute(source: &str) -> Option<(&'static str, &'static 
         "P&ID" => Some(("common", "p-id")),
         "P&ID Group" => Some(("common", "p-id-group")),
         "P&ID Legend" => Some(("common", "p-id-legend")),
+        "P&ID PDF" => Some(("common", "p-id-pdf")),
         "Property" => Some(("common", "property")),
         "First" => Some(("common", "first")),
         "Recreate" => Some(("common", "recreate")),

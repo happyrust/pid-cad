@@ -1848,6 +1848,7 @@ common =
     .p-id = P&ID
     .p-id-group = Ομάδα P&ID
     .p-id-legend = Υπόμνημα P&ID
+    .p-id-pdf = P&ID PDF
     .property = Ιδιότητα
     .first = Πρώτο
     .recreate = Αναδημιουργία

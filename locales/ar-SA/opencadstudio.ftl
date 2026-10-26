@@ -1859,6 +1859,7 @@ common =
     .p-id = P&ID
     .p-id-group = مجموعة P&ID
     .p-id-legend = مفتاح رموز P&ID
+    .p-id-pdf = P&ID PDF
     .property = خاصية
     .first = الأول
     .recreate = إعادة إنشاء

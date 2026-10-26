@@ -1846,6 +1846,7 @@ common =
     .p-id = P&ID
     .p-id-group = Skupina P&ID
     .p-id-legend = Legenda P&ID
+    .p-id-pdf = P&ID PDF
     .property = Vlastnost
     .first = První
     .recreate = Znovu vytvořit

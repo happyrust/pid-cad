@@ -1846,6 +1846,7 @@ common =
     .p-id = P&ID
     .p-id-group = P&ID-ryhmä
     .p-id-legend = P&ID-selite
+    .p-id-pdf = P&ID PDF
     .property = Ominaisuus
     .first = Ensimmäinen
     .recreate = Luo uudelleen
