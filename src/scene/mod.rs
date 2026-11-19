@@ -55,6 +55,8 @@ mod annotation_visibility_tests;
 #[cfg(test)]
 mod block_base_point_tests;
 #[cfg(test)]
+mod block_curve_order_tests;
+#[cfg(test)]
 mod block_definition_handles_tests;
 #[cfg(test)]
 mod e3d_ingest_tests;
