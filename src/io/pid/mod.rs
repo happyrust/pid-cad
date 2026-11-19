@@ -705,6 +705,8 @@ fn finish(
         }),
         template_entities: template.map(|overlay| overlay.drawn).unwrap_or(0),
         template_missing: template.map(|overlay| overlay.missing).unwrap_or(0),
+        symbol_blocks,
+        symbol_definitions,
         symbol_library: library
             .map(|library| library.roots().to_vec())
             .unwrap_or_default(),

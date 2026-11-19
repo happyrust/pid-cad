@@ -470,15 +470,76 @@
 
 - **做什么**：`ImportSummary` 加 `symbol_blocks`、`symbol_definitions`：字段、`counts()`（18 项变 20 项）、`count_mut`、`empty`，`finish` 里填值，`Built` 里带过来。查清摘要在哪些地方显示或导出（命令行那一行、备份浏览的诊断、审计），逐处定「列出新项」还是「保持原样」并写明。
 - **验收**
-  - [ ] 两条画法相同、一条不同的符号实例：`symbol_blocks` 是 3，`symbol_definitions` 是 2；边框模板里的不算。
-  - [ ] 摘要存进文档再取出（`PID_IMPORT_SUMMARY.<键>`），两项都在，值相同。
-  - [ ] 现有 18 项的值与改之前相同。
-  - [ ] 摘要的每个显示、导出处都查过，结论写在「做完」段。
-  - [ ] 故意改坏：两项填反、`symbol_definitions` 按引用数填，测试变红。
+  - [x] 两条画法相同、一条不同的符号实例：`symbol_blocks` 是 3，`symbol_definitions` 是 2；边框模板里的不算。
+  - [x] 摘要存进文档再取出（`PID_IMPORT_SUMMARY.<键>`），两项都在，值相同。
+  - [x] 现有 18 项的值与改之前相同（在代码里拼的图上逐项对过；`pid-test-data` 的 151 张没有重量，SB-9 的验收里有这一条）。
+  - [x] 摘要的每个显示、导出处都查过，结论写在「做完」段。
+  - [x] 故意改坏：两项填反、`symbol_definitions` 按引用数填，测试变红（另加 5 处，一共 7 处）。
 - **验证**：`gates.ps1 -Out D:\scratch\ocs-symblock\sb5 -Files <动过的 .rs> -Quick summary`。
 - **依赖**：SB-2。
 - **文件**：`src/io/pid/summary.rs`、`src/io/pid/mod.rs`、`src/io/pid/build.rs`，可能还有一两处显示摘要的文件。
 - **规模**：M。
+
+**做完**（2026-11-20）
+
+- 改了什么（产品代码 +21 −1）：
+  - `src/io/pid/summary.rs`：`ImportSummary` 加 `symbol_blocks`、`symbol_definitions` 两个字段，排在 `template_missing` 之后；`counts()` 从 18 项变 20 项，新的两项排在最后，原来 18 项的先后不动；`count_mut` 加两个分支；`empty()` 加两个 0。`store`、`load`、`take` 没有改：它们照 `counts()` 和 `count_mut` 走，新的两项自动存成 `PID_IMPORT_SUMMARY.symbol_blocks`、`PID_IMPORT_SUMMARY.symbol_definitions`，自动读回、取走。`log` 没有改。
+  - `src/io/pid/mod.rs`：`finish` 组摘要时把这两项填上。
+  - `src/io/pid/build.rs` 没有改。任务的「文件」里列了它，但 `Built` 从 SB-2 起就带着这两个数，`finish` 原先只拿它们写一行日志。
+  - 测试里加了两个小工具：`src/io/pid/tests.rs` 的 `summarised`（原来的 `finished` 改成调它，它另把 `finish` 交回的摘要带出来）；`tests/pid_import.rs` 的 `stored_count`（把摘要存进一个空文档，按键名读回一个数）。
+- 两项数的是什么：`symbol_blocks` 是建出来的块引用数，也就是图纸上画出了东西的符号实例数；`symbol_definitions` 是建出来的块定义数。画法相同的实例共用一个定义；同一个符号转过、缩过、改过尺寸的，各是一种画法，各有一个定义。边框模板里的符号实例不算，也不用另外去减：模板画的东西由 `overlay_template` 全部散着放在 `PID-FRAME` 上，不经过建块的那一段。
+- 简称：U 是 `src/io/pid/tests.rs` 里新加的 `the_summary_counts_the_references_and_the_definitions_they_refer_to`；T 是 `src/io/pid/template.rs` 里新加的 `pid_template_placements_are_not_among_the_symbol_blocks_the_summary_counts`；RT 是 `src/io/pid/tests.rs` 里原有的 `the_summary_round_trips_through_its_properties_and_take_removes_them`；S 是 SB-4b 加的 `a_placement_is_one_reference_to_a_block_of_what_it_draws`；RIDE 是 `tests/pid_import.rs` 里原有的 `the_summary_rides_the_document_once_and_is_never_saved`，没有改。
+- 钉住的：
+  - U（代码里拼的图）：同一个阀放三次，两次不转，一次转 90°，另有一条线。块引用 3 个，块名依次是 `SPPID_Ball Valve`、`SPPID_Ball Valve`、`SPPID_Ball Valve_2`，文档里多出 2 个块定义；`counts()` 的后两项是 `("symbol_blocks", 3)`、`("symbol_definitions", 2)`；存进文档后这两个键的值是 `3`、`2`；`take` 取出来的摘要与存进去的相等。原有 18 项逐项写了期望值：`drawn` 16，`decoded` 4，`sheet_layers` 1，`layered_entities` 16，`sheet_layer_names` 1，`cache_bodies` 3，其余 12 项是 0。
+  - T（代码里拼的图）：图纸放两个阀、一个仪表，边框模板里放一条线和同一个阀。块引用只有图纸的 3 个，模板的阀是 `PID-FRAME` 上的 2 条散线；`drawn` 8，`template_entities` 3；两项是 3 和 2。
+  - RT：两个字段填 27、19，存进文档再读回，整个摘要相等。
+  - S（四张样例图）：摘要的两项等于在文档里数出来的块引用数和 `SPPID_` 块定义数，按字段读一条，按存下来的键读一条。四对数是 SB-4b 量好写在测试里的（20 / 17，23 / 13，6 / 6，31 / 10），这次没有改。
+- 先红（03:36–03:44，`chainred.txt`；产品代码没有动）：这时字段还不存在，测试只按键名读这两项。`--lib summary` 17 个，通过 15，失败 2，是 U 和 T：U 的原有 18 项、块名、定义数先过，红在 `counts()` 的后两项上（读到的是空的）；T 的块引用、散线、`drawn`、`template_entities` 先过，红在两项上（读到 `(None, None)`，要 `(Some(3), Some(2))`）。`tests/pid_import.rs` 55 个，通过 54，失败 1，是 S，红在 DWG-0201 存下来的键上（读到 `(None, None)`，要 `(Some(20), Some(17))`）。实现之后才加了按字段读的断言（U 一条，S 一条）和 RT 里两个字段的值。
+- 现有 18 项没有变，依据三条：产品代码的改动只有加法，`finish` 里算原来 18 项的代码一行没动；U 里 18 项的期望值在改产品代码之前（03:41）和之后都过，期望值没有改过；原有测试里读摘要的断言没有改，全过。`pid-test-data` 的 151 张上没有重量，见「没验证的」。
+- 摘要用在哪里，逐处的结论。按类型名 `ImportSummary`、属性前缀 `PID_IMPORT_SUMMARY` 和各字段名搜的 `src`、`tests`、`examples`；导入器以外用到摘要的就是下表这几处，再加测试。
+
+  | # | 在哪 | 现在用的 | 结论 | 理由 |
+  |---|---|---|---|---|
+  | 1 | 打开图纸后的命令行（`src/app/update/file.rs`） | 固定两行：画了多少、解出多少记录、多少没画、多少图元在几个图纸图层上；图层名的个数和开始时关着的个数。有事才出的三行：驱动尺寸，样式表没读出来，单位是假定的 | 保持原样 | 这几行让人看出图进来得全不全、有什么要留意。图例存成块不影响这些，在图上点一下图例就看得到。摘要里 `cache_bodies`、`library_bodies`、`hidden_strokes_skipped`、`label_anchors_undrawn`、`lettering_flattened` 也都只进日志 |
+  | 2 | 不经界面的读图（`src/io/mod.rs` 的 `load_file`）：取出摘要，调 `ImportSummary::log` 写日志 | `log` 写的那几行 | 保持原样 | 这两个数已经在日志里：`finish` 自己写一行「N symbol placement(s) are block references to M definition(s)」（SB-2 加的），经界面和不经界面的两条路都过 `finish` |
+  | 3 | 随文档过打开流程（`store`、`load`、`take`） | 全部计数 | 自动带上 | 照 `counts()` 走。打开完成后和其他各条一起取走，存盘的图里不留（RIDE 钉着） |
+  | 4 | 备份浏览的诊断面板（`src/io/pid_backup_browse/diagnostics.rs` 的 `Imported`，`src/ui/window/pid_backup_browser/diagnostics.rs` 显示） | 画了多少、解出多少、多少没画、图纸图层、边框模板、图例取自图纸自带的还是符号库、符号库的位置、单位、样式表 | 保持原样 | `Imported` 只留看面板的人能据此做点什么的那一部分；这两个数不指向任何要人处理的事 |
+  | 5 | 备份审计（`src/app/commands/pidbackup/audit.rs`） | 每张图一行（图元数、解出数、没画数、图纸图层、用时），合计，参考数据的用量 | 保持原样 | 审计查的是备份里的图读得全不全、参考数据够不够，与图例怎么存无关 |
+  | 6 | 批量报告（`examples/pid_batch_report.rs`，CSV 21 列） | 摘要里的 13 项 | 这次不加列 | 加列要改表头，仓库里已提交的那份基线就得重签；重签是单独一件事，见规格 §11 的 SB-5 第 2 条 |
+
+  用户手册 `docs/user-guide.md` 的「导入汇总」讲的是第 1 处那几行，不用改。`docs` 下除了计划和证据，没有别的文件列举摘要的各项。
+- 故意改坏 7 处，用环境变量打开。单元测试和 `tests/pid_import.rs` 各编一次，把测试程序拷出来，不开的各跑一遍（17 个、55 个全过），每处各跑一遍（03:47–03:52，`libmut-m1.txt`、`mut-m1.txt`）。前两处是验收要的，后五处是加的。
+
+  | # | 改坏 | 改在哪 | `--lib summary` 17 个里变红 | `tests/pid_import.rs` 55 个里变红 | 读到的 |
+  |---|---|---|---|---|---|
+  | 1 | 两项填反 | `mod.rs` 的 `finish` | 2：U T | 1：S | U、T 读到 2 / 3；S 在 DWG-0201 读到 17 / 20 |
+  | 2 | `symbol_definitions` 按引用数填 | `finish` | 2：U T | 1：S | U、T 读到 3 / 3；S 读到 20 / 20 |
+  | 3 | `counts()` 里两个键名对调 | `summary.rs` | 3：RT U T | 2：S RIDE | S 按字段读的一条过，红在存下来的键上（17 / 20） |
+  | 4 | 读回时不认 `symbol_definitions` | `summary.rs` 的 `count_mut` | 2：RT U | 1：RIDE | U 红在最后的 `take` 上：取出来的与存进去的不相等 |
+  | 5 | 边框模板画的图元也算进 `symbol_blocks` | `finish` | 1：T | 1：S | T 读到 6 / 2；S 红在 `D06.pid`，读到 122 / 6（这张图套了边框模板，模板画了 116 个图元；排在它前面的两张照过） |
+  | 6 | 两项不填 | `finish` | 2：U T | 1：S | 0 / 0 |
+  | 7 | 存的时候跳过这两个键 | `summary.rs` 的 `store` | 2：RT U | 2：S RIDE | U、S 红在存下来的键上（读不到） |
+
+  改坏点已删：`summary.rs`、`mod.rs` 的 sha256 与加开关之前相同；`src`、`tests`、`examples` 里搜不到开关。固定门禁是删掉之后重新编译跑的。带开关的改动留在 `with-mutants.diff`。
+- 没有红过的：
+  - U、T 里交代前提的几条（U 的原有 18 项、块名、定义数；T 的块引用、散线、`drawn` 和 `template_entities`）在 7 处下都不红：7 处都只碰新的两项。
+  - U 里按字段读的那一条排在 `counts()` 那一条后面，字段不对时前一条先红，它自己没有红过。
+  - 其余的测试（`--lib summary` 另外 14 个，`tests/pid_import.rs` 另外 53 个）在 7 处下一个没红。
+- 读数（固定门禁 03:53–04:01，`chainfinal.txt`）：
+  - 全量单元测试 7,138 个：通过 7,085，忽略 53，失败 0（上一个提交的 7,136 加新加的 U、T）。`--lib summary` 17 个全过。
+  - 集成测试：`tests/pid_import.rs` 55 个、`tests/pid_legend.rs` 29 个全过，个数与上一个提交相同（没有新加集成测试，S 里加了两条断言）；测试文件编译告警 0；跑完后系统临时目录里名字带 `symbol` 的文件夹 0 个。
+  - clippy 656 / 1,051，与上一个提交相同。点到这五个文件的只有 1 条：`src/io/pid/mod.rs` 第 596 行，`finish` 的参数有 8 个（上限 7）。上一个提交就有，位置相同；这次动的是第 708、709 行。
+  - 格式：五个文件都是 `new=0`（`summary.rs` 0 → 0，`mod.rs` 1 → 1，`tests.rs` 2 → 2，`template.rs` 0 → 0，`tests/pid_import.rs` 6 → 6）。先红那一遍 `template.rs` 是 `new=1`：T 里有一处和 rustfmt 的排法不一样，红完之后按 rustfmt 的排法改了，内容没变；`red.diff` 是改过排法之后存的。
+  - 分层报告与上一个提交逐行相同。
+  - 改动：产品代码 +21 −1（`summary.rs` +19 −1，`mod.rs` +2）；测试 +276 −3（`tests.rs` +110 −2，`template.rs` +130，`tests/pid_import.rs` +36 −1）。
+- 查显示、导出处时发现的另一件事：仓库里有一份已提交的批量导入基线 `docs/evidence/2026-09-24-pid-batch-baseline/report.csv`，带另存 DXF 的哈希，这个分支会让它过时，计划没有提。这次没有重跑、没有重签、没有加列，记进了规格 §11 的 SB-5 第 2 条，检查点二列出来请用户定。
+- 没验证的：
+  - 现有 18 项在 `pid-test-data` 的 151 张上没有重量；SB-9 的验收里有这一条。
+  - 没有在程序界面里看。命令行那几行没变是读代码得出的（那一段没有改），没有打开一张图看。
+  - `pid_batch_report` 没有跑，那份基线现在差在哪些列没有量。
+  - 边框模板里的符号不算，在样例图上只有 `D06.pid` 一张查得出来（第 5 处改坏）。
+  - `tests/pid_legend.rs` 没有改，也没有对它做改坏。
+- 证据：`D:\scratch\ocs-symblock\sb5\`（先红：`chainred.txt`、`quickred-1.log`、`integred.log`、`red.diff`；改坏：`with-mutants.diff`、`libmut-m1.txt`、`libmut-m1-*.log`、`mut-m1.txt`、`mut-m1-*.log`；固定门禁：`chainfinal.txt` 和它列的各份记录）。新加的脚本 `D:\scratch\ocs-symblock\tools\lib-mut.ps1`：单元测试编一次，把测试程序拷出来，每处改坏跑一遍。
 
 ### SB-6 【接线】属性面板加「符号」一行
 

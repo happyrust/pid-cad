@@ -1705,6 +1705,136 @@ mod tests {
         );
     }
 
+    /// A sheet's symbols are block references, and the import's summary
+    /// counts them and the definitions they share (plan
+    /// 2026-11-19-pid-symbol-block, SB-5). The symbols its border template
+    /// places are neither: they stay the border's loose drafting on
+    /// `PID-FRAME`, add no reference and no definition, and are not among
+    /// the two counts -- even where the template places the very symbol the
+    /// sheet does. Here the sheet places a valve twice and a gauge once,
+    /// and its template the valve.
+    #[test]
+    fn pid_template_placements_are_not_among_the_symbol_blocks_the_summary_counts() {
+        let valve = pid_parse::PidSymbolDefinitionRef { site: 40, sheet: 7 };
+        let gauge = pid_parse::PidSymbolDefinitionRef { site: 41, sheet: 2 };
+        let stroke = |end: (f64, f64)| {
+            let start = (0.0, 0.0);
+            (SymbolPrimitive::Line { start, end }, 8, pen(0.25))
+        };
+        let valve_body = || cached_body(valve, vec![stroke((0.004, 0.0)), stroke((0.0, 0.003))]);
+        let shown = Some(("Default", Some(true)));
+        let sheet = NormalizedPidGeometry {
+            entities: vec![
+                entity(
+                    placement((0.100, 0.200), "Ball Valve.sym", Some(valve)),
+                    shown,
+                ),
+                entity(
+                    placement((0.300, 0.200), "Ball Valve.sym", Some(valve)),
+                    shown,
+                ),
+                entity(placement((0.200, 0.300), "Gauge.sym", Some(gauge)), shown),
+            ],
+            symbol_definitions: vec![
+                valve_body(),
+                cached_body(gauge, vec![stroke((0.002, 0.002))]),
+            ],
+            page_dimensions_mm: Some(A2),
+            ..Default::default()
+        };
+        let template = template_of(
+            "VALVE-A2.igr",
+            NormalizedPidGeometry {
+                entities: vec![
+                    entity(line((0.0, 0.0), (0.594, 0.0)), shown),
+                    entity(
+                        placement((0.500, 0.020), "Ball Valve.sym", Some(valve)),
+                        shown,
+                    ),
+                ],
+                symbol_definitions: vec![valve_body()],
+                ..Default::default()
+            },
+        );
+
+        // The steps `load_pid_with` takes once the file is parsed.
+        let parsed = pid_parse::PidDocument::default();
+        let file = Path::new("sheet.pid");
+        let mut doc = prepare_document(&parsed);
+        let tables = resolve_styles(&parsed, &sheet, file, &mut doc, 1.0);
+        let built = build_document_entities(
+            &sheet,
+            &tables,
+            &mut None,
+            &ImportUnit::AssumedMetre,
+            &mut doc,
+            1.0,
+        );
+        let overlay =
+            overlay_template(&template, &sheet, &mut doc, 1.0).expect("the template draws");
+        assert_eq!(
+            overlay.drawn, 3,
+            "the template's own line and the two strokes of its valve"
+        );
+        let summary = finish(
+            file,
+            &sheet,
+            None,
+            &tables,
+            ImportUnit::AssumedMetre,
+            built,
+            Some(&overlay),
+            &mut doc,
+        );
+
+        let references: Vec<&str> = doc
+            .model_space_entities()
+            .filter_map(|entity| match entity {
+                EntityType::Insert(insert) => Some(insert.block_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            references,
+            ["SPPID_Ball Valve", "SPPID_Ball Valve", "SPPID_Gauge"],
+            "the sheet's three placements and none of the template's"
+        );
+        let of_the_templates_valve: Vec<&EntityType> = doc
+            .model_space_entities()
+            .filter(|entity| {
+                xdata_strings(entity)
+                    .iter()
+                    .any(|said| said == "template_symbol=Ball Valve")
+            })
+            .collect();
+        assert_eq!(of_the_templates_valve.len(), 2, "its two strokes");
+        assert!(
+            of_the_templates_valve.iter().all(|entity| {
+                matches!(entity, EntityType::Line(_)) && entity.common().layer == LAYER_FRAME
+            }),
+            "loose lines on PID-FRAME, not a reference"
+        );
+        assert_eq!(summary.border_template.as_deref(), Some("VALVE-A2.igr"));
+        assert_eq!(
+            (summary.drawn, summary.template_entities),
+            (8, 3),
+            "the sheet's own entities, and the template's beside them"
+        );
+
+        let count = |key: &str| {
+            summary
+                .counts()
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| *value)
+        };
+        assert_eq!(
+            (count("symbol_blocks"), count("symbol_definitions")),
+            (Some(3), Some(2)),
+            "the sheet's three references to its two definitions, and nothing of the template's"
+        );
+    }
+
     /// What a title block's label shows is the sheet's own text record; the
     /// template only places the label, and the body it caches for it is the
     /// hairline cross the label is anchored by, its lettering on a layer

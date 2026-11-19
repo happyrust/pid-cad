@@ -26,6 +26,8 @@ fn the_summary_round_trips_through_its_properties_and_take_removes_them() {
     summary.hidden_strokes_skipped = 31;
     summary.label_anchors_undrawn = 4;
     summary.lettering_flattened = 10;
+    summary.symbol_blocks = 27;
+    summary.symbol_definitions = 19;
     summary.symbol_library = vec![
         PathBuf::from(r"\\server\Plant\Ref\Symbols"),
         PathBuf::from("D:/sym with spaces/=and=equals"),
@@ -1828,9 +1830,15 @@ pub(super) mod placements_as_blocks {
     /// parsed, `finish` included: the layers and the view filter are the
     /// ones an open leaves. `file` is the name the import is logged under.
     fn finished(file: &str, geometry: &NormalizedPidGeometry) -> Document {
+        summarised(file, geometry).0
+    }
+
+    /// [`finished`], beside the summary `finish` hands back: what the import
+    /// says of what it drew.
+    fn summarised(file: &str, geometry: &NormalizedPidGeometry) -> (Document, ImportSummary) {
         let tables = styles();
         let (mut doc, built) = import(geometry, &tables);
-        let _ = finish(
+        let summary = finish(
             Path::new(file),
             geometry,
             None,
@@ -1840,7 +1848,7 @@ pub(super) mod placements_as_blocks {
             None,
             &mut doc,
         );
-        doc
+        (doc, summary)
     }
 
     /// The sheet the program-level tests of a symbol as one object open
@@ -2876,6 +2884,106 @@ pub(super) mod placements_as_blocks {
             "the line and two references"
         );
         assert_eq!((built.symbol_blocks, built.symbol_definitions), (2, 1));
+    }
+
+    /// The import's summary counts the symbols the way they are filed:
+    /// `symbol_blocks` is the references and `symbol_definitions` the
+    /// definitions they refer to. A valve placed twice as it is filed and
+    /// once turned a quarter is three references to two definitions --
+    /// neither the one symbol the three name nor the three placements is
+    /// the number of definitions. The eighteen counts the summary kept
+    /// before are what they were: a block's members count as drawn and
+    /// towards their sheet layer, the reference does not. Stored into the
+    /// document for the open to pick up, both counts ride under their own
+    /// keys and read back.
+    #[test]
+    fn the_summary_counts_the_references_and_the_definitions_they_refer_to() {
+        let on = Some((Some("Process"), true));
+        let valve = |oid: u32, at: (f64, f64), rotation: f64| {
+            record(oid, placement(at, Some(VALVE), Some(BODY), rotation), on)
+        };
+        let geometry = sheet(
+            vec![
+                valve(1201, (0.1, 0.2), 0.0),
+                valve(1202, (0.3, 0.1), 0.0),
+                valve(1203, (0.2, 0.3), std::f64::consts::FRAC_PI_2),
+                record(
+                    1204,
+                    PidGraphicKind::Line {
+                        start: point(0.0, 0.0),
+                        end: point(0.05, 0.0),
+                    },
+                    on,
+                ),
+            ],
+            vec![valve_body()],
+        );
+        let (mut doc, summary) = summarised("three-valves.pid", &geometry);
+
+        let counts = summary.counts();
+        assert_eq!(
+            counts[..18],
+            [
+                ("drawn", 16),
+                ("decoded", 4),
+                ("missing", 0),
+                ("sheet_layers", 1),
+                ("layered_entities", 16),
+                ("unresolved_sheet_layers", 0),
+                ("sheet_layer_names", 1),
+                ("sheet_layers_off", 0),
+                ("driving_dimensions", 0),
+                ("template_bodies", 0),
+                ("parametric_placements", 0),
+                ("cache_bodies", 3),
+                ("library_bodies", 0),
+                ("hidden_strokes_skipped", 0),
+                ("label_anchors_undrawn", 0),
+                ("lettering_flattened", 0),
+                ("template_entities", 0),
+                ("template_missing", 0),
+            ],
+            "what the summary counted before: a pipe and three placements of five entities each, on one sheet layer"
+        );
+        let names: Vec<&str> = references(&doc)
+            .into_iter()
+            .map(|reference| as_insert(reference).block_name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["SPPID_Ball Valve", "SPPID_Ball Valve", "SPPID_Ball Valve_2"],
+            "what the two new counts count: the references, and the definitions they name"
+        );
+        assert_eq!(
+            doc.block_records.len(),
+            blocks_to_start_with() + 2,
+            "and no definition beside those two"
+        );
+        assert_eq!(
+            counts[18..],
+            [("symbol_blocks", 3), ("symbol_definitions", 2)],
+            "three references to two definitions"
+        );
+        assert_eq!((summary.symbol_blocks, summary.symbol_definitions), (3, 2));
+
+        summary.store(&mut doc);
+        let stored = |key: &str| {
+            let tag = format!("{SUMMARY_PROPERTY_PREFIX}{key}");
+            doc.summary_info
+                .custom_properties
+                .iter()
+                .find(|(name, _)| *name == tag)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            (
+                stored("symbol_blocks").as_deref(),
+                stored("symbol_definitions").as_deref()
+            ),
+            (Some("3"), Some("2")),
+            "each rides the document under its own key"
+        );
+        assert_eq!(ImportSummary::take(&mut doc), Some(summary));
     }
 
     /// The blocks the valve and the label symbol are filed as.

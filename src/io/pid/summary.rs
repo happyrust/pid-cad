@@ -91,6 +91,18 @@ pub struct ImportSummary {
     /// placements no body answered for, which the border leaves out rather
     /// than mark with a dot. Kept beside `missing`, never folded into it.
     pub template_missing: usize,
+    /// Symbol placements filed as block references: every placement of the
+    /// sheet that drew something is one (plan 2026-11-19-pid-symbol-block).
+    /// The placements of the border template are not among them: what a
+    /// template draws stays loose on `PID-FRAME`. Logged, not shown.
+    pub symbol_blocks: usize,
+    /// Block definitions those references refer to. Placements that draw
+    /// the same thing share one, so this counts the different drawings
+    /// among the sheet's symbols: fewer than `symbol_blocks` wherever a
+    /// symbol is placed twice alike, more than the symbols placed wherever
+    /// one is drawn more than one way -- turned, scaled, resized. Logged,
+    /// not shown.
+    pub symbol_definitions: usize,
     /// The symbol library roots the import found -- `PID_SYMBOL_LIBRARY` or
     /// the `.sym` tree above the drawing -- and drew its library bodies
     /// from. Empty when no library was found. Where a placement's body came
@@ -312,7 +324,7 @@ impl ImportSummary {
     }
 
     /// The counted fields, by the keys they are stored under.
-    pub(super) fn counts(&self) -> [(&'static str, usize); 18] {
+    pub(super) fn counts(&self) -> [(&'static str, usize); 20] {
         [
             ("drawn", self.drawn),
             ("decoded", self.decoded),
@@ -332,6 +344,8 @@ impl ImportSummary {
             ("lettering_flattened", self.lettering_flattened),
             ("template_entities", self.template_entities),
             ("template_missing", self.template_missing),
+            ("symbol_blocks", self.symbol_blocks),
+            ("symbol_definitions", self.symbol_definitions),
         ]
     }
 
@@ -356,6 +370,8 @@ impl ImportSummary {
             "lettering_flattened" => &mut self.lettering_flattened,
             "template_entities" => &mut self.template_entities,
             "template_missing" => &mut self.template_missing,
+            "symbol_blocks" => &mut self.symbol_blocks,
+            "symbol_definitions" => &mut self.symbol_definitions,
             _ => return None,
         })
     }
@@ -384,6 +400,8 @@ impl ImportSummary {
             border_template: None,
             template_entities: 0,
             template_missing: 0,
+            symbol_blocks: 0,
+            symbol_definitions: 0,
             symbol_library: Vec::new(),
             unit: ImportUnit::AssumedMetre,
         }

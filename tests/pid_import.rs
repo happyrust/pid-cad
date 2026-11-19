@@ -203,6 +203,21 @@ fn import_with_summary(name: &str) -> Option<(Document, ImportSummary)> {
     Some((doc, summary))
 }
 
+/// The count `summary` states under `key` once it is stored into a document
+/// -- the `PID_IMPORT_SUMMARY.<key>` property the open pipeline carries it
+/// as -- or `None` when it stores no count of that name.
+fn stored_count(summary: &ImportSummary, key: &str) -> Option<usize> {
+    let mut carrier = Document::new();
+    summary.store(&mut carrier);
+    let tag = format!("{SUMMARY_PROPERTY_PREFIX}{key}");
+    carrier
+        .summary_info
+        .custom_properties
+        .iter()
+        .find(|(name, _)| *name == tag)
+        .and_then(|(_, value)| value.parse().ok())
+}
+
 /// Placement-time values are separate sheet text records, not the `NULL`
 /// placeholders embedded in the reusable symbol body. Both halves must meet
 /// on screen: the placed symbol supplies its bubble/frame while the sheet
@@ -4096,6 +4111,10 @@ fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() 
 /// (`a_symbol_body_draws_in_the_style_its_placement_names` pins the
 /// colours). Every placement of this corpus draws in a style its drawing
 /// names, and each drawing's placements are counted here by that name.
+///
+/// The import counts the references and the definitions itself, and its
+/// summary states both (`symbol_blocks`, `symbol_definitions`): each
+/// drawing's two numbers are the two counted here off the document.
 #[test]
 fn a_placement_is_one_reference_to_a_block_of_what_it_draws() {
     for (name, placements, definitions, styles) in [
@@ -4127,7 +4146,7 @@ fn a_placement_is_one_reference_to_a_block_of_what_it_draws() {
             "As Drawn 12, Equipment - New 1, Nozzle - New 8, Piping OPC 10",
         ),
     ] {
-        let Some(doc) = import(name) else {
+        let Some((doc, summary)) = import_with_summary(name) else {
             continue;
         };
         let mut referenced: std::collections::BTreeMap<&str, usize> =
@@ -4234,6 +4253,22 @@ fn a_placement_is_one_reference_to_a_block_of_what_it_draws() {
             styled.join(", "),
             styles,
             "{name}: the placements by the style= their references state"
+        );
+        // What the import's summary says of the two: as it hands them back,
+        // and under the keys it rides a document by across the open
+        // pipeline.
+        assert_eq!(
+            (summary.symbol_blocks, summary.symbol_definitions),
+            (placements, definitions),
+            "{name}: the references / the definitions the import's summary counts"
+        );
+        assert_eq!(
+            (
+                stored_count(&summary, "symbol_blocks"),
+                stored_count(&summary, "symbol_definitions")
+            ),
+            (Some(placements), Some(definitions)),
+            "{name}: the references / the definitions the summary stores into a document"
         );
     }
 }
