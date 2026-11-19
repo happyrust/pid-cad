@@ -6217,6 +6217,7 @@ properties =
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
     .role = الدور
+    .symbol = الرمز
     .stylization = Stylization
     .color-scheme = Color scheme
     .scan-colors = Scan Colors

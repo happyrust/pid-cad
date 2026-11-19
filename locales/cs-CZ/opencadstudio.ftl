@@ -6207,6 +6207,7 @@ properties =
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
     .role = Role
+    .symbol = Symbol
     .stylization = Stylizace
     .color-scheme = Barevné schéma
     .scan-colors = Barvy skenu

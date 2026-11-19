@@ -8,7 +8,26 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
+use document::entities::Line;
+use document::xdata::{ExtendedDataRecord, XDataValue};
+use document::EntityType;
 use OpenCADStudio::i18n::{set_language, translate, Language};
+use OpenCADStudio::scene::cache::properties::pid_semantics_section;
+
+/// The caption the panel gives the row `field` of an entity whose
+/// `PID_SEMANTICS` record says `values`.
+fn panel_caption(values: &[&str], field: &str) -> String {
+    let mut entity = EntityType::Line(Line::new());
+    let mut record = ExtendedDataRecord::new("PID_SEMANTICS");
+    for value in values {
+        record.add_value(XDataValue::String((*value).to_string()));
+    }
+    entity.common_mut().extended_data.add_record(record);
+    pid_semantics_section(&entity)
+        .and_then(|group| group.props.into_iter().find(|row| row.field == field))
+        .unwrap_or_else(|| panic!("the panel shows no {field} row"))
+        .label
+}
 
 #[test]
 fn pid_panel_captions_translate_in_every_shipped_language() {
@@ -19,6 +38,7 @@ fn pid_panel_captions_translate_in_every_shipped_language() {
         "Matched by",
         "Sheet layer",
         "Layer OID",
+        "Symbol",
     ];
     for language in [
         Language::EnUs,
@@ -58,6 +78,12 @@ fn pid_panel_captions_translate_in_every_shipped_language() {
         if language == Language::ZhCn {
             assert_eq!(translate("Sheet layer"), "图纸图层");
             assert_eq!(translate("Layer OID"), "图层 OID");
+            assert_eq!(translate("Symbol"), "符号");
+            // The row the panel builds is captioned through the catalog too.
+            assert_eq!(
+                panel_caption(&["role=symbol", "symbol=Ball Valve"], "pid_symbol"),
+                "符号"
+            );
         }
     }
 }

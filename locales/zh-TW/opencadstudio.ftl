@@ -6200,6 +6200,7 @@ properties =
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
     .role = 角色
+    .symbol = 符號
     .stylization = 樣式化
     .color-scheme = 配色方案
     .scan-colors = 掃描顏色

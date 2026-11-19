@@ -6205,6 +6205,7 @@ properties =
     .model-text-height = { common.model-uppercase } · { common.text-height-sentence-case }
     .insert-unit-scale-is-outside-the-supported-range = Η κλίμακα μονάδας INSERT είναι εκτός του υποστηριζόμενου εύρους.
     .role = Ρόλος
+    .symbol = Σύμβολο
     .stylization = Stylization
     .color-scheme = Color scheme
     .scan-colors = Scan Colors

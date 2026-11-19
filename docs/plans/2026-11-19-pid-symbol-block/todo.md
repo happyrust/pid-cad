@@ -545,15 +545,92 @@
 
 - **做什么**：`src/scene/cache/properties.rs` 的 `pid_semantics_section` 认 `symbol=` 这个键，在「角色」一行之后加一行。新词条按现有词条的做法进词条目录。
 - **验收**
-  - [ ] 记录里有 `symbol=` 时，`P&ID` 一栏在「角色」之后有一行，值是符号名原样，只读，字段名 `pid_symbol`。
-  - [ ] 记录里没有 `symbol=` 时，各行与改之前相同。
-  - [ ] 选中一个导入的块引用，面板里既有块引用自己的几栏，也有 `P&ID` 一栏，没有 `*VARIES*`。
-  - [ ] 新词条在词条目录里，词条相关的现有测试通过。
-  - [ ] 故意改坏：不认 `symbol` 键、行加在「角色」之前，测试变红。
+  - [x] 记录里有 `symbol=` 时，`P&ID` 一栏在「角色」之后有一行，值是符号名原样，只读，字段名 `pid_symbol`。
+  - [x] 记录里没有 `symbol=` 时，各行与改之前相同。
+  - [x] 选中一个导入的块引用，面板里既有块引用自己的几栏，也有 `P&ID` 一栏，没有 `*VARIES*`。
+  - [x] 新词条在词条目录里，词条相关的现有测试通过（两个测试 C、L；另有一个脚本 `scripts/test_locales.py` 在改之前就不通过，改后它缺的名单不变，见「做完」）。
+  - [x] 故意改坏：不认 `symbol` 键、行加在「角色」之前，测试变红（另加 6 处，一共 8 处）。
 - **验证**：`gates.ps1 -Out D:\scratch\ocs-symblock\sb6 -Files <动过的 .rs> -Quick pid_semantics`。
 - **依赖**：SB-2。
 - **文件**：`src/scene/cache/properties.rs`、`src/locale_catalog.rs`、`locales/` 下的词条文件。
 - **规模**：S。
+
+**做完**（2026-11-20）
+
+- 改了什么（产品代码 +38：`properties.rs` +14，词条目录 +1，23 个词条文件各 +1；用户手册改一句）：
+  - `src/scene/cache/properties.rs` 的 `pid_semantics_section`：认 `symbol` 这个键。值不空时，在「角色」一行之后、三个尺寸行之前加一行：行名 `t!("Symbol")`，字段名 `pid_symbol`，只读，值是记录里 `=` 后面的全部内容，不去空格、不改写。值是空的不出行，和 `label` 键的做法一样；导入器不写空名字（`src/io/pid/metadata.rs` 的 `attach_symbol_name` 遇到空名字什么都不写），这一条是给别处写出来的记录留的。没有这个键的记录走的代码一行没变。
+  - `src/locale_catalog.rs`：加一条 `"Symbol" => Some(("properties", "symbol"))`，排在 `"Role"` 那一条后面。
+  - `locales/` 下 23 种语言的 `opencadstudio.ftl`：`properties` 这条消息里各加一行 `.symbol = …`，排在 `.role` 后面。只加英文和中文不够，见下面「中间一轮」。
+  - `docs/user-guide.md`：「特性面板」一段逐项列 `P&ID` 各行的那一句，在「角色」后面补上「符号」。这个文件不在任务的「文件」里；手册这一节另外几句的事见规格 §11 的 SB-6 第 1 条和新加的任务 SB-8b。
+- 各语言用的词都取自这种语言自己的词条文件里已有的条目，没有新造。取的是各语言的 `mleader-style.symbol`；它也是这种语言在 P&ID 的两个菜单项（`common.group-as-p-id-symbol`、`common.ungroup-p-id-symbol`）里说「符号」用的词。两处例外：阿拉伯语那两个菜单项里的词不带冠词，新行带，和它「角色」一行（`الدور`）的写法一致；韩语的 `mleader-style.symbol` 是 `기호`，P&ID 的两个菜单项里却是 `심볼`，新行跟 P&ID 的走。日语、荷兰语、土耳其语的 `table-cells.symbol`（`記号`、`Teken`、`Simge`）是「字符」的意思，没有用。加行用的脚本 `add-symbol.ps1` 从文件里读出这些值再写，脚本里没有写死任何译文。
+
+  | 语言 | 词 | 语言 | 词 | 语言 | 词 | 语言 | 词 |
+  |---|---|---|---|---|---|---|---|
+  | ar-SA | الرمز | es-ES | Símbolo | it-IT | Simbolo | pt-BR | Símbolo |
+  | bg-BG | Символ | fi-FI | Symboli | ja-JP | シンボル | ru-RU | Символ |
+  | cs-CZ | Symbol | fr-FR | Symbole | ko-KR | 심볼 | tr-TR | Sembol |
+  | de-DE | Symbol | hi-IN | प्रतीक | lo-LA | ສັນຍາລັກ | vi-VN | Ký hiệu |
+  | el-GR | Σύμβολο | hu-HU | Szimbólum | nl-NL | Symbool | zh-CN | 符号 |
+  | en-US | Symbol | | | pl-PL | Symbol | zh-TW | 符號 |
+
+- 简称：N1 是 `properties.rs` 测试模块里新加的 `a_symbol_reference_names_its_symbol_right_after_its_role`；N2 是同一处新加的 `the_name_of_a_symbol_is_shown_as_the_record_spells_it`；K 是同一处原有的 `a_placed_symbol_shows_its_library_defaults_and_its_extent_as_two_rows`，没有改；P 是 `src/app/pid_symbol_block_tests.rs` 里新加的 `a_selected_symbol_shows_its_reference_and_its_pid_group_in_the_panel`；L 是 `tests/pid_panel_localization.rs` 里原有的 `pid_panel_captions_translate_in_every_shipped_language`，加了三处；C 是原有的 `i18n::tests::every_catalog_covers_and_formats_the_source_catalog`，没有改。P、L 所在的两个文件不在任务的「文件」里。
+- 钉住的：
+  - N1（拼出来的记录）：一条带齐各键的记录（图纸图层、角色、样式、三个尺寸、类型、位号、`oid`、匹配方式）。不带 `symbol=` 时没有 `pid_symbol` 行。把 `symbol=Parametric Manifold` 加在最后（导入器就写在最后）：这一行的值是 `Parametric Manifold`；各行的字段名依次是 `pid_class`、`pid_role`、`pid_symbol`、`pid_driving`、`pid_instance`、`pid_extent`、`pid_label`、`pid_resolved`、`pid_sheet_layer`、`pid_sheet_layer_oid`；行名等于 `t!("Symbol")`；去掉这一行之后，其余各行与不带键时整行相等（行名、字段名、值）。读值用的是这个测试模块原有的 `value`，它只认只读的行。
+  - N2：名字 ` 3" Gate=Valve (蝶阀) `（两头有空格，中间有引号、等号、汉字）原样显示；记录里只有 `symbol=Ball Valve` 一个值时也出这一行，一共 1 行；`symbol=` 后面是空的不出行，只有 `pid_role`。
+  - P（程序一层，打开 SB-3 那张图：两个阀（同一个符号 `Ball Valve`）、一个只画自己名字的标注符号（`Item Note`）、一条管线，都在图纸图层 `Process`，不带 `_Data.xml`）：
+    - 在第一个阀的一笔上点一下：面板的 `P&ID` 一栏正好五行，`pid_role = symbol`、`pid_symbol = Ball Valve`、`pid_extent = 40.00 × 20.00 mm`、`pid_sheet_layer = Process`、`pid_sheet_layer_oid = 12`；块引用自己的行都在，`ins_x = 100.0000`、`ins_y = 100.0000`、`ins_z = 0.0000`、`u_scale = 1.0000`、`rotation = 0`，`block` 一行里是它的块名；整个面板没有一行是 `*VARIES*`。
+    - 用窗口框住两个阀：`P&ID` 一栏还是那五行（两个是同一个符号）；`ins_x` 是 `*VARIES*`，`ins_y` 是 `100.0000`。
+    - 打开符号名图层，用交叉框选第二个阀和那个标注符号：`pid_symbol` 是 `*VARIES*`。
+  - L：`Symbol` 加进它逐语言查的行名单（12 种语言下不是空的、不是原始编号）；中文下 `Symbol` 翻成「符号」；中文下面板自己拼出来的 `pid_symbol` 行，行名是「符号」（最后这一条是转绿之后加的，见第 7 处改坏）。
+  - C：23 种语言的词条文件都有词条目录里的每一条。
+- 先红（04:19–04:22，`chainred.txt`；这时只有三个测试文件有改动，产品代码、词条都没动）：
+  - `--lib pid_semantics` 6 个：通过 4（原有的），失败 2，是 N1、N2，都是「missing pid_symbol」。
+  - `--lib a_selected_symbol` 2 个：通过 1（SB-3 的夹点测试），失败 1，是 P：`P&ID` 一栏读到四行，没有 `pid_symbol = Ball Valve`。
+  - `tests/pid_panel_localization.rs` 1 个：失败，中文下 `Symbol` 读到 `Symbol`，要「符号」。
+  - C 通过：目录还没动。
+- 中间一轮（04:24–04:28，`chainmid.txt`）：写了实现和目录的一条，词条只加了英文、中文两个文件。N1、N2 过，L 过，C 红：「1 missing keys in BgBg: [("properties", "symbol")]」。也就是说少了某种语言的那一行，L 照过（它对各语言只查「不是空的、不是原始编号」，只在中文下对译文），拦住的是 C。于是 23 个文件都加。这一轮 P 也红，是测试自己写错了：我以为块引用有 `x_scale`、`y_scale`、`z_scale` 三行，面板对三个方向比例相同的引用只出 `u_scale` 一行（原有的做法）；改的是测试的期望，产品代码没动。
+- 转绿（04:30–04:36，`chaingreen.txt`）：`pid_semantics` 6 个、`a_selected_symbol` 2 个、C、L 全过。
+- 故意改坏 8 处，用环境变量打开。`--lib` 的 8 个（`pid_semantics` 6 个加 `a_selected_symbol` 2 个）和 L 各编一次，把测试程序拷出来，不开的各跑一遍（全过），每处各跑一遍。前两处是验收要的，后六处是加的。
+
+  | # | 改坏 | `--lib` 8 个里变红 | L | 读到的 |
+  |---|---|---|---|---|
+  | 1 | 不认 `symbol` 键 | 3：N1 N2 P | 红 | N1、N2「missing pid_symbol」；P 的 `P&ID` 一栏只有四行；L「the panel shows no pid_symbol row」 |
+  | 2 | 行加在「角色」之前 | 2：N1 P | 过 | 次序成了 `pid_symbol`、`pid_role` |
+  | 3 | 行加在三个尺寸之后 | 2：N1 P | 过 | `pid_extent` 之后才是 `pid_symbol` |
+  | 4 | 名字去掉首尾空格 | 1：N2 | 过 | 读到 `3" Gate=Valve (蝶阀)`，两头的空格没了 |
+  | 5 | 做成可编辑的文本框 | 2：N1 N2 | 过 | 「pid_symbol is not read-only: EditText(…)」 |
+  | 6 | 空名字也出一行 | 1：N2 | 过 | `pid_role` 之后多出一行 `pid_symbol` |
+  | 7 | 行名写死成英文，不经词条目录 | 0 | 红 | 中文下读到 `Symbol`，要「符号」 |
+  | 8 | 记录里没有 `symbol=` 也出一行 | 3：N1 N2 K | 没跑 | N1 红在「不带键时没有这一行」上；K 的前四行成了 `pid_class`、`pid_role`、`pid_symbol`、`pid_driving` |
+
+  - 第 1–7 处：`--lib` 是 04:42–04:44 跑的（`libmut-m3.txt`），L 是 04:44–04:46（`mut-i1.txt`）。第 8 处对应验收第 2 条，是固定门禁第一遍之后补的（05:02–05:04，`libmut-m4.txt`），只跑了 `--lib`。
+  - 第 7 处是怎么来的：行名写死成英文时 `--lib` 的 8 个全过（测试在英文下跑），L 原先只查词条翻得出来，也发现不了；而中文界面下这一行叫不叫「符号」正是用户看得见的那一点。所以在 L 里加了一条：切到中文后，面板自己拼出来的这一行，行名是「符号」。这一条是实现之后加的，没有先红，靠第 7 处证明它会红。
+  - 第一遍（04:37–04:39，`libmut-m1.txt`）没跑成：`lib-mut.ps1` 把测试程序拷出来直接跑，没带上仓库 `.cargo/config.toml` 里 `[env]` 给测试线程的 64 MB 栈（`RUST_MIN_STACK`），程序一层的两个测试栈溢出，测试程序中途退出。SB-5 用这个脚本只跑过名字带 `summary` 的 17 个测试，那一次没有出这个问题。脚本改成照仓库的 `[env]` 带上环境变量，重跑（04:40，`libmut-m2.txt`，当时 6 处）和上表的结果一致。
+  - 改坏点已删：`src`、`tests`、`examples` 里搜不到开关。第 8 处删掉之后，`properties.rs` 的 sha256 与加它之前相同（`324c1532…`）；固定门禁第二遍是在这之后跑的。带开关的改动留在 `with-mutants.diff`（前 7 处）、`with-mutant-8.diff`。
+- 没有红过的：
+  - P 的后两段（框住两个阀之后 `P&ID` 一栏不变、`ins_x` 是 `*VARIES*`；交叉框选阀和标注符号之后「符号」是 `*VARIES*`）：先红时和改坏时 P 都红在第一段，后面的没走到。这两段钉的是多选时各行怎么合并，那是面板原有的代码，这次没有改，也没有对它做改坏。
+  - P 里块引用自己的那几行和「没有一行是 `*VARIES*`」：同样是原有的代码。其中列块引用各行的那一条在中间一轮红过一次，是测试写错了（见上）。
+  - 程序一层分不出只读和可编辑：第 5 处下 P 照过，它读的是行里的字，不看是哪种控件。只读由 N1、N2 管。
+  - N1 里「其余各行与不带键时相同」那一条：8 处里 N1 红的 5 处都红在它前面的断言上。
+  - L 里把 `Symbol` 加进逐语言名单的那一处：目录里没有这一条时 `translate` 原样交回英文，名单查的「不是空的、不是原始编号」照过。中文下对译文的那一条在先红时红过。
+  - C 没有改，也没有对词条目录、词条文件做改坏；它在中间一轮红过。
+- 读数（固定门禁第二遍 05:05–05:12，`chainfinal2.txt`）：
+  - 全量单元测试 7,141 个：通过 7,088，忽略 53，失败 0（上一个提交的 7,138 加新加的 N1、N2、P）。`--lib pid_semantics` 6 个全过。
+  - 集成测试：`tests/pid_import.rs` 55 个、`tests/pid_legend.rs` 29 个、`tests/pid_panel_localization.rs` 1 个，全过；前两个的个数与上一个提交相同；测试文件编译告警 0；跑完后系统临时目录里名字带 `symbol` 的文件夹 0 个。`tests/pid_panel_localization.rs` 不在固定门禁的两个集成测试里，这次带上一起跑。
+  - clippy 656 / 1,051，与上一个提交相同。点到这四个文件的 2 条都是上一个提交就有的：`src/scene/cache/properties.rs` 第 20 行（这次动的是第 110 行以后）；`src/locale_catalog.rs` 第 4 行「这个函数可能在栈上分配 870,148 字节」，上一个提交是 870,035，目录多一条多了 113 字节。
+  - 格式：四个文件都是 `new=0`（都是 0 → 0）。第一遍（04:49–04:59，`chainfinal.txt`）有两个文件是 `new=1`：N2 和 P 里各有一处和 rustfmt 的排法不一样，按 rustfmt 的排法改了，内容没变。第一遍其余各项的读数与第二遍相同。
+  - 分层报告与上一个提交逐行相同。
+  - 改动：产品代码 +38（`properties.rs` +14，`locale_catalog.rs` +1，23 个词条文件 +23）；测试 +238 −2（`properties.rs` +80，`pid_symbol_block_tests.rs` +132 −2，`tests/pid_panel_localization.rs` +26）；用户手册 +1 −1。
+- `scripts/test_locales.py`（不在固定门禁里，加词条时跑到的）：它在这次改动之前就不通过。最后一项检查要求 `src` 里 `t!`、`tf!`、`HistoryLabel::Message` 里直接写的每一处文字都在词条目录里，现在有 806 处不在；脚本自己只显示前 30 处。整份名单用 `locales_full.py` 量：它拿仓库脚本的原文来跑，只去掉最后那条断言，把名单全写出来。四份名单：计划起点 `5171d197b` 806 处；上一个提交 806 处，和起点是同样的 806 处，其中 28 处行号移动了；先红时 807 处，多的一处是新测试里的 `t!("Symbol")`；改完之后 806 处，与上一个提交的逐字节相同。目录从 7,686 条变成 7,687 条，每条在英文词条文件里都有对应的一行。这 806 处没有动，记进了规格 §11 的 SB-6 第 2 条。
+- 没验证的：
+  - 没有在程序界面里看。面板上这一行画出来的样子（名字很长时显示得全不全）没有看；P 读的是面板的数据，不是画出来的画面。SB-10 在真实程序上验收时看。
+  - 译文没有请懂这些语言的人看过。23 个词都取自各语言词条文件里已有的条目；韩语、阿拉伯语的取法见上。
+  - 面板这一行的行名只在中文下对过（L）。其余 22 种语言有这一条词条（C 管），面板显示出来的是不是它没有逐个对。
+  - 带 `_Data.xml` 的图上选中图例（`P&ID` 一栏另有类型、位号、匹配方式），只在 N1 里用拼出来的记录测了；P 用的图不带 `_Data.xml`。
+  - 样例图上没有打开看面板。四张真实图纸上每个引用都带 `symbol=`、值等于块里的符号名文字，是 SB-4b 的集成测试钉的。
+  - 炸开之后的散图元没有这一行，没有单独测：SB-3 的测试钉的是炸开后每个图元的记录里只有 `role=`，N1 钉的是没有 `symbol=` 就没有这一行，是两条合起来推出的。
+  - `scripts/test_locales.py` 不通过，所以「`t!` 用到的文字都在目录里」没有一个通过的检查在管；这次靠的是量整份名单，前后相同。
+- 证据：`D:\scratch\ocs-symblock\sb6\`（先红：`chainred.txt`、`quickred-*.log`、`integred.log`、`localesred.txt`；中间一轮：`chainmid.txt` 和它列的各份记录；转绿：`chaingreen.txt`；改坏：`with-mutants.diff`、`with-mutant-8.diff`、`libmut-m1.txt`（没跑成的那一遍）、`libmut-m2.txt`、`libmut-m3.txt`、`mut-i1.txt`、`libmut-m4.txt` 和各自的 `*.log`；固定门禁：`chainfinal.txt`（第一遍）、`chainfinal2.txt` 和它列的各份记录；词条：`survey2.txt`、`add-symbol.ps1`、`add-symbol-check.txt`、`add-symbol-stage1.txt`、`add-symbol-stage2.txt`；词条脚本的名单：`locales_full.py`、`locales-missing-start.txt`、`locales-missing-head.txt`、`locales-missing-red.txt`、`locales-missing-final2.txt`）。`D:\scratch\ocs-symblock\tools\lib-mut.ps1` 改过：拷出来的测试程序带上仓库 `.cargo/config.toml` 的 `[env]`。
 
 ### SB-7 【接线】图例识别跳过导入的图块
 
@@ -588,6 +665,25 @@
 - **验证**：上面的文档检查命令，改前改后各一遍，输出存 `D:\scratch\ocs-symblock\sb8\`。
 - **依赖**：SB-3（验收标准说的行为先得有测试）。
 - **文件**：`docs/pid-platform/requirements/90-migration-and-interop.md`，可能还有文档检查要求同步的文件。
+- **规模**：S。
+
+### SB-8b 【文档】用户手册讲 `.pid` 的一节跟上图块
+
+做 SB-6 时加的，原计划没有：见规格 §11 的 SB-6 第 1 条、`plan.md` §9。
+
+- **做什么**：`docs/user-guide.md`「打开 Smart P&ID（.pid）图纸」一节还按「图例是一组散笔画」讲的几句，改成现在的样子；另加一段讲图例是图块：在任意一笔上点一下选中整个图例；块名是 `SPPID_` 加符号名，画法不同的带序号，认符号看特性面板的「符号」一行；炸开变回散图元；`PID_SEMANTICS` 记录里哪些键在引用上、哪些在块里的图元上；图纸图层视图各行的数字怎么数。只写测试钉住的或在程序上量过的。已知要改的几句（做的时候把这一节从头到尾再对一遍）：
+  - 开头「文件里的线、文字、符号、填充和审查标记被读成普通 CAD 实体」：符号现在是块引用。
+  - 「图层」一段「导入后每个实体的图层就是 …… 图纸图层名」：图例的引用在图纸图层上，块里的笔画在 `0` 层。
+  - 「分类信息没有丢：每个实体的 `PID_SEMANTICS` 扩展数据里写着 `role=` …… 与 `style=`」和后面给第三方的那句粗体字：图例的 `style=` 在引用上，块里的图元只带 `role=`。
+  - 「图纸图层视图」一段「列出每层的实体数」「各角色 …… 及实体数」：数法变了（规格 §4.3）。
+  - 「符号的三个尺寸」一段「点选一个符号放置的任一笔画或它旁边的符号名」「同一放置的所有实体相同」：选中的是这个图例的块引用，三个值只在引用上。
+- **验收**
+  - [ ] 这一节里讲图例结构的每一句都与现在的行为一致；改了哪几句、每句依据哪条测试或哪份读数，列成表写进「做完」段。
+  - [ ] 另存 DWG / DXF 之后，第三方怎么取图例的分类、样式和符号名写清楚。
+  - [ ] 这一节里没讲错的不动；别的章节不动。
+- **验证**：SB-8 的文档检查改前改后各一遍（它管不管这个文件，做的时候查清）；逐句对照表存 `D:\scratch\ocs-symblock\sb8b\`。
+- **依赖**：SB-3、SB-4、SB-6（讲的行为先得有测试）。
+- **文件**：`docs/user-guide.md`。
 - **规模**：S。
 
 ### SB-9 【测试】样例测试和性能预算

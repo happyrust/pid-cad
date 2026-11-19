@@ -6146,6 +6146,7 @@ properties =
     .model-text-height = Model metin yüksekliği
     .insert-unit-scale-is-outside-the-supported-range = INSERT birim ölçeği desteklenen aralığın dışında.
     .role = Rol
+    .symbol = Sembol
     .stylization = Stilize etme
     .color-scheme = Renk şeması
     .scan-colors = Tarama renkleri

@@ -107,6 +107,7 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
 
     let mut class = None;
     let mut role = None;
+    let mut symbol = None;
     let mut driving = None;
     let mut instance = None;
     let mut extent = None;
@@ -125,6 +126,7 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
         match key {
             "class" => class = Some(val.to_string()),
             "role" => role = Some(val.to_string()),
+            "symbol" if !val.is_empty() => symbol = Some(val.to_string()),
             "driving" => driving = driving_dimensions_caption(val),
             "instance" => instance = driving_dimensions_caption(val),
             "extent" => extent = body_extent_caption(val),
@@ -166,6 +168,18 @@ pub fn pid_semantics_section(entity: &EntityType) -> Option<PropSection> {
             label: t!("Role").into_owned(),
             field: "pid_role",
             value: PropValue::ReadOnly(role),
+        });
+    }
+    // The symbol a placement's block reference places, named as the drawing
+    // spells it (plan 2026-11-19-pid-symbol-block). The reference's block is
+    // named after it too, but made fit for a table and numbered where one
+    // symbol draws more than one way, so this row, not the block's name,
+    // says which symbol it is.
+    if let Some(symbol) = symbol {
+        props.push(Property {
+            label: t!("Symbol").into_owned(),
+            field: "pid_symbol",
+            value: PropValue::ReadOnly(symbol),
         });
     }
     // A symbol placement's sizes, kept apart on purpose: the driving
@@ -552,5 +566,85 @@ mod pid_semantics_tests {
         assert_eq!(driving_dimensions_caption(""), None);
         assert_eq!(body_extent_caption("wide"), Some("wide".to_string()));
         assert_eq!(body_extent_caption(" "), None);
+    }
+
+    /// The block reference of a placed symbol names the symbol it places
+    /// (`symbol=`; plan 2026-11-19-pid-symbol-block, SB-6): one read-only
+    /// row right after the role, wherever the key stands in the record, and
+    /// the rest of the group is what it is without the key.
+    #[test]
+    fn a_symbol_reference_names_its_symbol_right_after_its_role() {
+        let said = [
+            "sheet_layer=Default",
+            "sheet_layer_oid=42",
+            "role=symbol",
+            "style=Equipment - New",
+            "extent=172.21x71.18",
+            "driving=Top:20.32;Left:114.30;Right:114.30",
+            "instance=Left:57.91;Right:114.30;Top:35.59",
+            "class=PIDProcessVessel",
+            "label=V-101",
+            "oid=77",
+            "resolved=direct",
+        ];
+        let unnamed = pid_semantics_section(&entity(&said)).expect("P&ID section");
+        assert!(unnamed.props.iter().all(|p| p.field != "pid_symbol"));
+
+        // The import writes the key last.
+        let mut named = said.to_vec();
+        named.push("symbol=Parametric Manifold");
+        let section = pid_semantics_section(&entity(&named)).expect("P&ID section");
+        assert_eq!(value(&section, "pid_symbol"), "Parametric Manifold");
+        let fields: Vec<&str> = section.props.iter().map(|p| p.field).collect();
+        assert_eq!(
+            fields,
+            [
+                "pid_class",
+                "pid_role",
+                "pid_symbol",
+                "pid_driving",
+                "pid_instance",
+                "pid_extent",
+                "pid_label",
+                "pid_resolved",
+                "pid_sheet_layer",
+                "pid_sheet_layer_oid",
+            ]
+        );
+        assert!(section
+            .props
+            .iter()
+            .find(|property| property.field == "pid_symbol")
+            .is_some_and(|property| property.label == t!("Symbol")));
+        let others: Vec<&Property> = section
+            .props
+            .iter()
+            .filter(|property| property.field != "pid_symbol")
+            .collect();
+        assert_eq!(
+            others,
+            unnamed.props.iter().collect::<Vec<_>>(),
+            "the rows beside the name"
+        );
+    }
+
+    /// The name is shown as the record spells it: all that follows the first
+    /// `=`, the spaces at either end included. A reference that says nothing
+    /// else still names its symbol, and an empty name is no row.
+    #[test]
+    fn the_name_of_a_symbol_is_shown_as_the_record_spells_it() {
+        let odd =
+            pid_semantics_section(&entity(&["role=symbol", "symbol= 3\" Gate=Valve (蝶阀) "]))
+                .expect("P&ID section");
+        assert_eq!(value(&odd, "pid_symbol"), " 3\" Gate=Valve (蝶阀) ");
+
+        let alone = pid_semantics_section(&entity(&["symbol=Ball Valve"])).expect("P&ID section");
+        assert_eq!(value(&alone, "pid_symbol"), "Ball Valve");
+        assert_eq!(alone.props.len(), 1);
+
+        let nameless =
+            pid_semantics_section(&entity(&["role=symbol", "symbol="])).expect("P&ID section");
+        let fields: Vec<&str> = nameless.props.iter().map(|p| p.field).collect();
+        assert_eq!(fields, ["pid_role"]);
     }
 }

@@ -6205,6 +6205,7 @@ properties =
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
     .role = Роля
+    .symbol = Символ
     .stylization = Stylization
     .color-scheme = Color scheme
     .scan-colors = Scan Colors

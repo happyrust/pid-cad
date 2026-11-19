@@ -2906,6 +2906,7 @@ pub(super) fn message_attribute(source: &str) -> Option<(&'static str, &'static 
         "Matched by" => Some(("properties", "matched-by")),
         "Sheet layer" => Some(("properties", "sheet-layer")),
         "Role" => Some(("properties", "role")),
+        "Symbol" => Some(("properties", "symbol")),
         "Sheet layers" => Some(("layers", "sheet-layers")),
         "Roles" => Some(("layers", "roles")),
         "Sheet layer {} turned {} ({} entities)" => Some(("layers", "sheet-layer-turned-entities")),

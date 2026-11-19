@@ -6212,6 +6212,7 @@ properties =
     .model-text-height = Chiều cao chữ trong mô hình
     .insert-unit-scale-is-outside-the-supported-range = Tỷ lệ đơn vị INSERT nằm ngoài phạm vi được hỗ trợ.
     .role = Vai trò
+    .symbol = Ký hiệu
     .stylization = Kiểu tô màu
     .color-scheme = Cách phối màu
     .scan-colors = Màu quét

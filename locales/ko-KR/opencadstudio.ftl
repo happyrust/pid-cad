@@ -6204,6 +6204,7 @@ properties =
     .solid-history = { properties.solid } · { model.history }
     .solid-type = { properties.solid } · { common.type }
     .role = 역할
+    .symbol = 심볼
     .stylization = Stylization
     .color-scheme = Color scheme
     .scan-colors = Scan Colors

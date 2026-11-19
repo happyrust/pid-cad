@@ -6188,6 +6188,7 @@ properties =
     .solid-history = Test előzményei
     .solid-type = Testtípus
     .role = Szerep
+    .symbol = Szimbólum
     .stylization = Megjelenítési mód
     .color-scheme = Színséma
     .scan-colors = Szkennelési színek

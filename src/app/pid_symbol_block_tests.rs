@@ -1,6 +1,6 @@
 //! A symbol of an imported `.pid` is one object to the pointer and to the
 //! editing commands (plan 2026-11-19-pid-symbol-block, SB-3; SPEC §4.1 and
-//! §4.3).
+//! §4.3), and one object in the Properties panel (SB-6; SPEC §4.4).
 //!
 //! The sheet is the importer's own
 //! (`crate::io::pid::sheet_of_two_valves_a_note_and_a_pipe`), put in the
@@ -15,7 +15,8 @@ use document::entities::Insert;
 use document::{Document, EntityType, Handle};
 use glam::DVec3;
 
-use super::{Message, OpenCADStudio, HOVER_DWELL_MS, SNAP_DWELL_MS};
+use super::{Message, OpenCADStudio, HOVER_DWELL_MS, SNAP_DWELL_MS, VARIES_LABEL};
+use crate::scene::model::object::PropValue;
 
 /// The window the sheet is shown in.
 const VIEW: (f32, f32) = (800.0, 600.0);
@@ -382,6 +383,67 @@ fn loose(entity: &EntityType) -> String {
     format!("{} says {}", drawn(entity), says(entity).join(" "))
 }
 
+/// What a row of the Properties panel reads.
+fn reads(value: &PropValue) -> String {
+    match value {
+        PropValue::ReadOnly(text) | PropValue::EditText(text) => text.clone(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// The rows of the Properties panel as the last click or selection box left
+/// it, group after group: the field of each row and what the row reads.
+fn rows(app: &OpenCADStudio) -> Vec<(&'static str, String)> {
+    app.tabs[app.active_tab]
+        .properties
+        .sections
+        .iter()
+        .flat_map(|section| &section.props)
+        .map(|row| (row.field, reads(&row.value)))
+        .collect()
+}
+
+/// What the row of a field reads, or `None` when the panel has no such row.
+fn row(app: &OpenCADStudio, field: &str) -> Option<String> {
+    rows(app)
+        .into_iter()
+        .find(|(of, _)| *of == field)
+        .map(|(_, read)| read)
+}
+
+/// The rows of these fields, each as `field = what it reads`.
+fn rows_of(app: &OpenCADStudio, fields: &[&str]) -> Vec<String> {
+    fields
+        .iter()
+        .map(|field| match row(app, field) {
+            Some(read) => format!("{field} = {read}"),
+            None => format!("{field}: no such row"),
+        })
+        .collect()
+}
+
+/// The `P&ID` group of the panel, each row as `field = what it reads`.
+fn pid_group(app: &OpenCADStudio) -> Vec<String> {
+    app.tabs[app.active_tab]
+        .properties
+        .sections
+        .iter()
+        .filter(|section| section.title == "P&ID")
+        .flat_map(|section| &section.props)
+        .map(|row| format!("{} = {}", row.field, reads(&row.value)))
+        .collect()
+}
+
+/// The fields of the rows that read `*VARIES*`: the objects selected differ
+/// in them.
+fn varying(app: &OpenCADStudio) -> Vec<&'static str> {
+    rows(app)
+        .into_iter()
+        .filter(|(_, read)| read.contains(VARIES_LABEL) || read.contains("Varies"))
+        .map(|(field, _)| field)
+        .collect()
+}
+
 /// A click on any stroke of a symbol selects the symbol's block reference
 /// and nothing else; the valve beside it is another object, and so is the
 /// pipe.
@@ -451,6 +513,74 @@ fn a_selected_symbol_has_one_grip_at_its_insertion_point() {
         .map(|grip| format!("({:.1}, {:.1})", grip.world.x, grip.world.y))
         .collect();
     assert_eq!(grips, ["(100.0, 100.0)"]);
+}
+
+/// Selected, a symbol is one object in the Properties panel: the rows of
+/// its block reference -- where it is inserted, its scale, its block, its
+/// rotation -- beside the `P&ID` group, which gives its role, the name of
+/// its symbol, its extent and its sheet layer; and no row reads `*VARIES*`.
+/// Several symbols selected follow the rule of any objects selected
+/// together: a row they agree on reads the value, a row they differ on
+/// reads `*VARIES*`.
+#[test]
+fn a_selected_symbol_shows_its_reference_and_its_pid_group_in_the_panel() {
+    let mut app = opened();
+    let first = reference(&app, VALVE, FIRST);
+    let block = as_insert(&app, first).block_name.clone();
+    let of_a_valve = [
+        "pid_role = symbol",
+        "pid_symbol = Ball Valve",
+        "pid_extent = 40.00 × 20.00 mm",
+        "pid_sheet_layer = Process",
+        "pid_sheet_layer_oid = 12",
+    ];
+
+    assert_eq!(pick(&mut app, (85.0, 100.0)), only(first));
+    assert_eq!(pid_group(&app), of_a_valve);
+    // A reference scaled alike on its three axes has one row for its scale.
+    assert_eq!(
+        rows_of(&app, &["ins_x", "ins_y", "ins_z", "u_scale", "rotation"]),
+        [
+            "ins_x = 100.0000",
+            "ins_y = 100.0000",
+            "ins_z = 0.0000",
+            "u_scale = 1.0000",
+            "rotation = 0",
+        ]
+    );
+    assert!(
+        row(&app, "block").is_some_and(|read| read.contains(&block)),
+        "the row of its block reads {:?}",
+        row(&app, "block")
+    );
+    assert_eq!(varying(&app), NOTHING, "one symbol: no row varies");
+
+    assert_eq!(
+        box_takes(&mut app, (75.0, 85.0), (195.0, 115.0)),
+        [FIRST_VALVE, SECOND_VALVE],
+        "a window around the two valves"
+    );
+    assert_eq!(pid_group(&app), of_a_valve, "two placements of one symbol");
+    assert_eq!(
+        rows_of(&app, &["ins_x", "ins_y"]),
+        [
+            format!("ins_x = {VARIES_LABEL}"),
+            "ins_y = 100.0000".to_string()
+        ],
+        "they are inserted side by side"
+    );
+
+    bulb(&mut app, NAMES);
+    assert_eq!(
+        box_takes(&mut app, (195.0, 145.0), (165.0, 105.0)),
+        [SECOND_VALVE, NOTE_SYMBOL],
+        "a crossing box over the second valve and the note"
+    );
+    assert_eq!(
+        row(&app, "pid_symbol").as_deref(),
+        Some(VARIES_LABEL),
+        "two symbols"
+    );
 }
 
 /// The object snaps the strokes of a symbol offer as loose entities, the

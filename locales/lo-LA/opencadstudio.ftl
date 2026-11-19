@@ -6206,6 +6206,7 @@ properties =
     .model-text-height = ຄວາມສູງຂໍ້ຄວາມໂມເດວ
     .insert-unit-scale-is-outside-the-supported-range = ມາດຕາສ່ວນຫົວໜ່ວຍ INSERT ຢູ່ນອກຂອບເຂດທີ່ຮອງຮັບ.
     .role = ບົດບາດ
+    .symbol = ສັນຍາລັກ
     .stylization = ການປັບແຕ່ງຮູບແບບ
     .color-scheme = ໂທນສີ
     .scan-colors = ສີສະແກນ
