@@ -25,6 +25,10 @@ const BASE_NAME_CHARS: usize = 240;
 /// subtraction leaves in the last bits.
 const FINGERPRINT_DECIMALS: usize = 6;
 
+/// The application whose record on a hatch states the origin its pattern
+/// starts from.
+const PATTERN_ORIGIN_APP: &str = "ACAD";
+
 /// The block definitions an import has made for its symbol placements, kept
 /// so that a placement which draws what an earlier one drew refers to that
 /// definition instead of making another.
@@ -86,8 +90,32 @@ impl SymbolBlocks {
 
 /// Move `entity` from drawing coordinates into those of a block whose
 /// reference sits at `origin`, unrotated and unscaled.
+///
+/// Moving a hatch also writes down the origin its pattern starts from --
+/// for one that stated none, the move itself, which is a different point
+/// for every placement. A fill without pattern lines has nothing that
+/// starts anywhere, so it is left saying what it said: the same fill drawn
+/// in two places is the same member.
 fn to_block_space(entity: &mut EntityType, origin: Vector3) {
+    let said = match &*entity {
+        EntityType::Hatch(fill) if fill.pattern.lines.is_empty() => Some(
+            fill.common
+                .extended_data
+                .get_record(PATTERN_ORIGIN_APP)
+                .cloned(),
+        ),
+        _ => None,
+    };
     entity.as_entity_mut().translate(-origin);
+    if let Some(said) = said {
+        let records = &mut entity.common_mut().extended_data;
+        match said {
+            Some(record) => records.upsert_record(record),
+            None => {
+                let _ = records.remove_record(PATTERN_ORIGIN_APP);
+            }
+        }
+    }
 }
 
 /// What two placements have to agree on to share a definition: the `Debug`
@@ -258,6 +286,7 @@ fn define_block(doc: &mut Document, name: &str, members: Vec<EntityType>) {
 
 #[cfg(test)]
 mod tests {
+    use document::entities::hatch::{HatchPattern, HatchPatternLine};
     use document::entities::Spline;
 
     use super::*;
@@ -290,6 +319,23 @@ mod tests {
             EntityType::Circle(ring),
             label(x - 2.1, y + 2.9, "Gate Valve"),
         ]
+    }
+
+    /// A solid fill the way the importer draws one -- a ring handed to
+    /// `Hatch::new` -- around `at`.
+    fn fill(at: (f64, f64)) -> Hatch {
+        let (x, y) = at;
+        let corners = [(x - 1.0, y - 1.0), (x + 1.0, y - 1.0), (x, y + 1.5)];
+        let mut path = BoundaryPath::with_flags(BoundaryPathFlags::EXTERNAL);
+        for (from, to) in corners.iter().zip(corners.iter().cycle().skip(1)) {
+            path.edges.push(BoundaryEdge::Line(LineEdge {
+                start: Vector2::new(from.0, from.1),
+                end: Vector2::new(to.0, to.1),
+            }));
+        }
+        let mut hatch = Hatch::new();
+        hatch.paths.push(path);
+        hatch
     }
 
     /// The fingerprint `members` have once they are in the block space of a
@@ -460,6 +506,96 @@ mod tests {
         };
         assert_at((edge.center.x, edge.center.y), (2.0, 2.0), "edge centre");
         assert_eq!(edge.radius, 1.5);
+    }
+
+    /// A fill with no pattern lines comes out of the move saying what it
+    /// said going in: nothing when it stated no pattern origin, and the
+    /// record it carried when it did. The origin a move writes on a hatch is
+    /// the move, so left on, one symbol placed twice would be two drawings;
+    /// without it they are one.
+    #[test]
+    fn a_solid_fill_is_the_same_member_wherever_its_placement_stands() {
+        let origin = Vector3::new(120.5, -40.25, 0.0);
+
+        let mut member = EntityType::Hatch(Box::new(fill((120.5, -40.25))));
+        to_block_space(&mut member, origin);
+        let EntityType::Hatch(moved) = &member else {
+            panic!("a hatch stays a hatch");
+        };
+        let BoundaryEdge::Line(edge) = &moved.paths[0].edges[0] else {
+            panic!("the first edge is a line");
+        };
+        assert_at((edge.start.x, edge.start.y), (-1.0, -1.0), "edge start");
+        assert_eq!(moved.stored_pattern_origin(), None);
+        assert!(
+            moved.common.extended_data.is_empty(),
+            "the move leaves no record on the fill: {:?}",
+            moved.common.extended_data
+        );
+
+        let mut stated = fill((120.5, -40.25));
+        assert!(stated.record_pattern_origin(Vector2::new(3.0, 4.0)));
+        let said = stated.common.extended_data.clone();
+        let mut member = EntityType::Hatch(Box::new(stated));
+        to_block_space(&mut member, origin);
+        assert_eq!(
+            member.common().extended_data,
+            said,
+            "what a fill did state is left as it stated it"
+        );
+
+        let with_fill = |at: (f64, f64)| {
+            let mut members = valve(at);
+            members.push(EntityType::Hatch(Box::new(fill(at))));
+            members
+        };
+        assert_eq!(
+            print_at((10.1, 20.7), with_fill((10.1, 20.7))),
+            print_at((310.3, 95.9), with_fill((310.3, 95.9)))
+        );
+        let mut doc = Document::new();
+        let mut blocks = SymbolBlocks::default();
+        let first = blocks.place(
+            &mut doc,
+            Some("Ball Valve"),
+            Vector3::new(10.1, 20.7, 0.0),
+            with_fill((10.1, 20.7)),
+        );
+        let second = blocks.place(
+            &mut doc,
+            Some("Ball Valve"),
+            Vector3::new(310.3, 95.9, 0.0),
+            with_fill((310.3, 95.9)),
+        );
+        assert_eq!(second.block_name, first.block_name);
+        assert_eq!((blocks.definitions, blocks.references), (1, 2));
+    }
+
+    /// A hatch that does have pattern lines keeps what the move does to it:
+    /// the lines go with the area and the origin they start from is written
+    /// down, so the pattern falls where it fell.
+    #[test]
+    fn a_patterned_fill_keeps_the_origin_its_lines_start_from() {
+        let mut hatch = fill((120.5, -40.25));
+        hatch.is_solid = false;
+        hatch.pattern = HatchPattern::new("LINES");
+        hatch.pattern.add_line(HatchPatternLine {
+            angle: 0.0,
+            base_point: Vector2::new(121.5, -39.25),
+            offset: Vector2::new(0.0, 0.5),
+            dash_lengths: Vec::new(),
+        });
+        let mut member = EntityType::Hatch(Box::new(hatch));
+        to_block_space(&mut member, Vector3::new(120.5, -40.25, 0.0));
+        let EntityType::Hatch(moved) = &member else {
+            panic!("a hatch stays a hatch");
+        };
+        let base = moved.pattern.lines[0].base_point;
+        assert_at((base.x, base.y), (1.0, 1.0), "the line's base point");
+        let origin = moved
+            .stored_pattern_origin()
+            .expect("the origin the lines start from is stated");
+        assert_at((origin.x, origin.y), (-120.5, 40.25), "pattern origin");
     }
 
     /// The same members give the same fingerprint, a placement elsewhere on

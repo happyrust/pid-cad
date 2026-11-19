@@ -1582,3 +1582,1121 @@ fn a_restored_backup_has_the_symbol_library_its_drawings_look_for() {
     assert!(found_under(drawing, &root).is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A symbol placement is filed as one block reference (plan
+/// 2026-11-19-pid-symbol-block, SB-2): what the placement says is on the
+/// reference, what it draws is the block's definition, and every other
+/// record of the sheet stays the loose entity it was.
+mod placements_as_blocks {
+    use document::entities::Insert;
+    use pid_parse::style_link::{LineSymbology, StyleHop};
+    use pid_parse::symbol_library::PrimitiveFill;
+    use pid_parse::{PidSymbolDefinitionRef, PidSymbolSheetLayer};
+
+    use super::super::*;
+
+    /// The stream the records of these sheets are read from: half of the
+    /// key the style tables are joined on.
+    const STREAM: &str = "/Sheet6";
+    const VALVE: &str = r"\\SRV\Ref\Symbols\Piping\Valves\Ball Valve.sym";
+    const NOTE: &str = r"\\SRV\Ref\Symbols\Design\Annotation\Labels\Item Note.sym";
+    const BODY: PidSymbolDefinitionRef = PidSymbolDefinitionRef { site: 40, sheet: 7 };
+    const CROSS: PidSymbolDefinitionRef = PidSymbolDefinitionRef { site: 41, sheet: 9 };
+
+    /// The sheet layer a record is filed on -- the name the drawing resolves
+    /// for it, if any, and whether the file displays it -- or `None` for a
+    /// record that states no layer.
+    type OnLayer = Option<(Option<&'static str>, bool)>;
+
+    fn point(x: f64, y: f64) -> PidPoint {
+        PidPoint { x, y }
+    }
+
+    /// One decoded record of the sheet: graphic oid `oid`, sheet layer 12.
+    fn record(oid: u32, kind: PidGraphicKind, layer: OnLayer) -> pid_parse::PidGraphicEntity {
+        pid_parse::PidGraphicEntity {
+            id: format!("e{oid}"),
+            drawing_id: None,
+            graphic_oid: Some(oid),
+            source_layer: layer.map(|(name, displayed)| PidSourceLayer {
+                oid: 12,
+                name: name.map(str::to_string),
+                storage_path: "/".to_string(),
+                displayed: Some(displayed),
+            }),
+            kind,
+            coordinate_context: pid_parse::PidCoordinateContext::default(),
+            source: pid_parse::PidGraphicProvenance {
+                stream_path: Some(STREAM.to_string()),
+                byte_range: None,
+                record_id: None,
+                record_kind: None,
+                field_x: None,
+                note: None,
+            },
+            confidence: PidGeometryConfidence::Decoded,
+        }
+    }
+
+    /// A placement of the symbol filed at `path`, unscaled.
+    fn placement(
+        at: (f64, f64),
+        path: Option<&str>,
+        definition: Option<PidSymbolDefinitionRef>,
+        rotation: f64,
+    ) -> PidGraphicKind {
+        PidGraphicKind::SymbolInstance {
+            insertion: point(at.0, at.1),
+            symbol_path: path.map(str::to_string),
+            rotation,
+            scale: [1.0, 1.0],
+            definition,
+        }
+    }
+
+    /// A black, solid stroke style of the given width.
+    fn pen(width_mm: f64) -> Option<PrimitiveStyle> {
+        Some(PrimitiveStyle {
+            rgb: [0, 0, 0],
+            width_mm,
+            dash_mm: Vec::new(),
+            paper: false,
+        })
+    }
+
+    /// A cached symbol body on one layer the file displays, each stroke in
+    /// the style its own storage states for it.
+    fn body(
+        reference: PidSymbolDefinitionRef,
+        strokes: Vec<(SymbolPrimitive, Option<PrimitiveStyle>)>,
+    ) -> PidSymbolDefinition {
+        let (primitives, primitive_styles): (Vec<_>, Vec<_>) = strokes.into_iter().unzip();
+        PidSymbolDefinition {
+            reference,
+            layers: vec![8],
+            sheet_layers: vec![PidSymbolSheetLayer {
+                oid: 8,
+                name: Some("Default".to_string()),
+                displayed: Some(true),
+            }],
+            primitive_layers: vec![8; primitives.len()],
+            primitives,
+            primitive_styles,
+            primitive_letterings: Vec::new(),
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+            template: None,
+        }
+    }
+
+    /// A valve that draws one of everything a body can: two strokes, a
+    /// filled disc and a pair of letters. Placed, it is those four entities
+    /// and the symbol's name beside them.
+    fn valve_body() -> PidSymbolDefinition {
+        body(
+            BODY,
+            vec![
+                (
+                    SymbolPrimitive::Line {
+                        start: (0.0, 0.0),
+                        end: (0.004, 0.0),
+                    },
+                    pen(0.25),
+                ),
+                (
+                    SymbolPrimitive::Line {
+                        start: (0.004, 0.0),
+                        end: (0.004, 0.003),
+                    },
+                    pen(0.25),
+                ),
+                (
+                    SymbolPrimitive::Boundary {
+                        members: vec![SymbolPrimitive::Circle {
+                            center: (0.002, 0.001),
+                            radius: 0.001,
+                        }],
+                        fill: Some(PrimitiveFill {
+                            rgb: Some([0xFF, 0x00, 0x00]),
+                            type_code: 0x002A,
+                        }),
+                    },
+                    None,
+                ),
+                (
+                    SymbolPrimitive::Text {
+                        text: "FO".to_string(),
+                        at: (0.001, 0.002),
+                    },
+                    None,
+                ),
+            ],
+        )
+    }
+
+    /// The body of a label symbol: nothing but the hairline cross it is
+    /// anchored by, so the placement draws its name and no more.
+    fn cross_body() -> PidSymbolDefinition {
+        body(
+            CROSS,
+            vec![
+                (
+                    SymbolPrimitive::Line {
+                        start: (-0.00127, 0.0),
+                        end: (0.00127, 0.0),
+                    },
+                    pen(0.01),
+                ),
+                (
+                    SymbolPrimitive::Line {
+                        start: (0.0, 0.00127),
+                        end: (0.0, -0.00127),
+                    },
+                    pen(0.01),
+                ),
+            ],
+        )
+    }
+
+    /// Style tables that resolve nothing.
+    fn styles() -> Styles {
+        Styles {
+            style_tables_failed: false,
+            styles: LineStyleIndex::new(),
+            style_names: StyleNameIndex::new(),
+            text_heights: Default::default(),
+            lettering_flattened: 0,
+            fills: Default::default(),
+            dash_linetypes: HashMap::new(),
+            font_styles: HashMap::new(),
+            semantics: None,
+        }
+    }
+
+    /// `tables` with record `oid` drawing in a maroon 0.35 mm line style
+    /// the drawing calls `name`.
+    fn styled(mut tables: Styles, oid: u32, name: &str) -> Styles {
+        tables.styles.insert(
+            (STREAM.to_string(), oid),
+            ResolvedLineStyle {
+                style_id: 25,
+                symbology: LineSymbology {
+                    width_m: 0.000_35,
+                    colour: 0x0000_0080,
+                    paper: false,
+                },
+                dash: None,
+                marker: None,
+                complex_dash: None,
+                hop: StyleHop::Direct,
+            },
+        );
+        tables
+            .style_names
+            .insert((STREAM.to_string(), 25), name.to_string());
+        tables
+    }
+
+    fn sheet(
+        entities: Vec<pid_parse::PidGraphicEntity>,
+        bodies: Vec<PidSymbolDefinition>,
+    ) -> NormalizedPidGeometry {
+        NormalizedPidGeometry {
+            entities,
+            symbol_definitions: bodies,
+            ..Default::default()
+        }
+    }
+
+    /// Run the entity loop over `geometry` into a document prepared the way
+    /// an import prepares one.
+    fn import(geometry: &NormalizedPidGeometry, tables: &Styles) -> (Document, Built) {
+        let mut doc = prepare_document(&pid_parse::PidDocument::default());
+        let built = build_document_entities(
+            geometry,
+            tables,
+            &mut None,
+            &ImportUnit::AssumedMetre,
+            &mut doc,
+            1.0,
+        );
+        (doc, built)
+    }
+
+    /// How many block records a document holds before anything is imported.
+    fn blocks_to_start_with() -> usize {
+        prepare_document(&pid_parse::PidDocument::default())
+            .block_records
+            .len()
+    }
+
+    /// The `key=value` strings of an entity's `PID_SEMANTICS` record, in the
+    /// order they were written.
+    fn says(entity: &EntityType) -> Vec<String> {
+        entity
+            .common()
+            .extended_data
+            .get_record(PID_SEMANTICS_XDATA_APP)
+            .into_iter()
+            .flat_map(|record| record.values.iter())
+            .filter_map(|value| match value {
+                document::xdata::XDataValue::String(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The block references in model space, in the order they were filed.
+    fn references(doc: &Document) -> Vec<&EntityType> {
+        doc.model_space_entities()
+            .filter(|entity| matches!(entity, EntityType::Insert(_)))
+            .collect()
+    }
+
+    fn as_insert(entity: &EntityType) -> &Insert {
+        match entity {
+            EntityType::Insert(insert) => insert,
+            other => panic!("not a block reference: {other:?}"),
+        }
+    }
+
+    /// Everything in model space that is not a block reference.
+    fn loose(doc: &Document) -> Vec<&EntityType> {
+        doc.model_space_entities()
+            .filter(|entity| !matches!(entity, EntityType::Insert(_)))
+            .collect()
+    }
+
+    fn members<'a>(doc: &'a Document, block: &str) -> Vec<&'a EntityType> {
+        doc.entities_in_block(block).collect()
+    }
+
+    /// What a placement drew before it was filed as a block: the entities
+    /// of `record`, in drawing coordinates, in the placement's paint.
+    fn drawn_loose(
+        record: &pid_parse::PidGraphicEntity,
+        geometry: &NormalizedPidGeometry,
+        tables: &Styles,
+    ) -> Vec<EntityType> {
+        let cached = match &record.kind {
+            PidGraphicKind::SymbolInstance {
+                definition: Some(definition),
+                ..
+            } => geometry.symbol_definition(*definition),
+            _ => None,
+        };
+        let symbology = style_for(&tables.styles, record);
+        let mut drawn = build_entities(
+            &record.kind,
+            BodySources {
+                cached,
+                library: None,
+            },
+            Projection::for_geometry(geometry, &ImportUnit::AssumedMetre),
+            symbology,
+            LAYER_GEOMETRY,
+            &mut SymbolBodies::default(),
+            &tables.dash_linetypes,
+            1.0,
+            &tables.font_styles,
+        );
+        if let Some(style) = symbology {
+            for entity in &mut drawn {
+                apply_symbology(entity, style, &tables.dash_linetypes, 1.0);
+            }
+        }
+        drawn
+    }
+
+    /// An entity as its `Debug` text, without what filing it adds: the
+    /// handle, the owner and the `PID_SEMANTICS` record.
+    fn portrait(entity: &EntityType) -> String {
+        let mut bare = entity.clone();
+        let common = bare.common_mut();
+        common.handle = document::Handle::NULL;
+        common.owner_handle = document::Handle::NULL;
+        let _ = common.extended_data.remove_record(PID_SEMANTICS_XDATA_APP);
+        format!("{bare:?}")
+    }
+
+    /// The portrait of `drawn`, an entity in drawing coordinates, as the
+    /// member on `layer` of a block whose base point is `origin`: moved
+    /// there and saying no more than it said -- the pattern origin a move
+    /// writes on a hatch is not something the placement drew.
+    fn as_member(drawn: &EntityType, origin: Vector3, layer: &str) -> String {
+        let mut member = drawn.clone();
+        member.as_entity_mut().translate(-origin);
+        let common = member.common_mut();
+        common.extended_data = drawn.common().extended_data.clone();
+        common.layer = layer.to_string();
+        portrait(&member)
+    }
+
+    fn assert_at(actual: Vector3, expected: (f64, f64), what: &str) {
+        assert!(
+            (actual.x - expected.0).abs() < 1e-9
+                && (actual.y - expected.1).abs() < 1e-9
+                && actual.z == 0.0,
+            "{what}: {actual:?} is not {expected:?}"
+        );
+    }
+
+    /// One placement record becomes one block reference in model space and
+    /// one definition in the document, and nothing it drew is left loose --
+    /// not a stroke, not the fill, not the name.
+    #[test]
+    fn a_placement_is_one_reference_to_one_definition_and_leaves_nothing_loose() {
+        let geometry = sheet(
+            vec![record(
+                612,
+                placement((0.1, 0.2), Some(VALVE), Some(BODY), 0.0),
+                Some((Some("Process"), true)),
+            )],
+            vec![valve_body()],
+        );
+        let (doc, built) = import(&geometry, &styles());
+
+        let placed = references(&doc);
+        assert_eq!(placed.len(), 1, "one placement, one block reference");
+        assert_eq!(as_insert(placed[0]).block_name, "SPPID_Ball Valve");
+        assert_eq!(
+            doc.block_records.len(),
+            blocks_to_start_with() + 1,
+            "and one definition"
+        );
+        assert!(
+            loose(&doc).is_empty(),
+            "nothing the placement drew is left loose: {:?}",
+            loose(&doc)
+                .iter()
+                .map(|entity| says(entity))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            members(&doc, "SPPID_Ball Valve").len(),
+            5,
+            "two strokes, the disc, the letters and the name are in the block"
+        );
+        assert_eq!((built.symbol_blocks, built.symbol_definitions), (1, 1));
+    }
+
+    /// The reference stands at the placement's insertion point, unrotated
+    /// and unscaled, and carries the record the placement's strokes used to
+    /// carry -- sheet layer, role, style, measures -- plus the symbol's
+    /// name as the drawing spells it, where the block's name can only hold
+    /// what a table name allows.
+    #[test]
+    fn the_reference_stands_at_the_insertion_point_and_says_what_the_placement_said() {
+        let path = r#"\\SRV\Ref\Symbols\Piping\Valves\Valve <2"> a:b.sym"#;
+        let geometry = sheet(
+            vec![record(
+                612,
+                placement((0.1, 0.2), Some(path), Some(BODY), 0.0),
+                Some((Some("Process"), true)),
+            )],
+            vec![valve_body()],
+        );
+        let tables = styled(styles(), 612, "Equipment - New");
+        let (doc, _) = import(&geometry, &tables);
+
+        let placed = references(&doc);
+        assert_eq!(placed.len(), 1);
+        let insert = as_insert(placed[0]);
+        assert_eq!(
+            insert.block_name, "SPPID_Valve _2__ a_b",
+            "the block is named after the symbol, less what a block name cannot hold"
+        );
+        assert_at(
+            insert.insert_point,
+            (100.0, 200.0),
+            "the insertion point, in millimetres",
+        );
+        assert_eq!(insert.rotation, 0.0);
+        assert_eq!(
+            (insert.x_scale(), insert.y_scale(), insert.z_scale()),
+            (1.0, 1.0, 1.0)
+        );
+        assert_eq!(
+            says(placed[0]),
+            [
+                "sheet_layer=Process",
+                "sheet_layer_oid=12",
+                "role=symbol",
+                "style=Equipment - New",
+                "extent=4.00x3.00",
+                r#"symbol=Valve <2"> a:b"#,
+            ],
+            "the placement's record, and the symbol's name as the drawing spells it"
+        );
+    }
+
+    /// What `_Data.xml` publishes about a placement is the reference's to
+    /// state: the members say what they are and nothing else.
+    #[test]
+    fn the_published_identity_is_on_the_reference_and_not_in_the_block() {
+        let xml = r#"<Container>
+  <PIDInlineComponent><IObject UID="VALVE" ItemTag="GV-101"/></PIDInlineComponent>
+  <PIDRepresentation><IObject UID="REP"/><IDrawingRepresentation GraphicOID="612"/></PIDRepresentation>
+  <Rel><IRel UID1="VALVE" UID2="REP" DefUID="DwgRepresentationComposition"/></Rel>
+</Container>"#;
+        let mut tables = styles();
+        tables.semantics = Some(PidSemanticIndex::from_xml(
+            xml,
+            &pid_parse::PidDocument::default(),
+        ));
+        let geometry = sheet(
+            vec![record(
+                612,
+                placement((0.1, 0.2), Some(VALVE), Some(BODY), 0.0),
+                Some((Some("Process"), true)),
+            )],
+            vec![valve_body()],
+        );
+        let (doc, _) = import(&geometry, &tables);
+
+        let placed = references(&doc);
+        assert_eq!(placed.len(), 1);
+        assert_eq!(
+            says(placed[0]),
+            [
+                "sheet_layer=Process",
+                "sheet_layer_oid=12",
+                "role=symbol",
+                "extent=4.00x3.00",
+                "class=PIDInlineComponent",
+                "label=GV-101",
+                "oid=612",
+                "resolved=direct",
+                "symbol=Ball Valve",
+            ]
+        );
+        let inside: Vec<Vec<String>> = members(&doc, "SPPID_Ball Valve")
+            .iter()
+            .map(|member| says(member))
+            .collect();
+        assert_eq!(
+            inside,
+            [
+                vec!["role=symbol"],
+                vec!["role=symbol"],
+                vec!["role=fill"],
+                vec!["role=symbol"],
+                vec!["role=symbol-label"],
+            ],
+            "a member says what it is and nothing else"
+        );
+    }
+
+    /// The members are the entities the placement drew, moved so that the
+    /// insertion point is the block's base point: the same shapes in the
+    /// same paint, the name among them, each saying its role alone.
+    #[test]
+    fn the_members_are_what_the_placement_drew_about_its_insertion_point() {
+        let geometry = sheet(
+            vec![record(
+                612,
+                placement((0.1, 0.2), Some(VALVE), Some(BODY), 0.0),
+                Some((Some("Process"), true)),
+            )],
+            vec![valve_body()],
+        );
+        let tables = styled(styles(), 612, "Equipment - New");
+        let (doc, _) = import(&geometry, &tables);
+
+        let inside = members(&doc, "SPPID_Ball Valve");
+        let drew = drawn_loose(&geometry.entities[0], &geometry, &tables);
+        assert_eq!(
+            inside.len(),
+            drew.len(),
+            "every entity the placement draws is in the block"
+        );
+        let origin = Vector3::new(100.0, 200.0, 0.0);
+        let layers = ["0", "0", "0", "0", LAYER_SYMBOL_LABEL];
+        let roles = [
+            "role=symbol",
+            "role=symbol",
+            "role=fill",
+            "role=symbol",
+            "role=symbol-label",
+        ];
+        for (index, (member, before)) in inside.iter().zip(&drew).enumerate() {
+            assert_eq!(
+                says(member),
+                [roles[index]],
+                "member {index} says its role and nothing else"
+            );
+            assert_eq!(
+                portrait(member),
+                as_member(before, origin, layers[index]),
+                "member {index} is what the placement drew, about the insertion point"
+            );
+        }
+
+        // The same, by hand, for one member of each kind.
+        let maroon = Color::from_rgb(0x80, 0x00, 0x00);
+        match inside[0] {
+            EntityType::Line(stroke) => {
+                assert_at(
+                    stroke.start,
+                    (0.0, 0.0),
+                    "the first stroke leaves the base point",
+                );
+                assert_at(stroke.end, (4.0, 0.0), "and runs its four millimetres");
+                assert_eq!(
+                    (stroke.common.color, stroke.common.line_weight),
+                    (maroon, LineWeight::Value(34)),
+                    "in the placement's colour and pen"
+                );
+            }
+            other => panic!("the first member is the first stroke: {other:?}"),
+        }
+        match inside[2] {
+            EntityType::Hatch(disc) => {
+                match disc.paths.first().and_then(|path| path.edges.first()) {
+                    Some(BoundaryEdge::CircularArc(edge)) => assert!(
+                        (edge.center.x - 2.0).abs() < 1e-9
+                            && (edge.center.y - 1.0).abs() < 1e-9
+                            && (edge.radius - 1.0).abs() < 1e-9,
+                        "the disc, about the base point: {edge:?}"
+                    ),
+                    other => panic!("the fill is a disc: {other:?}"),
+                }
+                assert_eq!(
+                    disc.common.color,
+                    Color::from_rgb(0xFF, 0x00, 0x00),
+                    "the fill keeps the colour its own style states"
+                );
+                assert_eq!(
+                    disc.stored_pattern_origin(),
+                    None,
+                    "a solid fill states no pattern origin, wherever it stands"
+                );
+            }
+            other => panic!("the third member is the fill: {other:?}"),
+        }
+        match inside[3] {
+            EntityType::Text(letters) => {
+                assert_eq!(letters.value, "FO");
+                assert_at(letters.insertion_point, (1.0, 2.0), "the body's letters");
+                assert_eq!(letters.common.color, maroon, "in the placement's colour");
+            }
+            other => panic!("the fourth member is the body's lettering: {other:?}"),
+        }
+        match inside[4] {
+            EntityType::Text(name) => {
+                assert_eq!(name.value, "Ball Valve");
+                assert_at(
+                    name.insertion_point,
+                    (4.8, 0.5),
+                    "the name, beside the body",
+                );
+                assert_eq!(name.height, SYMBOL_LABEL_HEIGHT_MM);
+                assert_eq!(name.common.layer, LAYER_SYMBOL_LABEL);
+            }
+            other => panic!("the last member is the symbol's name: {other:?}"),
+        }
+    }
+
+    /// Import one placement filed on `layer` -- the valve, or the label
+    /// that draws only its name -- and check which layer the reference is
+    /// on, whether that layer is on, and which layers the members are on.
+    fn check_layers(
+        what: &str,
+        label_only: bool,
+        layer: OnLayer,
+        reference_layer: (&str, bool),
+        member_layers: &[&str],
+    ) -> Built {
+        let (path, definition) = if label_only {
+            (NOTE, CROSS)
+        } else {
+            (VALVE, BODY)
+        };
+        let geometry = sheet(
+            vec![record(
+                612,
+                placement((0.1, 0.2), Some(path), Some(definition), 0.0),
+                layer,
+            )],
+            vec![valve_body(), cross_body()],
+        );
+        let (doc, built) = import(&geometry, &styles());
+
+        let placed = references(&doc);
+        assert_eq!(placed.len(), 1, "{what}: one reference");
+        let (on_layer, layer_on) = reference_layer;
+        assert_eq!(
+            placed[0].common().layer,
+            on_layer,
+            "{what}: the reference's layer"
+        );
+        assert!(
+            says(placed[0]).iter().any(|pair| pair == "role=symbol"),
+            "{what}: a reference is a symbol whatever its block draws: {:?}",
+            says(placed[0])
+        );
+        let declared = doc
+            .layers
+            .get(on_layer)
+            .unwrap_or_else(|| panic!("{what}: {on_layer} is declared"));
+        assert_eq!(
+            !declared.flags.off, layer_on,
+            "{what}: whether {on_layer} is on"
+        );
+        let inside: Vec<&str> = members(&doc, &as_insert(placed[0]).block_name)
+            .iter()
+            .map(|member| member.common().layer.as_str())
+            .collect();
+        assert_eq!(inside, member_layers, "{what}: the members' layers");
+        assert!(loose(&doc).is_empty(), "{what}: nothing is left loose");
+        built
+    }
+
+    /// The reference is filed where the placement's strokes used to be: on
+    /// the sheet layer the drawing names, on `PID-SYMBOL` when it names
+    /// none, on `PID-HIDDEN` when it hides one it does not name. A member
+    /// that would have been on that same layer floats on layer 0, so it
+    /// shows, hides and takes its colour with the reference; a member that
+    /// kept a layer of the importer's own -- the name, and a fill when the
+    /// drawing names no layer -- keeps it inside the block. A placement
+    /// that draws nothing but its name is filed with the names.
+    #[test]
+    fn the_reference_takes_the_placements_layer_and_what_shared_it_floats_on_layer_0() {
+        let named = ["0", "0", "0", "0", LAYER_SYMBOL_LABEL];
+        let shown = check_layers(
+            "a named layer the file displays",
+            false,
+            Some((Some("Process"), true)),
+            ("Process", true),
+            &named,
+        );
+        assert!(shown.sheet_layers_off.is_empty());
+        let hidden = check_layers(
+            "a named layer the file hides",
+            false,
+            Some((Some("Process"), false)),
+            ("Process", false),
+            &named,
+        );
+        assert_eq!(
+            hidden.sheet_layers_off,
+            BTreeSet::from(["Process".to_string()]),
+            "the view filter still starts with the layer off"
+        );
+        let unnamed = ["0", "0", LAYER_FILL, "0", LAYER_SYMBOL_LABEL];
+        check_layers(
+            "a displayed layer with no name",
+            false,
+            Some((None, true)),
+            (LAYER_SYMBOL, true),
+            &unnamed,
+        );
+        check_layers(
+            "no layer at all",
+            false,
+            None,
+            (LAYER_SYMBOL, true),
+            &unnamed,
+        );
+        check_layers(
+            "a hidden layer with no name",
+            false,
+            Some((None, false)),
+            (LAYER_HIDDEN, false),
+            &["0"; 5],
+        );
+
+        let name_alone = ["0"];
+        check_layers(
+            "a label on a named layer the file displays",
+            true,
+            Some((Some("Labels"), true)),
+            (LAYER_SYMBOL_LABEL, false),
+            &name_alone,
+        );
+        check_layers(
+            "a label on a named layer the file hides",
+            true,
+            Some((Some("Labels"), false)),
+            (LAYER_SYMBOL_LABEL, false),
+            &name_alone,
+        );
+        check_layers(
+            "a label on a displayed layer with no name",
+            true,
+            Some((None, true)),
+            (LAYER_SYMBOL_LABEL, false),
+            &name_alone,
+        );
+        check_layers(
+            "a label on no layer at all",
+            true,
+            None,
+            (LAYER_SYMBOL_LABEL, false),
+            &name_alone,
+        );
+        check_layers(
+            "a label on a hidden layer with no name",
+            true,
+            Some((None, false)),
+            (LAYER_HIDDEN, false),
+            &name_alone,
+        );
+    }
+
+    /// Two placements that draw the same thing in different places refer to
+    /// one definition. A placement turned a quarter draws something else,
+    /// so it gets a definition of its own, numbered after the first -- and
+    /// the next one turned the same way shares that. The turn is in the
+    /// definition; every reference is unrotated.
+    #[test]
+    fn placements_that_draw_the_same_share_a_definition_and_a_turned_one_gets_its_own() {
+        let on = Some((Some("Process"), true));
+        let quarter = std::f64::consts::FRAC_PI_2;
+        let geometry = sheet(
+            vec![
+                record(601, placement((0.1, 0.2), Some(VALVE), Some(BODY), 0.0), on),
+                record(602, placement((0.3, 0.1), Some(VALVE), Some(BODY), 0.0), on),
+                record(
+                    603,
+                    placement((0.2, 0.3), Some(VALVE), Some(BODY), quarter),
+                    on,
+                ),
+                record(
+                    604,
+                    placement((0.4, 0.3), Some(VALVE), Some(BODY), quarter),
+                    on,
+                ),
+            ],
+            vec![valve_body()],
+        );
+        let (doc, built) = import(&geometry, &styles());
+
+        let placed = references(&doc);
+        let names: Vec<&str> = placed
+            .iter()
+            .map(|reference| as_insert(reference).block_name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "SPPID_Ball Valve",
+                "SPPID_Ball Valve",
+                "SPPID_Ball Valve_2",
+                "SPPID_Ball Valve_2",
+            ]
+        );
+        assert_eq!(doc.block_records.len(), blocks_to_start_with() + 2);
+        assert_eq!((built.symbol_blocks, built.symbol_definitions), (4, 2));
+        let stands = [
+            (100.0, 200.0),
+            (300.0, 100.0),
+            (200.0, 300.0),
+            (400.0, 300.0),
+        ];
+        for (reference, at) in placed.iter().zip(stands) {
+            let insert = as_insert(reference);
+            assert_at(
+                insert.insert_point,
+                at,
+                "each reference at its own placement",
+            );
+            assert_eq!(
+                insert.rotation, 0.0,
+                "the turn is drawn in the definition, not put on the reference"
+            );
+        }
+
+        let (again, _) = import(&geometry, &styles());
+        let names_again: Vec<String> = references(&again)
+            .iter()
+            .map(|reference| as_insert(reference).block_name.clone())
+            .collect();
+        assert_eq!(
+            names_again, names,
+            "the same drawing imports to the same names"
+        );
+    }
+
+    /// A placement neither body reaches is drawn as its marker dot, and the
+    /// dot is a block like any body: the dot on the base point and the name
+    /// beside it. One that names no symbol has no name to state or letter,
+    /// and all of those share the one definition.
+    #[test]
+    fn a_placement_with_no_body_is_a_block_of_its_marker_dot() {
+        let geometry = sheet(
+            vec![
+                record(701, placement((0.1, 0.2), Some(VALVE), None, 0.0), None),
+                record(702, placement((0.3, 0.2), None, None, 0.0), None),
+                record(703, placement((0.5, 0.2), None, None, 0.0), None),
+            ],
+            Vec::new(),
+        );
+        let (doc, built) = import(&geometry, &styles());
+
+        let placed = references(&doc);
+        let names: Vec<&str> = placed
+            .iter()
+            .map(|reference| as_insert(reference).block_name.as_str())
+            .collect();
+        assert_eq!(names, ["SPPID_Ball Valve", "SPPID_SYMBOL", "SPPID_SYMBOL"]);
+        assert!(placed
+            .iter()
+            .all(|reference| reference.common().layer == LAYER_SYMBOL));
+        assert_eq!(
+            says(placed[0]),
+            ["role=symbol", "extent=3.00x3.00", "symbol=Ball Valve"]
+        );
+        assert_eq!(
+            says(placed[1]),
+            ["role=symbol", "extent=3.00x3.00"],
+            "a placement that names no symbol has no name to state"
+        );
+
+        let named = members(&doc, "SPPID_Ball Valve");
+        assert_eq!(named.len(), 2, "the dot and the name");
+        match named[0] {
+            EntityType::Circle(dot) => {
+                assert_at(dot.center, (0.0, 0.0), "the dot sits on the base point");
+                assert_eq!(dot.radius, SYMBOL_MARKER_RADIUS_MM);
+                assert_eq!(dot.common.layer, "0");
+            }
+            other => panic!("the first member is the dot: {other:?}"),
+        }
+        match named[1] {
+            EntityType::Text(name) => {
+                assert_eq!(name.value, "Ball Valve");
+                assert_at(
+                    name.insertion_point,
+                    (
+                        SYMBOL_MARKER_RADIUS_MM + SYMBOL_LABEL_GAP_MM,
+                        -SYMBOL_LABEL_HEIGHT_MM / 2.0,
+                    ),
+                    "the name, beside the dot",
+                );
+                assert_eq!(name.common.layer, LAYER_SYMBOL_LABEL);
+            }
+            other => panic!("the second member is the name: {other:?}"),
+        }
+        assert_eq!(
+            members(&doc, "SPPID_SYMBOL").len(),
+            1,
+            "a nameless placement is the dot alone"
+        );
+        assert!(loose(&doc).is_empty());
+        assert_eq!(built.symbol_bodies.markers, 3);
+        assert_eq!((built.symbol_blocks, built.symbol_definitions), (3, 2));
+    }
+
+    /// A label placement whose body is only its anchor cross draws its name
+    /// and nothing else, and that name is its block. The reference is filed
+    /// with the names, on the layer that opens switched off, and still says
+    /// which sheet layer the placement is on and that it is a symbol.
+    #[test]
+    fn a_label_that_draws_only_its_name_is_a_block_of_that_name() {
+        let geometry = sheet(
+            vec![record(
+                801,
+                placement((0.1, 0.2), Some(NOTE), Some(CROSS), 0.0),
+                Some((Some("Labels"), true)),
+            )],
+            vec![cross_body()],
+        );
+        let (doc, built) = import(&geometry, &styles());
+
+        let placed = references(&doc);
+        assert_eq!(placed.len(), 1, "the label is a block reference");
+        assert_eq!(as_insert(placed[0]).block_name, "SPPID_Item Note");
+        assert_eq!(placed[0].common().layer, LAYER_SYMBOL_LABEL);
+        assert!(
+            doc.layers
+                .get(LAYER_SYMBOL_LABEL)
+                .is_some_and(|layer| layer.flags.off),
+            "and the names' layer opens switched off"
+        );
+        assert_eq!(
+            says(placed[0]),
+            [
+                "sheet_layer=Labels",
+                "sheet_layer_oid=12",
+                "role=symbol",
+                "extent=2.54x2.54",
+                "symbol=Item Note",
+            ]
+        );
+        let inside = members(&doc, "SPPID_Item Note");
+        assert_eq!(inside.len(), 1, "the name alone");
+        match inside[0] {
+            EntityType::Text(name) => {
+                assert_eq!(name.value, "Item Note");
+                assert_at(
+                    name.insertion_point,
+                    (2.07, -1.0),
+                    "beside where the cross would have been",
+                );
+                assert_eq!(name.common.layer, "0");
+            }
+            other => panic!("the member is the name: {other:?}"),
+        }
+        assert_eq!(says(inside[0]), ["role=symbol-label"]);
+        assert!(loose(&doc).is_empty());
+        assert_eq!((built.symbol_bodies.label_anchors, built.drawn), (1, 1));
+    }
+
+    /// A record that is not a placement -- a line, a run of text, a filled
+    /// ring, a point -- is the loose entity it always was, on the layer it
+    /// was on, carrying its whole record.
+    #[test]
+    fn a_record_that_is_no_placement_stays_loose_with_its_whole_record() {
+        let on = Some((Some("Process"), true));
+        let geometry = sheet(
+            vec![
+                record(
+                    901,
+                    PidGraphicKind::Line {
+                        start: point(0.0, 0.0),
+                        end: point(0.05, 0.0),
+                    },
+                    on,
+                ),
+                record(
+                    902,
+                    PidGraphicKind::Text {
+                        insertion: point(0.01, 0.03),
+                        value: "V-101".to_string(),
+                        height: 0.0025,
+                        rotation: 0.0,
+                        anchor_code: 0,
+                        text_box_width: None,
+                    },
+                    on,
+                ),
+                record(
+                    903,
+                    PidGraphicKind::Polyline {
+                        points: vec![point(0.01, 0.01), point(0.02, 0.01), point(0.02, 0.02)],
+                        closed: true,
+                    },
+                    on,
+                ),
+                record(
+                    904,
+                    PidGraphicKind::Point {
+                        position: point(0.03, 0.03),
+                    },
+                    None,
+                ),
+                record(905, placement((0.1, 0.2), Some(VALVE), Some(BODY), 0.0), on),
+            ],
+            vec![valve_body()],
+        );
+        let mut tables = styled(styles(), 901, "Primary Piping - New");
+        tables.fills.insert(
+            (STREAM.to_string(), 903),
+            ResolvedFill {
+                style_id: 9,
+                type_code: 0x002A,
+                colour: Some(0x00FF_0000),
+                hop: StyleHop::Direct,
+            },
+        );
+        let (doc, _) = import(&geometry, &tables);
+
+        assert_eq!(references(&doc).len(), 1, "the placement alone is a block");
+        let stays = loose(&doc);
+        let kinds: Vec<&str> = stays
+            .iter()
+            .map(|entity| match entity {
+                EntityType::Line(_) => "line",
+                EntityType::Text(_) => "text",
+                EntityType::Hatch(_) => "fill",
+                EntityType::Point(_) => "point",
+                _ => "something else",
+            })
+            .collect();
+        assert_eq!(kinds, ["line", "text", "fill", "point"]);
+        let filed: Vec<(&str, Vec<String>)> = stays
+            .iter()
+            .map(|entity| (entity.common().layer.as_str(), says(entity)))
+            .collect();
+        let on_process = |role: &str| {
+            vec![
+                "sheet_layer=Process".to_string(),
+                "sheet_layer_oid=12".to_string(),
+                format!("role={role}"),
+            ]
+        };
+        let mut line_says = on_process("geometry");
+        line_says.push("style=Primary Piping - New".to_string());
+        assert_eq!(
+            filed,
+            [
+                ("Process", line_says),
+                ("Process", on_process("text")),
+                ("Process", on_process("fill")),
+                (LAYER_POINT, vec!["role=point-ok".to_string()]),
+            ]
+        );
+    }
+
+    /// What the import tallies does not change: a placement's entities
+    /// still count as drawn and towards their sheet layer, and the camera
+    /// is still framed on what they cover -- the name included.
+    #[test]
+    fn the_tallies_count_what_the_placements_draw_as_before() {
+        let on = Some((Some("Process"), true));
+        let geometry = sheet(
+            vec![
+                record(
+                    1001,
+                    PidGraphicKind::Line {
+                        start: point(0.0, 0.0),
+                        end: point(0.05, 0.0),
+                    },
+                    on,
+                ),
+                record(
+                    1002,
+                    placement((0.1, 0.2), Some(VALVE), Some(BODY), 0.0),
+                    on,
+                ),
+                record(
+                    1003,
+                    placement((0.3, 0.1), Some(VALVE), Some(BODY), 0.0),
+                    on,
+                ),
+            ],
+            vec![valve_body()],
+        );
+        let (doc, built) = import(&geometry, &styles());
+
+        assert_eq!(
+            built.drawn, 11,
+            "a line and two placements of five entities each"
+        );
+        assert_eq!(built.decoded, 3);
+        assert_eq!(
+            built.sheet_layer_distribution,
+            BTreeMap::from([(("/".to_string(), 12, Some("Process".to_string())), 11)])
+        );
+        assert_eq!(built.symbol_bodies.cache, 2);
+        let framed = [
+            (built.bounds.min_x, 0.0),
+            (built.bounds.min_y, 0.0),
+            (built.bounds.max_x, 304.8),
+            (built.bounds.max_y, 203.0),
+        ];
+        assert!(
+            framed
+                .iter()
+                .all(|(actual, expected)| (actual - expected).abs() < 1e-9),
+            "the extent runs from the line's start to the second name and the first body's top: {framed:?}"
+        );
+        assert_eq!(
+            doc.model_space_entities().count(),
+            3,
+            "the line and two references"
+        );
+        assert_eq!((built.symbol_blocks, built.symbol_definitions), (2, 1));
+    }
+}

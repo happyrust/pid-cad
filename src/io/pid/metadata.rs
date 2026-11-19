@@ -12,8 +12,8 @@ use super::*;
 /// [`role_of_layer`]), `style` the name the drawing gives the line style it
 /// draws with -- the name `discipline_layer` derives a `PID-STYLE-*` layer
 /// from, stated even when that name is an appearance and earns no layer.
-/// `extent` and `driving` are a symbol placement's measures, the same on
-/// every entity the placement drew (see [`PlacementMeasures`]). The
+/// `extent` and `driving` are a symbol placement's measures, stated on the
+/// placement's block reference (see [`PlacementMeasures`]). The
 /// published pairs come from the drawing's own `_Data.xml`, joined by
 /// `pid-parse`'s semantic index: `class` is the owning object's XML element
 /// name (`PIDPipeline`, `PIDProcessVessel`, …), `label` its `ItemTag` /
@@ -88,10 +88,28 @@ pub(super) fn attach_pid_metadata(
     }
 }
 
+/// Add `symbol=<name>` to the end of an entity's `PID_SEMANTICS` record: the
+/// name of the symbol a placement places, as the drawing spells it. It goes
+/// on the placement's block reference, whose block's name is that name made
+/// fit for a table and numbered where one symbol draws more than one way --
+/// so the key, not the block name, is what says which symbol this is.
+pub(super) fn attach_symbol_name(entity: &mut EntityType, name: &str) {
+    use document::xdata::{ExtendedDataRecord, XDataValue};
+
+    if name.is_empty() {
+        return;
+    }
+    let extended = &mut entity.common_mut().extended_data;
+    let mut record = extended
+        .remove_record(PID_SEMANTICS_XDATA_APP)
+        .unwrap_or_else(|| ExtendedDataRecord::new(PID_SEMANTICS_XDATA_APP));
+    record.add_value(XDataValue::String(format!("symbol={name}")));
+    extended.add_record(record);
+}
+
 /// What a symbol placement says about its size, written into the
-/// `PID_SEMANTICS` record of every entity the placement drew -- body strokes
-/// and the name lettered beside them alike -- so the properties panel can
-/// answer for any of them (plan `2026-09-18-driving-dimensions-reach-the-
+/// `PID_SEMANTICS` record of the placement's block reference for the
+/// properties panel to show (plan `2026-09-18-driving-dimensions-reach-the-
 /// panel-as-library-defaults`, K2).
 ///
 /// The two are different facts and the panel shows them as two rows. The

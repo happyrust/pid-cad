@@ -115,7 +115,6 @@ mod metadata;
 mod page;
 mod styles;
 mod summary;
-#[cfg(test)]
 mod symbol_blocks;
 mod symbols;
 mod template;
@@ -127,6 +126,7 @@ use self::page::*;
 use self::styles::*;
 use self::summary::*;
 pub use self::summary::{ImportSummary, ImportUnit, SUMMARY_PROPERTY_PREFIX};
+use self::symbol_blocks::*;
 use self::symbols::*;
 use self::template::*;
 use self::text::*;
@@ -611,6 +611,8 @@ fn finish(
         parametric_placements,
         sheet_layer_distribution,
         sheet_layers_off,
+        symbol_blocks,
+        symbol_definitions,
         bounds,
     } = built;
     report_import(
@@ -622,6 +624,14 @@ fn finish(
         symbol_bodies,
         &sheet_layer_distribution,
     );
+    // Each placement is one block reference, and placements that draw the
+    // same thing share a definition (plan 2026-11-19-pid-symbol-block).
+    if symbol_blocks > 0 {
+        log::info!(
+            "{}: {symbol_blocks} symbol placement(s) are block references to {symbol_definitions} definition(s)",
+            path.display()
+        );
+    }
     let page_mm = geometry.page_dimensions_mm;
     // The linked template draws the real frame when it overlays; the
     // synthetic rectangle only stands in where it did not -- drawing both
