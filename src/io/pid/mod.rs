@@ -115,6 +115,8 @@ mod metadata;
 mod page;
 mod styles;
 mod summary;
+#[cfg(test)]
+mod symbol_blocks;
 mod symbols;
 mod template;
 mod text;
