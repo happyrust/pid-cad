@@ -281,19 +281,87 @@
 
 - **做什么**：用测试钉住规格 §4.3：图纸图层和角色的开关对引用和块内图元各设什么，图层视图的行和数字，开关之后块重画，隐藏图层上的图例，块内 0 层图元的取色。预计不改产品代码。
 - **验收**
-  - [ ] 关掉一个图纸图层：这一层的引用是 `invisible`，块内图元不变；再打开恢复。
-  - [ ] 关掉角色 `symbol`：引用和块内笔画是 `invisible`。关掉 `fill`：只有块内的填充是。关掉 `symbol-label`：只有块内的符号名是。
-  - [ ] 图层视图（`PidViewSummary`）：图纸图层那几行一个图例算 1 个；角色那几行的数字等于引用数加各定义里的图元数；`symbol`、`symbol-label`、`fill` 三行都在。
-  - [ ] 打开一个隐藏的图纸图层：引用亮起来，它所在的图层（同名图层或 `PID-HIDDEN`）被打开，与现在对散图元的做法相同。
-  - [ ] 显示：块定义的显示缓存里没有 `invisible` 的图元，没有所在图层关着的图元；开关之后按程序现有的流程（`after_pid_view_switch`）刷新，缓存跟着变。
-  - [ ] 隐藏图层上的图例，打开 `PID-SYMBOL-LABEL` 图层后仍然什么都不显示。
-  - [ ] 取色：块内 0 层、颜色随层的笔画，画出来的颜色是引用所在图层的颜色；自己带颜色的笔画颜色不变。
-  - [ ] 符号名图层打开后移动一个图例，符号名跟着走（成功标准第 5 条的末句；SB-3 做完时补进来的）。
-  - [ ] 故意改坏：块内图元不写 `role=`、引用不写 `sheet_layer=`，对应的测试变红。
+  - [x] 关掉一个图纸图层：这一层的引用是 `invisible`，块内图元不变；再打开恢复。
+  - [x] 关掉角色 `symbol`：引用和块内笔画是 `invisible`。关掉 `fill`：只有块内的填充是。关掉 `symbol-label`：只有块内的符号名是。
+  - [x] 图层视图（`PidViewSummary`）：图纸图层那几行一个图例算 1 个；角色那几行的数字等于引用数加各定义里的图元数；`symbol`、`symbol-label`、`fill` 三行都在。
+  - [x] 打开一个隐藏的图纸图层：引用亮起来，它所在的图层（同名图层或 `PID-HIDDEN`）被打开，与现在对散图元的做法相同。
+  - [x] 显示：块定义的显示缓存里没有 `invisible` 的图元，没有所在图层关着的图元；开关之后按程序现有的流程（`after_pid_view_switch`）刷新，缓存跟着变。
+  - [x] 隐藏图层上的图例，打开 `PID-SYMBOL-LABEL` 图层后仍然什么都不显示。
+  - [x] 取色：块内 0 层、颜色随层的笔画，画出来的颜色是引用所在图层的颜色；自己带颜色的笔画颜色不变。
+  - [x] 符号名图层打开后移动一个图例，符号名跟着走（成功标准第 5 条的末句；SB-3 做完时补进来的）。
+  - [x] 故意改坏：块内图元不写 `role=`、引用不写 `sheet_layer=`，对应的测试变红。
 - **验证**：`gates.ps1 -Out D:\scratch\ocs-symblock\sb4 -Files <测试所在的文件> -Quick pid_view_filter`。
 - **依赖**：SB-2。
 - **文件**：`src/io/pid_view_filter.rs`（测试）、`src/io/pid/tests.rs`（测试），显示那两条放在显示缓存或程序一层的测试里。
 - **规模**：M。
+
+**做完**（2026-11-20）
+
+- 放在哪：18 个测试，分三层。
+  - 过滤器一层 3 个，在 `src/io/pid_view_filter.rs` 的测试模块里。图在代码里直接拼：一个块，里面两笔 `role=symbol`、一个 `role=fill`、一个 `role=symbol-label`；两个引用分别在图纸图层 `Process`、`Utility`；一条管线。
+  - 导入器一层 4 个，在 `src/io/pid/tests.rs` 的 `placements_as_blocks` 里。图由导入器的记录循环建：同一个阀放三处（两处 `Process`、一处 `Instrument`），一个只画符号名的图例，一条管线。隐藏图层那个测试另建一张，连 `finish` 也走。
+  - 程序一层 11 个，新文件 `src/app/pid_symbol_view_tests.rs`。图是 `src/io/pid/tests.rs` 里新加的 `sheet_of_valves_on_shown_and_hidden_layers`，连 `finish` 也走：同一个阀放四处，分别在 `Process`、`Instrument`（文件显示的两个图层）、`Demolition`（文件隐藏的图层）和一个没有名字的隐藏图层上，另有一条 `Process` 上的管线。阀画四样：左边一段线（没有自己的样式，颜色随层）、一个圆（自己带颜色，黑）、右边一段线（自己带颜色，绿）、一个红色填充。发给程序的是图层管理器平时发的消息：图纸图层视图里图纸图层一行、角色一行的开关，图层表里的灯泡和取色；移动走命令行的 `MOVE`。
+  - 接线：`src/io/pid/mod.rs` 那行 `#[cfg(test)] pub(crate) use` 多带一张图；`src/app/mod.rs` 加一行声明测试模块；SB-3 的 `src/app/pid_symbol_block_tests.rs` 里 3 个常量、6 个帮手改成 `pub(super)`，`opened()` 拆出 `opened_with`，两个测试文件共用。
+- 产品代码没有改，测试没有查出程序的问题。原有测试的断言一条没动：`src/io/pid/tests.rs` 减掉的 12 行，是 SB-3 那张图里直接调 `finish` 的几行换成了共用的 `finished`；`src/io/pid_view_filter.rs` 减掉的 13 行，是帮手 `line_with` 拆出 `saying`、一个测试里的局部 `rows` 提到模块一级。
+- 简称：
+  - 过滤器一层：F1 `a_block_reference_answers_to_its_sheet_layer_and_the_members_to_their_roles`，F2 `the_summary_counts_a_reference_on_its_sheet_layer_and_the_members_under_their_roles`，F3 `lighting_a_sheet_layer_releases_the_layer_its_block_reference_is_on`。
+  - 导入器一层：I1 `a_sheet_layer_switched_off_darkens_its_references_and_no_member`，I2 `a_role_switched_off_darkens_the_members_that_state_it`，I3 `the_sheet_layer_view_counts_a_symbol_once_and_its_members_by_role`，I4 `a_hidden_sheet_layer_switched_on_lights_its_reference_and_turns_its_layer_on`。
+  - 程序一层：T1 `the_sheet_opens_with_the_symbols_of_its_displayed_layers_drawn`，T2 `the_layer_manager_counts_a_symbol_once_and_its_parts_by_role`，T3 `a_sheet_layer_switched_off_takes_its_symbol_out_whole`，T4 `the_role_of_fills_switched_off_leaves_the_outlines`，T5 `the_role_of_symbols_switched_off_takes_every_symbol_out`，T6 `the_names_show_with_their_layer_and_go_with_their_role`，T7 `the_names_layer_shows_nothing_of_a_symbol_on_a_hidden_layer`，T8 `a_hidden_sheet_layer_switched_on_shows_its_symbol`，T9 `a_symbol_on_the_hidden_layer_with_no_name_shows_with_the_layer_that_holds_it`，T10 `a_stroke_by_layer_takes_the_colour_of_the_layer_its_symbol_is_on`，T11 `the_name_and_the_fill_move_with_their_symbol`。
+- 清单各条由哪个测试管：
+  - 关图纸图层：F1、I1（引用是 `invisible`，块内图元不变，再打开恢复），画面是 T3。
+  - 关角色：F1、I2；画面上 `symbol` 是 T5，`fill` 是 T4，`symbol-label` 是 T6。
+  - 图层视图：F2、I3、T2。
+  - 打开隐藏的图纸图层：F3（引用在 `PID-HIDDEN` 上、在同名图层上各一例）、I4，画面是 T8。
+  - 显示：没有去读缓存里存了哪些图元，读的是画出来的结果（见「程序一层读的是什么」）。「缓存里没有 `invisible` 的图元」「没有所在图层关着的图元」「开关之后刷新」各有一处改坏对应（下表第 5、6、10 行）。
+  - 隐藏图层上的图例，打开 `PID-SYMBOL-LABEL` 后仍然什么都不显示：T7。
+  - 取色：T10；没有名字的隐藏图层上的阀取 `PID-HIDDEN` 的颜色，在 T9。
+  - 移动之后符号名跟着走：T11。
+  - 故意改坏：下表第 1、2 行。
+- 比清单多的：T1（刚打开时的画面）、T9（没有名字的隐藏图层上的图例，规格 §3.1 的最后一种情况；SB-2 测的是结构，这里补画面）。规格 §7 的表里过滤器一层还列了「过滤状态存取往返」，没有另加测试：`PID_VIEW_FILTER` 记录里只有图层名和角色名，与图元无关，原有的 `a_stored_filter_reads_back_and_an_empty_one_leaves_no_record` 管它；在有块的图上，T3、T8 断言的视图那一行的开关，就是从存下的记录读回来的（`PidViewSummary::of`）。
+- 程序一层读的是什么：
+  - 线和文字，读编辑器画图和点选用的那一份（`scene.entity_wires()`），两种读法。按对象读：一个块引用名下画了什么，同时核对出图那一份（`scene.plot_wire_groups`）取的与它相同。按位置读（`drawn_around`）：一个阀的位置周围画出来的全部，不管是哪个对象画的；这种读法没有和出图那一份核对。
+  - 填充，读出图取的那一份（`scene.paper_plot_hatches()`），同时核对点选能取到的那一份（`scene.insert_hatches_for_click()`）与它相同。窗口自己拿到的那份填充清单是场景私有的，没有读。
+  - 图层视图的行，读图层管理器面板自己的数据：名字、数字、开关。
+- 第一次跑：
+  - 过滤器、导入器两层的 7 个第一次跑就通过（`quick-e1.log`）。它们量的是程序现有的做法，会不会红看下面的改坏。
+  - 程序一层的 11 个第一次跑，1 个通过、10 个失败（`quick-v1.log`），都红在帮手 `fills()` 里「点选那份填充与出图那份相同」的核对上：点选那份不带图层名，我拿它和带图层名的出图那份逐字比。改成点选那份按画它的块引用所在的图层叫名之后通过。帮手写错，不是程序的问题。
+  - 改坏跑了四轮，头两轮之后各改过测试的读法：T7、T3、T11 原先只按对象读，把符号名留成散图元时，它们只红在前置条件上（阀名下没有符号名），没有跑到要钉的那一条；即使跑到，由别的对象画出来的符号名它们也看不到。加了按位置读的 `drawn_around`，「什么都没画」和移动前后的断言改用它。第三、四轮用的是同一份测试文件，第四轮多了后加的两处改坏（第 8、14 行）；下表是第四轮的结果。
+- 故意改坏 14 处，用环境变量打开，一次编译跑 15 遍：开关不开的一遍，47 个全过；每处各一遍（`quick-m0.log`、`quick-m-*.log`，汇总在 `mutant-table-round4.txt`）。47 个是四组：过滤器一层 9 个、`placements_as_blocks` 14 个、这里程序一层的 11 个、SB-3 的 13 个。清单要的是头两处；其余是为了让头两处照不到的断言也红一次。18 个新测试每个至少红过一次。
+
+  | # | 改坏 | 改在哪 | 47 个里变红 | 新 18 个里变红的 | 程序一层红在哪 |
+  |---|---|---|---|---|---|
+  | 1 | 块内图元不写 `role=` | `src/io/pid/build.rs` | 9 | I2 I3 T2 T4 T6 | T2 角色行的数字；T4、T6 视图里没有 `fill`、`symbol-label` 这一行 |
+  | 2 | 引用不写 `sheet_layer=` | 同上 | 9 | I1 I3 I4 T2 T3 T8 | T2 图纸图层行的数字；T3 关掉之后阀还在；T8 视图里没有 `Demolition` 这一行 |
+  | 3 | 没有名字的隐藏图层上的图例，符号名留在 `PID-SYMBOL-LABEL` 层 | 同上 | 3 | T2 T9 | T2 角色行的数字（两个定义并成了一个）；T9 打开 `PID-HIDDEN` 后没有符号名 |
+  | 4 | 符号名不进块，留成散图元 | 同上 | 21 | I1 I2 I3 T2 T3 T5 T6 T7 T9 T11 | T3 关掉图纸图层后原处还剩符号名；T5 关掉角色 `symbol` 后还剩符号名；T6、T9 阀名下没有符号名；T7 隐藏的阀的位置上读到符号名；T11 移动后新位置周围没有符号名；T2 的数字 |
+  | 5 | 块的显示缓存不跳过 `invisible` 的图元（`append_defn_entity`） | `src/scene/cache/block_cache.rs` | 1 | T6 | 关掉角色 `symbol-label` 后符号名还在 |
+  | 6 | 块的显示缓存不跳过所在图层关着的图元（同一个函数） | 同上 | 7 | T1 T4 T6 T8 T10 | 符号名图层关着，符号名也画了出来 |
+  | 7 | 0 层、颜色随层的块内图元不取引用所在图层的颜色（`resolve_wire_color`） | 同上 | 2 | T9 T10 | 左边那段线还是原来的颜色 |
+  | 8 | 自己带颜色的块内图元也取引用所在图层的颜色（同一个函数） | 同上 | 9 | T1 T3 T4 T6 T7 T8 T9 T10 T11 | T1 右边那段线不是绿的；T10 换色后圆和右边那段线也变蓝；T3、T7、T11 红在前置条件上 |
+  | 9 | 填充那条路照走 `invisible` 的块内图元 | `src/scene/render_graph.rs` | 1 | T4 | 关掉角色 `fill` 后填充还在 |
+  | 10 | 开关之后不告诉场景图元变了（`after_pid_view_switch` 不调 `bump_geometry`） | `src/app/layers.rs` | 5 | T3 T4 T5 T6 T8 | 开关之后画面没有变；T4 红在填充的两份不一致 |
+  | 11 | 过滤器不管不带 `sheet_layer=` 的对象 | `src/io/pid_view_filter.rs` | 6 | F1 I2 T4 T6 | 关掉角色后填充、符号名还在 |
+  | 12 | 图层视图数角色时只数带 `sheet_layer=` 的对象 | 同上 | 6 | F2 I3 T2 T4 T6 | T2 角色行的数字；T4、T6 视图里没有那一行 |
+  | 13 | 打开图纸图层时不开图层表里的图层 | 同上 | 4 | F3 I4 T8 | T8 图层 `Demolition` 没有被打开 |
+  | 14 | 过滤器只会关：已经暗的对象不再亮 | 同上 | 12 | F1 F3 I1 I2 I4 T3 T4 T5 T6 T8 | T3、T4、T5、T6 红在「再打开，画面与之前相同」；T8 红在图层没有被打开 |
+
+  改坏点已删：动过的 5 个产品文件里，`build.rs`、`block_cache.rs`、`render_graph.rs`、`layers.rs` 与上一个提交逐字节相同，`pid_view_filter.rs` 的改动全在测试模块里；源码里没有剩下开关。改坏的内容留在 `mutants.diff`。
+- 没有单独红过的，和只是顺带红的：
+  - 每个测试只红在第一条不成立的断言上，排在它后面的没有跑到。红过的：T1 的第一条（`Process` 上的阀名下画了什么）；T2 的两条；T3 的「关掉之后原处什么都不剩」和「再打开，画面与之前相同」；T4 的「填充没有了」「轮廓还在」和再打开；T5 的「每个阀的位置上什么都不剩」和再打开；T6 的打开符号名图层之后、关掉角色之后、再打开三处；T7 的「隐藏图层 `Demolition` 上的阀的位置上什么都没画」；T8 的「图层被打开」和「阀画出来了」；T9、T10 各自的第一条画面断言；T11 的「新位置周围画的是笔画加符号名」。
+  - 没有红过的：T1 里隐藏的两个阀的位置上什么都没画；T7 里没有名字的隐藏图层那个阀的位置、两处点不到隐藏的符号名、点得到画出来的符号名；T8 里再关掉之后的两条；T10 里填充颜色不变的那几条（填充走另一条路，第 8 处改不到它）；T11 里移动之后的后五条（按对象读、原处什么都不剩、填充跟着走、两次点选）。
+  - 第 2、3 处改坏下 T7 照样通过。原因是这个程序里，引用所在的图层关着时整个引用不画，块里在别的开着的图层上的图元也不画。隐藏的命名图层上的图例有两道保险：引用是 `invisible`，引用所在的图层也关着；去掉一道还有另一道。两道都去掉的情况没有试。
+- 测试钉住的行为：
+  - 关掉图纸图层 `Process`：这一层的引用和管线是 `invisible`（导入器一层那张图上 4 个对象），块里的图元一个不变，图层表不动（`released_layer` 是空，同名图层的灯泡还亮）。画面上这一层的阀整个不见——笔画、符号名、填充——管线也不见；另一层上画同一个定义的阀照常。再打开，画面与关之前相同。
+  - 关掉角色 `symbol`：引用和定义里的笔画、字母变暗（导入器一层那张图上 7 个对象），填充和符号名的 `invisible` 不变；画面上每个阀整个不见，因为引用带这个角色，管线还在。关掉 `fill`：只有定义里的填充变暗（1 个），画面上填充不见、轮廓还在。关掉 `symbol-label`：只有各定义里的符号名变暗（2 个），画面上符号名不见，符号名图层的灯泡还亮着。
+  - 图层视图的数字，程序一层那张图：图纸图层行是 `Demolition` 1（关）、`Instrument` 1、`Process` 2；没有名字的隐藏图层上的阀不带 `sheet_layer=`，没有行。角色行是 `geometry` 1、`symbol` 10（4 个引用，加两个定义各 3 笔）、`symbol-label` 2、`fill` 2。这张图上同一个阀有两个定义：没有名字的隐藏图层上的那个，符号名在 0 层，与别的不同（规格 §3.1）。
+  - 打开隐藏的图纸图层 `Demolition`：引用亮起来，图层表里的 `Demolition` 被打开，`PID-HIDDEN` 不动；阀和填充画出来，没有名字的隐藏图层上的阀还是不见。再关掉：引用变暗，阀不见，图层表不动，灯泡还亮。
+  - 没有名字的隐藏图层上的阀：引用没有被设成 `invisible`，看不见是因为它在 `PID-HIDDEN` 上。打开 `PID-HIDDEN` 的灯泡，它整个显示出来，符号名也在（符号名图层关着也一样，因为它的符号名在 0 层）；左边那段线和符号名取 `PID-HIDDEN` 的灰色，填充也在。
+  - 打开 `PID-SYMBOL-LABEL` 之后，两个隐藏的阀的位置上什么都没画，在它们符号名的位置上点不到东西；在显示着的阀的符号名上点一下，选中的是这个图例。
+  - 取色：把图层 `Process` 改成蓝色，这一层的阀左边那段线（0 层、随层）和管线变蓝，圆、右边那段线、填充不变；`Instrument` 上画同一个定义的阀不变。再把 `Instrument` 改成洋红，那边的左段线变洋红，`Process` 的还是蓝。
+  - 移动：符号名图层开着，选中 `Process` 上的阀，`MOVE` 从 (0, 0) 到 (0, −40)。新位置周围画的是笔画加符号名，都在这个引用名下；原处什么都不剩；填充到了新位置；在新位置的符号名上点一下选中这个图例，原来符号名的位置上点不到。
+- 读数：新增测试 18 个。全量 7,136 个：通过 7,083，忽略 53，失败 0（上一个提交的 7,065 加新增的 18）。clippy 656 / 1,051，与上一个提交相同；点到 `src/app/mod.rs`（4 条）、`src/io/pid/mod.rs`（1 条）的都不在这次动的行上，另外 4 个文件上没有。6 个文件都是 `new=0`。分层报告与上一个提交逐行相同。改动 +1,249 −40（不算本文件），全是测试和只在测试里编译的接线。还原产品文件之后第一次启动的全量检查没有重新编译：还原用的是复制，保留了旧的修改时间，编译工具认为不用重编，测的是带着改坏代码（开关没开）的旧程序。跑了 54 秒发现后停掉，把 5 个文件的修改时间改成当时再重跑；这里的读数是重新编译之后的。
+- 没验证的：没有在程序界面里看，留给 SB-10。窗口自己拿到的那份填充清单没有读；按位置读的那种没有和出图那一份核对。测试图只有一种画法，没有转过、镜像过的摆放，没有图框，没有只画符号名的图例放在隐藏图层上的情况。图层只测了关，没有测冻结；随层只测了颜色，线宽、线型没有测。打开隐藏的图纸图层时命令行的那句提示没有断言。移动只量了 `MOVE` 平移一次。隐藏图例的两道保险都去掉的情况没有试。
+- 证据：`D:\scratch\ocs-symblock\sb4\`（`quick-e1.log`、`quick-v1.log`、`quick-m0.log`、`quick-m-*.log`、`mutant-table-round4.txt`、`mutants.diff`、`chainfinal.txt`）。
 
 ### SB-5 【接线】导入摘要加两项
 

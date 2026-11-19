@@ -20,7 +20,7 @@ use super::{Message, OpenCADStudio, HOVER_DWELL_MS, SNAP_DWELL_MS};
 /// The window the sheet is shown in.
 const VIEW: (f32, f32) = (800.0, 600.0);
 /// The names the sheet's two symbols are placed under.
-const VALVE: &str = "Ball Valve";
+pub(super) const VALVE: &str = "Ball Valve";
 const NOTE: &str = "Item Note";
 /// Where the sheet places them: the valve twice, the label symbol once.
 const FIRST: (f64, f64) = (100.0, 100.0);
@@ -32,24 +32,29 @@ const SECOND_VALVE: &str = "Ball Valve at (170.0, 100.0)";
 const NOTE_SYMBOL: &str = "Item Note at (170.0, 140.0)";
 const PIPE: &str = "line (90.0, 80.0)-(180.0, 80.0) on Process";
 /// What a click or a selection box that finds nothing selects.
-const NOTHING: [&str; 0] = [];
+pub(super) const NOTHING: [&str; 0] = [];
 /// The layer every symbol's name is drawn on.
-const NAMES: &str = "PID-SYMBOL-LABEL";
+pub(super) const NAMES: &str = "PID-SYMBOL-LABEL";
 /// How far apart the clicks of `clicks_take` are, in millimetres. A click
 /// takes what is drawn within 8 pixels of it, 2 mm at this zoom, so nothing
 /// drawn slips between two of them.
 const STEP: f64 = 0.5;
 
-/// The program with the sheet open, looking at (40, 40)-(240, 190) of it:
-/// four pixels to the millimetre.
+/// The program with the sheet open; see `opened_with`.
 fn opened() -> OpenCADStudio {
+    opened_with(crate::io::pid::sheet_of_two_valves_a_note_and_a_pipe())
+}
+
+/// The program with `sheet` open, looking at (40, 40)-(240, 190) of it:
+/// four pixels to the millimetre.
+pub(super) fn opened_with(sheet: Document) -> OpenCADStudio {
     let mut app = OpenCADStudio::new_for_test();
     let _ = app.automation_op(r#"{"op":"new"}"#);
     let i = app.active_tab;
     // The steps of `open_drawing_headless`, from the loaded document on.
     let tab = &mut app.tabs[i];
     tab.scene.clear();
-    tab.scene.document = crate::io::pid::sheet_of_two_valves_a_note_and_a_pipe();
+    tab.scene.document = sheet;
     tab.scene.sync_annotation_scale_from_header();
     tab.scene.bump_layout_epoch();
     tab.scene.bump_scale_epoch();
@@ -78,13 +83,13 @@ fn opened() -> OpenCADStudio {
     app
 }
 
-fn document(app: &OpenCADStudio) -> &Document {
+pub(super) fn document(app: &OpenCADStudio) -> &Document {
     &app.tabs[app.active_tab].scene.document
 }
 
 /// The `key=value` strings of an entity's `PID_SEMANTICS` record, in the
 /// order they were written.
-fn says(entity: &EntityType) -> Vec<String> {
+pub(super) fn says(entity: &EntityType) -> Vec<String> {
     entity
         .common()
         .extended_data
@@ -136,7 +141,7 @@ fn placed<'a>(app: &'a OpenCADStudio, symbol: &str) -> Vec<&'a Insert> {
 }
 
 /// The one block reference of `symbol` inserted at `at`.
-fn reference(app: &OpenCADStudio, symbol: &str, at: (f64, f64)) -> Handle {
+pub(super) fn reference(app: &OpenCADStudio, symbol: &str, at: (f64, f64)) -> Handle {
     let found: Vec<Handle> = placed(app, symbol)
         .into_iter()
         .filter(|insert| is_at(insert, at))
@@ -162,7 +167,7 @@ fn in_model_space(app: &OpenCADStudio) -> BTreeSet<Handle> {
 }
 
 /// Whether the layer's bulb is lit.
-fn shown(app: &OpenCADStudio, layer: &str) -> bool {
+pub(super) fn shown(app: &OpenCADStudio, layer: &str) -> bool {
     !document(app)
         .layers
         .get(layer)
@@ -172,7 +177,7 @@ fn shown(app: &OpenCADStudio, layer: &str) -> bool {
 }
 
 /// Click the bulb of a layer's row in the Layer Manager.
-fn bulb(app: &mut OpenCADStudio, layer: &str) {
+pub(super) fn bulb(app: &mut OpenCADStudio, layer: &str) {
     let _ = app.update(Message::LayerToggleVisible(layer.to_string()));
 }
 
@@ -277,7 +282,7 @@ fn pick(app: &mut OpenCADStudio, at: (f64, f64)) -> BTreeSet<Handle> {
 }
 
 /// What one click selects, as `named` names it.
-fn click_takes(app: &mut OpenCADStudio, at: (f64, f64)) -> Vec<String> {
+pub(super) fn click_takes(app: &mut OpenCADStudio, at: (f64, f64)) -> Vec<String> {
     let taken = pick(app, at);
     named(app, &taken)
 }

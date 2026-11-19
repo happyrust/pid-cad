@@ -1588,6 +1588,7 @@ fn a_restored_backup_has_the_symbol_library_its_drawings_look_for() {
 /// reference, what it draws is the block's definition, and every other
 /// record of the sheet stays the loose entity it was.
 pub(super) mod placements_as_blocks {
+    use crate::io::pid_view_filter::{switch_role, switch_sheet_layer, PidViewRow, Switched};
     use document::entities::Insert;
     use pid_parse::style_link::{LineSymbology, StyleHop};
     use pid_parse::symbol_library::PrimitiveFill;
@@ -1823,6 +1824,25 @@ pub(super) mod placements_as_blocks {
         (doc, built)
     }
 
+    /// `geometry` imported by every step an import takes once the file is
+    /// parsed, `finish` included: the layers and the view filter are the
+    /// ones an open leaves. `file` is the name the import is logged under.
+    fn finished(file: &str, geometry: &NormalizedPidGeometry) -> Document {
+        let tables = styles();
+        let (mut doc, built) = import(geometry, &tables);
+        let _ = finish(
+            Path::new(file),
+            geometry,
+            None,
+            &tables,
+            ImportUnit::AssumedMetre,
+            built,
+            None,
+            &mut doc,
+        );
+        doc
+    }
+
     /// The sheet the program-level tests of a symbol as one object open
     /// (`crate::app::pid_symbol_block_tests`, SB-3): built by the steps an
     /// import takes once the file is parsed, `finish` included, so its
@@ -1880,19 +1900,83 @@ pub(super) mod placements_as_blocks {
             ],
             vec![valve, cross_body()],
         );
-        let tables = styles();
-        let (mut doc, built) = import(&geometry, &tables);
-        let _ = finish(
-            Path::new("two-valves.pid"),
-            &geometry,
-            None,
-            &tables,
-            ImportUnit::AssumedMetre,
-            built,
-            None,
-            &mut doc,
+        finished("two-valves.pid", &geometry)
+    }
+
+    /// The sheet the program-level tests of what is drawn of a symbol open
+    /// (`crate::app::pid_symbol_view_tests`, SB-4), built like the one
+    /// above. One valve is placed four times, in millimetres of the
+    /// drawing:
+    ///
+    /// - at (100, 100) on `Process` and at (170, 100) on `Instrument`, two
+    ///   layers the file displays;
+    /// - at (100, 150) on `Demolition`, a layer the file hides;
+    /// - at (170, 150) on a hidden layer the file gives no name;
+    ///
+    /// and a pipe runs from (90, 80) to (180, 80) on `Process`. The valve
+    /// is a stub from 20 to 10 left of the insertion point, in no style of
+    /// its own; a ring of radius 10 around the point, in black; a stub from
+    /// 10 to 20 right of it, in green; and a red disc of radius 5 inside
+    /// the ring.
+    pub(crate) fn sheet_of_valves_on_shown_and_hidden_layers() -> Document {
+        let stub = |from: f64, to: f64| SymbolPrimitive::Line {
+            start: (from, 0.0),
+            end: (to, 0.0),
+        };
+        let green = Some(PrimitiveStyle {
+            rgb: [0x00, 0x80, 0x00],
+            width_mm: 0.25,
+            dash_mm: Vec::new(),
+            paper: false,
+        });
+        let valve = body(
+            BODY,
+            vec![
+                (stub(-0.02, -0.01), None),
+                (
+                    SymbolPrimitive::Circle {
+                        center: (0.0, 0.0),
+                        radius: 0.01,
+                    },
+                    pen(0.25),
+                ),
+                (stub(0.01, 0.02), green),
+                (
+                    SymbolPrimitive::Boundary {
+                        members: vec![SymbolPrimitive::Circle {
+                            center: (0.0, 0.0),
+                            radius: 0.005,
+                        }],
+                        fill: Some(PrimitiveFill {
+                            rgb: Some([0xFF, 0x00, 0x00]),
+                            type_code: 0x002A,
+                        }),
+                    },
+                    None,
+                ),
+            ],
         );
-        doc
+        let place = |oid: u32, at: (f64, f64), layer: OnLayer| {
+            record(oid, placement(at, Some(VALVE), Some(BODY), 0.0), layer)
+        };
+        let geometry = sheet(
+            vec![
+                place(801, (0.1, 0.1), Some((Some("Process"), true))),
+                place(802, (0.17, 0.1), Some((Some("Instrument"), true))),
+                place(803, (0.1, 0.15), Some((Some("Demolition"), false))),
+                place(804, (0.17, 0.15), Some((None, false))),
+                record(
+                    805,
+                    PidGraphicKind::Line {
+                        start: point(0.09, 0.08),
+                        end: point(0.18, 0.08),
+                    },
+                    Some((Some("Process"), true)),
+                ),
+            ],
+            vec![valve],
+        );
+        finished("valves-on-layers.pid", &geometry)
     }
 
     /// How many block records a document holds before anything is imported.
@@ -1941,6 +2025,28 @@ pub(super) mod placements_as_blocks {
 
     fn members<'a>(doc: &'a Document, block: &str) -> Vec<&'a EntityType> {
         doc.entities_in_block(block).collect()
+    }
+
+    /// Which entities in model space are dark, in the order they were filed.
+    fn dark(doc: &Document) -> Vec<bool> {
+        doc.model_space_entities()
+            .map(|entity| entity.common().invisible)
+            .collect()
+    }
+
+    /// Which members of a block are dark, in the order they were filed.
+    fn dark_inside(doc: &Document, block: &str) -> Vec<bool> {
+        members(doc, block)
+            .iter()
+            .map(|member| member.common().invisible)
+            .collect()
+    }
+
+    /// The rows of one axis of the sheet-layer view: name, count, switch.
+    fn rows(rows: &[PidViewRow]) -> Vec<(String, usize, bool)> {
+        rows.iter()
+            .map(|row| (row.name.clone(), row.entities, row.on))
+            .collect()
     }
 
     /// What a placement drew before it was filed as a block: the entities
@@ -2770,5 +2876,233 @@ pub(super) mod placements_as_blocks {
             "the line and two references"
         );
         assert_eq!((built.symbol_blocks, built.symbol_definitions), (2, 1));
+    }
+
+    /// The blocks the valve and the label symbol are filed as.
+    const VALVE_BLOCK: &str = "SPPID_Ball Valve";
+    const NOTE_BLOCK: &str = "SPPID_Item Note";
+
+    /// A placement of the valve at (`x`, 0.2) metres, filed on `layer`.
+    fn valve_at(oid: u32, x: f64, layer: OnLayer) -> pid_parse::PidGraphicEntity {
+        record(
+            oid,
+            placement((x, 0.2), Some(VALVE), Some(BODY), 0.0),
+            layer,
+        )
+    }
+
+    /// A sheet whose layers the file displays: the valve twice on `Process`
+    /// and once on `Instrument`, a label symbol on `Process` and a pipe on
+    /// `Process`. In model space that is four references and the pipe, in
+    /// that order. The three valves draw one definition -- two strokes, the
+    /// disc, the letters, the name -- and the label one of its own, which
+    /// holds its name.
+    fn valves_a_note_and_a_pipe() -> Document {
+        let process = Some((Some("Process"), true));
+        let geometry = sheet(
+            vec![
+                valve_at(1101, 0.1, process),
+                valve_at(1102, 0.3, process),
+                valve_at(1103, 0.5, Some((Some("Instrument"), true))),
+                record(
+                    1104,
+                    placement((0.3, 0.3), Some(NOTE), Some(CROSS), 0.0),
+                    process,
+                ),
+                record(
+                    1105,
+                    PidGraphicKind::Line {
+                        start: point(0.0, 0.0),
+                        end: point(0.05, 0.0),
+                    },
+                    process,
+                ),
+            ],
+            vec![valve_body(), cross_body()],
+        );
+        let (doc, _) = import(&geometry, &styles());
+        doc
+    }
+
+    /// A sheet layer switched off darkens the references the drawing files
+    /// on it, and the pipe, and nothing inside a block: the valve on the
+    /// other layer draws the same definition. Switched on again, they are
+    /// back.
+    #[test]
+    fn a_sheet_layer_switched_off_darkens_its_references_and_no_member() {
+        let mut doc = valves_a_note_and_a_pipe();
+        assert_eq!(dark(&doc), [false; 5]);
+
+        let switched = switch_sheet_layer(&mut doc, "Process", false);
+        assert_eq!(
+            switched,
+            Switched {
+                entities: 4,
+                released_layer: None
+            },
+            "two valves, the label and the pipe"
+        );
+        assert_eq!(
+            dark(&doc),
+            [true, true, false, true, true],
+            "the valve on Instrument stays lit"
+        );
+        assert_eq!(dark_inside(&doc, VALVE_BLOCK), [false; 5]);
+        assert_eq!(dark_inside(&doc, NOTE_BLOCK), [false]);
+
+        let switched = switch_sheet_layer(&mut doc, "Process", true);
+        assert_eq!(
+            switched,
+            Switched {
+                entities: 4,
+                released_layer: None
+            }
+        );
+        assert_eq!(dark(&doc), [false; 5]);
+    }
+
+    /// A role switched off darkens what states it, inside the blocks too:
+    /// `symbol` every reference and the strokes and letters of the bodies,
+    /// `fill` the disc and nothing else, `symbol-label` the names and
+    /// nothing else.
+    #[test]
+    fn a_role_switched_off_darkens_the_members_that_state_it() {
+        let mut doc = valves_a_note_and_a_pipe();
+
+        let switched = switch_role(&mut doc, "symbol", false);
+        assert_eq!(
+            switched.entities, 7,
+            "four references, two strokes and the letters"
+        );
+        assert_eq!(
+            dark(&doc),
+            [true, true, true, true, false],
+            "the pipe is no symbol"
+        );
+        assert_eq!(
+            dark_inside(&doc, VALVE_BLOCK),
+            [true, true, false, true, false],
+            "the disc and the name are not"
+        );
+        assert_eq!(dark_inside(&doc, NOTE_BLOCK), [false]);
+        assert_eq!(switch_role(&mut doc, "symbol", true).entities, 7);
+
+        let switched = switch_role(&mut doc, "fill", false);
+        assert_eq!(switched.entities, 1);
+        assert_eq!(dark(&doc), [false; 5]);
+        assert_eq!(
+            dark_inside(&doc, VALVE_BLOCK),
+            [false, false, true, false, false]
+        );
+        assert_eq!(dark_inside(&doc, NOTE_BLOCK), [false]);
+        assert_eq!(switch_role(&mut doc, "fill", true).entities, 1);
+
+        let switched = switch_role(&mut doc, "symbol-label", false);
+        assert_eq!(switched.entities, 2, "the valve's name and the label's");
+        assert_eq!(dark(&doc), [false; 5]);
+        assert_eq!(
+            dark_inside(&doc, VALVE_BLOCK),
+            [false, false, false, false, true]
+        );
+        assert_eq!(dark_inside(&doc, NOTE_BLOCK), [true]);
+    }
+
+    /// The sheet-layer view counts a symbol once on its sheet layer, by its
+    /// reference, whatever its block draws. Along the roles it counts the
+    /// reference as a symbol and each member of a definition under what it
+    /// is, once however many references draw it -- so the rows of the
+    /// symbols, of their names and of their fills are all there.
+    #[test]
+    fn the_sheet_layer_view_counts_a_symbol_once_and_its_members_by_role() {
+        let summary = PidViewSummary::of(&valves_a_note_and_a_pipe());
+        assert_eq!(
+            rows(&summary.layers),
+            [
+                ("Instrument".to_string(), 1, true),
+                ("Process".to_string(), 4, true),
+            ],
+            "a valve; two valves, the label and the pipe"
+        );
+        assert_eq!(
+            rows(&summary.roles),
+            [
+                ("geometry".to_string(), 1, true),
+                ("symbol".to_string(), 7, true),
+                ("symbol-label".to_string(), 2, true),
+                ("fill".to_string(), 1, true),
+            ],
+            "symbol: four references and, in the valve's definition, two strokes and the letters"
+        );
+    }
+
+    /// A sheet layer the file hides starts switched off: the reference on
+    /// it is dark, on a layer of the table that is off. Switching the sheet
+    /// layer on lights the reference and turns that layer on with it, as it
+    /// does for a loose entity, and switching it off again leaves the table
+    /// alone. A placement on a hidden layer the file gives no name is under
+    /// `PID-HIDDEN` and states no sheet layer: no row of the view is its
+    /// switch.
+    #[test]
+    fn a_hidden_sheet_layer_switched_on_lights_its_reference_and_turns_its_layer_on() {
+        let geometry = sheet(
+            vec![
+                valve_at(1201, 0.1, Some((Some("Demolition"), false))),
+                valve_at(1202, 0.3, Some((Some("Process"), true))),
+                valve_at(1203, 0.5, Some((None, false))),
+            ],
+            vec![valve_body()],
+        );
+        let mut doc = finished("hidden-layers.pid", &geometry);
+        let filed: Vec<String> = references(&doc)
+            .iter()
+            .map(|reference| reference.common().layer.clone())
+            .collect();
+        assert_eq!(filed, ["Demolition", "Process", LAYER_HIDDEN]);
+        let lit = |doc: &Document| -> Vec<bool> {
+            references(doc)
+                .iter()
+                .map(|reference| !reference.common().invisible)
+                .collect()
+        };
+        let is_on = |doc: &Document, layer: &str| !doc.layers.get(layer).unwrap().flags.off;
+        assert_eq!(lit(&doc), [false, true, true]);
+        assert!(!is_on(&doc, "Demolition"));
+        assert!(!is_on(&doc, LAYER_HIDDEN));
+        assert_eq!(
+            rows(&PidViewSummary::of(&doc).layers),
+            [
+                ("Demolition".to_string(), 1, false),
+                ("Process".to_string(), 1, true),
+            ]
+        );
+
+        let switched = switch_sheet_layer(&mut doc, "Demolition", true);
+        assert_eq!(
+            switched,
+            Switched {
+                entities: 1,
+                released_layer: Some("Demolition".to_string())
+            }
+        );
+        assert_eq!(lit(&doc), [true; 3]);
+        assert!(is_on(&doc, "Demolition"));
+        assert!(
+            !is_on(&doc, LAYER_HIDDEN),
+            "PID-HIDDEN holds nothing of Demolition"
+        );
+
+        let switched = switch_sheet_layer(&mut doc, "Demolition", false);
+        assert_eq!(
+            switched,
+            Switched {
+                entities: 1,
+                released_layer: None
+            }
+        );
+        assert_eq!(lit(&doc), [false, true, true]);
+        assert!(
+            is_on(&doc, "Demolition"),
+            "switching off leaves the layer table alone"
+        );
     }
 }
