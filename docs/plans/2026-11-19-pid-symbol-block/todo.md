@@ -747,13 +747,47 @@
 
 - **做什么**：在 `docs/pid-platform/requirements/90-migration-and-interop.md` 的 `REQ-MIG-008` 里补一条验收标准，编号和写法照该文档现有的。意思是：打开的图纸上，文件里的每个符号实例是一个能整体选中的对象，在它的任意一笔上点一下就选中整个符号，不依赖图纸旁边的发布数据。
 - **验收**
-  - [ ] 验收标准加上了，编号接着现有的，写法一致。
-  - [ ] 文档检查 `python -m pytest scripts/pid-platform -q -p no:cacheprovider` 的结果不比改之前差（改之前先量一遍）。
-  - [ ] 文档检查要求同步的其它文件（索引、对照表）一并改。
+  - [x] 验收标准加上了，编号接着现有的，写法一致。
+  - [x] 文档检查 `python -m pytest scripts/pid-platform -q -p no:cacheprovider` 的结果不比改之前差（改之前先量一遍）。
+  - [x] 文档检查要求同步的其它文件（索引、对照表）一并改。
 - **验证**：上面的文档检查命令，改前改后各一遍，输出存 `D:\scratch\ocs-symblock\sb8\`。
 - **依赖**：SB-3（验收标准说的行为先得有测试）。
 - **文件**：`docs/pid-platform/requirements/90-migration-and-interop.md`，可能还有文档检查要求同步的文件。
 - **规模**：S。
+
+**做完**（2026-11-20）
+
+- 改了什么：`docs/pid-platform/requirements/90-migration-and-interop.md` 的 `REQ-MIG-008`，第 5 条验收标准之后加第 6 条（第 208 行，一行），别的没动：
+  > 6. 打开的图纸上，未选中任何对象时，在图纸文件中任意 1 个符号实例已显示的任意 1 个图元上单击 1 次，恰选中 1 个对象，即该符号实例的整体；没有该图纸的 publish 文件时结果相同。
+- 和上面「做什么」那句的出入，都照测试钉住的行为写：
+  - 多了「未选中任何对象时」：`a_click_on_a_stroke_selects_the_symbol_and_nothing_else` 的每一下都是先清空选择再点的。已经选着别的对象时再点一下会怎样，没有测，这一条不说。
+  - 多了「已显示的」：符号名在 `PID-SYMBOL-LABEL` 层上，这一层默认关着，关着时符号名点不到（`a_hidden_name_is_no_part_of_what_is_selected`）；只画符号名的符号实例在打开这一层之前点不到（`a_symbol_that_is_only_its_name_is_selected_once_names_are_shown`）。
+  - 没有照写「每个符号实例是一个……对象」：画不出任何图元的符号实例不建块，图上没有它（规格 §11 的 SB-2 第 3 条），所以只说点到的那个符号实例整个被选中。第一版写的是「图纸文件中的每个符号实例是 1 个对象：……」，对着规格 §11 核对时发现这一句把它们也算了进去，改成现在这样。
+  - 说的是「图纸文件中」的符号实例：边框模板是另一个文件（`.igr`），它里面的符号实例照旧是散图元（规格 §3.1、§8），不在这一条说的范围里。
+  - 用词照该文档现有的：「笔」写成「图元」（改之前这份文档里有 9 行用它），「点一下」写成「单击 1 次」（改之前全部需求文档里「单击」21 行、「点击」15 行），「发布数据」写成「publish 文件」（本节开头有定义）。
+- 依据的测试：上面三个都在 `src/app/pid_symbol_block_tests.rs`（SB-3），用的是导入器的测试图，没有 publish 文件；第一个量的是：点一个阀门的左短线、圆、右短线，三处选中的都只是这个阀门的块引用，点旁边的阀门选中的是另一个，点管线选中管线，点空白什么都不选。有 `_Data.xml` 时一个符号实例仍是 1 个块引用，是 `src/io/pid/tests.rs` 的 `the_published_identity_is_on_the_reference_and_not_in_the_block` 钉的。
+- 这条需求说的「打开 1 张图纸」走的是哪条路（读代码，没有跑）：备份浏览面板的打开图纸发的是 `Message::OpenRecent(path)`（`src/app/commands/pidbackup.rs` 第 582–585 行），它转成 `Message::OpenPathPicked`（`src/app/update/mod.rs` 第 1788–1799 行），也就是按路径打开文件的那条消息，所以进的是同一个 `.pid` 导入器。
+- 文档检查（`python -m pytest scripts/pid-platform -q -p no:cacheprovider`）：
+  - 改之前（06:24，在 `17e0da153` 上，工作区干净）：590 个全过。
+  - 改之后（06:32，现在这一版）：590 个全过。两遍跑完工作区里都没有多出文件。
+  - 这份检查看不看新加的这一行：把这一行改坏四种，各跑一遍全套，每遍之后把文件写回原样，最后核对 sha256 与改坏之前相同（06:33–06:34，在现在这一版上；第一版上同样的四遍，红的和不红的与下表相同）。
+
+    | 改法 | 结果 |
+    |---|---|
+    | 「符号实例」写成「图符实例」（「图符」是术语表禁用的别名） | 红 1 个：`test_terminology.py::test_terminology_banned_aliases_absent_from_every_deliverable`，点到这份文件 |
+    | 「恰选中」写成「尽量选中」（禁用的含糊说法） | 红 1 个：`test_lint.py::test_lint_documents_avoid_banned_vague_phrases`，点到第 208 行 |
+    | 整条换成「打开的图纸上的符号实例是整体。」（没有数字，没有反引号） | 红 1 个：`test_traceability.py::test_traceability_every_requirement_entry_has_the_five_fields`，点到 `REQ-MIG-008` 的第 6 条 |
+    | 编号 `6.` 写成 `7.` | **不红**，590 个全过 |
+
+  - 所以「编号接着现有的」这份检查不管，是对着差异看的：第 5 条之后是 `6.`。
+- 要同步的其它文件：没有。文档检查没有要求，另外搜了一遍：`docs/` 和 `scripts/` 下提到 `REQ-MIG-008` 的，在 `docs/pid-platform/` 里只有 `requirements/00-overview.md` 第 189 行（需求对应哪一屏的表，这条记的是「无界面」，说的是没有专用屏幕，不因这一条而变）；其余都在两份计划的文件夹里（本计划的 `plan.md`、规格、`todo.md`，和 `2026-11-17-sppid-backup-publish` 的 5 处），没有一处数过这条需求有几条验收标准。
+- 规格：§11 加 SB-8 一条（写进需求文档的这一条比 §9 的 Q6 窄在哪三处）。
+- 固定门禁：这一项只改了 `docs/pid-platform/` 下的一个 `.md`、规格和 `todo.md`，没有动 `.rs` 和词条文件，测试、clippy、格式、分层报告没有重新量（检查点二在 `3eb3e81de` 上量过，之后只有文档提交）；第 8 条文档检查就是上面的读数。
+- 没验证的：
+  - 这一条没有在真实图纸和真实程序上量：依据的测试用的是拼出来的图。样例上的块引用数在 SB-9，在程序上点选在 SB-10。
+  - 没有在带 publish 文件的图上点过：测试图没有 `_Data.xml`。
+  - 从备份浏览面板一路点到打开图纸、再点选符号，没有连起来跑过，只读了代码。
+- 证据：`D:\scratch\ocs-symblock\sb8\`（`doccheck-before.log`、`done-before.txt`、`doccheck-after.log`、`done-after.txt`；改坏：`mutants.txt` 和四份 `mutant-*.log`；用词：`phrases.txt`、`click-words.txt`，是改之后数的，「单击」比上面多的一行就是新加的这一条；第一版的那一遍在 `first-wording\`；脚本 `doccheck.ps1`、`mutants.ps1`、`phrases.ps1`、`spec-exceptions.ps1`、`rerun-final.ps1`）。
 
 ### SB-8b 【文档】用户手册讲 `.pid` 的一节跟上图块
 
