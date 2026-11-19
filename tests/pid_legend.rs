@@ -12,6 +12,7 @@ use document::entities::{Block, BlockEnd, Circle, Insert, Line, Point, Text};
 use document::objects::{Group, ObjectType};
 use document::tables::BlockRecord;
 use document::types::{Color, Vector3};
+use document::xdata::{ExtendedDataRecord, XDataValue};
 use document::{Document, EntityType, Handle};
 use OpenCADStudio::io;
 use OpenCADStudio::io::pid_legend::{self, Rules};
@@ -525,6 +526,165 @@ fn legend_entities_go_on_coloured_class_layers_and_come_off_again() {
     assert_eq!(removed, added);
     assert_eq!(doc.entity_count(), before);
     assert!(pid_legend::legend_handles(&doc).is_empty());
+}
+
+// ── symbols a .pid import placed ────────────────────────────────────────
+
+/// The XDATA application the `.pid` import and legend recognition both
+/// write their `key=value` records under.
+const PID_SEMANTICS: &str = "PID_SEMANTICS";
+
+/// The block a `.pid` import builds for the symbol `Ball Valve`.
+const BALL_VALVE: &str = "SPPID_Ball Valve";
+
+/// `entity`, carrying `pairs` as its `PID_SEMANTICS` record.
+fn saying(mut entity: EntityType, pairs: &[&str]) -> EntityType {
+    let mut record = ExtendedDataRecord::new(PID_SEMANTICS);
+    for pair in pairs {
+        record.add_value(XDataValue::String(pair.to_string()));
+    }
+    entity.common_mut().extended_data.add_record(record);
+    entity
+}
+
+/// A sheet in paper millimetres: one valve block placed three times, a note
+/// lettered beside them and a frame. The block is as a `.pid` import builds
+/// one for a symbol -- two stubs and a ring, and the symbol's name next to
+/// them -- but none of the three references is the import's. The first
+/// says nothing, as a block a person inserted. The second carries the
+/// identity a publisher gave it and no role. The role of the third only
+/// begins like a symbol's. Returns the sheet and the three, in that order.
+fn sheet_of_valves_no_import_placed() -> (Document, [Handle; 3]) {
+    let mut doc = Document::new();
+    define_block(
+        &mut doc,
+        BALL_VALVE,
+        vec![
+            line(-2.0, 0.0, -1.0, 0.0),
+            circle(0.0, 0.0, 1.0),
+            line(1.0, 0.0, 2.0, 0.0),
+            layered(text("Ball Valve", 2.5, -1.0), "PID-SYMBOL-LABEL"),
+        ],
+    );
+    let placed = [
+        insert(BALL_VALVE, 100.0, 140.0, "Process"),
+        saying(
+            insert(BALL_VALVE, 170.0, 140.0, "Process"),
+            &[
+                "class=PIDInlineComponent",
+                "label=V-102",
+                "oid=4712",
+                "resolved=direct",
+            ],
+        ),
+        saying(
+            insert(BALL_VALVE, 240.0, 140.0, "Process"),
+            &["role=symbol-label"],
+        ),
+    ]
+    .map(|reference| doc.add_entity(reference).unwrap());
+    doc.add_entity(text("NOTE 1", 300.0, 200.0)).unwrap();
+    // Sheet frame so the extent is a real A3 in paper millimetres.
+    doc.add_entity(line(0.0, 0.0, 420.0, 0.0)).unwrap();
+    doc.add_entity(line(0.0, 0.0, 0.0, 297.0)).unwrap();
+    (doc, placed)
+}
+
+/// What recognition makes of the three references of
+/// `sheet_of_valves_no_import_placed`: each is boxed as an unknown block,
+/// counted, given a location to go to and a connection point for pipe; and
+/// the note is the sheet's one piece of lettering -- the name inside the
+/// block is none.
+fn assert_three_unknown_blocks(recognition: &pid_legend::Recognition, placed: &[Handle; 3]) {
+    let boxed: Vec<Handle> = recognition
+        .symbols
+        .iter()
+        .flat_map(|symbol| symbol.handles.iter().copied())
+        .collect();
+    assert_eq!(boxed, placed, "the symbols are the three references");
+    assert!(
+        recognition
+            .symbols
+            .iter()
+            .all(|symbol| !symbol.known && symbol.source == BALL_VALVE),
+        "{:?}",
+        recognition.symbols
+    );
+    let unknown: Vec<(&str, usize)> = recognition
+        .unknown_blocks
+        .iter()
+        .map(|(what, placements)| (what.as_str(), *placements))
+        .collect();
+    assert_eq!(unknown, [("SPPID_Ball Valve on Process", 3)]);
+    let located: Vec<Handle> = recognition
+        .exceptions
+        .unknown_blocks
+        .values()
+        .flatten()
+        .flat_map(|location| location.handles.iter().copied())
+        .collect();
+    assert_eq!(located, placed, "each has a location to go to");
+    assert_eq!(recognition.pipes.ports, 3, "a connection point each");
+    assert_eq!(
+        recognition.lettering, 1,
+        "the note, and not the name inside the block"
+    );
+}
+
+/// A block reference that does not say `role=symbol` is read as it always
+/// was, whatever else its record says and whichever block it places: each
+/// of the three is an unknown block.
+#[test]
+fn a_reference_that_is_not_an_imports_symbol_is_read_as_ever() {
+    let (sheet, placed) = sheet_of_valves_no_import_placed();
+    let recognition = pid_legend::recognise(&sheet, &Rules::builtin());
+    assert_eq!(recognition.units_per_mm, 1.0, "an A3 in paper mm");
+    assert_three_unknown_blocks(&recognition, &placed);
+}
+
+/// A block reference a `.pid` import placed says `role=symbol`, and
+/// recognition leaves it out: the sheet reads word for word as it does
+/// without the reference -- no symbol, no unknown block, no location to go
+/// to, no connection point for pipe. (Listing such a symbol under the name
+/// the import gave it is another matter: SPEC-pid-symbol-block §9, Q3.) The
+/// role is found wherever the record has it: first, as the import writes it
+/// for a symbol the drawing files under no layer; or after the sheet layer
+/// and before what the published data adds.
+#[test]
+fn a_symbol_a_pid_import_placed_is_left_out_of_recognition() {
+    let rules = Rules::builtin();
+    let (without, placed) = sheet_of_valves_no_import_placed();
+    let (mut with, _) = sheet_of_valves_no_import_placed();
+    for imported in [
+        saying(
+            insert(BALL_VALVE, 100.0, 100.0, "PID-SYMBOL"),
+            &["role=symbol", "extent=4.00x2.00", "symbol=Ball Valve"],
+        ),
+        saying(
+            insert(BALL_VALVE, 170.0, 100.0, "Process"),
+            &[
+                "sheet_layer=Process",
+                "sheet_layer_oid=12",
+                "role=symbol",
+                "extent=4.00x2.00",
+                "class=PIDInlineComponent",
+                "label=V-101",
+                "oid=4711",
+                "resolved=direct",
+                "symbol=Ball Valve",
+            ],
+        ),
+    ] {
+        with.add_entity(imported).unwrap();
+    }
+
+    let recognition = pid_legend::recognise(&with, &rules);
+    assert_three_unknown_blocks(&recognition, &placed);
+    assert_eq!(
+        format!("{recognition:#?}"),
+        format!("{:#?}", pid_legend::recognise(&without, &rules)),
+        "the sheet reads as it does without the two"
+    );
 }
 
 // ── piped block sheet ───────────────────────────────────────────────────

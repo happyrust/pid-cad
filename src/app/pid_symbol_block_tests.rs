@@ -1,6 +1,7 @@
 //! A symbol of an imported `.pid` is one object to the pointer and to the
 //! editing commands (plan 2026-11-19-pid-symbol-block, SB-3; SPEC §4.1 and
-//! §4.3), and one object in the Properties panel (SB-6; SPEC §4.4).
+//! §4.3), and one object in the Properties panel (SB-6; SPEC §4.4); and
+//! legend recognition leaves it alone (SB-7; SPEC §4.5).
 //!
 //! The sheet is the importer's own
 //! (`crate::io::pid::sheet_of_two_valves_a_note_and_a_pipe`), put in the
@@ -9,7 +10,7 @@
 //! releases, the ticks of the hover and snap timers, the Layer Manager's
 //! bulb, Escape and command lines. The settings are the program's defaults,
 //! except the running object snaps, which the snap test sets.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use document::entities::Insert;
 use document::{Document, EntityType, Handle};
@@ -998,4 +999,154 @@ fn an_exploded_symbol_is_loose_entities_that_say_only_their_role() {
         [SECOND_VALVE],
         "the other valve is still one"
     );
+}
+
+/// What every entity that carries a `PID_SEMANTICS` record says, by handle.
+/// On the sheet as opened these are the records the import wrote: on the
+/// references, on the members of their blocks and on the pipe.
+fn records(app: &OpenCADStudio) -> BTreeMap<Handle, Vec<String>> {
+    document(app)
+        .entities()
+        .map(|entity| (entity.common().handle, says(entity)))
+        .filter(|(_, said)| !said.is_empty())
+        .collect()
+}
+
+/// What the entities of `before` say now.
+fn say_now(
+    app: &OpenCADStudio,
+    before: &BTreeMap<Handle, Vec<String>>,
+) -> BTreeMap<Handle, Vec<String>> {
+    before
+        .keys()
+        .map(|handle| (*handle, says_of(app, *handle)))
+        .collect()
+}
+
+/// Every line the command line has shown, newest last.
+fn history(app: &OpenCADStudio) -> Vec<String> {
+    app.command_line
+        .history
+        .iter()
+        .map(|entry| entry.text.clone())
+        .collect()
+}
+
+/// A butterfly valve the legend rules know by its block (`$VALVE$00000316`),
+/// drawn on the open sheet at (50, 50) as a bow-tie of four lines, 6 x 3 mm,
+/// and made a block the way BLOCK makes one. Returns its block reference.
+fn a_valve_the_legend_knows(app: &mut OpenCADStudio) -> Handle {
+    use document::entities::Line;
+    use document::types::{Transform, Vector3};
+
+    let i = app.active_tab;
+    let strokes: Vec<Handle> = [
+        ((50.0, 50.0), (50.0, 53.0)),
+        ((50.0, 53.0), (56.0, 50.0)),
+        ((56.0, 50.0), (56.0, 53.0)),
+        ((56.0, 53.0), (50.0, 50.0)),
+    ]
+    .into_iter()
+    .map(|((x0, y0), (x1, y1))| {
+        let mut line = Line::new();
+        line.start = Vector3::new(x0, y0, 0.0);
+        line.end = Vector3::new(x1, y1, 0.0);
+        app.tabs[i].scene.add_entity(EntityType::Line(line))
+    })
+    .collect();
+    let identity = Transform::identity();
+    app.tabs[i]
+        .scene
+        .create_block_from_entities(&strokes, "$VALVE$00000316", &identity, &identity)
+        .expect("four lines make a block")
+}
+
+/// Legend recognition leaves the symbols of an import alone (SB-7; SPEC
+/// §4.5). A valve the legend rules know is drawn beside them, so that
+/// PIDLEGEND has a symbol to recognise, a record to write and a record to
+/// clear. ON then recognises that valve and nothing else: no symbol of the
+/// import is boxed, none is reported as an unknown block. And through
+/// REPORT, ON, OFF, ON again and PURGE, every record the import wrote says
+/// what it said: on the references, on the members of their blocks and on
+/// the pipe.
+#[test]
+fn legend_recognition_leaves_the_symbols_of_an_import_alone() {
+    use crate::io::pid_legend;
+
+    let mut app = opened();
+    let i = app.active_tab;
+    let first = reference(&app, VALVE, FIRST);
+    let imported = records(&app);
+    assert_eq!(
+        imported[&first],
+        [
+            "sheet_layer=Process",
+            "sheet_layer_oid=12",
+            "role=symbol",
+            "extent=40.00x20.00",
+            "symbol=Ball Valve",
+        ],
+        "what the first valve says"
+    );
+    for symbol in [reference(&app, VALVE, SECOND), reference(&app, NOTE, NOTED)] {
+        assert!(imported.contains_key(&symbol), "{symbol:?} says something");
+    }
+    let known = a_valve_the_legend_knows(&mut app);
+
+    let _ = app.run_command_line("PIDLEGEND REPORT");
+    let reported = history(&app);
+    assert!(
+        !reported.iter().any(|line| line.contains("UNKNOWN BLOCK")),
+        "{reported:#?}"
+    );
+    assert_eq!(say_now(&app, &imported), imported, "after REPORT");
+
+    let _ = app.run_command_line("PIDLEGEND ON");
+    let recognition = app.tabs[i].pid_legend().expect("ON keeps what it read");
+    let recognised: Vec<Handle> = recognition
+        .symbols
+        .iter()
+        .flat_map(|symbol| symbol.handles.iter().copied())
+        .collect();
+    assert_eq!(recognised, [known], "the drawn valve and nothing else");
+    assert!(
+        recognition.unknown_blocks.is_empty(),
+        "{:?}",
+        recognition.unknown_blocks
+    );
+    assert_eq!(
+        pid_legend::legend_handles(document(&app)).len(),
+        2,
+        "a box and a label, for the drawn valve"
+    );
+    assert_eq!(
+        pid_legend::attached_handles(document(&app)),
+        [known],
+        "ON writes its record on the drawn valve alone"
+    );
+    assert_eq!(say_now(&app, &imported), imported, "after ON");
+
+    let _ = app.run_command_line("PIDLEGEND OFF");
+    assert!(
+        pid_legend::legend_handles(document(&app)).is_empty(),
+        "OFF takes the legend away"
+    );
+    assert_eq!(say_now(&app, &imported), imported, "after OFF");
+
+    let _ = app.run_command_line("PIDLEGEND ON");
+    assert_eq!(
+        pid_legend::attached_handles(document(&app)),
+        [known],
+        "ON again reads the drawn valve again"
+    );
+    let _ = app.run_command_line("PIDLEGEND PURGE");
+    assert!(
+        pid_legend::legend_handles(document(&app)).is_empty(),
+        "PURGE takes the legend away"
+    );
+    assert!(
+        pid_legend::attached_handles(document(&app)).is_empty(),
+        "and clears the record ON wrote"
+    );
+    assert_eq!(say_now(&app, &imported), imported, "after PURGE");
 }

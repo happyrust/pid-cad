@@ -636,15 +636,83 @@
 
 - **做什么**：`src/io/pid_legend/mod.rs` 的 `recognise_with_units` 里，块符号那一遍遇到带 `PID_SEMANTICS` 记录且 `role=symbol` 的块引用就跳过。
 - **验收**
-  - [ ] 这样的块引用不进认出的符号，不进未知块，不进异常清单。
-  - [ ] 不带记录的块引用、记录里没有 `role=symbol` 的块引用，结果与改之前相同。
-  - [ ] 块里的文字不算散字。
-  - [ ] 打开、关闭图例识别（写记录、清记录）前后，这些引用上的记录逐字不变。
-  - [ ] 故意改坏：去掉跳过、跳过所有带记录的块引用，测试变红。
+  - [x] 这样的块引用不进认出的符号，不进未知块，不进异常清单。
+  - [x] 不带记录的块引用、记录里没有 `role=symbol` 的块引用，结果与改之前相同。
+  - [x] 块里的文字不算散字。
+  - [x] 打开、关闭图例识别（写记录、清记录）前后，这些引用上的记录逐字不变。
+  - [x] 故意改坏：去掉跳过、跳过所有带记录的块引用，测试变红。
 - **验证**：`gates.ps1 -Out D:\scratch\ocs-symblock\sb7 -Files <动过的 .rs> -Quick pid_legend`。
 - **依赖**：SB-2。
 - **文件**：`src/io/pid_legend/mod.rs`，可能还有 `src/io/pid_legend/xdata.rs` 和该模块的测试文件。
 - **规模**：S。
+
+**做完**（2026-11-20）
+
+- 改了什么（产品代码 +34：`xdata.rs` +25，`mod.rs` +9；其中代码 16 行，其余是说明）：
+  - `src/io/pid_legend/xdata.rs`：加 `is_imported_symbol`。块引用的 `PID_SEMANTICS` 记录里有一项恰好是 `role=symbol`，它就是导入器放的图例。
+  - `src/io/pid_legend/mod.rs`：块符号那一遍，在排除手工编组的成员之后问这一句，是就跳过。
+  - 认的是记录，不是块名：同一个 `SPPID_` 块的引用，不带记录、或者记录里说的是别的，照旧识别。
+  - 图例识别自己写的记录只有 `class=`、`label=`、`lines=`、`resolved=legend:…`，没有 `role=`，所以它认出并写过记录的符号，下一次识别不会被跳过。
+  - 没有动的：手工编组那一遍（人把导入的图块编进 P&ID 组合是明确的指定）；写记录的 `attach`、清记录的 `purge`、读散字的 `lettering_of`。
+  - 用户手册「校正 P&ID 图例」一节没有讲 `.pid` 导入的图，这次的改动没有让它哪一句变成错的，没有改。
+- 钉住的（3 个新测试）：
+  - C（`tests/pid_legend.rs` 的 `a_reference_that_is_not_an_imports_symbol_is_read_as_ever`）：一张拼出来的 A3 图，一个照导入器的样子做的阀块（两段短线、一个圆、`PID-SYMBOL-LABEL` 层上的符号名文字）放了三次，另有一处散字和两条框线（把图幅撑成 A3）。三个引用都不是导入器放的：第一个不带记录；第二个带发布数据给的 `class=`、`label=`、`oid=`、`resolved=direct`，没有 `role=`；第三个的 `role=` 是 `symbol-label`。三个都照旧认成未知块：进符号清单，进未知块计数（`SPPID_Ball Valve on Process` 3 个），进异常清单，各给管线追踪一个连接点；散字 1 处。
+  - D（同一文件的 `a_symbol_a_pid_import_placed_is_left_out_of_recognition`）：同一张图再加两个带 `role=symbol` 的引用，记录照导入器写的两种样子：`role=symbol` 排在第一项的（图纸没给图层的图例，在 `PID-SYMBOL` 层）；排在 `sheet_layer=`、`sheet_layer_oid=` 之后、后面还有发布数据的四项和 `symbol=` 的。C 的各条断言照样成立；整个识别结果打印出来，与不加这两个引用时逐字相同。
+  - P（`src/app/pid_symbol_block_tests.rs` 的 `legend_recognition_leaves_the_symbols_of_an_import_alone`）：程序一层。用的是这个测试文件一直用的那张图（导入器测试用的 `sheet_of_two_valves_a_note_and_a_pipe`：两个阀、一个标注类图例、一条管线，不带 `_Data.xml`），先记下每个带记录的图元说了什么。这张图上是 9 个：三个引用、块里的 5 个图元、管线；测试没有断言这个数，它断言的是第一个阀的记录恰好是那五项、另外两个引用也带记录。在旁边画一个图例规则认识的阀（块名 `$VALVE$00000316`），好让 `PIDLEGEND` 有符号可认、有记录可写可清。然后依次 `PIDLEGEND REPORT`、`ON`、`OFF`、`ON`、`PURGE`：报告里没有 `UNKNOWN BLOCK`；`ON` 认出的只有画的那个阀，没有未知块，画出一个框一个标签，记录只写在那个阀上；`OFF` 把画出的图例拿掉；再 `ON`，记录又写在那个阀上；`PURGE` 把图例和它写的记录都清掉。`REPORT`、第一次 `ON`、`OFF`、`PURGE` 之后各核对一次：那 9 个图元的记录与开始时逐字相同（第二次 `ON` 之后没有单独核对，紧接着的 `PURGE` 之后核对）。
+- 先红（05:31–05:40，`chainred.txt`，实现之前）：
+  - P 红在 `REPORT` 之后的那一条：报告第一行是「4 symbols recognised」，后面有 `UNKNOWN BLOCK SPPID_Ball Valve on Process x2` 和 `UNKNOWN BLOCK SPPID_Item Note on PID-SYMBOL-LABEL x1`。
+  - D 红在第一条断言：认出 5 个符号，要 3 个。
+  - C 按设计在实现之前就过：它钉的是验收第 2 条「结果与改之前相同」，同样的断言改前改后都成立。
+  - 原有的图例识别测试全过：`--lib pid_legend` 37 个，`--lib pidlegend` 21 个（另有 2 个默认不跑），`tests/pid_legend.rs` 原有的 29 个。
+  - `chainred.txt` 里集成测试那一项写的「compile errors: 1」，数到的是 cargo 的 `error: 1 target failed` 那一行，不是编译错误：测试程序编出来了，31 个都跑了。
+- 转绿（05:42–05:48，`libmut-m1.txt`、`mut-i1.txt` 里不设变量的那一遍，代码里带着改坏开关）：`--lib` 的 59 个（P，加上 `pid_legend` 的 37 个、`pidlegend` 的 21 个）全过，`tests/pid_legend.rs` 31 个全过。去掉开关之后的读数是下面的固定门禁。
+- P 在先红之后加了一条断言：第二次 `ON` 之后，记录又写在画的那个阀上。它排在先红时红的那一条后面，先红的读数不受影响；它自己没有先红，靠第 2 处改坏证明会红。
+- 故意改坏 11 处（用环境变量 `OCS_MUTANT` 切换；测试程序各编一次，每处跑一遍。「库」是 `--lib` 的那 59 个，「集成」是 `tests/pid_legend.rs` 的 31 个）：
+
+  | # | 改坏 | 库：红的 | 集成：红的 | 红在哪 |
+  |---|---|---|---|---|
+  | 1 | 不跳过 | 1：P | 1：D | P：报告里有 `UNKNOWN BLOCK`；D：认出 5 个 |
+  | 2 | 带记录的块引用都跳过 | 4：P 和原有的 3 个 | 2：C D | P：第二次 `ON` 没认出画的阀（它带着第一次 `ON` 写的记录）；C、D：只认出不带记录的那 1 个 |
+  | 3 | `role=symbol` 按开头匹配 | 0 | 2：C D | `role=symbol-label` 的那个也被跳过，只认出 2 个 |
+  | 4 | 只看记录的第一项 | 1：P | 1：D | P：同第 1 处；D：认出 4 个，`role=symbol` 排在 `sheet_layer=` 后面的那个没跳过 |
+  | 5 | 按块名以 `SPPID_` 开头判断，不看记录 | 0 | 2：C D | 三个都被跳过，认出 0 个 |
+  | 6 | 散字从全部图元里读，块里的也算 | 0 | 2：C D | 散字 2 处，要 1 处 |
+  | 7 | 写记录时不避开导入的记录 | 2：P 和原有的 1 个 | 0 | P：`ON` 之后那 9 个图元的记录全空了 |
+  | 8 | 清记录时连导入的一起清 | 2：P 和原有的 1 个 | 0 | P：`PURGE` 之后那 9 个图元的记录全空了 |
+  | 9 | 跳过挪到后面，仍计进未知块 | 1：P | 1：D | P：同第 1 处；D：未知块成了 `… on PID-SYMBOL` 1 个、`… on Process` 4 个 |
+  | 10 | 跳过挪到后面，仍进异常清单 | 0 | 1：D | 异常清单里 5 个，要 3 个 |
+  | 11 | 跳过挪到后面，仍给连接点 | 0 | 1：D | 连接点 5 个，要 3 个 |
+
+  - 第 1–8 处是 05:42–05:48 跑的（`libmut-m1.txt`、`mut-i1.txt`）。第 9–11 处是看了前 8 处的结果之后补的（05:49–05:53，`libmut-m2.txt`、`mut-i2.txt`）：验收第 1 条说的是三样（认出的符号、未知块、异常清单），而前 8 处里 D 的「未知块」「异常清单」「连接点」三条断言没有一处单独红过：第 1–5 处 D 先红在「认出的符号」那一条，第 6–8 处这三条都成立。
+  - 第 2 处红的原有 3 个，都在 `app::commands::pidlegend::tests`：`a_copied_group_keeps_its_tag_and_the_legend_follows_group_changes`、`pidlegend_on_publishes_xdata_off_keeps_it_and_purge_removes_everything`、`pidlegend_on_draws_off_removes_and_on_twice_does_not_stack`。第 7、8 处红的原有 1 个是 `io::pid_legend::xdata::tests::recognition_xdata_round_trips_and_purge_keeps_authored_identity_and_groups`。
+  - 第 6、7、8 处改坏的是原有的代码（`lettering_of`、`attach`、`purge`），不是这次加的那几行：验收第 3、4 条说的行为本来就成立（见下面「没有红过的」），改坏它们是为了看新加的断言会不会红。
+  - 改坏点已删：开关加在 `mod.rs`、`xdata.rs`、`blocks.rs` 三个文件里，05:53 从加开关之前留的副本拷回；连同两个测试文件，五个文件的 sha256 都与加开关之前相同（`blocks.rs` 回到提交里的样子，这次不改它），`src`、`tests`、`examples` 里搜不到开关（`restore-final.txt`）。固定门禁是在这之后跑的。带开关的改动留在 `with-mutants.diff`（前 8 处）、`with-mutants-late.diff`（11 处）。
+- 没有红过的：
+  - 验收第 3 条（块里的文字不算散字）和第 4 条（导入的记录不被改写）靠的是原有的代码，不是这次加的：`lettering_of` 只读模型空间的文字；`attach` 只动图例识别自己的记录；`purge` 只清图例识别自己的记录。「散字 1 处」和「记录逐字相同」这几条断言因此没有先红，只在第 6、7、8 处改坏下红过（分别是散字、`ON` 之后、`PURGE` 之后）；P 里 `REPORT` 之后和 `OFF` 之后的「记录逐字相同」两条没有任何一处让它们红。
+  - C 整个测试在实现之前就过（按设计），只在第 2、3、5、6 处改坏下红过；它开头的「每毫米 1 个图形单位」没有红过。
+  - C 和 D 共用的「三个都算未知的、来源是那个块名」一条没有单独红过。
+  - D 最后「整个结果与不加那两个引用时逐字相同」一条，没有一处改坏走到它：每一处都红在它前面的断言。
+  - P 第一次 `ON` 之后的四条（认出的只有画的阀、没有未知块、一个框一个标签、记录只写在那个阀上）、「`OFF` 拿掉图例」「`PURGE` 拿掉图例」「`PURGE` 清掉 `ON` 写的记录」没有红过：第 1、4、9 处 P 先红在 `REPORT` 那一条，没有走到它们；其余各处这几条都成立。它们说的是图例识别本来就有的行为，原有的测试也在钉。
+  - P 开头的两条前提（第一个阀的记录恰好是那五项；另外两个引用也带记录）没有红过。
+- 读数（固定门禁，05:53–06:03，`chainfinal.txt`，去掉开关之后的代码）：
+  - 格式：四个 `.rs` 文件 `new=0`（改前 0，改后 0）。
+  - 快测：`--lib pid_legend` 37，`--lib pidlegend` 21（另有 2 个默认不跑），`--lib pid_symbol_block` 15，全过。
+  - 全量库测试：7,142 个，7,089 过，53 个默认不跑，0 失败（SB-6 时 7,141 个，多的一个是 P）。
+  - 集成测试：`tests/pid_import.rs` 55，`tests/pid_legend.rs` 31（原有 29，加 C、D），全过；测试目标的编译警告 0；临时目录里名字带 `symbol` 的文件夹 0。
+  - clippy：656 / 1,051，与 SB-6 相同；点到这次四个文件的行 0 / 0。
+  - 分层报告：36 行，与 SB-5 留的那份相同。
+  - 语言文件检查脚本的整份清单：806 条，与 SB-6 提交时逐字节相同（这次没有加界面文字）。
+  - 改动量：产品代码 +34；测试 +313 −2（`tests/pid_legend.rs` +160，`src/app/pid_symbol_block_tests.rs` +153 −2）。
+- 没验证的：
+  - 没有在真实图纸上跑图例识别，三个测试用的都是拼出来的图；规格 §4.5 说的散字数量（958）没有重量。已加进 SB-9 的验收，SB-10 在程序里再看一遍。
+  - 带发布数据的那种记录（`class=`、`label=`、`oid=`、`resolved=` 排在 `role=symbol` 后面）只在 D 里手写过；导入器在带 `_Data.xml` 的图上写出来的记录，没有拿来跑识别。
+  - 另存为 DWG / DXF 再打开之后还跳不跳过，没有测；是从「记录存取前后不变」的原有测试推出来的。
+  - 手工编组里带着导入的图块时怎么认，没有测（那一遍的代码没有改）。
+  - `PIDLEGEND LIST`、`EXPORT` 和自动化接口的 `pid_legend` 没有单独测：它们用的是同一个识别结果。
+  - 连接点只钉了个数；图例识别在 `.pid` 导入的图上能不能追出管线，没有量（规格 §11 的 SB-7 第 1 条）。
+  - 只有导入图块、没有别的符号的图上 `PIDLEGEND ON` 说什么，没有测；读代码是「nothing recognised -- no known block or circle symbol on this sheet」那一句，不画东西，也不写记录；图上留着以前画的图例或图例记录时，它把那些清掉。这句话对一张全是导入图块的图合不合适，这次没有动，检查点二里列出来。
+  - 没有在程序界面里看过（SB-10 做）。
+- 证据：`D:\scratch\ocs-symblock\sb7\`（先红：`chainred.txt`、`quickred-*.log`、`integred.log`；转绿和改坏：`libmut-m1.txt`、`mut-i1.txt`、`libmut-m2.txt`、`mut-i2.txt` 和各处的 `*.log`，`with-mutants.diff`、`with-mutants-late.diff`，加开关之前的文件在 `final-tree\`，拷回之后的核对在 `restore-final.txt`；固定门禁：`chainfinal.txt` 和它列的各份记录，`locales-missing-final.txt`；另有只量格式的一遍 `fmtcheck-a.txt`，是 05:41 加开关和 P 的那条断言之前量的，四个文件 `new=0`）。
 
 ### 检查点二（SB-7 之后）
 
@@ -694,6 +762,7 @@
   - [ ] 现有 18 项摘要计数与基线相同（基线值在 SB-1 开始前量好）。
   - [ ] 同一个文件导入两次：块名的集合相同，每个引用的块名、插入点、记录相同。
   - [ ] 存成 DWG 再读回：块引用数、定义数、每个引用的记录与存之前相同。
+  - [ ] 样例上跑图例识别（`pid_legend::recognise`）：认出的符号、未知块、异常清单里都没有导入的图块；散字数量出来写进测试（规格 §4.5 写的是 958，试验时量的）。做 SB-7 时加的：SB-7 的测试用的是拼出来的图，没有在真实图纸上跑（规格 §11 的 SB-7 第 2 条）。
   - [ ] 性能预算：样例导入 3 次取中位数，不超过基线中位数的 1.1 倍；基线值和预算值写在测试里并注明是哪台机器、哪个提交量的。
   - [ ] 故意改坏：关掉共用（每个图例一个定义），定义数的测试变红。
 - **验证**：`gates.ps1 -Out D:\scratch\ocs-symblock\sb9 -Files <测试文件> -Quick <测试名>`；预算测试另用 `cargo test --offline --locked --lib <名字> -- --ignored` 跑三遍。
