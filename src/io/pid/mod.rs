@@ -724,5 +724,10 @@ fn ensure_layer(doc: &mut Document, name: &str, colour: Color, visible: bool, pl
     let _ = doc.layers.add(layer);
 }
 
+/// The imported sheet the program-level tests of a symbol as one object
+/// open (`crate::app::pid_symbol_block_tests`).
+#[cfg(test)]
+pub(crate) use self::tests::placements_as_blocks::sheet_of_two_valves_a_note_and_a_pipe;
+
 #[cfg(test)]
 mod tests;

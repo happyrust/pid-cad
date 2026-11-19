@@ -89,6 +89,8 @@ mod options_session;
 #[cfg(test)]
 mod paste_special_tests;
 pub mod pid_shell;
+#[cfg(test)]
+mod pid_symbol_block_tests;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod plugin_host;
 mod presspull_ops;

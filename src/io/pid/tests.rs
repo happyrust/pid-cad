@@ -1587,7 +1587,7 @@ fn a_restored_backup_has_the_symbol_library_its_drawings_look_for() {
 /// 2026-11-19-pid-symbol-block, SB-2): what the placement says is on the
 /// reference, what it draws is the block's definition, and every other
 /// record of the sheet stays the loose entity it was.
-mod placements_as_blocks {
+pub(super) mod placements_as_blocks {
     use document::entities::Insert;
     use pid_parse::style_link::{LineSymbology, StyleHop};
     use pid_parse::symbol_library::PrimitiveFill;
@@ -1821,6 +1821,78 @@ mod placements_as_blocks {
             1.0,
         );
         (doc, built)
+    }
+
+    /// The sheet the program-level tests of a symbol as one object open
+    /// (`crate::app::pid_symbol_block_tests`, SB-3): built by the steps an
+    /// import takes once the file is parsed, `finish` included, so its
+    /// layers and its view filter are the ones an open leaves. In
+    /// millimetres of the drawing:
+    ///
+    /// - a valve at (100, 100) and the same valve at (170, 100): a stub from
+    ///   20 to 10 left of the insertion point, a ring of radius 10 around
+    ///   it, a stub from 10 to 20 right of it;
+    /// - a label symbol at (170, 140), which draws its name and no more;
+    /// - a pipe from (90, 80) to (180, 80), which belongs to no symbol.
+    pub(crate) fn sheet_of_two_valves_a_note_and_a_pipe() -> Document {
+        let stub = |from: f64, to: f64| SymbolPrimitive::Line {
+            start: (from, 0.0),
+            end: (to, 0.0),
+        };
+        let ring = SymbolPrimitive::Circle {
+            center: (0.0, 0.0),
+            radius: 0.01,
+        };
+        let valve = body(
+            BODY,
+            vec![
+                (stub(-0.02, -0.01), pen(0.25)),
+                (ring, pen(0.25)),
+                (stub(0.01, 0.02), pen(0.25)),
+            ],
+        );
+        let on_process = Some((Some("Process"), true));
+        let geometry = sheet(
+            vec![
+                record(
+                    701,
+                    placement((0.1, 0.1), Some(VALVE), Some(BODY), 0.0),
+                    on_process,
+                ),
+                record(
+                    702,
+                    placement((0.17, 0.1), Some(VALVE), Some(BODY), 0.0),
+                    on_process,
+                ),
+                record(
+                    703,
+                    placement((0.17, 0.14), Some(NOTE), Some(CROSS), 0.0),
+                    on_process,
+                ),
+                record(
+                    704,
+                    PidGraphicKind::Line {
+                        start: point(0.09, 0.08),
+                        end: point(0.18, 0.08),
+                    },
+                    on_process,
+                ),
+            ],
+            vec![valve, cross_body()],
+        );
+        let tables = styles();
+        let (mut doc, built) = import(&geometry, &tables);
+        let _ = finish(
+            Path::new("two-valves.pid"),
+            &geometry,
+            None,
+            &tables,
+            ImportUnit::AssumedMetre,
+            built,
+            None,
+            &mut doc,
+        );
+        doc
     }
 
     /// How many block records a document holds before anything is imported.
