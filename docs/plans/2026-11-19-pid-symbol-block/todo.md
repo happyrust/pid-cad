@@ -800,13 +800,65 @@
   - 「图纸图层视图」一段「列出每层的实体数」「各角色 …… 及实体数」：数法变了（规格 §4.3）。
   - 「符号的三个尺寸」一段「点选一个符号放置的任一笔画或它旁边的符号名」「同一放置的所有实体相同」：选中的是这个图例的块引用，三个值只在引用上。
 - **验收**
-  - [ ] 这一节里讲图例结构的每一句都与现在的行为一致；改了哪几句、每句依据哪条测试或哪份读数，列成表写进「做完」段。
-  - [ ] 另存 DWG / DXF 之后，第三方怎么取图例的分类、样式和符号名写清楚。
-  - [ ] 这一节里没讲错的不动；别的章节不动。
+  - [x] 这一节里讲图例结构的每一句都与现在的行为一致；改了哪几句、每句依据哪条测试或哪份读数，列成表写进「做完」段。
+  - [x] 另存 DWG / DXF 之后，第三方怎么取图例的分类、样式和符号名写清楚。
+  - [x] 这一节里没讲错的不动；别的章节不动。
 - **验证**：SB-8 的文档检查改前改后各一遍（它管不管这个文件，做的时候查清）；逐句对照表存 `D:\scratch\ocs-symblock\sb8b\`。
 - **依赖**：SB-3、SB-4、SB-6（讲的行为先得有测试）。
 - **文件**：`docs/user-guide.md`。
 - **规模**：S。
+
+**做完**（2026-11-20）
+
+- 改了什么：只动 `docs/user-guide.md` 的「打开 Smart P&ID（.pid）图纸」一节。七段各改一行，另加一段「符号是块」，放在「符号从哪来」之后；`git diff --numstat` 是加 9 行、减 7 行（新段落和它后面的空行占 2 行）。这一节的表格、没讲错的句子和别的章节没动。
+- 用词照手册自己的，和上面「做什么」的说法不一样：
+  - 上面的「图例」，手册里写「符号放置」「符号」：手册里「图例」指图例识别（`PIDLEGEND`，「校正 P&ID 图例」一节），这一节改之前就把图上放的符号叫「符号放置」。
+  - 「图块」写「块」「块引用」「块定义」；「炸开」写「分解」（手册第 60 行这样叫 `Explode`）；「图元」写「实体」（改之前手册里「实体」9 行，「图元」「图块」「炸开」都是 0 行，数在 `words-before.txt`）。
+  - 界面上的名字只引手册里已有的（`符号` 一行、`P&ID` 组、`本体尺寸`）。块引用自己那几行在面板上叫什么没有在屏幕上核对，手册只说是「插入点、比例、旋转和块名」。
+- 逐句对照（测试名在仓库里都只有一个，文件写在第一次出现的地方；「读数」是下一条的量测）：
+
+  | 段落 | 改后说的是 | 依据 |
+  |---|---|---|
+  | 开头 | 符号放置读成块引用，一个放置一个 | `a_placement_is_one_reference_to_one_definition_and_leaves_nothing_loose`（`src/io/pid/tests.rs`）；四张真图：`a_placement_is_one_reference_to_a_block_of_what_it_draws`（`tests/pid_import.rs`） |
+  | 导入汇总 | 第一行的两个实体数按画出来的算，块引用不另算 | `the_tallies_count_what_the_placements_draw_as_before`、`the_summary_counts_the_references_and_the_definitions_they_refer_to`（三个放置：`drawn` 和 `layered_entities` 都是 16，块里的成员算在里面，块引用不算） |
+  | 符号是块 | 点任一笔选中整个符号；只有一个夹点；对象捕捉照常 | `a_click_on_a_stroke_selects_the_symbol_and_nothing_else`、`a_selected_symbol_has_one_grip_at_its_insertion_point`、`the_strokes_of_a_symbol_keep_their_object_snaps`（`src/app/pid_symbol_block_tests.rs`） |
+  | 符号是块 | 移动、复制、旋转、镜像、删除、撤销按整个符号；复制、镜像出来的记录相同 | `moving_a_symbol_moves_its_reference_and_leaves_the_definition`、`copying_a_symbol_makes_another_reference_that_says_the_same`、`rotating_a_symbol_turns_its_reference_and_leaves_the_definition`、`mirroring_a_symbol_makes_a_mirrored_reference_that_says_the_same`、`an_erased_symbol_comes_back_whole_on_undo` |
+  | 符号是块 | 块名、序号、共用块定义、不能用的字符、截短、不重名 | `a_block_is_named_after_its_symbol_and_other_drawings_of_it_are_numbered`、`placements_that_draw_the_same_thing_share_one_definition`、`a_block_name_is_made_fit_for_the_table_and_never_taken_twice`（`src/io/pid/symbol_blocks.rs`）；`placements_that_draw_the_same_share_a_definition_and_a_turned_one_gets_its_own` |
+  | 符号是块 | 认符号看面板的 `符号` 一行 | `a_symbol_reference_names_its_symbol_right_after_its_role`、`the_name_of_a_symbol_is_shown_as_the_record_spells_it`（`src/scene/cache/properties.rs`） |
+  | 符号是块 | 导入出来的块引用转角 0、比例 1 | `the_reference_stands_at_the_insertion_point_and_says_what_the_placement_said`；读数：145 个块引用全是 |
+  | 符号是块、图层 | 块引用和块里的实体各在哪一层：有图层名的、只画符号名的、没给图层名的、没给图层名又隐藏的 | `the_reference_takes_the_placements_layer_and_what_shared_it_floats_on_layer_0`（十种情形逐个钉住）；读数：121 个块引用在图纸图层上，24 个只画符号名的在 `PID-SYMBOL-LABEL` 上，没有一个不带 `sheet_layer=` |
+  | 符号是块 | 跟着引用的图层显示、取它的颜色；符号名打开才显示、跟着符号走；只画符号名的打开才选得到 | `a_sheet_layer_switched_off_takes_its_symbol_out_whole`、`a_stroke_by_layer_takes_the_colour_of_the_layer_its_symbol_is_on`、`the_names_show_with_their_layer_and_go_with_their_role`、`the_name_and_the_fill_move_with_their_symbol`（`src/app/pid_symbol_view_tests.rs`）；`a_symbol_that_is_only_its_name_is_selected_once_names_are_shown` |
+  | 符号是块、分类信息、特性面板、三个尺寸 | 哪些键在块引用上；块里的实体只有 `role=` | `the_reference_stands_at_the_insertion_point_and_says_what_the_placement_said`、`the_published_identity_is_on_the_reference_and_not_in_the_block`、`the_members_are_what_the_placement_drew_about_its_insertion_point`；面板上：`a_selected_symbol_shows_its_reference_and_its_pid_group_in_the_panel` |
+  | 符号是块 | 分解之后是什么 | `an_exploded_symbol_is_loose_entities_that_say_only_their_role` |
+  | 符号是块 | 图例识别不碰这些块引用 | `legend_recognition_leaves_the_symbols_of_an_import_alone` |
+  | 符号是块 | 图框里的内容不是块 | `pid_template_placements_are_not_among_the_symbol_blocks_the_summary_counts`（`src/io/pid/template.rs`）；读数：五张图里 `role=frame` 的散实体各有 1 到 5025 个 |
+  | 分类信息（粗体句） | 另存之后第三方读 `INSERT` 上的 `role=` / `style=` / `symbol=` / `sheet_layer=`；块里实体的图层不是图纸图层 | 读数（两种格式读回来都一样）；块里实体的图层只有 `0` 和 `PID-*`：`a_placement_is_one_reference_to_a_block_of_what_it_draws` |
+  | 图纸图层视图 | 各行的数字怎么数 | `the_layer_manager_counts_a_symbol_once_and_its_parts_by_role`；`the_summary_counts_a_reference_on_its_sheet_layer_and_the_members_under_their_roles`（`src/io/pid_view_filter.rs`）；`the_sheet_layer_view_counts_a_symbol_once_and_its_members_by_role` |
+  | 图纸图层视图 | 关一个图纸图层、关一个角色各少什么 | `a_sheet_layer_switched_off_takes_its_symbol_out_whole`、`the_role_of_symbols_switched_off_takes_every_symbol_out`、`the_role_of_fills_switched_off_leaves_the_outlines`、`the_names_show_with_their_layer_and_go_with_their_role` |
+  | 三个尺寸 | 点笔画或打开了的符号名，选中的是块引用；三个值随 DWG / DXF 保留 | `a_hidden_name_is_no_part_of_what_is_selected`；`a_placement_states_its_extent_and_a_parametric_one_its_library_defaults`；读数：5 个带 `driving=` / `instance=` 的块引用两种格式读回来都在 |
+
+- 另存 DWG / DXF 的读数（给第三方的那句粗体字靠它）：
+  - 为什么量：块引用上的整份记录过不过得了另存，此前没有提交的测试钉住。`symbol_blocks_survive_a_dwg_round_trip` 看块定义、成员和引用，不看记录；`hidden_authored_layers_open_off_under_their_own_name_and_metadata_survives_dwg_and_dxf` 数的是写着 `role` 的实体有几个；`a_placement_states_its_extent_and_a_parametric_one_its_library_defaults` 只看 `extent` 和 `driving`。
+  - 怎么量：一个临时的 `examples/zz_sb8b_tmp.rs`（不进仓库，量完移到证据目录；放在 `examples/` 是因为那里的文件不用登记进 `Cargo.toml`）。对 `pid-parse\test-file` 下的 5 张 `.pid`（只读）逐张用 `io::load_file` 导入，用 `io::save_to_bytes` 存成 DWG 和 DXF，再用 `io::load_bytes` 读回来，比三样：每个块引用（块名、图层、插入点、比例、转角、整份记录）、每个 `SPPID_` 块定义的每个成员（类型、图层、记录）、模型空间里每个散实体（角色、图层、记录）。
+  - 读数：5 张图共 145 个块引用、81 个块定义、469 个成员（四张语料图是 6 / 6、20 / 17、23 / 13、31 / 10，与 `tests/pid_import.rs` 里钉的数相同；第五张 65 / 35）。每张图、两种格式，三样都和另存之前相同，按顺序比、按集合比都相同。块引用全部比例 1、转角 0，都写着 `role`、`symbol`、`sheet_layer`、`sheet_layer_oid`、`style`、`extent`；成员的记录只有 `role=symbol`、`role=fill`、`role=symbol-label` 三种。
+  - DXF 文本里是通常的写法（`dxf-excerpt-2.txt`，`DWG-0201GP06-01.pid` 的第一个块引用）：`0 INSERT`、`8 Default`、`2 SPPID_Flanged Nozzle`、插入点，然后 `1001 PID_SEMANTICS` 和六行 `1000`：`sheet_layer=Default`、`sheet_layer_oid=8`、`role=symbol`、`style=Nozzle - New`、`extent=3.81x2.54`、`symbol=Flanged Nozzle`。它的 `BLOCK` 里两条 `LINE` 在 `0` 层，各带 `1000 role=symbol`；一条 `TEXT` 在 `PID-SYMBOL-LABEL` 层，带 `1000 role=symbol-label`。
+- 比上面「已知要改的几句」多改的：
+  - 「导入汇总」第一行的两个实体数：把这一节从头到尾对一遍时发现的。这两个数按放置画出来的实体算，和图上能选中的对象数对不上，手册里加了一句说明。
+  - 「特性面板」一段：`本体尺寸` 那两行「仅符号放置的实体有」改成「仅符号放置有」，说明记录写在块引用上、面板里另有块引用自己的几行。
+  - 新段落里比「做什么」多写三句：对象捕捉、图例识别不碰这些块引用、文件没给出图层名的放置落在哪一层。都有上表的测试钉着。
+- 看到了没动的（都不是讲符号结构的，这份计划之前就是这样）：
+  - `PID-*` 图层表只列了 5 层，没有 `PID-SYMBOL`、`PID-FILL`、`PID-TEXT`、`PID-POINT*`、`PID-ANNOTATION`。新段落提到 `PID-SYMBOL` 和 `PID-FILL` 时写明了是文件没给出图层名的情形、语料图里没有。
+  - 两处角色清单里没有 `annotation`（`src/io/pid_view_filter.rs` 的 `ROLE_ORDER` 里有）。
+- 文档检查（`python -m pytest scripts/pid-platform -q -p no:cacheprovider`）：改之前（06:48，在 `b1cf3091e` 上，工作区干净）590 个全过；改之后（06:58，手册是现在这一版）590 个全过；提交前（07:04，手册和规格是提交的版本，本文件只差这一句和证据清单里的两个文件名）又跑了一遍，590 个全过。它管不管这个文件：不管。它只读 `docs/pid-platform`；仓库里也没有别的代码、测试或脚本读 `docs/user-guide.md`（`git grep -l user-guide`，除去 `docs/plans`，只有 `README.md` 和 `.kiro/specs/pid-import-next-round/` 下的三份文档提到它）。所以手册写错了不会有东西变红，这次靠的是改完把整节读回来，逐句对上表里的测试；读的时候订正了第一版的三处（共用块定义少了「同一个符号」的前提；「块引用自己不旋转也不缩放」说得太满，用户可以旋转它；「块里的笔画和填充在 `0` 层」没说文件没给图层名时的例外）。
+- 规格：§11 加 SB-8b 一条（五点）。
+- `todo.md` 另外两处：SB-9 的验收加一条（存成 DXF 再读回），检查点三加一条（手册这一节的两处缺口和「没有检查管」请用户定）。
+- 固定门禁：这一项只改了 `docs/user-guide.md`、规格和 `todo.md`，没有动 `.rs` 和词条文件，测试、clippy、格式、分层报告没有重新量；第 8 条文档检查就是上面的读数。
+- 没验证的：
+  - 另存出来的 DWG / DXF 没有用第三方 CAD 打开过：读回来用的是本程序自己的读取器，DXF 的写法是看摘录确认的。
+  - 量的是 `io::save_to_bytes`，没有走程序界面上的「另存为」（SB-10）。
+  - 手册里讲选中、夹点、捕捉、编辑、分解、图层管理器的句子，依据的测试用的是拼出来的图，没有在真图和真程序上点过（SB-10）。
+  - 冻结图层、在块编辑器里改块定义会怎样，没有测，手册里没写。
+- 证据：`D:\scratch\ocs-symblock\sb8b\`（量测：`zz_sb8b_tmp.rs`、`measure.ps1`、`measure-m1.log`、`measure-m1.done`、`saved-m1\saved.txt`、`saved-m1\dxf-excerpt-1.txt` 到 `-5.txt`；文档检查：`doccheck.ps1`、`doccheck-before.log`、`done-before.txt`、`doccheck-after.log`、`done-after.txt`、`doccheck-final.log`、`done-final.txt`；手册的差异 `user-guide.diff`；逐句对照表 `sentences.md`（`sentences.ps1` 从本文件抄出来的）；用词：`words.ps1`、`words-before.txt`、`words-after.txt`、`names.ps1`、`names.txt`、`names2.ps1`、`names2.txt`）。
 
 ### SB-9 【测试】样例测试和性能预算
 
@@ -816,6 +868,7 @@
   - [ ] 现有 18 项摘要计数与基线相同（基线值在 SB-1 开始前量好）。
   - [ ] 同一个文件导入两次：块名的集合相同，每个引用的块名、插入点、记录相同。
   - [ ] 存成 DWG 再读回：块引用数、定义数、每个引用的记录与存之前相同。
+  - [ ] 存成 DXF 再读回：同上一条。做 SB-8b 时加的：手册给第三方的那一句说的是 DWG、DXF 两种，SB-8b 只用临时程序量过一遍，没有变成测试（规格 §11 的 SB-8b 第 3 条）。
   - [ ] 样例上跑图例识别（`pid_legend::recognise`）：认出的符号、未知块、异常清单里都没有导入的图块；散字数量出来写进测试（规格 §4.5 写的是 958，试验时量的）。做 SB-7 时加的：SB-7 的测试用的是拼出来的图，没有在真实图纸上跑（规格 §11 的 SB-7 第 2 条）。
   - [ ] 性能预算：样例导入 3 次取中位数，不超过基线中位数的 1.1 倍；基线值和预算值写在测试里并注明是哪台机器、哪个提交量的。
   - [ ] 故意改坏：关掉共用（每个图例一个定义），定义数的测试变红。
@@ -845,4 +898,5 @@
 ### 检查点三（SB-10 之后，等用户）
 
 - [ ] 验收报告发给用户。
+- [ ] 做 SB-8b 时留下、请用户定的：用户手册 `.pid` 一节的 `PID-*` 图层表和角色清单有缺口，要不要补；手册没有任何检查管（规格 §11 的 SB-8b 第 4、5 条）。
 - [ ] 用户看过之后：合回本地 `main`（有冲突先问），删掉工作目录，清理 `D:\scratch\ocs-symblock`。
