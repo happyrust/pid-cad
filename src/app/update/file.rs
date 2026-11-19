@@ -529,6 +529,323 @@ fn plot_content_extents(content: &PlotContent) -> Option<(f64, f64, f64, f64)> {
         .then_some(bounds)
 }
 
+/// Whether a plot wire has anything in the plot `window` (x0, y0, x1, y1).
+///
+/// The wire's box answers when it reaches the window. It is an f32 box,
+/// though, and a block copy's is its prototype's moved by an f32 sum, so it
+/// can lie a rounding beside the points it stands for. Rounding alone would
+/// then drop a stroke that stands on the window's edge: the outermost stroke
+/// of an extents plot, a frame line a window was snapped to. So a wire its
+/// box puts outside is measured by what it draws, which a copy moves exactly,
+/// before it is left out.
+fn plot_wire_in_window(wire: &crate::scene::WireModel, window: (f64, f64, f64, f64)) -> bool {
+    let (x0, y0, x1, y1) = window;
+    let [left, bottom, right, top] = wire.aabb;
+    if left <= x1 as f32 && right >= x0 as f32 && bottom <= y1 as f32 && top >= y0 as f32 {
+        return true;
+    }
+    // A break in a path is a NaN point: `min` and `max` pass over it.
+    let mut least = [f64::INFINITY; 2];
+    let mut most = [f64::NEG_INFINITY; 2];
+    let mut reach = |high: &[f32; 3], low: Option<&[f32; 3]>| {
+        for axis in 0..2 {
+            let at = f64::from(high[axis]) + low.map_or(0.0, |low| f64::from(low[axis]));
+            least[axis] = least[axis].min(at);
+            most[axis] = most[axis].max(at);
+        }
+    };
+    for (index, point) in wire.points.iter().enumerate() {
+        reach(point, wire.points_low.get(index));
+    }
+    for (index, corner) in wire.fill_tris.iter().enumerate() {
+        reach(corner, wire.fill_tris_low.get(index));
+    }
+    for vertex in &wire.text_verts {
+        reach(&vertex.pos, Some(&vertex.pos_low));
+    }
+    // The window's edges are sums that round as well.
+    let slack = 1e-9
+        * [x0, y0, x1, y1]
+            .iter()
+            .fold(1.0_f64, |size, edge| size.max(edge.abs()));
+    least[0] <= x1 + slack
+        && most[0] >= x0 - slack
+        && least[1] <= y1 + slack
+        && most[1] >= y0 - slack
+}
+
+#[cfg(test)]
+mod plot_window_tests {
+    use super::plot_wire_in_window;
+    use crate::app::OpenCADStudio;
+    use crate::scene::pipeline::text_gpu::TextVertex;
+    use crate::scene::WireModel;
+    use document::entities::{Insert, Line};
+    use document::types::Vector3;
+    use document::EntityType;
+
+    /// A window whose left edge is at an x a drawing puts a stroke on.
+    const WINDOW: (f64, f64, f64, f64) = (66.38663299194862, 20.0, 1779.0, 810.0);
+
+    fn point(x: f64, y: f64) -> ([f32; 3], [f32; 3]) {
+        let (high_x, low_x) = WireModel::split_ds(x);
+        let (high_y, low_y) = WireModel::split_ds(y);
+        ([high_x, high_y, 0.0], [low_x, low_y, 0.0])
+    }
+
+    /// A stroke from `from` to `to` whose box is `aabb`, whatever its points
+    /// say.
+    fn stroke(from: (f64, f64), to: (f64, f64), aabb: [f32; 4]) -> WireModel {
+        let mut wire = WireModel::default();
+        draw(&mut wire, from, to);
+        wire.aabb = aabb;
+        wire
+    }
+
+    /// Another stroke in `wire`, after a break in its path.
+    fn stroke_after_a_break(wire: &mut WireModel, from: (f64, f64), to: (f64, f64)) {
+        wire.points.push([f32::NAN; 3]);
+        wire.points_low.push([0.0; 3]);
+        draw(wire, from, to);
+    }
+
+    fn draw(wire: &mut WireModel, from: (f64, f64), to: (f64, f64)) {
+        for (x, y) in [from, to] {
+            let (high, low) = point(x, y);
+            wire.points.push(high);
+            wire.points_low.push(low);
+        }
+    }
+
+    /// The box tessellation gives a stroke: each coordinate rounded.
+    fn own_box(from: (f64, f64), to: (f64, f64)) -> [f32; 4] {
+        [
+            from.0.min(to.0) as f32,
+            from.1.min(to.1) as f32,
+            from.0.max(to.0) as f32,
+            from.1.max(to.1) as f32,
+        ]
+    }
+
+    #[test]
+    fn a_stroke_on_an_edge_of_the_window_is_plotted_though_its_box_is_a_step_outside() {
+        // What the box of a block copy can come to: its prototype's box
+        // moved by an f32 sum, one f32 step off the stroke it stands for.
+        let (x0, y0, x1, y1) = WINDOW;
+        let (left, bottom) = ((x0 as f32).next_down(), (y0 as f32).next_down());
+        let (right, top) = ((x1 as f32).next_up(), (y1 as f32).next_up());
+        let on_the_edge = [
+            (
+                "left",
+                stroke((x0, 100.0), (x0, 104.0), [left, 100.0, left, 104.0]),
+            ),
+            (
+                "right",
+                stroke((x1, 100.0), (x1, 104.0), [right, 100.0, right, 104.0]),
+            ),
+            (
+                "bottom",
+                stroke((100.0, y0), (104.0, y0), [100.0, bottom, 104.0, bottom]),
+            ),
+            (
+                "top",
+                stroke((100.0, y1), (104.0, y1), [100.0, top, 104.0, top]),
+            ),
+        ];
+        let dropped: Vec<&str> = on_the_edge
+            .iter()
+            .filter(|(_, wire)| !plot_wire_in_window(wire, WINDOW))
+            .map(|(edge, _)| *edge)
+            .collect();
+        assert!(
+            dropped.is_empty(),
+            "dropped the stroke on these edges: {dropped:?}"
+        );
+    }
+
+    #[test]
+    fn a_stroke_a_rounding_beside_the_edge_is_plotted() {
+        // Where a block copy stands is a sum of rounded numbers: a stroke
+        // meant for the edge stands a rounding beside it.
+        let (x0, ..) = WINDOW;
+        let x = x0 - 1e-12;
+        let left = (x0 as f32).next_down();
+        let wire = stroke((x, 100.0), (x, 104.0), [left, 100.0, left, 104.0]);
+        assert!(
+            wire.point_world(0, 1.0).x < x0,
+            "the stroke stands outside the edge"
+        );
+        assert!(plot_wire_in_window(&wire, WINDOW));
+    }
+
+    #[test]
+    fn the_low_halves_of_the_points_count() {
+        // This x rounds down as an f32: the high halves alone put the stroke
+        // left of the edge it stands on.
+        let x = 68.17399905035352;
+        let left = (x as f32).next_down();
+        let wire = stroke((x, 10.0), (x, 14.0), [left, 10.0, left, 14.0]);
+        assert!(f64::from(wire.points[0][0]) < x - 1e-6);
+        assert!(plot_wire_in_window(&wire, (x, 0.0, 200.0, 100.0)));
+    }
+
+    #[test]
+    fn a_break_in_the_path_is_passed_over() {
+        // Strokes of one pen share a wire, a NaN point between them.
+        let (x0, ..) = WINDOW;
+        let left = (x0 as f32).next_down();
+        let mut wire = stroke(
+            (x0 - 9.0, 100.0),
+            (x0 - 5.0, 100.0),
+            [left - 9.0, 100.0, left, 104.0],
+        );
+        stroke_after_a_break(&mut wire, (x0, 100.0), (x0, 104.0));
+        assert!(plot_wire_in_window(&wire, WINDOW));
+    }
+
+    /// A triangle that reaches the left edge of `WINDOW` from outside, and a
+    /// box for it that stops one f32 step short of that edge.
+    fn reaching_the_left_edge() -> ([(f64, f64); 3], [f32; 4]) {
+        let (x0, ..) = WINDOW;
+        let left = (x0 as f32).next_down();
+        (
+            [(x0 - 3.0, 100.0), (x0, 100.0), (x0, 104.0)],
+            [left - 3.0, 100.0, left, 104.0],
+        )
+    }
+
+    #[test]
+    fn a_fill_that_reaches_the_edge_is_plotted_though_its_box_stops_short() {
+        let (corners, aabb) = reaching_the_left_edge();
+        let mut fill = WireModel::default();
+        for (x, y) in corners {
+            let (high, low) = point(x, y);
+            fill.fill_tris.push(high);
+            fill.fill_tris_low.push(low);
+        }
+        fill.aabb = aabb;
+        assert!(plot_wire_in_window(&fill, WINDOW));
+    }
+
+    #[test]
+    fn a_text_that_reaches_the_edge_is_plotted_though_its_box_stops_short() {
+        let (corners, aabb) = reaching_the_left_edge();
+        let mut text = WireModel::default();
+        for (x, y) in corners {
+            let (pos, pos_low) = point(x, y);
+            text.text_verts.push(TextVertex {
+                pos,
+                pos_low,
+                uv: [0.0; 2],
+                color: [1.0; 4],
+                draw_depth: 0.0,
+                pen: 0.0,
+            });
+        }
+        text.aabb = aabb;
+        assert!(plot_wire_in_window(&text, WINDOW));
+    }
+
+    #[test]
+    fn what_lies_beside_the_window_is_left_out() {
+        let (x0, y0, x1, y1) = WINDOW;
+        let beside = [
+            ("left of", (x0 - 0.001, 100.0), (x0 - 0.001, 104.0)),
+            ("right of", (x1 + 0.001, 100.0), (x1 + 0.001, 104.0)),
+            ("below", (100.0, y0 - 0.001), (104.0, y0 - 0.001)),
+            ("above", (100.0, y1 + 0.001), (104.0, y1 + 0.001)),
+        ];
+        let kept: Vec<&str> = beside
+            .iter()
+            .filter(|(_, from, to)| {
+                plot_wire_in_window(&stroke(*from, *to, own_box(*from, *to)), WINDOW)
+            })
+            .map(|(side, ..)| *side)
+            .collect();
+        assert!(kept.is_empty(), "kept a stroke that lies {kept:?} it");
+
+        // A break in a path brings nothing in.
+        let (from, to) = ((x0 - 9.0, 100.0), (x0 - 1.0, 104.0));
+        let mut broken = stroke(from, (x0 - 5.0, 100.0), own_box(from, to));
+        stroke_after_a_break(&mut broken, (x0 - 1.0, 100.0), to);
+        assert!(!plot_wire_in_window(&broken, WINDOW));
+
+        // A wire that draws nothing has only its box to go by.
+        let nothing = WireModel {
+            aabb: [0.0, 0.0, 1.0, 1.0],
+            ..WireModel::default()
+        };
+        assert!(!plot_wire_in_window(&nothing, WINDOW));
+    }
+
+    #[test]
+    fn an_extents_plot_draws_every_stroke_of_a_block_copy_that_stands_on_the_extents() {
+        // Two references of one block, placed where a drawing of the test
+        // corpus has them. The second is drawn as a copy of the first. Its
+        // left edge is the leftmost stroke of the drawing, and the box the
+        // copy gets for it lies one f32 step left of the extents.
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let scene = &mut app.tabs[i].scene;
+        let (left, right) = (-42.31999999999999, -0.3199999999999932);
+        let (low, high) = (1.8100000000000023, 5.810000000000002);
+        scene.define_block_raw(
+            "OFF-UNIT",
+            Vector3::ZERO,
+            vec![
+                EntityType::Line(Line::from_coords(left, low, 0.0, right, low, 0.0)),
+                EntityType::Line(Line::from_coords(left, high, 0.0, left, low, 0.0)),
+            ],
+        );
+        let first_at = (110.49399905035351, 362.04267679049275);
+        let copy_at = (108.70663299194861, 621.079492002102);
+        let mut place = |(x, y): (f64, f64)| {
+            scene.add_entity(EntityType::Insert(Insert::new(
+                "OFF-UNIT",
+                Vector3::new(x, y, 0.0),
+            )))
+        };
+        let first = place(first_at);
+        let copy = place(copy_at);
+        app.plot_dialog.paper_space = false;
+        app.plot_dialog.area = "Extents".into();
+        let page = app.extents_plot_job().expect("the extents of the drawing");
+
+        // The strokes the plot draws of a reference, in the block's own
+        // coordinates, in millionths.
+        let millionths = |line: [f64; 4]| line.map(|v| (v * 1e6).round() as i64);
+        let drawn = |reference: document::Handle, at: (f64, f64)| {
+            let name = reference.value().to_string();
+            let mut strokes = Vec::new();
+            for wire in page.content.wires.iter().filter(|wire| wire.name == name) {
+                let points: Vec<_> = (0..wire.points.len())
+                    .map(|index| wire.point_world(index, 1.0))
+                    .collect();
+                for ends in points.windows(2) {
+                    if ends[0].is_finite() && ends[1].is_finite() {
+                        strokes.push(millionths([
+                            ends[0].x - at.0,
+                            ends[0].y - at.1,
+                            ends[1].x - at.0,
+                            ends[1].y - at.1,
+                        ]));
+                    }
+                }
+            }
+            strokes.sort_unstable();
+            strokes
+        };
+        let block = [[left, low, right, low], [left, high, left, low]].map(millionths);
+        assert_eq!(drawn(first, first_at), block, "the first reference");
+        assert_eq!(
+            drawn(copy, copy_at),
+            block,
+            "its copy, whose left edge stands on the extents"
+        );
+    }
+}
+
 /// Stamp the owning entity's effective color index onto a plot wire so CTB
 /// plot-style lookups (`wire.aci > 0`) apply.
 ///
@@ -9504,18 +9821,13 @@ impl OpenCADStudio {
             origin_y
         };
         let scene = &self.tabs[i].scene;
-        let (wx0, wy0, wx1, wy1) = (x0 as f32, y0 as f32, x1 as f32, y1 as f32);
         let mut content = plot_scene_content(
             scene,
             self.plot_dialog.paperspace_last,
             plot_render_mode_override(&self.plot_dialog),
         );
         let in_window = |wire: &crate::io::pdf_export::PlotWire| {
-            wire.name != "paper_printable_area"
-                && wire.aabb[0] <= wx1
-                && wire.aabb[2] >= wx0
-                && wire.aabb[1] <= wy1
-                && wire.aabb[3] >= wy0
+            wire.name != "paper_printable_area" && plot_wire_in_window(wire, window)
         };
         content.group_splits.wires = content.wires
             [..content.group_splits.wires.min(content.wires.len())]
