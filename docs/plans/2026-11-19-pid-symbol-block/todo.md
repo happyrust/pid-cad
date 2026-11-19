@@ -24,14 +24,15 @@
 1. **先红后绿**。先写测试并看到它失败，再写实现。只加测试的任务没有「先红」，用第 2 条代替。
 2. **故意改坏**。在这个任务的代码里放几处由环境变量 `OCS_MUTANT` 控制的改坏点，编译一次，逐个打开，每一处都要有测试变红。核对完删掉改坏点，提交里不留。
 3. **全量单元测试** `cargo test --offline --locked --lib`：失败的只能是基线里就失败的那一个；通过数等于上一个提交的通过数加本任务新增的测试数。
-4. **clippy** `cargo clippy --offline --locked --lib` 和 `... --profile test`：两个告警数都不高于上一个提交。
-5. **格式** `scripts\fmt-newhunks.ps1 <改前的副本> <改后的文件>`：每个动过的 `.rs` 文件 `new=0`。
-6. **分层** `python scripts/arch_check.py report`：`io` 开头的行不增加。
-7. **文档检查**：只在动了 `docs/pid-platform/` 时跑（SB-8）。
-8. **提交**：只 `git add` 本任务的文件和 `todo.md`；说明里写读数、没验证的、门禁结果；改了既有测试的期望值的，逐处写原值、新值、原因。
-9. 与规格不一致的地方记进规格 §11。
+4. **集成测试**（SB-4b 起）`cargo test --offline --locked --no-fail-fast --test pid_import --test pid_legend`：两个文件都全过，个数等于上一个提交的加本任务新增的；测试文件编译没有告警；跑完之后系统临时目录里没有名字带 `symbol` 的文件夹。样例图在同级目录 `pid-parse\test-file\` 里，没有样例时这些测试直接算通过，那样的「全过」不算数。
+5. **clippy** `cargo clippy --offline --locked --lib` 和 `... --profile test`：两个告警数都不高于上一个提交。
+6. **格式** `scripts\fmt-newhunks.ps1 <改前的副本> <改后的文件>`：每个动过的 `.rs` 文件 `new=0`。
+7. **分层** `python scripts/arch_check.py report`：`io` 开头的行不增加。
+8. **文档检查**：只在动了 `docs/pid-platform/` 时跑（SB-8）。
+9. **提交**：只 `git add` 本任务的文件和 `todo.md`；说明里写读数、没验证的、门禁结果；改了既有测试的期望值的，逐处写原值、新值、原因。
+10. 与规格不一致的地方记进规格 §11。
 
-第 3–6 条用一个脚本跑（在仓库外）：`D:\scratch\ocs-symblock\tools\gates.ps1 -Out <证据目录> -Tag <标记> -Files <本任务的 .rs> -Quick <测试名过滤词>`。证据在 `D:\scratch\ocs-symblock\<任务>\`。
+第 3–7 条用一个脚本跑（在仓库外）：`D:\scratch\ocs-symblock\tools\gates.ps1 -Out <证据目录> -Tag <标记> -Files <本任务的 .rs> -Quick <测试名过滤词>`。集成测试默认跑 `pid_import`、`pid_legend` 两个文件（`-Integ` 可以换，`-NoInteg` 不跑）。编译输出的目录是几个工作目录共用的（见下一段），所以脚本在这一步之前先把 `src\lib.rs` 的修改时间改成当时（内容不动），让测试连的库在同一次 cargo 调用里由本工作目录的源码重编，不会拿到别的工作目录留在那里的库。证据在 `D:\scratch\ocs-symblock\<任务>\`。
 
 编译输出的位置（2026-11-19 SB-2 收尾时更正）：这台机器上的 cargo 不认 `CARGO_TARGET_DIR`，它提示 `this cargo always uses ./target`。中间产物和测试程序在 `D:\Rust\.cargo\targets\OpenCADStudio-9c2d1eeb\`（这个目录建于 11-17，早于本工作目录，可见是与别的工作目录共用的），发行版的 exe 在工作目录自己的 `target\release\`（`target` 在 `.gitignore` 里）。这里原先写的「编译输出在 `D:\scratch\ocs-ci\target`」不对，各证据文件开头 `target: D:\scratch\ocs-ci\target` 那一行也不对；测试和 clippy 的读数不受影响，证据里的 `Compiling OpenCADStudio … (D:\work\plant-code\cad\ocs-pid-symbol-block)` 一行说明编的是本工作目录的源码。
 
@@ -42,6 +43,7 @@
 | 编译器 | rustc 1.102.0-nightly (65ce8611f 2026-11-18)，clippy 0.1.102，rustfmt 1.12.0-nightly |
 | 全量单元测试 | 7,069 个：通过 7,015，忽略 53，失败 1 |
 | 基线里就失败的那一个 | `app::pid_shell::pid_shell_chrome::what_the_editor_shows_is_drawn_in_the_frame_where_a_window_of_its_own_draws_it`（画面逐像素比对，26,644 个像素不同；与导入器无关，不在本计划里处理）。SB-1 的全量里它通过了，可见结果随机器当时的状态变：之后各任务里它通过或失败都不算那个任务的变化，通过数因此可能差 1 |
+| 集成测试 | 起点上没有量，固定门禁原先不跑它。2026-11-20 02:17–02:25 补量（证据 `D:\scratch\ocs-symblock\integ\`）：`035046b4e` 上 `tests/pid_import.rs` 54 个，通过 43，失败 11；`tests/pid_legend.rs` 29 个全过。把分支改过的 9 个源文件换回起点的版本（分支新加的 4 个文件留着）：`tests/pid_import.rs` 通过 53，失败 1，这 1 个是系统临时目录里留下的文件夹造成的。来历和处理见 SB-4b；SB-4b 之后是 55 个、29 个，全过 |
 | clippy（`--lib`） | 656 条告警 |
 | clippy（`--lib --profile test`） | 1,051 条告警 |
 | 分层报告里 `io` 开头的行 | `io -> app 3`、`io -> modules 1`、`io -> patreon 1`、`io -> ui 1` |
@@ -359,9 +361,110 @@
   - 打开 `PID-SYMBOL-LABEL` 之后，两个隐藏的阀的位置上什么都没画，在它们符号名的位置上点不到东西；在显示着的阀的符号名上点一下，选中的是这个图例。
   - 取色：把图层 `Process` 改成蓝色，这一层的阀左边那段线（0 层、随层）和管线变蓝，圆、右边那段线、填充不变；`Instrument` 上画同一个定义的阀不变。再把 `Instrument` 改成洋红，那边的左段线变洋红，`Process` 的还是蓝。
   - 移动：符号名图层开着，选中 `Process` 上的阀，`MOVE` 从 (0, 0) 到 (0, −40)。新位置周围画的是笔画加符号名，都在这个引用名下；原处什么都不剩；填充到了新位置；在新位置的符号名上点一下选中这个图例，原来符号名的位置上点不到。
-- 读数：新增测试 18 个。全量 7,136 个：通过 7,083，忽略 53，失败 0（上一个提交的 7,065 加新增的 18）。clippy 656 / 1,051，与上一个提交相同；点到 `src/app/mod.rs`（4 条）、`src/io/pid/mod.rs`（1 条）的都不在这次动的行上，另外 4 个文件上没有。6 个文件都是 `new=0`。分层报告与上一个提交逐行相同。改动 +1,249 −40（不算本文件），全是测试和只在测试里编译的接线。还原产品文件之后第一次启动的全量检查没有重新编译：还原用的是复制，保留了旧的修改时间，编译工具认为不用重编，测的是带着改坏代码（开关没开）的旧程序。跑了 54 秒发现后停掉，把 5 个文件的修改时间改成当时再重跑；这里的读数是重新编译之后的。
+- 读数：新增测试 18 个。全量 7,136 个：通过 7,083，忽略 53，失败 0（上一个提交的 7,065 加新增的 18）。clippy 656 / 1,051，与上一个提交相同；点到 `src/app/mod.rs`（4 条）、`src/io/pid/mod.rs`（1 条）的都不在这次动的行上，另外 4 个文件上没有。6 个文件都是 `new=0`。分层报告与上一个提交逐行相同。改动 +1,248 −40（不算本文件），全是测试和只在测试里编译的接线。还原产品文件之后第一次启动的全量检查没有重新编译：还原用的是复制，保留了旧的修改时间，编译工具认为不用重编，测的是带着改坏代码（开关没开）的旧程序。跑了 54 秒发现后停掉，把 5 个文件的修改时间改成当时再重跑；这里的读数是重新编译之后的。
 - 没验证的：没有在程序界面里看，留给 SB-10。窗口自己拿到的那份填充清单没有读；按位置读的那种没有和出图那一份核对。测试图只有一种画法，没有转过、镜像过的摆放，没有图框，没有只画符号名的图例放在隐藏图层上的情况。图层只测了关，没有测冻结；随层只测了颜色，线宽、线型没有测。打开隐藏的图纸图层时命令行的那句提示没有断言。移动只量了 `MOVE` 平移一次。隐藏图例的两道保险都去掉的情况没有试。
 - 证据：`D:\scratch\ocs-symblock\sb4\`（`quick-e1.log`、`quick-v1.log`、`quick-m0.log`、`quick-m-*.log`、`mutant-table-round4.txt`、`mutants.diff`、`chainfinal.txt`）。
+
+### SB-4b 【测试】集成测试按新结构读图，并进固定门禁
+
+后来加的任务（计划 §9）。固定门禁原先只跑库里的单元测试，`tests/` 下的集成测试从 SB-1 起一次没跑过；SB-4 之后补跑，`tests/pid_import.rs` 的 54 个里有 11 个失败。
+
+- **做什么**
+  1. `tests/pid_import.rs` 加一种读法「按画出来的样子读」（`drawn`）：模型空间里每个图例的块引用换回它画的图元，成员平移到插入点，0 层的换回引用所在的图层，记录换回引用上的那一份（`role` 用成员自己的，`symbol` 不带）。读「图例画了什么」的测试改用它，原来的期望值不动。另加一个测试钉住存下来的块结构。
+  2. SB-1 的单元测试 `symbol_blocks_survive_a_dwg_round_trip` 不再往系统临时目录写文件；`tests/pid_import.rs` 里「临时目录上方没有符号库」的准备步骤不再受临时目录里别的文件夹影响。
+  3. 固定门禁加上集成测试（§1 第 4 条），脚本 `gates.ps1` 默认跑。
+- **验收**
+  - [x] `tests/pid_import.rs`、`tests/pid_legend.rs` 全过。
+  - [x] 原有测试不删，断言不放宽；期望值只改一处（记录的键名单加 `symbol`），提交说明里写原值、新值、原因。
+  - [x] 块结构有测试钉住：每张样例图的图例数和定义数；引用带 `role=symbol`、`symbol=`、`extent=`、`style=`，在它该在的图层；成员只带 `role=`，在 0 层或导入器自己的图层；符号名在块里写一次。
+  - [x] 故意改坏：引用的位置、块内坐标、少一笔、符号名不进块、成员同时留在模型空间、成员的图层和记录、引用的图层和各个键、定义共用的两个方向，每一处都有集成测试变红。
+  - [x] 临时目录里有一个名字带 `symbol` 的文件夹时，「没有符号库」那一条照样通过（用一个专用的临时目录试的，系统的没有动）；跑完全部测试后系统临时目录里没有这样的文件夹。
+  - [x] 固定门禁的脚本带上集成测试。
+- **验证**：`gates.ps1 -Out D:\scratch\ocs-symblock\sb4b -Tag final -Files src/io/pid/symbol_blocks.rs,tests/pid_import.rs -Quick symbol_blocks`；改坏用 `tools\integ-mut.ps1`（编一次，把测试程序拷出来，每处改坏跑一遍）。
+- **依赖**：SB-2、SB-4。
+- **文件**：`tests/pid_import.rs`、`src/io/pid/symbol_blocks.rs`（只动测试模块）。
+- **规模**：M。
+
+**做完**（2026-11-20）
+
+- 怎么查出来的：开始做 SB-5 时发现固定门禁只跑 `--lib`。`tests/` 下有两个文件测的是导入器，它们的样例图（同级目录 `pid-parse\test-file\`）这台机器上有，会真的跑；分支上还没有一个提交动过 `tests/`。在 `035046b4e` 上跑（02:17）：`tests/pid_legend.rs` 29 个全过；`tests/pid_import.rs` 54 个，43 个通过，11 个失败。再把分支改过的 9 个源文件换回起点 `5171d197b` 的版本跑 `tests/pid_import.rs`（分支新加的 4 个文件留着；跑完由脚本换回，工作目录的状态与之前相同）：53 个通过，1 个失败。
+- 简称（按文件里的先后）：
+  - 改了读法的 16 个：R1 `the_import_leaves_a_summary_the_app_can_show`，R2 `a_cached_strokes_dash_is_its_own_storages_not_its_placements`，R3 `filled_areas_come_in_as_solid_hatches`，R4 `a_symbol_name_is_lettered_beside_the_symbol_it_names`，R5 `a_placement_without_a_library_body_draws_the_body_the_drawing_carries`，R6 `a_symbols_bspline_lip_reaches_the_drawing`，R7 `a_symbol_authored_away_from_its_origin_lands_on_the_line_work_it_marks`，R8 `a_symbol_body_draws_in_the_style_its_placement_names`，R9 `the_vessel_draws_in_its_placements_maroon_not_its_syms_black`，R10 `a_cached_bodys_lettering_stays_on_its_switched_off_layer`，R11 `the_opening_view_is_framed_on_geometry_that_exists`，R12 `every_entity_is_filed_under_its_authored_layer_and_the_table_is_the_drawings_own`，R13 `a_placement_states_its_extent_and_a_parametric_one_its_library_defaults`，R14 `a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers`，R15 `a_label_placement_keeps_its_anchor_cross_off_the_sheet`，R16 `paper_style_scale_scales_dash_patterns_and_the_stated_line_weights`。
+  - 改了期望值的 1 个：K `role_and_class_are_separate_keys_with_disjoint_vocabularies`。
+  - 新加的 1 个：S `a_placement_is_one_reference_to_a_block_of_what_it_draws`。
+- 11 个失败的来历，都是这个分支带来的，没有一个指向画出来的内容变了：
+  - 9 个是测试按散图元的结构读图（R1、R7、R8、R10、R12、R13、R14、R15、R16）。它们在整个文档里按 `role=` 找图例的笔画和符号名，数个数、量坐标、读记录；现在笔画在块定义里，坐标是块内的，画法相同的只存一份，`extent=` 这些键在引用上。报错例如「`role=symbol` 的图元没有写 `extent=`」「导入器建的图元在 `0` 层」「画出的加边框模板加图框是文档里的全部：328 对 341」。
+  - 1 个是记录的键名单（K）：「导入写了一个不认识的键 `symbol=Cap2`」。
+  - 1 个是 SB-1 留下的文件夹（R5；起点源码上失败的也是它）。`symbol_blocks_survive_a_dwg_round_trip` 把 DWG 写进系统临时目录下的 `ocs_pid_symbol_blocks_tests`，用完删了文件，没删文件夹。导入器找符号库，是从图纸所在目录往上 5 级、名字里带 `symbol` 的文件夹都算（`src/io/pid/symbols.rs` 的 `discover_symbol_library`），所以在临时目录下打开的 `.pid` 都把这个空文件夹当成了符号库，R5 的前提「临时目录上方没有符号库」不成立。文件夹建于 2026-11-19 23:19，每跑一遍全量单元测试都会再建出来；11-20 确认是空的之后删掉。从建出来到删掉这段时间，这台机器上任何工作目录跑 `tests/pid_import.rs`，R5 都会失败，与那个工作目录的代码无关。
+- 改了什么：
+  - 读法。`trait Entities` 有两个实现：`Document` 照存下来的读（引用和定义都在内），视图过滤、图层管理器、存盘看到的就是这个；`Drawn` 是 `drawn(&doc)` 的结果，照画出来的读。`drawn` 自己带两条断言：每个引用不转不缩；文档里的图元都在模型空间和被引用到的定义里，没有落在别处的。帮手 `on_layer`、`of_role` 改成两种都收。
+  - R1–R16 改用 `drawn`，期望值一个没动。其中 10 个在 `035046b4e` 上是红的（上面 9 个加 R5）。另外 6 个（R2、R3、R4、R6、R9、R11）当时还通过，但读到的是存下来的结构：坐标是块内的，画法相同的图例只数到一次。
+  - K：`KEYS` 从 10 项变 11 项，加 `symbol`。这是唯一改的期望值。
+  - S：新测试，见下面「S 钉住的」。
+  - 其余 37 个原有测试没有动。任务开始时把 54 个逐个读过：它们读的是管线、文字、标记点、图框，或者量的就是存下来的结构（视图过滤、图层视图、存取往返），照存下来的读是对的。
+  - R5 的准备步骤 `import_without_library`：图原先直接放在临时目录下新建的一个文件夹里，查找的 5 级里就有临时目录自己和它上面三级；现在放到新建文件夹底下的 `1\2\3\4\5` 里，查找看的 5 级都是测试自己建的。
+  - `symbol_blocks_survive_a_dwg_round_trip`：在内存里写、读 DWG（`DwgWriter::write_to_vec`、`DwgReader::from_stream`），断言没动。
+  - 仓库外的脚本（`D:\scratch\ocs-symblock\tools\`）：`gates.ps1` 加集成测试一步；新加 `integ.ps1`（单跑集成测试）、`integ-mut.ps1`（改坏）、`integ-read.ps1`（读结果）、`integ-at-start.ps1`（在起点源码上跑）。
+- S 钉住的：
+  - 每张图的图例数、定义数、各样式名的图例数（引用上的 `style=`），见下表。定义数既是被引用到的定义数，也是文档里 `SPPID_` 开头的块记录数，两个都要等于表里的数。四张图 80 个图例都写了 `style=`。
+  - 每个引用：`role=symbol`；有 `symbol=`；块名以 `SPPID_` 开头；有 `extent=`；定义不空。
+  - 每个成员：记录里只有 `role=` 一个键，值是 `symbol`、`symbol-label`、`fill` 之一；在 `0` 层，或者在一个与引用不同的、`PID-` 开头的图层。
+  - 符号名：定义里角色是 `symbol-label` 的文字正好一个，内容等于引用上的 `symbol=`。
+  - 引用的图层：只画符号名的在 `PID-SYMBOL-LABEL`；其余的，写了 `sheet_layer=` 就在那个图层，没写就在 `PID-SYMBOL` 或 `PID-HIDDEN`。
+
+  | 图 | 图例 | 定义 | 各样式名的图例数 |
+  |---|---|---|---|
+  | `DWG-0201GP06-01.pid` | 20 | 17 | As Drawn 5，Equipment - New 1，Nozzle - New 6，Off-Line Instrument 3，Piping Component - New 4，Piping OPC 1 |
+  | `DWG-0202GP06-01.pid` | 23 | 13 | As Drawn 12，Nozzle - New 3，Off-Line Instrument 2，Piping Component - New 2，Piping OPC 4 |
+  | `D06.pid` | 6 | 6 | Equipment - New 1，In-Line Instrument - New 2，Nozzle - New 1，Off-Line Instrument 1，Piping Component - New 1 |
+  | `工艺管道及仪表流程-1.pid` | 31 | 10 | As Drawn 12，Equipment - New 1，Nozzle - New 8，Piping OPC 10 |
+
+- 第一次跑：
+  - S 先单独跑了一遍量定义数（`integ-measure1`），再把数写进测试。
+  - 第一次全跑（`integ-green1`，02:46）`tests/pid_import.rs` 的测试程序崩了，栈溢出：`Entities for Document` 的 `entities()` 里想调文档自己的同名方法，调到的是它自己。改成 `std::ops::Deref::deref(self).entities()` 之后再跑（`integ-green2`，02:49），55 个、29 个全过。测试代码写错，不是程序的问题。
+  - 这一次查出检查脚本的两个漏洞，都补上了。测试程序中途崩掉时，脚本把后一个文件的「全过」记到了前一个文件名下（`integ-green1.txt` 里 `tests\pid_import.rs … 29 passed` 那一行就是这样来的）；现在崩掉的写明没有结果。测试文件的编译告警原先不列；现在单独一行，是 0。
+- 故意改坏 13 处，用环境变量打开，编一次，把测试程序拷出来跑 14 遍：不开的一遍 55 个全过，每处各一遍。跑了两轮。第一轮（`mut-m1.txt`，02:50–02:52）12 处有测试变红，第 10 处 55 个全过：没有一个集成测试钉着图例的 `style=`。量了四张图上每个引用的 `style=`（`integ-measure2.log`），在 S 里加了按样式名数图例的断言。第二轮（`mut-m2.txt`，03:04–03:06）13 处都红，下表是第二轮的结果。
+
+  | # | 改坏 | 改在哪 | 55 个里变红 | 变红的 | S 红在哪 |
+  |---|---|---|---|---|---|
+  | 1 | 引用的插入点横向多偏 10 | `src/io/pid/build.rs` | 3 | R7 R15 R16 | 不红 |
+  | 2 | 成员不换算成块内坐标 | `src/io/pid/symbol_blocks.rs` | 4 | R7 R15 R16 S | 定义数（DWG-0201 是 20，不是 17） |
+  | 3 | 符号名不进块 | `build.rs` | 9 | R1 R4 R7 R10 R12 R13 R14 R15 S | 定义里没有符号名 |
+  | 4 | 成员多于一个的图例去掉第一个成员 | `build.rs` | 10 | R1 R2 R4 R5 R8 R13 R14 R15 R16 S | 去掉一笔后只剩符号名的图例，引用不在 `PID-SYMBOL-LABEL` |
+  | 5 | 成员进块的同时在模型空间也留一份 | `build.rs` | 12 | R1 R2 R5 R6 R7 R8 R9 R12 R13 R14 R15 R16 | 不红 |
+  | 6 | 与引用同层的成员不改到 0 层 | `build.rs` | 1 | S | 成员在引用的图层上 |
+  | 7 | 成员带整条记录 | `build.rs` | 1 | S | 成员的记录不止 `role=` |
+  | 8 | 引用不放到它的图层 | `build.rs` | 2 | R12 S | 引用在 `0` 层，不在它写的图纸图层 |
+  | 9 | 引用不写 `extent=`、`driving=` | `build.rs` | 4 | R1 R13 R14 S | 引用没有 `extent=` |
+  | 10 | 引用不写 `style=` | `build.rs` | 1 | S | 各样式名的个数（读到 `no style 20`）；第一轮不红 |
+  | 11 | 引用不写 `symbol=` | `build.rs` | 1 | S | 引用没有 `symbol=` |
+  | 12 | 画法相同也不共用定义 | `symbol_blocks.rs` | 1 | S | 定义数（DWG-0201 是 20，不是 17） |
+  | 13 | 同名的图例不比画法，都用第一个定义 | `symbol_blocks.rs` | 2 | R7 S | 定义数（DWG-0202 是 11，不是 13） |
+
+  改坏点已删：`build.rs` 与上一个提交逐字节相同，`symbol_blocks.rs` 的改动只有单元测试里那 7 行；`src`、`tests` 里搜不到开关。还原之后改了两个文件的修改时间，固定门禁是重新编译之后跑的。改坏的内容留在 `mutants.diff`。
+- 没有红过的：
+  - R1–R16 里 14 个至少红过一次，R3、R11 没有。R3 量的两张图上（DWG-0202 有 5 个填充，D06 没有）没有一个填充属于图例，13 处改坏都碰不到它读的东西。R11 要的是开图的取景范围不超出画出来的图形，13 处里没有一处让它不成立。这两个改了读法，但没有证据说改了之后它们能查出什么。
+  - K 在 13 处下都不红：它查的是「写出来的键都在名单里」，少写一个键不违反。它的「先红」是 `035046b4e` 上那一次。
+  - 没改的 37 个在 13 处下一个没红。
+  - 每个测试只红在第一条不成立的断言上。S 红过的断言见表的最后一列；没有红过的有：引用的 `role=symbol`、块名的前缀、定义不空、没写 `sheet_layer=` 的引用在 `PID-SYMBOL` 或 `PID-HIDDEN`。
+- 临时目录里有名字带 `symbol` 的文件夹时 R5 还过不过，实际试了一次（`probe-stray.txt`，03:14）：把固定门禁编出的测试程序拷到仓库外，用 `TMP`、`TEMP` 给它指一个专用的临时目录，里面放一个空的 `ocs_pid_symbol_blocks_tests`，只跑 R5：通过。专用目录的修改时间在这一遍里变了，说明测试确实在这里建过文件夹。系统自己的临时目录没有动。旧的准备步骤在同样的情况下失败，用的是 `035046b4e` 那次的记录，没有在专用目录里重做。
+- 读数（固定门禁 03:07–03:18，`chainfinal.txt`）：
+  - 集成测试：`tests/pid_import.rs` 55 个全过（原有的 54 加新加的 1），`tests/pid_legend.rs` 29 个全过；测试文件编译告警 0；跑完后系统临时目录里名字带 `symbol` 的文件夹 0 个。
+  - 全量单元测试 7,136 个：通过 7,083，忽略 53，失败 0，与上一个提交相同（没有新加单元测试）。
+  - clippy 656 / 1,051，与上一个提交相同，没有一条点到这两个文件。clippy 不检查 `tests/` 下的文件，这一点和以前一样。
+  - 格式：`symbol_blocks.rs` 是 `before=0 after=0 new=0`；`tests/pid_import.rs` 是 `before=7 after=6 new=0`。少的那一处是 R13 里的 `measures` 闭包：它本来就和 rustfmt 的排法不一样，这次改了它里面的一行，工具就把整处算成新的，所以按 rustfmt 的排法重排了，内容没变。
+  - 分层报告与上一个提交逐行相同。
+  - 改动 +401 −74（两个 `.rs` 文件），全是测试；产品代码没有改。
+- 与之前说的不一样的地方：进展里说过「18 个测试换成了新读法」，按文件逐个数，调用 `drawn` 的测试是 16 个。
+- 没验证的：
+  - S 里各样式名的个数是在分支当前的代码上量的，没有和起点提交对过。依据有三条：起点写在图例每个图元上的和现在写在引用上的是 `build.rs` 里同一个变量（读代码）；单元测试 `the_reference_stands_at_the_insertion_point_and_says_what_the_placement_said` 钉着引用上的 `style=`（代码里拼的图）；DWG-0201 上的个数与 R8 原有注释里按颜色分的个数对得上（7 = 1 + 6，5 = 4 + 1，3，5）。SB-2 的全部样例对比不看 `role` 以外的键。留给 SB-10：已在它的验收里加了一条。
+  - R3、R11 改了读法但没有红过（见上）。
+  - 没改的 37 个里有 24 个也读文档里的图元，照存下来的读。它们当中若有哪条断言顺带读到了图例的成员（坐标是块内的），这次没有逐条用改坏去试；分类靠的是逐个读测试。
+  - 起点源码上那 1 个失败是文件夹造成的，靠的是报错的位置和文件夹的建立时间；删掉文件夹之后没有把起点源码再跑一遍。
+  - 「按画出来的样子读」只在引用不转不缩时成立（`drawn` 自己断言）；导入器现在不产生转过、缩过的引用。
+  - `tests/pid_legend.rs` 没有改，也没有对它做改坏。
+  - 集成测试只有 `pid-parse\test-file\` 的四张图；`pid-test-data` 的 151 张不在里面（SB-9、SB-10）。没有在程序界面里看。
+- 证据：`D:\scratch\ocs-symblock\integ\`（`integ-head.*`、`integ-start.*`：改之前在 `035046b4e` 和起点源码上的结果）；`D:\scratch\ocs-symblock\sb4b\`（`integ-measure1.*`、`integ-green1.*`、`integ-green2.*`、`mut-m1.txt`、`integ-measure2.*`、`mut-m2.txt`、`mut-m2-*.log`、`mutants.diff`、`probe-stray.*`、`chainfinal.txt`）。
 
 ### SB-5 【接线】导入摘要加两项
 
@@ -407,7 +510,7 @@
 
 ### 检查点二（SB-7 之后）
 
-- [ ] SB-3 到 SB-7 的门禁都过；全量单元测试、两个 clippy 读数、分层报告各再量一遍。
+- [ ] SB-3 到 SB-7 的门禁都过；全量单元测试、集成测试、两个 clippy 读数、分层报告各再量一遍。
 - [ ] 记进规格 §11 的偏差列给用户。不等回复。
 
 ---
@@ -450,6 +553,7 @@
   - [ ] 另存 DWG：大小不超过基线（499,568 字节）的 1.7 倍；再打开，块引用数和每个引用的记录与保存前相同，再出的图与保存前相同。
   - [ ] 用时：只带 `.pid` 导入 3 次的中位数不超过基线程序同机中位数的 1.1 倍。
   - [ ] 带 `_Data.xml`：引用上的 `class`、`label`、`oid`、`resolved` 与基线程序写在笔画上的相同（按 `oid` 归并后比）。
+  - [ ] 引用上的 `style=` 与基线程序写在该图例笔画上的相同（SB-4b 留下的：集成测试里各样式名的图例个数是在分支上量的，没有和起点对过）。
   - [ ] 图例识别：导入的图块没有一个被报成未知块。
   - [ ] 起好一个打开了样例图的程序，路径和用法告诉用户。
   - [ ] 验收报告：规格 §6 的 12 条逐条写结果和证据位置，没验证到的单列。

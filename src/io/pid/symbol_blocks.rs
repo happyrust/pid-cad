@@ -988,13 +988,13 @@ mod tests {
         }
         assert_eq!((blocks.definitions, blocks.references), (3, 4));
 
-        let dir = std::env::temp_dir().join("ocs_pid_symbol_blocks_tests");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("round_trip_{}.dwg", std::process::id()));
-        document::DwgWriter::write_to_file(&path, &doc).unwrap();
-        let mut reader = document::DwgReader::from_file(&path).unwrap();
-        let reopened = reader.read().unwrap();
-        std::fs::remove_file(&path).ok();
+        // In memory, not through a file: a directory with `symbol` in its
+        // name left in the temp folder is a symbol library to every `.pid`
+        // opened under that folder afterwards (`discover_symbol_library`).
+        let bytes = document::DwgWriter::write_to_vec(&doc).unwrap();
+        let reopened = document::DwgReader::from_stream(std::io::Cursor::new(bytes))
+            .read()
+            .unwrap();
 
         for name in [
             "SPPID_Gate Valve",

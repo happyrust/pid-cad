@@ -48,12 +48,123 @@ fn import(name: &str) -> Option<Document> {
     )
 }
 
+/// Where a test reads a drawing's entities from: the document as it is
+/// stored, or the sheet as it is drawn ([`drawn`]).
+///
+/// Stored, a symbol placement is one block reference in model space, and
+/// what it draws lies in a block definition -- in the block's own
+/// coordinates, once for all the placements that draw the same (plan
+/// 2026-11-19-pid-symbol-block). A `Document` is read as stored, references
+/// and definitions alike: that is what the view filter, the layer manager
+/// and a save work on.
+trait Entities {
+    fn entities(&self) -> Box<dyn Iterator<Item = &EntityType> + '_>;
+}
+
+impl Entities for Document {
+    fn entities(&self) -> Box<dyn Iterator<Item = &EntityType> + '_> {
+        // The stored entities are the method of this name on what a
+        // `Document` wraps. Asked of the `Document` itself, the name is this
+        // method again.
+        Box::new(std::ops::Deref::deref(self).entities())
+    }
+}
+
+/// The sheet as it is drawn: what model space holds, each symbol placement's
+/// reference replaced by the entities it draws, where it draws them. A test
+/// of what a drawing shows -- how many strokes a symbol has, where its name
+/// sits, the colour it takes -- reads this, so what it pins is per placement
+/// and in sheet coordinates, however the placements share definitions.
+struct Drawn(Vec<EntityType>);
+
+impl Entities for Drawn {
+    fn entities(&self) -> Box<dyn Iterator<Item = &EntityType> + '_> {
+        Box::new(self.0.iter())
+    }
+}
+
+/// `doc` as it is drawn (see [`Drawn`]).
+///
+/// A placement's reference is unrotated and unscaled, so a member is drawn
+/// at its own coordinates plus the insertion point; a member on layer `0`
+/// shows on the reference's layer; a member of a dark reference is dark.
+/// What a placement says of itself -- the sheet layer it is filed under, its
+/// style, its measures, the plant item it stands for -- it says once, on the
+/// reference. Here each member says it as well, under its own `role=`: the
+/// import filed a placement that way before it filed blocks, and the tests
+/// that read a symbol's strokes were written against it. `symbol=` stays
+/// behind: it names the block's symbol, and no loose entity ever carried it.
+fn drawn(doc: &Document) -> Drawn {
+    use document::xdata::{ExtendedDataRecord, XDataValue};
+
+    let mut sheet: Vec<EntityType> = Vec::new();
+    let mut blocks: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for entity in doc.model_space_entities() {
+        let EntityType::Insert(reference) = entity else {
+            sheet.push(entity.clone());
+            continue;
+        };
+        assert_eq!(
+            (
+                reference.x_scale(),
+                reference.y_scale(),
+                reference.z_scale(),
+                reference.rotation
+            ),
+            (1.0, 1.0, 1.0, 0.0),
+            "the reference to {} is rotated or scaled",
+            reference.block_name
+        );
+        blocks.insert(reference.block_name.as_str());
+        let said = pid_pairs(entity);
+        for member in doc.entities_in_block(&reference.block_name) {
+            let role = pid_value(member, "role");
+            let mut record = ExtendedDataRecord::new("PID_SEMANTICS");
+            for (key, value) in &said {
+                let value = match key.as_str() {
+                    "symbol" => continue,
+                    "role" => match &role {
+                        Some(role) => role,
+                        None => continue,
+                    },
+                    _ => value,
+                };
+                record.add_value(XDataValue::String(format!("{key}={value}")));
+            }
+            let mut one = member.clone();
+            one.as_entity_mut().translate(reference.insert_point);
+            let common = one.common_mut();
+            if common.layer == "0" {
+                common.layer = entity.common().layer.clone();
+            }
+            common.invisible |= entity.common().invisible;
+            let _ = common.extended_data.remove_record("PID_SEMANTICS");
+            if !record.values.is_empty() {
+                common.extended_data.add_record(record);
+            }
+            sheet.push(one);
+        }
+    }
+    // Nothing is stored outside model space and the definitions referenced
+    // there, so nothing the document holds is missing from the sheet.
+    let defined: usize = blocks
+        .iter()
+        .map(|block| doc.entities_in_block(block).count())
+        .sum();
+    assert_eq!(
+        doc.entities().count(),
+        doc.model_space_entities().count() + defined,
+        "the document stores entities outside model space and the blocks referenced there"
+    );
+    Drawn(sheet)
+}
+
 fn layer_of(entity: &EntityType) -> &str {
     entity.common().layer.as_str()
 }
 
-fn on_layer<'a>(doc: &'a Document, layer: &'a str) -> impl Iterator<Item = &'a EntityType> {
-    doc.entities().filter(move |e| layer_of(e) == layer)
+fn on_layer<'a>(from: &'a impl Entities, layer: &'a str) -> impl Iterator<Item = &'a EntityType> {
+    from.entities().filter(move |e| layer_of(e) == layer)
 }
 
 /// Prefix of the working keys the importer builds named line work under, one
@@ -287,9 +398,11 @@ fn the_import_leaves_a_summary_the_app_can_show() {
         .filter(|entity| !from_border_template(entity))
         .count();
     assert!(synthetic_border <= 1, "at most one synthetic page border");
+    // Counted on the sheet as drawn: the summary counts what every placement
+    // draws, and the document stores once what several draw the same.
     assert_eq!(
         summary.drawn + summary.template_entities + synthetic_border,
-        doc.entities().count(),
+        drawn(&doc).entities().count(),
         "drawn plus the border template plus the page border is everything in the document"
     );
     assert_eq!(
@@ -341,7 +454,7 @@ fn the_import_leaves_a_summary_the_app_can_show() {
         "DWG-0201: named driving dimensions / template bodies / parametric placements"
     );
     let names_with_defaults = |doc: &Document| {
-        of_role(doc, "symbol-label")
+        of_role(&drawn(doc), "symbol-label")
             .filter(|entity| pid_value(entity, "driving").is_some())
             .count()
     };
@@ -497,10 +610,11 @@ fn a_cached_strokes_dash_is_its_own_storages_not_its_placements() {
         let Some(doc) = import(name) else {
             continue;
         };
+        let sheet = drawn(&doc);
         let mut dashed = 0usize;
         let mut patterns: std::collections::BTreeSet<Vec<i64>> = std::collections::BTreeSet::new();
         let mut palette: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for entity in of_role(&doc, "symbol") {
+        for entity in of_role(&sheet, "symbol") {
             let common = entity.common();
             let linetype = common.linetype.as_str();
             if !linetype.starts_with("PID-DASH-") {
@@ -1263,7 +1377,8 @@ fn filled_areas_come_in_as_solid_hatches() {
         let Some(doc) = import(name) else {
             continue;
         };
-        let hatches: Vec<_> = of_role(&doc, "fill").collect();
+        let sheet = drawn(&doc);
+        let hatches: Vec<_> = of_role(&sheet, "fill").collect();
         assert_eq!(
             hatches.len(),
             expected,
@@ -1651,8 +1766,8 @@ fn on_sheet_layer<'a>(
         .filter(move |entity| pid_value(entity, "sheet_layer").as_deref() == Some(layer))
 }
 
-fn of_role<'a>(doc: &'a Document, role: &'a str) -> impl Iterator<Item = &'a EntityType> {
-    doc.entities()
+fn of_role<'a>(from: &'a impl Entities, role: &'a str) -> impl Iterator<Item = &'a EntityType> {
+    from.entities()
         .filter(move |entity| pid_value(entity, "role").as_deref() == Some(role))
 }
 
@@ -2273,7 +2388,7 @@ fn role_and_class_are_separate_keys_with_disjoint_vocabularies() {
     let Some(doc) = import("export-test/publish-data/DWG-0202GP06-01/DWG-0202GP06-01.pid") else {
         return;
     };
-    const KEYS: [&str; 10] = [
+    const KEYS: [&str; 11] = [
         "sheet_layer",
         "sheet_layer_oid",
         "role",
@@ -2284,6 +2399,8 @@ fn role_and_class_are_separate_keys_with_disjoint_vocabularies() {
         "label",
         "oid",
         "resolved",
+        // On a placement's block reference: the symbol it places.
+        "symbol",
     ];
     let mut both = 0usize;
     for entity in doc.entities() {
@@ -2437,9 +2554,10 @@ fn a_symbol_name_is_lettered_beside_the_symbol_it_names() {
         let Some(doc) = import(name) else {
             continue;
         };
+        let sheet = drawn(&doc);
         let bodies: Vec<(f64, f64, f64, f64)> =
-            of_role(&doc, "symbol").filter_map(drawn_box).collect();
-        let labels: Vec<&EntityType> = of_role(&doc, "symbol-label")
+            of_role(&sheet, "symbol").filter_map(drawn_box).collect();
+        let labels: Vec<&EntityType> = of_role(&sheet, "symbol-label")
             .filter(|entity| {
                 !matches!(entity, EntityType::Text(text) if LABELS_LEFT_UNDRAWN.contains(&text.value.as_str()))
             })
@@ -2510,7 +2628,7 @@ fn a_placement_without_a_library_body_draws_the_body_the_drawing_carries() {
     };
 
     let radii = |doc: &Document| -> Vec<f64> {
-        let mut radii: Vec<f64> = of_role(doc, "symbol")
+        let mut radii: Vec<f64> = of_role(&drawn(doc), "symbol")
             .filter_map(|entity| match entity {
                 EntityType::Circle(circle) => Some((circle.radius * 100.0).round() / 100.0),
                 _ => None,
@@ -2537,19 +2655,19 @@ fn a_placement_without_a_library_body_draws_the_body_the_drawing_carries() {
     );
     // Six placements, each a real body of several strokes rather than one
     // marker.
-    let embedded = of_role(&without_library, "symbol").count();
+    let embedded = of_role(&drawn(&without_library), "symbol").count();
     assert!(
         embedded >= 30,
         "the cached bodies drew {embedded} entities over six placements"
     );
 }
 
-/// The `role=symbol` strokes of a document as comparable values: the entity
-/// kind and its geometry to a hundredth of a millimetre, sorted, so two
-/// imports can be asserted to have drawn the same bodies.
+/// The `role=symbol` strokes a document draws, as comparable values: the
+/// entity kind and its geometry on the sheet to a hundredth of a millimetre,
+/// sorted, so two imports can be asserted to have drawn the same bodies.
 fn symbol_strokes(doc: &Document) -> Vec<String> {
     let mm = |value: f64| (value * 100.0).round() / 100.0;
-    let mut strokes: Vec<String> = of_role(doc, "symbol")
+    let mut strokes: Vec<String> = of_role(&drawn(doc), "symbol")
         .map(|entity| match entity {
             EntityType::Line(line) => format!(
                 "line {} {} {} {}",
@@ -2594,11 +2712,17 @@ fn symbol_strokes(doc: &Document) -> Vec<String> {
     strokes
 }
 
-/// The fixture imported from a fresh temp directory, where the walk up from
-/// the drawing finds no symbol library. `None` when the fixture is absent.
+/// The fixture imported from deep inside a fresh temp directory, where the
+/// walk up from the drawing finds no symbol library. `None` when the fixture
+/// is absent.
+///
+/// The walk looks at five levels (`SYMBOL_SEARCH_DEPTH`) and takes any
+/// folder with `symbol` in its name for a library, so all five are folders
+/// made here: one level up, the walk would list the temp directory itself,
+/// and whatever anything else left there.
 fn import_without_library(name: &str) -> Option<Document> {
     let fixture = fixture(name)?;
-    let dir = std::env::temp_dir().join(format!(
+    let root = std::env::temp_dir().join(format!(
         "ocs-pid-no-library-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -2606,14 +2730,16 @@ fn import_without_library(name: &str) -> Option<Document> {
             .map(|d| d.as_nanos())
             .unwrap_or_default()
     ));
+    let dir = root.join("1").join("2").join("3").join("4").join("5");
     std::fs::create_dir_all(&dir).expect("temp dir");
     let copy = dir.join(name);
     std::fs::copy(&fixture, &copy).expect("copy fixture");
     let import = load_pid(&copy).unwrap_or_else(|error| panic!("load copy: {error}"));
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
     assert!(
         import.summary.symbol_library.is_empty(),
-        "{name}: no library above a fresh temp directory, and the summary says so"
+        "{name}: no library above a fresh temp directory, and the summary says so: {:?}",
+        import.summary.symbol_library
     );
     Some(import.document)
 }
@@ -2656,7 +2782,7 @@ fn a_symbols_bspline_lip_reaches_the_drawing() {
     // symbol layer.
     const LIP_REACH_MM: f64 = 3.0;
     let lips = |doc: &Document| -> Vec<Vec<(f64, f64)>> {
-        of_role(doc, "symbol")
+        of_role(&drawn(doc), "symbol")
             .filter_map(|entity| match entity {
                 EntityType::LwPolyline(polyline)
                     if !polyline.is_closed && polyline.vertices.len() == 17 =>
@@ -2776,8 +2902,9 @@ fn a_symbol_authored_away_from_its_origin_lands_on_the_line_work_it_marks() {
         "the drawing's own line work is what this measures against"
     );
 
+    let sheet = drawn(&doc);
     let mut reach: Vec<(f64, f64, f64)> = Vec::new();
-    for entity in of_role(&doc, "symbol-label") {
+    for entity in of_role(&sheet, "symbol-label") {
         let EntityType::Text(text) = entity else {
             continue;
         };
@@ -2834,9 +2961,10 @@ fn a_symbol_body_draws_in_the_style_its_placement_names() {
         return;
     };
 
+    let sheet = drawn(&doc);
     let mut palette: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut lettering = 0usize;
-    for entity in of_role(&doc, "symbol") {
+    for entity in of_role(&sheet, "symbol") {
         let common = entity.common();
         match (common.color, common.line_weight) {
             (document::types::Color::Rgb { r, g, b }, document::types::LineWeight::Value(w)) => {
@@ -2905,8 +3033,9 @@ fn the_vessel_draws_in_its_placements_maroon_not_its_syms_black() {
     };
 
     // The vessel shell: two 101.03mm runs, 71.18mm apart.
+    let sheet = drawn(&doc);
     let mut shell = 0usize;
-    for entity in of_role(&doc, "symbol") {
+    for entity in of_role(&sheet, "symbol") {
         let EntityType::Line(line) = entity else {
             continue;
         };
@@ -3198,7 +3327,8 @@ fn a_cached_bodys_lettering_stays_on_its_switched_off_layer() {
     let Some(doc) = import("DWG-0201GP06-01.pid") else {
         return;
     };
-    let symbol_texts = of_role(&doc, "symbol")
+    let sheet = drawn(&doc);
+    let symbol_texts = of_role(&sheet, "symbol")
         .filter(|entity| matches!(entity, EntityType::Text(_)))
         .count();
     assert_eq!(
@@ -3206,7 +3336,7 @@ fn a_cached_bodys_lettering_stays_on_its_switched_off_layer() {
         "a cached body's lettering is on switched-off layers and is not drawn"
     );
     assert!(
-        of_role(&doc, "symbol-label").count() >= 20,
+        of_role(&sheet, "symbol-label").count() >= 20,
         "every placement is still named beside its body"
     );
 }
@@ -3237,7 +3367,10 @@ fn the_opening_view_is_framed_on_geometry_that_exists() {
         let Some(doc) = import(name) else {
             continue;
         };
-        let Some(drawn) = doc
+        // On the sheet as drawn: a block definition's own coordinates are
+        // around its origin, which is not where anything is drawn.
+        let sheet = drawn(&doc);
+        let Some(drawn) = sheet
             .entities()
             .filter_map(drawn_box)
             .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
@@ -3354,8 +3487,14 @@ fn every_entity_is_filed_under_its_authored_layer_and_the_table_is_the_drawings_
         // The slot: the authored layer when there is one, the importer's own
         // layer -- the one that spells the role -- when the importer made the
         // entity itself.
+        //
+        // Read on the sheet as drawn. Stored, a placement is a reference
+        // filed like any other entity, and what it draws floats on layer `0`
+        // inside its block, which
+        // `a_placement_is_one_reference_to_a_block_of_what_it_draws` pins.
+        let sheet = drawn(&doc);
         let mut layered = 0usize;
-        for entity in doc.entities() {
+        for entity in sheet.entities() {
             let role = pid_value(entity, "role").unwrap_or_else(|| {
                 panic!("{name}: an entity without a role on {:?}", layer_of(entity))
             });
@@ -3430,6 +3569,11 @@ fn every_entity_is_filed_under_its_authored_layer_and_the_table_is_the_drawings_
 /// has an extent and no defaults, and `DWG-0202`, which places no
 /// parametric symbol, has no `driving=` anywhere. Both keys ride DWG and DXF
 /// like the rest of the record.
+///
+/// Since plan 2026-11-19-pid-symbol-block the record that states them is the
+/// placement's block reference, the one entity a pick selects. This test
+/// reads the sheet as drawn ([`drawn`]), where every entity a placement
+/// draws states what its reference does.
 #[test]
 fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
     struct Parametric {
@@ -3504,10 +3648,12 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
             continue;
         };
 
+        let sheet = drawn(&doc);
+
         // 1. Every entity of a placement has an extent in the shape the
         //    panel formats, and nothing else has either key.
         let mut placements = 0usize;
-        for entity in doc.entities() {
+        for entity in sheet.entities() {
             let role = pid_value(entity, "role").unwrap_or_default();
             let extent = pid_value(entity, "extent");
             let driving = pid_value(entity, "driving");
@@ -3559,7 +3705,7 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
             "{name}: the instance= values written"
         );
         for expected in *parametric {
-            let labels: Vec<&EntityType> = doc
+            let labels: Vec<&EntityType> = sheet
                 .entities()
                 .filter(|entity| label_of(entity).as_deref() == Some(expected.label))
                 .collect();
@@ -3588,7 +3734,7 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
                     expected.label
                 );
             }
-            let strokes = of_role(&doc, "symbol")
+            let strokes = of_role(&sheet, "symbol")
                 .filter(|entity| {
                     pid_value(entity, "driving").as_deref() == Some(expected.driving)
                         && pid_value(entity, "extent").as_deref() == Some(expected.extent)
@@ -3602,7 +3748,7 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
             );
         }
         // A placement that is not parametric has no defaults to show.
-        for entity in doc.entities() {
+        for entity in sheet.entities() {
             let Some(label) = label_of(entity) else {
                 continue;
             };
@@ -3616,22 +3762,21 @@ fn a_placement_states_its_extent_and_a_parametric_one_its_library_defaults() {
         }
 
         // 3. Both keys survive DWG and DXF.
-        let measures =
-            |doc: &Document| -> Vec<(Option<String>, Option<String>, Option<String>)> {
-                let mut all: Vec<_> = doc
-                    .entities()
-                    .filter(|entity| pid_value(entity, "extent").is_some())
-                    .map(|entity| {
-                        (
-                            pid_value(entity, "role"),
-                            pid_value(entity, "extent"),
-                            pid_value(entity, "driving"),
-                        )
-                    })
-                    .collect();
-                all.sort();
-                all
-            };
+        let measures = |doc: &Document| -> Vec<(Option<String>, Option<String>, Option<String>)> {
+            let mut all: Vec<_> = drawn(doc)
+                .entities()
+                .filter(|entity| pid_value(entity, "extent").is_some())
+                .map(|entity| {
+                    (
+                        pid_value(entity, "role"),
+                        pid_value(entity, "extent"),
+                        pid_value(entity, "driving"),
+                    )
+                })
+                .collect();
+            all.sort();
+            all
+        };
         let before = measures(&doc);
         for ext in ["dwg", "dxf"] {
             let bytes = OpenCADStudio::io::save_to_bytes(&doc, ext, doc.version)
@@ -3714,22 +3859,23 @@ fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() 
         let Some((doc, summary)) = import_with_summary(name) else {
             continue;
         };
+        let sheet = drawn(&doc);
         assert_eq!(
-            of_role(&doc, "symbol").count(),
+            of_role(&sheet, "symbol").count(),
             strokes,
             "{name}: strokes on the symbol layer -- the displayed part of every cached body"
         );
         assert_eq!(
-            of_role(&doc, "symbol-label").count(),
+            of_role(&sheet, "symbol-label").count(),
             placements,
             "{name}: one name per placement"
         );
         assert!(
-            of_role(&doc, "symbol").all(|entity| !matches!(entity, EntityType::Text(_))),
+            of_role(&sheet, "symbol").all(|entity| !matches!(entity, EntityType::Text(_))),
             "{name}: a cached body's lettering is on switched-off layers and stays off the sheet"
         );
         assert!(
-            of_role(&doc, "symbol").all(|entity| !matches!(
+            of_role(&sheet, "symbol").all(|entity| !matches!(
                 entity,
                 EntityType::Circle(circle) if (circle.radius - 1.5).abs() < 1e-9
             )),
@@ -3750,7 +3896,8 @@ fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() 
     // 2. The Manifold, stroke by stroke: its `driving=` names its strokes.
     if let Some(doc) = import("DWG-0201GP06-01.pid") {
         const MANIFOLD: &str = "Top:20.32;Left:114.30;Right:114.30";
-        let strokes: Vec<&EntityType> = of_role(&doc, "symbol")
+        let sheet = drawn(&doc);
+        let strokes: Vec<&EntityType> = of_role(&sheet, "symbol")
             .filter(|entity| pid_value(entity, "driving").as_deref() == Some(MANIFOLD))
             .collect();
         let lines: Vec<&document::entities::Line> = strokes
@@ -3819,7 +3966,8 @@ fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() 
     //    valve's single circle: no second ring from a merged library sheet.
     if let Some(doc) = import("D06.pid") {
         const TANK: &str = "Bottom:35.56;Left:63.50;Right:63.50;Top:35.56";
-        let strokes: Vec<&EntityType> = of_role(&doc, "symbol")
+        let sheet = drawn(&doc);
+        let strokes: Vec<&EntityType> = of_role(&sheet, "symbol")
             .filter(|entity| pid_value(entity, "driving").as_deref() == Some(TANK))
             .collect();
         assert_eq!(strokes.len(), 6, "the tank instance is six lines");
@@ -3833,7 +3981,7 @@ fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() 
                 .collect::<Vec<_>>(),
         );
         assert_eq!(extent_of(drawn), "122.12x82.84");
-        let mut radii: Vec<f64> = of_role(&doc, "symbol")
+        let mut radii: Vec<f64> = of_role(&sheet, "symbol")
             .filter_map(|entity| match entity {
                 EntityType::Circle(circle) => Some((circle.radius * 100.0).round() / 100.0),
                 _ => None,
@@ -3852,12 +4000,13 @@ fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() 
     //    earlier copies of 11 live ones (type word 0x8000), each drawn on
     //    top of its replacement.
     if let Some(doc) = import("工艺管道及仪表流程-1.pid") {
-        let remarks = of_role(&doc, "symbol-label")
+        let sheet = drawn(&doc);
+        let remarks = of_role(&sheet, "symbol-label")
             .filter(|entity| matches!(entity, EntityType::Text(text) if text.value == "Remarks"))
             .count();
         assert_eq!(remarks, 11, "工艺 places Remarks 11 times");
         assert!(
-            of_role(&doc, "symbol").all(|entity| !matches!(entity, EntityType::Arc(_))),
+            of_role(&sheet, "symbol").all(|entity| !matches!(entity, EntityType::Arc(_))),
             "no cached body of 工艺 carries an arc; the library's Remarks cloud is not drawn"
         );
     }
@@ -3891,7 +4040,8 @@ fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() 
         .collect();
         let named: std::collections::BTreeSet<&str> =
             expected.iter().map(|(name, _)| name.as_str()).collect();
-        let mut measured: Vec<(String, String)> = of_role(&doc, "symbol-label")
+        let sheet = drawn(&doc);
+        let mut measured: Vec<(String, String)> = of_role(&sheet, "symbol-label")
             .filter_map(|entity| match entity {
                 EntityType::Text(text) if named.contains(text.value.as_str()) => Some((
                     text.value.clone(),
@@ -3906,9 +4056,184 @@ fn a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers() 
             "the extents of the placements whose hidden strokes reach past the displayed outline"
         );
         assert_eq!(
-            of_role(&doc, "symbol-label").count(),
+            of_role(&sheet, "symbol-label").count(),
             20,
             "the other nine of DWG-0201's twenty measure the same either way"
+        );
+    }
+}
+
+/// A symbol placement is stored as one block reference, and what it draws as
+/// the members of the block the reference names (plan
+/// 2026-11-19-pid-symbol-block): a pick selects the placement whole, and
+/// placements that draw the same share one definition.
+///
+/// The reference is the placement. It states `role=symbol`, the symbol's
+/// name as `symbol=`, the placement's `extent=` and the sheet layer the
+/// drawing files it under, and it is on that layer -- or on
+/// `PID-SYMBOL-LABEL`, which ships switched off, when all the placement
+/// draws is its name. A member states its own `role=` and nothing else; it
+/// floats on layer `0`, or sits on one of the importer's own layers, as the
+/// name does. The block is named for the symbol, `SPPID_<name>`, with a
+/// number after it where one symbol is drawn more than one way.
+///
+/// The placements are the ones
+/// `a_placement_draws_the_body_the_drawing_carries_and_skips_its_hidden_layers`
+/// counts by their names on the sheet as drawn; the definitions are how many
+/// different drawings of a symbol those placements come to. DWG-0201's three
+/// `Flanged Nozzle` share one and its two `Item Note & Label` another, so
+/// twenty placements are seventeen definitions. DWG-0202 draws
+/// `ElecTraceLine` two ways over six placements and `Off-Drawing` two ways
+/// over four; 工艺 draws `Flanged Nozzle with blind` four ways over eight,
+/// and its eleven `Remarks`, which draw their name alone, are one. D06 places
+/// six different symbols once each.
+///
+/// The reference also states, as `style=`, what the drawing calls the style
+/// the placement draws in -- which the colour and the width do not always
+/// tell: DWG-0201's vessel is `Equipment - New` and the four nozzles, the
+/// manway and the gauge hatch are `Nozzle - New`, all seven drawn
+/// `0.350mm #800000`
+/// (`a_symbol_body_draws_in_the_style_its_placement_names` pins the
+/// colours). Every placement of this corpus draws in a style its drawing
+/// names, and each drawing's placements are counted here by that name.
+#[test]
+fn a_placement_is_one_reference_to_a_block_of_what_it_draws() {
+    for (name, placements, definitions, styles) in [
+        (
+            "DWG-0201GP06-01.pid",
+            20,
+            17,
+            "As Drawn 5, Equipment - New 1, Nozzle - New 6, Off-Line Instrument 3, \
+             Piping Component - New 4, Piping OPC 1",
+        ),
+        (
+            "DWG-0202GP06-01.pid",
+            23,
+            13,
+            "As Drawn 12, Nozzle - New 3, Off-Line Instrument 2, Piping Component - New 2, \
+             Piping OPC 4",
+        ),
+        (
+            "D06.pid",
+            6,
+            6,
+            "Equipment - New 1, In-Line Instrument - New 2, Nozzle - New 1, \
+             Off-Line Instrument 1, Piping Component - New 1",
+        ),
+        (
+            "工艺管道及仪表流程-1.pid",
+            31,
+            10,
+            "As Drawn 12, Equipment - New 1, Nozzle - New 8, Piping OPC 10",
+        ),
+    ] {
+        let Some(doc) = import(name) else {
+            continue;
+        };
+        let mut referenced: std::collections::BTreeMap<&str, usize> =
+            std::collections::BTreeMap::new();
+        let mut styled: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for entity in doc.model_space_entities() {
+            let EntityType::Insert(reference) = entity else {
+                continue;
+            };
+            let block = reference.block_name.as_str();
+            *referenced.entry(block).or_default() += 1;
+            assert_eq!(
+                pid_value(entity, "role").as_deref(),
+                Some("symbol"),
+                "{name}: the reference to {block} is the symbol"
+            );
+            let symbol = pid_value(entity, "symbol")
+                .unwrap_or_else(|| panic!("{name}: the reference to {block} states no symbol="));
+            assert!(
+                block.starts_with("SPPID_"),
+                "{name}: {symbol:?} is filed in a block named {block:?}"
+            );
+            assert!(
+                pid_value(entity, "extent").is_some(),
+                "{name}: the reference to {block} states no extent="
+            );
+            let style = pid_value(entity, "style").unwrap_or_else(|| "no style".to_string());
+            *styled.entry(style).or_default() += 1;
+
+            let members: Vec<&EntityType> = doc.entities_in_block(block).collect();
+            assert!(!members.is_empty(), "{name}: {block} draws nothing");
+            for member in &members {
+                let said = pid_pairs(member);
+                assert!(
+                    matches!(
+                        said.as_slice(),
+                        [(key, role)] if key == "role"
+                            && ["symbol", "symbol-label", "fill"].contains(&role.as_str())
+                    ),
+                    "{name}: a member of {block} says {said:?}, not its role alone"
+                );
+                let layer = layer_of(member);
+                assert!(
+                    layer == "0" || (layer.starts_with("PID-") && layer != layer_of(entity)),
+                    "{name}: a member of {block} is on {layer:?}, where only its reference belongs"
+                );
+            }
+            let names: Vec<&str> = members
+                .iter()
+                .filter_map(|member| match member {
+                    EntityType::Text(text)
+                        if pid_value(member, "role").as_deref() == Some("symbol-label") =>
+                    {
+                        Some(text.value.as_str())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                names,
+                [symbol.as_str()],
+                "{name}: {block} letters its symbol's name once"
+            );
+
+            let name_alone = members
+                .iter()
+                .all(|member| pid_value(member, "role").as_deref() == Some("symbol-label"));
+            let layer = layer_of(entity);
+            match pid_value(entity, "sheet_layer") {
+                _ if name_alone => assert_eq!(
+                    layer, "PID-SYMBOL-LABEL",
+                    "{name}: the reference to {block}, which draws its name alone"
+                ),
+                Some(sheet_layer) => assert_eq!(
+                    layer, sheet_layer,
+                    "{name}: the reference to {block} is on the sheet layer it states"
+                ),
+                None => assert!(
+                    layer == "PID-SYMBOL" || layer == "PID-HIDDEN",
+                    "{name}: the reference to {block} states no sheet layer and is on {layer:?}"
+                ),
+            }
+        }
+        let defined = doc
+            .block_records
+            .iter()
+            .filter(|record| record.name.starts_with("SPPID_"))
+            .count();
+        assert_eq!(
+            (
+                referenced.values().sum::<usize>(),
+                referenced.len(),
+                defined
+            ),
+            (placements, definitions, definitions),
+            "{name}: placements / the definitions they refer to / the definitions stored: {referenced:?}"
+        );
+        let styled: Vec<String> = styled
+            .iter()
+            .map(|(style, count)| format!("{style} {count}"))
+            .collect();
+        assert_eq!(
+            styled.join(", "),
+            styles,
+            "{name}: the placements by the style= their references state"
         );
     }
 }
@@ -3947,8 +4272,9 @@ fn a_label_placement_keeps_its_anchor_cross_off_the_sheet() {
         return;
     };
 
+    let sheet = drawn(&doc);
     let cross_strokes_at = |cx: f64, cy: f64| {
-        of_role(&doc, "symbol")
+        of_role(&sheet, "symbol")
             .filter(|entity| match entity {
                 EntityType::Line(line) => {
                     let (sx, sy) = (line.start.x, line.start.y);
@@ -3970,7 +4296,7 @@ fn a_label_placement_keeps_its_anchor_cross_off_the_sheet() {
         );
         // The name is lettered beside where the cross would have been:
         // 0.8 mm right of its east arm, half a 2 mm line below its centre.
-        let named = of_role(&doc, "symbol-label").any(|entity| match entity {
+        let named = of_role(&sheet, "symbol-label").any(|entity| match entity {
             EntityType::Text(text) => {
                 text.value == name
                     && (text.insertion_point.x - (cx + 1.27 + 0.8)).abs() < 0.05
@@ -3984,7 +4310,7 @@ fn a_label_placement_keeps_its_anchor_cross_off_the_sheet() {
         );
     }
     assert!(
-        of_role(&doc, "symbol").all(|entity| !matches!(
+        of_role(&sheet, "symbol").all(|entity| !matches!(
             entity,
             EntityType::Circle(circle) if (circle.radius - 1.5).abs() < 1e-9
         )),
@@ -3998,7 +4324,7 @@ fn a_label_placement_keeps_its_anchor_cross_off_the_sheet() {
     // The one other hairline body of the sheet still draws: ` Line2.sym`'s
     // 25.4 mm line, which an override of its own dashes, and which the
     // SmartPlant screenshot shows as a dashed line at the same x.
-    let line2 = of_role(&doc, "symbol")
+    let line2 = of_role(&sheet, "symbol")
         .filter(|entity| match entity {
             EntityType::Line(line) => {
                 (line.start.y - 209.61).abs() < 0.05
@@ -4020,7 +4346,7 @@ fn a_label_placement_keeps_its_anchor_cross_off_the_sheet() {
     // are tallied the same way and keep their names.
     if let Some((doc, summary)) = import_with_summary("工艺管道及仪表流程-1.pid") {
         assert_eq!(summary.label_anchors_undrawn, 12);
-        let names = of_role(&doc, "symbol-label")
+        let names = of_role(&drawn(&doc), "symbol-label")
             .filter(|entity| matches!(entity, EntityType::Text(text) if text.value == "Remarks" || text.value == "Xa Item Note & Label"))
             .count();
         assert_eq!(names, 12, "every label placement is still named");
@@ -4209,7 +4535,8 @@ fn paper_style_scale_scales_dash_patterns_and_the_stated_line_weights() {
         "Electric 1.905/1.27 mm × 5/3"
     );
 
-    let line2: Vec<_> = of_role(doc, "symbol")
+    let sheet = drawn(doc);
+    let line2: Vec<_> = of_role(&sheet, "symbol")
         .filter(|entity| match entity {
             EntityType::Line(line) => {
                 (line.start.y - 209.61).abs() < 0.05
