@@ -54,6 +54,27 @@ fn opened() -> OpenCADStudio {
 pub(super) fn opened_with(sheet: Document) -> OpenCADStudio {
     let mut app = OpenCADStudio::new_for_test();
     let _ = app.automation_op(r#"{"op":"new"}"#);
+    put_in_front(&mut app, sheet);
+    let i = app.active_tab;
+
+    app.tabs[i].scene.selection.borrow_mut().view.vp_size = VIEW;
+    app.tabs[i].scene.camera.borrow_mut().fit_to_bounds_f64(
+        DVec3::new(40.0, 40.0, 0.0),
+        DVec3::new(240.0, 190.0, 0.0),
+        VIEW.0 / VIEW.1,
+    );
+    // The distances the tests click and box at are sized for this zoom.
+    let millimetre = in_window(&app, (101.0, 100.0)).x - in_window(&app, (100.0, 100.0)).x;
+    assert!(
+        (millimetre - 4.0).abs() < 1e-3,
+        "a millimetre is {millimetre} pixels wide"
+    );
+    app
+}
+
+/// Put `sheet` in the tab in front, in place of the drawing that is there,
+/// the way a headless open puts a loaded drawing there.
+pub(super) fn put_in_front(app: &mut OpenCADStudio, sheet: Document) {
     let i = app.active_tab;
     // The steps of `open_drawing_headless`, from the loaded document on.
     let tab = &mut app.tabs[i];
@@ -71,20 +92,6 @@ pub(super) fn opened_with(sheet: Document) -> OpenCADStudio {
     app.tabs[i].scene.rebuild_derived_caches();
     app.tabs[i].note_document_loaded(None);
     app.refresh_layer_panel();
-
-    app.tabs[i].scene.selection.borrow_mut().view.vp_size = VIEW;
-    app.tabs[i].scene.camera.borrow_mut().fit_to_bounds_f64(
-        DVec3::new(40.0, 40.0, 0.0),
-        DVec3::new(240.0, 190.0, 0.0),
-        VIEW.0 / VIEW.1,
-    );
-    // The distances the tests click and box at are sized for this zoom.
-    let millimetre = in_window(&app, (101.0, 100.0)).x - in_window(&app, (100.0, 100.0)).x;
-    assert!(
-        (millimetre - 4.0).abs() < 1e-3,
-        "a millimetre is {millimetre} pixels wide"
-    );
-    app
 }
 
 pub(super) fn document(app: &OpenCADStudio) -> &Document {
@@ -156,7 +163,7 @@ pub(super) fn reference(app: &OpenCADStudio, symbol: &str, at: (f64, f64)) -> Ha
 }
 
 /// The one loose text of the sheet that reads `lettering`.
-fn lettered(app: &OpenCADStudio, lettering: &str) -> Handle {
+pub(super) fn lettered(app: &OpenCADStudio, lettering: &str) -> Handle {
     let found: Vec<Handle> = document(app)
         .model_space_entities()
         .filter(|entity| matches!(entity, EntityType::Text(text) if text.value == lettering))

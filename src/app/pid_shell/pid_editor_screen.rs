@@ -8,8 +8,9 @@ use std::collections::BTreeMap;
 use iced::{Point, Rectangle, Size};
 use serde_json::{json, Value};
 
-use super::editor::{self, Inspected, Tool};
+use super::editor::{self, ImportedLabel, ImportedSymbol, Inspected, Tool};
 use super::*;
+use crate::app::pid_symbol_block_tests::{lettered, put_in_front, reference, VALVE};
 use crate::cli::GuiConfig;
 use crate::pid::persist::PidAuthor;
 use crate::pid::topology::{ConnectorKind, TopologyTable};
@@ -859,6 +860,679 @@ fn the_inspector_says_what_kind_of_thing_is_selected() {
     );
     assert_eq!(both["ok"], true, "{both}");
     assert_eq!(editor::inspected(&app), Inspected::Several(2));
+}
+
+// ── The inspector, of what a `.pid` import placed ────────────────────────
+
+/// The module with `sheet` -- a drawing as a `.pid` import leaves one -- in
+/// front, in place of the blank drawing a launch opens.
+fn with_sheet(sheet: document::Document) -> OpenCADStudio {
+    let mut app = launched(false);
+    assert!(editor::has_drawing(&app), "a launch opens a drawing");
+    put_in_front(&mut app, sheet);
+    app
+}
+
+/// Every text the inspector shows, in the order it lays them out.
+fn inspector_says(app: &OpenCADStudio) -> Vec<String> {
+    use iced_test::core::widget::{self, Operation};
+    use iced_test::runtime::user_interface::{Cache, UserInterface};
+
+    /// The texts whose middle is inside a rectangle of the window.
+    struct Texts {
+        within: Rectangle,
+        found: Vec<String>,
+    }
+    impl Operation for Texts {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn text(&mut self, _id: Option<&widget::Id>, bounds: Rectangle, text: &str) {
+            if self.within.contains(bounds.center()) {
+                self.found.push(text.to_owned());
+            }
+        }
+    }
+
+    let mut texts = Texts {
+        within: at(&drawn(app), "inspector"),
+        found: Vec::new(),
+    };
+    let mut renderer = headless();
+    let mut ui = UserInterface::build(app.view_main(), WINDOW, Cache::default(), &mut renderer);
+    ui.operate(&renderer, &mut texts);
+    texts.found
+}
+
+/// The rows of the inspector that can be typed in, by the ids they report
+/// their rectangles under.
+fn typed_rows(app: &OpenCADStudio) -> Vec<String> {
+    let rows = editor::part("field:");
+    drawn(app)
+        .into_keys()
+        .filter(|id| id.starts_with(&rows))
+        .collect()
+}
+
+/// Have an entity state `pairs` in its `PID_SEMANTICS` record beside what
+/// it states there: a key it states takes the new value, a new key goes
+/// last, and an empty value takes the key out. This is done behind the
+/// program's back: nothing is told that the drawing changed.
+fn restate(app: &mut OpenCADStudio, handle: document::Handle, pairs: &[(&str, &str)]) {
+    use document::xdata::{ExtendedDataRecord, XDataValue};
+    let i = app.active_tab;
+    let entity = app.tabs[i]
+        .scene
+        .document
+        .get_entity_mut(handle)
+        .expect("the entity is in the drawing");
+    let mut said = crate::app::pid_symbol_block_tests::says(entity);
+    for (key, value) in pairs {
+        said.retain(|pair| pair.split_once('=').map(|(stated, _)| stated) != Some(*key));
+        if !value.is_empty() {
+            said.push(format!("{key}={value}"));
+        }
+    }
+    let mut record = ExtendedDataRecord::new(crate::io::PID_SEMANTICS_XDATA_APP);
+    for pair in said {
+        record.add_value(XDataValue::String(pair));
+    }
+    entity.common_mut().extended_data.upsert_record(record);
+}
+
+/// What the inspector shows of the imported symbol that is selected.
+fn symbol_shown(app: &OpenCADStudio) -> ImportedSymbol {
+    match editor::inspected(app) {
+        Inspected::Symbol(symbol) => symbol,
+        other => panic!("an imported symbol is selected: {other:?}"),
+    }
+}
+
+fn owned(read: &[&str]) -> Vec<String> {
+    read.iter().map(|text| (*text).to_owned()).collect()
+}
+
+/// Selected, a symbol a `.pid` import placed is shown by what its drawing
+/// file says it is (plan 2026-11-20-pid-symbol-identity, SI-4; SPEC §4.6)
+/// and no longer as an entity that is no P&ID object: its tag in the
+/// title's place, the class its item is published as by the inspector's
+/// name for it, the name of its symbol, where the tag came from, and what
+/// its labels read, in the order the sheet files them. A symbol the file
+/// gives no name says so in the title's place and has no row for where a
+/// tag came from. None of it can be typed over.
+#[test]
+fn the_inspector_shows_what_the_drawing_file_says_an_imported_symbol_is() {
+    let _one = crate::headless_ui_lock();
+    let mut app = with_sheet(crate::io::pid::sheet_of_a_tagged_valve_and_its_labels());
+    let tagged = reference(&app, VALVE, (100.0, 100.0));
+    let untagged = reference(&app, VALVE, (170.0, 100.0));
+
+    select(&mut app, tagged);
+    assert_eq!(
+        editor::inspected(&app),
+        Inspected::Symbol(ImportedSymbol {
+            handle: tagged,
+            tag: Some("GV-101".to_owned()),
+            kind: "管道元件".to_owned(),
+            symbol: Some("Ball Valve".to_owned()),
+            tag_source: Some("图纸文件".to_owned()),
+            name_in_file: None,
+            labels: owned(&["GV-101", "DN50", "PN16", "CS"]),
+        })
+    );
+    assert_eq!(
+        inspector_says(&app),
+        [
+            "GV-101",
+            "类型",
+            "管道元件",
+            "符号",
+            "Ball Valve",
+            "位号来源",
+            "图纸文件",
+            "标注",
+            "4 条",
+            "GV-101",
+            "DN50",
+            "PN16",
+            "CS",
+        ]
+    );
+    assert_eq!(typed_rows(&app), owned(&[]), "none of it is typed over");
+
+    select(&mut app, untagged);
+    assert_eq!(
+        editor::inspected(&app),
+        Inspected::Symbol(ImportedSymbol {
+            handle: untagged,
+            tag: None,
+            kind: "管道元件".to_owned(),
+            symbol: Some("Ball Valve".to_owned()),
+            tag_source: None,
+            name_in_file: None,
+            labels: owned(&["DN80"]),
+        })
+    );
+    assert_eq!(
+        inspector_says(&app),
+        [
+            "（没有位号）",
+            "类型",
+            "管道元件",
+            "符号",
+            "Ball Valve",
+            "标注",
+            "1 条",
+            "DN80",
+        ]
+    );
+    assert_eq!(typed_rows(&app), owned(&[]));
+}
+
+/// A symbol the drawing file says less of is shown by what the file does
+/// say (SPEC §4.6). One whose item is published as no class is shown by
+/// the kind SmartPlant holds the item as; one the file states no item for
+/// says that the drawing does not say what it is; and a class the inspector
+/// has no name of its own for is shown as it is written. A symbol no label
+/// hangs on counts none. The labels of such symbols name them by what they
+/// do state.
+#[test]
+fn the_inspector_shows_a_symbol_the_file_says_less_of_by_what_it_does_say() {
+    let _one = crate::headless_ui_lock();
+    let mut app = with_sheet(crate::io::pid::sheet_of_symbols_the_file_says_less_of());
+    let connector = reference(&app, VALVE, (100.0, 100.0));
+    let unstated = reference(&app, VALVE, (170.0, 100.0));
+    let branch = reference(&app, VALVE, (100.0, 160.0));
+
+    select(&mut app, connector);
+    assert_eq!(
+        editor::inspected(&app),
+        Inspected::Symbol(ImportedSymbol {
+            handle: connector,
+            tag: None,
+            kind: "OPC".to_owned(),
+            symbol: Some("Ball Valve".to_owned()),
+            tag_source: None,
+            name_in_file: None,
+            labels: owned(&["TO UNIT 2"]),
+        })
+    );
+    assert_eq!(
+        inspector_says(&app),
+        [
+            "（没有位号）",
+            "类型",
+            "OPC",
+            "符号",
+            "Ball Valve",
+            "标注",
+            "1 条",
+            "TO UNIT 2",
+        ]
+    );
+
+    select(&mut app, unstated);
+    assert_eq!(
+        editor::inspected(&app),
+        Inspected::Symbol(ImportedSymbol {
+            handle: unstated,
+            tag: None,
+            kind: "图纸里没有写".to_owned(),
+            symbol: Some("Ball Valve".to_owned()),
+            tag_source: None,
+            name_in_file: None,
+            labels: owned(&["SPARE"]),
+        })
+    );
+    assert_eq!(
+        inspector_says(&app),
+        [
+            "（没有位号）",
+            "类型",
+            "图纸里没有写",
+            "符号",
+            "Ball Valve",
+            "标注",
+            "1 条",
+            "SPARE",
+        ]
+    );
+
+    select(&mut app, branch);
+    assert_eq!(
+        editor::inspected(&app),
+        Inspected::Symbol(ImportedSymbol {
+            handle: branch,
+            tag: Some("ZZ-9".to_owned()),
+            kind: "PIDBranchPoint".to_owned(),
+            symbol: Some("Ball Valve".to_owned()),
+            tag_source: Some("图纸文件".to_owned()),
+            name_in_file: None,
+            labels: Vec::new(),
+        })
+    );
+    assert_eq!(
+        inspector_says(&app),
+        [
+            "ZZ-9",
+            "类型",
+            "PIDBranchPoint",
+            "符号",
+            "Ball Valve",
+            "位号来源",
+            "图纸文件",
+            "标注",
+            "0 条",
+        ]
+    );
+
+    for (lettering, hangs_on) in [
+        ("TO UNIT 2", "属于 OPC · Ball Valve"),
+        ("SPARE", "属于 Ball Valve"),
+    ] {
+        let text = lettered(&app, lettering);
+        select(&mut app, text);
+        assert_eq!(
+            editor::inspected(&app),
+            Inspected::Label(ImportedLabel {
+                handle: text,
+                text: lettering.to_owned(),
+                of: hangs_on.to_owned(),
+            })
+        );
+    }
+}
+
+/// Where a tag came from is said for each source a record can mark (SPEC
+/// §4.6): the plant database of a backup, beside the drawing file's own
+/// name for the item where the record keeps it; a published `_Data.xml`,
+/// which a record marks with no source; and a source this version does not
+/// know, as it is written. The records are restated here: no import gives
+/// a tag from a database yet. And of a symbol's labels six are listed,
+/// each without the blanks around it, and the rest are counted; selected,
+/// such a text reads without its blanks too.
+#[test]
+fn the_inspector_says_where_a_tag_came_from_and_lists_six_labels() {
+    let _one = crate::headless_ui_lock();
+    let mut app = with_sheet(crate::io::pid::sheet_of_a_tagged_valve_and_its_labels());
+    let valve = reference(&app, VALVE, (100.0, 100.0));
+    // The tag, where it came from and the name the file has, once the
+    // valve is selected anew.
+    let tagged = |app: &mut OpenCADStudio, pairs: &[(&str, &str)]| {
+        restate(app, valve, pairs);
+        select(app, valve);
+        let shown = symbol_shown(app);
+        (shown.tag, shown.tag_source, shown.name_in_file)
+    };
+    let some = |text: &str| Some(text.to_owned());
+
+    assert_eq!(
+        tagged(
+            &mut app,
+            &[
+                ("label", "GV-101A"),
+                ("tag_source", "database"),
+                ("label_in_file", "GV-101"),
+            ]
+        ),
+        (some("GV-101A"), some("备份数据库"), some("GV-101"))
+    );
+    assert_eq!(
+        inspector_says(&app),
+        [
+            "GV-101A",
+            "类型",
+            "管道元件",
+            "符号",
+            "Ball Valve",
+            "位号来源",
+            "备份数据库",
+            "图纸文件里的名字",
+            "GV-101",
+            "标注",
+            "4 条",
+            "GV-101",
+            "DN50",
+            "PN16",
+            "CS",
+        ]
+    );
+    assert_eq!(
+        tagged(&mut app, &[("tag_source", ""), ("label_in_file", "")]),
+        (some("GV-101A"), some("_Data.xml"), None)
+    );
+    assert_eq!(
+        tagged(&mut app, &[("tag_source", "survey")]),
+        (some("GV-101A"), some("survey"), None)
+    );
+
+    // One of its labels lettered with blanks around it.
+    let blanked = lettered(&app, "PN16");
+    let i = app.active_tab;
+    match app.tabs[i].scene.document.get_entity_mut(blanked) {
+        Some(document::EntityType::Text(text)) => text.value = "  PN16 ".to_owned(),
+        other => panic!("a text: {other:?}"),
+    }
+    // More texts of the sheet hung on the valve: its labels then, and what
+    // the inspector's block of them says.
+    let hang = |app: &mut OpenCADStudio, letterings: &[&str]| {
+        for lettering in letterings {
+            let text = lettered(app, lettering);
+            restate(app, text, &[("label_of", "612"), ("label_on", "symbol")]);
+        }
+        select(app, valve);
+        let says = inspector_says(app);
+        let from = says
+            .iter()
+            .position(|text| text == "标注")
+            .expect("the block of its labels");
+        (symbol_shown(app).labels, says[from..].to_vec())
+    };
+    // Two more make six, and all six are listed.
+    let six = ["GV-101", "DN50", "PN16", "CS", "DN80", "P-1001-50-CS"];
+    let (labels, block) = hang(&mut app, &["DN80", "P-1001-50-CS"]);
+    assert_eq!(labels, six);
+    assert_eq!(block[..2], ["标注", "6 条"]);
+    assert_eq!(block[2..], six);
+    // Two more make eight: six are listed and the rest are counted.
+    let (labels, block) = hang(&mut app, &["DWG-0201", "NOTE 4"]);
+    assert_eq!(labels[..6], six);
+    assert_eq!(labels[6..], ["DWG-0201", "NOTE 4"]);
+    assert_eq!(block[..2], ["标注", "8 条"]);
+    assert_eq!(block[2..8], six);
+    assert_eq!(block[8..], ["另有 2 条"]);
+
+    // Selected, the text itself reads without its blanks too.
+    select(&mut app, blanked);
+    assert_eq!(
+        editor::inspected(&app),
+        Inspected::Label(ImportedLabel {
+            handle: blanked,
+            text: "PN16".to_owned(),
+            of: "属于 GV-101A".to_owned(),
+        })
+    );
+}
+
+/// Selected, a text a `.pid` import placed as the lettering of a label is
+/// shown by what it reads and what its label hangs on (SPEC §4.6): its
+/// symbol by its tag, a symbol with no tag by what it is and by its
+/// symbol's name, a run of line, another object. Once its symbol is erased
+/// it says the symbol is not on the sheet, and an undo gives the symbol
+/// back. A symbol that states neither what it is nor its symbol's name is
+/// still a symbol to its labels.
+#[test]
+fn the_inspector_says_what_the_label_of_a_selected_text_hangs_on() {
+    let _one = crate::headless_ui_lock();
+    let mut app = with_sheet(crate::io::pid::sheet_of_a_tagged_valve_and_its_labels());
+    // What the inspector shows once the text that reads `lettering` is
+    // selected, beside the label it is expected to show.
+    let of_the_text = |app: &mut OpenCADStudio, lettering: &str, hangs_on: &str| {
+        let text = lettered(app, lettering);
+        select(app, text);
+        (
+            editor::inspected(app),
+            Inspected::Label(ImportedLabel {
+                handle: text,
+                text: lettering.to_owned(),
+                of: hangs_on.to_owned(),
+            }),
+        )
+    };
+
+    for (lettering, hangs_on) in [
+        ("DN50", "属于 GV-101"),
+        // Filed before its valve.
+        ("GV-101", "属于 GV-101"),
+        ("DN80", "属于 管道元件 · Ball Valve"),
+        ("P-1001-50-CS", "管线上的标注"),
+        ("DWG-0201", "其他对象上的标注"),
+    ] {
+        let (shown, expected) = of_the_text(&mut app, lettering, hangs_on);
+        assert_eq!(shown, expected);
+        assert_eq!(inspector_says(&app), [lettering, hangs_on]);
+    }
+    assert_eq!(typed_rows(&app), owned(&[]), "none of it is typed over");
+
+    let valve = reference(&app, VALVE, (100.0, 100.0));
+    select(&mut app, valve);
+    run(&mut app, "ERASE");
+    assert!(
+        !doc(&app)
+            .model_space_entities()
+            .any(|entity| entity.common().handle == valve),
+        "the valve is erased"
+    );
+    let (shown, expected) = of_the_text(&mut app, "DN50", "所属的图例不在图上");
+    assert_eq!(shown, expected);
+    app.undo_steps(1);
+    let (shown, expected) = of_the_text(&mut app, "DN50", "属于 GV-101");
+    assert_eq!(shown, expected, "the valve is back");
+
+    let untagged = reference(&app, VALVE, (170.0, 100.0));
+    restate(
+        &mut app,
+        untagged,
+        &[("class", ""), ("item_type", ""), ("symbol", "")],
+    );
+    let (shown, expected) = of_the_text(&mut app, "DN80", "属于一个没有位号的图例");
+    assert_eq!(shown, expected);
+}
+
+/// Whatever else is selected is shown as it was (SPEC §4.6): a text of an
+/// import that is no label's, its run of line -- though it state what a
+/// label states --, a block reference whose record does not say it is a
+/// symbol and a text that does not say what its label hangs on are entities
+/// that are no P&ID object; several objects are counted; and an object
+/// drawn in this program is the object its `PID_AUTHOR` record makes it,
+/// whatever else it states.
+#[test]
+fn the_inspector_shows_what_else_is_selected_as_it_did() {
+    let _one = crate::headless_ui_lock();
+    let mut app = with_sheet(crate::io::pid::sheet_of_a_tagged_valve_and_its_labels());
+    let plain = |kind: &str| Inspected::Plain(kind.to_owned());
+
+    let note = lettered(&app, "NOTE 4");
+    select(&mut app, note);
+    assert_eq!(editor::inspected(&app), plain("Text"));
+    assert_eq!(inspector_says(&app), ["Text · 不是 P&ID 对象"]);
+
+    let run_of_line = doc(&app)
+        .model_space_entities()
+        .find(|entity| {
+            !matches!(
+                entity,
+                document::EntityType::Insert(_) | document::EntityType::Text(_)
+            )
+        })
+        .map(|entity| entity.common().handle)
+        .expect("the run of line");
+    select(&mut app, run_of_line);
+    assert_eq!(editor::inspected(&app), plain("LwPolyline"));
+    // The lettering of a label is a text.
+    restate(
+        &mut app,
+        run_of_line,
+        &[("label_of", "612"), ("label_on", "symbol")],
+    );
+    select(&mut app, run_of_line);
+    assert_eq!(editor::inspected(&app), plain("LwPolyline"));
+
+    let valve = reference(&app, VALVE, (100.0, 100.0));
+    let label = lettered(&app, "DN50");
+    // Nor is the run of line a label of the valve it names.
+    select(&mut app, valve);
+    assert_eq!(symbol_shown(&app).labels, ["GV-101", "DN50", "PN16", "CS"]);
+    let _ = app.automation_op(r#"{"op":"select","clear":true}"#);
+    assert_eq!(editor::inspected(&app), Inspected::Nothing);
+    let both = request(
+        &mut app,
+        json!({"op": "select", "handles": [
+            format!("{:X}", valve.value()),
+            format!("{:X}", label.value()),
+        ]}),
+    );
+    assert_eq!(both["ok"], true, "{both}");
+    assert_eq!(editor::inspected(&app), Inspected::Several(2));
+
+    restate(&mut app, valve, &[("role", "geometry")]);
+    select(&mut app, valve);
+    assert_eq!(editor::inspected(&app), plain("Insert"));
+    restate(&mut app, label, &[("label_on", "")]);
+    select(&mut app, label);
+    assert_eq!(editor::inspected(&app), plain("Text"));
+
+    // A vessel placed from the palette, made to state what an imported
+    // symbol states.
+    let mut app = launched(false);
+    run(&mut app, "PIDINSERT vessel");
+    feed(&mut app, &[[80.0, 150.0, 0.0]]);
+    let vessel = last_symbol(&app);
+    restate(
+        &mut app,
+        vessel,
+        &[("role", "symbol"), ("graphic", "612"), ("label", "V-1")],
+    );
+    select(&mut app, vessel);
+    assert!(
+        matches!(editor::inspected(&app), Inspected::Object(object) if object.handle == vessel),
+        "{:?}",
+        editor::inspected(&app)
+    );
+}
+
+/// What the sheet says of the selection -- the labels of a symbol, what a
+/// label hangs on -- takes the whole of model space to find, and the
+/// inspector is drawn again at every message. So it is looked up the first
+/// time the inspector asks and kept until the selection is refreshed
+/// (`OpenCADStudio::refresh_properties`): a change to the sheet that
+/// nothing was told of shows once the selection is refreshed, while what
+/// the entity's own record states is read at every drawing. What is kept
+/// is shown for that entity of that drawing alone: asked of any other, the
+/// inspector reads the sheet for that one and keeps what it read in its
+/// turn.
+#[test]
+fn what_the_sheet_says_of_the_selection_is_looked_up_once_and_kept_until_a_refresh() {
+    let sheet = crate::io::pid::sheet_of_a_tagged_valve_and_its_labels;
+    let mut app = with_sheet(sheet());
+    let valve = reference(&app, VALVE, (100.0, 100.0));
+    let other = reference(&app, VALVE, (170.0, 100.0));
+    let cs = lettered(&app, "CS");
+
+    select(&mut app, valve);
+    assert_eq!(symbol_shown(&app).labels, ["GV-101", "DN50", "PN16", "CS"]);
+    // One label hung on the other valve and the valve given another tag,
+    // behind the program's back.
+    restate(&mut app, cs, &[("label_of", "613")]);
+    restate(&mut app, valve, &[("label", "GV-102")]);
+    let shown = symbol_shown(&app);
+    assert_eq!(
+        shown.labels,
+        ["GV-101", "DN50", "PN16", "CS"],
+        "as they were looked up when the inspector first asked"
+    );
+    assert_eq!(
+        shown.tag.as_deref(),
+        Some("GV-102"),
+        "its own record is read now"
+    );
+    app.refresh_properties();
+    assert_eq!(symbol_shown(&app).labels, ["GV-101", "DN50", "PN16"]);
+
+    // Another entity selected and nothing refreshed: what was kept was the
+    // valve's, so the sheet is read for this one, and what is read is kept
+    // in its turn.
+    let first = app.active_tab;
+    app.tabs[first].scene.select_entity(other, true);
+    let shown = symbol_shown(&app);
+    assert_eq!(
+        (shown.handle, shown.labels),
+        (other, owned(&["CS", "DN80"]))
+    );
+    restate(&mut app, cs, &[("label_of", "612")]);
+    assert_eq!(
+        symbol_shown(&app).labels,
+        ["CS", "DN80"],
+        "as they were looked up when the inspector first asked of this valve"
+    );
+    restate(&mut app, cs, &[("label_of", "613")]);
+    // What a label hangs on is kept as the labels of a symbol are.
+    app.tabs[first].scene.select_entity(cs, true);
+    let hangs_on_the_other = Inspected::Label(ImportedLabel {
+        handle: cs,
+        text: "CS".to_owned(),
+        of: "属于 管道元件 · Ball Valve".to_owned(),
+    });
+    assert_eq!(editor::inspected(&app), hangs_on_the_other);
+    restate(&mut app, cs, &[("label_of", "612")]);
+    assert_eq!(editor::inspected(&app), hangs_on_the_other);
+    restate(&mut app, cs, &[("label_of", "613")]);
+
+    // The same sheet in a second drawing and the same valve selected
+    // there, then the first drawing brought forward and nothing refreshed:
+    // what was kept was the other drawing's.
+    select(&mut app, valve);
+    let task = app.update(AppMessage::TabNew);
+    app.drive_headless_task(task)
+        .expect("a drawing opens without a window");
+    assert_ne!(app.active_tab, first, "the new drawing is in front");
+    put_in_front(&mut app, sheet());
+    assert_eq!(
+        reference(&app, VALVE, (100.0, 100.0)),
+        valve,
+        "the sheet is built the same way twice"
+    );
+    select(&mut app, valve);
+    assert_eq!(symbol_shown(&app).labels, ["GV-101", "DN50", "PN16", "CS"]);
+    app.active_tab = first;
+    assert_eq!(symbol_shown(&app).labels, ["GV-101", "DN50", "PN16"]);
+}
+
+/// The inspector has a name of its own for each class the items of a
+/// drawing file are published as (the eleven of SPEC §2.2), and none for
+/// any other, which it shows as it is written.
+#[test]
+fn the_inspector_names_the_classes_a_drawing_file_publishes_its_items_as() {
+    let named: Vec<(&str, Option<&str>)> = [
+        "PIDPipingComponent",
+        "PIDInstrument",
+        "PIDControlSystemFunction",
+        "PIDInlineInstrument",
+        "PIDNote",
+        "PIDNozzle",
+        "PIDProcessEquipment",
+        "PIDMechanicalEquipment",
+        "PIDProcessVessel",
+        "PIDHeatTransferEquipment",
+        "PIDPipingConnector",
+        "PIDBranchPoint",
+        "pidnozzle",
+        "PIDNozzle ",
+        "",
+    ]
+    .into_iter()
+    .map(|class| (class, editor::class_name(class)))
+    .collect();
+    assert_eq!(
+        named,
+        [
+            ("PIDPipingComponent", Some("管道元件")),
+            ("PIDInstrument", Some("仪表")),
+            ("PIDControlSystemFunction", Some("控制系统功能")),
+            ("PIDInlineInstrument", Some("在线仪表")),
+            ("PIDNote", Some("注释")),
+            ("PIDNozzle", Some("管口")),
+            ("PIDProcessEquipment", Some("工艺设备")),
+            ("PIDMechanicalEquipment", Some("机械设备")),
+            ("PIDProcessVessel", Some("容器")),
+            ("PIDHeatTransferEquipment", Some("换热设备")),
+            ("PIDPipingConnector", Some("管段")),
+            ("PIDBranchPoint", None),
+            ("pidnozzle", None),
+            ("PIDNozzle ", None),
+            ("", None),
+        ]
+    );
 }
 
 // ── Which tool is lit, and what a row holds ──────────────────────────────

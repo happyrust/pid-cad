@@ -31,12 +31,16 @@
 //!   `PID_AUTHOR` record has, its scale and rotation, and for a fitting how
 //!   many of its ports are joined. A value typed there is committed by the
 //!   path `PIDSETPROP` and the Properties panel's `P&ID 属性` rows take
-//!   (`OpenCADStudio::commit_pid_author_property`).
+//!   (`OpenCADStudio::commit_pid_author_property`). A symbol a `.pid`
+//!   import placed, and the lettering of a label of one, have no such
+//!   record: they are shown by what the drawing file says of them
+//!   ([`ImportedSymbol`], [`ImportedLabel`]), and none of it is typed over.
 //!
 //! The general interface's ribbon, quick access bar, tab bar, status bar
 //! and Start page are not part of this screen; every general command is
 //! still there on the command line at the foot of the drawing.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
@@ -44,6 +48,7 @@ use iced::{alignment, font, Background, Border, Color, Element, Fill, Length, Ta
 
 use super::{chrome, Message as ShellMessage, ViewFn};
 use crate::app::{Message as AppMessage, OpenCADStudio};
+use crate::io::pid_identity::{self, LabelOwner, SymbolIdentity, TagSource};
 use crate::pid::persist::PidAuthor;
 use crate::pid::propagate::{split_props, LINE_FIELDS};
 use crate::pid::symbols::block_name;
@@ -175,6 +180,13 @@ pub struct State {
     /// and the text so far. Enter commits it; it is dropped as soon as the
     /// object is no longer the one selected ([`selection_refreshed`]).
     editing: Option<(document::Handle, String, String)>,
+    /// What the sheet says of the one object selected, where a `.pid`
+    /// import placed it, with the drawing -- its tab's id -- and the entity
+    /// it was looked up for. Finding it takes the whole of model space, and
+    /// the inspector is drawn again at every message: so it is looked up
+    /// the first time the inspector asks ([`imported`]) and kept here until
+    /// the selection is refreshed ([`selection_refreshed`]).
+    paired: RefCell<Option<((u64, document::Handle), Paired)>>,
 }
 
 /// What the screen's widgets send.
@@ -298,9 +310,12 @@ pub(crate) fn symbol_is_lit(app: &OpenCADStudio, block: &str) -> bool {
 
 /// The general interface has rebuilt what it knows of the selection
 /// (`OpenCADStudio::refresh_properties`: the selection, or a property of
-/// what is selected, changed). A row being typed in outlives that only
-/// while its object is still the one object selected.
+/// what is selected, changed). What the inspector kept of what the sheet
+/// says of the selection is dropped, to be looked up anew when it next
+/// asks; and a row being typed in outlives that only while its object is
+/// still the one object selected.
 pub(in crate::app) fn selection_refreshed(app: &mut OpenCADStudio) {
+    *app.pid_shell.editor.paired.get_mut() = None;
     let Some((handle, ..)) = &app.pid_shell.editor.editing else {
         return;
     };
@@ -331,10 +346,15 @@ pub(crate) enum Inspected {
     Nothing,
     /// More than one object is: how many.
     Several(usize),
-    /// One object without a `PID_AUTHOR` record: what kind of entity it is.
+    /// One object without a `PID_AUTHOR` record that is neither of the two
+    /// a `.pid` import placed below: what kind of entity it is.
     Plain(String),
     /// One P&ID object.
     Object(Object),
+    /// One symbol a `.pid` import placed.
+    Symbol(ImportedSymbol),
+    /// One text a `.pid` import placed that is the lettering of a label.
+    Label(ImportedLabel),
 }
 
 /// One P&ID object, as its records have it.
@@ -360,6 +380,200 @@ pub(crate) struct Object {
     /// For a fitting: how many of its ports are joined to a segment, of
     /// how many.
     pub ports: Option<(usize, usize)>,
+}
+
+/// A symbol a `.pid` import placed, as its block reference states it and as
+/// the sheet around it has it (plan 2026-11-20-pid-symbol-identity, SPEC
+/// section 4.6). It is shown, and none of it is typed over.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ImportedSymbol {
+    /// The entity.
+    pub handle: document::Handle,
+    /// Its tag, where it has one.
+    pub tag: Option<String>,
+    /// What kind of thing it is, as it is shown: the class its item is
+    /// published as, by the name the inspector has for it ([`class_name`])
+    /// or else as it is written; without a class, the kind SmartPlant holds
+    /// the item as; and [`KIND_NOT_STATED`] where the drawing file states
+    /// neither.
+    pub kind: String,
+    /// The name of its symbol, as the drawing spells it.
+    pub symbol: Option<String>,
+    /// Where its tag came from, as it is shown; `None` without a tag.
+    pub tag_source: Option<String>,
+    /// The drawing file's own name for its item, where the tag is another's
+    /// and differs from it.
+    pub name_in_file: Option<String>,
+    /// What its labels read, in the order the sheet files them.
+    pub labels: Vec<String>,
+}
+
+/// A text a `.pid` import placed that is the lettering of a label.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ImportedLabel {
+    /// The entity.
+    pub handle: document::Handle,
+    /// What it reads.
+    pub text: String,
+    /// What its label hangs on, as it is shown: `属于` and its symbol's tag,
+    /// or what the symbol is where it has no tag; that it is a line's, or
+    /// another object's; or that its symbol is not on the sheet.
+    pub of: String,
+}
+
+/// What the inspector shows in the title's place for a symbol with no tag.
+const NO_TAG: &str = "（没有位号）";
+/// What it shows as the kind of a symbol the drawing file states no item
+/// for.
+const KIND_NOT_STATED: &str = "图纸里没有写";
+/// How many of a symbol's labels it lists before it counts the rest.
+const LABELS_LISTED: usize = 6;
+
+/// What the inspector calls the classes the items of a drawing file are
+/// published as (SPEC section 2.2 lists them).
+const CLASS_NAMES: [(&str, &str); 11] = [
+    ("PIDPipingComponent", "管道元件"),
+    ("PIDInstrument", "仪表"),
+    ("PIDControlSystemFunction", "控制系统功能"),
+    ("PIDInlineInstrument", "在线仪表"),
+    ("PIDNote", "注释"),
+    ("PIDNozzle", "管口"),
+    ("PIDProcessEquipment", "工艺设备"),
+    ("PIDMechanicalEquipment", "机械设备"),
+    ("PIDProcessVessel", "容器"),
+    ("PIDHeatTransferEquipment", "换热设备"),
+    ("PIDPipingConnector", "管段"),
+];
+
+/// The inspector's name for a class a plant item is published as, where it
+/// has one. A class it has none for is shown as it is written.
+pub(crate) fn class_name(class: &str) -> Option<&'static str> {
+    CLASS_NAMES
+        .iter()
+        .find(|(known, _)| *known == class)
+        .map(|(_, name)| *name)
+}
+
+/// What kind of thing an imported symbol is, as far as its record states
+/// it; see [`ImportedSymbol::kind`].
+fn kind_stated<'a>(symbol: &SymbolIdentity<'a>) -> Option<&'a str> {
+    match symbol.class {
+        Some(class) => Some(class_name(class).unwrap_or(class)),
+        None => symbol.item_type,
+    }
+}
+
+/// Where a tag came from, as the inspector says it.
+fn source_shown(source: TagSource<'_>) -> String {
+    match source {
+        TagSource::File => "图纸文件",
+        TagSource::Database => "备份数据库",
+        TagSource::Published => "_Data.xml",
+        TagSource::Other(written) => written,
+    }
+    .to_owned()
+}
+
+/// What the label of a text hangs on, as the inspector says it.
+fn owner_shown(owner: LabelOwner<'_>) -> String {
+    match owner {
+        LabelOwner::Symbol(reference) => {
+            let symbol = pid_identity::symbol_identity(reference).unwrap_or_default();
+            let named: Vec<&str> = match symbol.tag {
+                Some(tag) => vec![tag],
+                None => kind_stated(&symbol)
+                    .into_iter()
+                    .chain(symbol.symbol)
+                    .collect(),
+            };
+            if named.is_empty() {
+                "属于一个没有位号的图例".to_owned()
+            } else {
+                format!("属于 {}", named.join(" · "))
+            }
+        }
+        LabelOwner::Missing => "所属的图例不在图上".to_owned(),
+        LabelOwner::Line => "管线上的标注".to_owned(),
+        LabelOwner::Other => "其他对象上的标注".to_owned(),
+    }
+}
+
+/// What it takes the sheet around an imported entity to say of it.
+#[derive(Debug, Clone, PartialEq)]
+enum Paired {
+    /// Of a symbol: what its labels read, in the order the sheet files
+    /// them.
+    Labels(Vec<String>),
+    /// Of the lettering of a label: what the label hangs on, as it is
+    /// shown.
+    Owner(String),
+}
+
+/// Look through the sheet for what it says of `entity`, where its record
+/// states what a `.pid` import states of a symbol or of the lettering of a
+/// label; `None` for anything else.
+fn look_up(document: &document::Document, entity: &document::EntityType) -> Option<Paired> {
+    if let Some(symbol) = pid_identity::symbol_identity(entity) {
+        let labels = symbol.graphic.map_or_else(Vec::new, |graphic| {
+            pid_identity::labels_of(document, graphic)
+                .into_iter()
+                .filter_map(pid_identity::lettering)
+                .map(|lettering| lettering.trim().to_owned())
+                .collect()
+        });
+        return Some(Paired::Labels(labels));
+    }
+    pid_identity::label_owner(document, entity).map(|owner| Paired::Owner(owner_shown(owner)))
+}
+
+/// What the inspector shows of `entity`, in the drawing whose tab has the
+/// id `drawing`, where a `.pid` import placed it as a symbol or as the
+/// lettering of a label. What the entity's own record states is read now.
+/// What the sheet says of it is looked up the first time this is asked of
+/// the entity, and kept: until the selection is refreshed
+/// ([`selection_refreshed`]), or this is asked of another entity or of
+/// another drawing.
+fn imported(
+    app: &OpenCADStudio,
+    drawing: u64,
+    document: &document::Document,
+    entity: &document::EntityType,
+) -> Option<Inspected> {
+    let handle = entity.common().handle;
+    let of = (drawing, handle);
+    let kept = &app.pid_shell.editor.paired;
+    let found = kept
+        .borrow()
+        .as_ref()
+        .filter(|(kept_of, _)| *kept_of == of)
+        .map(|(_, paired)| paired.clone());
+    let paired = match found {
+        Some(paired) => paired,
+        None => {
+            let paired = look_up(document, entity)?;
+            *kept.borrow_mut() = Some((of, paired.clone()));
+            paired
+        }
+    };
+    Some(match paired {
+        Paired::Labels(labels) => {
+            let symbol = pid_identity::symbol_identity(entity)?;
+            Inspected::Symbol(ImportedSymbol {
+                handle,
+                tag: symbol.tag.map(str::to_owned),
+                kind: kind_stated(&symbol).unwrap_or(KIND_NOT_STATED).to_owned(),
+                symbol: symbol.symbol.map(str::to_owned),
+                tag_source: symbol.tag_source.map(source_shown),
+                name_in_file: symbol.name_in_file.map(str::to_owned),
+                labels,
+            })
+        }
+        Paired::Owner(of) => Inspected::Label(ImportedLabel {
+            handle,
+            text: pid_identity::lettering(entity)?.trim().to_owned(),
+            of,
+        }),
+    })
 }
 
 /// The fields an object of `type_code` has by its kind: the five line
@@ -395,6 +609,9 @@ pub(crate) fn inspected(app: &OpenCADStudio) -> Inspected {
     let document = &tab.scene.document;
     let entity = document.get_entity(handle);
     let Some(author) = PidAuthor::load(document, handle) else {
+        if let Some(shown) = entity.and_then(|entity| imported(app, tab.id, document, entity)) {
+            return shown;
+        }
         let kind = entity
             .map(|entity| crate::entities::traits::entity_type_name(entity).to_owned())
             .unwrap_or_default();
@@ -1240,12 +1457,133 @@ fn note<'a>(theme: PidTheme, line: String) -> Element<'a, AppMessage> {
     .into()
 }
 
+/// The first line of what the inspector shows of what a `.pid` import
+/// placed: the mark an object's tag has, and `line`.
+fn headline<'a>(theme: PidTheme, line: String, ink: ColorToken) -> Element<'a, AppMessage> {
+    row![
+        icon(
+            include_bytes!("../../../assets/icons/pid_palette.svg"),
+            16.0,
+            theme,
+            ColorToken::Accent
+        ),
+        text(line)
+            .size(15)
+            .font(mono(theme, font::Weight::Semibold))
+            .color(ink.color(theme)),
+    ]
+    .spacing(8)
+    .align_y(alignment::Vertical::Center)
+    .into()
+}
+
+/// The hairline between two blocks of the inspector.
+fn hairline<'a>(theme: PidTheme) -> Element<'a, AppMessage> {
+    container(Space::new())
+        .width(Fill)
+        .height(1)
+        .style(move |_| container::Style {
+            background: Some(Background::Color(
+                ColorToken::Border.color(theme).scale_alpha(0.5),
+            )),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// What the inspector shows of a symbol a `.pid` import placed: its tag,
+/// what the drawing file says it is, and what its labels read. Every row
+/// is read and none is typed over.
+fn imported_symbol<'a>(app: &'a OpenCADStudio, symbol: ImportedSymbol) -> Element<'a, AppMessage> {
+    let theme = app.pid_shell.theme;
+    let handle = symbol.handle;
+    let (title, ink) = match symbol.tag {
+        Some(tag) => (tag, ColorToken::TextPrimary),
+        None => (NO_TAG.to_owned(), ColorToken::TextMuted),
+    };
+    let stated =
+        |label: &str, value: String| field(app, handle, label.to_owned(), value, None, false);
+    let mut fields = column![stated("类型", symbol.kind)].spacing(14);
+    for (label, value) in [
+        ("符号", symbol.symbol),
+        ("位号来源", symbol.tag_source),
+        ("图纸文件里的名字", symbol.name_in_file),
+    ] {
+        if let Some(value) = value {
+            fields = fields.push(stated(label, value));
+        }
+    }
+
+    let count = symbol.labels.len();
+    let mut labels = column![row![
+        text("标注")
+            .size(11)
+            .font(ui(theme, font::Weight::Semibold))
+            .color(ColorToken::TextMuted.color(theme)),
+        Space::new().width(Fill),
+        text(format!("{count} 条"))
+            .size(12)
+            .font(mono(theme, font::Weight::Normal))
+            .color(ColorToken::TextSecondary.color(theme)),
+    ]
+    .width(Fill)]
+    .spacing(10);
+    for label in symbol.labels.into_iter().take(LABELS_LISTED) {
+        labels = labels.push(
+            text(label)
+                .size(12)
+                .font(mono(theme, font::Weight::Normal))
+                .color(ColorToken::TextPrimary.color(theme)),
+        );
+    }
+    if count > LABELS_LISTED {
+        labels = labels.push(
+            text(format!("另有 {} 条", count - LABELS_LISTED))
+                .size(12)
+                .font(ui(theme, font::Weight::Normal))
+                .color(ColorToken::TextMuted.color(theme)),
+        );
+    }
+
+    scrollable(column![
+        container(headline(theme, title, ink))
+            .width(Fill)
+            .padding(16),
+        hairline(theme),
+        container(fields).width(Fill).padding(16),
+        hairline(theme),
+        container(labels).width(Fill).padding(16),
+    ])
+    .height(Fill)
+    .into()
+}
+
+/// What the inspector shows of the lettering of a label a `.pid` import
+/// placed: what it reads, and what its label hangs on.
+fn imported_label<'a>(theme: PidTheme, label: ImportedLabel) -> Element<'a, AppMessage> {
+    container(
+        column![
+            headline(theme, label.text, ColorToken::TextPrimary),
+            text(label.of)
+                .size(12)
+                .font(ui(theme, font::Weight::Normal))
+                .color(ColorToken::TextSecondary.color(theme)),
+        ]
+        .spacing(8),
+    )
+    .width(Fill)
+    .padding(16)
+    .into()
+}
+
 fn inspector(app: &OpenCADStudio) -> Element<'_, AppMessage> {
     let theme = app.pid_shell.theme;
     let body: Element<'_, AppMessage> = match inspected(app) {
         Inspected::Nothing => note(theme, "没有选中对象".to_owned()),
         Inspected::Several(count) => note(theme, format!("选中了 {count} 个对象")),
         Inspected::Plain(kind) => note(theme, format!("{kind} · 不是 P&ID 对象")),
+        Inspected::Symbol(symbol) => imported_symbol(app, symbol),
+        Inspected::Label(label) => imported_label(theme, label),
         Inspected::Object(object) => {
             let mut title = row![
                 icon(

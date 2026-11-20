@@ -2057,6 +2057,32 @@ pub(super) mod placements_as_blocks {
         finished("valves-on-layers.pid", &geometry)
     }
 
+    /// A text of the two sheets below, on the displayed layer `Process`: 2.5
+    /// millimetres high, standing on `at`, the bottom left of its lettering.
+    fn lettering_at(oid: u32, at: (f64, f64), value: &str) -> pid_parse::PidGraphicEntity {
+        record(
+            oid,
+            PidGraphicKind::Text {
+                insertion: point(at.0, at.1),
+                value: value.to_string(),
+                height: 0.0025,
+                rotation: 0.0,
+                anchor_code: 0,
+                text_box_width: None,
+            },
+            Some((Some("Process"), true)),
+        )
+    }
+
+    /// The valve of those sheets placed at `at`, on the same layer.
+    fn valve_placed(oid: u32, at: (f64, f64)) -> pid_parse::PidGraphicEntity {
+        record(
+            oid,
+            placement(at, Some(VALVE), Some(BODY), 0.0),
+            Some((Some("Process"), true)),
+        )
+    }
+
     /// The sheet the program-level test of what a symbol and its labels say
     /// of each other opens (`crate::app::pid_symbol_block_tests`; plan
     /// 2026-11-20-pid-symbol-identity, SI-3). It is built like the two
@@ -2078,44 +2104,26 @@ pub(super) mod placements_as_blocks {
     /// lettering. The first label is filed before the valve it hangs on,
     /// the others after it.
     pub(crate) fn sheet_of_a_tagged_valve_and_its_labels() -> Document {
-        let on_process = Some((Some("Process"), true));
-        let lettering = |oid: u32, at: (f64, f64), value: &str| {
-            record(
-                oid,
-                PidGraphicKind::Text {
-                    insertion: point(at.0, at.1),
-                    value: value.to_string(),
-                    height: 0.0025,
-                    rotation: 0.0,
-                    anchor_code: 0,
-                    text_box_width: None,
-                },
-                on_process,
-            )
-        };
-        let valve = |oid: u32, at: (f64, f64)| {
-            record(oid, placement(at, Some(VALVE), Some(BODY), 0.0), on_process)
-        };
         let geometry = sheet(
             vec![
-                lettering(801, (0.085, 0.15), "GV-101"),
-                valve(612, (0.1, 0.1)),
-                lettering(802, (0.085, 0.14), "DN50"),
-                lettering(803, (0.085, 0.13), "PN16"),
-                lettering(804, (0.085, 0.12), "CS"),
-                valve(613, (0.17, 0.1)),
-                lettering(805, (0.16, 0.12), "DN80"),
+                lettering_at(801, (0.085, 0.15), "GV-101"),
+                valve_placed(612, (0.1, 0.1)),
+                lettering_at(802, (0.085, 0.14), "DN50"),
+                lettering_at(803, (0.085, 0.13), "PN16"),
+                lettering_at(804, (0.085, 0.12), "CS"),
+                valve_placed(613, (0.17, 0.1)),
+                lettering_at(805, (0.16, 0.12), "DN80"),
                 record(
                     704,
                     PidGraphicKind::Polyline {
                         points: vec![point(0.09, 0.08), point(0.18, 0.08)],
                         closed: false,
                     },
-                    on_process,
+                    Some((Some("Process"), true)),
                 ),
-                lettering(811, (0.12, 0.075), "P-1001-50-CS"),
-                lettering(812, (0.06, 0.06), "DWG-0201"),
-                lettering(813, (0.06, 0.17), "NOTE 4"),
+                lettering_at(811, (0.12, 0.075), "P-1001-50-CS"),
+                lettering_at(812, (0.06, 0.06), "DWG-0201"),
+                lettering_at(813, (0.06, 0.17), "NOTE 4"),
             ],
             vec![ringed_valve()],
         );
@@ -2165,6 +2173,58 @@ pub(super) mod placements_as_blocks {
         );
         summarised_as_stated(
             "tagged-valve.pid",
+            &geometry,
+            Stated {
+                items: &items,
+                labels: &labels,
+            },
+        )
+        .0
+    }
+
+    /// The sheet the test of what the P&ID editor's inspector shows of a
+    /// symbol the drawing file says less of opens
+    /// (`crate::app::pid_shell::pid_editor_screen`; plan
+    /// 2026-11-20-pid-symbol-identity, SI-4). It is built like the one
+    /// above, of the same valve. In millimetres of the drawing:
+    ///
+    /// - a valve at (100, 100), an off-page connector by its item, which the
+    ///   file publishes as no class and gives no name, and one label of it:
+    ///   `TO UNIT 2` at (85, 120);
+    /// - a valve at (170, 100) the file states no item for, and one label
+    ///   of it: `SPARE` at (160, 120);
+    /// - a valve at (100, 160) that no label hangs on, an item named `ZZ-9`
+    ///   and published as `PIDBranchPoint`: a class the items of a drawing
+    ///   file are not published as, but those of a `_Data.xml` are.
+    pub(crate) fn sheet_of_symbols_the_file_says_less_of() -> Document {
+        let geometry = sheet(
+            vec![
+                valve_placed(621, (0.1, 0.1)),
+                lettering_at(821, (0.085, 0.12), "TO UNIT 2"),
+                valve_placed(622, (0.17, 0.1)),
+                lettering_at(822, (0.16, 0.12), "SPARE"),
+                valve_placed(623, (0.1, 0.16)),
+            ],
+            vec![ringed_valve()],
+        );
+        let items = SheetItems::stating([
+            (
+                621,
+                plant_item("9C0D2E4F6A8B1C3D5E7F9A0B2C4D6E81", "OPC", None, None),
+            ),
+            (
+                623,
+                plant_item(
+                    "1B3D5F7A9C0E2A4C6E8B0D2F4A6C8E05",
+                    "OPC",
+                    Some("PIDBranchPoint"),
+                    Some("ZZ-9"),
+                ),
+            ),
+        ]);
+        let labels = labels_of(&[(821, 921), (822, 922)], &[(921, 621), (922, 622)], &[]);
+        summarised_as_stated(
+            "symbols-said-less-of.pid",
             &geometry,
             Stated {
                 items: &items,
