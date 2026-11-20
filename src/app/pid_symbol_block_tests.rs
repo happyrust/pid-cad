@@ -123,6 +123,32 @@ fn says_of(app: &OpenCADStudio, handle: Handle) -> Vec<String> {
     )
 }
 
+/// Have an entity state `pairs` in its `PID_SEMANTICS` record beside what
+/// it states there: a key it states takes the new value, a new key goes
+/// last, and an empty value takes the key out. This is done behind the
+/// program's back: nothing is told that the drawing changed.
+pub(super) fn restate(app: &mut OpenCADStudio, handle: Handle, pairs: &[(&str, &str)]) {
+    use document::xdata::{ExtendedDataRecord, XDataValue};
+    let i = app.active_tab;
+    let entity = app.tabs[i]
+        .scene
+        .document
+        .get_entity_mut(handle)
+        .expect("the entity is in the drawing");
+    let mut said = says(entity);
+    for (key, value) in pairs {
+        said.retain(|pair| pair.split_once('=').map(|(stated, _)| stated) != Some(*key));
+        if !value.is_empty() {
+            said.push(format!("{key}={value}"));
+        }
+    }
+    let mut record = ExtendedDataRecord::new(crate::io::PID_SEMANTICS_XDATA_APP);
+    for pair in said {
+        record.add_value(XDataValue::String(pair));
+    }
+    entity.common_mut().extended_data.upsert_record(record);
+}
+
 fn insert_of(entity: &EntityType) -> Option<&Insert> {
     match entity {
         EntityType::Insert(insert) => Some(insert),
