@@ -18,6 +18,15 @@ use OpenCADStudio::io::pid_view_filter::{
     switch_role, switch_sheet_layer, PidViewFilter, PidViewSummary,
 };
 
+// On Windows the program runs on mimalloc (`src/main.rs`), and so does this
+// test program. The system heap there is slow for what a large drawing
+// allocates, and imports under way side by side hold each other up on it:
+// with the three readings of a real sheet in `sample_sheet` among them,
+// these tests take about 17 seconds on the system heap and 5 on mimalloc.
+#[cfg(target_os = "windows")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 // An A2 sheet is 594 x 420mm. The decoded content of both fixtures sits
 // inside that, so any converted coordinate an order of magnitude past it is a
 // stray that reached the drawing rather than the diagnostic layers.
@@ -4666,4 +4675,488 @@ fn paper_style_scale_scales_dash_patterns_and_the_stated_line_weights() {
         heights, expected,
         "text height is not multiplied by the paper-style scale"
     );
+}
+
+/// The symbol blocks of a real sheet (plan 2026-11-19-pid-symbol-block,
+/// SB-9).
+///
+/// The four drawings read above place 6 to 31 symbols each. The sheet read
+/// here is the one the plan measured on: 592 placements among some ten
+/// thousand entities, which is where sharing the definitions and naming
+/// them show.
+///
+/// It is not one of the `pid-parse` fixtures. It lies in the plant test
+/// data, a folder beside this repository as that checkout is, and is read
+/// where it lies, with nothing published beside it. A symbol library is in
+/// reach of it there -- the test data's own, which the importer finds
+/// walking up from the drawing -- and the sheet takes no body from it:
+/// every placement that draws is drawn from the body the drawing caches
+/// for it. Where the folder is missing, or `PID_SYMBOL_LIBRARY` names
+/// libraries of its own, each test says so and passes -- which proves
+/// nothing: the numbers below are pinned only on a machine that has the
+/// drawing.
+///
+/// Reading the sheet takes seconds, and it is read three times over. That
+/// is why these tests are in the importer's own test program and not among
+/// the library's unit tests: run beside those, they make the ones that hold
+/// themselves to the clock fail (the plan's todo.md, SB-9). What importing
+/// the sheet may cost is timed there, by a test that runs only when asked
+/// for: `io::pid::sample_budget`.
+mod sample_sheet {
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
+    use std::sync::OnceLock;
+
+    use document::Handle;
+    use OpenCADStudio::io::pid::PidImport;
+    use OpenCADStudio::io::pid_legend::{self, Rules};
+
+    use super::*;
+
+    /// Symbol placements the sample draws.
+    const PLACEMENTS: usize = 592;
+
+    /// The different drawings among them: the block definitions the import
+    /// files. Counted on the sheet, not derived.
+    const DEFINITIONS: usize = 119;
+
+    /// What stays loose in model space, by role: what no placement drew. All
+    /// but the fills are the counts of the sheet before symbols were filed
+    /// as blocks (`5171d197b`; the plan's todo.md, section 1); it had 167
+    /// fills.
+    const LOOSE: &str =
+        "fill 74, frame 1, geometry 2471, point-ok 1864, point-warning 430, text 958";
+
+    /// What the references draw, by role: the members of the definition each
+    /// refers to, counted once for every reference to it. With what is
+    /// loose, these are the counts of the sheet before symbols were filed as
+    /// blocks: its 3,792 strokes of symbols, its 592 names of symbols, and
+    /// the other 93 of its fills.
+    const FILED: &str = "fill 93, symbol 3792, symbol-label 592";
+
+    /// The lettering legend recognition finds loose on the sheet: the text
+    /// no placement drew. The names of the symbols are inside the blocks.
+    const LETTERING: usize = 958;
+
+    /// Where the sample lies -- the sheet of the well sites L and M, in the
+    /// plant test data beside this repository -- or `None`, and a line
+    /// saying why, where it cannot be read the way the numbers here were
+    /// taken.
+    fn sample_path() -> Option<PathBuf> {
+        if std::env::var_os("PID_SYMBOL_LIBRARY").is_some() {
+            eprintln!(
+                "skipped: PID_SYMBOL_LIBRARY is set; the sample's numbers were taken without it"
+            );
+            return None;
+        }
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()?
+            .join("pid-test-data")
+            .join("backup-plant-data")
+            .join("00")
+            .join("00")
+            .join("L M井场 注采阀组工艺及自控流程图.pid");
+        if !path.is_file() {
+            eprintln!("skipped: no sample drawing at {}", path.display());
+            return None;
+        }
+        Some(path)
+    }
+
+    /// The sample as the importer hands it back, read once for the tests
+    /// that only look at it.
+    fn sample() -> Option<&'static PidImport> {
+        static IMPORT: OnceLock<PidImport> = OnceLock::new();
+        let path = sample_path()?;
+        Some(IMPORT.get_or_init(|| {
+            load_pid(&path).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
+        }))
+    }
+
+    /// The sample as the program opens it -- the import, then what every
+    /// opened drawing goes through -- read once for the tests that only look
+    /// at it.
+    fn opened() -> Option<&'static Document> {
+        static OPENED: OnceLock<Document> = OnceLock::new();
+        let path = sample_path()?;
+        Some(OPENED.get_or_init(|| {
+            OpenCADStudio::io::load_file(&path)
+                .unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
+        }))
+    }
+
+    /// The strings of an entity's `PID_SEMANTICS` record, whole and in the
+    /// order they are written.
+    fn says(entity: &EntityType) -> Vec<String> {
+        entity
+            .common()
+            .extended_data
+            .get_record("PID_SEMANTICS")
+            .into_iter()
+            .flat_map(|record| record.values.iter())
+            .filter_map(|value| match value {
+                document::xdata::XDataValue::String(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// How many of `entities` say each role, as `role count, role count`,
+    /// the roles in the order of the alphabet.
+    fn by_role<'a>(entities: impl Iterator<Item = &'a EntityType>) -> String {
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for entity in entities {
+            let role = pid_value(entity, "role").unwrap_or_else(|| "no role".to_string());
+            *counts.entry(role).or_default() += 1;
+        }
+        let counts: Vec<String> = counts
+            .iter()
+            .map(|(role, count)| format!("{role} {count}"))
+            .collect();
+        counts.join(", ")
+    }
+
+    /// The references of the sheet's symbols: the block references in model
+    /// space whose record says `role=symbol`, in the order they were filed.
+    fn symbol_references(doc: &Document) -> Vec<&EntityType> {
+        doc.model_space_entities()
+            .filter(|entity| {
+                matches!(entity, EntityType::Insert(_))
+                    && pid_value(entity, "role").as_deref() == Some("symbol")
+            })
+            .collect()
+    }
+
+    /// A symbol's reference as one line: the block it refers to, the layer
+    /// it is on, where it stands, its scale and turn, and its whole record.
+    fn reference_line(entity: &EntityType) -> String {
+        let EntityType::Insert(insert) = entity else {
+            panic!("not a block reference");
+        };
+        format!(
+            "{} | layer {} | at {:.6},{:.6} | scale {},{},{} turned {} | {}",
+            insert.block_name,
+            entity.common().layer,
+            insert.insert_point.x,
+            insert.insert_point.y,
+            insert.x_scale(),
+            insert.y_scale(),
+            insert.z_scale(),
+            insert.rotation,
+            says(entity).join("; ")
+        )
+    }
+
+    /// The names of the definitions the import filed: the block records
+    /// named with its prefix.
+    fn definitions(doc: &Document) -> BTreeSet<String> {
+        doc.block_records
+            .iter()
+            .map(|record| record.name.clone())
+            .filter(|name| name.starts_with("SPPID_"))
+            .collect()
+    }
+
+    /// What a drawing holds of its symbols, as lines a second reading is
+    /// compared by: one for each reference, and one for each member of each
+    /// definition -- its kind, its layer and its record.
+    fn filed(doc: &Document) -> (Vec<String>, Vec<String>) {
+        let references = symbol_references(doc)
+            .into_iter()
+            .map(reference_line)
+            .collect();
+        let mut members = Vec::new();
+        for block in definitions(doc) {
+            for (nth, member) in doc.entities_in_block(&block).enumerate() {
+                members.push(format!(
+                    "{block} #{nth} | {} | layer {} | {}",
+                    member.as_entity().entity_type(),
+                    member.common().layer,
+                    says(member).join("; ")
+                ));
+            }
+        }
+        (references, members)
+    }
+
+    /// Fails on the first line of `after` that is not the line of `before`
+    /// in its place.
+    fn assert_same_lines(what: &str, before: &[String], after: &[String]) {
+        assert_eq!(after.len(), before.len(), "{what}: how many");
+        let differs = before
+            .iter()
+            .zip(after)
+            .enumerate()
+            .find(|(_, (was, is))| was != is);
+        if let Some((nth, (was, is))) = differs {
+            panic!("{what} {nth} of {}:\n  was {was}\n  is  {is}", before.len());
+        }
+    }
+
+    /// The counts `summary` states, under the keys it is stored on a
+    /// document by and in the order it is stored in.
+    fn counts(summary: &ImportSummary) -> Vec<(String, usize)> {
+        let mut carrier = Document::new();
+        summary.store(&mut carrier);
+        carrier
+            .summary_info
+            .custom_properties
+            .iter()
+            .filter_map(|(tag, value)| {
+                let key = tag.strip_prefix(SUMMARY_PROPERTY_PREFIX)?;
+                Some((key.to_string(), value.parse().ok()?))
+            })
+            .collect()
+    }
+
+    /// Every placement of the sheet is one block reference that says
+    /// `role=symbol`, at scale 1 and unturned, and nothing a placement drew
+    /// is loose in model space; the references refer to the definitions the
+    /// import filed and to nothing else, and the summary counts both
+    /// (SPEC-pid-symbol-block §6, 1 and 10).
+    #[test]
+    fn every_placement_of_the_sample_is_one_reference_and_none_of_it_is_loose() {
+        let Some(import) = sample() else {
+            return;
+        };
+        let doc = &import.document;
+
+        let references = symbol_references(doc);
+        assert_eq!(
+            references.len(),
+            PLACEMENTS,
+            "block references that say role=symbol"
+        );
+        let inserts = doc
+            .model_space_entities()
+            .filter(|entity| matches!(entity, EntityType::Insert(_)))
+            .count();
+        assert_eq!(inserts, PLACEMENTS, "model space holds no other reference");
+        for reference in &references {
+            let line = reference_line(reference);
+            assert!(line.contains(" | scale 1,1,1 turned 0 | "), "{line}");
+        }
+
+        let loose = by_role(
+            doc.model_space_entities()
+                .filter(|entity| !matches!(entity, EntityType::Insert(_))),
+        );
+        assert_eq!(loose, LOOSE, "what is loose in model space, by role");
+        let mut members = Vec::new();
+        for reference in &references {
+            if let EntityType::Insert(insert) = reference {
+                members.extend(doc.entities_in_block(&insert.block_name));
+            }
+        }
+        assert_eq!(
+            by_role(members.into_iter()),
+            FILED,
+            "what the references draw, by role"
+        );
+
+        let defined = definitions(doc);
+        let referred: BTreeSet<String> = references
+            .iter()
+            .filter_map(|reference| match reference {
+                EntityType::Insert(insert) => Some(insert.block_name.clone()),
+                _ => None,
+            })
+            .collect();
+        let stray: Vec<&String> = defined.symmetric_difference(&referred).collect();
+        assert!(
+            stray.is_empty(),
+            "filed and unreferred to, or referred to and not filed: {stray:?}"
+        );
+        assert_eq!(defined.len(), DEFINITIONS, "definitions filed");
+        assert_eq!(
+            (
+                import.summary.symbol_blocks,
+                import.summary.symbol_definitions
+            ),
+            (PLACEMENTS, DEFINITIONS),
+            "the references and the definitions the summary counts"
+        );
+    }
+
+    /// The first eighteen counts of the summary are what the importer
+    /// counted on this sheet before symbols were filed as blocks
+    /// (`5171d197b`; the plan's todo.md, section 1): filing them changed
+    /// none. The last two came with the blocks.
+    #[test]
+    fn the_sample_summary_counts_what_it_counted_before_symbols_were_blocks() {
+        let Some(import) = sample() else {
+            return;
+        };
+        let stated = counts(&import.summary);
+        let stated: Vec<(&str, usize)> = stated
+            .iter()
+            .map(|(key, count)| (key.as_str(), *count))
+            .collect();
+        assert_eq!(
+            stated,
+            [
+                ("drawn", 10_274),
+                ("decoded", 5_527),
+                ("missing", 0),
+                ("sheet_layers", 4),
+                ("layered_entities", 10_274),
+                ("unresolved_sheet_layers", 0),
+                ("sheet_layer_names", 4),
+                ("sheet_layers_off", 1),
+                ("driving_dimensions", 6),
+                ("template_bodies", 3),
+                ("parametric_placements", 2),
+                ("cache_bodies", 565),
+                ("library_bodies", 0),
+                ("hidden_strokes_skipped", 1_087),
+                ("label_anchors_undrawn", 27),
+                ("lettering_flattened", 0),
+                ("template_entities", 0),
+                ("template_missing", 0),
+                ("symbol_blocks", PLACEMENTS),
+                ("symbol_definitions", DEFINITIONS),
+            ]
+        );
+    }
+
+    /// Read a second time, the sheet files the same definitions under the
+    /// same names, and every reference refers to the same one from the same
+    /// place with the same record: which drawing of a symbol is `_2` does
+    /// not depend on the order a hash map happens to hand things out in
+    /// (SPEC-pid-symbol-block §6, 10).
+    #[test]
+    fn the_sample_read_twice_files_the_same_blocks_under_the_same_names() {
+        let Some(first) = sample() else {
+            return;
+        };
+        let path = sample_path().expect("the sample is where it was read from");
+        let second = load_pid(&path).expect("the sample imports a second time");
+
+        let (names, again) = (definitions(&first.document), definitions(&second.document));
+        let stray: Vec<&String> = names.symmetric_difference(&again).collect();
+        assert!(
+            stray.is_empty(),
+            "definitions only one reading filed: {stray:?}"
+        );
+        let (references, members) = filed(&first.document);
+        let (references_again, members_again) = filed(&second.document);
+        assert_same_lines("reference", &references, &references_again);
+        assert_same_lines("member", &members, &members_again);
+        assert_eq!(second.summary, first.summary);
+    }
+
+    /// The sample, opened, saved as `ext` and read back, holds its symbols
+    /// as it did: as many references, each referring to the same block from
+    /// the same place, on the same layer, with its whole record; and as many
+    /// definitions, each member of the same kind, on the same layer, with
+    /// the same record. In memory, not through a file: a folder with
+    /// `symbol` in its name left in the temp folder is a symbol library to
+    /// every `.pid` opened under that folder afterwards.
+    fn check_the_saved_copy(ext: &str) {
+        let Some(doc) = opened() else {
+            return;
+        };
+        let (references, members) = filed(doc);
+        assert_eq!(references.len(), PLACEMENTS, "symbols of the opened sheet");
+
+        let bytes = OpenCADStudio::io::save_to_bytes(doc, ext, doc.version)
+            .unwrap_or_else(|error| panic!("saving the sample as {ext}: {error}"));
+        let copy = OpenCADStudio::io::load_bytes(&format!("sample.{ext}"), bytes)
+            .unwrap_or_else(|error| panic!("reading the {ext} back: {error}"));
+
+        let (references_after, members_after) = filed(&copy);
+        assert_same_lines(&format!("{ext}: reference"), &references, &references_after);
+        assert_eq!(
+            definitions(&copy).len(),
+            DEFINITIONS,
+            "{ext}: definitions read back"
+        );
+        assert_same_lines(&format!("{ext}: member"), &members, &members_after);
+    }
+
+    /// SPEC-pid-symbol-block §6, 8.
+    #[test]
+    fn the_sample_saved_as_dwg_reopens_with_its_symbols_as_they_were() {
+        check_the_saved_copy("dwg");
+    }
+
+    /// What the user guide tells a third party to read off a saved drawing
+    /// is there in a DXF as well as in a DWG.
+    #[test]
+    fn the_sample_saved_as_dxf_reopens_with_its_symbols_as_they_were() {
+        check_the_saved_copy("dxf");
+    }
+
+    /// Legend recognition reads the opened sheet and leaves the import's
+    /// symbols out of it: none is among the symbols it boxes, none an
+    /// unknown block, none a location of any of its exceptions; and the
+    /// lettering it finds is the text no placement drew -- the names of the
+    /// symbols are inside the blocks (SPEC-pid-symbol-block §4.5 and §6, 9).
+    #[test]
+    fn legend_recognition_reads_the_sample_and_leaves_its_symbols_out() {
+        let Some(doc) = opened() else {
+            return;
+        };
+        let placed: HashSet<Handle> = symbol_references(doc)
+            .iter()
+            .map(|reference| reference.common().handle)
+            .collect();
+        assert_eq!(placed.len(), PLACEMENTS, "symbols of the opened sheet");
+
+        let recognition = pid_legend::recognise(doc, &Rules::builtin());
+        println!(
+            "recognised: {} symbols, {} unknown blocks, {} unknown shapes, {} lettering, {} ports",
+            recognition.symbols.len(),
+            recognition.unknown_blocks.len(),
+            recognition.unknown_shapes.len(),
+            recognition.lettering,
+            recognition.pipes.ports
+        );
+
+        let boxed: Vec<&str> = recognition
+            .symbols
+            .iter()
+            .filter(|symbol| {
+                symbol.source.starts_with("SPPID_")
+                    || symbol.handles.iter().any(|handle| placed.contains(handle))
+            })
+            .map(|symbol| symbol.source.as_str())
+            .collect();
+        assert!(
+            boxed.is_empty(),
+            "symbols recognition made of the import's: {boxed:?}"
+        );
+        let unknown: Vec<&String> = recognition
+            .unknown_blocks
+            .keys()
+            .filter(|what| what.starts_with("SPPID_"))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "the import's blocks among the unknown: {unknown:?}"
+        );
+        let exceptions = &recognition.exceptions;
+        for (list, locations) in [
+            ("unknown blocks", &exceptions.unknown_blocks),
+            ("unknown shapes", &exceptions.unknown_shapes),
+            ("orphan tags", &exceptions.orphan_tags),
+            ("range annotations", &exceptions.range_annotations),
+            ("duplicate tags", &exceptions.duplicate_tags),
+        ] {
+            let located = locations
+                .values()
+                .flatten()
+                .filter(|location| {
+                    location
+                        .handles
+                        .iter()
+                        .any(|handle| placed.contains(handle))
+                })
+                .count();
+            assert_eq!(located, 0, "locations of {list} that are a symbol");
+        }
+        assert_eq!(
+            recognition.lettering, LETTERING,
+            "the text no placement drew, and no name of a symbol"
+        );
+    }
 }
