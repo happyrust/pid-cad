@@ -103,6 +103,15 @@ pub struct ImportSummary {
     /// one is drawn more than one way -- turned, scaled, resized. Logged,
     /// not shown.
     pub symbol_definitions: usize,
+    /// Block references the drawing file states a plant item for: the
+    /// symbols that say what they are -- `item`, `item_type` and, where the
+    /// file decides one, `class` (plan 2026-11-20-pid-symbol-identity). A
+    /// file whose items could not be read counts none. Logged, not shown.
+    pub symbol_items: usize,
+    /// Block references that carry a tag (`label`), wherever it came from:
+    /// the published `_Data.xml` or the name the drawing file gives the
+    /// item. Logged, not shown.
+    pub symbol_tags: usize,
     /// The symbol library roots the import found -- `PID_SYMBOL_LIBRARY` or
     /// the `.sym` tree above the drawing -- and drew its library bodies
     /// from. Empty when no library was found. Where a placement's body came
@@ -324,7 +333,7 @@ impl ImportSummary {
     }
 
     /// The counted fields, by the keys they are stored under.
-    pub(super) fn counts(&self) -> [(&'static str, usize); 20] {
+    pub(super) fn counts(&self) -> [(&'static str, usize); 22] {
         [
             ("drawn", self.drawn),
             ("decoded", self.decoded),
@@ -346,6 +355,8 @@ impl ImportSummary {
             ("template_missing", self.template_missing),
             ("symbol_blocks", self.symbol_blocks),
             ("symbol_definitions", self.symbol_definitions),
+            ("symbol_items", self.symbol_items),
+            ("symbol_tags", self.symbol_tags),
         ]
     }
 
@@ -372,6 +383,8 @@ impl ImportSummary {
             "template_missing" => &mut self.template_missing,
             "symbol_blocks" => &mut self.symbol_blocks,
             "symbol_definitions" => &mut self.symbol_definitions,
+            "symbol_items" => &mut self.symbol_items,
+            "symbol_tags" => &mut self.symbol_tags,
             _ => return None,
         })
     }
@@ -402,6 +415,8 @@ impl ImportSummary {
             template_missing: 0,
             symbol_blocks: 0,
             symbol_definitions: 0,
+            symbol_items: 0,
+            symbol_tags: 0,
             symbol_library: Vec::new(),
             unit: ImportUnit::AssumedMetre,
         }

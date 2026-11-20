@@ -1085,6 +1085,7 @@ fn legend_recognition_leaves_the_symbols_of_an_import_alone() {
             "role=symbol",
             "extent=40.00x20.00",
             "symbol=Ball Valve",
+            "graphic=701",
         ],
         "what the first valve says"
     );

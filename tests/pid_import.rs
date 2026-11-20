@@ -2412,7 +2412,7 @@ fn role_and_class_are_separate_keys_with_disjoint_vocabularies() {
     let Some(doc) = import("export-test/publish-data/DWG-0202GP06-01/DWG-0202GP06-01.pid") else {
         return;
     };
-    const KEYS: [&str; 11] = [
+    const KEYS: [&str; 15] = [
         "sheet_layer",
         "sheet_layer_oid",
         "role",
@@ -2425,6 +2425,12 @@ fn role_and_class_are_separate_keys_with_disjoint_vocabularies() {
         "resolved",
         // On a placement's block reference: the symbol it places.
         "symbol",
+        // And what the drawing file itself says that symbol is (plan
+        // 2026-11-20-pid-symbol-identity).
+        "graphic",
+        "item",
+        "item_type",
+        "tag_source",
     ];
     let mut both = 0usize;
     for entity in doc.entities() {
@@ -4737,6 +4743,13 @@ mod sample_sheet {
     /// no placement drew. The names of the symbols are inside the blocks.
     const LETTERING: usize = 958;
 
+    /// The placements the drawing file states a plant item for -- on this
+    /// sheet every one -- and those among them it names: the tags the
+    /// references carry when nothing is published beside the drawing.
+    /// Counted on the sheet, not derived.
+    const ITEMS: usize = 592;
+    const TAGS: usize = 231;
+
     /// Where the sample lies -- the sheet of the well sites L and M, in the
     /// plant test data beside this repository -- or `None`, and a line
     /// saying why, where it cannot be read the way the numbers here were
@@ -4980,7 +4993,9 @@ mod sample_sheet {
     /// The first eighteen counts of the summary are what the importer
     /// counted on this sheet before symbols were filed as blocks
     /// (`5171d197b`; the plan's todo.md, section 1): filing them changed
-    /// none. The last two came with the blocks.
+    /// none. The two after them came with the blocks, and the last two with
+    /// what the references state of the items they draw (plan
+    /// 2026-11-20-pid-symbol-identity).
     #[test]
     fn the_sample_summary_counts_what_it_counted_before_symbols_were_blocks() {
         let Some(import) = sample() else {
@@ -5014,6 +5029,180 @@ mod sample_sheet {
                 ("template_missing", 0),
                 ("symbol_blocks", PLACEMENTS),
                 ("symbol_definitions", DEFINITIONS),
+                ("symbol_items", ITEMS),
+                ("symbol_tags", TAGS),
+            ]
+        );
+    }
+
+    /// How many of `entities` state each value of `key`, as `value count,
+    /// value count`, the values in the order of the alphabet; those that do
+    /// not state the key are not counted.
+    fn by_value(entities: &[&EntityType], key: &str) -> String {
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for entity in entities {
+            if let Some(value) = pid_value(entity, key) {
+                *counts.entry(value).or_default() += 1;
+            }
+        }
+        let counts: Vec<String> = counts
+            .iter()
+            .map(|(value, count)| format!("{value} {count}"))
+            .collect();
+        counts.join(", ")
+    }
+
+    /// How many of `entities` state each of `keys`, as `key count, key
+    /// count`, the keys in the order given.
+    fn stating(entities: &[&EntityType], keys: &[&str]) -> String {
+        let counts: Vec<String> = keys
+            .iter()
+            .map(|key| {
+                let count = entities
+                    .iter()
+                    .filter(|entity| pid_value(entity, key).is_some())
+                    .count();
+                format!("{key} {count}")
+            })
+            .collect();
+        counts.join(", ")
+    }
+
+    /// With nothing published beside the drawing, every reference of the
+    /// sample states the plant item its graphic draws, as the drawing file
+    /// itself has it (plan 2026-11-20-pid-symbol-identity, SPEC section 6,
+    /// 1): its own number, the item and its kind; the class the item is
+    /// published as, where the file decides one -- the two off-page
+    /// connectors have none; and the name the file gives the item as its
+    /// tag, marked as the file's. Counted on the sheet, not derived.
+    #[test]
+    fn the_sample_references_state_the_items_the_file_gives_them() {
+        let Some(import) = sample() else {
+            return;
+        };
+        let references = symbol_references(&import.document);
+        assert_eq!(references.len(), PLACEMENTS, "symbols of the sheet");
+        assert_eq!(
+            [
+                stating(
+                    &references,
+                    &[
+                        "graphic",
+                        "item",
+                        "item_type",
+                        "class",
+                        "label",
+                        "tag_source",
+                        "label_in_file",
+                        "oid",
+                    ],
+                ),
+                by_value(&references, "item_type"),
+                by_value(&references, "class"),
+                by_value(&references, "resolved"),
+                by_value(&references, "tag_source"),
+            ],
+            [
+                "graphic 592, item 592, item_type 592, class 590, label 231, tag_source 231, label_in_file 0, oid 0",
+                "EquipmentOther 32, Instrument 269, ItemNote 49, Mechanical 4, Nozzle 9, OPC 2, PipingComp 225, Vessel 2",
+                "PIDControlSystemFunction 87, PIDInlineInstrument 78, PIDInstrument 104, PIDMechanicalEquipment 4, PIDNote 49, PIDNozzle 9, PIDPipingComponent 225, PIDProcessEquipment 32, PIDProcessVessel 2",
+                "item 590",
+                "file 231",
+            ],
+            "how many state each key; the kinds of item; the classes; how the class was resolved; where the tags come from"
+        );
+
+        // A graphic is a number of the file's, and no two symbols share one:
+        // it is what a label names its symbol by.
+        let graphics: BTreeSet<u32> = references
+            .iter()
+            .filter_map(|reference| pid_value(reference, "graphic"))
+            .map(|graphic| graphic.parse().expect("a graphic is a number"))
+            .collect();
+        assert_eq!(graphics.len(), PLACEMENTS, "no two symbols share a graphic");
+        for reference in &references {
+            assert_eq!(
+                pid_value(reference, "resolved").as_deref() == Some("item"),
+                pid_value(reference, "class").is_some(),
+                "a class is the file's own reading, and says so: {:?}",
+                says(reference)
+            );
+            assert_eq!(
+                pid_value(reference, "tag_source").as_deref() == Some("file"),
+                pid_value(reference, "label").is_some(),
+                "a tag is the name the file gives the item, and says so: {:?}",
+                says(reference)
+            );
+        }
+        // Nothing is added inside a block: a member says its role alone.
+        let (_, members) = filed(&import.document);
+        let saying_more: Vec<&String> = members
+            .iter()
+            .filter(|member| {
+                [
+                    "graphic=",
+                    "item=",
+                    "item_type=",
+                    "class=",
+                    "label=",
+                    "tag_source=",
+                ]
+                .iter()
+                .any(|key| member.contains(key))
+            })
+            .collect();
+        assert!(
+            saying_more.is_empty(),
+            "members that state an identity: {saying_more:?}"
+        );
+    }
+
+    /// A sheet the item reader gives nothing for -- `D04` of the plant test
+    /// data states no drawing number -- still imports, and its symbols
+    /// state their own numbers and nothing of an item (SPEC section 4.1).
+    #[test]
+    fn a_sheet_whose_items_cannot_be_read_imports_with_graphics_alone() {
+        let Some(sample) = sample_path() else {
+            return;
+        };
+        let Some(path) = sample
+            .ancestors()
+            .nth(3)
+            .map(|data| data.join("test").join("U01").join("D04.pid"))
+            .filter(|path| path.is_file())
+        else {
+            eprintln!("skipped: no D04.pid in the plant test data");
+            return;
+        };
+        let import =
+            load_pid(&path).unwrap_or_else(|error| panic!("load {}: {error}", path.display()));
+        let references = symbol_references(&import.document);
+        assert_eq!(
+            [
+                format!("references {}", references.len()),
+                stating(
+                    &references,
+                    &[
+                        "graphic",
+                        "item",
+                        "item_type",
+                        "class",
+                        "label",
+                        "tag_source",
+                        "resolved",
+                    ],
+                ),
+                format!(
+                    "symbol_blocks {}, symbol_items {}, symbol_tags {}",
+                    import.summary.symbol_blocks,
+                    import.summary.symbol_items,
+                    import.summary.symbol_tags
+                ),
+            ],
+            [
+                "references 5",
+                "graphic 5, item 0, item_type 0, class 0, label 0, tag_source 0, resolved 0",
+                "symbol_blocks 5, symbol_items 0, symbol_tags 0",
             ]
         );
     }

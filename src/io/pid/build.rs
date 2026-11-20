@@ -28,6 +28,10 @@ pub(super) struct Built {
     pub(super) symbol_blocks: usize,
     /// The block definitions those references share.
     pub(super) symbol_definitions: usize,
+    /// The references the drawing file states a plant item for.
+    pub(super) symbol_items: usize,
+    /// The references that carry a tag (`label`).
+    pub(super) symbol_tags: usize,
     /// The extent of the decoded geometry, for framing.
     pub(super) bounds: Bounds,
 }
@@ -37,10 +41,13 @@ pub(super) struct Built {
 /// bodies the drawing caches or `library` stands in with.
 ///
 /// A symbol placement is filed as one block reference, and what it draws is
-/// in the block definition that reference names (see [`SymbolBlocks`]).
+/// in the block definition that reference names (see [`SymbolBlocks`]). The
+/// reference also states what the symbol is: the plant item `items` gives
+/// for its graphic (see [`attach_symbol_identity`]).
 pub(super) fn build_document_entities(
     geometry: &NormalizedPidGeometry,
     lookups: &Styles,
+    items: &SheetItems,
     library: &mut Option<SymbolLibrary>,
     unit: &ImportUnit,
     doc: &mut Document,
@@ -75,6 +82,10 @@ pub(super) fn build_document_entities(
     // The block definitions the symbol placements are filed into, kept so
     // that placements which draw the same thing share one.
     let mut blocks = SymbolBlocks::default();
+    // References the file states a plant item for, and references that end
+    // up carrying a tag; see `ImportSummary`.
+    let mut symbol_items = 0usize;
+    let mut symbol_tags = 0usize;
     for entity in &geometry.entities {
         // A boundary ring is the one kind whose style decides its shape rather
         // than its colour: filled, it is an area; unfilled, it is an outline
@@ -343,6 +354,15 @@ pub(super) fn build_document_entities(
             if let Some(name) = name.as_deref() {
                 attach_symbol_name(&mut reference, name);
             }
+            // And what the drawing file itself says the symbol is: the plant
+            // item its graphic draws.
+            let item = entity
+                .graphic_oid
+                .and_then(|graphic_oid| items.item_of(graphic_oid));
+            symbol_items += usize::from(item.is_some());
+            if attach_symbol_identity(&mut reference, entity.graphic_oid, item) {
+                symbol_tags += 1;
+            }
             let _ = doc.add_entity(reference);
         }
     }
@@ -356,6 +376,8 @@ pub(super) fn build_document_entities(
         sheet_layers_off,
         symbol_blocks: blocks.references,
         symbol_definitions: blocks.definitions,
+        symbol_items,
+        symbol_tags,
         bounds,
     }
 }

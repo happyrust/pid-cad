@@ -111,6 +111,7 @@ pub(crate) use super::PID_SEMANTICS_XDATA_APP;
 use super::pid_view_filter::{is_hidden_sheet_layer, PidViewFilter, PidViewSummary};
 
 mod build;
+mod items;
 mod metadata;
 mod page;
 mod styles;
@@ -121,6 +122,7 @@ mod template;
 mod text;
 
 use self::build::*;
+use self::items::*;
 use self::metadata::*;
 use self::page::*;
 use self::styles::*;
@@ -493,9 +495,13 @@ pub fn load_pid_with(path: &Path, options: &PidImportOptions) -> Result<PidImpor
     let mut library = discover_symbol_library(path);
     let styles = resolve_styles(&parsed, &geometry, path, &mut doc, paper_style_scale);
     let unit = ImportUnit::read(&geometry, path);
+    // What each placed symbol stands for, as the file itself states it: the
+    // plant item behind the graphic (plan 2026-11-20-pid-symbol-identity).
+    let items = SheetItems::read(path);
     let built = build_document_entities(
         &geometry,
         &styles,
+        &items,
         &mut library,
         &unit,
         &mut doc,
@@ -613,6 +619,8 @@ fn finish(
         sheet_layers_off,
         symbol_blocks,
         symbol_definitions,
+        symbol_items,
+        symbol_tags,
         bounds,
     } = built;
     report_import(
@@ -629,6 +637,10 @@ fn finish(
     if symbol_blocks > 0 {
         log::info!(
             "{}: {symbol_blocks} symbol placement(s) are block references to {symbol_definitions} definition(s)",
+            path.display()
+        );
+        log::info!(
+            "{}: the drawing states a plant item for {symbol_items} of them, and {symbol_tags} carry a tag",
             path.display()
         );
     }
@@ -707,6 +719,8 @@ fn finish(
         template_missing: template.map(|overlay| overlay.missing).unwrap_or(0),
         symbol_blocks,
         symbol_definitions,
+        symbol_items,
+        symbol_tags,
         symbol_library: library
             .map(|library| library.roots().to_vec())
             .unwrap_or_default(),

@@ -107,6 +107,153 @@ pub(super) fn attach_symbol_name(entity: &mut EntityType, name: &str) {
     extended.add_record(record);
 }
 
+/// The value an entity's `PID_SEMANTICS` record states for `key`.
+pub(super) fn pid_value<'a>(entity: &'a EntityType, key: &str) -> Option<&'a str> {
+    use document::xdata::XDataValue;
+
+    let record = entity
+        .common()
+        .extended_data
+        .get_record(PID_SEMANTICS_XDATA_APP)?;
+    record.values.iter().find_map(|value| match value {
+        XDataValue::String(text) => text.strip_prefix(key)?.strip_prefix('='),
+        _ => None,
+    })
+}
+
+/// The keys of a `PID_SEMANTICS` record, in the order a record states them.
+/// A key written after its record was made -- what a symbol is, on its block
+/// reference; later a tag the plant database gives -- takes its place in
+/// this order (see [`stamp_pid_pairs`]), so a record reads the same
+/// whichever way it was arrived at.
+const PID_KEY_ORDER: [&str; 17] = [
+    "sheet_layer",
+    "sheet_layer_oid",
+    "role",
+    "style",
+    "extent",
+    "driving",
+    "instance",
+    "class",
+    "label",
+    "oid",
+    "resolved",
+    "symbol",
+    "graphic",
+    "item",
+    "item_type",
+    "tag_source",
+    "label_in_file",
+];
+
+/// Set `key=value` pairs in an entity's `PID_SEMANTICS` record, making the
+/// record where the entity has none.
+///
+/// A key the record already holds has its value replaced where it stands. A
+/// new key goes in after the last key that comes no later than it in
+/// [`PID_KEY_ORDER`], and a key that order does not know after every key.
+/// An empty value writes nothing, and what the record holds that is not a
+/// `key=value` string stays where it is. The record keeps its place among
+/// the entity's records.
+pub(super) fn stamp_pid_pairs(entity: &mut EntityType, pairs: &[(&str, &str)]) {
+    use document::xdata::{ExtendedDataRecord, XDataValue};
+
+    fn key_of(value: &XDataValue) -> Option<&str> {
+        match value {
+            XDataValue::String(text) => text.split_once('=').map(|(key, _)| key),
+            _ => None,
+        }
+    }
+
+    fn rank(key: &str) -> usize {
+        PID_KEY_ORDER
+            .iter()
+            .position(|known| *known == key)
+            .unwrap_or(PID_KEY_ORDER.len())
+    }
+
+    if pairs.iter().all(|(_, value)| value.is_empty()) {
+        return;
+    }
+    let extended = &mut entity.common_mut().extended_data;
+    let mut record = extended
+        .get_record(PID_SEMANTICS_XDATA_APP)
+        .cloned()
+        .unwrap_or_else(|| ExtendedDataRecord::new(PID_SEMANTICS_XDATA_APP));
+    for (key, value) in pairs {
+        if value.is_empty() {
+            continue;
+        }
+        let stated = XDataValue::String(format!("{key}={value}"));
+        if let Some(held) = record
+            .values
+            .iter_mut()
+            .find(|held| key_of(held) == Some(*key))
+        {
+            *held = stated;
+            continue;
+        }
+        let rank_of_key = rank(key);
+        let after = record
+            .values
+            .iter()
+            .rposition(|held| key_of(held).is_some_and(|held| rank(held) <= rank_of_key));
+        record.values.insert(after.map_or(0, |at| at + 1), stated);
+    }
+    extended.upsert_record(record);
+}
+
+/// State on a symbol's block reference what the drawing file itself says
+/// the symbol is (plan 2026-11-20-pid-symbol-identity, SPEC sections 3 and
+/// 4.2), and answer whether the reference carries a tag afterwards.
+///
+/// `graphic` is the placement's own number in the file, and every reference
+/// that has one states it: it is what a label names its symbol by, and what
+/// joins the reference back to the file. `item` and `item_type` are the
+/// plant item the graphic draws and the kind SmartPlant holds it as, where
+/// the file states one.
+///
+/// `class` and `label` are the keys a published `_Data.xml` fills, in the
+/// same vocabulary, and what it published stands. The file's own class is
+/// written only where nothing resolved the graphic before -- the record has
+/// no `resolved` -- and is marked `resolved=item`. The file's own name for
+/// the item is written as the tag only where the record has none, and
+/// marked `tag_source=file`: the file names fewer items than the plant
+/// database tags, and a few differently, so a reader has to be able to tell
+/// where a tag came from.
+pub(super) fn attach_symbol_identity(
+    reference: &mut EntityType,
+    graphic_oid: Option<u32>,
+    item: Option<&SheetItem>,
+) -> bool {
+    let graphic = graphic_oid.map(|graphic_oid| graphic_oid.to_string());
+    let published = pid_value(reference, "resolved").is_some();
+    let mut tagged = pid_value(reference, "label").is_some();
+    let mut pairs: Vec<(&str, &str)> = Vec::with_capacity(7);
+    if let Some(graphic) = graphic.as_deref() {
+        pairs.push(("graphic", graphic));
+    }
+    if let Some(item) = item {
+        pairs.push(("item", &item.uid));
+        pairs.push(("item_type", &item.item_type));
+        if !published {
+            if let Some(class) = item.class {
+                pairs.push(("class", class));
+                pairs.push(("resolved", "item"));
+            }
+        }
+        if !tagged {
+            if let Some(name) = item.name.as_deref() {
+                pairs.push(("label", name));
+                pairs.push(("tag_source", "file"));
+                tagged = true;
+            }
+        }
+    }
+    stamp_pid_pairs(reference, &pairs);
+    tagged
+}
+
 /// What a symbol placement says about its size, written into the
 /// `PID_SEMANTICS` record of the placement's block reference for the
 /// properties panel to show (plan `2026-09-18-driving-dimensions-reach-the-

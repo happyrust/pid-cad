@@ -28,6 +28,8 @@ fn the_summary_round_trips_through_its_properties_and_take_removes_them() {
     summary.lettering_flattened = 10;
     summary.symbol_blocks = 27;
     summary.symbol_definitions = 19;
+    summary.symbol_items = 25;
+    summary.symbol_tags = 11;
     summary.symbol_library = vec![
         PathBuf::from(r"\\server\Plant\Ref\Symbols"),
         PathBuf::from("D:/sym with spaces/=and=equals"),
@@ -1812,12 +1814,23 @@ pub(super) mod placements_as_blocks {
     }
 
     /// Run the entity loop over `geometry` into a document prepared the way
-    /// an import prepares one.
+    /// an import prepares one. The file states no plant item for any of its
+    /// graphics; see [`import_stating`].
     fn import(geometry: &NormalizedPidGeometry, tables: &Styles) -> (Document, Built) {
+        import_stating(geometry, tables, &SheetItems::default())
+    }
+
+    /// [`import`], with `items` as what the file states its graphics draw.
+    fn import_stating(
+        geometry: &NormalizedPidGeometry,
+        tables: &Styles,
+        items: &SheetItems,
+    ) -> (Document, Built) {
         let mut doc = prepare_document(&pid_parse::PidDocument::default());
         let built = build_document_entities(
             geometry,
             tables,
+            items,
             &mut None,
             &ImportUnit::AssumedMetre,
             &mut doc,
@@ -2211,8 +2224,9 @@ pub(super) mod placements_as_blocks {
                 "style=Equipment - New",
                 "extent=4.00x3.00",
                 r#"symbol=Valve <2"> a:b"#,
+                "graphic=612",
             ],
-            "the placement's record, and the symbol's name as the drawing spells it"
+            "the placement's record, the symbol's name as the drawing spells it, and the placement's own number in the file"
         );
     }
 
@@ -2254,6 +2268,7 @@ pub(super) mod placements_as_blocks {
                 "oid=612",
                 "resolved=direct",
                 "symbol=Ball Valve",
+                "graphic=612",
             ]
         );
         let inside: Vec<Vec<String>> = members(&doc, "SPPID_Ball Valve")
@@ -2631,11 +2646,16 @@ pub(super) mod placements_as_blocks {
             .all(|reference| reference.common().layer == LAYER_SYMBOL));
         assert_eq!(
             says(placed[0]),
-            ["role=symbol", "extent=3.00x3.00", "symbol=Ball Valve"]
+            [
+                "role=symbol",
+                "extent=3.00x3.00",
+                "symbol=Ball Valve",
+                "graphic=701",
+            ]
         );
         assert_eq!(
             says(placed[1]),
-            ["role=symbol", "extent=3.00x3.00"],
+            ["role=symbol", "extent=3.00x3.00", "graphic=702"],
             "a placement that names no symbol has no name to state"
         );
 
@@ -2708,6 +2728,7 @@ pub(super) mod placements_as_blocks {
                 "role=symbol",
                 "extent=2.54x2.54",
                 "symbol=Item Note",
+                "graphic=801",
             ]
         );
         let inside = members(&doc, "SPPID_Item Note");
@@ -2960,7 +2981,7 @@ pub(super) mod placements_as_blocks {
             "and no definition beside those two"
         );
         assert_eq!(
-            counts[18..],
+            counts[18..20],
             [("symbol_blocks", 3), ("symbol_definitions", 2)],
             "three references to two definitions"
         );
@@ -2984,6 +3005,525 @@ pub(super) mod placements_as_blocks {
             "each rides the document under its own key"
         );
         assert_eq!(ImportSummary::take(&mut doc), Some(summary));
+    }
+
+    /// A plant item as a drawing file states one.
+    fn plant_item(
+        uid: &str,
+        item_type: &str,
+        class: Option<&'static str>,
+        name: Option<&str>,
+    ) -> SheetItem {
+        SheetItem {
+            uid: uid.to_string(),
+            item_type: item_type.to_string(),
+            class,
+            name: name.map(str::to_string),
+        }
+    }
+
+    /// A valve placed at (`x`, 0.2) metres on a displayed layer `Process`.
+    fn valve_on_process(oid: u32, x: f64) -> pid_parse::PidGraphicEntity {
+        record(
+            oid,
+            placement((x, 0.2), Some(VALVE), Some(BODY), 0.0),
+            Some((Some("Process"), true)),
+        )
+    }
+
+    /// A reference states what the drawing file says its graphic draws
+    /// (plan 2026-11-20-pid-symbol-identity): the graphic's own number, the
+    /// item and its kind, the class the item is published as -- marked as
+    /// the file's own reading, `resolved=item` -- and the item's name as the
+    /// tag, marked as the file's, `tag_source=file`. `class`, `label` and
+    /// `resolved` stand where a published `_Data.xml` writes them, before
+    /// the symbol's name; the keys only the file gives follow it. Nothing is
+    /// added inside the block.
+    #[test]
+    fn the_reference_states_the_item_its_graphic_draws() {
+        let geometry = sheet(vec![valve_on_process(612, 0.1)], vec![valve_body()]);
+        let tables = styled(styles(), 612, "Equipment - New");
+        let items = SheetItems::stating([(
+            612,
+            plant_item(
+                "4E1F0B7C9A2D4C6E8F1A3B5D7C9E0F21",
+                "PipingComp",
+                Some("PIDPipingComponent"),
+                Some("GV-101"),
+            ),
+        )]);
+        let (doc, built) = import_stating(&geometry, &tables, &items);
+
+        let placed = references(&doc);
+        assert_eq!(placed.len(), 1);
+        assert_eq!(
+            says(placed[0]),
+            [
+                "sheet_layer=Process",
+                "sheet_layer_oid=12",
+                "role=symbol",
+                "style=Equipment - New",
+                "extent=4.00x3.00",
+                "class=PIDPipingComponent",
+                "label=GV-101",
+                "resolved=item",
+                "symbol=Ball Valve",
+                "graphic=612",
+                "item=4E1F0B7C9A2D4C6E8F1A3B5D7C9E0F21",
+                "item_type=PipingComp",
+                "tag_source=file",
+            ]
+        );
+        let inside: Vec<Vec<String>> = members(&doc, "SPPID_Ball Valve")
+            .iter()
+            .map(|member| says(member))
+            .collect();
+        assert_eq!(
+            inside,
+            [
+                vec!["role=symbol"],
+                vec!["role=symbol"],
+                vec!["role=fill"],
+                vec!["role=symbol"],
+                vec!["role=symbol-label"],
+            ],
+            "a member says what it is and nothing else"
+        );
+        assert_eq!((built.symbol_items, built.symbol_tags), (1, 1));
+    }
+
+    /// What the file does not decide is not stated. An item the file
+    /// publishes no class for -- an off-page connector -- gets no `class`
+    /// and no `resolved`; an item the file does not name gets no `label`
+    /// and no `tag_source`; a graphic the file states no item for says its
+    /// number alone; and a placement whose record has no number says
+    /// nothing new.
+    #[test]
+    fn a_reference_states_only_what_the_file_decides() {
+        let mut unnumbered = valve_on_process(615, 0.4);
+        unnumbered.graphic_oid = None;
+        let geometry = sheet(
+            vec![
+                valve_on_process(612, 0.1),
+                valve_on_process(613, 0.2),
+                valve_on_process(614, 0.3),
+                unnumbered,
+            ],
+            vec![valve_body()],
+        );
+        let items = SheetItems::stating([
+            (612, plant_item("CONNECTOR", "OPC", None, None)),
+            (
+                613,
+                plant_item("FITTING", "PipingComp", Some("PIDPipingComponent"), None),
+            ),
+        ]);
+        let (doc, built) = import_stating(&geometry, &styles(), &items);
+
+        let said: Vec<Vec<String>> = references(&doc).into_iter().map(says).collect();
+        assert_eq!(
+            said,
+            [
+                vec![
+                    "sheet_layer=Process",
+                    "sheet_layer_oid=12",
+                    "role=symbol",
+                    "extent=4.00x3.00",
+                    "symbol=Ball Valve",
+                    "graphic=612",
+                    "item=CONNECTOR",
+                    "item_type=OPC",
+                ],
+                vec![
+                    "sheet_layer=Process",
+                    "sheet_layer_oid=12",
+                    "role=symbol",
+                    "extent=4.00x3.00",
+                    "class=PIDPipingComponent",
+                    "resolved=item",
+                    "symbol=Ball Valve",
+                    "graphic=613",
+                    "item=FITTING",
+                    "item_type=PipingComp",
+                ],
+                vec![
+                    "sheet_layer=Process",
+                    "sheet_layer_oid=12",
+                    "role=symbol",
+                    "extent=4.00x3.00",
+                    "symbol=Ball Valve",
+                    "graphic=614",
+                ],
+                vec![
+                    "sheet_layer=Process",
+                    "sheet_layer_oid=12",
+                    "role=symbol",
+                    "extent=4.00x3.00",
+                    "symbol=Ball Valve",
+                ],
+            ]
+        );
+        assert_eq!(
+            (built.symbol_items, built.symbol_tags),
+            (2, 0),
+            "two of the four state an item, and none of them a tag"
+        );
+    }
+
+    /// Beside a published `_Data.xml`, what it published stands: its class,
+    /// its tag, its oid and how it was resolved are the values they were,
+    /// and a tag it gave is not marked with a source. The file adds what
+    /// the XML left out: the graphic, the item and its kind on every
+    /// reference; its own name where the XML gives the object none, marked
+    /// `tag_source=file`; its own class where the XML publishes nothing for
+    /// the graphic, marked `resolved=item`.
+    #[test]
+    fn what_data_xml_published_stands_and_the_file_adds_what_it_left_out() {
+        let xml = r#"<Container>
+  <PIDInlineComponent><IObject UID="VALVE" ItemTag="GV-101"/></PIDInlineComponent>
+  <PIDRepresentation><IObject UID="REP1"/><IDrawingRepresentation GraphicOID="612"/></PIDRepresentation>
+  <Rel><IRel UID1="VALVE" UID2="REP1" DefUID="DwgRepresentationComposition"/></Rel>
+  <PIDInstrument><IObject UID="GAUGE"/></PIDInstrument>
+  <PIDRepresentation><IObject UID="REP2"/><IDrawingRepresentation GraphicOID="613"/></PIDRepresentation>
+  <Rel><IRel UID1="GAUGE" UID2="REP2" DefUID="DwgRepresentationComposition"/></Rel>
+</Container>"#;
+        let mut tables = styles();
+        tables.semantics = Some(PidSemanticIndex::from_xml(
+            xml,
+            &pid_parse::PidDocument::default(),
+        ));
+        let geometry = sheet(
+            vec![
+                valve_on_process(612, 0.1),
+                valve_on_process(613, 0.2),
+                valve_on_process(614, 0.3),
+            ],
+            vec![valve_body()],
+        );
+        let items = SheetItems::stating([
+            (
+                612,
+                plant_item(
+                    "VALVE-ITEM",
+                    "PipingComp",
+                    Some("PIDPipingComponent"),
+                    Some("GV-101 AS THE FILE HAS IT"),
+                ),
+            ),
+            (
+                613,
+                plant_item(
+                    "GAUGE-ITEM",
+                    "Instrument",
+                    Some("PIDInstrument"),
+                    Some("PG-7"),
+                ),
+            ),
+            (
+                614,
+                plant_item("NOZZLE-ITEM", "Nozzle", Some("PIDNozzle"), Some("N1")),
+            ),
+        ]);
+        let (doc, built) = import_stating(&geometry, &tables, &items);
+
+        let said: Vec<Vec<String>> = references(&doc).into_iter().map(says).collect();
+        assert_eq!(
+            said,
+            [
+                vec![
+                    "sheet_layer=Process",
+                    "sheet_layer_oid=12",
+                    "role=symbol",
+                    "extent=4.00x3.00",
+                    "class=PIDInlineComponent",
+                    "label=GV-101",
+                    "oid=612",
+                    "resolved=direct",
+                    "symbol=Ball Valve",
+                    "graphic=612",
+                    "item=VALVE-ITEM",
+                    "item_type=PipingComp",
+                ],
+                vec![
+                    "sheet_layer=Process",
+                    "sheet_layer_oid=12",
+                    "role=symbol",
+                    "extent=4.00x3.00",
+                    "class=PIDInstrument",
+                    "label=PG-7",
+                    "oid=613",
+                    "resolved=direct",
+                    "symbol=Ball Valve",
+                    "graphic=613",
+                    "item=GAUGE-ITEM",
+                    "item_type=Instrument",
+                    "tag_source=file",
+                ],
+                vec![
+                    "sheet_layer=Process",
+                    "sheet_layer_oid=12",
+                    "role=symbol",
+                    "extent=4.00x3.00",
+                    "class=PIDNozzle",
+                    "label=N1",
+                    "resolved=item",
+                    "symbol=Ball Valve",
+                    "graphic=614",
+                    "item=NOZZLE-ITEM",
+                    "item_type=Nozzle",
+                    "tag_source=file",
+                ],
+            ]
+        );
+        assert_eq!((built.symbol_items, built.symbol_tags), (3, 3));
+    }
+
+    /// The summary counts the references the file states an item for and
+    /// the references that carry a tag, after the counts it kept before.
+    /// Both ride the document under their own keys and read back.
+    #[test]
+    fn the_summary_counts_the_references_that_state_an_item_and_a_tag() {
+        let geometry = sheet(
+            vec![
+                valve_on_process(1301, 0.1),
+                valve_on_process(1302, 0.2),
+                valve_on_process(1303, 0.3),
+            ],
+            vec![valve_body()],
+        );
+        let items = SheetItems::stating([
+            (
+                1301,
+                plant_item(
+                    "A",
+                    "PipingComp",
+                    Some("PIDPipingComponent"),
+                    Some("GV-101"),
+                ),
+            ),
+            (
+                1302,
+                plant_item("B", "PipingComp", Some("PIDPipingComponent"), None),
+            ),
+        ]);
+        let tables = styles();
+        let (mut doc, built) = import_stating(&geometry, &tables, &items);
+        let summary = finish(
+            Path::new("three-valves.pid"),
+            &geometry,
+            None,
+            &tables,
+            ImportUnit::AssumedMetre,
+            built,
+            None,
+            &mut doc,
+        );
+
+        assert_eq!(
+            summary.counts()[18..],
+            [
+                ("symbol_blocks", 3),
+                ("symbol_definitions", 1),
+                ("symbol_items", 2),
+                ("symbol_tags", 1),
+            ],
+            "three references: two state an item, one of them a tag"
+        );
+        assert_eq!((summary.symbol_items, summary.symbol_tags), (2, 1));
+
+        summary.store(&mut doc);
+        let stored = |key: &str| {
+            let tag = format!("{SUMMARY_PROPERTY_PREFIX}{key}");
+            doc.summary_info
+                .custom_properties
+                .iter()
+                .find(|(name, _)| *name == tag)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            (
+                stored("symbol_items").as_deref(),
+                stored("symbol_tags").as_deref()
+            ),
+            (Some("2"), Some("1")),
+            "each rides the document under its own key"
+        );
+        assert_eq!(ImportSummary::take(&mut doc), Some(summary));
+    }
+
+    /// A key written after its record was made takes its place in the
+    /// record's order, not the end, so a record reads the same whichever
+    /// way it was arrived at. A key the record already holds has its value
+    /// replaced where it stands; an empty value writes nothing; keys the
+    /// order does not know go last, in the order they come; what is not a
+    /// `key=value` string is left where it is. The record keeps its place
+    /// among the entity's records, and an entity that has none gets one.
+    #[test]
+    fn a_key_stamped_later_takes_its_place_in_the_record() {
+        use document::xdata::{ExtendedDataRecord, XDataValue};
+
+        let a_line = || {
+            EntityType::Line(Line::from_points(
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+            ))
+        };
+        let mut entity = a_line();
+        attach_pid_metadata(
+            &mut entity,
+            None,
+            None,
+            Some("symbol"),
+            Some("Equipment - New"),
+            None,
+        );
+        attach_symbol_name(&mut entity, "Ball Valve");
+        let mut other = ExtendedDataRecord::new("SOMEONE_ELSE");
+        other.add_value(XDataValue::String("label=theirs".to_string()));
+        entity.common_mut().extended_data.add_record(other.clone());
+        assert_eq!(
+            says(&entity),
+            ["role=symbol", "style=Equipment - New", "symbol=Ball Valve"]
+        );
+
+        stamp_pid_pairs(
+            &mut entity,
+            &[
+                ("graphic", "612"),
+                ("item", "ITEM"),
+                ("item_type", "PipingComp"),
+            ],
+        );
+        stamp_pid_pairs(
+            &mut entity,
+            &[
+                ("label", "GV-101"),
+                ("tag_source", "file"),
+                ("class", "PIDPipingComponent"),
+                ("resolved", "item"),
+            ],
+        );
+        assert_eq!(
+            says(&entity),
+            [
+                "role=symbol",
+                "style=Equipment - New",
+                "class=PIDPipingComponent",
+                "label=GV-101",
+                "resolved=item",
+                "symbol=Ball Valve",
+                "graphic=612",
+                "item=ITEM",
+                "item_type=PipingComp",
+                "tag_source=file",
+            ],
+            "each new key after the last key that comes no later than it"
+        );
+
+        // What the plant database later says of the same item: its tag in
+        // place of the file's, and the file's name kept beside it.
+        stamp_pid_pairs(
+            &mut entity,
+            &[
+                ("label", "GV-101A"),
+                ("tag_source", "database"),
+                ("label_in_file", "GV-101"),
+                ("oid", ""),
+                ("made_up", "1"),
+                ("another", "2"),
+            ],
+        );
+        assert_eq!(
+            says(&entity),
+            [
+                "role=symbol",
+                "style=Equipment - New",
+                "class=PIDPipingComponent",
+                "label=GV-101A",
+                "resolved=item",
+                "symbol=Ball Valve",
+                "graphic=612",
+                "item=ITEM",
+                "item_type=PipingComp",
+                "tag_source=database",
+                "label_in_file=GV-101",
+                "made_up=1",
+                "another=2",
+            ],
+            "a held key is replaced where it stands, an empty value is not written"
+        );
+        // A value is read by its whole key: `label` is not `label_in_file`,
+        // nor is the start of a key a key.
+        assert_eq!(
+            [
+                pid_value(&entity, "label"),
+                pid_value(&entity, "label_in_file"),
+                pid_value(&entity, "item"),
+                pid_value(&entity, "item_type"),
+                pid_value(&entity, "label_in"),
+                pid_value(&entity, "oid"),
+            ],
+            [
+                Some("GV-101A"),
+                Some("GV-101"),
+                Some("ITEM"),
+                Some("PipingComp"),
+                None,
+                None,
+            ]
+        );
+        let records: Vec<&str> = entity
+            .common()
+            .extended_data
+            .records()
+            .iter()
+            .map(|record| record.application_name.as_str())
+            .collect();
+        assert_eq!(
+            records,
+            [PID_SEMANTICS_XDATA_APP, "SOMEONE_ELSE"],
+            "the record stays where it was among the entity's records"
+        );
+        assert_eq!(
+            entity.common().extended_data.get_record("SOMEONE_ELSE"),
+            Some(&other),
+            "and another application's record is not read as this one"
+        );
+
+        // A value that is not a `key=value` string stays where it is, and
+        // keys still find their places around it.
+        let mut mixed = a_line();
+        let mut record = ExtendedDataRecord::new(PID_SEMANTICS_XDATA_APP);
+        record.add_value(XDataValue::String("role=symbol".to_string()));
+        record.add_value(XDataValue::Integer16(7));
+        record.add_value(XDataValue::String("symbol=Ball Valve".to_string()));
+        mixed.common_mut().extended_data.add_record(record);
+        stamp_pid_pairs(&mut mixed, &[("graphic", "9"), ("label", "GV-9")]);
+        let values = &mixed
+            .common()
+            .extended_data
+            .get_record(PID_SEMANTICS_XDATA_APP)
+            .expect("the record")
+            .values;
+        assert_eq!(
+            values,
+            &[
+                XDataValue::String("role=symbol".to_string()),
+                XDataValue::String("label=GV-9".to_string()),
+                XDataValue::Integer16(7),
+                XDataValue::String("symbol=Ball Valve".to_string()),
+                XDataValue::String("graphic=9".to_string()),
+            ]
+        );
+
+        let mut bare = a_line();
+        stamp_pid_pairs(&mut bare, &[("label", "")]);
+        assert!(
+            bare.common().extended_data.is_empty(),
+            "nothing to write makes no record"
+        );
+        stamp_pid_pairs(&mut bare, &[("graphic", "7")]);
+        assert_eq!(says(&bare), ["graphic=7"]);
     }
 
     /// The blocks the valve and the label symbol are filed as.
