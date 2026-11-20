@@ -466,6 +466,12 @@ impl OpenCADStudio {
     /// carry out the effect it asks for.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn on_pid_backup(&mut self, msg: PidBackupMsg) -> Task<Message> {
+        // The tags the database gives are not the panel's news: they go on
+        // the drawings that were opened from it.
+        if let PidBackupMsg::TagsRead { generation, result } = msg {
+            self.backup_tags_read(generation, result);
+            return Task::none();
+        }
         // An export to PDF reads the restores while it runs: none is removed
         // from under it, whoever asks -- `Cache=Clear`, `Press`, or the
         // panel's own button.
@@ -579,9 +585,11 @@ impl OpenCADStudio {
             // A drawing a tab shows already is brought to the front, as OPEN
             // and the sheet set's sheets do: the open itself takes no notice
             // of the tabs on the desktop, and would load the file once more.
+            // One that is opened takes the tags the backup's database
+            // gives the items of its symbols.
             Effect::OpenDrawing(path) => match self.tab_showing(&path) {
                 Some(index) => Task::done(Message::TabSwitch(index)),
-                None => Task::done(Message::OpenRecent(path)),
+                None => self.open_from_the_backup(path),
             },
             // A picked source, a refresh: both rebuild the index from a path.
             // The panel remembers the source it was given, so a refresh keeps
@@ -1722,3 +1730,8 @@ mod tests {
 /// A walk over a real backup through the application; run with `--ignored`.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod audit;
+
+/// The tags the database of a backup gives its items, on the drawings
+/// opened from the panel.
+#[cfg(not(target_arch = "wasm32"))]
+pub(in crate::app) mod tags;

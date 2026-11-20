@@ -2396,8 +2396,14 @@ impl OpenCADStudio {
     }
 
     pub(in crate::app) fn next_open_id(&mut self) -> u64 {
-        self.open_job_serial = self.open_job_serial.wrapping_add(1).max(1);
+        self.open_job_serial = self.open_id_to_come();
         self.open_job_serial
+    }
+
+    /// The id the next open will go by, without starting one: what
+    /// [`Self::next_open_id`] gives when it is asked next.
+    pub(in crate::app) fn open_id_to_come(&self) -> u64 {
+        self.open_job_serial.wrapping_add(1).max(1)
     }
 
     /// Index of a tab already showing `path`, or `None`.
@@ -3158,6 +3164,11 @@ impl OpenCADStudio {
                 );
             }
         }
+        // A drawing the backup panel asked for takes the tags the backup's
+        // database gives the items of its symbols: here, before it is
+        // shown, when they have been read; when they arrive, when not.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.tag_the_drawing_the_backup_opened(i);
         self.tabs[i].active_layer = self.tabs[i]
             .scene
             .document

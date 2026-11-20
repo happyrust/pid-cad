@@ -198,6 +198,29 @@ pub(super) fn stamp_pid_pairs(entity: &mut EntityType, pairs: &[(&str, &str)]) {
     extended.upsert_record(record);
 }
 
+/// Take `key` out of an entity's `PID_SEMANTICS` record: every `key=value`
+/// string that states it. What else the record holds stays, in its order,
+/// and the record keeps its place among the entity's records. An entity
+/// whose record does not state the key is not written at all.
+pub(super) fn clear_pid_key(entity: &mut EntityType, key: &str) {
+    use document::xdata::XDataValue;
+
+    let extended = &mut entity.common_mut().extended_data;
+    let Some(mut record) = extended.get_record(PID_SEMANTICS_XDATA_APP).cloned() else {
+        return;
+    };
+    let held = record.values.len();
+    record.values.retain(|value| match value {
+        XDataValue::String(text) => !text
+            .split_once('=')
+            .is_some_and(|(stated, _)| stated == key),
+        _ => true,
+    });
+    if record.values.len() != held {
+        extended.upsert_record(record);
+    }
+}
+
 /// State on a symbol's block reference what the drawing file itself says
 /// the symbol is (plan 2026-11-20-pid-symbol-identity, SPEC sections 3 and
 /// 4.2), and answer whether the reference carries a tag afterwards.

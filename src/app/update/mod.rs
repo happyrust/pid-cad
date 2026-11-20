@@ -679,6 +679,10 @@ impl OpenCADStudio {
         if self.collab.tags_wanted.is_some() {
             self.answer_collab_tags();
         }
+        // A drawing that took the tags of its backup's database after it
+        // was shown has its Properties panel read anew once it is in front.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.show_the_tags_taken();
         if let Some((resized, key)) = outline_switch_before {
             if resized || self.outline_switch_key() != key {
                 self.outline_switch_hover = false;

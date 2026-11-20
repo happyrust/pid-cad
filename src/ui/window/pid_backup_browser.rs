@@ -166,6 +166,13 @@ pub enum PidBackupMsg {
     Progress,
     /// The restore cache: measured, cleared, moved to another folder.
     Cache(cache::CacheMsg),
+    /// The tags the backup's database gives its plant items were read, or
+    /// were not: for the drawings opened from the panel, whose symbols take
+    /// them. `generation` is the panel's when the read began.
+    TagsRead {
+        generation: u64,
+        result: Result<Arc<HashMap<String, String>>, String>,
+    },
 }
 
 /// What the application should do after [`update`] applied a message.
@@ -497,6 +504,9 @@ pub fn update(state: &mut PidBackupBrowser, msg: PidBackupMsg) -> Effect {
             Effect::None
         }
         PidBackupMsg::Cache(msg) => cache::update(state, msg),
+        // Nothing of the panel's: the application puts the tags on the
+        // drawings it opened from here.
+        PidBackupMsg::TagsRead { .. } => Effect::None,
         // The message itself is what draws the panel anew; the clock goes
         // on for as long as something counts.
         PidBackupMsg::Progress => {

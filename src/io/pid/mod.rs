@@ -111,6 +111,7 @@ pub(crate) use super::PID_SEMANTICS_XDATA_APP;
 use super::pid_view_filter::{is_hidden_sheet_layer, PidViewFilter, PidViewSummary};
 
 mod build;
+mod database_tags;
 mod items;
 mod labels;
 mod metadata;
@@ -123,6 +124,7 @@ mod template;
 mod text;
 
 use self::build::*;
+pub(crate) use self::database_tags::{fill_database_tags, DatabaseTagFill};
 use self::items::*;
 use self::labels::*;
 use self::metadata::*;
@@ -765,11 +767,15 @@ fn ensure_layer(doc: &mut Document, name: &str, colour: Color, visible: bool, pl
 /// `crate::app::pid_symbol_block_tests`), the fourth those of what is drawn
 /// of it (`crate::app::pid_symbol_view_tests`). The P&ID editor's inspector
 /// is tested on the first and on the second
-/// (`crate::app::pid_shell::pid_editor_screen`).
+/// (`crate::app::pid_shell::pid_editor_screen`). The sheet the tags of a
+/// plant database are put on, and those tags, are for the tests of a
+/// drawing opened from the backup panel
+/// (`crate::app::commands::pidbackup::tags`).
 #[cfg(test)]
 pub(crate) use self::tests::placements_as_blocks::{
-    sheet_of_a_tagged_valve_and_its_labels, sheet_of_symbols_the_file_says_less_of,
-    sheet_of_two_valves_a_note_and_a_pipe, sheet_of_valves_on_shown_and_hidden_layers,
+    sheet_for_the_database, sheet_of_a_tagged_valve_and_its_labels,
+    sheet_of_symbols_the_file_says_less_of, sheet_of_two_valves_a_note_and_a_pipe,
+    sheet_of_valves_on_shown_and_hidden_layers, tags_for_that_sheet,
 };
 
 #[cfg(test)]

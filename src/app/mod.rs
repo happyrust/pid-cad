@@ -1649,6 +1649,11 @@ pub(super) struct OpenCADStudio {
     /// last one came to. App-level for the same reason.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) pid_backup_pdf: commands::pidbackuppdf::BackupPdf,
+    /// The tags that backup's database gives its items, and the drawings
+    /// opened from the panel that wait for them. App-level as well: the
+    /// tags are the backup's, and go on every drawing opened from it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) pid_backup_tags: commands::pidbackup::tags::BackupTags,
     pub(crate) pid_symbols: crate::pid::symbols::SymbolLibrary,
     /// Which group of symbols the P&ID legend list shows (its filter row).
     pub(crate) pid_legend_filter: crate::ui::window::pid_legend_list::PidLegendFilter,
@@ -6745,6 +6750,8 @@ impl OpenCADStudio {
             pid_backup_browser: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             pid_backup_pdf: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            pid_backup_tags: Default::default(),
             pid_symbols: crate::pid::symbols::SymbolLibrary::load_from_env(),
             pid_legend_filter: Default::default(),
             pid_legend_exceptions_open: false,

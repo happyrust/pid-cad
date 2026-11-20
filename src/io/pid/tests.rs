@@ -3762,6 +3762,519 @@ pub(super) mod placements_as_blocks {
         assert_eq!(says(&bare), ["graphic=7"]);
     }
 
+    /// A key taken out of a record leaves the rest of the record as it was:
+    /// the other keys in their order, what is no `key=value` string, and the
+    /// record's place among the entity's records. Every statement of the
+    /// key goes. A key is its whole name; one the record does not state is
+    /// not taken, and an entity with no record gets none.
+    #[test]
+    fn a_key_taken_out_leaves_the_rest_of_its_record() {
+        use document::xdata::{ExtendedDataRecord, XDataValue};
+
+        let a_line = || {
+            EntityType::Line(Line::from_points(
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+            ))
+        };
+        let string = |value: &str| XDataValue::String(value.to_string());
+        let mut entity = a_line();
+        let mut record = ExtendedDataRecord::new(PID_SEMANTICS_XDATA_APP);
+        record.add_value(string("role=symbol"));
+        record.add_value(string("label=GV-101A"));
+        record.add_value(XDataValue::Integer16(7));
+        record.add_value(string("tag_source=database"));
+        record.add_value(string("label_in_file=GV-101"));
+        record.add_value(string("label_in_file=GV-1"));
+        let mut other = ExtendedDataRecord::new("SOMEONE_ELSE");
+        other.add_value(string("label_in_file=theirs"));
+        let whole = record.values.clone();
+        entity.common_mut().extended_data.add_record(record);
+        entity.common_mut().extended_data.add_record(other.clone());
+        let held = |entity: &EntityType| {
+            entity
+                .common()
+                .extended_data
+                .get_record(PID_SEMANTICS_XDATA_APP)
+                .expect("the record")
+                .values
+                .clone()
+        };
+
+        // A key is its whole name. `label_in` is none of the record's,
+        // though two of them start with it; `label_in_file_too` is none,
+        // though it starts with one; nor is `oid`. Nothing is taken.
+        clear_pid_key(&mut entity, "label_in");
+        clear_pid_key(&mut entity, "label_in_file_too");
+        clear_pid_key(&mut entity, "oid");
+        assert_eq!(held(&entity), whole);
+
+        clear_pid_key(&mut entity, "label_in_file");
+        let left = [
+            string("role=symbol"),
+            string("label=GV-101A"),
+            XDataValue::Integer16(7),
+            string("tag_source=database"),
+        ];
+        assert_eq!(held(&entity), left, "both statements of the key are gone");
+        let records: Vec<&str> = entity
+            .common()
+            .extended_data
+            .records()
+            .iter()
+            .map(|record| record.application_name.as_str())
+            .collect();
+        assert_eq!(records, [PID_SEMANTICS_XDATA_APP, "SOMEONE_ELSE"]);
+        assert_eq!(
+            entity.common().extended_data.get_record("SOMEONE_ELSE"),
+            Some(&other),
+            "another application's record is not this one"
+        );
+
+        let mut bare = a_line();
+        clear_pid_key(&mut bare, "label");
+        assert!(
+            bare.common().extended_data.is_empty(),
+            "nothing to take makes no record"
+        );
+    }
+
+    /// The tags a plant database gives, by the ids of their items spelt as
+    /// the dump folds them: no braces, no dashes, capitals.
+    fn tags_of(tags: &[(&str, &str)]) -> HashMap<String, String> {
+        tags.iter()
+            .map(|(item, tag)| (item.to_string(), tag.to_string()))
+            .collect()
+    }
+
+    /// Nothing of a sheet was drawn in this program.
+    fn nothing_drawn_here(_: &EntityType) -> bool {
+        false
+    }
+
+    /// What a valve of the sheets below says: the four lines every one of
+    /// them starts with, then `rest`.
+    fn valve_saying(rest: &[&str]) -> Vec<String> {
+        [
+            "sheet_layer=Process",
+            "sheet_layer_oid=12",
+            "role=symbol",
+            "extent=4.00x3.00",
+        ]
+        .iter()
+        .chain(rest)
+        .map(|line| line.to_string())
+        .collect()
+    }
+
+    /// What every block reference of model space says, in the order they
+    /// were filed.
+    fn said_by_the_references(doc: &Document) -> Vec<Vec<String>> {
+        references(doc).into_iter().map(says).collect()
+    }
+
+    /// The sheet the tags of a plant database are put on, as an import of
+    /// the file alone leaves it: six valves on a displayed layer `Process`,
+    /// in the order they are filed --
+    ///
+    /// - 612, a piping component the file names `GV-101`;
+    /// - 613, a piping component the file gives no name;
+    /// - 614, an instrument the file names `PIA-0112101B`, its id spelt
+    ///   with braces, dashes and small letters;
+    /// - 615, a nozzle the file names `N1`;
+    /// - 616, a graphic the file states no item for;
+    /// - 617, a piping component the file names `K-1`.
+    pub(crate) fn sheet_for_the_database() -> Document {
+        let geometry = sheet(
+            vec![
+                valve_on_process(612, 0.05),
+                valve_on_process(613, 0.1),
+                valve_on_process(614, 0.15),
+                valve_on_process(615, 0.2),
+                valve_on_process(616, 0.25),
+                valve_on_process(617, 0.3),
+            ],
+            vec![valve_body()],
+        );
+        let items = SheetItems::stating([
+            (
+                612,
+                plant_item(
+                    "4E1F0B7C9A2D4C6E8F1A3B5D7C9E0F21",
+                    "PipingComp",
+                    Some("PIDPipingComponent"),
+                    Some("GV-101"),
+                ),
+            ),
+            (
+                613,
+                plant_item(
+                    "7A3C5E9B1D2F4A6C8E0B2D4F6A8C0E13",
+                    "PipingComp",
+                    Some("PIDPipingComponent"),
+                    None,
+                ),
+            ),
+            (
+                614,
+                plant_item(
+                    "{0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0}",
+                    "Instrument",
+                    Some("PIDInstrument"),
+                    Some("PIA-0112101B"),
+                ),
+            ),
+            (
+                615,
+                plant_item(
+                    "AAAA0000BBBB1111CCCC2222DDDD3333",
+                    "Nozzle",
+                    Some("PIDNozzle"),
+                    Some("N1"),
+                ),
+            ),
+            (
+                617,
+                plant_item(
+                    "EEEE4444FFFF5555AAAA6666BBBB7777",
+                    "PipingComp",
+                    Some("PIDPipingComponent"),
+                    Some("K-1"),
+                ),
+            ),
+        ]);
+        let tables = styles();
+        import_stating(&geometry, &tables, &items).0
+    }
+
+    /// The tags a database gives three items of that sheet: the first the
+    /// name the file has, the second where the file has none, the third
+    /// another than the file's, with blanks around it. It gives a fourth
+    /// item a blank tag, and tags an item that is on another sheet.
+    pub(crate) fn tags_for_that_sheet() -> HashMap<String, String> {
+        tags_of(&[
+            ("4E1F0B7C9A2D4C6E8F1A3B5D7C9E0F21", "GV-101"),
+            ("7A3C5E9B1D2F4A6C8E0B2D4F6A8C0E13", "BV1301102B"),
+            ("0B1C2D3E4F5061728394A5B6C7D8E9F0", "  PIA-old_0112101A "),
+            ("EEEE4444FFFF5555AAAA6666BBBB7777", "   "),
+            ("99990000999900009999000099990000", "ON-ANOTHER-SHEET"),
+        ])
+    }
+
+    /// The tag the plant database gives a symbol's item is the symbol's tag
+    /// (plan 2026-11-20-pid-symbol-identity, SPEC sections 4.2 and 4.4),
+    /// marked `tag_source=database`: in place of the file's own name where
+    /// the file has one, and where a tag stands in a record where it has
+    /// none. The file's name stays beside it, as `label_in_file`, only
+    /// where it is another name. An item's id is matched as the dump folds
+    /// it, and a tag comes without the blanks around it. What the database
+    /// has no tag for -- an item it does not hold, an item whose tag is
+    /// blank, a graphic of no item -- says what it said.
+    #[test]
+    fn the_database_tag_of_an_item_is_its_symbols_tag() {
+        let mut doc = sheet_for_the_database();
+        let before = said_by_the_references(&doc);
+        let loose_before: Vec<Vec<String>> = loose(&doc).into_iter().map(says).collect();
+
+        let fill = fill_database_tags(&mut doc, &tags_for_that_sheet(), nothing_drawn_here);
+
+        assert_eq!(
+            fill,
+            DatabaseTagFill {
+                tagged: 3,
+                differing: 1,
+                changed: 3,
+            }
+        );
+        let said = said_by_the_references(&doc);
+        assert_eq!(
+            said[0],
+            valve_saying(&[
+                "class=PIDPipingComponent",
+                "label=GV-101",
+                "resolved=item",
+                "symbol=Ball Valve",
+                "graphic=612",
+                "item=4E1F0B7C9A2D4C6E8F1A3B5D7C9E0F21",
+                "item_type=PipingComp",
+                "tag_source=database",
+            ]),
+            "the name the file has: the tag is the database's, and nothing is kept beside it"
+        );
+        assert_eq!(
+            said[1],
+            valve_saying(&[
+                "class=PIDPipingComponent",
+                "label=BV1301102B",
+                "resolved=item",
+                "symbol=Ball Valve",
+                "graphic=613",
+                "item=7A3C5E9B1D2F4A6C8E0B2D4F6A8C0E13",
+                "item_type=PipingComp",
+                "tag_source=database",
+            ]),
+            "no name in the file: the tag stands where a tag stands"
+        );
+        assert_eq!(
+            said[2],
+            valve_saying(&[
+                "class=PIDInstrument",
+                "label=PIA-old_0112101A",
+                "resolved=item",
+                "symbol=Ball Valve",
+                "graphic=614",
+                "item={0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0}",
+                "item_type=Instrument",
+                "tag_source=database",
+                "label_in_file=PIA-0112101B",
+            ]),
+            "another name: the file's is kept beside the database's"
+        );
+        assert_eq!(
+            &said[3..],
+            &before[3..],
+            "what the database has no tag for says what it said"
+        );
+        assert_eq!(
+            &before[3..],
+            [
+                valve_saying(&[
+                    "class=PIDNozzle",
+                    "label=N1",
+                    "resolved=item",
+                    "symbol=Ball Valve",
+                    "graphic=615",
+                    "item=AAAA0000BBBB1111CCCC2222DDDD3333",
+                    "item_type=Nozzle",
+                    "tag_source=file",
+                ]),
+                valve_saying(&["symbol=Ball Valve", "graphic=616"]),
+                valve_saying(&[
+                    "class=PIDPipingComponent",
+                    "label=K-1",
+                    "resolved=item",
+                    "symbol=Ball Valve",
+                    "graphic=617",
+                    "item=EEEE4444FFFF5555AAAA6666BBBB7777",
+                    "item_type=PipingComp",
+                    "tag_source=file",
+                ]),
+            ]
+        );
+        let loose_after: Vec<Vec<String>> = loose(&doc).into_iter().map(says).collect();
+        assert_eq!(loose_after, loose_before, "nothing else was written");
+    }
+
+    /// Putting the same tags on a sheet again writes nothing (SPEC section
+    /// 4.4): no record is touched, and every record says what it said. A
+    /// later table is followed all the same: where the database's tag has
+    /// become the file's own name, the name kept beside it goes.
+    #[test]
+    fn the_same_tags_put_on_again_write_nothing() {
+        let mut doc = sheet_for_the_database();
+        let tags = tags_for_that_sheet();
+        let first = fill_database_tags(&mut doc, &tags, nothing_drawn_here);
+        let said = said_by_the_references(&doc);
+
+        let second = fill_database_tags(&mut doc, &tags, nothing_drawn_here);
+
+        assert_eq!((first.tagged, first.differing, first.changed), (3, 1, 3));
+        assert_eq!(
+            second,
+            DatabaseTagFill {
+                tagged: 3,
+                differing: 1,
+                changed: 0,
+            },
+            "the sheet said all of it already"
+        );
+        assert_eq!(said_by_the_references(&doc), said);
+
+        let later = tags_of(&[("0B1C2D3E4F5061728394A5B6C7D8E9F0", "PIA-0112101B")]);
+        let third = fill_database_tags(&mut doc, &later, nothing_drawn_here);
+        assert_eq!(
+            third,
+            DatabaseTagFill {
+                tagged: 1,
+                differing: 0,
+                changed: 1,
+            }
+        );
+        let after = said_by_the_references(&doc);
+        assert_eq!(
+            after[2],
+            valve_saying(&[
+                "class=PIDInstrument",
+                "label=PIA-0112101B",
+                "resolved=item",
+                "symbol=Ball Valve",
+                "graphic=614",
+                "item={0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0}",
+                "item_type=Instrument",
+                "tag_source=database",
+            ]),
+            "the database's tag is the file's name now: nothing is kept beside it"
+        );
+        assert_eq!(
+            [&after[..2], &after[3..]],
+            [&said[..2], &said[3..]],
+            "the others are as the first table left them"
+        );
+    }
+
+    /// Only a symbol of the file takes a tag from the database: a block
+    /// reference that says `role=symbol` and was not drawn in this program.
+    /// A reference `drawn_here` answers for, a reference that says another
+    /// role and an entity that is no block reference are left as they are,
+    /// whatever item they name.
+    #[test]
+    fn only_a_symbol_of_the_file_takes_the_databases_tag() {
+        let mut doc = sheet_for_the_database();
+        let valves: Vec<document::Handle> = references(&doc)
+            .iter()
+            .map(|valve| valve.common().handle)
+            .collect();
+        // The second valve says it is a fill, not a symbol.
+        stamp_pid_pairs(
+            doc.get_entity_mut(valves[1]).expect("the second valve"),
+            &[("role", "fill")],
+        );
+        // A stroke says of an item what the first valve says of its own.
+        let mut stroke = EntityType::Line(Line::from_points(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        ));
+        stamp_pid_pairs(
+            &mut stroke,
+            &[
+                ("role", "symbol"),
+                ("label", "GV-101"),
+                ("item", "4E1F0B7C9A2D4C6E8F1A3B5D7C9E0F21"),
+                ("tag_source", "file"),
+            ],
+        );
+        let stroke = doc.add_entity(stroke).expect("the stroke is added");
+        let says_of = |doc: &Document, handle: document::Handle| {
+            says(doc.get_entity(handle).expect("the entity is in the sheet"))
+        };
+        let before: Vec<Vec<String>> = valves.iter().map(|valve| says_of(&doc, *valve)).collect();
+        let stroke_before = says_of(&doc, stroke);
+        let tags = tags_of(&[
+            ("4E1F0B7C9A2D4C6E8F1A3B5D7C9E0F21", "GV-101-DB"),
+            ("7A3C5E9B1D2F4A6C8E0B2D4F6A8C0E13", "BV1301102B"),
+            ("0B1C2D3E4F5061728394A5B6C7D8E9F0", "PIA-old_0112101A"),
+        ]);
+
+        // The first valve was drawn in this program, the caller says.
+        let first = valves[0];
+        let fill = fill_database_tags(&mut doc, &tags, |entity| entity.common().handle == first);
+
+        assert_eq!(
+            fill,
+            DatabaseTagFill {
+                tagged: 1,
+                differing: 1,
+                changed: 1,
+            },
+            "the third valve alone"
+        );
+        let after: Vec<Vec<String>> = valves.iter().map(|valve| says_of(&doc, *valve)).collect();
+        assert_eq!(after[0], before[0], "drawn in this program");
+        assert_eq!(after[1], before[1], "no symbol by its role");
+        assert_eq!(says_of(&doc, stroke), stroke_before, "no block reference");
+        assert_ne!(after[2], before[2]);
+        assert_eq!(&after[3..], &before[3..]);
+    }
+
+    /// On a drawing with a `_Data.xml` beside it the database's tag still
+    /// wins (SPEC section 3, and the first level of section 4.2): the tag
+    /// the XML published is replaced and marked `tag_source=database`, and
+    /// what else the XML published -- the class, the oid, how it was
+    /// resolved -- stands. No `label_in_file` is written beside it: such a
+    /// record does not say what the file called the item. A tag the file
+    /// itself gave on that drawing is treated as on any other.
+    #[test]
+    fn the_databases_tag_replaces_the_one_data_xml_published() {
+        let xml = r#"<Container>
+  <PIDInlineComponent><IObject UID="VALVE" ItemTag="GV-101"/></PIDInlineComponent>
+  <PIDRepresentation><IObject UID="REP1"/><IDrawingRepresentation GraphicOID="612"/></PIDRepresentation>
+  <Rel><IRel UID1="VALVE" UID2="REP1" DefUID="DwgRepresentationComposition"/></Rel>
+  <PIDInstrument><IObject UID="GAUGE"/></PIDInstrument>
+  <PIDRepresentation><IObject UID="REP2"/><IDrawingRepresentation GraphicOID="613"/></PIDRepresentation>
+  <Rel><IRel UID1="GAUGE" UID2="REP2" DefUID="DwgRepresentationComposition"/></Rel>
+</Container>"#;
+        let mut tables = styles();
+        tables.semantics = Some(PidSemanticIndex::from_xml(
+            xml,
+            &pid_parse::PidDocument::default(),
+        ));
+        let geometry = sheet(
+            vec![valve_on_process(612, 0.1), valve_on_process(613, 0.2)],
+            vec![valve_body()],
+        );
+        let items = SheetItems::stating([
+            (
+                612,
+                plant_item(
+                    "VALVE-ITEM",
+                    "PipingComp",
+                    Some("PIDPipingComponent"),
+                    Some("GV-101 AS THE FILE HAS IT"),
+                ),
+            ),
+            (
+                613,
+                plant_item(
+                    "GAUGE-ITEM",
+                    "Instrument",
+                    Some("PIDInstrument"),
+                    Some("PG-7"),
+                ),
+            ),
+        ]);
+        let (mut doc, _) = import_stating(&geometry, &tables, &items);
+        let tags = tags_of(&[("VALVEITEM", "GV-101-A"), ("GAUGEITEM", "PG-7A")]);
+
+        let fill = fill_database_tags(&mut doc, &tags, nothing_drawn_here);
+
+        assert_eq!(
+            fill,
+            DatabaseTagFill {
+                tagged: 2,
+                differing: 1,
+                changed: 2,
+            }
+        );
+        assert_eq!(
+            said_by_the_references(&doc),
+            [
+                valve_saying(&[
+                    "class=PIDInlineComponent",
+                    "label=GV-101-A",
+                    "oid=612",
+                    "resolved=direct",
+                    "symbol=Ball Valve",
+                    "graphic=612",
+                    "item=VALVE-ITEM",
+                    "item_type=PipingComp",
+                    "tag_source=database",
+                ]),
+                valve_saying(&[
+                    "class=PIDInstrument",
+                    "label=PG-7A",
+                    "oid=613",
+                    "resolved=direct",
+                    "symbol=Ball Valve",
+                    "graphic=613",
+                    "item=GAUGE-ITEM",
+                    "item_type=Instrument",
+                    "tag_source=database",
+                    "label_in_file=PG-7",
+                ]),
+            ]
+        );
+    }
+
     /// Text record `oid`: a run of lettering `value` at (`x`, 0.25) metres
     /// on a displayed layer `Process`.
     fn text_on_process(oid: u32, x: f64, value: &str) -> pid_parse::PidGraphicEntity {
