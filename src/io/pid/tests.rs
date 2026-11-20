@@ -1883,8 +1883,24 @@ pub(super) mod placements_as_blocks {
     /// [`finished`], beside the summary `finish` hands back: what the import
     /// says of what it drew.
     fn summarised(file: &str, geometry: &NormalizedPidGeometry) -> (Document, ImportSummary) {
+        summarised_as_stated(
+            file,
+            geometry,
+            Stated {
+                items: &SheetItems::default(),
+                labels: &SheetLabels::default(),
+            },
+        )
+    }
+
+    /// [`summarised`], with `stated` as what the file says its graphics are.
+    fn summarised_as_stated(
+        file: &str,
+        geometry: &NormalizedPidGeometry,
+        stated: Stated<'_>,
+    ) -> (Document, ImportSummary) {
         let tables = styles();
-        let (mut doc, built) = import(geometry, &tables);
+        let (mut doc, built) = import_as_stated(geometry, &tables, stated);
         let summary = finish(
             Path::new(file),
             geometry,
@@ -1896,6 +1912,29 @@ pub(super) mod placements_as_blocks {
             &mut doc,
         );
         (doc, summary)
+    }
+
+    /// The valve the sheets of the program-level tests place, large enough
+    /// to click on: a stub from 20 to 10 millimetres left of the insertion
+    /// point, a ring of radius 10 around it, a stub from 10 to 20 right of
+    /// it.
+    fn ringed_valve() -> PidSymbolDefinition {
+        let stub = |from: f64, to: f64| SymbolPrimitive::Line {
+            start: (from, 0.0),
+            end: (to, 0.0),
+        };
+        let ring = SymbolPrimitive::Circle {
+            center: (0.0, 0.0),
+            radius: 0.01,
+        };
+        body(
+            BODY,
+            vec![
+                (stub(-0.02, -0.01), pen(0.25)),
+                (ring, pen(0.25)),
+                (stub(0.01, 0.02), pen(0.25)),
+            ],
+        )
     }
 
     /// The sheet the program-level tests of a symbol as one object open
@@ -1910,22 +1949,6 @@ pub(super) mod placements_as_blocks {
     /// - a label symbol at (170, 140), which draws its name and no more;
     /// - a pipe from (90, 80) to (180, 80), which belongs to no symbol.
     pub(crate) fn sheet_of_two_valves_a_note_and_a_pipe() -> Document {
-        let stub = |from: f64, to: f64| SymbolPrimitive::Line {
-            start: (from, 0.0),
-            end: (to, 0.0),
-        };
-        let ring = SymbolPrimitive::Circle {
-            center: (0.0, 0.0),
-            radius: 0.01,
-        };
-        let valve = body(
-            BODY,
-            vec![
-                (stub(-0.02, -0.01), pen(0.25)),
-                (ring, pen(0.25)),
-                (stub(0.01, 0.02), pen(0.25)),
-            ],
-        );
         let on_process = Some((Some("Process"), true));
         let geometry = sheet(
             vec![
@@ -1953,7 +1976,7 @@ pub(super) mod placements_as_blocks {
                     on_process,
                 ),
             ],
-            vec![valve, cross_body()],
+            vec![ringed_valve(), cross_body()],
         );
         finished("two-valves.pid", &geometry)
     }
@@ -2032,6 +2055,123 @@ pub(super) mod placements_as_blocks {
             vec![valve],
         );
         finished("valves-on-layers.pid", &geometry)
+    }
+
+    /// The sheet the program-level test of what a symbol and its labels say
+    /// of each other opens (`crate::app::pid_symbol_block_tests`; plan
+    /// 2026-11-20-pid-symbol-identity, SI-3). It is built like the two
+    /// above, with what a drawing file states of its graphics beside them:
+    /// the items they draw, and what its labels hang on. In millimetres of
+    /// the drawing:
+    ///
+    /// - a valve at (100, 100), a piping component the file names `GV-101`,
+    ///   and four labels of it: `GV-101` at (85, 150), `DN50` at (85, 140),
+    ///   `PN16` at (85, 130) and `CS` at (85, 120);
+    /// - the same valve at (170, 100), a piping component the file gives no
+    ///   name, and one label of it: `DN80` at (160, 120);
+    /// - a run of line from (90, 80) to (180, 80), and its label
+    ///   `P-1001-50-CS` at (120, 75);
+    /// - `DWG-0201` at (60, 60), the label of what is no graphic of the
+    ///   sheet, and `NOTE 4` at (60, 170), which is no label's.
+    ///
+    /// A text is 2.5 high and stands on its point, the bottom left of its
+    /// lettering. The first label is filed before the valve it hangs on,
+    /// the others after it.
+    pub(crate) fn sheet_of_a_tagged_valve_and_its_labels() -> Document {
+        let on_process = Some((Some("Process"), true));
+        let lettering = |oid: u32, at: (f64, f64), value: &str| {
+            record(
+                oid,
+                PidGraphicKind::Text {
+                    insertion: point(at.0, at.1),
+                    value: value.to_string(),
+                    height: 0.0025,
+                    rotation: 0.0,
+                    anchor_code: 0,
+                    text_box_width: None,
+                },
+                on_process,
+            )
+        };
+        let valve = |oid: u32, at: (f64, f64)| {
+            record(oid, placement(at, Some(VALVE), Some(BODY), 0.0), on_process)
+        };
+        let geometry = sheet(
+            vec![
+                lettering(801, (0.085, 0.15), "GV-101"),
+                valve(612, (0.1, 0.1)),
+                lettering(802, (0.085, 0.14), "DN50"),
+                lettering(803, (0.085, 0.13), "PN16"),
+                lettering(804, (0.085, 0.12), "CS"),
+                valve(613, (0.17, 0.1)),
+                lettering(805, (0.16, 0.12), "DN80"),
+                record(
+                    704,
+                    PidGraphicKind::Polyline {
+                        points: vec![point(0.09, 0.08), point(0.18, 0.08)],
+                        closed: false,
+                    },
+                    on_process,
+                ),
+                lettering(811, (0.12, 0.075), "P-1001-50-CS"),
+                lettering(812, (0.06, 0.06), "DWG-0201"),
+                lettering(813, (0.06, 0.17), "NOTE 4"),
+            ],
+            vec![ringed_valve()],
+        );
+        let items = SheetItems::stating([
+            (
+                612,
+                plant_item(
+                    "4E1F0B7C9A2D4C6E8F1A3B5D7C9E0F21",
+                    "PipingComp",
+                    Some("PIDPipingComponent"),
+                    Some("GV-101"),
+                ),
+            ),
+            (
+                613,
+                plant_item(
+                    "7A3C5E9B1D2F4A6C8E0B2D4F6A8C0E13",
+                    "PipingComp",
+                    Some("PIDPipingComponent"),
+                    None,
+                ),
+            ),
+        ]);
+        // Each text names the record of its label, and each label the
+        // graphic it hangs on; `NOTE 4` names a record that is no label.
+        let labels = labels_of(
+            &[
+                (801, 901),
+                (802, 902),
+                (803, 903),
+                (804, 904),
+                (805, 905),
+                (811, 910),
+                (812, 911),
+                (813, 6),
+            ],
+            &[
+                (901, 612),
+                (902, 612),
+                (903, 612),
+                (904, 612),
+                (905, 613),
+                (910, 704),
+                (911, 24_578),
+            ],
+            &[704],
+        );
+        summarised_as_stated(
+            "tagged-valve.pid",
+            &geometry,
+            Stated {
+                items: &items,
+                labels: &labels,
+            },
+        )
+        .0
     }
 
     /// How many block records a document holds before anything is imported.

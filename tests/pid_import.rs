@@ -5264,6 +5264,148 @@ mod sample_sheet {
         );
     }
 
+    /// What the sample states is read back the way the program reads it
+    /// (`io::pid_identity`; plan 2026-11-20-pid-symbol-identity, SI-3):
+    /// every reference is a symbol that names its item and the kind the
+    /// file holds it as, and those the file names carry the name as a tag
+    /// of the file's. Asked symbol by symbol, the sheet hands out every
+    /// text that hangs on a symbol, each to the one symbol it names; asked
+    /// text by text, it finds that symbol again, a line, or another object,
+    /// and no symbol is missing. The counts are those of the tests above.
+    ///
+    /// What one lookup costs is said on standard error, for the plan's
+    /// record (SPEC section 4.6): a lookup reads the record of every entity
+    /// in model space. Nothing here is held to the clock.
+    #[test]
+    fn the_sample_symbols_and_their_labels_find_each_other() {
+        use std::time::{Duration, Instant};
+        use OpenCADStudio::io::pid_identity::{
+            label_owner, labels_of, symbol_identity, LabelOwner, SymbolIdentity, TagSource,
+        };
+
+        let Some(import) = sample() else {
+            return;
+        };
+        let doc = &import.document;
+        let references = symbol_references(doc);
+        let identities: Vec<_> = references
+            .iter()
+            .map(|reference| symbol_identity(reference).expect("the reference of a symbol"))
+            .collect();
+        let count = |holds: fn(&SymbolIdentity<'_>) -> bool| {
+            identities.iter().filter(|symbol| holds(symbol)).count()
+        };
+        assert_eq!(
+            [
+                identities.len(),
+                count(|symbol| symbol.graphic.is_some()),
+                count(|symbol| symbol.item.is_some() && symbol.item_type.is_some()),
+                count(|symbol| symbol.kind().is_some()),
+                count(|symbol| symbol.tag.is_some()),
+                count(|symbol| symbol.tag_source == Some(TagSource::File)),
+                count(|symbol| symbol.tag_source.is_some()),
+                count(|symbol| symbol.name_in_file.is_some()),
+            ],
+            [PLACEMENTS, PLACEMENTS, ITEMS, ITEMS, TAGS, TAGS, TAGS, 0],
+            "symbols; those that state a graphic, an item, a kind, a tag, a tag of the \
+             file's, a tag of any source, another name in the file"
+        );
+
+        // Symbol by symbol: the texts that hang on it.
+        let mut handed_out: BTreeSet<Handle> = BTreeSet::new();
+        let (mut hung, mut labelled, mut most) = (0, 0, 0);
+        let mut slowest_listing = Duration::ZERO;
+        let listing = Instant::now();
+        for symbol in &identities {
+            let graphic = symbol.graphic.expect("counted above");
+            let one = Instant::now();
+            let labels = labels_of(doc, graphic);
+            slowest_listing = slowest_listing.max(one.elapsed());
+            hung += labels.len();
+            labelled += usize::from(!labels.is_empty());
+            most = most.max(labels.len());
+            for label in labels {
+                assert!(
+                    matches!(label, EntityType::Text(_)),
+                    "a label of {graphic} is no text: {:?}",
+                    says(label)
+                );
+                assert!(
+                    handed_out.insert(label.common().handle),
+                    "a text handed to two symbols: {:?}",
+                    says(label)
+                );
+            }
+        }
+        let listing = listing.elapsed();
+        assert_eq!(
+            [hung, labelled, handed_out.len()],
+            [SYMBOL_LABELS, LABELLED, SYMBOL_LABELS],
+            "texts on symbols; symbols with a text; different texts"
+        );
+
+        // Text by text: what it hangs on.
+        let texts: Vec<&EntityType> = doc
+            .model_space_entities()
+            .filter(|entity| pid_value(entity, "role").as_deref() == Some("text"))
+            .collect();
+        let (mut on_symbols, mut missing, mut on_lines, mut on_others, mut unpaired) =
+            (0, 0, 0, 0, 0);
+        let mut slowest_owner = Duration::ZERO;
+        let owning = Instant::now();
+        for text in &texts {
+            let one = Instant::now();
+            let owner = label_owner(doc, text);
+            slowest_owner = slowest_owner.max(one.elapsed());
+            match owner {
+                Some(LabelOwner::Symbol(reference)) => {
+                    on_symbols += 1;
+                    assert_eq!(
+                        pid_value(reference, "graphic"),
+                        pid_value(text, "label_of"),
+                        "the symbol found is the one the text names"
+                    );
+                    assert!(
+                        handed_out.contains(&text.common().handle),
+                        "a text that finds its symbol was handed to it: {:?}",
+                        says(text)
+                    );
+                }
+                Some(LabelOwner::Missing) => missing += 1,
+                Some(LabelOwner::Line) => on_lines += 1,
+                Some(LabelOwner::Other) => on_others += 1,
+                None => unpaired += 1,
+            }
+        }
+        let owning = owning.elapsed();
+        assert_eq!(
+            [
+                texts.len(),
+                on_symbols,
+                missing,
+                on_lines,
+                on_others,
+                unpaired
+            ],
+            [LETTERING, SYMBOL_LABELS, 0, LINE_LABELS, OTHER_LABELS, 0],
+            "texts; on a symbol, on a missing symbol, on a line, on another object, on nothing"
+        );
+
+        let mean = |total: Duration, lookups: usize| total.as_secs_f64() * 1e6 / lookups as f64;
+        eprintln!(
+            "sample lookups over {} entities in model space: the labels of a symbol {:.0} us \
+             mean, {:.0} us slowest of {}; the symbol of a label {:.0} us mean, {:.0} us \
+             slowest of {}; most labels on one symbol {most}",
+            doc.model_space_entities().count(),
+            mean(listing, identities.len()),
+            slowest_listing.as_secs_f64() * 1e6,
+            identities.len(),
+            mean(owning, texts.len()),
+            slowest_owner.as_secs_f64() * 1e6,
+            texts.len(),
+        );
+    }
+
     /// `D04` of the plant test data, imported: a sheet that states no
     /// drawing number, and letters its texts outside any label. Or `None`,
     /// and a line saying why, where the plant test data does not hold it.

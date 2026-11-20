@@ -2249,6 +2249,14 @@ impl OpenCADStudio {
         if compact_solid {
             retain_compact_solid_sections(&mut sections);
         }
+        // The row of the P&ID group that takes the sheet around the object:
+        // the labels of an imported symbol, or what a label hangs on. It is
+        // on this page alone -- the page of several objects has no such row.
+        crate::scene::cache::properties::add_pid_pairing_row(
+            &mut sections,
+            &self.tabs[i].scene.document,
+            source_entity,
+        );
         append_pid_group_properties(&mut sections, &self.tabs[i].scene.document, &[handle]);
         sections.extend(crate::app::commands::pidprops::pid_author_section(
             &self.tabs[i].scene.document,

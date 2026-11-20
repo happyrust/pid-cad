@@ -1,6 +1,6 @@
 # 任务清单：导入的图例带上类型和位号，标注文字和图例配对
 
-> 日期：2026-11-20。状态：**执行中**。规格已确认（2026-11-20，Q1–Q5 都按推荐）；SI-1、SI-2 做完，其余没有开始。
+> 日期：2026-11-20。状态：**执行中**。规格已确认（2026-11-20，Q1–Q5 都按推荐）；SI-1、SI-2、SI-3 做完，其余没有开始。
 > 配套：规格 `SPEC-pid-symbol-identity.md`（下文简称「规格」）。
 > 分支 `pid-symbol-identity`，起点是图块分支验收的那个提交 `1855aaae5`；一个任务一个本地提交，不推送。
 
@@ -321,11 +321,216 @@
 
 - **做什么**：一组不碰外部状态的函数：从一个图元读出它的类型、位号、来源；找一个图例的全部标注；找一条标注所属的图例。经典界面的属性面板按规格 §4.5 加行，加中文译文。
 - **验收**：
-  - [ ] 规格 §4.5 的每一行各有一条测试。
-  - [ ] 样例上单次「找一个图例的标注」的耗时量出来；超过 16 毫秒就改成导入后建一次索引（规格 §4.6）。
+  - [x] 规格 §4.5 的每一行各有一条测试。
+  - [x] 样例上单次「找一个图例的标注」的耗时量出来；超过 16 毫秒就改成导入后建一次索引（规格 §4.6）。量出来 592 次平均 3.2–3.4 毫秒，最慢的一次 12.2 毫秒，没有建索引。只量了样例一张。
+  - 没有验证，留给 SI-7：规格 §6 第 12 条（耗时预算）。这次量了五次，过了一次，机器一直不空闲；经过见下面「耗时预算」那一条。
 - **依赖**：SI-2。
 - **文件**：`src/io/pid_identity.rs`（新）、`src/scene/cache/properties.rs`、译文文件。
 - **规模**：M。
+
+**做完**（2026-11-20）
+
+- 改了什么（产品代码 +411 −16；另有 `src/io/pid/mod.rs` +6 −4，只在测试里编译；译文 23 个文件 +185 −1）：
+  - `src/io/pid_identity.rs`（新文件，产品部分 234 行）：一组只读记录、什么都不改的函数，所有编译目标都编。
+    - `stated`：按整个键取值（`label` 不是 `label_of`）；同一个键写了两次取前一个；记录里不是「键=值」字符串的值跳过。
+    - `symbol_identity`：只认写了 `role=symbol` 的块引用，读出图形编号、对象编号、对象种类、发布类、符号名、位号、位号来源、图纸文件里的名字；空值算没写。`kind()` 是发布类，没有就是对象种类。位号来源只在有位号时有：`file`、`database`、没有标记（`_Data.xml` 给的位号）三种，这一版不认识的标记原样带出。
+    - `label_pairing`：`label_of`（非空）和 `label_on` 都写了才算一条标注；`label_on` 是 `symbol`、`line`，其余的值都算 `other`。
+    - `lettering`：单行文字、多行文字的内容；别的图元没有。
+    - `labels_of`：模型空间里 `label_on=symbol` 而且 `label_of` 等于这个编号的图元，按图纸里的先后；块定义里的不算。
+    - `symbols_numbered`：模型空间里写着这个编号的图例块引用，按先后；复制出来的同号，都在里面。
+    - `label_owner`：一条标注挂在什么上：图例（同号的取排在最前的一个）、图例不在图上、线、别的；不是标注的图元没有答案。挂在线上和别的东西上的不去找同号的图例。
+  - `src/scene/cache/properties.rs`（产品 +155 −3）：`pid_semantics_section` 多认 `item_type`、`tag_source`、`label_in_file` 三个键，多出 Item type、Tag source、Name in file 三行，Type 和 Matched by 的显示按下面的规则；新加 `add_pid_pairing_row`，给 P&ID 那一节加 Labels 或 Label of 一行，要扫一遍模型空间。
+  - `src/app/properties.rs`（+8）：只选中一个对象的那一页（`entity_property_sections`）调一次 `add_pid_pairing_row`。
+  - `src/io/pid/metadata.rs`（+5 −13）：导入器读键用的 `pid_value` 改成转出 `pid_identity::stated`，读法只留一份；取值的办法没有变。
+  - `src/io/mod.rs`（+1）：挂上新模块。
+  - `src/locale_catalog.rs`（+8）和 23 个 `locales/*/opencadstudio.ftl`（各 +8，`zh-CN` 另改 1 行）：8 条新词条。
+- 面板上的规则（规格 §4.5）。括号里是行在程序里的名字，测试按它找行：
+  - Type（`pid_class`）：发布类；`class` 没有写或者是空值时显示对象种类。
+  - Item type（`pid_item_type`，新）：`item_type`，紧跟在 Type 后面；空值没有这一行。
+  - Tag source（`pid_label_source`，新）：紧跟在位号后面，有位号而且 `tag_source` 非空时才有。`file` 显示「Drawing file」，`database` 显示「Backup database」，别的值照原文。
+  - Name in file（`pid_label_in_file`，新）：`label_in_file`，排在 Tag source 后面；空值没有这一行。
+  - Labels（`pid_labels`，新，只在图例的块引用上）：`<条数>: <前三条的文字，用 · 隔开> +<其余的条数>`，文字去掉首尾空白；没有标注就没有这一行。
+  - Label of（`pid_label_of`，新，只在标注文字上）：所属图例的位号；没有位号写「类型 · 符号名」，只有一样就写一样，都没有写「Symbol」；挂在线上写「A line」，挂在别的东西上写「Another object」；图例不在图上写「Not on the sheet」。
+  - Labels、Label of 排在 Matched by、Sheet layer、Layer OID 三行的前面，这一节没有这三行时排在最后；图元原来没有 P&ID 这一节时新建一节，排在已有各节的后面。这两行只在选中一个对象时有。
+  - Matched by（`pid_resolved`）：`resolved=item` 显示「Item in the drawing file」；别的值和原来一样。
+
+  和规格的写法不完全一样、或者规格没有写到的地方记在规格 §11 的 SI-3，共 13 条（最后一条是耗时预算没有验证）。
+- 简称。
+  - 单元测试，`src/io/pid_identity.rs` 里新加的：I1 是 `a_key_reads_back_whole_and_first`，I2 是 `a_symbol_reference_reads_back_what_it_states`，I3 是 `the_kind_of_a_symbol_is_its_class_or_else_its_item_type`，I4 是 `a_tag_says_where_it_came_from`，I5 是 `only_a_block_reference_that_says_symbol_is_a_symbol`，I6 是 `a_label_text_reads_back_what_its_label_hangs_on`，I7 是 `the_lettering_of_a_text_is_what_it_reads`，I8 是 `the_labels_of_a_symbol_are_the_texts_that_name_its_graphic`，I9 是 `a_label_finds_the_symbol_it_hangs_on`。
+  - 单元测试，`src/scene/cache/properties.rs` 里新加的：P1 是 `an_item_shows_the_kind_the_drawing_file_holds_it_as`，P2 是 `a_tag_names_where_it_came_from_in_the_row_after_it`，P3 是 `an_item_the_drawing_file_states_says_so_in_words`，P4 是 `a_symbol_lists_the_labels_the_sheet_hangs_on_it`，P5 是 `a_label_text_names_what_its_label_hangs_on`，P6 是 `the_rows_of_an_imported_symbol_stand_in_one_order`，P7 是 `the_row_of_a_pairing_joins_the_pid_group_or_makes_it`。
+  - 单元测试，`src/app/pid_symbol_block_tests.rs` 里新加的：A1 是 `a_symbol_and_its_labels_name_each_other_in_the_panel`。
+  - 单元测试，原有的：K 是 `src/io/pid/tests.rs` 的 `a_key_stamped_later_takes_its_place_in_the_record`（SI-1），SB6 是 `src/app/pid_symbol_block_tests.rs` 的 `a_selected_symbol_shows_its_reference_and_its_pid_group_in_the_panel`（图块计划）。
+  - `tests/pid_import.rs` 里新加的：S5 是 `the_sample_symbols_and_their_labels_find_each_other`。
+  - `tests/pid_panel_localization.rs` 里新加的：LOC 是 `what_the_panel_says_of_a_symbol_and_its_labels_is_said_in_every_shipped_language`。原有的：CAP 是 `pid_panel_captions_translate_in_every_shipped_language`。
+- 规格 §4.5 的每一行对哪条测试（验收第 1 条）：Type、Item type 是 P1；Item tag、Tag source、Name in file 是 P2；Labels 是 P4；Matched by 是 P3；Label of 是 P5。另外：各行的先后是 P6；没有 P&ID 一节时新建是 P7；在程序里点选之后面板上有什么是 A1；译文是 LOC。
+- 钉住的（I、P 都是代码里拼的数据）：
+  - I1：一条记录写了 `label_of=612`、`label=GV-101`、`label=GV-102`、`note=a=b`。`label` 读出 `GV-101`（前一个），`label_of` 读出 `612`，`label_o` 读不出，`note` 读出 `a=b`（只在第一个等号处拆）；没有记录的图元什么都读不出。另一条记录里夹着一个整数和一个不带等号的字符串：跳过它们，`graphic` 照样读出 9，读成的图例只有图形编号一项。
+  - I2：三个块引用逐项写了期望。图纸文件给了名字的阀（13 个键）：图形编号 612、对象编号、对象种类 `PipingComp`、发布类 `PIDPipingComponent`、符号名 `Ball Valve`、位号 `GV-101`、来源是图纸文件、没有「图纸文件里的名字」。数据库给了位号的泵：位号 `P-1001A`、来源是数据库、图纸文件里的名字 `P-1001`、没有发布类。图纸文件没有给对象的：只有图形编号和符号名。
+  - I3：发布类和对象种类都有时类型是发布类；只有对象种类（`OPC`）时是对象种类；都没有时没有类型。
+  - I4：有位号时，`tag_source=file` 是图纸文件，`database` 是数据库，没有标记是 `_Data.xml`，`manual` 原样带出；没有位号、或者位号是空值时没有来源。
+  - I5：写了 `role=symbol` 的块引用是图例；什么都没写的块引用、图例识别认出来的块引用（带 `class`、`label`、`resolved=legend:block`）、`role=geometry` 的块引用、写了 `role=symbol` 的一条线都不是。
+  - I6：`symbol`、`line`、`other` 各读对，编号读对；不认识的取值算 `other`；只写了两个键里的一个、`label_of` 是空值、没有记录，都不算标注。
+  - I7：单行文字读出 `GV-101`，多行文字读出 `DN50`，线读不出。
+  - I8：一张图上两个阀（612、613）和五条文字，另有块定义里一条写着 612 的文字。612 的标注是排在它前面的一条和后面的一条，按图纸里的先后；613 的是它自己的一条；把 612 当成线来挂的那条不算；块定义里的不算；614 没有标注；`61` 不按前缀对上 612。
+  - I9：一条标注、两个同号的阀（612）、一条挂在 700 上的（图上写着 700 的只是一条线）、一条挂在线上的、一条挂在别的东西上的、一条不是标注的。标注找到排在前面的那个阀；700 那条是「图例不在图上」；线、别的、不是标注各自读对。按编号找图例：612 是两个，按先后；700 没有（线不算图例）；`61` 没有。
+  - P1：发布类和对象种类都有：Type 是发布类，Item type 是对象种类，行的次序是 Type、Item type、Role、Matched by，两行的行名是 `Type`、`Item type` 的译文。只有对象种类（`OPC`）：两行都显示 `OPC`。`class=` 是空值而有对象种类：Type 显示对象种类。`item_type=` 是空值：没有 Item type 行，原有的行不变。只有 `class=`：Type 行照旧显示空值。
+  - P2：位号 `GV-101`。`tag_source=file`：位号后面一行是 Tag source，显示「Drawing file」的译文，三行的次序是 Role、Item tag、Tag source。`database` 加 `label_in_file`：显示「Backup database」的译文，再后面一行 Name in file 显示 `GV-101-OLD`。`_Data.xml` 给的位号（带 `class`、`resolved=direct`，没有标记）：没有来源行。`manual` 照原文显示。两个键是空值：都不显示。没有位号而写了 `tag_source=file`：不显示来源行。
+  - P3：`resolved=item` 显示「Item in the drawing file」的译文；`direct`、`dependency:77`、`items` 照原文；行名是 `Matched by` 的译文。
+  - P4：一个阀（612）带 0、1、3、4、5 条标注，另有一条把 612 当成线来挂的文字。0 条：没有 Labels 行，行还是 Role、Symbol、Matched by、Sheet layer。1 条：`1: GV-101`，排在 Symbol 和 Matched by 之间，行名是 `Labels` 的译文。3 条：`3: GV-101 · DN50 · PN16`（第二条的文字前后各有一个空格，去掉了）。4 条：末尾多 `+1`。5 条：`+2`。
+  - P5：五个图例各挂一条标注：有位号的；没有位号、有发布类和符号名的；只有符号名的；只有对象种类的（`symbol=` 是空值）；只有图形编号的。另有挂在 700（图上没有）上的、挂在线上的、挂在别的东西上的、不是标注的、没有图纸图层的各一条。Label of 依次是 `GV-101`、`PIDPipingComponent · Ball Valve`、`Ball Valve`、`OPC`、「Symbol」的译文、「Not on the sheet」的译文、「A line」的译文、「Another object」的译文；不是标注的文字和图例自己没有这一行。带图纸图层的那条，行的次序是 Role、Label of、Sheet layer，行名是 `Label of` 的译文；没有图纸图层的那条是 Role、Label of。
+  - P6：一个写全了 14 个键的图例（数据库的位号 `GV-101A`，图纸文件里的名字 `GV-101`）加一条排在它前面的标注。十二行的次序：Type、Item type、Role、Symbol、Body extent、Item tag、Tag source、Name in file、Labels、Matched by、Sheet layer、Layer OID；Labels 是 `1: GV-101A`。
+  - P7：三条文字各自的整页（常规一节、P&ID 一节、兜底一节）。只写了 `label_of=6`、`label_on=other` 的：原来没有 P&ID 一节，新建一节排在最后，里面只有 Label of。只写了 `role=text` 的：页面不变。写了 `role=text` 又挂在线上的：Label of 加进原有的 P&ID 一节，那一节的位置不动。
+  - A1：打开新加的一张拼出来的图 `sheet_of_a_tagged_valve_and_its_labels`，它走导入器解析之后的各步生成：一个图纸文件给了名字 `GV-101` 的阀带四条标注（`GV-101`、`DN50`、`PN16`、`CS`，第一条排在阀的前面）；一个没有名字的阀带一条（`DN80`）；一段线串和挂在它上面的 `P-1001-50-CS`；挂在图上没有的编号上的 `DWG-0201`；不是标注的 `NOTE 4`。
+    - 在画面上点文字，每次只选中这一条，逐行比 P&ID 一节：`DN50` 和排在阀前面的 `GV-101` 都是 Role、`Label of = GV-101`、两行图纸图层；`DN80` 是 `PIDPipingComponent · Ball Valve`；线上的是「A line」；`DWG-0201` 是「Another object」；`NOTE 4` 没有 Label of。
+    - 点阀的圈。有名字的阀十一行：Type `PIDPipingComponent`、Item type `PipingComp`、Role、Symbol、Body extent、Item tag `GV-101`、Tag source「Drawing file」、Labels `4: GV-101 · DN50 · PN16 +1`、Matched by「Item in the drawing file」、两行图纸图层。没有名字的阀九行：没有位号和来源两行，Labels 是 `1: DN80`。
+    - 框选阀和它的四条标注（5 个对象）：Labels、Label of 两行都没有。
+    - 删掉有名字的阀，它的标注显示「Not on the sheet」；撤销一步，又显示 `GV-101`。
+  - S5：见下面「样例读数」。另把每次查找的耗时打在标准错误输出上，不拿它作断言。
+  - LOC：程序带的 23 种语言逐个切换。8 条新词条和 3 条复用的词条在每种语言里都有内容；8 条新词条在英文里等于原文，在其余 22 种语言里都不等于原文（荷兰语的 `Labels` 除外，它和英文同形）。简体中文 11 条、繁体中文 8 条逐条写了期望。切到简体中文后面板建出来的行：`类型 = PipingComp`、`图元类型 = PipingComp`、`位号 = GV-101A`、`位号来源 = 备份数据库`、`图纸文件里的名字 = GV-101`、`匹配方式 = 图纸文件里的对象`，来源换成 `file` 时是 `位号来源 = 图纸文件`；`标注 = 1: DN50`、`标注属于 = Ball Valve`、`标注属于 = 不在图上`、`标注属于 = 一条管线`、`标注属于 = 其他对象`。
+- 先红：
+  - 第一遍（17:30–17:37，`chainred.txt`）：这时 `pid_identity.rs` 里的函数是空壳，面板没有加行，词条和译文没有加。单元测试这一遍没有编过：测试代码自己有一处错（I7 里的多行文字要装箱），和要测的东西无关，改了。集成测试编过了：`tests/pid_import.rs` 66 个里 S5 红（块引用读不成图例），其余 65 个过；`tests/pid_panel_localization.rs` 2 个里 LOC 红（保加利亚语的 `Name in file` 没有翻译），CAP 过。
+  - 第二遍（17:38–17:43，`chainred2.txt`）：单元测试 `io::pid_identity`、`scene::cache::properties::pid_semantics_tests`、`app::pid_symbol_block_tests` 三组 38 个：通过 21，失败 17，就是新加的 I1–I9、P1–P7、A1。
+  - 实现之后、加译文之前（17:50–17:54，`chainmid.txt`）：`tests/pid_import.rs` 66 个全过；LOC 仍然红，23 个译文文件加了之后才过（18:01，`chainprobe.txt`）。
+  - 这一遍里 A1 还红着，原因在测试自己：点文字的位置取在了插入点下方，文字是左下角对齐的，点空了。为了查清这一点临时加过一条探测用的测试，查完删了；改成点在字高一半的地方之后 A1 过（`chaingreen1.txt`）。产品代码没有为这件事改。
+- 改了期望的原有测试 0 处。原有的测试代码动过的地方都不涉及期望值：
+  - `tests/pid_panel_localization.rs` 的 CAP：开头加了一把锁（界面语言是整个进程共用的，这个文件现在有两条测试都在切语言，不能同时跑）；它用的辅助函数 `panel_caption` 改成转调新加的 `saying`。断言一条没改。
+  - `src/io/pid/tests.rs`：原有的拼图代码拆出 `summarised_as_stated`、`ringed_valve` 两个辅助函数，和新加的那张图共用。
+  - `src/scene/cache/properties.rs` 的测试模块：原有的辅助函数 `entity` 改成转调新加的 `saying`。
+  - `src/app/pid_symbol_block_tests.rs`：文件开头的说明改了一行。
+- 故意改坏 73 处，用环境变量打开。单元测试和两个集成测试目标各编一次，把测试程序拷出来，不开的各跑一遍，每处各跑一遍：
+  - 单元测试（固定门禁快跑的那四组，133 个；18:12–18:16，`libmut-m1.txt`）：不开时通过 132、忽略 1；73 处里 70 处有测试变红。
+  - `tests/pid_panel_localization.rs`（18:16–18:19，`mut-m1p.txt`）：不开时 2 个全过；73 处里 19 处变红，都红在 LOC。
+  - `tests/pid_import.rs`（18:20–18:25，`mut-m1i.txt`）：只跑了改 `pid_identity.rs` 的 30 处（第 1–30 处）；不开时 66 个全过；7 处变红，都红在 S5。
+  - 每一处都至少有一条测试变红。单元测试里不红的 3 处（第 71–73 处，改的是词条表）在 LOC 里红：单元测试比的是「面板上的字 = 这句话的译文」，两边走同一张词条表，词条表错了它看不出来。
+
+  | # | 改坏 | 改在哪 | 单元测试里变红 | `tests/pid_panel_localization.rs` 里变红 | `tests/pid_import.rs` 里变红 |
+  |---|---|---|---|---|---|
+  | 1 | 「键=值」从最后一个等号处拆 | `pid_identity.rs` 的 `pairs` | I1 | — | — |
+  | 2 | 键按前缀比 | `pid_identity.rs` 的 `stated` | I1 K | — | — |
+  | 3 | 同一个键写了两次时取后一个 | 同上 | I1 | — | — |
+  | 4 | 空值也算写了 | `pid_identity.rs` 的 `state` | I4 I6 P5 | — | — |
+  | 5 | 不是块引用也算图例 | `pid_identity.rs` 的 `is_symbol` | I5 | — | — |
+  | 6 | 不看 `role`，块引用都算图例 | 同上 | I5 | — | — |
+  | 7 | 找图例时图形编号按前缀比 | `pid_identity.rs` 的 `is_numbered` | I9 | — | — |
+  | 8 | 带这个编号的图元不是图例也算 | 同上 | I9 | — | — |
+  | 9 | 类型先取对象种类，再取发布类 | `pid_identity.rs` 的 `kind` | I3 P5 A1 | — | — |
+  | 10 | 没有来源标记的位号当成图纸文件的 | `pid_identity.rs` 的 `symbol_identity` | I4 | — | — |
+  | 11 | `file` 和 `database` 对调 | 同上 | I2 I4 | — | S5 |
+  | 12 | 不认识的来源标记当成图纸文件的 | 同上 | I4 | — | — |
+  | 13 | 没有位号也报来源 | 同上 | I1 I2 I4 | — | S5 |
+  | 14 | 对象编号读成对象种类 | 同上 | I2 | — | — |
+  | 15 | 图纸文件里的名字读成位号 | 同上 | I2 | — | S5 |
+  | 16 | `label_of` 是空的也算配对 | `pid_identity.rs` 的 `label_pairing` | I6 | — | — |
+  | 17 | 只有 `label_of`、没有 `label_on` 也算配对，当成挂在图例上 | 同上 | I6 | — | — |
+  | 18 | `line` 读成挂在图例上 | 同上 | I6 I8 I9 P4 P5 A1 | LOC | S5 |
+  | 19 | `other` 读成挂在线上 | 同上 | I6 I9 P5 A1 | LOC | S5 |
+  | 20 | 不认识的 `label_on` 读成挂在图例上 | 同上 | I6 | — | — |
+  | 21 | 多行文字读不出内容 | `pid_identity.rs` 的 `lettering` | I7 | — | — |
+  | 22 | 找标注时不看 `label_on` | `pid_identity.rs` 的 `labels_of` | I8 P4 | — | — |
+  | 23 | 找标注时编号按前缀比 | 同上 | I8 | — | S5 |
+  | 24 | 块定义里的文字也算 | 同上 | I8 | — | — |
+  | 25 | 标注的先后倒过来 | 同上 | I8 P4 A1 | — | — |
+  | 26 | 只给第一条标注 | 同上 | I8 P4 A1 | — | S5 |
+  | 27 | 同号的图例只给第一个 | `pid_identity.rs` 的 `symbols_numbered` | I9 | — | — |
+  | 28 | 同号的图例取最后一个 | `pid_identity.rs` 的 `label_owner` | I9 | — | — |
+  | 29 | 图例不在图上时当成不是标注 | 同上 | I9 P5 A1 | LOC | — |
+  | 30 | 挂在线上的标注也去找同号的图例 | 同上 | I9 P5 | — | — |
+  | 31 | 空的 `item_type` 也算 | `scene/cache/properties.rs` 的 `pid_semantics_section` | P1 | — | （没跑） |
+  | 32 | 空的 `tag_source` 也显示 | 同上 | P2 | — | （没跑） |
+  | 33 | 空的 `label_in_file` 也显示 | 同上 | P2 | — | （没跑） |
+  | 34 | 没有发布类时 Type 不显示对象种类 | 同上 | P1 | LOC | （没跑） |
+  | 35 | 有发布类时 Type 也显示对象种类 | 同上 | P1 A1 | — | （没跑） |
+  | 36 | `class=` 是空的、又没有对象种类时不显示 Type 行 | 同上 | P1 | — | （没跑） |
+  | 37 | 不加 Item type 行 | 同上 | P1 P6 A1 | LOC | （没跑） |
+  | 38 | Item type 行的行名写成 Type | 同上 | P1 | LOC | （没跑） |
+  | 39 | 来源显示原文 `file`、`database` | 同上 | P2 A1 | LOC | （没跑） |
+  | 40 | 两种来源的字样对调 | 同上 | P2 A1 | LOC | （没跑） |
+  | 41 | 不认识的来源显示成空 | 同上 | P2 | — | （没跑） |
+  | 42 | 没有位号也显示来源行 | 同上 | P2 | — | （没跑） |
+  | 43 | 不加 Name in file 行 | 同上 | P2 P6 | LOC | （没跑） |
+  | 44 | `resolved=item` 显示原文 | 同上 | P3 A1 | LOC | （没跑） |
+  | 45 | 以 `item` 开头的值都显示成那句话 | 同上 | P3 | — | （没跑） |
+  | 46 | 配对行加进第一个分组，不找 P&ID 组 | `scene/cache/properties.rs` 的 `add_pid_pairing_row` | P7 A1 | — | （没跑） |
+  | 47 | 配对行排在 Matched by 后面 | 同上 | P4 P6 A1 | — | （没跑） |
+  | 48 | 配对行排在组的最后 | 同上 | P4 P5 P6 A1 | — | （没跑） |
+  | 49 | 配对行排在组的最前 | 同上 | P4 P5 P6 P7 A1 | — | （没跑） |
+  | 50 | 没有 P&ID 组时不加行 | 同上 | P7 | — | （没跑） |
+  | 51 | 新建的 P&ID 组排在最前 | 同上 | P7 | — | （没跑） |
+  | 52 | 没有标注的图例也显示 Labels 行 | `scene/cache/properties.rs` 的 `pid_pairing_row` | P4 SB6 | — | （没跑） |
+  | 53 | 列 4 条 | 同上 | P4 A1 | — | （没跑） |
+  | 54 | 列 2 条 | 同上 | P4 A1 | — | （没跑） |
+  | 55 | 文字不去首尾空白 | 同上 | P4 | — | （没跑） |
+  | 56 | 各条之间用逗号隔开 | 同上 | P4 A1 | — | （没跑） |
+  | 57 | 不写条数 | 同上 | P4 P6 A1 | LOC | （没跑） |
+  | 58 | 不写 `+n` | 同上 | P4 A1 | — | （没跑） |
+  | 59 | Labels 和 Label of 两个行名对调 | 同上 | P4 P5 | LOC | （没跑） |
+  | 60 | Label of 不用位号 | 同上 | P5 A1 | — | （没跑） |
+  | 61 | 有位号时写成「类型 · 位号」 | 同上 | P5 A1 | — | （没跑） |
+  | 62 | 没有位号时只写类型 | 同上 | P5 A1 | LOC | （没跑） |
+  | 63 | 没有位号时只写符号名 | 同上 | P5 A1 | — | （没跑） |
+  | 64 | 没有位号时符号名写在类型前面 | 同上 | P5 A1 | — | （没跑） |
+  | 65 | 类型和符号名都没有时显示成空 | 同上 | P5 | — | （没跑） |
+  | 66 | 图例不在图上时写 Symbol | 同上 | P5 A1 | LOC | （没跑） |
+  | 67 | 挂在线上的写成 Another object | 同上 | P5 A1 | LOC | （没跑） |
+  | 68 | 其余的写成 A line | 同上 | P5 A1 | LOC | （没跑） |
+  | 69 | 属性面板不接配对行 | `app/properties.rs` 的 `entity_property_sections` | A1 | — | （没跑） |
+  | 70 | 选中几个对象时也加配对行 | `app/properties.rs` 的 `refresh_properties` | A1 | — | （没跑） |
+  | 71 | 词条表里没有 Label of | `locale_catalog.rs` 的 `message_attribute` | — | LOC | （没跑） |
+  | 72 | 词条表里没有 Not on the sheet | 同上 | — | LOC | （没跑） |
+  | 73 | A line 指到 Another object 的译文 | 同上 | — | LOC | （没跑） |
+
+  改坏点已删：加了开关的四个文件（`pid_identity.rs`、`scene/cache/properties.rs`、`app/properties.rs`、`locale_catalog.rs`）按副本还原，这次改动的 34 个文件的 sha256 与加开关之前逐个相同（`pre-mutant\sha256.txt`）；`src`、`tests`、`examples`、`locales`、`scripts` 里搜不到开关。固定门禁是还原之后重新编译跑的。带开关的改动留在 `with-mutants.diff`。还原之后只又改过一处：I7 的测试代码 2 行（见「读数」的第一条），所以提交的 `pid_identity.rs` 和改坏各轮跑的那一份差这 2 行；I7 的断言没有变。
+- 没有红过的：
+  - 新加的 19 条测试（I1–I9、P1–P7、A1、S5、LOC）每条都至少红过一次，但不是每一条断言都红过。
+    - S5 在 7 处改坏下变红：3 处（第 11、13、15 处）红在图例的那组计数，1 处（第 23 处）红在「一条文字给了两个图例」，1 处（第 26 处）红在标注的合计，2 处（第 18、19 处）红在逐条文字的合计。没有红过的三条：「标注都是单行文字」「找到的图例就是文字写的那个编号」「找得到图例的文字都在那个图例的标注里」。
+    - LOC 的 19 处：2 处红在「这种语言没有翻译」，1 处红在「英文等于原文」，4 处红在「面板没有这一行」，4 处红在简体中文的位号那组行，8 处红在简体中文的标注那组行。译文文件里的字没有改坏点（它们不走开关），所以这几条在 73 处下没有红过：「每种语言都有内容」、简体中文 11 条和繁体中文 8 条的逐条写法、保加利亚语之外 21 种语言各自的「不等于原文」。加译文之前 LOC 红在第一种语言（保加利亚语）的第一条上，后面的语言那时没有轮到；23 种语言各 8 条都在，是另用脚本数的（见「译文」）。
+  - 改 `pid_identity.rs` 的 30 处里有 23 处只有拼出来的数据拦得住，样例测试里一条不红（第 1–10、12、14、16、17、20–22、24、25、27–30 处）。按改坏的内容看，是样例上没有那种情况（没有同号的两个图例、没有空值、没有不认识的标记、没有不在图上的图例），或者 S5 不问那一项；没有另外量，只是从改坏不红推出来的。
+  - 原有的测试：K 在第 2 处下红（导入器读键现在用的是同一个函数），SB6 在第 52 处下红。CAP 在 73 处下没有红。快跑里另外的 114 个单元测试、`tests/pid_import.rs` 另外的 65 个，在各自跑过的改坏下一个没红。
+  - 节点图面板（`src/app/node_graph.rs`）也走单选的那一页，那里会不会多出 Labels、Label of，没有测试看。
+- 样例读数（S5 钉着；样例只带 `.pid`）：
+  - 592 个块引用都读成图例：592 个有图形编号，592 个有对象编号和对象种类，592 个说得出类型；231 个有位号，来源全是图纸文件；没有一个带「图纸文件里的名字」。
+  - 逐个图例问标注：合计 803 条，383 个图例至少有一条，803 条是 803 个不同的文字图元（没有一条给了两个图例），都是单行文字；一个图例最多 4 条。
+  - 逐条散字问所属：958 条里挂在图例上 803（找到的图例的 `graphic` 都等于文字的 `label_of`），图例不在图上 0，挂在线上 151，挂在别的东西上 4，不是标注 0。和 SI-2 按记录钉的数相同。
+- 耗时（验收第 2 条；S5 打在标准错误输出上的，`lookup-timing.txt`）：样例的模型空间 6,390 个图元，优化过的测试程序，跑了三遍，量的时候机器上有别的编译在跑。
+  - 找一个图例的标注，592 次：平均 3,432、3,337、3,245 微秒；最慢的一次 6,057、7,342、12,172 微秒。
+  - 找一条标注所属的图例，958 次：平均 316、283、287 微秒；最慢的一次 1,220、954、1,256 微秒。
+  - 都低于 16 毫秒，没有建索引。属性面板在选中的对象变了的时候查一次，不是每画一帧查一次；记录里没有 `label_of` 的文字、不是图例的图元不扫模型空间。
+- 译文：
+  - 新加 8 条词条（23 种语言都加了），简体中文依次是：Name in file「图纸文件里的名字」、Labels「标注」、Label of「标注属于」、Backup database「备份数据库」、Item in the drawing file「图纸文件里的对象」、A line「一条管线」、Another object「其他对象」、Not on the sheet「不在图上」。
+  - 复用词条表里已有的 3 条：Item type「图元类型」、Tag source「位号来源」、Drawing file「图纸文件」。最后一条在简体中文里原来是英文，这次改了；图纸集管理器也用这条词条，那里跟着变。
+  - 词条表 7,687 条变 7,695 条；23 种语言各 9,682 个译文项变 9,690 个；词条表里的每一条在每种语言里都有对应的一项，没有重复（`locale-check-before.txt`、`locale-check-after.txt`）。
+  - 仓库自带的 `scripts/test_locales.py` 不在固定门禁里，顺手跑了：是红的，上一个提交也是红的。它红在「代码里用了、词条表里没有的句子」，全量数下来是 806 处、120 个文件，这次改动前后完全相同，没有多出一处，都不在这次动的文件里（`locale-sources.txt`）。这次没有去修。
+- 耗时预算（规格 §6 第 12 条；`io::pid::sample_budget`，测试没有改，没有放宽）：**这次也没有验证：量了五次，过了一次，空闲的机器上一次也没有量到。**
+  - 门禁两遍各量一次，都是重新编译之后跑的，都红：第一遍导入 3 次 4,061、3,955、3,813 毫秒，中位数 3,955；第二遍 4,283、4,722、4,375，中位数 4,375。预算 3,747。第一遍量完 8 秒后记的整机占用是 100 %，有 12 个编译进程在跑。
+  - 同一个测试程序不重新编译又跑三轮，每轮先等一分钟看机器会不会空下来（18:54–18:59，`budget-rounds-a.txt`）：中位数 3,939（红）、3,703（过）、5,313（红；这一轮的三次是 3,548、5,313、7,146，跑完时整机占用 100 %，35 个编译进程）。三轮前后记下的整机占用在 53 % 到 100 % 之间，编译进程 2 到 35 个，一轮也不算空闲（空闲的标准：没有编译在跑，整机占用不超过五分之一）。那些编译不是这项工作启动的，没有动。
+  - 这次的改动在导入这条路上只有一处：导入器读键用的 `pid_value` 改成转出 `pid_identity::stated`，取值的办法没有变；新加的查找函数导入时不调，导入器写进图纸的东西没有变。没有像 SI-2 那样加分段计时去定责。
+  - 所以「空闲的机器上中位数不超过 3,747」仍然没有验证，留给 SI-7 重量。前两个提交量的中位数：SI-1 是 3,440（过），SI-2 是 4,101（红，同样是机器不空闲）。
+- 读数（固定门禁跑了两遍，下面是第二遍的数：18:43–18:54，`chainfinal2.txt`；耗时预算见上一条）：
+  - 第一遍（18:27–18:42，`chainfinal.txt`）别的各项和下面相同，只有 clippy `--lib --profile test` 是 1,052 条，比上一个提交多 1 条，没过：I7 的测试代码先建一个默认值再给字段赋值（`field_reassign_with_default`）。改成一步建好，只动了测试代码 2 行，断言没有变；改完整套门禁从头重跑。
+  - 全量单元测试 7,178 个：通过 7,124，忽略 54，失败 0（上一个提交的 7,107 加新加的 17）。
+  - 集成测试 `tests/pid_import.rs` 66 个（上一个提交的 65 加新加的 1）、`tests/pid_legend.rs` 31 个、`tests/pid_panel_localization.rs` 2 个（原有的 1 加新加的 1）全过；测试文件编译告警 0；跑完后系统临时目录里名字带 `symbol` 的文件夹 0 个。
+  - clippy `--lib` 656 条、`--lib --profile test` 1,051 条，与上一个提交相同。两份记录和上一个提交的按「文件加告警内容」逐条比过（不比行号；`clippy-diff-lib.txt`、`clippy-diff-lib-test.txt`）：没有多出一条，也没有少一条；只有 `src/locale_catalog.rs` 原有的那条「函数在栈上分配 N 字节」的 N 从 870,148 变成 871,052（词条表多了 8 条）。点到这次动的文件的 17 条（测试配置 19 条）都是上一个提交就有的。
+  - 格式：11 个 `.rs` 文件都是 `new=0`。
+  - 分层报告与上一个提交逐行相同（`io -> app 3`、`io -> modules 1`、`io -> patreon 1`、`io -> ui 1`）。
+  - 改动：产品代码 +411 −16（`pid_identity.rs` 234，`scene/cache/properties.rs` +155 −3，`app/properties.rs` +8，`io/mod.rs` +1，`io/pid/metadata.rs` +5 −13，`locale_catalog.rs` +8）；测试 +1,514 −31（`pid_identity.rs` 389，`scene/cache/properties.rs` +433 −3，`io/pid/tests.rs` +156 −16，`io/pid/mod.rs` +6 −4，`app/pid_symbol_block_tests.rs` +154 −1，`tests/pid_import.rs` +142，`tests/pid_panel_localization.rs` +234 −7）；译文 +185 −1。
+- 与清单不一样的地方：
+  - 动到了清单「文件」之外的文件。产品：`src/io/mod.rs`、`src/io/pid/metadata.rs`、`src/app/properties.rs`、`src/locale_catalog.rs`；测试：`src/io/pid/tests.rs`、`src/io/pid/mod.rs`、`src/app/pid_symbol_block_tests.rs`、`tests/pid_import.rs`、`tests/pid_panel_localization.rs`。清单漏写了 `src/app/properties.rs`：要扫图纸的那两行得在拿得到整张图的地方接。按文件数这一项是 L，不是 M。
+  - 清单写的是「加中文译文」，实际 23 种语言都加了：只加中文的话，别的语言里这几行会是英文，而同一节的其他行是翻译过的。
+  - 验收下面加了一行不带勾的：规格 §6 第 12 条（耗时预算）这次也没有验证，留给 SI-7。SI-7 的「做什么」加了两件 SI-3 留下的事：在 53 张里图元最多的一张上量「找一个图例的标注」的耗时；另存成 DWG、DXF 再打开之后看属性面板。
+- 没验证的：
+  - 没有在带窗口的程序里看（规格 §6 第 7 条，留给 SI-7）。A1 不开窗口，走的是程序的点选和属性面板的数据；面板画出来是什么样、长的一行会不会被截断，没有看。
+  - 机器空闲时的耗时预算（规格 §6 第 12 条）：见上面「耗时预算」那一条。
+  - 查找的耗时只量了样例一张（6,390 个图元）。图元更多的图上会不会超过 16 毫秒，没有量，留给 SI-7。
+  - 英文、简体中文之外 21 种语言的 8 条译文（包括繁体中文）没有母语的人校对过。
+  - 复用的词条里，Item type 在 21 种语言里、Drawing file 在 14 种语言里是英文，是原有的缺口，这次没有补：这些语言里 Item type 的行名、Tag source 的「图纸文件」会显示英文。
+  - 数据库的位号（`tag_source=database`、`label_in_file`）和 `_Data.xml` 的位号在面板上的行，只有拼出来的数据在钉（I2、I4、P2、P6、LOC）。真实图纸上带数据库位号的要等 SI-6；样例带 `_Data.xml` 时的面板没有量。
+  - 另存成 DWG、DXF 再打开之后面板上的行（规格 §6 第 11 条）没有测。读法只看 `PID_SEMANTICS` 记录，SI-1、SI-2 钉过另存前后记录逐行相同，但「另存、再打开、看面板」这一条线没有一条测试，留给 SI-7。
+  - 复制图例之后面板上的显示，只有 I9 在读记录这一层钉「同号取排在前面的」；在程序里真的复制一个图例再看面板，没有测。
+  - 节点图面板没有看（见「没有红过的」）。
+  - 出图没有重出（同 SI-1、SI-2，留给 SI-7）。这次没有改导入写进图纸的任何东西。
+  - 改坏只跑了快跑的 133 个单元测试和两个集成测试目标；`tests/pid_import.rs` 只跑了前 30 处。全量单元测试里别的测试、`tests/pid_legend.rs` 没有在改坏下跑。改坏各轮跑的是改 I7 那 2 行之前的测试代码，改完没有重跑改坏。
+  - 用户手册没有改。
+- 证据：`D:\scratch\ocs-symblock\si-3\`（先红：`chainred.txt`、`quickred-1.log`、`integred.log`、`chainred2.txt`、`quickred2-1.log`；实现后的几遍：`chainmid.txt`、`chainprobe.txt`、`chaingreen1.txt` 和它们列的各份记录；耗时：`lookup-timing.txt`；译文：`apply-ftl-write.txt`、`locale-check-before.txt`、`locale-check-after.txt`、`test-locales-final.txt`、`locale-sources.txt`；改坏：`with-mutants.diff`、`pre-mutant\`、`libmut-m1.txt`、`libmut-m1-*.log`、`mut-m1p.txt`、`mut-m1p-*.log`、`mut-m1i.txt`、`mut-m1i-*.log`、`mutant-table-m1.md`；固定门禁：第一遍 `final-runfinal.txt`、`budgetfinal.log`、`chainfinal.txt`，第二遍 `final-runfinal2.txt`、`budgetfinal2.log`、`chainfinal2.txt`，和它们列的各份记录；clippy 记录和上一个提交的比较：`clippy-diff-lib.txt`、`clippy-diff-lib-test.txt`；耗时预算的轮次：`budget-rounds-a.txt`；改动行数：`split-lines.py` 的输出）。新加的脚本：`D:\scratch\ocs-symblock\tools\` 的 `apply-ftl.py`（把一组译文加进 23 个译文文件）、`locale-check.py`（数词条表和各语言的译文项，找缺的和重复的）；`si-3\` 的 `run-integ-mut.ps1`（两个集成测试目标各跑一轮改坏）、`mutant-table.py`（把三轮的结果合成上面那张表）、`split-lines.py`（把改动行数分成产品和测试）、`locale-sources.py`（按仓库脚本的办法全量数，比较改动前后）、`clippy-diff.py`（两份 clippy 记录按文件和告警内容比）、`apply-record.py`（把这份记录写进清单和规格）。都只读仓库，`apply-ftl.py` 和 `apply-record.py` 除外。
 
 ### SI-4 默认界面的检查栏 【接线】
 
@@ -362,7 +567,7 @@
 
 ### SI-7 53 张核对，带窗口的验收，需求文档 【验收】【文档】
 
-- **做什么**：53 张图逐张导入，对规格 §6 第 3、4 条的合计数（第 4 条的配对数按文字图元量，和规格按记录量的数差在哪逐项说明；顺带查 53 张里有没有一个文件带几个有图形的图面流。这两件是 SI-2 留下的）；在带窗口的程序里做第 7、8、11、13 条，并重出样例的图，和图块分支验收时的出图逐字节比（第 9 条的后半句，SI-1 留下的）；在空闲的机器上重量样例的耗时预算（第 12 条，SI-2 留下的：没有编译在跑、整机占用不超过五分之一时跑预算测试，仍然超过就查）；`REQ-MIG-008` 加规格 §10 的两条验收标准。
+- **做什么**：53 张图逐张导入，对规格 §6 第 3、4 条的合计数（第 4 条的配对数按文字图元量，和规格按记录量的数差在哪逐项说明；顺带查 53 张里有没有一个文件带几个有图形的图面流。这两件是 SI-2 留下的）；在带窗口的程序里做第 7、8、11、13 条（做第 11 条时，另存成 DWG、DXF 再打开之后属性面板上规格 §4.5 的行也要看，这是 SI-3 留下的），并重出样例的图，和图块分支验收时的出图逐字节比（第 9 条的后半句，SI-1 留下的）；在空闲的机器上重量样例的耗时预算（第 12 条，SI-2、SI-3 留下的：没有编译在跑、整机占用不超过五分之一时跑预算测试，仍然超过就查）；在 53 张里图元最多的一张上量「找一个图例的标注」「找一条标注所属的图例」的耗时，超过 16 毫秒就改成导入后建一次索引（规格 §4.6，SI-3 留下的：只量了样例一张）；`REQ-MIG-008` 加规格 §10 的两条验收标准。
 - **验收**：
   - [ ] 规格 §6 的 14 条逐条有读数或说明，写成一张表。
   - [ ] 没验证的逐条写明。

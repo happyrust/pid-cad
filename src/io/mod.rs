@@ -42,6 +42,7 @@ pub mod pid_backup_browse;
 pub mod pid_backup_export;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pid_backup_pdf;
+pub mod pid_identity;
 pub mod pid_legend;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pid_pdf;

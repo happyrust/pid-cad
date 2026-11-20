@@ -760,12 +760,14 @@ fn ensure_layer(doc: &mut Document, name: &str, colour: Color, visible: bool, pl
 }
 
 /// The imported sheets the program-level tests of a symbol open: the first
-/// those of a symbol as one object (`crate::app::pid_symbol_block_tests`),
-/// the second those of what is drawn of it
-/// (`crate::app::pid_symbol_view_tests`).
+/// that of what a symbol and its labels say of each other and the second
+/// those of a symbol as one object (both in
+/// `crate::app::pid_symbol_block_tests`), the third those of what is drawn
+/// of it (`crate::app::pid_symbol_view_tests`).
 #[cfg(test)]
 pub(crate) use self::tests::placements_as_blocks::{
-    sheet_of_two_valves_a_note_and_a_pipe, sheet_of_valves_on_shown_and_hidden_layers,
+    sheet_of_a_tagged_valve_and_its_labels, sheet_of_two_valves_a_note_and_a_pipe,
+    sheet_of_valves_on_shown_and_hidden_layers,
 };
 
 #[cfg(test)]

@@ -107,19 +107,11 @@ pub(super) fn attach_symbol_name(entity: &mut EntityType, name: &str) {
     extended.add_record(record);
 }
 
-/// The value an entity's `PID_SEMANTICS` record states for `key`.
-pub(super) fn pid_value<'a>(entity: &'a EntityType, key: &str) -> Option<&'a str> {
-    use document::xdata::XDataValue;
-
-    let record = entity
-        .common()
-        .extended_data
-        .get_record(PID_SEMANTICS_XDATA_APP)?;
-    record.values.iter().find_map(|value| match value {
-        XDataValue::String(text) => text.strip_prefix(key)?.strip_prefix('='),
-        _ => None,
-    })
-}
+/// The value an entity's `PID_SEMANTICS` record states for `key`: the
+/// reader every target has (`crate::io::pid_identity`), under the name the
+/// importer calls it by, so what an import writes and what is read back off
+/// a drawing are read one way.
+pub(super) use crate::io::pid_identity::stated as pid_value;
 
 /// The keys of a `PID_SEMANTICS` record, in the order a record states them.
 /// A key written after its record was made -- what a symbol is, on its block

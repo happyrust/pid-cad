@@ -1,7 +1,9 @@
 //! A symbol of an imported `.pid` is one object to the pointer and to the
 //! editing commands (plan 2026-11-19-pid-symbol-block, SB-3; SPEC §4.1 and
 //! §4.3), and one object in the Properties panel (SB-6; SPEC §4.4); and
-//! legend recognition leaves it alone (SB-7; SPEC §4.5).
+//! legend recognition leaves it alone (SB-7; SPEC §4.5). There too a symbol
+//! and its labels name each other (plan 2026-11-20-pid-symbol-identity,
+//! SI-3; SPEC §4.5), on a sheet of its own.
 //!
 //! The sheet is the importer's own
 //! (`crate::io::pid::sheet_of_two_valves_a_note_and_a_pipe`), put in the
@@ -151,6 +153,30 @@ pub(super) fn reference(app: &OpenCADStudio, symbol: &str, at: (f64, f64)) -> Ha
         .collect();
     assert_eq!(found.len(), 1, "one block reference of {symbol} at {at:?}");
     found[0]
+}
+
+/// The one loose text of the sheet that reads `lettering`.
+fn lettered(app: &OpenCADStudio, lettering: &str) -> Handle {
+    let found: Vec<Handle> = document(app)
+        .model_space_entities()
+        .filter(|entity| matches!(entity, EntityType::Text(text) if text.value == lettering))
+        .map(|entity| entity.common().handle)
+        .collect();
+    assert_eq!(found.len(), 1, "one text that reads {lettering:?}");
+    found[0]
+}
+
+/// A point on the lettering of a loose text: a millimetre in from its left
+/// end, halfway up its height. The texts of the sheet stand on their point:
+/// it is the bottom left of their lettering.
+fn on_lettering(app: &OpenCADStudio, text: Handle) -> (f64, f64) {
+    match document(app).get_entity(text) {
+        Some(EntityType::Text(text)) => (
+            text.insertion_point.x + 1.0,
+            text.insertion_point.y + text.height / 2.0,
+        ),
+        other => panic!("{text:?} is no text: {other:?}"),
+    }
 }
 
 /// The members of a block's definition, each as its `Debug` text.
@@ -581,6 +607,133 @@ fn a_selected_symbol_shows_its_reference_and_its_pid_group_in_the_panel() {
         row(&app, "pid_symbol").as_deref(),
         Some(VARIES_LABEL),
         "two symbols"
+    );
+}
+
+/// A symbol and its labels name each other in the Properties panel (plan
+/// 2026-11-20-pid-symbol-identity, SI-3; SPEC §4.5). The sheet is
+/// `crate::io::pid::sheet_of_a_tagged_valve_and_its_labels`. Selected by a
+/// click, the valve the drawing file names shows what the file states of
+/// its item -- the kind it is held as, its tag and that the tag is the
+/// file's -- and lists its four labels; the text of one of them names the
+/// valve by its tag. The valve the file gives no name is named by what it
+/// is and by its symbol; the label of the run of line says it is a line's,
+/// and the label of what is no graphic of the sheet that it is another
+/// object's; a text that is no label's says nothing of the kind. The rows
+/// that take the sheet are shown for one object alone. Once the valve is
+/// erased its labels say it is not on the sheet, and an undo gives them
+/// their valve back.
+#[test]
+fn a_symbol_and_its_labels_name_each_other_in_the_panel() {
+    let mut app = opened_with(crate::io::pid::sheet_of_a_tagged_valve_and_its_labels());
+    let tagged = reference(&app, VALVE, FIRST);
+    let untagged = reference(&app, VALVE, SECOND);
+    let group =
+        |rows: &[&str]| -> Vec<String> { rows.iter().map(|row| (*row).to_string()).collect() };
+    let by_the_file = crate::t!("Item in the drawing file").into_owned();
+    let on_process = ["pid_sheet_layer = Process", "pid_sheet_layer_oid = 12"];
+    // What the P&ID group of a text on `Process` reads, with `more` between
+    // its role and its sheet layer.
+    let of_a_text = |more: &[String]| -> Vec<String> {
+        let mut rows = vec!["pid_role = text".to_string()];
+        rows.extend_from_slice(more);
+        rows.extend(group(&on_process));
+        rows
+    };
+    // The P&ID group once a click on the lettering of that text selected
+    // it and nothing else.
+    let mut of_the_text = |lettering: &str| -> Vec<String> {
+        let text = lettered(&app, lettering);
+        let at = on_lettering(&app, text);
+        assert_eq!(pick(&mut app, at), only(text), "a click on {lettering:?}");
+        pid_group(&app)
+    };
+
+    assert_eq!(
+        of_the_text("DN50"),
+        of_a_text(&["pid_label_of = GV-101".to_string()]),
+        "a label of the valve the file names"
+    );
+    assert_eq!(
+        of_the_text("GV-101"),
+        of_a_text(&["pid_label_of = GV-101".to_string()]),
+        "the label filed before its valve"
+    );
+    assert_eq!(
+        of_the_text("DN80"),
+        of_a_text(&["pid_label_of = PIDPipingComponent · Ball Valve".to_string()]),
+        "the label of the valve the file gives no name"
+    );
+    assert_eq!(
+        of_the_text("P-1001-50-CS"),
+        of_a_text(&[format!("pid_label_of = {}", crate::t!("A line"))]),
+        "the label of the run of line"
+    );
+    assert_eq!(
+        of_the_text("DWG-0201"),
+        of_a_text(&[format!("pid_label_of = {}", crate::t!("Another object"))]),
+        "the label of what is no graphic of the sheet"
+    );
+    assert_eq!(of_the_text("NOTE 4"), of_a_text(&[]), "no label's");
+
+    assert_eq!(pick(&mut app, (100.0, 110.0)), only(tagged), "its ring");
+    let mut of_the_tagged = group(&[
+        "pid_class = PIDPipingComponent",
+        "pid_item_type = PipingComp",
+        "pid_role = symbol",
+        "pid_symbol = Ball Valve",
+        "pid_extent = 40.00 × 20.00 mm",
+        "pid_label = GV-101",
+    ]);
+    of_the_tagged.push(format!("pid_label_source = {}", crate::t!("Drawing file")));
+    of_the_tagged.push("pid_labels = 4: GV-101 · DN50 · PN16 +1".to_string());
+    of_the_tagged.push(format!("pid_resolved = {by_the_file}"));
+    of_the_tagged.extend(group(&on_process));
+    assert_eq!(pid_group(&app), of_the_tagged);
+
+    assert_eq!(pick(&mut app, (170.0, 110.0)), only(untagged), "its ring");
+    let mut of_the_untagged = group(&[
+        "pid_class = PIDPipingComponent",
+        "pid_item_type = PipingComp",
+        "pid_role = symbol",
+        "pid_symbol = Ball Valve",
+        "pid_extent = 40.00 × 20.00 mm",
+        "pid_labels = 1: DN80",
+    ]);
+    of_the_untagged.push(format!("pid_resolved = {by_the_file}"));
+    of_the_untagged.extend(group(&on_process));
+    assert_eq!(pid_group(&app), of_the_untagged);
+
+    let together = box_takes(&mut app, (70.0, 85.0), (130.0, 155.0));
+    assert_eq!(
+        together.len(),
+        5,
+        "a window around the valve and its four labels: {together:?}"
+    );
+    assert_eq!(
+        rows_of(&app, &["pid_labels", "pid_label_of"]),
+        ["pid_labels: no such row", "pid_label_of: no such row"],
+        "several objects: no row takes the sheet"
+    );
+
+    assert_eq!(pick(&mut app, (100.0, 110.0)), only(tagged));
+    let _ = app.run_command_line("ERASE");
+    let orphaned = lettered(&app, "DN50");
+    let at = on_lettering(&app, orphaned);
+    assert_eq!(pick(&mut app, at), only(orphaned));
+    assert_eq!(
+        pid_group(&app),
+        of_a_text(&[format!("pid_label_of = {}", crate::t!("Not on the sheet"))]),
+        "its valve is erased"
+    );
+
+    escape(&mut app);
+    app.undo_steps(1);
+    assert_eq!(pick(&mut app, at), only(orphaned));
+    assert_eq!(
+        pid_group(&app),
+        of_a_text(&["pid_label_of = GV-101".to_string()]),
+        "the valve is back"
     );
 }
 
