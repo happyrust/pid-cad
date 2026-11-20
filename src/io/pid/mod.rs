@@ -779,6 +779,8 @@ pub(crate) use self::tests::placements_as_blocks::{
 };
 
 #[cfg(test)]
+mod plant_totals;
+#[cfg(test)]
 mod sample_budget;
 #[cfg(test)]
 mod tests;
