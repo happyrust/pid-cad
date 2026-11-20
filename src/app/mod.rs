@@ -88,6 +88,8 @@ mod object_isolation_tests;
 mod options_session;
 #[cfg(test)]
 mod paste_special_tests;
+#[cfg(test)]
+mod pid_read_only_view_tests;
 pub mod pid_shell;
 #[cfg(test)]
 mod pid_symbol_block_tests;

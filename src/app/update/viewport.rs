@@ -1839,10 +1839,21 @@ impl OpenCADStudio {
         self.tabs[i].scene.refresh_underlay_resolution(t);
 
         // If the camera moved since we last synced, write it back to
-        // the document and mark the file dirty.
+        // the document and mark the file dirty: the view is saved with the
+        // drawing.
         let gen = self.tabs[i].scene.camera_generation;
         if gen != self.tabs[i].last_synced_camera_gen {
             self.tabs[i].last_synced_camera_gen = gen;
+            // A read-only source (`.pid`) is never saved where it lies --
+            // Save on it is Save As -- so it has no file to keep a view in.
+            // The view is written into the document all the same, and a
+            // Save As takes it along; looking round such a drawing does not
+            // mark it modified. The mark is only ever set here: a drawing
+            // that was edited stays modified.
+            let view_is_kept = !self.tabs[i]
+                .current_path
+                .as_deref()
+                .is_some_and(crate::io::is_read_only_source_path);
             if self.tabs[i].active_block_edit.is_some() {
                 let camera = self.tabs[i].scene.camera.borrow().clone();
                 if let Some(session) = self.tabs[i].active_block_edit_session_mut() {
@@ -1853,9 +1864,9 @@ impl OpenCADStudio {
                 // the viewport entity. Syncing the separate main camera here
                 // can overwrite the saved Model/Paper view with a camera that
                 // does not own this change.
-                self.tabs[i].dirty = true;
+                self.tabs[i].dirty |= view_is_kept;
             } else if self.tabs[i].scene.sync_camera_to_document() {
-                self.tabs[i].dirty = true;
+                self.tabs[i].dirty |= view_is_kept;
             }
         }
 
