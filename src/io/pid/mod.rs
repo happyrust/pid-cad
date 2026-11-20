@@ -112,6 +112,7 @@ use super::pid_view_filter::{is_hidden_sheet_layer, PidViewFilter, PidViewSummar
 
 mod build;
 mod items;
+mod labels;
 mod metadata;
 mod page;
 mod styles;
@@ -123,6 +124,7 @@ mod text;
 
 use self::build::*;
 use self::items::*;
+use self::labels::*;
 use self::metadata::*;
 use self::page::*;
 use self::styles::*;
@@ -498,10 +500,16 @@ pub fn load_pid_with(path: &Path, options: &PidImportOptions) -> Result<PidImpor
     // What each placed symbol stands for, as the file itself states it: the
     // plant item behind the graphic (plan 2026-11-20-pid-symbol-identity).
     let items = SheetItems::read(path);
+    // And what each label of the sheet hangs on, off the records the parse
+    // above already holds.
+    let labels = SheetLabels::read(&parsed);
     let built = build_document_entities(
         &geometry,
         &styles,
-        &items,
+        Stated {
+            items: &items,
+            labels: &labels,
+        },
         &mut library,
         &unit,
         &mut doc,
@@ -621,6 +629,8 @@ fn finish(
         symbol_definitions,
         symbol_items,
         symbol_tags,
+        symbol_labels,
+        other_labels,
         bounds,
     } = built;
     report_import(
@@ -641,6 +651,13 @@ fn finish(
         );
         log::info!(
             "{}: the drawing states a plant item for {symbol_items} of them, and {symbol_tags} carry a tag",
+            path.display()
+        );
+    }
+    // What the sheet's label texts hang on, as the drawing file pairs them.
+    if symbol_labels + other_labels > 0 {
+        log::info!(
+            "{}: {symbol_labels} label text(s) hang on a symbol of the sheet, and {other_labels} on a line or on something else",
             path.display()
         );
     }
@@ -721,6 +738,8 @@ fn finish(
         symbol_definitions,
         symbol_items,
         symbol_tags,
+        symbol_labels,
+        other_labels,
         symbol_library: library
             .map(|library| library.roots().to_vec())
             .unwrap_or_default(),

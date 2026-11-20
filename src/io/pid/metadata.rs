@@ -123,10 +123,11 @@ pub(super) fn pid_value<'a>(entity: &'a EntityType, key: &str) -> Option<&'a str
 
 /// The keys of a `PID_SEMANTICS` record, in the order a record states them.
 /// A key written after its record was made -- what a symbol is, on its block
-/// reference; later a tag the plant database gives -- takes its place in
-/// this order (see [`stamp_pid_pairs`]), so a record reads the same
-/// whichever way it was arrived at.
-const PID_KEY_ORDER: [&str; 17] = [
+/// reference; what a label hangs on, on its text; later a tag the plant
+/// database gives -- takes its place in this order (see
+/// [`stamp_pid_pairs`]), so a record reads the same whichever way it was
+/// arrived at.
+const PID_KEY_ORDER: [&str; 19] = [
     "sheet_layer",
     "sheet_layer_oid",
     "role",
@@ -144,6 +145,8 @@ const PID_KEY_ORDER: [&str; 17] = [
     "item_type",
     "tag_source",
     "label_in_file",
+    "label_of",
+    "label_on",
 ];
 
 /// Set `key=value` pairs in an entity's `PID_SEMANTICS` record, making the
@@ -252,6 +255,24 @@ pub(super) fn attach_symbol_identity(
     }
     stamp_pid_pairs(reference, &pairs);
     tagged
+}
+
+/// State on a loose text what its label hangs on (plan
+/// 2026-11-20-pid-symbol-identity, SPEC sections 3 and 4.3).
+///
+/// `label_of` is the number of the graphic the drawing file hangs the label
+/// on, and `label_on` says what that graphic is on this sheet: `symbol`, a
+/// symbol whose block reference states the same number as its `graphic`;
+/// `line`, a run of line; `other`, anything else. A text that is no label's
+/// states neither.
+pub(super) fn attach_label_owner(text: &mut EntityType, graphic: u32, on: LabelOn) {
+    stamp_pid_pairs(
+        text,
+        &[
+            ("label_of", &graphic.to_string()),
+            ("label_on", on.as_str()),
+        ],
+    );
 }
 
 /// What a symbol placement says about its size, written into the

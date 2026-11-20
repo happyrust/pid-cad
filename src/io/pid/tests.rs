@@ -30,6 +30,8 @@ fn the_summary_round_trips_through_its_properties_and_take_removes_them() {
     summary.symbol_definitions = 19;
     summary.symbol_items = 25;
     summary.symbol_tags = 11;
+    summary.symbol_labels = 30;
+    summary.other_labels = 9;
     summary.symbol_library = vec![
         PathBuf::from(r"\\server\Plant\Ref\Symbols"),
         PathBuf::from("D:/sym with spaces/=and=equals"),
@@ -1826,11 +1828,43 @@ pub(super) mod placements_as_blocks {
         tables: &Styles,
         items: &SheetItems,
     ) -> (Document, Built) {
+        import_as_stated(
+            geometry,
+            tables,
+            Stated {
+                items,
+                labels: &SheetLabels::default(),
+            },
+        )
+    }
+
+    /// [`import`], with `labels` as what the file hangs its labels on.
+    fn import_labelled(
+        geometry: &NormalizedPidGeometry,
+        tables: &Styles,
+        labels: &SheetLabels,
+    ) -> (Document, Built) {
+        import_as_stated(
+            geometry,
+            tables,
+            Stated {
+                items: &SheetItems::default(),
+                labels,
+            },
+        )
+    }
+
+    /// [`import`], with `stated` as what the file says its graphics are.
+    fn import_as_stated(
+        geometry: &NormalizedPidGeometry,
+        tables: &Styles,
+        stated: Stated<'_>,
+    ) -> (Document, Built) {
         let mut doc = prepare_document(&pid_parse::PidDocument::default());
         let built = build_document_entities(
             geometry,
             tables,
-            items,
+            stated,
             &mut None,
             &ImportUnit::AssumedMetre,
             &mut doc,
@@ -3326,8 +3360,10 @@ pub(super) mod placements_as_blocks {
                 ("symbol_definitions", 1),
                 ("symbol_items", 2),
                 ("symbol_tags", 1),
+                ("symbol_labels", 0),
+                ("other_labels", 0),
             ],
-            "three references: two state an item, one of them a tag"
+            "three references: two state an item, one of them a tag; the sheet has no label"
         );
         assert_eq!((summary.symbol_items, summary.symbol_tags), (2, 1));
 
@@ -3524,6 +3560,478 @@ pub(super) mod placements_as_blocks {
         );
         stamp_pid_pairs(&mut bare, &[("graphic", "7")]);
         assert_eq!(says(&bare), ["graphic=7"]);
+    }
+
+    /// Text record `oid`: a run of lettering `value` at (`x`, 0.25) metres
+    /// on a displayed layer `Process`.
+    fn text_on_process(oid: u32, x: f64, value: &str) -> pid_parse::PidGraphicEntity {
+        record(
+            oid,
+            PidGraphicKind::Text {
+                insertion: point(x, 0.25),
+                value: value.to_string(),
+                height: 0.0025,
+                rotation: 0.0,
+                anchor_code: 0,
+                text_box_width: None,
+            },
+            Some((Some("Process"), true)),
+        )
+    }
+
+    /// What the file hangs the labels of a sheet stored in [`STREAM`] on:
+    /// its `texts`, each with the record it names as its parent; its
+    /// `labels`, each label record with its first member; and its `runs` of
+    /// line.
+    fn labels_of(texts: &[(u32, u32)], labels: &[(u32, u32)], runs: &[u32]) -> SheetLabels {
+        let mut table = SheetLabels::default();
+        table.add_stream(
+            STREAM,
+            texts.iter().copied(),
+            labels.iter().copied(),
+            runs.iter().copied(),
+        );
+        table
+    }
+
+    /// The loose texts of `doc` in the order they were filed, each as its
+    /// lettering and what its record says.
+    fn texts_say(doc: &Document) -> Vec<(String, Vec<String>)> {
+        loose(doc)
+            .into_iter()
+            .filter_map(|entity| match entity {
+                EntityType::Text(text) => Some((text.value.clone(), says(entity))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What a loose text on `Process` says, and `more` after it.
+    fn text_says(value: &str, more: &[&str]) -> (String, Vec<String>) {
+        let said = ["sheet_layer=Process", "sheet_layer_oid=12", "role=text"]
+            .iter()
+            .chain(more)
+            .map(|pair| (*pair).to_string())
+            .collect();
+        (value.to_string(), said)
+    }
+
+    /// A loose text that is a label's states what its label hangs on (plan
+    /// 2026-11-20-pid-symbol-identity, SPEC section 4.3): the number of the
+    /// graphic and, the graphic being a symbol of the sheet, that it is a
+    /// symbol. That symbol's reference states the same number as its
+    /// `graphic`, which is how the two are found from each other. The texts
+    /// of one label state the same, one filed before its symbol no less
+    /// than one filed after it; a text that is no label's states nothing of
+    /// the kind. The references and the members of their block say what
+    /// they said.
+    #[test]
+    fn a_label_text_states_the_symbol_its_label_hangs_on() {
+        let geometry = sheet(
+            vec![
+                text_on_process(801, 0.1, "GV-101"),
+                valve_on_process(612, 0.1),
+                text_on_process(802, 0.1, "DN50"),
+                valve_on_process(613, 0.3),
+                text_on_process(803, 0.3, "NOTE 4"),
+            ],
+            vec![valve_body()],
+        );
+        let labels = labels_of(&[(801, 900), (802, 900), (803, 6)], &[(900, 612)], &[]);
+        let (doc, built) = import_labelled(&geometry, &styles(), &labels);
+
+        assert_eq!(
+            texts_say(&doc),
+            [
+                text_says("GV-101", &["label_of=612", "label_on=symbol"]),
+                text_says("DN50", &["label_of=612", "label_on=symbol"]),
+                text_says("NOTE 4", &[]),
+            ]
+        );
+        let placed: Vec<Vec<String>> = references(&doc).into_iter().map(says).collect();
+        let valve = |graphic: &str| {
+            vec![
+                "sheet_layer=Process".to_string(),
+                "sheet_layer_oid=12".to_string(),
+                "role=symbol".to_string(),
+                "extent=4.00x3.00".to_string(),
+                "symbol=Ball Valve".to_string(),
+                format!("graphic={graphic}"),
+            ]
+        };
+        assert_eq!(
+            placed,
+            [valve("612"), valve("613")],
+            "a reference states its own number and nothing of its labels"
+        );
+        let inside: Vec<Vec<String>> = members(&doc, "SPPID_Ball Valve")
+            .iter()
+            .map(|member| says(member))
+            .collect();
+        assert_eq!(
+            inside,
+            [
+                vec!["role=symbol"],
+                vec!["role=symbol"],
+                vec!["role=fill"],
+                vec!["role=symbol"],
+                vec!["role=symbol-label"],
+            ]
+        );
+        assert_eq!((built.symbol_labels, built.other_labels), (2, 0));
+    }
+
+    /// A label that hangs on a run of line says `line`, and one that hangs
+    /// on anything else says `other`: a row of the title block's
+    /// attributes, which is no graphic of the sheet, or a single line,
+    /// which is no run. Either way the text states the number the file
+    /// names, and what is hung on says nothing of it.
+    #[test]
+    fn a_label_on_a_run_of_line_says_line_and_one_on_anything_else_other() {
+        let on = Some((Some("Process"), true));
+        let geometry = sheet(
+            vec![
+                record(
+                    701,
+                    PidGraphicKind::Polyline {
+                        points: vec![point(0.0, 0.1), point(0.2, 0.1), point(0.2, 0.2)],
+                        closed: false,
+                    },
+                    on,
+                ),
+                record(
+                    702,
+                    PidGraphicKind::Line {
+                        start: point(0.0, 0.3),
+                        end: point(0.2, 0.3),
+                    },
+                    on,
+                ),
+                text_on_process(811, 0.05, "P-1001-50-CS"),
+                text_on_process(812, 0.1, "DWG-0201"),
+                text_on_process(813, 0.15, "SEE NOTE 2"),
+            ],
+            Vec::new(),
+        );
+        let labels = labels_of(
+            &[(811, 910), (812, 911), (813, 912)],
+            &[(910, 701), (911, 24_578), (912, 702)],
+            &[701],
+        );
+        let (doc, built) = import_labelled(&geometry, &styles(), &labels);
+
+        assert_eq!(
+            texts_say(&doc),
+            [
+                text_says("P-1001-50-CS", &["label_of=701", "label_on=line"]),
+                text_says("DWG-0201", &["label_of=24578", "label_on=other"]),
+                text_says("SEE NOTE 2", &["label_of=702", "label_on=other"]),
+            ]
+        );
+        let line_work: Vec<Vec<String>> = loose(&doc)
+            .into_iter()
+            .filter(|entity| !matches!(entity, EntityType::Text(_)))
+            .map(says)
+            .collect();
+        let geometry_on_process = vec![
+            "sheet_layer=Process".to_string(),
+            "sheet_layer_oid=12".to_string(),
+            "role=geometry".to_string(),
+        ];
+        assert_eq!(
+            line_work,
+            [geometry_on_process.clone(), geometry_on_process],
+            "the run and the line say what they said"
+        );
+        assert_eq!((built.symbol_labels, built.other_labels), (0, 3));
+    }
+
+    /// A label hangs on a symbol only where that symbol was filed as a
+    /// reference: `label_on=symbol` promises a reference whose `graphic` is
+    /// the text's `label_of`. A placement that draws nothing -- a label
+    /// symbol whose body is only its anchor cross and whose file has no
+    /// name to letter -- is no reference, and a text hung on it says
+    /// `other`. So does a text hung on the number of a placement that lies
+    /// in another stream: a record's number is its stream's own.
+    #[test]
+    fn a_label_hangs_on_a_symbol_only_where_the_symbol_was_filed_as_a_reference() {
+        const NAMELESS: &str = r"\\SRV\Ref\Symbols\Design\Annotation\Labels\.sym";
+        let mut elsewhere = valve_on_process(630, 0.5);
+        elsewhere.source.stream_path = Some("/Sheet7".to_string());
+        let geometry = sheet(
+            vec![
+                record(
+                    620,
+                    placement((0.3, 0.3), Some(NAMELESS), Some(CROSS), 0.0),
+                    Some((Some("Process"), true)),
+                ),
+                text_on_process(821, 0.3, "ON WHAT DRAWS NOTHING"),
+                elsewhere,
+                text_on_process(822, 0.5, "ON A NUMBER OF ANOTHER STREAM"),
+                valve_on_process(612, 0.1),
+                text_on_process(823, 0.1, "GV-101"),
+            ],
+            vec![valve_body(), cross_body()],
+        );
+        let labels = labels_of(
+            &[(821, 920), (822, 921), (823, 922)],
+            &[(920, 620), (921, 630), (922, 612)],
+            &[],
+        );
+        let (doc, built) = import_labelled(&geometry, &styles(), &labels);
+
+        let graphics: Vec<Option<&str>> = references(&doc)
+            .into_iter()
+            .map(|reference| pid_value(reference, "graphic"))
+            .collect();
+        assert_eq!(
+            graphics,
+            [Some("630"), Some("612")],
+            "the placement that draws nothing is no reference"
+        );
+        assert_eq!(
+            texts_say(&doc),
+            [
+                text_says("ON WHAT DRAWS NOTHING", &["label_of=620", "label_on=other"]),
+                text_says(
+                    "ON A NUMBER OF ANOTHER STREAM",
+                    &["label_of=630", "label_on=other"]
+                ),
+                text_says("GV-101", &["label_of=612", "label_on=symbol"]),
+            ]
+        );
+        assert_eq!((built.symbol_labels, built.other_labels), (1, 2));
+    }
+
+    /// Only a text record is a label's text. A record of another kind
+    /// states no pairing even where the table has a text of its number: a
+    /// line stays a line that says what it said, and a placement's
+    /// reference states its own graphic and no more.
+    #[test]
+    fn a_record_that_is_no_text_states_no_pairing() {
+        let geometry = sheet(
+            vec![
+                valve_on_process(612, 0.1),
+                record(
+                    702,
+                    PidGraphicKind::Line {
+                        start: point(0.0, 0.3),
+                        end: point(0.2, 0.3),
+                    },
+                    Some((Some("Process"), true)),
+                ),
+            ],
+            vec![valve_body()],
+        );
+        let labels = labels_of(&[(702, 900), (612, 900)], &[(900, 612)], &[]);
+        let (doc, built) = import_labelled(&geometry, &styles(), &labels);
+
+        let paired: Vec<Vec<String>> = doc
+            .model_space_entities()
+            .map(says)
+            .filter(|said| said.iter().any(|pair| pair.starts_with("label_o")))
+            .collect();
+        assert!(
+            paired.is_empty(),
+            "records that state a pairing: {paired:?}"
+        );
+        assert_eq!((built.symbol_labels, built.other_labels), (0, 0));
+    }
+
+    /// The file pairs text records, and the import states the pairing on
+    /// what each record draws. A label that reads on two lines is two text
+    /// entities, and each states it; a record whose lettering is blank
+    /// draws nothing, so nothing states it. The counts are of text
+    /// entities.
+    #[test]
+    fn every_line_a_label_draws_states_the_pairing_and_a_blank_one_draws_nothing() {
+        let geometry = sheet(
+            vec![
+                valve_on_process(612, 0.1),
+                text_on_process(831, 0.1, "PT\r0112101"),
+                text_on_process(832, 0.1, "  "),
+                text_on_process(833, 0.1, ""),
+            ],
+            vec![valve_body()],
+        );
+        let labels = labels_of(&[(831, 930), (832, 930), (833, 930)], &[(930, 612)], &[]);
+        let (doc, built) = import_labelled(&geometry, &styles(), &labels);
+
+        assert_eq!(
+            texts_say(&doc),
+            [
+                text_says("PT", &["label_of=612", "label_on=symbol"]),
+                text_says("0112101", &["label_of=612", "label_on=symbol"]),
+            ],
+            "two lines of one record, and nothing of the two blank ones"
+        );
+        assert_eq!((built.symbol_labels, built.other_labels), (2, 0));
+    }
+
+    /// What a published `_Data.xml` says of a label's text stands where it
+    /// stood, and the pairing follows it: the two keys come after every key
+    /// a record had before them.
+    #[test]
+    fn the_pairing_follows_what_data_xml_published_for_the_text() {
+        let xml = r#"<Container>
+  <PIDInlineComponent><IObject UID="VALVE" ItemTag="GV-101"/></PIDInlineComponent>
+  <PIDRepresentation><IObject UID="REP1"/><IDrawingRepresentation GraphicOID="801"/></PIDRepresentation>
+  <Rel><IRel UID1="VALVE" UID2="REP1" DefUID="DwgRepresentationComposition"/></Rel>
+</Container>"#;
+        let mut tables = styles();
+        tables.semantics = Some(PidSemanticIndex::from_xml(
+            xml,
+            &pid_parse::PidDocument::default(),
+        ));
+        let geometry = sheet(
+            vec![
+                valve_on_process(612, 0.1),
+                text_on_process(801, 0.1, "GV-101"),
+            ],
+            vec![valve_body()],
+        );
+        let labels = labels_of(&[(801, 900)], &[(900, 612)], &[]);
+        let (doc, _) = import_labelled(&geometry, &tables, &labels);
+
+        assert_eq!(
+            texts_say(&doc),
+            [text_says(
+                "GV-101",
+                &[
+                    "class=PIDInlineComponent",
+                    "label=GV-101",
+                    "oid=801",
+                    "resolved=direct",
+                    "label_of=612",
+                    "label_on=symbol",
+                ]
+            )]
+        );
+    }
+
+    /// The two keys of the pairing have their place in a record's order:
+    /// after the keys a symbol's identity brings and before any key the
+    /// order does not know, `label_of` ahead of `label_on` whichever is
+    /// written first.
+    #[test]
+    fn the_keys_of_the_pairing_have_their_place_in_the_record() {
+        let mut text = EntityType::Line(Line::from_points(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        ));
+        stamp_pid_pairs(&mut text, &[("role", "text"), ("made_up", "1")]);
+        stamp_pid_pairs(&mut text, &[("label_on", "symbol")]);
+        stamp_pid_pairs(&mut text, &[("label_of", "612"), ("label_in_file", "X")]);
+        assert_eq!(
+            says(&text),
+            [
+                "role=text",
+                "label_in_file=X",
+                "label_of=612",
+                "label_on=symbol",
+                "made_up=1",
+            ]
+        );
+
+        // Stated again, the pairing replaces what was stated: a record
+        // holds it once.
+        attach_label_owner(&mut text, 701, LabelOn::Line);
+        assert_eq!(
+            says(&text),
+            [
+                "role=text",
+                "label_in_file=X",
+                "label_of=701",
+                "label_on=line",
+                "made_up=1",
+            ]
+        );
+        assert_eq!(
+            [
+                LabelOn::Symbol.as_str(),
+                LabelOn::Line.as_str(),
+                LabelOn::Other.as_str(),
+            ],
+            ["symbol", "line", "other"]
+        );
+    }
+
+    /// The summary counts the label texts by what they hang on, after the
+    /// counts it kept before: those on a symbol of the sheet, and those on
+    /// a line or on anything else together. A text that is no label's is in
+    /// neither. Both ride the document under their own keys and read back.
+    #[test]
+    fn the_summary_counts_the_label_texts_by_what_they_hang_on() {
+        let geometry = sheet(
+            vec![
+                valve_on_process(612, 0.1),
+                record(
+                    701,
+                    PidGraphicKind::Polyline {
+                        points: vec![point(0.0, 0.1), point(0.2, 0.1)],
+                        closed: false,
+                    },
+                    Some((Some("Process"), true)),
+                ),
+                text_on_process(841, 0.1, "GV-101"),
+                text_on_process(842, 0.1, "DN50"),
+                text_on_process(843, 0.1, "FO"),
+                text_on_process(844, 0.2, "P-1001-50-CS"),
+                text_on_process(845, 0.3, "DWG-0201"),
+                text_on_process(846, 0.4, "NOTE 4"),
+            ],
+            vec![valve_body()],
+        );
+        let labels = labels_of(
+            &[(841, 940), (842, 940), (843, 941), (844, 942), (845, 943)],
+            &[(940, 612), (941, 612), (942, 701), (943, 24_578)],
+            &[701],
+        );
+        let tables = styles();
+        let (mut doc, built) = import_labelled(&geometry, &tables, &labels);
+        let summary = finish(
+            Path::new("labels.pid"),
+            &geometry,
+            None,
+            &tables,
+            ImportUnit::AssumedMetre,
+            built,
+            None,
+            &mut doc,
+        );
+
+        assert_eq!(
+            summary.counts()[18..],
+            [
+                ("symbol_blocks", 1),
+                ("symbol_definitions", 1),
+                ("symbol_items", 0),
+                ("symbol_tags", 0),
+                ("symbol_labels", 3),
+                ("other_labels", 2),
+            ],
+            "six texts: three on the valve, one on the run, one on the title block, one no label's"
+        );
+        assert_eq!((summary.symbol_labels, summary.other_labels), (3, 2));
+
+        summary.store(&mut doc);
+        let stored = |key: &str| {
+            let tag = format!("{SUMMARY_PROPERTY_PREFIX}{key}");
+            doc.summary_info
+                .custom_properties
+                .iter()
+                .find(|(name, _)| *name == tag)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            (
+                stored("symbol_labels").as_deref(),
+                stored("other_labels").as_deref()
+            ),
+            (Some("3"), Some("2")),
+            "each rides the document under its own key"
+        );
+        assert_eq!(ImportSummary::take(&mut doc), Some(summary));
     }
 
     /// The blocks the valve and the label symbol are filed as.

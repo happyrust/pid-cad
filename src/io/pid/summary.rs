@@ -112,6 +112,16 @@ pub struct ImportSummary {
     /// the published `_Data.xml` or the name the drawing file gives the
     /// item. Logged, not shown.
     pub symbol_tags: usize,
+    /// Loose text entities whose label hangs on a symbol of the sheet
+    /// (`label_on=symbol`): each names, under `label_of`, the `graphic` of
+    /// one block reference. Text entities are counted, not text records: a
+    /// label's text that is blank draws nothing and is not among them.
+    /// Logged, not shown.
+    pub symbol_labels: usize,
+    /// Loose text entities whose label hangs on something that is not a
+    /// symbol of the sheet: a line (`label_on=line`) or anything else
+    /// (`label_on=other`). Logged, not shown.
+    pub other_labels: usize,
     /// The symbol library roots the import found -- `PID_SYMBOL_LIBRARY` or
     /// the `.sym` tree above the drawing -- and drew its library bodies
     /// from. Empty when no library was found. Where a placement's body came
@@ -333,7 +343,7 @@ impl ImportSummary {
     }
 
     /// The counted fields, by the keys they are stored under.
-    pub(super) fn counts(&self) -> [(&'static str, usize); 22] {
+    pub(super) fn counts(&self) -> [(&'static str, usize); 24] {
         [
             ("drawn", self.drawn),
             ("decoded", self.decoded),
@@ -357,6 +367,8 @@ impl ImportSummary {
             ("symbol_definitions", self.symbol_definitions),
             ("symbol_items", self.symbol_items),
             ("symbol_tags", self.symbol_tags),
+            ("symbol_labels", self.symbol_labels),
+            ("other_labels", self.other_labels),
         ]
     }
 
@@ -385,6 +397,8 @@ impl ImportSummary {
             "symbol_definitions" => &mut self.symbol_definitions,
             "symbol_items" => &mut self.symbol_items,
             "symbol_tags" => &mut self.symbol_tags,
+            "symbol_labels" => &mut self.symbol_labels,
+            "other_labels" => &mut self.other_labels,
             _ => return None,
         })
     }
@@ -417,6 +431,8 @@ impl ImportSummary {
             symbol_definitions: 0,
             symbol_items: 0,
             symbol_tags: 0,
+            symbol_labels: 0,
+            other_labels: 0,
             symbol_library: Vec::new(),
             unit: ImportUnit::AssumedMetre,
         }

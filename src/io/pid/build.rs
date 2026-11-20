@@ -32,8 +32,23 @@ pub(super) struct Built {
     pub(super) symbol_items: usize,
     /// The references that carry a tag (`label`).
     pub(super) symbol_tags: usize,
+    /// Loose texts whose label hangs on a symbol of the sheet.
+    pub(super) symbol_labels: usize,
+    /// Loose texts whose label hangs on a line or on anything else.
+    pub(super) other_labels: usize,
     /// The extent of the decoded geometry, for framing.
     pub(super) bounds: Bounds,
+}
+
+/// What the drawing file says its graphics are, beside what they draw: the
+/// tables [`build_document_entities`] reads a symbol's plant item and a
+/// label's owner from.
+#[derive(Clone, Copy)]
+pub(super) struct Stated<'a> {
+    /// The plant item behind each placed symbol.
+    pub(super) items: &'a SheetItems,
+    /// What each label text of the sheet hangs on.
+    pub(super) labels: &'a SheetLabels,
 }
 
 /// Build every entity of the drawing and file it into `doc` under the layer
@@ -42,12 +57,14 @@ pub(super) struct Built {
 ///
 /// A symbol placement is filed as one block reference, and what it draws is
 /// in the block definition that reference names (see [`SymbolBlocks`]). The
-/// reference also states what the symbol is: the plant item `items` gives
-/// for its graphic (see [`attach_symbol_identity`]).
+/// reference also states what the symbol is: the plant item `stated.items`
+/// gives for its graphic (see [`attach_symbol_identity`]). A loose text
+/// that is a label's states what the label hangs on, as `stated.labels`
+/// pairs them (see [`attach_label_owner`]).
 pub(super) fn build_document_entities(
     geometry: &NormalizedPidGeometry,
     lookups: &Styles,
-    items: &SheetItems,
+    stated: Stated<'_>,
     library: &mut Option<SymbolLibrary>,
     unit: &ImportUnit,
     doc: &mut Document,
@@ -63,6 +80,7 @@ pub(super) fn build_document_entities(
         semantics,
         ..
     } = lookups;
+    let Stated { items, labels } = stated;
     let projection = Projection::for_geometry(geometry, unit);
     let mut bounds = Bounds::new(projection);
     let mut decoded = 0usize;
@@ -86,6 +104,13 @@ pub(super) fn build_document_entities(
     // up carrying a tag; see `ImportSummary`.
     let mut symbol_items = 0usize;
     let mut symbol_tags = 0usize;
+    // What a label text hangs on is settled once every record is filed: a
+    // label may be drawn before the symbol it hangs on, and it hangs on a
+    // symbol only where that symbol was filed as a reference. Kept until
+    // then: the references filed, by stream and graphic, and the label
+    // texts filed, each with the graphic the file hangs its label on.
+    let mut placed: HashSet<(&str, u32)> = HashSet::new();
+    let mut labelled: Vec<(document::Handle, &str, u32)> = Vec::new();
     for entity in &geometry.entities {
         // A boundary ring is the one kind whose style decides its shape rather
         // than its colour: filled, it is an area; unfilled, it is an outline
@@ -119,6 +144,15 @@ pub(super) fn build_document_entities(
                 definition: Some(definition),
                 ..
             } => geometry.symbol_definition(*definition),
+            _ => None,
+        };
+        // The stream the record lies in. A record's number is its stream's
+        // own, so a label and what it hangs on are matched within one.
+        let stream = entity.source.stream_path.as_deref().unwrap_or_default();
+        // The graphic this record's label hangs on, where the record is a
+        // text of a label; see `SheetLabels`.
+        let hung_on = match (&entity.kind, entity.graphic_oid) {
+            (PidGraphicKind::Text { .. }, Some(text)) => labels.hung_on(stream, text),
             _ => None,
         };
         let built = match entity.confidence {
@@ -318,7 +352,11 @@ pub(super) fn build_document_entities(
             if placement.is_some() {
                 members.push(one);
             } else {
-                let _ = doc.add_entity(one);
+                let filed = doc.add_entity(one);
+                // A label's text states what it hangs on after the loop.
+                if let (Some(graphic), Ok(handle)) = (hung_on, filed) {
+                    labelled.push((handle, stream, graphic));
+                }
             }
         }
         if let Some((insertion, symbol_path)) = placement {
@@ -363,7 +401,33 @@ pub(super) fn build_document_entities(
             if attach_symbol_identity(&mut reference, entity.graphic_oid, item) {
                 symbol_tags += 1;
             }
-            let _ = doc.add_entity(reference);
+            let filed = doc.add_entity(reference);
+            if let (Some(graphic), Ok(_)) = (entity.graphic_oid, filed) {
+                placed.insert((stream, graphic));
+            }
+        }
+    }
+    // Each label text says what it hangs on: a symbol, where the graphic the
+    // file names was filed as a reference of the text's own stream; failing
+    // that a line, where the graphic is a run of line; anything else
+    // otherwise.
+    let mut symbol_labels = 0usize;
+    let mut other_labels = 0usize;
+    for (handle, stream, graphic) in labelled {
+        let on = if placed.contains(&(stream, graphic)) {
+            LabelOn::Symbol
+        } else if labels.is_run(stream, graphic) {
+            LabelOn::Line
+        } else {
+            LabelOn::Other
+        };
+        let Some(text) = doc.get_entity_mut(handle) else {
+            continue;
+        };
+        attach_label_owner(text, graphic, on);
+        match on {
+            LabelOn::Symbol => symbol_labels += 1,
+            LabelOn::Line | LabelOn::Other => other_labels += 1,
         }
     }
     Built {
@@ -378,6 +442,8 @@ pub(super) fn build_document_entities(
         symbol_definitions: blocks.definitions,
         symbol_items,
         symbol_tags,
+        symbol_labels,
+        other_labels,
         bounds,
     }
 }

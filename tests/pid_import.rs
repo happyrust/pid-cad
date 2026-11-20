@@ -2412,7 +2412,7 @@ fn role_and_class_are_separate_keys_with_disjoint_vocabularies() {
     let Some(doc) = import("export-test/publish-data/DWG-0202GP06-01/DWG-0202GP06-01.pid") else {
         return;
     };
-    const KEYS: [&str; 15] = [
+    const KEYS: [&str; 17] = [
         "sheet_layer",
         "sheet_layer_oid",
         "role",
@@ -2431,6 +2431,10 @@ fn role_and_class_are_separate_keys_with_disjoint_vocabularies() {
         "item",
         "item_type",
         "tag_source",
+        // On a text of a label: the graphic the label hangs on, and what
+        // that graphic is.
+        "label_of",
+        "label_on",
     ];
     let mut both = 0usize;
     for entity in doc.entities() {
@@ -4750,6 +4754,19 @@ mod sample_sheet {
     const ITEMS: usize = 592;
     const TAGS: usize = 231;
 
+    /// The loose texts by what their label hangs on: a symbol of the sheet,
+    /// a run of line, anything else -- here the four of the title block.
+    /// Every loose text of the sheet is a label's. The drawing file pairs
+    /// 961 text records, 806 of them with a symbol; three of those are
+    /// blank and draw no text, so the texts are 958 and 803 (the plan's
+    /// todo.md, SI-2). Counted on the sheet, not derived.
+    const SYMBOL_LABELS: usize = 803;
+    const LINE_LABELS: usize = 151;
+    const OTHER_LABELS: usize = 4;
+
+    /// The symbols at least one text hangs on.
+    const LABELLED: usize = 383;
+
     /// Where the sample lies -- the sheet of the well sites L and M, in the
     /// plant test data beside this repository -- or `None`, and a line
     /// saying why, where it cannot be read the way the numbers here were
@@ -4993,8 +5010,9 @@ mod sample_sheet {
     /// The first eighteen counts of the summary are what the importer
     /// counted on this sheet before symbols were filed as blocks
     /// (`5171d197b`; the plan's todo.md, section 1): filing them changed
-    /// none. The two after them came with the blocks, and the last two with
-    /// what the references state of the items they draw (plan
+    /// none. The two after them came with the blocks, the two after those
+    /// with what the references state of the items they draw, and the last
+    /// two with what the label texts hang on (plan
     /// 2026-11-20-pid-symbol-identity).
     #[test]
     fn the_sample_summary_counts_what_it_counted_before_symbols_were_blocks() {
@@ -5031,6 +5049,8 @@ mod sample_sheet {
                 ("symbol_definitions", DEFINITIONS),
                 ("symbol_items", ITEMS),
                 ("symbol_tags", TAGS),
+                ("symbol_labels", SYMBOL_LABELS),
+                ("other_labels", LINE_LABELS + OTHER_LABELS),
             ]
         );
     }
@@ -5157,25 +5177,117 @@ mod sample_sheet {
         );
     }
 
+    /// Every loose text of the sample states what its label hangs on, as
+    /// the drawing file pairs them (plan 2026-11-20-pid-symbol-identity,
+    /// SPEC section 6, 4): the number of a graphic and what that graphic
+    /// is. A text that says `symbol` names exactly one reference of the
+    /// sheet by its `graphic`, and a text that says anything else names
+    /// none. Nothing but a loose text states a pairing: no reference, no
+    /// member of a block, no line. Counted on the sheet, not derived.
+    #[test]
+    fn the_sample_label_texts_state_what_their_labels_hang_on() {
+        let Some(import) = sample() else {
+            return;
+        };
+        let doc = &import.document;
+        let texts: Vec<&EntityType> = doc
+            .model_space_entities()
+            .filter(|entity| pid_value(entity, "role").as_deref() == Some("text"))
+            .collect();
+        assert_eq!(texts.len(), LETTERING, "loose texts of the sheet");
+        assert_eq!(
+            [
+                stating(&texts, &["label_of", "label_on"]),
+                by_value(&texts, "label_on"),
+            ],
+            [
+                format!("label_of {LETTERING}, label_on {LETTERING}"),
+                format!("line {LINE_LABELS}, other {OTHER_LABELS}, symbol {SYMBOL_LABELS}"),
+            ],
+            "how many state each key; what the labels hang on"
+        );
+
+        let references = symbol_references(doc);
+        let mut named_by: BTreeMap<String, usize> = BTreeMap::new();
+        for reference in &references {
+            let graphic = pid_value(reference, "graphic").expect("a reference states its graphic");
+            *named_by.entry(graphic).or_default() += 1;
+        }
+        let mut labelled: BTreeSet<String> = BTreeSet::new();
+        for text in &texts {
+            let hung_on = pid_value(text, "label_of").expect("counted above");
+            let references_named = named_by.get(&hung_on).copied().unwrap_or(0);
+            if pid_value(text, "label_on").as_deref() == Some("symbol") {
+                assert_eq!(
+                    references_named,
+                    1,
+                    "a text on a symbol names one reference: {:?}",
+                    says(text)
+                );
+                labelled.insert(hung_on);
+            } else {
+                assert_eq!(
+                    references_named,
+                    0,
+                    "a text on no symbol names no reference: {:?}",
+                    says(text)
+                );
+            }
+        }
+        assert_eq!(
+            labelled.len(),
+            LABELLED,
+            "symbols at least one text hangs on"
+        );
+
+        let elsewhere = doc
+            .model_space_entities()
+            .filter(|entity| pid_value(entity, "role").as_deref() != Some("text"))
+            .filter(|entity| {
+                pid_value(entity, "label_of").is_some() || pid_value(entity, "label_on").is_some()
+            })
+            .count();
+        assert_eq!(elsewhere, 0, "what is no loose text states no pairing");
+        let (_, members) = filed(doc);
+        let inside: Vec<&String> = members
+            .iter()
+            .filter(|member| member.contains("label_of=") || member.contains("label_on="))
+            .collect();
+        assert!(
+            inside.is_empty(),
+            "members that state a pairing: {inside:?}"
+        );
+        assert_eq!(
+            (import.summary.symbol_labels, import.summary.other_labels),
+            (SYMBOL_LABELS, LINE_LABELS + OTHER_LABELS),
+            "the label texts the summary counts"
+        );
+    }
+
+    /// `D04` of the plant test data, imported: a sheet that states no
+    /// drawing number, and letters its texts outside any label. Or `None`,
+    /// and a line saying why, where the plant test data does not hold it.
+    fn sheet_d04() -> Option<PidImport> {
+        let path = sample_path()?
+            .ancestors()
+            .nth(3)
+            .map(|data| data.join("test").join("U01").join("D04.pid"))
+            .filter(|path| path.is_file());
+        let Some(path) = path else {
+            eprintln!("skipped: no D04.pid in the plant test data");
+            return None;
+        };
+        Some(load_pid(&path).unwrap_or_else(|error| panic!("load {}: {error}", path.display())))
+    }
+
     /// A sheet the item reader gives nothing for -- `D04` of the plant test
     /// data states no drawing number -- still imports, and its symbols
     /// state their own numbers and nothing of an item (SPEC section 4.1).
     #[test]
     fn a_sheet_whose_items_cannot_be_read_imports_with_graphics_alone() {
-        let Some(sample) = sample_path() else {
+        let Some(import) = sheet_d04() else {
             return;
         };
-        let Some(path) = sample
-            .ancestors()
-            .nth(3)
-            .map(|data| data.join("test").join("U01").join("D04.pid"))
-            .filter(|path| path.is_file())
-        else {
-            eprintln!("skipped: no D04.pid in the plant test data");
-            return;
-        };
-        let import =
-            load_pid(&path).unwrap_or_else(|error| panic!("load {}: {error}", path.display()));
         let references = symbol_references(&import.document);
         assert_eq!(
             [
@@ -5207,6 +5319,39 @@ mod sample_sheet {
         );
     }
 
+    /// A text whose parent record is no label record is no label's, and
+    /// states no pairing: `D04` of the plant test data letters every one of
+    /// its texts that way (SPEC section 2.3), so none of them states one
+    /// and the summary counts no label. Counted on the sheet, not derived.
+    #[test]
+    fn a_text_outside_a_label_states_no_pairing() {
+        let Some(import) = sheet_d04() else {
+            return;
+        };
+        let texts: Vec<&EntityType> = import
+            .document
+            .model_space_entities()
+            .filter(|entity| pid_value(entity, "role").as_deref() == Some("text"))
+            .collect();
+        assert_eq!(
+            [
+                format!("texts {}", texts.len()),
+                stating(&texts, &["label_of", "label_on"]),
+                by_value(&texts, "label_on"),
+                format!(
+                    "symbol_labels {}, other_labels {}",
+                    import.summary.symbol_labels, import.summary.other_labels
+                ),
+            ],
+            [
+                "texts 95",
+                "label_of 0, label_on 0",
+                "",
+                "symbol_labels 0, other_labels 0",
+            ]
+        );
+    }
+
     /// Read a second time, the sheet files the same definitions under the
     /// same names, and every reference refers to the same one from the same
     /// place with the same record: which drawing of a symbol is `_2` does
@@ -5233,11 +5378,33 @@ mod sample_sheet {
         assert_eq!(second.summary, first.summary);
     }
 
+    /// What a drawing holds of its labels, as lines a second reading is
+    /// compared by: one for each entity in model space that states a
+    /// pairing -- its lettering, its layer and its whole record -- in the
+    /// order they are filed.
+    fn label_lines(doc: &Document) -> Vec<String> {
+        doc.model_space_entities()
+            .filter(|entity| pid_value(entity, "label_of").is_some())
+            .map(|entity| {
+                let lettering = match entity {
+                    EntityType::Text(text) => text.value.as_str(),
+                    _ => "not a text",
+                };
+                format!(
+                    "{lettering} | layer {} | {}",
+                    entity.common().layer,
+                    says(entity).join("; ")
+                )
+            })
+            .collect()
+    }
+
     /// The sample, opened, saved as `ext` and read back, holds its symbols
     /// as it did: as many references, each referring to the same block from
     /// the same place, on the same layer, with its whole record; and as many
     /// definitions, each member of the same kind, on the same layer, with
-    /// the same record. In memory, not through a file: a folder with
+    /// the same record. Its label texts state what they stated, each with
+    /// its whole record. In memory, not through a file: a folder with
     /// `symbol` in its name left in the temp folder is a symbol library to
     /// every `.pid` opened under that folder afterwards.
     fn check_the_saved_copy(ext: &str) {
@@ -5246,6 +5413,8 @@ mod sample_sheet {
         };
         let (references, members) = filed(doc);
         assert_eq!(references.len(), PLACEMENTS, "symbols of the opened sheet");
+        let labels = label_lines(doc);
+        assert_eq!(labels.len(), LETTERING, "label texts of the opened sheet");
 
         let bytes = OpenCADStudio::io::save_to_bytes(doc, ext, doc.version)
             .unwrap_or_else(|error| panic!("saving the sample as {ext}: {error}"));
@@ -5260,6 +5429,7 @@ mod sample_sheet {
             "{ext}: definitions read back"
         );
         assert_same_lines(&format!("{ext}: member"), &members, &members_after);
+        assert_same_lines(&format!("{ext}: label text"), &labels, &label_lines(&copy));
     }
 
     /// SPEC-pid-symbol-block §6, 8.

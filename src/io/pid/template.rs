@@ -1765,7 +1765,10 @@ mod tests {
         let built = build_document_entities(
             &sheet,
             &tables,
-            &SheetItems::default(),
+            Stated {
+                items: &SheetItems::default(),
+                labels: &SheetLabels::default(),
+            },
             &mut None,
             &ImportUnit::AssumedMetre,
             &mut doc,
