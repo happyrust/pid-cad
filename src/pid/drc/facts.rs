@@ -2,19 +2,26 @@
 //!
 //! 现在接了对象自己的属性；派生事实 `位号`、`位号来源`、`独立编号`、`种类`、`类型编码`、`类型`、
 //! `图层`、`位号合规`、`位号.长度`、`位号.同类型重复数`、`必填项缺失数`，设备的 `管口数`、
-//! `设备类别`，符号实例的 `符号.状态`；仪表回路和图纸自己的事实；根 `图纸.图号`、`图纸.PBS`、
-//! `参数.<名>`。管线、管路、管段、管口、信号线、页间连接符、主数据和跨图的事实还取不到值。
-//! 作用对象从摘要的 `objects[]` 里选；仪表回路是按 `仪表回路` 属性分组的仪表，图纸是整张图。
+//! `设备类别`，符号实例的 `符号.状态`；管线、管路、管段的 `端口未连接数`、`长度`、`管路数`、
+//! `管段数`、`后缀`、`重叠管段数`、`直连异径管路数`、`未标记覆盖数`，关系 `所属管路`、`所属管线`；
+//! 仪表回路和图纸自己的事实；根 `图纸.图号`、`图纸.PBS`、`参数.<名>`。管口、信号线、页间连接符、
+//! 主数据和跨图的事实还取不到值。
+//! 作用对象从摘要的 `objects[]` 里选；管段是摘要的 `segments[]`，仪表回路是按 `仪表回路` 属性
+//! 分组的仪表，图纸是整张图。
 
 use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 
-use crate::pid::master_data::Resolved;
-use crate::pid::project_index::{DrawingSummary, ObjectKind, SummaryObject};
+use crate::pid::master_data::{parse_dn, Resolved};
+use crate::pid::project_index::{
+    DrawingSummary, Joint, ObjectKind, SummaryObject, SummarySegment, DEFAULT_TOLERANCE,
+};
+use crate::pid::propagate::LINE_FIELDS;
 use crate::pid::symbols::BLOCK_PREFIX;
 use crate::pid::tag_engine::{resolve_rule, TAG_STATUS_DUPLICATED};
 use crate::pid::tag_rule;
+use crate::pid::topology::{TYPE_PIPE_LINE, TYPE_PIPE_SEGMENT};
 use crate::pid::type_lib::TypeLib;
 
 use super::dsl::{Fact, FactList, Facts, Matching, Path};
@@ -35,6 +42,12 @@ const LOOP: &str = "仪表回路";
 /// 图纸的种类名，也是根 `图纸`。
 const DRAWING: &str = "图纸";
 
+/// 管段的种类名。
+const SEGMENT: &str = "管段";
+
+/// 结果的 `points` 要列出位置的派生事实（§3.6）：没接上的端点、与异径管路相接的地方。
+pub const LOCATED: [&str; 2] = ["端口未连接数", "直连异径管路数"];
+
 /// 检查时各张图共用的：规则包、主数据、类型库。
 pub struct Context<'a> {
     pub rules: &'a RuleSet,
@@ -42,7 +55,8 @@ pub struct Context<'a> {
     pub types: &'a TypeLib,
 }
 
-/// 一张图，连同检查前先数好的：同类型同位号的对象数、设备数、设备的管口数、仪表回路。
+/// 一张图，连同检查前先数好的：同类型同位号的对象数、设备数、设备的管口数、仪表回路，
+/// 按位号找的管线和管路、管线的管路数、管线和管路名下的线段。
 pub struct Sheet<'a> {
     drawing: &'a DrawingSummary,
     /// （类型编码，位号）→ 有自己编号的对象数。位号去掉首尾空白，空的不数。
@@ -52,6 +66,16 @@ pub struct Sheet<'a> {
     /// （类型编码，位号）→ 属主是设备的端口数。
     nozzles: HashMap<(&'a str, &'a str), usize>,
     loops: Vec<Loop<'a>>,
+    /// 管线位号 → 这个位号的管线。位号去掉首尾空白，空的不收。
+    lines: HashMap<&'a str, Vec<&'a SummaryObject>>,
+    /// 管路位号 → 这个位号的管路。位号去掉首尾空白，空的不收。
+    runs: HashMap<&'a str, Vec<&'a SummaryObject>>,
+    /// 管线位号 → 属主是它的管路数。
+    line_runs: HashMap<&'a str, usize>,
+    /// 管线位号 → 它的线段，它的管路的也算。
+    line_segments: HashMap<&'a str, Vec<&'a SummarySegment>>,
+    /// 管路位号 → 它的线段。
+    run_segments: HashMap<&'a str, Vec<&'a SummarySegment>>,
 }
 
 impl<'a> Sheet<'a> {
@@ -60,6 +84,9 @@ impl<'a> Sheet<'a> {
         let mut equipment = HashMap::new();
         let mut loops: Vec<Loop<'a>> = Vec::new();
         let mut loop_at: HashMap<&'a str, usize> = HashMap::new();
+        let mut lines: HashMap<&'a str, Vec<&'a SummaryObject>> = HashMap::new();
+        let mut runs: HashMap<&'a str, Vec<&'a SummaryObject>> = HashMap::new();
+        let mut line_runs = HashMap::new();
         for object in &drawing.objects {
             let key = (object.type_code.as_str(), object.tag.trim());
             if object.own_tag && !key.1.is_empty() {
@@ -67,6 +94,19 @@ impl<'a> Sheet<'a> {
             }
             if object.kind == ObjectKind::Equipment {
                 *equipment.entry(key).or_insert(0) += 1;
+            }
+            match object.kind {
+                ObjectKind::PipeLine if !key.1.is_empty() => {
+                    lines.entry(key.1).or_default().push(object);
+                }
+                ObjectKind::PipeRun if !key.1.is_empty() => {
+                    runs.entry(key.1).or_default().push(object);
+                }
+                _ => {}
+            }
+            let line = owner(object).filter(|_| object.kind == ObjectKind::PipeRun);
+            if let Some(line) = line {
+                *line_runs.entry(line).or_insert(0) += 1;
             }
             let number = object.props.get(LOOP).map_or("", |number| number.trim());
             if object.kind == ObjectKind::Instrument && !number.is_empty() {
@@ -88,13 +128,39 @@ impl<'a> Sheet<'a> {
                     .or_insert(0) += 1;
             }
         }
+        let mut line_segments: HashMap<&'a str, Vec<&'a SummarySegment>> = HashMap::new();
+        let mut run_segments: HashMap<&'a str, Vec<&'a SummarySegment>> = HashMap::new();
+        for segment in &drawing.segments {
+            line_segments
+                .entry(segment.line.trim())
+                .or_default()
+                .push(segment);
+            if let Some(run) = &segment.run {
+                run_segments.entry(run.trim()).or_default().push(segment);
+            }
+        }
         Self {
             drawing,
             tags,
             equipment,
             nozzles,
             loops,
+            lines,
+            runs,
+            line_runs,
+            line_segments,
+            run_segments,
         }
+    }
+
+    /// 位号是 `tag` 的管线；图上没有或不止一条时是 `None`。
+    fn line(&self, tag: &str) -> Option<&'a SummaryObject> {
+        single(self.lines.get(tag.trim()))
+    }
+
+    /// 位号是 `tag` 的管路；图上没有或不止一条时是 `None`。
+    fn run(&self, tag: &str) -> Option<&'a SummaryObject> {
+        single(self.runs.get(tag.trim()))
     }
 }
 
@@ -110,6 +176,8 @@ pub struct Loop<'a> {
 pub enum Subject<'a> {
     /// 摘要 `objects[]` 的一项。
     Object(&'a SummaryObject),
+    /// 摘要 `segments[]` 的一项。
+    Segment(&'a SummarySegment),
     Loop(&'a Loop<'a>),
     /// 整张图。
     Drawing,
@@ -119,6 +187,12 @@ pub enum Subject<'a> {
 /// 先后。写类型编码的含它的下级类型，下级按 `types` 认。
 pub fn subjects<'a>(sheet: &'a Sheet<'a>, target: &Target, types: &TypeLib) -> Vec<Subject<'a>> {
     match target {
+        Target::Kind(Kind::Segment) => sheet
+            .drawing
+            .segments
+            .iter()
+            .map(Subject::Segment)
+            .collect(),
         Target::Kind(Kind::Loop) => sheet.loops.iter().map(Subject::Loop).collect(),
         Target::Kind(Kind::Drawing) => vec![Subject::Drawing],
         _ => sheet
@@ -179,8 +253,8 @@ impl<'a> SubjectFacts<'a> {
         }
     }
 
-    /// 结果里的对象引用（§3.6）。仪表回路和图纸没有类型编码和句柄；回路的 `tag` 是回路号，
-    /// 位置取回路里第一个仪表的。
+    /// 结果里的对象引用（§3.6）。管段没有位号，属主是它的管路或管线，位置是起点。仪表回路和
+    /// 图纸没有类型编码和句柄；回路的 `tag` 是回路号，位置取回路里第一个仪表的。
     pub fn object_ref(&self) -> ObjectRef {
         let drawing_id = self.sheet.drawing.drawing_id.clone();
         match self.subject {
@@ -193,6 +267,16 @@ impl<'a> SubjectFacts<'a> {
                 port: None,
                 at: object.at,
                 handle: Some(object.handle.clone()),
+            },
+            Subject::Segment(segment) => ObjectRef {
+                kind: SEGMENT.to_owned(),
+                type_code: segment_type(segment).to_owned(),
+                tag: None,
+                drawing_id,
+                owner: text(segment_owner(segment)),
+                port: None,
+                at: segment.a,
+                handle: Some(segment.handle.clone()),
             },
             Subject::Loop(group) => ObjectRef {
                 kind: LOOP.to_owned(),
@@ -218,7 +302,8 @@ impl<'a> SubjectFacts<'a> {
     }
 
     /// 豁免用的对象键（§3.7）：有自己编号的是「类型编码|位号」，没有位号或没有自己
-    /// 编号的是「类型编码|所属|x,y」；仪表回路是「仪表回路|回路号」，图纸是「图纸|图号」。
+    /// 编号的是「类型编码|所属|x,y」；管段是「类型编码|所属|起点」，仪表回路是「仪表回路|回路号」，
+    /// 图纸是「图纸|图号」。
     pub fn object_key(&self) -> String {
         match self.subject {
             Subject::Object(object) => match text(&object.tag) {
@@ -230,30 +315,40 @@ impl<'a> SubjectFacts<'a> {
                     point(object.at)
                 ),
             },
+            Subject::Segment(segment) => format!(
+                "{}|{}|{}",
+                segment_type(segment),
+                segment_owner(segment),
+                point(segment.a)
+            ),
             Subject::Loop(group) => format!("{LOOP}|{}", group.number),
             Subject::Drawing => format!("{DRAWING}|{}", self.sheet.drawing.drawing_id),
         }
     }
 
-    /// 没写消息模板时消息里的「位号或位置」：仪表回路是回路号，图纸是图号。
+    /// 没写消息模板时消息里的「位号或位置」：管段是起点，仪表回路是回路号，图纸是图号。
     pub fn location(&self) -> String {
         match self.subject {
             Subject::Object(object) => text(&object.tag).unwrap_or_else(|| point(object.at)),
+            Subject::Segment(segment) => point(segment.a),
             Subject::Loop(group) => group.number.to_owned(),
             Subject::Drawing => self.sheet.drawing.drawing_id.clone(),
         }
     }
 
     /// 消息模板里 `{name}` 填的值（§3.1）；没有值是空串。仪表回路的 `{位号}` 是回路号，
-    /// 仪表回路和图纸的 `{类型}` 是种类名；`{缺失字段}` 是缺的必填属性名。
+    /// 管段、仪表回路和图纸的 `{类型}` 是种类名，管段的 `{所属}` 是它的管路或管线；`{缺失字段}`
+    /// 是缺的必填属性名。
     pub fn placeholder(&self, name: &str) -> String {
         let value = match (name, self.subject) {
             ("位号", Subject::Object(object)) => Some(object.tag.clone()),
             ("位号", Subject::Loop(group)) => Some(group.number.to_owned()),
             ("类型", Subject::Object(object)) => Some(object.type_label.clone()),
+            ("类型", Subject::Segment(_)) => Some(SEGMENT.to_owned()),
             ("类型", Subject::Loop(_)) => Some(LOOP.to_owned()),
             ("类型", Subject::Drawing) => Some(DRAWING.to_owned()),
             ("所属", Subject::Object(object)) => object.owner.clone(),
+            ("所属", Subject::Segment(segment)) => Some(segment_owner(segment).to_owned()),
             ("位号" | "所属", _) => None,
             ("图号", _) => Some(self.sheet.drawing.drawing_id.clone()),
             (MISSING_FIELDS, _) => Some(self.missing_fields().join("、")),
@@ -295,15 +390,37 @@ impl<'a> SubjectFacts<'a> {
         missing
     }
 
+    /// 结果的 `points`（§3.6）：`names` 里的派生事实指到的位置，按名字、再按线段的先后，不重复。
+    /// `端口未连接数` 是没接上的端点，`直连异径管路数` 是与异径管路相接的地方。
+    pub fn points(&self, names: &[&str]) -> Vec<[f64; 2]> {
+        let mut points: Vec<[f64; 2]> = Vec::new();
+        for name in names {
+            let found = match (*name, self.subject) {
+                ("端口未连接数", _) => self.loose_ends(),
+                ("直连异径管路数", Subject::Object(object)) => {
+                    self.reducers(object).map(|(_, at)| at)
+                }
+                _ => None,
+            };
+            for at in found.into_iter().flatten() {
+                if !points.contains(&at) {
+                    points.push(at);
+                }
+            }
+        }
+        points
+    }
+
     fn value(&self, name: &str) -> Option<String> {
         if !self.kind.has_fact(name) {
             return match self.subject {
                 Subject::Object(object) => object.props.get(name).cloned(),
-                Subject::Loop(_) | Subject::Drawing => None,
+                Subject::Segment(_) | Subject::Loop(_) | Subject::Drawing => None,
             };
         }
         match self.subject {
             Subject::Object(object) => self.object_fact(object, name),
+            Subject::Segment(segment) => self.segment_fact(segment, name),
             Subject::Loop(group) => loop_fact(group, name, self.context.rules),
             Subject::Drawing => self.drawing_fact(name),
         }
@@ -321,6 +438,27 @@ impl<'a> SubjectFacts<'a> {
             "位号合规" => self.tag_fits(object).map(truth),
             MISSING_COUNT => Some(self.missing_fields().len().to_string()),
             "管口数" => self.nozzles(object).map(|count| count.to_string()),
+            "端口未连接数" => self.loose_ends().map(|ends| ends.len().to_string()),
+            "长度" => self
+                .own_segments(object)
+                .map(|segments| total(segments).to_string()),
+            "管路数" => self.pipe_runs(object).map(|count| count.to_string()),
+            "管段数" => self
+                .own_segments(object)
+                .map(|segments| segments.len().to_string()),
+            "后缀" => suffix(object).map(str::to_owned),
+            "直连异径管路数" => self.reducers(object).map(|(count, _)| count.to_string()),
+            "未标记覆盖数" => self.unmarked(object).map(|count| count.to_string()),
+            _ => None,
+        }
+    }
+
+    /// 管段自己的事实。摘要里的线段不记图层，`图层` 不知道。
+    fn segment_fact(&self, segment: &SummarySegment, name: &str) -> Option<String> {
+        match name {
+            "长度" => Some(length(segment).to_string()),
+            "端口未连接数" => self.loose_ends().map(|ends| ends.len().to_string()),
+            "重叠管段数" => Some(self.overlaps(segment).to_string()),
             _ => None,
         }
     }
@@ -341,6 +479,147 @@ impl<'a> SubjectFacts<'a> {
             return None;
         }
         Some(self.sheet.nozzles.get(&key).copied().unwrap_or(0))
+    }
+
+    /// 管线、管路的位号：去掉首尾空白不空、图上同种同位号的只有它一条。不然分不清名下的线段
+    /// 和管路，不知道。
+    fn pipe_tag<'o>(&self, object: &'o SummaryObject) -> Option<&'o str> {
+        let pipes = match object.kind {
+            ObjectKind::PipeLine => &self.sheet.lines,
+            ObjectKind::PipeRun => &self.sheet.runs,
+            _ => return None,
+        };
+        let tag = object.tag.trim();
+        (pipes.get(tag).map_or(0, Vec::len) == 1).then_some(tag)
+    }
+
+    /// 管线、管路名下的线段：摘要里记在这个管线、管路位号下的；管线的含它的管路的。
+    fn own_segments(&self, object: &SummaryObject) -> Option<&'a [&'a SummarySegment]> {
+        let tag = self.pipe_tag(object)?;
+        let segments = match object.kind {
+            ObjectKind::PipeLine => &self.sheet.line_segments,
+            _ => &self.sheet.run_segments,
+        };
+        Some(segments.get(tag).map(Vec::as_slice).unwrap_or_default())
+    }
+
+    /// `管路数`：属主是这条管线的管路数。
+    fn pipe_runs(&self, object: &SummaryObject) -> Option<usize> {
+        if object.kind != ObjectKind::PipeLine {
+            return None;
+        }
+        let tag = self.pipe_tag(object)?;
+        Some(self.sheet.line_runs.get(tag).copied().unwrap_or(0))
+    }
+
+    /// 没接上的端点：管段是它两端里的，管线、管路是名下线段两端里的。
+    fn loose_ends(&self) -> Option<Vec<[f64; 2]>> {
+        match self.subject {
+            Subject::Segment(segment) => Some(open_ends(segment).collect()),
+            Subject::Object(object) => {
+                let segments = self.own_segments(object)?;
+                Some(segments.iter().copied().flat_map(open_ends).collect())
+            }
+            Subject::Loop(_) | Subject::Drawing => None,
+        }
+    }
+
+    /// `重叠管段数`：图上与这段共线、重叠长度超过容差的其他线段数。
+    fn overlaps(&self, segment: &SummarySegment) -> usize {
+        let Some(along) = Along::new(segment) else {
+            return 0;
+        };
+        self.sheet
+            .drawing
+            .segments
+            .iter()
+            .filter(|other| {
+                !std::ptr::eq(*other, segment) && along.overlap(other) > DEFAULT_TOLERANCE
+            })
+            .count()
+    }
+
+    /// `直连异径管路数` 和相接的地方：这条管路的线段端点直接接在别的管路的线段端点上（不是接在
+    /// 中间，也没隔着管件），两条管路的公称直径不同。按这条管路线段两端记的接点认；对面的管路
+    /// 图上没有或不止一条、任一方没填直径的不算。
+    fn reducers(&self, run: &SummaryObject) -> Option<(usize, Vec<[f64; 2]>)> {
+        if run.kind != ObjectKind::PipeRun {
+            return None;
+        }
+        let segments = self.own_segments(run)?;
+        let tag = run.tag.trim();
+        let mut others: Vec<&str> = Vec::new();
+        let mut points: Vec<[f64; 2]> = Vec::new();
+        for (joint, at) in segments.iter().copied().flat_map(ends) {
+            let Some(other) = joint.and_then(direct_run) else {
+                continue;
+            };
+            let neighbour = self.sheet.run(other).filter(|_| other != tag);
+            if !neighbour.is_some_and(|neighbour| differs(diameter(run), diameter(neighbour))) {
+                continue;
+            }
+            if !others.contains(&other) {
+                others.push(other);
+            }
+            if !points.contains(&at) {
+                points.push(at);
+            }
+        }
+        Some((others.len(), points))
+    }
+
+    /// `未标记覆盖数`：五个管级属性里，管路的值与所属管线的不同、又不在覆盖标记里的个数。值去掉
+    /// 首尾空白再比，没填当空。所属管线图上没有或不止一条时不知道。
+    fn unmarked(&self, run: &SummaryObject) -> Option<usize> {
+        if run.kind != ObjectKind::PipeRun {
+            return None;
+        }
+        let line = self.sheet.line(owner(run)?)?;
+        let count = LINE_FIELDS
+            .into_iter()
+            .filter(|&name| prop(run, name) != prop(line, name))
+            .filter(|&name| !run.overrides.iter().any(|mark| mark == name))
+            .count();
+        Some(count)
+    }
+
+    /// 关系 `所属管路`、`所属管线` 走到的对象上的事实。走不到时是 `None`。
+    fn related(&self, relation: &str) -> Option<SubjectFacts<'a>> {
+        let (kind, found) = match relation {
+            "所属管路" => (Kind::PipeRun, self.sheet.run(self.run_tag()?)?),
+            "所属管线" => (Kind::PipeLine, self.sheet.line(self.line_tag()?)?),
+            _ => return None,
+        };
+        Some(SubjectFacts {
+            subject: Subject::Object(found),
+            kind,
+            ..*self
+        })
+    }
+
+    /// 所属管路的位号：管段记的管路；线上的阀门、管件、打断符等是属主。管线、管路自己没有。
+    fn run_tag(&self) -> Option<&'a str> {
+        match self.subject {
+            Subject::Segment(segment) => segment.run.as_deref(),
+            Subject::Object(object) => match object.kind {
+                ObjectKind::PipeLine | ObjectKind::PipeRun => None,
+                _ => owner(object),
+            },
+            Subject::Loop(_) | Subject::Drawing => None,
+        }
+    }
+
+    /// 所属管线的位号：管段记的管线；管路是属主；别的对象经所属管路找。管线自己没有。
+    fn line_tag(&self) -> Option<&'a str> {
+        match self.subject {
+            Subject::Segment(segment) => Some(segment.line.as_str()),
+            Subject::Object(object) => match object.kind {
+                ObjectKind::PipeLine => None,
+                ObjectKind::PipeRun => owner(object),
+                _ => owner(self.sheet.run(self.run_tag()?)?),
+            },
+            Subject::Loop(_) | Subject::Drawing => None,
+        }
     }
 
     fn drawing_fact(&self, name: &str) -> Option<String> {
@@ -406,6 +685,13 @@ impl Facts for SubjectFacts<'_> {
             [first, name] if first == "位号" => Fact::Value(self.tag_fact(name)),
             [first, name] if first == "符号" && name == "状态" => {
                 Fact::Value(self.symbol_state())
+            }
+            [first, rest @ ..] if first == "所属管路" || first == "所属管线" => {
+                self.related(first).map_or(Fact::Value(None), |facts| {
+                    facts.fact(&Path {
+                        segments: rest.to_vec(),
+                    })
+                })
             }
             _ => Fact::Value(None),
         }
@@ -481,6 +767,153 @@ fn scalar(value: &Value) -> Option<String> {
 fn own_tag(object: &SummaryObject) -> Option<&str> {
     let tag = object.tag.trim();
     (object.own_tag && !tag.is_empty()).then_some(tag)
+}
+
+/// 对象的属主，去掉首尾空白；没有或空的是 `None`。
+fn owner(object: &SummaryObject) -> Option<&str> {
+    let owner = object.owner.as_deref()?.trim();
+    (!owner.is_empty()).then_some(owner)
+}
+
+/// 只有一个时取那一个。
+fn single<'a>(found: Option<&Vec<&'a SummaryObject>>) -> Option<&'a SummaryObject> {
+    match found?.as_slice() {
+        [one] => Some(*one),
+        _ => None,
+    }
+}
+
+/// 属性值去掉首尾空白；没有这个属性是空串。
+fn prop<'o>(object: &'o SummaryObject, name: &str) -> &'o str {
+    object.props.get(name).map_or("", |value| value.trim())
+}
+
+/// `后缀`：管路位号去掉「所属管线位号 + `-`」剩下的部分；不是这个形状的不知道。
+fn suffix(run: &SummaryObject) -> Option<&str> {
+    if run.kind != ObjectKind::PipeRun {
+        return None;
+    }
+    run.tag.trim().strip_prefix(owner(run)?)?.strip_prefix('-')
+}
+
+/// 管路的公称直径，去掉首尾空白；没填的是 `None`。
+fn diameter(run: &SummaryObject) -> Option<&str> {
+    Some(prop(run, "公称直径")).filter(|value| !value.is_empty())
+}
+
+/// 两个公称直径不同：都读得出数时比数（`DN80` 与 `80` 相同），不然比文本。任一方没填不算不同。
+fn differs(one: Option<&str>, other: Option<&str>) -> bool {
+    let (Some(one), Some(other)) = (one, other) else {
+        return false;
+    };
+    match (parse_dn(one), parse_dn(other)) {
+        (Some(a), Some(b)) => a != b,
+        _ => one != other,
+    }
+}
+
+/// 端点直接接着的管路的位号：接在别的线段的端点上（不是接在中间）、那段线是管路的。
+fn direct_run(joint: &Joint) -> Option<&str> {
+    match joint {
+        Joint::Segment {
+            run: Some(run),
+            tee: false,
+            ..
+        } => Some(run.trim()),
+        _ => None,
+    }
+}
+
+/// 管段的类型编码：管路的线是管段，管线自己的线是管线。
+fn segment_type(segment: &SummarySegment) -> &'static str {
+    if segment.run.is_some() {
+        TYPE_PIPE_SEGMENT
+    } else {
+        TYPE_PIPE_LINE
+    }
+}
+
+/// 管段的所属：管路的线是管路位号，管线自己的线是管线位号。去掉首尾空白。
+fn segment_owner(segment: &SummarySegment) -> &str {
+    segment.run.as_deref().unwrap_or(&segment.line).trim()
+}
+
+/// 线段两端：接点和坐标。
+fn ends(segment: &SummarySegment) -> [(Option<&Joint>, [f64; 2]); 2] {
+    [
+        (segment.joint_a.as_ref(), segment.a),
+        (segment.joint_b.as_ref(), segment.b),
+    ]
+}
+
+/// 线段两端里没接上的：什么都没接。接到打断符的有接点，不算悬空。
+fn open_ends(segment: &SummarySegment) -> impl Iterator<Item = [f64; 2]> + '_ {
+    ends(segment)
+        .into_iter()
+        .filter(|(joint, _)| joint.is_none())
+        .map(|(_, at)| at)
+}
+
+/// 线段长度：两端距离，不超过容差的算 0。
+fn length(segment: &SummarySegment) -> f64 {
+    let length = (segment.b[0] - segment.a[0]).hypot(segment.b[1] - segment.a[1]);
+    if length > DEFAULT_TOLERANCE {
+        length
+    } else {
+        0.0
+    }
+}
+
+/// 线段长度之和。从 0 加起：浮点数的 `sum` 对空表得 `-0`，写成文本是 `-0`。
+fn total(segments: &[&SummarySegment]) -> f64 {
+    segments
+        .iter()
+        .fold(0.0, |sum, segment| sum + length(segment))
+}
+
+/// 一段线所在的直线：从这段的起点量，量到终点是这段的长度。
+struct Along {
+    origin: [f64; 2],
+    direction: [f64; 2],
+    length: f64,
+}
+
+impl Along {
+    /// 长度为 0 的线段定不出方向，是 `None`。
+    fn new(segment: &SummarySegment) -> Option<Self> {
+        let span = length(segment);
+        if span <= 0.0 {
+            return None;
+        }
+        Some(Self {
+            origin: segment.a,
+            direction: [
+                (segment.b[0] - segment.a[0]) / span,
+                (segment.b[1] - segment.a[1]) / span,
+            ],
+            length: span,
+        })
+    }
+
+    /// 与 `other` 重叠的长度：`other` 两端离这条直线都不超过容差时，是两段在直线上的公共部分；
+    /// 不然是 0。
+    fn overlap(&self, other: &SummarySegment) -> f64 {
+        let (from, off_from) = self.project(other.a);
+        let (to, off_to) = self.project(other.b);
+        if off_from > DEFAULT_TOLERANCE || off_to > DEFAULT_TOLERANCE {
+            return 0.0;
+        }
+        (from.max(to).min(self.length) - from.min(to).max(0.0)).max(0.0)
+    }
+
+    /// 点在直线上的位置和离开直线的距离。
+    fn project(&self, at: [f64; 2]) -> (f64, f64) {
+        let dx = at[0] - self.origin[0];
+        let dy = at[1] - self.origin[1];
+        let along = dx * self.direction[0] + dy * self.direction[1];
+        let off = (dx * self.direction[1] - dy * self.direction[0]).abs();
+        (along, off)
+    }
 }
 
 /// 摘要里的种类名（项目索引规格 §3.1 归类表的 `kind`）。

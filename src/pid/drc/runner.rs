@@ -9,10 +9,10 @@ use crate::pid::type_lib::TypeLib;
 
 use super::builtin_rules::rule_set_digest;
 use super::dsl::{Expr, Operand, Path};
-use super::facts::{subjects, Context, Sheet, SubjectFacts, MISSING_COUNT};
+use super::facts::{subjects, Context, Sheet, SubjectFacts, LOCATED, MISSING_COUNT};
 use super::model::{
-    Category, CheckReport, CheckResult, Kind, Rule, RuleSet, Scope, Severity, Summary, Trigger,
-    Waiver, REPORT_VERSION,
+    Category, CheckReport, CheckResult, Rule, RuleSet, Scope, Severity, Summary, Trigger, Waiver,
+    REPORT_VERSION,
 };
 
 /// 消息和修复建议最多这么多字（§3.1）。
@@ -102,6 +102,7 @@ pub fn check(input: &CheckInput) -> CheckReport {
 /// 一条规则在范围内各图上的命中：表达式为真才算，不知道不算。
 fn hits(rule: &Rule, sheets: &[Sheet<'_>], context: &Context<'_>) -> Vec<CheckResult> {
     let fields = fields(rule);
+    let located = located(rule);
     let missing = rule.target.kind().has_fact(MISSING_COUNT)
         && fields.iter().any(|name| name == MISSING_COUNT);
     let mut found = Vec::new();
@@ -128,7 +129,7 @@ fn hits(rule: &Rule, sheets: &[Sheet<'_>], context: &Context<'_>) -> Vec<CheckRe
                 object_key: facts.object_key(),
                 message,
                 fix,
-                points: Vec::new(),
+                points: facts.points(&located),
                 fields: if missing {
                     with_missing(&fields, &facts)
                 } else {
@@ -169,8 +170,35 @@ fn limit(mut text: String) -> String {
 /// 和根下的不算。`必填项缺失数` 先记下这个名字，出结果时换成缺的属性名（[`with_missing`]）。
 /// 按出现的先后，不重复。
 fn fields(rule: &Rule) -> Vec<String> {
-    let mut names = Vec::new();
-    collect_expr(&rule.tree, rule.target.kind(), &mut names);
+    let kind = rule.target.kind();
+    let mut names: Vec<String> = Vec::new();
+    visit_paths(&rule.tree, &mut |path| {
+        let name = match path.segments.as_slice() {
+            [first, ..] if first == "位号" => first,
+            [name] if name == MISSING_COUNT || !kind.has_fact(name) => name,
+            _ => return,
+        };
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    });
+    names
+}
+
+/// 结果的 `points` 要看的派生事实：表达式里单独用到、是作用对象的派生事实的 [`LOCATED`]，
+/// 按出现的先后，不重复。沿关系取的不算。
+fn located(rule: &Rule) -> Vec<&'static str> {
+    let kind = rule.target.kind();
+    let mut names: Vec<&'static str> = Vec::new();
+    visit_paths(&rule.tree, &mut |path| {
+        let found = match path.segments.as_slice() {
+            [name] => LOCATED.into_iter().find(|located| located == name),
+            _ => None,
+        };
+        if let Some(found) = found.filter(|found| kind.has_fact(found) && !names.contains(found)) {
+            names.push(found);
+        }
+    });
     names
 }
 
@@ -192,41 +220,31 @@ fn with_missing(fields: &[String], facts: &SubjectFacts) -> Vec<String> {
     names
 }
 
-fn collect_expr(expr: &Expr, kind: Kind, names: &mut Vec<String>) {
+/// 表达式里的每个路径，按出现的先后。
+fn visit_paths(expr: &Expr, visit: &mut impl FnMut(&Path)) {
     match expr {
         Expr::Or(terms) | Expr::And(terms) => {
             for term in terms {
-                collect_expr(term, kind, names);
+                visit_paths(term, visit);
             }
         }
-        Expr::Not(inner) => collect_expr(inner, kind, names),
+        Expr::Not(inner) => visit_paths(inner, visit),
         Expr::Compare(comparison) => {
-            collect_path(&comparison.left, kind, names);
-            collect_operand(&comparison.right, kind, names);
+            visit(&comparison.left);
+            visit_operand(&comparison.right, visit);
         }
     }
 }
 
-fn collect_operand(operand: &Operand, kind: Kind, names: &mut Vec<String>) {
+fn visit_operand(operand: &Operand, visit: &mut impl FnMut(&Path)) {
     match operand {
-        Operand::Path(path) => collect_path(path, kind, names),
+        Operand::Path(path) => visit(path),
         Operand::List(items) => {
             for item in items {
-                collect_operand(item, kind, names);
+                visit_operand(item, visit);
             }
         }
         Operand::Value(_) | Operand::Pattern(_) => {}
-    }
-}
-
-fn collect_path(path: &Path, kind: Kind, names: &mut Vec<String>) {
-    let name = match path.segments.as_slice() {
-        [first, ..] if first == "位号" => first,
-        [name] if name == MISSING_COUNT || !kind.has_fact(name) => name,
-        _ => return,
-    };
-    if !names.contains(name) {
-        names.push(name.clone());
     }
 }
 
@@ -244,16 +262,19 @@ mod tests {
         Category, CheckResult, ObjectRef, RuleScope, ScopeKind, Severity, Source, Target,
     };
     use crate::pid::project_index::{
-        ObjectKind, SummaryObject, SummaryPort, SummarySource, SUMMARY_VERSION,
+        Joint, ObjectKind, SummaryObject, SummaryPort, SummarySegment, SummarySource,
+        SUMMARY_VERSION,
     };
     use crate::pid::tag_engine::TAG_STATUS_DUPLICATED;
 
     /// 还没有正反例的内置规则：用到的事实还没接上，只能不命中或只能命中。到 DRC-8 要清空。
-    const UNCOVERED: [&str; 24] = [
-        "DR-006", "DR-007", "DR-008", "DR-009", "DR-011", "DR-012", "DR-014", "DR-015", "DR-020",
-        "DR-021", "DR-022", "DR-102", "DR-103", "DR-104", "DR-105", "DR-106", "DR-107", "DR-108",
-        "DR-109", "DR-110", "DR-111", "DR-112", "DR-115", "DR-116",
+    const UNCOVERED: [&str; 18] = [
+        "DR-006", "DR-007", "DR-008", "DR-009", "DR-015", "DR-020", "DR-021", "DR-022", "DR-102",
+        "DR-103", "DR-104", "DR-106", "DR-107", "DR-108", "DR-109", "DR-111", "DR-112", "DR-116",
     ];
+
+    /// 命中的例子出两条的规则：两个对象互相违反（两段管段互相重叠）。
+    const MUTUAL: [&str; 1] = ["DR-110"];
 
     fn object(
         kind: ObjectKind,
@@ -309,6 +330,13 @@ mod tests {
         object(ObjectKind::Equipment, "TANK", "储罐", tag, &[])
     }
 
+    fn pipe_run(tag: &str, line: &str, props: &[(&str, &str)]) -> SummaryObject {
+        SummaryObject {
+            owner: Some(line.to_owned()),
+            ..object(ObjectKind::PipeRun, "PIPE_RUN", "管路", tag, props)
+        }
+    }
+
     /// 放了符号块 `block` 的对象；`known` 是当前符号库里有没有这个块。
     fn with_symbol(base: SummaryObject, block: &str, known: bool) -> SummaryObject {
         SummaryObject {
@@ -331,6 +359,37 @@ mod tests {
                 joined: false,
             })
             .collect()
+    }
+
+    /// 管线 `line` 上从 `a` 到 `b` 的一段，两端都没接上；`run` 为空是管线自己的线。
+    fn segment(line: &str, run: Option<&str>, a: [f64; 2], b: [f64; 2]) -> SummarySegment {
+        SummarySegment {
+            line: line.to_owned(),
+            run: run.map(str::to_owned),
+            a,
+            b,
+            length: (b[0] - a[0]).hypot(b[1] - a[1]),
+            joint_a: None,
+            joint_b: None,
+            handle: "2E0".to_owned(),
+        }
+    }
+
+    /// 接在管线 `L-1001` 的管路 `run` 的线段上（`run` 为空是管线自己的线）；`tee` 是接在中间。
+    fn joined(run: Option<&str>, tee: bool) -> Option<Joint> {
+        Some(Joint::Segment {
+            line: "L-1001".to_owned(),
+            run: run.map(str::to_owned),
+            tee,
+        })
+    }
+
+    /// 有这些对象和线段的图 `PID-1101`。
+    fn piping(objects: Vec<SummaryObject>, segments: Vec<SummarySegment>) -> DrawingSummary {
+        DrawingSummary {
+            segments,
+            ..drawing("PID-1101", objects)
+        }
     }
 
     fn drawing(id: &str, objects: Vec<SummaryObject>) -> DrawingSummary {
@@ -474,6 +533,15 @@ mod tests {
                     &[("名称", "进料泵")],
                 )],
             ),
+            "DR-011" => (
+                vec![pipe_run("L-1001", "L-1001", &[])],
+                vec![pipe_run("L-1001-01", "L-1001", &[])],
+            ),
+            "DR-012" => {
+                let from = [0.0, 0.0];
+                let with = |to| piping(Vec::new(), vec![segment("L-1001", None, from, to)]);
+                return Some((with(from), with([10.0, 0.0])));
+            }
             "DR-013" => (
                 vec![instrument("FT-101", &[("仪表回路", "F-101")])],
                 vec![
@@ -481,6 +549,17 @@ mod tests {
                     instrument("FIC-101", &[("仪表回路", "F-101")]),
                 ],
             ),
+            "DR-014" => {
+                let with = |end: Option<Joint>| {
+                    let ends = SummarySegment {
+                        joint_a: end.clone(),
+                        joint_b: end,
+                        ..segment("L-1001", None, [0.0, 0.0], [10.0, 0.0])
+                    };
+                    piping(vec![line("L-1001", &[])], vec![ends])
+                };
+                return Some((with(None), with(Some(Joint::Break))));
+            }
             "DR-016" => (
                 vec![annotation(&[("文字", "  ")])],
                 vec![annotation(&[("文字", "去火炬")])],
@@ -510,6 +589,38 @@ mod tests {
                 vec![line("L-1001", &[("流体介质", "蒸汽"), ("绝热等级", "H1")])],
             ),
             "DR-101" => (vec![valve("", &[])], vec![valve("V-101", &[])]),
+            "DR-105" => {
+                let with = |size| {
+                    let first = segment("L-1001", Some("L-1001-01"), [0.0, 0.0], [10.0, 0.0]);
+                    let second = segment("L-1001", Some("L-1001-02"), [10.0, 0.0], [20.0, 0.0]);
+                    piping(
+                        vec![
+                            pipe_run("L-1001-01", "L-1001", &[("公称直径", "50")]),
+                            pipe_run("L-1001-02", "L-1001", &[("公称直径", size)]),
+                        ],
+                        vec![
+                            SummarySegment {
+                                joint_b: joined(Some("L-1001-02"), false),
+                                ..first
+                            },
+                            second,
+                        ],
+                    )
+                };
+                return Some((with("80"), with("50")));
+            }
+            "DR-110" => {
+                let with = |from: f64| {
+                    piping(
+                        Vec::new(),
+                        vec![
+                            segment("L-1001", None, [0.0, 0.0], [10.0, 0.0]),
+                            segment("L-1001", None, [from, 0.0], [from + 10.0, 0.0]),
+                        ],
+                    )
+                };
+                return Some((with(5.0), with(10.0)));
+            }
             "DR-113" => {
                 let transmitter = with_symbol(
                     instrument("FT-101", &[("仪表回路", "F-101")]),
@@ -530,12 +641,22 @@ mod tests {
                 }],
                 vec![line("L-1001", &[])],
             ),
+            "DR-115" => {
+                let with = |class| {
+                    vec![
+                        line("L-1001", &[("管道等级", "A1")]),
+                        pipe_run("L-1001-01", "L-1001", &[("管道等级", class)]),
+                    ]
+                };
+                (with("B2"), with("A1"))
+            }
             _ => return None,
         };
         Some((drawing("PID-1101", hit), drawing("PID-1101", miss)))
     }
 
-    /// 表驱动：每条内置规则在它的例子图上，命中的例子出一条、不命中的不出。
+    /// 表驱动：每条内置规则在它的例子图上，命中的例子出一条（`MUTUAL` 里的出两条）、不命中的
+    /// 不出。
     #[test]
     fn every_builtin_rule_has_a_hit_and_a_miss() {
         let rules = all_enabled();
@@ -552,8 +673,9 @@ mod tests {
                 !UNCOVERED.contains(&id),
                 "{id} 有了例子，要从未覆盖名单里拿掉"
             );
+            let expected = if MUTUAL.contains(&id) { 2 } else { 1 };
             let report = run(&rules, &[hit]);
-            assert_eq!(hits(&report, id), 1, "{id} 应命中一条");
+            assert_eq!(hits(&report, id), expected, "{id} 应命中 {expected} 条");
             let report = run(&rules, &[miss]);
             assert_eq!(hits(&report, id), 0, "{id} 不应命中");
         }
@@ -1310,5 +1432,423 @@ mod tests {
             }
         }
         assert_eq!(hits(&run(&layers, &drawings), "DR-114"), 0);
+    }
+
+    /// 管线、管路名下的线段：长度、段数、条数、没接上的端点（接到打断符的不算）。
+    /// `DR-014` 一条管线出一条结果，`points` 列出三个悬空端点；`DR-011` 看管路位号的后缀。
+    #[test]
+    fn pipe_lines_and_runs_add_up_their_segments_and_loose_ends() {
+        let own = SummarySegment {
+            joint_b: Some(Joint::Break),
+            ..segment("L-1001", None, [0.0, 0.0], [10.0, 0.0])
+        };
+        let first = SummarySegment {
+            joint_a: joined(None, false),
+            ..segment("L-1001", Some("L-1001-01"), [10.0, 0.0], [20.0, 0.0])
+        };
+        let branch = SummarySegment {
+            joint_a: joined(None, true),
+            ..segment("L-1001", Some("L-1001-01"), [5.0, 0.0], [5.0, 10.0])
+        };
+        let elsewhere = segment("L-3001", None, [50.0, 0.0], [60.0, 0.0]);
+        let drawings = [piping(
+            vec![
+                line("L-1001", &[]),
+                pipe_run("L-1001-01", "L-1001", &[]),
+                pipe_run("L-1001-02", "L-1001", &[]),
+                pipe_run("L-1001-", "L-1001", &[]),
+                pipe_run("L-100103", "L-1001", &[]),
+                SummaryObject {
+                    owner: None,
+                    ..pipe_run("L-1001-04", "L-1001", &[])
+                },
+            ],
+            vec![own, first, branch, elsewhere],
+        )];
+        let rules = only(vec![
+            builtin().rule("DR-011").expect("DR-011").clone(),
+            builtin().rule("DR-014").expect("DR-014").clone(),
+            custom(
+                "XY-001",
+                "管线",
+                "长度 >= 0",
+                Some("{位号} 长 {长度}，{管路数} 条管路，{端口未连接数} 个端点没接上"),
+            ),
+            custom(
+                "XY-002",
+                "管路",
+                "管段数 >= 0",
+                Some("{位号} 后缀 {后缀}，{管段数} 段，长 {长度}，{端口未连接数} 个端点没接上"),
+            ),
+        ]);
+        let report = run(&rules, &drawings);
+        let found: Vec<(&str, &str, &str)> = report
+            .results
+            .iter()
+            .map(|result| {
+                (
+                    result.rule_id.as_str(),
+                    result.object_key.as_str(),
+                    result.message.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("DR-011", "PIPE_RUN|L-1001-", "管路 L-1001- 的位号没有后缀"),
+                (
+                    "DR-011",
+                    "PIPE_RUN|L-1001-04",
+                    "管路 L-1001-04 的位号没有后缀"
+                ),
+                (
+                    "DR-011",
+                    "PIPE_RUN|L-100103",
+                    "管路 L-100103 的位号没有后缀"
+                ),
+                (
+                    "DR-014",
+                    "PIPE_LINE|L-1001",
+                    "管线 L-1001 有 3 个端点没接上"
+                ),
+                (
+                    "XY-001",
+                    "PIPE_LINE|L-1001",
+                    "L-1001 长 30，4 条管路，3 个端点没接上",
+                ),
+                (
+                    "XY-002",
+                    "PIPE_RUN|L-1001-",
+                    "L-1001- 后缀 ，0 段，长 0，0 个端点没接上",
+                ),
+                (
+                    "XY-002",
+                    "PIPE_RUN|L-1001-01",
+                    "L-1001-01 后缀 01，2 段，长 20，2 个端点没接上",
+                ),
+                (
+                    "XY-002",
+                    "PIPE_RUN|L-1001-02",
+                    "L-1001-02 后缀 02，0 段，长 0，0 个端点没接上",
+                ),
+                (
+                    "XY-002",
+                    "PIPE_RUN|L-1001-04",
+                    "L-1001-04 后缀 ，0 段，长 0，0 个端点没接上",
+                ),
+                (
+                    "XY-002",
+                    "PIPE_RUN|L-100103",
+                    "L-100103 后缀 ，0 段，长 0，0 个端点没接上",
+                ),
+            ]
+        );
+        let loose = &report.results[3];
+        assert_eq!(loose.points, [[0.0, 0.0], [20.0, 0.0], [5.0, 10.0]]);
+        assert!(loose.fields.is_empty());
+        assert!(report.results[4].points.is_empty());
+    }
+
+    /// 管段：两端距离（不超过容差的算 0）、所属、重叠的其他线段。共线且重叠超过容差才算，
+    /// 首尾相接、平行错开的不算。结果指到管段：没有位号，靠所属和起点定位。
+    #[test]
+    fn segments_have_a_length_an_owner_and_overlaps() {
+        let drawings = [piping(
+            vec![line("L-1001", &[])],
+            vec![
+                segment("L-1001", None, [0.0, 0.0], [10.0, 0.0]),
+                segment("L-1001", None, [15.0, 0.0], [5.0, 0.0]),
+                segment("L-1001", None, [0.0, 1.0], [10.0, 1.0]),
+                segment("L-1001", None, [10.0, 0.0], [20.0, 0.0]),
+                segment(
+                    "L-1001",
+                    Some("L-1001-01"),
+                    [30.0, 0.0],
+                    [30.0, 0.000_000_5],
+                ),
+            ],
+        )];
+        let rules = only(vec![
+            builtin().rule("DR-012").expect("DR-012").clone(),
+            builtin().rule("DR-110").expect("DR-110").clone(),
+            custom(
+                "XY-001",
+                "管段",
+                "长度 >= 0",
+                Some(
+                    "{所属} {类型} 长 {长度}，{端口未连接数} 个端点没接上，与 {重叠管段数} 段重叠",
+                ),
+            ),
+        ]);
+        let report = run(&rules, &drawings);
+        let found: Vec<(&str, &str, &str)> = report
+            .results
+            .iter()
+            .map(|result| {
+                (
+                    result.rule_id.as_str(),
+                    result.object_key.as_str(),
+                    result.message.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    "DR-012",
+                    "PIPE_SEGMENT|L-1001-01|30.000,0.000",
+                    "L-1001-01 上有一段管段长度为 0",
+                ),
+                (
+                    "DR-110",
+                    "PIPE_LINE|L-1001|0.000,0.000",
+                    "L-1001 上有管段与别的管段重叠",
+                ),
+                (
+                    "DR-110",
+                    "PIPE_LINE|L-1001|10.000,0.000",
+                    "L-1001 上有管段与别的管段重叠",
+                ),
+                (
+                    "DR-110",
+                    "PIPE_LINE|L-1001|15.000,0.000",
+                    "L-1001 上有管段与别的管段重叠",
+                ),
+                (
+                    "XY-001",
+                    "PIPE_LINE|L-1001|0.000,0.000",
+                    "L-1001 管段 长 10，2 个端点没接上，与 1 段重叠",
+                ),
+                (
+                    "XY-001",
+                    "PIPE_LINE|L-1001|0.000,1.000",
+                    "L-1001 管段 长 10，2 个端点没接上，与 0 段重叠",
+                ),
+                (
+                    "XY-001",
+                    "PIPE_LINE|L-1001|10.000,0.000",
+                    "L-1001 管段 长 10，2 个端点没接上，与 1 段重叠",
+                ),
+                (
+                    "XY-001",
+                    "PIPE_LINE|L-1001|15.000,0.000",
+                    "L-1001 管段 长 10，2 个端点没接上，与 2 段重叠",
+                ),
+                (
+                    "XY-001",
+                    "PIPE_SEGMENT|L-1001-01|30.000,0.000",
+                    "L-1001-01 管段 长 0，2 个端点没接上，与 0 段重叠",
+                ),
+            ]
+        );
+        assert_eq!(
+            report.results[0].object,
+            ObjectRef {
+                kind: "管段".to_owned(),
+                type_code: "PIPE_SEGMENT".to_owned(),
+                tag: None,
+                drawing_id: "PID-1101".to_owned(),
+                owner: Some("L-1001-01".to_owned()),
+                port: None,
+                at: [30.0, 0.0],
+                handle: Some("2E0".to_owned()),
+            }
+        );
+    }
+
+    /// `直连异径管路数`：这条管路的线段端点直接接在别的管路的线段端点上、公称直径不同。
+    /// 接在中间、隔着管件、写法不同但直径相等、没填直径的都不算。`points` 是相接的地方。
+    #[test]
+    fn runs_of_different_sizes_meeting_end_to_end_need_a_reducer() {
+        let piece = |run, a, b| segment("L-1001", Some(run), a, b);
+        let fitting = || {
+            Some(Joint::Fitting {
+                type_code: "FITTING".to_owned(),
+                tag: "L-1001-05".to_owned(),
+                port: "连接点1".to_owned(),
+            })
+        };
+        let drawings = [piping(
+            vec![
+                pipe_run("L-1001-01", "L-1001", &[("公称直径", "50")]),
+                pipe_run("L-1001-02", "L-1001", &[("公称直径", "80")]),
+                pipe_run("L-1001-03", "L-1001", &[("公称直径", "DN80")]),
+                pipe_run("L-1001-04", "L-1001", &[("公称直径", "100")]),
+                pipe_run("L-1001-05", "L-1001", &[]),
+                pipe_run("L-1001-06", "L-1001", &[("公称直径", "25")]),
+            ],
+            vec![
+                SummarySegment {
+                    joint_b: joined(Some("L-1001-02"), false),
+                    ..piece("L-1001-01", [0.0, 0.0], [10.0, 0.0])
+                },
+                SummarySegment {
+                    joint_a: joined(Some("L-1001-01"), false),
+                    joint_b: joined(Some("L-1001-03"), false),
+                    ..piece("L-1001-02", [10.0, 0.0], [20.0, 0.0])
+                },
+                SummarySegment {
+                    joint_a: joined(Some("L-1001-02"), false),
+                    joint_b: joined(Some("L-1001-05"), false),
+                    ..piece("L-1001-03", [20.0, 0.0], [30.0, 0.0])
+                },
+                SummarySegment {
+                    joint_a: joined(Some("L-1001-03"), true),
+                    ..piece("L-1001-04", [25.0, 0.0], [25.0, 10.0])
+                },
+                SummarySegment {
+                    joint_a: joined(Some("L-1001-03"), false),
+                    joint_b: fitting(),
+                    ..piece("L-1001-05", [30.0, 0.0], [40.0, 0.0])
+                },
+                SummarySegment {
+                    joint_a: fitting(),
+                    ..piece("L-1001-06", [40.0, 0.0], [50.0, 0.0])
+                },
+            ],
+        )];
+        let rules = only(vec![builtin().rule("DR-105").expect("DR-105").clone()]);
+        let report = run(&rules, &drawings);
+        let found: Vec<(&str, Vec<[f64; 2]>)> = report
+            .results
+            .iter()
+            .map(|result| (result.object_key.as_str(), result.points.clone()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("PIPE_RUN|L-1001-01", vec![[10.0, 0.0]]),
+                ("PIPE_RUN|L-1001-02", vec![[10.0, 0.0]]),
+            ]
+        );
+        assert_eq!(
+            report.results[0].message,
+            "管路 L-1001-01 与公称直径不同的管路直接相接"
+        );
+    }
+
+    /// `未标记覆盖数`：五个管级属性里，管路的值与所属管线不同、又没有覆盖标记的个数；
+    /// 没填的当空，去掉首尾空白再比；所属管线不在图上时不知道。
+    #[test]
+    fn run_properties_that_differ_from_the_line_need_an_override_mark() {
+        let same = [
+            ("管道等级", "A1"),
+            ("公称直径", "50"),
+            ("流体介质", "工艺水"),
+        ];
+        let changed = [
+            ("管道等级", "B2"),
+            ("公称直径", "50"),
+            ("流体介质", "工艺水"),
+        ];
+        let drawings = [piping(
+            vec![
+                line("L-1001", &same),
+                pipe_run("L-1001-01", "L-1001", &changed),
+                SummaryObject {
+                    overrides: vec!["管道等级".to_owned()],
+                    ..pipe_run("L-1001-02", "L-1001", &changed)
+                },
+                pipe_run(
+                    "L-1001-03",
+                    "L-1001",
+                    &[
+                        ("管道等级", "A1"),
+                        ("公称直径", " "),
+                        ("绝热等级", "H1"),
+                        ("流体介质", "工艺水"),
+                    ],
+                ),
+                pipe_run(
+                    "L-1001-04",
+                    "L-1001",
+                    &[
+                        ("管道等级", " A1 "),
+                        ("公称直径", "50"),
+                        ("流体介质", "工艺水"),
+                        ("设计温度", "80"),
+                    ],
+                ),
+                pipe_run("L-2001-01", "L-2001", &changed),
+            ],
+            Vec::new(),
+        )];
+        let rules = only(vec![builtin().rule("DR-115").expect("DR-115").clone()]);
+        let report = run(&rules, &drawings);
+        let found: Vec<(&str, &str)> = report
+            .results
+            .iter()
+            .map(|result| (result.object_key.as_str(), result.message.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    "PIPE_RUN|L-1001-01",
+                    "管路 L-1001-01 有 1 个管级属性与所属管线不同，却没有覆盖标记",
+                ),
+                (
+                    "PIPE_RUN|L-1001-03",
+                    "管路 L-1001-03 有 2 个管级属性与所属管线不同，却没有覆盖标记",
+                ),
+            ]
+        );
+    }
+
+    /// `所属管路`、`所属管线`：管段到它的管路和管线，管路到它的管线，线上的阀门经所属管路
+    /// 到管线；关系可以连用；图上找不到时不知道。
+    #[test]
+    fn owner_relations_lead_to_the_run_and_the_line() {
+        let drawings = [piping(
+            vec![
+                line("L-1001", &[("管道等级", "A1")]),
+                pipe_run("L-1001-01", "L-1001", &[("公称直径", "50")]),
+                SummaryObject {
+                    owner: Some("L-1001-01".to_owned()),
+                    ..valve("V-101", &[("公称直径", "80")])
+                },
+                SummaryObject {
+                    owner: Some("L-1009-01".to_owned()),
+                    ..valve("V-102", &[("公称直径", "80")])
+                },
+            ],
+            vec![
+                segment("L-1001", None, [0.0, 0.0], [10.0, 0.0]),
+                segment("L-1001", Some("L-1001-01"), [10.0, 0.0], [20.0, 0.0]),
+            ],
+        )];
+        let rules = only(vec![
+            custom("XY-001", "管段", "所属管路.公称直径 = 50", None),
+            custom("XY-002", "管段", "所属管线.管道等级 = \"A1\"", None),
+            custom("XY-003", "管路", "所属管线.管道等级 = \"A1\"", None),
+            custom("XY-004", "阀门", "公称直径 != 所属管路.公称直径", None),
+            custom("XY-005", "阀门", "所属管线.管道等级 = \"A1\"", None),
+            custom(
+                "XY-006",
+                "管段",
+                "所属管路.所属管线.管道等级 = \"A1\"",
+                None,
+            ),
+        ]);
+        let report = run(&rules, &drawings);
+        let found: Vec<(&str, &str)> = report
+            .results
+            .iter()
+            .map(|result| (result.rule_id.as_str(), result.object_key.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("XY-001", "PIPE_SEGMENT|L-1001-01|10.000,0.000"),
+                ("XY-002", "PIPE_LINE|L-1001|0.000,0.000"),
+                ("XY-002", "PIPE_SEGMENT|L-1001-01|10.000,0.000"),
+                ("XY-003", "PIPE_RUN|L-1001-01"),
+                ("XY-004", "VALVE_GATE|V-101"),
+                ("XY-005", "VALVE_GATE|V-101"),
+                ("XY-006", "PIPE_SEGMENT|L-1001-01|10.000,0.000"),
+            ]
+        );
     }
 }
