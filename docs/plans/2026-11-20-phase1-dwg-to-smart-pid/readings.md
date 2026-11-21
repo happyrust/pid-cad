@@ -1537,4 +1537,45 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `201 passed` | **`202 passed`** | `+1` 条 Python 测试，**全绿** |
 
+---
+
+## 38. L3-4 / L2-2 / L6-2（#149）：应用内多标签页跨图页间连接符（`Off-Page Connector`）互逆配对校核、断链定位与一键跳转聚焦命令 `PIDOPC` 闭环（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `0fbe04710`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{opc,mod}.rs`、`src/app/commands/pidprops.rs` |
+| 外部证据子项 | `2026-11-21-issue149/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_opc.txt`、`real_out/real149_summary.json`、`fmt_arch_pytest.txt`、`clippy_counts.json`） |
+
+### 38.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidopc_pairs_multi_tab_connectors_selects_broken_and_jumps_camera_to_peer`（构造双标签页图纸 `DWG-2101-01` 与 `DWG-2101-02`，覆盖互逆配对、单向断链、外部未打开及升格前后双向跨标签页跳转与相机聚焦），运行按预期在 `PIDOPC EXPORT` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`15 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/opc.rs`（`analyze_open_sheets_opc`）：跨所有打开图纸标签页自动提取标题栏图号与文件名前缀候选码，统一兼容**未升格存量 `.dxf`/`.dwg`**（只读调用 `recognise_sppid_sheet`）与**已升格 `PID_AUTHOR` + `TopologyTable` 模型**，将全工作区连接符分类为 `Paired`（互逆配对）、`OneWayOpen`（目标图纸已打开但缺反向连接符）、`ExternalUnopened`（目标图纸未打开）、`MissingTarget`（缺目标图号）；
+  2. 在 `src/app/commands/pidprops.rs` 注册并分发 `PIDOPC`：支持 `SUMMARY`、`ALL`、`PAIRED`、`UNPAIRED`（整组高亮选中本图单向断链/缺目标连接符）、`JUMP`（切换至对端标签页、整组选中对端连接符并将视口相机精准聚焦至对端坐标）及 `EXPORT "<json>"`。
+
+### 38.2 真实双标准成对图纸（SPPID 生产图对 + 原生 AutoCAD 存量图对）多标签页跳转核验
+
+| 标签页代号 | 样本类别 | 源图 SHA-256 前缀 | 跨标签页实测行为与核验结果 |
+|---|---|---|---|
+| `SP01` | `EXPORT_DXF`（SPPID 拆分生产图） | `2164f88bbb57` | `PIDOPC PAIRED -> PIDOPC JUMP` 精准切换至 `SP02` 并选中聚焦对端连接符 |
+| `SP02` | `EXPORT_DXF`（SPPID 拆分生产图） | `fc2c812dc182` | 执行 `PIDPROMOTE` 升格进 `PID_AUTHOR` 后反向 `PIDOPC JUMP` 精准返回 `SP01` |
+| `LG01` | `SOURCE_DWG`（原生 AutoCAD 存量图） | `a0f05f81a655` | `PIDOPC PAIRED -> PIDOPC JUMP` 精准切换至 `LG02` 并选中聚焦对端连接符 |
+| `LG02` | `SOURCE_DWG`（原生 AutoCAD 存量图） | `28ed389e23cb` | 4 图同开共识别 `43` 个连接符，自动锁定 **`8` 对（`16` 个）互逆连接符**，`one_way_open = 0` |
+
+### 38.3 固定门禁读数
+
+| 门禁项 | 改前读数（§37.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,222` 条（`7,149` 过 / `72` 忽略 / `1` 既有 `.pen`） | **`7,224` 条**（**`7,150` 过** / **`73` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 4 图多标签页跳转），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `opc.rs`、`mod.rs`、`pidprops.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+
 

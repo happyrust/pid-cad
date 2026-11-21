@@ -433,10 +433,10 @@ flowchart LR
 - **资料**：RES-17 ⚠。
 - **解决记录（2026-11-21）**：在 `src/io/pid_convert/export.rs` 实现跨跳线/行内文字微断口共线桥接（`0.4..=6.5 mm` 且避开符号包围盒）、流向箭头/短刺微碎片过滤（`< 2.0 mm` 或包围盒对角线 `< 2.4 mm` 孤立碎片）、同层无歧义交点线号传播，以及 `PipeNetworkCensus` 与 `DeadEndAttribution` 守恒归因统计；90 张真实 DXF 全批实测：共线桥接 `124` 处、过滤箭头/短刺 `744` 条，全部 `27,070` 条管段（`54,140` 个端点）100% 守恒归因（接符号端口 `13,184`、接页间连接符 `712`、接三通 `34,347`、触设备壳体 `809`、开放自由端 `5,088`），详见 `readings.md` §22。
 
-#### L3-4 连通（L）— **已完成（[#133](https://github.com/happyrust/pid-cad/issues/133)）**
+#### L3-4 连通（L）— **已完成（[#133](https://github.com/happyrust/pid-cad/issues/133) / [#149](https://github.com/happyrust/pid-cad/issues/149)）**
 - **做法**：符号连接点与管线端点配对；页间连接符跨图配对（按文字与图号）。
 - **验收**：配对结果对参考 XML 的连通关系逐项比对；错配与漏配逐条列出。
-- **解决记录（2026-11-21）**：查明导出 DXF 符号图块不含显式 `POINT` 图元导致此前仅以图块中心单点吸附，在 `src/io/pid_convert/recognize.rs::placed_insert_geometry` 为无 `POINT` 图块补齐包围盒四向边缘中点端口，并在 `export.rs` 实现跨图页间连接符配对器 `pair_cross_sheet_connectors`（支持含中文字符与斜杠多图号的 `DWG-*` 编码归一化）：90 张真实 DXF 的 `PIDPipingPort` 由 `626` 跃升至 **`11,420`**（`18.2x`）、管端连通关系由 `37,221` 升至 **`48,243`**、三通分支点 **`4,907`** 个（真值 `5,044` 个）；`834` 个页间连接符中 `617` 个带对端图号（本批内互逆成对 `38` 对 = `76` 个、本批内单向引用 `99` 个、指向批外关联装置图 `442` 个），详见 `readings.md` §22。
+- **解决记录（2026-11-21）**：① `#133` 在 `src/io/pid_convert/recognize.rs::placed_insert_geometry` 为无 `POINT` 图块补齐包围盒四向边缘中点端口，并在 `export.rs` 实现批处理跨图页间连接符配对器 `pair_cross_sheet_connectors`（90 张真实 DXF 的 `PIDPipingPort` 跃升至 **`11,420`**、管端连通 **`48,243`**、`834` 个页间连接符中互逆成对 `38` 对 = `76` 个，见 `readings.md` §22）；② `#149` 落地 `src/io/pid_convert/opc.rs` 与应用内命令 `PIDOPC [SUMMARY | ALL | PAIRED | UNPAIRED | JUMP | EXPORT]`，统一兼容未升格 `.dxf`/`.dwg` 与已升格 `PID_AUTHOR` 模型，在多标签页内支持单向断链一键选中与跨标签页自动切换聚焦对端（4 张真实双标准成对图纸识别 `43` 个连接符、锁定 `8` 对互逆连接符并跑通往返跳转，详见 `readings.md` §38）。
 
 #### L3-5 设备与管口（M）— **已完成（[#132](https://github.com/happyrust/pid-cad/issues/132)）**
 - **做法**：管口位号继承设备位号；管口与设备的组合关系。

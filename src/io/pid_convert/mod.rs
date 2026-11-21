@@ -7,8 +7,14 @@
 pub mod class_map;
 pub mod export;
 pub mod external_props;
+pub mod opc;
 pub mod promote;
 pub mod recognize;
+
+pub use opc::{
+    analyze_open_sheets_opc, OpcConnectorItem, OpcPeerRef, OpcSheetInput, OpcStatus,
+    WorkspaceOpcReport,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use promote::save_author_document_to_dual;

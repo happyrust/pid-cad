@@ -26,7 +26,13 @@ pub(in crate::app) const PID_AUTHOR_SECTION: &str = "P&ID 属性";
 pub(in crate::app) const PID_EVIDENCE_SECTION: &str = "P&ID 来源证据";
 
 inventory::submit!(crate::command::CommandRegistration {
-    names: &["PIDPROMOTE", "PIDREVIEW", "PIDSAVEPID", "PIDCONVERT"]
+    names: &[
+        "PIDPROMOTE",
+        "PIDREVIEW",
+        "PIDSAVEPID",
+        "PIDCONVERT",
+        "PIDOPC"
+    ]
 });
 
 const TAG_FIELD: &str = "pid_tag";
@@ -254,6 +260,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidconvert_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidopc_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -1037,6 +1046,218 @@ impl OpenCADStudio {
             fb_cnt,
             out_dir.display(),
         ));
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidopc_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{analyze_open_sheets_opc, OpcSheetInput, OpcStatus};
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDOPC") {
+            return None;
+        }
+        let action = tokens
+            .get(1)
+            .map(|s| s.to_ascii_uppercase())
+            .unwrap_or_else(|| "SUMMARY".to_string());
+
+        let tab_names: Vec<(usize, String)> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.is_start)
+            .map(|(ti, t)| {
+                let nm = t
+                    .current_path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| t.tab_title.clone());
+                (ti, nm)
+            })
+            .collect();
+        let inputs: Vec<OpcSheetInput<'_>> = tab_names
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+        let rep = analyze_open_sheets_opc(&inputs);
+
+        match action.as_str() {
+            "SUMMARY" => {
+                let here_total = rep.connectors.iter().filter(|c| c.tab_index == i).count();
+                let here_paired = rep
+                    .connectors
+                    .iter()
+                    .filter(|c| c.tab_index == i && c.status == OpcStatus::Paired)
+                    .count();
+                self.command_line.push_output(&format!(
+                    "PIDOPC: 打开图纸={} | 总连接符={}（互逆配对={} 对，单向断链={}，外部未打开={}，缺目标图号={}）| 当前图连接符={}（已配对={}）。",
+                    rep.open_sheets,
+                    rep.total_connectors,
+                    rep.reciprocal_pairs,
+                    rep.one_way_open,
+                    rep.external_unopened,
+                    rep.missing_target,
+                    here_total,
+                    here_paired,
+                ));
+            }
+            "ALL" | "PAIRED" | "UNPAIRED" | "BROKEN" => {
+                let mut count = 0usize;
+                let mut handles = Vec::new();
+                for c in rep.connectors.iter().filter(|c| c.tab_index == i) {
+                    let keep = match action.as_str() {
+                        "ALL" => true,
+                        "PAIRED" => c.status == OpcStatus::Paired,
+                        _ => matches!(c.status, OpcStatus::OneWayOpen | OpcStatus::MissingTarget),
+                    };
+                    if !keep {
+                        continue;
+                    }
+                    count += 1;
+                    for &mh in &c.member_handles {
+                        if !handles.contains(&mh) {
+                            handles.push(mh);
+                        }
+                    }
+                }
+                self.tabs[i].scene.deselect_all();
+                if !handles.is_empty() {
+                    self.tabs[i].scene.select_entities(&handles);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDOPC {action}: 已选中 {count} 个页间连接符（共 {} 个图元）。",
+                    handles.len()
+                ));
+            }
+            "JUMP" => {
+                let here_conns: Vec<_> =
+                    rep.connectors.iter().filter(|c| c.tab_index == i).collect();
+                let chosen = if let Some(q) = tokens.get(2) {
+                    let qup = q.trim().to_ascii_uppercase();
+                    if let Ok(ord) = qup.parse::<usize>() {
+                        ord.checked_sub(1).and_then(|k| here_conns.get(k).copied())
+                    } else {
+                        here_conns.into_iter().find(|c| {
+                            c.primary_handle_hex.eq_ignore_ascii_case(&qup)
+                                || c.target_dwg_raw
+                                    .as_deref()
+                                    .is_some_and(|t| t.to_ascii_uppercase().contains(&qup))
+                                || c.line_label
+                                    .as_deref()
+                                    .is_some_and(|l| l.to_ascii_uppercase().contains(&qup))
+                        })
+                    }
+                } else {
+                    let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[i]
+                        .scene
+                        .selected_entities()
+                        .into_iter()
+                        .map(|(h, _)| h)
+                        .collect();
+                    here_conns
+                        .into_iter()
+                        .find(|c| c.member_handles.iter().any(|h| sel_set.contains(h)))
+                };
+
+                let Some(conn) = chosen else {
+                    self.command_line.push_error(
+                        "PIDOPC JUMP: 请先在本图选中一个页间连接符（如先运行 PIDOPC PAIRED）。",
+                    );
+                    return Some(Task::none());
+                };
+
+                if let Some(ref peer) = conn.peer {
+                    let peer_tab = peer.tab_index;
+                    let peer_handles = peer.member_handles.clone();
+                    let peer_x = peer.x;
+                    let peer_y = peer.y;
+                    let peer_dwg = peer.drawing_code.clone();
+
+                    if peer_tab < self.tabs.len() && peer_tab != self.active_tab {
+                        let _ = self.update(Message::TabSwitch(peer_tab));
+                        self.active_tab = peer_tab;
+                    }
+                    if peer_tab < self.tabs.len() {
+                        self.tabs[peer_tab].scene.deselect_all();
+                        if !peer_handles.is_empty() {
+                            self.tabs[peer_tab].scene.select_entities(&peer_handles);
+                        }
+                        let zoomed = self.tabs[peer_tab].scene.zoom_to_entities(&peer_handles);
+                        if !zoomed {
+                            let mut cam = self.tabs[peer_tab].scene.camera.borrow_mut();
+                            let z = cam.target.z;
+                            cam.target = glam::DVec3::new(peer_x, peer_y, z);
+                        }
+                        self.refresh_properties();
+                    }
+                    self.command_line.push_output(&format!(
+                        "PIDOPC JUMP: 已跳转至对端图纸 {peer_dwg}（坐标 {:.1}, {:.1}）。",
+                        peer_x, peer_y
+                    ));
+                } else if conn.target_open_tab.is_some() {
+                    self.command_line.push_error(
+                        "PIDOPC JUMP: 目标图纸已在标签页中打开，但缺少指回本图的互逆页间连接符（单向断链）。",
+                    );
+                    return Some(Task::none());
+                } else {
+                    let tgt = conn.target_dwg_raw.as_deref().unwrap_or("<未标注图号>");
+                    self.command_line.push_error(&format!(
+                        "PIDOPC JUMP: 目标图纸 {tgt} 当前未在标签页中打开。"
+                    ));
+                    return Some(Task::none());
+                }
+            }
+            "EXPORT" => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.command_line
+                        .push_error("PIDOPC EXPORT: Web 版本不支持直接写出本地报告文件。");
+                    return Some(Task::none());
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let Some(out_raw) = tokens.get(2) else {
+                        self.command_line
+                            .push_error("PIDOPC EXPORT: 用法 PIDOPC EXPORT \"<输出.json>\"。");
+                        return Some(Task::none());
+                    };
+                    let out_p = std::path::PathBuf::from(out_raw);
+                    if let Some(parent) = out_p.parent().filter(|p| !p.as_os_str().is_empty()) {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    match serde_json::to_string_pretty(&rep)
+                        .map_err(|e| e.to_string())
+                        .and_then(|s| std::fs::write(&out_p, format!("{s}\n")).map_err(|e| e.to_string()))
+                    {
+                        Ok(()) => self.command_line.push_output(&format!(
+                            "PIDOPC EXPORT: 已导出跨标签页连接符报告 -> {}（总连接符={}，互逆配对={} 对）。",
+                            out_p.display(),
+                            rep.total_connectors,
+                            rep.reciprocal_pairs,
+                        )),
+                        Err(err) => {
+                            self.command_line
+                                .push_error(&format!("PIDOPC EXPORT: {err}"));
+                            return Some(Task::none());
+                        }
+                    }
+                }
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDOPC: 未知子命令 {other}（支持 SUMMARY / ALL / PAIRED / UNPAIRED / JUMP / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
         Some(self.finish_dispatch(cmd))
     }
 
@@ -3707,6 +3928,291 @@ mod tests {
         std::fs::write(
             out_dir.join("real146_summary.json"),
             format!("{}\n", serde_json::to_string_pretty(&summary).unwrap()),
+        )
+        .unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidopc_pairs_multi_tab_connectors_selects_broken_and_jumps_camera_to_peer() {
+        use document::entities::{EntityType, Insert, Line, Text};
+        use document::types::Vector3;
+        use document::Document;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        fn build_opc_sheet(
+            dwg_no: &str,
+            connectors: &[(f64, f64, &str, Option<&str>)],
+        ) -> (Document, Vec<document::Handle>) {
+            let mut doc = Document::new();
+            define_sppid_block(&mut doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut border = Line::from_points(
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(1189.0, 841.0, 0.0),
+            );
+            border.common.layer = "Default".to_string();
+            doc.add_entity(EntityType::Line(border)).unwrap();
+
+            let mut tb = Text::with_value(dwg_no, Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(EntityType::Text(tb)).unwrap();
+
+            let mut handles = Vec::new();
+            for &(x, y, target_dwg, line_opt) in connectors {
+                let mut ins = Insert::new("_OFF-UNIT SQ", Vector3::new(x, y, 0.0));
+                ins.common.layer = "11".to_string();
+                let h = doc.add_entity(EntityType::Insert(ins)).unwrap();
+                handles.push(h);
+
+                let mut tf = Text::with_value(target_dwg, Vector3::new(x - 10.0, y - 1.0, 0.0))
+                    .with_height(2.5);
+                tf.common.layer = "11".to_string();
+                doc.add_entity(EntityType::Text(tf)).unwrap();
+
+                if let Some(ln_lbl) = line_opt {
+                    let mut pipe = Line::from_points(
+                        Vector3::new(x + 6.0, y, 0.0),
+                        Vector3::new(x + 80.0, y, 0.0),
+                    );
+                    pipe.common.layer = "1".to_string();
+                    doc.add_entity(EntityType::Line(pipe)).unwrap();
+
+                    let mut ltxt = Text::with_value(ln_lbl, Vector3::new(x + 30.0, y + 2.0, 0.0))
+                        .with_height(2.5);
+                    ltxt.common.layer = "11".to_string();
+                    doc.add_entity(EntityType::Text(ltxt)).unwrap();
+                }
+            }
+            (doc, handles)
+        }
+
+        let (doc_a, handles_a) = build_opc_sheet(
+            "DWG-2101-01",
+            &[
+                // Paired with Sheet B
+                (120.0, 300.0, "DWG-2101-02", Some("100-PW-2101-CS150")),
+                // One-way broken (Sheet B is open, but has no return connector for this branch)
+                (120.0, 150.0, "DWG-2101-02", None),
+                // External unopened sheet
+                (120.0, 50.0, "DWG-2101-99", None),
+            ],
+        );
+        let (doc_b, handles_b) = build_opc_sheet(
+            "DWG-2101-02",
+            &[(860.0, 640.0, "DWG-2101-01", Some("100-PW-2101-CS150"))],
+        );
+
+        let mut app = app();
+        let tab_a = app.active_tab;
+        app.tabs[tab_a].scene.document = doc_a;
+        app.tabs[tab_a].tab_title = "DWG-2101-01.dxf".to_string();
+
+        let _ = app.update(Message::TabNew);
+        let tab_b = app.active_tab;
+        assert_ne!(tab_a, tab_b);
+        app.tabs[tab_b].scene.document = doc_b;
+        app.tabs[tab_b].tab_title = "DWG-2101-02.dxf".to_string();
+
+        // Switch back to Tab A
+        let _ = app.update(Message::TabSwitch(tab_a));
+        assert_eq!(app.active_tab, tab_a);
+
+        // 1. Export cross-tab OPC audit JSON BEFORE PIDPROMOTE (read-only raw CAD mode)
+        let tmp = std::env::temp_dir().join(format!("ocs_pidopc_149_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let exp_json = tmp.join("opc_report.json");
+        let _ = app.run_command_line(&format!("PIDOPC EXPORT \"{}\"", exp_json.display()));
+        assert!(exp_json.is_file(), "PIDOPC EXPORT must write report JSON");
+        let rep: Value =
+            serde_json::from_str(&std::fs::read_to_string(&exp_json).unwrap()).unwrap();
+        assert_eq!(rep["open_sheets"].as_u64(), Some(2));
+        assert_eq!(rep["total_connectors"].as_u64(), Some(4));
+        assert_eq!(rep["reciprocal_pairs"].as_u64(), Some(1));
+        assert_eq!(rep["one_way_open"].as_u64(), Some(1));
+        assert_eq!(rep["external_unopened"].as_u64(), Some(1));
+
+        // 2. `PIDOPC UNPAIRED` selects broken one-way connector `handles_a[1]` on active sheet, NOT paired `handles_a[0]`
+        let _ = app.run_command_line("PIDOPC UNPAIRED");
+        assert!(has_sel(&app, tab_a, handles_a[1]));
+        assert!(!has_sel(&app, tab_a, handles_a[0]));
+
+        // 3. `PIDOPC PAIRED` selects `handles_a[0]`, then `PIDOPC JUMP` switches to Tab B, selects `handles_b[0]`, and centers camera
+        let _ = app.run_command_line("PIDOPC PAIRED");
+        assert!(has_sel(&app, tab_a, handles_a[0]));
+
+        let _ = app.run_command_line("PIDOPC JUMP");
+        assert_eq!(
+            app.active_tab, tab_b,
+            "PIDOPC JUMP must switch active tab to peer sheet"
+        );
+        assert!(
+            has_sel(&app, tab_b, handles_b[0]),
+            "PIDOPC JUMP must select peer connector on target tab"
+        );
+        let cam_b = app.tabs[tab_b].scene.camera.borrow().target;
+        assert!(
+            (cam_b.x - 860.0).abs() < 25.0 && (cam_b.y - 640.0).abs() < 25.0,
+            "camera target must center on peer connector at (860, 640), got {cam_b:?}"
+        );
+
+        // 4. Promote both tabs to `PID_AUTHOR` and jump back from Tab B -> Tab A
+        let _ = app.run_command_line("PIDPROMOTE");
+        let _ = app.update(Message::TabSwitch(tab_a));
+        let _ = app.run_command_line("PIDPROMOTE");
+        let _ = app.update(Message::TabSwitch(tab_b));
+        app.tabs[tab_b].scene.deselect_all();
+        app.tabs[tab_b].scene.select_entities(&[handles_b[0]]);
+        let _ = app.run_command_line("PIDOPC JUMP");
+        assert_eq!(
+            app.active_tab, tab_a,
+            "reverse PIDOPC JUMP after PIDPROMOTE must return to Tab A"
+        );
+        let cam_a = app.tabs[tab_a].scene.camera.borrow().target;
+        assert!(
+            (cam_a.x - 120.0).abs() < 25.0 && (cam_a.y - 300.0).abs() < 25.0,
+            "camera target must center on Tab A connector at (120, 300), got {cam_a:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into multi-tab OpenCADStudio and verifies PIDOPC SUMMARY / PAIRED / JUMP"]
+    fn real_multi_tab_pidopc_cross_sheet_pairing_and_jump() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_raw) = std::env::var("OCS_PID_REAL149_SPPID_PAIR") else {
+            println!("OCS_PID_REAL149_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(legacy_raw) = std::env::var("OCS_PID_REAL149_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL149_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL149_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real149"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sppid_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sppid_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        let legacy_paths: Vec<std::path::PathBuf> = std::env::split_paths(&legacy_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        assert_eq!(sppid_paths.len(), 2, "expected 2 paired SPPID DXF sheets");
+        assert_eq!(legacy_paths.len(), 2, "expected 2 paired legacy DXF sheets");
+
+        let all_files = [
+            ("SP01", &sppid_paths[0]),
+            ("SP02", &sppid_paths[1]),
+            ("LG01", &legacy_paths[0]),
+            ("LG02", &legacy_paths[1]),
+        ];
+
+        let mut app = app();
+        let mut tab_indices = Vec::new();
+        let mut sha_prefixes = Vec::new();
+
+        for (idx, (_, p)) in all_files.iter().enumerate() {
+            let raw_b = std::fs::read(p).unwrap();
+            sha_prefixes.push(format!("{:x}", Sha256::digest(&raw_b))[..12].to_string());
+            if idx > 0 {
+                let _ = app.update(Message::TabNew);
+            }
+            let ti = app.active_tab;
+            app.tabs[ti].scene.document = crate::io::load_file(p).expect("load DXF");
+            app.tabs[ti].current_path = Some((*p).clone());
+            app.tabs[ti].tab_title = p
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("sheet.dxf")
+                .to_string();
+            tab_indices.push(ti);
+        }
+
+        let raw_exp = out_dir.join("raw_opc_audit.json");
+        let _ = app.run_command_line(&format!("PIDOPC EXPORT \"{}\"", raw_exp.display()));
+        let rep: Value = serde_json::from_str(&std::fs::read_to_string(&raw_exp).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&raw_exp);
+
+        let open_sheets = rep["open_sheets"].as_u64().unwrap_or(0);
+        let total_connectors = rep["total_connectors"].as_u64().unwrap_or(0);
+        let reciprocal_pairs = rep["reciprocal_pairs"].as_u64().unwrap_or(0);
+        let one_way_open = rep["one_way_open"].as_u64().unwrap_or(0);
+        let external_unopened = rep["external_unopened"].as_u64().unwrap_or(0);
+
+        assert_eq!(open_sheets, 4);
+        assert!(
+            reciprocal_pairs >= 2,
+            "expected >=2 reciprocal pairs across SPPID + legacy pairs, got {reciprocal_pairs}"
+        );
+
+        // Jump 1: SP01 -> SP02 -> PIDPROMOTE -> reverse jump SP02 -> SP01
+        let _ = app.update(Message::TabSwitch(tab_indices[0]));
+        let _ = app.run_command_line("PIDOPC PAIRED");
+        assert!(!app.tabs[tab_indices[0]]
+            .scene
+            .selected_entities()
+            .is_empty());
+        let _ = app.run_command_line("PIDOPC JUMP");
+        assert_eq!(app.active_tab, tab_indices[1]);
+        assert!(!app.tabs[tab_indices[1]]
+            .scene
+            .selected_entities()
+            .is_empty());
+
+        let _ = app.run_command_line("PIDPROMOTE");
+        let _ = app.update(Message::TabSwitch(tab_indices[0]));
+        let _ = app.run_command_line("PIDPROMOTE");
+        let _ = app.update(Message::TabSwitch(tab_indices[1]));
+        let _ = app.run_command_line("PIDOPC PAIRED");
+        let _ = app.run_command_line("PIDOPC JUMP");
+        assert_eq!(app.active_tab, tab_indices[0]);
+
+        // Jump 2: Native AutoCAD legacy LG01 -> LG02
+        let _ = app.update(Message::TabSwitch(tab_indices[2]));
+        let _ = app.run_command_line("PIDOPC PAIRED");
+        assert!(!app.tabs[tab_indices[2]]
+            .scene
+            .selected_entities()
+            .is_empty());
+        let _ = app.run_command_line("PIDOPC JUMP");
+        assert_eq!(app.active_tab, tab_indices[3]);
+        assert!(!app.tabs[tab_indices[3]]
+            .scene
+            .selected_entities()
+            .is_empty());
+
+        let sanitized = json!({
+            "open_sheets": open_sheets,
+            "sheets": [
+                {"id": "SP01", "kind": "sppid_dxf", "sha256_prefix": sha_prefixes[0]},
+                {"id": "SP02", "kind": "sppid_dxf", "sha256_prefix": sha_prefixes[1]},
+                {"id": "LG01", "kind": "legacy_autocad_dxf", "sha256_prefix": sha_prefixes[2]},
+                {"id": "LG02", "kind": "legacy_autocad_dxf", "sha256_prefix": sha_prefixes[3]},
+            ],
+            "total_connectors": total_connectors,
+            "reciprocal_pairs": reciprocal_pairs,
+            "one_way_open": one_way_open,
+            "external_unopened": external_unopened,
+            "sppid_roundtrip_jump_verified": true,
+            "legacy_jump_verified": true,
+        });
+        std::fs::write(
+            out_dir.join("real149_summary.json"),
+            format!("{}\n", serde_json::to_string_pretty(&sanitized).unwrap()),
         )
         .unwrap();
     }
