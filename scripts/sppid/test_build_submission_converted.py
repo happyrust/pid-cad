@@ -19,9 +19,11 @@ def _make_converted_bundle(
     matched_oids: int = 2,
     xml_reps: int = 2,
     dwg_source: Path | None = None,
+    external_props_injected: int | None = None,
+    external_ppts_updated: int = 0,
 ) -> None:
     _make_strict_vendor_sample(slot_src, stem=stem)
-    cov = {
+    cov: dict = {
         "drawing_name": stem,
         "doc_uid": "0" * 32,
         "plant": "P01",
@@ -42,6 +44,14 @@ def _make_converted_bundle(
             "sppid_native_c1_status": "unverified_no_sppid_runner",
         },
     }
+    if external_props_injected is not None:
+        cov["external_props_applied"] = {
+            "rows_loaded": 10,
+            "items_matched": 6,
+            "process_points_updated": external_ppts_updated,
+            "attributes_injected": external_props_injected,
+            "ignored_unallowed_columns": 0,
+        }
     (slot_src / f"{stem}_Coverage.json").write_text(
         json.dumps(cov, indent=2) + "\n", encoding="utf-8"
     )
@@ -283,3 +293,145 @@ def test_evaluate_receipt_supports_converted_pilot_archetypes_and_boolean_accept
     assert ev2["all_archetypes_accepted"] is True
     assert ev2["archetype_acceptance"]["C6_pid_inapp_edit_save_accepted"] is True
     assert ev2["next_round_actions"] == ["phase1-external-acceptance-complete"]
+
+
+def test_build_submission_converted_supports_eight_slots_gates_external_props_and_derives_cross_slot_diagnostics(
+    tmp_path: Path,
+) -> None:
+    import build_submission_converted
+
+    slots = []
+    for idx in range(1, 7):
+        b = tmp_path / f"s{idx}"
+        _make_converted_bundle(b, f"RAW-{idx:02d}")
+        slots.append(b)
+    s7 = tmp_path / "s7"
+    _make_converted_bundle(
+        s7,
+        "RAW-EXTPROPS-07",
+        external_props_injected=42,
+        external_ppts_updated=11,
+    )
+    s8 = tmp_path / "s8"
+    _make_converted_bundle(s8, "RAW-BARE-PID-08")
+    dwg_p = tmp_path / "RAW-05.dwg"
+    dwg_p.write_bytes(b"AC1032\x00\x00\x00\x00MOCK")
+
+    out_dir = tmp_path / "round-01b-8"
+    rc = build_submission_converted.main(
+        [
+            "--sppid-dxf-bundle",
+            str(slots[0]),
+            "--legacy-block-bundle",
+            str(slots[1]),
+            "--legacy-shape-bundle",
+            str(slots[2]),
+            "--legacy-inapp-bundle",
+            str(slots[3]),
+            "--binary-dwg-bundle",
+            str(slots[4]),
+            "--binary-dwg-source",
+            str(dwg_p),
+            "--pid-inapp-bundle",
+            str(slots[5]),
+            "--external-props-bundle",
+            str(s7),
+            "--bare-pid-bundle",
+            str(s8),
+            "--out-dir",
+            str(out_dir),
+            "--plant",
+            "P01",
+        ]
+    )
+    assert rc == 0
+
+    raw_manifest = (out_dir / "submission-manifest.json").read_text(encoding="utf-8")
+    assert not re.search(r"[A-Za-z]:\\", raw_manifest)
+    assert "RAW-EXTPROPS-07" not in raw_manifest
+    assert "RAW-BARE-PID-08" not in raw_manifest
+
+    manifest = json.loads(raw_manifest)
+    assert manifest["precheck_passed"] is True
+    assert len(manifest["slots"]) == 8
+    assert manifest["slots"][6]["slot"] == "07-sppid-dxf-external-props"
+    assert manifest["slots"][6]["delivery_stem"] == "CONV-07"
+    assert manifest["slots"][6]["archetype_key"] == "C7_external_props_schedule_accepted"
+    assert manifest["slots"][6]["external_props_attributes_injected"] == 42
+    assert manifest["slots"][6]["external_props_process_points_updated"] == 11
+    assert manifest["slots"][7]["slot"] == "08-bare-pid-inapp-rebuild"
+    assert manifest["slots"][7]["delivery_stem"] == "CONV-08"
+    assert manifest["slots"][7]["archetype_key"] == "C8_bare_pid_rebuild_accepted"
+    assert manifest["slots"][7]["bare_pid_rebuilt_xml"] is True
+
+    # Rejects CONV-07 if external_props_attributes_injected == 0
+    bad_s7 = tmp_path / "bad_s7"
+    _make_converted_bundle(bad_s7, "BAD-07", external_props_injected=0)
+    rc_bad7 = build_submission_converted.main(
+        [
+            "--sppid-dxf-bundle",
+            str(slots[0]),
+            "--legacy-block-bundle",
+            str(slots[1]),
+            "--legacy-shape-bundle",
+            str(slots[2]),
+            "--legacy-inapp-bundle",
+            str(slots[3]),
+            "--binary-dwg-bundle",
+            str(slots[4]),
+            "--binary-dwg-source",
+            str(dwg_p),
+            "--pid-inapp-bundle",
+            str(slots[5]),
+            "--external-props-bundle",
+            str(bad_s7),
+            "--bare-pid-bundle",
+            str(s8),
+            "--out-dir",
+            str(tmp_path / "round-01b-bad7"),
+            "--plant",
+            "P01",
+        ]
+    )
+    assert rc_bad7 == 1
+
+    # Cross-slot receipt evaluation: CONV-01 rejected while CONV-07 accepted,
+    # and CONV-06 accepted while CONV-08 rejected -> emits actionable diagnostic_hints
+    rec_p = out_dir / "receipt.json"
+    eval_p = tmp_path / "eval8.json"
+    rec8 = {
+        "package_kind": "converted_pilot",
+        "round": "1B",
+        "manifest_sha256": manifest["manifest_sha256"],
+        "results": [
+            {"slot": "01-sppid-dxf-direct", "accepted": False, "raw_message": "MISSING_DESIGN_PRESSURE"},
+            {"slot": "02-legacy-block-circle-direct", "accepted": True},
+            {"slot": "03-legacy-exploded-shape-direct", "accepted": True},
+            {"slot": "04-legacy-inapp-pidsavepid", "accepted": True},
+            {"slot": "05-binary-dwg-direct", "accepted": True},
+            {"slot": "06-pid-inapp-edit-save", "accepted": True},
+            {"slot": "07-sppid-dxf-external-props", "accepted": True},
+            {"slot": "08-bare-pid-inapp-rebuild", "accepted": False, "raw_message": "MISSING_PIPE_SPEC"},
+        ],
+    }
+    rec_p.write_text(json.dumps(rec8, indent=2), encoding="utf-8")
+    assert (
+        precheck_and_receipt.main(
+            [
+                "evaluate-receipt",
+                "--manifest",
+                str(out_dir / "submission-manifest.json"),
+                "--receipt",
+                str(rec_p),
+                "--out-json",
+                str(eval_p),
+            ]
+        )
+        == 0
+    )
+    ev8 = json.loads(eval_p.read_text(encoding="utf-8"))
+    assert ev8["archetype_acceptance"]["C7_external_props_schedule_accepted"] is True
+    assert ev8["archetype_acceptance"]["C8_bare_pid_rebuild_accepted"] is False
+    assert "external_schedule_props_required_for_dxf" in ev8["diagnostic_hints"]
+    assert "companion_xml_or_schedule_needed_for_bare_pid" in ev8["diagnostic_hints"]
+

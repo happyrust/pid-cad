@@ -1448,3 +1448,51 @@
 | `scripts\fmt-newhunks.ps1` | — | `promote.rs`、`pidprops.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `200 passed` | **`200 passed`** | **全绿** |
+
+---
+
+## 36. LX-8 / LX-9 / L3-6 / L2-6 / L6-3（#147）：八槽全原型转换试点送测包升级（新增 `CONV-07` 外置工程表温压回填件与 `CONV-08` 纯裸 `.pid` 逆向双产物件）及 `C1..C8` 跨槽诊断收敛闭环（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `f7ad35999`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 修改文件 | `scripts/sppid/{build_submission_converted,test_build_submission_converted,precheck_and_receipt}.py` |
+| 外部证据子项 | `2026-11-21-issue147/`（`red-py.txt`、`green-py.txt`、`round1b_8slots.txt`、`cargo_test.txt`）与 `submissions/round-01b-converted-20261121/`（8 槽 24 文件） |
+
+### 36.1 先红后绿与设计摘要
+
+- **先红阶段**（`red-py.txt`，`RED_RC=1`）：在 `scripts/sppid/test_build_submission_converted.py` 新增 `test_build_submission_converted_supports_eight_slots_gates_external_props_and_derives_cross_slot_diagnostics`，验证 `--external-props-bundle`（`CONV-07`）与 `--bare-pid-bundle`（`CONV-08`）打包、外置属性注入强检及跨槽对比诊断归因，运行按预期失败变红。
+- **转绿阶段**（`green-py.txt`，`201 passed`）：
+  1. 扩展 `scripts/sppid/build_submission_converted.py`（向后兼容 5/6/7/8 槽）：新增第 7 槽 `07-sppid-dxf-external-props`（`CONV-07`，`C7_external_props_schedule_accepted`，强检 `_Coverage.json` `external_props_applied.attributes_injected > 0` 并记录 `external_props_process_points_updated`）与第 8 槽 `08-bare-pid-inapp-rebuild`（`CONV-08`，`C8_bare_pid_rebuild_accepted`，记录 `bare_pid_rebuilt_xml = true`）；
+  2. 扩展 `scripts/sppid/precheck_and_receipt.py` `evaluate-receipt`：对 `converted_pilot` 包输出 `C1..C8` 全量判定并自动派生跨槽对比 `diagnostic_hints`（例如当 `01-sppid-dxf-direct` 被拒而 `07-sppid-dxf-external-props` 通过时给出 `"external_schedule_props_required_for_dxf"`；当 `06-pid-inapp-edit-save` 通过而 `08-bare-pid-inapp-rebuild` 被拒时给出 `"companion_xml_or_schedule_needed_for_bare_pid"`）。
+
+### 36.2 重建八槽全原型转换试点送测包（`submissions/round-01b-converted-20261121/`，8 槽 24 文件）实测
+
+- 清单摘要：**`manifest_sha256 = 325551c26454b7810fde673ad67639dd0259368caf5c5b3512a5ed3a6fa5a854`**，`precheck_passed = true`（零本机盘符路径、零客户图名，全部 `8 / 8` 槽通过 `precheck --allow-unverified-sppid` Gate 1 零违规）。
+
+| 槽位 | 交付主干 | 原型验收键 | 精确变体数 / 兜底 | `StrictVendor` 违规 | `GraphicOID` 对齐 | `a/b` 级验证 | 新增专属核验读数 |
+|---|---|---|---:|---:|---:|---|---|
+| `01-sppid-dxf-direct` | `CONV-01` | `C1_sppid_dxf_accepted` | `43 / 0` | `0` | `80 / 80` | `true / true` | 与 `CONV-07` 构成外置表对照基线 |
+| `02-legacy-block-circle-direct` | `CONV-02` | `C2_legacy_block_circle_accepted` | `108 / 0` | `0` | `227 / 227` | `true / true` | 与 `CONV-05` 构成 `.dxf`/`.dwg` 对照 |
+| `03-legacy-exploded-shape-direct` | `CONV-03` | `C3_legacy_exploded_shape_accepted` | `127 / 0` | `0` | `345 / 345` | `true / true` | 炸散多散线形状直转 |
+| `04-legacy-inapp-pidsavepid` | `CONV-04` | `C4_inapp_pidsavepid_accepted` | `127 / 0` | `0` | `275 / 275` | `true / true` | 原生存量图应用内交互存回 |
+| `05-binary-dwg-direct` | `CONV-05` | `C5_binary_dwg_accepted` | `108 / 0` | `0` | `227 / 227` | `true / true` | `binary_dwg_header = "AC1032"` |
+| `06-pid-inapp-edit-save` | `CONV-06` | `C6_pid_inapp_edit_save_accepted` | `299 / 0` | `0` | `442 / 442` | `true / true` | 既有带 XML `.pid` 应用内编辑存回 |
+| **`07-sppid-dxf-external-props`** | **`CONV-07`** | **`C7_external_props_schedule_accepted`** | **`115 / 0`** | **`0`** | **`302 / 302`** | **`true / true`** | **`attributes_injected = 153`、`.PPT = 59`** |
+| **`08-bare-pid-inapp-rebuild`** | **`CONV-08`** | **`C8_bare_pid_rebuild_accepted`** | **`110 / 0`** | **`0`** | **`344 / 344`** | **`true / true`** | **`bare_pid_rebuilt_xml = true`** |
+| **合计（8 槽 24 文件）** | `CONV-01..08` | `C1..C8` | **`1,037 / 0`** | **`0`（`16/16` XML）** | **`2,242 / 2,242`（`100%`）** | **`8/8` 全过** | **覆盖全部 8 类真实工程输入形态** |
+
+### 36.3 固定门禁读数
+
+| 门禁项 | 改前读数（§35.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,222` 条（`7,149` 过 / `72` 忽略 / `1` 既有 `.pen`） | **`7,222` 条**（**`7,149` 过** / **`72` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | **0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告**（零 `.rs` 改动） | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告**（零 `.rs` 改动） | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | 本单零 `.rs` 改动（`new=0`） | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `200 passed` | **`201 passed`** | `+1` 条 Python 测试，**全绿** |
+

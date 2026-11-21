@@ -15,7 +15,7 @@
 | **口径 1：代理标准（与已通过样本一致，差异可解释）** | 导出的 XML 与 `.pid` 在格式、结构、接口与属性上与已通过样本逐项对齐；差异清单必须可解释且受白名单评审守门 | **本地已通过** | ① **90 张有效 SPPID 导出 DXF**：一键转换产出 `88,236` 个对象、`96,888` 条关系（`failed = 0`）；`180 / 180` 份 `_Data.xml` / `_Meta.xml` 通过 `#111` `StrictVendor` 零违规校验；`convert_check.py` 对参考 `_Data.xml` 实测 **`unexplained_diffs = 0`**；符号召回率 **`97.79%`**（`15,605 / 15,957`）、精确率 **`99.89%`**、图面可见位号一致率 **`~94.6%`**、管口挂设备率（含设备图）**`89.86%`**、标题栏图号提取 **`91.11%`**（`readings.md` §3、§14–§16、§21–§22）；② **12 张真实原生 AutoCAD 存量 DXF（`SOURCE_DWG`，`L01..L12`，含天正图块+散圆仪表图与炸散散线形状图两套标准，`#138`）**：精确变体映射由 `0` 跃升至 **`1,619`**（`class_default_fallback = 0`），产出 `6,867` 对象 / `7,147` 关系，`24 / 24` 份 XML 过 `StrictVendor` 零违规（`readings.md` §27） |
 | **口径 2：日常门禁（`.pid` 的 `a/b` 级与 XML 校验器）** | 每个任务执行 `.pid` `a` 级（解析器重读相等 + 索引无悬挂）、`b` 级（本软件加载显示与参考 PDF 一致）及 XML 格式/结构校验器 | **本地已通过** | ① **生成 `.pid` 双产物侧**：10 份空白模板 `.pid` 流级零差异无损往返（`#128`），五族记录链编码 + Q9 五步索引同步 `chain_fault_count = 0`（`#129`），90 张 SPPID DXF 全量双产物导出 **`42,861 / 42,861`（`100%`）** + 12 张原生 AutoCAD 存量 DXF **`3,454 / 3,454`（`100%`）** `GraphicOID`/`ModelID`/`DrawingID` 跨文件严格相等，合计 **`102 / 102`** 一次通过 `a` 级重读与 `b` 级 CAD 重载 + `pid-plot` PDF 出图验证（`readings.md` §17–§19、§27）；② **读取显示 `.pid` 侧**：`EXPORT_SET` 全部 `94 / 94` 张真实 `.pid` 零故障打开与出图，`release` 单图打开中位数 **`536.5 ms`**（`0.733x` 基线）、场景准备均值 **`63.1 ms`**，`L1-4` `27,148` 条文本 `Flattened = 0`；`L1-2` 94 图对 `EXPORT_PDF` 对位 `94 / 94` 通过，覆盖率均值 **`0.995949`**、中位数 **`1.000000`**（`69` 张达 `1.000`、`5` 张 `< 0.980` 全部定位到加长图框模板缺失或副表掩膜边界）（`readings.md` §20） |
 | **口径 3：送测前预检三关** | ① XML 与已通过样本逐项对照；② `.pid` 在 SPPID 里能打开（`c1`）；③ SPPID 发布 `.pid` 得到的 XML 与直接导出 XML 一致（`d`） | **第①关已通过；第②③关待 `RES-06` 执行（SPPID 未验证）** | 第①关已在全批 90 图转换产物与第一轮减法送测包上 `100%` 通过；因当前机器未配置受控 SPPID 运行器（`$OCS_PID_SPPID_RUNNER` 未设），第②关（`c1`）与第③关（`d`）按规程标为 **`unverified_no_sppid_runner`（SPPID 未验证）**，待受控环境就绪后执行 `LX-4 / LX-5 / LX-8` |
-| **口径 4：成组单变量「减法送测」** | 基于同一已知通过样本构造单变量减法变体组，随附零改动原样阳性对照，一次摸清外部平台硬门槛 | **首轮减法包 + 配套六槽真实转换与编辑存回试点包均已生成并通过本地预检；待投递回填 `receipt.json`** | ① `build_submission_round1.py`（`#135`）已产出 `submissions/round-01-20261121/`（`00-control` + `V1-01..V1-05` 共 6 槽 17 文件，`manifest_sha256 = 26eb6189e08d506a...`，`precheck_passed = true`）；② `build_submission_converted.py`（`#140` / `#143`）已产出 `submissions/round-01b-converted-20261121/`（`CONV-01..CONV-06` 共 6 槽 18 文件，覆盖 SPPID 拆分图、原生存量图块+散圆、原生存量炸散形状、原生存量图应用内 `PIDSAVEPID`、二进制 `AC1032` `.dwg` 直转及既有真实 `.pid` 应用内编辑 + `PIDINSERT` 存回，`manifest_sha256 = bb39b67f93d8c64d...`，`precheck_passed = true`）（`readings.md` §23、§29、§32） |
+| **口径 4：成组单变量「减法送测」** | 基于同一已知通过样本构造单变量减法变体组，随附零改动原样阳性对照，一次摸清外部平台硬门槛 | **首轮减法包 + 配套八槽全原型转换与编辑重建试点包均已生成并通过本地预检；待投递回填 `receipt.json`** | ① `build_submission_round1.py`（`#135`）已产出 `submissions/round-01-20261121/`（`00-control` + `V1-01..V1-05` 共 6 槽 17 文件，`manifest_sha256 = 26eb6189e08d506a...`，`precheck_passed = true`）；② `build_submission_converted.py`（`#140` / `#143` / `#147`）已产出 `submissions/round-01b-converted-20261121/`（`CONV-01..CONV-08` 共 8 槽 24 文件，覆盖 SPPID 拆分图、原生存量图块+散圆、原生存量炸散形状、原生存量图应用内 `PIDSAVEPID`、二进制 `AC1032` `.dwg` 直转、既有带 XML `.pid` 应用内编辑存回、外置 `.xlsx` 设备/管线表回填 `.PPT` 温压及全厂备份包纯裸无 XML `.pid` 逆向重建双产物，`manifest_sha256 = 325551c26454b781...`，`precheck_passed = true`）（`readings.md` §23、§29、§32、§36） |
 | **口径 5：严格区分「本软件解析器认」与「SPPID / 外部平台认」** | 汇报、覆盖报告与清单中明确区分本地重读/出图通过与原生 SPPID / 外部平台通过 | **严格遵守** | 每份 `_Coverage.json` 的 `pid_verification.sppid_native_c1_status`、`submission-manifest.json` 的 `sppid_c1_d_precheck_status` 及 `readings.md` §17–§23 均显式标注 `unverified_no_sppid_runner`，零越界宣称 |
 
 ---
@@ -31,7 +31,7 @@
 | **`L4` publish XML 导出**（`L4-0..L4-7`） | **100% 已完成** | `#111, #123, #126, #127, #137, #138, #141`（`6fd58799c`, `b49ed5274`, `1afee04eb`, `477b08b61`, `1b1495c37`, `b152958c1` + `#141`）：`StrictVendor` 校验器、220 份真值零违规、共享确定性 UID 分配、公称直径 `100%` 规范化、2/3/4+ 段线号兼容与管网派生合成、90 图整批转换 `unexplained_diffs = 0`、`_Coverage.json` `VariantResolutionSummary` 可观测性（`90` 图 `exact = 15,910` + `12` 图 `exact = 1,619`，`class_default_fallback = 0`）、`--class-map` 按厂外置替换，以及应用内标准命令 `PIDCONVERT`（单图与 `BATCH`、`CLASSMAP`、`VERIFY`） |
 | **`L5` `.pid` 生成**（`L5-1, L5-3..L5-6, L5-8, L5-9`） | **本地 `a/b` 级 100% 已完成** | `#128–#130`（`c851fa214..53ea94d76`）：18 类流写入面分类、10 份空白模板零差异往返、五族记录链与 Q9 索引同步、90 图一键双产物 `42,861/42,861` 跨文件对齐并通过 `a/b` 级验证（`L5-2 / L5-7` 待 `RES-06`） |
 | **`L6` 整合与总验收**（`L6-1..L6-3`） | **本地全线已完成** | `examples/pid_convert.rs` 整批双产物 CLI + 应用内 `PIDCONVERT` / `PIDCONVERT BATCH` 命令（`L6-1` / `L4-6`，`#130` / `#138` / `#140` / `#141` / `#142`，覆盖 90 张 SPPID 图 + 12 张原生 AutoCAD 存量图 + 二进制 `AC1032` `.dwg` + 已编辑 `PID_AUTHOR` 模型）、`promote::save_author_document_to_dual` 与 `PIDSAVEPID` 应用内编辑存回 `.pid` 全链路 `a/b` 验证（`L6-2`，`#134` / `#136` / `#139` / `#142` 覆盖 SPPID DXF、12 张原生存量图与真实 `.pid` 原图全闭环）及本文件 `L6-3` 总验收报告（`#135`，`3ba5c3c2e`；外部回执待回填） |
-| **`LX` 外部验收**（`LX-2, LX-4, LX-6..LX-9` 本机齐备） | **纯 ASCII 受控运行器模板、三套送测/真机探针实物包、全系回执收敛器与合规台账已全部就绪** | `build_submission_round1.py`（`#135`）已产出 `submissions/round-01-20261121/`；`build_submission_converted.py`（`#140` / `#143`）已产出 6 槽 `submissions/round-01b-converted-20261121/`；`build_submission_round2.py` + `sppid_runner_template.ps1`（`#144`）已产出第二轮二分包 `submissions/round-02-bisect-20261121/` 与 `LX-4` `E1..E3` 探针包 `submissions/lx4-sppid-probes-20261121/`；`precheck_and_receipt.py` 已支持串联三关预检与 `R1..R5` / `B1..B4` / `C1..C6` / `E1..E3` 自动收敛；`06-lx-compliance-and-codelist-audit.md` 已归档 `LX-6` 保留流够用性、`LX-7` 合规边界与 `#117` 分级来源调查 |
+| **`LX` 外部验收**（`LX-2, LX-4, LX-6..LX-9` 本机齐备） | **纯 ASCII 受控运行器模板、三套送测/真机探针实物包、全系回执收敛器与合规台账已全部就绪** | `build_submission_round1.py`（`#135`）已产出 `submissions/round-01-20261121/`；`build_submission_converted.py`（`#140` / `#143` / `#147`）已产出 8 槽 24 文件 `submissions/round-01b-converted-20261121/`；`build_submission_round2.py` + `sppid_runner_template.ps1`（`#144`）已产出第二轮二分包 `submissions/round-02-bisect-20261121/` 与 `LX-4` `E1..E3` 探针包 `submissions/lx4-sppid-probes-20261121/`；`precheck_and_receipt.py` 已支持串联三关预检与 `R1..R5` / `B1..B4` / `C1..C8`（含跨槽诊断 `diagnostic_hints`）/ `E1..E3` 自动收敛；`06-lx-compliance-and-codelist-audit.md` 已归档 `LX-6` 保留流够用性、`LX-7` 合规边界与 `#117` 分级来源调查 |
 | **检查点 A（能认得）** | **已达成**（2026-11-20） | 基线报告、`03-parse-answers.md` Q1–Q13 与 L4/L5 选型全部落盘 |
 | **检查点 B / C / D** | **本地静态与 `a/b` 级条件已齐备** | 待受控 SPPID 环境补跑 `c1/d` 真机预检及外部平台回填首轮 `receipt.json` 后即可正式签收 |
 
@@ -52,9 +52,9 @@
 | `04-var-plain-xml-format` | 是 | `3` | `536,770` | `10`（预期格式项） | `0` | `0` | **通过** | 探测外部平台对 BOM / CRLF / `0-3-6-3-2` 缩进的字节敏感度 |
 | `05-var-synthetic-uids` | 是 | `3` | `548,346` | `0` | `0` | — | **通过** | 探测外部平台是否接纳本平台确定性生成的全新 32 位十六进制 UID |
 
-### 3B. 配套六槽「真实存量图转换与交互编辑件」试点就绪包摘要（`submissions/round-01b-converted-20261121/`，#140 / #143）
+### 3B. 配套八槽「全原型存量图转换、外置表回填与交互重建件」试点就绪包摘要（`submissions/round-01b-converted-20261121/`，#140 / #143 / #147）
 
-- 送测包清单摘要：`manifest_sha256 = bb39b67f93d8c64daa90b06b4377ce19b5cee55efa3ea29a4e92fcdf815f8397`，`package_kind = "converted_pilot"`，`precheck_passed = true`（默认纯 ASCII 脱敏主干 `CONV-01..CONV-06`，零客户图名、零盘符路径）
+- 送测包清单摘要：`manifest_sha256 = 325551c26454b7810fde673ad67639dd0259368caf5c5b3512a5ed3a6fa5a854`，`package_kind = "converted_pilot"`，`precheck_passed = true`（默认纯 ASCII 脱敏主干 `CONV-01..CONV-08`，零客户图名、零盘符路径）
 
 | 槽位 | 交付主干 | 精确变体数 | 表外兜底 | `StrictVendor` 违规数 | `GraphicOID` 对齐 | `a/b` 级验证 | 验证目标 |
 |---|---|---:|---:|---:|---:|---|---|
@@ -63,7 +63,9 @@
 | `03-legacy-exploded-shape-direct` | `CONV-03` | `127` | `0` | `0` | `345 / 345` | **通过 / 通过** | 原生 AutoCAD 全散线形状存量图 → `pid_convert` 双产物 |
 | `04-legacy-inapp-pidsavepid` | `CONV-04` | `127` | `0` | `0` | `275 / 275` | **通过 / 通过** | 原生 AutoCAD 存量图 → 应用内 `PIDPROMOTE → PIDREVIEW → PIDSAVEPID` 存回 |
 | `05-binary-dwg-direct` | `CONV-05` | `108` | `0` | `0` | `227 / 227` | **通过 / 通过** | 二进制 `AC1032` `.dwg`（`e605ccf6d6f0`）→ `pid_convert` 直转双产物 |
-| `06-pid-inapp-edit-save` | `CONV-06` | `299` | `0` | `0` | `442 / 442` | **通过 / 通过** | 既有真实 `.pid` 原图 → 应用内 `PIDPROMOTE → 面板改位号 + PIDINSERT → PIDSAVEPID` 存回 |
+| `06-pid-inapp-edit-save` | `CONV-06` | `299` | `0` | `0` | `442 / 442` | **通过 / 通过** | 既有带 XML `.pid` 原图 → 应用内 `PIDPROMOTE → 面板改位号 + PIDINSERT → PIDSAVEPID` 存回 |
+| `07-sppid-dxf-external-props` | `CONV-07` | `115` | `0` | `0` | `302 / 302` | **通过 / 通过** | SPPID 拆分 DXF + 双工作表 `.xlsx` 回填 `153` 项属性与 `59` 个 `.PPT` 工艺点温压 |
+| `08-bare-pid-inapp-rebuild` | `CONV-08` | `110` | `0` | `0` | `344 / 344` | **通过 / 通过** | 全厂备份包无伴随 `_Data.xml` 纯裸 `.pid` → 应用内放置边界归并逆向重建双产物 |
 
 ### 3C. 第二轮定向二分减法送测包（`submissions/round-02-bisect-20261121/`）与 `LX-4` `E1..E3` 探针包摘要（#144）
 
@@ -79,7 +81,7 @@
 
 ## 4. 固定六门禁全阶段演进核验表
 
-| 门禁项 | 初始基线（#109，`9b5faf294`） | 当前收官节点（#146） | 演进结论 |
+| 门禁项 | 初始基线（#109，`9b5faf294`） | 当前收官节点（#147） | 演进结论 |
 |---|---|---|---|
 | `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` | 同一编译器 |
 | `cargo test --offline --locked --lib` | `7,145` 条（`7,089` 过 / `55` 忽略 / `1` `.pen`） | **`7,222` 条**（**`7,149` 过** / **`72` 忽略** / **`1` 同一既有 `.pen`**） | 净增 **`+77` 条测试**，**0 新增失败** |
@@ -87,7 +89,7 @@
 | `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
 | `scripts\fmt-newhunks.ps1` | — | 全阶段全部新增与修改 `.rs` 文件 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
-| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `159 passed` | **`200 passed`** | 净增 **`+41` 条测试**，**全绿** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `159 passed` | **`201 passed`** | 净增 **`+42` 条测试**，**全绿** |
 
 ---
 

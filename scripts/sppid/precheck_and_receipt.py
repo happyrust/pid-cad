@@ -236,14 +236,38 @@ def evaluate_receipt(manifest_path: Path, receipt_path: Path) -> tuple[int, dict
 
     if manifest.get("package_kind") == "converted_pilot":
         arch_acc: dict[str, bool] = {}
+        slot_ok_map: dict[str, bool] = {}
         next_actions: list[str] = []
         for s in manifest.get("slots") or []:
             sl = str(s["slot"])
             akey = str(s.get("archetype_key", sl))
             ok_slot = _slot_status_lower(results.get(sl)) == "accepted"
             arch_acc[akey] = ok_slot
+            slot_ok_map[sl] = ok_slot
             if not ok_slot:
                 next_actions.append(f"investigate-{sl}")
+        diag_hints: list[str] = []
+        if (
+            "01-sppid-dxf-direct" in slot_ok_map
+            and "07-sppid-dxf-external-props" in slot_ok_map
+            and (not slot_ok_map["01-sppid-dxf-direct"])
+            and slot_ok_map["07-sppid-dxf-external-props"]
+        ):
+            diag_hints.append("external_schedule_props_required_for_dxf")
+        if (
+            "06-pid-inapp-edit-save" in slot_ok_map
+            and "08-bare-pid-inapp-rebuild" in slot_ok_map
+            and slot_ok_map["06-pid-inapp-edit-save"]
+            and (not slot_ok_map["08-bare-pid-inapp-rebuild"])
+        ):
+            diag_hints.append("companion_xml_or_schedule_needed_for_bare_pid")
+        if (
+            "02-legacy-block-circle-direct" in slot_ok_map
+            and "05-binary-dwg-direct" in slot_ok_map
+            and slot_ok_map["02-legacy-block-circle-direct"]
+            and (not slot_ok_map["05-binary-dwg-direct"])
+        ):
+            diag_hints.append("binary_dwg_entity_decode_divergence")
         all_ok = bool(arch_acc) and all(arch_acc.values())
         if all_ok:
             next_actions.append("phase1-external-acceptance-complete")
@@ -253,6 +277,7 @@ def evaluate_receipt(manifest_path: Path, receipt_path: Path) -> tuple[int, dict
             "manifest_sha256": expected_sha,
             "all_archetypes_accepted": all_ok,
             "archetype_acceptance": arch_acc,
+            "diagnostic_hints": diag_hints,
             "next_round_actions": next_actions,
             "slot_statuses": {sl: _slot_status_lower(results.get(sl)) for sl in expected_slots if sl in results},
         }

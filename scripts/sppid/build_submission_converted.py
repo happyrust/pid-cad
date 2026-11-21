@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Build Round-1B 6-slot converted & in-app edited P&ID pilot submission package (LX-8 / LX-9 / #140 / #143).
+"""Build Round-1B 8-slot converted & in-app edited P&ID pilot submission package (LX-8 / LX-9 / #140 / #143 / #147).
 
-Packages six representative real SmartPlant P&ID bundles produced by
+Packages up to eight representative real SmartPlant P&ID bundles produced by
 OpenCADStudio's Phase-1 pipeline so external digital delivery testing validates
-all conversion and interactive edit/save-back archetypes alongside Round-1 subtraction probes:
+all conversion, external schedule backfill, and interactive edit/rebuild archetypes
+alongside Round-1 subtraction probes:
 
 - `01-sppid-dxf-direct` (`CONV-01`): SPPID-exported DXF -> `pid_convert` dual bundle;
 - `02-legacy-block-circle-direct` (`CONV-02`): Native AutoCAD block + circle-bubble DXF -> `pid_convert`;
 - `03-legacy-exploded-shape-direct` (`CONV-03`): Native AutoCAD exploded stroke-shape DXF -> `pid_convert`;
 - `04-legacy-inapp-pidsavepid` (`CONV-04`): Native AutoCAD sheet -> `PIDPROMOTE -> PIDREVIEW -> PIDSAVEPID`;
 - `05-binary-dwg-direct` (`CONV-05`): Genuine binary `.dwg` (`AC10*` magic verified) -> `pid_convert`;
-- `06-pid-inapp-edit-save` (`CONV-06`): Existing `.pid` sheet -> `PIDPROMOTE -> panel/PIDINSERT -> PIDSAVEPID`.
+- `06-pid-inapp-edit-save` (`CONV-06`): Existing `.pid` sheet -> `PIDPROMOTE -> panel/PIDINSERT -> PIDSAVEPID`;
+- `07-sppid-dxf-external-props` (`CONV-07`): SPPID DXF + external `.xlsx` schedule -> `.PPT` process points & attrs;
+- `08-bare-pid-inapp-rebuild` (`CONV-08`): XML-free bare backup `.pid` -> placement-run `PIDPROMOTE -> PIDSAVEPID`.
 
 Validates every slot against `StrictVendor` XML spec (`0` violations), `.pid` `a/b`-level
 `_Coverage.json` verification (`matched_graphic_oids == xml_rep_count`, `a_level_index_consistent`),
@@ -72,6 +75,18 @@ SLOT_DEFS: tuple[tuple[str, str, str, str], ...] = (
         "CONV-06",
         "C6_pid_inapp_edit_save_accepted",
         "Existing .pid sheet promoted, edited, and saved in-app via PIDPROMOTE -> panel/PIDINSERT -> PIDSAVEPID",
+    ),
+    (
+        "07-sppid-dxf-external-props",
+        "CONV-07",
+        "C7_external_props_schedule_accepted",
+        "SPPID-exported split DXF enriched with external equipment/line schedule (.xlsx/.csv) and .PPT process points",
+    ),
+    (
+        "08-bare-pid-inapp-rebuild",
+        "CONV-08",
+        "C8_bare_pid_rebuild_accepted",
+        "XML-free bare backup .pid promoted by placement runs and rebuilt to full dual bundle in-app",
     ),
 )
 
@@ -136,9 +151,9 @@ def build_converted_submission_package(
     plant: str = "P01",
     keep_original_stem: bool = False,
 ) -> tuple[int, dict[str, Any]]:
-    if len(bundle_dirs) not in (5, len(SLOT_DEFS)):
+    if len(bundle_dirs) not in (5, 6, 7, len(SLOT_DEFS)):
         raise ValueError(
-            f"expected 5 or {len(SLOT_DEFS)} bundle directories, got {len(bundle_dirs)}"
+            f"expected 5..{len(SLOT_DEFS)} bundle directories, got {len(bundle_dirs)}"
         )
     active_defs = SLOT_DEFS[: len(bundle_dirs)]
 
@@ -196,6 +211,11 @@ def build_converted_submission_package(
         ).is_file()
 
         slot_ok = (strict_cnt == 0) and (fallback_cnt == 0) and a_valid
+        ext_info = cov.get("external_props_applied") or {}
+        ext_injected = int(ext_info.get("attributes_injected", 0))
+        ext_ppts = int(ext_info.get("process_points_updated", 0))
+        if slot_name == "07-sppid-dxf-external-props" and ext_injected <= 0:
+            slot_ok = False
         if not slot_ok:
             precheck_ok = False
 
@@ -234,6 +254,11 @@ def build_converted_submission_package(
         if idx == 4:
             entry["binary_dwg_header"] = dwg_magic
             entry["binary_dwg_sha256_prefix"] = dwg_sha_pfx
+        if slot_name == "07-sppid-dxf-external-props":
+            entry["external_props_attributes_injected"] = ext_injected
+            entry["external_props_process_points_updated"] = ext_ppts
+        if slot_name == "08-bare-pid-inapp-rebuild":
+            entry["bare_pid_rebuilt_xml"] = True
         slot_reports.append(entry)
 
     canonical_slots = json.dumps(slot_reports, sort_keys=True, separators=(",", ":")).encode(
@@ -289,6 +314,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--binary-dwg-bundle", required=True, type=Path)
     p.add_argument("--binary-dwg-source", required=True, type=Path)
     p.add_argument("--pid-inapp-bundle", default=None, type=Path)
+    p.add_argument("--external-props-bundle", default=None, type=Path)
+    p.add_argument("--bare-pid-bundle", default=None, type=Path)
     p.add_argument("--out-dir", required=True, type=Path)
     p.add_argument("--plant", default="P01")
     p.add_argument("--keep-original-stem", action="store_true")
@@ -313,6 +340,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     ]
     if args.pid_inapp_bundle is not None:
         bundles.append(args.pid_inapp_bundle)
+    if args.external_props_bundle is not None:
+        if args.pid_inapp_bundle is None:
+            print("error: --external-props-bundle requires --pid-inapp-bundle", file=sys.stderr)
+            return 2
+        bundles.append(args.external_props_bundle)
+    if args.bare_pid_bundle is not None:
+        if args.external_props_bundle is None:
+            print("error: --bare-pid-bundle requires --external-props-bundle", file=sys.stderr)
+            return 2
+        bundles.append(args.bare_pid_bundle)
 
     try:
         rc, manifest = build_converted_submission_package(
