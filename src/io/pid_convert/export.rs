@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use super::class_map::default_legend_class_map;
 use super::recognize::{
     recognise_sppid_sheet, ConfidenceSummary, ConfidenceThresholds, ConfidenceTier, PipeLabelHit,
-    PipeSegmentHit, SheetRecognition,
+    PipeSegmentHit, SheetRecognition, TitleBlockInfo,
 };
 use crate::io::pid_publish::{
     export_drawing_bundle, is_valid_hex32, parse_sppid_line_number, pipeline_uid,
@@ -116,6 +116,8 @@ pub struct ConvertSheetReport {
     pub drawing_name: String,
     pub doc_uid: String,
     pub plant: String,
+    #[serde(default)]
+    pub title_block: TitleBlockInfo,
     pub confidence_summary: ConfidenceSummary,
     pub exported_by_class: BTreeMap<String, usize>,
     pub piping_synthesis: PipingSynthesisStats,
@@ -340,13 +342,24 @@ fn build_core_conversion(
     let rec = recognise_sppid_sheet(doc, map, opts.thresholds);
     let upm = rec.units_per_mm.max(1e-6);
 
-    let mut alloc = UidAllocator::new(&opts.plant, doc_name);
+    let effective_doc_name: String =
+        if doc_name.trim().is_empty() || doc_name.trim().eq_ignore_ascii_case("untitled") {
+            rec.title_block
+                .drawing_title
+                .clone()
+                .or_else(|| rec.title_block.drawing_number.clone())
+                .unwrap_or_else(|| doc_name.to_string())
+        } else {
+            doc_name.to_string()
+        };
+
+    let mut alloc = UidAllocator::new(&opts.plant, &effective_doc_name);
     if let Some((min_next, reserved)) = seed_reserved_oids {
         alloc.reserve_graphic_oids(min_next, reserved);
     }
 
-    let doc_uid = alloc.alloc_primary_uid(None, &format!("drawing:{doc_name}"));
-    let mut dwg = ExportDrawing::new(&opts.plant, &doc_uid, doc_name);
+    let doc_uid = alloc.alloc_primary_uid(None, &format!("drawing:{effective_doc_name}"));
+    let mut dwg = ExportDrawing::new(&opts.plant, &doc_uid, &effective_doc_name);
 
     let mut exported_by_class: BTreeMap<String, usize> = BTreeMap::new();
     let mut endpoints: Vec<SymbolEndpointRef> = Vec::new();
@@ -384,6 +397,17 @@ fn build_core_conversion(
                 attrs.insert(
                     ("IOffpageConnector".to_string(), "ToFromText".to_string()),
                     tf.clone(),
+                );
+            }
+        }
+        if sym.sppid_class == "PIDNozzle" {
+            if let Some(ref nd) = sym.nominal_diameter {
+                attrs.insert(
+                    (
+                        "IPipeCrossSectionItem".to_string(),
+                        "NominalDiameter".to_string(),
+                    ),
+                    nd.clone(),
                 );
             }
         }
@@ -479,9 +503,10 @@ fn build_core_conversion(
     }
 
     let report = ConvertSheetReport {
-        drawing_name: doc_name.to_string(),
+        drawing_name: effective_doc_name,
         doc_uid,
         plant: opts.plant.clone(),
+        title_block: rec.title_block.clone(),
         confidence_summary: rec.confidence_summary.clone(),
         exported_by_class,
         piping_synthesis: piping_stats,

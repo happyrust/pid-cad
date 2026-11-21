@@ -347,6 +347,7 @@
 **缺资料。** RES-02 ✔、RES-13 ⚠。
 
 **对应任务。** L1-2（M）
+**状态与解决记录。** **已完成（2026-11-21，[#131](https://github.com/happyrust/pid-cad/issues/131)）**：落地 `examples/pid_l1_bench.rs` 与 `scripts/sppid/{batch_l1_eval,test_batch_l1_eval}.py`（先红后绿）；对 `EXPORT_SET` 全部 `94` 张真实 `.pid` 渲染出图并对照 `EXPORT_PDF`（`84` 精确 + `10` 近似候选）全量比对：`94 / 94` 对位通过，覆盖率均值 `0.995949`、中位数 `1.000000`（`69` 张达 `1.000`、`20` 张 `[0.980, 1.000)`、`5` 张 `< 0.980` 全部脱敏归因），文字匹配 `27,062 / 27,300`（`99.13%`），详见 `readings.md` §20。
 
 ---
 
@@ -390,7 +391,7 @@
 **缺资料。** 无。
 
 **对应任务。** L1-4（S，范围已核实缩窄）
-**状态与现状说明。** 单样式字符 run 覆盖段落默认样式早已在 `src/io/pid/styles.rs:101-136` 接通（原 106/155 偏差已消除）；后续仅在 `L1-2` 整批出图对比中核查同一条 `TEXT` 内多样式混排展平是否造成可见字宽偏差。
+**状态与解决记录。** **已完成（2026-11-21，[#131](https://github.com/happyrust/pid-cad/issues/131)）**：单样式字符 run 覆盖段落默认样式早已在 `src/io/pid/styles.rs:101-136` 接通；本次对 `EXPORT_SET` 全部 `94` 张真实 `.pid`（`27,148` 条文本记录）全量核查 `TextRunStatus`：`Uniform = 26,968`、`NoRuns = 180`、**`Flattened = 0`（`0 / 94` 张图）**，证实整批生产图纸无多样式展平字宽偏差，详见 `readings.md` §20。
 
 ---
 
@@ -411,6 +412,7 @@
 **缺资料。** RES-02 ✔。
 
 **对应任务。** L1-5（S）
+**状态与解决记录。** **已完成（2026-11-21，[#131](https://github.com/happyrust/pid-cad/issues/131)）**：实测 `EXPORT_SET` 全部 `94` 张真实 `.pid`（`275,542` 实体、`16,826` 内嵌缓存本体，`load_failures = 0`）：`release` 单图打开中位数 `536.5 ms`（纯导入中位数 `509.9 ms`，为 `732.1 ms` 基线的 `0.733x`）、本仓场景准备均值 `63.1 ms`；均值 `1,693.4 ms`（`P95 = 7,696.0 ms`）的长尾热点已定位至外部 `pid-parse` 对大型高密度图 `470–606` 个 `/JSite*` 子存储的 CFB 遍历，详见 `readings.md` §20。
 
 ---
 
@@ -1097,8 +1099,8 @@
 | ISSUE-L3-2（[#125](https://github.com/happyrust/pid-cad/issues/125)） | 多行位号、范围标注、仪表圈内拼接、位号在符号外等写法覆盖不全 | **已完成**：落地 `src/io/pid_convert/recognize.rs` 四路位号配对与松散容器恢复，90 张 DXF 召回率升至 `97.79%`、精确率 `99.89%`、位号一致率 `89.55%`（见 `readings.md` §14） | RES-17 ⚠ | L3-2（M） |
 | ISSUE-L3-3 | 管线族覆盖不全，断头多 | 线号（5 位/4 位）、管线族、管段与管件断开、流向；逐族出读数 | RES-17 ⚠ | L3-3（L） |
 | ISSUE-L3-4 | 连通关系没有系统性配对 | 连接点与端点配对；页间连接符按文字与图号跨图配对 | — | L3-4（L） |
-| ISSUE-L3-5 | 管口位号没有继承设备位号 | 管口位号继承；管口与设备的组合关系 | — | L3-5（M） |
-| ISSUE-L3-6 | 线号没有拆解成属性；标题栏没读图号图名 | 拆解公称直径/介质/序号/等级；读标题栏；预留外部表格接口 | RES-17 ⚠ | L3-6（M） |
+| ISSUE-L3-5（[#132](https://github.com/happyrust/pid-cad/issues/132)） | 管口位号没有继承设备位号 | **已完成**：重构图层 `"10"` 容器壳体几何包围盒 + 双层容差挂接与接管直径/等级回填，90 图管口挂接升至 `629/779`（含设备图纸上 `89.86%`）、带公称直径 `212` 个（见 `readings.md` §21） | — | L3-5（M） |
+| ISSUE-L3-6（[#132](https://github.com/happyrust/pid-cad/issues/132)） | 线号没有拆解成属性；标题栏没读图号图名 | **已完成**：落地 `TitleBlockInfo` 提取器与线号拆解核对，90 图提取图号 `82/90`（`91.11%`）、图名精确率 `97.96%`、管道等级吻合 `90.56%`（见 `readings.md` §21）；外部表格接口预留 | RES-17 ⚠ | L3-6（M） |
 | ISSUE-L3-7（[#125](https://github.com/happyrust/pid-cad/issues/125)） | 没有置信度分档与人工确认 | **引擎分档已完成**：可配置三档阈值与计数守恒已在 `recognize.rs` 落地（见 `readings.md` §14），交互面板待 `L2` 衔接 | — | L3-7（M） |
 | ISSUE-L3-8 | 规则改动后没有回归门禁 | 整批报告逐行 diff，只允许预期行变化 | RES-02 ✔ | L3-8（S） |
 
@@ -1187,7 +1189,11 @@
 | `ISSUE-L4-6 / L4-7` | [#127](https://github.com/happyrust/pid-cad/issues/127) | `done-local`（本地已完成 · L4 全线收官） | 提交 `477b08b61`：落地 `src/io/pid_convert/export.rs`、`examples/pid_convert.rs`、`assets/pid-xml-diff-allowlist.json` 与 `convert_check.py`；90 图整批转换 `180` 份 XML 零违规、白名单外零未解释差异，见 `readings.md` §16 |
 | `ISSUE-L5-1 / L5-3` | [#128](https://github.com/happyrust/pid-cad/issues/128) | `done-local`（本地已完成） | 提交 `c851fa214`：落地 `src/io/pid_write/{mod,surface,seed,verify}.rs`，10 份空白模板种子流级零差异往返 + 第 2 节 `_SPID` 同步，见 `readings.md` §17 |
 | `ISSUE-L5-4 / L5-5` | [#129](https://github.com/happyrust/pid-cad/issues/129) | `done-local`（本地已完成） | 提交 `4e115a2f8`：落地 `src/io/pid_write/{oid,records,index}.rs`，五族记录编码 + Q9 五步索引同步自检全过，见 `readings.md` §18 |
-| `ISSUE-L5-6 / L5-8 / L5-9 / L6-1` | [#130](https://github.com/happyrust/pid-cad/issues/130) | `done-local`（本地已完成） | 扩展 `src/io/pid_publish/uid.rs`、`src/io/pid_convert/export.rs` 与 `examples/pid_convert.rs`；90 图双产物 `42,861/42,861` 100% 对齐、全过 `a/b` 级验证，见 `readings.md` §19 |
-| `ISSUE-L1-2 / L1-5` | [#131](https://github.com/happyrust/pid-cad/issues/131) | `in-progress`（进行中） | 94 张真实 `.pid` 批量打开性能与渲染出图对参考 PDF 扩面对比报告 |
+| `ISSUE-L5-6 / L5-8 / L5-9 / L6-1` | [#130](https://github.com/happyrust/pid-cad/issues/130) | `done-local`（本地已完成） | 提交 `53ea94d76`：扩展 `src/io/pid_publish/uid.rs`、`src/io/pid_convert/export.rs` 与 `examples/pid_convert.rs`；90 图双产物 `42,861/42,861` 100% 对齐、全过 `a/b` 级验证，见 `readings.md` §19 |
+| `ISSUE-L1-2 / L1-4 / L1-5` | [#131](https://github.com/happyrust/pid-cad/issues/131) | `done-local`（本地已完成 · L1 全线收官） | 提交 `e2f43b91c`：落地 `examples/pid_l1_bench.rs` 与 `scripts/sppid/{batch_l1_eval,test_batch_l1_eval}.py`；94 图零故障打开与出图（release 打开中位数 `536.5 ms`、`Flattened=0`、覆盖率均值 `0.995949`、`69` 张达 `1.000`），见 `readings.md` §20 |
+| `ISSUE-L3-5 / L3-6` | [#132](https://github.com/happyrust/pid-cad/issues/132) | `done-local`（本地已完成） | 扩展 `src/io/pid_convert/{mod,recognize,export}.rs` 与 `src/io/pid_publish/relations.rs`；90 图管口挂接升至 `629/779`（含设备图 `89.86%`），标题栏图号 `82/90`、图名精确率 `97.96%`，`unexplained_diffs=0`，见 `readings.md` §21 |
+| `ISSUE-L3-3 / L3-4 / L3-8` | [#133](https://github.com/happyrust/pid-cad/issues/133) | `phase1`（待推进） | 管线族成链、端口连通与跨图页间连接符配对深化及整批逐行回归门禁（零冲突） |
+| `ISSUE-L2-1 / L2-5 / L2-7 / L6-2` | [#134](https://github.com/happyrust/pid-cad/issues/134) | `phase1`（待推进） | `src/io/pid_convert/promote.rs` 无冲突 `PID_AUTHOR` 幂等升格与编辑后存回 `.pid` 全链路闭环 |
+| `ISSUE-LX-8 / LX-9 / L6-3` | [#135](https://github.com/happyrust/pid-cad/issues/135) | `phase1`（待推进） | 第一轮减法送测 6 套受控包自动构建器与阶段一总验收报告（零冲突） |
 | `.sym` 预览（关联） | [#116](https://github.com/happyrust/pid-cad/issues/116) | 暂缓（避让并行分支） | 待 `pid-symbol-identity` 合入 `main` 后实施 |
 | 分级表可观测性（关联） | [#117](https://github.com/happyrust/pid-cad/issues/117) | 待定范围 | 与 `L4-2` / `L0-9` 衔接，建议先做第 1 步表外计数输出 |

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::class_map::{BlockResolution, LegendClassMap};
 use crate::io::pid_legend::guess_units_per_mm;
+use crate::io::pid_publish::format_nominal_diameter_attr;
 
 /// The 10 SPPID taggable symbol classes evaluated by `scripts/sppid/legend_vs_xml.py`.
 pub const TEN_SYMBOL_CLASSES: [&str; 10] = [
@@ -97,9 +98,22 @@ pub struct ConvertedSymbol {
     pub description: Option<String>,
     pub to_from_text: Option<String>,
     pub lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nominal_diameter: Option<String>,
     pub confidence: f64,
     pub tier: ConfidenceTier,
     pub known: bool,
+}
+
+/// Title-block metadata extracted from the lower-right frame (`L3-6` / `#132`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TitleBlockInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drawing_number: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drawing_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
 }
 
 /// Line-number label detected on the sheet.
@@ -134,6 +148,8 @@ pub struct SheetRecognition {
     pub pipe_segments: Vec<PipeSegmentHit>,
     pub orphan_tags: Vec<String>,
     pub range_tags: Vec<RangeTagHit>,
+    #[serde(default)]
+    pub title_block: TitleBlockInfo,
     pub confidence_summary: ConfidenceSummary,
 }
 
@@ -675,7 +691,20 @@ pub fn recognise_sppid_sheet(
     let mut symbols: Vec<ConvertedSymbol> = Vec::new();
     let mut summary = ConfidenceSummary::default();
     let mut texts: Vec<SheetText> = Vec::new();
+    let mut all_texts: Vec<SheetText> = Vec::new();
     let mut pipe_segments: Vec<PipeSegmentHit> = Vec::new();
+    let mut layer10_boxes: Vec<(f64, f64, f64, f64)> = Vec::new();
+    let mut sheet_bounds: Option<(f64, f64, f64, f64)> = None;
+
+    let mut include_pt = |p: (f64, f64)| {
+        if !p.0.is_finite() || !p.1.is_finite() {
+            return;
+        }
+        sheet_bounds = Some(match sheet_bounds {
+            Some((x0, y0, x1, y1)) => (x0.min(p.0), y0.min(p.1), x1.max(p.0), y1.max(p.1)),
+            None => (p.0, p.1, p.0, p.1),
+        });
+    };
 
     for entity in doc.model_space_entities() {
         let layer = entity.common().layer.trim();
@@ -703,6 +732,7 @@ pub fn recognise_sppid_sheet(
                             description: None,
                             to_from_text: None,
                             lines: Vec::new(),
+                            nominal_diameter: None,
                             confidence: 0.0,
                             tier: ConfidenceTier::Medium,
                             known: true,
@@ -724,6 +754,7 @@ pub fn recognise_sppid_sheet(
                             description: None,
                             to_from_text: None,
                             lines: Vec::new(),
+                            nominal_diameter: None,
                             confidence: 0.35,
                             tier: thresholds.classify(0.35),
                             known: false,
@@ -731,7 +762,7 @@ pub fn recognise_sppid_sheet(
                     }
                 }
             }
-            EntityType::Text(t) if !ignore_layers.contains(&layer_upper) => {
+            EntityType::Text(t) => {
                 let val = t.value.trim();
                 if !val.is_empty() {
                     let x0 = t.insertion_point.x;
@@ -742,83 +773,184 @@ pub fn recognise_sppid_sheet(
                         Some(ap) if (ap.x - x0).hypot(ap.y - y0) > 1e-6 => (ap.x, ap.y + h * 0.4),
                         _ => (x0 + width_est * 0.5, y0 + h * 0.4),
                     };
-                    texts.push(SheetText {
+                    include_pt((x0, y0));
+                    include_pt(center);
+                    let st = SheetText {
                         value: val.to_string(),
                         layer: layer.to_string(),
                         anchor: (x0, y0),
                         center,
-                    });
+                    };
+                    if !ignore_layers.contains(&layer_upper) {
+                        texts.push(SheetText {
+                            value: st.value.clone(),
+                            layer: st.layer.clone(),
+                            anchor: st.anchor,
+                            center: st.center,
+                        });
+                    }
+                    all_texts.push(st);
                 }
             }
-            EntityType::MText(mt) if !ignore_layers.contains(&layer_upper) => {
+            EntityType::MText(mt) => {
                 let cleaned = mt.value.replace("\\P", " ");
                 let val = cleaned.trim();
                 if !val.is_empty() {
                     let p = (mt.insertion_point.x, mt.insertion_point.y);
-                    texts.push(SheetText {
+                    include_pt(p);
+                    let st = SheetText {
                         value: val.to_string(),
                         layer: layer.to_string(),
                         anchor: p,
                         center: p,
-                    });
+                    };
+                    if !ignore_layers.contains(&layer_upper) {
+                        texts.push(SheetText {
+                            value: st.value.clone(),
+                            layer: st.layer.clone(),
+                            anchor: st.anchor,
+                            center: st.center,
+                        });
+                    }
+                    all_texts.push(st);
                 }
             }
-            EntityType::Line(l) if !ignore_layers.contains(&layer_upper) => {
+            EntityType::Line(l) => {
                 let a = (l.start.x, l.start.y);
                 let b = (l.end.x, l.end.y);
+                include_pt(a);
+                include_pt(b);
                 if (a.0 - b.0).hypot(a.1 - b.1) > 1e-6 {
-                    pipe_segments.push(PipeSegmentHit {
-                        start: a,
-                        end: b,
-                        layer: layer.to_string(),
-                    });
+                    if layer == "10" {
+                        layer10_boxes.push((
+                            a.0.min(b.0),
+                            a.1.min(b.1),
+                            a.0.max(b.0),
+                            a.1.max(b.1),
+                        ));
+                    }
+                    if !ignore_layers.contains(&layer_upper) {
+                        pipe_segments.push(PipeSegmentHit {
+                            start: a,
+                            end: b,
+                            layer: layer.to_string(),
+                        });
+                    }
                 }
             }
-            EntityType::LwPolyline(pl) if !ignore_layers.contains(&layer_upper) => {
+            EntityType::LwPolyline(pl) => {
                 let pts: Vec<(f64, f64)> = pl
                     .vertices
                     .iter()
                     .map(|v| (v.location.x, v.location.y))
                     .collect();
+                for &pt in &pts {
+                    include_pt(pt);
+                }
                 for w in pts.windows(2) {
                     if (w[0].0 - w[1].0).hypot(w[0].1 - w[1].1) > 1e-6 {
-                        pipe_segments.push(PipeSegmentHit {
-                            start: w[0],
-                            end: w[1],
-                            layer: layer.to_string(),
-                        });
+                        if layer == "10" {
+                            layer10_boxes.push((
+                                w[0].0.min(w[1].0),
+                                w[0].1.min(w[1].1),
+                                w[0].0.max(w[1].0),
+                                w[0].1.max(w[1].1),
+                            ));
+                        }
+                        if !ignore_layers.contains(&layer_upper) {
+                            pipe_segments.push(PipeSegmentHit {
+                                start: w[0],
+                                end: w[1],
+                                layer: layer.to_string(),
+                            });
+                        }
                     }
                 }
                 if pl.is_closed && pts.len() > 2 {
-                    pipe_segments.push(PipeSegmentHit {
-                        start: pts[pts.len() - 1],
-                        end: pts[0],
-                        layer: layer.to_string(),
-                    });
+                    let a = pts[pts.len() - 1];
+                    let b = pts[0];
+                    if layer == "10" {
+                        layer10_boxes.push((
+                            a.0.min(b.0),
+                            a.1.min(b.1),
+                            a.0.max(b.0),
+                            a.1.max(b.1),
+                        ));
+                    }
+                    if !ignore_layers.contains(&layer_upper) {
+                        pipe_segments.push(PipeSegmentHit {
+                            start: a,
+                            end: b,
+                            layer: layer.to_string(),
+                        });
+                    }
                 }
             }
-            EntityType::Polyline2D(pl) if !ignore_layers.contains(&layer_upper) => {
+            EntityType::Polyline2D(pl) => {
                 let pts: Vec<(f64, f64)> = pl
                     .vertices
                     .iter()
                     .map(|v| (v.location.x, v.location.y))
                     .collect();
+                for &pt in &pts {
+                    include_pt(pt);
+                }
                 for w in pts.windows(2) {
                     if (w[0].0 - w[1].0).hypot(w[0].1 - w[1].1) > 1e-6 {
+                        if layer == "10" {
+                            layer10_boxes.push((
+                                w[0].0.min(w[1].0),
+                                w[0].1.min(w[1].1),
+                                w[0].0.max(w[1].0),
+                                w[0].1.max(w[1].1),
+                            ));
+                        }
+                        if !ignore_layers.contains(&layer_upper) {
+                            pipe_segments.push(PipeSegmentHit {
+                                start: w[0],
+                                end: w[1],
+                                layer: layer.to_string(),
+                            });
+                        }
+                    }
+                }
+                if pl.flags.is_closed() && pts.len() > 2 {
+                    let a = pts[pts.len() - 1];
+                    let b = pts[0];
+                    if layer == "10" {
+                        layer10_boxes.push((
+                            a.0.min(b.0),
+                            a.1.min(b.1),
+                            a.0.max(b.0),
+                            a.1.max(b.1),
+                        ));
+                    }
+                    if !ignore_layers.contains(&layer_upper) {
                         pipe_segments.push(PipeSegmentHit {
-                            start: w[0],
-                            end: w[1],
+                            start: a,
+                            end: b,
                             layer: layer.to_string(),
                         });
                     }
                 }
-                if pl.flags.is_closed() && pts.len() > 2 {
-                    pipe_segments.push(PipeSegmentHit {
-                        start: pts[pts.len() - 1],
-                        end: pts[0],
-                        layer: layer.to_string(),
-                    });
-                }
+            }
+            EntityType::Circle(c) if layer == "10" => {
+                let r = c.radius.abs();
+                layer10_boxes.push((
+                    c.center.x - r,
+                    c.center.y - r,
+                    c.center.x + r,
+                    c.center.y + r,
+                ));
+            }
+            EntityType::Arc(a) if layer == "10" => {
+                let r = a.radius.abs();
+                layer10_boxes.push((
+                    a.center.x - r,
+                    a.center.y - r,
+                    a.center.x + r,
+                    a.center.y + r,
+                ));
             }
             _ => {}
         }
@@ -1061,6 +1193,14 @@ pub fn recognise_sppid_sheet(
             let (cls, vid) = equipment_class_for_prefix(&pfx);
             let p = texts[ti].center;
             let r = 8.0 * upm;
+            let base_bbox = (p.0 - r, p.1 - r, p.0 + r, p.1 + r);
+            let shell_bbox = expand_bbox_over_layer10(
+                base_bbox,
+                &layer10_boxes,
+                36.0 * upm,
+                6.0 * upm,
+                380.0 * upm,
+            );
             symbols.push(ConvertedSymbol {
                 sppid_class: cls.to_string(),
                 variant_id: Some(vid.to_string()),
@@ -1068,16 +1208,38 @@ pub fn recognise_sppid_sheet(
                 source_block: "loose-equipment".to_string(),
                 layer: texts[ti].layer.clone(),
                 at: p,
-                bbox: (p.0 - r, p.1 - r, p.0 + r, p.1 + r),
+                bbox: shell_bbox,
                 ports: vec![p],
                 tag: Some(norm_tag),
                 description: None,
                 to_from_text: None,
                 lines: Vec::new(),
+                nominal_diameter: None,
                 confidence: 0.85,
                 tier: thresholds.classify(0.85),
                 known: true,
             });
+        }
+    }
+
+    // Also absorb touching layer-"10" nozzle-neck stubs onto INSERT-backed equipment.
+    for sym in &mut symbols {
+        if sym.source_block != "loose-equipment"
+            && matches!(
+                sym.sppid_class.as_str(),
+                "PIDProcessVessel"
+                    | "PIDMechanicalEquipment"
+                    | "PIDProcessEquipment"
+                    | "PIDHeatTransferEquipment"
+            )
+        {
+            sym.bbox = expand_bbox_over_layer10(
+                sym.bbox,
+                &layer10_boxes,
+                5.0 * upm,
+                4.5 * upm,
+                320.0 * upm,
+            );
         }
     }
 
@@ -1136,6 +1298,43 @@ pub fn recognise_sppid_sheet(
         let (ti, _, ref norm_tag) = valve_texts[vti];
         claimed_text[ti] = true;
         symbols[si].tag = Some(norm_tag.clone());
+    }
+
+    // Pass 3b: Nozzle nominal diameter callout pairing (`DN50`, `2"`, `1-1/2"`, etc., `L3-5`).
+    let noz_syms: Vec<usize> = symbols
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.sppid_class == "PIDNozzle")
+        .map(|(idx, _)| idx)
+        .collect();
+    if !noz_syms.is_empty() {
+        let noz_size_texts: Vec<(usize, String)> = texts
+            .iter()
+            .enumerate()
+            .filter_map(|(ti, t)| {
+                if claimed_text[ti] {
+                    return None;
+                }
+                parse_nozzle_size_callout(&t.value).map(|nd| (ti, nd))
+            })
+            .collect();
+        let mut nd_edges: Vec<(f64, usize, usize)> = Vec::new();
+        for (nti, (ti, _)) in noz_size_texts.iter().enumerate() {
+            for &si in &noz_syms {
+                let d_mm = point_to_bbox_dist(texts[*ti].anchor, symbols[si].bbox)
+                    .min(point_to_bbox_dist(texts[*ti].center, symbols[si].bbox))
+                    / upm;
+                if d_mm <= 14.0 {
+                    nd_edges.push((d_mm, nti, si));
+                }
+            }
+        }
+        for chosen in min_cost_bipartite_match(&nd_edges) {
+            let (_, nti, si) = nd_edges[chosen];
+            let (ti, ref nd) = noz_size_texts[nti];
+            claimed_text[ti] = true;
+            symbols[si].nominal_diameter = Some(nd.clone());
+        }
     }
 
     // Pass 4: Off-page connectors (`PIDBranchPoint`: `DWG-*` -> `to_from_text`, prose -> `description`).
@@ -1226,6 +1425,8 @@ pub fn recognise_sppid_sheet(
         }
     }
 
+    let title_block = extract_title_block(&all_texts, sheet_bounds, upm);
+
     SheetRecognition {
         units_per_mm: upm,
         symbols,
@@ -1233,7 +1434,285 @@ pub fn recognise_sppid_sheet(
         pipe_segments,
         orphan_tags,
         range_tags,
+        title_block,
         confidence_summary: summary,
+    }
+}
+
+fn rect_gap(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> f64 {
+    let dx = if a.2 < b.0 {
+        b.0 - a.2
+    } else if b.2 < a.0 {
+        a.0 - b.2
+    } else {
+        0.0
+    };
+    let dy = if a.3 < b.1 {
+        b.1 - a.3
+    } else if b.3 < a.1 {
+        a.1 - b.3
+    } else {
+        0.0
+    };
+    dx.hypot(dy)
+}
+
+fn expand_bbox_over_layer10(
+    seed: (f64, f64, f64, f64),
+    boxes: &[(f64, f64, f64, f64)],
+    seed_tol: f64,
+    link_tol: f64,
+    max_span: f64,
+) -> (f64, f64, f64, f64) {
+    if boxes.is_empty() {
+        return seed;
+    }
+    let mut cur = seed;
+    let mut used = vec![false; boxes.len()];
+    let mut queue: VecDeque<usize> = VecDeque::new();
+
+    for (i, &b) in boxes.iter().enumerate() {
+        if (b.2 - b.0) > max_span || (b.3 - b.1) > max_span {
+            continue;
+        }
+        if rect_gap(seed, b) <= seed_tol {
+            let nx0 = cur.0.min(b.0);
+            let ny0 = cur.1.min(b.1);
+            let nx1 = cur.2.max(b.2);
+            let ny1 = cur.3.max(b.3);
+            if (nx1 - nx0) <= max_span && (ny1 - ny0) <= max_span {
+                cur = (nx0, ny0, nx1, ny1);
+                used[i] = true;
+                queue.push_back(i);
+            }
+        }
+    }
+
+    while let Some(u) = queue.pop_front() {
+        let ub = boxes[u];
+        for (i, &b) in boxes.iter().enumerate() {
+            if used[i] || (b.2 - b.0) > max_span || (b.3 - b.1) > max_span {
+                continue;
+            }
+            if rect_gap(ub, b) <= link_tol {
+                let nx0 = cur.0.min(b.0);
+                let ny0 = cur.1.min(b.1);
+                let nx1 = cur.2.max(b.2);
+                let ny1 = cur.3.max(b.3);
+                if (nx1 - nx0) <= max_span && (ny1 - ny0) <= max_span {
+                    cur = (nx0, ny0, nx1, ny1);
+                    used[i] = true;
+                    queue.push_back(i);
+                }
+            }
+        }
+    }
+    cur
+}
+
+fn parse_nozzle_size_callout(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() || s.len() > 10 {
+        return None;
+    }
+    let upper = s.to_ascii_uppercase();
+    if upper.starts_with("DN")
+        || upper.ends_with("MM")
+        || upper.ends_with("IN")
+        || s.ends_with('"')
+        || s.ends_with("''")
+    {
+        return format_nominal_diameter_attr(s);
+    }
+    if matches!(
+        s,
+        "15" | "20"
+            | "25"
+            | "32"
+            | "40"
+            | "50"
+            | "65"
+            | "80"
+            | "100"
+            | "125"
+            | "150"
+            | "200"
+            | "250"
+            | "300"
+            | "350"
+            | "400"
+            | "450"
+            | "500"
+            | "600"
+    ) {
+        return format_nominal_diameter_attr(s);
+    }
+    None
+}
+
+fn extract_title_block(
+    all_texts: &[SheetText],
+    sheet_bounds: Option<(f64, f64, f64, f64)>,
+    upm: f64,
+) -> TitleBlockInfo {
+    let Some((min_x, min_y, max_x, max_y)) = sheet_bounds else {
+        return TitleBlockInfo::default();
+    };
+    let w = (max_x - min_x).max(1.0);
+    let h = (max_y - min_y).max(1.0);
+
+    let tb_cands: Vec<&SheetText> = all_texts
+        .iter()
+        .filter(|t| {
+            let lu = t.layer.to_ascii_uppercase();
+            let in_corner = (t.anchor.0 - min_x) / w >= 0.55 && (t.anchor.1 - min_y) / h <= 0.32;
+            let on_tb_layer = (lu == "LABELS" || lu.contains("TITLE") || lu.contains("BORDER"))
+                && (t.anchor.1 - min_y) / h <= 0.36
+                && (t.anchor.0 - min_x) / w >= 0.45;
+            in_corner || on_tb_layer
+        })
+        .collect();
+
+    if tb_cands.is_empty() {
+        return TitleBlockInfo::default();
+    }
+
+    // 1. Drawing number: prefer `DWG-*`, else drawing-code token in lower-right corner.
+    let mut drawing_number: Option<String> = None;
+    for t in &tb_cands {
+        let v = t.value.trim();
+        if v.starts_with("DWG-") && v.len() >= 6 {
+            drawing_number = Some(v.to_string());
+            break;
+        }
+    }
+    if drawing_number.is_none() {
+        for t in &tb_cands {
+            let v = t.value.trim().trim_end_matches('-');
+            if v.len() >= 6
+                && v.is_ascii()
+                && !is_sppid_line_label(&t.value)
+                && v.chars().any(|c| c.is_ascii_digit())
+                && v.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                && (v.contains('-') || v.len() >= 7)
+            {
+                drawing_number = Some(v.to_string());
+                break;
+            }
+        }
+    }
+
+    // 2. Drawing title: prefer text ending in `流程图` / `系统图` / `P&ID` / `DIAGRAM`, optionally paired with unit prefix line.
+    let is_title_noise = |s: &str| -> bool {
+        matches!(
+            s,
+            "图号"
+                | "图名"
+                | "版次"
+                | "比例"
+                | "日期"
+                | "设计"
+                | "校核"
+                | "审核"
+                | "审定"
+                | "批准"
+        )
+    };
+    let mut primary_title: Option<&SheetText> = None;
+    for t in &tb_cands {
+        let v = t.value.trim();
+        let vu = v.to_ascii_uppercase();
+        if (v.ends_with("流程图")
+            || v.ends_with("系统图")
+            || vu.contains("P&ID")
+            || vu.contains("FLOW DIAGRAM"))
+            && primary_title.is_none_or(|prev| v.chars().count() > prev.value.chars().count())
+        {
+            primary_title = Some(t);
+        }
+    }
+    if primary_title.is_none() {
+        for t in &tb_cands {
+            let v = t.value.trim();
+            if !v.is_ascii()
+                && v.chars().count() >= 6
+                && !is_title_noise(v)
+                && t.layer.eq_ignore_ascii_case("Labels")
+                && primary_title.is_none_or(|prev| v.chars().count() > prev.value.chars().count())
+            {
+                primary_title = Some(t);
+            }
+        }
+    }
+
+    let drawing_title = primary_title.map(|pt| {
+        let base = pt.value.trim();
+        if base.contains(' ') {
+            return base.to_string();
+        }
+        // Check for a stacked station/unit line in the same title-block area (`单元` / `站`)
+        let mut prefix_cand: Option<&SheetText> = None;
+        for t in &tb_cands {
+            if std::ptr::eq(*t, pt) {
+                continue;
+            }
+            let v = t.value.trim();
+            if !v.is_ascii()
+                && v.chars().count() >= 4
+                && !is_title_noise(v)
+                && (v.contains("单元") || v.contains('站'))
+                && !base.contains(v)
+                && (t.anchor.1 - pt.anchor.1).abs() <= 26.0 * upm
+                && (t.anchor.0 - pt.anchor.0).abs() <= 80.0 * upm
+                && prefix_cand.is_none_or(|p| v.chars().count() > p.value.chars().count())
+            {
+                prefix_cand = Some(t);
+            }
+        }
+        match prefix_cand {
+            Some(pfx) => format!("{} {base}", pfx.value.trim()),
+            None => base.to_string(),
+        }
+    });
+
+    // 3. Revision: look for `版次` / `版` / `REV` label and nearest short revision token.
+    let mut revision: Option<String> = None;
+    for lbl in &tb_cands {
+        let lv = lbl.value.trim();
+        let lvu = lv.to_ascii_uppercase();
+        if lv == "版次" || lv == "版" || lvu == "REV" || lvu == "REV." {
+            let mut best_rev: Option<(f64, &str)> = None;
+            for cand in &tb_cands {
+                if std::ptr::eq(*cand, *lbl) {
+                    continue;
+                }
+                let cv = cand.value.trim();
+                if (1..=4).contains(&cv.len())
+                    && cv.is_ascii()
+                    && cv.chars().all(|c| c.is_ascii_alphanumeric() || c == '.')
+                {
+                    let dx = (cand.anchor.0 - lbl.anchor.0) / upm;
+                    let dy = (cand.anchor.1 - lbl.anchor.1).abs() / upm;
+                    if (-5.0..=40.0).contains(&dx) && dy <= 16.0 {
+                        let d = dx.abs().hypot(dy);
+                        if best_rev.is_none_or(|(bd, _)| d < bd) {
+                            best_rev = Some((d, cv));
+                        }
+                    }
+                }
+            }
+            if let Some((_, rv)) = best_rev {
+                revision = Some(rv.to_string());
+                break;
+            }
+        }
+    }
+
+    TitleBlockInfo {
+        drawing_number,
+        drawing_title,
+        revision,
     }
 }
 
@@ -1439,6 +1918,81 @@ mod tests {
         );
         assert_eq!(rec.pipe_labels.len(), 1);
         assert_eq!(rec.pipe_labels[0].raw_text, "25-CI-0201505-B9-EH40");
+    }
+
+    #[test]
+    fn expands_loose_vessel_shell_bbox_extracts_nozzle_size_and_reads_title_block() {
+        let mut doc = Document::new();
+        define_block(&mut doc, "FLANGED NOZZLE WITH BLIND", box_lines(4.0, 4.0));
+
+        // Sheet border + lower-right title block on `Labels`
+        let mut border = Line::from_points(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(1189.0, 841.0, 0.0),
+        );
+        border.common.layer = "Default".to_string();
+        doc.add_entity(EntityType::Line(border)).unwrap();
+        add_txt(&mut doc, "DWG-0202GP06-01", 1120.0, 24.0, "Labels");
+        add_txt(
+            &mut doc,
+            "分离单元 生产分离器工艺及自控流程图",
+            1080.0,
+            38.0,
+            "Labels",
+        );
+        add_txt(&mut doc, "版次", 1045.0, 24.0, "Labels");
+        add_txt(&mut doc, "B", 1055.0, 24.0, "Labels");
+
+        // Loose-geometry vessel shell on layer "10": x in 200..260, y in 300..440
+        for (p1, p2) in [
+            ((200.0, 300.0), (260.0, 300.0)),
+            ((260.0, 300.0), (260.0, 440.0)),
+            ((260.0, 440.0), (200.0, 440.0)),
+            ((200.0, 440.0), (200.0, 300.0)),
+        ] {
+            let mut ln =
+                Line::from_points(Vector3::new(p1.0, p1.1, 0.0), Vector3::new(p2.0, p2.1, 0.0));
+            ln.common.layer = "10".to_string();
+            doc.add_entity(EntityType::Line(ln)).unwrap();
+        }
+        add_txt(&mut doc, "V-02021", 225.0, 370.0, "10");
+
+        // Nozzle mounted on outer shell at x=262, y=410 (65 mm away from text center!) with DN50 callout
+        add_ins(&mut doc, "FLANGED NOZZLE WITH BLIND", 262.0, 410.0, "10");
+        add_txt(&mut doc, "DN50", 266.0, 414.0, "10");
+
+        let rec = recognise_sppid_sheet(
+            &doc,
+            default_legend_class_map(),
+            ConfidenceThresholds::default(),
+        );
+        assert_eq!(
+            rec.title_block.drawing_number.as_deref(),
+            Some("DWG-0202GP06-01")
+        );
+        assert_eq!(
+            rec.title_block.drawing_title.as_deref(),
+            Some("分离单元 生产分离器工艺及自控流程图")
+        );
+        assert_eq!(rec.title_block.revision.as_deref(), Some("B"));
+
+        let vessel = rec
+            .symbols
+            .iter()
+            .find(|s| s.sppid_class == "PIDProcessVessel")
+            .expect("loose vessel");
+        assert!(
+            vessel.bbox.0 <= 200.5 && vessel.bbox.2 >= 259.5 && vessel.bbox.3 >= 439.5,
+            "loose vessel bbox should encompass layer-10 shell: {:?}",
+            vessel.bbox
+        );
+
+        let nozzle = rec
+            .symbols
+            .iter()
+            .find(|s| s.sppid_class == "PIDNozzle")
+            .expect("nozzle");
+        assert_eq!(nozzle.nominal_diameter.as_deref(), Some("50 mm"));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

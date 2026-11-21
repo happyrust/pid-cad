@@ -22,5 +22,5 @@ pub use export::{
 };
 pub use recognize::{
     recognise_sppid_sheet, ConfidenceSummary, ConfidenceThresholds, ConfidenceTier,
-    ConvertedSymbol, PipeLabelHit, PipeSegmentHit, RangeTagHit, SheetRecognition,
+    ConvertedSymbol, PipeLabelHit, PipeSegmentHit, RangeTagHit, SheetRecognition, TitleBlockInfo,
 };

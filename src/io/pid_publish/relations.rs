@@ -122,8 +122,16 @@ pub fn synthesize_piping_network(
         let mut best: Option<(f64, &str)> = None;
         for &ei in &equip_indices {
             let gap = bbox_gap(ep.bbox, endpoints[ei].bbox);
-            if gap <= tol * 4.0 && best.is_none_or(|(bg, _)| gap < bg) {
+            if gap <= tol * 18.0 && best.is_none_or(|(bg, _)| gap < bg) {
                 best = Some((gap, endpoints[ei].symbol_uid.as_str()));
+            }
+        }
+        if best.is_none() {
+            for &ei in &equip_indices {
+                let gap = bbox_gap(ep.bbox, endpoints[ei].bbox);
+                if gap <= tol * 180.0 && best.is_none_or(|(bg, _)| gap < bg) {
+                    best = Some((gap, endpoints[ei].symbol_uid.as_str()));
+                }
             }
         }
         if let Some((_, eq_uid)) = best {
@@ -156,6 +164,7 @@ pub fn synthesize_piping_network(
 
     let mut conn_uids: Vec<String> = Vec::with_capacity(runs.len());
     let mut conn_diameters: Vec<Option<String>> = Vec::with_capacity(runs.len());
+    let mut conn_mat_classes: Vec<Option<String>> = Vec::with_capacity(runs.len());
 
     for (ri, run) in runs.iter().enumerate() {
         let conn_uid = alloc.alloc_primary_uid(
@@ -237,9 +246,11 @@ pub fn synthesize_piping_network(
                 );
             }
             conn_diameters.push(Some(pl.nominal_diameter_attr.clone()));
+            conn_mat_classes.push(Some(pl.materials_class.clone()));
             Some(pl.connector_name())
         } else {
             conn_diameters.push(None);
+            conn_mat_classes.push(None);
             None
         };
 
@@ -406,6 +417,7 @@ pub fn synthesize_piping_network(
 
     let mut resolve_target_uid = |target: &SnappedTarget,
                                   diam: Option<&str>,
+                                  mat_class: Option<&str>,
                                   dwg: &mut ExportDrawing,
                                   stats: &mut PipingSynthesisStats|
      -> Result<String, String> {
@@ -416,6 +428,31 @@ pub fn synthesize_piping_network(
                 symbol_idx,
                 port_idx,
             } => {
+                if endpoints[*symbol_idx].sppid_class == "PIDNozzle"
+                    && (diam.is_some() || mat_class.is_some())
+                {
+                    let noz_uid = &endpoints[*symbol_idx].symbol_uid;
+                    if let Some(noz_item) = dwg.items.iter_mut().find(|it| &it.uid == noz_uid) {
+                        if let Some(nd) = diam.filter(|s| !s.is_empty()) {
+                            noz_item
+                                .attributes
+                                .entry((
+                                    "IPipeCrossSectionItem".to_string(),
+                                    "NominalDiameter".to_string(),
+                                ))
+                                .or_insert_with(|| nd.to_string());
+                        }
+                        if let Some(mc) = mat_class.filter(|s| !s.is_empty()) {
+                            noz_item
+                                .attributes
+                                .entry((
+                                    "IPipingSpecifiedItem".to_string(),
+                                    "PipingMaterialsClass".to_string(),
+                                ))
+                                .or_insert_with(|| mc.to_string());
+                        }
+                    }
+                }
                 if let Some(existing) = created_ports.get(&(*symbol_idx, *port_idx)) {
                     return Ok(existing.clone());
                 }
@@ -459,8 +496,9 @@ pub fn synthesize_piping_network(
 
     for ri in 0..runs.len() {
         let diam = conn_diameters[ri].as_deref();
+        let mat_class = conn_mat_classes[ri].as_deref();
         if let Some(ref t1) = end1_targets[ri] {
-            let u1 = resolve_target_uid(t1, diam, dwg, &mut stats)?;
+            let u1 = resolve_target_uid(t1, diam, mat_class, dwg, &mut stats)?;
             let key = (
                 "PipingEnd1Conn".to_string(),
                 u1.clone(),
@@ -477,7 +515,7 @@ pub fn synthesize_piping_network(
             }
         }
         if let Some(ref t2) = end2_targets[ri] {
-            let u1 = resolve_target_uid(t2, diam, dwg, &mut stats)?;
+            let u1 = resolve_target_uid(t2, diam, mat_class, dwg, &mut stats)?;
             let key = (
                 "PipingEnd2Conn".to_string(),
                 u1.clone(),
@@ -630,5 +668,81 @@ mod tests {
         );
         assert!(vd.is_empty(), "Data violations: {vd:?}");
         assert!(vm.is_empty(), "Meta violations: {vm:?}");
+    }
+
+    #[test]
+    fn links_nozzle_across_neck_stub_and_inherits_connected_pipe_spec() {
+        let mut alloc = UidAllocator::new("P01", "DWG-NOZ-SPEC");
+        let doc_uid = alloc.alloc_primary_uid(None, "drawing:DWG-NOZ-SPEC");
+        let mut dwg = ExportDrawing::new("P01", &doc_uid, "DWG-NOZ-SPEC");
+
+        let vessel_uid = alloc.alloc_primary_uid(None, "eq:V-02021");
+        let nozzle_uid = alloc.alloc_primary_uid(None, "noz:N1");
+
+        dwg.items.push(ExportItem {
+            uid: vessel_uid.clone(),
+            class: "PIDProcessVessel".to_string(),
+            name: Some("V-02021".to_string()),
+            graphic_oids: vec![alloc.alloc_graphic_oid(None)],
+            ..Default::default()
+        });
+        dwg.items.push(ExportItem {
+            uid: nozzle_uid.clone(),
+            class: "PIDNozzle".to_string(),
+            graphic_oids: vec![alloc.alloc_graphic_oid(None)],
+            ..Default::default()
+        });
+
+        // Nozzle sits 18 mm outside the vessel shell (on a nozzle neck stub)
+        let endpoints = vec![
+            SymbolEndpointRef {
+                symbol_uid: vessel_uid,
+                sppid_class: "PIDProcessVessel".to_string(),
+                bbox: (200.0, 300.0, 260.0, 440.0),
+                ports: vec![(260.0, 410.0)],
+            },
+            SymbolEndpointRef {
+                symbol_uid: nozzle_uid.clone(),
+                sppid_class: "PIDNozzle".to_string(),
+                bbox: (278.0, 408.0, 282.0, 412.0),
+                ports: vec![(282.0, 410.0)],
+            },
+        ];
+        let runs = vec![PipeRunInput {
+            start: (282.0, 410.0),
+            end: (340.0, 410.0),
+            line_label: Some("50-PG-0202101-B9-".to_string()),
+            graphic_oid: Some(alloc.alloc_graphic_oid(None)),
+        }];
+
+        let stats =
+            synthesize_piping_network(&mut dwg, &mut alloc, &endpoints, &runs, 1.8).unwrap();
+        assert_eq!(stats.equipment_nozzle_links, 1);
+
+        let noz_item = dwg
+            .items
+            .iter()
+            .find(|i| i.uid == nozzle_uid)
+            .expect("nozzle item");
+        assert_eq!(
+            noz_item
+                .attributes
+                .get(&(
+                    "IPipeCrossSectionItem".to_string(),
+                    "NominalDiameter".to_string()
+                ))
+                .map(String::as_str),
+            Some("50 mm")
+        );
+        assert_eq!(
+            noz_item
+                .attributes
+                .get(&(
+                    "IPipingSpecifiedItem".to_string(),
+                    "PipingMaterialsClass".to_string()
+                ))
+                .map(String::as_str),
+            Some("B9")
+        );
     }
 }
