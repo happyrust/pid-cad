@@ -1,6 +1,7 @@
 use super::{tests::request, OpenCADStudio};
 use crate::app::{ModalKind, SaveContinuation, SavePurpose};
 use crate::io::edit_lock::FileFingerprint;
+use crate::pid::drc;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -603,5 +604,154 @@ fn control_save_file_alias_refuses_retargeting_before_worker_or_completion() {
             assert_eq!(app.tabs[i].current_path.as_ref(), Some(&alias));
             assert!(app.tabs[i].dirty);
         }
+    }
+}
+
+/// A P&ID drawing saved at `path`, with a project rule pack beside it that
+/// sets only `save_gate` (none for `None`: the built-in pack's `warn`).
+fn pid_drawing(path: &Path, gate: Option<&str>) {
+    let doc = crate::pid::project_index::synthetic_drawing(20);
+    crate::io::save(&doc, path).expect("save the P&ID drawing");
+    if let Some(gate) = gate {
+        set_gate(path, gate);
+    }
+}
+
+fn set_gate(path: &Path, gate: &str) {
+    let pack = json!({
+        "version": 1, "pack": "save gate", "rule_set_version": "T1", "save_gate": gate
+    });
+    let file = path.with_file_name(drc::builtin_rules::PROJECT_PACK_FILE);
+    std::fs::write(file, pack.to_string()).unwrap();
+}
+
+/// The summary lines the save gate printed on the command line.
+fn summaries(app: &OpenCADStudio) -> Vec<String> {
+    app.command_line
+        .history
+        .iter()
+        .filter(|entry| entry.text.starts_with("规则检查"))
+        .map(|entry| entry.text.clone())
+        .collect()
+}
+
+/// Waive every unwaived error the active drawing has when saved at `path`.
+fn waive_all(app: &mut OpenCADStudio, path: &Path) {
+    let i = app.active_tab;
+    let rules = drc::builtin_rules::load(path.parent()).expect("rule pack");
+    let report = drc::check_drawing(
+        &app.tabs[i].scene.document,
+        Some(path),
+        &rules,
+        drc::Trigger::BeforeSave,
+    );
+    let waivers: Vec<drc::Waiver> = report
+        .results
+        .iter()
+        .filter(|result| result.severity == drc::Severity::Error && !result.waived)
+        .map(|result| {
+            drc::Waiver::new(
+                &result.rule_id,
+                &result.object_key,
+                "按设计如此",
+                "zhangsan",
+                1_794_800_000,
+            )
+            .unwrap()
+        })
+        .collect();
+    assert!(!waivers.is_empty(), "the drawing has errors to waive");
+    drc::set_waivers(&mut app.tabs[i].scene.document, &waivers);
+}
+
+/// `block`: a drawing with unwaived errors is refused with `RULE_BLOCKED` and
+/// the file on disk keeps every byte; once they are waived it saves, and a
+/// `block` save prints no summary (one check per save). The same on the
+/// synchronous and the background save (SPEC-pid-drc §4.3).
+#[test]
+fn save_gate_block_refuses_until_the_errors_are_waived() {
+    for windowed in [false, true] {
+        let scratch = Scratch::new();
+        let path = scratch.0.join("PID-1101.dwg");
+        pid_drawing(&path, Some("block"));
+        let before = std::fs::read(&path).unwrap();
+        let mut app = reopen_drawing(&path, windowed);
+        edit(&mut app);
+        let i = app.active_tab;
+
+        let refused = request(&mut app, json!({"op":"save","path":path}));
+        assert_eq!(refused["ok"], false, "{refused}");
+        assert!(refused.to_string().contains("RULE_BLOCKED"), "{refused}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(app.tabs[i].dirty);
+
+        waive_all(&mut app, &path);
+        let saved = request(&mut app, json!({"op":"save","path":path}));
+        assert_eq!(saved["ok"], true, "{saved}");
+        assert_ne!(std::fs::read(&path).unwrap(), before);
+        assert!(!app.tabs[i].dirty);
+        assert!(summaries(&app).is_empty(), "{:?}", summaries(&app));
+    }
+}
+
+/// `block` stops only saves a person started: the autosave still writes its
+/// recovery copy and leaves the drawing file alone (SPEC-pid-drc §4.3).
+#[test]
+fn save_gate_block_lets_the_autosave_write_its_copy() {
+    let scratch = Scratch::new();
+    let path = scratch.0.join("PID-1101.dwg");
+    pid_drawing(&path, Some("block"));
+    let before = std::fs::read(&path).unwrap();
+    let mut app = reopen_drawing(&path, false);
+    edit(&mut app);
+    let i = app.active_tab;
+    let target = app.autosave_target(i);
+    let task = app.update(crate::app::Message::AutoSave);
+    app.drive_headless_task(task)
+        .expect("a task that needs no window");
+    assert!(target.exists(), "no autosave copy at {}", target.display());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(app.tabs[i].dirty);
+    assert!(summaries(&app).is_empty(), "{:?}", summaries(&app));
+    let _ = std::fs::remove_file(target);
+}
+
+/// `warn` (the built-in pack's setting) saves and prints exactly one summary
+/// line; `off` saves without checking (SPEC-pid-drc §4.3).
+#[test]
+fn save_gate_warn_prints_one_summary_and_off_prints_none() {
+    for windowed in [false, true] {
+        let scratch = Scratch::new();
+        let path = scratch.0.join("PID-1101.dwg");
+        pid_drawing(&path, None);
+        let mut app = reopen_drawing(&path, windowed);
+        edit(&mut app);
+        let saved = request(&mut app, json!({"op":"save","path":path}));
+        assert_eq!(saved["ok"], true, "{saved}");
+        let lines = summaries(&app);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("规则检查：错误 "), "{lines:?}");
+
+        set_gate(&path, "off");
+        edit(&mut app);
+        let saved = request(&mut app, json!({"op":"save","path":path}));
+        assert_eq!(saved["ok"], true, "{saved}");
+        assert_eq!(summaries(&app), lines);
+    }
+}
+
+/// A drawing without P&ID objects is never checked: it saves under `block`
+/// and prints no summary under `warn` (SPEC-pid-drc §4.3).
+#[test]
+fn save_gate_leaves_plain_drawings_alone() {
+    for gate in ["warn", "block"] {
+        let scratch = Scratch::new();
+        let path = scratch.0.join("plain.dwg");
+        let mut app = open_drawing(&path, false);
+        set_gate(&path, gate);
+        edit(&mut app);
+        let saved = request(&mut app, json!({"op":"save","path":path}));
+        assert_eq!(saved["ok"], true, "{gate}: {saved}");
+        assert!(summaries(&app).is_empty(), "{gate}: {:?}", summaries(&app));
     }
 }

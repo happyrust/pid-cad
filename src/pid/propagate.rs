@@ -116,14 +116,22 @@ pub enum PropagationReason {
     },
 }
 
-/// 保存门禁的错误：任何 PID 实体 `tag_status == duplicated` 即拒绝保存。
+/// 保存门禁的错误：任何 PID 实体 `tag_status == duplicated` 即拒绝保存；规则检查的保存门禁
+/// 为 `block` 时，有未豁免的错误也拒绝（`SPEC-pid-drc.md` §4.3）。
 ///
-/// 契约编码复用 `TagError::DuplicatedBlocksSave` 的
+/// 重复位号的契约编码复用 `TagError::DuplicatedBlocksSave` 的
 /// `TAG_DUPLICATED_BLOCKS_SAVE`，不另造一套。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PidError {
     /// 存在重复位号，禁止保存。
     Tag(TagError),
+    /// 有未豁免的错误，禁止保存。
+    RuleBlocked {
+        /// 未豁免的错误一共几条。
+        errors: usize,
+        /// 前 5 条，每条是「规则号 消息」。
+        first: Vec<String>,
+    },
 }
 
 impl PidError {
@@ -131,6 +139,7 @@ impl PidError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Tag(error) => error.code(),
+            Self::RuleBlocked { .. } => "RULE_BLOCKED",
         }
     }
 }
@@ -139,6 +148,18 @@ impl std::fmt::Display for PidError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tag(error) => error.fmt(f),
+            Self::RuleBlocked { errors, first } => {
+                write!(
+                    f,
+                    "{}: 有 {errors} 条未豁免的错误，没有保存：{}",
+                    self.code(),
+                    first.join("；")
+                )?;
+                if *errors > first.len() {
+                    write!(f, "；另有 {} 条", errors - first.len())?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -770,6 +791,7 @@ mod tests {
             false,
             None,
             None,
+            true,
         )
         .expect_err("duplicated tag must block the real save path");
         assert_eq!(
@@ -823,6 +845,7 @@ mod tests {
             false,
             None,
             None,
+            true,
         )
         .expect("cleared conflict saves through the same wrapper");
         assert!(target.exists(), "成功保存必须落目标文件");

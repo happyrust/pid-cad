@@ -2372,6 +2372,20 @@ impl OpenCADStudio {
         self.save_tab_synchronously_protected_as(i, path, version, set_current_path, false)
     }
 
+    /// The rule check's `warn` save gate: once a save a person started has
+    /// written the drawing, check it and print one summary line
+    /// (SPEC-pid-drc §4.3). Drawings without P&ID objects print nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn report_rule_check_after_save(
+        &mut self,
+        i: usize,
+        path: &std::path::Path,
+    ) {
+        if let Some(line) = crate::pid::drc::save_summary(&self.tabs[i].scene.document, path) {
+            self.command_line.push_output(&line);
+        }
+    }
+
     /// Synchronous protected save with an explicit output version. Automation
     /// uses this path so format conversion never depends on an implicit source
     /// version or silently upgrades to the newest DWG.
@@ -2468,6 +2482,7 @@ impl OpenCADStudio {
             require_new_destination,
             (!path_changed).then_some(path.as_path()),
             self.tabs[i].ifccad_session.as_ref(),
+            true,
         )?;
 
         if set_current_path {
@@ -2484,6 +2499,7 @@ impl OpenCADStudio {
             self.tabs[i].recovery_save_as_required = false;
         }
         let _ = std::fs::remove_file(previous_autosave);
+        self.report_rule_check_after_save(i, &path);
         Ok(())
     }
 
@@ -4531,6 +4547,7 @@ impl OpenCADStudio {
                             purpose == crate::app::SavePurpose::SaveAsNew,
                             logical_path.as_deref(),
                             ifccad_session.as_ref(),
+                            purpose != crate::app::SavePurpose::Autosave,
                         );
                         (result, refreshed_preview)
                     })
@@ -4726,6 +4743,7 @@ impl OpenCADStudio {
                         .is_none_or(|current| !native_paths_match(current, &outcome.path));
                 self.command_line
                     .push_output(crate::tf!("Saved: {}", outcome.path.display()).as_ref());
+                self.report_rule_check_after_save(i, &outcome.path);
                 if let Some(previous) = outcome.previous_autosave {
                     if previous != outcome.path {
                         let _ = std::fs::remove_file(previous);
