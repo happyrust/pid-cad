@@ -858,13 +858,14 @@
 
 - **做什么**：新建 `src/pid/snapshot.rs`。`capture(summary, graph, meta)` 由摘要和连通图做出一份快照（`SPEC-pid-snapshot.md` §3.2）：`counts`、`body_sha256`（把 `summary` 和 `graph` 按「键名排序、不带空白」序列化后拼起来算 SHA-256）；`parse(bytes)` 解析并重算校验和。文件是 UTF-8、不带 BOM、不缩进的 JSON。
 - **验收**：
-  - [ ] `capture` 后序列化再 `parse` 得到相同的快照，`counts` 与正文一致。
-  - [ ] 改动 `summary` 或 `graph` 里任一字符后 `parse` 报 `SNAPSHOT_CORRUPT`。
-  - [ ] JSON 坏了、缺字段、`kind` 不对 → `SNAPSHOT_FORMAT_INVALID`；`version` 比程序认识的高 → `SNAPSHOT_VERSION_UNSUPPORTED`；原因超过 200 字 → `SNAPSHOT_REASON_TOO_LONG`。
+  - [x] `capture` 后序列化再 `parse` 得到相同的快照，`counts` 与正文一致。
+  - [x] 改动 `summary` 或 `graph` 里任一字符后 `parse` 报 `SNAPSHOT_CORRUPT`。
+  - [x] JSON 坏了、缺字段、`kind` 不对 → `SNAPSHOT_FORMAT_INVALID`；`version` 比程序认识的高 → `SNAPSHOT_VERSION_UNSUPPORTED`；原因超过 200 字 → `SNAPSHOT_REASON_TOO_LONG`。
 - **验证**：`cargo test --offline --locked --lib pid::snapshot::`
 - **依赖**：IX-2
 - **文件**：新建 `src/pid/snapshot.rs`；`src/pid/mod.rs`
 - **规模**：S
+- **补（2026-11-21）**：在 `pid-stage-c` 分支上接着 `BOM-5` 做，一个提交，只动了「文件」一栏的两个文件（另有快照规格和本文件）。与任务写法不同、或任务没有说的：摘要里有 NaN 或无穷大（写成 JSON 读不回来）时 `capture` 当场报 `SNAPSHOT_FORMAT_INVALID`；「改动任一字符」按改动正文里任一个值做，只改写法、不改值的（缩进、键的先后、等价的转义）不算；校验和在按字段读之前算，正文里改了键名、改出不认识的取值也报 `SNAPSHOT_CORRUPT`；`version` 比 1 高时只看 `kind` 和 `version`；`counts`、`drawing_id` 与正文对不上报 `SNAPSHOT_CORRUPT`，`seq` 为 0 报 `SNAPSHOT_FORMAT_INVALID`；原因按字符算；读的时候不计较开头的 BOM、外层多出的字段、校验和的大小写；小数一位不差地读回来靠 `serde_json` 的 `float_roundtrip`（本项目没直接打开，是 `jsonschema` 带开的，有测试盯着）；另外公开了 `Snapshot::to_bytes` 和格式版本、原因字数上限、错误码等常量。这些记在快照规格 §11.1。**先红后绿**：先放类型、错误码和空壳函数，7 条新测试都编得过、都失败（6 条做不出快照，1 条败在正文写法的断言上）；实现后 7 条第一次就全过，但逐字符改的那条用整张合成图，7 条要 12.9 秒；摘要改成只取各列表的前几项后，按它重算的连通图没有边，测试自己查出来败了，连通图改用整张图的以后 7 条全过，1.8 秒。**读数**：主程序库 7540 条，7467 通过、70 默认不跑、3 失败（比对设计稿的三条，与起点相同）；起点 7533 条（7460 / 70 / 3），多的 7 条是新加的，都过；编译警告 52；clippy 656 / 1051，与起点相同，告警的位置一处不差，改动的文件没有告警；`--tests` 那一遍 cargo 报的重复数 637 → 636：测试那一编里先报到的 `deprecated` 告警换成了 `src/app/collab/transport.rs` 测试代码里的一处，「on by default」那句附注跟着它走，`src/app/update/viewport_snap.rs` 的那条与库那一编的文字不再相同，就多印了一次，不是新告警；格式检查新增 0（`snapshot.rs` 整个文件 0 处）；架构检查上行依赖 33 对、183 个文件；SPPID 脚本测试 185 条全过；都与起点相同。**新基线**：主程序库 7540 条（7467 / 70 / 3）。
 
 ### SNAP-2 【纯】快照：存取
 

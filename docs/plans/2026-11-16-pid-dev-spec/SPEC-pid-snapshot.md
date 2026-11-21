@@ -316,3 +316,32 @@ MCP：`pid_snapshots`、`pid_snapshot`、`pid_diff` 进 `READ_OPS`；`pid_snapsh
 | `REQ-DRW-010` 任意两版本两两比对 | 覆盖（数据） | 新增、删除、修改三组及计数、明细、「无差异」。勾选两个版本才能点「比对」是界面行为，见 `SPEC-pid-verify-deliver-panel.md` |
 | 计划 T3.3「位号集合、属性键值、拓扑边与几何包围盒固化为轻量快照文件」 | 覆盖 | `summary`（位号、属性、包围盒）+ `graph`（拓扑边） |
 | 计划 T3.3「新增对象 / 删除对象 / 属性修改（旧值→新值）/ 位置移动 / 拓扑变更」 | 覆盖 | `added`、`removed`；`modified` 里的 `属性`、`位置`；`edges`。另多三种明细：`长度`、`管件`、`对端`，都归在「修改」组里 |
+
+## 11. 实现记录
+
+实现与本规格、任务文字有出入的地方，以及规格没写到、实现时定下的读法，记在这里（`todo.md` §1 第 7 条）。
+
+### 11.1 `SNAP-1`：内容与校验（2026-11-21）
+
+**做了什么**（新文件 `src/pid/snapshot.rs`，`src/pid/mod.rs` 登记一行）：
+
+- §5.1 的 `SnapshotMeta`、`capture`、`parse`，快照 `Snapshot`（字段和顺序照 §3.2）、条数 `Counts`、错误 `SnapshotError`。错误只有 §3.8 里属于这一层的四个码：`SNAPSHOT_CORRUPT`、`SNAPSHOT_FORMAT_INVALID`、`SNAPSHOT_VERSION_UNSUPPORTED`、`SNAPSHOT_REASON_TOO_LONG`。`store` 是 `SNAP-2` 的，`diff` 是 `SNAP-3` 的。
+- 另外公开的：格式版本 `SNAPSHOT_VERSION`（1）、`SNAPSHOT_KIND`（`pid-snapshot`）、原因的字数上限 `MAX_REASON_CHARS`（200）、四个错误码的常量，以及写成文件内容的 `Snapshot::to_bytes`（§5.1 没列；`SNAP-2` 写文件、算整个文件的 SHA-256 都用它）。
+
+**与规格写法不同的：**
+
+1. **做快照也可能报 `SNAPSHOT_FORMAT_INVALID`。** §3.8 里这个码只说了读文件的情形。摘要里有 NaN 或无穷大的数时（比如退化的图元算出无穷大的包围盒），JSON 写不出这种数，`serde_json` 会写成 `null`，这份快照以后读回来必然报 `SNAPSHOT_FORMAT_INVALID`。所以 `capture` 先把摘要从写出的 JSON 读一遍，读不回来就当场报这个码，说明多半是 NaN 或无穷大，不留一份读不回来的快照。
+2. **任务文字的「改动任一字符」按「改动正文里任一个值」做。** 校验和照 §3.2 按值算（键名排序、不带空白），所以只改写法、不改值的不算改动：缩进、键的先后、等价的转义（`\u4e2d` 与 `中`）、数的等价写法（`1.0` 与 `1.00`）。改了值的都报 `SNAPSHOT_CORRUPT`：字符串里任一字符、数里任一位、`true` 与 `false`、`null`，键名也算。
+
+**规格没写到、这里定下的：**
+
+1. **键名排序**按 UTF-8 字节序（也就是码点序）。字符串和数照 `serde_json` 的写法：非 ASCII 字符不转义，小数取能原样读回的最短写法。`serde_json` 在本项目里开着 `preserve_order`（对象按插入顺序写），所以键名要自己排。这份写法在 `snapshot.rs` 里单独有一份，不复用规则检查算规则包摘要的那份：它是快照文件格式的一部分，不能跟着别处改。
+2. **小数要一位不差地读回来**，读文件时重算的校验和才对得上。这靠 `serde_json` 的 `float_roundtrip` 功能，本项目没有直接打开它，是依赖 `jsonschema` 带开的。测试 `numbers_come_back_exactly` 盯着它（1,500 个以上随机双精度数，外加十个难写的数）：哪天依赖变了，这条测试会先红。
+3. **`parse` 的顺序**：去掉开头的 BOM → JSON 语法 → 最外层是对象 → `kind` → `version` → `body_sha256`、`summary`、`graph` 都在 → 重算校验和 → 按字段读 → 原因的字数 → 序号 → `drawing_id`、`counts` 与正文一致。校验和在按字段读之前算，所以正文里改了键名、改出了不认识的取值（比如种类），也报 `SNAPSHOT_CORRUPT`，不报 `SNAPSHOT_FORMAT_INVALID`。
+4. **`version`**：比 1 高时只看 `kind` 和 `version`，别的字段缺了、错了都不管，报 `SNAPSHOT_VERSION_UNSUPPORTED`。不是从 1 起的整数（0、小数、字符串）报 `SNAPSHOT_FORMAT_INVALID`。
+5. **与正文对不上的外层字段**：`counts` 与正文的条数不同、`drawing_id` 与 `summary.drawing_id` 不同，都报 `SNAPSHOT_CORRUPT`：这两项由正文算出，对不上说明文件被改过。`seq` 为 0 报 `SNAPSHOT_FORMAT_INVALID`（§3.2：序号从 1 起）。原因超过 200 字报 `SNAPSHOT_REASON_TOO_LONG`，做快照和读文件都查。
+6. **原因的字数**按字符算，一个汉字、一个字母都算一个：200 个汉字（600 字节）可以。
+7. **读的时候宽松的三处**：开头的 UTF-8 BOM 不算错（Windows PowerShell 5.1 存 UTF-8 文件时会加，同规则检查读规则包）；外层多出来的字段不认、也不报错（同一版本以后加了字段，旧程序照样能读）；`body_sha256` 不分大小写比。写出去的文件照 §3.2：UTF-8、不带 BOM、不缩进，校验和是小写十六进制。
+8. **读回来的快照再写出去**：文件是本模块写的，就与原文件逐字节相同。外层或正文里有本程序不认识的字段时，按字段读会丢掉它们，再写出去就不同了，正文的校验和也会对不上。所以存快照用 `capture` 出来的，不用读回来的；导出照 §5.1 原样复制文件，不受影响。
+
+**测试**（同文件，7 条）：做快照、写文件、读回来与原来相同，再写一遍逐字节相同，同样的输入两次写出的文件相同，§3.2 的字段和顺序、不缩进，`counts` 与正文一致（40 个对象的合成图）；校验和与另一种写法（重新按键排好再用 `serde_json` 写）算的相同，一段带引号、反斜杠和中文键的值写出来与手写的文字相同，缩进的文件、键倒过来的文件、开头带 BOM 的文件都读得回来；正文逐字符地改（字符串里每个字符、数里每位数字、`true` 与 `false`、`null`，一千处以上；摘要只取合成图各列表的前几项，连通图用整张图的，快照不核对两者是否相配），每一处都报 `SNAPSHOT_CORRUPT`，校验和本身改任一位也是；26 种坏文件各报各的码，`seq` 为 3 的、外层多一个字段的照常读；原因 200 字可以、201 字报 `SNAPSHOT_REASON_TOO_LONG`、可以空；1,500 个以上随机双精度数和十个难写的数（`0.1+0.2`、最小的次正规数、`f64::MAX` 等）写出去再读回来逐位相同；摘要里有 NaN、正负无穷时做快照报 `SNAPSHOT_FORMAT_INVALID`。先放类型、错误码和空壳函数，7 条都编得过、都失败；实现后全过。逐字符改的那条起初用整张 20 个对象的合成图，7 条跑了 12.9 秒，改成截取以后 1.8 秒。
