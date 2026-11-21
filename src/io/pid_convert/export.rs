@@ -1157,7 +1157,7 @@ fn measure_doc_extent_mm(doc: &Document) -> (f64, f64) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn load_configured_seed(
+pub(super) fn load_configured_seed(
     doc: &Document,
     opts: &ConvertOptions,
 ) -> Result<(pid_parse::PidPackage, Option<String>), String> {
@@ -1235,7 +1235,7 @@ fn infer_igr_for_seed_name(seed_name: &str) -> Option<String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn pick_seed_style_ids(seed: &pid_parse::PidPackage) -> (u32, u32) {
+pub(super) fn pick_seed_style_ids(seed: &pid_parse::PidPackage) -> (u32, u32) {
     use pid_parse::parsers::sheet_records::{parse_live_psm_header, SheetChain};
 
     let mut line_style_id: Option<u32> = None;
@@ -1341,7 +1341,9 @@ impl SheetCoordMapper {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn compute_representation_uid_map(dwg: &ExportDrawing) -> BTreeMap<(String, u32), String> {
+pub(super) fn compute_representation_uid_map(
+    dwg: &ExportDrawing,
+) -> BTreeMap<(String, u32), String> {
     let mut rep_alloc = UidAllocator::new(&dwg.plant, &dwg.doc_name);
     let _ = rep_alloc.alloc_primary_uid(Some(&dwg.doc_uid), "doc");
     for item in &dwg.items {

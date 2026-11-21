@@ -860,6 +860,50 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `192 passed` | **`193 passed`** | `+1` 条测试，**全绿** |
 
+---
+
+## 24. L2-1 M1..M5 / L2-5 / L2-6 / L2-7 / L6-2（#134）：`PID_AUTHOR` 统一模型无冲突升格引擎与编辑后存回 `.pid` 全链路闭环（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `3ba5c3c2e`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{mod,recognize,export,promote}.rs`（零改动 `src/pid/*`、`src/io/pid/*`、`src/app/*`） |
+| 证据目录子项 | `2026-11-20-issue134/`（`red.txt`、`green-fast.txt`、`real134_test.log`、`real_out/real134_summary.json`、`arch.txt`、`pytest.txt`、`gate-*.txt`） |
+
+### 24.1 先红后绿与契约核验
+
+- **先红后绿**：`red.txt` 4 条核心闭环断言在骨架上全部变红（`0 passed; 4 failed`，退出码 `101`）→ 实现 `src/io/pid_convert/promote.rs` 后 `green-fast.txt` **`24 passed; 0 failed`**（退出码 `0`）：
+  1. **`M1 + M2` 幂等升格与隔离契约**：重复调用 `promote_sheet_to_author` 实测 `newly_promoted = 0`、`updated_in_place = N`；`tag_source = "manual"` 手工位号与自定义扩展属性 100% 保留不被覆盖；`props` 超 `2,048` 字节自动溢出至模型空间扩展字典分片 `XRecord`（`props_ref=`）；`io::pid_legend::purge` 仅清 `PID_SEMANTICS` 中 `legend:` 记录，`PID_AUTHOR` 毫发无损；
+  2. **`M3 + L2-5` 拓扑写入与增删移同步**：管线、管路、管段（带 `SegmentEnd::joined` 端口绑定）、管件与页间连接符同步写入 `PID_AUTHOR_TOPOLOGY`；删除符号后 `sync_author_after_edit` 自动修剪记录并清除管段端点的悬挂 `peer` 引用，移动符号后自动刷新管段端点坐标，重号符号自动标 `tag_status = "duplicated"`；
+  3. **`L2-6` 导入 `.pid` 语义升格**：`promote_semantics_to_author` 支持按句柄集合选择性升格或全图批量升格，在旁侧无 `_Data.xml` 时仍可从 `instance` 符号路径推断类型；
+  4. **`M5 + L2-7 + L6-2` 单源导出与编辑存回 `.pid`**：`save_author_document_to_dual` 直接以 `PID_AUTHOR + TopologyTable` 为唯一权威数据源同步生成 `_Data.xml + _Meta.xml + .pid + _Coverage.json`。
+
+### 24.2 真实中位规模生产图纸「升格 → 编辑属性与新增符号 → 存回 `.pid` → `a/b` 级闭环」实测
+
+| 环节 | 实测指标 | 结果 |
+|---|---|---|
+| 第 1 遍升格（`promote_pass1`） | 升格符号 **`115`** 个、管线 **`5`** 条、管路 **`5`** 条、管段 **`50`** 条、管件 **`54`** 个、页间连接符 **`16`** 个 | `unmapped_classes = 0` |
+| 第 2 遍重跑（`promote_pass2`） | `newly_promoted = 0`、**`updated_in_place = 115`** | **100% 幂等** |
+| 编辑与新增对象（`L6-2`） | 修改既有阀门位号为手工 `BV-EDITED-134`，新增阀门 `BV-ADDED-134` 并执行 `sync_author_after_edit` | `duplicated_tags = 0` |
+| 存回真实空白模板 `.pid` + XML | 写出对象 **`236`** 个、关系 **`184`** 条；跨文件 `GraphicOID` / `ModelID` / `DrawingID` 对齐 **`166 / 166`（`100%`）**，`_SPID == DocUID` | `StrictVendor` 零违规 |
+| `a` 级（重读与 Q9 索引自检） | `a_level_index_consistent = true`，重读归一化几何实体 **`2,824`** 条 | **通过（零悬挂）** |
+| `b` 级（CAD 重载与 `plot_pdf` 出图） | 本仓重载 CAD 实体 **`943`** 个，写出有效 PDF `114,084 B`（图元 **`573`**、页内图元 **`509`**） | **通过**（`c1` 标「SPPID 未验证」） |
+
+### 24.3 固定门禁读数
+
+| 门禁项 | 改前读数（§23.2） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,193` 条 | **`7,198` 条**（**`7,131` 过** / **`66` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+5` 条测试，**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `src/io/pid_convert/{mod,recognize,export,promote}.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `193 passed` | **`193 passed`** | **全绿** |
+
+
 
 
 

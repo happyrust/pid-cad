@@ -6,7 +6,15 @@
 
 pub mod class_map;
 pub mod export;
+pub mod promote;
 pub mod recognize;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use promote::save_author_document_to_dual;
+pub use promote::{
+    promote_semantics_to_author, promote_sheet_to_author, sppid_class_to_author_type,
+    sync_author_after_edit, AuthorSyncReport, PromoteReport,
+};
 
 pub use class_map::{
     audit_document_blocks, default_legend_class_map, BlockAuditSummary, BlockMatchKind,

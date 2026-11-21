@@ -100,6 +100,8 @@ pub struct ConvertedSymbol {
     pub lines: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nominal_diameter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_handle: Option<u64>,
     pub confidence: f64,
     pub tier: ConfidenceTier,
     pub known: bool,
@@ -130,6 +132,8 @@ pub struct PipeSegmentHit {
     pub start: (f64, f64),
     pub end: (f64, f64),
     pub layer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_handle: Option<u64>,
 }
 
 /// Range or slash-expanded multi-tag annotation (`XV-0407A/0407B`, `BUV-3101～3103`).
@@ -215,6 +219,7 @@ struct SheetText {
     layer: String,
     anchor: (f64, f64),
     center: (f64, f64),
+    handle: u64,
 }
 
 fn sane(v: f64) -> bool {
@@ -714,6 +719,7 @@ pub fn recognise_sppid_sheet(
     };
 
     for entity in doc.model_space_entities() {
+        let ent_handle = entity.common().handle.value();
         let layer = entity.common().layer.trim();
         let layer_upper = layer.to_ascii_uppercase();
 
@@ -740,6 +746,7 @@ pub fn recognise_sppid_sheet(
                             to_from_text: None,
                             lines: Vec::new(),
                             nominal_diameter: None,
+                            entity_handle: Some(ent_handle),
                             confidence: 0.0,
                             tier: ConfidenceTier::Medium,
                             known: true,
@@ -762,6 +769,7 @@ pub fn recognise_sppid_sheet(
                             to_from_text: None,
                             lines: Vec::new(),
                             nominal_diameter: None,
+                            entity_handle: Some(ent_handle),
                             confidence: 0.35,
                             tier: thresholds.classify(0.35),
                             known: false,
@@ -787,6 +795,7 @@ pub fn recognise_sppid_sheet(
                         layer: layer.to_string(),
                         anchor: (x0, y0),
                         center,
+                        handle: ent_handle,
                     };
                     if !ignore_layers.contains(&layer_upper) {
                         texts.push(SheetText {
@@ -794,6 +803,7 @@ pub fn recognise_sppid_sheet(
                             layer: st.layer.clone(),
                             anchor: st.anchor,
                             center: st.center,
+                            handle: ent_handle,
                         });
                     }
                     all_texts.push(st);
@@ -810,6 +820,7 @@ pub fn recognise_sppid_sheet(
                         layer: layer.to_string(),
                         anchor: p,
                         center: p,
+                        handle: ent_handle,
                     };
                     if !ignore_layers.contains(&layer_upper) {
                         texts.push(SheetText {
@@ -817,6 +828,7 @@ pub fn recognise_sppid_sheet(
                             layer: st.layer.clone(),
                             anchor: st.anchor,
                             center: st.center,
+                            handle: ent_handle,
                         });
                     }
                     all_texts.push(st);
@@ -841,6 +853,7 @@ pub fn recognise_sppid_sheet(
                             start: a,
                             end: b,
                             layer: layer.to_string(),
+                            entity_handle: Some(ent_handle),
                         });
                     }
                 }
@@ -869,6 +882,7 @@ pub fn recognise_sppid_sheet(
                                 start: w[0],
                                 end: w[1],
                                 layer: layer.to_string(),
+                                entity_handle: Some(ent_handle),
                             });
                         }
                     }
@@ -889,6 +903,7 @@ pub fn recognise_sppid_sheet(
                             start: a,
                             end: b,
                             layer: layer.to_string(),
+                            entity_handle: Some(ent_handle),
                         });
                     }
                 }
@@ -917,6 +932,7 @@ pub fn recognise_sppid_sheet(
                                 start: w[0],
                                 end: w[1],
                                 layer: layer.to_string(),
+                                entity_handle: Some(ent_handle),
                             });
                         }
                     }
@@ -937,6 +953,7 @@ pub fn recognise_sppid_sheet(
                             start: a,
                             end: b,
                             layer: layer.to_string(),
+                            entity_handle: Some(ent_handle),
                         });
                     }
                 }
@@ -1222,6 +1239,7 @@ pub fn recognise_sppid_sheet(
                 to_from_text: None,
                 lines: Vec::new(),
                 nominal_diameter: None,
+                entity_handle: Some(texts[ti].handle),
                 confidence: 0.85,
                 tier: thresholds.classify(0.85),
                 known: true,

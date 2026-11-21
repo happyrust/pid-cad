@@ -1076,6 +1076,7 @@
 **前置协调。** 必须等并行分支 `pid-symbol-identity` 合入 `main` 后再开工，避免与 `src/io/pid/*` 及 `editor.rs` 冲突。
 
 **对应任务。** L2-1（L）
+**状态与解决记录。** **数据与引擎层（`M1/M2/M3/M5`）已完成（2026-11-21，[#134](https://github.com/happyrust/pid-cad/issues/134)）**：在独立模块 `src/io/pid_convert/promote.rs` 中零冲突实现幂等升格、手工位号保护、`>2048B` XRecord 溢出、`purge` 隔离、管网进拓扑表与统一只读导出视图，详见 `readings.md` §24；仅剩 `M4` 面板 UI 待 `pid-symbol-on-main` 合入后接线。
 
 ---
 
@@ -1086,9 +1087,9 @@
 | ISSUE-L2-2 | 点选导入的符号只是普通实体，没有"图形加数据整块" | 按 handle 把图形与 `PID_AUTHOR` 作为一块选中，打开属性面板 | RES-12 ⚠ | L2-2（M） |
 | ISSUE-L2-3 | 属性面板没有按接口分页签，也没有写回 | 按接口分页签；写入走既有 `set_entity_xdata`；改位号走位号引擎 | RES-12 ⚠ | L2-3（M） |
 | ISSUE-L2-4 | 属性改动不联动标注 | 改属性后刷新标注；位号唯一性校验 | — | L2-4（M） |
-| ISSUE-L2-5 | 删除符号后关系与拓扑不更新 | 移动/删除后更新端口、连通、管线端点 | — | L2-5（M） |
-| ISSUE-L2-6 | 导入的 `.pid` 对象不在统一模型里 | 按 M2 升格（可批量、可选择性） | RES-01 ⚠ | L2-6（M） |
-| ISSUE-L2-7 | 不能保存回 `.pid` | 复用 L5 写出器 | — | L2-7（M） |
+| ISSUE-L2-5（[#134](https://github.com/happyrust/pid-cad/issues/134)） | 删除符号后关系与拓扑不更新 | **引擎层已完成**：`promote::sync_author_after_edit` 自动修剪删除实体、清除悬挂 `SegmentEnd.peer`、更新移动端点坐标与重号状态（见 `readings.md` §24） | — | L2-5（M） |
+| ISSUE-L2-6（[#134](https://github.com/happyrust/pid-cad/issues/134)） | 导入的 `.pid` 对象不在统一模型里 | **引擎层已完成**：`promote::promote_semantics_to_author` 支持按句柄子集选择性或整图批量升格导入 `PID_SEMANTICS`（见 `readings.md` §24） | RES-01 ✔ | L2-6（M） |
+| ISSUE-L2-7（[#134](https://github.com/happyrust/pid-cad/issues/134)） | 不能保存回 `.pid` | **本地 `a/b` 级已完成**：`promote::save_author_document_to_dual` 从 `PID_AUTHOR + TopologyTable` 写出 `.pid` + XML 并过重读与 PDF 出图验证（见 `readings.md` §24） | — | L2-7（M） |
 
 ---
 
@@ -1128,6 +1129,7 @@
 - 改一个属性、加一个符号各走一遍全链路。
 
 **对应任务。** L6-2（M）
+**状态与解决记录。** **本地 `a/b` 级全链路已完成（2026-11-21，[#134](https://github.com/happyrust/pid-cad/issues/134)）**：合成与真实中位规模生产图纸跑通「升格 `PID_AUTHOR` → 改位号属性 + 加阀门符号 + 删符号清拓扑 → 存回 `.pid` + XML → `166/166` `GraphicOID` 100% 对齐、`a/b` 级重读与 PDF 出图验证」（`c1` SPPID 打开待 `RES-06`，详见 `readings.md` §24）。
 
 ### ISSUE-L6-3 没有总验收报告
 
@@ -1194,7 +1196,7 @@
 | `ISSUE-L1-2 / L1-4 / L1-5` | [#131](https://github.com/happyrust/pid-cad/issues/131) | `done-local`（本地已完成 · L1 全线收官） | 提交 `e2f43b91c`：落地 `examples/pid_l1_bench.rs` 与 `scripts/sppid/{batch_l1_eval,test_batch_l1_eval}.py`；94 图零故障打开与出图（release 打开中位数 `536.5 ms`、`Flattened=0`、覆盖率均值 `0.995949`、`69` 张达 `1.000`），见 `readings.md` §20 |
 | `ISSUE-L3-5 / L3-6` | [#132](https://github.com/happyrust/pid-cad/issues/132) | `done-local`（本地已完成） | 提交 `c2b0c35f2`：扩展 `src/io/pid_convert/{mod,recognize,export}.rs` 与 `src/io/pid_publish/relations.rs`；90 图管口挂接升至 `629/779`（含设备图 `89.86%`），标题栏图号 `82/90`、图名精确率 `97.96%`，`unexplained_diffs=0`，见 `readings.md` §21 |
 | `ISSUE-L3-3 / L3-4 / L3-8` | [#133](https://github.com/happyrust/pid-cad/issues/133) | `done-local`（本地已完成 · L3 全线收官） | 提交 `dd5a498d8`：扩展 `src/io/pid_convert/{mod,recognize,export}.rs` 并落地 `scripts/sppid/regression_gate.py`；90 图 `PIDPipingPort` 跃升至 `11,420`、管端连通 `48,243`、断头 100% 守恒、跨图连接符互逆配对 `38` 对，`unexplained_diffs=0`，见 `readings.md` §22 |
-| `ISSUE-L2-1 / L2-5 / L2-7 / L6-2` | [#134](https://github.com/happyrust/pid-cad/issues/134) | 暂缓（避让并行分支） | 待 `pid-symbol-on-main` 与 `pid-stage-c` 合入 `main` 后连同 `L2-2..L2-6` 一并推进 |
-| `ISSUE-LX-8 / LX-9 / L6-3` | [#135](https://github.com/happyrust/pid-cad/issues/135) | `done-local`（本地已完成 · 首轮送测就绪） | 落地 `scripts/sppid/build_submission_round1.py` 与 `05-phase1-acceptance-report.md`；生成 `round-01-20261121` 6 槽 17 文件（`precheck_passed=true`），见 `readings.md` §23 |
+| `ISSUE-L2-1 / L2-5 / L2-6 / L2-7 / L6-2` | [#134](https://github.com/happyrust/pid-cad/issues/134) | `done-local`（本地已完成 · 引擎全链路） | 落地 `src/io/pid_convert/promote.rs`（零冲突）；真实生产图升格 `115` 符号 + `50` 管段、编辑并存回 `.pid` `166/166` 100% 对齐过 `a/b` 验证，见 `readings.md` §24 |
+| `ISSUE-LX-8 / LX-9 / L6-3` | [#135](https://github.com/happyrust/pid-cad/issues/135) | `done-local`（本地已完成 · 首轮送测就绪） | 提交 `3ba5c3c2e`：落地 `scripts/sppid/build_submission_round1.py` 与 `05-phase1-acceptance-report.md`；生成 `round-01-20261121` 6 槽 17 文件（`precheck_passed=true`），见 `readings.md` §23 |
 | `.sym` 预览（关联） | [#116](https://github.com/happyrust/pid-cad/issues/116) | 暂缓（避让并行分支） | 待 `pid-symbol-identity` 合入 `main` 后实施 |
 | 分级表可观测性（关联） | [#117](https://github.com/happyrust/pid-cad/issues/117) | 待定范围 | 与 `L4-2` / `L0-9` 衔接，建议先做第 1 步表外计数输出 |
