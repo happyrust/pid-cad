@@ -59,14 +59,15 @@ round-01-YYYYMMDD/
 | `V1-04` | **去掉厂商字节信封细节**：去 UTF-8 BOM、改 LF、改 2 空格缩进（XML 语义内容 100% 不变） | 平台用标准 XML 解析器还是按文本行/字节头硬匹配 | **若被拒**：证明 `#111` `StrictVendor` 字节级规则是真硬门槛 |
 | `V1-05` | **重映射全图 UID**：按本平台 UID 分配器（32 位大写十六进制 + 派生端口/关系 UID）整体替换原样本 UID，并将容器 `DocName` 改为测试图号 | 平台是否校验「图纸/对象 UID 必须事先在某台 SPPID 数据库登记过」 | **若通过**：证明自研独立生成的全新 UID 完全可被平台接纳！ |
 
-### 第二轮：按第一轮回执定向二分收敛（至多 4 变体）
+### 第二轮：按第一轮回执定向二分收敛（至多 4 变体，已在 [#144](https://github.com/happyrust/pid-cad/issues/144) 预构建就绪）
 
+- 已由 `examples/pid_round2_probes.rs` + `scripts/sppid/build_submission_round2.py` 在真实语料与 `RefData~4~682.zip` 上预构建 `submissions/round-02-bisect-20261121/`（`package_kind = "round2_bisect"`，`00-control + R2-V2-01..04` 共 5 槽 15 文件，`precheck_passed = true`），收到第二轮回执后运行 `precheck_and_receipt.py evaluate-receipt` 自动收敛 `B1..B4`（详见 `readings.md` §33）：
 - **分支 A（若 `V1-01` 被拒，确认平台读取 `.pid`）**：
-  - `V2-01`：原样 XML + 经 `PidWriter::write_to` 流级无损重打包的 `.pid`（探测平台是否接受 `cfb` 字典序重打包容器）；
-  - `V2-02`：最小空白种子 `.pid` 上仅增补 1 个设备记录 + 配套最小 XML（验证 `L5` 种子加增补方案在外部平台的可行性）。
+  - `V2-01`（`01-v2-cfb-repack`）：原样 XML + 经 `PidWriter::write_to_bytes` 流级无损重打包的 `.pid`（探测平台是否接受 `cfb` 字典序重打包容器）；
+  - `V2-02`（`02-v2-single-vessel-seed`）：最小空白种子 `.pid` 上仅增补 1 个设备记录 + 配套最小 XML（验证 `L5` 种子加增补方案在外部平台的可行性）。
 - **分支 B（若 `V1-02` 或 `V1-03` 被拒且回执未给全字段名）**：
-  - `V2-03`：保留管道连通（`Piping*`），仅去掉仪表信号连通（`Signal*`）；
-  - `V2-04`：保留末级类型码表，去掉 `LEAF_LEVELS` 上级类型分级属性（验证 `#117` 上级类型链是否为平台硬要求）。
+  - `V2-03`（`03-v2-piping-no-signal`）：保留管道连通（`Piping*`），仅去掉仪表信号连通（`Signal*`）；
+  - `V2-04`（`04-v2-leaf-codelist-only`）：保留末级类型码表，置空 `LEAF_LEVELS` 上级类型分级父链属性（验证 `#117` 上级类型链是否为平台硬要求）。
 
 ### 第三轮 / 首轮配套包：真实存量图转换与交互编辑件试点包（检查点 C，已在 [#140](https://github.com/happyrust/pid-cad/issues/140) / [#143](https://github.com/happyrust/pid-cad/issues/143) 预构建就绪）
 

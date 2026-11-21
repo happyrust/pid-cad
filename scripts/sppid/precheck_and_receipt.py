@@ -257,6 +257,62 @@ def evaluate_receipt(manifest_path: Path, receipt_path: Path) -> tuple[int, dict
             "slot_statuses": {sl: _slot_status_lower(results.get(sl)) for sl in expected_slots if sl in results},
         }
 
+    if manifest.get("package_kind") == "round2_bisect":
+        ctrl_st = _slot_status_lower(results.get("00-control"))
+        if ctrl_st != "accepted":
+            return 1, {
+                "channel_valid": False,
+                "package_kind": "round2_bisect",
+                "control_status": ctrl_st,
+                "reason": "00-control positive baseline was not accepted in Round-2",
+            }
+        b_conc = {
+            "B1_cfb_repack_accepted": _slot_status_lower(results.get("01-v2-cfb-repack")) == "accepted",
+            "B2_seed_plus_one_vessel_accepted": _slot_status_lower(results.get("02-v2-single-vessel-seed")) == "accepted",
+            "B3_signal_topology_required": _slot_status_lower(results.get("03-v2-piping-no-signal")) != "accepted",
+            "B4_upper_leaf_levels_required": _slot_status_lower(results.get("04-v2-leaf-codelist-only")) != "accepted",
+        }
+        r2_next: list[str] = []
+        if not b_conc["B1_cfb_repack_accepted"]:
+            r2_next.append("investigate-cfb-directory-order")
+        if not b_conc["B2_seed_plus_one_vessel_accepted"]:
+            r2_next.append("investigate-seed-increment-streams")
+        if not r2_next:
+            r2_next.append("proceed-to-converted-pilot-submission")
+        return 0, {
+            "channel_valid": True,
+            "package_kind": "round2_bisect",
+            "manifest_sha256": expected_sha,
+            "bisect_conclusions": b_conc,
+            "next_round_actions": r2_next,
+            "slot_statuses": {sl: _slot_status_lower(results.get(sl)) for sl in expected_slots if sl in results},
+        }
+
+    if manifest.get("package_kind") == "lx4_acceptance":
+        e1_ok = _slot_status_lower(results.get("E1-byte-identical")) == "accepted"
+        e2_ok = _slot_status_lower(results.get("E2-metadata-stamp")) == "accepted"
+        e3_ok = _slot_status_lower(results.get("E3-foreign-single-vessel")) == "accepted"
+        if not e1_ok:
+            return 1, {
+                "channel_valid": False,
+                "package_kind": "lx4_acceptance",
+                "reason": "E1 byte-identical copy failed to open; SPPID runner or project environment invalid",
+            }
+        lx4_conc = {
+            "e1_byte_identical_opened": e1_ok,
+            "e2_modified_metadata_opened": e2_ok,
+            "c1_foreign_pid_accepted": e3_ok,
+            "checksum_or_stamp_enforced": e1_ok and (not e2_ok),
+            "plant_db_registration_required": e2_ok and (not e3_ok),
+        }
+        return 0, {
+            "channel_valid": True,
+            "package_kind": "lx4_acceptance",
+            "manifest_sha256": expected_sha,
+            "lx4_conclusions": lx4_conc,
+            "slot_statuses": {sl: _slot_status_lower(results.get(sl)) for sl in expected_slots if sl in results},
+        }
+
     ctrl_status = _slot_status_lower(results.get("00-control"))
     if ctrl_status != "accepted":
         return 1, {

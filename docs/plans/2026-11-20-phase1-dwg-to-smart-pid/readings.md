@@ -1305,6 +1305,58 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `198 passed` | **`198 passed`** | **全绿** |
 
+---
+
+## 33. LX-2 / LX-4 / LX-9 / L6-3（#144）：第二轮二分送测包构建器（`V2-01..04`）、`LX-2` 运行器脚手架与 `LX-4` `E1..E3` 探针及回执收敛闭环（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `2098e5ff8`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_write/{verify,mod}.rs`、`examples/pid_round2_probes.rs`、`scripts/sppid/{build_submission_round2,test_build_submission_round2,sppid_runner_template,precheck_and_receipt}.*` |
+| 外部送测包与证据目录 | `submissions/round-02-bisect-20261121/`（`manifest_sha256 = 905ad0bd5c0ed0c8...`）、`submissions/lx4-sppid-probes-20261121/`（`manifest_sha256 = 7b6d314670908336...`）、`$OCS_PID_EVIDENCE_DIR/2026-11-21-issue144/` |
+
+### 33.1 双端先红后绿与 `LX-2` 运行器契约核验
+
+- **Python 端先红后绿**：`red-py.txt` `2 failed, 198 passed`（`RED_PY_RC=1`）→ 落地 `sppid_runner_template.ps1`（100% 7-bit ASCII Windows PowerShell 5.1 脚手架，支持 `open / publish / restore` 与无 BOM JSON 输出）、`build_submission_round2.py` 与 `precheck_and_receipt.py` 扩展（支持 `round2_bisect` `B1..B4` 与 `lx4_acceptance` `E1..E3` 收敛）后 `green-py.txt` **`200 passed`**（退出码 `0`）。
+- **Rust 端先红后绿**：`red-rs.txt` `0 passed; 1 failed`（`RED_RS_RC=101`）→ 落地 `repack_pid_bytes_lossless`、`stamp_pid_summary_probe` 与 `examples/pid_round2_probes.rs` 后 `io::pid_write::` **`6 passed; 0 failed`**（退出码 `0`）。
+
+### 33.2 第二轮定向二分送测包（`submissions/round-02-bisect-20261121/`）实测表
+
+- 清单摘要：`manifest_sha256 = 905ad0bd5c0ed0c88c9abb743f9f6a0e71e4a5b7a6c77cd185149760f53dc676`，`package_kind = "round2_bisect"`，`precheck_passed = true`（5 槽 15 文件，全文零绝对路径、零客户图名）。
+
+| 槽位 | 交付主干 | `.pid` 字节数（SHA-256 前缀） | `_Data.xml` 字节数 | `StrictVendor` 违规数 | 本地预检 | 二分探测目标 |
+|---|---|---|---:|---:|---|---|
+| `00-control` | `R2-CTRL-00` | `339,968`（`81a99cefae55`） | `206,753` | `0` | **通过** | 零改动原样阳性对照 |
+| `01-v2-cfb-repack` | `R2-V2-01` | `339,968`（`74dbb9e6181b`） | `206,749` | `0` | **通过** | 流级无损 `PidWriter` 重打包 `.pid`（探测平台对 `cfb` 目录重排接受度 `B1`） |
+| `02-v2-single-vessel-seed` | `R2-V2-02` | `57,344`（`26077035e5d6`） | `2,309` | `0` | **通过**（`1 / 1` `GraphicOID` 对齐） | 空白模板 `A1-W-New.pid` + 单台容器 `V-1001` 最小双产物（`B2` / `RES-14`） |
+| `03-v2-piping-no-signal` | `R2-V2-03` | `339,968`（`81a99cefae55`） | `168,535` | `0` | **通过** | 保留全部工艺管网，单变量剥离仪表信号拓扑（`B3`） |
+| `04-v2-leaf-codelist-only` | `R2-V2-04` | `339,968`（`81a99cefae55`） | `205,588` | `0` | **通过** | 保留末级类型码表，单变量置空上级分类父链属性（`B4` / `#117`） |
+
+### 33.3 `LX-4` SPPID 接受度递进实验探针包（`submissions/lx4-sppid-probes-20261121/`）实测表
+
+- 清单摘要：`manifest_sha256 = 7b6d3146709083361a82c4c2dab595dcb5ab45809f9a7ff2cf2ff809ec4ca013`，`package_kind = "lx4_acceptance"`，`precheck_passed = true`（3 槽 9 文件，全部通过 `sppid_runner_template.ps1 --dry-run` 三关契约验证）。
+
+| 递进实验槽位 | 交付主干 | `.pid` 字节数（SHA-256 前缀） | `StrictVendor` 违规数 | 实验目标 |
+|---|---|---|---:|---|
+| `E1-byte-identical` | `LX4-E1` | `339,968`（`81a99cefae55`） | `0` | 字节完全相同副本放回，验证受控运行器与项目环境基线 |
+| `E2-metadata-stamp` | `LX4-E2` | `339,968`（`0bf5ac880bcc`） | `0` | 仅改第 2 节 `_PlantName` 单点摘要属性，探测 SPPID 是否强检文件校验和/修改戳 |
+| `E3-foreign-single-vessel` | `LX4-E3` | `57,344`（`26077035e5d6`） | `0` | 从未在数据库登记的空白模板 + 单容器 `.pid`，直接验证 `c1` 外来文件可打开性 |
+
+### 33.4 固定门禁读数
+
+| 门禁项 | 改前读数（§32.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,216` 条（`7,145` 过 / `70` 忽略 / `1` 既有 `.pen`） | **`7,217` 条**（**`7,146` 过** / **`70` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+1` 条 Rust 测试，**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `verify.rs`、`mod.rs`、`examples/pid_round2_probes.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `198 passed` | **`200 passed`** | `+2` 条 Python 测试，**全绿** |
+
+
 
 
 

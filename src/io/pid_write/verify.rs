@@ -57,3 +57,29 @@ pub fn verify_passthrough_roundtrip(seed: &PidPackage) -> Result<SeedRoundtripRe
         reparsed_sheets: reparsed.parsed.sheet_streams.len(),
     })
 }
+
+/// Repackage a `.pid` CFB container through `PidWriter` and verify 100% lossless
+/// stream & storage-CLSID preservation (`V2-01` / `LX-4` / `#144`).
+pub fn repack_pid_bytes_lossless(raw_pid: &[u8]) -> Result<(Vec<u8>, SeedRoundtripReport), String> {
+    let pkg = PidPackage::from_bytes(raw_pid)
+        .map_err(|e| format!("parse source .pid bytes failed: {e}"))?;
+    let repacked = PidWriter::write_to_bytes(&pkg, &WritePlan::default())
+        .map_err(|e| format!("PidWriter::write_to_bytes failed: {e}"))?;
+    let rt = verify_passthrough_roundtrip(&pkg)?;
+    if !rt.is_lossless_passthrough() {
+        return Err(format!("CFB repack was not stream-lossless: {rt:?}"));
+    }
+    Ok((repacked, rt))
+}
+
+/// Modify only `_PlantName` in `DocumentSummaryInformation` Section 2 while preserving
+/// every drawing/record/index stream untouched (`LX-4 E2` / `#144`).
+pub fn stamp_pid_summary_probe(raw_pid: &[u8], plant_override: &str) -> Result<Vec<u8>, String> {
+    let mut pkg = PidPackage::from_bytes(raw_pid)
+        .map_err(|e| format!("parse source .pid bytes failed: {e}"))?;
+    let mut updates = std::collections::BTreeMap::new();
+    updates.insert("_PlantName".to_string(), plant_override.trim().to_string());
+    super::seed::set_doc_summary_user_properties(&mut pkg, &updates)?;
+    PidWriter::write_to_bytes(&pkg, &WritePlan::default())
+        .map_err(|e| format!("write stamped E2 .pid bytes failed: {e}"))
+}

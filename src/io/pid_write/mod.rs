@@ -22,7 +22,10 @@ pub use seed::{
     load_seed_from_refdata_zip, set_doc_summary_user_properties, stamp_seed_drawing_identity,
 };
 pub use surface::{inspect_write_surface, WriteDisposition, WriteSurfaceEntry, WriteSurfaceReport};
-pub use verify::{verify_passthrough_roundtrip, SeedRoundtripReport};
+pub use verify::{
+    repack_pid_bytes_lossless, stamp_pid_summary_probe, verify_passthrough_roundtrip,
+    SeedRoundtripReport,
+};
 
 #[cfg(test)]
 mod tests {
@@ -214,5 +217,31 @@ mod tests {
             std::fs::write(out_file, serde_json::to_string_pretty(&audit_rows).unwrap()).unwrap();
         }
         println!("verified_blank_seeds={}", audit_rows.len());
+    }
+
+    #[test]
+    fn repack_lossless_and_stamp_summary_probe_preserve_streams_and_update_plant() {
+        let pkg = synthetic_seed_package();
+        let orig_bytes = PidWriter::write_to_bytes(&pkg, &WritePlan::default()).unwrap();
+
+        let (repacked, rep) = repack_pid_bytes_lossless(&orig_bytes).expect("lossless repack");
+        assert!(rep.is_lossless_passthrough());
+        assert!(!repacked.is_empty());
+
+        let stamped = stamp_pid_summary_probe(&orig_bytes, "P01-LX4-E2").expect("stamp E2 probe");
+        let reparsed = PidPackage::from_bytes(&stamped).expect("reparse E2");
+        let plant_ok = reparsed
+            .parsed
+            .summary
+            .as_ref()
+            .and_then(|s| s.user_properties.get("_PlantName"))
+            .is_some_and(|v| {
+                matches!(
+                    v,
+                    SummaryPropertyValue::Lpstr(t) | SummaryPropertyValue::Lpwstr(t)
+                        if t == "P01-LX4-E2"
+                )
+            });
+        assert!(plant_ok, "expected _PlantName=P01-LX4-E2 in E2 probe");
     }
 }

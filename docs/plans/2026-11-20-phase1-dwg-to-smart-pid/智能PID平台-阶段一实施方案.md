@@ -569,14 +569,14 @@ flowchart LR
 ### 7.8 LX 外部验收
 
 - **LX-1 快照、专用账号、文件进出通道（S）**：建基线快照（由使用者建）；建专用来宾账号（密码不进文档）；确定文件进出方式；关闭对宿主机的写共享。
-- **LX-2 "打开、另存、发布"自动化（M）**：实现第 4.3 节的运行器契约。
-- **LX-3 受控样本采集（M）**：按协议执行，编辑手工。
-- **LX-4 SPPID 接受度实验（M）**：E0 先找回旧结论；E1 字节相同副本放回原位；E2 改一处元数据；E3 外来 `.pid`。每步记录结果与报错原文。
-- **LX-5 我们的文件在 SPPID 里验收（M）**：`.pid` 打开、发布；取回 XML 与我们导出的比对。
+- **LX-2 "打开、另存、发布"自动化（M）— 运行器契约脚手架与 `--dry-run` 联调已完成（[#144](https://github.com/happyrust/pid-cad/issues/144)）**：落地纯 ASCII Windows PowerShell 5.1 受控运行器模板 `scripts/sppid/sppid_runner_template.ps1`（完整支持 `open / publish / restore` 三个子命令、无 BOM UTF-8 结果写出及受控环境钩子），并通过 `precheck_and_receipt.py precheck` 三关契约验证（真机执行待 `RES-06`，见 `readings.md` §33）。
+- **LX-3 受控样本采集（M）**：按协议执行，编辑手工（真机采集待 `RES-06`）。
+- **LX-4 SPPID 接受度实验（M）— `E1..E3` 递进探针实物包与回执判定器已备齐（[#144](https://github.com/happyrust/pid-cad/issues/144)）**：由 `examples/pid_round2_probes.rs` + `build_submission_round2.py` 自动构建 `submissions/lx4-sppid-probes-20261121/`（`E1` 原样字节副本、`E2` 仅改 `_PlantName` 单点摘要元数据、`E3` 空白模板 + 单台容器 `V-1001` 外来 `.pid`），并在 `evaluate-receipt` 原生支持推导 `c1_foreign_pid_accepted` / `plant_db_registration_required`（真机打开待 `RES-06`，见 `readings.md` §33）。
+- **LX-5 我们的文件在 SPPID 里验收（M）**：`.pid` 打开、发布；取回 XML 与我们导出的比对（待 `RES-06`）。
 - **LX-6 未解字段补充分析（视情况）— 已完成（[#137](https://github.com/happyrust/pid-cad/issues/137)）**：已在 `06-lx-compliance-and-codelist-audit.md` 第 2 节逐流核查 `passthrough_preserve` 的 10 类容器流，确认对阶段一 `a/b` 级与 `c1` 级完全够用，并完成 `#117` 备份包分级来源全包实查与阶段一 `_Coverage.json` `VariantResolutionSummary` 可观测性落地（见 `readings.md` §26）。
 - **LX-7 合规（S）— 已完成（[#137](https://github.com/happyrust/pid-cad/issues/137)）**：已在 `06-lx-compliance-and-codelist-audit.md` 第 3 节完成不分发厂商二进制、客户样本与连接串零入库、本机信息脱敏及受控环境单向隔离四条红线书面归档。
 - **LX-8 送测前预检三关（M）— 编排 CLI 与第①关已全部通过（[#135](https://github.com/happyrust/pid-cad/issues/135) / [#137](https://github.com/happyrust/pid-cad/issues/137)）**：落地 `scripts/sppid/precheck_and_receipt.py precheck`，统一串联第①关（`StrictVendor` + XML 比对）、第②关（`$OCS_PID_SPPID_RUNNER open`）与第③关（`$OCS_PID_SPPID_RUNNER publish` + `xml_diff`），未设运行器时默认退出码 `2` 阻断盲目送测（第②③关真机执行待 `RES-06`）。
-- **LX-9 外部平台送测（M）— 首轮 6 套减法送测包与回执自动收敛器均已就绪（[#135](https://github.com/happyrust/pid-cad/issues/135) / [#137](https://github.com/happyrust/pid-cad/issues/137)）**：`build_submission_round1.py` 已产出 `round-01` 6 槽受控包，`precheck_and_receipt.py evaluate-receipt` 已支持校验 `receipt.json` 并自动推导 `R1..R5` 平台要求与第二轮减法清单（见 `readings.md` §23、§26）。
+- **LX-9 外部平台送测（M）— 首轮减法包、第二轮二分包、六槽真实转换试点包与全系回执收敛器均已就绪（[#135](https://github.com/happyrust/pid-cad/issues/135) / [#137](https://github.com/happyrust/pid-cad/issues/137) / [#140](https://github.com/happyrust/pid-cad/issues/140) / [#143](https://github.com/happyrust/pid-cad/issues/143) / [#144](https://github.com/happyrust/pid-cad/issues/144)）**：三套送测实物包（`round-01`、`round-02-bisect`、`round-01b-converted`）均已预构建并通过本地预检，`precheck_and_receipt.py evaluate-receipt` 原生支持 `R1..R5`、`B1..B4` 与 `C1..C6` 自动收敛（见 `readings.md` §23、§26、§29、§32–§33）。
 
 ## 8. 推进顺序
 

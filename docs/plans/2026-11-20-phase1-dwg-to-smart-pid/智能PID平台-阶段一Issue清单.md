@@ -895,6 +895,7 @@
 **缺资料。** RES-06 ⚠。
 
 **对应任务。** LX-2（M）
+**状态与解决记录。** **运行器契约脚手架已完成（2026-11-21，[#144](https://github.com/happyrust/pid-cad/issues/144)）**：落地纯 ASCII Windows PowerShell 5.1 受控运行器模板 `scripts/sppid/sppid_runner_template.ps1`（完整支持 `open / publish / restore` 与 `--dry-run` 契约模式），并与 `precheck_and_receipt.py precheck` 联调全过（真机执行待 `RES-06`，详见 `readings.md` §33）。
 
 ---
 
@@ -936,6 +937,7 @@
 **缺资料。** RES-06 ⚠、RES-09 ⚠（旧实验记录）。
 
 **对应任务。** LX-4（M）
+**状态与解决记录。** **`E1..E3` 递进探针包与判定器已备齐（2026-11-21，[#144](https://github.com/happyrust/pid-cad/issues/144)）**：由 `examples/pid_round2_probes.rs` + `build_submission_round2.py` 自动构建 `submissions/lx4-sppid-probes-20261121/`（`E1` 原样副本、`E2` 单点 `_PlantName` 摘要修改、`E3` 空白模板 + 单台容器 `V-1001` 外来 `.pid`），并在 `evaluate-receipt` 支持自动推导 `c1_foreign_pid_accepted` / `plant_db_registration_required`（真机打开待 `RES-06`，详见 `readings.md` §33）。
 
 ---
 
@@ -1209,6 +1211,7 @@
 | `ISSUE-LX-8 / LX-9 / L6-1 / L6-3`（五槽转换试点送测包与二进制 `.dwg` 直转） | [#140](https://github.com/happyrust/pid-cad/issues/140) | `done-local`（本地已完成 · 双包送测就绪） | 提交 `6e0037a59`：落地 `build_submission_converted.py`、扩展 `precheck_and_receipt.py` 与 `save_cad_file_as_binary_dwg`；核实二进制 `AC1032` `.dwg` 直转与 `.dxf` 100% 相等，构建 `round-01b-converted-20261121`（5 槽 15 文件，`precheck_passed=true`），见 `readings.md` §29 |
 | `ISSUE-L4-6 / L5-8 / L6-1`（应用内标准转换命令 `PIDCONVERT` 闭环） | [#141](https://github.com/happyrust/pid-cad/issues/141) | `done-local`（本地已完成 · 应用内直转与批处理闭环） | 提交 `b6ade3c73`：扩展 `pid_convert/{export,mod}.rs` 与 `pidprops.rs`；补齐应用内 `PIDCONVERT`（单图与 `BATCH` 混合 `.dxf`/`.dwg`、`CLASSMAP`、`VERIFY`、`SUMMARY`），真实 SPPID 图单图 `302/302` 与 4 类真实图纸 `BATCH` `879/879` `GraphicOID` 对齐全过 `StrictVendor` 与 `a/b` 验证，见 `readings.md` §30 |
 | `ISSUE-L2-2 / L2-6 / L2-7 / L6-2`（真实 `.pid` 原图应用内升格编辑存回闭环） | [#142](https://github.com/happyrust/pid-cad/issues/142) | `done-local`（本地已完成 · 真实 `.pid` 交互闭环） | 提交 `39f6bd939`：扩展 `pid_convert/{promote,export,mod}.rs` 与 `pidprops.rs`；修复真实 `.pid` 多笔画按 `oid` 归并、精确变体映射、成员笔画面板点选、`LwPolyline` 管段保真与 `PIDCONVERT` 已校核模型优先导出，3 张真实 `.pid` 原图（`633/633` 精确变体、`fallback=0`、`897/897` `GraphicOID` 对齐）全过 `StrictVendor` 与 `a/b` 验证，见 `readings.md` §31 |
-| `ISSUE-LX-8 / LX-9 / L6-2 / L6-3`（六槽全原型转换与编辑存回试点送测包 `CONV-01..06`） | [#143](https://github.com/happyrust/pid-cad/issues/143) | `done-local`（本地已完成 · 六槽 18 文件送测就绪） | 扩展 `build_submission_converted.py`（新增 `06-pid-inapp-edit-save` / `CONV-06`）与 `precheck_and_receipt.py`（`C1..C6` 收敛 + 双形态回执兼容）；重建 `round-01b-converted-20261121`（6 槽 18 文件，`manifest_sha256=bb39b67f93d8c64d...`，`precheck_passed=true`），见 `readings.md` §32 |
+| `ISSUE-LX-8 / LX-9 / L6-2 / L6-3`（六槽全原型转换与编辑存回试点送测包 `CONV-01..06`） | [#143](https://github.com/happyrust/pid-cad/issues/143) | `done-local`（本地已完成 · 六槽 18 文件送测就绪） | 提交 `2098e5ff8`：扩展 `build_submission_converted.py`（新增 `06-pid-inapp-edit-save` / `CONV-06`）与 `precheck_and_receipt.py`（`C1..C6` 收敛 + 双形态回执兼容）；重建 `round-01b-converted-20261121`（6 槽 18 文件，`manifest_sha256=bb39b67f93d8c64d...`，`precheck_passed=true`），见 `readings.md` §32 |
+| `ISSUE-LX-2 / LX-4 / LX-9 / L6-3`（第二轮二分包 `V2-01..04`、运行器脚手架与 `LX-4` `E1..E3` 探针闭环） | [#144](https://github.com/happyrust/pid-cad/issues/144) | `done-local`（本地已完成 · 三套送测/探针包全备齐） | 扩展 `pid_write/{verify,mod}.rs`、新增 `examples/pid_round2_probes.rs`、`build_submission_round2.py` 与纯 ASCII `sppid_runner_template.ps1`；预构建 `round-02-bisect-20261121`（5 槽 15 文件，`precheck_passed=true`）与 `lx4-sppid-probes-20261121`（`E1..E3` 3 槽 9 文件）并接入 `B1..B4` / `E1..E3` 回执收敛，见 `readings.md` §33 |
 | `.sym` 预览（关联） | [#116](https://github.com/happyrust/pid-cad/issues/116) | 并行分支推进中 | 由 `pid-symbol-on-main` 工作树正在推进，严格避让 |
 | 分级表可观测性（关联） | [#117](https://github.com/happyrust/pid-cad/issues/117) | 已完成第 2 步实查与阶段一侧落地 | 已在 `06-lx-compliance-and-codelist-audit.md` 完成备份包全量实查（证实目标 `EFSchema` 6 层树不在包内），并在阶段一导出侧落地 `VariantResolutionSummary` 与 `--class-map` 热替换；备份包导出侧留待后续升级 `pid-parse` 时同步 |
