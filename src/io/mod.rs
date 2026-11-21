@@ -2897,8 +2897,14 @@ where
                     .and_then(|bytes| std::fs::write(&temp_path, bytes).map_err(|e| e.to_string()))
                     .map_err(SaveFailure::other)
             }
-            None => DwgWriter::write_to_file(&temp_path, &doc)
-                .map_err(|e| SaveFailure::other(e.to_string())),
+            None => {
+                // A DWG states a line weight as one of a fixed list of
+                // widths: this save copy states the nearest width on the
+                // list for one that is off it.
+                ocs_save::snap_dwg_line_weights(&mut doc);
+                DwgWriter::write_to_file(&temp_path, &doc)
+                    .map_err(|e| SaveFailure::other(e.to_string()))
+            }
         },
     };
     if let Err(error) = result {
@@ -4440,5 +4446,187 @@ mod ole_save_loss_tests {
         edited.storage.trailing_records =
             document::compound_file::BinaryRecord::split(&[1, 2, 3], 4096);
         assert_eq!(dropped(edited), 1);
+    }
+}
+
+#[cfg(test)]
+mod dwg_line_weight_tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use document::entities::{Block, BlockEnd, EntityType, Insert, Line};
+    use document::tables::layer::Layer as DocLayer;
+    use document::tables::BlockRecord;
+    use document::types::{DxfVersion, LineWeight, Vector3};
+
+    /// The layer that states a width of its own.
+    const PEN_LAYER: &str = "PENS";
+
+    /// The definition the strokes at 34 and 68 are members of.
+    const SYMBOL: &str = "SYMBOL";
+
+    /// A vertical stroke at `x` stating `weight`. Each stroke stands at the x
+    /// that names the width it was drawn with.
+    fn stroke(x: f64, weight: LineWeight) -> EntityType {
+        let mut line = Line::from_points(Vector3::new(x, 0.0, 0.0), Vector3::new(x, 9.0, 0.0));
+        line.common.line_weight = weight;
+        EntityType::Line(line)
+    }
+
+    /// A drawing that states the three pens of a Smart P&ID import -- 0.17,
+    /// 0.34 and 0.68 mm, none of them a width a DWG can state -- where an
+    /// imported sheet states them and beyond: the fine one on a stroke in
+    /// model space, the medium and the bold one on strokes inside a block
+    /// definition, the bold one on a layer too, the medium one as the current
+    /// width. Beside them a standard width and the three widths taken by
+    /// reference.
+    fn drawing() -> Document {
+        let mut doc = Document::new();
+        crate::io::linetypes::populate_document(&mut doc);
+        let mut layer = DocLayer::new(PEN_LAYER);
+        layer.handle = doc.allocate_handle();
+        layer.line_weight = LineWeight::Value(68);
+        doc.layers.add(layer).unwrap();
+        doc.header.current_line_weight = 34;
+        for (x, weight) in [
+            (1.0, LineWeight::ByLayer),
+            (2.0, LineWeight::ByBlock),
+            (3.0, LineWeight::Default),
+            (17.0, LineWeight::Value(17)),
+            (25.0, LineWeight::Value(25)),
+        ] {
+            doc.add_entity(stroke(x, weight)).unwrap();
+        }
+
+        // The definition, filed the way a drawn block is: its record, the
+        // BLOCK that opens it, the members the record owns, the ENDBLK that
+        // closes it. One reference places it.
+        let record_handle = doc.allocate_handle();
+        let block_handle = doc.allocate_handle();
+        let mut record = BlockRecord::new(SYMBOL);
+        record.handle = record_handle;
+        record.block_entity_handle = block_handle;
+        doc.block_records.add(record).unwrap();
+        let mut block = Block::new(SYMBOL, Vector3::ZERO);
+        block.common.handle = block_handle;
+        block.common.owner_handle = record_handle;
+        doc.add_entity(EntityType::Block(block)).unwrap();
+        for (x, width) in [(34.0, 34), (68.0, 68)] {
+            let mut member = stroke(x, LineWeight::Value(width));
+            member.common_mut().owner_handle = record_handle;
+            doc.add_entity(member).unwrap();
+        }
+        let end_handle = doc.allocate_handle();
+        let mut end = BlockEnd::new();
+        end.common.handle = end_handle;
+        end.common.owner_handle = record_handle;
+        doc.add_entity(EntityType::BlockEnd(end)).unwrap();
+        doc.block_records.get_mut(SYMBOL).unwrap().block_end_handle = end_handle;
+        let reference = Insert::new(SYMBOL, Vector3::ZERO);
+        doc.add_entity(EntityType::Insert(reference)).unwrap();
+        doc
+    }
+
+    /// The widths a drawing states: its strokes' by the x each stands at,
+    /// [`PEN_LAYER`]'s, and the current one.
+    type Stated = (BTreeMap<i64, LineWeight>, Option<LineWeight>, i16);
+
+    fn stated(doc: &Document) -> Stated {
+        let strokes = doc
+            .entities()
+            .filter_map(|entity| match entity {
+                EntityType::Line(line) => {
+                    Some((line.start.x.round() as i64, line.common.line_weight))
+                }
+                _ => None,
+            })
+            .collect();
+        (
+            strokes,
+            doc.layers.get(PEN_LAYER).map(|layer| layer.line_weight),
+            doc.header.current_line_weight,
+        )
+    }
+
+    /// What [`stated`] gives, without the current width.
+    fn strokes_and_layer(doc: &Document) -> (BTreeMap<i64, LineWeight>, Option<LineWeight>) {
+        let (strokes, layer, _) = stated(doc);
+        (strokes, layer)
+    }
+
+    /// What [`drawing`] states, with the importer's three pens at `pens`.
+    fn with_pens(pens: [i16; 3]) -> Stated {
+        let [fine, medium, bold] = pens.map(LineWeight::Value);
+        (
+            BTreeMap::from([
+                (1, LineWeight::ByLayer),
+                (2, LineWeight::ByBlock),
+                (3, LineWeight::Default),
+                (17, fine),
+                (25, LineWeight::Value(25)),
+                (34, medium),
+                (68, bold),
+            ]),
+            Some(bold),
+            pens[1],
+        )
+    }
+
+    /// `doc` saved to a file of the kind `ext` names, and opened again. Tests
+    /// run in parallel, so each names its own file.
+    fn through_a_file(doc: &Document, test: &str, ext: &str) -> Document {
+        let path = std::env::temp_dir().join(format!(
+            "ocs_lineweight_{test}_{}.{ext}",
+            std::process::id()
+        ));
+        save_as_version(doc, &path, DxfVersion::AC1032).expect("save to a file");
+        let loaded = load_file(&path);
+        let _ = std::fs::remove_file(&path);
+        loaded.expect("open the file")
+    }
+
+    /// `doc` saved to bytes of the kind `ext` names, and opened again.
+    fn through_bytes(doc: &Document, ext: &str) -> Document {
+        let bytes = save_to_bytes(doc, ext, DxfVersion::AC1032).expect("save to bytes");
+        load_bytes(&format!("drawing.{ext}"), bytes).expect("open the bytes")
+    }
+
+    /// A DWG states a width as one of a fixed list, so a width off the list
+    /// came back as the drawing's default: every stroke of a `.pid` saved as
+    /// DWG lost its pen. The save copy states the nearest standard width
+    /// instead, and the drawing being saved is not touched.
+    #[test]
+    fn a_dwg_saved_to_a_file_states_the_nearest_standard_widths() {
+        let doc = drawing();
+        let as_drawn = doc.clone();
+        assert_eq!(stated(&doc), with_pens([17, 34, 68]));
+        let reopened = through_a_file(&doc, "file", "dwg");
+        assert_eq!(stated(&reopened), with_pens([18, 35, 70]));
+        assert!(doc == as_drawn, "the drawing itself must stay as drawn");
+    }
+
+    /// The byte-buffer route writes what the on-disk route writes.
+    #[test]
+    fn a_dwg_saved_to_bytes_states_the_nearest_standard_widths() {
+        let doc = drawing();
+        let as_drawn = doc.clone();
+        let reopened = through_bytes(&doc, "dwg");
+        assert_eq!(stated(&reopened), with_pens([18, 35, 70]));
+        assert!(doc == as_drawn, "the drawing itself must stay as drawn");
+    }
+
+    /// A DXF states the number itself, so it keeps the width of every stroke
+    /// and of the layer as drawn. The current width is left out: the DXF
+    /// writer keeps a list of its own for it and states "by layer" for a
+    /// width that is not on it, with or without what a DWG save does.
+    #[test]
+    fn a_dxf_states_the_widths_as_drawn_whichever_way_it_is_saved() {
+        let doc = drawing();
+        let (strokes, layer, _) = with_pens([17, 34, 68]);
+        let as_drawn = (strokes, layer);
+        let reopened = through_a_file(&doc, "dxf", "dxf");
+        assert_eq!(strokes_and_layer(&reopened), as_drawn, "to a file");
+        let reopened = through_bytes(&doc, "dxf");
+        assert_eq!(strokes_and_layer(&reopened), as_drawn, "to bytes");
     }
 }

@@ -18,9 +18,11 @@ use document::{
     ReadStage, ReadStats,
 };
 
+mod dwg_line_weights;
 mod dxf_reference_integrity;
 mod ifccad;
 
+pub use dwg_line_weights::{has_unstorable_dwg_line_weights, snap_dwg_line_weights};
 pub use dxf_reference_integrity::{has_omitted_dxf_records, prune_omitted_dxf_records};
 
 /// Worker protocol version. Bumped whenever a request/response payload shape
@@ -53,6 +55,17 @@ pub fn serialize_document(doc: &Document, ext: &str) -> Result<Vec<u8>, String> 
     if let Some(format) = external_format(&ext) {
         return write_external(doc, format, false);
     }
+    // A DWG states a line weight as one of a fixed list of widths. The copy
+    // written here states the nearest width on the list for one that is off
+    // it; the caller's document keeps the width as drawn.
+    let mut restated;
+    let doc = if has_unstorable_dwg_line_weights(doc) {
+        restated = doc.clone();
+        snap_dwg_line_weights(&mut restated);
+        &restated
+    } else {
+        doc
+    };
     let mut buf = std::io::Cursor::new(Vec::new());
     DwgWriter::write_to_writer(&mut buf, doc).map_err(|e| e.to_string())?;
     Ok(buf.into_inner())

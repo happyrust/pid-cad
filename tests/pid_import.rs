@@ -5587,6 +5587,74 @@ mod sample_sheet {
         check_the_saved_copy("dxf");
     }
 
+    /// The pens of a drawing: how many of its entities state each width,
+    /// those inside the block definitions among them.
+    fn pens(doc: &Document) -> BTreeMap<String, usize> {
+        let mut pens = BTreeMap::new();
+        for entity in doc.entities() {
+            *pens
+                .entry(format!("{:?}", entity.common().line_weight))
+                .or_default() += 1;
+        }
+        pens
+    }
+
+    /// The sample, opened, saved as `ext` and read back, states the pens it
+    /// was opened with, but for those of `moved`: every entity that stated
+    /// the first width of a pair states the second.
+    fn check_the_saved_pens(ext: &str, moved: &[(&str, &str)]) {
+        let Some(doc) = opened() else {
+            return;
+        };
+        let drawn = pens(doc);
+        for pen in ["Value(17)", "Value(34)", "Value(68)"] {
+            assert!(
+                drawn.contains_key(pen),
+                "no {pen} pen on the opened sheet: {drawn:?}"
+            );
+        }
+        let mut expected = BTreeMap::new();
+        for (pen, count) in &drawn {
+            let stated = moved
+                .iter()
+                .find(|(from, _)| from == pen)
+                .map_or(pen.as_str(), |(_, to)| to);
+            *expected.entry(stated.to_string()).or_insert(0) += count;
+        }
+
+        let bytes = OpenCADStudio::io::save_to_bytes(doc, ext, doc.version)
+            .unwrap_or_else(|error| panic!("saving the sample as {ext}: {error}"));
+        let copy = OpenCADStudio::io::load_bytes(&format!("sample.{ext}"), bytes)
+            .unwrap_or_else(|error| panic!("reading the {ext} back: {error}"));
+        let saved = pens(&copy);
+        println!("{ext}: pens of the opened sheet: {drawn:?}");
+        println!("{ext}: pens read back:           {saved:?}");
+        assert_eq!(saved, expected, "{ext}: pens read back");
+    }
+
+    /// A DWG states a width as one of a fixed list, and the importer's three
+    /// pens -- 0.17, 0.34 and 0.68 mm -- are not on it: written as they
+    /// stand, every stroke of the sheet came back at the drawing's default
+    /// width (the plan's todo.md, SB-10). The save copy states each at the
+    /// nearest standard width, and no other width of the sheet moves.
+    #[test]
+    fn the_sample_saved_as_dwg_states_its_pens_at_the_nearest_standard_widths() {
+        check_the_saved_pens(
+            "dwg",
+            &[
+                ("Value(17)", "Value(18)"),
+                ("Value(34)", "Value(35)"),
+                ("Value(68)", "Value(70)"),
+            ],
+        );
+    }
+
+    /// A DXF states the number itself: the sheet keeps every pen as opened.
+    #[test]
+    fn the_sample_saved_as_dxf_states_its_pens_as_opened() {
+        check_the_saved_pens("dxf", &[]);
+    }
+
     /// Legend recognition reads the opened sheet and leaves the import's
     /// symbols out of it: none is among the symbols it boxes, none an
     /// unknown block, none a location of any of its exceptions; and the
