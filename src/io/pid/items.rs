@@ -14,9 +14,12 @@ use super::*;
 /// graphic: one `P&IDAttributes` row an item, and the graphic that draws
 /// it. `pid-parse` reads that copy (`load_publish_from_pid`, the reader the
 /// backup panel's item tree uses). Measured on the 53 sheets of the plant
-/// test data, it names the same item as the database for every placement
-/// the database has one for -- 9,218 of 9,225 (plan
-/// 2026-11-20-pid-symbol-identity, SPEC section 2.2).
+/// test data with pid-parse `96ee00c`, it named the same item as the
+/// database for every placement the database has one for -- 9,218 of 9,225
+/// (plan 2026-11-20-pid-symbol-identity, SPEC section 2.2). The library
+/// `Cargo.toml` pins now, `a85fa10`, gives no representation to a symbol
+/// that stands for a pipe run -- the gap drawn where two lines cross -- and
+/// the three of those in the plant name no item here, which leaves 9,215.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SheetItem {
     /// The item's id (`ModelID`), spelt as the file spells it.

@@ -2775,7 +2775,7 @@ mod tests {
 
     // ── PIDTAG, of a tag that holds spaces ─────────────────────────────────
 
-    /// A tag the plant's data gives that holds spaces: the one of the 5,027
+    /// A tag the plant's data gives that holds spaces: the one of the 5,024
     /// the 53 drawings of the plant backup carry, with the database's tags
     /// put on, that does (on D07).
     const SPACED: &str = "LG-Magnetic Float Gauge-0203";

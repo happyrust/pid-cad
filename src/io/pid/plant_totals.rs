@@ -32,11 +32,18 @@ const EMPTY: &str = "D03.pid";
 
 /// What the symbols and the texts of the other 52 say, read from the files
 /// alone ([`Counted::lines`]). Counted on the drawings on 2026-11-21, not
-/// derived; the kinds are the rows of SPEC section 2.2.
+/// derived; the kinds are the rows of SPEC section 2.2, less one.
+///
+/// The counts are those of the conversion library `Cargo.toml` pins,
+/// pid-parse `a85fa10`. It gives no representation to a symbol that stands
+/// for a pipe run -- the gap drawn where two lines cross, of which the
+/// plant has three -- so those three name no item and state no class. Under
+/// `96ee00c`, which the SPEC was measured with, they did: 9218 of an item,
+/// 8742 of a class, and a row `PipeRun PIDPipingConnector 3`.
 const FROM_THE_FILES: &str = "\
 symbols 9225, 0 of them sharing a graphic
-of an item 9218
-of a class 8742
+of an item 9215
+of a class 8739
 tagged 2957: file 2957
 named otherwise in the file 0
 labels 15490: line 2303, other 152, symbol 13035
@@ -52,18 +59,21 @@ ItemNote PIDNote 793
 Mechanical PIDMechanicalEquipment 91
 Nozzle PIDNozzle 372
 OPC (no class) 476
-PipeRun PIDPipingConnector 3
 PipingComp PIDPipingComponent 3473
 Vessel PIDProcessVessel 68";
 
 /// What their symbols say of their tags once the tags of the backup's
-/// database are put on them ([`Tagged::lines`]). Counted likewise.
+/// database are put on them ([`Tagged::lines`]). Counted likewise, and under
+/// the same library: the three gap symbols, naming no item, are given no
+/// tag. Under `96ee00c` the database's tags reached them too: 5027 tagged,
+/// 5006 of them by the database, 2070 in the database alone, 4198 in
+/// neither.
 const WITH_THE_DATABASE: &str = "\
-tagged 5027: database 5006, file 21
+tagged 5024: database 5003, file 21
 named otherwise in the file 32
-the database's tag put on 5006, 32 of them named otherwise in the file
-in both and the same 2904, in both and not the same 32, in the database alone 2070, \
-in the file alone 21, in neither 4198, otherwise 0";
+the database's tag put on 5003, 32 of them named otherwise in the file
+in both and the same 2904, in both and not the same 32, in the database alone 2067, \
+in the file alone 21, in neither 4201, otherwise 0";
 
 /// Where the plant backup lies -- the plant test data, a folder beside this
 /// repository -- or `None`, and a line saying why, where it cannot be read
