@@ -1432,7 +1432,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2953,7 +2953,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3763,7 +3763,7 @@ dependencies = [
 [[package]]
 name = "hayro"
 version = "0.7.1"
-source = "git+https://github.com/happyrust/pid-parse?rev=96ee00cf7555a046592f2b798b75cdd0a0e54d3b#96ee00cf7555a046592f2b798b75cdd0a0e54d3b"
+source = "git+https://github.com/happyrust/pid-parse?rev=a85fa10285cc5379953495fa391f374981b9e587#a85fa10285cc5379953495fa391f374981b9e587"
 dependencies = [
  "bytemuck",
  "hayro-interpret",
@@ -3793,7 +3793,7 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.7.0"
-source = "git+https://github.com/happyrust/pid-parse?rev=96ee00cf7555a046592f2b798b75cdd0a0e54d3b#96ee00cf7555a046592f2b798b75cdd0a0e54d3b"
+source = "git+https://github.com/happyrust/pid-parse?rev=a85fa10285cc5379953495fa391f374981b9e587#a85fa10285cc5379953495fa391f374981b9e587"
 dependencies = [
  "bitflags 2.13.1",
  "hayro-cmap",
@@ -3836,7 +3836,7 @@ checksum = "885c5ef0654933139a9b9546fc2c69e18d37f38aa2520f079092b1be18f1fcaa"
 [[package]]
 name = "hayro-syntax"
 version = "0.7.2"
-source = "git+https://github.com/happyrust/pid-parse?rev=96ee00cf7555a046592f2b798b75cdd0a0e54d3b#96ee00cf7555a046592f2b798b75cdd0a0e54d3b"
+source = "git+https://github.com/happyrust/pid-parse?rev=a85fa10285cc5379953495fa391f374981b9e587#a85fa10285cc5379953495fa391f374981b9e587"
 dependencies = [
  "flate2",
  "hayro-ccitt",
@@ -4062,7 +4062,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -5160,7 +5160,7 @@ dependencies = [
 [[package]]
 name = "lopdf"
 version = "0.45.0"
-source = "git+https://github.com/happyrust/pid-parse?rev=96ee00cf7555a046592f2b798b75cdd0a0e54d3b#96ee00cf7555a046592f2b798b75cdd0a0e54d3b"
+source = "git+https://github.com/happyrust/pid-parse?rev=a85fa10285cc5379953495fa391f374981b9e587#a85fa10285cc5379953495fa391f374981b9e587"
 dependencies = [
  "aes 0.9.3",
  "bitflags 2.13.1",
@@ -5616,7 +5616,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6317,7 +6317,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.45.0",
 ]
 
 [[package]]
@@ -6362,7 +6362,7 @@ dependencies = [
 [[package]]
 name = "oxidized-mdf"
 version = "0.3.1"
-source = "git+https://github.com/happyrust/pid-parse?rev=96ee00cf7555a046592f2b798b75cdd0a0e54d3b#96ee00cf7555a046592f2b798b75cdd0a0e54d3b"
+source = "git+https://github.com/happyrust/pid-parse?rev=a85fa10285cc5379953495fa391f374981b9e587#a85fa10285cc5379953495fa391f374981b9e587"
 dependencies = [
  "bitvec",
  "chrono",
@@ -6610,7 +6610,7 @@ checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
 [[package]]
 name = "pid-parse"
 version = "0.11.7"
-source = "git+https://github.com/happyrust/pid-parse?rev=96ee00cf7555a046592f2b798b75cdd0a0e54d3b#96ee00cf7555a046592f2b798b75cdd0a0e54d3b"
+source = "git+https://github.com/happyrust/pid-parse?rev=a85fa10285cc5379953495fa391f374981b9e587#a85fa10285cc5379953495fa391f374981b9e587"
 dependencies = [
  "base64",
  "cfb",
@@ -6633,7 +6633,7 @@ dependencies = [
 [[package]]
 name = "pid-plot"
 version = "0.1.0"
-source = "git+https://github.com/happyrust/pid-parse?rev=96ee00cf7555a046592f2b798b75cdd0a0e54d3b#96ee00cf7555a046592f2b798b75cdd0a0e54d3b"
+source = "git+https://github.com/happyrust/pid-parse?rev=a85fa10285cc5379953495fa391f374981b9e587#a85fa10285cc5379953495fa391f374981b9e587"
 dependencies = [
  "fontcull-klippa",
  "fontcull-read-fonts",
@@ -7723,7 +7723,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7780,7 +7780,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8538,7 +8538,7 @@ version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0811b01ca2c4e8718760713911feaf4675c24f94e50530a015ec646cfb622f7c"
 dependencies = [
- "skrifa 0.42.1",
+ "skrifa 0.37.0",
  "yazi",
  "zeno",
 ]
@@ -8618,7 +8618,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8627,7 +8627,7 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8c27177b12a6399ffc08b98f76f7c9a1f4fe9fc967c784c5a071fa8d93cf7e1"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9981,7 +9981,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -10382,7 +10382,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

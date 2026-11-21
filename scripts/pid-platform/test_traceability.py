@@ -507,7 +507,7 @@ def test_traceability_symbol_document_defines_the_eight_tag_rule_fields():
 
 
 def test_traceability_screen_catalog_uses_the_fourteen_contract_ids():
-    assert len(SCREEN_IDS) == 14, "VAL-CROSS-001 lists 14 screen ids, got %d" % len(SCREEN_IDS)
+    assert len(SCREEN_IDS) == 15, "VAL-CROSS-001 lists 15 screen ids, got %d" % len(SCREEN_IDS)
     if not CATALOG.exists():
         assert _screen_ids() == SCREEN_IDS
         return

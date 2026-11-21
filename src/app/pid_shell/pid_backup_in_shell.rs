@@ -7,7 +7,8 @@
 //! comes up beside the drawing and inside that frame, that the module's own
 //! parts stay where they were, that a drawing opened from the panel asks for
 //! the file the restore made of it, that one a tab shows already is brought
-//! to the front and not opened again, that a source that is no backup
+//! to the front and not opened again, that one opened opens on its whole
+//! sheet on the canvas the panel leaves, that a source that is no backup
 //! leaves the module in the state it leaves a `--classic` window in, that
 //! `PIDPLOT` plots a drawing of the backup from the file the restore made
 //! of it and refuses any other drawing as a `--classic` window does, and
@@ -73,11 +74,16 @@ fn headless() -> iced::Renderer {
 /// Draw the window once; where every reporting widget is, in window
 /// coordinates.
 fn drawn(app: &OpenCADStudio) -> BTreeMap<String, Rectangle> {
+    drawn_in(app, WINDOW)
+}
+
+/// [`drawn`], in a window of the size `window`.
+fn drawn_in(app: &OpenCADStudio, window: Size) -> BTreeMap<String, Rectangle> {
     use iced_test::core::{mouse, renderer, shell, window as core_window};
     use iced_test::runtime::user_interface::{Cache, UserInterface};
     crate::ui::wrap_bar::forget_bounds("");
     let mut renderer = headless();
-    let mut ui = UserInterface::build(app.view_main(), WINDOW, Cache::default(), &mut renderer);
+    let mut ui = UserInterface::build(app.view_main(), window, Cache::default(), &mut renderer);
     let _ = ui.update(
         &core_window::Headless,
         &shell::Waker::noop(),
@@ -705,6 +711,213 @@ fn a_drawing_a_tab_shows_already_is_brought_to_the_front_in_the_module() {
 #[test]
 fn a_drawing_a_tab_shows_already_is_brought_to_the_front_in_a_classic_window() {
     opened_again_from_the_panel(true, "again-classic");
+}
+
+// ── The view a drawing of the backup opens on ────────────────────────────
+
+/// `D07`'s sheet: an A2 laid landscape, in millimetres.
+const SHEET: (f64, f64) = (594.328, 420.566);
+
+/// The width and the height the importer frames [`SHEET`] with: the
+/// sheet's width with a twentieth over, and three quarters of that.
+fn framed() -> (f64, f64) {
+    (SHEET.0 * 1.05, SHEET.0 * 0.75 * 1.05)
+}
+
+/// A drawing's file of the loaded backup, by the drawing's name.
+fn file_of(app: &OpenCADStudio, name: &str) -> PathBuf {
+    app.pid_backup_browser
+        .index()
+        .expect("the backup is loaded")
+        .drawings
+        .iter()
+        .find(|drawing| drawing.name == name)
+        .and_then(|drawing| drawing.pid_path.clone())
+        .unwrap_or_else(|| panic!("{name} has a file"))
+}
+
+/// The open of `file` as the loader hands it back, the drawing in it being
+/// what the importer makes of one on [`SHEET`] that draws nothing. The
+/// drawings made up here are none the importer reads, so the loader is
+/// stood in for; the rest of the open is the one every file has.
+fn opened_on_the_sheet(app: &mut OpenCADStudio, file: &Path) {
+    let document = crate::io::pid::imported_sheet(SHEET);
+    let caches = crate::scene::build_derived_caches_with_progress(&document, &|_| {}, None);
+    let name = file
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    app.opening = Some(crate::app::OpenProgress {
+        id: 7,
+        name: name.clone(),
+        source_path: Some(file.to_path_buf()),
+        size_bytes: 0,
+        state: std::sync::Arc::new(crate::io::OpenProgressState::new(
+            crate::app::OPEN_PHASE_CACHING,
+        )),
+        started: std::time::Instant::now(),
+        recovery_error: None,
+        recovery_read_stats: None,
+        fingerprint: None,
+    });
+    give(
+        app,
+        AppMessage::FileOpened(7, Ok((name, file.to_path_buf(), document, caches, None))),
+    );
+}
+
+/// The view of the drawing in front as a window of the size `window` shows
+/// it, read as `readings.md` §8.1 reads it off a window -- the camera, and
+/// the canvas it is drawn on: its centre, and how wide and how high it
+/// reaches.
+fn shown(app: &OpenCADStudio, window: Size) -> ((f64, f64), f64, f64) {
+    let _ = drawn_in(app, window);
+    let scene = &app.tabs[app.active_tab].scene;
+    let (width, height) = scene.selection.borrow().view.vp_size;
+    let camera = scene.camera.borrow();
+    let high = 2.0 * f64::from(camera.ortho_size());
+    (
+        (camera.target.x, camera.target.y),
+        high * f64::from(width) / f64::from(height),
+        high,
+    )
+}
+
+/// Whether `view` is centred on [`SHEET`].
+fn centred_on_the_sheet(view: ((f64, f64), f64, f64)) -> bool {
+    let ((x, y), _, _) = view;
+    (x - SHEET.0 / 2.0).abs() < 1e-9 && (y - SHEET.1 / 2.0).abs() < 1e-9
+}
+
+/// Whether `a` is `b` to the precision a camera keeps its distance in.
+fn camera_close(a: f64, b: f64) -> bool {
+    (a / b - 1.0).abs() < 1e-5
+}
+
+/// A drawing of the backup opened from the panel opens on its whole sheet
+/// (`RD-7`). The panel leaves the canvas narrower than 1.27:1, on which
+/// the view a landscape sheet is framed with, restored at its height
+/// alone, showed 81.8% of the sheet's width. Now it is pulled back about
+/// the sheet's centre until the canvas takes in the width it is framed
+/// with, a twentieth over the sheet's: whether the drawing takes the place
+/// of the blank drawing, whose canvas is laid out, or a tab of its own,
+/// laid out only once it is drawn.
+fn opened_from_the_panel_on_the_whole_sheet(classic: bool, scratch: &str) {
+    let scratch = Scratch::new(scratch);
+    let backup = backup_folder(scratch.path());
+    let mut app = launched(classic);
+    restores_into(&mut app, scratch.path());
+    say(&mut app, &open_line(&backup));
+    assert!(app.dock_panel_visible(PanelId::PidBackup));
+    let (wide, high) = framed();
+    let canvas = widget_at(&drawn(&app), VIEWPORT);
+    assert!(
+        high * f64::from(canvas.width) / f64::from(canvas.height) < SHEET.0,
+        "the canvas {canvas:?} cuts the sides of the sheet off a view {high} high"
+    );
+    let on_the_whole_sheet = |app: &OpenCADStudio, name: &str| {
+        let view = shown(app, WINDOW);
+        let (_, width, height) = view;
+        assert!(centred_on_the_sheet(view), "{name}: {view:?}");
+        assert!(
+            camera_close(width, wide),
+            "{name} as wide as the sheet is framed, {wide}: {view:?}"
+        );
+        assert!(height > high, "{name} pulled back from {high}: {view:?}");
+    };
+
+    let blank = app.active_tab;
+    let tabs = app.tabs.len();
+    let first = file_of(&app, "A-101");
+    opened_on_the_sheet(&mut app, &first);
+    assert_eq!((app.active_tab, app.tabs.len()), (blank, tabs));
+    on_the_whole_sheet(&app, "A-101");
+
+    let second = file_of(&app, "B-202");
+    opened_on_the_sheet(&mut app, &second);
+    assert_eq!(app.tabs.len(), tabs + 1);
+    assert_ne!(app.active_tab, blank);
+    on_the_whole_sheet(&app, "B-202");
+}
+
+#[test]
+fn a_drawing_opened_from_the_panel_opens_on_its_whole_sheet_in_the_module() {
+    let _one = crate::headless_ui_lock();
+    opened_from_the_panel_on_the_whole_sheet(false, "whole-sheet-module");
+}
+
+#[test]
+fn a_drawing_opened_from_the_panel_opens_on_its_whole_sheet_in_a_classic_window() {
+    let _one = crate::headless_ui_lock();
+    opened_from_the_panel_on_the_whole_sheet(true, "whole-sheet-classic");
+}
+
+/// Where the canvas takes in the width the sheet is framed with -- the
+/// panel closed, on a full-HD screen -- a drawing opens on the view as it
+/// is framed, as it did before the view stated a width: centred on the
+/// sheet and as high as it is framed, 468.03 for `D07`. In the blank
+/// drawing's place and in a tab of its own.
+#[test]
+fn a_canvas_wide_enough_for_the_sheet_leaves_the_view_as_it_is_framed() {
+    // The design's frame leaves the module a canvas of 1.21:1 with the
+    // panel closed, short of the 4:3 a landscape sheet is framed for.
+    const SCREEN: Size = Size::new(1920.0, 1080.0);
+    let _one = crate::headless_ui_lock();
+    let scratch = Scratch::new("as-framed");
+    let backup = backup_folder(scratch.path());
+    let mut app = launched(false);
+    let _ = app.update(AppMessage::WindowResized(SCREEN.width, SCREEN.height));
+    restores_into(&mut app, scratch.path());
+    say(&mut app, &open_line(&backup));
+    give(
+        &mut app,
+        AppMessage::Dock(DockMsg::Close(PanelId::PidBackup)),
+    );
+    assert!(!app.dock_panel_visible(PanelId::PidBackup));
+    let (wide, high) = framed();
+    let canvas = widget_at(&drawn_in(&app, SCREEN), VIEWPORT);
+    assert!(
+        high * f64::from(canvas.width) / f64::from(canvas.height) >= wide,
+        "the canvas {canvas:?} takes in {wide} at a view {high} high"
+    );
+
+    let tabs = app.tabs.len();
+    for (name, tabs) in [("A-101", tabs), ("B-202", tabs + 1)] {
+        let file = file_of(&app, name);
+        opened_on_the_sheet(&mut app, &file);
+        assert_eq!(app.tabs.len(), tabs, "{name}");
+        let view = shown(&app, SCREEN);
+        let (_, _, height) = view;
+        assert!(centred_on_the_sheet(view), "{name}: {view:?}");
+        assert!(camera_close(height, high), "{name}, {high}: {view:?}");
+    }
+}
+
+/// Only a `.pid` is widened. Any other drawing's view states the canvas it
+/// was saved from, not a width it asks for: one saved from a 4:3 canvas,
+/// opened beside the panel, opens on its view as it was saved.
+#[test]
+fn a_drawing_that_is_no_pid_opens_beside_the_panel_on_its_view_as_saved() {
+    let _one = crate::headless_ui_lock();
+    let scratch = Scratch::new("no-pid");
+    let backup = backup_folder(scratch.path());
+    let mut app = launched(false);
+    restores_into(&mut app, scratch.path());
+    say(&mut app, &open_line(&backup));
+    assert!(app.dock_panel_visible(PanelId::PidBackup));
+    let (_, high) = framed();
+    let canvas = widget_at(&drawn(&app), VIEWPORT);
+    assert!(
+        high * f64::from(canvas.width) / f64::from(canvas.height) < SHEET.0,
+        "the canvas {canvas:?} cuts the sides of the sheet off a view {high} high"
+    );
+    let file = scratch.path().join("A-101.dxf");
+    std::fs::write(&file, b"").expect("the drawing's file is written");
+    opened_on_the_sheet(&mut app, &file);
+    let view = shown(&app, WINDOW);
+    let (_, _, height) = view;
+    assert!(centred_on_the_sheet(view), "{view:?}");
+    assert!(camera_close(height, high), "{high}: {view:?}");
 }
 
 // ── A source that is no backup ───────────────────────────────────────────

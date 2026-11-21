@@ -2,7 +2,7 @@
 summary: Sets the color theme of the program window.
 type: String
 saved: Program settings
-default: Oxocarbon
+default: Light
 related: COLORTHEME, OPTIONS
 ---
 

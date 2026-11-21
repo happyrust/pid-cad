@@ -14,29 +14,26 @@ use crate::ui::style::pid_tokens::{ColorToken, PidTheme};
 /// line every 40 and a stronger one every 200.
 pub const GRID_MAJOR_EVERY: u32 = 5;
 
-/// The alpha of the grid's lines and of its stronger lines: the design's
-/// `#FFFFFF06` and `#FFFFFF0D`.
-pub const GRID_LINE_ALPHA: (f32, f32) = (6.0 / 255.0, 13.0 / 255.0);
-
 /// The colour a drawing is cleared to: the design's `bg-canvas`.
 pub fn colour(theme: PidTheme) -> [f32; 4] {
     let colour = ColorToken::BgCanvas.color(theme);
     [colour.r, colour.g, colour.b, colour.a]
 }
 
-/// How the grid is drawn: whole-pixel lines in the theme's text colour at
-/// the design's two strengths, and no axis lines through the origin. The
+/// How the grid is drawn: whole-pixel lines in the design's `canvas-grid` and
+/// `canvas-grid-major` colours, and no axis lines through the origin. The
 /// spacing stays the drawing's own (it is in drawing units, and follows the
 /// zoom), and so does whether the grid is shown at all.
 pub fn grid_style(theme: PidTheme, bg_luminance: f32) -> GridStyle {
-    let ink = ColorToken::TextPrimary.color(theme);
+    let minor = ColorToken::CanvasGrid.color(theme);
+    let major = ColorToken::CanvasGridMajor.color(theme);
     GridStyle {
         // Not read while `line_alpha` is given.
         opacity: 0,
         bg_luminance,
-        color: [ink.r, ink.g, ink.b],
+        color: [minor.r, minor.g, minor.b],
         axes: false,
-        line_alpha: Some(GRID_LINE_ALPHA),
+        line_alpha: Some((minor.a, major.a)),
     }
 }
 

@@ -194,12 +194,23 @@ pub(super) fn build_document_entities(
         // Alignment rides the same join but comes off the paragraph rather
         // than the character style, since it belongs to the run.
         let text_alignment = text_style.and_then(|style| style.alignment);
+        // The character width comes off the character style, like the height.
+        let text_width = text_style.and_then(|style| text_width_factor(style.width_permille));
         // ...and the record's own trailer byte beats both: it is the anchor
         // the label was placed at, where the paragraph is only the default
-        // it overrides. See `apply_text_anchor`.
-        let anchor_code = match &entity.kind {
-            PidGraphicKind::Text { anchor_code, .. } => Some(*anchor_code),
-            _ => None,
+        // it overrides. See `apply_text_anchor`. A record that states a box
+        // is the exception: the paragraph then says which edge of the box
+        // the run hangs from. See `apply_text_box`.
+        let (anchor_code, box_width_mm) = match &entity.kind {
+            PidGraphicKind::Text {
+                anchor_code,
+                text_box_width,
+                ..
+            } => (
+                Some(*anchor_code),
+                text_box_width.map(|width| projection.mm(width)),
+            ),
+            _ => (None, None),
         };
         // And the typeface, which was registered as a document text style
         // above, so what lands on the entity is that style's name.
@@ -258,11 +269,17 @@ pub(super) fn build_document_entities(
             if let Some(mm) = height_mm {
                 apply_text_height(&mut one, mm);
             }
+            if let Some(factor) = text_width {
+                apply_text_width(&mut one, factor);
+            }
             if let Some(rgb) = text_rgb {
                 apply_text_colour(&mut one, rgb);
             }
             match anchor_code {
-                Some(code) => apply_text_anchor(&mut one, code),
+                Some(code) => {
+                    apply_text_anchor(&mut one, code, text_style);
+                    apply_text_box(&mut one, code, box_width_mm, text_alignment);
+                }
                 None => {
                     if let Some(alignment) = text_alignment {
                         apply_text_alignment(&mut one, alignment);

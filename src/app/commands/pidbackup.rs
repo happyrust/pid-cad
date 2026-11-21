@@ -472,13 +472,13 @@ impl OpenCADStudio {
             self.backup_tags_read(generation, result);
             return Task::none();
         }
-        // An export to PDF reads the restores while it runs: none is removed
-        // from under it, whoever asks -- `Cache=Clear`, `Press`, or the
-        // panel's own button.
+        // An export, to PDF or to publish files, reads the restores while it
+        // runs: none is removed from under it, whoever asks -- `Cache=Clear`,
+        // `Press`, or the panel's own button.
         if matches!(
             &msg,
             PidBackupMsg::Cache(pid_backup_browser::CacheMsg::Clear)
-        ) && self.pid_backup_pdf_keeps_the_cache()
+        ) && (self.pid_backup_pdf_keeps_the_cache() || self.pid_backup_export_keeps_the_cache())
         {
             return Task::none();
         }
@@ -488,7 +488,8 @@ impl OpenCADStudio {
         if matches!(
             &msg,
             PidBackupMsg::Loaded(_) | PidBackupMsg::SourcePicked(Some(_))
-        ) {
+        ) && self.pid_shell.current() != Some(crate::app::pid_shell::PidScreen::Backup)
+        {
             self.show_pid_backup_panel();
         }
         // The command line reports what a finished load found, and a read
@@ -520,18 +521,48 @@ impl OpenCADStudio {
         // What a clearing freed, where restores are kept after a move, what
         // the cache holds when the command line asked.
         match pid_backup_browser::take_cache_outcome(&mut self.pid_backup_browser) {
-            Some(Ok(said)) => self
-                .command_line
-                .push_output(crate::tf!("PIDBACKUPOPEN: {}", said).as_ref()),
-            Some(Err(error)) => self
-                .command_line
-                .push_error(crate::tf!("PIDBACKUPOPEN: {}", error).as_ref()),
+            Some(Ok(said)) => {
+                if self.pid_shell.backup.pending_ui_cache_clear {
+                    self.pid_shell.backup.pending_ui_cache_clear = false;
+                    self.pid_shell.backup.notice = Some((
+                        crate::app::pid_shell::backup::NoticeTone::Info,
+                        "已清理非当前打开备份包的还原缓存。".to_owned(),
+                    ));
+                }
+                self.command_line
+                    .push_output(crate::tf!("PIDBACKUPOPEN: {}", said).as_ref());
+            }
+            Some(Err(error)) => {
+                if self.pid_shell.backup.pending_ui_cache_clear {
+                    self.pid_shell.backup.pending_ui_cache_clear = false;
+                    self.pid_shell.backup.notice = Some((
+                        crate::app::pid_shell::backup::NoticeTone::Warning,
+                        format!("清理还原缓存失败：{error}"),
+                    ));
+                }
+                self.command_line
+                    .push_error(crate::tf!("PIDBACKUPOPEN: {}", error).as_ref());
+            }
             None => {}
         }
+        let mut auto_items_task = Task::none();
         if let Some(error) = failure {
             self.command_line
                 .push_error(crate::tf!("PIDBACKUPOPEN: {}", error).as_ref());
         } else if loaded {
+            let drawing_count = self
+                .pid_backup_browser
+                .index()
+                .map_or(0, |idx| idx.drawings.len());
+            self.pid_shell
+                .backup
+                .reset_for_loaded_package(drawing_count);
+            if drawing_count > 0
+                && self.pid_shell.current() == Some(crate::app::pid_shell::PidScreen::Backup)
+            {
+                auto_items_task =
+                    crate::app::pid_shell::backup::ensure_drawing_items_loaded(self, 0);
+            }
             if let Some(index) = self.pid_backup_browser.index() {
                 self.command_line.push_output(
                     crate::tf!(
@@ -560,7 +591,7 @@ impl OpenCADStudio {
                 .push_error(crate::tf!("PIDBACKUPOPEN: {}", error).as_ref()),
             None => {}
         }
-        let task = self.run_pid_backup_effect(effect);
+        let task = Task::batch([self.run_pid_backup_effect(effect), auto_items_task]);
         // The selection moved: once the panel is laid out again the tree
         // scrolls to it. Without a window there is nothing to scroll.
         if pid_backup_browser::take_reveal(&mut self.pid_backup_browser) {
@@ -681,7 +712,11 @@ impl OpenCADStudio {
     /// Put the panel in its loading state and index `source` off the UI
     /// thread. `target` is the restore folder, when the command named one.
     #[cfg(not(target_arch = "wasm32"))]
-    fn load_pid_backup(&mut self, source: PathBuf, target: Option<PathBuf>) -> Task<Message> {
+    pub(in crate::app) fn load_pid_backup(
+        &mut self,
+        source: PathBuf,
+        target: Option<PathBuf>,
+    ) -> Task<Message> {
         // A relative restore folder sits beside the backup.
         let target = target.map(|target| match source.parent() {
             Some(parent) if target.is_relative() => parent.join(target),
@@ -712,7 +747,7 @@ impl OpenCADStudio {
 
     /// The source dialog: a backup zip, or with `folder` a backup folder.
     #[cfg(not(target_arch = "wasm32"))]
-    fn pick_backup_source(&mut self, folder: bool) -> Task<Message> {
+    pub(in crate::app) fn pick_backup_source(&mut self, folder: bool) -> Task<Message> {
         Task::perform(pick_backup_source_async(folder), |source| {
             Message::PidBackup(PidBackupMsg::SourcePicked(source))
         })

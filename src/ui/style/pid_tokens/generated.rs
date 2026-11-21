@@ -6,7 +6,7 @@ use super::{PidTheme, Rgba, TokenValue};
 
 /// The themes the design gives values for. A theme missing here has no
 /// values of its own in the design: the tables repeat the dark ones for it.
-pub(super) const DESIGN_THEMES: &[PidTheme] = &[PidTheme::Dark];
+pub(super) const DESIGN_THEMES: &[PidTheme] = &[PidTheme::Dark, PidTheme::Light];
 
 /// Every variable of the design by the name it has there, in the design's
 /// order.
@@ -35,51 +35,84 @@ pub(super) const NAMES: &[&str] = &[
     "font-mono",
     "radius-sm",
     "radius-md",
+    "bg-input",
+    "border-control",
+    "border-contrast",
+    "text-on-accent",
+    "text-on-danger",
+    "amber-alt",
+    "canvas-grid",
+    "canvas-grid-major",
+    "canvas-axis",
+    "shadow",
+    "overlay",
 ];
 
 /// The colour variables of the design.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ColorToken {
-    /// `bg-app`: dark `#0B0E13`.
+    /// `bg-app`: dark `#0B0E13`, light `#EEF1F5`.
     BgApp,
-    /// `bg-panel`: dark `#11161D`.
+    /// `bg-panel`: dark `#11161D`, light `#FFFFFF`.
     BgPanel,
-    /// `bg-raised`: dark `#171D26`.
+    /// `bg-raised`: dark `#171D26`, light `#F4F6F9`.
     BgRaised,
-    /// `bg-hover`: dark `#1E2631`.
+    /// `bg-hover`: dark `#1E2631`, light `#E6EAF0`.
     BgHover,
-    /// `bg-canvas`: dark `#0D1218`.
+    /// `bg-canvas`: dark `#0D1218`, light `#FFFFFF`.
     BgCanvas,
-    /// `border`: dark `#232B36`.
+    /// `border`: dark `#232B36`, light `#DADFE7`.
     Border,
-    /// `border-strong`: dark `#313B48`.
+    /// `border-strong`: dark `#313B48`, light `#7D8898`.
     BorderStrong,
-    /// `text-primary`: dark `#E7EBF1`.
+    /// `text-primary`: dark `#E7EBF1`, light `#161D27`.
     TextPrimary,
-    /// `text-secondary`: dark `#9AA5B4`.
+    /// `text-secondary`: dark `#9AA5B4`, light `#414C5C`.
     TextSecondary,
-    /// `text-muted`: dark `#647083`.
+    /// `text-muted`: dark `#647083`, light `#566172`.
     TextMuted,
-    /// `accent`: dark `#4C9EFF`.
+    /// `accent`: dark `#4C9EFF`, light `#0F5BB8`.
     Accent,
-    /// `accent-soft`: dark `#4C9EFF1F`.
+    /// `accent-soft`: dark `#4C9EFF1F`, light `#0F5BB81F`.
     AccentSoft,
-    /// `amber`: dark `#F0A63A`.
+    /// `amber`: dark `#F0A63A`, light `#8F5500`.
     Amber,
-    /// `amber-soft`: dark `#F0A63A1F`.
+    /// `amber-soft`: dark `#F0A63A1F`, light `#FBEFD5`.
     AmberSoft,
-    /// `danger`: dark `#EF5A5F`.
+    /// `danger`: dark `#EF5A5F`, light `#C8272E`.
     Danger,
-    /// `danger-soft`: dark `#EF5A5F1F`.
+    /// `danger-soft`: dark `#EF5A5F1F`, light `#FBE6E6`.
     DangerSoft,
-    /// `success`: dark `#38C58C`.
+    /// `success`: dark `#38C58C`, light `#12714A`.
     Success,
-    /// `success-soft`: dark `#38C58C1F`.
+    /// `success-soft`: dark `#38C58C1F`, light `#DCF1E6`.
     SuccessSoft,
-    /// `line-process`: dark `#5FD0C2`.
+    /// `line-process`: dark `#5FD0C2`, light `#097268`.
     LineProcess,
-    /// `line-signal`: dark `#C08CFF`.
+    /// `line-signal`: dark `#C08CFF`, light `#7A3FD1`.
     LineSignal,
+    /// `bg-input`: dark `#0B0E13`, light `#FFFFFF`.
+    BgInput,
+    /// `border-control`: dark `#232B36`, light `#7D8898`.
+    BorderControl,
+    /// `border-contrast`: dark `#FFFFFF`, light `#161D27`.
+    BorderContrast,
+    /// `text-on-accent`: dark `#06101C`, light `#FFFFFF`.
+    TextOnAccent,
+    /// `text-on-danger`: dark `#FFFFFF`, light `#FFFFFF`.
+    TextOnDanger,
+    /// `amber-alt`: dark `#F7C46A`, light `#7A6200`.
+    AmberAlt,
+    /// `canvas-grid`: dark `#FFFFFF06`, light `#10203808`.
+    CanvasGrid,
+    /// `canvas-grid-major`: dark `#FFFFFF0D`, light `#10203814`.
+    CanvasGridMajor,
+    /// `canvas-axis`: dark `#4C9EFF40`, light `#0F5BB840`.
+    CanvasAxis,
+    /// `shadow`: dark `#00000080`, light `#10203833`.
+    Shadow,
+    /// `overlay`: dark `#05080C99`, light `#1020384D`.
+    Overlay,
 }
 
 impl ColorToken {
@@ -105,6 +138,17 @@ impl ColorToken {
         ColorToken::SuccessSoft,
         ColorToken::LineProcess,
         ColorToken::LineSignal,
+        ColorToken::BgInput,
+        ColorToken::BorderControl,
+        ColorToken::BorderContrast,
+        ColorToken::TextOnAccent,
+        ColorToken::TextOnDanger,
+        ColorToken::AmberAlt,
+        ColorToken::CanvasGrid,
+        ColorToken::CanvasGridMajor,
+        ColorToken::CanvasAxis,
+        ColorToken::Shadow,
+        ColorToken::Overlay,
     ];
 
     /// The variable's name in the design.
@@ -130,6 +174,17 @@ impl ColorToken {
             ColorToken::SuccessSoft => "success-soft",
             ColorToken::LineProcess => "line-process",
             ColorToken::LineSignal => "line-signal",
+            ColorToken::BgInput => "bg-input",
+            ColorToken::BorderControl => "border-control",
+            ColorToken::BorderContrast => "border-contrast",
+            ColorToken::TextOnAccent => "text-on-accent",
+            ColorToken::TextOnDanger => "text-on-danger",
+            ColorToken::AmberAlt => "amber-alt",
+            ColorToken::CanvasGrid => "canvas-grid",
+            ColorToken::CanvasGridMajor => "canvas-grid-major",
+            ColorToken::CanvasAxis => "canvas-axis",
+            ColorToken::Shadow => "shadow",
+            ColorToken::Overlay => "overlay",
         }
     }
 
@@ -141,26 +196,37 @@ impl ColorToken {
     /// `[dark, light]`.
     const fn themed(self) -> [Rgba; 2] {
         match self {
-            ColorToken::BgApp => [[0x0B, 0x0E, 0x13, 0xFF], [0x0B, 0x0E, 0x13, 0xFF]],
-            ColorToken::BgPanel => [[0x11, 0x16, 0x1D, 0xFF], [0x11, 0x16, 0x1D, 0xFF]],
-            ColorToken::BgRaised => [[0x17, 0x1D, 0x26, 0xFF], [0x17, 0x1D, 0x26, 0xFF]],
-            ColorToken::BgHover => [[0x1E, 0x26, 0x31, 0xFF], [0x1E, 0x26, 0x31, 0xFF]],
-            ColorToken::BgCanvas => [[0x0D, 0x12, 0x18, 0xFF], [0x0D, 0x12, 0x18, 0xFF]],
-            ColorToken::Border => [[0x23, 0x2B, 0x36, 0xFF], [0x23, 0x2B, 0x36, 0xFF]],
-            ColorToken::BorderStrong => [[0x31, 0x3B, 0x48, 0xFF], [0x31, 0x3B, 0x48, 0xFF]],
-            ColorToken::TextPrimary => [[0xE7, 0xEB, 0xF1, 0xFF], [0xE7, 0xEB, 0xF1, 0xFF]],
-            ColorToken::TextSecondary => [[0x9A, 0xA5, 0xB4, 0xFF], [0x9A, 0xA5, 0xB4, 0xFF]],
-            ColorToken::TextMuted => [[0x64, 0x70, 0x83, 0xFF], [0x64, 0x70, 0x83, 0xFF]],
-            ColorToken::Accent => [[0x4C, 0x9E, 0xFF, 0xFF], [0x4C, 0x9E, 0xFF, 0xFF]],
-            ColorToken::AccentSoft => [[0x4C, 0x9E, 0xFF, 0x1F], [0x4C, 0x9E, 0xFF, 0x1F]],
-            ColorToken::Amber => [[0xF0, 0xA6, 0x3A, 0xFF], [0xF0, 0xA6, 0x3A, 0xFF]],
-            ColorToken::AmberSoft => [[0xF0, 0xA6, 0x3A, 0x1F], [0xF0, 0xA6, 0x3A, 0x1F]],
-            ColorToken::Danger => [[0xEF, 0x5A, 0x5F, 0xFF], [0xEF, 0x5A, 0x5F, 0xFF]],
-            ColorToken::DangerSoft => [[0xEF, 0x5A, 0x5F, 0x1F], [0xEF, 0x5A, 0x5F, 0x1F]],
-            ColorToken::Success => [[0x38, 0xC5, 0x8C, 0xFF], [0x38, 0xC5, 0x8C, 0xFF]],
-            ColorToken::SuccessSoft => [[0x38, 0xC5, 0x8C, 0x1F], [0x38, 0xC5, 0x8C, 0x1F]],
-            ColorToken::LineProcess => [[0x5F, 0xD0, 0xC2, 0xFF], [0x5F, 0xD0, 0xC2, 0xFF]],
-            ColorToken::LineSignal => [[0xC0, 0x8C, 0xFF, 0xFF], [0xC0, 0x8C, 0xFF, 0xFF]],
+            ColorToken::BgApp => [[0x0B, 0x0E, 0x13, 0xFF], [0xEE, 0xF1, 0xF5, 0xFF]],
+            ColorToken::BgPanel => [[0x11, 0x16, 0x1D, 0xFF], [0xFF, 0xFF, 0xFF, 0xFF]],
+            ColorToken::BgRaised => [[0x17, 0x1D, 0x26, 0xFF], [0xF4, 0xF6, 0xF9, 0xFF]],
+            ColorToken::BgHover => [[0x1E, 0x26, 0x31, 0xFF], [0xE6, 0xEA, 0xF0, 0xFF]],
+            ColorToken::BgCanvas => [[0x0D, 0x12, 0x18, 0xFF], [0xFF, 0xFF, 0xFF, 0xFF]],
+            ColorToken::Border => [[0x23, 0x2B, 0x36, 0xFF], [0xDA, 0xDF, 0xE7, 0xFF]],
+            ColorToken::BorderStrong => [[0x31, 0x3B, 0x48, 0xFF], [0x7D, 0x88, 0x98, 0xFF]],
+            ColorToken::TextPrimary => [[0xE7, 0xEB, 0xF1, 0xFF], [0x16, 0x1D, 0x27, 0xFF]],
+            ColorToken::TextSecondary => [[0x9A, 0xA5, 0xB4, 0xFF], [0x41, 0x4C, 0x5C, 0xFF]],
+            ColorToken::TextMuted => [[0x64, 0x70, 0x83, 0xFF], [0x56, 0x61, 0x72, 0xFF]],
+            ColorToken::Accent => [[0x4C, 0x9E, 0xFF, 0xFF], [0x0F, 0x5B, 0xB8, 0xFF]],
+            ColorToken::AccentSoft => [[0x4C, 0x9E, 0xFF, 0x1F], [0x0F, 0x5B, 0xB8, 0x1F]],
+            ColorToken::Amber => [[0xF0, 0xA6, 0x3A, 0xFF], [0x8F, 0x55, 0x00, 0xFF]],
+            ColorToken::AmberSoft => [[0xF0, 0xA6, 0x3A, 0x1F], [0xFB, 0xEF, 0xD5, 0xFF]],
+            ColorToken::Danger => [[0xEF, 0x5A, 0x5F, 0xFF], [0xC8, 0x27, 0x2E, 0xFF]],
+            ColorToken::DangerSoft => [[0xEF, 0x5A, 0x5F, 0x1F], [0xFB, 0xE6, 0xE6, 0xFF]],
+            ColorToken::Success => [[0x38, 0xC5, 0x8C, 0xFF], [0x12, 0x71, 0x4A, 0xFF]],
+            ColorToken::SuccessSoft => [[0x38, 0xC5, 0x8C, 0x1F], [0xDC, 0xF1, 0xE6, 0xFF]],
+            ColorToken::LineProcess => [[0x5F, 0xD0, 0xC2, 0xFF], [0x09, 0x72, 0x68, 0xFF]],
+            ColorToken::LineSignal => [[0xC0, 0x8C, 0xFF, 0xFF], [0x7A, 0x3F, 0xD1, 0xFF]],
+            ColorToken::BgInput => [[0x0B, 0x0E, 0x13, 0xFF], [0xFF, 0xFF, 0xFF, 0xFF]],
+            ColorToken::BorderControl => [[0x23, 0x2B, 0x36, 0xFF], [0x7D, 0x88, 0x98, 0xFF]],
+            ColorToken::BorderContrast => [[0xFF, 0xFF, 0xFF, 0xFF], [0x16, 0x1D, 0x27, 0xFF]],
+            ColorToken::TextOnAccent => [[0x06, 0x10, 0x1C, 0xFF], [0xFF, 0xFF, 0xFF, 0xFF]],
+            ColorToken::TextOnDanger => [[0xFF, 0xFF, 0xFF, 0xFF], [0xFF, 0xFF, 0xFF, 0xFF]],
+            ColorToken::AmberAlt => [[0xF7, 0xC4, 0x6A, 0xFF], [0x7A, 0x62, 0x00, 0xFF]],
+            ColorToken::CanvasGrid => [[0xFF, 0xFF, 0xFF, 0x06], [0x10, 0x20, 0x38, 0x08]],
+            ColorToken::CanvasGridMajor => [[0xFF, 0xFF, 0xFF, 0x0D], [0x10, 0x20, 0x38, 0x14]],
+            ColorToken::CanvasAxis => [[0x4C, 0x9E, 0xFF, 0x40], [0x0F, 0x5B, 0xB8, 0x40]],
+            ColorToken::Shadow => [[0x00, 0x00, 0x00, 0x80], [0x10, 0x20, 0x38, 0x33]],
+            ColorToken::Overlay => [[0x05, 0x08, 0x0C, 0x99], [0x10, 0x20, 0x38, 0x4D]],
         }
     }
 }
@@ -168,9 +234,9 @@ impl ColorToken {
 /// The number variables of the design.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NumberToken {
-    /// `radius-sm`: dark `4`.
+    /// `radius-sm`: dark `4`, light `4`.
     RadiusSm,
-    /// `radius-md`: dark `6`.
+    /// `radius-md`: dark `6`, light `6`.
     RadiusMd,
 }
 
@@ -203,9 +269,9 @@ impl NumberToken {
 /// The text variables of the design.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TextToken {
-    /// `font-ui`: dark `Inter`.
+    /// `font-ui`: dark `Inter`, light `Inter`.
     FontUi,
-    /// `font-mono`: dark `JetBrains Mono`.
+    /// `font-mono`: dark `JetBrains Mono`, light `JetBrains Mono`.
     FontMono,
 }
 

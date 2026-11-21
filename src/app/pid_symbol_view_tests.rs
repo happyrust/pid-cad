@@ -37,15 +37,16 @@ const HIDDEN: &str = "PID-HIDDEN";
 /// words it. The ring has a colour of its own, the sheet's foreground, and
 /// so has the stub on the right, a green. The stub on the left is drawn by
 /// layer: `LEFT_STUB` is that stub on a layer of the foreground colour. The
-/// name is drawn by layer too, on layers that are grey.
-const RING: &str = "stroke (-10.0, -10.0)-(10.0, 10.0) in #FFFFFF";
-const LEFT_STUB: &str = "stroke (-20.0, 0.0)-(-10.0, 0.0) in #FFFFFF";
+/// name is drawn by layer too, on layers that are grey. The foreground is
+/// drawn black: the program opens in its default theme, the light one.
+const RING: &str = "stroke (-10.0, -10.0)-(10.0, 10.0) in #000000";
+const LEFT_STUB: &str = "stroke (-20.0, 0.0)-(-10.0, 0.0) in #000000";
 const RIGHT_STUB: &str = "stroke (10.0, 0.0)-(20.0, 0.0) in #008000";
 const NAME: &str = "text \"Ball Valve\" at (20.8, -1.0) in #808080";
 const STROKES: [&str; 3] = [RING, LEFT_STUB, RIGHT_STUB];
 const STROKES_AND_NAME: [&str; 4] = [RING, LEFT_STUB, RIGHT_STUB, NAME];
 /// The pipe, as `pipe` words it.
-const PIPE: [&str; 1] = ["stroke (90.0, 80.0)-(180.0, 80.0) in #FFFFFF"];
+const PIPE: [&str; 1] = ["stroke (90.0, 80.0)-(180.0, 80.0) in #000000"];
 /// The fill of each valve, as `fills` words it.
 const FILL_ON_PROCESS: &str = "fill around (100.0, 100.0) on Process in #FF0000";
 const FILL_ON_INSTRUMENT: &str = "fill around (170.0, 100.0) on Instrument in #FF0000";

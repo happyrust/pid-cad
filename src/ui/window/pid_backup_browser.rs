@@ -306,6 +306,11 @@ pub struct PidBackupBrowser {
     /// The restore cache: where it is and what it was last seen to hold.
     /// The folder is the user's preference, not the backup's.
     cache: cache::CacheState,
+    /// The most recent backup source path attempted or loaded, retained
+    /// across a failed load so the screen can show which path failed.
+    pub last_source: Option<PathBuf>,
+    /// When the current `LoadState::Loading` began, for elapsed-second UI.
+    pub loading_started_at: Option<iced::time::Instant>,
 }
 
 /// Whether the selection moved since this was last asked: the application
@@ -348,6 +353,141 @@ impl PidBackupBrowser {
     pub(crate) fn use_fake_sections(&mut self) {
         self.sections = section::Registry(section::fake::FAKE_SECTIONS);
     }
+
+    /// How long the current `LoadState::Loading` has been running at `now`.
+    pub fn loading_elapsed(&self, now: iced::time::Instant) -> Option<std::time::Duration> {
+        if !matches!(self.load, LoadState::Loading(_)) {
+            return None;
+        }
+        self.loading_started_at
+            .map(|started| now.saturating_duration_since(started))
+    }
+
+    /// Source path of the active or failed load (`None` when idle without error).
+    pub fn active_or_failed_source(&self) -> Option<&std::path::Path> {
+        match &self.load {
+            LoadState::Loading(source) => Some(source.as_path()),
+            LoadState::Ready(index) => Some(index.source.as_path()),
+            LoadState::Idle if self.error.is_some() => self.last_source.as_deref(),
+            LoadState::Idle => None,
+        }
+    }
+}
+
+/// Chinese display name of a plant group in the new `backup` screen (S2).
+pub fn screen_group_label(name: &str) -> &str {
+    match name {
+        crate::io::pid_backup_browse::UNREGISTERED_GROUP => "未登记图纸",
+        crate::io::pid_backup_browse::UNGROUPED => "未分组",
+        other => other,
+    }
+}
+
+/// Total drawings under `node` (its own `drawings` plus every descendant's).
+pub fn group_total_drawings(node: &GroupNode) -> usize {
+    node.drawings.len()
+        + node
+            .children
+            .iter()
+            .map(group_total_drawings)
+            .sum::<usize>()
+}
+
+fn find_group_node<'a>(nodes: &'a [GroupNode], path: &str) -> Option<&'a GroupNode> {
+    for node in nodes {
+        if node.path == path {
+            return Some(node);
+        }
+        if let Some(found) = find_group_node(&node.children, path) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn collect_group_subtree(node: &GroupNode, out: &mut HashSet<usize>) {
+    out.extend(node.drawings.iter().copied());
+    for child in &node.children {
+        collect_group_subtree(child, out);
+    }
+}
+
+/// Drawing indices in `index` matching `selected_group` (its subtree when
+/// `Some`) and case-insensitive substring `query` on the drawing's name.
+pub fn filter_drawings(
+    index: &BackupIndex,
+    selected_group: Option<&str>,
+    query: &str,
+) -> Vec<usize> {
+    let needle = query.trim().to_lowercase();
+    let subtree = selected_group.and_then(|group_path| {
+        let node = find_group_node(&index.plant_groups, group_path)?;
+        let mut set = HashSet::new();
+        collect_group_subtree(node, &mut set);
+        Some(set)
+    });
+    let prefix = selected_group.map(|group_path| format!("{group_path} / "));
+
+    index
+        .drawings
+        .iter()
+        .enumerate()
+        .filter(|(idx, entry)| {
+            let group_ok = match (&subtree, selected_group, &prefix) {
+                (Some(set), _, _) => set.contains(idx),
+                (None, Some(group_path), Some(pfx)) => {
+                    entry.group_path == group_path || entry.group_path.starts_with(pfx)
+                }
+                _ => true,
+            };
+            group_ok && (needle.is_empty() || entry.name.to_lowercase().contains(&needle))
+        })
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// `(item_type, count)` pairs for `items`, in `items.groups` order.
+pub fn item_type_counts(items: &DrawingItems) -> Vec<(&str, usize)> {
+    items
+        .groups
+        .iter()
+        .map(|group| (group.item_type.as_str(), group.items.len()))
+        .collect()
+}
+
+fn item_matches_query(item: &crate::io::pid_backup_browse::DrawingItem, needle: &str) -> bool {
+    item.label.to_lowercase().contains(needle)
+        || item.uid.to_lowercase().contains(needle)
+        || item.item_type.to_lowercase().contains(needle)
+        || item
+            .class
+            .as_deref()
+            .is_some_and(|cls| cls.to_lowercase().contains(needle))
+        || item.attributes.iter().any(|attr| {
+            attr.name.to_lowercase().contains(needle) || attr.value.to_lowercase().contains(needle)
+        })
+}
+
+/// Items of `items` matching optional exact `type_filter` and case-insensitive
+/// `query` (against label, UID, type, class, or attribute name/value).
+pub fn filter_drawing_items<'a>(
+    items: &'a DrawingItems,
+    type_filter: Option<&str>,
+    query: &str,
+) -> Vec<&'a crate::io::pid_backup_browse::DrawingItem> {
+    let needle = query.trim().to_lowercase();
+    let mut out = Vec::new();
+    for group in &items.groups {
+        if type_filter.is_some_and(|want| group.item_type != want) {
+            continue;
+        }
+        for item in &group.items {
+            if needle.is_empty() || item_matches_query(item, &needle) {
+                out.push(item);
+            }
+        }
+    }
+    out
 }
 
 /// [`section::Section::load`] of one section on a worker thread: what the
@@ -413,17 +553,22 @@ pub fn update(state: &mut PidBackupBrowser, msg: PidBackupMsg) -> Effect {
         PidBackupMsg::SourcePicked(Some(source)) => {
             state.error = None;
             state.clear();
+            state.last_source = Some(source.clone());
+            state.loading_started_at = Some(iced::time::Instant::now());
             state.load = LoadState::Loading(source.clone());
             Effect::Load(source)
         }
         PidBackupMsg::Loaded(Ok(index)) => {
             state.error = None;
             state.clear();
+            state.last_source = Some(index.source.clone());
+            state.loading_started_at = None;
             state.load = LoadState::Ready(index);
             Effect::None
         }
         PidBackupMsg::Loaded(Err(error)) => {
             state.clear();
+            state.loading_started_at = None;
             state.load = LoadState::Idle;
             state.error = Some(error);
             Effect::None
@@ -490,12 +635,17 @@ pub fn update(state: &mut PidBackupBrowser, msg: PidBackupMsg) -> Effect {
         }
         PidBackupMsg::Refresh => match &state.load {
             LoadState::Ready(index) => Effect::Refresh(index.source.clone()),
-            LoadState::Loading(source) => Effect::Refresh(source.clone()),
+            LoadState::Loading(source) => {
+                state.loading_started_at = Some(iced::time::Instant::now());
+                Effect::Refresh(source.clone())
+            }
             LoadState::Idle => Effect::None,
         },
         PidBackupMsg::Close => {
             state.load = LoadState::Idle;
             state.error = None;
+            state.last_source = None;
+            state.loading_started_at = None;
             state.clear();
             Effect::None
         }
@@ -2863,5 +3013,201 @@ mod tests {
         assert!(detail_rows_of(&state, &NodeId::RefDir(vec![7])).is_empty());
         assert!(detail_rows_of(&state, &NodeId::Item(0, 0, 0)).is_empty());
         assert!(detail_rows_of(&PidBackupBrowser::default(), &NodeId::Root).is_empty());
+    }
+
+    #[test]
+    fn pid_backup_ui1_loading_elapsed_and_failed_source_are_retained() {
+        use std::time::Duration;
+
+        let mut state = PidBackupBrowser::default();
+        assert_eq!(state.loading_elapsed(iced::time::Instant::now()), None);
+        assert_eq!(state.active_or_failed_source(), None);
+
+        let src = PathBuf::from("D:/samples/bad_backup.zip");
+        let _ = update(&mut state, PidBackupMsg::SourcePicked(Some(src.clone())));
+        assert!(state.loading_started_at.is_some());
+        let started = state.loading_started_at.expect("loading timestamp set");
+        assert_eq!(
+            state.loading_elapsed(started + Duration::from_secs(7)),
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(state.active_or_failed_source(), Some(src.as_path()));
+
+        let _ = update(
+            &mut state,
+            PidBackupMsg::Loaded(Err("not a backup".to_string())),
+        );
+        assert!(state.loading_started_at.is_none());
+        assert_eq!(
+            state.loading_elapsed(started + Duration::from_secs(9)),
+            None
+        );
+        assert_eq!(
+            state.active_or_failed_source(),
+            Some(src.as_path()),
+            "failed load keeps the attempted source path"
+        );
+
+        let _ = update(&mut state, PidBackupMsg::Close);
+        assert_eq!(state.active_or_failed_source(), None);
+    }
+
+    #[test]
+    fn pid_backup_ui1_screen_group_labels_translate_only_synthetic_groups() {
+        use crate::io::pid_backup_browse::{UNGROUPED, UNREGISTERED_GROUP};
+
+        assert_eq!(screen_group_label(UNREGISTERED_GROUP), "未登记图纸");
+        assert_eq!(screen_group_label(UNGROUPED), "未分组");
+        assert_eq!(screen_group_label("SQPlant"), "SQPlant");
+        assert_eq!(screen_group_label("00"), "00");
+    }
+
+    #[test]
+    fn pid_backup_ui1_filter_drawings_handles_nested_groups_and_query() {
+        use crate::io::pid_backup_browse::{DrawingEntry, UNGROUPED, UNREGISTERED_GROUP};
+
+        let index = BackupIndex {
+            plant_groups: vec![
+                GroupNode {
+                    name: "SQPlant".into(),
+                    path: "SQPlant".into(),
+                    drawings: vec![0],
+                    children: vec![GroupNode {
+                        name: "Unit100".into(),
+                        path: "SQPlant / Unit100".into(),
+                        drawings: vec![1, 2],
+                        children: Vec::new(),
+                    }],
+                },
+                GroupNode {
+                    name: UNREGISTERED_GROUP.into(),
+                    path: UNREGISTERED_GROUP.into(),
+                    drawings: vec![3],
+                    children: Vec::new(),
+                },
+                GroupNode {
+                    name: UNGROUPED.into(),
+                    path: UNGROUPED.into(),
+                    drawings: vec![4],
+                    children: Vec::new(),
+                },
+            ],
+            drawings: vec![
+                DrawingEntry {
+                    name: "PID-000-INDEX".into(),
+                    pid_path: Some(PathBuf::from("0.pid")),
+                    group_path: "SQPlant".into(),
+                    meta: Vec::new(),
+                },
+                DrawingEntry {
+                    name: "PID-100-A01".into(),
+                    pid_path: Some(PathBuf::from("1.pid")),
+                    group_path: "SQPlant / Unit100".into(),
+                    meta: Vec::new(),
+                },
+                DrawingEntry {
+                    name: "PID-100-MISSING".into(),
+                    pid_path: None,
+                    group_path: "SQPlant / Unit100".into(),
+                    meta: Vec::new(),
+                },
+                DrawingEntry {
+                    name: "LOOSE-a01".into(),
+                    pid_path: Some(PathBuf::from("3.pid")),
+                    group_path: UNREGISTERED_GROUP.into(),
+                    meta: Vec::new(),
+                },
+                DrawingEntry {
+                    name: "FLAT-999".into(),
+                    pid_path: Some(PathBuf::from("4.pid")),
+                    group_path: UNGROUPED.into(),
+                    meta: Vec::new(),
+                },
+            ],
+            ..BackupIndex::default()
+        };
+
+        assert_eq!(group_total_drawings(&index.plant_groups[0]), 3);
+        assert_eq!(filter_drawings(&index, None, ""), vec![0, 1, 2, 3, 4]);
+        assert_eq!(
+            filter_drawings(&index, Some("SQPlant"), ""),
+            vec![0, 1, 2],
+            "parent group includes nested Unit100 drawings and missing-file entries"
+        );
+        assert_eq!(
+            filter_drawings(&index, Some("SQPlant / Unit100"), ""),
+            vec![1, 2]
+        );
+        assert_eq!(
+            filter_drawings(&index, Some(UNREGISTERED_GROUP), ""),
+            vec![3]
+        );
+        assert_eq!(filter_drawings(&index, None, "a01"), vec![1, 3]);
+        assert_eq!(filter_drawings(&index, Some("SQPlant"), "missing"), vec![2]);
+    }
+
+    #[test]
+    fn pid_backup_ui1_item_counts_and_filters_match_type_and_attributes() {
+        use crate::io::pid_backup_browse::{DrawingItem, ItemAttribute, ItemGroup};
+
+        let items = DrawingItems {
+            drawing_uid: "D-100".into(),
+            drawing_name: "PID-100-A01".into(),
+            item_count: 3,
+            groups: vec![
+                ItemGroup {
+                    item_type: "Equipment".into(),
+                    items: vec![DrawingItem {
+                        uid: "EQ-1".into(),
+                        label: "V-101".into(),
+                        item_type: "Equipment".into(),
+                        class: Some("Vessel".into()),
+                        attributes: vec![ItemAttribute {
+                            interface: "IEquipment".into(),
+                            name: "Service".into(),
+                            value: "Feed Surge Drum".into(),
+                        }],
+                    }],
+                },
+                ItemGroup {
+                    item_type: "Instrument".into(),
+                    items: vec![
+                        DrawingItem {
+                            uid: "IN-1".into(),
+                            label: "PT-101A".into(),
+                            item_type: "Instrument".into(),
+                            class: None,
+                            attributes: vec![ItemAttribute {
+                                interface: "IInstrument".into(),
+                                name: "MeasuredVariable".into(),
+                                value: "Pressure".into(),
+                            }],
+                        },
+                        DrawingItem {
+                            uid: "IN-2".into(),
+                            label: "LT-101B".into(),
+                            item_type: "Instrument".into(),
+                            class: None,
+                            attributes: Vec::new(),
+                        },
+                    ],
+                },
+            ],
+            ..DrawingItems::default()
+        };
+
+        assert_eq!(
+            item_type_counts(&items),
+            vec![("Equipment", 1), ("Instrument", 2)]
+        );
+        assert_eq!(filter_drawing_items(&items, None, "").len(), 3);
+        let instruments = filter_drawing_items(&items, Some("Instrument"), "");
+        assert_eq!(instruments.len(), 2);
+        let by_attr = filter_drawing_items(&items, None, "surge");
+        assert_eq!(by_attr.len(), 1);
+        assert_eq!(by_attr[0].label, "V-101");
+        let combined = filter_drawing_items(&items, Some("Instrument"), "pressure");
+        assert_eq!(combined.len(), 1);
+        assert_eq!(combined[0].uid, "IN-1");
     }
 }

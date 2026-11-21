@@ -313,6 +313,23 @@ pub fn check(request: &ExportRequest) -> Result<(), ExportError> {
     }
 }
 
+/// Why the export cannot write to `out_dir` when the package is restored to
+/// `restored`, when it cannot: the folder lies in the restore, which is the
+/// restore cache's to clear, not the user's. A request names the package
+/// and not where it is restored to, so [`check`] cannot tell; the command,
+/// which knows both, asks this first (SPEC-sppid-export §11). Nothing is
+/// made to find out.
+pub fn in_the_restore(out_dir: &Path, restored: &Path) -> Option<String> {
+    if !lies_in(&resolved(out_dir), &resolved(restored)) {
+        return None;
+    }
+    let (folder, restore) = (out_dir.display(), restored.display());
+    Some(format!(
+        "{folder} lies in the folder the backup is restored to ({restore}); export to a \
+         folder outside of it"
+    ))
+}
+
 /// Publish the package into the request's folder and say what became of
 /// its drawings. A drawing that cannot be written is in the outcome with
 /// the reason, and the others are written all the same; what [`check`]
@@ -1063,6 +1080,46 @@ mod tests {
             );
             assert!(said.ends_with(&why), "{said}");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_folder_in_the_restore_is_one_the_command_does_not_export_to() {
+        let root = scratch("restore");
+        let restored = root.join("restored");
+        std::fs::create_dir_all(&restored).unwrap();
+        // The restore itself, a folder in it that is not there yet, one
+        // deeper, and one spelled another way.
+        let mut inside = vec![
+            restored.clone(),
+            restored.join("out"),
+            restored.join("deep").join("out"),
+            root.join("elsewhere")
+                .join("..")
+                .join("restored")
+                .join("out"),
+        ];
+        if cfg!(windows) {
+            inside.push(root.join("RESTORED").join("Out"));
+        }
+        for out_dir in inside {
+            let why = format!(
+                "{} lies in the folder the backup is restored to ({}); export to a folder \
+                 outside of it",
+                out_dir.display(),
+                restored.display()
+            );
+            let said = in_the_restore(&out_dir, &restored);
+            assert_eq!(said, Some(why), "{}", out_dir.display());
+        }
+        // Beside it, above it, or with no restore to speak of: nothing.
+        for out_dir in [root.join("restored out"), root.join("out"), root.clone()] {
+            let said = in_the_restore(&out_dir, &restored);
+            assert_eq!(said, None, "{}", out_dir.display());
+        }
+        assert_eq!(in_the_restore(Path::new("out"), Path::new("")), None);
+        let made = std::fs::read_dir(&restored).unwrap().count();
+        assert_eq!(made, 0, "nothing is made");
         let _ = std::fs::remove_dir_all(&root);
     }
 

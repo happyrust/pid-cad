@@ -47,7 +47,7 @@ EXPECTED_DELIVERABLES = [
 ]
 
 SCREEN_IDS = [
-    "workbench", "drawings", "editor", "palette", "properties", "typelib",
+    "workbench", "drawings", "editor", "backup", "palette", "properties", "typelib",
     "symbols", "symbol-editor", "tag-rules", "color-rules", "masterdata",
     "validation", "bom", "permissions",
 ]

@@ -26,15 +26,24 @@ pub type Rgba = [u8; 4];
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum PidTheme {
     /// The dark theme: the one the design started with.
-    #[default]
     Dark,
     /// The light theme.
+    #[default]
     Light,
 }
 
 impl PidTheme {
     /// Both themes, dark first.
     pub const ALL: [PidTheme; 2] = [PidTheme::Dark, PidTheme::Light];
+
+    /// The theme matching `theme`'s dark/light polarity.
+    pub fn from_iced(theme: &iced::Theme) -> Self {
+        if theme.palette().is_dark {
+            PidTheme::Dark
+        } else {
+            PidTheme::Light
+        }
+    }
 
     /// Whether the design gives this theme values of its own. A theme it does
     /// not draw answers every question with the dark values.
@@ -383,6 +392,7 @@ mod tests {
     /// so a caller never has to ask whether light exists yet.
     #[test]
     fn a_theme_the_design_does_not_draw_answers_with_the_dark_value() {
+        assert_eq!(PidTheme::default(), PidTheme::Light);
         assert!(PidTheme::Dark.in_design(), "dark is always drawn");
         for name in names() {
             let dark = by_name(name, PidTheme::Dark).expect("every name has a value");

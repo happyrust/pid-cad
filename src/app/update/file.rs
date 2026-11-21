@@ -2102,6 +2102,7 @@ impl OpenCADStudio {
     pub(in crate::app) fn apply_config(&mut self, cfg: crate::app::config::AppConfig) {
         self.apply_settings(&cfg.settings);
         self.ui_theme = cfg.theme.clone();
+        self.ui_theme.migrate_legacy_default();
         // A saved `System` scheme re-resolves at boot: the stored palette is
         // whatever the last resolution produced, so refresh it alongside the
         // live theme (COLORSCHEME SYSTEM documents this boot-time read).
@@ -2268,6 +2269,8 @@ impl OpenCADStudio {
                 tab.scene.populate_meshes_from_document();
             }
         }
+        self.pid_shell.theme =
+            crate::ui::style::pid_tokens::PidTheme::from_iced(&self.active_theme);
         // Inside the P&ID module a drawing is cleared to the canvas colour
         // of the module's design. The user's model space background stays
         // as it is set, for the general interface.
@@ -2999,6 +3002,16 @@ impl OpenCADStudio {
                 && !t.dirty
                 && self.tabs[self.active_tab].scene.document.entities().count() == 0
         };
+        // The canvas the drawing in front is shown on. A tab added for this
+        // one knows no size until it is first laid out, but it takes the
+        // front tab's place on the same canvas.
+        #[cfg(not(target_arch = "wasm32"))]
+        let front_canvas = self.tabs[self.active_tab]
+            .scene
+            .selection
+            .borrow()
+            .view
+            .vp_size;
         let i = if current_is_empty {
             self.active_tab
         } else {
@@ -3318,6 +3331,21 @@ impl OpenCADStudio {
         // selected — see #21.
         self.sync_ribbon_from_selection();
         self.tabs[i].scene.restore_saved_camera();
+        // A `.pid` states the width of its sheet beside the height the view
+        // is restored at, and a canvas too narrow for it -- the backup panel
+        // docked beside it -- gets the view widened to it. Where no canvas
+        // size is known yet (a tab added beside the start page) the view
+        // stays as restored.
+        #[cfg(not(target_arch = "wasm32"))]
+        if crate::io::pid_pdf::is_pid(&path) {
+            let own = self.tabs[i].scene.selection.borrow().view.vp_size;
+            let canvas = if own.0 > 0.0 && own.1 > 0.0 {
+                own
+            } else {
+                front_canvas
+            };
+            self.tabs[i].scene.widen_to_saved_width(canvas);
+        }
         // Grid/snap are per-drawing view settings — adopt the opened
         // file's active viewport state rather than a global preference.
         self.adopt_view_display(i);
@@ -13352,5 +13380,23 @@ mod minimized_save_tests {
         assert!(saved.refreshed_preview.is_none());
         assert!(path.is_file());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_config_upgrades_legacy_oxocarbon_to_light_in_pid_shell() {
+        let mut app = OpenCADStudio::new_for_test();
+        let legacy: crate::app::config::AppConfig = serde_json::from_str(
+            r#"{"theme":{"name":"Oxocarbon","palette":{"background":[35,35,35],"text":[208,208,208],"primary":[0,180,255],"success":[0,193,90],"warning":[190,149,255],"danger":[246,45,15]}}}"#,
+        )
+        .expect("deserialize legacy settings");
+
+        app.apply_config(legacy);
+
+        assert_eq!(app.active_theme, iced::Theme::Light);
+        assert!(app.ui_theme.light_default_migrated);
+        assert_eq!(
+            app.pid_shell.theme,
+            crate::ui::style::pid_tokens::PidTheme::Light
+        );
     }
 }

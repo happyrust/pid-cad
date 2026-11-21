@@ -160,10 +160,10 @@ iced_widget = { path = "../iced/widget" }
 # so the same four trees are named here, fetched from the same pid-parse
 # commit. hayro* are the versions the PDF import already uses; lopdf 0.45
 # is pdfcraft's alone (printpdf stays on 0.39).
-hayro = { git = "https://github.com/happyrust/pid-parse", rev = "96ee00cf7555a046592f2b798b75cdd0a0e54d3b" }
-hayro-interpret = { git = "https://github.com/happyrust/pid-parse", rev = "96ee00cf7555a046592f2b798b75cdd0a0e54d3b" }
-hayro-syntax = { git = "https://github.com/happyrust/pid-parse", rev = "96ee00cf7555a046592f2b798b75cdd0a0e54d3b" }
-lopdf = { git = "https://github.com/happyrust/pid-parse", rev = "96ee00cf7555a046592f2b798b75cdd0a0e54d3b" }
+hayro = { git = "https://github.com/happyrust/pid-parse", rev = "a85fa10285cc5379953495fa391f374981b9e587" }
+hayro-interpret = { git = "https://github.com/happyrust/pid-parse", rev = "a85fa10285cc5379953495fa391f374981b9e587" }
+hayro-syntax = { git = "https://github.com/happyrust/pid-parse", rev = "a85fa10285cc5379953495fa391f374981b9e587" }
+lopdf = { git = "https://github.com/happyrust/pid-parse", rev = "a85fa10285cc5379953495fa391f374981b9e587" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 getrandom = "0.3"
@@ -177,10 +177,10 @@ ureq = { version = "3", default-features = false, features = ["rustls", "platfor
 # SmartPlant / Smart P&ID `.pid` reader, pinned to the public GitHub repo.
 # Native-only: it reaches SQL Server backups through a bundled sqlite3 and
 # the vendored `oxidized-mdf`, neither of which builds for wasm.
-pid-parse = { git = "https://github.com/happyrust/pid-parse", rev = "96ee00cf7555a046592f2b798b75cdd0a0e54d3b" }
+pid-parse = { git = "https://github.com/happyrust/pid-parse", rev = "a85fa10285cc5379953495fa391f374981b9e587" }
 # PIDPLOT: pid-parse's own paper plot of a `.pid` (border template, library
 # symbol bodies, the sheet's typefaces subset in) written to PDF by pdfcraft.
-pid-plot = { git = "https://github.com/happyrust/pid-parse", rev = "96ee00cf7555a046592f2b798b75cdd0a0e54d3b" }
+pid-plot = { git = "https://github.com/happyrust/pid-parse", rev = "a85fa10285cc5379953495fa391f374981b9e587" }
 # Embedded 3D renderer (M1 POC): local bevy main checkout, windowless, on
 # iced's shared wgpu device. Feature-sliced to PBR + assets — no winit, no
 # audio, no UI. `tonemapping_luts`+`zstd_rust` feed the default tonemapper.

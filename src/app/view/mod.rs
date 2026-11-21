@@ -3981,6 +3981,21 @@ impl OpenCADStudio {
             .collect()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn pid_backup_wants_second_tick(&self) -> bool {
+        self.pid_shell.current().is_some()
+            && (matches!(
+                self.pid_backup_browser.load,
+                crate::ui::window::pid_backup_browser::LoadState::Loading(_)
+            ) || self.pid_backup_export.is_running()
+                || self.pid_backup_pdf.is_running())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(in crate::app) fn pid_backup_wants_second_tick(&self) -> bool {
+        false
+    }
+
     pub fn subscription(&self) -> Subscription<Message> {
         use iced::event;
         // Only request per-frame ticks while something on screen is animating
@@ -4186,6 +4201,11 @@ impl OpenCADStudio {
         };
         #[cfg(target_arch = "wasm32")]
         let sheet_set_poll = Subscription::none();
+        let pid_backup_tick = if self.pid_backup_wants_second_tick() {
+            iced::time::every(std::time::Duration::from_secs(1)).map(Message::Tick)
+        } else {
+            Subscription::none()
+        };
         let hatch_pattern_keys = if self.tabs[self.active_tab]
             .properties
             .hatch_pattern_picker_open
@@ -4265,6 +4285,7 @@ impl OpenCADStudio {
             autosave,
             plugin_drain,
             sheet_set_poll,
+            pid_backup_tick,
             single_instance,
             hatch_pattern_keys,
             keyboard_events,

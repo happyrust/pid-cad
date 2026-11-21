@@ -1,0 +1,2883 @@
+{
+  "schema_version": 1,
+  "format": {
+    "utf8_bom": true,
+    "line_ending": "CRLF",
+    "trailing_newline": true,
+    "xml_declaration": "<?xml version =\"1.0\" encoding=\"UTF-8\"?>",
+    "indent": {
+      "open_container": 0,
+      "open_object": 3,
+      "interface_element": 6,
+      "close_object": 3,
+      "close_container": 2
+    }
+  },
+  "data_container": {
+    "attribute_order": [
+      "CompSchema",
+      "Scope",
+      "SoftwareVersion",
+      "IsValidated",
+      "SchemaVersion",
+      "LoginUser",
+      "LoginPWD",
+      "Plant",
+      "Project",
+      "DocUID",
+      "DocName",
+      "Version",
+      "ToolID",
+      "ToolSignature",
+      "SDECIMAL"
+    ],
+    "fixed_attributes": {
+      "CompSchema": "PIDComponent",
+      "Scope": "Data",
+      "SoftwareVersion": "10.00.31.0023",
+      "IsValidated": "False",
+      "SchemaVersion": "04.02.17.01",
+      "LoginUser": "",
+      "LoginPWD": "",
+      "Project": "",
+      "Version": "",
+      "ToolID": "SMARTPLANTPID",
+      "ToolSignature": "AAAD",
+      "SDECIMAL": "."
+    },
+    "default_plant": "P01",
+    "first_element": "PIDDrawing"
+  },
+  "meta_container": {
+    "attribute_order": [
+      "CompSchema",
+      "Scope",
+      "SoftwareVersion",
+      "IsValidated",
+      "SchemaVersion",
+      "Plant",
+      "Project",
+      "DocUID",
+      "DocName",
+      "Version",
+      "ToolID",
+      "ToolSignature",
+      "SDECIMAL"
+    ],
+    "fixed_attributes": {
+      "CompSchema": "DocVersioningComponent",
+      "Scope": "Data",
+      "SoftwareVersion": "10.00.31.0023",
+      "IsValidated": "False",
+      "SchemaVersion": "04.02.17.01",
+      "Project": "",
+      "Version": "",
+      "ToolID": "SMARTPLANTPID",
+      "ToolSignature": "AAAD",
+      "SDECIMAL": "."
+    },
+    "default_plant": "P01",
+    "element_sequence": [
+      "DocumentVersion",
+      "Rel",
+      "DocumentRevision",
+      "Rel",
+      "File",
+      "Rel"
+    ]
+  },
+  "uid_rules": {
+    "hex32": "^[0-9A-F]{32}$",
+    "hex32_dot_num": "^[0-9A-F]{32}\\.[1-9][0-9]*$",
+    "hex32_bpt": "^[0-9A-F]{32}\\.BPT$",
+    "hex32_ppt": "^[0-9A-F]{32}\\.PPT$",
+    "meta_hex": "^[0-9A-F]{28,32}$",
+    "meta_file_strict": "^AAAD[0-9A-F\\-]+$",
+    "meta_file_schema": "^(AAAD[0-9A-F\\-]+|[0-9A-F]{28,32})$"
+  },
+  "data_classes": {
+    "PIDBranchPoint": {
+      "uid_kind": "hex32",
+      "required_interfaces": [
+        "IConnection",
+        "IDocumentItem",
+        "IDrawingItem",
+        "IDuctConnection",
+        "IObject",
+        "IPIDBranchPoint",
+        "IPipingConnection",
+        "ISignalConnection"
+      ],
+      "allowed_interfaces": [
+        "IConnection",
+        "IDocumentItem",
+        "IDrawingItem",
+        "IDuctConnection",
+        "IObject",
+        "IOffpageConnector",
+        "IPIDBranchPoint",
+        "IPipingConnection",
+        "ISignalConnection"
+      ],
+      "interface_attributes": {
+        "IConnection": {
+          "required": [],
+          "allowed": []
+        },
+        "IDocumentItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IDrawingItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IDuctConnection": {
+          "required": [],
+          "allowed": []
+        },
+        "IObject": {
+          "required": [
+            "Name",
+            "UID"
+          ],
+          "allowed": [
+            "Description",
+            "Name",
+            "UID"
+          ]
+        },
+        "IOffpageConnector": {
+          "required": [
+            "ToFromText"
+          ],
+          "allowed": [
+            "ToFromText"
+          ]
+        },
+        "IPIDBranchPoint": {
+          "required": [],
+          "allowed": []
+        },
+        "IPipingConnection": {
+          "required": [],
+          "allowed": []
+        },
+        "ISignalConnection": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    },
+    "PIDControlSystemFunction": {
+      "uid_kind": "hex32",
+      "required_interfaces": [
+        "IControlSystemFunction",
+        "IDocumentItem",
+        "IDrawingItem",
+        "IExpandableThing",
+        "IInstrument",
+        "ILoopMember",
+        "INamedInstrument",
+        "INoteCollection",
+        "IObject",
+        "IPBSItem",
+        "IPlannedMatl",
+        "ISignalPortComposition"
+      ],
+      "allowed_interfaces": [
+        "IControlSystemFunction",
+        "IDocumentItem",
+        "IDrawingItem",
+        "IExpandableThing",
+        "IInstrument",
+        "ILoopMember",
+        "INamedInstrument",
+        "INoteCollection",
+        "IObject",
+        "IPBSItem",
+        "IPlannedMatl",
+        "ISignalPortComposition"
+      ],
+      "interface_attributes": {
+        "IControlSystemFunction": {
+          "required": [],
+          "allowed": []
+        },
+        "IDocumentItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IDrawingItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IExpandableThing": {
+          "required": [],
+          "allowed": []
+        },
+        "IInstrument": {
+          "required": [],
+          "allowed": []
+        },
+        "ILoopMember": {
+          "required": [],
+          "allowed": []
+        },
+        "INamedInstrument": {
+          "required": [
+            "InstrFuncModifier",
+            "InstrLoopSuffix",
+            "InstrTagPrefix",
+            "InstrTagSequenceNo",
+            "InstrTagSuffix",
+            "MeasuredVariable"
+          ],
+          "allowed": [
+            "InstrFuncModifier",
+            "InstrLoopSuffix",
+            "InstrTagPrefix",
+            "InstrTagSequenceNo",
+            "InstrTagSuffix",
+            "MeasuredVariable"
+          ]
+        },
+        "INoteCollection": {
+          "required": [],
+          "allowed": []
+        },
+        "IObject": {
+          "required": [
+            "UID"
+          ],
+          "allowed": [
+            "Name",
+            "UID"
+          ]
+        },
+        "IPBSItem": {
+          "required": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ],
+          "allowed": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ]
+        },
+        "IPlannedMatl": {
+          "required": [],
+          "allowed": []
+        },
+        "ISignalPortComposition": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    },
+    "PIDDrawing": {
+      "uid_kind": "hex32",
+      "required_interfaces": [
+        "IDocVersionComposition",
+        "IDocument",
+        "IDwgRepresentationComposition",
+        "IObject",
+        "IPBSItem",
+        "IPIDDrawing",
+        "ISchematicDwg"
+      ],
+      "allowed_interfaces": [
+        "IDocVersionComposition",
+        "IDocument",
+        "IDwgRepresentationComposition",
+        "IObject",
+        "IPBSItem",
+        "IPIDDrawing",
+        "ISchematicDwg"
+      ],
+      "interface_attributes": {
+        "IDocVersionComposition": {
+          "required": [],
+          "allowed": []
+        },
+        "IDocument": {
+          "required": [
+            "DocCategory",
+            "DocSubtype",
+            "DocTitle",
+            "DocType"
+          ],
+          "allowed": [
+            "DocCategory",
+            "DocSubtype",
+            "DocTitle",
+            "DocType"
+          ]
+        },
+        "IDwgRepresentationComposition": {
+          "required": [],
+          "allowed": []
+        },
+        "IObject": {
+          "required": [
+            "Description",
+            "Name",
+            "UID"
+          ],
+          "allowed": [
+            "Description",
+            "Name",
+            "UID"
+          ]
+        },
+        "IPBSItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IPIDDrawing": {
+          "required": [],
+          "allowed": []
+        },
+        "ISchematicDwg": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    },
+    "PIDHeatTransferEquipment": {
+      "uid_kind": "hex32",
+      "required_interfaces": [
+        "IDrawingItem",
+        "IEquipment",
+        "IEquipmentOcc",
+        "IHeatTransferEquipment",
+        "IHeatTransferEquipmentOcc",
+        "IObject",
+        "IPBSItem",
+        "IPIDHeatTransferEquipment",
+        "IPIDHeatTransferEquipmentOcc",
+        "IPIDTypical",
+        "IPlannedMatl",
+        "IProcessEquipment",
+        "IProcessEquipmentOcc",
+        "IShellAndTubeHeatExchanger"
+      ],
+      "allowed_interfaces": [
+        "IAirCooledExchanger",
+        "IAirCooledExchangerOcc",
+        "IAirCooler",
+        "IAirCoolerOcc",
+        "IBoiler",
+        "IBoilerOcc",
+        "IDrawingItem",
+        "IEquipment",
+        "IEquipmentOcc",
+        "IHeatTransferEquipment",
+        "IHeatTransferEquipmentOcc",
+        "INamedEquipment",
+        "IObject",
+        "IPBSItem",
+        "IPIDHeatTransferEquipment",
+        "IPIDHeatTransferEquipmentOcc",
+        "IPIDTypical",
+        "IPlannedMatl",
+        "IProcessEquipment",
+        "IProcessEquipmentOcc",
+        "IShellAndTubeHeatExchanger",
+        "IShellAndTubeHeatExchangerOcc"
+      ],
+      "interface_attributes": {
+        "IAirCooledExchanger": {
+          "required": [],
+          "allowed": []
+        },
+        "IAirCooledExchangerOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IAirCooler": {
+          "required": [],
+          "allowed": []
+        },
+        "IAirCoolerOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IBoiler": {
+          "required": [],
+          "allowed": []
+        },
+        "IBoilerOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IDrawingItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IEquipment": {
+          "required": [
+            "EqType0",
+            "EqType1",
+            "EqTypeDescription"
+          ],
+          "allowed": [
+            "EqType0",
+            "EqType1",
+            "EqType2",
+            "EqType3",
+            "EqTypeDescription"
+          ]
+        },
+        "IEquipmentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IHeatTransferEquipment": {
+          "required": [],
+          "allowed": []
+        },
+        "IHeatTransferEquipmentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "INamedEquipment": {
+          "required": [
+            "EquipPrefix",
+            "EquipSeqNo",
+            "EquipSuff"
+          ],
+          "allowed": [
+            "EquipPrefix",
+            "EquipSeqNo",
+            "EquipSuff"
+          ]
+        },
+        "IObject": {
+          "required": [
+            "UID"
+          ],
+          "allowed": [
+            "Name",
+            "UID"
+          ]
+        },
+        "IPBSItem": {
+          "required": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ],
+          "allowed": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ]
+        },
+        "IPIDHeatTransferEquipment": {
+          "required": [],
+          "allowed": []
+        },
+        "IPIDHeatTransferEquipmentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IPIDTypical": {
+          "required": [
+            "IsTypical"
+          ],
+          "allowed": [
+            "IsTypical"
+          ]
+        },
+        "IPlannedMatl": {
+          "required": [],
+          "allowed": []
+        },
+        "IProcessEquipment": {
+          "required": [],
+          "allowed": []
+        },
+        "IProcessEquipmentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IShellAndTubeHeatExchanger": {
+          "required": [],
+          "allowed": []
+        },
+        "IShellAndTubeHeatExchangerOcc": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    },
+    "PIDInlineInstrument": {
+      "uid_kind": "hex32",
+      "required_interfaces": [
+        "IDocumentItem",
+        "IDrawingItem",
+        "IDuctPortComposition",
+        "IElecPowerConsumer",
+        "IExpandableThing",
+        "IHeatTracedItem",
+        "IInlineComponent",
+        "IInlineComponentOcc",
+        "IInlineInstrument",
+        "IInlineInstrumentOcc",
+        "IInstrument",
+        "IInstrumentOcc",
+        "ILoopMember",
+        "INamedInstrument",
+        "INoteCollection",
+        "IObject",
+        "IPBSItem",
+        "IPIDTypical",
+        "IPart",
+        "IPartOcc",
+        "IPipeCrossSectionItem",
+        "IPipingPortComposition",
+        "IPlannedMatl",
+        "IPressureReliefItem",
+        "IProcessPointCollection",
+        "ISignalPortComposition"
+      ],
+      "allowed_interfaces": [
+        "IDocumentItem",
+        "IDrawingItem",
+        "IDuctPortComposition",
+        "IElecPowerConsumer",
+        "IExpandableThing",
+        "IHeatTracedItem",
+        "IInlineComponent",
+        "IInlineComponentOcc",
+        "IInlineInstrument",
+        "IInlineInstrumentOcc",
+        "IInstrument",
+        "IInstrumentOcc",
+        "IInsulatedItem",
+        "ILoopMember",
+        "INamedInstrument",
+        "INoteCollection",
+        "IObject",
+        "IPBSItem",
+        "IPIDTypical",
+        "IPart",
+        "IPartOcc",
+        "IPipeCrossSectionItem",
+        "IPipingPortComposition",
+        "IPlannedMatl",
+        "IPressureReliefItem",
+        "IProcessPointCollection",
+        "ISignalPortComposition"
+      ],
+      "interface_attributes": {
+        "IDocumentItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IDrawingItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IDuctPortComposition": {
+          "required": [],
+          "allowed": []
+        },
+        "IElecPowerConsumer": {
+          "required": [],
+          "allowed": []
+        },
+        "IExpandableThing": {
+          "required": [],
+          "allowed": []
+        },
+        "IHeatTracedItem": {
+          "required": [
+            "HTraceRqmt"
+          ],
+          "allowed": [
+            "HTraceRqmt"
+          ]
+        },
+        "IInlineComponent": {
+          "required": [
+            "IsFlowDirectional"
+          ],
+          "allowed": [
+            "IsFlowDirectional"
+          ]
+        },
+        "IInlineComponentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IInlineInstrument": {
+          "required": [],
+          "allowed": []
+        },
+        "IInlineInstrumentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IInstrument": {
+          "required": [],
+          "allowed": [
+            "InstrumentType",
+            "InstrumentType3",
+            "ProcFunc"
+          ]
+        },
+        "IInstrumentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IInsulatedItem": {
+          "required": [
+            "InsulSpec"
+          ],
+          "allowed": [
+            "InsulSpec"
+          ]
+        },
+        "ILoopMember": {
+          "required": [],
+          "allowed": []
+        },
+        "INamedInstrument": {
+          "required": [
+            "InstrFuncModifier",
+            "InstrLoopSuffix",
+            "InstrTagPrefix",
+            "InstrTagSequenceNo",
+            "InstrTagSuffix",
+            "MeasuredVariable"
+          ],
+          "allowed": [
+            "InstrFuncModifier",
+            "InstrLoopSuffix",
+            "InstrTagPrefix",
+            "InstrTagSequenceNo",
+            "InstrTagSuffix",
+            "MeasuredVariable"
+          ]
+        },
+        "INoteCollection": {
+          "required": [],
+          "allowed": []
+        },
+        "IObject": {
+          "required": [
+            "UID"
+          ],
+          "allowed": [
+            "Name",
+            "UID"
+          ]
+        },
+        "IPBSItem": {
+          "required": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ],
+          "allowed": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ]
+        },
+        "IPIDTypical": {
+          "required": [
+            "IsTypical"
+          ],
+          "allowed": [
+            "IsTypical"
+          ]
+        },
+        "IPart": {
+          "required": [],
+          "allowed": []
+        },
+        "IPartOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IPipeCrossSectionItem": {
+          "required": [],
+          "allowed": [
+            "NominalDiameter"
+          ]
+        },
+        "IPipingPortComposition": {
+          "required": [],
+          "allowed": []
+        },
+        "IPlannedMatl": {
+          "required": [],
+          "allowed": []
+        },
+        "IPressureReliefItem": {
+          "required": [],
+          "allowed": [
+            "ReliefPressure"
+          ]
+        },
+        "IProcessPointCollection": {
+          "required": [],
+          "allowed": []
+        },
+        "ISignalPortComposition": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    },
+    "PIDInstrument": {
+      "uid_kind": "hex32",
+      "required_interfaces": [
+        "IDocumentItem",
+        "IDrawingItem",
+        "IElecPowerConsumer",
+        "IExpandableThing",
+        "IHeatTracedItem",
+        "IInlineComponentOcc",
+        "IInstrument",
+        "IInstrumentOcc",
+        "ILoopMember",
+        "INamedInstrument",
+        "INoteCollection",
+        "IObject",
+        "IPBSItem",
+        "IPIDTypical",
+        "IPart",
+        "IPartOcc",
+        "IPipingPortComposition",
+        "IPlannedMatl",
+        "IPressureReliefItem",
+        "IProcessPointCollection",
+        "ISignalPortComposition"
+      ],
+      "allowed_interfaces": [
+        "IDocumentItem",
+        "IDrawingItem",
+        "IElecPowerConsumer",
+        "IExpandableThing",
+        "IHeatTracedItem",
+        "IInlineComponentOcc",
+        "IInstrument",
+        "IInstrumentOcc",
+        "ILoopMember",
+        "INamedInstrument",
+        "INoteCollection",
+        "IObject",
+        "IPBSItem",
+        "IPIDTypical",
+        "IPart",
+        "IPartOcc",
+        "IPipingPortComposition",
+        "IPlannedMatl",
+        "IPressureReliefItem",
+        "IProcessPointCollection",
+        "ISignalPortComposition"
+      ],
+      "interface_attributes": {
+        "IDocumentItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IDrawingItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IElecPowerConsumer": {
+          "required": [],
+          "allowed": []
+        },
+        "IExpandableThing": {
+          "required": [],
+          "allowed": []
+        },
+        "IHeatTracedItem": {
+          "required": [
+            "HTraceRqmt"
+          ],
+          "allowed": [
+            "HTraceRqmt"
+          ]
+        },
+        "IInlineComponentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IInstrument": {
+          "required": [],
+          "allowed": []
+        },
+        "IInstrumentOcc": {
+          "required": [],
+          "allowed": [
+            "InstrumentLocation"
+          ]
+        },
+        "ILoopMember": {
+          "required": [],
+          "allowed": []
+        },
+        "INamedInstrument": {
+          "required": [
+            "InstrFuncModifier",
+            "InstrLoopSuffix",
+            "InstrTagPrefix",
+            "InstrTagSequenceNo",
+            "InstrTagSuffix",
+            "MeasuredVariable"
+          ],
+          "allowed": [
+            "InstrFuncModifier",
+            "InstrLoopSuffix",
+            "InstrTagPrefix",
+            "InstrTagSequenceNo",
+            "InstrTagSuffix",
+            "MeasuredVariable"
+          ]
+        },
+        "INoteCollection": {
+          "required": [],
+          "allowed": []
+        },
+        "IObject": {
+          "required": [
+            "UID"
+          ],
+          "allowed": [
+            "Name",
+            "UID"
+          ]
+        },
+        "IPBSItem": {
+          "required": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ],
+          "allowed": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ]
+        },
+        "IPIDTypical": {
+          "required": [
+            "IsTypical"
+          ],
+          "allowed": [
+            "IsTypical"
+          ]
+        },
+        "IPart": {
+          "required": [],
+          "allowed": []
+        },
+        "IPartOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IPipingPortComposition": {
+          "required": [],
+          "allowed": []
+        },
+        "IPlannedMatl": {
+          "required": [],
+          "allowed": []
+        },
+        "IPressureReliefItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IProcessPointCollection": {
+          "required": [],
+          "allowed": []
+        },
+        "ISignalPortComposition": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    },
+    "PIDMechanicalEquipment": {
+      "uid_kind": "hex32",
+      "required_interfaces": [
+        "IDrawingItem",
+        "IEquipment",
+        "IEquipmentOcc",
+        "IObject",
+        "IPBSItem",
+        "IPIDMechanicalEquipment",
+        "IPIDMechanicalEquipmentOcc",
+        "IPIDTypical",
+        "IPlannedMatl",
+        "IProcessEquipment",
+        "IProcessEquipmentOcc",
+        "IPump"
+      ],
+      "allowed_interfaces": [
+        "ICompressor",
+        "ICompressorOcc",
+        "IDrawingItem",
+        "IElectricMotor",
+        "IElectricMotorOcc",
+        "IEquipment",
+        "IEquipmentDriver",
+        "IEquipmentOcc",
+        "IFluidTransferMachine",
+        "IFluidTransferMachineOcc",
+        "IGasTransferMachine",
+        "IGasTransferMachineOcc",
+        "IMaterialTransferEquipment",
+        "IMaterialTransferEquipmentOcc",
+        "IMixingEquipment",
+        "IMixingEquipmentOcc",
+        "INamedEquipment",
+        "IObject",
+        "IPBSItem",
+        "IPIDMechanicalEquipment",
+        "IPIDMechanicalEquipmentOcc",
+        "IPIDTypical",
+        "IPlannedMatl",
+        "IPositiveDisplacementCompressor",
+        "IPositiveDisplacementCompressorOcc",
+        "IPositiveDisplacementPump",
+        "IPositiveDisplacementPumpOcc",
+        "IProcessEquipment",
+        "IProcessEquipmentDriverOcc",
+        "IProcessEquipmentOcc",
+        "IPump",
+        "IPumpOcc",
+        "IReciprocatingCompressor",
+        "IReciprocatingCompressorOcc"
+      ],
+      "interface_attributes": {
+        "ICompressor": {
+          "required": [],
+          "allowed": []
+        },
+        "ICompressorOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IDrawingItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IElectricMotor": {
+          "required": [],
+          "allowed": []
+        },
+        "IElectricMotorOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IEquipment": {
+          "required": [
+            "EqType0",
+            "EqType1",
+            "EqType2",
+            "EqTypeDescription"
+          ],
+          "allowed": [
+            "EqType0",
+            "EqType1",
+            "EqType2",
+            "EqType3",
+            "EqType4",
+            "EqType5",
+            "EqType6",
+            "EqTypeDescription",
+            "EquipmentTrimSpec"
+          ]
+        },
+        "IEquipmentDriver": {
+          "required": [],
+          "allowed": []
+        },
+        "IEquipmentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IFluidTransferMachine": {
+          "required": [],
+          "allowed": []
+        },
+        "IFluidTransferMachineOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IGasTransferMachine": {
+          "required": [],
+          "allowed": []
+        },
+        "IGasTransferMachineOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IMaterialTransferEquipment": {
+          "required": [],
+          "allowed": []
+        },
+        "IMaterialTransferEquipmentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IMixingEquipment": {
+          "required": [],
+          "allowed": []
+        },
+        "IMixingEquipmentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "INamedEquipment": {
+          "required": [
+            "EquipPrefix",
+            "EquipSeqNo",
+            "EquipSuff"
+          ],
+          "allowed": [
+            "EquipPrefix",
+            "EquipSeqNo",
+            "EquipSuff"
+          ]
+        },
+        "IObject": {
+          "required": [
+            "UID"
+          ],
+          "allowed": [
+            "Description",
+            "Name",
+            "UID"
+          ]
+        },
+        "IPBSItem": {
+          "required": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ],
+          "allowed": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ]
+        },
+        "IPIDMechanicalEquipment": {
+          "required": [],
+          "allowed": []
+        },
+        "IPIDMechanicalEquipmentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IPIDTypical": {
+          "required": [
+            "IsTypical"
+          ],
+          "allowed": [
+            "IsTypical"
+          ]
+        },
+        "IPlannedMatl": {
+          "required": [],
+          "allowed": []
+        },
+        "IPositiveDisplacementCompressor": {
+          "required": [],
+          "allowed": []
+        },
+        "IPositiveDisplacementCompressorOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IPositiveDisplacementPump": {
+          "required": [],
+          "allowed": []
+        },
+        "IPositiveDisplacementPumpOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IProcessEquipment": {
+          "required": [],
+          "allowed": []
+        },
+        "IProcessEquipmentDriverOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IProcessEquipmentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IPump": {
+          "required": [],
+          "allowed": []
+        },
+        "IPumpOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IReciprocatingCompressor": {
+          "required": [],
+          "allowed": []
+        },
+        "IReciprocatingCompressorOcc": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    },
+    "PIDNote": {
+      "uid_kind": "hex32",
+      "required_interfaces": [
+        "IDocumentItem",
+        "IDrawingItem",
+        "INote",
+        "IObject",
+        "IPBSNote"
+      ],
+      "allowed_interfaces": [
+        "IDocumentItem",
+        "IDrawingItem",
+        "INote",
+        "IObject",
+        "IPBSNote"
+      ],
+      "interface_attributes": {
+        "IDocumentItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IDrawingItem": {
+          "required": [],
+          "allowed": []
+        },
+        "INote": {
+          "required": [],
+          "allowed": [
+            "NoteText"
+          ]
+        },
+        "IObject": {
+          "required": [
+            "UID"
+          ],
+          "allowed": [
+            "UID"
+          ]
+        },
+        "IPBSNote": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    },
+    "PIDNozzle": {
+      "uid_kind": "hex32",
+      "required_interfaces": [
+        "IDocumentItem",
+        "IDrawingItem",
+        "IElecPowerConsumer",
+        "IEquipmentComponent",
+        "IEquipmentComponentOcc",
+        "IFabricatedItem",
+        "IHeatTracedItem",
+        "INoteCollection",
+        "INozzle",
+        "INozzleOcc",
+        "IObject",
+        "IPBSItem",
+        "IPBSItemCollection",
+        "IPIDTypical",
+        "IPart",
+        "IPartOcc",
+        "IPipeCrossSectionItem",
+        "IPipingPortComposition",
+        "IPlannedMatl",
+        "IProcessDataCaseComposition",
+        "IProcessPointCollection",
+        "ISignalPortComposition"
+      ],
+      "allowed_interfaces": [
+        "IDocumentItem",
+        "IDrawingItem",
+        "IElecPowerConsumer",
+        "IEquipmentComponent",
+        "IEquipmentComponentOcc",
+        "IFabricatedItem",
+        "IHeatTracedItem",
+        "INoteCollection",
+        "INozzle",
+        "INozzleOcc",
+        "IObject",
+        "IPBSItem",
+        "IPBSItemCollection",
+        "IPIDTypical",
+        "IPart",
+        "IPartOcc",
+        "IPipeCrossSectionItem",
+        "IPipingPortComposition",
+        "IPipingSpecifiedItem",
+        "IPlannedMatl",
+        "IProcessDataCaseComposition",
+        "IProcessPointCollection",
+        "ISignalPortComposition"
+      ],
+      "interface_attributes": {
+        "IDocumentItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IDrawingItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IElecPowerConsumer": {
+          "required": [],
+          "allowed": []
+        },
+        "IEquipmentComponent": {
+          "required": [
+            "ProcEqpCompTypeDescription",
+            "ProcessEqCompType1",
+            "ProcessEqCompType2"
+          ],
+          "allowed": [
+            "ProcEqpCompTypeDescription",
+            "ProcessEqCompType1",
+            "ProcessEqCompType2"
+          ]
+        },
+        "IEquipmentComponentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IFabricatedItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IHeatTracedItem": {
+          "required": [
+            "HTraceRqmt"
+          ],
+          "allowed": [
+            "HTraceRqmt"
+          ]
+        },
+        "INoteCollection": {
+          "required": [],
+          "allowed": []
+        },
+        "INozzle": {
+          "required": [],
+          "allowed": []
+        },
+        "INozzleOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IObject": {
+          "required": [
+            "UID"
+          ],
+          "allowed": [
+            "UID"
+          ]
+        },
+        "IPBSItem": {
+          "required": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ],
+          "allowed": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ]
+        },
+        "IPBSItemCollection": {
+          "required": [],
+          "allowed": []
+        },
+        "IPIDTypical": {
+          "required": [
+            "IsTypical"
+          ],
+          "allowed": [
+            "IsTypical"
+          ]
+        },
+        "IPart": {
+          "required": [],
+          "allowed": []
+        },
+        "IPartOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IPipeCrossSectionItem": {
+          "required": [],
+          "allowed": [
+            "NominalDiameter"
+          ]
+        },
+        "IPipingPortComposition": {
+          "required": [],
+          "allowed": []
+        },
+        "IPipingSpecifiedItem": {
+          "required": [
+            "PipingMaterialsClass"
+          ],
+          "allowed": [
+            "PipingMaterialsClass"
+          ]
+        },
+        "IPlannedMatl": {
+          "required": [],
+          "allowed": []
+        },
+        "IProcessDataCaseComposition": {
+          "required": [],
+          "allowed": []
+        },
+        "IProcessPointCollection": {
+          "required": [],
+          "allowed": []
+        },
+        "ISignalPortComposition": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    },
+    "PIDPipeline": {
+      "uid_kind": "hex32",
+      "required_interfaces": [
+        "IExpandableThing",
+        "IFluidSystem",
+        "INoteCollection",
+        "IObject",
+        "IPBSItem",
+        "IPBSItemCollection",
+        "IPIDTypical",
+        "IPipeline",
+        "IPipingConnectorComposition",
+        "IPlannedFacility"
+      ],
+      "allowed_interfaces": [
+        "IExpandableThing",
+        "IFluidSystem",
+        "INoteCollection",
+        "IObject",
+        "IPBSItem",
+        "IPBSItemCollection",
+        "IPIDTypical",
+        "IPipeline",
+        "IPipingConnectorComposition",
+        "IPlannedFacility"
+      ],
+      "interface_attributes": {
+        "IExpandableThing": {
+          "required": [],
+          "allowed": []
+        },
+        "IFluidSystem": {
+          "required": [],
+          "allowed": [
+            "FluidCode",
+            "FluidSystem"
+          ]
+        },
+        "INoteCollection": {
+          "required": [],
+          "allowed": []
+        },
+        "IObject": {
+          "required": [
+            "Name",
+            "UID"
+          ],
+          "allowed": [
+            "Name",
+            "UID"
+          ]
+        },
+        "IPBSItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IPBSItemCollection": {
+          "required": [],
+          "allowed": []
+        },
+        "IPIDTypical": {
+          "required": [],
+          "allowed": []
+        },
+        "IPipeline": {
+          "required": [],
+          "allowed": []
+        },
+        "IPipingConnectorComposition": {
+          "required": [],
+          "allowed": []
+        },
+        "IPlannedFacility": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    },
+    "PIDPipingBranchPoint": {
+      "uid_kind": "hex32_bpt",
+      "required_interfaces": [
+        "IConnection",
+        "IDocumentItem",
+        "IDrawingItem",
+        "IObject",
+        "IPipingBranchPoint",
+        "IPipingConnection"
+      ],
+      "allowed_interfaces": [
+        "IConnection",
+        "IDocumentItem",
+        "IDrawingItem",
+        "IObject",
+        "IPipingBranchPoint",
+        "IPipingConnection"
+      ],
+      "interface_attributes": {
+        "IConnection": {
+          "required": [],
+          "allowed": []
+        },
+        "IDocumentItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IDrawingItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IObject": {
+          "required": [
+            "UID"
+          ],
+          "allowed": [
+            "UID"
+          ]
+        },
+        "IPipingBranchPoint": {
+          "required": [],
+          "allowed": []
+        },
+        "IPipingConnection": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    },
+    "PIDPipingComponent": {
+      "uid_kind": "hex32",
+      "required_interfaces": [
+        "IDocumentItem",
+        "IDrawingItem",
+        "IElecPowerConsumer",
+        "IFabricatedItem",
+        "IHeatTracedItem",
+        "IInlineComponent",
+        "IInlineComponentOcc",
+        "INoteCollection",
+        "IObject",
+        "IPBSItem",
+        "IPIDTypical",
+        "IPart",
+        "IPartOcc",
+        "IPipeCrossSectionItem",
+        "IPipingComponent",
+        "IPipingComponentOcc",
+        "IPipingPortComposition",
+        "IPlannedMatl",
+        "IPressureReliefItem"
+      ],
+      "allowed_interfaces": [
+        "IDocumentItem",
+        "IDrawingItem",
+        "IElecPowerConsumer",
+        "IFabricatedItem",
+        "IHeatTracedItem",
+        "IInlineComponent",
+        "IInlineComponentOcc",
+        "IInsulatedItem",
+        "INoteCollection",
+        "IObject",
+        "IPBSItem",
+        "IPIDTypical",
+        "IPart",
+        "IPartOcc",
+        "IPipeCrossSectionItem",
+        "IPipingComponent",
+        "IPipingComponentOcc",
+        "IPipingPortComposition",
+        "IPlannedMatl",
+        "IPressureReliefItem"
+      ],
+      "interface_attributes": {
+        "IDocumentItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IDrawingItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IElecPowerConsumer": {
+          "required": [],
+          "allowed": []
+        },
+        "IFabricatedItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IHeatTracedItem": {
+          "required": [
+            "HTraceRqmt"
+          ],
+          "allowed": [
+            "HTraceRqmt"
+          ]
+        },
+        "IInlineComponent": {
+          "required": [
+            "IsFlowDirectional"
+          ],
+          "allowed": [
+            "IsFlowDirectional"
+          ]
+        },
+        "IInlineComponentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IInsulatedItem": {
+          "required": [
+            "InsulSpec"
+          ],
+          "allowed": [
+            "InsulSpec"
+          ]
+        },
+        "INoteCollection": {
+          "required": [],
+          "allowed": []
+        },
+        "IObject": {
+          "required": [
+            "UID"
+          ],
+          "allowed": [
+            "Description",
+            "Name",
+            "UID"
+          ]
+        },
+        "IPBSItem": {
+          "required": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ],
+          "allowed": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ]
+        },
+        "IPIDTypical": {
+          "required": [
+            "IsTypical"
+          ],
+          "allowed": [
+            "IsTypical"
+          ]
+        },
+        "IPart": {
+          "required": [],
+          "allowed": []
+        },
+        "IPartOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IPipeCrossSectionItem": {
+          "required": [],
+          "allowed": [
+            "NominalDiameter"
+          ]
+        },
+        "IPipingComponent": {
+          "required": [
+            "CommoditySpecialtyType",
+            "PipModelCode",
+            "PipingComponentType1"
+          ],
+          "allowed": [
+            "CommoditySpecialtyType",
+            "PipModelCode",
+            "PipingComponentType1",
+            "PipingComponentType2",
+            "PipingComponentType3"
+          ]
+        },
+        "IPipingComponentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IPipingPortComposition": {
+          "required": [],
+          "allowed": []
+        },
+        "IPlannedMatl": {
+          "required": [],
+          "allowed": []
+        },
+        "IPressureReliefItem": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    },
+    "PIDPipingConnector": {
+      "uid_kind": "hex32",
+      "required_interfaces": [
+        "IConnector",
+        "IDocumentItem",
+        "IDrawingItem",
+        "IElecPowerConsumer",
+        "IExpandableThing",
+        "IFabricatedItem",
+        "IHeatTracedItem",
+        "IJacketedItem",
+        "INoteCollection",
+        "IObject",
+        "IPBSItem",
+        "IPBSItemCollection",
+        "IPIDTypical",
+        "IPipeCrossSectionItem",
+        "IPipingConnector",
+        "IPlannedFacility",
+        "IProcessDataCaseComposition",
+        "IProcessPointCollection"
+      ],
+      "allowed_interfaces": [
+        "IConnector",
+        "IDocumentItem",
+        "IDrawingItem",
+        "IElecPowerConsumer",
+        "IExpandableThing",
+        "IFabricatedItem",
+        "IHeatTracedItem",
+        "IInsulatedItem",
+        "IJacketedItem",
+        "INamedPipingConnector",
+        "INoteCollection",
+        "IObject",
+        "IPBSItem",
+        "IPBSItemCollection",
+        "IPIDTypical",
+        "IPipeCrossSectionItem",
+        "IPipingConnector",
+        "IPipingSpecifiedItem",
+        "IPlannedFacility",
+        "IProcessDataCaseComposition",
+        "IProcessPointCollection",
+        "ISlopedPipingItem"
+      ],
+      "interface_attributes": {
+        "IConnector": {
+          "required": [
+            "FlowDirection",
+            "RepresentationsAreAllZeroLength"
+          ],
+          "allowed": [
+            "FlowDirection",
+            "RepresentationsAreAllZeroLength"
+          ]
+        },
+        "IDocumentItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IDrawingItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IElecPowerConsumer": {
+          "required": [],
+          "allowed": []
+        },
+        "IExpandableThing": {
+          "required": [],
+          "allowed": []
+        },
+        "IFabricatedItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IHeatTracedItem": {
+          "required": [
+            "HTraceRqmt"
+          ],
+          "allowed": [
+            "HTraceRqmt"
+          ]
+        },
+        "IInsulatedItem": {
+          "required": [
+            "InsulSpec"
+          ],
+          "allowed": [
+            "InsulSpec"
+          ]
+        },
+        "IJacketedItem": {
+          "required": [],
+          "allowed": []
+        },
+        "INamedPipingConnector": {
+          "required": [
+            "PipingConnectorPrefix",
+            "PipingConnectorSeqNo",
+            "PipingConnectorSuff"
+          ],
+          "allowed": [
+            "PipingConnectorPrefix",
+            "PipingConnectorSeqNo",
+            "PipingConnectorSuff"
+          ]
+        },
+        "INoteCollection": {
+          "required": [],
+          "allowed": []
+        },
+        "IObject": {
+          "required": [
+            "UID"
+          ],
+          "allowed": [
+            "Name",
+            "UID"
+          ]
+        },
+        "IPBSItem": {
+          "required": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ],
+          "allowed": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ]
+        },
+        "IPBSItemCollection": {
+          "required": [],
+          "allowed": []
+        },
+        "IPIDTypical": {
+          "required": [
+            "IsTypical"
+          ],
+          "allowed": [
+            "IsTypical"
+          ]
+        },
+        "IPipeCrossSectionItem": {
+          "required": [],
+          "allowed": [
+            "NominalDiameter"
+          ]
+        },
+        "IPipingConnector": {
+          "required": [
+            "PipingConnectorType"
+          ],
+          "allowed": [
+            "PipingConnectorType"
+          ]
+        },
+        "IPipingSpecifiedItem": {
+          "required": [
+            "PipingMaterialsClass"
+          ],
+          "allowed": [
+            "PipingMaterialsClass"
+          ]
+        },
+        "IPlannedFacility": {
+          "required": [],
+          "allowed": []
+        },
+        "IProcessDataCaseComposition": {
+          "required": [],
+          "allowed": []
+        },
+        "IProcessPointCollection": {
+          "required": [],
+          "allowed": []
+        },
+        "ISlopedPipingItem": {
+          "required": [
+            "SlopedPipeDirection"
+          ],
+          "allowed": [
+            "SlopedPipeDirection"
+          ]
+        }
+      }
+    },
+    "PIDPipingPort": {
+      "uid_kind": "hex32_dot_num",
+      "required_interfaces": [
+        "IConnection",
+        "IObject",
+        "IPipeCrossSectionItem",
+        "IPipingConnection",
+        "IPipingPort",
+        "IPort"
+      ],
+      "allowed_interfaces": [
+        "IConnection",
+        "IObject",
+        "IPipeCrossSectionItem",
+        "IPipingConnection",
+        "IPipingPort",
+        "IPort"
+      ],
+      "interface_attributes": {
+        "IConnection": {
+          "required": [],
+          "allowed": [
+            "ConnectionFlowDirection"
+          ]
+        },
+        "IObject": {
+          "required": [
+            "Name",
+            "UID"
+          ],
+          "allowed": [
+            "Name",
+            "UID"
+          ]
+        },
+        "IPipeCrossSectionItem": {
+          "required": [],
+          "allowed": [
+            "NominalDiameter"
+          ]
+        },
+        "IPipingConnection": {
+          "required": [],
+          "allowed": []
+        },
+        "IPipingPort": {
+          "required": [],
+          "allowed": []
+        },
+        "IPort": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    },
+    "PIDProcessEquipment": {
+      "uid_kind": "hex32",
+      "required_interfaces": [
+        "IDrawingItem",
+        "IEquipment",
+        "IEquipmentOcc",
+        "IObject",
+        "IPBSItem",
+        "IPBSItemCollection",
+        "IPIDTypical",
+        "IPlannedMatl"
+      ],
+      "allowed_interfaces": [
+        "IDrawingItem",
+        "IEquipment",
+        "IEquipmentOcc",
+        "INamedEquipment",
+        "IObject",
+        "IPBSItem",
+        "IPBSItemCollection",
+        "IPIDTypical",
+        "IPlannedMatl",
+        "ISpecifiedMatlItem"
+      ],
+      "interface_attributes": {
+        "IDrawingItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IEquipment": {
+          "required": [
+            "EqType0"
+          ],
+          "allowed": [
+            "EqType0",
+            "EqTypeDescription",
+            "EquipmentTrimSpec"
+          ]
+        },
+        "IEquipmentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "INamedEquipment": {
+          "required": [
+            "EquipPrefix",
+            "EquipSeqNo",
+            "EquipSuff"
+          ],
+          "allowed": [
+            "EquipPrefix",
+            "EquipSeqNo",
+            "EquipSuff"
+          ]
+        },
+        "IObject": {
+          "required": [
+            "UID"
+          ],
+          "allowed": [
+            "Description",
+            "Name",
+            "UID"
+          ]
+        },
+        "IPBSItem": {
+          "required": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ],
+          "allowed": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ]
+        },
+        "IPBSItemCollection": {
+          "required": [],
+          "allowed": []
+        },
+        "IPIDTypical": {
+          "required": [
+            "IsTypical"
+          ],
+          "allowed": [
+            "IsTypical"
+          ]
+        },
+        "IPlannedMatl": {
+          "required": [],
+          "allowed": []
+        },
+        "ISpecifiedMatlItem": {
+          "required": [
+            "LongMaterialDescription3"
+          ],
+          "allowed": [
+            "LongMaterialDescription3"
+          ]
+        }
+      }
+    },
+    "PIDProcessPoint": {
+      "uid_kind": "hex32_ppt",
+      "required_interfaces": [
+        "IBulkBaseProcessPoint",
+        "IBulkMaxProcessPoint",
+        "IBulkMinProcessPoint",
+        "IBulkNormProcessPoint",
+        "IFacilityPoint",
+        "IObject",
+        "IProcessPoint",
+        "IProcessPointCaseComposition"
+      ],
+      "allowed_interfaces": [
+        "IBulkBaseProcessPoint",
+        "IBulkMaxProcessPoint",
+        "IBulkMinProcessPoint",
+        "IBulkNormProcessPoint",
+        "IFacilityPoint",
+        "IObject",
+        "IProcessPoint",
+        "IProcessPointCaseComposition"
+      ],
+      "interface_attributes": {
+        "IBulkBaseProcessPoint": {
+          "required": [
+            "PhaseTemperatureBase",
+            "PressureBase"
+          ],
+          "allowed": [
+            "PhaseTemperatureBase",
+            "PressureBase"
+          ]
+        },
+        "IBulkMaxProcessPoint": {
+          "required": [
+            "PhaseTemperatureMax",
+            "PressureMax"
+          ],
+          "allowed": [
+            "PhaseTemperatureMax",
+            "PressureMax"
+          ]
+        },
+        "IBulkMinProcessPoint": {
+          "required": [
+            "PhaseTemperatureMin",
+            "PressureMin"
+          ],
+          "allowed": [
+            "PhaseTemperatureMin",
+            "PressureMin"
+          ]
+        },
+        "IBulkNormProcessPoint": {
+          "required": [
+            "CpCvRatioNorm",
+            "MolecularWeightNorm"
+          ],
+          "allowed": [
+            "CpCvRatioNorm",
+            "MolecularWeightNorm"
+          ]
+        },
+        "IFacilityPoint": {
+          "required": [],
+          "allowed": []
+        },
+        "IObject": {
+          "required": [
+            "UID"
+          ],
+          "allowed": [
+            "UID"
+          ]
+        },
+        "IProcessPoint": {
+          "required": [],
+          "allowed": []
+        },
+        "IProcessPointCaseComposition": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    },
+    "PIDProcessVessel": {
+      "uid_kind": "hex32",
+      "required_interfaces": [
+        "IDrawingItem",
+        "IEquipment",
+        "IEquipmentOcc",
+        "ILowPressureTank",
+        "IObject",
+        "IPBSItem",
+        "IPBSItemCollection",
+        "IPIDProcessVessel",
+        "IPIDProcessVesselOcc",
+        "IPIDTypical",
+        "IPlannedMatl",
+        "IProcessEquipment",
+        "IProcessEquipmentOcc",
+        "IProcessVessel",
+        "IProcessVesselOcc"
+      ],
+      "allowed_interfaces": [
+        "IDrawingItem",
+        "IEquipment",
+        "IEquipmentOcc",
+        "ILowPressureTank",
+        "ILowPressureTankOcc",
+        "INamedEquipment",
+        "IObject",
+        "IPBSItem",
+        "IPBSItemCollection",
+        "IPIDProcessVessel",
+        "IPIDProcessVesselOcc",
+        "IPIDTypical",
+        "IPlannedMatl",
+        "IProcessEquipment",
+        "IProcessEquipmentOcc",
+        "IProcessVessel",
+        "IProcessVesselOcc",
+        "ISpecifiedMatlItem"
+      ],
+      "interface_attributes": {
+        "IDrawingItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IEquipment": {
+          "required": [
+            "EqType0",
+            "EqType1",
+            "EqType2",
+            "EqType3",
+            "EqTypeDescription"
+          ],
+          "allowed": [
+            "EqType0",
+            "EqType1",
+            "EqType2",
+            "EqType3",
+            "EqType4",
+            "EqTypeDescription",
+            "EquipmentTrimSpec"
+          ]
+        },
+        "IEquipmentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "ILowPressureTank": {
+          "required": [],
+          "allowed": []
+        },
+        "ILowPressureTankOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "INamedEquipment": {
+          "required": [
+            "EquipPrefix",
+            "EquipSeqNo",
+            "EquipSuff"
+          ],
+          "allowed": [
+            "EquipPrefix",
+            "EquipSeqNo",
+            "EquipSuff"
+          ]
+        },
+        "IObject": {
+          "required": [
+            "UID"
+          ],
+          "allowed": [
+            "Description",
+            "Name",
+            "UID"
+          ]
+        },
+        "IPBSItem": {
+          "required": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ],
+          "allowed": [
+            "ConstructionStatus",
+            "ConstructionStatus2"
+          ]
+        },
+        "IPBSItemCollection": {
+          "required": [],
+          "allowed": []
+        },
+        "IPIDProcessVessel": {
+          "required": [],
+          "allowed": []
+        },
+        "IPIDProcessVesselOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IPIDTypical": {
+          "required": [
+            "IsTypical"
+          ],
+          "allowed": [
+            "IsTypical"
+          ]
+        },
+        "IPlannedMatl": {
+          "required": [],
+          "allowed": []
+        },
+        "IProcessEquipment": {
+          "required": [],
+          "allowed": []
+        },
+        "IProcessEquipmentOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "IProcessVessel": {
+          "required": [],
+          "allowed": [
+            "ProcessVessel_InternalDiameter"
+          ]
+        },
+        "IProcessVesselOcc": {
+          "required": [],
+          "allowed": []
+        },
+        "ISpecifiedMatlItem": {
+          "required": [
+            "LongMaterialDescription"
+          ],
+          "allowed": [
+            "LongMaterialDescription"
+          ]
+        }
+      }
+    },
+    "PIDRepresentation": {
+      "uid_kind": "hex32",
+      "required_interfaces": [
+        "IDrawingRepresentation",
+        "IObject"
+      ],
+      "allowed_interfaces": [
+        "IDrawingRepresentation",
+        "IObject"
+      ],
+      "interface_attributes": {
+        "IDrawingRepresentation": {
+          "required": [
+            "GraphicOID"
+          ],
+          "allowed": [
+            "GraphicOID"
+          ]
+        },
+        "IObject": {
+          "required": [
+            "UID"
+          ],
+          "allowed": [
+            "UID"
+          ]
+        }
+      }
+    },
+    "PIDSignalBranchPoint": {
+      "uid_kind": "hex32_bpt",
+      "required_interfaces": [
+        "IConnection",
+        "IDocumentItem",
+        "IDrawingItem",
+        "IFacilityPoint",
+        "IObject",
+        "ISignalBranchPoint",
+        "ISignalConnection"
+      ],
+      "allowed_interfaces": [
+        "IConnection",
+        "IDocumentItem",
+        "IDrawingItem",
+        "IFacilityPoint",
+        "IObject",
+        "ISignalBranchPoint",
+        "ISignalConnection"
+      ],
+      "interface_attributes": {
+        "IConnection": {
+          "required": [],
+          "allowed": []
+        },
+        "IDocumentItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IDrawingItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IFacilityPoint": {
+          "required": [],
+          "allowed": []
+        },
+        "IObject": {
+          "required": [
+            "UID"
+          ],
+          "allowed": [
+            "UID"
+          ]
+        },
+        "ISignalBranchPoint": {
+          "required": [],
+          "allowed": []
+        },
+        "ISignalConnection": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    },
+    "PIDSignalConnector": {
+      "uid_kind": "hex32",
+      "required_interfaces": [
+        "IConnector",
+        "IDocumentItem",
+        "IDrawingItem",
+        "IExpandableThing",
+        "IObject",
+        "IPIDTypical",
+        "IPlannedFacility",
+        "ISignalConnector"
+      ],
+      "allowed_interfaces": [
+        "IConnector",
+        "IDocumentItem",
+        "IDrawingItem",
+        "IExpandableThing",
+        "IObject",
+        "IPIDTypical",
+        "IPlannedFacility",
+        "ISignalConnector"
+      ],
+      "interface_attributes": {
+        "IConnector": {
+          "required": [
+            "FlowDirection"
+          ],
+          "allowed": [
+            "FlowDirection"
+          ]
+        },
+        "IDocumentItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IDrawingItem": {
+          "required": [],
+          "allowed": []
+        },
+        "IExpandableThing": {
+          "required": [],
+          "allowed": []
+        },
+        "IObject": {
+          "required": [
+            "UID"
+          ],
+          "allowed": [
+            "UID"
+          ]
+        },
+        "IPIDTypical": {
+          "required": [
+            "IsTypical"
+          ],
+          "allowed": [
+            "IsTypical"
+          ]
+        },
+        "IPlannedFacility": {
+          "required": [],
+          "allowed": []
+        },
+        "ISignalConnector": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    },
+    "PIDSignalPort": {
+      "uid_kind": "hex32_dot_num",
+      "required_interfaces": [
+        "IConnection",
+        "IFacilityPoint",
+        "IObject",
+        "IPIDTypical",
+        "IPipingConnection",
+        "ISignalConnection",
+        "ISignalPort"
+      ],
+      "allowed_interfaces": [
+        "IConnection",
+        "IFacilityPoint",
+        "IObject",
+        "IPIDTypical",
+        "IPipingConnection",
+        "ISignalConnection",
+        "ISignalPort"
+      ],
+      "interface_attributes": {
+        "IConnection": {
+          "required": [],
+          "allowed": []
+        },
+        "IFacilityPoint": {
+          "required": [],
+          "allowed": []
+        },
+        "IObject": {
+          "required": [
+            "Name",
+            "UID"
+          ],
+          "allowed": [
+            "Name",
+            "UID"
+          ]
+        },
+        "IPIDTypical": {
+          "required": [],
+          "allowed": []
+        },
+        "IPipingConnection": {
+          "required": [],
+          "allowed": []
+        },
+        "ISignalConnection": {
+          "required": [],
+          "allowed": []
+        },
+        "ISignalPort": {
+          "required": [],
+          "allowed": []
+        }
+      }
+    }
+  },
+  "data_relations": {
+    "DrawingItems": {
+      "prefix": "DRI",
+      "allowed_endpoints": [
+        [
+          "PIDRepresentation",
+          "PIDBranchPoint"
+        ],
+        [
+          "PIDRepresentation",
+          "PIDControlSystemFunction"
+        ],
+        [
+          "PIDRepresentation",
+          "PIDHeatTransferEquipment"
+        ],
+        [
+          "PIDRepresentation",
+          "PIDInlineInstrument"
+        ],
+        [
+          "PIDRepresentation",
+          "PIDInstrument"
+        ],
+        [
+          "PIDRepresentation",
+          "PIDMechanicalEquipment"
+        ],
+        [
+          "PIDRepresentation",
+          "PIDNote"
+        ],
+        [
+          "PIDRepresentation",
+          "PIDNozzle"
+        ],
+        [
+          "PIDRepresentation",
+          "PIDPipingBranchPoint"
+        ],
+        [
+          "PIDRepresentation",
+          "PIDPipingComponent"
+        ],
+        [
+          "PIDRepresentation",
+          "PIDPipingConnector"
+        ],
+        [
+          "PIDRepresentation",
+          "PIDProcessEquipment"
+        ],
+        [
+          "PIDRepresentation",
+          "PIDProcessVessel"
+        ],
+        [
+          "PIDRepresentation",
+          "PIDSignalBranchPoint"
+        ],
+        [
+          "PIDRepresentation",
+          "PIDSignalConnector"
+        ]
+      ]
+    },
+    "DwgRepresentationComposition": {
+      "prefix": "DRC",
+      "allowed_endpoints": [
+        [
+          "PIDDrawing",
+          "PIDRepresentation"
+        ]
+      ]
+    },
+    "EquipmentComponentComposition": {
+      "prefix": "EQC",
+      "allowed_endpoints": [
+        [
+          "PIDNozzle",
+          "PIDHeatTransferEquipment"
+        ],
+        [
+          "PIDNozzle",
+          "PIDMechanicalEquipment"
+        ],
+        [
+          "PIDNozzle",
+          "PIDProcessEquipment"
+        ],
+        [
+          "PIDNozzle",
+          "PIDProcessVessel"
+        ]
+      ]
+    },
+    "EquipmentOcc_EquipmentOcc": {
+      "prefix": "E2E",
+      "allowed_endpoints": [
+        [
+          "PIDMechanicalEquipment",
+          "PIDMechanicalEquipment"
+        ]
+      ]
+    },
+    "PBSItemNotes": {
+      "prefix": "ITN",
+      "allowed_endpoints": [
+        [
+          "PIDNote",
+          "PIDControlSystemFunction"
+        ],
+        [
+          "PIDNote",
+          "PIDHeatTransferEquipment"
+        ],
+        [
+          "PIDNote",
+          "PIDInlineInstrument"
+        ],
+        [
+          "PIDNote",
+          "PIDInstrument"
+        ],
+        [
+          "PIDNote",
+          "PIDMechanicalEquipment"
+        ],
+        [
+          "PIDNote",
+          "PIDNozzle"
+        ],
+        [
+          "PIDNote",
+          "PIDPipingComponent"
+        ],
+        [
+          "PIDNote",
+          "PIDProcessEquipment"
+        ],
+        [
+          "PIDNote",
+          "PIDProcessVessel"
+        ]
+      ]
+    },
+    "PipingConnectors": {
+      "prefix": "PCN",
+      "allowed_endpoints": [
+        [
+          "PIDPipingConnector",
+          "PIDPipeline"
+        ]
+      ]
+    },
+    "PipingEnd1Conn": {
+      "prefix": "PE1",
+      "allowed_endpoints": [
+        [
+          "PIDBranchPoint",
+          "PIDPipingConnector"
+        ],
+        [
+          "PIDPipingBranchPoint",
+          "PIDPipingConnector"
+        ],
+        [
+          "PIDPipingPort",
+          "PIDPipingConnector"
+        ],
+        [
+          "PIDSignalPort",
+          "PIDPipingConnector"
+        ]
+      ]
+    },
+    "PipingEnd2Conn": {
+      "prefix": "PE2",
+      "allowed_endpoints": [
+        [
+          "PIDBranchPoint",
+          "PIDPipingConnector"
+        ],
+        [
+          "PIDPipingBranchPoint",
+          "PIDPipingConnector"
+        ],
+        [
+          "PIDPipingPort",
+          "PIDPipingConnector"
+        ],
+        [
+          "PIDSignalPort",
+          "PIDPipingConnector"
+        ]
+      ]
+    },
+    "PipingPortComposition": {
+      "prefix": "PPC",
+      "allowed_endpoints": [
+        [
+          "PIDPipingPort",
+          "PIDInlineInstrument"
+        ],
+        [
+          "PIDPipingPort",
+          "PIDNozzle"
+        ],
+        [
+          "PIDPipingPort",
+          "PIDPipingComponent"
+        ],
+        [
+          "PIDPipingPort",
+          "PIDProcessEquipment"
+        ]
+      ]
+    },
+    "PipingTapOrFitting": {
+      "prefix": "PTF",
+      "allowed_endpoints": [
+        [
+          "PIDPipingBranchPoint",
+          "PIDPipingConnector"
+        ],
+        [
+          "PIDPipingPort",
+          "PIDPipingConnector"
+        ],
+        [
+          "PIDSignalPort",
+          "PIDPipingConnector"
+        ]
+      ]
+    },
+    "ProcessPointCollection": {
+      "prefix": "PRP",
+      "allowed_endpoints": [
+        [
+          "PIDProcessPoint",
+          "PIDPipingConnector"
+        ]
+      ]
+    },
+    "SignalEnd1Conn": {
+      "prefix": "SE1",
+      "allowed_endpoints": [
+        [
+          "PIDSignalBranchPoint",
+          "PIDSignalConnector"
+        ],
+        [
+          "PIDSignalPort",
+          "PIDSignalConnector"
+        ]
+      ]
+    },
+    "SignalEnd2Conn": {
+      "prefix": "SE2",
+      "allowed_endpoints": [
+        [
+          "PIDBranchPoint",
+          "PIDSignalConnector"
+        ],
+        [
+          "PIDSignalBranchPoint",
+          "PIDSignalConnector"
+        ],
+        [
+          "PIDSignalPort",
+          "PIDSignalConnector"
+        ]
+      ]
+    },
+    "SignalPortComposition": {
+      "prefix": "SPC",
+      "allowed_endpoints": [
+        [
+          "PIDSignalPort",
+          "PIDControlSystemFunction"
+        ],
+        [
+          "PIDSignalPort",
+          "PIDInlineInstrument"
+        ],
+        [
+          "PIDSignalPort",
+          "PIDInstrument"
+        ],
+        [
+          "PIDSignalPort",
+          "PIDNozzle"
+        ]
+      ]
+    },
+    "SignalTapOrFitting": {
+      "prefix": "STF",
+      "allowed_endpoints": [
+        [
+          "PIDSignalBranchPoint",
+          "PIDSignalConnector"
+        ],
+        [
+          "PIDSignalPort",
+          "PIDSignalConnector"
+        ]
+      ]
+    }
+  },
+  "meta_classes": {
+    "DocumentRevision": {
+      "uid_kind": "meta_hex",
+      "required_interfaces": [
+        "IDocumentRevision",
+        "IObject"
+      ],
+      "allowed_interfaces": [
+        "IDocumentRevision",
+        "IObject"
+      ],
+      "interface_attributes": {
+        "IDocumentRevision": {
+          "required": [
+            "MajorRev_ForRevise",
+            "MinorRev_ForRevise"
+          ],
+          "allowed": [
+            "MajorRev_ForRevise",
+            "MinorRev_ForRevise"
+          ]
+        },
+        "IObject": {
+          "required": [
+            "Name",
+            "UID"
+          ],
+          "allowed": [
+            "Name",
+            "UID"
+          ]
+        }
+      }
+    },
+    "DocumentVersion": {
+      "uid_kind": "meta_hex",
+      "required_interfaces": [
+        "IDocumentVersion",
+        "IFileComposition",
+        "IObject"
+      ],
+      "allowed_interfaces": [
+        "IDocumentVersion",
+        "IFileComposition",
+        "IObject"
+      ],
+      "interface_attributes": {
+        "IDocumentVersion": {
+          "required": [
+            "DocRevision",
+            "DocVersion",
+            "DocVersionDate"
+          ],
+          "allowed": [
+            "DocRevision",
+            "DocVersion",
+            "DocVersionDate"
+          ]
+        },
+        "IFileComposition": {
+          "required": [],
+          "allowed": []
+        },
+        "IObject": {
+          "required": [
+            "Name",
+            "UID"
+          ],
+          "allowed": [
+            "Name",
+            "UID"
+          ]
+        }
+      }
+    },
+    "File": {
+      "uid_kind": "meta_file",
+      "required_interfaces": [
+        "IFile",
+        "IObject"
+      ],
+      "allowed_interfaces": [
+        "IFile",
+        "IObject"
+      ],
+      "interface_attributes": {
+        "IFile": {
+          "required": [
+            "FilePath"
+          ],
+          "allowed": [
+            "FilePath"
+          ]
+        },
+        "IObject": {
+          "required": [
+            "Description",
+            "Name",
+            "UID"
+          ],
+          "allowed": [
+            "Description",
+            "Name",
+            "UID"
+          ]
+        }
+      }
+    }
+  },
+  "meta_relations": {
+    "VersionedDoc": {
+      "uid1_target": "DocUID",
+      "uid2_target": "DocumentVersion",
+      "rel_uid_kind": "meta_hex"
+    },
+    "RevisedDocument": {
+      "uid1_target": "DocumentRevision",
+      "uid2_target": "DocUID",
+      "rel_uid_kind": "meta_hex"
+    },
+    "FileComposition": {
+      "uid1_target": "File",
+      "uid2_target": "DocumentVersion",
+      "rel_uid_kind": "meta_file"
+    }
+  }
+}

@@ -431,6 +431,11 @@ fn every_part_of_the_shell_that_can_be_pressed_does_something() {
     let at = drawn(&app, WINDOW);
 
     // A navigation entry shows its screen.
+    let entry = at[&chrome::nav_bounds_id(PidScreen::Backup)].center();
+    let published = pointer(&mut app, WINDOW, &click(entry));
+    assert_eq!(published, ["PidShell(Show(Backup))"]);
+    assert_eq!(app.pid_shell.current(), Some(PidScreen::Backup));
+
     let entry = at[&chrome::nav_bounds_id(PidScreen::Editor)].center();
     let published = pointer(&mut app, WINDOW, &click(entry));
     assert_eq!(published, ["PidShell(Show(Editor))"]);
@@ -476,6 +481,7 @@ fn every_part_of_the_shell_that_can_be_pressed_does_something() {
             "crumb",
             "help",
             "nav",
+            "nav:backup",
             "nav:editor",
             "server",
             "status",

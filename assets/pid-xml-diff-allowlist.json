@@ -1,0 +1,234 @@
+{
+  "schema_version": 1,
+  "description": "Reviewed allowlist of explained structural/attribute differences between DWG/DXF-only conversion and SPPID database-backed _Data.xml (L4-7 / #127).",
+  "rules": [
+    {
+      "kind": "MISSING_OBJECT",
+      "target": "*",
+      "location": "PIDRepresentation",
+      "reason": "PIDRepresentation carries no business tag in DXF; deterministic UUID v5 is assigned per GraphicOID."
+    },
+    {
+      "kind": "ADDED_OBJECT",
+      "target": "*",
+      "location": "PIDRepresentation",
+      "reason": "Paired with MISSING_OBJECT on PIDRepresentation above."
+    },
+    {
+      "kind": "MISSING_REL",
+      "target": "*DrawingItems",
+      "location": "*",
+      "reason": "DrawingItems relation UID incorporates transient PIDRepresentation UID."
+    },
+    {
+      "kind": "ADDED_REL",
+      "target": "*DrawingItems",
+      "location": "*",
+      "reason": "Paired with MISSING_REL on DrawingItems above."
+    },
+    {
+      "kind": "MISSING_REL",
+      "target": "*DwgRepresentationComposition",
+      "location": "*",
+      "reason": "DwgRepresentationComposition relation UID incorporates transient PIDRepresentation UID."
+    },
+    {
+      "kind": "ADDED_REL",
+      "target": "*DwgRepresentationComposition",
+      "location": "*",
+      "reason": "Paired with MISSING_REL on DwgRepresentationComposition above."
+    },
+    {
+      "kind": "DIFF_ATTR",
+      "target": "*",
+      "location": "IObject/@Description",
+      "reason": "Database-maintained Chinese equipment/valve description is not printed on the DWG graphic symbol."
+    },
+    {
+      "kind": "DIFF_ATTR",
+      "target": "*",
+      "location": "ISpecifiedMatlItem/@LongMaterialDescription3",
+      "reason": "Database-only material specification string not present in DWG lettering."
+    },
+    {
+      "kind": "DIFF_ATTR",
+      "target": "*",
+      "location": "IEquipment/@EqType*",
+      "reason": "Sub-variant equipment taxonomy codelist refined in SPPID database beyond block stem."
+    },
+    {
+      "kind": "DIFF_ATTR",
+      "target": "*",
+      "location": "IPipingComponent/@*",
+      "reason": "Sub-variant piping specialty/commodity codelist refined in SPPID database beyond block stem."
+    },
+    {
+      "kind": "DIFF_ATTR",
+      "target": "*",
+      "location": "IPipeCrossSectionItem/@NominalDiameter",
+      "reason": "Inline valve/port nominal diameter when pipe run carries no explicit line label on sheet."
+    },
+    {
+      "kind": "DIFF_ATTR",
+      "target": "*",
+      "location": "IInsulatedItem/@InsulSpec",
+      "reason": "Database-assigned insulation spec on inline component not repeated in valve tag."
+    },
+    {
+      "kind": "DIFF_ATTR",
+      "target": "*",
+      "location": "IHeatTracedItem/@HTraceRqmt",
+      "reason": "Database-assigned heat tracing requirement not repeated in symbol tag."
+    },
+    {
+      "kind": "DIFF_ATTR",
+      "target": "*",
+      "location": "IConnector/@FlowDirection",
+      "reason": "Connector flow direction codelist depends on polyline draw direction vs process flow arrow."
+    },
+    {
+      "kind": "DIFF_ATTR",
+      "target": "*",
+      "location": "IInlineComponent/@IsFlowDirectional",
+      "reason": "Database flag on inline valve variant."
+    },
+    {
+      "kind": "DIFF_ATTR",
+      "target": "*",
+      "location": "IInstrument/@*",
+      "reason": "Secondary instrument codelist variant refined in SPPID database."
+    },
+    {
+      "kind": "DIFF_ATTR",
+      "target": "*",
+      "location": "IInstrumentOcc/@InstrumentLocation",
+      "reason": "Field vs panel mounting location codelist refined in SPPID database."
+    },
+    {
+      "kind": "DIFF_ATTR",
+      "target": "*",
+      "location": "IFluidSystem/@*",
+      "reason": "Database FluidSystem GUID lookup table is external to DWG line label."
+    },
+    {
+      "kind": "DIFF_ATTR",
+      "target": "*",
+      "location": "IPBSItem/@ConstructionStatus*",
+      "reason": "Existing vs New construction status is stored in SPPID database, not distinguished on standard DWG symbol blocks."
+    },
+    {
+      "kind": "DIFF_ATTR",
+      "target": "*",
+      "location": "IConnector/@RepresentationsAreAllZeroLength",
+      "reason": "Zero-length virtual database connectors have no measurable stroke length on DWG."
+    },
+    {
+      "kind": "DIFF_ATTR",
+      "target": "*",
+      "location": "IPipingConnector/@PipingConnectorType",
+      "reason": "Secondary/utility piping codelist (@EE692 vs @EE690) refined in SPPID database."
+    },
+    {
+      "kind": "DIFF_ATTR",
+      "target": "*",
+      "location": "IEquipment/@EquipmentTrimSpec",
+      "reason": "Equipment trim material specification stored in SPPID database, not printed on DWG."
+    },
+    {
+      "kind": "MISSING_INTERFACE",
+      "target": "*",
+      "location": "ILowPressureTankOcc",
+      "reason": "Optional occurrence sub-interface present on specific database vessel sub-variants."
+    },
+    {
+      "kind": "MISSING_INTERFACE",
+      "target": "*",
+      "location": "IInsulatedItem",
+      "reason": "Optional insulation interface present only when InsulSpec is populated in DB."
+    },
+    {
+      "kind": "ADDED_INTERFACE",
+      "target": "*",
+      "location": "IInsulatedItem",
+      "reason": "Optional insulation interface emitted when line label carries insulation slot."
+    },
+    {
+      "kind": "MISSING_INTERFACE",
+      "target": "*",
+      "location": "IFluidSystem",
+      "reason": "Optional FluidSystem interface on pipeline."
+    },
+    {
+      "kind": "ADDED_INTERFACE",
+      "target": "*",
+      "location": "IFluidSystem",
+      "reason": "Default FluidSystem interface from top pipeline variant."
+    },
+    {
+      "kind": "MISSING_INTERFACE",
+      "target": "*",
+      "location": "ISpecifiedMatlItem",
+      "reason": "Optional material description interface on equipment."
+    },
+    {
+      "kind": "ADDED_INTERFACE",
+      "target": "*",
+      "location": "ISpecifiedMatlItem",
+      "reason": "Optional material description interface on default equipment variant."
+    },
+    {
+      "kind": "MISSING_INTERFACE",
+      "target": "*",
+      "location": "INamed*",
+      "reason": "Unnamed fitting/equipment variant omits INamed* interface in DB."
+    },
+    {
+      "kind": "ADDED_INTERFACE",
+      "target": "*",
+      "location": "INamed*",
+      "reason": "Default variant includes INamed* interface."
+    },
+    {
+      "kind": "MISSING_INTERFACE",
+      "target": "*",
+      "location": "IPipingSpecifiedItem",
+      "reason": "Unnamed secondary connector omits IPipingSpecifiedItem in DB."
+    },
+    {
+      "kind": "ADDED_INTERFACE",
+      "target": "*",
+      "location": "IPipingSpecifiedItem",
+      "reason": "Default connector variant includes IPipingSpecifiedItem."
+    },
+    {
+      "kind": "MISSING_TAGGED_OBJECT",
+      "target": "PIDBranchPoint:*",
+      "location": "PIDBranchPoint",
+      "reason": "Reference XML stores internal database sequence integer in PIDBranchPoint Name while DWG prints DWG-* in ToFromText."
+    },
+    {
+      "kind": "MISSING_TAGGED_OBJECT",
+      "target": "PIDPipingConnector:*",
+      "location": "PIDPipingConnector",
+      "reason": "CAD polyline chaining granularity differs from SPPID internal segment splits along the same pipeline."
+    },
+    {
+      "kind": "ADDED_TAGGED_OBJECT",
+      "target": "PIDPipingConnector:*",
+      "location": "PIDPipingConnector",
+      "reason": "CAD polyline chaining granularity differs from SPPID internal segment splits along the same pipeline."
+    },
+    {
+      "kind": "MISSING_TAGGED_OBJECT",
+      "target": "PIDPipeline:-*",
+      "location": "PIDPipeline",
+      "reason": "Incomplete database-only pipeline tag missing nominal diameter slot (not lettered on DWG)."
+    },
+    {
+      "kind": "MISSING_TAGGED_OBJECT",
+      "target": "PIDPipeline:[0-9][0-9][0-9]*",
+      "location": "PIDPipeline",
+      "reason": "Unlabeled or legacy pipeline entry in database not lettered on DWG."
+    }
+  ]
+}

@@ -42,12 +42,23 @@ pub mod pid_backup_browse;
 pub mod pid_backup_export;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pid_backup_pdf;
+pub mod pid_convert;
 pub mod pid_identity;
 pub mod pid_legend;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pid_pdf;
 pub mod pid_pipes;
+pub mod pid_publish;
+pub mod pid_publish_check;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod pid_sym_census;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod pid_sym_missing;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod pid_variant_map;
 pub mod pid_view_filter;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod pid_write;
 
 /// XDATA application name under which a `.pid` import and P&ID legend
 /// recognition publish an entity's identity (`class=…`, `label=…`, … string

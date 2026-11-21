@@ -10,10 +10,12 @@ use crate::ui::style::pid_tokens::{ColorToken, PidTheme};
 
 /// The application as a launch leaves it once the startup prompts have been
 /// answered: in the module, or with `--classic` and a drawing.
-fn launched(classic: bool) -> OpenCADStudio {
+fn launched_with_mode(classic: bool, mode: crate::app::config::ModelSpaceMode) -> OpenCADStudio {
     let mut app = OpenCADStudio::new_for_test();
     app.default_assoc_prompted = true;
     app.donation_prompt_version = env!("OCS_APP_VERSION").to_owned();
+    app.model_space.mode = mode;
+    app.sync_model_space_theme(false);
     let cfg = GuiConfig {
         classic,
         new: classic,
@@ -23,6 +25,10 @@ fn launched(classic: bool) -> OpenCADStudio {
     app.drive_headless_task(first)
         .expect("the first screen opens without a window");
     app
+}
+
+fn launched(classic: bool) -> OpenCADStudio {
+    launched_with_mode(classic, crate::app::config::ModelSpaceMode::default())
 }
 
 /// The design's canvas colour (`bg-canvas`) in `theme`.
@@ -42,13 +48,15 @@ fn cleared_to(app: &OpenCADStudio) -> [f32; 4] {
 /// space background, which the module leaves as it is set.
 #[test]
 fn the_canvas_is_the_designs_colour_in_the_module_and_the_users_own_outside_it() {
-    let general = launched(true);
+    let mode = crate::app::config::ModelSpaceMode::ClassicDark;
+    let general = launched_with_mode(true, mode);
     // What the general interface clears a drawing to, and the setting it
     // has for that.
     let users = cleared_to(&general);
     let setting = general.model_space.resolve_model_bg(&general.active_theme);
 
-    let mut module = launched(false);
+    let mut module = launched_with_mode(false, mode);
+    assert_eq!(module.pid_shell.theme, PidTheme::Light);
     let designs = designs_colour(module.pid_shell.theme);
     assert_ne!(designs, users, "the two colours are not the same colour");
     assert_eq!(cleared_to(&module), designs, "the drawing the launch opens");
@@ -64,7 +72,7 @@ fn the_canvas_is_the_designs_colour_in_the_module_and_the_users_own_outside_it()
     );
 
     // The module coming on over an open drawing.
-    let mut switched = launched(true);
+    let mut switched = launched_with_mode(true, mode);
     assert_eq!(cleared_to(&switched), users);
     let _ = switched.dispatch_command("PIDSCREEN editor");
     assert_eq!(switched.pid_shell.current(), Some(PidScreen::Editor));
@@ -75,6 +83,24 @@ fn the_canvas_is_the_designs_colour_in_the_module_and_the_users_own_outside_it()
             .resolve_model_bg(&switched.active_theme),
         setting
     );
+}
+
+#[test]
+fn the_default_theme_is_light_and_colortheme_switches_both_halves() {
+    let mut app = launched(false);
+    assert_eq!(app.active_theme, iced::Theme::Light);
+    assert_eq!(app.pid_shell.theme, PidTheme::Light);
+    assert_eq!(cleared_to(&app), designs_colour(PidTheme::Light));
+
+    let _ = app.dispatch_command("COLORTHEME 0");
+    assert_eq!(app.active_theme, iced::Theme::Dark);
+    assert_eq!(app.pid_shell.theme, PidTheme::Dark);
+    assert_eq!(cleared_to(&app), designs_colour(PidTheme::Dark));
+
+    let _ = app.dispatch_command("COLORTHEME 1");
+    assert_eq!(app.active_theme, iced::Theme::Light);
+    assert_eq!(app.pid_shell.theme, PidTheme::Light);
+    assert_eq!(cleared_to(&app), designs_colour(PidTheme::Light));
 }
 
 const PEN: &str = concat!(
@@ -98,15 +124,14 @@ fn node_with_id<'a>(node: &'a Value, id: &str) -> Option<&'a Value> {
 }
 
 /// The grid the editor draws is the design's: lines, every fifth one
-/// stronger, at the two strengths the design's canvas has them — read from
+/// stronger, in the two grid variables the design's canvas names — read from
 /// the design file.
 #[test]
 fn the_grid_is_drawn_the_way_the_design_draws_it() {
     let text = std::fs::read_to_string(PEN).unwrap_or_else(|e| panic!("{PEN}: {e}"));
     let pen: Value = serde_json::from_str(&text).expect("the design is JSON");
     let drawn = node_with_id(&pen, "eSZiQ").expect("the editor's canvas");
-    // The vertical lines of the design's grid: where each is, and its fill
-    // (`#RRGGBBAA`).
+    // The vertical lines of the design's grid: where each is, and its fill.
     let mut lines: Vec<(f64, String)> = drawn["children"]
         .as_array()
         .expect("the canvas has children")
@@ -121,29 +146,34 @@ fn the_grid_is_drawn_the_way_the_design_draws_it() {
         .collect();
     lines.sort_by(|a, b| a.0.total_cmp(&b.0));
     assert!(lines.len() > 10, "the design draws a grid: {lines:?}");
-    let alpha = |fill: &str| {
-        assert!(fill.starts_with("#FFFFFF") && fill.len() == 9, "{fill}");
-        f32::from(u8::from_str_radix(&fill[7..], 16).expect("two hex digits")) / 255.0
-    };
     let step = lines[1].0 - lines[0].0;
     for (index, (x, fill)) in lines.iter().enumerate() {
         assert_eq!(*x, step * index as f64, "evenly spaced");
         let major = (index as u32).is_multiple_of(canvas::GRID_MAJOR_EVERY);
-        let (minor_alpha, major_alpha) = canvas::GRID_LINE_ALPHA;
         assert_eq!(
-            alpha(fill),
-            if major { major_alpha } else { minor_alpha },
+            fill,
+            if major {
+                "$canvas-grid-major"
+            } else {
+                "$canvas-grid"
+            },
             "line {index} at {x}"
         );
     }
     assert_eq!(canvas::GRID_MAJOR_EVERY, 5);
 
-    // And that is the style the module's drawing area is given: the theme's
-    // text colour at those strengths, with no axis lines.
+    // And that is the style the module's drawing area is given in both
+    // themes: the design's grid colours at their two strengths, with no axis
+    // lines.
     let app = launched(false);
-    let style = canvas::grid_style(app.pid_shell.theme, 0.1);
-    let ink = ColorToken::TextPrimary.color(app.pid_shell.theme);
-    assert_eq!(style.color, [ink.r, ink.g, ink.b]);
-    assert_eq!(style.line_alpha, Some(canvas::GRID_LINE_ALPHA));
-    assert!(!style.axes);
+    assert_eq!(app.pid_shell.theme, PidTheme::Light);
+    for theme in PidTheme::ALL {
+        let style = canvas::grid_style(theme, 0.1);
+        let minor = ColorToken::CanvasGrid.color(theme);
+        let major = ColorToken::CanvasGridMajor.color(theme);
+        assert_eq!([major.r, major.g, major.b], [minor.r, minor.g, minor.b]);
+        assert_eq!(style.color, [minor.r, minor.g, minor.b]);
+        assert_eq!(style.line_alpha, Some((minor.a, major.a)));
+        assert!(!style.axes);
+    }
 }

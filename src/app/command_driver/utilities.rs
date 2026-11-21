@@ -1404,6 +1404,8 @@ impl OpenCADStudio {
             // line, spaces and all; the bare verb would first say where the
             // export stands.
             || tokens[0].eq_ignore_ascii_case("PIDBACKUPPDF")
+            // `PIDBACKUPEXPORT [Plant=<name>] [Ref=<folder>] <folder>` likewise.
+            || tokens[0].eq_ignore_ascii_case("PIDBACKUPEXPORT")
         {
             return self.dispatch_command(cmd);
         }

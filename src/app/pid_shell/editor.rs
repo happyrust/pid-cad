@@ -863,12 +863,12 @@ fn toolbar(app: &OpenCADStudio) -> Element<'_, AppMessage> {
                         include_bytes!("../../../assets/icons/ui/save.svg"),
                         14.0,
                         theme,
-                        ColorToken::BgApp
+                        ColorToken::TextOnAccent
                     ),
                     text("保存")
                         .size(12)
                         .font(ui(theme, font::Weight::Medium))
-                        .color(ColorToken::BgApp.color(theme)),
+                        .color(ColorToken::TextOnAccent.color(theme)),
                 ]
                 .spacing(6)
                 .align_y(alignment::Vertical::Center),
@@ -1233,6 +1233,7 @@ pub(in crate::app) fn no_drawing(app: &OpenCADStudio) -> Element<'_, AppMessage>
                   label: &'static str,
                   message: AppMessage,
                   fill: ColorToken,
+                  stroke: Option<ColorToken>,
                   ink: ColorToken| {
         PosReport::owned(
             part(name),
@@ -1244,14 +1245,7 @@ pub(in crate::app) fn no_drawing(app: &OpenCADStudio) -> Element<'_, AppMessage>
                         .color(ink.color(theme)),
                 )
                 .padding([7, 14])
-                .style(move |_| {
-                    filled(
-                        theme,
-                        fill,
-                        Some(ColorToken::BorderStrong),
-                        NumberToken::RadiusSm.value(theme),
-                    )
-                }),
+                .style(move |_| filled(theme, fill, stroke, NumberToken::RadiusSm.value(theme))),
             )
             .padding(0)
             .style(bare)
@@ -1274,13 +1268,15 @@ pub(in crate::app) fn no_drawing(app: &OpenCADStudio) -> Element<'_, AppMessage>
                     "新建图纸",
                     AppMessage::TabNew,
                     ColorToken::Accent,
-                    ColorToken::BgApp
+                    None,
+                    ColorToken::TextOnAccent
                 ),
                 action(
                     "empty-open",
                     "打开图纸",
                     AppMessage::OpenFile,
                     ColorToken::BgRaised,
+                    Some(ColorToken::BorderStrong),
                     ColorToken::TextPrimary
                 ),
             ]
@@ -1378,8 +1374,8 @@ fn field<'a>(
             .style(move |_| {
                 filled(
                     theme,
-                    ColorToken::BgApp,
-                    Some(ColorToken::Border),
+                    ColorToken::BgInput,
+                    Some(ColorToken::BorderControl),
                     NumberToken::RadiusSm.value(theme),
                 )
             })

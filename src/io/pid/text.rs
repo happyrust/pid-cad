@@ -30,6 +30,46 @@ pub(super) fn apply_text_height(entity: &mut EntityType, height_mm: f64) {
     }
 }
 
+/// The width factor a character style's stated character width letters at.
+///
+/// `width_permille` is thousandths of the face's own width. The `CPE-SQ`
+/// templates letter their whole title block at `800`, and the vendor's plots
+/// narrow it to match; lettered at the face's own width, the company name
+/// runs over the title block's right-hand line. `0` is the face's own width
+/// -- what nearly every style of the drawings' own lettering states -- and
+/// `pid-plot` reads it as no statement, the same as `1000`: neither gives a
+/// factor, and the entity keeps the width it was built with.
+///
+/// `pid-plot` rounds the fraction the way the Windows print path does, which
+/// letters `800` at 0.742..0.797 depending on the height. The canvas has no
+/// device font to round against, so it letters at the stated fraction.
+pub(super) fn text_width_factor(width_permille: Option<u16>) -> Option<f64> {
+    width_permille
+        .filter(|width| *width > 0 && *width != 1000)
+        .map(|width| f64::from(width) / 1000.0)
+}
+
+/// Letter a text entity at the width its character style states, as
+/// [`text_width_factor`] reads it.
+///
+/// The anchor does not move: the canvas steps back from the hot point by the
+/// run's advance measured at the width factor, so a right-aligned label
+/// narrows towards its right end and a centred one towards its middle.
+///
+/// Scoped like [`apply_text_height`]: the sheet's own lettering on
+/// [`LAYER_TEXT`]. A symbol's lettering takes its width in `letter_label`,
+/// from its own record.
+pub(super) fn apply_text_width(entity: &mut EntityType, factor: f64) {
+    if !(factor.is_finite() && factor > 0.0) {
+        return;
+    }
+    if let EntityType::Text(text) = entity {
+        if text.common.layer == LAYER_TEXT {
+            text.width_factor = factor;
+        }
+    }
+}
+
 /// Letter a text entity in the colour its character style states.
 ///
 /// Scoped the way [`apply_text_height`] is: only the sheet's own lettering on
@@ -88,20 +128,29 @@ pub(super) fn apply_text_alignment(entity: &mut EntityType, alignment: TextAlign
 /// Letter a text entity at the hot point its own record states.
 ///
 /// Every `igTextBox` ends its placement tail with a 4-byte trailer whose last
-/// byte is the label's own justification: `(code >> 4) % 3` picks the
+/// byte is the label's own justification. `(code >> 4) % 3` picks the
 /// horizontal point of the text box the insertion sits on — `0` left,
-/// `1` centre, `2` right — and `(code & 0x0F) % 3` the vertical one —
-/// `0` bottom, `1` top, `2` middle. It is the record's authored anchor and
-/// it overrides the paragraph style's declared alignment: `L=0.8MPa ` and
-/// `1/2"` share a `Center` paragraph yet letter left-on-top and centred
-/// respectively, and the `+3`-shifted high nibbles (`0x38`/`0x48`/`0x58`)
-/// mark labels attached to a parent symbol while folding into the same
-/// classes. Measured against the reference sheets: every one of the ~1,500
-/// records' insertion points lands on the glyph-box hot point its code
-/// names.
+/// `1` centre, `2` right. It is the record's authored anchor and it overrides
+/// the paragraph style's declared alignment: `L=0.8MPa ` and `1/2"` share a
+/// `Center` paragraph yet letter left and centred respectively, and the
+/// `+3`-shifted high nibbles (`0x38`/`0x48`/`0x58`) mark labels attached to a
+/// parent symbol while folding into the same classes.
+///
+/// The low nibble names the line of the face the insertion sits on
+/// ([`PidTextLine`]), and how far that line is above the baseline depends on
+/// the face and on what its character height measures ([`pid_text_drop`]).
+/// None of those lines is one the canvas aligns to -- its bottom is the
+/// descender line, its middle half the height, and it has no ascender line --
+/// so the run is lettered from its baseline and both points move down to it.
+/// Measured against the vendor's plots of the eleven reference drawings in
+/// `readings.md` §25.
 ///
 /// Scoped like [`apply_text_alignment`]: the sheet's own lettering only.
-pub(super) fn apply_text_anchor(entity: &mut EntityType, code: u8) {
+pub(super) fn apply_text_anchor(
+    entity: &mut EntityType,
+    code: u8,
+    lettering: Option<&pid_parse::style_link::ResolvedTextHeight>,
+) {
     use crate::entities::text::sync_text_alignment_point;
 
     if let EntityType::Text(text) = entity {
@@ -113,11 +162,157 @@ pub(super) fn apply_text_anchor(entity: &mut EntityType, code: u8) {
             2 => TextHorizontalAlignment::Right,
             _ => TextHorizontalAlignment::Left,
         };
-        text.vertical_alignment = match (code & 0x0F) % 3 {
-            0 => TextVerticalAlignment::Bottom,
-            1 => TextVerticalAlignment::Top,
-            _ => TextVerticalAlignment::Middle,
+        let line = PidTextLine::of(code, lettering.and_then(|style| style.leading));
+        let below = text.height
+            * pid_text_drop(
+                line,
+                lettering.and_then(|style| style.height_mode),
+                lettering.and_then(|style| style.font_name.as_deref()),
+            );
+        let (sin, cos) = text.rotation.sin_cos();
+        let (dx, dy) = (sin * below, -cos * below);
+        text.insertion_point.x += dx;
+        text.insertion_point.y += dy;
+        if let Some(point) = text.alignment_point.as_mut() {
+            point.x += dx;
+            point.y += dy;
+        }
+        text.vertical_alignment = TextVerticalAlignment::Baseline;
+        sync_text_alignment_point(text);
+    }
+}
+
+/// The line of the face a sheet record's insertion point sits on, as the low
+/// nibble of its anchor code names it: `pid-plot`'s `TextLine` for the
+/// sheet's records (`model.rs`, `TextLine::from_paragraph`). It measured them
+/// on the vendor's plot of drawing I: the baseline at the insertion for `0`,
+/// and 1.25 to 1.38 bodies below it for `1`, 0.99 to 1.02 for `2`, 0.47 to
+/// 0.50 for `5` and 0.49 to 0.69 for `8`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PidTextLine {
+    /// The baseline: `0`.
+    Bottom,
+    /// The middle of the body: every nibble not named here.
+    Middle,
+    /// The top of the body, one character height up: `2`.
+    Top,
+    /// The face's ascender line: `1` and `3`.
+    Ascender,
+    /// Half the ascender: `8` under a paragraph whose lines are spaced by the
+    /// face's ascent, which only the 10 pt Arial Narrow device tags are.
+    HalfAscender,
+}
+
+impl PidTextLine {
+    fn of(code: u8, leading: Option<pid_parse::style_link::LineLeading>) -> Self {
+        use pid_parse::style_link::LineLeading;
+
+        match (code & 0x0F, leading) {
+            (8, Some(LineLeading::FractionAscender)) => Self::HalfAscender,
+            (0, _) => Self::Bottom,
+            (1 | 3, _) => Self::Ascender,
+            (2, _) => Self::Top,
+            _ => Self::Middle,
+        }
+    }
+}
+
+/// How far below the insertion point a sheet record's baseline sits, in
+/// character heights: `pid-plot`'s `ScaleHeights::drop` (`write.rs`) on its
+/// table of the faces the drawings letter in.
+///
+/// The table gives each face's cap height and ascent in a 72 px body as
+/// Windows renders it (`REFERENCE_CAP_PX`); the descent is the rest of the
+/// body. A character height is the cap height unless the style's height mode
+/// says it is the ascent. The middle of the body is halfway between the
+/// ascender and descender lines -- half a cap height up in Arial Narrow,
+/// 0.539 of one in 仿宋 -- or half the cap height when the height is the
+/// ascent. A face outside the table is measured as Arial, the way `pid-plot`
+/// measures a typeface it does not know.
+fn pid_text_drop(line: PidTextLine, height_mode: Option<u8>, font_name: Option<&str>) -> f64 {
+    const SIMSUN: (f64, f64) = (49.2, 62.0);
+    const FANGSONG: (f64, f64) = (48.2, 62.0);
+    const ARIAL: (f64, f64) = (46.0, 58.0);
+    const ARIAL_NARROW: (f64, f64) = (44.0, 58.0);
+
+    let (cap, ascent) = match font_name {
+        Some("宋体" | "新宋体" | "ËÎÌå") => SIMSUN,
+        Some("仿宋" | "仿宋_GB2312") => FANGSONG,
+        Some(name) => match name.to_ascii_lowercase().as_str() {
+            "simsun" | "nsimsun" => SIMSUN,
+            "fangsong" => FANGSONG,
+            "arial narrow" => ARIAL_NARROW,
+            _ => ARIAL,
+        },
+        None => ARIAL,
+    };
+    let by_ascent = height_mode == Some(pid_parse::style_link::TEXT_HEIGHT_MODE_ASCENT);
+    let descent = 72.0 - ascent;
+    let above = match line {
+        PidTextLine::Bottom => 0.0,
+        PidTextLine::Middle if by_ascent => cap / 2.0,
+        PidTextLine::Middle => (ascent - descent) / 2.0,
+        PidTextLine::Top => cap,
+        PidTextLine::Ascender => ascent,
+        PidTextLine::HalfAscender => ascent / 2.0,
+    };
+    above / if by_ascent { ascent } else { cap }
+}
+
+/// Letter a record that states a text box from the edge of the box its
+/// paragraph names.
+///
+/// A boxed `igTextBox` is laid out in its box, not on its insertion point: the
+/// anchor code says where inside the box the insertion sits -- left, middle or
+/// right -- which recovers the box, and the paragraph's alignment says which
+/// edge of it the run hangs from, the left one when the paragraph states
+/// none. The vertical stays where [`apply_text_anchor`] put it. The
+/// connectors' drawing numbers are the measured case: a 45.3 mm box centred
+/// on the insertion, and the vendor's plots start a left-aligned number at the
+/// box's left edge and end a right-aligned one at its right edge, where
+/// centring the run on the insertion put it about 9 mm off (`pid-parse`'s
+/// `docs/analysis/2026-10-19-igtextbox-box-is-where-the-text-starts.md` and
+/// `docs/analysis/2026-10-20-a-field-hangs-from-its-box-edge.md`).
+///
+/// Call it after [`apply_text_anchor`] with the same code. Scoped like it: the
+/// sheet's own lettering only.
+pub(super) fn apply_text_box(
+    entity: &mut EntityType,
+    code: u8,
+    box_width_mm: Option<f64>,
+    paragraph: Option<TextAlignment>,
+) {
+    use crate::entities::text::sync_text_alignment_point;
+
+    let Some(width) = box_width_mm.filter(|width| width.is_finite() && *width > 0.0) else {
+        return;
+    };
+    if let EntityType::Text(text) = entity {
+        if text.common.layer != LAYER_TEXT {
+            return;
+        }
+        let insertion_share = match (code >> 4) % 3 {
+            1 => 0.5,
+            2 => 1.0,
+            _ => 0.0,
         };
+        let (alignment, edge_share) = match paragraph.unwrap_or(TextAlignment::Left) {
+            TextAlignment::Left => (TextHorizontalAlignment::Left, 0.0),
+            TextAlignment::Center => (TextHorizontalAlignment::Center, 0.5),
+            TextAlignment::Right => (TextHorizontalAlignment::Right, 1.0),
+        };
+        let back = width * (insertion_share - edge_share);
+        let (sin, cos) = text.rotation.sin_cos();
+        let (dx, dy) = (cos * back, sin * back);
+        // Past the anchor the two points are the same hot point, and the
+        // canvas letters from `alignment_point`: both move, or the run stays.
+        text.insertion_point.x -= dx;
+        text.insertion_point.y -= dy;
+        if let Some(point) = text.alignment_point.as_mut() {
+            point.x -= dx;
+            point.y -= dy;
+        }
+        text.horizontal_alignment = alignment;
         sync_text_alignment_point(text);
     }
 }

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "description": "Externalized DWG/DXF block-to-SPPID class & variant mapping rules (L3-1 / #124). Pairs with assets/pid-class-map.json.",
+  "ignore_layers": [
+    "DrawingBorder",
+    "HiddenObjects",
+    "Notes"
+  ],
+  "ignore_block_exact": [
+    "NORTH ARROW",
+    "1",
+    "_ARCHTICK"
+  ],
+  "ignore_block_prefixes": [
+    "REMARKS"
+  ],
+  "ignore_block_suffixes": [
+    "_DWG"
+  ],
+  "strip_suffixes": [
+    "__MIRROREDTEXT"
+  ],
+  "strip_leading_chars": "_",
+  "strip_trailing_digits_fallback": true,
+  "stem_aliases": {
+    "DCS_": "DCS FUNC ACCESS IN PRIME LOC"
+  },
+  "block_overrides": {},
+  "layer_class_hints": {
+    "10": "PIDProcessEquipment",
+    "11": "PIDPipingComponent",
+    "12": "PIDInstrument"
+  }
+}

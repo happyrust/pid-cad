@@ -758,8 +758,9 @@ fn a_symbols_lettering_takes_its_placements_colour_and_nothing_else() {
     );
 }
 
-/// A body's arc runs clockwise from its start angle to its end angle,
-/// and lands on the sheet as the DXF arc that covers the same points:
+/// A body's arc whose byte says clockwise runs clockwise from its start
+/// angle to its end angle, and lands on the sheet as the DXF arc that
+/// covers the same points:
 /// the Manifold's left cap, `270° -> 90°` about a centre on the shell's
 /// left edge, is drawn as the counter-clockwise arc `90° -> 270°`, whose
 /// midpoint bulges left out of the shell -- and a mirrored placement,
@@ -782,7 +783,7 @@ fn a_bodys_arc_is_drawn_as_the_counter_clockwise_arc_over_the_same_points() {
         radius: 0.03559,
         start_angle: 3.0 * FRAC_PI_2,
         end_angle: FRAC_PI_2,
-        clockwise: false,
+        clockwise: true,
     };
     let midpoint = |arc: &document::entities::Arc| {
         let sweep = (arc.end_angle - arc.start_angle).rem_euclid(2.0 * PI);
@@ -827,10 +828,9 @@ fn a_bodys_arc_is_drawn_as_the_counter_clockwise_arc_over_the_same_points() {
 
 /// A half-turn cap whose file angles are one ulp past `f64::consts::PI`
 /// is still a half-turn: `Parametric V Drum`'s left head reads `π -> 0`
-/// with `π` stored as `3.141592653589794`, and a bare `sweep > PI`
-/// comparison flipped it into its complement (the head caved into the
-/// shell). With the epsilon, a placement rotated a quarter turn draws
-/// the cap bulging left.
+/// clockwise, with `π` stored as `3.141592653589794`, and a placement
+/// rotated a quarter turn draws the cap bulging left of its chord rather
+/// than caved into the shell.
 #[test]
 fn a_half_turn_cap_within_one_ulp_of_pi_keeps_its_clockwise_half() {
     use std::f64::consts::PI;
@@ -849,7 +849,7 @@ fn a_half_turn_cap_within_one_ulp_of_pi_keeps_its_clockwise_half() {
         radius: 0.02691,
         start_angle: 3.141592653589794,
         end_angle: 0.0,
-        clockwise: false,
+        clockwise: true,
     };
     let Some(EntityType::Arc(arc)) = shape_primitive(&head, None, &placement, &HashMap::new())
     else {
@@ -861,6 +861,117 @@ fn a_half_turn_cap_within_one_ulp_of_pi_keeps_its_clockwise_half() {
     assert!(
         mid_x < arc.center.x - 1e-6,
         "the rotated head must bulge left of its chord: mid_x {mid_x} vs chord x {}",
+        arc.center.x
+    );
+}
+
+/// A body's arc is read by its record's last byte, the direction (pid-parse
+/// `docs/analysis/2026-10-23-the-arc-trailing-byte-is-the-direction.md`).
+/// `FT-Ultrasonic Flowmeter.sym`'s wave is two semicircles over the same
+/// angles, `90° -> 270°`, one clockwise and one counter-clockwise: the first
+/// passes 0° and the second 180°, so the wave reads as an S. A mirrored
+/// placement reflects both and keeps them on opposite sides.
+#[test]
+fn pid_symbol_arc_semicircles_over_the_same_angles_take_the_halves_their_bytes_name() {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let insertion = PidPoint { x: 0.0, y: 0.0 };
+    let placement = |scale_y: f64| Placement {
+        insertion: &insertion,
+        rotation: 0.0,
+        scale: [1.0, scale_y],
+        projection: Projection {
+            mm_per_unit: 1000.0,
+            band: SheetBand::for_page(None),
+        },
+    };
+    let wave = |center_y: f64, clockwise: bool| SymbolPrimitive::Arc {
+        center: (0.0, center_y),
+        radius: 0.00127,
+        start_angle: FRAC_PI_2,
+        end_angle: 3.0 * FRAC_PI_2,
+        clockwise,
+    };
+    let midpoint = |primitive: &SymbolPrimitive, scale_y: f64| {
+        let Some(EntityType::Arc(arc)) =
+            shape_primitive(primitive, None, &placement(scale_y), &HashMap::new())
+        else {
+            panic!("the wave did not build");
+        };
+        let sweep = (arc.end_angle - arc.start_angle).rem_euclid(2.0 * PI);
+        assert!((sweep - PI).abs() < 1e-9, "a semicircle stays one: {sweep}");
+        let angle = arc.start_angle + sweep / 2.0;
+        (
+            arc.center.x + arc.radius * angle.cos(),
+            arc.center.y + arc.radius * angle.sin(),
+        )
+    };
+    let close =
+        |(x, y): (f64, f64), (ex, ey): (f64, f64)| (x - ex).abs() < 1e-6 && (y - ey).abs() < 1e-6;
+    let upper = wave(0.00127, true);
+    let lower = wave(-0.00127, false);
+
+    let at = midpoint(&upper, 1.0);
+    assert!(
+        close(at, (1.27, 1.27)),
+        "the clockwise half passes 0°: {at:?}"
+    );
+    let at = midpoint(&lower, 1.0);
+    assert!(
+        close(at, (-1.27, -1.27)),
+        "the counter-clockwise half passes 180°: {at:?}"
+    );
+
+    let at = midpoint(&upper, -1.0);
+    assert!(
+        close(at, (1.27, -1.27)),
+        "mirrored, the clockwise half still passes 0°: {at:?}"
+    );
+    let at = midpoint(&lower, -1.0);
+    assert!(
+        close(at, (-1.27, 1.27)),
+        "mirrored, the counter-clockwise half still passes 180°: {at:?}"
+    );
+}
+
+/// An arc past a half-turn keeps its long side. `Local Vent`'s cap runs
+/// counter-clockwise `88.18° -> 273.44°`, 185.26°; folded to the short side
+/// it became the 174.74° on the other side of its chord, and the gooseneck
+/// bent down where the plot bends it up.
+#[test]
+fn pid_symbol_arc_past_a_half_turn_keeps_its_long_side() {
+    use std::f64::consts::PI;
+    let insertion = PidPoint { x: 0.0, y: 0.0 };
+    let placement = Placement {
+        insertion: &insertion,
+        rotation: 0.0,
+        scale: [1.0, 1.0],
+        projection: Projection {
+            mm_per_unit: 1000.0,
+            band: SheetBand::for_page(None),
+        },
+    };
+    let cap = SymbolPrimitive::Arc {
+        center: (0.00119, -0.00254),
+        radius: 0.00254,
+        start_angle: 88.18_f64.to_radians(),
+        end_angle: 273.44_f64.to_radians(),
+        clockwise: false,
+    };
+    let Some(EntityType::Arc(arc)) = shape_primitive(&cap, None, &placement, &HashMap::new())
+    else {
+        panic!("the cap did not build");
+    };
+    let sweep = (arc.end_angle - arc.start_angle).rem_euclid(2.0 * PI);
+    assert!(
+        (sweep.to_degrees() - 185.26).abs() < 1e-9,
+        "the cap keeps its 185.26°: {}",
+        sweep.to_degrees()
+    );
+    let mid = arc.start_angle + sweep / 2.0;
+    let mid_x = arc.center.x + arc.radius * mid.cos();
+    assert!(
+        mid_x < arc.center.x - 2.5,
+        "the cap bulges left of its centre: mid_x {mid_x} vs centre x {}",
         arc.center.x
     );
 }
@@ -1480,7 +1591,8 @@ fn a_linked_igr_overlays_its_drafting_on_pid_frame() {
         (width - 841.0).abs() < 0.01 && (height - 594.0).abs() < 0.01,
         "the A1 template's strokes span the A1 sheet, not {width} x {height}"
     );
-    let overlay = overlay_template(&template, &drawing, &mut doc, 1.0).expect("the fixture draws");
+    let overlay = overlay_template(&template, &drawing, &mut doc, 1.0, FramePlacement::NONE)
+        .expect("the fixture draws");
     assert!(overlay.drawn > 50, "a title block is more than a few lines");
     assert!(
         overlay.page_frame_covered,
@@ -1587,6 +1699,764 @@ fn a_restored_backup_has_the_symbol_library_its_drawings_look_for() {
     let drawing = restored.drawings.first().expect("the drawing is restored");
     assert!(found_under(drawing, &root).is_empty());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The view the importer states for a drawing that draws over the rectangle
+/// `drawn` spans, on `page` where it names one: its centre, its height, and
+/// the width it states it takes in (`view_height * aspect_ratio`).
+fn opening_view(page: Option<(f64, f64)>, drawn: [(f64, f64); 2]) -> ((f64, f64), f64, f64) {
+    let mut bounds = Bounds::new(Projection {
+        mm_per_unit: 1.0,
+        band: SheetBand::for_page(page),
+    });
+    for (x, y) in drawn {
+        bounds.add_mm(x, y);
+    }
+    let mut doc = Document::new();
+    frame_drawing(&mut doc, &bounds, page, (0.0, 0.0));
+    let view = doc
+        .vports
+        .iter()
+        .find(|vport| vport.name == "*Active")
+        .expect("the importer states the opening view");
+    (
+        (view.view_target.x, view.view_target.y),
+        view.view_height,
+        view.view_height * view.aspect_ratio,
+    )
+}
+
+fn assert_same_view(found: ((f64, f64), f64, f64), wanted: ((f64, f64), f64, f64)) {
+    let ((x, y), height, width) = found;
+    let ((wanted_x, wanted_y), wanted_height, wanted_width) = wanted;
+    let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs().max(1.0);
+    assert!(
+        close(x, wanted_x)
+            && close(y, wanted_y)
+            && close(height, wanted_height)
+            && close(width, wanted_width),
+        "found {found:?}, wanted {wanted:?}"
+    );
+}
+
+/// A landscape sheet -- `D07`'s A2, 594.328 x 420.566 -- opens centred on
+/// the sheet and as high as three quarters of its width with a twentieth
+/// over, 468.03 as measured, and the view states the width it has to take
+/// in: the sheet's with a twentieth over. Restored at its height alone, it
+/// showed 81.8% of the sheet's width on the canvas the backup panel leaves
+/// (`readings.md` §8).
+#[test]
+fn a_landscape_sheet_opens_on_a_view_that_states_its_width() {
+    let (width, height) = (594.328, 420.566);
+    assert_same_view(
+        opening_view(Some((width, height)), [(30.0, 40.0), (560.0, 400.0)]),
+        (
+            (width / 2.0, height / 2.0),
+            width * 0.75 * 1.05,
+            width * 1.05,
+        ),
+    );
+}
+
+/// A portrait sheet opens as high as the sheet with a twentieth over, and
+/// states the sheet's width with a twentieth over: a canvas no narrower
+/// than the sheet takes that in.
+#[test]
+fn a_portrait_sheet_opens_on_a_view_that_states_its_width() {
+    let (width, height) = (420.0, 594.0);
+    assert_same_view(
+        opening_view(Some((width, height)), [(20.0, 30.0), (400.0, 560.0)]),
+        ((width / 2.0, height / 2.0), height * 1.05, width * 1.05),
+    );
+}
+
+/// A drawing that names no sheet opens on what it draws, and states the
+/// width of what it draws with a twentieth over. What it draws here is
+/// narrower than 4:3, so the height is its own and not three quarters of
+/// its width.
+#[test]
+fn a_drawing_without_a_sheet_opens_on_a_view_that_states_the_width_it_draws_over() {
+    assert_same_view(
+        opening_view(None, [(10.0, 20.0), (310.0, 270.0)]),
+        ((160.0, 145.0), 250.0 * 1.05, 300.0 * 1.05),
+    );
+}
+
+/// The page sits where the drawing's frame record puts its corner: the
+/// border drawn where no template frame covers the page, and the view the
+/// drawing opens on, both start there, and keep the page's size. `N井场`
+/// states its page from (-1.04, -1.34) mm.
+#[test]
+fn pid_template_frame_corner_moves_the_page_border_and_the_opening_view() {
+    let page = (843.46, 596.71);
+    let corner = (-1.043573, -1.338395);
+    let mut doc = Document::new();
+    draw_page_border(&mut doc, Some(page), corner);
+    let border: Vec<(f64, f64)> = doc
+        .entities()
+        .find_map(|entity| match entity {
+            EntityType::LwPolyline(polyline) => Some(
+                polyline
+                    .vertices
+                    .iter()
+                    .map(|vertex| (vertex.location.x, vertex.location.y))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .expect("the border is drawn");
+    let (x, y) = corner;
+    assert_eq!(
+        border,
+        [
+            (x, y),
+            (x + page.0, y),
+            (x + page.0, y + page.1),
+            (x, y + page.1)
+        ]
+    );
+
+    let mut bounds = Bounds::new(Projection {
+        mm_per_unit: 1.0,
+        band: SheetBand::for_page(Some(page)),
+    });
+    bounds.add_mm(30.0, 40.0);
+    bounds.add_mm(800.0, 560.0);
+    let mut doc = Document::new();
+    frame_drawing(&mut doc, &bounds, Some(page), corner);
+    let view = doc
+        .vports
+        .iter()
+        .find(|vport| vport.name == "*Active")
+        .expect("the importer states the opening view");
+    let at_origin = opening_view(Some(page), [(30.0, 40.0), (800.0, 560.0)]);
+    assert_same_view(
+        (
+            (view.view_target.x, view.view_target.y),
+            view.view_height,
+            view.view_height * view.aspect_ratio,
+        ),
+        (
+            (x + page.0 / 2.0, y + page.1 / 2.0),
+            at_origin.1,
+            at_origin.2,
+        ),
+    );
+}
+
+/// A character style states its character width in thousandths of the
+/// face's own (`width_permille`), and only a narrowing or a widening becomes
+/// a width factor: `0` -- the face's own width, what nearly every style of a
+/// drawing's own lettering states -- reads like `1000` and like no statement
+/// at all, the way `pid-plot` reads it. Like the height, the width goes on
+/// the sheet's own lettering only.
+#[test]
+fn pid_text_width_only_a_stated_width_becomes_a_width_factor() {
+    assert_eq!(text_width_factor(None), None);
+    assert_eq!(text_width_factor(Some(0)), None);
+    assert_eq!(text_width_factor(Some(1000)), None);
+    assert_eq!(text_width_factor(Some(800)), Some(0.8));
+    assert_eq!(text_width_factor(Some(700)), Some(0.7));
+
+    let lettered_on = |layer: &str| {
+        let mut text = Text::new();
+        text.common.layer = layer.to_string();
+        let mut entity = EntityType::Text(text);
+        apply_text_width(&mut entity, 0.8);
+        match entity {
+            EntityType::Text(text) => text.width_factor,
+            _ => unreachable!("built as text"),
+        }
+    };
+    assert_eq!(lettered_on(LAYER_TEXT), 0.8);
+    assert_eq!(
+        lettered_on(LAYER_SYMBOL),
+        Text::new().width_factor,
+        "a symbol's lettering takes its width from its own record"
+    );
+}
+
+/// A symbol's own lettering letters at the width its record's style states:
+/// the `M` and `S` of the motor and solenoid operators in the vendor's
+/// drawings state `800`.
+#[test]
+fn pid_text_width_symbol_lettering_letters_at_its_styles_width() {
+    let insertion = PidPoint { x: 0.0, y: 0.0 };
+    let placement = Placement {
+        insertion: &insertion,
+        rotation: 0.0,
+        scale: [1.0, 1.0],
+        projection: Projection {
+            mm_per_unit: 1000.0,
+            band: SheetBand::for_page(None),
+        },
+    };
+    let primitive = SymbolPrimitive::Text {
+        text: "M".to_string(),
+        at: (0.0, 0.0),
+    };
+    let width_of = |width_permille: Option<u16>| {
+        let lettering = SymbolLettering {
+            anchor_code: 0x15,
+            rotation_rad: 0.0,
+            letter_height_m: 0.0,
+            height_m: Some(0.002_54),
+            height_mode: None,
+            width_permille,
+            rgb: Some([0, 0, 0]),
+            alignment: Some(TextAlignment::Center),
+            line_spacing: Some(1.0),
+            run_style_id: Default::default(),
+            spans: Default::default(),
+            font_name: Some("Arial".to_string()),
+        };
+        let Some(EntityType::Text(label)) =
+            shape_primitive(&primitive, Some(&lettering), &placement, &HashMap::new())
+        else {
+            panic!("symbol text did not build");
+        };
+        label.width_factor
+    };
+    assert_eq!(width_of(Some(800)), 0.8);
+    for width_permille in [None, Some(0), Some(1000)] {
+        assert_eq!(
+            width_of(width_permille),
+            Text::new().width_factor,
+            "{width_permille:?} keeps the face's own width"
+        );
+    }
+}
+
+/// The `CPE-SQ` title block letters at the width its styles state: every
+/// label of the template states `800`, and the vendor's plots narrow them to
+/// match. At the face's own width the company name ran over the title
+/// block's right-hand line.
+#[test]
+fn pid_text_width_template_lettering_letters_at_its_styles_width() {
+    let igr = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|dir| {
+            dir.join("pid-parse")
+                .join("test-file")
+                .join("Ref")
+                .join("Template Files")
+                .join("CPE-SQ-A1.igr")
+        })
+        .filter(|path| path.is_file());
+    let Some(igr) = igr else {
+        return; // fixture absent: soft-skip like the corpus tests do
+    };
+    let mut doc = Document::new();
+    let drawing = NormalizedPidGeometry {
+        page_dimensions_mm: Some((841.0, 594.0)),
+        ..Default::default()
+    };
+    let template = read_template(&igr, false).expect("the fixture parses");
+    overlay_template(&template, &drawing, &mut doc, 1.0, FramePlacement::NONE)
+        .expect("the fixture draws");
+    let widths: Vec<(String, f64)> = doc
+        .entities()
+        .filter_map(|entity| match entity {
+            EntityType::Text(text) => Some((text.value.clone(), text.width_factor)),
+            _ => None,
+        })
+        .collect();
+    assert!(widths.len() >= 30, "a title block's labels: {widths:?}");
+    let off: Vec<_> = widths
+        .iter()
+        .filter(|(_, width)| (width - 0.8).abs() > 1e-12)
+        .collect();
+    assert!(off.is_empty(), "labels not at the stated 0.8: {off:?}");
+}
+
+/// A drawing's own lettering letters at the width its style states, and only
+/// where its style states one: in the export fixture `A01`, `项目经理` states
+/// `800` and `文件号` beside it in the title block states `0`.
+#[test]
+fn pid_text_width_sheet_lettering_letters_at_its_styles_width() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|dir| {
+            dir.join("pid-parse")
+                .join("test-file")
+                .join("export-test")
+                .join("publish-data")
+                .join("A01")
+                .join("A01.pid")
+        })
+        .filter(|path| path.is_file());
+    let Some(path) = path else {
+        return; // fixture absent: soft-skip like the corpus tests do
+    };
+    let import = load_pid(&path).expect("the fixture imports");
+    // The drawing's own lettering, not a linked template's that may letter
+    // the same words.
+    let widths_of = |value: &str| -> Vec<f64> {
+        import
+            .document
+            .entities()
+            .filter(|entity| {
+                !entity
+                    .common()
+                    .extended_data
+                    .records()
+                    .iter()
+                    .flat_map(|record| record.values.iter())
+                    .any(|datum| {
+                        matches!(datum, document::xdata::XDataValue::String(s) if s.starts_with("template="))
+                    })
+            })
+            .filter_map(|entity| match entity {
+                EntityType::Text(text) if text.value == value => Some(text.width_factor),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(widths_of("项目经理"), vec![0.8]);
+    assert_eq!(widths_of("文件号"), vec![Text::new().width_factor]);
+}
+
+/// Narrowing a label keeps the hot point its record states. The canvas steps
+/// back from the anchor by the run's advance measured at the width factor,
+/// so a right-aligned label keeps its right end and a centred one its middle.
+#[test]
+fn pid_text_width_keeps_a_right_or_centred_labels_anchor() {
+    use crate::entities::text::text_run_placement_at_scale;
+    use crate::entities::text_support::text_local_bounds;
+
+    let doc = Document::new();
+    // `0x20` is right-on-bottom and `0x10` centre-on-bottom; beside each, the
+    // share of the run's advance that lies left of the anchor.
+    for (code, left_of_anchor) in [(0x20_u8, 1.0), (0x10, 0.5)] {
+        let laid_out = |factor: Option<f64>| {
+            let mut text = Text::new();
+            text.value = "华北油田苏桥储气库群".to_string();
+            text.height = 4.0;
+            text.insertion_point.x = 700.0;
+            text.insertion_point.y = 30.0;
+            text.common.layer = LAYER_TEXT.to_string();
+            let mut entity = EntityType::Text(text);
+            apply_text_anchor(&mut entity, code, None);
+            if let Some(factor) = factor {
+                apply_text_width(&mut entity, factor);
+            }
+            let EntityType::Text(text) = entity else {
+                unreachable!("built as text");
+            };
+            let placement = text_run_placement_at_scale(&text, &doc, 1.0);
+            let advance = text_local_bounds(
+                &placement.font,
+                &text.value,
+                placement.height,
+                placement.width_factor,
+                placement.oblique_angle,
+            )
+            .expect("the label lays out")
+            .advance;
+            let advance = f64::from(advance);
+            (placement.origin[0] + left_of_anchor * advance, advance)
+        };
+        let (anchor, advance) = laid_out(None);
+        let (narrow_anchor, narrow_advance) = laid_out(text_width_factor(Some(800)));
+        assert!((anchor - 700.0).abs() < 1e-3, "{code:#04x}: {anchor}");
+        assert!(
+            (narrow_anchor - 700.0).abs() < 1e-3,
+            "{code:#04x} narrowed: {narrow_anchor}"
+        );
+        assert!(
+            (narrow_advance / advance - 0.8).abs() < 1e-4,
+            "{code:#04x}: {narrow_advance} against {advance}"
+        );
+    }
+}
+
+/// A sheet label placed the way the importer places it -- the anchor code,
+/// then the box when the record states one -- and laid out the way the canvas
+/// lays it out: the entity, the run's origin and its advance along the
+/// baseline, in drawing millimetres.
+fn boxed_label(
+    value: &str,
+    insertion: (f64, f64),
+    rotation: f64,
+    code: u8,
+    box_width_mm: Option<f64>,
+    paragraph: Option<TextAlignment>,
+) -> (Text, [f64; 2], f64) {
+    use crate::entities::text::text_run_placement_at_scale;
+    use crate::entities::text_support::text_local_bounds;
+
+    let mut text = Text::new();
+    text.value = value.to_string();
+    text.height = 2.469;
+    text.insertion_point.x = insertion.0;
+    text.insertion_point.y = insertion.1;
+    text.rotation = rotation;
+    text.common.layer = LAYER_TEXT.to_string();
+    let mut entity = EntityType::Text(text);
+    apply_text_anchor(&mut entity, code, None);
+    apply_text_box(&mut entity, code, box_width_mm, paragraph);
+    let EntityType::Text(text) = entity else {
+        unreachable!("built as text");
+    };
+    let placement = text_run_placement_at_scale(&text, &Document::new(), 1.0);
+    let advance = text_local_bounds(
+        &placement.font,
+        &text.value,
+        placement.height,
+        placement.width_factor,
+        placement.oblique_angle,
+    )
+    .expect("the label lays out")
+    .advance;
+    let origin = [placement.origin[0], placement.origin[1]];
+    (text, origin, f64::from(advance))
+}
+
+/// A boxed record whose paragraph is left-aligned starts at its box's left
+/// edge. The connectors' drawing numbers are the case: a 45.307 mm box with
+/// the insertion at its middle (`0x48`), around a number some 28 mm long.
+#[test]
+fn pid_text_box_starts_a_left_aligned_run_at_the_box_left_edge() {
+    let label = |width| {
+        boxed_label(
+            "DWG-0100集05-37",
+            (106.956, 505.482),
+            0.0,
+            0x48,
+            width,
+            Some(TextAlignment::Left),
+        )
+    };
+    let (text, origin, advance) = label(Some(45.307));
+    let (_, unboxed, _) = label(None);
+    assert!(advance < 40.0, "a box wider than its text: {advance}");
+    assert_eq!(text.horizontal_alignment, TextHorizontalAlignment::Left);
+    assert!(
+        (origin[0] - (106.956 - 45.307 / 2.0)).abs() < 1e-6,
+        "starts at the box's left edge: {origin:?}"
+    );
+    assert!(
+        (origin[1] - unboxed[1]).abs() < 1e-9,
+        "keeps the line the anchor code puts it on: {origin:?} against {unboxed:?}"
+    );
+}
+
+/// A right-aligned paragraph hangs the run from the box's right edge: the
+/// three such numbers of the reference drawings end 0.05 mm inside it.
+#[test]
+fn pid_text_box_ends_a_right_aligned_run_at_the_box_right_edge() {
+    let (text, origin, advance) = boxed_label(
+        "DWG-0100集05-42",
+        (689.867, 300.0),
+        0.0,
+        0x48,
+        Some(45.307),
+        Some(TextAlignment::Right),
+    );
+    assert!(advance < 40.0, "a box wider than its text: {advance}");
+    assert_eq!(text.horizontal_alignment, TextHorizontalAlignment::Right);
+    assert!(
+        (origin[0] + advance - (689.867 + 45.307 / 2.0)).abs() < 1e-3,
+        "ends at the box's right edge: {origin:?} + {advance}"
+    );
+}
+
+/// A centred paragraph letters the run at the box's middle, and the anchor
+/// code still says where the box is: a left anchor (`0x05`) puts the
+/// insertion on the box's left edge, so the run centres half a box further
+/// along.
+#[test]
+fn pid_text_box_centres_a_centre_aligned_run_in_the_box() {
+    let (text, origin, advance) = boxed_label(
+        "323",
+        (63.922, 335.647),
+        0.0,
+        0x05,
+        Some(20.0),
+        Some(TextAlignment::Center),
+    );
+    assert!(advance < 20.0, "a box wider than its text: {advance}");
+    assert_eq!(text.horizontal_alignment, TextHorizontalAlignment::Center);
+    assert!(
+        (origin[0] + advance / 2.0 - (63.922 + 10.0)).abs() < 1e-3,
+        "centred in the box: {origin:?} + {advance} / 2"
+    );
+}
+
+/// The box lies along the baseline: a record lettered up the page moves up
+/// it, and stays where it was across it.
+#[test]
+fn pid_text_box_moves_a_rotated_run_along_its_baseline() {
+    let label = |width| {
+        boxed_label(
+            "DWG-0100集05-37",
+            (74.005, 283.540),
+            std::f64::consts::FRAC_PI_2,
+            0x48,
+            width,
+            Some(TextAlignment::Left),
+        )
+    };
+    let (_, origin, _) = label(Some(42.009));
+    let (_, unboxed, _) = label(None);
+    assert!(
+        (origin[1] - (283.540 - 42.009 / 2.0)).abs() < 1e-6,
+        "starts at the box's lower edge: {origin:?}"
+    );
+    // The canvas turns a run in `f32`: the centred one steps back half its
+    // advance along a cosine of about -4e-8, some 7e-7 mm across.
+    assert!(
+        (origin[0] - unboxed[0]).abs() < 1e-3,
+        "stays across the baseline: {origin:?} against {unboxed:?}"
+    );
+}
+
+/// A record that states no box letters at its insertion by its anchor code,
+/// whatever its paragraph says.
+#[test]
+fn pid_text_box_absent_leaves_the_anchor_code_in_charge() {
+    let mut anchored = Text::new();
+    anchored.value = "PG-1001".to_string();
+    anchored.height = 2.469;
+    anchored.insertion_point.x = 100.0;
+    anchored.insertion_point.y = 50.0;
+    anchored.common.layer = LAYER_TEXT.to_string();
+    let mut anchored = EntityType::Text(anchored);
+    apply_text_anchor(&mut anchored, 0x15, None);
+    let EntityType::Text(anchored) = anchored else {
+        unreachable!("built as text");
+    };
+    for paragraph in [
+        None,
+        Some(TextAlignment::Left),
+        Some(TextAlignment::Center),
+        Some(TextAlignment::Right),
+    ] {
+        let (text, _, _) = boxed_label("PG-1001", (100.0, 50.0), 0.0, 0x15, None, paragraph);
+        assert_eq!(
+            (
+                text.horizontal_alignment,
+                text.vertical_alignment,
+                text.insertion_point,
+                text.alignment_point,
+            ),
+            (
+                anchored.horizontal_alignment,
+                anchored.vertical_alignment,
+                anchored.insertion_point,
+                anchored.alignment_point,
+            ),
+            "{paragraph:?}"
+        );
+    }
+}
+
+/// Read from a drawing: `DWG-0100集05-38` is lettered twice on the corpus's
+/// `一级闪蒸分离器B`, by records that state a 45.307 mm box around
+/// insertions at x = 106.956 and 693.814 mm and a left-aligned paragraph. Both
+/// start at their box's left edge.
+#[test]
+fn pid_text_box_sheet_numbers_start_at_their_box_left_edge() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|dir| {
+            dir.join("pid-parse")
+                .join("test-file")
+                .join("集注站 凝析油闪蒸单元 一级闪蒸分离器B工艺及自控流程图.pid")
+        })
+        .filter(|path| path.is_file());
+    let Some(path) = path else {
+        return; // fixture absent: soft-skip like the corpus tests do
+    };
+    let import = load_pid(&path).expect("the fixture imports");
+    let mut starts: Vec<(TextHorizontalAlignment, f64)> = import
+        .document
+        .entities()
+        .filter_map(|entity| match entity {
+            EntityType::Text(text) if text.value == "DWG-0100集05-38" => Some((
+                text.horizontal_alignment,
+                text.alignment_point.unwrap_or(text.insertion_point).x,
+            )),
+            _ => None,
+        })
+        .collect();
+    starts.sort_by(|a, b| a.1.total_cmp(&b.1));
+    assert_eq!(starts.len(), 2, "{starts:?}");
+    for ((alignment, x), insertion) in starts.iter().zip([106.956, 693.814]) {
+        assert_eq!(*alignment, TextHorizontalAlignment::Left, "{starts:?}");
+        assert!((x - (insertion - 45.307 / 2.0)).abs() < 0.01, "{starts:?}");
+    }
+}
+
+/// A sheet record's lettering as its styles state it: 7 pt in `font`, the
+/// paragraph's lines spaced by `leading`, the height measured the way
+/// `height_mode` says.
+fn line_lettering(
+    font: &str,
+    leading: Option<pid_parse::style_link::LineLeading>,
+    height_mode: Option<u8>,
+) -> pid_parse::style_link::ResolvedTextHeight {
+    pid_parse::style_link::ResolvedTextHeight {
+        style_id: 0,
+        height_m: 0.002_469,
+        height_mode,
+        width_permille: None,
+        colour: None,
+        alignment: None,
+        line_spacing: None,
+        leading,
+        font_name: Some(font.to_string()),
+    }
+}
+
+/// Where the canvas starts the baseline of a 2.469 mm sheet record inserted
+/// at (100, 50) and placed by its anchor code, in drawing millimetres.
+fn line_origin(
+    code: u8,
+    rotation: f64,
+    lettering: Option<&pid_parse::style_link::ResolvedTextHeight>,
+) -> [f64; 2] {
+    use crate::entities::text::text_run_placement_at_scale;
+
+    let mut text = Text::new();
+    text.value = "PG-1001".to_string();
+    text.height = 2.469;
+    text.insertion_point.x = 100.0;
+    text.insertion_point.y = 50.0;
+    text.rotation = rotation;
+    text.common.layer = LAYER_TEXT.to_string();
+    let mut entity = EntityType::Text(text);
+    apply_text_anchor(&mut entity, code, lettering);
+    let EntityType::Text(text) = entity else {
+        unreachable!("built as text");
+    };
+    let placement = text_run_placement_at_scale(&text, &Document::new(), 1.0);
+    [placement.origin[0], placement.origin[1]]
+}
+
+/// The low nibble of a sheet record's anchor code names the line its
+/// insertion point sits on, the way `pid-plot` reads it: `0` the baseline,
+/// `1` and `3` the face's ascender line, `2` the top of the body. Arial
+/// Narrow's ascender is 58 px of a 72 px body whose capitals take 44.
+#[test]
+fn pid_text_line_low_nibble_names_the_line_the_insertion_sits_on() {
+    use pid_parse::style_link::LineLeading;
+
+    let narrow = line_lettering("Arial Narrow", Some(LineLeading::FractionTile), Some(0x0D));
+    for (code, above) in [
+        (0x10_u8, 0.0),
+        (0x00, 0.0),
+        (0x01, 58.0 / 44.0),
+        (0x21, 58.0 / 44.0),
+        (0x03, 58.0 / 44.0),
+        (0x12, 1.0),
+    ] {
+        let origin = line_origin(code, 0.0, Some(&narrow));
+        assert!(
+            (origin[1] - (50.0 - above * 2.469)).abs() < 1e-6,
+            "{code:#04x}: baseline at {}",
+            origin[1]
+        );
+    }
+}
+
+/// Any other low nibble centres the run on the middle of the body, halfway
+/// between the face's ascender and descender lines, so where that is depends
+/// on the face: half a cap height up in Arial Narrow, 0.539 of one in 仿宋
+/// and 0.478 in Arial. A face outside `pid-plot`'s table, and a record with
+/// no style at all, are measured as Arial, the way `pid-plot` measures them.
+#[test]
+fn pid_text_line_middle_sits_where_the_face_puts_it() {
+    use pid_parse::style_link::LineLeading;
+
+    for (font, middle) in [
+        (Some("Arial Narrow"), 22.0 / 44.0),
+        (Some("Arial"), 22.0 / 46.0),
+        (Some("宋体"), 26.0 / 49.2),
+        (Some("SimSun"), 26.0 / 49.2),
+        (Some("仿宋"), 26.0 / 48.2),
+        (Some("Braggadocio"), 22.0 / 46.0),
+        (None, 22.0 / 46.0),
+    ] {
+        let lettering =
+            font.map(|font| line_lettering(font, Some(LineLeading::FractionTile), Some(0x0D)));
+        for code in [0x05_u8, 0x15, 0x25, 0x18, 0x38, 0x48, 0x58] {
+            let origin = line_origin(code, 0.0, lettering.as_ref());
+            assert!(
+                (origin[1] - (50.0 - middle * 2.469)).abs() < 1e-6,
+                "{font:?} {code:#04x}: baseline at {}",
+                origin[1]
+            );
+        }
+    }
+}
+
+/// The device tags lettered in Arial Narrow under a paragraph whose lines are
+/// spaced by the face's ascent hang from half its ascender, 29 px against the
+/// 44 its capitals take, rather than from the middle of the body: `pid-plot`
+/// measured them 0.656 of a body down. Only an `8` does: a `5` under the same
+/// paragraph keeps the middle, and so does an `8` under any other spacing.
+#[test]
+fn pid_text_line_ascent_spaced_tags_hang_from_half_the_ascender() {
+    use pid_parse::style_link::LineLeading;
+
+    let ascent_spaced = line_lettering(
+        "Arial Narrow",
+        Some(LineLeading::FractionAscender),
+        Some(0x0D),
+    );
+    let tile_spaced = line_lettering("Arial Narrow", Some(LineLeading::FractionTile), Some(0x0D));
+    for (code, lettering, above) in [
+        (0x48_u8, &ascent_spaced, 29.0 / 44.0),
+        (0x08, &ascent_spaced, 29.0 / 44.0),
+        (0x45, &ascent_spaced, 0.5),
+        (0x48, &tile_spaced, 0.5),
+    ] {
+        let origin = line_origin(code, 0.0, Some(lettering));
+        assert!(
+            (origin[1] - (50.0 - above * 2.469)).abs() < 1e-6,
+            "{code:#04x} {:?}: baseline at {}",
+            lettering.leading,
+            origin[1]
+        );
+    }
+}
+
+/// A character style that measures its height to the face's ascent rather
+/// than its capitals puts the ascender line one height up and the rest in
+/// proportion: the top of the body at 44/58 of it and the middle at half
+/// that. No sheet or template record of the corpus states it.
+#[test]
+fn pid_text_line_ascent_measured_height_scales_by_the_ascent() {
+    let ascent_measured = line_lettering("Arial Narrow", None, Some(0x0C));
+    for (code, above) in [
+        (0x10_u8, 0.0),
+        (0x01, 1.0),
+        (0x12, 44.0 / 58.0),
+        (0x15, 22.0 / 58.0),
+    ] {
+        let origin = line_origin(code, 0.0, Some(&ascent_measured));
+        assert!(
+            (origin[1] - (50.0 - above * 2.469)).abs() < 1e-6,
+            "{code:#04x}: baseline at {}",
+            origin[1]
+        );
+    }
+}
+
+/// The baseline drops across the run rather than down the page: a record
+/// lettered up the page has its baseline to the right of the insertion.
+#[test]
+fn pid_text_line_rotated_record_drops_across_its_baseline() {
+    use pid_parse::style_link::LineLeading;
+
+    let narrow = line_lettering("Arial Narrow", Some(LineLeading::FractionTile), Some(0x0D));
+    let origin = line_origin(0x01, std::f64::consts::FRAC_PI_2, Some(&narrow));
+    assert!(
+        (origin[0] - (100.0 + 58.0 / 44.0 * 2.469)).abs() < 1e-6,
+        "{origin:?}"
+    );
+    assert!((origin[1] - 50.0).abs() < 1e-6, "{origin:?}");
 }
 
 /// A symbol placement is filed as one block reference (plan
@@ -1909,6 +2779,7 @@ pub(super) mod placements_as_blocks {
             ImportUnit::AssumedMetre,
             built,
             None,
+            FramePlacement::NONE,
             &mut doc,
         );
         (doc, summary)
@@ -3550,6 +4421,7 @@ pub(super) mod placements_as_blocks {
             ImportUnit::AssumedMetre,
             built,
             None,
+            FramePlacement::NONE,
             &mut doc,
         );
 
@@ -4710,6 +5582,7 @@ pub(super) mod placements_as_blocks {
             ImportUnit::AssumedMetre,
             built,
             None,
+            FramePlacement::NONE,
             &mut doc,
         );
 

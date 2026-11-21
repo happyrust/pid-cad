@@ -90,7 +90,8 @@ pub(super) struct TemplateOverlay {
 /// all; a name no file on disk answers, or answers only in another size, is
 /// said in the log. The drawing imports identically with or without the
 /// overlay -- the template is the frame around the drawing, never a
-/// prerequisite.
+/// prerequisite. Where it lands is the drawing's frame record's call,
+/// `placement`.
 pub(super) fn overlay_linked_template(
     parsed: &pid_parse::PidDocument,
     geometry: &NormalizedPidGeometry,
@@ -98,6 +99,7 @@ pub(super) fn overlay_linked_template(
     drawing: &Path,
     doc: &mut Document,
     paper_style_scale: f64,
+    placement: FramePlacement,
 ) -> Option<TemplateOverlay> {
     let links = linked_templates(parsed);
     if linked_template_prefixes(&links).is_empty() {
@@ -167,7 +169,7 @@ pub(super) fn overlay_linked_template(
         drawing.display(),
         template.file.display()
     );
-    overlay_template(&template, geometry, doc, paper_style_scale)
+    overlay_template(&template, geometry, doc, paper_style_scale, placement)
 }
 
 /// The distinct template targets the drawing's `JSite` OLE streams name, as
@@ -679,11 +681,16 @@ pub(super) fn read_template(igr: &Path, stated: bool) -> Option<ReadTemplate> {
 ///   ([`LAYER_SYMBOL_LABEL`]) and, where no body answers, the marker dot. A
 ///   title block wears neither, so a placement no body answers for draws
 ///   nothing and is counted in [`TemplateOverlay::missing`] instead.
+///
+/// Each entity, once styled, goes where the drawing's frame record puts the
+/// template ([`FramePlacement::place_template`]): the template is authored
+/// from its own corner, and the record scales and moves it onto the sheet.
 pub(super) fn overlay_template(
     template: &ReadTemplate,
     geometry: &NormalizedPidGeometry,
     doc: &mut Document,
     paper_style_scale: f64,
+    placement: FramePlacement,
 ) -> Option<TemplateOverlay> {
     let igr = template.file.as_path();
     let tpl_geometry = &template.geometry;
@@ -779,12 +786,21 @@ pub(super) fn overlay_template(
         let height_mm = text_style.map(|h| projection.mm(h.height_m));
         let text_rgb = text_style.and_then(pid_parse::style_link::ResolvedTextHeight::rgb);
         let text_alignment = text_style.and_then(|style| style.alignment);
+        let text_width = text_style.and_then(|style| text_width_factor(style.width_permille));
         // The record's own trailer byte beats the paragraph the same way the
         // sheet's labels do: the template letters its title-block captions at
         // the hot point it states (`0x10` bottom-centre up the left column).
-        let anchor_code = match &entity.kind {
-            PidGraphicKind::Text { anchor_code, .. } => Some(*anchor_code),
-            _ => None,
+        // A boxed record hangs from its box the same way too.
+        let (anchor_code, box_width_mm) = match &entity.kind {
+            PidGraphicKind::Text {
+                anchor_code,
+                text_box_width,
+                ..
+            } => (
+                Some(*anchor_code),
+                text_box_width.map(|width| projection.mm(width)),
+            ),
+            _ => (None, None),
         };
         let font_style = text_style
             .and_then(|style| style.font_name.as_deref())
@@ -802,11 +818,17 @@ pub(super) fn overlay_template(
             if let Some(mm) = height_mm {
                 apply_text_height(&mut one, mm);
             }
+            if let Some(factor) = text_width {
+                apply_text_width(&mut one, factor);
+            }
             if let Some(rgb) = text_rgb {
                 apply_text_colour(&mut one, rgb);
             }
             match anchor_code {
-                Some(code) => apply_text_anchor(&mut one, code),
+                Some(code) => {
+                    apply_text_anchor(&mut one, code, text_style);
+                    apply_text_box(&mut one, code, box_width_mm, text_alignment);
+                }
                 None => {
                     if let Some(alignment) = text_alignment {
                         apply_text_alignment(&mut one, alignment);
@@ -838,6 +860,7 @@ pub(super) fn overlay_template(
                     .and_then(|layer| layer.name.as_deref()),
                 template_symbol.as_deref(),
             );
+            placement.place_template(&mut one);
             if let Some((width, height)) = geometry.page_dimensions_mm {
                 if let Some((min_x, min_y, max_x, max_y)) = drawn_extent(&one) {
                     if (max_x - min_x - width).abs() <= PAGE_MATCH_TOLERANCE_MM
@@ -1521,11 +1544,20 @@ mod tests {
 
     /// Overlay `template` onto `doc` as the border of an A2 sheet.
     fn overlay_on_a2(template: &ReadTemplate, doc: &mut Document) -> Option<TemplateOverlay> {
+        overlay_placed_on_a2(template, doc, FramePlacement::NONE)
+    }
+
+    /// [`overlay_on_a2`] on a sheet whose frame record states `placement`.
+    fn overlay_placed_on_a2(
+        template: &ReadTemplate,
+        doc: &mut Document,
+        placement: FramePlacement,
+    ) -> Option<TemplateOverlay> {
         let sheet = NormalizedPidGeometry {
             page_dimensions_mm: Some(A2),
             ..Default::default()
         };
-        overlay_template(template, &sheet, doc, 1.0)
+        overlay_template(template, &sheet, doc, 1.0, placement)
     }
 
     /// A placement of the symbol filed at `path`, unrotated and unscaled.
@@ -1774,8 +1806,8 @@ mod tests {
             &mut doc,
             1.0,
         );
-        let overlay =
-            overlay_template(&template, &sheet, &mut doc, 1.0).expect("the template draws");
+        let overlay = overlay_template(&template, &sheet, &mut doc, 1.0, FramePlacement::NONE)
+            .expect("the template draws");
         assert_eq!(
             overlay.drawn, 3,
             "the template's own line and the two strokes of its valve"
@@ -1788,6 +1820,7 @@ mod tests {
             ImportUnit::AssumedMetre,
             built,
             Some(&overlay),
+            FramePlacement::NONE,
             &mut doc,
         );
 
@@ -1947,5 +1980,242 @@ mod tests {
                 .any(|entity| matches!(entity, EntityType::Circle(_) | EntityType::Text(_))),
             "neither a marker dot nor the symbol's name"
         );
+    }
+
+    /// An A2 sheet's page frame record as `pid-parse` decodes it: the range
+    /// origin `lo_mm`, and the translation `t_mm` and scale `scale` of what
+    /// it frames.
+    fn frame(
+        lo_mm: (f64, f64),
+        t_mm: (f64, f64),
+        scale: f64,
+    ) -> pid_parse::DecodedIgSmartFrame2dRecord {
+        pid_parse::DecodedIgSmartFrame2dRecord {
+            byte_start: 0,
+            byte_end: 0,
+            type_code: 0x003D,
+            type_flags: 0,
+            bytes_to_follow: 0,
+            oid: 1,
+            parent_ref: 0,
+            sheet_layer_ref: 0,
+            content_flags: 0x8000,
+            link_flags: 0x40,
+            state: pid_parse::SmartFrame2dState::Linked,
+            range_origin_m: Some([lo_mm.0 / MM_PER_METRE, lo_mm.1 / MM_PER_METRE]),
+            extent_width_m: A2.0 / MM_PER_METRE,
+            extent_height_m: A2.1 / MM_PER_METRE,
+            aspect_ratio: std::f64::consts::FRAC_1_SQRT_2,
+            content_transform: Some(pid_parse::SmartFrameContentTransformRecord {
+                linear: [1.0, 0.0, 0.0, 1.0],
+                translation_m: [t_mm.0 / MM_PER_METRE, t_mm.1 / MM_PER_METRE],
+                scale,
+            }),
+        }
+    }
+
+    /// The frame record moves the template as one: what the template states
+    /// in records of its own and what its placements draw all move by the
+    /// translation the record states, and a scale it states scales them
+    /// about the template's origin first -- positions, radii and the height
+    /// of the lettering, never the pen or an angle. The corner the record
+    /// states is the page's, and moves none of it. The plant backup's
+    /// `CPECCHB-SQ-A2` sheets state (0.388, 0.566) mm; the small package's
+    /// `DWG-0202GP06-01` states (0.509, 0.629) mm and a scale of 0.9979.
+    #[test]
+    fn pid_template_frame_placement_moves_everything_the_template_draws() {
+        let sign_off = pid_parse::PidSymbolDefinitionRef { site: 16, sheet: 3 };
+        let shown = Some(("Default", Some(true)));
+        let stroke = SymbolPrimitive::Line {
+            start: (0.0, 0.0),
+            end: (0.008, 0.0),
+        };
+        let caption = SymbolPrimitive::Text {
+            text: "会 签".to_string(),
+            at: (0.002, 0.010),
+        };
+        let arc = PidGraphicKind::Arc {
+            center: point(0.300, 0.200),
+            radius: 0.010,
+            start_angle: 0.0,
+            end_angle: 1.0,
+            clockwise: false,
+        };
+        let template = template_of(
+            "SIGN-A2.igr",
+            NormalizedPidGeometry {
+                entities: vec![
+                    entity(line((0.0, 0.0), (0.594, 0.0)), shown),
+                    entity(lettering((0.500, 0.030)), shown),
+                    entity(arc, shown),
+                    entity(placement((0.010, 0.020), "hqz.sym", Some(sign_off)), shown),
+                ],
+                symbol_definitions: vec![cached_body(
+                    sign_off,
+                    vec![(stroke, 8, pen(0.25)), (caption, 8, None)],
+                )],
+                ..Default::default()
+            },
+        );
+        let drawn = |placement: FramePlacement| {
+            let mut doc = Document::new();
+            overlay_placed_on_a2(&template, &mut doc, placement).expect("the template draws");
+            doc.entities().cloned().collect::<Vec<EntityType>>()
+        };
+        let authored = drawn(FramePlacement::NONE);
+        assert_eq!(
+            authored.len(),
+            5,
+            "the line, the lettering, the arc, the body's stroke and its caption"
+        );
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        for (scale, offset) in [
+            (1.0, (0.388407, 0.565648)),
+            (0.997902280, (0.508732, 0.628601)),
+        ] {
+            let placed = drawn(FramePlacement {
+                corner_mm: (-1.043573, -1.338395),
+                template_offset_mm: offset,
+                template_scale: scale,
+            });
+            assert_eq!(placed.len(), authored.len());
+            let moved = |x: f64, y: f64| (scale * x + offset.0, scale * y + offset.1);
+            for (before, after) in authored.iter().zip(&placed) {
+                let (x0, y0, x1, y1) = drawn_extent(before).expect("an extent");
+                let (u0, v0, u1, v1) = drawn_extent(after).expect("an extent");
+                let (low, high) = (moved(x0, y0), moved(x1, y1));
+                assert!(
+                    near(u0, low.0) && near(v0, low.1) && near(u1, high.0) && near(v1, high.1),
+                    "scale {scale}, offset {offset:?}: {before:?} became {after:?}"
+                );
+                assert_eq!(
+                    after.common().line_weight,
+                    before.common().line_weight,
+                    "the pen does not scale"
+                );
+                match (before, after) {
+                    (EntityType::Text(before), EntityType::Text(after)) => {
+                        assert!(
+                            near(after.height, scale * before.height),
+                            "the lettering scales"
+                        );
+                        assert_eq!(after.rotation, before.rotation);
+                    }
+                    (EntityType::Arc(before), EntityType::Arc(after)) => assert_eq!(
+                        (after.start_angle, after.end_angle),
+                        (before.start_angle, before.end_angle),
+                        "an arc keeps its angles"
+                    ),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// A frame record that states no offset -- range origin and translation
+    /// zero, scale one -- is no placement, and no placement leaves what the
+    /// template drew as it was, bit for bit: not even a negative zero turns
+    /// positive.
+    #[test]
+    fn pid_template_frame_placement_of_no_offset_leaves_the_template_as_it_was() {
+        assert_eq!(
+            FramePlacement::agreed(&[frame((0.0, 0.0), (0.0, 0.0), 1.0)]),
+            FramePlacement::NONE
+        );
+        let mut title = Text::new();
+        title.value = "TITLE".to_string();
+        title.insertion_point = Vector3::new(500.0, -0.0, 0.0);
+        title.height = 3.5;
+        let mut drawn = vec![
+            EntityType::Line(Line::from_points(
+                Vector3::new(-0.0, 12.5, 0.0),
+                Vector3::new(594.0, -0.0, 0.0),
+            )),
+            EntityType::Text(title),
+        ];
+        let before = format!("{drawn:?}");
+        for entity in &mut drawn {
+            FramePlacement::NONE.place_template(entity);
+        }
+        assert_eq!(format!("{drawn:?}"), before);
+    }
+
+    /// The placement is the one every page frame of the sheet states, and
+    /// only one that reads as an offset on paper -- `pid-plot`'s rule. A
+    /// frame that is not a page, or states no range origin or no transform,
+    /// has no say; frames that disagree, a rotated content, or a value of
+    /// 10 mm or more -- or a scale 1 % or more off one -- place nothing.
+    #[test]
+    fn pid_template_frame_placement_is_the_offset_every_page_frame_states() {
+        let close =
+            |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9;
+        let stated = frame((0.0, 0.0), (0.388407, 0.565648), 1.0);
+        let placed = FramePlacement::agreed(std::slice::from_ref(&stated));
+        assert!(
+            close(placed.corner_mm, (0.0, 0.0))
+                && close(placed.template_offset_mm, (0.388407, 0.565648))
+                && placed.template_scale == 1.0,
+            "{placed:?}"
+        );
+        let cornered =
+            FramePlacement::agreed(&[frame((-1.043573, -1.338395), (0.253827, 0.214992), 1.0)]);
+        assert!(
+            close(cornered.corner_mm, (-1.043573, -1.338395))
+                && close(cornered.template_offset_mm, (0.253827, 0.214992)),
+            "{cornered:?}"
+        );
+        assert_eq!(
+            FramePlacement::agreed(&[stated.clone(), stated.clone()]),
+            placed,
+            "a placement two frames state is stated once"
+        );
+        let not_a_page = pid_parse::DecodedIgSmartFrame2dRecord {
+            state: pid_parse::SmartFrame2dState::LocallyLinked,
+            ..frame((5.0, 5.0), (5.0, 5.0), 1.0)
+        };
+        let no_origin = pid_parse::DecodedIgSmartFrame2dRecord {
+            range_origin_m: None,
+            ..frame((6.0, 6.0), (6.0, 6.0), 1.0)
+        };
+        let no_transform = pid_parse::DecodedIgSmartFrame2dRecord {
+            content_transform: None,
+            ..frame((7.0, 7.0), (7.0, 7.0), 1.0)
+        };
+        assert_eq!(
+            FramePlacement::agreed(&[not_a_page, stated.clone(), no_origin, no_transform]),
+            placed,
+            "frames that are no page, or state no origin or transform, have no say"
+        );
+
+        assert_eq!(
+            FramePlacement::agreed(std::iter::empty()),
+            FramePlacement::NONE
+        );
+        assert_eq!(
+            FramePlacement::agreed(&[stated.clone(), frame((0.0, 0.0), (0.150015, 0.399965), 1.0)]),
+            FramePlacement::NONE,
+            "frames that disagree"
+        );
+        let mut turned = stated.clone();
+        if let Some(transform) = turned.content_transform.as_mut() {
+            transform.linear = [0.0, -1.0, 1.0, 0.0];
+        }
+        assert_eq!(
+            FramePlacement::agreed(&[stated.clone(), turned]),
+            FramePlacement::NONE,
+            "a rotated content"
+        );
+        for far in [
+            frame((10.0, 0.0), (0.0, 0.0), 1.0),
+            frame((0.0, 0.0), (0.3, -10.0), 1.0),
+            frame((0.0, 0.0), (0.3, 0.3), 1.01),
+            frame((f64::NAN, 0.0), (0.3, 0.3), 1.0),
+        ] {
+            assert_eq!(
+                FramePlacement::agreed(std::slice::from_ref(&far)),
+                FramePlacement::NONE,
+                "{far:?}"
+            );
+        }
     }
 }

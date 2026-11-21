@@ -539,9 +539,18 @@ pub fn load_pid_with(path: &Path, options: &PidImportOptions) -> Result<PidImpor
     // frame rather than carried in its records: resolve the `.igr` and
     // overlay what it decodes to -- title block, margin strips, the real
     // frame -- before `finish` decides whether the synthetic page border is
-    // still needed.
-    let template =
-        overlay_linked_template(&parsed, &geometry, &unit, path, &mut doc, paper_style_scale);
+    // still needed. The sheet's frame record says where the template and the
+    // page sit; both read it from here.
+    let placement = FramePlacement::read(&parsed);
+    let template = overlay_linked_template(
+        &parsed,
+        &geometry,
+        &unit,
+        path,
+        &mut doc,
+        paper_style_scale,
+        placement,
+    );
     let summary = finish(
         path,
         &geometry,
@@ -550,6 +559,7 @@ pub fn load_pid_with(path: &Path, options: &PidImportOptions) -> Result<PidImpor
         unit,
         built,
         template.as_ref(),
+        placement,
         &mut doc,
     );
     doc.source_path = Some(path.to_string_lossy().into_owned());
@@ -617,6 +627,7 @@ fn finish(
     unit: ImportUnit,
     built: Built,
     template: Option<&TemplateOverlay>,
+    placement: FramePlacement,
     doc: &mut Document,
 ) -> ImportSummary {
     let Built {
@@ -668,9 +679,9 @@ fn finish(
     // synthetic rectangle only stands in where it did not -- drawing both
     // would double the border.
     if !template.is_some_and(|overlay| overlay.page_frame_covered) {
-        draw_page_border(doc, page_mm);
+        draw_page_border(doc, page_mm, placement.corner_mm);
     }
-    frame_drawing(doc, &bounds, page_mm);
+    frame_drawing(doc, &bounds, page_mm, placement.corner_mm);
     // The drawing's own view filter: the sheet layers the file switches off
     // start switched off here too, and the entities on them go dark by their
     // own `invisible` bit as well as by sitting on `PID-HIDDEN`. Stored in the
@@ -759,6 +770,25 @@ fn ensure_layer(doc: &mut Document, name: &str, colour: Color, visible: bool, pl
     layer.flags.off = !visible;
     layer.is_plottable = plottable;
     let _ = doc.layers.add(layer);
+}
+
+/// A document as the importer leaves a drawing that draws nothing on a
+/// `width` x `height` sheet (millimetres): the border drawn and the opening
+/// view stated. The repository holds no `.pid` the importer reads, so a
+/// test that opens one elsewhere opens this.
+#[cfg(test)]
+pub(crate) fn imported_sheet(page_mm: (f64, f64)) -> Document {
+    let mut doc = Document::new();
+    ensure_taxonomy_layer(&mut doc, LAYER_FRAME);
+    draw_page_border(&mut doc, Some(page_mm), (0.0, 0.0));
+    let mut bounds = Bounds::new(Projection {
+        mm_per_unit: 1.0,
+        band: SheetBand::for_page(Some(page_mm)),
+    });
+    bounds.add_mm(0.0, 0.0);
+    bounds.add_mm(page_mm.0, page_mm.1);
+    frame_drawing(&mut doc, &bounds, Some(page_mm), (0.0, 0.0));
+    doc
 }
 
 /// The imported sheets the program-level tests of a symbol open: the first

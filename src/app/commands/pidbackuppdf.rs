@@ -31,6 +31,8 @@ use crate::io::pid_backup_browse::{BackupIndex, DrawingEntry};
 use crate::io::pid_backup_pdf::{self, PdfDrawing, PdfError, PdfOutcome, PdfProgress, PdfRequest};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::ui::command_line::CommandLine;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 /// What an export comes to, once it has ended.
 #[cfg(not(target_arch = "wasm32"))]
@@ -50,20 +52,27 @@ pub(in crate::app) struct BackupPdf {
     /// What the last export that ran came to; `None` before the first. One
     /// that was refused before it started is not among them.
     last: Option<Result<PdfOutcome, PdfError>>,
+    /// `backup_root` of the package that produced `last`.
+    last_backup_root: Option<PathBuf>,
     /// The export itself: [`pid_backup_pdf::export_in_background`], or what
-    /// a test puts in its place.
-    export: Export,
+    /// a test puts in its place: PIDBACKUPEXPORT's tests put one there too,
+    /// to run an export to PDF beside theirs.
+    pub(super) export: Export,
 }
 
 /// An export on its way.
 #[cfg(not(target_arch = "wasm32"))]
 struct Running {
+    /// `backup_root` of the package being exported.
+    backup_root: PathBuf,
     /// Where it writes, as the command was given it.
     out_dir: PathBuf,
     /// How many drawings it was given.
     drawings: usize,
     /// How many of them it is through with.
     progress: PdfProgress,
+    /// When the export started.
+    started: Instant,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -72,10 +81,53 @@ impl Default for BackupPdf {
         Self {
             running: None,
             last: None,
+            last_backup_root: None,
             export: Box::new(|request, progress| {
                 Box::pin(pid_backup_pdf::export_in_background(request, progress))
             }),
         }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BackupPdf {
+    /// Whether a PDF export is currently running on a worker thread.
+    pub(in crate::app) fn is_running(&self) -> bool {
+        self.running.is_some()
+    }
+
+    /// `(out_dir, done, total, elapsed)` of the running PDF export at `now`.
+    pub(in crate::app) fn running_status(
+        &self,
+        now: Instant,
+    ) -> Option<(&std::path::Path, usize, usize, std::time::Duration)> {
+        let running = self.running.as_ref()?;
+        let total = match running.progress.total() {
+            0 => running.drawings,
+            counted => counted,
+        };
+        let elapsed = now.saturating_duration_since(running.started);
+        Some((
+            running.out_dir.as_path(),
+            running.progress.done(),
+            total,
+            elapsed,
+        ))
+    }
+
+    /// Structured outcome of the most recent PDF export that ran to completion.
+    pub(in crate::app) fn last_outcome(&self) -> Option<&Result<PdfOutcome, PdfError>> {
+        self.last.as_ref()
+    }
+
+    /// Structured outcome only when it belongs to `backup_root`.
+    pub(in crate::app) fn last_outcome_for(
+        &self,
+        backup_root: &std::path::Path,
+    ) -> Option<&Result<PdfOutcome, PdfError>> {
+        (self.last_backup_root.as_deref() == Some(backup_root))
+            .then_some(self.last.as_ref())
+            .flatten()
     }
 }
 
@@ -100,8 +152,7 @@ fn request_for(index: &BackupIndex, out_dir: PathBuf) -> PdfRequest {
 /// takes its restore folder from, and as PIDPLOT takes a PDF from the
 /// drawing's -- and not from wherever the application was started.
 #[cfg(not(target_arch = "wasm32"))]
-fn folder_asked_for(index: &BackupIndex, folder: &str) -> PathBuf {
-    let folder = PathBuf::from(folder);
+pub(super) fn resolve_folder_for(index: &BackupIndex, folder: PathBuf) -> PathBuf {
     let asked = match index.source.parent() {
         Some(beside) if folder.is_relative() => beside.join(folder),
         _ => folder,
@@ -136,7 +187,12 @@ fn say_result(command_line: &mut CommandLine, result: &Result<PdfOutcome, PdfErr
 
 impl OpenCADStudio {
     pub(super) fn dispatch_pidbackuppdf(&mut self, cmd: &str, _i: usize) -> Option<Task<Message>> {
-        let rest = cmd.strip_prefix("PIDBACKUPPDF")?;
+        let verb = "PIDBACKUPPDF";
+        let head = cmd.get(..verb.len())?;
+        if !head.eq_ignore_ascii_case(verb) {
+            return None;
+        }
+        let rest = &cmd[verb.len()..];
         if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
             return None;
         }
@@ -175,44 +231,20 @@ impl OpenCADStudio {
     /// that cannot start -- another runs, no package is open, the folder
     /// will not do -- makes nothing and is no export to speak of later.
     fn start_pid_backup_pdf(&mut self, folder: &str) -> Result<Task<Message>, PdfError> {
-        if self.pid_backup_pdf.running.is_some() {
-            return Err(PdfError::Busy);
-        }
-        let index = self.pid_backup_browser.index().ok_or(PdfError::NoPackage)?;
-        let request = request_for(index, folder_asked_for(index, folder));
-        pid_backup_pdf::check(&request)?;
-        let (drawings, out_dir) = (request.drawings.len(), request.out_dir.clone());
-        self.command_line.push_output(&format!(
-            "PIDBACKUPPDF: exporting {drawings} drawing(s) to {} ...",
-            out_dir.display()
-        ));
-        let progress = PdfProgress::default();
-        self.pid_backup_pdf.running = Some(Running {
-            out_dir,
-            drawings,
-            progress: progress.clone(),
-        });
-        let export = (self.pid_backup_pdf.export)(request, progress);
-        Ok(Task::perform(export, Message::PidBackupPdfFinished))
+        self.start_pid_backup_pdf_ui(PathBuf::from(folder))
     }
 
     /// The bare verb: how far the export that runs has come, what the last
     /// one came to, or that there has been none.
     fn say_where_the_pid_backup_pdf_stands(&mut self) {
-        let BackupPdf { running, last, .. } = &self.pid_backup_pdf;
-        if let Some(running) = running {
-            // Until the export has counted its drawings, they are the ones
-            // it was given.
-            let total = match running.progress.total() {
-                0 => running.drawings,
-                counted => counted,
-            };
+        if let Some((out_dir, done, total, _elapsed)) =
+            self.pid_backup_pdf.running_status(Instant::now())
+        {
             self.command_line.push_output(&format!(
-                "PIDBACKUPPDF: exporting to {}: {} of {total} drawing(s) done",
-                running.out_dir.display(),
-                running.progress.done()
+                "PIDBACKUPPDF: exporting to {}: {done} of {total} drawing(s) done",
+                out_dir.display(),
             ));
-        } else if let Some(last) = last {
+        } else if let Some(last) = self.pid_backup_pdf.last_outcome() {
             say_result(&mut self.command_line, last);
         } else {
             self.command_line.push_output(NO_EXPORT_YET);
@@ -224,7 +256,17 @@ impl OpenCADStudio {
         &mut self,
         result: Result<PdfOutcome, PdfError>,
     ) {
-        self.pid_backup_pdf.running = None;
+        let prev_root = self
+            .pid_backup_pdf
+            .running
+            .take()
+            .map(|r| r.backup_root)
+            .or_else(|| {
+                self.pid_backup_browser
+                    .index()
+                    .map(|idx| idx.backup_root.clone())
+            });
+        self.pid_backup_pdf.last_backup_root = prev_root;
         say_result(&mut self.command_line, &result);
         self.pid_backup_pdf.last = Some(result);
     }
@@ -233,7 +275,7 @@ impl OpenCADStudio {
     /// restore while it runs. Says so when it has to, to the one who asked
     /// for the clearing.
     pub(super) fn pid_backup_pdf_keeps_the_cache(&mut self) -> bool {
-        if self.pid_backup_pdf.running.is_none() {
+        if !self.pid_backup_pdf.is_running() {
             return false;
         }
         let code = PdfError::Busy.code();
@@ -245,6 +287,53 @@ impl OpenCADStudio {
             ),
         );
         true
+    }
+
+    /// Validate a PDF-export request from the UI without writing files.
+    pub(in crate::app) fn check_pid_backup_pdf_ui(
+        &self,
+        out_dir: PathBuf,
+    ) -> Result<PdfRequest, PdfError> {
+        if self.pid_backup_pdf.is_running() {
+            return Err(PdfError::Busy);
+        }
+        let index = self.pid_backup_browser.index().ok_or(PdfError::NoPackage)?;
+        if out_dir.as_os_str().is_empty() {
+            return Err(PdfError::TargetInvalid(
+                "no folder to export to was given".to_string(),
+            ));
+        }
+        let request = request_for(index, resolve_folder_for(index, out_dir));
+        pid_backup_pdf::check(&request)?;
+        Ok(request)
+    }
+
+    /// Start a PDF export from the UI, sharing state and guards with
+    /// `PIDBACKUPPDF`.
+    pub(in crate::app) fn start_pid_backup_pdf_ui(
+        &mut self,
+        out_dir: PathBuf,
+    ) -> Result<Task<Message>, PdfError> {
+        let request = self.check_pid_backup_pdf_ui(out_dir)?;
+        let (backup_root, drawings, out_dir) = (
+            request.package_dir.clone(),
+            request.drawings.len(),
+            request.out_dir.clone(),
+        );
+        self.command_line.push_output(&format!(
+            "PIDBACKUPPDF: exporting {drawings} drawing(s) to {} ...",
+            out_dir.display()
+        ));
+        let progress = PdfProgress::default();
+        self.pid_backup_pdf.running = Some(Running {
+            backup_root,
+            out_dir,
+            drawings,
+            progress: progress.clone(),
+            started: Instant::now(),
+        });
+        let export = (self.pid_backup_pdf.export)(request, progress);
+        Ok(Task::perform(export, Message::PidBackupPdfFinished))
     }
 }
 
@@ -1508,5 +1597,111 @@ mod tests {
             unmet.len(),
             unmet.join("\n")
         );
+    }
+
+    #[test]
+    fn ui2_ui_pdf_export_tracks_progress_elapsed_and_structured_outcome() {
+        let _one = crate::headless_ui_lock();
+        let scratch = Scratch::new("ui2-pdf-progress");
+        let mut app = in_the_module();
+        assert!(!app.pid_backup_wants_second_tick());
+
+        let _ = pid_backup_browser::update(
+            &mut app.pid_backup_browser,
+            PidBackupMsg::SourcePicked(Some(scratch.join("loading.zip"))),
+        );
+        assert!(
+            app.pid_backup_wants_second_tick(),
+            "loading backup in module requests 1s tick"
+        );
+
+        open_package(&mut app, &scratch);
+        assert!(!app.pid_backup_wants_second_tick());
+        let stand_in = StandIn::put_into(&mut app);
+
+        let out_dir = scratch.join("pdf-ui");
+        let task = app
+            .start_pid_backup_pdf_ui(out_dir.clone())
+            .expect("UI PDF export starts");
+        assert!(app.pid_backup_pdf.is_running());
+        assert!(app.pid_backup_wants_second_tick());
+
+        let (dir, done, total, _elapsed) = app
+            .pid_backup_pdf
+            .running_status(Instant::now())
+            .expect("running status");
+        assert_eq!(dir, out_dir.as_path());
+        assert_eq!((done, total), (0, 3));
+
+        let progress = stand_in.progress();
+        progress.begin(2);
+        progress.step();
+        let (_, done2, total2, _) = app
+            .pid_backup_pdf
+            .running_status(Instant::now())
+            .expect("updated running status");
+        assert_eq!((done2, total2), (1, 2));
+
+        let _ = app.dispatch_command("PIDBACKUPPDF");
+        let last_line = &app.command_line.history.last().expect("status line").text;
+        assert!(last_line.contains("1 of 2"), "got: {last_line}");
+
+        let expected = outcome(&out_dir);
+        stand_in.end(Ok(expected.clone()));
+        app.drive_headless_task(task).expect("PDF task finishes");
+
+        assert!(!app.pid_backup_pdf.is_running());
+        assert!(!app.pid_backup_wants_second_tick());
+        let stored = app
+            .pid_backup_pdf
+            .last_outcome()
+            .expect("structured outcome kept")
+            .as_ref()
+            .expect("PDF export succeeded");
+        assert_eq!(stored.written, expected.written);
+        assert_eq!(stored.index_path, expected.index_path);
+    }
+
+    #[test]
+    fn ui2_ui_pdf_preflight_allows_publish_files_and_rejects_conflicting_pdf() {
+        let scratch = Scratch::new("ui2-pdf-preflight");
+        let mut app = app();
+        open_package(&mut app, &scratch);
+        let stand_in = StandIn::put_into(&mut app);
+
+        let first_out = scratch.join("pdf-first");
+        let task = app
+            .start_pid_backup_pdf_ui(first_out.clone())
+            .expect("first PDF export starts");
+        stand_in.end(Ok(outcome(&first_out)));
+        app.drive_headless_task(task)
+            .expect("first PDF export ends");
+
+        let pair_dir = scratch.join("paired");
+        std::fs::create_dir_all(&pair_dir).unwrap();
+        std::fs::write(pair_dir.join("A-101_Data.xml"), "<x/>").unwrap();
+        std::fs::write(pair_dir.join("_Index.json"), "{}").unwrap();
+        assert!(
+            app.check_pid_backup_pdf_ui(pair_dir.clone()).is_ok(),
+            "publish files in delivery dir are allowed for paired PDF output"
+        );
+
+        std::fs::write(pair_dir.join("A-101.pdf"), "%PDF").unwrap();
+        assert!(matches!(
+            app.check_pid_backup_pdf_ui(pair_dir.clone()),
+            Err(PdfError::TargetHasFiles { .. })
+        ));
+        assert!(matches!(
+            app.start_pid_backup_pdf_ui(pair_dir),
+            Err(PdfError::TargetHasFiles { .. })
+        ));
+
+        let preserved = app
+            .pid_backup_pdf
+            .last_outcome()
+            .expect("previous outcome still stored")
+            .as_ref()
+            .expect("previous outcome still Ok");
+        assert_eq!(preserved.index_path, first_out.join("_PdfIndex.json"));
     }
 }

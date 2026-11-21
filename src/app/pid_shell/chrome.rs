@@ -168,25 +168,28 @@ pub(crate) fn status_parts(app: &OpenCADStudio, screen: PidScreen) -> Vec<Status
         label,
         switch: None,
     };
-    if !screen.needs_drawing() || app.tabs[app.active_tab].is_start {
-        return vec![said("就绪".to_owned())];
-    }
-    let writing = if app.read_only || app.collab.readonly {
-        "只读"
+    let mut parts = if !screen.needs_drawing() || app.tabs[app.active_tab].is_start {
+        vec![said("就绪".to_owned())]
     } else {
-        "编辑中"
+        let writing = if app.read_only || app.collab.readonly {
+            "只读"
+        } else {
+            "编辑中"
+        };
+        vec![
+            said(writing.to_owned()),
+            StatusPart {
+                label: format!("捕捉 {}", on_off(app.snapper.snap_enabled)),
+                switch: Some(("snap", AppMessage::ToggleSnapEnabled)),
+            },
+            StatusPart {
+                label: format!("正交 {}", on_off(app.ortho_mode)),
+                switch: Some(("ortho", AppMessage::ToggleOrtho)),
+            },
+        ]
     };
-    vec![
-        said(writing.to_owned()),
-        StatusPart {
-            label: format!("捕捉 {}", on_off(app.snapper.snap_enabled)),
-            switch: Some(("snap", AppMessage::ToggleSnapEnabled)),
-        },
-        StatusPart {
-            label: format!("正交 {}", on_off(app.ortho_mode)),
-            switch: Some(("ortho", AppMessage::ToggleOrtho)),
-        },
-    ]
+    parts.extend(super::backup_export_ui::status_bar_parts(app, screen));
+    parts
 }
 
 /// The status bar's text in one line, as the tests read it.

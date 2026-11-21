@@ -71,6 +71,7 @@ mod pdf_password;
 mod pdf_shx_text;
 mod pdf_underlay;
 pub(in crate::app) mod pidbackup;
+pub(in crate::app) mod pidbackupexport;
 pub(in crate::app) mod pidbackuppdf;
 mod pidbulk;
 mod pidconnector;
@@ -913,6 +914,9 @@ impl OpenCADStudio {
         if let Some(t) = self.dispatch_pidbackuppdf(cmd, i) {
             return Some(t);
         }
+        if let Some(t) = self.dispatch_pidbackupexport(cmd, i) {
+            return Some(t);
+        }
         if let Some(t) = self.dispatch_pidpalette(cmd, i) {
             return Some(t);
         }
@@ -1038,8 +1042,10 @@ pub fn start_allowed(cmd: &str) -> bool {
             verb,
             "OPEN" | "PIDBACKUPOPEN" | "SCRIPT" | "SCR" | "FILEDIA" | "SDI" | "EXIT"
             // The open backup package is the application's, as the panel
-            // that shows it is: its drawings go to PDF from any tab.
+            // that shows it is: its drawings go to PDF, and the package to
+            // publish files, from any tab.
             | "PIDBACKUPPDF"
+            | "PIDBACKUPEXPORT"
             // Which screen of the P&ID module shows is the application's
             // business, not a drawing's.
             | "PIDSCREEN"
@@ -1608,7 +1614,9 @@ inventory::submit!(crate::command::CommandRegistration {
         // pipe line by its coding-rule family, a symbol group by its tag, and
         // making a group a symbol by hand; and the sheet plotted to PDF by
         // pid-parse's own plotter; and a drawing opened out of a SmartPlant
-        // backup, and every drawing of that backup as a PDF.
+        // backup, every drawing of that backup as a PDF, and the backup as
+        // publish files.
+        "PIDBACKUPEXPORT",
         "PIDBACKUPOPEN",
         "PIDBACKUPPDF",
         "PIDBREAK",

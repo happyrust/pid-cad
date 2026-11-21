@@ -145,6 +145,8 @@ pub mod canvas;
 pub mod chrome;
 pub(crate) mod rebase;
 
+pub mod backup;
+pub mod backup_export_ui;
 pub mod bom;
 pub mod color_rules;
 pub mod drawings;
@@ -160,8 +162,12 @@ pub mod typelib;
 pub mod validation;
 pub mod workbench;
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod pid_backup_export_ui;
 #[cfg(test)]
 mod pid_backup_in_shell;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod pid_backup_screen;
 #[cfg(test)]
 mod pid_editor_screen;
 #[cfg(test)]
@@ -196,6 +202,8 @@ pub enum PidScreen {
     Drawings,
     /// 03 P&ID 编辑器.
     Editor,
+    /// 备份数据包.
+    Backup,
     /// 04 符号调色板.
     Palette,
     /// 05 属性面板.
@@ -247,10 +255,11 @@ impl NavGroup {
 
 impl PidScreen {
     /// Every screen of the design, in its order.
-    pub const ALL: [PidScreen; 14] = [
+    pub const ALL: [PidScreen; 15] = [
         PidScreen::Workbench,
         PidScreen::Drawings,
         PidScreen::Editor,
+        PidScreen::Backup,
         PidScreen::Palette,
         PidScreen::Properties,
         PidScreen::TypeLib,
@@ -272,6 +281,7 @@ impl PidScreen {
             PidScreen::Workbench => "workbench",
             PidScreen::Drawings => "drawings",
             PidScreen::Editor => "editor",
+            PidScreen::Backup => "backup",
             PidScreen::Palette => "palette",
             PidScreen::Properties => "properties",
             PidScreen::TypeLib => "typelib",
@@ -292,6 +302,7 @@ impl PidScreen {
             PidScreen::Workbench => "工作台",
             PidScreen::Drawings => "图纸管理",
             PidScreen::Editor => "P&ID 编辑器",
+            PidScreen::Backup => "备份数据包",
             PidScreen::Palette => "符号调色板",
             PidScreen::Properties => "属性面板",
             PidScreen::TypeLib => "业务类型库",
@@ -312,6 +323,7 @@ impl PidScreen {
             PidScreen::Workbench
             | PidScreen::Drawings
             | PidScreen::Editor
+            | PidScreen::Backup
             | PidScreen::Palette
             | PidScreen::Properties => NavGroup::Design,
             PidScreen::TypeLib
@@ -339,6 +351,7 @@ impl PidScreen {
             PidScreen::Workbench => workbench::VIEW,
             PidScreen::Drawings => drawings::VIEW,
             PidScreen::Editor => editor::VIEW,
+            PidScreen::Backup => backup::VIEW,
             PidScreen::Palette => palette::VIEW,
             PidScreen::Properties => properties::VIEW,
             PidScreen::TypeLib => typelib::VIEW,
@@ -392,6 +405,8 @@ pub struct PidShell {
     pub drawings: drawings::State,
     /// 03 P&ID 编辑器.
     pub editor: editor::State,
+    /// 备份数据包.
+    pub backup: backup::State,
     /// 04 符号调色板.
     pub palette: palette::State,
     /// 05 属性面板.
@@ -476,6 +491,8 @@ pub enum Message {
     Drawings(drawings::Message),
     /// 03 P&ID 编辑器.
     Editor(editor::Message),
+    /// 备份数据包.
+    Backup(backup::Message),
     /// 04 符号调色板.
     Palette(palette::Message),
     /// 05 属性面板.
@@ -568,12 +585,16 @@ impl OpenCADStudio {
     pub(in crate::app) fn on_pid_shell(&mut self, message: Message) -> Task<AppMessage> {
         match message {
             Message::Show(screen) => {
-                self.show_pid_screen(screen);
+                if self.show_pid_screen(screen) && screen == PidScreen::Backup {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    return backup::ensure_selected_drawing_items_loaded(self);
+                }
                 Task::none()
             }
             Message::Workbench(message) => workbench::update(self, message),
             Message::Drawings(message) => drawings::update(self, message),
             Message::Editor(message) => editor::update(self, message),
+            Message::Backup(message) => backup::update(self, message),
             Message::Palette(message) => palette::update(self, message),
             Message::Properties(message) => properties::update(self, message),
             Message::TypeLib(message) => typelib::update(self, message),
@@ -590,7 +611,7 @@ impl OpenCADStudio {
 
     /// Show `screen`; when it cannot be shown, say why on the command line
     /// and leave what was showing.
-    fn show_pid_screen(&mut self, screen: PidScreen) -> bool {
+    pub(in crate::app) fn show_pid_screen(&mut self, screen: PidScreen) -> bool {
         if !self.pid_shell.show(screen) {
             self.command_line.push_error(&format!(
                 "界面「{}」（{}）还没有实现，不能切换。",
@@ -646,6 +667,10 @@ impl OpenCADStudio {
                             screen.title(),
                             screen.id()
                         ));
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if screen == PidScreen::Backup {
+                            return Some(backup::ensure_selected_drawing_items_loaded(self));
+                        }
                     }
                 }
                 None => self.command_line.push_error(&format!(

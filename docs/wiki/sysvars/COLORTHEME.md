@@ -2,7 +2,7 @@
 summary: Switches the program window between the dark and the light theme.
 type: Integer
 saved: Program settings
-default: 0 (Dark)
+default: 1 (Light)
 related: COLORSCHEME, OPTIONS
 ---
 

@@ -577,3 +577,36 @@ fn the_call_example_of_the_module_docs_runs() {
     let window = app.view_main();
     drop(window);
 }
+
+#[test]
+fn pid_shell_ui3_backup_screen_is_registered_in_nav_and_draws_its_frame() {
+    let _one = crate::headless_ui_lock();
+    let listed: Vec<PidScreen> = nav().collect();
+    assert_eq!(listed, [PidScreen::Editor, PidScreen::Backup]);
+    assert_eq!(PidScreen::Backup.id(), "backup");
+    assert_eq!(PidScreen::Backup.title(), "备份数据包");
+    assert_eq!(PidScreen::Backup.group(), NavGroup::Design);
+    assert!(!PidScreen::Backup.needs_drawing());
+
+    let mut app = launched(&GuiConfig::default());
+    let said = say(&mut app, "PIDSCREEN backup");
+    assert_eq!(app.pid_shell.current(), Some(PidScreen::Backup));
+    assert!(
+        said.iter()
+            .any(|line| line.contains("当前界面 备份数据包（backup）")),
+        "{said:?}"
+    );
+    let frame = draw_window(&mut app);
+    assert_eq!(
+        frame.shell,
+        vec![(
+            "PID_SHELL:backup".to_owned(),
+            [
+                f64::from(chrome::NAV_WIDTH),
+                f64::from(chrome::TITLE_BAR_HEIGHT),
+                f64::from(WINDOW.width - chrome::NAV_WIDTH),
+                f64::from(WINDOW.height - chrome::TITLE_BAR_HEIGHT - chrome::STATUS_BAR_HEIGHT),
+            ],
+        )]
+    );
+}

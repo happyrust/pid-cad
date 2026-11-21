@@ -1,5 +1,7 @@
 // The page: its border, the projection from sheet units to millimetres, and the extents that frame the view.
 
+use document::types::Transform;
+
 use super::*;
 
 /// Draw the sheet the drawing states it is on.
@@ -12,18 +14,26 @@ use super::*;
 /// Only the rectangle is drawn. The title block, the revision table and the
 /// grid divisions inside a real border are the template's own drafting, and
 /// synthesising them would be inventing content the file does not carry.
-pub(super) fn draw_page_border(doc: &mut Document, page_mm: Option<(f64, f64)>) {
+///
+/// The page's lower-left corner is `corner_mm`, where the drawing's frame
+/// record puts it ([`FramePlacement`]), and the origin where none does.
+pub(super) fn draw_page_border(
+    doc: &mut Document,
+    page_mm: Option<(f64, f64)>,
+    corner_mm: (f64, f64),
+) {
     let Some((width, height)) = page_mm else {
         return;
     };
     if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
         return;
     }
+    let (x, y) = corner_mm;
     let mut border = LwPolyline::from_points(vec![
-        Vector2::new(0.0, 0.0),
-        Vector2::new(width, 0.0),
-        Vector2::new(width, height),
-        Vector2::new(0.0, height),
+        Vector2::new(x, y),
+        Vector2::new(x + width, y),
+        Vector2::new(x + width, y + height),
+        Vector2::new(x, y + height),
     ]);
     border.is_closed = true;
     border.common.layer = LAYER_FRAME.to_string();
@@ -139,9 +149,14 @@ impl SheetBand {
 /// A drawing that states its page opens on that whole sheet, the way it does
 /// in `SmartPlant`: framing on the content alone leaves an A2 whose drafting
 /// stops short of the border opening zoomed past its own title block. The
-/// page is where the border is drawn, so the view and the border agree by
-/// construction.
-pub(super) fn frame_drawing(doc: &mut Document, bounds: &Bounds, page_mm: Option<(f64, f64)>) {
+/// page is where the border is drawn -- both start at `corner_mm` -- so the
+/// view and the border agree by construction.
+pub(super) fn frame_drawing(
+    doc: &mut Document,
+    bounds: &Bounds,
+    page_mm: Option<(f64, f64)>,
+    corner_mm: (f64, f64),
+) {
     if bounds.is_empty() {
         return;
     }
@@ -150,7 +165,10 @@ pub(super) fn frame_drawing(doc: &mut Document, bounds: &Bounds, page_mm: Option
     doc.header.model_space_extents_max = Vector3::new(bounds.max_x, bounds.max_y, 0.0);
 
     let (min_x, min_y, max_x, max_y) = match page_mm {
-        Some((page_width, page_height)) => (0.0, 0.0, page_width, page_height),
+        Some((page_width, page_height)) => {
+            let (x, y) = corner_mm;
+            (x, y, x + page_width, y + page_height)
+        }
         None => (bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y),
     };
     let width = max_x - min_x;
@@ -165,9 +183,208 @@ pub(super) fn frame_drawing(doc: &mut Document, bounds: &Bounds, page_mm: Option
     // `view_height` alone decides the zoom, so a landscape sheet in a window
     // narrower than 4:3 would spill sideways; widen it to cover that case.
     vport.view_height = (height.max(width * 0.75) * 1.05).max(1.0);
+    // A canvas narrower still cuts the sides off all the same: the backup
+    // panel docked beside it takes it down to about 1:1. The width the view
+    // has to take in rides in its aspect ratio, which restoring a view
+    // leaves unread, and opening a `.pid` widens the view to it
+    // (`Scene::widen_to_saved_width`).
+    vport.aspect_ratio = (width * 1.05).max(1.0) / vport.view_height;
     vport.handle = doc.allocate_handle();
     // `add` refuses a duplicate name, and the default entry above is one.
     doc.vports.add_or_replace(vport);
+}
+
+/// Where a drawing's border frame puts the page and the template, as the
+/// drawing's frame records (`igSmartFrame2d`) state it and `pid-plot` reads
+/// it (its `model.rs`: `FramePlacement`, `frame_placement`).
+///
+/// A frame states the origin `lo` of the range it frames, and a translation
+/// `t` and a uniform scale `s` for the content it holds. `pid-plot` plots the
+/// frame's own rectangle, so the paper's corner is `lo`: the drawing's ink
+/// lands at `p - lo` and the template, authored from its own corner, at
+/// `s * q + t - lo`. The canvas keeps the drawing's own coordinates, so the
+/// drawing stays where it is and the rest comes out one translation `lo`
+/// over: the template at `s * q + t`, and the page -- the border drawn where
+/// no template frame covers it, and the opening view -- from `lo` to
+/// `lo + page`. Against the drawing's ink every stroke lands where the plot
+/// puts it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct FramePlacement {
+    /// The page's lower-left corner, millimetres: the framed range's origin.
+    pub(super) corner_mm: (f64, f64),
+    /// How far the template moves once scaled, millimetres.
+    pub(super) template_offset_mm: (f64, f64),
+    /// The template's uniform scale about its own origin.
+    pub(super) template_scale: f64,
+}
+
+impl FramePlacement {
+    /// No placement: the page on the origin, the template where it was
+    /// authored.
+    pub(super) const NONE: Self = Self {
+        corner_mm: (0.0, 0.0),
+        template_offset_mm: (0.0, 0.0),
+        template_scale: 1.0,
+    };
+
+    /// The placement the page frames of `parsed` agree on.
+    pub(super) fn read(parsed: &pid_parse::PidDocument) -> Self {
+        Self::agreed(
+            parsed
+                .sheet_streams
+                .iter()
+                .filter_map(|sheet| sheet.geometry.as_ref())
+                .flat_map(|geometry| &geometry.decoded_igsmartframes),
+        )
+    }
+
+    /// The placement every page frame among `frames` agrees on.
+    ///
+    /// A frame counts when it is a page (`page_extent_m`) and states both
+    /// its range origin and its content transform. A linear part that is not
+    /// the identity, frames that disagree, or a value that is no plausible
+    /// paper offset -- 10 mm or more, or a scale 1 % or more off one -- place
+    /// nothing, and the sheet imports as it did before frames were read:
+    /// `pid-plot`'s rule.
+    pub(super) fn agreed<'a>(
+        frames: impl IntoIterator<Item = &'a pid_parse::DecodedIgSmartFrame2dRecord>,
+    ) -> Self {
+        let mut placements: Vec<Self> = Vec::new();
+        for frame in frames {
+            if frame.page_extent_m().is_none() {
+                continue;
+            }
+            let (Some(transform), Some(origin_m)) = (frame.content_transform, frame.range_origin_m)
+            else {
+                continue;
+            };
+            if !transform.linear_is_identity() {
+                return Self::NONE;
+            }
+            let placement = Self {
+                corner_mm: (origin_m[0] * MM_PER_METRE, origin_m[1] * MM_PER_METRE),
+                template_offset_mm: (
+                    transform.translation_m[0] * MM_PER_METRE,
+                    transform.translation_m[1] * MM_PER_METRE,
+                ),
+                template_scale: transform.scale,
+            };
+            if !placements.contains(&placement) {
+                placements.push(placement);
+            }
+        }
+        match placements.as_slice() {
+            [only] if only.is_paper_offset() => *only,
+            _ => Self::NONE,
+        }
+    }
+
+    /// Whether every value is one a printed sheet's own offset could be.
+    fn is_paper_offset(&self) -> bool {
+        let (x, y) = self.corner_mm;
+        let (dx, dy) = self.template_offset_mm;
+        [x, y, dx, dy]
+            .iter()
+            .all(|value| value.is_finite() && value.abs() < 10.0)
+            && self.template_scale.is_finite()
+            && (self.template_scale - 1.0).abs() < 0.01
+    }
+
+    /// Put one entity the template drew where the frame places it: scaled
+    /// about the template's origin, then moved. [`Self::NONE`] leaves it
+    /// untouched, bit for bit.
+    pub(super) fn place_template(&self, entity: &mut EntityType) {
+        if self.template_scale != 1.0 {
+            scale_about_origin(entity, self.template_scale);
+        }
+        let (dx, dy) = self.template_offset_mm;
+        if dx != 0.0 || dy != 0.0 {
+            entity.translate(Vector3::new(dx, dy, 0.0));
+        }
+    }
+}
+
+/// Scale what `entity` draws about the origin by `scale`: its positions, its
+/// radii and the height of its lettering, the way `pid-plot` scales the
+/// template's shapes.
+///
+/// Angles, the pen and a run's width factor stay as they are, since a
+/// uniform scale changes none of them. `apply_transform` reads an arc's
+/// angles back off its transformed end points, which folds them into +-pi
+/// and a whole circle's sweep to nothing, so it is left to the kinds the
+/// importer never draws. A fill's pattern stays too: the importer's fills
+/// are solid.
+fn scale_about_origin(entity: &mut EntityType, scale: f64) {
+    let at = |p: Vector3| Vector3::new(p.x * scale, p.y * scale, p.z * scale);
+    let flat = |p: Vector2| Vector2::new(p.x * scale, p.y * scale);
+    match entity {
+        EntityType::Point(point) => point.location = at(point.location),
+        EntityType::Line(line) => {
+            line.start = at(line.start);
+            line.end = at(line.end);
+        }
+        EntityType::Circle(circle) => {
+            circle.center = at(circle.center);
+            circle.radius *= scale;
+        }
+        EntityType::Arc(arc) => {
+            arc.center = at(arc.center);
+            arc.radius *= scale;
+        }
+        EntityType::LwPolyline(polyline) => {
+            for vertex in &mut polyline.vertices {
+                vertex.location = flat(vertex.location);
+            }
+        }
+        EntityType::Text(text) => {
+            text.insertion_point = at(text.insertion_point);
+            text.alignment_point = text.alignment_point.map(at);
+            text.height *= scale;
+        }
+        EntityType::Hatch(hatch) => {
+            for edge in hatch
+                .paths
+                .iter_mut()
+                .flat_map(|path| path.edges.iter_mut())
+            {
+                match edge {
+                    BoundaryEdge::Line(line) => {
+                        line.start = flat(line.start);
+                        line.end = flat(line.end);
+                    }
+                    BoundaryEdge::CircularArc(arc) => {
+                        arc.center = flat(arc.center);
+                        arc.radius *= scale;
+                    }
+                    BoundaryEdge::EllipticArc(ellipse) => {
+                        ellipse.center = flat(ellipse.center);
+                        ellipse.major_axis_endpoint = flat(ellipse.major_axis_endpoint);
+                    }
+                    // A spline's `z` is its weight and a polyline vertex's its
+                    // bulge; neither is a length.
+                    BoundaryEdge::Spline(spline) => {
+                        for control in &mut spline.control_points {
+                            control.x *= scale;
+                            control.y *= scale;
+                        }
+                        for fit in &mut spline.fit_points {
+                            *fit = flat(*fit);
+                        }
+                    }
+                    BoundaryEdge::Polyline(polyline) => {
+                        for vertex in &mut polyline.vertices {
+                            vertex.x *= scale;
+                            vertex.y *= scale;
+                        }
+                    }
+                }
+            }
+            for seed in &mut hatch.seed_points {
+                *seed = flat(*seed);
+            }
+        }
+        other => other.apply_transform(&Transform::from_scale(scale)),
+    }
 }
 
 pub(super) struct Bounds {

@@ -1742,6 +1742,44 @@ impl Scene {
         }
     }
 
+    /// Pull the restored model view back about its centre until a canvas of
+    /// `canvas` (width, height) takes in the width the saved `*Active` view
+    /// states; a canvas that takes it in already leaves the view as it is.
+    /// Whether the view changed.
+    ///
+    /// The width is `view_height * aspect_ratio`. Only the `.pid` importer
+    /// writes the aspect ratio for that (`io::pid::page::frame_drawing`);
+    /// any other drawing's is the canvas it was last saved from, no width it
+    /// asks for, so this is for a `.pid` alone and the caller says which.
+    pub fn widen_to_saved_width(&mut self, canvas: (f32, f32)) -> bool {
+        let (width, height) = (f64::from(canvas.0), f64::from(canvas.1));
+        if self.current_layout != "Model" || !(width > 0.0 && height > 0.0) {
+            return false;
+        }
+        let Some(mut view) = self
+            .document
+            .vports
+            .iter()
+            .find(|v| is_active_vport_name(&v.name))
+            .cloned()
+        else {
+            return false;
+        };
+        let reach = view.view_height * view.aspect_ratio;
+        let fits = view.view_height * width / height;
+        if !reach.is_finite() || reach <= fits {
+            return false;
+        }
+        view.view_height = reach * height / width;
+        let Some(camera) = self.camera_from_vport(&view) else {
+            return false;
+        };
+        *self.camera.borrow_mut() = camera;
+        self.camera_generation += 1;
+        self.fit_depth_to_saved_extents();
+        true
+    }
+
     /// Size the camera's near/far from the drawing's own recorded extent,
     /// leaving its pose alone.
     ///

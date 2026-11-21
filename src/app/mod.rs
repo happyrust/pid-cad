@@ -1651,6 +1651,10 @@ pub(super) struct OpenCADStudio {
     /// last one came to. App-level for the same reason.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) pid_backup_pdf: commands::pidbackuppdf::BackupPdf,
+    /// PIDBACKUPEXPORT's export of that backup to publish files, beside the
+    /// one to PDF: the two may run at once.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) pid_backup_export: commands::pidbackupexport::BackupExport,
     /// The tags that backup's database gives its items, and the drawings
     /// opened from the panel that wait for them. App-level as well: the
     /// tags are the backup's, and go on every drawing opened from it.
@@ -4394,6 +4398,15 @@ pub enum Message {
     PidBackupPdfFinished(
         Result<crate::io::pid_backup_pdf::PdfOutcome, crate::io::pid_backup_pdf::PdfError>,
     ),
+    /// PIDBACKUPEXPORT's export ended: what it came to, or why it did not
+    /// get there.
+    #[cfg(not(target_arch = "wasm32"))]
+    PidBackupExportFinished(
+        Result<
+            crate::io::pid_backup_export::ExportOutcome,
+            crate::io::pid_backup_export::ExportError,
+        >,
+    ),
     /// PIDBACKUPOPEN's panel: a tree row clicked, a backup loaded, a drawing
     /// opened. The panel's own state machine decides what each one does; the
     /// command layer only carries out the effect it asks for.
@@ -6753,6 +6766,8 @@ impl OpenCADStudio {
             #[cfg(not(target_arch = "wasm32"))]
             pid_backup_pdf: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
+            pid_backup_export: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
             pid_backup_tags: Default::default(),
             pid_symbols: crate::pid::symbols::SymbolLibrary::load_from_env(),
             pid_legend_filter: Default::default(),
@@ -7012,8 +7027,8 @@ impl OpenCADStudio {
             })
             .ok(),
             plotstyle_panel_baseline: None,
-            // Color scheme (default: Oxocarbon)
-            active_theme: Theme::Oxocarbon,
+            // Color scheme (default: Light)
+            active_theme: Theme::Light,
             ui_theme: config::UiThemeConfig::default(),
             theme_color_inputs: config::UiThemePalette::default().hex_values(),
             model_space: config::ModelSpaceThemeConfig::default(),
