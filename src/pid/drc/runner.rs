@@ -1,6 +1,7 @@
 //! 检查器（`SPEC-pid-drc.md` §4.1、§5.1）：对每条启用的规则，从摘要里选出作用对象，逐个
 //! 求值，为真即命中，产出 §3.6 的检查结果。只吃摘要、索引、主数据和规则，不碰文件和图纸。
 
+use std::collections::HashSet;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::pid::master_data;
@@ -33,7 +34,7 @@ pub struct CheckInput<'a> {
     pub index: Option<&'a ProjectIndex>,
     /// 索引涉及的其余图，给 `对端线` 用。
     pub others: &'a [DrawingSummary],
-    /// 图号 → 该图的豁免。
+    /// 图号 → 该图的豁免；不在 `drawings` 里的图不看。
     pub waivers: &'a [(String, Vec<Waiver>)],
     pub trigger: Trigger,
     /// 结果里的 `cross_drawing` 不照这里写的，按有没有 `index` 填。
@@ -70,6 +71,7 @@ pub fn check(input: &CheckInput) -> CheckReport {
     let mut without_index = 0;
     let mut unknown = Vec::new();
     let mut results = Vec::new();
+    let mut ran = HashSet::new();
     for rule in &input.rules.rules {
         if !input.rules.is_enabled(rule) {
             continue;
@@ -89,6 +91,7 @@ pub fn check(input: &CheckInput) -> CheckReport {
             continue;
         }
         summary.rules_run += 1;
+        ran.insert(rule.id.as_str());
         results.extend(hits(rule, &sheets, &context));
         unknown.extend(scope_notice(rule, input));
     }
@@ -99,7 +102,12 @@ pub fn check(input: &CheckInput) -> CheckReport {
             .then_with(|| a.object.drawing_id.cmp(&b.object.drawing_id))
             .then_with(|| a.object_key.cmp(&b.object_key))
     });
+    let stale_waivers = apply_waivers(&mut results, input, &ran);
     for result in &results {
+        if result.waived {
+            summary.waived += 1;
+            continue;
+        }
         match result.severity {
             Severity::Error => summary.errors += 1,
             Severity::Warning => summary.warnings += 1,
@@ -133,8 +141,51 @@ pub fn check(input: &CheckInput) -> CheckReport {
         blocked: summary.errors > 0,
         results,
         notices,
-        stale_waivers: Vec::new(),
+        stale_waivers,
     }
+}
+
+/// 把图里记着的豁免挂到对得上的结果上（§3.7），返回这次对不上的。图号、规则号、对象键都相同才算
+/// 对上；一条豁免可以对上几条结果，一条结果挂先对上的那条。规则停用了或没跑的，它的豁免对不对得上
+/// 下不了结论，不算对不上；规则包里已经没有的规则、跑了但作用域不含这张图的规则，它的豁免算。
+fn apply_waivers(
+    results: &mut [CheckResult],
+    input: &CheckInput,
+    ran: &HashSet<&str>,
+) -> Vec<Waiver> {
+    let mut stale = Vec::new();
+    for (drawing_id, waivers) in input.waivers {
+        if !input
+            .drawings
+            .iter()
+            .any(|drawing| drawing.drawing_id == *drawing_id)
+        {
+            continue;
+        }
+        for waiver in waivers {
+            let mut matched = false;
+            for result in results.iter_mut().filter(|result| {
+                result.object.drawing_id == *drawing_id
+                    && result.rule_id == waiver.rule_id
+                    && result.object_key == waiver.object_key
+            }) {
+                matched = true;
+                if !result.waived {
+                    result.waived = true;
+                    result.waiver = Some(waiver.clone());
+                }
+            }
+            let known = input
+                .rules
+                .rules
+                .iter()
+                .any(|rule| rule.id == waiver.rule_id);
+            if !matched && (ran.contains(waiver.rule_id.as_str()) || !known) {
+                stale.push(waiver.clone());
+            }
+        }
+    }
+    stale
 }
 
 /// 规则用不用主数据的表（[`reads_master`]）。主数据没配置或读不出来时这些规则下不了结论，不跑
@@ -794,6 +845,42 @@ mod tests {
                     .map(|drawing| drawing.drawing_id.clone()),
                 pbs: None,
                 cross_drawing: index.is_some(),
+            },
+        })
+    }
+
+    /// 一条豁免，理由、人和时间都是固定的。
+    fn waiver(rule_id: &str, object_key: &str) -> Waiver {
+        Waiver {
+            rule_id: rule_id.to_owned(),
+            object_key: object_key.to_owned(),
+            reason: "已知，按设计如此".to_owned(),
+            by: "zhangsan".to_owned(),
+            at: 1_794_800_000,
+        }
+    }
+
+    /// 只查当前图，图里记着豁免 `waivers`（图号 → 那张图的豁免）。
+    fn run_waived(
+        rules: &RuleSet,
+        drawings: &[DrawingSummary],
+        waivers: &[(String, Vec<Waiver>)],
+    ) -> CheckReport {
+        let types = TypeLib::embedded();
+        check(&CheckInput {
+            rules,
+            master: &master_data::Resolved::NotConfigured,
+            types: &types,
+            drawings,
+            index: None,
+            others: &[],
+            waivers,
+            trigger: Trigger::OnDemand,
+            scope: Scope {
+                kind: ScopeKind::Drawing,
+                drawing_id: drawings.first().map(|drawing| drawing.drawing_id.clone()),
+                pbs: None,
+                cross_drawing: false,
             },
         })
     }
@@ -1735,6 +1822,177 @@ mod tests {
                 "规则 XY-008 的作用域是类型 NOPE，类型库里没有这个类型"
             )]
         );
+    }
+
+    /// 豁免按规则号和对象键对上同一张图上的结果（§3.7），对象键的四种写法各一例：有自己编号的
+    /// 对象、管口、仪表回路和图纸、其余对象（这里是页间连接符）。豁免了的结果还在，`waived` 为真、
+    /// 带着那条豁免，不计入三个严重度，另计 `已豁免`；`blocked` 只看没豁免的错误。
+    #[test]
+    fn waivers_match_results_on_the_rule_and_the_object_key() {
+        let rules = only(vec![
+            Rule {
+                severity: Severity::Error,
+                ..custom("XY-001", "设备", "位号 = \"P-101\"", None)
+            },
+            Rule {
+                severity: Severity::Error,
+                ..custom("XY-002", "管口", "连接状态 = \"未连接\"", None)
+            },
+            custom("XY-003", "仪表回路", "回路号 = \"F-101\"", None),
+            custom("XY-004", "图纸", "图号 = \"PID-1101\"", None),
+            Rule {
+                severity: Severity::Warning,
+                ..custom("XY-005", "页间连接符", "连接符种类 = \"pipe_out\"", None)
+            },
+        ]);
+        let drawings = [DrawingSummary {
+            ports: nozzles("PUMP", "P-101", 1),
+            ..with_connectors(
+                "PID-1101",
+                vec![
+                    pump("P-101"),
+                    instrument("FT-101", &[("仪表回路", "F-101")]),
+                ],
+                vec![connector("pipe_out", "L-1001", "3A0")],
+            )
+        }];
+        let keys = [
+            ("XY-001", "PUMP|P-101"),
+            ("XY-002", "PUMP|P-101#N1"),
+            ("XY-005", "PIPE_LINE|L-1001|300.000,100.000"),
+            ("XY-003", "仪表回路|F-101"),
+            ("XY-004", "图纸|PID-1101"),
+        ];
+        let counts = |report: &CheckReport| {
+            let summary = report.summary;
+            (
+                summary.errors,
+                summary.warnings,
+                summary.infos,
+                summary.waived,
+                report.blocked,
+            )
+        };
+        let plain = run_waived(&rules, &drawings, &[]);
+        let found: Vec<(&str, &str)> = plain
+            .results
+            .iter()
+            .map(|result| (result.rule_id.as_str(), result.object_key.as_str()))
+            .collect();
+        assert_eq!(found, keys);
+        assert_eq!(counts(&plain), (2, 1, 2, 0, true));
+
+        let every: Vec<Waiver> = keys.iter().map(|(rule, key)| waiver(rule, key)).collect();
+        let report = run_waived(&rules, &drawings, &[("PID-1101".to_owned(), every.clone())]);
+        let attached: Vec<Option<&Waiver>> = report
+            .results
+            .iter()
+            .map(|result| result.waiver.as_ref())
+            .collect();
+        assert_eq!(attached, every.iter().map(Some).collect::<Vec<_>>());
+        assert!(report.results.iter().all(|result| result.waived));
+        assert_eq!(counts(&report), (0, 0, 0, 5, false));
+        assert!(report.stale_waivers.is_empty());
+
+        let first = [("PID-1101".to_owned(), vec![waiver("XY-001", "PUMP|P-101")])];
+        let report = run_waived(&rules, &drawings, &first);
+        assert_eq!(counts(&report), (1, 1, 2, 1, true));
+        let value = serde_json::to_value(&report).expect("能写成 JSON");
+        assert_eq!(value["summary"]["已豁免"], 1);
+        assert_eq!(value["results"][0]["waived"], json!(true));
+        assert_eq!(
+            value["results"][0]["waiver"],
+            json!({ "reason": "已知，按设计如此", "by": "zhangsan", "at": 1_794_800_000 })
+        );
+        assert_eq!(value["results"][1]["waived"], json!(false));
+        assert_eq!(value["results"][1]["waiver"], Value::Null);
+        let both = [(
+            "PID-1101".to_owned(),
+            vec![
+                waiver("XY-001", "PUMP|P-101"),
+                waiver("XY-002", "PUMP|P-101#N1"),
+            ],
+        )];
+        assert_eq!(
+            counts(&run_waived(&rules, &drawings, &both)),
+            (0, 1, 2, 2, false)
+        );
+
+        let near = [
+            (
+                "PID-1101".to_owned(),
+                vec![
+                    waiver("XY-003", "PUMP|P-101"),
+                    waiver("XY-001", "PUMP|P-102"),
+                    waiver("XY-001", "pump|P-101"),
+                ],
+            ),
+            ("PID-1102".to_owned(), vec![waiver("XY-001", "PUMP|P-101")]),
+        ];
+        let report = run_waived(&rules, &drawings, &near);
+        assert_eq!(counts(&report), (2, 1, 2, 0, true));
+        assert_eq!(report.stale_waivers, near[0].1);
+    }
+
+    /// 图里记着、这次却没有结果对得上的豁免进 `stale_waivers`（§3.7）：对象改了位号、问题改掉了、
+    /// 规则包里没有这条规则。停用的规则、没有项目索引而没跑的项目级规则下不了结论，它们的豁免不算。
+    #[test]
+    fn waivers_without_a_result_this_time_are_stale() {
+        let rules = only(vec![
+            Rule {
+                severity: Severity::Error,
+                ..custom("XY-001", "设备", "设备类别 = \"泵\"", None)
+            },
+            Rule {
+                enabled: false,
+                ..custom("XY-002", "设备", "设备类别 = \"泵\"", None)
+            },
+            custom("XY-003", "设备", "位号.跨图重复数 > 0", None),
+        ]);
+        let kept = waiver("XY-001", "PUMP|P-101");
+        let gone = waiver("XY-099", "PUMP|P-101");
+        let waivers = [(
+            "PID-1101".to_owned(),
+            vec![
+                kept.clone(),
+                waiver("XY-002", "PUMP|P-101"),
+                waiver("XY-003", "PUMP|P-101"),
+                gone.clone(),
+            ],
+        )];
+        let check_with = |objects| run_waived(&rules, &[drawing("PID-1101", objects)], &waivers);
+
+        let report = check_with(vec![pump("P-101")]);
+        assert_eq!(
+            (report.summary.errors, report.summary.waived, report.blocked),
+            (0, 1, false)
+        );
+        assert_eq!(report.stale_waivers, std::slice::from_ref(&gone));
+
+        let renamed = check_with(vec![pump("P-102")]);
+        assert_eq!(
+            (
+                renamed.summary.errors,
+                renamed.summary.waived,
+                renamed.blocked
+            ),
+            (1, 0, true)
+        );
+        assert_eq!(renamed.results[0].object_key, "PUMP|P-102");
+        assert!(!renamed.results[0].waived);
+        assert_eq!(renamed.stale_waivers, [kept.clone(), gone.clone()]);
+        let value = serde_json::to_value(&renamed).expect("能写成 JSON");
+        assert_eq!(
+            value["stale_waivers"][0],
+            json!({
+                "rule_id": "XY-001", "object_key": "PUMP|P-101",
+                "reason": "已知，按设计如此", "by": "zhangsan", "at": 1_794_800_000
+            })
+        );
+
+        let fixed = check_with(vec![tank("T-101")]);
+        assert!(fixed.results.is_empty());
+        assert_eq!(fixed.stale_waivers, [kept, gone]);
     }
 
     /// 第一批纯属性规则都有正反例；需求的例子：管线设计温度 260、流体介质工艺水、没有绝热等级，

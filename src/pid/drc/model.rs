@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
 use super::dsl::{DslError, Expr};
@@ -597,8 +597,11 @@ pub struct Scope {
     pub cross_drawing: bool,
 }
 
+/// 豁免理由最多这么多字（§3.7）。
+pub const WAIVER_REASON_LIMIT: usize = 200;
+
 /// 一条豁免（§3.7）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Waiver {
     pub rule_id: String,
     pub object_key: String,
@@ -606,6 +609,35 @@ pub struct Waiver {
     pub by: String,
     /// Unix 秒。
     pub at: i64,
+}
+
+impl Waiver {
+    /// 新建一条豁免（§3.7）。理由去掉首尾空白后记下，不能为空，按字符数不能超过
+    /// [`WAIVER_REASON_LIMIT`]。`by` 是协同用户 ID，没有时是操作系统账户名；`at` 是 Unix 秒；
+    /// 都由调用方给。
+    pub fn new(
+        rule_id: &str,
+        object_key: &str,
+        reason: &str,
+        by: &str,
+        at: i64,
+    ) -> Result<Self, WaiverError> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(WaiverError::ReasonRequired);
+        }
+        let length = reason.chars().count();
+        if length > WAIVER_REASON_LIMIT {
+            return Err(WaiverError::ReasonTooLong { length });
+        }
+        Ok(Self {
+            rule_id: rule_id.to_owned(),
+            object_key: object_key.to_owned(),
+            reason: reason.to_owned(),
+            by: by.to_owned(),
+            at,
+        })
+    }
 }
 
 /// 一条结果指向的对象（§3.6 的 `results[].object`）：类型编码、位号、图号三样定位一个
@@ -828,6 +860,40 @@ impl fmt::Display for DrcError {
 
 impl std::error::Error for DrcError {}
 
+/// 豁免写不成的原因（§3.8 豁免那几类）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaiverError {
+    /// 理由去掉首尾空白后是空的。
+    ReasonRequired,
+    /// 理由超过 [`WAIVER_REASON_LIMIT`] 字；`length` 是去掉首尾空白后的字数。
+    ReasonTooLong { length: usize },
+}
+
+impl WaiverError {
+    /// 错误码（§3.8）。
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::ReasonRequired => "WAIVER_REASON_REQUIRED",
+            Self::ReasonTooLong { .. } => "WAIVER_REASON_TOO_LONG",
+        }
+    }
+}
+
+impl fmt::Display for WaiverError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReasonRequired => write!(f, "{}: 豁免要写理由", self.code()),
+            Self::ReasonTooLong { length } => write!(
+                f,
+                "{}: 豁免理由有 {length} 字，最多 {WAIVER_REASON_LIMIT} 字",
+                self.code()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WaiverError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -999,5 +1065,55 @@ mod tests {
         assert_eq!(root("图纸"), Some(Next::OneOf(&["图号", "PBS"])));
         assert_eq!(root("参数"), Some(Next::AnyName));
         assert_eq!(root("位号"), None);
+    }
+
+    /// 豁免理由必填、不超过 200 字（§3.7）：去掉首尾空白后为空是 `WAIVER_REASON_REQUIRED`，
+    /// 超过 200 字是 `WAIVER_REASON_TOO_LONG`。字数数字符，记下的是去掉首尾空白的理由。
+    #[test]
+    fn waiver_reasons_are_required_and_at_most_200_characters() {
+        let make = |reason: &str| {
+            Waiver::new(
+                "DR-014",
+                "PIPE_LINE|L-1003",
+                reason,
+                "zhangsan",
+                1_794_800_000,
+            )
+        };
+        assert_eq!(
+            make("  放空管，端部通大气 "),
+            Ok(Waiver {
+                rule_id: "DR-014".to_owned(),
+                object_key: "PIPE_LINE|L-1003".to_owned(),
+                reason: "放空管，端部通大气".to_owned(),
+                by: "zhangsan".to_owned(),
+                at: 1_794_800_000,
+            })
+        );
+        for blank in ["", "   ", "\n\t"] {
+            let error = make(blank).expect_err("空理由写不成");
+            assert_eq!(error, WaiverError::ReasonRequired);
+            assert_eq!(
+                (error.code(), error.to_string()),
+                (
+                    "WAIVER_REASON_REQUIRED",
+                    "WAIVER_REASON_REQUIRED: 豁免要写理由".to_owned()
+                )
+            );
+        }
+        let longest = "放".repeat(200);
+        assert_eq!(
+            make(&format!(" {longest} ")).map(|waiver| waiver.reason),
+            Ok(longest.clone())
+        );
+        let error = make(&format!("{longest}空")).expect_err("201 字写不成");
+        assert_eq!(error, WaiverError::ReasonTooLong { length: 201 });
+        assert_eq!(
+            (error.code(), error.to_string()),
+            (
+                "WAIVER_REASON_TOO_LONG",
+                "WAIVER_REASON_TOO_LONG: 豁免理由有 201 字，最多 200 字".to_owned()
+            )
+        );
     }
 }
