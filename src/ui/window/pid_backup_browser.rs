@@ -33,6 +33,7 @@ pub mod grid;
 mod manifest;
 mod section;
 pub mod split;
+mod symbol_preview;
 mod text_preview;
 
 pub use cache::{
@@ -1204,16 +1205,20 @@ enum DetailLine {
     /// A table, drawn as a [`grid`] below the other lines. A node's details
     /// hold at most one: it takes what is left of the detail half.
     Table(std::sync::Arc<grid::Table>),
+    /// What a symbol file draws, as a thumbnail among the lines.
+    Sketch(std::sync::Arc<crate::io::pid_backup_browse::symbol_file::Sketch>),
 }
 
 impl DetailLine {
     /// The `(key, value)` pairs this line shows: one for every kind but a
     /// table, which gives its titles (with its row count) and then a pair
     /// per row, the first cell as the key and the others joined with ` | `.
+    /// A thumbnail is a key of its own with how much it draws.
     #[cfg(test)]
     fn into_pairs(self) -> Vec<(String, String)> {
         match self {
             DetailLine::Field(key, value) => vec![(key, value)],
+            DetailLine::Sketch(sketch) => vec![symbol_preview::sketch_pair(&sketch)],
             DetailLine::Marker(key)
             | DetailLine::Heading(key)
             | DetailLine::OpenDrawing(key)
@@ -1349,6 +1354,7 @@ fn details<'a>(state: &'a PidBackupBrowser, width: f32) -> Element<'a, Message> 
                 .on_press(msg.message())
                 .padding([3, 10])
                 .into(),
+            DetailLine::Sketch(sketch) => symbol_preview::thumbnail(sketch),
             DetailLine::Table(found) => {
                 table = Some(found);
                 continue;

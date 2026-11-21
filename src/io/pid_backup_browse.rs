@@ -30,6 +30,7 @@ pub mod export_log;
 pub mod labels;
 pub mod loose_files;
 pub mod manifest;
+pub mod symbol_file;
 pub mod text_file;
 
 use std::collections::BTreeMap;

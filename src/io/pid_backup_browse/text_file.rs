@@ -125,6 +125,19 @@ fn starts_binary(head: &[u8]) -> bool {
 /// name as the index lists it: the member is taken by its position, and by
 /// its name when the position holds another.
 pub fn read_zip_member(archive: &Path, member: usize, name: &str) -> Result<Readable, String> {
+    with_zip_member(archive, member, name, |entry, total| read(entry, total))
+}
+
+/// Find member `member` of the zip at `archive` the way [`read_zip_member`]
+/// says, and hand it to `read` with the length it states. A reader of
+/// something that is not text (a symbol file) finds its member the same
+/// way. What fails is said with the archive's path.
+pub(super) fn with_zip_member<T>(
+    archive: &Path,
+    member: usize,
+    name: &str,
+    read: impl FnOnce(&mut dyn Read, u64) -> std::io::Result<T>,
+) -> Result<T, String> {
     let fail =
         |error: String| crate::tf!("cannot read {}: {}", archive.display(), error).into_owned();
     let file = std::fs::File::open(archive).map_err(|error| fail(error.to_string()))?;
@@ -140,9 +153,9 @@ pub fn read_zip_member(archive: &Path, member: usize, name: &str) -> Result<Read
             .find(|at| named(&mut zip, *at))
             .ok_or_else(|| crate::tf!("{} is not in {}", name, archive.display()).into_owned())?
     };
-    let entry = zip.by_index(at).map_err(|error| fail(error.to_string()))?;
+    let mut entry = zip.by_index(at).map_err(|error| fail(error.to_string()))?;
     let total = entry.size();
-    read(entry, total).map_err(|error| fail(error.to_string()))
+    read(&mut entry, total).map_err(|error| fail(error.to_string()))
 }
 
 /// Tell what `head`, the start of a file `total` bytes long, is, and read it
