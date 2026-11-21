@@ -1015,6 +1015,36 @@ pub static PID_CHECK_UNWAIVE: OpDef = OpDef {
     example: r#"{"op":"pid_check_unwaive","rule_id":"DR-014","object_key":"PIPE_LINE|L-1"}"#,
 };
 
+pub static PID_BOM_EXPORT: OpDef = OpDef {
+    name: "pid_bom_export",
+    doc: "Write the P&ID bill of materials of the current drawing, its project or a PBS node to a file on this machine; the extension picks the format (.csv, .xlsx, .json). CSV and XLSX also get the pipe summary beside it (<name>-pipe-summary.<ext>); JSON carries it inside. Nothing is written when the list cannot be made (BOM_DUPLICATE_TAG, BOM_SCOPE_INCOMPLETE). The drawing is not changed, so it also works in a read-only session. Answers status scanning (done, total) while the project's files are still being read: send it again later. Read the list itself with ocs_read op pid_bom. result: path, format, rows, bytes, pipe_summary_path.",
+    batchable: false,
+    params: &[
+        req(
+            "path",
+            Ty::Str,
+            "File to write; a relative path starts from the saved drawing's folder. An existing file is replaced.",
+        ),
+        opt(
+            "scope",
+            Ty::EnumCi(&["drawing", "pbs", "project"]),
+            "drawing (default): the current drawing; project: every drawing of its folder; pbs: the drawings under the PBS node pbs.",
+        ),
+        opt(
+            "pbs",
+            Ty::Str,
+            "PBS node id; only with scope pbs, and needed then (SCOPE_NOT_SELECTED).",
+        ),
+        opt(
+            "columns",
+            Ty::ArrayOf(&Ty::Str),
+            "Main-table columns by header name, in order (CSV and XLSX); all nine when omitted. An unknown name is BOM_COLUMN_UNKNOWN.",
+        ),
+    ],
+    rules: &[Rule::RejectUnknown],
+    example: r#"{"op":"pid_bom_export","path":"bom.xlsx","scope":"project"}"#,
+};
+
 pub static XREF_RELOAD: OpDef = OpDef {
     name: "xref_reload",
     doc: "Reload one direct external reference by id, preserving prior content on load failure.",
@@ -1430,6 +1460,7 @@ pub static OPS: &[&OpDef] = &[
     &PID_CHECK_RULES_SET,
     &PID_CHECK_WAIVE,
     &PID_CHECK_UNWAIVE,
+    &PID_BOM_EXPORT,
     &XREF_RELOAD,
     &XREF_UNLOAD,
     &XREF_DETACH,

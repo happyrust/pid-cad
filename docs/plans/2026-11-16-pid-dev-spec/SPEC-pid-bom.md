@@ -349,3 +349,32 @@ MCP：`pid_bom` 进 `READ_OPS`，`pid_bom_export` 进 `EXECUTE_OPS`。
 7. **JSON 文件**：§3.2 的对象带 `"ok": true`，清单对象本身不带（`BOM-1` 定的），写文件时加上；末尾一个换行。
 
 **测试**（`pidbom.rs` 里新增 8 条；`src/app/collab/apply.rs` 只读名单那条测试加了 5 种写法）：用命令建图——泵、容器、不在线上的阀门、管线、带阀门和管件的管路、两台仪表（前一台手填位号 PT-1001，后一台位号是空的）——`PIDBOM` 说的各种类行数、管长合计、跳过的对象和提示与入口函数算的一样，前后「已修改」、撤销栈、编辑修订号都不变；两张图的项目，全项目 3 行（同一根管线合成一行、两张图都列上），按节点只算归在节点及其下级的图；三种格式导出后读回（CSV 逐字节对、XLSX 用 `calamine` 读回、JSON 解析回同一份清单），目标已存在时覆盖，选列与不认识的列；不写文件的三种情形（重复位号、扩展名不支持、项目文件）；范围出错的四个码；只读会话里能算、能导出；登记了，写错时说用法；命令行上的 `PIDBOM PROJECT` 只算一次。先放空壳（模块和入口函数在，入口函数总得 `BOM_SCOPE_INCOMPLETE`，命令还没接上、没登记），8 条都编得过、都败在断言上，只读名单那条败在 `PIDBOM` 不在名单里。实现后 6 条过、2 条败：用命令插的仪表没有 `仪表功能` 属性，默认位号模板编不出位号，两台都被跳过，清单少了仪表那一行；测试图里给前一台手填位号后 8 条全过。
+
+### 11.5 `BOM-5`：操作 `pid_bom`、`pid_bom_export`（2026-11-21）
+
+**做了什么**（动了 `src/app/control/mod.rs`、`src/rest.rs`、`src/rest_openapi.json`、`src/mcp.rs`，另有两个文件见下）：
+
+- 两个操作的入口写在 `src/app/commands/pidbom.rs`，和命令一样从 `pidbom_compute` 算。`pid_bom`（查询）照 `scope` 算，应答是 §3.2 的清单带 `ok`，与同一张图上 `PIDBOM` 算的一样；`pid_bom_export`（写操作）照 `path` 的扩展名写文件，用命令的那一份写法（`write_bom`），结果是 `path`、`format`（`csv`、`xlsx`、`json`）、`rows`、`bytes`（主表文件的字节数）、`pipe_summary_path`（JSON 没有副表文件，是 `null`）。要写的文件怎么定（相对路径、扩展名、项目文件）拆成命令和操作共用的 `export_target`，命令说的话不变。
+- 按项目、按节点算用 `PIDINDEX` 的项目扫描（`op_scan`，同 `pid_check`）：要读的图缓存里没有时应答 `{"ok":true,"status":"scanning","done":…,"total":…}` 并在后台读，同样的请求再发才是结果。导出照 `pid_locate` 的接法，在登记写操作以前先看（`control_pid_bom_export_waits`）：请求写错了、当前图没存过、节点号不认识、要等扫描，都在这里应答，不登记成操作。
+- 接线（共用约定 §7.6 第 3–5 处）：`pid_bom` 进查询类名单，`pid_bom_export` 进改图分发，能力清单加 `pid_bom`；REST 的 `GET /api/v1/pid/bom`（查询参数 `scope`、`pbs`、`snapshot` 原样带上）走 `Plan::Run`，`POST /api/v1/pid/bom/export`（请求体就是参数）走 `Plan::Mutate`；`map_status` 里 `BOM_DUPLICATE_TAG`、`BOM_SCOPE_INCOMPLETE` 是 409，`BOM_IO_ERROR` 是 500，`SCOPE_NOT_SELECTED`、`BOM_COLUMN_UNKNOWN`、`BOM_FORMAT_UNSUPPORTED` 照默认是 400（`PBS_NODE_UNKNOWN` 的 404、`INDEX_NO_PROJECT_DIR` 的 409 原来就有）；`rest_openapi.json` 加两条路径；MCP 的 `pid_bom` 进 `READ_OPS`、`pid_bom_export` 进 `EXECUTE_OPS`，读门面 `scope`、`pbs` 的说明带上 `pid_bom`，`TOOL_SCHEMA_DIGEST` 跟着更新。
+- 另外公开的（`pub(in crate::app)`）：错误码 `BOM_IO_ERROR`。
+
+**与规格写法不同的：**
+
+1. **多动了两个文件。** 任务只列了上面四个。操作的入口照共用约定 §7.6 第 1 处写在命令那一份 `src/app/commands/pidbom.rs` 里，和命令共用算法、定文件、写文件；`src/mcp_ops.rs`——执行门面要求写操作登记参数表（同 `MD-4`），`pid_bom_export` 的 `path` 必给、`scope` 三选一、`columns` 是文本数组，别的参数不收。
+2. **导出的结果在 `result` 里。** §5.3 的表把 `path`、`format`、`rows`、`bytes`、`pipe_summary_path` 写在应答的顶层；导出是写操作，走改图分发，写操作的结果照惯例放在应答的 `result` 里（同 `plot`、`pid_check_waive`），REST 也一样。
+3. **新错误码 `BOM_IO_ERROR`（500）。** §3.5 没有写文件出错的码；操作要给调用方一个码，照 `MASTERDATA_IO_ERROR`、`RULESET_IO_ERROR` 定成 500。命令那边仍照 §11.4 第 6 条说原因、不带码。
+4. **`snapshot` 还不认。** §5.3 列了 `snapshot`（快照序号）；快照要等 `SNAP-*` 做好，从快照算是 `BOM-6` 的。现在带了 `snapshot`（不是 `null`）报 `invalid_request`，不按当前图算，免得调用方以为拿到的是快照的清单；MCP 读门面也还没有这个参数。
+
+**规格没写到、这里定下的：**
+
+1. **请求的写法**（两个操作一样）：`scope` 不分大小写，默认 `drawing`，写别的或不是文本报 `invalid_request`；`scope: pbs` 时 `pbs` 没给或是空的报 `SCOPE_NOT_SELECTED`（同命令），别的范围带了 `pbs` 报 `invalid_request`。导出的 `path` 必给、不空；`columns` 写列名的数组，不是的报 `invalid_request`；`path` 是项目文件报 `invalid_request`（命令那边不带码）。
+2. **先认请求再算**：请求写错、扩展名不支持、当前图没存过、节点号不认识，都在扫项目、算清单之前报；列名不认识在算出清单以后、写文件以前报，一个文件也不写。
+3. **算不出来时**：失败应答带上清单不产出的原因——`BOM_DUPLICATE_TAG` 带 `duplicates`（每个键的类型编码、位号和各处：图号、位置、句柄，写法同项目索引），`BOM_SCOPE_INCOMPLETE` 带 `drawings`（读不出来的图，写法同项目索引里的图纸条目，带 `error`）。都全部列出（命令说的话最多列 10 个）。
+4. **导出只对当前标签页**：`pid_bom_export` 不进“可以改后台标签页的图”的名单（`background_mutation`），同 `pid_locate`、`plot`；不进批处理（`batchable: false`，同 `pid_locate`）——批处理里没有等扫描的那一步。
+5. **只读会话**：两个操作都不改图，不查会话可不可写（同命令，§5.4）。
+6. **相对路径**同命令：从当前图所在目录算起，没存过的图从程序的当前目录算起；应答的 `path`、`pipe_summary_path` 是实际写的路径。
+
+**测试**（`pidbom.rs` 里新增 5 条，`src/rest.rs`、`src/mcp.rs` 各新增 1 条，名字都带 `pid_bom`）：`pid_bom` 的应答与入口函数在同一张图上算的清单一样，`scope` 不分大小写，不带 `request_id` 也能发，前后「已修改」、撤销栈、编辑修订号不变，能力清单里有 `pid_bom`；按项目先应答 `scanning`、扫着时再发不再起一次扫描、读完是 3 行，按节点 2 行；范围、请求写错的各种码，重复位号带 `duplicates`、读不出来的图带 `drawings`、范围外的坏图不影响；导出 CSV（绝对路径，逐字节对，应答五项都对）、JSON（相对路径，读回同一份清单，副表是 `null`）、XLSX（选列），写不成的九种都不写文件；按项目导出先应答 `scanning`、读完再发才写，只读会话里能导出；REST 两条路由、实测的状态码、各错误码的状态码、OpenAPI 两条路径的各状态；MCP 两份名单、执行门面的参数校验。先只放测试和 `BOM_IO_ERROR`，7 条都编得过、都败在断言上（操作不认识、查询要 `request_id`、不在名单里、路由不是读、能力清单里没有）。实现后 7 条第一次就全过；新加两个操作改了工具清单，`tool_schema_digest_is_pinned` 照预期败在摘要值上，换上它给的新值后过；格式检查查出 `pidbom.rs` 里 9 处长行的排法，照 `rustfmt` 改了（不改行为）再跑两条验证，都过。
+
+**手工**：调试版 `--http`（令牌只经环境变量）走了 35 步。空白图的清单是 0 行；没存过的图按项目算是 409，`pbs` 不给节点号、不认识的 `scope`、带 `snapshot`、扩展名不支持、不给 `path` 都是 400，不带令牌是 401。用命令画泵、阀门、容器、管线和管路，存进临时目录后清单 4 行（管线 1、设备 2、阀门 1），图号取文件名；三种格式导出都是 200，应答的路径、格式、行数、字节数与盘上的文件对得上（CSV 主表 5 行、副表 2 行，各含列名一行；JSON 用相对路径写，读回是同一份清单；XLSX 选列）。不认识的列是 400 且没写文件，写不了的路径是 500，不认识的节点号是 404。按项目算先应答 `scanning`（HTTP 200），读完是 4 行，按项目导出也是 4 行。同一张图另存一份后按项目算是 `BOM_DUPLICATE_TAG`（409，带 3 个重复的键；同一根管线不算重复），导出也是、没写文件，当前图自己的清单照旧。第一遍脚本漏画了管线（管路要画在管线上），清单没有管线行、副表是空的，补上后重走了一遍。

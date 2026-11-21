@@ -682,7 +682,7 @@ impl OpenCADStudio {
             "mtext_editor":self.mtext_editor.as_ref().map(|e|json!({"text":e.content.text(),"height":e.height,"style":e.style})),
             "text_editor":self.text_inline.is_some(),"event_cursor":self.control.serial,
             "operation":self.control.pending.as_ref().map(|p| &p.id),
-            "capabilities":["commands","command_manifest","step_input","batch","compact_results","entity_pick","structure_pick","selection","user_select","properties","records","record_schemas","record_filters","atomic_record_updates","layers","history","documents","events","capture","viewport_capture","measure","spatial_query","pid_legend","pid_master_data","pid_project_index","pid_check","audit","verified_save","explicit_save_version"]
+            "capabilities":["commands","command_manifest","step_input","batch","compact_results","entity_pick","structure_pick","selection","user_select","properties","records","record_schemas","record_filters","atomic_record_updates","layers","history","documents","events","capture","viewport_capture","measure","spatial_query","pid_legend","pid_master_data","pid_project_index","pid_check","pid_bom","audit","verified_save","explicit_save_version"]
         })
     }
 
@@ -715,6 +715,7 @@ impl OpenCADStudio {
                 | "pid_index"
                 | "pid_check"
                 | "pid_check_rules"
+                | "pid_bom"
                 | "snap"
                 | "grips"
                 | "query"
@@ -1042,6 +1043,9 @@ impl OpenCADStudio {
             if op == "pid_check" {
                 return self.control_pid_check(&req);
             }
+            if op == "pid_bom" {
+                return self.control_pid_bom(&req);
+            }
             let response = match op {
                 "properties" => self.control_properties(),
                 "measure" => self.control_measure(&req),
@@ -1205,6 +1209,11 @@ impl OpenCADStudio {
         }
         if op == "pid_locate" {
             if let Some(answer) = self.control_pid_locate_waits(&req) {
+                return answer;
+            }
+        }
+        if op == "pid_bom_export" {
+            if let Some(answer) = self.control_pid_bom_export_waits(&req) {
                 return answer;
             }
         }
@@ -1522,6 +1531,7 @@ impl OpenCADStudio {
             "pid_check_rules_set" => self.control_pid_check_rules_set(req)?,
             "pid_check_waive" => self.control_pid_check_waive(req)?,
             "pid_check_unwaive" => self.control_pid_check_unwaive(req)?,
+            "pid_bom_export" => self.control_pid_bom_export(req)?,
             "entities_set" => self.control_entities_set(req)?,
             "xref_reload" => self.control_xref_reload(req)?,
             "xref_unload" => self.control_xref_unload(req)?,

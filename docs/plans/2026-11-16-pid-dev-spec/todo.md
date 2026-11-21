@@ -843,13 +843,14 @@
 
 - **做什么**：两个自动化操作（§5.3）：`pid_bom`（`GET /api/v1/pid/bom`；`scope`、`pbs`）、`pid_bom_export`（`POST /api/v1/pid/bom/export`；`path`、范围参数、可选 `columns`）。按共用约定 §7.6 的第 3–5 处接线；§3.5 的错误码进 `map_status`。
 - **验收**：
-  - [ ] `pid_bom` 的应答就是 §3.2 的清单，与同一张图上 `PIDBOM` 的结果一致；项目扫描没做完时应答 `scanning`。
-  - [ ] `pid_bom_export` 的应答带 `path`、`format`、`rows`、`bytes`、`pipe_summary_path`，`columns` 选列生效；状态码：`BOM_DUPLICATE_TAG`、`BOM_SCOPE_INCOMPLETE` 是 409，`BOM_COLUMN_UNKNOWN`、`BOM_FORMAT_UNSUPPORTED`、`SCOPE_NOT_SELECTED` 是 400。
-  - [ ] `rest_openapi.json` 里有这两条路径；`tool_schema_digest_is_pinned` 通过。
+  - [x] `pid_bom` 的应答就是 §3.2 的清单，与同一张图上 `PIDBOM` 的结果一致；项目扫描没做完时应答 `scanning`。
+  - [x] `pid_bom_export` 的应答带 `path`、`format`、`rows`、`bytes`、`pipe_summary_path`，`columns` 选列生效；状态码：`BOM_DUPLICATE_TAG`、`BOM_SCOPE_INCOMPLETE` 是 409，`BOM_COLUMN_UNKNOWN`、`BOM_FORMAT_UNSUPPORTED`、`SCOPE_NOT_SELECTED` 是 400。
+  - [x] `rest_openapi.json` 里有这两条路径；`tool_schema_digest_is_pinned` 通过。
 - **验证**：`cargo test --offline --locked --lib pid_bom`；`cargo test --offline --locked --lib tool_schema_digest_is_pinned`；手工：`--http` 启动后请求 `GET /api/v1/pid/bom`
 - **依赖**：BOM-4
 - **文件**：`src/app/control/mod.rs`、`src/rest.rs`、`src/rest_openapi.json`、`src/mcp.rs`
 - **规模**：M
+- **补（2026-11-21）**：在 `pid-stage-c` 分支上接着 `BOM-4` 做，一个提交。多改了两个文件：`src/app/commands/pidbom.rs`（两个操作的主体，和命令共用入口函数、项目扫描、写文件；要写的文件怎么定提成 `export_target` 与命令共用，命令说的话不变；`Written` 多一项 `bytes`）、`src/mcp_ops.rs`（`pid_bom_export` 的参数表，执行门面要求登记）。与任务写法不同、或任务没有说的：导出的结果放在 `result` 里（写操作的惯例，同 `pid_locate`、`pid_check_waive`）；写文件出错是新错误码 `BOM_IO_ERROR`（HTTP 500，同 `MASTERDATA_IO_ERROR`），命令照旧说原因、不带码；带了 `snapshot` 先报 `invalid_request`（从快照算是 `BOM-6` 的）；`scope` 不分大小写、默认 `drawing`，`pbs` 只和 `scope: pbs` 一起给，空的等于没给（`SCOPE_NOT_SELECTED`）；`path` 必给，相对路径同命令从当前图所在目录算起，`path` 是项目文件报 `invalid_request`，`columns` 是文本数组；请求、扩展名、没存过的图、节点号都在扫项目之前报，不认识的列在写文件之前报；`BOM_DUPLICATE_TAG` 带 `duplicates`、`BOM_SCOPE_INCOMPLETE` 带 `drawings`，全部列出；导出照 `pid_locate` 在登记写操作以前先看要不要等扫描，只对当前标签页，不进批处理；两个操作都不查会话可不可写。这些记在材料清单规格 §11.5。**先红后绿**：先只放测试和 `BOM_IO_ERROR`，7 条新测试都编得过、都败在断言上；实现后 7 条第一次就全过，`tool_schema_digest_is_pinned` 照预期败在摘要值上，换上新值后过；格式检查查出 `pidbom.rs` 9 处长行的排法，照 `rustfmt` 改后两条验证再跑都过。**手工**：调试版 `--http`（令牌只经环境变量）走了 35 步，两条路由都通，200、400、401、404、409、500 都符合预期，导出的三种文件与应答对得上（细节在规格 §11.5）。**读数**：主程序库 7533 条，7460 通过、70 默认不跑、3 失败（比对设计稿的三条，与起点相同）；起点 7526 条（7453 / 70 / 3），多的 7 条是新加的，都过；编译警告 52；clippy 656 / 1051，与起点相同，各文件告警数不变，`src/mcp.rs` 原有的两处下移 4 行，`--tests` 那一遍另有 `src/app/control/mod.rs` 的六处下移 10 行、`src/rest.rs` 的两处下移 141 行，别的位置一处不差，改动的文件没有新告警；格式检查五个改动的 Rust 文件新增 0；架构检查上行依赖 33 对、183 个文件；SPPID 脚本测试 185 条全过；都与起点相同。**新基线**：主程序库 7533 条（7460 / 70 / 3）。
 
 > **检查点 CP-C4**（BOM-1 – BOM-5 之后）：命令行和 REST 都能出清单、导出三种格式；重复位号时不出清单；性能达标。
 

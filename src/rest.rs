@@ -672,6 +672,27 @@ pub(crate) fn plan(method: &str, rest: &[&str], request: &HttpRequest) -> Plan {
                 created: 200,
             }
         }
+        // P&ID bill of materials (SPEC-pid-bom §5.3): the list of the current
+        // drawing, its project or a PBS node, which answers `status: scanning`
+        // while the project's files are still being read, and writing it to a
+        // file on this machine. The export changes no drawing.
+        ("GET", ["pid", "bom"]) => {
+            let mut bom = json!({"protocol": 1, "op": "pid_bom"});
+            for key in ["scope", "pbs", "snapshot"] {
+                if let Some(value) = request.param(key) {
+                    bom[key] = json!(value);
+                }
+            }
+            Plan::Run {
+                request: bom,
+                created: 200,
+            }
+        }
+        ("POST", ["pid", "bom", "export"]) => Plan::Mutate {
+            op: "pid_bom_export".into(),
+            fields: body,
+            created: 200,
+        },
         // Same state read, plus `documents[].document_id` — the spelling the
         // REST contract (and every validator) reads.
         ("GET", ["documents"]) => Plan::Aliased {
@@ -1284,11 +1305,15 @@ pub(crate) fn map_status(response: Value, created: bool) -> u16 {
         | "RULE_BUILTIN_READONLY"
         | "RULE_ID_RESERVED"
         | "RULE_ID_DUPLICATED"
-        | "RULE_BLOCKED" => 409,
+        | "RULE_BLOCKED"
+        // 材料清单（材料清单规格 §3.5）：范围里有重复的位号、有图读不出来，清单不产出。
+        | "BOM_DUPLICATE_TAG"
+        | "BOM_SCOPE_INCOMPLETE" => 409,
         // 协同会话不可写：请求本身没有错，是这个会话不被允许做这件事。
         "COLLAB_READONLY" | "PERM_DENIED_ROLE" | "PERM_DENIED_PBS" | "PERM_DENIED_STATE" => 403,
-        // 项目文件、项目规则包读写失败：请求和图纸都没错，是桌面端这台机器的文件系统报了错。
-        "MASTERDATA_IO_ERROR" | "INDEX_IO_ERROR" | "RULESET_IO_ERROR" => 500,
+        // 项目文件、项目规则包读写失败，清单文件写不了：请求和图纸都没错，是桌面端这台机器的
+        // 文件系统报了错。
+        "MASTERDATA_IO_ERROR" | "INDEX_IO_ERROR" | "RULESET_IO_ERROR" | "BOM_IO_ERROR" => 500,
         "busy" => 503,
         _ => 400,
     }
@@ -1986,6 +2011,122 @@ mod tests {
                 map_status(json!({"ok": false, "code": code}), false),
                 expected_status,
                 "{code}"
+            );
+        }
+    }
+
+    /// The bill of materials (SPEC-pid-bom §5.3): GET /pid/bom runs the
+    /// `pid_bom` read with `scope`, `pbs` and `snapshot` from the query;
+    /// POST /pid/bom/export writes the file through the mutation wrapper with
+    /// the body as its fields. Status codes follow §3.5: a duplicate tag and
+    /// a scope with drawings that cannot be read are 409, a PBS node that is
+    /// not there 404, an unknown column, an unsupported extension and a PBS
+    /// scope without a node 400, a file that cannot be written 500. Both
+    /// routes are in the OpenAPI document.
+    #[test]
+    fn pid_bom_rest_routes_and_status_codes() {
+        let mut bom = request("GET", "/api/v1/pid/bom", "");
+        bom.query = vec![
+            ("scope".into(), "pbs".into()),
+            ("pbs".into(), "U-100".into()),
+            ("snapshot".into(), "3".into()),
+        ];
+        let Plan::Run {
+            request: asked,
+            created,
+        } = plan("GET", &["pid", "bom"], &bom)
+        else {
+            panic!("GET /pid/bom is not a read");
+        };
+        assert_eq!(created, 200);
+        assert_eq!(
+            asked,
+            json!({"protocol": 1, "op": "pid_bom", "scope": "pbs", "pbs": "U-100", "snapshot": "3"})
+        );
+        let body = r#"{"path":"bom.csv","scope":"project","columns":["位号"]}"#;
+        let export = request("POST", "/api/v1/pid/bom/export", body);
+        let Plan::Mutate {
+            op,
+            fields,
+            created,
+        } = plan("POST", &["pid", "bom", "export"], &export)
+        else {
+            panic!("POST /pid/bom/export is not a write");
+        };
+        assert_eq!((op.as_str(), created), ("pid_bom_export", 200));
+        let sent: Value = serde_json::from_str(body).expect("JSON");
+        assert_eq!(fields, sent);
+
+        let mut document_id: Option<u64> = None;
+        let mut counter: u64 = 0;
+        let mut app = serve_app(true);
+        let bare = request("GET", "/api/v1/pid/bom", "");
+        let (status, body) = route(&mut app, &bare, &mut document_id, &mut counter);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["version"], 1, "{body}");
+        assert_eq!(body["scope"]["kind"], "drawing", "{body}");
+        let read = |key: &str, value: &str| {
+            let mut asked = request("GET", "/api/v1/pid/bom", "");
+            asked.query = vec![(key.into(), value.into())];
+            asked
+        };
+        let export = |body: &str| request("POST", "/api/v1/pid/bom/export", body);
+        for (asked, expected_status, code) in [
+            (read("scope", "project"), 409, "INDEX_NO_PROJECT_DIR"),
+            (read("scope", "pbs"), 400, "SCOPE_NOT_SELECTED"),
+            (read("scope", "nowhere"), 400, "invalid_request"),
+            (read("snapshot", "3"), 400, "invalid_request"),
+            (
+                export(r#"{"path":"bom.txt"}"#),
+                400,
+                "BOM_FORMAT_UNSUPPORTED",
+            ),
+            (export("{}"), 400, "invalid_request"),
+            (
+                export(r#"{"path":"bom.csv","scope":"pbs"}"#),
+                400,
+                "SCOPE_NOT_SELECTED",
+            ),
+        ] {
+            let (status, body) = route(&mut app, &asked, &mut document_id, &mut counter);
+            let what = format!("{} {}?{:?} {body}", asked.method, asked.path, asked.query);
+            assert_eq!(status, expected_status, "{what}");
+            assert_eq!(body["code"], code, "{what}");
+        }
+
+        for (code, expected_status) in [
+            ("BOM_DUPLICATE_TAG", 409),
+            ("BOM_SCOPE_INCOMPLETE", 409),
+            ("INDEX_NO_PROJECT_DIR", 409),
+            ("PBS_NODE_UNKNOWN", 404),
+            ("SCOPE_NOT_SELECTED", 400),
+            ("BOM_COLUMN_UNKNOWN", 400),
+            ("BOM_FORMAT_UNSUPPORTED", 400),
+            ("BOM_IO_ERROR", 500),
+        ] {
+            assert_eq!(
+                map_status(json!({"ok": false, "code": code}), false),
+                expected_status,
+                "{code}"
+            );
+        }
+
+        let document: Value = serde_json::from_str(include_str!("rest_openapi.json"))
+            .expect("REST OpenAPI document parses");
+        for (path, method, status) in [
+            ("/api/v1/pid/bom", "get", "200"),
+            ("/api/v1/pid/bom", "get", "400"),
+            ("/api/v1/pid/bom", "get", "404"),
+            ("/api/v1/pid/bom", "get", "409"),
+            ("/api/v1/pid/bom/export", "post", "200"),
+            ("/api/v1/pid/bom/export", "post", "400"),
+            ("/api/v1/pid/bom/export", "post", "404"),
+            ("/api/v1/pid/bom/export", "post", "409"),
+            ("/api/v1/pid/bom/export", "post", "500"),
+        ] {
+            assert!(
+                document["paths"][path][method]["responses"][status].is_object(),
+                "missing {status} response for {method} {path}"
             );
         }
     }
