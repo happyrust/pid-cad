@@ -27,12 +27,15 @@ pub enum ClientMessage {
         /// first join, where the drawing is taken to be what the room has.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         since: Option<i64>,
-        /// Which repository the `since` claims to be of: the `repo_id` this
-        /// client's drawing recorded of the room it was in (its own saved
-        /// copy, or the last session's `welcome`). A revision means nothing
-        /// across repositories, so a `since` without it cannot be honoured:
-        /// the join is answered with [`ServerMessage::AlignRefused`]
-        /// (`REPO_MISMATCH`). Absent with no `since` either: a first join.
+        /// Which repository the `since` is of: the `repo_id` this client's
+        /// drawing recorded of the room it was in (its own saved copy, or
+        /// the last session's `welcome`). Naming it asks for the drawing to
+        /// be taken as consistent with the room, and the server checks
+        /// that; a refusal comes in the `welcome`
+        /// ([`ServerMessage::Welcome::align_refused`]). A `hello` that names
+        /// none is not checked: a `since` alone is replayed from as far as
+        /// the op log allows, as for a client that predates this field, and
+        /// with no `since` either the join is a first one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repo_id: Option<String>,
         /// The tags the objects of this client's own copy of the drawing
@@ -96,16 +99,15 @@ pub enum ServerMessage {
         /// `hello` gave. Absent: nothing is replayed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replay_from: Option<i64>,
+        /// Present when the `hello` named a repository and the server cannot
+        /// take the drawing as consistent with the room: the repository is
+        /// another, the revision is ahead of what the room has, or the op log
+        /// no longer holds what a replay needs (`REQ-COLL-015`). The session
+        /// is still established — the person sees the room — but nothing is
+        /// replayed, and every `op` it sends is answered `NOT_ALIGNED`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        align_refused: Option<AlignRefusal>,
     },
-    /// The `hello` asked to be taken as consistent — `repo_id` and/or
-    /// `since` — and the server cannot: the repository is another, the
-    /// revision is ahead of what the room has, or the op log no longer
-    /// holds what a replay needs (`REQ-COLL-015`). The session is still
-    /// established — the person sees the room — but nothing this copy does
-    /// may be submitted: `code` is one of `REPO_MISMATCH`, `REVISION_AHEAD`,
-    /// `REPLAY_GAP`, and `message` the reason in the user's words. Sent
-    /// right behind the `welcome`, before anything else on the socket.
-    AlignRefused { code: String, message: String },
     /// Structured failure. `level` names the first denying tier when the
     /// failure came out of the permission chain.
     Error {
@@ -198,6 +200,15 @@ pub struct ClaimInfo {
     pub expires_at: i64,
 }
 
+/// Why a `welcome` did not take the drawing as consistent with the room:
+/// `code` is one of `REPO_MISMATCH`, `REVISION_AHEAD`, `REPLAY_GAP`, and
+/// `message` the reason in the user's words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlignRefusal {
+    pub code: String,
+    pub message: String,
+}
+
 /// Error codes the protocol may return. Kept as constants so the client and
 /// the server can never drift on spelling.
 pub mod codes {
@@ -217,9 +228,8 @@ pub mod codes {
     pub const PERM_INVALID_STATE: &str = "PERM_INVALID_STATE";
     /// A deletion refused because other objects still hang on the object.
     pub const OBJECT_REFERENCED: &str = "OBJECT_REFERENCED";
-    /// The drawing's `hello` named a repository the server is not
-    /// (`repo_id` did not match, or a `since` was given none can be named
-    /// for). The join itself stands; the copy is not taken as consistent.
+    /// The drawing's `hello` named a repository the server is not. The join
+    /// itself stands; the copy is not taken as consistent.
     pub const REPO_MISMATCH: &str = "REPO_MISMATCH";
     /// The `since` a `hello` named is ahead of the revision the room has
     /// reached (or not a revision at all): the copy knows of a room this
@@ -228,6 +238,15 @@ pub mod codes {
     /// The `since` a `hello` named can no longer be replayed: the op log
     /// does not hold every revision in between (or there is no log).
     pub const REPLAY_GAP: &str = "REPLAY_GAP";
+    /// An `op` from a session whose `welcome` refused its alignment. It is
+    /// not judged, logged or told to the room, and it is not refused
+    /// either: the step stays with its sender for a connection that aligns.
+    pub const NOT_ALIGNED: &str = "NOT_ALIGNED";
+    /// The server's database could not be opened, so it takes no session:
+    /// a `hello` is answered with this and the connection closed. What the
+    /// session sent would be kept nowhere, and judged against a repository
+    /// id made up for this one run (`SPEC-collab-offline-sync.md` §6).
+    pub const STORE_UNAVAILABLE: &str = "STORE_UNAVAILABLE";
     /// A change to an object another session deleted after the change's
     /// baseline. The deletion stands (`architecture.md` §3.3, object level).
     pub const OBJECT_DELETED: &str = "OBJECT_DELETED";
@@ -344,6 +363,7 @@ mod tests {
             }],
             repo_id: "r-test".into(),
             replay_from: None,
+            align_refused: None,
         };
         let value: Value = serde_json::to_value(&msg).expect("welcome must serialize");
         assert_eq!(value["type"], "welcome");
@@ -401,6 +421,7 @@ mod tests {
             claims: Vec::new(),
             repo_id: "r-test".into(),
             replay_from: Some(6),
+            align_refused: None,
         };
         let value: Value = serde_json::to_value(&replaying).expect("serialize");
         assert_eq!(value["replay_from"], 6);
@@ -444,8 +465,8 @@ mod tests {
     }
 
     /// `REQ-COLL-015`: the repo identity rides `hello` and `welcome`, and
-    /// a refused alignment is its own message — all optional additions, so
-    /// an old frame still reads.
+    /// so does a refused alignment (`OFF-2`: in the `welcome`, not a frame
+    /// of its own) — all optional additions, so an old frame still reads.
     #[test]
     fn collab_align_repo_id_and_align_refused_are_optional_additions() {
         let plain: ClientMessage = serde_json::from_str(
@@ -478,18 +499,29 @@ mod tests {
             matches!(old_welcome, ServerMessage::Welcome { ref repo_id, .. } if repo_id.is_empty())
         );
 
-        let refused = ServerMessage::AlignRefused {
-            code: codes::REPO_MISMATCH.into(),
-            message: "这份文件属于另一个服务器库".into(),
-        };
-        let value = serde_json::to_value(&refused).expect("serialize");
-        assert_eq!(value["type"], "align_refused");
-        assert_eq!(value["code"], "REPO_MISMATCH");
-        let back: ServerMessage = serde_json::from_value(value).expect("round trip");
-        assert!(matches!(
-            back,
-            ServerMessage::AlignRefused { ref code, .. } if code == codes::REPO_MISMATCH
-        ));
+        assert!(serde_json::to_value(&old_welcome)
+            .expect("serialize")
+            .get("align_refused")
+            .is_none());
+
+        let refusing: ServerMessage = serde_json::from_str(
+            r#"{"type":"welcome","session_id":"s-1","base_revision":9,"peers":[],"claims":[],
+                "repo_id":"r-9","align_refused":{"code":"REPO_MISMATCH","message":"这份文件属于另一个服务器库"}}"#,
+        )
+        .expect("a welcome that refuses the claim");
+        let value = serde_json::to_value(&refusing).expect("serialize");
+        assert_eq!(value["align_refused"]["code"], "REPO_MISMATCH", "{value}");
+        assert_eq!(
+            value["align_refused"]["message"], "这份文件属于另一个服务器库",
+            "{value}"
+        );
+        assert!(
+            serde_json::from_str::<ServerMessage>(
+                r#"{"type":"align_refused","code":"REPO_MISMATCH","message":"x"}"#
+            )
+            .is_err(),
+            "a refusal is no frame of its own"
+        );
     }
 
     /// `hello.existing_tags`: the tags the objects of the client's own copy

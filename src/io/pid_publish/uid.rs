@@ -99,18 +99,31 @@ impl UidAllocator {
         }
     }
 
+    /// Reserve all OIDs already present in a seed `.pid` package and advance
+    /// `next_graphic_oid` to at least `min_next_oid`.
+    pub fn reserve_graphic_oids(&mut self, min_next_oid: u32, reserved: &BTreeSet<u32>) {
+        self.used_graphic_oids.extend(reserved.iter().copied());
+        if min_next_oid > self.next_graphic_oid {
+            self.next_graphic_oid = min_next_oid;
+        }
+    }
+
     /// Allocate or preserve a storage-unique `GraphicOID` (`< 0x2000` in segment 0
-    /// first, advancing monotonically without collisions).
+    /// first, advancing monotonically without collisions and skipping segment-0
+    /// boundary slots `(oid & 0x1FFF) == 0`).
     pub fn alloc_graphic_oid(&mut self, preferred: Option<u32>) -> u32 {
         if let Some(oid) = preferred {
-            if oid > 0 && self.used_graphic_oids.insert(oid) {
+            if oid > 0 && (oid & 0x1FFF) != 0 && self.used_graphic_oids.insert(oid) {
                 if oid >= self.next_graphic_oid {
                     self.next_graphic_oid = oid.saturating_add(1);
                 }
                 return oid;
             }
         }
-        while !self.used_graphic_oids.insert(self.next_graphic_oid) {
+        while self.next_graphic_oid == 0
+            || (self.next_graphic_oid & 0x1FFF) == 0
+            || !self.used_graphic_oids.insert(self.next_graphic_oid)
+        {
             self.next_graphic_oid = self.next_graphic_oid.saturating_add(1);
         }
         let assigned = self.next_graphic_oid;

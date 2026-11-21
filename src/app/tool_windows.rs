@@ -47,6 +47,7 @@ impl ModalKind {
             | K::AssocPrompt
             | K::Unsaved
             | K::BlockEditChanges
+            | K::CollabUnsynced
             | K::SaveDialog
             | K::Recovery
             | K::RecoveryPrompt

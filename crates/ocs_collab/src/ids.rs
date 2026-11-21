@@ -37,6 +37,21 @@ pub fn new_repo_id() -> String {
     format!("r-{}", Uuid::new_v4())
 }
 
+/// A fresh run id: drawn once each time the desktop client starts, it names
+/// the ops of that run ([`op_id`]). It is there before any session is, so a
+/// step made offline is named as surely as one made online, and no other
+/// run — the same person's next, or anybody's — names a step alike.
+pub fn new_run_id() -> String {
+    format!("r-{}", Uuid::new_v4())
+}
+
+/// The id of op `n` of run `run_id`: `op-<run id>-<n>`, counted from 1 in
+/// each run. Opaque to both ends: the server echoes it, and only the client
+/// that made it reads it, to know its own op when the room answers.
+pub fn op_id(run_id: &str, n: u64) -> String {
+    format!("op-{run_id}-{n}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,5 +73,17 @@ mod tests {
         assert!(a.starts_with("s-"));
         assert!(new_conflict_id().starts_with("c-"));
         assert!(new_claim_id().starts_with("cl-"));
+    }
+
+    #[test]
+    fn run_ids_are_unique_and_name_the_ops_of_their_run() {
+        let a = new_run_id();
+        let b = new_run_id();
+        assert_ne!(a, b);
+        assert!(a.starts_with("r-"), "{a}");
+        assert_eq!(op_id(&a, 1), format!("op-{a}-1"));
+        assert_ne!(op_id(&a, 1), op_id(&a, 2));
+        // Two runs that have counted alike still name their ops apart.
+        assert_ne!(op_id(&a, 1), op_id(&b, 1));
     }
 }

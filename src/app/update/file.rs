@@ -3528,6 +3528,7 @@ impl OpenCADStudio {
             }
             .map_err(|error| error.to_string())?;
             extracted.header.insertion_units = unit;
+            Self::without_collab_records(&mut extracted);
             Ok(extracted)
         };
         #[cfg(not(target_arch = "wasm32"))]
@@ -3938,16 +3939,47 @@ impl OpenCADStudio {
     /// ops the room has not answered. Written into the save snapshot only:
     /// the live document's dirty flag and undo stack are untouched, and a
     /// drawing no repository has claimed keeps no record.
-    fn write_collab_state_into_snapshot(&mut self, i: usize, snapshot: &mut document::Document) {
+    ///
+    /// What the drawing is known to be apart from the room for rides with
+    /// the record (`diverged`; `SPEC-collab-offline-sync.md` §5.1): the
+    /// mark it was read with or this run gave it, else `UNQUEUED_EDITS` when
+    /// edits no queue took were made on it, which go on its unsynced list.
+    /// Ops restored from its file that the room refused go there too, and
+    /// mark nothing (§5.4). A drawing that is not the session's keeps its
+    /// record's three as they were read.
+    ///
+    /// Every exit that writes the whole drawing calls this on the copy it
+    /// writes; one that writes another drawing out of it calls
+    /// [`Self::without_collab_records`] instead.
+    pub(in crate::app) fn write_collab_state_into_snapshot(
+        &mut self,
+        i: usize,
+        snapshot: &mut document::Document,
+    ) {
+        let unqueued = self
+            .collab
+            .unqueued_for_save(self.tabs[i].id)
+            .map(|(entries, mark)| (entries.to_vec(), mark));
+        let refused = self
+            .collab
+            .refused
+            .get(&self.tabs[i].id)
+            .cloned()
+            .unwrap_or_default();
         if self.collab_tab() == Some(i) && self.collab.had_session {
             if let Some(repo_id) = self.collab.repo_id.clone() {
-                crate::pid::collab_state::store_state(
+                let diverged = self
+                    .collab
+                    .diverged_record()
+                    .or_else(|| unqueued.as_ref().map(|(_, mark)| mark.clone()));
+                crate::pid::collab_state::store_state_diverged(
                     snapshot,
                     Some(&crate::pid::FileCollabState {
                         drawing_id: self.collab.drawing_id.clone(),
                         repo_id,
                         revision: self.collab.base_revision,
                     }),
+                    diverged.as_ref(),
                 );
                 let queued: Vec<crate::pid::QueuedOp> = self
                     .collab
@@ -3959,11 +3991,50 @@ impl OpenCADStudio {
                         base_revision: entry.base_revision,
                         on: entry.on,
                         label: entry.label.clone(),
+                        user_id: entry.user_id.clone(),
+                        queued_at: entry.queued_at,
+                        inverse: entry.inverse.clone(),
                     })
                     .collect();
-                crate::pid::collab_state::store_queue(snapshot, &queued);
+                crate::pid::collab_state::store_queue_keeping(
+                    snapshot,
+                    &queued,
+                    &self.collab.unreadable_queue,
+                );
+                if let Some((entries, _)) = &unqueued {
+                    crate::pid::collab_state::append_unsynced(snapshot, entries);
+                }
+                if !refused.is_empty() {
+                    crate::pid::collab_state::append_unsynced(snapshot, &refused);
+                }
+                return;
             }
         }
+        if unqueued.is_none() && refused.is_empty() {
+            return;
+        }
+        let Some(record) = crate::pid::collab_state::load_state(snapshot) else {
+            return;
+        };
+        if let Some((entries, mark)) = unqueued {
+            let kept = crate::pid::collab_state::load_diverged(snapshot);
+            let mark = kept.unwrap_or(mark);
+            crate::pid::collab_state::store_state_diverged(snapshot, Some(&record), Some(&mark));
+            crate::pid::collab_state::append_unsynced(snapshot, &entries);
+        }
+        if !refused.is_empty() {
+            crate::pid::collab_state::append_unsynced(snapshot, &refused);
+        }
+    }
+
+    /// A block, objects or the whole drawing written out make another
+    /// drawing, one no room has seen: it carries none of the three sync
+    /// records, whatever the drawing it came from or a template it was
+    /// written onto had.
+    pub(in crate::app) fn without_collab_records(drawing: &mut document::Document) {
+        crate::pid::collab_state::store_state(drawing, None);
+        crate::pid::collab_state::store_queue(drawing, &[]);
+        crate::pid::collab_state::store_unsynced(drawing, &[]);
     }
 
     /// Point the drawing at the file it now lives in. The fields that report
@@ -5058,7 +5129,7 @@ impl OpenCADStudio {
                     tasks.push(self.open_unsaved_dialog_window());
                 } else {
                     tasks.push(self.close_unsaved_dialog_window());
-                    tasks.push(self.exit_app());
+                    tasks.push(self.quit_unless_unsynced());
                 }
             }
             crate::app::SaveContinuation::CloseTab => {

@@ -28,7 +28,7 @@
 | `heartbeat` | `session_id` | 保活，每 15 秒一次 |
 | `claim` | `session_id`、`tag` | 占用一个位号（独占） |
 | `release` | `session_id`、`tag` | 主动放弃占用 |
-| `op` | `session_id`、`base_revision`、`op_id`、`payload` | 提交一步编辑。`base_revision` 是做这一步时本图跟到的修订号；`op_id` 由客户端生成，形如 `op-<session_id>-<序号>`；`payload` 见 §4。2026-11-17：编号改为 `op-<运行标识>-<序号>`，不再带会话号，见 `SPEC-collab-offline-sync.md` §4.2，已确认 |
+| `op` | `session_id`、`base_revision`、`op_id`、`payload` | 提交一步编辑。`base_revision` 是做这一步时本图跟到的修订号；`op_id` 由客户端生成，形如 `op-<运行标识>-<序号>`：运行标识每次启动程序生成一个，序号在一次运行里从 1 递增，不带会话号，连没连上都一样生成（`SPEC-collab-offline-sync.md` §4.2）；对服务器是不透明的字符串；`payload` 见 §4。2026-11-20 起（`OFF-3`），之前是 `op-<session_id>-<序号>` |
 | `attempt` | `session_id`；可选 `object_ref`、`text` | 报告一次被客户端自己拦下的写操作（会话只读，或位号被别人占用）。图不变，只留审计记录；记录里的原因是服务器自己判的，不采信客户端的说法 |
 
 ```json

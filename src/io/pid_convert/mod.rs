@@ -13,9 +13,12 @@ pub use class_map::{
     BlockOverrideRule, BlockResolution, IgnoreReason, LegendClassMap, LegendMapRules, MappedBlock,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use export::convert_path_to_dir;
+pub use export::{
+    convert_document_to_dual, convert_path_to_dir, verify_dual_bundle, DualConvertBundle,
+};
 pub use export::{
     convert_document_to_publish, BatchConvertSummary, ConvertOptions, ConvertSheetReport,
+    DualVerifyReport,
 };
 pub use recognize::{
     recognise_sppid_sheet, ConfidenceSummary, ConfidenceThresholds, ConfidenceTier,

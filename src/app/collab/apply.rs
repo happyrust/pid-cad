@@ -7,6 +7,7 @@
 //! `OpenCADStudio` and to the scene's redraw bookkeeping.
 
 use crate::app::OpenCADStudio;
+use crate::pid::collab_state::{REMOTE_UNAPPLIED, ROLLBACK_FAILED};
 
 use super::broadcast;
 
@@ -76,19 +77,71 @@ impl OpenCADStudio {
     /// is in front, until the tab is closed; a session whose drawing was
     /// closed has no document, and says so rather than move on to the next
     /// one.
+    ///
+    /// A drawing whose sync record names another drawing than the session's
+    /// is not it (`record_allows`), and leaves the session without one.
     pub(in crate::app) fn collab_tab(&mut self) -> Option<usize> {
         if let Some(id) = self.collab.document {
-            return self.tabs.iter().position(|tab| tab.id == id);
+            let i = self.tabs.iter().position(|tab| tab.id == id)?;
+            return self.record_allows(i).then_some(i);
         }
         let i = match self.collab.document_path.clone() {
             Some(path) => self.tab_showing(&path)?,
             None => self.active_tab,
         };
-        if self.tabs.get(i).is_some_and(|tab| !tab.is_start) {
+        if self.tabs.get(i).is_some_and(|tab| !tab.is_start) && self.record_allows(i) {
             self.collab.document = Some(self.tabs[i].id);
             return Some(i);
         }
         None
+    }
+
+    /// Whether tab `i`'s drawing may be the session's, by what its sync
+    /// record names (`SPEC-collab-offline-sync.md` §5.2, step one). Read
+    /// once for a tab, and only with collaboration configured. No record,
+    /// or one that names the session's drawing, allows it. One that names
+    /// another: with no drawing number given for this run and no session up
+    /// yet, the session takes the record's — over the settings file's and
+    /// the file name's; otherwise the drawing is not the session's, the
+    /// command line says whose it is, and its record is left as it was.
+    fn record_allows(&mut self, i: usize) -> bool {
+        let id = self.tabs[i].id;
+        if self.collab.foreign_tab == Some(id) {
+            return false;
+        }
+        if self.collab.record_read == Some(id) || !self.collab.wanted() {
+            return true;
+        }
+        self.collab.record_read = Some(id);
+        let Some(record) = crate::pid::collab_state::load_state(&self.tabs[i].scene.document)
+        else {
+            return true;
+        };
+        if record.drawing_id == self.collab.drawing_id {
+            return true;
+        }
+        let session_up = self.collab.had_session || self.collab.session_id.is_some();
+        if !self.collab.drawing_given && !session_up {
+            self.command_line.push_info(&format!(
+                "协同：本次会话的图号按这份图的同步记录取 {}",
+                record.drawing_id
+            ));
+            self.collab.drawing_id = record.drawing_id;
+            #[cfg(not(target_arch = "wasm32"))]
+            self.collab.sync_client_config();
+            return true;
+        }
+        let said = format!(
+            "协同：这份图记着它属于 {}，本次会话是 {}：会话不在它上面起，图里的记录不动",
+            record.drawing_id, self.collab.drawing_id
+        );
+        self.command_line.push_warning(&said);
+        self.collab.last_error = Some(said);
+        self.collab.foreign_tab = Some(id);
+        if self.collab.document == Some(id) {
+            self.collab.document = None;
+        }
+        false
     }
 
     /// Whether tab `i` holds the session's drawing, settling it on `i` when
@@ -124,6 +177,8 @@ impl OpenCADStudio {
     ///   that is still open on it is waited for;
     /// * it was closed — none. A session whose drawing is gone speaks for no
     ///   drawing, and does not come by another;
+    /// * the drawing it was taken to be turned out to be another's, by its
+    ///   sync record (`record_allows`) — as if it had none yet;
     /// * the editor was started on a file that has no tab yet — nothing, as
     ///   long as the launch is still opening what it was started on: the
     ///   dial waits for the drawing (as long as `transport::TAGS_WAIT`).
@@ -146,7 +201,13 @@ impl OpenCADStudio {
             return;
         };
         let drawing = if self.collab.document.is_some() {
-            self.collab_tab().map_or(Drawing::Closed, Drawing::Here)
+            match self.collab_tab() {
+                Some(i) => Drawing::Here(i),
+                // Its record named another drawing (`record_allows`): the
+                // session has none yet.
+                None if self.collab.document.is_none() => Drawing::NotYet,
+                None => Drawing::Closed,
+            }
         } else if self.collab.document_path.is_some() {
             // Finding the tab that shows a file asks the file system: only
             // when the tabs are not what they were at the last look.
@@ -192,15 +253,25 @@ impl OpenCADStudio {
                 if step_open || !self.collab.pending_remote.is_empty() {
                     return;
                 }
+                // What the file was saved aligned to (`REQ-COLL-015`): it
+                // seeds the baseline once — so edits made while this copy
+                // was closed queue like a session's leftovers — and goes
+                // back as the `hello`'s claim. Seeded ahead of the tags: a
+                // symbol a step of the file's queue placed is not the
+                // room's yet, and is not listed.
+                self.seed_collab_from_file(i);
+                self.collab.tags_wanted = None;
+                // A queue that is not this person's to send: the `hello`
+                // claims nothing and lists nothing.
+                if let Some(apart) = self.collab.judge_queue() {
+                    self.collab
+                        .say_tags(asked.ask, super::TagsSaid::Apart(apart));
+                    return;
+                }
                 let tags = broadcast::existing_tags(
                     &self.tabs[i].scene.document,
                     self.collab.outbox.iter().map(|entry| &entry.payload),
                 );
-                // What the file was saved aligned to (`REQ-COLL-015`): it
-                // seeds the baseline once — so edits made while this copy
-                // was closed queue like a session's leftovers — and goes
-                // back as the `hello`'s claim.
-                self.seed_collab_from_file(i);
                 // The claim is the file's own word: on a first dial it is
                 // all this copy has; afterwards `seen` is fresher and the
                 // transport prefers it.
@@ -211,14 +282,23 @@ impl OpenCADStudio {
                         repo_id: record.repo_id,
                         revision: record.revision,
                     });
-                self.collab.tags_wanted = None;
-                self.collab
-                    .say_tags(asked.ask, super::TagsSaid::Tags(tags, claim));
+                let said = if self.collab.detached {
+                    super::TagsSaid::Detached(tags)
+                } else {
+                    super::TagsSaid::Tags(tags, claim)
+                };
+                self.collab.say_tags(asked.ask, said);
             }
             Drawing::Closed => {
                 self.collab.tags_wanted = None;
-                self.collab
-                    .say_tags(asked.ask, super::TagsSaid::Tags(Vec::new(), None));
+                // The queue outlives the drawing's tab, and is judged the
+                // same without it.
+                let said = match self.collab.judge_queue() {
+                    Some(apart) => super::TagsSaid::Apart(apart),
+                    None if self.collab.detached => super::TagsSaid::Detached(Vec::new()),
+                    None => super::TagsSaid::Tags(Vec::new(), None),
+                };
+                self.collab.say_tags(asked.ask, said);
             }
             Drawing::NotYet => {
                 if !asked.put_off {
@@ -232,14 +312,18 @@ impl OpenCADStudio {
 
     /// Seed the baseline once from what tab `i`'s file was saved aligned to
     /// (`REQ-COLL-015`), including the ops the room never answered before
-    /// the copy was closed. No-op once a session has been up — from then on
-    /// the in-memory baseline is fresher than the file's word.
+    /// the copy was closed, and whether it knows it is apart from the room
+    /// (`diverged`). Once only, for the session's drawing: a drawing with
+    /// no record has nothing to seed. One read in after a session came up
+    /// without it keeps what its record says, and the connection is held
+    /// apart (`State::seed_file_state`).
     fn seed_collab_from_file(&mut self, i: usize) {
-        if self.collab.had_session {
+        if self.collab.seeded {
             return;
         }
         let Some(record) = crate::pid::collab_state::load_state(&self.tabs[i].scene.document)
         else {
+            self.collab.seeded = true;
             return;
         };
         // A record for another drawing says nothing of this session's.
@@ -251,7 +335,9 @@ impl OpenCADStudio {
             repo_id: record.repo_id,
             revision: record.revision,
         };
-        let ops = crate::pid::collab_state::load_queue(&self.tabs[i].scene.document)
+        let queue = crate::pid::collab_state::read_queue(&self.tabs[i].scene.document);
+        let ops = queue
+            .ops
             .into_iter()
             .map(|queued| super::Outgoing {
                 op_id: queued.op_id,
@@ -262,13 +348,23 @@ impl OpenCADStudio {
                 sent: false,
                 label: queued.label,
                 restored: true,
+                user_id: queued.user_id,
+                queued_at: queued.queued_at,
+                inverse: queued.inverse,
+                inverse_read: true,
             })
             .collect();
-        self.collab.seed_file_state(&claim, ops);
+        let diverged = crate::pid::collab_state::load_diverged(&self.tabs[i].scene.document);
+        if self.collab.seed_file_state(&claim, ops, queue.unreadable) {
+            self.collab.saved_diverged = diverged;
+            if let Some(late) = &self.collab.opened_late {
+                self.command_line.push_warning(&late.said());
+            }
+        }
     }
 
     /// Queue one `op` carrying the `changes` made on tab `i`, or stay quiet.
-    /// Five things silence it:
+    /// Six things silence it:
     ///
     /// * there has never been a session — the offline-first invariant
     ///   (`VAL-CLI-017`): a client that has not joined yet has nobody to
@@ -279,12 +375,19 @@ impl OpenCADStudio {
     ///   it;
     /// * the step is being taken back because the server refused it
     ///   (`rolling_back`): the room never had it;
+    /// * the step is being taken back to read what takes a queued op back
+    ///   out (`read_queued_inverses`): what it says is kept for that op;
     /// * tab `i` is not the session's drawing: an edit to another sheet is
     ///   that sheet's own, and would reach the room as a change to this one;
     /// * the session is read-only, which may not write. The command gate
     ///   refuses a write before it happens, so a change that got here anyway
     ///   came in by a door the gate does not watch; it stays in this drawing
     ///   only, and the command line says so.
+    ///
+    /// Of these, an edit to a drawing with a sync record that no queue takes
+    /// — there is no session to be had, the drawing is not the session's,
+    /// the session may not write, or the queue would not take it — is kept
+    /// on the drawing's unsynced list (`keep_unqueued`).
     ///
     /// Everything handed over in one call goes out as one op, which the server
     /// takes or refuses as a whole. `steps` are the undo steps it speaks
@@ -303,17 +406,33 @@ impl OpenCADStudio {
         on: bool,
         label: &str,
     ) {
-        if self.applying_remote || self.collab.rolling_back {
+        if self.applying_remote {
+            return;
+        }
+        // Ahead of `rolling_back`, which is up while the steps are read.
+        if let Some(read) = self.collab.reading_inverse.as_mut() {
+            read.extend(changes);
+            return;
+        }
+        if self.collab.rolling_back {
             return;
         }
         if !self.collab.connected && !self.collab.had_session {
             // A copy the file says was in a room still queues
             // (`REQ-COLL-015`): seed its baseline first, so this edit is a
-            // session's leftover, not a stranger's.
-            if self.is_collab_tab(i) {
+            // session's leftover, not a stranger's. With no collaboration
+            // configured no drawing is the session's.
+            let wanted = self.collab.wanted();
+            if wanted && self.is_collab_tab(i) {
                 self.seed_collab_from_file(i);
             }
             if !self.collab.had_session {
+                let why = if wanted {
+                    "不是本次会话的图"
+                } else {
+                    "本次运行没有配置协同"
+                };
+                self.keep_unqueued(i, &changes, label, why);
                 return;
             }
         }
@@ -321,6 +440,7 @@ impl OpenCADStudio {
             return;
         };
         if !self.is_collab_tab(i) {
+            self.keep_unqueued(i, &changes, label, "不是本次会话的图");
             return;
         }
         if self.collab.readonly {
@@ -328,6 +448,7 @@ impl OpenCADStudio {
                 "协同：当前会话只读，本地的 {} 项变更没有广播，本图与其他人的图已不一致",
                 changes.len()
             ));
+            self.keep_unqueued(i, &changes, label, "当前会话只读");
             return;
         }
         match self.collab.queue_op(payload, steps, on, label) {
@@ -346,10 +467,64 @@ impl OpenCADStudio {
                     "协同：未连接服务器，这一步已排队（共 {waiting} 步），重新连上后提交"
                 ));
             }
+            Ok(super::Queued::NotAligned(waiting)) => {
+                self.command_line.push_warning(&format!(
+                    "协同：这次连接与房间对不上，这一步已排队（共 {waiting} 步），不提交"
+                ));
+            }
             Err(reason) => {
                 self.command_line
                     .push_warning(&format!("协同：变更未广播（{reason}）"));
+                self.keep_unqueued(i, &changes, label, &reason);
             }
+        }
+    }
+
+    /// Keep `changes` made on tab `i` that no queue took — `why` says why —
+    /// on the drawing's unsynced list, when the drawing has a sync record:
+    /// a save writes them there and marks the drawing `UNQUEUED_EDITS`
+    /// (`SPEC-collab-offline-sync.md` §4.1, §5.1). The room will never see
+    /// them, and the drawing is no longer what it has. A drawing with no
+    /// record was never in a room, and changes that say nothing of the
+    /// drawing's objects (a move) are none of the room's: neither is kept.
+    /// The command line says so the first time for each drawing.
+    fn keep_unqueued(&mut self, i: usize, changes: &[broadcast::Change], label: &str, why: &str) {
+        let Some(payload) = broadcast::payload_for(changes) else {
+            return;
+        };
+        let Some(tab) = self.tabs.get(i) else {
+            return;
+        };
+        let id = tab.id;
+        let session_drawing = self.collab.document == Some(id)
+            && self.collab.had_session
+            && self.collab.repo_id.is_some();
+        let record = crate::pid::collab_state::load_state(&tab.scene.document);
+        if record.is_none() && !session_drawing {
+            return;
+        }
+        let user = &self.collab.user_id;
+        let entry = crate::pid::collab_state::Unsynced {
+            state: crate::pid::collab_state::UNQUEUED.to_owned(),
+            op_id: None,
+            label: label.to_owned(),
+            payload,
+            user_id: (!user.is_empty()).then(|| user.clone()),
+            at: ocs_collab::ids::now_unix(),
+            code: None,
+            message: why.to_owned(),
+            rolled_back: None,
+        };
+        let Ok(entry) = serde_json::to_value(entry) else {
+            return;
+        };
+        let kept = self.collab.unqueued.entry(id).or_default();
+        kept.push(entry);
+        if kept.len() == 1 {
+            self.command_line.push_warning(&format!(
+                "协同：这份图带着同步记录，这一步没有排上队（{why}），记进了未同步清单；\
+                 保存之后这份图不能再与服务器同步"
+            ));
         }
     }
 
@@ -390,12 +565,11 @@ impl OpenCADStudio {
     /// out of the drawing again is this person's own business and goes out
     /// as it would have.
     fn take_back_rejected(&mut self, rejection: super::Rejection) {
-        use crate::app::tab_document::HistorySnapshot;
-        let super::Rejection { entry, code, message } = rejection;
-        let step_of = |snapshot: &HistorySnapshot| match snapshot {
-            HistorySnapshot::Delta(delta) => delta.collab_step,
-            _ => 0,
-        };
+        let super::Rejection {
+            entry,
+            code,
+            message,
+        } = rejection;
         let tab = self.collab_tab();
         if let Some(i) = tab {
             // A step still open is this person's too, made on top of the
@@ -403,25 +577,25 @@ impl OpenCADStudio {
             // arrives, and goes back with the refused one if it is above it.
             self.finish_pending_history(i);
         }
+        // An op restored from the file has no undo step to take back, only
+        // its inverse.
+        if let (Some(i), true) = (tab, entry.restored) {
+            self.take_back_restored(i, entry, &code, &message);
+            return;
+        }
         let account = super::Refused::account(&entry, &self.collab.outbox);
         let (moved, outcome): (Vec<u64>, &str) = match tab {
             None => (Vec::new(), "协同的图纸已不在，没有可撤回的"),
-            // An op restored from the file has no undo step to take back:
-            // what it did stays in this drawing while the room refused it.
-            Some(_) if entry.restored => {
-                self.collab.mark_diverged(format!(
-                    "服务器拒绝了重开前排队的「{}」（{code}），这一步无法在本图撤回",
-                    entry.label
-                ));
-                (Vec::new(), "本图与房间已不一致")
-            }
             Some(_) if entry.steps.is_empty() => (Vec::new(), "它不对应撤销栈里的一步，没有撤回"),
             Some(_) if account.mixed => {
-                self.collab.mark_diverged(format!(
-                    "服务器拒绝了「{}」（{code}），而它之后有一次撤销或重做把它和房间已有的步骤一起动了，\
-                     无法只撤回被拒的部分",
-                    entry.label
-                ));
+                self.collab.mark_diverged(
+                    ROLLBACK_FAILED,
+                    format!(
+                        "服务器拒绝了「{}」（{code}），而它之后有一次撤销或重做把它和房间已有的步骤一起动了，\
+                         无法只撤回被拒的部分",
+                        entry.label
+                    ),
+                );
                 (Vec::new(), "无法只撤回被拒的部分，本图与房间已不一致")
             }
             // This person took it back (or put it on again) themselves
@@ -429,33 +603,22 @@ impl OpenCADStudio {
             Some(_) if account.in_effect.is_empty() => {
                 (Vec::new(), "本图已经是房间里的样子，不需要再动")
             }
-            Some(i) => {
-                let history = &self.tabs[i].history;
-                let stack = if entry.on { &history.undo_stack } else { &history.redo_stack };
-                // From the top of the stack down to the deepest step that
-                // has to move — if every such step is there.
-                let from_top: Vec<u64> = stack.iter().rev().map(step_of).collect();
-                let reach = account
-                    .in_effect
-                    .iter()
-                    .map(|step| from_top.iter().position(|there| there == step))
-                    .collect::<Option<Vec<usize>>>()
-                    .and_then(|depths| depths.into_iter().max());
-                match reach {
-                    Some(depth) => {
-                        let steps: Vec<u64> = from_top[..=depth].to_vec();
-                        self.replay_history_quietly(i, entry.on, steps.len());
-                        (steps, if entry.on { "已撤回" } else { "已恢复" })
-                    }
-                    None => {
-                        self.collab.mark_diverged(format!(
+            Some(i) => match self.take_back_steps(i, entry.on, &account.in_effect) {
+                Some(steps) => (steps, if entry.on { "已撤回" } else { "已恢复" }),
+                None => {
+                    self.collab.mark_diverged(
+                        ROLLBACK_FAILED,
+                        format!(
                             "服务器拒绝了「{}」（{code}），而这一步已不在撤销栈里，无法撤回",
                             entry.label
-                        ));
-                        (Vec::new(), "这一步已不在撤销栈里，无法撤回，本图与房间已不一致")
-                    }
+                        ),
+                    );
+                    (
+                        Vec::new(),
+                        "这一步已不在撤销栈里，无法撤回，本图与房间已不一致",
+                    )
                 }
-            }
+            },
         };
         // What the queue still holds for the refused steps and for what was
         // made on top of them is not sent.
@@ -480,7 +643,7 @@ impl OpenCADStudio {
         // error as the outcome of the command they ran.
         self.command_line.push_warning(&text);
         self.collab.last_error = Some(text.clone());
-        self.collab.rejection_log.push(serde_json::json!({
+        self.log_refusal(serde_json::json!({
             "op_id": entry.op_id,
             "code": code,
             "label": entry.label,
@@ -489,10 +652,306 @@ impl OpenCADStudio {
             "ops_dropped": dropped,
             "message": message,
         }));
+        self.refresh_properties();
+    }
+
+    /// Keep `entry` in the refusal log, which holds the last eight.
+    fn log_refusal(&mut self, entry: serde_json::Value) {
+        self.collab.rejection_log.push(entry);
         if self.collab.rejection_log.len() > 8 {
             self.collab.rejection_log.remove(0);
         }
+    }
+
+    /// Move back the steps of tab `i` that `in_effect` names — off the
+    /// drawing for steps that put something on it (`on`), on again for
+    /// steps that took something off — from the top of the stack down to
+    /// the deepest of them, if every one of them is still there. The steps
+    /// moved, from the top.
+    fn take_back_steps(&mut self, i: usize, on: bool, in_effect: &[u64]) -> Option<Vec<u64>> {
+        use crate::app::tab_document::HistorySnapshot;
+        let step_of = |snapshot: &HistorySnapshot| match snapshot {
+            HistorySnapshot::Delta(delta) => delta.collab_step,
+            _ => 0,
+        };
+        let history = &self.tabs[i].history;
+        let stack = if on {
+            &history.undo_stack
+        } else {
+            &history.redo_stack
+        };
+        let from_top: Vec<u64> = stack.iter().rev().map(step_of).collect();
+        let depth = in_effect
+            .iter()
+            .map(|step| from_top.iter().position(|there| there == step))
+            .collect::<Option<Vec<usize>>>()?
+            .into_iter()
+            .max()?;
+        let steps = from_top[..=depth].to_vec();
+        self.replay_history_quietly(i, on, steps.len());
+        Some(steps)
+    }
+
+    /// Take back an op restored from the drawing's file that the room
+    /// refused whole (`SPEC-collab-offline-sync.md` §5.4).
+    ///
+    /// Its undo steps died with the process that made them. What it kept
+    /// is its inverse, written the way a peer's change is: item by item,
+    /// each only where the drawing is still as the op left it — what
+    /// somebody else did there since is the room's, and stays. A refusal
+    /// that yields to the room (`OP_SUPERSEDED`, `OBJECT_DELETED`) takes
+    /// nothing back: what the room has is in the drawing already.
+    ///
+    /// What waits behind it and builds on it (`collab::Refused::built_on`)
+    /// goes with it, from the last back: this run's steps by the undo stack,
+    /// with whatever this run did on top of them, as for any step of this
+    /// run's; restored ones by their own inverses. The rest goes out as it
+    /// would have. Each op that goes is said on the command line and
+    /// logged; a restored one also goes on the unsynced list, there being
+    /// no redo to bring it back. One that cannot be taken back marks the
+    /// drawing `ROLLBACK_FAILED`.
+    fn take_back_restored(&mut self, i: usize, entry: super::Outgoing, code: &str, message: &str) {
+        use ocs_collab::protocol::codes;
+        let built_on = super::Refused::built_on(&entry, &self.collab.outbox);
+        // What became of each op that goes along: the outcome, whether what
+        // a restored one did is out of the drawing, and the steps moved.
+        let mut along: std::collections::HashMap<String, (String, Option<bool>, usize)> =
+            std::collections::HashMap::new();
+        // This run's steps were made last: they go first.
+        let first_of_this_run = self
+            .collab
+            .outbox
+            .iter()
+            .position(|queued| !queued.restored && built_on.contains(&queued.op_id));
+        if let Some(at) = first_of_this_run {
+            let first = self.collab.outbox[at].clone();
+            let after: std::collections::VecDeque<super::Outgoing> =
+                self.collab.outbox.iter().skip(at + 1).cloned().collect();
+            let account = super::Refused::account(&first, &after);
+            if account.mixed {
+                self.collab.mark_diverged(
+                    ROLLBACK_FAILED,
+                    format!(
+                        "服务器拒绝了重开前排队的「{}」（{code}），而建在它上面的「{}」之后有一次撤销或重做\
+                         把它和别的步骤一起动了，无法只撤回这一部分",
+                        entry.label, first.label
+                    ),
+                );
+            } else {
+                let moved = if account.in_effect.is_empty() {
+                    Some(Vec::new())
+                } else {
+                    self.take_back_steps(i, first.on, &account.in_effect)
+                };
+                let outcome = match &moved {
+                    Some(steps) if steps.is_empty() => "本图里已经没有它，不需要再动".to_owned(),
+                    Some(steps) => format!("已用撤销栈退回（共 {} 步，可以重做）", steps.len()),
+                    None => {
+                        self.collab.mark_diverged(
+                            ROLLBACK_FAILED,
+                            format!(
+                                "服务器拒绝了重开前排队的「{}」（{code}），而建在它上面的「{}」已不在撤销栈里，\
+                                 无法撤回",
+                                entry.label, first.label
+                            ),
+                        );
+                        "已不在撤销栈里，无法撤回，本图与房间已不一致".to_owned()
+                    }
+                };
+                let steps_moved = moved.as_ref().map_or(0, Vec::len);
+                for op_id in std::iter::once(&first.op_id).chain(&account.void) {
+                    along.insert(op_id.clone(), (outcome.clone(), None, steps_moved));
+                }
+            }
+        }
+        // Then the restored ones built on it, from the last back.
+        let restored: Vec<super::Outgoing> = self
+            .collab
+            .outbox
+            .iter()
+            .filter(|queued| queued.restored && built_on.contains(&queued.op_id))
+            .cloned()
+            .collect();
+        for queued in restored.iter().rev() {
+            let (outcome, rolled_back) = self.take_back_by_inverse(i, queued, false, code);
+            along.insert(queued.op_id.clone(), (outcome, Some(rolled_back), 0));
+        }
+        let yields = code == codes::OP_SUPERSEDED || code == codes::OBJECT_DELETED;
+        let (outcome, rolled_back) = self.take_back_by_inverse(i, &entry, yields, code);
+
+        // Said and kept in the order they were queued, the refused op first.
+        let went: Vec<super::Outgoing> = self
+            .collab
+            .outbox
+            .iter()
+            .filter(|queued| !queued.sent && along.contains_key(&queued.op_id))
+            .cloned()
+            .collect();
+        self.collab
+            .outbox
+            .retain(|queued| queued.sent || !along.contains_key(&queued.op_id));
+        let label = |op: &super::Outgoing| {
+            if op.label.is_empty() {
+                "这一步".to_owned()
+            } else {
+                op.label.clone()
+            }
+        };
+        let mut text = format!(
+            "协同：服务器没有接受重开前排队的「{}」（{code}：{message}）：{outcome}",
+            label(&entry)
+        );
+        if !went.is_empty() {
+            text.push_str(&format!(
+                "；排在它后面、建在它上面的 {} 个操作一并作废",
+                went.len()
+            ));
+        }
+        // A warning, not an error, as for a step of this run's.
+        self.command_line.push_warning(&text);
+        self.collab.last_error = Some(text);
+        self.log_refusal(serde_json::json!({
+            "op_id": entry.op_id,
+            "code": code,
+            "label": entry.label,
+            "outcome": outcome,
+            "steps_moved": 0,
+            "ops_dropped": went.len(),
+            "message": message,
+        }));
+        self.keep_refused(i, &entry, code, message, rolled_back);
+        let why = format!("建在被拒的「{}」（{code}）上，一并作废", label(&entry));
+        for queued in &went {
+            let Some((outcome, rolled_back, steps_moved)) = along.get(&queued.op_id).cloned()
+            else {
+                continue;
+            };
+            self.command_line
+                .push_warning(&format!("协同：「{}」{why}：{outcome}", label(queued)));
+            self.log_refusal(serde_json::json!({
+                "op_id": queued.op_id,
+                "code": code,
+                "label": queued.label,
+                "outcome": outcome,
+                "steps_moved": steps_moved,
+                "ops_dropped": 0,
+                "message": why,
+            }));
+            if let Some(rolled_back) = rolled_back {
+                self.keep_refused(i, queued, code, &why, rolled_back);
+            }
+        }
         self.refresh_properties();
+    }
+
+    /// Take restored op `entry` back out of tab `i` by its inverse (§5.4),
+    /// unless the refusal `yields` to the room, whose state is in the
+    /// drawing already. What became of it, and whether what it did is out
+    /// of the drawing. One that cannot be taken back marks the drawing.
+    fn take_back_by_inverse(
+        &mut self,
+        i: usize,
+        entry: &super::Outgoing,
+        yields: bool,
+        code: &str,
+    ) -> (String, bool) {
+        if yields {
+            return (
+                "让位：房间里的样子已经在本图里，不需要再动".to_owned(),
+                true,
+            );
+        }
+        match self.write_inverse(i, entry) {
+            Ok((_, 0)) => ("已按反向修改撤回".to_owned(), true),
+            Ok((0, passed)) => (
+                format!("{passed} 项已被别人改过，保留别人的，本图已是房间的样子"),
+                true,
+            ),
+            Ok((_, passed)) => (
+                format!("已按反向修改撤回，其中 {passed} 项已被别人改过，保留别人的"),
+                true,
+            ),
+            Err(why) => {
+                self.collab.mark_diverged(
+                    ROLLBACK_FAILED,
+                    format!(
+                        "服务器拒绝了重开前排队的「{}」（{code}），{why}，无法在本图撤回",
+                        entry.label
+                    ),
+                );
+                (format!("{why}，无法撤回，本图与房间已不一致"), false)
+            }
+        }
+    }
+
+    /// Write onto tab `i`, the way a peer's change is written, the items of
+    /// restored op `entry`'s inverse for which the drawing is still as the
+    /// op left it: every change of the op about the same object holds
+    /// (`broadcast::still_as_written`). How many were written and how many
+    /// passed over, or why it cannot be done.
+    fn write_inverse(
+        &mut self,
+        i: usize,
+        entry: &super::Outgoing,
+    ) -> Result<(usize, usize), String> {
+        let Some(inverse) = &entry.inverse else {
+            return Err("它存进图里时还没有算出反向修改".to_owned());
+        };
+        let read = broadcast::changes_from_payload(inverse);
+        if !read.unread.is_empty() {
+            return Err(format!(
+                "它的反向修改里有本客户端不认识的变更（{}）",
+                read.unread.join("、")
+            ));
+        }
+        let said = broadcast::changes_from_payload(std::slice::from_ref(&entry.payload)).changes;
+        let document = &self.tabs[i].scene.document;
+        let (held, passed): (Vec<broadcast::Change>, Vec<broadcast::Change>) =
+            read.changes.into_iter().partition(|undo| {
+                let names = undo.names();
+                said.iter()
+                    .filter(|change| change.names().iter().any(|name| names.contains(name)))
+                    .all(|change| broadcast::still_as_written(document, change))
+            });
+        let applied = self.write_as_received(i, &held);
+        if !applied.unresolved.is_empty() {
+            return Err(format!(
+                "它的反向修改有 {} 项写不进本图（{}）",
+                applied.unresolved.len(),
+                applied.unresolved.join("、")
+            ));
+        }
+        Ok((held.len(), passed.len()))
+    }
+
+    /// Put restored op `gone` on the unsynced list of tab `i`'s drawing as
+    /// `refused`, with what the room said and whether what it did is out of
+    /// the drawing: there is no redo to bring it back, and this is what is
+    /// left of it (§5.4). A save writes it into the file.
+    fn keep_refused(
+        &mut self,
+        i: usize,
+        gone: &super::Outgoing,
+        code: &str,
+        message: &str,
+        rolled_back: bool,
+    ) {
+        let entry = crate::pid::collab_state::Unsynced {
+            state: crate::pid::collab_state::REFUSED.to_owned(),
+            op_id: Some(gone.op_id.clone()),
+            label: gone.label.clone(),
+            payload: gone.payload.clone(),
+            user_id: gone.user_id.clone(),
+            at: ocs_collab::ids::now_unix(),
+            code: Some(code.to_owned()),
+            message: message.to_owned(),
+            rolled_back: Some(rolled_back),
+        };
+        let Ok(entry) = serde_json::to_value(entry) else {
+            return;
+        };
+        let id = self.tabs[i].id;
+        self.collab.refused.entry(id).or_default().push(entry);
     }
 
     /// Take the top `steps` steps of tab `i` back (`undo`) or put them on
@@ -513,6 +972,125 @@ impl OpenCADStudio {
         self.active_tab = in_front;
     }
 
+    /// Read what takes the steps of each op still waiting to go out back out
+    /// of the drawing (`Outgoing::inverse`; `SPEC-collab-offline-sync.md`
+    /// §4.1), which a refusal heard after this process is gone needs (§5.4).
+    /// It is what the room would be told on their being taken back — undone,
+    /// for an op that put them on; put on again, for one that took them off
+    /// — and is read by doing just that, quietly, and putting them back
+    /// (`inverse_of`).
+    ///
+    /// Run after every message (`update`), and does something only while
+    /// nothing else is on hand: no command under way and no step open in the
+    /// session's drawing, no text being edited in place, no peer's change
+    /// being written, no step being rolled back. What taking steps back and
+    /// putting them on again moves besides the drawing is put back as it
+    /// was: the selection, what is highlighted, the layout, the layer and
+    /// what is isolated, whether the drawing is changed and its revision,
+    /// and the view. The geometry epoch is not: what was built for the
+    /// drawing meanwhile is built for it again.
+    ///
+    /// An op on the wire is left alone, its answer being on its way. One
+    /// whose steps are not all where it left them, or that takes nothing
+    /// back, has none; neither is looked at again.
+    pub(in crate::app) fn read_queued_inverses(&mut self) {
+        let unread = |entry: &super::Outgoing| {
+            !entry.sent && !entry.restored && !entry.inverse_read && !entry.steps.is_empty()
+        };
+        if self.applying_remote
+            || self.collab.rolling_back
+            || self.graph_undo_open
+            || !self.collab.outbox.iter().any(unread)
+        {
+            return;
+        }
+        let Some(i) = self.collab_tab() else {
+            return;
+        };
+        if self.tabs[i].active_cmd.is_some()
+            || self.tabs[i].history.pending.is_some()
+            || self.mtext_editor.is_some()
+            || self.table_cell_editor.is_some()
+        {
+            return;
+        }
+        let tab = &self.tabs[i];
+        let selected = tab.scene.selected_handles_in_order();
+        let constraint = tab.scene.selected_constraint;
+        let hover = tab.scene.hover_highlight;
+        let layout = tab.scene.current_layout.clone();
+        let layer = tab.active_layer.clone();
+        let isolated = tab.layiso_state.clone();
+        let dirty = tab.dirty;
+        let revision = tab.edit_revision;
+        let camera = tab.scene.camera.borrow().clone();
+        let camera_generation = tab.scene.camera_generation;
+        for at in 0..self.collab.outbox.len() {
+            if !unread(&self.collab.outbox[at]) {
+                continue;
+            }
+            let entry = &self.collab.outbox[at];
+            let (steps, on) = (entry.steps.clone(), entry.on);
+            let inverse = self
+                .inverse_of(i, &steps, on)
+                .filter(|changes| !changes.is_empty())
+                .map(|changes| changes.iter().map(broadcast::Change::to_json).collect());
+            let entry = &mut self.collab.outbox[at];
+            entry.inverse = inverse;
+            entry.inverse_read = true;
+        }
+        let tab = &mut self.tabs[i];
+        tab.scene.replace_selection_exact(&selected);
+        tab.scene.selected_constraint = constraint;
+        tab.scene.set_hover_highlight(hover);
+        tab.scene.current_layout = layout;
+        tab.active_layer = layer;
+        tab.layiso_state = isolated;
+        tab.dirty = dirty;
+        tab.edit_revision = revision;
+        *tab.scene.camera.borrow_mut() = camera;
+        tab.scene.camera_generation = camera_generation;
+        self.refresh_properties();
+    }
+
+    /// What taking `steps` of tab `i` back out of the drawing tells the
+    /// room, in the order it tells it: undoing them, when they are on it
+    /// (`on`), or putting them on again. The stack they are on is gone down
+    /// one step at a time to the deepest of them and put back whole after;
+    /// of what that says, only what their own steps say is kept. `None`
+    /// when they are not all on that stack.
+    fn inverse_of(&mut self, i: usize, steps: &[u64], on: bool) -> Option<Vec<broadcast::Change>> {
+        use crate::app::tab_document::HistorySnapshot;
+        let history = &self.tabs[i].history;
+        let stack = if on {
+            &history.undo_stack
+        } else {
+            &history.redo_stack
+        };
+        let from_top: Vec<bool> = stack
+            .iter()
+            .rev()
+            .map(|snapshot| match snapshot {
+                HistorySnapshot::Delta(delta) => steps.contains(&delta.collab_step),
+                _ => false,
+            })
+            .collect();
+        if from_top.iter().filter(|&&own| own).count() != steps.len() {
+            return None;
+        }
+        let depth = from_top.iter().rposition(|&own| own)? + 1;
+        let mut said = Vec::new();
+        for &own in &from_top[..depth] {
+            if own {
+                self.collab.reading_inverse = Some(Vec::new());
+            }
+            self.replay_history_quietly(i, on, 1);
+            said.extend(self.collab.reading_inverse.take().into_iter().flatten());
+        }
+        self.replay_history_quietly(i, !on, depth);
+        Some(said)
+    }
+
     /// Fold every remote `op_applied` the state is holding onto the open
     /// drawing.
     ///
@@ -527,7 +1105,9 @@ impl OpenCADStudio {
     /// touched is `replay_remote_after`.
     ///
     /// A local step still open when a change arrives is closed first, as
-    /// the user's own: it is broadcast like any other step.
+    /// the user's own: it is queued like any other step. Nothing of the
+    /// queue goes out until the peers' changes are written, or one that
+    /// could not be has marked the drawing diverged (`State::pump`).
     ///
     /// While the session's drawing is not among the tabs — not loaded yet, or
     /// closed — the ops stay in `pending_remote`, in order, and `on_tick`
@@ -563,13 +1143,22 @@ impl OpenCADStudio {
             }
             return;
         };
+        // A drawing with a sync record that comes only now, after the
+        // session came up without it, keeps what its record says: what the
+        // room did meanwhile was not done to it (`seed_collab_from_file`).
+        self.seed_collab_from_file(i);
+        if self.collab.pending_remote.is_empty() {
+            return;
+        }
+        // The user's own step, if one is open, ends here and is queued as
+        // theirs — before the flag below is raised, which would keep it in.
+        // Left open it would record the peer's writes as part of itself.
+        // It ends while the peers' changes are still waiting to be written,
+        // which keeps the queue from going out ahead of them.
+        self.finish_pending_history(i);
         let pending = std::mem::take(&mut self.collab.pending_remote);
         let mut total = 0usize;
         let mut failure: Option<String> = None;
-        // The user's own step, if one is open, ends here and goes out as
-        // theirs — before the flag below is raised, which would keep it in.
-        // Left open it would record the peer's writes as part of itself.
-        self.finish_pending_history(i);
         // A question about the drawing's tags that was put off — the session
         // had no drawing when it was asked — is answered before the peers'
         // changes are written: what the room itself told is no news to it.
@@ -598,7 +1187,7 @@ impl OpenCADStudio {
             if parsed.is_empty() {
                 continue;
             }
-            let applied = self.write_remote_changes(i, &parsed);
+            let applied = self.write_as_received(i, &parsed);
             if !applied.unresolved.is_empty() {
                 failure.get_or_insert(format!(
                     "操作 {}：位号 {} 在本图里对不上一个对象（没有，或者有好几个），这部分变更未应用",
@@ -606,21 +1195,7 @@ impl OpenCADStudio {
                     applied.unresolved.join("、")
                 ));
             }
-            // Kept, with the entities each was written to, for the undo and
-            // redo that come later (`replay_remote_after`).
-            for (change, handles) in &applied.resolved {
-                self.collab.remote_seq += 1;
-                self.collab.remote_log.push(super::AppliedRemote {
-                    seq: self.collab.remote_seq,
-                    handles: handles.clone(),
-                    change: change.clone(),
-                });
-            }
-            if applied.is_empty() {
-                continue;
-            }
             total += applied.handles.len() + applied.erased.len();
-            self.settle_remote_writes(i, &applied.handles, &applied.retagged);
         }
         self.applying_remote = false;
         self.prune_remote_log(i);
@@ -636,7 +1211,7 @@ impl OpenCADStudio {
                 // session is marked, and writes nothing more on top of the
                 // difference (`State::request_op`).
                 let first = self.collab.diverged.is_none();
-                self.collab.mark_diverged(reason.clone());
+                self.collab.mark_diverged(REMOTE_UNAPPLIED, reason.clone());
                 self.report_apply_error(reason);
                 if first {
                     self.command_line.push_warning(
@@ -648,6 +1223,31 @@ impl OpenCADStudio {
             None if total > 0 => self.collab.last_apply_error = None,
             None => {}
         }
+        // The queue waited for these to be written (`State::pump`): it
+        // moves now, unless one could not be and the drawing is marked.
+        self.collab.pump();
+    }
+
+    /// Write `changes` onto tab `i` the way a peer's change is written:
+    /// nothing of it is this client's to send, and each change is kept, with
+    /// the entities it was written to, for the undo and redo that come later
+    /// (`replay_remote_after`).
+    fn write_as_received(&mut self, i: usize, changes: &[broadcast::Change]) -> broadcast::Applied {
+        let receiving = std::mem::replace(&mut self.applying_remote, true);
+        let applied = self.write_remote_changes(i, changes);
+        for (change, handles) in &applied.resolved {
+            self.collab.remote_seq += 1;
+            self.collab.remote_log.push(super::AppliedRemote {
+                seq: self.collab.remote_seq,
+                handles: handles.clone(),
+                change: change.clone(),
+            });
+        }
+        if !applied.is_empty() {
+            self.settle_remote_writes(i, &applied.handles, &applied.retagged);
+        }
+        self.applying_remote = receiving;
+        applied
     }
 
     /// Write one op's changes onto tab `i`, in the order it states them.
@@ -1149,19 +1749,23 @@ impl OpenCADStudio {
     /// explicit: a new drawing command defaults to refused, which is the safe
     /// direction for a write gate.
     ///
-    /// Two verbs read or write by what follows them, and are let through
+    /// Three verbs read or write by what follows them, and are let through
     /// only in the forms that read: `PIDTAG` with one word jumps to a tag
     /// (two rename it -- unless all that follows the verb is the tag of an
     /// imported symbol on the sheet, which may hold spaces, and naming it is
-    /// a jump as well), and `PIDLEGEND` reports, lists and exports (`ON`
+    /// a jump as well), `PIDLEGEND` reports, lists and exports (`ON`
     /// draws the legend, `OFF` and `PURGE` erase it — and the bare verb
-    /// defaults to `ON`).
+    /// defaults to `ON`), and `PIDMASTERDATA` reports, bare or as `STATUS`,
+    /// and exports (`INIT`, `IMPORT` and `EMBED` write master data).
     ///
     /// This list is a courtesy, not the lock: a command that does write is
     /// better turned away before it prompts for anything than after. What
     /// keeps a read-only session from changing its drawing is
     /// [`Self::refuses_step`], at the one place every edit passes through;
-    /// a verb wrongly let through here still changes nothing.
+    /// a verb wrongly let through here still changes nothing. The one thing
+    /// written outside the drawing is the project file `PIDMASTERDATA`
+    /// writes beside it; no step carries that, so for it this gate is the
+    /// only one.
     ///
     /// The gate is on the session's drawing. Another drawing open beside it
     /// is not in the session, and its commands are its own; while the session
@@ -1187,6 +1791,7 @@ impl OpenCADStudio {
                 words.len() > 2 && !self.pidtag_names_an_imported_tag(self.active_tab, named)
             }
             "PIDLEGEND" => !matches!(option.as_str(), "REPORT" | "LIST" | "EXPORT"),
+            "PIDMASTERDATA" => !matches!(option.as_str(), "" | "STATUS" | "EXPORT"),
             _ => !READONLY_ALLOWED.contains(&verb.as_str()),
         }
     }
@@ -1407,8 +2012,8 @@ fn tried_text(changes: &[broadcast::Change], label: &str) -> String {
 /// Commands a read-only session may still run: looking around, inspecting, and
 /// the collaboration panel itself. Everything else is a write.
 ///
-/// `PIDLEGEND` is here for its reading forms only (see
-/// `readonly_refuses_command`). Not here, though they once were: `MEASURE`
+/// `PIDLEGEND` and `PIDMASTERDATA` are here for their reading forms only
+/// (see `readonly_refuses_command`). Not here, though they once were: `MEASURE`
 /// (places points along an object), `FIND` (opens find-and-replace),
 /// `PIDGROUP` (every one of its forms regroups or retags) and `AUDIT`
 /// (applies its fixes when answered yes).
@@ -1442,6 +2047,9 @@ pub(super) const READONLY_ALLOWED: &[&str] = &[
     "SELECTALL",
     "HELP",
     "PIDLEGEND",
+    "PIDMASTERDATA",
+    "PIDINDEX",
+    "PIDLOCATE",
     "PIDLINE",
     "PIDTAG",
     "PIDTOPOLOGY",
@@ -2274,6 +2882,10 @@ mod tests {
             "AUDIT Yes",
             "MEASURE",
             "FIND",
+            "PIDMASTERDATA INIT",
+            "PIDMASTERDATA INIT DRAWING",
+            "PIDMASTERDATA IMPORT md.json",
+            "pidmasterdata embed",
         ] {
             assert!(app.readonly_refuses_command(cmd), "{cmd} must be refused");
         }
@@ -2281,6 +2893,15 @@ mod tests {
             "PIDLEGEND REPORT",
             "pidlegend list",
             "PIDLEGEND EXPORT out.json",
+            "PIDMASTERDATA",
+            "PIDMASTERDATA STATUS",
+            "pidmasterdata export md.json",
+            "PIDINDEX",
+            "PIDINDEX DUPLICATES",
+            "pidindex links",
+            "PIDINDEX CANCEL",
+            "PIDLOCATE P-1001",
+            "pidlocate P-1002 PID-1102",
             "PIDLINE",
             "PIDTAG P-1001",
             "MEASUREGEOM",
@@ -2374,6 +2995,7 @@ mod tests {
             let cmd = match *verb {
                 "PIDLEGEND" => "PIDLEGEND REPORT".to_owned(),
                 "PIDTAG" => "PIDTAG P-1001".to_owned(),
+                "PIDLOCATE" => "PIDLOCATE P-1001".to_owned(),
                 other => other.to_owned(),
             };
             assert!(!app.readonly_refuses_command(&cmd), "{cmd} is on the list");

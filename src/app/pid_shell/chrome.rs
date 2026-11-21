@@ -70,8 +70,8 @@ pub enum SyncStatus {
         /// The room's revision this session has applied.
         revision: i64,
     },
-    /// Connected, but the drawing is no longer what the room has: the
-    /// session sends nothing more.
+    /// Connected, but the drawing is not what the room has — parted from
+    /// it, or not taken on this connection: the session sends nothing.
     Diverged,
 }
 
@@ -87,7 +87,7 @@ impl SyncStatus {
                 0 => SyncStatus::Connecting,
                 failed => SyncStatus::Retrying { failed },
             }
-        } else if session.diverged.is_some() {
+        } else if session.mismatch().is_some() {
             SyncStatus::Diverged
         } else if session.readonly {
             SyncStatus::ReadOnly {

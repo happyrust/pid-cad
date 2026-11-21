@@ -17,6 +17,8 @@
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
+use crate::pid::collab_state::Diverged;
+
 // The claim commands and the panel glue are shared by both builds (the panel
 // exists on the web build as a hint); only the transport itself is desktop-only,
 // so `request_claim` / `request_release` carry a web stub below.
@@ -24,21 +26,43 @@ pub(super) mod broadcast;
 mod apply;
 mod claims;
 pub(super) mod connectors;
+mod leaving;
 pub(super) mod pipes;
+mod unsynced;
 #[cfg(not(target_arch = "wasm32"))]
 mod messages;
 #[cfg(not(target_arch = "wasm32"))]
 mod transport;
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod collab_align_refused;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod collab_connector_cross_drawing;
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod collab_diverged_persist;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod collab_duplicate_op;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod collab_existing_tags;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod collab_exit_prompt;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod collab_inverse;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod collab_large_props;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod collab_offline_queue;
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod collab_op_ids;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod collab_pipe_ops;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod collab_restored_rollback;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod collab_save_exits;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod collab_unsynced;
+
+pub(crate) use leaving::{Leaving, UnsyncedQuestion};
 
 /// A server address as it may be shown — in the log, on the command line,
 /// in `/collab/status`: without whatever stands before an `@` in its
@@ -87,10 +111,11 @@ pub enum CollabEvent {
         /// to the same one (`REQ-COLL-015`).
         repo_id: String,
     },
-    /// `align_refused`: the server opened the session but cannot take this
-    /// copy as consistent — wrong repository, revision ahead, or the log
-    /// cannot replay what it missed (`REQ-COLL-015`). The copy is diverged
-    /// from here: nothing it does is submitted.
+    /// `welcome.align_refused`, said ahead of the `Connected` it comes with:
+    /// the server opened the session but cannot take this copy as
+    /// consistent — wrong repository, revision ahead, or the log cannot
+    /// replay what it missed (`REQ-COLL-015`). Nothing of the queue goes out
+    /// on that connection, and nothing the room does comes into the drawing.
     AlignRefused {
         code: String,
         message: String,
@@ -161,7 +186,7 @@ pub enum CollabEvent {
 }
 
 /// One op this session has made that the room has not answered yet.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Outgoing {
     pub op_id: String,
     pub payload: Value,
@@ -182,11 +207,31 @@ pub struct Outgoing {
     pub label: String,
     /// Whether it was read back from the drawing file it was saved into
     /// (`PID_AUTHOR_COLLAB_QUEUE`). A restored op's undo steps died with
-    /// the process that made them — `steps` is empty — so a refusal cannot
-    /// take its step back: it marks the drawing diverged instead of
-    /// pretending it could (`REQ-COLL-015`).
-    #[serde(default)]
+    /// the process that made them — `steps` is empty — so a refusal takes
+    /// it back by its `inverse` instead, and marks the drawing diverged
+    /// when it has none rather than pretend it could (`REQ-COLL-015`;
+    /// `SPEC-collab-offline-sync.md` §5.4).
     pub restored: bool,
+    /// Who queued it: the user id in effect when the step was made, or what
+    /// the file said of a restored op — nothing, for one a version from
+    /// before saved. Only the person who queued an op sends it
+    /// (`State::judge_queue`).
+    pub user_id: Option<String>,
+    /// When it was queued, in Unix seconds; for a restored op, what the file
+    /// said.
+    pub queued_at: Option<i64>,
+    /// What takes its steps back out of the drawing again — for an op that
+    /// put them on, what undoing them tells the room; for one that took them
+    /// off, what putting them on again does — in the order they are to be
+    /// applied (`SPEC-collab-offline-sync.md` §4.1). It goes into the file
+    /// with the op, so that a refusal heard after the process that made the
+    /// steps is gone can still take them back (§5.4). Read while the editor
+    /// has nothing else on hand (`OpenCADStudio::read_queued_inverses`);
+    /// `None` until then, and for an op it could not be read for. Never sent.
+    pub inverse: Option<Vec<Value>>,
+    /// Whether `inverse` has been looked for: an op it could not be read for
+    /// is not tried again.
+    pub inverse_read: bool,
 }
 
 /// An op of this session's the server refused whole, for the app to take
@@ -265,6 +310,42 @@ impl Refused {
         out.in_effect = in_effect.into_iter().collect();
         out
     }
+
+    /// What waits in `queue` behind `refused`, an op restored from the
+    /// drawing's file, and is built on it — by id, in the order queued
+    /// (`SPEC-collab-offline-sync.md` §5.4). Such an op names, by tag, what
+    /// the refused op made, renamed or erased, or the line or run it was
+    /// about (`broadcast::Change::built_names`) — or what an op built on it
+    /// did, which is built on it too. A restored op has no undo steps to
+    /// go by (`account`), so the names are all there is.
+    pub fn built_on(
+        refused: &Outgoing,
+        queue: &std::collections::VecDeque<Outgoing>,
+    ) -> Vec<String> {
+        use std::collections::BTreeSet;
+        let said = |op: &Outgoing| {
+            broadcast::changes_from_payload(std::slice::from_ref(&op.payload)).changes
+        };
+        let mut names: BTreeSet<String> = said(refused)
+            .iter()
+            .flat_map(broadcast::Change::built_names)
+            .collect();
+        let mut along = Vec::new();
+        if names.is_empty() {
+            return along;
+        }
+        for queued in queue.iter().filter(|queued| !queued.sent) {
+            let changes = said(queued);
+            if changes
+                .iter()
+                .any(|change| change.names().iter().any(|name| names.contains(name)))
+            {
+                names.extend(changes.iter().flat_map(broadcast::Change::built_names));
+                along.push(queued.op_id.clone());
+            }
+        }
+        along
+    }
 }
 
 /// Where an op stands right after it was queued.
@@ -276,7 +357,47 @@ pub enum Queued {
     Behind(usize),
     /// No session is up; this many ops wait for the next one.
     Offline(usize),
+    /// The session is up but not aligned with the room; this many ops wait
+    /// for a connection that is.
+    NotAligned(usize),
 }
+
+/// Why this connection is not taken as aligned with the room: the
+/// `welcome` refused it, the room answered an op `NOT_ALIGNED`, or the room
+/// moved on with no replay. Judged afresh on every connection.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct NotAligned {
+    pub code: String,
+    pub message: String,
+}
+
+impl NotAligned {
+    /// What the command line says of it.
+    pub(super) fn said(&self) -> String {
+        format!(
+            "协同：这次连接与房间对不上（{}：{}），本地修改照常排队、不提交；需要取得最新图纸",
+            self.code, self.message
+        )
+    }
+
+    /// The reason, as the panel shows it.
+    fn reason(&self) -> String {
+        format!("{}（{}）", self.message, self.code)
+    }
+}
+
+/// What a copy holds itself apart for before its `hello`
+/// (`State::judge_queue`). The client's own codes: no server sends them.
+///
+/// Steps somebody else queued, or that say nobody.
+const QUEUED_BY_OTHERS: &str = "QUEUED_BY_OTHERS";
+/// Two steps under one name.
+const QUEUE_DUPLICATE_ID: &str = "QUEUE_DUPLICATE_ID";
+/// Entries of the queue that could not be read.
+const QUEUE_UNREADABLE: &str = "QUEUE_UNREADABLE";
+/// A drawing with a sync record read in after the session came up without
+/// it: that session never held the record against the room.
+const OPENED_AFTER_SESSION: &str = "OPENED_AFTER_SESSION";
 
 /// Whether `code`, on an `error` that names no op, can only be the refusal
 /// of an op. A server from before `error.op_id` answers a refused op this
@@ -371,6 +492,17 @@ pub(super) enum TagsSaid {
     /// that carries none or one that has been closed. The second slot is
     /// what the file was saved aligned to, for the `hello` to claim.
     Tags(Vec<String>, Option<FileClaim>),
+    /// The drawing is there, and its queue is not this person's to send
+    /// (`State::judge_queue`): the `hello` claims nothing — neither the
+    /// file's word nor where the last session left the drawing — and lists
+    /// no tags, and the connection is held apart, for this reason, whatever
+    /// the `welcome` says.
+    Apart(NotAligned),
+    /// The drawing is there, these are its tags, and it has been taken off
+    /// the room it was in (`PIDCOLLAB DETACH`) since a session was last up:
+    /// the `hello` claims nothing — not where the last session left the
+    /// drawing either — and the connection is not held apart.
+    Detached(Vec<String>),
     /// The session has no drawing yet and none is on its way: the `hello`
     /// need not wait. The tags follow under the same number once the
     /// session has come by its drawing.
@@ -469,21 +601,84 @@ pub(super) struct State {
     /// unset the session waits for the tab showing this file instead of
     /// taking the drawing in front.
     pub document_path: Option<std::path::PathBuf>,
+    /// `drawing_id` was given for this run — `--drawing`, or `PIDCOLLAB
+    /// DRAWING` with no session up — rather than read from the settings or
+    /// taken from the file's name. A drawing whose record names another
+    /// drawing is then not the session's; otherwise the session takes the
+    /// record's (`SPEC-collab-offline-sync.md` §5.2, step one).
+    pub drawing_given: bool,
+    /// The tab whose drawing's record names another drawing than this
+    /// session's, by document id, once it has been turned down for it.
+    pub foreign_tab: Option<u64>,
+    /// The tab whose drawing's record has been held against `drawing_id`,
+    /// by document id (`OpenCADStudio::record_allows`).
+    record_read: Option<u64>,
+    /// The drawing's record has been read into the session
+    /// (`seed_file_state`).
+    seeded: bool,
+    /// Why the drawing is held apart for having been read into the session
+    /// after one was up: that session never judged it, and the room it
+    /// joined does not know where the drawing is (`seed_file_state`).
+    opened_late: Option<NotAligned>,
+    /// Edits that changed what a drawing with a sync record says of its
+    /// objects and that no queue took, by the tab's document id, as entries
+    /// of the unsynced list (`collab_state::Unsynced`). The room will never
+    /// see them, so a save puts them on the drawing's record and marks it
+    /// `UNQUEUED_EDITS` (`SPEC-collab-offline-sync.md` §5.1).
+    pub unqueued: BTreeMap<u64, Vec<Value>>,
+    /// Ops restored from a drawing's file that the room refused, or that
+    /// went with one it refused, by the tab's document id, as `refused`
+    /// entries of the unsynced list. What they did is out of the drawing
+    /// again, or never was, and there is no redo to bring it back: the
+    /// entry is what is left of it. A save puts them on the drawing's
+    /// record; they do not mark it (§5.4).
+    pub refused: BTreeMap<u64, Vec<Value>>,
+    /// The `UNQUEUED_EDITS` mark of a drawing whose unsynced list was
+    /// cleared (`PIDCOLLAB UNSYNCED CLEAR`), by the tab's document id. The
+    /// entries go; that edits were made which no queue took stays true, and
+    /// a save keeps saying so until the drawing is taken off its room
+    /// (§4.5).
+    pub unqueued_marks: BTreeMap<u64, Diverged>,
     /// Why this drawing can no longer be taken to be what the room has: a
     /// revision that never arrived, or a peer's change that could not be
-    /// applied here. The baseline still reads as current — it is the
-    /// server's number, not a statement about this drawing — so this is what
-    /// keeps the session from writing on top of the difference. `None` while
-    /// nothing is known to be missing.
+    /// applied here. After a peer's change that could not be applied the
+    /// baseline still reads as current — it is the server's number, not a
+    /// statement about this drawing — so this is what keeps the session from
+    /// writing on top of the difference. `None` while nothing is known to be
+    /// missing.
     pub diverged: Option<String>,
+    /// The code `diverged` was marked with, and when, in Unix seconds: with
+    /// it, what the drawing's record is saved with (`diverged_record`).
+    pub diverged_as: Option<(&'static str, i64)>,
+    /// A revision that skipped one has come: from then on the baseline
+    /// stays the last revision this drawing has all of, which is what its
+    /// record is saved with.
+    revision_gap: bool,
+    /// What the drawing's record said of its divergence when the session
+    /// read it (`collab_state::load_diverged`). A drawing that knows it is
+    /// apart is held apart on every connection and says nothing of where it
+    /// is (`judge_queue`); a save keeps the mark.
+    pub saved_diverged: Option<Diverged>,
+    /// Why the connection that is up is not taken as aligned with the room,
+    /// while it is not. Unlike `diverged` it is of the connection, not of
+    /// the drawing: nothing of the outbox goes out and nothing the room does
+    /// comes in, the baseline and the repository stay what the drawing
+    /// said, and the next connection is judged afresh.
+    pub not_aligned: Option<NotAligned>,
     /// Whether a session has been up before in this run, so that
-    /// `base_revision` is a revision this drawing was actually at.
+    /// `base_revision` is a revision this drawing was actually at. One held
+    /// apart from the room does not count.
     pub had_session: bool,
+    /// The session's drawing was taken off the room it was in (`PIDCOLLAB
+    /// DETACH`) since a session was last up: the next `hello` claims nothing
+    /// of where the drawing is, not even where the last session left it
+    /// ([`TagsSaid::Detached`]).
+    pub detached: bool,
     /// Which repository the room this drawing belongs to is of — the
-    /// `repo_id` the last `welcome` named, or the one the drawing file was
-    /// saved with when it is a copy that was aligned before
-    /// (`REQ-COLL-015`). Written into the file on save; `None` for a
-    /// drawing no repository has ever claimed.
+    /// `repo_id` the last `welcome` that took the drawing as aligned named,
+    /// or the one the drawing file was saved with when it is a copy that
+    /// was aligned before (`REQ-COLL-015`). Written into the file on save;
+    /// `None` for a drawing no repository has ever claimed.
     pub repo_id: Option<String>,
     /// The conflict entries the room was told of and that no ruling has
     /// arrived for, oldest first. While one stands, the field it names has
@@ -526,6 +721,8 @@ pub(super) struct State {
     /// `welcome.replay_from`, between the event that says it and the
     /// `Connected` it belongs to.
     resume_from: Option<i64>,
+    /// `welcome.align_refused`, the same way.
+    align_refused: Option<NotAligned>,
     /// Ops the server refused whole, for the app to take their steps back
     /// (`OpenCADStudio::settle_rejected_ops`).
     pub rejections: Vec<Rejection>,
@@ -543,11 +740,28 @@ pub(super) struct State {
     /// neither the read-only gate nor a claim stands in the way — the
     /// drawing is being put back to what the room has.
     pub rolling_back: bool,
+    /// Held while what takes a queued op's steps back out is being read
+    /// (`OpenCADStudio::read_queued_inverses`): what taking them back says
+    /// to the room is kept here instead of being said.
+    reading_inverse: Option<Vec<broadcast::Change>>,
     /// The last number given to an undo step (`next_step`).
     step_seq: u64,
-    /// The id of the last session that was up: ops made with none up are
-    /// numbered under it (the id is the server's and nobody else's).
-    last_session: Option<String>,
+    /// This run's name, under which it names its ops
+    /// (`ocs_collab::ids::op_id`): drawn with the first op it names, so no
+    /// other start of the program — this person's or anybody's — names a
+    /// step alike, whether or not a session was ever up.
+    run_id: String,
+    /// How many ops this run has named.
+    ops_named: u64,
+    /// The entries of the queue the drawing file was saved with that could
+    /// not be read as ops, as they were found (`collab_state::QueueRead`).
+    /// A save puts them back; while there is one, no connection claims
+    /// alignment (`judge_queue`).
+    pub unreadable_queue: Vec<Value>,
+    /// Why this copy holds itself apart, as it said in its last answer to
+    /// the transport's question (`TagsSaid::Apart`): the connection that
+    /// answer was for is held apart for it, whatever the `welcome` says.
+    apart_before_hello: Option<NotAligned>,
     /// tag → when the claim on it runs out, in Unix seconds, for the claims
     /// the server has said it of: those standing at the last `welcome`, and
     /// one this session asked for and was refused. A claim this session was
@@ -637,13 +851,103 @@ impl State {
         (code, level)
     }
 
-    /// Record that this drawing is no longer known to match the room. The
-    /// first reason is kept: it is where the two parted.
-    pub(super) fn mark_diverged(&mut self, reason: String) {
+    /// Record that this drawing is no longer known to match the room, as
+    /// `code` (one of `collab_state`'s). The first reason is kept: it is
+    /// where the two parted.
+    pub(super) fn mark_diverged(&mut self, code: &'static str, reason: String) {
         if self.diverged.is_none() {
             self.last_error = Some(format!("已与房间不一致：{reason}"));
             self.diverged = Some(reason);
+            self.diverged_as = Some((code, ocs_collab::ids::now_unix()));
         }
+    }
+
+    /// The divergence the drawing's record is to be saved with: the one it
+    /// was read with, else the one marked in this run.
+    pub(super) fn diverged_record(&self) -> Option<Diverged> {
+        self.saved_diverged.clone().or_else(|| {
+            let (code, at) = self.diverged_as?;
+            Some(Diverged {
+                code: code.to_owned(),
+                message: self.diverged.clone()?,
+                at,
+            })
+        })
+    }
+
+    /// The edits no queue took on the drawing of tab `tab` (by document id),
+    /// with the mark a save gives the drawing for them: `UNQUEUED_EDITS`,
+    /// dated by the first. A drawing whose list was cleared keeps the mark
+    /// it had then, with what no queue took since. `None` while there are
+    /// none.
+    pub(super) fn unqueued_for_save(&self, tab: u64) -> Option<(&[Value], Diverged)> {
+        let entries = self.unqueued.get(&tab).map_or(&[][..], Vec::as_slice);
+        if let Some(kept) = self.unqueued_marks.get(&tab) {
+            return Some((entries, kept.clone()));
+        }
+        let first = entries.first()?;
+        let mark = Diverged {
+            code: crate::pid::collab_state::UNQUEUED_EDITS.to_owned(),
+            message: format!(
+                "有 {} 步修改没有排上队，服务器上没有：{}",
+                entries.len(),
+                first["message"].as_str().unwrap_or_default()
+            ),
+            at: first["at"].as_i64().unwrap_or_default(),
+        };
+        Some((entries, mark))
+    }
+
+    /// Forget that the drawing of tab `tab` (by document id) was ever in a
+    /// room (`PIDCOLLAB DETACH`): its unsynced list and the mark it kept and,
+    /// when it is the `session`'s drawing, the queue, the divergence, the
+    /// repository and the revision the session had it at. The next `hello`
+    /// claims nothing of where it is.
+    pub(super) fn forget_drawing(&mut self, tab: u64, session: bool) {
+        self.unqueued.remove(&tab);
+        self.refused.remove(&tab);
+        self.unqueued_marks.remove(&tab);
+        if self.foreign_tab == Some(tab) {
+            self.foreign_tab = None;
+        }
+        if self.record_read == Some(tab) {
+            self.record_read = None;
+        }
+        if !session {
+            return;
+        }
+        self.outbox.clear();
+        self.unreadable_queue.clear();
+        self.diverged = None;
+        self.diverged_as = None;
+        self.saved_diverged = None;
+        self.revision_gap = false;
+        self.opened_late = None;
+        self.repo_id = None;
+        self.base_revision = 0;
+        self.had_session = false;
+        // There is no record left to read in.
+        self.seeded = true;
+        self.detached = true;
+    }
+
+    /// Why the drawing and the room do not match, as the panel and the
+    /// status bar show it: the drawing's divergence, or else this
+    /// connection's not being aligned. `None` while they match.
+    pub(super) fn mismatch(&self) -> Option<String> {
+        self.diverged
+            .clone()
+            .or_else(|| self.not_aligned.as_ref().map(NotAligned::reason))
+    }
+
+    /// Take this connection as not aligned with the room, for `reason`.
+    fn hold_apart(&mut self, reason: NotAligned) {
+        self.last_error = Some(format!("本次连接与房间对不上：{}", reason.reason()));
+        self.catching_up = None;
+        for entry in &mut self.outbox {
+            entry.sent = false;
+        }
+        self.not_aligned = Some(reason);
     }
 
     /// Seed the session's baseline from what the drawing file was saved
@@ -657,20 +961,106 @@ impl State {
     /// the process that made them, so a refusal marks the drawing diverged
     /// rather than pretending a rollback.
     ///
-    /// Once only, ahead of the first session: from then on the in-memory
-    /// baseline is fresher than anything the file could say.
-    pub(super) fn seed_file_state(&mut self, claim: &FileClaim, ops: Vec<Outgoing>) {
+    /// Once only; whether this was the time is the answer. A drawing read
+    /// in after a session came up without it is seeded all the same — what
+    /// its record says is the drawing's — but that session never held the
+    /// record against the room, and the room's changes that were waiting
+    /// for a drawing were made on top of a revision this one may not be
+    /// at: they are dropped, and the connection is held apart for the rest
+    /// of the run (`opened_late`).
+    pub(super) fn seed_file_state(
+        &mut self,
+        claim: &FileClaim,
+        ops: Vec<Outgoing>,
+        unreadable: Vec<Value>,
+    ) -> bool {
+        if self.seeded {
+            return false;
+        }
+        self.seeded = true;
         if self.had_session {
-            return;
+            let late = NotAligned {
+                code: OPENED_AFTER_SESSION.to_owned(),
+                message: "这份图是会话连上之后才读进来的，这次连接没有按它的同步记录核对过；\
+                          用这份图重新启动程序再连接"
+                    .to_owned(),
+            };
+            self.pending_remote.clear();
+            if self.session_id.is_some() {
+                self.hold_apart(late.clone());
+            }
+            self.opened_late = Some(late);
         }
         self.repo_id = Some(claim.repo_id.clone());
         self.base_revision = claim.revision;
         self.had_session = true;
-        // `queue_op` mints op ids under a session name; a seeded copy has
-        // none yet, and ops made before the first session still need ids.
-        // The real session's name replaces this once a `welcome` arrives.
-        self.last_session = Some(format!("file-{}", claim.repo_id));
         self.outbox.extend(ops);
+        self.unreadable_queue = unreadable;
+        true
+    }
+
+    /// What this copy finds against itself before it says what it is
+    /// (`SPEC-collab-offline-sync.md` §5.2, step two): a drawing that knows
+    /// it is apart from the room — its record says so, this run found it so,
+    /// or edits no queue took were made on it — for the reason it would be
+    /// saved with; a drawing read in after the session came up
+    /// (`seed_file_state`); a queue that is not this person's to send —
+    /// steps somebody else queued, or that say nobody; entries that could
+    /// not be read; two steps under one name. A reconnection in the same run
+    /// is judged the same way.
+    pub(super) fn judge_queue(&self) -> Option<NotAligned> {
+        let unqueued = || Some(self.unqueued_for_save(self.document?)?.1);
+        if let Some(apart) = self.diverged_record().or_else(unqueued) {
+            return Some(NotAligned {
+                code: apart.code,
+                message: apart.message,
+            });
+        }
+        if let Some(late) = &self.opened_late {
+            return Some(late.clone());
+        }
+        let mut others: Vec<&str> = Vec::new();
+        let mut nobody = false;
+        for entry in &self.outbox {
+            match entry.user_id.as_deref() {
+                Some(user) if user == self.user_id => {}
+                Some(user) if !others.contains(&user) => others.push(user),
+                Some(_) => {}
+                None => nobody = true,
+            }
+        }
+        if !others.is_empty() || nobody {
+            let message = match (others.is_empty(), nobody) {
+                (false, false) => format!("图里带着 {} 排队未提交的修改", others.join("、")),
+                (false, true) => format!(
+                    "图里带着 {} 排队未提交的修改，还有的没有记下是谁排的",
+                    others.join("、")
+                ),
+                (true, _) => "图里带着排队未提交的修改，没有记下是谁排的".to_owned(),
+            };
+            return Some(NotAligned {
+                code: QUEUED_BY_OTHERS.to_owned(),
+                message,
+            });
+        }
+        if !self.unreadable_queue.is_empty() {
+            return Some(NotAligned {
+                code: QUEUE_UNREADABLE.to_owned(),
+                message: format!(
+                    "图里排队未提交的修改有 {} 条读不出来",
+                    self.unreadable_queue.len()
+                ),
+            });
+        }
+        let mut names = std::collections::BTreeSet::new();
+        let twice = self
+            .outbox
+            .iter()
+            .find(|entry| !names.insert(entry.op_id.as_str()))?;
+        Some(NotAligned {
+            code: QUEUE_DUPLICATE_ID.to_owned(),
+            message: format!("图里排队未提交的修改有两条都叫 {}", twice.op_id),
+        })
     }
 
     /// Turn the holder a denial names into the user the panel should show.
@@ -737,9 +1127,26 @@ impl State {
     /// Answer question `ask` of the transport's about the drawing's tags.
     pub(super) fn say_tags(&mut self, ask: u64, said: TagsSaid) {
         // Tags said to a session that is up are told by leaving it.
-        let tags_to_tell = matches!(&said, TagsSaid::Tags(tags, _) if !tags.is_empty());
+        let tags_to_tell = matches!(
+            &said,
+            TagsSaid::Tags(tags, _) | TagsSaid::Detached(tags) if !tags.is_empty()
+        );
         if tags_to_tell && self.session_id.is_some() {
             self.rejoining = true;
+        }
+        match &said {
+            TagsSaid::Apart(reason) => {
+                // Said to a session that is up, the answer came too late
+                // for its `hello`: it is held apart from now, and the
+                // transport leaves it to join again claiming nothing.
+                if self.session_id.is_some() && self.not_aligned.is_none() {
+                    self.hold_apart(reason.clone());
+                }
+                self.apart_before_hello = Some(reason.clone());
+            }
+            TagsSaid::Tags(..) | TagsSaid::Detached(_) | TagsSaid::NotYet => {
+                self.apart_before_hello = None
+            }
         }
         #[cfg(test)]
         self.tags_said.push((ask, said.clone()));
@@ -772,6 +1179,11 @@ impl State {
                 claims,
                 repo_id,
             } => {
+                // Each connection is judged afresh. One the `welcome`
+                // refused is held apart (`REQ-COLL-015`), and so is one
+                // this copy held apart before its `hello` — for that.
+                let refused = self.align_refused.take();
+                let refused = self.apart_before_hello.clone().or(refused);
                 // The server replays what this session missed, from the
                 // revision its drawing has: the baseline stays where it is
                 // and each replayed op moves it on, like any op. Nothing
@@ -780,33 +1192,43 @@ impl State {
                     .resume_from
                     .take()
                     .filter(|from| self.had_session && *from == self.base_revision);
-                match replay {
-                    Some(from) => {
+                let apart = match (refused, replay) {
+                    (Some(refused), _) => Some(refused),
+                    (None, Some(from)) => {
                         self.catching_up = (base_revision > from).then_some(base_revision);
+                        None
                     }
-                    None => {
-                        // Coming back to a room that moved on while this
-                        // session was away, with no replay: what was
-                        // applied in between is not in this drawing. (A
-                        // room that is *behind* is one whose server started
-                        // over; this drawing joins it as it joined the
-                        // first time, taken to be what the room has.)
-                        if self.had_session && base_revision > self.base_revision {
-                            self.mark_diverged(format!(
-                                "断线期间房间从修订 {} 走到了 {base_revision}，其间的变更本图没有收到",
+                    // Coming back to a room that moved on while this
+                    // drawing was away, with no replay: what was applied in
+                    // between is not in this drawing, so it is held apart
+                    // too, and keeps its own baseline.
+                    (None, None) if self.had_session && base_revision > self.base_revision => {
+                        Some(NotAligned {
+                            code: ocs_collab::protocol::codes::REPLAY_GAP.to_owned(),
+                            message: format!(
+                                "房间已从修订 {} 走到 {base_revision}，其间的变更没有补发给这份图纸",
                                 self.base_revision
-                            ));
-                        }
+                            ),
+                        })
+                    }
+                    // A room that is *behind* is one whose server started
+                    // over; this drawing joins it as it joined the first
+                    // time, taken to be what the room has.
+                    (None, None) => {
                         self.base_revision = base_revision;
                         self.catching_up = None;
+                        None
                     }
+                };
+                if apart.is_none() {
+                    self.had_session = true;
+                    self.detached = false;
+                    // Which repository this room is of; what the drawing
+                    // file is saved with, so its next open can say where it
+                    // was. One that is held apart keeps what it had.
+                    self.repo_id = Some(repo_id).filter(|repo| !repo.is_empty());
                 }
-                self.had_session = true;
                 self.connected = true;
-                // Which repository this room is of; what the drawing file
-                // is saved with, so its next open can say where it was.
-                self.repo_id = Some(repo_id).filter(|repo| !repo.is_empty());
-                self.last_session = Some(session_id.clone());
                 // The others on the drawing. `welcome.peers` does not list
                 // the session it welcomes; a server that still does (it
                 // used to) is read the same way.
@@ -834,6 +1256,9 @@ impl State {
                 for entry in &mut self.outbox {
                     entry.sent = false;
                 }
+                if let Some(apart) = apart {
+                    self.hold_apart(apart);
+                }
                 self.pump();
                 // The session before this one was left to tell the drawing's
                 // tags: what it held by claim is asked for again.
@@ -845,10 +1270,7 @@ impl State {
                 }
             }
             CollabEvent::AlignRefused { code, message } => {
-                // The session is open but the copy is not consistent: it
-                // sees the room and is done submitting (`REQ-COLL-015`).
-                self.mark_diverged(format!("{message}（{code}）"));
-                self.last_error = Some(message);
+                self.align_refused = Some(NotAligned { code, message });
             }
             CollabEvent::Resuming { from } => {
                 self.resume_from = Some(from);
@@ -872,6 +1294,8 @@ impl State {
                 self.claim_expiry.clear();
                 self.catching_up = None;
                 self.resume_from = None;
+                self.align_refused = None;
+                self.not_aligned = None;
                 for entry in &mut self.outbox {
                     entry.sent = false;
                 }
@@ -955,6 +1379,12 @@ impl State {
                 revision,
                 changes,
             } => {
+                // What the room does is not written into a drawing whose
+                // connection is held apart, and its baseline stays where
+                // the drawing is.
+                if self.not_aligned.is_some() {
+                    return;
+                }
                 // Said again: a revision this drawing is already at. Applying
                 // it twice is not harmless (a rename finds its old tag gone)
                 // and the baseline does not go backwards.
@@ -965,13 +1395,17 @@ impl State {
                 }
                 // Every op the room applies comes here, one revision after the
                 // other. One that is not the next means something in between
-                // never arrived, and this drawing is short a change while its
-                // baseline says it is current.
+                // never arrived: this drawing is short a change, and its
+                // baseline stays where the drawing has all of the room's.
                 if revision != self.base_revision + 1 {
-                    self.mark_diverged(format!(
-                        "收到修订 {revision}，本地基线是 {}：中间的变更没有收到",
-                        self.base_revision
-                    ));
+                    self.revision_gap = true;
+                    self.mark_diverged(
+                        crate::pid::collab_state::REVISION_GAP,
+                        format!(
+                            "收到修订 {revision}，本地基线是 {}：中间的变更没有收到",
+                            self.base_revision
+                        ),
+                    );
                 }
                 // A ruling settles the entry its id names. Its changes are a
                 // peer's like any other — the ruling was made on the server
@@ -1020,12 +1454,11 @@ impl State {
                     }
                 } else {
                     self.applied_ops = self.applied_ops.saturating_add(1);
-                    self.pending_remote.push(RemoteChange {
-                        op_id,
-                        changes,
-                    });
+                    self.pending_remote.push(RemoteChange { op_id, changes });
                 }
-                self.base_revision = revision;
+                if !self.revision_gap {
+                    self.base_revision = revision;
+                }
                 if self.catching_up.is_some_and(|target| revision >= target) {
                     self.catching_up = None;
                 }
@@ -1037,6 +1470,12 @@ impl State {
                 message,
                 rejected,
             } => {
+                // Not judged, so not refused either: the step stays queued
+                // for a connection that aligns, and nothing is taken back.
+                if code == ocs_collab::protocol::codes::NOT_ALIGNED {
+                    self.hold_apart(NotAligned { code, message });
+                    return;
+                }
                 self.last_error = Some(format!("{code}: {message}"));
                 // Nothing of it took effect: the step goes back
                 // (`OpenCADStudio::settle_rejected_ops`), and until it has,
@@ -1126,12 +1565,22 @@ impl State {
     }
 
     /// Put the first op of the queue on the wire, when there is a session
-    /// to send it on, the session has caught up with the room, and no other
-    /// op of this session's is waiting for its answer.
+    /// to send it on, the session has caught up with the room and written
+    /// what it heard of it into the drawing, and no other op of this
+    /// session's is waiting for its answer. Heard is not enough: a change
+    /// the drawing cannot take marks it diverged, and nothing is to go out
+    /// ahead of that (`apply_remote_changes` comes back here once it has
+    /// written them).
     fn pump(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if self.hold || !self.connected || self.catching_up.is_some() || self.diverged.is_some() {
+            if self.hold
+                || !self.connected
+                || self.catching_up.is_some()
+                || !self.pending_remote.is_empty()
+                || self.diverged.is_some()
+                || self.not_aligned.is_some()
+            {
                 return;
             }
             let Some(session_id) = self.session_id.clone() else {
@@ -1165,8 +1614,9 @@ impl State {
             "user_id": self.user_id,
             "drawing_id": self.drawing_id,
             "session_id": self.session_id,
-            // Which repository this drawing is aligned to — the last
-            // `welcome`'s, or the file's saved claim (`REQ-COLL-015`).
+            // Which repository this drawing is aligned to — that of the
+            // last `welcome` that took it as aligned, or the file's saved
+            // claim (`REQ-COLL-015`).
             "repo_id": self.repo_id,
             "base_revision": self.base_revision,
             "peers": self
@@ -1198,6 +1648,9 @@ impl State {
             "last_apply_error": self.last_apply_error,
             "document_id": self.document,
             "diverged": self.diverged,
+            // `{code, message}` while the connection that is up is held
+            // apart from the room.
+            "not_aligned": self.not_aligned,
             // tag → when the claim on it runs out (Unix seconds), where the
             // server has said.
             "claim_expiry": self
@@ -1247,7 +1700,8 @@ impl State {
     ///
     /// With a session up it goes out at once, or behind the op the room
     /// has yet to answer. With none up — after there has been one — it
-    /// waits for the next (`VAL-CROSS-008`). A client that never had a
+    /// waits for the next (`VAL-CROSS-008`), and with one that is held
+    /// apart from the room, for one that aligns. A client that never had a
     /// session queues nothing: when it first joins, its drawing is taken to
     /// be what the room has.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1269,12 +1723,10 @@ impl State {
                 "本图与房间已不一致（{reason}），已停止提交变更，需要重新同步"
             ));
         }
-        let session = match (&self.session_id, &self.last_session) {
-            (Some(live), _) => live.clone(),
-            (None, Some(last)) if self.had_session => last.clone(),
-            _ => return Err("未连接协同服务器".to_owned()),
-        };
-        let op_id = transport::next_op_id(&session);
+        if self.session_id.is_none() && !self.had_session {
+            return Err("未连接协同服务器".to_owned());
+        }
+        let op_id = self.name_op();
         #[cfg(test)]
         self.sent.push(payload.clone());
         self.outbox.push_back(Outgoing {
@@ -1286,6 +1738,10 @@ impl State {
             sent: false,
             label: label.to_owned(),
             restored: false,
+            user_id: Some(self.user_id.clone()),
+            queued_at: Some(ocs_collab::ids::now_unix()),
+            inverse: None,
+            inverse_read: false,
         });
         if self.own_ops.len() >= 64 {
             self.own_ops.pop_front();
@@ -1295,6 +1751,7 @@ impl State {
         let sent = self.outbox.back().is_some_and(|entry| entry.sent);
         Ok(match (self.session_id.is_some() && self.connected, sent) {
             (true, true) => Queued::Sent,
+            (true, false) if self.not_aligned.is_some() => Queued::NotAligned(self.outbox.len()),
             (true, false) => Queued::Behind(self.outbox.len().saturating_sub(1)),
             (false, _) => Queued::Offline(self.outbox.len()),
         })
@@ -1311,6 +1768,16 @@ impl State {
         Err("网页版不支持协同变更".to_owned())
     }
 
+    /// The id of the next op this run makes: `op-<run id>-<n>`, from 1.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn name_op(&mut self) -> String {
+        if self.run_id.is_empty() {
+            self.run_id = ocs_collab::ids::new_run_id();
+        }
+        self.ops_named += 1;
+        ocs_collab::ids::op_id(&self.run_id, self.ops_named)
+    }
+
     /// Ask the transport to send one `claim` / `release` for `tag`.
     ///
     /// Returns why nothing was sent when the client is not in a session — the
@@ -1322,6 +1789,14 @@ impl State {
         let Some(session_id) = self.session_id.clone() else {
             return Err("未连接协同服务器".to_owned());
         };
+        // A claim speaks for edits that would go to the room; a connection
+        // held apart sends none.
+        if let Some(apart) = &self.not_aligned {
+            return Err(format!(
+                "这次连接与房间对不上：{}，不申请占用",
+                apart.reason()
+            ));
+        }
         transport::request_claim(&session_id, tag)?;
         #[cfg(test)]
         self.claims_asked.push((session_id, tag.trim().to_owned()));
@@ -1918,10 +2393,11 @@ mod tests {
 
     /// `REQ-COLL-015`: a copy the file says was in a room seeds its
     /// baseline once — its edits then queue like a session's leftovers,
-    /// ahead of any session — and a refused alignment marks it diverged:
-    /// the session is up, the room is seen, and nothing is submitted.
+    /// ahead of any session — and a refused alignment holds the connection
+    /// apart (`OFF-2`): the session is up, the room is seen, nothing is
+    /// submitted, and the copy keeps what its file said.
     #[test]
-    fn collab_align_a_seeded_copy_queues_and_a_refusal_diverges_it() {
+    fn collab_align_a_seeded_copy_queues_and_a_refusal_holds_it_apart() {
         let mut state = State::new();
         state.server_url = "ws://127.0.0.1:3240/ws".to_owned();
         state.drawing_id = "PID-1101".to_owned();
@@ -1939,8 +2415,12 @@ mod tests {
             sent: false,
             label: "离线改动".into(),
             restored: true,
+            user_id: None,
+            queued_at: None,
+            inverse: None,
+            inverse_read: true,
         };
-        state.seed_file_state(&claim, vec![restored]);
+        state.seed_file_state(&claim, vec![restored], Vec::new());
         assert!(state.had_session);
         assert_eq!(state.base_revision, 42);
         assert_eq!(state.repo_id.as_deref(), Some("r-9"));
@@ -1951,26 +2431,38 @@ mod tests {
             Ok(Queued::Offline(2))
         ));
         // Seeding is once: a second call would have been a no-op anyway.
-        state.seed_file_state(&claim, Vec::new());
+        state.seed_file_state(&claim, Vec::new(), Vec::new());
         assert_eq!(state.outbox.len(), 2);
 
+        // The refusal is said ahead of the session it comes with.
+        state.apply(CollabEvent::AlignRefused {
+            code: "REPO_MISMATCH".into(),
+            message: "这份文件属于另一个服务器库".into(),
+        });
         state.apply(CollabEvent::Connected {
             session_id: "s-9".to_owned(),
             base_revision: 50,
             peers: Vec::new(),
             claims: Vec::new(),
-            repo_id: "r-9".into(),
+            repo_id: "r-other".into(),
         });
-        state.apply(CollabEvent::AlignRefused {
-            code: "REPO_MISMATCH".into(),
-            message: "这份文件属于另一个服务器库".into(),
-        });
-        assert!(state.diverged.is_some(), "refused alignment must diverge");
+        assert_eq!(
+            state.not_aligned.as_ref().map(|apart| apart.code.as_str()),
+            Some("REPO_MISMATCH")
+        );
+        assert_eq!(state.diverged, None, "held apart, not parted for good");
+        assert_eq!(
+            (state.repo_id.as_deref(), state.base_revision),
+            (Some("r-9"), 42),
+            "the room that refused the copy is not the copy's"
+        );
+        assert!(matches!(
+            state.queue_op(json!({"kind": "set_property"}), Vec::new(), true, "再改"),
+            Ok(Queued::NotAligned(3))
+        ));
         assert!(
-            state
-                .queue_op(json!({"kind": "set_property"}), Vec::new(), true, "再改")
-                .is_err(),
-            "a diverged copy submits nothing"
+            state.outbox.iter().all(|entry| !entry.sent),
+            "nothing of the queue goes out"
         );
     }
 
@@ -1985,20 +2477,24 @@ mod tests {
     }
 
     /// The room's ops arrive one revision after the other. One that is not
-    /// the next means a change in between never got here: the baseline still
-    /// moves — it is the server's count — but the session is marked, and
-    /// sends nothing on top of a drawing it knows to be short.
+    /// the next means a change in between never got here: the session is
+    /// marked `REVISION_GAP`, sends nothing on top of a drawing it knows to
+    /// be short, and its baseline stays the last revision it has all of.
     #[test]
     fn a_revision_that_skips_one_marks_the_session_and_stops_its_ops() {
         let mut state = joined_at(3);
         state.apply(applied("op-a", 4));
         assert_eq!(state.diverged, None);
-        assert!(state.request_op(serde_json::json!({"kind": "set_tag"})).is_ok());
+        assert!(state
+            .request_op(serde_json::json!({"kind": "set_tag"}))
+            .is_ok());
 
         state.apply(applied("op-c", 6));
-        assert_eq!(state.base_revision, 6);
+        assert_eq!(state.base_revision, 4, "the baseline does not pass the gap");
         let reason = state.diverged.clone().expect("marked");
         assert!(reason.contains('6') && reason.contains('4'), "{reason}");
+        let code = state.diverged_as.map(|(code, _)| code);
+        assert_eq!(code, Some(crate::pid::collab_state::REVISION_GAP));
         assert_eq!(state.status_json()["diverged"], reason.as_str());
         let refused = state
             .request_op(serde_json::json!({"kind": "set_tag"}))
@@ -2008,6 +2504,7 @@ mod tests {
         // The first reason stays: it is where the two parted.
         state.apply(applied("op-e", 9));
         assert_eq!(state.diverged.as_deref(), Some(reason.as_str()));
+        assert_eq!(state.base_revision, 4);
     }
 
     /// A revision this drawing is already at is not applied a second time,
@@ -2027,12 +2524,14 @@ mod tests {
         assert_eq!(state.diverged, None);
     }
 
-    /// Coming back to a room that moved on while the session was away: what
-    /// it applied meanwhile is not in this drawing. Coming back to the same
-    /// revision, nothing was missed; to a lower one, the server started over
-    /// and this is a first join again.
+    /// Coming back to a room that moved on while the session was away, with
+    /// no replay: what it applied meanwhile is not in this drawing, so the
+    /// connection is held apart (`OFF-2`) — the drawing keeps its own
+    /// baseline, and is not parted from the room for good. Coming back to
+    /// the same revision, nothing was missed; to a lower one, the server
+    /// started over and this is a first join again.
     #[test]
-    fn coming_back_to_a_room_that_moved_on_marks_the_session() {
+    fn coming_back_to_a_room_that_moved_on_holds_the_connection_apart() {
         let reconnect_at = |revision: i64| {
             let mut state = joined_at(3);
             state.apply(CollabEvent::Disconnected {
@@ -2048,13 +2547,33 @@ mod tests {
             });
             state
         };
-        assert_eq!(reconnect_at(3).diverged, None);
-        assert_eq!(reconnect_at(0).diverged, None);
+        let same = reconnect_at(3);
+        assert_eq!(
+            (same.not_aligned.clone(), same.diverged.clone()),
+            (None, None)
+        );
+        let restarted = reconnect_at(0);
+        assert_eq!(
+            (restarted.not_aligned.clone(), restarted.base_revision),
+            (None, 0)
+        );
         let moved_on = reconnect_at(5);
-        let reason = moved_on.diverged.clone().expect("marked");
-        assert!(reason.contains('3') && reason.contains('5'), "{reason}");
-        assert_eq!(moved_on.base_revision, 5);
+        let apart = moved_on.not_aligned.clone().expect("held apart");
+        assert_eq!(apart.code, "REPLAY_GAP");
+        assert!(
+            apart.message.contains('3') && apart.message.contains('5'),
+            "{apart:?}"
+        );
+        assert_eq!(
+            moved_on.base_revision, 3,
+            "the room's baseline is not taken"
+        );
+        assert_eq!(moved_on.diverged, None);
         // The first join of a run is taken at whatever the room is at.
-        assert_eq!(joined_at(7).diverged, None);
+        let first = joined_at(7);
+        assert_eq!(
+            (first.not_aligned.clone(), first.diverged.clone()),
+            (None, None)
+        );
     }
 }

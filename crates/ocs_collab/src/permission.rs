@@ -389,6 +389,16 @@ fn lookup_acl(request: &PermissionRequest<'_>) -> AclLookup {
 
 /// Runs the chain: role → PBS ACL → drawing state.
 pub fn decide(request: &PermissionRequest<'_>) -> PermissionDecision {
+    let decision = decide_without_state(request);
+    if decision.allowed && !state_allows(request.drawing_state, request.operation) {
+        return PermissionDecision::deny(DenialLevel::State);
+    }
+    decision
+}
+
+/// The first two tiers only: role → PBS ACL. Switching a drawing's state is
+/// judged this way, whatever state the drawing is in (REQ-COLL-004 rule 1).
+pub fn decide_without_state(request: &PermissionRequest<'_>) -> PermissionDecision {
     if !role_allows(request.role, request.operation) {
         return PermissionDecision::deny(DenialLevel::Role);
     }
@@ -400,12 +410,7 @@ pub fn decide(request: &PermissionRequest<'_>) -> PermissionDecision {
         } => PermissionDecision::deny(DenialLevel::Pbs),
         AclLookup {
             decision: Some((true, node_id, path, inherited)),
-        } => {
-            if !state_allows(request.drawing_state, request.operation) {
-                return PermissionDecision::deny(DenialLevel::State);
-            }
-            PermissionDecision::allow(&node_id, path, inherited)
-        }
+        } => PermissionDecision::allow(&node_id, path, inherited),
     }
 }
 
@@ -671,6 +676,40 @@ mod tests {
             nodes: &nodes,
         };
         assert!(decide(&request).allowed);
+    }
+
+    #[test]
+    fn a_state_switch_passes_on_the_first_two_tiers_in_every_state() {
+        let nodes = vec![node(
+            "n-unit-a",
+            None,
+            vec![allow_row("u1", AclPermission::Edit)],
+        )];
+        let request = |user_id, role, drawing_state| PermissionRequest {
+            user_id,
+            role,
+            operation: Operation::ConfigureAuthorization,
+            drawing_state,
+            node_id: "n-unit-a",
+            nodes: &nodes,
+        };
+        for drawing_state in DrawingState::ALL {
+            let admin = request("u1", Role::ProjectAdmin, drawing_state);
+            assert!(decide_without_state(&admin).allowed, "{drawing_state:?}");
+            assert_eq!(
+                decide(&admin).allowed,
+                drawing_state != DrawingState::ReadOnly,
+                "the full chain still applies the state tier: {drawing_state:?}"
+            );
+            assert_eq!(
+                decide_without_state(&request("u1", Role::ReadOnlyViewer, drawing_state)).denied_level,
+                Some(DenialLevel::Role)
+            );
+            assert_eq!(
+                decide_without_state(&request("u2", Role::ProjectAdmin, drawing_state)).denied_level,
+                Some(DenialLevel::Pbs)
+            );
+        }
     }
 
     #[test]

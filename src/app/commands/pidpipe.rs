@@ -703,13 +703,13 @@ impl OpenCADStudio {
                 first.end = SegmentEnd::joined(inner_a, fitting_handle, VALVE_PORT_NAMES[0]);
             }
             // 第二段：起点指向端口 2，终点保持原管段终点。
-            let end_point = segment.end.point;
             table.append_segment(
                 &run_tag,
                 second,
                 SegmentEnd::joined(inner_b, fitting_handle, VALVE_PORT_NAMES[1]),
-                SegmentEnd::open(end_point),
+                segment.end.clone(),
             );
+            hand_over_far_end(&mut table, &segment, second);
             // 几何同步：第一段的 Line 终点收到端口 1。
             if let Some(document::EntityType::Line(line)) =
                 self.tabs[i].scene.document.get_entity_mut(first_handle)
@@ -860,13 +860,13 @@ impl OpenCADStudio {
         if let Some(first) = table.segment_by_handle_mut(first_handle) {
             first.end = SegmentEnd::open(inner_a);
         }
-        let end_point = segment.end.point;
         table.append_segment(
             &run_tag,
             second,
             SegmentEnd::open(inner_b),
-            SegmentEnd::open(end_point),
+            segment.end.clone(),
         );
+        hand_over_far_end(&mut table, &segment, second);
         // 几何同步：第一段的 Line 终点收到打断点左侧。
         if let Some(document::EntityType::Line(line)) =
             self.tabs[i].scene.document.get_entity_mut(first_handle)
@@ -987,6 +987,30 @@ fn project_on_segment(a: DVec3, b: DVec3, p: DVec3) -> (f64, f64) {
 fn point_is_endpoint(segment: &crate::pid::topology::PipeSegmentRecord, point: DVec3) -> bool {
     let near = |p: [f64; 2]| (p[0] - point.x).abs() <= 1e-6 && (p[1] - point.y).abs() <= 1e-6;
     near(segment.start.point) || near(segment.end.point)
+}
+
+/// 拆段后原管段的终点归第二段：那一头接着管件时，管件记录里指着原管段的端口改指第二段。
+fn hand_over_far_end(
+    table: &mut TopologyTable,
+    original: &crate::pid::topology::PipeSegmentRecord,
+    second: document::Handle,
+) {
+    let Some(peer) = original.end.peer.as_deref() else {
+        return;
+    };
+    let Some((fitting, port)) = peer.split_once(':') else {
+        return;
+    };
+    let stale = Some(original.handle.clone());
+    let slot = table
+        .fittings
+        .iter_mut()
+        .find(|record| record.handle == fitting)
+        .and_then(|record| record.ports.get_mut(port))
+        .filter(|slot| **slot == stale);
+    if let Some(slot) = slot {
+        *slot = Some(handle_text(second));
+    }
 }
 
 /// 管段内侧端点相对阀门端口再让开的世界距离。
@@ -1506,6 +1530,43 @@ mod tests {
         assert_eq!(table.pipe_segments[1].end.point, [200.0, 0.0]);
         // 沿 X 严格不重叠。
         assert!(table.pipe_segments[0].end.point[0] < table.pipe_segments[1].start.point[0]);
+    }
+
+    /// 在终点已经接着阀门的管段上再插阀门：拆出来的第二段接过原管段的终点，
+    /// 连同 `peer`；先放的阀门记录里那个端口改指第二段。
+    #[test]
+    fn a_second_fitting_keeps_the_first_one_bound() {
+        let mut app = app();
+        draw(&mut app, "PIDPIPE", &[[0.0, 0.0, 0.0], [200.0, 0.0, 0.0]]);
+        draw(
+            &mut app,
+            "PIDPIPE run",
+            &[[0.0, 0.0, 0.0], [200.0, 0.0, 0.0]],
+        );
+        draw(&mut app, "PIDFITTING gate_valve", &[[150.0, 0.0, 0.0]]);
+        let first = topology(&app).fittings[0].handle.clone();
+        let done = draw(&mut app, "PIDFITTING gate_valve", &[[50.0, 0.0, 0.0]]);
+        assert_eq!(done["ok"], true, "{done}");
+
+        let table = topology(&app);
+        let peer = format!("{first}:{}", VALVE_PORT_NAMES[0]);
+        let bound: Vec<_> = table
+            .pipe_segments
+            .iter()
+            .filter(|segment| segment.end.peer.as_deref() == Some(peer.as_str()))
+            .collect();
+        assert_eq!(bound.len(), 1, "先放的阀门入口还有一段连着：{table:?}");
+        assert_eq!(bound[0].end.point, [134.0, 0.0], "终点还是原管段的终点");
+        let record = table
+            .fittings
+            .iter()
+            .find(|fitting| fitting.handle == first)
+            .unwrap();
+        assert_eq!(
+            record.ports[VALVE_PORT_NAMES[0]].as_deref(),
+            Some(bound[0].handle.as_str()),
+            "阀门记录指着连着它的那段"
+        );
     }
 
     /// `PIDPIPE signal` 自动生成 `S-2001`，第二条是 `S-2002`。
@@ -2048,6 +2109,44 @@ mod tests {
             }
         }
         assert_eq!(table.fittings.len(), 1, "打断符在 fittings 里有一条记录");
+    }
+
+    /// 在终点接着阀门的管段上打断：第二段接过原管段的终点，连同 `peer`；
+    /// 阀门记录里那个端口改指第二段。
+    #[test]
+    fn pidbreak_keeps_the_far_end_bound_to_its_fitting() {
+        let mut app = app();
+        draw(&mut app, "PIDPIPE", &[[0.0, 0.0, 0.0], [200.0, 0.0, 0.0]]);
+        draw(
+            &mut app,
+            "PIDPIPE run",
+            &[[0.0, 0.0, 0.0], [200.0, 0.0, 0.0]],
+        );
+        draw(&mut app, "PIDFITTING gate_valve", &[[150.0, 0.0, 0.0]]);
+        let valve = topology(&app).fittings[0].handle.clone();
+        let done = draw(&mut app, "PIDBREAK", &[[50.0, 0.0, 0.0]]);
+        assert_eq!(done["ok"], true, "{done}");
+
+        let table = topology(&app);
+        let peer = format!("{valve}:{}", VALVE_PORT_NAMES[0]);
+        let bound: Vec<_> = table
+            .pipe_segments
+            .iter()
+            .filter(|segment| segment.end.peer.as_deref() == Some(peer.as_str()))
+            .collect();
+        assert_eq!(bound.len(), 1, "阀门入口还有一段连着：{table:?}");
+        assert_eq!(bound[0].end.point, [134.0, 0.0], "终点还是原管段的终点");
+        assert_eq!(bound[0].start.peer, None, "打断那一侧不连");
+        let record = table
+            .fittings
+            .iter()
+            .find(|fitting| fitting.handle == valve)
+            .unwrap();
+        assert_eq!(
+            record.ports[VALVE_PORT_NAMES[0]].as_deref(),
+            Some(bound[0].handle.as_str()),
+            "阀门记录指着连着它的那段"
+        );
     }
 
     /// 打断点不在任何管段上时拒绝，且不新增实体、不动拓扑表。

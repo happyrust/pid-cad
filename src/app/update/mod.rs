@@ -243,6 +243,11 @@ impl OpenCADStudio {
             self.pending_close = None;
             self.save_dialog_for_unsaved = false;
         }
+        // Closing the question about steps not synced is its 取消.
+        if self.active_modal == Some(CollabUnsynced) {
+            self.unsynced_question = None;
+            self.pending_tab_closes.clear();
+        }
         if self.active_modal == Some(BlockEditorSettings) {
             self.block_editor_settings = None;
         }
@@ -679,6 +684,9 @@ impl OpenCADStudio {
         if self.collab.tags_wanted.is_some() {
             self.answer_collab_tags();
         }
+        // Here, not on a frame tick: ticks come only while something on
+        // screen moves, and not at all without a window.
+        self.read_queued_inverses();
         // A drawing that took the tags of its backup's database after it
         // was shown has its Properties panel read anew once it is in front.
         #[cfg(not(target_arch = "wasm32"))]
@@ -1455,6 +1463,12 @@ impl OpenCADStudio {
                             "协同：已连接 {}（会话 {session_id}）",
                             super::collab::shown_address(&self.collab.server_url)
                         ));
+                        // A connection that does not take the drawing as the
+                        // room's says why, and what to do about it
+                        // (`REQ-COLL-015` acceptance 3).
+                        if let Some(apart) = &self.collab.not_aligned {
+                            self.command_line.push_warning(&apart.said());
+                        }
                         // The first live session brings the panel out where the
                         // layout has it: a claim is only useful if the roster
                         // and the held tags are on screen. Once only, so a
@@ -1483,9 +1497,22 @@ impl OpenCADStudio {
                             ));
                         }
                     }
-                    super::collab::CollabEvent::OpApplied { revision, .. } => {
+                    // Not said on a connection held apart: the drawing did
+                    // not move.
+                    super::collab::CollabEvent::OpApplied { revision, .. }
+                        if self.collab.not_aligned.is_none() =>
+                    {
                         self.command_line
                             .push_info(&format!("协同：修订已推进到 {revision}"));
+                    }
+                    // The room neither took the step nor judged it: it stays
+                    // queued, and the person is told why.
+                    super::collab::CollabEvent::OpRefused { code, .. }
+                        if code == ocs_collab::protocol::codes::NOT_ALIGNED =>
+                    {
+                        if let Some(apart) = &self.collab.not_aligned {
+                            self.command_line.push_warning(&apart.said());
+                        }
                     }
                     // Said to everybody, and plainly: for the two who wrote,
                     // this is the only word that their write did not take
@@ -2319,7 +2346,10 @@ impl OpenCADStudio {
                 }
                 #[cfg(target_arch = "wasm32")]
                 let loaded_name = name.clone();
+                let opened = path.clone();
                 let task = self.on_file_opened(name, path, doc, caches, ifccad_session);
+                // PIDLOCATE opened this drawing to select a tag on it.
+                self.on_pid_locate_opened(open_id, &opened);
                 #[cfg(target_arch = "wasm32")]
                 if crate::io::host_bridge::is_embed_mode() {
                     crate::io::host_bridge::emit_loaded(&loaded_name);
@@ -2361,6 +2391,8 @@ impl OpenCADStudio {
                 if self.opening.as_ref().map(|opening| opening.id) != Some(open_id) {
                     return Task::none();
                 }
+                // PIDLOCATE was waiting for this drawing to select a tag on it.
+                self.on_pid_locate_open_failed(open_id);
                 #[cfg(not(target_arch = "wasm32"))]
                 if self
                     .opening
@@ -5061,6 +5093,7 @@ impl OpenCADStudio {
             }
             #[cfg(not(target_arch = "wasm32"))]
             Message::PidBackup(m) => self.on_pid_backup(m),
+            Message::PidIndexRead(scan, read) => self.on_pid_index_read(scan, read),
 
             // Web SCRIPT: the picked .scr file arrived — run it through the
             // same runner the native path feeds.
@@ -14480,6 +14513,8 @@ impl OpenCADStudio {
             Message::UnsavedDialogDiscard => self.on_unsaved_dialog_discard(),
 
             Message::UnsavedDialogSave => self.on_unsaved_dialog_save(),
+            Message::CollabUnsyncedLeave => self.on_unsynced_leave(),
+            Message::CollabUnsyncedCancel => self.on_unsynced_cancel(),
             Message::BlockEditChangesSave => self.resolve_block_edit_close(true),
             Message::BlockSaveAsName(name) => {
                 let i = self.active_tab;

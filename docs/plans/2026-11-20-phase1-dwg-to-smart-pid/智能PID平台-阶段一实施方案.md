@@ -523,27 +523,31 @@ flowchart LR
 - **验收**：每次写出后索引自检通过（无悬挂引用、无重复 OID）；新增对象后重读，引用图与表项齐全。
 - **解决记录（2026-11-21）**：落地 `src/io/pid_write/{oid,index}.rs`（`SeedOidPool`、`apply_increments_to_seed` 与 `verify_package_index_consistency`），完整同步链头 `live_record_count`、`0x0081 JSheetLayer` `+12` 对象计数、`/JSitesList` 与 `/PSMspacemap/*` 反向入边槽（`190`/`181`/`182`），自检 100% 通过且能拦截故意注入的越界悬挂引用，详见 `readings.md` §18。
 
-#### L5-6 往返验证（M）
+#### L5-6 往返验证（M）— **已完成（[#130](https://github.com/happyrust/pid-cad/issues/130)）**
 - **做法**：写出 → `pid-parse` 重读相等；本软件显示与参考一致；PDF 对比三项指标。
 - **验收**：三类验证都有读数；退化即失败。
+- **解决记录（2026-11-21）**：落地 `src/io/pid_convert/export.rs::verify_dual_bundle`；在合成图与全部 `90 / 90` 张真实导出 DXF 生成的 `.pid` 上，`a` 级（`PidParser` 重读 `297,226` 条归一化实体 + `verify_package_index_consistency` 零故障）与 `b` 级（`io::load_file` 重载 `123,948` 个 CAD 实体 + `pid_pdf::plot_pdf` 写出 `90` 份有效 PDF，页内图元 `76,711`）全部一次通过，详见 `readings.md` §19。
 
 #### L5-7 SPPID 打开验证（M）
 - **做法**：把我们生成的 `.pid` 放进验收环境，用运行器 `open`；记录成功/报错；对报错归类（登记问题/内容问题）。
 - **验收**：至少一张图能打开（c1）；不能打开的写明原因分类。
 - **依赖**：L5-6、LX-4。**资料**：RES-06 ⚠（缺则本任务只能标"未执行"）。
+- **现状说明**：当前环境未配置受控 SPPID 运行器（`OCS_PID_SPPID_RUNNER` 未设），按规程标为「未执行 / SPPID 原生打开 `c1` 未验证」。
 
-#### L5-8 最小闭环（M）
+#### L5-8 最小闭环（M）— **本地 `a/b` 与三关静态预检已完成（[#130](https://github.com/happyrust/pid-cad/issues/130)）**
 - **做法**：一张简单图从 DWG 出发：识别 → 最小模型 → XML 与 `.pid` → 预检三关 → 送测。
 - **验收**：三关预检结果齐备；第一轮送测有回执；覆盖报告列出缺失项。
 - **依赖**：L5-7、L3-0。**资料**：RES-02 ✔、RES-06 ⚠。
+- **解决记录（2026-11-21）**：打通单图/批量 `DWG/DXF -> _Data.xml + _Meta.xml + .pid + _Coverage.json` 全链路，跨文件 `GraphicOID` / `ModelID` / `DrawingID` / `_SPID` 100% 严格相等，XML 过 `StrictVendor` 零违规（外部送测回执待 `RES-06`/`RES-15` 到位后执行），详见 `readings.md` §19。
 
-#### L5-9 扩到整批（M）
+#### L5-9 扩到整批（M）— **已完成（[#130](https://github.com/happyrust/pid-cad/issues/130)）**
 - **做法**：按批次逐图跑；按失败类型分组修复。
 - **验收**：整批写出成功率与失败原因分类；不达标的逐图列出。
+- **解决记录（2026-11-21）**：90 张有效非空真实 DXF 整批双产物写出 **`90 / 90` 成功（失败 `0`）**，总耗时 `148.9 s`（`1.65 s/图`），`42,861 / 42,861` 图元表示跨文件 100% 对齐，详见 `readings.md` §19。
 
 ### 7.7 L6 整合与总验收
 
-- **L6-1 批量转换命令（M）**：一条命令跑完整批，产出 XML、`.pid`、覆盖报告与汇总；退出码反映成败。
+- **L6-1 批量转换命令（M）— 已完成（[#130](https://github.com/happyrust/pid-cad/issues/130)）**：`examples/pid_convert.rs` 支持 `--seed-pid`、`--sym-dir`、`--verify-plot` 与 `--summary-json`，一条命令跑完整批并产出 XML、`.pid`、可选验证 PDF、覆盖报告与汇总 JSON，退出码严格反映成败（见 `readings.md` §19）。
 - **L6-2 交互编辑后保存回 `.pid`（M）**：编辑 → 保存 → 重读 → SPPID 打开，全链路。
 - **L6-3 总验收（M）**：整批跑通；出验收报告（对照第 3 节五条口径）；附外部平台回执。
 

@@ -268,15 +268,9 @@ async fn drawing_state(
         );
     };
 
-    // Switching state is 授权配置 in the role matrix.
-    let active_editors = active_editors_on(&state, &drawing_id).await;
-    match perm::evaluate(
-        &store,
-        &user_id,
-        &drawing_id,
-        Operation::ConfigureAuthorization.as_str(),
-        &active_editors,
-    ) {
+    // Switching state is 授权配置, judged without the state tier: a 只读
+    // drawing switches back, and a 单人编辑 one unlocks while held.
+    match perm::evaluate_state_switch(&store, &user_id, &drawing_id) {
         Ok(outcome) if outcome.decision.allowed => {}
         Ok(outcome) => return (outcome.status, Json(decision_json(&outcome))).into_response(),
         Err(err) => return perm_error_response(&err),
@@ -1367,6 +1361,48 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// REQ-COLL-004 acceptance 3: a 只读 drawing switches back to 协同编辑,
+    /// after which a write by somebody with 编辑 is no longer a state denial.
+    #[tokio::test]
+    async fn a_readonly_drawing_switches_back_to_collaborative() {
+        let state = seeded_state();
+        let store = state.store.clone().expect("store");
+        assert_eq!(switch_state(&state, "只读").await, StatusCode::OK);
+        let refused = perm::evaluate(&store, "u-proc", "d-a1-coop", "编辑图纸", &[]).expect("evaluate");
+        assert_eq!(refused.decision.code.as_deref(), Some(codes::PERM_DENIED_STATE));
+
+        assert_eq!(switch_state(&state, "协同编辑").await, StatusCode::OK);
+        let (_, stored, _) = store
+            .drawing("d-a1-coop")
+            .expect("lookup")
+            .expect("exists");
+        assert_eq!(stored, "协同编辑");
+        let allowed = perm::evaluate(&store, "u-proc", "d-a1-coop", "编辑图纸", &[]).expect("evaluate");
+        assert!(allowed.decision.allowed);
+    }
+
+    /// REQ-COLL-004 rule 1: somebody else's live session on a 单人编辑
+    /// drawing does not stop it being unlocked.
+    #[tokio::test]
+    async fn a_locked_drawing_unlocks_while_somebody_else_edits_it() {
+        let state = seeded_state();
+        let store = state.store.clone().expect("store");
+        assert_eq!(switch_state(&state, "单人编辑").await, StatusCode::OK);
+        let (_holder, _rx) = live_session(&state, "u-proc", "协同编辑", ocs_collab::now_unix()).await;
+        assert_eq!(
+            active_editors_on(&state, "d-a1-coop").await.len(),
+            1,
+            "u-proc holds the drawing"
+        );
+
+        assert_eq!(switch_state(&state, "协同编辑").await, StatusCode::OK);
+        let (_, stored, _) = store
+            .drawing("d-a1-coop")
+            .expect("lookup")
+            .expect("exists");
+        assert_eq!(stored, "协同编辑");
     }
 
     #[tokio::test]

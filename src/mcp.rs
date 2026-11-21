@@ -60,8 +60,12 @@ const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 /// Atomic entity common-property writes and direct DGN import joined execute.
 /// Fresh xref reads joined the read facade; six direct-reference lifecycle
 /// writes joined execute with operation-local unknown-field rejection.
+/// The P&ID master-data read (`pid_masterdata`, with `usage`) joined the read
+/// facade and its whole-replacement write (`pid_masterdata_set`) execute.
+/// The P&ID project-index reads (`pid_summary`, and `pid_index` with `tag`
+/// and `type_code`) joined the read facade and `pid_locate` execute.
 #[cfg(test)]
-const TOOL_SCHEMA_DIGEST: &str = "33eb144ea5c5e0b9624dc916161da78fef2a299c2ab010a0e48338744d725de8";
+const TOOL_SCHEMA_DIGEST: &str = "d5a85cb18f22d881ed5e4153cf53008d11160f23456122ab53e294eb0aa3954b";
 const MAX_REQUEST: usize = 1_048_576;
 const MAX_RESPONSE: u64 = 16 * 1024 * 1024;
 const CACHE_TTL_MS: u64 = 3_600_000;
@@ -88,6 +92,9 @@ const READ_OPS: &[&str] = &[
     "properties",
     "measure",
     "pid_legend",
+    "pid_masterdata",
+    "pid_summary",
+    "pid_index",
     "snap",
     "grips",
     "history",
@@ -159,6 +166,8 @@ const EXECUTE_OPS: &[&str] = &[
     "layout_activate",
     "layout_delete",
     "page_setup_set",
+    "pid_masterdata_set",
+    "pid_locate",
     "file_identity",
     "save",
     "save_verified",
@@ -2570,7 +2579,7 @@ pub(crate) fn tool_definitions() -> Value {
         {
             "name":"ocs_read",
             "description":"Use entity_schema with parameters.type for creation fields/examples; omit type to list. Use validate with parameters.request to check an execute request without running it (no live document checks). Use guide with parameters.name to read workflow, architecture, capture or batch-bindings guidance (omit name to list). Discover capabilities and record schemas, or read state, P&ID recognition, complete database records, command manifests, entities, blocks (semantic block instances with attributes, definition tags and dynamic properties), properties, kernel measurements and spatial relationships, history, events or operation status from a live OCS session. Use batch_result with parameters.request_id to retrieve retained batch details without executing steps; available only in the originating MCP connection, for up to 64 retained batches per session.",
-            "inputSchema":{"type":"object","properties":{"ocs_session_id":{"type":"string","minLength":1,"description":"Value of session_id returned by ocs_sessions."},"op":{"type":"string","enum":READ_OPS,"default":"state"},"parameters":{"type":"object","description":"Operation-specific filters.","properties":{"layout":{"type":"string","minLength":1,"description":"Layout name for op: page_setup_get."},"request":{"type":"object","description":"Execute request to preflight without dispatch. request_id may be omitted. Batch bindings are checked structurally; result-dependent values require execution."},"name":{"type":"string","description":"Command name, block name/glob, or record name."},"names":{"type":"array","items":{"type":"string"},"description":"Block name or wildcard glob filters (e.g. ['*'], ['DOOR*']) for op: blocks."},"extract_attributes":{"type":"boolean","default":true,"description":"Extract ATTRIB values, ATTDEF defaults, and visible definition text tags (e.g. TAG, DIMS) for op: blocks."},"extract_dynamic_properties":{"type":"boolean","default":true,"description":"Extract dynamic block parameters, visibility states, and lookup values for op: blocks."},"include_anonymous":{"type":"boolean","default":false,"description":"Include unlinked internal anonymous blocks (*U..., *D..., *T...) in op: blocks."},"search":{"type":"string","description":"Case-insensitive command or record-type search."},"what":{"type":"string","enum":["recognise","report"],"description":"For pid_legend: return structured recognition, optionally with report lines."},"find":{"type":"string","description":"Text query string for text_search."},"match_case":{"type":"boolean","default":false,"description":"Case-sensitive text search."},"whole_word":{"type":"boolean","default":false,"description":"Match only whole words."},"ignore_accents":{"type":"boolean","description":"Ignore accents/diacritics in text (defaults to true when match_case is false)."},"scope":{"type":"string","enum":["all","active_space","blocks"],"default":"all","description":"Text search scope."},"system_spellcheck":{"type":"boolean","default":false,"description":"Use native OS spell-checker (Windows, macOS, Linux)."},"language":{"type":"string","description":"Language tag for spell-checker (e.g. 'fr-FR', 'en-US', 'de-DE', 'es-ES')."},"suggest":{"type":"boolean","default":true,"description":"Include suggested corrections for misspelled words."},"check_terms":{"type":"array","items":{"type":"string"},"description":"List of terms or suspect misspellings to flag in text_audit."},"dictionary":{"type":"array","items":{"type":"string"},"description":"Known valid words for text_audit dictionary check."},"pairs":{"type":"array","description":"Find/replace pairs for dry-run simulation in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"dry_run_pairs":{"type":"array","description":"Alias for pairs in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"document_id":{"type":"integer","minimum":0},"path":{"type":"string","description":"Optional intended output path for audit; extension determines target format."},"target_format":{"type":"string","enum":["dwg","dxf"],"description":"Intended output format for audit."},"target_version":{"type":"string","enum":["R14","2000","2004","2007","2010","2013","2018","AC1014","AC1015","AC1018","AC1021","AC1024","AC1027","AC1032"],"description":"Intended CAD output version for audit."},"collection":{"type":"string","description":"Record collection, all for records, or omit to discover collections and schema types."},"handle":{"type":"string"},"handles":{"type":"array","items":{"type":"string"},"description":"Exact entity or record handles."},"type":{"type":"string","description":"Entity or record type filter; for record_schema, returns its complete type graph and writable field paths."},"layer":{"type":"string","description":"Layer name filter for query; * and ? are wildcards."},"xdata_app":{"type":"string","description":"Only entities carrying XDATA of this application (query)."},"detail":{"type":"string","enum":["summary","geometry","full"],"default":"geometry","description":"Entity detail returned by query."},"fields":{"type":"array","items":{"type":"string"},"description":"Return only these entity fields plus handle."},"paths":{"type":"array","items":{"type":"string"},"description":"Project RFC 6901 JSON Pointer paths relative to record.properties."},"where":{"type":"array","description":"All property filters must match.","items":{"type":"object","properties":{"path":{"type":"string"},"op":{"type":"string","enum":["eq","ne","lt","lte","gt","gte","contains","starts_with","ends_with","in","exists","not_exists"],"default":"eq"},"value":{}},"required":["path"],"additionalProperties":false}},"near":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Rank planar curves by exact kernel distance to this world XY point."},"point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"World point whose object snap the snap op reports."},"from":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Base point for perpendicular and tangent snaps (snap op)."},"contains_point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Return closed planar curves containing this world XY point."},"bounds":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Filter entities whose world XY bounds overlap [min_x,min_y,max_x,max_y]."},"intersections":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":2,"description":"Return exact kernel intersections between two planar curve handles."},"after":{"type":"integer","minimum":0,"description":"Event cursor."},"request_id":{"type":"string","description":"Operation id to query."},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":10000}},"additionalProperties":false}},"anyOf":[{"required":["ocs_session_id"]},{"required":["op"],"properties":{"op":{"enum":["guide","entity_schema","validate"]}}}],"additionalProperties":false},
+            "inputSchema":{"type":"object","properties":{"ocs_session_id":{"type":"string","minLength":1,"description":"Value of session_id returned by ocs_sessions."},"op":{"type":"string","enum":READ_OPS,"default":"state"},"parameters":{"type":"object","description":"Operation-specific filters.","properties":{"layout":{"type":"string","minLength":1,"description":"Layout name for op: page_setup_get."},"request":{"type":"object","description":"Execute request to preflight without dispatch. request_id may be omitted. Batch bindings are checked structurally; result-dependent values require execution."},"name":{"type":"string","description":"Command name, block name/glob, or record name."},"names":{"type":"array","items":{"type":"string"},"description":"Block name or wildcard glob filters (e.g. ['*'], ['DOOR*']) for op: blocks."},"extract_attributes":{"type":"boolean","default":true,"description":"Extract ATTRIB values, ATTDEF defaults, and visible definition text tags (e.g. TAG, DIMS) for op: blocks."},"extract_dynamic_properties":{"type":"boolean","default":true,"description":"Extract dynamic block parameters, visibility states, and lookup values for op: blocks."},"include_anonymous":{"type":"boolean","default":false,"description":"Include unlinked internal anonymous blocks (*U..., *D..., *T...) in op: blocks."},"search":{"type":"string","description":"Case-insensitive command or record-type search."},"what":{"type":"string","enum":["recognise","report"],"description":"For pid_legend: return structured recognition, optionally with report lines."},"usage":{"type":"boolean","default":false,"description":"For pid_masterdata: also count, per master-data entry, the objects on the drawing that use it."},"tag":{"type":"string","minLength":1,"description":"For pid_index: also list every place in the project this tag is on (places); case-insensitive."},"type_code":{"type":"string","minLength":1,"description":"For pid_index with tag: only objects of this type code."},"find":{"type":"string","description":"Text query string for text_search."},"match_case":{"type":"boolean","default":false,"description":"Case-sensitive text search."},"whole_word":{"type":"boolean","default":false,"description":"Match only whole words."},"ignore_accents":{"type":"boolean","description":"Ignore accents/diacritics in text (defaults to true when match_case is false)."},"scope":{"type":"string","enum":["all","active_space","blocks"],"default":"all","description":"Text search scope."},"system_spellcheck":{"type":"boolean","default":false,"description":"Use native OS spell-checker (Windows, macOS, Linux)."},"language":{"type":"string","description":"Language tag for spell-checker (e.g. 'fr-FR', 'en-US', 'de-DE', 'es-ES')."},"suggest":{"type":"boolean","default":true,"description":"Include suggested corrections for misspelled words."},"check_terms":{"type":"array","items":{"type":"string"},"description":"List of terms or suspect misspellings to flag in text_audit."},"dictionary":{"type":"array","items":{"type":"string"},"description":"Known valid words for text_audit dictionary check."},"pairs":{"type":"array","description":"Find/replace pairs for dry-run simulation in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"dry_run_pairs":{"type":"array","description":"Alias for pairs in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"document_id":{"type":"integer","minimum":0},"path":{"type":"string","description":"Optional intended output path for audit; extension determines target format."},"target_format":{"type":"string","enum":["dwg","dxf"],"description":"Intended output format for audit."},"target_version":{"type":"string","enum":["R14","2000","2004","2007","2010","2013","2018","AC1014","AC1015","AC1018","AC1021","AC1024","AC1027","AC1032"],"description":"Intended CAD output version for audit."},"collection":{"type":"string","description":"Record collection, all for records, or omit to discover collections and schema types."},"handle":{"type":"string"},"handles":{"type":"array","items":{"type":"string"},"description":"Exact entity or record handles."},"type":{"type":"string","description":"Entity or record type filter; for record_schema, returns its complete type graph and writable field paths."},"layer":{"type":"string","description":"Layer name filter for query; * and ? are wildcards."},"xdata_app":{"type":"string","description":"Only entities carrying XDATA of this application (query)."},"detail":{"type":"string","enum":["summary","geometry","full"],"default":"geometry","description":"Entity detail returned by query."},"fields":{"type":"array","items":{"type":"string"},"description":"Return only these entity fields plus handle."},"paths":{"type":"array","items":{"type":"string"},"description":"Project RFC 6901 JSON Pointer paths relative to record.properties."},"where":{"type":"array","description":"All property filters must match.","items":{"type":"object","properties":{"path":{"type":"string"},"op":{"type":"string","enum":["eq","ne","lt","lte","gt","gte","contains","starts_with","ends_with","in","exists","not_exists"],"default":"eq"},"value":{}},"required":["path"],"additionalProperties":false}},"near":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Rank planar curves by exact kernel distance to this world XY point."},"point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"World point whose object snap the snap op reports."},"from":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Base point for perpendicular and tangent snaps (snap op)."},"contains_point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Return closed planar curves containing this world XY point."},"bounds":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Filter entities whose world XY bounds overlap [min_x,min_y,max_x,max_y]."},"intersections":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":2,"description":"Return exact kernel intersections between two planar curve handles."},"after":{"type":"integer","minimum":0,"description":"Event cursor."},"request_id":{"type":"string","description":"Operation id to query."},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":10000}},"additionalProperties":false}},"anyOf":[{"required":["ocs_session_id"]},{"required":["op"],"properties":{"op":{"enum":["guide","entity_schema","validate"]}}}],"additionalProperties":false},
             "outputSchema":read_output_schema(),
             "title":"Read OCS state","annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
         },
@@ -5363,6 +5372,103 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert!(result["tools"].is_array());
         assert!(result["instructions"].is_string());
+    }
+
+    /// The P&ID master-data read (`pid_masterdata`, with `usage`) is on the
+    /// read facade and its whole-replacement write on the execute facade,
+    /// whose parameters are checked before dispatch.
+    #[test]
+    fn pid_master_data_ops_are_on_the_facades() {
+        assert!(READ_OPS.contains(&"pid_masterdata"));
+        assert!(EXECUTE_OPS.contains(&"pid_masterdata_set"));
+        let tools = tool_definitions();
+        assert_eq!(
+            tools[1]["inputSchema"]["properties"]["parameters"]["properties"]["usage"]["type"],
+            "boolean"
+        );
+        let master_data = json!({
+            "version": 1,
+            "revision": 0,
+            "updated_at": 0,
+            "nominal_diameters": { "unit": "mm", "items": [] },
+            "pipe_classes": [],
+            "insulation_classes": [],
+            "fluid_codes": [],
+            "pbs": []
+        });
+        let write = json!({
+            "op": "pid_masterdata_set",
+            "request_id": "md-1",
+            "target": "drawing",
+            "master_data": master_data,
+            "expected_revision": 3
+        });
+        assert!(
+            crate::mcp_ops::validate_request(&write, false).is_ok(),
+            "{write}"
+        );
+        for refused in [
+            json!({ "op": "pid_masterdata_set", "request_id": "md-2" }),
+            json!({
+                "op": "pid_masterdata_set",
+                "request_id": "md-3",
+                "target": "disk",
+                "master_data": master_data
+            }),
+            json!({
+                "op": "pid_masterdata_set",
+                "request_id": "md-4",
+                "expected_rev": 3,
+                "master_data": master_data
+            }),
+        ] {
+            assert!(
+                crate::mcp_ops::validate_request(&refused, false).is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    /// The P&ID project-index reads (`pid_summary`, and `pid_index` with
+    /// `tag` and `type_code`) are on the read facade and `pid_locate` on the
+    /// execute facade, whose parameters are checked before dispatch. Going to
+    /// a tag may open a drawing, so it is not a batch step.
+    #[test]
+    fn pid_index_ops_are_on_the_facades() {
+        assert!(READ_OPS.contains(&"pid_summary"));
+        assert!(READ_OPS.contains(&"pid_index"));
+        assert!(EXECUTE_OPS.contains(&"pid_locate"));
+        let tools = tool_definitions();
+        let parameters = &tools[1]["inputSchema"]["properties"]["parameters"]["properties"];
+        assert_eq!(parameters["tag"]["type"], "string");
+        assert_eq!(parameters["type_code"]["type"], "string");
+        let locate = json!({
+            "op": "pid_locate",
+            "request_id": "ix-1",
+            "tag": "P-1001",
+            "type_code": "EQUIPMENT",
+            "drawing_id": "PID-1102",
+            "at": [120.0, 80.0]
+        });
+        assert!(
+            crate::mcp_ops::validate_request(&locate, false).is_ok(),
+            "{locate}"
+        );
+        for refused in [
+            json!({ "op": "pid_locate", "request_id": "ix-2" }),
+            json!({ "op": "pid_locate", "request_id": "ix-3", "tag": "P-1001", "at": [1.0] }),
+            json!({ "op": "pid_locate", "request_id": "ix-4", "tag": "P-1001", "drawing": "PID-1102" }),
+        ] {
+            assert!(
+                crate::mcp_ops::validate_request(&refused, false).is_err(),
+                "{refused}"
+            );
+        }
+        let step = json!({ "op": "pid_locate", "tag": "P-1001" });
+        assert!(
+            crate::mcp_ops::validate_request(&step, true).is_err(),
+            "{step}"
+        );
     }
 
     #[test]

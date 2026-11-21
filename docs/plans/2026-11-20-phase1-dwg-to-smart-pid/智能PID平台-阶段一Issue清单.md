@@ -783,6 +783,7 @@
 **缺资料。** RES-02 ✔。
 
 **对应任务。** L5-6（M）
+**状态与解决记录。** **已完成（2026-11-21，[#130](https://github.com/happyrust/pid-cad/issues/130)）**：落地 `src/io/pid_convert/export.rs::verify_dual_bundle`，对 90 张真实 DXF 生成的 `.pid` 逐份完成跨文件 `GraphicOID`/`ModelID`/`DrawingID`/`_SPID` 100% 核对、`a` 级重读索引自检与 `b` 级本仓重载 + `pid-plot` PDF 出图验证，详见 `readings.md` §19。
 
 ---
 
@@ -826,6 +827,7 @@
 **缺资料。** RES-02 ✔、RES-06 ⚠。
 
 **对应任务。** L5-8（M）
+**状态与解决记录。** **本地双产物与 `a/b` 预检已完成（2026-11-21，[#130](https://github.com/happyrust/pid-cad/issues/130)）**：已打通 `DWG/DXF -> _Data.xml + _Meta.xml + .pid + _Coverage.json` 闭环并通过 `StrictVendor` 零违规及 `a/b` 级核验；受控 SPPID 原生打开 `c1` 因未配置运行器明确标注「SPPID 未验证」，详见 `readings.md` §19。
 
 ---
 
@@ -843,6 +845,7 @@
 **缺资料。** RES-02 ✔。
 
 **对应任务。** L5-9（M）
+**状态与解决记录。** **已完成（2026-11-21，[#130](https://github.com/happyrust/pid-cad/issues/130)）**：90 张有效非空真实 DXF 整批双产物写出 `90 / 90` 成功（失败 `0`，耗时 `148.9 s`），`42,861 / 42,861` 图元表示跨文件 100% 对齐，详见 `readings.md` §19。
 
 ---
 
@@ -1112,6 +1115,7 @@
 - 整批可重复跑；汇总数字与逐图结果一致。
 
 **对应任务。** L6-1（M）
+**状态与解决记录。** **已完成（2026-11-21，[#130](https://github.com/happyrust/pid-cad/issues/130)）**：`examples/pid_convert.rs` 新增 `--seed-pid`、`--sym-dir`、`--verify-plot`，一条命令完成整批双产物导出与汇总 JSON 产出，退出码严格反映成败，详见 `readings.md` §19。
 
 ### ISSUE-L6-2 交互编辑后存回 `.pid` 没打通
 
@@ -1182,8 +1186,8 @@
 | `ISSUE-L4-4 / L4-5` | [#126](https://github.com/happyrust/pid-cad/issues/126) | `done-local`（本地已完成） | 提交 `1afee04eb`：落地 `src/io/pid_publish/{names,relations}.rs`，公称直径 `100%`、仪表 `99.48%`、设备 `99.14%`，管网拓扑合成零违规，见 `readings.md` §15 |
 | `ISSUE-L4-6 / L4-7` | [#127](https://github.com/happyrust/pid-cad/issues/127) | `done-local`（本地已完成 · L4 全线收官） | 提交 `477b08b61`：落地 `src/io/pid_convert/export.rs`、`examples/pid_convert.rs`、`assets/pid-xml-diff-allowlist.json` 与 `convert_check.py`；90 图整批转换 `180` 份 XML 零违规、白名单外零未解释差异，见 `readings.md` §16 |
 | `ISSUE-L5-1 / L5-3` | [#128](https://github.com/happyrust/pid-cad/issues/128) | `done-local`（本地已完成） | 提交 `c851fa214`：落地 `src/io/pid_write/{mod,surface,seed,verify}.rs`，10 份空白模板种子流级零差异往返 + 第 2 节 `_SPID` 同步，见 `readings.md` §17 |
-| `ISSUE-L5-4 / L5-5` | [#129](https://github.com/happyrust/pid-cad/issues/129) | `done-local`（本地已完成） | 落地 `src/io/pid_write/{oid,records,index}.rs`，五族记录编码 + Q9 五步索引同步自检全过，见 `readings.md` §18 |
-| `ISSUE-L5-6 / L5-8 / L6-1` | [#130](https://github.com/happyrust/pid-cad/issues/130) | `in-progress`（进行中） | DWG/DXF 一键双产物转换（XML + `.pid`）及 `a/b` 级验证 |
-| `ISSUE-L1-2 / L1-5` | [#131](https://github.com/happyrust/pid-cad/issues/131) | `phase1`（已建单待推进） | 94 张真实 `.pid` 批量打开性能与渲染出图对参考 PDF 扩面对比报告 |
+| `ISSUE-L5-4 / L5-5` | [#129](https://github.com/happyrust/pid-cad/issues/129) | `done-local`（本地已完成） | 提交 `4e115a2f8`：落地 `src/io/pid_write/{oid,records,index}.rs`，五族记录编码 + Q9 五步索引同步自检全过，见 `readings.md` §18 |
+| `ISSUE-L5-6 / L5-8 / L5-9 / L6-1` | [#130](https://github.com/happyrust/pid-cad/issues/130) | `done-local`（本地已完成） | 扩展 `src/io/pid_publish/uid.rs`、`src/io/pid_convert/export.rs` 与 `examples/pid_convert.rs`；90 图双产物 `42,861/42,861` 100% 对齐、全过 `a/b` 级验证，见 `readings.md` §19 |
+| `ISSUE-L1-2 / L1-5` | [#131](https://github.com/happyrust/pid-cad/issues/131) | `in-progress`（进行中） | 94 张真实 `.pid` 批量打开性能与渲染出图对参考 PDF 扩面对比报告 |
 | `.sym` 预览（关联） | [#116](https://github.com/happyrust/pid-cad/issues/116) | 暂缓（避让并行分支） | 待 `pid-symbol-identity` 合入 `main` 后实施 |
 | 分级表可观测性（关联） | [#117](https://github.com/happyrust/pid-cad/issues/117) | 待定范围 | 与 `L4-2` / `L0-9` 衔接，建议先做第 1 步表外计数输出 |

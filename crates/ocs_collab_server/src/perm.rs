@@ -4,13 +4,14 @@
 //! the drawing's state, the whole PBS ACL tree — runs [`decide`], and adds
 //! the two things the pure chain cannot know about: live editing sessions
 //! (the second half of the 单人编辑 rule) and the contract's root-first
-//! `effective_node_path`.
+//! `effective_node_path`. [`evaluate_state_switch`] runs the first two tiers
+//! only, for switching a drawing's state.
 
 use axum::http::StatusCode;
 use ocs_collab::protocol::codes;
 use ocs_collab::{
-    decide, AclEntry, AclNode, AclPermission, DenialLevel, DrawingState, Operation,
-    PermissionDecision, PermissionRequest, Role,
+    decide, decide_without_state, AclEntry, AclNode, AclPermission, DenialLevel, DrawingState,
+    Operation, PermissionDecision, PermissionRequest, Role,
 };
 
 use crate::store::Store;
@@ -144,30 +145,9 @@ pub fn evaluate(
     active_editors: &[(String, String)],
 ) -> Result<EvalOutcome, PermError> {
     let operation = Operation::parse(operation).ok_or(PermError::UnknownOperation)?;
-
-    let (role_text, _company) = store
-        .user_role(user_id)
-        .map_err(PermError::Store)?
-        .ok_or(PermError::UnknownSubject)?;
-    let role = Role::parse(&role_text).ok_or(PermError::UnknownSubject)?;
-
-    let (node_id, state_text, _revision) = store
-        .drawing(drawing_id)
-        .map_err(PermError::Store)?
-        .ok_or(PermError::UnknownDrawing)?;
-    let drawing_state =
-        DrawingState::parse(&state_text).ok_or_else(|| PermError::InvalidState(state_text.clone()))?;
-
-    let nodes = load_acl_tree(store).map_err(PermError::Store)?;
-    let request = PermissionRequest {
-        user_id,
-        role,
-        operation,
-        drawing_state,
-        node_id: &node_id,
-        nodes: &nodes,
-    };
-    let mut decision = decide(&request);
+    let inputs = Inputs::load(store, user_id, drawing_id)?;
+    let drawing_state = inputs.drawing_state;
+    let mut decision = decide(&inputs.request(user_id, operation));
 
     // The second half of the state tier: 单人编辑 admits exactly one live
     // editing session. The chain knows nothing about sessions, so the check
@@ -205,6 +185,73 @@ pub fn evaluate(
         status,
         holder,
     })
+}
+
+/// Runs the role and PBS tiers only, for switching `drawing_id`'s state: the
+/// state the drawing is in does not limit the switch (REQ-COLL-004 rule 1),
+/// so neither 只读 nor somebody else's session on a 单人编辑 drawing refuses it.
+pub fn evaluate_state_switch(
+    store: &Store,
+    user_id: &str,
+    drawing_id: &str,
+) -> Result<EvalOutcome, PermError> {
+    let inputs = Inputs::load(store, user_id, drawing_id)?;
+    let decision = decide_without_state(&inputs.request(user_id, Operation::ConfigureAuthorization));
+    let status = if decision.allowed {
+        StatusCode::OK
+    } else {
+        StatusCode::FORBIDDEN
+    };
+    Ok(EvalOutcome {
+        decision,
+        status,
+        holder: None,
+    })
+}
+
+/// What the chain reads out of SQLite for one `(user_id, drawing_id)`.
+struct Inputs {
+    role: Role,
+    node_id: String,
+    drawing_state: DrawingState,
+    nodes: Vec<AclNode>,
+}
+
+impl Inputs {
+    /// The user first, then the drawing, then the ACL tree.
+    fn load(store: &Store, user_id: &str, drawing_id: &str) -> Result<Inputs, PermError> {
+        let (role_text, _company) = store
+            .user_role(user_id)
+            .map_err(PermError::Store)?
+            .ok_or(PermError::UnknownSubject)?;
+        let role = Role::parse(&role_text).ok_or(PermError::UnknownSubject)?;
+
+        let (node_id, state_text, _revision) = store
+            .drawing(drawing_id)
+            .map_err(PermError::Store)?
+            .ok_or(PermError::UnknownDrawing)?;
+        let drawing_state = DrawingState::parse(&state_text)
+            .ok_or_else(|| PermError::InvalidState(state_text.clone()))?;
+
+        let nodes = load_acl_tree(store).map_err(PermError::Store)?;
+        Ok(Inputs {
+            role,
+            node_id,
+            drawing_state,
+            nodes,
+        })
+    }
+
+    fn request<'a>(&'a self, user_id: &'a str, operation: Operation) -> PermissionRequest<'a> {
+        PermissionRequest {
+            user_id,
+            role: self.role,
+            operation,
+            drawing_state: self.drawing_state,
+            node_id: &self.node_id,
+            nodes: &self.nodes,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -600,6 +647,35 @@ mod tests {
         assert!(!after.decision.allowed);
         assert_eq!(after.decision.denied_level, Some(DenialLevel::State));
         assert_eq!(after.status, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn a_state_switch_is_judged_on_the_role_and_pbs_tiers_only() {
+        let store = seeded_store();
+        // On the full chain 授权配置 is a write, and 只读 refuses every write.
+        let full = check(&store, "u-pm", "d-b1-ro", "授权配置");
+        assert_eq!(full.decision.denied_level, Some(DenialLevel::State));
+
+        let switch = evaluate_state_switch(&store, "u-pm", "d-b1-ro").expect("evaluate");
+        assert!(switch.decision.allowed);
+        assert_eq!(switch.status, StatusCode::OK);
+        assert!(switch.holder.is_none());
+
+        let role = evaluate_state_switch(&store, "u-proc", "d-b1-ro").expect("evaluate");
+        assert_eq!(role.decision.denied_level, Some(DenialLevel::Role));
+        assert_eq!(role.status, StatusCode::FORBIDDEN);
+
+        let mut doc = seed_doc();
+        doc.pbs_acl.push(acl("n-cell-b1", "u-pm", "编辑", false));
+        let store = store_with(doc);
+        let pbs = evaluate_state_switch(&store, "u-pm", "d-b1-ro").expect("evaluate");
+        assert_eq!(pbs.decision.denied_level, Some(DenialLevel::Pbs));
+        assert_eq!(pbs.status, StatusCode::FORBIDDEN);
+
+        assert_eq!(
+            evaluate_state_switch(&store, "u-pm", "d-missing").unwrap_err(),
+            PermError::UnknownDrawing
+        );
     }
 
     #[test]

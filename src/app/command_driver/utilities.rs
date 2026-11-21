@@ -1406,6 +1406,15 @@ impl OpenCADStudio {
             || tokens[0].eq_ignore_ascii_case("PIDBACKUPPDF")
             // `PIDBACKUPEXPORT [Plant=<name>] [Ref=<folder>] <folder>` likewise.
             || tokens[0].eq_ignore_ascii_case("PIDBACKUPEXPORT")
+            // `PIDMASTERDATA INIT DRAWING`, `... IMPORT <file>` and the rest
+            // are one whole line; the bare verb would first report the status.
+            || tokens[0].eq_ignore_ascii_case("PIDMASTERDATA")
+            // `PIDINDEX DUPLICATES` and `PIDINDEX LINKS` likewise: the bare
+            // verb would first scan the project and report the totals.
+            || tokens[0].eq_ignore_ascii_case("PIDINDEX")
+            // `PIDLOCATE <tag> [<drawing>]` likewise: the bare verb only says
+            // how it is written.
+            || tokens[0].eq_ignore_ascii_case("PIDLOCATE")
         {
             return self.dispatch_command(cmd);
         }

@@ -31,10 +31,11 @@ pub(super) enum Frame {
 /// the events that go with it — `before` it and `after` it, in that order
 /// on the channel.
 ///
-/// A frame was one event until a `welcome` came to say two things more
-/// (where a replay starts, when each claim runs out) and a `conflict` one
-/// (which ops tied). Those are events of their own, so that the event each
-/// frame has always been stays as it was.
+/// A frame was one event until a `welcome` came to say more (whether the
+/// drawing is taken as aligned, where a replay starts, when each claim runs
+/// out) and a `conflict` one thing more (which ops tied). Those are events
+/// of their own, so that the event each frame has always been stays as it
+/// was.
 pub(super) struct Reading {
     pub before: Vec<CollabEvent>,
     pub frame: Frame,
@@ -68,9 +69,15 @@ pub(super) fn read(text: &str) -> Reading {
             claims,
             repo_id,
             replay_from,
+            align_refused,
         } => {
-            // Said first: the session is then taken at the revision its
-            // drawing has, with what it missed still to come.
+            // Said first: the session is then taken as not aligned, or at
+            // the revision its drawing has with what it missed still to
+            // come, before anything of the queue goes out.
+            before.extend(align_refused.map(|refusal| CollabEvent::AlignRefused {
+                code: refusal.code,
+                message: refusal.message,
+            }));
             before.extend(replay_from.map(|from| CollabEvent::Resuming { from }));
             // When each claim runs out. It used to be dropped here.
             after.push(CollabEvent::ClaimsExpire(
@@ -89,9 +96,6 @@ pub(super) fn read(text: &str) -> Reading {
                     .collect(),
                 repo_id,
             })
-        }
-        ServerMessage::AlignRefused { code, message } => {
-            Frame::Event(CollabEvent::AlignRefused { code, message })
         }
         ServerMessage::PeerJoined(peer) => Frame::Event(CollabEvent::PeerJoined(peer_info(&peer))),
         ServerMessage::PeerLeft(peer) => Frame::Event(CollabEvent::PeerLeft {

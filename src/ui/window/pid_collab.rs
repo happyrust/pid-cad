@@ -11,6 +11,11 @@
 //!   this session). The button is the mouse front of `PIDCLAIM` / `PIDRELEASE`,
 //!   so the panel and the command line share one implementation.
 //!
+//! Under the banner a line says what has not reached the room: how many
+//! steps wait to be sent, or, for a drawing apart from the room, why, and
+//! how many of its changes never got there (`SPEC-collab-offline-sync.md`
+//! §5.6).
+//!
 //! The panel is the visible half of the claim state the scene also colours
 //! (`Scene::set_claim_display`): a tag somebody else holds draws in
 //! [`crate::scene::CLAIM_COLOR`], and the same tag appears here.
@@ -69,12 +74,17 @@ pub fn holder_bounds_id(user_id: &str) -> String {
 pub const READONLY_LABEL: &str = "只读";
 
 /// `PosReport` id of the badge a session wears once its drawing is known to
-/// be short of the room's changes. Reported only then, so its presence is
+/// be short of the room's changes, or while the connection that is up is not
+/// taken as aligned with the room. Reported only then, so its presence is
 /// the state.
 pub const DIVERGED_BOUNDS_ID: &str = "pid-collab-diverged";
 
 /// What the banner says of such a session.
 pub const DIVERGED_LABEL: &str = "不一致";
+
+/// What the panel says to do about it, under why (`REQ-COLL-015`
+/// acceptance 3): the way back is the room's own copy of the drawing.
+pub const GET_LATEST_HINT: &str = "需要取得最新图纸";
 
 /// What a peer row says of the session holding the edit right.
 pub const HOLDER_LABEL: &str = "编辑权";
@@ -147,6 +157,61 @@ pub fn conflict_bounds_id(conflict_id: &str) -> String {
 /// The header of the conflicts section. Drawn only while there is an entry.
 pub const CONFLICTS_LABEL: &str = "待裁决冲突";
 
+/// `PosReport` id of the line under the banner that says what has not
+/// reached the room. Reported only while there is something to say, so its
+/// presence is the state.
+pub const SYNC_BOUNDS_ID: &str = "pid-collab-sync";
+
+/// What has not reached the room, as the line under the banner says it
+/// (`SPEC-collab-offline-sync.md` §5.6). The counts are the ones
+/// `GET /api/v1/collab/status` gives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncLine {
+    /// `steps` steps queued for the room (`queued_ops`), the connection up
+    /// or not.
+    Waiting { connected: bool, steps: usize },
+    /// The drawing is apart from the room for `reason` (`align_message`),
+    /// and `entries` of its changes never reached it: the queue and the
+    /// unsynced list (`queued_ops` + `unsynced_count`).
+    Apart { reason: String, entries: usize },
+}
+
+impl SyncLine {
+    pub fn text(&self) -> String {
+        match self {
+            Self::Waiting {
+                connected: false,
+                steps,
+            } => format!("离线，{steps} 步待同步"),
+            Self::Waiting {
+                connected: true,
+                steps,
+            } => format!("已连接，{steps} 步待同步"),
+            Self::Apart { reason, entries } => format!("不一致：{reason}；未同步 {entries} 条"),
+        }
+    }
+}
+
+/// The title of the question about steps not synced.
+pub const UNSYNCED_TITLE: &str = "修改未同步";
+
+/// What quitting, or closing the session's drawing, asks while `steps`
+/// steps are still queued (§5.6).
+pub fn unsynced_prompt(steps: usize) -> String {
+    format!(
+        "这张图还有 {steps} 步修改没有同步到服务器。已经随图保存的，下次打开并连上服务器后会接着提交。"
+    )
+}
+
+/// The button that goes on with a quit.
+pub const UNSYNCED_QUIT_LABEL: &str = "退出";
+
+/// The button that goes on with closing the drawing.
+pub const UNSYNCED_CLOSE_LABEL: &str = "关闭";
+
+/// The button that stays.
+pub const UNSYNCED_CANCEL_LABEL: &str = "取消";
+
 /// Everything the panel draws, taken from the collaboration state so the view
 /// function stays free of app types (and therefore testable).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -155,9 +220,13 @@ pub struct CollabView {
     pub server_url: String,
     pub session_id: Option<String>,
     pub readonly: bool,
-    /// Why this drawing is no longer what the room has, once it is not: the
-    /// session then sends nothing more, and the panel says so.
+    /// Why this drawing is not what the room has, while it is not: parted
+    /// from it, or not taken on the connection that is up
+    /// (`State::mismatch`). The session sends nothing meanwhile, and the
+    /// panel says why and what to do about it.
     pub diverged: Option<String>,
+    /// What has not reached the room, while something has not.
+    pub sync: Option<SyncLine>,
     pub peers: Vec<PeerRow>,
     /// The conflict entries nobody has ruled on yet, oldest first.
     pub conflicts: Vec<ConflictRow>,
@@ -362,17 +431,39 @@ pub fn view<'a>(view: &'a CollabView, width: f32, chrome: Chrome) -> Element<'a,
     let banner = container(banner_items).width(Fill).padding([2, 2]);
 
     let mut body = column![banner].spacing(6);
+    // What has not reached the room, right under the banner (§5.6).
+    if let Some(line) = &view.sync {
+        let style: fn(&Theme) -> iced::widget::text::Style = match line {
+            SyncLine::Waiting { .. } => muted,
+            SyncLine::Apart { .. } => notice,
+        };
+        body = body.push(
+            container(crate::ui::wrap_bar::PosReport::new(
+                SYNC_BOUNDS_ID,
+                text(line.text()).size(10).style(style),
+            ))
+            .width(Fill)
+            .padding([0, 2]),
+        );
+    }
     if let Some(reason) = &view.diverged {
         // Under the banner rather than in the last-outcome line, which the
         // next claim would overwrite: this stays true until the drawing is
-        // replaced.
+        // replaced, or a connection takes it as the room's. A line above
+        // that says the drawing is apart has given the reason already.
+        let reason = match &view.sync {
+            Some(SyncLine::Apart { .. }) => "",
+            _ => reason.as_str(),
+        };
         body = body.push(
             container(
-                text(format!(
-                    "本图与房间已不一致，本地修改不再提交。{reason}"
-                ))
-                .size(10)
-                .style(notice),
+                column![
+                    text(format!("本图与房间已不一致，本地修改不再提交。{reason}"))
+                        .size(10)
+                        .style(notice),
+                    text(GET_LATEST_HINT).size(10).style(notice),
+                ]
+                .spacing(2),
             )
             .width(Fill)
             .padding([0, 2]),
@@ -666,5 +757,109 @@ mod tests {
         let badge = drawn(&mut ui, DIVERGED_LABEL).expect("the badge is drawn");
         let roster = drawn(&mut ui, "u1").expect("the roster is drawn");
         assert!(badge.y < roster.y, "badge {badge:?}, u1 {roster:?}");
+    }
+
+    /// `REQ-COLL-015` acceptance 3: a drawing that is not the room's —
+    /// parted from it, or not taken on this connection — says what to do
+    /// about it, under the badge and above the roster.
+    #[test]
+    fn collab_align_refused_the_panel_says_to_get_the_latest_drawing() {
+        let view_model = CollabView {
+            diverged: Some("协同库标识不一致：这份文件对齐的是另一个服务器库".to_owned()),
+            peers: vec![peer("u1", true, false)],
+            ..view_with(Vec::new())
+        };
+        let mut ui = draw(&view_model);
+        let badge = drawn(&mut ui, DIVERGED_LABEL).expect("the badge is drawn");
+        let hint = drawn(&mut ui, "需要取得最新图纸").expect("what to do is drawn");
+        let roster = drawn(&mut ui, "u1").expect("the roster is drawn");
+        assert!(
+            badge.y < hint.y && hint.y < roster.y,
+            "badge {badge:?}, hint {hint:?}, u1 {roster:?}"
+        );
+    }
+
+    /// The line under the banner (§5.6), in the words the spec gives, and
+    /// the prompt about steps not synced.
+    #[test]
+    fn the_sync_line_and_the_prompt_read_as_the_spec_has_them() {
+        let offline = SyncLine::Waiting {
+            connected: false,
+            steps: 2,
+        };
+        assert_eq!(offline.text(), "离线，2 步待同步");
+        let connected = SyncLine::Waiting {
+            connected: true,
+            steps: 3,
+        };
+        assert_eq!(connected.text(), "已连接，3 步待同步");
+        let apart = SyncLine::Apart {
+            reason: "收到修订 5，本地基线是 3".to_owned(),
+            entries: 4,
+        };
+        assert_eq!(
+            apart.text(),
+            "不一致：收到修订 5，本地基线是 3；未同步 4 条"
+        );
+        assert_eq!(
+            unsynced_prompt(3),
+            "这张图还有 3 步修改没有同步到服务器。已经随图保存的，下次打开并连上服务器后会接着提交。"
+        );
+    }
+
+    /// The line is drawn under the banner and above the roster while there
+    /// is something to say, and not at all once there is not.
+    #[test]
+    fn the_sync_line_is_drawn_under_the_banner_while_steps_wait() {
+        let line = SyncLine::Waiting {
+            connected: true,
+            steps: 3,
+        };
+        let waiting = CollabView {
+            sync: Some(line.clone()),
+            peers: vec![peer("u1", true, false)],
+            ..view_with(Vec::new())
+        };
+        let mut ui = draw(&waiting);
+        let banner = drawn(&mut ui, "已连接").expect("the banner is drawn");
+        let said = drawn(&mut ui, &line.text()).expect("the line is drawn");
+        let roster = drawn(&mut ui, "u1").expect("the roster is drawn");
+        assert!(
+            banner.y < said.y && said.y < roster.y,
+            "banner {banner:?}, line {said:?}, u1 {roster:?}"
+        );
+
+        let synced = CollabView {
+            sync: None,
+            ..waiting.clone()
+        };
+        let mut ui = draw(&synced);
+        assert_eq!(drawn(&mut ui, &line.text()), None);
+    }
+
+    /// A drawing apart from the room: the line gives the reason, and the
+    /// note under it says what that means without giving it a second time.
+    #[test]
+    fn apart_the_line_gives_the_reason_and_the_note_does_not_repeat_it() {
+        let reason = "收到修订 5，本地基线是 3";
+        let line = SyncLine::Apart {
+            reason: reason.to_owned(),
+            entries: 2,
+        };
+        let view_model = CollabView {
+            diverged: Some(reason.to_owned()),
+            sync: Some(line.clone()),
+            peers: vec![peer("u1", true, false)],
+            ..view_with(Vec::new())
+        };
+        let mut ui = draw(&view_model);
+        let said = drawn(&mut ui, &line.text()).expect("the line is drawn");
+        let note = drawn(&mut ui, "本图与房间已不一致，本地修改不再提交。")
+            .expect("the note is drawn, without the reason");
+        let hint = drawn(&mut ui, GET_LATEST_HINT).expect("what to do is drawn");
+        assert!(
+            said.y < note.y && note.y < hint.y,
+            "{said:?} {note:?} {hint:?}"
+        );
     }
 }

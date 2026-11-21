@@ -83,6 +83,8 @@ codes += REPO_MISMATCH / REVISION_AHEAD / REPLAY_GAP    // 拒绝对账三码
 
 **后续（2026-11-17 定）**：单独的 `AlignRefused` 消息只是这一批的落地形式。`docs/plans/2026-11-16-pid-dev-spec/SPEC-collab-offline-sync.md` §10 第 2 条已定：任务 `OFF-2` 把拒绝改写进 `welcome` 的可选键 `align_refused: {code, message}`，去掉这条单独的消息。另外，落地的代码标的原因是「<服务器给的原因>（<码>）」，面板上没有「需要取得最新图纸」这一句，与上一段写的不同；这一句也由 `OFF-2` 补（同一份规格 §5.2、验收 OS-08）。
 
+**`OFF-2` 之后（2026-11-20）**：上面说的形式已经改掉。拒绝写在 `welcome` 的可选键 `align_refused: {code, message}` 里，没有单独的消息了。服务器给这条连接记一个「没对上」的标记，它发来的 `op` 一律回 `error NOT_ALIGNED`（带 `op_id`，不带 `rejected`），不裁决、不写日志、不广播。客户端不再标 `diverged`，而是记下「这次连接对不上」（`State.not_aligned`）：队列不发，房间的修改不写进本图，不申请占用，基线和库标识保持图里原来的，存盘照旧写它们；断线后下一次连接重新核对。重连时房间的修订比本图高而没有补发，客户端也这样处理（码记 `REPLAY_GAP`），以前是标 `diverged`。面板在原因下面加了一行「需要取得最新图纸」，命令行也这样说。另外，只报 `since`、不报 `repo_id` 的 `hello` 不再核对，照旧按日志补发（`SPEC-collab-offline-sync.md` §11.2 的 R3，`OFF-2` 开工时定为放宽服务器），所以第一条括号里的情形不再拒绝。
+
 ### D5 客户端种子化：`had_session`/`base_revision`/`repo_id` 从文件回填
 
 `Resuming`→`Connected` 的接管滤网现在是 `had_session && from == base_revision`：纯新进程里 `had_session=false` 会让补发被当成「带 no-replay 的加入」，随后 `OpApplied` 又因 `revision <= base_revision` 被跳过。修法：把文件里的 `PID_AUTHOR_COLLAB` 当成「上一次会话的记忆」回填——`base_revision = rev`、`had_session = true`（这份文件确实进过房间：断线修改该排队正是这个语义）、`repo_id = repo`。
@@ -101,7 +103,7 @@ codes += REPO_MISMATCH / REVISION_AHEAD / REPLAY_GAP    // 拒绝对账三码
 
 ### D8 `diverged` 无恢复入口（维持边界）
 
-REQ-COLL-014 的既有边界「标成不一致后只能取最新图重开」不变；本任务让它**更早、更准地**被标出来（拒绝对账即标），不新增恢复通道。
+REQ-COLL-014 的既有边界「标成不一致后只能取最新图重开」不变；本任务让它**更早、更准地**被标出来（拒绝对账即标），不新增恢复通道。（`OFF-2` 之后，拒绝对账不再标不一致，只是这次连接不提交，见 D4 末段。）
 
 ## 4. 改动清单
 
@@ -131,7 +133,7 @@ REQ-COLL-014 的既有边界「标成不一致后只能取最新图重开」不�
 ## 6. 风险与开放点
 
 - **图号对不上的服务器侧兜底**：`hello` 不带单独 `file_drawing` 字段——文件图号与请求图号的比对全部在客户端（D5 的 `file.drawing == config.drawing_id`）。客户端出错时服务器无法复核；如要在协议里再压一道，加 `file_drawing: Option<String>` 让服务器也拒——冗余但便宜，倾向不加。
-- **旧协议互操作**：同仓库两端同发，无旧端；外部老客户端报 `since` 无 `repo_id` → 按 `REPO_MISMATCH` 拒（无法核验库）——比现状严，属预期收紧。
+- **旧协议互操作**：同仓库两端同发，无旧端；外部老客户端报 `since` 无 `repo_id` → 按 `REPO_MISMATCH` 拒（无法核验库）——比现状严，属预期收紧。（`OFF-2` 已放宽：只报 `since` 的不核对，照旧补发，见 D4 末段。）
 - **`document_for_save` 快照写 XRecord 的语义**：快照带着 `objects` 整体，`ensure_xrecord` 在其上建字典/记录即被序列化，不回写活文档——与「另存为不弄脏源图」的既有语义一致。
 - **`catching_up` 与种子化的次序**：种子必须在 `Resuming` 到达前完成；`answer_collab_tags` 先于 hello 回答，序天然成立。`broadcast` 侧种子是兜底，不依赖拨号节奏。
 
@@ -145,3 +147,13 @@ REQ-COLL-014 的既有边界「标成不一致后只能取最新图重开」不�
 4. D4：补了「后续」一段。
 
 文中其余的标识符（如 `told.file_state`、`seed_file_state(doc)`）是动手之前拟的名字，与代码里的不完全相同，以代码为准。核对时发现的问题记在 `docs/plans/2026-11-16-pid-dev-spec/SPEC-collab-offline-sync.md` §11。
+
+## 8. `OFF-2` 之后的改正（2026-11-20）
+
+任务 `OFF-2` 改了拒绝对账的形式和客户端的处理，本文相应改了三处：
+
+1. D4：补了「`OFF-2` 之后」一段。
+2. D8：注明拒绝对账不再标不一致。
+3. §6：旧协议互操作那一条注明已放宽。
+
+其余各段（包括 §4 的改动清单和 §5 的验收映射）是那批改动当时的说法，没有改。实现记录见 `docs/plans/2026-11-16-pid-dev-spec/SPEC-collab-offline-sync.md` §11.5。

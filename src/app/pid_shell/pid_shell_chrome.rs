@@ -358,8 +358,9 @@ fn the_sync_status_says_what_the_session_is() {
     app.collab.readonly = false;
 
     // The drawing is no longer what the room has.
+    let code = crate::pid::collab_state::REMOTE_UNAPPLIED;
     app.collab
-        .mark_diverged("op 7 could not be applied".to_owned());
+        .mark_diverged(code, "op 7 could not be applied".to_owned());
     check(
         &app,
         SyncStatus::Diverged,

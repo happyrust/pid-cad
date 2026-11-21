@@ -22,6 +22,9 @@ RECORDS = ("PID_AUTHOR_TYPE_LIB", "PID_AUTHOR_TAG_RULES", "PID_AUTHOR_TOPOLOGY")
 # （33e0a28e5 的生成器写出的；种子图里没有这些 XRecord）。
 BASELINE = m7h.WORK / "PID-1101-m3.dwg"
 PROPS = '{"设计压力":"%s","设计温度":"120C","材质":"碳钢"}'
+# 用户目录是空的时候，程序一启动就问的几件事（设为默认程序、捐助、显卡提示，见 src/app/startup.rs）。
+# 没进过协同的程序第一次启动也问，不是协同的残留。
+FIRST_LAUNCH = ("AssocPrompt", "DonationPrompt", "GpuWarning")
 
 
 def graph_records(gui):
@@ -146,8 +149,14 @@ try:
             f"last_error={status.get('last_error')} last_apply_error={status.get('last_apply_error')}")
     state = plain.state()
     R.dump("x12-plain-state.json", state)
-    modal = state.get("modal") or (state.get("result") or {}).get("modal")
-    R.check("VAL-CROSS-012", not modal, f"没有弹出对话框（state.modal = {modal!r}）")
+    inner = state.get("result") or {}
+    # 对话框是工具窗：两次更新之间停在 tool_windows 里，modal 只在它自己的消息处理时才有值
+    # （同 o06 的 modal()），所以两处一起看。
+    modal = state.get("modal") or inner.get("modal")
+    shown = sorted(set(state.get("tool_windows") or inner.get("tool_windows") or []) | ({modal} if modal else set()))
+    others = [kind for kind in shown if kind not in FIRST_LAUNCH]
+    R.check("VAL-CROSS-012", not others,
+            f"没有弹出对话框（tool_windows 和 modal 里开着的 {shown}；除去首次启动的提示，剩下 {others}）")
     plain.run("PIDCOLLAB ON")
     time.sleep(1.5)
     bounds = plain.ui_bounds("pid-collab")

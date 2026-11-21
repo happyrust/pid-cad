@@ -969,6 +969,42 @@ pub(super) fn run_with_parts(doc: &Document, tag: &str) -> Option<Vec<Handle>> {
     Some(all)
 }
 
+/// Whether the drawing's line or run is still as statement `change` says
+/// it: the line has the stretches it was given, the run the account it was
+/// left with (`SPEC-collab-offline-sync.md` §5.4).
+pub(super) fn as_said(doc: &Document, change: &Change) -> bool {
+    match &change.pipe {
+        Some(Pipe::Line(said)) => {
+            let pieces: Vec<[f64; 4]> = doc
+                .entities()
+                .filter(|entity| matches!(entity, EntityType::Line(_)))
+                .filter(|entity| {
+                    PidAuthor::from_entity(entity).is_some_and(|author| {
+                        author.tag == change.object_ref
+                            && matches!(author.topology.as_str(), ROLE_PIPE_LINE | ROLE_SIGNAL_LINE)
+                    })
+                })
+                .filter_map(place)
+                .collect();
+            let same_piece = |a: &[f64; 4], b: &[f64; 4]| {
+                same([a[0], a[1]], [b[0], b[1]]) && same([a[2], a[3]], [b[2], b[3]])
+            };
+            pieces.len() == said.pieces.len()
+                && said
+                    .pieces
+                    .iter()
+                    .all(|want| pieces.iter().any(|have| same_piece(have, want)))
+        }
+        Some(Pipe::Run(said)) => {
+            let table = TopologyTable::load(doc);
+            run_state(doc, &table, &change.object_ref).is_some_and(|(line_tag, run, _)| {
+                line_tag == said.line_tag && run.to_json() == said.run.to_json()
+            })
+        }
+        _ => false,
+    }
+}
+
 fn vector(at: [f64; 2]) -> document::types::Vector3 {
     document::types::Vector3::new(at[0], at[1], 0.0)
 }

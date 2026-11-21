@@ -138,6 +138,7 @@ impl OpenCADStudio {
             Some(K::LayerDeleteWarning) => crate::tr!("modal", "delete-layer"),
             Some(K::Unsaved) => crate::tr!("modal", "unsaved-changes"),
             Some(K::BlockEditChanges) => crate::t!("Block - Save Parameter Changes?").into_owned(),
+            Some(K::CollabUnsynced) => crate::ui::window::pid_collab::UNSYNCED_TITLE.to_owned(),
             Some(K::BlockEditPicker) => crate::t!("Edit Block Definition").into_owned(),
             Some(K::Rename) => crate::tr!("rename-dialog", "title"),
             Some(K::Purge) => crate::tr!("purge-dialog", "title"),
@@ -1680,6 +1681,26 @@ impl OpenCADStudio {
                     unsaved_changes_dialog_window(&tab_name, flow, None)
                 })
             }
+            super::super::ModalKind::CollabUnsynced => {
+                let name = self
+                    .collab
+                    .document
+                    .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
+                    .map(|tab| tab.tab_display_name())
+                    .unwrap_or_default();
+                let (steps, quitting) =
+                    self.unsynced_question
+                        .as_ref()
+                        .map_or((0, true), |question| {
+                            (
+                                question.steps,
+                                question.leaving == crate::app::collab::Leaving::Quit,
+                            )
+                        });
+                automatic_flow(ex, |flow| {
+                    unsynced_question_window(&name, steps, quitting, flow)
+                })
+            }
             super::super::ModalKind::BlockEditChanges => {
                 let pending = self.pending_block_close.as_ref();
                 let name = pending
@@ -2129,6 +2150,56 @@ fn unsaved_changes_dialog_window(
                     } else {
                         Message::UnsavedDialogCancel
                     },
+                    crate::ui::style::form::neutral_button
+                ),
+            ],
+        ]
+        .spacing(0),
+    )
+    .style(dialog_body_style)
+    .center_x(sizing.width)
+    .center_y(sizing.height)
+    .padding([24, 28])
+    .into()
+}
+
+/// The question about steps the room has not taken
+/// (`SPEC-collab-offline-sync.md` §5.6): the session's drawing, how many
+/// steps are left behind, and 退出 (关闭, for the drawing) or 取消. Laid out
+/// as the unsaved-changes dialog is.
+fn unsynced_question_window(
+    name: &str,
+    steps: usize,
+    quitting: bool,
+    sizing: crate::ui::modal::ModalSizing,
+) -> Element<'static, Message> {
+    use crate::ui::window::pid_collab::{
+        unsynced_prompt, UNSYNCED_CANCEL_LABEL, UNSYNCED_CLOSE_LABEL, UNSYNCED_QUIT_LABEL,
+    };
+    let leave = if quitting {
+        UNSYNCED_QUIT_LABEL
+    } else {
+        UNSYNCED_CLOSE_LABEL
+    };
+    container(
+        column![
+            text(name.to_owned()).size(14),
+            iced::widget::Space::new().height(4),
+            text(unsynced_prompt(steps))
+                .size(12)
+                .width(iced::Length::Fixed(360.0))
+                .style(dialog_muted_text_style),
+            iced::widget::Space::new().height(20),
+            row![
+                dialog_button(
+                    leave,
+                    Message::CollabUnsyncedLeave,
+                    crate::ui::style::form::accent_button
+                ),
+                iced::widget::Space::new().width(8),
+                dialog_button(
+                    UNSYNCED_CANCEL_LABEL,
+                    Message::CollabUnsyncedCancel,
                     crate::ui::style::form::neutral_button
                 ),
             ],

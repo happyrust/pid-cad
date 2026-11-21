@@ -198,12 +198,16 @@ impl OpenCADStudio {
         self.continue_tab_close_queue()
     }
 
-    /// Close queued drawings until a dirty tab requires confirmation. Queue
-    /// entries use stable document ids because removing an earlier tab changes
-    /// every later vector index.
+    /// Close queued drawings until a dirty tab, or the session's drawing with
+    /// steps not synced, requires confirmation; the queue waits while that
+    /// question is up. Queue entries use stable document ids because removing
+    /// an earlier tab changes every later vector index.
     pub(in crate::app) fn continue_tab_close_queue(&mut self) -> Task<Message> {
         let mut tasks = Vec::new();
-        while let Some(tab_id) = self.pending_tab_closes.pop_front() {
+        while self.unsynced_question.is_none() {
+            let Some(tab_id) = self.pending_tab_closes.pop_front() else {
+                break;
+            };
             let Some(idx) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
                 continue;
             };
@@ -280,6 +284,15 @@ impl OpenCADStudio {
         if self.tabs.get(idx).is_some_and(|t| t.dirty) {
             self.pending_close = Some(crate::app::PendingClose::Tab(self.tabs[idx].id));
             return self.open_unsaved_dialog_window();
+        }
+        if let Some(tab) = self.tabs.get(idx).map(|t| t.id) {
+            let leaving = crate::app::collab::Leaving::Close {
+                tab,
+                discard: false,
+            };
+            if let Some(ask) = self.ask_before_leaving(leaving) {
+                return ask;
+            }
         }
         // A draft belongs to its original tab and cannot survive its closure.
         if idx == self.active_tab && self.mtext_editor.is_some() {

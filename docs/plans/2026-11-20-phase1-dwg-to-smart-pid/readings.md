@@ -625,8 +625,42 @@
 | `scripts\fmt-newhunks.ps1` | — | `src/io/pid_write/{mod,oid,records,index}.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 
+---
 
+## 19. L5-6 / L5-8 / L5-9 / L6-1（#130）：DWG/DXF 一键双产物转换（`publish XML + .pid`）及 `a/b` 级往返与出图验证（2026-11-21）
 
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `4e115a2f8`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 新增 / 修改文件 | `src/io/pid_publish/uid.rs`、`src/io/pid_convert/{mod,export}.rs`、`examples/pid_convert.rs` |
+| 证据目录子项 | `2026-11-20-issue130/`（`red.txt`、`green-fast.txt`、`real5_summary.json`、`real90_summary.json`、`real90_convert_check_ok.txt`、`arch.txt`、`pytest.txt`、`gate-cargo-test-lib.txt`、`gate-clippy-lib.txt`、`gate-clippy-test.txt`） |
 
+### 19.1 先红后绿、跨文件 `UID`/`GraphicOID` 共享机制与三层校验闭环
 
+- **先红后绿**：`red.txt` `2 passed; 2 failed`（退出码 `101`）→ 实现后 `green-fast.txt` **`4 passed; 0 failed`**（退出码 `0`）。
+- **单次分配共享 `UID` 与 `GraphicOID`（`L5-8` / `L6-1`）**：
+  1. `UidAllocator::reserve_graphic_oids` 预先合并种子 `.pid`（`SeedOidPool::from_seed`）中全部已用 OID 水位线并避开 `8,192` 段首槽位（`(oid & 0x1FFF) == 0`）；
+  2. 对图幅自动从 `RefData~4~682.zip` 匹配 `A3/A2/A1/A0-W-New.pid` 空白模板种子与 `/StyleCluster` 线型/字样样式 ID，同步生成 `_Data.xml`、`_Meta.xml`、`.pid` 与 `_Coverage.json`；
+  3. 同一图元在 `_Data.xml`（`PIDRepresentation.UID` / `GraphicOID` / `DrawingItems.UID2`）与 `.pid`（`/Sheet*` 图元 `oid` + `/Unclustered Dynamic Attributes` `0x0089 P&IDAttributes` 的 `described_oid` / `DrawingID` / `ModelID` + 第 2 节 `_SPID = DocUID`）中 **100% 严格相等**。
 
+### 19.2 真实导出 DXF（5 图分位抽样 + 90 图有效全集）一键双产物与 `a/b` 级实测（`L5-6` / `L5-9` / `L6-1`）
+
+| 批次 | 转换图数 / 失败 | 写出对象 / 关系 | 跨文件 `GraphicOID` / `ModelID` / `DrawingID` 对齐 | `_SPID == DocUID` | `a` 级索引自检 / 重读归一化实体 | `b` 级本仓重载 CAD 实体 | `b` 级 `pid-plot` PDF 图元 / 页内图元 / 总字节 | `convert_check.py` 对参考 XML | 用时 |
+|---|---|---|---:|---:|---|---:|---|---|---:|
+| 5 图规模分位抽样（min..max） | **`5 / 0`** | `3,572` / `2,901` | **`2,119 / 2,119`（`100%`）** | `5 / 5` | **`5 / 5` 通过** / `19,220` | `7,551` | `4,536` / `4,363` / `558,588 B` | `spec_violations=0` | `~10.6 s` |
+| **90 图有效非空全集（`EXPORT_DXF`）** | **`90 / 0`** | **`77,491` / `71,415`** | **`42,861 / 42,861`（`100%`）** | **`90 / 90`** | **`90 / 90` 通过** / **`297,226`** | **`123,948`** | **`80,190` / `76,711` / `10,094,440 B`** | **`spec_violations=0`、`unexplained_diffs=0`** | **`148.9 s`（`1.65 s/图`）** |
+
+- **关于 `c1`（SPPID 原生环境打开）状态说明**：当前机器未配置受控 SPPID 运行器（`OCS_PID_SPPID_RUNNER` 未设），按规程在每份 `_Coverage.json` 的 `pid_verification.sppid_native_c1_status` 与本账本中明确标注 **`unverified_no_sppid_runner`（SPPID 原生打开 `c1` 未验证）**，绝不冒充已过。
+
+### 19.3 固定门禁读数
+
+| 门禁项 | 改前读数（§18.2） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,187` 条 | **`7,189` 条**（**`7,123` 过** / **`65` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条测试，**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `uid.rs`、`pid_convert/{mod,export}.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `185 passed` | **`185 passed`** | **全绿** |

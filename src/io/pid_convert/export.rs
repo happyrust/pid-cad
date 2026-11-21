@@ -1,5 +1,5 @@
-//! Single-sheet and batch `DWG/DXF -> SmartPlant publish XML + Coverage report`
-//! conversion pipeline (`L4-6` / `L4-7` / `#127`).
+//! Single-sheet and batch `DWG/DXF -> SmartPlant publish XML + .pid + Coverage report`
+//! conversion pipeline (`L4-6` / `L4-7` / `L5-6` / `L5-8` / `L6-1` / `#127` / `#130`).
 
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(not(target_arch = "wasm32"))]
@@ -11,15 +11,15 @@ use serde::{Deserialize, Serialize};
 use super::class_map::default_legend_class_map;
 use super::recognize::{
     recognise_sppid_sheet, ConfidenceSummary, ConfidenceThresholds, ConfidenceTier, PipeLabelHit,
-    PipeSegmentHit,
+    PipeSegmentHit, SheetRecognition,
 };
 use crate::io::pid_publish::{
-    export_drawing_bundle, parse_sppid_line_number, pipeline_uid, populate_item_tag_attributes,
-    synthesize_piping_network, ExportBundle, ExportDrawing, ExportItem, PipeRunInput,
-    PipingSynthesisStats, SymbolEndpointRef, UidAllocator, UnmappedItem,
+    export_drawing_bundle, is_valid_hex32, parse_sppid_line_number, pipeline_uid,
+    populate_item_tag_attributes, synthesize_piping_network, ExportBundle, ExportDrawing,
+    ExportItem, PipeRunInput, PipingSynthesisStats, SymbolEndpointRef, UidAllocator, UnmappedItem,
 };
 
-/// Options controlling DWG/DXF-to-publish conversion.
+/// Options controlling DWG/DXF-to-publish (and optional `.pid` dual-output) conversion.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConvertOptions {
     pub plant: String,
@@ -27,6 +27,14 @@ pub struct ConvertOptions {
     pub thresholds: ConfidenceThresholds,
     pub snap_tol_mm: f64,
     pub pipe_layers: Vec<String>,
+    #[serde(default)]
+    pub seed_pid_path: Option<String>,
+    #[serde(skip)]
+    pub seed_pid_bytes: Option<Vec<u8>>,
+    #[serde(default)]
+    pub sym_library_dir: Option<String>,
+    #[serde(default)]
+    pub verify_plot_pdf: bool,
 }
 
 impl Default for ConvertOptions {
@@ -37,7 +45,68 @@ impl Default for ConvertOptions {
             thresholds: ConfidenceThresholds::default(),
             snap_tol_mm: 1.8,
             pipe_layers: vec!["11".to_string(), "PIPE".to_string(), "0".to_string()],
+            seed_pid_path: None,
+            seed_pid_bytes: None,
+            sym_library_dir: None,
+            verify_plot_pdf: false,
         }
+    }
+}
+
+impl ConvertOptions {
+    pub fn wants_dual_pid(&self) -> bool {
+        self.seed_pid_bytes.is_some()
+            || self
+                .seed_pid_path
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+    }
+}
+
+/// Cross-file (`_Data.xml <-> .pid`), `a`-level (re-read + Q9 index check), and
+/// `b`-level (CAD load + `pid-plot` PDF render) verification report (`#130`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DualVerifyReport {
+    pub xml_rep_count: usize,
+    pub matched_graphic_oids: usize,
+    pub matched_model_uids: usize,
+    pub matched_representation_uids: usize,
+    pub missing_graphic_oids_in_pid: Vec<u32>,
+    pub missing_model_uids_in_pid: Vec<String>,
+    pub mismatched_links: Vec<String>,
+    pub spid_matches_doc_uid: bool,
+    pub a_level_index_consistent: bool,
+    pub a_level_normalized_entities: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b_level_cad_entities: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b_level_pdf_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b_level_pdf_primitives: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b_level_pdf_on_page: Option<u64>,
+    pub sppid_native_c1_status: String,
+}
+
+impl DualVerifyReport {
+    pub fn is_cross_file_and_a_valid(&self) -> bool {
+        self.xml_rep_count > 0
+            && self.matched_graphic_oids == self.xml_rep_count
+            && self.matched_model_uids == self.xml_rep_count
+            && self.matched_representation_uids == self.xml_rep_count
+            && self.missing_graphic_oids_in_pid.is_empty()
+            && self.missing_model_uids_in_pid.is_empty()
+            && self.mismatched_links.is_empty()
+            && self.spid_matches_doc_uid
+            && self.a_level_index_consistent
+            && self.a_level_normalized_entities > 0
+    }
+
+    pub fn is_b_plot_valid(&self) -> bool {
+        self.b_level_cad_entities.is_some_and(|n| n > 0)
+            && self.b_level_pdf_bytes.is_some_and(|n| n > 0)
+            && self.b_level_pdf_primitives.is_some_and(|n| n > 0)
+            && self.b_level_pdf_on_page.is_some_and(|n| n > 0)
     }
 }
 
@@ -53,6 +122,8 @@ pub struct ConvertSheetReport {
     pub total_items_written: usize,
     pub total_relations_written: usize,
     pub skipped_items: Vec<UnmappedItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid_verification: Option<DualVerifyReport>,
 }
 
 /// Summary of converting a single file or a directory of DWG/DXF sheets.
@@ -60,10 +131,23 @@ pub struct ConvertSheetReport {
 pub struct BatchConvertSummary {
     pub files_converted: usize,
     pub files_failed: usize,
+    #[serde(default)]
+    pub pid_files_written: usize,
+    #[serde(default)]
+    pub pdf_files_plotted: usize,
     pub total_items_written: usize,
     pub total_relations_written: usize,
     pub sheets: Vec<ConvertSheetReport>,
     pub errors: Vec<String>,
+}
+
+/// Dual-output bundle (`_Data.xml`, `_Meta.xml`, optional `.pid` bytes, and `_Coverage.json`).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub struct DualConvertBundle {
+    pub publish: ExportBundle,
+    pub pid_bytes: Option<Vec<u8>>,
+    pub report: ConvertSheetReport,
 }
 
 fn tier_rank(t: ConfidenceTier) -> u8 {
@@ -164,7 +248,6 @@ fn chain_pipe_segments(
     let mut used_edge = vec![false; edges.len()];
     let mut out = Vec::new();
 
-    // First walk from every stop vertex
     for start_v in 0..v_count {
         if !is_stop[start_v] {
             continue;
@@ -188,7 +271,6 @@ fn chain_pipe_segments(
         }
     }
 
-    // Walk any remaining isolated 2-degree loops
     for start_ei in 0..edges.len() {
         if used_edge[start_ei] {
             continue;
@@ -230,23 +312,46 @@ fn nearest_label_for_run(
     best.map(|(_, s)| s.to_string())
 }
 
-/// Convert an in-memory `Document` into `(_Data.xml, _Meta.xml, _Coverage.json)` bytes.
-pub fn convert_document_to_publish(
+struct PlacedSymbolRef {
+    sym_idx: usize,
+    graphic_oid: u32,
+}
+
+struct PlacedRunRef {
+    points: Vec<(f64, f64)>,
+    graphic_oid: u32,
+}
+
+struct CoreConversionState {
+    rec: SheetRecognition,
+    dwg: ExportDrawing,
+    report: ConvertSheetReport,
+    placed_symbols: Vec<PlacedSymbolRef>,
+    placed_runs: Vec<PlacedRunRef>,
+}
+
+fn build_core_conversion(
     doc: &Document,
     doc_name: &str,
     opts: &ConvertOptions,
-) -> Result<(ExportBundle, ConvertSheetReport), String> {
+    seed_reserved_oids: Option<(u32, &BTreeSet<u32>)>,
+) -> Result<CoreConversionState, String> {
     let map = default_legend_class_map();
     let rec = recognise_sppid_sheet(doc, map, opts.thresholds);
     let upm = rec.units_per_mm.max(1e-6);
 
     let mut alloc = UidAllocator::new(&opts.plant, doc_name);
+    if let Some((min_next, reserved)) = seed_reserved_oids {
+        alloc.reserve_graphic_oids(min_next, reserved);
+    }
+
     let doc_uid = alloc.alloc_primary_uid(None, &format!("drawing:{doc_name}"));
     let mut dwg = ExportDrawing::new(&opts.plant, &doc_uid, doc_name);
 
     let mut exported_by_class: BTreeMap<String, usize> = BTreeMap::new();
     let mut endpoints: Vec<SymbolEndpointRef> = Vec::new();
     let mut all_ports: Vec<(f64, f64)> = Vec::new();
+    let mut placed_symbols: Vec<PlacedSymbolRef> = Vec::new();
 
     for (idx, sym) in rec.symbols.iter().enumerate() {
         if !sym.known || tier_rank(sym.tier) < tier_rank(opts.min_tier) {
@@ -305,6 +410,10 @@ pub fn convert_document_to_publish(
             bbox: sym.bbox,
             ports: sym.ports.clone(),
         });
+        placed_symbols.push(PlacedSymbolRef {
+            sym_idx: idx,
+            graphic_oid: goid,
+        });
         dwg.items.push(item);
     }
 
@@ -316,20 +425,28 @@ pub fn convert_document_to_publish(
         opts.snap_tol_mm,
     );
     let label_dist = 18.0 * upm;
-    let run_inputs: Vec<PipeRunInput> = chained
-        .iter()
-        .filter_map(|cr| {
-            let start = *cr.points.first()?;
-            let end = *cr.points.last()?;
-            let line_label = nearest_label_for_run(cr, &rec.pipe_labels, label_dist);
-            Some(PipeRunInput {
-                start,
-                end,
-                line_label,
-                graphic_oid: Some(alloc.alloc_graphic_oid(None)),
-            })
-        })
-        .collect();
+    let mut run_inputs: Vec<PipeRunInput> = Vec::new();
+    let mut placed_runs: Vec<PlacedRunRef> = Vec::new();
+    for cr in &chained {
+        let Some(&start) = cr.points.first() else {
+            continue;
+        };
+        let Some(&end) = cr.points.last() else {
+            continue;
+        };
+        let line_label = nearest_label_for_run(cr, &rec.pipe_labels, label_dist);
+        let rgoid = alloc.alloc_graphic_oid(None);
+        run_inputs.push(PipeRunInput {
+            start,
+            end,
+            line_label,
+            graphic_oid: Some(rgoid),
+        });
+        placed_runs.push(PlacedRunRef {
+            points: cr.points.clone(),
+            graphic_oid: rgoid,
+        });
+    }
 
     let mut piping_stats = synthesize_piping_network(
         &mut dwg,
@@ -339,7 +456,6 @@ pub fn convert_document_to_publish(
         opts.snap_tol_mm * upm,
     )?;
 
-    // Ensure any standalone line label on the sheet whose pipeline wasn't touched by a stroke still creates a PIDPipeline.
     let mut existing_pipelines: BTreeSet<String> = dwg
         .items
         .iter()
@@ -362,22 +478,696 @@ pub fn convert_document_to_publish(
         }
     }
 
-    let mut bundle = export_drawing_bundle(&dwg)?;
     let report = ConvertSheetReport {
         drawing_name: doc_name.to_string(),
         doc_uid,
         plant: opts.plant.clone(),
-        confidence_summary: rec.confidence_summary,
+        confidence_summary: rec.confidence_summary.clone(),
         exported_by_class,
         piping_synthesis: piping_stats,
         total_items_written: dwg.items.len(),
         total_relations_written: dwg.relations.len(),
-        skipped_items: dwg.unmapped,
+        skipped_items: dwg.unmapped.clone(),
+        pid_verification: None,
     };
-    bundle.coverage_json = serde_json::to_string_pretty(&report)
+
+    Ok(CoreConversionState {
+        rec,
+        dwg,
+        report,
+        placed_symbols,
+        placed_runs,
+    })
+}
+
+/// Convert an in-memory `Document` into `(_Data.xml, _Meta.xml, _Coverage.json)` bytes.
+pub fn convert_document_to_publish(
+    doc: &Document,
+    doc_name: &str,
+    opts: &ConvertOptions,
+) -> Result<(ExportBundle, ConvertSheetReport), String> {
+    let state = build_core_conversion(doc, doc_name, opts, None)?;
+    let mut bundle = export_drawing_bundle(&state.dwg)?;
+    bundle.coverage_json = serde_json::to_string_pretty(&state.report)
+        .map_err(|e| format!("serialize coverage report: {e}"))?;
+    Ok((bundle, state.report))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn measure_doc_extent_mm(doc: &Document) -> (f64, f64) {
+    let upm = crate::io::pid_legend::guess_units_per_mm(doc).max(1e-6);
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    let mut consider = |x: f64, y: f64| {
+        if x.is_finite() && y.is_finite() && x.abs() < 1e7 && y.abs() < 1e7 {
+            min_x = min_x.min(x / upm);
+            min_y = min_y.min(y / upm);
+            max_x = max_x.max(x / upm);
+            max_y = max_y.max(y / upm);
+        }
+    };
+    for ent in doc.model_space_entities() {
+        match ent {
+            document::EntityType::Insert(ins) => consider(ins.insert_point.x, ins.insert_point.y),
+            document::EntityType::Line(ln) => {
+                consider(ln.start.x, ln.start.y);
+                consider(ln.end.x, ln.end.y);
+            }
+            document::EntityType::LwPolyline(pl) => {
+                for v in &pl.vertices {
+                    consider(v.location.x, v.location.y);
+                }
+            }
+            document::EntityType::Text(t) => consider(t.insertion_point.x, t.insertion_point.y),
+            _ => {}
+        }
+    }
+    if min_x.is_finite() && max_x >= min_x {
+        ((max_x - min_x).max(1.0), (max_y - min_y).max(1.0))
+    } else {
+        (841.0, 594.0)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_configured_seed(
+    doc: &Document,
+    opts: &ConvertOptions,
+) -> Result<(pid_parse::PidPackage, Option<String>), String> {
+    use crate::io::pid_write::{
+        list_seeds_in_refdata_zip, load_seed_from_bytes, load_seed_from_path,
+        load_seed_from_refdata_zip,
+    };
+
+    if let Some(ref raw) = opts.seed_pid_bytes {
+        let pkg = load_seed_from_bytes(raw)?;
+        return Ok((pkg, None));
+    }
+
+    let spec = opts
+        .seed_pid_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "no seed_pid_path or seed_pid_bytes configured".to_string())?;
+
+    if let Some((zip_part, entry_part)) = spec.split_once("::") {
+        let pkg = load_seed_from_refdata_zip(Path::new(zip_part), entry_part.trim())?;
+        let tpl = infer_igr_for_seed_name(entry_part.trim());
+        return Ok((pkg, tpl));
+    }
+
+    let path = Path::new(spec);
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+    {
+        let (w_mm, h_mm) = measure_doc_extent_mm(doc);
+        let preferred = if w_mm <= 430.0 && h_mm <= 305.0 {
+            "A3-W-New.pid"
+        } else if w_mm <= 605.0 && h_mm <= 430.0 {
+            "A2-W-New.pid"
+        } else if w_mm <= 855.0 && h_mm <= 605.0 {
+            "A1-W-New.pid"
+        } else {
+            "A0-W-New.pid"
+        };
+        let available = list_seeds_in_refdata_zip(path)?;
+        let chosen = available
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(preferred))
+            .or_else(|| {
+                available
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case("A1-W-New.pid"))
+            })
+            .or_else(|| available.first())
+            .map(|(n, _)| n.clone())
+            .ok_or_else(|| format!("no .pid seeds found in {}", path.display()))?;
+        let pkg = load_seed_from_refdata_zip(path, &chosen)?;
+        let tpl = infer_igr_for_seed_name(&chosen);
+        return Ok((pkg, tpl));
+    }
+
+    let pkg = load_seed_from_path(path)?;
+    let tpl = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .and_then(infer_igr_for_seed_name);
+    Ok((pkg, tpl))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn infer_igr_for_seed_name(seed_name: &str) -> Option<String> {
+    let stem = Path::new(seed_name).file_stem()?.to_str()?;
+    if let Some(prefix) = stem.strip_suffix("-New") {
+        Some(format!("{prefix} - New.igr"))
+    } else {
+        Some(format!("{stem}.igr"))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn pick_seed_style_ids(seed: &pid_parse::PidPackage) -> (u32, u32) {
+    use pid_parse::parsers::sheet_records::{parse_live_psm_header, SheetChain};
+
+    let mut line_style_id: Option<u32> = None;
+    let mut text_style_id: Option<u32> = None;
+    if let Some(sc) = seed.get_stream("/StyleCluster") {
+        for start in SheetChain::walk(&sc.data).starts {
+            let Some(hdr) = parse_live_psm_header(&sc.data, start) else {
+                continue;
+            };
+            let Some(id_bytes) = sc.data.get(hdr.body_start + 14..hdr.body_start + 18) else {
+                continue;
+            };
+            let style_id = u32::from_le_bytes([id_bytes[0], id_bytes[1], id_bytes[2], id_bytes[3]]);
+            if style_id == 0 {
+                continue;
+            }
+            if hdr.type_code == 0x002E && line_style_id.is_none() {
+                line_style_id = Some(style_id);
+            } else if hdr.type_code == 0x002C && text_style_id.is_none() {
+                text_style_id = Some(style_id);
+            }
+        }
+    }
+    (line_style_id.unwrap_or(1), text_style_id.unwrap_or(1))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct SheetCoordMapper {
+    upm: f64,
+    scale: f64,
+    offset_x_mm: f64,
+    offset_y_mm: f64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl SheetCoordMapper {
+    fn from_state_and_page(state: &CoreConversionState, page_mm: (f64, f64)) -> Self {
+        let upm = state.rec.units_per_mm.max(1e-6);
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        let mut add_pt = |pt: (f64, f64)| {
+            let x = pt.0 / upm;
+            let y = pt.1 / upm;
+            if x.is_finite() && y.is_finite() {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        };
+        for ps in &state.placed_symbols {
+            add_pt(state.rec.symbols[ps.sym_idx].at);
+        }
+        for pr in &state.placed_runs {
+            for &p in &pr.points {
+                add_pt(p);
+            }
+        }
+        for lb in &state.rec.pipe_labels {
+            add_pt(lb.at);
+        }
+
+        if !min_x.is_finite() || max_x < min_x {
+            return Self {
+                upm,
+                scale: 1.0,
+                offset_x_mm: 0.0,
+                offset_y_mm: 0.0,
+            };
+        }
+
+        let margin = 10.0;
+        let (pw, ph) = page_mm;
+        if min_x >= 2.0 && min_y >= 2.0 && max_x <= pw - 2.0 && max_y <= ph - 2.0 {
+            return Self {
+                upm,
+                scale: 1.0,
+                offset_x_mm: 0.0,
+                offset_y_mm: 0.0,
+            };
+        }
+
+        let span_x = (max_x - min_x).max(1.0);
+        let span_y = (max_y - min_y).max(1.0);
+        let avail_w = (pw - 2.0 * margin).max(50.0);
+        let avail_h = (ph - 2.0 * margin).max(50.0);
+        let fit_scale = (avail_w / span_x).min(avail_h / span_y).min(1.0);
+        Self {
+            upm,
+            scale: fit_scale,
+            offset_x_mm: margin - min_x * fit_scale,
+            offset_y_mm: margin - min_y * fit_scale,
+        }
+    }
+
+    fn map_pt(&self, dxf_pt: (f64, f64)) -> (f64, f64) {
+        let x_mm = (dxf_pt.0 / self.upm) * self.scale + self.offset_x_mm;
+        let y_mm = (dxf_pt.1 / self.upm) * self.scale + self.offset_y_mm;
+        (x_mm, y_mm)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn compute_representation_uid_map(dwg: &ExportDrawing) -> BTreeMap<(String, u32), String> {
+    let mut rep_alloc = UidAllocator::new(&dwg.plant, &dwg.doc_name);
+    let _ = rep_alloc.alloc_primary_uid(Some(&dwg.doc_uid), "doc");
+    for item in &dwg.items {
+        if is_valid_hex32(&item.uid) {
+            let _ = rep_alloc.alloc_primary_uid(Some(&item.uid), &item.uid);
+        }
+    }
+    let mut out = BTreeMap::new();
+    for item in &dwg.items {
+        for &oid in &item.graphic_oids {
+            let rep_uid = rep_alloc.alloc_primary_uid(None, &format!("rep:{}:{oid}", item.uid));
+            out.insert((item.uid.clone(), oid), rep_uid);
+        }
+    }
+    out
+}
+
+/// Convert an in-memory `Document` into publish XML plus synchronized `.pid` bytes (`#130`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn convert_document_to_dual(
+    doc: &Document,
+    doc_name: &str,
+    opts: &ConvertOptions,
+) -> Result<DualConvertBundle, String> {
+    use crate::io::pid_write::{
+        apply_increments_to_seed, AddedAttributeSpec, AddedLineSpec, AddedPolylineSpec,
+        AddedSymbolSpec, AddedTextSpec, PidWriteIncrements, SeedOidPool,
+    };
+    use pid_parse::{build_normalized_geometry, PidWriter, WritePlan};
+
+    if !opts.wants_dual_pid() {
+        let (publish, report) = convert_document_to_publish(doc, doc_name, opts)?;
+        return Ok(DualConvertBundle {
+            publish,
+            pid_bytes: None,
+            report,
+        });
+    }
+
+    let (mut seed_pkg, inferred_tpl) = load_configured_seed(doc, opts)?;
+    let pool = SeedOidPool::from_seed(&seed_pkg);
+    let max_seed_oid = pool.used_oids().iter().copied().max().unwrap_or(99);
+    let min_next_oid = max_seed_oid.saturating_add(1).max(100);
+
+    let mut state =
+        build_core_conversion(doc, doc_name, opts, Some((min_next_oid, pool.used_oids())))?;
+
+    let seed_geom = build_normalized_geometry(&seed_pkg.parsed);
+    let page_mm = seed_geom.page_dimensions_mm.unwrap_or((841.0, 594.0));
+    let mapper = SheetCoordMapper::from_state_and_page(&state, page_mm);
+    let (line_style_id, text_style_id) = pick_seed_style_ids(&seed_pkg);
+    let rep_uid_map = compute_representation_uid_map(&state.dwg);
+
+    let item_by_goid: BTreeMap<u32, &ExportItem> = state
+        .dwg
+        .items
+        .iter()
+        .flat_map(|it| it.graphic_oids.iter().copied().map(move |oid| (oid, it)))
+        .collect();
+
+    let mut inc = PidWriteIncrements {
+        doc_uid: Some(state.report.doc_uid.clone()),
+        plant_name: Some(opts.plant.clone()),
+        template_name: inferred_tpl,
+        ..Default::default()
+    };
+
+    for ps in &state.placed_symbols {
+        let sym = &state.rec.symbols[ps.sym_idx];
+        let pt_mm = mapper.map_pt(sym.at);
+        let rel_sym = sym
+            .symbol_path
+            .clone()
+            .unwrap_or_else(|| format!("Symbols\\{}.sym", sym.source_block));
+        inc.symbols.push(AddedSymbolSpec {
+            preferred_oid: Some(ps.graphic_oid),
+            symbol_rel_path: rel_sym,
+            insertion_mm: pt_mm,
+            rotation_rad: 0.0,
+            scale: mapper.scale,
+            style_ref: line_style_id,
+        });
+
+        if let Some(label_txt) = sym.tag.as_deref().or(sym.to_from_text.as_deref()) {
+            inc.texts.push(AddedTextSpec {
+                preferred_oid: None,
+                text: label_txt.to_string(),
+                insertion_mm: (pt_mm.0, (pt_mm.1 + 3.0).min(page_mm.1 - 4.0)),
+                rotation_rad: 0.0,
+                style_index: text_style_id,
+            });
+        }
+
+        if let Some(item) = item_by_goid.get(&ps.graphic_oid) {
+            let rep_uid = rep_uid_map
+                .get(&(item.uid.clone(), ps.graphic_oid))
+                .cloned()
+                .ok_or_else(|| format!("missing representation UID for {}", item.uid))?;
+            inc.attributes.push(AddedAttributeSpec {
+                described_graphic_oid: ps.graphic_oid,
+                model_uid: item.uid.clone(),
+                representation_uid: rep_uid,
+                sppid_class: item.class.clone(),
+                drawing_no: doc_name.to_string(),
+                item_tag: item.name.clone(),
+            });
+        }
+    }
+
+    for pr in &state.placed_runs {
+        let mapped_pts: Vec<(f64, f64)> = pr.points.iter().map(|&p| mapper.map_pt(p)).collect();
+        if mapped_pts.len() == 2 {
+            inc.lines.push(AddedLineSpec {
+                preferred_oid: Some(pr.graphic_oid),
+                start_mm: mapped_pts[0],
+                end_mm: mapped_pts[1],
+                style_index: line_style_id,
+            });
+        } else if mapped_pts.len() >= 3 {
+            inc.polylines.push(AddedPolylineSpec {
+                preferred_oid: Some(pr.graphic_oid),
+                vertices_mm: mapped_pts,
+                style_index: line_style_id,
+            });
+        }
+
+        if let Some(item) = item_by_goid.get(&pr.graphic_oid) {
+            let rep_uid = rep_uid_map
+                .get(&(item.uid.clone(), pr.graphic_oid))
+                .cloned()
+                .ok_or_else(|| format!("missing representation UID for {}", item.uid))?;
+            inc.attributes.push(AddedAttributeSpec {
+                described_graphic_oid: pr.graphic_oid,
+                model_uid: item.uid.clone(),
+                representation_uid: rep_uid,
+                sppid_class: item.class.clone(),
+                drawing_no: doc_name.to_string(),
+                item_tag: item.name.clone(),
+            });
+        }
+    }
+
+    for lb in &state.rec.pipe_labels {
+        let pt_mm = mapper.map_pt(lb.at);
+        inc.texts.push(AddedTextSpec {
+            preferred_oid: None,
+            text: lb.raw_text.clone(),
+            insertion_mm: pt_mm,
+            rotation_rad: 0.0,
+            style_index: text_style_id,
+        });
+    }
+
+    let sym_dir = opts
+        .sym_library_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    apply_increments_to_seed(&mut seed_pkg, &inc, sym_dir.as_deref())?;
+
+    let pid_bytes = PidWriter::write_to_bytes(&seed_pkg, &WritePlan::default())
+        .map_err(|e| format!("write .pid bytes for {doc_name}: {e}"))?;
+
+    let ver = verify_dual_bundle(
+        &state.report.doc_uid,
+        &export_drawing_bundle(&state.dwg)?.data_xml,
+        &pid_bytes,
+        None,
+        doc_name,
+    )?;
+    state.report.pid_verification = Some(ver);
+
+    let mut publish = export_drawing_bundle(&state.dwg)?;
+    publish.coverage_json = serde_json::to_string_pretty(&state.report)
         .map_err(|e| format!("serialize coverage report: {e}"))?;
 
-    Ok((bundle, report))
+    Ok(DualConvertBundle {
+        publish,
+        pid_bytes: Some(pid_bytes),
+        report: state.report,
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type XmlRepLink = (String, u32, String);
+
+#[cfg(not(target_arch = "wasm32"))]
+fn extract_attr_value<'a>(line: &'a str, attr: &str) -> Option<&'a str> {
+    let needle = format!("{attr}=\"");
+    let idx = line.find(&needle)?;
+    let rest = &line[idx + needle.len()..];
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_xml_rep_links(data_xml: &[u8]) -> Result<Vec<XmlRepLink>, String> {
+    let body = data_xml
+        .strip_prefix(&[0xEF, 0xBB, 0xBF])
+        .unwrap_or(data_xml);
+    let text = std::str::from_utf8(body).map_err(|e| format!("invalid UTF-8 in _Data.xml: {e}"))?;
+
+    let mut rep_goid: BTreeMap<String, u32> = BTreeMap::new();
+    let mut rep_to_model: BTreeMap<String, String> = BTreeMap::new();
+
+    let mut in_rep = false;
+    let mut cur_rep_uid: Option<String> = None;
+    let mut cur_goid: Option<u32> = None;
+
+    let mut in_rel = false;
+    let mut cur_uid1: Option<String> = None;
+    let mut cur_uid2: Option<String> = None;
+    let mut cur_def: Option<String> = None;
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line == "<PIDRepresentation>" {
+            in_rep = true;
+            cur_rep_uid = None;
+            cur_goid = None;
+        } else if line == "</PIDRepresentation>" {
+            if let (Some(ru), Some(go)) = (cur_rep_uid.take(), cur_goid.take()) {
+                rep_goid.insert(ru, go);
+            }
+            in_rep = false;
+        } else if in_rep {
+            if line.starts_with("<IObject ") {
+                cur_rep_uid = extract_attr_value(line, "UID").map(str::to_string);
+            } else if line.starts_with("<IDrawingRepresentation ") {
+                cur_goid = extract_attr_value(line, "GraphicOID").and_then(|s| s.parse().ok());
+            }
+        } else if line == "<Rel>" {
+            in_rel = true;
+            cur_uid1 = None;
+            cur_uid2 = None;
+            cur_def = None;
+        } else if line == "</Rel>" {
+            if cur_def.as_deref() == Some("DrawingItems") {
+                if let (Some(u1), Some(u2)) = (cur_uid1.take(), cur_uid2.take()) {
+                    rep_to_model.insert(u1, u2);
+                }
+            }
+            in_rel = false;
+        } else if in_rel && line.starts_with("<IRel ") {
+            cur_uid1 = extract_attr_value(line, "UID1").map(str::to_string);
+            cur_uid2 = extract_attr_value(line, "UID2").map(str::to_string);
+            cur_def = extract_attr_value(line, "DefUID").map(str::to_string);
+        }
+    }
+
+    let mut out = Vec::with_capacity(rep_goid.len());
+    for (rep_uid, goid) in rep_goid {
+        let model_uid = rep_to_model.get(&rep_uid).cloned().unwrap_or_default();
+        out.push((rep_uid, goid, model_uid));
+    }
+    Ok(out)
+}
+
+/// Verify cross-file `UID`/`GraphicOID` 100% alignment, `a`-level re-read/index
+/// consistency, and optional `b`-level CAD load + `pid-plot` PDF rendering (`#130`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn verify_dual_bundle(
+    doc_uid: &str,
+    data_xml: &[u8],
+    pid_bytes: &[u8],
+    plot_work_dir: Option<&Path>,
+    stem: &str,
+) -> Result<DualVerifyReport, String> {
+    use crate::io::pid_write::{load_seed_from_bytes, verify_package_index_consistency};
+    use pid_parse::parsers::attribute_rows::decode_attribute_row;
+    use pid_parse::parsers::sheet_records::{
+        decode_iglines, decode_iglinestrings, decode_igsymbols, decode_igtextboxes,
+        parse_live_psm_header, SheetChain,
+    };
+    use pid_parse::{build_normalized_geometry, SummaryPropertyValue};
+
+    let rep_links = parse_xml_rep_links(data_xml)?;
+    let reparsed = load_seed_from_bytes(pid_bytes)?;
+
+    let spid_matches_doc_uid = reparsed
+        .parsed
+        .summary
+        .as_ref()
+        .and_then(|s| s.user_properties.get("_SPID"))
+        .is_some_and(|v| {
+            matches!(
+                v,
+                SummaryPropertyValue::Lpstr(t) | SummaryPropertyValue::Lpwstr(t) if t == doc_uid
+            )
+        });
+
+    let mut sheet_goids: BTreeSet<u32> = BTreeSet::new();
+    for (path, raw) in &reparsed.streams {
+        let trimmed = path.trim_start_matches('/');
+        if trimmed.contains('/') || !trimmed.starts_with("Sheet") {
+            continue;
+        }
+        for r in decode_iglines(&raw.data) {
+            sheet_goids.insert(r.oid);
+        }
+        for r in decode_iglinestrings(&raw.data) {
+            sheet_goids.insert(r.oid);
+        }
+        for r in decode_igsymbols(&raw.data) {
+            sheet_goids.insert(r.oid);
+        }
+        for r in decode_igtextboxes(&raw.data) {
+            sheet_goids.insert(r.oid);
+        }
+    }
+
+    let mut attr_by_oid: BTreeMap<u32, (String, String)> = BTreeMap::new();
+    if let Some(uda) = reparsed.get_stream("/Unclustered Dynamic Attributes") {
+        for start in SheetChain::walk(&uda.data).starts {
+            let Some(hdr) = parse_live_psm_header(&uda.data, start) else {
+                continue;
+            };
+            if hdr.type_code != 0x0089 {
+                continue;
+            }
+            let Some(payload) = uda
+                .data
+                .get(hdr.body_start..hdr.body_start + hdr.bytes_to_follow as usize)
+            else {
+                continue;
+            };
+            if let Some(row) = decode_attribute_row(payload) {
+                let model_id = row.text("ModelID").unwrap_or_default().to_string();
+                let drawing_id = row.text("DrawingID").unwrap_or_default().to_string();
+                attr_by_oid.insert(row.described, (model_id, drawing_id));
+            }
+        }
+    }
+
+    let mut matched_graphic_oids = 0usize;
+    let mut matched_model_uids = 0usize;
+    let mut matched_representation_uids = 0usize;
+    let mut missing_graphic_oids_in_pid = Vec::new();
+    let mut missing_model_uids_in_pid = Vec::new();
+    let mut mismatched_links = Vec::new();
+
+    for (rep_uid, goid, model_uid) in &rep_links {
+        let on_sheet = sheet_goids.contains(goid);
+        let attr_entry = attr_by_oid.get(goid);
+        if on_sheet && attr_entry.is_some() {
+            matched_graphic_oids += 1;
+        } else {
+            missing_graphic_oids_in_pid.push(*goid);
+        }
+
+        if let Some((pid_model_uid, pid_rep_uid)) = attr_entry {
+            if pid_model_uid == model_uid {
+                matched_model_uids += 1;
+            } else {
+                missing_model_uids_in_pid.push(model_uid.clone());
+                mismatched_links.push(format!(
+                    "GraphicOID {goid}: XML ModelID={model_uid} != .pid ModelID={pid_model_uid}"
+                ));
+            }
+            if pid_rep_uid == rep_uid {
+                matched_representation_uids += 1;
+            } else {
+                mismatched_links.push(format!(
+                    "GraphicOID {goid}: XML RepUID={rep_uid} != .pid DrawingID={pid_rep_uid}"
+                ));
+            }
+        } else {
+            missing_model_uids_in_pid.push(model_uid.clone());
+        }
+    }
+
+    let idx_chk = verify_package_index_consistency(&reparsed)?;
+    let norm_geom = build_normalized_geometry(&reparsed.parsed);
+
+    let mut b_level_cad_entities = None;
+    let mut b_level_pdf_bytes = None;
+    let mut b_level_pdf_primitives = None;
+    let mut b_level_pdf_on_page = None;
+
+    if let Some(work_dir) = plot_work_dir {
+        std::fs::create_dir_all(work_dir)
+            .map_err(|e| format!("create plot dir {}: {e}", work_dir.display()))?;
+        let pid_path = work_dir.join(format!("{stem}.pid"));
+        if !pid_path.is_file() {
+            std::fs::write(&pid_path, pid_bytes)
+                .map_err(|e| format!("write {}: {e}", pid_path.display()))?;
+        }
+
+        let cad_doc = crate::io::load_file(&pid_path)
+            .map_err(|e| format!("b-level CAD load failed for {}: {e}", pid_path.display()))?;
+        b_level_cad_entities = Some(cad_doc.model_space_entities().count());
+
+        let pdf_path = work_dir.join(format!("{stem}.pidplot.pdf"));
+        let receipt = crate::io::pid_pdf::plot_pdf(&pid_path, &pdf_path)?;
+        let pdf_raw = std::fs::read(&pdf_path)
+            .map_err(|e| format!("read plotted PDF {}: {e}", pdf_path.display()))?;
+        if !pdf_raw.starts_with(b"%PDF-") {
+            return Err(format!(
+                "plotted PDF {} missing %PDF- header",
+                pdf_path.display()
+            ));
+        }
+        b_level_pdf_bytes = Some(receipt.bytes);
+        b_level_pdf_primitives = Some(receipt.primitives);
+        b_level_pdf_on_page = Some(receipt.ledger.on_page);
+    }
+
+    let sppid_native_c1_status = if std::env::var_os("OCS_PID_SPPID_RUNNER").is_some() {
+        "runner_configured".to_string()
+    } else {
+        "unverified_no_sppid_runner".to_string()
+    };
+
+    Ok(DualVerifyReport {
+        xml_rep_count: rep_links.len(),
+        matched_graphic_oids,
+        matched_model_uids,
+        matched_representation_uids,
+        missing_graphic_oids_in_pid,
+        missing_model_uids_in_pid,
+        mismatched_links,
+        spid_matches_doc_uid,
+        a_level_index_consistent: idx_chk.is_consistent(),
+        a_level_normalized_entities: norm_geom.entities.len(),
+        b_level_cad_entities,
+        b_level_pdf_bytes,
+        b_level_pdf_primitives,
+        b_level_pdf_on_page,
+        sppid_native_c1_status,
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -405,8 +1195,8 @@ fn collect_input_drawings(input: &Path, out: &mut Vec<PathBuf>) -> Result<(), St
 }
 
 /// Convert a single `.dxf`/`.dwg` file or all non-empty `.dxf`/`.dwg` files in a
-/// directory, writing `<stem>_Data.xml`, `<stem>_Meta.xml`, and `<stem>_Coverage.json`
-/// into `out_dir`.
+/// directory, writing `<stem>_Data.xml`, `<stem>_Meta.xml`, `<stem>_Coverage.json`,
+/// and (when a seed `.pid` is configured) `<stem>.pid` + optional `<stem>.pidplot.pdf`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn convert_path_to_dir(
     input: &Path,
@@ -429,22 +1219,67 @@ pub fn convert_path_to_dir(
             .unwrap_or("SHEET")
             .to_string();
         match crate::io::load_file(&f) {
-            Ok(doc) => match convert_document_to_publish(&doc, &stem, opts) {
-                Ok((bundle, rep)) => {
+            Ok(doc) => match convert_document_to_dual(&doc, &stem, opts) {
+                Ok(mut dual) => {
                     let data_p = out_dir.join(format!("{stem}_Data.xml"));
                     let meta_p = out_dir.join(format!("{stem}_Meta.xml"));
                     let cov_p = out_dir.join(format!("{stem}_Coverage.json"));
-                    if let Err(e) = std::fs::write(&data_p, &bundle.data_xml)
-                        .and_then(|_| std::fs::write(&meta_p, &bundle.meta_xml))
-                        .and_then(|_| std::fs::write(&cov_p, format!("{}\n", bundle.coverage_json)))
-                    {
-                        summary.files_failed += 1;
-                        summary.errors.push(format!("{stem}: write failed: {e}"));
-                    } else {
-                        summary.files_converted += 1;
-                        summary.total_items_written += rep.total_items_written;
-                        summary.total_relations_written += rep.total_relations_written;
-                        summary.sheets.push(rep);
+                    let mut write_res = std::fs::write(&data_p, &dual.publish.data_xml)
+                        .and_then(|_| std::fs::write(&meta_p, &dual.publish.meta_xml))
+                        .map_err(|e| format!("write xml failed: {e}"));
+
+                    if write_res.is_ok() {
+                        if let Some(ref pid_raw) = dual.pid_bytes {
+                            let pid_p = out_dir.join(format!("{stem}.pid"));
+                            write_res = std::fs::write(&pid_p, pid_raw)
+                                .map_err(|e| format!("write .pid failed: {e}"));
+                            if write_res.is_ok() && opts.verify_plot_pdf {
+                                match verify_dual_bundle(
+                                    &dual.report.doc_uid,
+                                    &dual.publish.data_xml,
+                                    pid_raw,
+                                    Some(out_dir),
+                                    &stem,
+                                ) {
+                                    Ok(ver) => {
+                                        dual.report.pid_verification = Some(ver);
+                                        if let Ok(updated_cov) =
+                                            serde_json::to_string_pretty(&dual.report)
+                                        {
+                                            dual.publish.coverage_json = updated_cov;
+                                        }
+                                    }
+                                    Err(err) => {
+                                        write_res = Err(format!("plot/verify failed: {err}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if write_res.is_ok() {
+                        write_res =
+                            std::fs::write(&cov_p, format!("{}\n", dual.publish.coverage_json))
+                                .map_err(|e| format!("write coverage failed: {e}"));
+                    }
+
+                    match write_res {
+                        Ok(()) => {
+                            summary.files_converted += 1;
+                            if dual.pid_bytes.is_some() {
+                                summary.pid_files_written += 1;
+                                if opts.verify_plot_pdf {
+                                    summary.pdf_files_plotted += 1;
+                                }
+                            }
+                            summary.total_items_written += dual.report.total_items_written;
+                            summary.total_relations_written += dual.report.total_relations_written;
+                            summary.sheets.push(dual.report);
+                        }
+                        Err(err) => {
+                            summary.files_failed += 1;
+                            summary.errors.push(format!("{stem}: {err}"));
+                        }
                     }
                 }
                 Err(err) => {
@@ -568,6 +1403,113 @@ mod tests {
         doc
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn build_synthetic_seed_pid_bytes() -> Vec<u8> {
+        use pid_parse::{PidDocument, PidPackage, PidWriter, RawStream, WritePlan};
+
+        fn wrap_psm(type_code: u16, payload: &[u8]) -> Vec<u8> {
+            let mut v = Vec::with_capacity(6 + payload.len());
+            v.extend_from_slice(&0x0001u16.to_le_bytes());
+            v.extend_from_slice(&type_code.to_le_bytes());
+            v.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+            v.extend_from_slice(payload);
+            v
+        }
+
+        fn make_layer(oid: u32, name: &str) -> Vec<u8> {
+            let u16s: Vec<u16> = name.encode_utf16().collect();
+            let mut p = Vec::new();
+            p.extend_from_slice(&oid.to_le_bytes());
+            p.extend_from_slice(&[0u8; 8]);
+            p.extend_from_slice(&0u16.to_le_bytes());
+            p.extend_from_slice(&6u32.to_le_bytes());
+            p.extend_from_slice(&(u16s.len() as u16).to_le_bytes());
+            for u in u16s {
+                p.extend_from_slice(&u.to_le_bytes());
+            }
+            p.extend_from_slice(&0u16.to_le_bytes());
+            wrap_psm(0x0081, &p)
+        }
+
+        let mut streams = BTreeMap::new();
+        let mut empty_chain = 0x6C90_F544u32.to_le_bytes().to_vec();
+        empty_chain.extend_from_slice(&0u32.to_le_bytes());
+
+        let mut cluster0 = 0x6C90_F544u32.to_le_bytes().to_vec();
+        cluster0.extend_from_slice(&2u32.to_le_bytes());
+        cluster0.extend_from_slice(&make_layer(8, "Default"));
+        cluster0.extend_from_slice(&make_layer(12, "Labels"));
+
+        streams.insert(
+            "/Sheet6".to_string(),
+            RawStream {
+                path: "/Sheet6".to_string(),
+                data: empty_chain.clone(),
+                modified: false,
+            },
+        );
+        streams.insert(
+            "/PSMcluster0".to_string(),
+            RawStream {
+                path: "/PSMcluster0".to_string(),
+                data: cluster0,
+                modified: false,
+            },
+        );
+        streams.insert(
+            "/Unclustered Dynamic Attributes".to_string(),
+            RawStream {
+                path: "/Unclustered Dynamic Attributes".to_string(),
+                data: empty_chain.clone(),
+                modified: false,
+            },
+        );
+        streams.insert(
+            "/StyleCluster".to_string(),
+            RawStream {
+                path: "/StyleCluster".to_string(),
+                data: empty_chain,
+                modified: false,
+            },
+        );
+
+        let mut roots = 0x746F_6F72u32.to_le_bytes().to_vec();
+        roots.extend_from_slice(&[0u8; 8]);
+        streams.insert(
+            "/PSMroots".to_string(),
+            RawStream {
+                path: "/PSMroots".to_string(),
+                data: roots,
+                modified: false,
+            },
+        );
+
+        let mut tseg = 0x6765_7374u32.to_le_bytes().to_vec();
+        tseg.extend_from_slice(&0u16.to_le_bytes());
+        tseg.extend_from_slice(&4u16.to_le_bytes());
+        tseg.extend_from_slice(&32u16.to_le_bytes());
+        tseg.extend_from_slice(&0u16.to_le_bytes());
+        streams.insert(
+            "/PSMspacemap/0x00000000".to_string(),
+            RawStream {
+                path: "/PSMspacemap/0x00000000".to_string(),
+                data: tseg,
+                modified: false,
+            },
+        );
+        streams.insert(
+            "/TaggedTxtData/Revision".to_string(),
+            RawStream {
+                path: "/TaggedTxtData/Revision".to_string(),
+                data: Vec::new(),
+                modified: false,
+            },
+        );
+
+        let pkg = PidPackage::new(None, streams, PidDocument::default());
+        PidWriter::write_to_bytes(&pkg, &WritePlan::default()).unwrap()
+    }
+
     #[test]
     fn converts_synthetic_sheet_to_strict_valid_xml_and_conserved_coverage_report() {
         let doc = build_synthetic_sheet();
@@ -629,6 +1571,110 @@ mod tests {
         assert!(out_dir.join("UNIT_SHEET_01_Data.xml").is_file());
         assert!(out_dir.join("UNIT_SHEET_01_Meta.xml").is_file());
         assert!(out_dir.join("UNIT_SHEET_01_Coverage.json").is_file());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dual_converts_synthetic_sheet_with_100pct_uid_graphic_oid_and_ab_roundtrip() {
+        let doc = build_synthetic_sheet();
+        let seed_bytes = build_synthetic_seed_pid_bytes();
+        let opts = ConvertOptions {
+            seed_pid_bytes: Some(seed_bytes),
+            verify_plot_pdf: true,
+            ..Default::default()
+        };
+
+        let dual = convert_document_to_dual(&doc, "SYNTH-DUAL-01", &opts).expect("dual convert");
+        let pid_bytes = dual
+            .pid_bytes
+            .as_ref()
+            .expect("dual convert must emit .pid bytes");
+
+        let spec = default_publish_spec();
+        let chk_opts = CheckOptions {
+            expected_plant: Some("P01".to_string()),
+            ..Default::default()
+        };
+        assert!(check_publish_xml_bytes(
+            "SYNTH-DUAL-01_Data.xml",
+            PublishXmlKind::Data,
+            &dual.publish.data_xml,
+            spec,
+            &chk_opts,
+        )
+        .is_empty());
+
+        let tmp = std::env::temp_dir().join(format!("ocs_pid_dual_verify_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let ver = verify_dual_bundle(
+            &dual.report.doc_uid,
+            &dual.publish.data_xml,
+            pid_bytes,
+            Some(&tmp),
+            "SYNTH-DUAL-01",
+        )
+        .expect("verify dual bundle");
+
+        assert!(ver.xml_rep_count >= 5, "unexpected rep count: {ver:?}");
+        assert!(
+            ver.is_cross_file_and_a_valid(),
+            "cross-file or a-level check failed: {ver:?}"
+        );
+        assert!(
+            ver.is_b_plot_valid(),
+            "b-level CAD load or PDF plot check failed: {ver:?}"
+        );
+        assert_eq!(ver.sppid_native_c1_status, "unverified_no_sppid_runner");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn batch_converts_directory_to_quadruple_outputs_with_pid_and_pdf() {
+        let doc = build_synthetic_sheet();
+        let seed_bytes = build_synthetic_seed_pid_bytes();
+        let tmp = std::env::temp_dir().join(format!("ocs_pid_dual_batch_{}", std::process::id()));
+        let in_dir = tmp.join("in");
+        let out_dir = tmp.join("out");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&in_dir).unwrap();
+
+        let seed_path = tmp.join("seed_blank.pid");
+        std::fs::write(&seed_path, &seed_bytes).unwrap();
+
+        let dxf_path = in_dir.join("UNIT_DUAL_01.dxf");
+        crate::io::save(&doc, &dxf_path).unwrap();
+        std::fs::write(in_dir.join("EMPTY_0BYTE.dxf"), b"").unwrap();
+
+        let opts = ConvertOptions {
+            seed_pid_path: Some(seed_path.to_string_lossy().into_owned()),
+            verify_plot_pdf: true,
+            ..Default::default()
+        };
+
+        let summary = convert_path_to_dir(&in_dir, &out_dir, &opts).expect("dual batch convert");
+        assert_eq!(summary.files_converted, 1);
+        assert_eq!(summary.files_failed, 0);
+        assert_eq!(summary.pid_files_written, 1);
+        assert_eq!(summary.pdf_files_plotted, 1);
+        assert!(out_dir.join("UNIT_DUAL_01_Data.xml").is_file());
+        assert!(out_dir.join("UNIT_DUAL_01_Meta.xml").is_file());
+        assert!(out_dir.join("UNIT_DUAL_01.pid").is_file());
+        assert!(out_dir.join("UNIT_DUAL_01_Coverage.json").is_file());
+        assert!(out_dir.join("UNIT_DUAL_01.pidplot.pdf").is_file());
+
+        let rep = &summary.sheets[0];
+        let pver = rep
+            .pid_verification
+            .as_ref()
+            .expect("sheet report carries pid_verification");
+        assert!(pver.is_cross_file_and_a_valid(), "{pver:?}");
+        assert!(pver.is_b_plot_valid(), "{pver:?}");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
