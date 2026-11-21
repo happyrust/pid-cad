@@ -8,6 +8,7 @@
 //! 与序列化；只有 [`TypeLib::store`] / [`TypeLib::load`] 需要一张
 //! [`document::Document`]。
 
+pub mod bom;
 pub mod collab_state;
 pub mod drc;
 pub mod dwg_roundtrip;
