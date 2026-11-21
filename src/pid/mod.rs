@@ -9,6 +9,7 @@
 //! [`document::Document`]。
 
 pub mod collab_state;
+pub mod drc;
 pub mod dwg_roundtrip;
 pub mod graph_data;
 pub mod master_data;
