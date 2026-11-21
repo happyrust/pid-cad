@@ -1,12 +1,13 @@
 //! 规则检查用到的数据（`SPEC-pid-drc.md` §3）。现在是规则的作用对象（§3.1 的 `target`）
 //! 和 §3.4 的名字表：每种对象有哪些派生事实，哪些关系能接 `.` 往下取，以及哪种
-//! 对象都能用的根；还有规则包（§3.1）读出来的规则、规则集和读不进来的原因。检查结果在后面的
-//! 步骤里加。
+//! 对象都能用的根；还有规则包（§3.1）读出来的规则、规则集和读不进来的原因，以及
+//! 检查结果（§3.6）。
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
+use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use super::dsl::{DslError, Expr};
@@ -354,10 +355,13 @@ impl Target {
 // ── 规则包 ─────────────────────────────────────────────────────────────────────
 
 /// 严重度（§3.1）：只有三级，结果按这个顺序排。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub enum Severity {
+    #[serde(rename = "错误")]
     Error,
+    #[serde(rename = "警告")]
     Warning,
+    #[serde(rename = "提示")]
     Info,
 }
 
@@ -556,6 +560,151 @@ impl RuleSet {
                 .iter()
                 .any(|set| set.name == rule.set && set.enabled)
     }
+}
+
+// ── 检查结果 ──────────────────────────────────────────────────────────────────────
+
+/// 检查结果格式的版本（§3.6 的 `version`）。
+pub const REPORT_VERSION: u32 = 1;
+
+/// 什么时候查的（§4.3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Trigger {
+    #[serde(rename = "按需")]
+    OnDemand,
+    #[serde(rename = "保存前")]
+    BeforeSave,
+    #[serde(rename = "发布前")]
+    BeforePublish,
+}
+
+/// 查哪些图（§4.2）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeKind {
+    Drawing,
+    Pbs,
+    Project,
+}
+
+/// 检查范围（§3.6 的 `scope`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Scope {
+    pub kind: ScopeKind,
+    pub drawing_id: Option<String>,
+    pub pbs: Option<String>,
+    /// 项目级规则跑没跑。
+    pub cross_drawing: bool,
+}
+
+/// 一条豁免（§3.7）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Waiver {
+    pub rule_id: String,
+    pub object_key: String,
+    pub reason: String,
+    pub by: String,
+    /// Unix 秒。
+    pub at: i64,
+}
+
+/// 一条结果指向的对象（§3.6 的 `results[].object`）：类型编码、位号、图号三样定位一个
+/// 对象，没有位号的靠 `owner`、`port`、`at` 补足；`handle` 只用来在图上定位。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ObjectRef {
+    /// 摘要里的种类名，如 `管线`。
+    pub kind: String,
+    pub type_code: String,
+    pub tag: Option<String>,
+    pub drawing_id: String,
+    pub owner: Option<String>,
+    pub port: Option<String>,
+    pub at: [f64; 2],
+    pub handle: Option<String>,
+}
+
+/// 一条检查结果（§3.6 的 `results[]`）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CheckResult {
+    pub rule_id: String,
+    pub rule_name: String,
+    pub severity: Severity,
+    pub object: ObjectRef,
+    /// 豁免用的对象键（§3.7）。
+    pub object_key: String,
+    pub message: String,
+    pub fix: String,
+    /// 一条结果涉及多个位置时逐个列出。
+    pub points: Vec<[f64; 2]>,
+    /// 涉及对象自己的哪些属性，给属性表高亮用。
+    pub fields: Vec<String>,
+    pub waived: bool,
+    /// 结果里只写豁免的 `reason`、`by`、`at`。
+    #[serde(serialize_with = "waiver_note")]
+    pub waiver: Option<Waiver>,
+}
+
+/// 不是违规、但用户该知道的事（§3.6 的 `notices[]`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Notice {
+    pub code: String,
+    pub message: String,
+}
+
+/// 计数（§3.6 的 `summary`）。三个严重度只数没被豁免的结果。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct Summary {
+    #[serde(rename = "错误")]
+    pub errors: usize,
+    #[serde(rename = "警告")]
+    pub warnings: usize,
+    #[serde(rename = "提示")]
+    pub infos: usize,
+    #[serde(rename = "已豁免")]
+    pub waived: usize,
+    /// 查过的图里摘要 `objects[]` 的总数。
+    pub objects: usize,
+    pub rules_run: usize,
+    /// 启用了却没执行的规则数；停用的不算。
+    pub rules_skipped: usize,
+}
+
+/// 一次检查的结果（§3.6）。应答外面的 `ok` 由接口层加。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CheckReport {
+    pub version: u32,
+    pub rule_set_version: String,
+    pub rule_set_digest: String,
+    /// Unix 秒。
+    pub checked_at: i64,
+    pub trigger: Trigger,
+    pub scope: Scope,
+    pub elapsed_ms: u64,
+    pub summary: Summary,
+    /// 有没被豁免的错误。
+    pub blocked: bool,
+    /// 按严重度、规则号、图号、对象键排好。
+    pub results: Vec<CheckResult>,
+    pub notices: Vec<Notice>,
+    /// 图里记着、这次却没有对应结果的豁免。
+    pub stale_waivers: Vec<Waiver>,
+}
+
+fn waiver_note<S: Serializer>(waiver: &Option<Waiver>, serializer: S) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Note<'a> {
+        reason: &'a str,
+        by: &'a str,
+        at: i64,
+    }
+    waiver
+        .as_ref()
+        .map(|waiver| Note {
+            reason: &waiver.reason,
+            by: &waiver.by,
+            at: waiver.at,
+        })
+        .serialize(serializer)
 }
 
 // ── 错误 ──────────────────────────────────────────────────────────────────────
