@@ -1,6 +1,6 @@
 # 任务清单：导入的图例带上类型和位号，标注文字和图例配对
 
-> 日期：2026-11-20。状态：**SI-1 到 SI-11 做完**（2026-11-21）。规格已确认（2026-11-20，Q1–Q5 都按推荐）。规格 §6 的 14 条里，第 12 条（耗时预算）一直没有在空闲的机器上验证；2026-11-21 机器空下来的时候量了，过了，是 SI-11；同一天机器再空下来时补量了 10 轮空闲的，十轮补齐了，「比图块分支慢 2 %–3 %」的说法也跟着改了（SI-11 记录后面的「补量」）。同一天把这份计划改过的代码通读了一遍（只读，代码没有改），补记了一个没有写出来的前提（最后的「通读」一段）。SI-7 留下等拍板的四处，用户在 2026-11-21 定了：第 3 条里 D03 的说法更正、第 5 条的 53 张合计数写进测试，是 SI-8；「视图一动就算改过」是 SI-9，「带空格的位号」是 SI-10。同一天在另开的本地分支 `pid-symbol-on-main` 上把 `main` 合进来走了一遍，记在最后的「合进 main 的演练」一段（这一句和那一段只在那条分支上）。演练留下的三件事用户同一天定了：缺口符号的数按新的改了，记在它后面的「演练之后」一段（也只在那条分支上）。
+> 日期：2026-11-20。状态：**SI-1 到 SI-11 做完**（2026-11-21）。规格已确认（2026-11-20，Q1–Q5 都按推荐）。规格 §6 的 14 条里，第 12 条（耗时预算）一直没有在空闲的机器上验证；2026-11-21 机器空下来的时候量了，过了，是 SI-11；同一天机器再空下来时补量了 10 轮空闲的，十轮补齐了，「比图块分支慢 2 %–3 %」的说法也跟着改了（SI-11 记录后面的「补量」）。同一天把这份计划改过的代码通读了一遍（只读，代码没有改），补记了一个没有写出来的前提（最后的「通读」一段）。SI-7 留下等拍板的四处，用户在 2026-11-21 定了：第 3 条里 D03 的说法更正、第 5 条的 53 张合计数写进测试，是 SI-8；「视图一动就算改过」是 SI-9，「带空格的位号」是 SI-10。同一天在另开的本地分支 `pid-symbol-on-main` 上把 `main` 合进来走了一遍，记在最后的「合进 main 的演练」一段（这一句和那一段只在那条分支上）。演练留下的三件事用户同一天定了：缺口符号的数按新的改了，记在它后面的「演练之后」一段（也只在那条分支上）。那一段里说要跑的另外 4 个外部测试程序随后跑了，记在再后面的「演练之后：另外 4 个外部测试程序」一段（同样只在那条分支上）。
 > 配套：规格 `SPEC-pid-symbol-identity.md`（下文简称「规格」）。
 > 分支 `pid-symbol-identity`，起点是图块分支验收的那个提交 `1855aaae5`；一个任务一个本地提交，不推送。
 
@@ -1762,3 +1762,31 @@
   - 那 4 个外部测试程序这时还没有运行。
   - 上一段「没验证的」里别的各条照旧：示例程序只做了类型检查；没有开带窗口的程序，没有编发布版；`53ea94d76` 没有合进来；样例预算只读过一次。
 - 证据：`D:\scratch\ocs-symblock\si-11\merge\`（这一次的脚本 `pin-chain.ps1`：编测试程序、拷出来、重数、门禁连着跑；等别人编译和跑的时候看到的 `quietpin.txt`）、`D:\scratch\ocs-symblock\si-11\merge\out\`（`build-libtest-pin.done`、`libtest-pin.exe`；重数 `totals-pin.txt`、`totals-pin.log`；另两条 `real-run-pin.txt`；门禁 `chaing2.txt` 和各步的日志 `lib-testg2.log`、`integg2.log`、`clippy-libg2.log`、`clippy-lib-testg2.log`、`archg2.txt`、`fmtg2.txt`；两份 clippy 对比）。
+
+**演练之后：另外 4 个外部测试程序**（2026-11-21，11:37 起。接着上一段，也只在分支 `pid-symbol-on-main` 上，跑的是提交 `b8d3a6d18`；程序没有改，没有推送）
+
+- 为什么跑：上一段「自己选的两处」的第一处。到那时为止 7 个外部测试程序只运行过 3 个 `pid_*`，另外 4 个在合并的树上只做过类型检查。
+- 结果（`chaini4.txt`、`integi4.log`）：4 个测试程序共 155 条，都过；没有不过的，没有平时不跑的，没有被筛掉的。
+  - `integration` 150 条（`tests/integration.rs` 收进来的 28 个模块）。
+  - `dwg_acadsharp_samples` 3 条。
+  - `bevy_composite_shader` 1 条。
+  - `text_width_variants` 1 条。
+  - 条数和源文件里 `#[test]` 的个数逐个对得上（150、3、1、1）。
+- 「过」的里面有 4 条在这台机器上其实什么也没有查。这些测试找不到要用的东西时自己打印一句话就返回，算作通过，而通过的测试打印的话 cargo 平时不显示；所以把这次编出来的测试程序带 `--nocapture` 各再跑了一遍看输出（三份 `nocapture-…-i4.txt`；跑之前核对过程序文件的写入时间 11:39:10、11:39:11 落在这次编译之内）：
+  - `annotative_context_roundtrip` 的 3 条（这个模块一共就这 3 条：`annotative_leaf_contexts_survive_dwg_roundtrip`、`annotative_leaf_type_breakdown`、`dump_one_blkref_leaf`）：要读的参照图纸写的是另一台机器上的绝对路径（`tests/annotative_context_roundtrip.rs` 第 15 行，一个 Linux 用户目录下的文件），这台机器上没有，三条都打印 `SKIP: golden file … not present` 就返回了。
+  - `text_font_rendering::block_nested_mtext_fill_tris_keep_paired_low_half_at_utm`（查块里文字的填充三角形高低两半成对）：它点名的字体 `DejaVu Sans` 这台机器没有装（装着的 DejaVu 只有 `DejaVu Math TeX Gyre`），打印 `no TTF fills resolvable on this host; skipping fill-pairing assertions` 就返回了。
+  - 这 4 条要查的东西在这台机器上没有被这些测试查过。前 3 条跳不跳只看那份图纸在不在，和代码无关，换成 `main` 也一样。第 4 条照它自己的注释，是没有解析到 TTF 字体、填充是空的时候才跳过；这台机器没有装它点名的字体，文字那部分代码（`src/scene/text/`）这条分支一个文件也没有改，所以认为换成 `main` 它也一样跳过。这一句是推出来的：没有在 `main` 上跑过，装上那个字体之后它会不会真去查也没有试。它走的是 `scene::cache::block_cache::expand_insert`；那个文件这条分支改过一处（`emit_wire` 里解析曲线的深度，5 行换 5 行），不在填充三角形那一段。
+  - `integration` 打印的话只有这 4 句。这 4 个测试程序的源文件里别的提前返回只有一处，`tests/entity_transform_regression.rs` 第 867 行，是设了 `OCS_UPDATE_GOLDEN` 才走的改写参照文件的那一支，这次没有设。
+  - 另外两个也会自己跳过的测试程序这次是真做了的。`dwg_acadsharp_samples`：样例图纸在（工作目录旁边的 `ACadSharp\samples`，它点名的 14 个文件都在），没有打印一句跳过。`text_width_variants`：量了两种窄体，`Arial Narrow` 的宽高比 6.567（`Arial` 8.007），`Bodoni MT Condensed` 5.313（`Bodoni MT` 8.262）。
+- 是谁的：这 4 个测试程序的源文件和 `main` 的相同（这条分支相对合进来的 `4e115a2f8`，`tests\` 下只改了 3 个 `pid_*` 文件），不同的是它们连着的库。没有不过的，所以没有到干净的 `main` 上再跑同一组。
+- 怎么跑的：`gates.ps1 -NoFull -NoClippy -NoArch -Integ integration,bevy_composite_shader,dwg_acadsharp_samples,text_width_variants`，经 `quiet-run.ps1` 等到没有别的编译才开始（等了 31 秒）；离线、依赖锁定、有不过的也接着跑完（`cargo test --offline --locked --no-fail-fast --test …`）。11:38:08–11:39:19，70 秒，其中编译 62 秒。是从这个工作目录编的（日志里 `Compiling OpenCADStudio … (D:\work\plant-code\cad\ocs-pid-symbol-block)` 一行）；这 70 秒里观察了 7 次，没有别的会话在编（`quieti4.txt`）。
+- 没有留下东西：`OCS_UPDATE_GOLDEN` 没有设；跑完（连同带 `--nocapture` 再跑的那几次）工作区没有改动，整个 git 目录没有锁文件；系统临时目录里 `ocs` 开头的条目前后都是 2,769 个，没有多一个，也没有少一个。
+- 顺带看到的：那 2,769 个是程序内测试留下的，每跑一遍留 17、18 个（`ocs-m071-missing-<进程号>` 这样的目录、`ocs_ortho_<进程号>.bak` 这样的文件），最早的是 11-18 15:05 的，各个会话都在留；这条分支上跑门禁的那几次也一样（今天 11:23–11:24 那一批 18 个，和上一段门禁里程序内测试那一步的时间对得上）。名字在源码里找得到出处的 9 种出自 7 个文件，都不是这条分支改过的。没有清。
+- 用时：事先对用户估的是「大约 40 分钟」，那是按「32 组」估的（上一段更正过的那个数法）；实际从开始等到跑完 1 分 42 秒。
+- 到这里，7 个外部测试程序在这条分支上都运行过了：252 条过、2 条不过，不过的是 `pid_import` 里 `main` 自己的那 2 条（上一段）。
+- `main` 又动了：现在是 `e2f43b91c`（2026-11-21 11:28:43），在合进来的 `4e115a2f8` 之后有 2 个提交、12 个文件，第一个就是上一段说的 `53ea94d76`。12 个文件里没有一个是这边改过的（这边相对 `4e115a2f8` 改了 73 个文件），`Cargo.toml`、`Cargo.lock` 不在其中。照上一段定的不追；`e2f43b91c` 没有试合过。
+- 没验证的：
+  - 上面跳过的 4 条所查的东西。
+  - 这 4 个测试程序在干净的 `main` 上没有跑过；这里只知道它们在这条分支上都过。
+  - 上一段「没验证的」里别的各条照旧：3 个缺口图例在带窗口的程序里的样子；规格 §2.2 第一张表里数据库的三行；示例程序只做了类型检查；没有开带窗口的程序，没有编发布版；`main` 后来的 2 个提交没有合进来；样例预算只读过一次。
+- 证据：`D:\scratch\ocs-symblock\si-11\merge\quieti4.txt`；`D:\scratch\ocs-symblock\si-11\merge\out\`（`chaini4.txt`、`integi4.log`、`donei4.txt`；带 `--nocapture` 再跑的三份 `nocapture-integration-i4.txt`、`nocapture-dwg_acadsharp_samples-i4.txt`、`nocapture-text_width_variants-i4.txt`；跑之前临时目录的清单 `temp-ocs-before-i4.txt`）。
