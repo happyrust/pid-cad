@@ -13,6 +13,12 @@ pub mod find;
 pub mod opc;
 pub mod promote;
 pub mod recognize;
+pub mod trace;
+
+pub use trace::{
+    trace_shortest_path_by_query, trace_subnet_by_query, trace_subnet_from_handles, TraceMode,
+    TraceNodeKind, TraceReport, TraceStep,
+};
 
 pub use find::{match_query_rank, search_pid_entities, PidFindHit, PidFindKind};
 

@@ -34,7 +34,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDOPC",
         "PIDBOM",
         "PIDDRC",
-        "PIDFIND"
+        "PIDFIND",
+        "PIDTRACE"
     ]
 });
 
@@ -275,6 +276,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidfind_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidtrace_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -1722,6 +1726,167 @@ impl OpenCADStudio {
             dx,
             dy,
         ));
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidtrace_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            trace_shortest_path_by_query, trace_subnet_by_query, trace_subnet_from_handles,
+            OpcSheetInput,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDTRACE") {
+            return None;
+        }
+
+        let mut all_tabs = false;
+        let mut export_path: Option<std::path::PathBuf> = None;
+        let mut positional: Vec<String> = Vec::new();
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            if tok.eq_ignore_ascii_case("ALLTABS") || tok.eq_ignore_ascii_case("ALL") {
+                all_tabs = true;
+                idx += 1;
+            } else if tok.eq_ignore_ascii_case("EXPORT") {
+                let Some(next_tok) = tokens.get(idx + 1) else {
+                    self.command_line
+                        .push_error("PIDTRACE EXPORT: 缺少输出 JSON 文件路径。");
+                    return Some(Task::none());
+                };
+                export_path = Some(std::path::PathBuf::from(next_tok));
+                idx += 2;
+            } else if tok.eq_ignore_ascii_case("TO") && positional.len() == 1 {
+                idx += 1;
+            } else {
+                positional.push(tok.clone());
+                idx += 1;
+            }
+        }
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<OpcSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+
+        let trace_res = match positional.len() {
+            0 => {
+                let sel_handles: Vec<document::Handle> = self.tabs[i]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                trace_subnet_from_handles(i, &sel_handles, all_tabs, &sheet_inputs)
+            }
+            1 => trace_subnet_by_query(&positional[0], i, all_tabs, &sheet_inputs),
+            _ => trace_shortest_path_by_query(
+                &positional[0],
+                &positional[1],
+                i,
+                all_tabs,
+                &sheet_inputs,
+            ),
+        };
+
+        let rep = match trace_res {
+            Ok(r) => r,
+            Err(err) => {
+                self.command_line.push_error(&format!("PIDTRACE: {err}"));
+                return Some(Task::none());
+            }
+        };
+
+        if let Some(ref out_p) = export_path {
+            if let Some(parent) = out_p.parent().filter(|p| !p.as_os_str().is_empty()) {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match serde_json::to_string_pretty(&rep)
+                .map_err(|e| e.to_string())
+                .and_then(|s| std::fs::write(out_p, format!("{s}\n")).map_err(|e| e.to_string()))
+            {
+                Ok(()) => {}
+                Err(err) => {
+                    self.command_line
+                        .push_error(&format!("PIDTRACE EXPORT: {err}"));
+                    return Some(Task::none());
+                }
+            }
+        }
+
+        if rep.reachable {
+            for (&ti, handles) in &rep.tab_handles {
+                if ti < self.tabs.len() {
+                    self.tabs[ti].scene.deselect_all();
+                    if !handles.is_empty() {
+                        self.tabs[ti].scene.select_entities(handles);
+                    }
+                }
+            }
+            let dest_tab = rep.focus_tab;
+            if dest_tab < self.tabs.len() && dest_tab != self.active_tab {
+                let _ = self.update(Message::TabSwitch(dest_tab));
+                self.active_tab = dest_tab;
+            }
+            if dest_tab < self.tabs.len() {
+                let zoomed = rep.tab_handles.get(&dest_tab).is_some_and(|hs| {
+                    !hs.is_empty() && self.tabs[dest_tab].scene.zoom_to_entities(hs)
+                });
+                if !zoomed {
+                    let mut cam = self.tabs[dest_tab].scene.camera.borrow_mut();
+                    let z = cam.target.z;
+                    cam.target = glam::DVec3::new(rep.focus_xy.0, rep.focus_xy.1, z);
+                }
+                self.refresh_properties();
+            }
+            self.command_line.push_output(&format!(
+                "PIDTRACE: 连通追踪完成（跨图纸={}，穿图OPC={}，节点={}，管段={}，设备={}，阀门={}，仪表={}）。",
+                rep.crossed_tabs,
+                rep.opc_bridges_traversed,
+                rep.total_nodes_visited,
+                rep.pipe_segments_count,
+                rep.equipment_tags.len(),
+                rep.valve_tags.len(),
+                rep.instrument_tags.len(),
+            ));
+        } else {
+            self.command_line
+                .push_output("PIDTRACE: 起点与终点之间不存在连通工艺路径（reachable=false）。");
+        }
+
         Some(self.finish_dispatch(cmd))
     }
 
@@ -5361,6 +5526,449 @@ mod tests {
         });
         std::fs::write(
             out_dir.join("real152_summary.json"),
+            format!("{}\n", serde_json::to_string_pretty(&sanitized).unwrap()),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidtrace_traces_connected_subnet_and_cross_tab_opc_shortest_path() {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let mut app = app();
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-153-01.dxf".to_string();
+        let (pump_h, v1_h, pipe1_h, opc1_h, iso_v_h) = {
+            let doc = &mut app.tabs[tab1].scene.document;
+            define_sppid_block(doc, "CENTRIFUGAL PUMP", 8.0, 8.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut border = Line::from_points(
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(1189.0, 841.0, 0.0),
+            );
+            border.common.layer = "Default".to_string();
+            doc.add_entity(document::EntityType::Line(border)).unwrap();
+            let mut tb =
+                Text::with_value("DWG-153-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            // Pump P-1531A at (80, 300)
+            let mut pump = Insert::new("CENTRIFUGAL PUMP", Vector3::new(80.0, 300.0, 0.0));
+            pump.common.layer = "10".to_string();
+            let pump_h = doc.add_entity(document::EntityType::Insert(pump)).unwrap();
+            let mut pt =
+                Text::with_value("P-1531A", Vector3::new(75.0, 308.0, 0.0)).with_height(2.5);
+            pt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(pt)).unwrap();
+
+            // Pipe 1: (84, 300) -> (160, 300)
+            let mut p1 = Line::from_points(
+                Vector3::new(84.0, 300.0, 0.0),
+                Vector3::new(160.0, 300.0, 0.0),
+            );
+            p1.common.layer = "1".to_string();
+            let pipe1_h = doc.add_entity(document::EntityType::Line(p1)).unwrap();
+            let mut l1 = Text::with_value("100-PW-1531-CS150", Vector3::new(105.0, 303.0, 0.0))
+                .with_height(2.5);
+            l1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(l1)).unwrap();
+
+            // Inline Valve BV153101 at (163, 300)
+            let mut v1 = Insert::new("BALL VALVE TYPE 2", Vector3::new(163.0, 300.0, 0.0));
+            v1.common.layer = "11".to_string();
+            let v1_h = doc.add_entity(document::EntityType::Insert(v1)).unwrap();
+            let mut vt1 =
+                Text::with_value("BV153101", Vector3::new(159.0, 306.0, 0.0)).with_height(2.5);
+            vt1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(vt1)).unwrap();
+
+            // Pipe 2: (166, 300) -> (254, 300)
+            let mut p2 = Line::from_points(
+                Vector3::new(166.0, 300.0, 0.0),
+                Vector3::new(254.0, 300.0, 0.0),
+            );
+            p2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p2)).unwrap();
+
+            // Paired OPC at (260, 300) -> DWG-153-02
+            let mut opc = Insert::new("_OFF-UNIT SQ", Vector3::new(260.0, 300.0, 0.0));
+            opc.common.layer = "11".to_string();
+            let opc1_h = doc.add_entity(document::EntityType::Insert(opc)).unwrap();
+            let mut tf =
+                Text::with_value("DWG-153-02", Vector3::new(250.0, 299.0, 0.0)).with_height(2.5);
+            tf.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(tf)).unwrap();
+
+            // Isolated disconnected valve BV999999 at (800, 700)
+            let mut iv = Insert::new("BALL VALVE TYPE 2", Vector3::new(800.0, 700.0, 0.0));
+            iv.common.layer = "11".to_string();
+            let iso_v_h = doc.add_entity(document::EntityType::Insert(iv)).unwrap();
+            let mut ivt =
+                Text::with_value("BV999999", Vector3::new(796.0, 706.0, 0.0)).with_height(2.5);
+            ivt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(ivt)).unwrap();
+
+            (pump_h, v1_h, pipe1_h, opc1_h, iso_v_h)
+        };
+
+        // Tab 2: Return OPC at (120, 420) -> BV153201 -> Vessel V-1532 at (356, 420)
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-153-02.dxf".to_string();
+        let (v2_h, drum_h) = {
+            let doc = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "1TO1PARAMETRIC V DRUM", 12.0, 24.0);
+
+            let mut border = Line::from_points(
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(1189.0, 841.0, 0.0),
+            );
+            border.common.layer = "Default".to_string();
+            doc.add_entity(document::EntityType::Line(border)).unwrap();
+            let mut tb =
+                Text::with_value("DWG-153-02", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut opc2 = Insert::new("_OFF-UNIT SQ", Vector3::new(120.0, 420.0, 0.0));
+            opc2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc2)).unwrap();
+            let mut tf2 =
+                Text::with_value("DWG-153-01", Vector3::new(110.0, 419.0, 0.0)).with_height(2.5);
+            tf2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(tf2)).unwrap();
+
+            let mut pa = Line::from_points(
+                Vector3::new(126.0, 420.0, 0.0),
+                Vector3::new(240.0, 420.0, 0.0),
+            );
+            pa.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pa)).unwrap();
+            let mut la = Text::with_value("100-PW-1531-CS150", Vector3::new(160.0, 423.0, 0.0))
+                .with_height(2.5);
+            la.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(la)).unwrap();
+
+            let mut v2 = Insert::new("BALL VALVE TYPE 2", Vector3::new(243.0, 420.0, 0.0));
+            v2.common.layer = "11".to_string();
+            let v2_h = doc.add_entity(document::EntityType::Insert(v2)).unwrap();
+            let mut vt2 =
+                Text::with_value("BV153201", Vector3::new(239.0, 426.0, 0.0)).with_height(2.5);
+            vt2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(vt2)).unwrap();
+
+            let mut pb = Line::from_points(
+                Vector3::new(246.0, 420.0, 0.0),
+                Vector3::new(350.0, 420.0, 0.0),
+            );
+            pb.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pb)).unwrap();
+
+            let mut drum = Insert::new("1TO1PARAMETRIC V DRUM", Vector3::new(356.0, 420.0, 0.0));
+            drum.common.layer = "10".to_string();
+            let drum_h = doc.add_entity(document::EntityType::Insert(drum)).unwrap();
+            let mut dt =
+                Text::with_value("V-1532", Vector3::new(352.0, 435.0, 0.0)).with_height(2.5);
+            dt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(dt)).unwrap();
+
+            (v2_h, drum_h)
+        };
+
+        let tmp = std::env::temp_dir().join(format!("ocs_pidtrace_153_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // 1. Select pump P-1531A on Tab 1 and trace connected subnet across tabs
+        let _ = app.update(Message::TabSwitch(tab1));
+        app.tabs[tab1].scene.deselect_all();
+        app.tabs[tab1].scene.select_entities(&[pump_h]);
+        let subnet_p = tmp.join("subnet.json");
+        let _ = app.run_command_line(&format!(
+            "PIDTRACE ALLTABS EXPORT \"{}\"",
+            subnet_p.display()
+        ));
+        assert!(
+            subnet_p.is_file(),
+            "PIDTRACE EXPORT must write subnet report JSON"
+        );
+        let sub_rep: Value =
+            serde_json::from_str(&std::fs::read_to_string(&subnet_p).unwrap()).unwrap();
+        assert_eq!(sub_rep["reachable"].as_bool(), Some(true));
+        assert_eq!(sub_rep["crossed_tabs"].as_u64(), Some(2));
+        assert!(sub_rep["opc_bridges_traversed"].as_u64().unwrap_or(0) >= 1);
+        let eq_tags: Vec<&str> = sub_rep["equipment_tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(eq_tags.contains(&"P-1531A") && eq_tags.contains(&"V-1532"));
+        let v_tags: Vec<&str> = sub_rep["valve_tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(v_tags.contains(&"BV153101") && v_tags.contains(&"BV153201"));
+        assert!(!v_tags.contains(&"BV999999"));
+        assert!(has_sel(&app, tab1, pump_h));
+        assert!(has_sel(&app, tab1, v1_h));
+        assert!(has_sel(&app, tab1, pipe1_h));
+        assert!(has_sel(&app, tab1, opc1_h));
+        assert!(!has_sel(&app, tab1, iso_v_h));
+
+        // 2. Shortest process path from P-1531A to V-1532 across paired OPC
+        let path_p = tmp.join("path.json");
+        let _ = app.run_command_line(&format!(
+            "PIDTRACE P-1531A V-1532 ALLTABS EXPORT \"{}\"",
+            path_p.display()
+        ));
+        let path_rep: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path_p).unwrap()).unwrap();
+        assert_eq!(path_rep["mode"].as_str(), Some("shortest_path"));
+        assert_eq!(path_rep["reachable"].as_bool(), Some(true));
+        assert_eq!(path_rep["crossed_tabs"].as_u64(), Some(2));
+        assert_eq!(path_rep["opc_bridges_traversed"].as_u64(), Some(1));
+        assert_eq!(app.active_tab, tab2);
+        assert!(has_sel(&app, tab2, v2_h));
+        assert!(has_sel(&app, tab2, drum_h));
+
+        // 3. Disconnected valve BV999999 must be reported unreachable from P-1531A
+        let unreach_p = tmp.join("unreach.json");
+        let _ = app.run_command_line(&format!(
+            "PIDTRACE P-1531A BV999999 ALLTABS EXPORT \"{}\"",
+            unreach_p.display()
+        ));
+        let unreach_rep: Value =
+            serde_json::from_str(&std::fs::read_to_string(&unreach_p).unwrap()).unwrap();
+        assert_eq!(unreach_rep["reachable"].as_bool(), Some(false));
+
+        // 4. Promote both sheets to PID_AUTHOR and verify shortest path parity
+        let _ = app.update(Message::TabSwitch(tab1));
+        let _ = app.run_command_line("PIDPROMOTE");
+        let _ = app.update(Message::TabSwitch(tab2));
+        let _ = app.run_command_line("PIDPROMOTE");
+        let _ = app.update(Message::TabSwitch(tab1));
+        let prom_p = tmp.join("promoted_path.json");
+        let _ = app.run_command_line(&format!(
+            "PIDTRACE P-1531A V-1532 ALLTABS EXPORT \"{}\"",
+            prom_p.display()
+        ));
+        let prom_rep: Value =
+            serde_json::from_str(&std::fs::read_to_string(&prom_p).unwrap()).unwrap();
+        assert_eq!(prom_rep["reachable"].as_bool(), Some(true));
+        assert_eq!(prom_rep["crossed_tabs"].as_u64(), Some(2));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads 4 real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into OpenCADStudio and verifies PIDTRACE ALLTABS cross-tab subnet & shortest-path tracing"]
+    fn real_multi_tab_pidtrace_cross_sheet_subnet_and_shortest_path() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_raw) = std::env::var("OCS_PID_REAL153_SPPID_PAIR") else {
+            println!("OCS_PID_REAL153_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(legacy_raw) = std::env::var("OCS_PID_REAL153_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL153_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL153_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real153"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sppid_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sppid_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        let legacy_paths: Vec<std::path::PathBuf> = std::env::split_paths(&legacy_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        assert_eq!(sppid_paths.len(), 2);
+        assert_eq!(legacy_paths.len(), 2);
+
+        let all_files = [
+            &sppid_paths[0],
+            &sppid_paths[1],
+            &legacy_paths[0],
+            &legacy_paths[1],
+        ];
+
+        let mut app = app();
+        let mut tab_indices = Vec::new();
+        let mut sha_prefixes = Vec::new();
+        for (idx, p) in all_files.iter().enumerate() {
+            let raw_b = std::fs::read(p).unwrap();
+            sha_prefixes.push(format!("{:x}", Sha256::digest(&raw_b))[..12].to_string());
+            if idx > 0 {
+                let _ = app.update(Message::TabNew);
+            }
+            let ti = app.active_tab;
+            app.tabs[ti].scene.document = crate::io::load_file(p).expect("load DXF");
+            app.tabs[ti].current_path = Some((*p).clone());
+            app.tabs[ti].tab_title = p
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("sheet.dxf")
+                .to_string();
+            tab_indices.push(ti);
+        }
+
+        // 1. SPPID paired sheets (Tab 0 <-> Tab 1): select paired OPC on Tab 0 and run PIDTRACE ALLTABS
+        let _ = app.update(Message::TabSwitch(tab_indices[0]));
+        let _ = app.run_command_line("PIDOPC PAIRED");
+        let sp_paired_sel: Vec<document::Handle> = app.tabs[tab_indices[0]]
+            .scene
+            .selected_entities()
+            .into_iter()
+            .map(|(h, _)| h)
+            .collect();
+        assert!(!sp_paired_sel.is_empty());
+        app.tabs[tab_indices[0]].scene.deselect_all();
+        app.tabs[tab_indices[0]]
+            .scene
+            .select_entities(&[sp_paired_sel[0]]);
+
+        let sp_sub_p = out_dir.join("sp_subnet_tmp.json");
+        let _ = app.run_command_line(&format!(
+            "PIDTRACE ALLTABS EXPORT \"{}\"",
+            sp_sub_p.display()
+        ));
+        let sp_sub: Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp_sub_p).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&sp_sub_p);
+
+        assert_eq!(sp_sub["reachable"].as_bool(), Some(true));
+        assert!(
+            sp_sub["crossed_tabs"].as_u64().unwrap_or(0) >= 2,
+            "SPPID paired trace must span >=2 open tabs, got {:?}",
+            sp_sub["crossed_tabs"]
+        );
+        assert!(sp_sub["opc_bridges_traversed"].as_u64().unwrap_or(0) >= 1);
+
+        // Also verify shortest-path query across Tab 0 -> Tab 1 using steps discovered on each tab
+        let steps = sp_sub["path_steps"].as_array().unwrap();
+        let start_tag_opt = steps.iter().find_map(|st| {
+            (st["tab_index"].as_u64() == Some(tab_indices[0] as u64)
+                && st["node_kind"].as_str() != Some("opc"))
+            .then(|| st["tag_or_label"].as_str())
+            .flatten()
+            .map(str::to_string)
+        });
+        let end_tag_opt = steps.iter().find_map(|st| {
+            (st["tab_index"].as_u64() == Some(tab_indices[1] as u64)
+                && st["node_kind"].as_str() != Some("opc"))
+            .then(|| st["tag_or_label"].as_str())
+            .flatten()
+            .map(str::to_string)
+        });
+
+        let mut shortest_path_verified = false;
+        let mut sp_path_steps_count = 0u64;
+        let cross_pair = start_tag_opt
+            .zip(end_tag_opt)
+            .filter(|(s, e)| crate::io::pid_convert::match_query_rank(s, e).is_none());
+        if let Some((s_tag, e_tag)) = cross_pair {
+            let _ = app.update(Message::TabSwitch(tab_indices[0]));
+            let sp_path_p = out_dir.join("sp_path_tmp.json");
+            let _ = app.run_command_line(&format!(
+                "PIDTRACE \"{s_tag}\" \"{e_tag}\" ALLTABS EXPORT \"{}\"",
+                sp_path_p.display()
+            ));
+            let sp_path: Value =
+                serde_json::from_str(&std::fs::read_to_string(&sp_path_p).unwrap()).unwrap();
+            let _ = std::fs::remove_file(&sp_path_p);
+            assert_eq!(sp_path["reachable"].as_bool(), Some(true));
+            assert!(sp_path["crossed_tabs"].as_u64().unwrap_or(0) >= 2);
+            sp_path_steps_count = sp_path["path_steps"]
+                .as_array()
+                .map(|a| a.len() as u64)
+                .unwrap_or(0);
+            shortest_path_verified = true;
+        }
+
+        // 2. Native AutoCAD legacy paired sheets (Tab 2 <-> Tab 3): select paired OPC on Tab 2 and run PIDTRACE ALLTABS
+        let _ = app.update(Message::TabSwitch(tab_indices[2]));
+        let _ = app.run_command_line("PIDOPC PAIRED");
+        let lg_paired_sel: Vec<document::Handle> = app.tabs[tab_indices[2]]
+            .scene
+            .selected_entities()
+            .into_iter()
+            .map(|(h, _)| h)
+            .collect();
+        assert!(!lg_paired_sel.is_empty());
+        app.tabs[tab_indices[2]].scene.deselect_all();
+        app.tabs[tab_indices[2]]
+            .scene
+            .select_entities(&[lg_paired_sel[0]]);
+
+        let lg_sub_p = out_dir.join("lg_subnet_tmp.json");
+        let _ = app.run_command_line(&format!(
+            "PIDTRACE ALLTABS EXPORT \"{}\"",
+            lg_sub_p.display()
+        ));
+        let lg_sub: Value =
+            serde_json::from_str(&std::fs::read_to_string(&lg_sub_p).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&lg_sub_p);
+
+        assert_eq!(lg_sub["reachable"].as_bool(), Some(true));
+        assert!(
+            lg_sub["crossed_tabs"].as_u64().unwrap_or(0) >= 2,
+            "Legacy paired trace must span >=2 open tabs, got {:?}",
+            lg_sub["crossed_tabs"]
+        );
+        assert!(lg_sub["opc_bridges_traversed"].as_u64().unwrap_or(0) >= 1);
+
+        let sanitized = json!({
+            "tabs_loaded": 4,
+            "sppid_sha256_prefixes": [&sha_prefixes[0], &sha_prefixes[1]],
+            "legacy_sha256_prefixes": [&sha_prefixes[2], &sha_prefixes[3]],
+            "sppid_subnet": {
+                "crossed_tabs": sp_sub["crossed_tabs"],
+                "opc_bridges_traversed": sp_sub["opc_bridges_traversed"],
+                "total_nodes_visited": sp_sub["total_nodes_visited"],
+                "pipe_segments_count": sp_sub["pipe_segments_count"],
+                "equipment_count": sp_sub["equipment_tags"].as_array().map(Vec::len).unwrap_or(0),
+                "valve_count": sp_sub["valve_tags"].as_array().map(Vec::len).unwrap_or(0),
+                "instrument_count": sp_sub["instrument_tags"].as_array().map(Vec::len).unwrap_or(0),
+                "pipeline_count": sp_sub["pipeline_labels"].as_array().map(Vec::len).unwrap_or(0),
+            },
+            "sppid_cross_tab_shortest_path": {
+                "verified": shortest_path_verified,
+                "path_steps_count": sp_path_steps_count,
+            },
+            "legacy_subnet": {
+                "crossed_tabs": lg_sub["crossed_tabs"],
+                "opc_bridges_traversed": lg_sub["opc_bridges_traversed"],
+                "total_nodes_visited": lg_sub["total_nodes_visited"],
+                "pipe_segments_count": lg_sub["pipe_segments_count"],
+                "equipment_count": lg_sub["equipment_tags"].as_array().map(Vec::len).unwrap_or(0),
+                "valve_count": lg_sub["valve_tags"].as_array().map(Vec::len).unwrap_or(0),
+                "instrument_count": lg_sub["instrument_tags"].as_array().map(Vec::len).unwrap_or(0),
+                "pipeline_count": lg_sub["pipeline_labels"].as_array().map(Vec::len).unwrap_or(0),
+            },
+        });
+        std::fs::write(
+            out_dir.join("real153_summary.json"),
             format!("{}\n", serde_json::to_string_pretty(&sanitized).unwrap()),
         )
         .unwrap();

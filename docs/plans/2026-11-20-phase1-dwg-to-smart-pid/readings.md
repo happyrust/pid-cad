@@ -1696,3 +1696,42 @@
 | `scripts\fmt-newhunks.ps1` | — | `find.rs`、`mod.rs`、`pidprops.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 42. L3-3 / L3-4 / L2-2 / L6-2（#153）：应用内跨符号/跨标签页工艺流路拓扑连通追踪与起止点路径溯源命令 `PIDTRACE` 闭环（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `c12f5e348`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{trace,mod}.rs`、`src/app/commands/pidprops.rs` |
+| 外部证据子项 | `2026-11-21-issue153/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_trace.txt`、`real_out/real153_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
+
+### 42.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidtrace_traces_connected_subnet_and_cross_tab_opc_shortest_path`（构造双标签页跨图工艺流程 `P-1531A -> BV153101 -> 互逆 OPC -> BV153201 -> V-1532` 与同图孤立隔离阀 `BV999999`，验证单起点跨图连通子网审查、双位号跨图最短流路寻径、孤立支路不可达拦截及 `PIDPROMOTE` 升格前后一致性），运行按预期在 `PIDTRACE EXPORT` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`19 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/trace.rs`（`trace_subnet_from_handles`、`trace_subnet_by_query`、`trace_shortest_path_by_query`）：统一兼容未升格 `.dxf`/`.dwg`、未升格 `.pid` 原图与已升格 `PID_AUTHOR` 模型，串联管段端点/三通交点、行内阀门/仪表包围盒与端口、设备壳体/管口及多标签页互逆 `PIDOPC`（`Paired`）连接符构建无向拓扑图；
+  2. **行内阀门 `6 mm` 端口间隙桥接避让与未裁剪贯通管段增强**：严格采用 `< 0.0` 非共线交叉判据，对 `2.0..=6.5 mm` 微断口桥接避开行内符号包围盒以确保最短流路必经在线切断阀，并同步捕获 AutoCAD 未裁剪直通管段上骑跨的在线阀门/仪表；
+  3. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDTRACE [<起点位号> [TO] [<终点位号>]] [ALLTABS] [EXPORT "<json>"]`，支持跨标签页高亮流路图元、自动切换目标图并聚焦视口相机。
+
+### 42.2 真实双标准成对工程图纸（SPPID 生产图对 + 原生 AutoCAD 存量图对）多标签页连通追踪实测
+
+| 图纸组 | 样本形态 | 源图 SHA-256 前缀对 | 跨标签页数 / 互逆 `OPC` 桥 | 连通子网访问节点与管段 | 可达设备 / 阀门 / 仪表 / 管线 | 跨图双位号最短寻径 |
+|---|---|---|---|---|---|---|
+| `SP01 <-> SP02` | 未升格 SPPID 拆分生产图对 | `2164f88bbb57` + `fc2c812dc182` | `2` 图 / `2` 桥 | **`966` 节点**（`704` 管段） | 设备 `6` / 阀门 `59` / 仪表 `87` / 管线 `37` | **通过（`12` 步跨图序列）** |
+| `LG01 <-> LG02` | 未升格原生 AutoCAD 存量图对 | `a0f05f81a655` + `28ed389e23cb` | `2` 图 / `6` 桥 | **`508` 节点**（`282` 管段） | 设备 `14` / 阀门 `0` / 仪表 `56` / 管线 `11` | **连通桥全通** |
+
+### 42.3 固定门禁读数
+
+| 门禁项 | 改前读数（§41.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,230` 条（`7,153` 过 / `76` 忽略 / `1` 既有 `.pen`） | **`7,232` 条**（**`7,154` 过** / **`77` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图跨标签页流路追踪），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `trace.rs`、`mod.rs`、`pidprops.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
