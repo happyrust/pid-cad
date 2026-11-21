@@ -1159,5 +1159,53 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `196 passed` | **`198 passed`** | `+2` 条 Python 测试，**全绿** |
 
+---
+
+## 30. L4-6 / L5-8 / L6-1（#141）：应用内标准转换命令 `PIDCONVERT`（单图/整批双产物导出、`CLASSMAP` 覆盖与 `VERIFY` 自检）闭环（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `6e0037a59`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{export,mod}.rs`、`src/app/commands/pidprops.rs` |
+| 外部证据目录 | `$OCS_PID_EVIDENCE_DIR/2026-11-21-issue141/`（`red.txt`、`green.txt`、`real141_test.log`、`real_out/real141_summary.json`、`cargo_test.txt`、`clippy_lib.txt`、`clippy_test.txt`、`fmt_arch_pytest.txt`） |
+
+### 30.1 先红后绿与命令契约核验
+
+- **先红阶段（`red.txt`）**：新增 `l4_6_pidconvert_exports_current_unpromoted_sheet_xml_and_dual_verify_without_mutating_canvas` 与 `l4_6_pidconvert_batch_converts_mixed_dxf_and_binary_dwg_directory_with_summary_and_verify` 两条单测，实测 `0 passed; 2 failed`（`RED_RC=101`）。
+- **落地实现与转绿（`green.txt`）**：
+  1. `src/io/pid_convert/{export,mod}.rs`：新增 `verify_published_xml_pair`、`export_document_to_dir` 与 `verify_batch_dir_strict`，统一封装内存 `Document` 单图落盘（`_Data.xml` + `_Meta.xml` + `_Coverage.json` + 可选 `.pid` + `.pidplot.pdf`）及 `#111` `StrictVendor` + `a/b` 级双端核验；转换或映射校验失败时在创建目录前立即阻断，零半成品残留。
+  2. `src/app/commands/pidprops.rs`：零触碰并行工作树（未改 `utilities.rs` 与 `commands/mod.rs`），注册并实现 `PIDCONVERT`：
+     - 单图模式：`PIDCONVERT "<输出目录 | 输出.pid | HERE>" [STEM <主干>] [PLANT <装置>] [SEED "<种子.pid|zip>"] [DUAL] [SYMDIR "<目录>"] [CLASSMAP "<映射.json>"] [VERIFY]`（只读转换当前活动画布 `Document`，不写入 `PID_AUTHOR` XDATA、不置 `dirty`、不污染撤销栈）；
+     - 批量模式：`PIDCONVERT BATCH "<输入文件或目录>" "<输出目录>" [PLANT <装置>] [SEED "<种子.pid|zip>"] [DUAL] [SYMDIR "<目录>"] [CLASSMAP "<映射.json>"] [VERIFY] [SUMMARY "<汇总.json>"]`（自动递归遍历非空 `.dxf` 与二进制 `.dwg`，跳过 `0` 字节空文件，输出跨图连接符配对与汇总 JSON）。
+  3. 复跑 `app::commands::pidprops::tests::`：**`12 passed; 0 failed`**（退出码 `0`）。
+
+### 30.2 真实多源图纸应用内 `PIDCONVERT` 单图与 `PIDCONVERT BATCH` 端到端实测表
+
+在 `OpenCADStudio` 应用内直接对未升格真实图纸运行 `PIDCONVERT ... VERIFY` 与 `PIDCONVERT BATCH ... VERIFY SUMMARY`（全文采用纯 ASCII 脱敏主干，`sppid_native_c1_status = "unverified_no_sppid_runner"`）：
+
+| 执行模式 | 脱敏主干 | 源图 SHA-256 前缀 | 精确变体数 | 表外兜底 | 写出对象 / 关系 | `StrictVendor` 违规数 | `GraphicOID` 对齐 | `a` 级 / `b` 级 PDF 图元 | 原型说明 |
+|---|---|---|---:|---:|---:|---:|---:|---|---|
+| 单图 `PIDCONVERT` | `INAPP-SINGLE-01` | `c0dd2cc4c75d` | `115` | `0` | `645 / 685` | `0` | `302 / 302` | `true` / `727` | 中位规模真实 SPPID 拆分 DXF（未升格画布零侵入直出双产物） |
+| 批量 `PIDCONVERT BATCH` | `BATCH-01-SPPID` | `75d6f761fd13` | `43` | `0` | `160 / 153` | `0` | `80 / 80` | `true` / `406` | SPPID 导出拆分 DXF |
+| 批量 `PIDCONVERT BATCH` | `BATCH-02-LEG-BLK` | `a0f05f81a655` | `108` | `0` | `483 / 554` | `0` | `227 / 227` | `true` / `560` | 原生 AutoCAD 图块+散圆存量图（`.dxf`） |
+| 批量 `PIDCONVERT BATCH` | `BATCH-03-LEG-EXP` | `135b6bf6b0a6` | `127` | `0` | `673 / 747` | `0` | `345 / 345` | `true` / `642` | 原生 AutoCAD 全散线形状存量图（`.dxf`） |
+| 批量 `PIDCONVERT BATCH` | `BATCH-04-BIN-DWG` | `e605ccf6d6f0` | `108` | `0` | `483 / 554` | `0` | `227 / 227` | `true` / `560` | 二进制 `AC1032` `.dwg`（与原 `.dxf` 转换结果 100% 相等） |
+| **批量合计（含跳过 1 份 `0 B` 空文件）** | **`4 / 4` 成功（`failed = 0`）** | — | **`386`** | **`0`** | **`1,799 / 2,008`** | **`0`（`8 / 8` XML）** | **`879 / 879`** | **`4 / 4` 通过（`2,168` 图元）** | 单条应用内命令完成 `.dxf` + `.dwg` 混合整批双产物转换与自检 |
+
+### 30.3 固定门禁读数
+
+| 门禁项 | 改前读数（§29.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,210` 条（`7,141` 过 / `68` 忽略 / `1` 既有 `.pen`） | **`7,213` 条**（**`7,143` 过** / **`69` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+3` 条 Rust 测试（`+2` 常规 + `+1` 真实多源集成），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `pidprops.rs`、`export.rs`、`mod.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `198 passed` | **`198 passed`** | **全绿** |
+
+
 
 

@@ -1942,6 +1942,163 @@ pub fn convert_path_to_dir(
     Ok(summary)
 }
 
+/// Validate `<stem>_Data.xml` and `<stem>_Meta.xml` bytes against `#111` `StrictVendor` rules (`#141`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn verify_published_xml_pair(
+    stem: &str,
+    expected_plant: &str,
+    data_xml: &[u8],
+    meta_xml: &[u8],
+) -> Result<(), String> {
+    use crate::io::pid_publish_check::{
+        check_publish_xml_bytes, default_publish_spec, CheckOptions, PublishXmlKind,
+    };
+
+    let spec = default_publish_spec();
+    let chk = CheckOptions {
+        expected_plant: (!expected_plant.trim().is_empty()).then(|| expected_plant.to_string()),
+        ..CheckOptions::default()
+    };
+    let v_data = check_publish_xml_bytes(
+        &format!("{stem}_Data.xml"),
+        PublishXmlKind::Data,
+        data_xml,
+        spec,
+        &chk,
+    );
+    if let Some(first) = v_data.first() {
+        return Err(format!(
+            "{stem}_Data.xml StrictVendor violations ({}): {:?}",
+            v_data.len(),
+            first
+        ));
+    }
+    let v_meta = check_publish_xml_bytes(
+        &format!("{stem}_Meta.xml"),
+        PublishXmlKind::Meta,
+        meta_xml,
+        spec,
+        &chk,
+    );
+    if let Some(first) = v_meta.first() {
+        return Err(format!(
+            "{stem}_Meta.xml StrictVendor violations ({}): {:?}",
+            v_meta.len(),
+            first
+        ));
+    }
+    Ok(())
+}
+
+/// Export an in-memory CAD `Document` directly to `out_dir` (`<stem>_Data.xml`,
+/// `<stem>_Meta.xml`, `<stem>_Coverage.json`, and optional `<stem>.pid` + `<stem>.pidplot.pdf`),
+/// with optional `StrictVendor` + `a/b`-level verification (`L4-6` / `#141`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn export_document_to_dir(
+    doc: &Document,
+    stem: &str,
+    out_dir: &Path,
+    opts: &ConvertOptions,
+    verify_strict: bool,
+) -> Result<ConvertSheetReport, String> {
+    let mut dual = convert_document_to_dual(doc, stem, opts)?;
+    if verify_strict {
+        verify_published_xml_pair(
+            stem,
+            &opts.plant,
+            &dual.publish.data_xml,
+            &dual.publish.meta_xml,
+        )?;
+    }
+
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| format!("create out dir {}: {e}", out_dir.display()))?;
+    let data_p = out_dir.join(format!("{stem}_Data.xml"));
+    let meta_p = out_dir.join(format!("{stem}_Meta.xml"));
+    let cov_p = out_dir.join(format!("{stem}_Coverage.json"));
+
+    std::fs::write(&data_p, &dual.publish.data_xml)
+        .map_err(|e| format!("write {} failed: {e}", data_p.display()))?;
+    std::fs::write(&meta_p, &dual.publish.meta_xml)
+        .map_err(|e| format!("write {} failed: {e}", meta_p.display()))?;
+
+    if let Some(ref pid_raw) = dual.pid_bytes {
+        let pid_p = out_dir.join(format!("{stem}.pid"));
+        std::fs::write(&pid_p, pid_raw)
+            .map_err(|e| format!("write {} failed: {e}", pid_p.display()))?;
+
+        if opts.verify_plot_pdf || verify_strict {
+            let ver = verify_dual_bundle(
+                &dual.report.doc_uid,
+                &dual.publish.data_xml,
+                pid_raw,
+                Some(out_dir),
+                stem,
+            )?;
+            if verify_strict && (!ver.is_cross_file_and_a_valid() || !ver.is_b_plot_valid()) {
+                return Err(format!("{stem}: dual a/b verification failed: {ver:?}"));
+            }
+            dual.report.pid_verification = Some(ver);
+            dual.publish.coverage_json = serde_json::to_string_pretty(&dual.report)
+                .map_err(|e| format!("serialize coverage report: {e}"))?;
+        }
+    }
+
+    std::fs::write(&cov_p, format!("{}\n", dual.publish.coverage_json))
+        .map_err(|e| format!("write {} failed: {e}", cov_p.display()))?;
+    Ok(dual.report)
+}
+
+/// Run `StrictVendor` XML checks (and `a/b` dual verification checks when `.pid` was emitted)
+/// across every converted sheet in `out_dir` (`#141`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn verify_batch_dir_strict(
+    out_dir: &Path,
+    expected_plant: &str,
+    summary: &BatchConvertSummary,
+) -> Result<(), String> {
+    let rd = std::fs::read_dir(out_dir)
+        .map_err(|e| format!("read out dir {} failed: {e}", out_dir.display()))?;
+    let mut xml_pairs_checked = 0usize;
+    let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for data_p in entries {
+        let Some(fname) = data_p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(stem) = fname.strip_suffix("_Data.xml") else {
+            continue;
+        };
+        let meta_p = out_dir.join(format!("{stem}_Meta.xml"));
+        let data_raw =
+            std::fs::read(&data_p).map_err(|e| format!("read {} failed: {e}", data_p.display()))?;
+        let meta_raw =
+            std::fs::read(&meta_p).map_err(|e| format!("read {} failed: {e}", meta_p.display()))?;
+        verify_published_xml_pair(stem, expected_plant, &data_raw, &meta_raw)?;
+        xml_pairs_checked += 1;
+    }
+    if xml_pairs_checked < summary.sheets.len() {
+        return Err(format!(
+            "expected at least {} XML pairs in {}, found {}",
+            summary.sheets.len(),
+            out_dir.display(),
+            xml_pairs_checked
+        ));
+    }
+    for sheet in &summary.sheets {
+        let name = &sheet.drawing_name;
+        if let Some(ref ver) = sheet.pid_verification {
+            if !ver.is_cross_file_and_a_valid() {
+                return Err(format!("{name}: a-level dual check failed: {ver:?}"));
+            }
+            if ver.b_level_pdf_bytes.is_some() && !ver.is_b_plot_valid() {
+                return Err(format!("{name}: b-level PDF check failed: {ver:?}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Load a CAD drawing (`.dxf` or `.dwg`) and save it as a standard binary `.dwg` (`AC1032`) (`#140`).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_cad_file_as_binary_dwg(input: &Path, dwg_out: &Path) -> Result<(), String> {

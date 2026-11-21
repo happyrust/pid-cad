@@ -26,7 +26,7 @@ pub(in crate::app) const PID_AUTHOR_SECTION: &str = "P&ID 属性";
 pub(in crate::app) const PID_EVIDENCE_SECTION: &str = "P&ID 来源证据";
 
 inventory::submit!(crate::command::CommandRegistration {
-    names: &["PIDPROMOTE", "PIDREVIEW", "PIDSAVEPID"]
+    names: &["PIDPROMOTE", "PIDREVIEW", "PIDSAVEPID", "PIDCONVERT"]
 });
 
 const TAG_FIELD: &str = "pid_tag";
@@ -242,6 +242,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidsavepid_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidconvert_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -686,6 +689,301 @@ impl OpenCADStudio {
         Some(self.finish_dispatch(cmd))
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn dispatch_pidconvert_cmd(&mut self, cmd: &str, _i: usize) -> Option<Task<Message>> {
+        let mut words = cmd.split_whitespace();
+        if !words.next()?.eq_ignore_ascii_case("PIDCONVERT") {
+            return None;
+        }
+        self.command_line
+            .push_error("PIDCONVERT: Web 版本不支持直接写出本地转换产物。");
+        Some(Task::none())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dispatch_pidconvert_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDCONVERT") {
+            return None;
+        }
+        if tokens.len() == 1 {
+            self.command_line.push_info(
+                "PIDCONVERT: 用法 PIDCONVERT \"<输出目录|输出.pid|HERE>\" [STEM <主干>] [PLANT <装置>] [SEED \"<种子.pid|zip>\"] [DUAL] [SYMDIR \"<目录>\"] [CLASSMAP \"<json>\"] [VERIFY]，或 PIDCONVERT BATCH \"<输入路径>\" \"<输出目录>\" [SUMMARY \"<json>\"] [...]",
+            );
+            return Some(Task::none());
+        }
+        if tokens
+            .get(1)
+            .is_some_and(|tok| tok.eq_ignore_ascii_case("BATCH"))
+        {
+            return self.dispatch_pidconvert_batch(cmd, &tokens[2..]);
+        }
+        self.dispatch_pidconvert_single(cmd, i, &tokens[1..])
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dispatch_pidconvert_single(
+        &mut self,
+        cmd: &str,
+        i: usize,
+        rest: &[String],
+    ) -> Option<Task<Message>> {
+        let args = match parse_pidconvert_args(rest) {
+            Ok(a) => a,
+            Err(err) => {
+                self.command_line.push_error(&format!("PIDCONVERT: {err}"));
+                return Some(Task::none());
+            }
+        };
+        let Some(target_raw) = args.positional.first() else {
+            self.command_line
+                .push_error("PIDCONVERT: 请指定输出目录、输出 .pid 路径或 HERE。");
+            return Some(Task::none());
+        };
+
+        let (out_dir, inferred_stem, target_wants_pid) = if target_raw.eq_ignore_ascii_case("HERE")
+        {
+            let Some(ref cur) = self.tabs[i].current_path else {
+                self.command_line
+                    .push_error("PIDCONVERT HERE: 当前图纸未关联本地路径，请显式指定输出目录。");
+                return Some(Task::none());
+            };
+            let dir = cur
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .to_path_buf();
+            let st = cur.file_stem().and_then(|s| s.to_str()).map(str::to_string);
+            (dir, st, false)
+        } else {
+            let target_p = std::path::PathBuf::from(target_raw);
+            let ext = target_p.extension().and_then(|s| s.to_str()).unwrap_or("");
+            if ext.eq_ignore_ascii_case("pid") {
+                let dir = target_p
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .to_path_buf();
+                let st = target_p
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string);
+                (dir, st, true)
+            } else if ext.eq_ignore_ascii_case("xml") {
+                let dir = target_p
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .to_path_buf();
+                let raw_st = target_p
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("SHEET");
+                let clean_st = raw_st
+                    .strip_suffix("_Data")
+                    .or_else(|| raw_st.strip_suffix("_Meta"))
+                    .unwrap_or(raw_st)
+                    .to_string();
+                (dir, Some(clean_st), false)
+            } else {
+                let st = self.tabs[i]
+                    .current_path
+                    .as_ref()
+                    .and_then(|p| p.file_stem())
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string);
+                (target_p, st, false)
+            }
+        };
+
+        let doc_stem = args
+            .stem
+            .or(inferred_stem)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "SHEET".to_string());
+
+        let seed_pid_path = if args.seed.is_some() {
+            args.seed
+        } else if target_wants_pid || args.force_dual {
+            match std::env::var("OCS_PID_SEED_ZIP")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| self.pid_source(i).map(|p| p.to_string_lossy().into_owned()))
+            {
+                Some(s) => Some(s),
+                None => {
+                    self.command_line.push_error(
+                        "PIDCONVERT: 写出 .pid 需要指定 SEED \"<种子.pid|zip>\" 或配置 OCS_PID_SEED_ZIP。",
+                    );
+                    return Some(Task::none());
+                }
+            }
+        } else {
+            None
+        };
+
+        let wants_dual = seed_pid_path.is_some();
+        let opts = crate::io::pid_convert::ConvertOptions {
+            plant: args.plant.unwrap_or_else(|| "P01".to_string()),
+            seed_pid_path,
+            sym_library_dir: args
+                .symdir
+                .or_else(|| std::env::var("OCS_PID_SYM_DIR").ok()),
+            class_map_path: args.classmap,
+            verify_plot_pdf: args.verify && wants_dual,
+            ..Default::default()
+        };
+
+        let report = match crate::io::pid_convert::export_document_to_dir(
+            &self.tabs[i].scene.document,
+            &doc_stem,
+            &out_dir,
+            &opts,
+            args.verify,
+        ) {
+            Ok(rep) => rep,
+            Err(err) => {
+                self.command_line
+                    .push_error(&format!("PIDCONVERT: 导出失败：{err}"));
+                return Some(Task::none());
+            }
+        };
+
+        let exact_cnt = report.variant_resolution.exact_variant_id
+            + report.variant_resolution.symbol_path_match;
+        let fb_cnt = report.variant_resolution.class_default_fallback
+            + report.variant_resolution.unmapped_class_variant;
+        self.command_line.push_output(&format!(
+            "PIDCONVERT: 已导出 {} -> {}（对象={}，关系={}，精确变体={}，兜底={}，双产物={}，自检={}）。",
+            doc_stem,
+            out_dir.display(),
+            report.total_items_written,
+            report.total_relations_written,
+            exact_cnt,
+            fb_cnt,
+            wants_dual,
+            args.verify,
+        ));
+        Some(self.finish_dispatch(cmd))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dispatch_pidconvert_batch(&mut self, cmd: &str, rest: &[String]) -> Option<Task<Message>> {
+        let args = match parse_pidconvert_args(rest) {
+            Ok(a) => a,
+            Err(err) => {
+                self.command_line
+                    .push_error(&format!("PIDCONVERT BATCH: {err}"));
+                return Some(Task::none());
+            }
+        };
+        if args.positional.len() < 2 {
+            self.command_line.push_error(
+                "PIDCONVERT BATCH: 用法 PIDCONVERT BATCH \"<输入文件或目录>\" \"<输出目录>\" [PLANT <装置>] [SEED \"<种子>\"] [DUAL] [SYMDIR \"<目录>\"] [CLASSMAP \"<json>\"] [VERIFY] [SUMMARY \"<json>\"]。",
+            );
+            return Some(Task::none());
+        }
+        let in_path = std::path::PathBuf::from(&args.positional[0]);
+        let out_dir = std::path::PathBuf::from(&args.positional[1]);
+
+        let seed_pid_path = if args.seed.is_some() {
+            args.seed
+        } else if args.force_dual {
+            match std::env::var("OCS_PID_SEED_ZIP")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+            {
+                Some(s) => Some(s),
+                None => {
+                    self.command_line.push_error(
+                        "PIDCONVERT BATCH: 指定 DUAL 时需提供 SEED 参数或配置 OCS_PID_SEED_ZIP。",
+                    );
+                    return Some(Task::none());
+                }
+            }
+        } else {
+            None
+        };
+
+        let wants_dual = seed_pid_path.is_some();
+        let opts = crate::io::pid_convert::ConvertOptions {
+            plant: args.plant.unwrap_or_else(|| "P01".to_string()),
+            seed_pid_path,
+            sym_library_dir: args
+                .symdir
+                .or_else(|| std::env::var("OCS_PID_SYM_DIR").ok()),
+            class_map_path: args.classmap,
+            verify_plot_pdf: args.verify && wants_dual,
+            ..Default::default()
+        };
+
+        let summary = match crate::io::pid_convert::convert_path_to_dir(&in_path, &out_dir, &opts) {
+            Ok(s) => s,
+            Err(err) => {
+                self.command_line
+                    .push_error(&format!("PIDCONVERT BATCH: {err}"));
+                return Some(Task::none());
+            }
+        };
+
+        if summary.files_converted == 0 || summary.files_failed > 0 {
+            self.command_line.push_error(&format!(
+                "PIDCONVERT BATCH: 转换存在失败或无有效图纸（成功={}，失败={}）：{:?}",
+                summary.files_converted, summary.files_failed, summary.errors
+            ));
+            return Some(Task::none());
+        }
+
+        if args.verify {
+            match crate::io::pid_convert::verify_batch_dir_strict(&out_dir, &opts.plant, &summary) {
+                Ok(()) => {}
+                Err(err) => {
+                    self.command_line
+                        .push_error(&format!("PIDCONVERT BATCH VERIFY: {err}"));
+                    return Some(Task::none());
+                }
+            }
+        }
+
+        if let Some(ref sjson) = args.summary {
+            if let Some(parent) = sjson.parent().filter(|p| !p.as_os_str().is_empty()) {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match serde_json::to_string_pretty(&summary)
+                .map_err(|e| e.to_string())
+                .and_then(|txt| {
+                    std::fs::write(sjson, format!("{txt}\n")).map_err(|e| e.to_string())
+                }) {
+                Ok(()) => {}
+                Err(err) => {
+                    self.command_line.push_error(&format!(
+                        "PIDCONVERT BATCH: 写出汇总 JSON {} 失败：{err}",
+                        sjson.display()
+                    ));
+                    return Some(Task::none());
+                }
+            }
+        }
+
+        let exact_cnt = summary.variant_resolution.exact_variant_id
+            + summary.variant_resolution.symbol_path_match;
+        let fb_cnt = summary.variant_resolution.class_default_fallback
+            + summary.variant_resolution.unmapped_class_variant;
+        self.command_line.push_output(&format!(
+            "PIDCONVERT BATCH: 成功转换 {} 张图纸（.pid={}，PDF={}，对象={}，关系={}，精确变体={}，兜底={}）-> {}。",
+            summary.files_converted,
+            summary.pid_files_written,
+            summary.pdf_files_plotted,
+            summary.total_items_written,
+            summary.total_relations_written,
+            exact_cnt,
+            fb_cnt,
+            out_dir.display(),
+        ));
+        Some(self.finish_dispatch(cmd))
+    }
+
     /// 属性下传重算：`edited` 里的管线/管路按「管线 → 管路 → 管段」级联。
     ///
     /// 唯一的重算入口。写 `PID_AUTHOR` XDATA 的每条路径（REST `xdata_set`、
@@ -857,6 +1155,87 @@ fn tokenize_command_words(cmd: &str) -> Vec<String> {
         out.push(cur);
     }
     out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct PidConvertArgs {
+    positional: Vec<String>,
+    stem: Option<String>,
+    plant: Option<String>,
+    seed: Option<String>,
+    symdir: Option<String>,
+    classmap: Option<String>,
+    summary: Option<std::path::PathBuf>,
+    force_dual: bool,
+    verify: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_pidconvert_args(tokens: &[String]) -> Result<PidConvertArgs, String> {
+    let mut args = PidConvertArgs::default();
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        let tok = &tokens[idx];
+        let upper = tok.to_ascii_uppercase();
+        match upper.as_str() {
+            "STEM" => {
+                let val = tokens
+                    .get(idx + 1)
+                    .ok_or_else(|| "STEM 缺少主干名称参数".to_string())?;
+                args.stem = Some(val.clone());
+                idx += 2;
+            }
+            "PLANT" => {
+                let val = tokens
+                    .get(idx + 1)
+                    .ok_or_else(|| "PLANT 缺少装置名称参数".to_string())?;
+                args.plant = Some(val.clone());
+                idx += 2;
+            }
+            "SEED" => {
+                let val = tokens
+                    .get(idx + 1)
+                    .ok_or_else(|| "SEED 缺少种子文件路径参数".to_string())?;
+                args.seed = Some(val.clone());
+                idx += 2;
+            }
+            "SYMDIR" => {
+                let val = tokens
+                    .get(idx + 1)
+                    .ok_or_else(|| "SYMDIR 缺少符号目录参数".to_string())?;
+                args.symdir = Some(val.clone());
+                idx += 2;
+            }
+            "CLASSMAP" => {
+                let val = tokens
+                    .get(idx + 1)
+                    .ok_or_else(|| "CLASSMAP 缺少映射 JSON 路径参数".to_string())?;
+                args.classmap = Some(val.clone());
+                idx += 2;
+            }
+            "SUMMARY" => {
+                let val = tokens
+                    .get(idx + 1)
+                    .ok_or_else(|| "SUMMARY 缺少输出 JSON 路径参数".to_string())?;
+                args.summary = Some(std::path::PathBuf::from(val));
+                idx += 2;
+            }
+            "DUAL" => {
+                args.force_dual = true;
+                idx += 1;
+            }
+            "VERIFY" => {
+                args.verify = true;
+                idx += 1;
+            }
+            _ => {
+                args.positional.push(tok.clone());
+                idx += 1;
+            }
+        }
+    }
+    Ok(args)
 }
 
 #[cfg(test)]
@@ -2037,6 +2416,493 @@ mod tests {
         std::fs::write(
             out_dir.join("real139_legacy12_inapp_summary.json"),
             format!("{}\n", serde_json::to_string_pretty(&summary).unwrap()),
+        )
+        .unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn make_synthetic_seed_pid_bytes() -> Vec<u8> {
+        use pid_parse::{PidDocument, PidPackage, PidWriter, RawStream, WritePlan};
+        fn wrap_psm(type_code: u16, payload: &[u8]) -> Vec<u8> {
+            let mut v = Vec::with_capacity(6 + payload.len());
+            v.extend_from_slice(&0x0001u16.to_le_bytes());
+            v.extend_from_slice(&type_code.to_le_bytes());
+            v.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+            v.extend_from_slice(payload);
+            v
+        }
+        fn make_layer(oid: u32, name: &str) -> Vec<u8> {
+            let u16s: Vec<u16> = name.encode_utf16().collect();
+            let mut p = Vec::new();
+            p.extend_from_slice(&oid.to_le_bytes());
+            p.extend_from_slice(&[0u8; 8]);
+            p.extend_from_slice(&0u16.to_le_bytes());
+            p.extend_from_slice(&6u32.to_le_bytes());
+            p.extend_from_slice(&(u16s.len() as u16).to_le_bytes());
+            for u in u16s {
+                p.extend_from_slice(&u.to_le_bytes());
+            }
+            p.extend_from_slice(&0u16.to_le_bytes());
+            wrap_psm(0x0081, &p)
+        }
+        let mut empty_chain = 0x6C90_F544u32.to_le_bytes().to_vec();
+        empty_chain.extend_from_slice(&0u32.to_le_bytes());
+        let mut cluster0 = 0x6C90_F544u32.to_le_bytes().to_vec();
+        cluster0.extend_from_slice(&2u32.to_le_bytes());
+        cluster0.extend_from_slice(&make_layer(8, "Default"));
+        cluster0.extend_from_slice(&make_layer(12, "Labels"));
+        let mut streams = std::collections::BTreeMap::new();
+        for (p, data) in [
+            ("/Sheet6", empty_chain.clone()),
+            ("/PSMcluster0", cluster0),
+            ("/Unclustered Dynamic Attributes", empty_chain.clone()),
+            ("/StyleCluster", empty_chain),
+        ] {
+            streams.insert(
+                p.to_string(),
+                RawStream {
+                    path: p.to_string(),
+                    data,
+                    modified: false,
+                },
+            );
+        }
+        streams.insert(
+            "/TaggedTxtData/Revision".to_string(),
+            RawStream {
+                path: "/TaggedTxtData/Revision".to_string(),
+                data: Vec::new(),
+                modified: false,
+            },
+        );
+        let mut roots = 0x746F_6F72u32.to_le_bytes().to_vec();
+        roots.extend_from_slice(&[0u8; 8]);
+        streams.insert(
+            "/PSMroots".to_string(),
+            RawStream {
+                path: "/PSMroots".to_string(),
+                data: roots,
+                modified: false,
+            },
+        );
+        let mut tseg = 0x6765_7374u32.to_le_bytes().to_vec();
+        tseg.extend_from_slice(&0u16.to_le_bytes());
+        tseg.extend_from_slice(&4u16.to_le_bytes());
+        tseg.extend_from_slice(&32u16.to_le_bytes());
+        tseg.extend_from_slice(&0u16.to_le_bytes());
+        streams.insert(
+            "/PSMspacemap/0x00000000".to_string(),
+            RawStream {
+                path: "/PSMspacemap/0x00000000".to_string(),
+                data: tseg,
+                modified: false,
+            },
+        );
+        PidWriter::write_to_bytes(
+            &PidPackage::new(None, streams, PidDocument::default()),
+            &WritePlan::default(),
+        )
+        .unwrap()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn l4_6_pidconvert_exports_current_unpromoted_sheet_xml_and_dual_verify_without_mutating_canvas(
+    ) {
+        use crate::io::pid_publish_check::{
+            check_publish_xml_bytes, default_publish_spec, CheckOptions, PublishXmlKind,
+        };
+
+        let root = std::env::temp_dir().join(format!("ocs_pidconvert_141_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let seed_path = root.join("seed.pid");
+        std::fs::write(&seed_path, make_synthetic_seed_pid_bytes()).unwrap();
+
+        let mut app = app();
+        let (valve_h, _, _, _, _, _) = seed_dxf_sheet_in_app(&mut app);
+        app.tabs[app.active_tab].current_path = Some(root.join("S141-A.dxf"));
+        app.tabs[app.active_tab].dirty = false;
+
+        // 1. XML-only export without seed or prior PIDPROMOTE; VERIFY enforces StrictVendor
+        let xml_dir = root.join("xml_only");
+        let cmd_xml = format!("PIDCONVERT \"{}\" PLANT P02 VERIFY", xml_dir.display());
+        let _ = app.run_command_line(&cmd_xml);
+
+        let data_xml = xml_dir.join("S141-A_Data.xml");
+        let meta_xml = xml_dir.join("S141-A_Meta.xml");
+        let cov_json = xml_dir.join("S141-A_Coverage.json");
+        assert!(data_xml.is_file(), "PIDCONVERT must write S141-A_Data.xml");
+        assert!(meta_xml.is_file(), "PIDCONVERT must write S141-A_Meta.xml");
+        assert!(
+            cov_json.is_file(),
+            "PIDCONVERT must write S141-A_Coverage.json"
+        );
+        assert!(
+            !xml_dir.join("S141-A.pid").exists(),
+            "directory PIDCONVERT without SEED/DUAL must stay XML-only"
+        );
+        assert!(
+            PidAuthor::load(&app.tabs[app.active_tab].scene.document, valve_h).is_none(),
+            "PIDCONVERT must be read-only on active canvas without injecting PID_AUTHOR"
+        );
+        assert!(!app.tabs[app.active_tab].dirty);
+
+        let xml_raw = std::fs::read(&data_xml).unwrap();
+        let xml_str = std::str::from_utf8(&xml_raw).unwrap();
+        assert!(xml_str.contains("BV0201501A"));
+        assert!(xml_str.contains("PT-02013"));
+        let v_p02 = check_publish_xml_bytes(
+            "S141-A_Data.xml",
+            PublishXmlKind::Data,
+            &xml_raw,
+            default_publish_spec(),
+            &CheckOptions {
+                expected_plant: Some("P02".to_string()),
+                ..CheckOptions::default()
+            },
+        );
+        assert!(v_p02.is_empty(), "{v_p02:?}");
+
+        // 2. Dual `.pid` + XML + `.pidplot.pdf` with SEED + VERIFY
+        let dual_target = root.join("dual").join("S141-DUAL.pid");
+        let cmd_dual = format!(
+            "PIDCONVERT \"{}\" SEED \"{}\" VERIFY",
+            dual_target.display(),
+            seed_path.display()
+        );
+        let _ = app.run_command_line(&cmd_dual);
+        assert!(dual_target.is_file(), "PIDCONVERT must write S141-DUAL.pid");
+        let dual_pdf = root.join("dual").join("S141-DUAL.pidplot.pdf");
+        assert!(
+            dual_pdf.is_file(),
+            "PIDCONVERT VERIFY with SEED must write b-level .pidplot.pdf"
+        );
+        let dual_cov: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("dual").join("S141-DUAL_Coverage.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            dual_cov["pid_verification"]["a_level_index_consistent"].as_bool(),
+            Some(true)
+        );
+        assert!(
+            dual_cov["pid_verification"]["b_level_pdf_primitives"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
+
+        // 3. CLASSMAP: invalid path blocks output; valid external class-map succeeds
+        let bad_dir = root.join("bad_map");
+        let cmd_bad = format!(
+            "PIDCONVERT \"{}\" CLASSMAP \"{}\"",
+            bad_dir.display(),
+            root.join("missing_map.json").display()
+        );
+        let _ = app.run_command_line(&cmd_bad);
+        assert!(
+            !bad_dir.join("S141-A_Data.xml").exists(),
+            "missing CLASSMAP must block export"
+        );
+
+        let custom_map_path = root.join("custom-class-map.json");
+        std::fs::write(
+            &custom_map_path,
+            include_str!("../../../assets/pid-class-map.json"),
+        )
+        .unwrap();
+        let cm_dir = root.join("cm_ok");
+        let cmd_cm = format!(
+            "PIDCONVERT \"{}\" STEM S141-CM CLASSMAP \"{}\" VERIFY",
+            cm_dir.display(),
+            custom_map_path.display()
+        );
+        let _ = app.run_command_line(&cmd_cm);
+        assert!(cm_dir.join("S141-CM_Data.xml").is_file());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn l4_6_pidconvert_batch_converts_mixed_dxf_and_binary_dwg_directory_with_summary_and_verify() {
+        let root =
+            std::env::temp_dir().join(format!("ocs_pidconvert_batch_141_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let in_dir = root.join("in_sheets");
+        let out_dir = root.join("out_bundles");
+        std::fs::create_dir_all(&in_dir).unwrap();
+
+        let seed_path = root.join("seed.pid");
+        std::fs::write(&seed_path, make_synthetic_seed_pid_bytes()).unwrap();
+
+        let mut tmp_app = app();
+        let _ = seed_dxf_sheet_in_app(&mut tmp_app);
+        let dxf_a = in_dir.join("BATCH-01.dxf");
+        crate::io::save_as_version(
+            &tmp_app.tabs[tmp_app.active_tab].scene.document,
+            &dxf_a,
+            document::DxfVersion::AC1032,
+        )
+        .unwrap();
+
+        let dwg_b = in_dir.join("BATCH-02.dwg");
+        crate::io::pid_convert::save_cad_file_as_binary_dwg(&dxf_a, &dwg_b).unwrap();
+        assert!(std::fs::read(&dwg_b).unwrap().starts_with(b"AC10"));
+
+        // 0-byte empty DXF must be skipped gracefully
+        std::fs::write(in_dir.join("EMPTY-SKIP.dxf"), b"").unwrap();
+
+        let summary_path = root.join("batch_summary.json");
+        let mut runner = app();
+        let cmd = format!(
+            "PIDCONVERT BATCH \"{}\" \"{}\" SEED \"{}\" VERIFY SUMMARY \"{}\"",
+            in_dir.display(),
+            out_dir.display(),
+            seed_path.display(),
+            summary_path.display()
+        );
+        let _ = runner.run_command_line(&cmd);
+
+        assert!(summary_path.is_file(), "BATCH SUMMARY JSON must be written");
+        let sum: Value =
+            serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        assert_eq!(sum["files_converted"].as_u64(), Some(2));
+        assert_eq!(sum["files_failed"].as_u64(), Some(0));
+        assert_eq!(sum["pid_files_written"].as_u64(), Some(2));
+        assert_eq!(sum["pdf_files_plotted"].as_u64(), Some(2));
+
+        for stem in ["BATCH-01", "BATCH-02"] {
+            assert!(out_dir.join(format!("{stem}_Data.xml")).is_file());
+            assert!(out_dir.join(format!("{stem}_Meta.xml")).is_file());
+            assert!(out_dir.join(format!("{stem}_Coverage.json")).is_file());
+            assert!(out_dir.join(format!("{stem}.pid")).is_file());
+            assert!(out_dir.join(format!("{stem}.pidplot.pdf")).is_file());
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "runs real SPPID DXF, native AutoCAD legacy sheets, and binary AC1032 .dwg inside OpenCADStudio via PIDCONVERT and PIDCONVERT BATCH"]
+    fn real_multi_source_in_app_pidconvert_single_and_batch_roundtrip() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_med) = std::env::var("OCS_PID_REAL141_SPPID_MED") else {
+            println!("OCS_PID_REAL141_SPPID_MED unset, skipping.");
+            return;
+        };
+        let Ok(sppid_small) = std::env::var("OCS_PID_REAL141_SPPID_SMALL") else {
+            println!("OCS_PID_REAL141_SPPID_SMALL unset, skipping.");
+            return;
+        };
+        let Ok(leg_block) = std::env::var("OCS_PID_REAL141_LEG_BLOCK") else {
+            println!("OCS_PID_REAL141_LEG_BLOCK unset, skipping.");
+            return;
+        };
+        let Ok(leg_shape) = std::env::var("OCS_PID_REAL141_LEG_SHAPE") else {
+            println!("OCS_PID_REAL141_LEG_SHAPE unset, skipping.");
+            return;
+        };
+        let Ok(seed_zip) = std::env::var("OCS_PID_SEED_ZIP") else {
+            println!("OCS_PID_SEED_ZIP unset, skipping.");
+            return;
+        };
+        let sym_dir = std::env::var("OCS_PID_SYM_DIR").unwrap_or_default();
+        let out_dir = std::env::var("OCS_PID_REAL141_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real141"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sha12 = |p: &std::path::Path| -> String {
+            let b = std::fs::read(p).expect("read source bytes");
+            let full = format!("{:x}", Sha256::digest(&b));
+            full[..12].to_string()
+        };
+
+        // 1. Single-sheet in-app `PIDCONVERT` on median real SPPID DXF without prior `PIDPROMOTE`
+        let sppid_med_p = std::path::PathBuf::from(&sppid_med);
+        let sppid_med_sha = sha12(&sppid_med_p);
+        let single_dir = out_dir.join("single_sppid");
+        let single_pid = single_dir.join("INAPP-SINGLE-01.pid");
+
+        let mut app_single = app();
+        let loaded_med = crate::io::load_file(&sppid_med_p).expect("load median SPPID DXF");
+        app_single.tabs[app_single.active_tab].scene.document = loaded_med;
+        app_single.tabs[app_single.active_tab].current_path = Some(out_dir.join("VIRTUAL-MED.dxf"));
+        app_single.tabs[app_single.active_tab].dirty = false;
+
+        let single_cmd = if sym_dir.trim().is_empty() {
+            format!(
+                "PIDCONVERT \"{}\" PLANT P01 SEED \"{}\" VERIFY",
+                single_pid.display(),
+                seed_zip
+            )
+        } else {
+            format!(
+                "PIDCONVERT \"{}\" PLANT P01 SEED \"{}\" SYMDIR \"{}\" VERIFY",
+                single_pid.display(),
+                seed_zip,
+                sym_dir
+            )
+        };
+        let _ = app_single.run_command_line(&single_cmd);
+        assert!(single_pid.is_file(), "single PIDCONVERT must write .pid");
+        assert!(
+            single_dir.join("INAPP-SINGLE-01.pidplot.pdf").is_file(),
+            "single PIDCONVERT VERIFY must write .pidplot.pdf"
+        );
+        assert!(
+            !app_single.tabs[app_single.active_tab].dirty,
+            "PIDCONVERT must not dirty active canvas"
+        );
+        assert_eq!(
+            crate::io::pid_convert::summarize_author_review(
+                &app_single.tabs[app_single.active_tab].scene.document
+            )
+            .total_authored_symbols,
+            0,
+            "PIDCONVERT must not mutate active document XDATA"
+        );
+
+        let single_cov: Value = serde_json::from_str(
+            &std::fs::read_to_string(single_dir.join("INAPP-SINGLE-01_Coverage.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            single_cov["variant_resolution"]["class_default_fallback"].as_u64(),
+            Some(0)
+        );
+        assert_eq!(
+            single_cov["pid_verification"]["a_level_index_consistent"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            single_cov["pid_verification"]["matched_graphic_oids"].as_u64(),
+            single_cov["pid_verification"]["xml_rep_count"].as_u64()
+        );
+
+        // 2. Batch in-app `PIDCONVERT BATCH` across 4 real prototypes (.dxf + binary AC1032 .dwg) + 0-byte empty skip
+        let mixed_in = out_dir.join("mixed_in");
+        let batch_out = out_dir.join("batch_out");
+        std::fs::create_dir_all(&mixed_in).unwrap();
+
+        let f1 = mixed_in.join("BATCH-01-SPPID.dxf");
+        let f2 = mixed_in.join("BATCH-02-LEG-BLK.dxf");
+        let f3 = mixed_in.join("BATCH-03-LEG-EXP.dxf");
+        let f4 = mixed_in.join("BATCH-04-BIN-DWG.dwg");
+        std::fs::copy(&sppid_small, &f1).unwrap();
+        std::fs::copy(&leg_block, &f2).unwrap();
+        std::fs::copy(&leg_shape, &f3).unwrap();
+        crate::io::pid_convert::save_cad_file_as_binary_dwg(std::path::Path::new(&leg_block), &f4)
+            .expect("save real legacy sheet as binary AC1032 .dwg");
+        assert!(std::fs::read(&f4).unwrap().starts_with(b"AC10"));
+        std::fs::write(mixed_in.join("EMPTY-00.dxf"), b"").unwrap();
+
+        let batch_sum_p = out_dir.join("batch_summary.json");
+        let mut app_batch = app();
+        let batch_cmd = if sym_dir.trim().is_empty() {
+            format!(
+                "PIDCONVERT BATCH \"{}\" \"{}\" PLANT P01 SEED \"{}\" VERIFY SUMMARY \"{}\"",
+                mixed_in.display(),
+                batch_out.display(),
+                seed_zip,
+                batch_sum_p.display()
+            )
+        } else {
+            format!(
+                "PIDCONVERT BATCH \"{}\" \"{}\" PLANT P01 SEED \"{}\" SYMDIR \"{}\" VERIFY SUMMARY \"{}\"",
+                mixed_in.display(),
+                batch_out.display(),
+                seed_zip,
+                sym_dir,
+                batch_sum_p.display()
+            )
+        };
+        let _ = app_batch.run_command_line(&batch_cmd);
+        assert!(
+            batch_sum_p.is_file(),
+            "PIDCONVERT BATCH must write summary JSON"
+        );
+
+        let bsum: Value =
+            serde_json::from_str(&std::fs::read_to_string(&batch_sum_p).unwrap()).unwrap();
+        assert_eq!(bsum["files_converted"].as_u64(), Some(4));
+        assert_eq!(bsum["files_failed"].as_u64(), Some(0));
+        assert_eq!(bsum["pid_files_written"].as_u64(), Some(4));
+        assert_eq!(bsum["pdf_files_plotted"].as_u64(), Some(4));
+        assert_eq!(
+            bsum["variant_resolution"]["class_default_fallback"].as_u64(),
+            Some(0)
+        );
+
+        let mut batch_rows = Vec::new();
+        for (stem, src_p) in [
+            ("BATCH-01-SPPID", &f1),
+            ("BATCH-02-LEG-BLK", &f2),
+            ("BATCH-03-LEG-EXP", &f3),
+            ("BATCH-04-BIN-DWG", &f4),
+        ] {
+            let cov: Value = serde_json::from_str(
+                &std::fs::read_to_string(batch_out.join(format!("{stem}_Coverage.json"))).unwrap(),
+            )
+            .unwrap();
+            let exact_v = cov["variant_resolution"]["exact_variant_id"]
+                .as_u64()
+                .unwrap_or(0)
+                + cov["variant_resolution"]["symbol_path_match"]
+                    .as_u64()
+                    .unwrap_or(0);
+            let reps = cov["pid_verification"]["xml_rep_count"]
+                .as_u64()
+                .unwrap_or(0);
+            let matched = cov["pid_verification"]["matched_graphic_oids"]
+                .as_u64()
+                .unwrap_or(0);
+            assert_eq!(matched, reps, "{stem}: GraphicOID mismatch");
+            batch_rows.push(json!({
+                "stem": stem,
+                "src_sha256_prefix": sha12(src_p),
+                "exact_variants": exact_v,
+                "fallback": cov["variant_resolution"]["class_default_fallback"],
+                "items_written": cov["total_items_written"],
+                "relations_written": cov["total_relations_written"],
+                "xml_reps": reps,
+                "matched_oids": matched,
+                "a_valid": cov["pid_verification"]["a_level_index_consistent"],
+                "pdf_prims": cov["pid_verification"]["b_level_pdf_primitives"],
+            }));
+        }
+
+        let final_report = json!({
+            "single_sppid": {
+                "stem": "INAPP-SINGLE-01",
+                "src_sha256_prefix": sppid_med_sha,
+                "exact_variants": single_cov["variant_resolution"]["exact_variant_id"].as_u64().unwrap_or(0)
+                    + single_cov["variant_resolution"]["symbol_path_match"].as_u64().unwrap_or(0),
+                "fallback": single_cov["variant_resolution"]["class_default_fallback"],
+                "items_written": single_cov["total_items_written"],
+                "relations_written": single_cov["total_relations_written"],
+                "xml_reps": single_cov["pid_verification"]["xml_rep_count"],
+                "matched_oids": single_cov["pid_verification"]["matched_graphic_oids"],
+                "a_valid": single_cov["pid_verification"]["a_level_index_consistent"],
+                "pdf_prims": single_cov["pid_verification"]["b_level_pdf_primitives"],
+            },
+            "batch_mixed_4": {
+                "files_converted": bsum["files_converted"],
+                "files_failed": bsum["files_failed"],
+                "total_items_written": bsum["total_items_written"],
+                "total_relations_written": bsum["total_relations_written"],
+                "sheets": batch_rows,
+            }
+        });
+        std::fs::write(
+            out_dir.join("real141_summary.json"),
+            format!("{}\n", serde_json::to_string_pretty(&final_report).unwrap()),
         )
         .unwrap();
     }

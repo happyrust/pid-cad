@@ -495,11 +495,11 @@ flowchart LR
 - **验收**：对整批逐条比对，吻合率与不一致项清单；不一致项归因（规则缺/数据缺）。
 - **解决记录（2026-11-20..21）**：① `1afee04eb`（`#126`）落地 `src/io/pid_publish/names.rs`（公制/英制公称直径格式化与整数编码换算、线号拆解、分段属性双向回填），94 份真实 `_Data.xml` 公称直径 `19,671 / 19,671`（`100.00%`）、仪表类名称 `99.48%`、设备类名称 `99.14%`（见 `readings.md` §15）；② `#138` 扩展 `parse_sppid_line_number` 与 `pipeline_name()` 兼容 2 段（`<公称直径>-<介质>`）与 3 段（`<公称直径>-<介质>-<序号>`）原生存量线号（4+ 段 SPPID 线号行为不变），12 张原生 AutoCAD 存量图合成 `54` 条 `PIDPipeline` 并全过 `StrictVendor` 零违规校验（详见 `readings.md` §27）。
 
-#### L4-6 导出命令与批量入口（M）— **已完成（[#127](https://github.com/happyrust/pid-cad/issues/127)）**
+#### L4-6 导出命令与批量入口（M）— **已完成（[#127](https://github.com/happyrust/pid-cad/issues/127) / [#141](https://github.com/happyrust/pid-cad/issues/141)）**
 - **做法**：新增命令（建议 `PIDCONVERT` 或独立 CLI），输入 DWG/拆分图，输出 XML 与覆盖报告（写了什么、没写什么、为什么）。
 - **验收**：一条命令对一张图产出 `_Data.xml` 与 `_Meta.xml`；覆盖报告列出未映射与跳过项；退出码反映成败。
 - **依赖**：L4-1、L4-4。
-- **解决记录（2026-11-20）**：落地 `src/io/pid_convert/export.rs` 与独立 CLI `examples/pid_convert.rs`（支持单文件与目录整批输入，自动跳过 0 字节空文件并产出 `_Data.xml`、`_Meta.xml`、`_Coverage.json`）；对全部 `90` 张真实有效 DXF 一键转换产出 `77,491` 个对象与 `71,415` 条关系（`failed = 0`），`180 / 180` 份 XML 通过 `#111` `StrictVendor` 零违规校验，详见 `readings.md` §16。
+- **解决记录（2026-11-20..21）**：① `477b08b61`（`#127`）落地 `src/io/pid_convert/export.rs` 与独立 CLI `examples/pid_convert.rs`（支持单文件与目录整批输入，自动跳过 0 字节空文件并产出 `_Data.xml`、`_Meta.xml`、`_Coverage.json`）；对全部 `90` 张真实有效 DXF 一键转换产出 `77,491` 个对象与 `71,415` 条关系（`failed = 0`），`180 / 180` 份 XML 通过 `#111` `StrictVendor` 零违规校验（见 `readings.md` §16）；② `#141` 在 `src/app/commands/pidprops.rs` 与 `src/io/pid_convert/{export,mod}.rs` 零冲突补齐应用内标准命令 `PIDCONVERT`（支持当前打开图纸只读零侵入单图导出与 `PIDCONVERT BATCH` 混合 `.dxf` / 二进制 `.dwg` 目录整批转换，支持 `PLANT`、外置 `CLASSMAP` 覆盖、`SUMMARY` JSON 与 `VERIFY` 双端 `StrictVendor` + `a/b` 级自检），在真实 SPPID 生产图与原生存量 AutoCAD 图纸上端到端验证通过，详见 `readings.md` §30。
 
 #### L4-7 参考 XML 比对门禁（M）— **已完成（[#127](https://github.com/happyrust/pid-cad/issues/127)）**
 - **做法**：用 L0-4 的 `xml_diff.py` 对整批比对，门禁规则：不允许出现"无法解释"的差异；允许的差异要进白名单并写明理由。

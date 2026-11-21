@@ -600,7 +600,7 @@
 
 ---
 
-### ISSUE-L4-6 没有导出命令，只能靠手工（GitHub [#127](https://github.com/happyrust/pid-cad/issues/127)）
+### ISSUE-L4-6 没有导出命令，只能靠手工（GitHub [#127](https://github.com/happyrust/pid-cad/issues/127) / [#141](https://github.com/happyrust/pid-cad/issues/141)）
 
 **现状问题。**
 - 现在没有任何"输入图 → 输出 XML"的命令。
@@ -620,7 +620,7 @@
 **缺资料。** 无（依赖 L4-1、L4-4 完成）。
 
 **对应任务。** L4-6（M）
-**状态与解决记录。** **已完成（2026-11-20，[#127](https://github.com/happyrust/pid-cad/issues/127)）**：落地 `src/io/pid_convert/export.rs` 与独立 CLI `examples/pid_convert.rs`（输出 `_Data.xml`、`_Meta.xml`、`_Coverage.json`，退出码反映成败）；全量 `90` 张真实有效 DXF 一键转换产出 `77,491` 个对象与 `71,415` 条关系（`failed=0`），`180 / 180` 份 XML 通过 `#111` `StrictVendor` 零违规校验（详见 `readings.md` §16）。
+**状态与解决记录。** **已完成（2026-11-20..21，[#127](https://github.com/happyrust/pid-cad/issues/127) / [#141](https://github.com/happyrust/pid-cad/issues/141)）**：① 提交 `477b08b61`（`#127`）落地 `src/io/pid_convert/export.rs` 与独立 CLI `examples/pid_convert.rs`（输出 `_Data.xml`、`_Meta.xml`、`_Coverage.json`，退出码反映成败），全量 `90` 张真实有效 DXF 一键转换产出 `77,491` 个对象与 `71,415` 条关系（`failed=0`），`180 / 180` 份 XML 通过 `#111` `StrictVendor` 零违规校验（见 `readings.md` §16）；② `#141` 在 `src/app/commands/pidprops.rs` 与 `src/io/pid_convert/{export,mod}.rs` 补齐应用内标准命令 `PIDCONVERT`（单图与 `PIDCONVERT BATCH`、外置 `CLASSMAP` 覆盖、`VERIFY` 双端自检），真实 SPPID 生产图与原生存量图/二进制 `.dwg` 应用内实测全过（详见 `readings.md` §30）。
 
 ---
 
@@ -1206,6 +1206,7 @@
 | `ISSUE-LX-6..LX-9 / L4-2` | [#137](https://github.com/happyrust/pid-cad/issues/137) | `done-local`（本地已完成 · 三关编排器与兜底可观测性收官） | 提交 `1b1495c37`：落地 `precheck_and_receipt.py`、`VariantResolutionSummary` + `--class-map` 热替换（90 图 `exact=15,910`、`fallback=0`）与 `06-lx-compliance-and-codelist-audit.md`，见 `readings.md` §26 |
 | `ISSUE-L3-1..L3-4 / L4-5 / L6-1`（原生存量图多模态融合） | [#138](https://github.com/happyrust/pid-cad/issues/138) | `done-local`（本地已完成 · 两套原生存量标准闭环） | 提交 `b152958c1`：扩展 `pid-sppid-legend-map.json`、`pid_convert/{class_map,recognize,export}.rs` 与 `pid_publish/names.rs`；12 张原生 AutoCAD 存量图（`L01..L12`）精确变体映射由 `0` 升至 `1,619`（`fallback=0`），`12/12` 双产物 `3,454/3,454` `GraphicOID` 对齐过 `a/b` 验证且 90 图 `baseline-90.tsv` 零回归，见 `readings.md` §27 |
 | `ISSUE-L2-1..L2-7 / L3-7 / L6-2`（原生存量图交互升格存回闭环） | [#139](https://github.com/happyrust/pid-cad/issues/139) | `done-local`（本地已完成 · 12 图应用内闭环） | 提交 `5c8fdbe65`：扩展 `pid_write/{oid,index}.rs`、`pid_convert/{recognize,promote,mod}.rs` 与 `pidprops.rs`；`L01..L12` 全部 `12/12` 张原生存量图在应用内跑通 `PIDPROMOTE → PIDREVIEW → PIDSAVEPID`（`1,619/1,619` 符号保真、`3,044/3,044` `GraphicOID` 对齐全过 `a/b` 验证），见 `readings.md` §28 |
-| `ISSUE-LX-8 / LX-9 / L6-1 / L6-3`（五槽转换试点送测包与二进制 `.dwg` 直转） | [#140](https://github.com/happyrust/pid-cad/issues/140) | `done-local`（本地已完成 · 双包送测就绪） | 落地 `build_submission_converted.py`、扩展 `precheck_and_receipt.py` 与 `save_cad_file_as_binary_dwg`；核实二进制 `AC1032` `.dwg` 直转与 `.dxf` 100% 相等，构建 `round-01b-converted-20261121`（5 槽 15 文件，`precheck_passed=true`），见 `readings.md` §29 |
+| `ISSUE-LX-8 / LX-9 / L6-1 / L6-3`（五槽转换试点送测包与二进制 `.dwg` 直转） | [#140](https://github.com/happyrust/pid-cad/issues/140) | `done-local`（本地已完成 · 双包送测就绪） | 提交 `6e0037a59`：落地 `build_submission_converted.py`、扩展 `precheck_and_receipt.py` 与 `save_cad_file_as_binary_dwg`；核实二进制 `AC1032` `.dwg` 直转与 `.dxf` 100% 相等，构建 `round-01b-converted-20261121`（5 槽 15 文件，`precheck_passed=true`），见 `readings.md` §29 |
+| `ISSUE-L4-6 / L5-8 / L6-1`（应用内标准转换命令 `PIDCONVERT` 闭环） | [#141](https://github.com/happyrust/pid-cad/issues/141) | `done-local`（本地已完成 · 应用内直转与批处理闭环） | 扩展 `pid_convert/{export,mod}.rs` 与 `pidprops.rs`；补齐应用内 `PIDCONVERT`（单图与 `BATCH` 混合 `.dxf`/`.dwg`、`CLASSMAP`、`VERIFY`、`SUMMARY`），真实 SPPID 图单图 `302/302` 与 4 类真实图纸 `BATCH` `879/879` `GraphicOID` 对齐全过 `StrictVendor` 与 `a/b` 验证，见 `readings.md` §30 |
 | `.sym` 预览（关联） | [#116](https://github.com/happyrust/pid-cad/issues/116) | 并行分支推进中 | 由 `pid-symbol-on-main` 工作树正在推进，严格避让 |
 | 分级表可观测性（关联） | [#117](https://github.com/happyrust/pid-cad/issues/117) | 已完成第 2 步实查与阶段一侧落地 | 已在 `06-lx-compliance-and-codelist-audit.md` 完成备份包全量实查（证实目标 `EFSchema` 6 层树不在包内），并在阶段一导出侧落地 `VariantResolutionSummary` 与 `--class-map` 热替换；备份包导出侧留待后续升级 `pid-parse` 时同步 |
