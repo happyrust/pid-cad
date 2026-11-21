@@ -241,13 +241,13 @@
     },
     "/api/v1/pid/bom": {
       "get": {
-        "summary": "P&ID bill of materials of the current drawing, of a PBS node or of the whole project in the drawing's folder; changes nothing",
+        "summary": "P&ID bill of materials of the current drawing, of one of its numbered snapshots, of a PBS node or of the whole project in the drawing's folder; changes nothing",
         "parameters": [
           {"name": "scope", "in": "query", "description": "drawing, pbs or project; case-insensitive; defaults to drawing", "schema": {"type": "string", "enum": ["drawing", "pbs", "project"]}},
           {"name": "pbs", "in": "query", "description": "Required with scope pbs, and only there: the PBS node whose drawings are counted, its subtree included", "schema": {"type": "string"}},
-          {"name": "snapshot", "in": "query", "description": "Snapshot sequence number to count from; refused (invalid_request) until snapshots are available", "schema": {"type": "integer"}}
+          {"name": "snapshot", "in": "query", "description": "Count this numbered snapshot of the current drawing (see GET /api/v1/pid/snapshots) instead of the drawing as it is now; only with scope drawing. The list then has source snapshot and snapshot_seq", "schema": {"type": "integer", "minimum": 1}}
         ],
-        "responses": {"200": {"description": "The bill of materials: version, generated_at, scope, source, snapshot_seq, length_unit_assumed, rows, pipe_summary, skipped, totals, notices; or status scanning with done and total while the project's files are still being read: ask again later"}, "400": {"description": "Malformed request, or SCOPE_NOT_SELECTED: scope pbs without pbs"}, "404": {"description": "PBS_NODE_UNKNOWN"}, "409": {"description": "BOM_DUPLICATE_TAG (with duplicates: each key and where it is), BOM_SCOPE_INCOMPLETE (with drawings: those that could not be read), INDEX_NO_PROJECT_DIR (the drawing was never saved) or INDEX_DRAWING_ID_DUPLICATED"}, "500": {"description": "INDEX_IO_ERROR"}}
+        "responses": {"200": {"description": "The bill of materials: version, generated_at, scope, source, snapshot_seq, length_unit_assumed, rows, pipe_summary, skipped, totals, notices; or status scanning with done and total while the project's files are still being read: ask again later"}, "400": {"description": "Malformed request (also snapshot that is not a whole number, or with scope pbs or project), SCOPE_NOT_SELECTED: scope pbs without pbs, SNAPSHOT_FORMAT_INVALID or SNAPSHOT_VERSION_UNSUPPORTED"}, "404": {"description": "PBS_NODE_UNKNOWN or SNAPSHOT_NOT_FOUND"}, "409": {"description": "BOM_DUPLICATE_TAG (with duplicates: each key and where it is), BOM_SCOPE_INCOMPLETE (with drawings: those that could not be read), INDEX_NO_PROJECT_DIR (the drawing was never saved, so it has no snapshots either), INDEX_DRAWING_ID_DUPLICATED or SNAPSHOT_CORRUPT (the snapshot fails its checksum)"}, "500": {"description": "INDEX_IO_ERROR or SNAPSHOT_IO_ERROR"}}
       }
     },
     "/api/v1/pid/bom/export": {
@@ -257,9 +257,10 @@
           "path": {"type": "string", "description": "File to write; a relative path starts from the saved drawing's folder. An existing file is replaced"},
           "scope": {"type": "string", "enum": ["drawing", "pbs", "project"], "description": "Case-insensitive; defaults to drawing"},
           "pbs": {"type": "string", "description": "Required with scope pbs, and only there"},
+          "snapshot": {"type": "integer", "minimum": 1, "description": "Count this numbered snapshot of the current drawing instead of the drawing as it is now; only with scope drawing"},
           "columns": {"type": "array", "items": {"type": "string"}, "description": "Main-table columns by header name, in order (CSV and XLSX); defaults to all nine"}
         }}}}},
-        "responses": {"200": {"description": "result: path, format (csv, xlsx or json), rows, bytes (size of the main file) and pipe_summary_path (null for JSON); or status scanning with done and total while the project's files are still being read: send it again later. Nothing is written when the list cannot be made"}, "400": {"description": "Malformed request (no path, or the project file as path), SCOPE_NOT_SELECTED, BOM_COLUMN_UNKNOWN or BOM_FORMAT_UNSUPPORTED"}, "404": {"description": "PBS_NODE_UNKNOWN"}, "409": {"description": "BOM_DUPLICATE_TAG, BOM_SCOPE_INCOMPLETE, INDEX_NO_PROJECT_DIR or INDEX_DRAWING_ID_DUPLICATED"}, "500": {"description": "BOM_IO_ERROR: the file could not be written; INDEX_IO_ERROR"}}
+        "responses": {"200": {"description": "result: path, format (csv, xlsx or json), rows, bytes (size of the main file) and pipe_summary_path (null for JSON); or status scanning with done and total while the project's files are still being read: send it again later. Nothing is written when the list cannot be made"}, "400": {"description": "Malformed request (no path, the project file as path, snapshot that is not a whole number or with scope pbs or project), SCOPE_NOT_SELECTED, BOM_COLUMN_UNKNOWN, BOM_FORMAT_UNSUPPORTED, SNAPSHOT_FORMAT_INVALID or SNAPSHOT_VERSION_UNSUPPORTED"}, "404": {"description": "PBS_NODE_UNKNOWN or SNAPSHOT_NOT_FOUND"}, "409": {"description": "BOM_DUPLICATE_TAG, BOM_SCOPE_INCOMPLETE, INDEX_NO_PROJECT_DIR, INDEX_DRAWING_ID_DUPLICATED or SNAPSHOT_CORRUPT"}, "500": {"description": "BOM_IO_ERROR: the file could not be written; INDEX_IO_ERROR or SNAPSHOT_IO_ERROR"}}
       }
     },
     "/api/v1/pid/snapshots": {

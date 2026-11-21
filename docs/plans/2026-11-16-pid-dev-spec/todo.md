@@ -935,13 +935,14 @@
 
 - **做什么**：`PIDBOM SNAPSHOT <序号> [EXPORT <文件>]`，以及 `pid_bom`、`pid_bom_export` 的 `snapshot` 参数：读这张图已存的那份快照，用里面的 `summary` 算清单；应答的 `source` 为 `snapshot`，`snapshot_seq` 是序号。只支持单图范围。排在快照之后，是因为它要读快照。
 - **验收**：
-  - [ ] 存一份快照后改图：`PIDBOM SNAPSHOT 1` 的清单是改图之前的，`source` 为 `snapshot`、`snapshot_seq` 为 1；`PIDBOM` 的清单是改图之后的。
-  - [ ] 序号不存在 → `SNAPSHOT_NOT_FOUND`（404）；`pid_bom` 带 `snapshot` 参数的结果与命令一致。
-  - [ ] `rest_openapi.json` 里有这个参数；`tool_schema_digest_is_pinned` 通过。
+  - [x] 存一份快照后改图：`PIDBOM SNAPSHOT 1` 的清单是改图之前的，`source` 为 `snapshot`、`snapshot_seq` 为 1；`PIDBOM` 的清单是改图之后的。
+  - [x] 序号不存在 → `SNAPSHOT_NOT_FOUND`（404）；`pid_bom` 带 `snapshot` 参数的结果与命令一致。
+  - [x] `rest_openapi.json` 里有这个参数；`tool_schema_digest_is_pinned` 通过。
 - **验证**：`cargo test --offline --locked --lib pidbom`；`cargo test --offline --locked --lib tool_schema_digest_is_pinned`
 - **依赖**：BOM-5；SNAP-2
 - **文件**：`src/app/commands/pidbom.rs`、`src/app/control/mod.rs`、`src/rest.rs`、`src/rest_openapi.json`、`src/mcp.rs`
 - **规模**：M（每个文件只加几行）
+- **补（2026-11-22）**：在 `pid-stage-c` 分支上接着 `SNAP-6` 做，一个提交。「文件」一栏的 `src/app/control/mod.rs` 没动（两个操作的分发 `BOM-5` 已接好，`snapshot` 在 `pidbom.rs` 的操作主体里认），多改了 `src/mcp_ops.rs`（`pid_bom_export` 的参数表加 `snapshot`，执行门面要求登记）。与任务写法不同、或任务没有说的：执行工具的请求 schema 上限 50,000 字节，`SNAP-6` 之后 49,925，先删了 `pid_bom_export` 说明里讲行为的三句再加参数，现在 49,853、剩 147（用调试版量的，同法量起点得 49,925），以后再加写操作要先定上限怎么办；图没存过报 `INDEX_NO_PROJECT_DIR`（409，同 `PIDSNAPSHOT`），校验不过报 `SNAPSHOT_CORRUPT`（409），都不出清单、不写文件；序号 0 同不存在；操作的 `snapshot` 要写成 JSON 非负整数、只和 `scope: drawing` 一起，`null` 等于没给；REST 查询参数是数字的换成整数，不是的原样交给操作拒（400）；按快照导出不等扫描，读快照的错由写操作应答；先认导出的文件再读快照；命令只认 `PIDBOM SNAPSHOT <序号> EXPORT <文件>` 这个次序；`generated_at` 是算的时候。这些记在材料清单规格 §11.6，§11.5 的第 4 条（`snapshot` 还不认）作废。**先红后绿**：先只加测试（新 3 条、改 3 条），6 条都编得过、都败在断言上（命令不认 `SNAPSHOT`、操作答还不能从快照算、REST 把序号当文本、MCP 读门面没有这个参数）；实现后第一遍 6 条全过，摘要照预期换新值；格式检查查出新测试里 2 处长行，照 `rustfmt` 改后 `pidbom`、`pid_bom`、摘要、`rest::` 重跑都过。**手工**：调试版用 `--http` 起（令牌只经环境变量 `OCS_API_TOKEN`，不打印、不落盘），经 HTTP 走了 39 步，第一遍全过：存一份快照后插一台泵，`GET /api/v1/pid/bom?snapshot=1` 仍是改图前的 4 行（`source` 为 `snapshot`、`snapshot_seq` 为 1），不带的是 5 行；按快照导出 JSON、CSV 是 200；序号不在 404、快照坏了 409、图没存过 409、写错 400，都没写文件。**读数**：`pidbom` 16 条、`pid_bom` 8 条、摘要 1 条全过；`pidsnapshot` 20 条、`rest::` 27 条、`mcp` 97 条（含 schema 大小那条）全过；主程序库 7582 条，7507 通过、72 默认不跑、3 失败（比对设计稿的三条，与起点相同），多的 3 条是新加的；编译警告 52；clippy 656 / 1051，与起点相同，各文件的告警数一样，位置变了的只有 `mcp.rs` 2 条（`--tests` 一遍另有 `rest.rs` 2 条）随加的行下移，改动的文件没有新告警；`--tests` 那一遍 cargo 报的重复数是 637（起点 636），差在 `viewport_snap.rs` 那条印的次数，告警总数和位置都没变；格式检查：查的五个 Rust 文件 rustfmt 要改的处数与起点相同（`control/mod.rs` 13、`rest.rs` 5，另三个 0），新增 0；架构检查上行依赖 33 对、183 个文件；SPPID 脚本测试 185 条全过；都与起点相同。**新基线**：主程序库 7582 条（7507 / 72 / 3）。
 
 > **检查点 CP-C5**（SNAP-1 – SNAP-6 与 BOM-6 之后）：能存快照、列表、导出、比对；能按快照出清单；性能达标。
 

@@ -378,3 +378,31 @@ MCP：`pid_bom` 进 `READ_OPS`，`pid_bom_export` 进 `EXECUTE_OPS`。
 **测试**（`pidbom.rs` 里新增 5 条，`src/rest.rs`、`src/mcp.rs` 各新增 1 条，名字都带 `pid_bom`）：`pid_bom` 的应答与入口函数在同一张图上算的清单一样，`scope` 不分大小写，不带 `request_id` 也能发，前后「已修改」、撤销栈、编辑修订号不变，能力清单里有 `pid_bom`；按项目先应答 `scanning`、扫着时再发不再起一次扫描、读完是 3 行，按节点 2 行；范围、请求写错的各种码，重复位号带 `duplicates`、读不出来的图带 `drawings`、范围外的坏图不影响；导出 CSV（绝对路径，逐字节对，应答五项都对）、JSON（相对路径，读回同一份清单，副表是 `null`）、XLSX（选列），写不成的九种都不写文件；按项目导出先应答 `scanning`、读完再发才写，只读会话里能导出；REST 两条路由、实测的状态码、各错误码的状态码、OpenAPI 两条路径的各状态；MCP 两份名单、执行门面的参数校验。先只放测试和 `BOM_IO_ERROR`，7 条都编得过、都败在断言上（操作不认识、查询要 `request_id`、不在名单里、路由不是读、能力清单里没有）。实现后 7 条第一次就全过；新加两个操作改了工具清单，`tool_schema_digest_is_pinned` 照预期败在摘要值上，换上它给的新值后过；格式检查查出 `pidbom.rs` 里 9 处长行的排法，照 `rustfmt` 改了（不改行为）再跑两条验证，都过。
 
 **手工**：调试版 `--http`（令牌只经环境变量）走了 35 步。空白图的清单是 0 行；没存过的图按项目算是 409，`pbs` 不给节点号、不认识的 `scope`、带 `snapshot`、扩展名不支持、不给 `path` 都是 400，不带令牌是 401。用命令画泵、阀门、容器、管线和管路，存进临时目录后清单 4 行（管线 1、设备 2、阀门 1），图号取文件名；三种格式导出都是 200，应答的路径、格式、行数、字节数与盘上的文件对得上（CSV 主表 5 行、副表 2 行，各含列名一行；JSON 用相对路径写，读回是同一份清单；XLSX 选列）。不认识的列是 400 且没写文件，写不了的路径是 500，不认识的节点号是 404。按项目算先应答 `scanning`（HTTP 200），读完是 4 行，按项目导出也是 4 行。同一张图另存一份后按项目算是 `BOM_DUPLICATE_TAG`（409，带 3 个重复的键；同一根管线不算重复），导出也是、没写文件，当前图自己的清单照旧。第一遍脚本漏画了管线（管路要画在管线上），清单没有管线行、副表是空的，补上后重走了一遍。
+
+### 11.6 `BOM-6`：按快照出清单（2026-11-22）
+
+**做了什么**（动了 `src/app/commands/pidbom.rs`、`src/rest.rs`、`src/rest_openapi.json`、`src/mcp.rs`，另有一个文件见下）：
+
+- 命令 `PIDBOM SNAPSHOT <序号> [EXPORT <文件>]`（§5.2）：读当前图已存的第几份快照——目录同 `PIDSNAPSHOT`，用快照的 `store::load` 读，读时校验——拿快照里存的摘要算清单：`source` 是 `snapshot`，`snapshot_seq` 是序号，范围是这一张图，图号取快照里的。入口函数 `pidbom_compute` 多一种 `Sheets::Snapshot(i, seq)`，命令和两个操作都从这里算；`BomFailure` 多两种：图没存过（`INDEX_NO_PROJECT_DIR`）、读快照的错（快照规格 §3.8 的码）。说法、导出同 §11.4，范围那句说成「图 PID-1101 的第 1 份快照，」。
+- 两个操作收 `snapshot`（快照序号）：`pid_bom` 带了它应答那份快照的清单，与 `PIDBOM SNAPSHOT` 一样；`pid_bom_export` 带了它写那份清单。按快照算不读别的图，不等项目扫描。
+- 接线：REST `GET /api/v1/pid/bom` 的 `snapshot` 是数字时换成整数交给操作，不是数字的原样交过去由操作拒绝（同 `SNAP-6` 路径里的序号，用同一个 `seq_segment`）；`POST /api/v1/pid/bom/export` 的请求体照旧原样。`map_status` 不用改：`SNAPSHOT_NOT_FOUND` 404、`SNAPSHOT_CORRUPT` 409、`SNAPSHOT_IO_ERROR` 500 是 `SNAP-6` 加的。`rest_openapi.json` 两条路径都加 `snapshot`（整数，最小 1），各状态码的说明补上快照的几种。MCP 读门面加 `snapshot`（整数，最小 1），`TOOL_SCHEMA_DIGEST` 跟着更新。
+- §11.5「与规格写法不同的」第 4 条（`snapshot` 还不认）到这里作废。
+
+**与任务写法不同的：**
+
+1. **`src/app/control/mod.rs` 没动，多动了 `src/mcp_ops.rs`。** 两个操作的分发和名单 `BOM-5` 已接好，`snapshot` 在操作的主体（`pidbom.rs`）里认，控制面不用改。执行门面要求写操作登记参数表（同 `BOM-5`），`pid_bom_export` 要收 `snapshot` 得在表里加一项（整数）。
+2. **压短了 `pid_bom_export` 的说明。** 执行工具的请求 schema 有 50,000 字节的上限（`schema_size_and_defs_structure`），`SNAP-6` 之后是 49,925 字节，加不下一个参数。删的是说明里讲行为、不讲参数的三句（清单出不来时不写文件、只读会话里也能用、清单本身用读门面的 `pid_bom` 读），参数和结果的说明没动；加了参数后是 49,853 字节，还剩 147 字节（用调试版经 `--mcp` 取工具清单、照 `execute_request_schema` 拼回去量的；同法量起点的调试版是 49,925，与 `SNAP-6` 记的相同）。以后再加写操作（如 `PUB-6`）得先定这个上限怎么办。
+
+**规格没写到、这里定下的：**
+
+1. **命令的写法**：`SNAPSHOT`、`EXPORT` 不分大小写；`SNAPSHOT` 后面跟一个序号（只认数字），再可跟 `EXPORT <文件>`（文件名同 §11.4 第 2 条），不再跟别的。按快照导出只认这个次序，`PIDBOM EXPORT <文件> SNAPSHOT 1` 当写错。写错的说怎么写（连同按快照算的写法），不带错误码。
+2. **序号**：0 和不存在的一样报 `SNAPSHOT_NOT_FOUND`。操作的 `snapshot` 要写成 JSON 非负整数，文本、负数、小数报 `invalid_request`；`null` 等于没给。REST 查询参数里的 `0`、`01` 换成整数交给操作（0 是 404），`first`、`-1`、`1.5` 原样交过去是 400。
+3. **范围**：`snapshot` 只和 `scope: drawing`（默认）一起；带 `scope: project`、`scope: pbs` 报 `invalid_request`——快照是一张图的。
+4. **读不出快照时**：图没存过（没有快照目录）报 `INDEX_NO_PROJECT_DIR`（409，同 `PIDSNAPSHOT`），序号不在 `SNAPSHOT_NOT_FOUND`（404），校验不过 `SNAPSHOT_CORRUPT`（409），别的照快照规格 §3.8（`SNAPSHOT_FORMAT_INVALID`、`SNAPSHOT_VERSION_UNSUPPORTED` 400，`SNAPSHOT_IO_ERROR` 500）。都不出清单、不写文件；命令说的话带码。
+5. **先认文件再读快照**：按快照导出时，扩展名不支持、是项目文件这些在读快照之前报（同 §11.4 第 3 条）。
+6. **导出不等**：`pid_bom_export` 带 `snapshot` 时，登记写操作以前的那一步（`control_pid_bom_export_waits`）不拦，读快照的错由写操作应答（`ok: false` 带码），一个文件也不写。
+7. **清单的其余字段**：`generated_at` 是算的时候，不是存快照的时候；符号的名称照现在的符号库。存快照时按当前图算的清单与之后按这份快照算的，除了 `source`、`snapshot_seq`、`generated_at` 都一样（测试和手工都比对了）。
+
+**测试**（`pidbom.rs` 里新增 3 条、改 1 条，`src/rest.rs`、`src/mcp.rs` 各改 1 条）：存过盘的测试图存一份快照后再插一台泵，`PIDBOM SNAPSHOT 1` 说的是改图前的 7 行，`PIDBOM` 是改图后的 8 行；按快照导出的 JSON（文件名带空格、关键字小写）读回、CSV 逐字节，都是存快照时现算的清单（`source`、`snapshot_seq` 换成快照的）；没存过的图 `INDEX_NO_PROJECT_DIR`，写错的 8 种说怎么写、不带码，序号 9 和 0 是 `SNAPSHOT_NOT_FOUND`，抄一份、改坏校验和的第 2 份是 `SNAPSHOT_CORRUPT`，要导出的都没写；`pid_bom` 带 `snapshot` 的应答与同一份清单一样（`scope` 不分大小写），不带的仍是 8 行、`source` 是 `live`，`pid_bom_export` 写的也是快照的清单，请求写错、序号不在、快照坏了的 11 种都应答失败、要写的都没写；`pid_bom_op_says_why_it_cannot` 里没存过的图带 `snapshot` 从 `invalid_request` 改成 `INDEX_NO_PROJECT_DIR`；REST 的 `snapshot` 是数字时成整数、不是时原样，实测的状态码和状态码表加了快照的几种，OpenAPI 两条路径都有 `snapshot`；MCP 读门面的 `snapshot` 是整数、最小 1，执行门面收整数、不收文本。先只加测试，6 条都编得过、都败在断言上（命令不认 `SNAPSHOT`，说用法；操作答还不能从快照算；REST 把序号当文本；MCP 读门面没有这个参数）。实现后 6 条第一次就全过；工具清单变了，`tool_schema_digest_is_pinned` 照预期败在摘要值上，换上它给的新值后过；格式检查查出新测试里 2 处长行的排法，照 `rustfmt` 改了（不改行为）再跑两条验证，都过。
+
+**手工**：调试版 `--http`（令牌只经环境变量）走了 39 步，第一遍全过。没存过的图按快照算、按快照导出都是 409 `INDEX_NO_PROJECT_DIR`，没写文件；`snapshot` 写成 `first`、`-1`、`1.5`，和 `scope=project`、`scope=pbs` 一起给，导出时写成文本，都是 400；不带令牌是 401。用命令画泵、阀门、容器、管线和管路，存成 PID-B6.dwg 后清单 4 行（管线 1、设备 2、阀门 1）；存第 1 份快照（201），这时按快照算的与按当前图算的范围、各行、副表、跳过、合计、提示都一样；再插一台泵，当前图 5 行，按快照算仍是改图前的那 4 行（同样逐项比对），`scope=DRAWING` 也一样。按快照导出 JSON（相对路径，读回是同一份清单）、CSV（选两列，含列名 5 行，另有副表）都是 200，应答的路径、格式、行数、字节数与盘上的对得上。序号 9、0 是 404，抄一份、改坏校验和的第 2 份是 409，导出时一样、都没写文件；按快照导出成 `.txt` 是 400；最后当前图的清单仍是 5 行。

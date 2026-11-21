@@ -1017,7 +1017,7 @@ pub static PID_CHECK_UNWAIVE: OpDef = OpDef {
 
 pub static PID_BOM_EXPORT: OpDef = OpDef {
     name: "pid_bom_export",
-    doc: "Write the P&ID bill of materials of the current drawing, its project or a PBS node to a file on this machine; the extension picks the format (.csv, .xlsx, .json). CSV and XLSX also get the pipe summary beside it (<name>-pipe-summary.<ext>); JSON carries it inside. Nothing is written when the list cannot be made (BOM_DUPLICATE_TAG, BOM_SCOPE_INCOMPLETE). The drawing is not changed, so it also works in a read-only session. Answers status scanning (done, total) while the project's files are still being read: send it again later. Read the list itself with ocs_read op pid_bom. result: path, format, rows, bytes, pipe_summary_path.",
+    doc: "Write the P&ID bill of materials of the current drawing, its project or a PBS node to a file on this machine; the extension picks the format (.csv, .xlsx, .json). CSV and XLSX also get the pipe summary beside it (<name>-pipe-summary.<ext>); JSON carries it inside. Answers status scanning (done, total) while the project's files are still being read: send it again later. result: path, format, rows, bytes, pipe_summary_path.",
     batchable: false,
     params: &[
         req(
@@ -1034,6 +1034,11 @@ pub static PID_BOM_EXPORT: OpDef = OpDef {
             "pbs",
             Ty::Str,
             "PBS node id; only with scope pbs, and needed then (SCOPE_NOT_SELECTED).",
+        ),
+        opt(
+            "snapshot",
+            Ty::Int,
+            "Count this numbered snapshot (pid_snapshots) of the drawing instead; scope drawing only.",
         ),
         opt(
             "columns",

@@ -675,13 +675,18 @@ pub(crate) fn plan(method: &str, rest: &[&str], request: &HttpRequest) -> Plan {
         // P&ID bill of materials (SPEC-pid-bom §5.3): the list of the current
         // drawing, its project or a PBS node, which answers `status: scanning`
         // while the project's files are still being read, and writing it to a
-        // file on this machine. The export changes no drawing.
+        // file on this machine. The export changes no drawing. A snapshot
+        // number in the query reaches the op as a number when it is one, else
+        // as written, for the op to refuse.
         ("GET", ["pid", "bom"]) => {
             let mut bom = json!({"protocol": 1, "op": "pid_bom"});
-            for key in ["scope", "pbs", "snapshot"] {
+            for key in ["scope", "pbs"] {
                 if let Some(value) = request.param(key) {
                     bom[key] = json!(value);
                 }
+            }
+            if let Some(seq) = request.param("snapshot") {
+                bom["snapshot"] = seq_segment(seq);
             }
             Plan::Run {
                 request: bom,
@@ -1154,8 +1159,8 @@ pub(crate) fn plan(method: &str, rest: &[&str], request: &HttpRequest) -> Plan {
     }
 }
 
-/// A snapshot sequence number from the path: a number when it is one, else
-/// the segment as written.
+/// A snapshot sequence number from the path or the query: a number when it is
+/// one, else as written.
 fn seq_segment(segment: &str) -> Value {
     segment
         .parse::<u64>()
@@ -2085,32 +2090,41 @@ mod tests {
     }
 
     /// The bill of materials (SPEC-pid-bom §5.3): GET /pid/bom runs the
-    /// `pid_bom` read with `scope`, `pbs` and `snapshot` from the query;
-    /// POST /pid/bom/export writes the file through the mutation wrapper with
-    /// the body as its fields. Status codes follow §3.5: a duplicate tag and
-    /// a scope with drawings that cannot be read are 409, a PBS node that is
-    /// not there 404, an unknown column, an unsupported extension and a PBS
-    /// scope without a node 400, a file that cannot be written 500. Both
-    /// routes are in the OpenAPI document.
+    /// `pid_bom` read with `scope`, `pbs` and `snapshot` from the query, the
+    /// snapshot as a number when it is one (otherwise as written, for the op
+    /// to refuse); POST /pid/bom/export writes the file through the mutation
+    /// wrapper with the body as its fields. Status codes follow §3.5: a
+    /// duplicate tag, a scope with drawings that cannot be read, a snapshot
+    /// that fails its checksum and a drawing never saved are 409, a PBS node
+    /// or a snapshot that is not there 404, an unknown column, an unsupported
+    /// extension and a PBS scope without a node 400, a file that cannot be
+    /// written 500. Both routes, and `snapshot` on both, are in the OpenAPI
+    /// document.
     #[test]
     fn pid_bom_rest_routes_and_status_codes() {
-        let mut bom = request("GET", "/api/v1/pid/bom", "");
-        bom.query = vec![
-            ("scope".into(), "pbs".into()),
-            ("pbs".into(), "U-100".into()),
-            ("snapshot".into(), "3".into()),
-        ];
-        let Plan::Run {
-            request: asked,
-            created,
-        } = plan("GET", &["pid", "bom"], &bom)
-        else {
-            panic!("GET /pid/bom is not a read");
+        let planned = |query: &[(&str, &str)]| {
+            let mut bom = request("GET", "/api/v1/pid/bom", "");
+            bom.query = query
+                .iter()
+                .map(|&(key, value)| (key.into(), value.into()))
+                .collect();
+            let Plan::Run {
+                request: asked,
+                created,
+            } = plan("GET", &["pid", "bom"], &bom)
+            else {
+                panic!("GET /pid/bom is not a read");
+            };
+            assert_eq!(created, 200);
+            asked
         };
-        assert_eq!(created, 200);
         assert_eq!(
-            asked,
-            json!({"protocol": 1, "op": "pid_bom", "scope": "pbs", "pbs": "U-100", "snapshot": "3"})
+            planned(&[("scope", "pbs"), ("pbs", "U-100"), ("snapshot", "3")]),
+            json!({"protocol": 1, "op": "pid_bom", "scope": "pbs", "pbs": "U-100", "snapshot": 3})
+        );
+        assert_eq!(
+            planned(&[("snapshot", "third")]),
+            json!({"protocol": 1, "op": "pid_bom", "snapshot": "third"})
         );
         let body = r#"{"path":"bom.csv","scope":"project","columns":["位号"]}"#;
         let export = request("POST", "/api/v1/pid/bom/export", body);
@@ -2144,7 +2158,8 @@ mod tests {
             (read("scope", "project"), 409, "INDEX_NO_PROJECT_DIR"),
             (read("scope", "pbs"), 400, "SCOPE_NOT_SELECTED"),
             (read("scope", "nowhere"), 400, "invalid_request"),
-            (read("snapshot", "3"), 400, "invalid_request"),
+            (read("snapshot", "3"), 409, "INDEX_NO_PROJECT_DIR"),
+            (read("snapshot", "third"), 400, "invalid_request"),
             (
                 export(r#"{"path":"bom.txt"}"#),
                 400,
@@ -2167,7 +2182,9 @@ mod tests {
             ("BOM_DUPLICATE_TAG", 409),
             ("BOM_SCOPE_INCOMPLETE", 409),
             ("INDEX_NO_PROJECT_DIR", 409),
+            ("SNAPSHOT_CORRUPT", 409),
             ("PBS_NODE_UNKNOWN", 404),
+            ("SNAPSHOT_NOT_FOUND", 404),
             ("SCOPE_NOT_SELECTED", 400),
             ("BOM_COLUMN_UNKNOWN", 400),
             ("BOM_FORMAT_UNSUPPORTED", 400),
@@ -2198,6 +2215,19 @@ mod tests {
                 "missing {status} response for {method} {path}"
             );
         }
+        let snapshot = json!({"type": "integer", "minimum": 1});
+        let parameters = document["paths"]["/api/v1/pid/bom"]["get"]["parameters"]
+            .as_array()
+            .expect("GET /pid/bom parameters");
+        let asked = parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "snapshot")
+            .expect("GET /pid/bom takes snapshot");
+        assert_eq!(asked["schema"], snapshot, "{asked}");
+        let body = &document["paths"]["/api/v1/pid/bom/export"]["post"]["requestBody"]["content"]
+            ["application/json"]["schema"]["properties"];
+        assert_eq!(body["snapshot"]["type"], snapshot["type"], "{body}");
+        assert_eq!(body["snapshot"]["minimum"], snapshot["minimum"], "{body}");
     }
 
     /// The P&ID snapshots (SPEC-pid-snapshot §5.3): GET /pid/snapshots lists

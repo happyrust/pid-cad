@@ -4,7 +4,9 @@
 //! PIDBOM                    算当前图的清单：各种类几行、管长合计、跳过了几个对象
 //! PIDBOM PROJECT            按项目算：项目目录里的全部图
 //! PIDBOM PBS <节点号>       按节点算：项目文件里归在这个节点及其下级的图
+//! PIDBOM SNAPSHOT <序号>    按快照算：当前图已存的第几份快照（PIDSNAPSHOT 存的）
 //! PIDBOM EXPORT <文件> [PROJECT | PBS <节点号>]
+//! PIDBOM SNAPSHOT <序号> EXPORT <文件>
 //!                           算了写成文件，扩展名定格式（.csv、.xlsx、.json）；CSV、XLSX
 //!                           另在同目录写副表 <文件名>-pipe-summary.<扩展名>
 //! ```
@@ -16,6 +18,10 @@
 //! （`BOM_SCOPE_INCOMPLETE`，§9 B4），逐张说原因；范围外读不出来的不管。有重复的（类型编码，
 //! 位号）也不出（`BOM_DUPLICATE_TAG`），逐个说各在哪张图的哪里。
 //!
+//! 按快照算（`PIDBOM SNAPSHOT`）用快照里存的摘要，快照目录同 `PIDSNAPSHOT`，读时校验：图没存过
+//! 没有快照（`INDEX_NO_PROJECT_DIR`），序号不在 `SNAPSHOT_NOT_FOUND`，坏了 `SNAPSHOT_CORRUPT`。
+//! 只算这一张图；清单的 `source` 是 `snapshot`，`snapshot_seq` 是序号。
+//!
 //! 导出：文件不是完整路径时从当前图所在的目录算起，没存过的图从当前目录算起；扩展名不分大小写，
 //! 别的扩展名报 `BOM_FORMAT_UNSUPPORTED`，这时还没算清单；不拿清单盖项目文件。目标文件已存在
 //! 时覆盖。清单算不出来、转表出错时一个文件也不写。JSON 是 §3.2 的对象，带 `ok`，缩进 2 格，
@@ -24,6 +30,7 @@
 //! 自动化操作（§5.3）同命令：`pid_bom` 照 `scope`（`drawing`、`project`、`pbs`）算，应答是清单带
 //! `ok`；`pid_bom_export` 照 `path` 的扩展名写文件，结果是写到哪里、什么格式、几行、几个字节、
 //! 副表写到哪里。要从磁盘读图时先应答 `scanning`，调用方稍后再发；导出在登记写操作以前等。
+//! 带 `snapshot`（快照序号，只和 `drawing` 一起）同 `PIDBOM SNAPSHOT`，不读别的图，不用等。
 //!
 //! 几个命令、操作都不改图，只读会话里照常能用：导出写的是本机文件，不是图纸（§5.4）。
 
@@ -39,6 +46,7 @@ use crate::pid::master_data::{self, Resolved, PROJECT_FILE};
 use crate::pid::project_index::{
     summarize, DrawingSummary, IndexDrawing, IndexError, ObjectKind, DEFAULT_TOLERANCE,
 };
+use crate::pid::snapshot::{store, Snapshot, SnapshotError};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::borrow::Cow;
@@ -66,10 +74,13 @@ const PIPE_SUMMARY_SUFFIX: &str = "-pipe-summary";
 const LISTED: usize = 10;
 
 const USAGE: &str =
-    "PIDBOM: 写成 PIDBOM、PIDBOM PROJECT 或 PIDBOM PBS <节点号>；导出写成 PIDBOM EXPORT <文件> [PROJECT | PBS <节点号>]。";
+    "PIDBOM: 写成 PIDBOM、PIDBOM PROJECT、PIDBOM PBS <节点号> 或 PIDBOM SNAPSHOT <序号>；导出写成 PIDBOM EXPORT <文件> [PROJECT | PBS <节点号>] 或 PIDBOM SNAPSHOT <序号> EXPORT <文件>。";
 
 const EXPORT_USAGE: &str =
-    "PIDBOM EXPORT: 写成 PIDBOM EXPORT <文件> [PROJECT | PBS <节点号>]；文件名里有空格就加双引号。";
+    "PIDBOM EXPORT: 写成 PIDBOM EXPORT <文件> [PROJECT | PBS <节点号>]，按快照导出写成 PIDBOM SNAPSHOT <序号> EXPORT <文件>；文件名里有空格就加双引号。";
+
+const SNAPSHOT_USAGE: &str =
+    "PIDBOM SNAPSHOT: 写成 PIDBOM SNAPSHOT <序号> [EXPORT <文件>]，序号见 PIDSNAPSHOT LIST；文件名里有空格就加双引号。";
 
 /// 要扫项目的范围：全项目，或一个 PBS 节点及其下级。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,6 +101,8 @@ pub(super) struct BomJob {
 pub(super) enum Sheets<'a> {
     /// 第 `i` 个标签页的图，现做摘要。
     Current(usize),
+    /// 第 `i` 个标签页的图已存的第 `seq` 份快照，用快照里的摘要。
+    Snapshot(usize, u64),
     /// 一次项目扫描的结果，取 `range` 里的图；按节点取时节点及其下级查 `master`。
     Scanned {
         scanned: &'a Scanned,
@@ -107,6 +120,10 @@ pub(super) enum BomFailure {
     Incomplete(Vec<IndexDrawing>),
     /// `bom::build` 报的错（`BOM_DUPLICATE_TAG`）。
     Bom(BomError),
+    /// 按快照算而图没存过，没有快照目录（`INDEX_NO_PROJECT_DIR`）。
+    NoProjectDir,
+    /// 读快照的错：序号不在（`SNAPSHOT_NOT_FOUND`）、坏了（`SNAPSHOT_CORRUPT`）等（快照规格 §3.8）。
+    Snapshot(SnapshotError),
 }
 
 impl BomFailure {
@@ -116,6 +133,8 @@ impl BomFailure {
             Self::Index(error) => error.code(),
             Self::Incomplete(_) => BOM_SCOPE_INCOMPLETE,
             Self::Bom(error) => error.code(),
+            Self::NoProjectDir => INDEX_NO_PROJECT_DIR,
+            Self::Snapshot(error) => error.code(),
         }
     }
 }
@@ -136,6 +155,11 @@ impl fmt::Display for BomFailure {
                 )
             }
             Self::Bom(error) => write!(f, "{error}"),
+            Self::NoProjectDir => write!(
+                f,
+                "{INDEX_NO_PROJECT_DIR}: 当前图没保存过，没有带序号的快照；存盘、存过快照后再按快照算"
+            ),
+            Self::Snapshot(error) => write!(f, "{error}"),
         }
     }
 }
@@ -209,11 +233,21 @@ struct Exported<'a> {
     bom: &'a Bom,
 }
 
-/// `pid_bom_export` 的请求：范围（`None` 是当前图）、要写的文件、主表选的列（`None` 是默认九列）。
+/// `pid_bom_export` 的请求：范围、要写的文件、主表选的列（`None` 是默认九列）。
 struct ExportAsked {
-    range: Option<Range>,
+    scope: Asked,
     export: Export,
     columns: Option<Vec<String>>,
+}
+
+/// `pid_bom`、`pid_bom_export` 请求的范围（§5.3）。
+enum Asked {
+    /// 当前图，现做摘要。
+    Drawing,
+    /// 当前图已存的第几份快照（`snapshot`）。
+    Snapshot(u64),
+    /// 按项目、按节点算，要扫项目。
+    Range(Range),
 }
 
 /// 范围的写法（关键字不分大小写）：什么都不写是当前图，`PROJECT`，`PBS <节点号>`。
@@ -253,12 +287,16 @@ impl OpenCADStudio {
             return None;
         }
         let (option, after) = first_word(rest);
+        if option.eq_ignore_ascii_case("SNAPSHOT") {
+            self.pidbom_snapshot_run(i, after);
+            return Some(Task::none());
+        }
         let (export, scope) = if option.eq_ignore_ascii_case("EXPORT") {
             let Some((name, scope)) = file_word(after) else {
                 self.command_line.push_error(EXPORT_USAGE);
                 return Some(Task::none());
             };
-            let Some(export) = self.pidbom_target(i, name) else {
+            let Some(export) = self.pidbom_target(i, "PIDBOM EXPORT", name) else {
                 return Some(Task::none());
             };
             (Some(export), scope)
@@ -297,20 +335,41 @@ impl OpenCADStudio {
         Some(task)
     }
 
-    /// `PIDBOM EXPORT` 要写的文件（[`export_target`]），从第 `i` 个标签页的图所在目录算起。
-    /// 扩展名不支持（`BOM_FORMAT_UNSUPPORTED`）、是项目文件时在命令行上说，得 `None`。
-    fn pidbom_target(&mut self, i: usize, name: &str) -> Option<Export> {
+    /// 导出要写的文件（[`export_target`]），从第 `i` 个标签页的图所在目录算起。扩展名不支持
+    /// （`BOM_FORMAT_UNSUPPORTED`）、是项目文件时在命令行上说（`verb` 打头），得 `None`。
+    fn pidbom_target(&mut self, i: usize, verb: &str, name: &str) -> Option<Export> {
         let dir = crate::io::drawing_dir(&self.tabs[i].scene.document);
         let (code, why) = match export_target(dir, name) {
             Ok(export) => return Some(export),
             Err(refused) => refused,
         };
-        let said = format!("PIDBOM EXPORT: {why}");
+        let said = format!("{verb}: {why}");
         match code {
             Some(code) => self.command_line.push_error_coded(code, &said),
             None => self.command_line.push_error(&said),
         }
         None
+    }
+
+    /// `PIDBOM SNAPSHOT <序号> [EXPORT <文件>]`（§5.2）：按第 `i` 个标签页的图已存的这份快照算，
+    /// 说清单，要导出的同 `PIDBOM EXPORT` 写成文件（先认文件再读快照）。写错了说怎么写。
+    fn pidbom_snapshot_run(&mut self, i: usize, text: &str) {
+        let verb = "PIDBOM SNAPSHOT";
+        let Some((seq, name)) = snapshot_words(text) else {
+            self.command_line.push_error(SNAPSHOT_USAGE);
+            return;
+        };
+        let export = match name {
+            None => None,
+            Some(name) => {
+                let Some(export) = self.pidbom_target(i, verb, name) else {
+                    return;
+                };
+                Some(export)
+            }
+        };
+        let outcome = self.pidbom_compute(Sheets::Snapshot(i, seq));
+        self.pidbom_done(verb, outcome, export.as_ref());
     }
 
     /// 按项目、按节点算（导出）：定项目目录、读主数据，按节点算时认节点号，再扫项目，扫完
@@ -370,31 +429,51 @@ impl OpenCADStudio {
     }
 
     /// 算清单（§4）：取范围内各图的摘要，交给 `bom::build`。命令、自动化操作，以后的面板和
-    /// 发布包都从这里算。当前图现做摘要（默认的连接容差）；项目、节点范围取扫好的项目里在
+    /// 发布包都从这里算。当前图现做摘要（默认的连接容差）；快照用里面存的摘要
+    /// （[`Self::pidbom_snapshot`]），清单的 `source` 是 `snapshot`；项目、节点范围取扫好的项目里在
     /// 范围内的图（[`in_scope`]）。得到清单和算进去的图数。不碰命令行。
     pub(super) fn pidbom_compute(&self, sheets: Sheets<'_>) -> Result<(Bom, usize), BomFailure> {
-        let (summaries, scope) = match sheets {
+        let (summaries, scope, source) = match sheets {
             Sheets::Current(i) => {
                 let meta = self.drawing_meta(i).map_err(BomFailure::Index)?;
                 let scope = BomScope::drawing(&meta.drawing_id);
                 let document = &self.tabs[i].scene.document;
                 let summary = summarize(document, &self.pid_symbols, meta, DEFAULT_TOLERANCE);
-                (Cow::Owned(vec![summary]), scope)
+                (Cow::Owned(vec![summary]), scope, BomSource::Live)
+            }
+            Sheets::Snapshot(i, seq) => {
+                let snapshot = self.pidbom_snapshot(i, seq)?;
+                let scope = BomScope::drawing(&snapshot.drawing_id);
+                let summaries = Cow::Owned(vec![snapshot.summary]);
+                (summaries, scope, BomSource::Snapshot(seq))
             }
             Sheets::Scanned {
                 scanned,
                 range,
                 master,
-            } => in_scope(scanned, range, master)?,
+            } => {
+                let (summaries, scope) = in_scope(scanned, range, master)?;
+                (summaries, scope, BomSource::Live)
+            }
         };
         let options = BomOptions {
             scope,
-            source: BomSource::Live,
+            source,
             generated_at: unix_now(),
             symbol_labels: bom::symbol_labels(&self.pid_symbols),
         };
         let bom = bom::build(&summaries, &options).map_err(BomFailure::Bom)?;
         Ok((bom, summaries.len()))
+    }
+
+    /// 第 `i` 个标签页的图已存的第 `seq` 份快照，读时校验；快照目录同 `PIDSNAPSHOT`（快照规格
+    /// §3.1）。图没存过时没有快照目录，是 [`BomFailure::NoProjectDir`]。
+    fn pidbom_snapshot(&self, i: usize, seq: u64) -> Result<Snapshot, BomFailure> {
+        let document = &self.tabs[i].scene.document;
+        let drawing_dir = crate::io::drawing_dir(document).ok_or(BomFailure::NoProjectDir)?;
+        let meta = self.drawing_meta(i).map_err(BomFailure::Index)?;
+        let dir = store::dir_for(drawing_dir, &meta.drawing_id);
+        store::load(&dir, seq).map_err(BomFailure::Snapshot)
     }
 
     /// 算完了：说清单（[`Self::pidbom_say`]），要导出的写成文件；算不出来的连同错误码说为什么
@@ -441,7 +520,7 @@ impl OpenCADStudio {
             .sum();
         self.command_line.push_output(&format!(
             "{verb}: {}{} 行{}，管长合计 {length:.2} m，跳过 {} 个对象。",
-            scope_said(&bom.scope, drawings),
+            scope_said(bom, drawings),
             bom.totals.rows,
             kinds_said(&bom.totals.by_kind),
             bom.skipped.len()
@@ -494,7 +573,10 @@ impl OpenCADStudio {
                     .collect();
                 self.pidbom_list(&lines, "读不出来的图");
             }
-            BomFailure::Index(_) | BomFailure::Bom(_) => {}
+            BomFailure::Index(_)
+            | BomFailure::Bom(_)
+            | BomFailure::NoProjectDir
+            | BomFailure::Snapshot(_) => {}
         }
     }
 
@@ -513,19 +595,19 @@ impl OpenCADStudio {
 
 /// 自动化操作（§5.3）：应答和失败的写法同别的控制面操作，不碰命令行。
 impl OpenCADStudio {
-    /// 控制面的 `pid_bom`：照 `scope` 算，应答是清单（§3.2）带 `ok`。当前图同 `PIDBOM`，按项目、
-    /// 按节点同 `PIDBOM PROJECT`、`PIDBOM PBS`；要读的图缓存里没有时应答 `scanning` 并交出后台
-    /// 读的任务（[`Self::op_scan`]），调用方稍后再发。算不出来时带上重复的键或读不出来的图
-    /// （[`failure_answer`]）。
+    /// 控制面的 `pid_bom`：照 `scope` 算，应答是清单（§3.2）带 `ok`。当前图同 `PIDBOM`，带
+    /// `snapshot` 同 `PIDBOM SNAPSHOT`，按项目、按节点同 `PIDBOM PROJECT`、`PIDBOM PBS`；要读的图
+    /// 缓存里没有时应答 `scanning` 并交出后台读的任务（[`Self::op_scan`]），调用方稍后再发。算不
+    /// 出来时带上重复的键或读不出来的图（[`failure_answer`]）。
     pub(in crate::app) fn control_pid_bom(&mut self, req: &Value) -> (Value, Task<Message>) {
         if self.tabs[self.active_tab].is_start {
             return no_task(refuse("no_document", "Create or open a drawing first"));
         }
-        let range = match scope_asked(req) {
-            Ok(range) => range,
+        let asked = match scope_asked(req) {
+            Ok(asked) => asked,
             Err(refusal) => return no_task(refusal),
         };
-        match self.op_bom(range, true) {
+        match self.op_bom(asked, true) {
             Ok(bom) => no_task(json!(Exported {
                 ok: true,
                 bom: &bom
@@ -536,7 +618,7 @@ impl OpenCADStudio {
 
     /// `pid_bom_export` 进写操作的流程以前先看（§5.3）：没有图、请求写错了、按项目按节点算时
     /// 当前图没存过或节点号不认识（[`Self::op_bom_master`]）、要等扫描，就在这里应答，要扫描的
-    /// 交出后台读的任务；能算了是 `None`。
+    /// 交出后台读的任务；能算了是 `None`。当前图、按快照算的不等，读快照的错在写操作里应答。
     pub(in crate::app) fn control_pid_bom_export_waits(
         &mut self,
         req: &Value,
@@ -548,7 +630,11 @@ impl OpenCADStudio {
         }
         let dir = crate::io::drawing_dir(&self.tabs[i].scene.document);
         let range = match export_asked(req, dir) {
-            Ok(asked) => asked.range?,
+            Ok(ExportAsked {
+                scope: Asked::Range(range),
+                ..
+            }) => range,
+            Ok(_) => return None,
             Err(refusal) => return Some(no_task(refusal)),
         };
         if let Err(refusal) = self.op_bom_master(i, &range) {
@@ -567,11 +653,11 @@ impl OpenCADStudio {
     ) -> Result<Task<Message>, Value> {
         let dir = crate::io::drawing_dir(&self.tabs[self.active_tab].scene.document);
         let ExportAsked {
-            range,
+            scope,
             export,
             columns,
         } = export_asked(req, dir)?;
-        let bom = self.op_bom(range, false).map_err(|(answer, _)| answer)?;
+        let bom = self.op_bom(scope, false).map_err(|(answer, _)| answer)?;
         let written =
             write_bom(&bom, &export, columns.as_deref()).map_err(|error| match error {
                 ExportError::Columns(error) => refuse(error.code(), error.to_string()),
@@ -592,14 +678,15 @@ impl OpenCADStudio {
         Ok(Task::none())
     }
 
-    /// 两个操作算 `range` 的清单（`None` 是当前图，现做）：按项目、按节点算先认范围
+    /// 两个操作算 `asked` 的清单：当前图现做，快照读出来算；按项目、按节点算先认范围
     /// （[`Self::op_bom_master`]），再扫项目（`read` 同 [`Self::op_scan`]），在扫好的项目上算。
     /// 算不出来是失败应答（[`failure_answer`]）。
-    fn op_bom(&mut self, range: Option<Range>, read: bool) -> Result<Bom, (Value, Task<Message>)> {
+    fn op_bom(&mut self, asked: Asked, read: bool) -> Result<Bom, (Value, Task<Message>)> {
         let i = self.active_tab;
-        let outcome = match range {
-            None => self.pidbom_compute(Sheets::Current(i)),
-            Some(range) => {
+        let outcome = match asked {
+            Asked::Drawing => self.pidbom_compute(Sheets::Current(i)),
+            Asked::Snapshot(seq) => self.pidbom_compute(Sheets::Snapshot(i, seq)),
+            Asked::Range(range) => {
                 let master = self.op_bom_master(i, &range).map_err(no_task)?;
                 let (_, scanned) = self.op_scan(i, DEFAULT_TOLERANCE, read)?;
                 let sheets = Sheets::Scanned {
@@ -686,12 +773,17 @@ fn verb_of(range: Option<&Range>, export: bool) -> &'static str {
     }
 }
 
-/// 清单算的是什么：「当前图，」「图 PID-1101，」「全项目 2 张图，」「PBS 节点 U-100 1 张图，」。
-fn scope_said(scope: &BomScope, drawings: usize) -> String {
+/// 清单算的是什么：「当前图，」「图 PID-1101，」「图 PID-1101 的第 1 份快照，」「全项目 2 张图，」
+/// 「PBS 节点 U-100 1 张图，」。
+fn scope_said(bom: &Bom, drawings: usize) -> String {
+    let scope = &bom.scope;
     match scope.kind {
         ScopeKind::Drawing => {
-            let drawing_id = scope.drawing_id.as_deref().unwrap_or_default();
-            format!("{}，", drawing_said(drawing_id))
+            let drawing = drawing_said(scope.drawing_id.as_deref().unwrap_or_default());
+            match bom.snapshot_seq {
+                Some(seq) => format!("{drawing} 的第 {seq} 份快照，"),
+                None => format!("{drawing}，"),
+            }
         }
         ScopeKind::Pbs => {
             let node = scope.pbs.as_deref().unwrap_or_default();
@@ -874,13 +966,16 @@ fn export_target(dir: Option<&Path>, name: &str) -> Result<Export, (Option<&'sta
     Ok(Export { path, format })
 }
 
-/// 读 `pid_bom`、`pid_bom_export` 请求里的范围（§5.3），`None` 是当前图。`scope` 不分大小写，
-/// 默认 `drawing`；`scope: pbs` 时 `pbs` 必给，没给或是空的报 `SCOPE_NOT_SELECTED`；别的范围不收
-/// `pbs`。从快照算（`snapshot`）要等快照做好。写得不对是 `invalid_request`。
-fn scope_asked(req: &Value) -> Result<Option<Range>, Value> {
-    if !req["snapshot"].is_null() {
-        return Err(refuse("invalid_request", "还不能从快照算清单（snapshot）"));
-    }
+/// 读 `pid_bom`、`pid_bom_export` 请求里的范围（§5.3）。`scope` 不分大小写，默认 `drawing`；
+/// `scope: pbs` 时 `pbs` 必给，没给或是空的报 `SCOPE_NOT_SELECTED`；别的范围不收 `pbs`。按快照算
+/// 给 `snapshot`：快照序号，写 JSON 的非负整数，只和 `drawing` 一起（快照是一张图的）；序号在
+/// 不在，读的时候才知道。写得不对是 `invalid_request`。
+fn scope_asked(req: &Value) -> Result<Asked, Value> {
+    let wrong = || refuse("invalid_request", "snapshot 写快照的序号：非负整数");
+    let snapshot = match &req["snapshot"] {
+        Value::Null => None,
+        written => Some(written.as_u64().ok_or_else(wrong)?),
+    };
     let scope = match &req["scope"] {
         Value::Null => "drawing".to_owned(),
         Value::String(scope) => scope.trim().to_ascii_lowercase(),
@@ -896,28 +991,33 @@ fn scope_asked(req: &Value) -> Result<Option<Range>, Value> {
         Value::String(node) => Some(node.trim()).filter(|node| !node.is_empty()),
         _ => return Err(refuse("invalid_request", "pbs 写 PBS 节点号")),
     };
-    match (scope.as_str(), pbs) {
-        ("drawing", None) => Ok(None),
-        ("project", None) => Ok(Some(Range::Project)),
-        ("pbs", Some(node)) => Ok(Some(Range::Pbs(node.to_owned()))),
-        ("pbs", None) => Err(refuse(
+    match (scope.as_str(), pbs, snapshot) {
+        ("drawing", None, None) => Ok(Asked::Drawing),
+        ("drawing", None, Some(seq)) => Ok(Asked::Snapshot(seq)),
+        ("project", None, None) => Ok(Asked::Range(Range::Project)),
+        ("pbs", Some(node), None) => Ok(Asked::Range(Range::Pbs(node.to_owned()))),
+        ("project" | "pbs", _, Some(_)) => Err(refuse(
+            "invalid_request",
+            "snapshot 只和 scope: drawing 一起给：快照是一张图的",
+        )),
+        ("pbs", None, None) => Err(refuse(
             SCOPE_NOT_SELECTED,
             "scope 是 pbs 时要给 pbs（PBS 节点号）",
         )),
-        ("drawing" | "project", Some(_)) => {
+        ("drawing" | "project", Some(_), _) => {
             Err(refuse("invalid_request", "pbs 只和 scope: pbs 一起给"))
         }
-        (other, _) => Err(refuse(
+        (other, _, _) => Err(refuse(
             "invalid_request",
             format!("scope 写 drawing、project 或 pbs，不认识 {other}"),
         )),
     }
 }
 
-/// `pid_bom_export` 的请求（§5.3）：范围同 [`scope_asked`]；`path` 必给，文件同
+/// `pid_bom_export` 的请求（§5.3）：范围同 [`scope_asked`]（含 `snapshot`）；`path` 必给，文件同
 /// [`export_target`]，项目文件是 `invalid_request`；`columns` 写列名的数组，不给是默认九列。
 fn export_asked(req: &Value, dir: Option<&Path>) -> Result<ExportAsked, Value> {
-    let range = scope_asked(req)?;
+    let scope = scope_asked(req)?;
     let name = match &req["path"] {
         Value::String(name) if !name.trim().is_empty() => name,
         _ => return Err(refuse("invalid_request", "要给 path：写到哪个文件")),
@@ -937,7 +1037,7 @@ fn export_asked(req: &Value, dir: Option<&Path>) -> Result<ExportAsked, Value> {
     let export = export_target(dir, name)
         .map_err(|(code, why)| refuse(code.unwrap_or("invalid_request"), why))?;
     Ok(ExportAsked {
-        range,
+        scope,
         export,
         columns,
     })
@@ -952,7 +1052,10 @@ fn failure_answer(failure: &BomFailure) -> Value {
             answer["duplicates"] = json!(duplicates);
         }
         BomFailure::Incomplete(drawings) => answer["drawings"] = json!(drawings),
-        BomFailure::Index(_) | BomFailure::Bom(_) => {}
+        BomFailure::Index(_)
+        | BomFailure::Bom(_)
+        | BomFailure::NoProjectDir
+        | BomFailure::Snapshot(_) => {}
     }
     answer
 }
@@ -988,6 +1091,27 @@ fn file_word(text: &str) -> Option<(&str, &str)> {
     (!name.is_empty()).then_some((name, rest))
 }
 
+/// `PIDBOM SNAPSHOT` 后面的写法：`<序号> [EXPORT <文件>]`，序号全是数字，文件名同 [`file_word`]。
+/// 得到序号和要写的文件名；写得不对是 `None`。
+fn snapshot_words(text: &str) -> Option<(u64, Option<&str>)> {
+    let (seq, rest) = first_word(text);
+    if seq.is_empty() || !seq.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let seq = seq.parse().ok()?;
+    let (option, after) = first_word(rest);
+    if option.is_empty() {
+        return Some((seq, None));
+    }
+    if !option.eq_ignore_ascii_case("EXPORT") {
+        return None;
+    }
+    match file_word(after) {
+        Some((name, "")) => Some((seq, Some(name))),
+        _ => None,
+    }
+}
+
 /// 现在的 Unix 秒，清单的 `generated_at`（跟检查结果的 `checked_at` 一样算）。
 fn unix_now() -> i64 {
     SystemTime::now()
@@ -1004,6 +1128,7 @@ mod tests {
     use crate::pid::master_data::{MasterData, PbsNode};
     use crate::pid::persist::PID_AUTHOR_APP;
     use crate::pid::project_index::{SummaryMeta, SummaryObject, SummarySource};
+    use crate::pid::snapshot::{store, SNAPSHOT_CORRUPT, SNAPSHOT_NOT_FOUND};
     use serde_json::{json, Value};
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1707,8 +1832,8 @@ mod tests {
     }
 
     /// `pid_bom` 算不出清单时（§3.5）：请求写错是 `invalid_request`（范围不认识、不按节点算却
-    /// 给了节点号、`snapshot` 要到 `BOM-6` 才认）；按节点算没给节点号 `SCOPE_NOT_SELECTED`；
-    /// 没存过的图要按项目、按节点算 `INDEX_NO_PROJECT_DIR`；节点号不认识 `PBS_NODE_UNKNOWN`；
+    /// 给了节点号）；按节点算没给节点号 `SCOPE_NOT_SELECTED`；没存过的图要按项目、按节点、
+    /// 按快照算 `INDEX_NO_PROJECT_DIR`；节点号不认识 `PBS_NODE_UNKNOWN`；
     /// 重复位号 `BOM_DUPLICATE_TAG`，带 `duplicates`；范围内有图读不出来
     /// `BOM_SCOPE_INCOMPLETE`，带 `drawings`，范围外的不管。
     #[test]
@@ -1723,7 +1848,7 @@ mod tests {
                 json!({"scope": "project", "pbs": "U-100"}),
                 "invalid_request",
             ),
-            (json!({"snapshot": 3}), "invalid_request"),
+            (json!({"snapshot": 3}), INDEX_NO_PROJECT_DIR),
             (json!({"scope": "pbs"}), SCOPE_NOT_SELECTED),
             (json!({"scope": "pbs", "pbs": " "}), SCOPE_NOT_SELECTED),
             (json!({"scope": "project"}), INDEX_NO_PROJECT_DIR),
@@ -1905,5 +2030,217 @@ mod tests {
         assert_eq!(wrote["result"]["rows"], 2, "{wrote}");
         assert!(scratch.path("node.csv").exists());
         assert_eq!(undo_steps(&app), steps);
+    }
+
+    /// 临时目录里的 PID-1101.dwg：画好 [`plant`]、存过盘、打开着。
+    fn saved_plant(scratch: &Scratch) -> OpenCADStudio {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        plant(&mut app);
+        let current = scratch.path("PID-1101.dwg");
+        save(&app, &current);
+        let i = app.active_tab;
+        app.tabs[i].scene.document.source_path = Some(current.to_string_lossy().into_owned());
+        app
+    }
+
+    /// 存第 1 份快照，再改图：空白处再插一台泵（位号自动编）。得到存快照时现算的清单，改成从
+    /// 第 1 份快照算的样子（`source`、`snapshot_seq`）：按这份快照算出的应当就是它。
+    fn snapshot_then_edit(app: &mut OpenCADStudio) -> Bom {
+        let i = app.active_tab;
+        let (mut before, _) = app
+            .pidbom_compute(Sheets::Current(i))
+            .expect("改图前的清单");
+        let ran = run(app, "PIDSNAPSHOT SAVE 改图前");
+        assert_eq!(ran.error, None, "{}", ran.said);
+        draw(app, "PIDINSERT pump", &[[0.0, -100.0]]);
+        before.source = bom::SourceKind::Snapshot;
+        before.snapshot_seq = Some(1);
+        before
+    }
+
+    /// PID-1101 的快照目录里放一份坏的第 2 份：抄第 1 份，校验和改掉。
+    fn corrupt_second(scratch: &Scratch) {
+        let dir = store::dir_for(&scratch.0, "PID-1101");
+        let bytes = fs::read(dir.join("0001.json")).expect("第 1 份");
+        let mut tampered: Value = serde_json::from_slice(&bytes).expect("快照是 JSON");
+        tampered["seq"] = json!(2);
+        tampered["body_sha256"] = json!("0".repeat(64));
+        fs::write(dir.join("0002.json"), tampered.to_string()).expect("写一份坏的");
+    }
+
+    /// `PIDBOM SNAPSHOT`（§5.2）：存一份快照后改图，按快照算的是改图之前的清单（`source` 是
+    /// `snapshot`、`snapshot_seq` 是 1），`PIDBOM` 算的是改图之后的。关键字不分大小写；导出同
+    /// `PIDBOM EXPORT`，写的也是快照的清单。
+    #[test]
+    fn pidbom_snapshot_counts_the_drawing_as_it_was_when_the_snapshot_was_saved() {
+        let scratch = Scratch::new();
+        let mut app = saved_plant(&scratch);
+        let expected = snapshot_then_edit(&mut app);
+        assert_eq!(expected.totals.rows, 7, "{expected:#?}");
+
+        let ran = run(&mut app, "PIDBOM SNAPSHOT 1");
+        assert_eq!(ran.error, None, "{}", ran.said);
+        let said =
+            "PIDBOM SNAPSHOT: 图 PID-1101 的第 1 份快照，7 行（管线 1，设备 2，阀门 2，仪表 1，管件 1），";
+        assert!(ran.said.contains(said), "{}", ran.said);
+        let ran = run(&mut app, "PIDBOM");
+        assert_eq!(ran.error, None, "{}", ran.said);
+        let said = "PIDBOM: 图 PID-1101，8 行（管线 1，设备 3，阀门 2，仪表 1，管件 1），";
+        assert!(ran.said.contains(said), "{}", ran.said);
+
+        let ran = run(&mut app, r#"pidbom snapshot 1 export "快照 清单.json""#);
+        assert_eq!(ran.error, None, "{}", ran.said);
+        let mut back = read_back(&scratch.path("快照 清单.json"));
+        back.generated_at = expected.generated_at;
+        assert_eq!(back, expected);
+        let ran = run(&mut app, "PIDBOM SNAPSHOT 1 EXPORT 快照清单.csv");
+        assert_eq!(ran.error, None, "{}", ran.said);
+        let bytes = fs::read(scratch.path("快照清单.csv")).expect("CSV");
+        let table = bom::rows(&expected, None).expect("主表");
+        assert_eq!(bytes, bom::csv_bytes(&table));
+    }
+
+    /// `PIDBOM SNAPSHOT` 算不出来时（§3.5）：图没存过、没有快照目录 `INDEX_NO_PROJECT_DIR`；
+    /// 序号不在 `SNAPSHOT_NOT_FOUND`、快照坏了 `SNAPSHOT_CORRUPT`，要导出的都不写。写错了说
+    /// 怎么写（连同按快照算的写法），不带错误码。
+    #[test]
+    fn pidbom_snapshot_says_why_it_cannot() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let ran = run(&mut app, "PIDBOM SNAPSHOT 1");
+        let code = ran.code.as_deref();
+        assert_eq!(code, Some(INDEX_NO_PROJECT_DIR), "{}", ran.said);
+        for line in [
+            "PIDBOM SNAPSHOT",
+            "PIDBOM SNAPSHOT first",
+            "PIDBOM SNAPSHOT -1",
+            "PIDBOM SNAPSHOT 1 PROJECT",
+            "PIDBOM SNAPSHOT 1 PBS U-100",
+            "PIDBOM SNAPSHOT 1 EXPORT",
+            "PIDBOM SNAPSHOT 1 EXPORT bom.csv PROJECT",
+            "PIDBOM EXPORT bom.csv SNAPSHOT 1",
+        ] {
+            let ran = run(&mut app, line);
+            assert_eq!(ran.code, None, "{line}: {}", ran.said);
+            let error = ran.error.unwrap_or_default();
+            assert!(error.starts_with("PIDBOM"), "{line}: {error}");
+            assert!(error.contains("PIDBOM SNAPSHOT <序号>"), "{line}: {error}");
+        }
+
+        let scratch = Scratch::new();
+        let mut app = saved_plant(&scratch);
+        snapshot_then_edit(&mut app);
+        corrupt_second(&scratch);
+        for (line, code, name) in [
+            ("PIDBOM SNAPSHOT 9", SNAPSHOT_NOT_FOUND, ""),
+            ("PIDBOM SNAPSHOT 0", SNAPSHOT_NOT_FOUND, ""),
+            (
+                "PIDBOM SNAPSHOT 9 EXPORT nine.csv",
+                SNAPSHOT_NOT_FOUND,
+                "nine.csv",
+            ),
+            ("PIDBOM SNAPSHOT 2", SNAPSHOT_CORRUPT, ""),
+            (
+                "PIDBOM SNAPSHOT 2 EXPORT two.json",
+                SNAPSHOT_CORRUPT,
+                "two.json",
+            ),
+        ] {
+            let ran = run(&mut app, line);
+            assert_eq!(ran.code.as_deref(), Some(code), "{line}: {}", ran.said);
+            let error = ran.error.unwrap_or_default();
+            let said = format!("PIDBOM SNAPSHOT: {code}");
+            assert!(error.starts_with(&said), "{line}: {error}");
+            if !name.is_empty() {
+                assert!(!scratch.path(name).exists(), "{line}");
+            }
+        }
+    }
+
+    /// 控制面带 `snapshot`（§5.3）：`pid_bom` 应答的是那份快照的清单，同 `PIDBOM SNAPSHOT`；
+    /// 不带的还是改图之后的。`pid_bom_export` 写的也是快照的清单。序号不在
+    /// `SNAPSHOT_NOT_FOUND`、快照坏了 `SNAPSHOT_CORRUPT`，都不写文件；`snapshot` 不是非负整数、
+    /// 和按项目按节点算一起给是 `invalid_request`。
+    #[test]
+    fn pid_bom_ops_with_snapshot_answer_the_bom_of_that_snapshot() {
+        let scratch = Scratch::new();
+        let mut app = saved_plant(&scratch);
+        let expected = snapshot_then_edit(&mut app);
+        let answer = request(&mut app, json!({"op": "pid_bom", "snapshot": 1}));
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["source"], "snapshot", "{answer}");
+        assert_eq!(answer["snapshot_seq"], 1, "{answer}");
+        let mut answered: Bom = serde_json::from_value(answer.clone()).expect("一份清单");
+        answered.generated_at = expected.generated_at;
+        assert_eq!(answered, expected);
+        let ask = json!({"op": "pid_bom", "scope": "Drawing", "snapshot": 1});
+        let scoped = request(&mut app, ask);
+        assert_eq!(scoped["rows"], answer["rows"], "{scoped}");
+        let live = request(&mut app, json!({"op": "pid_bom"}));
+        assert_eq!(live["source"], "live", "{live}");
+        assert_eq!(live["snapshot_seq"], Value::Null, "{live}");
+        assert_eq!(live["totals"]["rows"], 8, "{live}");
+
+        let ask = json!({"op": "pid_bom_export", "path": "snap.json", "snapshot": 1});
+        let wrote = request(&mut app, ask);
+        assert_eq!(wrote["ok"], true, "{wrote}");
+        assert_eq!(wrote["result"]["rows"], 7, "{wrote}");
+        let mut back = read_back(&scratch.path("snap.json"));
+        back.generated_at = expected.generated_at;
+        assert_eq!(back, expected);
+
+        corrupt_second(&scratch);
+        for (ask, code, name) in [
+            (json!({"snapshot": 9}), SNAPSHOT_NOT_FOUND, ""),
+            (json!({"snapshot": 2}), SNAPSHOT_CORRUPT, ""),
+            (json!({"snapshot": "1"}), "invalid_request", ""),
+            (json!({"snapshot": -1}), "invalid_request", ""),
+            (json!({"snapshot": 1.5}), "invalid_request", ""),
+            (
+                json!({"scope": "project", "snapshot": 1}),
+                "invalid_request",
+                "",
+            ),
+            (
+                json!({"scope": "pbs", "pbs": "U-100", "snapshot": 1}),
+                "invalid_request",
+                "",
+            ),
+            (
+                json!({"path": "nine.csv", "snapshot": 9}),
+                SNAPSHOT_NOT_FOUND,
+                "nine.csv",
+            ),
+            (
+                json!({"path": "two.csv", "snapshot": 2}),
+                SNAPSHOT_CORRUPT,
+                "two.csv",
+            ),
+            (
+                json!({"path": "one.csv", "snapshot": "1"}),
+                "invalid_request",
+                "one.csv",
+            ),
+            (
+                json!({"path": "all.csv", "scope": "project", "snapshot": 1}),
+                "invalid_request",
+                "all.csv",
+            ),
+        ] {
+            let mut ask = ask;
+            let op = if name.is_empty() {
+                "pid_bom"
+            } else {
+                "pid_bom_export"
+            };
+            ask["op"] = json!(op);
+            let answer = request(&mut app, ask.clone());
+            assert_eq!(answer["ok"], false, "{ask}: {answer}");
+            assert_eq!(answer["code"], code, "{ask}: {answer}");
+            if !name.is_empty() {
+                assert!(!scratch.path(name).exists(), "{ask}");
+            }
+        }
     }
 }
