@@ -292,3 +292,118 @@ def test_evaluate_receipt_validates_control_and_derives_round2_plan(tmp_path: Pa
     assert ev_bool["inferred_requirements"]["pid_binary_required"] is True
     assert ev_bool["next_round_actions"] == ["proceed-to-converted-dxf-pilot-submission"]
 
+
+def test_audit_packages_verifies_multi_package_integrity_and_catches_tampering_or_leaks(
+    tmp_path: Path,
+) -> None:
+    import re
+    import build_submission_converted
+    from test_build_submission_converted import _make_converted_bundle
+
+    src_dir = tmp_path / "src_passed"
+    _make_strict_vendor_sample(src_dir, stem="PASSED-01")
+
+    subm_root = tmp_path / "submissions"
+    r1_dir = subm_root / "round-01-test"
+    assert (
+        build_submission_round1.main(
+            ["--source-dir", str(src_dir), "--out-dir", str(r1_dir), "--plant", "P01"]
+        )
+        == 0
+    )
+
+    conv_srcs = []
+    for idx in range(1, 7):
+        b = tmp_path / f"cb_{idx}"
+        _make_converted_bundle(b, f"CONV-SRC-{idx:02d}")
+        conv_srcs.append(b)
+    dwg_p = tmp_path / "CONV-SRC-05.dwg"
+    dwg_p.write_bytes(b"AC1032\x00\x00\x00\x00MOCK")
+    r1b_dir = subm_root / "round-01b-test"
+    assert (
+        build_submission_converted.main(
+            [
+                "--sppid-dxf-bundle",
+                str(conv_srcs[0]),
+                "--legacy-block-bundle",
+                str(conv_srcs[1]),
+                "--legacy-shape-bundle",
+                str(conv_srcs[2]),
+                "--legacy-inapp-bundle",
+                str(conv_srcs[3]),
+                "--binary-dwg-bundle",
+                str(conv_srcs[4]),
+                "--binary-dwg-source",
+                str(dwg_p),
+                "--pid-inapp-bundle",
+                str(conv_srcs[5]),
+                "--out-dir",
+                str(r1b_dir),
+                "--plant",
+                "P01",
+            ]
+        )
+        == 0
+    )
+
+    summary_p = tmp_path / "delivery-readiness-summary.json"
+    rc = precheck_and_receipt.main(
+        [
+            "audit-packages",
+            "--submissions-root",
+            str(subm_root),
+            "--out-json",
+            str(summary_p),
+        ]
+    )
+    assert rc == 0
+    raw_sum = summary_p.read_text(encoding="utf-8")
+    assert not re.search(r"[A-Za-z]:\\", raw_sum)
+    summary = json.loads(raw_sum)
+    assert summary["audit_passed"] is True
+    assert summary["total_packages"] == 2
+    assert summary["total_slots"] == 12
+    assert summary["total_files"] == 35
+    assert summary["errors"] == []
+
+    # 1-byte tampering on a deliverable file must fail SHA-256 verification
+    target_pid = r1b_dir / "01-sppid-dxf-direct" / "CONV-01.pid"
+    orig_bytes = target_pid.read_bytes()
+    target_pid.write_bytes(orig_bytes[:-1] + bytes([orig_bytes[-1] ^ 0xFF]))
+    rc_tamper = precheck_and_receipt.main(
+        [
+            "audit-packages",
+            "--submissions-root",
+            str(subm_root),
+            "--out-json",
+            str(summary_p),
+        ]
+    )
+    assert rc_tamper == 1
+    sum_tamper = json.loads(summary_p.read_text(encoding="utf-8"))
+    assert sum_tamper["audit_passed"] is False
+    assert any("sha256 mismatch" in e.lower() for e in sum_tamper["errors"])
+    target_pid.write_bytes(orig_bytes)
+
+    # Host drive path leak inside receipt.json must fail leak check
+    rec_p = r1b_dir / "receipt.json"
+    orig_rec = rec_p.read_text(encoding="utf-8")
+    rec_obj = json.loads(orig_rec)
+    rec_obj["results"][0]["error_message"] = "failed reading /home/mockuser/file.pid"
+    rec_p.write_text(json.dumps(rec_obj, indent=2), encoding="utf-8")
+    rc_leak = precheck_and_receipt.main(
+        [
+            "audit-packages",
+            "--submissions-root",
+            str(subm_root),
+            "--out-json",
+            str(summary_p),
+        ]
+    )
+    assert rc_leak == 1
+    sum_leak = json.loads(summary_p.read_text(encoding="utf-8"))
+    assert sum_leak["audit_passed"] is False
+    assert any("path leak" in e.lower() for e in sum_leak["errors"])
+    rec_p.write_text(orig_rec, encoding="utf-8")
+
+

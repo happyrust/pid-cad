@@ -23,13 +23,18 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 from typing import Any, Sequence
+
+HOST_PATH_LEAK_RE = re.compile(r"(?:[A-Za-z]:\\|\\\\[A-Za-z0-9_.-]+\\|/Users/|/home/)")
+IFILE_FILEPATH_ATTR_RE = re.compile(r'(<IFile\b[^>]*?\bFilePath=)"[^"]*"')
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -377,6 +382,171 @@ def evaluate_receipt(manifest_path: Path, receipt_path: Path) -> tuple[int, dict
     return 0, summary
 
 
+def audit_submission_packages(submissions_root: Path) -> tuple[int, dict[str, Any]]:
+    spec = xml_spec_check.load_spec()
+    pkg_dirs: list[Path] = []
+    if (submissions_root / "submission-manifest.json").is_file():
+        pkg_dirs.append(submissions_root)
+    elif submissions_root.is_dir():
+        for child in sorted(submissions_root.iterdir()):
+            if child.is_dir() and (child / "submission-manifest.json").is_file():
+                pkg_dirs.append(child)
+
+    errors: list[str] = []
+    if not pkg_dirs:
+        errors.append("no submission packages containing submission-manifest.json found")
+
+    pkg_reports: list[dict[str, Any]] = []
+    tot_slots = 0
+    tot_files = 0
+    tot_bytes = 0
+
+    for pdir in pkg_dirs:
+        pname = pdir.name
+        pkg_errors: list[str] = []
+        mp = pdir / "submission-manifest.json"
+        rp = pdir / "receipt.json"
+
+        raw_m = mp.read_text(encoding="utf-8")
+        if HOST_PATH_LEAK_RE.search(raw_m):
+            pkg_errors.append(f"{pname}: host path leak detected in submission-manifest.json")
+
+        manifest = json.loads(raw_m)
+        pkind = str(manifest.get("package_kind") or f"round{manifest.get('round', 1)}_subtraction")
+        plant = manifest.get("plant")
+        if manifest.get("precheck_passed") is not True:
+            pkg_errors.append(f"{pname}: manifest precheck_passed is not True")
+
+        slots = manifest.get("slots") or []
+        canon_slots = json.dumps(slots, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        calc_m_sha = hashlib.sha256(canon_slots).hexdigest()
+        decl_m_sha = str(manifest.get("manifest_sha256") or "")
+        if calc_m_sha != decl_m_sha:
+            pkg_errors.append(
+                f"{pname}: canonical manifest_sha256 mismatch (expected {decl_m_sha[:16]}, got {calc_m_sha[:16]})"
+            )
+
+        receipt_state = "missing"
+        if not rp.is_file():
+            pkg_errors.append(f"{pname}: missing receipt.json")
+        else:
+            raw_r = rp.read_text(encoding="utf-8")
+            if HOST_PATH_LEAK_RE.search(raw_r):
+                pkg_errors.append(f"{pname}: host path leak detected in receipt.json")
+            rec = json.loads(raw_r)
+            if str(rec.get("manifest_sha256") or "") != decl_m_sha:
+                pkg_errors.append(f"{pname}: receipt.json manifest_sha256 mismatch")
+            rec_rows = {
+                str(r.get("slot")): r for r in (rec.get("results") or []) if isinstance(r, dict)
+            }
+            exp_slot_names = [str(s.get("slot")) for s in slots]
+            if set(rec_rows.keys()) != set(exp_slot_names):
+                pkg_errors.append(f"{pname}: receipt.json slot list does not match manifest slots")
+            statuses = [_slot_status_lower(rec_rows.get(sn)) for sn in exp_slot_names]
+            receipt_state = "pending" if any(st == "pending" for st in statuses) else "completed"
+
+        p_files = 0
+        p_bytes = 0
+        for s in slots:
+            sname = str(s.get("slot") or "")
+            expect_strict = bool(s.get("expect_strict_vendor_pass", True))
+            for fmeta in s.get("files") or []:
+                rel_p = str(fmeta.get("path") or "")
+                if (
+                    not rel_p
+                    or rel_p.startswith(("/", "\\"))
+                    or ".." in Path(rel_p).parts
+                    or HOST_PATH_LEAK_RE.search(rel_p)
+                ):
+                    pkg_errors.append(f"{pname}/{sname}: unsafe or leaked path entry")
+                    continue
+                fp = pdir / rel_p
+                if not fp.is_file():
+                    pkg_errors.append(f"{pname}/{sname}: missing deliverable file in slot")
+                    continue
+                raw_b = fp.read_bytes()
+                decl_len = int(fmeta.get("bytes", -1))
+                decl_sha = str(fmeta.get("sha256") or "")
+                actual_sha = hashlib.sha256(raw_b).hexdigest()
+                if len(raw_b) != decl_len:
+                    pkg_errors.append(
+                        f"{pname}/{sname}: byte length mismatch ({len(raw_b)} != {decl_len})"
+                    )
+                if actual_sha != decl_sha:
+                    pkg_errors.append(
+                        f"{pname}/{sname}: sha256 mismatch ({actual_sha[:12]} != {decl_sha[:12]})"
+                    )
+                p_files += 1
+                p_bytes += len(raw_b)
+
+                fname_lower = fp.name.lower()
+                if fname_lower.endswith("_data.xml") or fname_lower.endswith("_meta.xml"):
+                    kind = "data" if fname_lower.endswith("_data.xml") else "meta"
+                    txt_xml = raw_b.decode("utf-8", errors="replace")
+                    scrubbed_xml = (
+                        IFILE_FILEPATH_ATTR_RE.sub(r'\1""', txt_xml)
+                        if kind == "meta"
+                        else txt_xml
+                    )
+                    if HOST_PATH_LEAK_RE.search(scrubbed_xml):
+                        pkg_errors.append(f"{pname}/{sname}: host path leak inside {kind} XML")
+                    v_schema = xml_spec_check.check_xml_bytes(
+                        f"{sname}_{kind}.xml", kind, raw_b, spec, strict=False, expected_plant=plant
+                    )
+                    if v_schema:
+                        pkg_errors.append(
+                            f"{pname}/{sname}: {len(v_schema)} SchemaOnly XML violations"
+                        )
+                    if expect_strict:
+                        v_strict = xml_spec_check.check_xml_bytes(
+                            f"{sname}_{kind}.xml",
+                            kind,
+                            raw_b,
+                            spec,
+                            strict=True,
+                            expected_plant=plant,
+                        )
+                        if v_strict:
+                            pkg_errors.append(
+                                f"{pname}/{sname}: {len(v_strict)} StrictVendor XML violations"
+                            )
+
+        tot_slots += len(slots)
+        tot_files += p_files
+        tot_bytes += p_bytes
+        errors.extend(pkg_errors)
+
+        pkg_reports.append(
+            {
+                "package_dir": pname,
+                "package_kind": pkind,
+                "plant": plant,
+                "manifest_sha256": decl_m_sha,
+                "slot_count": len(slots),
+                "file_count": p_files,
+                "total_bytes": p_bytes,
+                "receipt_state": receipt_state,
+                "sppid_c1_d_precheck_status": manifest.get(
+                    "sppid_c1_d_precheck_status", "unverified_no_sppid_runner"
+                ),
+                "audit_passed": len(pkg_errors) == 0,
+            }
+        )
+
+    passed = (len(pkg_dirs) > 0) and (len(errors) == 0)
+    report = {
+        "schema_version": 1,
+        "audit_passed": passed,
+        "total_packages": len(pkg_dirs),
+        "total_slots": tot_slots,
+        "total_files": tot_files,
+        "total_bytes": tot_bytes,
+        "packages": pkg_reports,
+        "errors": errors[:100],
+    }
+    return (0 if passed else 1), report
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="precheck_and_receipt.py",
@@ -400,6 +570,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ev.add_argument("--manifest", required=True, help="Path to submission-manifest.json")
     p_ev.add_argument("--receipt", required=True, help="Path to receipt.json")
     p_ev.add_argument("--out-json", default=None, help="Optional JSON output path")
+
+    p_aud = sub.add_parser(
+        "audit-packages",
+        help="Audit cryptographic SHA-256 integrity, host-path sanitization, and Gate-1 XML spec across submission packages",
+    )
+    p_aud.add_argument(
+        "--submissions-root",
+        required=True,
+        help="Directory holding one or more built submission package subdirectories",
+    )
+    p_aud.add_argument("--out-json", default=None, help="Optional sanitized readiness JSON path")
     return p
 
 
@@ -440,6 +621,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.out_json:
             Path(args.out_json).write_text(json.dumps(ev, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(f"RECEIPT_EVAL\trc={rc}\tchannel_valid={ev.get('channel_valid')}")
+        return rc
+
+    if args.subcmd == "audit-packages":
+        sroot = Path(args.submissions_root)
+        if not sroot.is_dir():
+            print(f"error: submissions-root does not exist: {sroot}", file=sys.stderr)
+            return 2
+        rc, rep = audit_submission_packages(sroot)
+        if args.out_json:
+            out_p = Path(args.out_json)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            out_p.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
+        print(
+            f"AUDIT_PACKAGES\tpassed={rep['audit_passed']}\tpackages={rep['total_packages']}\tslots={rep['total_slots']}\tfiles={rep['total_files']}"
+        )
         return rc
 
     return 2

@@ -31,7 +31,7 @@
 | **`L4` publish XML 导出**（`L4-0..L4-7`） | **100% 已完成** | `#111, #123, #126, #127, #137, #138, #141`（`6fd58799c`, `b49ed5274`, `1afee04eb`, `477b08b61`, `1b1495c37`, `b152958c1` + `#141`）：`StrictVendor` 校验器、220 份真值零违规、共享确定性 UID 分配、公称直径 `100%` 规范化、2/3/4+ 段线号兼容与管网派生合成、90 图整批转换 `unexplained_diffs = 0`、`_Coverage.json` `VariantResolutionSummary` 可观测性（`90` 图 `exact = 15,910` + `12` 图 `exact = 1,619`，`class_default_fallback = 0`）、`--class-map` 按厂外置替换，以及应用内标准命令 `PIDCONVERT`（单图与 `BATCH`、`CLASSMAP`、`VERIFY`） |
 | **`L5` `.pid` 生成**（`L5-1, L5-3..L5-6, L5-8, L5-9`） | **本地 `a/b` 级 100% 已完成** | `#128–#130`（`c851fa214..53ea94d76`）：18 类流写入面分类、10 份空白模板零差异往返、五族记录链与 Q9 索引同步、90 图一键双产物 `42,861/42,861` 跨文件对齐并通过 `a/b` 级验证（`L5-2 / L5-7` 待 `RES-06`） |
 | **`L6` 整合与总验收**（`L6-1..L6-3`） | **本地全线已完成** | `examples/pid_convert.rs` 整批双产物 CLI + 应用内 `PIDCONVERT` / `PIDCONVERT BATCH` 命令（`L6-1` / `L4-6`，`#130` / `#138` / `#140` / `#141` / `#142`，覆盖 90 张 SPPID 图 + 12 张原生 AutoCAD 存量图 + 二进制 `AC1032` `.dwg` + 已编辑 `PID_AUTHOR` 模型）、`promote::save_author_document_to_dual` 与 `PIDSAVEPID` 应用内编辑存回 `.pid` 全链路 `a/b` 验证（`L6-2`，`#134` / `#136` / `#139` / `#142` 覆盖 SPPID DXF、12 张原生存量图与真实 `.pid` 原图全闭环）及本文件 `L6-3` 总验收报告（`#135`，`3ba5c3c2e`；外部回执待回填） |
-| **`LX` 外部验收**（`LX-2, LX-4, LX-6..LX-9` 本机齐备） | **纯 ASCII 受控运行器模板、三套送测/真机探针实物包、全系回执收敛器与合规台账已全部就绪** | `build_submission_round1.py`（`#135`）已产出 `submissions/round-01-20261121/`；`build_submission_converted.py`（`#140` / `#143` / `#147`）已产出 8 槽 24 文件 `submissions/round-01b-converted-20261121/`；`build_submission_round2.py` + `sppid_runner_template.ps1`（`#144`）已产出第二轮二分包 `submissions/round-02-bisect-20261121/` 与 `LX-4` `E1..E3` 探针包 `submissions/lx4-sppid-probes-20261121/`；`precheck_and_receipt.py` 已支持串联三关预检与 `R1..R5` / `B1..B4` / `C1..C8`（含跨槽诊断 `diagnostic_hints`）/ `E1..E3` 自动收敛；`06-lx-compliance-and-codelist-audit.md` 已归档 `LX-6` 保留流够用性、`LX-7` 合规边界与 `#117` 分级来源调查 |
+| **`LX` 外部验收**（`LX-2, LX-4, LX-6..LX-9` 本机齐备） | **纯 ASCII 受控运行器模板、四套送测/真机探针实物包、总审计门禁、全系回执收敛器与合规台账已全部就绪** | `build_submission_round1.py`（`#135`）产出 `submissions/round-01-20261121/`；`build_submission_converted.py`（`#140` / `#143` / `#147`）产出 8 槽 24 文件 `submissions/round-01b-converted-20261121/`；`build_submission_round2.py` + `sppid_runner_template.ps1`（`#144`）产出 `submissions/round-02-bisect-20261121/` 与 `submissions/lx4-sppid-probes-20261121/`；`precheck_and_receipt.py` 支持三关预检、`audit-packages`（`#148`，4 套包共 22 槽 65 文件密码学哈希自洽与零泄漏总审计 `audit_passed = true`）及 `R1..R5` / `B1..B4` / `C1..C8` / `E1..E3` 自动收敛；`06-lx-compliance-and-codelist-audit.md` 已归档 `LX-6/LX-7/#117` |
 | **检查点 A（能认得）** | **已达成**（2026-11-20） | 基线报告、`03-parse-answers.md` Q1–Q13 与 L4/L5 选型全部落盘 |
 | **检查点 B / C / D** | **本地静态与 `a/b` 级条件已齐备** | 待受控 SPPID 环境补跑 `c1/d` 真机预检及外部平台回填首轮 `receipt.json` 后即可正式签收 |
 
@@ -81,7 +81,7 @@
 
 ## 4. 固定六门禁全阶段演进核验表
 
-| 门禁项 | 初始基线（#109，`9b5faf294`） | 当前收官节点（#147） | 演进结论 |
+| 门禁项 | 初始基线（#109，`9b5faf294`） | 当前收官节点（#148） | 演进结论 |
 |---|---|---|---|
 | `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` | 同一编译器 |
 | `cargo test --offline --locked --lib` | `7,145` 条（`7,089` 过 / `55` 忽略 / `1` `.pen`） | **`7,222` 条**（**`7,149` 过** / **`72` 忽略** / **`1` 同一既有 `.pen`**） | 净增 **`+77` 条测试**，**0 新增失败** |
@@ -89,7 +89,7 @@
 | `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
 | `scripts\fmt-newhunks.ps1` | — | 全阶段全部新增与修改 `.rs` 文件 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
-| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `159 passed` | **`201 passed`** | 净增 **`+42` 条测试**，**全绿** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `159 passed` | **`202 passed`** | 净增 **`+43` 条测试**，**全绿** |
 
 ---
 

@@ -1496,3 +1496,45 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `200 passed` | **`201 passed`** | `+1` 条 Python 测试，**全绿** |
 
+---
+
+## 37. LX-8 / LX-9 / L6-3（#148）：四套送测与探针实物包一键完整性、密码学哈希自洽及脱敏零泄漏总审计 CLI（`audit-packages`）闭环（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `2672a54d6`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 修改文件 | `scripts/sppid/{precheck_and_receipt,test_precheck_and_receipt}.py` |
+| 外部证据子项 | `2026-11-21-issue148/`（`red-py.txt`、`green-py.txt`）与 `submissions/delivery-readiness-summary.json` |
+
+### 37.1 先红后绿与设计摘要
+
+- **先红阶段**（`red-py.txt`，`RED_RC=1`）：在 `scripts/sppid/test_precheck_and_receipt.py` 新增 `test_audit_packages_verifies_multi_package_integrity_and_catches_tampering_or_leaks`（覆盖多包批量审计、单字节交付物篡改拦截与 `receipt.json` 主机路径泄漏拦截），按预期失败变红。
+- **转绿阶段**（`green-py.txt`，`202 passed`）：
+  1. 在 `scripts/sppid/precheck_and_receipt.py` 落地 `audit_submission_packages` 与 CLI 子命令 `audit-packages --submissions-root <DIR> [--out-json <FILE>]`；
+  2. 自动完成四重独立审计：① 重算 `slots` 规范化 JSON 的 SHA-256 并与 `manifest_sha256` 及 `receipt.json` 指纹、槽位列表交叉核对；② 逐槽逐文件核验相对路径安全性（禁盘符、禁 `..`）、磁盘存在性、精确字节长度与 SHA-256 哈希；③ 对 `submission-manifest.json`、`receipt.json` 与 XML（豁免 SPPID 标准 `<IFile FilePath="..."/>` 规格属性）执行主机路径零泄漏扫描；④ 对全部 `_Data.xml` / `_Meta.xml` 独立重跑 `SchemaOnly` 与 `StrictVendor`（按槽位 `expect_strict_vendor_pass` 契约）零违规校验，并输出纯 ASCII 脱敏总交接单 `delivery-readiness-summary.json`。
+
+### 37.2 阶段一全部 4 套送测与探针实物包（`submissions/`，22 槽 65 文件）总审计实测
+
+| 包目录名 | `package_kind` | `manifest_sha256` 前 16 位 | 槽位数 | 文件数 | 总字节数 | 回执状态 | 独立审计结果 |
+|---|---|---|---:|---:|---:|---|---|
+| `round-01-20261121` | `round1_subtraction` | `26eb6189e08d506a` | `6` | `17` | `2,838,997` | `pending` | **`audit_passed = true`** |
+| `round-01b-converted-20261121` | `converted_pilot` | `325551c26454b781` | `8` | `24` | `9,973,718` | `pending` | **`audit_passed = true`** |
+| `round-02-bisect-20261121` | `round2_bisect` | `905ad0bd5c0ed0c8` | `5` | `15` | `2,215,756` | `pending` | **`audit_passed = true`** |
+| `lx4-sppid-probes-20261121` | `lx4_acceptance` | `7b6d314670908336` | `3` | `9` | `1,158,135` | `pending` | **`audit_passed = true`** |
+| **合计（4 套实物包）** | — | — | **`22`** | **`65`** | **`16,186,606`** | `pending` | **`errors = []`（`100%` 通过）** |
+
+### 37.3 固定门禁读数
+
+| 门禁项 | 改前读数（§36.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,222` 条（`7,149` 过 / `72` 忽略 / `1` 既有 `.pen`） | **`7,222` 条**（**`7,149` 过** / **`72` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | **0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告**（零 `.rs` 改动） | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告**（零 `.rs` 改动） | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | 本单零 `.rs` 改动（`new=0`） | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `201 passed` | **`202 passed`** | `+1` 条 Python 测试，**全绿** |
+
+
