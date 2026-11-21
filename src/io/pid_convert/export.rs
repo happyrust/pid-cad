@@ -37,6 +37,8 @@ pub struct ConvertOptions {
     #[serde(default)]
     pub class_map_path: Option<String>,
     #[serde(default)]
+    pub external_props_path: Option<String>,
+    #[serde(default)]
     pub verify_plot_pdf: bool,
 }
 
@@ -52,9 +54,33 @@ impl Default for ConvertOptions {
             seed_pid_bytes: None,
             sym_library_dir: None,
             class_map_path: None,
+            external_props_path: None,
             verify_plot_pdf: false,
         }
     }
+}
+
+pub(super) fn apply_configured_external_props(
+    dwg: &mut ExportDrawing,
+    opts: &ConvertOptions,
+) -> Result<Option<super::external_props::ExternalPropsReport>, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(p) = opts
+        .external_props_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let tbl = super::external_props::load_external_property_table(Path::new(p))?;
+        let rep = super::external_props::apply_external_properties_to_drawing(dwg, &tbl);
+        return Ok(Some(rep));
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = dwg;
+        let _ = opts;
+    }
+    Ok(None)
 }
 
 pub(super) fn resolve_effective_class_map(
@@ -387,6 +413,8 @@ pub struct ConvertSheetReport {
     pub total_items_written: usize,
     pub total_relations_written: usize,
     pub skipped_items: Vec<UnmappedItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_props_applied: Option<super::external_props::ExternalPropsReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_verification: Option<DualVerifyReport>,
 }
@@ -1108,6 +1136,8 @@ fn build_core_conversion(
         dead_end_attribution,
     };
 
+    let external_props_applied = apply_configured_external_props(&mut dwg, opts)?;
+
     let report = ConvertSheetReport {
         drawing_name: effective_doc_name,
         doc_uid,
@@ -1122,6 +1152,7 @@ fn build_core_conversion(
         total_items_written: dwg.items.len(),
         total_relations_written: dwg.relations.len(),
         skipped_items: dwg.unmapped.clone(),
+        external_props_applied,
         pid_verification: None,
     };
 

@@ -6,6 +6,7 @@
 
 pub mod class_map;
 pub mod export;
+pub mod external_props;
 pub mod promote;
 pub mod recognize;
 
@@ -33,6 +34,12 @@ pub use export::{
     convert_document_to_publish, pair_cross_sheet_connectors, BatchConvertSummary, ConvertOptions,
     ConvertSheetReport, CrossSheetOpcPair, CrossSheetOpcReport, DeadEndAttribution,
     DualVerifyReport, OffpageConnectorEntry, PipeNetworkCensus,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use external_props::load_external_property_table;
+pub use external_props::{
+    apply_external_properties_to_drawing, normalize_lookup_key, parse_external_property_delimited,
+    parse_external_property_json, ExternalItemRecord, ExternalPropertyTable, ExternalPropsReport,
 };
 pub use recognize::{
     recognise_sppid_sheet, ConfidenceSummary, ConfidenceThresholds, ConfidenceTier,

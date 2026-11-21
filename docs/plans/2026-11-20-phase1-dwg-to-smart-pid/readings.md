@@ -1356,6 +1356,51 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `198 passed` | **`200 passed`** | `+2` 条 Python 测试，**全绿** |
 
+---
+
+## 34. L3-6 / RES-11 / V1-03（#145）：外置设备表/管线表（`XLSX/CSV/TSV/JSON`）属性回填接口与 `PIDProcessPoint` 温压自动路由闭环（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `f3b2c556a`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/external_props.rs`、`src/io/pid_convert/{mod,export,promote}.rs`、`examples/pid_convert.rs`、`src/app/commands/pidprops.rs` |
+| 外部证据目录 | `$OCS_PID_EVIDENCE_DIR/2026-11-21-issue145/`（`red.txt`、`green_extprops.txt`、`green_pidprops.txt`、`real145_test.log`、`real_out/real145_summary.json`、`reg90_diff.txt`、`cargo_test.txt`、`clippy_lib.txt`、`clippy_test.txt`、`fmt_arch_pytest.txt`） |
+
+### 34.1 先红后绿与多格式外置工程表 + `.PPT` 温压自动路由设计
+
+- **先红阶段（`red.txt`）**：`loads_multisheet_xlsx_csv_and_json_routes_process_point_temp_pressure_and_keeps_strict_vendor` `0 passed; 1 failed`（`RED_RC=101`）。
+- **落地实现与转绿**：
+  1. `src/io/pid_convert/external_props.rs`：零新增外部 crate（复用 `calamine` 与 `serde_json`），原生支持 `.xlsx` / `.xlsm` / `.xls`（自动扫描全部工作表）、`.csv`、`.tsv`、`.json`；同时支持精确 `<Interface>.<Attribute>` 表头与中英双语工程表头（`位号/ItemTag/LineNumber`、`设备名称/Description`、`公称直径/DN`、`管道等级/Spec`、`保温规格/InsulSpec`、`介质/FluidCode`、`设计压力/PressureMax`、`设计温度/PhaseTemperatureMax`、`操作压力/PressureBase`、`操作温度/PhaseTemperatureBase`）；
+  2. **SPPID `PIDProcessPoint` 温压路由与 `StrictVendor` 白名单守门**：管线表命中 `PIDPipeline` 时，自动沿 `PipingConnectors` + `ProcessPointCollection` 关系链将温压属性写入 `<conn_uid>.PPT`（`IBulkMaxProcessPoint` / `IBulkBaseProcessPoint` / `IBulkMinProcessPoint`），将管道等级/保温规格传播至所属 `PIDPipingConnector`，并由 `default_publish_spec()` 严格校验类/接口允许集，自动过滤无关杂列；
+  3. **全入口接线**：`ConvertOptions::external_props_path`、`examples/pid_convert.rs --external-props <FILE>` 以及应用内 `PIDCONVERT`（单图与 `BATCH`）和 `PIDSAVEPID` 的 `PROPS "<FILE>"`，结果统计写入 `_Coverage.json` `external_props_applied`；
+  4. 复跑单测：`external_props::tests` **`1 passed; 0 failed`**，`pidprops::tests` **`14 passed; 0 failed`**。
+
+### 34.2 真实生产 DXF + 双工作表 `.xlsx`（设备表 + 管线表）CLI 与应用内双路径实测
+
+| 验证项 | 未加 `PROPS` 基线 | 加双工作表 `.xlsx`（CLI `--external-props` / 应用内 `PIDCONVERT ... PROPS`） | 说明 |
+|---|---:|---:|---|
+| 源图 SHA-256 前缀 | `c0dd2cc4c75d` | `c0dd2cc4c75d` | 中位规模真实 SPPID 导出拆分 DXF |
+| 工程表加载行数 / 匹配图面对象数 | `0 / 0` | **`127` 行 / `183` 个对象** | 同时覆盖 `EquipmentAndValves` 与 `LineSchedule` 两个工作表 |
+| 更新 `<conn_uid>.PPT` 工艺点数 | `0` | **`59` 个** | 非空 `PressureMax` 工艺点由 **`0` 升至 `59` 个** |
+| 合规注入属性数 / 安全过滤杂列次数 | `0 / 0` | **`153` 项 / `135` 次** | 全部输出 XML 通过 `#111` `StrictVendor` **0 违规** |
+| 双产物对齐与 `a/b` 级验证 | `302 / 302` | **`302 / 302`（`100%`）** | `a_valid = true`，`b` 级 PDF 页内图元 `727`，`class_default_fallback = 0` |
+| 默认配置 90 张基准图回归门禁 | `baseline-90.tsv` | **`passed=True, unexpected=0, expected=0`** | 未传 `external_props_path` 时逐图逐列 **100% 零差异**（退出码 `0`） |
+
+### 34.3 固定门禁读数
+
+| 门禁项 | 改前读数（§33.4） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,217` 条（`7,146` 过 / `70` 忽略 / `1` 既有 `.pen`） | **`7,220` 条**（**`7,148` 过** / **`71` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+3` 条 Rust 测试（`+2` 常规 + `+1` 真实 `.xlsx` 集成），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | 6 个新增与修改 `.rs` 文件全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `200 passed` | **`200 passed`** | **全绿** |
+
+
 
 
 

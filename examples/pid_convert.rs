@@ -7,6 +7,7 @@
 //!     [--seed-pid PATH_OR_ZIP]    Blank .pid seed, RefData~*.zip, or zip::entry for dual output
 //!     [--sym-dir DIR]             Optional Ref/Symbols root for cloning real .sym JSite bodies
 //!     [--class-map FILE]          Optional external SPPID class-map JSON override (#117 / #137)
+//!     [--external-props FILE]     Optional external Equipment/Line schedule (.xlsx/.csv/.tsv/.json, #145)
 //!     [--verify-plot]             Also run b-level CAD reload + pid-plot PDF export (<stem>.pidplot.pdf)
 //!     [--summary-json FILE]       Optional path to write BatchConvertSummary JSON
 //! ```
@@ -24,6 +25,7 @@ struct CliArgs {
     seed_pid: Option<String>,
     sym_dir: Option<String>,
     class_map: Option<String>,
+    external_props: Option<String>,
     save_dwg: Option<PathBuf>,
     verify_plot: bool,
     summary_json: Option<PathBuf>,
@@ -36,6 +38,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut seed_pid: Option<String> = None;
     let mut sym_dir: Option<String> = None;
     let mut class_map: Option<String> = None;
+    let mut external_props: Option<String> = None;
     let mut save_dwg: Option<PathBuf> = None;
     let mut verify_plot = false;
     let mut summary_json: Option<PathBuf> = None;
@@ -59,6 +62,11 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "--class-map" => {
                 class_map = Some(it.next().ok_or("--class-map requires a JSON file path")?);
+            }
+            "--external-props" => {
+                external_props = Some(it.next().ok_or(
+                    "--external-props requires a schedule file path (.xlsx/.csv/.tsv/.json)",
+                )?);
             }
             "--save-dwg" => {
                 save_dwg = Some(PathBuf::from(
@@ -96,6 +104,7 @@ fn parse_args() -> Result<CliArgs, String> {
         seed_pid,
         sym_dir,
         class_map,
+        external_props,
         save_dwg,
         verify_plot,
         summary_json,
@@ -126,6 +135,7 @@ fn main() {
         seed_pid_path: args.seed_pid,
         sym_library_dir: args.sym_dir,
         class_map_path: args.class_map,
+        external_props_path: args.external_props,
         verify_plot_pdf: args.verify_plot,
         ..Default::default()
     };

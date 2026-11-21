@@ -588,6 +588,7 @@ impl OpenCADStudio {
         let mut target_opt: Option<std::path::PathBuf> = None;
         let mut seed_opt: Option<String> = None;
         let mut symdir_opt: Option<String> = None;
+        let mut props_opt: Option<String> = None;
 
         let mut idx = 1usize;
         while idx < tokens.len() {
@@ -601,6 +602,12 @@ impl OpenCADStudio {
             } else if tok.eq_ignore_ascii_case("SYMDIR") {
                 if let Some(val) = tokens.get(idx + 1) {
                     symdir_opt = Some(val.clone());
+                    idx += 2;
+                    continue;
+                }
+            } else if tok.eq_ignore_ascii_case("PROPS") {
+                if let Some(val) = tokens.get(idx + 1) {
+                    props_opt = Some(val.clone());
                     idx += 2;
                     continue;
                 }
@@ -657,6 +664,7 @@ impl OpenCADStudio {
         let opts = crate::io::pid_convert::ConvertOptions {
             seed_pid_path: fallback_seed,
             sym_library_dir: symdir_opt.or_else(|| std::env::var("OCS_PID_SYM_DIR").ok()),
+            external_props_path: props_opt,
             verify_plot_pdf: false,
             ..Default::default()
         };
@@ -846,6 +854,7 @@ impl OpenCADStudio {
                 .symdir
                 .or_else(|| std::env::var("OCS_PID_SYM_DIR").ok()),
             class_map_path: args.classmap,
+            external_props_path: args.props,
             verify_plot_pdf: args.verify && wants_dual,
             ..Default::default()
         };
@@ -960,6 +969,7 @@ impl OpenCADStudio {
                 .symdir
                 .or_else(|| std::env::var("OCS_PID_SYM_DIR").ok()),
             class_map_path: args.classmap,
+            external_props_path: args.props,
             verify_plot_pdf: args.verify && wants_dual,
             ..Default::default()
         };
@@ -1212,6 +1222,7 @@ struct PidConvertArgs {
     seed: Option<String>,
     symdir: Option<String>,
     classmap: Option<String>,
+    props: Option<String>,
     summary: Option<std::path::PathBuf>,
     force_dual: bool,
     verify: bool,
@@ -1259,6 +1270,13 @@ fn parse_pidconvert_args(tokens: &[String]) -> Result<PidConvertArgs, String> {
                     .get(idx + 1)
                     .ok_or_else(|| "CLASSMAP 缺少映射 JSON 路径参数".to_string())?;
                 args.classmap = Some(val.clone());
+                idx += 2;
+            }
+            "PROPS" => {
+                let val = tokens
+                    .get(idx + 1)
+                    .ok_or_else(|| "PROPS 缺少外置工程表文件路径参数".to_string())?;
+                args.props = Some(val.clone());
                 idx += 2;
             }
             "SUMMARY" => {
@@ -3348,6 +3366,164 @@ mod tests {
         });
         std::fs::write(
             out_dir.join("real142_summary.json"),
+            format!("{}\n", serde_json::to_string_pretty(&summary).unwrap()),
+        )
+        .unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn l3_6_pidconvert_and_pidsavepid_apply_external_schedule_props_with_strict_vendor_check() {
+        let root = std::env::temp_dir().join(format!("ocs_pidprops_145_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let csv_path = root.join("schedule.csv");
+        std::fs::write(
+            &csv_path,
+            "位号,名称,设计压力,设计温度,操作压力,操作温度,管道等级\n\
+             BV0201501A,Inlet Block Valve,,,,,\n\
+             50-PG-02011-B9-,,3.5 MPa,130 C,2.2 MPa,75 C,B9-EXT\n",
+        )
+        .unwrap();
+
+        let mut app = app();
+        let _ = seed_dxf_sheet_in_app(&mut app);
+
+        let out_dir = root.join("conv_props");
+        let cmd = format!(
+            "PIDCONVERT \"{}\" STEM EXT-CSV-145 PROPS \"{}\" VERIFY",
+            out_dir.display(),
+            csv_path.display()
+        );
+        let _ = app.run_command_line(&cmd);
+
+        let data_xml = std::fs::read_to_string(out_dir.join("EXT-CSV-145_Data.xml"))
+            .expect("EXT-CSV-145_Data.xml");
+        assert!(data_xml.contains("Inlet Block Valve"));
+        assert!(data_xml.contains(r#"PressureMax="3.5 MPa""#));
+        assert!(data_xml.contains(r#"PhaseTemperatureMax="130 C""#));
+        assert!(data_xml.contains(r#"PressureBase="2.2 MPa""#));
+        assert!(data_xml.contains(r#"PhaseTemperatureBase="75 C""#));
+        assert!(data_xml.contains(r#"PipingMaterialsClass="B9-EXT""#));
+
+        let cov: Value = serde_json::from_str(
+            &std::fs::read_to_string(out_dir.join("EXT-CSV-145_Coverage.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            cov["external_props_applied"]["attributes_injected"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 5
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads real production DXF in OpenCADStudio and exports dual bundle with multisheet .xlsx Equipment/Line schedules"]
+    fn real_sheet_in_app_pidconvert_with_external_xlsx_schedule_roundtrip() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(dxf_p) = std::env::var("OCS_PID_REAL145_DXF") else {
+            println!("OCS_PID_REAL145_DXF unset, skipping.");
+            return;
+        };
+        let Ok(xlsx_p) = std::env::var("OCS_PID_REAL145_XLSX") else {
+            println!("OCS_PID_REAL145_XLSX unset, skipping.");
+            return;
+        };
+        let Ok(seed_zip) = std::env::var("OCS_PID_SEED_ZIP") else {
+            println!("OCS_PID_SEED_ZIP unset, skipping.");
+            return;
+        };
+        let sym_dir = std::env::var("OCS_PID_SYM_DIR").unwrap_or_default();
+        let out_dir = std::env::var("OCS_PID_REAL145_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real145"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let dxf_bytes = std::fs::read(&dxf_p).expect("read dxf");
+        let sha_pfx = format!("{:x}", Sha256::digest(&dxf_bytes))[..12].to_string();
+
+        let mut app = app();
+        app.tabs[app.active_tab].scene.document =
+            crate::io::load_file(std::path::Path::new(&dxf_p)).expect("load real DXF");
+
+        // 1. Baseline without PROPS
+        let base_dir = out_dir.join("without_props");
+        let cmd_base = format!(
+            "PIDCONVERT \"{}\" STEM REAL145-BASE VERIFY",
+            base_dir.display()
+        );
+        let _ = app.run_command_line(&cmd_base);
+        let base_xml =
+            std::fs::read_to_string(base_dir.join("REAL145-BASE_Data.xml")).expect("base xml");
+        let base_nonempty_pmax = base_xml.matches(r#"PressureMax=""#).count()
+            - base_xml.matches(r#"PressureMax="""#).count();
+
+        // 2. Dual export with multisheet `.xlsx` PROPS + VERIFY
+        let with_dir = out_dir.join("with_xlsx_props");
+        let target_pid = with_dir.join("REAL145-PROPS.pid");
+        let cmd_with = if sym_dir.trim().is_empty() {
+            format!(
+                "PIDCONVERT \"{}\" SEED \"{}\" PROPS \"{}\" VERIFY",
+                target_pid.display(),
+                seed_zip,
+                xlsx_p
+            )
+        } else {
+            format!(
+                "PIDCONVERT \"{}\" SEED \"{}\" SYMDIR \"{}\" PROPS \"{}\" VERIFY",
+                target_pid.display(),
+                seed_zip,
+                sym_dir,
+                xlsx_p
+            )
+        };
+        let _ = app.run_command_line(&cmd_with);
+        assert!(target_pid.is_file(), "REAL145-PROPS.pid must exist");
+        assert!(with_dir.join("REAL145-PROPS.pidplot.pdf").is_file());
+
+        let with_xml =
+            std::fs::read_to_string(with_dir.join("REAL145-PROPS_Data.xml")).expect("with xml");
+        let with_nonempty_pmax = with_xml.matches(r#"PressureMax=""#).count()
+            - with_xml.matches(r#"PressureMax="""#).count();
+        assert!(
+            with_nonempty_pmax > base_nonempty_pmax,
+            "XLSX LineSchedule must populate non-empty PressureMax on .PPT ({with_nonempty_pmax} vs {base_nonempty_pmax})"
+        );
+
+        let cov: Value = serde_json::from_str(
+            &std::fs::read_to_string(with_dir.join("REAL145-PROPS_Coverage.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            cov["variant_resolution"]["class_default_fallback"].as_u64(),
+            Some(0)
+        );
+        assert_eq!(
+            cov["pid_verification"]["matched_graphic_oids"].as_u64(),
+            cov["pid_verification"]["xml_rep_count"].as_u64()
+        );
+
+        let summary = json!({
+            "src_dxf_sha256_prefix": sha_pfx,
+            "nonempty_pressure_max_before": base_nonempty_pmax,
+            "nonempty_pressure_max_after": with_nonempty_pmax,
+            "external_props_applied": cov["external_props_applied"],
+            "items_written": cov["total_items_written"],
+            "relations_written": cov["total_relations_written"],
+            "xml_reps": cov["pid_verification"]["xml_rep_count"],
+            "matched_oids": cov["pid_verification"]["matched_graphic_oids"],
+            "a_valid": cov["pid_verification"]["a_level_index_consistent"],
+            "pdf_prims": cov["pid_verification"]["b_level_pdf_primitives"],
+        });
+        std::fs::write(
+            out_dir.join("real145_summary.json"),
             format!("{}\n", serde_json::to_string_pretty(&summary).unwrap()),
         )
         .unwrap();

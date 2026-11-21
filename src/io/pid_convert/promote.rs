@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use super::class_map::default_legend_class_map;
 #[cfg(not(target_arch = "wasm32"))]
 use super::export::{
-    compute_representation_uid_map, load_configured_seed, pick_seed_style_ids,
-    resolve_effective_class_map, verify_dual_bundle, DualConvertBundle,
+    apply_configured_external_props, compute_representation_uid_map, load_configured_seed,
+    pick_seed_style_ids, resolve_effective_class_map, verify_dual_bundle, DualConvertBundle,
 };
 use super::export::{ConvertOptions, ConvertSheetReport, DeadEndAttribution, PipeNetworkCensus};
 use super::recognize::{recognise_sppid_sheet, ConfidenceSummary, ConfidenceTier, TitleBlockInfo};
@@ -1981,6 +1981,8 @@ pub fn save_author_document_to_dual(
         }
     }
 
+    let external_props_applied = apply_configured_external_props(&mut dwg, opts)?;
+
     let sym_total: usize = exported_by_class.values().sum();
     let mut report = ConvertSheetReport {
         drawing_name: doc_name.to_string(),
@@ -2008,6 +2010,7 @@ pub fn save_author_document_to_dual(
         total_items_written: dwg.items.len(),
         total_relations_written: dwg.relations.len(),
         skipped_items: Vec::new(),
+        external_props_applied,
         pid_verification: None,
     };
 
