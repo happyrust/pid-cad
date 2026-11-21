@@ -226,6 +226,29 @@ def evaluate_receipt(manifest_path: Path, receipt_path: Path) -> tuple[int, dict
             "reason": "receipt still has pending slots",
         }
 
+    if manifest.get("package_kind") == "converted_pilot":
+        arch_acc: dict[str, bool] = {}
+        next_actions: list[str] = []
+        for s in manifest.get("slots") or []:
+            sl = str(s["slot"])
+            akey = str(s.get("archetype_key", sl))
+            ok_slot = str(results.get(sl, {}).get("status", "")).lower() == "accepted"
+            arch_acc[akey] = ok_slot
+            if not ok_slot:
+                next_actions.append(f"investigate-{sl}")
+        all_ok = bool(arch_acc) and all(arch_acc.values())
+        if all_ok:
+            next_actions.append("phase1-external-acceptance-complete")
+        return 0, {
+            "channel_valid": True,
+            "package_kind": "converted_pilot",
+            "manifest_sha256": expected_sha,
+            "all_archetypes_accepted": all_ok,
+            "archetype_acceptance": arch_acc,
+            "next_round_actions": next_actions,
+            "slot_statuses": {sl: results[sl].get("status") for sl in expected_slots if sl in results},
+        }
+
     ctrl_status = str(results.get("00-control", {}).get("status", "")).lower()
     if ctrl_status != "accepted":
         return 1, {

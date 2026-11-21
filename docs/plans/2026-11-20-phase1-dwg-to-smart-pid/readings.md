@@ -1117,4 +1117,47 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `196 passed` | **`196 passed`** | **全绿** |
 
+---
+
+## 29. LX-8 / LX-9 / L6-1 / L6-3（#140）：五类真实存量图转换件配套送测包构建器、二进制 `.dwg` 直转核验与转换回执收敛（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `5c8fdbe65`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `scripts/sppid/{build_submission_converted,test_build_submission_converted,precheck_and_receipt}.py`、`src/io/pid_convert/{export,mod}.rs`、`examples/pid_convert.rs` |
+| 外部送测包与证据目录 | `submissions/round-01b-converted-20261121/`（`manifest_sha256 = e40be5b2d915fafb...`）、`2026-11-21-issue140/`（`red-py.txt`、`green-py.txt`、`red-rs.txt`、`round1b_final.txt`、`cargo_test.txt`、`clippy_lib.txt`、`clippy_test.txt`） |
+
+### 29.1 双端先红后绿与二进制 `.dwg`（`AC1032`）无损直转核验
+
+- **Python 端先红后绿**：`red-py.txt` `2 failed`（退出码 `1`）→ 实现 `build_submission_converted.py` 与扩展 `precheck_and_receipt.py`（支持 `package_kind = "converted_pilot"` 推导 `C1..C5` 五类转换原型验收矩阵）后 `green-py.txt` **`198 passed`**（退出码 `0`）。
+- **Rust 端先红后绿**：`red-rs.txt` `0 passed; 1 failed`（退出码 `101`）→ 实现 `save_cad_file_as_binary_dwg`（校验 `AC10*` 二进制头魔数）与 `examples/pid_convert.rs --save-dwg` 后 `converts_binary_dwg_file_directly_to_valid_dual_bundle` 一次通过。
+- **真实二进制 `.dwg`（`AC1032`）对原 `.dxf` 转换一致性核验**：将原生 AutoCAD 存量图 `L01` 存为二进制 `AC1032` `.dwg`（`binary_dwg_sha256_prefix = e605ccf6d6f0`）后经 `pid_convert` 直转双产物，产出 **`483` 个对象、`554` 条关系、`108` 个精确变体、`0` 表外兜底、`_Data.xml` `588,255` 字节、`227 / 227` `GraphicOID` 100% 对齐**——与原 `.dxf` 转换结果逐项完全相等。
+
+### 29.2 五槽「真实存量图转换件」送测就绪包（`submissions/round-01b-converted-20261121/`）实测表
+
+- 送测包清单摘要：`manifest_sha256 = e40be5b2d915fafbef97bff9f2e7e6debc442850184418fde73045c84a46e9b9`，`package_kind = "converted_pilot"`，`precheck_passed = true`，`sppid_c1_d_precheck_status = "unverified_no_sppid_runner"`（全文零绝对路径、零客户图名，统一脱敏主干 `CONV-01..CONV-05`）。
+
+| 槽位 | 交付主干 | 源 `.pid` SHA-256 前缀 | 精确变体数 | 表外兜底 | `StrictVendor` 违规数 | `GraphicOID` 对齐 | `a/b` 级验证 | 覆盖转换原型 |
+|---|---|---|---:|---:|---:|---:|---|---|
+| `01-sppid-dxf-direct` | `CONV-01` | `4fa01b17fe81` | `43` | `0` | `0` | `80 / 80` | `true / true` | SPPID 导出拆分 DXF → `pid_convert` 直出双产物 |
+| `02-legacy-block-circle-direct` | `CONV-02` | `6bd7bed9d245` | `108` | `0` | `0` | `227 / 227` | `true / true` | 原生 AutoCAD 图块+散圆存量图 → `pid_convert` 直出双产物 |
+| `03-legacy-exploded-shape-direct` | `CONV-03` | `972d3ddb6ec0` | `127` | `0` | `0` | `345 / 345` | `true / true` | 原生 AutoCAD 全散线形状存量图 → `pid_convert` 直出双产物 |
+| `04-legacy-inapp-pidsavepid` | `CONV-04` | `f6f0720170a0` | `127` | `0` | `0` | `275 / 275` | `true / true` | 原生 AutoCAD 存量图 → 应用内 `PIDPROMOTE → PIDREVIEW → PIDSAVEPID` 存回双产物 |
+| `05-binary-dwg-direct` | `CONV-05` | `f5d544e5aa52` | `108` | `0` | `0` | `227 / 227` | `true / true` | 二进制 `.dwg`（`AC1032`，`e605ccf6d6f0`）→ `pid_convert` 直转双产物 |
+
+### 29.3 固定门禁读数
+
+| 门禁项 | 改前读数（§28.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,209` 条 | **`7,210` 条**（**`7,141` 过** / **`68` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+1` 条 Rust 测试，**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `export.rs`、`mod.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `196 passed` | **`198 passed`** | `+2` 条 Python 测试，**全绿** |
+
+
 

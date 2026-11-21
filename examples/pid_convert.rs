@@ -13,7 +13,9 @@
 
 use std::path::PathBuf;
 
-use OpenCADStudio::io::pid_convert::{convert_path_to_dir, ConvertOptions};
+use OpenCADStudio::io::pid_convert::{
+    convert_path_to_dir, save_cad_file_as_binary_dwg, ConvertOptions,
+};
 
 struct CliArgs {
     input: PathBuf,
@@ -22,6 +24,7 @@ struct CliArgs {
     seed_pid: Option<String>,
     sym_dir: Option<String>,
     class_map: Option<String>,
+    save_dwg: Option<PathBuf>,
     verify_plot: bool,
     summary_json: Option<PathBuf>,
 }
@@ -33,6 +36,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut seed_pid: Option<String> = None;
     let mut sym_dir: Option<String> = None;
     let mut class_map: Option<String> = None;
+    let mut save_dwg: Option<PathBuf> = None;
     let mut verify_plot = false;
     let mut summary_json: Option<PathBuf> = None;
 
@@ -55,6 +59,11 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "--class-map" => {
                 class_map = Some(it.next().ok_or("--class-map requires a JSON file path")?);
+            }
+            "--save-dwg" => {
+                save_dwg = Some(PathBuf::from(
+                    it.next().ok_or("--save-dwg requires an output .dwg path")?,
+                ));
             }
             "--verify-plot" => {
                 verify_plot = true;
@@ -87,6 +96,7 @@ fn parse_args() -> Result<CliArgs, String> {
         seed_pid,
         sym_dir,
         class_map,
+        save_dwg,
         verify_plot,
         summary_json,
     })
@@ -101,6 +111,16 @@ fn main() {
         }
     };
 
+    let effective_input = if let Some(ref dwg_out) = args.save_dwg {
+        if let Err(err) = save_cad_file_as_binary_dwg(&args.input, dwg_out) {
+            eprintln!("error: save-dwg failed: {err}");
+            std::process::exit(1);
+        }
+        dwg_out.clone()
+    } else {
+        args.input.clone()
+    };
+
     let opts = ConvertOptions {
         plant: args.plant,
         seed_pid_path: args.seed_pid,
@@ -110,7 +130,7 @@ fn main() {
         ..Default::default()
     };
 
-    match convert_path_to_dir(&args.input, &args.out_dir, &opts) {
+    match convert_path_to_dir(&effective_input, &args.out_dir, &opts) {
         Ok(summary) => {
             if let Some(ref sjson) = args.summary_json {
                 if let Some(parent) = sjson.parent() {

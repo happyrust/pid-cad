@@ -1942,6 +1942,20 @@ pub fn convert_path_to_dir(
     Ok(summary)
 }
 
+/// Load a CAD drawing (`.dxf` or `.dwg`) and save it as a standard binary `.dwg` (`AC1032`) (`#140`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_cad_file_as_binary_dwg(input: &Path, dwg_out: &Path) -> Result<(), String> {
+    let doc =
+        crate::io::load_file(input).map_err(|e| format!("load {} failed: {e}", input.display()))?;
+    if let Some(parent) = dwg_out.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create dir {}: {e}", parent.display()))?;
+        }
+    }
+    crate::io::save_as_version(&doc, dwg_out, document::DxfVersion::AC1032)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2565,6 +2579,51 @@ mod tests {
         .expect("verify legacy dual bundle");
         assert!(ver.is_cross_file_and_a_valid(), "{ver:?}");
         assert!(ver.is_b_plot_valid(), "{ver:?}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn converts_binary_dwg_file_directly_to_valid_dual_bundle() {
+        let doc = build_synthetic_sheet();
+        let tmp = std::env::temp_dir().join(format!("ocs_dwg140_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let src_dxf = tmp.join("BIN-SRC-01.dxf");
+        crate::io::save_as_version(&doc, &src_dxf, document::DxfVersion::AC1032)
+            .expect("save synthetic dxf");
+        let bin_dwg = tmp.join("BIN-SRC-01.dwg");
+        save_cad_file_as_binary_dwg(&src_dxf, &bin_dwg).expect("save binary dwg");
+
+        let dwg_bytes = std::fs::read(&bin_dwg).expect("read binary dwg");
+        assert!(
+            dwg_bytes.starts_with(b"AC10"),
+            "expected AC10* binary DWG magic, got {:?}",
+            &dwg_bytes[..dwg_bytes.len().min(8)]
+        );
+
+        let seed_p = tmp.join("seed140.pid");
+        std::fs::write(&seed_p, build_synthetic_seed_pid_bytes()).unwrap();
+        let out_dir = tmp.join("out_dual");
+        let opts = ConvertOptions {
+            plant: "P01".to_string(),
+            seed_pid_path: Some(seed_p.to_string_lossy().into_owned()),
+            verify_plot_pdf: true,
+            ..Default::default()
+        };
+        let summary = convert_path_to_dir(&bin_dwg, &out_dir, &opts).expect("convert binary dwg");
+        assert_eq!(summary.files_converted, 1);
+        assert_eq!(summary.files_failed, 0);
+        assert_eq!(summary.pid_files_written, 1);
+        assert_eq!(summary.pdf_files_plotted, 1);
+        assert_eq!(summary.variant_resolution.class_default_fallback, 0);
+
+        let sh = &summary.sheets[0];
+        let ver = sh.pid_verification.as_ref().expect("pid_verification");
+        assert!(ver.is_cross_file_and_a_valid(), "{ver:?}");
+        assert!(ver.is_b_plot_valid(), "{ver:?}");
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

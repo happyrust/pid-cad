@@ -68,9 +68,15 @@ round-01-YYYYMMDD/
   - `V2-03`：保留管道连通（`Piping*`），仅去掉仪表信号连通（`Signal*`）；
   - `V2-04`：保留末级类型码表，去掉 `LEAF_LEVELS` 上级类型分级属性（验证 `#117` 上级类型链是否为平台硬要求）。
 
-### 第三轮：单张简单存量 DWG 端到端闭环实测（检查点 C）
+### 第三轮 / 首轮配套包：真实存量 DWG/DXF 端到端转换件试点包（检查点 C，已在 [#140](https://github.com/happyrust/pid-cad/issues/140) 预构建就绪）
 
-- 取 1 张简单存量 DWG → 本平台识别（`L3`）→ 升格统一模型（`L2`）→ 自研导出 `_Data.xml` + `_Meta.xml`（+ `.pid`）→ 本地预检全过 → 附 `00-control` 送外部平台终验。
+- 由 `scripts/sppid/build_submission_converted.py` 自动构建 `submissions/round-01b-converted-20261121/`（`package_kind = "converted_pilot"`，`CONV-01..CONV-05` 脱敏主干），一次覆盖全部 5 类真实转换原型：
+  1. `01-sppid-dxf-direct`（`CONV-01`）：SPPID 导出拆分 DXF → `pid_convert` 双产物；
+  2. `02-legacy-block-circle-direct`（`CONV-02`）：原生 AutoCAD 图块+散圆存量图 → `pid_convert` 双产物；
+  3. `03-legacy-exploded-shape-direct`（`CONV-03`）：原生 AutoCAD 全散线形状存量图 → `pid_convert` 双产物；
+  4. `04-legacy-inapp-pidsavepid`（`CONV-04`）：原生 AutoCAD 存量图 → 应用内 `PIDPROMOTE → PIDREVIEW → PIDSAVEPID` 存回双产物；
+  5. `05-binary-dwg-direct`（`CONV-05`）：二进制 `AC1032` `.dwg` → `pid_convert` 直转双产物。
+- 收到回执后运行 `python scripts/sppid/precheck_and_receipt.py evaluate-receipt` 自动判定 `C1..C5` 五类转换原型通过状态与定向排查项（详见 `readings.md` §29）。
 
 ---
 

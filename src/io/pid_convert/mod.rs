@@ -25,7 +25,8 @@ pub use class_map::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use export::{
-    convert_document_to_dual, convert_path_to_dir, verify_dual_bundle, DualConvertBundle,
+    convert_document_to_dual, convert_path_to_dir, save_cad_file_as_binary_dwg, verify_dual_bundle,
+    DualConvertBundle,
 };
 pub use export::{
     convert_document_to_publish, pair_cross_sheet_connectors, BatchConvertSummary, ConvertOptions,
