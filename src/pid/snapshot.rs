@@ -1,9 +1,9 @@
 //! 快照（SPEC-pid-snapshot）：把一张图某一刻的摘要和连通图，连同什么时候、谁、为什么
 //! 做的，存成一份自带校验和的 JSON（§3.2）。
 //!
-//! 这里只管内容和校验：[`capture`] 由摘要、连通图和 [`SnapshotMeta`] 做出一份快照，
-//! [`Snapshot::to_bytes`] 写成文件内容，[`parse`] 读回来并重算校验和。都是纯函数；
-//! 存到哪个目录、怎么编号在 [`store`] 里。
+//! 这里管内容和校验：[`capture`] 由摘要、连通图和 [`SnapshotMeta`] 做出一份快照，
+//! [`Snapshot::to_bytes`] 写成文件内容，[`parse`] 读回来并重算校验和；两份快照怎么比
+//! （[`diff`]）写在 `compare.rs` 里。都是纯函数；存到哪个目录、怎么编号在 [`store`] 里。
 //!
 //! 校验和只算正文：`summary`、`graph` 两个值各自按键名排序、不带空白写出来，首尾相接
 //! 算 SHA-256。所以文件缩进与否、键的先后都不影响它，正文里任何一个值变了都对不上。
@@ -18,7 +18,13 @@ use sha2::{Digest, Sha256};
 
 use super::project_index::{DrawingSummary, Graph};
 
+mod compare;
 pub mod store;
+
+pub use compare::{
+    diff, ByWhat, Change, Diff, DiffEdges, DiffObject, DiffSide, DiffSummary, EdgeChange, Notice,
+    DEFAULT_MOVE_TOLERANCE, DIFF_VERSION, DRAWING_ID_DIFFERS, LENGTH_UNIT_DIFFERS,
+};
 
 /// 快照文件格式的版本。读到更高的版本报 [`SNAPSHOT_VERSION_UNSUPPORTED`]。
 pub const SNAPSHOT_VERSION: u32 = 1;
