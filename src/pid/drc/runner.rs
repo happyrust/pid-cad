@@ -252,9 +252,12 @@ fn visit_operand(operand: &Operand, visit: &mut impl FnMut(&Path)) {
 mod tests {
     use std::collections::BTreeMap;
 
-    use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use serde_json::{json, Value};
 
     use super::*;
+    use crate::app::OpenCADStudio;
     use crate::pid::drc::builtin_rules::{builtin, rule_set_digest};
     use crate::pid::drc::dsl::parse;
     use crate::pid::drc::facts::ANNOTATION_TYPE;
@@ -262,16 +265,22 @@ mod tests {
         Category, CheckResult, ObjectRef, RuleScope, ScopeKind, Severity, Source, Target,
     };
     use crate::pid::project_index::{
-        Joint, ObjectKind, SummaryObject, SummaryPort, SummarySegment, SummarySource,
-        SUMMARY_VERSION,
+        summarize, Joint, ObjectKind, SignalEnd, SummaryMeta, SummaryObject, SummaryPort,
+        SummarySegment, SummarySource, DEFAULT_TOLERANCE, SUMMARY_VERSION,
     };
+    use crate::pid::symbols::PortDir;
     use crate::pid::tag_engine::TAG_STATUS_DUPLICATED;
+    use crate::pid::topology::TYPE_SIGNAL_LINE;
 
     /// 还没有正反例的内置规则：用到的事实还没接上，只能不命中或只能命中。到 DRC-8 要清空。
-    const UNCOVERED: [&str; 18] = [
-        "DR-006", "DR-007", "DR-008", "DR-009", "DR-015", "DR-020", "DR-021", "DR-022", "DR-102",
-        "DR-103", "DR-104", "DR-106", "DR-107", "DR-108", "DR-109", "DR-111", "DR-112", "DR-116",
+    const UNCOVERED: [&str; 10] = [
+        "DR-006", "DR-007", "DR-009", "DR-021", "DR-022", "DR-102", "DR-103", "DR-104", "DR-112",
+        "DR-116",
     ];
+
+    /// 本期不出结果的内置规则（规格 §3.4）：管口没有位号，`位号前缀` 不知道；符号库里没有带方向
+    /// 的阀门，`流向相反` 不知道。它们命中的例子是要查的那种情形，本期也不命中。
+    const SILENT: [&str; 2] = ["DR-020", "DR-109"];
 
     /// 命中的例子出两条的规则：两个对象互相违反（两段管段互相重叠）。
     const MUTUAL: [&str; 1] = ["DR-110"];
@@ -337,6 +346,32 @@ mod tests {
         }
     }
 
+    fn signal(tag: &str, props: &[(&str, &str)]) -> SummaryObject {
+        object(
+            ObjectKind::SignalLine,
+            TYPE_SIGNAL_LINE,
+            "信号线",
+            tag,
+            props,
+        )
+    }
+
+    /// 管路 `run` 上的对象：属主是这条管路。
+    fn on_run(run: &str, base: SummaryObject) -> SummaryObject {
+        SummaryObject {
+            owner: Some(run.to_owned()),
+            ..base
+        }
+    }
+
+    /// 管路 `run` 上一个不单独编号的管件，记着管路的位号。
+    fn fitting(run: &str, props: &[(&str, &str)]) -> SummaryObject {
+        on_run(
+            run,
+            object(ObjectKind::Fitting, "FITTING", "管件", run, props),
+        )
+    }
+
     /// 放了符号块 `block` 的对象；`known` 是当前符号库里有没有这个块。
     fn with_symbol(base: SummaryObject, block: &str, known: bool) -> SummaryObject {
         SummaryObject {
@@ -359,6 +394,37 @@ mod tests {
                 joined: false,
             })
             .collect()
+    }
+
+    /// `owner` 的符号的端口 `name`，在原点，不分流向。
+    fn port_of(owner: &SummaryObject, name: &str, joined: bool) -> SummaryPort {
+        SummaryPort {
+            owner_kind: owner.kind,
+            type_code: owner.type_code.clone(),
+            tag: owner.tag.clone(),
+            port: name.to_owned(),
+            direction: None,
+            at: [0.0, 0.0],
+            joined,
+        }
+    }
+
+    /// 接在 `owner` 的符号的端口 `name` 上。
+    fn on_port(owner: &SummaryObject, name: &str) -> Option<Joint> {
+        Some(Joint::Port {
+            type_code: owner.type_code.clone(),
+            tag: owner.tag.clone(),
+            port: name.to_owned(),
+        })
+    }
+
+    /// 信号线 `tag` 在 `at` 的一端，接着 `joint`。
+    fn signal_end(tag: &str, at: [f64; 2], joint: Option<Joint>) -> SignalEnd {
+        SignalEnd {
+            tag: tag.to_owned(),
+            at,
+            joint,
+        }
     }
 
     /// 管线 `line` 上从 `a` 到 `b` 的一段，两端都没接上；`run` 为空是管线自己的线。
@@ -500,7 +566,8 @@ mod tests {
         RuleSet { rules, ..builtin() }
     }
 
-    /// 一条内置规则命中的例子和不命中的例子，各是一张图；还没有例子的在 `UNCOVERED` 里。
+    /// 一条内置规则命中的例子和不命中的例子，各是一张图；还没有例子的在 `UNCOVERED` 里。`SILENT`
+    /// 里的规则，命中的例子是它要查的那种情形。
     fn example(id: &str) -> Option<(DrawingSummary, DrawingSummary)> {
         let (hit, miss) = match id {
             "DR-001" => (
@@ -523,6 +590,13 @@ mod tests {
                 vec![instrument("FT-101", &[])],
                 vec![instrument("FT-101", &[("仪表回路", "F-101")])],
             ),
+            "DR-008" => {
+                let with = |joined| DrawingSummary {
+                    ports: vec![port_of(&pump("P-101"), "N1", joined)],
+                    ..drawing("PID-1101", vec![pump("P-101")])
+                };
+                return Some((with(false), with(true)));
+            }
             "DR-010" => (
                 vec![pump("P-101")],
                 vec![object(
@@ -560,6 +634,28 @@ mod tests {
                 };
                 return Some((with(None), with(Some(Joint::Break))));
             }
+            "DR-015" => {
+                let transmitter = instrument("FT-101", &[]);
+                let controller = instrument("FIC-101", &[]);
+                let with = |far: Option<Joint>| {
+                    let joined = far.is_some();
+                    DrawingSummary {
+                        signal_ends: vec![
+                            signal_end("S-1", [0.0, 0.0], on_port(&transmitter, "out1")),
+                            signal_end("S-1", [10.0, 0.0], far),
+                        ],
+                        ports: vec![
+                            port_of(&transmitter, "out1", true),
+                            port_of(&controller, "in1", joined),
+                        ],
+                        ..drawing(
+                            "PID-1101",
+                            vec![signal("S-1", &[]), transmitter.clone(), controller.clone()],
+                        )
+                    }
+                };
+                return Some((with(None), with(on_port(&controller, "in1"))));
+            }
             "DR-016" => (
                 vec![annotation(&[("文字", "  ")])],
                 vec![annotation(&[("文字", "去火炬")])],
@@ -573,6 +669,13 @@ mod tests {
                 vec![line(&format!("L-{}", "1".repeat(31)), &[])],
                 vec![line("L-1001", &[])],
             ),
+            "DR-020" => {
+                let with = |ports| DrawingSummary {
+                    ports,
+                    ..drawing("PID-1101", vec![pump("P-101")])
+                };
+                return Some((with(nozzles("PUMP", "P-101", 2)), with(Vec::new())));
+            }
             "DR-023" => {
                 let with = |count| DrawingSummary {
                     ports: nozzles("PUMP", "P-101", count),
@@ -609,6 +712,78 @@ mod tests {
                 };
                 return Some((with("80"), with("50")));
             }
+            "DR-106" => {
+                let with = |size| {
+                    vec![
+                        pipe_run("L-1001-01", "L-1001", &[("公称直径", "50")]),
+                        on_run("L-1001-01", valve("V-101", &[("公称直径", size)])),
+                    ]
+                };
+                (with("80"), with("50"))
+            }
+            "DR-107" => {
+                let with = |class| {
+                    vec![
+                        line("L-1001", &[("管道等级", "A1")]),
+                        pipe_run("L-1001-01", "L-1001", &[]),
+                        on_run("L-1001-01", valve("V-101", &[("管道等级", class)])),
+                    ]
+                };
+                (with("B2"), with("A1"))
+            }
+            "DR-108" => {
+                let equipment = pump("P-101");
+                let transmitter = instrument("FT-101", &[]);
+                let with = |to: &SummaryObject| DrawingSummary {
+                    signal_ends: vec![signal_end("S-1", [0.0, 0.0], on_port(to, "N1"))],
+                    ports: vec![
+                        port_of(&equipment, "N1", true),
+                        port_of(&transmitter, "N1", true),
+                    ],
+                    ..drawing(
+                        "PID-1101",
+                        vec![signal("S-1", &[]), equipment.clone(), transmitter.clone()],
+                    )
+                };
+                return Some((with(&equipment), with(&transmitter)));
+            }
+            "DR-109" => {
+                let check = on_run(
+                    "L-1001-01",
+                    with_symbol(
+                        object(ObjectKind::Valve, "VALVE_CHECK", "止回阀", "V-101", &[]),
+                        "PID_SYM_valve_check_valve",
+                        false,
+                    ),
+                );
+                let with = |inlet, outlet| {
+                    let upstream = SummarySegment {
+                        joint_b: on_port(&check, inlet),
+                        ..segment("L-1001", Some("L-1001-01"), [0.0, 0.0], [10.0, 0.0])
+                    };
+                    let downstream = SummarySegment {
+                        joint_a: on_port(&check, outlet),
+                        ..segment("L-1001", Some("L-1001-01"), [20.0, 0.0], [30.0, 0.0])
+                    };
+                    DrawingSummary {
+                        ports: vec![
+                            SummaryPort {
+                                direction: Some(PortDir::In),
+                                ..port_of(&check, "in1", true)
+                            },
+                            SummaryPort {
+                                direction: Some(PortDir::Out),
+                                ..port_of(&check, "out1", true)
+                            },
+                        ],
+                        ..piping(
+                            vec![pipe_run("L-1001-01", "L-1001", &[]), check.clone()],
+                            vec![upstream, downstream],
+                        )
+                    }
+                };
+                return Some((with("out1", "in1"), with("in1", "out1")));
+            }
             "DR-110" => {
                 let with = |from: f64| {
                     piping(
@@ -620,6 +795,14 @@ mod tests {
                     )
                 };
                 return Some((with(5.0), with(10.0)));
+            }
+            "DR-111" => {
+                let gate = with_symbol(valve("V-101", &[]), "PID_SYM_valve_gate_valve", true);
+                let with = |joined| DrawingSummary {
+                    ports: vec![port_of(&gate, "in1", true), port_of(&gate, "out1", joined)],
+                    ..drawing("PID-1101", vec![gate.clone()])
+                };
+                return Some((with(false), with(true)));
             }
             "DR-113" => {
                 let transmitter = with_symbol(
@@ -655,14 +838,14 @@ mod tests {
         Some((drawing("PID-1101", hit), drawing("PID-1101", miss)))
     }
 
-    /// 表驱动：每条内置规则在它的例子图上，命中的例子出一条（`MUTUAL` 里的出两条）、不命中的
-    /// 不出。
+    /// 表驱动：每条内置规则在它的例子图上，命中的例子出一条（`MUTUAL` 里的出两条，`SILENT` 里的
+    /// 本期不出）、不命中的不出。
     #[test]
     fn every_builtin_rule_has_a_hit_and_a_miss() {
         let rules = all_enabled();
         let ids: Vec<&str> = rules.rules.iter().map(|rule| rule.id.as_str()).collect();
-        for id in UNCOVERED {
-            assert!(ids.contains(&id), "未覆盖名单里的 {id} 不是内置规则");
+        for id in UNCOVERED.into_iter().chain(SILENT) {
+            assert!(ids.contains(&id), "名单里的 {id} 不是内置规则");
         }
         for id in ids {
             let Some((hit, miss)) = example(id) else {
@@ -673,7 +856,13 @@ mod tests {
                 !UNCOVERED.contains(&id),
                 "{id} 有了例子，要从未覆盖名单里拿掉"
             );
-            let expected = if MUTUAL.contains(&id) { 2 } else { 1 };
+            let expected = if SILENT.contains(&id) {
+                0
+            } else if MUTUAL.contains(&id) {
+                2
+            } else {
+                1
+            };
             let report = run(&rules, &[hit]);
             assert_eq!(hits(&report, id), expected, "{id} 应命中 {expected} 条");
             let report = run(&rules, &[miss]);
@@ -1850,5 +2039,431 @@ mod tests {
                 ("XY-006", "PIPE_SEGMENT|L-1001-01|10.000,0.000"),
             ]
         );
+    }
+
+    /// 管口是设备符号的端口：名称、方向、连接状态取摘要的端口，位号前缀本期不知道，`DR-020` 不出
+    /// 结果。关系 `所属设备` 走到类型编码和位号都对上的那台设备；同类型同位号的不止一台、图上没有
+    /// 这台设备时走不到。结果指到管口：没有位号，靠设备位号和端口名定位，句柄是设备的。
+    #[test]
+    fn nozzles_are_the_ports_of_equipment() {
+        let feed = pump("P-101");
+        let ports = vec![
+            SummaryPort {
+                direction: Some(PortDir::In),
+                at: [-14.0, 0.0],
+                ..port_of(&feed, "in1", false)
+            },
+            SummaryPort {
+                direction: Some(PortDir::Out),
+                at: [14.0, 0.0],
+                ..port_of(&feed, "out1", true)
+            },
+            SummaryPort {
+                direction: Some(PortDir::Bidir),
+                ..port_of(&pump("P-103"), "N1", false)
+            },
+            port_of(&pump("P-109"), "N1", true),
+            port_of(&instrument("FT-101", &[]), "in1", false),
+        ];
+        let drawings = [DrawingSummary {
+            ports,
+            ..drawing(
+                "PID-1101",
+                vec![
+                    feed.clone(),
+                    pump("P-103"),
+                    pump("P-103"),
+                    instrument("FT-101", &[]),
+                ],
+            )
+        }];
+        let rules = only(vec![
+            builtin().rule("DR-008").expect("DR-008").clone(),
+            builtin().rule("DR-020").expect("DR-020").clone(),
+            custom(
+                "XY-001",
+                "管口",
+                "位号前缀 = NULL",
+                Some("{类型} {所属}#{名称}：{方向}，{连接状态}"),
+            ),
+            custom("XY-002", "管口", "所属设备.位号 = \"P-101\"", None),
+            custom("XY-003", "管口", "所属设备.位号 = NULL", None),
+        ]);
+        let report = run(&rules, &drawings);
+        let found: Vec<(&str, &str, &str)> = report
+            .results
+            .iter()
+            .map(|result| {
+                (
+                    result.rule_id.as_str(),
+                    result.object_key.as_str(),
+                    result.message.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("DR-008", "PUMP|P-101#in1", "P-101 的管口 in1 没有接上"),
+                ("DR-008", "PUMP|P-103#N1", "P-103 的管口 N1 没有接上"),
+                ("XY-001", "PUMP|P-101#in1", "管口 P-101#in1：流入，未连接"),
+                ("XY-001", "PUMP|P-101#out1", "管口 P-101#out1：流出，已连接"),
+                ("XY-001", "PUMP|P-103#N1", "管口 P-103#N1：双向，未连接"),
+                ("XY-001", "PUMP|P-109#N1", "管口 P-109#N1：，已连接"),
+                ("XY-002", "PUMP|P-101#in1", "自定规则：P-101#in1"),
+                ("XY-002", "PUMP|P-101#out1", "自定规则：P-101#out1"),
+                ("XY-003", "PUMP|P-103#N1", "自定规则：P-103#N1"),
+                ("XY-003", "PUMP|P-109#N1", "自定规则：P-109#N1"),
+            ]
+        );
+        assert_eq!(
+            report.results[0].object,
+            ObjectRef {
+                kind: "管口".to_owned(),
+                type_code: "PUMP".to_owned(),
+                tag: None,
+                drawing_id: "PID-1101".to_owned(),
+                owner: Some("P-101".to_owned()),
+                port: Some("in1".to_owned()),
+                at: [-14.0, 0.0],
+                handle: Some("2D4".to_owned()),
+            }
+        );
+        assert_eq!(report.results[1].object.handle, None);
+    }
+
+    /// 信号线的起点仪表、终点仪表：属性里有就用属性；都没有时看两端接在哪个仪表的端口上，只接着
+    /// 一个时终点仪表不知道。端口未连接数数两端里什么都没接的（接到打断符的不算），`points` 是这些
+    /// 端点；接到设备管口数数接在设备端口上的。图上同位号的信号线不止一根时看不了端点，都不知道。
+    #[test]
+    fn signal_lines_find_their_instruments_from_props_or_ends() {
+        let transmitter = instrument("FT-101", &[]);
+        let controller = instrument("FIC-101", &[]);
+        let equipment = pump("P-101");
+        let drawings = [DrawingSummary {
+            signal_ends: vec![
+                signal_end("S-1", [0.0, 0.0], None),
+                signal_end("S-1", [10.0, 0.0], None),
+                signal_end("S-2", [0.0, 10.0], on_port(&transmitter, "out1")),
+                signal_end("S-2", [10.0, 10.0], on_port(&controller, "in1")),
+                signal_end("S-3", [0.0, 20.0], None),
+                signal_end("S-3", [10.0, 20.0], on_port(&controller, "in1")),
+                signal_end("S-4", [0.0, 30.0], on_port(&equipment, "out1")),
+                signal_end("S-4", [10.0, 30.0], Some(Joint::Break)),
+                signal_end("S-5", [0.0, 40.0], None),
+                signal_end("S-5", [10.0, 40.0], None),
+                signal_end("S-6", [0.0, 50.0], None),
+            ],
+            ports: vec![
+                port_of(&transmitter, "out1", true),
+                port_of(&controller, "in1", true),
+                port_of(&equipment, "out1", true),
+            ],
+            ..drawing(
+                "PID-1101",
+                vec![
+                    signal("S-1", &[("起点仪表", "FT-101"), ("终点仪表", "FIC-101")]),
+                    signal("S-2", &[]),
+                    signal("S-3", &[]),
+                    signal("S-4", &[]),
+                    signal("S-5", &[("起点仪表", "FT-109")]),
+                    signal("S-6", &[]),
+                    signal("S-6", &[]),
+                    transmitter.clone(),
+                    controller.clone(),
+                    equipment.clone(),
+                ],
+            )
+        }];
+        let rules = only(vec![
+            builtin().rule("DR-015").expect("DR-015").clone(),
+            builtin().rule("DR-108").expect("DR-108").clone(),
+            custom(
+                "XY-001",
+                "信号线",
+                "端口未连接数 >= 0",
+                Some("{位号}：{起点仪表}→{终点仪表}，悬空 {端口未连接数}，接设备 {接到设备管口数}"),
+            ),
+        ]);
+        let report = run(&rules, &drawings);
+        let found: Vec<(&str, &str, &str)> = report
+            .results
+            .iter()
+            .map(|result| {
+                (
+                    result.rule_id.as_str(),
+                    result.object_key.as_str(),
+                    result.message.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    "DR-015",
+                    "SIGNAL_LINE|S-3",
+                    "信号线 S-3 没有两端都接到仪表上"
+                ),
+                (
+                    "DR-015",
+                    "SIGNAL_LINE|S-4",
+                    "信号线 S-4 没有两端都接到仪表上"
+                ),
+                (
+                    "DR-015",
+                    "SIGNAL_LINE|S-5",
+                    "信号线 S-5 没有两端都接到仪表上"
+                ),
+                (
+                    "DR-015",
+                    "SIGNAL_LINE|S-6",
+                    "信号线 S-6 没有两端都接到仪表上"
+                ),
+                (
+                    "DR-015",
+                    "SIGNAL_LINE|S-6",
+                    "信号线 S-6 没有两端都接到仪表上"
+                ),
+                ("DR-108", "SIGNAL_LINE|S-4", "信号线 S-4 接到了设备管口上"),
+                (
+                    "XY-001",
+                    "SIGNAL_LINE|S-1",
+                    "S-1：FT-101→FIC-101，悬空 2，接设备 0"
+                ),
+                (
+                    "XY-001",
+                    "SIGNAL_LINE|S-2",
+                    "S-2：FT-101→FIC-101，悬空 0，接设备 0"
+                ),
+                (
+                    "XY-001",
+                    "SIGNAL_LINE|S-3",
+                    "S-3：FIC-101→，悬空 1，接设备 0"
+                ),
+                ("XY-001", "SIGNAL_LINE|S-4", "S-4：→，悬空 0，接设备 1"),
+                (
+                    "XY-001",
+                    "SIGNAL_LINE|S-5",
+                    "S-5：FT-109→，悬空 2，接设备 0"
+                ),
+            ]
+        );
+        let points: Vec<Vec<[f64; 2]>> = report
+            .results
+            .iter()
+            .filter(|result| result.rule_id == "XY-001")
+            .map(|result| result.points.clone())
+            .collect();
+        assert_eq!(
+            points,
+            [
+                vec![[0.0, 0.0], [10.0, 0.0]],
+                vec![],
+                vec![[0.0, 20.0]],
+                vec![],
+                vec![[0.0, 40.0], [10.0, 40.0]],
+            ]
+        );
+    }
+
+    /// `未连接端口数` 数这个符号的端口里没接上的，按种类、类型编码和位号认端口；图上同种同类型
+    /// 同位号的符号不止一个（同一条管路上两个同类型的管件）时分不清，不带符号的也不知道。
+    /// `DR-111` 只查阀门和管件。
+    #[test]
+    fn symbols_count_their_unconnected_ports() {
+        let gate = with_symbol(valve("V-101", &[]), "PID_SYM_valve_gate_valve", true);
+        let transmitter = with_symbol(
+            fitting("L-1001-01", &[]),
+            "PID_SYM_instrument_transmitter",
+            true,
+        );
+        let feed = with_symbol(pump("P-101"), "PID_SYM_equipment_pump", true);
+        let mut ports = vec![
+            port_of(&gate, "in1", true),
+            port_of(&gate, "out1", false),
+            port_of(&feed, "in1", false),
+            port_of(&feed, "out1", false),
+            SummaryPort {
+                owner_kind: ObjectKind::Equipment,
+                ..port_of(&gate, "in1", false)
+            },
+        ];
+        for _ in 0..2 {
+            ports.push(port_of(&transmitter, "in1", false));
+            ports.push(port_of(&transmitter, "out1", true));
+        }
+        let drawings = [DrawingSummary {
+            ports,
+            ..drawing(
+                "PID-1101",
+                vec![
+                    gate.clone(),
+                    transmitter.clone(),
+                    transmitter.clone(),
+                    feed.clone(),
+                    valve("V-102", &[]),
+                ],
+            )
+        }];
+        let rules = only(vec![
+            builtin().rule("DR-111").expect("DR-111").clone(),
+            custom(
+                "XY-001",
+                "对象实例",
+                "未连接端口数 >= 0",
+                Some("{类型} {位号}：{未连接端口数}"),
+            ),
+            custom("XY-002", "对象实例", "未连接端口数 = NULL", None),
+        ]);
+        let report = run(&rules, &drawings);
+        let found: Vec<(&str, &str, &str)> = report
+            .results
+            .iter()
+            .map(|result| {
+                (
+                    result.rule_id.as_str(),
+                    result.object_key.as_str(),
+                    result.message.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("DR-111", "VALVE_GATE|V-101", "闸阀 V-101 有 1 个端口没接上"),
+                ("XY-001", "PUMP|P-101", "泵 P-101：2"),
+                ("XY-001", "VALVE_GATE|V-101", "闸阀 V-101：1"),
+                (
+                    "XY-002",
+                    "FITTING|L-1001-01|10.000,20.000",
+                    "自定规则：L-1001-01",
+                ),
+                (
+                    "XY-002",
+                    "FITTING|L-1001-01|10.000,20.000",
+                    "自定规则：L-1001-01",
+                ),
+                ("XY-002", "VALVE_GATE|V-102", "自定规则：V-102"),
+            ]
+        );
+    }
+
+    /// 线上的阀门、管件经所属管路、所属管线取属性：阀门的公称直径与所在管路不同、阀门或管件的
+    /// 管道等级与所在管线不同才命中；阀门没填直径、不在线上的不命中。
+    #[test]
+    fn valves_and_fittings_follow_their_run_and_line() {
+        let drawings = [drawing(
+            "PID-1101",
+            vec![
+                line("L-1001", &[("管道等级", "A1")]),
+                pipe_run("L-1001-01", "L-1001", &[("公称直径", "50")]),
+                on_run(
+                    "L-1001-01",
+                    valve("V-101", &[("公称直径", "80"), ("管道等级", "A1")]),
+                ),
+                on_run("L-1001-01", valve("V-102", &[("管道等级", "B2")])),
+                on_run(
+                    "L-1001-01",
+                    valve("V-103", &[("公称直径", "50"), ("管道等级", "A1")]),
+                ),
+                fitting("L-1001-01", &[("管道等级", "B2")]),
+                valve("V-104", &[("公称直径", "80"), ("管道等级", "B2")]),
+            ],
+        )];
+        let rules = only(vec![
+            builtin().rule("DR-106").expect("DR-106").clone(),
+            builtin().rule("DR-107").expect("DR-107").clone(),
+        ]);
+        let report = run(&rules, &drawings);
+        let found: Vec<(&str, &str, &str)> = report
+            .results
+            .iter()
+            .map(|result| {
+                (
+                    result.rule_id.as_str(),
+                    result.object_key.as_str(),
+                    result.message.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    "DR-106",
+                    "VALVE_GATE|V-101",
+                    "阀门 V-101 的公称直径 80 与所在管路不一致",
+                ),
+                (
+                    "DR-107",
+                    "FITTING|L-1001-01|10.000,20.000",
+                    "管件 L-1001-01 的管道等级 B2 与所在管线不一致",
+                ),
+                (
+                    "DR-107",
+                    "VALVE_GATE|V-102",
+                    "闸阀 V-102 的管道等级 B2 与所在管线不一致",
+                ),
+            ]
+        );
+    }
+
+    /// 协议 1 的一条控制请求，发给当前的图。
+    fn request(app: &mut OpenCADStudio, mut req: Value) -> Value {
+        static SERIAL: AtomicU64 = AtomicU64::new(0);
+        let state = app.automation_op(r#"{"protocol":1,"op":"state"}"#);
+        req["protocol"] = json!(1);
+        req["document_id"] = state["document_id"].clone();
+        req["revision"] = state["revision"].clone();
+        req["client_id"] = json!("test");
+        req["request_id"] = json!(format!("drc-{}", SERIAL.fetch_add(1, Ordering::Relaxed)));
+        app.automation_op(&req.to_string())
+    }
+
+    /// 起 `cmd`，依次喂点，最后回车。
+    fn draw(app: &mut OpenCADStudio, cmd: &str, points: &[[f64; 2]]) {
+        let started = request(app, json!({"op": "run", "cmd": cmd}));
+        assert_eq!(started["ok"], true, "{cmd}：{started}");
+        for [x, y] in points {
+            let point =
+                json!({"op": "input", "kind": "point", "point": [x, y, 0.0], "space": "wcs"});
+            let fed = request(app, point);
+            assert_eq!(fed["ok"], true, "{cmd} 喂点：{fed}");
+        }
+        request(app, json!({"op": "input", "kind": "enter"}));
+    }
+
+    /// 用命令建的图上 `DR-020`、`DR-109` 不出结果：管口没有位号，库里的阀门不带方向。同一张图上
+    /// `DR-008` 照样查出没接上的管口，阀门也在摘要里。
+    #[test]
+    fn nozzle_prefixes_and_valve_flow_say_nothing_on_a_drawing_built_by_commands() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        draw(&mut app, "PIDINSERT pump", &[[0.0, 0.0]]);
+        draw(&mut app, "PIDINSERT vessel", &[[200.0, 12.0]]);
+        draw(&mut app, "PIDPIPE", &[[200.0, 100.0], [300.0, 100.0]]);
+        draw(&mut app, "PIDPIPE run", &[[14.0, 0.0], [200.0, 0.0]]);
+        draw(&mut app, "PIDFITTING gate_valve", &[[100.0, 0.0]]);
+        let summary = summarize(
+            app.active_document_for_test(),
+            &app.pid_symbols,
+            SummaryMeta {
+                drawing_id: "PID-1101".to_owned(),
+                file: None,
+                pbs: None,
+                source: SummarySource::Open,
+                fingerprint: None,
+            },
+            DEFAULT_TOLERANCE,
+        );
+        assert!(summary
+            .objects
+            .iter()
+            .any(|object| object.kind == ObjectKind::Valve));
+        let report = run(&builtin(), &[summary]);
+        assert!(hits(&report, "DR-008") > 0, "{:#?}", report.results);
+        assert_eq!(hits(&report, "DR-020"), 0);
+        assert_eq!(hits(&report, "DR-109"), 0);
     }
 }
