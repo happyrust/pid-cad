@@ -1123,6 +1123,12 @@ impl OpenCADStudio {
     /// states, or picked by its block reference or by the lettering of one
     /// of its labels; its group is the reference with the lettering of all
     /// its labels, and the receipt then counts symbols and labels.
+    ///
+    /// A tag the plant's data gives may hold spaces. Named whole after the
+    /// verb -- `PIDTAG LG-Magnetic Float Gauge-0203`, in quotes or not --
+    /// the tag of such a symbol is found however many words it is, case
+    /// and the white space between its words aside. A line of two words
+    /// that is no such tag renames, as it did.
     pub(super) fn dispatch_pidtag(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         let rest = cmd.strip_prefix("PIDTAG")?;
         if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
@@ -1142,13 +1148,20 @@ impl OpenCADStudio {
         // change as exactly this line (`VAL-CLI-009`), and it is the only
         // command-line spelling of "set this symbol's tag" that exists. Two
         // words make it a write; one word stays the jump-to-tag it always was.
+        //
+        // A tag the plant's data gives may hold spaces (`LG-Magnetic Float
+        // Gauge-0203`). Where all that follows the verb is the tag of a
+        // symbol a `.pid` import placed on this sheet, the line names that
+        // tag, however many words it is: of the two readings a line of two
+        // words then has, the one that writes nothing is taken.
         let words: Vec<&str> = arg.split_whitespace().collect();
-        if words.len() == 2 {
+        let names_a_tag = words.len() > 1 && self.pidtag_names_an_imported_tag(i, arg);
+        if words.len() == 2 && !names_a_tag {
             return Some(self.retag_by_tag(i, words[0], words[1]));
         }
-        if words.len() > 2 {
+        if words.len() > 2 && !names_a_tag {
             self.command_line.push_error(&format!(
-                "PIDTAG: 改位号只接受两个参数（旧位号 新位号），实得 \"{arg}\"。"
+                "PIDTAG: 本图上没有位号 \"{arg}\" 的导入图例；改位号只接受两个参数（旧位号 新位号）。"
             ));
             return Some(Task::none());
         }
@@ -1171,7 +1184,7 @@ impl OpenCADStudio {
                 Some(Asked::Picked(&picked)),
             )
         } else {
-            let wanted = arg.to_uppercase();
+            let wanted = asked_tag(arg);
             let found = self.pid_groups_select(
                 i,
                 |s| s.tag.as_deref().is_some_and(|t| t.to_uppercase() == wanted),
@@ -1192,6 +1205,19 @@ impl OpenCADStudio {
                 .push_info("PIDTAG: the picked entities belong to no recognised symbol."),
         }
         Some(Task::none())
+    }
+
+    /// Whether `arg` -- all that follows the verb on a PIDTAG line -- is,
+    /// whole, the tag of a symbol a `.pid` import placed on the sheet of
+    /// tab `i`. It tells a tag that holds spaces from a rename, for the
+    /// command and for the gate of a read-only session alike
+    /// (`readonly_refuses_command`): the two read one line one way.
+    pub(in crate::app) fn pidtag_names_an_imported_tag(&self, i: usize, arg: &str) -> bool {
+        let wanted = asked_tag(arg);
+        !wanted.is_empty()
+            && self.tabs.get(i).is_some_and(|tab| {
+                !imported_groups(&tab.scene.document, &Asked::Tag(&wanted)).is_empty()
+            })
     }
 
     /// `PIDTAG <old> <new>`: rename every symbol carrying `old` to `new`.
@@ -1383,9 +1409,32 @@ fn symbol_has_any(symbol: &pid_legend::Recognized, handles: &[u64]) -> bool {
         .any(|h| handles.contains(&h.value()))
 }
 
+/// A tag the way PIDTAG compares the tags of imported symbols: upper-cased,
+/// and each run of white space in it one space. The command line hands on
+/// the words of a tag that holds spaces, not what stood between them.
+fn tag_key(tag: &str) -> String {
+    tag.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_uppercase()
+}
+
+/// The tag a PIDTAG line asks for, as [`tag_key`] gives it: `arg` is what
+/// follows the verb, and the quotes the command line keeps a name with
+/// spaces whole in are no part of the tag.
+fn asked_tag(arg: &str) -> String {
+    let arg = arg.trim();
+    let named = arg
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or(arg);
+    tag_key(named)
+}
+
 /// What PIDTAG asks for among the symbols a `.pid` import placed.
 enum Asked<'a> {
-    /// Those that carry this tag: upper-cased, the way tags are compared.
+    /// Those that carry this tag, given as [`tag_key`] gives one: the way
+    /// the tags of these symbols are compared.
     Tag(&'a str),
     /// Those the picked entities are of, by handle value: a symbol's block
     /// reference, or the lettering of one of its labels.
@@ -1470,7 +1519,7 @@ fn imported_groups(document: &document::Document, asked: &Asked<'_>) -> Vec<Impo
                 return false;
             }
             match asked {
-                Asked::Tag(wanted) => symbol.tag.is_some_and(|tag| tag.to_uppercase() == *wanted),
+                Asked::Tag(wanted) => symbol.tag.is_some_and(|tag| tag_key(tag) == *wanted),
                 Asked::Picked(_) => {
                     picked.contains(&handle.value())
                         || (first
@@ -2722,6 +2771,325 @@ mod tests {
                 "{absent}: nothing is framed"
             );
         }
+    }
+
+    // ── PIDTAG, of a tag that holds spaces ─────────────────────────────────
+
+    /// A tag the plant's data gives that holds spaces: the one of the 5,027
+    /// the 53 drawings of the plant backup carry, with the database's tags
+    /// put on, that does (on D07).
+    const SPACED: &str = "LG-Magnetic Float Gauge-0203";
+
+    /// The sheet of imported symbols with its first valve given `tag` as the
+    /// plant's database gives one; the valve and the lettering of its four
+    /// labels. Nothing to save, as a sheet just opened.
+    fn sheet_tagged(tag: &str) -> (OpenCADStudio, document::Handle, [document::Handle; 4]) {
+        let mut app = imported_sheet();
+        let (valve, labels) = tagged_valve(&app);
+        restate(
+            &mut app,
+            valve,
+            &[("label", tag), ("tag_source", "database")],
+        );
+        let i = app.active_tab;
+        app.tabs[i].dirty = false;
+        (app, valve, labels)
+    }
+
+    /// PIDTAG finds an imported symbol by a tag that holds spaces (plan
+    /// 2026-11-20-pid-symbol-identity, SI-10): named whole on the line
+    /// after the verb, however many words it is, the symbol and the
+    /// lettering of all its labels are selected, framed and zoomed to, as
+    /// by any tag. Nothing is refused, no prompt is left waiting for the
+    /// rest of the line and no word of it is left over, and nothing is
+    /// written: the record says what it said, no undo step, nothing to
+    /// save.
+    #[test]
+    fn pidtag_finds_an_imported_symbol_by_a_tag_that_holds_spaces() {
+        let (mut app, valve, labels) = sheet_tagged(SPACED);
+        let i = app.active_tab;
+        let said = pid_xdata_strings(&app, valve);
+        let undo_before = app.tabs[i].history.undo_stack.len();
+        let camera_before = app.tabs[i].scene.camera_generation;
+
+        let _ = app.run_command_line("PIDTAG LG-Magnetic Float Gauge-0203");
+        app.finish_all_pending_history();
+        assert_eq!(refused(&app), "", "nothing is refused");
+        assert_eq!(
+            selected(&app),
+            in_order(labels.into_iter().chain([valve])),
+            "the valve and its four labels"
+        );
+        assert_eq!(
+            last_line(&app),
+            "PIDTAG: Ball Valve LG-Magnetic Float Gauge-0203 -- 1 symbol(s), 4 label(s) selected and framed in red."
+        );
+        assert_eq!(frames(&app).len(), 1, "one frame for one symbol");
+        assert!(
+            app.tabs[i].scene.camera_generation > camera_before,
+            "the view moved to the group"
+        );
+        assert!(
+            app.tabs[i].active_cmd.is_none(),
+            "no prompt is left waiting"
+        );
+        assert!(
+            app.command_line.unconsumed.is_empty(),
+            "no word of the line is left over: {:?}",
+            app.command_line.unconsumed
+        );
+        assert_eq!(
+            pid_xdata_strings(&app, valve),
+            said,
+            "the record says what it said"
+        );
+        assert_eq!(
+            app.tabs[i].history.undo_stack.len(),
+            undo_before,
+            "no undo step"
+        );
+        assert!(!app.tabs[i].dirty, "nothing to save");
+    }
+
+    /// A line of two words reads two ways where the two are, together, the
+    /// tag of an imported symbol: a jump to that tag, or the renaming of
+    /// the first word's tag to the second. The reading that writes nothing
+    /// is taken: the symbol is found, and an object drawn here that carries
+    /// the first word keeps its tag. With no imported symbol carrying the
+    /// two words the same line renames, as it did.
+    #[test]
+    fn two_words_that_are_the_tag_of_an_imported_symbol_find_it_and_rename_nothing() {
+        use crate::pid::persist::PidAuthor;
+
+        let (mut app, valve, labels) = sheet_tagged("P-1001 P-1009");
+        let i = app.active_tab;
+        let drawn_here = authored(&mut app, "P-1001");
+        let said = pid_xdata_strings(&app, valve);
+        let undo_before = app.tabs[i].history.undo_stack.len();
+
+        let _ = app.run_command_line("PIDTAG p-1001 P-1009");
+        app.finish_all_pending_history();
+        assert_eq!(refused(&app), "", "nothing is refused");
+        assert_eq!(selected(&app), in_order(labels.into_iter().chain([valve])));
+        assert_eq!(
+            last_line(&app),
+            "PIDTAG: Ball Valve P-1001 P-1009 -- 1 symbol(s), 4 label(s) selected and framed in red."
+        );
+        let author = PidAuthor::load(sheet(&app), drawn_here).expect("author");
+        assert_eq!(
+            (author.tag.as_str(), author.tag_source.as_str()),
+            ("P-1001", "auto"),
+            "the object drawn here keeps its tag"
+        );
+        assert_eq!(
+            pid_xdata_strings(&app, valve),
+            said,
+            "the record says what it said"
+        );
+        assert_eq!(
+            app.tabs[i].history.undo_stack.len(),
+            undo_before,
+            "no undo step"
+        );
+
+        restate(&mut app, valve, &[("label", "GV-101")]);
+        let _ = app.run_command_line("PIDTAG p-1001 P-1009");
+        app.finish_all_pending_history();
+        let author = PidAuthor::load(sheet(&app), drawn_here).expect("author");
+        assert_eq!(
+            (author.tag.as_str(), author.tag_source.as_str()),
+            ("P-1009", "manual"),
+            "the two words are a rename again"
+        );
+        assert_eq!(
+            last_line(&app),
+            "PIDTAG: 位号 p-1001 → P-1009，1 个符号已改。"
+        );
+        assert_eq!(
+            app.tabs[i].history.undo_stack.len(),
+            undo_before + 1,
+            "one undo step"
+        );
+    }
+
+    /// The command line hands on the words of a tag, not what stood between
+    /// them, so a tag that holds spaces is compared with each run of white
+    /// space taken for one space, on both sides, and case aside as any tag
+    /// is. The receipt spells the tag as the record does.
+    #[test]
+    fn pidtag_compares_a_tag_that_holds_spaces_white_space_aside() {
+        // The record states two spaces after the first word.
+        let (mut app, valve, labels) = sheet_tagged("LG-Magnetic  Float Gauge-0203");
+        let i = app.active_tab;
+
+        for typed in [
+            "LG-Magnetic Float Gauge-0203",
+            "LG-Magnetic  Float Gauge-0203",
+            "lg-magnetic   float\tgauge-0203 ",
+        ] {
+            app.tabs[i].scene.deselect_all();
+            let _ = app.run_command_line(&format!("PIDTAG {typed}"));
+            assert_eq!(
+                selected(&app),
+                in_order(labels.into_iter().chain([valve])),
+                "{typed:?}"
+            );
+            assert_eq!(
+                last_line(&app),
+                "PIDTAG: Ball Valve LG-Magnetic  Float Gauge-0203 -- 1 symbol(s), 4 label(s) selected and framed in red.",
+                "{typed:?}"
+            );
+        }
+    }
+
+    /// In quotes the tag is one word to the command line, which hands it
+    /// whole to the prompt the bare verb opens. The quotes are no part of
+    /// the tag there, nor where the line reaches the command as it stands
+    /// (a button, a plugin, the control surface).
+    #[test]
+    fn pidtag_takes_a_tag_that_holds_spaces_in_quotes() {
+        let (mut app, valve, labels) = sheet_tagged(SPACED);
+        let i = app.active_tab;
+        let found = in_order(labels.into_iter().chain([valve]));
+        let receipt = "PIDTAG: Ball Valve LG-Magnetic Float Gauge-0203 -- 1 symbol(s), 4 label(s) selected and framed in red.";
+
+        let _ = app.run_command_line(r#"PIDTAG "LG-Magnetic Float Gauge-0203""#);
+        assert_eq!(selected(&app), found, "by the command line");
+        assert_eq!(last_line(&app), receipt);
+        assert!(
+            app.tabs[i].active_cmd.is_none(),
+            "the prompt took its answer"
+        );
+
+        app.tabs[i].scene.deselect_all();
+        let _ = app.dispatch_command(r#"PIDTAG "lg-magnetic float gauge-0203""#);
+        assert_eq!(selected(&app), found, "handed to the command as it stands");
+        assert_eq!(last_line(&app), receipt);
+    }
+
+    /// Words that are, together, no tag of an imported symbol on the sheet
+    /// are neither a jump nor, being more than two, a rename, and the
+    /// refusal says both. A tag is matched whole: its first words, its last
+    /// words, and the tag with a word more are none of them the tag.
+    /// Nothing is selected, framed or written, and no prompt is left
+    /// waiting. Two words of the tag are a rename, as two words were.
+    #[test]
+    fn words_that_are_no_tag_of_an_imported_symbol_are_refused_and_say_why() {
+        let (mut app, valve, _) = sheet_tagged(SPACED);
+        let i = app.active_tab;
+        let note = lettered(&app, "NOTE 4");
+        app.tabs[i].scene.select_entity(note, true);
+        let said = pid_xdata_strings(&app, valve);
+        let undo_before = app.tabs[i].history.undo_stack.len();
+
+        for absent in [
+            "LG-Magnetic Float Gauge-0204",
+            "LG-Magnetic Float Gauge-0203 A",
+            "Magnetic Float Gauge-0203",
+            "LG-Magnetic Float Gauge",
+        ] {
+            let _ = app.run_command_line(&format!("PIDTAG {absent}"));
+            app.finish_all_pending_history();
+            assert_eq!(
+                refused(&app),
+                format!(
+                    "PIDTAG: 本图上没有位号 \"{absent}\" 的导入图例；改位号只接受两个参数（旧位号 新位号）。"
+                )
+            );
+            assert_eq!(selected(&app), vec![note], "{absent}: the pick stays");
+            assert!(
+                app.tabs[i].scene.pid_group_highlight_wires().is_empty(),
+                "{absent}: nothing is framed"
+            );
+            assert!(
+                app.tabs[i].active_cmd.is_none(),
+                "{absent}: no prompt is left waiting"
+            );
+        }
+        assert_eq!(
+            pid_xdata_strings(&app, valve),
+            said,
+            "the record says what it said"
+        );
+        assert_eq!(
+            app.tabs[i].history.undo_stack.len(),
+            undo_before,
+            "no undo step"
+        );
+
+        let _ = app.run_command_line("PIDTAG LG-Magnetic Float");
+        assert_eq!(
+            app.command_line.last_error_code.as_deref(),
+            Some("tag_absent")
+        );
+        assert_eq!(
+            refused(&app),
+            "PIDTAG: 本图上没有位号 \"LG-Magnetic\" 的符号，未做改动。"
+        );
+    }
+
+    /// Typed into the window's command line, a space ends the word and the
+    /// step with it, so a line that holds spaces is typed after a `>`,
+    /// which keeps them until Enter (`Message::CommandSpace`); a line
+    /// pasted in arrives with its spaces and needs none. Either way the
+    /// line reaches the command whole and finds the symbol; the `>` is no
+    /// part of it.
+    #[test]
+    fn a_tag_that_holds_spaces_is_typed_on_a_line_that_keeps_its_spaces() {
+        for line in [
+            ">PIDTAG LG-Magnetic Float Gauge-0203",
+            "PIDTAG LG-Magnetic Float Gauge-0203",
+        ] {
+            let (mut app, valve, labels) = sheet_tagged(SPACED);
+            let i = app.active_tab;
+
+            let _ = app.update(crate::app::Message::CommandInput(line.to_string()));
+            let _ = app.update(crate::app::Message::CommandSubmit);
+            app.finish_all_pending_history();
+            assert_eq!(refused(&app), "", "{line}: nothing is refused");
+            assert_eq!(
+                selected(&app),
+                in_order(labels.into_iter().chain([valve])),
+                "{line}: the valve and its four labels"
+            );
+            assert_eq!(
+                last_line(&app),
+                "PIDTAG: Ball Valve LG-Magnetic Float Gauge-0203 -- 1 symbol(s), 4 label(s) selected and framed in red.",
+                "{line}"
+            );
+            assert!(
+                app.tabs[i].active_cmd.is_none(),
+                "{line}: no prompt is left waiting"
+            );
+            assert!(!app.tabs[i].dirty, "{line}: nothing to save");
+        }
+    }
+
+    /// The prompt the bare verb opens takes one word, as it did: words
+    /// typed at it are fed to it one at a time, so of a tag that holds
+    /// spaces it gets the first word, which is no tag here. Such a tag is
+    /// named on the line of the verb.
+    #[test]
+    fn the_prompt_of_the_bare_verb_takes_one_word_as_it_did() {
+        let (mut app, _, _) = sheet_tagged(SPACED);
+        let i = app.active_tab;
+
+        let _ = app.update(crate::app::Message::CommandInput("PIDTAG".to_string()));
+        let _ = app.update(crate::app::Message::CommandSubmit);
+        assert!(app.tabs[i].active_cmd.is_some(), "the prompt is open");
+        let _ = app.update(crate::app::Message::CommandInput(
+            ">LG-Magnetic Float Gauge-0203".to_string(),
+        ));
+        let _ = app.update(crate::app::Message::CommandSubmit);
+        assert_eq!(
+            refused(&app),
+            "PIDTAG: no symbol tagged \"LG-Magnetic\" on this sheet -- PIDLEGEND LIST shows the tags."
+        );
+        assert!(selected(&app).is_empty(), "nothing is found");
+        assert!(
+            app.tabs[i].active_cmd.is_none(),
+            "the prompt took the first word for its answer"
+        );
     }
 
     /// PIDTAG with nothing named goes by the picked entities on a sheet of

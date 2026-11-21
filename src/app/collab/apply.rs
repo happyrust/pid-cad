@@ -1151,7 +1151,9 @@ impl OpenCADStudio {
     ///
     /// Two verbs read or write by what follows them, and are let through
     /// only in the forms that read: `PIDTAG` with one word jumps to a tag
-    /// (two rename it), and `PIDLEGEND` reports, lists and exports (`ON`
+    /// (two rename it -- unless all that follows the verb is the tag of an
+    /// imported symbol on the sheet, which may hold spaces, and naming it is
+    /// a jump as well), and `PIDLEGEND` reports, lists and exports (`ON`
     /// draws the legend, `OFF` and `PURGE` erase it — and the bare verb
     /// defaults to `ON`).
     ///
@@ -1176,7 +1178,14 @@ impl OpenCADStudio {
         let verb = words.first().copied().unwrap_or("").to_ascii_uppercase();
         let option = words.get(1).copied().unwrap_or("").to_ascii_uppercase();
         match verb.as_str() {
-            "PIDTAG" => words.len() > 2,
+            "PIDTAG" => {
+                // All that follows the verb, as the command reads it.
+                let named = cmd
+                    .trim_start()
+                    .split_once(char::is_whitespace)
+                    .map_or("", |(_, rest)| rest);
+                words.len() > 2 && !self.pidtag_names_an_imported_tag(self.active_tab, named)
+            }
             "PIDLEGEND" => !matches!(option.as_str(), "REPORT" | "LIST" | "EXPORT"),
             _ => !READONLY_ALLOWED.contains(&verb.as_str()),
         }
@@ -2278,6 +2287,69 @@ mod tests {
             "ZOOM EXTENTS",
         ] {
             assert!(!app.readonly_refuses_command(cmd), "{cmd} only reads");
+        }
+    }
+
+    /// A tag the plant's data gives may hold spaces, and naming it is a
+    /// jump however many words it is (plan 2026-11-20-pid-symbol-identity,
+    /// SI-10): a read-only session is let through with it, in quotes or
+    /// not, finds the symbol, and leaves the drawing as it was. What
+    /// renames, and words that are no tag of an imported symbol on the
+    /// sheet, are refused as they were.
+    #[test]
+    fn a_readonly_session_may_jump_to_an_imported_tag_that_holds_spaces() {
+        use crate::app::pid_symbol_block_tests::{opened_with, reference, restate, VALVE};
+
+        let mut app = opened_with(crate::io::pid::sheet_of_a_tagged_valve_and_its_labels());
+        let i = app.active_tab;
+        let valve = reference(&app, VALVE, (100.0, 100.0));
+        restate(
+            &mut app,
+            valve,
+            &[
+                ("label", "LG-Magnetic Float Gauge-0203"),
+                ("tag_source", "database"),
+            ],
+        );
+        app.collab.document = Some(app.tabs[i].id);
+        app.collab.readonly = true;
+        let steps = app.tabs[i].history.undo_stack.len();
+        let entities = app.tabs[i].scene.document.entities().count();
+
+        for cmd in [
+            "PIDTAG LG-Magnetic Float Gauge-0203",
+            "PIDTAG lg-magnetic  float gauge-0203",
+            r#"PIDTAG "LG-Magnetic Float Gauge-0203""#,
+        ] {
+            assert!(!app.readonly_refuses_command(cmd), "{cmd} only reads");
+            app.tabs[i].scene.deselect_all();
+            let _ = app.run_command_line(cmd);
+            app.finish_all_pending_history();
+            assert!(
+                app.tabs[i]
+                    .scene
+                    .selected_handles_in_order()
+                    .contains(&valve),
+                "{cmd} finds the valve"
+            );
+            assert_eq!(
+                app.tabs[i].history.undo_stack.len(),
+                steps,
+                "{cmd} made a step in a session that may not write"
+            );
+            assert_eq!(
+                app.tabs[i].scene.document.entities().count(),
+                entities,
+                "{cmd} added or removed an entity"
+            );
+        }
+        for cmd in [
+            "PIDTAG GV-101 GV-109",
+            "PIDTAG LG-Magnetic Float",
+            "PIDTAG LG-Magnetic Float Gauge-0204",
+            r#"PIDTAG "LG-Magnetic Float Gauge-0204""#,
+        ] {
+            assert!(app.readonly_refuses_command(cmd), "{cmd} must be refused");
         }
     }
 

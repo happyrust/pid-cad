@@ -1384,11 +1384,13 @@ impl OpenCADStudio {
             // ATTSYNC <block> names its block on the line; a bare ATTSYNC
             // still asks its [?/Name/Select] question.
             || (tokens[0].eq_ignore_ascii_case("ATTSYNC") && tokens.len() > 1)
-            // `PIDTAG <old> <new>` re-tags in one line. The one-word form is
+            // `PIDTAG <old> <new>` re-tags in one line, and a tag the plant's
+            // data gives may hold spaces (`PIDTAG LG-Magnetic Float
+            // Gauge-0203`): either is one whole line. The one-word form is
             // the jump-to-tag command and must keep going through the
             // first-word path (bare `PIDTAG` prompts), so the condition names
-            // the three-token shape rather than the verb.
-            || (tokens[0].eq_ignore_ascii_case("PIDTAG") && tokens.len() == 3)
+            // the shape of three tokens or more rather than the verb.
+            || (tokens[0].eq_ignore_ascii_case("PIDTAG") && tokens.len() >= 3)
             // `PIDSETPROP [<tag>] <key> <value>` is one whole line; the verb
             // alone only says how it is written.
             || tokens[0].eq_ignore_ascii_case("PIDSETPROP")
