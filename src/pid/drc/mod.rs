@@ -76,9 +76,24 @@ pub fn has_pid_objects(doc: &Document) -> bool {
     })
 }
 
+/// 图纸文件 `path`（可以还不存在）在检查结果里的图号和 PBS 节点：按它所在目录的项目文件取
+/// （[`project_index::drawing_of`]），项目文件读不出来时图号用文件名；没有 `path` 时图号是空的。
+pub fn drawing_of(path: Option<&Path>) -> (String, Option<String>) {
+    let dir = path.and_then(Path::parent);
+    let file = path
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy());
+    match (dir, file.as_deref()) {
+        (Some(dir), Some(file)) => project_index::drawing_of(dir, file).unwrap_or_else(|_| {
+            let stem = Path::new(file).file_stem().unwrap_or_default();
+            (stem.to_string_lossy().into_owned(), None)
+        }),
+        _ => (String::new(), None),
+    }
+}
+
 /// 查 `doc` 这一张图，只跑单图规则。`path` 是这张图的文件（可以还不存在）：主数据取它所在的
-/// 目录，图号和 PBS 节点按那个目录的项目文件取（[`project_index::drawing_of`]），项目文件读不
-/// 出来时图号用文件名；没有 `path` 时图号是空的。
+/// 目录，图号和 PBS 节点见 [`drawing_of`]。
 pub fn check_drawing(
     doc: &Document,
     path: Option<&Path>,
@@ -89,13 +104,7 @@ pub fn check_drawing(
     let file = path
         .and_then(Path::file_name)
         .map(|name| name.to_string_lossy().into_owned());
-    let (drawing_id, pbs) = match (dir, file.as_deref()) {
-        (Some(dir), Some(file)) => project_index::drawing_of(dir, file).unwrap_or_else(|_| {
-            let stem = Path::new(file).file_stem().unwrap_or_default();
-            (stem.to_string_lossy().into_owned(), None)
-        }),
-        _ => (String::new(), None),
-    };
+    let (drawing_id, pbs) = drawing_of(path);
     let master = master_data::resolve(doc, dir);
     let meta = SummaryMeta {
         drawing_id: drawing_id.clone(),

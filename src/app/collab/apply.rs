@@ -1749,21 +1749,25 @@ impl OpenCADStudio {
     /// explicit: a new drawing command defaults to refused, which is the safe
     /// direction for a write gate.
     ///
-    /// Three verbs read or write by what follows them, and are let through
+    /// Four verbs read or write by what follows them, and are let through
     /// only in the forms that read: `PIDTAG` with one word jumps to a tag
     /// (two rename it), `PIDLEGEND` reports, lists and exports (`ON`
     /// draws the legend, `OFF` and `PURGE` erase it — and the bare verb
-    /// defaults to `ON`), and `PIDMASTERDATA` reports, bare or as `STATUS`,
-    /// and exports (`INIT`, `IMPORT` and `EMBED` write master data).
+    /// defaults to `ON`), `PIDMASTERDATA` reports, bare or as `STATUS`,
+    /// and exports (`INIT`, `IMPORT` and `EMBED` write master data), and
+    /// `PIDCHECK` checks, lists its rules and exports (`ENABLE` and
+    /// `DISABLE` rewrite the project rule pack, `WAIVE` and `UNWAIVE` the
+    /// drawing's waivers).
     ///
     /// This list is a courtesy, not the lock: a command that does write is
     /// better turned away before it prompts for anything than after. What
     /// keeps a read-only session from changing its drawing is
     /// [`Self::refuses_step`], at the one place every edit passes through;
-    /// a verb wrongly let through here still changes nothing. The one thing
-    /// written outside the drawing is the project file `PIDMASTERDATA`
-    /// writes beside it; no step carries that, so for it this gate is the
-    /// only one.
+    /// a verb wrongly let through here still changes nothing. Two things are
+    /// written outside the drawing: the project file `PIDMASTERDATA` writes
+    /// beside it, and the project rule pack `PIDCHECK ENABLE` and `DISABLE`
+    /// rewrite; no step carries either, so for them this gate is the only
+    /// one.
     ///
     /// The gate is on the session's drawing. Another drawing open beside it
     /// is not in the session, and its commands are its own; while the session
@@ -1783,6 +1787,7 @@ impl OpenCADStudio {
             "PIDTAG" => words.len() > 2,
             "PIDLEGEND" => !matches!(option.as_str(), "REPORT" | "LIST" | "EXPORT"),
             "PIDMASTERDATA" => !matches!(option.as_str(), "" | "STATUS" | "EXPORT"),
+            "PIDCHECK" => matches!(option.as_str(), "ENABLE" | "DISABLE" | "WAIVE" | "UNWAIVE"),
             _ => !READONLY_ALLOWED.contains(&verb.as_str()),
         }
     }
@@ -2003,11 +2008,11 @@ fn tried_text(changes: &[broadcast::Change], label: &str) -> String {
 /// Commands a read-only session may still run: looking around, inspecting, and
 /// the collaboration panel itself. Everything else is a write.
 ///
-/// `PIDLEGEND` and `PIDMASTERDATA` are here for their reading forms only
-/// (see `readonly_refuses_command`). Not here, though they once were: `MEASURE`
-/// (places points along an object), `FIND` (opens find-and-replace),
-/// `PIDGROUP` (every one of its forms regroups or retags) and `AUDIT`
-/// (applies its fixes when answered yes).
+/// `PIDLEGEND`, `PIDMASTERDATA` and `PIDCHECK` are here for their reading
+/// forms only (see `readonly_refuses_command`). Not here, though they once
+/// were: `MEASURE` (places points along an object), `FIND` (opens
+/// find-and-replace), `PIDGROUP` (every one of its forms regroups or retags)
+/// and `AUDIT` (applies its fixes when answered yes).
 pub(super) const READONLY_ALLOWED: &[&str] = &[
     "ZOOM",
     "ZO",
@@ -2878,6 +2883,10 @@ mod tests {
             "PIDMASTERDATA INIT DRAWING",
             "PIDMASTERDATA IMPORT md.json",
             "pidmasterdata embed",
+            "PIDCHECK ENABLE DR-014",
+            "pidcheck disable DR-014",
+            "PIDCHECK WAIVE DR-014 PIPE_LINE|L-1 放空管",
+            "PIDCHECK UNWAIVE DR-014 PIPE_LINE|L-1",
         ] {
             assert!(app.readonly_refuses_command(cmd), "{cmd} must be refused");
         }

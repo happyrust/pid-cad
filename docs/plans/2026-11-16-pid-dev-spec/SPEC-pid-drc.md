@@ -934,3 +934,66 @@ MCP：`pid_check`、`pid_check_rules` 进 `READ_OPS`，其余三个进 `EXECUTE_
   - 只读会话里五个命令都不被拒、照常出结果，不留撤销步。
   - 命令行上 `PIDCHECK PROJECT` 只查一次，没有先查当前图。
   - 命令已注册；六种写错的行都报以 `PIDCHECK` 开头的错，不带错误码。
+
+### 11.13 `DRC-13`：命令 `PIDCHECK`——启停规则与豁免（2026-11-21）
+
+**做了什么**：
+
+- `src/app/commands/piddrc.rs`：`PIDCHECK ENABLE <规则号>`、`DISABLE <规则号>`、`WAIVE <规则号> <对象键> <理由>`、`UNWAIVE <规则号> <对象键>`。
+  - 启停：`pidcheck_switch`，项目包怎么改在 `switched_pack`。
+  - 豁免、取消豁免：`pidcheck_waive`、`pidcheck_unwaive`，写图都走 `pidcheck_write_waivers`（先记撤销快照）。
+  - 就地改留着的结果：`Checked::follow`。留着的每份结果多记两样：查了哪些图，`stale_waivers` 里每条是哪张图上的。入口 `pidcheck_follow_waivers`，豁免、取消豁免后调，撤销、重做后也调。
+- `src/app/collab/apply.rs`：`readonly_refuses_command` 里 `PIDCHECK` 按第二个词判，四个写的子命令拒绝。
+- `src/app/history.rs`：撤销、重做收尾时调 `pidcheck_follow_waivers`。
+- `src/pid/drc/mod.rs`：从 `check_drawing` 拆出 `drawing_of`（一个图纸文件在结果里的图号），豁免认「当前图」用同一个。
+
+**规格没写到、这里定下的：**
+
+1. **启停怎么改项目包**：
+   - 只动 `rules` 里这一条的 `enabled`；没有这条就在末尾加 `{"id", "enabled"}`（内置规则的条目只许带 `id`、`enabled`、`params`，§3.2）。项目包自己加的规则也只改 `enabled`。
+   - 没有项目包就新建：`version` 1、`pack`「项目规则包」、`rule_set_version`「1.0.0」，`rules` 只有这一条。
+   - 先照读规则包的同一套校验（`validate_project_pack`），不过就不写、带码报；再写临时文件、改名盖过去（`write_atomic`）。
+   - 改写后键按字母排（`serde_json` 没开 `preserve_order`），缩进改成两格；内容只差那一处。
+   - 规则自己的 `enabled` 已经是要的就不写，说一句「本来就启用着」或「本来就停用着」。启用一条规则、而它所在的规则集停用着时，注明「规则集 X 停用着，检查时仍不跑」。
+   - 规则号转大写再找。先后是：写法不对报用法，不带码；图没保存过是 `INDEX_NO_PROJECT_DIR`；项目包有错带码报；规则号不在生效的规则里是 `RULE_NOT_FOUND`。
+   - 只改项目包，留着的结果不改，下一次检查起生效。
+2. **豁免的写法**：
+   - 规则号转大写，对象键原样；对象键里有空格就加双引号。理由取到行尾，去掉首尾空白和成对的双引号。
+   - 规则号、对象键没写全是写法错，不带码；只缺理由时由 `Waiver::new` 报 `WAIVER_REASON_REQUIRED`。
+   - 先后：项目包有错带码报；规则号不在生效的规则里是 `RULE_NOT_FOUND`；不在最近一次结果里是 `WAIVER_TARGET_NOT_FOUND`；最后查理由。哪一步不过都不改图、不留撤销步。
+3. **「当前图最近一次检查结果」**：
+   - 指标签页上那份和它项目目录那份里，查过这张图的较新一份。条目要落在当前图上（`object.drawing_id` 是当前图的图号），规则号和对象键对得上。
+   - 所以先查项目后，项目级规则在当前图上的结果（如 `DR-102`）也能豁免；别的图上的条目不能，要打开那张图再豁免。
+   - 图号照 `drawing_of`，和检查时一样。
+4. **`by` 和 `at`**：`by` 连着协同时是协同用户 ID；否则是操作系统账户名，依次取 `USERNAME`、`USER`、`LOGNAME`，都没有是空的。`at` 是现在的 Unix 秒，和 `checked_at` 一样算。
+5. **同一条再豁免**：图上已有同一（规则号, 对象键）的豁免，就在原位换成新的（理由、人、时间都换），重复的去掉；说「原来就豁免着，理由换成了这次写的」。
+6. **取消豁免**：去掉图上所有同一（规则号, 对象键）的豁免。不查规则号、也不要检查结果：对不上结果的老豁免、规则已经不在的豁免也要去得掉。图上没有是 `WAIVER_TARGET_NOT_FOUND`。
+7. **就地改**：
+   - 标签页那份和项目目录那份，只要查过当前图都改。
+   - 当前图上的结果按图上现在的豁免重挂（先记的先用，和检查器一样），三个严重度和已豁免的条数重算，`blocked` 是还有没豁免的错误；序号、`checked_at` 不变。
+   - `stale_waivers` 里当前图的只留图上还有的，别的图的不动。
+   - 说一句改后的条数，注明「没有重新检查」。
+8. **撤销、重做**：豁免是图里的记录，撤销、重做把它连同图一起换回来。撤销栈收尾时同样就地改留着的结果，结果跟着图走。
+9. **只读**：`readonly_refuses_command` 看 `PIDCHECK` 后面的词：`ENABLE`、`DISABLE`、`WAIVE`、`UNWAIVE` 拒绝；裸 `PIDCHECK`、`PROJECT`、`PBS`、`RULES`、`EXPORT` 照常。项目包写在图外面，撤销栈管不到，这一道闸是它唯一的闸。
+
+**留给以后的**：
+
+- 整个规则集的启停（`sets[].enabled`）没有命令，要手改项目包；`DRC-14` 的 `pid_check_rules_set` 整包替换也能做到。
+- 检查之前就去掉、后来又撤销回来的豁免，不会回到 `stale_waivers`：结果只记得检查时那些，再查一次就对了。
+- `DRC-14` 的写操作（`pid_check_rules_set`、`pid_check_waive`、`pid_check_unwaive`）不走命令行，只读要它们自己查。
+- 「文件」一栏以外改了 `src/app/history.rs`（上面第 8 条）和 `src/pid/drc/mod.rs`（拆出 `drawing_of`）。
+
+**测试**（`piddrc` 新加 7 条，注册测试多 6 种写错的行；`collab::apply` 的只读名单测试多 4 种写法）：
+
+- **先红后绿**：
+  - 先只写测试和两个错误码常量。都编得过，7 条新测试和只读名单测试败在「不认识 ENABLE / DISABLE / WAIVE」和「PIDCHECK ENABLE DR-014 must be refused」上；原有 10 条和注册测试照过。
+  - 写实后第一次跑 `piddrc`、`collab::apply`、`history` 三组 126 条全过。之后只按 rustfmt 调了新代码的换行，全量单元测试是在调完的树上跑的。
+- **各测**：
+  - 在 `DR-014` 会命中的图上：`PIDCHECK DISABLE DR-014` 新建项目包，`rules` 正好是 `[{"id":"DR-014","enabled":false}]`、校验得过，再查没有 `DR-014`；小写的 `pidcheck enable dr-014` 后又有了。`DR-999`、`XX-001` 报 `RULE_NOT_FOUND`，文件不变。
+  - 项目包里有规则集停用、带参数的内置条目和一条新规则时：停用新规则只改它的 `enabled`，停用 `DR-014` 在末尾加一条，别的原样；「本来就启用着」「本来就停用着」「规则集 工程扩展 停用着」三种都不写文件；项目包写坏报 `RULESET_SCHEMA_ERROR`、不动文件；没保存过的图报 `INDEX_NO_PROJECT_DIR`。
+  - 把当前图上每个错误（规则号, 对象键）逐个豁免（对象键加引号，理由前后带空格）：每次序号不变、错误和已豁免的条数、`blocked` 当即变；每次一个撤销步、图是已修改，理由去掉了首尾空白。存成 `PID-1101.dwg` 再打开豁免都在；撤销一步最后一条没了、留着的结果跟着回去（`blocked` 又是真），重做又回来。
+  - 还没查时、对象键不对、规则没在这次里跑（查当前图时的 `DR-102`）都是 `WAIVER_TARGET_NOT_FOUND`；`DR-999` 是 `RULE_NOT_FOUND`；不写理由或理由只有空格是 `WAIVER_REASON_REQUIRED`，201 字是 `WAIVER_REASON_TOO_LONG`；都不留撤销步、不加豁免。正好 200 字得过。
+  - 先 `PIDCHECK` 再 `PIDCHECK PROJECT`，豁免 PID-1101 上的 `DR-102`：只有 PID-1101 那条变成已豁免，标签页那份不变；再豁免 `DR-014`，两份都跟着变；只在 PID-1102 上的条目是 `WAIVER_TARGET_NOT_FOUND`。
+  - 图里先放两条对不上的豁免（其中一条规则已不存在），查过以后 `stale_waivers` 就是这两条；豁免再取消，记录和条数都回到原样；取消规则已不存在的那条后 `stale_waivers` 只剩一条，撤销后又是两条；取消图里没有的是 `WAIVER_TARGET_NOT_FOUND`。
+  - 只读会话里四种写的子命令都被 `readonly_refuses_command` 拒、跑了报错，不留撤销步、不加豁免、不写项目包；`PIDCHECK`、`PIDCHECK RULES` 不被拒、照常。
+  - 注册测试多的 6 种写错的行（少规则号、多一个规则号、少对象键、`UNWAIVE` 多写理由）都报以 `PIDCHECK` 开头的错，不带错误码。
