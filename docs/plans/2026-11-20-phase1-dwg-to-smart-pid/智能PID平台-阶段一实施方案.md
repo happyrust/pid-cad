@@ -396,16 +396,16 @@ flowchart LR
 - **验收**：删除符号后，指向它的关系被清除且拓扑表无悬挂项；移动后端口坐标更新。
 - **解决记录（2026-11-21）**：落地 `src/io/pid_convert/promote.rs::sync_author_after_edit`（调用 `TopologyTable::prune`、清除被删符号在 `SegmentEnd.peer` 中的悬挂引用、同步被移动符号的管段端点坐标并重算全图 `tag_status` 重复位号标记），详见 `readings.md` §24。
 
-#### L2-6 导入的 `.pid` 对象进模型（M）— **已完成（[#134](https://github.com/happyrust/pid-cad/issues/134) / [#142](https://github.com/happyrust/pid-cad/issues/142)）**
+#### L2-6 导入的 `.pid` 对象进模型（M）— **已完成（[#134](https://github.com/happyrust/pid-cad/issues/134) / [#142](https://github.com/happyrust/pid-cad/issues/142) / [#146](https://github.com/happyrust/pid-cad/issues/146)）**
 - **做法**：把 `.pid` 导入的对象按 M2 的方式升格（可批量、可选择性）。
 - **验收**：导入的图能点选、能改、能保存回 DWG；`_Data.xml` 缺省时仍能显示基本身份。
 - **资料**：RES-01 ⚠。
-- **解决记录（2026-11-21）**：① `#134` 落地 `src/io/pid_convert/promote.rs::promote_semantics_to_author` 初版选择性/整批升格（见 `readings.md` §24）；② `#142` 在真实 `.pid` 原图（`EXPORT_SET` 生产图 + `VENDOR_REF` 参考图）上打通按 `oid` 多笔画自动归并升格（消除同一符号多笔画裂变与假重号）、利用 `PID-SYMBOL-LABEL` `.sym` 主干名匹配 `LegendClassMap` 精确 `variant_id`（`fallback = 0`）、自动绑定可见位号文字 `_tag_handles`、支持点选任意成员笔画联动属性面板以及 `.pid` `Line`/`LwPolyline` 工艺管段升格进 `TopologyTable`，3 张真实 `.pid` 原图 `3,153` 个展开图元精准归并为 `630` 个业务符号，详见 `readings.md` §31。
+- **解决记录（2026-11-21）**：① `#134` 落地 `src/io/pid_convert/promote.rs::promote_semantics_to_author` 初版选择性/整批升格（见 `readings.md` §24）；② `#142` 在带 `_Data.xml` 的真实 `.pid` 原图上打通按 `oid` 多笔画自动归并升格、`PID-SYMBOL-LABEL` 精确变体映射（`fallback = 0`）、可见位号文字 `_tag_handles` 联动、成员笔画面板点选与 `LwPolyline` 管段进 `TopologyTable`（见 `readings.md` §31）；③ `#146` 进一步打通**无伴随 `_Data.xml` 的纯裸 `.pid` 文件**按放置边界（连续 `extent=` + 结尾 `role=symbol-label` `.sym` 主干名）自动归并、忽略类过滤、邻近位号/线号文字唯一配对与逆向拓扑重建，并在 `VENDOR_REF` 全部 `5 / 5` 张验收参考 `.pid`（`V01..V05`）+ `BACKUP_ORACLE` `3 / 3` 张纯裸 `.pid`（`B01..B03`）共 8 图（`14,817` 展开实体归并为 `929 / 929` 精确变体，`fallback = 0`）上全批闭环，详见 `readings.md` §35。
 
-#### L2-7 保存回 `.pid`（M）— **本地 `a/b` 级已完成（[#134](https://github.com/happyrust/pid-cad/issues/134) / [#139](https://github.com/happyrust/pid-cad/issues/139) / [#142](https://github.com/happyrust/pid-cad/issues/142)）**
+#### L2-7 保存回 `.pid`（M）— **本地 `a/b` 级已完成（[#134](https://github.com/happyrust/pid-cad/issues/134) / [#139](https://github.com/happyrust/pid-cad/issues/139) / [#142](https://github.com/happyrust/pid-cad/issues/142) / [#146](https://github.com/happyrust/pid-cad/issues/146)）**
 - **依赖**：L5-7。**做法**：复用 L5 的写出器，把当前模型写回 `.pid`。
 - **验收**：写出后 `pid-parse` 重读相等；SPPID 能打开。
-- **解决记录（2026-11-21）**：落地 `src/io/pid_convert/promote.rs::save_author_document_to_dual`、应用内 `PIDSAVEPID` 与 `PIDCONVERT` 已校核模型优先导出（`#134`、`#136`、`#139`、`#142`）；已在三类真实图纸上全链路闭环验证：① SPPID 图块生产 DXF（`166/166`、`165/165` 对齐）；② `SOURCE_DWG` 全部 `12 / 12` 张原生 AutoCAD 存量图（`1,619 / 1,619` 符号零丢失、`3,044 / 3,044` `GraphicOID` 对齐）；③ 真实 `.pid` 原图（`P01..P03`，含面板改位号 + `PIDINSERT` 新放容器，`633 / 633` 精确变体、`fallback = 0`、`897 / 897` `GraphicOID` 100% 对齐），全部通过 `#111` `StrictVendor` 零违规与 `a/b` 级重读及 PDF 出图验证（`c1` 待 `RES-06`），详见 `readings.md` §24–§25、§28、§31。
+- **解决记录（2026-11-21）**：落地 `src/io/pid_convert/promote.rs::save_author_document_to_dual`、应用内 `PIDSAVEPID` 与 `PIDCONVERT` 已校核模型优先导出（`#134`、`#136`、`#139`、`#142`、`#146`）；已在四类真实图纸上全链路闭环验证：① SPPID 图块生产 DXF（`166/166`、`165/165` 对齐）；② `SOURCE_DWG` 全部 `12 / 12` 张原生 AutoCAD 存量图（`1,619 / 1,619` 符号零丢失、`3,044 / 3,044` `GraphicOID` 对齐）；③ 带 XML 真实 `.pid` 原图（含 `EXPORT_SET` 与全部 `5 / 5` 张 `VENDOR_REF` 验收参考图 `V01..V05`）；④ 无伴随 `_Data.xml` 的全厂备份包纯裸 `.pid`（`B01..B03`，`233 / 233` 精确变体逆向重建双产物 `732 / 732` `GraphicOID` 对齐），全部通过 `#111` `StrictVendor` 零违规与 `a/b` 级重读及 PDF 出图验证（`c1` 待 `RES-06`），详见 `readings.md` §24–§25、§28、§31、§35。
 
 ### 7.4 L3 DWG 识别
 

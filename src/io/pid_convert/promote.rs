@@ -1171,19 +1171,96 @@ pub fn promote_semantics_to_author(
         });
     }
 
-    // Group entities that carry an `oid`; keep `oid`-less entities as singleton groups
+    // Group entities:
+    // 1. Entities carrying an `oid` group together under `"oid:<oid>"`;
+    // 2. On XML-free bare `.pid` imports (no `oid`), consecutive geometry strokes carrying
+    //    `extent=` followed by a trailing `role=symbol-label` sharing `(extent, sheet_layer)`
+    //    merge into a single `"bare_sym:<label_handle>"` placement group (`#146`);
+    // 3. Remaining `oid`-less entities stay as singleton `"single:<handle>"` groups.
     let mut group_order: Vec<String> = Vec::new();
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (idx, item) in raw_ents.iter().enumerate() {
-        let key = match item.kv.get("oid").map(String::as_str) {
-            Some(oid) if !oid.trim().is_empty() => format!("oid:{}", oid.trim()),
-            _ => format!("single:{:X}", item.handle.value()),
-        };
-        if !groups.contains_key(&key) {
-            group_order.push(key.clone());
+    let mut pending_bare_strokes: Vec<usize> = Vec::new();
+
+    let flush_pending = |pending: &mut Vec<usize>,
+                         order: &mut Vec<String>,
+                         map: &mut BTreeMap<String, Vec<usize>>,
+                         ents: &[RawSemEnt]| {
+        for idx in pending.drain(..) {
+            let k = format!("single:{:X}", ents[idx].handle.value());
+            if !map.contains_key(&k) {
+                order.push(k.clone());
+            }
+            map.entry(k).or_default().push(idx);
         }
-        groups.entry(key).or_default().push(idx);
+    };
+
+    for (idx, item) in raw_ents.iter().enumerate() {
+        if let Some(oid) = item
+            .kv
+            .get("oid")
+            .map(String::as_str)
+            .filter(|s| !s.trim().is_empty())
+        {
+            flush_pending(
+                &mut pending_bare_strokes,
+                &mut group_order,
+                &mut groups,
+                &raw_ents,
+            );
+            let key = format!("oid:{}", oid.trim());
+            if !groups.contains_key(&key) {
+                group_order.push(key.clone());
+            }
+            groups.entry(key).or_default().push(idx);
+            continue;
+        }
+
+        if item.is_sym_label {
+            let ext = item.kv.get("extent").map(String::as_str).unwrap_or("");
+            let sl = item.kv.get("sheet_layer").map(String::as_str).unwrap_or("");
+            let mut split_at = pending_bare_strokes.len();
+            while split_at > 0 {
+                let cand = &raw_ents[pending_bare_strokes[split_at - 1]];
+                let c_ext = cand.kv.get("extent").map(String::as_str).unwrap_or("");
+                let c_sl = cand.kv.get("sheet_layer").map(String::as_str).unwrap_or("");
+                if !ext.is_empty() && c_ext == ext && c_sl == sl {
+                    split_at -= 1;
+                } else {
+                    break;
+                }
+            }
+            let matched: Vec<usize> = pending_bare_strokes.drain(split_at..).collect();
+            flush_pending(
+                &mut pending_bare_strokes,
+                &mut group_order,
+                &mut groups,
+                &raw_ents,
+            );
+            let key = format!("bare_sym:{:X}", item.handle.value());
+            group_order.push(key.clone());
+            let mut g = matched;
+            g.push(idx);
+            groups.insert(key, g);
+        } else if !item.is_text && item.kv.contains_key("extent") {
+            pending_bare_strokes.push(idx);
+        } else {
+            flush_pending(
+                &mut pending_bare_strokes,
+                &mut group_order,
+                &mut groups,
+                &raw_ents,
+            );
+            let key = format!("single:{:X}", item.handle.value());
+            group_order.push(key.clone());
+            groups.insert(key, vec![idx]);
+        }
     }
+    flush_pending(
+        &mut pending_bare_strokes,
+        &mut group_order,
+        &mut groups,
+        &raw_ents,
+    );
 
     type Seg2d = ((f64, f64), (f64, f64));
     struct SemPipeItem {
@@ -1191,10 +1268,66 @@ pub fn promote_semantics_to_author(
         segs: Vec<Seg2d>,
         is_poly: bool,
     }
+    struct BareFreeText {
+        handle: Handle,
+        text: String,
+        at: (f64, f64),
+        used: bool,
+    }
     fn segs_total_len(segs: &[Seg2d]) -> f64 {
         segs.iter()
             .map(|&(p, q)| (p.0 - q.0).hypot(p.1 - q.1))
             .sum()
+    }
+    fn looks_like_item_tag(s: &str) -> bool {
+        let t = s.trim();
+        if t.len() < 3 || t.len() > 24 || t.contains(char::is_whitespace) {
+            return false;
+        }
+        let has_alpha = t.chars().any(|c| c.is_ascii_alphabetic());
+        let has_digit = t.chars().any(|c| c.is_ascii_digit());
+        has_alpha
+            && has_digit
+            && parse_sppid_line_number(t).is_none_or(|p| p.seq_no.is_empty() && !t.contains('-'))
+    }
+
+    let upm_doc = guess_units_per_mm(doc).max(1e-6);
+    let mut bare_line_labels: Vec<(String, (f64, f64))> = Vec::new();
+    let mut bare_item_tags: Vec<BareFreeText> = Vec::new();
+
+    for ent in &raw_ents {
+        if ent.kv.contains_key("oid")
+            || ent.kv.contains_key("class")
+            || !ent.is_text
+            || ent.is_sym_label
+        {
+            continue;
+        }
+        let sl_up = ent
+            .kv
+            .get("sheet_layer")
+            .map(|s| s.to_ascii_uppercase())
+            .unwrap_or_default();
+        if matches!(sl_up.as_str(), "DRAWINGBORDER" | "HIDDENOBJECTS" | "NOTES") {
+            continue;
+        }
+        let Some(ref raw_txt) = ent.text_val else {
+            continue;
+        };
+        let trimmed = raw_txt.trim();
+        let Some(at) = ent.anchor else {
+            continue;
+        };
+        if trimmed.contains('-') && parse_sppid_line_number(trimmed).is_some() {
+            bare_line_labels.push((trimmed.to_string(), at));
+        } else if looks_like_item_tag(trimmed) {
+            bare_item_tags.push(BareFreeText {
+                handle: ent.handle,
+                text: trimmed.to_string(),
+                at,
+                used: false,
+            });
+        }
     }
 
     let mut report = PromoteReport::default();
@@ -1244,6 +1377,7 @@ pub fn promote_semantics_to_author(
         let rep_kv = &raw_ents[indices[0]].kv;
         let cls = rep_kv.get("class").map(String::as_str).unwrap_or("");
         let role0 = rep_kv.get("role").map(String::as_str).unwrap_or("");
+        let sheet_layer0 = rep_kv.get("sheet_layer").map(String::as_str).unwrap_or("");
 
         if matches!(
             cls,
@@ -1269,8 +1403,19 @@ pub fn promote_semantics_to_author(
             continue;
         }
 
-        // Process pipe group (`PIDPipingConnector` / `PIDPipeline`)
-        if matches!(cls, "PIDPipingConnector" | "PIDPipeline") {
+        // Process pipe group (`PIDPipingConnector` / `PIDPipeline`, or XML-free bare `.pid` geometry without `extent`)
+        let is_bare_pipe = cls.is_empty()
+            && !rep_kv.contains_key("oid")
+            && !rep_kv.contains_key("extent")
+            && role0 == "geometry"
+            && indices.len() == 1
+            && !raw_ents[indices[0]].segs.is_empty()
+            && !matches!(
+                sheet_layer0.to_ascii_uppercase().as_str(),
+                "DRAWINGBORDER" | "HIDDENOBJECTS" | "NOTES" | "CONSISTENCYCHECKS"
+            );
+
+        if matches!(cls, "PIDPipingConnector" | "PIDPipeline") || is_bare_pipe {
             let best_pipe_idx = indices
                 .iter()
                 .copied()
@@ -1284,10 +1429,25 @@ pub fn promote_semantics_to_author(
                     })
                 });
             if let Some(pi) = best_pipe_idx {
+                if is_bare_pipe && segs_total_len(&raw_ents[pi].segs) < 2.5 * upm_doc {
+                    continue;
+                }
                 let line_lbl = rep_kv
                     .get("label")
                     .filter(|s| !s.trim().is_empty())
                     .cloned()
+                    .or_else(|| {
+                        let mut best: Option<(f64, &str)> = None;
+                        for (lbl, lat) in &bare_line_labels {
+                            for &(sa, sb) in &raw_ents[pi].segs {
+                                let d = point_to_seg_dist(*lat, sa, sb);
+                                if d <= 35.0 * upm_doc && best.is_none_or(|(bd, _)| d < bd) {
+                                    best = Some((d, lbl.as_str()));
+                                }
+                            }
+                        }
+                        best.map(|(_, s)| s.to_string())
+                    })
                     .unwrap_or_else(|| "50-PG-0001-B9-".to_string());
                 pipe_candidates.push((
                     line_lbl,
@@ -1337,6 +1497,27 @@ pub fn promote_semantics_to_author(
                 .filter(|s| !s.is_empty())
         });
 
+        // On XML-free bare `.pid` sheets (`cls` empty), honor `LegendClassMap` ignore rules (`NORTH ARROW`, `DrawingBorder`, etc.)
+        if cls.is_empty() {
+            if matches!(
+                sheet_layer0.to_ascii_uppercase().as_str(),
+                "DRAWINGBORDER" | "HIDDENOBJECTS" | "NOTES" | "CONSISTENCYCHECKS"
+            ) {
+                continue;
+            }
+            if let Some(ref st) = sym_label_stem {
+                if matches!(
+                    default_legend_class_map().resolve_block(st, sheet_layer0),
+                    super::class_map::BlockResolution::Ignored { .. }
+                ) {
+                    continue;
+                }
+            } else if !rep_kv.contains_key("instance") {
+                // Unaffiliated non-symbol geometry without `symbol-label` or `instance`
+                continue;
+            }
+        }
+
         let inst_raw = indices
             .iter()
             .find_map(|&i| raw_ents[i].kv.get("instance").cloned());
@@ -1365,7 +1546,7 @@ pub fn promote_semantics_to_author(
             .unwrap_or("EQUIPMENT")
             .to_string();
 
-        let label_opt = indices
+        let mut label_opt = indices
             .iter()
             .find_map(|&i| raw_ents[i].kv.get("label").cloned())
             .filter(|s| !s.trim().is_empty());
@@ -1397,6 +1578,30 @@ pub fn promote_semantics_to_author(
             })
             .map(|i| raw_ents[i].handle)
             .collect();
+
+        if label_opt.is_none()
+            && !matches!(sppid_cls.as_str(), "PIDNote" | "PIDNozzle")
+            && !bare_item_tags.is_empty()
+        {
+            let max_pair_d = ((bbox.2 - bbox.0).hypot(bbox.3 - bbox.1) * 0.65 + 14.0 * upm_doc)
+                .min(35.0 * upm_doc);
+            let best_ti = bare_item_tags
+                .iter()
+                .enumerate()
+                .filter(|(_, bt)| !bt.used)
+                .filter_map(|(ti, bt)| {
+                    let d = (bt.at.0 - center_at.0).hypot(bt.at.1 - center_at.1);
+                    (d <= max_pair_d).then_some((d, ti))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, ti)| ti);
+            if let Some(ti) = best_ti {
+                bare_item_tags[ti].used = true;
+                label_opt = Some(bare_item_tags[ti].text.clone());
+                tag_handles.push(bare_item_tags[ti].handle);
+            }
+        }
+
         if tag_handles.is_empty() {
             if let Some(ref lbl) = label_opt {
                 if let Some(extra) =
@@ -3041,6 +3246,195 @@ mod tests {
         let xml_txt = String::from_utf8_lossy(&dual.publish.data_xml);
         assert!(xml_txt.contains("BV-5001-EDITED"));
         assert!(xml_txt.contains("PG-5002"));
+        assert!(dual
+            .report
+            .pid_verification
+            .as_ref()
+            .is_some_and(super::super::export::DualVerifyReport::is_cross_file_and_a_valid));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn l2_6_xml_free_bare_pid_merges_placement_runs_pairs_nearby_tags_and_rebuilds_dual() {
+        use document::entities::{LwPolyline, LwVertex};
+
+        let mut doc = Document::new();
+
+        // 1. Bare `.pid` valve placement (no `oid=`, no `class=`, no `label=`): 4 strokes + trailing `PID-SYMBOL-LABEL`
+        let valve_stroke_sem = vec![
+            XDataValue::String("sheet_layer=Default".to_string()),
+            XDataValue::String("role=symbol".to_string()),
+            XDataValue::String("extent=6.00x4.00".to_string()),
+        ];
+        for (a, b) in [
+            ((77.0, 98.0), (77.0, 102.0)),
+            ((77.0, 102.0), (83.0, 98.0)),
+            ((83.0, 98.0), (83.0, 102.0)),
+            ((83.0, 102.0), (77.0, 98.0)),
+        ] {
+            let mut ln =
+                Line::from_points(Vector3::new(a.0, a.1, 0.0), Vector3::new(b.0, b.1, 0.0));
+            ln.common.layer = "Default".to_string();
+            let h = doc.add_entity(EntityType::Line(ln)).unwrap();
+            set_entity_xdata(
+                &mut doc,
+                h,
+                PID_SEMANTICS_XDATA_APP,
+                Some(valve_stroke_sem.clone()),
+            );
+        }
+        let mut valve_slbl =
+            Text::with_value("Ball Valve Type 2", Vector3::new(80.0, 96.0, 0.0)).with_height(1.8);
+        valve_slbl.common.layer = "PID-SYMBOL-LABEL".to_string();
+        let valve_slbl_h = doc.add_entity(EntityType::Text(valve_slbl)).unwrap();
+        set_entity_xdata(
+            &mut doc,
+            valve_slbl_h,
+            PID_SEMANTICS_XDATA_APP,
+            Some(vec![
+                XDataValue::String("sheet_layer=Default".to_string()),
+                XDataValue::String("role=symbol-label".to_string()),
+                XDataValue::String("extent=6.00x4.00".to_string()),
+            ]),
+        );
+
+        // 2. Ignored non-business placement (`North Arrow` -> ignored by `LegendClassMap`)
+        for (a, b) in [
+            ((10.0, 250.0), (10.0, 260.0)),
+            ((8.0, 255.0), (12.0, 255.0)),
+        ] {
+            let mut ln =
+                Line::from_points(Vector3::new(a.0, a.1, 0.0), Vector3::new(b.0, b.1, 0.0));
+            ln.common.layer = "Default".to_string();
+            let h = doc.add_entity(EntityType::Line(ln)).unwrap();
+            set_entity_xdata(
+                &mut doc,
+                h,
+                PID_SEMANTICS_XDATA_APP,
+                Some(vec![
+                    XDataValue::String("sheet_layer=Default".to_string()),
+                    XDataValue::String("role=symbol".to_string()),
+                    XDataValue::String("extent=4.00x10.00".to_string()),
+                ]),
+            );
+        }
+        let mut ign_slbl =
+            Text::with_value("NORTH ARROW", Vector3::new(10.0, 248.0, 0.0)).with_height(1.8);
+        ign_slbl.common.layer = "PID-SYMBOL-LABEL".to_string();
+        let ign_slbl_h = doc.add_entity(EntityType::Text(ign_slbl)).unwrap();
+        set_entity_xdata(
+            &mut doc,
+            ign_slbl_h,
+            PID_SEMANTICS_XDATA_APP,
+            Some(vec![
+                XDataValue::String("sheet_layer=Default".to_string()),
+                XDataValue::String("role=symbol-label".to_string()),
+                XDataValue::String("extent=4.00x10.00".to_string()),
+            ]),
+        );
+
+        // 3. Bare `.pid` vessel placement (`Vertical Drum`)
+        let mut drum_pl = LwPolyline::new();
+        drum_pl.is_closed = true;
+        drum_pl.common.layer = "Equipment".to_string();
+        for (x, y) in [(134.0, 88.0), (146.0, 88.0), (146.0, 112.0), (134.0, 112.0)] {
+            drum_pl.vertices.push(LwVertex::from_coords(x, y));
+        }
+        let drum_h = doc.add_entity(EntityType::LwPolyline(drum_pl)).unwrap();
+        set_entity_xdata(
+            &mut doc,
+            drum_h,
+            PID_SEMANTICS_XDATA_APP,
+            Some(vec![
+                XDataValue::String("sheet_layer=Equipment".to_string()),
+                XDataValue::String("role=symbol".to_string()),
+                XDataValue::String("extent=12.00x24.00".to_string()),
+            ]),
+        );
+        let mut drum_slbl =
+            Text::with_value("Vertical Drum", Vector3::new(140.0, 85.0, 0.0)).with_height(1.8);
+        drum_slbl.common.layer = "PID-SYMBOL-LABEL".to_string();
+        let drum_slbl_h = doc.add_entity(EntityType::Text(drum_slbl)).unwrap();
+        set_entity_xdata(
+            &mut doc,
+            drum_slbl_h,
+            PID_SEMANTICS_XDATA_APP,
+            Some(vec![
+                XDataValue::String("sheet_layer=Equipment".to_string()),
+                XDataValue::String("role=symbol-label".to_string()),
+                XDataValue::String("extent=12.00x24.00".to_string()),
+            ]),
+        );
+
+        // 4. Bare `.pid` process pipe `LwPolyline` (no `extent=`, no `oid=`, no `class=`)
+        let mut pipe_pl = LwPolyline::new();
+        pipe_pl.common.layer = "Process".to_string();
+        for (x, y) in [(40.0, 100.0), (77.0, 100.0), (134.0, 100.0)] {
+            pipe_pl.vertices.push(LwVertex::from_coords(x, y));
+        }
+        let pipe_h = doc.add_entity(EntityType::LwPolyline(pipe_pl)).unwrap();
+        set_entity_xdata(
+            &mut doc,
+            pipe_h,
+            PID_SEMANTICS_XDATA_APP,
+            Some(vec![
+                XDataValue::String("sheet_layer=Process".to_string()),
+                XDataValue::String("role=geometry".to_string()),
+            ]),
+        );
+
+        // 5. Bare visible canvas `Text` labels (no `oid=`, no `label=`)
+        for (txt, x, y) in [
+            ("BV-7001", 78.0, 104.0),
+            ("V-7002", 137.0, 115.0),
+            ("80-PG-7001-B9-", 102.0, 103.0),
+        ] {
+            let mut t = Text::with_value(txt, Vector3::new(x, y, 0.0)).with_height(2.5);
+            t.common.layer = "Labels".to_string();
+            let th = doc.add_entity(EntityType::Text(t)).unwrap();
+            set_entity_xdata(
+                &mut doc,
+                th,
+                PID_SEMANTICS_XDATA_APP,
+                Some(vec![
+                    XDataValue::String("sheet_layer=Labels".to_string()),
+                    XDataValue::String("role=text".to_string()),
+                ]),
+            );
+        }
+
+        let rep = promote_semantics_to_author(&mut doc, None);
+        let rev = summarize_author_review(&doc);
+        assert_eq!(
+            rev.total_authored_symbols, 2,
+            "bare .pid must merge valve strokes, ignore North Arrow, and keep vessel -> 2 symbols, got {rev:?} ({rep:?})"
+        );
+        assert!(
+            rep.pipe_segments_promoted >= 1,
+            "bare .pid pipe geometry must pair line label and promote into TopologyTable"
+        );
+
+        let opts = ConvertOptions {
+            plant: "P01".to_string(),
+            seed_pid_bytes: Some(synthetic_blank_seed_pid()),
+            ..Default::default()
+        };
+        let dual =
+            save_author_document_to_dual(&doc, "BARE-PID-146", &opts).expect("save bare 146");
+        assert_eq!(dual.report.variant_resolution.class_default_fallback, 0);
+        assert_eq!(dual.report.variant_resolution.exact_variant_id, 2);
+        assert!(dual.report.piping_synthesis.pipelines >= 1);
+
+        let xml_txt = String::from_utf8_lossy(&dual.publish.data_xml);
+        assert!(
+            xml_txt.contains("BV-7001"),
+            "expected paired valve tag BV-7001 in XML"
+        );
+        assert!(
+            xml_txt.contains("V-7002"),
+            "expected paired vessel tag V-7002 in XML"
+        );
+        assert!(xml_txt.contains("80 mm-PG-7001-B9"));
         assert!(dual
             .report
             .pid_verification

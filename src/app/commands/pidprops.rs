@@ -3528,4 +3528,186 @@ mod tests {
         )
         .unwrap();
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "runs all VENDOR_REF reference .pid files plus XML-free bare BACKUP_ORACLE .pid files inside OpenCADStudio via PIDPROMOTE -> PIDREVIEW DEDUP -> PIDSAVEPID"]
+    fn real_vendor_ref_all_and_bare_backup_pids_in_app_roundtrip() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(vendor_raw) = std::env::var("OCS_PID_REAL146_VENDOR_PIDS") else {
+            println!("OCS_PID_REAL146_VENDOR_PIDS unset, skipping.");
+            return;
+        };
+        let Ok(bare_raw) = std::env::var("OCS_PID_REAL146_BARE_PIDS") else {
+            println!("OCS_PID_REAL146_BARE_PIDS unset, skipping.");
+            return;
+        };
+        let Ok(seed_zip) = std::env::var("OCS_PID_SEED_ZIP") else {
+            println!("OCS_PID_SEED_ZIP unset, skipping.");
+            return;
+        };
+        let sym_dir = std::env::var("OCS_PID_SYM_DIR").unwrap_or_default();
+        let out_dir = std::env::var("OCS_PID_REAL146_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real146"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let vendor_paths: Vec<std::path::PathBuf> = std::env::split_paths(&vendor_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        let bare_paths: Vec<std::path::PathBuf> = std::env::split_paths(&bare_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        assert!(!vendor_paths.is_empty());
+        assert!(!bare_paths.is_empty());
+
+        let mut all_cases: Vec<(String, String, std::path::PathBuf)> = Vec::new();
+        for (i, p) in vendor_paths.into_iter().enumerate() {
+            all_cases.push((
+                format!("V{:02}", i + 1),
+                "vendor_ref_with_xml".to_string(),
+                p,
+            ));
+        }
+        for (i, p) in bare_paths.into_iter().enumerate() {
+            // Confirm companion _Data.xml does NOT exist next to bare backup `.pid`
+            let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            assert!(
+                !p.with_file_name(format!("{stem}_Data.xml")).exists(),
+                "expected XML-free bare .pid"
+            );
+            all_cases.push((format!("B{:02}", i + 1), "bare_pid_no_xml".to_string(), p));
+        }
+
+        let mut rows = Vec::new();
+        let mut tot_syms = 0usize;
+        let mut tot_exact = 0usize;
+        let mut tot_fb = 0usize;
+        let mut tot_items = 0usize;
+        let mut tot_rels = 0usize;
+        let mut tot_reps = 0usize;
+        let mut tot_matched = 0usize;
+
+        for (cid, kind, p) in &all_cases {
+            let raw_b = std::fs::read(p).expect("read .pid");
+            let sha_pfx = format!("{:x}", Sha256::digest(&raw_b))[..12].to_string();
+
+            let mut app = app();
+            let loaded = crate::io::load_file(p).expect("load .pid in app");
+            let raw_ents = loaded.model_space_entities().count();
+            app.tabs[app.active_tab].scene.document = loaded;
+
+            let _ = app.run_command_line("PIDPROMOTE");
+            let rev0 = crate::io::pid_convert::summarize_author_review(
+                &app.tabs[app.active_tab].scene.document,
+            );
+            assert!(
+                rev0.total_authored_symbols > 0 && rev0.total_authored_symbols < raw_ents,
+                "{cid} ({kind}): expected merged symbols in 1..{raw_ents}, got {}",
+                rev0.total_authored_symbols
+            );
+
+            if rev0.duplicated_tags > 0 {
+                let _ = app.run_command_line("PIDREVIEW DEDUP");
+            }
+            let rev1 = crate::io::pid_convert::summarize_author_review(
+                &app.tabs[app.active_tab].scene.document,
+            );
+            assert_eq!(rev1.duplicated_tags, 0);
+
+            let sdir = out_dir.join(cid);
+            std::fs::create_dir_all(&sdir).unwrap();
+            let out_pid = sdir.join(format!("{cid}.pid"));
+            let save_cmd = if sym_dir.trim().is_empty() {
+                format!("PIDSAVEPID \"{}\" SEED \"{}\"", out_pid.display(), seed_zip)
+            } else {
+                format!(
+                    "PIDSAVEPID \"{}\" SEED \"{}\" SYMDIR \"{}\"",
+                    out_pid.display(),
+                    seed_zip,
+                    sym_dir
+                )
+            };
+            let _ = app.run_command_line(&save_cmd);
+            assert!(out_pid.is_file(), "{cid}: saved .pid must exist");
+
+            let data_raw = std::fs::read(sdir.join(format!("{cid}_Data.xml"))).unwrap();
+            let meta_raw = std::fs::read(sdir.join(format!("{cid}_Meta.xml"))).unwrap();
+            let pid_raw = std::fs::read(&out_pid).unwrap();
+            crate::io::pid_convert::verify_published_xml_pair(cid, "P01", &data_raw, &meta_raw)
+                .expect("StrictVendor clean");
+
+            let cov: Value = serde_json::from_str(
+                &std::fs::read_to_string(sdir.join(format!("{cid}_Coverage.json"))).unwrap(),
+            )
+            .unwrap();
+            let doc_uid = cov["doc_uid"].as_str().unwrap().to_string();
+            let exact_v = cov["variant_resolution"]["exact_variant_id"]
+                .as_u64()
+                .unwrap_or(0) as usize
+                + cov["variant_resolution"]["symbol_path_match"]
+                    .as_u64()
+                    .unwrap_or(0) as usize;
+            let fb_v = cov["variant_resolution"]["class_default_fallback"]
+                .as_u64()
+                .unwrap_or(0) as usize;
+            assert_eq!(fb_v, 0, "{cid}: fallback must be 0");
+
+            let ver = crate::io::pid_convert::verify_dual_bundle(
+                &doc_uid,
+                &data_raw,
+                &pid_raw,
+                Some(&sdir),
+                cid,
+            )
+            .expect("verify_dual_bundle");
+            assert!(ver.is_cross_file_and_a_valid(), "{cid}: {ver:?}");
+            assert!(ver.is_b_plot_valid(), "{cid}: {ver:?}");
+
+            let iw = cov["total_items_written"].as_u64().unwrap_or(0) as usize;
+            let rw = cov["total_relations_written"].as_u64().unwrap_or(0) as usize;
+            tot_syms += rev1.total_authored_symbols;
+            tot_exact += exact_v;
+            tot_fb += fb_v;
+            tot_items += iw;
+            tot_rels += rw;
+            tot_reps += ver.xml_rep_count;
+            tot_matched += ver.matched_graphic_oids;
+
+            rows.push(json!({
+                "id": cid,
+                "kind": kind,
+                "src_pid_sha256_prefix": sha_pfx,
+                "raw_model_entities": raw_ents,
+                "promoted_symbols": rev1.total_authored_symbols,
+                "exact_variants": exact_v,
+                "fallback": fb_v,
+                "items_written": iw,
+                "relations_written": rw,
+                "xml_reps": ver.xml_rep_count,
+                "matched_oids": ver.matched_graphic_oids,
+                "a_valid": ver.a_level_index_consistent,
+                "pdf_prims": ver.b_level_pdf_primitives,
+            }));
+        }
+
+        let summary = json!({
+            "sheets_tested": rows.len(),
+            "total_promoted_symbols": tot_syms,
+            "total_exact_variants": tot_exact,
+            "total_fallbacks": tot_fb,
+            "total_items_written": tot_items,
+            "total_relations_written": tot_rels,
+            "total_xml_reps": tot_reps,
+            "total_matched_oids": tot_matched,
+            "sheets": rows,
+        });
+        std::fs::write(
+            out_dir.join("real146_summary.json"),
+            format!("{}\n", serde_json::to_string_pretty(&summary).unwrap()),
+        )
+        .unwrap();
+    }
 }

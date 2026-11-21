@@ -1400,9 +1400,51 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `200 passed` | **`200 passed`** | **全绿** |
 
+---
 
+## 35. L2-6 / L2-7 / L6-2（#146）：无伴随 XML 纯裸 `.pid` 放置边界归并升格与 `VENDOR_REF` + `BACKUP_ORACLE` 8 图应用内全批核验闭环（2026-11-21）
 
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `d3de3b0cd`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 修改文件 | `src/io/pid_convert/promote.rs`、`src/app/commands/pidprops.rs` |
+| 外部证据子项 | `2026-11-21-issue146/`（`red.txt`、`green_promote.txt`、`green_pidprops.txt`、`real_vendor_and_bare_pids.txt`、`real_out/real146_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
 
+### 35.1 先红后绿与设计摘要
 
+- **问题根因**：`#142` 已打通带伴随 `<stem>_Data.xml` 的真实 `.pid` 原图按 `oid` 归并升格，但《智能PID平台-阶段一实施方案.md》`L2-6` 明确要求「`_Data.xml` 缺省时仍能显示基本身份并升格编辑存回」（典型场景为全厂备份包 `BACKUP_ORACLE` 解包出的纯裸 `.pid` 文件）。在无伴随 `_Data.xml` 时，`load_pid` 产出的 `PID_SEMANTICS` 全部 `oid == None`，原回退分支逐笔画按 `"ent:<handle>"` 裂变（例如 1 台 4 笔画阀门裂变为 4 个重号符号）、未按 `LegendClassMap` 过滤忽略类符号、未就近配对散落位号文字，也未将无 `oid` 的管线实体配对进入 `TopologyTable`。
+- **先红阶段**（`red.txt`，`RED_RC=101`）：在 `src/io/pid_convert/promote.rs` 新增 `l2_6_xml_free_bare_pid_merges_placement_runs_pairs_nearby_tags_and_rebuilds_dual`（构造无 `oid` 纯裸 `.pid` 展开实体：容器 5 笔画 + 结尾 `role=symbol-label` + 邻近位号文字 `V-3301`、阀门 3 笔画 + 邻近位号 `XV-3302`、忽略类标题栏符号 `TITLEBLOCK` 及带线号 `100-PW-3301-CS150` 的管线段），改前因符号裂变为 `8` 个（预期 `2` 个）断言失败变红。
+- **转绿阶段**（`green_promote.txt` `7 passed; 0 failed`、`green_pidprops.txt` `14 passed; 0 failed`）：
+  1. **纯裸 `.pid` 放置边界归并**：在 `promote_semantics_to_author` 中识别无 `oid` 纯裸 `.pid` 实体——`load_pid` 将每次 `.sym` 放置展开为连续带相同 `extent=(x1,y1,x2,y2)` 的几何笔画并在末尾紧跟 `role=symbol-label` 隐藏 `Text`（携带 `.sym` 主干名），按该放置边界将整组笔画归并为单一 `AuthorSymbol`（`group_key = "bare_sym:..."`，写入完整 `_member_handles`）；
+  2. **忽略类过滤与精确变体映射**：利用结尾 `symbol-label` `.sym` 主干名查询 `LegendClassMap`，自动跳过 `is_ignored` 非业务符号并获得精确 `variant_id`（`class_default_fallback = 0`）；
+  3. **可见位号/线号文字配对与逆向拓扑重建**：对无 `extent`、无 `role` 的散落 `Text`/`MText`（`BareFreeText`），在无预设位号时按包围盒距离贪心一对一绑定可见设备/仪表位号并写入 `_tag_handles`，同时将无 `extent` 的 `Line`/`LwPolyline` 管线段配对邻近线号文字升格进入 `TopologyTable`，支持应用内 `PIDSAVEPID` 逆向重建完整 `_Data.xml` + `_Meta.xml` + `.pid` 双产物。
 
+### 35.2 全批 5 张厂商验收参考 `.pid`（`V01..V05`）+ 3 张无 XML 纯裸备份 `.pid`（`B01..B03`）应用内实测
 
+| 代号 | 样本类别 | 源 `.pid` SHA-256 前缀 | 展开模型实体数 | 归并升格符号数 | 精确变体数 / 兜底 | 写出对象数 | 写出关系数 | `GraphicOID` 对齐 | `a/b` 级验证 | PDF 图元数 |
+|---|---|---|---:|---:|---:|---:|---:|---:|---|---:|
+| `V01` | `VENDOR_REF`（含超大型全集） | `c568d23f3992` | `973` | `62` | `62 / 0` | `374` | `452` | `178 / 178` | `true / true` | `570` |
+| `V02` | `VENDOR_REF`（含超大型全集） | `69d8bdff3aaa` | `1,182` | `72` | `72 / 0` | `494` | `600` | `227 / 227` | `true / true` | `659` |
+| `V03` | `VENDOR_REF`（含超大型全集） | `778c9395d439` | `1,331` | `83` | `83 / 0` | `477` | `534` | `226 / 226` | `true / true` | `679` |
+| `V04` | `VENDOR_REF`（含超大型全集） | `655e7281f51a` | `2,167` | `154` | `154 / 0` | `845` | `978` | `392 / 392` | `true / true` | `886` |
+| `V05` | `VENDOR_REF`（超大型 `5,576` 实体） | `ecc602494c4d` | `5,576` | `325` | `325 / 0` | `2,120` | `2,504` | `977 / 977` | `true / true` | `1,638` |
+| `B01` | `BACKUP_ORACLE`（**纯裸无 XML**） | `837d439e2e52` | `899` | `61` | `61 / 0` | `343` | `385` | `157 / 157` | `true / true` | `493` |
+| `B02` | `BACKUP_ORACLE`（**纯裸无 XML**） | `6f83a78c5445` | `1,028` | `62` | `62 / 0` | `499` | `642` | `231 / 231` | `true / true` | `578` |
+| `B03` | `BACKUP_ORACLE`（**纯裸无 XML**） | `a7c3cfe616cb` | `1,661` | `110` | `110 / 0` | `706` | `848` | `344 / 344` | `true / true` | `711` |
+| **合计（8 图）** | **`5` 参考 + `3` 纯裸无 XML** | — | **`14,817`** | **`929`** | **`929 / 0`** | **`5,858`** | **`6,943`** | **`2,732 / 2,732`（`100%`）** | **`8/8` 全过** | **`6,214`** |
+
+- **`StrictVendor` 合规性**：全部 `16 / 16` 份生成的 `_Data.xml` 与 `_Meta.xml`（含由纯裸 `.pid` 逆向重建的 `B01..B03` 6 份 XML）通过 `#111` `StrictVendor` **0 违规**（`c1` 按规程标 `unverified_no_sppid_runner`）。
+
+### 35.3 固定门禁读数
+
+| 门禁项 | 改前读数（§34.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,220` 条（`7,148` 过 / `71` 忽略 / `1` 既有 `.pen`） | **`7,222` 条**（**`7,149` 过** / **`72` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 8 图真实 `.pid` 集成），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `promote.rs`、`pidprops.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `200 passed` | **`200 passed`** | **全绿** |
