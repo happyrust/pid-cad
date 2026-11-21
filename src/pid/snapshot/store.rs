@@ -524,49 +524,16 @@ fn io_error(path: &Path, error: &io::Error) -> SnapshotError {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use serde_json::{json, Value};
     use sha2::{Digest, Sha256};
 
     use super::*;
-    use crate::pid::snapshot::tests::{drawing, meta};
+    use crate::pid::snapshot::tests::{drawing, meta, Scratch};
     use crate::pid::snapshot::{
         capture, parse, SNAPSHOT_CORRUPT, SNAPSHOT_IMMUTABLE, SNAPSHOT_NOT_FOUND,
     };
     use SnapshotStatus::{Missing, Present};
-
-    /// 测试用的临时目录，测完删掉（只读的快照文件也删得掉）。
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new() -> Self {
-            // 测试并行跑：计数器把同一纳秒里建的两个目录分开。
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "ocs-snapshot-store-{}-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_or(0, |elapsed| elapsed.as_nanos())
-            ));
-            fs::create_dir(&path).expect("scratch directory");
-            Self(path)
-        }
-
-        /// 这个临时目录里 PID-1101 的快照目录。
-        fn snapshots(&self) -> PathBuf {
-            dir_for(&self.0, "PID-1101")
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     /// 20 个对象的合成图做的一份快照，还没存。
     fn snapshot(reason: &str) -> Snapshot {

@@ -10,7 +10,7 @@
 //! 小数要原样读回来才算得对：`serde_json` 的 `float_roundtrip` 是依赖 `jsonschema`
 //! 打开的，测试 `numbers_come_back_exactly` 盯着它。
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -181,13 +181,13 @@ pub fn capture(
     meta: SnapshotMeta,
 ) -> Result<Snapshot, SnapshotError> {
     check_reason(&meta.reason)?;
-    let summary_value = serde_json::to_value(&summary).expect("摘要能写成 JSON");
+    let mut summary_value = serde_json::to_value(&summary).expect("摘要能写成 JSON");
     if let Err(error) = DrawingSummary::deserialize(&summary_value) {
         return Err(invalid(format!(
             "摘要写成 JSON 后读不回来，多半是有 NaN 或无穷大的数：{error}"
         )));
     }
-    let graph_value = serde_json::to_value(&graph).expect("连通图能写成 JSON");
+    let mut graph_value = serde_json::to_value(&graph).expect("连通图能写成 JSON");
     Ok(Snapshot {
         version: SNAPSHOT_VERSION,
         kind: SNAPSHOT_KIND.to_owned(),
@@ -199,7 +199,7 @@ pub fn capture(
         generator: meta.generator,
         dirty: meta.dirty,
         counts: Counts::of(&summary, &graph),
-        body_sha256: body_sha256(&summary_value, &graph_value),
+        body_sha256: body_sha256(&mut summary_value, &mut graph_value),
         summary,
         graph,
     })
@@ -210,9 +210,9 @@ pub fn capture(
 /// UTF-8 BOM 不算错。
 pub fn parse(bytes: &[u8]) -> Result<Snapshot, SnapshotError> {
     let bytes = bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes);
-    let value: Value =
+    let mut value: Value =
         serde_json::from_slice(bytes).map_err(|error| invalid(format!("不是 JSON：{error}")))?;
-    check_body(&value)?;
+    check_body(&mut value)?;
     let snapshot: Snapshot =
         serde_json::from_value(value).map_err(|error| invalid(format!("字段不对：{error}")))?;
     check_fields(&snapshot)?;
@@ -220,9 +220,10 @@ pub fn parse(bytes: &[u8]) -> Result<Snapshot, SnapshotError> {
 }
 
 /// `kind`、`version` 认得，正文的校验和对得上。校验和在按字段读之前算，所以正文里改了
-/// 什么（连键名在内）都报 [`SNAPSHOT_CORRUPT`]，而不是读不进来。
-fn check_body(value: &Value) -> Result<(), SnapshotError> {
-    let Some(fields) = value.as_object() else {
+/// 什么（连键名在内）都报 [`SNAPSHOT_CORRUPT`]，而不是读不进来。算的时候把正文里对象的键
+/// 就地排好。
+fn check_body(value: &mut Value) -> Result<(), SnapshotError> {
+    let Some(fields) = value.as_object_mut() else {
         return Err(invalid("最外层不是 JSON 对象"));
     };
     match fields.get("kind") {
@@ -241,17 +242,22 @@ fn check_body(value: &Value) -> Result<(), SnapshotError> {
         _ => return Err(invalid(format!("`version` 应是从 1 起的整数：{version}"))),
     }
     let recorded = match fields.get("body_sha256") {
-        Some(Value::String(recorded)) => recorded,
+        Some(Value::String(recorded)) => recorded.clone(),
         Some(other) => return Err(invalid(format!("`body_sha256` 不是字符串：{other}"))),
         None => return Err(invalid("缺 `body_sha256`")),
     };
-    let part = |key: &str| {
-        fields
-            .get(key)
-            .ok_or_else(|| invalid(format!("缺 `{key}`")))
-    };
-    let actual = body_sha256(part("summary")?, part("graph")?);
-    if actual.eq_ignore_ascii_case(recorded) {
+    let (mut summary, mut graph) = (None, None);
+    for (key, part) in fields.iter_mut() {
+        match key.as_str() {
+            "summary" => summary = Some(part),
+            "graph" => graph = Some(part),
+            _ => {}
+        }
+    }
+    let summary = summary.ok_or_else(|| invalid("缺 `summary`"))?;
+    let graph = graph.ok_or_else(|| invalid("缺 `graph`"))?;
+    let actual = body_sha256(summary, graph);
+    if actual.eq_ignore_ascii_case(&recorded) {
         Ok(())
     } else {
         Err(SnapshotError::Corrupt(format!(
@@ -306,52 +312,33 @@ impl Snapshot {
 
 /// 正文的校验和：`summary`、`graph` 各自经 [`write_canonical`] 写出来，首尾相接算 SHA-256，
 /// 写成小写十六进制。
-fn body_sha256(summary: &Value, graph: &Value) -> String {
-    let mut body = Vec::new();
+fn body_sha256(summary: &mut Value, graph: &mut Value) -> String {
+    let mut body = String::new();
     write_canonical(summary, &mut body);
     write_canonical(graph, &mut body);
     format!("{:x}", Sha256::digest(body))
 }
 
-/// 按键名排序、不带空白写出 `value`。键按 UTF-8 字节序排；字符串和数照 `serde_json` 的
-/// 写法。规则检查的规则包摘要也有一份同样的写法，这里另写一份：它是快照文件格式的一部分，
-/// 不能跟着别处改。
-fn write_canonical(value: &Value, out: &mut Vec<u8>) {
-    match value {
-        Value::Object(map) => {
-            let mut entries: Vec<(&String, &Value)> = map.iter().collect();
-            entries.sort_unstable_by_key(|(key, _)| *key);
-            out.push(b'{');
-            for (index, (key, value)) in entries.into_iter().enumerate() {
-                if index > 0 {
-                    out.push(b',');
-                }
-                write_json(key, out);
-                out.push(b':');
-                write_canonical(value, out);
-            }
-            out.push(b'}');
-        }
-        Value::Array(items) => {
-            out.push(b'[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push(b',');
-                }
-                write_canonical(item, out);
-            }
-            out.push(b']');
-        }
-        scalar => write_json(scalar, out),
-    }
-}
-
-fn write_json<T: Serialize + ?Sized>(value: &T, out: &mut Vec<u8>) {
-    serde_json::to_writer(out, value).expect("字符串和数写进内存不会失败");
+/// 按键名排序、不带空白写出 `value`，各层对象的键就地排好。键按 UTF-8 字节序排；
+/// 字符串和数照 `serde_json` 的写法。规则检查的规则包摘要也有一份同样的写法，这里另写
+/// 一份：它是快照文件格式的一部分，不能跟着别处改。
+///
+/// 排序和写出都用 `serde_json` 自己的（`sort_all_objects`、`Value` 的 `Display`），
+/// 不在这里逐个值写：它们在依赖里编好、开了优化，在本 crate 不优化的测试配置里快一倍，
+/// 存快照的预算（§6 第 9 条）靠它。
+fn write_canonical(value: &mut Value, out: &mut String) {
+    value.sort_all_objects();
+    write!(out, "{value}").expect("写进内存不会失败");
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    use document::{Document, DxfVersion};
     use serde_json::{json, Map};
 
     use super::*;
@@ -360,23 +347,34 @@ mod tests {
     };
     use crate::pid::symbols::SymbolLibrary;
 
-    /// 合成图（`objects` 个对象）的摘要和连通图。
-    pub(super) fn drawing(objects: usize) -> (DrawingSummary, Graph) {
-        let meta = SummaryMeta {
+    /// 做摘要的几项：当作程序里打开着的 PID-1101。
+    fn open_meta() -> SummaryMeta {
+        SummaryMeta {
             drawing_id: "PID-1101".to_owned(),
             file: None,
             pbs: None,
             source: SummarySource::Open,
             fingerprint: None,
-        };
+        }
+    }
+
+    /// 合成图（`objects` 个对象）的摘要和连通图。
+    pub(super) fn drawing(objects: usize) -> (DrawingSummary, Graph) {
         let summary = summarize(
             &synthetic_drawing(objects),
             &SymbolLibrary::builtin(),
-            meta,
+            open_meta(),
             DEFAULT_TOLERANCE,
         );
         let graph = graph(&summary);
         (summary, graph)
+    }
+
+    /// 一张图做的快照：做摘要、连通图，再做快照。
+    fn snapshot_of(doc: &Document, library: &SymbolLibrary) -> Snapshot {
+        let summary = summarize(doc, library, open_meta(), DEFAULT_TOLERANCE);
+        let graph = graph(&summary);
+        capture(summary, graph, meta("")).expect("能做快照")
     }
 
     pub(super) fn meta(reason: &str) -> SnapshotMeta {
@@ -386,6 +384,37 @@ mod tests {
             reason: reason.to_owned(),
             generator: "OpenCADStudio 0.9.0".to_owned(),
             dirty: true,
+        }
+    }
+
+    /// 测试用的临时目录，测完删掉（只读的快照文件也删得掉）。
+    pub(super) struct Scratch(pub(super) PathBuf);
+
+    impl Scratch {
+        pub(super) fn new() -> Self {
+            // 测试并行跑：计数器把同一纳秒里建的两个目录分开。
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "ocs-snapshot-{}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_nanos())
+            ));
+            fs::create_dir(&path).expect("scratch directory");
+            Self(path)
+        }
+
+        /// 这个临时目录里 PID-1101 的快照目录。
+        pub(super) fn snapshots(&self) -> PathBuf {
+            store::dir_for(&self.0, "PID-1101")
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
         }
     }
 
@@ -539,9 +568,9 @@ mod tests {
     /// 所以文件缩进与否、键的先后都不影响读；开头带 BOM 也不算错。
     #[test]
     fn the_checksum_is_over_the_sorted_compact_body() {
-        let mut canonical = Vec::new();
+        let mut canonical = String::new();
         write_canonical(
-            &json!({
+            &mut json!({
                 "nodes": ["P-1001", "引号\"和\\"],
                 "edges": [["P-1001", "引号\"和\\"]],
                 "位号": {"z": 1, "Z": [true, null, 0.5, -2]}
@@ -549,7 +578,7 @@ mod tests {
             &mut canonical,
         );
         assert_eq!(
-            String::from_utf8(canonical).expect("UTF-8"),
+            canonical,
             r#"{"edges":[["P-1001","引号\"和\\"]],"nodes":["P-1001","引号\"和\\"],"位号":{"Z":[true,null,0.5,-2],"z":1}}"#
         );
 
@@ -959,5 +988,131 @@ mod tests {
             let error = capture(summary, graph.clone(), meta("")).expect_err("拒绝");
             assert_eq!(error.code(), SNAPSHOT_FORMAT_INVALID, "{bad}：{error}");
         }
+    }
+
+    /// 另存成 DWG、重新打开以后做的快照，与之前的比对无差异（成功标准第 7 条）。存、读用的是
+    /// 程序自己存盘、打开走的 `crate::io::save_as_version` 和 `crate::io::load_file`。
+    #[test]
+    fn a_snapshot_after_saving_as_dwg_and_reopening_compares_identical() {
+        let library = SymbolLibrary::builtin();
+        let drawn = synthetic_drawing(200);
+        let before = snapshot_of(&drawn, &library);
+        let scratch = Scratch::new();
+        let path = scratch.0.join("PID-1101.dwg");
+        crate::io::save_as_version(&drawn, &path, DxfVersion::AC1032).expect("另存成 DWG 2018");
+        let reopened = crate::io::load_file(&path).expect("重新打开");
+        let after = snapshot_of(&reopened, &library);
+
+        assert_eq!(before.counts.objects, 200);
+        assert_eq!(after.counts, before.counts);
+        let result = diff(&before, &after, DEFAULT_MOVE_TOLERANCE);
+        assert!(result.identical, "{:#}", json!(result));
+    }
+
+    /// 契约规模：2,000 个对象的合成图（`IX-4`）。
+    const SYNTHETIC_OBJECTS: usize = 2000;
+    /// 采样次数：取中位数。
+    const RUNS: usize = 3;
+
+    /// `what` 量了 [`RUNS`] 次，中位数不超过 `budget`。
+    fn assert_median_within(what: &str, mut samples: Vec<Duration>, budget: Duration) {
+        samples.sort();
+        let median = samples[samples.len() / 2];
+        let shown: Vec<String> = samples
+            .iter()
+            .map(|sample| format!("{:.2}", sample.as_secs_f64() * 1e3))
+            .collect();
+        println!(
+            "SNAP-4 {what} median {:.2} ms of {shown:?}, budget {} ms",
+            median.as_secs_f64() * 1e3,
+            budget.as_millis()
+        );
+        assert!(
+            median <= budget,
+            "SNAP-4 {what} 超预算：中位数 {:.2} ms（{shown:?}），预算 {} ms",
+            median.as_secs_f64() * 1e3,
+            budget.as_millis()
+        );
+    }
+
+    /// 2,000 个对象的图存一份快照不超过 300 ms（成功标准第 9 条），做摘要算在里面：摘要、
+    /// 连通图、做快照、存进快照目录，存一份快照就是这几步。符号库和图事先备好。
+    #[test]
+    #[ignore]
+    fn snapshot_2000_objects_saved_within_300_ms() {
+        const BUDGET: Duration = Duration::from_millis(300);
+        let doc = synthetic_drawing(SYNTHETIC_OBJECTS);
+        let library = SymbolLibrary::builtin();
+        let scratch = Scratch::new();
+        let dir = scratch.snapshots();
+        let mut samples = Vec::with_capacity(RUNS);
+        let ms = |duration: Duration| duration.as_secs_f64() * 1e3;
+        for run in 1..=RUNS {
+            let started = Instant::now();
+            let summary = summarize(&doc, &library, open_meta(), DEFAULT_TOLERANCE);
+            let summarized = started.elapsed();
+            let graph = graph(&summary);
+            let graphed = started.elapsed();
+            let snapshot = capture(summary, graph, meta("")).expect("能做快照");
+            let captured = started.elapsed();
+            let objects = snapshot.counts.objects;
+            let saved = store::save(&dir, snapshot).expect("存得进去");
+            let elapsed = started.elapsed();
+            println!(
+                "SNAP-4 save run {run}/{RUNS}: {:.2} ms (summary {:.2}, graph {:.2}, capture {:.2}, \
+                 save {:.2}), objects {objects}, {} bytes",
+                ms(elapsed),
+                ms(summarized),
+                ms(graphed - summarized),
+                ms(captured - graphed),
+                ms(elapsed - captured),
+                saved.bytes
+            );
+            assert_eq!(objects, SYNTHETIC_OBJECTS, "run {run}");
+            samples.push(elapsed);
+        }
+        assert_median_within("save", samples, BUDGET);
+    }
+
+    /// 两份 2,000 个对象的快照比对不超过 200 ms（成功标准第 9 条），不含读文件。量的是最费事
+    /// 的情形：后一份每个对象、每个连接符都挪了 1，单独比的每一项都进「修改」。
+    #[test]
+    #[ignore]
+    fn snapshot_2000_objects_compared_within_200_ms() {
+        const BUDGET: Duration = Duration::from_millis(200);
+        let (summary, graph) = drawing(SYNTHETIC_OBJECTS);
+        let mut moved = summary.clone();
+        for object in &mut moved.objects {
+            object.at[0] += 1.0;
+            object.bbox[0] += 1.0;
+            object.bbox[2] += 1.0;
+        }
+        for connector in &mut moved.connectors {
+            connector.at[0] += 1.0;
+        }
+        // 单独比的是自己编号的对象和连接符；不单独编号的管件、打断符不比位置。
+        let compared = summary
+            .objects
+            .iter()
+            .filter(|object| object.own_tag)
+            .count()
+            + summary.connectors.len();
+        let before = capture(summary, graph.clone(), meta("")).expect("能做快照");
+        let after = capture(moved, graph, meta("")).expect("能做快照");
+        let mut samples = Vec::with_capacity(RUNS);
+        for run in 1..=RUNS {
+            let started = Instant::now();
+            let result = diff(&before, &after, DEFAULT_MOVE_TOLERANCE);
+            let elapsed = started.elapsed();
+            println!(
+                "SNAP-4 diff run {run}/{RUNS}: {:.2} ms, modified {}",
+                elapsed.as_secs_f64() * 1e3,
+                result.summary.modified
+            );
+            assert_eq!(result.summary.modified, compared, "run {run}");
+            assert_eq!(result.summary.by_what.position, compared, "run {run}");
+            samples.push(elapsed);
+        }
+        assert_median_within("diff", samples, BUDGET);
     }
 }
