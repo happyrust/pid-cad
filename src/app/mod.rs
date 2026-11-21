@@ -1654,6 +1654,9 @@ pub(super) struct OpenCADStudio {
     /// project drawings on disk, kept while the file is unchanged, and the
     /// scan reading them in the background.
     pub(in crate::app) pid_index: commands::pidindex::PidIndex,
+    /// What PIDCHECK PROJECT and PIDCHECK PBS last found, per project folder
+    /// (`commands::piddrc`); a drawing's own check is kept on its tab.
+    pub(in crate::app) pid_checks: commands::piddrc::PidChecks,
     /// Which group of symbols the P&ID legend list shows (its filter row).
     pub(crate) pid_legend_filter: crate::ui::window::pid_legend_list::PidLegendFilter,
     /// Whether the P&ID panel's five exception summaries are expanded.
@@ -6777,6 +6780,7 @@ impl OpenCADStudio {
             pid_backup_export: Default::default(),
             pid_symbols: crate::pid::symbols::SymbolLibrary::load_from_env(),
             pid_index: Default::default(),
+            pid_checks: Default::default(),
             pid_legend_filter: Default::default(),
             pid_legend_exceptions_open: false,
             show_tool_palettes: false,

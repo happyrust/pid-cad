@@ -75,6 +75,7 @@ pub(in crate::app) mod pidbackupexport;
 pub(in crate::app) mod pidbackuppdf;
 mod pidbulk;
 mod pidconnector;
+pub(in crate::app) mod piddrc;
 pub(in crate::app) mod pidindex;
 mod pidlegend;
 pub(in crate::app) mod pidmasterdata;
@@ -949,6 +950,9 @@ impl OpenCADStudio {
         if let Some(t) = self.dispatch_pidlocate(cmd, i) {
             return Some(t);
         }
+        if let Some(t) = self.dispatch_piddrc(cmd, i) {
+            return Some(t);
+        }
         None
     }
 
@@ -1631,6 +1635,10 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDBACKUPOPEN",
         "PIDBACKUPPDF",
         "PIDBREAK",
+        // The P&ID design rule check (`pid::drc`): the current drawing, the
+        // project or one PBS node checked against the rules, the rules in
+        // effect listed, and the latest result written out as JSON.
+        "PIDCHECK",
         "PIDCLAIM",
         "PIDCOLLAB",
         "PIDCONNECTOR",

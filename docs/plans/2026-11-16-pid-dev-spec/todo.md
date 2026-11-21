@@ -750,13 +750,14 @@
 
 - **做什么**：新建 `src/app/commands/piddrc.rs`。一个入口函数把「取规则 → 取主数据 → 做摘要（容差取规则包的 `connect_tolerance`）→ 范围要项目就扫描建索引 → 检查」串起来（§4.1），命令、接口、以后的面板都调它。命令（§5.2）：`PIDCHECK`（当前图，输出一句汇总和前 10 条）、`PIDCHECK PROJECT`、`PIDCHECK PBS <节点号>`、`PIDCHECK RULES`、`PIDCHECK EXPORT <文件>`。最近一次检查结果只留在内存里：范围是当前图的放在这张图的标签页状态里，范围是全项目或节点的按项目目录放在程序状态里；不写进图（面板以后直接读这两处）。检查不改图。命令进只读允许名单；带参数，登记成整行命令。
 - **验收**：
-  - [ ] 用命令建一张有若干缺陷的图，`PIDCHECK` 的汇总数与逐条结果正确；检查前后图纸的「已修改」状态和撤销栈不变。
-  - [ ] `PIDCHECK PROJECT` 能查出另一张图造成的跨图重号；没保存过的图 → `INDEX_NO_PROJECT_DIR`；节点号不存在 → `PBS_NODE_UNKNOWN`；项目包有错时 `PIDCHECK RULES` 把错报出来。
-  - [ ] 只读会话里这五个命令都能用；`PIDCHECK EXPORT <文件>` 写出的 JSON 就是最近一次的结果；从命令行执行 `PIDCHECK PROJECT` 只检查一次。
+  - [x] 用命令建一张有若干缺陷的图，`PIDCHECK` 的汇总数与逐条结果正确；检查前后图纸的「已修改」状态和撤销栈不变。
+  - [x] `PIDCHECK PROJECT` 能查出另一张图造成的跨图重号；没保存过的图 → `INDEX_NO_PROJECT_DIR`；节点号不存在 → `PBS_NODE_UNKNOWN`；项目包有错时 `PIDCHECK RULES` 把错报出来。
+  - [x] 只读会话里这五个命令都能用；`PIDCHECK EXPORT <文件>` 写出的 JSON 就是最近一次的结果；从命令行执行 `PIDCHECK PROJECT` 只检查一次。
 - **验证**：`cargo test --offline --locked --lib piddrc`
 - **依赖**：DRC-8、DRC-9；IX-6（项目扫描）
 - **文件**：新建 `src/app/commands/piddrc.rs`；`src/app/commands/mod.rs`、`src/app/command_driver/utilities.rs`、`src/app/collab/apply.rs`、`src/app/tab_document.rs`（跟着图走的结果）
 - **规模**：M
+- **补（2026-11-21）**：在 `pid-stage-c` 分支上接着 `DRC-11` 做，一个提交。动手前把规格没写到的两处和推荐的做法报给了你：项目扫描按规则包的连接容差做摘要、缓存按条记容差；磁盘上那些图的豁免随读图一起读。照你「按你推荐的方案做」的话照推荐做了。与任务写法不同、或任务没有说的：「一个入口函数」分成两路，查当前图就是保存门禁的 `check_drawing`（不跑项目级规则，结果带 `PROJECT_RULES_SKIPPED`），查项目、查节点借 `PIDINDEX` 的后台扫描，扫完由 `check_project` 查（不碰命令行和程序状态，接口、面板、发布以后调它）；命令一开头取规则和主数据，项目包有错带码报出、不退回内置包，节点号要在主数据的 PBS 表里，否则 `PBS_NODE_UNKNOWN`、不扫描；节点范围以外的图当对端，跨图重号照样报在范围内的图上；列出的每条带对象键（`DRC-13` 豁免要用）；`EXPORT` 写 §3.6 的结果加 `"ok": true`，只写 `.json`、不写 `pid-project.json`、相对路径从图纸目录算起、已有的覆盖；两处结果带序号，`EXPORT` 写当前图那份和项目那份里较新的；`DRC-13` 的写子命令在只读会话里怎么拒留到 `DRC-13`，现在它们是「不认识」。这些记在规则检查规格 §11.12。「文件」一栏以外改了：`src/app/commands/pidindex.rs`（扫描能排「扫完接着查」、摘要按调用方给的容差做并按条缓存、读图时一并读出豁免；`PIDINDEX`、`PIDLOCATE` 照旧用默认容差）、`src/app/mod.rs`（按项目目录放结果）。**先红后绿**：先写全部代码和测试、只不接分派，`piddrc` 10 条都编得过，全败在「Unknown command: PIDCHECK …」上；接上分派后第一次跑 10 条全过；把查项目的部分拆成 `check_project`、整理格式和注释后，在最终的树上重跑 `piddrc`、`pidindex`、`collab::apply` 全过。**读数**：主程序库 7485 条，7413 通过、69 默认不跑、3 失败（比对设计稿的三条，与起点相同）；起点 7475 条（7403 / 69 / 3），多的 10 条是新加的，都过；编译警告 52；clippy 656 / 1051，改动的 7 个 Rust 文件告警数逐个与起点相同，新代码没有告警；格式检查 6 个改动的 Rust 文件新增 0，新文件 rustfmt 无差异；架构检查上行依赖 33 对、183 个文件；SPPID 脚本测试 185 条全过；都与起点相同。**新基线**：主程序库 7485 条（7413 / 69 / 3）。
 
 ### DRC-13 【接线】命令 `PIDCHECK`：启停规则与豁免
 

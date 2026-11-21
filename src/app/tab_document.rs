@@ -416,6 +416,9 @@ pub(super) struct DocumentTab {
     /// an undo) it is out of date — the panel says so and PIDLINE reads the
     /// sheet again before it selects (`pid_legend_is_stale`).
     pub(super) pid_legend: Option<PidLegendIndex>,
+    /// What PIDCHECK last found on this drawing (`commands::piddrc`). Kept in
+    /// memory only, never written into the drawing (`SPEC-pid-drc.md` §4.1).
+    pub(super) pid_check: Option<super::commands::piddrc::Checked>,
     /// Model-space corners of the last crossing window drawn with no command
     /// running: STRETCH on that selection stretches through it (#1068).
     pub(super) last_crossing_window: Option<([f64; 2], [f64; 2])>,
@@ -966,6 +969,7 @@ impl DocumentTab {
             layer_previous: Vec::new(),
             transparent_resume: false,
             pid_legend: None,
+            pid_check: None,
             last_crossing_window: None,
             recent_colors: Vec::new(),
             layer_walk: None,
