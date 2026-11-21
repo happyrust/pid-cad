@@ -922,13 +922,14 @@
 
 - **做什么**：五个自动化操作（§5.3）：`pid_snapshots`（`GET /api/v1/pid/snapshots`）、`pid_snapshot`（`GET /api/v1/pid/snapshots/{seq}`）、`pid_snapshot_save`（`POST /api/v1/pid/snapshots`，状态 201）、`pid_snapshot_export`（`POST /api/v1/pid/snapshots/{seq}/export`）、`pid_diff`（`GET /api/v1/pid/diff`）。按共用约定 §7.6 的第 3–5 处接线；§3.8 的错误码进 `map_status`。
 - **验收**：
-  - [ ] 五个操作的应答符合 §5.3；`pid_snapshot_save` 的状态是 201，带 `path` 时就是 `FILE` 形式；`pid_diff` 的 `b` 默认 `live`。
-  - [ ] 状态码符合 §3.8：`SNAPSHOT_IMMUTABLE`、`SNAPSHOT_CORRUPT`、`INDEX_NO_PROJECT_DIR` 是 409，`SNAPSHOT_NOT_FOUND` 是 404，其余是 400。
-  - [ ] `rest_openapi.json` 里有这五条路径；`tool_schema_digest_is_pinned` 通过。
+  - [x] 五个操作的应答符合 §5.3；`pid_snapshot_save` 的状态是 201，带 `path` 时就是 `FILE` 形式；`pid_diff` 的 `b` 默认 `live`。
+  - [x] 状态码符合 §3.8：`SNAPSHOT_IMMUTABLE`、`SNAPSHOT_CORRUPT`、`INDEX_NO_PROJECT_DIR` 是 409，`SNAPSHOT_NOT_FOUND` 是 404，其余是 400。
+  - [x] `rest_openapi.json` 里有这五条路径；`tool_schema_digest_is_pinned` 通过。
 - **验证**：`cargo test --offline --locked --lib pid_snapshot`；`cargo test --offline --locked --lib pid_diff`；`cargo test --offline --locked --lib tool_schema_digest_is_pinned`；手工：`--http` 启动后请求 `POST /api/v1/pid/snapshots`
 - **依赖**：SNAP-5
 - **文件**：`src/app/control/mod.rs`、`src/rest.rs`、`src/rest_openapi.json`、`src/mcp.rs`
 - **规模**：M
+- **补（2026-11-21）**：在 `pid-stage-c` 分支上接着 `SNAP-5` 做，一个提交。多改了两个文件：`src/app/commands/pidsnapshot.rs`（五个操作的主体，与命令共用取图、定目录、做快照、读快照、比对；命令里的几步提成 `pidsnapshot_store`、`pidsnapshot_listed`、`pidsnapshot_copy`，`piddiff_compare` 加了容差参数，命令说的话和行为不变）、`src/mcp_ops.rs`（两个写操作的参数表，执行门面要求登记）。与任务写法不同、或任务没有说的：写的两个操作的结果放在 `result` 里（写操作的惯例，同 `pid_bom_export`；§5.3 写在顶层），读的三个照 §5.3；列表每一份另带 `file`、`sha256`（`store::list` 本来就给）；`seq` 要写成 JSON 整数；`a`、`b` 同 `PIDDIFF` 的甲、乙（整数也算序号，`ref` 写成数字串），`b` 默认 `live`；`move_tolerance` 不给是 0.001、要不小于 0；`reason` 去首尾空白；`path` 的解析同命令；图没存过时要目录的都报 `INDEX_NO_PROJECT_DIR`，说法提示给 `path`；`SNAPSHOT_IO_ERROR` 是 HTTP 500；两个写操作都能当批量里的一步；REST 路径里不是数字的序号、读不成数的容差原样交给操作去拒，复制时以路径里的序号为准；能力名 `pid_snapshot`。执行工具的请求 schema 有 50,000 字节的上限（`schema_size_and_defs_structure`）：两个写操作的说明起先写长了，到 50,464 字节，照别的操作压短后 49,925 字节，只剩 75 字节，`BOM-6` 给 `pid_bom_export` 加参数前要先腾地方。这些记在快照规格 §11.6。**先红后绿**：先只加测试，新的 10 条都编得过、都失败（7 条操作不认得，能力清单、REST 规划、MCP 读列表各 1 条）；`openapi_documents_structured_automation_routes` 加的五项不在任务的筛选里，红的时候没跑。实现后第一遍：比对那条败在测试挪了一台没有位号的仪表（§3.5 按坐标认，挪了是删一个、增一个），改成挪一台另插的、有位号、不在线上的泵；摘要照预期变了，换新值；第二遍三个筛选全过。全套检查又拦下 schema 大小那条，压短说明、再换一次摘要后整套重跑。**手工**：调试版用 `--http` 起（令牌只经环境变量 `OCS_API_TOKEN`，不打印、不落盘），经 HTTP 走了 46 步全过：没存过的图上五条路由是 409 `INDEX_NO_PROJECT_DIR`，带完整路径的存是 201；存过的图上存是 201，列表、整份读（与文件相同）、比对（挪 0.5 的泵默认容差报位置 1 处，容差 1 无差异）、复制（200，以路径里的序号为准，逐字节相同）都对，404、409、400、500 各码都对，删掉的一份列表标 `missing`。第一遍有两步是脚本的预期写错（空图存的文件对象数是 0；经 HTTP 的应答都多一个服务器加的 `http_status`），改了重跑全过。**读数**：`pid_snapshot` 9 条（0.64 秒）、`pid_diff` 3 条、摘要 1 条全过；`pidsnapshot` 20 条（`SNAP-5` 的 12 条照过）、`rest::` 27 条、`mcp` 97 条全过；主程序库 7579 条，7504 通过、72 默认不跑、3 失败（比对设计稿的三条，与起点相同），多的 10 条是新加的；编译警告 52；clippy 656 / 1051，与起点相同，各文件的告警数一样，位置变了的只有改动的文件里原有的几条随加的行下移（`--lib` 一遍 `mcp.rs` 2 条，`--tests` 一遍另有 `control/mod.rs` 6 条、`rest.rs` 2 条），改动的文件没有新告警；`--tests` 那一遍 cargo 报的重复数是 636（起点 637），差在 `src/app/update/viewport_snap.rs` 那条印的次数（见 `SNAP-2`、`SNAP-3` 的补记），告警总数和位置都没变；格式检查：五个改过的 Rust 文件 rustfmt 要改的处数与起点相同（只算本文件：`control/mod.rs` 13、`rest.rs` 5，另三个 0），新增 0；架构检查上行依赖 33 对、183 个文件；SPPID 脚本测试 185 条全过；都与起点相同。**新基线**：主程序库 7579 条（7504 / 72 / 3）。
 
 ### BOM-6 【接线】按快照出材料清单
 

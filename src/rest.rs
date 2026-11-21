@@ -693,6 +693,53 @@ pub(crate) fn plan(method: &str, rest: &[&str], request: &HttpRequest) -> Plan {
             fields: body,
             created: 200,
         },
+        // P&ID snapshots (SPEC-pid-snapshot §5.3): the current drawing's list,
+        // one snapshot whole, saving one (201; with `path`, as that file rather
+        // than a numbered one), copying one out, and comparing two (`b` is the
+        // drawing as it is now when left out). Saving and copying write files
+        // on this machine and change no drawing. A sequence number or a
+        // tolerance that is not a number reaches the op as written, which
+        // refuses it.
+        ("GET", ["pid", "snapshots"]) => Plan::Run {
+            request: json!({"protocol": 1, "op": "pid_snapshots"}),
+            created: 200,
+        },
+        ("POST", ["pid", "snapshots"]) => Plan::Mutate {
+            op: "pid_snapshot_save".into(),
+            fields: body,
+            created: 201,
+        },
+        ("GET", ["pid", "snapshots", seq]) => Plan::Run {
+            request: json!({"protocol": 1, "op": "pid_snapshot", "seq": seq_segment(seq)}),
+            created: 200,
+        },
+        ("POST", ["pid", "snapshots", seq, "export"]) => {
+            let mut fields = body;
+            fields["seq"] = seq_segment(seq);
+            Plan::Mutate {
+                op: "pid_snapshot_export".into(),
+                fields,
+                created: 200,
+            }
+        }
+        ("GET", ["pid", "diff"]) => {
+            let mut diff = json!({"protocol": 1, "op": "pid_diff"});
+            for key in ["a", "b"] {
+                if let Some(value) = request.param(key) {
+                    diff[key] = json!(value);
+                }
+            }
+            if let Some(tolerance) = request.param("move_tolerance") {
+                diff["move_tolerance"] = match tolerance.parse::<f64>() {
+                    Ok(number) if number.is_finite() => json!(number),
+                    _ => json!(tolerance),
+                };
+            }
+            Plan::Run {
+                request: diff,
+                created: 200,
+            }
+        }
         // Same state read, plus `documents[].document_id` — the spelling the
         // REST contract (and every validator) reads.
         ("GET", ["documents"]) => Plan::Aliased {
@@ -1107,6 +1154,14 @@ pub(crate) fn plan(method: &str, rest: &[&str], request: &HttpRequest) -> Plan {
     }
 }
 
+/// A snapshot sequence number from the path: a number when it is one, else
+/// the segment as written.
+fn seq_segment(segment: &str) -> Value {
+    segment
+        .parse::<u64>()
+        .map_or_else(|_| json!(segment), |seq| json!(seq))
+}
+
 /// The headless executor: run a resolved plan against this server's private
 /// app. The GUI-hosted bridge runs the same plans over its envelope queue.
 fn route(
@@ -1281,6 +1336,8 @@ pub(crate) fn map_status(response: Value, created: bool) -> u16 {
         "LOCATE_NOT_FOUND" => 404,
         // 规则检查（规则检查规格 §3.8）：指的规则号、要豁免或取消的条目、PBS 节点不存在。
         "RULE_NOT_FOUND" | "WAIVER_TARGET_NOT_FOUND" | "PBS_NODE_UNKNOWN" => 404,
+        // 快照（快照规格 §3.8）：要读、要比、要导出的那一份不在。
+        "SNAPSHOT_NOT_FOUND" => 404,
         // 同一线号同图第二个流入连接符是「与现有资源冲突」，不是请求格式错。
         // `CONNECTOR_KIND_MISMATCH` 保持 400（契约 A.7 明文）。
         "stale_state"
@@ -1308,12 +1365,19 @@ pub(crate) fn map_status(response: Value, created: bool) -> u16 {
         | "RULE_BLOCKED"
         // 材料清单（材料清单规格 §3.5）：范围里有重复的位号、有图读不出来，清单不产出。
         | "BOM_DUPLICATE_TAG"
-        | "BOM_SCOPE_INCOMPLETE" => 409,
+        | "BOM_SCOPE_INCOMPLETE"
+        // 快照（快照规格 §3.8）：要写的文件已在（快照只新建），快照文件对不上校验和。
+        | "SNAPSHOT_IMMUTABLE"
+        | "SNAPSHOT_CORRUPT" => 409,
         // 协同会话不可写：请求本身没有错，是这个会话不被允许做这件事。
         "COLLAB_READONLY" | "PERM_DENIED_ROLE" | "PERM_DENIED_PBS" | "PERM_DENIED_STATE" => 403,
-        // 项目文件、项目规则包读写失败，清单文件写不了：请求和图纸都没错，是桌面端这台机器的
-        // 文件系统报了错。
-        "MASTERDATA_IO_ERROR" | "INDEX_IO_ERROR" | "RULESET_IO_ERROR" | "BOM_IO_ERROR" => 500,
+        // 项目文件、项目规则包读写失败，清单文件写不了，快照文件读写失败：请求和图纸都没错，
+        // 是桌面端这台机器的文件系统报了错。
+        "MASTERDATA_IO_ERROR"
+        | "INDEX_IO_ERROR"
+        | "RULESET_IO_ERROR"
+        | "BOM_IO_ERROR"
+        | "SNAPSHOT_IO_ERROR" => 500,
         "busy" => 503,
         _ => 400,
     }
@@ -1455,6 +1519,11 @@ mod tests {
             ("/api/v1/pid/check/rules", "put"),
             ("/api/v1/pid/check/waivers", "post"),
             ("/api/v1/pid/check/waivers", "delete"),
+            ("/api/v1/pid/snapshots", "get"),
+            ("/api/v1/pid/snapshots", "post"),
+            ("/api/v1/pid/snapshots/{seq}", "get"),
+            ("/api/v1/pid/snapshots/{seq}/export", "post"),
+            ("/api/v1/pid/diff", "get"),
         ] {
             assert!(
                 document["paths"][path][method].is_object(),
@@ -2128,6 +2197,264 @@ mod tests {
                 document["paths"][path][method]["responses"][status].is_object(),
                 "missing {status} response for {method} {path}"
             );
+        }
+    }
+
+    /// The P&ID snapshots (SPEC-pid-snapshot §5.3): GET /pid/snapshots lists
+    /// the current drawing's, GET /pid/snapshots/{seq} reads one whole, POST
+    /// /pid/snapshots saves one (201; with `path`, as that file rather than a
+    /// numbered one), POST /pid/snapshots/{seq}/export copies one out byte for
+    /// byte, and GET /pid/diff compares `a` with `b` (the drawing when left
+    /// out). A sequence number or a tolerance that is not a number reaches the
+    /// op as written, and the op refuses it. Status codes follow §3.8: a
+    /// snapshot that is not there is 404; one that is there already, one that
+    /// fails its checksum and a drawing never saved (no folder for numbered
+    /// snapshots) are 409; a file that cannot be read or written is 500; the
+    /// rest 400. Every route is in the OpenAPI document.
+    #[test]
+    fn pid_snapshot_and_pid_diff_rest_routes_and_status_codes() {
+        let read = |segments: &[&str], query: &[(&str, &str)]| {
+            let path = format!("/api/v1/{}", segments.join("/"));
+            let mut asked = request("GET", &path, "");
+            asked.query = query
+                .iter()
+                .map(|&(key, value)| (key.into(), value.into()))
+                .collect();
+            let Plan::Run {
+                request: asked,
+                created,
+            } = plan("GET", segments, &asked)
+            else {
+                panic!("GET {path} is not a read");
+            };
+            assert_eq!(created, 200, "GET {path}");
+            asked
+        };
+        assert_eq!(
+            read(&["pid", "snapshots"], &[]),
+            json!({"protocol": 1, "op": "pid_snapshots"})
+        );
+        assert_eq!(
+            read(&["pid", "snapshots", "3"], &[]),
+            json!({"protocol": 1, "op": "pid_snapshot", "seq": 3})
+        );
+        assert_eq!(
+            read(&["pid", "snapshots", "third"], &[]),
+            json!({"protocol": 1, "op": "pid_snapshot", "seq": "third"})
+        );
+        assert_eq!(
+            read(
+                &["pid", "diff"],
+                &[("a", "2"), ("b", "live"), ("move_tolerance", "0.5")]
+            ),
+            json!({"protocol": 1, "op": "pid_diff", "a": "2", "b": "live", "move_tolerance": 0.5})
+        );
+        assert_eq!(
+            read(
+                &["pid", "diff"],
+                &[("a", "D:\\p\\1.json"), ("move_tolerance", "far")]
+            ),
+            json!({"protocol": 1, "op": "pid_diff", "a": "D:\\p\\1.json", "move_tolerance": "far"})
+        );
+        let write = |segments: &[&str], body: &str| {
+            let path = format!("/api/v1/{}", segments.join("/"));
+            let Plan::Mutate {
+                op,
+                fields,
+                created,
+            } = plan("POST", segments, &request("POST", &path, body))
+            else {
+                panic!("POST {path} is not a write");
+            };
+            (op, fields, created)
+        };
+        assert_eq!(
+            write(
+                &["pid", "snapshots"],
+                r#"{"reason":"送审前","path":"a.json"}"#
+            ),
+            (
+                "pid_snapshot_save".to_owned(),
+                json!({"reason": "送审前", "path": "a.json"}),
+                201
+            )
+        );
+        assert_eq!(
+            write(
+                &["pid", "snapshots", "2", "export"],
+                r#"{"path":"copy.json","seq":7}"#
+            ),
+            (
+                "pid_snapshot_export".to_owned(),
+                json!({"path": "copy.json", "seq": 2}),
+                200
+            )
+        );
+
+        // Over the wire, on a drawing never saved: numbered snapshots have no
+        // folder to go in, the file form works.
+        struct Gone(std::path::PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        let dir = Gone(std::env::temp_dir().join(format!(
+            "ocs-rest-pid-snapshot-{}-{nanos}",
+            std::process::id()
+        )));
+        std::fs::create_dir_all(&dir.0).expect("a folder for the snapshot files");
+        let file = dir.0.join("a.json").display().to_string();
+        let mut document_id: Option<u64> = None;
+        let mut counter: u64 = 0;
+        let mut app = serve_app(true);
+        let mut call = |method: &str, path: &str, query: &[(&str, &str)], body: &str| {
+            let mut asked = request(method, path, body);
+            asked.query = query
+                .iter()
+                .map(|&(key, value)| (key.into(), value.into()))
+                .collect();
+            route(&mut app, &asked, &mut document_id, &mut counter)
+        };
+        let saving = json!({"path": file, "reason": "送审前"}).to_string();
+        let (status, body) = call("POST", "/api/v1/pid/snapshots", &[], &saving);
+        assert_eq!(status, 201, "{body}");
+        assert_eq!(body["result"]["seq"], Value::Null, "{body}");
+        assert_eq!(body["result"]["path"], file, "{body}");
+        let (status, body) = call("GET", "/api/v1/pid/diff", &[("a", file.as_str())], "");
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["identical"], true, "{body}");
+        assert_eq!(body["b"]["ref"], "live", "{body}");
+
+        let written = std::fs::read(&file).expect("the snapshot file");
+        let mut tampered: Value = serde_json::from_slice(&written).expect("JSON");
+        tampered["body_sha256"] = json!("0".repeat(64));
+        let bad = dir.0.join("bad.json").display().to_string();
+        std::fs::write(&bad, tampered.to_string()).expect("a snapshot failing its checksum");
+        let missing = dir.0.join("missing.json").display().to_string();
+        let snapshots = "/api/v1/pid/snapshots";
+        let diff = "/api/v1/pid/diff";
+        for (method, path, query, body, expected_status, code) in [
+            (
+                "POST",
+                snapshots,
+                vec![],
+                saving.as_str(),
+                409,
+                "SNAPSHOT_IMMUTABLE",
+            ),
+            ("POST", snapshots, vec![], "{}", 409, "INDEX_NO_PROJECT_DIR"),
+            ("GET", snapshots, vec![], "", 409, "INDEX_NO_PROJECT_DIR"),
+            (
+                "GET",
+                "/api/v1/pid/snapshots/1",
+                vec![],
+                "",
+                409,
+                "INDEX_NO_PROJECT_DIR",
+            ),
+            (
+                "GET",
+                "/api/v1/pid/snapshots/first",
+                vec![],
+                "",
+                400,
+                "invalid_request",
+            ),
+            (
+                "POST",
+                "/api/v1/pid/snapshots/1/export",
+                vec![],
+                "{}",
+                400,
+                "invalid_request",
+            ),
+            (
+                "GET",
+                diff,
+                vec![("a", file.as_str()), ("b", file.as_str())],
+                "",
+                400,
+                "DIFF_SAME_SNAPSHOT",
+            ),
+            (
+                "GET",
+                diff,
+                vec![("a", missing.as_str())],
+                "",
+                404,
+                "SNAPSHOT_NOT_FOUND",
+            ),
+            (
+                "GET",
+                diff,
+                vec![("a", bad.as_str())],
+                "",
+                409,
+                "SNAPSHOT_CORRUPT",
+            ),
+            (
+                "GET",
+                diff,
+                vec![("a", file.as_str()), ("move_tolerance", "far")],
+                "",
+                400,
+                "invalid_request",
+            ),
+            ("GET", diff, vec![], "", 400, "invalid_request"),
+        ] {
+            let (status, answer) = call(method, path, &query, body);
+            let what = format!("{method} {path}?{query:?} {answer}");
+            assert_eq!(status, expected_status, "{what}");
+            assert_eq!(answer["code"], code, "{what}");
+        }
+        assert!(!std::path::Path::new(&missing).exists());
+
+        for (code, expected_status) in [
+            ("SNAPSHOT_NOT_FOUND", 404),
+            ("SNAPSHOT_IMMUTABLE", 409),
+            ("SNAPSHOT_CORRUPT", 409),
+            ("INDEX_NO_PROJECT_DIR", 409),
+            ("SNAPSHOT_FORMAT_INVALID", 400),
+            ("SNAPSHOT_VERSION_UNSUPPORTED", 400),
+            ("SNAPSHOT_REASON_TOO_LONG", 400),
+            ("DIFF_SAME_SNAPSHOT", 400),
+            ("SNAPSHOT_IO_ERROR", 500),
+        ] {
+            assert_eq!(
+                map_status(json!({"ok": false, "code": code}), false),
+                expected_status,
+                "{code}"
+            );
+        }
+
+        let document: Value = serde_json::from_str(include_str!("rest_openapi.json"))
+            .expect("REST OpenAPI document parses");
+        let answered = ["200", "400", "404", "409", "500"];
+        for (path, method, statuses) in [
+            (
+                "/api/v1/pid/snapshots",
+                "get",
+                &["200", "400", "409", "500"][..],
+            ),
+            (
+                "/api/v1/pid/snapshots",
+                "post",
+                &["201", "400", "409", "500"],
+            ),
+            ("/api/v1/pid/snapshots/{seq}", "get", &answered),
+            ("/api/v1/pid/snapshots/{seq}/export", "post", &answered),
+            ("/api/v1/pid/diff", "get", &answered),
+        ] {
+            for status in statuses {
+                assert!(
+                    document["paths"][path][method]["responses"][status].is_object(),
+                    "missing {status} response for {method} {path}"
+                );
+            }
         }
     }
 

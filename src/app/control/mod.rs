@@ -682,7 +682,7 @@ impl OpenCADStudio {
             "mtext_editor":self.mtext_editor.as_ref().map(|e|json!({"text":e.content.text(),"height":e.height,"style":e.style})),
             "text_editor":self.text_inline.is_some(),"event_cursor":self.control.serial,
             "operation":self.control.pending.as_ref().map(|p| &p.id),
-            "capabilities":["commands","command_manifest","step_input","batch","compact_results","entity_pick","structure_pick","selection","user_select","properties","records","record_schemas","record_filters","atomic_record_updates","layers","history","documents","events","capture","viewport_capture","measure","spatial_query","pid_legend","pid_master_data","pid_project_index","pid_check","pid_bom","audit","verified_save","explicit_save_version"]
+            "capabilities":["commands","command_manifest","step_input","batch","compact_results","entity_pick","structure_pick","selection","user_select","properties","records","record_schemas","record_filters","atomic_record_updates","layers","history","documents","events","capture","viewport_capture","measure","spatial_query","pid_legend","pid_master_data","pid_project_index","pid_check","pid_bom","pid_snapshot","audit","verified_save","explicit_save_version"]
         })
     }
 
@@ -716,6 +716,9 @@ impl OpenCADStudio {
                 | "pid_check"
                 | "pid_check_rules"
                 | "pid_bom"
+                | "pid_snapshots"
+                | "pid_snapshot"
+                | "pid_diff"
                 | "snap"
                 | "grips"
                 | "query"
@@ -1052,6 +1055,9 @@ impl OpenCADStudio {
                 "pid_masterdata" => self.control_pid_masterdata(&req),
                 "pid_summary" => self.control_pid_summary(),
                 "pid_check_rules" => self.control_pid_check_rules(),
+                "pid_snapshots" => self.control_pid_snapshots(),
+                "pid_snapshot" => self.control_pid_snapshot(&req),
+                "pid_diff" => self.control_pid_diff(&req),
                 // The object snap a cursor over `point` (world) would get;
                 // `from` is the base for perpendicular and tangent.
                 "snap" => 'snap: {
@@ -1532,6 +1538,8 @@ impl OpenCADStudio {
             "pid_check_waive" => self.control_pid_check_waive(req)?,
             "pid_check_unwaive" => self.control_pid_check_unwaive(req)?,
             "pid_bom_export" => self.control_pid_bom_export(req)?,
+            "pid_snapshot_save" => self.control_pid_snapshot_save(req)?,
+            "pid_snapshot_export" => self.control_pid_snapshot_export(req)?,
             "entities_set" => self.control_entities_set(req)?,
             "xref_reload" => self.control_xref_reload(req)?,
             "xref_unload" => self.control_xref_unload(req)?,

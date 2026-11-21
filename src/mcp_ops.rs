@@ -1045,6 +1045,34 @@ pub static PID_BOM_EXPORT: OpDef = OpDef {
     example: r#"{"op":"pid_bom_export","path":"bom.xlsx","scope":"project"}"#,
 };
 
+pub static PID_SNAPSHOT_SAVE: OpDef = OpDef {
+    name: "pid_snapshot_save",
+    doc: "Snapshot the current P&ID drawing (unsaved changes included) as the next number in pid-snapshots/<drawing id>/ beside the saved drawing, or with path into that file. Never replaces a file; the drawing is unchanged. result: seq (null with path), path, objects, bytes, sha256.",
+    batchable: true,
+    params: &[
+        opt("reason", Ty::Str, "Why; up to 200 characters."),
+        opt(
+            "path",
+            Ty::Str,
+            "Write into this file instead; relative to the saved drawing's folder.",
+        ),
+    ],
+    rules: &[Rule::RejectUnknown],
+    example: r#"{"op":"pid_snapshot_save","reason":"Before review"}"#,
+};
+
+pub static PID_SNAPSHOT_EXPORT: OpDef = OpDef {
+    name: "pid_snapshot_export",
+    doc: "Copy a numbered snapshot of the current drawing to a file, byte for byte. Never replaces a file. result: path, bytes.",
+    batchable: true,
+    params: &[
+        req("seq", Ty::Int, "Sequence number from pid_snapshots."),
+        req("path", Ty::Str, "File to write; relative to the saved drawing's folder."),
+    ],
+    rules: &[Rule::RejectUnknown],
+    example: r#"{"op":"pid_snapshot_export","seq":3,"path":"PID-1101-3.json"}"#,
+};
+
 pub static XREF_RELOAD: OpDef = OpDef {
     name: "xref_reload",
     doc: "Reload one direct external reference by id, preserving prior content on load failure.",
@@ -1461,6 +1489,8 @@ pub static OPS: &[&OpDef] = &[
     &PID_CHECK_WAIVE,
     &PID_CHECK_UNWAIVE,
     &PID_BOM_EXPORT,
+    &PID_SNAPSHOT_SAVE,
+    &PID_SNAPSHOT_EXPORT,
     &XREF_RELOAD,
     &XREF_UNLOAD,
     &XREF_DETACH,

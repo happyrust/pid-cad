@@ -25,17 +25,23 @@
 //! `"ok": true`，缩进 2 格、末尾一个换行，目标已存在时覆盖，不拿它盖项目文件。
 //!
 //! 两个命令都不改图，只读会话里照常能用：写的是本机文件，不是图纸（§5.4）。
+//!
+//! 自动化操作（§5.3）同这两个命令：读的 `pid_snapshots`（列表）、`pid_snapshot`（第几份的全文）、
+//! `pid_diff`（`b` 不给是当前图，`move_tolerance` 交给比对）在控制面的读操作里；写的
+//! `pid_snapshot_save`（给了 `path` 就是 `FILE` 形式）、`pid_snapshot_export` 走写操作的流程，结果
+//! 放在 `result` 里。错误码同命令。
 
 use super::pidindex::{number, point, same_file, INDEX_NO_PROJECT_DIR};
 use super::*;
 use crate::pid::master_data::PROJECT_FILE;
 use crate::pid::project_index::{graph, summarize, IndexError, DEFAULT_TOLERANCE};
-use crate::pid::snapshot::store::{self, SnapshotInfo, SnapshotStatus};
+use crate::pid::snapshot::store::{self, Saved, SnapshotInfo, SnapshotStatus};
 use crate::pid::snapshot::{
     capture, diff, Change, Diff, DiffObject, EdgeChange, Snapshot, SnapshotError, SnapshotMeta,
     DEFAULT_MOVE_TOLERANCE,
 };
 use serde::Serialize;
+use serde_json::{json, Value};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -151,12 +157,13 @@ impl From<SnapshotError> for Failure {
     }
 }
 
-/// `PIDDIFF … EXPORT` 写的 JSON：§3.7 的比对结果，带上应答那一层的 `ok`。
+/// 带上应答那一层的 `ok`：`PIDDIFF … EXPORT` 写的 JSON（§3.7 的比对结果），自动化操作应答的
+/// 快照全文和比对结果。
 #[derive(Serialize)]
-struct Exported<'a> {
+struct Answered<'a, T> {
     ok: bool,
     #[serde(flatten)]
-    diff: &'a Diff,
+    body: &'a T,
 }
 
 impl OpenCADStudio {
@@ -201,7 +208,7 @@ impl OpenCADStudio {
         Some(Task::none())
     }
 
-    /// 给第 `i` 个标签页的图做一份快照（§4），序号空着。命令、以后的自动化操作和面板都从
+    /// 给第 `i` 个标签页的图做一份快照（§4），序号空着。命令、自动化操作和以后的面板都从
     /// 这里做。只读图，不碰撤销栈和「已修改」。
     fn pidsnapshot_capture(&self, i: usize, reason: &str) -> Result<Snapshot, Failure> {
         let meta = self.drawing_meta(i)?;
@@ -240,15 +247,44 @@ impl OpenCADStudio {
         }
     }
 
-    /// `PIDSNAPSHOT [SAVE [<原因>]]`：存一份带序号的快照。先认目录再做快照，图没存过时不做。
-    fn pidsnapshot_save(&mut self, i: usize, reason: &str) {
-        let saved = self.pidsnapshot_drawing_dir(i).and_then(|drawing_dir| {
+    /// 存一份快照：不给文件时带序号存进快照目录，先认目录再做快照，图没存过时不做；给了文件就
+    /// 不编序号写成它。一并交出 `about` 从这份快照里取的东西。
+    fn pidsnapshot_store<T>(
+        &self,
+        i: usize,
+        file: Option<&Path>,
+        reason: &str,
+        about: impl FnOnce(&Snapshot) -> T,
+    ) -> Result<(Saved, T), Failure> {
+        let Some(path) = file else {
+            let drawing_dir = self.pidsnapshot_drawing_dir(i)?;
             let snapshot = self.pidsnapshot_capture(i, reason)?;
             let dir = store::dir_for(&drawing_dir, &snapshot.drawing_id);
-            let said = snapshot_said(&snapshot);
-            Ok((store::save(&dir, snapshot)?, said))
-        });
-        match saved {
+            let about = about(&snapshot);
+            return Ok((store::save(&dir, snapshot)?, about));
+        };
+        let snapshot = self.pidsnapshot_capture(i, reason)?;
+        Ok((store::save_to_file(path, &snapshot)?, about(&snapshot)))
+    }
+
+    /// 第 `i` 个标签页的图的快照列表，连同快照目录和图号。
+    fn pidsnapshot_listed(
+        &self,
+        i: usize,
+    ) -> Result<(Vec<SnapshotInfo>, PathBuf, String), Failure> {
+        let (dir, drawing_id) = self.pidsnapshot_dir(i)?;
+        Ok((store::list(&dir)?, dir, drawing_id))
+    }
+
+    /// 把第 `seq` 份快照原样复制成 `to`，得到字节数。
+    fn pidsnapshot_copy(&self, i: usize, seq: u64, to: &Path) -> Result<u64, Failure> {
+        let (dir, _) = self.pidsnapshot_dir(i)?;
+        Ok(store::export(&dir, seq, to)?)
+    }
+
+    /// `PIDSNAPSHOT [SAVE [<原因>]]`：存一份带序号的快照。
+    fn pidsnapshot_save(&mut self, i: usize, reason: &str) {
+        match self.pidsnapshot_store(i, None, reason, snapshot_said) {
             Ok((saved, said)) => {
                 let seq = saved.seq.unwrap_or_default();
                 let path = saved.path.display();
@@ -261,10 +297,7 @@ impl OpenCADStudio {
 
     /// `PIDSNAPSHOT LIST`：先说有几份、在哪个目录，再一份一行。
     fn pidsnapshot_list(&mut self, i: usize) {
-        let listed = self
-            .pidsnapshot_dir(i)
-            .and_then(|(dir, drawing_id)| Ok((store::list(&dir)?, dir, drawing_id)));
-        let (infos, dir, drawing_id) = match listed {
+        let (infos, dir, drawing_id) = match self.pidsnapshot_listed(i) {
             Ok(listed) => listed,
             Err(failure) => return self.pidsnapshot_refuse("PIDSNAPSHOT LIST", &failure),
         };
@@ -285,10 +318,7 @@ impl OpenCADStudio {
     /// `PIDSNAPSHOT EXPORT <序号> <文件>`：把一份原样复制出去。
     fn pidsnapshot_export(&mut self, i: usize, seq: u64, name: &str) {
         let to = self.pidsnapshot_path(i, name);
-        let copied = self
-            .pidsnapshot_dir(i)
-            .and_then(|(dir, _)| Ok(store::export(&dir, seq, &to)?));
-        match copied {
+        match self.pidsnapshot_copy(i, seq, &to) {
             Ok(bytes) => {
                 let to = to.display();
                 let said = format!(
@@ -303,11 +333,7 @@ impl OpenCADStudio {
     /// `PIDSNAPSHOT FILE <文件> [<原因>]`：不编序号，把当前图的快照写成这个文件。
     fn pidsnapshot_file(&mut self, i: usize, name: &str, reason: &str) {
         let path = self.pidsnapshot_path(i, name);
-        let written = self.pidsnapshot_capture(i, reason).and_then(|snapshot| {
-            let said = snapshot_said(&snapshot);
-            Ok((store::save_to_file(&path, &snapshot)?, said))
-        });
-        match written {
+        match self.pidsnapshot_store(i, Some(&path), reason, snapshot_said) {
             Ok((saved, said)) => {
                 let path = saved.path.display();
                 let said =
@@ -327,13 +353,15 @@ impl OpenCADStudio {
             "PIDDIFF"
         };
         let (a, b) = (self.piddiff_side(i, a), self.piddiff_side(i, b));
-        let compared = self.piddiff_compare(i, &a, &b).and_then(|result| {
-            let written = match to {
-                Some(name) => Some(self.piddiff_write(i, name, &result)?),
-                None => None,
-            };
-            Ok((result, written))
-        });
+        let compared = self
+            .piddiff_compare(i, &a, &b, DEFAULT_MOVE_TOLERANCE)
+            .and_then(|result| {
+                let written = match to {
+                    Some(name) => Some(self.piddiff_write(i, name, &result)?),
+                    None => None,
+                };
+                Ok((result, written))
+            });
         let (result, written) = match compared {
             Ok(compared) => compared,
             Err(failure) => return self.pidsnapshot_refuse(verb, &failure),
@@ -367,14 +395,20 @@ impl OpenCADStudio {
         }
     }
 
-    /// 比对甲、乙（§3.5–§3.7），`ref` 照写的填。
-    fn piddiff_compare(&self, i: usize, a: &Side, b: &Side) -> Result<Diff, Failure> {
+    /// 比对甲、乙（§3.5–§3.7），位置差不超过 `tolerance` 的不算改了，`ref` 照写的填。
+    fn piddiff_compare(
+        &self,
+        i: usize,
+        a: &Side,
+        b: &Side,
+        tolerance: f64,
+    ) -> Result<Diff, Failure> {
         if a.same_as(b) {
             return Err(Failure::Same(a.said()));
         }
         let old = self.piddiff_load(i, a)?;
         let new = self.piddiff_load(i, b)?;
-        let mut result = diff(&old, &new, DEFAULT_MOVE_TOLERANCE);
+        let mut result = diff(&old, &new, tolerance);
         result.a.reference = a.reference();
         result.b.reference = b.reference();
         Ok(result)
@@ -405,9 +439,9 @@ impl OpenCADStudio {
                 "{shown} 是项目文件，不拿比对结果盖它"
             )));
         }
-        let exported = Exported {
+        let exported = Answered {
             ok: true,
-            diff: result,
+            body: result,
         };
         let text = serde_json::to_string_pretty(&exported)
             .map_err(|error| Failure::Write(format!("比对结果写不成 JSON：{error}")))?;
@@ -425,6 +459,187 @@ impl OpenCADStudio {
             Some(code) => self.command_line.push_error_coded(code, &said),
             None => self.command_line.push_error(&said),
         }
+    }
+}
+
+/// 自动化操作（§5.3）：应答和失败的写法同别的控制面操作，不碰命令行。
+impl OpenCADStudio {
+    /// 控制面的 `pid_snapshots`：当前图的快照列表，带图号和快照目录。每份同 `PIDSNAPSHOT LIST`
+    /// 一行说的，另带文件名和整个文件的 SHA-256；文件不在了 `status` 是 `missing`。
+    pub(in crate::app) fn control_pid_snapshots(&self) -> Value {
+        let listed = self.pidsnapshot_op_tab().and_then(|i| {
+            self.pidsnapshot_listed(i)
+                .map_err(|failure| failure_answer(&failure))
+        });
+        match listed {
+            Ok((infos, dir, drawing_id)) => json!({
+                "ok": true,
+                "drawing_id": drawing_id,
+                "dir": dir.display().to_string(),
+                "snapshots": infos,
+            }),
+            Err(refusal) => refusal,
+        }
+    }
+
+    /// 控制面的 `pid_snapshot`：第 `seq` 份快照的全文（§3.2）带 `ok`；读的时候照常校验。
+    pub(in crate::app) fn control_pid_snapshot(&self, req: &Value) -> Value {
+        let loaded = self.pidsnapshot_op_tab().and_then(|i| {
+            let seq = seq_asked(req)?;
+            self.piddiff_load(i, &Side::Seq(seq))
+                .map_err(|failure| failure_answer(&failure))
+        });
+        match loaded {
+            Ok(snapshot) => json!(Answered {
+                ok: true,
+                body: &snapshot
+            }),
+            Err(refusal) => refusal,
+        }
+    }
+
+    /// 控制面的 `pid_diff`：同 `PIDDIFF`，比对 `a`、`b`（不给是当前图），位置差不超过
+    /// `move_tolerance` 的不算改了；应答是比对结果（§3.7）带 `ok`。
+    pub(in crate::app) fn control_pid_diff(&self, req: &Value) -> Value {
+        let compared = self.pidsnapshot_op_tab().and_then(|i| {
+            let (a, b, tolerance) = diff_request(req)?;
+            let (a, b) = (self.piddiff_side(i, &a), self.piddiff_side(i, &b));
+            self.piddiff_compare(i, &a, &b, tolerance)
+                .map_err(|failure| failure_answer(&failure))
+        });
+        match compared {
+            Ok(result) => json!(Answered {
+                ok: true,
+                body: &result
+            }),
+            Err(refusal) => refusal,
+        }
+    }
+
+    /// 控制面的 `pid_snapshot_save`，在写操作的流程里：同 `PIDSNAPSHOT SAVE`，给了 `path` 同
+    /// `PIDSNAPSHOT FILE`。结果是序号（写成文件的是 `null`）、写到哪里、对象数、字节数和整个
+    /// 文件的 SHA-256。不改图。
+    pub(in crate::app) fn control_pid_snapshot_save(
+        &mut self,
+        req: &Value,
+    ) -> Result<Task<Message>, Value> {
+        let i = self.pidsnapshot_op_tab()?;
+        let reason = reason_asked(req)?;
+        let file = path_asked(req)?.map(|name| self.pidsnapshot_path(i, name));
+        let (saved, objects) = self
+            .pidsnapshot_store(i, file.as_deref(), reason, |snapshot| {
+                snapshot.counts.objects
+            })
+            .map_err(|failure| failure_answer(&failure))?;
+        self.set_control_result(json!({
+            "seq": saved.seq,
+            "path": saved.path.display().to_string(),
+            "objects": objects,
+            "bytes": saved.bytes,
+            "sha256": saved.sha256,
+        }));
+        Ok(Task::none())
+    }
+
+    /// 控制面的 `pid_snapshot_export`，在写操作的流程里：同 `PIDSNAPSHOT EXPORT`，把第 `seq` 份
+    /// 原样复制成 `path`；结果是写到哪里、几个字节。目标已在报 `SNAPSHOT_IMMUTABLE`。
+    pub(in crate::app) fn control_pid_snapshot_export(
+        &mut self,
+        req: &Value,
+    ) -> Result<Task<Message>, Value> {
+        let i = self.pidsnapshot_op_tab()?;
+        let seq = seq_asked(req)?;
+        let name = path_asked(req)?
+            .ok_or_else(|| refuse("invalid_request", "要给 path：复制到哪个文件"))?;
+        let to = self.pidsnapshot_path(i, name);
+        let bytes = self
+            .pidsnapshot_copy(i, seq, &to)
+            .map_err(|failure| failure_answer(&failure))?;
+        self.set_control_result(json!({
+            "path": to.display().to_string(),
+            "bytes": bytes,
+        }));
+        Ok(Task::none())
+    }
+
+    /// 自动化操作对着的标签页：当前的；开始页上没有图。
+    fn pidsnapshot_op_tab(&self) -> Result<usize, Value> {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return Err(refuse("no_document", "Create or open a drawing first"));
+        }
+        Ok(i)
+    }
+}
+
+/// 自动化操作做不成的应答：错误码和说法同命令；图没存过时说给 `path` 写成文件。
+fn failure_answer(failure: &Failure) -> Value {
+    let error = match failure {
+        Failure::NoProjectDir => format!(
+            "{INDEX_NO_PROJECT_DIR}: 当前图没保存过，没有放带序号快照的目录；存盘后再用，或者给 pid_snapshot_save 一个 path 写成文件"
+        ),
+        _ => failure.to_string(),
+    };
+    refuse(failure.code().unwrap_or("invalid_request"), error)
+}
+
+/// 控制面的失败应答。
+fn refuse(code: &str, error: impl Into<String>) -> Value {
+    json!({ "ok": false, "status": "failed", "code": code, "error": error.into() })
+}
+
+/// `seq`：第几份快照，写整数。
+fn seq_asked(req: &Value) -> Result<u64, Value> {
+    req["seq"]
+        .as_u64()
+        .ok_or_else(|| refuse("invalid_request", "要给 seq：第几份快照，写整数"))
+}
+
+/// `path`：写到哪个文件，不给是 `None`；给了要是非空的文字。
+fn path_asked(req: &Value) -> Result<Option<&str>, Value> {
+    match &req["path"] {
+        Value::Null => Ok(None),
+        Value::String(name) if !name.trim().is_empty() => Ok(Some(name)),
+        _ => Err(refuse("invalid_request", "path 写文件名")),
+    }
+}
+
+/// `reason`：原因，去掉首尾空白；不给是空的。
+fn reason_asked(req: &Value) -> Result<&str, Value> {
+    match &req["reason"] {
+        Value::Null => Ok(""),
+        Value::String(reason) => Ok(reason.trim()),
+        _ => Err(refuse("invalid_request", "reason 写文字")),
+    }
+}
+
+/// `pid_diff` 的请求：`a` 必给，`b` 不给是当前图，都换成 `PIDDIFF` 的写法；`move_tolerance`
+/// 不给是 [`DEFAULT_MOVE_TOLERANCE`]，给了要是不小于 0 的数。
+fn diff_request(req: &Value) -> Result<(String, String, f64), Value> {
+    let a = side_asked(&req["a"], "a")?
+        .ok_or_else(|| refuse("invalid_request", "要给 a：比对的旧的一边"))?;
+    let b = side_asked(&req["b"], "b")?.unwrap_or_else(|| "live".to_owned());
+    let tolerance = match &req["move_tolerance"] {
+        Value::Null => DEFAULT_MOVE_TOLERANCE,
+        value => value
+            .as_f64()
+            .filter(|tolerance| *tolerance >= 0.0)
+            .ok_or_else(|| refuse("invalid_request", "move_tolerance 写不小于 0 的数"))?,
+    };
+    Ok((a, b, tolerance))
+}
+
+/// 比对的一边：整数是序号，文字同 `PIDDIFF` 的写法（序号、快照文件或 `live`），去掉首尾空白；
+/// 不给是 `None`。
+fn side_asked(value: &Value, key: &str) -> Result<Option<String>, Value> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Number(seq) if seq.is_u64() => Ok(Some(seq.to_string())),
+        Value::String(text) if !text.trim().is_empty() => Ok(Some(text.trim().to_owned())),
+        _ => Err(refuse(
+            "invalid_request",
+            format!("{key} 写序号、快照文件或 live"),
+        )),
     }
 }
 
@@ -665,7 +880,8 @@ mod tests {
     use super::*;
     use crate::pid::project_index::{ObjectKind, SummaryMeta, SummaryObject, SummarySource};
     use crate::pid::snapshot::{
-        MAX_REASON_CHARS, SNAPSHOT_IMMUTABLE, SNAPSHOT_NOT_FOUND, SNAPSHOT_REASON_TOO_LONG,
+        MAX_REASON_CHARS, SNAPSHOT_CORRUPT, SNAPSHOT_IMMUTABLE, SNAPSHOT_NOT_FOUND,
+        SNAPSHOT_REASON_TOO_LONG,
     };
     use serde_json::{json, Value};
     use std::fs;
@@ -1331,5 +1547,374 @@ mod tests {
         assert_eq!(utc_said(0), "1970-01-01 00:00 UTC");
         assert_eq!(utc_said(951_782_400), "2000-02-29 00:00 UTC");
         assert_eq!(utc_said(1_795_272_374), "2026-11-21 14:46 UTC");
+    }
+
+    /// 写操作做成了，它的结果（`result`）。
+    fn result_of(answer: &Value) -> &Value {
+        assert_eq!(answer["ok"], true, "{answer}");
+        &answer["result"]
+    }
+
+    /// `asked` 没做成，报的是 `code`。
+    fn assert_refused(asked: &Value, answer: &Value, code: &str) {
+        assert_eq!(answer["ok"], false, "{asked}: {answer}");
+        assert_eq!(answer["code"], code, "{asked}: {answer}");
+    }
+
+    /// 自动化操作（§5.3）：`pid_snapshot_save` 同 `PIDSNAPSHOT SAVE`，结果是序号、文件、对象数、
+    /// 字节数和整个文件的 SHA-256，与列表里记的一致；带 `path` 就是 `FILE` 形式，不编序号（`seq`
+    /// 是 `null`），不是完整路径的从图所在的目录算起。图的「已修改」和撤销栈都不变。
+    #[test]
+    fn pid_snapshot_save_answers_the_seq_and_the_file_it_wrote() {
+        let scratch = Scratch::new();
+        let mut app = saved_plant(&scratch);
+        let i = app.active_tab;
+        let (dirty, steps) = (app.tabs[i].dirty, undo_steps(&app));
+        let answer = request(
+            &mut app,
+            json!({"op": "pid_snapshot_save", "reason": "送审前"}),
+        );
+        let saved = result_of(&answer);
+        let file = snapshots(&scratch).join("0001.json");
+        let listed = store::list(&snapshots(&scratch)).expect("快照列表");
+        assert_eq!(saved["seq"], 1, "{answer}");
+        assert_eq!(saved["path"], file.display().to_string(), "{answer}");
+        assert_eq!(saved["objects"], listed[0].objects, "{answer}");
+        let bytes = fs::metadata(&file).expect("快照文件").len();
+        assert_eq!(saved["bytes"], bytes, "{answer}");
+        assert_eq!(saved["sha256"], listed[0].sha256, "{answer}");
+        let first = store::load(&snapshots(&scratch), 1).expect("第 1 份");
+        assert_eq!(first.reason, "送审前");
+        let again = request(&mut app, json!({"op": "pid_snapshot_save"}));
+        assert_eq!(result_of(&again)["seq"], 2, "{again}");
+
+        let answer = request(
+            &mut app,
+            json!({"op": "pid_snapshot_save", "path": "spare.json", "reason": "备份"}),
+        );
+        let saved = result_of(&answer);
+        let spare = scratch.path("spare.json");
+        assert_eq!(saved["seq"], Value::Null, "{answer}");
+        assert_eq!(saved["path"], spare.display().to_string(), "{answer}");
+        let written = store::load_file(&spare).expect("FILE 形式的快照");
+        assert_eq!((written.seq, written.reason.as_str()), (None, "备份"));
+        assert_eq!(saved["objects"], written.counts.objects, "{answer}");
+        let listed = store::list(&snapshots(&scratch)).expect("快照列表");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(app.tabs[i].dirty, dirty);
+        assert_eq!(undo_steps(&app), steps);
+    }
+
+    /// `pid_snapshots` 是当前图的快照列表：图号、快照目录，每份的序号、时间、生成人、原因、对象数、
+    /// 字节数和 `status`（文件不在了是 `missing`），另带文件名和整个文件的 SHA-256。
+    #[test]
+    fn pid_snapshots_lists_each_snapshot_and_marks_the_missing_ones() {
+        let scratch = Scratch::new();
+        let mut app = saved_plant(&scratch);
+        let answer = request(&mut app, json!({"op": "pid_snapshots"}));
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["drawing_id"], "PID-1101", "{answer}");
+        let dir = snapshots(&scratch).display().to_string();
+        assert_eq!(answer["dir"], dir, "{answer}");
+        assert_eq!(answer["snapshots"], json!([]), "{answer}");
+        for reason in ["一", "二"] {
+            let saved = request(
+                &mut app,
+                json!({"op": "pid_snapshot_save", "reason": reason}),
+            );
+            assert_eq!(saved["ok"], true, "{saved}");
+        }
+        fs::remove_file(snapshots(&scratch).join("0002.json")).expect("只读的文件也删得掉");
+        let answer = request(&mut app, json!({"op": "pid_snapshots"}));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let listed = store::list(&snapshots(&scratch)).expect("快照列表");
+        assert_eq!(answer["snapshots"], json!(listed), "{answer}");
+        let first = &answer["snapshots"][0];
+        for key in [
+            "seq",
+            "created_at",
+            "created_by",
+            "reason",
+            "objects",
+            "bytes",
+            "status",
+            "file",
+            "sha256",
+        ] {
+            assert!(!first[key].is_null(), "{key}: {first}");
+        }
+        assert_eq!(first["created_by"], app.waiver_by(), "{first}");
+        assert_eq!(first["reason"], "一", "{first}");
+        assert_eq!(first["status"], "ok", "{first}");
+        assert_eq!(answer["snapshots"][1]["status"], "missing", "{answer}");
+    }
+
+    /// `pid_snapshot` 应答第几份快照的全文（§3.2），`ok` 在最前；读的时候照常校验：序号不在报
+    /// `SNAPSHOT_NOT_FOUND`，与校验和对不上报 `SNAPSHOT_CORRUPT`；`seq` 不是整数是
+    /// `invalid_request`。
+    #[test]
+    fn pid_snapshot_answers_the_whole_snapshot_and_checks_it_on_the_way() {
+        let scratch = Scratch::new();
+        let mut app = saved_plant(&scratch);
+        let saved = request(
+            &mut app,
+            json!({"op": "pid_snapshot_save", "reason": "送审前"}),
+        );
+        assert_eq!(saved["ok"], true, "{saved}");
+        let answer = request(&mut app, json!({"op": "pid_snapshot", "seq": 1}));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let bytes = fs::read(snapshots(&scratch).join("0001.json")).expect("第 1 份");
+        let file: Value = serde_json::from_slice(&bytes).expect("快照是 JSON");
+        let mut whole = answer.clone();
+        whole.as_object_mut().expect("应答是对象").remove("ok");
+        assert_eq!(whole, file);
+        let keys: Vec<&str> = answer
+            .as_object()
+            .expect("应答是对象")
+            .keys()
+            .take(3)
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["ok", "version", "kind"]);
+
+        let mut tampered = file;
+        tampered["seq"] = json!(2);
+        tampered["body_sha256"] = json!("0".repeat(64));
+        let bad = snapshots(&scratch).join("0002.json");
+        fs::write(bad, tampered.to_string()).expect("写一份坏的");
+        for (asked, code) in [
+            (json!({"op": "pid_snapshot", "seq": 9}), SNAPSHOT_NOT_FOUND),
+            (json!({"op": "pid_snapshot", "seq": 2}), SNAPSHOT_CORRUPT),
+            (json!({"op": "pid_snapshot"}), "invalid_request"),
+            (json!({"op": "pid_snapshot", "seq": "1"}), "invalid_request"),
+            (json!({"op": "pid_snapshot", "seq": -1}), "invalid_request"),
+        ] {
+            let answer = request(&mut app, asked.clone());
+            assert_refused(&asked, &answer, code);
+        }
+    }
+
+    /// `pid_snapshot_export` 同 `PIDSNAPSHOT EXPORT`：原样复制，结果是写到哪里、几个字节；目标已在
+    /// 报 `SNAPSHOT_IMMUTABLE`，序号不在报 `SNAPSHOT_NOT_FOUND`，都不写；`seq`、`path` 都要给。
+    #[test]
+    fn pid_snapshot_export_copies_byte_for_byte_and_never_overwrites() {
+        let scratch = Scratch::new();
+        let mut app = saved_plant(&scratch);
+        let saved = request(&mut app, json!({"op": "pid_snapshot_save"}));
+        assert_eq!(saved["ok"], true, "{saved}");
+        let answer = request(
+            &mut app,
+            json!({"op": "pid_snapshot_export", "seq": 1, "path": "copy.json"}),
+        );
+        let copied = result_of(&answer);
+        let copy = scratch.path("copy.json");
+        let original = fs::read(snapshots(&scratch).join("0001.json")).expect("第 1 份");
+        assert_eq!(copied["path"], copy.display().to_string(), "{answer}");
+        assert_eq!(copied["bytes"], original.len(), "{answer}");
+        assert_eq!(fs::read(&copy).expect("复制出来的"), original);
+        for (asked, code) in [
+            (
+                json!({"op": "pid_snapshot_export", "seq": 1, "path": "copy.json"}),
+                SNAPSHOT_IMMUTABLE,
+            ),
+            (
+                json!({"op": "pid_snapshot_export", "seq": 9, "path": "nine.json"}),
+                SNAPSHOT_NOT_FOUND,
+            ),
+            (
+                json!({"op": "pid_snapshot_export", "seq": 1}),
+                "invalid_request",
+            ),
+            (
+                json!({"op": "pid_snapshot_export", "path": "other.json"}),
+                "invalid_request",
+            ),
+        ] {
+            let answer = request(&mut app, asked.clone());
+            assert_refused(&asked, &answer, code);
+        }
+        assert_eq!(fs::read(&copy).expect("复制出来的"), original);
+        for name in ["nine.json", "other.json"] {
+            assert!(!scratch.path(name).exists(), "{name}");
+        }
+    }
+
+    /// `pid_diff` 同 `PIDDIFF`：`a`、`b` 写序号（整数或全是数字的文字）、快照文件或 `live`，`b`
+    /// 默认 `live`，`ref` 照写的填；`move_tolerance` 交给比对（§3.6），不给是 0.001。两边是同一份报
+    /// `DIFF_SAME_SNAPSHOT`；写错了是 `invalid_request`。
+    #[test]
+    fn pid_diff_compares_with_the_drawing_by_default_and_passes_move_tolerance_on() {
+        let scratch = Scratch::new();
+        let mut app = saved_plant(&scratch);
+        // 挑有位号的来挪（§3.5）：位号空的挪了是删一个、增一个。这台泵不在线上，挪了不牵动连接。
+        let spare_pump = [60.0, -80.0];
+        draw(&mut app, "PIDINSERT pump", &[spare_pump]);
+        app.finish_all_pending_history();
+        let saved = request(&mut app, json!({"op": "pid_snapshot_save"}));
+        assert_eq!(saved["ok"], true, "{saved}");
+        edit(&mut app);
+        let counts = |answer: &Value| {
+            let summary = &answer["summary"];
+            [&summary["新增"], &summary["删除"], &summary["修改"]].map(Value::clone)
+        };
+        let answer = request(&mut app, json!({"op": "pid_diff", "a": 1}));
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["a"]["ref"], "1", "{answer}");
+        assert_eq!(answer["a"]["seq"], 1, "{answer}");
+        assert_eq!(answer["b"]["ref"], "live", "{answer}");
+        assert_eq!(answer["b"]["seq"], Value::Null, "{answer}");
+        assert_eq!(answer["identical"], false, "{answer}");
+        assert_eq!(counts(&answer), [json!(1), json!(1), json!(1)], "{answer}");
+        let saved = request(&mut app, json!({"op": "pid_snapshot_save"}));
+        assert_eq!(saved["ok"], true, "{saved}");
+        let answer = request(&mut app, json!({"op": "pid_diff", "a": "1", "b": "2"}));
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["a"]["ref"], "1", "{answer}");
+        assert_eq!(answer["b"]["ref"], "2", "{answer}");
+        assert_eq!(counts(&answer), [json!(1), json!(1), json!(1)], "{answer}");
+        let answer = request(&mut app, json!({"op": "pid_diff", "a": 2, "b": "LIVE"}));
+        assert_eq!(answer["identical"], true, "{answer}");
+
+        let pump = object_at(&app, ObjectKind::Equipment, spare_pump);
+        assert!(!pump.tag.is_empty(), "挪的泵要有位号，挪了才认得是同一个");
+        let moved = request(
+            &mut app,
+            json!({"op": "entities_transform", "handles": [pump.handle], "vector": [0.5, 0.0, 0.0]}),
+        );
+        assert_eq!(moved["ok"], true, "{moved}");
+        for (tolerance, identical) in [(None, false), (Some(0.1), false), (Some(1.0), true)] {
+            let mut asked = json!({"op": "pid_diff", "a": 2});
+            if let Some(tolerance) = tolerance {
+                asked["move_tolerance"] = json!(tolerance);
+            }
+            let answer = request(&mut app, asked.clone());
+            assert_eq!(answer["ok"], true, "{asked}: {answer}");
+            assert_eq!(answer["identical"], identical, "{asked}: {answer}");
+            if !identical {
+                let moved = &answer["summary"]["by_what"]["位置"];
+                assert_eq!(*moved, 1, "{asked}: {answer}");
+            }
+        }
+
+        let saved = request(
+            &mut app,
+            json!({"op": "pid_snapshot_save", "path": "spare.json"}),
+        );
+        assert_eq!(saved["ok"], true, "{saved}");
+        let spare = scratch.path("spare.json").display().to_string();
+        for (asked, code) in [
+            (
+                json!({"op": "pid_diff", "a": 2, "b": "2"}),
+                DIFF_SAME_SNAPSHOT,
+            ),
+            (json!({"op": "pid_diff", "a": "live"}), DIFF_SAME_SNAPSHOT),
+            (
+                json!({"op": "pid_diff", "a": "spare.json", "b": spare}),
+                DIFF_SAME_SNAPSHOT,
+            ),
+            (json!({"op": "pid_diff", "a": 9}), SNAPSHOT_NOT_FOUND),
+            (
+                json!({"op": "pid_diff", "a": "none.json"}),
+                SNAPSHOT_NOT_FOUND,
+            ),
+            (json!({"op": "pid_diff"}), "invalid_request"),
+            (json!({"op": "pid_diff", "a": ""}), "invalid_request"),
+            (
+                json!({"op": "pid_diff", "a": 1, "b": true}),
+                "invalid_request",
+            ),
+            (
+                json!({"op": "pid_diff", "a": 1, "move_tolerance": -1}),
+                "invalid_request",
+            ),
+            (
+                json!({"op": "pid_diff", "a": 1, "move_tolerance": "1"}),
+                "invalid_request",
+            ),
+        ] {
+            let answer = request(&mut app, asked.clone());
+            assert_refused(&asked, &answer, code);
+        }
+    }
+
+    /// 只读会话里五个操作照常能用（写的是本机文件，不是图纸，§5.4）；自动化停了以后三个读的照常
+    /// 能用，存快照同别的写操作被拒。
+    #[test]
+    fn pid_snapshot_ops_work_in_a_readonly_session_and_the_reads_with_automation_stopped() {
+        let scratch = Scratch::new();
+        let mut app = saved_plant(&scratch);
+        app.collab.readonly = true;
+        for asked in [
+            json!({"op": "pid_snapshot_save", "reason": "只读"}),
+            json!({"op": "pid_snapshot_save", "path": "spare.json"}),
+            json!({"op": "pid_snapshots"}),
+            json!({"op": "pid_snapshot", "seq": 1}),
+            json!({"op": "pid_snapshot_export", "seq": 1, "path": "copy.json"}),
+            json!({"op": "pid_diff", "a": 1}),
+            json!({"op": "pid_diff", "a": "spare.json", "b": 1}),
+        ] {
+            let answer = request(&mut app, asked.clone());
+            assert_eq!(answer["ok"], true, "{asked}: {answer}");
+        }
+        for name in ["spare.json", "copy.json"] {
+            assert!(scratch.path(name).is_file(), "{name}");
+        }
+        let stopped = request(&mut app, json!({"op": "stop"}));
+        assert_eq!(stopped["ok"], true, "{stopped}");
+        for asked in [
+            json!({"op": "pid_snapshots"}),
+            json!({"op": "pid_snapshot", "seq": 1}),
+            json!({"op": "pid_diff", "a": 1}),
+        ] {
+            let answer = request(&mut app, asked.clone());
+            assert_eq!(answer["ok"], true, "{asked}: {answer}");
+        }
+        let asked = json!({"op": "pid_snapshot_save"});
+        let answer = request(&mut app, asked.clone());
+        assert_refused(&asked, &answer, "disabled");
+    }
+
+    /// 没保存过的图没有放带序号快照的目录，要用目录的操作都报 `INDEX_NO_PROJECT_DIR`，说可以给
+    /// `path`；`pid_snapshot_save` 带 `path` 照常写成文件，拿它和当前图比也行。
+    #[test]
+    fn pid_snapshot_ops_on_an_unsaved_drawing_need_a_path() {
+        let scratch = Scratch::new();
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        plant(&mut app);
+        let copy = scratch.path("copy.json").display().to_string();
+        for asked in [
+            json!({"op": "pid_snapshot_save"}),
+            json!({"op": "pid_snapshots"}),
+            json!({"op": "pid_snapshot", "seq": 1}),
+            json!({"op": "pid_snapshot_export", "seq": 1, "path": copy}),
+            json!({"op": "pid_diff", "a": 1}),
+        ] {
+            let answer = request(&mut app, asked.clone());
+            assert_refused(&asked, &answer, INDEX_NO_PROJECT_DIR);
+            let error = answer["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("没保存过") && error.contains("path"),
+                "{asked}: {answer}"
+            );
+        }
+        assert!(!scratch.path("copy.json").exists());
+        let file = scratch.path("unsaved.json").display().to_string();
+        let answer = request(&mut app, json!({"op": "pid_snapshot_save", "path": file}));
+        let saved = result_of(&answer);
+        assert_eq!(saved["seq"], Value::Null, "{answer}");
+        assert_eq!(saved["path"], file, "{answer}");
+        let answer = request(&mut app, json!({"op": "pid_diff", "a": file}));
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["identical"], true, "{answer}");
+    }
+
+    /// 状态里的能力清单有 `pid_snapshot`。
+    #[test]
+    fn pid_snapshot_is_among_the_capabilities() {
+        let mut app = OpenCADStudio::new_for_test();
+        let state = app.automation_op(r#"{"protocol":1,"op":"state"}"#);
+        let capabilities = state["capabilities"].as_array().expect("能力清单");
+        assert!(capabilities.contains(&json!("pid_snapshot")), "{state}");
     }
 }

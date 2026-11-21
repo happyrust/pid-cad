@@ -470,3 +470,46 @@ MCP：`pid_snapshots`、`pid_snapshot`、`pid_diff` 进 `READ_OPS`；`pid_snapsh
 `apply.rs` 里只读名单的那条测试，「只读」一组加了两个命令的七种写法。
 
 **先红后绿：** 先放空壳：模块登记了，`waiver_by` 放宽了，测试要用的函数和常量都在；但做快照的入口总报错，命令没接进命令链、没登记、不在只读名单和整行名单里，`utc_said` 返回空串。`apply.rs` 那条测试先加上七种写法。新的 12 条都编得过、都败在断言上：9 条败在命令不认得（`Unknown command`），登记那条败在没登记，UTC 那条败在空串，只读会话那条败在只读会话拦下了 `PIDSNAPSHOT`；`apply.rs` 那条也败在 `PIDSNAPSHOT` 被拦（`collab::apply` 的 39 条里 38 条过）。实现、接线后 12 条全过（1.04 秒），`collab::apply` 的 39 条全过。之后把写长度的小函数换成 `pidindex` 的 `number`，又在测试里补了四处断言：整段加双引号的原因去掉引号、序号与它自己的文件不算同一份、比对结果不盖项目文件、列表标出不在了的文件。这四处是实现以后补的，没有先红；全套检查里 12 条全过（0.56 秒）。新文件照 rustfmt 整理过（只改排版），整理后重跑也全过（0.67 秒）。
+
+### 11.6 `SNAP-6`：操作与接口（2026-11-21）
+
+**做了什么**（五个操作写在 `src/app/commands/pidsnapshot.rs`；`src/app/control/mod.rs` 接进控制面；`src/rest.rs`、`src/rest_openapi.json` 接 REST；`src/mcp.rs`、`src/mcp_ops.rs` 接 MCP）：
+
+- 五个操作与两个命令共用取图、定目录、做快照、读快照、比对的那几步。命令里的几步提成了函数：`pidsnapshot_store`（存一份，或写成文件）、`pidsnapshot_listed`（列表）、`pidsnapshot_copy`（复制）；`piddiff_compare` 多了容差参数，命令传默认的 0.001。命令的说法和行为都不变，`SNAP-5` 的 12 条照过。操作写在命令的同一个文件里，§11.5 说的「到时再放宽可见性」用不着了。
+- 控制面：`pid_snapshots`、`pid_snapshot`、`pid_diff` 是读操作，自动化停了也能用；`pid_snapshot_save`、`pid_snapshot_export` 走写操作的流程，自动化停了报 `disabled`。只读会话里五个都能用（§5.4）。能力清单加 `pid_snapshot`，排在 `pid_bom` 后面。
+- REST：五条路由照 §5.3。`map_status` 加 `SNAPSHOT_NOT_FOUND` → 404，`SNAPSHOT_IMMUTABLE`、`SNAPSHOT_CORRUPT` → 409（`INDEX_NO_PROJECT_DIR` 本来就是 409），`SNAPSHOT_IO_ERROR` → 500；§3.8 别的码走默认的 400。OpenAPI 加四个路径（`/api/v1/pid/snapshots` 下有 GET、POST 两个操作），每个操作列出会回的状态码。
+- MCP：三个读的进 `READ_OPS`，读工具的 `parameters` 加 `seq`（整数，不小于 1）、`a`、`b`（整数或文字）、`move_tolerance`（数，不小于 0）。两个写的进 `EXECUTE_OPS`，各有一份参数定义：`pid_snapshot_save` 的 `reason`、`path` 都可选，`pid_snapshot_export` 的 `seq`（整数）、`path` 都必给，多给的参数不收；两个都可以当批量里的一步。`TOOL_SCHEMA_DIGEST` 换成新值。
+
+**与规格、任务写法不同的：**
+
+1. **写的两个操作，结果在 `result` 里。** §5.3 把 `seq`、`path` 等写在应答顶层。控制面的写操作都是 `ok`、`status` 在顶层，结果放在 `result` 里（同 `pid_bom_export`），这里照控制面。存的结果是 `seq`（写成文件的是 `null`）、`path`（解析后的完整路径）、`objects`、`bytes`、`sha256`；复制的是 `path`、`bytes`。读的三个照 §5.3，内容在顶层。
+2. **列表的每一份多两项**：`file`（文件名，如 `0001.json`）和 `sha256`（整个文件的），是 `store::list` 本来就给的（§11.2），照原样给出。键的先后是 `seq`、`file`、`created_at`、`created_by`、`reason`、`objects`、`bytes`、`sha256`、`status`。
+3. **多改了两个文件**：`src/app/commands/pidsnapshot.rs`（操作写在这里）和 `src/mcp_ops.rs`（写操作的参数定义在这里）。
+
+**规格没写到、这里定下的：**
+
+1. **参数。** `seq` 要写成 JSON 整数，不给、写成文字或负数报 `invalid_request`。`a`、`b` 同 `PIDDIFF` 的甲、乙：整数或全是数字的文字是序号，`live`（不分大小写）是当前图，别的文字当快照文件，都去掉首尾空白；`a` 必给，`b` 不给是 `live`；`ref` 照写的填，整数写成数字串（`1` → `"1"`）。`move_tolerance` 不给是 0.001，给了要是不小于 0 的数。`reason` 去掉首尾空白，不给是空的。`path` 要是非空的文字，解析同命令：不是完整路径的从图所在的目录算起，图没存过的从程序的当前目录算起。写错了都报 `invalid_request`（REST 400），说怎么写。
+2. **同一份、不在、坏了**同命令：同一份（只给 `a: "live"` 也算）在读任何东西之前查，报 `DIFF_SAME_SNAPSHOT`；序号、文件不在报 `SNAPSHOT_NOT_FOUND`；读的时候校验，对不上报 `SNAPSHOT_CORRUPT`。
+3. **图没存过。** 列表、按序号读、复制、按序号比对，和不给 `path` 的存，都报 `INDEX_NO_PROJECT_DIR`（409）；说法里提示存盘，或者给 `pid_snapshot_save` 一个 `path` 写成文件。给了 `path` 照常写成文件，拿这个文件与当前图比也照常。开始页上（没有图）五个都报 `no_document`，同别的控制面操作。
+4. **状态码。** `SNAPSHOT_IO_ERROR`（§11.2 第 1 条加的）给 500，同 `BOM_IO_ERROR` 等。存成功是 201，写成文件的也是。
+5. **REST 的写法。** 路径里的 `{seq}` 是数字就换成整数，不是的原样交给操作，由操作报 `invalid_request`（400）；查询参数 `move_tolerance` 能读成有限的数就换成数，读不成的原样交给操作去拒。`POST …/{seq}/export` 的请求体里也写了 `seq` 时，以路径里的为准。
+6. **执行工具的 schema 大小。** 执行工具的请求 schema 有 50,000 字节的上限（测试 `schema_size_and_defs_structure`）。两个写操作的说明起先写得长，加上后是 50,464 字节；照别的操作的写法压短（不再提错误码、只读会话和读的三个操作），现在是 49,925 字节（按删掉的字数算出，那条测试过了）。离上限只剩 75 字节，`BOM-6` 给 `pid_bom_export` 加参数之前要先腾地方。
+
+**测试**（`pidsnapshot.rs` 8 条，图同 `SNAP-5`，操作都用协议 1 的控制请求发）：
+
+- 存：带原因存出第 1 份，`result` 里的序号、路径、对象数、字节数、校验和与 `store::list` 的相同；再存是第 2 份；`path: "spare.json"` 写成图所在目录里的那个文件，序号是 `null`。前后标签页的「已修改」、撤销步数都不变。
+- 列表：还没有快照时 `snapshots` 是空的；存两份、删掉 `0002.json` 后，`snapshots` 与 `store::list` 写成的 JSON 相同：第 1 份的生成人与豁免人相同、原因对、`status` 是 `ok`，第 2 份是 `missing`。
+- 读：应答去掉 `ok` 与文件里的 JSON 相同，键以 `ok`、`version`、`kind` 开头；把 `0002.json` 的 `body_sha256` 改成全 0，读它报 `SNAPSHOT_CORRUPT`；序号 9 报 `SNAPSHOT_NOT_FOUND`；不给 `seq`、写成 `"1"`、写成 -1 都报 `invalid_request`。
+- 复制：复制成 `copy.json`，与 `0001.json` 逐字节相同，`result` 的路径、字节数对；再复制到它报 `SNAPSHOT_IMMUTABLE`，文件不变；序号 9 报 `SNAPSHOT_NOT_FOUND`；不给 `path`、不给 `seq` 报 `invalid_request`；这几次都不写文件。
+- 比对：存第 1 份之前另插一台不在线上的泵。改图后 `a: 1` 与当前图比，`ref` 是 `"1"` 和 `"live"`，三组计数是 1、1、1；再存一份，`"1"` 比 `"2"` 同样，`2` 比 `"LIVE"` 无差异。把那台泵挪 0.5：不给容差、容差 0.1 都不是无差异，`by_what` 里位置是 1；容差 1 是无差异。同一份的三种（`2` 与 `"2"`、只给 `"live"`、同一个文件一边写相对路径一边写完整路径）报 `DIFF_SAME_SNAPSHOT`；序号 9、不在的文件报 `SNAPSHOT_NOT_FOUND`；不给 `a`、`a` 是空串、`b` 是 `true`、容差 -1、容差写成文字，都报 `invalid_request`。
+- 只读会话：七个请求（两种存、列表、读、复制、两种比对）都照常，文件都写出来了。自动化停了以后三个读的照常，存报 `disabled`。
+- 图没存过：五个都报 `INDEX_NO_PROJECT_DIR`，说法里有「没保存过」和 `path`，不写文件；`path` 给完整路径能写成文件（序号 `null`），拿它与当前图比无差异。
+- 能力清单里有 `pid_snapshot`。
+
+`rest.rs` 新的 1 条：五条路由各规划成哪个操作（存是 201；路径里的序号是数字的换成整数，`third` 原样；`a`、`b`、`move_tolerance` 从查询参数来，`far` 原样；复制时路径里的序号盖过请求体里的）。再在一张没存过的图上经 `route` 走一遍：带完整路径存是 201、序号 `null`，拿它与当前图比无差异；11 种做不成的状态码和错误码都对（同一个文件再存 409 `SNAPSHOT_IMMUTABLE`；不给 `path` 的存、列表、按序号读 409 `INDEX_NO_PROJECT_DIR`；序号写成 `first` 400；复制不给 `path` 400；两边同一个文件 400 `DIFF_SAME_SNAPSHOT`；不在的文件 404；校验和不对的文件 409 `SNAPSHOT_CORRUPT`；容差 `far` 400；不给 `a` 400）。`map_status` 对 §3.8 的八个码和 `SNAPSHOT_IO_ERROR`；OpenAPI 里五个操作都列了该列的状态码。原有的 `openapi_documents_structured_automation_routes` 加了这五个操作。
+
+`mcp.rs` 新的 1 条：三个读的在 `READ_OPS`，两个写的在 `EXECUTE_OPS`；读工具四个参数的类型和下限；写的两个：3 种合规的请求过，5 种不合规的拒（原因写成数、存的时候给 `seq`、复制不给 `seq`、不给 `path`、`seq` 写成文字），当批量里的一步也过。
+
+**先红后绿：** 先只加测试，产品代码没动。新的 10 条都编得过、都失败：`pid_snapshot` 筛出的 9 条里，6 条败在操作不认得（`unknown_operation`），能力清单那条败在没有 `pid_snapshot`，REST 那条败在 `GET /api/v1/pid/snapshots` 没有规划成读，MCP 那条败在 `pid_snapshots` 不在 `READ_OPS`；`pid_diff` 筛出的 3 条也都败，比对那条败在 `unknown_operation`。`openapi_documents_structured_automation_routes` 加的五项不在这两个筛选里，红的时候没跑。实现、接线后第一遍：`pid_snapshot` 9 条过；比对那条败了，是测试挑错了对象：挪的是改图时新插的变送器，它没有位号，按 §3.5 挪了就是删一个、增一个，不会报「位置」改了。改成在存第 1 份之前另插一台不在线上的泵（泵插进来就有位号），挪它。摘要那条照预期败在值变了，换上新值。第二遍三个筛选全过（`pid_snapshot` 9 条 0.64 秒，`pid_diff` 3 条 0.59 秒）。全套检查拦下 `mcp::tests::schema_size_and_defs_structure`（见上面第 6 条）；压短说明、再换一次摘要后重跑全套。
+
+**手工检查：** 编了调试版（`cargo build --offline --locked`），用 `--http` 起程序，令牌只经环境变量 `OCS_API_TOKEN` 传（不打印、不落盘），经 HTTP 走了 46 步。不带令牌是 401，能力清单里有 `pid_snapshot`。没存过的图上五个操作都是 409 `INDEX_NO_PROJECT_DIR`、说法里有 `path`；带完整路径的存是 201、写成文件（还没画东西，对象数 0），拿它与当前图比无差异。画上泵、阀、容器、管路和一台不在线上的泵，存成 `PID-S1.dwg`：列表是空的；存第 1 份是 201，原因去了首尾空白；列表的对象数、校验和对；整份读与文件相同。插一台变送器后与当前图比是 1、0、0；存第 2 份，1 比 2 同样，2 比当前图无差异。用 `entities_transform` 把那台泵挪 0.5：不给容差报位置 1 处，容差 1 无差异，容差 `far` 是 400。复制是 200，路径里的序号盖过请求体里的 7，复制出的文件与 `0001.json` 逐字节相同。做不成的都是该有的码和状态码：再复制一遍、存到已有的文件是 409 `SNAPSHOT_IMMUTABLE`；序号 9（复制、读）和不在的文件是 404 `SNAPSHOT_NOT_FOUND`，复制序号 9 不写文件；校验和不对的文件是 409 `SNAPSHOT_CORRUPT`；原因 201 字是 400 `SNAPSHOT_REASON_TOO_LONG`；写到不存在的目录是 500 `SNAPSHOT_IO_ERROR`；同一份是 400 `DIFF_SAME_SNAPSHOT`；序号写成 `first`、不给 `a`、复制不给 `path` 是 400 `invalid_request`。删掉 `0002.json` 后列表把它标成 `missing`，读它是 404。第一遍有两步没过，都是检查脚本的预期写错了：没画东西时存的文件对象数本来就是 0；整份读的应答末尾多一个 `http_status`，这是 HTTP 服务给每个 JSON 应答都加的（`rest.rs` 的 `serve_connection`，原来就有），直接调 `route` 的测试里没有；去掉它和 `ok` 以后与文件逐项相同。改了脚本的这两处预期，重跑 46 步全过。

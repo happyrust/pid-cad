@@ -262,6 +262,48 @@
         "responses": {"200": {"description": "result: path, format (csv, xlsx or json), rows, bytes (size of the main file) and pipe_summary_path (null for JSON); or status scanning with done and total while the project's files are still being read: send it again later. Nothing is written when the list cannot be made"}, "400": {"description": "Malformed request (no path, or the project file as path), SCOPE_NOT_SELECTED, BOM_COLUMN_UNKNOWN or BOM_FORMAT_UNSUPPORTED"}, "404": {"description": "PBS_NODE_UNKNOWN"}, "409": {"description": "BOM_DUPLICATE_TAG, BOM_SCOPE_INCOMPLETE, INDEX_NO_PROJECT_DIR or INDEX_DRAWING_ID_DUPLICATED"}, "500": {"description": "BOM_IO_ERROR: the file could not be written; INDEX_IO_ERROR"}}
       }
     },
+    "/api/v1/pid/snapshots": {
+      "get": {
+        "summary": "The current drawing's numbered P&ID snapshots, kept in pid-snapshots/<drawing id>/ beside the saved drawing; changes nothing",
+        "responses": {"200": {"description": "drawing_id, dir (the snapshot folder) and snapshots, oldest first: seq, file, created_at (Unix seconds), created_by, reason, objects, bytes, sha256 (of the whole file) and status (ok, or missing when the file is gone)"}, "400": {"description": "No drawing open (no_document)"}, "409": {"description": "INDEX_NO_PROJECT_DIR: the drawing was never saved, so it has no snapshot folder"}, "500": {"description": "SNAPSHOT_IO_ERROR: the snapshot folder could not be read"}}
+      },
+      "post": {
+        "summary": "Take a snapshot of the current drawing, unsaved changes included, and keep it numbered in its snapshot folder; with path, write it as that file without a number instead. Writes a file on this machine and changes no drawing, so it also works in a read-only collaboration session",
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": {
+          "reason": {"type": "string", "description": "Why it is taken; at most 200 characters"},
+          "path": {"type": "string", "description": "Write the snapshot as this file, without a sequence number; a relative path starts from the saved drawing's folder. An existing file is never replaced"}
+        }}}}},
+        "responses": {"201": {"description": "result: seq (null when written as path), path, objects, bytes and sha256 (of the whole file)"}, "400": {"description": "Malformed request, or SNAPSHOT_REASON_TOO_LONG"}, "409": {"description": "INDEX_NO_PROJECT_DIR (the drawing was never saved: give path), or SNAPSHOT_IMMUTABLE (the file at path is already there)"}, "500": {"description": "SNAPSHOT_IO_ERROR: the file could not be written"}}
+      }
+    },
+    "/api/v1/pid/snapshots/{seq}": {
+      "get": {
+        "summary": "One numbered P&ID snapshot of the current drawing, whole, checked as it is read; changes nothing",
+        "parameters": [{"name": "seq", "in": "path", "required": true, "schema": {"type": "integer", "minimum": 1}}],
+        "responses": {"200": {"description": "The snapshot as kept in its file: version, kind, seq, drawing_id, created_at, created_by, reason, generator, dirty, counts, body_sha256, summary and graph"}, "400": {"description": "seq is not a number, SNAPSHOT_FORMAT_INVALID or SNAPSHOT_VERSION_UNSUPPORTED"}, "404": {"description": "SNAPSHOT_NOT_FOUND"}, "409": {"description": "SNAPSHOT_CORRUPT (the file fails its checksum), or INDEX_NO_PROJECT_DIR (the drawing was never saved)"}, "500": {"description": "SNAPSHOT_IO_ERROR"}}
+      }
+    },
+    "/api/v1/pid/snapshots/{seq}/export": {
+      "post": {
+        "summary": "Copy one numbered P&ID snapshot of the current drawing to a file on this machine, byte for byte; changes no drawing",
+        "parameters": [{"name": "seq", "in": "path", "required": true, "schema": {"type": "integer", "minimum": 1}}],
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "required": ["path"], "properties": {
+          "path": {"type": "string", "description": "File to write; a relative path starts from the saved drawing's folder. An existing file is never replaced"}
+        }}}}},
+        "responses": {"200": {"description": "result: path and bytes"}, "400": {"description": "Malformed request: no path, or seq is not a number"}, "404": {"description": "SNAPSHOT_NOT_FOUND"}, "409": {"description": "SNAPSHOT_IMMUTABLE (the file at path is already there), or INDEX_NO_PROJECT_DIR (the drawing was never saved)"}, "500": {"description": "SNAPSHOT_IO_ERROR"}}
+      }
+    },
+    "/api/v1/pid/diff": {
+      "get": {
+        "summary": "Compare two P&ID snapshots, or one with the current drawing as it is now; changes nothing",
+        "parameters": [
+          {"name": "a", "in": "query", "required": true, "description": "The old side: a sequence number of the current drawing's snapshots, a snapshot file (a relative path starts from the saved drawing's folder) or live (the drawing as it is now)", "schema": {"type": "string"}},
+          {"name": "b", "in": "query", "description": "The new side, written like a; defaults to live", "schema": {"type": "string"}},
+          {"name": "move_tolerance", "in": "query", "description": "A position change no larger than this is not a change; defaults to 0.001", "schema": {"type": "number", "minimum": 0}}
+        ],
+        "responses": {"200": {"description": "The comparison: version, a and b (ref as asked, seq, drawing_id, created_at, objects), identical, summary, added, removed, modified, edges and notices"}, "400": {"description": "Malformed request (no a, or move_tolerance is not a number of at least 0), DIFF_SAME_SNAPSHOT (both sides are the same), SNAPSHOT_FORMAT_INVALID or SNAPSHOT_VERSION_UNSUPPORTED"}, "404": {"description": "SNAPSHOT_NOT_FOUND"}, "409": {"description": "SNAPSHOT_CORRUPT, or INDEX_NO_PROJECT_DIR (a sequence number on a drawing never saved)"}, "500": {"description": "SNAPSHOT_IO_ERROR"}}
+      }
+    },
     "/api/v1/entities": {
       "get": {
         "summary": "Query entities (type, layer, detail, offset, limit, fields, handles, bounds, near, contains_point, intersections)",
