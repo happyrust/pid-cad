@@ -1619,6 +1619,45 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
 
+---
+
+## 40. L3-3 / L3-5 / L3-7 / L6-2（#151）：应用内 P&ID 交付前设计规则一键体检、分类高亮与逐项巡检聚焦命令 `PIDDRC` 闭环（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `f0c7199f0`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{drc,mod}.rs`、`src/app/commands/pidprops.rs` |
+| 外部证据子项 | `2026-11-21-issue151/`（`red.txt`、`green_pidprops.txt`、`real_multi_source_drc.txt`、`real_out/real151_summary.json`、`fmt_arch_pytest.txt`、`clippy_clean_counts.json`） |
+
+### 40.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `piddrc_detects_duplicates_orphan_nozzles_deadends_steps_camera_and_clears_after_fix`（构造重复位号、无位号阀门、孤立管口与悬空开放管段四类典型问题，校验 `PIDDRC` 分类选中、`PIDDRC NEXT` 视口聚焦以及 `PIDREVIEW DEDUP + ACCEPT` 后告警自动归零），运行按预期在 `PIDDRC EXPORT` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`17 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/drc.rs`（`audit_sheet_drc`）：统一兼容未升格 `.dxf`/`.dwg` 与已升格 `PID_AUTHOR` 模型，串联五大工程体检项：`DuplicateTag`（`Error`）、`OneWayOpc`（`Error`）、`OrphanNozzle`（`Warning`）、`OpenPipeDeadEnd`（`Warning`）与 `UntaggedComponent`（`Warning`），给出 `ready_for_export = (error_count == 0)` 判定；
+  2. 在 `src/app/commands/pidprops.rs` 注册并分发 `PIDDRC`：支持 `SUMMARY`、`ALL / ERRORS / WARNINGS / DUPLICATES / ONEWAYOPC / ORPHANNOZZLES / DEADENDS / UNTAGGED` 分类整组高亮选中、无状态游标 `PIDDRC NEXT [分类]`（逐项推进选中并将视口相机精准聚焦至问题图元坐标）及 `EXPORT "<json>"`。
+
+### 40.2 真实双源工程图纸应用内 `PIDDRC` 体检与巡检实测
+
+| 代号 | 样本类别 | 源图 SHA-256 前缀 | `ready_for_export` | `Errors` | `orphan_nozzles` | `open_pipe_dead_ends` | `untagged_components` | `PIDDRC NEXT` 巡检验证 |
+|---|---|---|---:|---:|---:|---:|---:|---|
+| `SP01` | `EXPORT_DXF`（SPPID 中位规模生产图） | `c0dd2cc4c75d` | `true` | `0` | `10` | `1` | `12`（与 §25 中置信度阀门数精确一致） | **通过** |
+| `LG01` | `SOURCE_DWG`（原生 AutoCAD 散线存量图） | `135b6bf6b0a6` | `true` | `0` | `0` | `11` | `28` | **通过** |
+
+### 40.3 固定门禁读数
+
+| 门禁项 | 改前读数（§39.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,226` 条（`7,151` 过 / `74` 忽略 / `1` 既有 `.pen`） | **`7,228` 条**（**`7,152` 过** / **`75` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 真实多源 DRC 巡检），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `drc.rs`、`mod.rs`、`pidprops.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+
 
 
 

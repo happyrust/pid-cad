@@ -448,10 +448,10 @@ flowchart LR
 - **验收**：拆解结果对参考 XML 的属性逐项比对；标题栏读出的图号与 XML 的图号一致。
 - **解决记录（2026-11-21）**：① `c2b0c35f2`（`#132`）落地右下角标题栏元数据提取器 `TitleBlockInfo`（90 张真实 DXF 提取标题栏图号 **`82 / 90 = 91.11%`**、图名精确率 **`48 / 49 = 97.96%`**，管段等级吻合 **`90.56%`**，见 `readings.md` §21）；② `#145` 落地 `src/io/pid_convert/external_props.rs`、CLI `--external-props` 与应用内 `PIDCONVERT` / `PIDSAVEPID` `PROPS` 外置工程表回填接口（支持 `.xlsx/.xlsm/.xls/.csv/.tsv/.json` 及 `<conn_uid>.PPT` 温压自动路由，见 `readings.md` §34）；③ `#150` 落地 `src/io/pid_convert/bom.rs`、应用内 `PIDBOM [SUMMARY | "<输出>" [ALLTABS]]` 与 CLI `--export-schedule`，直接从图纸提取与 `external_props` 100% 同构的 14 列清册模板，打通「图纸提取清册 → 补填温压 → `PROPS` 回填生成双产物」闭环（详见 `readings.md` §39）。
 
-#### L3-7 校核入口（M）— **已完成（随 [#125](https://github.com/happyrust/pid-cad/issues/125) 与 [#136](https://github.com/happyrust/pid-cad/issues/136) 落地）**
+#### L3-7 校核入口（M）— **已完成（随 [#125](https://github.com/happyrust/pid-cad/issues/125)、[#136](https://github.com/happyrust/pid-cad/issues/136) 与 [#151](https://github.com/happyrust/pid-cad/issues/151) 落地）**
 - **做法**：置信度三档（高 ≥ 0.90 自动接受；中 0.60–0.89 进人工确认；低 < 0.60 默认不导入）；人工确认 6 步；识别报告（三档计数 + 未识别图元数，计数之和等于候选行数）。
 - **验收**：三档阈值可配置；报告数字自洽；人工确认后结果进入模型。
-- **解决记录（2026-11-20..21）**：引擎层可配置阈值 `ConfidenceThresholds` 与 `ConfidenceSummary` 在 `recognize.rs` 落地并校验三档守恒（90 张 DXF `high=12,174`、`medium=3,736`、`low=0`，见 `readings.md` §14）；应用内交互命令 `PIDPROMOTE` 与 `PIDREVIEW [SUMMARY | HIGH | MEDIUM | LOW | DUPLICATES | ACCEPT | REJECT]` 在 `pidprops.rs`（`#136`）落地，支持按档位一键画布选中、人工确认（转 `manual` + `confirmed`）与驳回剔除（同步清理拓扑悬挂引用）且单步可撤销，详见 `readings.md` §25。
+- **解决记录（2026-11-20..21）**：① 引擎层可配置阈值 `ConfidenceThresholds` 与 `ConfidenceSummary` 在 `recognize.rs` 落地并校验三档守恒（90 张 DXF `high=12,174`、`medium=3,736`、`low=0`，见 `readings.md` §14）；② 应用内交互命令 `PIDPROMOTE` 与 `PIDREVIEW [SUMMARY | HIGH | MEDIUM | LOW | DUPLICATES | ACCEPT | REJECT | DEDUP]` 在 `pidprops.rs`（`#136` / `#139`）落地，支持按档位一键画布选中、人工确认与驳回剔除且单步可撤销（见 `readings.md` §25）；③ `#151` 进一步落地 `src/io/pid_convert/drc.rs` 与一站式交付前体检命令 `PIDDRC [SUMMARY | ERRORS | DEADENDS | ORPHANNOZZLES | UNTAGGED | NEXT | EXPORT]`，串联重号、单向断链连接符、孤立管口、悬空管端与无位号组件五维规则及 `NEXT` 视口逐项巡检聚焦（详见 `readings.md` §40）。
 
 #### L3-8 回归门禁（S）— **已完成（[#133](https://github.com/happyrust/pid-cad/issues/133)）**
 - **做法**：每改一次规则，整批报告逐行 diff；差异只允许出现在预期行。

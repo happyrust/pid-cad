@@ -32,7 +32,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDSAVEPID",
         "PIDCONVERT",
         "PIDOPC",
-        "PIDBOM"
+        "PIDBOM",
+        "PIDDRC"
     ]
 });
 
@@ -267,6 +268,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidbom_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_piddrc_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -1400,6 +1404,200 @@ impl OpenCADStudio {
             ));
         }
 
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_piddrc_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            audit_sheet_drc, DrcFinding, DrcKind, DrcSeverity, OpcSheetInput,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDDRC") {
+            return None;
+        }
+        let action = tokens
+            .get(1)
+            .map(|s| s.to_ascii_uppercase())
+            .unwrap_or_else(|| "SUMMARY".to_string());
+
+        let tab_names: Vec<(usize, String)> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.is_start)
+            .map(|(ti, t)| {
+                let nm = t
+                    .current_path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| t.tab_title.clone());
+                (ti, nm)
+            })
+            .collect();
+        let inputs: Vec<OpcSheetInput<'_>> = tab_names
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+        let rep = audit_sheet_drc(i, &inputs);
+
+        let filter_pred = |f: &DrcFinding, flt: &str| -> bool {
+            match flt {
+                "ALL" => true,
+                "ERRORS" | "ERROR" => f.severity == DrcSeverity::Error,
+                "WARNINGS" | "WARNING" | "WARN" => f.severity == DrcSeverity::Warning,
+                "DUPLICATES" | "DUP" => f.kind == DrcKind::DuplicateTag,
+                "ONEWAYOPC" | "OPC" => f.kind == DrcKind::OneWayOpc,
+                "ORPHANNOZZLES" | "NOZZLES" => f.kind == DrcKind::OrphanNozzle,
+                "DEADENDS" | "DEADEND" => f.kind == DrcKind::OpenPipeDeadEnd,
+                "UNTAGGED" => f.kind == DrcKind::UntaggedComponent,
+                _ => false,
+            }
+        };
+
+        match action.as_str() {
+            "SUMMARY" => {
+                let s = &rep.summary;
+                self.command_line.push_output(&format!(
+                    "PIDDRC: 可导出={} | 总项={}（错误={}：重号={} 单向连接符={} | 警告={}：孤立管口={} 悬空管端={} 无位号组件={}）。",
+                    s.ready_for_export,
+                    s.total_findings,
+                    s.error_count,
+                    s.duplicate_tags,
+                    s.one_way_opcs,
+                    s.warning_count,
+                    s.orphan_nozzles,
+                    s.open_pipe_dead_ends,
+                    s.untagged_components,
+                ));
+            }
+            "ALL" | "ERRORS" | "ERROR" | "WARNINGS" | "WARNING" | "WARN" | "DUPLICATES" | "DUP"
+            | "ONEWAYOPC" | "OPC" | "ORPHANNOZZLES" | "NOZZLES" | "DEADENDS" | "DEADEND"
+            | "UNTAGGED" => {
+                let mut count = 0usize;
+                let mut handles = Vec::new();
+                for f in &rep.findings {
+                    if !filter_pred(f, action.as_str()) {
+                        continue;
+                    }
+                    count += 1;
+                    for &mh in &f.member_handles {
+                        if !handles.contains(&mh) {
+                            handles.push(mh);
+                        }
+                    }
+                }
+                self.tabs[i].scene.deselect_all();
+                if !handles.is_empty() {
+                    self.tabs[i].scene.select_entities(&handles);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDDRC {action}: 已选中 {count} 处待核查项（共 {} 个图元）。",
+                    handles.len()
+                ));
+            }
+            "NEXT" => {
+                let sub_flt = tokens
+                    .get(2)
+                    .map(|s| s.to_ascii_uppercase())
+                    .unwrap_or_else(|| "ALL".to_string());
+                let pool: Vec<&DrcFinding> = rep
+                    .findings
+                    .iter()
+                    .filter(|f| filter_pred(f, sub_flt.as_str()))
+                    .collect();
+                if pool.is_empty() {
+                    self.command_line
+                        .push_output(&format!("PIDDRC NEXT {sub_flt}: 当前无匹配待核查项。"));
+                    return Some(self.finish_dispatch(cmd));
+                }
+
+                let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[i]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                let cur_pos = pool.iter().position(|f| {
+                    sel_set.len() == f.member_handles.len()
+                        && f.member_handles.iter().all(|h| sel_set.contains(h))
+                });
+                let next_idx = cur_pos.map(|p| (p + 1) % pool.len()).unwrap_or(0);
+                let target = pool[next_idx];
+                let target_handles = target.member_handles.clone();
+                let tx = target.x;
+                let ty = target.y;
+                let msg = target.message.clone();
+
+                self.tabs[i].scene.deselect_all();
+                if !target_handles.is_empty() {
+                    self.tabs[i].scene.select_entities(&target_handles);
+                }
+                let zoomed = self.tabs[i].scene.zoom_to_entities(&target_handles);
+                if !zoomed {
+                    let mut cam = self.tabs[i].scene.camera.borrow_mut();
+                    let z = cam.target.z;
+                    cam.target = glam::DVec3::new(tx, ty, z);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDDRC NEXT [{}/{}]: {msg}",
+                    next_idx + 1,
+                    pool.len()
+                ));
+            }
+            "EXPORT" => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.command_line
+                        .push_error("PIDDRC EXPORT: Web 版本不支持直接写出本地报告文件。");
+                    return Some(Task::none());
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let Some(out_raw) = tokens.get(2) else {
+                        self.command_line
+                            .push_error("PIDDRC EXPORT: 用法 PIDDRC EXPORT \"<输出.json>\"。");
+                        return Some(Task::none());
+                    };
+                    let out_p = std::path::PathBuf::from(out_raw);
+                    if let Some(parent) = out_p.parent().filter(|p| !p.as_os_str().is_empty()) {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    match serde_json::to_string_pretty(&rep)
+                        .map_err(|e| e.to_string())
+                        .and_then(|s| {
+                            std::fs::write(&out_p, format!("{s}\n")).map_err(|e| e.to_string())
+                        }) {
+                        Ok(()) => self.command_line.push_output(&format!(
+                            "PIDDRC EXPORT: 已导出体检报告 -> {}（错误={}，警告={}）。",
+                            out_p.display(),
+                            rep.summary.error_count,
+                            rep.summary.warning_count,
+                        )),
+                        Err(err) => {
+                            self.command_line
+                                .push_error(&format!("PIDDRC EXPORT: {err}"));
+                            return Some(Task::none());
+                        }
+                    }
+                }
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDDRC: 未知子命令 {other}（支持 SUMMARY / ALL / ERRORS / WARNINGS / DUPLICATES / ORPHANNOZZLES / DEADENDS / UNTAGGED / NEXT / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
         Some(self.finish_dispatch(cmd))
     }
 
@@ -4616,6 +4814,215 @@ mod tests {
         std::fs::write(
             out_dir.join("real150_summary.json"),
             format!("{}\n", serde_json::to_string_pretty(&sanitized).unwrap()),
+        )
+        .unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn piddrc_detects_duplicates_orphan_nozzles_deadends_steps_camera_and_clears_after_fix() {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, h: document::Handle) -> bool {
+            app.tabs[app.active_tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let mut app = app();
+        let (v1_h, _v2_h, untagged_h, nozzle_h, dead_pipe_h) = {
+            let doc = &mut app.tabs[app.active_tab].scene.document;
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "GATE VALVE", 6.0, 4.0);
+            define_sppid_block(doc, "FLANGED NOZZLE WITH BLIND", 4.0, 4.0);
+
+            // Duplicate tag `BV5101` on two ball valves -> DuplicateTag (Error)
+            let mut v1 = Insert::new("BALL VALVE TYPE 2", Vector3::new(100.0, 200.0, 0.0));
+            v1.common.layer = "11".to_string();
+            let v1_h = doc.add_entity(document::EntityType::Insert(v1)).unwrap();
+            let mut vt1 =
+                Text::with_value("BV5101", Vector3::new(96.0, 206.0, 0.0)).with_height(2.5);
+            vt1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(vt1)).unwrap();
+
+            let mut v2 = Insert::new("BALL VALVE TYPE 2", Vector3::new(180.0, 200.0, 0.0));
+            v2.common.layer = "11".to_string();
+            let v2_h = doc.add_entity(document::EntityType::Insert(v2)).unwrap();
+            let mut vt2 =
+                Text::with_value("BV5101", Vector3::new(176.0, 206.0, 0.0)).with_height(2.5);
+            vt2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(vt2)).unwrap();
+
+            // Untagged ball valve -> UntaggedComponent (Warning)
+            let mut gv = Insert::new("BALL VALVE TYPE 2", Vector3::new(320.0, 200.0, 0.0));
+            gv.common.layer = "11".to_string();
+            let untagged_h = doc.add_entity(document::EntityType::Insert(gv)).unwrap();
+
+            // Isolated nozzle far from any vessel -> OrphanNozzle (Warning)
+            let mut nz = Insert::new("FLANGED NOZZLE WITH BLIND", Vector3::new(650.0, 520.0, 0.0));
+            nz.common.layer = "10".to_string();
+            let nozzle_h = doc.add_entity(document::EntityType::Insert(nz)).unwrap();
+
+            // Open-ended disconnected pipe segment -> OpenPipeDeadEnd (Warning)
+            let mut dp = Line::from_points(
+                Vector3::new(800.0, 100.0, 0.0),
+                Vector3::new(900.0, 100.0, 0.0),
+            );
+            dp.common.layer = "1".to_string();
+            let dead_pipe_h = doc.add_entity(document::EntityType::Line(dp)).unwrap();
+            let mut ltxt = Text::with_value("50-PW-5109-CS150", Vector3::new(830.0, 103.0, 0.0))
+                .with_height(2.5);
+            ltxt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(ltxt)).unwrap();
+
+            (v1_h, v2_h, untagged_h, nozzle_h, dead_pipe_h)
+        };
+
+        let _ = app.run_command_line("PIDPROMOTE");
+
+        let tmp = std::env::temp_dir().join(format!("ocs_piddrc_151_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let drc1_p = tmp.join("drc1.json");
+        let _ = app.run_command_line(&format!("PIDDRC EXPORT \"{}\"", drc1_p.display()));
+        assert!(drc1_p.is_file(), "PIDDRC EXPORT must write DRC report JSON");
+        let rep1: Value = serde_json::from_str(&std::fs::read_to_string(&drc1_p).unwrap()).unwrap();
+        assert_eq!(rep1["summary"]["ready_for_export"].as_bool(), Some(false));
+        assert!(rep1["summary"]["error_count"].as_u64().unwrap_or(0) >= 1);
+        assert!(rep1["summary"]["duplicate_tags"].as_u64().unwrap_or(0) >= 1);
+        assert_eq!(rep1["summary"]["orphan_nozzles"].as_u64(), Some(1));
+        assert_eq!(rep1["summary"]["untagged_components"].as_u64(), Some(1));
+        assert!(rep1["summary"]["open_pipe_dead_ends"].as_u64().unwrap_or(0) >= 1);
+
+        // Category selection filters
+        let _ = app.run_command_line("PIDDRC ERRORS");
+        assert!(has_sel(&app, v1_h));
+        let _ = app.run_command_line("PIDDRC ORPHANNOZZLES");
+        assert!(has_sel(&app, nozzle_h));
+        let _ = app.run_command_line("PIDDRC UNTAGGED");
+        assert!(has_sel(&app, untagged_h));
+        let _ = app.run_command_line("PIDDRC DEADENDS");
+        assert!(has_sel(&app, dead_pipe_h));
+
+        // `PIDDRC NEXT ORPHANNOZZLES` steps cursor and centers viewport camera on `(650, 520)`
+        let _ = app.run_command_line("PIDDRC NEXT ORPHANNOZZLES");
+        assert!(has_sel(&app, nozzle_h));
+        let cam_nz = app.tabs[app.active_tab].scene.camera.borrow().target;
+        assert!(
+            (cam_nz.x - 650.0).abs() < 25.0 && (cam_nz.y - 520.0).abs() < 25.0,
+            "PIDDRC NEXT ORPHANNOZZLES must center camera on (650, 520), got {cam_nz:?}"
+        );
+
+        // Resolve duplicate tags + accept untagged gate valve -> errors & untagged warnings drop to 0
+        let _ = app.run_command_line("PIDREVIEW DEDUP");
+        app.tabs[app.active_tab].scene.deselect_all();
+        app.tabs[app.active_tab]
+            .scene
+            .select_entities(&[untagged_h]);
+        let _ = app.run_command_line("PIDREVIEW ACCEPT");
+
+        let drc2_p = tmp.join("drc2.json");
+        let _ = app.run_command_line(&format!("PIDDRC EXPORT \"{}\"", drc2_p.display()));
+        let rep2: Value = serde_json::from_str(&std::fs::read_to_string(&drc2_p).unwrap()).unwrap();
+        assert_eq!(rep2["summary"]["error_count"].as_u64(), Some(0));
+        assert_eq!(rep2["summary"]["ready_for_export"].as_bool(), Some(true));
+        assert_eq!(rep2["summary"]["duplicate_tags"].as_u64(), Some(0));
+        assert_eq!(rep2["summary"]["untagged_components"].as_u64(), Some(0));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "runs real SPPID and native AutoCAD sheets inside OpenCADStudio through PIDDRC audit, PIDREVIEW DEDUP remediation, and PIDDRC NEXT camera stepping"]
+    fn real_multi_source_piddrc_audit_and_next_step_focus() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_raw) = std::env::var("OCS_PID_REAL151_SPPID_DXF") else {
+            println!("OCS_PID_REAL151_SPPID_DXF unset, skipping.");
+            return;
+        };
+        let Ok(legacy_raw) = std::env::var("OCS_PID_REAL151_LEGACY_DXF") else {
+            println!("OCS_PID_REAL151_LEGACY_DXF unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL151_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real151"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let cases = [
+            ("SP01", "sppid_dxf", std::path::PathBuf::from(&sppid_raw)),
+            (
+                "LG01",
+                "legacy_autocad_dxf",
+                std::path::PathBuf::from(&legacy_raw),
+            ),
+        ];
+
+        let mut rows = Vec::new();
+        for (cid, kind, path) in &cases {
+            let sha_pfx =
+                format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))[..12].to_string();
+            let mut app = app();
+            app.tabs[app.active_tab].scene.document = crate::io::load_file(path).unwrap();
+            app.tabs[app.active_tab].tab_title = format!("{cid}.dxf");
+
+            let _ = app.run_command_line("PIDPROMOTE");
+            let before_p = out_dir.join(format!("{cid}_before.json"));
+            let _ = app.run_command_line(&format!("PIDDRC EXPORT \"{}\"", before_p.display()));
+            let rep_before: Value =
+                serde_json::from_str(&std::fs::read_to_string(&before_p).unwrap()).unwrap();
+            let _ = std::fs::remove_file(&before_p);
+
+            if rep_before["summary"]["duplicate_tags"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+            {
+                let _ = app.run_command_line("PIDREVIEW DEDUP");
+            }
+
+            let after_p = out_dir.join(format!("{cid}_after.json"));
+            let _ = app.run_command_line(&format!("PIDDRC EXPORT \"{}\"", after_p.display()));
+            let rep_after: Value =
+                serde_json::from_str(&std::fs::read_to_string(&after_p).unwrap()).unwrap();
+            let _ = std::fs::remove_file(&after_p);
+
+            assert_eq!(rep_after["summary"]["error_count"].as_u64(), Some(0));
+            assert_eq!(
+                rep_after["summary"]["ready_for_export"].as_bool(),
+                Some(true)
+            );
+
+            if rep_after["summary"]["total_findings"].as_u64().unwrap_or(0) > 0 {
+                let _ = app.run_command_line("PIDDRC NEXT");
+                assert!(!app.tabs[app.active_tab]
+                    .scene
+                    .selected_entities()
+                    .is_empty());
+            }
+
+            rows.push(json!({
+                "id": cid,
+                "kind": kind,
+                "sha256_prefix": sha_pfx,
+                "before": rep_before["summary"],
+                "after": rep_after["summary"],
+            }));
+        }
+
+        std::fs::write(
+            out_dir.join("real151_summary.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({"sheets": rows})).unwrap()
+            ),
         )
         .unwrap();
     }

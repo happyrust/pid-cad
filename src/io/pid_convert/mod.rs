@@ -6,11 +6,14 @@
 
 pub mod bom;
 pub mod class_map;
+pub mod drc;
 pub mod export;
 pub mod external_props;
 pub mod opc;
 pub mod promote;
 pub mod recognize;
+
+pub use drc::{audit_sheet_drc, DrcFinding, DrcKind, DrcSeverity, DrcSummary, SheetDrcReport};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use bom::{extract_bom_from_batch_dir, write_bom_schedule_file};
