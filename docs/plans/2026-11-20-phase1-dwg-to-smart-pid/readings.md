@@ -822,5 +822,44 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `189 passed` | **`192 passed`** | `+3` 条测试，**全绿** |
 
+---
+
+## 23. LX-8 / LX-9 / L6-3（#135）：第一轮「减法送测」6 套受控包自动构建预检与阶段一总验收报告（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `dd5a498d8`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `scripts/sppid/{build_submission_round1,test_build_submission_round1}.py`、`docs/plans/2026-11-20-phase1-dwg-to-smart-pid/05-phase1-acceptance-report.md` |
+| 证据目录子项 | `2026-11-20-issue135/`（`red.txt`、`green.txt`、`round1_sanitized.json`、`arch.txt`、`pytest.txt`）及 `submissions/round-01-20261121/` |
+
+### 23.1 先红后绿与第一轮 6 槽减法送测实物包预检读数
+
+- **先红后绿**：`red.txt` 对骨架运行 `test_build_submission_round1.py`（`1 failed`，退出码 `1`）→ 实现 `scripts/sppid/build_submission_round1.py` 后 `green.txt` **`1 passed`**（`pytest scripts/sppid` 全集 **`193 passed`**，退出码 `0`）。
+- **真实语料首轮受控送测包构建（`submissions/round-01-20261121/`）**：
+  - 自动从 `EXPORT_SET` 94 套已通过真值样本中选取体积最小的三件套齐全样本（`source_pid_sha256_prefix = 81a99cefae55`），产出 6 个单变量受控槽位、`submission-manifest.json`（`manifest_sha256 = 26eb6189e08d506ac4be4828b40c607f2eea6e6c587573bb2398b7bc782e9eb8`）与 `receipt.json` 标准回填模板，**`precheck_passed = true`**：
+
+| 槽位 | 含 `.pid` | 文件数 | 总字节数 | `StrictVendor` 违规数 | `SchemaOnly` 违规数 | 对照语义差异数 | 本地预检 |
+|---|---|---:|---:|---:|---:|---:|---|
+| `00-control` | 是 | `3` | `548,863` | **`0`** | **`0`** | **`0`** | **通过** |
+| `01-var-xml-only`（`V1-01`） | **否** | `2` | `208,895` | **`0`** | **`0`** | **`0`** | **通过** |
+| `02-var-no-topology`（`V1-02`） | 是 | `3` | `447,840` | **`0`** | **`0`** | — | **通过** |
+| `03-var-minimal-attrs`（`V1-03`） | 是 | `3` | `548,283` | **`0`** | **`0`** | — | **通过** |
+| `04-var-plain-xml-format`（`V1-04`） | 是 | `3` | `536,770` | **`10`**（预期格式探针） | **`0`** | **`0`** | **通过** |
+| `05-var-synthetic-uids`（`V1-05`） | 是 | `3` | `548,346` | **`0`** | **`0`** | — | **通过** |
+
+- **阶段一总验收报告落盘（`L6-3`）**：`05-phase1-acceptance-report.md` 已对照《实施方案》第 3 节全部五条总口径汇总全阶段 24 个原子提交与 §1–§23 读数，明确标注 `sppid_c1_d_precheck_status = unverified_no_sppid_runner` 及待 `RES-15` 回填的 `receipt.json` 清单。
+
+### 23.2 门禁读数（本单仅新增纯 Python 标准库脚本与 Markdown 文档，未触碰 `.rs` 代码）
+
+| 门禁项 | 改前读数（§22.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| Rust 库与 `clippy`（未改 `.rs` 源码） | `7,193` 条测试，`clippy` `656` / `1,051` | 同 `dd5a498d8`（未动 `src/` 与 `examples/`） | **0 变化** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `192 passed` | **`193 passed`** | `+1` 条测试，**全绿** |
+
+
 
 

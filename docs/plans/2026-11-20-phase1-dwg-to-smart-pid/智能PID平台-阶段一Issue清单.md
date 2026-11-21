@@ -1138,6 +1138,7 @@
 - 报告覆盖五条口径，每条有结论与证据位置。
 
 **对应任务。** L6-3（M）
+**状态与解决记录。** **已完成本地闭环与首轮送测包（2026-11-21，[#135](https://github.com/happyrust/pid-cad/issues/135)）**：落地 `scripts/sppid/{build_submission_round1,test_build_submission_round1}.py` 自动构建第一轮 6 套减法送测实物包并通过本地预检，同时落盘阶段一总验收报告 `05-phase1-acceptance-report.md`（覆盖第 3 节全部五条口径，外部回执待 `RES-15` 回填），详见 `readings.md` §23。
 
 ---
 
@@ -1192,8 +1193,8 @@
 | `ISSUE-L5-6 / L5-8 / L5-9 / L6-1` | [#130](https://github.com/happyrust/pid-cad/issues/130) | `done-local`（本地已完成） | 提交 `53ea94d76`：扩展 `src/io/pid_publish/uid.rs`、`src/io/pid_convert/export.rs` 与 `examples/pid_convert.rs`；90 图双产物 `42,861/42,861` 100% 对齐、全过 `a/b` 级验证，见 `readings.md` §19 |
 | `ISSUE-L1-2 / L1-4 / L1-5` | [#131](https://github.com/happyrust/pid-cad/issues/131) | `done-local`（本地已完成 · L1 全线收官） | 提交 `e2f43b91c`：落地 `examples/pid_l1_bench.rs` 与 `scripts/sppid/{batch_l1_eval,test_batch_l1_eval}.py`；94 图零故障打开与出图（release 打开中位数 `536.5 ms`、`Flattened=0`、覆盖率均值 `0.995949`、`69` 张达 `1.000`），见 `readings.md` §20 |
 | `ISSUE-L3-5 / L3-6` | [#132](https://github.com/happyrust/pid-cad/issues/132) | `done-local`（本地已完成） | 提交 `c2b0c35f2`：扩展 `src/io/pid_convert/{mod,recognize,export}.rs` 与 `src/io/pid_publish/relations.rs`；90 图管口挂接升至 `629/779`（含设备图 `89.86%`），标题栏图号 `82/90`、图名精确率 `97.96%`，`unexplained_diffs=0`，见 `readings.md` §21 |
-| `ISSUE-L3-3 / L3-4 / L3-8` | [#133](https://github.com/happyrust/pid-cad/issues/133) | `done-local`（本地已完成 · L3 全线收官） | 扩展 `src/io/pid_convert/{mod,recognize,export}.rs` 并落地 `scripts/sppid/regression_gate.py`；90 图 `PIDPipingPort` 跃升至 `11,420`、管端连通 `48,243`、断头 100% 守恒、跨图连接符互逆配对 `38` 对，`unexplained_diffs=0`，见 `readings.md` §22 |
-| `ISSUE-L2-1 / L2-5 / L2-7 / L6-2` | [#134](https://github.com/happyrust/pid-cad/issues/134) | `phase1`（待推进） | `src/io/pid_convert/promote.rs` 无冲突 `PID_AUTHOR` 幂等升格与编辑后存回 `.pid` 全链路闭环 |
-| `ISSUE-LX-8 / LX-9 / L6-3` | [#135](https://github.com/happyrust/pid-cad/issues/135) | `phase1`（待推进） | 第一轮减法送测 6 套受控包自动构建器与阶段一总验收报告（零冲突） |
+| `ISSUE-L3-3 / L3-4 / L3-8` | [#133](https://github.com/happyrust/pid-cad/issues/133) | `done-local`（本地已完成 · L3 全线收官） | 提交 `dd5a498d8`：扩展 `src/io/pid_convert/{mod,recognize,export}.rs` 并落地 `scripts/sppid/regression_gate.py`；90 图 `PIDPipingPort` 跃升至 `11,420`、管端连通 `48,243`、断头 100% 守恒、跨图连接符互逆配对 `38` 对，`unexplained_diffs=0`，见 `readings.md` §22 |
+| `ISSUE-L2-1 / L2-5 / L2-7 / L6-2` | [#134](https://github.com/happyrust/pid-cad/issues/134) | 暂缓（避让并行分支） | 待 `pid-symbol-on-main` 与 `pid-stage-c` 合入 `main` 后连同 `L2-2..L2-6` 一并推进 |
+| `ISSUE-LX-8 / LX-9 / L6-3` | [#135](https://github.com/happyrust/pid-cad/issues/135) | `done-local`（本地已完成 · 首轮送测就绪） | 落地 `scripts/sppid/build_submission_round1.py` 与 `05-phase1-acceptance-report.md`；生成 `round-01-20261121` 6 槽 17 文件（`precheck_passed=true`），见 `readings.md` §23 |
 | `.sym` 预览（关联） | [#116](https://github.com/happyrust/pid-cad/issues/116) | 暂缓（避让并行分支） | 待 `pid-symbol-identity` 合入 `main` 后实施 |
 | 分级表可观测性（关联） | [#117](https://github.com/happyrust/pid-cad/issues/117) | 待定范围 | 与 `L4-2` / `L0-9` 衔接，建议先做第 1 步表外计数输出 |
