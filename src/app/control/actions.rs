@@ -265,6 +265,19 @@ fn parse_point_2d(val: &Value) -> Result<[f64; 2], Value> {
     Ok([x, y])
 }
 
+/// The file a `plot` request writes, and whether it is an SVG (else a PDF).
+#[cfg(not(target_arch = "wasm32"))]
+fn plot_target(req: &Value) -> Result<(&str, bool), Value> {
+    let path = string(req, "path")?;
+    let lower = path.to_ascii_lowercase();
+    // SVG shares the plot page with PDF: the writer follows the extension.
+    let is_svg = lower.ends_with(".svg");
+    if !is_svg && !lower.ends_with(".pdf") {
+        return Err(failure("invalid_path", "plot writes .pdf or .svg files"));
+    }
+    Ok((path, is_svg))
+}
+
 fn parse_calibrate(
     cal: &Value,
     pixel_width: u32,
@@ -606,16 +619,24 @@ impl OpenCADStudio {
     /// the stored setup (layouts) or the app's plot defaults (Model).
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn control_plot(&mut self, req: &Value) -> Result<Task<Message>, Value> {
+        plot_target(req)?;
+        self.stamp_plot_fields();
+        let result = self.plot_current(req)?;
+        self.set_control_result(result);
+        Ok(Task::none())
+    }
+
+    /// The body of `plot`, without touching the session: renders the active
+    /// tab's drawing as the request asks and returns the result object the
+    /// operation answers with, instead of storing it as the control result,
+    /// and leaves PlotDate fields as they are. Publishing plots through this,
+    /// so the drawing stays unmodified and a pending control answer is not
+    /// overwritten.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn plot_current(&mut self, req: &Value) -> Result<Value, Value> {
         use crate::io::pdf_export::PdfPageInput;
 
-        let path = string(req, "path")?;
-        let lower = path.to_ascii_lowercase();
-        // SVG shares the plot page with PDF: the writer follows the extension.
-        let is_svg = lower.ends_with(".svg");
-        if !is_svg && !lower.ends_with(".pdf") {
-            return Err(failure("invalid_path", "plot writes .pdf or .svg files"));
-        }
-        self.stamp_plot_fields();
+        let (path, is_svg) = plot_target(req)?;
         let i = self.active_tab;
         let names = self.tabs[i].scene.layout_names();
         let requested = req["layout"].as_str().unwrap_or("Model").to_owned();
@@ -986,8 +1007,7 @@ impl OpenCADStudio {
                 }
                 files.push(json!({"layout": name, "path": file}));
             }
-            self.set_control_result(json!({ "files": files, "pages": pages.len() }));
-            return Ok(Task::none());
+            return Ok(json!({ "files": files, "pages": pages.len() }));
         }
         // Pages may drop the style when a stored page setup overwrites the
         // dialog's style fields, so the explicit request style rides along as
@@ -1016,15 +1036,14 @@ impl OpenCADStudio {
             )
             .map_err(|e| failure("plot_failed", e))?;
         }
-        self.set_control_result(json!({
+        Ok(json!({
             "path": path,
             "pages": pages.len(),
             "page_sizes": pages
                 .iter()
                 .map(|page| json!([page.paper_w, page.paper_h]))
                 .collect::<Vec<_>>(),
-        }));
-        Ok(Task::none())
+        }))
     }
 
     pub(super) fn control_properties(&mut self) -> Value {
