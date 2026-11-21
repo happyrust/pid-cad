@@ -607,3 +607,27 @@ MCP：`pid_check`、`pid_check_rules` 进 `READ_OPS`，其余三个进 `EXECUTE_
 11. **偏移和报错。** 偏移按字符数，不按字节数（§3.3 的例子 `管道等级 ==` 是 6）。只报第一处。关键字只认大写，`and` 是名字（`开度 = 1 and 位号 = 2` 报在 `and` 上，`expected` 是「AND、OR 或结尾」）。没收尾的字符串报在表达式结尾，`expected` 是「右引号」。各处的 `expected` 见 `dsl.rs` 开头的常量；多段路径的第一段认不得时，`expected` 列出这里能写的关系和根（如「关系或根：位号、所属管路、…、参数」）。
 
 **测试**（`drc::` 下 12 条：`dsl` 11 条，`model` 1 条）：先只放类型和空壳函数（`parse` 总是成功、求值总是不知道、名字表是空的），12 条都编得过、都败在断言上；实现后全过。§3.5 的 41 条内置表达式写在测试里，在各自的作用对象上都能解析；`DR-025` 用需求的例子求值命中。任务写的验证命令是 `drc::dsl`，名字表那条在 `drc::model` 下，所以用 `drc::` 跑。
+
+### 11.2 `DRC-2`：规则包——内置 41 条与项目包叠加（2026-11-21）
+
+**做了什么**（新文件 `assets/pid-drc-rules.json`、`src/pid/drc/builtin_rules.rs`；改 `src/pid/drc/model.rs`、`src/pid/drc/mod.rs`）：
+
+- `assets/pid-drc-rules.json`：§3.5 的 41 条，§3.1 的每个键都写出来。两个规则集 `基础规则`（`DR-001` – `DR-025`）、`工程扩展`（`DR-101` – `DR-116`）都启用；`DR-114` 停用，`params` 是 `{"允许图层": []}`。文件级：`save_gate` 为 `warn`，`connect_tolerance` 为 `0.000001`，`legend_standard` 为 `null`；`required_fields` 写了 `EQUIPMENT` → `名称`、`PIPE_LINE` → `流体介质`；`loop_roles` 写了 `控制器` → `controller`，`测量元件` → `transmitter`、`indicator`。每条都写了 `message` 和 `fix`：模板里只用 §3.1 的四个占位符和 §3.4 的事实名、属性名，`fix` 里只提程序里已有的命令。
+- `model.rs`：规则包读出来的数据——`Severity`、`Category`、`Source`、`RuleScope`、`SaveGate`、`Rule`（表达式原文和解析好的语法树都留着）、`RuleGroup`、`RuleSet`（`rule(id)`；`is_enabled(rule)`：规则自己启用，且所在的规则集有、也启用）；规则包类的错误 `DrcError`（`code()`、`at()`、`rule_id()`，显示成「码: 路径 说明（规则 id）」）。
+- `builtin_rules.rs`：`builtin()`、`load(drawing_dir)`、`validate_project_pack(value)`、`rule_set_digest(rules)`，常量 `PROJECT_PACK_FILE`、`PACK_VERSION`。内置包和项目包用同一个读法；内置包读不过时 `builtin()` 直接 panic，测试保证它读得过。
+
+**规格没写到、这里定下的：**
+
+1. **`enabled` 可以不写，不写为真。** §3.1 的表对它既写了「必填」又写了「默认真」，这里取默认真；规则集的 `enabled` 同样。内置包每条都写了。
+2. **文件级的键。** `version` 和 `rule_set_version` 必填：`version` 只认 `1`，更大报 `RULESET_VERSION_UNSUPPORTED`，其余的值报 `RULESET_SCHEMA_ERROR`。别的键都能不写：内置包不写时 `save_gate` 为 `warn`、`connect_tolerance` 为 `1e-6`，其余为空。项目包写了 `legend_standard` 就取代内置的值，写成 `null` 等于没写。
+3. **项目包给内置规则的 `params` 按名字合并**：写到的名字取代内置的值，没写到的保留。
+4. **项目包里写内置规则的条目只能带 `id`、`enabled`、`params`**，多带别的键（值跟内置的一样也算）报 `RULE_BUILTIN_READONLY`，路径指向多出来的键里按字典序最小的一个。
+5. **`RULESET_SCHEMA_ERROR` 还包括**：`id` 不是「两个大写字母-三位数字」，`name` 超过 64 个字，`set` 在内置包和项目包的 `sets` 里都没有，`scope`、`source` 的值认不得，项目包新加的规则 `source` 写 `内置`、内置包的规则 `source` 不是 `内置`，规则集名为空或重复，`connect_tolerance` 是负数。这类错误只带路径，不带 `rule_id`。
+6. **`REQUIRED_FIELD_EMPTY`**：必填的键没写、写成 `null` 或只有空白；缺的是 `id` 时没有 `rule_id`。`message`、`fix` 写空串等于没写。
+7. **重复编号先查。** 同一个 `id` 在项目包里写两次报 `RULE_ID_DUPLICATED`，写内置规则的条目也算在内；内置包没有的新号落在 `DR-001` – `DR-199`（如 `DR-150`）报 `RULE_ID_RESERVED`。
+8. **读不出来的项目包。** 图纸目录里没有 `pid-drc-rules.json` 就只用内置包；有但读不出来（比如同名的是个目录），`load` 报 `RULESET_SCHEMA_ERROR`，路径是这个文件；内容有错报对应的码。都不退回内置包。文件开头的 BOM 认。
+9. **摘要值**是规范化 JSON（对象的键按字典序、紧凑写法）的 SHA-256 前 16 位十六进制。算进去的是会改变检查结果的：每条规则的全部字段（含停用的规则和 `params`）、规则集和它们的启停、`required_fields`、`loop_roles`、`connect_tolerance`。`rule_set_version`、`save_gate`、`legend_standard`（只记录，见 §3.1）和项目包的路径不算。
+10. **`loop_roles` 里写的是符号库的符号 id**（`controller`），图纸摘要里符号实例的 `symbol` 是块名 `PID_SYM_<类别>_<id>`；怎么对上留给 `DRC-4` 的事实。
+11. **`DrcError` 放在 `model.rs`**，和规则包的数据放在一起。
+
+**测试**（`drc::builtin_rules` 下 11 条）：先放数据类型、错误码和空壳函数（内置包读出来没有规则，叠项目包、校验项目包都不报错），11 条都编得过、都败在断言上；实现后第一次就全过。§3.5 的 41 条（编号、名称、作用对象、严重度、表达式）抄在测试里，逐条对照内置包；§3.2 的六行各有用例，`load` 用临时目录里的项目包测；§3.8 规则包类的七个码各有反例，另有 `RULE_BUILTIN_READONLY` 和 `DSL_PARSE_ERROR`（报在规则的 `expr` 上，带 `rule_id`、偏移和 `expected`）。

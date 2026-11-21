@@ -1,6 +1,15 @@
 //! 规则检查用到的数据（`SPEC-pid-drc.md` §3）。现在是规则的作用对象（§3.1 的 `target`）
 //! 和 §3.4 的名字表：每种对象有哪些派生事实，哪些关系能接 `.` 往下取，以及哪种
-//! 对象都能用的根。规则包、检查结果在后面的步骤里加。
+//! 对象都能用的根；还有规则包（§3.1）读出来的规则、规则集和读不进来的原因。检查结果在后面的
+//! 步骤里加。
+
+use std::collections::BTreeMap;
+use std::fmt;
+use std::path::PathBuf;
+
+use serde_json::Value;
+
+use super::dsl::{DslError, Expr};
 
 /// 对象种类（§3.4 的表）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -332,7 +341,343 @@ impl Target {
             Self::TypeCode(_) => Kind::Symbol,
         }
     }
+
+    /// `target` 字段的写法：种类名，或类型编码。
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Kind(kind) => kind.name(),
+            Self::TypeCode(code) => code,
+        }
+    }
 }
+
+// ── 规则包 ─────────────────────────────────────────────────────────────────────
+
+/// 严重度（§3.1）：只有三级，结果按这个顺序排。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Severity {
+    Error,
+    Warning,
+    Info,
+}
+
+impl Severity {
+    pub const ALL: [Self; 3] = [Self::Error, Self::Warning, Self::Info];
+
+    /// 规则包和检查结果里的写法。
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Error => "错误",
+            Self::Warning => "警告",
+            Self::Info => "提示",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|severity| severity.name() == name)
+    }
+}
+
+/// 规则类别：本期只求值设计类，配置类可以写进文件但不跑（§8）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Category {
+    Design,
+    Configuration,
+}
+
+impl Category {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Design => "设计类",
+            Self::Configuration => "配置类",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::Design, Self::Configuration]
+            .into_iter()
+            .find(|category| category.name() == name)
+    }
+}
+
+/// 规则从哪来：内置包里的，或项目包新加的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Builtin,
+    /// 复制一条内置规则再改。
+    Modified,
+    New,
+}
+
+impl Source {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Builtin => "内置",
+            Self::Modified => "复制修改",
+            Self::New => "新建",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::Builtin, Self::Modified, Self::New]
+            .into_iter()
+            .find(|source| source.name() == name)
+    }
+}
+
+/// 规则在哪里生效（§3.1 的 `scope` 和 `scope_ref`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleScope {
+    /// 处处生效。
+    Project,
+    /// 这个 PBS 节点及其下级的图纸。
+    Pbs(String),
+    /// 这张图（图号）。
+    Drawing(String),
+    /// 这个类型及其下级类型的对象（类型编码）。
+    Type(String),
+}
+
+impl RuleScope {
+    /// `scope` 的写法。
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Project => "项目",
+            Self::Pbs(_) => "PBS 节点",
+            Self::Drawing(_) => "图纸",
+            Self::Type(_) => "类型",
+        }
+    }
+
+    /// `scope_ref`：作用域是项目时没有。
+    pub fn reference(&self) -> Option<&str> {
+        match self {
+            Self::Project => None,
+            Self::Pbs(reference) | Self::Drawing(reference) | Self::Type(reference) => {
+                Some(reference)
+            }
+        }
+    }
+}
+
+/// 保存门禁的三档（§4.3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveGate {
+    /// 保存时不检查。
+    Off,
+    /// 检查后只提示。
+    Warn,
+    /// 有错误就拒绝保存。
+    Block,
+}
+
+impl SaveGate {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Warn => "warn",
+            Self::Block => "block",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::Off, Self::Warn, Self::Block]
+            .into_iter()
+            .find(|gate| gate.name() == name)
+    }
+}
+
+/// 一条规则（§3.1）。表达式在读规则包时就按作用对象解析好了。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rule {
+    pub id: String,
+    pub name: String,
+    /// 所在的规则集。
+    pub set: String,
+    pub category: Category,
+    pub target: Target,
+    pub severity: Severity,
+    /// 表达式原文。
+    pub expr: String,
+    /// 解析好的表达式。
+    pub tree: Expr,
+    /// 消息模板；没写时用「<名称>：<位号或位置>」。
+    pub message: Option<String>,
+    /// 修复建议的模板。
+    pub fix: Option<String>,
+    pub scope: RuleScope,
+    /// 这条规则自己的启停；所在的规则集停用时它也不跑，见 [`RuleSet::is_enabled`]。
+    pub enabled: bool,
+    pub source: Source,
+    /// 表达式里的 `参数.<名>` 取这里的值。
+    pub params: BTreeMap<String, Value>,
+}
+
+/// 规则集（规则包里 `sets[]` 的一项）：可以整组启停的一组规则。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleGroup {
+    pub name: String,
+    pub enabled: bool,
+}
+
+/// 生效的整套规则：内置包，有项目包时叠上项目包（§3.2）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleSet {
+    /// 规则版本：内置包的 `rule_set_version`；有项目包时是 `<内置版本>+<项目包版本>`。
+    pub version: String,
+    /// 这套规则是为哪套图例标准写的。本期只记录，不校验。
+    pub legend_standard: Option<String>,
+    pub save_gate: SaveGate,
+    /// 判断两点重合的容差，图纸单位。
+    pub connect_tolerance: f64,
+    /// 类型编码 → 必填的属性名；下级类型也要填。
+    pub required_fields: BTreeMap<String, Vec<String>>,
+    /// 仪表回路里的角色 → 符号 id，只有 `DR-113` 用。
+    pub loop_roles: BTreeMap<String, Vec<String>>,
+    pub sets: Vec<RuleGroup>,
+    /// 内置规则在前，项目包新加的按文件里的顺序接在后面。
+    pub rules: Vec<Rule>,
+    /// 叠上来的项目包文件；只用内置包时是 `None`。
+    pub project_pack: Option<PathBuf>,
+}
+
+impl RuleSet {
+    pub fn rule(&self, id: &str) -> Option<&Rule> {
+        self.rules.iter().find(|rule| rule.id == id)
+    }
+
+    /// 这条规则跑不跑：它自己启用，所在的规则集也启用。
+    pub fn is_enabled(&self, rule: &Rule) -> bool {
+        rule.enabled
+            && self
+                .sets
+                .iter()
+                .any(|set| set.name == rule.set && set.enabled)
+    }
+}
+
+// ── 错误 ──────────────────────────────────────────────────────────────────────
+
+/// 规则包读不进来的原因（§3.8 规则包那几类）。`at` 是出错的位置，如
+/// `rules[3].severity`；整个文件是空串，文件读不出来时是文件路径。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DrcError {
+    /// 不是合法 JSON、字段类型不对、取值超出约束，或者文件读不出来。
+    Schema { at: String, reason: String },
+    /// `version` 比程序认识的高。
+    VersionUnsupported { at: String, found: u64 },
+    /// 规则缺必填字段（没写、`null` 或空串），或者 `scope` 不是 `项目` 而没写
+    /// `scope_ref`。缺的是 `id` 时 `rule_id` 为 `None`。
+    RequiredFieldEmpty { at: String, rule_id: Option<String> },
+    /// `category` 不是 `设计类` 或 `配置类`。
+    KindInvalid {
+        at: String,
+        rule_id: String,
+        found: String,
+    },
+    /// `severity` 不是 `错误`、`警告` 或 `提示`。
+    SeverityInvalid {
+        at: String,
+        rule_id: String,
+        found: String,
+    },
+    /// 项目包里写内置规则的那一项带了 `id`、`enabled`、`params` 以外的键；`at` 是那个键。
+    BuiltinReadonly { at: String, rule_id: String },
+    /// 项目包新加的规则用了留给内置规则的编号 `DR-001` – `DR-199`。
+    IdReserved { at: String, rule_id: String },
+    /// 同一个文件里两条规则编号相同；`at` 是后出现的那一条。
+    IdDuplicated { at: String, rule_id: String },
+    /// 表达式解析不过。
+    Dsl {
+        at: String,
+        rule_id: String,
+        error: DslError,
+    },
+}
+
+impl DrcError {
+    /// 错误码（§3.8）。
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Schema { .. } => "RULESET_SCHEMA_ERROR",
+            Self::VersionUnsupported { .. } => "RULESET_VERSION_UNSUPPORTED",
+            Self::RequiredFieldEmpty { .. } => "REQUIRED_FIELD_EMPTY",
+            Self::KindInvalid { .. } => "RULE_KIND_INVALID",
+            Self::SeverityInvalid { .. } => "SEVERITY_INVALID",
+            Self::BuiltinReadonly { .. } => "RULE_BUILTIN_READONLY",
+            Self::IdReserved { .. } => "RULE_ID_RESERVED",
+            Self::IdDuplicated { .. } => "RULE_ID_DUPLICATED",
+            Self::Dsl { error, .. } => error.code(),
+        }
+    }
+
+    /// 出错的位置。
+    pub fn at(&self) -> &str {
+        match self {
+            Self::Schema { at, .. }
+            | Self::VersionUnsupported { at, .. }
+            | Self::RequiredFieldEmpty { at, .. }
+            | Self::KindInvalid { at, .. }
+            | Self::SeverityInvalid { at, .. }
+            | Self::BuiltinReadonly { at, .. }
+            | Self::IdReserved { at, .. }
+            | Self::IdDuplicated { at, .. }
+            | Self::Dsl { at, .. } => at,
+        }
+    }
+
+    /// 出错的那条规则；文件层的错和缺编号的规则没有。
+    pub fn rule_id(&self) -> Option<&str> {
+        match self {
+            Self::Schema { .. } | Self::VersionUnsupported { .. } => None,
+            Self::RequiredFieldEmpty { rule_id, .. } => rule_id.as_deref(),
+            Self::KindInvalid { rule_id, .. }
+            | Self::SeverityInvalid { rule_id, .. }
+            | Self::BuiltinReadonly { rule_id, .. }
+            | Self::IdReserved { rule_id, .. }
+            | Self::IdDuplicated { rule_id, .. }
+            | Self::Dsl { rule_id, .. } => Some(rule_id),
+        }
+    }
+}
+
+impl fmt::Display for DrcError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let at = if self.at().is_empty() {
+            "顶层"
+        } else {
+            self.at()
+        };
+        write!(f, "{}: {at} ", self.code())?;
+        match self {
+            Self::Schema { reason, .. } => f.write_str(reason)?,
+            Self::VersionUnsupported { found, .. } => write!(f, "是 {found}，比程序认识的高")?,
+            Self::RequiredFieldEmpty { .. } => f.write_str("不能为空")?,
+            Self::KindInvalid { found, .. } => {
+                write!(f, "是「{found}」，只能是设计类或配置类")?;
+            }
+            Self::SeverityInvalid { found, .. } => {
+                write!(f, "是「{found}」，只能是错误、警告或提示")?;
+            }
+            Self::BuiltinReadonly { .. } => {
+                f.write_str("改不了：项目包里的内置规则只能带 id、enabled、params")?;
+            }
+            Self::IdReserved { .. } => f.write_str("落在留给内置规则的 DR-001 – DR-199 里")?,
+            Self::IdDuplicated { .. } => f.write_str("与前面的规则重复")?,
+            Self::Dsl { error, .. } => {
+                write!(f, "偏移 {} 处应为{}", error.offset, error.expected)?;
+            }
+        }
+        match self.rule_id() {
+            Some(id) => write!(f, "（规则 {id}）"),
+            None => Ok(()),
+        }
+    }
+}
+
+impl std::error::Error for DrcError {}
 
 #[cfg(test)]
 mod tests {

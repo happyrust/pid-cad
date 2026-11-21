@@ -614,13 +614,14 @@
 
 - **做什么**：新建内置规则包 `assets/pid-drc-rules.json`（格式见 §3.1；内容是 §3.5 的 41 条：基础规则 `DR-001` – `DR-025`，工程扩展 `DR-101` – `DR-116`）和 `src/pid/drc/builtin_rules.rs`：`builtin()` 读编进程序的内置包；`load(drawing_dir)` 把图纸目录里的项目包 `pid-drc-rules.json` 叠上去（§3.2）；`validate_project_pack(value)`；规则集的版本号与摘要值 `rule_set_digest`。
 - **验收**：
-  - [ ] 内置 41 条全部能解析；基础规则恰好 25 条、编号连续；`DR-114` 默认停用。
-  - [ ] §3.2 叠加规则的每一行各有用例；项目包想改内置规则的表达式 → `RULE_BUILTIN_READONLY`；项目包有错时 `load` 报错，不退回去只用内置包。
-  - [ ] §3.8 里规则包类的错误码（`RULESET_SCHEMA_ERROR`、`RULESET_VERSION_UNSUPPORTED`、`REQUIRED_FIELD_EMPTY`、`RULE_KIND_INVALID`、`SEVERITY_INVALID`、`RULE_ID_RESERVED`、`RULE_ID_DUPLICATED`）各有一个反例。
+  - [x] 内置 41 条全部能解析；基础规则恰好 25 条、编号连续；`DR-114` 默认停用。
+  - [x] §3.2 叠加规则的每一行各有用例；项目包想改内置规则的表达式 → `RULE_BUILTIN_READONLY`；项目包有错时 `load` 报错，不退回去只用内置包。
+  - [x] §3.8 里规则包类的错误码（`RULESET_SCHEMA_ERROR`、`RULESET_VERSION_UNSUPPORTED`、`REQUIRED_FIELD_EMPTY`、`RULE_KIND_INVALID`、`SEVERITY_INVALID`、`RULE_ID_RESERVED`、`RULE_ID_DUPLICATED`）各有一个反例。
 - **验证**：`cargo test --offline --locked --lib drc::builtin_rules`
 - **依赖**：DRC-1
 - **文件**：新建 `assets/pid-drc-rules.json`、`src/pid/drc/builtin_rules.rs`；`src/pid/drc/model.rs`、`src/pid/drc/mod.rs`
 - **规模**：M
+- **补（2026-11-21）**：在 `pid-stage-c` 分支上接着 `DRC-1` 做，一个提交。与任务写法不同、或任务没有说的：规则包的数据（严重度、类别、来源、作用域、保存门禁、规则、规则集）和规则包类的错误 `DrcError` 放在 `model.rs`；`RuleSet::is_enabled`（规则和所在规则集都启用才算）这一步就加了；`enabled` 不写为真；文件级只有 `version`、`rule_set_version` 必填；项目包给内置规则的 `params` 按名字合并；摘要值算会改变检查结果的全部内容，不算版本号、保存门禁、图例标准和项目包路径；`loop_roles` 写符号库的符号 id，跟摘要里的块名怎么对上留给 `DRC-4`；41 条都写了 `message` 和 `fix`。这些和别的读法（哪些错报 `RULESET_SCHEMA_ERROR`、重复编号先查、读不出来的项目包报文件路径、BOM 认）记在规则检查规格 §11.2。「文件」一栏以外没有改。**先红后绿**：先放数据类型、错误码和空壳函数（内置包读出来没有规则，叠项目包、校验项目包都不报错），`drc::builtin_rules` 下 11 条都编得过、都败在断言上；实现后 11 条第一次就全过。**读数**：主程序库 7423 条，7352 通过、68 默认不跑、3 失败（比对设计稿的三条，起点相同）；起点 7412 条（7341 / 68 / 3），多的 11 条是新加的，都过；编译警告 52，与起点相同；clippy 656 / 1051，与起点相同，新文件没有告警；格式检查 `model.rs`、`mod.rs` 新增 0，新文件 `rustfmt --check` 干净。**新基线**：主程序库 7423 条（7352 / 68 / 3）。
 
 ### DRC-3 【纯】检查器骨架与结果格式
 
