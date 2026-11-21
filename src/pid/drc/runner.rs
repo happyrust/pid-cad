@@ -520,6 +520,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
     use serde_json::{json, Value};
 
@@ -532,11 +533,11 @@ mod tests {
         Category, CheckResult, Notice, ObjectRef, RuleScope, ScopeKind, Severity, Source, Target,
     };
     use crate::pid::project_index::{
-        build_index, summarize, FailedDrawing, Joint, ObjectKind, PeerKind, SignalEnd,
-        SummaryConnector, SummaryMeta, SummaryObject, SummaryPort, SummarySegment, SummarySource,
-        DEFAULT_TOLERANCE, SUMMARY_VERSION,
+        build_index, summarize, synthetic_drawing, FailedDrawing, Joint, ObjectKind, PeerKind,
+        SignalEnd, SummaryConnector, SummaryMeta, SummaryObject, SummaryPort, SummarySegment,
+        SummarySource, DEFAULT_TOLERANCE, SUMMARY_VERSION,
     };
-    use crate::pid::symbols::PortDir;
+    use crate::pid::symbols::{PortDir, SymbolLibrary};
     use crate::pid::tag_engine::TAG_STATUS_DUPLICATED;
     use crate::pid::topology::TYPE_SIGNAL_LINE;
 
@@ -3820,5 +3821,83 @@ mod tests {
         assert!(hits(&report, "DR-008") > 0, "{:#?}", report.results);
         assert_eq!(hits(&report, "DR-020"), 0);
         assert_eq!(hits(&report, "DR-109"), 0);
+    }
+
+    /// 契约规模：2,000 个对象的合成图（`IX-4`）。
+    const SYNTHETIC_OBJECTS: usize = 2000;
+    /// 预算：单图全量检查（含做摘要）不超过 500 ms（成功标准第 12 条）。
+    const BUDGET: Duration = Duration::from_millis(500);
+    /// 采样次数：取中位数。
+    const RUNS: usize = 3;
+
+    /// 全量：主数据配好、带项目索引，启用的规则都跑、一条不跳。计时的是做摘要加检查；项目索引
+    /// 平时由项目扫描建好留着，这里事先建好，不计时。
+    #[test]
+    #[ignore]
+    fn drc_check_2000_objects_within_500_ms() {
+        let doc = synthetic_drawing(SYNTHETIC_OBJECTS);
+        let library = SymbolLibrary::builtin();
+        let meta = || SummaryMeta {
+            drawing_id: "PID-1101".to_owned(),
+            file: None,
+            pbs: None,
+            source: SummarySource::Open,
+            fingerprint: None,
+        };
+        let index = index_of(&[summarize(&doc, &library, meta(), DEFAULT_TOLERANCE)], &[]);
+        let rules = builtin();
+        let configured = master(None);
+        let types = TypeLib::embedded();
+        let mut samples = Vec::with_capacity(RUNS);
+        for run in 1..=RUNS {
+            let started = Instant::now();
+            let summary = summarize(&doc, &library, meta(), DEFAULT_TOLERANCE);
+            let summarized = started.elapsed();
+            let report = check(&CheckInput {
+                rules: &rules,
+                master: &configured,
+                types: &types,
+                drawings: std::slice::from_ref(&summary),
+                index: Some(&index),
+                others: &[],
+                waivers: &[],
+                trigger: Trigger::OnDemand,
+                scope: Scope {
+                    kind: ScopeKind::Drawing,
+                    drawing_id: Some(summary.drawing_id.clone()),
+                    pbs: None,
+                    cross_drawing: true,
+                },
+            });
+            let elapsed = started.elapsed();
+            println!(
+                "DRC-10 run {run}/{RUNS}: {:.2} ms (summary {:.2} ms), objects {}, rules run {}, results {}",
+                elapsed.as_secs_f64() * 1e3,
+                summarized.as_secs_f64() * 1e3,
+                report.summary.objects,
+                report.summary.rules_run,
+                report.results.len()
+            );
+            assert_eq!(report.summary.objects, SYNTHETIC_OBJECTS, "run {run}");
+            assert_eq!(report.summary.rules_skipped, 0, "run {run}");
+            samples.push(elapsed);
+        }
+        samples.sort();
+        let median = samples[RUNS / 2];
+        let shown: Vec<String> = samples
+            .iter()
+            .map(|sample| format!("{:.2}", sample.as_secs_f64() * 1e3))
+            .collect();
+        println!(
+            "DRC-10 median {:.2} ms of {shown:?}, budget {} ms",
+            median.as_secs_f64() * 1e3,
+            BUDGET.as_millis()
+        );
+        assert!(
+            median <= BUDGET,
+            "DRC-10 超预算：中位数 {:.2} ms（{shown:?}），预算 {} ms",
+            median.as_secs_f64() * 1e3,
+            BUDGET.as_millis()
+        );
     }
 }
