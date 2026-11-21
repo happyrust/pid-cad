@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Externalized DWG/DXF block-to-SPPID class & variant mapping rules (L3-1 / #124). Pairs with assets/pid-class-map.json.",
+  "description": "Externalized DWG/DXF block and multi-modal legacy legend-to-SPPID class & variant mapping rules (L3-1 / #124 / #138). Pairs with assets/pid-class-map.json.",
   "ignore_layers": [
     "DrawingBorder",
     "HiddenObjects",
@@ -30,5 +30,242 @@
     "10": "PIDProcessEquipment",
     "11": "PIDPipingComponent",
     "12": "PIDInstrument"
+  },
+  "legacy_ignore_classes": [
+    "ignore",
+    "motor",
+    "eh-switch"
+  ],
+  "legacy_class_map": {
+    "ball-valve": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#01",
+      "symbol_path": "Piping\\Valves\\2 Way Common\\Ball Valve Type 2.sym"
+    },
+    "pr-valve": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#01",
+      "symbol_path": "Piping\\Valves\\2 Way Common\\Ball Valve Type 1.sym"
+    },
+    "bleed-valve": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#01",
+      "symbol_path": "Piping\\Valves\\2 Way Common\\Ball Valve Type 1.sym"
+    },
+    "normally-open-valve": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#01",
+      "symbol_path": "Piping\\Valves\\2 Way Common\\Ball Valve Type 2.sym"
+    },
+    "valve-unknown": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#01",
+      "symbol_path": "Piping\\Valves\\2 Way Common\\Ball Valve Type 1.sym"
+    },
+    "gate": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#11",
+      "symbol_path": "Piping\\Valves\\2 Way Common\\Gate Valve Type 2.sym"
+    },
+    "block-valve": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#11",
+      "symbol_path": "Piping\\Valves\\2 Way Common\\Gate Valve Type 2.sym"
+    },
+    "drain-valve": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#11",
+      "symbol_path": "Piping\\Valves\\2 Way Common\\Gate Valve Type 2.sym"
+    },
+    "globe-valve": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#06",
+      "symbol_path": "Piping\\Valves\\2 Way Common\\Globe Valve Type 1.sym"
+    },
+    "butterfly": {
+      "class": "PIDInlineInstrument",
+      "variant_id": "PIDInlineInstrument#01",
+      "symbol_path": "Instrumentation\\In-Line\\Valves\\2 Way Common\\2 Way Butterfly Type 1.sym"
+    },
+    "check-valve": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#05",
+      "symbol_path": "Piping\\Valves\\2 Way Common\\Check Valve Type 1.sym"
+    },
+    "breather-valve": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#02",
+      "symbol_path": "Piping\\Valves\\2 Way Common\\Breather Valve Type 1.sym"
+    },
+    "evalve": {
+      "class": "PIDInlineInstrument",
+      "variant_id": "PIDInlineInstrument#03",
+      "symbol_path": "Instrumentation\\In-Line\\Control Valves\\MOV-Electrically Operated Valve with Flange.sym"
+    },
+    "evalve-unknown": {
+      "class": "PIDInlineInstrument",
+      "variant_id": "PIDInlineInstrument#03",
+      "symbol_path": "Instrumentation\\In-Line\\Control Valves\\MOV-Electrically Operated Valve with Flange.sym"
+    },
+    "control-valve": {
+      "class": "PIDInlineInstrument",
+      "variant_id": "PIDInlineInstrument#07",
+      "symbol_path": "Instrumentation\\In-Line\\Control Valves\\LV-Level Control Valve.sym"
+    },
+    "relief-valve": {
+      "class": "PIDInlineInstrument",
+      "variant_id": "PIDInlineInstrument#05",
+      "symbol_path": "Instrumentation\\Relief Devices\\Safety Valve Type 1.sym"
+    },
+    "flow-indicator": {
+      "class": "PIDInlineInstrument",
+      "variant_id": "PIDInlineInstrument#09",
+      "symbol_path": "Instrumentation\\In-Line\\Flow\\FT-Electromagnetic Flowmeter.sym"
+    },
+    "flow-meter": {
+      "class": "PIDInlineInstrument",
+      "variant_id": "PIDInlineInstrument#09",
+      "symbol_path": "Instrumentation\\In-Line\\Flow\\FT-Electromagnetic Flowmeter.sym"
+    },
+    "filter": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#12",
+      "symbol_path": "Piping\\Specialty Components\\Strainers\\Y-Strainer.sym"
+    },
+    "y-strainer": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#12",
+      "symbol_path": "Piping\\Specialty Components\\Strainers\\Y-Strainer with flange.sym"
+    },
+    "eccentric-reducer": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#08",
+      "symbol_path": "Piping\\Fittings\\Diameter Change\\Concentric Reducer.sym"
+    },
+    "pipe-cap": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#03",
+      "symbol_path": "Piping\\Fittings\\Flanges and Unions\\Flange Type 2.sym"
+    },
+    "quick-coupling": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#03",
+      "symbol_path": "Piping\\Fittings\\Flanges and Unions\\Flange Type 2.sym"
+    },
+    "flame-arrester": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#07",
+      "symbol_path": "Piping\\Specialty Components\\Misc\\Buffer Vessel.sym"
+    },
+    "hydrant": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#07",
+      "symbol_path": "Piping\\Specialty Components\\Misc\\Buffer Vessel.sym"
+    },
+    "foam-port": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#03",
+      "symbol_path": "Piping\\Fittings\\Flanges and Unions\\Flange Type 2.sym"
+    },
+    "vent": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#07",
+      "symbol_path": "Piping\\Specialty Components\\Misc\\Buffer Vessel.sym"
+    },
+    "vent-outlet": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#07",
+      "symbol_path": "Piping\\Specialty Components\\Misc\\Buffer Vessel.sym"
+    },
+    "funnel": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#07",
+      "symbol_path": "Piping\\Specialty Components\\Misc\\Cleaning Tee.sym"
+    },
+    "loading-arm": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#07",
+      "symbol_path": "Piping\\Specialty Components\\Misc\\Buffer Vessel.sym"
+    },
+    "pipe-unknown": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#03",
+      "symbol_path": "Piping\\Fittings\\Flanges and Unions\\Flange Type 2.sym"
+    },
+    "rc": {
+      "class": "PIDPipingComponent",
+      "variant_id": "PIDPipingComponent#03",
+      "symbol_path": "Piping\\Fittings\\Flanges and Unions\\Flange Type 2.sym"
+    },
+    "bubble": {
+      "class": "PIDInstrument",
+      "variant_id": "PIDInstrument#02",
+      "symbol_path": "Instrumentation\\Off-Line\\Without Implied Components\\Pressure\\PG-Pressure Gauge.sym"
+    },
+    "gauge": {
+      "class": "PIDInstrument",
+      "variant_id": "PIDInstrument#02",
+      "symbol_path": "Instrumentation\\Off-Line\\Without Implied Components\\Pressure\\PG-Pressure Gauge.sym"
+    },
+    "bubble-panel": {
+      "class": "PIDControlSystemFunction",
+      "variant_id": "PIDControlSystemFunction#01",
+      "symbol_path": "Instrumentation\\System Functions\\D C S\\DCS Func Access in Prime Loc.sym"
+    },
+    "tank": {
+      "class": "PIDProcessVessel",
+      "variant_id": "PIDProcessVessel#07",
+      "symbol_path": "Equipment\\Vessels\\Tanks\\Internal Floating Roof Parametric Tank.sym"
+    },
+    "additive-tank": {
+      "class": "PIDProcessVessel",
+      "variant_id": "PIDProcessVessel#01",
+      "symbol_path": "Equipment\\Vessels\\Vertical Drums\\1to1Parametric V Drum.sym"
+    },
+    "pump": {
+      "class": "PIDMechanicalEquipment",
+      "variant_id": "PIDMechanicalEquipment#03",
+      "symbol_path": "Equipment\\Mechanical\\Pumps\\Centrifugal Pump.sym"
+    },
+    "electric-motor": {
+      "class": "PIDMechanicalEquipment",
+      "variant_id": "PIDMechanicalEquipment#01",
+      "symbol_path": "Equipment\\Mechanical\\Drivers\\Electric Motor Type 1.sym"
+    },
+    "skid": {
+      "class": "PIDProcessEquipment",
+      "variant_id": "PIDProcessEquipment#04",
+      "symbol_path": "Equipment\\Black Box System\\Parametric Black Box.sym"
+    },
+    "equip-unknown": {
+      "class": "PIDProcessEquipment",
+      "variant_id": "PIDProcessEquipment#04",
+      "symbol_path": "Equipment\\Black Box System\\Parametric Black Box.sym"
+    },
+    "sheet-ref": {
+      "class": "PIDBranchPoint",
+      "variant_id": "PIDBranchPoint#01",
+      "symbol_path": "Instrumentation\\Instrument OPC's\\Off-Unit.sym"
+    },
+    "flow-arrow": {
+      "class": "PIDBranchPoint",
+      "variant_id": "PIDBranchPoint#01",
+      "symbol_path": "Instrumentation\\Instrument OPC's\\Off-Unit.sym"
+    },
+    "s-point": {
+      "class": "PIDNote",
+      "variant_id": "PIDNote#01",
+      "symbol_path": "Design\\Annotation\\Graphics\\Circle.sym"
+    },
+    "drain-point": {
+      "class": "PIDNote",
+      "variant_id": "PIDNote#01",
+      "symbol_path": "Design\\Annotation\\Graphics\\Circle.sym"
+    },
+    "drain-node": {
+      "class": "PIDNote",
+      "variant_id": "PIDNote#01",
+      "symbol_path": "Design\\Annotation\\Graphics\\Circle.sym"
+    }
   }
 }

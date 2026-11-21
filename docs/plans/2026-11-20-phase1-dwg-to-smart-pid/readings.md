@@ -990,3 +990,66 @@
 | `scripts\fmt-newhunks.ps1` | — | `classes.rs`、`write.rs`、`mod.rs`、`export.rs`、`promote.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `193 passed` | **`196 passed`** | `+3` 条 Python 测试，**全绿** |
+
+---
+
+## 27. L3-1..L3-4 / L4-5 / L6-1（#138）：原生存量 AutoCAD DWG/DXF 多模态符号识别融合与 2/3 段存量线号转换闭环（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `1b1495c37`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `assets/pid-sppid-legend-map.json`、`src/io/pid_convert/{class_map,recognize,export}.rs`、`src/io/pid_publish/names.rs` |
+| 证据目录子项 | `2026-11-21-issue138/`（`red.txt`、`green-fast.txt`、`legacy12_summary.json`、`legacy12_check.json`、`baseline-legacy-12.tsv`、`gen90_reg_summary.json`、`current-90.tsv`、`sanitized_138_report.json`、`cargo_test.txt`、`clippy_lib2.txt`、`clippy_test2.txt`） |
+
+### 27.1 先红后绿与设计摘要
+
+- **问题根因**：阶段一前序 `L3/L4/L5` 在 90 张 SPPID 导出 DXF（图块名直接对应英文 `.sym` 主干、线号为 4–6 段 SPPID 格式）上闭环，但实测 `SOURCE_DWG` 批次 12 张真实原生 AutoCAD 存量图（涵盖两套非 SPPID 图例标准：`L01..L04, L11..L12` 为天正 `$VALVE$*` 图块 + 散圆仪表圈/容器/泵；`L05..L10` 为完全炸散成散线的 49 种形状指纹图）时，改前 `pid_convert` 仅扫描 `INSERT` 图块匹配英文 `.sym` 名，导致 **12 图精确变体映射数为 `0`（`variant_exact = 0`）**，且两段式（如 `80-FS`、`150-FW`）与三段式（如 `150-FW-31001`）存量线号因段数不足 4 段被 `parse_sppid_line_number` 拒绝。
+- **先红阶段**（`red.txt`，退出码 `101`）：新增 `parses_two_part_and_three_part_legacy_line_numbers` 与 `converts_legacy_autocad_blocks_circles_and_two_part_line_numbers_to_valid_dual_bundle` 两条单测，按预期因断言失败变红。
+- **转绿阶段**（`green-fast.txt`，`PUB_RC=0`、`CONV_RC=0`）：
+  1. 在 `assets/pid-sppid-legend-map.json` 新增纯 ASCII `legacy_ignore_classes`（过滤非 P&ID 电器辅助类 `ignore / motor / eh-switch`）与 `legacy_class_map`（将 `io::pid_legend` 产出的全部 45 个业务类别映射到 `assets/pid-class-map.json` 中带真实库内 `.sym` 的精确 `variant_id`）；
+  2. 在 `src/io/pid_convert/recognize.rs` 新增 `fuse_legacy_autocad_recognition`：仅当图纸无任何命中 SPPID `.sym` 的图块（`!symbols.iter().any(|s| s.known)`）时，只读复用 `crate::io::pid_legend::recognise_with_units`（零改动 `src/io/pid_legend/*`）融合块、圆与散线形状符号、位号句柄 `tag_handles`、页间连接符对端图号及 `legacy.pipes.runs` 管段成链；并在 `export.rs` 支持无预置线号图层时的 `"PIPE"` 管段兜底采集；
+  3. 在 `src/io/pid_publish/names.rs` 扩展 `parse_sppid_line_number` 与 `ParsedLineNumber::pipeline_name()` 兼容 2 段（`<公称直径>-<介质>`）与 3 段（`<公称直径>-<介质>-<序号>`）存量线号，4+ 段 SPPID 线号行为保持不变。
+
+### 27.2 12 张真实原生 AutoCAD 存量 DXF（`L01..L12`）双产物实测与 90 张 SPPID 基准零回归验证
+
+| 汇总指标 | 改前（`1b1495c37`） | 改后（#138） | 说明 |
+|---|---:|---:|---|
+| 转换成功 / 失败图数 | `12 / 0`（空壳） | **`12 / 0`** | 全部 12 张原生存量 DXF 一次产出 `_Data.xml` + `_Meta.xml` + `_Coverage.json` + `.pid` + `.pidplot.pdf` |
+| **精确变体映射数（`exact_variant_id`）** | **`0`** | **`1,619`** | 覆盖 8 大 SPPID 业务类：`PIDPipingComponent=610`、`PIDInstrument=308`、`PIDInlineInstrument=250`、`PIDBranchPoint=174`、`PIDNote=136`、`PIDControlSystemFunction=101`、`PIDProcessVessel=30`、`PIDMechanicalEquipment=10` |
+| **表外类默认兜底（`class_default_fallback`）** | `0` | **`0`** | `unmapped_class_variant = 0`，100% 精确命中库内 `.sym` 变体 |
+| 合成管线 / 端口 / 管端连通关系 | — | **`54` / `1,124` / `3,302`** | 两段与四段存量线号全部进入 `PIDPipeline` 合成；跨图页间连接符 `174` 个（本批内互逆成对 **`12` 对 = `24` 个**，`one_way_in_batch = 0`） |
+| 写出总对象数 / 总关系数 | — | **`6,867` / `7,147`** | `convert_check.py` 实测 `24 / 24` 份 XML **`spec_violations = 0`、`coverage_errors = 0`** |
+| 跨文件 `GraphicOID` 对齐（`matched / xml_reps`） | — | **`3,454 / 3,454`（`100%`）** | `12 / 12` 张 `.pid` 全部通过 `a` 级（重读 `20,808` 条归一化实体 + Q9 索引零故障）与 `b` 级（CAD 重载 `10,505` 实体 + `pid-plot` PDF 页内图元 `6,972`）；`c1` 标 `unverified_no_sppid_runner` |
+| **90 张 SPPID DXF 回归门禁（`baseline-90.tsv`）** | 基准 | **`passed=True, unexpected=0, expected=0`** | `items=88,236`、`relations=96,888`、`exact_variant_id=15,910` 逐图逐列 **100% 零差异**（退出码 `0`） |
+
+#### 12 张原生 AutoCAD 存量图纸脱敏逐图明细（`L01..L12`）
+
+| 代号 | 源 DXF SHA-256 前缀 | 高置信度 | 中置信度 | 精确变体数 | 合成管线 | 端口数 | 对象总数 | 关系总数 | `GraphicOID` 对齐 | `a/b` 级验证 | PDF 图元数 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|
+| `L01` | `a0f05f81a655` | `107` | `1` | `108` | `7` | `96` | `483` | `554` | `227 / 227` | `true / true` | `560` |
+| `L02` | `66913e5a4dcb` | `145` | `0` | `145` | `7` | `130` | `686` | `789` | `319 / 319` | `true / true` | `648` |
+| `L03` | `28ed389e23cb` | `118` | `0` | `118` | `5` | `114` | `493` | `562` | `236 / 236` | `true / true` | `579` |
+| `L04` | `c43bd94ee217` | `155` | `0` | `155` | `6` | `150` | `745` | `880` | `347 / 347` | `true / true` | `736` |
+| `L05` | `4f2200b7c055` | `209` | `13` | `222` | `0` | `67` | `836` | `700` | `449 / 449` | `true / true` | `720` |
+| `L06` | `135b6bf6b0a6` | `90` | `37` | `127` | `5` | `73` | `673` | `747` | `345 / 345` | `true / true` | `642` |
+| `L07` | `4051ce7189a6` | `168` | `40` | `208` | `4` | `147` | `850` | `844` | `437 / 437` | `true / true` | `727` |
+| `L08` | `7553b30957f1` | `180` | `39` | `219` | `5` | `151` | `849` | `854` | `444 / 444` | `true / true` | `734` |
+| `L09` | `8379ca9156bb` | `143` | `30` | `173` | `5` | `123` | `692` | `694` | `356 / 356` | `true / true` | `642` |
+| `L10` | `5a2218c7924d` | `68` | `44` | `112` | `2` | `49` | `415` | `382` | `225 / 225` | `true / true` | `483` |
+| `L11` | `fc7451dd86cb` | `8` | `3` | `11` | `3` | `0` | `49` | `41` | `27 / 27` | `true / true` | `233` |
+| `L12` | `2e16d71c2b6f` | `18` | `3` | `21` | `5` | `24` | `96` | `100` | `42 / 42` | `true / true` | `268` |
+
+### 27.3 固定门禁读数
+
+| 门禁项 | 改前读数（§26.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,204` 条 | **`7,206` 条**（**`7,138` 过** / **`67` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试，**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `class_map.rs`、`recognize.rs`、`export.rs`、`names.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `196 passed` | **`196 passed`** | **全绿** |
+

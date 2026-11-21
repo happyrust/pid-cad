@@ -1462,6 +1462,17 @@ pub fn recognise_sppid_sheet(
         }
     }
 
+    if !symbols.iter().any(|s| s.known) {
+        if let Some(fused) = fuse_legacy_autocad_recognition(doc, map, thresholds, upm) {
+            symbols = fused.symbols;
+            summary = fused.summary;
+            if let Some((segs, labels)) = fused.pipes {
+                pipe_segments = segs;
+                pipe_labels = labels;
+            }
+        }
+    }
+
     let title_block = extract_title_block(&all_texts, sheet_bounds, upm);
 
     SheetRecognition {
@@ -1474,6 +1485,176 @@ pub fn recognise_sppid_sheet(
         title_block,
         confidence_summary: summary,
     }
+}
+
+struct LegacyFusion {
+    symbols: Vec<ConvertedSymbol>,
+    summary: ConfidenceSummary,
+    pipes: Option<(Vec<PipeSegmentHit>, Vec<PipeLabelHit>)>,
+}
+
+fn fuse_legacy_autocad_recognition(
+    doc: &Document,
+    map: &LegendClassMap,
+    thresholds: ConfidenceThresholds,
+    upm: f64,
+) -> Option<LegacyFusion> {
+    let rules = crate::io::pid_legend::Rules::load();
+    let legacy = crate::io::pid_legend::recognise_with_units(doc, &rules, upm);
+
+    let mut fused_syms = Vec::new();
+    let mut fused_sum = ConfidenceSummary {
+        unmapped_blocks: legacy.unknown_blocks.values().sum::<usize>()
+            + legacy.unknown_shapes.iter().map(|u| u.count).sum::<usize>(),
+        ..Default::default()
+    };
+    let mut mapped_business = 0usize;
+
+    for ls in &legacy.symbols {
+        if map.is_legacy_ignored(&ls.class) {
+            fused_sum.ignored_blocks += 1;
+            continue;
+        }
+        if !ls.known || ls.class.starts_with("shape-") || ls.class == "unknown" {
+            continue;
+        }
+        let Some(ov) = map.resolve_legacy_class(&ls.class) else {
+            fused_sum.unmapped_blocks += 1;
+            let score = 0.35;
+            let tier = thresholds.classify(score);
+            match tier {
+                ConfidenceTier::High => fused_sum.high += 1,
+                ConfidenceTier::Medium => fused_sum.medium += 1,
+                ConfidenceTier::Low => fused_sum.low += 1,
+            }
+            fused_syms.push(ConvertedSymbol {
+                sppid_class: "Unmapped".to_string(),
+                variant_id: None,
+                symbol_path: None,
+                source_block: ls.source.clone(),
+                layer: ls.class.clone(),
+                at: ls.at,
+                bbox: ls.bbox,
+                ports: vec![ls.at],
+                tag: ls.tag.clone(),
+                description: None,
+                to_from_text: None,
+                lines: ls.lines.clone(),
+                nominal_diameter: None,
+                entity_handle: ls.handles.first().map(|h| h.value()),
+                tag_handles: ls.tag_handles.iter().map(|h| h.value()).collect(),
+                confidence: score,
+                tier,
+                known: false,
+            });
+            continue;
+        };
+
+        mapped_business += 1;
+        let ports = vec![
+            (ls.bbox.0, ls.at.1),
+            (ls.bbox.2, ls.at.1),
+            (ls.at.0, ls.bbox.1),
+            (ls.at.0, ls.bbox.3),
+            ls.at,
+        ];
+        let (tag, to_from_text, description) = if ov.class == "PIDBranchPoint" {
+            match ls.tag.as_deref() {
+                Some(t) if t.contains("DWG-") => (None, Some(t.to_string()), None),
+                Some(t) => (None, None, Some(t.to_string())),
+                None => (None, None, None),
+            }
+        } else {
+            (ls.tag.clone(), None, None)
+        };
+
+        let tag_handles: Vec<u64> = if !ls.tag_handles.is_empty() {
+            ls.tag_handles.iter().map(|h| h.value()).collect()
+        } else if ls.handles.len() > 1 && ls.source.starts_with("circle") {
+            ls.handles[1..].iter().map(|h| h.value()).collect()
+        } else {
+            Vec::new()
+        };
+
+        let score = if tag.is_some() || to_from_text.is_some() || !ls.wants_tag {
+            0.95
+        } else {
+            0.78
+        };
+        let tier = thresholds.classify(score);
+        match tier {
+            ConfidenceTier::High => fused_sum.high += 1,
+            ConfidenceTier::Medium => fused_sum.medium += 1,
+            ConfidenceTier::Low => fused_sum.low += 1,
+        }
+
+        fused_syms.push(ConvertedSymbol {
+            sppid_class: ov.class.clone(),
+            variant_id: Some(ov.variant_id.clone()),
+            symbol_path: ov.symbol_path.clone(),
+            source_block: ls.source.clone(),
+            layer: ls.class.clone(),
+            at: ls.at,
+            bbox: ls.bbox,
+            ports,
+            tag,
+            description,
+            to_from_text,
+            lines: ls.lines.clone(),
+            nominal_diameter: None,
+            entity_handle: ls.handles.first().map(|h| h.value()),
+            tag_handles,
+            confidence: score,
+            tier,
+            known: true,
+        });
+    }
+
+    if mapped_business == 0 {
+        return None;
+    }
+
+    let pipes = if !legacy.pipes.runs.is_empty() {
+        let mut new_segs = Vec::new();
+        let mut new_labels = Vec::new();
+        for run in &legacy.pipes.runs {
+            let first_h = run.handles.first().map(|h| h.value());
+            for w in run.path.windows(2) {
+                if (w[0].0 - w[1].0).hypot(w[0].1 - w[1].1) > 1e-6 {
+                    new_segs.push(PipeSegmentHit {
+                        start: w[0],
+                        end: w[1],
+                        layer: "PIPE".to_string(),
+                        entity_handle: first_h,
+                    });
+                }
+            }
+            if let Some(lbl) = run.lines.first().or_else(|| run.numbers.first()) {
+                let mid_idx = run.path.len() / 2;
+                let anchor = if run.path.len() >= 2 && mid_idx > 0 {
+                    let a = run.path[mid_idx - 1];
+                    let b = run.path[mid_idx];
+                    ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5)
+                } else {
+                    run.path.first().copied().unwrap_or((0.0, 0.0))
+                };
+                new_labels.push(PipeLabelHit {
+                    raw_text: lbl.clone(),
+                    at: anchor,
+                    layer: "PIPE".to_string(),
+                });
+            }
+        }
+        Some((new_segs, new_labels))
+    } else {
+        None
+    };
+
+    Some(LegacyFusion {
+        symbols: fused_syms,
+        summary: fused_sum,
+        pipes,
+    })
 }
 
 fn rect_gap(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> f64 {

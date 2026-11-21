@@ -2449,4 +2449,122 @@ mod tests {
         assert_eq!(paired.pairs[0].uid_a, "OPC_A1");
         assert_eq!(paired.pairs[0].uid_b, "OPC_B1");
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn converts_legacy_autocad_blocks_circles_and_two_part_line_numbers_to_valid_dual_bundle() {
+        use document::entities::Circle;
+
+        let mut doc = Document::new();
+        // TWT AutoCAD block symbols (`$VALVE$00000316` butterfly, `$TwtSys$00000132` sheet-ref)
+        define_block(&mut doc, "$VALVE$00000316", 6.0, 4.0);
+        define_block(&mut doc, "$TwtSys$00000132", 10.0, 6.0);
+
+        // Tank loose circle (`r=15 mm`, inner tag `TK-1001`)
+        let mut tank_c = Circle::new();
+        tank_c.center = Vector3::new(30.0, 100.0, 0.0);
+        tank_c.radius = 15.0;
+        tank_c.common.layer = "EQUIP".to_string();
+        doc.add_entity(EntityType::Circle(tank_c)).unwrap();
+        let mut tank_t =
+            Text::with_value("TK-1001", Vector3::new(26.0, 100.0, 0.0)).with_height(2.5);
+        tank_t.common.layer = "TEXT".to_string();
+        doc.add_entity(EntityType::Text(tank_t)).unwrap();
+
+        // Butterfly valve block (`BUV-3101`)
+        let mut buv = Insert::new("$VALVE$00000316", Vector3::new(80.0, 100.0, 0.0));
+        buv.common.layer = "VALVE_1".to_string();
+        doc.add_entity(EntityType::Insert(buv)).unwrap();
+        let mut buv_t =
+            Text::with_value("BUV-3101", Vector3::new(76.0, 106.0, 0.0)).with_height(2.5);
+        buv_t.common.layer = "TEXT".to_string();
+        doc.add_entity(EntityType::Text(buv_t)).unwrap();
+
+        // Loose circle instrument bubble (`r=3.0 mm`, two-line `PT` / `3102`)
+        let mut bub_c = Circle::new();
+        bub_c.center = Vector3::new(110.0, 118.0, 0.0);
+        bub_c.radius = 3.0;
+        bub_c.common.layer = "INST".to_string();
+        doc.add_entity(EntityType::Circle(bub_c)).unwrap();
+        let mut bub_t1 = Text::with_value("PT", Vector3::new(109.2, 118.8, 0.0)).with_height(1.8);
+        bub_t1.common.layer = "TEXT".to_string();
+        doc.add_entity(EntityType::Text(bub_t1)).unwrap();
+        let mut bub_t2 = Text::with_value("3102", Vector3::new(108.8, 116.8, 0.0)).with_height(1.8);
+        bub_t2.common.layer = "TEXT".to_string();
+        doc.add_entity(EntityType::Text(bub_t2)).unwrap();
+
+        // Off-page sheet connector (`$TwtSys$00000132` + `DWG-9000AA01-02`)
+        let mut opc = Insert::new("$TwtSys$00000132", Vector3::new(150.0, 100.0, 0.0));
+        opc.common.layer = "PIPE-FW".to_string();
+        doc.add_entity(EntityType::Insert(opc)).unwrap();
+        let mut opc_t =
+            Text::with_value("DWG-9000AA01-02", Vector3::new(145.0, 106.0, 0.0)).with_height(2.5);
+        opc_t.common.layer = "TEXT".to_string();
+        doc.add_entity(EntityType::Text(opc_t)).unwrap();
+
+        // Pipe runs on `PIPE-FW` with 2-part legacy line number `80-FS`
+        for (a, b) in [
+            ((45.0, 100.0), (77.0, 100.0)),
+            ((83.0, 100.0), (145.0, 100.0)),
+        ] {
+            let mut pl =
+                Line::from_points(Vector3::new(a.0, a.1, 0.0), Vector3::new(b.0, b.1, 0.0));
+            pl.common.layer = "PIPE-FW".to_string();
+            doc.add_entity(EntityType::Line(pl)).unwrap();
+        }
+        let mut line_t = Text::with_value("80-FS", Vector3::new(58.0, 102.0, 0.0)).with_height(2.5);
+        line_t.common.layer = "TEXT".to_string();
+        doc.add_entity(EntityType::Text(line_t)).unwrap();
+
+        let opts = ConvertOptions {
+            seed_pid_bytes: Some(build_synthetic_seed_pid_bytes()),
+            verify_plot_pdf: true,
+            ..Default::default()
+        };
+        let dual =
+            convert_document_to_dual(&doc, "LEGACY-AUTOCAD-01", &opts).expect("dual convert");
+
+        assert!(
+            dual.report.variant_resolution.exact_variant_id >= 4,
+            "expected >=4 legacy symbols mapped to exact variants, got {:?}",
+            dual.report.variant_resolution
+        );
+        assert_eq!(dual.report.variant_resolution.class_default_fallback, 0);
+        assert!(dual.report.piping_synthesis.pipelines >= 1);
+
+        let xml_str = String::from_utf8_lossy(&dual.publish.data_xml);
+        assert!(xml_str.contains("TK-1001"));
+        assert!(xml_str.contains("BUV-3101"));
+        assert!(xml_str.contains("PT-3102"));
+        assert!(xml_str.contains("80 mm-FS"));
+
+        let spec = default_publish_spec();
+        let chk_opts = CheckOptions {
+            expected_plant: Some("P01".to_string()),
+            ..Default::default()
+        };
+        assert!(check_publish_xml_bytes(
+            "LEGACY-AUTOCAD-01_Data.xml",
+            PublishXmlKind::Data,
+            &dual.publish.data_xml,
+            spec,
+            &chk_opts,
+        )
+        .is_empty());
+
+        let tmp = std::env::temp_dir().join(format!("ocs_legacy138_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let ver = verify_dual_bundle(
+            &dual.report.doc_uid,
+            &dual.publish.data_xml,
+            dual.pid_bytes.as_ref().unwrap(),
+            Some(&tmp),
+            "LEGACY-AUTOCAD-01",
+        )
+        .expect("verify legacy dual bundle");
+        assert!(ver.is_cross_file_and_a_valid(), "{ver:?}");
+        assert!(ver.is_b_plot_valid(), "{ver:?}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

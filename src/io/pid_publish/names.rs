@@ -18,16 +18,19 @@ pub struct ParsedLineNumber {
 
 impl ParsedLineNumber {
     pub fn pipeline_name(&self) -> String {
-        match &self.insulation {
-            Some(ins) if !ins.is_empty() => format!(
-                "{}-{}-{}-{}-{}",
-                self.size_in_name, self.fluid_code, self.seq_no, self.materials_class, ins
-            ),
-            _ => format!(
-                "{}-{}-{}-{}",
-                self.size_in_name, self.fluid_code, self.seq_no, self.materials_class
-            ),
+        let mut parts = vec![self.size_in_name.as_str(), self.fluid_code.as_str()];
+        if !self.seq_no.is_empty() {
+            parts.push(self.seq_no.as_str());
         }
+        if !self.materials_class.is_empty() {
+            parts.push(self.materials_class.as_str());
+        }
+        if let Some(ref ins) = self.insulation {
+            if !ins.is_empty() {
+                parts.push(ins.as_str());
+            }
+        }
+        parts.join("-")
     }
 
     pub fn connector_name(&self) -> String {
@@ -156,12 +159,12 @@ pub fn parse_sppid_line_number(raw: &str) -> Option<ParsedLineNumber> {
         return None;
     }
     let raw_parts: Vec<&str> = trimmed.split('-').map(str::trim).collect();
-    if raw_parts.len() < 4 {
+    if raw_parts.len() < 2 {
         return None;
     }
 
-    // Handle fractional inch size with internal hyphen (`1-1/2"-IA-101-A1`)
-    let (raw_size, idx_after_size) = if raw_parts.len() >= 5
+    // Handle fractional inch size with internal hyphen (`1-1/2"-IA-101-A1` or `1-1/2"-IA`)
+    let (raw_size, idx_after_size) = if raw_parts.len() >= 3
         && !raw_parts[0].is_empty()
         && raw_parts[0].chars().all(|c| c.is_ascii_digit())
         && raw_parts[1].contains('/')
@@ -174,14 +177,49 @@ pub fn parse_sppid_line_number(raw: &str) -> Option<ParsedLineNumber> {
         (raw_parts[0].to_string(), 1usize)
     };
 
-    if raw_parts.len() < idx_after_size + 3 {
+    if raw_parts.len() < idx_after_size + 1 {
         return None;
     }
     let (nominal_diameter_attr, size_in_name) = parse_diameter_core(&raw_size)?;
     let fluid_code = raw_parts[idx_after_size].trim();
+    if fluid_code.is_empty() {
+        return None;
+    }
+
+    // Short 2-part (`80-FS`) or 3-part (`150-FW-31001`) legacy AutoCAD line numbers:
+    // require uppercase ASCII service code so equipment tags (`TK-1001`) never match.
+    if raw_parts.len() < idx_after_size + 3 {
+        if !(1..=5).contains(&fluid_code.len())
+            || !fluid_code.chars().all(|c| c.is_ascii_uppercase())
+        {
+            return None;
+        }
+        let seq_no = raw_parts
+            .get(idx_after_size + 1)
+            .copied()
+            .unwrap_or("")
+            .trim();
+        if !seq_no.is_empty()
+            && !seq_no
+                .chars()
+                .all(|c| c.is_ascii_digit() || c.is_ascii_uppercase())
+        {
+            return None;
+        }
+        return Some(ParsedLineNumber {
+            raw_size,
+            nominal_diameter_attr,
+            size_in_name,
+            fluid_code: fluid_code.to_string(),
+            seq_no: seq_no.to_string(),
+            materials_class: String::new(),
+            insulation: None,
+        });
+    }
+
     let seq_no = raw_parts[idx_after_size + 1].trim();
     let materials_class = raw_parts[idx_after_size + 2].trim();
-    if fluid_code.is_empty() || seq_no.is_empty() || materials_class.is_empty() {
+    if seq_no.is_empty() || materials_class.is_empty() {
         return None;
     }
 
@@ -351,6 +389,20 @@ mod tests {
         let p4 = parse_sppid_line_number("1-1/2\"-IA-101-A1").expect("fractional inch");
         assert_eq!(p4.nominal_diameter_attr, "1-1/2 in");
         assert_eq!(p4.pipeline_name(), "1-1/2\"-IA-101-A1");
+    }
+
+    #[test]
+    fn parses_two_part_and_three_part_legacy_line_numbers() {
+        let p_two = parse_sppid_line_number("80-FS").expect("two-part legacy line number");
+        assert_eq!(p_two.nominal_diameter_attr, "80 mm");
+        assert_eq!(p_two.fluid_code, "FS");
+        assert_eq!(p_two.pipeline_name(), "80 mm-FS");
+
+        let p_three = parse_sppid_line_number("150-FW-31001").expect("three-part legacy line");
+        assert_eq!(p_three.nominal_diameter_attr, "150 mm");
+        assert_eq!(p_three.fluid_code, "FW");
+        assert_eq!(p_three.seq_no, "31001");
+        assert_eq!(p_three.pipeline_name(), "150 mm-FW-31001");
     }
 
     #[test]

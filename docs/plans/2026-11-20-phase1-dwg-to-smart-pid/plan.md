@@ -11,7 +11,7 @@
 | 文件名 | 定位与职责 | 当前状态 |
 |---|---|---|
 | `智能PID平台-阶段一实施方案.md` | 阶段一主执行方案（L0–L6 + LX 逐任务做法、门禁、验收与逐项解决记录） | **已确认并执行中**（已对齐 `main @ 6377fe233` 与 `pid-parse @ a85fa10`） |
-| `智能PID平台-阶段一Issue清单.md` | 阶段一拆单说明、线上 GitHub Issue 映射与逐单解决日志 | **已同步线上 `#106`–`#137`** |
+| `智能PID平台-阶段一Issue清单.md` | 阶段一拆单说明、线上 GitHub Issue 映射与逐单解决日志 | **已同步线上 `#106`–`#138`** |
 | `智能PID平台-阶段一路线图-DWG转智能PID与pid导出.md` | 阶段一总体路线、取舍依据、预检三关与减法送测设计 | **已对齐当前仓库进度并脱敏** |
 | `智能PID平台-样本分析-XML规格与pid结构.md` | 110 对真实 SPPID 样本格式/结构实测规格与 Q1–Q13 答案回填 | **已完成全批 220 份复核与 Q1–Q13 回填** |
 | `03-parse-answers.md` | `L0-8`（[#118](https://github.com/happyrust/pid-cad/issues/118)）对照 `pid-parse @ a85fa10` 源码逐条回答 Q1–Q13（含精确源码路径与行号） | **已完成** |
@@ -20,7 +20,7 @@
 | `06-lx-compliance-and-codelist-audit.md` | `LX-6 / LX-7 / #117`（[#137](https://github.com/happyrust/pid-cad/issues/137)）备份包分级来源全包实查、`.pid` 保留流够用性台账与书面合规边界确认 | **已完成** |
 | `智能PID平台-内部模型合一分析.md` | `PID_SEMANTICS` 与 `PID_AUTHOR` 升格合一方案及与并行分支 `pid-symbol-identity` 的衔接边界 | **已完成引擎与属性面板双分组落地（见 `promote.rs`、`pidprops.rs`）** |
 | `智能PID平台-资料清单.md` | `RES-01`–`RES-17` 资料清点、环境变量约定与缺口降级策略（`L0-1`） | **已完成清点登记** |
-| `readings.md` | 阶段一门禁基线与各单先红后绿、真实样本实测读数账本 | **持续更新（已记 §1–§26）** |
+| `readings.md` | 阶段一门禁基线与各单先红后绿、真实样本实测读数账本 | **持续更新（已记 §1–§27）** |
 
 ---
 
@@ -56,5 +56,6 @@
 | `L2-1 M1..M5 / L2-5 / L2-6 / L2-7 / L6-2` `PID_AUTHOR` 无冲突升格与编辑存回 `.pid` | [#134](https://github.com/happyrust/pid-cad/issues/134) | **已完成（引擎全链路）**（2026-11-21） | 提交 **`ac6527ca1`**：落地 `src/io/pid_convert/promote.rs`（零改动 `src/pid/*` 与 `src/app/*`）；打通 `M1..M5` 幂等升格、手工位号保护、`>2048B` XRecord 分片、`purge` 隔离、`L2-5` 删符号清拓扑与移位同步、`L2-6` `.pid` 语义升格及 `L2-7 / L6-2` 编辑后存回 `.pid` + XML；真实中位规模生产 DXF（`115` 符号 + `50` 管段）升格编辑存回 `166 / 166` `GraphicOID` 100% 对齐并通过 `a/b` 级重读与 PDF 出图验证，见 `readings.md` §24 |
 | `LX-8 / LX-9 / L6-3` 第一轮减法送测 6 套受控包构建器与阶段一总验收报告 | [#135](https://github.com/happyrust/pid-cad/issues/135) | **已完成（首轮送测就绪）**（2026-11-21） | 提交 **`3ba5c3c2e`**：落地 `scripts/sppid/{build_submission_round1,test_build_submission_round1}.py` 与 `05-phase1-acceptance-report.md`；在真实语料上自动构建 `submissions/round-01-20261121/`（`00-control` + `V1-01..V1-05` 共 6 槽 17 文件，`manifest_sha256 = 26eb6189e08d506a...`）并全部通过本地预检（`precheck_passed = true`），见 `readings.md` §23 |
 | `L2-1 M4 / L2-2 / L2-3 / L2-4 / L3-7` 属性面板读写联动、来源证据只读组与三档置信度交互校核闭环 | [#136](https://github.com/happyrust/pid-cad/issues/136) | **已完成 · L2/L3-7 交互全线收官**（2026-11-21） | 提交 **`13635d1f1`**：扩展 `src/app/commands/pidprops.rs` 与 `src/io/pid_convert/{recognize,promote,mod}.rs`（零触碰并行活跃分支）；实现属性面板可编辑 `P&ID 属性` + 只读 `P&ID 来源证据` 双分组、DWG/DXF 单行及圈内双行 `TEXT`/`MTEXT` 位号双向联动与单步撤销回滚，以及应用内交互命令 `PIDPROMOTE`、`PIDREVIEW`（`SUMMARY / HIGH / MEDIUM / LOW / DUPLICATES / ACCEPT / REJECT`）与 `PIDSAVEPID`（前置重号拦截 `gate_save` + 写出 `.pid` + XML）；真实生产 DXF 在 `OpenCADStudio` 内跑通升格 `115` 符号 → `PIDREVIEW MEDIUM` 选中 `12` 个并 `ACCEPT` → 面板改位号联动 `TEXT` → `PIDSAVEPID` 存回 `165 / 165` 对齐过 `a/b` 级验证，见 `readings.md` §25 |
-| `LX-6..LX-9 / L4-2 / #117` 送测三关预检与回执收敛 CLI、类变体兜底可观测性与按厂替换及分级来源实查 | [#137](https://github.com/happyrust/pid-cad/issues/137)（联动 [#117](https://github.com/happyrust/pid-cad/issues/117)） | **已完成 · 阶段一本机全项收官**（2026-11-21） | 落地 `scripts/sppid/{precheck_and_receipt,test_precheck_and_receipt}.py`（统一编排三关预检与 `receipt.json` `R1..R5` 收敛）、`VariantResolutionSummary` 可观测性与 `--class-map` 热替换（90 图全批实测 `exact_variant_id = 15,910`、`structural_default = 72,326`、`class_default_fallback = 0`），并落盘 `06-lx-compliance-and-codelist-audit.md`（完成 `#117` 第 2 步备份包全量实查、`LX-6` 保留流够用性台账与 `LX-7` 合规确认），见 `readings.md` §26 |
+| `LX-6..LX-9 / L4-2 / #117` 送测三关预检与回执收敛 CLI、类变体兜底可观测性与按厂替换及分级来源实查 | [#137](https://github.com/happyrust/pid-cad/issues/137)（联动 [#117](https://github.com/happyrust/pid-cad/issues/117)） | **已完成**（2026-11-21） | 提交 **`1b1495c37`**：落地 `scripts/sppid/{precheck_and_receipt,test_precheck_and_receipt}.py`（统一编排三关预检与 `receipt.json` `R1..R5` 收敛）、`VariantResolutionSummary` 可观测性与 `--class-map` 热替换（90 图全批实测 `exact_variant_id = 15,910`、`structural_default = 72,326`、`class_default_fallback = 0`），并落盘 `06-lx-compliance-and-codelist-audit.md`（完成 `#117` 第 2 步备份包全量实查、`LX-6` 保留流够用性台账与 `LX-7` 合规确认），见 `readings.md` §26 |
+| `L3-1..L3-4 / L4-5 / L6-1` 原生存量 AutoCAD DWG/DXF 多模态符号识别融合与 2/3 段线号转换闭环 | [#138](https://github.com/happyrust/pid-cad/issues/138) | **已完成 · 两套原生存量标准闭环**（2026-11-21） | 扩展 `assets/pid-sppid-legend-map.json`、`src/io/pid_convert/{class_map,recognize,export}.rs` 与 `src/io/pid_publish/names.rs`；只读融合多模态存量识别（天正图块 + 散圆仪表/容器/泵 + 散线形状指纹 45 类符号 + `pipes.runs`）与 2/3 段存量线号解析：`SOURCE_DWG` 全部 `12 / 12` 张原生 AutoCAD 存量图（`L01..L12`）精确变体映射由 `0` 跃升至 **`1,619`**（`fallback = 0`），生成 `6,867` 对象 / `7,147` 关系（`24 / 24` XML 过 `StrictVendor` 零违规，`3,454 / 3,454` `GraphicOID` 100% 对齐并通过 `a/b` 级重读与 PDF 出图），同时 90 张 SPPID DXF 对 `baseline-90.tsv` 逐行零差异，见 `readings.md` §27 |
 | `.sym` 参考数据预览（关联） | [#116](https://github.com/happyrust/pid-cad/issues/116) | **由并行分支推进中** | 正在 `pid-symbol-on-main` 工作树推进 `pid_backup_browser/symbol_preview.rs`，严格避让 |

@@ -419,7 +419,7 @@ flowchart LR
 - **做法**：以 L0-9 的变体目录为基础，建立"DWG 块/图层/形状 → `.sym` 路径 → ModelItemType 与码表值元组"的规则；规则外置；先覆盖高频（管件与管线段前 50 种覆盖 99%）。
 - **验收**：对验收批次，映射覆盖率与"未映射"清单；映射上的对象在 XML 里写出正确类型与码表值；每加一批规则，报告逐行 diff 可控。
 - **依赖**：L0-9、L3-0。**资料**：RES-02 ✔、RES-03 ✔。
-- **解决记录（2026-11-20）**：落地纯 ASCII 外置规则 `assets/pid-sppid-legend-map.json` 与独立转换模块 `src/io/pid_convert/class_map.rs`（先红后绿，零并行分支冲突）；对 90 张有效非空 DXF 全量实测：过滤 `1,326` 个非业务图框/说明框后，净业务图块 **`15,852 / 15,852`（100.00%）** 映射到 `assets/pid-class-map.json` 变体（未映射 `0`），详见 `readings.md` §13。
+- **解决记录（2026-11-20..21）**：① `1bb06191e`（`#124`）落地纯 ASCII 外置规则 `assets/pid-sppid-legend-map.json` 与 `src/io/pid_convert/class_map.rs`，90 张有效 SPPID 导出 DXF 净业务图块 **`15,852 / 15,852`（100.00%）** 映射到 `assets/pid-class-map.json` 变体（未映射 `0`，见 `readings.md` §13）；② `#138` 补充 `legacy_ignore_classes` 与 45 类 `legacy_class_map`，并在无 SPPID `.sym` 块图纸上只读融合 `io::pid_legend` 多模态识别（天正图块 + 散圆仪表/容器/泵 + 炸散散线形状指纹），使 `SOURCE_DWG` 全部 `12 / 12` 张原生 AutoCAD 存量图（`L01..L12`）精确变体映射由 `0` 升至 **`1,619`**（`class_default_fallback = 0`）且对 `baseline-90.tsv` 逐行零差异（详见 `readings.md` §27）。
 
 #### L3-2 位号识别增强（M）— **已完成（[#125](https://github.com/happyrust/pid-cad/issues/125)）**
 - **做法**：多行位号、范围标注（`BUV-3101/3102`、`～`）、仪表圈内文字拼接、位号落在符号外的各种写法。
@@ -493,7 +493,7 @@ flowchart LR
 #### L4-5 码表值、公称直径换算、名称拼接（M）— **已完成（[#126](https://github.com/happyrust/pid-cad/issues/126)）**
 - **做法**：按 Q5、Q6 的规则实现；码表值取自变体目录；单位与写法严格照样本（`4 in`、`25 mm`）。
 - **验收**：对整批逐条比对，吻合率与不一致项清单；不一致项归因（规则缺/数据缺）。
-- **解决记录（2026-11-20）**：落地 `src/io/pid_publish/names.rs`（公制/英制公称直径格式化与整数编码换算、线号拆解、分段属性双向回填）；94 份真实 `_Data.xml` 全量核对：公称直径 `19,671 / 19,671`（`100.00%`）、仪表类名称 `99.48%`、设备类名称 `99.14%`、完整槽位管线名 `78.61%`（其余均为 Q5 记载的数据库历史缺省或手工 `ItemTag` 例外），详见 `readings.md` §15。
+- **解决记录（2026-11-20..21）**：① `1afee04eb`（`#126`）落地 `src/io/pid_publish/names.rs`（公制/英制公称直径格式化与整数编码换算、线号拆解、分段属性双向回填），94 份真实 `_Data.xml` 公称直径 `19,671 / 19,671`（`100.00%`）、仪表类名称 `99.48%`、设备类名称 `99.14%`（见 `readings.md` §15）；② `#138` 扩展 `parse_sppid_line_number` 与 `pipeline_name()` 兼容 2 段（`<公称直径>-<介质>`）与 3 段（`<公称直径>-<介质>-<序号>`）原生存量线号（4+ 段 SPPID 线号行为不变），12 张原生 AutoCAD 存量图合成 `54` 条 `PIDPipeline` 并全过 `StrictVendor` 零违规校验（详见 `readings.md` §27）。
 
 #### L4-6 导出命令与批量入口（M）— **已完成（[#127](https://github.com/happyrust/pid-cad/issues/127)）**
 - **做法**：新增命令（建议 `PIDCONVERT` 或独立 CLI），输入 DWG/拆分图，输出 XML 与覆盖报告（写了什么、没写什么、为什么）。

@@ -47,6 +47,10 @@ pub struct LegendMapRules {
     pub block_overrides: BTreeMap<String, BlockOverrideRule>,
     #[serde(default)]
     pub layer_class_hints: BTreeMap<String, String>,
+    #[serde(default)]
+    pub legacy_ignore_classes: Vec<String>,
+    #[serde(default)]
+    pub legacy_class_map: BTreeMap<String, BlockOverrideRule>,
 }
 
 fn default_true() -> bool {
@@ -271,6 +275,27 @@ impl LegendClassMap {
 
     pub fn rules(&self) -> &LegendMapRules {
         &self.rules
+    }
+
+    /// Whether an `io::pid_legend` recognized class is a non-business sub-part (`ignore`, `motor`, `eh-switch`).
+    pub fn is_legacy_ignored(&self, legacy_cls: &str) -> bool {
+        let key = legacy_cls.trim();
+        self.rules
+            .legacy_ignore_classes
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(key))
+    }
+
+    /// Map an `io::pid_legend` recognized class (`ball-valve`, `bubble`, `tank`, ...) to SPPID `(class, variant_id, symbol_path)`.
+    pub fn resolve_legacy_class(&self, legacy_cls: &str) -> Option<&BlockOverrideRule> {
+        let key = legacy_cls.trim();
+        self.rules.legacy_class_map.get(key).or_else(|| {
+            self.rules
+                .legacy_class_map
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                .map(|(_, v)| v)
+        })
     }
 
     /// Resolve a placed DXF/DWG block name and its layer to SPPID `(class, variant_id, symbol_path)`.
