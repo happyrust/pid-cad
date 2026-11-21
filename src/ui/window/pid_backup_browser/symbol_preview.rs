@@ -1557,7 +1557,7 @@ mod tests {
                 most.len(),
                 most.iter().map(|(count, _)| count).sum::<usize>()
             );
-            for (_, line) in most.iter().take(60) {
+            for (_, line) in &most {
                 println!("    {line}");
             }
             println!(
