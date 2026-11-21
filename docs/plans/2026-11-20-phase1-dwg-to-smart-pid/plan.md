@@ -11,14 +11,14 @@
 | 文件名 | 定位与职责 | 当前状态 |
 |---|---|---|
 | `智能PID平台-阶段一实施方案.md` | 阶段一主执行方案（L0–L6 + LX 逐任务做法、门禁、验收与逐项解决记录） | **已确认并执行中**（已对齐 `main @ 6377fe233` 与 `pid-parse @ a85fa10`） |
-| `智能PID平台-阶段一Issue清单.md` | 阶段一拆单说明、线上 GitHub Issue 映射与逐单解决日志 | **已同步线上 `#106`–`#131`** |
+| `智能PID平台-阶段一Issue清单.md` | 阶段一拆单说明、线上 GitHub Issue 映射与逐单解决日志 | **已同步线上 `#106`–`#135`** |
 | `智能PID平台-阶段一路线图-DWG转智能PID与pid导出.md` | 阶段一总体路线、取舍依据、预检三关与减法送测设计 | **已对齐当前仓库进度并脱敏** |
 | `智能PID平台-样本分析-XML规格与pid结构.md` | 110 对真实 SPPID 样本格式/结构实测规格与 Q1–Q13 答案回填 | **已完成全批 220 份复核与 Q1–Q13 回填** |
 | `03-parse-answers.md` | `L0-8`（[#118](https://github.com/happyrust/pid-cad/issues/118)）对照 `pid-parse @ a85fa10` 源码逐条回答 Q1–Q13（含精确源码路径与行号） | **已完成** |
 | `04-external-platform-protocol.md` | `L0-7`（[#121](https://github.com/happyrust/pid-cad/issues/121)）外部数字化交付平台验收口径、三轮减法送测变体矩阵与回执标准 | **已完成** |
 | `智能PID平台-内部模型合一分析.md` | `PID_SEMANTICS` 与 `PID_AUTHOR` 升格合一方案及与并行分支 `pid-symbol-identity` 的衔接边界 | **已对齐并行分支边界** |
 | `智能PID平台-资料清单.md` | `RES-01`–`RES-17` 资料清点、环境变量约定与缺口降级策略（`L0-1`） | **已完成清点登记** |
-| `readings.md` | 阶段一门禁基线与各单先红后绿、真实样本实测读数账本 | **持续更新（已记 §1–§20）** |
+| `readings.md` | 阶段一门禁基线与各单先红后绿、真实样本实测读数账本 | **持续更新（已记 §1–§21）** |
 
 ---
 
@@ -48,6 +48,10 @@
 | `L5-1 / L5-3` 写入面普查与空白模板种子流级往返验证 | [#128](https://github.com/happyrust/pid-cad/issues/128) | **已完成**（2026-11-21） | 提交 **`c851fa214`**：落地 `src/io/pid_write/{mod,surface,seed,verify}.rs`；18 类顶层流写入面完整分类，`RefData~4~682.zip` 内 **`10 / 10` 份空白模板 `.pid` 流级零差异无损往返** + 第 2 节 `_SPID` 注入重读全过，见 `readings.md` §17 |
 | `L5-4 / L5-5` `.pid` 记录链按族增补写出器与索引一致性自检 | [#129](https://github.com/happyrust/pid-cad/issues/129) | **已完成**（2026-11-21） | 提交 **`4e115a2f8`**：落地 `src/io/pid_write/{oid,records,index}.rs`；五族记录编码 + `.sym` 内嵌缓存克隆 + Q9 五步索引同步在真实 `A1-W-New.pid` 种子上 `chain_fault_count=0`、图层计数与空间表 100% 守恒，见 `readings.md` §18 |
 | `L5-6 / L5-8 / L5-9 / L6-1` DWG/DXF 一键双产物（XML + `.pid`）及 `a/b` 级验证 | [#130](https://github.com/happyrust/pid-cad/issues/130) | **已完成**（2026-11-21） | 提交 **`53ea94d76`**：扩展 `src/io/pid_publish/uid.rs`、`src/io/pid_convert/export.rs` 与 `examples/pid_convert.rs`；90 张真实 DXF 全量双产物导出（`42,861 / 42,861` `GraphicOID`/`ModelID`/`DrawingID` 100% 对齐），`90 / 90` 过 `a/b` 级重读与 `pid-plot` PDF 出图验证，XML `unexplained_diffs=0`（`c1` 标「SPPID 未验证」），见 `readings.md` §19 |
-| `L1-2 / L1-4 / L1-5` 94 张真实 `.pid` 批量打开耗时与渲染出图扩面对比 | [#131](https://github.com/happyrust/pid-cad/issues/131) | **已完成 · L1 全线收官**（2026-11-21） | 落地 `examples/pid_l1_bench.rs` 与 `scripts/sppid/{batch_l1_eval,test_batch_l1_eval}.py`；`EXPORT_SET` 全量 `94 / 94` 张 `.pid` 加载与出图零失败，release 单图打开中位数 `536.5 ms`（场景准备均值 `63.1 ms`；均值 `1,693.4 ms` 受 14 张大型多井口丛式图 `16,826` 个 `/JSite*` 缓存解析长尾拉高），`L1-4` 全批 `27,148` 条文本 `Flattened = 0`；`L1-2` 94 图对位 `94 / 94` 通过，覆盖率均值 `0.995949`、中位数 `1.000000`（`69` 张达 `1.000`、`20` 张 `[0.980, 1.000)`、`5` 张 `< 0.980` 全部脱敏归因），文字匹配 `27,062 / 27,300`（`99.13%`），见 `readings.md` §20 |
+| `L1-2 / L1-4 / L1-5` 94 张真实 `.pid` 批量打开耗时与渲染出图扩面对比 | [#131](https://github.com/happyrust/pid-cad/issues/131) | **已完成 · L1 全线收官**（2026-11-21） | 提交 **`e2f43b91c`**：落地 `examples/pid_l1_bench.rs` 与 `scripts/sppid/{batch_l1_eval,test_batch_l1_eval}.py`；`EXPORT_SET` 全量 `94 / 94` 张 `.pid` 加载与出图零失败，release 单图打开中位数 `536.5 ms`（场景准备均值 `63.1 ms`；均值 `1,693.4 ms` 受 14 张大型高密度图 `16,826` 个 `/JSite*` 缓存解析长尾拉高），`L1-4` 全批 `27,148` 条文本 `Flattened = 0`；`L1-2` 94 图对位 `94 / 94` 通过，覆盖率均值 `0.995949`、中位数 `1.000000`（`69` 张达 `1.000`、`20` 张 `[0.980, 1.000)`、`5` 张 `< 0.980` 全部脱敏归因），文字匹配 `27,062 / 27,300`（`99.13%`），见 `readings.md` §20 |
+| `L3-5 / L3-6` 设备管口配对与规格继承及标题栏/线号属性提取核对 | [#132](https://github.com/happyrust/pid-cad/issues/132) | **已完成**（2026-11-21） | 扩展 `src/io/pid_convert/{mod,recognize,export}.rs` 与 `src/io/pid_publish/relations.rs`；90 张有效 DXF 管口挂设备关系由 `379` 升至 **`629 / 779`（`80.74%`；含设备图纸上达 `629 / 700 = 89.86%`）**、管口带公称直径 `212` 个，标题栏提取图号 `82 / 90`（`91.11%`）、图名命中精确率 `48 / 49`（`97.96%`），线号拆解等级吻合 `90.56%`，`StrictVendor` 零违规、`unexplained_diffs = 0`，见 `readings.md` §21 |
+| `L3-3 / L3-4 / L3-8` 管线共线成链、端口/跨图连接符配对与逐行回归门禁 | [#133](https://github.com/happyrust/pid-cad/issues/133) | **待推进（已拆单）** | 仅涉及 `src/io/pid_convert/` 与 `scripts/sppid/`，与全部并行工作树零冲突 |
+| `L2-1 M1..M5 / L2-5 / L2-7 / L6-2` `PID_AUTHOR` 无冲突升格与编辑存回 `.pid` | [#134](https://github.com/happyrust/pid-cad/issues/134) | **待推进（已拆单）** | 在 `src/io/pid_convert/promote.rs` 调用既有契约实现，避开 `pid-symbol-on-main` 与 `pid-stage-c` 修改面 |
+| `LX-8 / LX-9 / L6-3` 第一轮减法送测 6 套受控包构建器与阶段一总验收报告 | [#135](https://github.com/happyrust/pid-cad/issues/135) | **待推进（已拆单）** | 仅涉及 `scripts/sppid/` 与 `docs/plans/2026-11-20-phase1-dwg-to-smart-pid/`，与全部并行工作树零冲突 |
 | `L2-1..L2-6` 内部模型合一与编辑 | 待拆单 | **暂缓（避让并行分支）** | 等活跃分支 `pid-symbol-identity` 合入 `main` 后承接其底座实施 |
 | `.sym` 参考数据预览（关联） | [#116](https://github.com/happyrust/pid-cad/issues/116) | **暂缓（避让并行分支）** | 等 `pid-symbol-identity` 合入 `main` 后实施，避免撞 `pid_backup_browser.rs` 与 `src/io/pid/` |

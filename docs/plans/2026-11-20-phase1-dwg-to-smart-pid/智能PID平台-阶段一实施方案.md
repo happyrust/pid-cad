@@ -354,7 +354,7 @@ flowchart LR
 #### L1-5 批量打开性能（S）— **已完成（[#131](https://github.com/happyrust/pid-cad/issues/131)）**
 - **做法**：量整批导入耗时；找热点；只做低风险优化。
 - **验收**：整批耗时不超过基线的约定倍数；读数记录。
-- **解决记录（2026-11-21）**：在单热进程（预热 `warmup_ms = 107.7 ms`）中实测 `EXPORT_SET` 全部 `94` 张真实 `.pid`（共 `275,542` 个 CAD 实体、`16,826` 个 `/JSite*` 内嵌缓存本体，`load_failures = 0`）：`release` 构建下单图完整打开**中位数 `536.5 ms`**（纯导入中位数 `509.9 ms`，为 `732.1 ms` 基线的 **`0.733x`**，优于 `1.5x` 预算）、本仓场景准备（`purge + xref + caches + prepare_open_geometry`）单图均值仅 **`63.1 ms`**（全批总计 `5.93 s`，仅占 `3.7%`）；未加权算术均值 `1,693.4 ms`（`P95 = 7,696.0 ms`，最大 `S05` `10,196.7 ms`）的唯一热点已定位至外部依赖 `pid-parse @ a85fa10` 对 14 张大型多井口丛式图（单图 `470–606` 个 `/JSite*` 子存储、`7,300–10,396` 实体）的 CFB 目录遍历，同时查明 `dev` 构建因 `[profile.dev.package] OpenCADStudio = { opt-level = 0 }` 为 `2,757.2 ms/图`，双配置数据已完整登记于 `readings.md` §20。
+- **解决记录（2026-11-21）**：在单热进程（预热 `warmup_ms = 107.7 ms`）中实测 `EXPORT_SET` 全部 `94` 张真实 `.pid`（共 `275,542` 个 CAD 实体、`16,826` 个 `/JSite*` 内嵌缓存本体，`load_failures = 0`）：`release` 构建下单图完整打开**中位数 `536.5 ms`**（纯导入中位数 `509.9 ms`，为 `732.1 ms` 基线的 **`0.733x`**，优于 `1.5x` 预算）、本仓场景准备（`purge + xref + caches + prepare_open_geometry`）单图均值仅 **`63.1 ms`**（全批总计 `5.93 s`，仅占 `3.7%`）；未加权算术均值 `1,693.4 ms`（`P95 = 7,696.0 ms`，最大 `S05` `10,196.7 ms`）的唯一热点已定位至外部依赖 `pid-parse @ a85fa10` 对 14 张大型高密度图（单图 `470–606` 个 `/JSite*` 子存储、`7,300–10,396` 实体）的 CFB 目录遍历，同时查明 `dev` 构建因 `[profile.dev.package] OpenCADStudio = { opt-level = 0 }` 为 `2,757.2 ms/图`，双配置数据已完整登记于 `readings.md` §20。
 
 #### L1-6 `.sym` 解码状态普查（M）— **已完成（[#114](https://github.com/happyrust/pid-cad/issues/114)）**
 - **做法**：对 `SYMBOLS` 里每个 `.sym` 跑一遍解码，统计成功/失败/部分；失败项分类（版本、加密、非标准）。
@@ -429,13 +429,15 @@ flowchart LR
 - **做法**：符号连接点与管线端点配对；页间连接符跨图配对（按文字与图号）。
 - **验收**：配对结果对参考 XML 的连通关系逐项比对；错配与漏配逐条列出。
 
-#### L3-5 设备与管口（M）
+#### L3-5 设备与管口（M）— **已完成（[#132](https://github.com/happyrust/pid-cad/issues/132)）**
 - **做法**：管口位号继承设备位号；管口与设备的组合关系。
 - **验收**：管口位号与参考 XML 一致的比例；不一致的逐条说明。
+- **解决记录（2026-11-21）**：经 94 份真值 `_Data.xml` 全量核实，SPPID 中 `797 / 797`（`100%`）个 `PIDNozzle` 的 `IObject/@Name` 均保持空串、通过 `EquipmentComponentComposition` 关系挂接所属设备，并由接管标注或相连管段携带 `NominalDiameter` / `PipingMaterialsClass`。据此在 `src/io/pid_convert/recognize.rs` 重构图层 `"10"` 松散容器壳体与接管颈几何包围盒并配对管口 `DN` 标注，在 `src/io/pid_publish/relations.rs` 实现双层容差挂接与相连管段规格回填：全批 90 张有效 DXF 的 `EquipmentComponentComposition` 挂接数由 `379 / 779`（`48.65%`）提升至 **`629 / 779`（`80.74%`；在含设备符号的图纸上达 `629 / 700 = 89.86%`，其余 `79` 个位于图面无独立容器符号的纯管汇图）**，带 `NominalDiameter` 管口达 `212` 个，详见 `readings.md` §21。
 
-#### L3-6 属性来源（M）
+#### L3-6 属性来源（M）— **已完成（[#132](https://github.com/happyrust/pid-cad/issues/132)）**
 - **做法**：线号拆解（公称直径、介质、序号、等级）；图框标题栏读图号图名；预留外部表格接口（不做）。
 - **验收**：拆解结果对参考 XML 的属性逐项比对；标题栏读出的图号与 XML 的图号一致。
+- **解决记录（2026-11-21）**：在 `src/io/pid_convert/recognize.rs` 新增右下角标题栏元数据提取器 `TitleBlockInfo`（含跨双行装置名+图名拼接，写入 `_Coverage.json` 并在未显式指定图名时自动回退为 `PIDDrawing` 名称）；全批 90 张真实 DXF 实测提取标题栏图号 **`82 / 90`（`91.11%`）**、提取标题栏图名 `49` 份且与 `_Data.xml` `PIDDrawing/IObject/@Name` 吻合 **`48 / 49`（精确率 `97.96%`）**；按管段序号对齐 `5,678` 条已标线号 `PIDPipingConnector` 核对拆解属性，管道等级吻合率 **`90.56%`**、保温规格吻合率 **`87.76%`**、公称直径吻合率 **`71.24%`**，全批 `StrictVendor` 零违规、`unexplained_diffs = 0`，详见 `readings.md` §21。
 
 #### L3-7 校核入口（M）— **引擎三档分桶已完成（随 [#125](https://github.com/happyrust/pid-cad/issues/125) 落地）**
 - **做法**：置信度三档（高 ≥ 0.90 自动接受；中 0.60–0.89 进人工确认；低 < 0.60 默认不导入）；人工确认 6 步；识别报告（三档计数 + 未识别图元数，计数之和等于候选行数）。

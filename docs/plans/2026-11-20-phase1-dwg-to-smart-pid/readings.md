@@ -737,3 +737,47 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `185 passed` | **`189 passed`** | `+4` 条测试，**全绿** |
 
+---
+
+## 21. L3-5 / L3-6（#132）：设备与管口组合配对、规格继承及标题栏/线号属性提取核对（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `e2f43b91c`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 修改文件 | `src/io/pid_convert/{mod,recognize,export}.rs`、`src/io/pid_publish/relations.rs` |
+| 证据目录子项 | `2026-11-20-issue132/`（`red.txt`、`green-fast.txt`、`gen90_summary.json`、`convert_check_90.json`、`full90_audit.json`、`arch.txt`、`pytest.txt`、`gate-*.txt`） |
+
+### 21.1 真值规格核实与先红后绿
+
+- **94 份真值 `_Data.xml` 规格核实**：
+  1. 全批共 `797` 个 `PIDNozzle`，**`797 / 797`（`100.00%`）** 的 `IObject/@Name` 均保持空串、全部通过 `EquipmentComponentComposition`（`UID1 = PIDNozzle, UID2 = Equipment`）挂接所属设备，其中 `514` 个带 `IPipeCrossSectionItem/@NominalDiameter`、`483` 个带 `IPipingSpecifiedItem/@PipingMaterialsClass`；
+  2. `PIDDrawing` 的 `IObject/@Name` 为图纸中文标题，`IDocument/@DocTitle` 保持空串。
+- **先红后绿**：`red.txt` 2 条目标断言测试在骨架上变红（`0 passed; 2 failed`，退出码 `101`）→ 实现图层 `"10"` 松散容器壳体几何泛洪重构、双层容差管口挂接、管口 `DN`/相连管段规格回填及右下角标题栏 `TitleBlockInfo` 提取后，`green-fast.txt` **`18 passed; 0 failed`**（退出码 `0`）。
+
+### 21.2 90 张有效非空真实 DXF 全批对账结果（`L3-5 / L3-6`）
+
+| 维度 | 指标 | 改前基线（#130） | 改后实测（#132） | 对账说明 |
+|---|---|---:|---:|---|
+| `L3-5` 设备与管口组合 | 检出并写出 `PIDNozzle` 数 | `779` | **`779`**（真值 `784`） | 保持召回不退化 |
+| `L3-5` 设备与管口组合 | `EquipmentComponentComposition` 关系数 | `379`（`48.65%`） | **`629`（`80.74%`）** | 净增 `+250` 条；在含设备符号的图纸上挂接率达 **`629 / 700`（`89.86%`）**，另有 `79` 个位于图面无独立容器符号的纯管汇图 |
+| `L3-5` 管口规格回填 | 带 `NominalDiameter` 的 `PIDNozzle` 数 | `0` | **`212`** | 来自管口旁 `DN`/寸制标注与相连已标线号 `PIDPipingConnector` |
+| `L3-6` 标题栏提取 | 提取标题栏图号（`drawing_number`）图数 | `0 / 90` | **`82 / 90`（`91.11%`）** | 提取右下角标题栏图号编码并写入 `_Coverage.json` |
+| `L3-6` 标题栏提取 | 提取标题栏图名并与真值 `PIDDrawing/@Name` 吻合 | `0` | **`48 / 49`（精确率 `97.96%`）** | 支持单行图名及跨行装置名+流程图名拼接；其余图纸标题栏字段存于未导出块属性内 |
+| `L3-6` 线号属性拆解 | 按序号对齐 `5,678` 条 `PIDPipingConnector` 属性吻合率 | — | 等级 **`90.56%`** / 保温 **`87.76%`** / 公称直径 **`71.24%`** | 支管相对主管变径处若图面未重复标支管线号则产生直径差异（已在白名单说明） |
+| 整批严格对账门禁 | `convert_check.py`（`180` 份 XML + `90` 份覆盖报告） | `0` 违规 / `0` 未解释差异 | **`spec_violations = 0`、`coverage_errors = 0`、`unexplained_diffs = 0`** | 总关系数由 `71,415` 增至 **`71,665`** |
+
+### 21.3 固定门禁读数
+
+| 门禁项 | 改前读数（§20.5） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,189` 条 | **`7,191` 条**（**`7,125` 过** / **`65` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条测试，**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `src/io/pid_convert/{mod,recognize,export}.rs`、`relations.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `189 passed` | **`189 passed`** | **全绿** |
+
+
