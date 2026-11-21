@@ -5,6 +5,10 @@
 //!                        发布当前图：前提和门禁都过了就存快照、出包
 //! PIDPUBLISH CHECK [<目标目录>] [REV <修订号>] [ALLOW_OFFLINE]
 //!                        只看能不能发布：前提和四项门禁，不写任何东西
+//! PIDPUBLISH LIST [<目标目录>]
+//!                        这张图发布到哪一版了，和已发布的各版
+//! PIDPUBLISH VERIFY <包目录>
+//!                        校验一个包
 //! ```
 //!
 //! 目标目录不写时是图纸所在目录下的 `pid-publish`，相对路径从图纸所在目录算，有空格的加双引号；
@@ -31,10 +35,15 @@
 //! 出图日期字段盖时间；从刚存的快照算材料清单；写包，自检后改名落位。说包在哪里、几个文件、多大，
 //! 和各步用时。存快照以后哪一步失败，都删掉临时目录和这次建的目标目录，报 `PUBLISH_FAILED` 并说
 //! 是哪一步（`step`），快照留着。发布不改图：「已修改」、撤销栈、磁盘上的源文件都不变。
+//!
+//! `LIST` 不扫项目，只读目标目录里这张图的包（[`publications`]）：先说发布到哪一版了（§4 末尾的
+//! 表），再新的在前一行一个包，与图纸文件一致的标「当前」。`VERIFY` 校验一个包（§3.5），相对路径从
+//! 图纸所在目录算。两者都不写任何东西，只读会话里也能用。
 
 use super::pidbom::Sheets;
 use super::piddrc::{self, Check};
 use super::pidindex::{point, same_file, Scanned, INDEX_NO_PROJECT_DIR};
+use super::pidsnapshot::utc_said;
 use super::*;
 use crate::pid::collab_state;
 use crate::pid::drc::{CheckReport, CheckResult, RuleSet, Severity};
@@ -46,6 +55,8 @@ use crate::pid::publish_pkg::{
 };
 use crate::pid::snapshot::{capture, store, Snapshot, SnapshotMeta};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -67,6 +78,8 @@ const LISTED: usize = 10;
 /// 写错时说的写法。
 const USAGE: &str =
     "写成 PIDPUBLISH [CHECK] [<目标目录>] [REV <修订号>] [ALLOW_OFFLINE]，目录有空格就加双引号。";
+const LIST_USAGE: &str = "写成 PIDPUBLISH LIST [<目标目录>]，目录有空格就加双引号。";
+const VERIFY_USAGE: &str = "写成 PIDPUBLISH VERIFY <包目录>，目录有空格就加双引号。";
 /// 出包用的临时目录的名字的开头（§4）。以 `.` 开头：数修订号、列包都不看它；清崩溃留下的临时
 /// 目录也只认这个开头。
 const STAGING_PREFIX: &str = ".publishing-";
@@ -250,6 +263,48 @@ impl Staging {
     }
 }
 
+/// 这张图发布到哪一版了（§4 末尾的表）。不记在图里，由目标目录里的包推出。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PublishState {
+    /// 目标目录里没有这张图的包。
+    Unpublished,
+    /// 修订号最大的包的源文件就是磁盘上现在这一份，图也没有没保存的修改。
+    Published(u32),
+    /// 其余：修订号最大的那一版之后图改过，或者有没保存的修改。
+    ChangedSince(u32),
+}
+
+impl fmt::Display for PublishState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unpublished => f.write_str("未发布"),
+            Self::Published(revision) => write!(f, "已发布，修订 {revision}"),
+            Self::ChangedSince(revision) => write!(f, "修订 {revision} 之后有改动"),
+        }
+    }
+}
+
+/// 目标目录里这张图的一个包，和它的发布清单里记的时间、发布人。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Publication {
+    pub(super) package_id: String,
+    pub(super) revision: u32,
+    /// 出包的时间，Unix 秒；清单读不出来时为 `None`。
+    pub(super) published_at: Option<i64>,
+    pub(super) published_by: Option<String>,
+    /// 与磁盘上现在的图纸文件一致（图也没有没保存的修改）的包里，修订号最大的那一个。
+    pub(super) current: bool,
+}
+
+/// 一张图的发布记录（§5.3 `pid_publications`）：目标目录、发布到哪一版了，和各包，新的在前。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Publications {
+    pub(super) drawing_id: String,
+    pub(super) target_dir: PathBuf,
+    pub(super) state: PublishState,
+    pub(super) packages: Vec<Publication>,
+}
+
 impl OpenCADStudio {
     pub(super) fn dispatch_pidpublish(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         let (word, rest) = first_word(cmd);
@@ -257,10 +312,12 @@ impl OpenCADStudio {
             return None;
         }
         let (option, after) = first_word(rest);
-        if option.eq_ignore_ascii_case("LIST") || option.eq_ignore_ascii_case("VERIFY") {
-            let option = option.to_ascii_uppercase();
-            self.command_line
-                .push_error(&format!("PIDPUBLISH {option}: 还没有这一项。"));
+        if option.eq_ignore_ascii_case("LIST") {
+            self.pidpublish_list(i, after);
+            return Some(Task::none());
+        }
+        if option.eq_ignore_ascii_case("VERIFY") {
+            self.pidpublish_verify(i, after);
             return Some(Task::none());
         }
         let only_check = option.eq_ignore_ascii_case("CHECK");
@@ -373,14 +430,7 @@ impl OpenCADStudio {
         if let CollabVerdict::Refused(code) = verdict {
             return Err((code, collab_said(code, collab.queued)));
         }
-        let Some(project_dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
-            return Err((INDEX_NO_PROJECT_DIR, "当前图不属于哪个项目目录".to_owned()));
-        };
-        let drawing_id = listed_id(project_dir, path)?;
-        let dir = asked.dir.as_deref().map_or_else(
-            || project_dir.join(DEFAULT_TARGET),
-            |dir| project_dir.join(dir),
-        );
+        let (project_dir, drawing_id, dir) = placed(path, asked.dir.as_deref())?;
         target_usable(&dir).map_err(|why| (PUBLISH_TARGET_INVALID, why))?;
         let next = publish_pkg::next_revision(&dir, &drawing_id);
         let revision = match asked.revision.as_deref() {
@@ -399,7 +449,7 @@ impl OpenCADStudio {
         }
         Ok(Target {
             source: path.to_path_buf(),
-            project_dir: project_dir.to_path_buf(),
+            project_dir,
             drawing_id,
             dir,
             revision,
@@ -756,6 +806,103 @@ impl OpenCADStudio {
         self.command_line
             .push_error_coded(code, &format!("{verb}: {code}: {what}；{kept}。"));
     }
+
+    /// `PIDPUBLISH LIST [<目标目录>]`：说这张图发布到哪一版了，再新的在前一行一个包。不扫项目，
+    /// 不写任何东西。
+    fn pidpublish_list(&mut self, i: usize, rest: &str) {
+        let verb = "PIDPUBLISH LIST";
+        let dir = match only_folder(rest) {
+            Ok(dir) => dir,
+            Err(why) => {
+                self.command_line
+                    .push_error(&format!("{verb}: {why}；{LIST_USAGE}"));
+                return;
+            }
+        };
+        let listed = match self.pidpublish_listed(i, dir) {
+            Ok(listed) => listed,
+            Err((code, why)) => {
+                self.pidpublish_refuse(verb, code, &why);
+                return;
+            }
+        };
+        let target = listed.target_dir.display();
+        if listed.packages.is_empty() {
+            self.command_line.push_output(&format!(
+                "{verb}: 图 {}：{}（{target} 里没有这张图的包）。",
+                listed.drawing_id, listed.state
+            ));
+            return;
+        }
+        self.command_line.push_output(&format!(
+            "{verb}: 图 {}：{}；{target} 里有 {} 个包，新的在前：",
+            listed.drawing_id,
+            listed.state,
+            listed.packages.len()
+        ));
+        for package in &listed.packages {
+            self.command_line.push_output(&publication_said(package));
+        }
+    }
+
+    /// 第 `i` 个标签页的图的发布记录（[`publications`]）。目标目录 `dir` 与发布的算法相同：从图纸
+    /// 所在目录算，不写是 `pid-publish`。图没保存过、不在项目的图纸里时是错误码和为什么。
+    pub(super) fn pidpublish_listed(
+        &self,
+        i: usize,
+        dir: Option<&str>,
+    ) -> Result<Publications, (&'static str, String)> {
+        let tab = &self.tabs[i];
+        let Some(path) = tab.current_path.as_deref() else {
+            return Err((PUBLISH_UNSAVED, "图还没保存过，没有发布记录".to_owned()));
+        };
+        let (_, drawing_id, target_dir) = placed(path, dir)?;
+        Ok(publications(&target_dir, &drawing_id, path, tab.dirty))
+    }
+
+    /// `PIDPUBLISH VERIFY <包目录>`：校验一个包（§3.5），相对路径从图纸所在目录算，图没保存过时从
+    /// 当前目录算。不写任何东西。
+    fn pidpublish_verify(&mut self, i: usize, rest: &str) {
+        let verb = "PIDPUBLISH VERIFY";
+        let name = match only_folder(rest) {
+            Ok(Some(name)) => name,
+            Ok(None) => {
+                self.command_line
+                    .push_error(&format!("{verb}: 要写包目录；{VERIFY_USAGE}"));
+                return;
+            }
+            Err(why) => {
+                self.command_line
+                    .push_error(&format!("{verb}: {why}；{VERIFY_USAGE}"));
+                return;
+            }
+        };
+        let dir = match crate::io::drawing_dir(&self.tabs[i].scene.document) {
+            Some(drawing_dir) if Path::new(name).is_relative() => drawing_dir.join(name),
+            _ => PathBuf::from(name),
+        };
+        match publish_pkg::verify_package(&dir) {
+            Ok(report) => {
+                self.command_line.push_output(&format!(
+                    "{verb}: {} 完好：{}，第 {} 版，共 {} 个文件，清单列的都在，字节数和校验和都对。",
+                    dir.display(),
+                    report.package_id,
+                    report.revision,
+                    report.files
+                ));
+                if !report.extra.is_empty() {
+                    self.command_line.push_output(&format!(
+                        "  清单没列的文件（不算失败）：{}",
+                        report.extra.join("、")
+                    ));
+                }
+            }
+            Err(error) => {
+                self.command_line
+                    .push_error_coded(error.code(), &format!("{verb}: {error}。"));
+            }
+        }
+    }
 }
 
 /// 门禁这一段（§3.4、§4）：在扫好的项目 `scanned` 上现做一次检查——只报图号 `drawing_id` 那张图
@@ -862,6 +1009,107 @@ fn listed_id(project_dir: &Path, path: &Path) -> Result<String, (&'static str, S
                 "当前图不在项目的图纸里（项目只认目录里的 .dwg），发布要跨图检查".to_owned(),
             )
         })
+}
+
+/// 存在 `path` 的图的项目目录（图纸所在目录）、图号（[`listed_id`]）和目标目录：命令行上写的
+/// `dir` 从项目目录算，不写是 `pid-publish`（§3.1）。
+fn placed(
+    path: &Path,
+    dir: Option<&str>,
+) -> Result<(PathBuf, String, PathBuf), (&'static str, String)> {
+    let Some(project_dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
+        return Err((INDEX_NO_PROJECT_DIR, "当前图不属于哪个项目目录".to_owned()));
+    };
+    let drawing_id = listed_id(project_dir, path)?;
+    let target = dir.map_or_else(
+        || project_dir.join(DEFAULT_TARGET),
+        |dir| project_dir.join(dir),
+    );
+    Ok((project_dir.to_path_buf(), drawing_id, target))
+}
+
+/// 目标目录 `target_dir` 里图号 `drawing_id` 的包，新的在前，和发布到哪一版了（§4 末尾的表）：
+/// 修订号最大的包，清单里源文件的校验和 `source.sha256` 与图纸文件 `source` 现在的相同、`dirty`
+/// （有没保存的修改）为假时是已发布，否则是之后有改动。清单读不出来的包照列，算不一致。不写任何
+/// 东西。
+pub(super) fn publications(
+    target_dir: &Path,
+    drawing_id: &str,
+    source: &Path,
+    dirty: bool,
+) -> Publications {
+    let checksum = if dirty {
+        None
+    } else {
+        fs::read(source)
+            .ok()
+            .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+    };
+    let mut packages: Vec<Publication> = Vec::new();
+    for package in publish_pkg::list_packages(target_dir, drawing_id)
+        .into_iter()
+        .rev()
+    {
+        let manifest = manifest_of(&package.path);
+        let same = checksum.as_deref().is_some_and(|checksum| {
+            manifest
+                .pointer("/source/sha256")
+                .and_then(Value::as_str)
+                .is_some_and(|listed| listed.eq_ignore_ascii_case(checksum))
+        });
+        let current = same && !packages.iter().any(|newer| newer.current);
+        packages.push(Publication {
+            package_id: package.package_id,
+            revision: package.revision,
+            published_at: manifest.get("published_at").and_then(Value::as_i64),
+            published_by: manifest
+                .get("published_by")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            current,
+        });
+    }
+    let state = match packages.first() {
+        None => PublishState::Unpublished,
+        Some(latest) if latest.current => PublishState::Published(latest.revision),
+        Some(latest) => PublishState::ChangedSince(latest.revision),
+    };
+    Publications {
+        drawing_id: drawing_id.to_owned(),
+        target_dir: target_dir.to_path_buf(),
+        state,
+        packages,
+    }
+}
+
+/// 包目录 `dir` 里的发布清单；读不出来、不是 JSON 时是 `null`。
+fn manifest_of(dir: &Path) -> Value {
+    let Ok(bytes) = fs::read(dir.join(publish_pkg::MANIFEST_FILE)) else {
+        return Value::Null;
+    };
+    let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+    serde_json::from_slice(text).unwrap_or(Value::Null)
+}
+
+/// 发布记录的一行：包名、出包的时间（UTC）、发布人，与图纸文件一致的标「当前」。
+fn publication_said(package: &Publication) -> String {
+    let Some(at) = package.published_at else {
+        return format!("  {}  （发布清单读不出来）", package.package_id);
+    };
+    let at = utc_said(u64::try_from(at).unwrap_or_default());
+    let by = package.published_by.as_deref().unwrap_or_default();
+    let current = if package.current { "  当前" } else { "" };
+    format!("  {}  {at}  {by}{current}", package.package_id)
+}
+
+/// `LIST`、`VERIFY` 后面写的：至多一个目录，有空格的加双引号。写错时说错在哪里。
+fn only_folder(text: &str) -> Result<Option<&str>, &'static str> {
+    match words(text).ok_or("双引号没配对")?.as_slice() {
+        [] => Ok(None),
+        [("", _)] => Err("目录不能是空的"),
+        [(word, _)] => Ok(Some(*word)),
+        _ => Err("只能写一个目录"),
+    }
 }
 
 /// 目标目录 `dir` 能不能用（§3.6 `PUBLISH_TARGET_INVALID`），只看路径，不建也不试写：已经有的
@@ -1094,7 +1342,9 @@ mod tests {
     use crate::pid::project_index::{
         build_index, summarize, synthetic_drawing, SummaryMeta, SummarySource,
     };
-    use crate::pid::publish_pkg::{COLLAB_DIVERGED, COLLAB_OFFLINE, COLLAB_UNSYNCED};
+    use crate::pid::publish_pkg::{
+        COLLAB_DIVERGED, COLLAB_OFFLINE, COLLAB_UNSYNCED, PACKAGE_CORRUPT, PACKAGE_NOT_FOUND,
+    };
     use crate::pid::symbols::SymbolLibrary;
     use crate::pid::{FileCollabState, QueuedOp};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1375,8 +1625,11 @@ mod tests {
             "PIDPUBLISH ALLOW_OFFLINE allow_offline",
             "PIDPUBLISH \"out",
             "PIDPUBLISH CHECK \"\"",
-            "PIDPUBLISH LIST",
-            "pidpublish verify out/PID-1101-r001",
+            "PIDPUBLISH LIST a b",
+            "pidpublish list \"a",
+            "PIDPUBLISH VERIFY",
+            "pidpublish verify a b",
+            "PIDPUBLISH VERIFY \"\"",
         ] {
             let ran = run(&mut app, line);
             assert_eq!(ran.code, None, "{line}: {}", ran.said);
@@ -1387,6 +1640,8 @@ mod tests {
                 ran.said
             );
         }
+        let ran = run(&mut app, "PIDPUBLISH LIST");
+        assert_eq!(ran.code.as_deref(), Some(PUBLISH_UNSAVED), "{}", ran.said);
     }
 
     /// 目标目录、`REV`、`ALLOW_OFFLINE` 先后不论；加了引号的是目录名，可以有空格。
@@ -2006,6 +2261,136 @@ mod tests {
         assert_eq!(ran.error, None, "{}", ran.said);
         let manifest = json_at(&published.join("PID-1101-r002").join("manifest.json"));
         assert_eq!(manifest["collab"]["reconciled"], true, "{manifest}");
+    }
+
+    /// PUB-5 验收第 1 条：没发布过是「未发布」；发布后「已发布，修订 1」，那个包标当前；改了图
+    /// 没存、存了都是「修订 1 之后有改动」；再发布两次是「已发布，修订 3」，新的在前，两版源文件
+    /// 相同时只有新的那版标当前。`LIST` 什么都不写。
+    #[test]
+    fn pidpublish_list_says_which_revision_the_drawing_was_published_to() {
+        let scratch = Scratch::new();
+        only_rule(&scratch, "DR-001");
+        let mut app = sheet(&scratch);
+        let current = scratch.path("PID-1101.dwg");
+        let listed = |app: &mut OpenCADStudio, line: &str| {
+            let before = scratch.listing();
+            let ran = run(app, line);
+            assert_eq!(ran.error, None, "{line}: {}", ran.said);
+            assert_eq!(scratch.listing(), before, "{line} 写了东西");
+            ran.said
+        };
+        let rows = |said: &str| -> Vec<String> {
+            said.lines()
+                .filter(|line| line.starts_with("  PID-1101-r"))
+                .map(str::to_owned)
+                .collect()
+        };
+
+        let said = listed(&mut app, "PIDPUBLISH LIST");
+        let head = line_of(&said, "PIDPUBLISH LIST: 图 PID-1101：");
+        assert!(head.contains("未发布"), "{said}");
+        assert!(rows(&said).is_empty(), "{said}");
+
+        assert_eq!(run(&mut app, "PIDPUBLISH").error, None);
+        let said = listed(&mut app, "PIDPUBLISH LIST");
+        let head = line_of(&said, "PIDPUBLISH LIST: 图 PID-1101：");
+        assert!(head.contains("已发布，修订 1；"), "{said}");
+        let found = rows(&said);
+        assert_eq!(found.len(), 1, "{said}");
+        assert!(found[0].starts_with("  PID-1101-r001  "), "{said}");
+        assert!(
+            found[0].contains(" UTC  ") && found[0].ends_with("当前"),
+            "{said}"
+        );
+
+        draw(&mut app, "PIDINSERT pump", &[[100.0, 0.0]]);
+        assert!(app.tabs[app.active_tab].dirty);
+        let said = listed(&mut app, "PIDPUBLISH LIST");
+        assert!(said.contains("修订 1 之后有改动；"), "{said}");
+        assert!(!rows(&said)[0].ends_with("当前"), "{said}");
+        save(&mut app, &current);
+        let said = listed(&mut app, "PIDPUBLISH LIST");
+        assert!(said.contains("修订 1 之后有改动；"), "{said}");
+        assert!(!rows(&said)[0].ends_with("当前"), "{said}");
+
+        for _ in 0..2 {
+            let ran = run(&mut app, "PIDPUBLISH");
+            assert_eq!(ran.error, None, "{}", ran.said);
+        }
+        let said = listed(&mut app, "pidpublish list");
+        assert!(said.contains("已发布，修订 3；"), "{said}");
+        let found = rows(&said);
+        assert_eq!(found.len(), 3, "{said}");
+        for (row, (package, current)) in found.iter().zip([
+            ("PID-1101-r003", true),
+            ("PID-1101-r002", false),
+            ("PID-1101-r001", false),
+        ]) {
+            assert!(row.starts_with(&format!("  {package}  ")), "{said}");
+            assert_eq!(row.ends_with("当前"), current, "{said}");
+        }
+
+        let i = app.active_tab;
+        let publications = app.pidpublish_listed(i, None).expect("发布记录");
+        assert_eq!(publications.state, PublishState::Published(3));
+        assert_eq!(publications.target_dir, scratch.path("pid-publish"));
+        let revisions: Vec<u32> = publications
+            .packages
+            .iter()
+            .map(|package| package.revision)
+            .collect();
+        assert_eq!(revisions, [3, 2, 1]);
+        assert!(publications
+            .packages
+            .iter()
+            .all(|package| package.published_at.is_some() && package.published_by.is_some()));
+
+        let said = listed(&mut app, "PIDPUBLISH LIST \"out dir\"");
+        assert!(said.contains("未发布"), "{said}");
+        assert!(!scratch.path("out dir").exists());
+    }
+
+    /// PUB-5 验收第 2 条：完好的包通过（相对路径从图纸所在目录算，也可以写完整路径）；目录不在是
+    /// `PACKAGE_NOT_FOUND`；动过一个字节是 `PACKAGE_CORRUPT`。都在只读会话里做，`LIST` 也照用。
+    #[test]
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn pidpublish_verify_checks_a_package_even_in_a_readonly_session() {
+        let scratch = Scratch::new();
+        only_rule(&scratch, "DR-001");
+        let mut app = sheet(&scratch);
+        let ran = run(&mut app, "PIDPUBLISH");
+        assert_eq!(ran.error, None, "{}", ran.said);
+        let package = scratch.path("pid-publish").join("PID-1101-r001");
+
+        app.collab.readonly = true;
+        let ran = run(&mut app, "PIDPUBLISH LIST");
+        assert_eq!(ran.error, None, "{}", ran.said);
+        assert!(ran.said.contains("已发布，修订 1"), "{}", ran.said);
+        let full = format!("PIDPUBLISH VERIFY \"{}\"", package.display());
+        for line in ["PIDPUBLISH VERIFY pid-publish/PID-1101-r001", full.as_str()] {
+            let ran = run(&mut app, line);
+            assert_eq!(ran.error, None, "{line}: {}", ran.said);
+            let said = line_of(&ran.said, "PIDPUBLISH VERIFY: ");
+            assert!(said.contains("完好：PID-1101-r001"), "{line}: {said}");
+            assert!(said.contains("共 11 个文件"), "{line}: {said}");
+        }
+        let ran = run(&mut app, "pidpublish verify pid-publish/PID-1101-r002");
+        assert_eq!(ran.code.as_deref(), Some(PACKAGE_NOT_FOUND), "{}", ran.said);
+
+        let bom = package.join("bom.csv");
+        let mut permissions = fs::metadata(&bom).expect("材料清单").permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&bom, permissions).expect("去掉只读");
+        let mut bytes = fs::read(&bom).expect("读材料清单");
+        bytes[0] ^= 1;
+        fs::write(&bom, bytes).expect("改一个字节");
+        let ran = run(&mut app, "PIDPUBLISH VERIFY pid-publish/PID-1101-r001");
+        assert_eq!(ran.code.as_deref(), Some(PACKAGE_CORRUPT), "{}", ran.said);
+        assert!(
+            ran.error.is_some_and(|error| error.contains("bom.csv")),
+            "{}",
+            ran.said
+        );
     }
 
     /// 契约规模：2,000 个对象的合成图（`IX-4`）。

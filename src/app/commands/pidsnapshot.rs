@@ -858,7 +858,7 @@ fn unix_now() -> u64 {
 }
 
 /// Unix 秒写成 UTC 的日期和时刻，到分，标明 UTC（§7.4：标准库拿不到本机时区）。
-fn utc_said(seconds: u64) -> String {
+pub(super) fn utc_said(seconds: u64) -> String {
     let days = i64::try_from(seconds / 86_400).unwrap_or_default();
     let minutes = seconds % 86_400 / 60;
     // 1970-01-01 起的天数换成公历日期（Howard Hinnant 的 civil_from_days）。
