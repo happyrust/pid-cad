@@ -1206,6 +1206,60 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `198 passed` | **`198 passed`** | **全绿** |
 
+---
+
+## 31. L2-2 / L2-6 / L2-7 / L6-2（#142）：真实 `.pid` 原图应用内 `PIDPROMOTE` 按 `OID` 归并升格、面板/`PIDINSERT` 编辑与 `PIDSAVEPID`/`PIDCONVERT` 存回双产物闭环（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `b6ade3c73`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{promote,export,mod}.rs`、`src/app/commands/pidprops.rs` |
+| 外部证据目录 | `$OCS_PID_EVIDENCE_DIR/2026-11-21-issue142/`（`red.txt`、`green_promote.txt`、`green_pidprops.txt`、`real142_test.log`、`real_out/real142_summary.json`、`cargo_test.txt`、`clippy_lib_final.txt`、`clippy_test_final.txt`、`fmt_arch_pytest.txt`） |
+
+### 31.1 先红后绿与 4 处真实 `.pid` 交互断链修复
+
+- **先红阶段（`red.txt`）**：
+  - `l2_6_real_pid_stroke_group_merges_by_oid_resolves_exact_variant_and_preserves_polyline_pipes`：`RED1_RC=101`（改前 2 个多笔画符号 + 1 条 `LwPolyline` 管线被裂变为 `10` 个符号对象、`9` 个假重号冲突、`0` 条管段）；
+  - `l6_2_in_app_pid_import_promote_panel_edit_pidinsert_and_pidconvert_roundtrip`：`RED2_RC=101`。
+- **落地修复与转绿**：
+  1. **按 `oid` 多笔画归并、精确变体映射与 `LwPolyline` 管网构建（`src/io/pid_convert/promote.rs`，零改动 `src/io/pid/*`）**：
+     - 对携带 `oid` 的原生 `.pid` 导入图元按 `oid` 聚合成单个主句柄（收集 `_member_handles`、联合 `_bbox` 与中心 `_at`），过滤纯派生连接点对象（`PIDPipingPort` / `PIDPipingBranchPoint` / `PIDProcessPoint`），并将独立位号文字组自动关联进对应符号 `_tag_handles`；
+     - 利用 `PID-SYMBOL-LABEL` 图层上的 `.sym` 主干名匹配 `default_legend_class_map()` 与 `default_class_map()`，获得精确 `(sppid_class, variant_id, symbol_path)`（无 `oid` 单实体保持既有行为向后兼容）；
+     - 将 `.pid` 工艺管线（`Line` 与多折线 `LwPolyline`，自动剔除复杂线型短刻度）升格为 `PIPE_SEGMENT` 并写入 `TopologyTable`；扩展 `save_author_document_to_dual` 原生支持 `LwPolyline` 折线管段与新建 `PIDINSERT` 符号的目录 `.sym` 默认路径。
+  2. **成员笔画面板联动、原生 `.pid` 自动路由与 `PIDCONVERT` 已编辑模型优先导出（`src/app/commands/pidprops.rs` + `src/io/pid_convert/export.rs`）**：
+     - `pid_author_section` 与 `commit_pid_author_property` 通过 `resolve_owning_author_handles` 反查主句柄，使点选多笔画符号任意一根笔画均可读写其 `PID_AUTHOR`；
+     - 默认 `PIDPROMOTE` 检测到 `has_native_pid_semantics` 时直接执行 `promote_semantics_to_author`；
+     - 单图 `PIDCONVERT` 当画布存在已校核/手建 `PID_AUTHOR` 对象（且未指定 `RAW`）时前置执行 `gate_save` 并调用 `export_author_document_to_dir`（在克隆副本上同步，保持活动画布只读零污染）。
+  3. 复跑单测：`promote::tests` **`6 passed; 0 failed`**，`pidprops::tests` **`13 passed; 0 failed`**。
+
+### 31.2 3 张真实 `.pid` 原图应用内「打开 → `PIDPROMOTE` → 面板改位号 + `PIDINSERT` → `PIDCONVERT` & `PIDSAVEPID`」实测表
+
+对 `EXPORT_SET` 生产 `.pid`（`P01`、`P02`）与 `VENDOR_REF` 厂商参考 `.pid`（`P03`）逐张在 `OpenCADStudio` 内执行完整交互与存回核验（`sppid_native_c1_status = "unverified_no_sppid_runner"`）：
+
+| 脱敏编号 | 源 `.pid` SHA-256 前缀 | 原始展开图元数 | 按 `oid` 归并符号数 | 面板改位号 + `PIDINSERT` 后精确变体数 | 表外兜底 | 写出对象 / 关系 | `StrictVendor` 违规数 | `GraphicOID` 对齐 | `a` 级 / `b` 级 PDF 图元 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `P01`（`EXPORT_SET`） | `81a99cefae55` | `519` | `119`（重号 `0`） | `120` | `0` | `259 / 197` | `0` | `164 / 164` | `true` / `367` |
+| `P02`（`EXPORT_SET`） | `a7c3cfe616cb` | `1,661` | `298`（历史重号 `3` 经 `DEDUP` 消解） | `299` | `0` | `711 / 559` | `0` | `442 / 442` | `true` / `713` |
+| `P03`（`VENDOR_REF`） | `c568d23f3992` | `973` | `213`（历史重号 `2` 经 `DEDUP` 消解） | `214` | `0` | `438 / 320` | `0` | `291 / 291` | `true` / `534` |
+| **合计（`3 / 3` 通过）** | — | **`3,153`** | **`630`** | **`633 / 633`（`100%`）** | **`0`** | **`1,408 / 1,076`** | **`0`（`12 / 12` XML）** | **`897 / 897`（`100%`）** | **`3 / 3` 通过（`1,614` 图元）** |
+
+- **90 张 SPPID 基准图回归门禁（`baseline-90.tsv`）**：`regression_gate.py diff` **`passed=True, unexpected=0, expected=0`**（退出码 `0`）。
+
+### 31.3 固定门禁读数
+
+| 门禁项 | 改前读数（§30.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,213` 条（`7,143` 过 / `69` 忽略 / `1` 既有 `.pen`） | **`7,216` 条**（**`7,145` 过** / **`70` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+3` 条 Rust 测试（`+2` 常规 + `+1` 真实 `.pid` 集成），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `promote.rs`、`export.rs`、`mod.rs`、`pidprops.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `198 passed` | **`198 passed`** | **全绿** |
+
+
 
 
 

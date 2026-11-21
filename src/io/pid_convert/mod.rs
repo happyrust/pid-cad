@@ -13,10 +13,10 @@ pub mod recognize;
 pub use promote::save_author_document_to_dual;
 pub use promote::{
     accept_author_handles, deduplicate_author_tags, expand_author_member_handles,
-    filter_author_handles, promote_semantics_to_author, promote_sheet_to_author,
-    reject_author_handles, resolve_owning_author_handles, sppid_class_to_author_type,
-    summarize_author_review, sync_author_after_edit, sync_paired_canvas_tag_texts,
-    AuthorReviewStats, AuthorSyncReport, PromoteReport,
+    filter_author_handles, has_native_pid_semantics, promote_semantics_to_author,
+    promote_sheet_to_author, reject_author_handles, resolve_owning_author_handles,
+    sppid_class_to_author_type, summarize_author_review, sync_author_after_edit,
+    sync_paired_canvas_tag_texts, AuthorReviewStats, AuthorSyncReport, PromoteReport,
 };
 
 pub use class_map::{
@@ -25,9 +25,9 @@ pub use class_map::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use export::{
-    convert_document_to_dual, convert_path_to_dir, export_document_to_dir,
-    save_cad_file_as_binary_dwg, verify_batch_dir_strict, verify_dual_bundle,
-    verify_published_xml_pair, DualConvertBundle,
+    convert_document_to_dual, convert_path_to_dir, export_author_document_to_dir,
+    export_document_to_dir, save_cad_file_as_binary_dwg, verify_batch_dir_strict,
+    verify_dual_bundle, verify_published_xml_pair, DualConvertBundle,
 };
 pub use export::{
     convert_document_to_publish, pair_cross_sheet_connectors, BatchConvertSummary, ConvertOptions,

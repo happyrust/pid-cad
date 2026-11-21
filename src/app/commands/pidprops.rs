@@ -57,7 +57,12 @@ pub(in crate::app) fn pid_author_section(
     document: &document::Document,
     handle: document::Handle,
 ) -> Vec<PropSection> {
-    let Some(author) = PidAuthor::load(document, handle) else {
+    let resolved_owner = PidAuthor::load(document, handle).or_else(|| {
+        crate::io::pid_convert::resolve_owning_author_handles(document, &[handle])
+            .first()
+            .and_then(|&oh| PidAuthor::load(document, oh))
+    });
+    let Some(author) = resolved_owner else {
         return Vec::new();
     };
     let display = TagView::new(
@@ -148,7 +153,11 @@ impl OpenCADStudio {
                 _ => return false,
             },
         };
-        let authored: Vec<(document::Handle, PidAuthor)> = handles
+        let owner_handles = crate::io::pid_convert::resolve_owning_author_handles(
+            &self.tabs[i].scene.document,
+            handles,
+        );
+        let authored: Vec<(document::Handle, PidAuthor)> = owner_handles
             .iter()
             .filter_map(|handle| {
                 PidAuthor::load(&self.tabs[i].scene.document, *handle).map(|a| (*handle, a))
@@ -370,6 +379,12 @@ impl OpenCADStudio {
                 crate::io::pid_convert::promote_semantics_to_author(
                     &mut self.tabs[i].scene.document,
                     Some(&selected),
+                )
+            }
+            _ if crate::io::pid_convert::has_native_pid_semantics(&self.tabs[i].scene.document) => {
+                crate::io::pid_convert::promote_semantics_to_author(
+                    &mut self.tabs[i].scene.document,
+                    None,
                 )
             }
             _ => {
@@ -835,18 +850,49 @@ impl OpenCADStudio {
             ..Default::default()
         };
 
-        let report = match crate::io::pid_convert::export_document_to_dir(
-            &self.tabs[i].scene.document,
-            &doc_stem,
-            &out_dir,
-            &opts,
-            args.verify,
-        ) {
-            Ok(rep) => rep,
-            Err(err) => {
-                self.command_line
-                    .push_error(&format!("PIDCONVERT: 导出失败：{err}"));
+        let use_authored = !args.raw
+            && crate::io::pid_convert::summarize_author_review(&self.tabs[i].scene.document)
+                .total_authored_symbols
+                > 0;
+
+        let report = if use_authored {
+            if let Err(err) = crate::pid::propagate::gate_save(&self.tabs[i].scene.document) {
+                self.command_line.push_error(&format!(
+                    "PIDCONVERT: 存在重复位号冲突（{}），已阻断导出：{err}",
+                    err.code()
+                ));
                 return Some(Task::none());
+            }
+            let mut synced_doc = self.tabs[i].scene.document.clone();
+            let _ = crate::io::pid_convert::sync_author_after_edit(&mut synced_doc);
+            match crate::io::pid_convert::export_author_document_to_dir(
+                &synced_doc,
+                &doc_stem,
+                &out_dir,
+                &opts,
+                args.verify,
+            ) {
+                Ok(rep) => rep,
+                Err(err) => {
+                    self.command_line
+                        .push_error(&format!("PIDCONVERT: 导出失败：{err}"));
+                    return Some(Task::none());
+                }
+            }
+        } else {
+            match crate::io::pid_convert::export_document_to_dir(
+                &self.tabs[i].scene.document,
+                &doc_stem,
+                &out_dir,
+                &opts,
+                args.verify,
+            ) {
+                Ok(rep) => rep,
+                Err(err) => {
+                    self.command_line
+                        .push_error(&format!("PIDCONVERT: 导出失败：{err}"));
+                    return Some(Task::none());
+                }
             }
         };
 
@@ -1169,6 +1215,7 @@ struct PidConvertArgs {
     summary: Option<std::path::PathBuf>,
     force_dual: bool,
     verify: bool,
+    raw: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1227,6 +1274,10 @@ fn parse_pidconvert_args(tokens: &[String]) -> Result<PidConvertArgs, String> {
             }
             "VERIFY" => {
                 args.verify = true;
+                idx += 1;
+            }
+            "RAW" => {
+                args.raw = true;
                 idx += 1;
             }
             _ => {
@@ -2903,6 +2954,401 @@ mod tests {
         std::fs::write(
             out_dir.join("real141_summary.json"),
             format!("{}\n", serde_json::to_string_pretty(&final_report).unwrap()),
+        )
+        .unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn l6_2_in_app_pid_import_promote_panel_edit_pidinsert_and_pidconvert_roundtrip() {
+        use crate::io::PID_SEMANTICS_XDATA_APP;
+        use crate::scene::view::dispatch::set_entity_xdata;
+        use document::entities::{Line, LwPolyline, LwVertex, Text};
+        use document::types::Vector3;
+        use document::xdata::XDataValue;
+        use document::EntityType;
+
+        let root = std::env::temp_dir().join(format!("ocs_pidimport_142_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let seed_path = root.join("seed142.pid");
+        std::fs::write(&seed_path, make_synthetic_seed_pid_bytes()).unwrap();
+
+        let mut app = app();
+        let (stroke_h1, vis_tag_h) = {
+            let doc = &mut app.tabs[app.active_tab].scene.document;
+            let sem = vec![
+                XDataValue::String("role=symbol".to_string()),
+                XDataValue::String("class=PIDPipingComponent".to_string()),
+                XDataValue::String("label=BV-6101".to_string()),
+                XDataValue::String("oid=801".to_string()),
+                XDataValue::String("resolved=direct".to_string()),
+            ];
+            let mut h_first = None;
+            for (a, b) in [
+                ((47.0, 98.0), (47.0, 102.0)),
+                ((47.0, 102.0), (53.0, 98.0)),
+                ((53.0, 98.0), (53.0, 102.0)),
+                ((53.0, 102.0), (47.0, 98.0)),
+            ] {
+                let mut ln =
+                    Line::from_points(Vector3::new(a.0, a.1, 0.0), Vector3::new(b.0, b.1, 0.0));
+                ln.common.layer = "Default".to_string();
+                let h = doc.add_entity(EntityType::Line(ln)).unwrap();
+                set_entity_xdata(doc, h, PID_SEMANTICS_XDATA_APP, Some(sem.clone()));
+                if h_first.is_none() {
+                    h_first = Some(h);
+                }
+            }
+            let mut slbl = Text::with_value("Ball Valve Type 2", Vector3::new(50.0, 96.0, 0.0))
+                .with_height(1.8);
+            slbl.common.layer = "PID-SYMBOL-LABEL".to_string();
+            let slbl_h = doc.add_entity(EntityType::Text(slbl)).unwrap();
+            set_entity_xdata(
+                doc,
+                slbl_h,
+                PID_SEMANTICS_XDATA_APP,
+                Some(vec![
+                    XDataValue::String("role=symbol-label".to_string()),
+                    XDataValue::String("class=PIDPipingComponent".to_string()),
+                    XDataValue::String("label=BV-6101".to_string()),
+                    XDataValue::String("oid=801".to_string()),
+                ]),
+            );
+            let mut vtxt =
+                Text::with_value("BV-6101", Vector3::new(48.0, 104.0, 0.0)).with_height(2.5);
+            vtxt.common.layer = "Labels".to_string();
+            let vtxt_h = doc.add_entity(EntityType::Text(vtxt)).unwrap();
+            set_entity_xdata(
+                doc,
+                vtxt_h,
+                PID_SEMANTICS_XDATA_APP,
+                Some(vec![
+                    XDataValue::String("role=text".to_string()),
+                    XDataValue::String("class=PIDPipingComponent".to_string()),
+                    XDataValue::String("label=BV-6101".to_string()),
+                    XDataValue::String("oid=801".to_string()),
+                    XDataValue::String("resolved=dependency:800".to_string()),
+                ]),
+            );
+            let mut pl = LwPolyline::new();
+            pl.common.layer = "Process".to_string();
+            for (x, y) in [(10.0, 100.0), (47.0, 100.0), (95.0, 100.0)] {
+                pl.vertices.push(LwVertex::from_coords(x, y));
+            }
+            let pl_h = doc.add_entity(EntityType::LwPolyline(pl)).unwrap();
+            set_entity_xdata(
+                doc,
+                pl_h,
+                PID_SEMANTICS_XDATA_APP,
+                Some(vec![
+                    XDataValue::String("role=geometry".to_string()),
+                    XDataValue::String("class=PIDPipingConnector".to_string()),
+                    XDataValue::String("label=50-PG-6101-B9-".to_string()),
+                    XDataValue::String("oid=802".to_string()),
+                ]),
+            );
+            (h_first.unwrap(), vtxt_h)
+        };
+
+        // 1. Bare `PIDPROMOTE` must detect native `.pid` semantics, merge by `oid`, and leave 0 duplicates
+        let _ = app.run_command_line("PIDPROMOTE");
+        let rev0 = crate::io::pid_convert::summarize_author_review(
+            &app.tabs[app.active_tab].scene.document,
+        );
+        assert_eq!(rev0.total_authored_symbols, 1);
+        assert_eq!(rev0.duplicated_tags, 0);
+
+        // 2. Edit tag via property panel -> paired visible Text updates
+        select(&mut app, stroke_h1);
+        set(&mut app, "pid_tag", "BV-PANEL-142");
+        assert_eq!(dwg_text_val(&app, vis_tag_h), "BV-PANEL-142");
+
+        // 3. Place a brand-new vessel via `PIDINSERT vessel`
+        let vessel_h = placed_vessel(&mut app, 130.0);
+        let vessel_tag = author(&app, vessel_h).tag;
+        assert!(!vessel_tag.is_empty());
+
+        // 4. `PIDCONVERT` (XML-only, no SEED) must export edited `PID_AUTHOR` + newly placed vessel with 0 fallback
+        let xml_dir = root.join("xml_authored");
+        let cmd_xml = format!("PIDCONVERT \"{}\" STEM AUTH-142 VERIFY", xml_dir.display());
+        let _ = app.run_command_line(&cmd_xml);
+        let auth_xml = xml_dir.join("AUTH-142_Data.xml");
+        assert!(auth_xml.is_file(), "PIDCONVERT must export authored XML");
+        let xml_str = std::fs::read_to_string(&auth_xml).unwrap();
+        assert!(
+            xml_str.contains("BV-PANEL-142"),
+            "PIDCONVERT must preserve panel-edited PID_AUTHOR tag"
+        );
+        assert!(
+            xml_str.contains(&vessel_tag),
+            "PIDCONVERT must include newly placed PIDINSERT symbol"
+        );
+        let cov_val: Value = serde_json::from_str(
+            &std::fs::read_to_string(xml_dir.join("AUTH-142_Coverage.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            cov_val["variant_resolution"]["class_default_fallback"].as_u64(),
+            Some(0)
+        );
+
+        // 5. `PIDSAVEPID` dual save-back succeeds and passes a/b verification
+        let out_pid = root.join("dual").join("AUTH-DUAL-142.pid");
+        let cmd_save = format!(
+            "PIDSAVEPID \"{}\" SEED \"{}\"",
+            out_pid.display(),
+            seed_path.display()
+        );
+        let _ = app.run_command_line(&cmd_save);
+        assert!(out_pid.is_file());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads real .pid production/reference sheets in OpenCADStudio -> PIDPROMOTE -> panel tag edit + PIDINSERT -> PIDCONVERT XML & PIDSAVEPID dual roundtrip"]
+    fn real_pid_files_in_app_promote_edit_pidinsert_and_dual_save_roundtrip() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(raw_list) = std::env::var("OCS_PID_REAL142_PIDS") else {
+            println!("OCS_PID_REAL142_PIDS unset, skipping.");
+            return;
+        };
+        let Ok(seed_zip) = std::env::var("OCS_PID_SEED_ZIP") else {
+            println!("OCS_PID_SEED_ZIP unset, skipping.");
+            return;
+        };
+        let sym_dir = std::env::var("OCS_PID_SYM_DIR").unwrap_or_default();
+        let out_dir = std::env::var("OCS_PID_REAL142_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real142"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let pid_paths: Vec<std::path::PathBuf> = std::env::split_paths(&raw_list)
+            .filter(|p| p.is_file())
+            .collect();
+        assert!(!pid_paths.is_empty(), "expected >= 1 real .pid path");
+
+        let mut rows = Vec::new();
+        let mut tot_promoted = 0usize;
+        let mut tot_exact = 0usize;
+        let mut tot_fallbacks = 0usize;
+        let mut tot_items = 0usize;
+        let mut tot_rels = 0usize;
+        let mut tot_reps = 0usize;
+        let mut tot_matched = 0usize;
+        let mut tot_pdf_prims = 0usize;
+
+        for (idx, p) in pid_paths.iter().enumerate() {
+            let pid_id = format!("P{:02}", idx + 1);
+            let raw_bytes = std::fs::read(p).expect("read real .pid bytes");
+            let sha_full = format!("{:x}", Sha256::digest(&raw_bytes));
+            let sha_pfx = sha_full[..12].to_string();
+
+            let mut app = app();
+            let loaded = crate::io::load_file(p).expect("load real .pid in app");
+            let model_ents = loaded.model_space_entities().count();
+            app.tabs[app.active_tab].scene.document = loaded;
+
+            // 1. Default `PIDPROMOTE` auto-detects native `.pid` semantics and merges multi-stroke placements by `oid`
+            let _ = app.run_command_line("PIDPROMOTE");
+            let rev0 = crate::io::pid_convert::summarize_author_review(
+                &app.tabs[app.active_tab].scene.document,
+            );
+            assert!(
+                rev0.total_authored_symbols > 0,
+                "{pid_id}: expected promoted symbols > 0"
+            );
+            assert!(
+                rev0.total_authored_symbols < model_ents,
+                "{pid_id}: multi-stroke placements must merge ({} < {})",
+                rev0.total_authored_symbols,
+                model_ents
+            );
+
+            if rev0.duplicated_tags > 0 {
+                let _ = app.run_command_line("PIDREVIEW DEDUP");
+            }
+            let rev1 = crate::io::pid_convert::summarize_author_review(
+                &app.tabs[app.active_tab].scene.document,
+            );
+            assert_eq!(rev1.duplicated_tags, 0, "{pid_id}: duplicates must be 0");
+
+            // 2. Select a promoted symbol (prefer one carrying paired `_tag_handles`) and edit its tag via property panel
+            let target_sym = app.tabs[app.active_tab]
+                .scene
+                .document
+                .model_space_entities()
+                .find_map(|e| {
+                    let h = e.common().handle;
+                    let a = PidAuthor::load(&app.tabs[app.active_tab].scene.document, h)?;
+                    if a.topology == crate::pid::topology::ROLE_PIPE_SEGMENT
+                        || a.type_code == crate::pid::topology::TYPE_PIPE_SEGMENT
+                        || a.tag.is_empty()
+                    {
+                        return None;
+                    }
+                    let m: serde_json::Map<String, Value> = serde_json::from_str(&a.props).ok()?;
+                    let th = m
+                        .get("_tag_handles")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    (!th.is_empty()).then_some((h, th))
+                })
+                .or_else(|| {
+                    crate::io::pid_convert::filter_author_handles(
+                        &app.tabs[app.active_tab].scene.document,
+                        "ALL",
+                    )
+                    .into_iter()
+                    .next()
+                    .map(|h| (h, String::new()))
+                })
+                .expect("at least one promoted symbol");
+
+            select(&mut app, target_sym.0);
+            let ev_rows = section_rows(&mut app, PID_EVIDENCE_SECTION)
+                .expect("promoted .pid symbol must expose P&ID 来源证据 section");
+            assert_eq!(
+                row_value(&ev_rows, "pid_ev_source").as_deref(),
+                Some("import:pid")
+            );
+
+            let edited_tag = format!("PID142-ED-{}", idx + 1);
+            set(&mut app, "pid_tag", &edited_tag);
+            if let Some(first_hex) = target_sym.1.split(',').find(|s| !s.trim().is_empty()) {
+                let th = document::Handle::new(u64::from_str_radix(first_hex, 16).unwrap());
+                assert!(dwg_text_val(&app, th).contains("PID142"));
+            }
+
+            // 3. Place a brand-new vessel via `PIDINSERT vessel`
+            let new_vessel_h = placed_vessel(&mut app, 220.0);
+            let new_vessel_tag = author(&app, new_vessel_h).tag;
+            assert!(!new_vessel_tag.is_empty());
+
+            let sheet_dir = out_dir.join(&pid_id);
+            std::fs::create_dir_all(&sheet_dir).unwrap();
+
+            // 4. `PIDCONVERT` XML-only export (no SEED) preserves both edited tag and newly placed vessel
+            let xml_only_dir = sheet_dir.join("xml_only");
+            let xml_cmd = format!(
+                "PIDCONVERT \"{}\" STEM {pid_id}-XML VERIFY",
+                xml_only_dir.display()
+            );
+            let _ = app.run_command_line(&xml_cmd);
+            let xml_only_data =
+                std::fs::read_to_string(xml_only_dir.join(format!("{pid_id}-XML_Data.xml")))
+                    .expect("read authored XML");
+            assert!(xml_only_data.contains(&edited_tag));
+            assert!(xml_only_data.contains(&new_vessel_tag));
+
+            // 5. `PIDSAVEPID` dual `.pid` + XML save-back + `StrictVendor` + `a/b` verification
+            let dual_pid = sheet_dir.join(format!("{pid_id}.pid"));
+            let save_cmd = if sym_dir.trim().is_empty() {
+                format!(
+                    "PIDSAVEPID \"{}\" SEED \"{}\"",
+                    dual_pid.display(),
+                    seed_zip
+                )
+            } else {
+                format!(
+                    "PIDSAVEPID \"{}\" SEED \"{}\" SYMDIR \"{}\"",
+                    dual_pid.display(),
+                    seed_zip,
+                    sym_dir
+                )
+            };
+            let _ = app.run_command_line(&save_cmd);
+            assert!(dual_pid.is_file(), "{pid_id}: saved .pid must exist");
+
+            let data_raw =
+                std::fs::read(sheet_dir.join(format!("{pid_id}_Data.xml"))).expect("read _Data");
+            let meta_raw =
+                std::fs::read(sheet_dir.join(format!("{pid_id}_Meta.xml"))).expect("read _Meta");
+            let pid_raw = std::fs::read(&dual_pid).expect("read saved .pid");
+            crate::io::pid_convert::verify_published_xml_pair(&pid_id, "P01", &data_raw, &meta_raw)
+                .expect("StrictVendor zero violations");
+
+            let cov_val: Value = serde_json::from_str(
+                &std::fs::read_to_string(sheet_dir.join(format!("{pid_id}_Coverage.json")))
+                    .unwrap(),
+            )
+            .unwrap();
+            let doc_uid = cov_val["doc_uid"].as_str().unwrap().to_string();
+            let exact_v = cov_val["variant_resolution"]["exact_variant_id"]
+                .as_u64()
+                .unwrap_or(0) as usize
+                + cov_val["variant_resolution"]["symbol_path_match"]
+                    .as_u64()
+                    .unwrap_or(0) as usize;
+            let fb_v = cov_val["variant_resolution"]["class_default_fallback"]
+                .as_u64()
+                .unwrap_or(0) as usize;
+            let items_w = cov_val["total_items_written"].as_u64().unwrap_or(0) as usize;
+            let rels_w = cov_val["total_relations_written"].as_u64().unwrap_or(0) as usize;
+            assert_eq!(fb_v, 0, "{pid_id}: fallback must be 0");
+
+            let dual_ver = crate::io::pid_convert::verify_dual_bundle(
+                &doc_uid,
+                &data_raw,
+                &pid_raw,
+                Some(&sheet_dir),
+                &pid_id,
+            )
+            .expect("verify_dual_bundle");
+            assert!(
+                dual_ver.is_cross_file_and_a_valid(),
+                "{pid_id}: {dual_ver:?}"
+            );
+            assert!(dual_ver.is_b_plot_valid(), "{pid_id}: {dual_ver:?}");
+
+            tot_promoted += rev1.total_authored_symbols + 1;
+            tot_exact += exact_v;
+            tot_fallbacks += fb_v;
+            tot_items += items_w;
+            tot_rels += rels_w;
+            tot_reps += dual_ver.xml_rep_count;
+            tot_matched += dual_ver.matched_graphic_oids;
+            tot_pdf_prims += dual_ver.b_level_pdf_primitives.unwrap_or(0);
+
+            rows.push(json!({
+                "id": pid_id,
+                "src_pid_sha256_prefix": sha_pfx,
+                "raw_model_entities": model_ents,
+                "promoted_symbols_merged": rev1.total_authored_symbols,
+                "duplicates_before_dedup": rev0.duplicated_tags,
+                "edited_tag": edited_tag,
+                "inserted_vessel_tag": new_vessel_tag,
+                "exact_variants_saved": exact_v,
+                "fallback": fb_v,
+                "items_written": items_w,
+                "relations_written": rels_w,
+                "xml_reps": dual_ver.xml_rep_count,
+                "matched_oids": dual_ver.matched_graphic_oids,
+                "a_valid": dual_ver.a_level_index_consistent,
+                "pdf_prims": dual_ver.b_level_pdf_primitives,
+            }));
+        }
+
+        let summary = json!({
+            "pid_sheets_tested": rows.len(),
+            "total_authored_plus_inserted": tot_promoted,
+            "total_exact_variants_saved": tot_exact,
+            "total_fallbacks": tot_fallbacks,
+            "total_items_written": tot_items,
+            "total_relations_written": tot_rels,
+            "total_xml_reps": tot_reps,
+            "total_matched_oids": tot_matched,
+            "total_pdf_primitives": tot_pdf_prims,
+            "sheets": rows,
+        });
+        std::fs::write(
+            out_dir.join("real142_summary.json"),
+            format!("{}\n", serde_json::to_string_pretty(&summary).unwrap()),
         )
         .unwrap();
     }

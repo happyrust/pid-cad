@@ -20,7 +20,7 @@ use super::export::{ConvertOptions, ConvertSheetReport, DeadEndAttribution, Pipe
 use super::recognize::{recognise_sppid_sheet, ConfidenceSummary, ConfidenceTier, TitleBlockInfo};
 use crate::io::pid_legend::guess_units_per_mm;
 use crate::io::pid_publish::{
-    export_drawing_bundle_with_map, parse_sppid_line_number, pipeline_uid,
+    default_class_map, export_drawing_bundle_with_map, parse_sppid_line_number, pipeline_uid,
     populate_item_tag_attributes, synthesize_piping_network, ExportDrawing, ExportItem,
     PipeRunInput, SymbolEndpointRef, UidAllocator, VariantResolutionSummary,
 };
@@ -945,12 +945,183 @@ fn infer_sppid_from_semantics(kv: &BTreeMap<String, String>) -> (String, String)
     }
 }
 
-/// Promote imported `.pid` entities carrying `PID_SEMANTICS` into `PID_AUTHOR` (`L2-6`).
+/// Whether `doc` carries native `.pid`-imported `PID_SEMANTICS` records (as opposed to `legend:*` hits) (`L2-6` / `#142`).
+pub fn has_native_pid_semantics(doc: &Document) -> bool {
+    for ent in doc.model_space_entities() {
+        let Some(rec) = ent
+            .common()
+            .extended_data
+            .get_record(PID_SEMANTICS_XDATA_APP)
+        else {
+            continue;
+        };
+        let mut has_kv = false;
+        let mut is_legend = false;
+        for v in &rec.values {
+            if let XDataValue::String(s) = v {
+                if s.contains('=') {
+                    has_kv = true;
+                }
+                if s.starts_with("resolved=legend:") {
+                    is_legend = true;
+                }
+            }
+        }
+        if has_kv && !is_legend {
+            return true;
+        }
+    }
+    false
+}
+
+fn entity_geom_bounds(ent: &EntityType) -> Option<(f64, f64, f64, f64)> {
+    match ent {
+        EntityType::Insert(ins) => {
+            let (x, y) = (ins.insert_point.x, ins.insert_point.y);
+            Some((x - 3.0, y - 3.0, x + 3.0, y + 3.0))
+        }
+        EntityType::Line(ln) => Some((
+            ln.start.x.min(ln.end.x),
+            ln.start.y.min(ln.end.y),
+            ln.start.x.max(ln.end.x),
+            ln.start.y.max(ln.end.y),
+        )),
+        EntityType::Circle(c) => Some((
+            c.center.x - c.radius,
+            c.center.y - c.radius,
+            c.center.x + c.radius,
+            c.center.y + c.radius,
+        )),
+        EntityType::Arc(a) => Some((
+            a.center.x - a.radius,
+            a.center.y - a.radius,
+            a.center.x + a.radius,
+            a.center.y + a.radius,
+        )),
+        EntityType::LwPolyline(pl) if !pl.vertices.is_empty() => {
+            let mut min_x = f64::INFINITY;
+            let mut min_y = f64::INFINITY;
+            let mut max_x = f64::NEG_INFINITY;
+            let mut max_y = f64::NEG_INFINITY;
+            for v in &pl.vertices {
+                min_x = min_x.min(v.location.x);
+                min_y = min_y.min(v.location.y);
+                max_x = max_x.max(v.location.x);
+                max_y = max_y.max(v.location.y);
+            }
+            Some((min_x, min_y, max_x, max_y))
+        }
+        EntityType::Point(p) => Some((p.location.x, p.location.y, p.location.x, p.location.y)),
+        _ => None,
+    }
+}
+
+fn polyline_or_line_segments(ent: &EntityType) -> Vec<((f64, f64), (f64, f64))> {
+    match ent {
+        EntityType::Line(ln) => vec![((ln.start.x, ln.start.y), (ln.end.x, ln.end.y))],
+        EntityType::LwPolyline(pl) if pl.vertices.len() >= 2 => {
+            let mut out = Vec::with_capacity(pl.vertices.len());
+            for win in pl.vertices.windows(2) {
+                out.push((
+                    (win[0].location.x, win[0].location.y),
+                    (win[1].location.x, win[1].location.y),
+                ));
+            }
+            if pl.is_closed && pl.vertices.len() >= 3 {
+                let last = pl.vertices.last().unwrap();
+                let first = &pl.vertices[0];
+                out.push((
+                    (last.location.x, last.location.y),
+                    (first.location.x, first.location.y),
+                ));
+            }
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn resolve_catalog_symbol_variant(
+    explicit_cls: Option<&str>,
+    stem_hint: Option<&str>,
+    sym_path_hint: Option<&str>,
+) -> (String, String, Option<String>) {
+    let legend_map = default_legend_class_map();
+    let class_map = default_class_map();
+
+    if let Some(stem) = stem_hint.map(str::trim).filter(|s| !s.is_empty()) {
+        if let super::class_map::BlockResolution::Mapped(mb) = legend_map.resolve_block(stem, "") {
+            if explicit_cls.is_none_or(|c| c == mb.class) {
+                return (
+                    mb.class,
+                    mb.variant_id,
+                    mb.symbol_path.or_else(|| sym_path_hint.map(str::to_string)),
+                );
+            }
+        }
+    }
+
+    let cls = explicit_cls.unwrap_or("PIDProcessEquipment").to_string();
+    if let Some(stem) = stem_hint.map(str::trim).filter(|s| !s.is_empty()) {
+        let stem_up = stem.to_ascii_uppercase();
+        if let Some(v) = class_map.variants.iter().find(|v| {
+            v.class == cls
+                && v.symbol_paths.iter().any(|sp| {
+                    std::path::Path::new(&sp.replace('\\', "/"))
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|st| st.trim().eq_ignore_ascii_case(&stem_up))
+                })
+        }) {
+            return (
+                cls,
+                v.variant_id.clone(),
+                v.symbol_paths
+                    .first()
+                    .cloned()
+                    .or_else(|| sym_path_hint.map(str::to_string)),
+            );
+        }
+    }
+
+    if let Some(v) = class_map.variants.iter().find(|v| v.class == cls) {
+        let sp = sym_path_hint
+            .map(str::to_string)
+            .or_else(|| v.symbol_paths.first().cloned());
+        return (cls, v.variant_id.clone(), sp);
+    }
+
+    (
+        cls.clone(),
+        format!("{cls}#01"),
+        sym_path_hint.map(str::to_string),
+    )
+}
+
+/// Promote imported `.pid` entities carrying `PID_SEMANTICS` into `PID_AUTHOR` (`L2-6` / `#142`).
+///
+/// Multi-stroke `.pid` symbol placements sharing the same `oid` are merged onto one
+/// primary handle (recording `_member_handles`, `_tag_handles`, `_bbox`, and `_at`),
+/// matched against `LegendClassMap` / `ClassMapSpec` via `PID-SYMBOL-LABEL` stems for
+/// zero-fallback `variant_id` resolution, and `.pid` `Line`/`LwPolyline` pipes are
+/// promoted into `PIPE_SEGMENT` + `TopologyTable`.
 pub fn promote_semantics_to_author(
     doc: &mut Document,
     filter_handles: Option<&BTreeSet<Handle>>,
 ) -> PromoteReport {
-    let mut candidates: Vec<(Handle, BTreeMap<String, String>)> = Vec::new();
+    struct RawSemEnt {
+        handle: Handle,
+        kv: BTreeMap<String, String>,
+        is_text: bool,
+        is_sym_label: bool,
+        text_val: Option<String>,
+        bounds: Option<(f64, f64, f64, f64)>,
+        anchor: Option<(f64, f64)>,
+        segs: Vec<((f64, f64), (f64, f64))>,
+        is_poly: bool,
+    }
+
+    let mut raw_ents: Vec<RawSemEnt> = Vec::new();
     for ent in doc.model_space_entities() {
         let h = ent.common().handle;
         if let Some(allowed) = filter_handles {
@@ -973,22 +1144,277 @@ pub fn promote_semantics_to_author(
                 }
             }
         }
-        if !kv.is_empty() {
-            candidates.push((h, kv));
+        if kv.is_empty() {
+            continue;
         }
+        if kv.get("resolved").is_some_and(|r| r.starts_with("legend:")) {
+            continue;
+        }
+        let layer_up = ent.common().layer.trim().to_ascii_uppercase();
+        let role = kv.get("role").map(String::as_str).unwrap_or("");
+        let is_sym_label = role == "symbol-label" || layer_up == "PID-SYMBOL-LABEL";
+        let (is_text, text_val) = match ent {
+            EntityType::Text(t) => (true, Some(t.value.clone())),
+            EntityType::MText(mt) => (true, Some(mt.value.clone())),
+            _ => (false, None),
+        };
+        raw_ents.push(RawSemEnt {
+            handle: h,
+            kv,
+            is_text,
+            is_sym_label,
+            text_val,
+            bounds: entity_geom_bounds(ent),
+            anchor: entity_world_anchor(ent),
+            segs: polyline_or_line_segments(ent),
+            is_poly: matches!(ent, EntityType::LwPolyline(_)),
+        });
+    }
+
+    // Group entities that carry an `oid`; keep `oid`-less entities as singleton groups
+    let mut group_order: Vec<String> = Vec::new();
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (idx, item) in raw_ents.iter().enumerate() {
+        let key = match item.kv.get("oid").map(String::as_str) {
+            Some(oid) if !oid.trim().is_empty() => format!("oid:{}", oid.trim()),
+            _ => format!("single:{:X}", item.handle.value()),
+        };
+        if !groups.contains_key(&key) {
+            group_order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(idx);
+    }
+
+    type Seg2d = ((f64, f64), (f64, f64));
+    struct SemPipeItem {
+        handle: Handle,
+        segs: Vec<Seg2d>,
+        is_poly: bool,
+    }
+    fn segs_total_len(segs: &[Seg2d]) -> f64 {
+        segs.iter()
+            .map(|&(p, q)| (p.0 - q.0).hypot(p.1 - q.1))
+            .sum()
     }
 
     let mut report = PromoteReport::default();
-    for (h, kv) in candidates {
-        let (sppid_cls, auth_ty) = infer_sppid_from_semantics(&kv);
-        let existing = PidAuthor::load(doc, h);
+    let mut standalone_label_texts: BTreeMap<(String, String), Vec<Handle>> = BTreeMap::new();
+    let mut promoted_sym_owners: Vec<(Handle, Vec<(f64, f64)>)> = Vec::new();
+    let mut pipe_candidates: Vec<(String, SemPipeItem)> = Vec::new();
+
+    // First pass: collect standalone text-only `oid` groups so they can bind to matching symbol owners
+    for key in &group_order {
+        let indices = &groups[key];
+        let rep_kv = &raw_ents[indices[0]].kv;
+        let cls = rep_kv.get("class").map(String::as_str).unwrap_or("");
+        if matches!(
+            cls,
+            "PIDPipingPort"
+                | "PIDSignalPort"
+                | "PIDProcessPoint"
+                | "PIDPipingBranchPoint"
+                | "PIDSignalBranchPoint"
+                | "PIDDrawing"
+                | "Plant"
+                | "PIDAreaBreak"
+                | "PIDHistory"
+                | "PIDSignalConnector"
+        ) {
+            continue;
+        }
+        let has_geom = indices
+            .iter()
+            .any(|&i| !raw_ents[i].is_text && !raw_ents[i].is_sym_label);
+        if !has_geom && cls != "PIDNote" && !cls.is_empty() {
+            if let Some(lbl) = rep_kv.get("label").filter(|s| !s.trim().is_empty()) {
+                for &i in indices {
+                    if raw_ents[i].is_text && !raw_ents[i].is_sym_label {
+                        standalone_label_texts
+                            .entry((cls.to_string(), lbl.clone()))
+                            .or_default()
+                            .push(raw_ents[i].handle);
+                    }
+                }
+            }
+        }
+    }
+
+    for key in &group_order {
+        let indices = &groups[key];
+        let rep_kv = &raw_ents[indices[0]].kv;
+        let cls = rep_kv.get("class").map(String::as_str).unwrap_or("");
+        let role0 = rep_kv.get("role").map(String::as_str).unwrap_or("");
+
+        if matches!(
+            cls,
+            "PIDPipingPort"
+                | "PIDSignalPort"
+                | "PIDProcessPoint"
+                | "PIDPipingBranchPoint"
+                | "PIDSignalBranchPoint"
+                | "PIDDrawing"
+                | "Plant"
+                | "PIDAreaBreak"
+                | "PIDHistory"
+                | "PIDSignalConnector"
+        ) || matches!(
+            role0,
+            "frame"
+                | "point-ok"
+                | "point-warning"
+                | "point-error"
+                | "point-approved"
+                | "connectivity"
+        ) {
+            continue;
+        }
+
+        // Process pipe group (`PIDPipingConnector` / `PIDPipeline`)
+        if matches!(cls, "PIDPipingConnector" | "PIDPipeline") {
+            let best_pipe_idx = indices
+                .iter()
+                .copied()
+                .filter(|&i| !raw_ents[i].segs.is_empty() && !raw_ents[i].is_sym_label)
+                .max_by(|&a, &b| {
+                    let pa = raw_ents[a].is_poly;
+                    let pb = raw_ents[b].is_poly;
+                    pa.cmp(&pb).then_with(|| {
+                        segs_total_len(&raw_ents[a].segs)
+                            .total_cmp(&segs_total_len(&raw_ents[b].segs))
+                    })
+                });
+            if let Some(pi) = best_pipe_idx {
+                let line_lbl = rep_kv
+                    .get("label")
+                    .filter(|s| !s.trim().is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| "50-PG-0001-B9-".to_string());
+                pipe_candidates.push((
+                    line_lbl,
+                    SemPipeItem {
+                        handle: raw_ents[pi].handle,
+                        segs: raw_ents[pi].segs.clone(),
+                        is_poly: raw_ents[pi].is_poly,
+                    },
+                ));
+            }
+            continue;
+        }
+
+        let geom_indices: Vec<usize> = indices
+            .iter()
+            .copied()
+            .filter(|&i| !raw_ents[i].is_text && !raw_ents[i].is_sym_label)
+            .collect();
+
+        let primary_idx = if let Some(&gi) = geom_indices.first() {
+            gi
+        } else if cls == "PIDNote" {
+            match indices
+                .iter()
+                .copied()
+                .find(|&i| raw_ents[i].is_text && !raw_ents[i].is_sym_label)
+            {
+                Some(ti) => ti,
+                None => continue,
+            }
+        } else {
+            continue;
+        };
+
+        let primary_h = raw_ents[primary_idx].handle;
+        let sym_label_stem = indices.iter().find_map(|&i| {
+            raw_ents[i]
+                .is_sym_label
+                .then(|| {
+                    raw_ents[i]
+                        .text_val
+                        .as_deref()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string()
+                })
+                .filter(|s| !s.is_empty())
+        });
+
+        let inst_raw = indices
+            .iter()
+            .find_map(|&i| raw_ents[i].kv.get("instance").cloned());
+        let inst_sym_path = inst_raw
+            .as_deref()
+            .filter(|s| s.trim().to_ascii_lowercase().ends_with(".sym"));
+        let inst_stem = inst_sym_path.and_then(|sp| {
+            std::path::Path::new(&sp.replace('\\', "/"))
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        });
+
+        let inferred_cls_opt = if !cls.is_empty() && cls.starts_with("PID") {
+            Some(cls.to_string())
+        } else if sym_label_stem.is_none() && inst_stem.is_none() {
+            Some(infer_sppid_from_semantics(rep_kv).0)
+        } else {
+            None
+        };
+
+        let stem_ref = sym_label_stem.as_deref().or(inst_stem.as_deref());
+        let (sppid_cls, variant_id, resolved_sym_path) =
+            resolve_catalog_symbol_variant(inferred_cls_opt.as_deref(), stem_ref, inst_sym_path);
+        let auth_ty = sppid_class_to_author_type(&sppid_cls, stem_ref.unwrap_or(""))
+            .unwrap_or("EQUIPMENT")
+            .to_string();
+
+        let label_opt = indices
+            .iter()
+            .find_map(|&i| raw_ents[i].kv.get("label").cloned())
+            .filter(|s| !s.trim().is_empty());
+        let oid_opt = indices
+            .iter()
+            .find_map(|&i| raw_ents[i].kv.get("oid").cloned())
+            .filter(|s| !s.trim().is_empty());
+
+        let mut union_bbox: Option<(f64, f64, f64, f64)> = None;
+        for &gi in &geom_indices {
+            if let Some(b) = raw_ents[gi].bounds {
+                union_bbox = Some(match union_bbox {
+                    Some(u) => (u.0.min(b.0), u.1.min(b.1), u.2.max(b.2), u.3.max(b.3)),
+                    None => b,
+                });
+            }
+        }
+        let bbox = union_bbox.unwrap_or_else(|| {
+            let a = raw_ents[primary_idx].anchor.unwrap_or((50.0, 50.0));
+            (a.0 - 3.0, a.1 - 3.0, a.0 + 3.0, a.1 + 3.0)
+        });
+        let center_at = ((bbox.0 + bbox.2) * 0.5, (bbox.1 + bbox.3) * 0.5);
+
+        let mut tag_handles: Vec<Handle> = indices
+            .iter()
+            .copied()
+            .filter(|&i| {
+                raw_ents[i].is_text && !raw_ents[i].is_sym_label && raw_ents[i].handle != primary_h
+            })
+            .map(|i| raw_ents[i].handle)
+            .collect();
+        if tag_handles.is_empty() {
+            if let Some(ref lbl) = label_opt {
+                if let Some(extra) =
+                    standalone_label_texts.remove(&(sppid_cls.clone(), lbl.clone()))
+                {
+                    tag_handles.extend(extra);
+                }
+            }
+        }
+
+        let existing = PidAuthor::load(doc, primary_h);
         let is_update = existing.is_some();
         let mut author = existing.unwrap_or_default();
-        author.type_code = auth_ty;
+        author.type_code = auth_ty.clone();
 
         if author.tag_source == "manual" {
             report.manual_tags_preserved += 1;
-        } else if let Some(lbl) = kv.get("label") {
+        } else if let Some(ref lbl) = label_opt {
             author.tag = lbl.clone();
             author.tag_source = "auto".to_string();
         } else if author.tag_source.is_empty() {
@@ -998,40 +1424,204 @@ pub fn promote_semantics_to_author(
             author.tag_status = "ok".to_string();
         }
 
+        if matches!(
+            sppid_cls.as_str(),
+            "PIDPipingComponent" | "PIDInlineInstrument"
+        ) {
+            author.topology = ROLE_FITTING.to_string();
+            author.ports = VALVE_PORT_NAMES.join(",");
+        } else if sppid_cls == "PIDBranchPoint" {
+            author.topology = ROLE_CONNECTOR_OUT.to_string();
+            author.ports = "连接点1".to_string();
+        } else if author.ports.is_empty() {
+            author.ports = "连接点1,连接点2".to_string();
+        }
+
         let mut pmap = parse_props_map(&author.props);
         pmap.insert(
             "_source".to_string(),
             serde_json::Value::String("import:pid".to_string()),
         );
         pmap.insert(
+            "_confidence".to_string(),
+            serde_json::Value::String("1.00".to_string()),
+        );
+        if !pmap
+            .get("_confidence_tier")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| t == "confirmed")
+        {
+            pmap.insert(
+                "_confidence_tier".to_string(),
+                serde_json::Value::String("high".to_string()),
+            );
+        }
+        pmap.insert(
             "_sppid_class".to_string(),
             serde_json::Value::String(sppid_cls.clone()),
         );
         pmap.insert(
             "_variant_id".to_string(),
-            serde_json::Value::String(format!("{sppid_cls}#01")),
+            serde_json::Value::String(variant_id),
         );
-        if let Some(oid_str) = kv.get("oid") {
+        pmap.insert(
+            "_at".to_string(),
+            serde_json::Value::String(format!("{:.4},{:.4}", center_at.0, center_at.1)),
+        );
+        pmap.insert(
+            "_bbox".to_string(),
+            serde_json::Value::String(format!(
+                "{:.4},{:.4},{:.4},{:.4}",
+                bbox.0, bbox.1, bbox.2, bbox.3
+            )),
+        );
+        if geom_indices.len() > 1 {
+            let mem_hex = geom_indices
+                .iter()
+                .map(|&gi| format!("{:X}", raw_ents[gi].handle.value()))
+                .collect::<Vec<_>>()
+                .join(",");
+            pmap.insert(
+                "_member_handles".to_string(),
+                serde_json::Value::String(mem_hex),
+            );
+        }
+        if !tag_handles.is_empty() {
+            let th_hex = tag_handles
+                .iter()
+                .map(|th| format!("{:X}", th.value()))
+                .collect::<Vec<_>>()
+                .join(",");
+            pmap.insert(
+                "_tag_handles".to_string(),
+                serde_json::Value::String(th_hex),
+            );
+        }
+        if let Some(oid_str) = oid_opt {
             pmap.insert(
                 "_graphic_oid".to_string(),
-                serde_json::Value::String(oid_str.clone()),
+                serde_json::Value::String(oid_str),
             );
         }
-        if let Some(inst_str) = kv.get("instance") {
-            pmap.insert(
-                "_symbol_path".to_string(),
-                serde_json::Value::String(inst_str.clone()),
-            );
+        if let Some(sp) = resolved_sym_path {
+            pmap.insert("_symbol_path".to_string(), serde_json::Value::String(sp));
+        }
+        if sppid_cls == "PIDBranchPoint" {
+            if let Some(ref tf) = label_opt {
+                pmap.entry("对端图号".to_string())
+                    .or_insert_with(|| serde_json::Value::String(tf.clone()));
+            }
         }
         author.props = serde_json::Value::Object(pmap).to_string();
-        author.store(doc, h);
+        author.store(doc, primary_h);
 
         if is_update {
             report.updated_in_place += 1;
         } else {
             report.newly_promoted += 1;
         }
+
+        let ports = vec![
+            (bbox.0, center_at.1),
+            (bbox.2, center_at.1),
+            (center_at.0, bbox.1),
+            (center_at.0, bbox.3),
+            center_at,
+        ];
+        promoted_sym_owners.push((primary_h, ports));
     }
+
+    if !pipe_candidates.is_empty() {
+        let upm = guess_units_per_mm(doc).max(1e-6);
+        let snap_tol = 4.0 * upm;
+        let mut topo = TopologyTable::load(doc);
+        let mut by_line: BTreeMap<String, Vec<SemPipeItem>> = BTreeMap::new();
+        for (lbl, pitem) in pipe_candidates {
+            by_line.entry(lbl).or_default().push(pitem);
+        }
+
+        let snap_pt = |pt: (f64, f64)| -> SegmentEnd {
+            let mut best: Option<(f64, Handle, usize)> = None;
+            for (sh, ports) in &promoted_sym_owners {
+                for (pi, &sp) in ports.iter().enumerate() {
+                    let d = (pt.0 - sp.0).hypot(pt.1 - sp.1);
+                    if d <= snap_tol && best.is_none_or(|(bd, _, _)| d < bd) {
+                        best = Some((d, *sh, pi));
+                    }
+                }
+            }
+            if let Some((_, sh, pi)) = best {
+                let pname = if pi % 2 == 0 {
+                    VALVE_PORT_NAMES[0]
+                } else {
+                    VALVE_PORT_NAMES[1]
+                };
+                SegmentEnd::joined([pt.0, pt.1], sh, pname)
+            } else {
+                SegmentEnd::open([pt.0, pt.1])
+            }
+        };
+
+        for (line_tag, items) in &by_line {
+            let Some(first_item) = items.first() else {
+                continue;
+            };
+            let first_h = first_item.handle;
+            let mut lprops = BTreeMap::new();
+            if let Some(parsed) = parse_sppid_line_number(line_tag) {
+                lprops.insert("size".to_string(), parsed.nominal_diameter_attr);
+                lprops.insert("fluid".to_string(), parsed.fluid_code);
+                lprops.insert("spec".to_string(), parsed.materials_class);
+            }
+            if topo.pipe_lines.iter().all(|l| l.tag != *line_tag) {
+                topo.append_line(line_tag, first_h, lprops.clone());
+                report.pipe_lines_promoted += 1;
+            }
+            let run_tag = format!("{line_tag}-01");
+            if topo.pipe_runs.iter().all(|r| r.tag != run_tag) {
+                topo.append_run(line_tag, &run_tag, first_h, lprops, Vec::new());
+                report.pipe_runs_promoted += 1;
+            }
+
+            for pitem in items {
+                let ph = pitem.handle;
+                let segs = &pitem.segs;
+                let is_poly = pitem.is_poly;
+                let mut enc = Vec::new();
+                for &(a, b) in segs {
+                    if (a.0 - b.0).hypot(a.1 - b.1) < 0.2 * upm {
+                        continue;
+                    }
+                    topo.append_segment(&run_tag, ph, snap_pt(a), snap_pt(b));
+                    report.pipe_segments_promoted += 1;
+                    enc.push(format!(
+                        "{:.4},{:.4},{:.4},{:.4}|{}",
+                        a.0, a.1, b.0, b.1, line_tag
+                    ));
+                }
+                if !enc.is_empty() {
+                    let mut sa = PidAuthor::load(doc, ph).unwrap_or_default();
+                    sa.type_code = TYPE_PIPE_SEGMENT.to_string();
+                    sa.topology = ROLE_PIPE_SEGMENT.to_string();
+                    let mut smap = parse_props_map(&sa.props);
+                    smap.insert(
+                        "_line_label".to_string(),
+                        serde_json::Value::String(line_tag.clone()),
+                    );
+                    if is_poly || enc.len() > 1 {
+                        smap.insert(
+                            "_segments".to_string(),
+                            serde_json::Value::String(enc.join(";")),
+                        );
+                    }
+                    sa.props = serde_json::Value::Object(smap).to_string();
+                    sa.store(doc, ph);
+                }
+            }
+        }
+        topo.store(doc);
+    }
+
     let _ = refresh_duplicate_tag_statuses(doc);
     report
 }
@@ -1185,23 +1775,20 @@ pub fn save_author_document_to_dual(
         .map(|ent| {
             let h = ent.common().handle;
             let anchor = entity_world_anchor(ent);
-            match ent {
-                EntityType::Insert(ins) => (h, ins.block_name.clone(), anchor, None),
-                EntityType::Line(ln) => (
-                    h,
-                    "LINE".to_string(),
-                    anchor,
-                    Some(((ln.start.x, ln.start.y), (ln.end.x, ln.end.y))),
-                ),
-                EntityType::Circle(_) => (h, "CIRCLE".to_string(), anchor, None),
-                EntityType::LwPolyline(_) => (h, "LWPOLYLINE".to_string(), anchor, None),
-                EntityType::Text(_) => (h, "TEXT".to_string(), anchor, None),
-                _ => (h, String::new(), anchor, None),
-            }
+            let segs = polyline_or_line_segments(ent);
+            let blk = match ent {
+                EntityType::Insert(ins) => ins.block_name.clone(),
+                EntityType::Line(_) => "LINE".to_string(),
+                EntityType::Circle(_) => "CIRCLE".to_string(),
+                EntityType::LwPolyline(_) => "LWPOLYLINE".to_string(),
+                EntityType::Text(_) => "TEXT".to_string(),
+                _ => String::new(),
+            };
+            (h, blk, anchor, segs)
         })
         .collect();
 
-    for (h, blk_name, pt_opt, seg_opt) in handles_and_geom {
+    for (h, blk_name, pt_opt, poly_segs) in handles_and_geom {
         let Some(auth) = PidAuthor::load(doc, h) else {
             continue;
         };
@@ -1225,19 +1812,21 @@ pub fn save_author_document_to_dual(
                         seg_draws.push((goid, (ax / upm, ay / upm), (bx / upm, by / upm)));
                     }
                 }
-            } else if let Some((a, b)) = seg_opt {
-                let goid = alloc.alloc_graphic_oid(None);
+            } else if !poly_segs.is_empty() {
                 let lbl = pmap
                     .get("_line_label")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
-                run_inputs.push(PipeRunInput {
-                    start: a,
-                    end: b,
-                    line_label: lbl,
-                    graphic_oid: Some(goid),
-                });
-                seg_draws.push((goid, (a.0 / upm, a.1 / upm), (b.0 / upm, b.1 / upm)));
+                for (a, b) in poly_segs {
+                    let goid = alloc.alloc_graphic_oid(None);
+                    run_inputs.push(PipeRunInput {
+                        start: a,
+                        end: b,
+                        line_label: lbl.clone(),
+                        graphic_oid: Some(goid),
+                    });
+                    seg_draws.push((goid, (a.0 / upm, a.1 / upm), (b.0 / upm, b.1 / upm)));
+                }
             }
             continue;
         }
@@ -1272,6 +1861,13 @@ pub fn save_author_document_to_dual(
             .get("_symbol_path")
             .and_then(|v| v.as_str())
             .map(str::to_string)
+            .or_else(|| {
+                default_class_map()
+                    .variants
+                    .iter()
+                    .find(|v| v.class == sppid_cls && v.variant_id == variant_id)
+                    .and_then(|v| v.symbol_paths.first().cloned())
+            })
             .unwrap_or_else(|| format!("Symbols\\{blk_name}.sym"));
 
         let uid = alloc.alloc_primary_uid(None, &format!("author_sym:{:X}", h.value()));
@@ -2236,5 +2832,216 @@ mod tests {
             .as_ref()
             .expect("pid_verification");
         assert!(ver.is_cross_file_and_a_valid(), "{ver:?}");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn l2_6_real_pid_stroke_group_merges_by_oid_resolves_exact_variant_and_preserves_polyline_pipes(
+    ) {
+        use document::entities::{Circle, LwPolyline, LwVertex};
+
+        let mut doc = Document::new();
+
+        // 1. Multi-stroke imported `.pid` ball valve (`oid=501`): 4 body lines + `PID-SYMBOL-LABEL` + visible tag text
+        let valve_sem = vec![
+            XDataValue::String("role=symbol".to_string()),
+            XDataValue::String("class=PIDPipingComponent".to_string()),
+            XDataValue::String("label=BV-5001".to_string()),
+            XDataValue::String("oid=501".to_string()),
+            XDataValue::String("instance=Width:6.00;Height:4.00".to_string()),
+            XDataValue::String("resolved=direct".to_string()),
+        ];
+        for (a, b) in [
+            ((77.0, 98.0), (77.0, 102.0)),
+            ((77.0, 102.0), (83.0, 98.0)),
+            ((83.0, 98.0), (83.0, 102.0)),
+            ((83.0, 102.0), (77.0, 98.0)),
+        ] {
+            let mut ln =
+                Line::from_points(Vector3::new(a.0, a.1, 0.0), Vector3::new(b.0, b.1, 0.0));
+            ln.common.layer = "Default".to_string();
+            let h = doc.add_entity(EntityType::Line(ln)).unwrap();
+            set_entity_xdata(
+                &mut doc,
+                h,
+                PID_SEMANTICS_XDATA_APP,
+                Some(valve_sem.clone()),
+            );
+        }
+        let mut sym_lbl =
+            Text::with_value("Ball Valve Type 2", Vector3::new(80.0, 96.0, 0.0)).with_height(1.8);
+        sym_lbl.common.layer = "PID-SYMBOL-LABEL".to_string();
+        let sym_lbl_h = doc.add_entity(EntityType::Text(sym_lbl)).unwrap();
+        set_entity_xdata(
+            &mut doc,
+            sym_lbl_h,
+            PID_SEMANTICS_XDATA_APP,
+            Some(vec![
+                XDataValue::String("role=symbol-label".to_string()),
+                XDataValue::String("class=PIDPipingComponent".to_string()),
+                XDataValue::String("label=BV-5001".to_string()),
+                XDataValue::String("oid=501".to_string()),
+                XDataValue::String("resolved=direct".to_string()),
+            ]),
+        );
+
+        let mut vis_tag =
+            Text::with_value("BV-5001", Vector3::new(78.0, 104.0, 0.0)).with_height(2.5);
+        vis_tag.common.layer = "Labels".to_string();
+        let vis_tag_h = doc.add_entity(EntityType::Text(vis_tag)).unwrap();
+        set_entity_xdata(
+            &mut doc,
+            vis_tag_h,
+            PID_SEMANTICS_XDATA_APP,
+            Some(vec![
+                XDataValue::String("role=text".to_string()),
+                XDataValue::String("class=PIDPipingComponent".to_string()),
+                XDataValue::String("label=BV-5001".to_string()),
+                XDataValue::String("oid=501".to_string()),
+                XDataValue::String("resolved=dependency:500".to_string()),
+            ]),
+        );
+
+        // 2. Multi-entity imported `.pid` pressure gauge (`oid=502`): Circle + pointer Line + `PID-SYMBOL-LABEL`
+        let mut pg_c = Circle::new();
+        pg_c.center = Vector3::new(140.0, 100.0, 0.0);
+        pg_c.radius = 4.0;
+        pg_c.common.layer = "Default".to_string();
+        let pg_c_h = doc.add_entity(EntityType::Circle(pg_c)).unwrap();
+        let pg_sem = vec![
+            XDataValue::String("role=symbol".to_string()),
+            XDataValue::String("class=PIDInstrument".to_string()),
+            XDataValue::String("label=PG-5002".to_string()),
+            XDataValue::String("oid=502".to_string()),
+            XDataValue::String("instance=Diameter:8.00".to_string()),
+            XDataValue::String("resolved=direct".to_string()),
+        ];
+        set_entity_xdata(
+            &mut doc,
+            pg_c_h,
+            PID_SEMANTICS_XDATA_APP,
+            Some(pg_sem.clone()),
+        );
+        let mut pg_ptr = Line::from_points(
+            Vector3::new(138.0, 98.0, 0.0),
+            Vector3::new(142.0, 102.0, 0.0),
+        );
+        pg_ptr.common.layer = "Default".to_string();
+        let pg_ptr_h = doc.add_entity(EntityType::Line(pg_ptr)).unwrap();
+        set_entity_xdata(&mut doc, pg_ptr_h, PID_SEMANTICS_XDATA_APP, Some(pg_sem));
+
+        let mut pg_lbl =
+            Text::with_value("PG-Pressure Gauge", Vector3::new(140.0, 94.0, 0.0)).with_height(1.8);
+        pg_lbl.common.layer = "PID-SYMBOL-LABEL".to_string();
+        let pg_lbl_h = doc.add_entity(EntityType::Text(pg_lbl)).unwrap();
+        set_entity_xdata(
+            &mut doc,
+            pg_lbl_h,
+            PID_SEMANTICS_XDATA_APP,
+            Some(vec![
+                XDataValue::String("role=symbol-label".to_string()),
+                XDataValue::String("class=PIDInstrument".to_string()),
+                XDataValue::String("label=PG-5002".to_string()),
+                XDataValue::String("oid=502".to_string()),
+                XDataValue::String("resolved=direct".to_string()),
+            ]),
+        );
+
+        // 3. Derived non-symbol point (`PIDPipingPort`) must NOT be promoted as an authored symbol
+        let mut port_pt = Point::new();
+        port_pt.location = Vector3::new(77.0, 100.0, 0.0);
+        port_pt.common.layer = "PID-POINT".to_string();
+        let port_h = doc.add_entity(EntityType::Point(port_pt)).unwrap();
+        set_entity_xdata(
+            &mut doc,
+            port_h,
+            PID_SEMANTICS_XDATA_APP,
+            Some(vec![
+                XDataValue::String("role=point-ok".to_string()),
+                XDataValue::String("class=PIDPipingPort".to_string()),
+                XDataValue::String("oid=601".to_string()),
+            ]),
+        );
+
+        // 4. Multi-vertex `LwPolyline` process pipe (`oid=701`) + complex-dash tick `Line` sharing `oid=701`
+        let mut pipe_pl = LwPolyline::new();
+        pipe_pl.common.layer = "Process".to_string();
+        for (x, y) in [(30.0, 100.0), (77.0, 100.0), (136.0, 100.0)] {
+            pipe_pl.vertices.push(LwVertex::from_coords(x, y));
+        }
+        let pipe_pl_h = doc.add_entity(EntityType::LwPolyline(pipe_pl)).unwrap();
+        let pipe_sem = vec![
+            XDataValue::String("role=geometry".to_string()),
+            XDataValue::String("class=PIDPipingConnector".to_string()),
+            XDataValue::String("label=80-PG-5001-B9-".to_string()),
+            XDataValue::String("oid=701".to_string()),
+        ];
+        set_entity_xdata(
+            &mut doc,
+            pipe_pl_h,
+            PID_SEMANTICS_XDATA_APP,
+            Some(pipe_sem.clone()),
+        );
+        let mut tick = Line::from_points(
+            Vector3::new(50.0, 99.5, 0.0),
+            Vector3::new(50.0, 100.5, 0.0),
+        );
+        tick.common.layer = "Process".to_string();
+        let tick_h = doc.add_entity(EntityType::Line(tick)).unwrap();
+        set_entity_xdata(&mut doc, tick_h, PID_SEMANTICS_XDATA_APP, Some(pipe_sem));
+
+        let rep = promote_semantics_to_author(&mut doc, None);
+        let rev = summarize_author_review(&doc);
+        assert_eq!(
+            rev.total_authored_symbols, 2,
+            "multi-stroke .pid symbols sharing oid must merge into 2 authored symbols, got {rev:?} ({rep:?})"
+        );
+        assert_eq!(
+            rev.duplicated_tags, 0,
+            "merged strokes must not trigger fake duplicate tags"
+        );
+        assert!(
+            rep.pipe_segments_promoted >= 1,
+            "imported .pid LwPolyline pipe must promote into TopologyTable"
+        );
+
+        // Edit valve tag -> visible label text updates, while PID-SYMBOL-LABEL template name stays untouched
+        let valve_owner = filter_author_handles(&doc, "ALL")
+            .into_iter()
+            .find(|&h| PidAuthor::load(&doc, h).is_some_and(|a| a.tag == "BV-5001"))
+            .expect("merged BV-5001 owner");
+        let mut v_auth = PidAuthor::load(&doc, valve_owner).unwrap();
+        v_auth.tag = "BV-5001-EDITED".to_string();
+        v_auth.tag_source = "manual".to_string();
+        v_auth.store(&mut doc, valve_owner);
+        let _ = sync_paired_canvas_tag_texts(&mut doc);
+
+        match doc.get_entity(vis_tag_h) {
+            Some(EntityType::Text(t)) => assert_eq!(t.value, "BV-5001-EDITED"),
+            other => panic!("expected visible Text, got {other:?}"),
+        }
+        match doc.get_entity(sym_lbl_h) {
+            Some(EntityType::Text(t)) => assert_eq!(t.value, "Ball Valve Type 2"),
+            other => panic!("expected symbol-label Text, got {other:?}"),
+        }
+
+        let opts = ConvertOptions {
+            plant: "P01".to_string(),
+            seed_pid_bytes: Some(synthetic_blank_seed_pid()),
+            ..Default::default()
+        };
+        let dual =
+            save_author_document_to_dual(&doc, "PID-IMPORT-142", &opts).expect("save dual 142");
+        assert_eq!(dual.report.variant_resolution.class_default_fallback, 0);
+        assert_eq!(dual.report.variant_resolution.exact_variant_id, 2);
+        assert!(dual.report.piping_synthesis.pipelines >= 1);
+        let xml_txt = String::from_utf8_lossy(&dual.publish.data_xml);
+        assert!(xml_txt.contains("BV-5001-EDITED"));
+        assert!(xml_txt.contains("PG-5002"));
+        assert!(dual
+            .report
+            .pid_verification
+            .as_ref()
+            .is_some_and(super::super::export::DualVerifyReport::is_cross_file_and_a_valid));
     }
 }

@@ -1990,18 +1990,14 @@ pub fn verify_published_xml_pair(
     Ok(())
 }
 
-/// Export an in-memory CAD `Document` directly to `out_dir` (`<stem>_Data.xml`,
-/// `<stem>_Meta.xml`, `<stem>_Coverage.json`, and optional `<stem>.pid` + `<stem>.pidplot.pdf`),
-/// with optional `StrictVendor` + `a/b`-level verification (`L4-6` / `#141`).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn export_document_to_dir(
-    doc: &Document,
+fn write_and_verify_dual_bundle(
+    mut dual: DualConvertBundle,
     stem: &str,
     out_dir: &Path,
     opts: &ConvertOptions,
     verify_strict: bool,
 ) -> Result<ConvertSheetReport, String> {
-    let mut dual = convert_document_to_dual(doc, stem, opts)?;
     if verify_strict {
         verify_published_xml_pair(
             stem,
@@ -2047,6 +2043,36 @@ pub fn export_document_to_dir(
     std::fs::write(&cov_p, format!("{}\n", dual.publish.coverage_json))
         .map_err(|e| format!("write {} failed: {e}", cov_p.display()))?;
     Ok(dual.report)
+}
+
+/// Export an in-memory CAD `Document` directly to `out_dir` (`<stem>_Data.xml`,
+/// `<stem>_Meta.xml`, `<stem>_Coverage.json`, and optional `<stem>.pid` + `<stem>.pidplot.pdf`),
+/// with optional `StrictVendor` + `a/b`-level verification (`L4-6` / `#141`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn export_document_to_dir(
+    doc: &Document,
+    stem: &str,
+    out_dir: &Path,
+    opts: &ConvertOptions,
+    verify_strict: bool,
+) -> Result<ConvertSheetReport, String> {
+    let dual = convert_document_to_dual(doc, stem, opts)?;
+    write_and_verify_dual_bundle(dual, stem, out_dir, opts, verify_strict)
+}
+
+/// Export an authored/promoted `Document` (`PID_AUTHOR` + `TopologyTable`) directly to
+/// `out_dir` (XML-only or dual `.pid` + PDF), preserving human edits and newly placed
+/// `PIDINSERT` symbols (`L2-7` / `L4-6` / `L6-2` / `#142`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn export_author_document_to_dir(
+    doc: &Document,
+    stem: &str,
+    out_dir: &Path,
+    opts: &ConvertOptions,
+    verify_strict: bool,
+) -> Result<ConvertSheetReport, String> {
+    let dual = super::promote::save_author_document_to_dual(doc, stem, opts)?;
+    write_and_verify_dual_bundle(dual, stem, out_dir, opts, verify_strict)
 }
 
 /// Run `StrictVendor` XML checks (and `a/b` dual verification checks when `.pid` was emitted)
