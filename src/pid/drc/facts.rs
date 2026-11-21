@@ -5,9 +5,10 @@
 //! `管口数`、`设备类别`，符号实例的 `符号.状态`；管线、管路、管段的 `端口未连接数`、`长度`、
 //! `管路数`、`管段数`、`后缀`、`重叠管段数`、`直连异径管路数`、`未标记覆盖数`，关系 `所属管路`、
 //! `所属管线`；管口的 `名称`、`方向`、`连接状态` 和关系 `所属设备`；信号线的 `起点仪表`、
-//! `终点仪表`、`端口未连接数`、`接到设备管口数`；仪表回路和图纸自己的事实；根 `图纸.图号`、
-//! `图纸.PBS`、`参数.<名>`。管口的 `位号前缀`、阀门的 `流向相反`、页间连接符、主数据和跨图的事实
-//! 还取不到值。
+//! `终点仪表`、`端口未连接数`、`接到设备管口数`；仪表回路和图纸自己的事实；到主数据里找的关系
+//! `管道等级`、`绝热等级`、`流体介质`；根 `项目` 下的主数据表和图例标准、`图纸.图号`、
+//! `图纸.PBS`、`参数.<名>`。管口的 `位号前缀`、阀门的 `流向相反`、页间连接符和跨图的事实还取
+//! 不到值。
 //! 作用对象从摘要的 `objects[]` 里选；管段是摘要的 `segments[]`，管口是摘要 `ports[]` 里属主是
 //! 设备的，仪表回路是按 `仪表回路` 属性分组的仪表，图纸是整张图。
 
@@ -15,7 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 
-use crate::pid::master_data::{parse_dn, Resolved};
+use crate::pid::master_data::{parse_dn, MasterData, Resolved, Table};
 use crate::pid::project_index::{
     DrawingSummary, Joint, ObjectKind, SignalEnd, SummaryObject, SummaryPort, SummarySegment,
     DEFAULT_TOLERANCE,
@@ -50,6 +51,19 @@ const SEGMENT: &str = "管段";
 
 /// 管口的种类名。
 const NOZZLE: &str = "管口";
+
+/// 根 `项目`：项目主数据的表和图例标准。
+const PROJECT: &str = "项目";
+
+/// 图例标准：根 `项目` 下的名字，也是图纸自己的事实。
+const LEGEND: &str = "图例标准";
+
+/// 按对象的同名属性到主数据里找那一行的关系（§3.4），和各自找的表。
+const MASTER_RELATIONS: [(&str, Table); 3] = [
+    ("管道等级", Table::PipeClass),
+    ("绝热等级", Table::InsulationClass),
+    ("流体介质", Table::FluidCode),
+];
 
 /// 结果的 `points` 要列出位置的派生事实（§3.6）：没接上的端点、与异径管路相接的地方。
 pub const LOCATED: [&str; 2] = ["端口未连接数", "直连异径管路数"];
@@ -780,12 +794,43 @@ impl<'a> SubjectFacts<'a> {
             "图号" => Some(drawing.drawing_id.clone()),
             "PBS" => drawing.pbs.clone(),
             "对象数" => Some(drawing.objects.len().to_string()),
-            "图例标准" => match self.context.master {
-                Resolved::Configured { data, .. } => data.legend_standard.clone(),
-                Resolved::Unreadable { .. } | Resolved::NotConfigured => None,
-            },
+            LEGEND => self.master()?.legend_standard.clone(),
             _ => None,
         }
+    }
+
+    /// 配好了的项目主数据；没配置或读不出来是 `None`。
+    fn master(&self) -> Option<&MasterData> {
+        match self.context.master {
+            Resolved::Configured { data, .. } => Some(data),
+            Resolved::Unreadable { .. } | Resolved::NotConfigured => None,
+        }
+    }
+
+    /// 根 `项目.<名>`（主数据规格 §3.5）：`图例标准` 是一个值，四张表见 [`master_list`]。主数据
+    /// 没配置或读不出来时都取不到。
+    fn project(&self, name: &str) -> Fact {
+        let master = self.master();
+        if name == LEGEND {
+            return Fact::Value(master.and_then(|data| data.legend_standard.clone()));
+        }
+        Fact::List(master.and_then(|data| master_list(data, name)))
+    }
+
+    /// `管道等级.<名>`、`绝热等级.<名>`、`流体介质.<名>`：按对象的同名属性在主数据里找名称逐字
+    /// 相同的那一行，取它的扩展属性 `<名>`。不是这三个关系、属性没填、主数据没配好、表里没有
+    /// 这一行或这一行没有这个扩展属性时取不到。
+    fn master_attr(&self, relation: &str, name: &str) -> Option<String> {
+        let table = master_table(relation)?;
+        let Subject::Object(object) = self.subject else {
+            return None;
+        };
+        let value = prop(object, relation);
+        if value.is_empty() {
+            return None;
+        }
+        let entry = self.master()?.entry(table, value)?;
+        entry.attr(name).map(str::to_owned)
     }
 
     /// `位号.长度`、`位号.同类型重复数`。没有自己编号或位号为空时不知道；位号引擎标了重复的
@@ -847,9 +892,59 @@ impl Facts for SubjectFacts<'_> {
                     })
                 })
             }
+            [root, name] if root == PROJECT => self.project(name),
+            [relation, name] => Fact::Value(self.master_attr(relation, name)),
             _ => Fact::Value(None),
         }
     }
+}
+
+/// 路径要不要读主数据的表（主数据规格 §3.5）：根 `项目` 下的四张表，或经 `管道等级`、`绝热等级`、
+/// `流体介质` 到主数据里取扩展属性。`项目.图例标准` 不算：主数据没配置时它是 `NULL`，照样能下结论。
+pub fn reads_master(segments: &[String]) -> bool {
+    match segments {
+        [root, name] if root == PROJECT => name != LEGEND,
+        [relations @ .., _] => relations
+            .iter()
+            .any(|relation| master_table(relation).is_some()),
+        [] => false,
+    }
+}
+
+/// 关系 `relation` 到主数据里找的表；不是按主数据找的关系是 `None`。
+fn master_table(relation: &str) -> Option<Table> {
+    MASTER_RELATIONS
+        .iter()
+        .find(|(name, _)| *name == relation)
+        .map(|&(_, table)| table)
+}
+
+/// 主数据的一张表（根 `项目` 下的名字），连同表里的值怎么比：`公称直径表` 是没隐藏的公称直径，
+/// 按公称直径比；另三张是名称，逐字比。配好了而表是空的，取得到一张空表。不是这四张表是 `None`。
+fn master_list(data: &MasterData, name: &str) -> Option<FactList> {
+    let table = match name {
+        "公称直径表" => {
+            let items = data
+                .nominal_diameters
+                .iter()
+                .filter(|diameter| !diameter.hidden)
+                .map(|diameter| diameter.dn.to_string())
+                .collect();
+            return Some(FactList {
+                items,
+                matching: Matching::NominalDiameter,
+            });
+        }
+        "管道等级表" => Table::PipeClass,
+        "绝热等级表" => Table::InsulationClass,
+        "流体介质表" => Table::FluidCode,
+        _ => return None,
+    };
+    let items = data.names(table).into_iter().map(str::to_owned).collect();
+    Some(FactList {
+        items,
+        matching: Matching::Exact,
+    })
 }
 
 /// 管口自己的事实。管口没有位号，`位号前缀` 本期不知道（§3.4）。

@@ -225,6 +225,8 @@ pub enum Matching {
     Equal,
     /// 公称直径：按主数据规格 §3.5 读成数再比，`DN50` 与 `50` 是同一个。
     NominalDiameter,
+    /// 主数据的名称表（主数据规格 §3.5）：去掉首尾空白后逐字比，区分大小写，不当数读。
+    Exact,
 }
 
 /// 事实提供者：表达式里的路径在当前对象上取值，都从这里拿。
@@ -808,6 +810,7 @@ impl Matching {
             Matching::NominalDiameter => {
                 parse_dn(value).is_some_and(|dn| parse_dn(item) == Some(dn))
             }
+            Matching::Exact => value == item.trim(),
         }
     }
 }
@@ -1209,7 +1212,8 @@ mod tests {
         }
     }
 
-    /// `IN` 的列表可以写值、路径和表；左边没有值、表取不出来都是不知道。
+    /// `IN` 的列表可以写值、路径和表；左边没有值、表取不出来都是不知道。公称直径表读成数再比，
+    /// 主数据的名称表逐字比。
     #[test]
     fn in_lists_take_values_paths_and_tables() {
         let facts = Sample::default()
@@ -1263,6 +1267,23 @@ mod tests {
                 Matching::NominalDiameter,
             );
             let expr = "公称直径 IN (项目.公称直径表)";
+            assert_eq!(eval(expr, &facts), Truth::from(hit), "{value}");
+        }
+        // 名称表区分大小写，不把名称当数读
+        for (value, hit) in [
+            ("A1A", true),
+            (" A1A ", true),
+            ("a1a", false),
+            ("1", true),
+            ("01", false),
+            ("1.0", false),
+        ] {
+            let facts = Sample::default().with("管道等级", value).list(
+                "项目.管道等级表",
+                &["A1A", "1"],
+                Matching::Exact,
+            );
+            let expr = "管道等级 IN (项目.管道等级表)";
             assert_eq!(eval(expr, &facts), Truth::from(hit), "{value}");
         }
     }

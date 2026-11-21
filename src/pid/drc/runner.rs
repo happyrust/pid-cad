@@ -9,10 +9,10 @@ use crate::pid::type_lib::TypeLib;
 
 use super::builtin_rules::rule_set_digest;
 use super::dsl::{Expr, Operand, Path};
-use super::facts::{subjects, Context, Sheet, SubjectFacts, LOCATED, MISSING_COUNT};
+use super::facts::{reads_master, subjects, Context, Sheet, SubjectFacts, LOCATED, MISSING_COUNT};
 use super::model::{
-    Category, CheckReport, CheckResult, Rule, RuleSet, Scope, Severity, Summary, Trigger, Waiver,
-    REPORT_VERSION,
+    Category, CheckReport, CheckResult, Notice, Rule, RuleSet, Scope, Severity, Summary, Trigger,
+    Waiver, REPORT_VERSION,
 };
 
 /// 消息和修复建议最多这么多字（§3.1）。
@@ -53,6 +53,8 @@ pub fn check(input: &CheckInput) -> CheckReport {
             .sum(),
         ..Summary::default()
     };
+    let configured = matches!(input.master, master_data::Resolved::Configured { .. });
+    let mut without_master = 0;
     let mut results = Vec::new();
     for rule in &input.rules.rules {
         if !input.rules.is_enabled(rule) {
@@ -60,6 +62,11 @@ pub fn check(input: &CheckInput) -> CheckReport {
         }
         if rule.category != Category::Design {
             summary.rules_skipped += 1;
+            continue;
+        }
+        if !configured && uses_master(rule) {
+            summary.rules_skipped += 1;
+            without_master += 1;
             continue;
         }
         summary.rules_run += 1;
@@ -94,9 +101,41 @@ pub fn check(input: &CheckInput) -> CheckReport {
         summary,
         blocked: summary.errors > 0,
         results,
-        notices: Vec::new(),
+        notices: master_notice(input.master, without_master)
+            .into_iter()
+            .collect(),
         stale_waivers: Vec::new(),
     }
+}
+
+/// 规则用不用主数据的表（[`reads_master`]）。主数据没配置或读不出来时这些规则下不了结论，不跑
+/// （主数据规格 §3.5）；只用 `项目.图例标准` 的照跑。
+fn uses_master(rule: &Rule) -> bool {
+    let mut found = false;
+    visit_paths(&rule.tree, &mut |path| {
+        found |= reads_master(&path.segments)
+    });
+    found
+}
+
+/// 主数据没配置或读不出来、`skipped` 条用到主数据的规则因此没跑时，报告的 `notices[]` 里说一句。
+fn master_notice(master: &master_data::Resolved, skipped: usize) -> Option<Notice> {
+    if skipped == 0 {
+        return None;
+    }
+    let (code, state) = match master {
+        master_data::Resolved::Configured { .. } => return None,
+        master_data::Resolved::NotConfigured => {
+            ("MASTERDATA_NOT_CONFIGURED", "没有配置".to_owned())
+        }
+        master_data::Resolved::Unreadable { error, .. } => {
+            ("MASTERDATA_UNREADABLE", format!("读不出来（{error}）"))
+        }
+    };
+    Some(Notice {
+        code: code.to_owned(),
+        message: format!("项目主数据{state}，用到主数据的 {skipped} 条规则没有执行"),
+    })
 }
 
 /// 一条规则在范围内各图上的命中：表达式为真才算，不知道不算。
@@ -262,7 +301,7 @@ mod tests {
     use crate::pid::drc::dsl::parse;
     use crate::pid::drc::facts::ANNOTATION_TYPE;
     use crate::pid::drc::model::{
-        Category, CheckResult, ObjectRef, RuleScope, ScopeKind, Severity, Source, Target,
+        Category, CheckResult, Notice, ObjectRef, RuleScope, ScopeKind, Severity, Source, Target,
     };
     use crate::pid::project_index::{
         summarize, Joint, ObjectKind, SignalEnd, SummaryMeta, SummaryObject, SummaryPort,
@@ -273,10 +312,7 @@ mod tests {
     use crate::pid::topology::TYPE_SIGNAL_LINE;
 
     /// 还没有正反例的内置规则：用到的事实还没接上，只能不命中或只能命中。到 DRC-8 要清空。
-    const UNCOVERED: [&str; 10] = [
-        "DR-006", "DR-007", "DR-009", "DR-021", "DR-022", "DR-102", "DR-103", "DR-104", "DR-112",
-        "DR-116",
-    ];
+    const UNCOVERED: [&str; 4] = ["DR-006", "DR-102", "DR-112", "DR-116"];
 
     /// 本期不出结果的内置规则（规格 §3.4）：管口没有位号，`位号前缀` 不知道；符号库里没有带方向
     /// 的阀门，`流向相反` 不知道。它们命中的例子是要查的那种情形，本期也不命中。
@@ -503,22 +539,61 @@ mod tests {
         })
     }
 
-    /// 配好了的项目主数据：图例标准是 `legend`，几张表都空着。
+    /// 管道等级、绝热等级、流体介质表的一行。
+    fn entry(name: &str, attrs: &[(&str, &str)]) -> master_data::Entry {
+        master_data::Entry {
+            name: name.to_owned(),
+            attrs: attrs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect(),
+        }
+    }
+
+    /// 配好了的项目主数据：图例标准是 `legend`；公称直径 DN50、DN80，DN65 标了隐藏；管道等级
+    /// `A1`（碳钢，最大公称压力 16）、`B2`（不锈钢，最大公称压力 40）；绝热等级 `H1`（厚度 50）；
+    /// 流体介质 `工艺水`（液）、`蒸汽`（气）、`氯气`（气）。
     fn master(legend: Option<&str>) -> master_data::Resolved {
+        let diameter = |dn: u32, hidden: bool| master_data::Diameter {
+            dn,
+            label: format!("DN{dn}"),
+            outer_diameter: None,
+            hidden,
+        };
         master_data::Resolved::Configured {
             data: master_data::MasterData {
                 version: master_data::PROJECT_FILE_VERSION,
                 revision: 1,
                 updated_at: 0,
                 legend_standard: legend.map(str::to_owned),
-                nominal_diameters: Vec::new(),
-                pipe_classes: Vec::new(),
-                insulation_classes: Vec::new(),
-                fluid_codes: Vec::new(),
+                nominal_diameters: vec![
+                    diameter(50, false),
+                    diameter(65, true),
+                    diameter(80, false),
+                ],
+                pipe_classes: vec![
+                    entry("A1", &[("材质", "碳钢"), ("最大公称压力", "16")]),
+                    entry("B2", &[("材质", "不锈钢"), ("最大公称压力", "40")]),
+                ],
+                insulation_classes: vec![entry("H1", &[("厚度", "50")])],
+                fluid_codes: vec![
+                    entry("工艺水", &[("相态", "液")]),
+                    entry("蒸汽", &[("相态", "气")]),
+                    entry("氯气", &[("相态", "气")]),
+                ],
                 pbs: Vec::new(),
             },
             source: master_data::Source::Drawing,
         }
+    }
+
+    /// 改过几张表的 [`master`]，图例标准没写。
+    fn master_with(change: impl FnOnce(&mut master_data::MasterData)) -> master_data::Resolved {
+        let master_data::Resolved::Configured { mut data, source } = master(None) else {
+            unreachable!("master 给的是配好了的主数据");
+        };
+        change(&mut data);
+        master_data::Resolved::Configured { data, source }
     }
 
     fn hits(report: &CheckReport, id: &str) -> usize {
@@ -590,6 +665,16 @@ mod tests {
                 vec![instrument("FT-101", &[])],
                 vec![instrument("FT-101", &[("仪表回路", "F-101")])],
             ),
+            "DR-007" => {
+                let with = |rating| {
+                    vec![
+                        line("L-1001", &[("管道等级", "A1")]),
+                        pipe_run("L-1001-01", "L-1001", &[]),
+                        on_run("L-1001-01", valve("V-101", &[("压力等级", rating)])),
+                    ]
+                };
+                (with("40"), with("16"))
+            }
             "DR-008" => {
                 let with = |joined| DrawingSummary {
                     ports: vec![port_of(&pump("P-101"), "N1", joined)],
@@ -597,6 +682,7 @@ mod tests {
                 };
                 return Some((with(false), with(true)));
             }
+            "DR-009" => (Vec::new(), Vec::new()),
             "DR-010" => (
                 vec![pump("P-101")],
                 vec![object(
@@ -676,6 +762,14 @@ mod tests {
                 };
                 return Some((with(nozzles("PUMP", "P-101", 2)), with(Vec::new())));
             }
+            "DR-021" => (
+                vec![line("L-1001", &[("流体介质", "氯气"), ("管道等级", "A1")])],
+                vec![line("L-1001", &[("流体介质", "氯气"), ("管道等级", "B2")])],
+            ),
+            "DR-022" => (
+                vec![line("L-1001", &[("管道等级", "C3")])],
+                vec![line("L-1001", &[("管道等级", "A1")])],
+            ),
             "DR-023" => {
                 let with = |count| DrawingSummary {
                     ports: nozzles("PUMP", "P-101", count),
@@ -692,6 +786,14 @@ mod tests {
                 vec![line("L-1001", &[("流体介质", "蒸汽"), ("绝热等级", "H1")])],
             ),
             "DR-101" => (vec![valve("", &[])], vec![valve("V-101", &[])]),
+            "DR-103" => (
+                vec![line("L-1001", &[("公称直径", "DN100")])],
+                vec![line("L-1001", &[("公称直径", "DN50")])],
+            ),
+            "DR-104" => (
+                vec![line("L-1001", &[("流体介质", "氨")])],
+                vec![line("L-1001", &[("流体介质", "工艺水")])],
+            ),
             "DR-105" => {
                 let with = |size| {
                     let first = segment("L-1001", Some("L-1001-01"), [0.0, 0.0], [10.0, 0.0]);
@@ -839,10 +941,12 @@ mod tests {
     }
 
     /// 表驱动：每条内置规则在它的例子图上，命中的例子出一条（`MUTUAL` 里的出两条，`SILENT` 里的
-    /// 本期不出）、不命中的不出。
+    /// 本期不出）、不命中的不出。例子在配好了的主数据（[`master`]）下跑；`DR-009` 命中的那次，
+    /// 主数据里没写图例标准。
     #[test]
     fn every_builtin_rule_has_a_hit_and_a_miss() {
         let rules = all_enabled();
+        let (configured, unset) = (master(Some("GB/T 6567")), master(None));
         let ids: Vec<&str> = rules.rules.iter().map(|rule| rule.id.as_str()).collect();
         for id in UNCOVERED.into_iter().chain(SILENT) {
             assert!(ids.contains(&id), "名单里的 {id} 不是内置规则");
@@ -863,9 +967,10 @@ mod tests {
             } else {
                 1
             };
-            let report = run(&rules, &[hit]);
+            let legend = if id == "DR-009" { &unset } else { &configured };
+            let report = run_with(&rules, legend, &[hit]);
             assert_eq!(hits(&report, id), expected, "{id} 应命中 {expected} 条");
-            let report = run(&rules, &[miss]);
+            let report = run_with(&rules, &configured, &[miss]);
             assert_eq!(hits(&report, id), 0, "{id} 不应命中");
         }
     }
@@ -1032,7 +1137,7 @@ mod tests {
     }
 
     /// 停用 `DR-016` 后结果里没有它、其余照常，重新启用后恢复；停用整个规则集同理。停用的
-    /// 不算进 `rules_skipped`。
+    /// 不算进 `rules_skipped`。在配好了的主数据下跑，启用的规则都执行。
     #[test]
     fn disabling_a_rule_or_its_set_drops_only_its_results() {
         let drawings = [drawing(
@@ -1040,7 +1145,9 @@ mod tests {
             vec![annotation(&[]), line("L-1001", &[]), valve("", &[])],
         )];
         let rules = builtin();
-        let all = run(&rules, &drawings);
+        let configured = master(Some("GB/T 6567"));
+        let checked = |rules: &RuleSet| run_with(rules, &configured, &drawings);
+        let all = checked(&rules);
         assert_eq!(hits(&all, "DR-016"), 1);
         assert!(all.results.len() > 1);
         let keep = |prefix: &str| -> Vec<CheckResult> {
@@ -1058,12 +1165,12 @@ mod tests {
             .position(|rule| rule.id == "DR-016")
             .expect("DR-016");
         changed.rules[at].enabled = false;
-        let report = run(&changed, &drawings);
+        let report = checked(&changed);
         assert_eq!(report.results, keep("DR-016"));
         assert_eq!(report.summary.rules_run, all.summary.rules_run - 1);
         assert_eq!(report.summary.rules_skipped, all.summary.rules_skipped);
         changed.rules[at].enabled = true;
-        assert_eq!(run(&changed, &drawings).results, all.results);
+        assert_eq!(checked(&changed).results, all.results);
 
         let at = changed
             .sets
@@ -1071,11 +1178,11 @@ mod tests {
             .position(|set| set.name == "基础规则")
             .expect("基础规则");
         changed.sets[at].enabled = false;
-        let report = run(&changed, &drawings);
+        let report = checked(&changed);
         assert_eq!(report.results, keep("DR-0"));
         assert_eq!(report.summary.rules_run, all.summary.rules_run - 25);
         changed.sets[at].enabled = true;
-        assert_eq!(run(&changed, &drawings).results, all.results);
+        assert_eq!(checked(&changed).results, all.results);
     }
 
     /// 同一份输入检查两次，规则版本、摘要值和结果相同。
@@ -1105,7 +1212,8 @@ mod tests {
         );
     }
 
-    /// 结果按严重度、规则号、图号、对象键排；三个严重度各自计数，有错误就 `blocked`。
+    /// 结果按严重度、规则号、图号、对象键排；三个严重度各自计数，有错误就 `blocked`。没配主数据，
+    /// 用到主数据的五条不跑，计入 `rules_skipped`。
     #[test]
     fn results_are_sorted_and_counted() {
         let drawings = [
@@ -1164,12 +1272,17 @@ mod tests {
                 infos: 1,
                 waived: 0,
                 objects: 6,
-                rules_run: 40,
-                rules_skipped: 0,
+                rules_run: 35,
+                rules_skipped: 5,
             }
         );
         assert!(report.blocked);
-        assert!(report.notices.is_empty());
+        let codes: Vec<&str> = report
+            .notices
+            .iter()
+            .map(|notice| notice.code.as_str())
+            .collect();
+        assert_eq!(codes, ["MASTERDATA_NOT_CONFIGURED"]);
         assert!(report.stale_waivers.is_empty());
 
         let report = run_with(
@@ -1621,6 +1734,222 @@ mod tests {
             }
         }
         assert_eq!(hits(&run(&layers, &drawings), "DR-114"), 0);
+    }
+
+    /// 主数据没配置或读不出来：用到主数据的规则（内置的 `DR-007`、`021`、`022`、`103`、`104`，
+    /// 和经主数据的表或关系取值的自定规则）不跑，计入 `rules_skipped`，`notices` 里说明有几条
+    /// 没跑；`DR-009` 照常命中，只用 `项目.图例标准` 的照常跑。停用的不算；没有规则因此没跑时
+    /// 不给说明。
+    #[test]
+    fn rules_that_need_master_data_are_skipped_without_it() {
+        let drawings = [drawing(
+            "PID-1101",
+            vec![
+                line(
+                    "L-1001",
+                    &[
+                        ("管道等级", "C3"),
+                        ("公称直径", "DN100"),
+                        ("流体介质", "氨"),
+                    ],
+                ),
+                line("L-1002", &[("管道等级", "A1"), ("流体介质", "氯气")]),
+                pipe_run("L-1002-01", "L-1002", &[]),
+                on_run("L-1002-01", valve("V-101", &[("压力等级", "40")])),
+            ],
+        )];
+        let needs_master = ["DR-007", "DR-021", "DR-022", "DR-103", "DR-104"];
+        let report = run_with(&builtin(), &master(Some("GB/T 6567")), &drawings);
+        for id in needs_master {
+            assert_eq!(hits(&report, id), 1, "{id}");
+        }
+        assert_eq!(
+            (report.summary.rules_run, report.summary.rules_skipped),
+            (40, 0)
+        );
+        assert!(report.notices.is_empty());
+
+        let unreadable = master_data::Resolved::Unreadable {
+            source: master_data::Source::Drawing,
+            error: master_data::MasterDataError::RequiredFieldMissing {
+                at: "pipe_classes[0].name".to_owned(),
+            },
+        };
+        for (resolved, code, message) in [
+            (
+                master_data::Resolved::NotConfigured,
+                "MASTERDATA_NOT_CONFIGURED",
+                "项目主数据没有配置，用到主数据的 5 条规则没有执行",
+            ),
+            (
+                unreadable,
+                "MASTERDATA_UNREADABLE",
+                "项目主数据读不出来（REQUIRED_FIELD_MISSING: pipe_classes[0].name 不能为空），用到主数据的 5 条规则没有执行",
+            ),
+        ] {
+            let report = run_with(&builtin(), &resolved, &drawings);
+            for id in needs_master {
+                assert_eq!(hits(&report, id), 0, "{id}");
+            }
+            assert_eq!(hits(&report, "DR-009"), 1);
+            assert_eq!(
+                (report.summary.rules_run, report.summary.rules_skipped),
+                (35, 5)
+            );
+            assert_eq!(
+                report.notices,
+                [Notice {
+                    code: code.to_owned(),
+                    message: message.to_owned(),
+                }]
+            );
+        }
+
+        let rules = only(vec![
+            custom("XY-001", "管线", "公称直径 < 管道等级.公称直径下限", None),
+            custom("XY-002", "阀门", "所属管线.流体介质.相态 = #气", None),
+            custom("XY-003", "管线", "项目.图例标准 = NULL", None),
+            Rule {
+                enabled: false,
+                ..custom("XY-004", "管线", "管道等级 NOT IN (项目.管道等级表)", None)
+            },
+        ]);
+        let report = run(&rules, &drawings);
+        assert_eq!(
+            (report.summary.rules_run, report.summary.rules_skipped),
+            (1, 2)
+        );
+        assert_eq!(hits(&report, "XY-003"), 2);
+        assert_eq!(
+            report.notices[0].message,
+            "项目主数据没有配置，用到主数据的 2 条规则没有执行"
+        );
+        let plain = only(vec![custom("XY-005", "管线", "管道等级 = NULL", None)]);
+        let report = run(&plain, &drawings);
+        assert_eq!(report.summary.rules_skipped, 0);
+        assert!(report.notices.is_empty());
+    }
+
+    /// 根 `项目.…` 读项目主数据：名称表去掉首尾空白后逐字比，区分大小写，不当数读；公称直径表
+    /// 按主数据规格 §3.5 读成数再比，隐藏的、读不出数的不在表里。配好了而表是空的，取值都不在
+    /// 表里。`项目.图例标准` 是主数据的图例标准，没配置时是 `NULL`。
+    #[test]
+    fn project_roots_read_the_master_data_tables() {
+        let rules = only(vec![
+            custom("XY-001", "管线", "管道等级 NOT IN (项目.管道等级表)", None),
+            custom("XY-002", "管线", "公称直径 NOT IN (项目.公称直径表)", None),
+            custom("XY-003", "管线", "绝热等级 NOT IN (项目.绝热等级表)", None),
+            custom("XY-004", "管线", "流体介质 NOT IN (项目.流体介质表)", None),
+        ]);
+        let found = |resolved: &master_data::Resolved, props: &[(&str, &str)]| -> Vec<String> {
+            let drawings = [drawing("PID-1101", vec![line("L-1001", props)])];
+            run_with(&rules, resolved, &drawings)
+                .results
+                .into_iter()
+                .map(|result| result.rule_id)
+                .collect()
+        };
+        let listed = [
+            ("管道等级", " A1 "),
+            ("公称直径", "dn 50"),
+            ("绝热等级", "H1"),
+            ("流体介质", "工艺水"),
+        ];
+        let all = ["XY-001", "XY-002", "XY-003", "XY-004"];
+        let configured = master(Some("GB/T 6567"));
+        assert!(found(&configured, &listed).is_empty());
+        assert!(found(&configured, &[("公称直径", "80")]).is_empty());
+        let unlisted = [
+            ("管道等级", "a1"),
+            ("公称直径", "DN65"),
+            ("绝热等级", "h1"),
+            ("流体介质", "水"),
+        ];
+        assert_eq!(found(&configured, &unlisted), all);
+        assert_eq!(found(&configured, &[("公称直径", "五十")]), ["XY-002"]);
+        let numbered = master_with(|data| data.insulation_classes.push(entry("1", &[])));
+        assert!(found(&numbered, &[("绝热等级", "1")]).is_empty());
+        assert_eq!(found(&numbered, &[("绝热等级", "01")]), ["XY-003"]);
+        let empty = master_with(|data| {
+            data.nominal_diameters.clear();
+            data.pipe_classes.clear();
+            data.insulation_classes.clear();
+            data.fluid_codes.clear();
+        });
+        assert_eq!(found(&empty, &listed), all);
+
+        let legend = only(vec![
+            custom("XY-005", "管线", "项目.图例标准 = \"GB/T 6567\"", None),
+            custom("XY-006", "管线", "项目.图例标准 = NULL", None),
+        ]);
+        let drawings = [drawing("PID-1101", vec![line("L-1001", &[])])];
+        let ids = |resolved: &master_data::Resolved| -> Vec<String> {
+            run_with(&legend, resolved, &drawings)
+                .results
+                .into_iter()
+                .map(|result| result.rule_id)
+                .collect()
+        };
+        assert_eq!(ids(&configured), ["XY-005"]);
+        assert_eq!(ids(&master(None)), ["XY-006"]);
+        assert_eq!(ids(&master_data::Resolved::NotConfigured), ["XY-006"]);
+    }
+
+    /// `管道等级.<扩展属性>`、`绝热等级.<…>`、`流体介质.<…>`：按对象的同名属性（去掉首尾空白）在
+    /// 主数据里找名称逐字相同的那一行，取它的扩展属性；能接在 `所属管线` 等关系后面。属性没填、
+    /// 主数据里没有这一行、这一行没有这个扩展属性时是 `NULL`。
+    #[test]
+    fn master_data_relations_read_the_entry_attributes() {
+        let rules = only(vec![
+            custom("XY-001", "管线", "管道等级.材质 = #碳钢", None),
+            custom("XY-002", "管线", "绝热等级.厚度 > 40", None),
+            custom("XY-003", "管线", "流体介质.相态 = #气", None),
+            custom(
+                "XY-004",
+                "阀门",
+                "所属管线.管道等级.最大公称压力 = 16",
+                None,
+            ),
+            custom("XY-005", "管线", "管道等级.材质 = NULL", None),
+            custom("XY-006", "管线", "管道等级.口径 = NULL", None),
+        ]);
+        let found = |props: &[(&str, &str)]| -> Vec<String> {
+            let objects = vec![
+                line("L-1001", props),
+                pipe_run("L-1001-01", "L-1001", &[]),
+                on_run("L-1001-01", valve("V-101", &[])),
+            ];
+            run_with(&rules, &master(None), &[drawing("PID-1101", objects)])
+                .results
+                .into_iter()
+                .map(|result| format!("{} {}", result.rule_id, result.object_key))
+                .collect()
+        };
+        assert_eq!(
+            found(&[
+                ("管道等级", " A1 "),
+                ("绝热等级", "H1"),
+                ("流体介质", "蒸汽")
+            ]),
+            [
+                "XY-001 PIPE_LINE|L-1001",
+                "XY-002 PIPE_LINE|L-1001",
+                "XY-003 PIPE_LINE|L-1001",
+                "XY-004 VALVE_GATE|V-101",
+                "XY-006 PIPE_LINE|L-1001",
+            ]
+        );
+        assert_eq!(
+            found(&[("管道等级", "B2"), ("流体介质", "工艺水")]),
+            ["XY-006 PIPE_LINE|L-1001"]
+        );
+        for class in ["a1", "C3", " "] {
+            assert_eq!(
+                found(&[("管道等级", class)]),
+                ["XY-005 PIPE_LINE|L-1001", "XY-006 PIPE_LINE|L-1001"],
+                "{class}"
+            );
+        }
     }
 
     /// 管线、管路名下的线段：长度、段数、条数、没接上的端点（接到打断符的不算）。
