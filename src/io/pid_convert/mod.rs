@@ -4,12 +4,20 @@
 //! tag pairing, and publish conversion evolve independently without colliding
 //! with `src/io/pid/` or `src/io/pid_legend/`.
 
+pub mod bom;
 pub mod class_map;
 pub mod export;
 pub mod external_props;
 pub mod opc;
 pub mod promote;
 pub mod recognize;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use bom::{extract_bom_from_batch_dir, write_bom_schedule_file};
+pub use bom::{
+    extract_bom_from_documents, format_bom_delimited, format_bom_json, ingest_data_xml_into_bom,
+    BomScheduleReport, BomScheduleRow, BomScheduleSummary, BomSheetInput, BOM_CSV_HEADERS,
+};
 
 pub use opc::{
     analyze_open_sheets_opc, OpcConnectorItem, OpcPeerRef, OpcSheetInput, OpcStatus,

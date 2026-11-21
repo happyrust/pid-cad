@@ -443,10 +443,10 @@ flowchart LR
 - **验收**：管口位号与参考 XML 一致的比例；不一致的逐条说明。
 - **解决记录（2026-11-21）**：经 94 份真值 `_Data.xml` 全量核实，SPPID 中 `797 / 797`（`100%`）个 `PIDNozzle` 的 `IObject/@Name` 均保持空串、通过 `EquipmentComponentComposition` 关系挂接所属设备，并由接管标注或相连管段携带 `NominalDiameter` / `PipingMaterialsClass`。据此在 `src/io/pid_convert/recognize.rs` 重构图层 `"10"` 松散容器壳体与接管颈几何包围盒并配对管口 `DN` 标注，在 `src/io/pid_publish/relations.rs` 实现双层容差挂接与相连管段规格回填：全批 90 张有效 DXF 的 `EquipmentComponentComposition` 挂接数由 `379 / 779`（`48.65%`）提升至 **`629 / 779`（`80.74%`；在含设备符号的图纸上达 `629 / 700 = 89.86%`，其余 `79` 个位于图面无独立容器符号的纯管汇图）**，带 `NominalDiameter` 管口达 `212` 个，详见 `readings.md` §21。
 
-#### L3-6 属性来源（M）— **已完成（[#132](https://github.com/happyrust/pid-cad/issues/132) / [#145](https://github.com/happyrust/pid-cad/issues/145)）**
+#### L3-6 属性来源（M）— **已完成（[#132](https://github.com/happyrust/pid-cad/issues/132) / [#145](https://github.com/happyrust/pid-cad/issues/145) / [#150](https://github.com/happyrust/pid-cad/issues/150)）**
 - **做法**：线号拆解（公称直径、介质、序号、等级）；图框标题栏读图号图名；预留外部表格接口（不做）。
 - **验收**：拆解结果对参考 XML 的属性逐项比对；标题栏读出的图号与 XML 的图号一致。
-- **解决记录（2026-11-21）**：① `c2b0c35f2`（`#132`）在 `src/io/pid_convert/recognize.rs` 新增右下角标题栏元数据提取器 `TitleBlockInfo`（全批 90 张真实 DXF 提取标题栏图号 **`82 / 90 = 91.11%`**、图名吻合精确率 **`48 / 49 = 97.96%`**，按管段序号对齐 `5,678` 条 `PIDPipingConnector` 等级吻合 **`90.56%`**，见 `readings.md` §21）；② `#145` 进一步落地 `src/io/pid_convert/external_props.rs`、CLI `--external-props` 与应用内 `PIDCONVERT` / `PIDSAVEPID` `PROPS` 外置工程表回填接口（支持 `.xlsx`/`.xlsm`/`.xls` 多工作表、`.csv`、`.tsv`、`.json`，自动将管线温压路由至 `<conn_uid>.PPT` `PIDProcessPoint` 并由 `default_publish_spec()` 严格守门），真实生产图 + 双工作表 `.xlsx` 实测注入 `153` 项属性、更新 `59` 个 `.PPT` 且 100% 保持 `StrictVendor` 零违规（详见 `readings.md` §34）。
+- **解决记录（2026-11-21）**：① `c2b0c35f2`（`#132`）落地右下角标题栏元数据提取器 `TitleBlockInfo`（90 张真实 DXF 提取标题栏图号 **`82 / 90 = 91.11%`**、图名精确率 **`48 / 49 = 97.96%`**，管段等级吻合 **`90.56%`**，见 `readings.md` §21）；② `#145` 落地 `src/io/pid_convert/external_props.rs`、CLI `--external-props` 与应用内 `PIDCONVERT` / `PIDSAVEPID` `PROPS` 外置工程表回填接口（支持 `.xlsx/.xlsm/.xls/.csv/.tsv/.json` 及 `<conn_uid>.PPT` 温压自动路由，见 `readings.md` §34）；③ `#150` 落地 `src/io/pid_convert/bom.rs`、应用内 `PIDBOM [SUMMARY | "<输出>" [ALLTABS]]` 与 CLI `--export-schedule`，直接从图纸提取与 `external_props` 100% 同构的 14 列清册模板，打通「图纸提取清册 → 补填温压 → `PROPS` 回填生成双产物」闭环（详见 `readings.md` §39）。
 
 #### L3-7 校核入口（M）— **已完成（随 [#125](https://github.com/happyrust/pid-cad/issues/125) 与 [#136](https://github.com/happyrust/pid-cad/issues/136) 落地）**
 - **做法**：置信度三档（高 ≥ 0.90 自动接受；中 0.60–0.89 进人工确认；低 < 0.60 默认不导入）；人工确认 6 步；识别报告（三档计数 + 未识别图元数，计数之和等于候选行数）。

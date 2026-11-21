@@ -15,7 +15,8 @@
 use std::path::PathBuf;
 
 use OpenCADStudio::io::pid_convert::{
-    convert_path_to_dir, save_cad_file_as_binary_dwg, ConvertOptions,
+    convert_path_to_dir, extract_bom_from_batch_dir, save_cad_file_as_binary_dwg,
+    write_bom_schedule_file, ConvertOptions,
 };
 
 struct CliArgs {
@@ -26,6 +27,7 @@ struct CliArgs {
     sym_dir: Option<String>,
     class_map: Option<String>,
     external_props: Option<String>,
+    export_schedule: Option<PathBuf>,
     save_dwg: Option<PathBuf>,
     verify_plot: bool,
     summary_json: Option<PathBuf>,
@@ -39,6 +41,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut sym_dir: Option<String> = None;
     let mut class_map: Option<String> = None;
     let mut external_props: Option<String> = None;
+    let mut export_schedule: Option<PathBuf> = None;
     let mut save_dwg: Option<PathBuf> = None;
     let mut verify_plot = false;
     let mut summary_json: Option<PathBuf> = None;
@@ -67,6 +70,12 @@ fn parse_args() -> Result<CliArgs, String> {
                 external_props = Some(it.next().ok_or(
                     "--external-props requires a schedule file path (.xlsx/.csv/.tsv/.json)",
                 )?);
+            }
+            "--export-schedule" => {
+                export_schedule = Some(PathBuf::from(
+                    it.next()
+                        .ok_or("--export-schedule requires an output path (.csv/.tsv/.json)")?,
+                ));
             }
             "--save-dwg" => {
                 save_dwg = Some(PathBuf::from(
@@ -105,6 +114,7 @@ fn parse_args() -> Result<CliArgs, String> {
         sym_dir,
         class_map,
         external_props,
+        export_schedule,
         save_dwg,
         verify_plot,
         summary_json,
@@ -148,6 +158,17 @@ fn main() {
                 }
                 if let Ok(txt) = serde_json::to_string_pretty(&summary) {
                     let _ = std::fs::write(sjson, format!("{txt}\n"));
+                }
+            }
+            if let Some(ref sched_p) = args.export_schedule {
+                match extract_bom_from_batch_dir(&args.out_dir)
+                    .and_then(|bom| write_bom_schedule_file(&bom, sched_p))
+                {
+                    Ok(()) => {}
+                    Err(err) => {
+                        eprintln!("error: export-schedule failed: {err}");
+                        std::process::exit(1);
+                    }
                 }
             }
             for err in &summary.errors {

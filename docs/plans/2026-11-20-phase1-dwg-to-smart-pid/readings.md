@@ -1577,5 +1577,48 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
 
+---
+
+## 39. L3-6 / L4-6 / L6-1 / L6-2（#150）：应用内设备/仪表/管线清册一键提取导出命令 `PIDBOM` 与 CLI `--export-schedule`（与 `PROPS` 外置工程表同构往返闭环）（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `0fdad0d35`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{bom,mod}.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-21-issue150/`（`red.txt`、`green_pidprops.txt`、`real_multi_source_bom.txt`、`cli_export_schedule.txt`、`real_out/real150_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
+
+### 39.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidbom_exports_isomorphic_schedule_and_roundtrips_through_pidconvert_props`（测试双标签页 `PIDBOM ALLTABS` 合并导出 `.csv` / `.json`、直接兼容 `load_external_property_table` 加载、补填温压/描述后经 `PIDCONVERT ... PROPS ... VERIFY` 回填通过 `StrictVendor` 零违规），运行按预期在 `PIDBOM must write CSV schedule` 变红。
+- **转绿阶段**（`green_pidprops.txt`，`16 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/bom.rs`：零新增外部依赖，支持从单张或多张打开图纸（兼容未升格 `.dxf`/`.dwg` 与已升格 `PID_AUTHOR` 模型）以及批处理输出目录 `_Data.xml` 提取 `Equipment`、`Pipeline`、`Instrument`、`Valve` 四大类带位号对象，自动沿 `PIDPipeline -> PIDPipingConnector -> PIDProcessPoint` 汇总公称直径、管道等级、流体代号、保温规格与温压，跨多图按规范化位号去重归并所属图号与出现频次；
+  2. 支持导出 14 列 UTF-8 BOM `.csv`、`.tsv` 与带 `"items"` 映射的 `.json`，列头与 `#145` `external_props` 解析器 **100% 同构兼容**；
+  3. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDBOM [SUMMARY | "<输出.csv|.tsv|.json>" [ALLTABS]]`，并在 `examples/pid_convert.rs` 接入 `--export-schedule <FILE>`（最小真实 SPPID 图实测 `csv_rows = 29`，退出码 `0`）。
+
+### 39.2 真实多源图纸「`PIDBOM ALLTABS` 提取清册 → 补填温压 → `PIDCONVERT PROPS` 双产物」往返实测
+
+| 验证项 | 实测读数 | 说明 |
+|---|---:|---|
+| 扫描打开图纸 | `2` 张（`c0dd2cc4c75d` + `a0f05f81a655`） | 同时覆盖 SPPID 中位规模拆分图与原生 AutoCAD 存量图 |
+| 去重清册总条目（`total_unique_rows`） | **`122` 条** | `Equipment = 7`、`Pipeline = 25`、`Instrument = 55`、`Valve = 35` |
+| 工艺补填管线温压行数 | **`25` 条** | 在导出 CSV 的管线行填入保温规格、设计压力与设计温度 |
+| `PROPS` 回填结果 | **`122` 行加载 / `85` 对象命中** | 自动更新 **`59` 个 `.PPT` 工艺点**、合规注入 **`103` 项属性**，安全过滤只读汇总列 `345` 次 |
+| `StrictVendor` 与 `a/b` 级双产物验证 | **`302 / 302`（`100%`）** | `StrictVendor` **0 违规**、`class_default_fallback = 0`、`a_valid = true`、`b` 级 PDF 页内图元 `727` |
+
+### 39.3 固定门禁读数
+
+| 门禁项 | 改前读数（§38.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,224` 条（`7,150` 过 / `73` 忽略 / `1` 既有 `.pen`） | **`7,226` 条**（**`7,151` 过** / **`74` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 真实多源清册往返），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `bom.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+
 
 

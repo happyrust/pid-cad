@@ -31,7 +31,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDREVIEW",
         "PIDSAVEPID",
         "PIDCONVERT",
-        "PIDOPC"
+        "PIDOPC",
+        "PIDBOM"
     ]
 });
 
@@ -263,6 +264,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidopc_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidbom_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -1258,6 +1262,144 @@ impl OpenCADStudio {
                 return Some(Task::none());
             }
         }
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidbom_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{extract_bom_from_documents, BomSheetInput, ConvertOptions};
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDBOM") {
+            return None;
+        }
+
+        let mut all_tabs = false;
+        let mut plant = "P01".to_string();
+        let mut class_map_opt: Option<String> = None;
+        let mut out_path_opt: Option<std::path::PathBuf> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            if tok.eq_ignore_ascii_case("ALLTABS") || tok.eq_ignore_ascii_case("ALL") {
+                all_tabs = true;
+                idx += 1;
+            } else if tok.eq_ignore_ascii_case("SUMMARY") {
+                idx += 1;
+            } else if tok.eq_ignore_ascii_case("PLANT") {
+                if let Some(val) = tokens.get(idx + 1) {
+                    plant = val.clone();
+                    idx += 2;
+                } else {
+                    self.command_line
+                        .push_error("PIDBOM: PLANT 后需指定装置代号。");
+                    return Some(Task::none());
+                }
+            } else if tok.eq_ignore_ascii_case("CLASSMAP") {
+                if let Some(val) = tokens.get(idx + 1) {
+                    class_map_opt = Some(val.clone());
+                    idx += 2;
+                } else {
+                    self.command_line
+                        .push_error("PIDBOM: CLASSMAP 后需指定规则文件路径。");
+                    return Some(Task::none());
+                }
+            } else if out_path_opt.is_none() {
+                out_path_opt = Some(std::path::PathBuf::from(tok));
+                idx += 1;
+            } else {
+                self.command_line
+                    .push_error(&format!("PIDBOM: 无法识别的参数 {tok}。"));
+                return Some(Task::none());
+            }
+        }
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_stem())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_stem())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<BomSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| BomSheetInput {
+                drawing_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+        let opts = ConvertOptions {
+            plant,
+            class_map_path: class_map_opt,
+            ..Default::default()
+        };
+
+        let report = match extract_bom_from_documents(&sheet_inputs, &opts) {
+            Ok(r) => r,
+            Err(err) => {
+                self.command_line.push_error(&format!("PIDBOM: {err}"));
+                return Some(Task::none());
+            }
+        };
+
+        if let Some(out_p) = out_path_opt {
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = out_p;
+                self.command_line
+                    .push_error("PIDBOM: Web 版本不支持直接写出本地清册文件。");
+                return Some(Task::none());
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if let Err(err) = crate::io::pid_convert::write_bom_schedule_file(&report, &out_p) {
+                    self.command_line.push_error(&format!("PIDBOM: {err}"));
+                    return Some(Task::none());
+                }
+                self.command_line.push_output(&format!(
+                    "PIDBOM: 已导出清册 -> {}（扫描图纸={}，去重总条目={} | 设备={} 管线={} 仪表={} 阀门={}）。",
+                    out_p.display(),
+                    report.summary.sheets_scanned,
+                    report.summary.total_unique_rows,
+                    report.summary.equipment_count,
+                    report.summary.pipeline_count,
+                    report.summary.instrument_count,
+                    report.summary.valve_count,
+                ));
+            }
+        } else {
+            self.command_line.push_output(&format!(
+                "PIDBOM: 扫描图纸={} | 去重总条目={}（设备={}，管线={}，仪表={}，阀门={}）。",
+                report.summary.sheets_scanned,
+                report.summary.total_unique_rows,
+                report.summary.equipment_count,
+                report.summary.pipeline_count,
+                report.summary.instrument_count,
+                report.summary.valve_count,
+            ));
+        }
+
         Some(self.finish_dispatch(cmd))
     }
 
@@ -4212,6 +4354,267 @@ mod tests {
         });
         std::fs::write(
             out_dir.join("real149_summary.json"),
+            format!("{}\n", serde_json::to_string_pretty(&sanitized).unwrap()),
+        )
+        .unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidbom_exports_isomorphic_schedule_and_roundtrips_through_pidconvert_props() {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        let mut app = app();
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-150-01.dxf".to_string();
+        let _ = seed_dxf_sheet_in_app(&mut app);
+
+        // Open a second tab sharing pipeline `50-PG-02011-B9-` plus a new valve `BV0201509B`
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-150-02.dxf".to_string();
+        {
+            let doc2 = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc2, "BALL VALVE TYPE 2", 6.0, 4.0);
+            let mut v2 = Insert::new("BALL VALVE TYPE 2", Vector3::new(80.0, 120.0, 0.0));
+            v2.common.layer = "11".to_string();
+            doc2.add_entity(document::EntityType::Insert(v2)).unwrap();
+            let mut vt2 =
+                Text::with_value("BV0201509B", Vector3::new(76.0, 126.0, 0.0)).with_height(2.5);
+            vt2.common.layer = "11".to_string();
+            doc2.add_entity(document::EntityType::Text(vt2)).unwrap();
+
+            let mut seg2 = Line::from_points(
+                Vector3::new(20.0, 120.0, 0.0),
+                Vector3::new(140.0, 120.0, 0.0),
+            );
+            seg2.common.layer = "11".to_string();
+            doc2.add_entity(document::EntityType::Line(seg2)).unwrap();
+            let mut ll2 = Text::with_value("50-PG-02011-B9-", Vector3::new(40.0, 123.0, 0.0))
+                .with_height(2.5);
+            ll2.common.layer = "11".to_string();
+            doc2.add_entity(document::EntityType::Text(ll2)).unwrap();
+        }
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        let tmp = std::env::temp_dir().join(format!("ocs_pidbom_150_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let bom_csv = tmp.join("bom_all.csv");
+        let bom_json = tmp.join("bom_all.json");
+        let _ = app.run_command_line(&format!("PIDBOM \"{}\" ALLTABS", bom_csv.display()));
+        let _ = app.run_command_line(&format!("PIDBOM \"{}\" ALLTABS", bom_json.display()));
+        assert!(bom_csv.is_file(), "PIDBOM must write CSV schedule");
+        assert!(bom_json.is_file(), "PIDBOM must write JSON schedule");
+
+        let jb: Value = serde_json::from_str(&std::fs::read_to_string(&bom_json).unwrap()).unwrap();
+        assert!(jb["summary"]["total_unique_rows"].as_u64().unwrap_or(0) >= 4);
+        assert_eq!(jb["summary"]["sheets_scanned"].as_u64(), Some(2));
+
+        // Unmodified exported CSV parses cleanly via `load_external_property_table`
+        let parsed_tbl =
+            crate::io::pid_convert::load_external_property_table(&bom_csv).expect("load BOM CSV");
+        assert!(parsed_tbl.total_rows_loaded >= 4);
+
+        // Simulate process engineer filling in Description + PressureMax + PhaseTemperatureMax in CSV
+        let csv_raw = std::fs::read_to_string(&bom_csv).unwrap();
+        let mut edited_lines = Vec::new();
+        for (li, line) in csv_raw.lines().enumerate() {
+            if li == 0 {
+                edited_lines.push(line.to_string());
+                continue;
+            }
+            let mut cols: Vec<String> = line.split(',').map(str::to_string).collect();
+            if cols.first().is_some_and(|k| k.contains("BV0201501A")) && cols.len() >= 13 {
+                cols[5] = "ISOLATION BALL VALVE".to_string();
+            } else if cols.first().is_some_and(|k| k.contains("02011")) && cols.len() >= 13 {
+                cols[9] = "HL-40".to_string();
+                cols[10] = "4.0 MPa".to_string();
+                cols[11] = "150 C".to_string();
+            }
+            edited_lines.push(cols.join(","));
+        }
+        let edited_csv = tmp.join("bom_filled.csv");
+        std::fs::write(&edited_csv, format!("{}\n", edited_lines.join("\r\n"))).unwrap();
+
+        // Feed filled CSV back into `PIDCONVERT ... PROPS ... VERIFY` (`StrictVendor` 0 violations!)
+        let conv_dir = tmp.join("conv_out");
+        let _ = app.run_command_line(&format!(
+            "PIDCONVERT \"{}\" STEM BOM-RT-150 PROPS \"{}\" VERIFY",
+            conv_dir.display(),
+            edited_csv.display()
+        ));
+        let data_xml_p = conv_dir.join("BOM-RT-150_Data.xml");
+        assert!(
+            data_xml_p.is_file(),
+            "PIDCONVERT with filled BOM PROPS must succeed"
+        );
+        let xml_txt = std::fs::read_to_string(&data_xml_p).unwrap();
+        assert!(xml_txt.contains("ISOLATION BALL VALVE"));
+        assert!(xml_txt.contains("PressureMax=\"4.0 MPa\""));
+        assert!(xml_txt.contains("PhaseTemperatureMax=\"150 C\""));
+
+        let cov: Value = serde_json::from_str(
+            &std::fs::read_to_string(conv_dir.join("BOM-RT-150_Coverage.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            cov["external_props_applied"]["process_points_updated"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads real SPPID and native AutoCAD sheets in multi-tab OpenCADStudio, runs PIDBOM ALLTABS export, fills process temperatures/pressures, and verifies PIDCONVERT PROPS dual roundtrip"]
+    fn real_multi_source_pidbom_alltabs_schedule_export_and_props_roundtrip() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_p_raw) = std::env::var("OCS_PID_REAL150_SPPID_DXF") else {
+            println!("OCS_PID_REAL150_SPPID_DXF unset, skipping.");
+            return;
+        };
+        let Ok(legacy_p_raw) = std::env::var("OCS_PID_REAL150_LEGACY_DXF") else {
+            println!("OCS_PID_REAL150_LEGACY_DXF unset, skipping.");
+            return;
+        };
+        let Ok(seed_zip) = std::env::var("OCS_PID_SEED_ZIP") else {
+            println!("OCS_PID_SEED_ZIP unset, skipping.");
+            return;
+        };
+        let sym_dir = std::env::var("OCS_PID_SYM_DIR").unwrap_or_default();
+        let out_dir = std::env::var("OCS_PID_REAL150_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real150"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sppid_p = std::path::PathBuf::from(&sppid_p_raw);
+        let legacy_p = std::path::PathBuf::from(&legacy_p_raw);
+        let sppid_sha =
+            format!("{:x}", Sha256::digest(std::fs::read(&sppid_p).unwrap()))[..12].to_string();
+        let legacy_sha =
+            format!("{:x}", Sha256::digest(std::fs::read(&legacy_p).unwrap()))[..12].to_string();
+
+        let mut app = app();
+        let tab_sp = app.active_tab;
+        app.tabs[tab_sp].scene.document = crate::io::load_file(&sppid_p).unwrap();
+        app.tabs[tab_sp].tab_title = "REAL150-SP01.dxf".to_string();
+
+        let _ = app.update(Message::TabNew);
+        let tab_lg = app.active_tab;
+        app.tabs[tab_lg].scene.document = crate::io::load_file(&legacy_p).unwrap();
+        app.tabs[tab_lg].tab_title = "REAL150-LG01.dxf".to_string();
+
+        let _ = app.update(Message::TabSwitch(tab_sp));
+
+        let bom_csv = out_dir.join("real150_alltabs.csv");
+        let bom_json = out_dir.join("real150_alltabs.json");
+        let _ = app.run_command_line(&format!("PIDBOM \"{}\" ALLTABS", bom_csv.display()));
+        let _ = app.run_command_line(&format!("PIDBOM \"{}\" ALLTABS", bom_json.display()));
+        assert!(bom_csv.is_file() && bom_json.is_file());
+
+        let jb: Value = serde_json::from_str(&std::fs::read_to_string(&bom_json).unwrap()).unwrap();
+        let sum = &jb["summary"];
+        assert_eq!(sum["sheets_scanned"].as_u64(), Some(2));
+        assert!(sum["total_unique_rows"].as_u64().unwrap_or(0) > 20);
+        assert!(sum["pipeline_count"].as_u64().unwrap_or(0) > 0);
+
+        // Fill design pressure/temperature on all pipeline rows in the exported CSV and feed back to `PIDCONVERT`
+        let raw_csv = std::fs::read_to_string(&bom_csv).unwrap();
+        let mut filled_lines = Vec::new();
+        let mut filled_pipelines = 0usize;
+        for (li, ln) in raw_csv.lines().enumerate() {
+            if li == 0 {
+                filled_lines.push(ln.to_string());
+                continue;
+            }
+            let mut cols: Vec<String> = ln.split(',').map(str::to_string).collect();
+            if cols.get(1).map(|s| s.as_str()) == Some("Pipeline") && cols.len() >= 14 {
+                cols[9] = "HL-50".to_string();
+                cols[10] = "6.4 MPa".to_string();
+                cols[11] = "180 C".to_string();
+                filled_pipelines += 1;
+            }
+            filled_lines.push(cols.join(","));
+        }
+        assert!(filled_pipelines > 0);
+        let filled_csv = out_dir.join("real150_filled.csv");
+        std::fs::write(&filled_csv, format!("{}\n", filled_lines.join("\r\n"))).unwrap();
+        let _ = std::fs::remove_file(&bom_csv);
+        let _ = std::fs::remove_file(&bom_json);
+
+        let dual_dir = out_dir.join("dual_out");
+        std::fs::create_dir_all(&dual_dir).unwrap();
+        let target_pid = dual_dir.join("REAL150-RT.pid");
+        let conv_cmd = if sym_dir.trim().is_empty() {
+            format!(
+                "PIDCONVERT \"{}\" SEED \"{}\" PROPS \"{}\" VERIFY",
+                target_pid.display(),
+                seed_zip,
+                filled_csv.display()
+            )
+        } else {
+            format!(
+                "PIDCONVERT \"{}\" SEED \"{}\" SYMDIR \"{}\" PROPS \"{}\" VERIFY",
+                target_pid.display(),
+                seed_zip,
+                sym_dir,
+                filled_csv.display()
+            )
+        };
+        let _ = app.run_command_line(&conv_cmd);
+        let _ = std::fs::remove_file(&filled_csv);
+        assert!(target_pid.is_file(), "PIDCONVERT dual output must exist");
+
+        let data_xml = std::fs::read(dual_dir.join("REAL150-RT_Data.xml")).unwrap();
+        let meta_xml = std::fs::read(dual_dir.join("REAL150-RT_Meta.xml")).unwrap();
+        crate::io::pid_convert::verify_published_xml_pair(
+            "REAL150-RT",
+            "P01",
+            &data_xml,
+            &meta_xml,
+        )
+        .expect("StrictVendor clean");
+
+        let cov: Value = serde_json::from_str(
+            &std::fs::read_to_string(dual_dir.join("REAL150-RT_Coverage.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            cov["variant_resolution"]["class_default_fallback"].as_u64(),
+            Some(0)
+        );
+        assert!(
+            cov["external_props_applied"]["process_points_updated"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
+        assert_eq!(
+            cov["pid_verification"]["matched_graphic_oids"].as_u64(),
+            cov["pid_verification"]["xml_rep_count"].as_u64()
+        );
+
+        let sanitized = json!({
+            "sppid_src_sha256_prefix": sppid_sha,
+            "legacy_src_sha256_prefix": legacy_sha,
+            "bom_summary": sum,
+            "filled_pipeline_rows": filled_pipelines,
+            "external_props_applied": cov["external_props_applied"],
+            "xml_reps": cov["pid_verification"]["xml_rep_count"],
+            "matched_oids": cov["pid_verification"]["matched_graphic_oids"],
+            "a_valid": cov["pid_verification"]["a_level_index_consistent"],
+            "pdf_prims": cov["pid_verification"]["b_level_pdf_primitives"],
+        });
+        std::fs::write(
+            out_dir.join("real150_summary.json"),
             format!("{}\n", serde_json::to_string_pretty(&sanitized).unwrap()),
         )
         .unwrap();
