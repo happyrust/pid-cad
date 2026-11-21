@@ -9,7 +9,7 @@ use crate::pid::type_lib::TypeLib;
 
 use super::builtin_rules::rule_set_digest;
 use super::dsl::{Expr, Operand, Path};
-use super::facts::{subjects, SubjectFacts};
+use super::facts::{subjects, Context, Sheet, SubjectFacts, MISSING_COUNT};
 use super::model::{
     Category, CheckReport, CheckResult, Kind, Rule, RuleSet, Scope, Severity, Summary, Trigger,
     Waiver, REPORT_VERSION,
@@ -39,6 +39,12 @@ pub struct CheckInput<'a> {
 /// 按规则检查范围内的图（§4.1）。纯函数：只读输入，不碰文件和图纸。
 pub fn check(input: &CheckInput) -> CheckReport {
     let started = Instant::now();
+    let context = Context {
+        rules: input.rules,
+        master: input.master,
+        types: input.types,
+    };
+    let sheets: Vec<Sheet<'_>> = input.drawings.iter().map(Sheet::new).collect();
     let mut summary = Summary {
         objects: input
             .drawings
@@ -57,7 +63,7 @@ pub fn check(input: &CheckInput) -> CheckReport {
             continue;
         }
         summary.rules_run += 1;
-        results.extend(hits(rule, input));
+        results.extend(hits(rule, &sheets, &context));
     }
     results.sort_by(|a, b| {
         a.severity
@@ -94,13 +100,14 @@ pub fn check(input: &CheckInput) -> CheckReport {
 }
 
 /// 一条规则在范围内各图上的命中：表达式为真才算，不知道不算。
-fn hits(rule: &Rule, input: &CheckInput) -> Vec<CheckResult> {
-    let kind = rule.target.kind();
+fn hits(rule: &Rule, sheets: &[Sheet<'_>], context: &Context<'_>) -> Vec<CheckResult> {
     let fields = fields(rule);
+    let missing = rule.target.kind().has_fact(MISSING_COUNT)
+        && fields.iter().any(|name| name == MISSING_COUNT);
     let mut found = Vec::new();
-    for drawing in input.drawings {
-        for subject in subjects(drawing, &rule.target, input.types) {
-            let facts = SubjectFacts::new(subject, kind, drawing);
+    for sheet in sheets {
+        for subject in subjects(sheet, &rule.target, context.types) {
+            let facts = SubjectFacts::new(subject, rule, sheet, context);
             if !rule.tree.eval(&facts).is_true() {
                 continue;
             }
@@ -122,7 +129,11 @@ fn hits(rule: &Rule, input: &CheckInput) -> Vec<CheckResult> {
                 message,
                 fix,
                 points: Vec::new(),
-                fields: fields.clone(),
+                fields: if missing {
+                    with_missing(&fields, &facts)
+                } else {
+                    fields.clone()
+                },
                 waived: false,
                 waiver: None,
             });
@@ -155,10 +166,29 @@ fn limit(mut text: String) -> String {
 }
 
 /// 结果的 `fields`（§3.6）：表达式里出现的属性名，用到位号的再加 `位号`；派生事实、沿关系取的
-/// 和根下的不算。按出现的先后，不重复。
+/// 和根下的不算。`必填项缺失数` 先记下这个名字，出结果时换成缺的属性名（[`with_missing`]）。
+/// 按出现的先后，不重复。
 fn fields(rule: &Rule) -> Vec<String> {
     let mut names = Vec::new();
     collect_expr(&rule.tree, rule.target.kind(), &mut names);
+    names
+}
+
+/// 一条结果的 `fields`：`必填项缺失数` 换成这个对象缺的那些属性名，不重复。
+fn with_missing(fields: &[String], facts: &SubjectFacts) -> Vec<String> {
+    let mut names = Vec::new();
+    for name in fields {
+        let expanded = if name == MISSING_COUNT {
+            facts.missing_fields()
+        } else {
+            vec![name.clone()]
+        };
+        for name in expanded {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
     names
 }
 
@@ -192,7 +222,7 @@ fn collect_operand(operand: &Operand, kind: Kind, names: &mut Vec<String>) {
 fn collect_path(path: &Path, kind: Kind, names: &mut Vec<String>) {
     let name = match path.segments.as_slice() {
         [first, ..] if first == "位号" => first,
-        [name] if !kind.has_fact(name) => name,
+        [name] if name == MISSING_COUNT || !kind.has_fact(name) => name,
         _ => return,
     };
     if !names.contains(name) {
@@ -213,14 +243,16 @@ mod tests {
     use crate::pid::drc::model::{
         Category, CheckResult, ObjectRef, RuleScope, ScopeKind, Severity, Source, Target,
     };
-    use crate::pid::project_index::{ObjectKind, SummaryObject, SummarySource, SUMMARY_VERSION};
+    use crate::pid::project_index::{
+        ObjectKind, SummaryObject, SummaryPort, SummarySource, SUMMARY_VERSION,
+    };
+    use crate::pid::tag_engine::TAG_STATUS_DUPLICATED;
 
     /// 还没有正反例的内置规则：用到的事实还没接上，只能不命中或只能命中。到 DRC-8 要清空。
-    const UNCOVERED: [&str; 33] = [
-        "DR-004", "DR-006", "DR-007", "DR-008", "DR-009", "DR-010", "DR-011", "DR-012", "DR-013",
-        "DR-014", "DR-015", "DR-018", "DR-019", "DR-020", "DR-021", "DR-022", "DR-023", "DR-024",
-        "DR-102", "DR-103", "DR-104", "DR-105", "DR-106", "DR-107", "DR-108", "DR-109", "DR-110",
-        "DR-111", "DR-112", "DR-113", "DR-114", "DR-115", "DR-116",
+    const UNCOVERED: [&str; 24] = [
+        "DR-006", "DR-007", "DR-008", "DR-009", "DR-011", "DR-012", "DR-014", "DR-015", "DR-020",
+        "DR-021", "DR-022", "DR-102", "DR-103", "DR-104", "DR-105", "DR-106", "DR-107", "DR-108",
+        "DR-109", "DR-110", "DR-111", "DR-112", "DR-115", "DR-116",
     ];
 
     fn object(
@@ -273,6 +305,34 @@ mod tests {
         object(ObjectKind::Other, ANNOTATION_TYPE, "标注", "", props)
     }
 
+    fn tank(tag: &str) -> SummaryObject {
+        object(ObjectKind::Equipment, "TANK", "储罐", tag, &[])
+    }
+
+    /// 放了符号块 `block` 的对象；`known` 是当前符号库里有没有这个块。
+    fn with_symbol(base: SummaryObject, block: &str, known: bool) -> SummaryObject {
+        SummaryObject {
+            symbol: Some(block.to_owned()),
+            symbol_known: known,
+            ..base
+        }
+    }
+
+    /// 设备 `type_code` `tag` 的 `count` 个管口。
+    fn nozzles(type_code: &str, tag: &str, count: usize) -> Vec<SummaryPort> {
+        (1..=count)
+            .map(|n| SummaryPort {
+                owner_kind: ObjectKind::Equipment,
+                type_code: type_code.to_owned(),
+                tag: tag.to_owned(),
+                port: format!("N{n}"),
+                direction: None,
+                at: [0.0, 0.0],
+                joined: false,
+            })
+            .collect()
+    }
+
     fn drawing(id: &str, objects: Vec<SummaryObject>) -> DrawingSummary {
         DrawingSummary {
             version: SUMMARY_VERSION,
@@ -291,11 +351,18 @@ mod tests {
     }
 
     fn run(rules: &RuleSet, drawings: &[DrawingSummary]) -> CheckReport {
-        let master = master_data::Resolved::NotConfigured;
+        run_with(rules, &master_data::Resolved::NotConfigured, drawings)
+    }
+
+    fn run_with(
+        rules: &RuleSet,
+        master: &master_data::Resolved,
+        drawings: &[DrawingSummary],
+    ) -> CheckReport {
         let types = TypeLib::embedded();
         check(&CheckInput {
             rules,
-            master: &master,
+            master,
             types: &types,
             drawings,
             index: None,
@@ -311,6 +378,24 @@ mod tests {
         })
     }
 
+    /// 配好了的项目主数据：图例标准是 `legend`，几张表都空着。
+    fn master(legend: Option<&str>) -> master_data::Resolved {
+        master_data::Resolved::Configured {
+            data: master_data::MasterData {
+                version: master_data::PROJECT_FILE_VERSION,
+                revision: 1,
+                updated_at: 0,
+                legend_standard: legend.map(str::to_owned),
+                nominal_diameters: Vec::new(),
+                pipe_classes: Vec::new(),
+                insulation_classes: Vec::new(),
+                fluid_codes: Vec::new(),
+                pbs: Vec::new(),
+            },
+            source: master_data::Source::Drawing,
+        }
+    }
+
     fn hits(report: &CheckReport, id: &str) -> usize {
         report
             .results
@@ -319,11 +404,14 @@ mod tests {
             .count()
     }
 
-    /// 内置规则全部启用，含默认停用的 `DR-114`。
+    /// 内置规则全部启用，含默认停用的 `DR-114`，给它的参数是只许 `PID` 图层。
     fn all_enabled() -> RuleSet {
         let mut rules = builtin();
         for rule in &mut rules.rules {
             rule.enabled = true;
+            if rule.id == "DR-114" {
+                rule.params.insert("允许图层".to_owned(), json!(["PID"]));
+            }
         }
         rules
     }
@@ -353,9 +441,9 @@ mod tests {
         RuleSet { rules, ..builtin() }
     }
 
-    /// 一条内置规则命中的例子和不命中的例子；还没有例子的在 `UNCOVERED` 里。
-    fn example(id: &str) -> Option<(Vec<SummaryObject>, Vec<SummaryObject>)> {
-        let pair = match id {
+    /// 一条内置规则命中的例子和不命中的例子，各是一张图；还没有例子的在 `UNCOVERED` 里。
+    fn example(id: &str) -> Option<(DrawingSummary, DrawingSummary)> {
+        let (hit, miss) = match id {
             "DR-001" => (
                 vec![line("L-1001", &[])],
                 vec![line("L-1001", &[("管道等级", "A1")])],
@@ -365,9 +453,33 @@ mod tests {
                 vec![line("L-1001", &[("公称直径", "50")])],
             ),
             "DR-003" => (vec![pump(" ")], vec![pump("P-101")]),
+            "DR-004" => (
+                vec![SummaryObject {
+                    tag_status: TAG_STATUS_DUPLICATED.to_owned(),
+                    ..pump("P-101")
+                }],
+                vec![pump("P-101"), pump("P-102")],
+            ),
             "DR-005" => (
                 vec![instrument("FT-101", &[])],
                 vec![instrument("FT-101", &[("仪表回路", "F-101")])],
+            ),
+            "DR-010" => (
+                vec![pump("P-101")],
+                vec![object(
+                    ObjectKind::Equipment,
+                    "PUMP",
+                    "泵",
+                    "P-101",
+                    &[("名称", "进料泵")],
+                )],
+            ),
+            "DR-013" => (
+                vec![instrument("FT-101", &[("仪表回路", "F-101")])],
+                vec![
+                    instrument("FT-101", &[("仪表回路", "F-101")]),
+                    instrument("FIC-101", &[("仪表回路", "F-101")]),
+                ],
             ),
             "DR-016" => (
                 vec![annotation(&[("文字", "  ")])],
@@ -377,17 +489,53 @@ mod tests {
                 vec![valve("V-101", &[("开度", "-5")])],
                 vec![valve("V-101", &[("开度", "100")])],
             ),
+            "DR-018" => (vec![line("X-1001", &[])], vec![line("L-1001", &[])]),
+            "DR-019" => (
+                vec![line(&format!("L-{}", "1".repeat(31)), &[])],
+                vec![line("L-1001", &[])],
+            ),
+            "DR-023" => {
+                let with = |count| DrawingSummary {
+                    ports: nozzles("PUMP", "P-101", count),
+                    ..drawing("PID-1101", vec![pump("P-101")])
+                };
+                return Some((with(1), with(2)));
+            }
+            "DR-024" => (
+                vec![with_symbol(pump("P-101"), "PID_SYM_equipment_pump", false)],
+                vec![with_symbol(pump("P-101"), "PID_SYM_equipment_pump", true)],
+            ),
             "DR-025" => (
                 vec![line("L-1001", &[("流体介质", "蒸汽")])],
                 vec![line("L-1001", &[("流体介质", "蒸汽"), ("绝热等级", "H1")])],
             ),
             "DR-101" => (vec![valve("", &[])], vec![valve("V-101", &[])]),
+            "DR-113" => {
+                let transmitter = with_symbol(
+                    instrument("FT-101", &[("仪表回路", "F-101")]),
+                    "PID_SYM_instrument_transmitter",
+                    true,
+                );
+                let controller = with_symbol(
+                    instrument("FIC-101", &[("仪表回路", "F-101")]),
+                    "PID_SYM_instrument_controller",
+                    true,
+                );
+                (vec![transmitter.clone()], vec![transmitter, controller])
+            }
+            "DR-114" => (
+                vec![SummaryObject {
+                    layer: "0".to_owned(),
+                    ..line("L-1001", &[])
+                }],
+                vec![line("L-1001", &[])],
+            ),
             _ => return None,
         };
-        Some(pair)
+        Some((drawing("PID-1101", hit), drawing("PID-1101", miss)))
     }
 
-    /// 表驱动：每条内置规则在一张只有例子对象的图上，命中的例子出一条、不命中的不出。
+    /// 表驱动：每条内置规则在它的例子图上，命中的例子出一条、不命中的不出。
     #[test]
     fn every_builtin_rule_has_a_hit_and_a_miss() {
         let rules = all_enabled();
@@ -404,9 +552,9 @@ mod tests {
                 !UNCOVERED.contains(&id),
                 "{id} 有了例子，要从未覆盖名单里拿掉"
             );
-            let report = run(&rules, &[drawing("PID-1101", hit)]);
+            let report = run(&rules, &[hit]);
             assert_eq!(hits(&report, id), 1, "{id} 应命中一条");
-            let report = run(&rules, &[drawing("PID-1101", miss)]);
+            let report = run(&rules, &[miss]);
             assert_eq!(hits(&report, id), 0, "{id} 不应命中");
         }
     }
@@ -686,15 +834,22 @@ mod tests {
                 ("DR-001", "PID-1101", "PIPE_LINE|L-1009"),
                 ("DR-001", "PID-1102", "PIPE_LINE|L-2001"),
                 ("DR-003", "PID-1102", "PUMP||10.000,20.000"),
+                ("DR-009", "PID-1101", "图纸|PID-1101"),
+                ("DR-009", "PID-1102", "图纸|PID-1102"),
+                ("DR-010", "PID-1101", "PIPE_LINE|L-1001"),
+                ("DR-010", "PID-1101", "PIPE_LINE|L-1009"),
+                ("DR-010", "PID-1102", "PIPE_LINE|L-2001"),
+                ("DR-010", "PID-1102", "PUMP||10.000,20.000"),
                 ("DR-017", "PID-1102", "VALVE_GATE|V-201"),
+                ("DR-023", "PID-1102", "PUMP||10.000,20.000"),
                 ("DR-016", "PID-1101", "ANNOTATION||10.000,20.000"),
             ]
         );
         assert_eq!(
             report.summary,
             Summary {
-                errors: 4,
-                warnings: 1,
+                errors: 10,
+                warnings: 2,
                 infos: 1,
                 waived: 0,
                 objects: 6,
@@ -706,7 +861,11 @@ mod tests {
         assert!(report.notices.is_empty());
         assert!(report.stale_waivers.is_empty());
 
-        let report = run(&builtin(), &[drawing("PID-1101", vec![annotation(&[])])]);
+        let report = run_with(
+            &builtin(),
+            &master(Some("GB/T 6567")),
+            &[drawing("PID-1101", vec![annotation(&[])])],
+        );
         assert_eq!(
             (report.summary.errors, report.summary.infos, report.blocked),
             (0, 1, false)
@@ -775,9 +934,13 @@ mod tests {
     fn the_report_serializes_to_the_shape_of_section_3_6() {
         let pipe = SummaryObject {
             at: [0.0, 20.0],
-            ..line("L-1003", &[("公称直径", "50")])
+            ..line("L-1003", &[("公称直径", "50"), ("流体介质", "工艺水")])
         };
-        let report = run(&builtin(), &[drawing("PID-1101", vec![pipe])]);
+        let report = run_with(
+            &builtin(),
+            &master(Some("GB/T 6567")),
+            &[drawing("PID-1101", vec![pipe])],
+        );
         let value = serde_json::to_value(&report).expect("能写成 JSON");
         assert_eq!(value["version"], 1);
         assert_eq!(value["rule_set_version"], "1.0.0");
@@ -827,5 +990,325 @@ mod tests {
             .map(|key| text.find(&format!("\"{key}\":")).expect("有这个键"))
             .collect();
         assert!(at.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
+    }
+
+    /// `位号.同类型重复数` 只数同一张图上类型编码和位号（去掉首尾空白）都相同、有自己编号的
+    /// 对象；`位号合规` 按这个类型的位号规则判，类型没有位号规则或对象没有自己编号的不知道；
+    /// `位号.长度` 数去掉首尾空白后的字数。
+    #[test]
+    fn tag_facts_follow_the_type_and_its_tag_rule() {
+        let fitting = |tag: &str| object(ObjectKind::Fitting, "FITTING", "管件", tag, &[]);
+        let run_of = |tag: &str| {
+            object(
+                ObjectKind::PipeRun,
+                "PIPE_RUN",
+                "管路",
+                tag,
+                &[("管线号", "L-1001")],
+            )
+        };
+        let long = "管".repeat(33);
+        let drawings = [drawing(
+            "PID-1101",
+            vec![
+                pump("P-101"),
+                pump(" P-101 "),
+                tank("P-101"),
+                fitting("X 1"),
+                fitting("X 1"),
+                valve("阀门一号", &[]),
+                instrument("TI-101", &[("仪表功能", "PI")]),
+                instrument("FIC-101", &[]),
+                run_of("L-1001-01"),
+                run_of("L-1001"),
+                line(&format!(" L-{} ", "1".repeat(30)), &[]),
+                line(&long, &[]),
+            ],
+        )];
+        let report = run(&builtin(), &drawings);
+        let found = |id: &str| -> Vec<(String, String)> {
+            report
+                .results
+                .iter()
+                .filter(|result| result.rule_id == id)
+                .map(|result| (result.object_key.clone(), result.message.clone()))
+                .collect()
+        };
+        let duplicated = (
+            "PUMP|P-101".to_owned(),
+            "泵 的位号 P-101 在本图重复".to_owned(),
+        );
+        assert_eq!(found("DR-004"), [duplicated.clone(), duplicated]);
+        assert_eq!(
+            found("DR-018"),
+            [
+                (
+                    "INSTRUMENT|TI-101".to_owned(),
+                    "仪表 TI-101 的位号不符合这个类型的位号规则".to_owned(),
+                ),
+                (
+                    format!("PIPE_LINE|{long}"),
+                    format!("管线 {long} 的位号不符合这个类型的位号规则"),
+                ),
+                (
+                    "PIPE_RUN|L-1001".to_owned(),
+                    "管路 L-1001 的位号不符合这个类型的位号规则".to_owned(),
+                ),
+            ]
+        );
+        assert_eq!(
+            found("DR-019"),
+            [(
+                format!("PIPE_LINE|{long}"),
+                format!("位号 {long} 超过 32 个字符"),
+            )]
+        );
+    }
+
+    /// `必填项缺失数` 数 `required_fields` 里这个类型和它的上级类型列的属性里空着的；消息和
+    /// `fields` 列出缺的属性名，上级类型的在前。
+    #[test]
+    fn required_fields_include_the_parent_types() {
+        let mut rules = builtin();
+        rules.required_fields.insert(
+            "TANK".to_owned(),
+            vec!["容积".to_owned(), "名称".to_owned()],
+        );
+        let equipment = |code: &str, label: &str, tag: &str, props: &[(&str, &str)]| {
+            object(ObjectKind::Equipment, code, label, tag, props)
+        };
+        let drawings = [drawing(
+            "PID-1101",
+            vec![
+                tank("T-101"),
+                equipment(
+                    "TANK",
+                    "储罐",
+                    "T-102",
+                    &[("名称", "原料罐"), ("容积", " ")],
+                ),
+                equipment("VESSEL", "容器", "V-101", &[("名称", "分离器")]),
+                line("L-1001", &[("流体介质", "工艺水")]),
+                valve("V-201", &[]),
+            ],
+        )];
+        let report = run(&rules, &drawings);
+        let found: Vec<(&str, &str, Vec<&str>)> = report
+            .results
+            .iter()
+            .filter(|result| result.rule_id == "DR-010")
+            .map(|result| {
+                (
+                    result.object_key.as_str(),
+                    result.message.as_str(),
+                    result.fields.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    "TANK|T-101",
+                    "储罐 T-101 有 2 个必填属性没填：名称、容积",
+                    vec!["名称", "容积"],
+                ),
+                (
+                    "TANK|T-102",
+                    "储罐 T-102 有 1 个必填属性没填：容积",
+                    vec!["容积"],
+                ),
+            ]
+        );
+    }
+
+    /// `管口数` 数图上属于这台设备（类型编码和位号都对上）的端口；储罐不要求两个管口；
+    /// 同类型同位号的设备不止一台时分不清，不知道。
+    #[test]
+    fn equipment_counts_its_own_nozzles() {
+        let mut ports = nozzles("PUMP", "P-101", 1);
+        ports.extend(nozzles("PUMP", "P-102", 2));
+        ports.extend(nozzles("VESSEL", "P-101", 3));
+        ports.push(SummaryPort {
+            owner_kind: ObjectKind::Instrument,
+            ..nozzles("PUMP", "P-101", 1).remove(0)
+        });
+        let drawings = [DrawingSummary {
+            ports,
+            ..drawing(
+                "PID-1101",
+                vec![
+                    pump("P-101"),
+                    pump("P-102"),
+                    tank("T-101"),
+                    pump("P-103"),
+                    pump("P-103"),
+                    pump(""),
+                    pump(" "),
+                ],
+            )
+        }];
+        let report = run(&builtin(), &drawings);
+        let found: Vec<(&str, &str)> = report
+            .results
+            .iter()
+            .filter(|result| result.rule_id == "DR-023")
+            .map(|result| (result.object_key.as_str(), result.message.as_str()))
+            .collect();
+        assert_eq!(found, [("PUMP|P-101", "设备 P-101 只有 1 个管口")]);
+    }
+
+    /// 仪表回路是 `仪表回路` 属性相同（去掉首尾空白）的一组仪表；控制器、测量元件按
+    /// `loop_roles` 认符号，规则包没写的角色数不出来。结果的对象键是「仪表回路|回路号」。
+    #[test]
+    fn instrument_loops_group_instruments_by_loop_number() {
+        let member = |tag: &str, number: &str, symbol: &str| {
+            with_symbol(
+                instrument(tag, &[("仪表回路", number)]),
+                &format!("PID_SYM_instrument_{symbol}"),
+                true,
+            )
+        };
+        let drawings = [drawing(
+            "PID-1101",
+            vec![
+                SummaryObject {
+                    at: [5.0, 6.0],
+                    ..member("TI-201", "T-201", "indicator")
+                },
+                member("FT-101", " F-101 ", "transmitter"),
+                member("FIC-101", "F-101", "controller"),
+                instrument("PI-301", &[]),
+                valve("V-101", &[("仪表回路", "T-201")]),
+            ],
+        )];
+        let report = run(&builtin(), &drawings);
+        let found: Vec<(&str, &str, &str)> = report
+            .results
+            .iter()
+            .filter(|result| ["DR-013", "DR-113"].contains(&result.rule_id.as_str()))
+            .map(|result| {
+                (
+                    result.rule_id.as_str(),
+                    result.object_key.as_str(),
+                    result.message.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    "DR-113",
+                    "仪表回路|T-201",
+                    "仪表回路 T-201 缺控制器或测量元件"
+                ),
+                ("DR-013", "仪表回路|T-201", "仪表回路 T-201 只有 1 个仪表"),
+            ]
+        );
+        let result = report
+            .results
+            .iter()
+            .find(|result| result.rule_id == "DR-013")
+            .expect("DR-013 命中");
+        assert_eq!(
+            result.object,
+            ObjectRef {
+                kind: "仪表回路".to_owned(),
+                type_code: String::new(),
+                tag: Some("T-201".to_owned()),
+                drawing_id: "PID-1101".to_owned(),
+                owner: None,
+                port: None,
+                at: [5.0, 6.0],
+                handle: None,
+            }
+        );
+        assert!(result.fields.is_empty());
+
+        let mut rules = builtin();
+        rules.loop_roles.remove("控制器");
+        assert_eq!(hits(&run(&rules, &drawings), "DR-113"), 0);
+    }
+
+    /// 图纸是整张图：`图例标准` 取项目主数据的，没配置、没写都是空；`图号`、`PBS`、`对象数`
+    /// 取摘要的。根 `图纸.图号`、`图纸.PBS`、`参数.<名>` 哪种对象都能用；参数是空表时不知道。
+    #[test]
+    fn drawings_and_roots_read_the_summary_master_data_and_params() {
+        let drawings = [DrawingSummary {
+            pbs: Some("A-100".to_owned()),
+            ..drawing("PID-1101", vec![line("L-1001", &[]), pump("P-101")])
+        }];
+        let legend = only(vec![builtin().rule("DR-009").expect("DR-009").clone()]);
+        let report = run(&legend, &drawings);
+        assert_eq!(report.results.len(), 1);
+        let result = &report.results[0];
+        assert_eq!(
+            result.object,
+            ObjectRef {
+                kind: "图纸".to_owned(),
+                type_code: String::new(),
+                tag: None,
+                drawing_id: "PID-1101".to_owned(),
+                owner: None,
+                port: None,
+                at: [0.0, 0.0],
+                handle: None,
+            }
+        );
+        assert_eq!(result.object_key, "图纸|PID-1101");
+        assert_eq!(result.message, "图纸 PID-1101 没有设图例标准");
+        let unset = run_with(&legend, &master(None), &drawings);
+        assert_eq!(hits(&unset, "DR-009"), 1);
+        let report = run_with(&legend, &master(Some("GB/T 6567")), &drawings);
+        assert_eq!(hits(&report, "DR-009"), 0);
+
+        let mut limit = custom("XY-004", "管线", "位号.长度 > 参数.上限", None);
+        limit.params.insert("上限".to_owned(), json!(5));
+        let mut switch = custom("XY-006", "管线", "参数.开关 = TRUE", None);
+        switch.params.insert("开关".to_owned(), json!(true));
+        let rules = only(vec![
+            custom(
+                "XY-001",
+                "图纸",
+                "图号 = \"PID-1101\" AND PBS = \"A-100\" AND 对象数 = 2",
+                Some("{图号} {类型}"),
+            ),
+            custom(
+                "XY-002",
+                "管线",
+                "图纸.图号 = \"PID-1101\" AND 图纸.PBS = \"A-100\"",
+                None,
+            ),
+            custom("XY-003", "图纸", "PBS = NULL", None),
+            limit,
+            custom("XY-005", "管线", "参数.没有 = NULL", None),
+            switch,
+        ]);
+        let report = run(&rules, &drawings);
+        let found: Vec<(&str, &str)> = report
+            .results
+            .iter()
+            .map(|result| (result.rule_id.as_str(), result.object_key.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("XY-001", "图纸|PID-1101"),
+                ("XY-002", "PIPE_LINE|L-1001"),
+                ("XY-004", "PIPE_LINE|L-1001"),
+                ("XY-005", "PIPE_LINE|L-1001"),
+                ("XY-006", "PIPE_LINE|L-1001"),
+            ]
+        );
+        assert_eq!(report.results[0].message, "PID-1101 图纸");
+
+        let mut layers = builtin();
+        for rule in &mut layers.rules {
+            if rule.id == "DR-114" {
+                rule.enabled = true;
+            }
+        }
+        assert_eq!(hits(&run(&layers, &drawings), "DR-114"), 0);
     }
 }
