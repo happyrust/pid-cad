@@ -974,14 +974,15 @@
 
 - **做什么**：`write_package(staging, input)` 往临时目录里写除两张出图以外的文件（出图由调用方先放进去）：图纸文件（源文件原样复制）、`bom.csv`、`bom.json`、`pipe-summary.csv`、`topology.json`（§3.3）、`snapshot.json`、`master-data.json`（没配置时写 `{"version":1,"configured":false}`）、`drc-report.json`，最后写发布清单 `manifest.json`（§3.2，`contents[]` 按规格的顺序，每项带字节数和 SHA-256）。`commit(staging, final_dir)`：先自检再改名到位，目标已存在则拒绝，落位后文件设为只读。`verify_package(dir)`（§3.5）。2026-11-17 加（离线规格 §5.7）：清单多一段 `collab`，图里没有同步记录时是 `null`，有时是 `{"drawing_id", "repo_id", "revision", "reconciled"}`。
 - **验收**：
-  - [ ] 清单的 `collab` 段（2026-11-17 加）：没有同步记录时是 `null`；有时四项与输入相同；`contents[]` 仍是十项。
-  - [ ] 写出的包恰好十一个文件（测试里两张出图用占位文件）；清单 `contents[]` 十项，顺序、类别、字节数、校验和都对；图纸文件与源文件逐字节相同；`topology.json` 的边与 `snapshot.json` 里的 `graph.edges` 相同。
-  - [ ] `verify_package`：完好的包通过；改动任一文件的一个字节 → `PACKAGE_CORRUPT` 并列出 `mismatched`；删掉任一文件 → `PACKAGE_INCOMPLETE` 并列出 `missing`；多出来的文件只列在 `extra`；目录不存在或没有清单 → `PACKAGE_NOT_FOUND`。
-  - [ ] `commit`：目标已存在 → `PUBLISH_TARGET_EXISTS`，原包不变；自检不过就不改名；落位后的文件是只读的。
+  - [x] 清单的 `collab` 段（2026-11-17 加）：没有同步记录时是 `null`；有时四项与输入相同；`contents[]` 仍是十项。
+  - [x] 写出的包恰好十一个文件（测试里两张出图用占位文件）；清单 `contents[]` 十项，顺序、类别、字节数、校验和都对；图纸文件与源文件逐字节相同；`topology.json` 的边与 `snapshot.json` 里的 `graph.edges` 相同。
+  - [x] `verify_package`：完好的包通过；改动任一文件的一个字节 → `PACKAGE_CORRUPT` 并列出 `mismatched`；删掉任一文件 → `PACKAGE_INCOMPLETE` 并列出 `missing`；多出来的文件只列在 `extra`；目录不存在或没有清单 → `PACKAGE_NOT_FOUND`。
+  - [x] `commit`：目标已存在 → `PUBLISH_TARGET_EXISTS`，原包不变；自检不过就不改名；落位后的文件是只读的。
 - **验证**：`cargo test --offline --locked --lib publish_pkg`
 - **依赖**：PUB-1；BOM-3；SNAP-1
 - **文件**：`src/pid/publish_pkg.rs`
 - **规模**：M
+- **补（2026-11-22）**：在 `pid-stage-d` 上接着 PUB-1（`fc9cf6d90`）做，一个提交，代码只动了「文件」一栏的 `publish_pkg.rs`（另有发布规格和本文件）。与任务写法不同、或任务没有说的：`PackageInput` 收快照和项目索引，不收规格 §5.1 注释里的「连通图与连接符状态」——连通图就在快照里，连接符状态由新加的 `topology` 从索引查，所以 `topology.json` 与 `snapshot.json` 的 `graph` 出自同一个值；快照要已经存过（有序号），`snapshot.json` 就是快照目录里那份文件的字节；`bom.json`、`drc-report.json` 与 `PIDBOM EXPORT`、`PIDCHECK EXPORT` 导出的文件同一写法（外面一层 `ok: true`）；包里的图纸文件名是「换过字符的图号 + 源文件扩展名」，清单的 `source.file` 记源文件自己的名字；`collab` 排在 `gates` 之后、`contents` 之前；门禁没过、快照没有序号、出图或源文件读不到时一个文件都不写，写到一半失败或落位失败时不动临时目录，由调用方删；`PUBLISH_FAILED` 的 `step` 除了 `plot`、`write`、`verify` 还有 `snapshot`、`commit`；校验时清单解析不了、不是发布清单、列的路径不是单段文件名都报 `PACKAGE_CORRUPT`，清单里缺一类就把类别名记进 `missing`，缺文件和坏文件都有时报 `PACKAGE_INCOMPLETE`；落位时目标已存在（目录、文件都算）先于自检报，自检另要求清单的包名与目标目录名相同，只读设不成不报错。这些记在发布规格新加的 §11.2。**先红后绿**：先放类型和空壳函数（写包一律报门禁没过，落位一律报目标已存在，校验一律报找不到，出图名是空串，连接关系是空的），新加的 6 条都编得过、都败在断言上；实现后第一遍 10 条全过（0.05 秒）。全套门禁跑完后，把新测试里一处 rustfmt 拆不开的长断言（`matches!` 套 `matches!`）改成先解构再断言，改后重跑了本模块测试、clippy `--tests` 和格式检查，除了下面说的重复数，读数不变。**读数**：`publish_pkg` 10 条全过；主程序库 7592 条，7517 通过、72 默认不跑、3 失败（比对设计稿的三条，与起点相同），多的 6 条是新加的；编译警告 52；clippy 656 / 1051，与起点相同，各文件的告警数和位置都一样，本文件没有告警；`--tests` 那一遍 cargo 报的重复数，全套门禁那一遍是 637（与起点相同），改断言后重跑是 636，差在 `viewport_snap.rs` 那条印的次数（见 `SNAP-2`、`SNAP-3` 的补记），告警总数和位置都没变；格式检查：本文件 rustfmt 要改的 0 处，新增 0；架构检查上行依赖 33 对、183 个文件；SPPID 脚本测试 185 条全过；都与起点相同。**新基线**：主程序库 7592 条（7517 / 72 / 3）。
 
 > **检查点 CP-D1**（PUB-1 – PUB-2 之后）：给定摘要、检查报告、清单、快照，能在临时目录里写出一个完整的包并校验通过。
 

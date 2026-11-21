@@ -377,3 +377,36 @@ pub fn list_packages(target_dir: &Path, drawing_id: &str) -> Vec<PackageInfo>;
 4. **哪些目录算这张图的包**：名字恰好等于 `package_name(图号, n)` 的目录，n 从 1 起。`r08`、`r0005`、`r+06`、`r000` 这样的写法不算，同名的文件不算，临时目录不算，别的图不算（图号是本图图号加上 `-r001` 的图也分得开）。目标目录不存在或读不了时列表是空的、`next_revision` 是 1，目录本身有问题留给写包那一步报 `PUBLISH_TARGET_INVALID`。修订号到了 `u32` 的上限不再加一。
 5. **门禁**：未豁免的错误数取检查报告的 `summary.错误`（检查报告的 `blocked` 与它同真假）；`result` 只有 `放行` 和 `PUBLISH_BLOCKED` 两个值。
 6. **协同前提的顺序**照离线规格 §5.7 表里的顺序查：队列、不一致、连接，几条同时不满足时报排在前面的那条。「允许未对账」只放过最后一条；连着并补齐时带不带它都是 `reconciled: true`。
+
+### 11.2 `PUB-2`：写包、落位、校验（2026-11-22）
+
+**做了什么**（只改 `src/pid/publish_pkg.rs`）：
+
+- §5.1 的 `write_package`、`commit`、`verify_package`，以及它们用的 `PackageInput`、`Manifest`（字段和顺序照 §3.2）、`VerifyReport`（照 §3.5）、`PublishError`（`code()` 给错误码，`step()` 给 `PUBLISH_FAILED` 停在哪一步）。
+- `plot_files(图号)`：两张出图在包里的名字（`<图号>.pdf`、`<图号>.svg`，图号换字符与包名同一规则），命令层照这两个名字往临时目录里出图。
+- `topology(快照, 项目索引)`：`topology.json` 的内容（§3.3）。
+- 常量 `MANIFEST_FILE`、`MANIFEST_KIND`、`MANIFEST_VERSION`、`TOPOLOGY_VERSION`，错误码 `PUBLISH_TARGET_EXISTS`、`PUBLISH_FAILED`、`PACKAGE_NOT_FOUND`、`PACKAGE_INCOMPLETE`、`PACKAGE_CORRUPT`。
+- 清单的 `collab` 是 `CollabRecord`（图号、仓库号、修订、`reconciled`），由调用方从图里的同步记录和 `collab_preconditions` 的结论拼。
+
+**与规格写法不同的：**
+
+1. **`PackageInput` 收快照和项目索引，不收「连通图与连接符状态」**（§5.1 的注释）。连通图就在快照里，连接符状态由 `topology` 从索引查；这样 `topology.json` 与 `snapshot.json` 的 `graph` 出自同一个值，不会对不上。快照要已经存过（有序号），`snapshot.json` 就是快照目录里那份文件的字节。
+2. **`bom.json`、`drc-report.json` 外面有一层 `ok: true`**，与 `PIDBOM EXPORT`、`PIDCHECK EXPORT` 导出的文件同一写法（缩进两格、末尾换行）；两份规格里的格式本身不带 `ok`。下游用读导出文件的那套办法就能读。
+3. **`PUBLISH_FAILED` 的 `step` 多两个值**：§3.6 列了出图、写文件、自检（`plot`、`write`、`verify`），这里另有 `snapshot`（传进来的快照没有序号）和 `commit`（改名失败、目标也不存在）。命令层把 `step()` 原样放进应答的 `step`。
+
+**规格没写到、这里定下的：**
+
+1. **包里的图纸文件名**是「与包名同规则换过字符的图号 + 源文件的扩展名」（扩展名原样，不改大小写）；清单的 `source.file` 记源文件自己的文件名（§3.2「被复制的那个图纸文件」）。两个名字可以不同，校验和相同。
+2. **`collab` 在清单里排在 `gates` 之后、`contents` 之前**；没有同步记录时写 `null`，`contents` 仍是十项。
+3. **写包的顺序**：先查门禁（没过报 `PUBLISH_BLOCKED`）和快照序号，再读两张出图和源文件，都读得到才开始写；文件按 `contents` 的顺序写，清单最后写。前面几样不满足时临时目录里不多一个文件。写到一半失败、`commit` 失败时都不动临时目录，由调用方删（§4）。
+4. **`topology.json` 的连接符**按快照摘要里的顺序；状态按句柄在项目索引里找这张图的那一个：在 `links` 里（不论是流出侧还是流入侧）是 `paired`，在 `unresolved` 里取那里的状态，都没有算 `unpaired`。索引里别的图上句柄相同的不算。
+5. **`master-data.json`** 是生效主数据的全文（`MasterData::to_json()`），缩进两格加换行；没配置时是 `{"version": 1, "configured": false}`（同样缩进），清单的 `master_data_revision` 为 `null`。
+6. **校验的细则**：
+   - 目录不在、清单不在（或不是文件）→ `PACKAGE_NOT_FOUND`。
+   - 清单解析不了、`kind` 不是 `pid-publish-manifest`、`version` 不是 1、`contents` 里有不是单段文件名的路径（带目录、`..`、空串、清单自己）→ `PACKAGE_CORRUPT`，不带 `missing`、`mismatched`。规格只说「清单能解析」，没说解析不了报哪个码。带目录的路径一律不认，校验不会去读包外的文件。
+   - 清单里某一类一个文件都没有：把类别名（如 `项目主数据快照`）记进 `missing`。
+   - 列的文件不在或是个目录记进 `missing`；字节数、校验和不对，或在却读不了，记进 `mismatched`。`missing` 不空就报 `PACKAGE_INCOMPLETE`（两样都有时也是它），否则 `mismatched` 不空报 `PACKAGE_CORRUPT`；错里带着完整的 `VerifyReport`。
+   - `extra` 按名字排，子目录也列；`files` 只数文件，含清单。
+   - `VerifyReport` 不带 `ok`，由应答那一层加（与检查报告、材料清单同一做法）。
+   - 已知限制：清单自己没有校验和。只改清单里不影响解析、也不影响对账的字段（比如 `published_by`），校验查不出来。
+7. **落位的细则**：目标已存在（目录、文件都算）→ `PUBLISH_TARGET_EXISTS`，先于自检；自检就是 `verify_package`，另要求清单的 `package_id` 与目标目录同名，否则也算自检不过（`PUBLISH_FAILED`、`verify`）；都过了才改名。改名失败时，目标已经有了就报 `PUBLISH_TARGET_EXISTS`，否则 `PUBLISH_FAILED`、`commit`。改名后把包里每个文件设为只读，设不成不报错，因为包已经落位了。
