@@ -5,6 +5,9 @@
 //! （§3.1）；管长另按（管道等级，公称直径，绝热等级）归成副表「管道汇总」（§3.3）。范围内
 //! 同一个键有两处以上时整份清单不产出，返回 [`BomError::DuplicateTag`]；产出的清单里键不
 //! 重复，出口处断言。
+//!
+//! [`rows`]、[`pipe_summary_rows`] 把主表、副表转成「第一行列名，其后每行一条」的文本表，
+//! [`csv_bytes`] 再写成带 BOM 头的 CSV 字节（§3.4）；写文件在命令层。
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,12 +19,16 @@ use super::project_index::{
     compare_places, DrawingSummary, Duplicate, ObjectKind, Place, SummaryObject, SummarySegment,
 };
 use super::symbols::SymbolLibrary;
+use crate::app::annotation_data::rows_to_csv;
 
 /// 清单格式的版本（§3.2 `version`）。
 pub const BOM_VERSION: u32 = 1;
 
 /// 范围里有重复的（类型编码，位号）（§3.5）。
 pub const BOM_DUPLICATE_TAG: &str = "BOM_DUPLICATE_TAG";
+
+/// 导出时写了不认识的列名（§3.5）。
+pub const BOM_COLUMN_UNKNOWN: &str = "BOM_COLUMN_UNKNOWN";
 
 /// 一条管路上不单独编号的管件合成的那一行的类型编码。
 pub const FITTING_ROW: &str = "FITTING";
@@ -50,6 +57,13 @@ const PIPE_LINE_LABEL: &str = "管线";
 
 /// 一毫米是多少米；没设单位的图也按它算（§3.1）。
 const MILLIMETRE: f64 = 0.001;
+
+/// 副表导出的六列（§3.4）。
+const PIPE_SUMMARY_COLUMNS: [&str; 6] =
+    ["管道等级", "公称直径", "绝热等级", "长度", "单位", "管线"];
+
+/// 一格里有几张图（或几条管线）时用它隔开（§3.4）。
+const LIST_SEPARATOR: &str = ";";
 
 /// 清单的范围（§3.2 `scope`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,11 +243,13 @@ pub struct Notice {
     pub message: String,
 }
 
-/// 算不出清单的原因。
+/// 算不出清单、导不出表的原因。
 #[derive(Debug, Clone, PartialEq)]
 pub enum BomError {
     /// 这些（类型编码，位号）在范围内各有两处以上（`BOM_DUPLICATE_TAG`）。
     DuplicateTag(Vec<Duplicate>),
+    /// 选列里这些列名不认识（`BOM_COLUMN_UNKNOWN`）。
+    ColumnUnknown(Vec<String>),
 }
 
 impl BomError {
@@ -242,6 +258,7 @@ impl BomError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::DuplicateTag(_) => BOM_DUPLICATE_TAG,
+            Self::ColumnUnknown(_) => BOM_COLUMN_UNKNOWN,
         }
     }
 }
@@ -258,6 +275,15 @@ impl fmt::Display for BomError {
                     f,
                     "{BOM_DUPLICATE_TAG}: 范围内这些（类型编码，位号）不止一处：{}；清单不产出",
                     keys.join("、")
+                )
+            }
+            Self::ColumnUnknown(names) => {
+                let names: Vec<String> = names.iter().map(|name| format!("「{name}」")).collect();
+                write!(
+                    f,
+                    "{BOM_COLUMN_UNKNOWN}: 不认识这些列名：{}；可用的列：{}",
+                    names.join("、"),
+                    Column::ALL.map(Column::header).join("、")
                 )
             }
         }
@@ -342,6 +368,134 @@ pub fn build(drawings: &[DrawingSummary], options: &BomOptions) -> Result<Bom, B
         skipped: skipped.into_iter().map(|(_, skipped)| skipped).collect(),
         notices,
     })
+}
+
+/// 主表转成「第一行列名，其后每行一条」的文本表，给 CSV / XLSX 用（§3.4）。`columns` 是要的列名
+/// 和先后（去掉两头空白再认，同一列可以要几次）；不给或给空的是默认九列。
+///
+/// # Errors
+///
+/// `columns` 里有不认识的列名时返回 [`BomError::ColumnUnknown`]，列出全部不认识的。
+pub fn rows(bom: &Bom, columns: Option<&[String]>) -> Result<Vec<Vec<String>>, BomError> {
+    let names = columns.unwrap_or_default();
+    let unknown: Vec<String> = names
+        .iter()
+        .filter(|name| Column::named(name).is_none())
+        .cloned()
+        .collect();
+    if !unknown.is_empty() {
+        return Err(BomError::ColumnUnknown(unknown));
+    }
+    let picked: Vec<Column> = if names.is_empty() {
+        Column::ALL.to_vec()
+    } else {
+        names
+            .iter()
+            .filter_map(|name| Column::named(name))
+            .collect()
+    };
+    let header = picked
+        .iter()
+        .map(|column| column.header().to_string())
+        .collect();
+    Ok(std::iter::once(header)
+        .chain(
+            bom.rows
+                .iter()
+                .map(|row| picked.iter().map(|column| column.cell(row)).collect()),
+        )
+        .collect())
+}
+
+/// 副表同理（§3.4）：管道等级、公称直径、绝热等级、长度、单位、管线六列。
+#[must_use]
+pub fn pipe_summary_rows(bom: &Bom) -> Vec<Vec<String>> {
+    let header = PIPE_SUMMARY_COLUMNS.map(str::to_string).to_vec();
+    std::iter::once(header)
+        .chain(bom.pipe_summary.iter().map(|row| {
+            vec![
+                row.pipe_class.clone(),
+                row.nominal_diameter.clone(),
+                row.insulation_class.clone(),
+                metres_text(row.length),
+                row.unit.clone(),
+                row.lines.join(LIST_SEPARATOR),
+            ]
+        }))
+        .collect()
+}
+
+/// CSV 字节（§3.4）：UTF-8，文件头带 BOM（不然 Excel 打开中文是乱码）；逗号分隔、转义与提取表
+/// 导出的 CSV 相同。
+#[must_use]
+pub fn csv_bytes(rows: &[Vec<String>]) -> Vec<u8> {
+    format!("\u{feff}{}", rows_to_csv(rows)).into_bytes()
+}
+
+/// 主表导出的一列（§3.4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Column {
+    Seq,
+    Kind,
+    Tag,
+    Name,
+    Quantity,
+    Unit,
+    Spec,
+    TypeCode,
+    Drawings,
+}
+
+impl Column {
+    /// 默认九列，前六列是需求定的标准表头，顺序不变。
+    const ALL: [Self; 9] = [
+        Self::Seq,
+        Self::Kind,
+        Self::Tag,
+        Self::Name,
+        Self::Quantity,
+        Self::Unit,
+        Self::Spec,
+        Self::TypeCode,
+        Self::Drawings,
+    ];
+
+    fn header(self) -> &'static str {
+        match self {
+            Self::Seq => "序号",
+            Self::Kind => "类型",
+            Self::Tag => "位号",
+            Self::Name => "名称",
+            Self::Quantity => "数量",
+            Self::Unit => "单位",
+            Self::Spec => "规格",
+            Self::TypeCode => "类型编码",
+            Self::Drawings => "图纸",
+        }
+    }
+
+    /// 列名去掉两头空白后是哪一列。
+    fn named(name: &str) -> Option<Self> {
+        let name = name.trim();
+        Self::ALL.into_iter().find(|column| column.header() == name)
+    }
+
+    fn cell(self, row: &BomRow) -> String {
+        match self {
+            Self::Seq => row.seq.to_string(),
+            Self::Kind => kind_label(row.kind).to_string(),
+            Self::Tag => row.tag.clone(),
+            Self::Name => row.name.clone(),
+            Self::Quantity => match row.quantity {
+                Quantity::Count(count) => count.to_string(),
+                Quantity::Length(metres) => metres_text(metres),
+            },
+            Self::Unit => row.unit.clone(),
+            Self::Spec => row.spec.clone(),
+            Self::TypeCode => row.type_code.clone(),
+            Self::Drawings => row.drawings.join(LIST_SEPARATOR),
+        }
+    }
 }
 
 /// 摘要里的一个对象，连同它所在的图。
@@ -722,6 +876,23 @@ fn prop<'a>(object: &'a SummaryObject, key: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
+/// 「类型」一列：种类的名字，与 `totals.by_kind` 的写法一样。
+fn kind_label(kind: ObjectKind) -> &'static str {
+    match kind {
+        ObjectKind::PipeLine => "管线",
+        ObjectKind::Equipment => "设备",
+        ObjectKind::Valve => "阀门",
+        ObjectKind::Instrument => "仪表",
+        ObjectKind::Fitting => "管件",
+        _ => "其他",
+    }
+}
+
+/// 表里的米数写满两位小数（§3.1 留 2 位小数）。
+fn metres_text(metres: f64) -> String {
+    format!("{metres:.2}")
+}
+
 /// §3.1 表里的单位。
 fn unit_of(kind: ObjectKind) -> &'static str {
     match kind {
@@ -822,9 +993,13 @@ fn assert_unique(rows: &[BomRow]) {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::pid::project_index::{SummarySource, SUMMARY_VERSION};
+    use crate::pid::project_index::{
+        summarize, synthetic_drawing, SummaryMeta, SummarySource, DEFAULT_TOLERANCE,
+        SUMMARY_VERSION,
+    };
 
     fn label(type_code: &str) -> String {
         match type_code {
@@ -1661,6 +1836,219 @@ mod tests {
         );
     }
 
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    fn texts(table: &[&[&str]]) -> Vec<Vec<String>> {
+        table.iter().map(|cells| names(cells)).collect()
+    }
+
+    /// §3.4 的默认九列。
+    const HEADER: [&str; 9] = [
+        "序号",
+        "类型",
+        "位号",
+        "名称",
+        "数量",
+        "单位",
+        "规格",
+        "类型编码",
+        "图纸",
+    ];
+
+    /// §3.4 例子里的两行（管线 `L-1001`、泵 `P-1001`），再加一条管路上分画在两张图里的两个弯头。
+    fn exported() -> Bom {
+        let first = drawing_in(
+            "PID-1101",
+            "mm",
+            vec![
+                with_props(
+                    object(ObjectKind::PipeLine, "PIPE_LINE", "L-1001", "E0"),
+                    &[
+                        ("名称", "工艺水进料管线"),
+                        ("管道等级", "A1A"),
+                        ("公称直径", "50"),
+                    ],
+                ),
+                with_props(
+                    object(ObjectKind::Equipment, "PUMP", "P-1001", "E1"),
+                    &[("名称", "离心泵")],
+                ),
+                fitting("L-1001-01", Some("PID_SYM_FITTINGS_ELBOW"), "E2"),
+            ],
+            vec![segment("L-1001", None, 24510.0, "E3")],
+        );
+        let second = drawing(
+            "PID-1102",
+            vec![fitting("L-1001-01", Some("PID_SYM_FITTINGS_ELBOW"), "F0")],
+        );
+        build(&[first, second], &options()).expect("清单")
+    }
+
+    /// §3.4、§6：默认九列，列名与先后同 §3.4 的表，前两行就是那里的例子；数量是米的写满两位
+    /// 小数，「图纸」一格里几张图用分号隔开；`columns` 给空的也是默认九列。
+    #[test]
+    fn default_rows_are_the_nine_columns_of_section_3_4() {
+        let bom = exported();
+        let table = rows(&bom, None).expect("默认列");
+        assert_eq!(
+            table,
+            texts(&[
+                &HEADER,
+                &[
+                    "1",
+                    "管线",
+                    "L-1001",
+                    "工艺水进料管线",
+                    "24.51",
+                    "m",
+                    "A1A DN50",
+                    "PIPE_LINE",
+                    "PID-1101"
+                ],
+                &[
+                    "2",
+                    "设备",
+                    "P-1001",
+                    "离心泵",
+                    "1",
+                    "台",
+                    "",
+                    "PUMP",
+                    "PID-1101"
+                ],
+                &[
+                    "3",
+                    "管件",
+                    "L-1001-01",
+                    "弯头×2",
+                    "2",
+                    "个",
+                    "",
+                    "FITTING",
+                    "PID-1101;PID-1102"
+                ],
+            ])
+        );
+        assert_eq!(rows(&bom, Some(&[])).expect("空的选列"), table);
+
+        let short = drawing_in(
+            "PID-1",
+            "m",
+            vec![
+                object(ObjectKind::PipeLine, "PIPE_LINE", "L-1", "A0"),
+                object(ObjectKind::PipeLine, "PIPE_LINE", "L-2", "A1"),
+            ],
+            vec![segment("L-1", None, 2.5, "B0")],
+        );
+        let table = rows(&build(&[short], &options()).expect("清单"), None).expect("默认列");
+        let quantities: Vec<&str> = table[1..].iter().map(|cells| cells[4].as_str()).collect();
+        assert_eq!(quantities, ["2.50", "0.00"]);
+    }
+
+    /// §3.4：`columns` 选列、排列，列名去掉两头空白再认，同一列可以要两次；有不认识的列名报
+    /// `BOM_COLUMN_UNKNOWN`，列出全部不认识的，不出表。
+    #[test]
+    fn columns_pick_and_order_the_cells_and_unknown_names_are_refused() {
+        let bom = exported();
+        assert_eq!(
+            rows(&bom, Some(&names(&["图纸", "位号", "数量"]))).expect("选列"),
+            texts(&[
+                &["图纸", "位号", "数量"],
+                &["PID-1101", "L-1001", "24.51"],
+                &["PID-1101", "P-1001", "1"],
+                &["PID-1101;PID-1102", "L-1001-01", "2"],
+            ])
+        );
+        assert_eq!(
+            rows(&bom, Some(&names(&[" 名称 ", "名称"]))).expect("选列"),
+            texts(&[
+                &["名称", "名称"],
+                &["工艺水进料管线", "工艺水进料管线"],
+                &["离心泵", "离心泵"],
+                &["弯头×2", "弯头×2"],
+            ])
+        );
+        let error =
+            rows(&bom, Some(&names(&["位号", "Tag", "重量", " "]))).expect_err("不认识的列名");
+        assert_eq!(error, BomError::ColumnUnknown(names(&["Tag", "重量", " "])));
+        assert_eq!(error.code(), BOM_COLUMN_UNKNOWN);
+        assert!(
+            error.to_string().contains("「Tag」、「重量」、「 」"),
+            "{error}"
+        );
+    }
+
+    /// §3.4：副表六列（管道等级、公称直径、绝热等级、长度、单位、管线），长度写满两位小数，几条
+    /// 管线用分号隔开；没有管线时只有列名一行，主表也是。
+    #[test]
+    fn pipe_summary_rows_have_six_columns() {
+        const SUMMARY_HEADER: [&str; 6] =
+            ["管道等级", "公称直径", "绝热等级", "长度", "单位", "管线"];
+        let classed = [("管道等级", "A1A"), ("公称直径", "50")];
+        let summary = drawing_in(
+            "PID-1101",
+            "m",
+            vec![
+                with_props(
+                    object(ObjectKind::PipeLine, "PIPE_LINE", "L-1001", "G0"),
+                    &classed,
+                ),
+                with_props(
+                    object(ObjectKind::PipeLine, "PIPE_LINE", "L-1002", "G1"),
+                    &classed,
+                ),
+                object(ObjectKind::PipeLine, "PIPE_LINE", "L-1003", "G2"),
+            ],
+            vec![
+                segment("L-1001", None, 2.5, "H0"),
+                segment("L-1002", None, 1.0, "H1"),
+                segment("L-1003", None, 0.25, "H2"),
+            ],
+        );
+        let bom = build(&[summary], &options()).expect("清单");
+        assert_eq!(
+            pipe_summary_rows(&bom),
+            texts(&[
+                &SUMMARY_HEADER,
+                &["", "", "", "0.25", "m", "L-1003"],
+                &["A1A", "50", "", "3.50", "m", "L-1001;L-1002"],
+            ])
+        );
+        let empty = build(&[drawing("PID-1101", Vec::new())], &options()).expect("空清单");
+        assert_eq!(pipe_summary_rows(&empty), texts(&[&SUMMARY_HEADER]));
+        assert_eq!(rows(&empty, None).expect("默认列"), texts(&[&HEADER]));
+    }
+
+    /// §3.4、§6：CSV 字节以 BOM 头 `EF BB BF` 开始，其后是 UTF-8；逗号分隔，每行以换行结束；
+    /// 含逗号、引号、换行（含回车）的格子加双引号、引号成双，别的照写。
+    #[test]
+    fn csv_bytes_start_with_a_byte_order_mark_and_escape_cells() {
+        let bytes = csv_bytes(&texts(&[
+            &["名称", "规格"],
+            &["泵, 离心", "3\" 法兰"],
+            &["两行\n文字", "回车\r"],
+            &["", "普通"],
+        ]));
+        assert!(bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "{bytes:02X?}");
+        assert_eq!(
+            std::str::from_utf8(&bytes[3..]).expect("UTF-8"),
+            "名称,规格\n\"泵, 离心\",\"3\"\" 法兰\"\n\"两行\n文字\",\"回车\r\"\n,普通\n"
+        );
+        assert_eq!(
+            csv_bytes(&rows(&exported(), None).expect("默认列")),
+            concat!(
+                "\u{feff}序号,类型,位号,名称,数量,单位,规格,类型编码,图纸\n",
+                "1,管线,L-1001,工艺水进料管线,24.51,m,A1A DN50,PIPE_LINE,PID-1101\n",
+                "2,设备,P-1001,离心泵,1,台,,PUMP,PID-1101\n",
+                "3,管件,L-1001-01,弯头×2,2,个,,FITTING,PID-1101;PID-1102\n",
+            )
+            .as_bytes()
+        );
+        assert_eq!(csv_bytes(&[]), [0xEF, 0xBB, 0xBF]);
+    }
+
     /// xorshift64，测试自带的伪随机数（不加依赖）。
     struct Rng(u64);
 
@@ -1723,7 +2111,9 @@ mod tests {
     /// 各种线段，键撞上管件行或管线行的），要么报 `BOM_DUPLICATE_TAG`，要么产出的清单里键不重复；
     /// 报不报、报哪些键和照定义数出来的一致。产出的清单里副表长度之和与管线行长度之和相差不过
     /// 每行 0.005 米，管线行的实例数合起来是有管线位号的线段数，两条提示与 `length_unit_assumed`、
-    /// 有没有管线行对得上。同样的输入两次结果相同，图的先后不影响结果。
+    /// 有没有管线行对得上；默认列的文本表比清单多一行列名、每行九格、序号一列就是行序，副表的
+    /// 文本表也多一行列名，CSV 的行数与文本表相同（这些格子里没有要转义的字符）。同样的输入
+    /// 两次结果相同，图的先后不影响结果。
     #[test]
     fn random_summaries_either_report_duplicates_or_have_unique_keys() {
         const KINDS: [ObjectKind; 9] = [
@@ -1832,7 +2222,20 @@ mod tests {
                     let has = |code| bom.notices.iter().any(|notice| notice.code == code);
                     assert_eq!(has(LENGTH_UNIT_ASSUMED), bom.length_unit_assumed);
                     assert_eq!(has(LENGTH_FROM_DRAWING), !metres.is_empty());
+                    let table = rows(bom, None).expect("默认列");
+                    assert_eq!(table.len(), bom.rows.len() + 1);
+                    assert!(table.iter().all(|cells| cells.len() == 9));
+                    assert!(bom
+                        .rows
+                        .iter()
+                        .zip(&table[1..])
+                        .all(|(row, cells)| cells[0] == row.seq.to_string()));
+                    assert_eq!(pipe_summary_rows(bom).len(), bom.pipe_summary.len() + 1);
+                    let csv = csv_bytes(&table);
+                    let text = std::str::from_utf8(&csv[3..]).expect("UTF-8");
+                    assert_eq!(text.lines().count(), table.len());
                 }
+                Err(error) => panic!("算清单只会报重复键：{error}"),
             }
             assert_eq!(build(&drawings, &options()), result);
             drawings.reverse();
@@ -1841,6 +2244,82 @@ mod tests {
         assert!(
             reported > 50 && produced > 50,
             "报 {reported}，产出 {produced}"
+        );
+    }
+
+    /// 契约规模：2,000 个对象的合成图（`IX-4`）。
+    const SYNTHETIC_OBJECTS: usize = 2000;
+    /// 预算：一张图算一份清单（含做摘要）不超过 300 ms（成功标准第 9 条）。
+    const BUDGET: Duration = Duration::from_millis(300);
+    /// 采样次数：取中位数。
+    const RUNS: usize = 3;
+
+    /// 计时的是做摘要、取符号的显示名、算清单，`BOM-4` 的入口函数每次都做这三件事。合成图
+    /// 每组 20 个对象出 14 行：两条管线、三台设备、四个阀门、四块仪表、一条管路上的管件；没有跳过的。
+    #[test]
+    #[ignore]
+    fn bom_build_2000_objects_within_300_ms() {
+        let doc = synthetic_drawing(SYNTHETIC_OBJECTS);
+        let library = SymbolLibrary::builtin();
+        let meta = || SummaryMeta {
+            drawing_id: "PID-1101".to_owned(),
+            file: None,
+            pbs: None,
+            source: SummarySource::Open,
+            fingerprint: None,
+        };
+        let cells = SYNTHETIC_OBJECTS / 20;
+        let expected = ByKind {
+            pipe_line: 2 * cells,
+            equipment: 3 * cells,
+            valve: 4 * cells,
+            instrument: 4 * cells,
+            fitting: cells,
+            other: 0,
+        };
+        let mut samples = Vec::with_capacity(RUNS);
+        for run in 1..=RUNS {
+            let started = Instant::now();
+            let summary = summarize(&doc, &library, meta(), DEFAULT_TOLERANCE);
+            let summarized = started.elapsed();
+            let options = BomOptions {
+                symbol_labels: symbol_labels(&library),
+                ..options()
+            };
+            let bom = build(std::slice::from_ref(&summary), &options).expect("合成图的位号不重复");
+            let elapsed = started.elapsed();
+            println!(
+                "BOM-3 run {run}/{RUNS}: {:.2} ms (summary {:.2} ms), rows {}, pipe summary {}, skipped {}",
+                elapsed.as_secs_f64() * 1e3,
+                summarized.as_secs_f64() * 1e3,
+                bom.rows.len(),
+                bom.pipe_summary.len(),
+                bom.skipped.len()
+            );
+            assert_eq!(bom.totals.by_kind, expected, "run {run}");
+            assert!(
+                bom.skipped.is_empty(),
+                "run {run}: {:?}",
+                bom.skipped.first()
+            );
+            samples.push(elapsed);
+        }
+        samples.sort();
+        let median = samples[RUNS / 2];
+        let shown: Vec<String> = samples
+            .iter()
+            .map(|sample| format!("{:.2}", sample.as_secs_f64() * 1e3))
+            .collect();
+        println!(
+            "BOM-3 median {:.2} ms of {shown:?}, budget {} ms",
+            median.as_secs_f64() * 1e3,
+            BUDGET.as_millis()
+        );
+        assert!(
+            median <= BUDGET,
+            "BOM-3 超预算：中位数 {:.2} ms（{shown:?}），预算 {} ms",
+            median.as_secs_f64() * 1e3,
+            BUDGET.as_millis()
         );
     }
 }

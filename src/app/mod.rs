@@ -9,7 +9,7 @@ pub(crate) mod config;
 pub use automation::{export_headless, run_batch, serve};
 #[cfg(not(target_arch = "wasm32"))]
 pub use automation::{list_layouts_headless, plot_svg_headless, PlotSvgRequest};
-mod annotation_data;
+pub(crate) mod annotation_data;
 mod array_grips;
 mod block_action_bars;
 mod block_actions;
