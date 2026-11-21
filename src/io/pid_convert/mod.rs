@@ -12,8 +12,10 @@ pub mod recognize;
 #[cfg(not(target_arch = "wasm32"))]
 pub use promote::save_author_document_to_dual;
 pub use promote::{
-    promote_semantics_to_author, promote_sheet_to_author, sppid_class_to_author_type,
-    sync_author_after_edit, AuthorSyncReport, PromoteReport,
+    accept_author_handles, filter_author_handles, promote_semantics_to_author,
+    promote_sheet_to_author, reject_author_handles, sppid_class_to_author_type,
+    summarize_author_review, sync_author_after_edit, sync_paired_canvas_tag_texts,
+    AuthorReviewStats, AuthorSyncReport, PromoteReport,
 };
 
 pub use class_map::{

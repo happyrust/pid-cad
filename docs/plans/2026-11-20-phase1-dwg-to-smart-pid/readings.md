@@ -903,7 +903,45 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `193 passed` | **`193 passed`** | **全绿** |
 
+---
 
+## 25. L2-1 M4 / L2-2 / L2-3 / L2-4 / L3-7（#136）：属性面板读写联动、来源证据只读组与三档置信度交互校核存回闭环（2026-11-21）
 
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `ac6527ca1`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 修改文件 | `src/app/commands/pidprops.rs`、`src/io/pid_convert/{mod,recognize,promote}.rs`（零触碰并行活跃分支 `pid-symbol-on-main` 与 `pid-stage-c` 的全部修改文件） |
+| 证据目录子项 | `2026-11-21-issue136/`（`red.txt`、`green-fast.txt`、`real136_test.log`、`real_out/real136_summary.json`、`fmt.txt`、`arch.txt`、`pytest.txt`、`gate-*.txt`） |
 
+### 25.1 先红后绿与交互契约核验
 
+- **先红后绿**：`red.txt` 4 条应用内交互单测在骨架上全部变红（`0 passed; 4 failed`，退出码 `101`）→ 实现后 `green-fast.txt` 模块内 **`9 passed; 0 failed`**（退出码 `0`）：
+  1. **`L2-1 M4 + L2-2 + L2-3` 属性面板双分组与溢出保护**：选中升格或导入对象后，属性面板呈现可编辑 `P&ID 属性`（仅列位号与非下划线前缀业务属性如 `公称直径`、`对端图号`、`说明`）与只读 `P&ID 来源证据`（来源、置信度、置信度分档、SPPID 类、变体编码、符号路径、`GraphicOID`；注：因缺 `RES-12` SPPID 界面截图，按本平台标准双分组自设计并注明未对照实物）；编辑业务属性时自动透传 `>2,048 B` XRecord 分片且完整保留内部证据键；
+  2. **`L2-4` DWG/DXF 图面位号标注双向联动与单步撤销**：`recognize.rs` 与 `promote.rs` 追踪符号配对的图面文字句柄 `_tag_handles`（含单行设备/阀门位号及圈内上下双行仪表位号）；面板或 `PIDSETPROP` 修改 `pid_tag` 时同步更新图面 `TEXT` / `MTEXT`（冲突显示 `？`，双行仪表圈自动拆分上下行），`UNDO` / `REDO` 一步同时回滚 `PID_AUTHOR` 与图面文字；
+  3. **`L3-7` 应用内一键升格与三档置信度人工确认/驳回**：落地 `PIDPROMOTE [ALL | SELECTED | SEMANTICS]` 与 `PIDREVIEW [SUMMARY | HIGH | MEDIUM | LOW | DUPLICATES | ACCEPT | REJECT]`，支持按档位一键画布选中、`ACCEPT` 人工确认（转 `manual` + `confirmed`）与 `REJECT` 剔除假阳性（同步清理 `TopologyTable` 管件/连接符及悬挂 `SegmentEnd.peer`），均支持单步撤销；
+  4. **`L6-2` 应用内 `PIDSAVEPID` 前置重号门禁与双产物写出**：`PIDSAVEPID` 前置调用 `gate_save`（存在 `duplicated` 位号立即以 `TAG_DUPLICATED_BLOCKS_SAVE` 阻断保存且不写文件），冲突消除后直接写出 `.pid + _Data.xml + _Meta.xml + _Coverage.json`。
+
+### 25.2 真实中位规模生产图纸在 `OpenCADStudio` 应用内全链路交互验证
+
+| 交互步骤 | 应用内命令 / 面板操作 | 实测指标与结果 |
+|---|---|---|
+| 1. 一键升格 | `PIDPROMOTE` | 升格业务符号 **`115`** 个（`high = 103`、`medium = 12`、`low = 0`、`duplicated_tags = 0`） |
+| 2. 筛选中置信度 | `PIDREVIEW MEDIUM` | 画布自动选中全部 **`12 / 12`** 个中置信度待校核符号 |
+| 3. 批量人工确认 | `PIDREVIEW ACCEPT` | `medium` 归零（`0`），**`confirmed = 12`**、`manual_tags = 12`，三档总数 `103 + 12 = 115` 严格守恒 |
+| 4. 面板校核与改位号 | 选中阀门校验 `P&ID 来源证据` 并改 `pid_tag = BV-INAPP-136` | `pid_ev_source = convert:dxf` 只读组就位；配对图面 `TEXT` 实体同步更新为新位号 |
+| 5. 应用内直接存回 | `PIDSAVEPID "<out>.pid" SEED "<seed_zip>" SYMDIR "<sym_dir>"` | 写出 `.pid`（`671,744 B`）与 `_Data.xml`（`338,546 B`），跨文件 `GraphicOID` / `ModelID` / `DrawingID` **`165 / 165`（`100%`）** 对齐 |
+| 6. `a / b` 级闭环校验 | `verify_dual_bundle`（`PidParser` + Q9 索引 + CAD 重载 + `plot_pdf`） | `a` 级重读归一化实体 **`2,822`** 条且 `a_level_index_consistent = true`；`b` 级重载 **`940`** 个 CAD 实体并写出有效 PDF `114,039 B`（图元 **`572`**、页内 **`508`**；`c1` 标「SPPID 未验证」） |
+
+### 25.3 固定门禁读数
+
+| 门禁项 | 改前读数（§24.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,198` 条 | **`7,203` 条**（**`7,135` 过** / **`67` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+5` 条测试，**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `src/app/commands/pidprops.rs`、`src/io/pid_convert/{mod,recognize,promote}.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `193 passed` | **`193 passed`** | **全绿** |

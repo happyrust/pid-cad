@@ -23,6 +23,11 @@ use crate::t;
 /// Title of the author group. Kept apart from the recognizer's `P&ID` group
 /// (`PID_SEMANTICS` / marked GROUPs), which merges rows by that exact title.
 pub(in crate::app) const PID_AUTHOR_SECTION: &str = "P&ID 属性";
+pub(in crate::app) const PID_EVIDENCE_SECTION: &str = "P&ID 来源证据";
+
+inventory::submit!(crate::command::CommandRegistration {
+    names: &["PIDPROMOTE", "PIDREVIEW", "PIDSAVEPID"]
+});
 
 const TAG_FIELD: &str = "pid_tag";
 const PROPS_FIELD_PREFIX: &str = "pid_props_";
@@ -46,13 +51,15 @@ fn props_field(key: &str) -> &'static str {
     leaked
 }
 
-/// The `P&ID 属性` group for `handle`, or `None` when it carries no
-/// `PID_AUTHOR` record.
+/// The `P&ID 属性` group (plus read-only `P&ID 来源证据` when promoted/imported)
+/// for `handle`, or empty when it carries no `PID_AUTHOR` record (`L2-1 M4` / `#136`).
 pub(in crate::app) fn pid_author_section(
     document: &document::Document,
     handle: document::Handle,
-) -> Option<PropSection> {
-    let author = PidAuthor::load(document, handle)?;
+) -> Vec<PropSection> {
+    let Some(author) = PidAuthor::load(document, handle) else {
+        return Vec::new();
+    };
     let display = TagView::new(
         author.tag.clone(),
         author.tag_source.clone(),
@@ -71,20 +78,55 @@ pub(in crate::app) fn pid_author_section(
             "pid_tag_source",
             author.tag_source,
         ),
-        crate::entities::common::ro_prop(t!("Status").as_ref(), "pid_tag_status", author.tag_status),
+        crate::entities::common::ro_prop(
+            t!("Status").as_ref(),
+            "pid_tag_status",
+            author.tag_status,
+        ),
     ];
     let (values, _) = split_props(&author.props);
-    for (key, value) in values {
+    for (key, value) in &values {
+        if key.starts_with('_') {
+            continue;
+        }
         props.push(Property {
-            field: props_field(&key),
-            label: key,
-            value: PropValue::PlainText(value),
+            field: props_field(key),
+            label: key.clone(),
+            value: PropValue::PlainText(value.clone()),
         });
     }
-    Some(PropSection {
+    let mut sections = vec![PropSection {
         title: PID_AUTHOR_SECTION.to_string(),
         props,
-    })
+    }];
+
+    if values.contains_key("_source") || values.contains_key("_sppid_class") {
+        let mut ev_props = Vec::new();
+        for (label, field_id, key) in [
+            ("来源", "pid_ev_source", "_source"),
+            ("置信度", "pid_ev_confidence", "_confidence"),
+            ("置信度分档", "pid_ev_tier", "_confidence_tier"),
+            ("SPPID 类", "pid_ev_sppid_class", "_sppid_class"),
+            ("变体编码", "pid_ev_variant_id", "_variant_id"),
+            ("符号路径", "pid_ev_symbol_path", "_symbol_path"),
+            ("GraphicOID", "pid_ev_graphic_oid", "_graphic_oid"),
+        ] {
+            if let Some(val) = values.get(key).filter(|v| !v.is_empty()) {
+                ev_props.push(crate::entities::common::ro_prop(
+                    label,
+                    field_id,
+                    val.clone(),
+                ));
+            }
+        }
+        if !ev_props.is_empty() {
+            sections.push(PropSection {
+                title: PID_EVIDENCE_SECTION.to_string(),
+                props: ev_props,
+            });
+        }
+    }
+    sections
 }
 
 impl OpenCADStudio {
@@ -102,7 +144,7 @@ impl OpenCADStudio {
         let key = match field {
             TAG_FIELD => None,
             _ => match field.strip_prefix(PROPS_FIELD_PREFIX) {
-                Some(key) if !key.is_empty() => Some(key.to_string()),
+                Some(key) if !key.is_empty() && !key.starts_with('_') => Some(key.to_string()),
                 _ => return false,
             },
         };
@@ -129,7 +171,9 @@ impl OpenCADStudio {
                     .display;
                     value != author.tag && value != shown
                 }
-                Some(key) => split_props(&author.props).0.get(key).map(String::as_str) != Some(value),
+                Some(key) => {
+                    split_props(&author.props).0.get(key).map(String::as_str) != Some(value)
+                }
             })
             .collect();
         if changed.is_empty() {
@@ -160,6 +204,15 @@ impl OpenCADStudio {
         }
         let edited: Vec<document::Handle> = changed.iter().map(|(handle, _)| *handle).collect();
         self.refresh_pid_tags(i, &edited);
+        let synced_texts =
+            crate::io::pid_convert::sync_paired_canvas_tag_texts(&mut self.tabs[i].scene.document);
+        if !synced_texts.is_empty() {
+            let text_changes: Vec<_> = synced_texts
+                .into_iter()
+                .map(|handle| (handle, crate::scene::ChangeKind::Modified))
+                .collect();
+            self.tabs[i].scene.bump_entities(&text_changes);
+        }
         // 手工改管路字段之后，管路当前值要立刻下传给它的管段
         // （`VAL-PIPE-010`）；改管线字段同理级联到管路再级联到管段。
         self.propagate_pid_chain(i, &edited);
@@ -177,7 +230,20 @@ impl OpenCADStudio {
     /// it is what is selected; and with nothing selected, the symbol placed
     /// last on this drawing — so `PIDINSERT` followed by `PIDSETPROP` sets
     /// a property of what was just placed.
-    pub(in crate::app) fn dispatch_pidsetprop(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+    pub(in crate::app) fn dispatch_pidsetprop(
+        &mut self,
+        cmd: &str,
+        i: usize,
+    ) -> Option<Task<Message>> {
+        if let Some(t) = self.dispatch_pidpromote_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidreview_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidsavepid_cmd(cmd, i) {
+            return Some(t);
+        }
         let mut words = cmd.split_whitespace();
         if !words.next()?.eq_ignore_ascii_case("PIDSETPROP") {
             return None;
@@ -203,7 +269,10 @@ impl OpenCADStudio {
                     .filter_map(|entity| {
                         let handle = entity.common().handle;
                         let author = authored(&handle)?;
-                        author.tag.eq_ignore_ascii_case(tag).then_some((handle, author.tag))
+                        author
+                            .tag
+                            .eq_ignore_ascii_case(tag)
+                            .then_some((handle, author.tag))
                     })
                     .collect();
                 // The exact spelling wins; otherwise the letters must name
@@ -213,7 +282,8 @@ impl OpenCADStudio {
                     .filter(|(_, spelled)| spelled == tag)
                     .map(|(handle, _)| *handle)
                     .collect();
-                let mut spellings: Vec<&String> = carrying.iter().map(|(_, spelled)| spelled).collect();
+                let mut spellings: Vec<&String> =
+                    carrying.iter().map(|(_, spelled)| spelled).collect();
                 spellings.sort();
                 spellings.dedup();
                 if !exact.is_empty() {
@@ -237,7 +307,9 @@ impl OpenCADStudio {
                     // Nothing selected: the symbol placed last on this
                     // drawing, while it is still there.
                     self.pid_last_placed
-                        .filter(|(tab, handle)| *tab == self.tabs[i].id && authored(handle).is_some())
+                        .filter(|(tab, handle)| {
+                            *tab == self.tabs[i].id && authored(handle).is_some()
+                        })
                         .map(|(_, handle)| handle)
                         .into_iter()
                         .collect()
@@ -247,9 +319,13 @@ impl OpenCADStudio {
         if handles.is_empty() {
             let why = match tag {
                 Some(tag) => format!("没有位号为 {tag} 的对象（或有几种写法）"),
-                None => "没有选中带 P&ID 属性的对象，本图上也没有刚放置的符号；先选中一个，或写出位号".to_owned(),
+                None => {
+                    "没有选中带 P&ID 属性的对象，本图上也没有刚放置的符号；先选中一个，或写出位号"
+                        .to_owned()
+                }
             };
-            self.command_line.push_error(&format!("PIDSETPROP: {why}。"));
+            self.command_line
+                .push_error(&format!("PIDSETPROP: {why}。"));
             return Some(Task::none());
         }
         let named = PidAuthor::load(&self.tabs[i].scene.document, handles[0])
@@ -263,6 +339,314 @@ impl OpenCADStudio {
         }
         self.command_line
             .push_info(&format!("PIDSETPROP: {named} 的 {key} = {value}"));
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidpromote_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        let mut words = cmd.split_whitespace();
+        if !words.next()?.eq_ignore_ascii_case("PIDPROMOTE") {
+            return None;
+        }
+        let mode = words.next().unwrap_or("ALL").to_ascii_uppercase();
+        self.push_undo_snapshot(i, "PIDPROMOTE");
+        let selected: std::collections::BTreeSet<document::Handle> = self.tabs[i]
+            .scene
+            .selected_handles_in_order()
+            .into_iter()
+            .collect();
+
+        let report = match mode.as_str() {
+            "SEMANTICS" => {
+                let filter = (!selected.is_empty()).then_some(&selected);
+                crate::io::pid_convert::promote_semantics_to_author(
+                    &mut self.tabs[i].scene.document,
+                    filter,
+                )
+            }
+            "SELECTED" if !selected.is_empty() => {
+                crate::io::pid_convert::promote_semantics_to_author(
+                    &mut self.tabs[i].scene.document,
+                    Some(&selected),
+                )
+            }
+            _ => {
+                let opts = crate::io::pid_convert::ConvertOptions::default();
+                match crate::io::pid_convert::promote_sheet_to_author(
+                    &mut self.tabs[i].scene.document,
+                    &opts,
+                ) {
+                    Ok(mut rep) => {
+                        if rep.newly_promoted == 0 && rep.updated_in_place == 0 {
+                            rep = crate::io::pid_convert::promote_semantics_to_author(
+                                &mut self.tabs[i].scene.document,
+                                None,
+                            );
+                        }
+                        rep
+                    }
+                    Err(err) => {
+                        self.command_line.push_error(&format!("PIDPROMOTE: {err}"));
+                        return Some(Task::none());
+                    }
+                }
+            }
+        };
+
+        let authored_handles: Vec<(document::Handle, crate::scene::ChangeKind)> = self.tabs[i]
+            .scene
+            .document
+            .model_space_entities()
+            .filter_map(|ent| {
+                let h = ent.common().handle;
+                PidAuthor::load(&self.tabs[i].scene.document, h)
+                    .map(|_| (h, crate::scene::ChangeKind::Modified))
+            })
+            .collect();
+        if !authored_handles.is_empty() {
+            self.tabs[i].scene.bump_entities(&authored_handles);
+        }
+        self.tabs[i].dirty = true;
+        self.refresh_properties();
+        let rev = crate::io::pid_convert::summarize_author_review(&self.tabs[i].scene.document);
+        self.command_line.push_output(&format!(
+            "PIDPROMOTE: 新增升格 {} 个，原位更新 {} 个，保护手工位号 {} 个；置信度 high={} medium={} low={}（管段={}）。",
+            report.newly_promoted,
+            report.updated_in_place,
+            report.manual_tags_preserved,
+            rev.high,
+            rev.medium,
+            rev.low,
+            report.pipe_segments_promoted,
+        ));
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidreview_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        let mut words = cmd.split_whitespace();
+        if !words.next()?.eq_ignore_ascii_case("PIDREVIEW") {
+            return None;
+        }
+        let action = words.next().unwrap_or("SUMMARY").to_ascii_uppercase();
+        match action.as_str() {
+            "SUMMARY" => {
+                let rev =
+                    crate::io::pid_convert::summarize_author_review(&self.tabs[i].scene.document);
+                self.command_line.push_output(&format!(
+                    "PIDREVIEW: 总符号={} | high={} medium={} low={} confirmed={} | 手工位号={} 重号冲突={}",
+                    rev.total_authored_symbols,
+                    rev.high,
+                    rev.medium,
+                    rev.low,
+                    rev.confirmed,
+                    rev.manual_tags,
+                    rev.duplicated_tags,
+                ));
+            }
+            "HIGH" | "MEDIUM" | "MED" | "LOW" | "CONFIRMED" | "DUPLICATES" | "DUP" | "ALL" => {
+                let matched = crate::io::pid_convert::filter_author_handles(
+                    &self.tabs[i].scene.document,
+                    &action,
+                );
+                let count = matched.len();
+                self.tabs[i].scene.deselect_all();
+                if !matched.is_empty() {
+                    self.tabs[i].scene.select_entities(&matched);
+                }
+                self.refresh_properties();
+                self.command_line
+                    .push_output(&format!("PIDREVIEW {action}: 已选中 {count} 个对象。"));
+            }
+            "ACCEPT" => {
+                let selected = self.tabs[i].scene.selected_handles_in_order();
+                if selected.is_empty() {
+                    self.command_line.push_error(
+                        "PIDREVIEW ACCEPT: 请先选中要确认的对象（如先运行 PIDREVIEW MEDIUM）。",
+                    );
+                    return Some(Task::none());
+                }
+                self.push_undo_snapshot(i, "PIDREVIEW_ACCEPT");
+                let accepted = crate::io::pid_convert::accept_author_handles(
+                    &mut self.tabs[i].scene.document,
+                    &selected,
+                );
+                let changes: Vec<_> = selected
+                    .iter()
+                    .map(|&h| (h, crate::scene::ChangeKind::Modified))
+                    .collect();
+                self.tabs[i].scene.bump_entities(&changes);
+                self.tabs[i].dirty = true;
+                self.refresh_properties();
+                self.command_line
+                    .push_output(&format!("PIDREVIEW ACCEPT: 已人工确认 {accepted} 个对象。"));
+            }
+            "REJECT" => {
+                let selected = self.tabs[i].scene.selected_handles_in_order();
+                if selected.is_empty() {
+                    self.command_line
+                        .push_error("PIDREVIEW REJECT: 请先选中要剔除语义的对象。");
+                    return Some(Task::none());
+                }
+                self.push_undo_snapshot(i, "PIDREVIEW_REJECT");
+                let (removed, sync) = crate::io::pid_convert::reject_author_handles(
+                    &mut self.tabs[i].scene.document,
+                    &selected,
+                );
+                let changes: Vec<_> = selected
+                    .iter()
+                    .map(|&h| (h, crate::scene::ChangeKind::Modified))
+                    .collect();
+                self.tabs[i].scene.bump_entities(&changes);
+                self.tabs[i].dirty = true;
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDREVIEW REJECT: 已移除 {} 个对象的 P&ID 语义（清理拓扑记录 {} 条、悬挂端点 {} 处）。",
+                    removed, sync.pruned_records, sync.cleared_dangling_peers
+                ));
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDREVIEW: 未知子命令 {other}（支持 SUMMARY / HIGH / MEDIUM / LOW / DUPLICATES / ACCEPT / REJECT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
+        Some(self.finish_dispatch(cmd))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn dispatch_pidsavepid_cmd(&mut self, cmd: &str, _i: usize) -> Option<Task<Message>> {
+        let mut words = cmd.split_whitespace();
+        if !words.next()?.eq_ignore_ascii_case("PIDSAVEPID") {
+            return None;
+        }
+        self.command_line
+            .push_error("PIDSAVEPID: Web 版本不支持直接写出本地 .pid 文件。");
+        Some(Task::none())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dispatch_pidsavepid_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDSAVEPID") {
+            return None;
+        }
+        let mut target_opt: Option<std::path::PathBuf> = None;
+        let mut seed_opt: Option<String> = None;
+        let mut symdir_opt: Option<String> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            if tok.eq_ignore_ascii_case("SEED") {
+                if let Some(val) = tokens.get(idx + 1) {
+                    seed_opt = Some(val.clone());
+                    idx += 2;
+                    continue;
+                }
+            } else if tok.eq_ignore_ascii_case("SYMDIR") {
+                if let Some(val) = tokens.get(idx + 1) {
+                    symdir_opt = Some(val.clone());
+                    idx += 2;
+                    continue;
+                }
+            } else if target_opt.is_none() {
+                target_opt = Some(std::path::PathBuf::from(tok));
+            }
+            idx += 1;
+        }
+
+        let target_pid = match target_opt.or_else(|| self.pid_source(i)) {
+            Some(mut p) => {
+                if p.extension().is_none() {
+                    p.set_extension("pid");
+                }
+                p
+            }
+            None => {
+                self.command_line.push_error(
+                    "PIDSAVEPID: 请指定输出路径，例如 PIDSAVEPID \"out.pid\" [SEED \"seed.pid\"]。",
+                );
+                return Some(Task::none());
+            }
+        };
+
+        if let Err(err) = crate::pid::propagate::gate_save(&self.tabs[i].scene.document) {
+            self.command_line.push_error(&format!(
+                "PIDSAVEPID: 存在重复位号冲突（{}），已阻断保存：{err}",
+                err.code()
+            ));
+            return Some(Task::none());
+        }
+
+        let _ = crate::io::pid_convert::sync_author_after_edit(&mut self.tabs[i].scene.document);
+        let fallback_seed = seed_opt
+            .or_else(|| std::env::var("OCS_PID_SEED_ZIP").ok())
+            .or_else(|| self.pid_source(i).map(|p| p.to_string_lossy().into_owned()));
+        let doc_stem = target_pid
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let out_dir = target_pid
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        if let Err(err) = std::fs::create_dir_all(&out_dir) {
+            self.command_line.push_error(&format!(
+                "PIDSAVEPID: 无法创建目录 {}: {err}",
+                out_dir.display()
+            ));
+            return Some(Task::none());
+        }
+
+        let opts = crate::io::pid_convert::ConvertOptions {
+            seed_pid_path: fallback_seed,
+            sym_library_dir: symdir_opt.or_else(|| std::env::var("OCS_PID_SYM_DIR").ok()),
+            verify_plot_pdf: false,
+            ..Default::default()
+        };
+        let dual = match crate::io::pid_convert::save_author_document_to_dual(
+            &self.tabs[i].scene.document,
+            &doc_stem,
+            &opts,
+        ) {
+            Ok(b) => b,
+            Err(err) => {
+                self.command_line
+                    .push_error(&format!("PIDSAVEPID: 存回失败：{err}"));
+                return Some(Task::none());
+            }
+        };
+
+        let Some(ref pid_bytes) = dual.pid_bytes else {
+            self.command_line.push_error(
+                "PIDSAVEPID: 未配置种子模板 .pid（可通过 SEED 参数或 OCS_PID_SEED_ZIP 指定）。",
+            );
+            return Some(Task::none());
+        };
+        if let Err(err) = std::fs::write(&target_pid, pid_bytes) {
+            self.command_line
+                .push_error(&format!("PIDSAVEPID: 写入 .pid 失败：{err}"));
+            return Some(Task::none());
+        }
+        let data_xml_path = out_dir.join(format!("{doc_stem}_Data.xml"));
+        let meta_xml_path = out_dir.join(format!("{doc_stem}_Meta.xml"));
+        let cov_path = out_dir.join(format!("{doc_stem}_Coverage.json"));
+        let _ = std::fs::write(&data_xml_path, &dual.publish.data_xml);
+        let _ = std::fs::write(&meta_xml_path, &dual.publish.meta_xml);
+        let _ = std::fs::write(&cov_path, &dual.publish.coverage_json);
+
+        if self.tabs[i].current_path.as_deref() == Some(target_pid.as_path()) {
+            self.tabs[i].dirty = false;
+        }
+        self.command_line.push_output(&format!(
+            "PIDSAVEPID: 已写出 {}（{} 字节，对象={}，关系={}）及同名 _Data.xml / _Meta.xml。",
+            target_pid.display(),
+            pid_bytes.len(),
+            dual.report.total_items_written,
+            dual.report.total_relations_written,
+        ));
         Some(self.finish_dispatch(cmd))
     }
 
@@ -387,7 +771,10 @@ pub(in crate::app) fn mark_manual_run_overrides(
     let Some(author) = PidAuthor::load(document, handle) else {
         return;
     };
-    if !author.type_code.eq_ignore_ascii_case(crate::pid::topology::TYPE_PIPE_RUN) {
+    if !author
+        .type_code
+        .eq_ignore_ascii_case(crate::pid::topology::TYPE_PIPE_RUN)
+    {
         return;
     }
     let (props, mut marks) = split_props(&author.props);
@@ -408,6 +795,34 @@ pub(in crate::app) fn mark_manual_run_overrides(
     author.store(document, handle);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn tokenize_command_words(cmd: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    for ch in cmd.chars() {
+        match quote {
+            Some(q) if ch == q => {
+                quote = None;
+            }
+            Some(_) => cur.push(ch),
+            None if ch == '"' || ch == '\'' => {
+                quote = Some(ch);
+            }
+            None if ch.is_whitespace() => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            None => cur.push(ch),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,12 +837,16 @@ mod tests {
         req["revision"] = state["revision"].clone();
         req["client_id"] = json!("test");
         if req.get("request_id").is_none() {
-            req["request_id"] = json!(format!("pidprops-{}", SERIAL.fetch_add(1, Ordering::Relaxed)));
+            req["request_id"] = json!(format!(
+                "pidprops-{}",
+                SERIAL.fetch_add(1, Ordering::Relaxed)
+            ));
         }
         let (response, task) = app.control_request(req.clone());
         app.drive_headless_task(task).unwrap();
         if matches!(response["status"].as_str(), Some("accepted" | "running")) {
-            app.control_request(json!({"op":"operation","request_id":req["request_id"]})).0
+            app.control_request(json!({"op":"operation","request_id":req["request_id"]}))
+                .0
         } else {
             response
         }
@@ -484,7 +903,12 @@ mod tests {
         sections
             .into_iter()
             .find(|section| section["title"] == PID_AUTHOR_SECTION)
-            .map(|section| section["properties"].as_array().cloned().unwrap_or_default())
+            .map(|section| {
+                section["properties"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
     }
 
     fn row_value(rows: &[Value], id: &str) -> Option<String> {
@@ -512,23 +936,46 @@ mod tests {
         select(&mut app, vessel);
         let rows = author_rows(&mut app).expect("P&ID 属性 group for an authored symbol");
         let stored = author(&app, vessel);
-        assert_eq!(row_value(&rows, "pid_type").as_deref(), Some(stored.type_code.as_str()));
-        assert_eq!(row_value(&rows, "pid_tag").as_deref(), Some(stored.tag.as_str()));
-        assert_eq!(row_value(&rows, "pid_tag_source").as_deref(), Some(stored.tag_source.as_str()));
-        assert_eq!(row_value(&rows, "pid_tag_status").as_deref(), Some(stored.tag_status.as_str()));
-        assert_eq!(row_value(&rows, "pid_props_设计压力").as_deref(), Some("1.6MPa"));
-        assert_eq!(row_value(&rows, "pid_props_设计温度").as_deref(), Some("120℃"));
+        assert_eq!(
+            row_value(&rows, "pid_type").as_deref(),
+            Some(stored.type_code.as_str())
+        );
+        assert_eq!(
+            row_value(&rows, "pid_tag").as_deref(),
+            Some(stored.tag.as_str())
+        );
+        assert_eq!(
+            row_value(&rows, "pid_tag_source").as_deref(),
+            Some(stored.tag_source.as_str())
+        );
+        assert_eq!(
+            row_value(&rows, "pid_tag_status").as_deref(),
+            Some(stored.tag_status.as_str())
+        );
+        assert_eq!(
+            row_value(&rows, "pid_props_设计压力").as_deref(),
+            Some("1.6MPa")
+        );
+        assert_eq!(
+            row_value(&rows, "pid_props_设计温度").as_deref(),
+            Some("120℃")
+        );
         assert!(rows.len() >= 4 + 2, "rows: {rows:?}");
         assert!(rows.iter().any(|row| row["label"] == "设计压力"));
 
         let line = app
-            .commit_entity_handle(document::EntityType::Line(document::entities::Line::from_points(
-                document::types::Vector3::ZERO,
-                document::types::Vector3::new(10.0, 0.0, 0.0),
-            )))
+            .commit_entity_handle(document::EntityType::Line(
+                document::entities::Line::from_points(
+                    document::types::Vector3::ZERO,
+                    document::types::Vector3::new(10.0, 0.0, 0.0),
+                ),
+            ))
             .expect("line commits");
         select(&mut app, line);
-        assert!(author_rows(&mut app).is_none(), "a plain LINE has no P&ID 属性 group");
+        assert!(
+            author_rows(&mut app).is_none(),
+            "a plain LINE has no P&ID 属性 group"
+        );
     }
 
     /// `VAL-DRAW-026`: a props edit lands in XDATA, other keys untouched.
@@ -544,7 +991,10 @@ mod tests {
         assert_eq!(values.len(), 2);
         assert!(marks.is_empty(), "equipment props carry no override mark");
         let rows = author_rows(&mut app).unwrap();
-        assert_eq!(row_value(&rows, "pid_props_设计压力").as_deref(), Some("2.5MPa"));
+        assert_eq!(
+            row_value(&rows, "pid_props_设计压力").as_deref(),
+            Some("2.5MPa")
+        );
     }
 
     /// `VAL-DRAW-027` / `028`: a tag edit makes the tag manual, relabels the
@@ -554,7 +1004,10 @@ mod tests {
         let mut app = app();
         let vessel = placed_vessel(&mut app, 200.0);
         let before = author(&app, vessel);
-        assert_eq!((before.tag.as_str(), before.tag_source.as_str()), ("P-1001", "auto"));
+        assert_eq!(
+            (before.tag.as_str(), before.tag_source.as_str()),
+            ("P-1001", "auto")
+        );
         select(&mut app, vessel);
         set(&mut app, "pid_tag", "P-9001");
         let after = author(&app, vessel);
@@ -566,7 +1019,10 @@ mod tests {
         let undone = request(&mut app, json!({"op":"undo"}));
         assert_eq!(undone["ok"], true, "{undone}");
         let back = author(&app, vessel);
-        assert_eq!((back.tag.as_str(), back.tag_source.as_str()), ("P-1001", "auto"));
+        assert_eq!(
+            (back.tag.as_str(), back.tag_source.as_str()),
+            ("P-1001", "auto")
+        );
         assert_eq!(label(&app, vessel).as_deref(), Some("P-1001"));
         select(&mut app, vessel);
         let rows = author_rows(&mut app).unwrap();
@@ -575,7 +1031,10 @@ mod tests {
         let redone = request(&mut app, json!({"op":"redo"}));
         assert_eq!(redone["ok"], true, "{redone}");
         let again = author(&app, vessel);
-        assert_eq!((again.tag.as_str(), again.tag_source.as_str()), ("P-9001", "manual"));
+        assert_eq!(
+            (again.tag.as_str(), again.tag_source.as_str()),
+            ("P-9001", "manual")
+        );
     }
 
     /// A tag edited into a clash shows `？` in the group and on the canvas.
@@ -593,7 +1052,10 @@ mod tests {
         assert_eq!(author(&app, first).tag_status, "ok");
         let rows = author_rows(&mut app).unwrap();
         assert_eq!(row_value(&rows, "pid_tag").as_deref(), Some("？"));
-        assert_eq!(row_value(&rows, "pid_tag_status").as_deref(), Some("duplicated"));
+        assert_eq!(
+            row_value(&rows, "pid_tag_status").as_deref(),
+            Some("duplicated")
+        );
         assert_eq!(label(&app, second).as_deref(), Some("？"));
     }
 
@@ -649,13 +1111,13 @@ mod tests {
         draw(&mut app, "PIDPIPE", &[[0.0, 0.0, 0.0], [200.0, 0.0, 0.0]]);
         let table = TopologyTable::load(&app.tabs[app.active_tab].scene.document);
         let line = parse_handle(&table.pipe_lines[0].handle).expect("handle");
-        put_props(
-            &mut app,
-            line,
-            &[("管道等级", "A1A"), ("公称直径", "DN50")],
-        );
+        put_props(&mut app, line, &[("管道等级", "A1A"), ("公称直径", "DN50")]);
 
-        draw(&mut app, "PIDPIPE run", &[[0.0, 0.0, 0.0], [200.0, 0.0, 0.0]]);
+        draw(
+            &mut app,
+            "PIDPIPE run",
+            &[[0.0, 0.0, 0.0], [200.0, 0.0, 0.0]],
+        );
         let table = TopologyTable::load(&app.tabs[app.active_tab].scene.document);
         let run = parse_handle(&table.pipe_runs[0].handle).expect("handle");
         let segment = parse_handle(&table.pipe_segments[0].handle).expect("handle");
@@ -670,7 +1132,11 @@ mod tests {
         assert_eq!(field(&app, segment, "公称直径"), "DN80", "管段跟随管路");
 
         // 管线改值：被覆盖的字段不穿透，未覆盖的仍下传。
-        put_props(&mut app, line, &[("公称直径", "DN150"), ("管道等级", "A2B")]);
+        put_props(
+            &mut app,
+            line,
+            &[("公称直径", "DN150"), ("管道等级", "A2B")],
+        );
         assert_eq!(field(&app, run, "公称直径"), "DN80");
         assert_eq!(field(&app, run, "管道等级"), "A2B");
         assert_eq!(field(&app, segment, "公称直径"), "DN80");
@@ -696,5 +1162,526 @@ mod tests {
             }),
         );
         assert_eq!(done["ok"], true, "写 props 应成功：{done}");
+    }
+
+    // ── #136: L2-1 M4 / L2-2 / L2-3 / L2-4 / L3-7 / L6-2 交互面板与命令闭环 ──
+
+    fn define_sppid_block(doc: &mut document::Document, name: &str, w: f64, h: f64) {
+        use document::entities::{Block, BlockEnd, Line, Point};
+        use document::tables::BlockRecord;
+        use document::types::Vector3;
+        if doc.block_records.get(name).is_some() {
+            return;
+        }
+        let next = doc.next_handle();
+        let br_h = document::Handle::new(next);
+        let b_h = document::Handle::new(next + 1);
+        let e_h = document::Handle::new(next + 2);
+        let mut rec = BlockRecord::new(name);
+        rec.handle = br_h;
+        rec.block_entity_handle = b_h;
+        rec.block_end_handle = e_h;
+        doc.block_records.add(rec).unwrap();
+        let mut blk = Block::new(name, Vector3::ZERO);
+        blk.common.handle = b_h;
+        blk.common.owner_handle = br_h;
+        doc.add_entity(document::EntityType::Block(blk)).unwrap();
+        let mut end = BlockEnd::new();
+        end.common.handle = e_h;
+        end.common.owner_handle = br_h;
+        doc.add_entity(document::EntityType::BlockEnd(end)).unwrap();
+        let mut ln = Line::from_points(
+            Vector3::new(-w * 0.5, -h * 0.5, 0.0),
+            Vector3::new(w * 0.5, h * 0.5, 0.0),
+        );
+        ln.common.owner_handle = br_h;
+        doc.add_entity(document::EntityType::Line(ln)).unwrap();
+        for px in [-w * 0.5, w * 0.5] {
+            let mut pt = Point::new();
+            pt.location = Vector3::new(px, 0.0, 0.0);
+            pt.common.owner_handle = br_h;
+            doc.add_entity(document::EntityType::Point(pt)).unwrap();
+        }
+    }
+
+    fn seed_dxf_sheet_in_app(
+        app: &mut OpenCADStudio,
+    ) -> (
+        document::Handle,
+        document::Handle,
+        document::Handle,
+        document::Handle,
+        document::Handle,
+        document::Handle,
+    ) {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+        let doc = &mut app.tabs[app.active_tab].scene.document;
+        define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+        define_sppid_block(doc, "DCS FUNC ACCESS IN PRIME LOC", 8.0, 8.0);
+        define_sppid_block(doc, "GATE VALVE", 6.0, 4.0);
+
+        // High-confidence tagged valve + single-line DWG TEXT
+        let mut v = Insert::new("BALL VALVE TYPE 2", Vector3::new(50.0, 100.0, 0.0));
+        v.common.layer = "11".to_string();
+        let valve_h = doc.add_entity(document::EntityType::Insert(v)).unwrap();
+        let mut vt =
+            Text::with_value("BV0201501A", Vector3::new(47.0, 106.0, 0.0)).with_height(2.5);
+        vt.common.layer = "11".to_string();
+        let valve_txt_h = doc.add_entity(document::EntityType::Text(vt)).unwrap();
+
+        // High-confidence 2-line instrument bubble (PT / 02013)
+        let mut inst = Insert::new(
+            "DCS FUNC ACCESS IN PRIME LOC",
+            Vector3::new(110.0, 100.0, 0.0),
+        );
+        inst.common.layer = "12".to_string();
+        let inst_h = doc.add_entity(document::EntityType::Insert(inst)).unwrap();
+        let mut top_t = Text::with_value("PT", Vector3::new(108.5, 102.0, 0.0)).with_height(2.2);
+        top_t.common.layer = "12".to_string();
+        let inst_top_h = doc.add_entity(document::EntityType::Text(top_t)).unwrap();
+        let mut bot_t = Text::with_value("02013", Vector3::new(107.0, 97.5, 0.0)).with_height(2.2);
+        bot_t.common.layer = "12".to_string();
+        let inst_bot_h = doc.add_entity(document::EntityType::Text(bot_t)).unwrap();
+
+        // Medium-confidence untagged valve + connected pipe segment
+        let mut gv = Insert::new("BALL VALVE TYPE 2", Vector3::new(170.0, 100.0, 0.0));
+        gv.common.layer = "11".to_string();
+        let med_gv_h = doc.add_entity(document::EntityType::Insert(gv)).unwrap();
+        let mut seg = Line::from_points(
+            Vector3::new(53.0, 100.0, 0.0),
+            Vector3::new(167.0, 100.0, 0.0),
+        );
+        seg.common.layer = "11".to_string();
+        doc.add_entity(document::EntityType::Line(seg)).unwrap();
+        let mut line_lbl =
+            Text::with_value("50-PG-02011-B9-", Vector3::new(90.0, 103.0, 0.0)).with_height(2.5);
+        line_lbl.common.layer = "11".to_string();
+        doc.add_entity(document::EntityType::Text(line_lbl))
+            .unwrap();
+
+        (
+            valve_h,
+            valve_txt_h,
+            inst_h,
+            inst_top_h,
+            inst_bot_h,
+            med_gv_h,
+        )
+    }
+
+    fn section_rows(app: &mut OpenCADStudio, section_title: &str) -> Option<Vec<Value>> {
+        let read = request(app, json!({"op":"properties"}));
+        let sections = read["sections"]
+            .as_array()
+            .or_else(|| read["result"]["sections"].as_array())
+            .cloned()
+            .unwrap_or_default();
+        sections
+            .into_iter()
+            .find(|section| section["title"] == section_title)
+            .map(|section| {
+                section["properties"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+    }
+
+    fn dwg_text_val(app: &OpenCADStudio, h: document::Handle) -> String {
+        match app.tabs[app.active_tab].scene.document.get_entity(h) {
+            Some(document::EntityType::Text(t)) => t.value.clone(),
+            Some(document::EntityType::MText(mt)) => mt.value.clone(),
+            other => panic!("expected Text/MText, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn l2_m4_l2_3_promoted_symbol_separates_readonly_evidence_group_and_preserves_overflow_metadata_on_edit(
+    ) {
+        let mut app = app();
+        let (valve_h, _, _, _, _, _) = seed_dxf_sheet_in_app(&mut app);
+        let _ = app.run_command_line("PIDPROMOTE");
+
+        // Add >2048B business prop so XRecord overflow is exercised too
+        {
+            let doc = &mut app.tabs[app.active_tab].scene.document;
+            let mut auth = PidAuthor::load(doc, valve_h).expect("promoted valve has PID_AUTHOR");
+            let mut pmap: serde_json::Map<String, Value> =
+                serde_json::from_str(&auth.props).unwrap();
+            pmap.insert("公称直径".to_string(), json!("50 mm"));
+            pmap.insert("备注长文".to_string(), json!("N".repeat(2400)));
+            auth.props = Value::Object(pmap).to_string();
+            auth.store(doc, valve_h);
+        }
+
+        select(&mut app, valve_h);
+        let edit_rows = author_rows(&mut app).expect("editable P&ID 属性 group");
+        let ev_rows = section_rows(&mut app, PID_EVIDENCE_SECTION)
+            .expect("read-only P&ID 来源证据 group must exist for promoted symbols");
+
+        // Internal `_` keys must NOT leak into editable P&ID 属性 rows
+        assert!(
+            edit_rows
+                .iter()
+                .all(|r| !r["label"].as_str().unwrap_or("").starts_with('_')),
+            "internal keys leaked into editable rows: {edit_rows:?}"
+        );
+        assert_eq!(
+            row_value(&edit_rows, "pid_props_公称直径").as_deref(),
+            Some("50 mm")
+        );
+        assert_eq!(
+            row_value(&ev_rows, "pid_ev_source").as_deref(),
+            Some("convert:dxf")
+        );
+        assert_eq!(
+            row_value(&ev_rows, "pid_ev_sppid_class").as_deref(),
+            Some("PIDPipingComponent")
+        );
+
+        // Editing a business property preserves overflowed internal evidence keys
+        set(&mut app, "pid_props_公称直径", "80 mm");
+        let after = author(&app, valve_h);
+        let after_map: serde_json::Map<String, Value> = serde_json::from_str(&after.props).unwrap();
+        assert_eq!(
+            after_map.get("公称直径").and_then(Value::as_str),
+            Some("80 mm")
+        );
+        assert_eq!(
+            after_map.get("_sppid_class").and_then(Value::as_str),
+            Some("PIDPipingComponent")
+        );
+        assert_eq!(
+            after_map
+                .get("备注长文")
+                .and_then(Value::as_str)
+                .map(str::len),
+            Some(2400)
+        );
+    }
+
+    #[test]
+    fn l2_4_editing_promoted_tag_updates_paired_single_and_two_line_dwg_texts_and_undoes_atomically(
+    ) {
+        let mut app = app();
+        let (valve_h, valve_txt_h, inst_h, inst_top_h, inst_bot_h, _) =
+            seed_dxf_sheet_in_app(&mut app);
+        let _ = app.run_command_line("PIDPROMOTE");
+
+        // 1. Single-line valve tag edit updates paired DWG Text and UNDO restores both
+        select(&mut app, valve_h);
+        set(&mut app, "pid_tag", "BV-9901A");
+        assert_eq!(author(&app, valve_h).tag, "BV-9901A");
+        assert_eq!(author(&app, valve_h).tag_source, "manual");
+        assert_eq!(dwg_text_val(&app, valve_txt_h), "BV-9901A");
+
+        let _ = request(&mut app, json!({"op":"undo"}));
+        assert_eq!(author(&app, valve_h).tag, "BV0201501A");
+        assert_eq!(dwg_text_val(&app, valve_txt_h), "BV0201501A");
+
+        let _ = request(&mut app, json!({"op":"redo"}));
+        assert_eq!(dwg_text_val(&app, valve_txt_h), "BV-9901A");
+
+        // 2. Two-line instrument bubble tag edit splits across top & bottom DWG Texts
+        select(&mut app, inst_h);
+        set(&mut app, "pid_tag", "FT-08888");
+        assert_eq!(author(&app, inst_h).tag, "FT-08888");
+        assert_eq!(dwg_text_val(&app, inst_top_h), "FT");
+        assert_eq!(dwg_text_val(&app, inst_bot_h), "08888");
+
+        let _ = request(&mut app, json!({"op":"undo"}));
+        assert_eq!(dwg_text_val(&app, inst_top_h), "PT");
+        assert_eq!(dwg_text_val(&app, inst_bot_h), "02013");
+    }
+
+    #[test]
+    fn l3_7_pidpromote_and_pidreview_filter_accept_reject_and_undo_in_app() {
+        let mut app = app();
+        let (valve_h, _, _, _, _, med_gv_h) = seed_dxf_sheet_in_app(&mut app);
+        let _ = app.run_command_line("PIDPROMOTE");
+
+        // Medium-confidence untagged gate valve is selected by PIDREVIEW MEDIUM
+        let _ = app.run_command_line("PIDREVIEW MEDIUM");
+        let sel = app.tabs[app.active_tab].scene.selected_handles_in_order();
+        assert_eq!(sel, vec![med_gv_h]);
+
+        // PIDREVIEW ACCEPT marks it manual + confirmed
+        let _ = app.run_command_line("PIDREVIEW ACCEPT");
+        let accepted = author(&app, med_gv_h);
+        assert_eq!(accepted.tag_source, "manual");
+        let acc_map: serde_json::Map<String, Value> =
+            serde_json::from_str(&accepted.props).unwrap();
+        assert_eq!(
+            acc_map.get("_confidence_tier").and_then(Value::as_str),
+            Some("confirmed")
+        );
+
+        // Undo ACCEPT -> back to medium, then REJECT removes PID_AUTHOR and prunes topology peer
+        let _ = request(&mut app, json!({"op":"undo"}));
+        select(&mut app, med_gv_h);
+        let _ = app.run_command_line("PIDREVIEW REJECT");
+        assert!(
+            PidAuthor::load(&app.tabs[app.active_tab].scene.document, med_gv_h).is_none(),
+            "rejected symbol must lose PID_AUTHOR"
+        );
+        let med_hex = hex(med_gv_h);
+        let topo = TopologyTable::load(&app.tabs[app.active_tab].scene.document);
+        assert!(topo.fittings.iter().all(|f| f.handle != med_hex));
+        assert!(PidAuthor::load(&app.tabs[app.active_tab].scene.document, valve_h).is_some());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn l6_2_pidsavepid_blocks_duplicate_tags_then_writes_valid_dual_pid_and_xml_after_fix() {
+        use pid_parse::{PidDocument, PidPackage, PidWriter, RawStream, WritePlan};
+        fn wrap_psm(type_code: u16, payload: &[u8]) -> Vec<u8> {
+            let mut v = Vec::with_capacity(6 + payload.len());
+            v.extend_from_slice(&0x0001u16.to_le_bytes());
+            v.extend_from_slice(&type_code.to_le_bytes());
+            v.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+            v.extend_from_slice(payload);
+            v
+        }
+        fn make_layer(oid: u32, name: &str) -> Vec<u8> {
+            let u16s: Vec<u16> = name.encode_utf16().collect();
+            let mut p = Vec::new();
+            p.extend_from_slice(&oid.to_le_bytes());
+            p.extend_from_slice(&[0u8; 8]);
+            p.extend_from_slice(&0u16.to_le_bytes());
+            p.extend_from_slice(&6u32.to_le_bytes());
+            p.extend_from_slice(&(u16s.len() as u16).to_le_bytes());
+            for u in u16s {
+                p.extend_from_slice(&u.to_le_bytes());
+            }
+            p.extend_from_slice(&0u16.to_le_bytes());
+            wrap_psm(0x0081, &p)
+        }
+        let mut empty_chain = 0x6C90_F544u32.to_le_bytes().to_vec();
+        empty_chain.extend_from_slice(&0u32.to_le_bytes());
+        let mut cluster0 = 0x6C90_F544u32.to_le_bytes().to_vec();
+        cluster0.extend_from_slice(&2u32.to_le_bytes());
+        cluster0.extend_from_slice(&make_layer(8, "Default"));
+        cluster0.extend_from_slice(&make_layer(12, "Labels"));
+        let mut streams = std::collections::BTreeMap::new();
+        for (p, data) in [
+            ("/Sheet6", empty_chain.clone()),
+            ("/PSMcluster0", cluster0),
+            ("/Unclustered Dynamic Attributes", empty_chain.clone()),
+            ("/StyleCluster", empty_chain),
+        ] {
+            streams.insert(
+                p.to_string(),
+                RawStream {
+                    path: p.to_string(),
+                    data,
+                    modified: false,
+                },
+            );
+        }
+        streams.insert(
+            "/TaggedTxtData/Revision".to_string(),
+            RawStream {
+                path: "/TaggedTxtData/Revision".to_string(),
+                data: Vec::new(),
+                modified: false,
+            },
+        );
+        let mut roots = 0x746F_6F72u32.to_le_bytes().to_vec();
+        roots.extend_from_slice(&[0u8; 8]);
+        streams.insert(
+            "/PSMroots".to_string(),
+            RawStream {
+                path: "/PSMroots".to_string(),
+                data: roots,
+                modified: false,
+            },
+        );
+        let mut tseg = 0x6765_7374u32.to_le_bytes().to_vec();
+        tseg.extend_from_slice(&0u16.to_le_bytes());
+        tseg.extend_from_slice(&4u16.to_le_bytes());
+        tseg.extend_from_slice(&32u16.to_le_bytes());
+        tseg.extend_from_slice(&0u16.to_le_bytes());
+        streams.insert(
+            "/PSMspacemap/0x00000000".to_string(),
+            RawStream {
+                path: "/PSMspacemap/0x00000000".to_string(),
+                data: tseg,
+                modified: false,
+            },
+        );
+        let seed_bytes = PidWriter::write_to_bytes(
+            &PidPackage::new(None, streams, PidDocument::default()),
+            &WritePlan::default(),
+        )
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("ocs_pidsavepid_136_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let seed_path = dir.join("seed.pid");
+        std::fs::write(&seed_path, seed_bytes).unwrap();
+        let target_pid = dir.join("OUT-136.pid");
+
+        let mut app = app();
+        let (valve_h, _, _, _, _, med_gv_h) = seed_dxf_sheet_in_app(&mut app);
+        let _ = app.run_command_line("PIDPROMOTE");
+
+        // Create duplicate tag conflict on med_gv_h -> PIDSAVEPID must block without writing file
+        select(&mut app, med_gv_h);
+        let taken = author(&app, valve_h).tag;
+        set(&mut app, "pid_tag", &taken);
+        assert_eq!(author(&app, med_gv_h).tag_status, "duplicated");
+
+        let cmd_blocked = format!(
+            "PIDSAVEPID \"{}\" SEED \"{}\"",
+            target_pid.display(),
+            seed_path.display()
+        );
+        let _ = app.run_command_line(&cmd_blocked);
+        assert!(
+            !target_pid.exists(),
+            "PIDSAVEPID must refuse saving while duplicated tags exist"
+        );
+
+        // Fix duplicate tag -> PIDSAVEPID writes valid .pid + _Data.xml + _Meta.xml
+        set(&mut app, "pid_tag", "GV-0201999");
+        assert_eq!(author(&app, med_gv_h).tag_status, "ok");
+        let _ = app.run_command_line(&cmd_blocked);
+        assert!(target_pid.exists(), "PIDSAVEPID must write target .pid");
+        let data_xml = dir.join("OUT-136_Data.xml");
+        assert!(data_xml.exists(), "PIDSAVEPID must write _Data.xml");
+        let xml_text = std::fs::read_to_string(&data_xml).unwrap();
+        assert!(xml_text.contains("GV-0201999"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "runs real production DXF inside OpenCADStudio through PIDPROMOTE -> PIDREVIEW -> property edit -> PIDSAVEPID"]
+    fn real_sheet_in_app_promote_review_edit_and_pidsavepid_roundtrip() {
+        let Ok(dxf_path) = std::env::var("OCS_PID_REAL_DXF") else {
+            println!("OCS_PID_REAL_DXF unset, skipping.");
+            return;
+        };
+        let Ok(seed_zip) = std::env::var("OCS_PID_SEED_ZIP") else {
+            println!("OCS_PID_SEED_ZIP unset, skipping.");
+            return;
+        };
+        let sym_dir = std::env::var("OCS_PID_SYM_DIR").unwrap_or_default();
+        let out_dir = std::env::var("OCS_PID_REAL136_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real136"));
+        let _ = std::fs::create_dir_all(&out_dir);
+
+        let mut app = app();
+        let loaded = crate::io::load_file(std::path::Path::new(&dxf_path)).expect("load real DXF");
+        app.tabs[app.active_tab].scene.document = loaded;
+
+        let _ = app.run_command_line("PIDPROMOTE");
+        let stats_before = crate::io::pid_convert::summarize_author_review(
+            &app.tabs[app.active_tab].scene.document,
+        );
+        assert!(stats_before.total_authored_symbols > 0);
+
+        let _ = app.run_command_line("PIDREVIEW MEDIUM");
+        let med_selected = app.tabs[app.active_tab]
+            .scene
+            .selected_handles_in_order()
+            .len();
+        assert_eq!(med_selected, stats_before.medium);
+        if med_selected > 0 {
+            let _ = app.run_command_line("PIDREVIEW ACCEPT");
+        }
+        let stats_after = crate::io::pid_convert::summarize_author_review(
+            &app.tabs[app.active_tab].scene.document,
+        );
+        assert_eq!(stats_after.medium, 0);
+        assert_eq!(stats_after.confirmed, med_selected);
+
+        // Pick a promoted symbol that has a paired DWG text handle and edit its tag via panel op
+        let target_sym = app.tabs[app.active_tab]
+            .scene
+            .document
+            .model_space_entities()
+            .find_map(|e| {
+                let h = e.common().handle;
+                let a = PidAuthor::load(&app.tabs[app.active_tab].scene.document, h)?;
+                let m: serde_json::Map<String, Value> = serde_json::from_str(&a.props).ok()?;
+                let th = m.get("_tag_handles")?.as_str()?.to_string();
+                (!a.tag.is_empty() && !th.is_empty()).then_some((h, th))
+            })
+            .expect("find promoted symbol with paired DWG text");
+        select(&mut app, target_sym.0);
+        let ev_rows = section_rows(&mut app, PID_EVIDENCE_SECTION)
+            .expect("real promoted symbol has P&ID 来源证据 section");
+        assert_eq!(
+            row_value(&ev_rows, "pid_ev_source").as_deref(),
+            Some("convert:dxf")
+        );
+        set(&mut app, "pid_tag", "BV-INAPP-136");
+
+        let first_txt_hex = target_sym.1.split(',').next().unwrap();
+        let first_txt_h = document::Handle::new(u64::from_str_radix(first_txt_hex, 16).unwrap());
+        assert!(dwg_text_val(&app, first_txt_h).contains("BV"));
+
+        let target_pid = out_dir.join("REAL-INAPP-136.pid");
+        let save_cmd = if sym_dir.trim().is_empty() {
+            format!(
+                "PIDSAVEPID \"{}\" SEED \"{}\"",
+                target_pid.display(),
+                seed_zip
+            )
+        } else {
+            format!(
+                "PIDSAVEPID \"{}\" SEED \"{}\" SYMDIR \"{}\"",
+                target_pid.display(),
+                seed_zip,
+                sym_dir
+            )
+        };
+        let _ = app.run_command_line(&save_cmd);
+        assert!(target_pid.exists(), "REAL-INAPP-136.pid must exist");
+        let data_xml = out_dir.join("REAL-INAPP-136_Data.xml");
+        let cov_json = out_dir.join("REAL-INAPP-136_Coverage.json");
+        assert!(data_xml.exists());
+        assert!(cov_json.exists());
+        let xml_str = std::fs::read_to_string(&data_xml).unwrap();
+        assert!(xml_str.contains("BV-INAPP-136"));
+
+        let cov_val: Value =
+            serde_json::from_str(&std::fs::read_to_string(&cov_json).unwrap()).unwrap();
+        let doc_uid = cov_val["doc_uid"]
+            .as_str()
+            .expect("doc_uid in coverage")
+            .to_string();
+        let pid_raw = std::fs::read(&target_pid).unwrap();
+        let xml_raw = std::fs::read(&data_xml).unwrap();
+        let dual_ver = crate::io::pid_convert::verify_dual_bundle(
+            &doc_uid,
+            &xml_raw,
+            &pid_raw,
+            Some(&out_dir),
+            "REAL-INAPP-136",
+        )
+        .expect("verify_dual_bundle on PIDSAVEPID output");
+        assert!(dual_ver.is_cross_file_and_a_valid(), "{dual_ver:?}");
+        assert!(dual_ver.is_b_plot_valid(), "{dual_ver:?}");
+
+        let summary = json!({
+            "stats_before": stats_before,
+            "med_selected_and_accepted": med_selected,
+            "stats_after": stats_after,
+            "edited_tag": "BV-INAPP-136",
+            "pid_bytes": pid_raw.len(),
+            "data_xml_bytes": xml_raw.len(),
+            "dual_verify": dual_ver,
+        });
+        std::fs::write(
+            out_dir.join("real136_summary.json"),
+            serde_json::to_string_pretty(&summary).unwrap(),
+        )
+        .unwrap();
     }
 }

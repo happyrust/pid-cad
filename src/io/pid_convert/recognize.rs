@@ -102,6 +102,8 @@ pub struct ConvertedSymbol {
     pub nominal_diameter: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entity_handle: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tag_handles: Vec<u64>,
     pub confidence: f64,
     pub tier: ConfidenceTier,
     pub known: bool,
@@ -747,6 +749,7 @@ pub fn recognise_sppid_sheet(
                             lines: Vec::new(),
                             nominal_diameter: None,
                             entity_handle: Some(ent_handle),
+                            tag_handles: Vec::new(),
                             confidence: 0.0,
                             tier: ConfidenceTier::Medium,
                             known: true,
@@ -770,6 +773,7 @@ pub fn recognise_sppid_sheet(
                             lines: Vec::new(),
                             nominal_diameter: None,
                             entity_handle: Some(ent_handle),
+                            tag_handles: Vec::new(),
                             confidence: 0.35,
                             tier: thresholds.classify(0.35),
                             known: false,
@@ -1134,6 +1138,11 @@ pub fn recognise_sppid_sheet(
         let (_, ci, si) = inst_edges[chosen];
         paired_cands[ci] = true;
         symbols[si].tag = Some(bubble_cands[ci].tag.clone());
+        symbols[si].tag_handles = bubble_cands[ci]
+            .text_indices
+            .iter()
+            .map(|&ti| texts[ti].handle)
+            .collect();
     }
     let mut orphan_tags: Vec<String> = Vec::new();
     for (ci, cand) in bubble_cands.iter().enumerate() {
@@ -1205,6 +1214,7 @@ pub fn recognise_sppid_sheet(
         paired_eq_text[eti] = true;
         claimed_text[ti] = true;
         symbols[si].tag = Some(norm_tag.clone());
+        symbols[si].tag_handles = vec![texts[ti].handle];
     }
 
     // Recover loose-geometry vessels / equipment on layer "10" that have no INSERT block.
@@ -1240,6 +1250,7 @@ pub fn recognise_sppid_sheet(
                 lines: Vec::new(),
                 nominal_diameter: None,
                 entity_handle: Some(texts[ti].handle),
+                tag_handles: vec![texts[ti].handle],
                 confidence: 0.85,
                 tier: thresholds.classify(0.85),
                 known: true,
@@ -1323,6 +1334,7 @@ pub fn recognise_sppid_sheet(
         let (ti, _, ref norm_tag) = valve_texts[vti];
         claimed_text[ti] = true;
         symbols[si].tag = Some(norm_tag.clone());
+        symbols[si].tag_handles = vec![texts[ti].handle];
     }
 
     // Pass 3b: Nozzle nominal diameter callout pairing (`DN50`, `2"`, `1-1/2"`, etc., `L3-5`).

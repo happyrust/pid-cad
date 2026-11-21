@@ -364,7 +364,7 @@ flowchart LR
 
 ### 7.3 L2 内部模型与点选编辑
 
-#### L2-1 内部模型合一（L，分五步；`M1/M2/M3/M5` 引擎层已在 [#134](https://github.com/happyrust/pid-cad/issues/134) 完成，`M4` 面板待 `pid-symbol-on-main` 合入后接线）
+#### L2-1 内部模型合一（L，分五步；`M1..M5` 已在 [#134](https://github.com/happyrust/pid-cad/issues/134) 与 [#136](https://github.com/happyrust/pid-cad/issues/136) 全部完成）
 - **M1 类型映射**：识别类 → 类型库编码 → SPPID 类名；规则外置；未映射单列。依赖 L0-8、L3-1。
 - **M2 升格**：识别结果写成 `PID_AUTHOR`，带来源与置信度（先放 `props` 保留键）；幂等，不覆盖手工位号。验收：重复升格不重复建对象；手工位号不被覆盖；`purge` 仍只清 `legend:` 来源。
 - **M3 管线进拓扑**：识别出的线号与 run 转成拓扑表记录；端口与连通转成连接符记录。验收：拓扑表与识别报告逐项对得上。
@@ -373,20 +373,23 @@ flowchart LR
 - **不做**：不改两个 APPID 的隔离规则；不改自动化接口对外面。
 - **风险**：`PID_AUTHOR` 九键契约、XDATA 长度上限（2048 字节软上限）、变换敏感类型禁止落盘（`Position3D` 等五种）。
 - **依赖**：M1 依赖 L0-8、L3-1；其余按步。
-- **解决记录（2026-11-21）**：在独立模块 `src/io/pid_convert/promote.rs` 中零冲突实现 `sppid_class_to_author_type`（`M1`）、`promote_sheet_to_author`（`M2/M3`，幂等升格、保护 `tag_source=manual`、`>2048B` 自动溢出 `XRecord`、`pid_legend::purge` 隔离性不变）与 `save_author_document_to_dual`（`M5`，单源读取 `PID_AUTHOR + TopologyTable` 同步导出 XML + `.pid`），详见 `readings.md` §24。
+- **解决记录（2026-11-21）**：在独立模块 `src/io/pid_convert/promote.rs`（`#134`，提交 `ac6527ca1`）与 `src/app/commands/pidprops.rs`（`#136`）中零冲突实现 `sppid_class_to_author_type`（`M1`）、`promote_sheet_to_author`（`M2/M3`，幂等升格、保护 `tag_source=manual`、`>2048B` 自动溢出 `XRecord`、`pid_legend::purge` 隔离性不变）、属性面板可编辑 `P&ID 属性` + 只读 `P&ID 来源证据` 双分组（`M4`）与 `save_author_document_to_dual`（`M5`，单源读取 `PID_AUTHOR + TopologyTable` 同步导出 XML + `.pid`），详见 `readings.md` §24–§25。
 
-#### L2-2 点选整块（M）
+#### L2-2 点选整块（M）— **已完成（[#136](https://github.com/happyrust/pid-cad/issues/136)）**
 - **做法**：点选一个符号时，按 handle 把图形与 `PID_AUTHOR` 记录作为一块选中；打开属性面板。
 - **验收**：点选后属性面板显示该类对象的全部字段；选中态可撤销重做。
 - **资料**：RES-12 ⚠（缺则按"属性按接口分组"自设计并注明未对照实物）。
+- **解决记录（2026-11-21）**：点选或经 `PIDREVIEW` 筛选选中带 `PID_AUTHOR` 的块引用句柄后，属性面板自动呈现可编辑 `P&ID 属性` 与只读 `P&ID 来源证据` 两组完整字段（因缺 `RES-12` 实物截图，按本平台标准双分组自设计并注明未对照实物），选中与编辑均支持单步撤销/重做，详见 `readings.md` §25。
 
-#### L2-3 属性面板读写（M）
+#### L2-3 属性面板读写（M）— **已完成（[#136](https://github.com/happyrust/pid-cad/issues/136)）**
 - **做法**：按接口分页签；写入走既有 `set_entity_xdata` 路径；改位号走位号引擎。
 - **验收**：改一个属性后保存、重开，值不变；位号重复时给出提示且不写入。
+- **解决记录（2026-11-21）**：在 `src/app/commands/pidprops.rs` 过滤内部 `_` 保留键，业务属性（`公称直径`、`对端图号`、`说明` 及 `>2048B` 溢出属性）通过 `PidAuthor::store`（底层走 `set_entity_xdata` + XRecord 分片）写回并透传至 `save_author_document_to_dual`；存在重复位号时标 `tag_status=duplicated` 并由 `PIDSAVEPID` 前置 `gate_save`（`TAG_DUPLICATED_BLOCKS_SAVE`）阻断写盘，详见 `readings.md` §25。
 
-#### L2-4 属性改动联动（M）
+#### L2-4 属性改动联动（M）— **已完成（[#136](https://github.com/happyrust/pid-cad/issues/136)）**
 - **做法**：属性改动后刷新图上标注；位号唯一性校验。
 - **验收**：改位号后图面标注跟着变；重复位号被拒并提示。
+- **解决记录（2026-11-21）**：在 `recognize.rs` 与 `promote.rs` 追踪符号配对的图面 `TEXT` / `MTEXT` 句柄（`_tag_handles`，支持单行设备/阀门位号及圈内上下双行仪表位号），在 `commit_pid_author_property` 中同步刷新 `Insert.attributes["PID_TAG"]` 与配对图面 `TEXT`/`MTEXT`（冲突显示 `？`，`UNDO`/`REDO` 原子回滚），详见 `readings.md` §25。
 
 #### L2-5 几何改动联动（M）— **引擎层已完成（[#134](https://github.com/happyrust/pid-cad/issues/134)）**
 - **做法**：移动、删除符号后，更新端口位置、连通关系、管线端点。
@@ -445,10 +448,10 @@ flowchart LR
 - **验收**：拆解结果对参考 XML 的属性逐项比对；标题栏读出的图号与 XML 的图号一致。
 - **解决记录（2026-11-21）**：在 `src/io/pid_convert/recognize.rs` 新增右下角标题栏元数据提取器 `TitleBlockInfo`（含跨双行装置名+图名拼接，写入 `_Coverage.json` 并在未显式指定图名时自动回退为 `PIDDrawing` 名称）；全批 90 张真实 DXF 实测提取标题栏图号 **`82 / 90`（`91.11%`）**、提取标题栏图名 `49` 份且与 `_Data.xml` `PIDDrawing/IObject/@Name` 吻合 **`48 / 49`（精确率 `97.96%`）**；按管段序号对齐 `5,678` 条已标线号 `PIDPipingConnector` 核对拆解属性，管道等级吻合率 **`90.56%`**、保温规格吻合率 **`87.76%`**、公称直径吻合率 **`71.24%`**，全批 `StrictVendor` 零违规、`unexplained_diffs = 0`，详见 `readings.md` §21。
 
-#### L3-7 校核入口（M）— **引擎三档分桶已完成（随 [#125](https://github.com/happyrust/pid-cad/issues/125) 落地）**
+#### L3-7 校核入口（M）— **已完成（随 [#125](https://github.com/happyrust/pid-cad/issues/125) 与 [#136](https://github.com/happyrust/pid-cad/issues/136) 落地）**
 - **做法**：置信度三档（高 ≥ 0.90 自动接受；中 0.60–0.89 进人工确认；低 < 0.60 默认不导入）；人工确认 6 步；识别报告（三档计数 + 未识别图元数，计数之和等于候选行数）。
 - **验收**：三档阈值可配置；报告数字自洽；人工确认后结果进入模型。
-- **解决记录（2026-11-20）**：引擎层可配置阈值 `ConfidenceThresholds` 与 `ConfidenceSummary` 已在 `src/io/pid_convert/recognize.rs` 落地并校验三档之和严格守恒（90 张 DXF `high=12,174`、`medium=3,736`、`low=0`，见 `readings.md` §14）；交互面板确认待 `L2` 合一后衔接。
+- **解决记录（2026-11-20..21）**：引擎层可配置阈值 `ConfidenceThresholds` 与 `ConfidenceSummary` 在 `recognize.rs` 落地并校验三档守恒（90 张 DXF `high=12,174`、`medium=3,736`、`low=0`，见 `readings.md` §14）；应用内交互命令 `PIDPROMOTE` 与 `PIDREVIEW [SUMMARY | HIGH | MEDIUM | LOW | DUPLICATES | ACCEPT | REJECT]` 在 `pidprops.rs`（`#136`）落地，支持按档位一键画布选中、人工确认（转 `manual` + `confirmed`）与驳回剔除（同步清理拓扑悬挂引用）且单步可撤销，详见 `readings.md` §25。
 
 #### L3-8 回归门禁（S）— **已完成（[#133](https://github.com/happyrust/pid-cad/issues/133)）**
 - **做法**：每改一次规则，整批报告逐行 diff；差异只允许出现在预期行。

@@ -55,6 +55,194 @@ pub struct AuthorSyncReport {
     pub duplicated_tags: usize,
 }
 
+/// Sheet-level three-tier confidence and review status of `PID_AUTHOR` entities (`L3-7` / `#136`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorReviewStats {
+    pub high: usize,
+    pub medium: usize,
+    pub low: usize,
+    pub confirmed: usize,
+    pub manual_tags: usize,
+    pub duplicated_tags: usize,
+    pub total_authored_symbols: usize,
+}
+
+/// Summarize `PID_AUTHOR` review buckets across `doc` (`L3-7` / `#136`).
+pub fn summarize_author_review(doc: &Document) -> AuthorReviewStats {
+    let mut stats = AuthorReviewStats::default();
+    for ent in doc.model_space_entities() {
+        let h = ent.common().handle;
+        let Some(auth) = PidAuthor::load(doc, h) else {
+            continue;
+        };
+        if auth.topology == ROLE_PIPE_SEGMENT || auth.type_code == TYPE_PIPE_SEGMENT {
+            continue;
+        }
+        stats.total_authored_symbols += 1;
+        if auth.tag_source == "manual" {
+            stats.manual_tags += 1;
+        }
+        if auth.tag_status == "duplicated" {
+            stats.duplicated_tags += 1;
+        }
+        let pmap = parse_props_map(&auth.props);
+        match pmap.get("_confidence_tier").and_then(|v| v.as_str()) {
+            Some("confirmed") => stats.confirmed += 1,
+            Some("medium") => stats.medium += 1,
+            Some("low") => stats.low += 1,
+            _ => stats.high += 1,
+        }
+    }
+    stats
+}
+
+/// Filter `PID_AUTHOR` symbol handles on `doc` by review bucket (`HIGH`, `MEDIUM`, `LOW`, `CONFIRMED`, `DUPLICATES`, `ALL`).
+pub fn filter_author_handles(doc: &Document, filter: &str) -> Vec<Handle> {
+    let key = filter.trim().to_ascii_uppercase();
+    let mut out = Vec::new();
+    for ent in doc.model_space_entities() {
+        let h = ent.common().handle;
+        let Some(auth) = PidAuthor::load(doc, h) else {
+            continue;
+        };
+        if auth.topology == ROLE_PIPE_SEGMENT || auth.type_code == TYPE_PIPE_SEGMENT {
+            continue;
+        }
+        let pmap = parse_props_map(&auth.props);
+        let tier = pmap
+            .get("_confidence_tier")
+            .and_then(|v| v.as_str())
+            .unwrap_or("high");
+        let matched = match key.as_str() {
+            "ALL" => true,
+            "HIGH" => tier.eq_ignore_ascii_case("high"),
+            "MEDIUM" | "MED" => tier.eq_ignore_ascii_case("medium"),
+            "LOW" => tier.eq_ignore_ascii_case("low"),
+            "CONFIRMED" => tier.eq_ignore_ascii_case("confirmed"),
+            "DUPLICATES" | "DUP" | "DUPLICATED" => auth.tag_status == "duplicated",
+            _ => false,
+        };
+        if matched {
+            out.push(h);
+        }
+    }
+    out
+}
+
+/// Mark `handles` as human-reviewed (`tag_source = "manual"`, `_confidence_tier = "confirmed"`).
+pub fn accept_author_handles(doc: &mut Document, handles: &[Handle]) -> usize {
+    let mut count = 0usize;
+    for &h in handles {
+        let Some(mut auth) = PidAuthor::load(doc, h) else {
+            continue;
+        };
+        if auth.topology == ROLE_PIPE_SEGMENT || auth.type_code == TYPE_PIPE_SEGMENT {
+            continue;
+        }
+        auth.tag_source = "manual".to_string();
+        let mut pmap = parse_props_map(&auth.props);
+        pmap.insert(
+            "_confidence_tier".to_string(),
+            serde_json::Value::String("confirmed".to_string()),
+        );
+        auth.props = serde_json::Value::Object(pmap).to_string();
+        auth.store(doc, h);
+        count += 1;
+    }
+    let _ = refresh_duplicate_tag_statuses(doc);
+    count
+}
+
+/// Remove `PID_AUTHOR` from `handles` and prune any topology bindings referencing them (`L3-7` REJECT).
+pub fn reject_author_handles(doc: &mut Document, handles: &[Handle]) -> (usize, AuthorSyncReport) {
+    let mut removed = 0usize;
+    for &h in handles {
+        if PidAuthor::load(doc, h).is_some() {
+            crate::scene::view::dispatch::set_entity_xdata(
+                doc,
+                h,
+                crate::pid::persist::PID_AUTHOR_APP,
+                None,
+            );
+            removed += 1;
+        }
+    }
+    let sync = sync_author_after_edit(doc);
+    (removed, sync)
+}
+
+fn set_text_entity_value(doc: &mut Document, h: Handle, desired: &str) -> bool {
+    let needs_update = match doc.get_entity(h) {
+        Some(EntityType::Text(t)) => t.value != desired,
+        Some(EntityType::MText(mt)) => mt.value != desired,
+        _ => false,
+    };
+    if !needs_update {
+        return false;
+    }
+    match doc.get_entity_mut(h) {
+        Some(EntityType::Text(t)) => {
+            t.value = desired.to_string();
+            true
+        }
+        Some(EntityType::MText(mt)) => {
+            mt.value = desired.to_string();
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Synchronize paired DWG/DXF `TEXT` / `MTEXT` entities with current `PID_AUTHOR` tags (`L2-4`).
+pub fn sync_paired_canvas_tag_texts(doc: &mut Document) -> Vec<Handle> {
+    let mut updates: Vec<(Vec<Handle>, String, String)> = Vec::new();
+    for ent in doc.model_space_entities() {
+        let h = ent.common().handle;
+        let Some(auth) = PidAuthor::load(doc, h) else {
+            continue;
+        };
+        let pmap = parse_props_map(&auth.props);
+        let Some(raw_th) = pmap.get("_tag_handles").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let ths: Vec<Handle> = raw_th
+            .split(',')
+            .filter_map(|hex| u64::from_str_radix(hex.trim(), 16).ok().map(Handle::new))
+            .filter(|&th| th != h)
+            .collect();
+        if ths.is_empty() {
+            continue;
+        }
+        updates.push((ths, auth.tag, auth.tag_status));
+    }
+
+    let mut modified = Vec::new();
+    for (ths, tag, status) in updates {
+        let duplicated = status == "duplicated";
+        if ths.len() == 2 {
+            let (top_val, bot_val) = if duplicated {
+                ("？".to_string(), String::new())
+            } else if let Some((l, r)) = tag.split_once('-') {
+                (l.to_string(), r.to_string())
+            } else {
+                (tag, String::new())
+            };
+            if set_text_entity_value(doc, ths[0], &top_val) {
+                modified.push(ths[0]);
+            }
+            if set_text_entity_value(doc, ths[1], &bot_val) {
+                modified.push(ths[1]);
+            }
+        } else {
+            let shown = if duplicated { "？".to_string() } else { tag };
+            if set_text_entity_value(doc, ths[0], &shown) {
+                modified.push(ths[0]);
+            }
+        }
+    }
+    modified
+}
+
 fn tier_rank(t: ConfidenceTier) -> u8 {
     match t {
         ConfidenceTier::High => 2,
@@ -259,16 +447,37 @@ pub fn promote_sheet_to_author(
         }
 
         let mut pmap = parse_props_map(&author.props);
+        let already_confirmed = pmap
+            .get("_confidence_tier")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| t == "confirmed");
         pmap.insert(
             "_source".to_string(),
             serde_json::Value::String("convert:dxf".to_string()),
         );
-        pmap.insert("_confidence".to_string(), serde_json::json!(sym.confidence));
-        pmap.insert("_confidence_tier".to_string(), serde_json::json!(sym.tier));
+        pmap.insert(
+            "_confidence".to_string(),
+            serde_json::Value::String(format!("{:.2}", sym.confidence)),
+        );
+        if !already_confirmed {
+            pmap.insert("_confidence_tier".to_string(), serde_json::json!(sym.tier));
+        }
         pmap.insert(
             "_sppid_class".to_string(),
             serde_json::Value::String(sym.sppid_class.clone()),
         );
+        if !sym.tag_handles.is_empty() {
+            let joined = sym
+                .tag_handles
+                .iter()
+                .map(|th| format!("{th:X}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            pmap.insert(
+                "_tag_handles".to_string(),
+                serde_json::Value::String(joined),
+            );
+        }
         if let Some(ref vid) = sym.variant_id {
             pmap.insert(
                 "_variant_id".to_string(),
@@ -286,12 +495,20 @@ pub fn promote_sheet_to_author(
                 "_to_from_text".to_string(),
                 serde_json::Value::String(tf.clone()),
             );
+            pmap.entry("对端图号".to_string())
+                .or_insert_with(|| serde_json::Value::String(tf.clone()));
         }
         if let Some(ref nd) = sym.nominal_diameter {
             pmap.insert(
                 "_nominal_diameter".to_string(),
                 serde_json::Value::String(nd.clone()),
             );
+            pmap.entry("公称直径".to_string())
+                .or_insert_with(|| serde_json::Value::String(nd.clone()));
+        }
+        if let Some(ref desc) = sym.description {
+            pmap.entry("说明".to_string())
+                .or_insert_with(|| serde_json::Value::String(desc.clone()));
         }
         author.props = serde_json::Value::Object(pmap).to_string();
 
@@ -629,7 +846,17 @@ fn entity_world_anchor(ent: &EntityType) -> Option<(f64, f64)> {
 /// Reconcile `TopologyTable` and `PID_AUTHOR` tag uniqueness after moving/deleting/editing entities (`L2-4 / L2-5`).
 pub fn sync_author_after_edit(doc: &mut Document) -> AuthorSyncReport {
     let mut topo = TopologyTable::load(doc);
-    let pruned_records = topo.prune(doc);
+    let mut pruned_records = topo.prune(doc);
+
+    let before_fit = topo.fittings.len();
+    topo.fittings
+        .retain(|f| parse_handle(&f.handle).is_some_and(|h| PidAuthor::load(doc, h).is_some()));
+    pruned_records += before_fit.saturating_sub(topo.fittings.len());
+
+    let before_conn = topo.connectors.len();
+    topo.connectors
+        .retain(|c| parse_handle(&c.handle).is_some_and(|h| PidAuthor::load(doc, h).is_some()));
+    pruned_records += before_conn.saturating_sub(topo.connectors.len());
 
     let mut cleared_dangling_peers = 0usize;
     let mut updated_moved_endpoints = 0usize;
@@ -649,6 +876,11 @@ pub fn sync_author_after_edit(doc: &mut Document) -> AuthorSyncReport {
                 cleared_dangling_peers += 1;
                 continue;
             };
+            if PidAuthor::load(doc, peer_h).is_none() {
+                end_slot.peer = None;
+                cleared_dangling_peers += 1;
+                continue;
+            }
             let Some(peer_ent) = doc.get_entity(peer_h) else {
                 end_slot.peer = None;
                 cleared_dangling_peers += 1;
@@ -803,7 +1035,8 @@ pub fn save_author_document_to_dual(
 
         let mut attrs: BTreeMap<(String, String), String> = BTreeMap::new();
         let tf_txt = pmap
-            .get("_to_from_text")
+            .get("对端图号")
+            .or_else(|| pmap.get("_to_from_text"))
             .and_then(|v| v.as_str())
             .map(str::to_string);
         if sppid_cls == "PIDBranchPoint" {
@@ -814,7 +1047,11 @@ pub fn save_author_document_to_dual(
                 );
             }
         }
-        if let Some(nd) = pmap.get("_nominal_diameter").and_then(|v| v.as_str()) {
+        if let Some(nd) = pmap
+            .get("公称直径")
+            .or_else(|| pmap.get("_nominal_diameter"))
+            .and_then(|v| v.as_str())
+        {
             attrs.insert(
                 (
                     "IPipeCrossSectionItem".to_string(),
