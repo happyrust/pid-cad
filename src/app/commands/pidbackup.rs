@@ -472,6 +472,16 @@ impl OpenCADStudio {
             self.backup_tags_read(generation, result);
             return Task::none();
         }
+        // Nor is a symbol file that was read to be shown as a drawing: the
+        // tab is made of it here, whatever the panel shows by now.
+        if let PidBackupMsg::SymbolRead {
+            source,
+            name,
+            result,
+        } = msg
+        {
+            return self.show_the_symbol_read(source, name, result);
+        }
         // An export, to PDF or to publish files, reads the restores while it
         // runs: none is removed from under it, whoever asks -- `Cache=Clear`,
         // `Press`, or the panel's own button.
@@ -622,6 +632,9 @@ impl OpenCADStudio {
                 Some(index) => Task::done(Message::TabSwitch(index)),
                 None => self.open_from_the_backup(path),
             },
+            // A symbol file is shown as a drawing in a tab of its own, and
+            // one a tab shows already is brought to the front.
+            Effect::OpenSymbol { source, name } => self.open_symbol_from_the_backup(source, name),
             // A picked source, a refresh: both rebuild the index from a path.
             // The panel remembers the source it was given, so a refresh keeps
             // the backup it was showing.
@@ -1770,3 +1783,7 @@ mod audit;
 /// opened from the panel.
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::app) mod tags;
+
+/// A symbol file of a backup, shown as a drawing in a tab of its own.
+#[cfg(not(target_arch = "wasm32"))]
+pub(in crate::app) mod symbol_tab;

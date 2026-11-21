@@ -17,11 +17,15 @@
 //!   [`Sketch`] in millimetres. A primitive the import draws nothing for is
 //!   not drawn here either, and is counted.
 //! * At most [`SYMBOL_LIMIT`] bytes are read: a longer file is no symbol.
+//!
+//! A file is also read to be opened as a drawing of its own
+//! ([`SymbolSource::read_drawing`]): the same reading, with the entities its
+//! sketch is flattened from kept beside it.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::f64::consts::TAU;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use document::entities::hatch::BoundaryEdge;
@@ -287,6 +291,17 @@ impl Sketch {
             })
     }
 
+    /// What `entities`, ones the import drew, show: the sketch a thumbnail
+    /// of them is drawn from.
+    #[cfg(test)]
+    pub(crate) fn of<'a>(entities: impl IntoIterator<Item = &'a EntityType>) -> Self {
+        let mut sketch = Self::default();
+        for entity in entities {
+            sketch.add(entity);
+        }
+        sketch
+    }
+
     /// Add what `entity`, one the import drew, shows.
     fn add(&mut self, entity: &EntityType) {
         let ink = match entity.common().color {
@@ -438,6 +453,14 @@ fn arc_points(center: (f64, f64), radius: f64, start: f64, sweep: f64) -> Vec<(f
 
 /// What the browser shows of a symbol body the conversion library read.
 pub fn digest(geometry: &SymbolGeometry) -> SymbolFile {
+    digest_keeping(geometry, None)
+}
+
+/// [`digest`], which also hands the entities the sketch is made of to
+/// `keep`, in the order their primitives are displayed in. The one pass says
+/// what the thumbnail draws and what a drawing of the symbol holds, so the
+/// two cannot come apart.
+fn digest_keeping(geometry: &SymbolGeometry, mut keep: Option<&mut Vec<EntityType>>) -> SymbolFile {
     let picked = geometry.displayed();
     let reading = match &picked {
         Err(why) => Reading::Short(Some(*why)),
@@ -470,6 +493,9 @@ pub fn digest(geometry: &SymbolGeometry) -> SymbolFile {
         }
         for entity in &entities {
             sketch.add(entity);
+        }
+        if let Some(keep) = keep.as_deref_mut() {
+            keep.extend(entities);
         }
     }
 
@@ -523,17 +549,31 @@ fn failed(why: Failure) -> SymbolFile {
 
 /// Read `bytes`, all of a symbol file.
 pub fn read_symbol_bytes(bytes: &[u8]) -> SymbolFile {
+    read_bytes_keeping(bytes, None)
+}
+
+/// [`read_symbol_bytes`], keeping the entities as [`digest_keeping`] does.
+fn read_bytes_keeping(bytes: &[u8], keep: Option<&mut Vec<EntityType>>) -> SymbolFile {
     if !bytes.starts_with(&CFB_MAGIC) {
         return failed(Failure::NotCompound(bytes.len() as u64));
     }
     match read_symbol_geometry_from_bytes(bytes) {
-        Ok(geometry) => digest(&geometry),
+        Ok(geometry) => digest_keeping(&geometry, keep),
         Err(error) => failed(Failure::Decode(error.to_string())),
     }
 }
 
 /// Read what `reader` gives of a file `total` bytes long as a symbol.
 fn read(reader: &mut dyn Read, total: u64) -> std::io::Result<SymbolFile> {
+    read_keeping(reader, total, None)
+}
+
+/// [`read`], keeping the entities as [`digest_keeping`] does.
+fn read_keeping(
+    reader: &mut dyn Read,
+    total: u64,
+    keep: Option<&mut Vec<EntityType>>,
+) -> std::io::Result<SymbolFile> {
     if total > SYMBOL_LIMIT {
         return Ok(failed(Failure::TooLarge(total)));
     }
@@ -545,18 +585,26 @@ fn read(reader: &mut dyn Read, total: u64) -> std::io::Result<SymbolFile> {
     Ok(if read > SYMBOL_LIMIT {
         failed(Failure::TooLarge(read.max(total)))
     } else {
-        read_symbol_bytes(&bytes)
+        read_bytes_keeping(&bytes, keep)
     })
 }
 
 /// Read the symbol file at `path`.
 pub fn read_symbol_file(path: &Path) -> Result<SymbolFile, String> {
+    read_file_keeping(path, None)
+}
+
+/// [`read_symbol_file`], keeping the entities as [`digest_keeping`] does.
+fn read_file_keeping(
+    path: &Path,
+    keep: Option<&mut Vec<EntityType>>,
+) -> Result<SymbolFile, String> {
     let fail = |error: std::io::Error| {
         crate::tf!("cannot read {}: {}", path.display(), error).into_owned()
     };
     let total = std::fs::metadata(path).map_err(fail)?.len();
     let mut file = std::fs::File::open(path).map_err(fail)?;
-    read(&mut file, total).map_err(fail)
+    read_keeping(&mut file, total, keep).map_err(fail)
 }
 
 /// Read member `member` of the zip at `archive` as a symbol. `name` is the
@@ -564,6 +612,109 @@ pub fn read_symbol_file(path: &Path) -> Result<SymbolFile, String> {
 /// [`super::text_file::read_zip_member`] finds one.
 pub fn read_symbol_member(archive: &Path, member: usize, name: &str) -> Result<SymbolFile, String> {
     with_zip_member(archive, member, name, read)
+}
+
+/// Where a symbol file is: a file on disk -- one of the `Ref` tree, or one
+/// of the backup folder -- or a member of an archive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymbolSource {
+    /// The file at this path.
+    File(PathBuf),
+    /// Member `member` of the zip at `archive`. `name` is the member's name
+    /// as the index lists it; the member is found the way
+    /// [`read_symbol_member`] finds it.
+    Member {
+        archive: PathBuf,
+        member: usize,
+        name: String,
+    },
+}
+
+impl SymbolSource {
+    /// The file on disk that is read, and which member of it when it is an
+    /// archive.
+    fn place(&self) -> (&Path, Option<&str>) {
+        match self {
+            SymbolSource::File(path) => (path.as_path(), None),
+            SymbolSource::Member { archive, name, .. } => (archive.as_path(), Some(name.as_str())),
+        }
+    }
+
+    /// Whether `other` is the same file. Paths are the same when they are
+    /// spelt alike or resolve alike, so one file reached two ways is one
+    /// file. A member is the same when its archive and its name are: where
+    /// it stands in the archive is only where it is looked for first.
+    pub fn is_same_file(&self, other: &SymbolSource) -> bool {
+        let (path, member) = self.place();
+        let (other_path, other_member) = other.place();
+        member == other_member && same_path(path, other_path)
+    }
+
+    /// Read the file there to be shown as a drawing: what the browser shows
+    /// of it, and the entities that is drawn from.
+    pub fn read_drawing(&self) -> Result<SymbolDrawing, String> {
+        let mut entities = Vec::new();
+        let keep = Some(&mut entities);
+        let file = match self {
+            SymbolSource::File(path) => read_file_keeping(path, keep)?,
+            SymbolSource::Member {
+                archive,
+                member,
+                name,
+            } => with_zip_member(archive, *member, name, |reader, total| {
+                read_keeping(reader, total, keep)
+            })?,
+        };
+        Ok(SymbolDrawing { file, entities })
+    }
+}
+
+/// Whether two paths are one file: spelt alike, or resolving alike.
+fn same_path(a: &Path, b: &Path) -> bool {
+    let resolved = |path: &Path| std::fs::canonicalize(path).ok();
+    a == b || resolved(a).is_some_and(|a| Some(a) == resolved(b))
+}
+
+/// A symbol file read to be shown as a drawing of its own.
+#[derive(Debug, Clone)]
+pub struct SymbolDrawing {
+    /// What the browser shows of the file.
+    pub file: SymbolFile,
+    /// The entities the import draws of the primitives the file displays,
+    /// in the order they are displayed in: what [`Body::sketch`] is
+    /// flattened from. Millimetres about the symbol's origin.
+    pub entities: Vec<EntityType>,
+}
+
+impl SymbolDrawing {
+    /// Whether there is anything to show. What makes a thumbnail of the
+    /// file makes a drawing of it, and nothing else does.
+    pub fn draws(&self) -> bool {
+        self.file
+            .body
+            .as_ref()
+            .is_some_and(|body| !body.sketch.is_empty())
+    }
+}
+
+/// The thread a symbol file is read on to be opened.
+const OPEN_THREAD: &str = "ocs-pid-backup-symbol";
+
+/// [`SymbolSource::read_drawing`] on a worker thread. A symbol file is
+/// small; the archive or the share it lies in need not be quick.
+pub async fn read_drawing_in_background(source: SymbolSource) -> Result<SymbolDrawing, String> {
+    let (sender, receiver) = iced::futures::channel::oneshot::channel();
+    std::thread::Builder::new()
+        .name(OPEN_THREAD.into())
+        .spawn(move || {
+            let _ = sender.send(source.read_drawing());
+        })
+        .map_err(|error| {
+            crate::tf!("cannot start reading the backup data: {}", error).into_owned()
+        })?;
+    receiver.await.unwrap_or_else(|_| {
+        Err(crate::t!("the backup data read stopped before it finished").into_owned())
+    })
 }
 
 /// Symbol bodies made up for the tests, here and in the browser's.
@@ -771,6 +922,14 @@ pub(crate) mod made_up {
             }],
             ..valve()
         }
+    }
+
+    /// What a read of a file that holds `geometry` hands the tab that
+    /// shows it.
+    pub(crate) fn drawing(geometry: &SymbolGeometry) -> super::SymbolDrawing {
+        let mut entities = Vec::new();
+        let file = super::digest_keeping(geometry, Some(&mut entities));
+        super::SymbolDrawing { file, entities }
     }
 }
 
@@ -1223,5 +1382,207 @@ mod tests {
             failed(Failure::TooLarge(SYMBOL_LIMIT + 1))
         );
         assert_eq!(understated.limit(), 4, "one byte past the limit is read");
+    }
+
+    /// What each of `entities` is, in a word.
+    fn kinds(entities: &[EntityType]) -> Vec<&'static str> {
+        entities
+            .iter()
+            .map(|entity| match entity {
+                EntityType::Line(_) => "line",
+                EntityType::Circle(_) => "circle",
+                EntityType::Arc(_) => "arc",
+                EntityType::LwPolyline(_) => "polyline",
+                EntityType::Hatch(_) => "hatch",
+                EntityType::Text(_) => "text",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_drawing_holds_the_entities_its_sketch_is_flattened_from() {
+        let read = drawing(&valve());
+        assert!(read.draws());
+        // The reading is the one the browser shows.
+        assert_eq!(read.file, digest(&valve()));
+        // One entity for each primitive the import draws, in the order the
+        // file displays them in; nothing for the placeholder, for the layer
+        // that is off or for the other sheet.
+        assert_eq!(
+            kinds(&read.entities),
+            ["line", "circle", "arc", "polyline", "polyline", "hatch", "text"]
+        );
+        // Flattened again, they are the sketch.
+        assert_eq!(
+            Sketch::of(&read.entities),
+            *read.file.body.as_ref().expect("a body").sketch
+        );
+
+        // What was read of a normal view read short is drawn, and kept.
+        let part = drawing(&valve_short(&[], &[NORMAL]));
+        assert!(part.draws());
+        assert_eq!(part.file.reading, Reading::Short(None));
+        assert_eq!(kinds(&part.entities), kinds(&read.entities));
+    }
+
+    #[test]
+    fn the_document_of_a_drawing_holds_its_entities_as_they_are() {
+        let read = drawing(&valve());
+        let sketch = read.file.body.as_ref().expect("a body").sketch.clone();
+        let count = read.entities.len();
+        let (doc, held) = crate::io::pid::symbol_file_document(read.entities);
+        assert_eq!(held, count);
+
+        // In model space, in the order they were read in, drawing what the
+        // thumbnail draws.
+        assert_eq!(doc.model_space_entities().count(), count);
+        assert_eq!(Sketch::of(doc.model_space_entities()), *sketch);
+
+        // On the import's own layers, each declared and on.
+        let layers: std::collections::BTreeSet<&str> = doc
+            .model_space_entities()
+            .map(|entity| entity.common().layer.as_str())
+            .collect();
+        assert_eq!(
+            layers.into_iter().collect::<Vec<_>>(),
+            ["PID-FILL", "PID-SYMBOL"]
+        );
+        for layer in ["PID-FILL", "PID-SYMBOL"] {
+            assert!(!doc.layers.get(layer).expect(layer).flags.off, "{layer}");
+        }
+        // Widths show, and the standard linetypes are there to draw with.
+        assert!(doc.header.lineweight_display);
+        assert!(crate::io::linetypes::catalog_missing_from(&doc).is_empty());
+
+        // Nothing read, nothing held: a document all the same.
+        let (doc, held) = crate::io::pid::symbol_file_document(Vec::new());
+        assert_eq!((held, doc.model_space_entities().count()), (0, 0));
+    }
+
+    #[test]
+    fn what_makes_no_thumbnail_makes_no_drawing() {
+        // A body of placeholders, a body that holds nothing, a file whose
+        // deciding cluster was read short: no thumbnail, and nothing kept.
+        for geometry in [placeholder(), empty(), valve_short(&["PSMcluster0"], &[])] {
+            let read = drawing(&geometry);
+            assert!(!read.draws(), "{:?}", read.file.reading);
+            assert!(read.entities.is_empty(), "{:?}", read.file.reading);
+        }
+        // A file that was not read as a symbol has no body to draw.
+        let read = SymbolDrawing {
+            file: failed(Failure::NotCompound(5)),
+            entities: Vec::new(),
+        };
+        assert!(!read.draws());
+    }
+
+    #[test]
+    fn a_drawing_is_read_from_a_file_and_from_an_archive_alike() {
+        let root =
+            std::env::temp_dir().join(format!("ocs-pid-symbol-drawing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let plain = b"PLAIN-ASCII-NOT-CFB";
+        let on_disk = root.join("plain.sym");
+        std::fs::write(&on_disk, plain).unwrap();
+        let archive = root.join("symbols.zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        writer.add_directory("Piping/", options).unwrap();
+        writer.start_file("Piping/plain.sym", options).unwrap();
+        writer.write_all(plain).unwrap();
+        writer.finish().unwrap();
+        let member = |position: usize, name: &str| SymbolSource::Member {
+            archive: archive.clone(),
+            member: position,
+            name: name.to_string(),
+        };
+
+        // The reading is the browser's, whichever way the file is reached;
+        // a file that is no symbol keeps nothing and draws nothing.
+        let expected = failed(Failure::NotCompound(plain.len() as u64));
+        for source in [
+            SymbolSource::File(on_disk.clone()),
+            member(1, "Piping/plain.sym"),
+            // A position that holds another member: found by its name.
+            member(0, "Piping/plain.sym"),
+        ] {
+            let read = source.read_drawing().expect("read");
+            assert_eq!(read.file, expected, "{source:?}");
+            assert!(read.entities.is_empty() && !read.draws(), "{source:?}");
+            // On a thread of its own it reads the same.
+            let behind =
+                iced::futures::executor::block_on(read_drawing_in_background(source.clone()))
+                    .expect("read");
+            assert_eq!(behind.file, expected, "{source:?}");
+        }
+
+        // What is not there says so, with where it was looked for.
+        let gone = SymbolSource::File(root.join("gone.sym"));
+        let missing = gone.read_drawing().unwrap_err();
+        assert!(missing.contains("gone.sym"), "{missing}");
+        let behind = iced::futures::executor::block_on(read_drawing_in_background(gone));
+        assert_eq!(behind.unwrap_err(), missing);
+        let missing = member(0, "Piping/gone.sym").read_drawing().unwrap_err();
+        assert!(
+            missing.contains("Piping/gone.sym") && missing.contains("symbols.zip"),
+            "{missing}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn one_file_reached_two_ways_is_one_source() {
+        let root =
+            std::env::temp_dir().join(format!("ocs-pid-symbol-source-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Piping")).unwrap();
+        let valve = root.join("Piping").join("valve.sym");
+        let other = root.join("Piping").join("other.sym");
+        let archive = root.join("symbols.zip");
+        for path in [&valve, &other, &archive] {
+            std::fs::write(path, b"x").unwrap();
+        }
+        let file = |path: &Path| SymbolSource::File(path.to_path_buf());
+        let member = |archive: &Path, position: usize, name: &str| SymbolSource::Member {
+            archive: archive.to_path_buf(),
+            member: position,
+            name: name.to_string(),
+        };
+
+        // A file is itself, however its path is spelt.
+        assert!(file(&valve).is_same_file(&file(&valve)));
+        let round = root
+            .join("Piping")
+            .join("..")
+            .join("Piping")
+            .join("valve.sym");
+        assert_ne!(round, valve);
+        assert!(file(&valve).is_same_file(&file(&round)));
+        assert!(file(&round).is_same_file(&file(&valve)));
+        assert!(!file(&valve).is_same_file(&file(&other)));
+        // One that is not there is the same only spelt the same.
+        let gone = root.join("gone.sym");
+        let gone_round = root.join("Piping").join("..").join("gone.sym");
+        assert!(file(&gone).is_same_file(&file(&gone)));
+        assert!(!file(&gone).is_same_file(&file(&gone_round)));
+        assert!(!file(&gone).is_same_file(&file(&valve)));
+
+        // A member is its archive and its name; where it stands in the
+        // archive is not asked.
+        let in_zip = member(&archive, 3, "Piping/valve.sym");
+        assert!(in_zip.is_same_file(&member(&archive, 3, "Piping/valve.sym")));
+        assert!(in_zip.is_same_file(&member(&archive, 0, "Piping/valve.sym")));
+        let archive_round = root.join("Piping").join("..").join("symbols.zip");
+        assert!(in_zip.is_same_file(&member(&archive_round, 3, "Piping/valve.sym")));
+        assert!(!in_zip.is_same_file(&member(&archive, 3, "Piping/other.sym")));
+        assert!(!in_zip.is_same_file(&member(&valve, 3, "Piping/valve.sym")));
+        // A file is never a member, not of an archive at its own path
+        // either.
+        assert!(!in_zip.is_same_file(&file(&archive)));
+        assert!(!file(&archive).is_same_file(&in_zip));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

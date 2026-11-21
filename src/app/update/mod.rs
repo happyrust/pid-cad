@@ -724,6 +724,10 @@ impl OpenCADStudio {
         // A dock change leaves the drawing where it was on screen, and the
         // viewport's size follows dock and window changes at once.
         self.dock_keep_view();
+        // A symbol opened beside the start page had no canvas to be fitted
+        // to: it is fitted once its tab has been laid out.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.refit_the_symbol_opened_without_a_canvas();
         // Thumbnails the block palette asked for are read in the background.
         task = Task::batch([task, self.palette_thumbnail_task()]);
         // A script waiting on an open or a save goes on once it is done,

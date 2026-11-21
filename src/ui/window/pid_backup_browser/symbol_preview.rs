@@ -15,6 +15,11 @@
 //! Only the selected file's reading is kept
 //! ([`Section::keeps_only_selected`]), so of a run of quick clicks the last
 //! one alone is shown.
+//!
+//! A symbol that has a thumbnail opens as a drawing of its own: a double
+//! click on its row, or the button under the thumbnail ([`opens`]). What
+//! the details say of a file that has none is what the command line says
+//! when it is asked to open one ([`notes`]).
 
 use std::borrow::Cow;
 use std::f64::consts::TAU;
@@ -30,7 +35,7 @@ use super::{human_size, ref_at, DetailLine, NodeId};
 use crate::app::Message;
 use crate::io::pid_backup_browse::symbol_file::{
     read_symbol_file, read_symbol_member, Across, Body, Counts, Failure, Ink, Kind, Label, Reading,
-    Sketch, SymbolFile, SymbolNotDrawn, Upright,
+    Sketch, SymbolFile, SymbolNotDrawn, SymbolSource, Upright,
 };
 use crate::io::pid_backup_browse::BackupIndex;
 use crate::{t, tf};
@@ -104,6 +109,48 @@ fn source(index: &BackupIndex, id: &NodeId) -> Option<Source> {
     }
 }
 
+/// What the symbol file `id` is called: its name as the plant names the
+/// file, less the folders and the `.sym`. The name is taken where
+/// [`is_symbol`] found it: a file of the backup folder that is not named so
+/// itself is called by the path it was backed up from. Folders are parted
+/// by either slash, whatever this machine parts them by: the names were
+/// written on the plant's.
+fn symbol_name(index: &BackupIndex, id: &NodeId) -> Option<String> {
+    let stem = |name: &str| -> Option<String> {
+        let file = name.rsplit(['/', '\\']).next().unwrap_or(name);
+        let (stem, extension) = file.rsplit_once('.')?;
+        (extension.eq_ignore_ascii_case("sym") && !stem.is_empty()).then(|| stem.to_string())
+    };
+    match id {
+        NodeId::File(at) => {
+            let file = index.files.get(*at)?;
+            stem(&file.name).or_else(|| stem(&file.record.as_ref()?.original))
+        }
+        NodeId::FileMember(file, member) => stem(index.files.get(*file)?.members.get(*member)?),
+        NodeId::RefFile(dirs, at) => stem(&ref_at(&index.ref_tree, dirs)?.files.get(*at)?.name),
+        _ => None,
+    }
+}
+
+/// What opening the symbol file `id` as a drawing takes: where the file is
+/// and what the symbol is called. Nothing for a node that is no symbol file
+/// with content to read.
+pub(crate) fn opens(index: &BackupIndex, id: &NodeId) -> Option<(SymbolSource, String)> {
+    let source = match source(index, id)? {
+        Source::File(path) => SymbolSource::File(path),
+        Source::Member {
+            archive,
+            member,
+            name,
+        } => SymbolSource::Member {
+            archive,
+            member,
+            name,
+        },
+    };
+    Some((source, symbol_name(index, id)?))
+}
+
 impl Section for SymbolPreview {
     fn details(&self, cx: &Cx<'_>, id: &NodeId, lines: &mut Vec<DetailLine>) {
         match cx.load(id) {
@@ -114,7 +161,7 @@ impl Section for SymbolPreview {
             Some(SectionLoad::Failed(error)) => lines.push(DetailLine::Marker(error.clone())),
             Some(SectionLoad::Ready(data)) => {
                 if let Some(file) = data.get::<SymbolFile>() {
-                    lines_of(file, lines);
+                    lines_of(file, id, lines);
                 }
             }
         }
@@ -143,26 +190,40 @@ impl Section for SymbolPreview {
     }
 }
 
-/// The lines a symbol file adds to its details: its thumbnail, how it
-/// reads, and what it holds.
-fn lines_of(file: &SymbolFile, lines: &mut Vec<DetailLine>) {
-    let marker = |text: Cow<'_, str>| DetailLine::Marker(text.into_owned());
+/// The lines the symbol file of `node` adds to its details: its thumbnail
+/// and the button that opens it as a drawing, how it reads, and what it
+/// holds.
+fn lines_of(file: &SymbolFile, node: &NodeId, lines: &mut Vec<DetailLine>) {
     if let Some(body) = &file.body {
         if !body.sketch.is_empty() {
             lines.push(DetailLine::Sketch(Arc::clone(&body.sketch)));
+            // What has a thumbnail opens as a drawing, and nothing else
+            // does: the button is the double click on the file's row.
+            lines.push(DetailLine::Button(
+                t!("Open symbol").into_owned(),
+                node.clone(),
+            ));
         }
     }
+    lines.extend(notes(file).into_iter().map(DetailLine::Marker));
+    if let Some(body) = &file.body {
+        body_lines(body, lines);
+    }
+}
+
+/// What the details say of how a symbol file reads and of what the import
+/// draws of it, a line each: nothing of a file read whole and drawn. The
+/// command line says the same of a symbol it is asked to open as a drawing.
+pub(crate) fn notes(file: &SymbolFile) -> Vec<String> {
+    let mut notes = Vec::new();
+    let mut note = |text: Cow<'_, str>| notes.push(text.into_owned());
     match &file.reading {
         Reading::Drawable => {}
-        Reading::EmptyBody => {
-            lines.push(marker(t!(
-                "Nothing to draw: the symbol displays no primitive."
-            )));
-        }
-        Reading::Short(None) => lines.push(marker(t!(
+        Reading::EmptyBody => note(t!("Nothing to draw: the symbol displays no primitive.")),
+        Reading::Short(None) => note(t!(
             "Part of the file was not read; what is shown is part of the symbol."
-        ))),
-        Reading::Short(Some(why)) => lines.push(marker(match why {
+        )),
+        Reading::Short(Some(why)) => note(match why {
             SymbolNotDrawn::ClusterShort => t!(
                 "Not drawn: its PSMcluster0 stream was not read whole, so the layer table and the view sets that say what draws the symbol may be incomplete."
             ),
@@ -172,33 +233,34 @@ fn lines_of(file: &SymbolFile, lines: &mut Vec<DetailLine>) {
             SymbolNotDrawn::PickAmongShortSheets => t!(
                 "Not drawn: the symbol is drawn from the sheet with the most strokes, and a sheet in the running was not read whole."
             ),
-        })),
-        Reading::Failed(Failure::TooLarge(bytes)) => lines.push(marker(tf!(
+        }),
+        Reading::Failed(Failure::TooLarge(bytes)) => note(tf!(
             "Too large to be a symbol file ({}); not read.",
             human_size(*bytes)
-        ))),
-        Reading::Failed(Failure::NotCompound(_)) => lines.push(marker(t!(
+        )),
+        Reading::Failed(Failure::NotCompound(_)) => note(t!(
             "Not a symbol file: it does not start as an OLE compound file."
-        ))),
-        Reading::Failed(Failure::Decode(error)) => lines.push(marker(tf!(
+        )),
+        Reading::Failed(Failure::Decode(error)) => note(tf!(
             "The symbol file cannot be decoded: {}",
             error
-        ))),
+        )),
     }
-    if let Some(body) = &file.body {
-        body_lines(body, lines);
+    // Primitives are displayed, and the import draws nothing for any.
+    if file
+        .body
+        .as_ref()
+        .is_some_and(|body| body.displayed.total() > 0 && body.sketch.is_empty())
+    {
+        note(t!("The import draws none of these primitives."));
     }
+    notes
 }
 
 /// What a symbol body holds, as fields. A count of nothing is left out,
 /// but for how many primitives are displayed and how many sheets there are.
 fn body_lines(body: &Body, lines: &mut Vec<DetailLine>) {
     let field = |key: Cow<'_, str>, value: String| DetailLine::Field(key.into_owned(), value);
-    if body.displayed.total() > 0 && body.sketch.is_empty() {
-        lines.push(DetailLine::Marker(
-            t!("The import draws none of these primitives.").into_owned(),
-        ));
-    }
     if let Some((min_x, min_y, max_x, max_y)) = body.sketch.bounds() {
         lines.push(field(
             t!("Symbol extent"),
@@ -584,7 +646,8 @@ mod tests {
     use crate::ui::dock::Chrome;
     use crate::ui::window::pid_backup_browser::section::load_in_background;
     use crate::ui::window::pid_backup_browser::{
-        detail_rows, update, view, Effect, PidBackupBrowser, PidBackupMsg,
+        detail_buttons, detail_rows, selected_buttons, update, view, Effect, PidBackupBrowser,
+        PidBackupMsg,
     };
     use std::collections::BTreeMap;
     use std::io::Write;
@@ -897,8 +960,14 @@ mod tests {
         assert_eq!(value(&rows, &t!("Retired copies")), Some("3"));
         assert_eq!(value(&rows, &t!("Chain faults")), None);
         // A symbol that reads whole and is drawn has no more to say: every
-        // line is a field or the thumbnail.
-        assert!(rows.iter().all(|(_, value)| !value.is_empty()), "{rows:?}");
+        // line is a field, the thumbnail, or the button under it.
+        let open = t!("Open symbol");
+        assert_eq!(at(&open), at(SKETCH_KEY) + 1);
+        assert!(
+            rows.iter()
+                .all(|(key, value)| !value.is_empty() || *key == open),
+            "{rows:?}"
+        );
 
         // A stream whose framing does not hold is said in the conversion
         // library's words, under how many there are. (The node is left and
@@ -1066,6 +1135,221 @@ mod tests {
         update(&mut state, PidBackupMsg::Select(NodeId::Root));
         assert!(state.section_data.is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_double_click_on_a_symbol_file_asks_for_it_as_a_drawing() {
+        let (root, mut state) = backup("opens");
+        // Where a member of the archive is: where it stands in it, and its
+        // name.
+        let in_archive = |state: &PidBackupBrowser, name: &str| {
+            let node = member(state, "RefData~4~809.zip", name);
+            let NodeId::FileMember(_, at) = node else {
+                unreachable!()
+            };
+            let source = SymbolSource::Member {
+                archive: root.join("RefData~4~809.zip"),
+                member: at,
+                name: name.to_string(),
+            };
+            (node, source)
+        };
+        let (hollow, hollow_source) = in_archive(&state, "Symbols/hollow.sym");
+        let (plain, plain_source) = in_archive(&state, "Symbols/plain.SYM");
+        // A member of an archive; one named in capitals; a file of the
+        // backup folder, called by the path it was backed up from; a file
+        // of the `Ref` tree.
+        let cases = [
+            (hollow, hollow_source, "hollow"),
+            (plain, plain_source, "plain"),
+            (
+                file(&state, "RefData~4~810"),
+                SymbolSource::File(root.join("RefData~4~810")),
+                "Loose",
+            ),
+            (
+                NodeId::RefFile(vec![0], 0),
+                SymbolSource::File(root.join("Ref").join("Symbols").join("Gate.sym")),
+                "Gate",
+            ),
+        ];
+        for (node, expected, called) in &cases {
+            // Nothing is selected and nothing was read of the file: the
+            // double click does not wait for a thumbnail.
+            let (source, name) = match update(&mut state, PidBackupMsg::Activate(node.clone())) {
+                Effect::OpenSymbol { source, name } => (source, name),
+                other => panic!("{node:?} is asked for as a drawing: {other:?}"),
+            };
+            assert!(source.is_same_file(expected), "{node:?}: {source:?}");
+            assert_eq!(&name, called, "{node:?}");
+            // A member is asked for where it stands in its archive.
+            if let SymbolSource::Member { member, .. } = expected {
+                assert!(
+                    matches!(&source, SymbolSource::Member { member: asked, .. } if asked == member),
+                    "{node:?}: {source:?}"
+                );
+            }
+            assert!(state.section_data.is_empty(), "{node:?}");
+        }
+
+        // What is no symbol file is not opened: a text file, a folder of
+        // the archive, the archive, the dump, a directory, the backup.
+        for node in [
+            member(&state, "RefData~4~809.zip", "Symbols/notes.txt"),
+            member(&state, "RefData~4~809.zip", "Symbols/"),
+            file(&state, "RefData~4~809.zip"),
+            file(&state, "Export.dmp"),
+            NodeId::RefDir(vec![0]),
+            NodeId::Root,
+        ] {
+            assert_eq!(
+                update(&mut state, PidBackupMsg::Activate(node.clone())),
+                Effect::None,
+                "{node:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+
+        // A symbol file the backup lists and does not hold has nothing to
+        // open.
+        let root = scratch("opens-missing");
+        std::fs::write(
+            root.join("Manifest.txt"),
+            b"Name<<|>>SQPlant\n\
+              File<<|>>4<<|>>2<<|>>811<<|>>20811<<|>>\\\\host\\P\\Ref\\Gone.sym<<|>>1<<|>>RefData~4~811\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("Export.dmp"),
+            b"\x03\x03iEXPORT:V12.02.00\nrest-of-dump",
+        )
+        .unwrap();
+        let index = build_index(&root, None).expect("the folder indexes");
+        let mut state = PidBackupBrowser::default();
+        // No backup, nothing to open.
+        assert_eq!(
+            update(&mut state, PidBackupMsg::Activate(NodeId::File(0))),
+            Effect::None
+        );
+        update(&mut state, PidBackupMsg::Loaded(Ok(Arc::new(index))));
+        let gone = file(&state, "RefData~4~811");
+        assert!(is_symbol(state.index().expect("a ready index"), &gone));
+        assert_eq!(
+            update(&mut state, PidBackupMsg::Activate(gone)),
+            Effect::None
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_button_under_the_thumbnail_is_the_double_click() {
+        let (root, mut state) = backup("button");
+        let node = member(&state, "RefData~4~809.zip", "Symbols/hollow.sym");
+        let open = t!("Open symbol").into_owned();
+
+        // While the file is read there is no thumbnail, and no button.
+        let read = start(&mut state, &node);
+        assert!(detail_buttons(&state, &node).is_empty());
+        assert!(selected_buttons(&state).is_empty());
+
+        // With the thumbnail comes the button, and a press of it is the
+        // double click on the file's row.
+        finish(
+            &mut state,
+            read,
+            &node,
+            Ok(SectionData::new(digest(&made_up::valve()))),
+        );
+        assert_eq!(
+            detail_buttons(&state, &node),
+            [(open.clone(), node.clone())]
+        );
+        let mut pressed = selected_buttons(&state);
+        assert_eq!(pressed.len(), 1);
+        let (label, press) = pressed.remove(0);
+        assert_eq!(label, open);
+        assert!(matches!(&press, PidBackupMsg::Activate(activated) if *activated == node));
+        assert_eq!(
+            update(&mut state, press),
+            update(&mut state, PidBackupMsg::Activate(node.clone()))
+        );
+        assert!(matches!(
+            update(&mut state, PidBackupMsg::Activate(node.clone())),
+            Effect::OpenSymbol { name, .. } if name == "hollow"
+        ));
+
+        // What has no thumbnail has no button; a part of a symbol has both.
+        for (file, offered) in [
+            (digest(&made_up::empty()), false),
+            (digest(&made_up::placeholder()), false),
+            (digest(&made_up::valve_short(&["PSMcluster0"], &[])), false),
+            (digest(&made_up::valve_short(&[], &[made_up::NORMAL])), true),
+        ] {
+            // The node is left and come back to: selecting the node it is
+            // on again starts no read.
+            update(&mut state, PidBackupMsg::Select(NodeId::Root));
+            let reading = file.reading.clone();
+            show(&mut state, &node, file);
+            let rows = detail_rows(&state, &node);
+            assert_eq!(value(&rows, SKETCH_KEY).is_some(), offered, "{reading:?}");
+            assert_eq!(
+                detail_buttons(&state, &node),
+                if offered {
+                    vec![(open.clone(), node.clone())]
+                } else {
+                    Vec::new()
+                },
+                "{reading:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn what_is_said_of_a_symbol_that_is_not_drawn_is_one_text() {
+        // Read whole and drawn: nothing to say.
+        assert!(notes(&digest(&made_up::valve())).is_empty());
+        // The lines the details mark are the notes, in their order.
+        let none_drawn = t!("The import draws none of these primitives.").into_owned();
+        let part =
+            t!("Part of the file was not read; what is shown is part of the symbol.").into_owned();
+        assert_eq!(notes(&digest(&made_up::placeholder())), [none_drawn]);
+        assert_eq!(
+            notes(&digest(&made_up::empty())),
+            [t!("Nothing to draw: the symbol displays no primitive.").into_owned()]
+        );
+        assert_eq!(
+            notes(&digest(&made_up::valve_short(&[], &[made_up::NORMAL]))),
+            [part]
+        );
+        let not_compound = SymbolFile {
+            reading: Reading::Failed(Failure::NotCompound(5)),
+            body: None,
+        };
+        assert_eq!(
+            notes(&not_compound),
+            [t!("Not a symbol file: it does not start as an OLE compound file.").into_owned()]
+        );
+        for file in [
+            digest(&made_up::placeholder()),
+            digest(&made_up::empty()),
+            digest(&made_up::valve_short(&["PSMcluster0"], &[])),
+            digest(&made_up::valve_short(&[], &[made_up::NORMAL])),
+            not_compound,
+        ] {
+            let mut lines = Vec::new();
+            lines_of(&file, &NodeId::Root, &mut lines);
+            let marked: Vec<String> = lines
+                .into_iter()
+                .filter_map(|line| match line {
+                    DetailLine::Marker(text) => Some(text),
+                    _ => None,
+                })
+                .collect();
+            let said = notes(&file);
+            assert!(!said.is_empty(), "{:?}", file.reading);
+            assert_eq!(marked[..said.len()], said[..], "{:?}", file.reading);
+        }
     }
 
     fn close(found: Point, expected: (f32, f32)) -> bool {
@@ -1430,7 +1714,7 @@ mod tests {
             // The lines the details get, and the thumbnail's every point
             // inside its box.
             let mut lines = Vec::new();
-            lines_of(file, &mut lines);
+            lines_of(file, node, &mut lines);
             let thumbnails = lines
                 .iter()
                 .filter(|line| matches!(line, DetailLine::Sketch(_)))

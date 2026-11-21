@@ -133,8 +133,8 @@ use self::styles::*;
 use self::summary::*;
 pub use self::summary::{ImportSummary, ImportUnit, SUMMARY_PROPERTY_PREFIX};
 use self::symbol_blocks::*;
-pub(crate) use self::symbols::symbol_file_primitive_entities;
 use self::symbols::*;
+pub(crate) use self::symbols::{symbol_file_document, symbol_file_primitive_entities};
 use self::template::*;
 use self::text::*;
 

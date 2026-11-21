@@ -33,7 +33,7 @@ const SAVED_IN_PLACE: Option<&str> = Some("ocs-si9-sheet.dwg");
 const NOT_SAVED_YET: Option<&str> = None;
 
 /// A way of moving the view.
-type Move = fn(&mut OpenCADStudio);
+pub(super) type Move = fn(&mut OpenCADStudio);
 
 /// The ways the view is moved, by name.
 const MOVES: [(&str, Move); 3] = [
@@ -43,7 +43,7 @@ const MOVES: [(&str, Move); 3] = [
 ];
 
 /// A notch of the mouse wheel over the drawing.
-fn wheel(app: &mut OpenCADStudio) {
+pub(super) fn wheel(app: &mut OpenCADStudio) {
     app.touchpad_pan = false;
     app.ctrl_down = false;
     app.zoom_wheel_reversed = false;
@@ -53,7 +53,7 @@ fn wheel(app: &mut OpenCADStudio) {
     }));
 }
 
-fn zoom_extents(app: &mut OpenCADStudio) {
+pub(super) fn zoom_extents(app: &mut OpenCADStudio) {
     let _ = app.run_command_line("ZOOM EXTENTS");
 }
 
@@ -69,7 +69,7 @@ fn go_to_the_tagged_valve(app: &mut OpenCADStudio) {
 }
 
 /// One tick of the application's clock.
-fn tick(app: &mut OpenCADStudio) {
+pub(super) fn tick(app: &mut OpenCADStudio) {
     let _ = app.update(Message::Tick(Instant::now()));
 }
 
@@ -98,7 +98,7 @@ fn shown_from(path: Option<&str>) -> OpenCADStudio {
 }
 
 /// Move the view by `by`, and let two ticks see that it moved.
-fn moved(app: &mut OpenCADStudio, by: Move) {
+pub(super) fn moved(app: &mut OpenCADStudio, by: Move) {
     let i = app.active_tab;
     let generation = app.tabs[i].scene.camera_generation;
     by(app);
@@ -111,7 +111,7 @@ fn moved(app: &mut OpenCADStudio, by: Move) {
 }
 
 /// Where the camera looks, and how much of the drawing it shows.
-fn pose(app: &OpenCADStudio) -> [f64; 3] {
+pub(super) fn pose(app: &OpenCADStudio) -> [f64; 3] {
     let camera = app.tabs[app.active_tab].scene.camera.borrow();
     [
         camera.target.x,
@@ -121,14 +121,14 @@ fn pose(app: &OpenCADStudio) -> [f64; 3] {
 }
 
 /// Whether two poses are one, to a thousandth of a millimetre.
-fn same(a: [f64; 3], b: [f64; 3]) -> bool {
+pub(super) fn same(a: [f64; 3], b: [f64; 3]) -> bool {
     a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-3)
 }
 
 /// Ask for the tab in front to be closed, as its close button asks, and say
 /// whether the program asked about saving it first. A drawing that is not
 /// asked about is gone; one that is stays open for the answer.
-fn asks_to_save_on_closing(app: &mut OpenCADStudio) -> bool {
+pub(super) fn asks_to_save_on_closing(app: &mut OpenCADStudio) -> bool {
     let id = app.tabs[app.active_tab].id;
     let _ = app.update(Message::TabClose(id));
     let asked = app.pending_close.is_some();

@@ -317,6 +317,30 @@ pub(crate) fn symbol_file_primitive_entities(
     )
 }
 
+/// A document that holds `entities` -- what [`symbol_file_primitive_entities`]
+/// draws of a symbol file -- as a drawing of their own, and how many of them
+/// it holds: a symbol opened from the backup browser (issue #116).
+///
+/// It is made the way a drawing's is ([`prepare_document`]): a fresh
+/// document, the standard linetypes, lineweights shown -- every stroke comes
+/// in at the width the file states for it. The entities go into model space
+/// as they are, millimetres about the symbol's origin, and a layer one of
+/// them is on is declared as the import declares it for a drawing
+/// ([`ensure_taxonomy_layer`]).
+pub(crate) fn symbol_file_document(entities: Vec<EntityType>) -> (Document, usize) {
+    let mut doc = Document::new();
+    crate::io::linetypes::populate_document(&mut doc);
+    doc.header.lineweight_display = true;
+    let mut held = 0;
+    for entity in entities {
+        ensure_taxonomy_layer(&mut doc, &entity.common().layer);
+        if doc.add_entity(entity).is_ok() {
+            held += 1;
+        }
+    }
+    (doc, held)
+}
+
 /// The entities one primitive of a symbol body draws at its placement —
 /// usually one; a boundary draws a solid hatch per member shape (see
 /// [`shape_boundary`]).

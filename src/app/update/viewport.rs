@@ -1854,6 +1854,11 @@ impl OpenCADStudio {
                 .current_path
                 .as_deref()
                 .is_some_and(crate::io::is_read_only_source_path);
+            // Nor has a symbol file of a backup that is shown in a tab of
+            // its own: the file is only ever read, and the tab has none to
+            // keep a view in until it is saved under a name.
+            #[cfg(not(target_arch = "wasm32"))]
+            let view_is_kept = view_is_kept && self.tabs[i].shown_symbol().is_none();
             if self.tabs[i].active_block_edit.is_some() {
                 let camera = self.tabs[i].scene.camera.borrow().clone();
                 if let Some(session) = self.tabs[i].active_block_edit_session_mut() {

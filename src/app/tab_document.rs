@@ -416,6 +416,13 @@ pub(super) struct DocumentTab {
     /// an undo) it is out of date — the panel says so and PIDLINE reads the
     /// sheet again before it selects (`pid_legend_is_stale`).
     pub(super) pid_legend: Option<PidLegendIndex>,
+    /// The symbol file of a backup this tab was added to show, when the
+    /// backup panel had it opened as a drawing: asked for again, the file
+    /// brings this tab to the front, and looking round it is no edit. Read
+    /// through `shown_symbol`, which lets go of it once the tab is saved
+    /// under a name of its own.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) pid_symbol: Option<super::commands::pidbackup::symbol_tab::SymbolTab>,
     /// Model-space corners of the last crossing window drawn with no command
     /// running: STRETCH on that selection stretches through it (#1068).
     pub(super) last_crossing_window: Option<([f64; 2], [f64; 2])>,
@@ -966,6 +973,8 @@ impl DocumentTab {
             layer_previous: Vec::new(),
             transparent_resume: false,
             pid_legend: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            pid_symbol: None,
             last_crossing_window: None,
             recent_colors: Vec::new(),
             layer_walk: None,
@@ -995,6 +1004,11 @@ impl DocumentTab {
         // gone, and its coordinates are not the new document's.
         crate::modules::draw::draw::attdef::session().forget_place_of(self.id);
         crate::modules::annotate::text::forget_place_of(self.id);
+        // Nor is it the symbol file the tab was added to show, if it was.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.pid_symbol = None;
+        }
         self.ifccad_session = ifccad_session;
         self.document_opened_pending = true;
     }

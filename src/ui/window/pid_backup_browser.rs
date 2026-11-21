@@ -10,9 +10,10 @@
 //!
 //! Every click is a message, and [`update`] is the pure function that applies
 //! it and says what the application should do next ([`Effect`]): read a
-//! drawing's items off the UI thread, open a drawing in a tab, ask for a
-//! source, rebuild the index. The panel therefore has no IO of its own and is
-//! testable without a window, which is what `visible_rows`/`update` are for.
+//! drawing's items off the UI thread, open a drawing or a symbol file in a
+//! tab, ask for a source, rebuild the index. The panel therefore has no IO of
+//! its own and is testable without a window, which is what
+//! `visible_rows`/`update` are for.
 //!
 //! The state lives on the application, not on a tab, so switching documents
 //! leaves the tree where the user left it.
@@ -43,12 +44,16 @@ pub use cache::{
 pub use goto::take_outcome as take_goto_outcome;
 pub use section::{SectionData, SectionLoad};
 pub use split::reveal_selected;
+pub(crate) use symbol_preview::notes as symbol_notes;
+#[cfg(test)]
+pub(crate) use symbol_preview::opens as symbol_opens;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::app::Message;
+use crate::io::pid_backup_browse::symbol_file::{SymbolDrawing, SymbolSource};
 use crate::io::pid_backup_browse::{BackupIndex, DrawingItems, GroupNode, RefNode};
 use crate::t;
 use crate::ui::dock::{Chrome, PanelId};
@@ -144,7 +149,8 @@ pub enum PidBackupMsg {
     Toggle(NodeId),
     /// A click on a row: select it.
     Select(NodeId),
-    /// A double click on a row: open the drawing it names.
+    /// A double click on a row: open the drawing or the symbol file it
+    /// names.
     Activate(NodeId),
     /// The "refresh" button: rebuild the index from the current source.
     Refresh,
@@ -174,6 +180,15 @@ pub enum PidBackupMsg {
         generation: u64,
         result: Result<Arc<HashMap<String, String>>, String>,
     },
+    /// The symbol file at `source` was read to be opened as a drawing
+    /// ([`Effect::OpenSymbol`]), or was not; `name` is what the symbol is
+    /// called. It carries no generation: what was asked for is shown
+    /// whatever the panel did since, as a drawing opened from it is.
+    SymbolRead {
+        source: SymbolSource,
+        name: String,
+        result: Result<Box<SymbolDrawing>, String>,
+    },
 }
 
 /// What the application should do after [`update`] applied a message.
@@ -186,6 +201,10 @@ pub enum Effect {
     LoadItems(usize, PathBuf),
     /// Open the `.pid` at the path in a tab.
     OpenDrawing(PathBuf),
+    /// Open the symbol file at `source` as a drawing of its own, in a tab
+    /// called `name`: read it off the UI thread and come back with
+    /// [`PidBackupMsg::SymbolRead`].
+    OpenSymbol { source: SymbolSource, name: String },
     /// Build the index of this source.
     Load(PathBuf),
     /// Rebuild the index from the current source.
@@ -658,6 +677,8 @@ pub fn update(state: &mut PidBackupBrowser, msg: PidBackupMsg) -> Effect {
         // Nothing of the panel's: the application puts the tags on the
         // drawings it opened from here.
         PidBackupMsg::TagsRead { .. } => Effect::None,
+        // Nor this: the application shows the symbol in a tab.
+        PidBackupMsg::SymbolRead { .. } => Effect::None,
         // The message itself is what draws the panel anew; the clock goes
         // on for as long as something counts.
         PidBackupMsg::Progress => {
@@ -989,16 +1010,26 @@ fn flip(state: &mut PidBackupBrowser, id: NodeId) {
     }
 }
 
-/// Open a drawing; anything else, and a drawing without a file, does nothing.
+/// Open a drawing, or a symbol file as a drawing of its own; anything else,
+/// and a drawing without a file, does nothing.
+///
+/// A symbol file is asked for whether or not it was read for its details:
+/// a double click does not wait for the thumbnail, and one that draws
+/// nothing says so when it has been read to be opened.
 fn activate(state: &PidBackupBrowser, id: NodeId) -> Effect {
-    let NodeId::Drawing(drawing) = id else {
+    let Some(index) = state.index() else {
         return Effect::None;
     };
-    state
-        .index()
-        .and_then(|index| index.drawings.get(drawing))
-        .and_then(|entry| entry.pid_path.clone())
-        .map_or(Effect::None, Effect::OpenDrawing)
+    match id {
+        NodeId::Drawing(drawing) => index
+            .drawings
+            .get(drawing)
+            .and_then(|entry| entry.pid_path.clone())
+            .map_or(Effect::None, Effect::OpenDrawing),
+        id => symbol_preview::opens(index, &id).map_or(Effect::None, |(source, name)| {
+            Effect::OpenSymbol { source, name }
+        }),
+    }
 }
 
 impl PidBackupMsg {
