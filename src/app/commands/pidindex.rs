@@ -1763,7 +1763,8 @@ pub(super) fn point([x, y]: [f64; 2]) -> String {
     format!("({}, {})", number(x), number(y))
 }
 
-fn number(value: f64) -> String {
+/// 一个数，写法同 [`point`]。快照比对的长度（`commands::pidsnapshot`）也这样写。
+pub(super) fn number(value: f64) -> String {
     let text = format!("{value:.3}");
     let text = text.trim_end_matches('0').trim_end_matches('.');
     if text == "-0" {

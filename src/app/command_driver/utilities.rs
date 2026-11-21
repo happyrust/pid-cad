@@ -1419,6 +1419,12 @@ impl OpenCADStudio {
             // `PIDBOM PROJECT`, `PIDBOM EXPORT <file> PBS <node>` and the rest
             // likewise: the bare verb would first total the current drawing.
             || tokens[0].eq_ignore_ascii_case("PIDBOM")
+            // `PIDSNAPSHOT SAVE <reason>` and the rest likewise: the bare verb
+            // would first save a snapshot of its own, and the line two.
+            || tokens[0].eq_ignore_ascii_case("PIDSNAPSHOT")
+            // `PIDDIFF <a> [<b>] [EXPORT <file>]` likewise: the bare verb only
+            // says how it is written.
+            || tokens[0].eq_ignore_ascii_case("PIDDIFF")
         {
             return self.dispatch_command(cmd);
         }

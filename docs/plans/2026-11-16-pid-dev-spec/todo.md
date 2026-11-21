@@ -909,13 +909,14 @@
 
 - **做什么**：新建 `src/app/commands/pidsnapshot.rs`。取程序里此刻的图（不要求先保存，`dirty` 记下有没有未保存的修改）→ 摘要与连通图 → `capture` → 存。生成人的取法与豁免人相同。命令（§5.2）：`PIDSNAPSHOT` 或 `PIDSNAPSHOT SAVE [<原因>]`、`PIDSNAPSHOT LIST`、`PIDSNAPSHOT EXPORT <序号> <文件>`、`PIDSNAPSHOT FILE <文件> [<原因>]`；`PIDDIFF <甲> [<乙>]`（甲、乙是序号或快照文件路径，不写乙就是与当前图比）、`PIDDIFF <甲> <乙> EXPORT <文件>`（与当前图比时乙写 `LIVE`）。两个命令都不改图，整个进只读允许名单；都带参数，登记成整行命令。
 - **验收**：
-  - [ ] 用命令建图 → `PIDSNAPSHOT SAVE 送审前` → 改图 → `PIDDIFF 1`：三组计数与明细正确；从命令行执行 `PIDSNAPSHOT SAVE <原因>` 只存出一份。
-  - [ ] 做快照前后图纸的「已修改」状态和撤销栈不变；没保存过的图 `PIDSNAPSHOT` 报 `INDEX_NO_PROJECT_DIR`，`PIDSNAPSHOT FILE <文件>` 可用；只读会话里两个命令都能用。
-  - [ ] `PIDDIFF 2 2` → `DIFF_SAME_SNAPSHOT`；序号不存在 → `SNAPSHOT_NOT_FOUND`；`PIDDIFF 1 LIVE EXPORT <文件>` 写出的 JSON 就是 §3.7 的比对结果。
+  - [x] 用命令建图 → `PIDSNAPSHOT SAVE 送审前` → 改图 → `PIDDIFF 1`：三组计数与明细正确；从命令行执行 `PIDSNAPSHOT SAVE <原因>` 只存出一份。
+  - [x] 做快照前后图纸的「已修改」状态和撤销栈不变；没保存过的图 `PIDSNAPSHOT` 报 `INDEX_NO_PROJECT_DIR`，`PIDSNAPSHOT FILE <文件>` 可用；只读会话里两个命令都能用。
+  - [x] `PIDDIFF 2 2` → `DIFF_SAME_SNAPSHOT`；序号不存在 → `SNAPSHOT_NOT_FOUND`；`PIDDIFF 1 LIVE EXPORT <文件>` 写出的 JSON 就是 §3.7 的比对结果。
 - **验证**：`cargo test --offline --locked --lib pidsnapshot`
 - **依赖**：SNAP-2、SNAP-3
 - **文件**：新建 `src/app/commands/pidsnapshot.rs`；`src/app/commands/mod.rs`、`src/app/command_driver/utilities.rs`、`src/app/collab/apply.rs`
 - **规模**：M
+- **补（2026-11-21）**：在 `pid-stage-c` 分支上接着 `SNAP-4` 做，一个提交。多改了两个文件，都只放宽可见性（`pub(super)`）、加一句文档：`src/app/commands/piddrc.rs` 的 `waiver_by`（生成人与豁免人取法相同），`src/app/commands/pidindex.rs` 的 `number`（明细里的长度与位置同一种写法）。`DIFF_SAME_SNAPSHOT` 定义在命令文件里。任务没有说的：命令名和关键字不分大小写；`PIDSNAPSHOT` 后面跟的不是关键字只说怎么写、不存；原因是 `SAVE`、`FILE <文件>` 后面的整段，整段加了双引号的去掉引号；甲、乙全是数字的是序号、`LIVE` 是当前图、别的当快照文件，写了 `EXPORT <文件>` 就不能省乙；不是完整路径的文件名从图所在的目录算起，图没存过从当前目录算起（同 `PIDBOM EXPORT`）；同一份（同一个序号、都是当前图、同一个文件）在读任何东西之前查，所以 `PIDDIFF 9 9` 也报 `DIFF_SAME_SNAPSHOT`，序号与它自己的文件、导出的副本不算同一份；`ref` 照写的填；`EXPORT`、`FILE` 的目标已在报 `SNAPSHOT_IMMUTABLE`，比对结果的文件已在时覆盖、不盖项目文件、写不成不带错误码；明细最多列 10 个对象；列表的时间按 UTC 写到分。这些记在快照规格 §11.5。**先红后绿**：先放空壳（做快照的入口总报错，命令没接进命令链、没登记、不在只读名单和整行名单里，`utc_said` 返回空串），新的 12 条都编得过、都败在断言上（9 条命令不认得，登记、UTC、只读会话各 1 条），`collab::apply` 只读名单那条也败（39 条里 38 条过）；实现、接线后 12 条全过（1.04 秒），`collab::apply` 39 条全过。之后把写长度的小函数换成 `pidindex` 的 `number`，又补了四处断言（原因去引号、序号与它自己的文件不算同一份、比对结果不盖项目文件、列表标出不在了的文件；这四处没有先红）。新文件照 rustfmt 整理过，只改排版：整理是在全套检查跑到 clippy 时做的，所以主程序库全量和第一遍 clippy 跑的是整理前的排版，`--tests` 那一遍 clippy 和格式检查跑的是整理后的，新测试整理后又重跑了一遍。**读数**：新的 12 条全过（全套检查里 0.56 秒，整理后重跑 0.67 秒）；`collab::apply` 39 条全过；主程序库 7569 条，7494 通过、72 默认不跑、3 失败（比对设计稿的三条，与起点相同），多的 12 条是新加的；编译警告 52；clippy 656 / 1051，与起点相同，`--tests` 那一遍 cargo 报的重复数 637，也相同；告警的位置只有 `src/app/commands/mod.rs` 里原有的一条（测试里多余的 `.to_string()`）随前面加的 14 行从第 1962 行移到第 1976 行，其余一处不差，改动的文件没有新告警；格式检查：新文件 0 处，改过的文件 rustfmt 要改的处数与起点相同（`mod.rs` 4、`utilities.rs` 3、`apply.rs` 49，另两个 0）。`fmt-newhunks.ps1` 报 `mod.rs` 新 1 处：是起点就有的 `pidprops` 与 `pidplot` 先后那一处，`mod pidsnapshot;` 按字母序插在它下面，成了那处差异的上下文，脚本按整段文字比就认作新的，不是新问题（原有的两行没动）；架构检查上行依赖 33 对、183 个文件；SPPID 脚本测试 185 条全过；都与起点相同。**新基线**：主程序库 7569 条（7494 / 72 / 3）。
 
 ### SNAP-6 【接线】快照的操作与接口
 

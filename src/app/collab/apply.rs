@@ -2012,7 +2012,9 @@ fn tried_text(changes: &[broadcast::Change], label: &str) -> String {
 /// forms only (see `readonly_refuses_command`). Not here, though they once
 /// were: `MEASURE` (places points along an object), `FIND` (opens
 /// find-and-replace), `PIDGROUP` (every one of its forms regroups or retags)
-/// and `AUDIT` (applies its fixes when answered yes).
+/// and `AUDIT` (applies its fixes when answered yes). `PIDSNAPSHOT` and
+/// `PIDDIFF` write files on this machine, never the drawing, so every one of
+/// their forms is here.
 pub(super) const READONLY_ALLOWED: &[&str] = &[
     "ZOOM",
     "ZO",
@@ -2048,6 +2050,8 @@ pub(super) const READONLY_ALLOWED: &[&str] = &[
     "PIDLOCATE",
     "PIDCHECK",
     "PIDBOM",
+    "PIDSNAPSHOT",
+    "PIDDIFF",
     "PIDLINE",
     "PIDTAG",
     "PIDTOPOLOGY",
@@ -2914,6 +2918,13 @@ mod tests {
             "pidbom pbs U-100",
             "PIDBOM EXPORT bom.csv",
             "PIDBOM EXPORT bom.xlsx PBS U-100",
+            "PIDSNAPSHOT",
+            "PIDSNAPSHOT SAVE before review",
+            "pidsnapshot list",
+            "PIDSNAPSHOT EXPORT 1 snap.json",
+            "PIDSNAPSHOT FILE snap.json",
+            "PIDDIFF 1",
+            "piddiff 1 LIVE EXPORT diff.json",
             "PIDLINE",
             "PIDTAG P-1001",
             "MEASUREGEOM",

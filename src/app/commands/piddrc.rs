@@ -809,8 +809,9 @@ impl OpenCADStudio {
         )
     }
 
-    /// 豁免记在谁名下（§3.7）：连着协同时是协同的用户 ID，否则是操作系统的账户名。
-    fn waiver_by(&self) -> String {
+    /// 豁免记在谁名下（§3.7）：连着协同时是协同的用户 ID，否则是操作系统的账户名。快照的生成人
+    /// （`commands::pidsnapshot`）也这样取。
+    pub(super) fn waiver_by(&self) -> String {
         let user = self.collab.user_id.trim();
         if self.collab.connected && !user.is_empty() {
             return user.to_owned();

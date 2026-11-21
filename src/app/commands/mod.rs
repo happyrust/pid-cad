@@ -85,6 +85,7 @@ pub(in crate::app) mod pidpalette;
 mod pidpipe;
 pub(in crate::app) mod pidprops;
 mod pidplot;
+mod pidsnapshot;
 mod plotvars;
 mod point_cloud;
 mod refedit;
@@ -957,6 +958,12 @@ impl OpenCADStudio {
         if let Some(t) = self.dispatch_pidbom(cmd, i) {
             return Some(t);
         }
+        if let Some(t) = self.dispatch_pidsnapshot(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_piddiff(cmd, i) {
+            return Some(t);
+        }
         None
     }
 
@@ -1650,6 +1657,9 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDCLAIM",
         "PIDCOLLAB",
         "PIDCONNECTOR",
+        // Comparing two snapshots of a drawing, or one with the drawing as it
+        // is now (`pid::snapshot`), and writing the result out as JSON.
+        "PIDDIFF",
         "PIDFITTING",
         "PIDGROUP",
         // The P&ID project index (`pid::project_index`): the drawings in the
@@ -1673,6 +1683,10 @@ inventory::submit!(crate::command::CommandRegistration {
         // Which screen of the P&ID module is showing (`app::pid_shell`).
         "PIDSCREEN",
         "PIDSETPROP",
+        // Snapshots of the current drawing (`pid::snapshot`): taking a
+        // numbered one, listing them, copying one out, or writing one
+        // straight to a file.
+        "PIDSNAPSHOT",
         "PIDTAG",
         "PIDTOPOLOGY",
         "PLOT",
