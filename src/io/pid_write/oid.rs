@@ -168,6 +168,16 @@ impl SeedOidPool {
         &self.used_oids
     }
 
+    /// Advance `next_oid` strictly past `max_preferred` so subsequent `alloc_oid(None)`
+    /// calls (e.g. cloned `JSite` IDs or auxiliary labels) cannot collide with caller-supplied
+    /// `Some(preferred_oid)` values processed later in the same batch (`#139`).
+    pub fn advance_watermark_past(&mut self, max_preferred: u32) {
+        let target = max_preferred.saturating_add(1);
+        if target > self.next_oid {
+            self.next_oid = target;
+        }
+    }
+
     /// Reserve a preferred OID if free, or allocate the next monotonically
     /// increasing unused OID (`>= 1`, skipping segment-0 index 0 boundaries `(seg << 13)`).
     pub fn alloc_oid(&mut self, preferred: Option<u32>) -> u32 {

@@ -448,13 +448,49 @@ impl OpenCADStudio {
                     &action,
                 );
                 let count = matched.len();
+                let expanded = crate::io::pid_convert::expand_author_member_handles(
+                    &self.tabs[i].scene.document,
+                    &matched,
+                );
                 self.tabs[i].scene.deselect_all();
-                if !matched.is_empty() {
-                    self.tabs[i].scene.select_entities(&matched);
+                if !expanded.is_empty() {
+                    self.tabs[i].scene.select_entities(&expanded);
                 }
                 self.refresh_properties();
-                self.command_line
-                    .push_output(&format!("PIDREVIEW {action}: 已选中 {count} 个对象。"));
+                self.command_line.push_output(&format!(
+                    "PIDREVIEW {action}: 已选中 {count} 个符号（共 {} 个图元）。",
+                    expanded.len()
+                ));
+            }
+            "DEDUP" => {
+                self.push_undo_snapshot(i, "PIDREVIEW_DEDUP");
+                let renamed = crate::io::pid_convert::deduplicate_author_tags(
+                    &mut self.tabs[i].scene.document,
+                );
+                let synced_texts = crate::io::pid_convert::sync_paired_canvas_tag_texts(
+                    &mut self.tabs[i].scene.document,
+                );
+                if renamed > 0 || !synced_texts.is_empty() {
+                    let changes: Vec<_> = self.tabs[i]
+                        .scene
+                        .document
+                        .model_space_entities()
+                        .filter_map(|e| {
+                            let h = e.common().handle;
+                            (PidAuthor::load(&self.tabs[i].scene.document, h).is_some()
+                                || synced_texts.contains(&h))
+                            .then_some((h, crate::scene::ChangeKind::Modified))
+                        })
+                        .collect();
+                    if !changes.is_empty() {
+                        self.tabs[i].scene.bump_entities(&changes);
+                    }
+                    self.tabs[i].dirty = true;
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDREVIEW DEDUP: 已自动消解 {renamed} 个重复位号冲突。"
+                ));
             }
             "ACCEPT" => {
                 let selected = self.tabs[i].scene.selected_handles_in_order();
@@ -505,7 +541,7 @@ impl OpenCADStudio {
             }
             other => {
                 self.command_line.push_error(&format!(
-                    "PIDREVIEW: 未知子命令 {other}（支持 SUMMARY / HIGH / MEDIUM / LOW / DUPLICATES / ACCEPT / REJECT）。"
+                    "PIDREVIEW: 未知子命令 {other}（支持 SUMMARY / HIGH / MEDIUM / LOW / DUPLICATES / ACCEPT / REJECT / DEDUP）。"
                 ));
                 return Some(Task::none());
             }
@@ -1681,6 +1717,326 @@ mod tests {
         std::fs::write(
             out_dir.join("real136_summary.json"),
             serde_json::to_string_pretty(&summary).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn pidreview_expands_exploded_strokes_accepts_member_stroke_and_dedups_conflicts() {
+        use document::entities::{Circle, Line, LwPolyline, LwVertex, Text};
+        use document::types::Vector3;
+        use document::EntityType;
+
+        let mut app = app();
+        {
+            let doc = &mut app.tabs[app.active_tab].scene.document;
+            let mut frame = LwPolyline::new();
+            frame.is_closed = true;
+            frame.common.layer = "PUB_TITLE".to_string();
+            for (x, y) in [(0.0, 0.0), (420.0, 0.0), (420.0, 297.0), (0.0, 297.0)] {
+                frame.vertices.push(LwVertex::from_coords(x, y));
+            }
+            doc.add_entity(EntityType::LwPolyline(frame)).unwrap();
+
+            // Two exploded 4-stroke bowtie valves sharing duplicate tag `BV3101`
+            for &cx in &[80.0, 130.0] {
+                for (a, b) in [
+                    ((cx - 3.0, 98.0), (cx - 3.0, 102.0)),
+                    ((cx - 3.0, 102.0), (cx + 3.0, 98.0)),
+                    ((cx + 3.0, 98.0), (cx + 3.0, 102.0)),
+                    ((cx + 3.0, 102.0), (cx - 3.0, 98.0)),
+                ] {
+                    let mut st =
+                        Line::from_points(Vector3::new(a.0, a.1, 0.0), Vector3::new(b.0, b.1, 0.0));
+                    st.common.layer = "DEVICE".to_string();
+                    doc.add_entity(EntityType::Line(st)).unwrap();
+                }
+                let mut vt =
+                    Text::with_value("BV3101", Vector3::new(cx - 3.0, 104.0, 0.0)).with_height(2.2);
+                vt.common.layer = "TEXT".to_string();
+                doc.add_entity(EntityType::Text(vt)).unwrap();
+            }
+
+            // One untagged loose `Circle` pump (`r = 5.5` -> `Medium` tier)
+            let mut pump_c = Circle::from_coords(190.0, 100.0, 0.0, 5.5);
+            pump_c.common.layer = "0".to_string();
+            doc.add_entity(EntityType::Circle(pump_c)).unwrap();
+        }
+
+        let _ = app.run_command_line("PIDPROMOTE");
+        let rev0 = crate::io::pid_convert::summarize_author_review(
+            &app.tabs[app.active_tab].scene.document,
+        );
+        assert_eq!(rev0.total_authored_symbols, 3);
+        assert_eq!(rev0.medium, 1);
+        assert_eq!(rev0.duplicated_tags, 2);
+
+        // `PIDREVIEW DUPLICATES` expands `_member_handles` (2 valves x 2 member handles = 4 entities > 2 primary handles)
+        let _ = app.run_command_line("PIDREVIEW DUPLICATES");
+        let dup_selected = app.tabs[app.active_tab].scene.selected_handles_in_order();
+        assert_eq!(dup_selected.len(), 4);
+
+        // Selecting ONLY a non-primary member stroke of the first exploded valve and running `PIDREVIEW ACCEPT` resolves to its owner
+        let dup_owners = crate::io::pid_convert::filter_author_handles(
+            &app.tabs[app.active_tab].scene.document,
+            "DUPLICATES",
+        );
+        let non_primary_stroke = *dup_selected
+            .iter()
+            .find(|h| !dup_owners.contains(h))
+            .expect("member stroke distinct from primary handle");
+        select(&mut app, non_primary_stroke);
+        let _ = app.run_command_line("PIDREVIEW ACCEPT");
+
+        let rev1 = crate::io::pid_convert::summarize_author_review(
+            &app.tabs[app.active_tab].scene.document,
+        );
+        assert_eq!(rev1.confirmed, 1);
+
+        // `PIDREVIEW DEDUP` resolves the duplicate `BV3101` conflict in one undoable step
+        let _ = app.run_command_line("PIDREVIEW DEDUP");
+        let rev2 = crate::io::pid_convert::summarize_author_review(
+            &app.tabs[app.active_tab].scene.document,
+        );
+        assert_eq!(rev2.duplicated_tags, 0);
+        assert!(crate::pid::propagate::gate_save(&app.tabs[app.active_tab].scene.document).is_ok());
+
+        let _ = request(&mut app, json!({"op":"undo"}));
+        let rev_undo = crate::io::pid_convert::summarize_author_review(
+            &app.tabs[app.active_tab].scene.document,
+        );
+        assert_eq!(rev_undo.duplicated_tags, 2);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "runs all 12 real native AutoCAD legacy sheets inside OpenCADStudio through PIDPROMOTE -> PIDREVIEW -> PIDSAVEPID"]
+    fn real_legacy_12_in_app_promote_review_dedup_and_pidsavepid_roundtrip() {
+        use crate::io::pid_publish_check::{
+            check_publish_xml_bytes, default_publish_spec, CheckOptions, PublishXmlKind,
+        };
+        use sha2::{Digest, Sha256};
+
+        let Ok(legacy_dir) = std::env::var("OCS_PID_LEGACY12_DIR") else {
+            println!("OCS_PID_LEGACY12_DIR unset, skipping.");
+            return;
+        };
+        let Ok(seed_zip) = std::env::var("OCS_PID_SEED_ZIP") else {
+            println!("OCS_PID_SEED_ZIP unset, skipping.");
+            return;
+        };
+        let sym_dir = std::env::var("OCS_PID_SYM_DIR").unwrap_or_default();
+        let out_dir = std::env::var("OCS_PID_REAL139_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real139"));
+        let _ = std::fs::create_dir_all(&out_dir);
+
+        let mut dxf_files: Vec<std::path::PathBuf> = std::fs::read_dir(&legacy_dir)
+            .expect("read legacy dir")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("dxf"))
+                    && p.metadata().map(|m| m.len() > 0).unwrap_or(false)
+            })
+            .collect();
+        dxf_files.sort();
+        assert_eq!(dxf_files.len(), 12, "expected 12 legacy DXF files");
+
+        let spec = default_publish_spec();
+        let chk = CheckOptions {
+            expected_plant: Some("P01".to_string()),
+            ..CheckOptions::default()
+        };
+
+        let mut sheet_rows = Vec::new();
+        let mut tot_promoted = 0usize;
+        let mut tot_confirmed = 0usize;
+        let mut tot_deduped = 0usize;
+        let mut tot_exact_variants = 0usize;
+        let mut tot_fallbacks = 0usize;
+        let mut tot_items = 0usize;
+        let mut tot_relations = 0usize;
+        let mut tot_xml_reps = 0usize;
+        let mut tot_matched_oids = 0usize;
+        let mut tot_pdf_prims = 0usize;
+
+        for (idx, path) in dxf_files.iter().enumerate() {
+            let lid = format!("L{:02}", idx + 1);
+            let raw_dxf = std::fs::read(path).expect("read dxf bytes");
+            let sha_hex = format!("{:x}", Sha256::digest(&raw_dxf));
+            let sha_pfx = sha_hex[..12].to_string();
+
+            let mut app = app();
+            let loaded = crate::io::load_file(path).expect("load legacy dxf");
+            app.tabs[app.active_tab].scene.document = loaded;
+
+            let _ = app.run_command_line("PIDPROMOTE");
+            let stats_before = crate::io::pid_convert::summarize_author_review(
+                &app.tabs[app.active_tab].scene.document,
+            );
+            assert!(
+                stats_before.total_authored_symbols > 0,
+                "{lid}: expected promoted symbols > 0"
+            );
+
+            let _ = app.run_command_line("PIDREVIEW MEDIUM");
+            let med_entities_selected = app.tabs[app.active_tab]
+                .scene
+                .selected_handles_in_order()
+                .len();
+            assert!(med_entities_selected >= stats_before.medium);
+            if stats_before.medium > 0 {
+                let _ = app.run_command_line("PIDREVIEW ACCEPT");
+            }
+
+            let dup_before = crate::io::pid_convert::summarize_author_review(
+                &app.tabs[app.active_tab].scene.document,
+            )
+            .duplicated_tags;
+            if dup_before > 0 {
+                let _ = app.run_command_line("PIDREVIEW DEDUP");
+            }
+            let stats_after = crate::io::pid_convert::summarize_author_review(
+                &app.tabs[app.active_tab].scene.document,
+            );
+            assert_eq!(
+                stats_after.medium, 0,
+                "{lid}: medium must be 0 after ACCEPT"
+            );
+            assert_eq!(
+                stats_after.duplicated_tags, 0,
+                "{lid}: duplicated_tags must be 0 after DEDUP"
+            );
+
+            let sheet_out = out_dir.join(&lid);
+            let _ = std::fs::create_dir_all(&sheet_out);
+            let target_pid = sheet_out.join(format!("{lid}.pid"));
+            let save_cmd = if sym_dir.trim().is_empty() {
+                format!(
+                    "PIDSAVEPID \"{}\" SEED \"{}\"",
+                    target_pid.display(),
+                    seed_zip
+                )
+            } else {
+                format!(
+                    "PIDSAVEPID \"{}\" SEED \"{}\" SYMDIR \"{}\"",
+                    target_pid.display(),
+                    seed_zip,
+                    sym_dir
+                )
+            };
+            let _ = app.run_command_line(&save_cmd);
+            assert!(target_pid.exists(), "{lid}: target .pid must exist");
+
+            let data_xml_p = sheet_out.join(format!("{lid}_Data.xml"));
+            let meta_xml_p = sheet_out.join(format!("{lid}_Meta.xml"));
+            let cov_json_p = sheet_out.join(format!("{lid}_Coverage.json"));
+            let data_raw = std::fs::read(&data_xml_p).expect("read _Data.xml");
+            let meta_raw = std::fs::read(&meta_xml_p).expect("read _Meta.xml");
+            let pid_raw = std::fs::read(&target_pid).expect("read .pid");
+
+            let v_data = check_publish_xml_bytes(
+                &format!("{lid}_Data.xml"),
+                PublishXmlKind::Data,
+                &data_raw,
+                spec,
+                &chk,
+            );
+            let v_meta = check_publish_xml_bytes(
+                &format!("{lid}_Meta.xml"),
+                PublishXmlKind::Meta,
+                &meta_raw,
+                spec,
+                &chk,
+            );
+            assert!(
+                v_data.is_empty(),
+                "{lid} _Data.xml spec violations: {v_data:?}"
+            );
+            assert!(
+                v_meta.is_empty(),
+                "{lid} _Meta.xml spec violations: {v_meta:?}"
+            );
+
+            let cov_val: Value =
+                serde_json::from_str(&std::fs::read_to_string(&cov_json_p).unwrap()).unwrap();
+            let doc_uid = cov_val["doc_uid"].as_str().unwrap().to_string();
+            let exact_v = cov_val["variant_resolution"]["exact_variant_id"]
+                .as_u64()
+                .unwrap_or(0) as usize;
+            let fb_v = cov_val["variant_resolution"]["class_default_fallback"]
+                .as_u64()
+                .unwrap_or(0) as usize;
+            let items_w = cov_val["total_items_written"].as_u64().unwrap_or(0) as usize;
+            let rels_w = cov_val["total_relations_written"].as_u64().unwrap_or(0) as usize;
+            assert_eq!(fb_v, 0, "{lid}: fallback must be 0");
+            assert_eq!(
+                exact_v, stats_after.total_authored_symbols,
+                "{lid}: all promoted symbols must be preserved on PIDSAVEPID"
+            );
+
+            let dual_ver = crate::io::pid_convert::verify_dual_bundle(
+                &doc_uid,
+                &data_raw,
+                &pid_raw,
+                Some(&sheet_out),
+                &lid,
+            )
+            .expect("verify_dual_bundle");
+            assert!(dual_ver.is_cross_file_and_a_valid(), "{lid}: {dual_ver:?}");
+            assert!(dual_ver.is_b_plot_valid(), "{lid}: {dual_ver:?}");
+
+            tot_promoted += stats_after.total_authored_symbols;
+            tot_confirmed += stats_after.confirmed;
+            tot_deduped += dup_before;
+            tot_exact_variants += exact_v;
+            tot_fallbacks += fb_v;
+            tot_items += items_w;
+            tot_relations += rels_w;
+            tot_xml_reps += dual_ver.xml_rep_count;
+            tot_matched_oids += dual_ver.matched_graphic_oids;
+            tot_pdf_prims += dual_ver.b_level_pdf_primitives.unwrap_or(0);
+
+            sheet_rows.push(json!({
+                "id": lid,
+                "dxf_sha256_prefix": sha_pfx,
+                "authored_symbols": stats_after.total_authored_symbols,
+                "high_before": stats_before.high,
+                "medium_accepted": stats_after.confirmed,
+                "med_entities_selected": med_entities_selected,
+                "duplicates_before_dedup": dup_before,
+                "exact_variants_saved": exact_v,
+                "fallback": fb_v,
+                "items_written": items_w,
+                "relations_written": rels_w,
+                "xml_reps": dual_ver.xml_rep_count,
+                "matched_oids": dual_ver.matched_graphic_oids,
+                "a_valid": dual_ver.a_level_index_consistent,
+                "pdf_bytes": dual_ver.b_level_pdf_bytes,
+                "pdf_prims": dual_ver.b_level_pdf_primitives,
+            }));
+        }
+
+        let summary = json!({
+            "sheets_tested": sheet_rows.len(),
+            "total_authored_symbols": tot_promoted,
+            "total_medium_confirmed": tot_confirmed,
+            "total_duplicates_before_dedup": tot_deduped,
+            "total_exact_variants_saved": tot_exact_variants,
+            "total_fallbacks": tot_fallbacks,
+            "total_items_written": tot_items,
+            "total_relations_written": tot_relations,
+            "total_xml_reps": tot_xml_reps,
+            "total_matched_oids": tot_matched_oids,
+            "total_pdf_primitives": tot_pdf_prims,
+            "sheets": sheet_rows,
+        });
+        std::fs::write(
+            out_dir.join("real139_legacy12_inapp_summary.json"),
+            format!("{}\n", serde_json::to_string_pretty(&summary).unwrap()),
         )
         .unwrap();
     }

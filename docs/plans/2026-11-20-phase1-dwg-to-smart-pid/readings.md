@@ -1053,3 +1053,68 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `196 passed` | **`196 passed`** | **全绿** |
 
+---
+
+## 28. L2-1..L2-7 / L3-7 / L6-2（#139）：原生存量多图元/散圆/多段线图纸 `PID_AUTHOR` 升格、整组校核与 `PIDSAVEPID` 12 图全批闭环（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `b152958c1`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_write/{oid,index}.rs`、`src/io/pid_convert/{recognize,promote,mod}.rs`、`src/app/commands/pidprops.rs` |
+| 证据目录子项 | `2026-11-21-issue139/`（`red.txt`、`green_pidwrite2.txt`、`green_convert2.txt`、`green_pidprops2.txt`、`real12_inapp/real139_legacy12_inapp_summary.json`、`cargo_test.txt`、`clippy_lib.txt`、`clippy_test.txt`、`gen90_reg_summary.json`） |
+
+### 28.1 先红后绿与四项真实断链修复
+
+- **先红阶段**（`red.txt`，`RED139_RC=101`）：构造含散圆储罐（`Circle`）、圈内双行散圆仪表（`Circle` + 双行 `Text`）、无 `Insert` 炸散散线阀门（`Line` 簇）与多顶点 `LwPolyline` 两段式线号（`80-FS`）管线的合成原生存量图纸，运行 `promote_sheet_to_author` + `save_author_document_to_dual` 按预期因 `pipe_segments_promoted == 0` 及非 `Insert` 符号存回断链变红。
+- **转绿与实测捕获修复**：
+  1. **多图元符号与多折线管段保真升格（`recognize.rs` + `promote.rs`）**：`ConvertedSymbol` 新增 `member_handles`；`promote_sheet_to_author` 在 `PidAuthor.props` 以字符串保留键记录 `_at`、`_bbox`、`_member_handles`（兼容 `split_props` 属性编辑写回），屏蔽全部符号成员图元免受管段覆盖，并将 `rec.pipe_segments` 中的 `Line` / `LwPolyline` 折线段写入 `_segments` 与 `TopologyTable`；
+  2. **非 `Insert` 符号与世界坐标等比映射存回（`promote.rs`）**：`save_author_document_to_dual` 优先读取 `_at` / `_bbox` 及 `Circle` / `Arc` / `LwPolyline` / `Line` 世界锚点，并在图纸世界坐标超出种子图幅时自动按包围盒等比居中映射至图框内，消除硬钳位零长线；
+  3. **`SeedOidPool` 显式 `preferred_oid` 水位预留（`pid_write/{oid,index}.rs`）**：在 `apply_increments_to_seed` 入口调用 `advance_watermark_past(max_preferred)`，消除克隆 `/JSite*` 或辅助文字 `alloc_oid(None)` 提前占用后续符号 `preferred_oid` 的碰撞隐患（实测 `L01` `144 / 144` `GraphicOID` 恢复 100% 命中）；
+  4. **整组图元高亮、成员散线归并确认与一键消重（`promote.rs` + `pidprops.rs`）**：`PIDREVIEW HIGH/MEDIUM/LOW/DUPLICATES` 自动展开 `_member_handles` 整组高亮，点选任一成员散线执行 `ACCEPT / REJECT` 自动归并主句柄，并新增单步可撤销 `PIDREVIEW DEDUP` 自动消解原生存量图历史同名位号冲突。
+
+### 28.2 12 张真实原生 AutoCAD 存量图（`L01..L12`）应用内交互全批闭环实测
+
+在 `OpenCADStudio` 应用内逐张加载全部 12 张真实原生 AutoCAD 存量图，依次执行真实命令流 `PIDPROMOTE` → `PIDREVIEW MEDIUM` → `PIDREVIEW ACCEPT` → `PIDREVIEW DEDUP` → `PIDSAVEPID`（写出 `.pid` + `_Data.xml` + `_Meta.xml` + `_Coverage.json`），并逐张执行 `#111` `StrictVendor` 校验与 `#130` `a/b` 级重读/索引/PDF 出图校验：
+
+| 汇总指标 | 全批 12 图应用内实测值 | 说明 |
+|---|---:|---|
+| 跑通应用内闭环图数 | **`12 / 12`** | 含 6 张天正图块+散圆仪表图（`L01..L04, L11..L12`）与 6 张全散线形状图（`L05..L10`） |
+| 升格业务符号数 / 存回精确变体数 | **`1,619` / `1,619`（`100.00%`）** | 散圆仪表/容器/泵与炸散散线阀门/仪表/DCS 功能块 **零丢失**，**`class_default_fallback = 0`** |
+| `PIDREVIEW MEDIUM` 人工确认数 | **`210` 个符号（高亮选中 `914` 个成员图元）** | 炸散形状符号按整组散线在画布同步高亮选中并一次确认转 `confirmed` |
+| `PIDREVIEW DEDUP` 消解历史重号数 | **`18` 个**（`L02=2, L07=12, L08=4`） | 消解后全批 `12 / 12` 通过 `gate_save` 重号门禁 |
+| `PIDSAVEPID` 写出对象总数 / 关系总数 | **`5,197` / `5,076`** | `24 / 24` 份 XML 通过 `StrictVendor` **0 违规** |
+| 跨文件 `GraphicOID` 对齐（`matched / xml_reps`） | **`3,044 / 3,044`（`100.00%`）** | `12 / 12` 通过 `a` 级（Q9 索引零故障）与 `b` 级（`pid-plot` PDF 页内图元合计 `6,037`）；`c1` 标 `unverified_no_sppid_runner` |
+| 90 张 SPPID 基准图回归门禁（`baseline-90.tsv`） | **`passed=True, unexpected=0, expected=0`** | 逐图逐列 **100% 零差异**（退出码 `0`） |
+
+#### 12 张原生 AutoCAD 存量图应用内 `PIDPROMOTE → PIDREVIEW → PIDSAVEPID` 脱敏逐图明细
+
+| 代号 | 源 DXF SHA-256 前缀 | 升格符号数 | `MEDIUM` 确认数（选中图元数） | `DEDUP` 消重数 | 存回精确变体 | 写出对象 / 关系 | `GraphicOID` 对齐 | `a/b` 级验证 | PDF 图元数 |
+|---|---|---:|---:|---:|---:|---:|---:|---|---:|
+| `L01` | `a0f05f81a655` | `108` | `1`（`1`） | `0` | `108` | `201 / 126` | `144 / 144` | `true / true` | `380` |
+| `L02` | `66913e5a4dcb` | `145` | `0`（`0`） | `2` | `145` | `316 / 241` | `211 / 211` | `true / true` | `450` |
+| `L03` | `28ed389e23cb` | `118` | `0`（`0`） | `0` | `118` | `241 / 168` | `166 / 166` | `true / true` | `407` |
+| `L04` | `c43bd94ee217` | `155` | `0`（`0`） | `0` | `155` | `266 / 148` | `199 / 199` | `true / true` | `428` |
+| `L05` | `4f2200b7c055` | `222` | `13`（`41`） | `0` | `222` | `1,075 / 1,124` | `603 / 603` | `true / true` | `874` |
+| `L06` | `135b6bf6b0a6` | `127` | `37`（`150`） | `0` | `127` | `496 / 557` | `275 / 275` | `true / true` | `558` |
+| `L07` | `4051ce7189a6` | `208` | `40`（`160`） | `12` | `208` | `637 / 644` | `365 / 365` | `true / true` | `642` |
+| `L08` | `7553b30957f1` | `219` | `39`（`168`） | `4` | `219` | `693 / 701` | `392 / 392` | `true / true` | `667` |
+| `L09` | `8379ca9156bb` | `143` -> `173` | `30`（`130`） | `0` | `173` | `556 / 546` | `315 / 315` | `true / true` | `588` |
+| `L10` | `5a2218c7924d` | `112` | `44`（`258`） | `0` | `112` | `557 / 657` | `288 / 288` | `true / true` | `538` |
+| `L11` | `fc7451dd86cb` | `11` | `3`（`3`） | `0` | `11` | `53 / 52` | `28 / 28` | `true / true` | `230` |
+| `L12` | `2e16d71c2b6f` | `21` | `3`（`3`） | `0` | `21` | `106 / 112` | `58 / 58` | `true / true` | `275` |
+
+### 28.3 固定门禁读数
+
+| 门禁项 | 改前读数（§27.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,206` 条 | **`7,209` 条**（**`7,140` 过** / **`68` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+3` 条 Rust 测试（`+2` 常驻 + `+1` 12 图实测套件），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `oid.rs`、`index.rs`、`recognize.rs`、`promote.rs`、`mod.rs`、`pidprops.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `196 passed` | **`196 passed`** | **全绿** |
+
+

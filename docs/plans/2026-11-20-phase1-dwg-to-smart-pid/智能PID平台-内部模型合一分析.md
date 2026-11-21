@@ -7,7 +7,7 @@
 > **状态与解决记录（可回溯日志）**：
 > - `2026-11-20`（并行分支对齐）：确认活跃分支 `pid-symbol-identity` 正在将 `.pid` 导入符号建为图块（`INSERT`），直接经 `pid_parse::publish::pid_load::load_publish_from_pid` 从 `.pid` 自身读取类型与名称（53 图 `9,218 / 9,225` 命中，无需旁置 `_Data.xml`）、从备份库补全 `ItemTag`、经 `0x00FA` 6 字节成员配对散落标注文字并接入默认界面右侧检查栏。**决定：`L2-1`–`L2-6` 严格排在 `pid-symbol-identity` 合入 `main` 之后实施，直接承接其底座，避免 `src/io/pid/*` 与 `editor.rs` 合并冲突。**
 > - `2026-11-20`（`L0-8` 源码核实，见 `03-parse-answers.md`）：第 8 节问题 1 所需的 XML 21 类接口与码表目录已在 `pid-parse/src/publish/{catalog,codelist_values}.rs` 核实完毕。
-> - `2026-11-21`（[#134](https://github.com/happyrust/pid-cad/issues/134)，`src/io/pid_convert/promote.rs`）：在不触碰 `src/pid/*`、`src/io/pid/*` 与 `src/app/*` 的零冲突边界下，已完成本文方案 A 的引擎与持久化全链路（`M1` 类型映射、`M2` 幂等升格与 `tag_source=manual` 手工位号保护 + `props` JSON 保留键 + `>2048B` XRecord 溢出 + `purge` 隔离、`M3` 管线/管段/管件/连接符落盘 `PID_AUTHOR_TOPOLOGY` 与删改同步 `sync_author_after_edit`、`L2-6` `.pid` 导入语义升格、以及 `M5 / L2-7 / L6-2` 单源读取 `PID_AUTHOR + TopologyTable` 存回 `.pid` + XML 并通过 `a/b` 级重读与 PDF 出图验证，详见 `readings.md` §24）；仅剩 `M4` 面板 UI 交互待 `pid-symbol-on-main` 合入后接线。
+> - `2026-11-21`（[#134](https://github.com/happyrust/pid-cad/issues/134) 提交 `ac6527ca1`、[#136](https://github.com/happyrust/pid-cad/issues/136) 提交 `13635d1f1`、[#139](https://github.com/happyrust/pid-cad/issues/139)）：在零触碰并行工作树的边界下，已在 `src/io/pid_convert/promote.rs` 与 `src/app/commands/pidprops.rs` 完整落地本文方案 A 的 `M1..M5` 全链路（含可编辑 `P&ID 属性` + 只读 `P&ID 来源证据` 双分组、单/双行 DWG 文字双向联动、散圆与炸散多图元形状 `_member_handles` 整组画布高亮与成员归并 `ACCEPT/REJECT`、`LwPolyline` 多折线管段保真、`PIDREVIEW DEDUP` 一键消重及 `PIDSAVEPID` 存回双产物），SPPID 生产图与全部 `12 / 12` 张原生 AutoCAD 存量图（`L01..L12`）均 100% 通过 `StrictVendor` 与 `a/b` 级验证（详见 `readings.md` §24–§25、§28）。
 
 ---
 

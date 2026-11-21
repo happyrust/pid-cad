@@ -379,7 +379,7 @@ flowchart LR
 - **做法**：点选一个符号时，按 handle 把图形与 `PID_AUTHOR` 记录作为一块选中；打开属性面板。
 - **验收**：点选后属性面板显示该类对象的全部字段；选中态可撤销重做。
 - **资料**：RES-12 ⚠（缺则按"属性按接口分组"自设计并注明未对照实物）。
-- **解决记录（2026-11-21）**：点选或经 `PIDREVIEW` 筛选选中带 `PID_AUTHOR` 的块引用句柄后，属性面板自动呈现可编辑 `P&ID 属性` 与只读 `P&ID 来源证据` 两组完整字段（因缺 `RES-12` 实物截图，按本平台标准双分组自设计并注明未对照实物），选中与编辑均支持单步撤销/重做，详见 `readings.md` §25。
+- **解决记录（2026-11-21）**：点选或经 `PIDREVIEW` 筛选选中带 `PID_AUTHOR` 的图元后，属性面板自动呈现可编辑 `P&ID 属性` 与只读 `P&ID 来源证据` 两组完整字段（因缺 `RES-12` 实物截图，按本平台标准双分组自设计并注明未对照实物）；`#139` 进一步补齐炸散多图元符号 `_member_handles` 整组画布高亮与点选任意成员散线自动归并主句柄执行 `ACCEPT / REJECT`，选中与编辑均支持单步撤销/重做，详见 `readings.md` §25、§28。
 
 #### L2-3 属性面板读写（M）— **已完成（[#136](https://github.com/happyrust/pid-cad/issues/136)）**
 - **做法**：按接口分页签；写入走既有 `set_entity_xdata` 路径；改位号走位号引擎。
@@ -405,7 +405,7 @@ flowchart LR
 #### L2-7 保存回 `.pid`（M）— **本地 `a/b` 级已完成（[#134](https://github.com/happyrust/pid-cad/issues/134)）**
 - **依赖**：L5-7。**做法**：复用 L5 的写出器，把当前模型写回 `.pid`。
 - **验收**：写出后 `pid-parse` 重读相等；SPPID 能打开。
-- **解决记录（2026-11-21）**：落地 `src/io/pid_convert/promote.rs::save_author_document_to_dual`，合成与真实中位规模生产 DXF（升格 `115` 个符号 + `50` 条管段、编辑位号并新增阀门后存回真实空白模板 `.pid`）均 `100%` 通过跨文件对齐与 `a/b` 级重读及 PDF 出图验证（`c1` 待 `RES-06`），详见 `readings.md` §24。
+- **解决记录（2026-11-21）**：落地 `src/io/pid_convert/promote.rs::save_author_document_to_dual` 与应用内 `PIDSAVEPID`（`#134`、`#136`、`#139`）；不仅在 SPPID 图块生产图（`166/166`、`165/165` 对齐）跑通，还在 `SOURCE_DWG` 全部 `12 / 12` 张原生 AutoCAD 存量图（散圆仪表/容器/泵 + 炸散散线形状 + `LwPolyline` 管线）上跑通应用内 `PIDPROMOTE → PIDREVIEW → PIDSAVEPID` 闭环（`1,619 / 1,619` 符号零丢失、`3,044 / 3,044` `GraphicOID` 100% 对齐并通过 `a/b` 级重读及 PDF 出图验证；`c1` 待 `RES-06`），详见 `readings.md` §24–§25、§28。
 
 ### 7.4 L3 DWG 识别
 

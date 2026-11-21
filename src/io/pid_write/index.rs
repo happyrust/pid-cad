@@ -405,6 +405,18 @@ pub fn apply_increments_to_seed(
     }
 
     let mut pool = SeedOidPool::from_seed(seed);
+    let max_pref = increments
+        .lines
+        .iter()
+        .filter_map(|l| l.preferred_oid)
+        .chain(increments.polylines.iter().filter_map(|p| p.preferred_oid))
+        .chain(increments.texts.iter().filter_map(|t| t.preferred_oid))
+        .chain(increments.symbols.iter().filter_map(|s| s.preferred_oid))
+        .max()
+        .unwrap_or(0);
+    if max_pref > 0 {
+        pool.advance_watermark_past(max_pref);
+    }
     let sheet_path = pool.targets().sheet_stream_path.clone();
     let default_layer = pool.targets().default_layer_oid;
     let labels_layer = pool.targets().labels_layer_oid;

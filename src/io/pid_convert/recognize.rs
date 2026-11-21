@@ -103,6 +103,8 @@ pub struct ConvertedSymbol {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entity_handle: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_handles: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tag_handles: Vec<u64>,
     pub confidence: f64,
     pub tier: ConfidenceTier,
@@ -749,6 +751,7 @@ pub fn recognise_sppid_sheet(
                             lines: Vec::new(),
                             nominal_diameter: None,
                             entity_handle: Some(ent_handle),
+                            member_handles: vec![ent_handle],
                             tag_handles: Vec::new(),
                             confidence: 0.0,
                             tier: ConfidenceTier::Medium,
@@ -773,6 +776,7 @@ pub fn recognise_sppid_sheet(
                             lines: Vec::new(),
                             nominal_diameter: None,
                             entity_handle: Some(ent_handle),
+                            member_handles: vec![ent_handle],
                             tag_handles: Vec::new(),
                             confidence: 0.35,
                             tier: thresholds.classify(0.35),
@@ -1250,6 +1254,7 @@ pub fn recognise_sppid_sheet(
                 lines: Vec::new(),
                 nominal_diameter: None,
                 entity_handle: Some(texts[ti].handle),
+                member_handles: vec![texts[ti].handle],
                 tag_handles: vec![texts[ti].handle],
                 confidence: 0.85,
                 tier: thresholds.classify(0.85),
@@ -1542,6 +1547,7 @@ fn fuse_legacy_autocad_recognition(
                 lines: ls.lines.clone(),
                 nominal_diameter: None,
                 entity_handle: ls.handles.first().map(|h| h.value()),
+                member_handles: ls.handles.iter().map(|h| h.value()).collect(),
                 tag_handles: ls.tag_handles.iter().map(|h| h.value()).collect(),
                 confidence: score,
                 tier,
@@ -1603,6 +1609,7 @@ fn fuse_legacy_autocad_recognition(
             lines: ls.lines.clone(),
             nominal_diameter: None,
             entity_handle: ls.handles.first().map(|h| h.value()),
+            member_handles: ls.handles.iter().map(|h| h.value()).collect(),
             tag_handles,
             confidence: score,
             tier,

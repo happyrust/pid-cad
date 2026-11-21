@@ -129,10 +129,134 @@ pub fn filter_author_handles(doc: &Document, filter: &str) -> Vec<Handle> {
     out
 }
 
+/// Expand primary `PID_AUTHOR` handles to include any multi-entity `_member_handles` on `doc` (`#139`).
+pub fn expand_author_member_handles(doc: &Document, handles: &[Handle]) -> Vec<Handle> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for &h in handles {
+        if seen.insert(h) {
+            out.push(h);
+        }
+        let Some(auth) = PidAuthor::load(doc, h) else {
+            continue;
+        };
+        let pmap = parse_props_map(&auth.props);
+        if let Some(raw_mem) = pmap.get("_member_handles").and_then(|v| v.as_str()) {
+            for hex in raw_mem.split(',') {
+                if let Ok(v) = u64::from_str_radix(hex.trim(), 16) {
+                    let mh = Handle::new(v);
+                    if doc.get_entity(mh).is_some() && seen.insert(mh) {
+                        out.push(mh);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Resolve selected entity handles (including individual strokes of an exploded symbol)
+/// back to their owning primary `PID_AUTHOR` handles (`#139`).
+pub fn resolve_owning_author_handles(doc: &Document, selected: &[Handle]) -> Vec<Handle> {
+    let mut member_to_owner: BTreeMap<Handle, Handle> = BTreeMap::new();
+    for ent in doc.model_space_entities() {
+        let oh = ent.common().handle;
+        let Some(auth) = PidAuthor::load(doc, oh) else {
+            continue;
+        };
+        if auth.topology == ROLE_PIPE_SEGMENT || auth.type_code == TYPE_PIPE_SEGMENT {
+            continue;
+        }
+        let pmap = parse_props_map(&auth.props);
+        if let Some(raw_mem) = pmap.get("_member_handles").and_then(|v| v.as_str()) {
+            for hex in raw_mem.split(',') {
+                if let Ok(v) = u64::from_str_radix(hex.trim(), 16) {
+                    member_to_owner.entry(Handle::new(v)).or_insert(oh);
+                }
+            }
+        }
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut owners = Vec::new();
+    for &h in selected {
+        let target = if PidAuthor::load(doc, h).is_some() {
+            Some(h)
+        } else {
+            member_to_owner.get(&h).copied()
+        };
+        if let Some(th) = target {
+            if seen.insert(th) {
+                owners.push(th);
+            }
+        }
+    }
+    owners
+}
+
+/// Disambiguate duplicate `PID_AUTHOR` symbol tags in deterministic handle order (`PIDREVIEW DEDUP` / `#139`).
+pub fn deduplicate_author_tags(doc: &mut Document) -> usize {
+    let handles: Vec<Handle> = doc
+        .model_space_entities()
+        .map(|e| e.common().handle)
+        .collect();
+    let mut seen_counts: BTreeMap<(String, String), usize> = BTreeMap::new();
+    let mut used_tags: BTreeSet<(String, String)> = BTreeSet::new();
+    for &h in &handles {
+        if let Some(auth) = PidAuthor::load(doc, h) {
+            if !auth.tag.is_empty()
+                && !matches!(
+                    auth.topology.as_str(),
+                    ROLE_PIPE_SEGMENT | ROLE_CONNECTOR_IN | ROLE_CONNECTOR_OUT
+                )
+            {
+                used_tags.insert((auth.type_code, auth.tag));
+            }
+        }
+    }
+
+    let mut renamed = 0usize;
+    for h in handles {
+        let Some(mut auth) = PidAuthor::load(doc, h) else {
+            continue;
+        };
+        if auth.tag.is_empty()
+            || matches!(
+                auth.topology.as_str(),
+                ROLE_PIPE_SEGMENT | ROLE_CONNECTOR_IN | ROLE_CONNECTOR_OUT
+            )
+        {
+            continue;
+        }
+        let key = (auth.type_code.clone(), auth.tag.clone());
+        let occ = seen_counts.entry(key).or_default();
+        *occ += 1;
+        if *occ == 1 {
+            continue;
+        }
+        let mut suffix = *occ;
+        let new_tag = loop {
+            let cand = format!("{}-{suffix}", auth.tag);
+            if used_tags.insert((auth.type_code.clone(), cand.clone())) {
+                break cand;
+            }
+            suffix += 1;
+        };
+        auth.tag = new_tag;
+        auth.tag_source = "manual".to_string();
+        auth.tag_status = "ok".to_string();
+        auth.store(doc, h);
+        renamed += 1;
+    }
+    let _ = refresh_duplicate_tag_statuses(doc);
+    renamed
+}
+
 /// Mark `handles` as human-reviewed (`tag_source = "manual"`, `_confidence_tier = "confirmed"`).
 pub fn accept_author_handles(doc: &mut Document, handles: &[Handle]) -> usize {
+    let owners = resolve_owning_author_handles(doc, handles);
     let mut count = 0usize;
-    for &h in handles {
+    for h in owners {
         let Some(mut auth) = PidAuthor::load(doc, h) else {
             continue;
         };
@@ -155,8 +279,9 @@ pub fn accept_author_handles(doc: &mut Document, handles: &[Handle]) -> usize {
 
 /// Remove `PID_AUTHOR` from `handles` and prune any topology bindings referencing them (`L3-7` REJECT).
 pub fn reject_author_handles(doc: &mut Document, handles: &[Handle]) -> (usize, AuthorSyncReport) {
+    let owners = resolve_owning_author_handles(doc, handles);
     let mut removed = 0usize;
-    for &h in handles {
+    for h in owners {
         if PidAuthor::load(doc, h).is_some() {
             crate::scene::view::dispatch::set_entity_xdata(
                 doc,
@@ -404,6 +529,7 @@ pub fn promote_sheet_to_author(
         ports: Vec<(f64, f64)>,
     }
     let mut promoted_syms: Vec<PromotedSym> = Vec::new();
+    let mut symbol_member_handles: BTreeSet<Handle> = BTreeSet::new();
 
     for sym in &rec.symbols {
         if !sym.known || tier_rank(sym.tier) < tier_rank(opts.min_tier) {
@@ -429,6 +555,10 @@ pub fn promote_sheet_to_author(
         let handle = Handle::new(raw_h);
         if doc.get_entity(handle).is_none() {
             continue;
+        }
+        symbol_member_handles.insert(handle);
+        for &mh in &sym.member_handles {
+            symbol_member_handles.insert(Handle::new(mh));
         }
 
         let existing = PidAuthor::load(doc, handle);
@@ -466,6 +596,29 @@ pub fn promote_sheet_to_author(
             "_sppid_class".to_string(),
             serde_json::Value::String(sym.sppid_class.clone()),
         );
+        pmap.insert(
+            "_at".to_string(),
+            serde_json::Value::String(format!("{:.4},{:.4}", sym.at.0, sym.at.1)),
+        );
+        pmap.insert(
+            "_bbox".to_string(),
+            serde_json::Value::String(format!(
+                "{:.4},{:.4},{:.4},{:.4}",
+                sym.bbox.0, sym.bbox.1, sym.bbox.2, sym.bbox.3
+            )),
+        );
+        if sym.member_handles.len() > 1 {
+            let mem_hex = sym
+                .member_handles
+                .iter()
+                .map(|mh| format!("{mh:X}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            pmap.insert(
+                "_member_handles".to_string(),
+                serde_json::Value::String(mem_hex),
+            );
+        }
         if !sym.tag_handles.is_empty() {
             let joined = sym
                 .tag_handles
@@ -555,6 +708,8 @@ pub fn promote_sheet_to_author(
     }
 
     // Build M3 `TopologyTable` from pipe line entities on `opts.pipe_layers`
+    // (or from `rec.pipe_segments` for native AutoCAD `LwPolyline` / custom pipe layers),
+    // strictly excluding member strokes of promoted symbols (`#139`).
     let pipe_layer_set: BTreeSet<String> = opts
         .pipe_layers
         .iter()
@@ -562,6 +717,10 @@ pub fn promote_sheet_to_author(
         .collect();
     let mut raw_lines = Vec::new();
     for ent in doc.model_space_entities() {
+        let eh = ent.common().handle;
+        if symbol_member_handles.contains(&eh) {
+            continue;
+        }
         let lu = ent.common().layer.trim().to_ascii_uppercase();
         let on_pipe = pipe_layer_set.contains(&lu)
             || (pipe_layer_set.contains("PIPE") && lu.starts_with("PIPE"));
@@ -572,7 +731,30 @@ pub fn promote_sheet_to_author(
             let a = (ln.start.x, ln.start.y);
             let b = (ln.end.x, ln.end.y);
             if (a.0 - b.0).hypot(a.1 - b.1) >= 2.0 * upm {
-                raw_lines.push((ent.common().handle, a, b));
+                raw_lines.push((eh, a, b));
+            }
+        }
+    }
+
+    if raw_lines.is_empty() && !rec.pipe_segments.is_empty() {
+        let fallback_pipe_h = doc.model_space_entities().find_map(|ent| {
+            let eh = ent.common().handle;
+            if symbol_member_handles.contains(&eh) {
+                return None;
+            }
+            matches!(ent, EntityType::Line(_) | EntityType::LwPolyline(_)).then_some(eh)
+        });
+        for ps in &rec.pipe_segments {
+            if (ps.start.0 - ps.end.0).hypot(ps.start.1 - ps.end.1) < 2.0 * upm {
+                continue;
+            }
+            let cand_h = ps
+                .entity_handle
+                .map(Handle::new)
+                .filter(|h| !symbol_member_handles.contains(h) && doc.get_entity(*h).is_some())
+                .or(fallback_pipe_h);
+            if let Some(eh) = cand_h {
+                raw_lines.push((eh, ps.start, ps.end));
             }
         }
     }
@@ -622,6 +804,7 @@ pub fn promote_sheet_to_author(
     };
 
     let mut fitting_bound_segs: BTreeMap<(Handle, String), String> = BTreeMap::new();
+    let mut per_handle_subsegs: BTreeMap<Handle, Vec<String>> = BTreeMap::new();
 
     for (line_tag, segs) in &line_groups {
         let Some(&(first_h, _, _)) = segs.first() else {
@@ -656,18 +839,37 @@ pub fn promote_sheet_to_author(
             }
             topo.append_segment(&run_tag, sh, start_end, end_end);
             report.pipe_segments_promoted += 1;
-
-            let mut seg_auth = PidAuthor::load(doc, sh).unwrap_or_default();
-            seg_auth.type_code = TYPE_PIPE_SEGMENT.to_string();
-            seg_auth.topology = ROLE_PIPE_SEGMENT.to_string();
-            let mut smap = parse_props_map(&seg_auth.props);
-            smap.insert(
-                "_line_label".to_string(),
-                serde_json::Value::String(line_tag.clone()),
-            );
-            seg_auth.props = serde_json::Value::Object(smap).to_string();
-            seg_auth.store(doc, sh);
+            per_handle_subsegs.entry(sh).or_default().push(format!(
+                "{:.4},{:.4},{:.4},{:.4}|{}",
+                a.0, a.1, b.0, b.1, line_tag
+            ));
         }
+    }
+
+    for (sh, encoded_list) in per_handle_subsegs {
+        let mut seg_auth = PidAuthor::load(doc, sh).unwrap_or_default();
+        seg_auth.type_code = TYPE_PIPE_SEGMENT.to_string();
+        seg_auth.topology = ROLE_PIPE_SEGMENT.to_string();
+        let mut smap = parse_props_map(&seg_auth.props);
+        if let Some(first_enc) = encoded_list.first() {
+            if let Some((_, lbl)) = first_enc.split_once('|') {
+                smap.insert(
+                    "_line_label".to_string(),
+                    serde_json::Value::String(lbl.to_string()),
+                );
+            }
+        }
+        let non_line = !matches!(doc.get_entity(sh), Some(EntityType::Line(_)));
+        if non_line || encoded_list.len() > 1 {
+            smap.insert(
+                "_segments".to_string(),
+                serde_json::Value::String(encoded_list.join(";")),
+            );
+        } else {
+            smap.remove("_segments");
+        }
+        seg_auth.props = serde_json::Value::Object(smap).to_string();
+        seg_auth.store(doc, sh);
     }
 
     let first_run_tag = topo
@@ -837,10 +1039,38 @@ pub fn promote_semantics_to_author(
 fn entity_world_anchor(ent: &EntityType) -> Option<(f64, f64)> {
     match ent {
         EntityType::Insert(ins) => Some((ins.insert_point.x, ins.insert_point.y)),
+        EntityType::Circle(c) => Some((c.center.x, c.center.y)),
+        EntityType::Arc(a) => Some((a.center.x, a.center.y)),
         EntityType::Text(t) => Some((t.insertion_point.x, t.insertion_point.y)),
         EntityType::MText(mt) => Some((mt.insertion_point.x, mt.insertion_point.y)),
+        EntityType::Point(p) => Some((p.location.x, p.location.y)),
+        EntityType::Line(ln) => {
+            Some(((ln.start.x + ln.end.x) * 0.5, (ln.start.y + ln.end.y) * 0.5))
+        }
+        EntityType::LwPolyline(pl) if !pl.vertices.is_empty() => {
+            let n = pl.vertices.len() as f64;
+            let sx: f64 = pl.vertices.iter().map(|v| v.location.x).sum();
+            let sy: f64 = pl.vertices.iter().map(|v| v.location.y).sum();
+            Some((sx / n, sy / n))
+        }
         _ => None,
     }
+}
+
+fn parse_pair_f64(raw: &str) -> Option<(f64, f64)> {
+    let mut it = raw.split(',');
+    let x = it.next()?.trim().parse::<f64>().ok()?;
+    let y = it.next()?.trim().parse::<f64>().ok()?;
+    Some((x, y))
+}
+
+fn parse_quad_f64(raw: &str) -> Option<(f64, f64, f64, f64)> {
+    let mut it = raw.split(',');
+    let a = it.next()?.trim().parse::<f64>().ok()?;
+    let b = it.next()?.trim().parse::<f64>().ok()?;
+    let c = it.next()?.trim().parse::<f64>().ok()?;
+    let d = it.next()?.trim().parse::<f64>().ok()?;
+    Some((a, b, c, d))
 }
 
 /// Reconcile `TopologyTable` and `PID_AUTHOR` tag uniqueness after moving/deleting/editing entities (`L2-4 / L2-5`).
@@ -954,26 +1184,19 @@ pub fn save_author_document_to_dual(
         .model_space_entities()
         .map(|ent| {
             let h = ent.common().handle;
+            let anchor = entity_world_anchor(ent);
             match ent {
-                EntityType::Insert(ins) => (
-                    h,
-                    ins.block_name.clone(),
-                    Some((ins.insert_point.x, ins.insert_point.y)),
-                    None,
-                ),
-                EntityType::Text(t) => (
-                    h,
-                    "TEXT".to_string(),
-                    Some((t.insertion_point.x, t.insertion_point.y)),
-                    None,
-                ),
+                EntityType::Insert(ins) => (h, ins.block_name.clone(), anchor, None),
                 EntityType::Line(ln) => (
                     h,
                     "LINE".to_string(),
-                    None,
+                    anchor,
                     Some(((ln.start.x, ln.start.y), (ln.end.x, ln.end.y))),
                 ),
-                _ => (h, String::new(), None, None),
+                EntityType::Circle(_) => (h, "CIRCLE".to_string(), anchor, None),
+                EntityType::LwPolyline(_) => (h, "LWPOLYLINE".to_string(), anchor, None),
+                EntityType::Text(_) => (h, "TEXT".to_string(), anchor, None),
+                _ => (h, String::new(), anchor, None),
             }
         })
         .collect();
@@ -985,7 +1208,24 @@ pub fn save_author_document_to_dual(
         let pmap = parse_props_map(&auth.props);
 
         if auth.topology == ROLE_PIPE_SEGMENT || auth.type_code == TYPE_PIPE_SEGMENT {
-            if let Some((a, b)) = seg_opt {
+            if let Some(raw_segs) = pmap.get("_segments").and_then(|v| v.as_str()) {
+                for entry in raw_segs.split(';').filter(|s| !s.trim().is_empty()) {
+                    let (coords_str, lbl_opt) = match entry.split_once('|') {
+                        Some((c, l)) => (c, (!l.trim().is_empty()).then(|| l.trim().to_string())),
+                        None => (entry, None),
+                    };
+                    if let Some((ax, ay, bx, by)) = parse_quad_f64(coords_str) {
+                        let goid = alloc.alloc_graphic_oid(None);
+                        run_inputs.push(PipeRunInput {
+                            start: (ax, ay),
+                            end: (bx, by),
+                            line_label: lbl_opt,
+                            graphic_oid: Some(goid),
+                        });
+                        seg_draws.push((goid, (ax / upm, ay / upm), (bx / upm, by / upm)));
+                    }
+                }
+            } else if let Some((a, b)) = seg_opt {
                 let goid = alloc.alloc_graphic_oid(None);
                 let lbl = pmap
                     .get("_line_label")
@@ -1002,7 +1242,11 @@ pub fn save_author_document_to_dual(
             continue;
         }
 
-        let Some(at) = pt_opt else {
+        let stored_at = pmap
+            .get("_at")
+            .and_then(|v| v.as_str())
+            .and_then(parse_pair_f64);
+        let Some(at) = stored_at.or(pt_opt) else {
             continue;
         };
         let explicit_cls = pmap
@@ -1079,8 +1323,14 @@ pub fn save_author_document_to_dual(
         populate_item_tag_attributes(&mut item);
 
         *exported_by_class.entry(sppid_cls.clone()).or_default() += 1;
-        let r = 4.0 * upm;
-        let bbox = (at.0 - r, at.1 - r, at.0 + r, at.1 + r);
+        let bbox = pmap
+            .get("_bbox")
+            .and_then(|v| v.as_str())
+            .and_then(parse_quad_f64)
+            .unwrap_or_else(|| {
+                let r = 4.0 * upm;
+                (at.0 - r, at.1 - r, at.0 + r, at.1 + r)
+            });
         let ports = vec![
             (bbox.0, at.1),
             (bbox.2, at.1),
@@ -1180,11 +1430,50 @@ pub fn save_author_document_to_dual(
             .flat_map(|it| it.graphic_oids.iter().copied().map(move |oid| (oid, it)))
             .collect();
 
-        let clamp_pt = |pt: (f64, f64)| -> (f64, f64) {
-            (
-                pt.0.clamp(10.0, (page_mm.0 - 10.0).max(20.0)),
-                pt.1.clamp(10.0, (page_mm.1 - 10.0).max(20.0)),
-            )
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for sd in &sym_draws {
+            min_x = min_x.min(sd.at_mm.0);
+            min_y = min_y.min(sd.at_mm.1);
+            max_x = max_x.max(sd.at_mm.0);
+            max_y = max_y.max(sd.at_mm.1);
+        }
+        for &(_, a, b) in &seg_draws {
+            for p in [a, b] {
+                min_x = min_x.min(p.0);
+                min_y = min_y.min(p.1);
+                max_x = max_x.max(p.0);
+                max_y = max_y.max(p.1);
+            }
+        }
+        let margin = 20.0;
+        let avail_w = (page_mm.0 - 2.0 * margin).max(40.0);
+        let avail_h = (page_mm.1 - 2.0 * margin).max(40.0);
+        let fits_directly = min_x.is_finite()
+            && min_x >= 10.0
+            && min_y >= 10.0
+            && max_x <= page_mm.0 - 10.0
+            && max_y <= page_mm.1 - 10.0;
+        let span_x = (max_x - min_x).max(1.0);
+        let span_y = (max_y - min_y).max(1.0);
+        let fit_scale = (avail_w / span_x).min(avail_h / span_y).clamp(0.05, 1.0);
+        let off_x = margin + (avail_w - span_x * fit_scale) * 0.5;
+        let off_y = margin + (avail_h - span_y * fit_scale) * 0.5;
+
+        let map_pt = |pt: (f64, f64)| -> (f64, f64) {
+            if fits_directly || !min_x.is_finite() {
+                (
+                    pt.0.clamp(10.0, (page_mm.0 - 10.0).max(20.0)),
+                    pt.1.clamp(10.0, (page_mm.1 - 10.0).max(20.0)),
+                )
+            } else {
+                (
+                    ((pt.0 - min_x) * fit_scale + off_x).clamp(10.0, (page_mm.0 - 10.0).max(20.0)),
+                    ((pt.1 - min_y) * fit_scale + off_y).clamp(10.0, (page_mm.1 - 10.0).max(20.0)),
+                )
+            }
         };
 
         let mut inc = PidWriteIncrements {
@@ -1195,13 +1484,13 @@ pub fn save_author_document_to_dual(
         };
 
         for sd in &sym_draws {
-            let p = clamp_pt(sd.at_mm);
+            let p = map_pt(sd.at_mm);
             inc.symbols.push(AddedSymbolSpec {
                 preferred_oid: Some(sd.graphic_oid),
                 symbol_rel_path: sd.sym_path.clone(),
                 insertion_mm: p,
                 rotation_rad: 0.0,
-                scale: 1.0,
+                scale: if fits_directly { 1.0 } else { fit_scale },
                 style_ref: line_style_id,
             });
             if let Some(ref lbl) = sd.label {
@@ -1232,8 +1521,8 @@ pub fn save_author_document_to_dual(
         for &(goid, a_mm, b_mm) in &seg_draws {
             inc.lines.push(AddedLineSpec {
                 preferred_oid: Some(goid),
-                start_mm: clamp_pt(a_mm),
-                end_mm: clamp_pt(b_mm),
+                start_mm: map_pt(a_mm),
+                end_mm: map_pt(b_mm),
                 style_index: line_style_id,
             });
             if let Some(item) = item_by_goid.get(&goid) {
@@ -1787,5 +2076,165 @@ mod tests {
             format!("{}\n", serde_json::to_string_pretty(&summary).unwrap()),
         )
         .unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn promotes_and_saves_native_autocad_circles_strokes_and_polylines_to_valid_dual_bundle() {
+        use document::entities::{Circle, LwPolyline, LwVertex};
+
+        let mut doc = Document::new();
+        // Sheet frame so `guess_units_per_mm` detects 1.0 unit/mm (420 x 297 A3)
+        let mut frame = LwPolyline::new();
+        frame.is_closed = true;
+        frame.common.layer = "PUB_TITLE".to_string();
+        for (x, y) in [(0.0, 0.0), (420.0, 0.0), (420.0, 297.0), (0.0, 297.0)] {
+            frame.vertices.push(LwVertex::from_coords(x, y));
+        }
+        doc.add_entity(EntityType::LwPolyline(frame)).unwrap();
+
+        // 1. Loose Circle storage tank `TK-1001` (`r = 12.0`)
+        let mut tank_c = Circle::from_coords(40.0, 100.0, 0.0, 12.0);
+        tank_c.common.layer = "0".to_string();
+        let tank_h = doc.add_entity(EntityType::Circle(tank_c)).unwrap();
+        let mut tank_t =
+            Text::with_value("TK-1001", Vector3::new(34.0, 99.0, 0.0)).with_height(2.5);
+        tank_t.common.layer = "TEXT".to_string();
+        doc.add_entity(EntityType::Text(tank_t)).unwrap();
+
+        // 2. Exploded 4-stroke bowtie ball valve on `DEVICE` (two identical placements so shape dictionary / tag_classes triggers)
+        for &(cx, tag_str) in &[(90.0, "BV3101"), (150.0, "BV3102")] {
+            for (a, b) in [
+                ((cx - 3.0, 98.0), (cx - 3.0, 102.0)),
+                ((cx - 3.0, 102.0), (cx + 3.0, 98.0)),
+                ((cx + 3.0, 98.0), (cx + 3.0, 102.0)),
+                ((cx + 3.0, 102.0), (cx - 3.0, 98.0)),
+            ] {
+                let mut st =
+                    Line::from_points(Vector3::new(a.0, a.1, 0.0), Vector3::new(b.0, b.1, 0.0));
+                st.common.layer = "DEVICE".to_string();
+                doc.add_entity(EntityType::Line(st)).unwrap();
+            }
+            let mut vt =
+                Text::with_value(tag_str, Vector3::new(cx - 3.0, 104.0, 0.0)).with_height(2.2);
+            vt.common.layer = "TEXT".to_string();
+            doc.add_entity(EntityType::Text(vt)).unwrap();
+        }
+
+        // 3. Loose Circle instrument bubble `PI-3102` (`r = 3.0`) with two inner Text lines
+        let mut bub_c = Circle::from_coords(120.0, 118.0, 0.0, 3.0);
+        bub_c.common.layer = "YIBIAO".to_string();
+        let bub_h = doc.add_entity(EntityType::Circle(bub_c)).unwrap();
+        let mut bub_t1 = Text::with_value("PI", Vector3::new(119.0, 118.8, 0.0)).with_height(1.8);
+        bub_t1.common.layer = "TEXT".to_string();
+        let bub_t1_h = doc.add_entity(EntityType::Text(bub_t1)).unwrap();
+        let mut bub_t2 = Text::with_value("3102", Vector3::new(118.4, 116.4, 0.0)).with_height(1.8);
+        bub_t2.common.layer = "TEXT".to_string();
+        let bub_t2_h = doc.add_entity(EntityType::Text(bub_t2)).unwrap();
+
+        // 4. Multi-vertex `LwPolyline` process pipe on `"0"` (`shapes.pipe_layers`) with 2-part line label `80-FS`
+        let mut pipe_pl = LwPolyline::new();
+        pipe_pl.common.layer = "0".to_string();
+        for (x, y) in [(52.0, 100.0), (70.0, 100.0), (87.0, 100.0)] {
+            pipe_pl.vertices.push(LwVertex::from_coords(x, y));
+        }
+        doc.add_entity(EntityType::LwPolyline(pipe_pl)).unwrap();
+
+        let mut pipe_pl2 = LwPolyline::new();
+        pipe_pl2.common.layer = "0".to_string();
+        for (x, y) in [(93.0, 100.0), (147.0, 100.0)] {
+            pipe_pl2.vertices.push(LwVertex::from_coords(x, y));
+        }
+        doc.add_entity(EntityType::LwPolyline(pipe_pl2)).unwrap();
+
+        let mut pl_lbl = Text::with_value("80-FS", Vector3::new(62.0, 102.5, 0.0)).with_height(2.2);
+        pl_lbl.common.layer = "TEXT".to_string();
+        doc.add_entity(EntityType::Text(pl_lbl)).unwrap();
+
+        let prom =
+            promote_sheet_to_author(&mut doc, &ConvertOptions::default()).expect("promote sheet");
+        assert!(
+            prom.newly_promoted >= 4,
+            "expected tank + bubble + 2 exploded valves promoted, got {prom:?}"
+        );
+        assert!(
+            prom.pipe_segments_promoted >= 2,
+            "expected LwPolyline pipe segments promoted, got {prom:?}"
+        );
+        assert!(PidAuthor::load(&doc, tank_h).is_some());
+        assert!(PidAuthor::load(&doc, bub_h).is_some());
+
+        // Edit inner-text circle bubble tag on `PID_AUTHOR` and verify two-line inner `Text` sync
+        let mut bub_auth = PidAuthor::load(&doc, bub_h).unwrap();
+        bub_auth.tag = "PI-3999".to_string();
+        bub_auth.tag_source = "manual".to_string();
+        bub_auth.store(&mut doc, bub_h);
+        let synced = sync_paired_canvas_tag_texts(&mut doc);
+        assert!(
+            synced.contains(&bub_t1_h) || synced.contains(&bub_t2_h),
+            "expected inner circle texts synced, got {synced:?}"
+        );
+        if let Some(EntityType::Text(t2)) = doc.get_entity(bub_t2_h) {
+            assert_eq!(t2.value, "3999");
+        }
+
+        // Save back via `save_author_document_to_dual` (`PIDSAVEPID` engine) into synthetic seed `.pid`
+        let tmp = std::env::temp_dir().join(format!("ocs_prom139_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let seed_path = tmp.join("seed139.pid");
+        std::fs::write(&seed_path, synthetic_blank_seed_pid()).unwrap();
+
+        let opts = ConvertOptions {
+            plant: "P01".to_string(),
+            seed_pid_path: Some(seed_path.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let dual =
+            save_author_document_to_dual(&doc, "LEGACY-PROM-139", &opts).expect("save dual 139");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(
+            dual.report.exported_by_class.get("PIDProcessVessel"),
+            Some(&1),
+            "Circle tank must not be dropped on PIDSAVEPID: {:?}",
+            dual.report.exported_by_class
+        );
+        assert_eq!(
+            dual.report.exported_by_class.get("PIDInstrument"),
+            Some(&1),
+            "Circle bubble must not be dropped on PIDSAVEPID: {:?}",
+            dual.report.exported_by_class
+        );
+        assert_eq!(
+            dual.report.exported_by_class.get("PIDPipingComponent"),
+            Some(&2),
+            "Exploded stroke valves must not be dropped on PIDSAVEPID: {:?}",
+            dual.report.exported_by_class
+        );
+        assert!(
+            dual.report.piping_synthesis.pipelines >= 1,
+            "2-part line 80-FS on LwPolyline must synthesize PIDPipeline"
+        );
+        assert_eq!(dual.report.variant_resolution.class_default_fallback, 0);
+
+        let spec = default_publish_spec();
+        let chk = CheckOptions {
+            expected_plant: Some("P01".to_string()),
+            ..CheckOptions::default()
+        };
+        assert!(check_publish_xml_bytes(
+            "LEGACY-PROM-139_Data.xml",
+            PublishXmlKind::Data,
+            &dual.publish.data_xml,
+            spec,
+            &chk
+        )
+        .is_empty());
+        let ver = dual
+            .report
+            .pid_verification
+            .as_ref()
+            .expect("pid_verification");
+        assert!(ver.is_cross_file_and_a_valid(), "{ver:?}");
     }
 }
