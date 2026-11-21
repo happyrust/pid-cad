@@ -780,4 +780,47 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `189 passed` | **`189 passed`** | **全绿** |
 
+---
+
+## 22. L3-3 / L3-4 / L3-8（#133）：管线族成链、端口连通与跨图页间连接符配对深化及整批回归门禁（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `c2b0c35f2`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{mod,recognize,export}.rs`、`scripts/sppid/{regression_gate,test_regression_gate}.py` |
+| 证据目录子项 | `2026-11-20-issue133/`（`red-py.txt`、`green-py.txt`、`red-rs.txt`、`green-rs.txt`、`gen90_summary.json`、`convert_check_90.json`、`baseline-90.tsv`、`audit_133_summary.json`、`arch.txt`、`pytest.txt`、`gate-*.txt`） |
+
+### 22.1 先红后绿与机制深化说明
+
+- **Python 回归门禁先红后绿（`L3-8`）**：`red-py.txt` `3 failed`（退出码 `1`）→ 实现 `scripts/sppid/regression_gate.py` 后 `green-py.txt` **`3 passed`**（全集 `pytest` **`192 passed`**）。
+- **Rust 管网与连通深化先红后绿（`L3-3 / L3-4`）**：`red-rs.txt` `0 passed; 2 failed`（退出码 `101`）→ 实现四向边缘中点端口、共线微断口桥接、微短刺/箭头碎片过滤、无歧义交点线号传播与跨图页间连接符配对后，`green-rs.txt` **`20 passed; 0 failed`**（退出码 `0`）。
+
+### 22.2 90 张有效非空真实 DXF 全批管网、端口连通与跨图连接符实测（`L3-3 / L3-4 / L3-8`）
+
+| 维度 | 指标 | 改前读数（#132） | 改后实测（#133） | 技术说明 |
+|---|---|---:|---:|---|
+| 整批写出总规模 | 写出对象总数 / 关系总数 | `77,491` / `71,665` | **`88,236` / `96,888`** | 净增 `+10,745` 个端口对象与 `+25,223` 条连通/归属关系 |
+| `L3-4` 符号端口吸附 | 合成 `PIDPipingPort` 数 | `626` | **`11,420`（`18.2x`）** | 导出 DXF 块定义不含显式 `POINT` 图元，补齐包围盒四向边缘中点后精确吸附左右/上下接管端 |
+| `L3-4` 管端连通关系 | `PipingEnd1Conn + PipingEnd2Conn` | `37,221` | **`48,243`** | 净增 `+11,022` 条管端到符号端口/连接符连通关系 |
+| `L3-3` 三通与成链清理 | `PIDPipingBranchPoint` / 共线桥接 / 过滤短刺 | — / `0` / `0` | **`4,907` / `124` / `744`** | 三通分支点与真值（`5,044`）高度吻合；过滤 `744` 条流向箭头与短标引杂散线段 |
+| `L3-3` 线号传播与对账 | 已标线号管段 / 对参考 XML 匹配命名对象 | — / `10,671` | **`9,526` / `10,708`** | 同层无歧义交点线号传播净增 `+37` 个命名对象精确对齐 |
+| `L3-3` 管端断头守恒归因 | 全部 `27,070` 条管段共 `54,140` 个端点 | — | **`54,140 / 54,140`（`100%` 守恒）** | 接符号端口 **`13,184`**、接页间连接符 **`712`**（占 `834` 个连接符的 `85.4%`）、接三通 **`34,347`**、触设备壳体 **`809`**、开放排凝/放空自由端 **`5,088`** |
+| `L3-4` 跨图页间连接符配对 | 总 `PIDBranchPoint` `834` 个（带图号 `617` 个） | `0` 对 | **本批互逆成对 `38` 对（`76` 个）** | 另含本批内单向引用 **`99`** 个、指向批外关联装置图 **`442`** 个、无图号公用工程/放空连接符 `217` 个；标题栏图号提取同步升至 **`83 / 90`（`92.22%`）** |
+| `L3-8` 整批逐行回归门禁 | `regression_gate.py` + `convert_check.py` | — | **`baseline-90.tsv` 落盘，自比 `0` / 旧版异动拦截 `1`** | `180` 份 XML **`spec_violations = 0`、`coverage_errors = 0`、`unexplained_diffs = 0`** |
+
+### 22.3 固定门禁读数
+
+| 门禁项 | 改前读数（§21.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,191` 条 | **`7,193` 条**（**`7,127` 过** / **`65` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条测试，**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `src/io/pid_convert/{mod,recognize,export}.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `189 passed` | **`192 passed`** | `+3` 条测试，**全绿** |
+
+
 

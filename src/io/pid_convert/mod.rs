@@ -17,8 +17,9 @@ pub use export::{
     convert_document_to_dual, convert_path_to_dir, verify_dual_bundle, DualConvertBundle,
 };
 pub use export::{
-    convert_document_to_publish, BatchConvertSummary, ConvertOptions, ConvertSheetReport,
-    DualVerifyReport,
+    convert_document_to_publish, pair_cross_sheet_connectors, BatchConvertSummary, ConvertOptions,
+    ConvertSheetReport, CrossSheetOpcPair, CrossSheetOpcReport, DeadEndAttribution,
+    DualVerifyReport, OffpageConnectorEntry, PipeNetworkCensus,
 };
 pub use recognize::{
     recognise_sppid_sheet, ConfidenceSummary, ConfidenceThresholds, ConfidenceTier,

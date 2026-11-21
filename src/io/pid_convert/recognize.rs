@@ -310,10 +310,17 @@ fn placed_insert_geometry(doc: &Document, ins: &Insert, upm: f64) -> PlacedGeome
         insertion.0 + h,
         insertion.1 + h,
     ));
+    let at = ((bbox.0 + bbox.2) * 0.5, (bbox.1 + bbox.3) * 0.5);
     if ports.is_empty() {
+        let span = (bbox.2 - bbox.0).max(bbox.3 - bbox.1);
+        if span > 0.5 * upm {
+            ports.push((bbox.0, at.1));
+            ports.push((bbox.2, at.1));
+            ports.push((at.0, bbox.1));
+            ports.push((at.0, bbox.3));
+        }
         ports.push(insertion);
     }
-    let at = ((bbox.0 + bbox.2) * 0.5, (bbox.1 + bbox.3) * 0.5);
     PlacedGeometry { at, bbox, ports }
 }
 
@@ -1580,24 +1587,40 @@ fn extract_title_block(
     // 1. Drawing number: prefer `DWG-*`, else drawing-code token in lower-right corner.
     let mut drawing_number: Option<String> = None;
     for t in &tb_cands {
-        let v = t.value.trim();
-        if v.starts_with("DWG-") && v.len() >= 6 {
-            drawing_number = Some(v.to_string());
+        let v: String = t
+            .value
+            .trim()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        if v.starts_with("DWG-") && v.chars().count() >= 6 {
+            drawing_number = Some(v);
             break;
         }
     }
     if drawing_number.is_none() {
         for t in &tb_cands {
-            let v = t.value.trim().trim_end_matches('-');
-            if v.len() >= 6
-                && v.is_ascii()
+            let v: String = t
+                .value
+                .trim()
+                .trim_end_matches('-')
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            let char_n = v.chars().count();
+            if (6..=28).contains(&char_n)
                 && !is_sppid_line_label(&t.value)
                 && v.chars().any(|c| c.is_ascii_digit())
-                && v.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-                && (v.contains('-') || v.len() >= 7)
+                && !v.ends_with("流程图")
+                && !v.ends_with("系统图")
+                && (v.contains('-') || (v.is_ascii() && char_n >= 7))
+                && v.chars().all(|c| {
+                    c.is_ascii_alphanumeric()
+                        || matches!(c, '-' | '_' | '.' | '/')
+                        || ('\u{4e00}'..='\u{9fff}').contains(&c)
+                })
             {
-                drawing_number = Some(v.to_string());
+                drawing_number = Some(v);
                 break;
             }
         }

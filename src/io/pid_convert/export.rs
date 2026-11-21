@@ -110,6 +110,239 @@ impl DualVerifyReport {
     }
 }
 
+/// Conserved endpoint attribution across all exported pipe runs (`L3-3` / `#133`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeadEndAttribution {
+    pub snapped_to_port: usize,
+    pub snapped_to_offpage: usize,
+    pub snapped_to_tee: usize,
+    pub touching_equipment_shell: usize,
+    pub open_free_end: usize,
+}
+
+impl DeadEndAttribution {
+    pub fn total_endpoints(&self) -> usize {
+        self.snapped_to_port
+            + self.snapped_to_offpage
+            + self.snapped_to_tee
+            + self.touching_equipment_shell
+            + self.open_free_end
+    }
+}
+
+/// Per-sheet pipe network chaining, family breakdown, and dead-end census (`L3-3` / `#133`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipeNetworkCensus {
+    pub runs_by_layer: BTreeMap<String, usize>,
+    pub labeled_runs: usize,
+    pub unlabeled_runs: usize,
+    pub collinear_bridges: usize,
+    pub filtered_micro_stubs: usize,
+    pub dead_end_attribution: DeadEndAttribution,
+}
+
+/// One off-page connector summary on a converted sheet (`L3-4` / `#133`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OffpageConnectorEntry {
+    pub uid: String,
+    pub target_dwg_number: Option<String>,
+    pub description: Option<String>,
+    pub line_label: Option<String>,
+}
+
+/// A matched reciprocal cross-sheet off-page connector pair (`L3-4` / `#133`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrossSheetOpcPair {
+    pub sheet_a_index: usize,
+    pub sheet_a_dwg: String,
+    pub uid_a: String,
+    pub sheet_b_index: usize,
+    pub sheet_b_dwg: String,
+    pub uid_b: String,
+    pub line_label: Option<String>,
+}
+
+/// Batch-level cross-sheet off-page connector pairing report (`L3-4` / `#133`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrossSheetOpcReport {
+    pub total_offpage_connectors: usize,
+    pub with_target_dwg: usize,
+    pub reciprocal_paired_connectors: usize,
+    pub one_way_in_batch: usize,
+    pub external_target_dwg: usize,
+    pub without_target_dwg: usize,
+    pub pairs: Vec<CrossSheetOpcPair>,
+}
+
+fn norm_dwg_code(raw: &str) -> String {
+    raw.trim()
+        .trim_end_matches('-')
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_uppercase()
+}
+
+fn expand_target_dwg_codes(raw: &str) -> Vec<String> {
+    let clean = norm_dwg_code(raw);
+    if clean.is_empty() {
+        return Vec::new();
+    }
+    if !clean.contains('/') {
+        return vec![clean];
+    }
+    let parts: Vec<&str> = clean.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    let first = parts[0].to_string();
+    let mut out = vec![first.clone()];
+    if let Some((prefix, _)) = first.rsplit_once('-') {
+        for &suffix in &parts[1..] {
+            if suffix.starts_with("DWG-") || suffix.contains('-') {
+                out.push(suffix.to_string());
+            } else {
+                out.push(format!("{prefix}-{suffix}"));
+            }
+        }
+    }
+    out
+}
+
+/// Pair off-page connectors across a batch of converted sheet reports (`L3-4` / `#133`).
+pub fn pair_cross_sheet_connectors(sheets: &[ConvertSheetReport]) -> CrossSheetOpcReport {
+    let mut dwg_to_sheets: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut sheet_dwg_code: Vec<String> = Vec::with_capacity(sheets.len());
+
+    for (si, sh) in sheets.iter().enumerate() {
+        let code = sh
+            .title_block
+            .drawing_number
+            .as_deref()
+            .map(norm_dwg_code)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| norm_dwg_code(&sh.drawing_name));
+        if !code.is_empty() {
+            dwg_to_sheets.entry(code.clone()).or_default().push(si);
+        }
+        sheet_dwg_code.push(code);
+    }
+
+    #[derive(Clone)]
+    struct FlatOpc {
+        sheet_idx: usize,
+        uid: String,
+        targets: Vec<String>,
+        line_label: Option<String>,
+    }
+
+    let mut flat: Vec<FlatOpc> = Vec::new();
+    let mut without_target_dwg = 0usize;
+    for (si, sh) in sheets.iter().enumerate() {
+        for opc in &sh.offpage_connectors {
+            let targets = opc
+                .target_dwg_number
+                .as_deref()
+                .map(expand_target_dwg_codes)
+                .unwrap_or_default();
+            if targets.is_empty() {
+                without_target_dwg += 1;
+            }
+            flat.push(FlatOpc {
+                sheet_idx: si,
+                uid: opc.uid.clone(),
+                targets,
+                line_label: opc.line_label.clone(),
+            });
+        }
+    }
+
+    let total_offpage_connectors = flat.len();
+    let with_target_dwg = total_offpage_connectors.saturating_sub(without_target_dwg);
+
+    // Build candidate reciprocal pairs: i < j where i targets j's sheet AND j targets i's sheet.
+    let mut cand_pairs: Vec<(u8, usize, usize)> = Vec::new();
+    for i in 0..flat.len() {
+        if flat[i].targets.is_empty() {
+            continue;
+        }
+        let code_i = &sheet_dwg_code[flat[i].sheet_idx];
+        if code_i.is_empty() {
+            continue;
+        }
+        for j in (i + 1)..flat.len() {
+            if flat[i].sheet_idx == flat[j].sheet_idx || flat[j].targets.is_empty() {
+                continue;
+            }
+            let code_j = &sheet_dwg_code[flat[j].sheet_idx];
+            if code_j.is_empty() {
+                continue;
+            }
+            let i_to_j = flat[i].targets.iter().any(|t| t == code_j);
+            let j_to_i = flat[j].targets.iter().any(|t| t == code_i);
+            if i_to_j && j_to_i {
+                let rank = match (&flat[i].line_label, &flat[j].line_label) {
+                    (Some(la), Some(lb)) if !la.is_empty() && la == lb => 0,
+                    (None, None) => 1,
+                    _ => 2,
+                };
+                cand_pairs.push((rank, i, j));
+            }
+        }
+    }
+    cand_pairs.sort_by_key(|&(rank, i, j)| (rank, i, j));
+
+    let mut paired_mask = vec![false; flat.len()];
+    let mut pairs = Vec::new();
+    for (_, i, j) in cand_pairs {
+        if paired_mask[i] || paired_mask[j] {
+            continue;
+        }
+        paired_mask[i] = true;
+        paired_mask[j] = true;
+        pairs.push(CrossSheetOpcPair {
+            sheet_a_index: flat[i].sheet_idx,
+            sheet_a_dwg: sheet_dwg_code[flat[i].sheet_idx].clone(),
+            uid_a: flat[i].uid.clone(),
+            sheet_b_index: flat[j].sheet_idx,
+            sheet_b_dwg: sheet_dwg_code[flat[j].sheet_idx].clone(),
+            uid_b: flat[j].uid.clone(),
+            line_label: flat[i]
+                .line_label
+                .clone()
+                .or_else(|| flat[j].line_label.clone()),
+        });
+    }
+
+    let mut one_way_in_batch = 0usize;
+    let mut external_target_dwg = 0usize;
+    for (idx, opc) in flat.iter().enumerate() {
+        if paired_mask[idx] || opc.targets.is_empty() {
+            continue;
+        }
+        let in_batch = opc.targets.iter().any(|t| {
+            dwg_to_sheets
+                .get(t)
+                .is_some_and(|owners| owners.iter().any(|&si| si != opc.sheet_idx))
+        });
+        if in_batch {
+            one_way_in_batch += 1;
+        } else {
+            external_target_dwg += 1;
+        }
+    }
+
+    CrossSheetOpcReport {
+        total_offpage_connectors,
+        with_target_dwg,
+        reciprocal_paired_connectors: pairs.len() * 2,
+        one_way_in_batch,
+        external_target_dwg,
+        without_target_dwg,
+        pairs,
+    }
+}
+
 /// Structured per-sheet conversion & coverage report written to `<stem>_Coverage.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConvertSheetReport {
@@ -121,6 +354,10 @@ pub struct ConvertSheetReport {
     pub confidence_summary: ConfidenceSummary,
     pub exported_by_class: BTreeMap<String, usize>,
     pub piping_synthesis: PipingSynthesisStats,
+    #[serde(default)]
+    pub pipe_network_census: PipeNetworkCensus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub offpage_connectors: Vec<OffpageConnectorEntry>,
     pub total_items_written: usize,
     pub total_relations_written: usize,
     pub skipped_items: Vec<UnmappedItem>,
@@ -139,6 +376,8 @@ pub struct BatchConvertSummary {
     pub pdf_files_plotted: usize,
     pub total_items_written: usize,
     pub total_relations_written: usize,
+    #[serde(default)]
+    pub cross_sheet_opc_pairing: CrossSheetOpcReport,
     pub sheets: Vec<ConvertSheetReport>,
     pub errors: Vec<String>,
 }
@@ -182,23 +421,36 @@ fn point_to_segment_dist(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
 
 struct ChainedRun {
     points: Vec<(f64, f64)>,
+    layer: String,
 }
 
-/// Chain 2-degree connected pipe segments into logical pipe runs, cutting at
-/// symbol ports and 3+-way junctions.
+fn point_in_bbox(p: (f64, f64), bb: (f64, f64, f64, f64), margin: f64) -> bool {
+    p.0 >= bb.0 - margin && p.0 <= bb.2 + margin && p.1 >= bb.1 - margin && p.1 <= bb.3 + margin
+}
+
+fn polyline_length(pts: &[(f64, f64)]) -> f64 {
+    pts.windows(2)
+        .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
+        .sum()
+}
+
+/// Chain 2-degree connected pipe segments into logical pipe runs, bridging
+/// collinear line-jump gaps, cutting at symbol ports and 3+-way junctions, and
+/// filtering isolated micro-stubs (`L3-3` / `#133`).
 fn chain_pipe_segments(
     segments: &[PipeSegmentHit],
     pipe_layers: &[String],
     port_points: &[(f64, f64)],
+    symbol_bboxes: &[(f64, f64, f64, f64)],
     upm: f64,
     port_tol_mm: f64,
-) -> Vec<ChainedRun> {
+) -> (Vec<ChainedRun>, usize, usize) {
     let filtered: Vec<&PipeSegmentHit> = segments
         .iter()
         .filter(|s| is_pipe_layer(&s.layer, pipe_layers))
         .collect();
     if filtered.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0, 0);
     }
 
     let node_tol = 0.4 * upm;
@@ -215,7 +467,7 @@ fn chain_pipe_segments(
         idx
     };
 
-    let mut edges: Vec<(usize, usize)> = Vec::new();
+    let mut edges: Vec<(usize, usize, String)> = Vec::new();
     let mut adj: Vec<Vec<(usize, usize)>> = Vec::new();
     for seg in filtered {
         let u = intern_node(seg.start, &mut node_coords);
@@ -227,28 +479,103 @@ fn chain_pipe_segments(
             continue;
         }
         let ei = edges.len();
-        edges.push((u, v));
+        edges.push((u, v, seg.layer.trim().to_string()));
         adj[u].push((v, ei));
         adj[v].push((u, ei));
+    }
+
+    let near_any_port = |pt: (f64, f64)| -> bool {
+        port_points
+            .iter()
+            .any(|&pp| (pt.0 - pp.0).hypot(pt.1 - pp.1) <= port_tol)
+    };
+
+    // Collinear micro-gap bridging across line jumps / inline label breaks (`0.4..=6.5 mm`).
+    let deg1_nodes: Vec<usize> = (0..node_coords.len())
+        .filter(|&vi| adj.get(vi).map_or(0, Vec::len) == 1 && !near_any_port(node_coords[vi]))
+        .collect();
+    let mut bridge_cands: Vec<(i64, usize, usize, String)> = Vec::new();
+    let min_seg_for_bridge = 2.0 * upm;
+    let max_gap = 6.5 * upm;
+    let max_lat = 0.45 * upm;
+
+    for idx_a in 0..deg1_nodes.len() {
+        let u = deg1_nodes[idx_a];
+        let (u_nb, u_ei) = adj[u][0];
+        let pu = node_coords[u];
+        let p_unb = node_coords[u_nb];
+        let len_u = (pu.0 - p_unb.0).hypot(pu.1 - p_unb.1);
+        if len_u < min_seg_for_bridge {
+            continue;
+        }
+        // Outward ray direction from `u` away from `u_nb`
+        let du = ((pu.0 - p_unb.0) / len_u, (pu.1 - p_unb.1) / len_u);
+        let lay_u = &edges[u_ei].2;
+
+        for &v in &deg1_nodes[(idx_a + 1)..] {
+            let (v_nb, v_ei) = adj[v][0];
+            if u_nb == v || v_nb == u || &edges[v_ei].2 != lay_u {
+                continue;
+            }
+            let pv = node_coords[v];
+            let gap_vec = (pv.0 - pu.0, pv.1 - pu.1);
+            let gap_len = gap_vec.0.hypot(gap_vec.1);
+            if !(node_tol..=max_gap).contains(&gap_len) {
+                continue;
+            }
+            let p_vnb = node_coords[v_nb];
+            let len_v = (pv.0 - p_vnb.0).hypot(pv.1 - p_vnb.1);
+            if len_v < min_seg_for_bridge {
+                continue;
+            }
+            // Outward ray from `v` away from `v_nb` must oppose `du` (`du · dv <= -0.990`)
+            let dv = ((pv.0 - p_vnb.0) / len_v, (pv.1 - p_vnb.1) / len_v);
+            let anti_dot = -(du.0 * dv.0 + du.1 * dv.1);
+            let forward_proj = (gap_vec.0 * du.0 + gap_vec.1 * du.1) / gap_len;
+            let lat_off = (gap_vec.0 * (-du.1) + gap_vec.1 * du.0).abs();
+            if anti_dot < 0.990 || forward_proj < 0.990 || lat_off > max_lat {
+                continue;
+            }
+            let mid = ((pu.0 + pv.0) * 0.5, (pu.1 + pv.1) * 0.5);
+            if symbol_bboxes
+                .iter()
+                .any(|&bb| point_in_bbox(mid, bb, 0.2 * upm))
+            {
+                continue;
+            }
+            bridge_cands.push(((gap_len * 1000.0) as i64, u, v, lay_u.clone()));
+        }
+    }
+    bridge_cands.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    let mut bridged_node = vec![false; node_coords.len()];
+    let mut collinear_bridges = 0usize;
+    for (_, u, v, lay) in bridge_cands {
+        if bridged_node[u] || bridged_node[v] {
+            continue;
+        }
+        bridged_node[u] = true;
+        bridged_node[v] = true;
+        let ei = edges.len();
+        edges.push((u, v, lay));
+        adj[u].push((v, ei));
+        adj[v].push((u, ei));
+        collinear_bridges += 1;
     }
 
     let v_count = node_coords.len();
     let mut is_stop = vec![false; v_count];
     for (vi, &nc) in node_coords.iter().enumerate() {
-        if adj.get(vi).map_or(0, Vec::len) != 2 {
-            is_stop[vi] = true;
-            continue;
-        }
-        if port_points
-            .iter()
-            .any(|&pp| (nc.0 - pp.0).hypot(nc.1 - pp.1) <= port_tol)
-        {
+        if adj.get(vi).map_or(0, Vec::len) != 2 || near_any_port(nc) {
             is_stop[vi] = true;
         }
     }
 
     let mut used_edge = vec![false; edges.len()];
-    let mut out = Vec::new();
+    let mut raw_runs = Vec::new();
 
     for start_v in 0..v_count {
         if !is_stop[start_v] {
@@ -259,6 +586,7 @@ fn chain_pipe_segments(
                 continue;
             }
             used_edge[first_ei] = true;
+            let lay = edges[first_ei].2.clone();
             let mut pts = vec![node_coords[start_v], node_coords[next_v]];
             let mut cur = next_v;
             while !is_stop[cur] {
@@ -269,7 +597,14 @@ fn chain_pipe_segments(
                 pts.push(node_coords[nxt]);
                 cur = nxt;
             }
-            out.push(ChainedRun { points: pts });
+            raw_runs.push((
+                start_v,
+                cur,
+                ChainedRun {
+                    points: pts,
+                    layer: lay,
+                },
+            ));
         }
     }
 
@@ -278,7 +613,7 @@ fn chain_pipe_segments(
             continue;
         }
         used_edge[start_ei] = true;
-        let (u, v) = edges[start_ei];
+        let (u, v, ref lay) = edges[start_ei];
         let mut pts = vec![node_coords[u], node_coords[v]];
         let mut cur = v;
         while cur != u {
@@ -289,10 +624,51 @@ fn chain_pipe_segments(
             pts.push(node_coords[nxt]);
             cur = nxt;
         }
-        out.push(ChainedRun { points: pts });
+        raw_runs.push((
+            u,
+            cur,
+            ChainedRun {
+                points: pts,
+                layer: lay.clone(),
+            },
+        ));
     }
 
-    out
+    let min_stub_len = 2.0 * upm;
+    let max_arrow_span = 2.4 * upm;
+    let mut out = Vec::new();
+    let mut filtered_micro_stubs = 0usize;
+    for (u_idx, v_idx, cr) in raw_runs {
+        let len = polyline_length(&cr.points);
+        let span = if cr.points.is_empty() {
+            0.0
+        } else {
+            let mut x0 = f64::INFINITY;
+            let mut y0 = f64::INFINITY;
+            let mut x1 = f64::NEG_INFINITY;
+            let mut y1 = f64::NEG_INFINITY;
+            for &(px, py) in &cr.points {
+                x0 = x0.min(px);
+                y0 = y0.min(py);
+                x1 = x1.max(px);
+                y1 = y1.max(py);
+            }
+            (x1 - x0).hypot(y1 - y0)
+        };
+        let deg_u = adj.get(u_idx).map_or(0, Vec::len);
+        let deg_v = adj.get(v_idx).map_or(0, Vec::len);
+        let anchored = deg_u >= 3
+            || deg_v >= 3
+            || cr.points.first().is_some_and(|&p| near_any_port(p))
+            || cr.points.last().is_some_and(|&p| near_any_port(p));
+        if (len < min_stub_len || span < max_arrow_span) && !anchored {
+            filtered_micro_stubs += cr.points.len().saturating_sub(1).max(1);
+            continue;
+        }
+        out.push(cr);
+    }
+
+    (out, collinear_bridges, filtered_micro_stubs)
 }
 
 fn nearest_label_for_run(
@@ -441,24 +817,93 @@ fn build_core_conversion(
         dwg.items.push(item);
     }
 
-    let chained = chain_pipe_segments(
+    let sym_bboxes: Vec<(f64, f64, f64, f64)> = endpoints
+        .iter()
+        .filter(|ep| {
+            !matches!(
+                ep.sppid_class.as_str(),
+                "PIDProcessVessel"
+                    | "PIDMechanicalEquipment"
+                    | "PIDProcessEquipment"
+                    | "PIDHeatTransferEquipment"
+            )
+        })
+        .map(|ep| ep.bbox)
+        .collect();
+    let (chained, collinear_bridges, filtered_micro_stubs) = chain_pipe_segments(
         &rec.pipe_segments,
         &opts.pipe_layers,
         &all_ports,
+        &sym_bboxes,
         upm,
         opts.snap_tol_mm,
     );
     let label_dist = 18.0 * upm;
+    let mut run_labels: Vec<Option<String>> = chained
+        .iter()
+        .map(|cr| nearest_label_for_run(cr, &rec.pipe_labels, label_dist))
+        .collect();
+
+    // Propagate unambiguous line label across shared junctions on the same layer (`L3-3`).
+    let junc_tol = opts.snap_tol_mm * upm;
+    for _pass in 0..2 {
+        let mut next_labels = run_labels.clone();
+        for (ri, cr) in chained.iter().enumerate() {
+            if run_labels[ri].is_some() {
+                continue;
+            }
+            let Some(&s_pt) = cr.points.first() else {
+                continue;
+            };
+            let Some(&e_pt) = cr.points.last() else {
+                continue;
+            };
+            let mut neighbor_set: BTreeSet<&str> = BTreeSet::new();
+            for (oj, ocr) in chained.iter().enumerate() {
+                if oj == ri || ocr.layer != cr.layer {
+                    continue;
+                }
+                let Some(ref olbl) = run_labels[oj] else {
+                    continue;
+                };
+                let (Some(&os), Some(&oe)) = (ocr.points.first(), ocr.points.last()) else {
+                    continue;
+                };
+                let touches = (s_pt.0 - os.0).hypot(s_pt.1 - os.1) <= junc_tol
+                    || (s_pt.0 - oe.0).hypot(s_pt.1 - oe.1) <= junc_tol
+                    || (e_pt.0 - os.0).hypot(e_pt.1 - os.1) <= junc_tol
+                    || (e_pt.0 - oe.0).hypot(e_pt.1 - oe.1) <= junc_tol;
+                if touches {
+                    neighbor_set.insert(olbl.as_str());
+                }
+            }
+            if neighbor_set.len() == 1 {
+                if let Some(&only) = neighbor_set.iter().next() {
+                    next_labels[ri] = Some(only.to_string());
+                }
+            }
+        }
+        run_labels = next_labels;
+    }
+
+    let mut runs_by_layer: BTreeMap<String, usize> = BTreeMap::new();
+    let mut labeled_runs = 0usize;
+    let mut unlabeled_runs = 0usize;
     let mut run_inputs: Vec<PipeRunInput> = Vec::new();
     let mut placed_runs: Vec<PlacedRunRef> = Vec::new();
-    for cr in &chained {
+    for (cr, line_label) in chained.iter().zip(run_labels) {
         let Some(&start) = cr.points.first() else {
             continue;
         };
         let Some(&end) = cr.points.last() else {
             continue;
         };
-        let line_label = nearest_label_for_run(cr, &rec.pipe_labels, label_dist);
+        *runs_by_layer.entry(cr.layer.clone()).or_default() += 1;
+        if line_label.is_some() {
+            labeled_runs += 1;
+        } else {
+            unlabeled_runs += 1;
+        }
         let rgoid = alloc.alloc_graphic_oid(None);
         run_inputs.push(PipeRunInput {
             start,
@@ -502,6 +947,139 @@ fn build_core_conversion(
         }
     }
 
+    // Compute conserved dead-end attribution (`2 * run_inputs.len()`) and off-page connector entries (`L3-3 / L3-4`).
+    let snap_tol = opts.snap_tol_mm * upm;
+    let mut dead_end_attribution = DeadEndAttribution::default();
+    let mut unsnapped_pts: Vec<(usize, bool, (f64, f64))> = Vec::new();
+    let mut opc_line_label: BTreeMap<String, String> = BTreeMap::new();
+
+    let classify_snap = |pt: (f64, f64)| -> Option<(bool, &str)> {
+        let mut best_opc: Option<(f64, &str)> = None;
+        let mut best_port: Option<(f64, &str)> = None;
+        for ep in &endpoints {
+            if ep.sppid_class == "PIDBranchPoint" {
+                for &sp in &ep.ports {
+                    let d = (pt.0 - sp.0).hypot(pt.1 - sp.1);
+                    if d <= snap_tol && best_opc.is_none_or(|(bd, _)| d < bd) {
+                        best_opc = Some((d, ep.symbol_uid.as_str()));
+                    }
+                }
+            } else if matches!(
+                ep.sppid_class.as_str(),
+                "PIDPipingComponent" | "PIDInlineInstrument" | "PIDNozzle" | "PIDProcessEquipment"
+            ) {
+                for &sp in &ep.ports {
+                    let d = (pt.0 - sp.0).hypot(pt.1 - sp.1);
+                    if d <= snap_tol && best_port.is_none_or(|(bd, _)| d < bd) {
+                        best_port = Some((d, ep.symbol_uid.as_str()));
+                    }
+                }
+            }
+        }
+        match (best_opc, best_port) {
+            (Some((do_, ouid)), Some((dp, puid))) => {
+                if do_ <= dp {
+                    Some((true, ouid))
+                } else {
+                    Some((false, puid))
+                }
+            }
+            (Some((_, ouid)), None) => Some((true, ouid)),
+            (None, Some((_, puid))) => Some((false, puid)),
+            (None, None) => None,
+        }
+    };
+
+    for (ri, r) in run_inputs.iter().enumerate() {
+        for (is_end2, pt) in [(false, r.start), (true, r.end)] {
+            if let Some((is_opc, uid_str)) = classify_snap(pt) {
+                if is_opc {
+                    dead_end_attribution.snapped_to_offpage += 1;
+                    if let Some(ref lbl) = r.line_label {
+                        opc_line_label
+                            .entry(uid_str.to_string())
+                            .or_insert_with(|| lbl.clone());
+                    }
+                } else {
+                    dead_end_attribution.snapped_to_port += 1;
+                }
+            } else {
+                unsnapped_pts.push((ri, is_end2, pt));
+            }
+        }
+    }
+
+    let mut used_un = vec![false; unsnapped_pts.len()];
+    for i in 0..unsnapped_pts.len() {
+        if used_un[i] {
+            continue;
+        }
+        let anchor = unsnapped_pts[i].2;
+        let mut group = vec![i];
+        used_un[i] = true;
+        for j in (i + 1)..unsnapped_pts.len() {
+            if !used_un[j]
+                && (unsnapped_pts[j].2 .0 - anchor.0).hypot(unsnapped_pts[j].2 .1 - anchor.1)
+                    <= snap_tol
+            {
+                used_un[j] = true;
+                group.push(j);
+            }
+        }
+        let distinct_runs: BTreeSet<usize> = group.iter().map(|&gi| unsnapped_pts[gi].0).collect();
+        if distinct_runs.len() >= 3 {
+            dead_end_attribution.snapped_to_tee += group.len();
+        } else {
+            for &gi in &group {
+                let pt = unsnapped_pts[gi].2;
+                let near_eq = endpoints.iter().any(|ep| {
+                    matches!(
+                        ep.sppid_class.as_str(),
+                        "PIDProcessVessel"
+                            | "PIDMechanicalEquipment"
+                            | "PIDProcessEquipment"
+                            | "PIDHeatTransferEquipment"
+                    ) && point_in_bbox(pt, ep.bbox, 3.0 * snap_tol)
+                });
+                if near_eq {
+                    dead_end_attribution.touching_equipment_shell += 1;
+                } else {
+                    dead_end_attribution.open_free_end += 1;
+                }
+            }
+        }
+    }
+
+    let mut offpage_connectors: Vec<OffpageConnectorEntry> = Vec::new();
+    for ps in &placed_symbols {
+        let sym = &rec.symbols[ps.sym_idx];
+        if sym.sppid_class != "PIDBranchPoint" {
+            continue;
+        }
+        let Some(ep_item) = dwg
+            .items
+            .iter()
+            .find(|it| it.graphic_oids.contains(&ps.graphic_oid))
+        else {
+            continue;
+        };
+        offpage_connectors.push(OffpageConnectorEntry {
+            uid: ep_item.uid.clone(),
+            target_dwg_number: sym.to_from_text.clone(),
+            description: sym.description.clone(),
+            line_label: opc_line_label.get(&ep_item.uid).cloned(),
+        });
+    }
+
+    let pipe_network_census = PipeNetworkCensus {
+        runs_by_layer,
+        labeled_runs,
+        unlabeled_runs,
+        collinear_bridges,
+        filtered_micro_stubs,
+        dead_end_attribution,
+    };
+
     let report = ConvertSheetReport {
         drawing_name: effective_doc_name,
         doc_uid,
@@ -510,6 +1088,8 @@ fn build_core_conversion(
         confidence_summary: rec.confidence_summary.clone(),
         exported_by_class,
         piping_synthesis: piping_stats,
+        pipe_network_census,
+        offpage_connectors,
         total_items_written: dwg.items.len(),
         total_relations_written: dwg.relations.len(),
         skipped_items: dwg.unmapped.clone(),
@@ -1320,6 +1900,7 @@ pub fn convert_path_to_dir(
             }
         }
     }
+    summary.cross_sheet_opc_pairing = pair_cross_sheet_connectors(&summary.sheets);
     Ok(summary)
 }
 
@@ -1702,5 +2283,132 @@ mod tests {
         assert!(pver.is_b_plot_valid(), "{pver:?}");
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn bridges_collinear_pipe_gaps_filters_micro_stubs_and_snaps_cardinal_valve_ports() {
+        use document::entities::{Block, BlockEnd, Insert, Line, Text};
+        use document::tables::BlockRecord;
+        use document::types::Vector3;
+        use document::{EntityType, Handle};
+
+        let mut doc = Document::new();
+        // Define a valve block WITHOUT explicit Point entities (only stroke lines, 6mm wide)
+        let br_h = Handle::new(100);
+        let b_h = Handle::new(101);
+        let e_h = Handle::new(102);
+        let mut rec = BlockRecord::new("BALL VALVE TYPE 2");
+        rec.handle = br_h;
+        rec.block_entity_handle = b_h;
+        rec.block_end_handle = e_h;
+        doc.block_records.add(rec).unwrap();
+        let mut blk = Block::new("BALL VALVE TYPE 2", Vector3::ZERO);
+        blk.common.handle = b_h;
+        blk.common.owner_handle = br_h;
+        doc.add_entity(EntityType::Block(blk)).unwrap();
+        let mut end = BlockEnd::new();
+        end.common.handle = e_h;
+        end.common.owner_handle = br_h;
+        doc.add_entity(EntityType::BlockEnd(end)).unwrap();
+        let mut stroke =
+            Line::from_points(Vector3::new(-3.0, -2.0, 0.0), Vector3::new(3.0, 2.0, 0.0));
+        stroke.common.owner_handle = br_h;
+        doc.add_entity(EntityType::Line(stroke)).unwrap();
+
+        let mut v_ins = Insert::new("BALL VALVE TYPE 2", Vector3::new(100.0, 100.0, 0.0));
+        v_ins.common.layer = "11".to_string();
+        doc.add_entity(EntityType::Insert(v_ins)).unwrap();
+
+        // Upstream run broken by a 3.0mm collinear line-jump gap: (20,100)->(50,100) and (53,100)->(97,100)
+        // Downstream run from right edge of valve: (103,100)->(160,100)
+        // Plus two 0.8mm isolated arrow-barb micro-stubs on layer "11" far from ports
+        for (a, b) in [
+            ((20.0, 100.0), (50.0, 100.0)),
+            ((53.0, 100.0), (97.0, 100.0)),
+            ((103.0, 100.0), (160.0, 100.0)),
+            ((60.0, 100.4), (60.6, 100.0)),
+            ((60.0, 99.6), (60.6, 100.0)),
+        ] {
+            let mut ln =
+                Line::from_points(Vector3::new(a.0, a.1, 0.0), Vector3::new(b.0, b.1, 0.0));
+            ln.common.layer = "11".to_string();
+            doc.add_entity(EntityType::Line(ln)).unwrap();
+        }
+        let mut lbl =
+            Text::with_value("50-PG-02011-B9-", Vector3::new(30.0, 102.5, 0.0)).with_height(2.5);
+        lbl.common.layer = "11".to_string();
+        doc.add_entity(EntityType::Text(lbl)).unwrap();
+
+        let (_bundle, rep) =
+            convert_document_to_publish(&doc, "SYNTH-CHAIN-133", &ConvertOptions::default())
+                .expect("convert");
+
+        assert_eq!(rep.pipe_network_census.collinear_bridges, 1);
+        assert!(rep.pipe_network_census.filtered_micro_stubs >= 2);
+        assert_eq!(rep.piping_synthesis.piping_connectors, 2);
+        assert_eq!(rep.piping_synthesis.piping_ports, 2);
+        assert_eq!(
+            rep.pipe_network_census
+                .dead_end_attribution
+                .total_endpoints(),
+            rep.piping_synthesis.piping_connectors * 2
+        );
+    }
+
+    #[test]
+    fn pairs_reciprocal_one_way_and_external_offpage_connectors_across_sheets() {
+        let s1 = ConvertSheetReport {
+            drawing_name: "SHEET_A".to_string(),
+            title_block: TitleBlockInfo {
+                drawing_number: Some("DWG-0201集01-01".to_string()),
+                ..Default::default()
+            },
+            offpage_connectors: vec![
+                OffpageConnectorEntry {
+                    uid: "OPC_A1".to_string(),
+                    target_dwg_number: Some("DWG-0201集 01-02".to_string()),
+                    description: None,
+                    line_label: Some("50-PG-02011-B9-".to_string()),
+                },
+                OffpageConnectorEntry {
+                    uid: "OPC_A2".to_string(),
+                    target_dwg_number: Some("DWG-9999-EXT".to_string()),
+                    description: None,
+                    line_label: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let s2 = ConvertSheetReport {
+            drawing_name: "SHEET_B".to_string(),
+            title_block: TitleBlockInfo {
+                drawing_number: Some("DWG-0201集01-02".to_string()),
+                ..Default::default()
+            },
+            offpage_connectors: vec![
+                OffpageConnectorEntry {
+                    uid: "OPC_B1".to_string(),
+                    target_dwg_number: Some("DWG-0201集01-01".to_string()),
+                    description: None,
+                    line_label: Some("50-PG-02011-B9-".to_string()),
+                },
+                OffpageConnectorEntry {
+                    uid: "OPC_B2".to_string(),
+                    target_dwg_number: Some("DWG-0201集01-01".to_string()),
+                    description: None,
+                    line_label: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let paired = pair_cross_sheet_connectors(&[s1, s2]);
+        assert_eq!(paired.total_offpage_connectors, 4);
+        assert_eq!(paired.reciprocal_paired_connectors, 2);
+        assert_eq!(paired.one_way_in_batch, 1);
+        assert_eq!(paired.external_target_dwg, 1);
+        assert_eq!(paired.pairs.len(), 1);
+        assert_eq!(paired.pairs[0].uid_a, "OPC_A1");
+        assert_eq!(paired.pairs[0].uid_b, "OPC_B1");
     }
 }
