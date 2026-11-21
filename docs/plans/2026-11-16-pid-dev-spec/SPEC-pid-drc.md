@@ -371,6 +371,7 @@ digit         = "0".."9" ;
 | `WAIVER_TARGET_NOT_FOUND` | 要豁免的 `(规则号, 对象键)` 不在当前图最近一次检查的结果里 | 404 |
 | `PBS_NODE_UNKNOWN` | 按 PBS 节点检查时节点号不在主数据里 | 404 |
 | `INDEX_NO_PROJECT_DIR` | 要项目范围而当前图没保存过（沿用项目索引的码） | 409 |
+| `RULESET_IO_ERROR` | 整包替换项目包（`pid_check_rules_set`）时写不了文件；`DRC-14` 补的码（§11.14） | 500 |
 
 ## 4. 数据怎么传
 
@@ -997,3 +998,79 @@ MCP：`pid_check`、`pid_check_rules` 进 `READ_OPS`，其余三个进 `EXECUTE_
   - 图里先放两条对不上的豁免（其中一条规则已不存在），查过以后 `stale_waivers` 就是这两条；豁免再取消，记录和条数都回到原样；取消规则已不存在的那条后 `stale_waivers` 只剩一条，撤销后又是两条；取消图里没有的是 `WAIVER_TARGET_NOT_FOUND`。
   - 只读会话里四种写的子命令都被 `readonly_refuses_command` 拒、跑了报错，不留撤销步、不加豁免、不写项目包；`PIDCHECK`、`PIDCHECK RULES` 不被拒、照常。
   - 注册测试多的 6 种写错的行（少规则号、多一个规则号、少对象键、`UNWAIVE` 多写理由）都报以 `PIDCHECK` 开头的错，不带错误码。
+
+### 11.14 `DRC-14`：规则检查的操作与接口（2026-11-21）
+
+**做了什么**：
+
+- `src/app/commands/piddrc.rs`：五个自动化操作（§5.3），在第二个 `impl OpenCADStudio` 块里，应答和失败的写法同别的控制面操作，不碰命令行。
+  - `pid_check`：`control_pid_check` → `op_check`。请求由 `check_request` 读成要查的（`Asked`：只查当前图、跨图、节点、全项目）和 `include_waived`。只查当前图走 `pidcheck_this_drawing`（就是 `PIDCHECK` 用的 `check_drawing`）；其余借 `op_scan` 扫项目，扫好由 `check_project` 查，`Range` 多了 `Drawing(图号)`。应答由 `answer_of` 写，和 `EXPORT` 共用 `Exported`（§3.6 的结果带 `ok`）。
+  - `pid_check_rules`：`control_pid_check_rules`；`pid_check_rules_set`：`control_pid_check_rules_set`。
+  - `pid_check_waive`、`pid_check_unwaive`：`control_pid_check_waive`、`control_pid_check_unwaive`。改图的部分从 `WAIVE`、`UNWAIVE` 里拆成 `pidcheck_add_waiver`、`pidcheck_remove_waiver`，命令和操作共用，命令的输出文字不变。
+  - 只读会话的拒绝在 `pidcheck_writable`。
+- `src/app/commands/pidindex.rs`：从 `op_index` 拆出 `op_scan`，摘要按调用方给的连接容差做；`op_index`（`pid_index`、`pid_locate` 用）照旧用默认容差。
+- `src/pid/drc/builtin_rules.rs`：从摘要值的 `describe` 拆出 `listing`（规则集和规则，照规则包文件的写法）。
+- `src/app/control/mod.rs`：`pid_check`、`pid_check_rules` 进查询名单，`pid_check` 要能交出后台读的任务，单独分派；三个写操作进改图的分派和 `background_mutation`；能力清单加 `pid_check`。
+- `src/rest.rs`：五条路由，`map_status` 登记 §3.8 的码；`src/rest_openapi.json`：五个操作和它们的状态码。
+- `src/mcp.rs`、`src/mcp_ops.rs`：`READ_OPS` 加两个、`EXECUTE_OPS` 加三个，读工具加参数，三个写操作的 `OpDef`，工具摘要值重新固定。
+
+**规格没写到、这里定下的：**
+
+1. **`pid_check` 的请求**：
+   - `scope` 不分大小写、去掉两头空白，默认 `drawing`；`pbs` 只和 `scope: pbs` 一起给，这时必给、不能是空的；`cross_drawing` 默认假，只对 `drawing` 起作用（`project`、`pbs` 本来就跑项目级规则）；`include_waived` 默认真。类型不对、取值不认识、`pbs` 和 `scope` 对不上都是 `invalid_request`（400）。
+   - 先后照 §4.1：没有打开的图是 `no_document`；再看请求的写法。只查当前图时取到规则就查（项目包有错带码报）。其余的：图没保存过是 `INDEX_NO_PROJECT_DIR`；跨图时认当前图（第 3 条）；取规则；取主数据、认节点号（`PBS_NODE_UNKNOWN`）；扫描；查。前面哪一步不过都不扫描。
+2. **扫描中**：要从磁盘读的图缓存里没有，就起后台读，应答 `{"ok":true,"status":"scanning","done":0,"total":<要读的个数>}`，调用方稍后发同样的请求才是结果；正在扫（哪个目录都算）时再发还是 `scanning`，不再起一次。同 `pid_index`。摘要按规则包的连接容差做，缓存按容差分开（§11.12），不和索引的混用。
+3. **跨图**（`scope: drawing` 带 `cross_drawing: true`，§4.2）：
+   - 扫项目，项目级规则也跑，只报当前图上的，范围外的图作对端。应答的 `scope` 是 `drawing`、当前图的图号、`cross_drawing: true`。
+   - 当前图按文件路径在项目的图纸清单（`list_drawings`）里找，图号也取清单里的。找不到——项目只认目录里的 `.dwg`，打开的是 DXF、或者文件已经不在盘上——是 `INDEX_NO_PROJECT_DIR`，消息提示不带 `cross_drawing` 可以只查这张图。不按图号找：同目录里同名的 `.dwg` 会顶替打开着的这张，查的就不是它了，还不报错。
+   - 扫描用的就是打开着的那份（含没存盘的修改），结果、豁免和图对得上。
+4. **留着的结果**：同命令。只查当前图的和跨图的放在标签页上，查项目、查节点的按项目目录放；`PIDCHECK EXPORT`、豁免照常用它们。
+5. **`include_waived: false`**：只从应答的 `results` 里去掉已豁免的，`summary`（含「已豁免」）照旧；留着的结果是完整的。
+6. **`pid_check_rules`**：`rules[]` 每条照规则包文件的写法（§3.1，14 个字段），`sets[]` 是名称和启停。这两样由 `listing` 给，摘要值算的也是它们，列的和摘要值对得上，摘要值不变。`project_pack` 是叠上的项目包的路径，没有是 `null`。项目包有错时应答那条错误的码。只读会话里能用。
+7. **`pid_check_rules_set`**：
+   - `pack` 必给，没给是 `invalid_request`。先照读规则包的同一套校验（`validate_project_pack`），不过就带码报、不写；再写临时文件、改名盖过去（`write_atomic`）。写出的是两格缩进的 JSON，键按字母排（`serde_json` 没开 `preserve_order`），内容和请求里的一样。
+   - 写不了是新码 `RULESET_IO_ERROR`（500），照主数据的 `MASTERDATA_IO_ERROR`，§3.8 已加一行。图没保存过就没有放项目包的目录：`INDEX_NO_PROJECT_DIR`。
+   - 不改图、不留撤销步，留着的结果不动，下一次检查起生效。`result` 是换上以后生效规则的 `rule_set_version`、`rule_set_digest`。
+8. **豁免、取消豁免**：和命令共用一段，§11.13 第 2、5、6、7 条照旧：规则号转大写，对象键去掉两头空白，理由交给 `Waiver::new`；各一个撤销步，就地改留着的结果。参数没给、不是文本或者是空的是 `invalid_request`；理由给了、只有空白，是 `WAIVER_REASON_REQUIRED`。`result` 是 `{"waivers": <图上现在有几条豁免>}`。
+9. **只读**（§5.4）：三个写操作不经过命令行，自己按对应的子命令词问 `readonly_refuses_command`：`pid_check_rules_set` 按 `PIDCHECK ENABLE`，`pid_check_waive` 按 `PIDCHECK WAIVE`，`pid_check_unwaive` 按 `PIDCHECK UNWAIVE`。码和级别同别的被拒的写（`COLLAB_READONLY`，`level: state`），也报给服务器。`pid_check`、`pid_check_rules` 照常。三个写操作进 `background_mutation`：和 `pid_masterdata_set` 一样，只动这张图自己的数据（豁免）或图所在目录的项目包，不要界面。
+10. **REST**：
+    - `POST /api/v1/pid/check` 是读，请求体就是参数，`op`、`protocol` 由路由填，请求体里带的换不掉要执行的操作。`GET /pid/check/rules` 是读；`PUT /pid/check/rules`、`POST /pid/check/waivers`、`DELETE /pid/check/waivers` 是写。
+    - `DELETE` 的 `rule_id`、`object_key` 也可以放在查询串里（先解码），查询串盖过请求体。
+    - `map_status`：`RULE_NOT_FOUND`、`WAIVER_TARGET_NOT_FOUND`、`PBS_NODE_UNKNOWN` 是 404；`RULE_BUILTIN_READONLY`、`RULE_ID_RESERVED`、`RULE_ID_DUPLICATED`、`RULE_BLOCKED` 是 409；`RULESET_IO_ERROR` 是 500。规则包格式的码（`DSL_PARSE_ERROR`、`RULESET_SCHEMA_ERROR` 等）和 `WAIVER_REASON_*` 照默认是 400；`INDEX_NO_PROJECT_DIR` 原来就是 409。
+    - `RULE_BLOCKED` 登记以后，REST 上被保存门禁拦下的保存（自动化的保存、带校验的保存本来就带这个码）从 400 变成 409；控制接口的同步保存照旧报 `save_failed`、码写在消息里（§11.11）。
+11. **MCP**：
+    - 读工具的参数是所有读操作共用的一张表，里面已经有文字搜索的 `scope`（`all` / `active_space` / `blocks`，默认 `all`）。沿用同一个名字，取值扩成六个、去掉 `default`，说明里写各归哪个操作、各自的默认；另加 `pbs`、`cross_drawing`、`include_waived`。
+    - 三个写操作的 `OpDef` 能进批量（`batchable`），不认识的参数拒绝（`RejectUnknown`）。
+    - `pid_check_rules_set` 的 `pack` 只声明是对象，约束写在参数说明里：整包有哪些键；内置规则号的条目只能带 `id`、`enabled`、`params`；新规则号不能落在 `DR-001` – `DR-199`。生成 schema 时参数说明会盖掉 `Ty::Raw` 里自带的 `description`，写在那里客户端看不到。
+    - 两条原有的测试跟着改：`schema_size_and_defs_structure` 的上限从 45000 提到 50000——execute 的 schema 加了三个写操作后是 47035 字节；这条测试防的是生成时指数膨胀，上游 `3c1c1364c` 加操作时也把它从 40000 提到过 45000。`curated_read_schemas_match_the_legacy_read_parameter_constraints` 里 `scope` 单独比：`ocs_find_text` 的取值都要在读工具的取值里，读工具的说明里要写着 `all (the default)`，其余参数照旧全等；`ocs_find_text` 自己的 schema 不变。
+
+**留给以后的**：
+
+- `pid_check` 扫描中只答 `scanning`，调用方要自己隔一会儿再发，没有进度推送（同 `pid_index`）。
+- 跨图只认项目目录里的 `.dwg`：打开的是 DXF 时查不了跨图，要先存成项目目录里的 `.dwg`。
+- 读工具上 `scope` 的取值不分操作：给文字搜索传 `drawing`、`pbs`、`project` 不会被 schema 拦下，文字搜索把不认识的取值当 `all`（向来如此）；`ocs_find_text` 只认它那三个。
+- 协同权限表里的「规则检查」没有单独鉴权（§5.4），只看会话可不可写。
+- 原有操作里也有 `Ty::Raw` 自带的 `description` 被参数说明盖掉的（如 `pid_masterdata_set` 的 `master_data`，字段名客户端看不到），这一步没动。
+- 「文件」一栏以外改了 `src/app/commands/piddrc.rs`（操作的主体）、`src/app/commands/pidindex.rs`（`op_scan`）、`src/pid/drc/builtin_rules.rs`（`listing`）、`src/mcp_ops.rs`（三个 `OpDef`）、`src/mcp_intent.rs`（一条测试）。
+
+**测试**（`piddrc` 新加 9 条，`rest`、`mcp` 各 1 条；`mcp`、`mcp_intent` 各有一条原有的测试跟着改，见上面第 11 条）：
+
+- **先红后绿**：
+  - 先只写 11 条测试，都编得过，全败在功能还没有上：不认识的操作、不在查询名单、REST 路由和 MCP 名单里还没有。
+  - 写实后第一次跑 28 过 2 挂，都在预期之中：工具摘要值变了，照实际值重新固定；OpenAPI 测试缺 `post /api/v1/pid/check`，补上 `rest_openapi.json` 的五个操作后过。全量单元测试又挂了第 11 条那两条原有的 MCP 测试，改后重跑全过。复查时把 `pack` 的约束挪进参数说明（第 11 条），工具摘要值再固定一次，`pid_check`、`mcp`、`rest::` 定向重跑 129 条全过。
+- **各测**：
+  - 三种范围各一例：不写 `scope` 查当前图，应答的 `version`、`trigger`（按需）、`scope`、摘要值、`summary`、`results` 和直接调 `check_drawing` 的一样，没有项目级的 `DR-102`，结果记在标签页上；`project` 要读另一张图，先应答 `scanning`（0 / 1），同样的请求再发是结果，`DR-102` 报在 PID-1101、PID-1102 两张图上，按项目目录记下；`pbs: U-100` 只报节点下 PID-1101 上的。是查询：不带 `request_id` 也能发，不留撤销步；能力清单里有 `pid_check`。
+  - 扫着的时候再发还是 `scanning`，也不再起一次扫描；后台读完再发是结果。
+  - 跨图：先 `scanning`，再发是结果，`scope` 带 `cross_drawing: true`，`DR-102` 只报 PID-1101 上的，全部结果都在 PID-1101 上；记在标签页上、不按项目目录记，接着能豁免 PID-1101 上的 `DR-102`。把当前图的路径换成同目录的 `PID-1101.dxf`（同名的 `.dwg` 还在）后是 `INDEX_NO_PROJECT_DIR`。
+  - 豁免一条 `DR-014` 后，默认列出已豁免的，带 `waived` 和理由；`include_waived: false` 时 `results` 里没有已豁免的，`summary` 相同，两份的条数对得上。
+  - 七种写错的请求是 `invalid_request`；没保存过的图查项目、查节点（`scope` 写大写的 `PBS` 也认）、跨图都是 `INDEX_NO_PROJECT_DIR`，只查当前图照样行；没配置主数据、节点号不在 PBS 表里是 `PBS_NODE_UNKNOWN`；三种校验不过的项目包（改内置规则的严重度、新规则用内置号段、表达式解析不过）在四种范围下都应答那条错误的码。
+  - 看规则：没有项目包时版本、摘要值同内置包，`project_pack` 是 `null`，两个规则集，第一条 `DR-001` 照规则包文件的写法共 14 个字段；叠上项目包后（只读会话里看）版本是 `<内置版本>+P2`，`project_pack` 是它的路径，`save_gate` 是 `block`，`DR-014` 停用，多一条来源「新建」的 `DR-201`；三种校验不过的包应答各自的码。
+  - 整包替换：写进去的 JSON 和请求里的相等，应答新的版本和摘要值，不留撤销步，下一次检查不再出 `DR-014`；三种校验不过的包、规则号重复（`RULE_ID_DUPLICATED`）、`pack` 不是对象（`RULESET_SCHEMA_ERROR`）、没给 `pack`（`invalid_request`）都不动文件；没保存过的图是 `INDEX_NO_PROJECT_DIR`。
+  - 豁免和取消：还没查时是 `WAIVER_TARGET_NOT_FOUND`；查过后用小写规则号、带空格的理由豁免，记下的是 `DR-014` 和去掉空白的理由，一个撤销步，序号不变（没有重新检查），留着的那条变成已豁免；再豁免换理由，条数仍是 1；`DR-999`、对象键不对、理由只有空白、理由 201 字、没给理由、没给规则号、规则号是数字各报各的码，都不留撤销步；取消后条数是 0，留着的结果里没有已豁免的；再取消是 `WAIVER_TARGET_NOT_FOUND`，没给对象键是 `invalid_request`。
+  - 只读会话里三个写操作都是 `COLLAB_READONLY`、`level: state`，都报给了服务器；不留撤销步，豁免还是原来那条，项目包没写出来；`pid_check`、`pid_check_rules` 照常。
+  - REST：五条路由各对应哪个操作、是读还是写，`POST /pid/check` 的请求体加上了 `protocol`、`op`；`DELETE` 查询串里的规则号和带空格、竖线的对象键原样进参数。在开着一张空图的程序上走一遍：查当前图、看规则是 200；查项目和没保存过的图换项目包是 409；`scope: pbs` 不给节点、空的豁免是 400；`DR-999`、不在结果里的豁免和取消是 404；`map_status` 把 §3.8 的码映射成对应的状态。OpenAPI 测试多查五条路径和七个状态。
+  - MCP：两个读操作、三个写操作在各自的名单里；读工具的 `scope` 六个值都在，`pbs`、`cross_drawing`、`include_waived` 的类型对；三个写操作合格的请求过，缺参数、类型不对、多给参数的被拒；豁免能当批量里的一步。
+- **手工**（调试版 `--http`，令牌只经环境变量交给程序）：
+  - 开着空白的新图：不带令牌 401；查当前图、看规则 200（内置 41 条、两个规则集、`project_pack` 是 `null`）；没存盘时查项目、换项目包是 409 `INDEX_NO_PROJECT_DIR`，`scope: pbs` 不给节点是 400。
+  - 存进一个空目录后：换项目包 200，版本 `1.0.0+P1`，看规则多一条、`project_pack` 是 `pid-drc-rules.json`，盘上的文件和请求里的一样；改内置规则、用内置号段、表达式写错各是 409、409、400，文件不动；查项目、跨图 200（项目里只有开着的这张，不用读盘，没有 `scanning`）；节点号不认识 404 `PBS_NODE_UNKNOWN`；豁免 `DR-999` 404 `RULE_NOT_FOUND`，不在结果里的 404，没给对象键 400，取消不存在的豁免 404。
+  - `pid_check` 的能力标记在 `GET /state` 的 `capabilities` 里（和 `pid_project_index` 一样），不在 `GET /capabilities` 的 `operations` 里；原有的 P&ID 操作也都不在那里。

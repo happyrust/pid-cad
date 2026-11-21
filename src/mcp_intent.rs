@@ -706,7 +706,26 @@ mod tests {
 
             for property in expected_properties {
                 let public = comparable_schema(&properties[*property], &schema["$defs"]);
-                let legacy = comparable_schema(&legacy[*property], &Value::Null);
+                let raw = &legacy[*property];
+                let mut legacy = comparable_schema(raw, &Value::Null);
+                if *property == "scope" {
+                    // On the legacy facade scope is shared with pid_check: it lists both
+                    // operations' values and gives each default in its description.
+                    let listed = legacy["enum"].as_array().cloned().unwrap_or_default();
+                    for value in public["enum"].as_array().unwrap() {
+                        assert!(listed.contains(value), "{name} scope {value}");
+                    }
+                    let default = public["default"].as_str().unwrap();
+                    assert!(
+                        raw["description"]
+                            .as_str()
+                            .unwrap()
+                            .contains(&format!("{default} (the default)")),
+                        "{name} scope default"
+                    );
+                    legacy["enum"] = public["enum"].clone();
+                    legacy["default"] = public["default"].clone();
+                }
                 assert_eq!(public, legacy, "{name} parameter {property}");
             }
         }

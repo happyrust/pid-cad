@@ -977,6 +977,44 @@ pub static PID_LOCATE: OpDef = OpDef {
     example: r#"{"op":"pid_locate","tag":"P-1001","drawing_id":"PID-1102"}"#,
 };
 
+pub static PID_CHECK_RULES_SET: OpDef = OpDef {
+    name: "pid_check_rules_set",
+    doc: "Replace the whole P&ID project rule pack (pid-drc-rules.json in the saved drawing's folder), validated first: nothing is written unless every rule passes. It takes effect from the next check. Read the rules in effect with ocs_read op pid_check_rules. result: rule_set_version, rule_set_digest.",
+    batchable: true,
+    params: &[req(
+        "pack",
+        Ty::Raw(r#"{"type":"object"}"#),
+        "The whole project pack (version, pack, rule_set_version, save_gate, sets, rules); it replaces the one in the drawing's folder. An entry with a built-in id may carry only id, enabled and params; new rules take ids outside DR-001 to DR-199.",
+    )],
+    rules: &[Rule::RejectUnknown],
+    example: r#"{"op":"pid_check_rules_set","pack":{"version":1,"rule_set_version":"P1","rules":[{"id":"DR-014","enabled":false}]}}"#,
+};
+
+pub static PID_CHECK_WAIVE: OpDef = OpDef {
+    name: "pid_check_waive",
+    doc: "Waive one result of the current drawing's latest P&ID rule check (ocs_read op pid_check), by rule id and object key, with a reason; one undo step. A pair already waived gets the new reason. result: waivers, how many the drawing records.",
+    batchable: true,
+    params: &[
+        req("rule_id", Ty::Str, "Rule id such as DR-014; case-insensitive."),
+        req("object_key", Ty::Str, "object_key of the result, as pid_check lists it."),
+        req("reason", Ty::Str, "Why the result is accepted: 1 to 200 characters."),
+    ],
+    rules: &[Rule::RejectUnknown],
+    example: r#"{"op":"pid_check_waive","rule_id":"DR-014","object_key":"PIPE_LINE|L-1","reason":"Vent to atmosphere"}"#,
+};
+
+pub static PID_CHECK_UNWAIVE: OpDef = OpDef {
+    name: "pid_check_unwaive",
+    doc: "Remove one waiver recorded on the current drawing, by rule id and object key; one undo step. Works for waivers no result matches any more. result: waivers, how many the drawing records.",
+    batchable: true,
+    params: &[
+        req("rule_id", Ty::Str, "Rule id such as DR-014; case-insensitive."),
+        req("object_key", Ty::Str, "object_key of the waiver."),
+    ],
+    rules: &[Rule::RejectUnknown],
+    example: r#"{"op":"pid_check_unwaive","rule_id":"DR-014","object_key":"PIPE_LINE|L-1"}"#,
+};
+
 pub static XREF_RELOAD: OpDef = OpDef {
     name: "xref_reload",
     doc: "Reload one direct external reference by id, preserving prior content on load failure.",
@@ -1389,6 +1427,9 @@ pub static OPS: &[&OpDef] = &[
     &PAGE_SETUP_SET,
     &PID_MASTERDATA_SET,
     &PID_LOCATE,
+    &PID_CHECK_RULES_SET,
+    &PID_CHECK_WAIVE,
+    &PID_CHECK_UNWAIVE,
     &XREF_RELOAD,
     &XREF_UNLOAD,
     &XREF_DETACH,

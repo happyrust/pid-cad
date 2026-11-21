@@ -1278,11 +1278,26 @@ impl OpenCADStudio {
         Ok(meta(&drawing, SummarySource::Open, None))
     }
 
-    /// 操作要的项目索引，项目目录是第 `i` 个标签页的图所在的目录。要读的文件缓存里都有
-    /// 就当场建好；要读盘时 `read` 为真就起后台扫描、应答 `scanning` 并交出后台读的任务，
-    /// 为假就把要读的算作读不出来。正在扫（哪个目录都算）也应答 `scanning`。以前读不出来、
-    /// 到现在没变的文件照上次的原因算，不再读。
+    /// 操作要的项目索引（[`Self::op_scan`]，默认的连接容差）。
     fn op_index(&mut self, i: usize, read: bool) -> Result<Indexed, (Value, Task<Message>)> {
+        let (project_dir, scanned) = self.op_scan(i, DEFAULT_TOLERANCE, read)?;
+        Ok(Indexed {
+            project_dir,
+            index: scanned.index,
+            summaries: scanned.summaries,
+        })
+    }
+
+    /// 操作要扫的项目：第 `i` 个标签页的图所在的目录和扫出来的，摘要按连接容差
+    /// `tolerance` 做。要读的文件缓存里都有就当场扫完；要读盘时 `read` 为真就起后台扫描、
+    /// 应答 `scanning` 并交出后台读的任务，为假就把要读的算作读不出来。正在扫（哪个目录都
+    /// 算）也应答 `scanning`。以前读不出来、到现在没变的文件照上次的原因算，不再读。
+    pub(super) fn op_scan(
+        &mut self,
+        i: usize,
+        tolerance: f64,
+        read: bool,
+    ) -> Result<(PathBuf, Scanned), (Value, Task<Message>)> {
         let Some(project_dir) =
             crate::io::drawing_dir(&self.tabs[i].scene.document).map(Path::to_path_buf)
         else {
@@ -1297,7 +1312,7 @@ impl OpenCADStudio {
         }
         let unreadable = std::mem::take(&mut self.pid_index.unreadable);
         let mut unread = Vec::new();
-        let scanned = self.pidindex_scan(&project_dir, DEFAULT_TOLERANCE, &mut |path| {
+        let scanned = self.pidindex_scan(&project_dir, tolerance, &mut |path| {
             if let Some(why) = recall(&unreadable, path) {
                 return Err(why);
             }
@@ -1311,14 +1326,10 @@ impl OpenCADStudio {
             Err(error) => Err((index_refusal(&error), Task::none())),
             Ok(_) if !unread.is_empty() => {
                 let total = unread.len();
-                let task = self.pidindex_read(project_dir, unread, DEFAULT_TOLERANCE, None);
+                let task = self.pidindex_read(project_dir, unread, tolerance, None);
                 Err((scanning(0, total), task))
             }
-            Ok(scanned) => Ok(Indexed {
-                project_dir,
-                index: scanned.index,
-                summaries: scanned.summaries,
-            }),
+            Ok(scanned) => Ok((project_dir, scanned)),
         }
     }
 
@@ -1492,7 +1503,7 @@ fn refuse(code: &str, error: impl Into<String>) -> Value {
 }
 
 /// 列图、建索引出错时的失败应答，错误码是 [`IndexError::code`]。
-fn index_refusal(error: &IndexError) -> Value {
+pub(super) fn index_refusal(error: &IndexError) -> Value {
     refuse(error.code(), error.to_string())
 }
 

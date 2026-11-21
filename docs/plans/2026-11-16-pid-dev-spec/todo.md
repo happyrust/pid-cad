@@ -776,13 +776,14 @@
 
 - **做什么**：五个自动化操作（§5.3）：`pid_check`（`POST /api/v1/pid/check`）、`pid_check_rules`（`GET /api/v1/pid/check/rules`）、`pid_check_rules_set`（`PUT /api/v1/pid/check/rules`，整包替换，先校验后写）、`pid_check_waive`（`POST /api/v1/pid/check/waivers`）、`pid_check_unwaive`（`DELETE /api/v1/pid/check/waivers`）。按共用约定 §7.6 的第 3–5 处接线；§3.8 的错误码进 `map_status`。
 - **验收**：
-  - [ ] `pid_check` 的应答就是 §3.6 的检查结果，三种范围各一例；项目扫描没做完时应答 `scanning`。
-  - [ ] 状态码符合 §3.8：`RULE_BUILTIN_READONLY`、`RULE_ID_RESERVED`、`RULE_BLOCKED` 是 409；`RULE_NOT_FOUND`、`WAIVER_TARGET_NOT_FOUND`、`PBS_NODE_UNKNOWN` 是 404；`DSL_PARSE_ERROR` 是 400。
-  - [ ] `rest_openapi.json` 里有这五条路径；`tool_schema_digest_is_pinned` 通过。
+  - [x] `pid_check` 的应答就是 §3.6 的检查结果，三种范围各一例；项目扫描没做完时应答 `scanning`。
+  - [x] 状态码符合 §3.8：`RULE_BUILTIN_READONLY`、`RULE_ID_RESERVED`、`RULE_BLOCKED` 是 409；`RULE_NOT_FOUND`、`WAIVER_TARGET_NOT_FOUND`、`PBS_NODE_UNKNOWN` 是 404；`DSL_PARSE_ERROR` 是 400。
+  - [x] `rest_openapi.json` 里有这五条路径；`tool_schema_digest_is_pinned` 通过。
 - **验证**：`cargo test --offline --locked --lib pid_check`；`cargo test --offline --locked --lib tool_schema_digest_is_pinned`；手工：`--http` 启动后请求 `POST /api/v1/pid/check`
 - **依赖**：DRC-13
 - **文件**：`src/app/control/mod.rs`、`src/rest.rs`、`src/rest_openapi.json`、`src/mcp.rs`
 - **规模**：M
+- **补（2026-11-21）**：在 `pid-stage-c` 分支上接着 `DRC-13` 做，一个提交。五个操作的主体在 `src/app/commands/piddrc.rs`，和命令共用取规则、扫描、查、豁免那几段；控制面、REST、MCP 只接线。与任务写法不同、或任务没有说的：`pid_check` 的 `scope` 不分大小写、默认 `drawing`，`pbs` 只和 `scope: pbs` 一起给，`cross_drawing` 只对 `drawing` 起作用，`include_waived` 默认真、为假时只从 `results` 去掉已豁免的（`summary` 照旧）；先后照 §4.1，前面哪一步不过都不扫描；要读盘时应答 `scanning`（同 `pid_index`），再发同样的请求拿结果；跨图按文件路径在项目的图纸清单里认当前图，打开的是 DXF 或文件不在盘上是 `INDEX_NO_PROJECT_DIR`；结果按范围留在标签页或项目目录上，`EXPORT`、豁免照常用；`pid_check_rules` 照规则包文件的写法列（14 个字段）并给项目包路径；`pid_check_rules_set` 先校验、再写临时文件改名，不改图、不留撤销步，写不了是新码 `RULESET_IO_ERROR`（500，§3.8 加了一行），图没保存过是 `INDEX_NO_PROJECT_DIR`；豁免、取消和命令共用一段，`result` 是图上的豁免条数；三个写操作在只读会话里按对应的子命令词拒绝，并进 `background_mutation`；`DELETE /pid/check/waivers` 的参数也可以放查询串；`RULE_BLOCKED` 登记 409 以后，REST 上被保存门禁拦下的保存也从 400 变成 409；MCP 读工具的 `scope` 和文字搜索共用，取值扩成六个、各自的默认写进说明，`pack` 的约束写在参数说明里；能力标记 `pid_check` 在状态的 `capabilities` 里（同 `pid_project_index`）。这些记在规则检查规格 §11.14。「文件」一栏以外改了：`src/app/commands/piddrc.rs`（操作主体）、`src/app/commands/pidindex.rs`（拆出 `op_scan`，摘要按规则包的连接容差做）、`src/pid/drc/builtin_rules.rs`（拆出 `listing`）、`src/mcp_ops.rs`（三个 `OpDef`）、`src/mcp_intent.rs`（一条测试）；`mcp` 两条原有测试跟着改：schema 大小上限 45000 → 50000（加了三个写操作后 47035 字节），读工具和 `ocs_find_text` 的参数比对里 `scope` 单独比。**先红后绿**：先只写 11 条新测试，都编得过，全败在功能还没有上；写实后第一次跑 28 过 2 挂（工具摘要值变了、OpenAPI 缺路径），补上后过；全量又挂那两条原有的 MCP 测试，改后全过；最后把 `pack` 的约束挪进参数说明，摘要值再固定一次。**手工**：调试版 `--http`（令牌只经环境变量）走了 23 步，五条路由都通，401、200、400、404、409 都符合预期，换上的项目包和盘上的文件一致。**读数**：最终的树上主程序库 7503 条，7431 通过、69 默认不跑、3 失败（比对设计稿的三条，与起点相同）；起点 7492 条（7420 / 69 / 3），多的 11 条是新加的，都过；`pid_check`、`mcp`、`rest::` 定向 129 条全过；编译警告 52；clippy 656 / 1051，改动的 8 个 Rust 文件告警数逐个与起点相同，新代码没有告警（clippy 在挪 `pack` 说明之前跑，之后只改了那段字符串和摘要值）；格式检查 8 个改动的 Rust 文件新增 0；架构检查上行依赖 33 对、183 个文件；SPPID 脚本测试 185 条全过；都与起点相同。**新基线**：主程序库 7503 条（7431 / 69 / 3）。
 
 > **检查点 CP-C3**（DRC-11 – DRC-14 之后）：命令行和 REST 都能检查、启停规则、豁免；保存门禁三档可用；固定门禁全过。
 

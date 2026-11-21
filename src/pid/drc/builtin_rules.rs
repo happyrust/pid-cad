@@ -583,8 +583,8 @@ fn flag(value: &Value, at: &str) -> Result<bool, DrcError> {
 
 // ── 摘要值 ─────────────────────────────────────────────────────────────────────
 
-/// 摘要值算的内容，见 [`rule_set_digest`]。
-fn describe(rules: &RuleSet) -> Value {
+/// 规则集和规则，照规则包文件的写法（§3.1）：`pid_check_rules` 列的就是这两样，摘要值也算它们。
+pub fn listing(rules: &RuleSet) -> (Vec<Value>, Vec<Value>) {
     let sets: Vec<Value> = rules
         .sets
         .iter()
@@ -612,6 +612,12 @@ fn describe(rules: &RuleSet) -> Value {
             })
         })
         .collect();
+    (sets, list)
+}
+
+/// 摘要值算的内容，见 [`rule_set_digest`]。
+fn describe(rules: &RuleSet) -> Value {
+    let (sets, list) = listing(rules);
     serde_json::json!({
         "connect_tolerance": rules.connect_tolerance,
         "required_fields": rules.required_fields,

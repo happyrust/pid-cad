@@ -35,8 +35,14 @@
 //!
 //! 检查、看规则、导出不改图，只读会话里都能用；四个写的子命令只读会话里不让用，由
 //! `collab::apply` 的 `readonly_refuses_command` 按子命令词拒绝。
+//!
+//! 自动化操作（§5.3）是这些子命令的接口，走同样的逻辑：`pid_check` 按 `scope` 查，应答就是检查
+//! 结果；查项目、查节点、跨图（`cross_drawing`）借 `PIDINDEX` 操作的扫描，要从磁盘读图时先应答
+//! `scanning`，调用方稍后再发一次。`pid_check_rules` 列生效的规则，`pid_check_rules_set` 整个换掉
+//! 项目包，`pid_check_waive`、`pid_check_unwaive` 同 `WAIVE`、`UNWAIVE`。操作不经过命令行，三个写的
+//! 操作自己按对应的子命令词查只读会话。
 
-use super::pidindex::{same_file, Scanned, INDEX_NO_PROJECT_DIR};
+use super::pidindex::{index_refusal, same_file, Scanned, INDEX_NO_PROJECT_DIR};
 use super::*;
 use crate::io::linetypes::writer::write_atomic;
 use crate::pid::drc::builtin_rules::{self, PROJECT_PACK_FILE};
@@ -45,7 +51,7 @@ use crate::pid::drc::{
     Trigger, Waiver,
 };
 use crate::pid::master_data::{self, Resolved, PROJECT_FILE};
-use crate::pid::project_index::DrawingSummary;
+use crate::pid::project_index::{self, DrawingSummary};
 use crate::pid::type_lib::TypeLib;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -62,6 +68,9 @@ pub(in crate::app) const RULE_NOT_FOUND: &str = "RULE_NOT_FOUND";
 /// 要豁免的（规则号, 对象键）不在当前图最近一次检查的结果里，或者要取消的豁免图里没有
 /// （§3.8）。
 pub(in crate::app) const WAIVER_TARGET_NOT_FOUND: &str = "WAIVER_TARGET_NOT_FOUND";
+
+/// 换项目包时写不了文件（`pid_check_rules_set`；`SPEC-pid-drc.md` §11.14 补的码）。
+const RULESET_IO_ERROR: &str = "RULESET_IO_ERROR";
 
 /// 命令行上列出的结果条数（§5.2）。
 const LISTED: usize = 10;
@@ -195,17 +204,27 @@ fn stale_by_drawing(
     found
 }
 
-/// 扫完项目接着查的（`commands::pidindex` 的扫描排着的一件）：查哪些图，用的规则和主数据。
-/// 规则和主数据在命令起头时取（§4.1 的先后），摘要的连接容差照这套规则。
+/// 扫好项目要做的检查（`commands::pidindex` 的扫描排着的一件，或者操作扫好了当场查）：查哪些图，
+/// 用的规则和主数据。规则和主数据在起头时取（§4.1 的先后），摘要的连接容差照这套规则。
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Check {
-    /// `None` 是全项目，否则是这个 PBS 节点及其下级。
-    pbs: Option<String>,
+    range: Range,
     pub(super) rules: RuleSet,
     master: Resolved,
 }
 
-/// `PIDCHECK EXPORT` 写的：§3.6 的检查结果，带上应答外面那层的 `ok`。
+/// 扫项目的检查报哪些图上的结果（§4.2），项目级规则都跑。
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Range {
+    /// 全项目。
+    Project,
+    /// 这个 PBS 节点及其下级。
+    Pbs(String),
+    /// 只报这张图（图号）上的：`pid_check` 的 `cross_drawing`。
+    Drawing(String),
+}
+
+/// `PIDCHECK EXPORT` 写的、`pid_check` 应答的：§3.6 的检查结果，带上应答外面那层的 `ok`。
 #[derive(Serialize)]
 struct Exported<'a> {
     ok: bool,
@@ -271,38 +290,53 @@ impl OpenCADStudio {
         let Some(rules) = self.pidcheck_rule_set(i, "PIDCHECK") else {
             return;
         };
-        let document = &self.tabs[i].scene.document;
-        let path = document.source_path.as_deref().map(Path::new);
-        let report = drc::check_drawing(document, path, &rules, Trigger::OnDemand);
-        let drawing = report.scope.drawing_id.clone().unwrap_or_default();
-        let recorded = [(drawing.clone(), drc::waivers(document))];
-        self.pidcheck_say("PIDCHECK", &report, None);
-        self.tabs[i].pid_check = Some(self.pid_checks.checked(report, vec![drawing], &recorded));
+        let checked = self.pidcheck_this_drawing(i, &rules);
+        self.pidcheck_say("PIDCHECK", &checked.report, None);
+        self.tabs[i].pid_check = Some(checked);
     }
 
-    /// 生效的规则：内置包，第 `i` 个标签页的图所在目录有项目包就叠上（§3.2）。读不出来就连同
-    /// 错误码说出来，得 `None`：不退回去只用内置包（§4.1）。
+    /// 只查第 `i` 个标签页的图，用保存门禁的同一个函数（[`drc::check_drawing`]），项目级规则不跑。
+    /// 不碰命令行，结果由调用的记下。
+    fn pidcheck_this_drawing(&mut self, i: usize, rules: &RuleSet) -> Checked {
+        let document = &self.tabs[i].scene.document;
+        let path = document.source_path.as_deref().map(Path::new);
+        let report = drc::check_drawing(document, path, rules, Trigger::OnDemand);
+        let drawing = report.scope.drawing_id.clone().unwrap_or_default();
+        let recorded = [(drawing.clone(), drc::waivers(document))];
+        self.pid_checks.checked(report, vec![drawing], &recorded)
+    }
+
+    /// 生效的规则（[`Self::pidcheck_load_rules`]）。读不出来就连同错误码说出来，得 `None`。
     fn pidcheck_rule_set(&mut self, i: usize, verb: &str) -> Option<RuleSet> {
-        let dir = crate::io::drawing_dir(&self.tabs[i].scene.document);
-        match builtin_rules::load(dir) {
+        match self.pidcheck_load_rules(i) {
             Ok(rules) => Some(rules),
-            Err(error) => {
-                let pack = match dir {
-                    Some(dir) => format!("项目包 {}", dir.join(PROJECT_PACK_FILE).display()),
-                    None => "内置规则包".to_owned(),
-                };
+            Err((code, why)) => {
                 self.command_line
-                    .push_error_coded(error.code(), &format!("{verb}: {pack} 有错：{error}"));
+                    .push_error_coded(code, &format!("{verb}: {why}"));
                 None
             }
         }
+    }
+
+    /// 生效的规则：内置包，第 `i` 个标签页的图所在目录有项目包就叠上（§3.2）。读不出来时是错误码
+    /// 和「哪个包有错：错在哪」，不退回去只用内置包（§4.1）。
+    fn pidcheck_load_rules(&self, i: usize) -> Result<RuleSet, (&'static str, String)> {
+        let dir = crate::io::drawing_dir(&self.tabs[i].scene.document);
+        builtin_rules::load(dir).map_err(|error| {
+            let pack = match dir {
+                Some(dir) => format!("项目包 {}", dir.join(PROJECT_PACK_FILE).display()),
+                None => "内置规则包".to_owned(),
+            };
+            (error.code(), format!("{pack} 有错：{error}"))
+        })
     }
 
     /// `PIDCHECK PROJECT`、`PIDCHECK PBS <节点号>`（§4.2）：取规则和主数据，查节点号在不在，再扫
     /// 第 `i` 个标签页的图所在的项目目录，扫完接着查（[`Self::pidcheck_scanned`]）。要从磁盘读的图
     /// 在后台读，这里先交差。
     fn pidcheck_start(&mut self, i: usize, pbs: Option<String>) -> Task<Message> {
-        let verb = verb_of(pbs.as_deref());
+        let range = pbs.map_or(Range::Project, Range::Pbs);
+        let verb = verb_of(&range);
         let Some(project_dir) =
             crate::io::drawing_dir(&self.tabs[i].scene.document).map(Path::to_path_buf)
         else {
@@ -318,7 +352,7 @@ impl OpenCADStudio {
             return Task::none();
         };
         let master = master_data::resolve(&self.tabs[i].scene.document, Some(&project_dir));
-        if let Some(node) = pbs.as_deref() {
+        if let Range::Pbs(node) = &range {
             if let Err(why) = pbs_known(&master, node) {
                 self.command_line.push_error_coded(
                     PBS_NODE_UNKNOWN,
@@ -327,12 +361,19 @@ impl OpenCADStudio {
                 return Task::none();
             }
         }
-        self.pidindex_check(i, Check { pbs, rules, master })
+        self.pidindex_check(
+            i,
+            Check {
+                range,
+                rules,
+                master,
+            },
+        )
     }
 
     /// 扫完项目接着查（[`check_project`]），说一句汇总、列前 10 条，结果按项目目录记下。
     pub(super) fn pidcheck_scanned(&mut self, project_dir: &Path, scanned: &Scanned, check: Check) {
-        let verb = verb_of(check.pbs.as_deref());
+        let verb = verb_of(&check.range);
         let (report, drawings) = check_project(scanned, check);
         self.pidcheck_say(verb, &report, Some(drawings.len()));
         let checked = self.pid_checks.checked(report, drawings, &scanned.waivers);
@@ -566,20 +607,48 @@ impl OpenCADStudio {
     }
 
     /// `PIDCHECK WAIVE <规则号> <对象键> <理由>`（§3.7）：豁免第 `i` 个标签页的图最近一次检查结果
-    /// 里的一条。规则号要在生效的规则里；（规则号, 对象键）要在查过这张图的最近一份结果里、落在
-    /// 这张图上；理由照 [`Waiver::new`] 查。写进图是一个撤销步，这张图上同一（规则号, 对象键）已有
-    /// 豁免就换成这条。写完就地改留着的结果，不重新检查。
+    /// 里的一条（[`Self::pidcheck_add_waiver`]）。
     fn pidcheck_waive(&mut self, i: usize, rule_id: &str, key: &str, reason: &str) {
         const VERB: &str = "PIDCHECK WAIVE";
         let Some(rules) = self.pidcheck_rule_set(i, VERB) else {
             return;
         };
+        let replaced = match self.pidcheck_add_waiver(i, &rules, rule_id, key, unquoted(reason)) {
+            Ok(replaced) => replaced,
+            Err((code, said)) => {
+                self.command_line
+                    .push_error_coded(code, &format!("{VERB}: {said}"));
+                return;
+            }
+        };
+        let counts = self.pidcheck_counts(i, &self.pidcheck_drawing_id(i));
+        let done = if replaced {
+            format!("{rule_id} 对 {key} 原来就豁免着，理由换成了这次写的")
+        } else {
+            format!("已豁免 {rule_id} 对 {key} 的结果")
+        };
+        self.command_line
+            .push_output(&format!("{VERB}: {done}；{counts}。"));
+    }
+
+    /// 豁免第 `i` 个标签页的图最近一次检查结果里的一条（§3.7），命令和操作共用。规则号要在生效的
+    /// 规则 `rules` 里；（规则号, 对象键）要在查过这张图的最近一份结果里、落在这张图上；理由照
+    /// [`Waiver::new`] 查。写进图是一个撤销步，这张图上同一（规则号, 对象键）已有豁免就换成这条；
+    /// 写完就地改留着的结果，不重新检查。成了得有没有换掉原来的；不成什么也不写，得错误码和命令行
+    /// 上命令词后面说的话。
+    fn pidcheck_add_waiver(
+        &mut self,
+        i: usize,
+        rules: &RuleSet,
+        rule_id: &str,
+        key: &str,
+        reason: &str,
+    ) -> Result<bool, (&'static str, String)> {
         if rules.rule(rule_id).is_none() {
-            self.command_line.push_error_coded(
+            return Err((
                 RULE_NOT_FOUND,
-                &format!("{VERB}: {RULE_NOT_FOUND}: 生效的规则里没有 {rule_id}。"),
-            );
-            return;
+                format!("{RULE_NOT_FOUND}: 生效的规则里没有 {rule_id}。"),
+            ));
         }
         let drawing = self.pidcheck_drawing_id(i);
         let target = match self.pidcheck_covering(i, &drawing) {
@@ -601,21 +670,14 @@ impl OpenCADStudio {
                 }),
         };
         if let Err(why) = target {
-            self.command_line.push_error_coded(
+            return Err((
                 WAIVER_TARGET_NOT_FOUND,
-                &format!("{VERB}: {WAIVER_TARGET_NOT_FOUND}: {why}。"),
-            );
-            return;
+                format!("{WAIVER_TARGET_NOT_FOUND}: {why}。"),
+            ));
         }
         let by = self.waiver_by();
-        let waiver = match Waiver::new(rule_id, key, unquoted(reason), &by, unix_now()) {
-            Ok(waiver) => waiver,
-            Err(error) => {
-                self.command_line
-                    .push_error_coded(error.code(), &format!("{VERB}: {error}"));
-                return;
-            }
-        };
+        let waiver = Waiver::new(rule_id, key, reason, &by, unix_now())
+            .map_err(|error| (error.code(), error.to_string()))?;
         let mut replaced = false;
         let mut waivers = Vec::new();
         for old in drc::waivers(&self.tabs[i].scene.document) {
@@ -630,38 +692,44 @@ impl OpenCADStudio {
             waivers.push(waiver);
         }
         self.pidcheck_write_waivers(i, &waivers);
-        let counts = self.pidcheck_counts(i, &drawing);
-        let done = if replaced {
-            format!("{rule_id} 对 {key} 原来就豁免着，理由换成了这次写的")
-        } else {
-            format!("已豁免 {rule_id} 对 {key} 的结果")
-        };
-        self.command_line
-            .push_output(&format!("{VERB}: {done}；{counts}。"));
+        Ok(replaced)
     }
 
-    /// `PIDCHECK UNWAIVE <规则号> <对象键>`（§3.7）：去掉第 `i` 个标签页的图上这条豁免，一个撤销步。
-    /// 对不上结果的老豁免、规则包里已经没有的规则的豁免也去得掉，所以不查规则号、不要检查结果；
-    /// 图里没有这条是 `WAIVER_TARGET_NOT_FOUND`。写完就地改留着的结果。
+    /// `PIDCHECK UNWAIVE <规则号> <对象键>`（§3.7）：去掉第 `i` 个标签页的图上这条豁免
+    /// （[`Self::pidcheck_remove_waiver`]）。
     fn pidcheck_unwaive(&mut self, i: usize, rule_id: &str, key: &str) {
         const VERB: &str = "PIDCHECK UNWAIVE";
-        let mut waivers = drc::waivers(&self.tabs[i].scene.document);
-        let before = waivers.len();
-        waivers.retain(|waiver| waiver.rule_id != rule_id || waiver.object_key != key);
-        if waivers.len() == before {
-            self.command_line.push_error_coded(
-                WAIVER_TARGET_NOT_FOUND,
-                &format!(
-                    "{VERB}: {WAIVER_TARGET_NOT_FOUND}: 当前图上没有 {rule_id} 对 {key} 的豁免。"
-                ),
-            );
+        if let Err((code, said)) = self.pidcheck_remove_waiver(i, rule_id, key) {
+            self.command_line
+                .push_error_coded(code, &format!("{VERB}: {said}"));
             return;
         }
-        self.pidcheck_write_waivers(i, &waivers);
         let counts = self.pidcheck_counts(i, &self.pidcheck_drawing_id(i));
         self.command_line.push_output(&format!(
             "{VERB}: 已取消 {rule_id} 对 {key} 的豁免；{counts}。"
         ));
+    }
+
+    /// 去掉第 `i` 个标签页的图上的一条豁免（§3.7），命令和操作共用：一个撤销步，写完就地改留着的
+    /// 结果。对不上结果的老豁免、规则包里已经没有的规则的豁免也去得掉，所以不查规则号、不要检查
+    /// 结果；图里没有这条是 `WAIVER_TARGET_NOT_FOUND`，连同命令行上命令词后面说的话。
+    fn pidcheck_remove_waiver(
+        &mut self,
+        i: usize,
+        rule_id: &str,
+        key: &str,
+    ) -> Result<(), (&'static str, String)> {
+        let mut waivers = drc::waivers(&self.tabs[i].scene.document);
+        let before = waivers.len();
+        waivers.retain(|waiver| waiver.rule_id != rule_id || waiver.object_key != key);
+        if waivers.len() == before {
+            return Err((
+                WAIVER_TARGET_NOT_FOUND,
+                format!("{WAIVER_TARGET_NOT_FOUND}: 当前图上没有 {rule_id} 对 {key} 的豁免。"),
+            ));
+        }
+        self.pidcheck_write_waivers(i, &waivers);
+        Ok(())
     }
 
     /// 把第 `i` 个标签页的图上的豁免整个换成 `waivers`：先记撤销快照（§3.7），写完就地改留着的结果。
@@ -758,31 +826,278 @@ impl OpenCADStudio {
     }
 }
 
+/// 自动化操作（§5.3）：应答和失败的写法同别的控制面操作，不碰命令行。
+impl OpenCADStudio {
+    /// 控制面的 `pid_check`：照 `scope` 查，应答是检查结果（§3.6）带 `ok`；`include_waived` 为假时
+    /// `results` 里不列已豁免的，计数照旧。只查当前图同 `PIDCHECK`，查项目、查节点同
+    /// `PIDCHECK PROJECT`、`PIDCHECK PBS`；查当前图带 `cross_drawing` 时扫项目，项目级规则也跑，
+    /// 只报这张图上的。要扫项目时，要读的图缓存里没有就应答 `scanning` 并交出后台读的任务
+    /// （[`Self::op_scan`]），调用方稍后再发。结果和命令的一样留着：查当前图的（跨图也算）在
+    /// 标签页上，查项目、查节点的按项目目录。
+    pub(in crate::app) fn control_pid_check(&mut self, req: &Value) -> (Value, Task<Message>) {
+        match self.op_check(req) {
+            Ok(answer) => (answer, Task::none()),
+            Err(answered) => answered,
+        }
+    }
+
+    fn op_check(&mut self, req: &Value) -> Result<Value, (Value, Task<Message>)> {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            let refusal = refuse("no_document", "Create or open a drawing first");
+            return Err(no_task(refusal));
+        }
+        let (asked, include_waived) = check_request(req).map_err(no_task)?;
+        let range = match asked {
+            Asked::Drawing => {
+                let rules = self
+                    .pidcheck_load_rules(i)
+                    .map_err(|(code, why)| no_task(refuse(code, why)))?;
+                let checked = self.pidcheck_this_drawing(i, &rules);
+                let answer = answer_of(&checked.report, include_waived);
+                self.tabs[i].pid_check = Some(checked);
+                return Ok(answer);
+            }
+            Asked::CrossDrawing => None,
+            Asked::Pbs(node) => Some(Range::Pbs(node)),
+            Asked::Project => Some(Range::Project),
+        };
+        let Some(project_dir) =
+            crate::io::drawing_dir(&self.tabs[i].scene.document).map(Path::to_path_buf)
+        else {
+            let refusal = refuse(
+                INDEX_NO_PROJECT_DIR,
+                "当前图没保存过，不属于哪个项目；存盘后再查",
+            );
+            return Err(no_task(refusal));
+        };
+        let range = match range {
+            Some(range) => range,
+            None => Range::Drawing(self.pidcheck_listed_id(i, &project_dir).map_err(no_task)?),
+        };
+        let rules = self
+            .pidcheck_load_rules(i)
+            .map_err(|(code, why)| no_task(refuse(code, why)))?;
+        let master = master_data::resolve(&self.tabs[i].scene.document, Some(&project_dir));
+        if let Range::Pbs(node) = &range {
+            pbs_known(&master, node).map_err(|why| no_task(refuse(PBS_NODE_UNKNOWN, why)))?;
+        }
+        let (_, scanned) = self.op_scan(i, rules.connect_tolerance, true)?;
+        let on_tab = matches!(range, Range::Drawing(_));
+        let (report, drawings) = check_project(
+            &scanned,
+            Check {
+                range,
+                rules,
+                master,
+            },
+        );
+        let answer = answer_of(&report, include_waived);
+        let checked = self.pid_checks.checked(report, drawings, &scanned.waivers);
+        if on_tab {
+            self.tabs[i].pid_check = Some(checked);
+        } else {
+            self.pid_checks
+                .projects
+                .insert(same_file(&project_dir), checked);
+        }
+        Ok(answer)
+    }
+
+    /// 第 `i` 个标签页的图在项目目录 `project_dir` 的图纸里的图号（跨图检查要它）。按文件认：
+    /// 不在里面——项目只认这个目录里的 `.dwg`——是 `INDEX_NO_PROJECT_DIR`，同名的别的文件顶替不了。
+    fn pidcheck_listed_id(&self, i: usize, project_dir: &Path) -> Result<String, Value> {
+        let drawings =
+            project_index::list_drawings(project_dir).map_err(|error| index_refusal(&error))?;
+        let current = self.tabs[i]
+            .scene
+            .document
+            .source_path
+            .as_deref()
+            .map(|path| same_file(Path::new(path)));
+        drawings
+            .into_iter()
+            .find(|drawing| current.as_ref() == Some(&same_file(&drawing.path)))
+            .map(|drawing| drawing.drawing_id)
+            .ok_or_else(|| {
+                refuse(
+                    INDEX_NO_PROJECT_DIR,
+                    "当前图不在项目的图纸里（项目只认目录里的 .dwg），查不了跨图；不带 cross_drawing 只查这张图",
+                )
+            })
+    }
+
+    /// 控制面的 `pid_check_rules`：生效的规则——版本、摘要值、叠上的项目包（没有是 `null`）、保存
+    /// 门禁、规则集和规则（照规则包文件的写法，[`builtin_rules::listing`]）。项目包有错时应答它的
+    /// 错误码，同 `PIDCHECK RULES`。
+    pub(in crate::app) fn control_pid_check_rules(&self) -> Value {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return refuse("no_document", "Create or open a drawing first");
+        }
+        let rules = match self.pidcheck_load_rules(i) {
+            Ok(rules) => rules,
+            Err((code, why)) => return refuse(code, why),
+        };
+        let (sets, list) = builtin_rules::listing(&rules);
+        json!({
+            "ok": true,
+            "rule_set_version": rules.version,
+            "rule_set_digest": builtin_rules::rule_set_digest(&rules),
+            "project_pack": rules.project_pack.as_ref().map(|path| path.display().to_string()),
+            "save_gate": rules.save_gate.name(),
+            "sets": sets,
+            "rules": list,
+        })
+    }
+
+    /// 控制面的 `pid_check_rules_set`：整个换掉当前图所在目录的项目包。`pack` 先照读规则包的规矩
+    /// 校验（[`builtin_rules::validate_project_pack`]），全过才写：写临时文件、改名盖过去，下一次
+    /// 检查起生效，留着的结果不动。结果是换上以后生效规则的版本和摘要值。只读会话里同
+    /// `PIDCHECK ENABLE` 被拒（§5.4）。
+    pub(in crate::app) fn control_pid_check_rules_set(
+        &mut self,
+        req: &Value,
+    ) -> Result<Task<Message>, Value> {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return Err(refuse("no_document", "Create or open a drawing first"));
+        }
+        self.pidcheck_writable("PIDCHECK ENABLE", "pid_check_rules_set")?;
+        let Some(dir) = crate::io::drawing_dir(&self.tabs[i].scene.document).map(Path::to_path_buf)
+        else {
+            return Err(refuse(
+                INDEX_NO_PROJECT_DIR,
+                "当前图没保存过，没有放项目包的目录；存盘后再换",
+            ));
+        };
+        let pack = &req["pack"];
+        if pack.is_null() {
+            return Err(refuse(
+                "invalid_request",
+                "pid_check_rules_set 要给 pack：整个项目包",
+            ));
+        }
+        builtin_rules::validate_project_pack(pack)
+            .map_err(|error| refuse(error.code(), format!("项目包没有写：{error}")))?;
+        let path = dir.join(PROJECT_PACK_FILE);
+        write_atomic(&path, &format!("{pack:#}\n")).map_err(|error| {
+            refuse(
+                RULESET_IO_ERROR,
+                format!("写不了 {}：{error}", path.display()),
+            )
+        })?;
+        let rules = builtin_rules::load(Some(&dir))
+            .map_err(|error| refuse(error.code(), error.to_string()))?;
+        self.set_control_result(json!({
+            "rule_set_version": rules.version,
+            "rule_set_digest": builtin_rules::rule_set_digest(&rules),
+        }));
+        Ok(Task::none())
+    }
+
+    /// 控制面的 `pid_check_waive`：同 `PIDCHECK WAIVE`（[`Self::pidcheck_add_waiver`]），规则号不分
+    /// 大小写，理由原样交给 [`Waiver::new`] 查。结果是图上现在有几条豁免。只读会话里同命令被拒
+    /// （§5.4）。
+    pub(in crate::app) fn control_pid_check_waive(
+        &mut self,
+        req: &Value,
+    ) -> Result<Task<Message>, Value> {
+        const OP: &str = "pid_check_waive";
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return Err(refuse("no_document", "Create or open a drawing first"));
+        }
+        self.pidcheck_writable("PIDCHECK WAIVE", OP)?;
+        let rule_id = required_text(req, "rule_id", OP)?.to_ascii_uppercase();
+        let key = required_text(req, "object_key", OP)?;
+        let Some(reason) = req["reason"].as_str() else {
+            return Err(refuse(
+                "invalid_request",
+                format!("{OP} 要给 reason：豁免的理由"),
+            ));
+        };
+        let rules = self
+            .pidcheck_load_rules(i)
+            .map_err(|(code, why)| refuse(code, why))?;
+        self.pidcheck_add_waiver(i, &rules, &rule_id, &key, reason)
+            .map_err(|(code, said)| refuse(code, said))?;
+        self.pidcheck_waivers_now(i);
+        Ok(Task::none())
+    }
+
+    /// 控制面的 `pid_check_unwaive`：同 `PIDCHECK UNWAIVE`（[`Self::pidcheck_remove_waiver`]），规则号
+    /// 不分大小写。结果是图上现在有几条豁免。只读会话里同命令被拒（§5.4）。
+    pub(in crate::app) fn control_pid_check_unwaive(
+        &mut self,
+        req: &Value,
+    ) -> Result<Task<Message>, Value> {
+        const OP: &str = "pid_check_unwaive";
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return Err(refuse("no_document", "Create or open a drawing first"));
+        }
+        self.pidcheck_writable("PIDCHECK UNWAIVE", OP)?;
+        let rule_id = required_text(req, "rule_id", OP)?.to_ascii_uppercase();
+        let key = required_text(req, "object_key", OP)?;
+        self.pidcheck_remove_waiver(i, &rule_id, &key)
+            .map_err(|(code, said)| refuse(code, said))?;
+        self.pidcheck_waivers_now(i);
+        Ok(Task::none())
+    }
+
+    /// 豁免改完以后操作的结果：第 `i` 个标签页的图上现在有几条豁免。
+    fn pidcheck_waivers_now(&mut self, i: usize) {
+        let waivers = drc::waivers(&self.tabs[i].scene.document).len();
+        self.set_control_result(json!({ "waivers": waivers }));
+    }
+
+    /// 只读会话里拒绝写的操作 `op`（§5.4），同命令 `command` 被拒：码和级别同别的被拒的写，
+    /// 也报给服务器。
+    fn pidcheck_writable(&mut self, command: &str, op: &str) -> Result<(), Value> {
+        if !self.readonly_refuses_command(command) {
+            return Ok(());
+        }
+        let (code, level) = self.collab.refusal();
+        self.collab.report_attempt("", op);
+        let mut refusal = refuse(&code, "协同：当前会话只读，拒绝改规则包和豁免");
+        refusal["level"] = json!(level);
+        Err(refusal)
+    }
+}
+
 /// 在扫好的项目上查（§4.1、§4.2），得到结果和查了的图（图号）。查全项目时范围是读得出来的
-/// 全部图；查节点时是项目文件里归在这个节点及其下级的图，其余的作对端（`others`）。项目级
-/// 规则都跑。不碰命令行和程序状态。
+/// 全部图；查节点时是项目文件里归在这个节点及其下级的图；跨图查一张图时是这张图。范围外的
+/// 作对端（`others`），项目级规则都跑。不碰命令行和程序状态。
 fn check_project(scanned: &Scanned, check: Check) -> (CheckReport, Vec<String>) {
-    let Check { pbs, rules, master } = check;
-    let nodes: Option<HashSet<&str>> = pbs.as_deref().map(|node| match &master {
-        Resolved::Configured { data, .. } => data.pbs_subtree(node).into_iter().collect(),
-        Resolved::Unreadable { .. } | Resolved::NotConfigured => HashSet::new(),
-    });
+    let Check {
+        range,
+        rules,
+        master,
+    } = check;
+    let nodes: HashSet<&str> = match (&range, &master) {
+        (Range::Pbs(node), Resolved::Configured { data, .. }) => {
+            data.pbs_subtree(node).into_iter().collect()
+        }
+        _ => HashSet::new(),
+    };
     let (drawings, others): (Vec<DrawingSummary>, Vec<DrawingSummary>) = scanned
         .summaries
         .iter()
         .cloned()
-        .partition(|summary| match &nodes {
-            None => true,
-            Some(nodes) => summary
+        .partition(|summary| match &range {
+            Range::Project => true,
+            Range::Pbs(_) => summary
                 .pbs
                 .as_deref()
                 .is_some_and(|pbs| nodes.contains(pbs)),
+            Range::Drawing(id) => summary.drawing_id == *id,
         });
     let types = TypeLib::embedded();
-    let kind = if pbs.is_some() {
-        ScopeKind::Pbs
-    } else {
-        ScopeKind::Project
+    let (kind, drawing_id, pbs) = match range {
+        Range::Project => (ScopeKind::Project, None, None),
+        Range::Pbs(node) => (ScopeKind::Pbs, None, Some(node)),
+        Range::Drawing(id) => (ScopeKind::Drawing, Some(id), None),
     };
     let report = drc::check(&CheckInput {
         rules: &rules,
@@ -795,7 +1110,7 @@ fn check_project(scanned: &Scanned, check: Check) -> (CheckReport, Vec<String>) 
         trigger: Trigger::OnDemand,
         scope: Scope {
             kind,
-            drawing_id: None,
+            drawing_id,
             pbs,
             cross_drawing: true,
         },
@@ -807,12 +1122,12 @@ fn check_project(scanned: &Scanned, check: Check) -> (CheckReport, Vec<String>) 
     (report, checked)
 }
 
-/// 查项目、查节点时说话打头的命令。
-fn verb_of(pbs: Option<&str>) -> &'static str {
-    if pbs.is_some() {
-        "PIDCHECK PBS"
-    } else {
-        "PIDCHECK PROJECT"
+/// 扫完项目接着查时说话打头的命令。
+fn verb_of(range: &Range) -> &'static str {
+    match range {
+        Range::Project => "PIDCHECK PROJECT",
+        Range::Pbs(_) => "PIDCHECK PBS",
+        Range::Drawing(_) => "PIDCHECK",
     }
 }
 
@@ -828,6 +1143,105 @@ fn pbs_known(master: &Resolved, node: &str) -> Result<(), String> {
         }
         Resolved::NotConfigured => Err(format!("没有配置主数据，认不出节点 {node}")),
     }
+}
+
+/// `pid_check` 要查的（§5.3 的 `scope`、`pbs`、`cross_drawing`）。
+enum Asked {
+    /// 只查当前图，项目级规则不跑。
+    Drawing,
+    /// 查当前图，扫项目、项目级规则也跑，只报这张图上的。
+    CrossDrawing,
+    /// 查这个 PBS 节点及其下级。
+    Pbs(String),
+    /// 查全项目。
+    Project,
+}
+
+/// 读 `pid_check` 的请求：要查的，和列不列已豁免的结果（`include_waived`，默认列）。`scope` 不分
+/// 大小写，默认 `drawing`；`pbs` 只和 `scope: pbs` 一起给，这时必给；`cross_drawing` 只对查当前图
+/// 有用。写得不对是 `invalid_request`。
+fn check_request(req: &Value) -> Result<(Asked, bool), Value> {
+    let scope = match &req["scope"] {
+        Value::Null => "drawing".to_owned(),
+        Value::String(scope) => scope.trim().to_ascii_lowercase(),
+        _ => {
+            return Err(refuse(
+                "invalid_request",
+                "scope 写 drawing、pbs 或 project",
+            ))
+        }
+    };
+    let pbs = match &req["pbs"] {
+        Value::Null => None,
+        Value::String(node) if !node.trim().is_empty() => Some(node.trim().to_owned()),
+        _ => return Err(refuse("invalid_request", "pbs 写不空的 PBS 节点号")),
+    };
+    let cross_drawing = flag(req, "cross_drawing", false)?;
+    let include_waived = flag(req, "include_waived", true)?;
+    let asked = match (scope.as_str(), pbs) {
+        ("pbs", Some(node)) => Asked::Pbs(node),
+        ("pbs", None) => {
+            return Err(refuse(
+                "invalid_request",
+                "scope 是 pbs 时要给 pbs（PBS 节点号）",
+            ))
+        }
+        ("drawing" | "project", Some(_)) => {
+            return Err(refuse("invalid_request", "pbs 只和 scope: pbs 一起给"))
+        }
+        ("drawing", None) if cross_drawing => Asked::CrossDrawing,
+        ("drawing", None) => Asked::Drawing,
+        ("project", None) => Asked::Project,
+        (other, _) => {
+            return Err(refuse(
+                "invalid_request",
+                format!("scope 写 drawing、pbs 或 project，不认识 {other}"),
+            ))
+        }
+    };
+    Ok((asked, include_waived))
+}
+
+/// 请求里可以不给的一项真假：没给、给的是 `null` 时是 `default`；不是真假报 `invalid_request`。
+fn flag(req: &Value, key: &str, default: bool) -> Result<bool, Value> {
+    match &req[key] {
+        Value::Null => Ok(default),
+        Value::Bool(value) => Ok(*value),
+        _ => Err(refuse("invalid_request", format!("{key} 写 true 或 false"))),
+    }
+}
+
+/// 请求里必给的一项文本，去掉两头的空白：没给、不是文本或者是空的报 `invalid_request`。
+fn required_text(req: &Value, key: &str, op: &str) -> Result<String, Value> {
+    match &req[key] {
+        Value::String(text) if !text.trim().is_empty() => Ok(text.trim().to_owned()),
+        _ => Err(refuse(
+            "invalid_request",
+            format!("{op} 要给 {key}：不空的文本"),
+        )),
+    }
+}
+
+/// `pid_check` 的应答：§3.6 的检查结果带 `ok`；`include_waived` 为假时 `results` 里不列已豁免的，
+/// 计数照旧。
+fn answer_of(report: &CheckReport, include_waived: bool) -> Value {
+    let mut answer = json!(Exported { ok: true, report });
+    if !include_waived {
+        if let Some(results) = answer["results"].as_array_mut() {
+            results.retain(|result| result["waived"] != true);
+        }
+    }
+    answer
+}
+
+/// 控制面的失败应答。
+fn refuse(code: &str, error: impl Into<String>) -> Value {
+    json!({ "ok": false, "status": "failed", "code": code, "error": error.into() })
+}
+
+/// 不带后台任务的应答。
+fn no_task(answer: Value) -> (Value, Task<Message>) {
+    (answer, Task::none())
 }
 
 /// 列在命令行上的一条结果：严重度、规则号、（查项目时）图号、消息，括号里是对象键——豁免
@@ -2025,6 +2439,637 @@ mod tests {
                 "{line}: {}",
                 ran.said
             );
+        }
+    }
+
+    /// 发一条 `pid_check`；应答 `scanning` 就用同样的请求再发（§5.3），直到有结果。
+    fn checked(app: &mut OpenCADStudio, req: &Value) -> Value {
+        for _ in 0..5 {
+            let answer = request(app, req.clone());
+            if answer["status"] != "scanning" {
+                return answer;
+            }
+        }
+        panic!("一直应答 scanning：{req}");
+    }
+
+    /// 应答里的 `results`。
+    fn results_of(answer: &Value) -> Vec<&Value> {
+        answer["results"].as_array().into_iter().flatten().collect()
+    }
+
+    /// 应答里规则 `rule_id` 的结果落在哪些图上，图号排好序。
+    fn drawings_hit(answer: &Value, rule_id: &str) -> Vec<String> {
+        let mut drawings: Vec<String> = results_of(answer)
+            .into_iter()
+            .filter(|result| result["rule_id"] == rule_id)
+            .filter_map(|result| result["object"]["drawing_id"].as_str())
+            .map(str::to_owned)
+            .collect();
+        drawings.sort_unstable();
+        drawings
+    }
+
+    /// 读得进来的项目包：停用 `DR-014`，加一条项目自己的规则 `DR-201`，保存门禁 `block`。
+    fn project_pack() -> Value {
+        json!({
+            "version": 1,
+            "pack": "项目规则",
+            "rule_set_version": "P2",
+            "save_gate": "block",
+            "rules": [
+                { "id": "DR-014", "enabled": false },
+                {
+                    "id": "DR-201", "name": "项目自己的规则", "set": "基础规则",
+                    "category": "设计类", "target": "管线", "severity": "提示",
+                    "expr": "管道等级 = NULL", "scope": "项目", "source": "新建"
+                }
+            ]
+        })
+    }
+
+    /// 三个校验不过的项目包和它们的错误码（§3.8）：改内置规则的严重度、新规则用内置号段、
+    /// 表达式解析不过。
+    fn broken_packs() -> [(Value, &'static str); 3] {
+        let mut readonly = project_pack();
+        readonly["rules"][0]["severity"] = json!("提示");
+        let mut reserved = project_pack();
+        reserved["rules"][1]["id"] = json!("DR-199");
+        let mut unparsed = project_pack();
+        unparsed["rules"][1]["expr"] = json!("管道等级 =");
+        [
+            (readonly, "RULE_BUILTIN_READONLY"),
+            (reserved, "RULE_ID_RESERVED"),
+            (unparsed, drc::DSL_PARSE_ERROR),
+        ]
+    }
+
+    /// `pid_check`（§5.3）的应答就是检查结果（§3.6）带上 `ok`，三种范围各一例。不写 `scope` 查
+    /// 当前图，和保存门禁用的函数查的一样，结果记在标签页上；`project` 要从磁盘读另一张图，先应答
+    /// `scanning`（读了几个、共几个），同样的请求再发才是结果，有跨图重号，按项目目录记下；`pbs`
+    /// 只报节点下那张图上的。是查询：不带 `request_id` 也能发，不留撤销步。能力清单里有 `pid_check`。
+    #[test]
+    fn pid_check_op_answers_the_check_result_for_each_scope() {
+        let scratch = Scratch::new();
+        let mut app = project(&scratch);
+        write_project_file(&scratch);
+        let steps = undo_steps(&app);
+        let state = app.automation_op(r#"{"protocol":1,"op":"state"}"#);
+        assert!(
+            state["capabilities"]
+                .as_array()
+                .is_some_and(|names| names.contains(&json!("pid_check"))),
+            "{state}"
+        );
+
+        let answer = app.automation_op(r#"{"protocol":1,"op":"pid_check"}"#);
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["version"], drc::REPORT_VERSION, "{answer}");
+        assert_eq!(answer["trigger"], "按需", "{answer}");
+        assert_eq!(
+            answer["scope"],
+            json!({"kind": "drawing", "drawing_id": "PID-1101", "pbs": null, "cross_drawing": false}),
+            "{answer}"
+        );
+        let rules = builtin_rules::load(Some(&scratch.0)).expect("规则");
+        let path = scratch.path("PID-1101.dwg");
+        let direct = drc::check_drawing(
+            app.active_document_for_test(),
+            Some(&path),
+            &rules,
+            Trigger::OnDemand,
+        );
+        assert_eq!(answer["rule_set_digest"], direct.rule_set_digest.as_str());
+        assert_eq!(answer["summary"], json!(direct.summary), "{answer}");
+        assert_eq!(answer["results"], json!(direct.results), "{answer}");
+        assert!(drawings_hit(&answer, "DR-102").is_empty(), "{answer}");
+        assert_eq!(kept(&app).report.summary, direct.summary);
+        assert_eq!(kept(&app).drawings, ["PID-1101"]);
+
+        let ask = json!({"op": "pid_check", "scope": "project"});
+        let answer = request(&mut app, ask.clone());
+        assert_eq!(
+            answer,
+            json!({"ok": true, "status": "scanning", "done": 0, "total": 1})
+        );
+        let answer = request(&mut app, ask);
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(
+            answer["scope"],
+            json!({"kind": "project", "drawing_id": null, "pbs": null, "cross_drawing": true}),
+            "{answer}"
+        );
+        assert_eq!(drawings_hit(&answer, "DR-102"), ["PID-1101", "PID-1102"]);
+        assert_eq!(answer["summary"], json!(scratch.report(&app).summary));
+
+        let answer = request(
+            &mut app,
+            json!({"op": "pid_check", "scope": "pbs", "pbs": "U-100"}),
+        );
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(
+            answer["scope"],
+            json!({"kind": "pbs", "drawing_id": null, "pbs": "U-100", "cross_drawing": true}),
+            "{answer}"
+        );
+        assert_eq!(drawings_hit(&answer, "DR-102"), ["PID-1101"]);
+        assert!(
+            results_of(&answer)
+                .iter()
+                .all(|result| result["object"]["drawing_id"] == "PID-1101"),
+            "{answer}"
+        );
+        assert_eq!(scratch.report(&app).scope.pbs.as_deref(), Some("U-100"));
+        assert_eq!(undo_steps(&app), steps);
+    }
+
+    /// 编辑器里不等后台：扫着的时候再发 `pid_check` 还是 `scanning`，也不再起一次扫描；读完再发
+    /// 才是结果（§5.3）。
+    #[test]
+    fn pid_check_op_answers_scanning_until_the_project_is_read() {
+        let scratch = Scratch::new();
+        let mut app = project(&scratch);
+        let ask = json!({"protocol": 1, "op": "pid_check", "scope": "project"});
+        let (answer, task) = app.control_request(ask.clone());
+        assert_eq!(
+            answer,
+            json!({"ok": true, "status": "scanning", "done": 0, "total": 1})
+        );
+        let (again, none) = app.control_request(ask.clone());
+        assert_eq!(again, answer);
+        assert!(
+            iced_runtime::task::into_stream(none).is_none(),
+            "正在扫又起了一次"
+        );
+        app.drive_headless_task(task).expect("后台读");
+        let (answer, _) = app.control_request(ask);
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(drawings_hit(&answer, "DR-102"), ["PID-1101", "PID-1102"]);
+    }
+
+    /// `scope: drawing` 带 `cross_drawing: true`（§4.2）：扫项目、项目级规则也跑，只报当前图上的
+    /// 对象；结果记在标签页上，可以照常豁免。当前图不在项目的图纸里（项目只认目录里的 `.dwg`）
+    /// 时查不了跨图，同名的 `.dwg` 也不能顶替它：`INDEX_NO_PROJECT_DIR`。
+    #[test]
+    fn pid_check_op_cross_drawing_runs_the_project_rules_for_this_drawing_only() {
+        let scratch = Scratch::new();
+        let mut app = project(&scratch);
+        let ask = json!({"op": "pid_check", "cross_drawing": true});
+        let answer = request(&mut app, ask.clone());
+        assert_eq!(answer["status"], "scanning", "{answer}");
+        let answer = checked(&mut app, &ask);
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(
+            answer["scope"],
+            json!({"kind": "drawing", "drawing_id": "PID-1101", "pbs": null, "cross_drawing": true}),
+            "{answer}"
+        );
+        assert_eq!(drawings_hit(&answer, "DR-102"), ["PID-1101"]);
+        assert!(
+            results_of(&answer)
+                .iter()
+                .all(|result| result["object"]["drawing_id"] == "PID-1101"),
+            "{answer}"
+        );
+        assert!(kept(&app).report.scope.cross_drawing);
+        assert_eq!(kept(&app).drawings, ["PID-1101"]);
+        assert!(
+            app.pid_checks.projects.is_empty(),
+            "查当前图的不按项目目录记"
+        );
+
+        let key = key_of(&kept(&app).report, "DR-102", "PID-1101");
+        let wrote = request(
+            &mut app,
+            json!({"op": "pid_check_waive", "rule_id": "DR-102", "object_key": key, "reason": "同一台泵画在两张图上"}),
+        );
+        assert_eq!(wrote["result"], json!({"waivers": 1}), "{wrote}");
+
+        let i = app.active_tab;
+        let dxf = scratch.path("PID-1101.dxf");
+        app.tabs[i].scene.document.source_path = Some(dxf.to_string_lossy().into_owned());
+        let answer = request(&mut app, ask);
+        assert_eq!(answer["code"], INDEX_NO_PROJECT_DIR, "{answer}");
+    }
+
+    /// `include_waived: false` 只是不列已豁免的结果（§5.3），计数照旧；默认列出来，带 `waived`
+    /// 和豁免的理由。
+    #[test]
+    fn pid_check_op_can_leave_out_the_waived_results() {
+        let scratch = Scratch::new();
+        let mut app = project(&scratch);
+        let answer = request(&mut app, json!({"op": "pid_check"}));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let key = key_of(&kept(&app).report, "DR-014", "PID-1101");
+        let wrote = request(
+            &mut app,
+            json!({"op": "pid_check_waive", "rule_id": "DR-014", "object_key": key, "reason": "放空管"}),
+        );
+        assert_eq!(wrote["result"], json!({"waivers": 1}), "{wrote}");
+
+        let all = request(&mut app, json!({"op": "pid_check"}));
+        let listed = results_of(&all);
+        let waived: Vec<&Value> = listed
+            .iter()
+            .copied()
+            .filter(|result| result["waived"] == true)
+            .collect();
+        assert!(!waived.is_empty(), "{all}");
+        assert!(
+            waived.iter().all(|result| result["rule_id"] == "DR-014"
+                && result["object_key"] == key.as_str()
+                && result["waiver"]["reason"] == "放空管"),
+            "{all}"
+        );
+
+        let open = request(
+            &mut app,
+            json!({"op": "pid_check", "include_waived": false}),
+        );
+        assert_eq!(open["ok"], true, "{open}");
+        assert_eq!(open["summary"], all["summary"]);
+        assert_eq!(open["summary"]["已豁免"], waived.len(), "{open}");
+        let left = results_of(&open);
+        assert!(
+            left.iter().all(|result| result["waived"] == false),
+            "{open}"
+        );
+        assert_eq!(left.len() + waived.len(), listed.len());
+    }
+
+    /// `pid_check` 查不了时说为什么，连同错误码：参数不对是 `invalid_request`；图没保存过，查项目、
+    /// 查节点、跨图都是 `INDEX_NO_PROJECT_DIR`（只查当前图照样行）；没配置主数据、节点号不在 PBS 表里
+    /// 是 `PBS_NODE_UNKNOWN`；项目包有错时是那条错误的码（§3.8），哪个范围都不查。
+    #[test]
+    fn pid_check_op_says_why_it_cannot_check() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        for (ask, code) in [
+            (json!({"scope": "sheet"}), "invalid_request"),
+            (json!({"scope": 1}), "invalid_request"),
+            (json!({"scope": "pbs"}), "invalid_request"),
+            (json!({"scope": "pbs", "pbs": " "}), "invalid_request"),
+            (
+                json!({"scope": "project", "pbs": "U-100"}),
+                "invalid_request",
+            ),
+            (json!({"cross_drawing": "yes"}), "invalid_request"),
+            (json!({"include_waived": 0}), "invalid_request"),
+            (json!({"scope": "project"}), INDEX_NO_PROJECT_DIR),
+            (
+                json!({"scope": "PBS", "pbs": "U-100"}),
+                INDEX_NO_PROJECT_DIR,
+            ),
+            (json!({"cross_drawing": true}), INDEX_NO_PROJECT_DIR),
+        ] {
+            let mut req = ask.clone();
+            req["op"] = json!("pid_check");
+            let answer = request(&mut app, req);
+            assert_eq!(answer["ok"], false, "{ask}: {answer}");
+            assert_eq!(answer["code"], code, "{ask}: {answer}");
+        }
+        let answer = request(&mut app, json!({"op": "pid_check"}));
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["scope"]["drawing_id"], "", "{answer}");
+
+        let scratch = Scratch::new();
+        let mut app = project(&scratch);
+        let pbs = json!({"op": "pid_check", "scope": "pbs", "pbs": "U-100"});
+        let answer = request(&mut app, pbs.clone());
+        assert_eq!(answer["code"], PBS_NODE_UNKNOWN, "没配置主数据：{answer}");
+        write_project_file(&scratch);
+        let answer = request(
+            &mut app,
+            json!({"op": "pid_check", "scope": "pbs", "pbs": "U-999"}),
+        );
+        assert_eq!(answer["code"], PBS_NODE_UNKNOWN, "{answer}");
+
+        for (pack, code) in broken_packs() {
+            fs::write(scratch.path(PROJECT_PACK_FILE), pack.to_string()).expect("项目包");
+            for ask in [
+                json!({"op": "pid_check"}),
+                json!({"op": "pid_check", "scope": "project"}),
+                pbs.clone(),
+                json!({"op": "pid_check", "cross_drawing": true}),
+            ] {
+                let answer = request(&mut app, ask.clone());
+                assert_eq!(answer["code"], code, "{ask}: {answer}");
+            }
+        }
+    }
+
+    /// `pid_check_rules`（§5.3）：生效规则的版本、摘要值、项目包的位置、保存门禁、规则集和规则，
+    /// 每条规则照规则包文件的写法（§3.1）。没有项目包时就是内置包；有就叠上，版本是
+    /// `<内置版本>+<项目包版本>`；项目包有错时是它的错误码。只读会话里也能看。
+    #[test]
+    fn pid_check_rules_op_lists_the_rules_in_effect() {
+        let scratch = Scratch::new();
+        let mut app = project(&scratch);
+        let builtin = builtin_rules::builtin();
+        let answer = app.automation_op(r#"{"protocol":1,"op":"pid_check_rules"}"#);
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(
+            answer["rule_set_version"],
+            builtin.version.as_str(),
+            "{answer}"
+        );
+        assert_eq!(
+            answer["rule_set_digest"],
+            builtin_rules::rule_set_digest(&builtin).as_str()
+        );
+        assert_eq!(answer["project_pack"], Value::Null, "{answer}");
+        assert_eq!(answer["save_gate"], builtin.save_gate.name(), "{answer}");
+        assert_eq!(
+            answer["sets"],
+            json!([
+                { "name": "基础规则", "enabled": true },
+                { "name": "工程扩展", "enabled": true }
+            ])
+        );
+        let rules = answer["rules"].as_array().expect("rules");
+        assert_eq!(rules.len(), builtin.rules.len());
+        let first = &rules[0];
+        for (key, value) in [
+            ("id", json!("DR-001")),
+            ("set", json!("基础规则")),
+            ("category", json!("设计类")),
+            ("target", json!("管线")),
+            ("severity", json!("错误")),
+            ("expr", json!("管道等级 = NULL")),
+            ("scope", json!("项目")),
+            ("scope_ref", Value::Null),
+            ("enabled", json!(true)),
+            ("source", json!("内置")),
+            ("params", json!({})),
+        ] {
+            assert_eq!(first[key], value, "{key}: {first}");
+        }
+        assert_eq!(
+            first.as_object().map(serde_json::Map::len),
+            Some(14),
+            "{first}"
+        );
+
+        let pack_path = scratch.path(PROJECT_PACK_FILE);
+        fs::write(&pack_path, project_pack().to_string()).expect("项目包");
+        app.collab.readonly = true;
+        let answer = request(&mut app, json!({"op": "pid_check_rules"}));
+        assert_eq!(answer["ok"], true, "只读会话里也能看：{answer}");
+        let loaded = builtin_rules::load(Some(&scratch.0)).expect("规则");
+        assert_eq!(
+            answer["rule_set_version"],
+            format!("{}+P2", builtin.version),
+            "{answer}"
+        );
+        assert_eq!(
+            answer["rule_set_digest"],
+            builtin_rules::rule_set_digest(&loaded).as_str()
+        );
+        assert_eq!(
+            answer["project_pack"],
+            pack_path.display().to_string(),
+            "{answer}"
+        );
+        assert_eq!(answer["save_gate"], "block", "{answer}");
+        let rules = answer["rules"].as_array().expect("rules");
+        assert_eq!(rules.len(), builtin.rules.len() + 1);
+        let rule = |id: &str| rules.iter().find(|rule| rule["id"] == id).cloned();
+        assert_eq!(
+            rule("DR-014").map(|rule| rule["enabled"].clone()),
+            Some(json!(false))
+        );
+        assert_eq!(
+            rule("DR-201").map(|rule| rule["source"].clone()),
+            Some(json!("新建"))
+        );
+
+        for (pack, code) in broken_packs() {
+            fs::write(&pack_path, pack.to_string()).expect("项目包");
+            let answer = request(&mut app, json!({"op": "pid_check_rules"}));
+            assert_eq!(answer["code"], code, "{answer}");
+        }
+    }
+
+    /// `pid_check_rules_set`（§5.3）整个换掉项目包：先照读规则包的规矩校验，全过才写，应答新的规则
+    /// 版本和摘要值，下一次检查起生效，不改图。校验不过是那条错误的码（§3.8），文件不动；没给
+    /// `pack` 是 `invalid_request`；图没保存过没有放项目包的目录，是 `INDEX_NO_PROJECT_DIR`。
+    #[test]
+    fn pid_check_rules_set_op_replaces_the_pack_only_when_it_is_valid() {
+        let scratch = Scratch::new();
+        let mut app = project(&scratch);
+        let pack_path = scratch.path(PROJECT_PACK_FILE);
+        let steps = undo_steps(&app);
+        let pack = project_pack();
+        let answer = request(&mut app, json!({"op": "pid_check_rules_set", "pack": pack}));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let loaded = builtin_rules::load(Some(&scratch.0)).expect("规则");
+        assert_eq!(
+            loaded.version,
+            format!("{}+P2", builtin_rules::builtin().version)
+        );
+        assert_eq!(
+            answer["result"],
+            json!({
+                "rule_set_version": loaded.version,
+                "rule_set_digest": builtin_rules::rule_set_digest(&loaded),
+            }),
+            "{answer}"
+        );
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(&pack_path).expect("项目包")).expect("JSON");
+        assert_eq!(written, pack);
+        assert_eq!(undo_steps(&app), steps);
+        assert!(!fires(&mut app, "DR-014"), "下一次检查起生效");
+
+        let text = fs::read_to_string(&pack_path).expect("项目包");
+        let mut repeated = project_pack();
+        let copy = repeated["rules"][1].clone();
+        if let Some(rules) = repeated["rules"].as_array_mut() {
+            rules.push(copy);
+        }
+        let [first, second, third] = broken_packs();
+        for (pack, code) in [
+            first,
+            second,
+            third,
+            (repeated, "RULE_ID_DUPLICATED"),
+            (json!("不是对象"), "RULESET_SCHEMA_ERROR"),
+        ] {
+            let answer = request(&mut app, json!({"op": "pid_check_rules_set", "pack": pack}));
+            assert_eq!(answer["code"], code, "{answer}");
+        }
+        let answer = request(&mut app, json!({"op": "pid_check_rules_set"}));
+        assert_eq!(answer["code"], "invalid_request", "{answer}");
+        assert_eq!(fs::read_to_string(&pack_path).expect("项目包"), text);
+
+        let i = app.active_tab;
+        app.tabs[i].scene.document.source_path = None;
+        let answer = request(
+            &mut app,
+            json!({"op": "pid_check_rules_set", "pack": project_pack()}),
+        );
+        assert_eq!(answer["code"], INDEX_NO_PROJECT_DIR, "{answer}");
+    }
+
+    /// `pid_check_waive`、`pid_check_unwaive`（§5.3）与命令一样改图里的豁免（§3.7）：各是一个撤销步，
+    /// 留着的结果就地改，应答是图上现在有几条豁免。规则号小写也认，理由去掉首尾空白；同一条
+    /// 再豁免是换理由。规则号不在生效的规则里是 `RULE_NOT_FOUND`；还没查过、（规则号, 对象键）不在
+    /// 最近一次结果里、要取消的豁免图里没有是 `WAIVER_TARGET_NOT_FOUND`；理由空着、太长各有各的码；
+    /// 缺参数是 `invalid_request`。这些都什么也不写。
+    #[test]
+    fn pid_check_waive_and_unwaive_ops_change_the_waivers_on_the_drawing() {
+        let scratch = Scratch::new();
+        let mut app = project(&scratch);
+        let early = request(
+            &mut app,
+            json!({"op": "pid_check_waive", "rule_id": "DR-014", "object_key": "x", "reason": "r"}),
+        );
+        assert_eq!(early["code"], WAIVER_TARGET_NOT_FOUND, "还没查过：{early}");
+        let answer = request(&mut app, json!({"op": "pid_check"}));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let serial = kept(&app).serial;
+        let key = key_of(&kept(&app).report, "DR-014", "PID-1101");
+        let steps = undo_steps(&app);
+
+        let wrote = request(
+            &mut app,
+            json!({"op": "pid_check_waive", "rule_id": "dr-014", "object_key": key, "reason": " 放空管 "}),
+        );
+        assert_eq!(wrote["ok"], true, "{wrote}");
+        assert_eq!(wrote["result"], json!({"waivers": 1}), "{wrote}");
+        assert_eq!(undo_steps(&app), steps + 1);
+        let now = recorded(&app);
+        assert_eq!(
+            (
+                now[0].rule_id.as_str(),
+                now[0].object_key.as_str(),
+                now[0].reason.as_str()
+            ),
+            ("DR-014", key.as_str(), "放空管")
+        );
+        assert_eq!(kept(&app).serial, serial, "不重新检查");
+        assert!(kept(&app)
+            .report
+            .results
+            .iter()
+            .any(|result| result.rule_id == "DR-014" && result.object_key == key && result.waived));
+
+        let again = request(
+            &mut app,
+            json!({"op": "pid_check_waive", "rule_id": "DR-014", "object_key": key, "reason": "端部通大气"}),
+        );
+        assert_eq!(again["result"], json!({"waivers": 1}), "{again}");
+        assert_eq!(recorded(&app)[0].reason, "端部通大气");
+
+        let steps = undo_steps(&app);
+        for (ask, code) in [
+            (
+                json!({"rule_id": "DR-999", "object_key": key, "reason": "r"}),
+                RULE_NOT_FOUND,
+            ),
+            (
+                json!({"rule_id": "DR-014", "object_key": "没有这个", "reason": "r"}),
+                WAIVER_TARGET_NOT_FOUND,
+            ),
+            (
+                json!({"rule_id": "DR-014", "object_key": key, "reason": "  "}),
+                "WAIVER_REASON_REQUIRED",
+            ),
+            (
+                json!({"rule_id": "DR-014", "object_key": key, "reason": "长".repeat(201)}),
+                "WAIVER_REASON_TOO_LONG",
+            ),
+            (
+                json!({"rule_id": "DR-014", "object_key": key}),
+                "invalid_request",
+            ),
+            (json!({"object_key": key, "reason": "r"}), "invalid_request"),
+            (
+                json!({"rule_id": 14, "object_key": key, "reason": "r"}),
+                "invalid_request",
+            ),
+        ] {
+            let mut req = ask.clone();
+            req["op"] = json!("pid_check_waive");
+            let answer = request(&mut app, req);
+            assert_eq!(answer["code"], code, "{ask}: {answer}");
+        }
+        assert_eq!(undo_steps(&app), steps);
+        assert_eq!(recorded(&app)[0].reason, "端部通大气");
+
+        let removed = request(
+            &mut app,
+            json!({"op": "pid_check_unwaive", "rule_id": "DR-014", "object_key": key}),
+        );
+        assert_eq!(removed["result"], json!({"waivers": 0}), "{removed}");
+        assert!(recorded(&app).is_empty());
+        assert_eq!(undo_steps(&app), steps + 1);
+        assert!(kept(&app)
+            .report
+            .results
+            .iter()
+            .all(|result| !result.waived));
+        for (ask, code) in [
+            (
+                json!({"rule_id": "DR-014", "object_key": key}),
+                WAIVER_TARGET_NOT_FOUND,
+            ),
+            (json!({"rule_id": "DR-014"}), "invalid_request"),
+        ] {
+            let mut req = ask.clone();
+            req["op"] = json!("pid_check_unwaive");
+            let answer = request(&mut app, req);
+            assert_eq!(answer["code"], code, "{ask}: {answer}");
+        }
+        assert_eq!(undo_steps(&app), steps + 1);
+    }
+
+    /// 只读会话里三个写操作都被拒（§5.4）：码同别的被拒的写，也报给服务器；项目包和图里的
+    /// 豁免都不动，不留撤销步。检查和看规则照常。
+    #[test]
+    fn pid_check_writes_are_refused_in_a_readonly_session() {
+        let scratch = Scratch::new();
+        let mut app = project(&scratch);
+        let answer = request(&mut app, json!({"op": "pid_check"}));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let key = key_of(&kept(&app).report, "DR-014", "PID-1101");
+        let wrote = request(
+            &mut app,
+            json!({"op": "pid_check_waive", "rule_id": "DR-014", "object_key": key, "reason": "放空管"}),
+        );
+        assert_eq!(wrote["ok"], true, "{wrote}");
+        app.collab.readonly = true;
+        let steps = undo_steps(&app);
+        for (op, ask) in [
+            ("pid_check_rules_set", json!({"pack": project_pack()})),
+            (
+                "pid_check_waive",
+                json!({"rule_id": "DR-014", "object_key": key, "reason": "换个理由"}),
+            ),
+            (
+                "pid_check_unwaive",
+                json!({"rule_id": "DR-014", "object_key": key}),
+            ),
+        ] {
+            let mut req = ask;
+            req["op"] = json!(op);
+            let refused = request(&mut app, req);
+            assert_eq!(refused["ok"], false, "{op}: {refused}");
+            assert_eq!(refused["code"], "COLLAB_READONLY", "{op}: {refused}");
+            assert_eq!(refused["level"], "state", "{op}: {refused}");
+            assert!(
+                app.collab.attempts.iter().any(|(_, text)| text == op),
+                "{op}: {:?}",
+                app.collab.attempts
+            );
+        }
+        assert_eq!(undo_steps(&app), steps);
+        assert_eq!(recorded(&app).len(), 1);
+        assert_eq!(recorded(&app)[0].reason, "放空管");
+        assert!(!scratch.path(PROJECT_PACK_FILE).exists());
+        for op in ["pid_check", "pid_check_rules"] {
+            let answer = request(&mut app, json!({ "op": op }));
+            assert_eq!(answer["ok"], true, "{op}: {answer}");
         }
     }
 }

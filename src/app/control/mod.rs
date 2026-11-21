@@ -241,6 +241,9 @@ fn background_mutation(op: &str) -> bool {
             | "entities_transform"
             | "pid_insert_batch"
             | "pid_masterdata_set"
+            | "pid_check_rules_set"
+            | "pid_check_waive"
+            | "pid_check_unwaive"
             | "text_replace"
             | "xdata_set"
             | "block_define"
@@ -679,7 +682,7 @@ impl OpenCADStudio {
             "mtext_editor":self.mtext_editor.as_ref().map(|e|json!({"text":e.content.text(),"height":e.height,"style":e.style})),
             "text_editor":self.text_inline.is_some(),"event_cursor":self.control.serial,
             "operation":self.control.pending.as_ref().map(|p| &p.id),
-            "capabilities":["commands","command_manifest","step_input","batch","compact_results","entity_pick","structure_pick","selection","user_select","properties","records","record_schemas","record_filters","atomic_record_updates","layers","history","documents","events","capture","viewport_capture","measure","spatial_query","pid_legend","pid_master_data","pid_project_index","audit","verified_save","explicit_save_version"]
+            "capabilities":["commands","command_manifest","step_input","batch","compact_results","entity_pick","structure_pick","selection","user_select","properties","records","record_schemas","record_filters","atomic_record_updates","layers","history","documents","events","capture","viewport_capture","measure","spatial_query","pid_legend","pid_master_data","pid_project_index","pid_check","audit","verified_save","explicit_save_version"]
         })
     }
 
@@ -710,6 +713,8 @@ impl OpenCADStudio {
                 | "pid_masterdata"
                 | "pid_summary"
                 | "pid_index"
+                | "pid_check"
+                | "pid_check_rules"
                 | "snap"
                 | "grips"
                 | "query"
@@ -1034,11 +1039,15 @@ impl OpenCADStudio {
             if op == "pid_index" {
                 return self.control_pid_index(&req);
             }
+            if op == "pid_check" {
+                return self.control_pid_check(&req);
+            }
             let response = match op {
                 "properties" => self.control_properties(),
                 "measure" => self.control_measure(&req),
                 "pid_masterdata" => self.control_pid_masterdata(&req),
                 "pid_summary" => self.control_pid_summary(),
+                "pid_check_rules" => self.control_pid_check_rules(),
                 // The object snap a cursor over `point` (world) would get;
                 // `from` is the base for perpendicular and tangent.
                 "snap" => 'snap: {
@@ -1510,6 +1519,9 @@ impl OpenCADStudio {
             "pid_insert_batch" => self.control_pid_insert_batch(req)?,
             "pid_masterdata_set" => self.control_pid_masterdata_set(req)?,
             "pid_locate" => self.control_pid_locate(req)?,
+            "pid_check_rules_set" => self.control_pid_check_rules_set(req)?,
+            "pid_check_waive" => self.control_pid_check_waive(req)?,
+            "pid_check_unwaive" => self.control_pid_check_unwaive(req)?,
             "entities_set" => self.control_entities_set(req)?,
             "xref_reload" => self.control_xref_reload(req)?,
             "xref_unload" => self.control_xref_unload(req)?,

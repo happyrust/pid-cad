@@ -633,6 +633,45 @@ pub(crate) fn plan(method: &str, rest: &[&str], request: &HttpRequest) -> Plan {
             fields: body,
             created: 200,
         },
+        // A rule check of the current drawing, its project or a PBS node; the
+        // body is the request. It changes no drawing, so it runs as a read.
+        ("POST", ["pid", "check"]) => {
+            let mut check = body;
+            check["protocol"] = json!(1);
+            check["op"] = json!("pid_check");
+            Plan::Run {
+                request: check,
+                created: 200,
+            }
+        }
+        ("GET", ["pid", "check", "rules"]) => Plan::Run {
+            request: json!({"protocol": 1, "op": "pid_check_rules"}),
+            created: 200,
+        },
+        ("PUT", ["pid", "check", "rules"]) => Plan::Mutate {
+            op: "pid_check_rules_set".into(),
+            fields: body,
+            created: 200,
+        },
+        ("POST", ["pid", "check", "waivers"]) => Plan::Mutate {
+            op: "pid_check_waive".into(),
+            fields: body,
+            created: 200,
+        },
+        // The waiver may also be named in the query, which wins over the body.
+        ("DELETE", ["pid", "check", "waivers"]) => {
+            let mut fields = body;
+            for key in ["rule_id", "object_key"] {
+                if let Some(value) = request.param(key) {
+                    fields[key] = json!(value);
+                }
+            }
+            Plan::Mutate {
+                op: "pid_check_unwaive".into(),
+                fields,
+                created: 200,
+            }
+        }
         // Same state read, plus `documents[].document_id` — the spelling the
         // REST contract (and every validator) reads.
         ("GET", ["documents"]) => Plan::Aliased {
@@ -1219,6 +1258,8 @@ pub(crate) fn map_status(response: Value, created: bool) -> u16 {
         "entity_absent" | "layout_missing" | "xref_missing" | "unknown_route" => 404,
         // 要定位的位号哪张图上都没有（项目索引规格 §5.3）。
         "LOCATE_NOT_FOUND" => 404,
+        // 规则检查（规则检查规格 §3.8）：指的规则号、要豁免或取消的条目、PBS 节点不存在。
+        "RULE_NOT_FOUND" | "WAIVER_TARGET_NOT_FOUND" | "PBS_NODE_UNKNOWN" => 404,
         // 同一线号同图第二个流入连接符是「与现有资源冲突」，不是请求格式错。
         // `CONNECTOR_KIND_MISMATCH` 保持 400（契约 A.7 明文）。
         "stale_state"
@@ -1237,11 +1278,17 @@ pub(crate) fn map_status(response: Value, created: bool) -> u16 {
         // 都是与现在的图纸和项目对不上。
         | "INDEX_NO_PROJECT_DIR"
         | "INDEX_DRAWING_ID_DUPLICATED"
-        | "LOCATE_AMBIGUOUS" => 409,
+        | "LOCATE_AMBIGUOUS"
+        // 规则检查（规则检查规格 §3.8）：项目包想改内置规则、新规则号落在内置号段或者重复，
+        // 保存门禁拦下了有错误的图。
+        | "RULE_BUILTIN_READONLY"
+        | "RULE_ID_RESERVED"
+        | "RULE_ID_DUPLICATED"
+        | "RULE_BLOCKED" => 409,
         // 协同会话不可写：请求本身没有错，是这个会话不被允许做这件事。
         "COLLAB_READONLY" | "PERM_DENIED_ROLE" | "PERM_DENIED_PBS" | "PERM_DENIED_STATE" => 403,
-        // 项目文件读写失败：请求和图纸都没错，是桌面端这台机器的文件系统报了错。
-        "MASTERDATA_IO_ERROR" | "INDEX_IO_ERROR" => 500,
+        // 项目文件、项目规则包读写失败：请求和图纸都没错，是桌面端这台机器的文件系统报了错。
+        "MASTERDATA_IO_ERROR" | "INDEX_IO_ERROR" | "RULESET_IO_ERROR" => 500,
         "busy" => 503,
         _ => 400,
     }
@@ -1378,6 +1425,11 @@ mod tests {
             ("/api/v1/pid/summary", "get"),
             ("/api/v1/pid/index", "get"),
             ("/api/v1/pid/locate", "post"),
+            ("/api/v1/pid/check", "post"),
+            ("/api/v1/pid/check/rules", "get"),
+            ("/api/v1/pid/check/rules", "put"),
+            ("/api/v1/pid/check/waivers", "post"),
+            ("/api/v1/pid/check/waivers", "delete"),
         ] {
             assert!(
                 document["paths"][path][method].is_object(),
@@ -1395,6 +1447,20 @@ mod tests {
             assert!(
                 document["paths"]["/api/v1/pid/locate"]["post"]["responses"][status].is_object(),
                 "missing {status} response for post /api/v1/pid/locate"
+            );
+        }
+        for (path, method, status) in [
+            ("/api/v1/pid/check", "post", "404"),
+            ("/api/v1/pid/check", "post", "409"),
+            ("/api/v1/pid/check/rules", "put", "403"),
+            ("/api/v1/pid/check/rules", "put", "409"),
+            ("/api/v1/pid/check/rules", "put", "500"),
+            ("/api/v1/pid/check/waivers", "post", "404"),
+            ("/api/v1/pid/check/waivers", "delete", "404"),
+        ] {
+            assert!(
+                document["paths"][path][method]["responses"][status].is_object(),
+                "missing {status} response for {method} {path}"
             );
         }
         for (path, method) in [
@@ -1747,6 +1813,174 @@ mod tests {
             ("LOCATE_AMBIGUOUS", 409),
             ("LOCATE_NOT_FOUND", 404),
             ("INDEX_IO_ERROR", 500),
+        ] {
+            assert_eq!(
+                map_status(json!({"ok": false, "code": code}), false),
+                expected_status,
+                "{code}"
+            );
+        }
+    }
+
+    /// SPEC-pid-drc §5.3 over HTTP: POST /pid/check runs a check with the
+    /// body as its request, GET /pid/check/rules lists the rules in effect,
+    /// PUT /pid/check/rules replaces the project pack, POST and DELETE
+    /// /pid/check/waivers add and take away a waiver (DELETE may carry
+    /// `rule_id` and `object_key` in the query). Status codes follow §3.8:
+    /// a pack the rules refuse and a blocked save are 409, a rule, waiver
+    /// target or PBS node that is not there 404, a malformed pack 400.
+    #[test]
+    fn pid_check_rest_routes_and_status_codes() {
+        let check = request(
+            "POST",
+            "/api/v1/pid/check",
+            r#"{"scope":"pbs","pbs":"U-100","include_waived":false}"#,
+        );
+        let Plan::Run {
+            request: asked,
+            created,
+        } = plan("POST", &["pid", "check"], &check)
+        else {
+            panic!("POST /pid/check is not a read");
+        };
+        assert_eq!(created, 200);
+        assert_eq!(
+            asked,
+            json!({"protocol": 1, "op": "pid_check", "scope": "pbs", "pbs": "U-100", "include_waived": false})
+        );
+        let rules = request("GET", "/api/v1/pid/check/rules", "");
+        let Plan::Run { request: asked, .. } = plan("GET", &["pid", "check", "rules"], &rules)
+        else {
+            panic!("GET /pid/check/rules is not a read");
+        };
+        assert_eq!(asked, json!({"protocol": 1, "op": "pid_check_rules"}));
+        for (method, rest, body, expected) in [
+            (
+                "PUT",
+                ["pid", "check", "rules"],
+                r#"{"pack":{"version":1}}"#,
+                "pid_check_rules_set",
+            ),
+            (
+                "POST",
+                ["pid", "check", "waivers"],
+                r#"{"rule_id":"DR-014","object_key":"K","reason":"r"}"#,
+                "pid_check_waive",
+            ),
+            (
+                "DELETE",
+                ["pid", "check", "waivers"],
+                r#"{"rule_id":"DR-014","object_key":"K"}"#,
+                "pid_check_unwaive",
+            ),
+        ] {
+            let path = format!("/api/v1/{}", rest.join("/"));
+            let Plan::Mutate {
+                op,
+                fields,
+                created,
+            } = plan(method, &rest, &request(method, &path, body))
+            else {
+                panic!("{method} {path} is not a write");
+            };
+            assert_eq!((op.as_str(), created), (expected, 200), "{method} {path}");
+            let sent: Value = serde_json::from_str(body).expect("JSON");
+            assert_eq!(fields, sent, "{method} {path}");
+        }
+        let mut unwaive = request("DELETE", "/api/v1/pid/check/waivers", "");
+        unwaive.query = vec![
+            ("rule_id".into(), "DR-014".into()),
+            ("object_key".into(), "PUMP|P 1".into()),
+        ];
+        let Plan::Mutate { op, fields, .. } =
+            plan("DELETE", &["pid", "check", "waivers"], &unwaive)
+        else {
+            panic!("DELETE /pid/check/waivers is not a write");
+        };
+        assert_eq!(op, "pid_check_unwaive");
+        assert_eq!(
+            fields,
+            json!({"rule_id": "DR-014", "object_key": "PUMP|P 1"})
+        );
+
+        let mut document_id: Option<u64> = None;
+        let mut counter: u64 = 0;
+        let mut app = serve_app(true);
+        let bare = request("POST", "/api/v1/pid/check", "");
+        let (status, body) = route(&mut app, &bare, &mut document_id, &mut counter);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["version"], 1, "{body}");
+        assert_eq!(body["scope"]["kind"], "drawing", "{body}");
+        let (status, body) = route(&mut app, &rules, &mut document_id, &mut counter);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["rules"].as_array().map(Vec::len),
+            Some(crate::pid::drc::builtin_rules::builtin().rules.len()),
+            "{body}"
+        );
+        for (asked, expected_status, code) in [
+            (
+                request("POST", "/api/v1/pid/check", r#"{"scope":"project"}"#),
+                409,
+                "INDEX_NO_PROJECT_DIR",
+            ),
+            (
+                request("POST", "/api/v1/pid/check", r#"{"scope":"pbs"}"#),
+                400,
+                "invalid_request",
+            ),
+            (
+                request(
+                    "PUT",
+                    "/api/v1/pid/check/rules",
+                    r#"{"pack":{"version":1}}"#,
+                ),
+                409,
+                "INDEX_NO_PROJECT_DIR",
+            ),
+            (
+                request(
+                    "POST",
+                    "/api/v1/pid/check/waivers",
+                    r#"{"rule_id":"DR-999","object_key":"K","reason":"r"}"#,
+                ),
+                404,
+                "RULE_NOT_FOUND",
+            ),
+            (
+                request(
+                    "POST",
+                    "/api/v1/pid/check/waivers",
+                    r#"{"rule_id":"DR-014","object_key":"K","reason":"r"}"#,
+                ),
+                404,
+                "WAIVER_TARGET_NOT_FOUND",
+            ),
+            (unwaive, 404, "WAIVER_TARGET_NOT_FOUND"),
+            (
+                request("POST", "/api/v1/pid/check/waivers", "{}"),
+                400,
+                "invalid_request",
+            ),
+        ] {
+            let (status, body) = route(&mut app, &asked, &mut document_id, &mut counter);
+            let what = format!("{} {}?{:?} {body}", asked.method, asked.path, asked.query);
+            assert_eq!(status, expected_status, "{what}");
+            assert_eq!(body["code"], code, "{what}");
+        }
+
+        for (code, expected_status) in [
+            ("RULE_BUILTIN_READONLY", 409),
+            ("RULE_ID_RESERVED", 409),
+            ("RULE_ID_DUPLICATED", 409),
+            ("RULE_BLOCKED", 409),
+            ("RULE_NOT_FOUND", 404),
+            ("WAIVER_TARGET_NOT_FOUND", 404),
+            ("PBS_NODE_UNKNOWN", 404),
+            ("DSL_PARSE_ERROR", 400),
+            ("RULESET_SCHEMA_ERROR", 400),
+            ("WAIVER_REASON_REQUIRED", 400),
+            ("RULESET_IO_ERROR", 500),
         ] {
             assert_eq!(
                 map_status(json!({"ok": false, "code": code}), false),

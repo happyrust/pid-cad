@@ -195,6 +195,50 @@
         "responses": {"200": {"description": "result: drawing_id, document_id, handle and handles; or status scanning with done and total while the project's files are still being read: send it again later"}, "400": {"description": "Malformed request"}, "404": {"description": "LOCATE_NOT_FOUND"}, "409": {"description": "LOCATE_AMBIGUOUS (with places), INDEX_NO_PROJECT_DIR or INDEX_DRAWING_ID_DUPLICATED"}, "500": {"description": "INDEX_IO_ERROR"}}
       }
     },
+    "/api/v1/pid/check": {
+      "post": {
+        "summary": "P&ID rule check of the current drawing, of a PBS node or of the whole project in the drawing's folder; changes nothing",
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": {
+          "scope": {"type": "string", "enum": ["drawing", "pbs", "project"], "description": "Case-insensitive; defaults to drawing"},
+          "pbs": {"type": "string", "description": "Required with scope pbs, and only there: the PBS node whose drawings are checked, its subtree included"},
+          "cross_drawing": {"type": "boolean", "description": "With scope drawing: also run the project rules, reporting this drawing's results only; defaults to false"},
+          "include_waived": {"type": "boolean", "description": "false leaves waived results out of results; the counts still include them. Defaults to true"}
+        }}}}},
+        "responses": {"200": {"description": "The check result: version, rule_set_version, rule_set_digest, checked_at, trigger, scope, elapsed_ms, summary, blocked, results, notices, stale_waivers; or status scanning with done and total while the project's files are still being read: send it again later"}, "400": {"description": "Malformed request, or a malformed project rule pack (RULESET_SCHEMA_ERROR, DSL_PARSE_ERROR and the like)"}, "404": {"description": "PBS_NODE_UNKNOWN"}, "409": {"description": "INDEX_NO_PROJECT_DIR (the drawing was never saved; with cross_drawing, it is not one of the .dwg files of its folder), INDEX_DRAWING_ID_DUPLICATED, or RULE_BUILTIN_READONLY, RULE_ID_RESERVED or RULE_ID_DUPLICATED in the project rule pack"}, "500": {"description": "INDEX_IO_ERROR"}}
+      }
+    },
+    "/api/v1/pid/check/rules": {
+      "get": {
+        "summary": "P&ID rules in effect: the built-in pack with the project pack of the drawing's folder laid over it",
+        "responses": {"200": {"description": "rule_set_version, rule_set_digest, project_pack (its path, or null), save_gate, sets and rules, written as in a rule pack"}, "400": {"description": "Malformed project rule pack"}, "409": {"description": "RULE_BUILTIN_READONLY, RULE_ID_RESERVED or RULE_ID_DUPLICATED in the project rule pack"}}
+      },
+      "put": {
+        "summary": "Replace the whole P&ID project rule pack (pid-drc-rules.json in the saved drawing's folder); validated first and written only when every rule passes",
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "required": ["pack"], "properties": {
+          "pack": {"type": "object", "description": "The whole project pack: version, pack, rule_set_version, save_gate, sets, rules"}
+        }}}}},
+        "responses": {"200": {"description": "rule_set_version and rule_set_digest of the rules now in effect"}, "400": {"description": "Malformed request or pack (RULESET_SCHEMA_ERROR, DSL_PARSE_ERROR, REQUIRED_FIELD_EMPTY and the like)"}, "403": {"description": "Read-only collaboration session (COLLAB_READONLY, PERM_DENIED_*)"}, "409": {"description": "RULE_BUILTIN_READONLY, RULE_ID_RESERVED or RULE_ID_DUPLICATED; INDEX_NO_PROJECT_DIR when the drawing was never saved"}, "500": {"description": "RULESET_IO_ERROR: the pack could not be written"}}
+      }
+    },
+    "/api/v1/pid/check/waivers": {
+      "post": {
+        "summary": "Waive one result of the current drawing's latest P&ID rule check; one undo step",
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "required": ["rule_id", "object_key", "reason"], "properties": {
+          "rule_id": {"type": "string", "description": "Case-insensitive"},
+          "object_key": {"type": "string", "description": "object_key of the result"},
+          "reason": {"type": "string", "description": "1 to 200 characters"}
+        }}}}},
+        "responses": {"200": {"description": "waivers: how many the drawing records"}, "400": {"description": "Malformed request, WAIVER_REASON_REQUIRED or WAIVER_REASON_TOO_LONG"}, "403": {"description": "Read-only collaboration session (COLLAB_READONLY, PERM_DENIED_*)"}, "404": {"description": "RULE_NOT_FOUND, or WAIVER_TARGET_NOT_FOUND: no such result on this drawing in its latest check"}}
+      },
+      "delete": {
+        "summary": "Remove one waiver recorded on the current drawing; one undo step",
+        "parameters": [
+          {"name": "rule_id", "in": "query", "description": "Or in the body; case-insensitive", "schema": {"type": "string"}},
+          {"name": "object_key", "in": "query", "description": "Or in the body", "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "waivers: how many the drawing records"}, "400": {"description": "Malformed request"}, "403": {"description": "Read-only collaboration session (COLLAB_READONLY, PERM_DENIED_*)"}, "404": {"description": "WAIVER_TARGET_NOT_FOUND: the drawing records no such waiver"}}
+      }
+    },
     "/api/v1/entities": {
       "get": {
         "summary": "Query entities (type, layer, detail, offset, limit, fields, handles, bounds, near, contains_point, intersections)",
