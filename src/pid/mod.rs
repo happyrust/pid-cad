@@ -18,6 +18,7 @@ pub mod perf_budget;
 pub mod persist;
 pub mod project_index;
 pub mod propagate;
+pub mod publish_pkg;
 pub mod snapshot;
 pub mod symbols;
 pub mod tag_engine;
