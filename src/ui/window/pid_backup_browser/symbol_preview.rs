@@ -646,10 +646,10 @@ mod tests {
     use crate::ui::dock::Chrome;
     use crate::ui::window::pid_backup_browser::section::load_in_background;
     use crate::ui::window::pid_backup_browser::{
-        detail_buttons, detail_rows, selected_buttons, update, view, Effect, PidBackupBrowser,
-        PidBackupMsg,
+        detail_buttons, detail_rows, selected_buttons, update, view, visible_rows, Effect,
+        PidBackupBrowser, PidBackupMsg, Row,
     };
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::io::Write;
     use std::path::{Path, PathBuf};
 
@@ -1242,6 +1242,38 @@ mod tests {
     }
 
     #[test]
+    fn a_double_click_on_a_symbol_file_a_search_keeps_asks_for_the_same_drawing() {
+        let (root, mut state) = backup("opens-searched");
+        let gate = NodeId::RefFile(vec![0], 0);
+        let unsearched = update(&mut state, PidBackupMsg::Activate(gate.clone()));
+        assert!(
+            matches!(&unsearched, Effect::OpenSymbol { name, .. } if name == "Gate"),
+            "{unsearched:?}"
+        );
+
+        // The search keeps the file's row, and the row is the node it was:
+        // a double click on it asks for the same file under the same name.
+        update(&mut state, PidBackupMsg::Filter("GATE".to_string()));
+        let kept: Vec<NodeId> = visible_rows(&state).into_iter().map(|row| row.id).collect();
+        assert!(kept.contains(&gate), "{kept:?}");
+        assert_eq!(update(&mut state, PidBackupMsg::Activate(gate)), unsearched);
+        assert!(state.section_data.is_empty());
+
+        // A member of an archive is not looked for: the files of the
+        // backup have no rows in a searched tree.
+        update(&mut state, PidBackupMsg::Filter("hollow".to_string()));
+        let kept: Vec<NodeId> = visible_rows(&state).into_iter().map(|row| row.id).collect();
+        assert!(
+            !kept.iter().any(|id| matches!(
+                id,
+                NodeId::File(_) | NodeId::FileMember(..) | NodeId::Ref | NodeId::RefFile(..)
+            )),
+            "{kept:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn the_button_under_the_thumbnail_is_the_double_click() {
         let (root, mut state) = backup("button");
         let node = member(&state, "RefData~4~809.zip", "Symbols/hollow.sym");
@@ -1606,6 +1638,22 @@ mod tests {
         }
     }
 
+    /// The real backup an opt-in test reads, and whether it is the plant
+    /// package beside the repository: the folder or the zip
+    /// `OCS_PID_SYM_PREVIEW_BACKUP` names, or that package when it is
+    /// there.
+    fn real_backup() -> Option<(PathBuf, bool)> {
+        let named = std::env::var_os("OCS_PID_SYM_PREVIEW_BACKUP").map(PathBuf::from);
+        let plant = named.is_none();
+        let source = named.or_else(|| {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()?
+                .join("pid-test-data");
+            root.join("Export.dmp").is_file().then_some(root)
+        })?;
+        Some((source, plant))
+    }
+
     /// Every symbol file of a real backup through the read the panel makes
     /// of one, each against what the symbol census (issue #114) says of the
     /// same bytes, with the totals printed.
@@ -1621,14 +1669,7 @@ mod tests {
     #[test]
     #[ignore = "reads a real backup: ../pid-test-data, or the one OCS_PID_SYM_PREVIEW_BACKUP names"]
     fn every_symbol_of_a_real_backup_is_previewed() {
-        let named = std::env::var_os("OCS_PID_SYM_PREVIEW_BACKUP").map(PathBuf::from);
-        let plant = named.is_none();
-        let Some(source_path) = named.or_else(|| {
-            let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()?
-                .join("pid-test-data");
-            root.join("Export.dmp").is_file().then_some(root)
-        }) else {
+        let Some((source_path, plant)) = real_backup() else {
             println!("skipped: there is no backup to read");
             return;
         };
@@ -1880,5 +1921,272 @@ mod tests {
                 (644, 643, 1, 0, 0)
             );
         }
+    }
+
+    /// The search box over the reference data of a real backup. For each of
+    /// a few search texts, the files the tree keeps are the files a walk of
+    /// the index made here finds, in the order the open tree lists them;
+    /// the directories it keeps are those a kept file stands under, each
+    /// under its own; and none of it depends on what the user has open.
+    /// How many rows a text leaves, and how long the panel takes to list
+    /// them, is printed.
+    ///
+    /// The backup is the one `every_symbol_of_a_real_backup_is_previewed`
+    /// reads.
+    ///
+    /// ```text
+    /// cargo test --lib a_search_of_a_real_backup_keeps_the_reference_files_it_names -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "reads a real backup: ../pid-test-data, or the one OCS_PID_SYM_PREVIEW_BACKUP names"]
+    fn a_search_of_a_real_backup_keeps_the_reference_files_it_names() {
+        /// How many times the rows are listed to say how long it takes.
+        const RUNS: usize = 25;
+        /// A text no file is named with.
+        const NOWHERE: &str = "no such file zzq";
+
+        fn directory<'a>(root: &'a RefNode, dirs: &[usize]) -> &'a RefNode {
+            dirs.iter().fold(root, |node, at| &node.dirs[*at])
+        }
+
+        /// Every directory under `node`, parents before children.
+        fn directories(node: &RefNode, dirs: &mut Vec<usize>, found: &mut Vec<Vec<usize>>) {
+            for (at, dir) in node.dirs.iter().enumerate() {
+                dirs.push(at);
+                found.push(dirs.clone());
+                directories(dir, dirs, found);
+                dirs.pop();
+            }
+        }
+
+        /// The files under `node` whose name holds `needle`, the
+        /// directories of a level before its files as the tree lists them,
+        /// and every directory one of them stands under.
+        fn named(
+            node: &RefNode,
+            dirs: &mut Vec<usize>,
+            needle: &str,
+            files: &mut Vec<NodeId>,
+            above: &mut BTreeSet<Vec<usize>>,
+        ) {
+            for (at, dir) in node.dirs.iter().enumerate() {
+                dirs.push(at);
+                named(dir, dirs, needle, files, above);
+                dirs.pop();
+            }
+            for (at, file) in node.files.iter().enumerate() {
+                if file.name.to_lowercase().contains(needle) {
+                    files.push(NodeId::RefFile(dirs.clone(), at));
+                    above.extend((1..=dirs.len()).map(|depth| dirs[..depth].to_vec()));
+                }
+            }
+        }
+
+        /// How long the panel takes to list its rows, in milliseconds: the
+        /// fastest and the median of `RUNS` times.
+        fn listed_in(state: &PidBackupBrowser) -> (f64, f64) {
+            let mut took: Vec<f64> = (0..RUNS)
+                .map(|_| {
+                    let asked = std::time::Instant::now();
+                    let rows = std::hint::black_box(visible_rows(state));
+                    let took = asked.elapsed();
+                    drop(rows);
+                    took.as_secs_f64() * 1000.0
+                })
+                .collect();
+            took.sort_by(f64::total_cmp);
+            (took[0], took[RUNS / 2])
+        }
+
+        /// Search for `text` and hold what the tree keeps of the reference
+        /// data against the index. The rows, and how many of them are
+        /// reference files, directories and drawings.
+        fn searched(
+            state: &mut PidBackupBrowser,
+            index: &crate::io::pid_backup_browse::BackupIndex,
+            text: &str,
+        ) -> (Vec<Row>, usize, usize, usize) {
+            let open = state.expanded.clone();
+            update(state, PidBackupMsg::Filter(text.to_string()));
+            let rows = visible_rows(state);
+            assert_eq!(state.expanded, open, "{text:?}");
+
+            let needle = text.trim().to_lowercase();
+            let (mut files, mut above) = (Vec::new(), BTreeSet::new());
+            named(
+                &index.ref_tree,
+                &mut Vec::new(),
+                &needle,
+                &mut files,
+                &mut above,
+            );
+            let kept: Vec<NodeId> = rows
+                .iter()
+                .filter(|row| matches!(row.id, NodeId::RefFile(..)))
+                .map(|row| row.id.clone())
+                .collect();
+            assert_eq!(kept, files, "{text:?}");
+            // Each directory a kept file stands under once, and no other.
+            let kept_above: Vec<Vec<usize>> = rows
+                .iter()
+                .filter_map(|row| match &row.id {
+                    NodeId::RefDir(path) => Some(path.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(kept_above.len(), above.len(), "{text:?}");
+            assert_eq!(
+                kept_above.iter().cloned().collect::<BTreeSet<_>>(),
+                above,
+                "{text:?}"
+            );
+            let heads = rows.iter().filter(|row| row.id == NodeId::Ref).count();
+            assert_eq!(heads, usize::from(!files.is_empty()), "{text:?}");
+
+            // Each row of the branch stands under the row it belongs to,
+            // is drawn open and bears the name of what it is.
+            let mut over: Vec<&Row> = Vec::new();
+            for row in &rows {
+                while over.last().is_some_and(|last| last.depth >= row.depth) {
+                    over.pop();
+                }
+                let under = over.last().map(|last| &last.id);
+                match &row.id {
+                    NodeId::Ref => {
+                        assert_eq!((row.depth, under), (1, Some(&NodeId::Root)), "{text:?}");
+                        assert!(row.expandable && row.expanded, "{text:?}");
+                        assert_eq!(row.label, t!("Reference data").into_owned(), "{text:?}");
+                    }
+                    NodeId::RefDir(path) => {
+                        let upper = path.split_last().map_or(&[][..], |(_, upper)| upper);
+                        let parent = if upper.is_empty() {
+                            NodeId::Ref
+                        } else {
+                            NodeId::RefDir(upper.to_vec())
+                        };
+                        assert_eq!(
+                            (row.depth, under),
+                            (1 + path.len(), Some(&parent)),
+                            "{text:?}: {path:?}"
+                        );
+                        assert!(row.expandable && row.expanded, "{text:?}: {path:?}");
+                        assert_eq!(
+                            row.label,
+                            directory(&index.ref_tree, path).name,
+                            "{text:?}: {path:?}"
+                        );
+                    }
+                    NodeId::RefFile(dirs, at) => {
+                        let parent = if dirs.is_empty() {
+                            NodeId::Ref
+                        } else {
+                            NodeId::RefDir(dirs.clone())
+                        };
+                        assert_eq!(
+                            (row.depth, under),
+                            (2 + dirs.len(), Some(&parent)),
+                            "{text:?}: {dirs:?} {at}"
+                        );
+                        assert_eq!(
+                            row.label,
+                            directory(&index.ref_tree, dirs).files[*at].name,
+                            "{text:?}: {dirs:?} {at}"
+                        );
+                    }
+                    _ => {}
+                }
+                over.push(row);
+            }
+            let drawings = rows
+                .iter()
+                .filter(|row| matches!(row.id, NodeId::Drawing(_)))
+                .count();
+            (rows, files.len(), above.len(), drawings)
+        }
+
+        let Some((source_path, _)) = real_backup() else {
+            println!("skipped: there is no backup to read");
+            return;
+        };
+        // Whatever has to be unpacked goes where the test clears it away.
+        let cache = scratch("real-search");
+        let index =
+            Arc::new(build_index_in(&source_path, None, Some(&cache)).expect("the backup indexes"));
+        let mut state = PidBackupBrowser::default();
+        update(&mut state, PidBackupMsg::Loaded(Ok(Arc::clone(&index))));
+
+        let mut all = Vec::new();
+        ref_files(&index.ref_tree, &mut Vec::new(), &mut all);
+        let mut dirs = Vec::new();
+        directories(&index.ref_tree, &mut Vec::new(), &mut dirs);
+        let symbols = all
+            .iter()
+            .filter(|node| source(&index, node).is_some())
+            .count();
+        println!(
+            "the Ref tree: {} file(s), {symbols} of them symbol files, in {} directories",
+            all.len(),
+            dirs.len()
+        );
+
+        let before = visible_rows(&state);
+        let (fastest, median) = listed_in(&state);
+        println!(
+            "no search, the tree as it is loaded: {} row(s); listed in {fastest:.3} ms at the fastest, {median:.3} ms at the median of {RUNS}",
+            before.len()
+        );
+        let texts = ["valve", "ball valve", "a", "e", ".sym", NOWHERE];
+        let mut left = Vec::new();
+        for text in texts {
+            let (rows, files, above, drawings) = searched(&mut state, &index, text);
+            let (fastest, median) = listed_in(&state);
+            println!(
+                "search {text:?}: {files} reference file(s) under {above} directory row(s), {drawings} drawing(s), {} row(s) in all; listed in {fastest:.3} ms at the fastest, {median:.3} ms at the median of {RUNS}",
+                rows.len()
+            );
+            if text == NOWHERE {
+                assert_eq!((files, above), (0, 0));
+            }
+            // A symbol file bears its extension, and a search for it finds
+            // the file.
+            if text == ".sym" {
+                assert!(files >= symbols, "{files} of {symbols}");
+            }
+            left.push(rows);
+        }
+        // Capitals and the blanks around a text change nothing.
+        assert_eq!(searched(&mut state, &index, "  VALVE ").0, left[0]);
+
+        // Cleared, the tree is the one it was.
+        update(&mut state, PidBackupMsg::Filter(String::new()));
+        assert_eq!(visible_rows(&state), before);
+
+        // With every directory open the tree shows every file without a
+        // search, and a search leaves what it left with them shut.
+        for node in std::iter::once(NodeId::Ref).chain(dirs.iter().cloned().map(NodeId::RefDir)) {
+            if !state.expanded.contains(&node) {
+                update(&mut state, PidBackupMsg::Toggle(node));
+            }
+        }
+        let open = visible_rows(&state);
+        let branch = open
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.id,
+                    NodeId::Ref | NodeId::RefDir(_) | NodeId::RefFile(..)
+                )
+            })
+            .count();
+        assert_eq!(branch, 1 + dirs.len() + all.len());
+        let (fastest, median) = listed_in(&state);
+        println!(
+            "no search, every directory open: {} row(s); listed in {fastest:.3} ms at the fastest, {median:.3} ms at the median of {RUNS}",
+            open.len()
+        );
+        for (text, rows) in texts.iter().zip(&left) {
+            assert_eq!(&searched(&mut state, &index, text).0, rows, "{text:?}");
+        }
+        let _ = std::fs::remove_dir_all(&cache);
     }
 }

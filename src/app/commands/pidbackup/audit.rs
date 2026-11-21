@@ -41,6 +41,7 @@
 
 use super::*;
 use crate::app::pid_shell::PidScreen;
+use crate::io::pid_backup_browse::symbol_file::SymbolFile;
 use crate::io::pid_backup_browse::{BackupIndex, GroupNode, RefNode};
 use crate::ui::window::pid_backup_browser::{
     detail_buttons, detail_rows, visible_rows, ItemsState, NodeId, Row, SectionLoad,
@@ -175,6 +176,15 @@ fn ref_dir_paths(root: &RefNode) -> Vec<Vec<usize>> {
 
 fn ref_dir<'a>(root: &'a RefNode, path: &[usize]) -> &'a RefNode {
     path.iter().fold(root, |node, at| &node.dirs[*at])
+}
+
+/// The name of the first file the opened `Ref` tree shows, directories
+/// standing before files.
+fn first_ref_file(node: &RefNode) -> Option<&str> {
+    node.dirs
+        .iter()
+        .find_map(first_ref_file)
+        .or_else(|| node.files.first().map(|file| file.name.as_str()))
 }
 
 /// The node's details, which every node the tree can show must have.
@@ -685,6 +695,8 @@ enum Content {
     },
     /// The panel says it is not a text file.
     NotText,
+    /// A symbol file: never text, the details show what it draws.
+    Symbol,
     /// Nothing was read: the node has no text of its own.
     NotRead,
     /// The read failed, and the details say why.
@@ -736,6 +748,7 @@ fn read_file_node(app: &mut OpenCADStudio, id: &NodeId, empty: &mut Vec<String>)
             );
             Content::Failed(error)
         }
+        Some(SectionLoad::Ready(data)) if data.get::<SymbolFile>().is_some() => Content::Symbol,
         Some(other) => panic!("the read of {id:?} is left in {other:?}"),
     }
 }
@@ -746,6 +759,7 @@ fn read_file_node(app: &mut OpenCADStudio, id: &NodeId, empty: &mut Vec<String>)
 struct ContentTally {
     text: Vec<String>,
     not_text: usize,
+    symbols: usize,
     not_read: usize,
     failed: Vec<String>,
 }
@@ -766,6 +780,7 @@ impl ContentTally {
                 self.text.push(line);
             }
             Content::NotText => self.not_text += 1,
+            Content::Symbol => self.symbols += 1,
             Content::NotRead => self.not_read += 1,
             Content::Failed(error) => self.failed.push(format!("{label}: {error}")),
         }
@@ -773,9 +788,10 @@ impl ContentTally {
 
     fn report(&self, audit: &mut Audit, what: &str, not_read: &str) {
         audit.line(format!(
-            "  {what}: {} text, {} not text, {} {not_read}, {} could not be read",
+            "  {what}: {} text, {} not text, {} symbols, {} {not_read}, {} could not be read",
             self.text.len(),
             self.not_text,
+            self.symbols,
             self.not_read,
             self.failed.len()
         ));
@@ -2523,6 +2539,15 @@ fn a_real_backup_is_walked_node_by_node() {
     }
 
     // ── The search box ───────────────────────────────────────────────────
+    // It finds drawings and reference files by their names: searched once
+    // with the start of the first drawing's name, once with the start of
+    // the first reference file's.
+    let reference_files = |app: &OpenCADStudio| {
+        visible_rows(&app.pid_backup_browser)
+            .iter()
+            .filter(|row| matches!(row.id, NodeId::RefFile(..)))
+            .count()
+    };
     let rows_before = visible_rows(&app.pid_backup_browser).len();
     let needle = index
         .drawings
@@ -2536,10 +2561,23 @@ fn a_real_backup_is_walked_node_by_node() {
         .filter(|drawing| drawing.name.to_lowercase().contains(&needle.to_lowercase()))
         .count();
     audit.line(format!(
-        "== search \"{needle}\": {} rows (were {rows_before}), {matching} drawings match ==",
-        visible_rows(&app.pid_backup_browser).len()
+        "== search \"{needle}\": {} rows (were {rows_before}), {matching} drawings match, {} reference files kept ==",
+        visible_rows(&app.pid_backup_browser).len(),
+        reference_files(&app)
     ));
     audit.shot(&app, "search");
+    let file_needle = first_ref_file(&index.ref_tree)
+        .map(|name| name.chars().take(4).collect::<String>())
+        .unwrap_or_default();
+    if !file_needle.trim().is_empty() {
+        send(&mut app, PidBackupMsg::Filter(file_needle.clone())).unwrap();
+        audit.line(format!(
+            "== search \"{file_needle}\": {} rows, {} reference files kept ==",
+            visible_rows(&app.pid_backup_browser).len(),
+            reference_files(&app)
+        ));
+        audit.shot(&app, "search-reference");
+    }
     send(&mut app, PidBackupMsg::Filter(String::new())).unwrap();
 
     // ── A node reached from the command line ─────────────────────────────

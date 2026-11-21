@@ -370,6 +370,50 @@ mod tests {
     }
 
     #[test]
+    fn under_a_search_a_walk_reaches_what_the_search_keeps_and_nothing_else() {
+        let mut state = ready();
+        update(&mut state, PidBackupMsg::Filter("valve".to_string()));
+        let reference = t!("Reference data").into_owned();
+        let effect = start(&mut state, &format!("{reference} > Symbols > valve.svg"));
+        assert_eq!(
+            take_outcome(&mut state),
+            Some(Ok(format!("{reference} > Symbols > valve.svg")))
+        );
+        let file = NodeId::RefFile(vec![0], 0);
+        assert_eq!(state.selected, Some(file.clone()));
+        // The walk ends as a click on the file does.
+        let mut clicked = ready();
+        assert_eq!(
+            effect,
+            update(&mut clicked, PidBackupMsg::Select(file.clone()))
+        );
+        // The search holds the levels open: the walk unfolded none of them.
+        assert!(!state.expanded.contains(&NodeId::Ref));
+        assert!(!state.expanded.contains(&NodeId::RefDir(vec![0])));
+
+        // A file the search hides is not there to walk to, and the
+        // selection stays.
+        start(&mut state, &format!("{reference} > Symbols > pump.svg"));
+        let error = take_outcome(&mut state)
+            .expect("the walk ended")
+            .expect_err("the search hides pump.svg");
+        assert!(
+            error.contains("pump.svg") && error.contains("Symbols"),
+            "{error}"
+        );
+        assert_eq!(state.selected, Some(file));
+
+        // Nor is the reference data itself, when the search names none of
+        // its files.
+        update(&mut state, PidBackupMsg::Filter("b-2".to_string()));
+        start(&mut state, &reference);
+        let error = take_outcome(&mut state)
+            .expect("the walk ended")
+            .expect_err("no reference file is called b-2");
+        assert!(error.contains(&reference), "{error}");
+    }
+
+    #[test]
     fn an_empty_path_selects_the_backup_and_an_idle_panel_refuses() {
         let mut state = ready();
         start(&mut state, "");
