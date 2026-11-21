@@ -375,11 +375,11 @@ flowchart LR
 - **依赖**：M1 依赖 L0-8、L3-1；其余按步。
 - **解决记录（2026-11-21）**：在独立模块 `src/io/pid_convert/promote.rs`（`#134`，提交 `ac6527ca1`）与 `src/app/commands/pidprops.rs`（`#136`）中零冲突实现 `sppid_class_to_author_type`（`M1`）、`promote_sheet_to_author`（`M2/M3`，幂等升格、保护 `tag_source=manual`、`>2048B` 自动溢出 `XRecord`、`pid_legend::purge` 隔离性不变）、属性面板可编辑 `P&ID 属性` + 只读 `P&ID 来源证据` 双分组（`M4`）与 `save_author_document_to_dual`（`M5`，单源读取 `PID_AUTHOR + TopologyTable` 同步导出 XML + `.pid`），详见 `readings.md` §24–§25。
 
-#### L2-2 点选整块（M）— **已完成（[#136](https://github.com/happyrust/pid-cad/issues/136)）**
+#### L2-2 点选整块（M）— **已完成（[#136](https://github.com/happyrust/pid-cad/issues/136) / [#139](https://github.com/happyrust/pid-cad/issues/139) / [#152](https://github.com/happyrust/pid-cad/issues/152)）**
 - **做法**：点选一个符号时，按 handle 把图形与 `PID_AUTHOR` 记录作为一块选中；打开属性面板。
 - **验收**：点选后属性面板显示该类对象的全部字段；选中态可撤销重做。
 - **资料**：RES-12 ⚠（缺则按"属性按接口分组"自设计并注明未对照实物）。
-- **解决记录（2026-11-21）**：点选或经 `PIDREVIEW` 筛选选中带 `PID_AUTHOR` 的图元后，属性面板自动呈现可编辑 `P&ID 属性` 与只读 `P&ID 来源证据` 两组完整字段（因缺 `RES-12` 实物截图，按本平台标准双分组自设计并注明未对照实物）；`#139` 进一步补齐炸散多图元符号 `_member_handles` 整组画布高亮与点选任意成员散线自动归并主句柄执行 `ACCEPT / REJECT`，选中与编辑均支持单步撤销/重做，详见 `readings.md` §25、§28。
+- **解决记录（2026-11-21）**：点选或经 `PIDREVIEW` 筛选选中带 `PID_AUTHOR` 的图元后，属性面板自动呈现可编辑 `P&ID 属性` 与只读 `P&ID 来源证据` 两组完整字段（因缺 `RES-12` 实物截图，按本平台标准双分组自设计并注明未对照实物）；`#139` 进一步补齐炸散多图元符号 `_member_handles` 整组画布高亮与点选任意成员散线自动归并主句柄执行 `ACCEPT / REJECT`，选中与编辑均支持单步撤销/重做；`#152` 新增 `src/io/pid_convert/find.rs` 与应用内命令 `PIDFIND <关键字> [ALLTABS] [NEXT]`，支持跨多标签页按位号/线号秒级跳转、整组选中符号或整条连通管线全部管段并自动聚焦相机，详见 `readings.md` §25、§28、§41。
 
 #### L2-3 属性面板读写（M）— **已完成（[#136](https://github.com/happyrust/pid-cad/issues/136)）**
 - **做法**：按接口分页签；写入走既有 `set_entity_xdata` 路径；改位号走位号引擎。
@@ -427,11 +427,11 @@ flowchart LR
 - **资料**：RES-17 ⚠。
 - **解决记录（2026-11-20）**：落地 `src/io/pid_convert/recognize.rs`（圈内双行拼接、带空格 7 位阀门位号归一化、二分图最小距离唯一配对、设备包围盒配对与图层 `10` 松散几何容器恢复、页间连接符 `DWG-*` / 走向配对及范围展开）；90 张有效 DXF 两轮复跑 100% 一致，召回率由 `0.000188` 升至 **`0.977941`**、精确率 **`0.998912`**、位号一致率 **`0.895546`**，详见 `readings.md` §14。
 
-#### L3-3 管线识别增强（L）— **已完成（[#133](https://github.com/happyrust/pid-cad/issues/133)）**
+#### L3-3 管线识别增强（L）— **已完成（[#133](https://github.com/happyrust/pid-cad/issues/133) / [#152](https://github.com/happyrust/pid-cad/issues/152)）**
 - **做法**：线号（5 位与 4 位序号两种）、管线族、管段与管件断开、流向；补未覆盖的族。
 - **验收**：每族有 run 数与端口数读数；断头逐条归因。
 - **资料**：RES-17 ⚠。
-- **解决记录（2026-11-21）**：在 `src/io/pid_convert/export.rs` 实现跨跳线/行内文字微断口共线桥接（`0.4..=6.5 mm` 且避开符号包围盒）、流向箭头/短刺微碎片过滤（`< 2.0 mm` 或包围盒对角线 `< 2.4 mm` 孤立碎片）、同层无歧义交点线号传播，以及 `PipeNetworkCensus` 与 `DeadEndAttribution` 守恒归因统计；90 张真实 DXF 全批实测：共线桥接 `124` 处、过滤箭头/短刺 `744` 条，全部 `27,070` 条管段（`54,140` 个端点）100% 守恒归因（接符号端口 `13,184`、接页间连接符 `712`、接三通 `34,347`、触设备壳体 `809`、开放自由端 `5,088`），详见 `readings.md` §22。
+- **解决记录（2026-11-21）**：在 `src/io/pid_convert/export.rs` 实现跨跳线/行内文字微断口共线桥接（`0.4..=6.5 mm` 且避开符号包围盒）、流向箭头/短刺微碎片过滤（`< 2.0 mm` 或包围盒对角线 `< 2.4 mm` 孤立碎片）、同层无歧义交点线号传播，以及 `PipeNetworkCensus` 与 `DeadEndAttribution` 守恒归因统计；90 张真实 DXF 全批实测：共线桥接 `124` 处、过滤箭头/短刺 `744` 条，全部 `27,070` 条管段（`54,140` 个端点）100% 守恒归因（接符号端口 `13,184`、接页间连接符 `712`、接三通 `34,347`、触设备壳体 `809`、开放自由端 `5,088`，见 `readings.md` §22）；`#152` 在 `src/io/pid_convert/find.rs` 补齐英制/公制规范化管线号双向匹配与 `6.5 mm` 端点连通 BFS 整条管线全段聚拢定位（详见 `readings.md` §41）。
 
 #### L3-4 连通（L）— **已完成（[#133](https://github.com/happyrust/pid-cad/issues/133) / [#149](https://github.com/happyrust/pid-cad/issues/149)）**
 - **做法**：符号连接点与管线端点配对；页间连接符跨图配对（按文字与图号）。

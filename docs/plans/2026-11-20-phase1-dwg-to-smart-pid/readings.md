@@ -1657,7 +1657,42 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
 
+---
 
+## 41. L2-2 / L3-2 / L3-3 / L6-2（#152）：应用内跨标签页按位号/线号智能检索、整条管线全段高亮与视口秒级定位命令 `PIDFIND` 闭环（2026-11-21）
 
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `7ac42d319`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{find,mod}.rs`、`src/app/commands/pidprops.rs` |
+| 外部证据子项 | `2026-11-21-issue152/`（`red.txt`、`green_pidprops.txt`、`real_multi_source_find.txt`、`real_out/real152_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
 
+### 41.1 先红后绿与设计摘要
 
+- **先红阶段**（`red.txt`，`RED_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidfind_searches_tags_and_full_pipelines_across_tabs_and_focuses_camera`（构造未升格 DXF 与已升格 `PID_AUTHOR` 混合双标签页，验证跨标签页去连字符位号检索跳转、双段管线子串全段高亮选中与双行仪表圈跳转聚焦），运行按预期在 `PIDFIND ALLTABS` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`18 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/find.rs`（`search_pid_entities`）：统一兼容未升格 `.dxf`/`.dwg`、未升格 `.pid` 原图与已升格 `PID_AUTHOR` 模型；支持四级精度排序（`0`=完全一致、`1`=忽略连字符/空格一致、`2`=前缀一致、`3`=子串命中）以及 `parse_sppid_line_number` 英制/公制规范化管线号双向等价匹配（如用清册公制线号 `150-PG-...` 精准命中图面英寸标注 `6"-PG-...`）；
+  2. **整条管线连通 BFS 全段聚拢**：当命中管线号时，从标注种子管段出发按 `6.5 mm` 端点连通容差向相连管段自动传播，一键聚拢整条管线的全部管段图元并计算联合重心；
+  3. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDFIND "<位号或线号关键字>" [ALLTABS] [NEXT]`，支持跨标签页自动切换、成员整组选中、视口相机平移聚焦及多匹配项无状态循环跳转。
+
+### 41.2 真实三源异构工程图纸（SPPID DXF + 原生 AutoCAD DXF + 超大型 `.pid` 原图）多标签页跳转实测
+
+| 目标标签页 | 样本形态 | 源图 SHA-256 前缀 | 跨标签页检索类型 | 自动切换与整组选中图元数 |
+|---|---|---|---|---|
+| `SP01` | 未升格 SPPID 拆分生产图 | `c0dd2cc4c75d` | 规范化工艺管线号 | **自动切换并全选 `6` 段相连管段** |
+| `LG01` | 未升格原生 AutoCAD 存量图 | `a0f05f81a655` | 散圆仪表位号 | **自动切换并整组选中 `2` 个成员图元** |
+| `PD01` | 已升格超大型真实 `.pid`（`5,576` 实体） | `ecc602494c4d` | 工艺设备位号 | **自动切换并整组选中 `4` 个多笔画成员图元** |
+
+### 41.3 固定门禁读数
+
+| 门禁项 | 改前读数（§40.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,228` 条（`7,152` 过 / `75` 忽略 / `1` 既有 `.pen`） | **`7,230` 条**（**`7,153` 过** / **`76` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 三源跨标签页检索），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `find.rs`、`mod.rs`、`pidprops.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |

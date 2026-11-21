@@ -9,9 +9,12 @@ pub mod class_map;
 pub mod drc;
 pub mod export;
 pub mod external_props;
+pub mod find;
 pub mod opc;
 pub mod promote;
 pub mod recognize;
+
+pub use find::{match_query_rank, search_pid_entities, PidFindHit, PidFindKind};
 
 pub use drc::{audit_sheet_drc, DrcFinding, DrcKind, DrcSeverity, DrcSummary, SheetDrcReport};
 

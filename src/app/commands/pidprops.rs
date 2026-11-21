@@ -33,7 +33,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDCONVERT",
         "PIDOPC",
         "PIDBOM",
-        "PIDDRC"
+        "PIDDRC",
+        "PIDFIND"
     ]
 });
 
@@ -271,6 +272,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_piddrc_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidfind_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -1598,6 +1602,126 @@ impl OpenCADStudio {
                 return Some(Task::none());
             }
         }
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidfind_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{search_pid_entities, OpcSheetInput};
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDFIND") {
+            return None;
+        }
+
+        let mut all_tabs = false;
+        let mut query_opt: Option<String> = None;
+        for tok in tokens.iter().skip(1) {
+            if tok.eq_ignore_ascii_case("ALLTABS") || tok.eq_ignore_ascii_case("ALL") {
+                all_tabs = true;
+            } else if tok.eq_ignore_ascii_case("NEXT") {
+                // Stateless cycle advancement is enabled automatically when re-running PIDFIND
+            } else if query_opt.is_none() {
+                query_opt = Some(tok.clone());
+            }
+        }
+
+        let Some(query) = query_opt.filter(|q| !q.trim().is_empty()) else {
+            self.command_line
+                .push_error("PIDFIND: 用法 PIDFIND \"<位号或线号关键字>\" [ALLTABS] [NEXT]。");
+            return Some(Task::none());
+        };
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<OpcSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+        let hits = search_pid_entities(&query, i, &sheet_inputs);
+        if hits.is_empty() {
+            self.command_line
+                .push_error(&format!("PIDFIND: 未找到匹配 \"{query}\" 的符号或管线。"));
+            return Some(Task::none());
+        }
+
+        let cur_tab = self.active_tab;
+        let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[cur_tab]
+            .scene
+            .selected_entities()
+            .into_iter()
+            .map(|(h, _)| h)
+            .collect();
+        let cur_pos = hits.iter().position(|h| {
+            h.tab_index == cur_tab
+                && !sel_set.is_empty()
+                && sel_set.len() == h.member_handles.len()
+                && h.member_handles.iter().all(|mh| sel_set.contains(mh))
+        });
+        let next_idx = cur_pos.map(|p| (p + 1) % hits.len()).unwrap_or(0);
+        let chosen = &hits[next_idx];
+        let dest_tab = chosen.tab_index;
+        let dest_handles = chosen.member_handles.clone();
+        let dx = chosen.x;
+        let dy = chosen.y;
+        let mtag = chosen.matched_tag.clone();
+        let cls = chosen.sppid_class.clone();
+        let dwg = chosen.drawing_name.clone();
+
+        if dest_tab < self.tabs.len() && dest_tab != self.active_tab {
+            let _ = self.update(Message::TabSwitch(dest_tab));
+            self.active_tab = dest_tab;
+        }
+        if dest_tab < self.tabs.len() {
+            self.tabs[dest_tab].scene.deselect_all();
+            if !dest_handles.is_empty() {
+                self.tabs[dest_tab].scene.select_entities(&dest_handles);
+            }
+            let zoomed = self.tabs[dest_tab].scene.zoom_to_entities(&dest_handles);
+            if !zoomed {
+                let mut cam = self.tabs[dest_tab].scene.camera.borrow_mut();
+                let z = cam.target.z;
+                cam.target = glam::DVec3::new(dx, dy, z);
+            }
+            self.refresh_properties();
+        }
+        self.command_line.push_output(&format!(
+            "PIDFIND [{}/{}]: 已定位 {mtag}（{cls}，图元={}，图纸={dwg}，坐标 {:.1}, {:.1}）。",
+            next_idx + 1,
+            hits.len(),
+            dest_handles.len(),
+            dx,
+            dy,
+        ));
         Some(self.finish_dispatch(cmd))
     }
 
@@ -5023,6 +5147,221 @@ mod tests {
                 "{}\n",
                 serde_json::to_string_pretty(&json!({"sheets": rows})).unwrap()
             ),
+        )
+        .unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidfind_searches_tags_and_full_pipelines_across_tabs_and_focuses_camera() {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let mut app = app();
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-152-01.dxf".to_string();
+        let (_, _, inst_h, inst_top_h, inst_bot_h, _) = seed_dxf_sheet_in_app(&mut app);
+
+        // Tab 2: promoted `PID_AUTHOR` sheet with valve `BV0209901B` at (740, 580) and 2-segment pipeline `100-PW-6205-CS150`
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-152-02.dxf".to_string();
+        let (v2_h, seg_a_h, seg_b_h) = {
+            let doc2 = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc2, "BALL VALVE TYPE 2", 6.0, 4.0);
+
+            let mut v2 = Insert::new("BALL VALVE TYPE 2", Vector3::new(740.0, 580.0, 0.0));
+            v2.common.layer = "11".to_string();
+            let v2_h = doc2.add_entity(document::EntityType::Insert(v2)).unwrap();
+            let mut vt2 =
+                Text::with_value("BV0209901B", Vector3::new(736.0, 586.0, 0.0)).with_height(2.5);
+            vt2.common.layer = "11".to_string();
+            doc2.add_entity(document::EntityType::Text(vt2)).unwrap();
+
+            let mut sa = Line::from_points(
+                Vector3::new(400.0, 300.0, 0.0),
+                Vector3::new(500.0, 300.0, 0.0),
+            );
+            sa.common.layer = "1".to_string();
+            let seg_a_h = doc2.add_entity(document::EntityType::Line(sa)).unwrap();
+
+            let mut sb = Line::from_points(
+                Vector3::new(500.0, 300.0, 0.0),
+                Vector3::new(500.0, 420.0, 0.0),
+            );
+            sb.common.layer = "1".to_string();
+            let seg_b_h = doc2.add_entity(document::EntityType::Line(sb)).unwrap();
+
+            let mut ll = Text::with_value("100-PW-6205-CS150", Vector3::new(430.0, 303.0, 0.0))
+                .with_height(2.5);
+            ll.common.layer = "11".to_string();
+            doc2.add_entity(document::EntityType::Text(ll)).unwrap();
+
+            (v2_h, seg_a_h, seg_b_h)
+        };
+        let _ = app.run_command_line("PIDPROMOTE");
+
+        // Switch back to unpromoted Tab 1 and search across tabs with hyphenated spelling `BV-0209901B`
+        let _ = app.update(Message::TabSwitch(tab1));
+        assert_eq!(app.active_tab, tab1);
+
+        let _ = app.run_command_line("PIDFIND BV-0209901B ALLTABS");
+        assert_eq!(
+            app.active_tab, tab2,
+            "PIDFIND ALLTABS must switch to Tab 2 where BV0209901B lives"
+        );
+        assert!(has_sel(&app, tab2, v2_h));
+        let cam2 = app.tabs[tab2].scene.camera.borrow().target;
+        assert!(
+            (cam2.x - 740.0).abs() < 25.0 && (cam2.y - 580.0).abs() < 25.0,
+            "camera must center on (740, 580), got {cam2:?}"
+        );
+
+        // Search pipeline substring `6205` -> selects ALL segments (`seg_a_h` AND `seg_b_h`) of `100-PW-6205-CS150`
+        let _ = app.run_command_line("PIDFIND 6205");
+        assert!(has_sel(&app, tab2, seg_a_h));
+        assert!(has_sel(&app, tab2, seg_b_h));
+
+        // Search `PT-02013 ALLTABS` from Tab 2 -> jumps back to unpromoted Tab 1 and selects instrument + 2-line texts
+        let _ = app.run_command_line("PIDFIND PT-02013 ALLTABS");
+        assert_eq!(app.active_tab, tab1);
+        assert!(has_sel(&app, tab1, inst_h));
+        assert!(has_sel(&app, tab1, inst_top_h));
+        assert!(has_sel(&app, tab1, inst_bot_h));
+        let cam1 = app.tabs[tab1].scene.camera.borrow().target;
+        assert!(
+            (cam1.x - 110.0).abs() < 25.0 && (cam1.y - 100.0).abs() < 25.0,
+            "camera must center on (110, 100), got {cam1:?}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads real SPPID DXF, native AutoCAD legacy DXF, and real .pid file into 3 tabs and verifies PIDFIND ALLTABS cross-tab symbol & full-pipeline search/focus"]
+    fn real_multi_source_pidfind_cross_tab_tag_and_pipeline_jump() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_raw) = std::env::var("OCS_PID_REAL152_SPPID_DXF") else {
+            println!("OCS_PID_REAL152_SPPID_DXF unset, skipping.");
+            return;
+        };
+        let Ok(legacy_raw) = std::env::var("OCS_PID_REAL152_LEGACY_DXF") else {
+            println!("OCS_PID_REAL152_LEGACY_DXF unset, skipping.");
+            return;
+        };
+        let Ok(pid_raw) = std::env::var("OCS_PID_REAL152_PID_FILE") else {
+            println!("OCS_PID_REAL152_PID_FILE unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL152_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real152"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let files = [
+            ("SP01", std::path::PathBuf::from(&sppid_raw)),
+            ("LG01", std::path::PathBuf::from(&legacy_raw)),
+            ("PD01", std::path::PathBuf::from(&pid_raw)),
+        ];
+
+        let mut app = app();
+        let mut tabs = Vec::new();
+        let mut shas = Vec::new();
+        for (idx, (cid, p)) in files.iter().enumerate() {
+            shas.push(format!("{:x}", Sha256::digest(std::fs::read(p).unwrap()))[..12].to_string());
+            if idx > 0 {
+                let _ = app.update(Message::TabNew);
+            }
+            let ti = app.active_tab;
+            app.tabs[ti].scene.document = crate::io::load_file(p).unwrap();
+            app.tabs[ti].tab_title = format!("{cid}.dxf");
+            tabs.push(ti);
+        }
+
+        // Promote PD01 (.pid) so all three representations coexist (unpromoted SPPID DXF, unpromoted Legacy DXF, promoted .pid)
+        let _ = app.update(Message::TabSwitch(tabs[2]));
+        let _ = app.run_command_line("PIDPROMOTE");
+
+        let sheet_boms: Vec<_> = tabs
+            .iter()
+            .map(|&ti| {
+                crate::io::pid_convert::extract_bom_from_documents(
+                    &[crate::io::pid_convert::BomSheetInput {
+                        drawing_name: "S",
+                        document: &app.tabs[ti].scene.document,
+                    }],
+                    &crate::io::pid_convert::ConvertOptions::default(),
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let pick_unique = |target_idx: usize, want_cat: &str| -> String {
+            let candidates = sheet_boms[target_idx]
+                .rows
+                .iter()
+                .filter(|r| r.category == want_cat)
+                .chain(sheet_boms[target_idx].rows.iter());
+            for row in candidates {
+                let unique = sheet_boms.iter().enumerate().all(|(oi, ob)| {
+                    oi == target_idx
+                        || ob.rows.iter().all(|orow| {
+                            crate::io::pid_convert::match_query_rank(&orow.item_tag, &row.item_tag)
+                                .is_none()
+                        })
+                });
+                if unique {
+                    return row.item_tag.clone();
+                }
+            }
+            sheet_boms[target_idx].rows[0].item_tag.clone()
+        };
+
+        let sp_pipe_tag = pick_unique(0, "Pipeline");
+        let lg_sym_tag = pick_unique(1, "Instrument");
+        let pd_sym_tag = pick_unique(2, "Equipment");
+
+        // 1. From Tab 2 (PD01), `PIDFIND <sp_pipe_tag> ALLTABS` jumps to Tab 0 (SP01) and selects multi-segment pipeline
+        let _ = app.update(Message::TabSwitch(tabs[2]));
+        let _ = app.run_command_line(&format!("PIDFIND \"{sp_pipe_tag}\" ALLTABS"));
+        assert_eq!(app.active_tab, tabs[0]);
+        let sp_pipe_sel = app.tabs[tabs[0]].scene.selected_entities().len();
+        assert!(sp_pipe_sel >= 1);
+
+        // 2. From Tab 0 (SP01), `PIDFIND <lg_sym_tag> ALLTABS` jumps to Tab 1 (LG01)
+        let _ = app.run_command_line(&format!("PIDFIND \"{lg_sym_tag}\" ALLTABS"));
+        assert_eq!(app.active_tab, tabs[1]);
+        let lg_sel = app.tabs[tabs[1]].scene.selected_entities().len();
+        assert!(lg_sel >= 1);
+
+        // 3. From Tab 1 (LG01), `PIDFIND <pd_sym_tag> ALLTABS` jumps to Tab 2 (PD01)
+        let _ = app.run_command_line(&format!("PIDFIND \"{pd_sym_tag}\" ALLTABS"));
+        assert_eq!(app.active_tab, tabs[2]);
+        let pd_sel = app.tabs[tabs[2]].scene.selected_entities().len();
+        assert!(pd_sel >= 1);
+
+        let sanitized = json!({
+            "tabs_loaded": 3,
+            "sppid_sha256_prefix": shas[0],
+            "legacy_sha256_prefix": shas[1],
+            "pid_sha256_prefix": shas[2],
+            "sppid_pipeline_entities_selected": sp_pipe_sel,
+            "legacy_symbol_entities_selected": lg_sel,
+            "pid_symbol_entities_selected": pd_sel,
+            "all_cross_tab_jumps_verified": true,
+        });
+        std::fs::write(
+            out_dir.join("real152_summary.json"),
+            format!("{}\n", serde_json::to_string_pretty(&sanitized).unwrap()),
         )
         .unwrap();
     }
