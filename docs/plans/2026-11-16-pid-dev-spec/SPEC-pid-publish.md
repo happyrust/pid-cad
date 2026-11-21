@@ -410,3 +410,31 @@ pub fn list_packages(target_dir: &Path, drawing_id: &str) -> Vec<PackageInfo>;
    - `VerifyReport` 不带 `ok`，由应答那一层加（与检查报告、材料清单同一做法）。
    - 已知限制：清单自己没有校验和。只改清单里不影响解析、也不影响对账的字段（比如 `published_by`），校验查不出来。
 7. **落位的细则**：目标已存在（目录、文件都算）→ `PUBLISH_TARGET_EXISTS`，先于自检；自检就是 `verify_package`，另要求清单的 `package_id` 与目标目录同名，否则也算自检不过（`PUBLISH_FAILED`、`verify`）；都过了才改名。改名失败时，目标已经有了就报 `PUBLISH_TARGET_EXISTS`，否则 `PUBLISH_FAILED`、`commit`。改名后把包里每个文件设为只读，设不成不报错，因为包已经落位了。
+
+### 11.3 `PUB-3`：`PIDPUBLISH CHECK`，前提与门禁（2026-11-22）
+
+**做了什么**（新文件 `src/app/commands/pidpublish.rs`；除了任务列的 `commands/mod.rs`、`command_driver/utilities.rs`、`collab/apply.rs`，还改了 `commands/piddrc.rs`、`commands/pidindex.rs`、`collab/unsynced.rs`）：
+
+- 命令 `PIDPUBLISH [CHECK] [<目标目录>] [REV <修订号>] [ALLOW_OFFLINE]`。按 §3.4 的先后过前提；都满足后取规则和主数据，扫项目（要读盘的在后台读，读完接着做）；扫完再过一遍前提，然后在扫好的项目上算门禁。最后说出发到哪里、第几版、四项门禁的计数、前 10 条没豁免的错误、重复位号的各处、读不出来的图，以及能不能发布（不能时错误码 `PUBLISH_BLOCKED`）。`CHECK` 和发布在这一段做的事相同，都不写任何东西。
+- `publish_gates(扫好的项目, 图号, 规则, 主数据)`：门禁这一段，不碰命令行和程序状态（2,000 个对象的计时量的就是它）。当前图的摘要就是这次扫描做的那一份，检查和数重复位号都用它。
+- 错误码 `PUBLISH_UNSAVED`、`PUBLISH_FILE_CHANGED`、`PUBLISH_TARGET_INVALID`、`PUBLISH_REVISION_INVALID`；`PUBLISH_BLOCKED`、`PUBLISH_TARGET_EXISTS` 和三个协同码用 `publish_pkg` 的。
+- `mod.rs` 登记模块、分派和命令表；`utilities.rs` 把 `PIDPUBLISH` 登记成整行命令；`apply.rs` 让只读会话按子命令词放行 `CHECK`、`LIST`、`VERIFY`，别的写法都算发布，在命令闸门拒（`COLLAB_READONLY`）。
+- `unsynced.rs` 新加 `publish_collab_input`：从标签页和协同状态取 `collab_preconditions` 要的输入（有没有同步记录、队列条数、有没有标不一致或这次连接对不上、是不是连着并补齐）。「有没有同步记录」与同步状态判「离线」用同一个条件，抽成了 `has_record`。
+- `piddrc.rs`：`Check` 带上触发时机，`PIDCHECK`、`pid_check` 是「按需」，新加的 `Check::before_publish` 是「发布前」；`check_project`、`pidcheck_load_rules`、`listed` 放开给发布用（任务说的「DRC-12 的入口函数」就是 `check_project`）。`pidindex.rs`：扫描排着的事多一种「扫完接着发布」。
+
+**与规格、任务写法不同的：**
+
+1. **发布的写法这一步还不出包。** 前提和门禁都过时报一行错误「出包还没接上，没有发布」，不带错误码，什么也不写；`PUB-4` 接上。`LIST`、`VERIFY` 这一步报「还没有这一项」，由 `PUB-5` 做。
+2. **`CHECK` 也收目标目录、`REV` 和 `ALLOW_OFFLINE`。** §5.2 的 `PIDPUBLISH CHECK` 没写参数；这里与发布同一套写法，查的是「照这样发布能不能成」，目标目录和修订号也按写的算。`ALLOW_OFFLINE` 是离线规格 §5.7 定的写法，§5.2 的发布写法里还没有它。
+3. **只读会话里 `CHECK` 照查门禁，最后说这个会话发布不了。** 门禁都过时，错误码是只读的码（`COLLAB_READONLY`）；门禁没过时仍是 `PUBLISH_BLOCKED`，前面加一行提示说会话只读。§3.4 把「不是只读会话」列为前提、不满足不做检查，而 §5.2 又说只读会话允许 `CHECK`；这里取后者。发布的写法在命令闸门就被拒，不扫项目也不做检查。
+4. **前提多一条：当前图要在项目的图纸里。** 图号、项目目录都从这里来，门禁也要跨图查。项目只认目录里的 `.dwg`，不在里面的报 `INDEX_NO_PROJECT_DIR`；列图纸出错时报项目索引给的码，原样透出（与 §3.6 末行同一做法）。
+5. **「目标目录能建、能写」只看路径。** 目标在的话要是目录；不在的话，往上找到的第一个在的要是目录。检查不写任何东西（§5.2），所以不建也不试写；建不出来、写不了的（权限、只读盘）留给 `PUB-4` 真去建临时目录时报。
+
+**规格没写到、这里定下的：**
+
+1. **前提的先后**：没保存过、有没保存的修改（`PUBLISH_UNSAVED`）→ 磁盘上的文件变了（`PUBLISH_FILE_CHANGED`）→ 协同前提 → 当前图在项目里 → 目标目录（`PUBLISH_TARGET_INVALID`）→ 修订号（`PUBLISH_REVISION_INVALID`）→ 这一版的包已经有了（`PUBLISH_TARGET_EXISTS`），报第一条不满足的。只读会话不在这个序列里（见上第 3 条）。
+2. **文件变没变**：现取的指纹与标签页记的 `disk_fingerprint` 相等才算没变；没记到、取不到都算变了（§3.4「无法确认」）。网页版没有本机文件，一律算变了。
+3. **扫完再过一遍前提。** 扫项目要读盘时在后台读，这期间图可能被改、被存、被关。扫完先按标签页的 `id` 找回那张图（关掉了就说一声），再从头过一遍前提，不满足就照前提报，不算门禁。规则和主数据仍用起头时取的那份（与 `PIDCHECK` 相同）。
+4. **命令行的写法**：子命令词只认紧跟在 `PIDPUBLISH` 后面、没加引号的 `CHECK`、`LIST`、`VERIFY`；`REV`、`ALLOW_OFFLINE` 不分大小写、不加引号，先后不论；别的词是目标目录，加了双引号的一律算目录（目录名有空格就加引号）。`REV` 没写值或写了两次、`ALLOW_OFFLINE` 写了两次、目录写了两个或写成空串、引号没配对，都报写法错（不带错误码）。目标目录的相对路径从图纸所在目录算，不写时是 `pid-publish`。
+5. **修订号**：`REV` 后面要是正整数（`u32`），且不小于下一版（已有的最大修订号加一），否则 `PUBLISH_REVISION_INVALID`；可以跳号（已有 r002 时写 `REV 7` 就是 r007）。
+6. **命令行上说的**：一行「发到哪里、第几版」；按 `ALLOW_OFFLINE` 放行时一行提示；一行计数（错误、警告、提示、已豁免的条数，重复位号个数，主数据状态，项目里的图读没读全）；没豁免的错误按检查报告的顺序列前 10 条，多的说还有几条；每个重复位号一行，列出各处（图号和坐标）；读不出来的图各一行；最后一句是结论。`PIDCHECK` 记着的结果不用也不改。

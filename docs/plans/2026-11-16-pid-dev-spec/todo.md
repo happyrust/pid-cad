@@ -990,14 +990,15 @@
 
 - **做什么**：新建 `src/app/commands/pidpublish.rs`，先做流程的前半段（§4）。前提（§3.4）：图保存过且没有未保存的修改，否则 `PUBLISH_UNSAVED`；现取的文件指纹与标签页记的 `disk_fingerprint` 不同或标签页没记到指纹，`PUBLISH_FILE_CHANGED`；只读会话 `COLLAB_READONLY`；目标目录与修订号不合法是 `PUBLISH_TARGET_INVALID` / `PUBLISH_TARGET_EXISTS` / `PUBLISH_REVISION_INVALID`。前提满足后：当前图的摘要只做一次，扫描项目建索引，**现做一次**规则检查（`scope: drawing`、`cross_drawing: true`、触发时机 `发布前`，调 DRC-12 的入口函数），数重复位号，读主数据，算四项门禁。`PIDPUBLISH CHECK` 只做到这里，不写任何东西。`PIDPUBLISH` 带参数，登记成整行命令；只读会话里 `CHECK`、`LIST`、`VERIFY` 允许，发布本身拒绝（按子命令词判）。2026-11-17 加（离线规格 §5.7）：前提里加三条协同前提，只对图里有同步记录的图生效：队列不空 `COLLAB_UNSYNCED`；标了不一致或这次连接对不上 `COLLAB_DIVERGED`；没连着或没补齐 `COLLAB_OFFLINE`。取数调 `PUB-1` 的 `collab_preconditions`。
 - **验收**：
-  - [ ] 有未保存的修改 → `PUBLISH_UNSAVED`；文件被别的程序改过 → `PUBLISH_FILE_CHANGED`；只读会话里发布 → `COLLAB_READONLY`，而 `PIDPUBLISH CHECK` 仍可用；都不写任何东西。
-  - [ ] 一张有错误的图：`PIDPUBLISH CHECK` 报出四项门禁的计数和前若干条错误，目标目录里没有新增任何文件或目录，也没有新快照；检查是现做的（先留下一份「没有错误」的旧结果，再改出错误并保存，仍然被拦）。
-  - [ ] 2,000 个对象的图，门禁部分（不含项目扫描）不超过 1 秒。
-  - [ ] 协同前提（2026-11-17 加）：带同步记录的图，队列不空、不一致、离线三种情形下 `PIDPUBLISH CHECK` 各报出对应的码；没有同步记录的图不受影响。
+  - [x] 有未保存的修改 → `PUBLISH_UNSAVED`；文件被别的程序改过 → `PUBLISH_FILE_CHANGED`；只读会话里发布 → `COLLAB_READONLY`，而 `PIDPUBLISH CHECK` 仍可用；都不写任何东西。
+  - [x] 一张有错误的图：`PIDPUBLISH CHECK` 报出四项门禁的计数和前若干条错误，目标目录里没有新增任何文件或目录，也没有新快照；检查是现做的（先留下一份「没有错误」的旧结果，再改出错误并保存，仍然被拦）。
+  - [x] 2,000 个对象的图，门禁部分（不含项目扫描）不超过 1 秒。
+  - [x] 协同前提（2026-11-17 加）：带同步记录的图，队列不空、不一致、离线三种情形下 `PIDPUBLISH CHECK` 各报出对应的码；没有同步记录的图不受影响。
 - **验证**：`cargo test --offline --locked --lib pidpublish`；`cargo test --offline --locked --lib -- --ignored publish_gates_2000`
 - **依赖**：PUB-1；DRC-12；IX-6；IX-4（合成图）；OFF-9（协同前提要读的状态）
 - **文件**：新建 `src/app/commands/pidpublish.rs`；`src/app/commands/mod.rs`、`src/app/command_driver/utilities.rs`、`src/app/collab/apply.rs`
 - **规模**：M
+- **补（2026-11-22）**：在 `pid-stage-d` 上接着 PUB-2（`90098d1c2`）做，一个提交。代码除了「文件」一栏的四个，还改了三个（另有发布规格和本文件）：`commands/piddrc.rs`（`Check` 带上触发时机，新加 `Check::before_publish`；`check_project`、`pidcheck_load_rules`、`listed` 放开给发布用），`commands/pidindex.rs`（扫完接着发布），`collab/unsynced.rs`（`publish_collab_input`，「有没有同步记录」与同步状态共用 `has_record`）。`mod.rs` 里顺手把紧挨着新模块的 `pidplot`、`pidprops` 两行声明排好序，这是 rustfmt 本来就要改的一处。与任务写法不同、或任务没有说的：发布的写法这一步过完门禁就停，报「出包还没接上，没有发布」，什么也不写，`PUB-4` 接上；`LIST`、`VERIFY` 报「还没有这一项」，`PUB-5` 做；`CHECK` 也收目标目录、`REV` 和 `ALLOW_OFFLINE`（离线规格 §5.7 的写法）；只读会话里 `CHECK` 照查门禁，门禁都过了报 `COLLAB_READONLY`，没过仍报 `PUBLISH_BLOCKED` 并提示会话只读，发布的写法在命令闸门就拒；前提多一条「当前图在项目的图纸里」（`INDEX_NO_PROJECT_DIR`，项目只认目录里的 `.dwg`）；「目标目录能建、能写」只看路径、不建不试写，写不了的留给 `PUB-4`；前提按「保存 → 文件指纹 → 协同 → 项目 → 目标目录 → 修订号 → 包已有」的先后报第一条；扫项目在后台读盘时图可能又改了，扫完按标签页 `id` 找回图再过一遍前提；修订号可以跳号；`PIDCHECK` 记着的结果不用也不改。这些记在发布规格新加的 §11.3。**先红后绿**：先在命令入口、参数解析、门禁计算三处放空壳（命令什么也不说，参数一律当没写，门禁一律算不出），新加的 9 条都编得过、都败在断言上（另 1 条是默认不跑的计时）。实现后第一遍 3 过 6 败，都是测试自己的问题：一是「什么也没写」的对比里，编辑租约的锁文件大小从 0 变成 117。Windows 目录项里的大小滞后（拿租约时就写了），改成按路径取大小。二是 `PIDPIPE run` 画的不是「管线」，触发不了 DR-001，改用实际会报的 DR-010（泵没填名称）和 DR-102（跨图重号）；「现做检查」那条改成空图存盘时没有错误，放一台泵再存盘后拦下。三是协同那条把命令前缀写成了 `PIDPUBLISH CHECK ALLOW_OFFLINE:`。改后 9 条全过。**读数**：`pidpublish` 9 条全过；计时那条单跑也过：2,000 个对象的合成图，门禁部分三次 85.20 / 93.18 / 72.03 ms，中位数 85.20 ms（预算 1 秒；做摘要、建索引另算，76 – 108 ms），现做的检查得错误 701、警告 400、提示 100 条，重复位号 0；只读放行所在的 `collab::apply` 39 条全过；主程序库 7602 条，7526 通过、73 默认不跑、3 失败（比对设计稿的三条，与起点相同），多的 10 条是新加的（9 条加 1 条计时）；编译警告 52；clippy 656 / 1051，与起点相同，改动的七个文件没有新告警；`--tests` 那一遍只有 `mod.rs` 原有的一条（多余的 `.to_string()`）因为上面多了 7 行，从 1976 行挪到 1983 行，cargo 报的重复数是 637（起点 636），差在 `viewport_snap.rs` 那条印的次数；格式检查：新文件 rustfmt 要改的 0 处，七个文件新增 0，`mod.rs` 本文件要改的从 4 处降到 3 处；架构检查上行依赖 33 对、183 个文件，输出与起点一字不差；SPPID 脚本测试 185 条全过。**新基线**：主程序库 7602 条（7526 / 73 / 3）。
 
 ### PUB-4 【接线】`PIDPUBLISH`：出包
 

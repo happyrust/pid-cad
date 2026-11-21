@@ -205,12 +205,28 @@ fn stale_by_drawing(
 }
 
 /// 扫好项目要做的检查（`commands::pidindex` 的扫描排着的一件，或者操作扫好了当场查）：查哪些图，
-/// 用的规则和主数据。规则和主数据在起头时取（§4.1 的先后），摘要的连接容差照这套规则。
+/// 用的规则和主数据，按哪个触发时机查。规则和主数据在起头时取（§4.1 的先后），摘要的连接容差照
+/// 这套规则。
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Check {
     range: Range,
     pub(super) rules: RuleSet,
     master: Resolved,
+    /// `PIDCHECK`、`pid_check` 是「按需」，发布前现做的那次是「发布前」。
+    trigger: Trigger,
+}
+
+impl Check {
+    /// 发布前现做的检查（`SPEC-pid-publish.md` §4）：只报要发布的那张图（图号 `drawing_id`）上的，
+    /// 跨图查，触发时机「发布前」。
+    pub(super) fn before_publish(drawing_id: String, rules: RuleSet, master: Resolved) -> Self {
+        Self {
+            range: Range::Drawing(drawing_id),
+            rules,
+            master,
+            trigger: Trigger::BeforePublish,
+        }
+    }
 }
 
 /// 扫项目的检查报哪些图上的结果（§4.2），项目级规则都跑。
@@ -320,7 +336,7 @@ impl OpenCADStudio {
 
     /// 生效的规则：内置包，第 `i` 个标签页的图所在目录有项目包就叠上（§3.2）。读不出来时是错误码
     /// 和「哪个包有错：错在哪」，不退回去只用内置包（§4.1）。
-    fn pidcheck_load_rules(&self, i: usize) -> Result<RuleSet, (&'static str, String)> {
+    pub(super) fn pidcheck_load_rules(&self, i: usize) -> Result<RuleSet, (&'static str, String)> {
         let dir = crate::io::drawing_dir(&self.tabs[i].scene.document);
         builtin_rules::load(dir).map_err(|error| {
             let pack = match dir {
@@ -367,6 +383,7 @@ impl OpenCADStudio {
                 range,
                 rules,
                 master,
+                trigger: Trigger::OnDemand,
             },
         )
     }
@@ -891,6 +908,7 @@ impl OpenCADStudio {
                 range,
                 rules,
                 master,
+                trigger: Trigger::OnDemand,
             },
         );
         let answer = answer_of(&report, include_waived);
@@ -1070,11 +1088,12 @@ impl OpenCADStudio {
 /// 在扫好的项目上查（§4.1、§4.2），得到结果和查了的图（图号）。查全项目时范围是读得出来的
 /// 全部图；查节点时是项目文件里归在这个节点及其下级的图；跨图查一张图时是这张图。范围外的
 /// 作对端（`others`），项目级规则都跑。不碰命令行和程序状态。
-fn check_project(scanned: &Scanned, check: Check) -> (CheckReport, Vec<String>) {
+pub(super) fn check_project(scanned: &Scanned, check: Check) -> (CheckReport, Vec<String>) {
     let Check {
         range,
         rules,
         master,
+        trigger,
     } = check;
     let nodes: HashSet<&str> = match (&range, &master) {
         (Range::Pbs(node), Resolved::Configured { data, .. }) => {
@@ -1108,7 +1127,7 @@ fn check_project(scanned: &Scanned, check: Check) -> (CheckReport, Vec<String>) 
         index: Some(&scanned.index),
         others: &others,
         waivers: &scanned.waivers,
-        trigger: Trigger::OnDemand,
+        trigger,
         scope: Scope {
             kind,
             drawing_id,
@@ -1247,7 +1266,7 @@ fn no_task(answer: Value) -> (Value, Task<Message>) {
 
 /// 列在命令行上的一条结果：严重度、规则号、（查项目时）图号、消息，括号里是对象键——豁免
 /// 时用它。
-fn listed(result: &CheckResult, with_drawing: bool) -> String {
+pub(super) fn listed(result: &CheckResult, with_drawing: bool) -> String {
     let drawing = &result.object.drawing_id;
     let at = if with_drawing && !drawing.is_empty() {
         format!("{drawing} ")

@@ -29,6 +29,9 @@
 //! `PIDBOM PROJECT`、`PIDBOM PBS` 和带范围的 `PIDBOM EXPORT`（`commands::pidbom`）也用这里的
 //! 扫描，按默认的连接容差，扫完接着算清单。
 //!
+//! `PIDPUBLISH`、`PIDPUBLISH CHECK`（`commands::pidpublish`）也用这里的扫描，摘要同 `PIDCHECK`
+//! 按规则包的连接容差做，扫完接着现做发布前的检查、算门禁。
+//!
 //! `PIDLOCATE` 不给图号时先在当前图上找，有就不扫项目；没有就扫项目（同上，要读盘就
 //! 在后台读，读完接着找）：只有一张图上有就去那一张，几张图上都有就逐处列出来
 //! （`LOCATE_AMBIGUOUS`），哪张都没有是 `LOCATE_NOT_FOUND`。给了图号就扫项目、只看那一张。
@@ -46,6 +49,7 @@
 
 use super::pidbom::BomJob;
 use super::piddrc::Check;
+use super::pidpublish::PublishJob;
 use super::*;
 use crate::pid::drc::Waiver;
 use crate::pid::project_index::{
@@ -242,8 +246,8 @@ struct Scan {
     tolerance: f64,
 }
 
-/// 扫完接着做的事：`PIDINDEX` 的三种说法，`PIDLOCATE` 接着找，`PIDCHECK` 接着查，或者
-/// `PIDBOM` 接着算清单。
+/// 扫完接着做的事：`PIDINDEX` 的三种说法，`PIDLOCATE` 接着找，`PIDCHECK` 接着查，
+/// `PIDBOM` 接着算清单，或者 `PIDPUBLISH` 接着算门禁。
 #[derive(Clone, Debug, PartialEq)]
 enum Then {
     Overview,
@@ -252,6 +256,7 @@ enum Then {
     Locate(Locate),
     Check(Box<Check>),
     Bom(Box<BomJob>),
+    Publish(Box<PublishJob>),
 }
 
 impl Then {
@@ -262,13 +267,16 @@ impl Then {
             Self::Locate(_) => "PIDLOCATE",
             Self::Check(_) => "PIDCHECK",
             Self::Bom(_) => "PIDBOM",
+            Self::Publish(job) => job.verb(),
         }
     }
 
-    /// 做摘要用的连接容差：`PIDCHECK` 用它的规则包的（`SPEC-pid-drc.md` §4.1），其余用默认的。
+    /// 做摘要用的连接容差：`PIDCHECK` 和发布前的检查用它们的规则包的（`SPEC-pid-drc.md` §4.1），
+    /// 其余用默认的。
     fn tolerance(&self) -> f64 {
         match self {
             Self::Check(check) => check.rules.connect_tolerance,
+            Self::Publish(job) => job.tolerance(),
             Self::Overview | Self::Duplicates | Self::Links | Self::Locate(_) | Self::Bom(_) => {
                 DEFAULT_TOLERANCE
             }
@@ -600,6 +608,12 @@ impl OpenCADStudio {
         self.pidindex_start(i, Then::Bom(Box::new(job)))
     }
 
+    /// `PIDPUBLISH`、`PIDPUBLISH CHECK`（`commands::pidpublish`）：扫第 `i` 个标签页的图所在的
+    /// 项目目录，扫完接着算门禁。
+    pub(super) fn pidindex_publish(&mut self, i: usize, job: PublishJob) -> Task<Message> {
+        self.pidindex_start(i, Then::Publish(Box::new(job)))
+    }
+
     /// 扫当前图所在的项目目录，扫完做 `then`。缓存里的都没变就当场扫完、当场说；有要从
     /// 磁盘读的挪到后台读（§4），这里先交差，读完接着说。已经在扫同一个目录就排在它后面。
     /// 没有项目目录、列图或建索引出错时在命令行连同错误码说。
@@ -847,6 +861,7 @@ impl OpenCADStudio {
             }
             Then::Check(check) => self.pidcheck_scanned(project_dir, scanned, *check),
             Then::Bom(job) => self.pidbom_scanned(scanned, *job),
+            Then::Publish(job) => self.pidpublish_scanned(scanned, *job),
         }
         Task::none()
     }

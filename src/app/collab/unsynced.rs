@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 
 use crate::app::OpenCADStudio;
 use crate::pid::collab_state::{self, Diverged};
+use crate::pid::publish_pkg::CollabInput;
 use crate::ui::window::pid_collab::SyncLine;
 
 /// §4.4's `state` of a step still in the queue.
@@ -238,13 +239,35 @@ impl OpenCADStudio {
                 None => ("ok", None),
             };
         }
-        let recorded = tab.is_some_and(|i| {
-            collab_state::load_state(&self.tabs[i].scene.document).is_some()
-                || (self.collab.document == Some(self.tabs[i].id)
-                    && self.collab.had_session
-                    && self.collab.repo_id.is_some())
-        });
+        let recorded = tab.is_some_and(|i| self.has_record(i));
         (if recorded { "offline" } else { "none" }, None)
+    }
+
+    /// Whether tab `i`'s drawing belongs to a repository: its file brought a
+    /// sync record, or a session of this run has taken it in.
+    fn has_record(&self, i: usize) -> bool {
+        collab_state::load_state(&self.tabs[i].scene.document).is_some()
+            || (self.collab.document == Some(self.tabs[i].id)
+                && self.collab.had_session
+                && self.collab.repo_id.is_some())
+    }
+
+    /// What publishing asks of tab `i`'s drawing's standing with the room
+    /// (`SPEC-collab-offline-sync.md` §5.7), for
+    /// [`crate::pid::publish_pkg::collab_preconditions`]: whether it has a
+    /// sync record at all, how many steps are still to go to the room,
+    /// whether it is known to be apart or this connection could not line it
+    /// up, and whether a session has it read in, connected and caught up.
+    /// Whether to publish unreconciled is the caller's to say.
+    pub(in crate::app) fn publish_collab_input(&self, i: usize) -> CollabInput {
+        let here = self.read_in(i) && self.collab.session_id.is_some();
+        CollabInput {
+            has_record: self.has_record(i),
+            queued: self.queued_entries(i).len(),
+            diverged: self.diverged_of(i).is_some() || (here && self.collab.not_aligned.is_some()),
+            caught_up: here && self.collab.connected && self.collab.catching_up.is_none(),
+            allow_offline: false,
+        }
     }
 
     /// What tab `i`'s drawing is known to be apart from the room for: the

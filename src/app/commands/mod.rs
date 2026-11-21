@@ -83,8 +83,9 @@ pub(in crate::app) mod pidmasterdata;
 pub(in crate::app) mod pidmove;
 pub(in crate::app) mod pidpalette;
 mod pidpipe;
-pub(in crate::app) mod pidprops;
 mod pidplot;
+pub(in crate::app) mod pidprops;
+mod pidpublish;
 mod pidsnapshot;
 mod plotvars;
 mod point_cloud;
@@ -964,6 +965,9 @@ impl OpenCADStudio {
         if let Some(t) = self.dispatch_piddiff(cmd, i) {
             return Some(t);
         }
+        if let Some(t) = self.dispatch_pidpublish(cmd, i) {
+            return Some(t);
+        }
         None
     }
 
@@ -1679,6 +1683,9 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDPALETTE",
         "PIDPIPE",
         "PIDPLOT",
+        // Publishing the current drawing as a numbered package
+        // (`pid::publish_pkg`), or only checking whether it may be.
+        "PIDPUBLISH",
         "PIDRELEASE",
         // Which screen of the P&ID module is showing (`app::pid_shell`).
         "PIDSCREEN",

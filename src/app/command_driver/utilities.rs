@@ -1425,6 +1425,10 @@ impl OpenCADStudio {
             // `PIDDIFF <a> [<b>] [EXPORT <file>]` likewise: the bare verb only
             // says how it is written.
             || tokens[0].eq_ignore_ascii_case("PIDDIFF")
+            // `PIDPUBLISH CHECK`, `PIDPUBLISH <folder> REV <n>` and the rest
+            // likewise: the bare verb would first publish to the default
+            // folder.
+            || tokens[0].eq_ignore_ascii_case("PIDPUBLISH")
         {
             return self.dispatch_command(cmd);
         }
