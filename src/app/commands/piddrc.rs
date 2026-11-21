@@ -1132,7 +1132,7 @@ fn verb_of(range: &Range) -> &'static str {
 }
 
 /// 节点号 `node` 在不在主数据的 PBS 表里（§3.8 的 `PBS_NODE_UNKNOWN`）；不在时说为什么。
-fn pbs_known(master: &Resolved, node: &str) -> Result<(), String> {
+pub(super) fn pbs_known(master: &Resolved, node: &str) -> Result<(), String> {
     match master {
         Resolved::Configured { data, .. } if data.pbs_subtree(node).is_empty() => {
             Err(format!("主数据的 PBS 表里没有节点 {node}"))

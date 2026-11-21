@@ -73,6 +73,7 @@ mod pdf_underlay;
 mod pidbackup;
 pub(in crate::app) mod pidbackupexport;
 pub(in crate::app) mod pidbackuppdf;
+pub(in crate::app) mod pidbom;
 mod pidbulk;
 mod pidconnector;
 pub(in crate::app) mod piddrc;
@@ -953,6 +954,9 @@ impl OpenCADStudio {
         if let Some(t) = self.dispatch_piddrc(cmd, i) {
             return Some(t);
         }
+        if let Some(t) = self.dispatch_pidbom(cmd, i) {
+            return Some(t);
+        }
         None
     }
 
@@ -1634,6 +1638,10 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDBACKUPEXPORT",
         "PIDBACKUPOPEN",
         "PIDBACKUPPDF",
+        // The P&ID bill of materials (`pid::bom`): the current drawing, the
+        // project or one PBS node totalled by kind, and the list written out
+        // as CSV, XLSX or JSON.
+        "PIDBOM",
         "PIDBREAK",
         // The P&ID design rule check (`pid::drc`): the current drawing, the
         // project or one PBS node checked against the rules, the rules in

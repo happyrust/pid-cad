@@ -26,6 +26,9 @@
 //! 摘要按规则包的连接容差做，这里的命令和自动化操作用默认的：缓存记着做摘要用的容差，
 //! 容差不同就重读。读图时顺带读出图里记着的豁免，一起记着。
 //!
+//! `PIDBOM PROJECT`、`PIDBOM PBS` 和带范围的 `PIDBOM EXPORT`（`commands::pidbom`）也用这里的
+//! 扫描，按默认的连接容差，扫完接着算清单。
+//!
 //! `PIDLOCATE` 不给图号时先在当前图上找，有就不扫项目；没有就扫项目（同上，要读盘就
 //! 在后台读，读完接着找）：只有一张图上有就去那一张，几张图上都有就逐处列出来
 //! （`LOCATE_AMBIGUOUS`），哪张都没有是 `LOCATE_NOT_FOUND`。给了图号就扫项目、只看那一张。
@@ -41,6 +44,7 @@
 //! 「路径 + 大小 + 修改时间」记着原因，文件没变就照这个原因算，轮询时不反复读；命令照旧
 //! 每次重读。
 
+use super::pidbom::BomJob;
 use super::piddrc::Check;
 use super::*;
 use crate::pid::drc::Waiver;
@@ -238,7 +242,8 @@ struct Scan {
     tolerance: f64,
 }
 
-/// 扫完接着做的事：`PIDINDEX` 的三种说法，`PIDLOCATE` 接着找，或者 `PIDCHECK` 接着查。
+/// 扫完接着做的事：`PIDINDEX` 的三种说法，`PIDLOCATE` 接着找，`PIDCHECK` 接着查，或者
+/// `PIDBOM` 接着算清单。
 #[derive(Clone, Debug, PartialEq)]
 enum Then {
     Overview,
@@ -246,6 +251,7 @@ enum Then {
     Links,
     Locate(Locate),
     Check(Box<Check>),
+    Bom(Box<BomJob>),
 }
 
 impl Then {
@@ -255,6 +261,7 @@ impl Then {
             Self::Overview | Self::Duplicates | Self::Links => "PIDINDEX",
             Self::Locate(_) => "PIDLOCATE",
             Self::Check(_) => "PIDCHECK",
+            Self::Bom(_) => "PIDBOM",
         }
     }
 
@@ -262,7 +269,9 @@ impl Then {
     fn tolerance(&self) -> f64 {
         match self {
             Self::Check(check) => check.rules.connect_tolerance,
-            Self::Overview | Self::Duplicates | Self::Links | Self::Locate(_) => DEFAULT_TOLERANCE,
+            Self::Overview | Self::Duplicates | Self::Links | Self::Locate(_) | Self::Bom(_) => {
+                DEFAULT_TOLERANCE
+            }
         }
     }
 }
@@ -585,6 +594,12 @@ impl OpenCADStudio {
         self.pidindex_start(i, Then::Check(Box::new(check)))
     }
 
+    /// `PIDBOM PROJECT`、`PIDBOM PBS`、带范围的 `PIDBOM EXPORT`（`commands::pidbom`）：扫第 `i`
+    /// 个标签页的图所在的项目目录，扫完接着算清单。
+    pub(super) fn pidindex_bom(&mut self, i: usize, job: BomJob) -> Task<Message> {
+        self.pidindex_start(i, Then::Bom(Box::new(job)))
+    }
+
     /// 扫当前图所在的项目目录，扫完做 `then`。缓存里的都没变就当场扫完、当场说；有要从
     /// 磁盘读的挪到后台读（§4），这里先交差，读完接着说。已经在扫同一个目录就排在它后面。
     /// 没有项目目录、列图或建索引出错时在命令行连同错误码说。
@@ -831,6 +846,7 @@ impl OpenCADStudio {
                 return self.pidlocate_found(project_dir, index, &scanned.summaries, locate);
             }
             Then::Check(check) => self.pidcheck_scanned(project_dir, scanned, *check),
+            Then::Bom(job) => self.pidbom_scanned(scanned, *job),
         }
         Task::none()
     }
@@ -1253,7 +1269,7 @@ impl OpenCADStudio {
     /// 第 `i` 个标签页的图在项目里叫什么（§3.1、§3.7）：存过盘的照项目文件 `drawings[]`，
     /// 没写的取文件名去掉扩展名；没存过的图号是空的、没有文件。项目文件读不出来、两个
     /// 文件同号时报错。
-    fn drawing_meta(&self, i: usize) -> Result<SummaryMeta, IndexError> {
+    pub(super) fn drawing_meta(&self, i: usize) -> Result<SummaryMeta, IndexError> {
         let document = &self.tabs[i].scene.document;
         let (Some(project_dir), Some(source)) = (
             crate::io::drawing_dir(document),
@@ -1743,7 +1759,7 @@ fn link_end(end: &LinkEnd) -> String {
 }
 
 /// `(x, y)`，最多三位小数，去掉末尾的 0。
-fn point([x, y]: [f64; 2]) -> String {
+pub(super) fn point([x, y]: [f64; 2]) -> String {
     format!("({}, {})", number(x), number(y))
 }
 

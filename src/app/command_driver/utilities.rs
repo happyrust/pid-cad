@@ -1416,6 +1416,9 @@ impl OpenCADStudio {
             // `PIDCHECK PROJECT`, `PIDCHECK PBS <node>` and the rest likewise:
             // the bare verb would first check the current drawing.
             || tokens[0].eq_ignore_ascii_case("PIDCHECK")
+            // `PIDBOM PROJECT`, `PIDBOM EXPORT <file> PBS <node>` and the rest
+            // likewise: the bare verb would first total the current drawing.
+            || tokens[0].eq_ignore_ascii_case("PIDBOM")
         {
             return self.dispatch_command(cmd);
         }

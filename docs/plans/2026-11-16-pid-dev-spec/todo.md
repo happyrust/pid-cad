@@ -830,13 +830,14 @@
 
 - **做什么**：新建 `src/app/commands/pidbom.rs`。一个入口函数「取范围内各图的摘要（当前图现做，其余图经项目扫描）→ `bom::build`」，命令、接口、以后的面板和发布都调它。命令（§5.2）：`PIDBOM`、`PIDBOM PROJECT`、`PIDBOM PBS <节点号>`、`PIDBOM EXPORT <文件> [PROJECT | PBS <节点号>]`。导出的格式由扩展名决定：CSV 用 `csv_bytes`，XLSX 用 `write_extraction_file`，JSON 是 §3.2 的对象缩进 2 格；副表另写到同目录的 `<文件名>-pipe-summary.<扩展名>`（JSON 除外）；目标文件已存在时覆盖；有错就不写文件。命令不改图，整个进只读允许名单；带参数，登记成整行命令。（`PIDBOM SNAPSHOT` 在 BOM-6。）
 - **验收**：
-  - [ ] 用命令建图（泵、容器、带阀门的管路、仪表），`PIDBOM` 报出的各类行数、管长合计、跳过数正确；前后图纸的「已修改」状态不变。
-  - [ ] 三种格式导出后读回与清单一致（XLSX 用 `calamine` 读回，JSON 解析回同一份清单）；有重复位号时报 `BOM_DUPLICATE_TAG` 且没有写文件；扩展名不支持 → `BOM_FORMAT_UNSUPPORTED`。
-  - [ ] 项目范围的行数等于各图对象归并后的行数；`PIDBOM PBS` 不给节点号 → `SCOPE_NOT_SELECTED`；范围内有图读不出来 → `BOM_SCOPE_INCOMPLETE`；只读会话里能算、能导出。
+  - [x] 用命令建图（泵、容器、带阀门的管路、仪表），`PIDBOM` 报出的各类行数、管长合计、跳过数正确；前后图纸的「已修改」状态不变。
+  - [x] 三种格式导出后读回与清单一致（XLSX 用 `calamine` 读回，JSON 解析回同一份清单）；有重复位号时报 `BOM_DUPLICATE_TAG` 且没有写文件；扩展名不支持 → `BOM_FORMAT_UNSUPPORTED`。
+  - [x] 项目范围的行数等于各图对象归并后的行数；`PIDBOM PBS` 不给节点号 → `SCOPE_NOT_SELECTED`；范围内有图读不出来 → `BOM_SCOPE_INCOMPLETE`；只读会话里能算、能导出。
 - **验证**：`cargo test --offline --locked --lib pidbom`
 - **依赖**：BOM-3；IX-6
 - **文件**：新建 `src/app/commands/pidbom.rs`；`src/app/commands/mod.rs`、`src/app/command_driver/utilities.rs`、`src/app/collab/apply.rs`
 - **规模**：M
+- **补（2026-11-21）**：在 `pid-stage-c` 分支上接着 `BOM-3` 做，一个提交。多改了两个文件：`src/app/commands/pidindex.rs`——按项目、按节点算借它的后台扫描，扫完接着做的事加一种 `Then::Bom` 和起扫描的 `pidindex_bom`（与 `PIDCHECK PROJECT` 一样接），`drawing_meta`（当前图的图号和 PBS）、`point`（位置的写法）放成 `pub(super)`；`src/app/commands/piddrc.rs`——节点号认不认照 `PIDCHECK PBS`，`pbs_known` 放成 `pub(super)`。任务没有说的：命令名和 `PROJECT`、`PBS`、`EXPORT` 不分大小写，`PROJECT` 后面不再跟别的，`PBS` 后面只跟一个节点号，别的写错的说用法、不带错误码；导出的文件名有空格加双引号，不是完整路径的从当前图所在目录算起，扩展名不分大小写；扩展名不支持在算之前就报，文件名是项目文件 `pid-project.json` 的不写；`BOM_SCOPE_INCOMPLETE` 只看范围内的图，`INDEX_NO_PROJECT_DIR`、`PBS_NODE_UNKNOWN` 在扫项目之前报；重复的键、读不出来的图、跳过的对象逐个列出，最多 10 个；写文件出错说原因、不带错误码，副表写不了时已写的主表留着；JSON 文件带 `"ok": true`、末尾一个换行。这些记在材料清单规格 §11.4。**先红后绿**：先放空壳（入口函数总得 `BOM_SCOPE_INCOMPLETE`，命令还没接上、没登记），8 条新测试都编得过、都败在断言上，只读名单那条测试（加了 5 种写法）败在 `PIDBOM` 不在名单里；实现后只读名单那条过，新测试 6 条过、2 条败——用命令插的仪表没有 `仪表功能` 属性，默认位号模板编不出位号，测试图上两台仪表都被跳过；给前一台手填位号后 8 条全过。**读数**：主程序库 7526 条，7453 通过、70 默认不跑、3 失败（比对设计稿的三条，与起点相同）；起点 7518 条（7445 / 70 / 3），多的 8 条是新加的，都过；编译警告 52；clippy 656 / 1051，与起点相同，各文件告警数不变，`--tests` 那一遍 `src/app/commands/mod.rs` 里原有的一处因上面多了 8 行下移了 8 行，别的位置一处不差，新文件和改动的文件没有新告警；格式检查六个改动的文件新增 0；架构检查上行依赖 33 对、183 个文件；SPPID 脚本测试 185 条全过；都与起点相同。**新基线**：主程序库 7526 条（7453 / 70 / 3）。
 
 ### BOM-5 【接线】材料清单的操作与接口
 
