@@ -259,3 +259,36 @@ def test_evaluate_receipt_validates_control_and_derives_round2_plan(tmp_path: Pa
         )
         == 1
     )
+
+    # Also supports protocol-style boolean `accepted: true/false` entries on subtraction round-1
+    bool_sub_rec = {
+        "round": 1,
+        "manifest_sha256": json.loads(manifest_path.read_text(encoding="utf-8"))["manifest_sha256"],
+        "results": [
+            {"slot": "00-control", "accepted": True},
+            {"slot": "01-var-xml-only", "accepted": False},
+            {"slot": "02-var-no-topology", "accepted": True},
+            {"slot": "03-var-minimal-attrs", "accepted": True},
+            {"slot": "04-var-plain-xml-format", "accepted": True},
+            {"slot": "05-var-synthetic-uids", "accepted": True},
+        ],
+    }
+    receipt_path.write_text(json.dumps(bool_sub_rec, indent=2), encoding="utf-8")
+    assert (
+        precheck_and_receipt.main(
+            [
+                "evaluate-receipt",
+                "--manifest",
+                str(manifest_path),
+                "--receipt",
+                str(receipt_path),
+                "--out-json",
+                str(eval_out),
+            ]
+        )
+        == 0
+    )
+    ev_bool = json.loads(eval_out.read_text(encoding="utf-8"))
+    assert ev_bool["inferred_requirements"]["pid_binary_required"] is True
+    assert ev_bool["next_round_actions"] == ["proceed-to-converted-dxf-pilot-submission"]
+

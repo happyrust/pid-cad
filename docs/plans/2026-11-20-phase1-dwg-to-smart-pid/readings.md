@@ -1259,6 +1259,52 @@
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `198 passed` | **`198 passed`** | **全绿** |
 
+---
+
+## 32. LX-8 / LX-9 / L6-2 / L6-3（#143）：六槽全原型转换与编辑存回试点送测包（新增 `CONV-06`）及双形态回执收敛加固（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `39f6bd939`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 修改文件 | `scripts/sppid/{build_submission_converted,test_build_submission_converted,precheck_and_receipt,test_precheck_and_receipt}.py` |
+| 外部送测包与证据目录 | `submissions/round-01b-converted-20261121/`（`manifest_sha256 = bb39b67f93d8c64d...`）、`$OCS_PID_EVIDENCE_DIR/2026-11-21-issue143/`（`red-py.txt`、`green-py.txt`、`round1b_6slots.txt`） |
+
+### 32.1 先红后绿与双形态回执兼容核验
+
+- **先红阶段（`red-py.txt`）**：`3 failed, 195 passed`（`RED_PY_RC=1`，验证未接入第 6 槽 `--pid-inapp-bundle` 及布尔 `"accepted": true/false` 回执字段被判为 `pending`）。
+- **落地实现与转绿（`green-py.txt`）**：
+  1. `scripts/sppid/build_submission_converted.py`：新增第 6 槽 `06-pid-inapp-edit-save`（脱敏主干 `CONV-06`，`archetype_key = "C6_pid_inapp_edit_save_accepted"`，CLI 参数 `--pid-inapp-bundle`），向后兼容 5 槽与完整 6 槽打包；
+  2. `scripts/sppid/precheck_and_receipt.py`：新增 `_slot_status_lower`，使减法包（`R1..R5`）与转换试点包（`C1..C6`）在 `evaluate-receipt` 下同时兼容 `"status": "accepted"/"rejected"` 与协议文档布尔 `"accepted": true/false` 两种回执回填写法；
+  3. 复跑 `pytest scripts/sppid`：**`198 passed`**（退出码 `0`）。
+
+### 32.2 六槽「真实存量图转换与交互编辑件」送测就绪包（`submissions/round-01b-converted-20261121/`）实测表
+
+- 送测包清单摘要：`manifest_sha256 = bb39b67f93d8c64daa90b06b4377ce19b5cee55efa3ea29a4e92fcdf815f8397`，`package_kind = "converted_pilot"`，`precheck_passed = true`，`sppid_c1_d_precheck_status = "unverified_no_sppid_runner"`（共 6 槽 18 个交付文件，全文零绝对路径、零客户图名）。
+
+| 槽位 | 交付主干 | 源 `.pid` SHA-256 前缀 | 精确变体数 | 表外兜底 | `StrictVendor` 违规数 | `GraphicOID` 对齐 | `a/b` 级验证 | 覆盖转换 / 编辑原型 |
+|---|---|---|---:|---:|---:|---:|---|---|
+| `01-sppid-dxf-direct` | `CONV-01` | `92c09b250f80` | `43` | `0` | `0` | `80 / 80` | `true / true` | SPPID 导出拆分 DXF → `pid_convert` 直出双产物 |
+| `02-legacy-block-circle-direct` | `CONV-02` | `7a817a6626a5` | `108` | `0` | `0` | `227 / 227` | `true / true` | 原生 AutoCAD 图块+散圆存量图 → `pid_convert` 直出双产物 |
+| `03-legacy-exploded-shape-direct` | `CONV-03` | `17b4c5bcba05` | `127` | `0` | `0` | `345 / 345` | `true / true` | 原生 AutoCAD 全散线形状存量图 → `pid_convert` 直出双产物 |
+| `04-legacy-inapp-pidsavepid` | `CONV-04` | `f6f0720170a0` | `127` | `0` | `0` | `275 / 275` | `true / true` | 原生 AutoCAD 存量图 → 应用内 `PIDPROMOTE → PIDREVIEW → PIDSAVEPID` 存回双产物 |
+| `05-binary-dwg-direct` | `CONV-05` | `83d282d79557` | `108` | `0` | `0` | `227 / 227` | `true / true` | 二进制 `.dwg`（`AC1032`，`e605ccf6d6f0`）→ `pid_convert` 直转双产物 |
+| `06-pid-inapp-edit-save` | `CONV-06` | `fc7b3bfb080d` | `299` | `0` | `0` | `442 / 442` | `true / true` | 既有真实 `.pid` 原图 → 应用内 `PIDPROMOTE → 面板改位号 + PIDINSERT → PIDSAVEPID` 存回双产物 |
+| **合计（`6 / 6` 槽通过）** | **`CONV-01..06`** | — | **`812`** | **`0`** | **`0`（`12 / 12` XML）** | **`1,596 / 1,596`** | **`6 / 6` 通过** | 逐槽执行 `precheck_and_receipt.py precheck --allow-unverified-sppid` 全部 `gate1=True` |
+
+### 32.3 固定门禁读数
+
+| 门禁项 | 改前读数（§31.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,216` 条（`7,145` 过 / `70` 忽略 / `1` 既有 `.pen`） | **`7,216` 条**（本单未改动 `.rs` 源码，与 `39f6bd939` 一致） | **0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | 无 `.rs` 修改（`new=0`） | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `198 passed` | **`198 passed`** | **全绿** |
+
 
 
 

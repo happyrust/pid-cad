@@ -201,6 +201,16 @@ def run_precheck(
     return (0 if all_passed else 1), report
 
 
+def _slot_status_lower(row: dict[str, Any] | None) -> str:
+    if not row:
+        return "pending"
+    if "status" in row and row["status"] is not None and str(row["status"]).strip():
+        return str(row["status"]).strip().lower()
+    if isinstance(row.get("accepted"), bool):
+        return "accepted" if row["accepted"] else "rejected"
+    return "pending"
+
+
 def evaluate_receipt(manifest_path: Path, receipt_path: Path) -> tuple[int, dict[str, Any]]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -216,9 +226,7 @@ def evaluate_receipt(manifest_path: Path, receipt_path: Path) -> tuple[int, dict
     results = {str(r.get("slot")): r for r in (receipt.get("results") or []) if isinstance(r, dict)}
     expected_slots = [str(s["slot"]) for s in (manifest.get("slots") or [])]
 
-    pending_slots = [
-        sl for sl in expected_slots if str(results.get(sl, {}).get("status", "pending")).lower() == "pending"
-    ]
+    pending_slots = [sl for sl in expected_slots if _slot_status_lower(results.get(sl)) == "pending"]
     if pending_slots:
         return 2, {
             "channel_valid": None,
@@ -232,7 +240,7 @@ def evaluate_receipt(manifest_path: Path, receipt_path: Path) -> tuple[int, dict
         for s in manifest.get("slots") or []:
             sl = str(s["slot"])
             akey = str(s.get("archetype_key", sl))
-            ok_slot = str(results.get(sl, {}).get("status", "")).lower() == "accepted"
+            ok_slot = _slot_status_lower(results.get(sl)) == "accepted"
             arch_acc[akey] = ok_slot
             if not ok_slot:
                 next_actions.append(f"investigate-{sl}")
@@ -246,10 +254,10 @@ def evaluate_receipt(manifest_path: Path, receipt_path: Path) -> tuple[int, dict
             "all_archetypes_accepted": all_ok,
             "archetype_acceptance": arch_acc,
             "next_round_actions": next_actions,
-            "slot_statuses": {sl: results[sl].get("status") for sl in expected_slots if sl in results},
+            "slot_statuses": {sl: _slot_status_lower(results.get(sl)) for sl in expected_slots if sl in results},
         }
 
-    ctrl_status = str(results.get("00-control", {}).get("status", "")).lower()
+    ctrl_status = _slot_status_lower(results.get("00-control"))
     if ctrl_status != "accepted":
         return 1, {
             "channel_valid": False,
@@ -258,7 +266,7 @@ def evaluate_receipt(manifest_path: Path, receipt_path: Path) -> tuple[int, dict
         }
 
     def is_accepted(slot_name: str) -> bool:
-        return str(results.get(slot_name, {}).get("status", "")).lower() == "accepted"
+        return _slot_status_lower(results.get(slot_name)) == "accepted"
 
     inferred = {
         "pid_binary_required": not is_accepted("01-var-xml-only"),
@@ -283,7 +291,7 @@ def evaluate_receipt(manifest_path: Path, receipt_path: Path) -> tuple[int, dict
         "manifest_sha256": expected_sha,
         "inferred_requirements": inferred,
         "next_round_actions": next_actions,
-        "slot_statuses": {sl: results[sl].get("status") for sl in expected_slots if sl in results},
+        "slot_statuses": {sl: _slot_status_lower(results.get(sl)) for sl in expected_slots if sl in results},
     }
     return 0, summary
 

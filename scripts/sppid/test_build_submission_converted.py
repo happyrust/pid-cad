@@ -50,7 +50,7 @@ def _make_converted_bundle(
         dwg_source.write_bytes(b"AC1018\x00\x00\x00\x00\x00\x00MOCK_BINARY_DWG")
 
 
-def test_build_submission_converted_packages_five_archetypes_anonymizes_and_gates_quality(
+def test_build_submission_converted_packages_six_archetypes_anonymizes_and_gates_quality(
     tmp_path: Path,
 ) -> None:
     import build_submission_converted
@@ -60,6 +60,7 @@ def test_build_submission_converted_packages_five_archetypes_anonymizes_and_gate
     s3 = tmp_path / "src_s3"
     s4 = tmp_path / "src_s4"
     s5 = tmp_path / "src_s5"
+    s6 = tmp_path / "src_s6"
     dwg_p = tmp_path / "dwg" / "SRC-LEGACY.dwg"
 
     _make_converted_bundle(s1, "SPPID-RAW-01")
@@ -67,6 +68,7 @@ def test_build_submission_converted_packages_five_archetypes_anonymizes_and_gate
     _make_converted_bundle(s3, "LEGACY-SHP-01")
     _make_converted_bundle(s4, "LEGACY-INAPP-01")
     _make_converted_bundle(s5, "LEGACY-DWG-01", dwg_source=dwg_p)
+    _make_converted_bundle(s6, "PID-INAPP-EDIT-01")
 
     out_dir = tmp_path / "round-01b"
     rc = build_submission_converted.main(
@@ -83,6 +85,8 @@ def test_build_submission_converted_packages_five_archetypes_anonymizes_and_gate
             str(s5),
             "--binary-dwg-source",
             str(dwg_p),
+            "--pid-inapp-bundle",
+            str(s6),
             "--out-dir",
             str(out_dir),
             "--plant",
@@ -100,12 +104,13 @@ def test_build_submission_converted_packages_five_archetypes_anonymizes_and_gate
     assert not re.search(r"[A-Za-z]:\\", raw_manifest), "manifest must contain zero drive paths"
     assert "SPPID-RAW-01" not in raw_manifest
     assert "LEGACY-BLK-01" not in raw_manifest
+    assert "PID-INAPP-EDIT-01" not in raw_manifest
 
     manifest = json.loads(raw_manifest)
     assert manifest["package_kind"] == "converted_pilot"
     assert manifest["precheck_passed"] is True
     assert manifest["sppid_c1_d_precheck_status"] == "unverified_no_sppid_runner"
-    assert len(manifest["slots"]) == 5
+    assert len(manifest["slots"]) == 6
 
     expected_slots = [
         ("01-sppid-dxf-direct", "CONV-01"),
@@ -113,6 +118,7 @@ def test_build_submission_converted_packages_five_archetypes_anonymizes_and_gate
         ("03-legacy-exploded-shape-direct", "CONV-03"),
         ("04-legacy-inapp-pidsavepid", "CONV-04"),
         ("05-binary-dwg-direct", "CONV-05"),
+        ("06-pid-inapp-edit-save", "CONV-06"),
     ]
     for slot_info, (slot_name, stem) in zip(manifest["slots"], expected_slots):
         assert slot_info["slot"] == slot_name
@@ -123,6 +129,7 @@ def test_build_submission_converted_packages_five_archetypes_anonymizes_and_gate
         for ext in (".pid", "_Data.xml", "_Meta.xml"):
             assert (out_dir / slot_name / f"{stem}{ext}").is_file()
     assert manifest["slots"][4]["binary_dwg_header"] == "AC1018"
+    assert manifest["slots"][5]["archetype_key"] == "C6_pid_inapp_edit_save_accepted"
 
     # Rejects bundle with class_default_fallback > 0
     bad_s2 = tmp_path / "bad_s2"
@@ -141,6 +148,8 @@ def test_build_submission_converted_packages_five_archetypes_anonymizes_and_gate
             str(s5),
             "--binary-dwg-source",
             str(dwg_p),
+            "--pid-inapp-bundle",
+            str(s6),
             "--out-dir",
             str(tmp_path / "round-01b-bad"),
             "--plant",
@@ -150,11 +159,13 @@ def test_build_submission_converted_packages_five_archetypes_anonymizes_and_gate
     assert rc_bad == 1
 
 
-def test_evaluate_receipt_supports_converted_pilot_archetypes(tmp_path: Path) -> None:
+def test_evaluate_receipt_supports_converted_pilot_archetypes_and_boolean_accepted_fields(
+    tmp_path: Path,
+) -> None:
     import build_submission_converted
 
     bundles = []
-    for idx in range(1, 6):
+    for idx in range(1, 7):
         b = tmp_path / f"b{idx}"
         _make_converted_bundle(b, f"SRC-{idx:02d}")
         bundles.append(b)
@@ -177,6 +188,8 @@ def test_evaluate_receipt_supports_converted_pilot_archetypes(tmp_path: Path) ->
                 str(bundles[4]),
                 "--binary-dwg-source",
                 str(dwg_p),
+                "--pid-inapp-bundle",
+                str(bundles[5]),
                 "--out-dir",
                 str(out_dir),
                 "--plant",
@@ -206,16 +219,23 @@ def test_evaluate_receipt_supports_converted_pilot_archetypes(tmp_path: Path) ->
         == 2
     )
 
-    # Partial failure on exploded-shape slot -> isolates archetype C3
-    rec = json.loads(receipt_p.read_text(encoding="utf-8"))
-    for row in rec["results"]:
-        if row["slot"] == "03-legacy-exploded-shape-direct":
-            row["status"] = "rejected"
-            row["error_message"] = "ERR_VALVE_PORT"
-        else:
-            row["status"] = "accepted"
-    rec["returned_at"] = "2026-11-22T10:00:00Z"
-    receipt_p.write_text(json.dumps(rec, indent=2), encoding="utf-8")
+    # Partial failure using boolean `accepted: true/false` protocol schema -> isolates C3 and C6
+    bool_rec = {
+        "package_kind": "converted_pilot",
+        "round": "1B",
+        "submitted_at": "2026-11-21",
+        "responded_at": "2026-11-22",
+        "manifest_sha256": json.loads(manifest_p.read_text(encoding="utf-8"))["manifest_sha256"],
+        "results": [
+            {"slot": "01-sppid-dxf-direct", "accepted": True, "error_code": None, "raw_message": ""},
+            {"slot": "02-legacy-block-circle-direct", "accepted": True, "error_code": None, "raw_message": ""},
+            {"slot": "03-legacy-exploded-shape-direct", "accepted": False, "error_code": "E_PORT", "raw_message": "ERR_VALVE_PORT"},
+            {"slot": "04-legacy-inapp-pidsavepid", "accepted": True, "error_code": None, "raw_message": ""},
+            {"slot": "05-binary-dwg-direct", "accepted": True, "error_code": None, "raw_message": ""},
+            {"slot": "06-pid-inapp-edit-save", "accepted": False, "error_code": "E_SAVE", "raw_message": "ERR_SAVE"},
+        ],
+    }
+    receipt_p.write_text(json.dumps(bool_rec, indent=2), encoding="utf-8")
 
     assert (
         precheck_and_receipt.main(
@@ -235,13 +255,16 @@ def test_evaluate_receipt_supports_converted_pilot_archetypes(tmp_path: Path) ->
     assert ev1["package_kind"] == "converted_pilot"
     assert ev1["all_archetypes_accepted"] is False
     assert ev1["archetype_acceptance"]["C3_legacy_exploded_shape_accepted"] is False
+    assert ev1["archetype_acceptance"]["C6_pid_inapp_edit_save_accepted"] is False
     assert "investigate-03-legacy-exploded-shape-direct" in ev1["next_round_actions"]
+    assert "investigate-06-pid-inapp-edit-save" in ev1["next_round_actions"]
 
-    # All 5 accepted -> phase1-external-acceptance-complete
-    for row in rec["results"]:
-        row["status"] = "accepted"
-        row["error_message"] = ""
-    receipt_p.write_text(json.dumps(rec, indent=2), encoding="utf-8")
+    # All 6 accepted -> phase1-external-acceptance-complete
+    for row in bool_rec["results"]:
+        row["accepted"] = True
+        row["error_code"] = None
+        row["raw_message"] = ""
+    receipt_p.write_text(json.dumps(bool_rec, indent=2), encoding="utf-8")
     assert (
         precheck_and_receipt.main(
             [
@@ -258,4 +281,5 @@ def test_evaluate_receipt_supports_converted_pilot_archetypes(tmp_path: Path) ->
     )
     ev2 = json.loads(eval_p.read_text(encoding="utf-8"))
     assert ev2["all_archetypes_accepted"] is True
+    assert ev2["archetype_acceptance"]["C6_pid_inapp_edit_save_accepted"] is True
     assert ev2["next_round_actions"] == ["phase1-external-acceptance-complete"]
