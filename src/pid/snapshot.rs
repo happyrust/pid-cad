@@ -3,7 +3,7 @@
 //!
 //! 这里只管内容和校验：[`capture`] 由摘要、连通图和 [`SnapshotMeta`] 做出一份快照，
 //! [`Snapshot::to_bytes`] 写成文件内容，[`parse`] 读回来并重算校验和。都是纯函数；
-//! 存到哪个目录、怎么编号不在这里。
+//! 存到哪个目录、怎么编号在 [`store`] 里。
 //!
 //! 校验和只算正文：`summary`、`graph` 两个值各自按键名排序、不带空白写出来，首尾相接
 //! 算 SHA-256。所以文件缩进与否、键的先后都不影响它，正文里任何一个值变了都对不上。
@@ -17,6 +17,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::project_index::{DrawingSummary, Graph};
+
+pub mod store;
 
 /// 快照文件格式的版本。读到更高的版本报 [`SNAPSHOT_VERSION_UNSUPPORTED`]。
 pub const SNAPSHOT_VERSION: u32 = 1;
@@ -33,6 +35,12 @@ pub const SNAPSHOT_FORMAT_INVALID: &str = "SNAPSHOT_FORMAT_INVALID";
 pub const SNAPSHOT_VERSION_UNSUPPORTED: &str = "SNAPSHOT_VERSION_UNSUPPORTED";
 /// 原因超过 [`MAX_REASON_CHARS`] 个字。
 pub const SNAPSHOT_REASON_TOO_LONG: &str = "SNAPSHOT_REASON_TOO_LONG";
+/// 往已有的快照文件写：序号已经用过，或者要写的文件已经存在。快照文件只新建、不覆盖。
+pub const SNAPSHOT_IMMUTABLE: &str = "SNAPSHOT_IMMUTABLE";
+/// 要读的序号或文件不存在。
+pub const SNAPSHOT_NOT_FOUND: &str = "SNAPSHOT_NOT_FOUND";
+/// 读写快照文件时文件系统报的错（§3.8 没有这个码）。
+pub const SNAPSHOT_IO_ERROR: &str = "SNAPSHOT_IO_ERROR";
 
 /// 文件开头的 UTF-8 BOM。读的时候不算错：Windows PowerShell 5.1 存 UTF-8 文件时会加上。
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
@@ -100,7 +108,8 @@ pub struct Snapshot {
     pub graph: Graph,
 }
 
-/// 做快照、读快照时的错误，即 §3.8 里属于这一层的四个码。
+/// 做快照、存取快照时的错误：§3.8 里属于这一层的六个码，加上读写文件出错的
+/// [`SNAPSHOT_IO_ERROR`]。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotError {
     /// 正文与校验和对不上，或者 `counts`、`drawing_id` 与正文对不上；带上哪里不对。
@@ -111,6 +120,12 @@ pub enum SnapshotError {
     VersionUnsupported(u64),
     /// 原因的字数，超过了 [`MAX_REASON_CHARS`]。
     ReasonTooLong(usize),
+    /// 没有写：会盖掉已有的文件，或者快照已经有序号；带上是哪个文件、哪个序号。
+    Immutable(String),
+    /// 要读的快照不在；带上找的是哪个文件。
+    NotFound(String),
+    /// 文件系统报的错；带上路径和原因。
+    Io(String),
 }
 
 impl SnapshotError {
@@ -122,6 +137,9 @@ impl SnapshotError {
             Self::FormatInvalid(_) => SNAPSHOT_FORMAT_INVALID,
             Self::VersionUnsupported(_) => SNAPSHOT_VERSION_UNSUPPORTED,
             Self::ReasonTooLong(_) => SNAPSHOT_REASON_TOO_LONG,
+            Self::Immutable(_) => SNAPSHOT_IMMUTABLE,
+            Self::NotFound(_) => SNAPSHOT_NOT_FOUND,
+            Self::Io(_) => SNAPSHOT_IO_ERROR,
         }
     }
 }
@@ -129,9 +147,11 @@ impl SnapshotError {
 impl fmt::Display for SnapshotError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Corrupt(detail) | Self::FormatInvalid(detail) => {
-                write!(f, "{}: {detail}", self.code())
-            }
+            Self::Corrupt(detail)
+            | Self::FormatInvalid(detail)
+            | Self::Immutable(detail)
+            | Self::NotFound(detail)
+            | Self::Io(detail) => write!(f, "{}: {detail}", self.code()),
             Self::VersionUnsupported(version) => write!(
                 f,
                 "{SNAPSHOT_VERSION_UNSUPPORTED}: 快照是第 {version} 版的格式，这个程序只认到第 {SNAPSHOT_VERSION} 版"
@@ -335,7 +355,7 @@ mod tests {
     use crate::pid::symbols::SymbolLibrary;
 
     /// 合成图（`objects` 个对象）的摘要和连通图。
-    fn drawing(objects: usize) -> (DrawingSummary, Graph) {
+    pub(super) fn drawing(objects: usize) -> (DrawingSummary, Graph) {
         let meta = SummaryMeta {
             drawing_id: "PID-1101".to_owned(),
             file: None,
@@ -353,7 +373,7 @@ mod tests {
         (summary, graph)
     }
 
-    fn meta(reason: &str) -> SnapshotMeta {
+    pub(super) fn meta(reason: &str) -> SnapshotMeta {
         SnapshotMeta {
             created_at: 1_794_800_000,
             created_by: "zhangsan".to_owned(),
