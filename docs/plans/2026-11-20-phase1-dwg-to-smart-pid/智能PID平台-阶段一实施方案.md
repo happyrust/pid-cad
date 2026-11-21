@@ -573,10 +573,10 @@ flowchart LR
 - **LX-3 受控样本采集（M）**：按协议执行，编辑手工。
 - **LX-4 SPPID 接受度实验（M）**：E0 先找回旧结论；E1 字节相同副本放回原位；E2 改一处元数据；E3 外来 `.pid`。每步记录结果与报错原文。
 - **LX-5 我们的文件在 SPPID 里验收（M）**：`.pid` 打开、发布；取回 XML 与我们导出的比对。
-- **LX-6 未解字段补充分析（视情况）**：只针对 L5 写出所需。
-- **LX-7 合规（S）**：授权确认、不分发厂商文件、样本保密。
-- **LX-8 送测前预检三关（M）— 第①关已自动化通过（[#135](https://github.com/happyrust/pid-cad/issues/135)）**：① XML 对照（`StrictVendor` + `xml_diff` 已全过）；② `.pid` 能打开（待 `RES-06`）；③ 发布一致（待 `RES-06`）。
-- **LX-9 外部平台送测（M）— 第一轮 6 套减法送测包已自动构建就绪（[#135](https://github.com/happyrust/pid-cad/issues/135)）**：落地 `scripts/sppid/build_submission_round1.py`，已在外部证据目录产出 `round-01`（`00-control` + `V1-01..V1-05` + `submission-manifest.json` + `receipt.json` 模板，`precheck_passed = true`），详见 `readings.md` §23。
+- **LX-6 未解字段补充分析（视情况）— 已完成（[#137](https://github.com/happyrust/pid-cad/issues/137)）**：已在 `06-lx-compliance-and-codelist-audit.md` 第 2 节逐流核查 `passthrough_preserve` 的 10 类容器流，确认对阶段一 `a/b` 级与 `c1` 级完全够用，并完成 `#117` 备份包分级来源全包实查与阶段一 `_Coverage.json` `VariantResolutionSummary` 可观测性落地（见 `readings.md` §26）。
+- **LX-7 合规（S）— 已完成（[#137](https://github.com/happyrust/pid-cad/issues/137)）**：已在 `06-lx-compliance-and-codelist-audit.md` 第 3 节完成不分发厂商二进制、客户样本与连接串零入库、本机信息脱敏及受控环境单向隔离四条红线书面归档。
+- **LX-8 送测前预检三关（M）— 编排 CLI 与第①关已全部通过（[#135](https://github.com/happyrust/pid-cad/issues/135) / [#137](https://github.com/happyrust/pid-cad/issues/137)）**：落地 `scripts/sppid/precheck_and_receipt.py precheck`，统一串联第①关（`StrictVendor` + XML 比对）、第②关（`$OCS_PID_SPPID_RUNNER open`）与第③关（`$OCS_PID_SPPID_RUNNER publish` + `xml_diff`），未设运行器时默认退出码 `2` 阻断盲目送测（第②③关真机执行待 `RES-06`）。
+- **LX-9 外部平台送测（M）— 首轮 6 套减法送测包与回执自动收敛器均已就绪（[#135](https://github.com/happyrust/pid-cad/issues/135) / [#137](https://github.com/happyrust/pid-cad/issues/137)）**：`build_submission_round1.py` 已产出 `round-01` 6 槽受控包，`precheck_and_receipt.py evaluate-receipt` 已支持校验 `receipt.json` 并自动推导 `R1..R5` 平台要求与第二轮减法清单（见 `readings.md` §23、§26）。
 
 ## 8. 推进顺序
 

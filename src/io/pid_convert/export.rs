@@ -14,9 +14,10 @@ use super::recognize::{
     PipeSegmentHit, SheetRecognition, TitleBlockInfo,
 };
 use crate::io::pid_publish::{
-    export_drawing_bundle, is_valid_hex32, parse_sppid_line_number, pipeline_uid,
-    populate_item_tag_attributes, synthesize_piping_network, ExportBundle, ExportDrawing,
-    ExportItem, PipeRunInput, PipingSynthesisStats, SymbolEndpointRef, UidAllocator, UnmappedItem,
+    default_class_map, export_drawing_bundle_with_map, is_valid_hex32, load_class_map_from_json,
+    parse_sppid_line_number, pipeline_uid, populate_item_tag_attributes, synthesize_piping_network,
+    ClassMapSpec, ExportBundle, ExportDrawing, ExportItem, PipeRunInput, PipingSynthesisStats,
+    SymbolEndpointRef, UidAllocator, UnmappedItem, VariantResolutionSummary,
 };
 
 /// Options controlling DWG/DXF-to-publish (and optional `.pid` dual-output) conversion.
@@ -34,6 +35,8 @@ pub struct ConvertOptions {
     #[serde(default)]
     pub sym_library_dir: Option<String>,
     #[serde(default)]
+    pub class_map_path: Option<String>,
+    #[serde(default)]
     pub verify_plot_pdf: bool,
 }
 
@@ -48,9 +51,30 @@ impl Default for ConvertOptions {
             seed_pid_path: None,
             seed_pid_bytes: None,
             sym_library_dir: None,
+            class_map_path: None,
             verify_plot_pdf: false,
         }
     }
+}
+
+pub(super) fn resolve_effective_class_map(
+    opts: &ConvertOptions,
+) -> Result<std::borrow::Cow<'static, ClassMapSpec>, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(p) = opts
+        .class_map_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let raw = std::fs::read_to_string(p)
+            .map_err(|e| format!("read custom class-map '{}': {e}", p))?;
+        let parsed = load_class_map_from_json(&raw)?;
+        return Ok(std::borrow::Cow::Owned(parsed));
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = opts;
+    Ok(std::borrow::Cow::Borrowed(default_class_map()))
 }
 
 impl ConvertOptions {
@@ -353,6 +377,8 @@ pub struct ConvertSheetReport {
     pub title_block: TitleBlockInfo,
     pub confidence_summary: ConfidenceSummary,
     pub exported_by_class: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub variant_resolution: VariantResolutionSummary,
     pub piping_synthesis: PipingSynthesisStats,
     #[serde(default)]
     pub pipe_network_census: PipeNetworkCensus,
@@ -376,6 +402,8 @@ pub struct BatchConvertSummary {
     pub pdf_files_plotted: usize,
     pub total_items_written: usize,
     pub total_relations_written: usize,
+    #[serde(default)]
+    pub variant_resolution: VariantResolutionSummary,
     #[serde(default)]
     pub cross_sheet_opc_pairing: CrossSheetOpcReport,
     pub sheets: Vec<ConvertSheetReport>,
@@ -1087,6 +1115,7 @@ fn build_core_conversion(
         title_block: rec.title_block.clone(),
         confidence_summary: rec.confidence_summary.clone(),
         exported_by_class,
+        variant_resolution: VariantResolutionSummary::default(),
         piping_synthesis: piping_stats,
         pipe_network_census,
         offpage_connectors,
@@ -1111,8 +1140,10 @@ pub fn convert_document_to_publish(
     doc_name: &str,
     opts: &ConvertOptions,
 ) -> Result<(ExportBundle, ConvertSheetReport), String> {
-    let state = build_core_conversion(doc, doc_name, opts, None)?;
-    let mut bundle = export_drawing_bundle(&state.dwg)?;
+    let mut state = build_core_conversion(doc, doc_name, opts, None)?;
+    let eff_map = resolve_effective_class_map(opts)?;
+    let (mut bundle, var_res) = export_drawing_bundle_with_map(&state.dwg, &eff_map)?;
+    state.report.variant_resolution = var_res;
     bundle.coverage_json = serde_json::to_string_pretty(&state.report)
         .map_err(|e| format!("serialize coverage report: {e}"))?;
     Ok((bundle, state.report))
@@ -1508,16 +1539,18 @@ pub fn convert_document_to_dual(
     let pid_bytes = PidWriter::write_to_bytes(&seed_pkg, &WritePlan::default())
         .map_err(|e| format!("write .pid bytes for {doc_name}: {e}"))?;
 
+    let eff_map = resolve_effective_class_map(opts)?;
+    let (mut publish, var_res) = export_drawing_bundle_with_map(&state.dwg, &eff_map)?;
+    state.report.variant_resolution = var_res;
+
     let ver = verify_dual_bundle(
         &state.report.doc_uid,
-        &export_drawing_bundle(&state.dwg)?.data_xml,
+        &publish.data_xml,
         &pid_bytes,
         None,
         doc_name,
     )?;
     state.report.pid_verification = Some(ver);
-
-    let mut publish = export_drawing_bundle(&state.dwg)?;
     publish.coverage_json = serde_json::to_string_pretty(&state.report)
         .map_err(|e| format!("serialize coverage report: {e}"))?;
 
@@ -1881,6 +1914,9 @@ pub fn convert_path_to_dir(
                             }
                             summary.total_items_written += dual.report.total_items_written;
                             summary.total_relations_written += dual.report.total_relations_written;
+                            summary
+                                .variant_resolution
+                                .merge(&dual.report.variant_resolution);
                             summary.sheets.push(dual.report);
                         }
                         Err(err) => {

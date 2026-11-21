@@ -11,15 +11,16 @@
 | 文件名 | 定位与职责 | 当前状态 |
 |---|---|---|
 | `智能PID平台-阶段一实施方案.md` | 阶段一主执行方案（L0–L6 + LX 逐任务做法、门禁、验收与逐项解决记录） | **已确认并执行中**（已对齐 `main @ 6377fe233` 与 `pid-parse @ a85fa10`） |
-| `智能PID平台-阶段一Issue清单.md` | 阶段一拆单说明、线上 GitHub Issue 映射与逐单解决日志 | **已同步线上 `#106`–`#136`** |
+| `智能PID平台-阶段一Issue清单.md` | 阶段一拆单说明、线上 GitHub Issue 映射与逐单解决日志 | **已同步线上 `#106`–`#137`** |
 | `智能PID平台-阶段一路线图-DWG转智能PID与pid导出.md` | 阶段一总体路线、取舍依据、预检三关与减法送测设计 | **已对齐当前仓库进度并脱敏** |
 | `智能PID平台-样本分析-XML规格与pid结构.md` | 110 对真实 SPPID 样本格式/结构实测规格与 Q1–Q13 答案回填 | **已完成全批 220 份复核与 Q1–Q13 回填** |
 | `03-parse-answers.md` | `L0-8`（[#118](https://github.com/happyrust/pid-cad/issues/118)）对照 `pid-parse @ a85fa10` 源码逐条回答 Q1–Q13（含精确源码路径与行号） | **已完成** |
 | `04-external-platform-protocol.md` | `L0-7`（[#121](https://github.com/happyrust/pid-cad/issues/121)）外部数字化交付平台验收口径、三轮减法送测变体矩阵与回执标准 | **已完成** |
 | `05-phase1-acceptance-report.md` | `L6-3`（[#135](https://github.com/happyrust/pid-cad/issues/135)）阶段一总验收报告（对照第 3 节五条总口径与首轮送测包清单） | **已完成（待外部回执回填）** |
+| `06-lx-compliance-and-codelist-audit.md` | `LX-6 / LX-7 / #117`（[#137](https://github.com/happyrust/pid-cad/issues/137)）备份包分级来源全包实查、`.pid` 保留流够用性台账与书面合规边界确认 | **已完成** |
 | `智能PID平台-内部模型合一分析.md` | `PID_SEMANTICS` 与 `PID_AUTHOR` 升格合一方案及与并行分支 `pid-symbol-identity` 的衔接边界 | **已完成引擎与属性面板双分组落地（见 `promote.rs`、`pidprops.rs`）** |
 | `智能PID平台-资料清单.md` | `RES-01`–`RES-17` 资料清点、环境变量约定与缺口降级策略（`L0-1`） | **已完成清点登记** |
-| `readings.md` | 阶段一门禁基线与各单先红后绿、真实样本实测读数账本 | **持续更新（已记 §1–§25）** |
+| `readings.md` | 阶段一门禁基线与各单先红后绿、真实样本实测读数账本 | **持续更新（已记 §1–§26）** |
 
 ---
 
@@ -54,5 +55,6 @@
 | `L3-3 / L3-4 / L3-8` 管线共线成链、端口/跨图连接符配对与逐行回归门禁 | [#133](https://github.com/happyrust/pid-cad/issues/133) | **已完成 · L3 全线收官**（2026-11-21） | 提交 **`dd5a498d8`**：扩展 `src/io/pid_convert/{mod,recognize,export}.rs` 并落地 `scripts/sppid/{regression_gate,test_regression_gate}.py`；90 张真实 DXF `PIDPipingPort` 由 `626` 跃升至 **`11,420`**（`18.2x`）、管端连通关系升至 **`48,243`**、三通分支点 **`4,907`** 个，桥接共线微断口 `124` 处、过滤流向箭头/短刺 `744` 条，管端断头 `54,140 / 54,140` 100% 守恒归因；跨图页间连接符 `834` 个完成跨图配对台账（互逆成对 `38` 对 = `76` 个、批内单向 `99` 个、批外 `442` 个），生成脱敏逐行回归基线 `baseline-90.tsv`，`StrictVendor` 零违规、`unexplained_diffs = 0`，见 `readings.md` §22 |
 | `L2-1 M1..M5 / L2-5 / L2-6 / L2-7 / L6-2` `PID_AUTHOR` 无冲突升格与编辑存回 `.pid` | [#134](https://github.com/happyrust/pid-cad/issues/134) | **已完成（引擎全链路）**（2026-11-21） | 提交 **`ac6527ca1`**：落地 `src/io/pid_convert/promote.rs`（零改动 `src/pid/*` 与 `src/app/*`）；打通 `M1..M5` 幂等升格、手工位号保护、`>2048B` XRecord 分片、`purge` 隔离、`L2-5` 删符号清拓扑与移位同步、`L2-6` `.pid` 语义升格及 `L2-7 / L6-2` 编辑后存回 `.pid` + XML；真实中位规模生产 DXF（`115` 符号 + `50` 管段）升格编辑存回 `166 / 166` `GraphicOID` 100% 对齐并通过 `a/b` 级重读与 PDF 出图验证，见 `readings.md` §24 |
 | `LX-8 / LX-9 / L6-3` 第一轮减法送测 6 套受控包构建器与阶段一总验收报告 | [#135](https://github.com/happyrust/pid-cad/issues/135) | **已完成（首轮送测就绪）**（2026-11-21） | 提交 **`3ba5c3c2e`**：落地 `scripts/sppid/{build_submission_round1,test_build_submission_round1}.py` 与 `05-phase1-acceptance-report.md`；在真实语料上自动构建 `submissions/round-01-20261121/`（`00-control` + `V1-01..V1-05` 共 6 槽 17 文件，`manifest_sha256 = 26eb6189e08d506a...`）并全部通过本地预检（`precheck_passed = true`），见 `readings.md` §23 |
-| `L2-1 M4 / L2-2 / L2-3 / L2-4 / L3-7` 属性面板读写联动、来源证据只读组与三档置信度交互校核闭环 | [#136](https://github.com/happyrust/pid-cad/issues/136) | **已完成 · L2/L3-7 交互全线收官**（2026-11-21） | 扩展 `src/app/commands/pidprops.rs` 与 `src/io/pid_convert/{recognize,promote,mod}.rs`（零触碰并行活跃分支）；实现属性面板可编辑 `P&ID 属性` + 只读 `P&ID 来源证据` 双分组、DWG/DXF 单行及圈内双行 `TEXT`/`MTEXT` 位号双向联动与单步撤销回滚，以及应用内交互命令 `PIDPROMOTE`、`PIDREVIEW`（`SUMMARY / HIGH / MEDIUM / LOW / DUPLICATES / ACCEPT / REJECT`）与 `PIDSAVEPID`（前置重号拦截 `gate_save` + 写出 `.pid` + XML）；真实生产 DXF 在 `OpenCADStudio` 内跑通升格 `115` 符号 → `PIDREVIEW MEDIUM` 选中 `12` 个并 `ACCEPT` → 面板改位号联动 `TEXT` → `PIDSAVEPID` 存回 `165 / 165` 对齐过 `a/b` 级验证，见 `readings.md` §25 |
+| `L2-1 M4 / L2-2 / L2-3 / L2-4 / L3-7` 属性面板读写联动、来源证据只读组与三档置信度交互校核闭环 | [#136](https://github.com/happyrust/pid-cad/issues/136) | **已完成 · L2/L3-7 交互全线收官**（2026-11-21） | 提交 **`13635d1f1`**：扩展 `src/app/commands/pidprops.rs` 与 `src/io/pid_convert/{recognize,promote,mod}.rs`（零触碰并行活跃分支）；实现属性面板可编辑 `P&ID 属性` + 只读 `P&ID 来源证据` 双分组、DWG/DXF 单行及圈内双行 `TEXT`/`MTEXT` 位号双向联动与单步撤销回滚，以及应用内交互命令 `PIDPROMOTE`、`PIDREVIEW`（`SUMMARY / HIGH / MEDIUM / LOW / DUPLICATES / ACCEPT / REJECT`）与 `PIDSAVEPID`（前置重号拦截 `gate_save` + 写出 `.pid` + XML）；真实生产 DXF 在 `OpenCADStudio` 内跑通升格 `115` 符号 → `PIDREVIEW MEDIUM` 选中 `12` 个并 `ACCEPT` → 面板改位号联动 `TEXT` → `PIDSAVEPID` 存回 `165 / 165` 对齐过 `a/b` 级验证，见 `readings.md` §25 |
+| `LX-6..LX-9 / L4-2 / #117` 送测三关预检与回执收敛 CLI、类变体兜底可观测性与按厂替换及分级来源实查 | [#137](https://github.com/happyrust/pid-cad/issues/137)（联动 [#117](https://github.com/happyrust/pid-cad/issues/117)） | **已完成 · 阶段一本机全项收官**（2026-11-21） | 落地 `scripts/sppid/{precheck_and_receipt,test_precheck_and_receipt}.py`（统一编排三关预检与 `receipt.json` `R1..R5` 收敛）、`VariantResolutionSummary` 可观测性与 `--class-map` 热替换（90 图全批实测 `exact_variant_id = 15,910`、`structural_default = 72,326`、`class_default_fallback = 0`），并落盘 `06-lx-compliance-and-codelist-audit.md`（完成 `#117` 第 2 步备份包全量实查、`LX-6` 保留流够用性台账与 `LX-7` 合规确认），见 `readings.md` §26 |
 | `.sym` 参考数据预览（关联） | [#116](https://github.com/happyrust/pid-cad/issues/116) | **由并行分支推进中** | 正在 `pid-symbol-on-main` 工作树推进 `pid_backup_browser/symbol_preview.rs`，严格避让 |

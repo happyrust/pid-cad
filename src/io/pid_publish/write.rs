@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 
-use super::classes::{materialize_class_interfaces, materialize_export_item, OrderedInterfaces};
+use super::classes::{
+    default_class_map, materialize_class_interfaces, materialize_export_item_with_map,
+    ClassMapSpec, OrderedInterfaces, VariantResolutionSummary,
+};
 use super::model::{ExportBundle, ExportDrawing};
 use super::uid::{derive_meta_envelope_uids, is_valid_hex32, relation_uid, UidAllocator};
 use crate::io::pid_publish_check::default_publish_spec;
@@ -109,6 +112,13 @@ fn format_container_open(
 }
 
 pub fn export_drawing_bundle(drawing: &ExportDrawing) -> Result<ExportBundle, String> {
+    export_drawing_bundle_with_map(drawing, default_class_map()).map(|(bundle, _)| bundle)
+}
+
+pub fn export_drawing_bundle_with_map(
+    drawing: &ExportDrawing,
+    class_map: &ClassMapSpec,
+) -> Result<(ExportBundle, VariantResolutionSummary), String> {
     if drawing.plant.trim().is_empty() {
         return Err("ExportDrawing.plant must not be empty".to_string());
     }
@@ -221,8 +231,10 @@ pub fn export_drawing_bundle(drawing: &ExportDrawing) -> Result<ExportBundle, St
 
     // 3. Emit all domain items
     let mut class_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut variant_resolution = VariantResolutionSummary::default();
     for item in &drawing.items {
-        let ifaces = materialize_export_item(item)?;
+        let (ifaces, match_kind) = materialize_export_item_with_map(item, class_map)?;
+        variant_resolution.record(&item.class, match_kind);
         write_object_block(&mut data_buf, &item.class, &ifaces);
         *class_counts.entry(item.class.clone()).or_default() += 1;
     }
@@ -402,15 +414,19 @@ pub fn export_drawing_bundle(drawing: &ExportDrawing) -> Result<ExportBundle, St
         "representations_emitted": reps_emitted,
         "relations_emitted": total_rels,
         "class_counts": class_counts,
+        "variant_resolution": variant_resolution,
         "unmapped_count": drawing.unmapped.len(),
         "unmapped": drawing.unmapped,
     });
     let coverage_json = serde_json::to_string_pretty(&coverage)
         .map_err(|e| format!("failed to serialize coverage JSON: {e}"))?;
 
-    Ok(ExportBundle {
-        data_xml: data_buf,
-        meta_xml: meta_buf,
-        coverage_json,
-    })
+    Ok((
+        ExportBundle {
+            data_xml: data_buf,
+            meta_xml: meta_buf,
+            coverage_json,
+        },
+        variant_resolution,
+    ))
 }

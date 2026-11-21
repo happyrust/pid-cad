@@ -945,3 +945,48 @@
 | `scripts\fmt-newhunks.ps1` | — | `src/app/commands/pidprops.rs`、`src/io/pid_convert/{mod,recognize,promote}.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `193 passed` | **`193 passed`** | **全绿** |
+
+---
+
+## 26. LX-6..LX-9 / L4-2 / #117（#137）：送测三关预检与回执收敛 CLI、类变体兜底可观测性及分级来源调查（2026-11-21）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-21` |
+| 基线提交 | `13635d1f1`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `scripts/sppid/{precheck_and_receipt,test_precheck_and_receipt}.py`、`src/io/pid_publish/{classes,write,mod}.rs`、`src/io/pid_convert/{export,promote}.rs`、`examples/pid_convert.rs`、`docs/plans/2026-11-20-phase1-dwg-to-smart-pid/06-lx-compliance-and-codelist-audit.md` |
+| 证据目录子项 | `2026-11-21-issue137/`（`probe_117_report.json`、`red-py.txt`、`green-py.txt`、`round1_control_precheck.json`、`red-rs.txt`、`green-rs.txt`、`gen90_summary.json`、`fmt.txt`、`arch.txt`、`pytest.txt`、`gate-*.txt`） |
+
+### 26.1 双端先红后绿与三关预检 / 回执收敛验证
+
+- **Python 端先红后绿（`LX-8 / LX-9`）**：`red-py.txt` `3 failed`（退出码 `1`）→ 实现 `scripts/sppid/precheck_and_receipt.py` 后 `green-py.txt` **`196 passed`**（退出码 `0`）：
+  1. `precheck` 子命令：串联第①关（`StrictVendor` 校验）、第②关（`$OCS_PID_SPPID_RUNNER open` 解析 `open-result.json`）、第③关（`$OCS_PID_SPPID_RUNNER publish` 重发布 XML 与本方 XML 逐项 `xml_diff` 对账）；未配置运行器时默认返回退出码 `2` 阻断盲目送测（显式传入 `--allow-unverified-sppid` 时验证静态第①关并标注 `unverified_no_sppid_runner`）；已在真实首轮送测包 `round-01-20261121/00-control` 上实测 `gate1 = True`、`sppid = unverified_no_sppid_runner`；
+  2. `evaluate-receipt` 子命令：核对 `manifest_sha256`、待定槽位与 `00-control` 阳性对照状态，自动推导 `R1..R5` 五项平台要求并输出下一轮减法变体清单。
+- **Rust 端先红后绿（`L4-2` 衔接 `#117`）**：`red-rs.txt` `0 passed; 1 failed`（退出码 `101`）→ 实现 `VariantResolutionSummary` 与 `load_class_map_from_json` / `--class-map` 后 `green-rs.txt` 全绿（退出码 `0`）。
+
+### 26.2 全批 90 张真实 DXF 类变体兜底可观测性实测与 `#117` 全包来源调查结论
+
+| 指标 | 90 张真实 DXF 全批实测值 | 说明 |
+|---|---:|---|
+| 写出对象总数（`total_items_written`） | **`88,236`** | 与 §22.2 完全一致，零字节漂移 |
+| 精确变体命中（`exact_variant_id`） | **`15,910`** | 全部已导出业务符号 `100%` 精确命中 `assets/pid-class-map.json` 变体 |
+| 符号路径命中（`symbol_path_match`） | `0` | 存量 DXF 已全部先经 `class_map.rs` 解析到精确 `variant_id` |
+| 结构派生默认（`structural_default`） | **`72,326`** | 管段、管线、端口、工艺点、分支点等无独立符号变体的派生结构对象（`15,910 + 72,326 = 88,236` 100% 守恒） |
+| **表外类默认兜底（`class_default_fallback`）** | **`0`** | **全批 90 图零静默表外兜底**（`fallback_by_class = {}`，恒定写出至 `_Coverage.json`） |
+| **无变体类计数（`unmapped_class_variant`）** | **`0`** | 零缺口 |
+
+- **`#117` 第 2 步全厂备份包实查核心结论**（全文见同目录 `06-lx-compliance-and-codelist-audit.md` §1）：
+  - 扫描 `BACKUP_ORACLE` 全部 `16` 个顶层文件（含 `Export.dmp` `126` 张表、全部 `10` 卷 `RefData~4~*`、`PlantConfig.xml` 及 `SPPIDDataMap.xml` `12,087` 条 `<Rel>`）：`SPPIDDataMap.xml` 仅含工具侧 3 层 `MapEnumMapEnum` 父子边（`1,573` 条），无法推出目标 `EFSchema.xml` 的 6 层设备分级链（`EqType0..EqType5`）及跳层管件父链，且 `SPECIALTY_ITEM` 两枚举 GUID 与仪表 `@EE3F8.1` 在包内均为 `0` 字节命中；因此分级表不能从备份包单独推出，须采用「**表外计数 100% 可观测 + 外置 JSON 按厂热替换**」方案（阶段一侧已在本单全部落地）。
+
+### 26.3 固定门禁读数
+
+| 门禁项 | 改前读数（§25.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,203` 条 | **`7,204` 条**（**`7,136` 过** / **`67` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+1` 条 Rust 测试，**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `classes.rs`、`write.rs`、`mod.rs`、`export.rs`、`promote.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `193 passed` | **`196 passed`** | `+3` 条 Python 测试，**全绿** |

@@ -964,6 +964,7 @@
 **缺资料。** RES-01 ⚠。
 
 **对应任务。** LX-6（视情况）
+**状态与解决记录。** **已完成（2026-11-21，[#137](https://github.com/happyrust/pid-cad/issues/137)）**：已在 `06-lx-compliance-and-codelist-audit.md` 第 2 节完成 10 类保留流够用性核查（全部够用），并完成 `#117` 第 2 步备份包分级来源实查与阶段一 `VariantResolutionSummary` 落地（见 `readings.md` §26）。
 
 ---
 
@@ -979,6 +980,7 @@
 - 一页书面结论，随计划归档。
 
 **对应任务。** LX-7（S）
+**状态与解决记录。** **已完成（2026-11-21，[#137](https://github.com/happyrust/pid-cad/issues/137)）**：已在 `06-lx-compliance-and-codelist-audit.md` 第 3 节完成四条合规与脱敏红线书面确认并归档。
 
 ---
 
@@ -996,6 +998,7 @@
 **缺资料。** RES-06 ⚠。
 
 **对应任务。** LX-8（M）
+**状态与解决记录。** **编排器与静态第①关已完成（2026-11-21，[#135](https://github.com/happyrust/pid-cad/issues/135) / [#137](https://github.com/happyrust/pid-cad/issues/137)）**：落地 `scripts/sppid/precheck_and_receipt.py precheck`（覆盖模拟运行器三关全过、失败拦截与未设运行器退出码拦截；真机第②③关待 `RES-06`）。
 
 ---
 
@@ -1013,6 +1016,7 @@
 **缺资料。** RES-15 ✖（阻塞精确口径）。
 
 **对应任务。** LX-9（M）
+**状态与解决记录。** **首轮送测包与回执收敛器均已完成（2026-11-21，[#135](https://github.com/happyrust/pid-cad/issues/135) / [#137](https://github.com/happyrust/pid-cad/issues/137)）**：`build_submission_round1.py` 已生成首轮 6 套包，`precheck_and_receipt.py evaluate-receipt` 已支持回执校验与 `R1..R5` 收敛（待 `RES-15` 回填实测回执）。
 
 ---
 
@@ -1198,6 +1202,7 @@
 | `ISSUE-L3-3 / L3-4 / L3-8` | [#133](https://github.com/happyrust/pid-cad/issues/133) | `done-local`（本地已完成 · L3 全线收官） | 提交 `dd5a498d8`：扩展 `src/io/pid_convert/{mod,recognize,export}.rs` 并落地 `scripts/sppid/regression_gate.py`；90 图 `PIDPipingPort` 跃升至 `11,420`、管端连通 `48,243`、断头 100% 守恒、跨图连接符互逆配对 `38` 对，`unexplained_diffs=0`，见 `readings.md` §22 |
 | `ISSUE-L2-1 / L2-5 / L2-6 / L2-7 / L6-2` | [#134](https://github.com/happyrust/pid-cad/issues/134) | `done-local`（本地已完成 · 引擎全链路） | 提交 `ac6527ca1`：落地 `src/io/pid_convert/promote.rs`（零冲突）；真实生产图升格 `115` 符号 + `50` 管段、编辑并存回 `.pid` `166/166` 100% 对齐过 `a/b` 验证，见 `readings.md` §24 |
 | `ISSUE-LX-8 / LX-9 / L6-3` | [#135](https://github.com/happyrust/pid-cad/issues/135) | `done-local`（本地已完成 · 首轮送测就绪） | 提交 `3ba5c3c2e`：落地 `scripts/sppid/build_submission_round1.py` 与 `05-phase1-acceptance-report.md`；生成 `round-01-20261121` 6 槽 17 文件（`precheck_passed=true`），见 `readings.md` §23 |
-| `ISSUE-L2-1 M4 / L2-2..L2-4 / L3-7` | [#136](https://github.com/happyrust/pid-cad/issues/136) | `done-local`（本地已完成 · 交互面板与校核全线收官） | 扩展 `src/app/commands/pidprops.rs` 与 `src/io/pid_convert/{recognize,promote,mod}.rs`；实现属性面板双分组、DWG 图面标注联动及 `PIDPROMOTE` / `PIDREVIEW` / `PIDSAVEPID`，真实生产图应用内闭环 `165/165` 对齐过 `a/b` 验证，见 `readings.md` §25 |
+| `ISSUE-L2-1 M4 / L2-2..L2-4 / L3-7` | [#136](https://github.com/happyrust/pid-cad/issues/136) | `done-local`（本地已完成 · 交互面板与校核全线收官） | 提交 `13635d1f1`：扩展 `src/app/commands/pidprops.rs` 与 `src/io/pid_convert/{recognize,promote,mod}.rs`；实现属性面板双分组、DWG 图面标注联动及 `PIDPROMOTE` / `PIDREVIEW` / `PIDSAVEPID`，真实生产图应用内闭环 `165/165` 对齐过 `a/b` 验证，见 `readings.md` §25 |
+| `ISSUE-LX-6..LX-9 / L4-2` | [#137](https://github.com/happyrust/pid-cad/issues/137) | `done-local`（本地已完成 · 三关编排器与兜底可观测性收官） | 落地 `precheck_and_receipt.py`、`VariantResolutionSummary` + `--class-map` 热替换（90 图 `exact=15,910`、`fallback=0`）与 `06-lx-compliance-and-codelist-audit.md`，见 `readings.md` §26 |
 | `.sym` 预览（关联） | [#116](https://github.com/happyrust/pid-cad/issues/116) | 并行分支推进中 | 由 `pid-symbol-on-main` 工作树正在推进，严格避让 |
-| 分级表可观测性（关联） | [#117](https://github.com/happyrust/pid-cad/issues/117) | 待定范围 | 与 `L4-2` / `L0-9` 衔接，建议先做第 1 步表外计数输出 |
+| 分级表可观测性（关联） | [#117](https://github.com/happyrust/pid-cad/issues/117) | 已完成第 2 步实查与阶段一侧落地 | 已在 `06-lx-compliance-and-codelist-audit.md` 完成备份包全量实查（证实目标 `EFSchema` 6 层树不在包内），并在阶段一导出侧落地 `VariantResolutionSummary` 与 `--class-map` 热替换；备份包导出侧留待后续升级 `pid-parse` 时同步 |

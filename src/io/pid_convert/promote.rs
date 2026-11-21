@@ -13,16 +13,16 @@ use serde::{Deserialize, Serialize};
 use super::class_map::default_legend_class_map;
 #[cfg(not(target_arch = "wasm32"))]
 use super::export::{
-    compute_representation_uid_map, load_configured_seed, pick_seed_style_ids, verify_dual_bundle,
-    DualConvertBundle,
+    compute_representation_uid_map, load_configured_seed, pick_seed_style_ids,
+    resolve_effective_class_map, verify_dual_bundle, DualConvertBundle,
 };
 use super::export::{ConvertOptions, ConvertSheetReport, DeadEndAttribution, PipeNetworkCensus};
 use super::recognize::{recognise_sppid_sheet, ConfidenceSummary, ConfidenceTier, TitleBlockInfo};
 use crate::io::pid_legend::guess_units_per_mm;
 use crate::io::pid_publish::{
-    export_drawing_bundle, parse_sppid_line_number, pipeline_uid, populate_item_tag_attributes,
-    synthesize_piping_network, ExportDrawing, ExportItem, PipeRunInput, SymbolEndpointRef,
-    UidAllocator,
+    export_drawing_bundle_with_map, parse_sppid_line_number, pipeline_uid,
+    populate_item_tag_attributes, synthesize_piping_network, ExportDrawing, ExportItem,
+    PipeRunInput, SymbolEndpointRef, UidAllocator, VariantResolutionSummary,
 };
 use crate::io::PID_SEMANTICS_XDATA_APP;
 use crate::pid::persist::PidAuthor;
@@ -1149,6 +1149,7 @@ pub fn save_author_document_to_dual(
             unmapped_blocks: 0,
         },
         exported_by_class,
+        variant_resolution: VariantResolutionSummary::default(),
         piping_synthesis: piping_stats,
         pipe_network_census: PipeNetworkCensus {
             dead_end_attribution: DeadEndAttribution {
@@ -1164,7 +1165,9 @@ pub fn save_author_document_to_dual(
         pid_verification: None,
     };
 
-    let mut publish = export_drawing_bundle(&dwg)?;
+    let eff_map = resolve_effective_class_map(opts)?;
+    let (mut publish, var_res) = export_drawing_bundle_with_map(&dwg, &eff_map)?;
+    report.variant_resolution = var_res;
 
     let pid_bytes = if let Some((ref mut seed_pkg, ref inferred_tpl)) = seed_opt {
         let seed_geom = build_normalized_geometry(&seed_pkg.parsed);

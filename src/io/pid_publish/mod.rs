@@ -8,7 +8,10 @@ pub mod relations;
 pub mod uid;
 pub mod write;
 
-pub use classes::{default_class_map, materialize_export_item, resolve_variant};
+pub use classes::{
+    default_class_map, load_class_map_from_json, materialize_export_item, resolve_variant,
+    ClassMapSpec, VariantResolutionSummary,
+};
 pub use model::{ExportBundle, ExportDrawing, ExportItem, ExportRelation, UnmappedItem};
 pub use names::{
     format_nominal_diameter_attr, format_nominal_diameter_from_code,
@@ -22,7 +25,7 @@ pub use uid::{
     branch_point_uid, derive_meta_envelope_uids, is_valid_hex32, pipeline_uid, port_uid,
     process_point_uid, relation_uid, MetaEnvelopeUids, UidAllocator,
 };
-pub use write::export_drawing_bundle;
+pub use write::{export_drawing_bundle, export_drawing_bundle_with_map};
 
 #[cfg(test)]
 mod tests {
@@ -349,6 +352,92 @@ mod tests {
             order_value: None,
         });
         assert!(export_drawing_bundle(&dwg).is_err());
+    }
+
+    #[test]
+    fn tracks_out_of_table_variant_fallback_in_coverage_and_supports_custom_plant_class_map() {
+        let mut alloc = UidAllocator::new("P01", "DWG-VAR-137");
+        let doc_uid = alloc.alloc_primary_uid(None, "doc");
+        let mut dwg = ExportDrawing::new("P01", &doc_uid, "DWG-VAR-137");
+
+        // 1. Exact variant_id hit
+        dwg.items.push(ExportItem {
+            uid: alloc.alloc_primary_uid(None, "v1"),
+            class: "PIDPipingComponent".to_string(),
+            name: Some("BV-101".to_string()),
+            variant_id: Some("PIDPipingComponent#01".to_string()),
+            graphic_oids: vec![alloc.alloc_graphic_oid(None)],
+            ..Default::default()
+        });
+        // 2. Symbol-path hit
+        dwg.items.push(ExportItem {
+            uid: alloc.alloc_primary_uid(None, "v2"),
+            class: "PIDPipingComponent".to_string(),
+            name: Some("BV-102".to_string()),
+            symbol_path: Some(r"Piping\Valves\2 Way Common\Ball Valve Type 2.sym".to_string()),
+            graphic_oids: vec![alloc.alloc_graphic_oid(None)],
+            ..Default::default()
+        });
+        // 3. Out-of-table unknown variant_id + unknown symbol_path -> falls back to class default & MUST be counted!
+        dwg.items.push(ExportItem {
+            uid: alloc.alloc_primary_uid(None, "v3"),
+            class: "PIDProcessEquipment".to_string(),
+            name: Some("SKID-999".to_string()),
+            variant_id: Some("PIDProcessEquipment#9999_OTHER_PLANT".to_string()),
+            symbol_path: Some(r"Equipment\CustomPlant\NonStandardSkid.sym".to_string()),
+            graphic_oids: vec![alloc.alloc_graphic_oid(None)],
+            ..Default::default()
+        });
+
+        let (bundle, var_sum) =
+            export_drawing_bundle_with_map(&dwg, default_class_map()).expect("export");
+        assert_eq!(var_sum.exact_variant_id, 1);
+        assert_eq!(var_sum.symbol_path_match, 1);
+        assert_eq!(var_sum.class_default_fallback, 1);
+        assert_eq!(
+            var_sum
+                .fallback_by_class
+                .get("PIDProcessEquipment")
+                .copied(),
+            Some(1)
+        );
+        let cov: serde_json::Value = serde_json::from_str(&bundle.coverage_json).unwrap();
+        assert_eq!(cov["variant_resolution"]["class_default_fallback"], 1);
+
+        // Hot-swapping an external plant class map makes the custom variant an exact hit with 0 fallback!
+        let custom_json = serde_json::json!({
+            "schema_version": 1,
+            "total_variants": 2,
+            "variants": [
+                {
+                    "variant_id": "PIDPipingComponent#01",
+                    "class": "PIDPipingComponent",
+                    "instance_count": 10,
+                    "interfaces": ["IObject", "IPipingComponent"],
+                    "codelist_values": {"IPipingComponent.PipingComponentType1": "@CUSTOM_VALVE_L1"},
+                    "graphic_kinds": ["Symbol"],
+                    "symbol_paths": ["Piping\\Valves\\2 Way Common\\Ball Valve Type 2.sym"]
+                },
+                {
+                    "variant_id": "PIDProcessEquipment#9999_OTHER_PLANT",
+                    "class": "PIDProcessEquipment",
+                    "instance_count": 5,
+                    "interfaces": ["IObject", "IEquipment"],
+                    "codelist_values": {"IEquipment.EqType0": "@CUSTOM_PLANT_EQ0"},
+                    "graphic_kinds": ["Symbol"],
+                    "symbol_paths": ["Equipment\\CustomPlant\\NonStandardSkid.sym"]
+                }
+            ]
+        })
+        .to_string();
+        let custom_map = load_class_map_from_json(&custom_json).expect("load custom plant map");
+        let (custom_bundle, custom_sum) =
+            export_drawing_bundle_with_map(&dwg, &custom_map).expect("export with custom map");
+        assert_eq!(custom_sum.exact_variant_id, 2);
+        assert_eq!(custom_sum.symbol_path_match, 1);
+        assert_eq!(custom_sum.class_default_fallback, 0);
+        let xml_str = String::from_utf8_lossy(&custom_bundle.data_xml);
+        assert!(xml_str.contains("EqType0=\"@CUSTOM_PLANT_EQ0\""));
     }
 
     #[test]

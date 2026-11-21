@@ -5,12 +5,67 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::model::ExportItem;
 use crate::io::pid_publish_check::{default_publish_spec, ClassSpec};
 
 const EMBEDDED_CLASS_MAP_JSON: &str = include_str!("../../../assets/pid-class-map.json");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VariantMatchKind {
+    ExactVariantId,
+    SymbolPath,
+    StructuralDefault,
+    ClassDefaultFallback,
+    UnmappedClass,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VariantResolutionSummary {
+    pub exact_variant_id: usize,
+    pub symbol_path_match: usize,
+    #[serde(default)]
+    pub structural_default: usize,
+    pub class_default_fallback: usize,
+    pub unmapped_class_variant: usize,
+    pub fallback_by_class: BTreeMap<String, usize>,
+}
+
+impl VariantResolutionSummary {
+    pub fn record(&mut self, class: &str, kind: VariantMatchKind) {
+        match kind {
+            VariantMatchKind::ExactVariantId => self.exact_variant_id += 1,
+            VariantMatchKind::SymbolPath => self.symbol_path_match += 1,
+            VariantMatchKind::StructuralDefault => self.structural_default += 1,
+            VariantMatchKind::ClassDefaultFallback => {
+                self.class_default_fallback += 1;
+                *self.fallback_by_class.entry(class.to_string()).or_default() += 1;
+            }
+            VariantMatchKind::UnmappedClass => {
+                self.unmapped_class_variant += 1;
+                *self.fallback_by_class.entry(class.to_string()).or_default() += 1;
+            }
+        }
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        self.exact_variant_id += other.exact_variant_id;
+        self.symbol_path_match += other.symbol_path_match;
+        self.structural_default += other.structural_default;
+        self.class_default_fallback += other.class_default_fallback;
+        self.unmapped_class_variant += other.unmapped_class_variant;
+        for (cls, &cnt) in &other.fallback_by_class {
+            *self.fallback_by_class.entry(cls.clone()).or_default() += cnt;
+        }
+    }
+}
+
+pub fn load_class_map_from_json(raw: &str) -> Result<ClassMapSpec, String> {
+    serde_json::from_str::<ClassMapSpec>(raw)
+        .map_err(|e| format!("invalid SPPID class-map JSON: {e}"))
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CatalogVariant {
@@ -38,35 +93,74 @@ pub fn default_class_map() -> &'static ClassMapSpec {
     })
 }
 
+fn is_structural_unparameterized_class(class: &str) -> bool {
+    matches!(
+        class,
+        "PIDPipeline"
+            | "PIDPipingConnector"
+            | "PIDSignalConnector"
+            | "PIDPipingPort"
+            | "PIDSignalPort"
+            | "PIDProcessPoint"
+            | "PIDPipingBranchPoint"
+            | "PIDSignalBranchPoint"
+            | "PIDBranchPoint"
+            | "PIDNote"
+    )
+}
+
+pub fn resolve_variant_tracked<'a>(
+    map: &'a ClassMapSpec,
+    class: &str,
+    variant_id: Option<&str>,
+    symbol_path: Option<&str>,
+) -> (Option<&'a CatalogVariant>, VariantMatchKind) {
+    if let Some(vid) = variant_id.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(hit) = map
+            .variants
+            .iter()
+            .find(|v| v.class == class && v.variant_id == vid)
+        {
+            return (Some(hit), VariantMatchKind::ExactVariantId);
+        }
+    }
+    if let Some(sym) = symbol_path.map(str::trim).filter(|s| !s.is_empty()) {
+        let norm = sym.trim_start_matches(['\\', '/']).replace('/', "\\");
+        if let Some(hit) = map.variants.iter().find(|v| {
+            v.class == class && v.symbol_paths.iter().any(|p| p.eq_ignore_ascii_case(&norm))
+        }) {
+            return (Some(hit), VariantMatchKind::SymbolPath);
+        }
+    }
+    let had_selector = variant_id.is_some_and(|s| !s.trim().is_empty())
+        || symbol_path.is_some_and(|s| !s.trim().is_empty());
+    match map.variants.iter().find(|v| v.class == class) {
+        Some(fallback) => {
+            let kind = if !had_selector && is_structural_unparameterized_class(class) {
+                VariantMatchKind::StructuralDefault
+            } else {
+                VariantMatchKind::ClassDefaultFallback
+            };
+            (Some(fallback), kind)
+        }
+        None => {
+            let kind = if !had_selector && is_structural_unparameterized_class(class) {
+                VariantMatchKind::StructuralDefault
+            } else {
+                VariantMatchKind::UnmappedClass
+            };
+            (None, kind)
+        }
+    }
+}
+
 pub fn resolve_variant<'a>(
     map: &'a ClassMapSpec,
     class: &str,
     variant_id: Option<&str>,
     symbol_path: Option<&str>,
 ) -> Option<&'a CatalogVariant> {
-    if let Some(vid) = variant_id {
-        if let Some(hit) = map
-            .variants
-            .iter()
-            .find(|v| v.class == class && v.variant_id == vid)
-        {
-            return Some(hit);
-        }
-    }
-    if let Some(sym) = symbol_path {
-        let norm = sym
-            .trim()
-            .trim_start_matches(['\\', '/'])
-            .replace('/', "\\");
-        // `variants` are already sorted by descending `instance_count` per class,
-        // so the first variant whose `symbol_paths` matches is the most frequent one.
-        if let Some(hit) = map.variants.iter().find(|v| {
-            v.class == class && v.symbol_paths.iter().any(|p| p.eq_ignore_ascii_case(&norm))
-        }) {
-            return Some(hit);
-        }
-    }
-    map.variants.iter().find(|v| v.class == class)
+    resolve_variant_tracked(map, class, variant_id, symbol_path).0
 }
 
 fn default_attr_constant(class: &str, iface: &str, attr: &str) -> &'static str {
@@ -188,25 +282,35 @@ pub fn materialize_class_interfaces(
     out
 }
 
-pub fn materialize_export_item(item: &ExportItem) -> Result<OrderedInterfaces, String> {
+pub fn materialize_export_item_with_map(
+    item: &ExportItem,
+    class_map: &ClassMapSpec,
+) -> Result<(OrderedInterfaces, VariantMatchKind), String> {
     let spec = default_publish_spec();
     let cls_spec = spec
         .data_classes
         .get(&item.class)
         .ok_or_else(|| format!("unknown SPPID publish class '{}'", item.class))?;
-    let variant = resolve_variant(
-        default_class_map(),
+    let (variant, match_kind) = resolve_variant_tracked(
+        class_map,
         &item.class,
         item.variant_id.as_deref(),
         item.symbol_path.as_deref(),
     );
-    Ok(materialize_class_interfaces(
-        &item.class,
-        cls_spec,
-        &item.uid,
-        item.name.as_deref(),
-        item.description.as_deref(),
-        variant,
-        &item.attributes,
+    Ok((
+        materialize_class_interfaces(
+            &item.class,
+            cls_spec,
+            &item.uid,
+            item.name.as_deref(),
+            item.description.as_deref(),
+            variant,
+            &item.attributes,
+        ),
+        match_kind,
     ))
+}
+
+pub fn materialize_export_item(item: &ExportItem) -> Result<OrderedInterfaces, String> {
+    materialize_export_item_with_map(item, default_class_map()).map(|(ifaces, _)| ifaces)
 }

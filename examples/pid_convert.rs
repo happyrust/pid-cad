@@ -6,6 +6,7 @@
 //!     [--plant NAME]              Plant name in Container header (default: P01)
 //!     [--seed-pid PATH_OR_ZIP]    Blank .pid seed, RefData~*.zip, or zip::entry for dual output
 //!     [--sym-dir DIR]             Optional Ref/Symbols root for cloning real .sym JSite bodies
+//!     [--class-map FILE]          Optional external SPPID class-map JSON override (#117 / #137)
 //!     [--verify-plot]             Also run b-level CAD reload + pid-plot PDF export (<stem>.pidplot.pdf)
 //!     [--summary-json FILE]       Optional path to write BatchConvertSummary JSON
 //! ```
@@ -20,6 +21,7 @@ struct CliArgs {
     plant: String,
     seed_pid: Option<String>,
     sym_dir: Option<String>,
+    class_map: Option<String>,
     verify_plot: bool,
     summary_json: Option<PathBuf>,
 }
@@ -30,6 +32,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut plant = "P01".to_string();
     let mut seed_pid: Option<String> = None;
     let mut sym_dir: Option<String> = None;
+    let mut class_map: Option<String> = None;
     let mut verify_plot = false;
     let mut summary_json: Option<PathBuf> = None;
 
@@ -49,6 +52,9 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "--sym-dir" => {
                 sym_dir = Some(it.next().ok_or("--sym-dir requires a directory")?);
+            }
+            "--class-map" => {
+                class_map = Some(it.next().ok_or("--class-map requires a JSON file path")?);
             }
             "--verify-plot" => {
                 verify_plot = true;
@@ -80,6 +86,7 @@ fn parse_args() -> Result<CliArgs, String> {
         plant,
         seed_pid,
         sym_dir,
+        class_map,
         verify_plot,
         summary_json,
     })
@@ -98,6 +105,7 @@ fn main() {
         plant: args.plant,
         seed_pid_path: args.seed_pid,
         sym_library_dir: args.sym_dir,
+        class_map_path: args.class_map,
         verify_plot_pdf: args.verify_plot,
         ..Default::default()
     };
@@ -116,13 +124,15 @@ fn main() {
                 eprintln!("convert error: {err}");
             }
             println!(
-                "pid_convert: converted={} failed={} pid_written={} pdf_plotted={} items={} relations={}",
+                "pid_convert: converted={} failed={} pid_written={} pdf_plotted={} items={} relations={} variant_exact={} variant_fallback={}",
                 summary.files_converted,
                 summary.files_failed,
                 summary.pid_files_written,
                 summary.pdf_files_plotted,
                 summary.total_items_written,
-                summary.total_relations_written
+                summary.total_relations_written,
+                summary.variant_resolution.exact_variant_id + summary.variant_resolution.symbol_path_match,
+                summary.variant_resolution.class_default_fallback + summary.variant_resolution.unmapped_class_variant,
             );
             if summary.files_converted == 0 || summary.files_failed > 0 {
                 std::process::exit(1);
