@@ -7,10 +7,11 @@
 //! `所属管线`；管口的 `名称`、`方向`、`连接状态` 和关系 `所属设备`；信号线的 `起点仪表`、
 //! `终点仪表`、`端口未连接数`、`接到设备管口数`；仪表回路和图纸自己的事实；到主数据里找的关系
 //! `管道等级`、`绝热等级`、`流体介质`；根 `项目` 下的主数据表和图例标准、`图纸.图号`、
-//! `图纸.PBS`、`参数.<名>`。管口的 `位号前缀`、阀门的 `流向相反`、页间连接符和跨图的事实还取
-//! 不到值。
+//! `图纸.PBS`、`参数.<名>`；页间连接符的 `连接符种类`、`对端图纸`、`对端位号`、`配对状态` 和关系
+//! `所在线`、`对端线`，对象的 `位号.跨图重复数`。管口的 `位号前缀`、阀门的 `流向相反` 还取不到值。
 //! 作用对象从摘要的 `objects[]` 里选；管段是摘要的 `segments[]`，管口是摘要 `ports[]` 里属主是
-//! 设备的，仪表回路是按 `仪表回路` 属性分组的仪表，图纸是整张图。
+//! 设备的，页间连接符是摘要的 `connectors[]`，仪表回路是按 `仪表回路` 属性分组的仪表，图纸是
+//! 整张图。`配对状态`、`对端线`、`位号.跨图重复数` 要项目索引（[`Project`]），没有时不知道。
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -18,14 +19,14 @@ use serde_json::Value;
 
 use crate::pid::master_data::{parse_dn, MasterData, Resolved, Table};
 use crate::pid::project_index::{
-    DrawingSummary, Joint, ObjectKind, SignalEnd, SummaryObject, SummaryPort, SummarySegment,
-    DEFAULT_TOLERANCE,
+    DrawingSummary, Joint, LinkEnd, LinkStatus, ObjectKind, PeerKind, ProjectIndex, SignalEnd,
+    SummaryConnector, SummaryObject, SummaryPort, SummarySegment, DEFAULT_TOLERANCE,
 };
 use crate::pid::propagate::LINE_FIELDS;
 use crate::pid::symbols::{PortDir, BLOCK_PREFIX};
 use crate::pid::tag_engine::{resolve_rule, TAG_STATUS_DUPLICATED};
 use crate::pid::tag_rule;
-use crate::pid::topology::{TYPE_PIPE_LINE, TYPE_PIPE_SEGMENT};
+use crate::pid::topology::{ConnectorKind, TYPE_PIPE_LINE, TYPE_PIPE_SEGMENT};
 use crate::pid::type_lib::TypeLib;
 
 use super::dsl::{Fact, FactList, Facts, Matching, Path};
@@ -52,6 +53,12 @@ const SEGMENT: &str = "管段";
 /// 管口的种类名。
 const NOZZLE: &str = "管口";
 
+/// 页间连接符的种类名。
+const CONNECTOR: &str = "页间连接符";
+
+/// 同一进程里配的对（`peer_kind` 是 `local`）的 `对端图纸`。
+const LOCAL_PEER: &str = "本机配对";
+
 /// 根 `项目`：项目主数据的表和图例标准。
 const PROJECT: &str = "项目";
 
@@ -68,11 +75,89 @@ const MASTER_RELATIONS: [(&str, Table); 3] = [
 /// 结果的 `points` 要列出位置的派生事实（§3.6）：没接上的端点、与异径管路相接的地方。
 pub const LOCATED: [&str; 2] = ["端口未连接数", "直连异径管路数"];
 
-/// 检查时各张图共用的：规则包、主数据、类型库。
+/// 检查时各张图共用的：规则包、主数据、类型库，带着项目索引查时还有项目（[`Project`]）。
 pub struct Context<'a> {
     pub rules: &'a RuleSet,
     pub master: &'a Resolved,
     pub types: &'a TypeLib,
+    pub project: Option<Project<'a>>,
+}
+
+/// 跨图的事实要的（§3.4）：按图号找得到的图（查的和只用来找对端的），项目索引里连接符的配对和
+/// 跨图重复的位号。
+pub struct Project<'a> {
+    sheets: HashMap<&'a str, &'a Sheet<'a>>,
+    /// （图号，句柄）→ 这个连接符的配对。
+    pairing: HashMap<(&'a str, &'a str), Pairing<'a>>,
+    /// （类型编码，位号）→ 这个位号的对象落在的图号，不重复。位号照索引里的，不去空白。
+    duplicates: HashMap<(&'a str, &'a str), Vec<&'a str>>,
+}
+
+/// 一个连接符在项目索引里的配对。
+#[derive(Clone, Copy)]
+enum Pairing<'a> {
+    /// 配成了对，对端是这一个。
+    Paired(&'a LinkEnd),
+    Unresolved(LinkStatus),
+}
+
+impl<'a> Project<'a> {
+    /// 由项目索引 `index` 和找得到的图建：`checked` 是查的图，`others` 是只用来找对端的图。
+    pub fn new(index: &'a ProjectIndex, checked: &'a [Sheet<'a>], others: &'a [Sheet<'a>]) -> Self {
+        let sheets = checked
+            .iter()
+            .chain(others)
+            .map(|sheet| (sheet.drawing.drawing_id.as_str(), sheet))
+            .collect();
+        let mut pairing = HashMap::new();
+        for link in &index.links {
+            for (end, other) in [(&link.from, &link.to), (&link.to, &link.from)] {
+                pairing.insert(
+                    (end.drawing_id.as_str(), end.handle.as_str()),
+                    Pairing::Paired(other),
+                );
+            }
+        }
+        for item in &index.unresolved {
+            pairing.insert(
+                (item.drawing_id.as_str(), item.handle.as_str()),
+                Pairing::Unresolved(item.status),
+            );
+        }
+        let mut duplicates = HashMap::new();
+        for duplicate in &index.duplicates {
+            let mut drawings: Vec<&str> = duplicate
+                .places
+                .iter()
+                .map(|place| place.drawing_id.as_str())
+                .collect();
+            drawings.sort_unstable();
+            drawings.dedup();
+            duplicates.insert(
+                (duplicate.type_code.as_str(), duplicate.tag.as_str()),
+                drawings,
+            );
+        }
+        Self {
+            sheets,
+            pairing,
+            duplicates,
+        }
+    }
+
+    /// 图 `drawing_id` 上句柄是 `handle` 的连接符的配对；索引里没有它时是 `None`。
+    fn pairing(&self, drawing_id: &'a str, handle: &'a str) -> Option<Pairing<'a>> {
+        self.pairing.get(&(drawing_id, handle)).copied()
+    }
+
+    /// 和 `object` 类型编码、位号都相同的对象还落在几张别的图上（`drawing_id` 以外）。
+    fn elsewhere(&self, object: &'a SummaryObject, drawing_id: &str) -> usize {
+        self.duplicates
+            .get(&(object.type_code.as_str(), object.tag.as_str()))
+            .map_or(0, |drawings| {
+                drawings.iter().filter(|id| **id != drawing_id).count()
+            })
+    }
 }
 
 /// 一张图，连同检查前先数好的：同类型同位号的对象数、设备、符号实例的端口和个数、仪表回路，
@@ -200,6 +285,16 @@ impl<'a> Sheet<'a> {
         single(self.runs.get(tag.trim()))
     }
 
+    /// 位号是 `tag` 的信号线；图上没有或不止一条时是 `None`。
+    fn signal(&self, tag: &str) -> Option<&'a SummaryObject> {
+        single(self.signals.get(tag.trim()))
+    }
+
+    /// 这张图的摘要。
+    pub fn drawing(&self) -> &'a DrawingSummary {
+        self.drawing
+    }
+
     /// 类型编码是 `type_code`、位号是 `tag` 的设备；图上没有或不止一台时是 `None`。
     fn equipment(&self, type_code: &'a str, tag: &'a str) -> Option<&'a SummaryObject> {
         single(self.equipment.get(&(type_code, tag.trim())))
@@ -222,9 +317,24 @@ pub enum Subject<'a> {
     Segment(&'a SummarySegment),
     /// 摘要 `ports[]` 里属主是设备的一项：一个管口。
     Port(&'a SummaryPort),
+    /// 摘要 `connectors[]` 的一项：一个页间连接符。
+    Connector(&'a SummaryConnector),
     Loop(&'a Loop<'a>),
     /// 整张图。
     Drawing,
+}
+
+impl Subject<'_> {
+    /// 作用对象的类型编码；仪表回路和图纸没有。
+    pub fn type_code(&self) -> Option<&str> {
+        match self {
+            Self::Object(object) => Some(&object.type_code),
+            Self::Segment(segment) => Some(segment_type(segment)),
+            Self::Port(port) => Some(&port.type_code),
+            Self::Connector(plug) => Some(connector_type(plug)),
+            Self::Loop(_) | Self::Drawing => None,
+        }
+    }
 }
 
 /// `sheet` 上作用对象是 `target` 的那些，按摘要里的顺序；仪表回路按第一个仪表出现的
@@ -243,6 +353,12 @@ pub fn subjects<'a>(sheet: &'a Sheet<'a>, target: &Target, types: &TypeLib) -> V
             .iter()
             .filter(|port| port.owner_kind == ObjectKind::Equipment)
             .map(Subject::Port)
+            .collect(),
+        Target::Kind(Kind::Connector) => sheet
+            .drawing
+            .connectors
+            .iter()
+            .map(Subject::Connector)
             .collect(),
         Target::Kind(Kind::Loop) => sheet.loops.iter().map(Subject::Loop).collect(),
         Target::Kind(Kind::Drawing) => vec![Subject::Drawing],
@@ -305,8 +421,9 @@ impl<'a> SubjectFacts<'a> {
     }
 
     /// 结果里的对象引用（§3.6）。管段没有位号，属主是它的管路或管线，位置是起点。管口没有位号，
-    /// 类型编码和属主是设备的，句柄是那台设备的，图上没有或不止一台时没有句柄。仪表回路和
-    /// 图纸没有类型编码和句柄；回路的 `tag` 是回路号，位置取回路里第一个仪表的。
+    /// 类型编码和属主是设备的，句柄是那台设备的，图上没有或不止一台时没有句柄。页间连接符没有
+    /// 位号，类型编码是它那一族线的，属主是它所在的线。仪表回路和图纸没有类型编码和句柄；回路的
+    /// `tag` 是回路号，位置取回路里第一个仪表的。
     pub fn object_ref(&self) -> ObjectRef {
         let drawing_id = self.sheet.drawing.drawing_id.clone();
         match self.subject {
@@ -343,6 +460,16 @@ impl<'a> SubjectFacts<'a> {
                     .equipment(&port.type_code, &port.tag)
                     .map(|equipment| equipment.handle.clone()),
             },
+            Subject::Connector(plug) => ObjectRef {
+                kind: CONNECTOR.to_owned(),
+                type_code: connector_type(plug).to_owned(),
+                tag: None,
+                drawing_id,
+                owner: text(&plug.line),
+                port: None,
+                at: plug.at,
+                handle: Some(plug.handle.clone()),
+            },
             Subject::Loop(group) => ObjectRef {
                 kind: LOOP.to_owned(),
                 type_code: String::new(),
@@ -368,7 +495,8 @@ impl<'a> SubjectFacts<'a> {
 
     /// 豁免用的对象键（§3.7）：有自己编号的是「类型编码|位号」，没有位号或没有自己
     /// 编号的是「类型编码|所属|x,y」；管段是「类型编码|所属|起点」，管口是「设备类型编码|设备位号#
-    /// 端口名」，仪表回路是「仪表回路|回路号」，图纸是「图纸|图号」。
+    /// 端口名」，页间连接符是「类型编码|所在线|x,y」，仪表回路是「仪表回路|回路号」，图纸是
+    /// 「图纸|图号」。
     pub fn object_key(&self) -> String {
         match self.subject {
             Subject::Object(object) => match text(&object.tag) {
@@ -387,17 +515,24 @@ impl<'a> SubjectFacts<'a> {
                 point(segment.a)
             ),
             Subject::Port(port) => format!("{}|{}#{}", port.type_code, port.tag.trim(), port.port),
+            Subject::Connector(plug) => format!(
+                "{}|{}|{}",
+                connector_type(plug),
+                plug.line.trim(),
+                point(plug.at)
+            ),
             Subject::Loop(group) => format!("{LOOP}|{}", group.number),
             Subject::Drawing => format!("{DRAWING}|{}", self.sheet.drawing.drawing_id),
         }
     }
 
-    /// 没写消息模板时消息里的「位号或位置」：管段是起点，管口是「设备位号#端口名」，仪表回路是
-    /// 回路号，图纸是图号。
+    /// 没写消息模板时消息里的「位号或位置」：管段是起点，管口是「设备位号#端口名」，页间连接符是
+    /// 它的位置，仪表回路是回路号，图纸是图号。
     pub fn location(&self) -> String {
         match self.subject {
             Subject::Object(object) => text(&object.tag).unwrap_or_else(|| point(object.at)),
             Subject::Segment(segment) => point(segment.a),
+            Subject::Connector(plug) => point(plug.at),
             Subject::Port(port) => format!("{}#{}", port.tag.trim(), port.port),
             Subject::Loop(group) => group.number.to_owned(),
             Subject::Drawing => self.sheet.drawing.drawing_id.clone(),
@@ -405,8 +540,8 @@ impl<'a> SubjectFacts<'a> {
     }
 
     /// 消息模板里 `{name}` 填的值（§3.1）；没有值是空串。仪表回路的 `{位号}` 是回路号，
-    /// 管段、管口、仪表回路和图纸的 `{类型}` 是种类名，管段的 `{所属}` 是它的管路或管线，管口的
-    /// 是设备位号；`{缺失字段}` 是缺的必填属性名。
+    /// 管段、管口、页间连接符、仪表回路和图纸的 `{类型}` 是种类名，管段的 `{所属}` 是它的管路或
+    /// 管线，管口的是设备位号，页间连接符的是它所在的线；`{缺失字段}` 是缺的必填属性名。
     pub fn placeholder(&self, name: &str) -> String {
         let value = match (name, self.subject) {
             ("位号", Subject::Object(object)) => Some(object.tag.clone()),
@@ -414,11 +549,13 @@ impl<'a> SubjectFacts<'a> {
             ("类型", Subject::Object(object)) => Some(object.type_label.clone()),
             ("类型", Subject::Segment(_)) => Some(SEGMENT.to_owned()),
             ("类型", Subject::Port(_)) => Some(NOZZLE.to_owned()),
+            ("类型", Subject::Connector(_)) => Some(CONNECTOR.to_owned()),
             ("类型", Subject::Loop(_)) => Some(LOOP.to_owned()),
             ("类型", Subject::Drawing) => Some(DRAWING.to_owned()),
             ("所属", Subject::Object(object)) => object.owner.clone(),
             ("所属", Subject::Segment(segment)) => Some(segment_owner(segment).to_owned()),
             ("所属", Subject::Port(port)) => Some(port.tag.clone()),
+            ("所属", Subject::Connector(plug)) => Some(plug.line.clone()),
             ("位号" | "所属", _) => None,
             ("图号", _) => Some(self.sheet.drawing.drawing_id.clone()),
             (MISSING_FIELDS, _) => Some(self.missing_fields().join("、")),
@@ -485,15 +622,18 @@ impl<'a> SubjectFacts<'a> {
         if !self.kind.has_fact(name) {
             return match self.subject {
                 Subject::Object(object) => object.props.get(name).cloned(),
-                Subject::Segment(_) | Subject::Port(_) | Subject::Loop(_) | Subject::Drawing => {
-                    None
-                }
+                Subject::Segment(_)
+                | Subject::Port(_)
+                | Subject::Connector(_)
+                | Subject::Loop(_)
+                | Subject::Drawing => None,
             };
         }
         match self.subject {
             Subject::Object(object) => self.object_fact(object, name),
             Subject::Segment(segment) => self.segment_fact(segment, name),
             Subject::Port(port) => nozzle_fact(port, name),
+            Subject::Connector(plug) => self.connector_fact(plug, name),
             Subject::Loop(group) => loop_fact(group, name, self.context.rules),
             Subject::Drawing => self.drawing_fact(name),
         }
@@ -682,7 +822,7 @@ impl<'a> SubjectFacts<'a> {
                 let segments = self.own_segments(object)?;
                 Some(segments.iter().copied().flat_map(open_ends).collect())
             }
-            Subject::Port(_) | Subject::Loop(_) | Subject::Drawing => None,
+            Subject::Port(_) | Subject::Connector(_) | Subject::Loop(_) | Subject::Drawing => None,
         }
     }
 
@@ -745,8 +885,10 @@ impl<'a> SubjectFacts<'a> {
         Some(count)
     }
 
-    /// 关系 `所属管路`、`所属管线`、`所属设备` 走到的对象上的事实。走不到时是 `None`。
+    /// 关系 `所属管路`、`所属管线`、`所属设备`、`所在线`、`对端线` 走到的对象上的事实。走不到时
+    /// 是 `None`；`对端线` 要项目索引里配成了对，对端那张图也在手上。
     fn related(&self, relation: &str) -> Option<SubjectFacts<'a>> {
+        let mut sheet = self.sheet;
         let (kind, found) = match (relation, self.subject) {
             ("所属管路", _) => (Kind::PipeRun, self.sheet.run(self.run_tag()?)?),
             ("所属管线", _) => (Kind::PipeLine, self.sheet.line(self.line_tag()?)?),
@@ -754,11 +896,22 @@ impl<'a> SubjectFacts<'a> {
                 Kind::Equipment,
                 self.sheet.equipment(&port.type_code, &port.tag)?,
             ),
+            ("所在线", Subject::Connector(plug)) => carrier(sheet, plug, &plug.line)?,
+            ("对端线", Subject::Connector(plug)) => {
+                let project = self.context.project.as_ref()?;
+                let drawing_id = self.sheet.drawing.drawing_id.as_str();
+                let Pairing::Paired(end) = project.pairing(drawing_id, &plug.handle)? else {
+                    return None;
+                };
+                sheet = project.sheets.get(end.drawing_id.as_str()).copied()?;
+                carrier(sheet, plug, &end.line)?
+            }
             _ => return None,
         };
         Some(SubjectFacts {
             subject: Subject::Object(found),
             kind,
+            sheet,
             ..*self
         })
     }
@@ -771,7 +924,7 @@ impl<'a> SubjectFacts<'a> {
                 ObjectKind::PipeLine | ObjectKind::PipeRun => None,
                 _ => owner(object),
             },
-            Subject::Port(_) | Subject::Loop(_) | Subject::Drawing => None,
+            Subject::Port(_) | Subject::Connector(_) | Subject::Loop(_) | Subject::Drawing => None,
         }
     }
 
@@ -784,7 +937,37 @@ impl<'a> SubjectFacts<'a> {
                 ObjectKind::PipeRun => owner(object),
                 _ => owner(self.sheet.run(self.run_tag()?)?),
             },
-            Subject::Port(_) | Subject::Loop(_) | Subject::Drawing => None,
+            Subject::Port(_) | Subject::Connector(_) | Subject::Loop(_) | Subject::Drawing => None,
+        }
+    }
+
+    /// 页间连接符自己的事实（§3.4）：`连接符种类` 是摘要里记的种类；`对端图纸` 是记着的对端图，
+    /// 同进程配的对是「本机配对」，没记的是 `NULL`；`对端位号` 在两侧线号都记着时才有，流出的
+    /// 取 `downstream`、流入的取 `upstream`；`配对状态` 照项目索引，没有索引或索引里没有它时不知道。
+    fn connector_fact(&self, plug: &'a SummaryConnector, name: &str) -> Option<String> {
+        match name {
+            "连接符种类" => text(&plug.kind),
+            "对端图纸" => match plug.peer_kind {
+                PeerKind::Target | PeerKind::Server => plug.peer_drawing.as_deref().and_then(text),
+                PeerKind::Local => Some(LOCAL_PEER.to_owned()),
+                PeerKind::None => None,
+            },
+            "对端位号" => {
+                let upstream = plug.upstream.as_deref()?;
+                let downstream = plug.downstream.as_deref()?;
+                let inflow = ConnectorKind::parse(&plug.kind)?.is_inflow();
+                text(if inflow { upstream } else { downstream })
+            }
+            "配对状态" => {
+                let project = self.context.project.as_ref()?;
+                let drawing_id = self.sheet.drawing.drawing_id.as_str();
+                let status = match project.pairing(drawing_id, &plug.handle)? {
+                    Pairing::Paired(_) => "paired",
+                    Pairing::Unresolved(status) => status_name(status),
+                };
+                Some(status.to_owned())
+            }
+            _ => None,
         }
     }
 
@@ -833,8 +1016,9 @@ impl<'a> SubjectFacts<'a> {
         entry.attr(name).map(str::to_owned)
     }
 
-    /// `位号.长度`、`位号.同类型重复数`。没有自己编号或位号为空时不知道；位号引擎标了重复的
-    /// 至少算 2。
+    /// `位号.长度`、`位号.同类型重复数`、`位号.跨图重复数`。没有自己编号或位号为空时不知道；位号
+    /// 引擎标了重复的，同类型重复数至少算 2。跨图重复数数项目索引里类型编码、位号都相同的对象还
+    /// 落在几张别的图上，没有项目索引时不知道。
     fn tag_fact(&self, name: &str) -> Option<String> {
         let Subject::Object(object) = self.subject else {
             return None;
@@ -854,6 +1038,11 @@ impl<'a> SubjectFacts<'a> {
                 } else {
                     count
                 };
+                Some(count.to_string())
+            }
+            "跨图重复数" => {
+                let project = self.context.project.as_ref()?;
+                let count = project.elsewhere(object, &self.sheet.drawing.drawing_id);
                 Some(count.to_string())
             }
             _ => None,
@@ -884,7 +1073,10 @@ impl Facts for SubjectFacts<'_> {
                 Fact::Value(self.symbol_state())
             }
             [first, rest @ ..]
-                if matches!(first.as_str(), "所属管路" | "所属管线" | "所属设备") =>
+                if matches!(
+                    first.as_str(),
+                    "所属管路" | "所属管线" | "所属设备" | "所在线" | "对端线"
+                ) =>
             {
                 self.related(first).map_or(Fact::Value(None), |facts| {
                     facts.fact(&Path {
@@ -908,6 +1100,19 @@ pub fn reads_master(segments: &[String]) -> bool {
             .iter()
             .any(|relation| master_table(relation).is_some()),
         [] => false,
+    }
+}
+
+/// 路径要不要项目索引（§3.4）：页间连接符的 `配对状态`、经 `对端线` 走到别的图上、
+/// `位号.跨图重复数`。`kind` 是规则的作用对象；用到这些的规则是项目级规则。
+pub fn reads_index(kind: Kind, segments: &[String]) -> bool {
+    let connector = kind == Kind::Connector;
+    match segments {
+        [name] => connector && name == "配对状态",
+        [first, ..] if connector && first == "对端线" => true,
+        _ => segments
+            .windows(2)
+            .any(|pair| pair[0] == "位号" && pair[1] == "跨图重复数"),
     }
 }
 
@@ -1190,6 +1395,40 @@ impl Along {
         let along = dx * self.direction[0] + dy * self.direction[1];
         let off = (dx * self.direction[1] - dy * self.direction[0]).abs();
         (along, off)
+    }
+}
+
+/// 页间连接符的类型编码：管道连接符是管线的，信号连接符是信号线的；种类认不出时是摘要里记的
+/// 种类。
+fn connector_type(plug: &SummaryConnector) -> &str {
+    match ConnectorKind::parse(&plug.kind) {
+        Some(kind) => kind.type_code(),
+        None => &plug.kind,
+    }
+}
+
+/// 连接符 `plug` 那一族里位号是 `tag` 的线：管道连接符找管线，信号连接符找信号线。种类认不出、
+/// 图上没有或不止一条时是 `None`。
+fn carrier<'a>(
+    sheet: &Sheet<'a>,
+    plug: &SummaryConnector,
+    tag: &str,
+) -> Option<(Kind, &'a SummaryObject)> {
+    match ConnectorKind::parse(&plug.kind)? {
+        ConnectorKind::PipeIn | ConnectorKind::PipeOut => Some((Kind::PipeLine, sheet.line(tag)?)),
+        ConnectorKind::SignalIn | ConnectorKind::SignalOut => {
+            Some((Kind::SignalLine, sheet.signal(tag)?))
+        }
+    }
+}
+
+/// 配对状态在项目索引里的写法（§3.6）。
+fn status_name(status: LinkStatus) -> &'static str {
+    match status {
+        LinkStatus::OneSided => "one_sided",
+        LinkStatus::TargetMissing => "target_missing",
+        LinkStatus::Unpaired => "unpaired",
+        LinkStatus::Ambiguous => "ambiguous",
     }
 }
 

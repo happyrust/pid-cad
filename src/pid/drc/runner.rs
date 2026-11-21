@@ -4,15 +4,18 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::pid::master_data;
-use crate::pid::project_index::{DrawingSummary, ProjectIndex};
+use crate::pid::project_index::{DrawingSummary, LinkStatus, ProjectIndex};
 use crate::pid::type_lib::TypeLib;
 
 use super::builtin_rules::rule_set_digest;
 use super::dsl::{Expr, Operand, Path};
-use super::facts::{reads_master, subjects, Context, Sheet, SubjectFacts, LOCATED, MISSING_COUNT};
+use super::facts::{
+    reads_index, reads_master, subjects, Context, Project, Sheet, Subject, SubjectFacts, LOCATED,
+    MISSING_COUNT,
+};
 use super::model::{
-    Category, CheckReport, CheckResult, Notice, Rule, RuleSet, Scope, Severity, Summary, Trigger,
-    Waiver, REPORT_VERSION,
+    Category, CheckReport, CheckResult, Notice, Rule, RuleScope, RuleSet, Scope, ScopeKind,
+    Severity, Summary, Trigger, Waiver, REPORT_VERSION,
 };
 
 /// 消息和修复建议最多这么多字（§3.1）。
@@ -33,18 +36,27 @@ pub struct CheckInput<'a> {
     /// 图号 → 该图的豁免。
     pub waivers: &'a [(String, Vec<Waiver>)],
     pub trigger: Trigger,
+    /// 结果里的 `cross_drawing` 不照这里写的，按有没有 `index` 填。
     pub scope: Scope,
 }
 
 /// 按规则检查范围内的图（§4.1）。纯函数：只读输入，不碰文件和图纸。
 pub fn check(input: &CheckInput) -> CheckReport {
     let started = Instant::now();
+    let sheets: Vec<Sheet<'_>> = input.drawings.iter().map(Sheet::new).collect();
+    let elsewhere: Vec<Sheet<'_>> = if input.index.is_some() {
+        input.others.iter().map(Sheet::new).collect()
+    } else {
+        Vec::new()
+    };
     let context = Context {
         rules: input.rules,
         master: input.master,
         types: input.types,
+        project: input
+            .index
+            .map(|index| Project::new(index, &sheets, &elsewhere)),
     };
-    let sheets: Vec<Sheet<'_>> = input.drawings.iter().map(Sheet::new).collect();
     let mut summary = Summary {
         objects: input
             .drawings
@@ -55,6 +67,8 @@ pub fn check(input: &CheckInput) -> CheckReport {
     };
     let configured = matches!(input.master, master_data::Resolved::Configured { .. });
     let mut without_master = 0;
+    let mut without_index = 0;
+    let mut unknown = Vec::new();
     let mut results = Vec::new();
     for rule in &input.rules.rules {
         if !input.rules.is_enabled(rule) {
@@ -69,8 +83,14 @@ pub fn check(input: &CheckInput) -> CheckReport {
             without_master += 1;
             continue;
         }
+        if input.index.is_none() && uses_index(rule) {
+            summary.rules_skipped += 1;
+            without_index += 1;
+            continue;
+        }
         summary.rules_run += 1;
         results.extend(hits(rule, &sheets, &context));
+        unknown.extend(scope_notice(rule, input));
     }
     results.sort_by(|a, b| {
         a.severity
@@ -86,6 +106,14 @@ pub fn check(input: &CheckInput) -> CheckReport {
             Severity::Info => summary.infos += 1,
         }
     }
+    let mut notices: Vec<Notice> = master_notice(input.master, without_master)
+        .into_iter()
+        .chain(project_notice(input.scope.kind, without_index))
+        .collect();
+    if let Some(index) = input.index {
+        notices.extend(index_notices(index, input.drawings));
+    }
+    notices.extend(unknown);
     CheckReport {
         version: REPORT_VERSION,
         rule_set_version: input.rules.version.clone(),
@@ -96,14 +124,15 @@ pub fn check(input: &CheckInput) -> CheckReport {
                 i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
             }),
         trigger: input.trigger,
-        scope: input.scope.clone(),
+        scope: Scope {
+            cross_drawing: input.index.is_some(),
+            ..input.scope.clone()
+        },
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         summary,
         blocked: summary.errors > 0,
         results,
-        notices: master_notice(input.master, without_master)
-            .into_iter()
-            .collect(),
+        notices,
         stale_waivers: Vec::new(),
     }
 }
@@ -138,7 +167,149 @@ fn master_notice(master: &master_data::Resolved, skipped: usize) -> Option<Notic
     })
 }
 
-/// 一条规则在范围内各图上的命中：表达式为真才算，不知道不算。
+/// 规则是不是项目级的（[`reads_index`]）：没有项目索引时这些规则下不了结论，不跑（§3.4）。
+fn uses_index(rule: &Rule) -> bool {
+    let kind = rule.target.kind();
+    let mut found = false;
+    visit_paths(&rule.tree, &mut |path| {
+        found |= reads_index(kind, &path.segments)
+    });
+    found
+}
+
+/// 没有项目索引、`skipped` 条项目级规则因此没跑时，`notices[]` 里说一句（§3.6）；只查当前图时
+/// 说只查了当前图。
+fn project_notice(kind: ScopeKind, skipped: usize) -> Option<Notice> {
+    if skipped == 0 {
+        return None;
+    }
+    let reason = if kind == ScopeKind::Drawing {
+        "只检查了当前图"
+    } else {
+        "没有项目索引"
+    };
+    Some(Notice {
+        code: "PROJECT_RULES_SKIPPED".to_owned(),
+        message: format!("{reason}，{skipped} 条项目级规则没有执行"),
+    })
+}
+
+/// 带着项目索引查时，跨图的结论可能不全的两种情形各说一句（§3.6）：项目里有图读不出来，查的图上
+/// 有页间连接符分不出对端是哪一个。
+fn index_notices(index: &ProjectIndex, drawings: &[DrawingSummary]) -> Vec<Notice> {
+    let unreadable = index
+        .drawings
+        .iter()
+        .filter(|drawing| drawing.error.is_some())
+        .count();
+    let ambiguous = index
+        .unresolved
+        .iter()
+        .filter(|item| item.status == LinkStatus::Ambiguous)
+        .filter(|item| {
+            drawings
+                .iter()
+                .any(|drawing| drawing.drawing_id == item.drawing_id)
+        })
+        .count();
+    let mut notices = Vec::new();
+    if unreadable > 0 {
+        notices.push(Notice {
+            code: "INDEX_INCOMPLETE".to_owned(),
+            message: format!("项目里有 {unreadable} 张图读不出来，跨图的结论不完整"),
+        });
+    }
+    if ambiguous > 0 {
+        notices.push(Notice {
+            code: "CONNECTOR_AMBIGUOUS".to_owned(),
+            message: format!("有 {ambiguous} 个页间连接符分不出对端是哪一个，跨图的结论不完整"),
+        });
+    }
+    notices
+}
+
+/// 规则的作用域（§3.1 `scope_ref`）指的 PBS 节点、图纸或类型不在项目里时，`notices[]` 里说一句。
+/// 主数据没配好时不知道有哪些节点，没有项目索引时不知道有哪些图，这时不说。
+fn scope_notice(rule: &Rule, input: &CheckInput) -> Option<Notice> {
+    let message = match &rule.scope {
+        RuleScope::Project => return None,
+        RuleScope::Pbs(node) => {
+            let master_data::Resolved::Configured { data, .. } = input.master else {
+                return None;
+            };
+            if !data.pbs_subtree(node).is_empty() {
+                return None;
+            }
+            format!(
+                "规则 {} 的作用域是 PBS 节点 {node}，项目主数据里没有这个节点",
+                rule.id
+            )
+        }
+        RuleScope::Drawing(id) => {
+            let index = input.index?;
+            if index
+                .drawings
+                .iter()
+                .any(|drawing| drawing.drawing_id == *id)
+            {
+                return None;
+            }
+            format!("规则 {} 的作用域是图纸 {id}，项目里没有这张图", rule.id)
+        }
+        RuleScope::Type(code) => {
+            if !input.types.ancestors(code).is_empty() {
+                return None;
+            }
+            format!(
+                "规则 {} 的作用域是类型 {code}，类型库里没有这个类型",
+                rule.id
+            )
+        }
+    };
+    Some(Notice {
+        code: "RULE_SCOPE_UNKNOWN".to_owned(),
+        message,
+    })
+}
+
+/// 规则的作用域管不管这张图：PBS 节点管挂在它和它下级节点上的图，主数据没配好时只认挂在它
+/// 自己上的；图纸只管那一张；项目和类型不挑图。
+fn covers_drawing(
+    scope: &RuleScope,
+    drawing: &DrawingSummary,
+    master: &master_data::Resolved,
+) -> bool {
+    match scope {
+        RuleScope::Project | RuleScope::Type(_) => true,
+        RuleScope::Drawing(id) => drawing.drawing_id == *id,
+        RuleScope::Pbs(node) => {
+            let Some(pbs) = drawing.pbs.as_deref() else {
+                return false;
+            };
+            match master {
+                master_data::Resolved::Configured { data, .. } => {
+                    data.pbs_subtree(node).contains(&pbs)
+                }
+                master_data::Resolved::NotConfigured | master_data::Resolved::Unreadable { .. } => {
+                    pbs == node.as_str()
+                }
+            }
+        }
+    }
+}
+
+/// 规则的作用域管不管这个对象：类型管这个类型和它下级类型的对象，没有类型编码的（仪表回路、
+/// 图纸）不管；别的作用域不挑对象。
+fn covers_subject(scope: &RuleScope, subject: Subject<'_>, types: &TypeLib) -> bool {
+    let RuleScope::Type(code) = scope else {
+        return true;
+    };
+    subject
+        .type_code()
+        .is_some_and(|own| own == code.as_str() || types.ancestors(own).contains(code))
+}
+
+/// 一条规则在范围内各图上的命中：表达式为真才算，不知道不算；规则的作用域管不到的图和对象不查。
 fn hits(rule: &Rule, sheets: &[Sheet<'_>], context: &Context<'_>) -> Vec<CheckResult> {
     let fields = fields(rule);
     let located = located(rule);
@@ -146,7 +317,13 @@ fn hits(rule: &Rule, sheets: &[Sheet<'_>], context: &Context<'_>) -> Vec<CheckRe
         && fields.iter().any(|name| name == MISSING_COUNT);
     let mut found = Vec::new();
     for sheet in sheets {
+        if !covers_drawing(&rule.scope, sheet.drawing(), context.master) {
+            continue;
+        }
         for subject in subjects(sheet, &rule.target, context.types) {
+            if !covers_subject(&rule.scope, subject, context.types) {
+                continue;
+            }
             let facts = SubjectFacts::new(subject, rule, sheet, context);
             if !rule.tree.eval(&facts).is_true() {
                 continue;
@@ -304,15 +481,13 @@ mod tests {
         Category, CheckResult, Notice, ObjectRef, RuleScope, ScopeKind, Severity, Source, Target,
     };
     use crate::pid::project_index::{
-        summarize, Joint, ObjectKind, SignalEnd, SummaryMeta, SummaryObject, SummaryPort,
-        SummarySegment, SummarySource, DEFAULT_TOLERANCE, SUMMARY_VERSION,
+        build_index, summarize, FailedDrawing, Joint, ObjectKind, PeerKind, SignalEnd,
+        SummaryConnector, SummaryMeta, SummaryObject, SummaryPort, SummarySegment, SummarySource,
+        DEFAULT_TOLERANCE, SUMMARY_VERSION,
     };
     use crate::pid::symbols::PortDir;
     use crate::pid::tag_engine::TAG_STATUS_DUPLICATED;
     use crate::pid::topology::TYPE_SIGNAL_LINE;
-
-    /// 还没有正反例的内置规则：用到的事实还没接上，只能不命中或只能命中。到 DRC-8 要清空。
-    const UNCOVERED: [&str; 4] = ["DR-006", "DR-102", "DR-112", "DR-116"];
 
     /// 本期不出结果的内置规则（规格 §3.4）：管口没有位号，`位号前缀` 不知道；符号库里没有带方向
     /// 的阀门，`流向相反` 不知道。它们命中的例子是要查的那种情形，本期也不命中。
@@ -511,14 +686,95 @@ mod tests {
         }
     }
 
+    /// 图 `id` 上的对象和页间连接符。
+    fn with_connectors(
+        id: &str,
+        objects: Vec<SummaryObject>,
+        connectors: Vec<SummaryConnector>,
+    ) -> DrawingSummary {
+        DrawingSummary {
+            connectors,
+            ..drawing(id, objects)
+        }
+    }
+
+    /// 线 `line` 上的页间连接符，`kind` 如 `pipe_out`。像刚放上去的那样：对端什么都没记，
+    /// `upstream` 是本侧线号。
+    fn connector(kind: &str, line: &str, handle: &str) -> SummaryConnector {
+        SummaryConnector {
+            kind: kind.to_owned(),
+            line: line.to_owned(),
+            at: [300.0, 100.0],
+            radius: 3.0,
+            peer_kind: PeerKind::None,
+            peer_drawing: None,
+            upstream: Some(line.to_owned()),
+            downstream: None,
+            handle: handle.to_owned(),
+        }
+    }
+
+    /// 协同服务器配过对的连接符：对端在图 `peer` 上，流出侧线号 `upstream`、流入侧 `downstream`。
+    fn served(
+        base: SummaryConnector,
+        peer: &str,
+        upstream: &str,
+        downstream: &str,
+    ) -> SummaryConnector {
+        SummaryConnector {
+            peer_kind: PeerKind::Server,
+            peer_drawing: Some(peer.to_owned()),
+            upstream: Some(upstream.to_owned()),
+            downstream: Some(downstream.to_owned()),
+            ..base
+        }
+    }
+
     fn run(rules: &RuleSet, drawings: &[DrawingSummary]) -> CheckReport {
         run_with(rules, &master_data::Resolved::NotConfigured, drawings)
     }
 
+    /// 只查当前图，没有项目索引。
     fn run_with(
         rules: &RuleSet,
         master: &master_data::Resolved,
         drawings: &[DrawingSummary],
+    ) -> CheckReport {
+        inspect(rules, master, drawings, None, &[], ScopeKind::Drawing)
+    }
+
+    /// 当前图带 `cross_drawing` 查：项目索引由 `drawings` 和 `others` 一起建，查的是 `drawings`。
+    fn run_across(
+        rules: &RuleSet,
+        master: &master_data::Resolved,
+        drawings: &[DrawingSummary],
+        others: &[DrawingSummary],
+    ) -> CheckReport {
+        let index = index_of(&[drawings, others].concat(), &[]);
+        inspect(
+            rules,
+            master,
+            drawings,
+            Some(&index),
+            others,
+            ScopeKind::Drawing,
+        )
+    }
+
+    /// 由这些图和读不出来的 `failed` 建的项目索引。
+    fn index_of(drawings: &[DrawingSummary], failed: &[FailedDrawing]) -> ProjectIndex {
+        build_index(std::path::Path::new("项目"), drawings, failed).expect("建得出项目索引")
+    }
+
+    /// 在范围 `kind` 里查 `drawings`；给了 `index` 就是带 `cross_drawing` 查，`others` 是索引里的
+    /// 别的图。
+    fn inspect(
+        rules: &RuleSet,
+        master: &master_data::Resolved,
+        drawings: &[DrawingSummary],
+        index: Option<&ProjectIndex>,
+        others: &[DrawingSummary],
+        kind: ScopeKind,
     ) -> CheckReport {
         let types = TypeLib::embedded();
         check(&CheckInput {
@@ -526,15 +782,18 @@ mod tests {
             master,
             types: &types,
             drawings,
-            index: None,
-            others: &[],
+            index,
+            others,
             waivers: &[],
             trigger: Trigger::OnDemand,
             scope: Scope {
-                kind: ScopeKind::Drawing,
-                drawing_id: drawings.first().map(|drawing| drawing.drawing_id.clone()),
+                kind,
+                drawing_id: drawings
+                    .first()
+                    .filter(|_| kind == ScopeKind::Drawing)
+                    .map(|drawing| drawing.drawing_id.clone()),
                 pbs: None,
-                cross_drawing: false,
+                cross_drawing: index.is_some(),
             },
         })
     }
@@ -641,8 +900,8 @@ mod tests {
         RuleSet { rules, ..builtin() }
     }
 
-    /// 一条内置规则命中的例子和不命中的例子，各是一张图；还没有例子的在 `UNCOVERED` 里。`SILENT`
-    /// 里的规则，命中的例子是它要查的那种情形。
+    /// 一条内置规则命中的例子和不命中的例子，各是一张图；项目级规则的例子在 [`across`] 里。
+    /// `SILENT` 里的规则，命中的例子是它要查的那种情形。
     fn example(id: &str) -> Option<(DrawingSummary, DrawingSummary)> {
         let (hit, miss) = match id {
             "DR-001" => (
@@ -665,6 +924,14 @@ mod tests {
                 vec![instrument("FT-101", &[])],
                 vec![instrument("FT-101", &[("仪表回路", "F-101")])],
             ),
+            "DR-006" => {
+                let fresh = connector("pipe_out", "L-1001", "3A0");
+                let with = |plug| with_connectors("PID-1101", Vec::new(), vec![plug]);
+                return Some((
+                    with(fresh.clone()),
+                    with(served(fresh, "PID-1102", "L-1001", "L-2001")),
+                ));
+            }
             "DR-007" => {
                 let with = |rating| {
                     vec![
@@ -940,26 +1207,76 @@ mod tests {
         Some((drawing("PID-1101", hit), drawing("PID-1101", miss)))
     }
 
+    /// 项目级规则的例子：命中的和不命中的各是一个项目的几张图，查第一张，其余的只进项目索引。
+    /// `PID-1101` 上流出的 `L-1001` 和 `PID-1102` 上流入的 `L-2001` 由协同服务器配过对。
+    fn across(id: &str) -> Option<(Vec<DrawingSummary>, Vec<DrawingSummary>)> {
+        let out = served(
+            connector("pipe_out", "L-1001", "3A0"),
+            "PID-1102",
+            "L-1001",
+            "L-2001",
+        );
+        let back = served(
+            connector("pipe_in", "L-2001", "4B0"),
+            "PID-1101",
+            "L-1001",
+            "L-2001",
+        );
+        let pair = match id {
+            "DR-102" => {
+                let with = |there| {
+                    vec![
+                        drawing("PID-1101", vec![pump("P-1001")]),
+                        drawing("PID-1102", vec![pump(there)]),
+                    ]
+                };
+                (with("P-1001"), with("P-1002"))
+            }
+            "DR-112" => {
+                let pipe = |tag, class| line(tag, &[("管道等级", class), ("公称直径", "50")]);
+                let with = |class| {
+                    vec![
+                        with_connectors("PID-1101", vec![pipe("L-1001", "A1")], vec![out.clone()]),
+                        with_connectors(
+                            "PID-1102",
+                            vec![pipe("L-2001", class)],
+                            vec![back.clone()],
+                        ),
+                    ]
+                };
+                (with("B2"), with("A1"))
+            }
+            "DR-116" => {
+                let with = |there| {
+                    vec![
+                        with_connectors("PID-1101", Vec::new(), vec![out.clone()]),
+                        with_connectors("PID-1102", Vec::new(), there),
+                    ]
+                };
+                (with(Vec::new()), with(vec![back.clone()]))
+            }
+            _ => return None,
+        };
+        Some(pair)
+    }
+
     /// 表驱动：每条内置规则在它的例子图上，命中的例子出一条（`MUTUAL` 里的出两条，`SILENT` 里的
-    /// 本期不出）、不命中的不出。例子在配好了的主数据（[`master`]）下跑；`DR-009` 命中的那次，
+    /// 本期不出）、不命中的不出。41 条都有例子：项目级的见 [`across`]，其余的见 [`example`]。例子
+    /// 带着由例子里的图建的项目索引、在配好了的主数据（[`master`]）下跑；`DR-009` 命中的那次，
     /// 主数据里没写图例标准。
     #[test]
     fn every_builtin_rule_has_a_hit_and_a_miss() {
         let rules = all_enabled();
         let (configured, unset) = (master(Some("GB/T 6567")), master(None));
         let ids: Vec<&str> = rules.rules.iter().map(|rule| rule.id.as_str()).collect();
-        for id in UNCOVERED.into_iter().chain(SILENT) {
+        assert_eq!(ids.len(), 41);
+        for id in SILENT {
             assert!(ids.contains(&id), "名单里的 {id} 不是内置规则");
         }
         for id in ids {
-            let Some((hit, miss)) = example(id) else {
-                assert!(UNCOVERED.contains(&id), "{id} 没有例子，也不在未覆盖名单里");
-                continue;
-            };
-            assert!(
-                !UNCOVERED.contains(&id),
-                "{id} 有了例子，要从未覆盖名单里拿掉"
-            );
+            let (hit, miss) = across(id)
+                .or_else(|| example(id).map(|(hit, miss)| (vec![hit], vec![miss])))
+                .unwrap_or_else(|| panic!("{id} 没有例子"));
             let expected = if SILENT.contains(&id) {
                 0
             } else if MUTUAL.contains(&id) {
@@ -968,11 +1285,456 @@ mod tests {
                 1
             };
             let legend = if id == "DR-009" { &unset } else { &configured };
-            let report = run_with(&rules, legend, &[hit]);
+            let report = run_across(&rules, legend, &hit[..1], &hit[1..]);
             assert_eq!(hits(&report, id), expected, "{id} 应命中 {expected} 条");
-            let report = run_with(&rules, &configured, &[miss]);
+            let report = run_across(&rules, &configured, &miss[..1], &miss[1..]);
             assert_eq!(hits(&report, id), 0, "{id} 不应命中");
         }
+    }
+
+    /// 用到 `位号.跨图重复数`、`配对状态`、`对端线` 的是项目级规则，经关系走到的也算：没有项目
+    /// 索引时不跑，计入 `rules_skipped`，`notices` 里说有几条没跑，报告的 `cross_drawing` 为假；
+    /// 有索引时照跑。`所在线`、别的对象上叫 `配对状态` 的属性不算。
+    #[test]
+    fn project_rules_are_skipped_without_the_project_index() {
+        let configured = master(Some("GB/T 6567"));
+        let (project, _) = across("DR-102").expect("DR-102");
+        let report = run_with(&all_enabled(), &configured, &project[..1]);
+        for id in ["DR-102", "DR-112", "DR-116"] {
+            assert_eq!(hits(&report, id), 0, "{id}");
+        }
+        assert_eq!(
+            (report.summary.rules_run, report.summary.rules_skipped),
+            (38, 3)
+        );
+        assert_eq!(
+            report.notices,
+            [Notice {
+                code: "PROJECT_RULES_SKIPPED".to_owned(),
+                message: "只检查了当前图，3 条项目级规则没有执行".to_owned(),
+            }]
+        );
+        let report = run_across(&all_enabled(), &configured, &project[..1], &project[1..]);
+        assert_eq!(hits(&report, "DR-102"), 1);
+        assert_eq!(
+            (report.summary.rules_run, report.summary.rules_skipped),
+            (41, 0)
+        );
+        assert!(report.notices.is_empty());
+        assert!(report.scope.cross_drawing);
+
+        let rules = only(vec![
+            custom("XY-001", "阀门", "所属管线.位号.跨图重复数 > 0", None),
+            custom("XY-002", "页间连接符", "配对状态 = NULL", None),
+            custom("XY-003", "页间连接符", "对端线.管道等级 = NULL", None),
+            custom("XY-004", "页间连接符", "所在线.管道等级 = NULL", None),
+            custom("XY-005", "管线", "配对状态 = NULL", None),
+        ]);
+        let types = TypeLib::embedded();
+        for (kind, message) in [
+            (ScopeKind::Drawing, "只检查了当前图，3 条项目级规则没有执行"),
+            (ScopeKind::Project, "没有项目索引，3 条项目级规则没有执行"),
+        ] {
+            let report = check(&CheckInput {
+                rules: &rules,
+                master: &configured,
+                types: &types,
+                drawings: &project,
+                index: None,
+                others: &[],
+                waivers: &[],
+                trigger: Trigger::OnDemand,
+                scope: Scope {
+                    kind,
+                    drawing_id: None,
+                    pbs: None,
+                    cross_drawing: true,
+                },
+            });
+            assert_eq!(
+                (report.summary.rules_run, report.summary.rules_skipped),
+                (2, 3),
+                "{kind:?}"
+            );
+            assert_eq!(report.notices.len(), 1, "{kind:?}");
+            assert_eq!(report.notices[0].message, message);
+            assert!(!report.scope.cross_drawing);
+        }
+    }
+
+    /// 当前图带 `cross_drawing` 查时，项目级规则看整个项目的索引，只报当前图上的对象；查整个项目
+    /// 时各图上的都报。`位号.跨图重复数` 数同类型同位号的对象还在几张别的图上：同一张图上重了的
+    /// 不算，管线这样本来就跨图的不算。项目里有图读不出来时 `notices` 给 `INDEX_INCOMPLETE`。
+    #[test]
+    fn a_drawing_checked_across_the_project_reports_only_its_own_objects() {
+        let unset = master_data::Resolved::NotConfigured;
+        let rules = only(vec![builtin().rule("DR-102").expect("DR-102").clone()]);
+        let (project, _) = across("DR-102").expect("DR-102");
+        let places = |report: &CheckReport| -> Vec<String> {
+            report
+                .results
+                .iter()
+                .map(|result| format!("{} {}", result.object.drawing_id, result.object_key))
+                .collect()
+        };
+        let report = run_across(&rules, &unset, &project[..1], &project[1..]);
+        assert_eq!(places(&report), ["PID-1101 PUMP|P-1001"]);
+        assert_eq!(
+            report.results[0].message,
+            "泵 的位号 P-1001 在别的图纸上也有"
+        );
+        let index = index_of(&project, &[]);
+        let report = inspect(
+            &rules,
+            &unset,
+            &project,
+            Some(&index),
+            &[],
+            ScopeKind::Project,
+        );
+        assert_eq!(
+            places(&report),
+            ["PID-1101 PUMP|P-1001", "PID-1102 PUMP|P-1001"]
+        );
+        assert_eq!(report.scope.kind, ScopeKind::Project);
+        assert!(report.scope.cross_drawing && report.notices.is_empty());
+
+        let drawings = [
+            drawing(
+                "PID-1101",
+                vec![
+                    pump("P-1001"),
+                    pump("P-1001"),
+                    pump("P-1002"),
+                    line("L-1001", &[]),
+                ],
+            ),
+            drawing("PID-1102", vec![pump("P-1001"), line("L-1001", &[])]),
+            drawing("PID-1103", vec![pump("P-1001"), pump("P-1003")]),
+        ];
+        let counted = |count: usize| -> Vec<String> {
+            let expr = format!("位号.跨图重复数 = {count}");
+            let rules = only(vec![custom("XY-001", "对象实例", &expr, None)]);
+            run_across(&rules, &unset, &drawings[..1], &drawings[1..])
+                .results
+                .into_iter()
+                .map(|result| result.object_key)
+                .collect()
+        };
+        assert_eq!(counted(2), ["PUMP|P-1001", "PUMP|P-1001"]);
+        assert_eq!(counted(0), ["PIPE_LINE|L-1001", "PUMP|P-1002"]);
+
+        let failed = [FailedDrawing {
+            drawing_id: "PID-1109".to_owned(),
+            file: "PID-1109.dwg".to_owned(),
+            pbs: None,
+            error: "文件损坏".to_owned(),
+        }];
+        let index = index_of(&project, &failed);
+        let report = inspect(
+            &rules,
+            &unset,
+            &project[..1],
+            Some(&index),
+            &project[1..],
+            ScopeKind::Drawing,
+        );
+        assert_eq!(hits(&report, "DR-102"), 1);
+        assert_eq!(
+            report.notices,
+            [Notice {
+                code: "INDEX_INCOMPLETE".to_owned(),
+                message: "项目里有 1 张图读不出来，跨图的结论不完整".to_owned(),
+            }]
+        );
+    }
+
+    /// 页间连接符的事实：`连接符种类` 是摘要里记的种类；`对端图纸` 是记着的对端图，同进程配的对
+    /// 是「本机配对」；`对端位号` 在两侧线号都记着时取对面那侧的；`配对状态` 照项目索引。
+    /// `所在线` 是本图上这个线号的管线或信号线，`对端线` 是配成了对的那个连接符所在的线。结果里
+    /// 连接符的属主是它所在的线。有连接符分不出对端时 `notices` 给 `CONNECTOR_AMBIGUOUS`。
+    #[test]
+    fn connectors_read_their_peer_from_the_drawing_and_the_index() {
+        let at = |x: f64, base: SummaryConnector| SummaryConnector {
+            at: [x, 0.0],
+            ..base
+        };
+        let local = |base: SummaryConnector, upstream: &str, downstream: &str| SummaryConnector {
+            peer_kind: PeerKind::Local,
+            upstream: Some(upstream.to_owned()),
+            downstream: Some(downstream.to_owned()),
+            ..base
+        };
+        let targeted = SummaryConnector {
+            peer_kind: PeerKind::Target,
+            peer_drawing: Some("PID-1103".to_owned()),
+            upstream: Some("L-3001".to_owned()),
+            downstream: Some("L-1001".to_owned()),
+            ..connector("pipe_in", "L-1001", "A2")
+        };
+        let here = with_connectors(
+            "PID-1101",
+            vec![line("L-1001", &[("管道等级", "A1")]), signal("S-101", &[])],
+            vec![
+                at(
+                    1.0,
+                    served(
+                        connector("pipe_out", "L-1001", "A1"),
+                        "PID-1102",
+                        "L-1001",
+                        "L-2001",
+                    ),
+                ),
+                at(2.0, targeted),
+                at(
+                    3.0,
+                    local(connector("signal_out", "S-101", "A3"), "S-101", "S-201"),
+                ),
+                at(
+                    4.0,
+                    served(
+                        connector("pipe_out", "L-1001", "A4"),
+                        "PID-1109",
+                        "L-1001",
+                        "L-9001",
+                    ),
+                ),
+                at(
+                    5.0,
+                    served(
+                        connector("pipe_out", "L-1009", "A5"),
+                        "PID-1102",
+                        "L-1009",
+                        "L-2009",
+                    ),
+                ),
+                at(6.0, connector("pipe_out", "L-1001", "A6")),
+            ],
+        );
+        let there = [
+            with_connectors(
+                "PID-1102",
+                vec![line("L-2001", &[("管道等级", "B2")]), signal("S-201", &[])],
+                vec![
+                    served(
+                        connector("pipe_in", "L-2001", "B1"),
+                        "PID-1101",
+                        "L-1001",
+                        "L-2001",
+                    ),
+                    local(connector("signal_in", "S-201", "B2"), "S-101", "S-201"),
+                ],
+            ),
+            with_connectors(
+                "PID-1103",
+                vec![signal("S-201", &[])],
+                vec![local(
+                    connector("signal_in", "S-201", "C1"),
+                    "S-101",
+                    "S-201",
+                )],
+            ),
+        ];
+        let checked = |expr: &str, message: Option<&str>| {
+            let rules = only(vec![custom("XY-001", "页间连接符", expr, message)]);
+            run_across(
+                &rules,
+                &master_data::Resolved::NotConfigured,
+                std::slice::from_ref(&here),
+                &there,
+            )
+        };
+        let report = checked(
+            "连接符种类 != NULL",
+            Some("{所属}|{连接符种类}|{对端图纸}|{对端位号}|{配对状态}"),
+        );
+        let messages: Vec<&str> = report
+            .results
+            .iter()
+            .map(|result| result.message.as_str())
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                "L-1001|pipe_out|PID-1102|L-2001|paired",
+                "L-1001|pipe_in|PID-1103|L-3001|unpaired",
+                "L-1001|pipe_out|PID-1109|L-9001|target_missing",
+                "L-1001|pipe_out|||unpaired",
+                "L-1009|pipe_out|PID-1102|L-2009|one_sided",
+                "S-101|signal_out|本机配对|S-201|ambiguous",
+            ]
+        );
+        assert_eq!(
+            report.results[0].object,
+            ObjectRef {
+                kind: "页间连接符".to_owned(),
+                type_code: "PIPE_LINE".to_owned(),
+                tag: None,
+                drawing_id: "PID-1101".to_owned(),
+                owner: Some("L-1001".to_owned()),
+                port: None,
+                at: [1.0, 0.0],
+                handle: Some("A1".to_owned()),
+            }
+        );
+        assert_eq!(report.results[0].object_key, "PIPE_LINE|L-1001|1.000,0.000");
+        assert_eq!(
+            report.notices,
+            [Notice {
+                code: "CONNECTOR_AMBIGUOUS".to_owned(),
+                message: "有 1 个页间连接符分不出对端是哪一个，跨图的结论不完整".to_owned(),
+            }]
+        );
+
+        let keys = |expr: &str| -> Vec<String> {
+            checked(expr, None)
+                .results
+                .into_iter()
+                .map(|result| result.object_key)
+                .collect()
+        };
+        assert_eq!(
+            keys("所在线.管道等级 = \"A1\""),
+            [
+                "PIPE_LINE|L-1001|1.000,0.000",
+                "PIPE_LINE|L-1001|2.000,0.000",
+                "PIPE_LINE|L-1001|4.000,0.000",
+                "PIPE_LINE|L-1001|6.000,0.000",
+            ]
+        );
+        assert_eq!(
+            keys("所在线.位号 = \"S-101\""),
+            ["SIGNAL_LINE|S-101|3.000,0.000"]
+        );
+        assert_eq!(
+            keys("对端线.管道等级 = \"B2\""),
+            ["PIPE_LINE|L-1001|1.000,0.000"]
+        );
+        assert_eq!(
+            keys("对端线.位号 = NULL"),
+            [
+                "PIPE_LINE|L-1001|2.000,0.000",
+                "PIPE_LINE|L-1001|4.000,0.000",
+                "PIPE_LINE|L-1001|6.000,0.000",
+                "PIPE_LINE|L-1009|5.000,0.000",
+                "SIGNAL_LINE|S-101|3.000,0.000",
+            ]
+        );
+    }
+
+    /// 规则的作用域：`项目` 处处查；`PBS 节点` 只查挂在这个节点及其下级上的图，主数据没配好时
+    /// 只认挂在这个节点自己上的；`图纸` 只查这张图；`类型` 只查这个类型及其下级的对象，图纸和
+    /// 仪表回路没有类型，不查。作用域指的东西不在项目里时 `notices` 给 `RULE_SCOPE_UNKNOWN`；主数据没
+    /// 配好时不知道有哪些节点，没有项目索引时不知道有哪些图，就不说。
+    #[test]
+    fn rule_scopes_limit_where_a_rule_applies() {
+        let node = |id: &str, parent: Option<&str>| master_data::PbsNode {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            parent: parent.map(str::to_owned),
+        };
+        let configured = master_with(|data| {
+            data.pbs = vec![
+                node("1001", None),
+                node("1001-01", Some("1001")),
+                node("2001", None),
+            ];
+        });
+        let placed = |id: &str, pbs: &str, objects| DrawingSummary {
+            pbs: Some(pbs.to_owned()),
+            ..drawing(id, objects)
+        };
+        let drawings = [
+            placed("PID-1101", "1001-01", vec![pump("P-101"), tank("T-101")]),
+            placed("PID-1102", "2001", vec![pump("P-201")]),
+            placed("PID-1103", "1001", vec![pump("P-301")]),
+        ];
+        let scoped = |id: &str, scope| Rule {
+            scope,
+            ..custom(id, "设备", "位号 != NULL", None)
+        };
+        let rules = only(vec![
+            scoped("XY-001", RuleScope::Project),
+            scoped("XY-002", RuleScope::Pbs("1001".to_owned())),
+            scoped("XY-003", RuleScope::Drawing("PID-1102".to_owned())),
+            scoped("XY-004", RuleScope::Type("VESSEL".to_owned())),
+            Rule {
+                scope: RuleScope::Type("VESSEL".to_owned()),
+                ..custom("XY-005", "图纸", "图号 != NULL", None)
+            },
+            scoped("XY-006", RuleScope::Pbs("9999".to_owned())),
+            scoped("XY-007", RuleScope::Drawing("PID-9999".to_owned())),
+            scoped("XY-008", RuleScope::Type("NOPE".to_owned())),
+        ]);
+        let found = |report: &CheckReport| -> Vec<String> {
+            report
+                .results
+                .iter()
+                .map(|result| format!("{} {}", result.rule_id, result.object_key))
+                .collect()
+        };
+        let unknown = |message: &str| Notice {
+            code: "RULE_SCOPE_UNKNOWN".to_owned(),
+            message: message.to_owned(),
+        };
+        let index = index_of(&drawings, &[]);
+        let report = inspect(
+            &rules,
+            &configured,
+            &drawings,
+            Some(&index),
+            &[],
+            ScopeKind::Project,
+        );
+        assert_eq!(
+            found(&report),
+            [
+                "XY-001 PUMP|P-101",
+                "XY-001 TANK|T-101",
+                "XY-001 PUMP|P-201",
+                "XY-001 PUMP|P-301",
+                "XY-002 PUMP|P-101",
+                "XY-002 TANK|T-101",
+                "XY-002 PUMP|P-301",
+                "XY-003 PUMP|P-201",
+                "XY-004 TANK|T-101",
+            ]
+        );
+        assert_eq!(
+            report.notices,
+            [
+                unknown("规则 XY-006 的作用域是 PBS 节点 9999，项目主数据里没有这个节点"),
+                unknown("规则 XY-007 的作用域是图纸 PID-9999，项目里没有这张图"),
+                unknown("规则 XY-008 的作用域是类型 NOPE，类型库里没有这个类型"),
+            ]
+        );
+
+        let report = inspect(
+            &rules,
+            &master_data::Resolved::NotConfigured,
+            &drawings,
+            None,
+            &[],
+            ScopeKind::Project,
+        );
+        assert_eq!(
+            found(&report),
+            [
+                "XY-001 PUMP|P-101",
+                "XY-001 TANK|T-101",
+                "XY-001 PUMP|P-201",
+                "XY-001 PUMP|P-301",
+                "XY-002 PUMP|P-301",
+                "XY-003 PUMP|P-201",
+                "XY-004 TANK|T-101",
+            ]
+        );
+        assert_eq!(
+            report.notices,
+            [unknown(
+                "规则 XY-008 的作用域是类型 NOPE，类型库里没有这个类型"
+            )]
+        );
     }
 
     /// 第一批纯属性规则都有正反例；需求的例子：管线设计温度 260、流体介质工艺水、没有绝热等级，
@@ -1212,8 +1974,8 @@ mod tests {
         );
     }
 
-    /// 结果按严重度、规则号、图号、对象键排；三个严重度各自计数，有错误就 `blocked`。没配主数据，
-    /// 用到主数据的五条不跑，计入 `rules_skipped`。
+    /// 结果按严重度、规则号、图号、对象键排；三个严重度各自计数，有错误就 `blocked`。没配主数据、
+    /// 没有项目索引，用到主数据的五条和三条项目级规则不跑，计入 `rules_skipped`（和 §3.6 的例子一样）。
     #[test]
     fn results_are_sorted_and_counted() {
         let drawings = [
@@ -1272,8 +2034,8 @@ mod tests {
                 infos: 1,
                 waived: 0,
                 objects: 6,
-                rules_run: 35,
-                rules_skipped: 5,
+                rules_run: 32,
+                rules_skipped: 8,
             }
         );
         assert!(report.blocked);
@@ -1282,7 +2044,10 @@ mod tests {
             .iter()
             .map(|notice| notice.code.as_str())
             .collect();
-        assert_eq!(codes, ["MASTERDATA_NOT_CONFIGURED"]);
+        assert_eq!(
+            codes,
+            ["MASTERDATA_NOT_CONFIGURED", "PROJECT_RULES_SKIPPED"]
+        );
         assert!(report.stale_waivers.is_empty());
 
         let report = run_with(
@@ -1375,7 +2140,7 @@ mod tests {
         );
         assert_eq!(
             value["summary"],
-            json!({ "错误": 1, "警告": 0, "提示": 0, "已豁免": 0, "objects": 1, "rules_run": 40, "rules_skipped": 0 })
+            json!({ "错误": 1, "警告": 0, "提示": 0, "已豁免": 0, "objects": 1, "rules_run": 37, "rules_skipped": 3 })
         );
         assert_eq!(value["blocked"], json!(true));
         assert_eq!(
@@ -1391,7 +2156,10 @@ mod tests {
                 "waived": false, "waiver": null
             }])
         );
-        assert_eq!(value["notices"], json!([]));
+        assert_eq!(
+            value["notices"],
+            json!([{ "code": "PROJECT_RULES_SKIPPED", "message": "只检查了当前图，3 条项目级规则没有执行" }])
+        );
         assert_eq!(value["stale_waivers"], json!([]));
 
         let text = serde_json::to_string(&report).expect("能写成 JSON");
@@ -1759,7 +2527,7 @@ mod tests {
             ],
         )];
         let needs_master = ["DR-007", "DR-021", "DR-022", "DR-103", "DR-104"];
-        let report = run_with(&builtin(), &master(Some("GB/T 6567")), &drawings);
+        let report = run_across(&builtin(), &master(Some("GB/T 6567")), &drawings, &[]);
         for id in needs_master {
             assert_eq!(hits(&report, id), 1, "{id}");
         }
@@ -1787,7 +2555,7 @@ mod tests {
                 "项目主数据读不出来（REQUIRED_FIELD_MISSING: pipe_classes[0].name 不能为空），用到主数据的 5 条规则没有执行",
             ),
         ] {
-            let report = run_with(&builtin(), &resolved, &drawings);
+            let report = run_across(&builtin(), &resolved, &drawings, &[]);
             for id in needs_master {
                 assert_eq!(hits(&report, id), 0, "{id}");
             }
