@@ -13484,19 +13484,51 @@ mod minimized_save_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod pid_import_lines_tests {
     use crate::app::{Message, OpenCADStudio, OpenProgress};
-    use crate::io::pid::{imported_sheet_summarised, TemplateGap, TemplateNotDrawn};
+    use crate::i18n::Language;
+    use crate::io::pid::{
+        imported_sheet_counted, imported_sheet_summarised, TemplateGap, TemplateNotDrawn,
+    };
     use crate::ui::command_line::EntryKind;
 
     const SHEET: (f64, f64) = (594.0, 420.0);
 
+    /// The six counts of the import's headline in the order the English
+    /// sentence has them: entities drawn, decoded records, source records
+    /// not drawn, entities on the drawing's own layers, those layers, and
+    /// the ones among them whose name did not resolve. No two are the same
+    /// number, so one in another's place shows.
+    const COUNTS: [usize; 6] = [335, 206, 12, 309, 7, 1];
+
+    /// The headline of [`COUNTS`] as an English interface is told it.
+    const ENGLISH: &str = "P&ID import: 335 entities from 206 decoded records; 12 source records not drawn; 309 entities on 7 authored sheet layers (1 unresolved)";
+
+    /// The same headline as a Chinese interface is told it.
+    const CHINESE: &str = "P&ID 导入：从 206 条已解码记录画出 335 个实体；12 条源记录未绘制；309 个实体在 7 个原图图层上（1 个未解析）";
+
     /// What the command line gained when a `.pid` whose import had
     /// `template_not_drawn` to say finished opening: the kind and the text
-    /// of each entry, in order. The drawing arrives through the message the
-    /// open pipeline ends with, carrying its import's summary the way the
-    /// reader leaves it.
+    /// of each entry, in order.
     fn lines_after_opening(
         tag: &str,
         template_not_drawn: Option<TemplateNotDrawn>,
+    ) -> Vec<(EntryKind, String)> {
+        lines_after_opening_sheet(
+            tag,
+            imported_sheet_summarised(SHEET, template_not_drawn),
+            None,
+        )
+    }
+
+    /// What the command line gained when `document`, a `.pid` as its import
+    /// leaves it, finished opening: the kind and the text of each entry, in
+    /// order. The drawing arrives through the message the open pipeline ends
+    /// with, carrying its import's summary the way the reader leaves it.
+    /// Given a `language`, the interface speaks it by the time the drawing
+    /// arrives.
+    fn lines_after_opening_sheet(
+        tag: &str,
+        document: document::Document,
+        language: Option<Language>,
     ) -> Vec<(EntryKind, String)> {
         // A real file, as the handler is given one. No "template" in the
         // folder's name: a folder so named under the temp directory is a
@@ -13514,9 +13546,13 @@ mod pid_import_lines_tests {
         std::fs::write(&file, b"bytes enough to be a real file on disk").expect("write");
 
         let mut app = OpenCADStudio::new_for_test();
+        // After the application is up: starting it sets the configured
+        // language.
+        if let Some(language) = language {
+            crate::i18n::set_language(language).expect("Fluent resources must parse");
+        }
         let before = app.command_line.history.len();
         let name = "sheet.pid".to_string();
-        let document = imported_sheet_summarised(SHEET, template_not_drawn);
         let caches = crate::scene::build_derived_caches_with_progress(&document, &|_| {}, None);
         app.opening = Some(OpenProgress {
             id: 7,
@@ -13587,6 +13623,137 @@ mod pid_import_lines_tests {
                 .iter()
                 .any(|(_, text)| text.contains("border template")),
             "{lines:?}"
+        );
+    }
+
+    /// A sheet whose import counted [`COUNTS`] for its headline, and five
+    /// sheet layer names of which two start switched off for the line after
+    /// it.
+    fn counted_sheet() -> document::Document {
+        imported_sheet_counted(SHEET, |summary| {
+            summary.drawn = COUNTS[0];
+            summary.decoded = COUNTS[1];
+            summary.missing = COUNTS[2];
+            summary.layered_entities = COUNTS[3];
+            summary.sheet_layers = COUNTS[4];
+            summary.unresolved_sheet_layers = COUNTS[5];
+            summary.sheet_layer_names = 5;
+            summary.sheet_layers_off = 2;
+        })
+    }
+
+    /// The numbers `text` names, smallest first.
+    fn numbers_in(text: &str) -> Vec<usize> {
+        let mut numbers: Vec<usize> = text
+            .split(|c: char| !c.is_ascii_digit())
+            .filter_map(|digits| digits.parse().ok())
+            .collect();
+        numbers.sort_unstable();
+        numbers
+    }
+
+    /// Where the import's headline is among `lines`: the entries that name
+    /// its six counts and no other number, in whatever order the language of
+    /// the interface has them.
+    fn headlines(lines: &[(EntryKind, String)]) -> Vec<usize> {
+        let mut counts = COUNTS.to_vec();
+        counts.sort_unstable();
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, text))| numbers_in(text) == counts)
+            .map(|(at, _)| at)
+            .collect()
+    }
+
+    /// A line of information without the mark the command line puts before
+    /// one.
+    fn told(text: &str) -> &str {
+        text.strip_prefix("ⓘ ").unwrap_or(text)
+    }
+
+    /// The first thing the command line says of an import is its headline:
+    /// how many entities were drawn from how many decoded records, how many
+    /// source records were not drawn, and how many entities sit on how many
+    /// of the drawing's own layers. It is said once, as information, each
+    /// count where the sentence has it, and the line of the sheet layers
+    /// comes right after it.
+    #[test]
+    fn the_import_headline_names_its_six_counts_each_in_its_place() {
+        let lines = lines_after_opening_sheet("headline", counted_sheet(), None);
+        let said = headlines(&lines);
+        assert_eq!(said.len(), 1, "said once: {lines:?}");
+        let (kind, text) = &lines[said[0]];
+        assert_eq!(*kind, EntryKind::Info, "{lines:?}");
+        assert_eq!(told(text), ENGLISH);
+        let after = lines.get(said[0] + 1).map(|(_, text)| numbers_in(text));
+        assert_eq!(after, Some(vec![2, 5]), "the sheet layers next: {lines:?}");
+    }
+
+    /// In every language of the interface the headline is said once and
+    /// names its six counts -- no catalog drops one or leaves a placeholder
+    /// -- and only an English interface is told it in English: a Chinese one
+    /// is told it in Chinese, word for word. The language is one loader for
+    /// the whole process, so this runs in a child process of the test
+    /// binary.
+    #[test]
+    fn the_import_headline_speaks_the_ui_language() {
+        const CHILD: &str = "OCS_PID_IMPORT_HEADLINE_CHILD";
+        const NAME: &str =
+            "app::update::file::pid_import_lines_tests::the_import_headline_speaks_the_ui_language";
+        if std::env::var_os(CHILD).is_none() {
+            let program = std::env::current_exe().expect("the test binary has a path");
+            let output = std::process::Command::new(program)
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+                .env(CHILD, "1")
+                .output()
+                .expect("the test binary must start");
+            assert!(
+                output.status.success(),
+                "the child run failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let mut wrong = Vec::new();
+        for language in Language::ALL {
+            if language == Language::System {
+                continue;
+            }
+            let lines = lines_after_opening_sheet("spoken", counted_sheet(), Some(language));
+            if lines.iter().any(|(_, text)| text.contains("__ocs_fmt_")) {
+                wrong.push(format!("{language:?} leaves a placeholder: {lines:?}"));
+            }
+            let said = headlines(&lines);
+            if said.len() != 1 {
+                wrong.push(format!(
+                    "{language:?} names the six counts in {} lines, not one: {lines:?}",
+                    said.len()
+                ));
+                continue;
+            }
+            let (kind, text) = &lines[said[0]];
+            let text = told(text);
+            if *kind != EntryKind::Info {
+                wrong.push(format!(
+                    "{language:?} does not say it as information: {text}"
+                ));
+            }
+            match language {
+                Language::EnUs if text != ENGLISH => wrong.push(format!("EnUs: {text}")),
+                Language::ZhCn if text != CHINESE => wrong.push(format!("ZhCn: {text}")),
+                Language::EnUs | Language::ZhCn => {}
+                _ if text == ENGLISH => wrong.push(format!("{language:?} is told in English")),
+                _ => {}
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} wrong:\n{}",
+            wrong.len(),
+            wrong.join("\n")
         );
     }
 }

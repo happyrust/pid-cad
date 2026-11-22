@@ -3271,7 +3271,7 @@ pub(super) fn message_attribute(source: &str) -> Option<(&'static str, &'static 
         "P&ID import: the drawing links the border template(s) {named}, but none of the files of that name fits its {page} page: {found}; the template's frame and title block are not drawn." => Some(("common", "pid-import-template-none-fits")),
         "P&ID import: the drawing links the border template(s) {named}, but nothing could be drawn from the file(s) found for it: {files}; the template's frame and title block are not drawn." => Some(("common", "pid-import-template-undrawable")),
         "P&ID import: the drawing links the border template(s) {named}, but it states no page size and its lines fit no standard sheet, so there is no size to choose a file by; the template's frame and title block are not drawn." => Some(("common", "pid-import-template-no-page")),
-        "P&ID import: {drawn} entities from {decoded} decoded records; {missing} source records not drawn" => Some(("common", "pid-import-drawn-decoded-missing")),
+        "P&ID import: {drawn} entities from {decoded} decoded records; {missing} source records not drawn; {layered} entities on {layers} authored sheet layers ({unresolved} unresolved)" => Some(("common", "pid-import-drawn-decoded-missing")),
         "P&ID style table did not read; line work keeps the layer defaults." => Some(("common", "pid-style-table-did-not-read")),
         "Pan" => Some(("view", "pan")),
         "Paper" => Some(("common", "paper")),

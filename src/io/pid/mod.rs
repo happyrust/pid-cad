@@ -806,9 +806,22 @@ pub(crate) fn imported_sheet_summarised(
     page_mm: (f64, f64),
     template_not_drawn: Option<TemplateNotDrawn>,
 ) -> Document {
+    imported_sheet_counted(page_mm, |summary| {
+        summary.template_not_drawn = template_not_drawn;
+    })
+}
+
+/// [`imported_sheet`] carrying the summary of an import that counted what
+/// `count` writes into it and nothing else: for the same tests, where they
+/// read the numbers the command line is given.
+#[cfg(test)]
+pub(crate) fn imported_sheet_counted(
+    page_mm: (f64, f64),
+    count: impl FnOnce(&mut ImportSummary),
+) -> Document {
     let mut doc = imported_sheet(page_mm);
     let mut summary = ImportSummary::empty();
-    summary.template_not_drawn = template_not_drawn;
+    count(&mut summary);
     summary.store(&mut doc);
     doc
 }
