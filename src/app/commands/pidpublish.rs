@@ -3473,3 +3473,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "pidpublish_acceptance.rs"]
+mod acceptance;
