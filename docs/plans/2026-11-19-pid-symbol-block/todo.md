@@ -1074,7 +1074,30 @@
 ### 检查点三（SB-10 之后，等用户）
 
 - [ ] 验收报告发给用户。
-- [ ] 做 SB-8b 时留下、请用户定的：用户手册 `.pid` 一节的 `PID-*` 图层表和角色清单有缺口，要不要补；手册没有任何检查管（规格 §11 的 SB-8b 第 4、5 条）。
+- [x] 做 SB-8b 时留下、请用户定的：用户手册 `.pid` 一节的 `PID-*` 图层表和角色清单有缺口，要不要补；手册没有任何检查管（规格 §11 的 SB-8b 第 4、5 条）。（2026-11-22 补：补了。给用户的建议是补——只改文档，逐句对着代码和样例图核对，单独一个本地提交；用户的答复是「按你推荐的方案做。没有明确推荐的，你结合当前情况选最合适的继续，并简要说明理由。」手册仍然没有任何检查管，这一次靠的还是改完把整节读回来逐句对。）
+  - 改了什么（`docs/user-guide.md` 的「图层」一段、它的表和「图纸图层视图」一段）：
+    - 表从 5 行补到 10 行：加了 `PID-TEXT`、`PID-FILL`、`PID-SYMBOL`、`PID-POINT`、`PID-POINT-WARNING` / `-ERROR` / `-APPROVED`。`PID-FRAME` 一行加了图框模板和「读不到页面尺寸、也没找到模板时这一层是空的」；`PID-SYMBOL-LABEL` 一行加了只画出符号名的放置；`PID-GEOMETRY` 一行由「没有原图图层的字形线（样式簇的字形笔画）」改成「文件没给出图层名的线条」；`PID-HIDDEN` 一行的「（语料四图里没有）」挪到表下一并说，并写明隐藏的归这一层、不隐藏的归上面几层。
+    - 表前一句原来说这些层「只在有实体落上去时才出现」；`PID-FRAME` 是例外，每张图都建，写明了。这一句还写明这些层收两种实体：程序自己造的，和文件没给出图层名的。
+    - 表下加了一段：平常见得到的只有前三层；「不打印」指图层的打印开关初始为关，原图的 `ConsistencyChecks` 图层也是这样；`PID-ANNOTATION` 和角色 `annotation` 是留着的名字。
+    - 两处角色清单补上 `annotation`，写明是十二个词；加了四个 `point-*` 各指什么（标记的点一律是 `point-ok`，记号笔画才分状态）、图框模板里的内容角色都是 `frame`；「图纸图层」视图的角色一段只列有实体的角色，次序是那十二个词的次序。
+    - 改准一处：原文说打开隐藏的图纸图层时「文件没给出名字的隐藏内容则是 `PID-HIDDEN`」。这类内容不写 `sheet_layer=`，图纸图层那几行里没有它的开关，要在普通的图层视图里打开 `PID-HIDDEN`；连带打开 `PID-HIDDEN` 的是 2026-09-21 之前另存的图。
+    - 「分类合成层」退役那一句后面加了一句：退役的是读法，那些层名除 `PID-STYLE-<样式名>` 外还在用，只收文件没给出图层名的实体。
+  - 怎么核对的：
+    - 代码：`src/io/pid/mod.rs` 的 `taxonomy_layers`（十三个层名和各自的初始开关、打印开关）、`ensure_taxonomy_layer`、`role_of_layer`、`prepare_document`（`PID-FRAME` 总是建；`ConsistencyChecks` 不打印）；`build.rs` 里实体落到哪一层的那一段、`placement_layer`、审查标记那一支、`stamp_complex_dash` 和 `build_inferred`；`page.rs` 的 `draw_page_border`；`template.rs`；`metadata.rs`；`src/io/pid_view_filter.rs` 的 `ROLE_ORDER`、`PidViewSummary::of`、`release_layer_holding`。
+    - 真图：用 LX-1 时编的发行版（`D:\scratch\ocs-symblock\si-7\lx1-after\OpenCADStudio.exe`，2026-11-22 12:16 编的；导入和图层面板的代码最后一次改动是前一天的 `adc1eedee`，解析库钉的版本自 2026-11-19 没有变）的 `--export` 把图纸转成 DXF，不开窗口，再按组码读图层表（开关、打印开关）和每个实体的图层、`PID_SEMANTICS` 里的 `role=` 和 `sheet_layer=`。`pid-test-data` 的 152 张：151 张读出，1 张（`backup-plant-data\test\U01\D03.pid`）程序报里面没有可画的图形。`pid-parse\test-file` 的 7 张（语料四图在内）转了两遍，一遍把那里的符号库和 `Ref\Template Files` 指给程序，一遍都不指。图纸都是先拷到 `D:\scratch\ocs-symblock\ug-1` 再读，原件没有动。
+    - 读数（158 张）：程序自己的层，每张图都有 `PID-FRAME`（开）和 `PID-SYMBOL-LABEL`（关）；`PID-CONNECTIVITY`（关）只在语料图 `DWG-0201GP06-01.pid` 上有，25 条线；其余十个层名一张图上也没有，十三个之外的 `PID-*` 层名也没有。每个实体都有 `PID_SEMANTICS` 记录，角色都在十二个词之内；`point-error` 和 `annotation` 一次也没有，`connectivity` 只有那 25 条。`pid-test-data` 的 151 张里，模型空间 275,808 个实体，275,673 个写着 `sheet_layer=`，其余 135 个是图框；135 张的 `PID-FRAME` 上是一个矩形，16 张是空的。`ConsistencyChecks` 在 158 张图里都是开着、打印开关为关；151 张里审查标记 106,533 个，97,849 个在这一层。
+    - 图框模板：语料目录的 7 张，指了模板目录时 3 张的 `PID-FRAME` 上是 116、175、5,025 个实体（线、多段线、文字、填充、圆弧、点），角色全是 `frame`，没有块引用；另外 4 张和不指模板目录时的 7 张都只有一个矩形。
+    - 审查标记：8 张图（语料目录 7 张和 `pid-test-data` 的第一张）逐张看了哪种实体写着哪个角色：`point-ok` 全是点，`point-warning`、`point-approved` 全是线。
+    - 没有图框的 16 张里开日志看了一张（`D井场 注采阀组工艺及自控流程图.pid`）：日志说没有读到坐标单位，也没有点名图框模板。页面尺寸日志不单独报；「读不到页面尺寸才不画」读的是 `draw_page_border` 的代码。
+    - 现有测试（这一次只读了，没有跑）：`tests/pid_import.rs` 的 `import_declares_only_the_layers_its_own_entities_land_on_and_hides_the_evidence_ones`、`nothing_takes_the_annotation_role_and_its_layer_is_not_declared`、`connectivity_links_stay_on_the_sheet`、`every_imported_entity_states_its_role_and_exactly_one_is_the_page_border`；`src/io/pid/tests.rs` 的 `the_reference_takes_the_placements_layer_and_what_shared_it_floats_on_layer_0`、`a_record_that_is_no_placement_stays_loose_with_its_whole_record`、`the_sheet_layer_view_counts_a_symbol_once_and_its_members_by_role`、`a_hidden_sheet_layer_switched_on_lights_its_reference_and_turns_its_layer_on`；`src/io/pid_view_filter.rs` 的 `a_switch_stores_applies_and_releases_the_hidden_layer_only_when_lighting_it`。
+    - 旁证：SB-10 在进程里数的那一份（`D:\scratch\ocs-symblock\sb10\dump-head\digests.txt`，同样的 151 张）里，九个角色各自出现在几张图上与这一次相等，`geometry`、`text`、`point-ok`、`point-warning`、`point-approved` 的实体数也相等。
+  - 只读了代码和测试、没有在真图上见到的：文件没给出图层名的实体落在 `PID-GEOMETRY`、`PID-TEXT`、`PID-FILL`、`PID-SYMBOL`、`PID-POINT*`、`PID-HIDDEN` 的哪一层（158 张图上没有这样的实体）；`point-error`；文件没点名状态的记号算 `point-ok`；四个 `PID-POINT*` 层的打印开关；`PID-ANNOTATION` 初始为关；隐藏且没有图层名的内容要在普通的图层视图里打开 `PID-HIDDEN` 才看得见；2026-09-21 之前另存的图连带打开的是 `PID-HIDDEN`（没有打开过一张那时候另存的图）。解析库里 `annotation` 这类图形只有声明、没有一处构造，是读 `Cargo.toml` 钉的那一版源码得来的。
+  - 没有做的：没有开窗口，图层管理器的「角色」一段和两种视图没有在界面上看；没有出图，「不打印」读的是图层表里的打印开关；图框模板是用环境变量 `PID_TEMPLATE_LIBRARY` 指给程序的，没有把图纸放在工程目录里让程序自己往上找；没有跑测试，这一次只改了文档。
+  - 看到了没动的：
+    - 手册没有讲图框模板从哪里来（从图纸所在的文件夹往上，每层看它自己和它的 `Ref` 里名字带 `template` 的文件夹，或者环境变量 `PID_TEMPLATE_LIBRARY`；图纸点了名而找不到时日志里有一行警告），这一次只在表里提了一句。它对画面的影响很大（上面的 5,025 个实体），建议照「符号从哪来」的写法补一段，请用户定。
+    - `taxonomy_layers` 里有两处注释还把 `PID-POINT-ERROR` 和 `PID-ANNOTATION` 说成声明着的空层；2026-09-21 之后层只在有实体落上去时才建，这两层在 158 张图上都没有。注释没有改。
+    - `connectivity_links_stay_on_the_sheet` 的失败信息里写的是 35 对，这一次量到的是 25 条线；测试只断言不为空。没有查差的 10 对，也没有改。
+    - `pid-test-data` 里 `backup-plant-data\test\U01\D04.pid` 有一个名字就叫 `0` 的图纸图层，它的 445 个实体和符号的块内成员同在 `0` 层。没有查它在界面上有没有后果。
 - [ ] 做 SB-9 时留下、请用户定的（规格 §11 的 SB-9 第 1、6、7、8、9 条）：
   - 写死 1.1 倍的预算测试会误报：按任务跑的三遍是一遍过、两遍红，SB-9 的这一条验收因此没有勾。要不要换写法：保持现状；放宽余量；搬到 `tests/pid_import.rs`（那个测试程序用 mimalloc）并重新取基线；或者不设写死的数，只在验收时拿两个程序轮流量。建议：1.1 倍这一条靠两个程序轮流量来判（检查点一、SB-10 的做法）；预算测试留着当粗筛，余量放宽到 1.3 倍（4,428 ms）。交替量的 20 轮里，基线和分支最慢的一趟是 4,176 和 4,273 ms，都不超过 4,428；故意每次多睡 1 秒的那一遍（4,741 ms）仍然红。别人满负荷编译的时候它还是会红（实现前量基线的那一次，9 次的中位数是 4,569 ms），所以仍然只在机器闲的时候单独跑。
   - `tests/pid_import.rs` 加了只在 Windows 上生效的 mimalloc 声明，是任务清单之外的改动，留不留。建议留：这个测试程序从 16–19 秒降到 5–6 秒，用的是程序自己的分配器，测试检查的东西一点没变。
