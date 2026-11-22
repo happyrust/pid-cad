@@ -25,24 +25,34 @@
 //! drawing it is (`pidindex.rs`), and the waive buttons call what
 //! `PIDCHECK WAIVE` and `PIDCHECK UNWAIVE` call; they too say in the
 //! message bar what came of it.
+//!
+//! The material-list tab's buttons call what `pid_bom` calls: the bill of
+//! the drawing in front, kept on its tab, and the bill of its project after
+//! `PIDINDEX`'s scan, kept for the folder ([`PanelBoms`]). Its export writes
+//! the bill shown as `PIDBOM EXPORT` writes it, and a row clicked finds its
+//! object as `PIDLOCATE` finds its tag. Only the bills made here are shown:
+//! `PIDBOM` and `pid_bom` keep none.
 
+use super::pidbom::{unix_now, BomFailure, Sheets};
 use super::piddrc::Checked;
-use super::pidindex::{same_file, Landed, LOCATE_NOT_FOUND};
+use super::pidindex::{same_file, Landed, Target, LOCATE_NOT_FOUND};
 use crate::app::{Message, OpenCADStudio};
+use crate::pid::bom::{self, Bom, BomError, BomScope};
 use crate::pid::drc::{self, CheckResult};
 use crate::ui::dock::{DockMsg, PanelId};
 use crate::ui::window::pid_verify_deliver::{
-    self, Context, DrawingResults, KeptCheck, Notice, PidVerifyMsg, ProjectResults, Tab, Waiving,
-    GONE, REASON_ID, ROWS_PER_PAGE,
+    self, BomFailed, Context, DrawingResults, KeptBom, KeptCheck, Notice, PidVerifyMsg,
+    ProjectResults, Tab, Unreadable, Waiving, GONE, REASON_ID, ROWS_PER_PAGE,
 };
 use iced::Task;
 use serde_json::{json, Value};
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// What the panel's view was built from besides its interface state: whether
 /// it is on screen, the drawing tab in front and where that drawing was
-/// saved, each open drawing's edit count, the last check the program made,
-/// whether the session may write and whether a scan runs.
+/// saved, each open drawing's edit count, the last check and the last bill
+/// the program made, whether the session may write and whether a scan runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::app) struct Inputs {
     visible: bool,
@@ -50,30 +60,105 @@ pub(in crate::app) struct Inputs {
     source: Option<String>,
     revisions: Vec<(u64, u64)>,
     last_check: u64,
+    last_bom: u64,
     writable: bool,
     busy: bool,
 }
 
+/// A bill of materials the panel made (§3.1, §4.5), or why it did not come
+/// out, with which bill of the program's it is, what it covers and how many
+/// drawings it read, when it was made, and each open drawing's edit count
+/// then (tab number, `edit_revision`).
+pub(in crate::app) struct PanelBom {
+    serial: u64,
+    scope: BomScope,
+    drawings: usize,
+    made_at: i64,
+    outcome: Result<Bom, BomFailed>,
+    revisions: Vec<(u64, u64)>,
+}
+
+impl PanelBom {
+    /// The edit count of the drawing on tab `id` when the bill was made; a
+    /// drawing opened since counts from 0, as it was opened.
+    fn revision_at(&self, id: u64) -> u64 {
+        self.revisions
+            .iter()
+            .find(|(tab, _)| *tab == id)
+            .map_or(0, |&(_, revision)| revision)
+    }
+
+    /// The bill lent to the view, `stale` or not.
+    fn kept(&self, stale: bool) -> KeptBom<'_> {
+        KeptBom {
+            outcome: self.outcome.as_ref(),
+            scope: &self.scope,
+            drawings: self.drawings,
+            made_at: self.made_at,
+            serial: self.serial,
+            stale,
+        }
+    }
+}
+
+/// The bills of whole projects the panel made, the latest per project
+/// folder; a drawing's own is kept on its tab. The serials of both are
+/// given here, so the newer of a drawing's and its folder's can be told.
+#[derive(Default)]
+pub(in crate::app) struct PanelBoms {
+    serial: u64,
+    projects: HashMap<PathBuf, PanelBom>,
+}
+
+impl PanelBoms {
+    /// A bill just made, numbered after the last.
+    fn made(
+        &mut self,
+        scope: BomScope,
+        drawings: usize,
+        made_at: i64,
+        outcome: Result<Bom, BomFailed>,
+        revisions: Vec<(u64, u64)>,
+    ) -> PanelBom {
+        self.serial += 1;
+        PanelBom {
+            serial: self.serial,
+            scope,
+            drawings,
+            made_at,
+            outcome,
+            revisions,
+        }
+    }
+}
+
 impl OpenCADStudio {
     /// Rebuild what the panel draws from its interface state and the
-    /// program's state around it. A check made since the last build starts
-    /// the list over at its first 200 rows.
+    /// program's state around it. A check or a bill made since the last
+    /// build starts its list over at its first 200 rows.
     pub(in crate::app) fn refresh_pid_verify_view(&mut self) {
         let inputs = self.pid_verify_inputs();
-        if self
-            .pid_verify_built_from
-            .as_ref()
-            .is_some_and(|built| built.last_check != inputs.last_check)
-        {
+        let built = self.pid_verify_built_from.as_ref();
+        if built.is_some_and(|built| built.last_check != inputs.last_check) {
             self.pid_verify_ui.more = 0;
+        }
+        if built.is_some_and(|built| built.last_bom != inputs.last_bom) {
+            self.pid_verify_ui.bom_more = 0;
         }
         let context = self.pid_verify_context();
         let view = {
             let (drawing, project) = self.pid_verify_kept();
+            let (drawing_bom, project_bom) = self.pid_verify_kept_bom();
             pid_verify_deliver::build_view(
                 &self.pid_verify_ui,
-                Some(&DrawingResults { check: drawing }),
-                Some(&ProjectResults { check: project }),
+                Some(&DrawingResults {
+                    check: drawing,
+                    bom: drawing_bom,
+                }),
+                Some(&ProjectResults {
+                    check: project,
+                    bom: project_bom,
+                }),
                 &context,
             )
         };
@@ -105,6 +190,7 @@ impl OpenCADStudio {
                 .map(|tab| (tab.id, tab.edit_revision))
                 .collect(),
             last_check: self.pid_checks.last_serial(),
+            last_bom: self.pid_boms.serial,
             writable: !self.readonly_refuses_command("PIDPUBLISH"),
             busy: self.pid_index.scanning(),
         }
@@ -172,15 +258,46 @@ impl OpenCADStudio {
         }
     }
 
-    /// Whether a drawing `checked` read changed since (§3.1). A check of the
-    /// drawing on tab `i` alone goes stale when that drawing changes; one
-    /// that read its project folder `dir`, when any drawing open in that
-    /// folder does, one opened after the check counting from its opening.
-    /// Waiving follows the result in place and leaves it fresh; undoing that
-    /// does not (§4.4).
+    /// The bills kept for the drawing in front (§3.1): its own, on its tab,
+    /// and its project folder's; none on the Start page.
+    fn pid_verify_kept_bom(&self) -> (Option<KeptBom<'_>>, Option<KeptBom<'_>>) {
+        let i = self.active_tab;
+        let Some(tab) = self.tabs.get(i).filter(|tab| !tab.is_start) else {
+            return (None, None);
+        };
+        let dir = crate::io::drawing_dir(&tab.scene.document);
+        let own = tab
+            .pid_bom
+            .as_ref()
+            .map(|made| made.kept(self.pid_verify_stale(|id| made.revision_at(id), i, None)));
+        let project = dir
+            .and_then(|dir| self.pid_boms.projects.get(&same_file(dir)))
+            .map(|made| made.kept(self.pid_verify_stale(|id| made.revision_at(id), i, dir)));
+        (own, project)
+    }
+
+    /// Whether a drawing `checked` read changed since (§3.1): a check across
+    /// drawings read the project folder `dir` of the drawing on tab `i`, any
+    /// other only that drawing ([`Self::pid_verify_stale`]). Waiving follows
+    /// the result in place and leaves it fresh; undoing that does not (§4.4).
     fn pid_check_stale(&self, checked: &Checked, i: usize, dir: Option<&Path>) -> bool {
-        let changed = |id: u64, revision: u64| checked.revision_at_check(id) != revision;
-        let Some(dir) = dir.filter(|_| checked.report.scope.cross_drawing) else {
+        let across = dir.filter(|_| checked.report.scope.cross_drawing);
+        self.pid_verify_stale(|id| checked.revision_at_check(id), i, across)
+    }
+
+    /// Whether a drawing a result read changed since it was made (§3.1),
+    /// `revision_at` giving each tab's edit count then. A result of the
+    /// drawing on tab `i` alone goes stale when that drawing changes; one
+    /// that read its project folder `across`, when any drawing open in that
+    /// folder does, one opened since counting from its opening.
+    fn pid_verify_stale(
+        &self,
+        revision_at: impl Fn(u64) -> u64,
+        i: usize,
+        across: Option<&Path>,
+    ) -> bool {
+        let changed = |id: u64, revision: u64| revision_at(id) != revision;
+        let Some(dir) = across else {
             return changed(self.tabs[i].id, self.tabs[i].edit_revision);
         };
         let dir = same_file(dir);
@@ -250,7 +367,8 @@ impl OpenCADStudio {
 
     /// What the user did in the panel. Hiding takes the close button's path,
     /// so the controls' positions go with the panel. A filter changed or a
-    /// check pressed starts the list over at its first 200 rows.
+    /// check pressed starts the rule-check list over at its first 200 rows,
+    /// and a search typed or a bill pressed the material list.
     pub(in crate::app) fn on_pid_verify(&mut self, msg: PidVerifyMsg) -> Task<Message> {
         let ui = &mut self.pid_verify_ui;
         let task = match msg {
@@ -261,6 +379,7 @@ impl OpenCADStudio {
                 return task;
             }
             PidVerifyMsg::PickExport => return self.pid_verify_pick_export(),
+            PidVerifyMsg::PickBomExport => return self.pid_verify_pick_bom_export(),
             PidVerifyMsg::Tab(tab) => {
                 ui.tab = tab;
                 Task::none()
@@ -343,6 +462,45 @@ impl OpenCADStudio {
                 self.pid_verify_drop_waiver(&rule_id, &object_key);
                 Task::none()
             }
+            PidVerifyMsg::BomDrawing => {
+                ui.bom_more = 0;
+                self.pid_verify_bom_drawing();
+                Task::none()
+            }
+            PidVerifyMsg::BomProject => {
+                ui.bom_more = 0;
+                self.pid_verify_bom_project()
+            }
+            PidVerifyMsg::BomSearch(typed) => {
+                ui.bom_search = typed;
+                ui.bom_more = 0;
+                Task::none()
+            }
+            PidVerifyMsg::BomFold(kind) => {
+                toggle(&mut ui.bom_folded, kind);
+                Task::none()
+            }
+            PidVerifyMsg::MoreBom => {
+                ui.bom_more = ui.bom_more.saturating_add(1);
+                Task::none()
+            }
+            PidVerifyMsg::BomExport(name) => {
+                self.pid_verify_bom_export(&name);
+                Task::none()
+            }
+            PidVerifyMsg::BomLocate(index) => self.pid_verify_bom_locate(index),
+            PidVerifyMsg::BomSkipped => {
+                ui.skipped_open = !ui.skipped_open;
+                Task::none()
+            }
+            PidVerifyMsg::BomSkippedLocate(at) => self.pid_verify_bom_skipped_locate(at),
+            PidVerifyMsg::BomDuplicateLocate(repeated, at) => {
+                self.pid_verify_bom_duplicate_locate(repeated, at)
+            }
+            PidVerifyMsg::BomSummary => {
+                ui.summary_open = !ui.summary_open;
+                Task::none()
+            }
         };
         self.refresh_pid_verify_view();
         task
@@ -390,9 +548,40 @@ impl OpenCADStudio {
         }
     }
 
-    /// 【导出…】: ask where to write the result shown, offering
-    /// `<drawing>-drc.json` beside the drawing.
+    /// 【导出…】 on the rule-check tab: ask where to write the result shown,
+    /// offering `<drawing>-drc.json` beside the drawing.
     fn pid_verify_pick_export(&self) -> Task<Message> {
+        self.pid_verify_pick(
+            "导出检查结果",
+            "drc.json",
+            &[("JSON", "json")],
+            PidVerifyMsg::Export,
+        )
+    }
+
+    /// 【导出…】 under the material list (§4.5): ask where to write the bill
+    /// shown, offering `<drawing>-bom.csv` beside the drawing, and CSV, XLSX
+    /// or JSON.
+    fn pid_verify_pick_bom_export(&self) -> Task<Message> {
+        self.pid_verify_pick(
+            "导出材料清单",
+            "bom.csv",
+            &[("CSV", "csv"), ("XLSX", "xlsx"), ("JSON", "json")],
+            PidVerifyMsg::BomExport,
+        )
+    }
+
+    /// Ask where to write what the panel shows: the system's save dialog
+    /// titled `title`, in the drawing's folder, offering `<drawing>-<name>`
+    /// and the `kinds` of file. The file picked is pressed as `write`;
+    /// nothing is when none is.
+    fn pid_verify_pick(
+        &self,
+        title: &'static str,
+        name: &str,
+        kinds: &'static [(&'static str, &'static str)],
+        write: fn(String) -> PidVerifyMsg,
+    ) -> Task<Message> {
         let dir = self
             .tabs
             .get(self.active_tab)
@@ -405,13 +594,15 @@ impl OpenCADStudio {
             .as_deref()
             .filter(|id| !id.is_empty())
             .unwrap_or("PID");
-        let name = format!("{drawing}-drc.json");
+        let name = format!("{drawing}-{name}");
         Task::perform(
             async move {
                 let mut dialog = crate::sys::file_dialog()
-                    .set_title("导出检查结果")
-                    .set_file_name(&name)
-                    .add_filter("JSON", &["json"]);
+                    .set_title(title)
+                    .set_file_name(&name);
+                for &(kind, extension) in kinds {
+                    dialog = dialog.add_filter(kind, &[extension]);
+                }
                 if let Some(dir) = dir {
                     dialog = dialog.set_directory(dir);
                 }
@@ -420,8 +611,8 @@ impl OpenCADStudio {
                     .await
                     .map(|picked| crate::sys::handle_path(&picked))
             },
-            |picked| match picked {
-                Some(path) => PidVerifyMsg::Export(path.to_string_lossy().into_owned()).message(),
+            move |picked| match picked {
+                Some(path) => write(path.to_string_lossy().into_owned()).message(),
                 None => Message::Noop,
             },
         )
@@ -462,9 +653,17 @@ impl OpenCADStudio {
             return Task::none();
         };
         self.pid_verify_ui.located = Some((serial, index));
+        let here = self.pidcheck_drawing_id(self.active_tab);
+        self.pid_verify_go(Target::of_result(&result), &here)
+    }
+
+    /// Find `target` (`pidindex.rs`): on the drawing in front when that is
+    /// the one `here` names, else on the drawing of its folder the target
+    /// names, switched to or opened.
+    fn pid_verify_go(&mut self, target: Target, here: &str) -> Task<Message> {
         let i = self.active_tab;
-        if result.object.drawing_id == self.pidcheck_drawing_id(i) {
-            let landed = self.pidlocate_result(i, &result);
+        if target.drawing_id() == here {
+            let landed = self.pidlocate_target(i, &target);
             self.pid_verify_landed(landed);
             return Task::none();
         }
@@ -472,7 +671,7 @@ impl OpenCADStudio {
             return Task::none();
         };
         let dir = dir.to_path_buf();
-        self.pidlocate_result_elsewhere(&dir, result)
+        self.pidlocate_elsewhere(&dir, target)
     }
 
     /// What came of finding a row's object, in the message bar: nothing when
@@ -544,6 +743,220 @@ impl OpenCADStudio {
             .err()
             .map(|(code, said)| Notice::error(Some(code.to_owned()), said));
     }
+
+    /// 【当前图】 (§4.5): what `pid_bom` does with `scope: drawing`, the bill
+    /// kept on the drawing's tab. Tags found in more than one place are kept
+    /// in its place to be listed; what else stops it is said in the message
+    /// bar, under its code, and the bill there was stays.
+    fn pid_verify_bom_drawing(&mut self) {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return;
+        }
+        let revisions = vec![(self.tabs[i].id, self.tabs[i].edit_revision)];
+        let made = match self.pidbom_compute(Sheets::Current(i)) {
+            Ok((bill, drawings)) => {
+                let (scope, made_at) = (bill.scope.clone(), bill.generated_at);
+                self.pid_boms
+                    .made(scope, drawings, made_at, Ok(bill), revisions)
+            }
+            Err(failure) => {
+                let Some(failed) = bom_failed(&failure) else {
+                    let code = Some(failure.code().to_owned());
+                    self.pid_verify_ui.notice = Some(Notice::error(code, failure.to_string()));
+                    return;
+                };
+                let scope = BomScope::drawing(&self.pid_verify_bom_drawing_id(i));
+                self.pid_boms
+                    .made(scope, 1, unix_now(), Err(failed), revisions)
+            }
+        };
+        self.tabs[i].pid_bom = Some(made);
+        self.pid_verify_ui.notice = None;
+    }
+
+    /// 【全项目】 (§4.5): `PIDBOM PROJECT` — `PIDINDEX`'s scan of the
+    /// drawing's folder, then the bill, kept for the folder
+    /// ([`Self::pid_verify_bom_scanned`]). The scan and the bill say on the
+    /// command line what they say for the command.
+    fn pid_verify_bom_project(&mut self) -> Task<Message> {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return Task::none();
+        }
+        self.pid_verify_ui.notice = None;
+        self.pidbom_for_panel(i).unwrap_or_else(Task::none)
+    }
+
+    /// The bill 【全项目】 asked for, made on the scan of `project_dir`
+    /// (`pidbom.rs`): kept for that folder with each open drawing's edit
+    /// count. Tags found in more than one place and drawings that did not
+    /// read are kept in its place to be listed; what else stops it is said
+    /// in the message bar, and the bill there was stays.
+    pub(super) fn pid_verify_bom_scanned(
+        &mut self,
+        project_dir: &Path,
+        outcome: Result<(Bom, usize), BomFailure>,
+    ) {
+        let revisions = self
+            .tabs
+            .iter()
+            .map(|tab| (tab.id, tab.edit_revision))
+            .collect();
+        let made = match outcome {
+            Ok((bill, drawings)) => {
+                let (scope, made_at) = (bill.scope.clone(), bill.generated_at);
+                self.pid_boms
+                    .made(scope, drawings, made_at, Ok(bill), revisions)
+            }
+            Err(failure) => {
+                let Some(failed) = bom_failed(&failure) else {
+                    let code = Some(failure.code().to_owned());
+                    self.pid_verify_ui.notice = Some(Notice::error(code, failure.to_string()));
+                    self.refresh_pid_verify_view();
+                    return;
+                };
+                self.pid_boms
+                    .made(BomScope::project(), 0, unix_now(), Err(failed), revisions)
+            }
+        };
+        self.pid_boms.projects.insert(same_file(project_dir), made);
+        self.pid_verify_ui.notice = None;
+        self.refresh_pid_verify_view();
+    }
+
+    /// The bill the panel shows for the drawing in front — the newer of its
+    /// own and its folder's (§3.1) — or why it did not come out.
+    fn pid_verify_made(&self) -> Option<&PanelBom> {
+        let tab = self.tabs.get(self.active_tab).filter(|tab| !tab.is_start)?;
+        let folder = crate::io::drawing_dir(&tab.scene.document)
+            .and_then(|dir| self.pid_boms.projects.get(&same_file(dir)));
+        match (tab.pid_bom.as_ref(), folder) {
+            (Some(own), Some(folder)) if folder.serial > own.serial => Some(folder),
+            (Some(own), _) => Some(own),
+            (None, folder) => folder,
+        }
+    }
+
+    /// The drawing on tab `i` as a bill names it: the project file's number,
+    /// else the file name ([`Self::drawing_meta`]); as the rule check names
+    /// it when the project file does not read.
+    fn pid_verify_bom_drawing_id(&self, i: usize) -> String {
+        self.drawing_meta(i)
+            .map_or_else(|_| self.pidcheck_drawing_id(i), |meta| meta.drawing_id)
+    }
+
+    /// Write the bill shown to `name` as `PIDBOM EXPORT` writes a bill — all
+    /// of it, whatever is searched or folded — and say in the message bar
+    /// where it went or why it did not.
+    fn pid_verify_bom_export(&mut self, name: &str) {
+        let i = self.active_tab;
+        let Some(bill) = self
+            .pid_verify_made()
+            .and_then(|made| made.outcome.as_ref().ok())
+        else {
+            return;
+        };
+        self.pid_verify_ui.notice = Some(match self.pidbom_write(i, bill, name) {
+            Ok(said) => Notice::info(said),
+            Err((code, why)) => Notice::error(code.map(str::to_owned), why),
+        });
+    }
+
+    /// A row of the material list clicked (§4.5): its object found as
+    /// `PIDLOCATE <tag>` finds it, on the drawing in front when the row is on
+    /// it, else on the first drawing the row names. The fittings of a run
+    /// make one row under the run's tag, which finds the run.
+    fn pid_verify_bom_locate(&mut self, index: usize) -> Task<Message> {
+        let Some(made) = self.pid_verify_made() else {
+            return Task::none();
+        };
+        let serial = made.serial;
+        let Some(row) = made
+            .outcome
+            .as_ref()
+            .ok()
+            .and_then(|bill| bill.rows.get(index))
+        else {
+            return Task::none();
+        };
+        let here = self.pid_verify_bom_drawing_id(self.active_tab);
+        let drawing_id = match row.drawings.first() {
+            Some(first) if !row.drawings.contains(&here) => first.as_str(),
+            _ => here.as_str(),
+        };
+        let lumped = [bom::FITTING_ROW, bom::PIPE_LINE_ROW].contains(&row.type_code.as_str());
+        let type_code = (!lumped).then_some(row.type_code.as_str());
+        let target = Target::tagged(drawing_id, &row.tag, type_code);
+        self.pid_verify_ui.bom_located = Some((serial, index));
+        self.pid_verify_go(target, &here)
+    }
+
+    /// One of the objects without a tag clicked (§4.5): with nothing to
+    /// find it by, the view goes to where it is, on its drawing.
+    fn pid_verify_bom_skipped_locate(&mut self, at: usize) -> Task<Message> {
+        let bill = self
+            .pid_verify_made()
+            .and_then(|made| made.outcome.as_ref().ok());
+        let Some(skipped) = bill.and_then(|bill| bill.skipped.get(at)) else {
+            return Task::none();
+        };
+        let target = Target::spot(&skipped.drawing_id, skipped.at);
+        let here = self.pid_verify_bom_drawing_id(self.active_tab);
+        self.pid_verify_go(target, &here)
+    }
+
+    /// One place of a tag found more than once clicked (§4.5): the object of
+    /// that type and tag nearest the place, on its drawing.
+    fn pid_verify_bom_duplicate_locate(&mut self, repeated: usize, at: usize) -> Task<Message> {
+        let failed = self
+            .pid_verify_made()
+            .and_then(|made| made.outcome.as_ref().err());
+        let Some(duplicate) = failed.and_then(|failed| failed.duplicates.get(repeated)) else {
+            return Task::none();
+        };
+        let Some(place) = duplicate.places.get(at) else {
+            return Task::none();
+        };
+        let target = Target::placed(
+            &place.drawing_id,
+            &duplicate.type_code,
+            &duplicate.tag,
+            place.at,
+        );
+        let here = self.pid_verify_bom_drawing_id(self.active_tab);
+        self.pid_verify_go(target, &here)
+    }
+}
+
+/// What the panel keeps in a bill's place when it did not come out (§4.5):
+/// the tags found in more than one place, or the drawings of the scope that
+/// did not read. What else stops a bill is `None`: the message bar says it.
+fn bom_failed(failure: &BomFailure) -> Option<BomFailed> {
+    let (duplicates, unreadable) = match failure {
+        BomFailure::Bom(BomError::DuplicateTag(duplicates)) => (duplicates.clone(), Vec::new()),
+        BomFailure::Incomplete(drawings) => {
+            let unreadable = drawings
+                .iter()
+                .map(|drawing| Unreadable {
+                    drawing_id: drawing.drawing_id.clone(),
+                    file: drawing.file.clone(),
+                    why: drawing.error.clone().unwrap_or_default(),
+                })
+                .collect();
+            (Vec::new(), unreadable)
+        }
+        BomFailure::Index(_)
+        | BomFailure::Bom(_)
+        | BomFailure::NoProjectDir
+        | BomFailure::Snapshot(_) => return None,
+    };
+    Some(BomFailed {
+        code: failure.code().to_owned(),
+        text: failure.to_string(),
+        duplicates,
+        unreadable,
+    })
 }
 
 /// Switch `item` in `list`: off when it is on, on when it is off.
@@ -593,12 +1006,13 @@ mod tests {
     use crate::pid::drc::builtin_rules::PROJECT_PACK_FILE;
     use crate::ui::dock::{DockMsg, PanelId};
     use crate::ui::window::pid_verify_deliver::{
-        Group, PidVerifyMsg, RowView, Tab, BOUNDS_PREFIX, CHECK_DRAWING_ID, CHECK_PROJECT_ID,
+        BomRowView, BomTable, Group, PidVerifyMsg, RowView, Tab, BOM_DRAWING_ID, BOM_EXPORT_ID,
+        BOM_PROJECT_ID, BOM_SEARCH_ID, BOUNDS_PREFIX, CHECK_DRAWING_ID, CHECK_PROJECT_ID,
         NEVER_CHECKED, PANEL_BOUNDS_ID,
     };
     use serde_json::{json, Value};
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const PANEL: PanelId = PanelId::PidVerifyDeliver;
@@ -1773,6 +2187,378 @@ mod tests {
                 assert_eq!(shown.rows.len(), 3);
                 let mut ids = vec![CHECK_DRAWING_ID.to_owned(), CHECK_PROJECT_ID.to_owned()];
                 ids.extend(shown.rows.iter().map(RowView::bounds_id));
+                for id in ids {
+                    assert!(drawn.contains(&id), "{id}: {drawn:?}");
+                }
+            })
+            .expect("spawn test thread")
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    }
+
+    /// Save the drawing in front as `path` and have it read from there.
+    fn save_as(app: &mut OpenCADStudio, path: &Path) {
+        let bytes = crate::io::save_to_bytes(
+            app.active_document_for_test(),
+            "dwg",
+            document::DxfVersion::AC1032,
+        )
+        .expect("the drawing as DWG");
+        fs::write(path, bytes).expect("the drawing");
+        let i = app.active_tab;
+        app.tabs[i].scene.document.source_path = Some(path.to_string_lossy().into_owned());
+    }
+
+    /// The plant the material-list tests list, saved as PID-1101.dwg in
+    /// `scratch` with the panel open: a pump with a gate valve beside it, a
+    /// vessel, a pipe line of its own, a run from the pump to the vessel
+    /// with a gate valve and a fitting of no tag of its own on it, and a
+    /// transmitter that gets no tag.
+    fn plant(scratch: &Scratch) -> OpenCADStudio {
+        let mut app = fresh();
+        draw(&mut app, "PIDINSERT pump", &[[0.0, 0.0]]);
+        draw(&mut app, "PIDINSERT gate_valve", &[[-28.0, 0.0]]);
+        draw(&mut app, "PIDINSERT vessel", &[[200.0, 12.0]]);
+        draw(&mut app, "PIDPIPE", &[[200.0, 100.0], [300.0, 100.0]]);
+        draw(&mut app, "PIDPIPE run", &[[14.0, 0.0], [200.0, 0.0]]);
+        draw(&mut app, "PIDFITTING gate_valve", &[[100.0, 0.0]]);
+        draw(&mut app, "PIDFITTING transmitter", &[[40.0, 0.0]]);
+        draw(&mut app, "PIDINSERT transmitter", &[[58.0, 80.0]]);
+        save_as(&mut app, &scratch.path("PID-1101.dwg"));
+        let _ = run(&mut app, "PIDVERIFY");
+        app
+    }
+
+    /// [`sheet`], with PID-1102.dwg beside it holding a pump tagged `tag`.
+    fn beside(scratch: &Scratch, tag: &str) -> OpenCADStudio {
+        let mut other = fresh();
+        draw(&mut other, "PIDINSERT pump", &[[0.0, 0.0]]);
+        let ran = run(&mut other, &format!("PIDTAG P-1001 {tag}"));
+        assert_eq!(ran.error, None, "{}", ran.said);
+        save_as(&mut other, &scratch.path("PID-1102.dwg"));
+        sheet(scratch)
+    }
+
+    /// The rows of the material list the panel state lists.
+    fn bom_rows(state: &Value) -> Vec<Value> {
+        state["bom"]["rows"].as_array().cloned().unwrap_or_default()
+    }
+
+    /// The index and the tag of the first row of the material list in the
+    /// panel state that `pick` picks.
+    fn bom_row_of(state: &Value, pick: impl Fn(&Value) -> bool) -> (usize, String) {
+        let rows = bom_rows(state);
+        let row = rows
+            .iter()
+            .find(|row| pick(row))
+            .unwrap_or_else(|| panic!("no such row: {state}"));
+        let index = row["index"].as_u64().expect("the index");
+        (
+            usize::try_from(index).expect("an index"),
+            row["tag"].as_str().unwrap_or_default().to_owned(),
+        )
+    }
+
+    /// What `PIDLOCATE words` selects on the drawing in front and where it
+    /// looks then; afterwards nothing is selected, the view looks away and
+    /// the command line is cleared.
+    fn pidlocate(app: &mut OpenCADStudio, words: &str) -> (Vec<String>, glam::DVec3) {
+        let ran = run(app, &format!("PIDLOCATE {words}"));
+        assert_eq!(ran.error, None, "{}", ran.said);
+        let found = (selection(app), looking_at(app));
+        assert!(!found.0.is_empty(), "{}", ran.said);
+        look_away(app);
+        app.command_line.history.clear();
+        found
+    }
+
+    /// Press `pressed` in the panel as a click does, driving whatever it
+    /// starts to its end.
+    fn click(app: &mut OpenCADStudio, pressed: PidVerifyMsg) {
+        let task = app.update(pressed.message());
+        app.drive_headless_task(task).expect("the click's task");
+    }
+
+    /// The table of the material list the panel draws now.
+    fn drawn_bill(app: &OpenCADStudio) -> BomTable {
+        let shown = app.pid_verify_view.bom.shown.clone();
+        shown.expect("a bill drawn").table.expect("a table")
+    }
+
+    #[test]
+    fn the_material_list_tab_lists_what_pid_bom_answers_and_searches_it() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        let steps = undo_steps(&app);
+        let answer = act(&mut app, "bom=drawing");
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(undo_steps(&app), steps, "a bill changes no drawing");
+        let listed = request(&mut app, json!({"op": "pid_bom"}));
+        assert_eq!(listed["ok"], true, "{listed}");
+        let rows: Vec<Value> = listed["rows"]
+            .as_array()
+            .expect("the rows")
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let mut row = row.clone();
+                row["index"] = json!(index);
+                row
+            })
+            .collect();
+        let state = panel(&mut app, "");
+        let bom = &state["bom"];
+        assert_eq!(bom["has_result"], true, "{state}");
+        assert_eq!(bom["stale"], false, "{state}");
+        assert_eq!(bom["scope"], "drawing", "{state}");
+        assert_eq!(bom["error"], Value::Null, "{state}");
+        assert_eq!(bom["total"], rows.len(), "{state}");
+        assert_eq!(bom_rows(&state), rows, "{state}");
+        // Only the rows with P-10 in their tag, name, spec or type code.
+        let answer = act(&mut app, "bom_search=P-10");
+        assert_eq!(answer["ok"], true, "{answer}");
+        let has = |row: &&Value| {
+            ["tag", "name", "spec", "type_code"].iter().any(|column| {
+                let text = row[*column].as_str().unwrap_or_default();
+                text.to_lowercase().contains("p-10")
+            })
+        };
+        let wanted: Vec<Value> = rows.iter().filter(has).cloned().collect();
+        assert!(!wanted.is_empty() && wanted.len() < rows.len(), "{listed}");
+        let state = panel(&mut app, "");
+        assert_eq!(state["bom"]["search"], "P-10", "{state}");
+        assert_eq!(state["bom"]["total"], wanted.len(), "{state}");
+        assert_eq!(bom_rows(&state), wanted, "{state}");
+        // An edit leaves the bill shown, marked stale.
+        draw(&mut app, "PIDINSERT pump", &[[300.0, 0.0]]);
+        let state = panel(&mut app, "");
+        assert_eq!(state["bom"]["has_result"], true, "{state}");
+        assert_eq!(state["bom"]["stale"], true, "{state}");
+    }
+
+    #[test]
+    fn the_panel_exports_the_bill_shown_as_pidbom_export_writes_it() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        let answer = act(&mut app, "bom_export=early.csv");
+        assert_eq!(answer["code"], "PANEL_ACTION_UNAVAILABLE", "{answer}");
+        assert_eq!(answer["reason"], "no_result", "{answer}");
+        let _ = act(&mut app, "bom=drawing");
+        // Searched and folded, the whole bill is written all the same.
+        let _ = act(&mut app, "bom_search=P-10");
+        let _ = act(&mut app, "bom_group=设备");
+        let answer = act(&mut app, "bom_export=panel.csv");
+        assert_eq!(answer["ok"], true, "{answer}");
+        let state = panel(&mut app, "");
+        assert_eq!(state["notice"]["level"], "info", "{state}");
+        let said = state["notice"]["text"].as_str().unwrap_or_default();
+        assert!(said.contains("panel.csv"), "{state}");
+        let ran = run(&mut app, "PIDBOM EXPORT command.csv");
+        assert_eq!(ran.error, None, "{}", ran.said);
+        let written = |name: &str| fs::read(scratch.path(name)).expect("the file written");
+        assert_eq!(written("panel.csv"), written("command.csv"));
+        assert_eq!(
+            written("panel-pipe-summary.csv"),
+            written("command-pipe-summary.csv")
+        );
+        // What the export refuses is said in the message bar.
+        app.command_line.last_error = None;
+        let answer = act(&mut app, "bom_export=panel.txt");
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(app.command_line.last_error, None);
+        let state = panel(&mut app, "");
+        assert_eq!(state["notice"]["level"], "error", "{state}");
+        assert_eq!(state["notice"]["code"], "BOM_FORMAT_UNSUPPORTED", "{state}");
+        assert!(!scratch.path("panel.txt").exists());
+    }
+
+    #[test]
+    fn a_tag_found_twice_shows_no_table_and_lists_where_it_is() {
+        let scratch = Scratch::new();
+        let mut app = two_sheets(&scratch);
+        let tabs = app.tabs.len();
+        app.command_line.history.clear();
+        let answer = act(&mut app, "bom=project");
+        assert_eq!(answer["ok"], true, "{answer}");
+        // The command line says why, as `PIDBOM PROJECT` does, but not as an
+        // error, which would fail the panel's action.
+        let history = &app.command_line.history;
+        let said: Vec<&str> = history.iter().map(|entry| entry.text.as_str()).collect();
+        assert!(
+            said.iter().any(|line| line.contains("BOM_DUPLICATE_TAG")),
+            "{said:?}"
+        );
+        assert!(
+            said.iter().any(|line| line.contains("EQUIPMENT P-1001")),
+            "{said:?}"
+        );
+        let error = crate::ui::command_line::EntryKind::Error;
+        assert!(history.iter().all(|entry| entry.kind != error), "{said:?}");
+        let state = panel(&mut app, "");
+        let bom = &state["bom"];
+        assert_eq!(bom["has_result"], true, "{state}");
+        assert_eq!(bom["scope"], "project", "{state}");
+        assert_eq!(bom["error"]["code"], "BOM_DUPLICATE_TAG", "{state}");
+        assert_eq!(bom["total"], 0, "{state}");
+        assert_eq!(bom_rows(&state), Vec::<Value>::new(), "{state}");
+        assert_eq!(state["buttons"]["bom_export"], false, "{state}");
+        assert_eq!(state["notice"], Value::Null, "{state}");
+        let duplicates = bom["error"]["duplicates"]
+            .as_array()
+            .expect("the duplicates");
+        assert_eq!(duplicates.len(), 1, "{state}");
+        let places = duplicates[0]["places"].as_array().expect("the places");
+        let drawings: Vec<&str> = places
+            .iter()
+            .map(|place| place["drawing_id"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(drawings, ["PID-1101", "PID-1102"], "{state}");
+        let handle = places[1]["handle"].as_str().unwrap_or_default().to_owned();
+        let answer = act(&mut app, "bom_export=repeated.csv");
+        assert_eq!(answer["reason"], "no_result", "{answer}");
+        // The place on PID-1102, clicked, opens it and selects the pump
+        // there; the project's bill is still the one shown.
+        click(&mut app, PidVerifyMsg::BomDuplicateLocate(0, 1));
+        assert_eq!(app.tabs.len(), tabs + 1);
+        let other = scratch.path("PID-1102.dwg");
+        assert_eq!(app.tab_showing(&other), Some(app.active_tab));
+        assert_eq!(selection(&mut app), [handle]);
+        let state = panel(&mut app, "");
+        assert_eq!(
+            state["bom"]["error"]["code"], "BOM_DUPLICATE_TAG",
+            "{state}"
+        );
+        assert_eq!(state["notice"], Value::Null, "{state}");
+    }
+
+    #[test]
+    fn locating_a_row_of_the_material_list_selects_its_object_and_a_fitting_row_its_run() {
+        let scratch = Scratch::new();
+        let mut app = plant(&scratch);
+        let answer = act(&mut app, "bom=drawing");
+        assert_eq!(answer["ok"], true, "{answer}");
+        let state = panel(&mut app, "");
+        let pump = bom_row_of(&state, |row| row["tag"] == "P-1001");
+        let line = bom_row_of(&state, |row| row["type_code"] == "PIPE_LINE");
+        // A fitting with no tag of its own is listed by its run's tag.
+        let fittings = bom_row_of(&state, |row| row["type_code"] == "FITTING");
+        for (index, tag) in [pump, line, fittings] {
+            let (selected, framed) = pidlocate(&mut app, &tag);
+            let answer = act(&mut app, &format!("bom_locate={index}"));
+            assert_eq!(answer["ok"], true, "{answer}");
+            assert_eq!(selection(&mut app), selected, "{tag}");
+            let looking = looking_at(&app);
+            assert!(
+                looking.distance(framed) < 1e-6,
+                "{tag}: {looking} ≠ {framed}"
+            );
+            assert_eq!(drawn_bill(&app).located, Some(index), "{tag}");
+            assert_eq!(panel(&mut app, "")["notice"], Value::Null, "{tag}");
+            assert!(!pidlocate_said(&app), "{tag}");
+            look_away(&mut app);
+        }
+        // An object without a tag is shown where it is, nothing selected.
+        let skipped = drawn_bill(&app).skipped;
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        click(&mut app, PidVerifyMsg::BomSkippedLocate(0));
+        assert_eq!(selection(&mut app), Vec::<String>::new());
+        let looking = looking_at(&app);
+        let at = glam::DVec3::new(skipped[0].at[0], skipped[0].at[1], 0.0);
+        assert!(looking.distance(at) < 1e-6, "{looking} ≠ {at}");
+        let answer = act(&mut app, "bom_locate=99");
+        assert_eq!(answer["code"], "PANEL_ROW_NOT_FOUND", "{answer}");
+    }
+
+    #[test]
+    fn the_project_bill_pressed_in_the_panel_is_kept_for_the_folder_until_a_drawing_changes() {
+        let scratch = Scratch::new();
+        let mut app = beside(&scratch, "P-2001");
+        let first = app.active_tab;
+        let tabs = app.tabs.len();
+        let answer = act(&mut app, "bom=project");
+        assert_eq!(answer["ok"], true, "{answer}");
+        let state = panel(&mut app, "");
+        assert_eq!(state["bom"]["scope"], "project", "{state}");
+        assert_eq!(state["bom"]["error"], Value::Null, "{state}");
+        assert_eq!(state["bom"]["stale"], false, "{state}");
+        assert_eq!(state["busy"], Value::Null, "{state}");
+        let (other, _) = bom_row_of(&state, |row| row["tag"] == "P-2001");
+        assert_eq!(bom_rows(&state)[other]["drawings"], json!(["PID-1102"]));
+        // A row on the other drawing opens it; the bill stays.
+        let answer = act(&mut app, &format!("bom_locate={other}"));
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(app.tabs.len(), tabs + 1);
+        let path = scratch.path("PID-1102.dwg");
+        assert_eq!(app.tab_showing(&path), Some(app.active_tab));
+        assert_eq!(selection(&mut app).len(), 1);
+        let state = panel(&mut app, "");
+        assert_eq!(state["drawing_id"], "PID-1102", "{state}");
+        assert_eq!(state["bom"]["scope"], "project", "{state}");
+        assert_eq!(drawn_bill(&app).located, Some(other));
+        // The drawing's own bill made later is the one shown, until the
+        // project's is made again.
+        let _ = app.update(Message::TabSwitch(first));
+        let _ = act(&mut app, "bom=drawing");
+        assert_eq!(panel(&mut app, "")["bom"]["scope"], "drawing");
+        let _ = act(&mut app, "bom=project");
+        assert_eq!(panel(&mut app, "")["bom"]["scope"], "project");
+        // An edit to a drawing of the folder makes it stale.
+        draw(&mut app, "PIDINSERT pump", &[[300.0, 300.0]]);
+        let state = panel(&mut app, "");
+        assert_eq!(state["bom"]["scope"], "project", "{state}");
+        assert_eq!(state["bom"]["stale"], true, "{state}");
+    }
+
+    #[test]
+    fn the_panel_refuses_a_grey_material_list_button_with_the_reason() {
+        let mut app = fresh();
+        let answer = act(&mut app, "bom=project");
+        assert_eq!(answer["code"], "PANEL_ACTION_UNAVAILABLE", "{answer}");
+        assert_eq!(answer["reason"], "no_project_dir", "{answer}");
+        for value in [
+            "bom_search=P",
+            "bom_group=设备",
+            "bom_locate=0",
+            "bom_export=a.csv",
+            "more=bom",
+        ] {
+            let answer = act(&mut app, value);
+            assert_eq!(
+                answer["code"], "PANEL_ACTION_UNAVAILABLE",
+                "{value}: {answer}"
+            );
+            assert_eq!(answer["reason"], "no_result", "{value}: {answer}");
+        }
+        // A drawing never saved is listed all the same.
+        draw(&mut app, "PIDINSERT pump", &[[0.0, 0.0]]);
+        let answer = act(&mut app, "bom=drawing");
+        assert_eq!(answer["ok"], true, "{answer}");
+        let state = panel(&mut app, "");
+        assert_eq!(state["bom"]["has_result"], true, "{state}");
+        assert_eq!(state["bom"]["total"], 1, "{state}");
+        assert_eq!(state["buttons"]["bom_project"], false, "{state}");
+    }
+
+    #[test]
+    fn the_drawn_material_list_tab_reports_its_buttons_and_rows() {
+        // As for the panel's body and tabs above.
+        let _one = crate::headless_ui_lock();
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let scratch = Scratch::new();
+                let mut app = sheet(&scratch);
+                app.win_size = (1600.0, 900.0);
+                let _ = act(&mut app, "tab=bom");
+                let _ = act(&mut app, "bom=drawing");
+                let drawn = drawn_ids(&app);
+                let table = drawn_bill(&app);
+                assert_eq!(table.rows.len(), 2);
+                let mut ids: Vec<String> =
+                    [BOM_DRAWING_ID, BOM_PROJECT_ID, BOM_SEARCH_ID, BOM_EXPORT_ID]
+                        .map(str::to_owned)
+                        .to_vec();
+                ids.extend(table.rows.iter().map(BomRowView::bounds_id));
                 for id in ids {
                     assert!(drawn.contains(&id), "{id}: {drawn:?}");
                 }

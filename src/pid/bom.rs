@@ -877,7 +877,8 @@ fn prop<'a>(object: &'a SummaryObject, key: &str) -> Option<&'a str> {
 }
 
 /// 「类型」一列：种类的名字，与 `totals.by_kind` 的写法一样。
-fn kind_label(kind: ObjectKind) -> &'static str {
+#[must_use]
+pub fn kind_label(kind: ObjectKind) -> &'static str {
     match kind {
         ObjectKind::PipeLine => "管线",
         ObjectKind::Equipment => "设备",

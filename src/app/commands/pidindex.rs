@@ -38,8 +38,9 @@
 //! 去一张图：有标签页开着它就切过去，没有就打开，打开以后接着找。在哪张图上都按
 //! （类型编码, 位号）照图现在的样子现找，不用摘要里记的句柄（§5.2）；位号不分大小写，
 //! 与 `PIDTAG` 一样。找到的只选中它们、缩放到它们；画不出样子的按外框和定位点缩放。
-//! 「校验与交付」面板点一条检查结果也走这里（`pidlocate_result`）：同样去那张图、现找、选中、
-//! 缩放，不在命令行上说话，定位成什么样说在面板的消息栏里。
+//! 「校验与交付」面板点的一条检查结果、清单的一行、一个没位号的对象、重复位号的一处也走这里
+//! （`pidlocate_target`）：同样去那张图、现找、选中、缩放，不在命令行上说话，定位成什么样
+//! 说在面板的消息栏里。
 //!
 //! 自动化操作（§5.3）：`pid_summary` 是当前图的摘要；`pid_index` 是项目索引，带 `tag`
 //! 时加上这个位号的各处（`places`）；`pid_locate` 同 `PIDLOCATE`，结果（图号、标签页、
@@ -321,18 +322,95 @@ struct Opening {
 enum Opened {
     /// 找 `wanted`；`reply` 是 `pid_locate` 在等这次打开，找到了把结果交给它。
     Find { wanted: Wanted, reply: bool },
-    /// 定位「校验与交付」面板点的这条检查结果（[`OpenCADStudio::pidlocate_result`]）。
-    Result(Box<CheckResult>),
+    /// 定位「校验与交付」面板点的这样东西（[`OpenCADStudio::pidlocate_target`]）。
+    Target(Box<Target>),
 }
 
-/// 面板点的一条检查结果定位成了什么样（`SPEC-pid-verify-deliver-panel.md` §4.3）。
+/// 面板点的东西定位成了什么样（`SPEC-pid-verify-deliver-panel.md` §4.3）。
 pub(super) enum Landed {
-    /// 按（类型编码，位号）现找到了，选中了。
+    /// 现找到了，选中了。
     Found,
-    /// 有自己的位号，图上却现找不到了：缩放到了结果里记的位置。
+    /// 有得找，图上却现找不到了：缩放到了记着的位置，没记着位置就什么也没动。
     Gone,
-    /// 没有自己的位号：缩放到了结果里记的位置。
+    /// 没得找（没有自己的位号）：缩放到了记着的位置。
     Spot,
+}
+
+/// 「校验与交付」面板点的一样要定位的东西（`SPEC-pid-verify-deliver-panel.md` §4.3、§4.5）：
+/// 在哪张图上，按什么现找（没得找的只看位置），和记着的位置——现找不到、没得找、
+/// 记了几处时缩放到这些位置的外包范围。
+pub(super) struct Target {
+    drawing_id: String,
+    wanted: Option<Wanted>,
+    spots: Vec<[f64; 2]>,
+}
+
+impl Target {
+    /// 一条检查结果：有自己位号的按（类型编码，位号）现找；位置是结果记的几处，没记就是
+    /// 对象的定位点。
+    pub(super) fn of_result(result: &CheckResult) -> Self {
+        let object = &result.object;
+        let wanted = object
+            .tag
+            .as_deref()
+            .filter(|tag| !tag.is_empty())
+            .map(|tag| Wanted {
+                tag: tag.to_owned(),
+                type_code: Some(object.type_code.clone()),
+                at: None,
+            });
+        let spots = if result.points.is_empty() {
+            vec![object.at]
+        } else {
+            result.points.clone()
+        };
+        Self {
+            drawing_id: object.drawing_id.clone(),
+            wanted,
+            spots,
+        }
+    }
+
+    /// 清单的一行：按位号现找有自己位号的对象，给了类型编码就只找这个类型的，同
+    /// `PIDLOCATE`；不记位置。
+    pub(super) fn tagged(drawing_id: &str, tag: &str, type_code: Option<&str>) -> Self {
+        Self {
+            drawing_id: drawing_id.to_owned(),
+            wanted: Some(Wanted {
+                tag: tag.to_owned(),
+                type_code: type_code.map(str::to_owned),
+                at: None,
+            }),
+            spots: Vec::new(),
+        }
+    }
+
+    /// 重复位号的一处：同类型同位号的对象里离 `at` 最近的那个；现找不到就缩放到 `at`。
+    pub(super) fn placed(drawing_id: &str, type_code: &str, tag: &str, at: [f64; 2]) -> Self {
+        Self {
+            drawing_id: drawing_id.to_owned(),
+            wanted: Some(Wanted {
+                tag: tag.to_owned(),
+                type_code: Some(type_code.to_owned()),
+                at: Some(at),
+            }),
+            spots: vec![at],
+        }
+    }
+
+    /// 只看一个位置：没有位号、没得找的对象。
+    pub(super) fn spot(drawing_id: &str, at: [f64; 2]) -> Self {
+        Self {
+            drawing_id: drawing_id.to_owned(),
+            wanted: None,
+            spots: vec![at],
+        }
+    }
+
+    /// 在哪张图上（图号）。
+    pub(super) fn drawing_id(&self) -> &str {
+        &self.drawing_id
+    }
 }
 
 /// 自动化操作扫出的项目索引：项目目录、索引、读得出来的各图的摘要。
@@ -886,7 +964,7 @@ impl OpenCADStudio {
                 return self.pidlocate_found(project_dir, index, &scanned.summaries, locate);
             }
             Then::Check(check) => self.pidcheck_scanned(project_dir, scanned, *check),
-            Then::Bom(job) => self.pidbom_scanned(scanned, *job),
+            Then::Bom(job) => self.pidbom_scanned(project_dir, scanned, *job),
             Then::Publish(job) => self.pidpublish_scanned(scanned, *job),
         }
         Task::none()
@@ -1201,8 +1279,8 @@ impl OpenCADStudio {
     }
 
     /// 编号是 `open_id` 的那次打开做完了，打开的是 `path`：是为定位打开的，就在它的
-    /// 标签页上接着找，`pid_locate` 在等就把结果交给它；是面板为一条检查结果打开的，就在
-    /// 上面定位那条结果。
+    /// 标签页上接着找，`pid_locate` 在等就把结果交给它；是面板为要定位的东西打开的，就在
+    /// 上面定位它。
     pub(in crate::app) fn on_pid_locate_opened(&mut self, open_id: u64, path: &Path) {
         let Some(opening) = self
             .pid_index
@@ -1214,8 +1292,8 @@ impl OpenCADStudio {
         let tab = self.pidlocate_tab(path).unwrap_or(self.active_tab);
         let (wanted, reply) = match opening.then {
             Opened::Find { wanted, reply } => (wanted, reply),
-            Opened::Result(result) => {
-                let landed = self.pidlocate_result(tab, &result);
+            Opened::Target(target) => {
+                let landed = self.pidlocate_target(tab, &target);
                 self.pid_verify_landed(landed);
                 return;
             }
@@ -1244,7 +1322,7 @@ impl OpenCADStudio {
             Opened::Find { wanted, .. } => {
                 self.pidlocate_not_opened(&opening.drawing_id, &wanted.tag);
             }
-            Opened::Result(_) => self.pid_verify_not_located(
+            Opened::Target(_) => self.pid_verify_not_located(
                 None,
                 format!("{} 没打开，没定位到这条结果。", opening.drawing_id),
             ),
@@ -1325,20 +1403,27 @@ impl OpenCADStudio {
         Some(self.pidlocate_select(i, &picks, place))
     }
 
-    /// 「校验与交付」面板点的一条检查结果，在第 `i` 个标签页的图上定位
-    /// （`SPEC-pid-verify-deliver-panel.md` §4.3）。有自己位号的，按（类型编码，位号）照图现在
-    /// 的样子现找（[`Self::pick_on`]，不用结果里的句柄），找到了只选中它们、缩放到它们，同
-    /// `PIDLOCATE`；结果记了几个位置的，缩放到这些位置的外包范围。现找不到的、没有自己
-    /// 位号的，什么也不选，缩放到结果里记的位置（没记就是对象的定位点）。命令行上什么也
-    /// 不说。
-    pub(super) fn pidlocate_result(&mut self, i: usize, result: &CheckResult) -> Landed {
-        let object = &result.object;
-        let places = if result.points.is_empty() {
-            std::slice::from_ref(&object.at)
-        } else {
-            result.points.as_slice()
+    /// 「校验与交付」面板点的 `target`，在第 `i` 个标签页的图上定位
+    /// （`SPEC-pid-verify-deliver-panel.md` §4.3、§4.5）。有得找的照图现在的样子现找
+    /// （[`Self::pick_on`]，不用记着的句柄），找到了只选中它们、缩放到它们，同 `PIDLOCATE`；
+    /// 记了几处位置的，缩放到这些位置的外包范围。现找不到的、没得找的，什么也不选，缩放到
+    /// 记着的位置；连位置也没记着的什么也不动。命令行上什么也不说。
+    pub(super) fn pidlocate_target(&mut self, i: usize, target: &Target) -> Landed {
+        let picks = target
+            .wanted
+            .as_ref()
+            .map(|wanted| self.pick_on(i, wanted))
+            .unwrap_or_default();
+        let landed = match (&target.wanted, picks.is_empty()) {
+            (None, _) => Landed::Spot,
+            (Some(_), true) => Landed::Gone,
+            (Some(_), false) => Landed::Found,
         };
-        let spots: Vec<Pick> = places
+        if picks.is_empty() && target.spots.is_empty() {
+            return landed;
+        }
+        let spots: Vec<Pick> = target
+            .spots
             .iter()
             .map(|&place| {
                 let place = glam::DVec2::from(place);
@@ -1350,17 +1435,6 @@ impl OpenCADStudio {
                 }
             })
             .collect();
-        let tag = object.tag.as_deref().filter(|tag| !tag.is_empty());
-        let picks = tag
-            .map(|tag| {
-                let wanted = Wanted {
-                    tag: tag.to_owned(),
-                    type_code: Some(object.type_code.clone()),
-                    at: None,
-                };
-                self.pick_on(i, &wanted)
-            })
-            .unwrap_or_default();
         let handles: Vec<document::Handle> = picks
             .iter()
             .filter_map(|pick| parse_handle(&pick.handle))
@@ -1377,23 +1451,19 @@ impl OpenCADStudio {
             scene.zoom_to_window(min, max);
         }
         self.refresh_properties();
-        match (tag, picks.is_empty()) {
-            (None, _) => Landed::Spot,
-            (Some(_), true) => Landed::Gone,
-            (Some(_), false) => Landed::Found,
-        }
+        landed
     }
 
-    /// 面板点的检查结果在项目目录 `project_dir` 里的另一张图上（§4.3）：有标签页开着它就切
-    /// 过去当场定位（[`Self::pidlocate_result`]），没有就打开它、打开以后接着定位
+    /// 面板点的东西在项目目录 `project_dir` 里的另一张图上（§4.3、§4.5）：有标签页开着它就
+    /// 切过去当场定位（[`Self::pidlocate_target`]），没有就打开它、打开以后接着定位
     /// （`on_pid_locate_opened`），同 `PIDLOCATE` 去一张图。定位成什么样、图不在目录里、没打开
     /// 成，都在面板的消息栏里说。
-    pub(super) fn pidlocate_result_elsewhere(
+    pub(super) fn pidlocate_elsewhere(
         &mut self,
         project_dir: &Path,
-        result: CheckResult,
+        target: Target,
     ) -> Task<Message> {
-        let drawing_id = result.object.drawing_id.clone();
+        let drawing_id = target.drawing_id.clone();
         let path = match list_drawings(project_dir) {
             Ok(drawings) => drawings
                 .into_iter()
@@ -1420,7 +1490,7 @@ impl OpenCADStudio {
             } else {
                 self.update(Message::TabSwitch(tab))
             };
-            let landed = self.pidlocate_result(tab, &result);
+            let landed = self.pidlocate_target(tab, &target);
             self.pid_verify_landed(landed);
             return switched;
         }
@@ -1430,7 +1500,7 @@ impl OpenCADStudio {
                 self.pid_index.opening = Some(Opening {
                     open_id,
                     drawing_id,
-                    then: Opened::Result(Box::new(result)),
+                    then: Opened::Target(Box::new(target)),
                 });
             }
             None => self

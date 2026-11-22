@@ -1147,7 +1147,7 @@ fn the_verify_panel_opens_from_the_pallet_menu_and_switches_tabs_in_the_real_vie
             iced::mouse::Button::Left,
         ));
         for (tab, says) in [
-            (Tab::Bom, "还没有生成材料清单。"),
+            (Tab::Bom, "还没有生成材料清单。点上面的按钮开始。"),
             (Tab::Deliver, "还没有快照和发布记录。"),
             (Tab::Check, "还没有检查过。点上面的按钮开始。"),
         ] {

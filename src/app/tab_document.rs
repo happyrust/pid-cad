@@ -419,6 +419,10 @@ pub(super) struct DocumentTab {
     /// What PIDCHECK last found on this drawing (`commands::piddrc`). Kept in
     /// memory only, never written into the drawing (`SPEC-pid-drc.md` §4.1).
     pub(super) pid_check: Option<super::commands::piddrc::Checked>,
+    /// The bill of materials the verify panel last made of this drawing
+    /// (`commands::pidverify`), or why it did not come out. Kept in memory
+    /// only, as the check is.
+    pub(super) pid_bom: Option<super::commands::pidverify::PanelBom>,
     /// Model-space corners of the last crossing window drawn with no command
     /// running: STRETCH on that selection stretches through it (#1068).
     pub(super) last_crossing_window: Option<([f64; 2], [f64; 2])>,
@@ -970,6 +974,7 @@ impl DocumentTab {
             transparent_resume: false,
             pid_legend: None,
             pid_check: None,
+            pid_bom: None,
             last_crossing_window: None,
             recent_colors: Vec::new(),
             layer_walk: None,

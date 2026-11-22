@@ -89,12 +89,14 @@ pub(super) enum Range {
     Pbs(String),
 }
 
-/// 扫完项目接着算的：范围，读出来的主数据（按节点算要找节点的下级），要写的文件。
+/// 扫完项目接着算的：范围，读出来的主数据（按节点算要找节点的下级），要写的文件，是不是
+/// 「校验与交付」面板要的（要的话算出来的交给面板留着）。
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct BomJob {
     range: Range,
     master: Resolved,
     export: Option<Export>,
+    panel: bool,
 }
 
 /// 清单范围里的图从哪来。
@@ -403,17 +405,37 @@ impl OpenCADStudio {
                 range,
                 master,
                 export,
+                panel: false,
             },
         )
     }
 
-    /// 扫完项目接着算（`commands::pidindex`）：在扫好的项目上算 `job` 的范围，说出来，要导出
-    /// 的写成文件。
-    pub(super) fn pidbom_scanned(&mut self, scanned: &Scanned, job: BomJob) {
+    /// 「校验与交付」面板的【全项目】（面板规格 §4.5）：同 `PIDBOM PROJECT`，定项目目录、读主数据、
+    /// 扫项目，扫完接着算，照命令在命令行上说清单或算不出来的原因（原因写成提示）；算出来的、
+    /// 算不出来的都交给面板（[`Self::pid_verify_bom_scanned`]）。图没存过、没有项目目录时是 `None`，
+    /// 什么也不做。
+    pub(super) fn pidbom_for_panel(&mut self, i: usize) -> Option<Task<Message>> {
+        let document = &self.tabs[i].scene.document;
+        let project_dir = crate::io::drawing_dir(document)?;
+        let master = master_data::resolve(document, Some(project_dir));
+        let job = BomJob {
+            range: Range::Project,
+            master,
+            export: None,
+            panel: true,
+        };
+        Some(self.pidindex_bom(i, job))
+    }
+
+    /// 扫完项目接着算（`commands::pidindex`）：在扫好的项目 `project_dir` 上算 `job` 的范围，说出来，
+    /// 要导出的写成文件；面板要的再交给面板（[`Self::pid_verify_bom_scanned`]），算不出来的原因
+    /// 写成提示——命令行上有错误，控制通道就把面板的动作答成失败。
+    pub(super) fn pidbom_scanned(&mut self, project_dir: &Path, scanned: &Scanned, job: BomJob) {
         let BomJob {
             range,
             master,
             export,
+            panel,
         } = job;
         let sheets = Sheets::Scanned {
             scanned,
@@ -421,11 +443,40 @@ impl OpenCADStudio {
             master: &master,
         };
         let outcome = self.pidbom_compute(sheets);
-        self.pidbom_done(
-            verb_of(Some(&range), export.is_some()),
-            outcome,
-            export.as_ref(),
-        );
+        let verb = verb_of(Some(&range), export.is_some());
+        if !panel {
+            self.pidbom_done(verb, outcome, export.as_ref());
+            return;
+        }
+        match &outcome {
+            Ok((bom, drawings)) => self.pidbom_say(verb, bom, *drawings),
+            Err(failure) => {
+                self.command_line.push_info(&format!("{verb}: {failure}"));
+                self.pidbom_list_failure(failure);
+            }
+        }
+        self.pid_verify_bom_scanned(project_dir, outcome);
+    }
+
+    /// 「校验与交付」面板的【导出…】（面板规格 §4.5）：把面板上的清单 `bom` 写成文件 `name`，同
+    /// `PIDBOM EXPORT`——从第 `i` 个标签页的图所在目录算起（[`export_target`]），写法同
+    /// [`write_bom`]（默认九列）。写好了是写了什么；写不了、扩展名不支持、是项目文件时是
+    /// `Err`：错误码和原因。不碰命令行。
+    pub(super) fn pidbom_write(
+        &self,
+        i: usize,
+        bom: &Bom,
+        name: &str,
+    ) -> Result<String, (Option<&'static str>, String)> {
+        let export = export_target(crate::io::drawing_dir(&self.tabs[i].scene.document), name)?;
+        match write_bom(bom, &export, None) {
+            Ok(written) => Ok(wrote(&written)),
+            Err(ExportError::Columns(error)) => Err((Some(error.code()), error.to_string())),
+            Err(ExportError::Io { path, reason }) => Err((
+                Some(BOM_IO_ERROR),
+                format!("写不了 {}：{reason}", path.display()),
+            )),
+        }
     }
 
     /// 算清单（§4）：取范围内各图的摘要，交给 `bom::build`。命令、自动化操作，以后的面板和
@@ -537,6 +588,11 @@ impl OpenCADStudio {
     fn pidbom_refuse(&mut self, verb: &str, failure: &BomFailure) {
         self.command_line
             .push_error_coded(failure.code(), &format!("{verb}: {failure}"));
+        self.pidbom_list_failure(failure);
+    }
+
+    /// 逐个列出重复的键各在哪张图的哪里、读不出来的图和原因；别的原因没有可列的。
+    fn pidbom_list_failure(&mut self, failure: &BomFailure) {
         match failure {
             BomFailure::Bom(BomError::DuplicateTag(duplicates)) => {
                 let lines: Vec<String> = duplicates
@@ -856,6 +912,11 @@ fn kind_said(kind: ObjectKind) -> &'static str {
 
 /// 写好了：主表几行写成什么文件，副表几行写在哪。
 fn written_said(verb: &str, written: &Written) -> String {
+    format!("{verb}: {}", wrote(written))
+}
+
+/// 写了什么：「已把清单（N 行）写成 CSV 文件 …，管道汇总（M 行）写成 …。」
+fn wrote(written: &Written) -> String {
     let side = written
         .pipe_summary
         .as_ref()
@@ -863,7 +924,7 @@ fn written_said(verb: &str, written: &Written) -> String {
             format!("，管道汇总（{rows} 行）写成 {}", path.display())
         });
     format!(
-        "{verb}: 已把清单（{} 行）写成 {} 文件 {}{side}。",
+        "已把清单（{} 行）写成 {} 文件 {}{side}。",
         written.rows,
         written.format.name(),
         written.path.display()
@@ -1113,7 +1174,7 @@ fn snapshot_words(text: &str) -> Option<(u64, Option<&str>)> {
 }
 
 /// 现在的 Unix 秒，清单的 `generated_at`（跟检查结果的 `checked_at` 一样算）。
-fn unix_now() -> i64 {
+pub(super) fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {

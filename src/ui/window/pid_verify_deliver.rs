@@ -15,10 +15,12 @@
 //! The texts are Chinese literals, as in the collaboration panel (§9 V2).
 
 use crate::app::Message;
+use crate::pid::bom::{self, Bom, BomRow, BomScope, PipeSummaryRow, Quantity};
 use crate::pid::drc::{
     self, CheckReport, CheckResult, Scope, ScopeKind, Severity, Summary, Waiver,
     WAIVER_REASON_LIMIT,
 };
+use crate::pid::project_index::Duplicate;
 use crate::ui::dock::{Chrome, PanelId};
 use crate::ui::wrap_bar::PosReport;
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
@@ -77,7 +79,7 @@ impl Tab {
     fn empty(self) -> &'static str {
         match self {
             Self::Check => NEVER_CHECKED,
-            Self::Bom => "还没有生成材料清单。",
+            Self::Bom => NEVER_LISTED,
             Self::Deliver => "还没有快照和发布记录。",
         }
     }
@@ -100,6 +102,21 @@ pub const GONE: &str = "对象已不在图上，结果可能过期";
 /// Widget id of the reason box under a row (§4.4): 【豁免】 puts the cursor
 /// in it.
 pub const REASON_ID: &str = "pid-verify-waiver-reason";
+
+/// What the material-list tab says instead of a table (§4.5): nothing
+/// listed yet, a bill with no rows, and every row searched away.
+pub const NEVER_LISTED: &str = "还没有生成材料清单。点上面的按钮开始。";
+pub const NOTHING_LISTED: &str = "清单里没有行：范围内没有要计入的对象。";
+pub const NONE_SEARCHED: &str = "没有符合搜索的行。";
+
+/// What the material-list tab adds under its status line while the bill
+/// shown may be out of date (§4.5).
+pub const BOM_STALE: &str = "图纸已改动，清单可能过期";
+
+/// What the material-list tab says instead of a table when tags repeat,
+/// and when drawings of the scope did not read (§4.5).
+pub const DUPLICATE_SAID: &str = "有重复位号，清单没有生成";
+pub const UNREADABLE_SAID: &str = "范围内有图读不出来，清单没有生成";
 
 /// What the user did in the panel: one message per button, tag and list
 /// header.
@@ -147,6 +164,31 @@ pub enum PidVerifyMsg {
     /// 【删除】 beside a waiver no result matches: take it off the drawing
     /// in front.
     DropWaiver { rule_id: String, object_key: String },
+    /// 【当前图】 on the material-list tab.
+    BomDrawing,
+    /// 【全项目】 on the material-list tab.
+    BomProject,
+    /// What is typed in the material list's search box.
+    BomSearch(String),
+    /// A kind's header in the material list: folded opens, open folds.
+    BomFold(String),
+    /// 【再显示 200 条】 under the material list.
+    MoreBom,
+    /// 【导出…】 under the material list: ask where to write the bill.
+    PickBomExport,
+    /// Write the bill shown to this file, as `PIDBOM EXPORT` writes a bill.
+    BomExport(String),
+    /// A row of the material list clicked: find its object (§4.5).
+    BomLocate(usize),
+    /// 「有 N 个对象没有位号」: list those objects, or fold the list.
+    BomSkipped,
+    /// One of the objects without a tag clicked: look at where it is.
+    BomSkippedLocate(usize),
+    /// One place of a tag found in more than one clicked: the index of the
+    /// repeated (type code, tag) in the list, and of the place under it.
+    BomDuplicateLocate(usize, usize),
+    /// 「管道汇总」: open it, or fold it.
+    BomSummary,
 }
 
 impl PidVerifyMsg {
@@ -213,6 +255,15 @@ pub const CHECK_DRAWING_ID: &str = "pid-verify-check-drawing";
 pub const CHECK_PROJECT_ID: &str = "pid-verify-check-project";
 pub const CHECK_ROW_PREFIX: &str = "pid-verify-check-row-";
 
+/// What the id of each row of the material list starts with, its index
+/// following (§3.4), and the `PosReport` ids of 【当前图】, 【全项目】, the
+/// search box and 【导出…】 on its tab.
+pub const BOM_ROW_PREFIX: &str = "pid-verify-bom-row-";
+pub const BOM_DRAWING_ID: &str = "pid-verify-bom-drawing";
+pub const BOM_PROJECT_ID: &str = "pid-verify-bom-project";
+pub const BOM_SEARCH_ID: &str = "pid-verify-bom-search";
+pub const BOM_EXPORT_ID: &str = "pid-verify-bom-export";
+
 /// How many rows of each list the panel state returns when the request
 /// does not say (`limit`, §3.2), and how many rows each group of the
 /// rule-check list draws before 【再显示 200 条】 (§4.2).
@@ -243,6 +294,20 @@ pub struct VerifyUi {
     pub waiving: Option<Waiving>,
     /// Whether the waivers no result matches are listed.
     pub stale_open: bool,
+    /// What is typed in the material list's search box (§4.5).
+    pub bom_search: String,
+    /// The kinds whose groups of the material list are folded shut.
+    pub bom_folded: Vec<String>,
+    /// How many times 【再显示 200 条】 was pressed under the material list
+    /// since its search last changed.
+    pub bom_more: usize,
+    /// The row of the material list last clicked: the serial of the bill it
+    /// is a row of, and its index in that bill's rows.
+    pub bom_located: Option<(u64, usize)>,
+    /// Whether the objects left out for having no tag are listed.
+    pub skipped_open: bool,
+    /// Whether 「管道汇总」 is open.
+    pub summary_open: bool,
 }
 
 impl Default for VerifyUi {
@@ -258,6 +323,12 @@ impl Default for VerifyUi {
             located: None,
             waiving: None,
             stale_open: false,
+            bom_search: String::new(),
+            bom_folded: Vec::new(),
+            bom_more: 0,
+            bom_located: None,
+            skipped_open: false,
+            summary_open: false,
         }
     }
 }
@@ -345,18 +416,59 @@ pub struct KeptCheck<'a> {
     pub stale: bool,
 }
 
+/// Why a bill of materials did not come out, kept in its place to be
+/// listed (§4.5): the code and what it says, the (type code, tag) pairs
+/// found in more than one place (`BOM_DUPLICATE_TAG`), and the drawings of
+/// the scope that did not read (`BOM_SCOPE_INCOMPLETE`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BomFailed {
+    pub code: String,
+    pub text: String,
+    pub duplicates: Vec<Duplicate>,
+    pub unreadable: Vec<Unreadable>,
+}
+
+/// A drawing of the scope that did not read: its number, its file and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unreadable {
+    pub drawing_id: String,
+    pub file: Option<String>,
+    pub why: String,
+}
+
+/// A bill of materials the program keeps for the panel (§3.1), or why it
+/// did not come out, lent to [`build_view`].
+#[derive(Debug, Clone, Copy)]
+pub struct KeptBom<'a> {
+    pub outcome: Result<&'a Bom, &'a BomFailed>,
+    /// What it covers: the bill's own scope, or the one asked for when it
+    /// did not come out.
+    pub scope: &'a BomScope,
+    /// How many drawings it read.
+    pub drawings: usize,
+    /// When it was made, Unix seconds.
+    pub made_at: i64,
+    /// Which bill of the program's it was: of two, the one with the larger
+    /// serial is the newer.
+    pub serial: u64,
+    /// Whether a drawing it read changed since (§3.1).
+    pub stale: bool,
+}
+
 /// The results kept with the drawing in front, on its tab (§3.1, §5.1):
-/// its own rule check so far.
+/// its own rule check and bill of materials so far.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DrawingResults<'a> {
     pub check: Option<KeptCheck<'a>>,
+    pub bom: Option<KeptBom<'a>>,
 }
 
 /// The results kept for the folder that drawing is in (§3.1, §5.1): the
-/// project's or a PBS node's rule check so far.
+/// project's or a PBS node's rule check and bill of materials so far.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProjectResults<'a> {
     pub check: Option<KeptCheck<'a>>,
+    pub bom: Option<KeptBom<'a>>,
 }
 
 /// Whether each of the panel's buttons can be pressed now (§3.2, §4.8).
@@ -509,9 +621,123 @@ impl RowView {
     }
 }
 
+/// The material-list tab worked out (§4.5), which its block of the panel
+/// state reads (§3.2 `bom`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BomView {
+    /// The bill shown — the newer of the drawing's and its project's — or
+    /// why it did not come out; `None` before either.
+    pub shown: Option<BomShown>,
+    /// What is typed in the search box.
+    pub search: String,
+}
+
+/// What the material-list tab shows of the bill it shows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BomShown {
+    /// Whether a drawing it read changed since.
+    pub stale: bool,
+    pub scope: bom::ScopeKind,
+    /// The status line's words for the scope, as the command line says
+    /// them: 「图 PID-1101」「全项目 2 张图」「PBS 节点 U-100 1 张图」.
+    pub scope_said: String,
+    /// When it was made, Unix seconds.
+    pub made_at: i64,
+    /// Which bill of the program's it is ([`KeptBom::serial`]).
+    pub serial: u64,
+    /// The table, or why there is none.
+    pub table: Result<BomTable, BomFailed>,
+}
+
+/// The table of a bill that came out (§4.5).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BomTable {
+    /// The rows of the whole bill, whatever the search: the total at the
+    /// bottom.
+    pub total: usize,
+    /// Its rows of each kind, in its order, kinds without rows left out.
+    pub by_kind: Vec<(&'static str, usize)>,
+    pub notices: Vec<bom::Notice>,
+    /// The objects left out for having no tag.
+    pub skipped: Vec<SkippedView>,
+    /// Whether they are listed.
+    pub skipped_open: bool,
+    /// The groups with rows the search leaves, in the bill's kind order.
+    pub groups: Vec<BomGroup>,
+    /// Every row the search leaves, group after group, folded groups'
+    /// included.
+    pub rows: Vec<BomRowView>,
+    /// The side table: pipe length by (pipe class, nominal diameter,
+    /// insulation class).
+    pub pipe_summary: Vec<PipeSummaryRow>,
+    /// Whether 「管道汇总」 is open.
+    pub summary_open: bool,
+    /// Whether the rows name the drawings they are on: they do in the
+    /// project's and a node's bills.
+    pub across: bool,
+    /// The index of the row last clicked, while this bill is shown.
+    pub located: Option<usize>,
+}
+
+/// One group of the material list: the rows of one kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BomGroup {
+    pub kind: &'static str,
+    /// Its rows the search leaves: the header's count.
+    pub count: usize,
+    /// Where its rows start in [`BomTable::rows`].
+    pub first: usize,
+    /// How many of them are drawn: none while folded, else 200 and 200 more
+    /// for each 【再显示 200 条】.
+    pub drawn: usize,
+    pub folded: bool,
+}
+
+impl BomGroup {
+    /// Whether 【再显示 200 条】 is drawn under it.
+    pub fn has_more(&self) -> bool {
+        !self.folded && self.drawn < self.count
+    }
+}
+
+/// One row of the material list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BomRowView {
+    /// Where the row is in the bill's `rows[]`: what the panel's actions
+    /// name it by.
+    pub index: usize,
+    pub row: BomRow,
+    /// Whether it is the row last clicked.
+    pub located: bool,
+}
+
+impl BomRowView {
+    /// The quantity and its unit: metres to two places, counts whole.
+    pub fn quantity(&self) -> String {
+        match self.row.quantity {
+            Quantity::Length(metres) => format!("{metres:.2} {}", self.row.unit),
+            Quantity::Count(count) => format!("{count} {}", self.row.unit),
+        }
+    }
+
+    /// The row's `PosReport` id (§3.4).
+    pub fn bounds_id(&self) -> String {
+        format!("{BOM_ROW_PREFIX}{}", self.index)
+    }
+}
+
+/// An object left out of the bill for having no tag (§4.5).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkippedView {
+    pub kind: &'static str,
+    pub type_code: String,
+    pub drawing_id: String,
+    pub at: [f64; 2],
+}
+
 /// What the panel draws, worked out by [`build_view`]: plain data, so the
 /// interface can report it and a test can compare it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VerifyView {
     /// The tab in front.
     pub tab: Tab,
@@ -534,6 +760,8 @@ pub struct VerifyView {
     pub notice: Option<Notice>,
     /// The rule-check tab.
     pub check: CheckView,
+    /// The material-list tab.
+    pub bom: BomView,
 }
 
 impl Default for VerifyView {
@@ -555,11 +783,19 @@ pub fn build_view(
     let kept = newer(
         drawing.and_then(|results| results.check),
         project.and_then(|results| results.check),
+        |kept| kept.serial,
     );
     let check = check_view(ui, kept, context);
+    let kept = newer(
+        drawing.and_then(|results| results.bom),
+        project.and_then(|results| results.bom),
+        |kept| kept.serial,
+    );
+    let bom = bom_view(ui, kept);
     let empty = match ui.tab {
         Tab::Check => check_empty(&check),
-        tab => Some(tab.empty()),
+        Tab::Bom => bom_empty(&bom),
+        Tab::Deliver => Some(Tab::Deliver.empty()),
     };
     VerifyView {
         tab: ui.tab,
@@ -569,33 +805,37 @@ pub fn build_view(
         drawing_id: context.drawing_id.clone(),
         writable: context.writable,
         busy: context.busy,
-        buttons: buttons(context, &check),
+        buttons: buttons(context, &check, &bom),
         notice: ui.notice.clone(),
         check,
+        bom,
     }
 }
 
-/// Of the drawing's check and its project's, the newer (§3.1).
-fn newer<'a>(
-    drawing: Option<KeptCheck<'a>>,
-    project: Option<KeptCheck<'a>>,
-) -> Option<KeptCheck<'a>> {
+/// Of the drawing's result and its project's, the newer by `serial`
+/// (§3.1).
+fn newer<T>(drawing: Option<T>, project: Option<T>, serial: impl Fn(&T) -> u64) -> Option<T> {
     match (drawing, project) {
-        (Some(drawing), Some(project)) if project.serial > drawing.serial => Some(project),
+        (Some(drawing), Some(project)) if serial(&project) > serial(&drawing) => Some(project),
         (Some(drawing), _) => Some(drawing),
         (None, project) => project,
     }
 }
 
-/// Which buttons can be pressed (§4.8). Checking needs a drawing in front,
-/// checking its project a saved one, and neither starts while something
-/// runs; exporting needs a result shown, whatever runs.
-fn buttons(context: &Context, check: &CheckView) -> Buttons {
-    let drawing = context.document_id.is_some();
+/// Which buttons can be pressed (§4.8). Checking and listing need a drawing
+/// in front, the project's a saved one, and none of them starts while
+/// something runs; exporting needs a result shown, whatever runs — of a
+/// bill, one that came out.
+fn buttons(context: &Context, check: &CheckView, bom: &BomView) -> Buttons {
+    let drawing = context.document_id.is_some() && !context.busy;
+    let project = drawing && context.saved;
     Buttons {
-        check_drawing: drawing && !context.busy,
-        check_project: drawing && context.saved && !context.busy,
+        check_drawing: drawing,
+        check_project: project,
         check_export: check.shown.is_some(),
+        bom_drawing: drawing,
+        bom_project: project,
+        bom_export: bom.shown.as_ref().is_some_and(|shown| shown.table.is_ok()),
         ..Buttons::default()
     }
 }
@@ -712,6 +952,142 @@ fn check_empty(check: &CheckView) -> Option<&'static str> {
     }
 }
 
+/// The material-list tab of `kept` under the search and the folds of `ui`
+/// (§4.5).
+fn bom_view(ui: &VerifyUi, kept: Option<KeptBom<'_>>) -> BomView {
+    BomView {
+        shown: kept.map(|kept| BomShown {
+            stale: kept.stale,
+            scope: kept.scope.kind,
+            scope_said: bom_scope_said(kept.scope, kept.drawings),
+            made_at: kept.made_at,
+            serial: kept.serial,
+            table: kept
+                .outcome
+                .map(|bill| bom_table(ui, bill, kept.serial))
+                .map_err(BomFailed::clone),
+        }),
+        search: ui.bom_search.clone(),
+    }
+}
+
+/// The table of `bill` under the search and the folds of `ui`: the rows of
+/// each kind the search leaves, a group per kind in the bill's own kind
+/// order, while the totals are the whole bill's.
+fn bom_table(ui: &VerifyUi, bill: &Bom, serial: u64) -> BomTable {
+    let search = ui.bom_search.to_lowercase();
+    let drawn = ROWS_PER_PAGE.saturating_mul(ui.bom_more.saturating_add(1));
+    let located = ui
+        .bom_located
+        .filter(|(clicked, _)| *clicked == serial)
+        .map(|(_, index)| index);
+    let by_kind = kinds_counted(&bill.rows);
+    let mut groups = Vec::new();
+    let mut rows = Vec::new();
+    for &(kind, _) in &by_kind {
+        let first = rows.len();
+        rows.extend(
+            bill.rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| bom::kind_label(row.kind) == kind && search_finds(row, &search))
+                .map(|(index, row)| BomRowView {
+                    index,
+                    row: row.clone(),
+                    located: located == Some(index),
+                }),
+        );
+        let count = rows.len() - first;
+        if count == 0 {
+            continue;
+        }
+        let folded = ui.bom_folded.iter().any(|folded| folded == kind);
+        groups.push(BomGroup {
+            kind,
+            count,
+            first,
+            drawn: if folded { 0 } else { count.min(drawn) },
+            folded,
+        });
+    }
+    BomTable {
+        total: bill.rows.len(),
+        by_kind,
+        notices: bill.notices.clone(),
+        skipped: bill
+            .skipped
+            .iter()
+            .map(|skipped| SkippedView {
+                kind: bom::kind_label(skipped.kind),
+                type_code: skipped.type_code.clone(),
+                drawing_id: skipped.drawing_id.clone(),
+                at: skipped.at,
+            })
+            .collect(),
+        skipped_open: ui.skipped_open,
+        groups,
+        rows,
+        pipe_summary: bill.pipe_summary.clone(),
+        summary_open: ui.summary_open,
+        across: bill.scope.kind != bom::ScopeKind::Drawing,
+        located,
+    }
+}
+
+/// Whether the lower-cased `search` is in the row's tag, name, spec or type
+/// code, in any case (§4.5). An empty search finds every row.
+fn search_finds(row: &BomRow, search: &str) -> bool {
+    [&row.tag, &row.name, &row.spec, &row.type_code]
+        .into_iter()
+        .any(|column| column.to_lowercase().contains(search))
+}
+
+/// How many of `rows` are of each kind, in the order the kinds first come,
+/// as `totals.by_kind` counts them.
+fn kinds_counted(rows: &[BomRow]) -> Vec<(&'static str, usize)> {
+    let mut counted: Vec<(&'static str, usize)> = Vec::new();
+    for kind in rows.iter().map(|row| bom::kind_label(row.kind)) {
+        match counted.iter_mut().find(|(known, _)| *known == kind) {
+            Some((_, count)) => *count += 1,
+            None => counted.push((kind, 1)),
+        }
+    }
+    counted
+}
+
+/// What a bill covers, as the command line says it: the drawing, or the
+/// project or the node and how many drawings it read — when that is known.
+fn bom_scope_said(scope: &BomScope, drawings: usize) -> String {
+    let read = if drawings == 0 {
+        String::new()
+    } else {
+        format!(" {drawings} 张图")
+    };
+    match scope.kind {
+        bom::ScopeKind::Drawing => match scope.drawing_id.as_deref() {
+            Some(id) if !id.is_empty() => format!("图 {id}"),
+            _ => "当前图".to_owned(),
+        },
+        bom::ScopeKind::Pbs => format!(
+            "PBS 节点 {}{read}",
+            scope.pbs.as_deref().unwrap_or_default()
+        ),
+        bom::ScopeKind::Project => format!("全项目{read}"),
+    }
+}
+
+/// What the material-list tab says instead of a table (§4.5). A bill that
+/// did not come out has none: what stopped it is listed instead.
+fn bom_empty(bom: &BomView) -> Option<&'static str> {
+    match bom.shown.as_ref().map(|shown| &shown.table) {
+        None => Some(NEVER_LISTED),
+        Some(Err(_)) => None,
+        Some(Ok(table)) if table.total == 0 => Some(NOTHING_LISTED),
+        Some(Ok(table)) if table.rows.is_empty() => Some(NONE_SEARCHED),
+        Some(Ok(_)) => None,
+    }
+}
+
 /// The row of the result at `index`. It can be waived where the session may
 /// write, the object is on the drawing in front and it is not waived
 /// already, and unwaived on the same terms once it is (§4.8).
@@ -820,7 +1196,7 @@ pub fn panel_state(view: &VerifyView, limit: usize, offset: usize) -> Value {
         "notice": view.notice.as_ref().map(Notice::state),
         "buttons": view.buttons,
         "check": paged(check_state(&view.check), limit, offset),
-        "bom": paged(no_bom(), limit, offset),
+        "bom": paged(bom_state(&view.bom), limit, offset),
         "deliver": {"snapshots": [], "picked": [], "diff": null, "publish": null}
     })
 }
@@ -899,18 +1275,67 @@ fn scope_key(kind: ScopeKind) -> &'static str {
     }
 }
 
-/// The `bom` block before any bill of materials is made.
-fn no_bom() -> Value {
+/// The `bom` block (§3.2), read off the material-list tab as worked out:
+/// `rows` are all the search leaves, folded groups' included, each as the
+/// bill's `rows[]` writes it with its index. A bill that did not come out
+/// says why in `error`, with no rows.
+fn bom_state(bom: &BomView) -> Value {
+    let Some(shown) = &bom.shown else {
+        return json!({
+            "has_result": false,
+            "stale": false,
+            "scope": null,
+            "search": bom.search,
+            "error": null,
+            "total": 0,
+            "groups": [],
+            "rows": []
+        });
+    };
+    let (error, groups, rows): (Value, Vec<Value>, Vec<Value>) = match &shown.table {
+        Ok(table) => (
+            Value::Null,
+            table
+                .groups
+                .iter()
+                .map(|group| {
+                    json!({ "kind": group.kind, "rows": group.count, "collapsed": group.folded })
+                })
+                .collect(),
+            table.rows.iter().map(bom_row_state).collect(),
+        ),
+        Err(failed) => (
+            json!({ "code": failed.code, "text": failed.text, "duplicates": failed.duplicates }),
+            Vec::new(),
+            Vec::new(),
+        ),
+    };
     json!({
-        "has_result": false,
-        "stale": false,
-        "scope": null,
-        "search": "",
-        "error": null,
-        "total": 0,
-        "groups": [],
-        "rows": []
+        "has_result": true,
+        "stale": shown.stale,
+        "scope": bom_scope_key(shown.scope),
+        "search": bom.search,
+        "error": error,
+        "total": rows.len(),
+        "groups": groups,
+        "rows": rows
     })
+}
+
+/// One row as `bom.rows[]` gives it (§3.2): the bill's row and its index.
+fn bom_row_state(row: &BomRowView) -> Value {
+    let mut state = serde_json::to_value(&row.row).unwrap_or_default();
+    state["index"] = json!(row.index);
+    state
+}
+
+/// The scope as `bom.scope` names it.
+fn bom_scope_key(kind: bom::ScopeKind) -> &'static str {
+    match kind {
+        bom::ScopeKind::Drawing => "drawing",
+        bom::ScopeKind::Pbs => "pbs",
+        bom::ScopeKind::Project => "project",
+    }
 }
 
 /// `block` with its `rows` cut to `limit` of them from `offset` on.
@@ -987,6 +1412,15 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
             reason: "no_result",
         })
     };
+    let listed = || {
+        view.bom
+            .shown
+            .as_ref()
+            .and_then(|shown| shown.table.as_ref().ok())
+            .ok_or(PanelError::Unavailable {
+                reason: "no_result",
+            })
+    };
     match key {
         "show" | "hide" if written.is_some() => Err(PanelError::InvalidValue(format!(
             "{key} 不带值，实得 \"{value}\""
@@ -1001,10 +1435,13 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
                 ))
             })
         }
-        "check" => {
-            let (pressed, pressable) = match written {
-                Some("drawing") => (PidVerifyMsg::CheckDrawing, view.buttons.check_drawing),
-                Some("project") => (PidVerifyMsg::CheckProject, view.buttons.check_project),
+        "check" | "bom" => {
+            let buttons = view.buttons;
+            let (pressed, pressable) = match (key, written) {
+                ("check", Some("drawing")) => (PidVerifyMsg::CheckDrawing, buttons.check_drawing),
+                ("check", Some("project")) => (PidVerifyMsg::CheckProject, buttons.check_project),
+                (_, Some("drawing")) => (PidVerifyMsg::BomDrawing, buttons.bom_drawing),
+                (_, Some("project")) => (PidVerifyMsg::BomProject, buttons.bom_project),
                 _ => return Err(invalid(" drawing 或 project")),
             };
             if pressable {
@@ -1057,12 +1494,48 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
             checked()?;
             Ok(PidVerifyMsg::Export(path.to_owned()))
         }
-        "more" => {
-            if written != Some("check") {
-                return Err(invalid(" check（规则检查的列表再显示 200 条）"));
+        "more" => match written {
+            Some("check") => checked().map(|_| PidVerifyMsg::MoreChecks),
+            Some("bom") => listed().map(|_| PidVerifyMsg::MoreBom),
+            _ => Err(invalid(" check 或 bom（那个列表再显示 200 条）")),
+        },
+        "bom_search" => {
+            let search = written
+                .ok_or_else(|| invalid("成 bom_search=<文字>，或者 bom_search= 清掉搜索"))?;
+            listed()?;
+            Ok(PidVerifyMsg::BomSearch(search.to_owned()))
+        }
+        "bom_group" => {
+            let kind = written
+                .filter(|kind| !kind.is_empty())
+                .ok_or_else(|| invalid("成 bom_group=<种类>"))?;
+            let kinds: Vec<&str> = listed()?.by_kind.iter().map(|(known, _)| *known).collect();
+            if !kinds.contains(&kind) {
+                return Err(PanelError::InvalidValue(format!(
+                    "清单里没有种类「{kind}」的组；有的是：{}",
+                    kinds.join("、")
+                )));
             }
-            checked()?;
-            Ok(PidVerifyMsg::MoreChecks)
+            Ok(PidVerifyMsg::BomFold(kind.to_owned()))
+        }
+        "bom_locate" => {
+            let index = written
+                .and_then(|number| number.trim().parse::<usize>().ok())
+                .ok_or_else(|| invalid("成 bom_locate=<下标>"))?;
+            if !listed()?.rows.iter().any(|row| row.index == index) {
+                return Err(PanelError::RowNotFound(format!(
+                    "材料清单的列表里现在没有下标 {index} 的一行（搜索筛掉的不在列表里）"
+                )));
+            }
+            Ok(PidVerifyMsg::BomLocate(index))
+        }
+        "bom_export" => {
+            let path = written
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| invalid("成 bom_export=<文件>"))?;
+            listed()?;
+            Ok(PidVerifyMsg::BomExport(path.to_owned()))
         }
         "locate" | "waive" | "unwaive" => {
             let form = match key {
@@ -1150,7 +1623,8 @@ pub fn view<'a>(view: &'a VerifyView, width: f32, chrome: Chrome) -> Element<'a,
     }
     let content = match view.tab {
         Tab::Check => check_tab(view),
-        Tab::Bom | Tab::Deliver => empty_text(view.empty.unwrap_or_default()),
+        Tab::Bom => bom_tab(view),
+        Tab::Deliver => empty_text(view.empty.unwrap_or_default()),
     };
     let body = column![tabs, content].spacing(6).height(Fill);
     let reported = PosReport::new(PANEL_BOUNDS_ID, body);
@@ -1433,9 +1907,317 @@ fn result_row(row: &RowView) -> Element<'_, Message> {
         .into()
 }
 
+/// The material-list tab (§4.5): its buttons and the message bar, the
+/// status line, then the bill shown — the search box, the notices, the list
+/// and 「管道汇总」, with the totals and 【导出…】 under them — or what
+/// stopped it, or what the tab says instead.
+fn bom_tab(view: &VerifyView) -> Element<'_, Message> {
+    let buttons = view.buttons;
+    let actions = row![
+        PosReport::new(
+            BOM_DRAWING_ID,
+            small_button(
+                "当前图",
+                buttons.bom_drawing.then_some(PidVerifyMsg::BomDrawing)
+            ),
+        ),
+        PosReport::new(
+            BOM_PROJECT_ID,
+            small_button(
+                "全项目",
+                buttons.bom_project.then_some(PidVerifyMsg::BomProject)
+            ),
+        ),
+    ]
+    .spacing(4);
+    let mut tab = column![actions].spacing(6).height(Fill);
+    if let Some(notice) = &view.notice {
+        tab = tab.push(notice_line(notice));
+    }
+    let Some(shown) = &view.bom.shown else {
+        return tab
+            .push(empty_text(view.empty.unwrap_or(NEVER_LISTED)))
+            .into();
+    };
+    tab = tab.push(text(bom_status_line(shown)).size(11).style(muted));
+    if shown.stale {
+        tab = tab.push(text(BOM_STALE).size(11).style(warning));
+    }
+    let table = match &shown.table {
+        Ok(table) => table,
+        Err(failed) => {
+            return tab
+                .push(scrollable(bom_failure(failed)).height(Fill))
+                .into()
+        }
+    };
+    tab = tab.push(PosReport::new(
+        BOM_SEARCH_ID,
+        text_input("搜索位号、名称、规格、类型编码", &view.bom.search)
+            .on_input(|typed| PidVerifyMsg::BomSearch(typed).message())
+            .size(12)
+            .padding([3, 6])
+            .width(Fill),
+    ));
+    for notice in &table.notices {
+        tab = tab.push(text(notice.message.as_str()).size(11).style(muted));
+    }
+    let mut body = column![].spacing(4).width(Fill);
+    if !table.skipped.is_empty() {
+        body = body.push(skipped_list(table));
+    }
+    body = match view.empty {
+        Some(said) => body.push(text(said).size(12).style(muted)),
+        None => body.push(bom_list(table)),
+    };
+    if !table.pipe_summary.is_empty() {
+        body = body.push(pipe_summary(table));
+    }
+    let bottom = row![
+        text(bom_totals(table)).size(11).style(muted).width(Fill),
+        PosReport::new(
+            BOM_EXPORT_ID,
+            small_button(
+                "导出…",
+                buttons.bom_export.then_some(PidVerifyMsg::PickBomExport)
+            ),
+        ),
+    ]
+    .spacing(4)
+    .align_y(iced::Center);
+    tab.push(scrollable(body).height(Fill)).push(bottom).into()
+}
+
+/// The status line (§4.5): scope, when, how many rows.
+fn bom_status_line(shown: &BomShown) -> String {
+    let rows = match &shown.table {
+        Ok(table) => format!("{} 行", table.total),
+        Err(_) => "没有生成".to_owned(),
+    };
+    format!(
+        "{} · {} · {rows}",
+        shown.scope_said,
+        utc_said(shown.made_at)
+    )
+}
+
+/// What stopped the bill, in place of its table (§4.5): the tags found in
+/// more than one place, each place clicked to look at it, or the drawings
+/// of the scope that did not read and why.
+fn bom_failure(failed: &BomFailed) -> Element<'_, Message> {
+    let said = if failed.code == bom::BOM_DUPLICATE_TAG {
+        DUPLICATE_SAID
+    } else {
+        UNREADABLE_SAID
+    };
+    let mut list = column![text(said).size(12).style(danger)]
+        .spacing(2)
+        .width(Fill);
+    for (repeated, duplicate) in failed.duplicates.iter().enumerate() {
+        list = list.push(
+            text(format!(
+                "{} {}（{} 处）",
+                duplicate.type_code,
+                duplicate.tag,
+                duplicate.places.len()
+            ))
+            .size(12),
+        );
+        for (at, place) in duplicate.places.iter().enumerate() {
+            list = list.push(place_button(
+                format!("{} · {}", place.drawing_id, point_said(place.at)),
+                PidVerifyMsg::BomDuplicateLocate(repeated, at),
+            ));
+        }
+    }
+    for drawing in &failed.unreadable {
+        let file = drawing
+            .file
+            .as_deref()
+            .map(|file| format!("（{file}）"))
+            .unwrap_or_default();
+        list = list.push(
+            text(format!("{}{file}：{}", drawing.drawing_id, drawing.why))
+                .size(11)
+                .style(muted),
+        );
+    }
+    list.into()
+}
+
+/// 「有 N 个对象没有位号，没有计入」, which lists them or folds the list;
+/// each listed is clicked to look at where it is.
+fn skipped_list(table: &BomTable) -> Element<'_, Message> {
+    let arrow = if table.skipped_open { "▼" } else { "▶" };
+    let header = button(
+        text(format!(
+            "{arrow} 有 {} 个对象没有位号，没有计入",
+            table.skipped.len()
+        ))
+        .size(11)
+        .style(warning),
+    )
+    .on_press(PidVerifyMsg::BomSkipped.message())
+    .padding([2, 4])
+    .style(button::text);
+    let mut list = column![header].spacing(2);
+    if !table.skipped_open {
+        return list.into();
+    }
+    for (at, skipped) in table.skipped.iter().enumerate() {
+        list = list.push(place_button(
+            format!(
+                "{} {} · {} · {}",
+                skipped.kind,
+                skipped.type_code,
+                skipped.drawing_id,
+                point_said(skipped.at)
+            ),
+            PidVerifyMsg::BomSkippedLocate(at),
+        ));
+    }
+    list.into()
+}
+
+/// A place to look at, under what it is a place of, clicked like a row.
+fn place_button<'a>(label: String, press: PidVerifyMsg) -> Element<'a, Message> {
+    button(text(label).size(11))
+        .on_press(press.message())
+        .padding([1, 16])
+        .style(button::text)
+        .into()
+}
+
+/// A point on the drawing, to the drawing unit.
+fn point_said(at: [f64; 2]) -> String {
+    format!("({:.0}, {:.0})", at[0], at[1])
+}
+
+/// The list (§4.5): each kind's header, which folds it, its rows drawn, and
+/// 【再显示 200 条】 while it has more.
+fn bom_list(table: &BomTable) -> Element<'_, Message> {
+    let mut list = column![].spacing(4).width(Fill);
+    for group in &table.groups {
+        let arrow = if group.folded { "▶" } else { "▼" };
+        list = list.push(
+            button(text(format!("{arrow} {}（{}）", group.kind, group.count)).size(12))
+                .on_press(PidVerifyMsg::BomFold(group.kind.to_owned()).message())
+                .padding([2, 4])
+                .style(button::text),
+        );
+        for row in &table.rows[group.first..group.first + group.drawn] {
+            list = list.push(PosReport::owned(
+                row.bounds_id(),
+                bill_row(row, table.across),
+            ));
+        }
+        if group.has_more() {
+            list = list.push(small_button("再显示 200 条", Some(PidVerifyMsg::MoreBom)));
+        }
+    }
+    list.into()
+}
+
+/// One row (§4.5): tag, name and quantity, and under it in a lighter colour
+/// the spec, with the drawings it is on in a bill of more than one drawing.
+/// Clicking it finds its object.
+fn bill_row(row: &BomRowView, across: bool) -> Element<'_, Message> {
+    let first = row![
+        text(format!("{} {}", row.row.tag, row.row.name))
+            .size(12)
+            .width(Fill),
+        text(row.quantity()).size(12)
+    ]
+    .spacing(8);
+    let mut second = row.row.spec.clone();
+    if across {
+        let drawings = row.row.drawings.join("、");
+        second = if second.is_empty() {
+            drawings
+        } else {
+            format!("{second} · {drawings}")
+        };
+    }
+    let mut lines = column![first].spacing(1);
+    if !second.is_empty() {
+        lines = lines.push(text(second).size(11).style(muted));
+    }
+    let located = row.located;
+    button(lines)
+        .on_press(PidVerifyMsg::BomLocate(row.index).message())
+        .padding([2, 8])
+        .width(Fill)
+        .style(move |theme: &Theme, status| {
+            if located {
+                button::secondary(theme, status)
+            } else {
+                button::text(theme, status)
+            }
+        })
+        .into()
+}
+
+/// 「管道汇总」 (§4.5), which opens or folds the bill's side table: pipe
+/// length by pipe class, nominal diameter and insulation class, and the
+/// lines of each.
+fn pipe_summary(table: &BomTable) -> Element<'_, Message> {
+    let arrow = if table.summary_open { "▼" } else { "▶" };
+    let header = button(text(format!("{arrow} 管道汇总（{}）", table.pipe_summary.len())).size(12))
+        .on_press(PidVerifyMsg::BomSummary.message())
+        .padding([2, 4])
+        .style(button::text);
+    let mut list = column![header].spacing(2);
+    if !table.summary_open {
+        return list.into();
+    }
+    for summed in &table.pipe_summary {
+        let class = [
+            &summed.pipe_class,
+            &summed.nominal_diameter,
+            &summed.insulation_class,
+        ]
+        .map(|said| {
+            if said.is_empty() {
+                "—"
+            } else {
+                said.as_str()
+            }
+        })
+        .join(" / ");
+        list = list.push(
+            column![
+                row![
+                    text(class).size(12).width(Fill),
+                    text(format!("{:.2} {}", summed.length, summed.unit)).size(12)
+                ]
+                .spacing(8),
+                text(summed.lines.join("、")).size(11).style(muted)
+            ]
+            .spacing(1)
+            .padding([2, 8]),
+        );
+    }
+    list.into()
+}
+
+/// The totals at the bottom (§4.5): the whole bill's rows, by kind.
+fn bom_totals(table: &BomTable) -> String {
+    let by_kind: Vec<String> = table
+        .by_kind
+        .iter()
+        .map(|(kind, count)| format!("{kind} {count}"))
+        .collect();
+    if by_kind.is_empty() {
+        format!("合计 {} 行", table.total)
+    } else {
+        format!("合计 {} 行：{}", table.total, by_kind.join("，"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pid::project_index::ObjectKind;
 
     #[test]
     fn the_panel_starts_on_the_rule_check_tab() {
@@ -1461,7 +2243,7 @@ mod tests {
             drawn,
             [
                 (Tab::Check, Some("还没有检查过。点上面的按钮开始。")),
-                (Tab::Bom, Some("还没有生成材料清单。")),
+                (Tab::Bom, Some(NEVER_LISTED)),
                 (Tab::Deliver, Some("还没有快照和发布记录。")),
             ]
         );
@@ -1551,8 +2333,9 @@ mod tests {
         assert_eq!(state["writable"], false);
         assert_eq!(state["busy"], Value::Null);
         assert_eq!(state["notice"], Value::Null);
-        // Only 【检查当前图】 can be pressed: the drawing was never saved,
-        // nothing is checked yet and the other tabs have no buttons yet.
+        // Only 【检查当前图】 and 【当前图】 can be pressed: the drawing was
+        // never saved, nothing is checked or listed yet and the last tab has
+        // no buttons yet.
         let mut buttons: Vec<(&str, Option<bool>)> = state["buttons"]
             .as_object()
             .map(|named| {
@@ -1579,7 +2362,7 @@ mod tests {
         names.sort_unstable();
         let expected: Vec<(&str, Option<bool>)> = names
             .into_iter()
-            .map(|name| (name, Some(name == "check_drawing")))
+            .map(|name| (name, Some(matches!(name, "check_drawing" | "bom_drawing"))))
             .collect();
         assert_eq!(buttons, expected, "{state}");
         // Nothing checked, listed or kept yet.
@@ -1818,6 +2601,7 @@ mod tests {
     /// What the panel draws with `report` kept on the drawing in front.
     fn viewed(ui: &VerifyUi, report: &CheckReport) -> VerifyView {
         let drawing = DrawingResults {
+            bom: None,
             check: Some(KeptCheck {
                 report,
                 serial: 1,
@@ -1952,6 +2736,7 @@ mod tests {
             ],
         );
         let kept = ProjectResults {
+            bom: None,
             check: Some(KeptCheck {
                 report: &project,
                 serial: 1,
@@ -1994,6 +2779,7 @@ mod tests {
         );
         let shown = |drawing: u64, project: u64| {
             let drawing = DrawingResults {
+                bom: None,
                 check: Some(KeptCheck {
                     report: &mine,
                     serial: drawing,
@@ -2001,6 +2787,7 @@ mod tests {
                 }),
             };
             let project = ProjectResults {
+                bom: None,
                 check: Some(KeptCheck {
                     report: &theirs,
                     serial: project,
@@ -2020,6 +2807,7 @@ mod tests {
         assert_eq!(shown(6, 5), (ScopeKind::Drawing, false, 1));
         // With one kept, that one; with none, none.
         let project = ProjectResults {
+            bom: None,
             check: Some(KeptCheck {
                 report: &theirs,
                 serial: 1,
@@ -2149,7 +2937,7 @@ mod tests {
             tab: Tab::Bom,
             ..VerifyUi::default()
         };
-        assert_eq!(viewed(&bom, &five).empty, Some("还没有生成材料清单。"));
+        assert_eq!(viewed(&bom, &five).empty, Some(NEVER_LISTED));
     }
 
     /// Whether 【检查当前图】【检查全项目】【导出…】 can be pressed.
@@ -2166,6 +2954,7 @@ mod tests {
     fn the_rule_check_buttons_are_grey_as_section_4_8_says() {
         let five = five();
         let kept = DrawingResults {
+            bom: None,
             check: Some(KeptCheck {
                 report: &five,
                 serial: 1,
@@ -2195,13 +2984,17 @@ mod tests {
         assert_eq!(pressable(&read_only, Some(&kept)), (true, true, true));
         // The Start page has no drawing to check.
         assert_eq!(pressable(&Context::default(), None), (false, false, false));
-        // The other tabs bring their own buttons.
+        // The material list's buttons are tested with it, and the last tab
+        // brings its own.
         let buttons = build_view(&VerifyUi::default(), Some(&kept), None, &in_front()).buttons;
         assert_eq!(
             Buttons {
                 check_drawing: false,
                 check_project: false,
                 check_export: false,
+                bom_drawing: false,
+                bom_project: false,
+                bom_export: false,
                 ..buttons
             },
             Buttons::default()
@@ -2225,6 +3018,7 @@ mod tests {
             ],
         );
         let kept = ProjectResults {
+            bom: None,
             check: Some(KeptCheck {
                 report: &project,
                 serial: 1,
@@ -2273,6 +3067,7 @@ mod tests {
             ..VerifyUi::default()
         };
         let kept = DrawingResults {
+            bom: None,
             check: Some(KeptCheck {
                 report: &five,
                 serial: 3,
@@ -2353,6 +3148,7 @@ mod tests {
     fn pid_verify_action_refuses_a_grey_rule_check_button_with_the_reason() {
         let five = five();
         let kept = DrawingResults {
+            bom: None,
             check: Some(KeptCheck {
                 report: &five,
                 serial: 1,
@@ -2472,6 +3268,7 @@ mod tests {
     fn the_reason_box_is_open_under_a_row_that_can_be_waived_while_its_check_is_shown() {
         let five = five();
         let kept = DrawingResults {
+            bom: None,
             check: Some(KeptCheck {
                 report: &five,
                 serial: 1,
@@ -2531,6 +3328,7 @@ mod tests {
             ],
         );
         let kept = ProjectResults {
+            bom: None,
             check: Some(KeptCheck {
                 report: &project,
                 serial: 1,
@@ -2571,6 +3369,7 @@ mod tests {
             });
         }
         let kept = DrawingResults {
+            bom: None,
             check: Some(KeptCheck {
                 report: &five,
                 serial: 1,
@@ -2661,6 +3460,7 @@ mod tests {
             ..VerifyUi::default()
         };
         let kept = DrawingResults {
+            bom: None,
             check: Some(KeptCheck {
                 report: &five,
                 serial: 1,
@@ -2688,6 +3488,7 @@ mod tests {
             ],
         );
         let kept_elsewhere = ProjectResults {
+            bom: None,
             check: Some(KeptCheck {
                 report: &project,
                 serial: 2,
@@ -2768,6 +3569,660 @@ mod tests {
         assert_eq!(
             parse_action("waive=0", &view).map_err(|refused| refused.to_string()),
             Err("waive 写成 waive=<下标>:<理由>，实得 \"waive=0\"".to_owned())
+        );
+    }
+
+    /// A row of a bill: one of `kind` written `type_code`, `tag` and `name`,
+    /// with no spec, counted one, on PID-1101.
+    fn bom_row(kind: ObjectKind, type_code: &str, tag: &str, name: &str) -> BomRow {
+        BomRow {
+            seq: 0,
+            kind,
+            type_code: type_code.to_owned(),
+            tag: tag.to_owned(),
+            name: name.to_owned(),
+            spec: String::new(),
+            quantity: Quantity::Count(1),
+            unit: "个".to_owned(),
+            instances: 1,
+            drawings: vec!["PID-1101".to_owned()],
+        }
+    }
+
+    /// A bill of `scope` with `rows` numbered in order and counted by kind.
+    fn bill(scope: BomScope, rows: Vec<BomRow>) -> Bom {
+        let mut by_kind = bom::ByKind::default();
+        for row in &rows {
+            let count = match row.kind {
+                ObjectKind::PipeLine => &mut by_kind.pipe_line,
+                ObjectKind::Equipment => &mut by_kind.equipment,
+                ObjectKind::Valve => &mut by_kind.valve,
+                ObjectKind::Instrument => &mut by_kind.instrument,
+                ObjectKind::Fitting => &mut by_kind.fitting,
+                _ => &mut by_kind.other,
+            };
+            *count += 1;
+        }
+        let rows: Vec<BomRow> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(at, row)| BomRow { seq: at + 1, ..row })
+            .collect();
+        Bom {
+            version: bom::BOM_VERSION,
+            generated_at: 1_794_800_000,
+            scope,
+            source: bom::SourceKind::Live,
+            snapshot_seq: None,
+            length_unit_assumed: false,
+            totals: bom::Totals {
+                rows: rows.len(),
+                by_kind,
+            },
+            rows,
+            pipe_summary: Vec::new(),
+            skipped: Vec::new(),
+            notices: Vec::new(),
+        }
+    }
+
+    /// The bill of PID-1101 the material-list tests read: a pipe line, two
+    /// pumps, a gate valve, a pressure transmitter and the fittings of a
+    /// run, in the kind order `bom::build` gives.
+    fn plant() -> Bom {
+        let line = BomRow {
+            spec: "A1A DN50".to_owned(),
+            quantity: Quantity::Length(12.5),
+            unit: "m".to_owned(),
+            ..bom_row(
+                ObjectKind::PipeLine,
+                bom::PIPE_LINE_ROW,
+                "L-1001",
+                "工艺管线",
+            )
+        };
+        let pump = BomRow {
+            spec: "IS80-65-160".to_owned(),
+            unit: "台".to_owned(),
+            ..bom_row(ObjectKind::Equipment, "PUMP", "P-1001", "离心泵")
+        };
+        let spare = BomRow {
+            unit: "台".to_owned(),
+            ..bom_row(ObjectKind::Equipment, "PUMP", "P-1002", "备用泵")
+        };
+        let fittings = BomRow {
+            quantity: Quantity::Count(2),
+            instances: 2,
+            ..bom_row(
+                ObjectKind::Fitting,
+                bom::FITTING_ROW,
+                "L-1001-01",
+                "异径管×2",
+            )
+        };
+        bill(
+            BomScope::drawing("PID-1101"),
+            vec![
+                line,
+                pump,
+                spare,
+                bom_row(ObjectKind::Valve, "GATE_VALVE", "V-1001", "闸阀"),
+                bom_row(ObjectKind::Instrument, "PT", "PT-1001", "压力变送器"),
+                fittings,
+            ],
+        )
+    }
+
+    /// `bom` kept as the program's bill of `serial`, read off one drawing.
+    fn kept_bill(bom: &Bom, serial: u64) -> KeptBom<'_> {
+        KeptBom {
+            outcome: Ok(bom),
+            scope: &bom.scope,
+            drawings: 1,
+            made_at: bom.generated_at,
+            serial,
+            stale: false,
+        }
+    }
+
+    /// Why the tests' bill did not come out: P-1001 twice on PID-1101.
+    fn repeated() -> BomFailed {
+        let place = |x: f64, handle: &str| crate::pid::project_index::Place {
+            drawing_id: "PID-1101".to_owned(),
+            at: [x, 0.0],
+            handle: handle.to_owned(),
+        };
+        BomFailed {
+            code: bom::BOM_DUPLICATE_TAG.to_owned(),
+            text:
+                "BOM_DUPLICATE_TAG: 范围内这些（类型编码，位号）不止一处：PUMP P-1001；清单不产出"
+                    .to_owned(),
+            duplicates: vec![Duplicate {
+                type_code: "PUMP".to_owned(),
+                tag: "P-1001".to_owned(),
+                places: vec![place(0.0, "1A"), place(300.0, "2B")],
+            }],
+            unreadable: Vec::new(),
+        }
+    }
+
+    /// `failed` kept as the program's first bill, of `scope`.
+    fn kept_failure<'a>(failed: &'a BomFailed, scope: &'a BomScope) -> KeptBom<'a> {
+        KeptBom {
+            outcome: Err(failed),
+            scope,
+            drawings: 1,
+            made_at: 1_794_800_000,
+            serial: 1,
+            stale: false,
+        }
+    }
+
+    /// What the panel draws on the material-list tab under `ui` with `bom`
+    /// kept on the drawing in front.
+    fn with_bill(ui: &VerifyUi, bom: &Bom) -> VerifyView {
+        let drawing = DrawingResults {
+            bom: Some(kept_bill(bom, 1)),
+            ..DrawingResults::default()
+        };
+        let ui = VerifyUi {
+            tab: Tab::Bom,
+            ..ui.clone()
+        };
+        build_view(&ui, Some(&drawing), None, &in_front())
+    }
+
+    /// [`with_bill`] searched for `search`.
+    fn searched(bom: &Bom, search: &str) -> VerifyView {
+        let ui = VerifyUi {
+            bom_search: search.to_owned(),
+            ..VerifyUi::default()
+        };
+        with_bill(&ui, bom)
+    }
+
+    /// The table the material-list tab draws.
+    fn table_of(view: &VerifyView) -> &BomTable {
+        let shown = view.bom.shown.as_ref().expect("a bill shown");
+        shown.table.as_ref().expect("a table")
+    }
+
+    /// The groups drawn with their counts, and the rows listed by index.
+    fn bom_listed(view: &VerifyView) -> (Vec<(&'static str, usize)>, Vec<usize>) {
+        let table = table_of(view);
+        (
+            table
+                .groups
+                .iter()
+                .map(|group| (group.kind, group.count))
+                .collect(),
+            table.rows.iter().map(|row| row.index).collect(),
+        )
+    }
+
+    #[test]
+    fn the_material_list_is_grouped_by_kind_and_searched_in_four_columns() {
+        let plant = plant();
+        let view = with_bill(&VerifyUi::default(), &plant);
+        assert_eq!(view.empty, None);
+        let every = (
+            vec![
+                ("管线", 1),
+                ("设备", 2),
+                ("阀门", 1),
+                ("仪表", 1),
+                ("管件", 1),
+            ],
+            vec![0, 1, 2, 3, 4, 5],
+        );
+        assert_eq!(bom_listed(&view), every);
+        let table = table_of(&view);
+        assert_eq!(table.total, 6);
+        assert!(
+            !table.across,
+            "a drawing's bill names no drawing on its rows"
+        );
+        assert_eq!(table.rows[0].quantity(), "12.50 m");
+        assert_eq!(table.rows[1].quantity(), "1 台");
+        // Tag, name, spec and type code, in any case.
+        for (search, groups, rows) in [
+            ("p-10", vec![("设备", 2)], vec![1, 2]),
+            ("闸", vec![("阀门", 1)], vec![3]),
+            ("is80", vec![("设备", 1)], vec![1]),
+            ("Gate", vec![("阀门", 1)], vec![3]),
+            ("l-1001", vec![("管线", 1), ("管件", 1)], vec![0, 5]),
+        ] {
+            let view = searched(&plant, search);
+            assert_eq!(bom_listed(&view), (groups, rows), "{search}");
+            assert_eq!(view.bom.search, search);
+            // The totals at the bottom are the whole bill's.
+            let table = table_of(&view);
+            assert_eq!(table.total, 6, "{search}");
+            assert_eq!(table.by_kind, every.0, "{search}");
+        }
+        let view = searched(&plant, "没有这个");
+        assert_eq!(bom_listed(&view), (Vec::new(), Vec::new()));
+        assert_eq!(view.empty, Some(NONE_SEARCHED));
+        // A folded group keeps its count and its rows, and draws none.
+        let ui = VerifyUi {
+            bom_folded: vec!["设备".to_owned()],
+            ..VerifyUi::default()
+        };
+        let view = with_bill(&ui, &plant);
+        assert_eq!(bom_listed(&view), every);
+        let folds: Vec<(&str, bool, usize)> = table_of(&view)
+            .groups
+            .iter()
+            .map(|group| (group.kind, group.folded, group.drawn))
+            .collect();
+        assert_eq!(
+            folds,
+            [
+                ("管线", false, 1),
+                ("设备", true, 0),
+                ("阀门", false, 1),
+                ("仪表", false, 1),
+                ("管件", false, 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn each_kind_of_the_material_list_draws_200_rows_and_200_more_for_each_press() {
+        let mut rows = vec![bom_row(
+            ObjectKind::PipeLine,
+            bom::PIPE_LINE_ROW,
+            "L-1001",
+            "工艺管线",
+        )];
+        rows.extend(
+            (1..=450).map(|n| bom_row(ObjectKind::Equipment, "PUMP", &format!("P-{n:04}"), "泵")),
+        );
+        let many = bill(BomScope::drawing("PID-1101"), rows);
+        for (more, drawn, has_more) in [
+            (0, 200, true),
+            (1, 400, true),
+            (2, 450, false),
+            (3, 450, false),
+        ] {
+            let ui = VerifyUi {
+                bom_more: more,
+                ..VerifyUi::default()
+            };
+            let view = with_bill(&ui, &many);
+            let pumps = &table_of(&view).groups[1];
+            assert_eq!(
+                (
+                    pumps.kind,
+                    pumps.count,
+                    pumps.first,
+                    pumps.drawn,
+                    pumps.has_more()
+                ),
+                ("设备", 450, 1, drawn, has_more),
+                "{more}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_material_list_says_why_it_has_no_table() {
+        let ui = VerifyUi {
+            tab: Tab::Bom,
+            ..VerifyUi::default()
+        };
+        let view = build_view(&ui, None, None, &in_front());
+        assert_eq!(
+            (view.bom.shown.is_none(), view.empty),
+            (true, Some(NEVER_LISTED))
+        );
+        let empty = bill(BomScope::drawing("PID-1101"), Vec::new());
+        let view = with_bill(&VerifyUi::default(), &empty);
+        assert_eq!(view.empty, Some(NOTHING_LISTED));
+        assert_eq!(table_of(&view).total, 0);
+        // Tags found twice are listed in place of the table.
+        let failed = repeated();
+        let scope = BomScope::drawing("PID-1101");
+        let drawing = DrawingResults {
+            bom: Some(kept_failure(&failed, &scope)),
+            ..DrawingResults::default()
+        };
+        let view = build_view(&ui, Some(&drawing), None, &in_front());
+        let shown = view.bom.shown.as_ref().expect("the failure shown");
+        assert_eq!(shown.table, Err(failed.clone()));
+        assert_eq!(shown.scope_said, "图 PID-1101");
+        assert_eq!(view.empty, None, "what repeats is listed instead");
+        // Objects without a tag are listed apart, by kind and place.
+        let mut skipping = plant();
+        skipping.skipped = vec![bom::Skipped {
+            reason: bom::SkipReason::EmptyTag,
+            kind: ObjectKind::Instrument,
+            type_code: "PT".to_owned(),
+            drawing_id: "PID-1101".to_owned(),
+            at: [58.0, 80.0],
+            handle: "3C".to_owned(),
+        }];
+        let view = with_bill(&VerifyUi::default(), &skipping);
+        assert_eq!(
+            table_of(&view).skipped,
+            [SkippedView {
+                kind: "仪表",
+                type_code: "PT".to_owned(),
+                drawing_id: "PID-1101".to_owned(),
+                at: [58.0, 80.0],
+            }]
+        );
+    }
+
+    #[test]
+    fn the_material_list_buttons_are_grey_as_section_4_8_says() {
+        let plant = plant();
+        let kept = DrawingResults {
+            bom: Some(kept_bill(&plant, 1)),
+            ..DrawingResults::default()
+        };
+        let failed = repeated();
+        let scope = BomScope::drawing("PID-1101");
+        let failing = DrawingResults {
+            bom: Some(kept_failure(&failed, &scope)),
+            ..DrawingResults::default()
+        };
+        let pressable = |context: &Context, kept: Option<&DrawingResults<'_>>| {
+            let buttons = build_view(&VerifyUi::default(), kept, None, context).buttons;
+            (buttons.bom_drawing, buttons.bom_project, buttons.bom_export)
+        };
+        let unsaved = Context {
+            saved: false,
+            ..in_front()
+        };
+        let busy = Context {
+            busy: true,
+            ..in_front()
+        };
+        let read_only = Context {
+            writable: false,
+            ..in_front()
+        };
+        assert_eq!(pressable(&in_front(), None), (true, true, false));
+        assert_eq!(pressable(&in_front(), Some(&kept)), (true, true, true));
+        assert_eq!(pressable(&unsaved, Some(&kept)), (true, false, true));
+        assert_eq!(pressable(&busy, Some(&kept)), (false, false, true));
+        assert_eq!(
+            pressable(&read_only, Some(&kept)),
+            (true, true, true),
+            "a bill changes no drawing"
+        );
+        assert_eq!(pressable(&in_front(), Some(&failing)), (true, true, false));
+        assert_eq!(pressable(&Context::default(), None), (false, false, false));
+    }
+
+    #[test]
+    fn the_bom_block_reads_off_the_tab_as_worked_out() {
+        let plant = plant();
+        let row = |index: usize| {
+            let mut row = serde_json::to_value(&plant.rows[index]).expect("a row");
+            row["index"] = json!(index);
+            row
+        };
+        let ui = VerifyUi {
+            bom_search: "p-10".to_owned(),
+            bom_folded: vec!["设备".to_owned()],
+            ..VerifyUi::default()
+        };
+        let state = panel_state(&with_bill(&ui, &plant), ROWS_PER_PAGE, 0);
+        assert_eq!(
+            state["bom"],
+            json!({
+                "has_result": true,
+                "stale": false,
+                "scope": "drawing",
+                "search": "p-10",
+                "error": null,
+                "total": 2,
+                "groups": [{ "kind": "设备", "rows": 2, "collapsed": true }],
+                "rows": [row(1), row(2)]
+            })
+        );
+        let state = panel_state(&with_bill(&VerifyUi::default(), &plant), 2, 4);
+        assert_eq!(state["bom"]["total"], 6);
+        assert_eq!(state["bom"]["rows"], json!([row(4), row(5)]));
+        // A bill that did not come out: why, and no rows.
+        let failed = repeated();
+        let scope = BomScope::project();
+        let project = ProjectResults {
+            bom: Some(KeptBom {
+                stale: true,
+                ..kept_failure(&failed, &scope)
+            }),
+            ..ProjectResults::default()
+        };
+        let ui = VerifyUi {
+            tab: Tab::Bom,
+            ..VerifyUi::default()
+        };
+        let view = build_view(&ui, None, Some(&project), &in_front());
+        assert_eq!(
+            panel_state(&view, ROWS_PER_PAGE, 0)["bom"],
+            json!({
+                "has_result": true,
+                "stale": true,
+                "scope": "project",
+                "search": "",
+                "error": {
+                    "code": "BOM_DUPLICATE_TAG",
+                    "text": failed.text,
+                    "duplicates": failed.duplicates
+                },
+                "total": 0,
+                "groups": [],
+                "rows": []
+            })
+        );
+    }
+
+    #[test]
+    fn of_the_drawing_s_and_the_project_s_bill_the_newer_is_shown() {
+        let plant = plant();
+        let mut whole = plant.clone();
+        whole.scope = BomScope::project();
+        whole.rows[1].drawings = vec!["PID-1101".to_owned(), "PID-1102".to_owned()];
+        let ui = VerifyUi {
+            tab: Tab::Bom,
+            ..VerifyUi::default()
+        };
+        let shown = |own: u64, folder: u64| {
+            let drawing = DrawingResults {
+                bom: Some(kept_bill(&plant, own)),
+                ..DrawingResults::default()
+            };
+            let project = ProjectResults {
+                bom: Some(KeptBom {
+                    drawings: 2,
+                    ..kept_bill(&whole, folder)
+                }),
+                ..ProjectResults::default()
+            };
+            let view = build_view(&ui, Some(&drawing), Some(&project), &in_front());
+            let shown = view.bom.shown.expect("a bill shown");
+            let across = shown.table.as_ref().ok().map(|table| table.across);
+            (shown.scope, shown.serial, shown.scope_said, across)
+        };
+        assert_eq!(
+            shown(1, 2),
+            (
+                bom::ScopeKind::Project,
+                2,
+                "全项目 2 张图".to_owned(),
+                Some(true)
+            )
+        );
+        assert_eq!(
+            shown(3, 2),
+            (
+                bom::ScopeKind::Drawing,
+                3,
+                "图 PID-1101".to_owned(),
+                Some(false)
+            )
+        );
+    }
+
+    #[test]
+    fn the_material_row_last_clicked_is_located_while_its_bill_is_shown() {
+        let plant = plant();
+        let located = |clicked: Option<(u64, usize)>| {
+            let ui = VerifyUi {
+                bom_located: clicked,
+                ..VerifyUi::default()
+            };
+            let view = with_bill(&ui, &plant);
+            let table = table_of(&view);
+            let marked: Vec<usize> = table
+                .rows
+                .iter()
+                .filter(|row| row.located)
+                .map(|row| row.index)
+                .collect();
+            (table.located, marked)
+        };
+        assert_eq!(located(Some((1, 4))), (Some(4), vec![4]));
+        assert_eq!(
+            located(Some((2, 4))),
+            (None, Vec::new()),
+            "a row of another bill"
+        );
+        assert_eq!(located(None), (None, Vec::new()));
+    }
+
+    #[test]
+    fn pid_verify_action_reads_the_material_list_keys() {
+        let plant = plant();
+        let view = with_bill(&VerifyUi::default(), &plant);
+        for (value, pressed) in [
+            ("bom=drawing", PidVerifyMsg::BomDrawing),
+            ("bom=project", PidVerifyMsg::BomProject),
+            (
+                "bom_search=P-10",
+                PidVerifyMsg::BomSearch("P-10".to_owned()),
+            ),
+            ("bom_search=", PidVerifyMsg::BomSearch(String::new())),
+            ("bom_search=a=b", PidVerifyMsg::BomSearch("a=b".to_owned())),
+            ("bom_group=设备", PidVerifyMsg::BomFold("设备".to_owned())),
+            ("bom_locate=5", PidVerifyMsg::BomLocate(5)),
+            (
+                "bom_export=D:/out/bom.csv",
+                PidVerifyMsg::BomExport("D:/out/bom.csv".to_owned()),
+            ),
+            ("more=bom", PidVerifyMsg::MoreBom),
+        ] {
+            assert_eq!(parse_action(value, &view), Ok(pressed), "{value}");
+        }
+        let unlisted = build_view(&VerifyUi::default(), None, None, &in_front());
+        assert_eq!(
+            parse_action("bom=drawing", &unlisted),
+            Ok(PidVerifyMsg::BomDrawing)
+        );
+    }
+
+    #[test]
+    fn pid_verify_action_refuses_a_grey_material_list_button_with_the_reason() {
+        let plant = plant();
+        let unlisted = build_view(&VerifyUi::default(), None, None, &in_front());
+        let failed = repeated();
+        let scope = BomScope::drawing("PID-1101");
+        let drawing = DrawingResults {
+            bom: Some(kept_failure(&failed, &scope)),
+            ..DrawingResults::default()
+        };
+        let failing = build_view(&VerifyUi::default(), Some(&drawing), None, &in_front());
+        for (view, value) in [
+            (&unlisted, "bom_search=P"),
+            (&unlisted, "bom_group=设备"),
+            (&unlisted, "bom_locate=0"),
+            (&unlisted, "bom_export=a.csv"),
+            (&unlisted, "more=bom"),
+            (&failing, "bom_search=P"),
+            (&failing, "bom_locate=0"),
+            (&failing, "bom_export=a.csv"),
+        ] {
+            let refused = parse_action(value, view).expect_err(value);
+            assert_eq!(
+                (refused.code(), refused.reason()),
+                ("PANEL_ACTION_UNAVAILABLE", Some("no_result")),
+                "{value}"
+            );
+        }
+        for (context, value, reason) in [
+            (Context::default(), "bom=drawing", "no_drawing"),
+            (Context::default(), "bom=project", "no_drawing"),
+            (
+                Context {
+                    busy: true,
+                    ..in_front()
+                },
+                "bom=drawing",
+                "busy",
+            ),
+            (
+                Context {
+                    saved: false,
+                    ..in_front()
+                },
+                "bom=project",
+                "no_project_dir",
+            ),
+        ] {
+            let view = build_view(&VerifyUi::default(), None, None, &context);
+            let refused = parse_action(value, &view).expect_err(value);
+            assert_eq!(
+                (refused.code(), refused.reason()),
+                ("PANEL_ACTION_UNAVAILABLE", Some(reason)),
+                "{value}"
+            );
+        }
+        let whole = with_bill(&VerifyUi::default(), &plant);
+        let pumps = searched(&plant, "p-10");
+        for (view, value) in [(&whole, "bom_locate=6"), (&pumps, "bom_locate=0")] {
+            let refused = parse_action(value, view).expect_err(value);
+            assert_eq!(
+                (refused.code(), refused.reason()),
+                ("PANEL_ROW_NOT_FOUND", None),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            parse_action("bom_locate=0", &pumps).map_err(|refused| refused.to_string()),
+            Err("材料清单的列表里现在没有下标 0 的一行（搜索筛掉的不在列表里）".to_owned())
+        );
+    }
+
+    #[test]
+    fn pid_verify_action_names_a_wrong_material_list_value_invalid() {
+        let plant = plant();
+        let view = with_bill(&VerifyUi::default(), &plant);
+        for value in [
+            "bom",
+            "bom=",
+            "bom=all",
+            "bom_search",
+            "bom_group",
+            "bom_group=",
+            "bom_locate",
+            "bom_locate=a",
+            "bom_locate=-1",
+            "bom_export",
+            "bom_export=",
+            "bom_export= ",
+            "more",
+            "more=diff",
+        ] {
+            let refused = parse_action(value, &view).expect_err(value);
+            assert_eq!(refused.code(), "invalid_value", "{value}");
+            assert!(!refused.to_string().is_empty(), "{value}");
+        }
+        assert_eq!(
+            parse_action("bom_group=泵", &view).map_err(|refused| refused.to_string()),
+            Err("清单里没有种类「泵」的组；有的是：管线、设备、阀门、仪表、管件".to_owned())
         );
     }
 }
