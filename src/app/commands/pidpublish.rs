@@ -70,6 +70,8 @@ pub(in crate::app) const PUBLISH_FILE_CHANGED: &str = "PUBLISH_FILE_CHANGED";
 pub(in crate::app) const PUBLISH_TARGET_INVALID: &str = "PUBLISH_TARGET_INVALID";
 /// 指定的修订号不是正整数，或者不大于已有的最大修订号（§3.6，HTTP 400）。
 pub(in crate::app) const PUBLISH_REVISION_INVALID: &str = "PUBLISH_REVISION_INVALID";
+/// 扫出来的项目里没有当前图：项目没读成（项目索引规格的码，HTTP 500）。
+const INDEX_IO_ERROR: &str = "INDEX_IO_ERROR";
 
 /// 不写目标目录时用的：图纸所在目录下的这个子目录（§3.1）。
 const DEFAULT_TARGET: &str = "pid-publish";
@@ -105,6 +107,14 @@ struct Target {
     collab: CollabVerdict,
 }
 
+/// 要发到哪里（§3.1、§3.6，[`destination`]）：项目目录、图号、目标目录和这一版的修订号。
+struct Destination {
+    project_dir: PathBuf,
+    drawing_id: String,
+    dir: PathBuf,
+    revision: u32,
+}
+
 /// 扫完项目接着做的发布或检查（`commands::pidindex` 的扫描排着的一件）：哪张图（标签页的
 /// `id`，扫的时候它可能被关掉）、命令行上写的，和起头时取的规则、主数据（`SPEC-pid-drc.md`
 /// §4.1 的先后，摘要的连接容差照这套规则）。
@@ -137,8 +147,8 @@ pub(super) struct Gated {
     pub(super) gates: Gates,
 }
 
-/// 出包要用的（§4）：第几个标签页、扫好的项目、前提给的目标、主数据、门禁这一段的结果，和这次发布
-/// 的时间（Unix 秒）。
+/// 出包要用的（§4）：第几个标签页、扫好的项目、前提给的目标、主数据、门禁这一段的结果、这次发布
+/// 的时间（Unix 秒），和出图设置（§5.3 `pid_publish` 的 `plot`；命令行上发布是 `null`，用默认的）。
 struct Packing<'a> {
     i: usize,
     scanned: &'a Scanned,
@@ -146,6 +156,28 @@ struct Packing<'a> {
     master: &'a Resolved,
     gated: &'a Gated,
     now: u64,
+    plot: &'a Value,
+}
+
+/// 出包成了：包的目录、里面几个文件、共几个字节，和发布前的快照的序号。
+struct Published {
+    dir: PathBuf,
+    files: usize,
+    bytes: u64,
+    seq: u64,
+}
+
+/// 出包没成：错在哪里，和留下了什么。
+struct Unpublished {
+    failed: Failed,
+    kept: String,
+}
+
+/// `pid_publish` 发得了时（[`OpenCADStudio::pidpublish_ready`]）：出图设置、前提给的目标和规则包。
+struct Ready {
+    plot: Value,
+    target: Target,
+    rules: RuleSet,
 }
 
 /// 出包没成：错误码，`PUBLISH_FAILED` 时是哪一步（§3.6 的 `step`），和为什么。
@@ -164,21 +196,26 @@ impl Failed {
             why: why.into(),
         }
     }
+
+    /// 说给人听：`PUBLISH_FAILED` 先说是在哪一步失败的。
+    fn said(&self) -> String {
+        match self.step {
+            Some(step) => format!(
+                "出包在「{}」这一步失败（step {step}）：{}",
+                step_said(step),
+                self.why
+            ),
+            None => self.why.clone(),
+        }
+    }
 }
 
 impl From<PublishError> for Failed {
     fn from(error: PublishError) -> Self {
-        let code = error.code();
-        let said = error.to_string();
-        let why = said
-            .strip_prefix(code)
-            .and_then(|rest| rest.strip_prefix(": "))
-            .unwrap_or(&said)
-            .to_owned();
         Self {
-            code,
+            code: error.code(),
             step: error.step(),
-            why,
+            why: why_of(&error),
         }
     }
 }
@@ -393,13 +430,14 @@ impl OpenCADStudio {
                 master: &job.master,
                 gated: &gated,
                 now: unix_now(),
+                plot: &Value::Null,
             });
         }
     }
 
     /// 发布的前提（§3.4，离线规格 §5.7），按先后查第 `i` 个标签页的图：先不满足的那条是错误码
-    /// 和为什么；都满足时是要发到哪里。只读会话不在这里查（命令闸门拒发布，`CHECK` 照查）。
-    /// 不写任何东西。
+    /// 和为什么；都满足时是要发到哪里（[`destination`]）。只读会话不在这里查（命令闸门和
+    /// `pid_publish` 自己拒发布，`CHECK` 照查）。不写任何东西。
     fn pidpublish_preconditions(
         &self,
         i: usize,
@@ -430,23 +468,12 @@ impl OpenCADStudio {
         if let CollabVerdict::Refused(code) = verdict {
             return Err((code, collab_said(code, collab.queued)));
         }
-        let (project_dir, drawing_id, dir) = placed(path, asked.dir.as_deref())?;
-        target_usable(&dir).map_err(|why| (PUBLISH_TARGET_INVALID, why))?;
-        let next = publish_pkg::next_revision(&dir, &drawing_id);
-        let revision = match asked.revision.as_deref() {
-            Some(text) => revision_of(text, next)?,
-            None => next,
-        };
-        let package = dir.join(publish_pkg::package_name(&drawing_id, revision));
-        if package.symlink_metadata().is_ok() {
-            return Err((
-                PUBLISH_TARGET_EXISTS,
-                format!(
-                    "{} 已经有了，发布不覆盖已有的东西；换一个修订号或者目标目录",
-                    package.display()
-                ),
-            ));
-        }
+        let Destination {
+            project_dir,
+            drawing_id,
+            dir,
+            revision,
+        } = destination(path, asked)?;
         Ok(Target {
             source: path.to_path_buf(),
             project_dir,
@@ -596,55 +623,73 @@ impl OpenCADStudio {
         }
     }
 
-    /// 出包（§4）：存发布前的快照，在目标目录里建临时目录，出图、算材料清单、写包、自检后落位
-    /// （[`Self::pidpublish_build`]），说包在哪里和各步用时。存了快照以后哪一步失败，都删掉临时目录
-    /// 和这次建的目标目录，连同错误码和是哪一步说出来，快照留着。不改图。
+    /// 出包（§4，[`Self::pidpublish_pack`]）并说出来：包在哪里、几个文件、多大、发布前的快照是第
+    /// 几份和各步用时；没成时连同错误码和是哪一步说为什么、留下了什么。
     fn pidpublish_package(&mut self, packing: &Packing<'_>) {
         let verb = verb_of(false);
-        let target = packing.target;
         let mut timings = Timings::default();
-        let started = Instant::now();
-        let snapshot = self.pidpublish_snapshot(packing);
-        timings.add("快照", started);
-        let snapshot = match snapshot {
-            Ok(snapshot) => snapshot,
-            Err(failed) => {
-                self.pidpublish_failed(verb, &timings, &failed, "什么都没写");
-                return;
-            }
-        };
-        let seq = snapshot.seq.unwrap_or_default();
-        let kept = format!("发布前的快照第 {seq} 份留着");
-        let package = publish_pkg::package_name(&target.drawing_id, target.revision);
-        let staging = match Staging::prepare(&target.dir, &package) {
-            Ok(staging) => staging,
-            Err(why) => {
-                let failed = Failed {
-                    code: PUBLISH_TARGET_INVALID,
-                    step: None,
-                    why,
-                };
-                self.pidpublish_failed(verb, &timings, &failed, &kept);
-                return;
-            }
-        };
-        match self.pidpublish_build(packing, &snapshot, &staging.path, &mut timings) {
-            Ok(dir) => {
-                let (files, bytes) = package_size(&dir);
+        match self.pidpublish_pack(packing, &mut timings) {
+            Ok(published) => {
                 self.command_line.push_output(&format!(
-                    "{verb}: 已发布第 {} 版：{}，{files} 个文件，共 {bytes} 字节；发布前的快照是第 {seq} 份。",
-                    target.revision,
-                    dir.display()
+                    "{verb}: 已发布第 {} 版：{}，{} 个文件，共 {} 字节；发布前的快照是第 {} 份。",
+                    packing.target.revision,
+                    published.dir.display(),
+                    published.files,
+                    published.bytes,
+                    published.seq
                 ));
                 self.command_line
                     .push_output(&format!("{verb}: 用时：{}。", timings.said()));
             }
+            Err(Unpublished { failed, kept }) => {
+                self.pidpublish_failed(verb, &timings, &failed, &kept);
+            }
+        }
+    }
+
+    /// 出包（§4）：存发布前的快照，在目标目录里建临时目录，出图、算材料清单、写包、自检后落位
+    /// （[`Self::pidpublish_build`]），各步的用时记进 `timings`。存了快照以后哪一步失败，都删掉临时
+    /// 目录和这次建的目标目录，快照留着。不改图，不碰命令行。
+    fn pidpublish_pack(
+        &mut self,
+        packing: &Packing<'_>,
+        timings: &mut Timings,
+    ) -> Result<Published, Unpublished> {
+        let target = packing.target;
+        let started = Instant::now();
+        let snapshot = self.pidpublish_snapshot(packing);
+        timings.add("快照", started);
+        let snapshot = snapshot.map_err(|failed| Unpublished {
+            failed,
+            kept: "什么都没写".to_owned(),
+        })?;
+        let seq = snapshot.seq.unwrap_or_default();
+        let kept = format!("发布前的快照第 {seq} 份留着");
+        let package = publish_pkg::package_name(&target.drawing_id, target.revision);
+        let staging = Staging::prepare(&target.dir, &package).map_err(|why| Unpublished {
+            failed: Failed {
+                code: PUBLISH_TARGET_INVALID,
+                step: None,
+                why,
+            },
+            kept: kept.clone(),
+        })?;
+        match self.pidpublish_build(packing, &snapshot, &staging.path, timings) {
+            Ok(dir) => {
+                let (files, bytes) = package_size(&dir);
+                Ok(Published {
+                    dir,
+                    files,
+                    bytes,
+                    seq,
+                })
+            }
             Err(failed) => {
-                let cleanup = match staging.discard() {
+                let kept = match staging.discard() {
                     Ok(()) => format!("临时目录已删，{kept}"),
                     Err(why) => format!("{why}；{kept}"),
                 };
-                self.pidpublish_failed(verb, &timings, &failed, &cleanup);
+                Err(Unpublished { failed, kept })
             }
         }
     }
@@ -695,7 +740,7 @@ impl OpenCADStudio {
         let (i, target) = (packing.i, packing.target);
         let started = Instant::now();
         let plotted = unless_broken("plot", || {
-            self.pidpublish_plot(i, &target.drawing_id, staging)
+            self.pidpublish_plot(i, &target.drawing_id, staging, packing.plot)
                 .map_err(|why| Failed::at("plot", why))
         });
         timings.add("出图", started);
@@ -752,19 +797,22 @@ impl OpenCADStudio {
     }
 
     /// 出图（§3.1）：把第 `i` 个标签页的图出成 PDF 和 SVG，按 [`publish_pkg::plot_files`] 的名字写进
-    /// `staging`。走 `plot` 操作的出图（模型空间、图形范围、布满图纸），但不给出图日期字段盖时间：
-    /// 发布不改图。出图只认当前标签页，出的时候临时把这一页当成当前的，出完换回来。
+    /// `staging`。走 `plot` 操作的出图，设置是 `plot`（字段同 `plot` 操作；`null` 是模型空间、图形范围、
+    /// 布满图纸），但不给出图日期字段盖时间：发布不改图。出图只认当前标签页，出的时候临时把
+    /// 这一页当成当前的，出完换回来。
     #[cfg(not(target_arch = "wasm32"))]
     fn pidpublish_plot(
         &mut self,
         i: usize,
         drawing_id: &str,
         staging: &Path,
+        plot: &Value,
     ) -> Result<(), String> {
         let active = std::mem::replace(&mut self.active_tab, i);
         let mut plotted = Ok(());
         for name in publish_pkg::plot_files(drawing_id) {
-            let request = json!({ "path": staging.join(&name).to_string_lossy() });
+            let mut request = plot.clone();
+            request["path"] = json!(staging.join(&name).to_string_lossy());
             if let Err(error) = self.plot_current(&request) {
                 plotted = Err(format!(
                     "{name} 出不来：{}（{}）",
@@ -785,6 +833,7 @@ impl OpenCADStudio {
         _i: usize,
         _drawing_id: &str,
         _staging: &Path,
+        _plot: &Value,
     ) -> Result<(), String> {
         Err("网页版不能出图到本机文件".to_owned())
     }
@@ -795,14 +844,7 @@ impl OpenCADStudio {
         self.command_line
             .push_output(&format!("{verb}: 用时：{}。", timings.said()));
         let code = failed.code;
-        let what = match failed.step {
-            Some(step) => format!(
-                "出包在「{}」这一步失败（step {step}）：{}",
-                step_said(step),
-                failed.why
-            ),
-            None => failed.why.clone(),
-        };
+        let what = failed.said();
         self.command_line
             .push_error_coded(code, &format!("{verb}: {code}: {what}；{kept}。"));
     }
@@ -877,10 +919,7 @@ impl OpenCADStudio {
                 return;
             }
         };
-        let dir = match crate::io::drawing_dir(&self.tabs[i].scene.document) {
-            Some(drawing_dir) if Path::new(name).is_relative() => drawing_dir.join(name),
-            _ => PathBuf::from(name),
-        };
+        let dir = self.pidpublish_package_dir(i, name);
         match publish_pkg::verify_package(&dir) {
             Ok(report) => {
                 self.command_line.push_output(&format!(
@@ -900,6 +939,273 @@ impl OpenCADStudio {
             Err(error) => {
                 self.command_line
                     .push_error_coded(error.code(), &format!("{verb}: {error}。"));
+            }
+        }
+    }
+
+    /// 要校验的包目录 `name`：相对路径从第 `i` 个标签页的图纸所在目录算，图没保存过时从当前目录算。
+    fn pidpublish_package_dir(&self, i: usize, name: &str) -> PathBuf {
+        match crate::io::drawing_dir(&self.tabs[i].scene.document) {
+            Some(drawing_dir) if Path::new(name).is_relative() => drawing_dir.join(name),
+            _ => PathBuf::from(name),
+        }
+    }
+}
+
+/// 自动化操作（§5.3）：应答和失败的写法同别的控制面操作，不碰命令行。
+impl OpenCADStudio {
+    /// 控制面的 `pid_publish_check`：同 `PIDPUBLISH CHECK`，但前提逐条照实答，不在先不满足的那条
+    /// 停下（[`Self::pidpublish_each`]），再答四项门禁、目标目录和这次会用的修订号；前提和门禁都过了
+    /// `can_publish` 才为真。图没保存过时门禁、目标目录、修订号都是 `null`；`dir`、`rev` 写的目标
+    /// 目录用不了、修订号不对、这一版已经有了是失败应答。要读的图缓存里没有时应答 `scanning`
+    /// 并交出后台读的任务（[`Self::op_scan`]），调用方稍后再发。是查询：不改图，不写东西。
+    pub(in crate::app) fn control_pid_publish_check(
+        &mut self,
+        req: &Value,
+    ) -> (Value, Task<Message>) {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return no_task(refuse("no_document", "Create or open a drawing first"));
+        }
+        let asked = match asked_of(req) {
+            Ok(asked) => asked,
+            Err(refusal) => return no_task(refusal),
+        };
+        let (preconditions, held) = self.pidpublish_each(i, &asked);
+        let Some(path) = self.tabs[i].current_path.clone() else {
+            return no_task(json!({
+                "ok": true,
+                "can_publish": false,
+                "preconditions": preconditions,
+                "gates": null,
+                "target_dir": null,
+                "next_revision": null,
+            }));
+        };
+        let destination = match destination(&path, &asked) {
+            Ok(destination) => destination,
+            Err((code, why)) => return no_task(refuse(code, why)),
+        };
+        let rules = match self.pidcheck_load_rules(i) {
+            Ok(rules) => rules,
+            Err((code, why)) => return no_task(refuse(code, why)),
+        };
+        let document = &self.tabs[i].scene.document;
+        let master = master_data::resolve(document, Some(&destination.project_dir));
+        let (_, scanned) = match self.op_scan(i, rules.connect_tolerance, true) {
+            Ok(scanned) => scanned,
+            Err(answered) => return answered,
+        };
+        let gated = match publish_gates(&scanned, &destination.drawing_id, rules, &master) {
+            Ok(gated) => gated,
+            Err(why) => return no_task(refuse(INDEX_IO_ERROR, why)),
+        };
+        no_task(json!({
+            "ok": true,
+            "can_publish": held && gated.gates.passed(),
+            "preconditions": preconditions,
+            "gates": gated.gates,
+            "target_dir": destination.dir.display().to_string(),
+            "next_revision": destination.revision,
+        }))
+    }
+
+    /// `pid_publish_check` 的七条前提（§3.4，离线规格 §5.7），各自照实答：存过、没有没保存的修改、
+    /// 磁盘上的文件对得上、会话可写，和带同步记录的图队列空、没有不一致、连着并补齐了（没有同步
+    /// 记录时这三条都为真）；再答它们放不放行发布——协同的照 [`publish_pkg::collab_preconditions`]，
+    /// `allow_offline` 放过没连着。
+    fn pidpublish_each(&self, i: usize, asked: &Asked) -> (Value, bool) {
+        let tab = &self.tabs[i];
+        let saved = tab.current_path.as_deref();
+        let unchanged = saved.is_some_and(|path| self.pidpublish_file_unchanged(i, path));
+        let writable = !self.readonly_refuses_command("PIDPUBLISH");
+        let collab = CollabInput {
+            allow_offline: asked.allow_offline,
+            ..self.publish_collab_input(i)
+        };
+        let unrecorded = !collab.has_record;
+        let verdict = publish_pkg::collab_preconditions(collab);
+        let preconditions = json!({
+            "saved": saved.is_some(),
+            "clean": !tab.dirty,
+            "file_unchanged": unchanged,
+            "writable_session": writable,
+            "collab_synced": unrecorded || collab.queued == 0,
+            "collab_consistent": unrecorded || !collab.diverged,
+            "collab_online": unrecorded || collab.caught_up,
+        });
+        let held = saved.is_some()
+            && !tab.dirty
+            && unchanged
+            && writable
+            && !matches!(verdict, CollabVerdict::Refused(_));
+        (preconditions, held)
+    }
+
+    /// `pid_publish` 进写操作的流程以前先看（§5.3）：没有图、请求写错了、会话只读、前提没过、
+    /// 取不到规则包（[`Self::pidpublish_ready`]），就在这里应答；要读的图缓存里没有时应答 `scanning`
+    /// 并交出后台读的任务。能发布了是 `None`。
+    pub(in crate::app) fn control_pid_publish_waits(
+        &mut self,
+        req: &Value,
+    ) -> Option<(Value, Task<Message>)> {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            let refusal = refuse("no_document", "Create or open a drawing first");
+            return Some(no_task(refusal));
+        }
+        let tolerance = match self.pidpublish_ready(i, req) {
+            Ok(ready) => ready.rules.connect_tolerance,
+            Err(refusal) => return Some(no_task(refusal)),
+        };
+        self.op_scan(i, tolerance, true).err()
+    }
+
+    /// 控制面的 `pid_publish`，在写操作的流程里（§5.3）：同 `PIDPUBLISH`，`dir`、`rev`、
+    /// `allow_offline` 是命令行上的目标目录、`REV`、`ALLOW_OFFLINE`，`plot` 交给出图。扫描前面
+    /// [`Self::control_pid_publish_waits`] 等过了，这里不读盘。门禁没过是 `PUBLISH_BLOCKED`，带四项
+    /// 门禁、重复位号的各处和检查报告；出包没成是它的错误码，`PUBLISH_FAILED` 带是哪一步（`step`）。
+    /// 结果是包名、包的目录、修订号、发布前快照的序号、文件数、字节数和门禁。不改图。
+    pub(in crate::app) fn control_pid_publish(
+        &mut self,
+        req: &Value,
+    ) -> Result<Task<Message>, Value> {
+        let i = self.active_tab;
+        let Ready {
+            plot,
+            target,
+            rules,
+        } = self.pidpublish_ready(i, req)?;
+        let document = &self.tabs[i].scene.document;
+        let master = master_data::resolve(document, Some(&target.project_dir));
+        let (_, scanned) = self
+            .op_scan(i, rules.connect_tolerance, false)
+            .map_err(|(answer, _)| answer)?;
+        let gated = publish_gates(&scanned, &target.drawing_id, rules, &master)
+            .map_err(|why| refuse(INDEX_IO_ERROR, why))?;
+        if !gated.gates.passed() {
+            let why = format!("{}，没有发布", blocked_said(&gated.gates));
+            let mut refusal = refuse(PUBLISH_BLOCKED, why);
+            refusal["gates"] = json!(gated.gates);
+            refusal["duplicates"] = json!(gated.duplicates);
+            refusal["report"] = json!(gated.report);
+            return Err(refusal);
+        }
+        let packing = Packing {
+            i,
+            scanned: &scanned,
+            target: &target,
+            master: &master,
+            gated: &gated,
+            now: unix_now(),
+            plot: &plot,
+        };
+        let mut timings = Timings::default();
+        let published = self.pidpublish_pack(&packing, &mut timings).map_err(
+            |Unpublished { failed, kept }| {
+                let mut refusal = refuse(failed.code, format!("{}；{kept}", failed.said()));
+                if let Some(step) = failed.step {
+                    refusal["step"] = json!(step);
+                }
+                refusal
+            },
+        )?;
+        self.set_control_result(json!({
+            "package_id": publish_pkg::package_name(&target.drawing_id, target.revision),
+            "path": published.dir.display().to_string(),
+            "revision": target.revision,
+            "snapshot_seq": published.seq,
+            "files": published.files,
+            "bytes": published.bytes,
+            "gates": gated.gates,
+        }));
+        Ok(Task::none())
+    }
+
+    /// `pid_publish` 发得了吗（§5.3）：请求写对了（[`asked_of`]、[`plot_of`]），会话可写，前提都过了
+    /// （[`Self::pidpublish_preconditions`]），规则包取得到。只读会话拒发布：同命令闸门记下这次尝试，
+    /// 应答带拒绝的级别。不写任何东西。
+    fn pidpublish_ready(&mut self, i: usize, req: &Value) -> Result<Ready, Value> {
+        let asked = asked_of(req)?;
+        let plot = plot_of(req)?;
+        if self.readonly_refuses_command("PIDPUBLISH") {
+            let (code, level) = self.collab.refusal();
+            self.collab.report_attempt("", "pid_publish");
+            let mut refusal = refuse(&code, "协同：当前会话只读，拒绝发布");
+            refusal["level"] = json!(level);
+            return Err(refusal);
+        }
+        let target = self
+            .pidpublish_preconditions(i, &asked)
+            .map_err(|(code, why)| refuse(code, why))?;
+        let rules = self
+            .pidcheck_load_rules(i)
+            .map_err(|(code, why)| refuse(code, why))?;
+        Ok(Ready {
+            plot,
+            target,
+            rules,
+        })
+    }
+
+    /// 控制面的 `pid_publications`：同 `PIDPUBLISH LIST`，`dir` 是目标目录——图号、目标目录、这张图
+    /// 发布到哪一版了（`state`，同命令行上说的）和各包，新的在前，各带包的目录（目标目录和包名
+    /// 拼出）。是查询：不扫项目，不写东西。
+    pub(in crate::app) fn control_pid_publications(&self, req: &Value) -> Value {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return refuse("no_document", "Create or open a drawing first");
+        }
+        let dir = match dir_of(req) {
+            Ok(dir) => dir,
+            Err(refusal) => return refusal,
+        };
+        let listed = match self.pidpublish_listed(i, dir.as_deref()) {
+            Ok(listed) => listed,
+            Err((code, why)) => return refuse(code, why),
+        };
+        let packages: Vec<Value> = listed
+            .packages
+            .iter()
+            .map(|package| {
+                let path = listed.target_dir.join(&package.package_id);
+                json!({
+                    "package_id": package.package_id,
+                    "revision": package.revision,
+                    "path": path.display().to_string(),
+                    "published_at": package.published_at,
+                    "published_by": package.published_by,
+                    "current": package.current,
+                })
+            })
+            .collect();
+        json!({
+            "ok": true,
+            "drawing_id": listed.drawing_id,
+            "target_dir": listed.target_dir.display().to_string(),
+            "state": listed.state.to_string(),
+            "packages": packages,
+        })
+    }
+
+    /// 控制面的 `pid_publish_verify`：同 `PIDPUBLISH VERIFY`，`path` 是包目录（[`Self::pidpublish_package_dir`]）。
+    /// 完好时应答是 §3.5 的报告带 `ok`；缺文件、对不上清单是它的错误码，也带报告；目录不在、
+    /// 没有清单是 `PACKAGE_NOT_FOUND`。是查询：不写东西。
+    pub(in crate::app) fn control_pid_publish_verify(&self, req: &Value) -> Value {
+        let Some(name) = req["path"].as_str().filter(|name| !name.is_empty()) else {
+            return refuse("invalid_request", "path 要写成不空的文本：包目录");
+        };
+        let dir = self.pidpublish_package_dir(self.active_tab, name);
+        match publish_pkg::verify_package(&dir) {
+            Ok(report) => with_report(json!({ "ok": true }), &report),
+            Err(error) => {
+                let refusal = refuse(error.code(), why_of(&error));
+                match &error {
+                    PublishError::Incomplete(report) | PublishError::Corrupt(report) => {
+                        with_report(refusal, report)
+                    }
+                    _ => refusal,
+                }
             }
         }
     }
@@ -1026,6 +1332,138 @@ fn placed(
         |dir| project_dir.join(dir),
     );
     Ok((project_dir.to_path_buf(), drawing_id, target))
+}
+
+/// 要发到哪里（§3.1、§3.6）：存在 `path` 的图的项目目录和图号（[`placed`]），目标目录——要能用
+/// （[`target_usable`]）——和这一版的修订号：写了的要对（[`revision_of`]），不写是下一版；这一版的
+/// 名字被占了是 `PUBLISH_TARGET_EXISTS`。不写任何东西。
+fn destination(path: &Path, asked: &Asked) -> Result<Destination, (&'static str, String)> {
+    let (project_dir, drawing_id, dir) = placed(path, asked.dir.as_deref())?;
+    target_usable(&dir).map_err(|why| (PUBLISH_TARGET_INVALID, why))?;
+    let next = publish_pkg::next_revision(&dir, &drawing_id);
+    let revision = match asked.revision.as_deref() {
+        Some(text) => revision_of(text, next)?,
+        None => next,
+    };
+    let package = dir.join(publish_pkg::package_name(&drawing_id, revision));
+    if package.symlink_metadata().is_ok() {
+        return Err((
+            PUBLISH_TARGET_EXISTS,
+            format!(
+                "{} 已经有了，发布不覆盖已有的东西；换一个修订号或者目标目录",
+                package.display()
+            ),
+        ));
+    }
+    Ok(Destination {
+        project_dir,
+        drawing_id,
+        dir,
+        revision,
+    })
+}
+
+/// 请求里的目标目录 `dir`（§5.3）：不写是 `None`，写了要是不空的文本。
+fn dir_of(req: &Value) -> Result<Option<String>, Value> {
+    match &req["dir"] {
+        Value::Null => Ok(None),
+        Value::String(dir) if !dir.is_empty() => Ok(Some(dir.clone())),
+        _ => Err(refuse("invalid_request", "dir 要写成不空的文本：目标目录")),
+    }
+}
+
+/// 请求里写的（§5.3）：目标目录（[`dir_of`]），修订号 `rev`——整数原样交给前提查，不是整数也是
+/// `PUBLISH_REVISION_INVALID`——和 `allow_offline`（布尔）。写错时是失败应答。
+fn asked_of(req: &Value) -> Result<Asked, Value> {
+    let dir = dir_of(req)?;
+    let revision = match &req["rev"] {
+        Value::Null => None,
+        Value::Number(number) if number.is_i64() || number.is_u64() => Some(number.to_string()),
+        other => {
+            return Err(refuse(
+                PUBLISH_REVISION_INVALID,
+                format!("修订号 {other} 不是正整数"),
+            ))
+        }
+    };
+    let allow_offline = match &req["allow_offline"] {
+        Value::Null => false,
+        Value::Bool(allow) => *allow,
+        _ => {
+            return Err(refuse(
+                "invalid_request",
+                "allow_offline 要写成 true 或 false",
+            ))
+        }
+    };
+    Ok(Asked {
+        dir,
+        revision,
+        allow_offline,
+    })
+}
+
+/// `pid_publish` 的出图设置 `plot`（§5.3）：字段同 `plot` 操作，PDF 和 SVG 都用它，不写是默认的
+/// （`null`）。文件名由包定，不能写 `path`；一次只出一个布局，`layout` 不能是 `all`。写错时是失败
+/// 应答。
+fn plot_of(req: &Value) -> Result<Value, Value> {
+    let plot = &req["plot"];
+    let Some(fields) = plot.as_object() else {
+        return if plot.is_null() {
+            Ok(Value::Null)
+        } else {
+            Err(refuse(
+                "invalid_request",
+                "plot 要写成对象，字段同 plot 操作",
+            ))
+        };
+    };
+    if fields.contains_key("path") {
+        return Err(refuse(
+            "invalid_request",
+            "plot 里不写 path：PDF 和 SVG 的文件名由包定",
+        ));
+    }
+    let every = fields
+        .get("layout")
+        .and_then(Value::as_str)
+        .is_some_and(|layout| layout.eq_ignore_ascii_case("all"));
+    if every {
+        return Err(refuse(
+            "invalid_request",
+            "plot 的 layout 不能是 all：一次只出一个布局",
+        ));
+    }
+    Ok(plot.clone())
+}
+
+/// 控制面的失败应答。
+fn refuse(code: &str, error: impl Into<String>) -> Value {
+    json!({ "ok": false, "status": "failed", "code": code, "error": error.into() })
+}
+
+/// 不带后台任务的应答。
+fn no_task(answer: Value) -> (Value, Task<Message>) {
+    (answer, Task::none())
+}
+
+/// 发布错误说的为什么，去掉打头的错误码。
+fn why_of(error: &PublishError) -> String {
+    let code = error.code();
+    let said = error.to_string();
+    said.strip_prefix(code)
+        .and_then(|rest| rest.strip_prefix(": "))
+        .unwrap_or(&said)
+        .to_owned()
+}
+
+/// 校验报告（§3.5）的各字段，再加上 `answer` 的：应答外面的 `ok`，失败时的码和为什么。
+fn with_report(answer: Value, report: &publish_pkg::VerifyReport) -> Value {
+    let mut merged = json!(report);
+    if let (Some(fields), Value::Object(outer)) = (merged.as_object_mut(), answer) {
+        fields.extend(outer);
+    }
+    merged
 }
 
 /// 目标目录 `target_dir` 里图号 `drawing_id` 的包，新的在前，和发布到哪一版了（§4 末尾的表）：
@@ -2391,6 +2829,582 @@ mod tests {
             "{}",
             ran.said
         );
+    }
+
+    /// 发 `ask`，应答 `scanning` 就再发：测试里后台读随应答跑完，再发就是结论。
+    fn settled(app: &mut OpenCADStudio, ask: &Value) -> Value {
+        for _ in 0..5 {
+            let answer = request(app, ask.clone());
+            if answer["status"] != "scanning" {
+                return answer;
+            }
+        }
+        panic!("{ask}：一直在扫");
+    }
+
+    /// `pid_publish_check` 的七条前提里只有 `failing` 这几条为假。
+    fn only_failing(answer: &Value, failing: &[&str]) {
+        let preconditions = answer["preconditions"].as_object().expect("前提逐条的结论");
+        assert_eq!(preconditions.len(), 7, "{answer}");
+        for (key, holds) in preconditions {
+            let expected = !failing.contains(&key.as_str());
+            assert_eq!(holds, &json!(expected), "{key}: {answer}");
+        }
+    }
+
+    /// PUB-6 验收第 1 条：`pid_publish_check` 答前提逐条的结论、四项门禁、目标目录和这次会用的修订号，前提和
+    /// 门禁都过了 `can_publish` 才为真；是查询，不改图、不写东西。图有没保存的修改、磁盘上的文件对不上、会话
+    /// 只读时各是那一条为假，门禁照算；没保存过的图门禁、目标目录、修订号都是 `null`。`dir`、`rev` 同命令的
+    /// 目标目录和 `REV`，写错是 `invalid_request` 或 §3.6 的码。能力清单里有 `pid_publish`。
+    #[test]
+    fn pid_publish_check_op_answers_each_precondition_the_gates_and_the_target() {
+        let scratch = Scratch::new();
+        only_rule(&scratch, "DR-001");
+        let mut app = sheet(&scratch);
+        let current = scratch.path("PID-1101.dwg");
+        let state = app.automation_op(r#"{"protocol":1,"op":"state"}"#);
+        assert!(
+            state["capabilities"]
+                .as_array()
+                .is_some_and(|names| names.contains(&json!("pid_publish"))),
+            "{state}"
+        );
+        let before = scratch.listing();
+        let drawing = drawing_state(&app, &current);
+        let checked = |app: &mut OpenCADStudio| request(app, json!({"op": "pid_publish_check"}));
+
+        let answer = checked(&mut app);
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["can_publish"], true, "{answer}");
+        only_failing(&answer, &[]);
+        let gates = &answer["gates"];
+        assert_eq!(gates["drc_errors"], 0, "{answer}");
+        assert_eq!(gates["duplicate_tags"], 0, "{answer}");
+        assert_eq!(gates["master_data"], "not_configured", "{answer}");
+        assert_eq!(gates["index_complete"], true, "{answer}");
+        assert_eq!(gates["result"], publish_pkg::PASSED, "{answer}");
+        let target = scratch.path(DEFAULT_TARGET).display().to_string();
+        assert_eq!(answer["target_dir"], target, "{answer}");
+        assert_eq!(answer["next_revision"], 1, "{answer}");
+        assert_eq!(scratch.listing(), before, "检查写了东西");
+        assert_eq!(drawing_state(&app, &current), drawing, "检查动了图");
+
+        let ask = json!({"op": "pid_publish_check", "dir": "out dir", "rev": 4});
+        let answer = request(&mut app, ask);
+        let target = scratch.path("out dir").display().to_string();
+        assert_eq!(answer["target_dir"], target, "{answer}");
+        assert_eq!(answer["next_revision"], 4, "{answer}");
+
+        let i = app.active_tab;
+        let failing = |app: &mut OpenCADStudio, which: &str| {
+            let answer = checked(app);
+            assert_eq!(answer["ok"], true, "{which}: {answer}");
+            assert_eq!(answer["can_publish"], false, "{which}: {answer}");
+            only_failing(&answer, &[which]);
+            let result = &answer["gates"]["result"];
+            assert_eq!(result, publish_pkg::PASSED, "{which}: {answer}");
+        };
+        app.tabs[i].dirty = true;
+        failing(&mut app, "clean");
+        app.tabs[i].dirty = false;
+        let recorded = app.tabs[i].disk_fingerprint.take();
+        failing(&mut app, "file_unchanged");
+        app.tabs[i].disk_fingerprint = recorded;
+        app.collab.readonly = true;
+        failing(&mut app, "writable_session");
+        app.collab.readonly = false;
+
+        fs::write(scratch.path("a file.txt"), b"not a folder").expect("写文件");
+        for (ask, code) in [
+            (json!({"dir": "a file.txt"}), PUBLISH_TARGET_INVALID),
+            (json!({"rev": 0}), PUBLISH_REVISION_INVALID),
+            (json!({"rev": -1}), PUBLISH_REVISION_INVALID),
+            (json!({"rev": "2"}), PUBLISH_REVISION_INVALID),
+            (json!({"dir": ""}), "invalid_request"),
+            (json!({"dir": 7}), "invalid_request"),
+            (json!({"allow_offline": "yes"}), "invalid_request"),
+        ] {
+            let mut ask = ask;
+            ask["op"] = json!("pid_publish_check");
+            let answer = request(&mut app, ask.clone());
+            assert_eq!(answer["ok"], false, "{ask}: {answer}");
+            assert_eq!(answer["code"], code, "{ask}: {answer}");
+        }
+
+        let mut unsaved = OpenCADStudio::new_for_test();
+        let _ = unsaved.automation_op(r#"{"op":"new"}"#);
+        let answer = checked(&mut unsaved);
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["can_publish"], false, "{answer}");
+        assert_eq!(answer["preconditions"]["saved"], false, "{answer}");
+        assert_eq!(answer["preconditions"]["file_unchanged"], false, "{answer}");
+        for key in ["gates", "target_dir", "next_revision"] {
+            assert_eq!(answer[key], Value::Null, "{key}: {answer}");
+        }
+    }
+
+    /// 项目里还有没打开的图时 `pid_publish_check` 先应答 `scanning`（读了几个、共几个），读完再发才是结论：
+    /// 泵没填名称、位号另一张图上也有，门禁拦下（`result` 是 `PUBLISH_BLOCKED`），前提都过了 `can_publish` 也为假。
+    #[test]
+    fn pid_publish_check_op_answers_scanning_then_the_blocked_gates() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        other_sheet(&scratch);
+        let ask = json!({"protocol": 1, "op": "pid_publish_check"});
+        let (answer, task) = app.control_request(ask.clone());
+        assert_eq!(
+            answer,
+            json!({"ok": true, "status": "scanning", "done": 0, "total": 1})
+        );
+        app.drive_headless_task(task).expect("后台读");
+        let (answer, _) = app.control_request(ask);
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["can_publish"], false, "{answer}");
+        only_failing(&answer, &[]);
+        let gates = &answer["gates"];
+        let errors = gates["drc_errors"].as_u64().unwrap_or_default();
+        assert!(errors > 0, "{answer}");
+        assert_eq!(gates["duplicate_tags"], 1, "{answer}");
+        assert_eq!(gates["result"], PUBLISH_BLOCKED, "{answer}");
+    }
+
+    /// PUB-6 验收第 3 条：带同步记录的图，`preconditions` 里队列空、没有不一致、连着并补齐三条（`collab_synced`、
+    /// `collab_consistent`、`collab_online`）各自照实答，不在先不满足的那条停下；有一条不满足 `can_publish` 就为假，
+    /// `allow_offline` 只放过没连着，`collab_online` 照实为假。连着并补齐了三条都为真。
+    #[test]
+    fn pid_publish_check_op_answers_the_collab_preconditions_one_by_one() {
+        let record = FileCollabState {
+            drawing_id: "PID-1101".to_owned(),
+            repo_id: "repo-1".to_owned(),
+            revision: 3,
+        };
+        let queued = QueuedOp {
+            op_id: "op-1".to_owned(),
+            payload: json!({ "changes": [] }),
+            base_revision: 3,
+            on: true,
+            label: "改位号".to_owned(),
+            user_id: Some("u-1".to_owned()),
+            queued_at: Some(1_795_000_000),
+            inverse: None,
+        };
+        let apart = Diverged {
+            code: collab_state::REVISION_GAP.to_owned(),
+            message: "缺了修订 4".to_owned(),
+            at: 1_795_000_000,
+        };
+        let checked = |app: &mut OpenCADStudio, allow_offline: bool| {
+            let ask = json!({"op": "pid_publish_check", "allow_offline": allow_offline});
+            request(app, ask)
+        };
+
+        let scratch = Scratch::new();
+        only_rule(&scratch, "DR-001");
+        let mut app = sheet_with(&scratch, |document| {
+            collab_state::store_state(document, Some(&record));
+            collab_state::store_queue(document, std::slice::from_ref(&queued));
+        });
+        for allow_offline in [false, true] {
+            let answer = checked(&mut app, allow_offline);
+            only_failing(&answer, &["collab_synced", "collab_online"]);
+            assert_eq!(answer["can_publish"], false, "{answer}");
+        }
+
+        let scratch = Scratch::new();
+        only_rule(&scratch, "DR-001");
+        let mut app = sheet_with(&scratch, |document| {
+            collab_state::store_state_diverged(document, Some(&record), Some(&apart));
+        });
+        for allow_offline in [false, true] {
+            let answer = checked(&mut app, allow_offline);
+            only_failing(&answer, &["collab_consistent", "collab_online"]);
+            assert_eq!(answer["can_publish"], false, "{answer}");
+        }
+
+        let scratch = Scratch::new();
+        only_rule(&scratch, "DR-001");
+        let mut app = sheet_with(&scratch, |document| {
+            collab_state::store_state(document, Some(&record));
+        });
+        for allow_offline in [false, true] {
+            let answer = checked(&mut app, allow_offline);
+            only_failing(&answer, &["collab_online"]);
+            assert_eq!(answer["can_publish"], allow_offline, "{answer}");
+        }
+        let i = app.active_tab;
+        app.collab.document = Some(app.tabs[i].id);
+        app.collab.session_id = Some("s-1".to_owned());
+        app.collab.connected = true;
+        let claim = FileClaim {
+            drawing_id: record.drawing_id.clone(),
+            repo_id: record.repo_id.clone(),
+            revision: record.revision,
+        };
+        assert!(app.collab.seed_file_state(&claim, Vec::new(), Vec::new()));
+        let answer = checked(&mut app, false);
+        only_failing(&answer, &[]);
+        assert_eq!(answer["can_publish"], true, "{answer}");
+    }
+
+    /// PUB-6 验收第 1 条：`pid_publish` 同 `PIDPUBLISH`，结果是包名、包的目录、修订号、发布前快照的序号、文件数、
+    /// 字节数和门禁；包校验得过，图不动。`rev`、`dir` 同命令的 `REV` 和目标目录。经 REST 是 201，见 `rest` 的测试。
+    #[test]
+    fn pid_publish_op_publishes_a_package_and_answers_what_it_wrote() {
+        let scratch = Scratch::new();
+        only_rule(&scratch, "DR-001");
+        let mut app = sheet(&scratch);
+        let current = scratch.path("PID-1101.dwg");
+        let before = drawing_state(&app, &current);
+
+        let wrote = settled(&mut app, &json!({"op": "pid_publish"}));
+        assert_eq!(wrote["ok"], true, "{wrote}");
+        let package = scratch.path(DEFAULT_TARGET).join("PID-1101-r001");
+        let result = &wrote["result"];
+        assert_eq!(result["package_id"], "PID-1101-r001", "{wrote}");
+        assert_eq!(result["path"], package.display().to_string(), "{wrote}");
+        assert_eq!(result["revision"], 1, "{wrote}");
+        assert_eq!(result["snapshot_seq"], 1, "{wrote}");
+        assert_eq!(result["files"], 11, "{wrote}");
+        let bytes: u64 = names(&package)
+            .iter()
+            .map(|name| fs::metadata(package.join(name)).expect("包里的文件").len())
+            .sum();
+        assert_eq!(result["bytes"], bytes, "{wrote}");
+        let manifest = json_at(&package.join("manifest.json"));
+        assert_eq!(result["gates"], manifest["gates"], "{wrote}");
+        assert_eq!(result["gates"]["result"], publish_pkg::PASSED, "{wrote}");
+        publish_pkg::verify_package(&package).expect("自检过得了");
+        assert_eq!(drawing_state(&app, &current), before, "发布动了图");
+
+        let ask = json!({"op": "pid_publish", "rev": 5, "dir": "out dir"});
+        let wrote = settled(&mut app, &ask);
+        assert_eq!(wrote["ok"], true, "{wrote}");
+        assert_eq!(wrote["result"]["package_id"], "PID-1101-r005", "{wrote}");
+        assert_eq!(wrote["result"]["snapshot_seq"], 2, "{wrote}");
+        assert_eq!(names(&scratch.path("out dir")), ["PID-1101-r005"]);
+    }
+
+    /// PUB-6 验收第 1 条：`plot` 交给出图，字段同 `plot` 操作，PDF 和 SVG 都用它——A3 竖放、横放出来的 SVG 各是
+    /// 297×420、420×297 毫米；纸张不认识时出包在出图这一步失败（`PUBLISH_FAILED`，`step` 是 `plot`），不留包。
+    /// `plot` 不是对象、带 `path`、`layout` 是 `all` 都是 `invalid_request`，什么也不写。
+    #[test]
+    fn pid_publish_op_hands_plot_to_both_plots() {
+        let scratch = Scratch::new();
+        only_rule(&scratch, "DR-001");
+        let mut app = sheet(&scratch);
+        let published = scratch.path(DEFAULT_TARGET);
+        for (package, orientation, size) in [
+            (
+                "PID-1101-r001",
+                "Portrait",
+                "width=\"297mm\" height=\"420mm\"",
+            ),
+            (
+                "PID-1101-r002",
+                "Landscape",
+                "width=\"420mm\" height=\"297mm\"",
+            ),
+        ] {
+            let plot = json!({"paper": "A3", "orientation": orientation});
+            let wrote = settled(&mut app, &json!({"op": "pid_publish", "plot": plot}));
+            assert_eq!(wrote["ok"], true, "{orientation}: {wrote}");
+            let svg =
+                fs::read_to_string(published.join(package).join("PID-1101.svg")).expect("SVG");
+            let head = svg.lines().take(3).collect::<Vec<_>>().join("\n");
+            assert!(svg.contains(size), "{orientation}: {head}");
+        }
+
+        let ask = json!({"op": "pid_publish", "plot": {"paper": "No Such Paper"}});
+        let failed = settled(&mut app, &ask);
+        assert_eq!(failed["ok"], false, "{failed}");
+        assert_eq!(failed["code"], PUBLISH_FAILED, "{failed}");
+        assert_eq!(failed["step"], "plot", "{failed}");
+        let error = failed["error"].as_str().unwrap_or_default();
+        assert!(error.contains("invalid_paper"), "{failed}");
+        assert_eq!(names(&published), ["PID-1101-r001", "PID-1101-r002"]);
+
+        let before = scratch.listing();
+        for plot in [
+            json!("A3"),
+            json!({"path": "elsewhere.pdf"}),
+            json!({"layout": "ALL"}),
+        ] {
+            let refused = request(&mut app, json!({"op": "pid_publish", "plot": plot}));
+            assert_eq!(refused["code"], "invalid_request", "{plot}: {refused}");
+        }
+        assert_eq!(scratch.listing(), before, "plot 写错了还写了东西");
+    }
+
+    /// PUB-6 验收第 2 条：门禁没过的 `pid_publish` 是 `PUBLISH_BLOCKED`，带四项门禁、重复位号的各处和检查报告；
+    /// 项目里还有没打开的图时先应答 `scanning`。什么也不写——快照也没有。
+    #[test]
+    fn pid_publish_op_answers_blocked_with_the_gates_and_the_duplicates() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        other_sheet(&scratch);
+        let before = scratch.listing();
+        let first = request(&mut app, json!({"op": "pid_publish"}));
+        assert_eq!(first["status"], "scanning", "{first}");
+        assert_eq!(first["total"], 1, "{first}");
+
+        let blocked = settled(&mut app, &json!({"op": "pid_publish"}));
+        assert_eq!(blocked["ok"], false, "{blocked}");
+        assert_eq!(blocked["code"], PUBLISH_BLOCKED, "{blocked}");
+        let gates = &blocked["gates"];
+        let errors = gates["drc_errors"].as_u64().unwrap_or_default();
+        assert!(errors > 0, "{blocked}");
+        assert_eq!(gates["duplicate_tags"], 1, "{blocked}");
+        assert_eq!(gates["result"], PUBLISH_BLOCKED, "{blocked}");
+        let duplicates = blocked["duplicates"].as_array().expect("重复位号");
+        assert_eq!(duplicates.len(), 1, "{blocked}");
+        let mut drawings: Vec<&str> = duplicates[0]["places"]
+            .as_array()
+            .expect("各处")
+            .iter()
+            .filter_map(|place| place["drawing_id"].as_str())
+            .collect();
+        drawings.sort_unstable();
+        assert_eq!(drawings, ["PID-1101", "PID-1102"], "{blocked}");
+        let results = blocked["report"]["results"].as_array().expect("检查报告");
+        assert!(!results.is_empty(), "{blocked}");
+        let error = blocked["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains(&format!("{errors} 条错误、1 个重复位号")),
+            "{blocked}"
+        );
+        assert_eq!(scratch.listing(), before, "拦下了还写了东西");
+    }
+
+    /// PUB-6 验收第 2 条：只读会话里 `pid_publish` 是 `COLLAB_READONLY`，带拒绝的级别；没保存的修改是
+    /// `PUBLISH_UNSAVED`，修订号不大于已有的或不是正整数是 `PUBLISH_REVISION_INVALID`，这一版的名字被占了是
+    /// `PUBLISH_TARGET_EXISTS`；请求写错是 `invalid_request`。都不写任何东西。
+    #[test]
+    fn pid_publish_op_is_refused_by_a_readonly_session_and_by_the_preconditions() {
+        let scratch = Scratch::new();
+        only_rule(&scratch, "DR-001");
+        let mut app = sheet(&scratch);
+        let i = app.active_tab;
+        let published = scratch.path(DEFAULT_TARGET);
+        fs::create_dir_all(published.join("PID-1101-r002")).expect("建旧包");
+        fs::write(published.join("PID-1101-r003"), b"in the way").expect("占位");
+        let before = scratch.listing();
+
+        app.collab.readonly = true;
+        let refused = request(&mut app, json!({"op": "pid_publish", "rev": 4}));
+        assert_eq!(refused["code"], "COLLAB_READONLY", "{refused}");
+        assert_eq!(refused["level"], "state", "{refused}");
+        app.collab.readonly = false;
+        for (ask, code) in [
+            (json!({}), PUBLISH_TARGET_EXISTS),
+            (json!({"rev": 2}), PUBLISH_REVISION_INVALID),
+            (json!({"rev": 1.5}), PUBLISH_REVISION_INVALID),
+            (json!({"dir": ""}), "invalid_request"),
+            (json!({"allow_offline": 1}), "invalid_request"),
+        ] {
+            let mut ask = ask;
+            ask["op"] = json!("pid_publish");
+            let answer = request(&mut app, ask.clone());
+            assert_eq!(answer["ok"], false, "{ask}: {answer}");
+            assert_eq!(answer["code"], code, "{ask}: {answer}");
+        }
+        app.tabs[i].dirty = true;
+        let refused = request(&mut app, json!({"op": "pid_publish", "rev": 4}));
+        assert_eq!(refused["code"], PUBLISH_UNSAVED, "{refused}");
+        assert_eq!(scratch.listing(), before, "被拒了还写了东西");
+    }
+
+    /// PUB-6 验收第 3 条：带同步记录的图，队列不空、标了不一致、没连着时 `pid_publish` 各是 `COLLAB_UNSYNCED`、
+    /// `COLLAB_DIVERGED`、`COLLAB_OFFLINE`，带 `allow_offline: true` 也只放过没连着，被拒时什么也不写；没连着而
+    /// 带 `allow_offline: true` 发布成了，清单的 `collab` 记 `reconciled` 为假。
+    #[test]
+    fn pid_publish_op_publishes_offline_only_with_allow_offline() {
+        let record = FileCollabState {
+            drawing_id: "PID-1101".to_owned(),
+            repo_id: "repo-1".to_owned(),
+            revision: 3,
+        };
+        let queued = QueuedOp {
+            op_id: "op-1".to_owned(),
+            payload: json!({ "changes": [] }),
+            base_revision: 3,
+            on: true,
+            label: "改位号".to_owned(),
+            user_id: Some("u-1".to_owned()),
+            queued_at: Some(1_795_000_000),
+            inverse: None,
+        };
+        let apart = Diverged {
+            code: collab_state::REVISION_GAP.to_owned(),
+            message: "缺了修订 4".to_owned(),
+            at: 1_795_000_000,
+        };
+        let refused = |app: &mut OpenCADStudio, scratch: &Scratch, code: &str| {
+            let before = scratch.listing();
+            for allow_offline in [false, true] {
+                let ask = json!({"op": "pid_publish", "allow_offline": allow_offline});
+                let answer = request(app, ask);
+                assert_eq!(answer["code"], code, "{allow_offline}: {answer}");
+                assert_eq!(scratch.listing(), before, "{allow_offline}: 写了东西");
+            }
+        };
+
+        let scratch = Scratch::new();
+        only_rule(&scratch, "DR-001");
+        let mut app = sheet_with(&scratch, |document| {
+            collab_state::store_state(document, Some(&record));
+            collab_state::store_queue(document, std::slice::from_ref(&queued));
+        });
+        refused(&mut app, &scratch, COLLAB_UNSYNCED);
+
+        let scratch = Scratch::new();
+        only_rule(&scratch, "DR-001");
+        let mut app = sheet_with(&scratch, |document| {
+            collab_state::store_state_diverged(document, Some(&record), Some(&apart));
+        });
+        refused(&mut app, &scratch, COLLAB_DIVERGED);
+
+        let scratch = Scratch::new();
+        only_rule(&scratch, "DR-001");
+        let mut app = sheet_with(&scratch, |document| {
+            collab_state::store_state(document, Some(&record));
+        });
+        let before = scratch.listing();
+        let answer = request(&mut app, json!({"op": "pid_publish"}));
+        assert_eq!(answer["code"], COLLAB_OFFLINE, "{answer}");
+        assert_eq!(scratch.listing(), before, "没连着还写了东西");
+        let wrote = settled(
+            &mut app,
+            &json!({"op": "pid_publish", "allow_offline": true}),
+        );
+        assert_eq!(wrote["ok"], true, "{wrote}");
+        let package = scratch.path(DEFAULT_TARGET).join("PID-1101-r001");
+        let manifest = json_at(&package.join("manifest.json"));
+        let offline = json!({
+            "drawing_id": "PID-1101",
+            "repo_id": "repo-1",
+            "revision": 3,
+            "reconciled": false,
+        });
+        assert_eq!(manifest["collab"], offline, "{manifest}");
+    }
+
+    /// PUB-6 验收第 2 条：出包中途失败的 `pid_publish` 是 `PUBLISH_FAILED`，`step` 是哪一步；不留包和临时目录，
+    /// 存下了的快照留着。
+    #[test]
+    fn pid_publish_op_that_fails_midway_answers_the_step() {
+        let scratch = Scratch::new();
+        only_rule(&scratch, "DR-001");
+        let mut app = sheet(&scratch);
+        let published = scratch.path(DEFAULT_TARGET);
+        for (step, saved) in [("snapshot", 0), ("bom", 1), ("commit", 2)] {
+            BREAK_AT.with(|at| at.set(Some(step)));
+            let failed = request(&mut app, json!({"op": "pid_publish"}));
+            BREAK_AT.with(|at| at.set(None));
+            assert_eq!(failed["ok"], false, "{step}: {failed}");
+            assert_eq!(failed["code"], PUBLISH_FAILED, "{step}: {failed}");
+            assert_eq!(failed["step"], step, "{step}: {failed}");
+            assert_eq!(snapshots(&scratch).len(), saved, "{step}: 快照");
+            assert!(
+                !published.exists(),
+                "{step}: 留下了 {:?}",
+                names(&published)
+            );
+        }
+    }
+
+    /// PUB-6 验收第 1 条：`pid_publications` 同 `PIDPUBLISH LIST`——目标目录、发布到哪一版了（`state`）和各包，新的
+    /// 在前，每个带包的目录；`pid_publish_verify` 同 `PIDPUBLISH VERIFY`——完好的包答 §3.5 的报告，目录不在是
+    /// `PACKAGE_NOT_FOUND`，动过一个字节是 `PACKAGE_CORRUPT` 并带报告，不给 `path` 是 `invalid_request`。两个都是
+    /// 查询：只读会话里、自动化停了也照用，`pid_publish` 这时是 `disabled`。图没保存过时 `pid_publications` 是
+    /// `PUBLISH_UNSAVED`。
+    #[test]
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn pid_publish_ops_list_the_packages_and_verify_one_as_queries() {
+        let scratch = Scratch::new();
+        only_rule(&scratch, "DR-001");
+        let mut app = sheet(&scratch);
+        let listed = request(&mut app, json!({"op": "pid_publications"}));
+        assert_eq!(listed["ok"], true, "{listed}");
+        assert_eq!(listed["state"], "未发布", "{listed}");
+        assert_eq!(listed["packages"], json!([]), "{listed}");
+        for _ in 0..2 {
+            let wrote = settled(&mut app, &json!({"op": "pid_publish"}));
+            assert_eq!(wrote["ok"], true, "{wrote}");
+        }
+
+        app.collab.readonly = true;
+        let stopped = request(&mut app, json!({"op": "stop"}));
+        assert_eq!(stopped["ok"], true, "{stopped}");
+        let refused = request(&mut app, json!({"op": "pid_publish"}));
+        assert_eq!(refused["code"], "disabled", "{refused}");
+        let listed = request(&mut app, json!({"op": "pid_publications"}));
+        assert_eq!(listed["ok"], true, "{listed}");
+        let published = scratch.path(DEFAULT_TARGET);
+        assert_eq!(listed["drawing_id"], "PID-1101", "{listed}");
+        assert_eq!(
+            listed["target_dir"],
+            published.display().to_string(),
+            "{listed}"
+        );
+        assert_eq!(listed["state"], "已发布，修订 2", "{listed}");
+        let packages = listed["packages"].as_array().expect("各包");
+        let ids: Vec<&Value> = packages
+            .iter()
+            .map(|package| &package["package_id"])
+            .collect();
+        assert_eq!(ids, ["PID-1101-r002", "PID-1101-r001"], "{listed}");
+        let newest = &packages[0];
+        assert_eq!(newest["revision"], 2, "{listed}");
+        let path = published.join("PID-1101-r002");
+        assert_eq!(newest["path"], path.display().to_string(), "{listed}");
+        assert_eq!(newest["current"], true, "{listed}");
+        assert!(newest["published_at"].is_i64(), "{listed}");
+        assert!(newest["published_by"].is_string(), "{listed}");
+        assert_eq!(packages[1]["current"], false, "{listed}");
+
+        let ask = json!({"op": "pid_publish_verify", "path": "pid-publish/PID-1101-r002"});
+        let verified = request(&mut app, ask);
+        let report = json!({
+            "ok": true,
+            "package_id": "PID-1101-r002",
+            "revision": 2,
+            "files": 11,
+            "missing": [],
+            "mismatched": [],
+            "extra": [],
+        });
+        assert_eq!(verified, report);
+        for (ask, code) in [
+            (
+                json!({"path": "pid-publish/PID-1101-r009"}),
+                PACKAGE_NOT_FOUND,
+            ),
+            (json!({}), "invalid_request"),
+            (json!({"path": 7}), "invalid_request"),
+        ] {
+            let mut ask = ask;
+            ask["op"] = json!("pid_publish_verify");
+            let answer = request(&mut app, ask.clone());
+            assert_eq!(answer["code"], code, "{ask}: {answer}");
+        }
+
+        let bom = path.join("bom.csv");
+        let mut permissions = fs::metadata(&bom).expect("材料清单").permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&bom, permissions).expect("去掉只读");
+        let mut bytes = fs::read(&bom).expect("读材料清单");
+        bytes[0] ^= 1;
+        fs::write(&bom, bytes).expect("改一个字节");
+        let full = path.display().to_string();
+        let corrupt = request(&mut app, json!({"op": "pid_publish_verify", "path": full}));
+        assert_eq!(corrupt["code"], PACKAGE_CORRUPT, "{corrupt}");
+        assert_eq!(corrupt["mismatched"], json!(["bom.csv"]), "{corrupt}");
+        assert_eq!(corrupt["package_id"], "PID-1101-r002", "{corrupt}");
+
+        let mut unsaved = OpenCADStudio::new_for_test();
+        let _ = unsaved.automation_op(r#"{"op":"new"}"#);
+        let listed = request(&mut unsaved, json!({"op": "pid_publications"}));
+        assert_eq!(listed["code"], PUBLISH_UNSAVED, "{listed}");
     }
 
     /// 契约规模：2,000 个对象的合成图（`IX-4`）。

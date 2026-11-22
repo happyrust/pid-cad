@@ -204,9 +204,8 @@ fn forward(
                 response = transact(sender, mutate_request(&op, &fields, cached), wait, stream);
             }
             harvest(document_cache, &response);
-            let status = rest::map_status(response.clone(), created == 201);
             (
-                if status == 200 { created } else { status },
+                rest::map_status(response.clone(), created == 201),
                 compact(response),
             )
         }

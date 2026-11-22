@@ -488,3 +488,36 @@ pub fn list_packages(target_dir: &Path, drawing_id: &str) -> Vec<PackageInfo>;
 5. **目录怎么算**：`LIST` 的目标目录与发布同一个算法：相对路径从图纸所在目录算，不写是 `pid-publish`；目录不在就是「未发布」，不建目录。`VERIFY` 的相对路径从图纸所在目录算，图没保存过时从程序的当前目录算，写完整路径也行。
 6. **时间**：清单的 `published_at`（Unix 秒）写成 UTC 的日期和时刻，到分，标明 UTC，与快照列表相同（标准库拿不到本机时区）。
 7. **命令行的写法**：子命令词不分大小写；`LIST` 后面至多一个目录，`VERIFY` 后面恰好一个，有空格的加双引号。目录写了两个、写成空串、引号没配对、`VERIFY` 没写目录，都报写法错（不带错误码）并说正确写法。
+
+### 11.6 `PUB-6`：发布的四个自动化操作，REST 与 MCP（2026-11-22）
+
+**做了什么**（`src/app/commands/pidpublish.rs`、`src/app/control/mod.rs`、`src/app/control/http_bridge.rs`、`src/rest.rs`、`src/rest_openapi.json`、`src/mcp.rs`、`src/mcp_ops.rs`）：
+
+- `pid_publish_check`（查询，自动化停着也能用）：前提逐条照实答，不在第一条不满足的地方停下；再答四项门禁（同 `PIDPUBLISH CHECK`，现做一次检查）、目标目录和这次会用的修订号。要读的图缓存里没有时答 `scanning`（带 `done`、`total`）并在后台读，调用方稍后用同样的请求再发。
+- `pid_publish`（写，本机文件）：同 `PIDPUBLISH`。`dir`、`rev`、`allow_offline` 就是命令行上的目标目录、`REV`、`ALLOW_OFFLINE`；`plot` 交给 PDF 和 SVG 的出图。请求、会话、前提、规则包和扫描都在进写操作流程之前的等待一步里看（同 `pid_bom_export`），扫描没做完时答 `scanning`，什么也没写。出包一段从命令里抽成 `pidpublish_pack`，命令与操作共用，命令行上的说法没变。不能放进 `batch`。
+- `pid_publications`、`pid_publish_verify`（查询）：同 `PIDPUBLISH LIST`、`PIDPUBLISH VERIFY`，接 `PUB-5` 的 `pidpublish_listed` 和 `verify_package`。
+- REST：§5.3 的四条路由和 OpenAPI。`map_status`：§3.6 里请求的问题是 400，只读会话 403，`PACKAGE_NOT_FOUND` 404；图和磁盘的状态不让发的——`PUBLISH_BLOCKED`、`PUBLISH_UNSAVED`、`PUBLISH_FILE_CHANGED`、`COLLAB_UNSYNCED`、`COLLAB_DIVERGED`、`COLLAB_OFFLINE`、`PUBLISH_TARGET_EXISTS`、`PACKAGE_INCOMPLETE`、`PACKAGE_CORRUPT`——是 409；`PUBLISH_FAILED` 500。
+- MCP：三个查询进 `READ_OPS`，`ocs_read` 多了 `dir`、`rev`、`allow_offline` 三个参数，`path` 的说明加上 `pid_publish_verify`；`pid_publish` 进 `EXECUTE_OPS`。工具清单摘要已更新。
+
+**与规格、任务写法不同的：**
+
+1. **修订号的参数叫 `rev`**，不是 §5.3 表里的 `revision`：与命令行的 `REV` 一致，也不和应答里的 `revision`（这次用的修订号）混。
+2. **`pid_publish` 的结果在 `result` 里**，不像 §5.3 表里那样平铺：控制协议的写操作都这样（`pid_snapshot_save`、`pid_bom_export` 也是），REST 照转。字段与表里的一致。
+3. **失败的说明在 `error` 里**，不是 §3.4 例子里的 `message`：控制面的失败应答都是 `{"ok":false,"status":"failed","code":…,"error":…}`。
+4. **`preconditions` 有七条**：§5.3 例子的四条之外，加上协同的 `collab_synced`、`collab_consistent`、`collab_online`（任务的验收要「这三条」），分别对应 `COLLAB_UNSYNCED`、`COLLAB_DIVERGED`、`COLLAB_OFFLINE`；图没有同步记录时三条都为真。`allow_offline` 写了 `true` 时 `collab_online` 仍照实答，但没连着不再挡 `can_publish`。
+5. **扫描中不是 201**：`POST /api/v1/pid/publish` 在项目还在读时答 200 和 `scanning`，出了包才是 201。`map_status` 改成成功的应答只有不是 `scanning` 时才给 201，`rest.rs` 和控制层的 HTTP 桥两处写操作都改用它。
+6. **只读会话里 `pid_publish` 自己拒绝**：自动化操作不走命令行，碰不到命令闸门，所以在操作里照闸门的做法查一次：答协同给的码（`COLLAB_READONLY` 等，403），带 `level`，也记下这次尝试。
+7. **改的文件多了三个**：任务的「文件」一栏是四个，另外改了 `pidpublish.rs`（四个操作写在发布模块里）、`http_bridge.rs`（上一条的 201）、`mcp_ops.rs`（`pid_publish` 的定义，和下面第 10 条的说明压缩）。
+
+**规格没写到、这里定下的：**
+
+1. **图没保存过时的 `pid_publish_check`** 不报错：`saved` 为假，`can_publish` 为假，`gates`、`target_dir`、`next_revision` 都是 `null`——没有图纸文件就推不出图号和目标目录，门禁也无从算起。
+2. **`can_publish`**：七条前提都放行（协同三条照 `collab_preconditions` 判，见上面第 4 条）并且门禁「放行」。**`next_revision`**：这次会用的修订号，写了 `rev` 就是它，不写是下一版。`dir` 写的目录用不了、`rev` 不对、这一版的包已经有了，`pid_publish_check` 与 `pid_publish` 一样答相应的错误码。
+3. **`plot` 的限制**：要是对象，`null` 等于没写；不能有 `path`（文件名由包定）；`layout` 不能是 `all`（本期一次只出一个布局）；这几种都是 `invalid_request`，什么也没写。其余字段由出图判断，例如纸张不认得时出包在「出图」一步失败：`PUBLISH_FAILED`，`step` 是 `plot`。
+4. **门禁没过**：`PUBLISH_BLOCKED` 的应答带 `gates`、`duplicates`（每个重复位号出现的各处）和 `report`（这次检查的报告），调用方不必再查一次。
+5. **出包失败**：`PUBLISH_FAILED` 带 `step`；`error` 里还说留下了什么（快照那一步就失败时什么都没写；之后的步骤失败时临时目录已删、发布前的快照留着）。
+6. **`pid_publications`** 的应答顶层多一个 `drawing_id`；各包的 `path` 由目标目录和包名拼出（§11.5）。
+7. **`pid_publish_verify` 不通过时**也带 §3.5 报告的各字段（缺了哪些、哪些对不上），`error` 是去掉打头错误码的原因。相对路径的算法同 `VERIFY`（§11.5 第 5 条）。
+8. **扫出的项目里找不到当前这张图**时答 `INDEX_IO_ERROR`（500），不发布。
+9. **REST 查询参数**：`allow_offline` 的 `true`/`1`、`false`/`0` 换成布尔，别的值原样交给操作、答 `invalid_request`（400）；`rev` 不是整数时也原样交给操作，答 `PUBLISH_REVISION_INVALID`（400）。
+10. **MCP 执行工具的说明压缩**：加上 `pid_publish` 后执行工具的 schema 是 50,736 字节，超过测试定的 50,000 上限。上限没放宽，把几条 P&ID 操作（BOM 导出、规则包、快照、定位、豁免、主数据、发布）和 `grip_drag`、`node_graph`、`pointer`、`click` 的说明写短，意思不变，省下 950 字节，现在约 49,786。

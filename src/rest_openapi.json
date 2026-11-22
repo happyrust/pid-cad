@@ -305,6 +305,47 @@
         "responses": {"200": {"description": "The comparison: version, a and b (ref as asked, seq, drawing_id, created_at, objects), identical, summary, added, removed, modified, edges and notices"}, "400": {"description": "Malformed request (no a, or move_tolerance is not a number of at least 0), DIFF_SAME_SNAPSHOT (both sides are the same), SNAPSHOT_FORMAT_INVALID or SNAPSHOT_VERSION_UNSUPPORTED"}, "404": {"description": "SNAPSHOT_NOT_FOUND"}, "409": {"description": "SNAPSHOT_CORRUPT, or INDEX_NO_PROJECT_DIR (a sequence number on a drawing never saved)"}, "500": {"description": "SNAPSHOT_IO_ERROR"}}
       }
     },
+    "/api/v1/pid/publish/check": {
+      "get": {
+        "summary": "Whether the current P&ID drawing can be published: each precondition, the publish gates (a fresh rule check across the project, duplicate tags, master data, every drawing read), the target folder and the revision it would get; writes nothing",
+        "parameters": [
+          {"name": "dir", "in": "query", "description": "Target folder; a relative path starts from the saved drawing's folder. Defaults to pid-publish", "schema": {"type": "string"}},
+          {"name": "rev", "in": "query", "description": "Revision to check, above every published one; defaults to the next", "schema": {"type": "integer", "minimum": 1}},
+          {"name": "allow_offline", "in": "query", "description": "true lets a drawing with a sync record publish while not connected and caught up", "schema": {"type": "boolean"}}
+        ],
+        "responses": {"200": {"description": "can_publish (every precondition and gate holds), preconditions (saved, clean, file_unchanged, writable_session, collab_synced, collab_consistent, collab_online), gates (drc_errors, drc_warnings, drc_hints, waived, duplicate_tags, master_data, index_complete, result), target_dir and next_revision; gates, target_dir and next_revision are null for a drawing never saved. Or status scanning with done and total while the project's files are still being read: send it again later"}, "400": {"description": "Malformed request (no drawing open, dir empty, allow_offline not true or false), PUBLISH_TARGET_INVALID or PUBLISH_REVISION_INVALID"}, "409": {"description": "INDEX_NO_PROJECT_DIR or INDEX_DRAWING_ID_DUPLICATED"}, "500": {"description": "INDEX_IO_ERROR or RULESET_IO_ERROR"}}
+      }
+    },
+    "/api/v1/pid/publish": {
+      "post": {
+        "summary": "Publish the saved current P&ID drawing as a revision package (the drawing, PDF, SVG, bill of materials, snapshot, rule-check report and manifest) in the target folder when every precondition and gate holds. Writes a folder on this machine and changes no drawing",
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": {
+          "dir": {"type": "string", "description": "Target folder; a relative path starts from the saved drawing's folder. Defaults to pid-publish"},
+          "rev": {"type": "integer", "minimum": 1, "description": "Revision, above every published one; defaults to the next"},
+          "plot": {"type": "object", "description": "PDF and SVG settings as the plot operation takes them (layout, paper, orientation, scale and so on), without path; one layout, not all. Defaults to model space, extents, fit to paper"},
+          "allow_offline": {"type": "boolean", "description": "Publish a drawing with a sync record while not connected and caught up; the manifest records it as not reconciled"}
+        }}}}},
+        "responses": {"200": {"description": "status scanning with done and total while the project's files are still being read: send it again later; nothing is written yet"}, "201": {"description": "result: package_id, path, revision, snapshot_seq (the snapshot taken before publishing), files, bytes and gates"}, "400": {"description": "Malformed request (no drawing open, dir empty, plot not an object, with path or with layout all, allow_offline not true or false), PUBLISH_TARGET_INVALID or PUBLISH_REVISION_INVALID"}, "403": {"description": "COLLAB_READONLY or PERM_DENIED_*: the collaboration session may not publish; level says why"}, "409": {"description": "PUBLISH_BLOCKED (with gates, duplicates and report), PUBLISH_UNSAVED, PUBLISH_FILE_CHANGED, COLLAB_UNSYNCED, COLLAB_DIVERGED, COLLAB_OFFLINE, PUBLISH_TARGET_EXISTS, INDEX_NO_PROJECT_DIR or INDEX_DRAWING_ID_DUPLICATED; nothing is written"}, "500": {"description": "PUBLISH_FAILED with step (snapshot, plot, bom, write or commit): no package is left, a snapshot already taken stays; INDEX_IO_ERROR or RULESET_IO_ERROR"}}
+      }
+    },
+    "/api/v1/pid/publications": {
+      "get": {
+        "summary": "The current P&ID drawing's packages in the target folder, newest first, and the revision it is published at; writes nothing",
+        "parameters": [
+          {"name": "dir", "in": "query", "description": "Target folder; a relative path starts from the saved drawing's folder. Defaults to pid-publish", "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "drawing_id, target_dir, state (未发布, 已发布，修订 N, or 修订 N 之后有改动) and packages: package_id, revision, path, published_at (Unix seconds; null when the manifest cannot be read), published_by and current (the newest one matching the drawing file)"}, "400": {"description": "Malformed request (no drawing open, dir empty)"}, "409": {"description": "PUBLISH_UNSAVED (the drawing was never saved), INDEX_NO_PROJECT_DIR or INDEX_DRAWING_ID_DUPLICATED"}, "500": {"description": "INDEX_IO_ERROR: the project folder could not be read"}}
+      }
+    },
+    "/api/v1/pid/publish/verify": {
+      "post": {
+        "summary": "Check a published package against its manifest: every listed file there, with its size and checksum; writes nothing",
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "required": ["path"], "properties": {
+          "path": {"type": "string", "description": "The package folder; a relative path starts from the saved drawing's folder"}
+        }}}}},
+        "responses": {"200": {"description": "package_id, revision, files, and missing, mismatched and extra (only extra may be non-empty: it does not fail)"}, "400": {"description": "Malformed request: no path"}, "404": {"description": "PACKAGE_NOT_FOUND: no such folder, or no manifest in it"}, "409": {"description": "PACKAGE_INCOMPLETE or PACKAGE_CORRUPT, with the report"}}
+      }
+    },
     "/api/v1/entities": {
       "get": {
         "summary": "Query entities (type, layer, detail, offset, limit, fields, handles, bounds, near, contains_point, intersections)",
