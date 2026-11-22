@@ -423,6 +423,9 @@ pub(super) struct DocumentTab {
     /// (`commands::pidverify`), or why it did not come out. Kept in memory
     /// only, as the check is.
     pub(super) pid_bom: Option<super::commands::pidverify::PanelBom>,
+    /// This drawing's numbered snapshots as the verify panel last read them,
+    /// and the diff it made last (`commands::pidverify`). In memory only.
+    pub(super) pid_snapshots: super::commands::pidverify::PanelSnapshots,
     /// Model-space corners of the last crossing window drawn with no command
     /// running: STRETCH on that selection stretches through it (#1068).
     pub(super) last_crossing_window: Option<([f64; 2], [f64; 2])>,
@@ -975,6 +978,7 @@ impl DocumentTab {
             pid_legend: None,
             pid_check: None,
             pid_bom: None,
+            pid_snapshots: Default::default(),
             last_crossing_window: None,
             recent_colors: Vec::new(),
             layer_walk: None,

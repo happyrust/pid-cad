@@ -1148,7 +1148,7 @@ fn the_verify_panel_opens_from_the_pallet_menu_and_switches_tabs_in_the_real_vie
         ));
         for (tab, says) in [
             (Tab::Bom, "还没有生成材料清单。点上面的按钮开始。"),
-            (Tab::Deliver, "还没有快照和发布记录。"),
+            (Tab::Deliver, "图纸还没有保存，不能存带序号的快照"),
             (Tab::Check, "还没有检查过。点上面的按钮开始。"),
         ] {
             let at = find_in_view(&app, tab.label());

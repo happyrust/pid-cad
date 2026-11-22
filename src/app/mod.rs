@@ -1644,6 +1644,11 @@ pub(super) struct OpenCADStudio {
     /// the panel is open, the view is rebuilt after any message that changes
     /// it (`commands::pidverify`). `None` before the first build.
     pub(in crate::app) pid_verify_built_from: Option<commands::pidverify::Inputs>,
+    /// The drawing the panel last followed, by its tab and the file it is
+    /// saved to: when another comes in front, or the one in front becomes
+    /// another file, the rows ticked in the snapshot list go
+    /// (`commands::pidverify`).
+    pub(in crate::app) pid_verify_front: Option<(u64, Option<String>)>,
     /// Set while a remote `op_applied` is being folded into the document. The
     /// undo step that fold opens must not be broadcast back to the room
     /// (`src/app/collab/apply.rs`).
@@ -6793,6 +6798,7 @@ impl OpenCADStudio {
             pid_verify_ui: Default::default(),
             pid_verify_view: Default::default(),
             pid_verify_built_from: None,
+            pid_verify_front: None,
             applying_remote: false,
             #[cfg(not(target_arch = "wasm32"))]
             pid_backup_browser: Default::default(),

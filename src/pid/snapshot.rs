@@ -23,7 +23,7 @@ pub mod store;
 
 pub use compare::{
     diff, ByWhat, Change, Diff, DiffEdges, DiffObject, DiffSide, DiffSummary, EdgeChange, Notice,
-    DEFAULT_MOVE_TOLERANCE, DIFF_VERSION, DRAWING_ID_DIFFERS, LENGTH_UNIT_DIFFERS,
+    CONNECTOR, DEFAULT_MOVE_TOLERANCE, DIFF_VERSION, DRAWING_ID_DIFFERS, LENGTH_UNIT_DIFFERS,
 };
 
 /// 快照文件格式的版本。读到更高的版本报 [`SNAPSHOT_VERSION_UNSUPPORTED`]。

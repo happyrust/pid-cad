@@ -60,7 +60,7 @@ const DIFF_USAGE: &str =
 
 /// 比对的一边（§5.2）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Side {
+pub(super) enum Side {
     /// 当前图的第几份快照。
     Seq(u64),
     /// 快照文件：照写的，和从哪算起以后的路径。
@@ -102,7 +102,7 @@ impl Side {
 
 /// 快照命令做不成的原因。
 #[derive(Debug)]
-enum Failure {
+pub(super) enum Failure {
     /// 图没存过，没有放带序号快照的目录（§3.1）。
     NoProjectDir,
     /// 定当前图的图号时读项目目录出错。
@@ -116,7 +116,7 @@ enum Failure {
 }
 
 impl Failure {
-    fn code(&self) -> Option<&'static str> {
+    pub(super) fn code(&self) -> Option<&'static str> {
         match self {
             Self::NoProjectDir => Some(INDEX_NO_PROJECT_DIR),
             Self::Index(error) => Some(error.code()),
@@ -249,7 +249,7 @@ impl OpenCADStudio {
 
     /// 存一份快照：不给文件时带序号存进快照目录，先认目录再做快照，图没存过时不做；给了文件就
     /// 不编序号写成它。一并交出 `about` 从这份快照里取的东西。
-    fn pidsnapshot_store<T>(
+    pub(super) fn pidsnapshot_store<T>(
         &self,
         i: usize,
         file: Option<&Path>,
@@ -268,7 +268,7 @@ impl OpenCADStudio {
     }
 
     /// 第 `i` 个标签页的图的快照列表，连同快照目录和图号。
-    fn pidsnapshot_listed(
+    pub(super) fn pidsnapshot_listed(
         &self,
         i: usize,
     ) -> Result<(Vec<SnapshotInfo>, PathBuf, String), Failure> {
@@ -282,7 +282,8 @@ impl OpenCADStudio {
         Ok(store::export(&dir, seq, to)?)
     }
 
-    /// `PIDSNAPSHOT [SAVE [<原因>]]`：存一份带序号的快照。
+    /// `PIDSNAPSHOT [SAVE [<原因>]]`：存一份带序号的快照。「校验与交付」面板读过这张图的快照
+    /// 列表就重读。
     fn pidsnapshot_save(&mut self, i: usize, reason: &str) {
         match self.pidsnapshot_store(i, None, reason, snapshot_said) {
             Ok((saved, said)) => {
@@ -290,6 +291,7 @@ impl OpenCADStudio {
                 let path = saved.path.display();
                 let said = format!("PIDSNAPSHOT: 已存第 {seq} 份快照（{said}），文件 {path}。");
                 self.command_line.push_output(&said);
+                self.pid_verify_snapshots_saved(i);
             }
             Err(failure) => self.pidsnapshot_refuse("PIDSNAPSHOT", &failure),
         }
@@ -396,7 +398,7 @@ impl OpenCADStudio {
     }
 
     /// 比对甲、乙（§3.5–§3.7），位置差不超过 `tolerance` 的不算改了，`ref` 照写的填。
-    fn piddiff_compare(
+    pub(super) fn piddiff_compare(
         &self,
         i: usize,
         a: &Side,
@@ -423,7 +425,7 @@ impl OpenCADStudio {
     }
 
     /// 把比对结果写成 `name`，说写到哪里、几个字节。
-    fn piddiff_write(
+    pub(super) fn piddiff_write(
         &self,
         i: usize,
         name: &str,
@@ -518,7 +520,7 @@ impl OpenCADStudio {
 
     /// 控制面的 `pid_snapshot_save`，在写操作的流程里：同 `PIDSNAPSHOT SAVE`，给了 `path` 同
     /// `PIDSNAPSHOT FILE`。结果是序号（写成文件的是 `null`）、写到哪里、对象数、字节数和整个
-    /// 文件的 SHA-256。不改图。
+    /// 文件的 SHA-256。不改图。存的是带序号的，面板同 `PIDSNAPSHOT SAVE` 重读列表。
     pub(in crate::app) fn control_pid_snapshot_save(
         &mut self,
         req: &Value,
@@ -531,6 +533,9 @@ impl OpenCADStudio {
                 snapshot.counts.objects
             })
             .map_err(|failure| failure_answer(&failure))?;
+        if saved.seq.is_some() {
+            self.pid_verify_snapshots_saved(i);
+        }
         self.set_control_result(json!({
             "seq": saved.seq,
             "path": saved.path.display().to_string(),
@@ -658,7 +663,7 @@ fn diff_asked(text: &str) -> Option<(&str, &str, Option<&str>)> {
 }
 
 /// 一份快照是哪张图的、多少个对象、有没有没保存的修改。
-fn snapshot_said(snapshot: &Snapshot) -> String {
+pub(super) fn snapshot_said(snapshot: &Snapshot) -> String {
     let drawing = if snapshot.drawing_id.is_empty() {
         "没存过的图".to_owned()
     } else {

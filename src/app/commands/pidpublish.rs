@@ -624,7 +624,8 @@ impl OpenCADStudio {
     }
 
     /// 出包（§4，[`Self::pidpublish_pack`]）并说出来：包在哪里、几个文件、多大、发布前的快照是第
-    /// 几份和各步用时；没成时连同错误码和是哪一步说为什么、留下了什么。
+    /// 几份和各步用时；没成时连同错误码和是哪一步说为什么、留下了什么。发布前的快照出包没成也留着，
+    /// 成没成「校验与交付」面板都重读这张图的快照列表。
     fn pidpublish_package(&mut self, packing: &Packing<'_>) {
         let verb = verb_of(false);
         let mut timings = Timings::default();
@@ -645,6 +646,7 @@ impl OpenCADStudio {
                 self.pidpublish_failed(verb, &timings, &failed, &kept);
             }
         }
+        self.pid_verify_snapshots_saved(packing.i);
     }
 
     /// 出包（§4）：存发布前的快照，在目标目录里建临时目录，出图、算材料清单、写包、自检后落位
@@ -2613,6 +2615,24 @@ mod tests {
         assert_eq!(names(&scratch.path("out dir")), ["PID-1101-r001"]);
         assert!(!scratch.path(DEFAULT_TARGET).exists(), "发到了默认目录");
         assert_eq!(snapshots(&scratch), ["0001.json"]);
+    }
+
+    /// PNL-8：「校验与交付」面板读过这张图的快照列表，发布以后重读：发布前的快照列进来。
+    #[test]
+    fn pidpublish_has_the_pid_verify_panel_read_its_snapshots_again() {
+        let scratch = Scratch::new();
+        only_rule(&scratch, "DR-001");
+        let mut app = sheet(&scratch);
+        let ran = run(&mut app, "PIDVERIFY DELIVER");
+        assert_eq!(ran.error, None, "{}", ran.said);
+        let listed = |app: &OpenCADStudio| -> Vec<u64> {
+            let rows = &app.pid_verify_view.deliver.rows;
+            rows.iter().map(|row| row.info.seq).collect()
+        };
+        assert_eq!(listed(&app), Vec::<u64>::new());
+        let ran = run(&mut app, "PIDPUBLISH \"out dir\"");
+        assert_eq!(ran.error, None, "{}", ran.said);
+        assert_eq!(listed(&app), [1]);
     }
 
     /// PUB-4 验收第 4 条：带同步记录的图，队列不空、标了不一致、没连着时发布各报对应的码，什么也不写——连

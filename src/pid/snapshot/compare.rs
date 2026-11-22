@@ -21,7 +21,7 @@ pub const DRAWING_ID_DIFFERS: &str = "DRAWING_ID_DIFFERS";
 pub const LENGTH_UNIT_DIFFERS: &str = "LENGTH_UNIT_DIFFERS";
 
 /// 页间连接符在结果里的种类，同规则检查。
-const CONNECTOR: &str = "页间连接符";
+pub const CONNECTOR: &str = "页间连接符";
 
 /// 比对结果（§3.7），字段顺序就是 JSON 里的顺序。§3.7 例子开头的 `"ok": true` 由应答那一层加。
 #[derive(Debug, Clone, PartialEq, Serialize)]

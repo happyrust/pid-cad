@@ -21,9 +21,11 @@ use crate::pid::drc::{
     WAIVER_REASON_LIMIT,
 };
 use crate::pid::project_index::Duplicate;
+use crate::pid::snapshot::store::{SnapshotInfo, SnapshotStatus};
+use crate::pid::snapshot::{self, Change, Diff, DiffObject, DiffSide, DiffSummary, EdgeChange};
 use crate::ui::dock::{Chrome, PanelId};
 use crate::ui::wrap_bar::PosReport;
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input};
 use iced::{Element, Fill, Theme};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -74,15 +76,6 @@ impl Tab {
             Self::Deliver => "pid-verify-tab-deliver",
         }
     }
-
-    /// What the tab says while it has nothing to show.
-    fn empty(self) -> &'static str {
-        match self {
-            Self::Check => NEVER_CHECKED,
-            Self::Bom => NEVER_LISTED,
-            Self::Deliver => "还没有快照和发布记录。",
-        }
-    }
 }
 
 /// What the rule-check tab says instead of a list (§4.2): never checked,
@@ -117,6 +110,21 @@ pub const BOM_STALE: &str = "图纸已改动，清单可能过期";
 /// and when drawings of the scope did not read (§4.5).
 pub const DUPLICATE_SAID: &str = "有重复位号，清单没有生成";
 pub const UNREADABLE_SAID: &str = "范围内有图读不出来，清单没有生成";
+
+/// What the snapshot half of 「快照与发布」 says in place of its list (§4.6):
+/// with no drawing in front, and while the drawing in front was never
+/// saved, so it has no folder to number snapshots in.
+pub const NO_DRAWING_SAID: &str = "当前没有图纸。";
+pub const UNSAVED_SAID: &str = "图纸还没有保存，不能存带序号的快照";
+
+/// The row on top of the snapshot list, the drawing as it is now, and
+/// what a row says when its file is gone (§4.6).
+pub const LIVE_SAID: &str = "当前图（未存快照）";
+pub const MISSING_SAID: &str = "文件缺失";
+
+/// What a diff says in place of its counts when the two sides are the
+/// same (§4.6).
+pub const IDENTICAL_SAID: &str = "无差异";
 
 /// What the user did in the panel: one message per button, tag and list
 /// header.
@@ -189,11 +197,108 @@ pub enum PidVerifyMsg {
     BomDuplicateLocate(usize, usize),
     /// 「管道汇总」: open it, or fold it.
     BomSummary,
+    /// What is typed in the reason box of 【存快照】 (§4.6).
+    SnapshotReason(String),
+    /// 【存快照】: a numbered snapshot of the drawing in front, for this
+    /// reason.
+    SnapshotSave(String),
+    /// A row of the snapshot list ticked, or unticked.
+    Pick(Pick),
+    /// 【比对】: the two rows ticked, the older first (§4.6).
+    Diff(Pick, Pick),
+    /// An object of the diff clicked: its group, and its index there.
+    DiffLocate(DiffGroup, usize),
+    /// 【再显示 200 条】 under the diff.
+    MoreDiff,
+    /// 【导出比对结果】: ask where to write the diff.
+    PickDiffExport,
+    /// Write the diff shown to this file, as `PIDDIFF … EXPORT` writes one.
+    DiffExport(String),
 }
 
 impl PidVerifyMsg {
     pub(crate) fn message(self) -> Message {
         Message::PidVerify(self)
+    }
+}
+
+/// A row of the snapshot list (§4.6): a numbered snapshot, or the drawing
+/// as it is now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Pick {
+    Live,
+    Seq(u64),
+}
+
+impl Pick {
+    /// How `deliver.picked` and the sides of `deliver.diff` write it
+    /// (§3.2): the snapshot's number, or `"live"`.
+    pub fn state(self) -> Value {
+        match self {
+            Self::Live => json!("live"),
+            Self::Seq(seq) => json!(seq),
+        }
+    }
+
+    /// The `PosReport` id of its row (§3.4).
+    pub fn bounds_id(self) -> String {
+        match self {
+            Self::Live => format!("{SNAPSHOT_ROW_PREFIX}live"),
+            Self::Seq(seq) => format!("{SNAPSHOT_ROW_PREFIX}{seq}"),
+        }
+    }
+
+    /// The row a side of a diff the panel made was ticked as.
+    fn of(side: &DiffSide) -> Self {
+        side.seq.map_or(Self::Live, Self::Seq)
+    }
+}
+
+/// The diff's groups (§4.6), in the order they are drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiffGroup {
+    Added,
+    Removed,
+    Modified,
+}
+
+impl DiffGroup {
+    pub const ALL: [Self; 3] = [Self::Added, Self::Removed, Self::Modified];
+
+    /// What its header reads, before the count.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Added => "新增",
+            Self::Removed => "删除",
+            Self::Modified => "修改",
+        }
+    }
+
+    /// What `diff_locate` names it by (§3.3), as the diff's JSON does.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Removed => "removed",
+            Self::Modified => "modified",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|group| group.key() == key)
+    }
+
+    /// The `PosReport` id of its object of `index`.
+    pub fn item_id(self, index: usize) -> String {
+        format!("{DIFF_ITEM_PREFIX}{}-{index}", self.key())
+    }
+
+    /// Its objects in `diff`.
+    pub fn objects(self, diff: &Diff) -> &[DiffObject] {
+        match self {
+            Self::Added => &diff.added,
+            Self::Removed => &diff.removed,
+            Self::Modified => &diff.modified,
+        }
     }
 }
 
@@ -264,6 +369,18 @@ pub const BOM_PROJECT_ID: &str = "pid-verify-bom-project";
 pub const BOM_SEARCH_ID: &str = "pid-verify-bom-search";
 pub const BOM_EXPORT_ID: &str = "pid-verify-bom-export";
 
+/// What the id of each row of the snapshot list starts with, the
+/// snapshot's number or `live` following, and the `PosReport` id of
+/// 【比对】 (§3.4); those of the reason box, 【存快照】 and 【导出比对结果】,
+/// and what the id of each object of the diff starts with, its group's
+/// key and its index there following.
+pub const SNAPSHOT_ROW_PREFIX: &str = "pid-verify-snapshot-row-";
+pub const DIFF_ID: &str = "pid-verify-diff";
+pub const SNAPSHOT_REASON_ID: &str = "pid-verify-snapshot-reason";
+pub const SNAPSHOT_SAVE_ID: &str = "pid-verify-snapshot-save";
+pub const DIFF_EXPORT_ID: &str = "pid-verify-diff-export";
+pub const DIFF_ITEM_PREFIX: &str = "pid-verify-diff-item-";
+
 /// How many rows of each list the panel state returns when the request
 /// does not say (`limit`, §3.2), and how many rows each group of the
 /// rule-check list draws before 【再显示 200 条】 (§4.2).
@@ -308,6 +425,16 @@ pub struct VerifyUi {
     pub skipped_open: bool,
     /// Whether 「管道汇总」 is open.
     pub summary_open: bool,
+    /// What is typed in the reason box of 【存快照】 (§4.6).
+    pub snapshot_reason: String,
+    /// The rows of the snapshot list ticked, in the order they were (§3.1):
+    /// another drawing in front clears them.
+    pub picked: Vec<Pick>,
+    /// How many times 【再显示 200 条】 was pressed under the diff since it
+    /// was made.
+    pub diff_more: usize,
+    /// The object of the diff last clicked: its group and its index there.
+    pub diff_located: Option<(DiffGroup, usize)>,
 }
 
 impl Default for VerifyUi {
@@ -329,6 +456,10 @@ impl Default for VerifyUi {
             bom_located: None,
             skipped_open: false,
             summary_open: false,
+            snapshot_reason: String::new(),
+            picked: Vec::new(),
+            diff_more: 0,
+            diff_located: None,
         }
     }
 }
@@ -456,11 +587,17 @@ pub struct KeptBom<'a> {
 }
 
 /// The results kept with the drawing in front, on its tab (§3.1, §5.1):
-/// its own rule check and bill of materials so far.
+/// its own rule check and bill of materials so far, its numbered snapshots
+/// and the diff of two of them.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DrawingResults<'a> {
     pub check: Option<KeptCheck<'a>>,
     pub bom: Option<KeptBom<'a>>,
+    /// The snapshots as last read from the drawing's folder, by number;
+    /// `None` before they are read, and for a drawing never saved.
+    pub snapshots: Option<&'a [SnapshotInfo]>,
+    /// The diff made last, while the two rows it compared stay ticked.
+    pub diff: Option<&'a Diff>,
 }
 
 /// The results kept for the folder that drawing is in (§3.1, §5.1): the
@@ -762,6 +899,96 @@ pub struct VerifyView {
     pub check: CheckView,
     /// The material-list tab.
     pub bom: BomView,
+    /// The snapshot half of 「快照与发布」.
+    pub deliver: DeliverView,
+}
+
+/// The snapshot half of 「快照与发布」 worked out (§4.6), which the
+/// `deliver` block of the panel state reads (§3.2).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DeliverView {
+    /// Whether the drawing in front was saved: only then has it a folder to
+    /// number snapshots in, and a list.
+    pub saved: bool,
+    /// What is typed in the reason box.
+    pub reason: String,
+    /// The snapshots, newest first, under the row of the drawing as it is.
+    pub rows: Vec<SnapshotRow>,
+    /// Whether that row is ticked.
+    pub live_picked: bool,
+    /// The rows ticked that can be, in the order they were.
+    pub picked: Vec<Pick>,
+    /// The diff shown.
+    pub diff: Option<DiffView>,
+}
+
+impl DeliverView {
+    /// The two rows ticked as 【比对】 compares them, the older first: of
+    /// two snapshots the lower number, the drawing as it is always second.
+    /// `None` unless exactly two are ticked.
+    pub fn pair(&self) -> Option<(Pick, Pick)> {
+        let &[one, other] = self.picked.as_slice() else {
+            return None;
+        };
+        Some(match (one, other) {
+            (Pick::Seq(a), Pick::Seq(b)) if b < a => (other, one),
+            (Pick::Live, _) => (other, one),
+            _ => (one, other),
+        })
+    }
+}
+
+/// A snapshot in the list (§4.6).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapshotRow {
+    pub info: SnapshotInfo,
+    pub picked: bool,
+}
+
+impl SnapshotRow {
+    /// Whether its file is gone: it cannot be ticked.
+    pub fn missing(&self) -> bool {
+        self.info.status == SnapshotStatus::Missing
+    }
+}
+
+/// A diff shown (§4.6).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiffView {
+    /// The rows compared, the older first.
+    pub a: Pick,
+    pub b: Pick,
+    pub identical: bool,
+    pub summary: DiffSummary,
+    /// What the diff warns of, said under its summary.
+    pub notices: Vec<snapshot::Notice>,
+    /// The groups with objects, in order.
+    pub groups: Vec<DiffGroupView>,
+}
+
+/// A group of the diff: its header and its objects.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiffGroupView {
+    pub group: DiffGroup,
+    /// How many objects it has: its header's count.
+    pub count: usize,
+    /// How many of them are drawn: 200, and 200 more for each 【再显示 200
+    /// 条】.
+    pub drawn: usize,
+    pub items: Vec<DiffItem>,
+}
+
+/// An object of the diff.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiffItem {
+    /// Its index in its group: what `diff_locate` names it by.
+    pub index: usize,
+    /// Its kind, type code and tag.
+    pub label: String,
+    /// What changed on it, a line each: modified objects only.
+    pub changes: Vec<String>,
+    /// Whether it was the last clicked.
+    pub located: bool,
 }
 
 impl Default for VerifyView {
@@ -792,10 +1019,16 @@ pub fn build_view(
         |kept| kept.serial,
     );
     let bom = bom_view(ui, kept);
+    let deliver = deliver_view(
+        ui,
+        drawing.and_then(|results| results.snapshots),
+        drawing.and_then(|results| results.diff),
+        context,
+    );
     let empty = match ui.tab {
         Tab::Check => check_empty(&check),
         Tab::Bom => bom_empty(&bom),
-        Tab::Deliver => Some(Tab::Deliver.empty()),
+        Tab::Deliver => deliver_empty(&deliver, context),
     };
     VerifyView {
         tab: ui.tab,
@@ -805,10 +1038,11 @@ pub fn build_view(
         drawing_id: context.drawing_id.clone(),
         writable: context.writable,
         busy: context.busy,
-        buttons: buttons(context, &check, &bom),
+        buttons: buttons(context, &check, &bom, &deliver),
         notice: ui.notice.clone(),
         check,
         bom,
+        deliver,
     }
 }
 
@@ -822,11 +1056,70 @@ fn newer<T>(drawing: Option<T>, project: Option<T>, serial: impl Fn(&T) -> u64) 
     }
 }
 
+/// What changed on an object of a diff, as its line under the object reads
+/// (§4.6).
+fn change_said(change: &Change) -> String {
+    match change {
+        Change::Property { field, old, new } => format!(
+            "属性 {field}：{} → {}",
+            value_said(old.as_deref()),
+            value_said(new.as_deref())
+        ),
+        Change::Position { old, new } => {
+            format!("位置：{} → {}", numbers_said(old), numbers_said(new))
+        }
+        Change::Length { old, new } => {
+            format!("长度：{} → {}", number_said(*old), number_said(*new))
+        }
+        Change::Fittings { symbol, old, new } => format!("管件 {symbol}：{old} → {new} 个"),
+        Change::Connection { change, with, port } => {
+            let change = match change {
+                EdgeChange::Added => "新增",
+                EdgeChange::Removed => "删除",
+            };
+            let port = port
+                .as_deref()
+                .map(|port| format!("（本端 {port}）"))
+                .unwrap_or_default();
+            format!("连接：{change}，接到 {with}{port}")
+        }
+        Change::Peer { field, old, new } => format!(
+            "对端 {field}：{} → {}",
+            value_said(old.as_deref()),
+            value_said(new.as_deref())
+        ),
+    }
+}
+
+/// A property's value, or a page connector's peer, as a change reads it:
+/// none, or empty, is 「（空）」.
+fn value_said(value: Option<&str>) -> &str {
+    value.filter(|said| !said.is_empty()).unwrap_or("（空）")
+}
+
+/// A length or a coordinate to the thousandth, as short as that reads: no
+/// zeros after the last digit that counts, but a decimal at least.
+fn number_said(number: f64) -> String {
+    let said = format!("{number:.3}");
+    let said = said.trim_end_matches('0');
+    match said.strip_suffix('.') {
+        Some(whole) => format!("{whole}.0"),
+        None => said.to_owned(),
+    }
+}
+
+/// A point, each coordinate as [`number_said`] writes it.
+fn numbers_said(numbers: &[f64]) -> String {
+    let said: Vec<String> = numbers.iter().copied().map(number_said).collect();
+    format!("({})", said.join(", "))
+}
+
 /// Which buttons can be pressed (§4.8). Checking and listing need a drawing
-/// in front, the project's a saved one, and none of them starts while
-/// something runs; exporting needs a result shown, whatever runs — of a
-/// bill, one that came out.
-fn buttons(context: &Context, check: &CheckView, bom: &BomView) -> Buttons {
+/// in front, the project's and a numbered snapshot a saved one, and none of
+/// them starts while something runs; exporting needs a result shown,
+/// whatever runs — of a bill, one that came out. 【比对】 needs exactly two
+/// rows ticked.
+fn buttons(context: &Context, check: &CheckView, bom: &BomView, deliver: &DeliverView) -> Buttons {
     let drawing = context.document_id.is_some() && !context.busy;
     let project = drawing && context.saved;
     Buttons {
@@ -836,6 +1129,9 @@ fn buttons(context: &Context, check: &CheckView, bom: &BomView) -> Buttons {
         bom_drawing: drawing,
         bom_project: project,
         bom_export: bom.shown.as_ref().is_some_and(|shown| shown.table.is_ok()),
+        snapshot_save: project,
+        diff: deliver.pair().is_some(),
+        diff_export: deliver.diff.is_some(),
         ..Buttons::default()
     }
 }
@@ -1088,6 +1384,104 @@ fn bom_empty(bom: &BomView) -> Option<&'static str> {
     }
 }
 
+/// The snapshot half of 「快照与发布」 (§4.6) of the snapshots and the diff
+/// kept on the drawing in front. A drawing never saved has no list, so
+/// nothing on it is ticked; of the rows ticked, a snapshot whose file is
+/// gone, or which the list does not have, does not count.
+fn deliver_view(
+    ui: &VerifyUi,
+    snapshots: Option<&[SnapshotInfo]>,
+    diff: Option<&Diff>,
+    context: &Context,
+) -> DeliverView {
+    let saved = context.document_id.is_some() && context.saved;
+    let listed = snapshots.filter(|_| saved).unwrap_or_default();
+    let tickable = |pick: &Pick| match *pick {
+        Pick::Live => saved,
+        Pick::Seq(seq) => listed
+            .iter()
+            .any(|info| info.seq == seq && info.status == SnapshotStatus::Present),
+    };
+    let picked: Vec<Pick> = ui.picked.iter().copied().filter(tickable).collect();
+    let mut rows: Vec<SnapshotRow> = listed
+        .iter()
+        .map(|info| SnapshotRow {
+            info: info.clone(),
+            picked: picked.contains(&Pick::Seq(info.seq)),
+        })
+        .collect();
+    rows.sort_by_key(|row| std::cmp::Reverse(row.info.seq));
+    DeliverView {
+        saved,
+        reason: ui.snapshot_reason.clone(),
+        rows,
+        live_picked: picked.contains(&Pick::Live),
+        picked,
+        diff: diff.filter(|_| saved).map(|diff| diff_view(ui, diff)),
+    }
+}
+
+/// What the snapshot half says instead of its list (§4.6 item 7).
+fn deliver_empty(deliver: &DeliverView, context: &Context) -> Option<&'static str> {
+    if context.document_id.is_none() {
+        Some(NO_DRAWING_SAID)
+    } else if !deliver.saved {
+        Some(UNSAVED_SAID)
+    } else {
+        None
+    }
+}
+
+/// `diff` as the snapshot half draws it (§4.6): the groups with objects,
+/// each drawing 200 of them and 200 more for each 【再显示 200 条】, and
+/// what changed on each modified object, a line each.
+fn diff_view(ui: &VerifyUi, diff: &Diff) -> DiffView {
+    let drawn = ROWS_PER_PAGE.saturating_mul(ui.diff_more.saturating_add(1));
+    let groups = DiffGroup::ALL
+        .into_iter()
+        .filter_map(|group| {
+            let objects = group.objects(diff);
+            if objects.is_empty() {
+                return None;
+            }
+            let items = objects
+                .iter()
+                .enumerate()
+                .map(|(index, object)| DiffItem {
+                    index,
+                    label: diff_label(object),
+                    changes: object.changes.iter().map(change_said).collect(),
+                    located: ui.diff_located == Some((group, index)),
+                })
+                .collect();
+            Some(DiffGroupView {
+                group,
+                count: objects.len(),
+                drawn: drawn.min(objects.len()),
+                items,
+            })
+        })
+        .collect();
+    DiffView {
+        a: Pick::of(&diff.a),
+        b: Pick::of(&diff.b),
+        identical: diff.identical,
+        summary: diff.summary,
+        notices: diff.notices.clone(),
+        groups,
+    }
+}
+
+/// An object of a diff as its line reads: kind, type code and tag.
+fn diff_label(object: &DiffObject) -> String {
+    let tag = if object.tag.is_empty() {
+        "（无位号）"
+    } else {
+        object.tag.as_str()
+    };
+    format!("{} {} {tag}", object.kind, object.type_code)
+}
+
 /// The row of the result at `index`. It can be waived where the session may
 /// write, the object is on the drawing in front and it is not waived
 /// already, and unwaived on the same terms once it is (§4.8).
@@ -1197,7 +1591,7 @@ pub fn panel_state(view: &VerifyView, limit: usize, offset: usize) -> Value {
         "buttons": view.buttons,
         "check": paged(check_state(&view.check), limit, offset),
         "bom": paged(bom_state(&view.bom), limit, offset),
-        "deliver": {"snapshots": [], "picked": [], "diff": null, "publish": null}
+        "deliver": deliver_state(&view.deliver)
     })
 }
 
@@ -1338,6 +1732,34 @@ fn bom_scope_key(kind: bom::ScopeKind) -> &'static str {
     }
 }
 
+/// The `deliver` block (§3.2), read off the snapshot half as worked out:
+/// the snapshots newest first, each as `pid_snapshots` lists it and
+/// whether it is ticked; the rows ticked, in the order they were; the diff
+/// shown, by its sides and counts.
+fn deliver_state(deliver: &DeliverView) -> Value {
+    let snapshots: Vec<Value> = deliver
+        .rows
+        .iter()
+        .map(|row| {
+            let mut said = json!(row.info);
+            said["picked"] = json!(row.picked);
+            said
+        })
+        .collect();
+    let picked: Vec<Value> = deliver.picked.iter().copied().map(Pick::state).collect();
+    let diff = deliver.diff.as_ref().map(|diff| {
+        json!({
+            "a": diff.a.state(),
+            "b": diff.b.state(),
+            "identical": diff.identical,
+            "新增": diff.summary.added,
+            "删除": diff.summary.removed,
+            "修改": diff.summary.modified,
+        })
+    });
+    json!({"snapshots": snapshots, "picked": picked, "diff": diff, "publish": null})
+}
+
 /// `block` with its `rows` cut to `limit` of them from `offset` on.
 fn paged(mut block: Value, limit: usize, offset: usize) -> Value {
     if let Some(rows) = block.get_mut("rows").and_then(Value::as_array_mut) {
@@ -1398,7 +1820,9 @@ impl std::fmt::Display for PanelError {
 /// row's own buttons are grey or not by the row, so for `waive` and
 /// `unwaive` that comes last: a session that may not write is refused
 /// first, then a row the list does not have, then a row whose button is
-/// grey.
+/// grey. `pick` the same way: a drawing never saved has no list to tick
+/// in, a number the list does not have is no row of it, and a snapshot
+/// whose file is gone cannot be ticked.
 pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, PanelError> {
     let (key, written) = match value.split_once('=') {
         Some((key, written)) => (key, Some(written)),
@@ -1421,8 +1845,23 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
                 reason: "no_result",
             })
     };
+    let compared = || {
+        view.deliver.diff.as_ref().ok_or(PanelError::Unavailable {
+            reason: "no_result",
+        })
+    };
+    let grey = || {
+        let reason = if view.document_id.is_none() {
+            "no_drawing"
+        } else if view.busy {
+            "busy"
+        } else {
+            "no_project_dir"
+        };
+        PanelError::Unavailable { reason }
+    };
     match key {
-        "show" | "hide" if written.is_some() => Err(PanelError::InvalidValue(format!(
+        "show" | "hide" | "diff" if written.is_some() => Err(PanelError::InvalidValue(format!(
             "{key} 不带值，实得 \"{value}\""
         ))),
         "show" => Ok(PidVerifyMsg::Show),
@@ -1447,14 +1886,7 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
             if pressable {
                 return Ok(pressed);
             }
-            let reason = if view.document_id.is_none() {
-                "no_drawing"
-            } else if view.busy {
-                "busy"
-            } else {
-                "no_project_dir"
-            };
-            Err(PanelError::Unavailable { reason })
+            Err(grey())
         }
         "severity" => {
             let severity = written
@@ -1497,7 +1929,8 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
         "more" => match written {
             Some("check") => checked().map(|_| PidVerifyMsg::MoreChecks),
             Some("bom") => listed().map(|_| PidVerifyMsg::MoreBom),
-            _ => Err(invalid(" check 或 bom（那个列表再显示 200 条）")),
+            Some("diff") => compared().map(|_| PidVerifyMsg::MoreDiff),
+            _ => Err(invalid(" check、bom 或 diff（那个列表再显示 200 条）")),
         },
         "bom_search" => {
             let search = written
@@ -1536,6 +1969,85 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
                 .ok_or_else(|| invalid("成 bom_export=<文件>"))?;
             listed()?;
             Ok(PidVerifyMsg::BomExport(path.to_owned()))
+        }
+        "snapshot_save" => {
+            let reason = written
+                .ok_or_else(|| invalid("成 snapshot_save=<原因>，或者 snapshot_save= 不填原因"))?;
+            if !view.buttons.snapshot_save {
+                return Err(grey());
+            }
+            Ok(PidVerifyMsg::SnapshotSave(reason.to_owned()))
+        }
+        "pick" => {
+            let form = "成 pick=<序号> 或 pick=live";
+            let pick = match written.map(str::trim) {
+                Some(live) if live.eq_ignore_ascii_case("live") => Pick::Live,
+                Some(number) => number
+                    .parse::<u64>()
+                    .map(Pick::Seq)
+                    .map_err(|_| invalid(form))?,
+                None => return Err(invalid(form)),
+            };
+            let deliver = &view.deliver;
+            if !deliver.saved {
+                let reason = if view.document_id.is_none() {
+                    "no_drawing"
+                } else {
+                    "no_project_dir"
+                };
+                return Err(PanelError::Unavailable { reason });
+            }
+            if let Pick::Seq(seq) = pick {
+                let row = deliver
+                    .rows
+                    .iter()
+                    .find(|row| row.info.seq == seq)
+                    .ok_or_else(|| {
+                        PanelError::RowNotFound(format!("快照列表里现在没有第 {seq} 份"))
+                    })?;
+                if row.missing() {
+                    return Err(PanelError::Unavailable { reason: "missing" });
+                }
+            }
+            Ok(PidVerifyMsg::Pick(pick))
+        }
+        "diff" => view
+            .deliver
+            .pair()
+            .map(|(a, b)| PidVerifyMsg::Diff(a, b))
+            .ok_or(PanelError::Unavailable {
+                reason: "not_two_picked",
+            }),
+        "diff_locate" => {
+            let (group, index) = written
+                .and_then(|written| written.split_once(':'))
+                .and_then(|(group, number)| {
+                    let group = DiffGroup::from_key(group.trim())?;
+                    Some((group, number.trim().parse::<usize>().ok()?))
+                })
+                .ok_or_else(|| {
+                    invalid("成 diff_locate=<组>:<下标>，组是 added、removed、modified 中的一个")
+                })?;
+            let count = compared()?
+                .groups
+                .iter()
+                .find(|shown| shown.group == group)
+                .map_or(0, |shown| shown.count);
+            if index >= count {
+                return Err(PanelError::RowNotFound(format!(
+                    "比对结果的「{}」组里现在没有下标 {index} 的一项",
+                    group.label()
+                )));
+            }
+            Ok(PidVerifyMsg::DiffLocate(group, index))
+        }
+        "diff_export" => {
+            let path = written
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| invalid("成 diff_export=<文件>"))?;
+            compared()?;
+            Ok(PidVerifyMsg::DiffExport(path.to_owned()))
         }
         "locate" | "waive" | "unwaive" => {
             let form = match key {
@@ -1624,7 +2136,7 @@ pub fn view<'a>(view: &'a VerifyView, width: f32, chrome: Chrome) -> Element<'a,
     let content = match view.tab {
         Tab::Check => check_tab(view),
         Tab::Bom => bom_tab(view),
-        Tab::Deliver => empty_text(view.empty.unwrap_or_default()),
+        Tab::Deliver => deliver_tab(view),
     };
     let body = column![tabs, content].spacing(6).height(Fill);
     let reported = PosReport::new(PANEL_BOUNDS_ID, body);
@@ -2214,6 +2726,172 @@ fn bom_totals(table: &BomTable) -> String {
     }
 }
 
+/// The snapshot half of 「快照与发布」 (§4.6): the reason box and
+/// 【存快照】 and the message bar, then 【比对】 and 【导出比对结果】 over
+/// the list — the drawing as it is on top, the snapshots newest first —
+/// and the diff shown under it; or what the half says instead.
+fn deliver_tab(view: &VerifyView) -> Element<'_, Message> {
+    let buttons = view.buttons;
+    let deliver = &view.deliver;
+    let saving = row![
+        PosReport::new(
+            SNAPSHOT_REASON_ID,
+            text_input("快照原因（可不填，最多 200 字）", &deliver.reason)
+                .on_input(|typed| PidVerifyMsg::SnapshotReason(typed).message())
+                .size(12)
+                .padding([3, 6])
+                .width(Fill),
+        ),
+        PosReport::new(
+            SNAPSHOT_SAVE_ID,
+            small_button(
+                "存快照",
+                buttons
+                    .snapshot_save
+                    .then(|| PidVerifyMsg::SnapshotSave(deliver.reason.clone()))
+            ),
+        ),
+    ]
+    .spacing(4)
+    .align_y(iced::Center);
+    let mut tab = column![saving].spacing(6).height(Fill);
+    if let Some(notice) = &view.notice {
+        tab = tab.push(notice_line(notice));
+    }
+    if let Some(said) = view.empty {
+        return tab.push(empty_text(said)).into();
+    }
+    let actions = row![
+        PosReport::new(
+            DIFF_ID,
+            small_button(
+                "比对",
+                deliver.pair().map(|(a, b)| PidVerifyMsg::Diff(a, b))
+            ),
+        ),
+        PosReport::new(
+            DIFF_EXPORT_ID,
+            small_button(
+                "导出比对结果",
+                buttons.diff_export.then_some(PidVerifyMsg::PickDiffExport)
+            ),
+        ),
+    ]
+    .spacing(4);
+    let live = ticked(
+        deliver.live_picked,
+        Some(Pick::Live),
+        text(LIVE_SAID).size(12).into(),
+    );
+    let mut body = column![PosReport::owned(Pick::Live.bounds_id(), live)]
+        .spacing(4)
+        .width(Fill);
+    for row in &deliver.rows {
+        body = body.push(snapshot_row(row));
+    }
+    if let Some(diff) = &deliver.diff {
+        body = body.push(diff_part(diff));
+    }
+    tab.push(actions).push(scrollable(body).height(Fill)).into()
+}
+
+/// A row of the snapshot list (§4.6): number, time, author and object
+/// count, and the reason under them in a lighter colour; one whose file is
+/// gone says so and cannot be ticked.
+fn snapshot_row(row: &SnapshotRow) -> Element<'_, Message> {
+    let info = &row.info;
+    let made = utc_said(i64::try_from(info.created_at).unwrap_or_default());
+    let said = format!(
+        "第 {} 份 · {made} · {} · {} 个对象",
+        info.seq, info.created_by, info.objects
+    );
+    let mut first = row![text(said).size(12)].spacing(8);
+    if row.missing() {
+        first = first.push(text(MISSING_SAID).size(11).style(danger));
+    }
+    let mut lines = column![first].spacing(1);
+    if !info.reason.is_empty() {
+        lines = lines.push(text(info.reason.as_str()).size(11).style(muted));
+    }
+    let pick = Pick::Seq(info.seq);
+    let tick = ticked(row.picked, (!row.missing()).then_some(pick), lines.into());
+    PosReport::owned(pick.bounds_id(), tick).into()
+}
+
+/// A tick box before `lines` that ticks or unticks `pick`; grey while
+/// `pick` is `None`.
+fn ticked<'a>(on: bool, pick: Option<Pick>, lines: Element<'a, Message>) -> Element<'a, Message> {
+    let mut tick = checkbox(on).size(12);
+    if let Some(pick) = pick {
+        tick = tick.on_toggle(move |_| PidVerifyMsg::Pick(pick).message());
+    }
+    row![tick, lines].spacing(6).align_y(iced::Center).into()
+}
+
+/// The diff shown (§4.6): the rows it compared and its counts, or
+/// 「无差异」, and what it warns of; then each group's header with its count
+/// and its objects drawn, with 【再显示 200 条】 while it has more.
+fn diff_part(diff: &DiffView) -> Element<'_, Message> {
+    let sides = format!("{} → {}", pick_said(diff.a), pick_said(diff.b));
+    let summary = if diff.identical {
+        format!("{sides}：{IDENTICAL_SAID}")
+    } else {
+        let counted = diff.summary;
+        format!(
+            "{sides}：新增 {}，删除 {}，修改 {}",
+            counted.added, counted.removed, counted.modified
+        )
+    };
+    let mut part = column![text(summary).size(12)].spacing(4).width(Fill);
+    for notice in &diff.notices {
+        part = part.push(text(notice.message.as_str()).size(11).style(warning));
+    }
+    for group in &diff.groups {
+        part = part.push(text(format!("{}（{}）", group.group.label(), group.count)).size(12));
+        for item in &group.items[..group.drawn] {
+            part = part.push(PosReport::owned(
+                group.group.item_id(item.index),
+                diff_item(group.group, item),
+            ));
+        }
+        if group.drawn < group.count {
+            part = part.push(small_button("再显示 200 条", Some(PidVerifyMsg::MoreDiff)));
+        }
+    }
+    part.into()
+}
+
+/// A side of the diff as its summary names it.
+fn pick_said(pick: Pick) -> String {
+    match pick {
+        Pick::Live => "当前图".to_owned(),
+        Pick::Seq(seq) => format!("第 {seq} 份"),
+    }
+}
+
+/// An object of the diff (§4.6): kind, type code and tag, and under it in a
+/// lighter colour what changed on it, a line each. Clicking it finds it on
+/// the drawing in front.
+fn diff_item(group: DiffGroup, item: &DiffItem) -> Element<'_, Message> {
+    let mut lines = column![text(item.label.as_str()).size(12)].spacing(1);
+    for change in &item.changes {
+        lines = lines.push(text(change.as_str()).size(11).style(muted));
+    }
+    let located = item.located;
+    button(lines)
+        .on_press(PidVerifyMsg::DiffLocate(group, item.index).message())
+        .padding([2, 8])
+        .width(Fill)
+        .style(move |theme: &Theme, status| {
+            if located {
+                button::secondary(theme, status)
+            } else {
+                button::text(theme, status)
+            }
+        })
+        .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2244,7 +2922,7 @@ mod tests {
             [
                 (Tab::Check, Some("还没有检查过。点上面的按钮开始。")),
                 (Tab::Bom, Some(NEVER_LISTED)),
-                (Tab::Deliver, Some("还没有快照和发布记录。")),
+                (Tab::Deliver, Some(NO_DRAWING_SAID)),
             ]
         );
     }
@@ -2601,12 +3279,12 @@ mod tests {
     /// What the panel draws with `report` kept on the drawing in front.
     fn viewed(ui: &VerifyUi, report: &CheckReport) -> VerifyView {
         let drawing = DrawingResults {
-            bom: None,
             check: Some(KeptCheck {
                 report,
                 serial: 1,
                 stale: false,
             }),
+            ..DrawingResults::default()
         };
         build_view(ui, Some(&drawing), None, &in_front())
     }
@@ -2779,12 +3457,12 @@ mod tests {
         );
         let shown = |drawing: u64, project: u64| {
             let drawing = DrawingResults {
-                bom: None,
                 check: Some(KeptCheck {
                     report: &mine,
                     serial: drawing,
                     stale: false,
                 }),
+                ..DrawingResults::default()
             };
             let project = ProjectResults {
                 bom: None,
@@ -2954,12 +3632,12 @@ mod tests {
     fn the_rule_check_buttons_are_grey_as_section_4_8_says() {
         let five = five();
         let kept = DrawingResults {
-            bom: None,
             check: Some(KeptCheck {
                 report: &five,
                 serial: 1,
                 stale: false,
             }),
+            ..DrawingResults::default()
         };
         assert_eq!(pressable(&in_front(), Some(&kept)), (true, true, true));
         // Nothing checked: nothing to export.
@@ -2984,8 +3662,8 @@ mod tests {
         assert_eq!(pressable(&read_only, Some(&kept)), (true, true, true));
         // The Start page has no drawing to check.
         assert_eq!(pressable(&Context::default(), None), (false, false, false));
-        // The material list's buttons are tested with it, and the last tab
-        // brings its own.
+        // The material list's buttons and 【存快照】 are tested with their
+        // tabs, and the publishing half brings its own.
         let buttons = build_view(&VerifyUi::default(), Some(&kept), None, &in_front()).buttons;
         assert_eq!(
             Buttons {
@@ -2995,6 +3673,7 @@ mod tests {
                 bom_drawing: false,
                 bom_project: false,
                 bom_export: false,
+                snapshot_save: false,
                 ..buttons
             },
             Buttons::default()
@@ -3067,12 +3746,12 @@ mod tests {
             ..VerifyUi::default()
         };
         let kept = DrawingResults {
-            bom: None,
             check: Some(KeptCheck {
                 report: &five,
                 serial: 3,
                 stale: true,
             }),
+            ..DrawingResults::default()
         };
         let view = build_view(&ui, Some(&kept), None, &in_front());
         let state = panel_state(&view, ROWS_PER_PAGE, 0);
@@ -3148,12 +3827,12 @@ mod tests {
     fn pid_verify_action_refuses_a_grey_rule_check_button_with_the_reason() {
         let five = five();
         let kept = DrawingResults {
-            bom: None,
             check: Some(KeptCheck {
                 report: &five,
                 serial: 1,
                 stale: false,
             }),
+            ..DrawingResults::default()
         };
         let ui = VerifyUi::default();
         let busy_context = Context {
@@ -3268,12 +3947,12 @@ mod tests {
     fn the_reason_box_is_open_under_a_row_that_can_be_waived_while_its_check_is_shown() {
         let five = five();
         let kept = DrawingResults {
-            bom: None,
             check: Some(KeptCheck {
                 report: &five,
                 serial: 1,
                 stale: false,
             }),
+            ..DrawingResults::default()
         };
         let open = |serial: u64, index: usize, context: &Context| -> Vec<(usize, String)> {
             let ui = VerifyUi {
@@ -3369,12 +4048,12 @@ mod tests {
             });
         }
         let kept = DrawingResults {
-            bom: None,
             check: Some(KeptCheck {
                 report: &five,
                 serial: 1,
                 stale: false,
             }),
+            ..DrawingResults::default()
         };
         // The drawing in front keeps only the first.
         let keeps = Context {
@@ -3460,12 +4139,12 @@ mod tests {
             ..VerifyUi::default()
         };
         let kept = DrawingResults {
-            bom: None,
             check: Some(KeptCheck {
                 report: &five,
                 serial: 1,
                 stale: false,
             }),
+            ..DrawingResults::default()
         };
         let writable = build_view(&ui, Some(&kept), None, &in_front());
         let read_only_context = Context {
@@ -4214,7 +4893,7 @@ mod tests {
             "bom_export=",
             "bom_export= ",
             "more",
-            "more=diff",
+            "more=publish",
         ] {
             let refused = parse_action(value, &view).expect_err(value);
             assert_eq!(refused.code(), "invalid_value", "{value}");
@@ -4224,5 +4903,582 @@ mod tests {
             parse_action("bom_group=泵", &view).map_err(|refused| refused.to_string()),
             Err("清单里没有种类「泵」的组；有的是：管线、设备、阀门、仪表、管件".to_owned())
         );
+    }
+
+    /// A snapshot of PID-1101 numbered `seq`, saved for `reason`, its file
+    /// there or gone.
+    fn info(seq: u64, reason: &str, status: SnapshotStatus) -> SnapshotInfo {
+        SnapshotInfo {
+            seq,
+            file: format!("{seq:04}.json"),
+            created_at: 1_794_800_000 + seq * 3_600,
+            created_by: "设计员".to_owned(),
+            reason: reason.to_owned(),
+            objects: 12,
+            bytes: 4_096,
+            sha256: "0".repeat(64),
+            status,
+        }
+    }
+
+    /// The snapshots of PID-1101 the snapshot tests list: the third's file
+    /// is gone.
+    fn three() -> Vec<SnapshotInfo> {
+        vec![
+            info(1, "送审前", SnapshotStatus::Present),
+            info(2, "", SnapshotStatus::Present),
+            info(3, "改版", SnapshotStatus::Missing),
+        ]
+    }
+
+    /// What the panel draws on 「快照与发布」 with `picked` ticked, and
+    /// `snapshots` and `diff` kept on the drawing in front, in `context`.
+    fn delivered(
+        picked: &[Pick],
+        snapshots: &[SnapshotInfo],
+        diff: Option<&Diff>,
+        context: &Context,
+    ) -> VerifyView {
+        let drawing = DrawingResults {
+            snapshots: Some(snapshots),
+            diff,
+            ..DrawingResults::default()
+        };
+        let ui = VerifyUi {
+            tab: Tab::Deliver,
+            picked: picked.to_vec(),
+            ..VerifyUi::default()
+        };
+        build_view(&ui, Some(&drawing), None, context)
+    }
+
+    /// An object of PID-1101 in a diff: `kind`, `type_code` and `tag` at
+    /// `at`, with `changes`.
+    fn diffed(
+        kind: &str,
+        type_code: &str,
+        tag: &str,
+        at: [f64; 2],
+        changes: Vec<Change>,
+    ) -> DiffObject {
+        DiffObject {
+            key: format!("{type_code}|{tag}"),
+            kind: kind.to_owned(),
+            type_code: type_code.to_owned(),
+            tag: tag.to_owned(),
+            at,
+            handle: "1A".to_owned(),
+            changes,
+        }
+    }
+
+    /// A side of a diff of PID-1101: snapshot `seq`, or the drawing as it is.
+    fn side(seq: Option<u64>) -> DiffSide {
+        DiffSide {
+            reference: seq.map_or_else(|| "live".to_owned(), |seq| seq.to_string()),
+            seq,
+            drawing_id: "PID-1101".to_owned(),
+            created_at: 1_794_800_000,
+            objects: 12,
+        }
+    }
+
+    /// Counts of a diff: `added`, `removed` and `modified` objects.
+    fn counted(added: usize, removed: usize, modified: usize) -> DiffSummary {
+        DiffSummary {
+            added,
+            removed,
+            modified,
+            by_what: snapshot::ByWhat::default(),
+            edges_added: 0,
+            edges_removed: 0,
+        }
+    }
+
+    /// The diff of snapshot 1 and the drawing as it is that the snapshot
+    /// tests read: a transmitter added, a valve of no tag removed, the pump
+    /// given another design pressure and the line made longer and joined to
+    /// the valve V-1002.
+    fn compared() -> Diff {
+        let pressure = Change::Property {
+            field: "设计压力".to_owned(),
+            old: Some("1.6MPa".to_owned()),
+            new: Some("2.5MPa".to_owned()),
+        };
+        let length = Change::Length {
+            old: 12.5,
+            new: 14.0,
+        };
+        let joined = Change::Connection {
+            change: EdgeChange::Added,
+            with: "V-1002".to_owned(),
+            port: Some("N2".to_owned()),
+        };
+        Diff {
+            version: snapshot::DIFF_VERSION,
+            a: side(Some(1)),
+            b: side(None),
+            identical: false,
+            summary: counted(1, 1, 2),
+            added: vec![diffed("仪表", "PT", "PT-1001", [60.0, 80.0], Vec::new())],
+            removed: vec![diffed("阀门", "GATE_VALVE", "", [-100.0, 60.0], Vec::new())],
+            modified: vec![
+                diffed("设备", "PUMP", "P-1001", [0.0, 0.0], vec![pressure]),
+                diffed(
+                    "管线",
+                    "PIPE_LINE",
+                    "L-1001",
+                    [100.0, 0.0],
+                    vec![length, joined],
+                ),
+            ],
+            edges: snapshot::DiffEdges::default(),
+            notices: vec![snapshot::Notice {
+                code: snapshot::LENGTH_UNIT_DIFFERS,
+                message: "两份快照的图纸单位不同".to_owned(),
+            }],
+        }
+    }
+
+    #[test]
+    fn the_snapshot_controls_report_under_the_ids_the_spec_gives_them() {
+        assert_eq!(Pick::Seq(3).bounds_id(), "pid-verify-snapshot-row-3");
+        assert_eq!(Pick::Live.bounds_id(), "pid-verify-snapshot-row-live");
+        assert_eq!(DIFF_ID, "pid-verify-diff");
+        assert_eq!(
+            DiffGroup::Modified.item_id(0),
+            "pid-verify-diff-item-modified-0"
+        );
+        for id in [
+            SNAPSHOT_ROW_PREFIX,
+            SNAPSHOT_REASON_ID,
+            SNAPSHOT_SAVE_ID,
+            DIFF_EXPORT_ID,
+            DIFF_ITEM_PREFIX,
+        ] {
+            assert!(id.starts_with(BOUNDS_PREFIX), "{id}");
+        }
+    }
+
+    #[test]
+    fn the_snapshot_list_is_newest_first_and_a_file_gone_cannot_be_ticked() {
+        let three = three();
+        // 3 was ticked before its file went: it no longer counts, nor does
+        // a number the list does not have.
+        let ticked = [Pick::Seq(3), Pick::Seq(9), Pick::Seq(1)];
+        let view = delivered(&ticked, &three, None, &in_front());
+        assert_eq!(view.empty, None);
+        let deliver = &view.deliver;
+        assert!(deliver.saved);
+        let rows: Vec<(u64, bool, bool)> = deliver
+            .rows
+            .iter()
+            .map(|row| (row.info.seq, row.picked, row.missing()))
+            .collect();
+        assert_eq!(
+            rows,
+            [(3, false, true), (2, false, false), (1, true, false)]
+        );
+        assert_eq!(deliver.picked, [Pick::Seq(1)]);
+        assert!(!deliver.live_picked);
+        let view = delivered(&[Pick::Live], &three, None, &in_front());
+        assert!(view.deliver.live_picked);
+        assert_eq!(view.deliver.picked, [Pick::Live]);
+    }
+
+    #[test]
+    fn diff_can_be_pressed_with_two_rows_ticked_and_compares_the_older_first() {
+        use Pick::{Live, Seq};
+        let three = three();
+        let view = |picked: &[Pick]| delivered(picked, &three, None, &in_front());
+        let pressable = |picked: &[Pick]| view(picked).buttons.diff;
+        assert!(!pressable(&[]));
+        assert!(!pressable(&[Seq(1)]));
+        assert!(pressable(&[Seq(2), Seq(1)]));
+        assert!(!pressable(&[Seq(2), Seq(1), Live]));
+        // A file gone ticked is not ticked.
+        assert!(!pressable(&[Seq(3), Seq(1)]));
+        let pair = |picked: &[Pick]| view(picked).deliver.pair();
+        assert_eq!(pair(&[Seq(2), Seq(1)]), Some((Seq(1), Seq(2))));
+        assert_eq!(pair(&[Seq(1), Seq(2)]), Some((Seq(1), Seq(2))));
+        assert_eq!(pair(&[Live, Seq(2)]), Some((Seq(2), Live)));
+        assert_eq!(pair(&[Seq(1), Live]), Some((Seq(1), Live)));
+        assert_eq!(pair(&[Live]), None);
+        assert_eq!(pair(&[Seq(1), Seq(2), Live]), None);
+    }
+
+    #[test]
+    fn the_snapshot_buttons_are_grey_as_section_4_8_says() {
+        let three = three();
+        let diff = compared();
+        let saving =
+            |context: &Context| delivered(&[], &three, None, context).buttons.snapshot_save;
+        assert!(saving(&in_front()));
+        // A read-only session keeps snapshots all the same (§5.4).
+        assert!(saving(&Context {
+            writable: false,
+            ..in_front()
+        }));
+        assert!(!saving(&Context {
+            busy: true,
+            ..in_front()
+        }));
+        assert!(!saving(&Context {
+            saved: false,
+            ..in_front()
+        }));
+        assert!(!saving(&Context::default()));
+        // Only a diff shown can be exported.
+        let picked = [Pick::Seq(1), Pick::Live];
+        let view = delivered(&picked, &three, None, &in_front());
+        assert!(!view.buttons.diff_export);
+        let view = delivered(&picked, &three, Some(&diff), &in_front());
+        assert!(view.buttons.diff_export);
+    }
+
+    #[test]
+    fn the_snapshot_half_says_why_it_has_no_list() {
+        let unsaved = Context {
+            saved: false,
+            ..in_front()
+        };
+        let view = delivered(&[], &[], None, &unsaved);
+        assert_eq!(view.empty, Some(UNSAVED_SAID));
+        assert!(!view.deliver.saved);
+        let view = delivered(&[], &[], None, &Context::default());
+        assert_eq!(view.empty, Some(NO_DRAWING_SAID));
+        // A saved drawing with no snapshot yet lists the drawing as it is.
+        let view = delivered(&[], &[], None, &in_front());
+        assert_eq!(view.empty, None);
+        assert!(view.deliver.saved);
+        assert!(view.deliver.rows.is_empty());
+    }
+
+    #[test]
+    fn the_diff_is_counted_and_listed_in_three_groups_a_line_for_each_change() {
+        let three = three();
+        let diff = compared();
+        let picked = [Pick::Seq(1), Pick::Live];
+        let view = delivered(&picked, &three, Some(&diff), &in_front());
+        let shown = view.deliver.diff.as_ref().expect("a diff shown");
+        assert_eq!((shown.a, shown.b), (Pick::Seq(1), Pick::Live));
+        assert!(!shown.identical);
+        assert_eq!(shown.summary, diff.summary);
+        assert_eq!(shown.notices, diff.notices);
+        let groups: Vec<(DiffGroup, usize, usize)> = shown
+            .groups
+            .iter()
+            .map(|group| (group.group, group.count, group.drawn))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                (DiffGroup::Added, 1, 1),
+                (DiffGroup::Removed, 1, 1),
+                (DiffGroup::Modified, 2, 2)
+            ]
+        );
+        let items: Vec<(&str, Vec<&str>)> = shown
+            .groups
+            .iter()
+            .flat_map(|group| &group.items)
+            .map(|item| {
+                let changes = item.changes.iter().map(String::as_str).collect();
+                (item.label.as_str(), changes)
+            })
+            .collect();
+        assert_eq!(
+            items,
+            [
+                ("仪表 PT PT-1001", vec![]),
+                ("阀门 GATE_VALVE （无位号）", vec![]),
+                ("设备 PUMP P-1001", vec!["属性 设计压力：1.6MPa → 2.5MPa"]),
+                (
+                    "管线 PIPE_LINE L-1001",
+                    vec!["长度：12.5 → 14.0", "连接：新增，接到 V-1002（本端 N2）"]
+                ),
+            ]
+        );
+        // Two sides alike say so, with no group.
+        let alike = Diff {
+            identical: true,
+            summary: counted(0, 0, 0),
+            added: Vec::new(),
+            removed: Vec::new(),
+            modified: Vec::new(),
+            notices: Vec::new(),
+            ..compared()
+        };
+        let view = delivered(&picked, &three, Some(&alike), &in_front());
+        let shown = view.deliver.diff.as_ref().expect("a diff shown");
+        assert!(shown.identical);
+        assert!(shown.groups.is_empty());
+    }
+
+    #[test]
+    fn each_change_reads_as_section_4_6_writes_it() {
+        let said: Vec<String> = [
+            Change::Property {
+                field: "设计温度".to_owned(),
+                old: None,
+                new: Some("80".to_owned()),
+            },
+            Change::Position {
+                old: vec![0.0, 0.0],
+                new: vec![10.0, 2.5],
+            },
+            Change::Length {
+                old: 100.0,
+                new: 100.25,
+            },
+            Change::Fittings {
+                symbol: "弯头".to_owned(),
+                old: 2,
+                new: 3,
+            },
+            Change::Connection {
+                change: EdgeChange::Removed,
+                with: "P-1001".to_owned(),
+                port: None,
+            },
+            Change::Peer {
+                field: "peer_drawing".to_owned(),
+                old: Some("PID-1102".to_owned()),
+                new: Some(String::new()),
+            },
+        ]
+        .iter()
+        .map(change_said)
+        .collect();
+        assert_eq!(
+            said,
+            [
+                "属性 设计温度：（空） → 80",
+                "位置：(0.0, 0.0) → (10.0, 2.5)",
+                "长度：100.0 → 100.25",
+                "管件 弯头：2 → 3 个",
+                "连接：删除，接到 P-1001",
+                "对端 peer_drawing：PID-1102 → （空）",
+            ]
+        );
+    }
+
+    #[test]
+    fn each_group_of_the_diff_draws_200_objects_and_200_more_for_each_press() {
+        let three = three();
+        let many = (0..450)
+            .map(|n| {
+                let tag = format!("P-{n:04}");
+                diffed("设备", "PUMP", &tag, [f64::from(n), 0.0], Vec::new())
+            })
+            .collect();
+        let diff = Diff {
+            added: many,
+            ..compared()
+        };
+        let drawing = DrawingResults {
+            snapshots: Some(&three),
+            diff: Some(&diff),
+            ..DrawingResults::default()
+        };
+        let drawn = |more: usize| {
+            let ui = VerifyUi {
+                tab: Tab::Deliver,
+                picked: vec![Pick::Seq(1), Pick::Live],
+                diff_more: more,
+                diff_located: Some((DiffGroup::Added, 201)),
+                ..VerifyUi::default()
+            };
+            let view = build_view(&ui, Some(&drawing), None, &in_front());
+            let shown = view.deliver.diff.expect("a diff shown");
+            let added = &shown.groups[0];
+            let located = added.items.iter().filter(|item| item.located);
+            let located: Vec<usize> = located.map(|item| item.index).collect();
+            (added.count, added.drawn, located)
+        };
+        assert_eq!(drawn(0), (450, 200, vec![201]));
+        assert_eq!(drawn(1).1, 400);
+        assert_eq!(drawn(2).1, 450);
+    }
+
+    #[test]
+    fn the_deliver_block_reads_off_the_tab_as_worked_out() {
+        let three = three();
+        let diff = compared();
+        let view = delivered(
+            &[Pick::Live, Pick::Seq(1)],
+            &three,
+            Some(&diff),
+            &in_front(),
+        );
+        let state = panel_state(&view, ROWS_PER_PAGE, 0);
+        let deliver = &state["deliver"];
+        let rows = deliver["snapshots"].as_array().cloned().unwrap_or_default();
+        let seqs: Vec<Option<u64>> = rows.iter().map(|row| row["seq"].as_u64()).collect();
+        assert_eq!(seqs, [Some(3), Some(2), Some(1)], "{state}");
+        let mut first = serde_json::to_value(&three[0]).expect("a snapshot as JSON");
+        first["picked"] = json!(true);
+        assert_eq!(rows[2], first, "{state}");
+        assert_eq!(rows[0]["status"], "missing", "{state}");
+        assert_eq!(rows[0]["picked"], false, "{state}");
+        assert_eq!(deliver["picked"], json!(["live", 1]), "{state}");
+        assert_eq!(
+            deliver["diff"],
+            json!({"a": 1, "b": "live", "identical": false, "新增": 1, "删除": 1, "修改": 2}),
+            "{state}"
+        );
+        assert_eq!(deliver["publish"], Value::Null, "{state}");
+        for button in ["snapshot_save", "diff", "diff_export"] {
+            assert_eq!(state["buttons"][button], true, "{button}: {state}");
+        }
+    }
+
+    #[test]
+    fn pid_verify_action_reads_the_snapshot_keys() {
+        use Pick::{Live, Seq};
+        let three = three();
+        let diff = compared();
+        let view = delivered(&[Seq(1), Live], &three, Some(&diff), &in_front());
+        for (value, pressed) in [
+            (
+                "snapshot_save=送审前",
+                PidVerifyMsg::SnapshotSave("送审前".to_owned()),
+            ),
+            ("snapshot_save=", PidVerifyMsg::SnapshotSave(String::new())),
+            ("pick=2", PidVerifyMsg::Pick(Seq(2))),
+            ("pick=live", PidVerifyMsg::Pick(Live)),
+            ("pick=LIVE", PidVerifyMsg::Pick(Live)),
+            ("diff", PidVerifyMsg::Diff(Seq(1), Live)),
+            (
+                "diff_locate=modified:1",
+                PidVerifyMsg::DiffLocate(DiffGroup::Modified, 1),
+            ),
+            (
+                "diff_locate=removed:0",
+                PidVerifyMsg::DiffLocate(DiffGroup::Removed, 0),
+            ),
+            (
+                "diff_export=D:/out/比对.json",
+                PidVerifyMsg::DiffExport("D:/out/比对.json".to_owned()),
+            ),
+            ("more=diff", PidVerifyMsg::MoreDiff),
+        ] {
+            assert_eq!(parse_action(value, &view), Ok(pressed), "{value}");
+        }
+    }
+
+    #[test]
+    fn pid_verify_action_refuses_a_grey_snapshot_button_with_the_reason() {
+        let three = three();
+        let diff = compared();
+        let unsaved = Context {
+            saved: false,
+            ..in_front()
+        };
+        let busy = Context {
+            busy: true,
+            ..in_front()
+        };
+        for (context, value, reason) in [
+            (Context::default(), "snapshot_save=送审前", "no_drawing"),
+            (busy, "snapshot_save=送审前", "busy"),
+            (unsaved.clone(), "snapshot_save=送审前", "no_project_dir"),
+            (Context::default(), "pick=live", "no_drawing"),
+            (unsaved.clone(), "pick=live", "no_project_dir"),
+            (unsaved, "pick=1", "no_project_dir"),
+        ] {
+            let view = delivered(&[], &three, None, &context);
+            let refused = parse_action(value, &view).expect_err(value);
+            assert_eq!(
+                (refused.code(), refused.reason()),
+                ("PANEL_ACTION_UNAVAILABLE", Some(reason)),
+                "{value}"
+            );
+        }
+        // 【比对】 wants exactly two rows ticked.
+        let ticked: [&[Pick]; 3] = [
+            &[],
+            &[Pick::Seq(1)],
+            &[Pick::Seq(1), Pick::Seq(2), Pick::Live],
+        ];
+        for picked in ticked {
+            let view = delivered(picked, &three, None, &in_front());
+            let refused = parse_action("diff", &view).expect_err("diff");
+            assert_eq!(
+                (refused.code(), refused.reason()),
+                ("PANEL_ACTION_UNAVAILABLE", Some("not_two_picked")),
+                "{picked:?}"
+            );
+        }
+        // A file gone cannot be ticked; a number the list does not have is
+        // no row of it.
+        let view = delivered(&[], &three, None, &in_front());
+        let refused = parse_action("pick=3", &view).expect_err("pick=3");
+        assert_eq!(
+            (refused.code(), refused.reason()),
+            ("PANEL_ACTION_UNAVAILABLE", Some("missing"))
+        );
+        assert_eq!(
+            parse_action("pick=9", &view).map_err(|refused| (refused.code(), refused.to_string())),
+            Err((
+                "PANEL_ROW_NOT_FOUND",
+                "快照列表里现在没有第 9 份".to_owned()
+            ))
+        );
+        // Nothing compared: nothing to find, page or export.
+        for value in ["diff_locate=added:0", "diff_export=a.json", "more=diff"] {
+            let refused = parse_action(value, &view).expect_err(value);
+            assert_eq!(
+                (refused.code(), refused.reason()),
+                ("PANEL_ACTION_UNAVAILABLE", Some("no_result")),
+                "{value}"
+            );
+        }
+        let shown = delivered(
+            &[Pick::Seq(1), Pick::Live],
+            &three,
+            Some(&diff),
+            &in_front(),
+        );
+        assert_eq!(
+            parse_action("diff_locate=added:1", &shown)
+                .map_err(|refused| (refused.code(), refused.to_string())),
+            Err((
+                "PANEL_ROW_NOT_FOUND",
+                "比对结果的「新增」组里现在没有下标 1 的一项".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn pid_verify_action_names_a_wrong_snapshot_value_invalid() {
+        let three = three();
+        let diff = compared();
+        let view = delivered(
+            &[Pick::Seq(1), Pick::Live],
+            &three,
+            Some(&diff),
+            &in_front(),
+        );
+        for value in [
+            "snapshot_save",
+            "pick",
+            "pick=",
+            "pick=first",
+            "pick=-1",
+            "diff=1",
+            "diff_locate",
+            "diff_locate=",
+            "diff_locate=modified",
+            "diff_locate=changed:0",
+            "diff_locate=modified:x",
+            "diff_export",
+            "diff_export=",
+            "diff_export= ",
+        ] {
+            let refused = parse_action(value, &view).expect_err(value);
+            assert_eq!(refused.code(), "invalid_value", "{value}");
+            assert!(!refused.to_string().is_empty(), "{value}");
+        }
     }
 }

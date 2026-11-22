@@ -32,17 +32,30 @@
 //! the bill shown as `PIDBOM EXPORT` writes it, and a row clicked finds its
 //! object as `PIDLOCATE` finds its tag. Only the bills made here are shown:
 //! `PIDBOM` and `pid_bom` keep none.
+//!
+//! The snapshot half of 「快照与发布」 calls what `PIDSNAPSHOT SAVE` and
+//! `PIDDIFF` call: 【存快照】 numbers a snapshot in the drawing's folder, and
+//! 【比对】 compares the two rows ticked, the older first, the diff kept on the
+//! drawing's tab ([`PanelSnapshots`]) until the rows ticked change or another
+//! drawing comes in front. The list is read from the folder when the panel
+//! is turned or opened to that tab, when another drawing comes in front
+//! there, and after each numbered snapshot, wherever it was saved. An object
+//! of the diff clicked is found the way a place of a repeated tag is, and
+//! the export writes what `PIDDIFF … EXPORT` writes.
 
 use super::pidbom::{unix_now, BomFailure, Sheets};
 use super::piddrc::Checked;
 use super::pidindex::{same_file, Landed, Target, LOCATE_NOT_FOUND};
+use super::pidsnapshot::{snapshot_said, Failure, Side};
 use crate::app::{Message, OpenCADStudio};
 use crate::pid::bom::{self, Bom, BomError, BomScope};
 use crate::pid::drc::{self, CheckResult};
+use crate::pid::snapshot::store::SnapshotInfo;
+use crate::pid::snapshot::{Diff, CONNECTOR, DEFAULT_MOVE_TOLERANCE};
 use crate::ui::dock::{DockMsg, PanelId};
 use crate::ui::window::pid_verify_deliver::{
-    self, BomFailed, Context, DrawingResults, KeptBom, KeptCheck, Notice, PidVerifyMsg,
-    ProjectResults, Tab, Unreadable, Waiving, GONE, REASON_ID, ROWS_PER_PAGE,
+    self, BomFailed, Context, DiffGroup, DrawingResults, KeptBom, KeptCheck, Notice, Pick,
+    PidVerifyMsg, ProjectResults, Tab, Unreadable, Waiving, GONE, REASON_ID, ROWS_PER_PAGE,
 };
 use iced::Task;
 use serde_json::{json, Value};
@@ -132,11 +145,22 @@ impl PanelBoms {
     }
 }
 
+/// What 「快照与发布」 keeps of a drawing, on its tab (§3.1): its numbered
+/// snapshots as last read from its folder, and the last diff the panel made
+/// while the two rows it compared stay ticked.
+#[derive(Default)]
+pub(in crate::app) struct PanelSnapshots {
+    listed: Option<Vec<SnapshotInfo>>,
+    diff: Option<Diff>,
+}
+
 impl OpenCADStudio {
     /// Rebuild what the panel draws from its interface state and the
     /// program's state around it. A check or a bill made since the last
-    /// build starts its list over at its first 200 rows.
+    /// build starts its list over at its first 200 rows, and another drawing
+    /// in front is followed first ([`Self::pid_verify_follow_front`]).
     pub(in crate::app) fn refresh_pid_verify_view(&mut self) {
+        self.pid_verify_follow_front();
         let inputs = self.pid_verify_inputs();
         let built = self.pid_verify_built_from.as_ref();
         if built.is_some_and(|built| built.last_check != inputs.last_check) {
@@ -149,11 +173,14 @@ impl OpenCADStudio {
         let view = {
             let (drawing, project) = self.pid_verify_kept();
             let (drawing_bom, project_bom) = self.pid_verify_kept_bom();
+            let (snapshots, diff) = self.pid_verify_kept_snapshots();
             pid_verify_deliver::build_view(
                 &self.pid_verify_ui,
                 Some(&DrawingResults {
                     check: drawing,
                     bom: drawing_bom,
+                    snapshots,
+                    diff,
                 }),
                 Some(&ProjectResults {
                     check: project,
@@ -168,8 +195,10 @@ impl OpenCADStudio {
 
     /// After a message, rebuild the view if the panel is open and anything
     /// it was built from changed: a check made or followed, a drawing
-    /// edited, another tab in front, a scan started or done.
+    /// edited, another tab in front, a scan started or done. Another drawing
+    /// in front is followed whether the panel is open or not.
     pub(in crate::app) fn sync_pid_verify_view(&mut self) {
+        self.pid_verify_follow_front();
         if !self.dock_panel_wanted(PanelId::PidVerifyDeliver) {
             return;
         }
@@ -225,6 +254,79 @@ impl OpenCADStudio {
                         .collect()
                 })
                 .unwrap_or_default(),
+        }
+    }
+
+    /// The snapshots and the diff kept with the drawing in front (§3.1);
+    /// none on the Start page.
+    fn pid_verify_kept_snapshots(&self) -> (Option<&[SnapshotInfo]>, Option<&Diff>) {
+        let Some(tab) = self.tabs.get(self.active_tab).filter(|tab| !tab.is_start) else {
+            return (None, None);
+        };
+        let kept = &tab.pid_snapshots;
+        (kept.listed.as_deref(), kept.diff.as_ref())
+    }
+
+    /// Another drawing in front (§3.1), or the one in front another file now
+    /// (saved under another name, replaced in its tab): the snapshot rows
+    /// ticked are cleared, and the diff of the drawing left drops with them;
+    /// on 「快照与发布」, open, the list of the drawing now in front is read.
+    fn pid_verify_follow_front(&mut self) {
+        let front = self.tabs.get(self.active_tab).filter(|tab| !tab.is_start);
+        let followed = match (front, &self.pid_verify_front) {
+            (Some(tab), Some((id, source))) => {
+                tab.id == *id && tab.scene.document.source_path == *source
+            }
+            (front, followed) => front.is_none() && followed.is_none(),
+        };
+        if followed {
+            return;
+        }
+        let front = front.map(|tab| (tab.id, tab.scene.document.source_path.clone()));
+        let left = std::mem::replace(&mut self.pid_verify_front, front);
+        if let Some(tab) = left.and_then(|(id, _)| self.tabs.iter_mut().find(|tab| tab.id == id)) {
+            tab.pid_snapshots.diff = None;
+        }
+        let ui = &mut self.pid_verify_ui;
+        ui.picked.clear();
+        ui.diff_more = 0;
+        ui.diff_located = None;
+        if ui.tab == Tab::Deliver && self.dock_panel_wanted(PanelId::PidVerifyDeliver) {
+            self.pid_verify_reread_snapshots(self.active_tab);
+        }
+    }
+
+    /// Read the snapshot list of the drawing on tab `i` from its folder again
+    /// (§3.1). A drawing never saved has none, which goes unsaid; what else
+    /// stops it is said in the message bar, and the list read before stays.
+    fn pid_verify_reread_snapshots(&mut self, i: usize) {
+        if self.tabs.get(i).is_none_or(|tab| tab.is_start) {
+            return;
+        }
+        match self.pidsnapshot_listed(i) {
+            Ok((listed, _, _)) => self.tabs[i].pid_snapshots.listed = Some(listed),
+            Err(Failure::NoProjectDir) => self.tabs[i].pid_snapshots.listed = None,
+            Err(failure) => {
+                let code = failure.code().map(str::to_owned);
+                self.pid_verify_ui.notice = Some(Notice::error(code, failure.to_string()));
+            }
+        }
+    }
+
+    /// A numbered snapshot of the drawing on tab `i` saved elsewhere than in
+    /// the panel (`PIDSNAPSHOT SAVE`, `pid_snapshot_save`, the one a publish
+    /// saves first): the list the panel read of that drawing is read again,
+    /// and the panel, open, redrawn.
+    pub(super) fn pid_verify_snapshots_saved(&mut self, i: usize) {
+        if self
+            .tabs
+            .get(i)
+            .is_some_and(|tab| tab.pid_snapshots.listed.is_some())
+        {
+            self.pid_verify_reread_snapshots(i);
+        }
+        if self.dock_panel_wanted(PanelId::PidVerifyDeliver) {
+            self.refresh_pid_verify_view();
         }
     }
 
@@ -312,9 +414,13 @@ impl OpenCADStudio {
     }
 
     /// Show the panel the way its switch among the dock's panels does:
-    /// docked on the right the first time, where the user left it after.
+    /// docked on the right the first time, where the user left it after. On
+    /// 「快照与发布」 the snapshot list is read again.
     pub(in crate::app) fn show_pid_verify_panel(&mut self) -> Task<Message> {
         let task = self.dock_set_open(PanelId::PidVerifyDeliver, true);
+        if self.pid_verify_ui.tab == Tab::Deliver {
+            self.pid_verify_reread_snapshots(self.active_tab);
+        }
         self.refresh_pid_verify_view();
         task
     }
@@ -368,7 +474,8 @@ impl OpenCADStudio {
     /// What the user did in the panel. Hiding takes the close button's path,
     /// so the controls' positions go with the panel. A filter changed or a
     /// check pressed starts the rule-check list over at its first 200 rows,
-    /// and a search typed or a bill pressed the material list.
+    /// and a search typed or a bill pressed the material list. Turning to
+    /// 「快照与发布」 reads its snapshot list again.
     pub(in crate::app) fn on_pid_verify(&mut self, msg: PidVerifyMsg) -> Task<Message> {
         let ui = &mut self.pid_verify_ui;
         let task = match msg {
@@ -380,8 +487,12 @@ impl OpenCADStudio {
             }
             PidVerifyMsg::PickExport => return self.pid_verify_pick_export(),
             PidVerifyMsg::PickBomExport => return self.pid_verify_pick_bom_export(),
+            PidVerifyMsg::PickDiffExport => return self.pid_verify_pick_diff_export(),
             PidVerifyMsg::Tab(tab) => {
                 ui.tab = tab;
+                if tab == Tab::Deliver {
+                    self.pid_verify_reread_snapshots(self.active_tab);
+                }
                 Task::none()
             }
             PidVerifyMsg::CheckDrawing => {
@@ -499,6 +610,31 @@ impl OpenCADStudio {
             }
             PidVerifyMsg::BomSummary => {
                 ui.summary_open = !ui.summary_open;
+                Task::none()
+            }
+            PidVerifyMsg::SnapshotReason(typed) => {
+                ui.snapshot_reason = typed;
+                Task::none()
+            }
+            PidVerifyMsg::SnapshotSave(reason) => {
+                self.pid_verify_snapshot_save(&reason);
+                Task::none()
+            }
+            PidVerifyMsg::Pick(pick) => {
+                self.pid_verify_pick_row(pick);
+                Task::none()
+            }
+            PidVerifyMsg::Diff(a, b) => {
+                self.pid_verify_diff(a, b);
+                Task::none()
+            }
+            PidVerifyMsg::DiffLocate(group, index) => self.pid_verify_diff_locate(group, index),
+            PidVerifyMsg::MoreDiff => {
+                ui.diff_more = ui.diff_more.saturating_add(1);
+                Task::none()
+            }
+            PidVerifyMsg::DiffExport(name) => {
+                self.pid_verify_diff_export(&name);
                 Task::none()
             }
         };
@@ -927,6 +1063,123 @@ impl OpenCADStudio {
         let here = self.pid_verify_bom_drawing_id(self.active_tab);
         self.pid_verify_go(target, &here)
     }
+
+    /// 【存快照】 (§4.6): a numbered snapshot of the drawing in front for
+    /// `reason`, by the entry `PIDSNAPSHOT SAVE` calls. Saved, the message
+    /// bar says which it is and the reason box empties; what stops it is said
+    /// there, and what was typed stays. The list is read again either way.
+    fn pid_verify_snapshot_save(&mut self, reason: &str) {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return;
+        }
+        let notice = match self.pidsnapshot_store(i, None, reason, snapshot_said) {
+            Ok((saved, said)) => {
+                self.pid_verify_ui.snapshot_reason.clear();
+                let seq = saved.seq.unwrap_or_default();
+                Notice::info(format!("已存第 {seq} 份快照（{said}）。"))
+            }
+            Err(failure) => Notice::error(failure.code().map(str::to_owned), failure.to_string()),
+        };
+        self.pid_verify_ui.notice = Some(notice);
+        self.pid_verify_reread_snapshots(i);
+    }
+
+    /// A row of the snapshot list ticked or unticked (§4.6): the rows the
+    /// panel shows ticked, with this one switched. The diff shown compared
+    /// the rows ticked before, so it goes.
+    fn pid_verify_pick_row(&mut self, pick: Pick) {
+        let mut picked = self.pid_verify_view.deliver.picked.clone();
+        toggle(&mut picked, pick);
+        let ui = &mut self.pid_verify_ui;
+        ui.picked = picked;
+        ui.diff_more = 0;
+        ui.diff_located = None;
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.pid_snapshots.diff = None;
+        }
+    }
+
+    /// 【比对】 (§4.6): the two rows ticked compared by the entry `PIDDIFF`
+    /// calls, `a` the older, at the tolerance `PIDDIFF` takes by default. The
+    /// diff is kept on the drawing's tab and its list starts over; what stops
+    /// it is said in the message bar, and no diff is shown then.
+    fn pid_verify_diff(&mut self, a: Pick, b: Pick) {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return;
+        }
+        let side = |pick: Pick| match pick {
+            Pick::Live => Side::Live,
+            Pick::Seq(seq) => Side::Seq(seq),
+        };
+        let compared = self.piddiff_compare(i, &side(a), &side(b), DEFAULT_MOVE_TOLERANCE);
+        let ui = &mut self.pid_verify_ui;
+        ui.diff_more = 0;
+        ui.diff_located = None;
+        ui.notice = compared
+            .as_ref()
+            .err()
+            .map(|failure| Notice::error(failure.code().map(str::to_owned), failure.to_string()));
+        self.tabs[i].pid_snapshots.diff = compared.ok();
+    }
+
+    /// An object of the diff clicked (§4.6): on the drawing in front, the
+    /// object of its type and tag nearest to where the diff puts it, found as
+    /// `PIDLOCATE` finds a tag and framed. A removed object, and a page
+    /// connector, have nothing to find them by there: the view goes to where
+    /// they were, or are.
+    fn pid_verify_diff_locate(&mut self, group: DiffGroup, index: usize) -> Task<Message> {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return Task::none();
+        }
+        let here = self.pid_verify_bom_drawing_id(i);
+        let diff = self.tabs[i].pid_snapshots.diff.as_ref();
+        let Some(object) = diff.and_then(|diff| group.objects(diff).get(index)) else {
+            return Task::none();
+        };
+        let target = if group == DiffGroup::Removed || object.kind == CONNECTOR {
+            Target::spot(&here, object.at)
+        } else {
+            Target::placed(&here, &object.type_code, &object.tag, object.at)
+        };
+        self.pid_verify_ui.diff_located = Some((group, index));
+        self.pid_verify_go(target, &here)
+    }
+
+    /// 【导出比对结果】 (§4.6): ask where to write the diff shown, offering
+    /// `<drawing>-diff.json` beside the drawing.
+    fn pid_verify_pick_diff_export(&self) -> Task<Message> {
+        self.pid_verify_pick(
+            "导出比对结果",
+            "diff.json",
+            &[("JSON", "json")],
+            PidVerifyMsg::DiffExport,
+        )
+    }
+
+    /// Write the diff shown to `name` as `PIDDIFF … EXPORT` writes it, and
+    /// say in the message bar where it went or why it did not.
+    fn pid_verify_diff_export(&mut self, name: &str) {
+        let i = self.active_tab;
+        let Some(diff) = self
+            .tabs
+            .get(i)
+            .filter(|tab| !tab.is_start)
+            .and_then(|tab| tab.pid_snapshots.diff.as_ref())
+        else {
+            return;
+        };
+        let notice = match self.piddiff_write(i, name, diff) {
+            Ok((path, bytes)) => Notice::info(format!(
+                "已把比对结果写成 {}（{bytes} 字节）。",
+                path.display()
+            )),
+            Err(failure) => Notice::error(failure.code().map(str::to_owned), failure.to_string()),
+        };
+        self.pid_verify_ui.notice = Some(notice);
+    }
 }
 
 /// What the panel keeps in a bill's place when it did not come out (§4.5):
@@ -1006,9 +1259,10 @@ mod tests {
     use crate::pid::drc::builtin_rules::PROJECT_PACK_FILE;
     use crate::ui::dock::{DockMsg, PanelId};
     use crate::ui::window::pid_verify_deliver::{
-        BomRowView, BomTable, Group, PidVerifyMsg, RowView, Tab, BOM_DRAWING_ID, BOM_EXPORT_ID,
-        BOM_PROJECT_ID, BOM_SEARCH_ID, BOUNDS_PREFIX, CHECK_DRAWING_ID, CHECK_PROJECT_ID,
-        NEVER_CHECKED, PANEL_BOUNDS_ID,
+        BomRowView, BomTable, DiffGroup, Group, Pick, PidVerifyMsg, RowView, Tab, BOM_DRAWING_ID,
+        BOM_EXPORT_ID, BOM_PROJECT_ID, BOM_SEARCH_ID, BOUNDS_PREFIX, CHECK_DRAWING_ID,
+        CHECK_PROJECT_ID, DIFF_EXPORT_ID, DIFF_ID, NEVER_CHECKED, PANEL_BOUNDS_ID,
+        SNAPSHOT_REASON_ID, SNAPSHOT_SAVE_ID, UNSAVED_SAID,
     };
     use serde_json::{json, Value};
     use std::fs;
@@ -2559,6 +2813,267 @@ mod tests {
                         .map(str::to_owned)
                         .to_vec();
                 ids.extend(table.rows.iter().map(BomRowView::bounds_id));
+                for id in ids {
+                    assert!(drawn.contains(&id), "{id}: {drawn:?}");
+                }
+            })
+            .expect("spawn test thread")
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    }
+
+    /// Press `value` in the panel, which takes it.
+    fn pressed(app: &mut OpenCADStudio, value: &str) {
+        let answer = act(app, value);
+        assert_eq!(answer["ok"], true, "{value}: {answer}");
+    }
+
+    /// Press `value` in the panel, which refuses it as a grey button for
+    /// `reason`.
+    fn refused_for(app: &mut OpenCADStudio, value: &str, reason: &str) {
+        let answer = act(app, value);
+        assert_eq!(
+            answer["code"], "PANEL_ACTION_UNAVAILABLE",
+            "{value}: {answer}"
+        );
+        assert_eq!(answer["reason"], reason, "{value}: {answer}");
+    }
+
+    /// The numbers of the snapshots the panel state lists, in its order.
+    fn listed_seqs(state: &Value) -> Vec<u64> {
+        let rows = state["deliver"]["snapshots"].as_array();
+        let rows = rows.cloned().unwrap_or_default();
+        rows.iter().filter_map(|row| row["seq"].as_u64()).collect()
+    }
+
+    #[test]
+    fn a_snapshot_saved_in_the_panel_is_listed_and_two_ticked_are_compared() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        pressed(&mut app, "tab=deliver");
+        let state = panel(&mut app, "");
+        assert_eq!(listed_seqs(&state), Vec::<u64>::new(), "{state}");
+        assert_eq!(state["buttons"]["snapshot_save"], true, "{state}");
+        let steps = undo_steps(&app);
+        pressed(&mut app, "snapshot_save=送审前");
+        assert_eq!(undo_steps(&app), steps, "a snapshot changes no drawing");
+        let state = panel(&mut app, "");
+        assert_eq!(listed_seqs(&state), [1], "{state}");
+        assert_eq!(state["notice"]["level"], "info", "{state}");
+        // The row is what pid_snapshots lists, ticked or not.
+        let listed = request(&mut app, json!({"op": "pid_snapshots"}));
+        let mut row = listed["snapshots"][0].clone();
+        assert_eq!(row["reason"], "送审前", "{listed}");
+        row["picked"] = json!(false);
+        assert_eq!(state["deliver"]["snapshots"][0], row, "{state}");
+        // 【比对】 wants two rows ticked: not none, one or three.
+        assert_eq!(state["buttons"]["diff"], false, "{state}");
+        refused_for(&mut app, "diff", "not_two_picked");
+        pressed(&mut app, "pick=1");
+        refused_for(&mut app, "diff", "not_two_picked");
+        pressed(&mut app, "snapshot_save=");
+        pressed(&mut app, "pick=2");
+        let state = panel(&mut app, "");
+        assert_eq!(listed_seqs(&state), [2, 1], "{state}");
+        assert_eq!(state["deliver"]["picked"], json!([1, 2]), "{state}");
+        assert_eq!(state["buttons"]["diff"], true, "{state}");
+        pressed(&mut app, "pick=live");
+        let state = panel(&mut app, "");
+        assert_eq!(state["buttons"]["diff"], false, "{state}");
+        refused_for(&mut app, "diff", "not_two_picked");
+        pressed(&mut app, "pick=live");
+        // Two snapshots of a drawing that did not change are alike.
+        pressed(&mut app, "diff");
+        let state = panel(&mut app, "");
+        let alike = json!({"a": 1, "b": 2, "identical": true, "新增": 0, "删除": 0, "修改": 0});
+        assert_eq!(state["deliver"]["diff"], alike, "{state}");
+    }
+
+    #[test]
+    fn a_snapshot_against_the_drawing_as_it_is_counts_as_pid_diff_and_finds_what_changed() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        pressed(&mut app, "tab=deliver");
+        pressed(&mut app, "snapshot_save=送审前");
+        // The pump gets a design temperature, and a transmitter comes in.
+        let ran = run(&mut app, "PIDSETPROP P-1001 设计温度 80");
+        assert_eq!(ran.error, None, "{}", ran.said);
+        draw(&mut app, "PIDINSERT transmitter", &[[300.0, 300.0]]);
+        pressed(&mut app, "pick=live");
+        pressed(&mut app, "pick=1");
+        pressed(&mut app, "diff");
+        let state = panel(&mut app, "");
+        let compared = request(&mut app, json!({"op": "pid_diff", "a": 1}));
+        assert_eq!(compared["ok"], true, "{compared}");
+        let summary = &compared["summary"];
+        let counts = ["新增", "删除", "修改"].map(|group| summary[group].as_u64());
+        assert_eq!(counts, [Some(1), Some(0), Some(1)], "{compared}");
+        let wanted = json!({
+            "a": 1, "b": "live", "identical": false,
+            "新增": 1, "删除": 0, "修改": 1
+        });
+        assert_eq!(state["deliver"]["diff"], wanted, "{state}");
+        // What changed on the pump reads under it.
+        let shown = app
+            .pid_verify_view
+            .deliver
+            .diff
+            .clone()
+            .expect("a diff drawn");
+        let mut groups = shown.groups.iter();
+        let modified = groups.find(|group| group.group == DiffGroup::Modified);
+        let pump = &modified.expect("the modified group").items[0];
+        let said = "属性 设计温度：（空） → 80".to_owned();
+        assert!(pump.changes.contains(&said), "{:?}", pump.changes);
+        // Clicked, the pump is selected and framed as PIDLOCATE does.
+        let found = pidlocate(&mut app, "P-1001");
+        pressed(&mut app, "diff_locate=modified:0");
+        assert_eq!((selection(&mut app), looking_at(&app)), found);
+        let state = panel(&mut app, "");
+        assert_eq!(state["notice"], Value::Null, "{state}");
+        assert!(!pidlocate_said(&app), "the panel finds in silence");
+    }
+
+    #[test]
+    fn a_drawing_never_saved_keeps_no_numbered_snapshot_in_the_panel() {
+        let mut app = fresh();
+        draw(&mut app, "PIDINSERT pump", &[[0.0, 0.0]]);
+        pressed(&mut app, "show");
+        pressed(&mut app, "tab=deliver");
+        let state = panel(&mut app, "");
+        assert_eq!(state["buttons"]["snapshot_save"], false, "{state}");
+        assert_eq!(state["deliver"]["snapshots"], json!([]), "{state}");
+        assert_eq!(state["notice"], Value::Null, "{state}");
+        assert_eq!(app.pid_verify_view.empty, Some(UNSAVED_SAID));
+        refused_for(&mut app, "snapshot_save=送审前", "no_project_dir");
+        refused_for(&mut app, "pick=live", "no_project_dir");
+    }
+
+    #[test]
+    fn ticking_otherwise_drops_the_diff_and_another_drawing_in_front_the_ticks() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        let first = app.tabs[app.active_tab].id;
+        pressed(&mut app, "tab=deliver");
+        pressed(&mut app, "snapshot_save=送审前");
+        pressed(&mut app, "pick=1");
+        pressed(&mut app, "pick=live");
+        pressed(&mut app, "diff");
+        let state = panel(&mut app, "");
+        assert_ne!(state["deliver"]["diff"], Value::Null, "{state}");
+        // Unticked, the diff goes; ticked again, it does not come back.
+        pressed(&mut app, "pick=live");
+        let state = panel(&mut app, "");
+        assert_eq!(state["deliver"]["diff"], Value::Null, "{state}");
+        assert_eq!(state["buttons"]["diff_export"], false, "{state}");
+        pressed(&mut app, "pick=live");
+        let state = panel(&mut app, "");
+        assert_eq!(state["deliver"]["diff"], Value::Null, "{state}");
+        pressed(&mut app, "diff");
+        // Another drawing in front: nothing ticked, no diff; nor when the
+        // first comes back, its list read again.
+        let _ = app.update(Message::TabNew);
+        assert_ne!(app.tabs[app.active_tab].id, first);
+        let state = panel(&mut app, "");
+        assert_eq!(state["deliver"]["picked"], json!([]), "{state}");
+        assert_eq!(state["deliver"]["diff"], Value::Null, "{state}");
+        activate(&mut app, first, "pid-verify-back-to-the-first");
+        let state = panel(&mut app, "");
+        assert_eq!(state["deliver"]["picked"], json!([]), "{state}");
+        assert_eq!(state["deliver"]["diff"], Value::Null, "{state}");
+        assert_eq!(listed_seqs(&state), [1], "{state}");
+        // Another drawing in the same tab is another drawing too: the ticks
+        // go, not only out of sight.
+        pressed(&mut app, "pick=1");
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let _ = panel(&mut app, "");
+        assert_eq!(app.pid_verify_ui.picked, Vec::<Pick>::new());
+    }
+
+    #[test]
+    fn the_snapshot_list_is_read_again_on_turning_to_it_and_after_each_save() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        let ran = run(&mut app, "PIDSNAPSHOT SAVE 送审前");
+        assert_eq!(ran.error, None, "{}", ran.said);
+        pressed(&mut app, "tab=deliver");
+        assert_eq!(listed_seqs(&panel(&mut app, "")), [1]);
+        let ran = run(&mut app, "PIDSNAPSHOT SAVE 改版");
+        assert_eq!(ran.error, None, "{}", ran.said);
+        assert_eq!(listed_seqs(&panel(&mut app, "")), [2, 1]);
+        let saved = request(
+            &mut app,
+            json!({"op": "pid_snapshot_save", "reason": "交付"}),
+        );
+        assert_eq!(saved["ok"], true, "{saved}");
+        assert_eq!(listed_seqs(&panel(&mut app, "")), [3, 2, 1]);
+        // What is typed in the box is the reason; saved, the box empties.
+        click(&mut app, PidVerifyMsg::SnapshotReason("出图".to_owned()));
+        assert_eq!(app.pid_verify_view.deliver.reason, "出图");
+        click(&mut app, PidVerifyMsg::SnapshotSave("出图".to_owned()));
+        assert_eq!(app.pid_verify_view.deliver.reason, "");
+        let state = panel(&mut app, "");
+        assert_eq!(listed_seqs(&state), [4, 3, 2, 1], "{state}");
+        assert_eq!(
+            state["deliver"]["snapshots"][0]["reason"], "出图",
+            "{state}"
+        );
+    }
+
+    #[test]
+    fn the_panel_exports_the_diff_shown_as_piddiff_export_writes_it() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        pressed(&mut app, "tab=deliver");
+        refused_for(&mut app, "diff_export=early.json", "no_result");
+        pressed(&mut app, "snapshot_save=送审前");
+        draw(&mut app, "PIDINSERT transmitter", &[[300.0, 300.0]]);
+        pressed(&mut app, "snapshot_save=改版");
+        pressed(&mut app, "pick=2");
+        pressed(&mut app, "pick=1");
+        pressed(&mut app, "diff");
+        pressed(&mut app, "diff_export=panel.json");
+        let state = panel(&mut app, "");
+        assert_eq!(state["notice"]["level"], "info", "{state}");
+        let ran = run(&mut app, "PIDDIFF 1 2 EXPORT command.json");
+        assert_eq!(ran.error, None, "{}", ran.said);
+        let written = |name: &str| {
+            fs::read(scratch.path(name)).unwrap_or_else(|error| panic!("{name}: {error}"))
+        };
+        assert_eq!(written("panel.json"), written("command.json"));
+    }
+
+    #[test]
+    fn the_drawn_snapshot_tab_reports_its_buttons_and_rows() {
+        // As for the panel's body and tabs above.
+        let _one = crate::headless_ui_lock();
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let scratch = Scratch::new();
+                let mut app = sheet(&scratch);
+                app.win_size = (1600.0, 900.0);
+                for value in ["tab=deliver", "snapshot_save=送审前"] {
+                    pressed(&mut app, value);
+                }
+                draw(&mut app, "PIDINSERT transmitter", &[[300.0, 300.0]]);
+                for value in ["pick=1", "pick=live", "diff"] {
+                    pressed(&mut app, value);
+                }
+                let drawn = drawn_ids(&app);
+                let mut ids: Vec<String> = [
+                    SNAPSHOT_REASON_ID,
+                    SNAPSHOT_SAVE_ID,
+                    DIFF_ID,
+                    DIFF_EXPORT_ID,
+                ]
+                .map(str::to_owned)
+                .to_vec();
+                ids.extend([
+                    Pick::Live.bounds_id(),
+                    Pick::Seq(1).bounds_id(),
+                    DiffGroup::Added.item_id(0),
+                ]);
                 for id in ids {
                     assert!(drawn.contains(&id), "{id}: {drawn:?}");
                 }
