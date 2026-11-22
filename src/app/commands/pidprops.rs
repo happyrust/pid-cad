@@ -51,7 +51,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDLINELIST",
         "PIDEQUIP",
         "PIDRELIEF",
-        "PIDCAUSE"
+        "PIDCAUSE",
+        "PIDIO"
     ]
 });
 
@@ -343,6 +344,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidcause_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidio_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -5749,6 +5753,270 @@ impl OpenCADStudio {
             other => {
                 self.command_line.push_error(&format!(
                     "PIDCAUSE: 未知子命令 {other}（支持 SUMMARY / ALL / COMPLETE / INCOMPLETE / TAG / NEXT / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
+
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidio_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            analyze_pid_io_list, io_item_matches_query, write_pid_io_list_file, ControlSystemKind,
+            MountStatus, OpcSheetInput,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDIO") {
+            return None;
+        }
+
+        let mut action: Option<String> = None;
+        let mut channel_query: Option<String> = None;
+        let mut tag_query: Option<String> = None;
+        let mut all_tabs = false;
+        let mut export_path: Option<std::path::PathBuf> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            let up = tok.to_ascii_uppercase();
+            match up.as_str() {
+                "ALLTABS" => {
+                    all_tabs = true;
+                    idx += 1;
+                }
+                "SUMMARY" | "ALL" | "DCS" | "SIS" | "LOCAL" | "UNCONNECTED" | "NEXT" => {
+                    action = Some(up);
+                    idx += 1;
+                }
+                "CHANNEL" => {
+                    let Some(q) = tokens.get(idx + 1) else {
+                        self.command_line.push_error(
+                            "PIDIO CHANNEL: 缺少信号类型（AI / AO / DI / DO / SOFT）。",
+                        );
+                        return Some(Task::none());
+                    };
+                    action = Some("CHANNEL".to_string());
+                    channel_query = Some(q.to_ascii_uppercase());
+                    idx += 2;
+                }
+                "TAG" => {
+                    let Some(q) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDIO TAG: 缺少仪表或程控阀位号关键字。");
+                        return Some(Task::none());
+                    };
+                    action = Some("TAG".to_string());
+                    tag_query = Some(q.clone());
+                    idx += 2;
+                }
+                "EXPORT" => {
+                    let Some(next_tok) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDIO EXPORT: 缺少输出文件路径（.json/.csv/.tsv）。");
+                        return Some(Task::none());
+                    };
+                    export_path = Some(std::path::PathBuf::from(next_tok));
+                    idx += 2;
+                }
+                _ => {
+                    if action.is_none() {
+                        action = Some("TAG".to_string());
+                        tag_query = Some(tok.clone());
+                    }
+                    idx += 1;
+                }
+            }
+        }
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<OpcSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+
+        let rep = analyze_pid_io_list(&sheet_inputs);
+
+        if let Some(ref out_p) = export_path {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(err) = write_pid_io_list_file(&rep, out_p) {
+                self.command_line
+                    .push_error(&format!("PIDIO EXPORT: {err}"));
+                return Some(Task::none());
+            }
+        }
+
+        let eff_action = action.as_deref().unwrap_or("SUMMARY");
+        let filtered: Vec<_> = rep
+            .items
+            .iter()
+            .filter(|r| match eff_action {
+                "DCS" => r.control_system == ControlSystemKind::Dcs,
+                "SIS" => r.control_system == ControlSystemKind::SisEsd,
+                "LOCAL" => r.control_system == ControlSystemKind::Local,
+                "UNCONNECTED" => r.mount_status == MountStatus::UnconnectedField,
+                "CHANNEL" => channel_query
+                    .as_deref()
+                    .is_some_and(|q| r.io_channel.as_str().eq_ignore_ascii_case(q)),
+                "TAG" => tag_query
+                    .as_deref()
+                    .is_some_and(|q| io_item_matches_query(r, q)),
+                _ => true,
+            })
+            .collect();
+
+        match eff_action {
+            "SUMMARY" => {
+                self.command_line.push_output(&format!(
+                    "PIDIO: 扫描图纸={} | 仪表/执行器={} | DCS硬点={}(+20%裕量={})[AI={},AO={},DI={},DO={}] | SIS硬点={}(+20%裕量={})[AI={},DI={},DO={}] | 就地表={}，软功能={}，未接管={}。",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_items,
+                    rep.summary.dcs_total_hw,
+                    rep.summary.dcs_with_20pct_spare,
+                    rep.summary.dcs_ai,
+                    rep.summary.dcs_ao,
+                    rep.summary.dcs_di,
+                    rep.summary.dcs_do,
+                    rep.summary.sis_total_hw,
+                    rep.summary.sis_with_20pct_spare,
+                    rep.summary.sis_ai,
+                    rep.summary.sis_di,
+                    rep.summary.sis_do,
+                    rep.summary.local_gauges_count,
+                    rep.summary.soft_functions_count,
+                    rep.summary.unconnected_field_count,
+                ));
+            }
+            "ALL" | "DCS" | "SIS" | "LOCAL" | "UNCONNECTED" | "CHANNEL" | "TAG" => {
+                let mut by_tab: std::collections::BTreeMap<usize, Vec<document::Handle>> =
+                    std::collections::BTreeMap::new();
+                for r in &filtered {
+                    let dst = by_tab.entry(r.tab_index).or_default();
+                    for &h in &r.member_handles {
+                        if !dst.contains(&h) {
+                            dst.push(h);
+                        }
+                    }
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                let mut sel_cnt = 0usize;
+                for (&ti, hs) in &by_tab {
+                    if ti < self.tabs.len() && !hs.is_empty() {
+                        self.tabs[ti].scene.select_entities(hs);
+                        sel_cnt += hs.len();
+                    }
+                }
+                if eff_action == "TAG"
+                    && filtered.len() == 1
+                    && filtered[0].tab_index < self.tabs.len()
+                    && filtered[0].tab_index != self.active_tab
+                {
+                    let dt = filtered[0].tab_index;
+                    let _ = self.update(Message::TabSwitch(dt));
+                    self.active_tab = dt;
+                }
+                if let Some(cur_hs) = by_tab.get(&self.active_tab).filter(|h| !h.is_empty()) {
+                    let _ = self.tabs[self.active_tab].scene.zoom_to_entities(cur_hs);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDIO {eff_action}: 匹配 {} 台仪表/执行元件，跨打开图纸高亮 {sel_cnt} 个图元。",
+                    filtered.len()
+                ));
+            }
+            "NEXT" => {
+                if filtered.is_empty() {
+                    self.command_line
+                        .push_output("PIDIO NEXT: 未找到可巡检的仪表图元。");
+                    return Some(self.finish_dispatch(cmd));
+                }
+                let cur_tab = self.active_tab;
+                let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[cur_tab]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                let cur_pos = filtered
+                    .iter()
+                    .position(|r| r.tab_index == cur_tab && sel_set.contains(&r.primary_handle));
+                let next_idx = cur_pos.map(|p| (p + 1) % filtered.len()).unwrap_or(0);
+                let chosen = filtered[next_idx];
+                let dest_tab = chosen.tab_index;
+
+                if dest_tab < self.tabs.len() && dest_tab != self.active_tab {
+                    let _ = self.update(Message::TabSwitch(dest_tab));
+                    self.active_tab = dest_tab;
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                if dest_tab < self.tabs.len() {
+                    self.tabs[dest_tab]
+                        .scene
+                        .select_entities(&chosen.member_handles);
+                    let zoomed = self.tabs[dest_tab]
+                        .scene
+                        .zoom_to_entities(&chosen.member_handles);
+                    if !zoomed {
+                        let mut cam = self.tabs[dest_tab].scene.camera.borrow_mut();
+                        let z = cam.target.z;
+                        cam.target = glam::DVec3::new(chosen.x, chosen.y, z);
+                    }
+                    self.refresh_properties();
+                }
+                self.command_line.push_output(&format!(
+                    "PIDIO NEXT [{}/{}]: {}（系统={}，通道={}，取源={}）。",
+                    next_idx + 1,
+                    filtered.len(),
+                    chosen.item_tag,
+                    chosen.control_system.as_str(),
+                    chosen.io_channel.as_str(),
+                    chosen.mounted_on,
+                ));
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDIO: 未知子命令 {other}（支持 SUMMARY / ALL / DCS / SIS / LOCAL / UNCONNECTED / CHANNEL / TAG / NEXT / EXPORT）。"
                 ));
                 return Some(Task::none());
             }
@@ -16678,6 +16946,407 @@ mod tests {
 
         std::fs::write(
             out_dir.join("real172_summary.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()
+            ),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidio_classifies_dcs_sis_local_channels_avoids_ly_lv_double_count_computes_20pct_spare_flags_unconnected_and_steps_camera(
+    ) {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let tmp = std::env::temp_dir().join("ocs_pidio_test_173");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let mut app = app();
+
+        // Tab 1:
+        // - V-1731 + 100-PG-17301-CS150
+        // - DCS loop 1731: LT-1731 (AI) + LICA-1731 (SOFT) + LY-1731 (SOFT, paired with LV!) + LV-1731 (AO)
+        // - Local gauge PG-1731 (LOCAL_NONE) on 100-PG-17301-CS150
+        // - Floating unconnected PT-1799 (AI, unconnected_field)
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-173-01.dxf".to_string();
+        let (lt_h, pg_h, pt_unconn_h) = {
+            let doc = &mut app.tabs[tab1].scene.document;
+            define_sppid_block(doc, "1TO1PARAMETRIC V DRUM", 12.0, 24.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "DCS FUNC ACCESS IN PRIME LOC", 8.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-173-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut drum = Insert::new("1TO1PARAMETRIC V DRUM", Vector3::new(100.0, 300.0, 0.0));
+            drum.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(drum)).unwrap();
+            let mut dt =
+                Text::with_value("V-1731", Vector3::new(95.0, 280.0, 0.0)).with_height(2.5);
+            dt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(dt)).unwrap();
+
+            // LT-1731 connected via impulse line to V-1731
+            let mut imp = Line::from_points(
+                Vector3::new(100.0, 312.0, 0.0),
+                Vector3::new(100.0, 336.0, 0.0),
+            );
+            imp.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Line(imp)).unwrap();
+            let mut lt = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(100.0, 340.0, 0.0),
+            );
+            lt.common.layer = "12".to_string();
+            let lt_h = doc.add_entity(document::EntityType::Insert(lt)).unwrap();
+            let mut lt1 = Text::with_value("LT", Vector3::new(98.5, 342.0, 0.0)).with_height(2.2);
+            lt1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(lt1)).unwrap();
+            let mut lt2 = Text::with_value("1731", Vector3::new(97.5, 337.5, 0.0)).with_height(2.2);
+            lt2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(lt2)).unwrap();
+
+            // LICA-1731 (DCS soft controller)
+            let mut lica = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(145.0, 340.0, 0.0),
+            );
+            lica.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Insert(lica)).unwrap();
+            let mut lc1 =
+                Text::with_value("LICA", Vector3::new(142.5, 342.0, 0.0)).with_height(2.2);
+            lc1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(lc1)).unwrap();
+            let mut lc2 =
+                Text::with_value("1731", Vector3::new(142.5, 337.5, 0.0)).with_height(2.2);
+            lc2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(lc2)).unwrap();
+
+            // Process line 100-PG-17301-CS150 with LY-1731 + LV-1731 + PG-1731
+            let mut p1 = Line::from_points(
+                Vector3::new(106.0, 300.0, 0.0),
+                Vector3::new(187.0, 300.0, 0.0),
+            );
+            p1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p1)).unwrap();
+            let mut ltxt = Text::with_value("100-PG-17301-CS150", Vector3::new(120.0, 303.0, 0.0))
+                .with_height(2.5);
+            ltxt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(ltxt)).unwrap();
+
+            let mut lv = Insert::new("BALL VALVE TYPE 2", Vector3::new(190.0, 300.0, 0.0));
+            lv.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(lv)).unwrap();
+            let mut lvt =
+                Text::with_value("LV-1731", Vector3::new(185.0, 292.0, 0.0)).with_height(2.5);
+            lvt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(lvt)).unwrap();
+
+            let mut ly = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(190.0, 320.0, 0.0),
+            );
+            ly.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Insert(ly)).unwrap();
+            let mut ly1 = Text::with_value("LY", Vector3::new(188.5, 322.0, 0.0)).with_height(2.2);
+            ly1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(ly1)).unwrap();
+            let mut ly2 =
+                Text::with_value("1731", Vector3::new(187.5, 317.5, 0.0)).with_height(2.2);
+            ly2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(ly2)).unwrap();
+
+            let mut p2 = Line::from_points(
+                Vector3::new(193.0, 300.0, 0.0),
+                Vector3::new(280.0, 300.0, 0.0),
+            );
+            p2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p2)).unwrap();
+
+            let mut pg = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(240.0, 306.0, 0.0),
+            );
+            pg.common.layer = "12".to_string();
+            let pg_h = doc.add_entity(document::EntityType::Insert(pg)).unwrap();
+            let mut pg1 = Text::with_value("PG", Vector3::new(238.5, 308.0, 0.0)).with_height(2.2);
+            pg1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pg1)).unwrap();
+            let mut pg2 =
+                Text::with_value("1731", Vector3::new(237.5, 303.5, 0.0)).with_height(2.2);
+            pg2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pg2)).unwrap();
+
+            // Unconnected field transmitter PT-1799 far from any pipe/equipment
+            let mut ptu = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(500.0, 500.0, 0.0),
+            );
+            ptu.common.layer = "12".to_string();
+            let pt_unconn_h = doc.add_entity(document::EntityType::Insert(ptu)).unwrap();
+            let mut pu1 = Text::with_value("PT", Vector3::new(498.5, 502.0, 0.0)).with_height(2.2);
+            pu1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pu1)).unwrap();
+            let mut pu2 =
+                Text::with_value("1799", Vector3::new(497.5, 497.5, 0.0)).with_height(2.2);
+            pu2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pu2)).unwrap();
+
+            (lt_h, pg_h, pt_unconn_h)
+        };
+
+        // Tab 2: SIS ESD loop 1732 on 80-PG-17302-CS300: PSHH-1732 (DI) + HSC-1732 (DI) + ZSC-1732 (DI) + ESDV-1732 (DO)
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-173-02.dxf".to_string();
+        let esdv_h = {
+            let doc = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "DCS FUNC ACCESS IN PRIME LOC", 8.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-173-02", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut pa = Line::from_points(
+                Vector3::new(100.0, 300.0, 0.0),
+                Vector3::new(177.0, 300.0, 0.0),
+            );
+            pa.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pa)).unwrap();
+            let mut la = Text::with_value("80-PG-17302-CS300", Vector3::new(115.0, 303.0, 0.0))
+                .with_height(2.5);
+            la.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(la)).unwrap();
+
+            let mut pshh = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(140.0, 306.0, 0.0),
+            );
+            pshh.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Insert(pshh)).unwrap();
+            let mut ps1 =
+                Text::with_value("PSHH", Vector3::new(137.5, 308.0, 0.0)).with_height(2.2);
+            ps1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(ps1)).unwrap();
+            let mut ps2 =
+                Text::with_value("1732", Vector3::new(137.5, 303.5, 0.0)).with_height(2.2);
+            ps2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(ps2)).unwrap();
+
+            let mut hsc = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(140.0, 350.0, 0.0),
+            );
+            hsc.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Insert(hsc)).unwrap();
+            let mut hs1 = Text::with_value("HSC", Vector3::new(138.0, 352.0, 0.0)).with_height(2.2);
+            hs1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(hs1)).unwrap();
+            let mut hs2 =
+                Text::with_value("1732", Vector3::new(137.5, 347.5, 0.0)).with_height(2.2);
+            hs2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(hs2)).unwrap();
+
+            let mut esdv = Insert::new("BALL VALVE TYPE 2", Vector3::new(180.0, 300.0, 0.0));
+            esdv.common.layer = "11".to_string();
+            let esdv_h = doc.add_entity(document::EntityType::Insert(esdv)).unwrap();
+            let mut esdvt =
+                Text::with_value("ESDV-1732", Vector3::new(175.0, 292.0, 0.0)).with_height(2.5);
+            esdvt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(esdvt)).unwrap();
+
+            let mut zsc = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(180.0, 306.0, 0.0),
+            );
+            zsc.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Insert(zsc)).unwrap();
+            let mut zs1 = Text::with_value("ZSC", Vector3::new(178.0, 308.0, 0.0)).with_height(2.2);
+            zs1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(zs1)).unwrap();
+            let mut zs2 =
+                Text::with_value("1732", Vector3::new(177.5, 303.5, 0.0)).with_height(2.2);
+            zs2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(zs2)).unwrap();
+
+            let mut pb = Line::from_points(
+                Vector3::new(183.0, 300.0, 0.0),
+                Vector3::new(260.0, 300.0, 0.0),
+            );
+            pb.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pb)).unwrap();
+
+            esdv_h
+        };
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        let json_p = tmp.join("io_list.json");
+        let csv_p = tmp.join("io_list.csv");
+        let _ = app.run_command_line(&format!("PIDIO ALLTABS EXPORT \"{}\"", json_p.display()));
+        assert!(
+            json_p.is_file(),
+            "PIDIO EXPORT must write Instrument Index & I/O Count Schedule io_list.json"
+        );
+        let _ = app.run_command_line(&format!(
+            "PIDIO SUMMARY ALLTABS EXPORT \"{}\"",
+            csv_p.display()
+        ));
+        assert!(csv_p.is_file());
+        let csv_bytes = std::fs::read(&csv_p).unwrap();
+        assert!(csv_bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
+
+        let rep: Value = serde_json::from_str(&std::fs::read_to_string(&json_p).unwrap()).unwrap();
+        let s = &rep["summary"];
+        assert_eq!(s["sheets_scanned"].as_u64(), Some(2));
+        assert_eq!(s["total_items"].as_u64(), Some(10));
+        assert_eq!(s["dcs_ai"].as_u64(), Some(2));
+        assert_eq!(s["dcs_ao"].as_u64(), Some(1));
+        assert_eq!(s["dcs_total_hw"].as_u64(), Some(3));
+        assert_eq!(s["dcs_with_20pct_spare"].as_u64(), Some(4));
+        assert_eq!(s["sis_di"].as_u64(), Some(3));
+        assert_eq!(s["sis_do"].as_u64(), Some(1));
+        assert_eq!(s["sis_total_hw"].as_u64(), Some(4));
+        assert_eq!(s["sis_with_20pct_spare"].as_u64(), Some(5));
+        assert_eq!(s["local_gauges_count"].as_u64(), Some(1));
+        assert_eq!(s["soft_functions_count"].as_u64(), Some(2));
+        assert_eq!(s["unconnected_field_count"].as_u64(), Some(1));
+
+        let _ = app.run_command_line("PIDIO DCS ALLTABS");
+        assert!(has_sel(&app, tab1, lt_h));
+
+        let _ = app.run_command_line("PIDIO LOCAL ALLTABS");
+        assert!(has_sel(&app, tab1, pg_h));
+
+        let _ = app.run_command_line("PIDIO UNCONNECTED ALLTABS");
+        assert!(has_sel(&app, tab1, pt_unconn_h) && !has_sel(&app, tab1, lt_h));
+
+        let _ = app.run_command_line("PIDIO CHANNEL DO ALLTABS");
+        assert!(has_sel(&app, tab2, esdv_h));
+
+        let _ = app.run_command_line("PIDIO TAG ESDV-1732 ALLTABS");
+        assert_eq!(app.active_tab, tab2);
+        assert!(has_sel(&app, tab2, esdv_h));
+
+        let mut visited_esdv = false;
+        for _ in 0..12 {
+            let _ = app.run_command_line("PIDIO NEXT ALLTABS");
+            if app.active_tab == tab2 && has_sel(&app, tab2, esdv_h) {
+                visited_esdv = true;
+                break;
+            }
+        }
+        assert!(visited_esdv, "PIDIO NEXT ALLTABS must visit ESDV-1732");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads 4 real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into OpenCADStudio and verifies PIDIO ALLTABS Instrument Index & DCS/SIS I/O sizing and NEXT stepping"]
+    fn real_multi_tab_pidio_instrument_index_and_cabinet_sizing_audit() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_raw) = std::env::var("OCS_PID_REAL173_SPPID_PAIR") else {
+            println!("OCS_PID_REAL173_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(legacy_raw) = std::env::var("OCS_PID_REAL173_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL173_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL173_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real173"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sppid_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sppid_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        let legacy_paths: Vec<std::path::PathBuf> = std::env::split_paths(&legacy_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        assert_eq!(sppid_paths.len(), 2);
+        assert_eq!(legacy_paths.len(), 2);
+
+        let groups = [("SP01_SP02", &sppid_paths), ("LG01_LG02", &legacy_paths)];
+        let mut out_groups = Vec::new();
+
+        for (gname, paths) in groups {
+            let mut app = app();
+            let mut shas = Vec::new();
+            for (idx, p) in paths.iter().enumerate() {
+                let raw_b = std::fs::read(p).unwrap();
+                shas.push(format!("{:x}", Sha256::digest(&raw_b))[..12].to_string());
+                if idx > 0 {
+                    let _ = app.update(Message::TabNew);
+                }
+                let ti = app.active_tab;
+                app.tabs[ti].scene.document = crate::io::load_file(p).expect("load DXF");
+                app.tabs[ti].tab_title = format!("{gname}_{idx}.dxf");
+            }
+
+            let json_p = out_dir.join(format!("{gname}_io.json"));
+            let csv_p = out_dir.join(format!("{gname}_io.csv"));
+            let _ = app.run_command_line(&format!("PIDIO ALLTABS EXPORT \"{}\"", json_p.display()));
+            let _ = app.run_command_line(&format!(
+                "PIDIO SUMMARY ALLTABS EXPORT \"{}\"",
+                csv_p.display()
+            ));
+            assert!(json_p.is_file() && csv_p.is_file());
+            let csv_raw = std::fs::read(&csv_p).unwrap();
+            assert!(csv_raw.starts_with(&[0xEF, 0xBB, 0xBF]));
+
+            let rep: Value =
+                serde_json::from_str(&std::fs::read_to_string(&json_p).unwrap()).unwrap();
+            let tot = rep["summary"]["total_items"].as_u64().unwrap_or(0);
+            assert!(
+                tot >= 20,
+                "{gname} must extract >= 20 instruments/actuators, got {tot}"
+            );
+
+            let _ = app.run_command_line("PIDIO NEXT ALLTABS");
+            let cur_tab = app.active_tab;
+            assert!(
+                !app.tabs[cur_tab].scene.selected_entities().is_empty(),
+                "PIDIO NEXT ALLTABS must select target instrument entities"
+            );
+
+            let _ = std::fs::remove_file(&json_p);
+            let _ = std::fs::remove_file(&csv_p);
+
+            out_groups.push(json!({
+                "group": gname,
+                "sha256_prefixes": shas,
+                "total_items": rep["summary"]["total_items"],
+                "dcs_total_hw": rep["summary"]["dcs_total_hw"],
+                "dcs_with_20pct_spare": rep["summary"]["dcs_with_20pct_spare"],
+                "sis_total_hw": rep["summary"]["sis_total_hw"],
+                "sis_with_20pct_spare": rep["summary"]["sis_with_20pct_spare"],
+                "local_gauges_count": rep["summary"]["local_gauges_count"],
+                "soft_functions_count": rep["summary"]["soft_functions_count"],
+                "unconnected_field_count": rep["summary"]["unconnected_field_count"],
+            }));
+        }
+
+        std::fs::write(
+            out_dir.join("real173_summary.json"),
             format!(
                 "{}\n",
                 serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()

@@ -17,14 +17,15 @@ use std::path::PathBuf;
 use OpenCADStudio::io::pid_convert::{
     convert_path_to_dir, diff_pid_files, export_handover_package_from_path,
     extract_bom_from_batch_dir, extract_cause_effect_from_path, extract_drawing_index_from_path,
-    extract_equipment_from_path, extract_hazop_from_path, extract_lines_from_path,
-    extract_loops_from_batch_dir, extract_nozzles_from_path, extract_relief_from_path,
-    extract_specialties_from_path, extract_utilities_from_path, extract_valves_from_path,
-    save_cad_file_as_binary_dwg, write_bom_schedule_file, write_pid_cause_effect_file,
-    write_pid_diff_file, write_pid_drawing_index_file, write_pid_equipment_file,
-    write_pid_hazop_file, write_pid_line_list_file, write_pid_loops_file, write_pid_nozzle_file,
-    write_pid_relief_file, write_pid_specialty_file, write_pid_utility_file, write_pid_valve_file,
-    ConvertOptions, PackageOptions,
+    extract_equipment_from_path, extract_hazop_from_path, extract_io_list_from_path,
+    extract_lines_from_path, extract_loops_from_batch_dir, extract_nozzles_from_path,
+    extract_relief_from_path, extract_specialties_from_path, extract_utilities_from_path,
+    extract_valves_from_path, save_cad_file_as_binary_dwg, write_bom_schedule_file,
+    write_pid_cause_effect_file, write_pid_diff_file, write_pid_drawing_index_file,
+    write_pid_equipment_file, write_pid_hazop_file, write_pid_io_list_file,
+    write_pid_line_list_file, write_pid_loops_file, write_pid_nozzle_file, write_pid_relief_file,
+    write_pid_specialty_file, write_pid_utility_file, write_pid_valve_file, ConvertOptions,
+    PackageOptions,
 };
 
 struct CliArgs {
@@ -49,6 +50,7 @@ struct CliArgs {
     export_equipment: Option<PathBuf>,
     export_relief: Option<PathBuf>,
     export_cause_effect: Option<PathBuf>,
+    export_io: Option<PathBuf>,
     export_package: Option<PathBuf>,
     strict_gate: bool,
     save_dwg: Option<PathBuf>,
@@ -76,6 +78,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut export_equipment: Option<PathBuf> = None;
     let mut export_relief: Option<PathBuf> = None;
     let mut export_cause_effect: Option<PathBuf> = None;
+    let mut export_io: Option<PathBuf> = None;
     let mut export_package: Option<PathBuf> = None;
     let mut strict_gate = false;
     let mut save_dwg: Option<PathBuf> = None;
@@ -181,6 +184,12 @@ fn parse_args() -> Result<CliArgs, String> {
                         .ok_or("--export-cause-effect requires an output path (.csv/.tsv/.json)")?,
                 ));
             }
+            "--export-io" => {
+                export_io = Some(PathBuf::from(
+                    it.next()
+                        .ok_or("--export-io requires an output path (.csv/.tsv/.json)")?,
+                ));
+            }
             "--export-package" => {
                 export_package = Some(PathBuf::from(
                     it.next()
@@ -243,6 +252,7 @@ fn parse_args() -> Result<CliArgs, String> {
         && export_equipment.is_none()
         && export_relief.is_none()
         && export_cause_effect.is_none()
+        && export_io.is_none()
     {
         return Err(
             "--out <dir> (or --diff-with <baseline> or --export-package <dir>) is required"
@@ -271,6 +281,7 @@ fn parse_args() -> Result<CliArgs, String> {
         export_equipment,
         export_relief,
         export_cause_effect,
+        export_io,
         export_package,
         strict_gate,
         save_dwg,
@@ -307,6 +318,47 @@ fn main() {
         verify_plot_pdf: args.verify_plot,
         ..Default::default()
     };
+
+    if let Some(ref io_out) = args.export_io {
+        match extract_io_list_from_path(&effective_input)
+            .and_then(|rep| write_pid_io_list_file(&rep, io_out).map(|()| rep))
+        {
+            Ok(rep) => {
+                println!(
+                    "pid_io: sheets={} items={} dcs_hw={} dcs_spare={} sis_hw={} sis_spare={} local={} soft={} unconnected={}",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_items,
+                    rep.summary.dcs_total_hw,
+                    rep.summary.dcs_with_20pct_spare,
+                    rep.summary.sis_total_hw,
+                    rep.summary.sis_with_20pct_spare,
+                    rep.summary.local_gauges_count,
+                    rep.summary.soft_functions_count,
+                    rep.summary.unconnected_field_count,
+                );
+                if args.out_dir.is_none()
+                    && args.diff_with.is_none()
+                    && args.export_package.is_none()
+                    && args.export_hazop.is_none()
+                    && args.export_utilities.is_none()
+                    && args.export_valves.is_none()
+                    && args.export_nozzles.is_none()
+                    && args.export_index.is_none()
+                    && args.export_specialties.is_none()
+                    && args.export_lines.is_none()
+                    && args.export_equipment.is_none()
+                    && args.export_relief.is_none()
+                    && args.export_cause_effect.is_none()
+                {
+                    return;
+                }
+            }
+            Err(err) => {
+                eprintln!("error: export-io failed: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if let Some(ref ce_out) = args.export_cause_effect {
         match extract_cause_effect_from_path(&effective_input)

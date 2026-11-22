@@ -15,6 +15,7 @@ pub mod export;
 pub mod external_props;
 pub mod find;
 pub mod hazop;
+pub mod io_list;
 pub mod isolate;
 pub mod line_list;
 pub mod loops;
@@ -54,6 +55,12 @@ pub use equipment::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use equipment::{extract_equipment_from_path, write_pid_equipment_file};
+pub use io_list::{
+    analyze_pid_io_list, format_pid_io_list_delimited, io_item_matches_query, ControlSystemKind,
+    IoChannelKind, MountStatus, PidIoItemRow, PidIoListReport, PidIoSummary, IO_LIST_CSV_HEADERS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use io_list::{extract_io_list_from_path, write_pid_io_list_file};
 pub use line_list::{
     analyze_pid_line_list, format_pid_line_list_delimited, pipeline_row_matches_query,
     LineTerminationStatus, PidLineListReport, PidLineListSummary, PidPipelineRow,
