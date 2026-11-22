@@ -1649,6 +1649,12 @@ pub(super) struct OpenCADStudio {
     /// another file, the rows ticked in the snapshot list go
     /// (`commands::pidverify`).
     pub(in crate::app) pid_verify_front: Option<(u64, Option<String>)>,
+    /// The properties of one object a rule-check result clicked in the panel
+    /// names, which the property table highlights (`commands::pidverify`):
+    /// at most one, set when such a result is clicked and its object found,
+    /// dropped when another is set, when something else is selected on its
+    /// drawing or that drawing closes; a property drops out once filled in.
+    pub(in crate::app) pid_verify_highlight: Option<commands::pidverify::Highlight>,
     /// Set while a remote `op_applied` is being folded into the document. The
     /// undo step that fold opens must not be broadcast back to the room
     /// (`src/app/collab/apply.rs`).
@@ -6799,6 +6805,7 @@ impl OpenCADStudio {
             pid_verify_view: Default::default(),
             pid_verify_built_from: None,
             pid_verify_front: None,
+            pid_verify_highlight: None,
             applying_remote: false,
             #[cfg(not(target_arch = "wasm32"))]
             pid_backup_browser: Default::default(),

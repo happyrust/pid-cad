@@ -361,6 +361,9 @@ pub(super) struct Target {
     drawing_id: String,
     wanted: Option<Wanted>,
     spots: Vec<[f64; 2]>,
+    /// 检查结果涉及的属性（结果的 `fields`）：现找到一个对象时属性表高亮这几行（面板规格
+    /// §3.6）。别的东西没有。
+    fields: Vec<String>,
 }
 
 impl Target {
@@ -386,6 +389,7 @@ impl Target {
             drawing_id: object.drawing_id.clone(),
             wanted,
             spots,
+            fields: result.fields.clone(),
         }
     }
 
@@ -400,6 +404,7 @@ impl Target {
                 at: None,
             }),
             spots: Vec::new(),
+            fields: Vec::new(),
         }
     }
 
@@ -413,6 +418,7 @@ impl Target {
                 at: Some(at),
             }),
             spots: vec![at],
+            fields: Vec::new(),
         }
     }
 
@@ -422,6 +428,7 @@ impl Target {
             drawing_id: drawing_id.to_owned(),
             wanted: None,
             spots: vec![at],
+            fields: Vec::new(),
         }
     }
 
@@ -1474,7 +1481,8 @@ impl OpenCADStudio {
     /// （`SPEC-pid-verify-deliver-panel.md` §4.3、§4.5）。有得找的照图现在的样子现找
     /// （[`Self::pick_on`]，不用记着的句柄），找到了只选中它们、缩放到它们，同 `PIDLOCATE`；
     /// 记了几处位置的，缩放到这些位置的外包范围。现找不到的、没得找的，什么也不选，缩放到
-    /// 记着的位置；连位置也没记着的什么也不动。命令行上什么也不说。
+    /// 记着的位置；连位置也没记着的什么也不动。命令行上什么也不说。现找到的是一个对象、`target`
+    /// 又记着属性的，属性表高亮这几行（[`Self::pid_verify_highlight_found`]）。
     pub(super) fn pidlocate_target(&mut self, i: usize, target: &Target) -> Landed {
         let picks = target
             .wanted
@@ -1517,6 +1525,7 @@ impl OpenCADStudio {
             let (min, max) = frame(&picks);
             scene.zoom_to_window(min, max);
         }
+        self.pid_verify_highlight_found(i, &handles, &target.fields);
         self.refresh_properties();
         landed
     }

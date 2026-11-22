@@ -1047,9 +1047,32 @@ impl OpenCADStudio {
         }))
     }
 
+    /// The Properties panel's rows (`property_json`); a row a clicked
+    /// rule-check result highlights also has `"highlighted": true` (panel
+    /// spec §3.6).
     pub(super) fn control_properties(&mut self) -> Value {
         self.refresh_properties();
-        json!({"ok":true,"sections":self.tabs[self.active_tab].properties.sections.iter().map(|s|json!({"title":s.title,"properties":s.props.iter().map(property_json).collect::<Vec<_>>()})).collect::<Vec<_>>()})
+        let i = self.active_tab;
+        let sections: Vec<Value> = self.tabs[i]
+            .properties
+            .sections
+            .iter()
+            .map(|section| {
+                let rows: Vec<Value> = section
+                    .props
+                    .iter()
+                    .map(|property| {
+                        let mut row = property_json(property);
+                        if self.pid_verify_row_highlighted(i, &row_id(property)) {
+                            row["highlighted"] = json!(true);
+                        }
+                        row
+                    })
+                    .collect();
+                json!({"title": section.title, "properties": rows})
+            })
+            .collect();
+        json!({"ok": true, "sections": sections})
     }
     /// Where the drawn UI widgets are on screen, as `[x, y, width, height]`
     /// per `PosReport` id, optionally filtered by id `prefix`.

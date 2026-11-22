@@ -61,6 +61,7 @@
 use super::pidbom::{unix_now, BomFailure, Sheets};
 use super::piddrc::Checked;
 use super::pidindex::{same_file, Landed, Target, LOCATE_NOT_FOUND};
+use super::pidprops::{PROPS_FIELD_PREFIX, TAG_FIELD};
 use super::pidpublish::{why_of, Publications};
 use super::pidsnapshot::{snapshot_said, Failure, Side};
 use crate::app::{Message, OpenCADStudio};
@@ -98,6 +99,29 @@ pub(in crate::app) struct Inputs {
     writable: bool,
     busy: Option<Busy>,
     dirty: bool,
+}
+
+/// How a result's `fields` name an object's tag (§3.5); its row in the
+/// property table is `pid_tag`.
+pub(in crate::app) const TAG_NAME: &str = "位号";
+
+/// The properties of one object a clicked rule-check result names (§3.6),
+/// by the tab its drawing is open in: the property table highlights their
+/// rows while that object is the one selected there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::app) struct Highlight {
+    pub(in crate::app) document_id: u64,
+    pub(in crate::app) handle: document::Handle,
+    pub(in crate::app) fields: Vec<String>,
+}
+
+/// Whether the property row `row_id` is the row of one of `fields`
+/// (§3.6): `pid_props_<property>`, or `pid_tag` for [`TAG_NAME`].
+pub(in crate::app) fn highlights_row(fields: &[String], row_id: &str) -> bool {
+    match row_id.strip_prefix(PROPS_FIELD_PREFIX) {
+        Some(name) => fields.iter().any(|field| field == name),
+        None => row_id == TAG_FIELD && fields.iter().any(|field| field == TAG_NAME),
+    }
 }
 
 /// A bill of materials the panel made (§3.1, §4.5), or why it did not come
@@ -239,9 +263,11 @@ impl OpenCADStudio {
     /// it was built from changed: a check made or followed, a drawing
     /// edited, saved or read again, another tab in front, a scan started or
     /// done. Another drawing in front is followed whether the panel is open
-    /// or not.
+    /// or not, and so is the highlight a clicked result left in the property
+    /// table.
     pub(in crate::app) fn sync_pid_verify_view(&mut self) {
         self.pid_verify_follow_front();
+        self.pid_verify_highlight_follow();
         if !self.dock_panel_wanted(PanelId::PidVerifyDeliver) {
             return;
         }
@@ -1081,6 +1107,99 @@ impl OpenCADStudio {
     pub(super) fn pid_verify_not_located(&mut self, code: Option<&str>, why: String) {
         self.pid_verify_ui.notice = Some(Notice::error(code.map(str::to_owned), why));
         self.refresh_pid_verify_view();
+    }
+
+    /// A row's object found on tab `i` as `found` (§3.6): one object, of
+    /// which the row names properties, and those are the rows the property
+    /// table highlights, in place of any it highlighted before. Other finds
+    /// leave the highlight as it was; the selection they change drops it
+    /// ([`Self::pid_verify_highlight_follow`]).
+    pub(in crate::app) fn pid_verify_highlight_found(
+        &mut self,
+        i: usize,
+        found: &[document::Handle],
+        fields: &[String],
+    ) {
+        if let ([handle], false) = (found, fields.is_empty()) {
+            self.pid_verify_highlight = Some(Highlight {
+                document_id: self.tabs[i].id,
+                handle: *handle,
+                fields: fields.to_vec(),
+            });
+        }
+    }
+
+    /// The highlight dropped once what it is for is gone (§3.6): its drawing
+    /// closed, or its object no longer the one selected there.
+    pub(in crate::app) fn pid_verify_highlight_follow(&mut self) {
+        let Some(highlight) = &self.pid_verify_highlight else {
+            return;
+        };
+        let kept = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == highlight.document_id)
+            .is_some_and(|i| !self.pid_verify_highlighted(i, highlight.handle).is_empty());
+        if !kept {
+            self.pid_verify_highlight = None;
+        }
+    }
+
+    /// The properties of `handle` the property table of tab `i` highlights
+    /// (§3.6): the highlight's, while `handle` is its object and the only one
+    /// selected there; none otherwise.
+    pub(in crate::app) fn pid_verify_highlighted(
+        &self,
+        i: usize,
+        handle: document::Handle,
+    ) -> &[String] {
+        let tab = &self.tabs[i];
+        let selected = &tab.scene.selected;
+        match &self.pid_verify_highlight {
+            Some(highlight)
+                if highlight.document_id == tab.id
+                    && highlight.handle == handle
+                    && selected.len() == 1
+                    && selected.contains(&handle) =>
+            {
+                &highlight.fields
+            }
+            _ => &[],
+        }
+    }
+
+    /// Whether the row `row_id` of the property table of tab `i` is
+    /// highlighted (§3.6, [`highlights_row`]).
+    pub(in crate::app) fn pid_verify_row_highlighted(&self, i: usize, row_id: &str) -> bool {
+        self.pid_verify_highlight.as_ref().is_some_and(|highlight| {
+            highlights_row(self.pid_verify_highlighted(i, highlight.handle), row_id)
+        })
+    }
+
+    /// The property `name` of `handles` on tab `i` filled with `value`
+    /// (§3.6): its row is no longer highlighted, the others stay, and with
+    /// none left the highlight goes. A blank value fills nothing.
+    pub(in crate::app) fn pid_verify_highlight_filled(
+        &mut self,
+        i: usize,
+        handles: &[document::Handle],
+        name: &str,
+        value: &str,
+    ) {
+        if value.trim().is_empty() {
+            return;
+        }
+        let id = self.tabs[i].id;
+        let Some(highlight) = &mut self.pid_verify_highlight else {
+            return;
+        };
+        if highlight.document_id != id || !handles.contains(&highlight.handle) {
+            return;
+        }
+        highlight.fields.retain(|field| field != name);
+        if highlight.fields.is_empty() {
+            self.pid_verify_highlight = None;
+        }
     }
 
     /// 【确认】 under a row's reason box (§4.4): the row waived for `reason`
@@ -2669,6 +2788,262 @@ mod tests {
         assert_eq!(app.tabs.len(), tabs + 1);
         assert_eq!(app.active_tab, i);
         assert_eq!(selection(&mut app), selected);
+    }
+
+    /// [`sheet`] checked with the built-in rules on beside the panel tests'
+    /// own, equipment required to carry two properties no object has, and a
+    /// rule of the panel tests' own reading the tag of equipment: the pump
+    /// has a `DR-010` naming both, and a `DR-204` naming `位号`; the line a
+    /// `DR-001` naming `管道等级`.
+    fn highlight_sheet(scratch: &Scratch) -> OpenCADStudio {
+        let mut app = sheet(scratch);
+        let pack = json!({
+            "version": 1,
+            "pack": "高亮验收",
+            "rule_set_version": "H1",
+            "required_fields": {"EQUIPMENT": ["铭牌号", "出厂编号"]},
+            "sets": [
+                {"name": "基础规则", "enabled": true},
+                {"name": "工程扩展", "enabled": false},
+                {"name": "面板验收", "enabled": true}
+            ],
+            "rules": [rule("DR-204", "设备", "提示", "位号.长度 > 3")]
+        });
+        fs::write(scratch.path(PROJECT_PACK_FILE), pack.to_string()).expect("the pack");
+        typed(&mut app, "PIDCHECK");
+        app
+    }
+
+    /// The row of rule `rule` on the object whose key starts with `key` in
+    /// the panel state: its index, the properties it names and its label.
+    fn row_naming(state: &Value, rule: &str, key: &str) -> (usize, Vec<String>, String) {
+        let rows = state["check"]["rows"].as_array().expect("the rows");
+        let row = rows
+            .iter()
+            .find(|row| {
+                let object = row["object_key"].as_str().unwrap_or_default();
+                row["rule_id"] == rule && object.starts_with(key)
+            })
+            .unwrap_or_else(|| panic!("{rule} on {key}: {state}"));
+        let index = row["index"].as_u64().expect("the index");
+        let fields = row["fields"].as_array().expect("the fields");
+        (
+            usize::try_from(index).expect("an index"),
+            fields
+                .iter()
+                .map(|field| field.as_str().unwrap_or_default().to_owned())
+                .collect(),
+            row["label"].as_str().unwrap_or_default().to_owned(),
+        )
+    }
+
+    /// What `properties` answers for the selection on the drawing in front.
+    fn properties(app: &mut OpenCADStudio) -> Value {
+        app.automation_op(r#"{"protocol":1,"op":"properties"}"#)
+    }
+
+    /// The rows of what `properties` answered, every section's in order.
+    fn property_rows(answer: &Value) -> Vec<Value> {
+        let sections = answer["result"]["sections"].as_array();
+        let sections = sections.or_else(|| answer["sections"].as_array());
+        sections
+            .unwrap_or_else(|| panic!("the sections: {answer}"))
+            .iter()
+            .flat_map(|section| {
+                section["properties"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// The ids of the rows `properties` marks highlighted, in order.
+    fn highlighted(answer: &Value) -> Vec<String> {
+        property_rows(answer)
+            .iter()
+            .filter(|row| row["highlighted"] == true)
+            .map(|row| row["id"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    /// The row `id` of what `properties` answered.
+    fn property_row(answer: &Value, id: &str) -> Value {
+        let rows = property_rows(answer);
+        let row = rows.into_iter().find(|row| row["id"] == id);
+        row.unwrap_or_else(|| panic!("no row {id}: {answer}"))
+    }
+
+    /// Commit `value` in the row `id` of the selection through `property`,
+    /// the way the property table commits what is typed in a row.
+    fn fill(app: &mut OpenCADStudio, id: &str, value: &str) -> Value {
+        static FILLED: AtomicU64 = AtomicU64::new(0);
+        let state = app.automation_op(r#"{"protocol":1,"op":"state"}"#);
+        let (answer, task) = app.control_request(json!({
+            "protocol": 1,
+            "op": "property",
+            "field": id,
+            "value": value,
+            "document_id": state["document_id"],
+            "revision": state["revision"],
+            "request_id": format!("pid-verify-fill-{}", FILLED.fetch_add(1, Ordering::Relaxed)),
+        }));
+        app.drive_headless_task(task).expect("the commit's task");
+        answer
+    }
+
+    /// §3.6: the rows a highlight names are `pid_props_<property>` for the
+    /// properties it lists, and `pid_tag` when it lists the tag.
+    #[test]
+    fn pid_verify_highlight_names_rows_by_their_ids() {
+        let fields = ["管道等级".to_owned(), "位号".to_owned()];
+        assert!(super::highlights_row(&fields, "pid_props_管道等级"));
+        assert!(super::highlights_row(&fields, "pid_tag"));
+        assert!(!super::highlights_row(&fields, "pid_props_设计压力"));
+        assert!(!super::highlights_row(&fields, "pid_type"));
+        assert!(!super::highlights_row(&fields, "管道等级"));
+        assert!(!super::highlights_row(&fields[..1], "pid_tag"));
+        assert!(!super::highlights_row(&[], "pid_props_"));
+    }
+
+    /// §3.6: a row of a result naming properties, clicked, highlights their
+    /// rows in what `properties` answers — a property its object does not
+    /// carry yet in an empty row of its own — and a rule reading the tag
+    /// highlights the tag's row.
+    #[test]
+    fn pid_verify_highlight_marks_the_rows_a_clicked_result_names() {
+        let scratch = Scratch::new();
+        let mut app = highlight_sheet(&scratch);
+        let state = panel(&mut app, "");
+        let (missing, fields, _) = row_naming(&state, "DR-010", "EQUIPMENT|");
+        assert_eq!(fields, ["铭牌号", "出厂编号"], "{state}");
+        let answer = act(&mut app, &format!("locate={missing}"));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let rows = properties(&mut app);
+        let ids = ["pid_props_铭牌号", "pid_props_出厂编号"];
+        assert_eq!(highlighted(&rows), ids, "{rows}");
+        for id in ids {
+            let row = property_row(&rows, id);
+            assert_eq!(
+                (&row["kind"], &row["value"]),
+                (&json!("text"), &json!("")),
+                "{row}"
+            );
+        }
+        let (grade, fields, _) = row_naming(&state, "DR-001", "PIPE_LINE|");
+        assert_eq!(fields, ["管道等级"], "{state}");
+        let answer = act(&mut app, &format!("locate={grade}"));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let rows = properties(&mut app);
+        assert_eq!(highlighted(&rows), ["pid_props_管道等级"], "{rows}");
+        let (tag, fields, _) = row_naming(&state, "DR-204", "EQUIPMENT|");
+        assert_eq!(fields, ["位号"], "{state}");
+        let answer = act(&mut app, &format!("locate={tag}"));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let rows = properties(&mut app);
+        assert_eq!(highlighted(&rows), ["pid_tag"], "{rows}");
+    }
+
+    /// §3.6: a value typed in the empty row of a highlighted property is
+    /// committed as in any row, creating the key, and that row alone is no
+    /// longer highlighted; both filled, the result is gone from the next
+    /// check. Left empty, the row writes nothing.
+    #[test]
+    fn pid_verify_highlight_fills_its_empty_rows_as_any_row_is_filled() {
+        let scratch = Scratch::new();
+        let mut app = highlight_sheet(&scratch);
+        let (missing, ..) = row_naming(&panel(&mut app, ""), "DR-010", "EQUIPMENT|");
+        let answer = act(&mut app, &format!("locate={missing}"));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let i = app.active_tab;
+        app.tabs[i].dirty = false;
+        let (steps, revision) = (undo_steps(&app), app.tabs[i].edit_revision);
+        let answer = fill(&mut app, "pid_props_铭牌号", "");
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert!(!app.tabs[i].dirty);
+        assert_eq!(
+            (undo_steps(&app), app.tabs[i].edit_revision),
+            (steps, revision)
+        );
+        let rows = properties(&mut app);
+        let ids = ["pid_props_铭牌号", "pid_props_出厂编号"];
+        assert_eq!(highlighted(&rows), ids, "{rows}");
+
+        let answer = fill(&mut app, "pid_props_铭牌号", "NP-0001");
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert!(app.tabs[i].dirty);
+        assert_eq!(undo_steps(&app), steps + 1);
+        let rows = properties(&mut app);
+        assert_eq!(property_row(&rows, "pid_props_铭牌号")["value"], "NP-0001");
+        assert_eq!(highlighted(&rows), ["pid_props_出厂编号"], "{rows}");
+        let answer = fill(&mut app, "pid_props_出厂编号", "2026-11");
+        assert_eq!(answer["ok"], true, "{answer}");
+        let rows = properties(&mut app);
+        assert_eq!(highlighted(&rows), Vec::<String>::new(), "{rows}");
+        assert_eq!(app.pid_verify_highlight, None);
+
+        typed(&mut app, "PIDCHECK");
+        let state = panel(&mut app, "");
+        let rows = state["check"]["rows"].as_array().expect("the rows");
+        let left = rows.iter().any(|row| {
+            let object = row["object_key"].as_str().unwrap_or_default();
+            row["rule_id"] == "DR-010" && object.starts_with("EQUIPMENT|")
+        });
+        assert!(!left, "{state}");
+    }
+
+    /// §3.6: the highlight goes once something else is selected, another
+    /// row is clicked or its drawing closes; with none, `properties` answers
+    /// as it did before there was any.
+    #[test]
+    fn pid_verify_highlight_goes_with_the_selection_another_row_and_the_drawing() {
+        let scratch = Scratch::new();
+        let mut app = highlight_sheet(&scratch);
+        let state = panel(&mut app, "");
+        let (missing, _, pump) = row_naming(&state, "DR-010", "EQUIPMENT|");
+        let (tag, ..) = row_naming(&state, "DR-204", "EQUIPMENT|");
+        let (_, _, line) = row_naming(&state, "DR-001", "PIPE_LINE|");
+        let ran = run(&mut app, &format!("PIDLOCATE {pump}"));
+        assert_eq!(ran.error, None, "{}", ran.said);
+        let plain = property_rows(&properties(&mut app));
+        assert!(
+            plain.iter().all(|row| row.get("highlighted").is_none()),
+            "{plain:?}"
+        );
+
+        let answer = act(&mut app, &format!("locate={missing}"));
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_ne!(highlighted(&properties(&mut app)), Vec::<String>::new());
+        let ran = run(&mut app, &format!("PIDLOCATE {line}"));
+        assert_eq!(ran.error, None, "{}", ran.said);
+        let rows = properties(&mut app);
+        assert_eq!(highlighted(&rows), Vec::<String>::new(), "{rows}");
+        assert_eq!(app.pid_verify_highlight, None);
+        let ran = run(&mut app, &format!("PIDLOCATE {pump}"));
+        assert_eq!(ran.error, None, "{}", ran.said);
+        assert_eq!(property_rows(&properties(&mut app)), plain);
+
+        let answer = act(&mut app, &format!("locate={missing}"));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let answer = act(&mut app, &format!("locate={tag}"));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let rows = properties(&mut app);
+        assert_eq!(highlighted(&rows), ["pid_tag"], "{rows}");
+        assert!(property_rows(&rows)
+            .iter()
+            .all(|row| row["id"] != "pid_props_铭牌号"));
+
+        let id = app.tabs[app.active_tab].id;
+        let (closed, task) = app.control_request(json!({
+            "protocol": 1,
+            "op": "close",
+            "request_id": "pid-verify-highlight-close",
+            "document_id": id,
+            "discard": true,
+        }));
+        app.drive_headless_task(task).expect("the close's task");
+        assert_eq!(closed["ok"], true, "{closed}");
+        assert_eq!(app.pid_verify_highlight, None);
     }
 
     #[test]

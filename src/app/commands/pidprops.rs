@@ -3,8 +3,9 @@
 //!
 //! Row ids are fixed by the architecture: `pid_type`, `pid_tag`,
 //! `pid_tag_source`, `pid_tag_status`, then one `pid_props_<key>` row per
-//! `props` key. Only the tag and the props rows are editable; a tag edit makes
-//! the tag `manual`. Every commit is one undo step that also re-runs the
+//! `props` key, and an empty one for each property a clicked rule-check result
+//! highlights that the record lacks (panel spec §3.6). Only the tag and the
+//! props rows are editable; a tag edit makes the tag `manual`. Every commit is one undo step that also re-runs the
 //! uniqueness check and redraws the canvas tag labels
 //! ([`OpenCADStudio::refresh_pid_tags`]), so a conflict mark (`？`) and the
 //! label follow the edit and roll back with it.
@@ -24,8 +25,8 @@ use crate::t;
 /// (`PID_SEMANTICS` / marked GROUPs), which merges rows by that exact title.
 pub(in crate::app) const PID_AUTHOR_SECTION: &str = "P&ID 属性";
 
-const TAG_FIELD: &str = "pid_tag";
-const PROPS_FIELD_PREFIX: &str = "pid_props_";
+pub(in crate::app) const TAG_FIELD: &str = "pid_tag";
+pub(in crate::app) const PROPS_FIELD_PREFIX: &str = "pid_props_";
 
 /// `Property::field` is `&'static str`, but props keys are data. Each distinct
 /// row id is leaked once and reused, so repeated refreshes do not grow memory.
@@ -47,10 +48,13 @@ fn props_field(key: &str) -> &'static str {
 }
 
 /// The `P&ID 属性` group for `handle`, or `None` when it carries no
-/// `PID_AUTHOR` record.
+/// `PID_AUTHOR` record. Each property of `highlighted` the record has no value
+/// for gets an empty row after the record's own, so its highlight shows and
+/// filling it in adds the property; the tag has its row already.
 pub(in crate::app) fn pid_author_section(
     document: &document::Document,
     handle: document::Handle,
+    highlighted: &[String],
 ) -> Option<PropSection> {
     let author = PidAuthor::load(document, handle)?;
     let display = TagView::new(
@@ -71,9 +75,22 @@ pub(in crate::app) fn pid_author_section(
             "pid_tag_source",
             author.tag_source,
         ),
-        crate::entities::common::ro_prop(t!("Status").as_ref(), "pid_tag_status", author.tag_status),
+        crate::entities::common::ro_prop(
+            t!("Status").as_ref(),
+            "pid_tag_status",
+            author.tag_status,
+        ),
     ];
     let (values, _) = split_props(&author.props);
+    let mut missing: Vec<&str> = Vec::new();
+    for name in highlighted {
+        if name != super::pidverify::TAG_NAME
+            && !values.contains_key(name.as_str())
+            && !missing.contains(&name.as_str())
+        {
+            missing.push(name);
+        }
+    }
     for (key, value) in values {
         props.push(Property {
             field: props_field(&key),
@@ -81,6 +98,11 @@ pub(in crate::app) fn pid_author_section(
             value: PropValue::PlainText(value),
         });
     }
+    props.extend(missing.into_iter().map(|name| Property {
+        field: props_field(name),
+        label: name.to_owned(),
+        value: PropValue::PlainText(String::new()),
+    }));
     Some(PropSection {
         title: PID_AUTHOR_SECTION.to_string(),
         props,
@@ -129,7 +151,15 @@ impl OpenCADStudio {
                     .display;
                     value != author.tag && value != shown
                 }
-                Some(key) => split_props(&author.props).0.get(key).map(String::as_str) != Some(value),
+                // A property the record lacks entered empty, as its
+                // highlighted row shows it, is left out.
+                Some(key) => {
+                    split_props(&author.props)
+                        .0
+                        .get(key)
+                        .map_or("", String::as_str)
+                        != value
+                }
             })
             .collect();
         if changed.is_empty() {
@@ -159,6 +189,8 @@ impl OpenCADStudio {
             }
         }
         let edited: Vec<document::Handle> = changed.iter().map(|(handle, _)| *handle).collect();
+        let name = key.as_deref().unwrap_or(super::pidverify::TAG_NAME);
+        self.pid_verify_highlight_filled(i, &edited, name, value);
         self.refresh_pid_tags(i, &edited);
         // 手工改管路字段之后，管路当前值要立刻下传给它的管段
         // （`VAL-PIPE-010`）；改管线字段同理级联到管路再级联到管段。
