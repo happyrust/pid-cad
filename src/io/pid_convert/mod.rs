@@ -14,6 +14,7 @@ pub mod find;
 pub mod isolate;
 pub mod loops;
 pub mod opc;
+pub mod package;
 pub mod promote;
 pub mod recognize;
 pub mod spec_check;
@@ -28,6 +29,12 @@ pub use loops::{
     IsaLoopRole, LoopStatus, ParsedIsaTag, PidInstrumentLoop, PidLoopMember, PidLoopReport,
     PidLoopSummary, LOOP_CSV_HEADERS,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use package::{export_handover_package_from_path, export_handover_package_from_sheets};
+pub use package::{
+    HandoverFileEntry, HandoverManifest, HandoverSheetDrcEntry, PackageOptions, PackageSheetInput,
+};
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use spec_check::write_pid_spec_file;
 pub use spec_check::{

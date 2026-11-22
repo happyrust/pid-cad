@@ -15,9 +15,10 @@
 use std::path::PathBuf;
 
 use OpenCADStudio::io::pid_convert::{
-    convert_path_to_dir, diff_pid_files, extract_bom_from_batch_dir, extract_loops_from_batch_dir,
-    save_cad_file_as_binary_dwg, write_bom_schedule_file, write_pid_diff_file,
-    write_pid_loops_file, ConvertOptions,
+    convert_path_to_dir, diff_pid_files, export_handover_package_from_path,
+    extract_bom_from_batch_dir, extract_loops_from_batch_dir, save_cad_file_as_binary_dwg,
+    write_bom_schedule_file, write_pid_diff_file, write_pid_loops_file, ConvertOptions,
+    PackageOptions,
 };
 
 struct CliArgs {
@@ -32,6 +33,8 @@ struct CliArgs {
     external_props: Option<String>,
     export_schedule: Option<PathBuf>,
     export_loops: Option<PathBuf>,
+    export_package: Option<PathBuf>,
+    strict_gate: bool,
     save_dwg: Option<PathBuf>,
     verify_plot: bool,
     summary_json: Option<PathBuf>,
@@ -47,6 +50,8 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut external_props: Option<String> = None;
     let mut export_schedule: Option<PathBuf> = None;
     let mut export_loops: Option<PathBuf> = None;
+    let mut export_package: Option<PathBuf> = None;
+    let mut strict_gate = false;
     let mut save_dwg: Option<PathBuf> = None;
     let mut verify_plot = false;
     let mut summary_json: Option<PathBuf> = None;
@@ -90,6 +95,15 @@ fn parse_args() -> Result<CliArgs, String> {
                         .ok_or("--export-loops requires an output path (.csv/.tsv/.json)")?,
                 ));
             }
+            "--export-package" => {
+                export_package = Some(PathBuf::from(
+                    it.next()
+                        .ok_or("--export-package requires an output directory")?,
+                ));
+            }
+            "--strict-gate" => {
+                strict_gate = true;
+            }
             "--save-dwg" => {
                 save_dwg = Some(PathBuf::from(
                     it.next().ok_or("--save-dwg requires an output .dwg path")?,
@@ -130,8 +144,11 @@ fn parse_args() -> Result<CliArgs, String> {
     let input = input.ok_or(
         "usage: pid_convert <input.dxf|input.dwg|dir> --out <dir> [--plant NAME] [--seed-pid PATH_OR_ZIP] [--sym-dir DIR] [--verify-plot] [--summary-json FILE]",
     )?;
-    if out_dir.is_none() && diff_with.is_none() {
-        return Err("--out <dir> (or --diff-with <baseline>) is required".to_string());
+    if out_dir.is_none() && diff_with.is_none() && export_package.is_none() {
+        return Err(
+            "--out <dir> (or --diff-with <baseline> or --export-package <dir>) is required"
+                .to_string(),
+        );
     }
     Ok(CliArgs {
         input,
@@ -145,6 +162,8 @@ fn parse_args() -> Result<CliArgs, String> {
         external_props,
         export_schedule,
         export_loops,
+        export_package,
+        strict_gate,
         save_dwg,
         verify_plot,
         summary_json,
@@ -179,6 +198,34 @@ fn main() {
         verify_plot_pdf: args.verify_plot,
         ..Default::default()
     };
+
+    if let Some(ref pkg_dir) = args.export_package {
+        let pkg_opts = PackageOptions {
+            convert: opts.clone(),
+            verify_strict: true,
+            strict_gate: args.strict_gate,
+        };
+        match export_handover_package_from_path(&effective_input, pkg_dir, &pkg_opts) {
+            Ok(man) => {
+                println!(
+                    "pid_package: handover_ready={} sheets={} pid={} pdf={} files={} manifest_sha256={}",
+                    man.handover_ready,
+                    man.sheets_exported,
+                    man.pid_files_written,
+                    man.pdf_files_plotted,
+                    man.files.len(),
+                    man.manifest_sha256,
+                );
+                if args.out_dir.is_none() && args.diff_with.is_none() {
+                    return;
+                }
+            }
+            Err(err) => {
+                eprintln!("error: export-package failed: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if let Some(ref base_p) = args.diff_with {
         let rep = match diff_pid_files(base_p, &effective_input, &opts) {

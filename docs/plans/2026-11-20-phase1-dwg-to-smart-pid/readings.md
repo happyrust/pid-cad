@@ -1888,3 +1888,44 @@
 | `scripts\fmt-newhunks.ps1` | — | `spec_check.rs`、`mod.rs`、`pidprops.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 47. L6-1 / L6-2 / L6-3 / L3-7 / L4-6（#158）：应用内多标签页/整批一键数字化交付成套打包与总校审门禁命令 `PIDPACKAGE` 及 CLI `--export-package` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `10647f8ba`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{package,mod}.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-22-issue158/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_package.txt`、`cli_export_package.txt`、`real_out/real158_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
+
+### 47.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_158_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidpackage_builds_verified_handover_bundle_blocks_strict_errors_and_hashes_all_artifacts`（构造含重复位号 `Error` 的双标签页成对图纸，先验证 `PIDPACKAGE ... STRICT` 阻断拦截并输出 `handover_ready = false`，再经 `PIDPROMOTE + PIDREVIEW DEDUP` 修复后生成全套交付包并逐文件复验字节数与 SHA-256 指纹），运行按预期在 `handover_manifest.json` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`24 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/package.rs`（`export_handover_package_from_sheets`、`export_handover_package_from_path`）：一站式编排生成 `drawings/`（`StrictVendor` 零违规 `_Data.xml` + `_Meta.xml` + `_Coverage.json` 及可选 `.pid` + `.pidplot.pdf`）、`schedules/01_bom_schedule.csv/.json`、`schedules/02_instrument_loops.csv/.json`、`audits/03_opc_pairing.json`、`audits/04_drc_and_spec_audit.json` 与纯 POSIX 相对路径密码学清单 `handover_manifest.json`；
+  2. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDPACKAGE "<输出目录>" [ALLTABS] [PLANT <装置>] [SEED "<种子>"] [SYMDIR "<目录>"] [CLASSMAP "<json>"] [PROPS "<外置表>"] [VERIFY] [STRICT]`，并在 `examples/pid_convert.rs` 新增 `--export-package <DIR>` 与 `--strict-gate`（最小真实 SPPID 图 CLI 实测产出 `9` 个交付文件且 `handover_ready = true`，退出码 `0`）。
+
+### 47.2 真实双标准四图成对双产物成套打包与密码学自检实测
+
+| 指标项 | 实测读数 |
+|---|---|
+| 输入多标签页图纸 | `SP01=2164f88bbb57` + `SP02=fc2c812dc182`（SPPID 生产图对）+ `LG01=a0f05f81a655` + `LG02=28ed389e23cb`（原生 AutoCAD 存量图对） |
+| `handover_ready` / `strict_vendor_passed` | **`true` / `true`**（`drc_total_errors = 0`） |
+| 双产物与 PDF 出图校验 | `sheets_exported = 4`、`pid_files_written = 4`、`pdf_files_plotted = 4` |
+| 汇总清册 / 仪表回路 / 互逆 OPC | 综合清册 **`249` 条** / ISA-5.1 回路 **`49` 个** / 互逆 `OPC` **`8` 对** |
+| 成套产出总文件数 / 字节数 | **`26` 个文件** / **`4,109,985` B**（`manifest_sha256 = dc57c9742fba...`，逐文件 SHA-256 100% 对齐，零盘符路径泄漏） |
+
+### 47.3 固定门禁读数
+
+| 门禁项 | 改前读数（§46.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,240` 条（`7,158` 过 / `81` 忽略 / `1` 既有 `.pen`） | **`7,242` 条**（**`7,159` 过** / **`82` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图双产物成套交付包），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `package.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |

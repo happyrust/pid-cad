@@ -39,7 +39,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDDIFF",
         "PIDISOLATE",
         "PIDLOOP",
-        "PIDSPEC"
+        "PIDSPEC",
+        "PIDPACKAGE"
     ]
 });
 
@@ -295,6 +296,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidspec_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidpackage_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -2863,6 +2867,206 @@ impl OpenCADStudio {
         }
 
         Some(self.finish_dispatch(cmd))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn dispatch_pidpackage_cmd(&mut self, cmd: &str, _i: usize) -> Option<Task<Message>> {
+        let mut words = cmd.split_whitespace();
+        if !words.next()?.eq_ignore_ascii_case("PIDPACKAGE") {
+            return None;
+        }
+        self.command_line
+            .push_error("PIDPACKAGE: Web 版本不支持直接写出本地交付包。");
+        Some(Task::none())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dispatch_pidpackage_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            export_handover_package_from_sheets, ConvertOptions, PackageOptions, PackageSheetInput,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDPACKAGE") {
+            return None;
+        }
+
+        let mut out_dir_opt: Option<std::path::PathBuf> = None;
+        let mut all_tabs = false;
+        let mut plant = "P01".to_string();
+        let mut seed: Option<String> = None;
+        let mut force_dual = false;
+        let mut symdir: Option<String> = None;
+        let mut classmap: Option<String> = None;
+        let mut props: Option<String> = None;
+        let mut verify = false;
+        let mut strict_gate = false;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            let up = tok.to_ascii_uppercase();
+            match up.as_str() {
+                "ALLTABS" => {
+                    all_tabs = true;
+                    idx += 1;
+                }
+                "DUAL" => {
+                    force_dual = true;
+                    idx += 1;
+                }
+                "VERIFY" => {
+                    verify = true;
+                    idx += 1;
+                }
+                "STRICT" => {
+                    strict_gate = true;
+                    idx += 1;
+                }
+                "PLANT" => {
+                    let Some(v) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDPACKAGE PLANT: 缺少装置名称。");
+                        return Some(Task::none());
+                    };
+                    plant = v.clone();
+                    idx += 2;
+                }
+                "SEED" => {
+                    let Some(v) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDPACKAGE SEED: 缺少种子文件路径。");
+                        return Some(Task::none());
+                    };
+                    seed = Some(v.clone());
+                    idx += 2;
+                }
+                "SYMDIR" => {
+                    let Some(v) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDPACKAGE SYMDIR: 缺少符号库目录路径。");
+                        return Some(Task::none());
+                    };
+                    symdir = Some(v.clone());
+                    idx += 2;
+                }
+                "CLASSMAP" => {
+                    let Some(v) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDPACKAGE CLASSMAP: 缺少映射规则文件路径。");
+                        return Some(Task::none());
+                    };
+                    classmap = Some(v.clone());
+                    idx += 2;
+                }
+                "PROPS" => {
+                    let Some(v) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDPACKAGE PROPS: 缺少外置工程表路径。");
+                        return Some(Task::none());
+                    };
+                    props = Some(v.clone());
+                    idx += 2;
+                }
+                _ => {
+                    if out_dir_opt.is_none() {
+                        out_dir_opt = Some(std::path::PathBuf::from(tok));
+                    }
+                    idx += 1;
+                }
+            }
+        }
+
+        let Some(out_dir) = out_dir_opt else {
+            self.command_line.push_error(
+                "PIDPACKAGE: 用法 PIDPACKAGE \"<输出目录>\" [ALLTABS] [PLANT <装置>] [SEED \"<种子>\"] [SYMDIR \"<目录>\"] [CLASSMAP \"<json>\"] [PROPS \"<外置表>\"] [VERIFY] [STRICT]。",
+            );
+            return Some(Task::none());
+        };
+
+        let seed_pid_path = if seed.is_some() {
+            seed
+        } else if force_dual {
+            std::env::var("OCS_PID_SEED_ZIP")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        } else {
+            None
+        };
+        let wants_dual = seed_pid_path.is_some();
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<PackageSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| PackageSheetInput {
+                tab_index: *ti,
+                drawing_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+
+        let pkg_opts = PackageOptions {
+            convert: ConvertOptions {
+                plant,
+                seed_pid_path,
+                sym_library_dir: symdir.or_else(|| std::env::var("OCS_PID_SYM_DIR").ok()),
+                class_map_path: classmap,
+                external_props_path: props,
+                verify_plot_pdf: verify && wants_dual,
+                ..Default::default()
+            },
+            verify_strict: true,
+            strict_gate,
+        };
+
+        match export_handover_package_from_sheets(&sheet_inputs, &out_dir, &pkg_opts) {
+            Ok(man) => {
+                self.command_line.push_output(&format!(
+                    "PIDPACKAGE: 交付包已生成 -> {}（就绪={}，图纸={}，.pid={}，PDF={}，清册={}，回路={}，互逆OPC={}，文件数={}）。",
+                    out_dir.display(),
+                    man.handover_ready,
+                    man.sheets_exported,
+                    man.pid_files_written,
+                    man.pdf_files_plotted,
+                    man.bom_unique_rows,
+                    man.instrument_loops_count,
+                    man.opc_reciprocal_pairs,
+                    man.files.len(),
+                ));
+                Some(self.finish_dispatch(cmd))
+            }
+            Err(err) => {
+                self.command_line.push_error(&format!("PIDPACKAGE: {err}"));
+                Some(Task::none())
+            }
+        }
     }
 
     /// 属性下传重算：`edited` 里的管线/管路按「管线 → 管路 → 管段」级联。
@@ -8472,6 +8676,342 @@ mod tests {
                 }))
                 .unwrap()
             ),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidpackage_builds_verified_handover_bundle_blocks_strict_errors_and_hashes_all_artifacts() {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+        use sha2::{Digest, Sha256};
+
+        let mut app = app();
+
+        // Tab 1: DWG-158-01.dxf (initially contains a duplicate valve tag BV5801!)
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-158-01.dxf".to_string();
+        {
+            let doc = &mut app.tabs[tab1].scene.document;
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "DCS FUNC ACCESS IN PRIME LOC", 8.0, 8.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-158-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            // Duplicate tag BV5801 on two valves -> DRC Error
+            for x in [100.0, 180.0] {
+                let mut v = Insert::new("BALL VALVE TYPE 2", Vector3::new(x, 200.0, 0.0));
+                v.common.layer = "11".to_string();
+                doc.add_entity(document::EntityType::Insert(v)).unwrap();
+                let mut vt =
+                    Text::with_value("BV5801", Vector3::new(x - 4.0, 206.0, 0.0)).with_height(2.5);
+                vt.common.layer = "11".to_string();
+                doc.add_entity(document::EntityType::Text(vt)).unwrap();
+            }
+
+            // Loop 02013 Sensor PT-02013 + Controller PIC-02013
+            let mut pt_ins = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(110.0, 320.0, 0.0),
+            );
+            pt_ins.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Insert(pt_ins))
+                .unwrap();
+            let mut pt1 = Text::with_value("PT", Vector3::new(108.5, 322.0, 0.0)).with_height(2.2);
+            pt1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pt1)).unwrap();
+            let mut pt2 =
+                Text::with_value("02013", Vector3::new(107.0, 317.5, 0.0)).with_height(2.2);
+            pt2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pt2)).unwrap();
+
+            let mut pic_ins = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(110.0, 360.0, 0.0),
+            );
+            pic_ins.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Insert(pic_ins))
+                .unwrap();
+            let mut pic1 =
+                Text::with_value("PIC", Vector3::new(108.0, 362.0, 0.0)).with_height(2.2);
+            pic1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pic1)).unwrap();
+            let mut pic2 =
+                Text::with_value("02013", Vector3::new(107.0, 357.5, 0.0)).with_height(2.2);
+            pic2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pic2)).unwrap();
+
+            // Paired OPC -> DWG-158-02
+            let mut p1 = Line::from_points(
+                Vector3::new(210.0, 200.0, 0.0),
+                Vector3::new(304.0, 200.0, 0.0),
+            );
+            p1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p1)).unwrap();
+            let mut lt1 = Text::with_value("100-PW-5801-CS150", Vector3::new(240.0, 203.0, 0.0))
+                .with_height(2.5);
+            lt1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(lt1)).unwrap();
+
+            let mut opc1 = Insert::new("_OFF-UNIT SQ", Vector3::new(310.0, 200.0, 0.0));
+            opc1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc1)).unwrap();
+            let mut oft1 =
+                Text::with_value("DWG-158-02", Vector3::new(300.0, 199.0, 0.0)).with_height(2.5);
+            oft1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(oft1)).unwrap();
+        }
+
+        // Tab 2: DWG-158-02.dxf with PV-02013 + Vessel V-5802 + Return OPC -> DWG-158-01
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-158-02.dxf".to_string();
+        {
+            let doc = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc, "LV-LEVEL CONTROL VALVE", 6.0, 6.0);
+            define_sppid_block(doc, "1TO1PARAMETRIC V DRUM", 12.0, 24.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-158-02", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut opc2 = Insert::new("_OFF-UNIT SQ", Vector3::new(120.0, 200.0, 0.0));
+            opc2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc2)).unwrap();
+            let mut oft2 =
+                Text::with_value("DWG-158-01", Vector3::new(110.0, 199.0, 0.0)).with_height(2.5);
+            oft2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(oft2)).unwrap();
+
+            let mut p2 = Line::from_points(
+                Vector3::new(126.0, 200.0, 0.0),
+                Vector3::new(260.0, 200.0, 0.0),
+            );
+            p2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p2)).unwrap();
+            let mut lt2 = Text::with_value("100-PW-5801-CS150", Vector3::new(160.0, 203.0, 0.0))
+                .with_height(2.5);
+            lt2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(lt2)).unwrap();
+
+            let mut pv = Insert::new("LV-LEVEL CONTROL VALVE", Vector3::new(200.0, 200.0, 0.0));
+            pv.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Insert(pv)).unwrap();
+            let mut pvt =
+                Text::with_value("PV-02013", Vector3::new(195.0, 208.0, 0.0)).with_height(2.5);
+            pvt.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pvt)).unwrap();
+
+            let mut drum = Insert::new("1TO1PARAMETRIC V DRUM", Vector3::new(266.0, 200.0, 0.0));
+            drum.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(drum)).unwrap();
+            let mut dt =
+                Text::with_value("V-5802", Vector3::new(262.0, 215.0, 0.0)).with_height(2.5);
+            dt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(dt)).unwrap();
+        }
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        let tmp = std::env::temp_dir().join(format!("ocs_pidpackage_158_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // 1. Run PIDPACKAGE with STRICT while Tab 1 still has DuplicateTag BV5801 -> handover_ready == false
+        let bad_dir = tmp.join("pkg_blocked");
+        let _ = app.run_command_line(&format!(
+            "PIDPACKAGE \"{}\" ALLTABS VERIFY STRICT",
+            bad_dir.display()
+        ));
+        let bad_manifest_p = bad_dir.join("handover_manifest.json");
+        assert!(
+            bad_manifest_p.is_file(),
+            "PIDPACKAGE must write handover_manifest.json"
+        );
+        let bad_man: Value =
+            serde_json::from_str(&std::fs::read_to_string(&bad_manifest_p).unwrap()).unwrap();
+        assert_eq!(bad_man["handover_ready"].as_bool(), Some(false));
+        assert!(bad_man["drc_total_errors"].as_u64().unwrap_or(0) >= 1);
+
+        // 2. Fix DuplicateTag via PIDPROMOTE + PIDREVIEW DEDUP, then build clean verified package
+        let _ = app.run_command_line("PIDPROMOTE");
+        let _ = app.run_command_line("PIDREVIEW DEDUP");
+
+        let ok_dir = tmp.join("pkg_ready");
+        let _ = app.run_command_line(&format!(
+            "PIDPACKAGE \"{}\" ALLTABS VERIFY STRICT",
+            ok_dir.display()
+        ));
+        let ok_manifest_p = ok_dir.join("handover_manifest.json");
+        assert!(ok_manifest_p.is_file());
+        let ok_man: Value =
+            serde_json::from_str(&std::fs::read_to_string(&ok_manifest_p).unwrap()).unwrap();
+        assert_eq!(ok_man["handover_ready"].as_bool(), Some(true));
+        assert_eq!(ok_man["strict_vendor_passed"].as_bool(), Some(true));
+        assert_eq!(ok_man["drc_total_errors"].as_u64(), Some(0));
+        assert_eq!(ok_man["sheets_exported"].as_u64(), Some(2));
+
+        // Verify expected sub-artifacts & cryptographic SHA-256 self-consistency
+        for rel in [
+            "schedules/01_bom_schedule.csv",
+            "schedules/01_bom_schedule.json",
+            "schedules/02_instrument_loops.csv",
+            "schedules/02_instrument_loops.json",
+            "audits/03_opc_pairing.json",
+            "audits/04_drc_and_spec_audit.json",
+        ] {
+            assert!(ok_dir.join(rel).is_file(), "missing artifact {rel}");
+        }
+
+        let files_arr = ok_man["files"].as_array().unwrap();
+        assert!(files_arr.len() >= 10);
+        for entry in files_arr {
+            let rel = entry["rel_path"].as_str().unwrap();
+            assert!(
+                !rel.contains(':') && !rel.contains('\\'),
+                "manifest rel_path must be clean POSIX relative path: {rel}"
+            );
+            let fp = ok_dir.join(rel);
+            let raw = std::fs::read(&fp).unwrap();
+            assert_eq!(entry["bytes"].as_u64(), Some(raw.len() as u64));
+            let actual_sha = format!("{:x}", Sha256::digest(&raw));
+            assert_eq!(entry["sha256"].as_str(), Some(actual_sha.as_str()));
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads 4 real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into OpenCADStudio and builds a full dual-artifact Digital Handover Package via PIDPACKAGE ALLTABS SEED VERIFY STRICT"]
+    fn real_multi_tab_pidpackage_dual_handover_bundle_and_sha256_self_audit() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_raw) = std::env::var("OCS_PID_REAL158_SPPID_PAIR") else {
+            println!("OCS_PID_REAL158_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(legacy_raw) = std::env::var("OCS_PID_REAL158_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL158_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(seed_spec) = std::env::var("OCS_PID_REAL158_SEED") else {
+            println!("OCS_PID_REAL158_SEED unset, skipping.");
+            return;
+        };
+        let sym_dir = std::env::var("OCS_PID_REAL158_SYMDIR").unwrap_or_default();
+        let out_dir = std::env::var("OCS_PID_REAL158_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real158"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sppid_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sppid_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        let legacy_paths: Vec<std::path::PathBuf> = std::env::split_paths(&legacy_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        assert_eq!(sppid_paths.len(), 2);
+        assert_eq!(legacy_paths.len(), 2);
+
+        let all_files = [
+            ("SP01", &sppid_paths[0]),
+            ("SP02", &sppid_paths[1]),
+            ("LG01", &legacy_paths[0]),
+            ("LG02", &legacy_paths[1]),
+        ];
+
+        let mut app = app();
+        let mut tab_indices = Vec::new();
+        let mut sha_prefixes = Vec::new();
+        for (idx, (cid, p)) in all_files.iter().enumerate() {
+            let raw_b = std::fs::read(p).unwrap();
+            sha_prefixes.push(format!("{:x}", Sha256::digest(&raw_b))[..12].to_string());
+            if idx > 0 {
+                let _ = app.update(Message::TabNew);
+            }
+            let ti = app.active_tab;
+            app.tabs[ti].scene.document = crate::io::load_file(p).expect("load DXF");
+            app.tabs[ti].tab_title = format!("{cid}.dxf");
+            tab_indices.push(ti);
+        }
+
+        // Pre-remediate any duplicate tags via PIDPROMOTE + PIDREVIEW DEDUP if present so STRICT passes cleanly
+        for &ti in &tab_indices {
+            let _ = app.update(Message::TabSwitch(ti));
+            let _ = app.run_command_line("PIDPROMOTE");
+            let _ = app.run_command_line("PIDREVIEW DEDUP");
+        }
+        let _ = app.update(Message::TabSwitch(tab_indices[0]));
+
+        let pkg_dir = out_dir.join("pkg_tmp");
+        let sym_arg = if sym_dir.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" SYMDIR \"{sym_dir}\"")
+        };
+        let _ = app.run_command_line(&format!(
+            "PIDPACKAGE \"{}\" ALLTABS PLANT P01 SEED \"{seed_spec}\"{sym_arg} VERIFY STRICT",
+            pkg_dir.display()
+        ));
+
+        let man_p = pkg_dir.join("handover_manifest.json");
+        assert!(
+            man_p.is_file(),
+            "PIDPACKAGE must write handover_manifest.json"
+        );
+        let man: Value = serde_json::from_str(&std::fs::read_to_string(&man_p).unwrap()).unwrap();
+        assert_eq!(man["handover_ready"].as_bool(), Some(true));
+        assert_eq!(man["strict_vendor_passed"].as_bool(), Some(true));
+        assert_eq!(man["drc_total_errors"].as_u64(), Some(0));
+        assert_eq!(man["sheets_exported"].as_u64(), Some(4));
+        assert_eq!(man["pid_files_written"].as_u64(), Some(4));
+        assert_eq!(man["pdf_files_plotted"].as_u64(), Some(4));
+        assert!(man["opc_reciprocal_pairs"].as_u64().unwrap_or(0) >= 2);
+        assert!(man["bom_unique_rows"].as_u64().unwrap_or(0) >= 50);
+        assert!(man["instrument_loops_count"].as_u64().unwrap_or(0) >= 10);
+
+        let files_arr = man["files"].as_array().unwrap();
+        let mut total_bytes = 0u64;
+        for entry in files_arr {
+            let rel = entry["rel_path"].as_str().unwrap();
+            assert!(!rel.contains(':') && !rel.contains('\\'));
+            let raw = std::fs::read(pkg_dir.join(rel)).unwrap();
+            let b = raw.len() as u64;
+            total_bytes += b;
+            assert_eq!(entry["bytes"].as_u64(), Some(b));
+            let sha = format!("{:x}", Sha256::digest(&raw));
+            assert_eq!(entry["sha256"].as_str(), Some(sha.as_str()));
+        }
+
+        let sanitized = json!({
+            "source_sha256_prefixes": sha_prefixes,
+            "handover_ready": man["handover_ready"],
+            "strict_vendor_passed": man["strict_vendor_passed"],
+            "sheets_exported": man["sheets_exported"],
+            "pid_files_written": man["pid_files_written"],
+            "pdf_files_plotted": man["pdf_files_plotted"],
+            "bom_unique_rows": man["bom_unique_rows"],
+            "instrument_loops_count": man["instrument_loops_count"],
+            "opc_reciprocal_pairs": man["opc_reciprocal_pairs"],
+            "drc_total_errors": man["drc_total_errors"],
+            "drc_total_warnings": man["drc_total_warnings"],
+            "spec_total_findings": man["spec_total_findings"],
+            "total_package_files": files_arr.len(),
+            "total_package_bytes": total_bytes,
+            "manifest_sha256": man["manifest_sha256"],
+        });
+
+        let _ = std::fs::remove_dir_all(&pkg_dir);
+        std::fs::write(
+            out_dir.join("real158_summary.json"),
+            format!("{}\n", serde_json::to_string_pretty(&sanitized).unwrap()),
         )
         .unwrap();
     }
