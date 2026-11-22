@@ -427,11 +427,11 @@ flowchart LR
 - **资料**：RES-17 ⚠。
 - **解决记录（2026-11-20）**：落地 `src/io/pid_convert/recognize.rs`（圈内双行拼接、带空格 7 位阀门位号归一化、二分图最小距离唯一配对、设备包围盒配对与图层 `10` 松散几何容器恢复、页间连接符 `DWG-*` / 走向配对及范围展开）；90 张有效 DXF 两轮复跑 100% 一致，召回率由 `0.000188` 升至 **`0.977941`**、精确率 **`0.998912`**、位号一致率 **`0.895546`**（见 `readings.md` §14）；此外 `#156` 落地 `src/io/pid_convert/loops.rs`、应用内命令 `PIDLOOP` 与 CLI `--export-loops`，按 ISA-5.1 跨标签页聚合仪表回路、校核缺失变送元件的残缺回路并导出 `.json/.csv/.tsv` 回路索引表（详见 `readings.md` §45）。
 
-#### L3-3 管线识别增强（L）— **已完成（[#133](https://github.com/happyrust/pid-cad/issues/133) / [#152](https://github.com/happyrust/pid-cad/issues/152)）**
+#### L3-3 管线识别增强（L）— **已完成（[#133](https://github.com/happyrust/pid-cad/issues/133) / [#152](https://github.com/happyrust/pid-cad/issues/152) / [#157](https://github.com/happyrust/pid-cad/issues/157)）**
 - **做法**：线号（5 位与 4 位序号两种）、管线族、管段与管件断开、流向；补未覆盖的族。
 - **验收**：每族有 run 数与端口数读数；断头逐条归因。
 - **资料**：RES-17 ⚠。
-- **解决记录（2026-11-21）**：在 `src/io/pid_convert/export.rs` 实现跨跳线/行内文字微断口共线桥接（`0.4..=6.5 mm` 且避开符号包围盒）、流向箭头/短刺微碎片过滤（`< 2.0 mm` 或包围盒对角线 `< 2.4 mm` 孤立碎片）、同层无歧义交点线号传播，以及 `PipeNetworkCensus` 与 `DeadEndAttribution` 守恒归因统计；90 张真实 DXF 全批实测：共线桥接 `124` 处、过滤箭头/短刺 `744` 条，全部 `27,070` 条管段（`54,140` 个端点）100% 守恒归因（接符号端口 `13,184`、接页间连接符 `712`、接三通 `34,347`、触设备壳体 `809`、开放自由端 `5,088`，见 `readings.md` §22）；`#152` 在 `src/io/pid_convert/find.rs` 补齐英制/公制规范化管线号双向匹配与 `6.5 mm` 端点连通 BFS 整条管线全段聚拢定位（详见 `readings.md` §41）。
+- **解决记录（2026-11-21）**：在 `src/io/pid_convert/export.rs` 实现跨跳线/行内文字微断口共线桥接（`0.4..=6.5 mm` 且避开符号包围盒）、流向箭头/短刺微碎片过滤（`< 2.0 mm` 或包围盒对角线 `< 2.4 mm` 孤立碎片）、同层无歧义交点线号传播，以及 `PipeNetworkCensus` 与 `DeadEndAttribution` 守恒归因统计；90 张真实 DXF 全批实测：共线桥接 `124` 处、过滤箭头/短刺 `744` 条，全部 `27,070` 条管段（`54,140` 个端点）100% 守恒归因（接符号端口 `13,184`、接页间连接符 `712`、接三通 `34,347`、触设备壳体 `809`、开放自由端 `5,088`，见 `readings.md` §22）；`#152` 在 `src/io/pid_convert/find.rs` 补齐英制/公制规范化管线号双向匹配与 `6.5 mm` 端点连通 BFS 整条管线全段聚拢定位（见 `readings.md` §41）；`#157` 进一步落地 `src/io/pid_convert/spec_check.rs` 与应用内命令 `PIDSPEC`，完成异径漏画大小头（豁免合法三通）、跨等级无分界直连与跨图互逆 OPC 管径/等级一致性校核（详见 `readings.md` §46）。
 
 #### L3-4 连通（L）— **已完成（[#133](https://github.com/happyrust/pid-cad/issues/133) / [#149](https://github.com/happyrust/pid-cad/issues/149) / [#153](https://github.com/happyrust/pid-cad/issues/153) / [#155](https://github.com/happyrust/pid-cad/issues/155)）**
 - **做法**：符号连接点与管线端点配对；页间连接符跨图配对（按文字与图号）。

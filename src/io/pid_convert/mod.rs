@@ -16,6 +16,7 @@ pub mod loops;
 pub mod opc;
 pub mod promote;
 pub mod recognize;
+pub mod spec_check;
 pub mod trace;
 
 pub use diff::{
@@ -27,6 +28,13 @@ pub use loops::{
     IsaLoopRole, LoopStatus, ParsedIsaTag, PidInstrumentLoop, PidLoopMember, PidLoopReport,
     PidLoopSummary, LOOP_CSV_HEADERS,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use spec_check::write_pid_spec_file;
+pub use spec_check::{
+    audit_pid_spec_consistency, format_pid_spec_delimited, PidSpecFinding, PidSpecReport,
+    PidSpecSummary, SpecFindingKind, SPEC_CSV_HEADERS,
+};
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use loops::{extract_loops_from_batch_dir, write_pid_loops_file};
 

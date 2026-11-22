@@ -1850,3 +1850,41 @@
 | `scripts\fmt-newhunks.ps1` | — | `loops.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 46. L3-3 / L3-4 / L3-6 / L6-2（#157）：应用内 P&ID 管道等级与公称直径一致性校核（漏画变径器 / 跨等级无分界直连 / 跨图 OPC 规格失配）及巡检命令 `PIDSPEC` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `0df907b00`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{spec_check,mod}.rs`、`src/app/commands/pidprops.rs` |
+| 外部证据子项 | `2026-11-22-issue157/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_spec.txt`、`real_out/real157_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
+
+### 46.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_157_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidspec_detects_missing_reducers_spec_breaks_and_opc_mismatches_then_clears_after_fix`（构造合法三通异径支管豁免对照、`DN100->DN50` 1-对-1 直连缺变径器、`CS150->SS300` 无分界跨等级直连以及跨双标签页互逆 `OPC` 两端规格失配四类场景，验证精准检出、分类高亮、`PIDSPEC NEXT` 聚焦以及补齐 `CONCENTRIC REDUCER` / 分界阀门 / 修正对端线号并 `PIDPROMOTE` 后告警全部清零），运行按预期在 `PIDSPEC EXPORT` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`23 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/spec_check.rs`（`audit_pid_spec_consistency`、`write_pid_spec_file`）：统一兼容未升格 `.dxf`/`.dwg`、未升格 `.pid` 原图与已升格 `PID_AUTHOR` 模型，基于 `parse_sppid_line_number` 公制/英制规范化直径与管道材质等级拆解，串联检测 `MissingReducer`（自动豁免 `>=3` 管段汇交或主管内插三通支管的合法异径三通）、`UnmarkedSpecBreak`（区分仅变径的大小头与可分界等级的阀门/法兰/设备）与 `OpcSpecMismatch`（多标签页互逆 `PIDOPC` 两端接续管径/等级对账），支持导出 `.json` 与 UTF-8 BOM `.csv` / `.tsv` 配管规格一致性校核报告；
+  2. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDSPEC [SUMMARY | ALL | REDUCERS | SPECBREAKS | OPCMISMATCH | NEXT] [ALLTABS] [EXPORT "<.json|.csv|.tsv>"]`。
+
+### 46.2 真实双标准成对工程图纸（SPPID 生产图对 + 原生 AutoCAD 存量图对）多标签页规格对账实测
+
+| 图纸组 | 样本形态 | 源图 SHA-256 前缀对 | 带线号管段数 | `missing_reducers` | `unmarked_spec_breaks` | `opc_spec_mismatches` | `.csv` 报告与 `PIDSPEC NEXT` |
+|---|---|---|---:|---:|---:|---:|---|
+| `SP01 + SP02` | 未升格 SPPID 拆分生产图对 | `2164f88bbb57` + `fc2c812dc182` | **`390` 段** | **`0`** | **`0`** | `1` | **通过** |
+| `LG01 + LG02` | 未升格原生 AutoCAD 存量图对 | `a0f05f81a655` + `28ed389e23cb` | **`282` 段** | `1` | **`0`** | `6` | **通过** |
+
+### 46.3 固定门禁读数
+
+| 门禁项 | 改前读数（§45.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,238` 条（`7,157` 过 / `80` 忽略 / `1` 既有 `.pen`） | **`7,240` 条**（**`7,158` 过** / **`81` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图跨标签页配管规格对账），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `spec_check.rs`、`mod.rs`、`pidprops.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
