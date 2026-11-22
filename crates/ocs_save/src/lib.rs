@@ -40,11 +40,16 @@ pub const PROTOCOL_VERSION: u16 = 5;
 pub fn serialize_document(doc: &Document, ext: &str) -> Result<Vec<u8>, String> {
     let ext = ext.to_lowercase();
     if ext == "dxf" {
-        let mut pruned;
-        let doc = if has_omitted_dxf_records(doc) {
-            pruned = doc.clone();
-            prune_omitted_dxf_records(&mut pruned);
-            &pruned
+        // A DXF states a line weight as the number itself, yet a reader may
+        // hold it to the list a DWG states one from. The copy written here
+        // states the nearest width on the list for one that is off it, and
+        // names no record the export omits; the caller's document stays as is.
+        let mut copy;
+        let doc = if has_omitted_dxf_records(doc) || has_unstorable_dwg_line_weights(doc) {
+            copy = doc.clone();
+            prune_omitted_dxf_records(&mut copy);
+            snap_dwg_line_weights(&mut copy);
+            &copy
         } else {
             doc
         };

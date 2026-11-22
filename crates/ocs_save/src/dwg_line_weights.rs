@@ -1,15 +1,19 @@
-//! Line weights on the DWG save copy.
+//! Line weights on the save copy of a DWG or a DXF.
 //!
 //! A DWG states a line weight as a place in a fixed list of widths, so a
 //! width that is not on the list has no place to be stated at and the codec
 //! writes `LineWeight::Default` for it: read back, the stroke takes the
 //! drawing's default width, not the one it was drawn with. A DXF states the
-//! number itself and keeps any width.
+//! number itself, and the codec writes whatever number an entity or a layer
+//! states; yet a program that reads the file may hold the number to the same
+//! list: the audit of ezdxf, a DXF library, calls a width off the list
+//! invalid and restates it.
 //!
 //! The Smart P&ID importer states its three pens as 0.17, 0.34 and 0.68 mm,
 //! none of them on the list, so every stroke of a `.pid` saved as DWG lost
-//! its pen. On the DWG save copy -- never on the drawing being edited, and
-//! never for a DXF -- each such width moves to the nearest one on the list.
+//! its pen, and saved as DXF stated a width such a reader calls invalid. On
+//! the save copy of either -- never on the drawing being edited -- each such
+//! width moves to the nearest one on the list.
 
 use std::cmp::Reverse;
 
@@ -25,11 +29,12 @@ const STANDARD_WIDTHS: [i16; 24] = [
     211,
 ];
 
-/// The width a DWG states in place of `width`: the nearest on the list, the
-/// wider of two equally near. `None` when `width` is on the list already, or
-/// lies outside what the list spans: such a width stays as it is and is
-/// written as the default -- the importer, too, leaves a pen the format
-/// cannot state unstated rather than clamp it into a width nobody asked for.
+/// The width a save copy states in place of `width`: the nearest on the
+/// list, the wider of two equally near. `None` when `width` is on the list
+/// already, or lies outside what the list spans: such a width stays as it
+/// is, for a DWG to write as the default and a DXF as the number it is --
+/// the importer, too, leaves a pen the format cannot state unstated rather
+/// than clamp it into a width nobody asked for.
 fn nearest_standard(width: i16) -> Option<i16> {
     let narrowest = STANDARD_WIDTHS[0];
     let widest = STANDARD_WIDTHS[STANDARD_WIDTHS.len() - 1];
@@ -52,8 +57,8 @@ fn restated(weight: LineWeight) -> Option<LineWeight> {
 }
 
 /// Whether `entity` states a width a DWG cannot: its own, or that of an
-/// attribute it carries -- the DWG writer states every attribute of a block
-/// reference with the attribute's own width.
+/// attribute it carries -- the DWG writer and the DXF writer state every
+/// attribute of a block reference with the attribute's own width.
 fn states_a_width_off_the_list(entity: &EntityType) -> bool {
     if restated(entity.common().line_weight).is_some() {
         return true;
@@ -82,8 +87,8 @@ pub fn has_unstorable_dwg_line_weights(doc: &Document) -> bool {
 /// Restate every width of `doc` that a DWG cannot state at the nearest one it
 /// can: the header's current width, the layers', and the entities' -- those
 /// inside the block definitions and the attributes of block references among
-/// them. For the DWG save copy only: a DXF keeps the width as drawn, and so
-/// does the drawing being edited. Returns whether anything changed.
+/// them. For the save copy of a DWG or a DXF only: the drawing being edited
+/// keeps the width as drawn. Returns whether anything changed.
 pub fn snap_dwg_line_weights(doc: &mut Document) -> bool {
     let mut changed = false;
     if let Some(width) = nearest_standard(doc.header.current_line_weight) {
@@ -130,12 +135,13 @@ mod tests {
     use std::io::Cursor;
 
     use document::entities::{AttributeEntity, Block, BlockEnd, Insert, Line};
+    use document::objects::{DictionaryWithDefault, ObjectType, PlaceHolder};
     use document::tables::{BlockRecord, Layer};
     use document::types::{DxfVersion, Vector3};
     use document::{DwgReader, DxfReader};
 
     use super::*;
-    use crate::serialize_document;
+    use crate::{has_omitted_dxf_records, serialize_document};
 
     /// The layer that states a width of its own.
     const PEN_LAYER: &str = "PENS";
@@ -297,6 +303,15 @@ mod tests {
         DwgReader::from_stream(Cursor::new(bytes)).read().unwrap()
     }
 
+    /// `doc` saved as a DXF, and read back.
+    fn through_a_dxf(doc: &Document) -> Document {
+        let bytes = serialize_document(doc, "dxf").unwrap();
+        DxfReader::from_reader(Cursor::new(bytes))
+            .unwrap()
+            .read()
+            .unwrap()
+    }
+
     /// State `weight` on the stroke that stands at `x`.
     fn restate_stroke(doc: &mut Document, x: f64, weight: LineWeight) {
         let handle = doc
@@ -322,6 +337,69 @@ mod tests {
             panic!("the block reference is gone");
         };
         reference.attributes[0].common.line_weight = weight;
+    }
+
+    /// The entry of [`add_an_omitted_record`]'s dictionary whose record a
+    /// DXF export writes.
+    const WRITTEN: &str = "WRITTEN";
+
+    /// The entry whose record the export omits.
+    const OMITTED: &str = "OMITTED";
+
+    /// Give `doc` a record a DXF export omits -- an object the model holds
+    /// nothing of a DXF for -- and a dictionary that lists it beside a record
+    /// the export writes. Written as it stands, the dictionary names a record
+    /// the file does not have; the save copy drops that entry. Answers the
+    /// dictionary's handle.
+    fn add_an_omitted_record(doc: &mut Document) -> Handle {
+        let root = doc.header.named_objects_dict_handle;
+        assert!(
+            matches!(doc.objects.get(&root), Some(ObjectType::Dictionary(_))),
+            "the drawing has no root dictionary"
+        );
+        let dictionary = doc.allocate_handle();
+        let written = doc.allocate_handle();
+        let omitted = doc.allocate_handle();
+        let placeholder = PlaceHolder {
+            handle: written,
+            owner: dictionary,
+        };
+        doc.objects
+            .insert(written, ObjectType::PlaceHolder(placeholder));
+        doc.objects.insert(
+            omitted,
+            ObjectType::Unknown {
+                type_name: "SYNTHETIC_RAW_OBJECT".into(),
+                handle: omitted,
+                owner: dictionary,
+                raw_dxf_codes: None,
+                raw_dwg_data: Some(vec![0]),
+                raw_dwg_handle_bits: 0,
+                raw_dwg_version: Some(DxfVersion::AC1032),
+            },
+        );
+        let listing = DictionaryWithDefault {
+            handle: dictionary,
+            owner: root,
+            entries: vec![(WRITTEN.into(), written), (OMITTED.into(), omitted)],
+            default_handle: written,
+            ..DictionaryWithDefault::default()
+        };
+        doc.objects
+            .insert(dictionary, ObjectType::DictionaryWithDefault(listing));
+        dictionary
+    }
+
+    /// The names the dictionary at `handle` lists.
+    fn listed(doc: &Document, handle: Handle) -> Vec<String> {
+        let Some(ObjectType::DictionaryWithDefault(listing)) = doc.objects.get(&handle) else {
+            panic!("no dictionary at the handle it was filed under");
+        };
+        listing
+            .entries
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     #[test]
@@ -512,22 +590,90 @@ mod tests {
         assert_eq!(stated(&through_a_dwg(&doc)), as_a_dwg_states_it());
     }
 
-    /// A DXF states the number itself: the strokes, the attribute and the
-    /// layer keep the width they were drawn with. The header's current width
-    /// is left out: the DXF writer states it only when it is on a list of the
-    /// writer's own, and BYLAYER otherwise -- 34 reads back as -1.
+    /// A DXF states the number itself, yet a reader may hold it to the same
+    /// list. Its save copy states what the DWG of the drawing states, the
+    /// header's current width with the rest, and the drawing stays as drawn.
     #[test]
-    fn a_dxf_states_the_widths_as_drawn() {
+    fn a_dxf_states_the_nearest_standard_width_for_a_width_off_the_list() {
         let doc = drawing();
-        let bytes = serialize_document(&doc, "dxf").unwrap();
-        let reopened = DxfReader::from_reader(Cursor::new(bytes))
-            .unwrap()
-            .read()
-            .unwrap();
-        let read_back = Stated {
-            current: doc.header.current_line_weight,
-            ..stated(&reopened)
+        let read_back = stated(&through_a_dxf(&doc));
+        assert_eq!(read_back, as_a_dwg_states_it());
+        assert_eq!(read_back, stated(&through_a_dwg(&doc)), "DXF against DWG");
+        assert_eq!(stated(&doc), as_drawn(), "the drawing stays as drawn");
+    }
+
+    /// The DXF writer states the header's current width only when it is on a
+    /// list of the writer's own, which is not the standard one, and "by
+    /// layer" otherwise. Whatever the current width, a DXF read back states
+    /// the nearest standard width if the writer states that one, and "by
+    /// layer" if it does not: never a width off the list.
+    #[test]
+    fn a_dxf_states_the_current_width_the_way_it_states_the_nearest_standard_one() {
+        let current_through_a_dxf = |current: i16| {
+            let mut doc = Document::new();
+            doc.version = DxfVersion::AC1032;
+            doc.header.current_line_weight = current;
+            through_a_dxf(&doc).header.current_line_weight
         };
-        assert_eq!(read_back, as_drawn());
+        let by_layer = LineWeight::ByLayer.value();
+        let stated_for: BTreeMap<i16, i16> = STANDARD_WIDTHS
+            .into_iter()
+            .map(|standard| (standard, current_through_a_dxf(standard)))
+            .collect();
+        for (&standard, &read_back) in &stated_for {
+            assert!(
+                read_back == standard || read_back == by_layer,
+                "the standard width {standard} reads back as {read_back}"
+            );
+        }
+        for pen in [18, 35, 70] {
+            assert_eq!(stated_for[&pen], pen, "the importer's pen moved to {pen}");
+        }
+        let mut by_layer_for = Vec::new();
+        for current in 0..=211_i16 {
+            let nearest = nearest_standard(current).unwrap_or(current);
+            assert_eq!(
+                current_through_a_dxf(current),
+                stated_for[&nearest],
+                "{current}"
+            );
+            if stated_for[&nearest] == by_layer {
+                by_layer_for.push(current);
+            }
+        }
+        println!("current widths a DXF states by layer for: {by_layer_for:?}");
+    }
+
+    /// A DXF save copies the drawing when it has a record to drop or a width
+    /// to restate, and does both on the one copy. Whichever of the two the
+    /// drawing has -- both, either, neither -- the DXF lists no record it
+    /// omits and states no width off the list, and the drawing stays as it
+    /// was.
+    #[test]
+    fn a_dxf_drops_the_omitted_records_and_restates_the_widths_on_one_copy() {
+        for (case, pens, omits) in [
+            ("both", [17, 34, 68], true),
+            ("only an omitted record", [18, 35, 70], true),
+            ("only widths off the list", [17, 34, 68], false),
+            ("neither", [18, 35, 70], false),
+        ] {
+            let mut doc = drawing_with(pens);
+            let dictionary = omits.then(|| add_an_omitted_record(&mut doc));
+            assert_eq!(has_omitted_dxf_records(&doc), omits, "{case}");
+            assert_eq!(
+                has_unstorable_dwg_line_weights(&doc),
+                pens != [18, 35, 70],
+                "{case}"
+            );
+            let as_drawn = doc.clone();
+
+            let reopened = through_a_dxf(&doc);
+            assert_eq!(stated(&reopened), as_a_dwg_states_it(), "{case}");
+            if let Some(dictionary) = dictionary {
+                assert_eq!(listed(&doc, dictionary), [WRITTEN, OMITTED], "{case}");
+                assert_eq!(listed(&reopened, dictionary), [WRITTEN], "{case}");
+            }
+            assert!(doc == as_drawn, "{case}: the drawing itself changed");
+        }
     }
 }

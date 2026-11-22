@@ -2886,6 +2886,9 @@ where
     if ext == "dxf" {
         crate::entities::spline::complete_nurbs_for_dxf(&mut doc);
         ocs_save::prune_omitted_dxf_records(&mut doc);
+        // A reader may hold a DXF to the widths a DWG can state: this save
+        // copy states the nearest width on the list for one that is off it.
+        ocs_save::snap_dwg_line_weights(&mut doc);
     }
     let result = match ext.as_str() {
         "dxf" => DxfWriter::new(&doc)
@@ -4548,12 +4551,6 @@ mod dwg_line_weight_tests {
         )
     }
 
-    /// What [`stated`] gives, without the current width.
-    fn strokes_and_layer(doc: &Document) -> (BTreeMap<i64, LineWeight>, Option<LineWeight>) {
-        let (strokes, layer, _) = stated(doc);
-        (strokes, layer)
-    }
-
     /// What [`drawing`] states, with the importer's three pens at `pens`.
     fn with_pens(pens: [i16; 3]) -> Stated {
         let [fine, medium, bold] = pens.map(LineWeight::Value);
@@ -4615,18 +4612,17 @@ mod dwg_line_weight_tests {
         assert!(doc == as_drawn, "the drawing itself must stay as drawn");
     }
 
-    /// A DXF states the number itself, so it keeps the width of every stroke
-    /// and of the layer as drawn. The current width is left out: the DXF
-    /// writer keeps a list of its own for it and states "by layer" for a
-    /// width that is not on it, with or without what a DWG save does.
+    /// A DXF states the number itself, yet a reader may hold it to the same
+    /// list: saved either way it states what the DWG states, the current
+    /// width with the rest, and the drawing being saved is not touched.
     #[test]
-    fn a_dxf_states_the_widths_as_drawn_whichever_way_it_is_saved() {
+    fn a_dxf_states_the_nearest_standard_widths_whichever_way_it_is_saved() {
         let doc = drawing();
-        let (strokes, layer, _) = with_pens([17, 34, 68]);
-        let as_drawn = (strokes, layer);
+        let as_drawn = doc.clone();
         let reopened = through_a_file(&doc, "dxf", "dxf");
-        assert_eq!(strokes_and_layer(&reopened), as_drawn, "to a file");
+        assert_eq!(stated(&reopened), with_pens([18, 35, 70]), "to a file");
         let reopened = through_bytes(&doc, "dxf");
-        assert_eq!(strokes_and_layer(&reopened), as_drawn, "to bytes");
+        assert_eq!(stated(&reopened), with_pens([18, 35, 70]), "to bytes");
+        assert!(doc == as_drawn, "the drawing itself must stay as drawn");
     }
 }

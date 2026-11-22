@@ -5649,10 +5649,18 @@ mod sample_sheet {
         );
     }
 
-    /// A DXF states the number itself: the sheet keeps every pen as opened.
+    /// A DXF states the number itself, yet a reader may hold it to the same
+    /// list: the sheet saved as DXF states the pens its DWG states.
     #[test]
-    fn the_sample_saved_as_dxf_states_its_pens_as_opened() {
-        check_the_saved_pens("dxf", &[]);
+    fn the_sample_saved_as_dxf_states_its_pens_at_the_nearest_standard_widths() {
+        check_the_saved_pens(
+            "dxf",
+            &[
+                ("Value(17)", "Value(18)"),
+                ("Value(34)", "Value(35)"),
+                ("Value(68)", "Value(70)"),
+            ],
+        );
     }
 
     /// Legend recognition reads the opened sheet and leaves the import's
