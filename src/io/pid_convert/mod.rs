@@ -28,6 +28,7 @@ pub mod relief;
 pub mod renumber;
 pub mod spec_check;
 pub mod specialty;
+pub mod tie_in;
 pub mod trace;
 pub mod utility;
 pub mod valve_mto;
@@ -80,6 +81,13 @@ pub use specialty::{
     PidSpecialtyItem, PidSpecialtyReport, PidSpecialtyRollupRow, PidSpecialtySummary,
     SpecialtyCategory, SpecialtySubtype, SPECIALTY_CSV_HEADERS,
 };
+pub use tie_in::{
+    analyze_pid_tie_ins, format_pid_tie_in_delimited, is_explicit_tie_in_text,
+    tie_in_row_matches_query, PidTieInReport, PidTieInRow, PidTieInSummary,
+    TieInIsolationReadiness, TieInSourceKind, TIE_IN_CSV_HEADERS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use tie_in::{extract_tie_ins_from_path, write_pid_tie_in_file};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use specialty::{extract_specialties_from_path, write_pid_specialty_file};

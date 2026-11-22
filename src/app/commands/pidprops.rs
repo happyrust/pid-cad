@@ -52,7 +52,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDEQUIP",
         "PIDRELIEF",
         "PIDCAUSE",
-        "PIDIO"
+        "PIDIO",
+        "PIDTIEIN"
     ]
 });
 
@@ -347,6 +348,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidio_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidtiein_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -6016,6 +6020,258 @@ impl OpenCADStudio {
             other => {
                 self.command_line.push_error(&format!(
                     "PIDIO: 未知子命令 {other}（支持 SUMMARY / ALL / DCS / SIS / LOCAL / UNCONNECTED / CHANNEL / TAG / NEXT / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
+
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidtiein_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            analyze_pid_tie_ins, tie_in_row_matches_query, write_pid_tie_in_file, OpcSheetInput,
+            TieInIsolationReadiness,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDTIEIN") {
+            return None;
+        }
+
+        let mut action: Option<String> = None;
+        let mut service_query: Option<String> = None;
+        let mut tag_query: Option<String> = None;
+        let mut all_tabs = false;
+        let mut export_path: Option<std::path::PathBuf> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            let up = tok.to_ascii_uppercase();
+            match up.as_str() {
+                "ALLTABS" => {
+                    all_tabs = true;
+                    idx += 1;
+                }
+                "SUMMARY" | "ALL" | "READY" | "SINGLE" | "HAZARDS" | "NEXT" => {
+                    action = Some(up);
+                    idx += 1;
+                }
+                "SERVICE" => {
+                    let Some(q) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDTIEIN SERVICE: 缺少介质代号（如 PG、LS、N2）。");
+                        return Some(Task::none());
+                    };
+                    action = Some("SERVICE".to_string());
+                    service_query = Some(q.to_ascii_uppercase());
+                    idx += 2;
+                }
+                "TAG" => {
+                    let Some(q) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDTIEIN TAG: 缺少碰头接点号或目标图号关键字。");
+                        return Some(Task::none());
+                    };
+                    action = Some("TAG".to_string());
+                    tag_query = Some(q.clone());
+                    idx += 2;
+                }
+                "EXPORT" => {
+                    let Some(next_tok) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDTIEIN EXPORT: 缺少输出文件路径（.json/.csv/.tsv）。");
+                        return Some(Task::none());
+                    };
+                    export_path = Some(std::path::PathBuf::from(next_tok));
+                    idx += 2;
+                }
+                _ => {
+                    if action.is_none() {
+                        action = Some("TAG".to_string());
+                        tag_query = Some(tok.clone());
+                    }
+                    idx += 1;
+                }
+            }
+        }
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<OpcSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+
+        let rep = analyze_pid_tie_ins(&sheet_inputs);
+
+        if let Some(ref out_p) = export_path {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(err) = write_pid_tie_in_file(&rep, out_p) {
+                self.command_line
+                    .push_error(&format!("PIDTIEIN EXPORT: {err}"));
+                return Some(Task::none());
+            }
+        }
+
+        let eff_action = action.as_deref().unwrap_or("SUMMARY");
+        let filtered: Vec<_> = rep
+            .tie_ins
+            .iter()
+            .filter(|r| match eff_action {
+                "READY" => r.isolation_readiness == TieInIsolationReadiness::DbbOrBlindReady,
+                "SINGLE" => {
+                    r.isolation_readiness == TieInIsolationReadiness::SingleValveShutdownOnly
+                }
+                "HAZARDS" => {
+                    r.isolation_readiness == TieInIsolationReadiness::UnisolatedDirectHazard
+                }
+                "SERVICE" => service_query
+                    .as_deref()
+                    .is_some_and(|q| r.fluid_code.eq_ignore_ascii_case(q)),
+                "TAG" => tag_query
+                    .as_deref()
+                    .is_some_and(|q| tie_in_row_matches_query(r, q)),
+                _ => true,
+            })
+            .collect();
+
+        match eff_action {
+            "SUMMARY" => {
+                self.command_line.push_output(&format!(
+                    "PIDTIEIN: 扫描图纸={} | 总碰头/界区接点={}（显式TP={}，外接OPC={}）| 双阀/盲板正隔离={}，单阀停车={}，无阀高危={}。",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_tie_ins,
+                    rep.summary.explicit_callouts_count,
+                    rep.summary.battery_limit_opc_count,
+                    rep.summary.dbb_or_blind_ready_count,
+                    rep.summary.single_valve_count,
+                    rep.summary.unisolated_hazard_count,
+                ));
+            }
+            "ALL" | "READY" | "SINGLE" | "HAZARDS" | "SERVICE" | "TAG" => {
+                let mut by_tab: std::collections::BTreeMap<usize, Vec<document::Handle>> =
+                    std::collections::BTreeMap::new();
+                for r in &filtered {
+                    let dst = by_tab.entry(r.tab_index).or_default();
+                    if !dst.contains(&r.primary_handle) {
+                        dst.push(r.primary_handle);
+                    }
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                let mut sel_cnt = 0usize;
+                for (&ti, hs) in &by_tab {
+                    if ti < self.tabs.len() && !hs.is_empty() {
+                        self.tabs[ti].scene.select_entities(hs);
+                        sel_cnt += hs.len();
+                    }
+                }
+                if eff_action == "TAG"
+                    && filtered.len() == 1
+                    && filtered[0].tab_index < self.tabs.len()
+                    && filtered[0].tab_index != self.active_tab
+                {
+                    let dt = filtered[0].tab_index;
+                    let _ = self.update(Message::TabSwitch(dt));
+                    self.active_tab = dt;
+                }
+                if let Some(cur_hs) = by_tab.get(&self.active_tab).filter(|h| !h.is_empty()) {
+                    let _ = self.tabs[self.active_tab].scene.zoom_to_entities(cur_hs);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDTIEIN {eff_action}: 匹配 {} 个碰头/界区接点，高亮 {sel_cnt} 个定位图元。",
+                    filtered.len()
+                ));
+            }
+            "NEXT" => {
+                if filtered.is_empty() {
+                    self.command_line
+                        .push_output("PIDTIEIN NEXT: 未找到可巡检的碰头接点。");
+                    return Some(self.finish_dispatch(cmd));
+                }
+                let cur_tab = self.active_tab;
+                let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[cur_tab]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                let cur_pos = filtered
+                    .iter()
+                    .position(|r| r.tab_index == cur_tab && sel_set.contains(&r.primary_handle));
+                let next_idx = cur_pos.map(|p| (p + 1) % filtered.len()).unwrap_or(0);
+                let chosen = filtered[next_idx];
+                let dest_tab = chosen.tab_index;
+
+                if dest_tab < self.tabs.len() && dest_tab != self.active_tab {
+                    let _ = self.update(Message::TabSwitch(dest_tab));
+                    self.active_tab = dest_tab;
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                if dest_tab < self.tabs.len() {
+                    let hs = vec![chosen.primary_handle];
+                    self.tabs[dest_tab].scene.select_entities(&hs);
+                    let zoomed = self.tabs[dest_tab].scene.zoom_to_entities(&hs);
+                    if !zoomed {
+                        let mut cam = self.tabs[dest_tab].scene.camera.borrow_mut();
+                        let z = cam.target.z;
+                        cam.target = glam::DVec3::new(chosen.x, chosen.y, z);
+                    }
+                    self.refresh_properties();
+                }
+                self.command_line.push_output(&format!(
+                    "PIDTIEIN NEXT [{}/{}]: {}（目标={}，隔离等级={}，锚定={}）。",
+                    next_idx + 1,
+                    filtered.len(),
+                    chosen.tie_in_id,
+                    chosen.callout_or_target,
+                    chosen.isolation_readiness.as_str(),
+                    chosen.anchor_equipment_or_header,
+                ));
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDTIEIN: 未知子命令 {other}（支持 SUMMARY / ALL / READY / SINGLE / HAZARDS / SERVICE / TAG / NEXT / EXPORT）。"
                 ));
                 return Some(Task::none());
             }
@@ -17731,6 +17987,393 @@ mod tests {
         std::fs::write(
             out_dir.join("real174_summary.json"),
             format!("{}\n", serde_json::to_string_pretty(&sanitized).unwrap()),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidtiein_extracts_explicit_tp_and_battery_limit_tieins_grades_dbb_blind_single_and_hazard_isolation_and_steps_camera(
+    ) {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let tmp = std::env::temp_dir().join("ocs_pidtiein_test_175");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let mut app = app();
+
+        // Tab 1:
+        // 1) Explicit TP-1751 -> 100-PG-17501-CS150-IH -> BV1751 + SB-1751 (BLANK OPEN SPECTACLE) -> V-1751 (dbb_or_blind_ready)
+        // 2) External OSBL OPC (DWG-OSBL-901) -> 80-LS-17502-CS300 -> GV1752 -> V-1751 (single_valve_shutdown_only)
+        // 3) Paired internal OPC to Tab 2 (DWG-175-02) -> excluded!
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-175-01.dxf".to_string();
+        let (tp1_txt_h, osbl_opc_h) = {
+            let doc = &mut app.tabs[tab1].scene.document;
+            define_sppid_block(doc, "1TO1PARAMETRIC V DRUM", 12.0, 24.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "BLANK OPEN SPECTACLE", 4.0, 8.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-175-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            // TP-1751 on left end of p1 (80..137) -> BV1751 (140) -> p2 (143..177) -> SB-1751 (180) -> p3 (183..242) -> V-1751 (248, 300)
+            let mut tp1 =
+                Text::with_value("TP-1751", Vector3::new(75.0, 303.0, 0.0)).with_height(2.5);
+            tp1.common.layer = "11".to_string();
+            let tp1_txt_h = doc.add_entity(document::EntityType::Text(tp1)).unwrap();
+
+            let mut p1 = Line::from_points(
+                Vector3::new(80.0, 300.0, 0.0),
+                Vector3::new(137.0, 300.0, 0.0),
+            );
+            p1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p1)).unwrap();
+            let mut l1 = Text::with_value("100-PG-17501-CS150-IH", Vector3::new(92.0, 303.0, 0.0))
+                .with_height(2.5);
+            l1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(l1)).unwrap();
+
+            let mut bv1 = Insert::new("BALL VALVE TYPE 2", Vector3::new(140.0, 300.0, 0.0));
+            bv1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bv1)).unwrap();
+            let mut bvt1 =
+                Text::with_value("BV1751", Vector3::new(136.0, 306.0, 0.0)).with_height(2.5);
+            bvt1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(bvt1)).unwrap();
+
+            let mut p2 = Line::from_points(
+                Vector3::new(143.0, 300.0, 0.0),
+                Vector3::new(177.0, 300.0, 0.0),
+            );
+            p2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p2)).unwrap();
+
+            let mut sb = Insert::new("BLANK OPEN SPECTACLE", Vector3::new(180.0, 300.0, 0.0));
+            sb.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(sb)).unwrap();
+            let mut sbt =
+                Text::with_value("SB-1751", Vector3::new(175.0, 307.0, 0.0)).with_height(2.5);
+            sbt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(sbt)).unwrap();
+
+            let mut p3 = Line::from_points(
+                Vector3::new(183.0, 300.0, 0.0),
+                Vector3::new(242.0, 300.0, 0.0),
+            );
+            p3.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p3)).unwrap();
+
+            let mut drum = Insert::new("1TO1PARAMETRIC V DRUM", Vector3::new(248.0, 300.0, 0.0));
+            drum.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(drum)).unwrap();
+            let mut dt =
+                Text::with_value("V-1751", Vector3::new(244.0, 316.0, 0.0)).with_height(2.5);
+            dt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(dt)).unwrap();
+
+            // OSBL OPC (DWG-OSBL-901) at (80, 200) -> s1 (86..137) -> GV1752 (140) -> s2 (143..248) -> s3 (248, 200..288) -> V-1751
+            let mut osbl = Insert::new("_OFF-UNIT SQ", Vector3::new(80.0, 200.0, 0.0));
+            osbl.common.layer = "11".to_string();
+            let osbl_opc_h = doc.add_entity(document::EntityType::Insert(osbl)).unwrap();
+            let mut osbl_t =
+                Text::with_value("DWG-OSBL-901", Vector3::new(70.0, 199.0, 0.0)).with_height(2.5);
+            osbl_t.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(osbl_t)).unwrap();
+
+            let mut s1 = Line::from_points(
+                Vector3::new(86.0, 200.0, 0.0),
+                Vector3::new(137.0, 200.0, 0.0),
+            );
+            s1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(s1)).unwrap();
+            let mut sl1 = Text::with_value("80-LS-17502-CS300", Vector3::new(92.0, 203.0, 0.0))
+                .with_height(2.5);
+            sl1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(sl1)).unwrap();
+
+            let mut gv = Insert::new("BALL VALVE TYPE 2", Vector3::new(140.0, 200.0, 0.0));
+            gv.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(gv)).unwrap();
+            let mut gvt =
+                Text::with_value("GV1752", Vector3::new(136.0, 206.0, 0.0)).with_height(2.5);
+            gvt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(gvt)).unwrap();
+
+            let mut s2 = Line::from_points(
+                Vector3::new(143.0, 200.0, 0.0),
+                Vector3::new(248.0, 200.0, 0.0),
+            );
+            s2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(s2)).unwrap();
+            let mut s3 = Line::from_points(
+                Vector3::new(248.0, 200.0, 0.0),
+                Vector3::new(248.0, 288.0, 0.0),
+            );
+            s3.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(s3)).unwrap();
+
+            // Paired internal OPC to DWG-175-02
+            let mut m1 = Line::from_points(
+                Vector3::new(254.0, 300.0, 0.0),
+                Vector3::new(334.0, 300.0, 0.0),
+            );
+            m1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(m1)).unwrap();
+            let mut opc_in = Insert::new("_OFF-UNIT SQ", Vector3::new(340.0, 300.0, 0.0));
+            opc_in.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc_in))
+                .unwrap();
+            let mut opc_in_t =
+                Text::with_value("DWG-175-02", Vector3::new(330.0, 299.0, 0.0)).with_height(2.5);
+            opc_in_t.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(opc_in_t))
+                .unwrap();
+
+            (tp1_txt_h, osbl_opc_h)
+        };
+
+        // Tab 2: paired return OPC + E-1752 + unisolated TP-1759 on 50-N2-17503-CS150 -> E-1752
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-175-02.dxf".to_string();
+        let tp2_txt_h = {
+            let doc = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc, "HEAT EXCHANGER", 12.0, 12.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-175-02", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut opc2 = Insert::new("_OFF-UNIT SQ", Vector3::new(100.0, 300.0, 0.0));
+            opc2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc2)).unwrap();
+            let mut oft2 =
+                Text::with_value("DWG-175-01", Vector3::new(90.0, 299.0, 0.0)).with_height(2.5);
+            oft2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(oft2)).unwrap();
+
+            let mut pa = Line::from_points(
+                Vector3::new(106.0, 300.0, 0.0),
+                Vector3::new(194.0, 300.0, 0.0),
+            );
+            pa.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pa)).unwrap();
+
+            let mut ex = Insert::new("HEAT EXCHANGER", Vector3::new(200.0, 300.0, 0.0));
+            ex.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(ex)).unwrap();
+            let mut ext =
+                Text::with_value("E-1752", Vector3::new(195.0, 286.0, 0.0)).with_height(2.5);
+            ext.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(ext)).unwrap();
+
+            // Unisolated TP-1759 -> 50-N2-17503-CS150 -> E-1752 (no valve, no blind!)
+            let mut tp2 =
+                Text::with_value("TP-1759", Vector3::new(115.0, 383.0, 0.0)).with_height(2.5);
+            tp2.common.layer = "11".to_string();
+            let tp2_txt_h = doc.add_entity(document::EntityType::Text(tp2)).unwrap();
+
+            let mut hz1 = Line::from_points(
+                Vector3::new(120.0, 380.0, 0.0),
+                Vector3::new(200.0, 380.0, 0.0),
+            );
+            hz1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(hz1)).unwrap();
+            let mut hzl = Text::with_value("50-N2-17503-CS150", Vector3::new(138.0, 383.0, 0.0))
+                .with_height(2.5);
+            hzl.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(hzl)).unwrap();
+
+            let mut hz2 = Line::from_points(
+                Vector3::new(200.0, 380.0, 0.0),
+                Vector3::new(200.0, 306.0, 0.0),
+            );
+            hz2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(hz2)).unwrap();
+
+            tp2_txt_h
+        };
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        let json_p = tmp.join("tieins.json");
+        let csv_p = tmp.join("tieins.csv");
+        let _ = app.run_command_line(&format!("PIDTIEIN ALLTABS EXPORT \"{}\"", json_p.display()));
+        assert!(
+            json_p.is_file(),
+            "PIDTIEIN EXPORT must write Tie-In Schedule tieins.json"
+        );
+        let _ = app.run_command_line(&format!(
+            "PIDTIEIN SUMMARY ALLTABS EXPORT \"{}\"",
+            csv_p.display()
+        ));
+        assert!(csv_p.is_file());
+        let csv_bytes = std::fs::read(&csv_p).unwrap();
+        assert!(csv_bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
+
+        let rep: Value = serde_json::from_str(&std::fs::read_to_string(&json_p).unwrap()).unwrap();
+        let s = &rep["summary"];
+        assert_eq!(s["sheets_scanned"].as_u64(), Some(2));
+        assert_eq!(s["total_tie_ins"].as_u64(), Some(3));
+        assert_eq!(s["explicit_callouts_count"].as_u64(), Some(2));
+        assert_eq!(s["battery_limit_opc_count"].as_u64(), Some(1));
+        assert_eq!(s["dbb_or_blind_ready_count"].as_u64(), Some(1));
+        assert_eq!(s["single_valve_count"].as_u64(), Some(1));
+        assert_eq!(s["unisolated_hazard_count"].as_u64(), Some(1));
+
+        let rows = rep["tie_ins"].as_array().unwrap();
+        let r_tp1 = rows
+            .iter()
+            .find(|r| r["callout_or_target"].as_str() == Some("TP-1751"))
+            .expect("TP-1751 row");
+        assert_eq!(
+            r_tp1["isolation_readiness"].as_str(),
+            Some("dbb_or_blind_ready")
+        );
+        assert_eq!(r_tp1["anchor_equipment_or_header"].as_str(), Some("V-1751"));
+        assert_eq!(r_tp1["insulation"].as_str(), Some("IH"));
+
+        let r_hz = rows
+            .iter()
+            .find(|r| r["callout_or_target"].as_str() == Some("TP-1759"))
+            .expect("TP-1759 row");
+        assert_eq!(
+            r_hz["isolation_readiness"].as_str(),
+            Some("unisolated_direct_hazard")
+        );
+        assert_eq!(r_hz["anchor_equipment_or_header"].as_str(), Some("E-1752"));
+
+        let _ = app.run_command_line("PIDTIEIN READY ALLTABS");
+        assert!(has_sel(&app, tab1, tp1_txt_h) && !has_sel(&app, tab1, osbl_opc_h));
+
+        let _ = app.run_command_line("PIDTIEIN SINGLE ALLTABS");
+        assert!(has_sel(&app, tab1, osbl_opc_h));
+
+        let _ = app.run_command_line("PIDTIEIN HAZARDS ALLTABS");
+        assert!(has_sel(&app, tab2, tp2_txt_h));
+
+        let _ = app.run_command_line("PIDTIEIN TAG TP-1759 ALLTABS");
+        assert_eq!(app.active_tab, tab2);
+        assert!(has_sel(&app, tab2, tp2_txt_h));
+
+        let mut visited_tp2 = false;
+        for _ in 0..5 {
+            let _ = app.run_command_line("PIDTIEIN NEXT ALLTABS");
+            if app.active_tab == tab2 && has_sel(&app, tab2, tp2_txt_h) {
+                visited_tp2 = true;
+                break;
+            }
+        }
+        assert!(visited_tp2, "PIDTIEIN NEXT ALLTABS must visit TP-1759");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads 4 real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into OpenCADStudio and verifies PIDTIEIN ALLTABS Tie-In & Battery-Limit isolation grading and NEXT stepping"]
+    fn real_multi_tab_pidtiein_isolation_readiness_and_next_audit() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_raw) = std::env::var("OCS_PID_REAL175_SPPID_PAIR") else {
+            println!("OCS_PID_REAL175_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(legacy_raw) = std::env::var("OCS_PID_REAL175_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL175_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL175_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real175"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sppid_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sppid_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        let legacy_paths: Vec<std::path::PathBuf> = std::env::split_paths(&legacy_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        assert_eq!(sppid_paths.len(), 2);
+        assert_eq!(legacy_paths.len(), 2);
+
+        let groups = [("SP01_SP02", &sppid_paths), ("LG01_LG02", &legacy_paths)];
+        let mut out_groups = Vec::new();
+
+        for (gname, paths) in groups {
+            let mut app = app();
+            let mut shas = Vec::new();
+            for (idx, p) in paths.iter().enumerate() {
+                let raw_b = std::fs::read(p).unwrap();
+                shas.push(format!("{:x}", Sha256::digest(&raw_b))[..12].to_string());
+                if idx > 0 {
+                    let _ = app.update(Message::TabNew);
+                }
+                let ti = app.active_tab;
+                app.tabs[ti].scene.document = crate::io::load_file(p).expect("load DXF");
+                app.tabs[ti].tab_title = format!("{gname}_{idx}.dxf");
+            }
+
+            let json_p = out_dir.join(format!("{gname}_tiein.json"));
+            let csv_p = out_dir.join(format!("{gname}_tiein.csv"));
+            let _ =
+                app.run_command_line(&format!("PIDTIEIN ALLTABS EXPORT \"{}\"", json_p.display()));
+            let _ = app.run_command_line(&format!(
+                "PIDTIEIN SUMMARY ALLTABS EXPORT \"{}\"",
+                csv_p.display()
+            ));
+            assert!(json_p.is_file() && csv_p.is_file());
+            let csv_raw = std::fs::read(&csv_p).unwrap();
+            assert!(csv_raw.starts_with(&[0xEF, 0xBB, 0xBF]));
+
+            let rep: Value =
+                serde_json::from_str(&std::fs::read_to_string(&json_p).unwrap()).unwrap();
+            let tot = rep["summary"]["total_tie_ins"].as_u64().unwrap_or(0);
+            assert!(tot >= 2, "{gname} must extract >= 2 tie-ins, got {tot}");
+
+            let _ = app.run_command_line("PIDTIEIN NEXT ALLTABS");
+            let cur_tab = app.active_tab;
+            assert!(
+                !app.tabs[cur_tab].scene.selected_entities().is_empty(),
+                "PIDTIEIN NEXT ALLTABS must select target tie-in entity"
+            );
+
+            let _ = std::fs::remove_file(&json_p);
+            let _ = std::fs::remove_file(&csv_p);
+
+            out_groups.push(json!({
+                "group": gname,
+                "sha256_prefixes": shas,
+                "total_tie_ins": rep["summary"]["total_tie_ins"],
+                "explicit_callouts_count": rep["summary"]["explicit_callouts_count"],
+                "battery_limit_opc_count": rep["summary"]["battery_limit_opc_count"],
+                "dbb_or_blind_ready_count": rep["summary"]["dbb_or_blind_ready_count"],
+                "single_valve_count": rep["summary"]["single_valve_count"],
+                "unisolated_hazard_count": rep["summary"]["unisolated_hazard_count"],
+            }));
+        }
+
+        std::fs::write(
+            out_dir.join("real175_summary.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()
+            ),
         )
         .unwrap();
     }

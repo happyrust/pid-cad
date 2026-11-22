@@ -2552,3 +2552,41 @@
 | `scripts\fmt-newhunks.ps1` | — | `package.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 64. L3-3 / L3-4 / L3-6 / L6-2（#175）：应用内 P&ID 改扩建碰头接点与装置界区交接清册（Tie-In Schedule `SH/T 3005 / PIP PIC001`）、双阀/盲板正隔离条件核查与巡检命令 `PIDTIEIN` 及 CLI `--export-tieins` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `f3f867945`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{tie_in,mod}.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-22-issue175/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_tiein.txt`、`cli_export_tieins.txt`、`real_out/real175_summary.json`、`fmt_newhunks.txt`、`rust_gates_status.json`） |
+
+### 64.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_175_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidtiein_extracts_explicit_tp_and_battery_limit_tieins_grades_dbb_blind_single_and_hazard_isolation_and_steps_camera`（构造跨双标签页的：① 显式碰头点 `TP-1751` 串联切断阀 `BV1751` + 8字盲板 `SB-1751` 进入 `V-1751` 判定 `dbb_or_blind_ready`；② 外接管廊界区 `DWG-OSBL-901` 仅单道阀 `GV1752` 判定 `single_valve_shutdown_only`；③ 装置内互逆配对 `OPC` 自动剔除；④ 无阀无盲板直连换热器 `E-1752` 的 `TP-1759` 判定 `unisolated_direct_hazard`），运行按预期在 `tieins.json` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`41 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/tie_in.rs`（`analyze_pid_tie_ins`、`extract_tie_ins_from_path`、`write_pid_tie_in_file`）：统一兼容未升格 `.dxf`/`.dwg`/`.pid` 与已升格 `PID_AUTHOR` 混合态图纸，融合显式碰头标注（`explicit_callout`）与未在装置内配对的外接界区连接符（`battery_limit_opc`），向内串联回溯切断阀与 8字盲板/盲法兰并分级判定 `dbb_or_blind_ready / single_valve_shutdown_only / unisolated_direct_hazard`，导出 `.json` 与 13 列 UTF-8 BOM `.csv` / `.tsv` 标准碰头接点清册；
+  2. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDTIEIN [SUMMARY | ALL | READY | SINGLE | HAZARDS | SERVICE "<介质>" | TAG "<接点号/线号>" | NEXT] [ALLTABS] [EXPORT "<.json|.csv|.tsv>"]`，并在 `examples/pid_convert.rs` 新增 `--export-tieins <PATH>`（真实 SPPID 图单图 CLI 独立提取 `14` 个界区/碰头接点，退出码 `0`）。
+
+### 64.2 真实双标准四图成对跨标签页碰头接点与界区隔离分级实测
+
+| 图纸组 | 样本形态 | 源图 SHA-256 前缀对 | 总碰头/界区接点 | 显式标注 / 外接 OPC | 双阀或阀+盲板正隔离 | 单阀停车隔离 | 无阀直连高危 | `.csv` 导出与 `NEXT` 巡检 |
+|---|---|---|---:|---|---:|---:|---:|---|
+| `SP01 + SP02` | 未升格 SPPID 拆分生产图对 | `2164f88bbb57` + `fc2c812dc182` | **`23`** | `0 / 23` | **`2`** | **`13`** | `8` | **通过** |
+| `LG01 + LG02` | 未升格原生 AutoCAD 存量图对 | `a0f05f81a655` + `28ed389e23cb` | **`4`** | `0 / 4` | **`0`** | **`4`** | `0` | **通过** |
+
+### 64.3 固定门禁读数
+
+| 门禁项 | 改前读数（§63.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,274` 条（`7,175` 过 / `98` 忽略 / `1` 既有 `.pen`） | **`7,276` 条**（**`7,176` 过** / **`99` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图跨标签页碰头接点隔离分级对账），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `tie_in.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |

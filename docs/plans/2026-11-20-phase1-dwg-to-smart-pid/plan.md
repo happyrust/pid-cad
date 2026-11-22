@@ -11,7 +11,7 @@
 | 文件名 | 定位与职责 | 当前状态 |
 |---|---|---|
 | `智能PID平台-阶段一实施方案.md` | 阶段一主执行方案（L0–L6 + LX 逐任务做法、门禁、验收与逐项解决记录） | **已确认并执行中**（已对齐 `main @ 6377fe233` 与 `pid-parse @ a85fa10`） |
-| `智能PID平台-阶段一Issue清单.md` | 阶段一拆单说明、线上 GitHub Issue 映射与逐单解决日志 | **已同步线上 `#106`–`#174`** |
+| `智能PID平台-阶段一Issue清单.md` | 阶段一拆单说明、线上 GitHub Issue 映射与逐单解决日志 | **已同步线上 `#106`–`#175`** |
 | `智能PID平台-阶段一路线图-DWG转智能PID与pid导出.md` | 阶段一总体路线、取舍依据、预检三关与减法送测设计 | **已对齐当前仓库进度并脱敏** |
 | `智能PID平台-样本分析-XML规格与pid结构.md` | 110 对真实 SPPID 样本格式/结构实测规格与 Q1–Q13 答案回填 | **已完成全批 220 份复核与 Q1–Q13 回填** |
 | `03-parse-answers.md` | `L0-8`（[#118](https://github.com/happyrust/pid-cad/issues/118)）对照 `pid-parse @ a85fa10` 源码逐条回答 Q1–Q13（含精确源码路径与行号） | **已完成** |
@@ -20,7 +20,7 @@
 | `06-lx-compliance-and-codelist-audit.md` | `LX-6 / LX-7 / #117`（[#137](https://github.com/happyrust/pid-cad/issues/137)）备份包分级来源全包实查、`.pid` 保留流够用性台账与书面合规边界确认 | **已完成** |
 | `智能PID平台-内部模型合一分析.md` | `PID_SEMANTICS` 与 `PID_AUTHOR` 升格合一方案及与并行分支 `pid-symbol-identity` 的衔接边界 | **已完成引擎与属性面板双分组落地（见 `promote.rs`、`pidprops.rs`）** |
 | `智能PID平台-资料清单.md` | `RES-01`–`RES-17` 资料清点、环境变量约定与缺口降级策略（`L0-1`） | **已完成清点登记** |
-| `readings.md` | 阶段一门禁基线与各单先红后绿、真实样本实测读数账本 | **持续更新（已记 §1–§63）** |
+| `readings.md` | 阶段一门禁基线与各单先红后绿、真实样本实测读数账本 | **持续更新（已记 §1–§64）** |
 
 ---
 
@@ -93,5 +93,6 @@
 | `L6-1 / L6-2 / L6-3 / L3-6 / L4-6` 升级一站式数字化移交总打包命令 `PIDPACKAGE v4` 及 CLI `--export-package` 十表三审 44 文件全套 EPC 交付与 `API 520` 安全红线门禁闭环 | [#171](https://github.com/happyrust/pid-cad/issues/171) | **已完成 · 十表三审 44 文件全套 EPC 移交包与 CSO 门禁闭环**（2026-11-22） | 提交 **`f1dd519fb`**：升级 `src/io/pid_convert/package.rs`、`src/app/commands/pidprops.rs` 与 `examples/pid_convert.rs`（`schema_version = 4`），将 `08_equipment_schedule` 与 `09_relief_devices` 及未铅封截断阀 `STRICT` 阻断门禁纳入一站式移交包（齐备 `00..09` 十套清册 + 三审底稿）；4 张真实成对图纸一次产出 `44` 个交付文件（`4,408,764` B）全过 SHA-256 密码学门禁，见 `readings.md` §60 |
 | `L3-2 / L3-6 / L6-2` 应用内 P&ID 安全仪表系统联锁因果矩阵（SIS / ESD Cause & Effect Matrix `IEC 61511`）提取、触发→逻辑→切断执行链完整性校核与巡检命令 `PIDCAUSE` 及 CLI `--export-cause-effect` 闭环 | [#172](https://github.com/happyrust/pid-cad/issues/172) | **已完成 · 安全联锁因果矩阵与完整性校核闭环**（2026-11-22） | 提交 **`013d01da8`**：新增 `src/io/pid_convert/cause_effect.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDCAUSE`）与 `examples/pid_convert.rs`（`--export-cause-effect`）；双通道并查集串联触发源、逻辑块、切断阀/停泵与阀位回讯，4 张真实成对图纸提取 `18` 条安全联锁（完整闭环 `18` 条）全过，见 `readings.md` §61 |
 | `L3-2 / L3-6 / L6-2` 应用内 P&ID 自控仪表索引与 DCS/SIS 硬件 I/O 点数统计清册（SH/T 3005 / HG/T 20507）、20% 备用卡件裕量核算、取源连接校核及巡检命令 `PIDIO` 与 CLI `--export-io` 闭环 | [#173](https://github.com/happyrust/pid-cad/issues/173) | **已完成 · 仪表索引与 DCS/SIS 机柜 I/O 点数核算闭环**（2026-11-22） | 提交 **`0d2ac68a4`**：新增 `src/io/pid_convert/io_list.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDIO`）与 `examples/pid_convert.rs`（`--export-io`）；剥离软功能与就地表并消除 `LY+LV` 重复计点，4 张真实成对图纸索引 `177` 台仪表/执行元件、核算净硬件通道 `95` 点全过，见 `readings.md` §62 |
-| `L6-1 / L6-2 / L6-3 / L3-6 / L4-6` 升级一站式数字化移交总打包命令 `PIDPACKAGE v5` 及 CLI `--export-package` 十一表四审 48 文件全套 EPC 交付与 `IEC 61511` 安全联锁残缺阻断门禁闭环 | [#174](https://github.com/happyrust/pid-cad/issues/174) | **已完成 · 十一表四审 48 文件全套 EPC 移交包与 SIS 门禁闭环**（2026-11-22） | 升级 `src/io/pid_convert/package.rs`、`src/app/commands/pidprops.rs` 与 `examples/pid_convert.rs`（`schema_version = 5`），将 `10_instrument_io_schedule`、`06_sis_cause_effect_matrix` 及安全联锁残缺 `STRICT` 阻断门禁纳入一站式移交包；4 张真实成对图纸一次产出 `48` 个交付文件（`4,528,922` B）全过 SHA-256 密码学门禁，见 `readings.md` §63 |
+| `L6-1 / L6-2 / L6-3 / L3-6 / L4-6` 升级一站式数字化移交总打包命令 `PIDPACKAGE v5` 及 CLI `--export-package` 十一表四审 48 文件全套 EPC 交付与 `IEC 61511` 安全联锁残缺阻断门禁闭环 | [#174](https://github.com/happyrust/pid-cad/issues/174) | **已完成 · 十一表四审 48 文件全套 EPC 移交包与 SIS 门禁闭环**（2026-11-22） | 提交 **`f3f867945`**：升级 `src/io/pid_convert/package.rs`、`src/app/commands/pidprops.rs` 与 `examples/pid_convert.rs`（`schema_version = 5`），将 `10_instrument_io_schedule`、`06_sis_cause_effect_matrix` 及安全联锁残缺 `STRICT` 阻断门禁纳入一站式移交包；4 张真实成对图纸一次产出 `48` 个交付文件（`4,528,922` B）全过 SHA-256 密码学门禁，见 `readings.md` §63 |
+| `L3-3 / L3-4 / L3-6 / L6-2` 应用内 P&ID 改扩建碰头接点与装置界区交接清册（Tie-In Schedule `SH/T 3005 / PIP PIC001`）、双阀/盲板正隔离条件核查与巡检命令 `PIDTIEIN` 及 CLI `--export-tieins` 闭环 | [#175](https://github.com/happyrust/pid-cad/issues/175) | **已完成 · 碰头接点清册与正隔离分级闭环**（2026-11-22） | 新增 `src/io/pid_convert/tie_in.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDTIEIN`）与 `examples/pid_convert.rs`（`--export-tieins`）；融合显式 `TP-*` 标注与外接界区 `OPC` 评估三档正隔离就绪状态，4 张真实成对图纸提取 `27` 个交接点（带阀/盲板隔离 `19` 个）全过，见 `readings.md` §64 |
 | `.sym` 参考数据预览（关联） | [#116](https://github.com/happyrust/pid-cad/issues/116) | **由并行分支推进中** | 正在 `pid-symbol-on-main` 工作树推进 `pid_backup_browser/symbol_preview.rs`，严格避让 |
