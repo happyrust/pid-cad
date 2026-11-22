@@ -42,7 +42,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDSPEC",
         "PIDPACKAGE",
         "PIDRENUM",
-        "PIDHAZOP"
+        "PIDHAZOP",
+        "PIDUTILITY"
     ]
 });
 
@@ -307,6 +308,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidhazop_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidutility_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -3553,6 +3557,271 @@ impl OpenCADStudio {
             other => {
                 self.command_line.push_error(&format!(
                     "PIDHAZOP: 未知子命令 {other}（支持 SUMMARY / ALL / UNPROTECTED / PROTECTED / NODE / NEXT / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
+
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidutility_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            analyze_pid_utilities_and_interfaces, write_pid_utility_file, OpcSheetInput,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDUTILITY") {
+            return None;
+        }
+
+        let mut action: Option<String> = None;
+        let mut service_query: Option<String> = None;
+        let mut all_tabs = false;
+        let mut export_path: Option<std::path::PathBuf> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            let up = tok.to_ascii_uppercase();
+            match up.as_str() {
+                "ALLTABS" => {
+                    all_tabs = true;
+                    idx += 1;
+                }
+                "SUMMARY" | "ALL" | "UTILITIES" | "BATTERYLIMIT" | "NEXT" => {
+                    action = Some(up);
+                    idx += 1;
+                }
+                "SERVICE" => {
+                    let Some(q) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDUTILITY SERVICE: 缺少介质代号（如 N2、LS、CW）。");
+                        return Some(Task::none());
+                    };
+                    action = Some("SERVICE".to_string());
+                    service_query = Some(q.to_ascii_uppercase());
+                    idx += 2;
+                }
+                "EXPORT" => {
+                    let Some(next_tok) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDUTILITY EXPORT: 缺少输出文件路径（.json/.csv/.tsv）。");
+                        return Some(Task::none());
+                    };
+                    export_path = Some(std::path::PathBuf::from(next_tok));
+                    idx += 2;
+                }
+                _ => {
+                    if action.is_none() {
+                        action = Some("SERVICE".to_string());
+                        service_query = Some(up);
+                    }
+                    idx += 1;
+                }
+            }
+        }
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<OpcSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+
+        let rep = analyze_pid_utilities_and_interfaces(&sheet_inputs);
+
+        if let Some(ref out_p) = export_path {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(err) = write_pid_utility_file(&rep, out_p) {
+                self.command_line
+                    .push_error(&format!("PIDUTILITY EXPORT: {err}"));
+                return Some(Task::none());
+            }
+        }
+
+        let eff_action = action.as_deref().unwrap_or("SUMMARY");
+        match eff_action {
+            "SUMMARY" => {
+                self.command_line.push_output(&format!(
+                    "PIDUTILITY: 扫描图纸={} | 流体介质={}（公用工程={}，主工艺={}）| 标记管线={} | 界区外接接口={}（公用工程接口={}）。",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_services,
+                    rep.summary.utility_services_count,
+                    rep.summary.process_services_count,
+                    rep.summary.labeled_pipelines_count,
+                    rep.summary.battery_limit_count,
+                    rep.summary.utility_battery_limits,
+                ));
+            }
+            "ALL" | "UTILITIES" | "SERVICE" => {
+                let mut by_tab: std::collections::BTreeMap<usize, Vec<document::Handle>> =
+                    std::collections::BTreeMap::new();
+                let mut matched_svcs = 0usize;
+                for sg in &rep.service_groups {
+                    let keep = match eff_action {
+                        "UTILITIES" => sg.is_utility,
+                        "SERVICE" => service_query
+                            .as_deref()
+                            .is_some_and(|q| sg.fluid_code.eq_ignore_ascii_case(q)),
+                        _ => true,
+                    };
+                    if !keep {
+                        continue;
+                    }
+                    matched_svcs += 1;
+                    for (&ti, hs) in &sg.handles_by_tab {
+                        let dst = by_tab.entry(ti).or_default();
+                        for &h in hs {
+                            if !dst.contains(&h) {
+                                dst.push(h);
+                            }
+                        }
+                    }
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                let mut sel_cnt = 0usize;
+                for (&ti, hs) in &by_tab {
+                    if ti < self.tabs.len() && !hs.is_empty() {
+                        self.tabs[ti].scene.select_entities(hs);
+                        sel_cnt += hs.len();
+                    }
+                }
+                if let Some(cur_hs) = by_tab.get(&self.active_tab).filter(|h| !h.is_empty()) {
+                    let _ = self.tabs[self.active_tab].scene.zoom_to_entities(cur_hs);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDUTILITY {eff_action}: 匹配 {matched_svcs} 类介质，跨打开图纸高亮 {sel_cnt} 个管段图元。"
+                ));
+            }
+            "BATTERYLIMIT" => {
+                let mut by_tab: std::collections::BTreeMap<usize, Vec<document::Handle>> =
+                    std::collections::BTreeMap::new();
+                for bl in &rep.battery_limits {
+                    let dst = by_tab.entry(bl.tab_index).or_default();
+                    for &h in &bl.member_handles {
+                        if !dst.contains(&h) {
+                            dst.push(h);
+                        }
+                    }
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                let mut sel_cnt = 0usize;
+                for (&ti, hs) in &by_tab {
+                    if ti < self.tabs.len() && !hs.is_empty() {
+                        self.tabs[ti].scene.select_entities(hs);
+                        sel_cnt += hs.len();
+                    }
+                }
+                if let Some(cur_hs) = by_tab.get(&self.active_tab).filter(|h| !h.is_empty()) {
+                    let _ = self.tabs[self.active_tab].scene.zoom_to_entities(cur_hs);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDUTILITY BATTERYLIMIT: 匹配 {} 个界区接口，高亮 {} 个图元。",
+                    rep.battery_limits.len(),
+                    sel_cnt
+                ));
+            }
+            "NEXT" => {
+                if rep.battery_limits.is_empty() {
+                    self.command_line
+                        .push_output("PIDUTILITY NEXT: 未检出外接界区接口（Battery Limit）。");
+                    return Some(self.finish_dispatch(cmd));
+                }
+                let cur_tab = self.active_tab;
+                let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[cur_tab]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                let cur_pos = rep
+                    .battery_limits
+                    .iter()
+                    .position(|bl| bl.tab_index == cur_tab && sel_set.contains(&bl.primary_handle));
+                let next_idx = cur_pos
+                    .map(|p| (p + 1) % rep.battery_limits.len())
+                    .unwrap_or(0);
+                let chosen = &rep.battery_limits[next_idx];
+                let dest_tab = chosen.tab_index;
+
+                if dest_tab < self.tabs.len() && dest_tab != self.active_tab {
+                    let _ = self.update(Message::TabSwitch(dest_tab));
+                    self.active_tab = dest_tab;
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                if dest_tab < self.tabs.len() {
+                    self.tabs[dest_tab]
+                        .scene
+                        .select_entities(&chosen.member_handles);
+                    let zoomed = self.tabs[dest_tab]
+                        .scene
+                        .zoom_to_entities(&chosen.member_handles);
+                    if !zoomed {
+                        let mut cam = self.tabs[dest_tab].scene.camera.borrow_mut();
+                        let z = cam.target.z;
+                        cam.target = glam::DVec3::new(chosen.x, chosen.y, z);
+                    }
+                    self.refresh_properties();
+                }
+                self.command_line.push_output(&format!(
+                    "PIDUTILITY NEXT [{}/{}]: {} -> {}（{}，规格 {} / {}）。",
+                    next_idx + 1,
+                    rep.battery_limits.len(),
+                    chosen.interface_id,
+                    chosen.external_target,
+                    chosen.drawing_code,
+                    chosen.nominal_diameter,
+                    chosen.piping_spec,
+                ));
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDUTILITY: 未知子命令 {other}（支持 SUMMARY / ALL / UTILITIES / BATTERYLIMIT / SERVICE / NEXT / EXPORT）。"
                 ));
                 return Some(Task::none());
             }
@@ -10189,6 +10458,351 @@ mod tests {
 
         std::fs::write(
             out_dir.join("real160_summary.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()
+            ),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidutility_classifies_utility_services_extracts_battery_limits_with_boundary_valves_and_steps_camera(
+    ) {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let mut app = app();
+
+        // Tab 1: DWG-161-01.dxf with OSBL Nitrogen utility header (50-N2-16101-CS150 + BV16101) and internal paired PG process line
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-161-01.dxf".to_string();
+        let (n2_pipe_h, pg_pipe_h) = {
+            let doc = &mut app.tabs[tab1].scene.document;
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-161-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            // External Battery-Limit OPC DWG-OSBL-901 -> (46..97, 200) -> BV16101 -> (103..180, 200) labeled 50-N2-16101-CS150
+            let mut bl1 = Insert::new("_OFF-UNIT SQ", Vector3::new(40.0, 200.0, 0.0));
+            bl1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bl1)).unwrap();
+            let mut blt1 =
+                Text::with_value("DWG-OSBL-901", Vector3::new(30.0, 199.0, 0.0)).with_height(2.5);
+            blt1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(blt1)).unwrap();
+
+            let mut np1 = Line::from_points(
+                Vector3::new(46.0, 200.0, 0.0),
+                Vector3::new(97.0, 200.0, 0.0),
+            );
+            np1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(np1)).unwrap();
+
+            let mut bv1 = Insert::new("BALL VALVE TYPE 2", Vector3::new(100.0, 200.0, 0.0));
+            bv1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bv1)).unwrap();
+            let mut bvt1 =
+                Text::with_value("BV16101", Vector3::new(96.0, 206.0, 0.0)).with_height(2.5);
+            bvt1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(bvt1)).unwrap();
+
+            let mut np2 = Line::from_points(
+                Vector3::new(103.0, 200.0, 0.0),
+                Vector3::new(185.0, 200.0, 0.0),
+            );
+            np2.common.layer = "1".to_string();
+            let n2_pipe_h = doc.add_entity(document::EntityType::Line(np2)).unwrap();
+            let mut nlbl = Text::with_value("50-N2-16101-CS150", Vector3::new(130.0, 203.0, 0.0))
+                .with_height(2.5);
+            nlbl.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(nlbl)).unwrap();
+
+            // Internal paired process line 100-PG-16102-CS150 -> DWG-161-02 (must NOT be counted as battery limit)
+            let mut pp = Line::from_points(
+                Vector3::new(80.0, 320.0, 0.0),
+                Vector3::new(254.0, 320.0, 0.0),
+            );
+            pp.common.layer = "1".to_string();
+            let pg_pipe_h = doc.add_entity(document::EntityType::Line(pp)).unwrap();
+            let mut plbl = Text::with_value("100-PG-16102-CS150", Vector3::new(140.0, 323.0, 0.0))
+                .with_height(2.5);
+            plbl.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(plbl)).unwrap();
+
+            let mut opc_in1 = Insert::new("_OFF-UNIT SQ", Vector3::new(260.0, 320.0, 0.0));
+            opc_in1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc_in1))
+                .unwrap();
+            let mut opct1 =
+                Text::with_value("DWG-161-02", Vector3::new(250.0, 319.0, 0.0)).with_height(2.5);
+            opct1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(opct1)).unwrap();
+
+            (n2_pipe_h, pg_pipe_h)
+        };
+
+        // Tab 2: DWG-161-02.dxf with paired PG continuation + OSBL Low-Pressure Steam header (80-LS-16103-CS300 + BV16103)
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-161-02.dxf".to_string();
+        let (ls_pipe_h, bl_ls_h) = {
+            let doc = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-161-02", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut opc_in2 = Insert::new("_OFF-UNIT SQ", Vector3::new(100.0, 320.0, 0.0));
+            opc_in2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc_in2))
+                .unwrap();
+            let mut opct2 =
+                Text::with_value("DWG-161-01", Vector3::new(90.0, 319.0, 0.0)).with_height(2.5);
+            opct2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(opct2)).unwrap();
+
+            let mut pp2 = Line::from_points(
+                Vector3::new(106.0, 320.0, 0.0),
+                Vector3::new(200.0, 320.0, 0.0),
+            );
+            pp2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pp2)).unwrap();
+            let mut plbl2 = Text::with_value("100-PG-16102-CS150", Vector3::new(140.0, 323.0, 0.0))
+                .with_height(2.5);
+            plbl2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(plbl2)).unwrap();
+
+            // OSBL Steam header 80-LS-16103-CS300 -> BV16103 -> DWG-OSBL-902
+            let mut sp1 = Line::from_points(
+                Vector3::new(120.0, 460.0, 0.0),
+                Vector3::new(197.0, 460.0, 0.0),
+            );
+            sp1.common.layer = "1".to_string();
+            let ls_pipe_h = doc.add_entity(document::EntityType::Line(sp1)).unwrap();
+            let mut slbl = Text::with_value("80-LS-16103-CS300", Vector3::new(145.0, 463.0, 0.0))
+                .with_height(2.5);
+            slbl.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(slbl)).unwrap();
+
+            let mut bv2 = Insert::new("BALL VALVE TYPE 2", Vector3::new(200.0, 460.0, 0.0));
+            bv2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bv2)).unwrap();
+            let mut bvt2 =
+                Text::with_value("BV16103", Vector3::new(196.0, 466.0, 0.0)).with_height(2.5);
+            bvt2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(bvt2)).unwrap();
+
+            let mut sp2 = Line::from_points(
+                Vector3::new(203.0, 460.0, 0.0),
+                Vector3::new(254.0, 460.0, 0.0),
+            );
+            sp2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(sp2)).unwrap();
+
+            let mut bl2 = Insert::new("_OFF-UNIT SQ", Vector3::new(260.0, 460.0, 0.0));
+            bl2.common.layer = "11".to_string();
+            let bl_ls_h = doc.add_entity(document::EntityType::Insert(bl2)).unwrap();
+            let mut blt2 =
+                Text::with_value("DWG-OSBL-902", Vector3::new(250.0, 459.0, 0.0)).with_height(2.5);
+            blt2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(blt2)).unwrap();
+
+            (ls_pipe_h, bl_ls_h)
+        };
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        app.active_tab = tab1;
+
+        let tmp = std::env::temp_dir().join(format!("ocs_pidutility_161_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let ut_json = tmp.join("utility.json");
+        let ut_csv = tmp.join("utility.csv");
+        let _ = app.run_command_line(&format!(
+            "PIDUTILITY ALLTABS EXPORT \"{}\"",
+            ut_json.display()
+        ));
+        assert!(
+            ut_json.is_file(),
+            "PIDUTILITY EXPORT must write utility.json"
+        );
+        let _ = app.run_command_line(&format!(
+            "PIDUTILITY SUMMARY ALLTABS EXPORT \"{}\"",
+            ut_csv.display()
+        ));
+        let csv_raw = std::fs::read_to_string(&ut_csv).unwrap();
+        assert!(
+            csv_raw.starts_with('\u{feff}')
+                && csv_raw.contains("SERVICE_GROUP")
+                && csv_raw.contains("BATTERY_LIMIT")
+        );
+
+        let rep: Value = serde_json::from_str(&std::fs::read_to_string(&ut_json).unwrap()).unwrap();
+        assert_eq!(rep["summary"]["utility_services_count"].as_u64(), Some(2));
+        assert_eq!(rep["summary"]["process_services_count"].as_u64(), Some(1));
+        assert_eq!(rep["summary"]["battery_limit_count"].as_u64(), Some(2));
+
+        let bls = rep["battery_limits"].as_array().unwrap();
+        let bl_n2 = bls
+            .iter()
+            .find(|b| b["fluid_code"].as_str() == Some("N2"))
+            .expect("must have N2 battery limit");
+        assert_eq!(bl_n2["nominal_diameter"].as_str(), Some("50 mm"));
+        assert_eq!(bl_n2["piping_spec"].as_str(), Some("CS150"));
+        assert_eq!(bl_n2["nearest_valve_or_meter"].as_str(), Some("BV16101"));
+
+        let bl_ls = bls
+            .iter()
+            .find(|b| b["fluid_code"].as_str() == Some("LS"))
+            .expect("must have LS battery limit");
+        assert_eq!(bl_ls["nominal_diameter"].as_str(), Some("80 mm"));
+        assert_eq!(bl_ls["piping_spec"].as_str(), Some("CS300"));
+        assert_eq!(bl_ls["nearest_valve_or_meter"].as_str(), Some("BV16103"));
+
+        // PIDUTILITY UTILITIES ALLTABS selects utility lines (N2 + LS) and excludes process line PG
+        let _ = app.run_command_line("PIDUTILITY UTILITIES ALLTABS");
+        assert!(has_sel(&app, tab1, n2_pipe_h));
+        assert!(has_sel(&app, tab2, ls_pipe_h));
+        assert!(!has_sel(&app, tab1, pg_pipe_h));
+
+        // PIDUTILITY SERVICE N2 ALLTABS selects only N2
+        let _ = app.run_command_line("PIDUTILITY SERVICE N2 ALLTABS");
+        assert!(has_sel(&app, tab1, n2_pipe_h));
+        assert!(!has_sel(&app, tab2, ls_pipe_h));
+
+        // Stateless NEXT steps across battery-limit interfaces and switches to Tab 2
+        let mut visited_tab2_bl = false;
+        for _ in 0..2 {
+            let _ = app.run_command_line("PIDUTILITY NEXT ALLTABS");
+            if app.active_tab == tab2 && has_sel(&app, tab2, bl_ls_h) {
+                visited_tab2_bl = true;
+            }
+        }
+        assert!(
+            visited_tab2_bl,
+            "PIDUTILITY NEXT ALLTABS must step to LS battery-limit interface on Tab 2"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads 4 real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into OpenCADStudio and verifies PIDUTILITY ALLTABS utility service classification, battery-limit tie-in extraction, and NEXT stepping"]
+    fn real_multi_tab_pidutility_services_and_battery_limit_audit() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sp_raw) = std::env::var("OCS_PID_REAL161_SPPID_PAIR") else {
+            println!("OCS_PID_REAL161_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(lg_raw) = std::env::var("OCS_PID_REAL161_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL161_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL161_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real161"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sp_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sp_raw).collect();
+        let lg_paths: Vec<std::path::PathBuf> = std::env::split_paths(&lg_raw).collect();
+        assert_eq!(sp_paths.len(), 2);
+        assert_eq!(lg_paths.len(), 2);
+
+        let groups = [
+            ("SP01_SP02", "sppid_pair", &sp_paths),
+            ("LG01_LG02", "legacy_autocad_pair", &lg_paths),
+        ];
+
+        let mut out_groups = Vec::new();
+        for (gid, kind, pair) in &groups {
+            let mut sha_pair = Vec::new();
+            let mut app = app();
+            for (pi, p) in pair.iter().enumerate() {
+                let sha_pfx =
+                    format!("{:x}", Sha256::digest(std::fs::read(p).unwrap()))[..12].to_string();
+                sha_pair.push(sha_pfx);
+                let ti = if pi == 0 {
+                    app.active_tab
+                } else {
+                    let _ = app.update(Message::TabNew);
+                    app.active_tab
+                };
+                app.tabs[ti].scene.document = crate::io::load_file(p).unwrap();
+                app.tabs[ti].tab_title = format!("{gid}_{}.dxf", pi + 1);
+            }
+
+            let ut_json = out_dir.join(format!("{gid}_utility.json"));
+            let ut_csv = out_dir.join(format!("{gid}_utility.csv"));
+            let _ = app.run_command_line(&format!(
+                "PIDUTILITY ALLTABS EXPORT \"{}\"",
+                ut_json.display()
+            ));
+            let _ = app.run_command_line(&format!(
+                "PIDUTILITY SUMMARY ALLTABS EXPORT \"{}\"",
+                ut_csv.display()
+            ));
+            let csv_txt = std::fs::read_to_string(&ut_csv).unwrap();
+            assert!(csv_txt.starts_with('\u{feff}') && csv_txt.contains("RecordKind,IdOrService"));
+            let rep: Value =
+                serde_json::from_str(&std::fs::read_to_string(&ut_json).unwrap()).unwrap();
+            let _ = std::fs::remove_file(&ut_json);
+            let _ = std::fs::remove_file(&ut_csv);
+
+            assert!(
+                rep["summary"]["total_services"].as_u64().unwrap_or(0) >= 1,
+                "{gid} must classify >= 1 fluid service"
+            );
+            assert!(
+                rep["summary"]["battery_limit_count"].as_u64().unwrap_or(0) >= 1,
+                "{gid} must extract >= 1 external battery-limit interface"
+            );
+
+            let _ = app.run_command_line("PIDUTILITY NEXT ALLTABS");
+            assert!(
+                !app.tabs[app.active_tab]
+                    .scene
+                    .selected_entities()
+                    .is_empty(),
+                "PIDUTILITY NEXT ALLTABS must select battery-limit interface entities"
+            );
+
+            out_groups.push(json!({
+                "group": gid,
+                "kind": kind,
+                "sha256_prefixes": sha_pair,
+                "sheets_scanned": rep["summary"]["sheets_scanned"],
+                "total_services": rep["summary"]["total_services"],
+                "utility_services_count": rep["summary"]["utility_services_count"],
+                "process_services_count": rep["summary"]["process_services_count"],
+                "labeled_pipelines_count": rep["summary"]["labeled_pipelines_count"],
+                "utility_pipelines_count": rep["summary"]["utility_pipelines_count"],
+                "battery_limit_count": rep["summary"]["battery_limit_count"],
+                "utility_battery_limits": rep["summary"]["utility_battery_limits"],
+            }));
+        }
+
+        std::fs::write(
+            out_dir.join("real161_summary.json"),
             format!(
                 "{}\n",
                 serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()

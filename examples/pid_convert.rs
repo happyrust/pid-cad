@@ -17,8 +17,9 @@ use std::path::PathBuf;
 use OpenCADStudio::io::pid_convert::{
     convert_path_to_dir, diff_pid_files, export_handover_package_from_path,
     extract_bom_from_batch_dir, extract_hazop_from_path, extract_loops_from_batch_dir,
-    save_cad_file_as_binary_dwg, write_bom_schedule_file, write_pid_diff_file,
-    write_pid_hazop_file, write_pid_loops_file, ConvertOptions, PackageOptions,
+    extract_utilities_from_path, save_cad_file_as_binary_dwg, write_bom_schedule_file,
+    write_pid_diff_file, write_pid_hazop_file, write_pid_loops_file, write_pid_utility_file,
+    ConvertOptions, PackageOptions,
 };
 
 struct CliArgs {
@@ -34,6 +35,7 @@ struct CliArgs {
     export_schedule: Option<PathBuf>,
     export_loops: Option<PathBuf>,
     export_hazop: Option<PathBuf>,
+    export_utilities: Option<PathBuf>,
     export_package: Option<PathBuf>,
     strict_gate: bool,
     save_dwg: Option<PathBuf>,
@@ -52,6 +54,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut export_schedule: Option<PathBuf> = None;
     let mut export_loops: Option<PathBuf> = None;
     let mut export_hazop: Option<PathBuf> = None;
+    let mut export_utilities: Option<PathBuf> = None;
     let mut export_package: Option<PathBuf> = None;
     let mut strict_gate = false;
     let mut save_dwg: Option<PathBuf> = None;
@@ -101,6 +104,12 @@ fn parse_args() -> Result<CliArgs, String> {
                 export_hazop = Some(PathBuf::from(
                     it.next()
                         .ok_or("--export-hazop requires an output path (.csv/.tsv/.json)")?,
+                ));
+            }
+            "--export-utilities" => {
+                export_utilities = Some(PathBuf::from(
+                    it.next()
+                        .ok_or("--export-utilities requires an output path (.csv/.tsv/.json)")?,
                 ));
             }
             "--export-package" => {
@@ -156,6 +165,7 @@ fn parse_args() -> Result<CliArgs, String> {
         && diff_with.is_none()
         && export_package.is_none()
         && export_hazop.is_none()
+        && export_utilities.is_none()
     {
         return Err(
             "--out <dir> (or --diff-with <baseline> or --export-package <dir>) is required"
@@ -175,6 +185,7 @@ fn parse_args() -> Result<CliArgs, String> {
         export_schedule,
         export_loops,
         export_hazop,
+        export_utilities,
         export_package,
         strict_gate,
         save_dwg,
@@ -211,6 +222,34 @@ fn main() {
         verify_plot_pdf: args.verify_plot,
         ..Default::default()
     };
+
+    if let Some(ref ut_out) = args.export_utilities {
+        match extract_utilities_from_path(&effective_input)
+            .and_then(|rep| write_pid_utility_file(&rep, ut_out).map(|()| rep))
+        {
+            Ok(rep) => {
+                println!(
+                    "pid_utility: sheets={} services={} utility_services={} pipelines={} battery_limits={}",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_services,
+                    rep.summary.utility_services_count,
+                    rep.summary.labeled_pipelines_count,
+                    rep.summary.battery_limit_count,
+                );
+                if args.out_dir.is_none()
+                    && args.diff_with.is_none()
+                    && args.export_package.is_none()
+                    && args.export_hazop.is_none()
+                {
+                    return;
+                }
+            }
+            Err(err) => {
+                eprintln!("error: export-utilities failed: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if let Some(ref hz_out) = args.export_hazop {
         match extract_hazop_from_path(&effective_input)

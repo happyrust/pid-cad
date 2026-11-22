@@ -21,6 +21,7 @@ pub mod recognize;
 pub mod renumber;
 pub mod spec_check;
 pub mod trace;
+pub mod utility;
 
 pub use diff::{
     diff_pid_documents, format_pid_diff_delimited, DiffFieldChange, DiffKind, PidDiffItem,
@@ -30,6 +31,14 @@ pub use hazop::{
     analyze_pid_hazop_nodes, format_pid_hazop_delimited, hazop_node_matches_query,
     HazopSafeguardStatus, PidHazopNode, PidHazopReport, PidHazopSummary, HAZOP_CSV_HEADERS,
 };
+pub use utility::{
+    analyze_pid_utilities_and_interfaces, classify_fluid_service, format_pid_utility_delimited,
+    FluidCategory, PidBatteryLimitInterface, PidServiceSummaryRow, PidUtilityReport,
+    PidUtilitySummary, UTILITY_CSV_HEADERS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use utility::{extract_utilities_from_path, write_pid_utility_file};
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use hazop::{extract_hazop_from_path, write_pid_hazop_file};
 pub use loops::{

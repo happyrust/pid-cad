@@ -2005,3 +2005,41 @@
 | `scripts\fmt-newhunks.ps1` | — | `hazop.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 50. L3-3 / L3-4 / L3-6 / L6-2（#161）：应用内 P&ID 公用工程介质分类汇总与装置界区外接接口条件表提取及巡检命令 `PIDUTILITY` 与 CLI `--export-utilities` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `4d759eca2`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{utility,mod}.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-22-issue161/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_utility.txt`、`cli_export_utilities.txt`、`real_out/real161_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
+
+### 50.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_161_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidutility_classifies_utility_services_extracts_battery_limits_with_boundary_valves_and_steps_camera`（构造跨双标签页的外接氮气总管 `50-N2-16101-CS150` + 界区阀 `BV16101`、内部互逆配对主工艺线 `100-PG-16102-CS150` 与外接低压蒸汽总管 `80-LS-16103-CS300` + 界区阀 `BV16103`，验证公用工程/主工艺介质归类、内部互逆 `OPC` 自动豁免、外接界区接口管径/等级及首道关断阀回溯、`UTILITIES / SERVICE` 筛选高亮与 `PIDUTILITY NEXT ALLTABS` 跨标签页聚焦巡检），运行按预期在 `utility.json` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`27 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/utility.rs`（`analyze_pid_utilities_and_interfaces`、`extract_utilities_from_path`、`write_pid_utility_file`）：统一兼容未升格 `.dxf`/`.dwg`/`.pid` 与已升格 `PID_AUTHOR` 模型，基于 `parse_sppid_line_number` 自动归类四大公用工程子系统（蒸汽/凝液、水系统、气/风系统、排污/放空系统）与主工艺介质，筛选指向图集外部的装置界区 `OPC` 接口并沿无歧义管段回溯管线号、公称直径、管道等级及近端首道关断阀/流量仪表，导出 `.json` 与带 UTF-8 BOM 的 `.csv` / `.tsv` 10 列条件表；
+  2. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDUTILITY [SUMMARY | ALL | UTILITIES | BATTERYLIMIT | SERVICE "<介质代码>" | NEXT] [ALLTABS] [EXPORT "<.json|.csv|.tsv>"]`，并在 `examples/pid_convert.rs` 新增 `--export-utilities <PATH>`（真实中位规模 SPPID 图 CLI 独立识别 `6` 类介质与 `16` 个界区外接接口，退出码 `0`）。
+
+### 50.2 真实双标准四图成对跨标签页公用工程统计与装置界区接口对账实测
+
+| 图纸组 | 样本形态 | 源图 SHA-256 前缀对 | 识别介质种类 | 公用工程介质 / 主工艺介质 | 标记管线数 | 界区外接接口数（公用工程接口） | `.csv` 条件表与 `NEXT` 巡检 |
+|---|---|---|---:|---|---:|---:|---|
+| `SP01 + SP02` | 未升格 SPPID 拆分生产图对 | `2164f88bbb57` + `fc2c812dc182` | **`6`** | `0` / `6` | **`37`** | **`23`**（`0`） | **通过** |
+| `LG01 + LG02` | 未升格原生 AutoCAD 存量图对 | `a0f05f81a655` + `28ed389e23cb` | **`1`** | `1` / `0` | **`11`** | **`4`**（`4`） | **通过** |
+
+### 50.3 固定门禁读数
+
+| 门禁项 | 改前读数（§49.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,246` 条（`7,161` 过 / `84` 忽略 / `1` 既有 `.pen`） | **`7,248` 条**（**`7,162` 过** / **`85` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图跨标签页公用工程与界区接口对账），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `utility.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
