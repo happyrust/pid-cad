@@ -2238,3 +2238,41 @@
 | `scripts\fmt-newhunks.ps1` | — | `specialty.rs`、`valve_mto.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 56. L3-3 / L3-4 / L3-6 / L6-2（#167）：应用内 P&ID 工艺与公用工程管线一览表 Master Line List、跨多标签页 `From → To` 起止端追踪与巡检命令 `PIDLINELIST` 及 CLI `--export-lines` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `64bb06648`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{line_list,mod}.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-22-issue167/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_lines.txt`、`cli_export_lines.txt`、`real_out/real167_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
+
+### 56.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_167_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidlinelist_traces_cross_tab_from_to_endpoints_counts_valves_flags_unterminated_and_steps_camera`（构造跨双标签页的机泵 `P-1671 -> BV16701 -> 互逆 OPC -> BV16702 -> 容器 V-1672` 保温管线 `100-PG-16701-CS150-IH`、界区外接蒸汽管线 `OPC:DWG-OSBL-901 -> V-1672` 与孤立悬空管线 `50-N2-16799-CS150`，验证 `From -> To` 动静设备优先级排序、在线阀门计数、`UNTERMINATED / LINE` 跨标签页高亮与 `PIDLINELIST NEXT ALLTABS` 聚焦巡检），运行按预期在 `lines.json` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`33 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/line_list.rs`（`analyze_pid_line_list`、`extract_lines_from_path`、`write_pid_line_list_file`）：统一兼容未升格 `.dxf`/`.dwg`/`.pid` 与已升格 `PID_AUTHOR` 模型，跨互逆 `PIDOPC` 自动聚合同名管线的全部连通管段，向两端自动追踪识别核心设备位号、支管母线（`HDR:*`）与外接界区连接符（`OPC:*`），按「动设备机泵 -> 外接界区 -> 静设备/母线」工程流向顺序排定 `FromEndpoint` 与 `ToEndpoint`，统计在线阀门与特殊件数量并归类 `both_terminated / single_ended / unterminated`，导出 `.json` 与带 UTF-8 BOM 的 `.csv` / `.tsv` 12 列管道命名表；
+  2. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDLINELIST [SUMMARY | ALL | UNTERMINATED | SERVICE "<介质>" | LINE "<线号>" | NEXT] [ALLTABS] [EXPORT "<.json|.csv|.tsv>"]`，并在 `examples/pid_convert.rs` 新增 `--export-lines <PATH>`（真实 SPPID 图 CLI 独立提取 `21` 条管线，退出码 `0`）。
+
+### 56.2 真实双标准四图成对跨标签页管线一览表与 `From → To` 起止端追踪实测
+
+| 图纸组 | 样本形态 | 源图 SHA-256 前缀对 | 总管线数（跨图管线） | `both_terminated` 双端闭环 | `single_ended` 单端接续 | `unterminated` 悬空 | 在线阀门累计 | `.csv` 命名表与 `NEXT` 巡检 |
+|---|---|---|---:|---:|---:|---:|---:|---|
+| `SP01 + SP02` | 未升格 SPPID 拆分生产图对 | `2164f88bbb57` + `fc2c812dc182` | **`37`**（`0`） | **`37`** | `0` | `0` | **`211`** | **通过** |
+| `LG01 + LG02` | 未升格原生 AutoCAD 存量图对 | `a0f05f81a655` + `28ed389e23cb` | **`11`**（`7`） | **`11`** | `0` | `0` | **`99`** | **通过** |
+
+### 56.3 固定门禁读数
+
+| 门禁项 | 改前读数（§55.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,258` 条（`7,167` 过 / `90` 忽略 / `1` 既有 `.pen`） | **`7,260` 条**（**`7,168` 过** / **`91` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图跨标签页管线命名表 `From-To` 对账），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `line_list.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |

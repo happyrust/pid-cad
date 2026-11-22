@@ -14,6 +14,7 @@ pub mod external_props;
 pub mod find;
 pub mod hazop;
 pub mod isolate;
+pub mod line_list;
 pub mod loops;
 pub mod nozzle;
 pub mod opc;
@@ -36,11 +37,19 @@ pub use drawing_index::{
     DrawingIndexStatus, PidDrawingIndexReport, PidDrawingIndexRow, PidDrawingIndexSummary,
     DRAWING_INDEX_CSV_HEADERS,
 };
+pub use line_list::{
+    analyze_pid_line_list, format_pid_line_list_delimited, pipeline_row_matches_query,
+    LineTerminationStatus, PidLineListReport, PidLineListSummary, PidPipelineRow,
+    LINE_LIST_CSV_HEADERS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use line_list::{extract_lines_from_path, write_pid_line_list_file};
 pub use specialty::{
     analyze_pid_specialty_items, classify_specialty_component, format_pid_specialty_delimited,
     PidSpecialtyItem, PidSpecialtyReport, PidSpecialtyRollupRow, PidSpecialtySummary,
     SpecialtyCategory, SpecialtySubtype, SPECIALTY_CSV_HEADERS,
 };
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use specialty::{extract_specialties_from_path, write_pid_specialty_file};
 

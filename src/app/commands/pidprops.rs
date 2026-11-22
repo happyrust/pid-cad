@@ -47,7 +47,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDVALVE",
         "PIDNOZZLE",
         "PIDINDEX",
-        "PIDSPECIALTY"
+        "PIDSPECIALTY",
+        "PIDLINELIST"
     ]
 });
 
@@ -327,6 +328,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidspecialty_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidlinelist_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -4744,6 +4748,258 @@ impl OpenCADStudio {
             other => {
                 self.command_line.push_error(&format!(
                     "PIDSPECIALTY: 未知子命令 {other}（支持 SUMMARY / ALL / SPECIALTIES / REDUCERS / FITTINGS / TYPE / NEXT / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
+
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidlinelist_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            analyze_pid_line_list, pipeline_row_matches_query, write_pid_line_list_file,
+            LineTerminationStatus, OpcSheetInput,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDLINELIST") {
+            return None;
+        }
+
+        let mut action: Option<String> = None;
+        let mut service_query: Option<String> = None;
+        let mut line_query: Option<String> = None;
+        let mut all_tabs = false;
+        let mut export_path: Option<std::path::PathBuf> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            let up = tok.to_ascii_uppercase();
+            match up.as_str() {
+                "ALLTABS" => {
+                    all_tabs = true;
+                    idx += 1;
+                }
+                "SUMMARY" | "ALL" | "UNTERMINATED" | "NEXT" => {
+                    action = Some(up);
+                    idx += 1;
+                }
+                "SERVICE" => {
+                    let Some(q) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDLINELIST SERVICE: 缺少介质代号（如 PG、LS、N2）。");
+                        return Some(Task::none());
+                    };
+                    action = Some("SERVICE".to_string());
+                    service_query = Some(q.to_ascii_uppercase());
+                    idx += 2;
+                }
+                "LINE" => {
+                    let Some(q) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDLINELIST LINE: 缺少管线号或序号关键字。");
+                        return Some(Task::none());
+                    };
+                    action = Some("LINE".to_string());
+                    line_query = Some(q.clone());
+                    idx += 2;
+                }
+                "EXPORT" => {
+                    let Some(next_tok) = tokens.get(idx + 1) else {
+                        self.command_line.push_error(
+                            "PIDLINELIST EXPORT: 缺少输出文件路径（.json/.csv/.tsv）。",
+                        );
+                        return Some(Task::none());
+                    };
+                    export_path = Some(std::path::PathBuf::from(next_tok));
+                    idx += 2;
+                }
+                _ => {
+                    if action.is_none() {
+                        action = Some("LINE".to_string());
+                        line_query = Some(tok.clone());
+                    }
+                    idx += 1;
+                }
+            }
+        }
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<OpcSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+
+        let rep = analyze_pid_line_list(&sheet_inputs);
+
+        if let Some(ref out_p) = export_path {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(err) = write_pid_line_list_file(&rep, out_p) {
+                self.command_line
+                    .push_error(&format!("PIDLINELIST EXPORT: {err}"));
+                return Some(Task::none());
+            }
+        }
+
+        let eff_action = action.as_deref().unwrap_or("SUMMARY");
+        let filtered: Vec<_> = rep
+            .pipelines
+            .iter()
+            .filter(|r| match eff_action {
+                "UNTERMINATED" => r.status == LineTerminationStatus::Unterminated,
+                "SERVICE" => service_query
+                    .as_deref()
+                    .is_some_and(|q| r.fluid_code.eq_ignore_ascii_case(q)),
+                "LINE" => line_query
+                    .as_deref()
+                    .is_some_and(|q| pipeline_row_matches_query(r, q)),
+                _ => true,
+            })
+            .collect();
+
+        match eff_action {
+            "SUMMARY" => {
+                self.command_line.push_output(&format!(
+                    "PIDLINELIST: 扫描图纸={} | 总管线={}（跨图管线={}，双端闭环={}，单端={}，悬空孤立={}）| 在线阀门={}。",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_pipelines,
+                    rep.summary.multi_sheet_pipelines,
+                    rep.summary.both_terminated_count,
+                    rep.summary.single_ended_count,
+                    rep.summary.unterminated_count,
+                    rep.summary.total_inline_valves,
+                ));
+            }
+            "ALL" | "UNTERMINATED" | "SERVICE" | "LINE" => {
+                let mut by_tab: std::collections::BTreeMap<usize, Vec<document::Handle>> =
+                    std::collections::BTreeMap::new();
+                for r in &filtered {
+                    for (&ti, hs) in &r.handles_by_tab {
+                        let dst = by_tab.entry(ti).or_default();
+                        for &h in hs {
+                            if !dst.contains(&h) {
+                                dst.push(h);
+                            }
+                        }
+                    }
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                let mut sel_cnt = 0usize;
+                for (&ti, hs) in &by_tab {
+                    if ti < self.tabs.len() && !hs.is_empty() {
+                        self.tabs[ti].scene.select_entities(hs);
+                        sel_cnt += hs.len();
+                    }
+                }
+                if eff_action == "LINE"
+                    && filtered.len() == 1
+                    && filtered[0].primary_tab < self.tabs.len()
+                    && filtered[0].primary_tab != self.active_tab
+                {
+                    let dt = filtered[0].primary_tab;
+                    let _ = self.update(Message::TabSwitch(dt));
+                    self.active_tab = dt;
+                }
+                if let Some(cur_hs) = by_tab.get(&self.active_tab).filter(|h| !h.is_empty()) {
+                    let _ = self.tabs[self.active_tab].scene.zoom_to_entities(cur_hs);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDLINELIST {eff_action}: 匹配 {} 条管线，跨打开图纸高亮 {sel_cnt} 个图元。",
+                    filtered.len()
+                ));
+            }
+            "NEXT" => {
+                if filtered.is_empty() {
+                    self.command_line
+                        .push_output("PIDLINELIST NEXT: 未找到可巡检的管线图元。");
+                    return Some(self.finish_dispatch(cmd));
+                }
+                let cur_tab = self.active_tab;
+                let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[cur_tab]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                let cur_pos = filtered
+                    .iter()
+                    .position(|r| r.primary_tab == cur_tab && sel_set.contains(&r.primary_handle));
+                let next_idx = cur_pos.map(|p| (p + 1) % filtered.len()).unwrap_or(0);
+                let chosen = filtered[next_idx];
+                let dest_tab = chosen.primary_tab;
+
+                if dest_tab < self.tabs.len() && dest_tab != self.active_tab {
+                    let _ = self.update(Message::TabSwitch(dest_tab));
+                    self.active_tab = dest_tab;
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                if dest_tab < self.tabs.len() {
+                    if let Some(hs) = chosen.handles_by_tab.get(&dest_tab) {
+                        self.tabs[dest_tab].scene.select_entities(hs);
+                        let zoomed = self.tabs[dest_tab].scene.zoom_to_entities(hs);
+                        if !zoomed {
+                            let mut cam = self.tabs[dest_tab].scene.camera.borrow_mut();
+                            let z = cam.target.z;
+                            cam.target = glam::DVec3::new(chosen.x, chosen.y, z);
+                        }
+                    }
+                    self.refresh_properties();
+                }
+                self.command_line.push_output(&format!(
+                    "PIDLINELIST NEXT [{}/{}]: {}（{} -> {}，状态={}）。",
+                    next_idx + 1,
+                    filtered.len(),
+                    chosen.line_number,
+                    chosen.from_endpoint,
+                    chosen.to_endpoint,
+                    chosen.status.as_str(),
+                ));
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDLINELIST: 未知子命令 {other}（支持 SUMMARY / ALL / UNTERMINATED / SERVICE / LINE / NEXT / EXPORT）。"
                 ));
                 return Some(Task::none());
             }
@@ -13268,6 +13524,374 @@ mod tests {
 
         std::fs::write(
             out_dir.join("real166_summary.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()
+            ),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidlinelist_traces_cross_tab_from_to_endpoints_counts_valves_flags_unterminated_and_steps_camera(
+    ) {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let mut app = app();
+
+        // Tab 1: P-1671 -> BV16701 -> 100-PG-16701-CS150-IH -> paired OPC to Tab 2, plus floating 50-N2-16799-CS150
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-167-01.dxf".to_string();
+        let (p_tab1_h, unterm_pipe_h) = {
+            let doc = &mut app.tabs[tab1].scene.document;
+            define_sppid_block(doc, "CENTRIFUGAL PUMP", 8.0, 8.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-167-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut pump = Insert::new("CENTRIFUGAL PUMP", Vector3::new(100.0, 300.0, 0.0));
+            pump.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(pump)).unwrap();
+            let mut pt =
+                Text::with_value("P-1671", Vector3::new(95.0, 308.0, 0.0)).with_height(2.5);
+            pt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(pt)).unwrap();
+
+            let mut p1 = Line::from_points(
+                Vector3::new(104.0, 300.0, 0.0),
+                Vector3::new(147.0, 300.0, 0.0),
+            );
+            p1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p1)).unwrap();
+
+            let mut bv1 = Insert::new("BALL VALVE TYPE 2", Vector3::new(150.0, 300.0, 0.0));
+            bv1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bv1)).unwrap();
+            let mut bvt1 =
+                Text::with_value("BV16701", Vector3::new(146.0, 306.0, 0.0)).with_height(2.5);
+            bvt1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(bvt1)).unwrap();
+
+            let mut p2 = Line::from_points(
+                Vector3::new(153.0, 300.0, 0.0),
+                Vector3::new(254.0, 300.0, 0.0),
+            );
+            p2.common.layer = "1".to_string();
+            let p_tab1_h = doc.add_entity(document::EntityType::Line(p2)).unwrap();
+            let mut ltxt =
+                Text::with_value("100-PG-16701-CS150-IH", Vector3::new(185.0, 303.0, 0.0))
+                    .with_height(2.5);
+            ltxt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(ltxt)).unwrap();
+
+            let mut opc1 = Insert::new("_OFF-UNIT SQ", Vector3::new(260.0, 300.0, 0.0));
+            opc1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc1)).unwrap();
+            let mut oft1 =
+                Text::with_value("DWG-167-02", Vector3::new(250.0, 299.0, 0.0)).with_height(2.5);
+            oft1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(oft1)).unwrap();
+
+            // Unterminated floating line 50-N2-16799-CS150
+            let mut up = Line::from_points(
+                Vector3::new(120.0, 480.0, 0.0),
+                Vector3::new(220.0, 480.0, 0.0),
+            );
+            up.common.layer = "1".to_string();
+            let unterm_pipe_h = doc.add_entity(document::EntityType::Line(up)).unwrap();
+            let mut ulbl = Text::with_value("50-N2-16799-CS150", Vector3::new(145.0, 483.0, 0.0))
+                .with_height(2.5);
+            ulbl.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(ulbl)).unwrap();
+
+            (p_tab1_h, unterm_pipe_h)
+        };
+
+        // Tab 2: return OPC -> BV16702 -> V-1672, plus OSBL 80-LS-16703-CS300 -> V-1672
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-167-02.dxf".to_string();
+        let (p_tab2_h, ls_pipe_h) = {
+            let doc = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "1TO1PARAMETRIC V DRUM", 12.0, 24.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-167-02", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut opc2 = Insert::new("_OFF-UNIT SQ", Vector3::new(100.0, 300.0, 0.0));
+            opc2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc2)).unwrap();
+            let mut oft2 =
+                Text::with_value("DWG-167-01", Vector3::new(90.0, 299.0, 0.0)).with_height(2.5);
+            oft2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(oft2)).unwrap();
+
+            let mut pa = Line::from_points(
+                Vector3::new(106.0, 300.0, 0.0),
+                Vector3::new(177.0, 300.0, 0.0),
+            );
+            pa.common.layer = "1".to_string();
+            let p_tab2_h = doc.add_entity(document::EntityType::Line(pa)).unwrap();
+            let mut la = Text::with_value("100-PG-16701-CS150-IH", Vector3::new(120.0, 303.0, 0.0))
+                .with_height(2.5);
+            la.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(la)).unwrap();
+
+            let mut bv2 = Insert::new("BALL VALVE TYPE 2", Vector3::new(180.0, 300.0, 0.0));
+            bv2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bv2)).unwrap();
+            let mut bvt2 =
+                Text::with_value("BV16702", Vector3::new(176.0, 306.0, 0.0)).with_height(2.5);
+            bvt2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(bvt2)).unwrap();
+
+            let mut pb = Line::from_points(
+                Vector3::new(183.0, 300.0, 0.0),
+                Vector3::new(240.0, 300.0, 0.0),
+            );
+            pb.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pb)).unwrap();
+
+            let mut drum = Insert::new("1TO1PARAMETRIC V DRUM", Vector3::new(248.0, 300.0, 0.0));
+            drum.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(drum)).unwrap();
+            let mut dt =
+                Text::with_value("V-1672", Vector3::new(244.0, 316.0, 0.0)).with_height(2.5);
+            dt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(dt)).unwrap();
+
+            // OSBL Steam line 80-LS-16703-CS300 from DWG-OSBL-901 into V-1672 bottom
+            let mut bl = Insert::new("_OFF-UNIT SQ", Vector3::new(100.0, 180.0, 0.0));
+            bl.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bl)).unwrap();
+            let mut blt =
+                Text::with_value("DWG-OSBL-901", Vector3::new(90.0, 179.0, 0.0)).with_height(2.5);
+            blt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(blt)).unwrap();
+
+            let mut sp1 = Line::from_points(
+                Vector3::new(106.0, 180.0, 0.0),
+                Vector3::new(248.0, 180.0, 0.0),
+            );
+            sp1.common.layer = "1".to_string();
+            let ls_pipe_h = doc.add_entity(document::EntityType::Line(sp1)).unwrap();
+            let mut slbl = Text::with_value("80-LS-16703-CS300", Vector3::new(150.0, 183.0, 0.0))
+                .with_height(2.5);
+            slbl.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(slbl)).unwrap();
+
+            let mut sp2 = Line::from_points(
+                Vector3::new(248.0, 180.0, 0.0),
+                Vector3::new(248.0, 286.0, 0.0),
+            );
+            sp2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(sp2)).unwrap();
+
+            (p_tab2_h, ls_pipe_h)
+        };
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        app.active_tab = tab1;
+
+        let tmp = std::env::temp_dir().join(format!("ocs_pidlinelist_167_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let ll_json = tmp.join("lines.json");
+        let ll_csv = tmp.join("lines.csv");
+        let _ = app.run_command_line(&format!(
+            "PIDLINELIST ALLTABS EXPORT \"{}\"",
+            ll_json.display()
+        ));
+        assert!(
+            ll_json.is_file(),
+            "PIDLINELIST EXPORT must write lines.json"
+        );
+        let _ = app.run_command_line(&format!(
+            "PIDLINELIST SUMMARY ALLTABS EXPORT \"{}\"",
+            ll_csv.display()
+        ));
+        let csv_raw = std::fs::read_to_string(&ll_csv).unwrap();
+        assert!(
+            csv_raw.starts_with('\u{feff}')
+                && csv_raw.contains("P-1671")
+                && csv_raw.contains("V-1672")
+        );
+
+        let rep: Value = serde_json::from_str(&std::fs::read_to_string(&ll_json).unwrap()).unwrap();
+        assert_eq!(rep["summary"]["total_pipelines"].as_u64(), Some(3));
+        assert_eq!(rep["summary"]["both_terminated_count"].as_u64(), Some(2));
+        assert_eq!(rep["summary"]["unterminated_count"].as_u64(), Some(1));
+        assert!(
+            rep["summary"]["multi_sheet_pipelines"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1
+        );
+
+        let lines = rep["pipelines"].as_array().unwrap();
+        let pg_line = lines
+            .iter()
+            .find(|l| l["seq_no"].as_str() == Some("16701"))
+            .expect("must have 16701 pipeline");
+        assert_eq!(pg_line["nominal_diameter"].as_str(), Some("100 mm"));
+        assert_eq!(pg_line["fluid_code"].as_str(), Some("PG"));
+        assert_eq!(pg_line["piping_spec"].as_str(), Some("CS150"));
+        assert_eq!(pg_line["insulation"].as_str(), Some("IH"));
+        assert_eq!(pg_line["inline_valves_count"].as_u64(), Some(2));
+        let ends = [
+            pg_line["from_endpoint"].as_str().unwrap_or(""),
+            pg_line["to_endpoint"].as_str().unwrap_or(""),
+        ];
+        assert!(ends.contains(&"P-1671") && ends.contains(&"V-1672"));
+
+        // Filter UNTERMINATED selects unterm_pipe_h only; LINE 16701 selects across Tab 1 & Tab 2
+        let _ = app.run_command_line("PIDLINELIST UNTERMINATED ALLTABS");
+        assert!(has_sel(&app, tab1, unterm_pipe_h));
+        assert!(!has_sel(&app, tab1, p_tab1_h));
+
+        let _ = app.run_command_line("PIDLINELIST LINE 16701 ALLTABS");
+        assert!(has_sel(&app, tab1, p_tab1_h));
+        assert!(has_sel(&app, tab2, p_tab2_h));
+
+        // Stateless NEXT steps across all 3 lines including Tab 2 steam line
+        let mut visited_tab2 = false;
+        for _ in 0..3 {
+            let _ = app.run_command_line("PIDLINELIST NEXT ALLTABS");
+            if app.active_tab == tab2 && has_sel(&app, tab2, ls_pipe_h) {
+                visited_tab2 = true;
+            }
+        }
+        assert!(
+            visited_tab2,
+            "PIDLINELIST NEXT ALLTABS must visit Tab 2 steam line"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads 4 real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into OpenCADStudio and verifies PIDLINELIST ALLTABS Master Line List From-To tracing and NEXT stepping"]
+    fn real_multi_tab_pidlinelist_cross_sheet_from_to_schedule_audit() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sp_raw) = std::env::var("OCS_PID_REAL167_SPPID_PAIR") else {
+            println!("OCS_PID_REAL167_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(lg_raw) = std::env::var("OCS_PID_REAL167_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL167_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL167_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real167"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sp_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sp_raw).collect();
+        let lg_paths: Vec<std::path::PathBuf> = std::env::split_paths(&lg_raw).collect();
+        assert_eq!(sp_paths.len(), 2);
+        assert_eq!(lg_paths.len(), 2);
+
+        let groups = [
+            ("SP01_SP02", "sppid_pair", &sp_paths),
+            ("LG01_LG02", "legacy_autocad_pair", &lg_paths),
+        ];
+
+        let mut out_groups = Vec::new();
+        for (gid, kind, pair) in &groups {
+            let mut sha_pair = Vec::new();
+            let mut app = app();
+            for (pi, p) in pair.iter().enumerate() {
+                let sha_pfx =
+                    format!("{:x}", Sha256::digest(std::fs::read(p).unwrap()))[..12].to_string();
+                sha_pair.push(sha_pfx);
+                let ti = if pi == 0 {
+                    app.active_tab
+                } else {
+                    let _ = app.update(Message::TabNew);
+                    app.active_tab
+                };
+                app.tabs[ti].scene.document = crate::io::load_file(p).unwrap();
+                app.tabs[ti].tab_title = format!("{gid}_{}.dxf", pi + 1);
+            }
+
+            let ll_json = out_dir.join(format!("{gid}_lines.json"));
+            let ll_csv = out_dir.join(format!("{gid}_lines.csv"));
+            let _ = app.run_command_line(&format!(
+                "PIDLINELIST ALLTABS EXPORT \"{}\"",
+                ll_json.display()
+            ));
+            let _ = app.run_command_line(&format!(
+                "PIDLINELIST SUMMARY ALLTABS EXPORT \"{}\"",
+                ll_csv.display()
+            ));
+            let csv_txt = std::fs::read_to_string(&ll_csv).unwrap();
+            assert!(
+                csv_txt.starts_with('\u{feff}')
+                    && csv_txt.contains("LineNumber,NominalDiameter,FluidCode")
+            );
+            let rep: Value =
+                serde_json::from_str(&std::fs::read_to_string(&ll_json).unwrap()).unwrap();
+            let _ = std::fs::remove_file(&ll_json);
+            let _ = std::fs::remove_file(&ll_csv);
+
+            assert!(
+                rep["summary"]["total_pipelines"].as_u64().unwrap_or(0) >= 5,
+                "{gid} must extract >= 5 pipelines"
+            );
+            assert!(
+                rep["summary"]["both_terminated_count"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    >= 1,
+                "{gid} must resolve From -> To endpoints on >= 1 pipeline"
+            );
+
+            let _ = app.run_command_line("PIDLINELIST NEXT ALLTABS");
+            assert!(
+                !app.tabs[app.active_tab]
+                    .scene
+                    .selected_entities()
+                    .is_empty(),
+                "PIDLINELIST NEXT ALLTABS must select target pipeline entities"
+            );
+
+            out_groups.push(json!({
+                "group": gid,
+                "kind": kind,
+                "sha256_prefixes": sha_pair,
+                "sheets_scanned": rep["summary"]["sheets_scanned"],
+                "total_pipelines": rep["summary"]["total_pipelines"],
+                "multi_sheet_pipelines": rep["summary"]["multi_sheet_pipelines"],
+                "both_terminated_count": rep["summary"]["both_terminated_count"],
+                "single_ended_count": rep["summary"]["single_ended_count"],
+                "unterminated_count": rep["summary"]["unterminated_count"],
+                "total_inline_valves": rep["summary"]["total_inline_valves"],
+            }));
+        }
+
+        std::fs::write(
+            out_dir.join("real167_summary.json"),
             format!(
                 "{}\n",
                 serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()
