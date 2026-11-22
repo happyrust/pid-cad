@@ -11,6 +11,7 @@ pub mod drc;
 pub mod export;
 pub mod external_props;
 pub mod find;
+pub mod hazop;
 pub mod isolate;
 pub mod loops;
 pub mod opc;
@@ -25,11 +26,18 @@ pub use diff::{
     diff_pid_documents, format_pid_diff_delimited, DiffFieldChange, DiffKind, PidDiffItem,
     PidDiffReport, PidDiffSummary, DIFF_CSV_HEADERS,
 };
+pub use hazop::{
+    analyze_pid_hazop_nodes, format_pid_hazop_delimited, hazop_node_matches_query,
+    HazopSafeguardStatus, PidHazopNode, PidHazopReport, PidHazopSummary, HAZOP_CSV_HEADERS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use hazop::{extract_hazop_from_path, write_pid_hazop_file};
 pub use loops::{
     analyze_pid_loops, format_pid_loops_delimited, loop_matches_query, parse_isa_instrument_tag,
     IsaLoopRole, LoopStatus, ParsedIsaTag, PidInstrumentLoop, PidLoopMember, PidLoopReport,
     PidLoopSummary, LOOP_CSV_HEADERS,
 };
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use renumber::write_pid_renumber_file;
 pub use renumber::{

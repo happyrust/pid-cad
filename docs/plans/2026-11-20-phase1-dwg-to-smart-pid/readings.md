@@ -1967,3 +1967,41 @@
 | `scripts\fmt-newhunks.ps1` | — | `renumber.rs`、`mod.rs`、`pidprops.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 49. L3-3 / L3-4 / L3-5 / L3-6 / L6-2（#160）：应用内 P&ID 自动 HAZOP 审查节点划界、设备-管线-自控保护层关联聚合与审查工作底稿导出命令 `PIDHAZOP` 及 CLI `--export-hazop` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `522066c87`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{hazop,mod}.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-22-issue160/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_hazop.txt`、`cli_export_hazop.txt`、`real_out/real160_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
+
+### 49.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_160_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidhazop_partitions_multi_tab_equipment_nodes_links_safeguards_flags_unprotected_and_steps_camera`（构造跨双标签页互逆 `OPC` 的机泵 `P-1601`、下游容器 `V-1602` 与无保护盲区容器 `V-1609`，验证跨图节点划界、相邻设备边界截断防串扰、同 ISA-5.1 回路远传控制器 `PIC-1601` 自动归组、`UNPROTECTED` 盲区筛选高亮与 `PIDHAZOP NEXT ALLTABS` 跨标签页聚焦巡检），运行按预期在 `hazop.json` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`26 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/hazop.rs`（`analyze_pid_hazop_nodes`、`extract_hazop_from_path`、`write_pid_hazop_file`）：统一兼容未升格 `.dxf`/`.dwg`/`.pid` 与已升格 `PID_AUTHOR` 模型，以核心设备为中心跨互逆 `PIDOPC` 自动划定 HAZOP 节点直至相邻设备边界，联动 `analyze_pid_loops` 聚合关联工艺管线、阀门、安全泄放元件与 ISA-5.1 检测/报警/控制保护层，推导 IEC 61882 偏离引导词并导出 `.json` 与带 UTF-8 BOM 的 `.csv` / `.tsv` 11 列 HAZOP 审查工作底稿；
+  2. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDHAZOP [SUMMARY | ALL | UNPROTECTED | PROTECTED | NODE "<设备位号或节点号>" | NEXT] [ALLTABS] [EXPORT "<.json|.csv|.tsv>"]`，并在 `examples/pid_convert.rs` 新增 `--export-hazop <PATH>`（真实中位规模 SPPID 图 CLI 独立导出 `2` 个 HAZOP 审查节点，退出码 `0`）。
+
+### 49.2 真实双标准四图成对跨标签页 HAZOP 节点划界与保护层对账实测
+
+| 图纸组 | 样本形态 | 源图 SHA-256 前缀对 | HAZOP 节点总数 | 跨图节点数 | `Protected` 节点 | `Unprotected` 节点 | 关联工艺管线数 | 关联保护仪表数 | `.csv` 底稿与 `NEXT` 巡检 |
+|---|---|---|---:|---:|---:|---:|---:|---:|---|
+| `SP01 + SP02` | 未升格 SPPID 拆分生产图对 | `2164f88bbb57` + `fc2c812dc182` | **`8`** | **`8`** | **`8`** | `0` | **`37`** | **`91`** | **通过** |
+| `LG01 + LG02` | 未升格原生 AutoCAD 存量图对 | `a0f05f81a655` + `28ed389e23cb` | **`14`** | **`14`** | **`14`** | `0` | **`11`** | **`56`** | **通过** |
+
+### 49.3 固定门禁读数
+
+| 门禁项 | 改前读数（§48.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,244` 条（`7,160` 过 / `83` 忽略 / `1` 既有 `.pen`） | **`7,246` 条**（**`7,161` 过** / **`84` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图跨标签页 HAZOP 节点划界与保护层聚合），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `hazop.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |

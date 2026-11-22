@@ -41,7 +41,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDLOOP",
         "PIDSPEC",
         "PIDPACKAGE",
-        "PIDRENUM"
+        "PIDRENUM",
+        "PIDHAZOP"
     ]
 });
 
@@ -303,6 +304,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidrenum_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidhazop_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -3312,6 +3316,248 @@ impl OpenCADStudio {
             "PIDRENUM: 已重编号 {} 个符号与 {} 条管线（同步画布图元={}）。",
             rep.summary.symbols_renamed, rep.summary.pipelines_renamed, total_synced,
         ));
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidhazop_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            analyze_pid_hazop_nodes, hazop_node_matches_query, write_pid_hazop_file,
+            HazopSafeguardStatus, OpcSheetInput,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDHAZOP") {
+            return None;
+        }
+
+        let mut action: Option<String> = None;
+        let mut node_query: Option<String> = None;
+        let mut all_tabs = false;
+        let mut export_path: Option<std::path::PathBuf> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            let up = tok.to_ascii_uppercase();
+            match up.as_str() {
+                "ALLTABS" => {
+                    all_tabs = true;
+                    idx += 1;
+                }
+                "SUMMARY" | "ALL" | "UNPROTECTED" | "PROTECTED" | "NEXT" => {
+                    action = Some(up);
+                    idx += 1;
+                }
+                "NODE" => {
+                    let Some(q) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDHAZOP NODE: 缺少设备位号或节点编号。");
+                        return Some(Task::none());
+                    };
+                    action = Some("NODE".to_string());
+                    node_query = Some(q.clone());
+                    idx += 2;
+                }
+                "EXPORT" => {
+                    let Some(next_tok) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDHAZOP EXPORT: 缺少输出文件路径（.json/.csv/.tsv）。");
+                        return Some(Task::none());
+                    };
+                    export_path = Some(std::path::PathBuf::from(next_tok));
+                    idx += 2;
+                }
+                _ => {
+                    if action.is_none() {
+                        action = Some("NODE".to_string());
+                        node_query = Some(tok.clone());
+                    }
+                    idx += 1;
+                }
+            }
+        }
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<OpcSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+
+        let rep = analyze_pid_hazop_nodes(&sheet_inputs);
+
+        if let Some(ref out_p) = export_path {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(err) = write_pid_hazop_file(&rep, out_p) {
+                self.command_line
+                    .push_error(&format!("PIDHAZOP EXPORT: {err}"));
+                return Some(Task::none());
+            }
+        }
+
+        let eff_action = action.as_deref().unwrap_or("SUMMARY");
+        let filtered: Vec<_> = rep
+            .nodes
+            .iter()
+            .filter(|nd| {
+                let q_ok = node_query
+                    .as_deref()
+                    .is_none_or(|q| hazop_node_matches_query(nd, q));
+                let st_ok = match eff_action {
+                    "UNPROTECTED" => nd.status == HazopSafeguardStatus::Unprotected,
+                    "PROTECTED" => nd.status == HazopSafeguardStatus::Protected,
+                    _ => true,
+                };
+                q_ok && st_ok
+            })
+            .collect();
+
+        match eff_action {
+            "SUMMARY" => {
+                self.command_line.push_output(&format!(
+                    "PIDHAZOP: 扫描图纸={} | HAZOP节点={}（跨图节点={}，具备保护层={}，盲区无保护={}）| 关联管线={} | 关联保护仪表={}。",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_nodes,
+                    rep.summary.multi_sheet_nodes,
+                    rep.summary.protected_nodes,
+                    rep.summary.unprotected_nodes,
+                    rep.summary.total_linked_pipelines,
+                    rep.summary.total_linked_safeguards,
+                ));
+            }
+            "ALL" | "UNPROTECTED" | "PROTECTED" | "NODE" => {
+                let mut by_tab: std::collections::BTreeMap<usize, Vec<document::Handle>> =
+                    std::collections::BTreeMap::new();
+                for nd in &filtered {
+                    for (&ti, hs) in &nd.handles_by_tab {
+                        let dst = by_tab.entry(ti).or_default();
+                        for &h in hs {
+                            if !dst.contains(&h) {
+                                dst.push(h);
+                            }
+                        }
+                    }
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                let mut sel_cnt = 0usize;
+                for (&ti, hs) in &by_tab {
+                    if ti < self.tabs.len() && !hs.is_empty() {
+                        self.tabs[ti].scene.select_entities(hs);
+                        sel_cnt += hs.len();
+                    }
+                }
+                if eff_action == "NODE"
+                    && filtered.len() == 1
+                    && filtered[0].tab_index < self.tabs.len()
+                    && filtered[0].tab_index != self.active_tab
+                {
+                    let dt = filtered[0].tab_index;
+                    let _ = self.update(Message::TabSwitch(dt));
+                    self.active_tab = dt;
+                }
+                if let Some(cur_hs) = by_tab.get(&self.active_tab).filter(|h| !h.is_empty()) {
+                    let _ = self.tabs[self.active_tab].scene.zoom_to_entities(cur_hs);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDHAZOP {eff_action}: 匹配 {} 个审查节点，跨打开图纸高亮 {} 个图元。",
+                    filtered.len(),
+                    sel_cnt
+                ));
+            }
+            "NEXT" => {
+                if filtered.is_empty() {
+                    self.command_line
+                        .push_output("PIDHAZOP NEXT: 未找到可巡检的 HAZOP 审查节点。");
+                    return Some(self.finish_dispatch(cmd));
+                }
+                let cur_tab = self.active_tab;
+                let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[cur_tab]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                let cur_pos = filtered
+                    .iter()
+                    .position(|nd| nd.tab_index == cur_tab && sel_set.contains(&nd.primary_handle));
+                let next_idx = cur_pos.map(|p| (p + 1) % filtered.len()).unwrap_or(0);
+                let chosen = filtered[next_idx];
+                let dest_tab = chosen.tab_index;
+
+                if dest_tab < self.tabs.len() && dest_tab != self.active_tab {
+                    let _ = self.update(Message::TabSwitch(dest_tab));
+                    self.active_tab = dest_tab;
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                if dest_tab < self.tabs.len() {
+                    if let Some(hs) = chosen.handles_by_tab.get(&dest_tab) {
+                        self.tabs[dest_tab].scene.select_entities(hs);
+                        let zoomed = self.tabs[dest_tab].scene.zoom_to_entities(hs);
+                        if !zoomed {
+                            let mut cam = self.tabs[dest_tab].scene.camera.borrow_mut();
+                            let z = cam.target.z;
+                            cam.target = glam::DVec3::new(chosen.x, chosen.y, z);
+                        }
+                    }
+                    self.refresh_properties();
+                }
+                self.command_line.push_output(&format!(
+                    "PIDHAZOP NEXT [{}/{}]: {} {}（{}，状态={}）。",
+                    next_idx + 1,
+                    filtered.len(),
+                    chosen.node_id,
+                    chosen.equipment_tag,
+                    chosen.primary_drawing,
+                    chosen.status.as_str(),
+                ));
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDHAZOP: 未知子命令 {other}（支持 SUMMARY / ALL / UNPROTECTED / PROTECTED / NODE / NEXT / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
+
         Some(self.finish_dispatch(cmd))
     }
 
@@ -9551,6 +9797,401 @@ mod tests {
             format!(
                 "{}\n",
                 serde_json::to_string_pretty(&json!({ "sheets": rows })).unwrap()
+            ),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidhazop_partitions_multi_tab_equipment_nodes_links_safeguards_flags_unprotected_and_steps_camera(
+    ) {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let mut app = app();
+
+        // Tab 1: DWG-160-01.dxf with protected Pump P-1601 (crosses OPC to Tab 2) and unprotected Drum V-1609
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-160-01.dxf".to_string();
+        let (pump_h, unprot_drum_h) = {
+            let doc = &mut app.tabs[tab1].scene.document;
+            define_sppid_block(doc, "CENTRIFUGAL PUMP", 8.0, 8.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "DCS FUNC ACCESS IN PRIME LOC", 8.0, 8.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+            define_sppid_block(doc, "1TO1PARAMETRIC V DRUM", 12.0, 24.0);
+
+            let mut tb =
+                Text::with_value("DWG-160-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            // Pump P-1601 at (100, 300)
+            let mut pump = Insert::new("CENTRIFUGAL PUMP", Vector3::new(100.0, 300.0, 0.0));
+            pump.common.layer = "10".to_string();
+            let pump_h = doc.add_entity(document::EntityType::Insert(pump)).unwrap();
+            let mut pt =
+                Text::with_value("P-1601", Vector3::new(95.0, 308.0, 0.0)).with_height(2.5);
+            pt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(pt)).unwrap();
+
+            // Discharge line 100-PW-1601-CS150: (104, 300)..(147, 300) -> BV160101 -> (153, 300)..(254, 300) -> OPC
+            let mut p1 = Line::from_points(
+                Vector3::new(104.0, 300.0, 0.0),
+                Vector3::new(147.0, 300.0, 0.0),
+            );
+            p1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p1)).unwrap();
+
+            let mut v1 = Insert::new("BALL VALVE TYPE 2", Vector3::new(150.0, 300.0, 0.0));
+            v1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(v1)).unwrap();
+            let mut vt1 =
+                Text::with_value("BV160101", Vector3::new(146.0, 306.0, 0.0)).with_height(2.5);
+            vt1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(vt1)).unwrap();
+
+            let mut p2 = Line::from_points(
+                Vector3::new(153.0, 300.0, 0.0),
+                Vector3::new(254.0, 300.0, 0.0),
+            );
+            p2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p2)).unwrap();
+            let mut ltxt = Text::with_value("100-PW-1601-CS150", Vector3::new(195.0, 303.0, 0.0))
+                .with_height(2.5);
+            ltxt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(ltxt)).unwrap();
+
+            // Pressure transmitter PT-1601 tapped onto discharge line at (185, 308)
+            let mut inst = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(185.0, 308.0, 0.0),
+            );
+            inst.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Insert(inst)).unwrap();
+            let mut itop = Text::with_value("PT", Vector3::new(183.5, 310.0, 0.0)).with_height(2.2);
+            itop.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(itop)).unwrap();
+            let mut ibot =
+                Text::with_value("1601", Vector3::new(182.5, 305.5, 0.0)).with_height(2.2);
+            ibot.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(ibot)).unwrap();
+
+            let mut opc1 = Insert::new("_OFF-UNIT SQ", Vector3::new(260.0, 300.0, 0.0));
+            opc1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc1)).unwrap();
+            let mut tf1 =
+                Text::with_value("DWG-160-02", Vector3::new(250.0, 299.0, 0.0)).with_height(2.5);
+            tf1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(tf1)).unwrap();
+
+            // Unprotected Drum V-1609 at (100, 480) with process pipe 80-CW-1609-CS150 and ZERO safeguards
+            let mut ud = Insert::new("1TO1PARAMETRIC V DRUM", Vector3::new(100.0, 480.0, 0.0));
+            ud.common.layer = "10".to_string();
+            let unprot_drum_h = doc.add_entity(document::EntityType::Insert(ud)).unwrap();
+            let mut udt =
+                Text::with_value("V-1609", Vector3::new(96.0, 496.0, 0.0)).with_height(2.5);
+            udt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(udt)).unwrap();
+
+            let mut upipe = Line::from_points(
+                Vector3::new(108.0, 480.0, 0.0),
+                Vector3::new(210.0, 480.0, 0.0),
+            );
+            upipe.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(upipe)).unwrap();
+            let mut ulbl = Text::with_value("80-CW-1609-CS150", Vector3::new(145.0, 483.0, 0.0))
+                .with_height(2.5);
+            ulbl.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(ulbl)).unwrap();
+
+            (pump_h, unprot_drum_h)
+        };
+
+        // Tab 2: DWG-160-02.dxf with return OPC -> PIC-1601 + BV160201 -> Downstream Drum V-1602 + LT-1602
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-160-02.dxf".to_string();
+        let (v_tab2_h, drum2_h) = {
+            let doc = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "DCS FUNC ACCESS IN PRIME LOC", 8.0, 8.0);
+            define_sppid_block(doc, "1TO1PARAMETRIC V DRUM", 12.0, 24.0);
+
+            let mut tb =
+                Text::with_value("DWG-160-02", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut opc2 = Insert::new("_OFF-UNIT SQ", Vector3::new(120.0, 420.0, 0.0));
+            opc2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc2)).unwrap();
+            let mut tf2 =
+                Text::with_value("DWG-160-01", Vector3::new(110.0, 419.0, 0.0)).with_height(2.5);
+            tf2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(tf2)).unwrap();
+
+            let mut pa = Line::from_points(
+                Vector3::new(126.0, 420.0, 0.0),
+                Vector3::new(217.0, 420.0, 0.0),
+            );
+            pa.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pa)).unwrap();
+            let mut la = Text::with_value("100-PW-1601-CS150", Vector3::new(155.0, 423.0, 0.0))
+                .with_height(2.5);
+            la.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(la)).unwrap();
+
+            // Remote DCS controller PIC-1601 on Tab 2 linked via ISA-5.1 loop 1601
+            let mut pic = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(180.0, 460.0, 0.0),
+            );
+            pic.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Insert(pic)).unwrap();
+            let mut ptop =
+                Text::with_value("PIC", Vector3::new(178.0, 462.0, 0.0)).with_height(2.2);
+            ptop.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(ptop)).unwrap();
+            let mut pbot =
+                Text::with_value("1601", Vector3::new(177.5, 457.5, 0.0)).with_height(2.2);
+            pbot.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pbot)).unwrap();
+
+            let mut vd = Insert::new("BALL VALVE TYPE 2", Vector3::new(220.0, 420.0, 0.0));
+            vd.common.layer = "11".to_string();
+            let v_tab2_h = doc.add_entity(document::EntityType::Insert(vd)).unwrap();
+            let mut vdt =
+                Text::with_value("BV160201", Vector3::new(216.0, 426.0, 0.0)).with_height(2.5);
+            vdt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(vdt)).unwrap();
+
+            let mut pb = Line::from_points(
+                Vector3::new(223.0, 420.0, 0.0),
+                Vector3::new(266.0, 420.0, 0.0),
+            );
+            pb.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pb)).unwrap();
+
+            // Downstream Drum V-1602 at (274, 420) with its own level transmitter LT-1602 at (284, 420)
+            let mut d2 = Insert::new("1TO1PARAMETRIC V DRUM", Vector3::new(274.0, 420.0, 0.0));
+            d2.common.layer = "10".to_string();
+            let drum2_h = doc.add_entity(document::EntityType::Insert(d2)).unwrap();
+            let mut d2t =
+                Text::with_value("V-1602", Vector3::new(270.0, 436.0, 0.0)).with_height(2.5);
+            d2t.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(d2t)).unwrap();
+
+            let mut lt = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(286.0, 420.0, 0.0),
+            );
+            lt.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Insert(lt)).unwrap();
+            let mut ltop = Text::with_value("LT", Vector3::new(284.5, 422.0, 0.0)).with_height(2.2);
+            ltop.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(ltop)).unwrap();
+            let mut lbot =
+                Text::with_value("1602", Vector3::new(283.5, 417.5, 0.0)).with_height(2.2);
+            lbot.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(lbot)).unwrap();
+
+            (v_tab2_h, drum2_h)
+        };
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        app.active_tab = tab1;
+
+        let tmp = std::env::temp_dir().join(format!("ocs_pidhazop_160_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let hz_json = tmp.join("hazop.json");
+        let hz_csv = tmp.join("hazop.csv");
+        let _ = app.run_command_line(&format!(
+            "PIDHAZOP ALLTABS EXPORT \"{}\"",
+            hz_json.display()
+        ));
+        assert!(hz_json.is_file(), "PIDHAZOP EXPORT must write hazop.json");
+        let _ = app.run_command_line(&format!(
+            "PIDHAZOP SUMMARY ALLTABS EXPORT \"{}\"",
+            hz_csv.display()
+        ));
+        let csv_raw = std::fs::read_to_string(&hz_csv).unwrap();
+        assert!(csv_raw.starts_with('\u{feff}') && csv_raw.contains("HAZOP-01"));
+
+        let rep: Value = serde_json::from_str(&std::fs::read_to_string(&hz_json).unwrap()).unwrap();
+        assert_eq!(rep["summary"]["total_nodes"].as_u64(), Some(3));
+        assert_eq!(rep["summary"]["protected_nodes"].as_u64(), Some(2));
+        assert_eq!(rep["summary"]["unprotected_nodes"].as_u64(), Some(1));
+        assert!(rep["summary"]["multi_sheet_nodes"].as_u64().unwrap_or(0) >= 1);
+
+        let nodes = rep["nodes"].as_array().unwrap();
+        let p_node = nodes
+            .iter()
+            .find(|n| n["equipment_tag"].as_str() == Some("P-1601"))
+            .expect("must have P-1601 HAZOP node");
+        assert_eq!(p_node["status"].as_str(), Some("protected"));
+        let p_spans: Vec<&str> = p_node["span_drawings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(p_spans.contains(&"DWG-160-01") && p_spans.contains(&"DWG-160-02"));
+        let p_insts: Vec<&str> = p_node["safeguard_instruments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(p_insts.contains(&"PT-1601") && p_insts.contains(&"PIC-1601"));
+        assert!(
+            !p_insts.contains(&"LT-1602"),
+            "peer equipment boundary must isolate V-1602's LT-1602 from P-1601's node"
+        );
+
+        let u_node = nodes
+            .iter()
+            .find(|n| n["equipment_tag"].as_str() == Some("V-1609"))
+            .expect("must have V-1609 HAZOP node");
+        assert_eq!(u_node["status"].as_str(), Some("unprotected"));
+
+        // Highlight UNPROTECTED selects V-1609 and NOT P-1601
+        let _ = app.run_command_line("PIDHAZOP UNPROTECTED ALLTABS");
+        assert!(has_sel(&app, tab1, unprot_drum_h));
+        assert!(!has_sel(&app, tab1, pump_h));
+
+        // Highlight NODE P-1601 ALLTABS selects P-1601 on Tab 1 and BV160201 across paired OPC on Tab 2
+        let _ = app.run_command_line("PIDHAZOP NODE P-1601 ALLTABS");
+        assert!(has_sel(&app, tab1, pump_h));
+        assert!(has_sel(&app, tab2, v_tab2_h));
+
+        // Stateless NEXT steps across all 3 HAZOP nodes and switches tab to Tab 2 for V-1602
+        let mut visited_tab2 = false;
+        for _ in 0..3 {
+            let _ = app.run_command_line("PIDHAZOP NEXT ALLTABS");
+            if app.active_tab == tab2 && has_sel(&app, tab2, drum2_h) {
+                visited_tab2 = true;
+            }
+        }
+        assert!(
+            visited_tab2,
+            "PIDHAZOP NEXT ALLTABS must focus V-1602 on Tab 2"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads 4 real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into OpenCADStudio and verifies PIDHAZOP ALLTABS automated HAZOP node partitioning, safeguard loop linkage, and NEXT stepping"]
+    fn real_multi_tab_pidhazop_cross_sheet_node_partition_and_safeguard_audit() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sp_raw) = std::env::var("OCS_PID_REAL160_SPPID_PAIR") else {
+            println!("OCS_PID_REAL160_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(lg_raw) = std::env::var("OCS_PID_REAL160_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL160_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL160_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real160"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sp_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sp_raw).collect();
+        let lg_paths: Vec<std::path::PathBuf> = std::env::split_paths(&lg_raw).collect();
+        assert_eq!(sp_paths.len(), 2);
+        assert_eq!(lg_paths.len(), 2);
+
+        let groups = [
+            ("SP01_SP02", "sppid_pair", &sp_paths),
+            ("LG01_LG02", "legacy_autocad_pair", &lg_paths),
+        ];
+
+        let mut out_groups = Vec::new();
+        for (gid, kind, pair) in &groups {
+            let mut sha_pair = Vec::new();
+            let mut app = app();
+            for (pi, p) in pair.iter().enumerate() {
+                let sha_pfx =
+                    format!("{:x}", Sha256::digest(std::fs::read(p).unwrap()))[..12].to_string();
+                sha_pair.push(sha_pfx);
+                let ti = if pi == 0 {
+                    app.active_tab
+                } else {
+                    let _ = app.update(Message::TabNew);
+                    app.active_tab
+                };
+                app.tabs[ti].scene.document = crate::io::load_file(p).unwrap();
+                app.tabs[ti].tab_title = format!("{gid}_{}.dxf", pi + 1);
+            }
+
+            let hz_json = out_dir.join(format!("{gid}_hazop.json"));
+            let hz_csv = out_dir.join(format!("{gid}_hazop.csv"));
+            let _ = app.run_command_line(&format!(
+                "PIDHAZOP ALLTABS EXPORT \"{}\"",
+                hz_json.display()
+            ));
+            let _ = app.run_command_line(&format!(
+                "PIDHAZOP SUMMARY ALLTABS EXPORT \"{}\"",
+                hz_csv.display()
+            ));
+            let csv_txt = std::fs::read_to_string(&hz_csv).unwrap();
+            assert!(csv_txt.starts_with('\u{feff}') && csv_txt.contains("NodeId,EquipmentTag"));
+            let rep: Value =
+                serde_json::from_str(&std::fs::read_to_string(&hz_json).unwrap()).unwrap();
+            let _ = std::fs::remove_file(&hz_json);
+            let _ = std::fs::remove_file(&hz_csv);
+
+            let total_nodes = rep["summary"]["total_nodes"].as_u64().unwrap_or(0);
+            assert!(
+                total_nodes >= 1,
+                "{gid} must partition >= 1 equipment HAZOP node"
+            );
+
+            // Step through first 2 nodes via PIDHAZOP NEXT ALLTABS
+            let _ = app.run_command_line("PIDHAZOP NEXT ALLTABS");
+            assert!(
+                !app.tabs[app.active_tab]
+                    .scene
+                    .selected_entities()
+                    .is_empty(),
+                "PIDHAZOP NEXT ALLTABS must select target HAZOP node envelope"
+            );
+
+            out_groups.push(json!({
+                "group": gid,
+                "kind": kind,
+                "sha256_prefixes": sha_pair,
+                "sheets_scanned": rep["summary"]["sheets_scanned"],
+                "total_nodes": rep["summary"]["total_nodes"],
+                "multi_sheet_nodes": rep["summary"]["multi_sheet_nodes"],
+                "protected_nodes": rep["summary"]["protected_nodes"],
+                "unprotected_nodes": rep["summary"]["unprotected_nodes"],
+                "total_linked_pipelines": rep["summary"]["total_linked_pipelines"],
+                "total_linked_safeguards": rep["summary"]["total_linked_safeguards"],
+            }));
+        }
+
+        std::fs::write(
+            out_dir.join("real160_summary.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()
             ),
         )
         .unwrap();

@@ -16,9 +16,9 @@ use std::path::PathBuf;
 
 use OpenCADStudio::io::pid_convert::{
     convert_path_to_dir, diff_pid_files, export_handover_package_from_path,
-    extract_bom_from_batch_dir, extract_loops_from_batch_dir, save_cad_file_as_binary_dwg,
-    write_bom_schedule_file, write_pid_diff_file, write_pid_loops_file, ConvertOptions,
-    PackageOptions,
+    extract_bom_from_batch_dir, extract_hazop_from_path, extract_loops_from_batch_dir,
+    save_cad_file_as_binary_dwg, write_bom_schedule_file, write_pid_diff_file,
+    write_pid_hazop_file, write_pid_loops_file, ConvertOptions, PackageOptions,
 };
 
 struct CliArgs {
@@ -33,6 +33,7 @@ struct CliArgs {
     external_props: Option<String>,
     export_schedule: Option<PathBuf>,
     export_loops: Option<PathBuf>,
+    export_hazop: Option<PathBuf>,
     export_package: Option<PathBuf>,
     strict_gate: bool,
     save_dwg: Option<PathBuf>,
@@ -50,6 +51,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut external_props: Option<String> = None;
     let mut export_schedule: Option<PathBuf> = None;
     let mut export_loops: Option<PathBuf> = None;
+    let mut export_hazop: Option<PathBuf> = None;
     let mut export_package: Option<PathBuf> = None;
     let mut strict_gate = false;
     let mut save_dwg: Option<PathBuf> = None;
@@ -93,6 +95,12 @@ fn parse_args() -> Result<CliArgs, String> {
                 export_loops = Some(PathBuf::from(
                     it.next()
                         .ok_or("--export-loops requires an output path (.csv/.tsv/.json)")?,
+                ));
+            }
+            "--export-hazop" => {
+                export_hazop = Some(PathBuf::from(
+                    it.next()
+                        .ok_or("--export-hazop requires an output path (.csv/.tsv/.json)")?,
                 ));
             }
             "--export-package" => {
@@ -144,7 +152,11 @@ fn parse_args() -> Result<CliArgs, String> {
     let input = input.ok_or(
         "usage: pid_convert <input.dxf|input.dwg|dir> --out <dir> [--plant NAME] [--seed-pid PATH_OR_ZIP] [--sym-dir DIR] [--verify-plot] [--summary-json FILE]",
     )?;
-    if out_dir.is_none() && diff_with.is_none() && export_package.is_none() {
+    if out_dir.is_none()
+        && diff_with.is_none()
+        && export_package.is_none()
+        && export_hazop.is_none()
+    {
         return Err(
             "--out <dir> (or --diff-with <baseline> or --export-package <dir>) is required"
                 .to_string(),
@@ -162,6 +174,7 @@ fn parse_args() -> Result<CliArgs, String> {
         external_props,
         export_schedule,
         export_loops,
+        export_hazop,
         export_package,
         strict_gate,
         save_dwg,
@@ -198,6 +211,35 @@ fn main() {
         verify_plot_pdf: args.verify_plot,
         ..Default::default()
     };
+
+    if let Some(ref hz_out) = args.export_hazop {
+        match extract_hazop_from_path(&effective_input)
+            .and_then(|rep| write_pid_hazop_file(&rep, hz_out).map(|()| rep))
+        {
+            Ok(rep) => {
+                println!(
+                    "pid_hazop: sheets={} nodes={} multi_sheet={} protected={} unprotected={} pipelines={} safeguards={}",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_nodes,
+                    rep.summary.multi_sheet_nodes,
+                    rep.summary.protected_nodes,
+                    rep.summary.unprotected_nodes,
+                    rep.summary.total_linked_pipelines,
+                    rep.summary.total_linked_safeguards,
+                );
+                if args.out_dir.is_none()
+                    && args.diff_with.is_none()
+                    && args.export_package.is_none()
+                {
+                    return;
+                }
+            }
+            Err(err) => {
+                eprintln!("error: export-hazop failed: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if let Some(ref pkg_dir) = args.export_package {
         let pkg_opts = PackageOptions {
