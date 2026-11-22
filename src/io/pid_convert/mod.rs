@@ -17,6 +17,7 @@ pub mod opc;
 pub mod package;
 pub mod promote;
 pub mod recognize;
+pub mod renumber;
 pub mod spec_check;
 pub mod trace;
 
@@ -29,6 +30,14 @@ pub use loops::{
     IsaLoopRole, LoopStatus, ParsedIsaTag, PidInstrumentLoop, PidLoopMember, PidLoopReport,
     PidLoopSummary, LOOP_CSV_HEADERS,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use renumber::write_pid_renumber_file;
+pub use renumber::{
+    format_pid_renumber_delimited, plan_or_apply_sheet_renumber, PidRenumberConflict,
+    PidRenumberItem, PidRenumberReport, PidRenumberSummary, RenumberOptions, SheetRenumberOutcome,
+    RENUMBER_CSV_HEADERS,
+};
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use package::{export_handover_package_from_path, export_handover_package_from_sheets};
 pub use package::{

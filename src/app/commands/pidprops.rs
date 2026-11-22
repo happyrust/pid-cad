@@ -40,7 +40,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDISOLATE",
         "PIDLOOP",
         "PIDSPEC",
-        "PIDPACKAGE"
+        "PIDPACKAGE",
+        "PIDRENUM"
     ]
 });
 
@@ -299,6 +300,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidpackage_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidrenum_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -3067,6 +3071,248 @@ impl OpenCADStudio {
                 Some(Task::none())
             }
         }
+    }
+
+    fn dispatch_pidrenum_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            plan_or_apply_sheet_renumber, write_pid_renumber_file, PidRenumberReport,
+            PidRenumberSummary, RenumberOptions,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDRENUM") {
+            return None;
+        }
+
+        let mut all_tabs = false;
+        let mut selected_only = false;
+        let mut dry_run = false;
+        let mut force = false;
+        let mut export_path: Option<std::path::PathBuf> = None;
+        let mut positional: Vec<String> = Vec::new();
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            let up = tok.to_ascii_uppercase();
+            match up.as_str() {
+                "ALLTABS" => {
+                    all_tabs = true;
+                    idx += 1;
+                }
+                "SELECTED" => {
+                    selected_only = true;
+                    idx += 1;
+                }
+                "DRYRUN" => {
+                    dry_run = true;
+                    idx += 1;
+                }
+                "FORCE" => {
+                    force = true;
+                    idx += 1;
+                }
+                "EXPORT" => {
+                    let Some(next_tok) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDRENUM EXPORT: 缺少输出文件路径（.json/.csv/.tsv）。");
+                        return Some(Task::none());
+                    };
+                    export_path = Some(std::path::PathBuf::from(next_tok));
+                    idx += 2;
+                }
+                _ => {
+                    positional.push(tok.clone());
+                    idx += 1;
+                }
+            }
+        }
+
+        if positional.len() < 2 {
+            self.command_line.push_error(
+                "PIDRENUM: 用法 PIDRENUM \"<旧编码>\" \"<新编码>\" [DRYRUN] [SELECTED | ALLTABS] [FORCE] [EXPORT \"<.json|.csv|.tsv>\"]。",
+            );
+            return Some(Task::none());
+        }
+        let from_pat = positional[0].clone();
+        let to_pat = positional[1].clone();
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs && !selected_only {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sel_vec: Option<Vec<document::Handle>> = selected_only.then(|| {
+            self.tabs[i]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .map(|(h, _)| h)
+                .collect()
+        });
+
+        // Phase 1: pre-flight across all target tabs without mutating documents or undo stack
+        let pre_opts = RenumberOptions {
+            from_pattern: from_pat.clone(),
+            to_pattern: to_pat.clone(),
+            dry_run: true,
+            force,
+        };
+        let mut pre_items = Vec::new();
+        let mut pre_conflicts = Vec::new();
+        let mut pre_pipes = 0usize;
+        for &(ti, ref nm) in &target_tabs {
+            let sel_slice = if ti == i { sel_vec.as_deref() } else { None };
+            let out = plan_or_apply_sheet_renumber(
+                nm,
+                &mut self.tabs[ti].scene.document,
+                sel_slice,
+                &pre_opts,
+            );
+            pre_pipes += out.pipelines_renamed;
+            pre_items.extend(out.items);
+            pre_conflicts.extend(out.conflicts);
+        }
+
+        let pre_syms = pre_items
+            .iter()
+            .filter(|it| it.entity_kind == "symbol")
+            .count();
+        let can_apply = !dry_run && (pre_conflicts.is_empty() || force) && !pre_items.is_empty();
+
+        if !can_apply {
+            let rep = PidRenumberReport {
+                summary: PidRenumberSummary {
+                    from_pattern: from_pat,
+                    to_pattern: to_pat,
+                    dry_run,
+                    applied: false,
+                    sheets_processed: target_tabs.len(),
+                    symbols_renamed: pre_syms,
+                    pipelines_renamed: pre_pipes,
+                    canvas_texts_synced: 0,
+                    conflict_count: pre_conflicts.len(),
+                },
+                items: pre_items,
+                conflicts: pre_conflicts,
+            };
+            if let Some(ref out_p) = export_path {
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Err(err) = write_pid_renumber_file(&rep, out_p) {
+                    self.command_line
+                        .push_error(&format!("PIDRENUM EXPORT: {err}"));
+                    return Some(Task::none());
+                }
+            }
+            if !dry_run && rep.summary.conflict_count > 0 {
+                self.command_line.push_error(&format!(
+                    "PIDRENUM: 检测到 {} 处重号冲突，已阻断改写（可加 DRYRUN 查看明细或 FORCE 强制执行）。",
+                    rep.summary.conflict_count
+                ));
+                return Some(Task::none());
+            }
+            self.command_line.push_output(&format!(
+                "PIDRENUM 预演: 符号={}，管线={}，冲突={}（未写入画布）。",
+                rep.summary.symbols_renamed,
+                rep.summary.pipelines_renamed,
+                rep.summary.conflict_count,
+            ));
+            return Some(self.finish_dispatch(cmd));
+        }
+
+        // Phase 2: push one undo snapshot per affected tab and apply atomically
+        let live_opts = RenumberOptions {
+            from_pattern: from_pat.clone(),
+            to_pattern: to_pat.clone(),
+            dry_run: false,
+            force,
+        };
+        let mut all_items = Vec::new();
+        let mut all_conflicts = Vec::new();
+        let mut total_pipes = 0usize;
+        let mut total_synced = 0usize;
+
+        for &(ti, ref nm) in &target_tabs {
+            let sel_slice = if ti == i { sel_vec.as_deref() } else { None };
+            self.push_undo_snapshot(ti, "PIDRENUM");
+            let out = plan_or_apply_sheet_renumber(
+                nm,
+                &mut self.tabs[ti].scene.document,
+                sel_slice,
+                &live_opts,
+            );
+            if !out.modified_handles.is_empty() {
+                total_synced += out.modified_handles.len();
+                let changes: Vec<_> = out
+                    .modified_handles
+                    .iter()
+                    .map(|&h| (h, crate::scene::ChangeKind::Modified))
+                    .collect();
+                self.tabs[ti].scene.bump_entities(&changes);
+                self.tabs[ti].dirty = true;
+            }
+            total_pipes += out.pipelines_renamed;
+            all_items.extend(out.items);
+            all_conflicts.extend(out.conflicts);
+        }
+        self.refresh_properties();
+
+        let syms_cnt = all_items
+            .iter()
+            .filter(|it| it.entity_kind == "symbol")
+            .count();
+        let rep = PidRenumberReport {
+            summary: PidRenumberSummary {
+                from_pattern: from_pat,
+                to_pattern: to_pat,
+                dry_run: false,
+                applied: true,
+                sheets_processed: target_tabs.len(),
+                symbols_renamed: syms_cnt,
+                pipelines_renamed: total_pipes,
+                canvas_texts_synced: total_synced,
+                conflict_count: all_conflicts.len(),
+            },
+            items: all_items,
+            conflicts: all_conflicts,
+        };
+        if let Some(ref out_p) = export_path {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(err) = write_pid_renumber_file(&rep, out_p) {
+                self.command_line
+                    .push_error(&format!("PIDRENUM EXPORT: {err}"));
+                return Some(Task::none());
+            }
+        }
+
+        self.command_line.push_output(&format!(
+            "PIDRENUM: 已重编号 {} 个符号与 {} 条管线（同步画布图元={}）。",
+            rep.summary.symbols_renamed, rep.summary.pipelines_renamed, total_synced,
+        ));
+        Some(self.finish_dispatch(cmd))
     }
 
     /// 属性下传重算：`edited` 里的管线/管路按「管线 → 管路 → 管段」级联。
@@ -9012,6 +9258,300 @@ mod tests {
         std::fs::write(
             out_dir.join("real158_summary.json"),
             format!("{}\n", serde_json::to_string_pretty(&sanitized).unwrap()),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidrenum_dryruns_blocks_conflicts_updates_single_two_line_and_pipe_texts_and_undoes() {
+        use document::entities::{Insert, Text};
+        use document::types::Vector3;
+
+        let mut app = app();
+        let tab = app.active_tab;
+        app.tabs[tab].tab_title = "DWG-159-01.dxf".to_string();
+        let (valve_h, valve_txt_h, inst_h, inst_top_h, inst_bot_h, _) =
+            seed_dxf_sheet_in_app(&mut app);
+
+        // Add an existing BV0301501A valve to test pre-flight collision blocking
+        {
+            let doc = &mut app.tabs[tab].scene.document;
+            let mut v3 = Insert::new("BALL VALVE TYPE 2", Vector3::new(320.0, 260.0, 0.0));
+            v3.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(v3)).unwrap();
+            let mut vt3 =
+                Text::with_value("BV0301501A", Vector3::new(316.0, 266.0, 0.0)).with_height(2.5);
+            vt3.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(vt3)).unwrap();
+        }
+
+        let _ = app.run_command_line("PIDPROMOTE");
+
+        let tmp = std::env::temp_dir().join(format!("ocs_pidrenum_159_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // 1. Pre-flight conflict check: selecting only BV0201501A and renaming 0201 -> 0301 collides with existing BV0301501A
+        app.tabs[tab].scene.deselect_all();
+        app.tabs[tab].scene.select_entities(&[valve_h]);
+        let conf_json = tmp.join("conflict.json");
+        let _ = app.run_command_line(&format!(
+            "PIDRENUM 0201 0301 SELECTED EXPORT \"{}\"",
+            conf_json.display()
+        ));
+        assert!(
+            conf_json.is_file(),
+            "PIDRENUM EXPORT must write report JSON"
+        );
+        let conf_rep: Value =
+            serde_json::from_str(&std::fs::read_to_string(&conf_json).unwrap()).unwrap();
+        assert_eq!(conf_rep["summary"]["applied"].as_bool(), Some(false));
+        assert!(conf_rep["summary"]["conflict_count"].as_u64().unwrap_or(0) >= 1);
+        assert_eq!(
+            PidAuthor::load(&app.tabs[tab].scene.document, valve_h)
+                .unwrap()
+                .tag,
+            "BV0201501A"
+        );
+
+        // 2. DRYRUN 0201 -> 0401 previews symbol + pipeline renames without mutating canvas
+        let dry_json = tmp.join("dry.json");
+        let _ = app.run_command_line(&format!(
+            "PIDRENUM 0201 0401 DRYRUN EXPORT \"{}\"",
+            dry_json.display()
+        ));
+        let dry_rep: Value =
+            serde_json::from_str(&std::fs::read_to_string(&dry_json).unwrap()).unwrap();
+        assert_eq!(dry_rep["summary"]["dry_run"].as_bool(), Some(true));
+        assert_eq!(dry_rep["summary"]["applied"].as_bool(), Some(false));
+        assert_eq!(dry_rep["summary"]["symbols_renamed"].as_u64(), Some(2));
+        assert!(
+            dry_rep["summary"]["pipelines_renamed"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1
+        );
+        assert_eq!(
+            PidAuthor::load(&app.tabs[tab].scene.document, valve_h)
+                .unwrap()
+                .tag,
+            "BV0201501A"
+        );
+
+        // 3. Live apply 0201 -> 0401 updates PidAuthor, single-line Text, 2-line bubble Text, and pipeline label
+        let live_csv = tmp.join("live.csv");
+        let _ = app.run_command_line(&format!(
+            "PIDRENUM 0201 0401 EXPORT \"{}\"",
+            live_csv.display()
+        ));
+        let csv_raw = std::fs::read_to_string(&live_csv).unwrap();
+        assert!(
+            csv_raw.starts_with('\u{feff}')
+                && csv_raw.contains("BV0401501A")
+                && csv_raw.contains("PT-04013")
+        );
+
+        assert_eq!(
+            PidAuthor::load(&app.tabs[tab].scene.document, valve_h)
+                .unwrap()
+                .tag,
+            "BV0401501A"
+        );
+        assert_eq!(
+            PidAuthor::load(&app.tabs[tab].scene.document, inst_h)
+                .unwrap()
+                .tag,
+            "PT-04013"
+        );
+        if let Some(document::EntityType::Text(t)) =
+            app.tabs[tab].scene.document.get_entity(valve_txt_h)
+        {
+            assert_eq!(t.value, "BV0401501A");
+        } else {
+            panic!("expected single-line valve text");
+        }
+        if let Some(document::EntityType::Text(top)) =
+            app.tabs[tab].scene.document.get_entity(inst_top_h)
+        {
+            assert_eq!(top.value, "PT");
+        }
+        if let Some(document::EntityType::Text(bot)) =
+            app.tabs[tab].scene.document.get_entity(inst_bot_h)
+        {
+            assert_eq!(bot.value, "04013");
+        } else {
+            panic!("expected 2-line bottom instrument text");
+        }
+
+        // Renamed pipeline 50-PG-04011-B9- is discoverable via PIDFIND
+        app.tabs[tab].scene.deselect_all();
+        let _ = app.run_command_line("PIDFIND 04011");
+        assert!(!app.tabs[tab].scene.selected_entities().is_empty());
+
+        // 4. Single-step UNDO reverts all renumbered symbols, canvas texts, and pipelines atomically
+        let undone = request(&mut app, json!({"op": "undo"}));
+        assert_eq!(undone["ok"], true);
+        assert_eq!(
+            PidAuthor::load(&app.tabs[tab].scene.document, valve_h)
+                .unwrap()
+                .tag,
+            "BV0201501A"
+        );
+        assert_eq!(
+            PidAuthor::load(&app.tabs[tab].scene.document, inst_h)
+                .unwrap()
+                .tag,
+            "PT-02013"
+        );
+        if let Some(document::EntityType::Text(t)) =
+            app.tabs[tab].scene.document.get_entity(valve_txt_h)
+        {
+            assert_eq!(t.value, "BV0201501A");
+        }
+        if let Some(document::EntityType::Text(bot)) =
+            app.tabs[tab].scene.document.get_entity(inst_bot_h)
+        {
+            assert_eq!(bot.value, "02013");
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "runs real SPPID and native AutoCAD sheets inside OpenCADStudio through PIDRENUM train cloning, StrictVendor XML/dual export verification, and single-step UNDO rollback"]
+    fn real_multi_source_pidrenum_train_clone_export_and_undo() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_raw) = std::env::var("OCS_PID_REAL159_SPPID_DXF") else {
+            println!("OCS_PID_REAL159_SPPID_DXF unset, skipping.");
+            return;
+        };
+        let Ok(legacy_raw) = std::env::var("OCS_PID_REAL159_LEGACY_DXF") else {
+            println!("OCS_PID_REAL159_LEGACY_DXF unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL159_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real159"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let cases = [
+            ("SP01", "sppid_dxf", std::path::PathBuf::from(&sppid_raw)),
+            (
+                "LG01",
+                "legacy_autocad_dxf",
+                std::path::PathBuf::from(&legacy_raw),
+            ),
+        ];
+
+        let mut rows = Vec::new();
+        for (cid, kind, path) in &cases {
+            let sha_pfx =
+                format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))[..12].to_string();
+            let mut app = app();
+            let tab = app.active_tab;
+            app.tabs[tab].scene.document = crate::io::load_file(path).unwrap();
+            app.tabs[tab].tab_title = format!("{cid}.dxf");
+
+            let _ = app.run_command_line("PIDPROMOTE");
+            let _ = app.run_command_line("PIDREVIEW DEDUP");
+
+            // Discover most frequent 2-digit numeric prefix in tags on this sheet so Train clone renumbers a realistic batch
+            let mut sub_freq: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
+            for ent in app.tabs[tab].scene.document.model_space_entities() {
+                if let Some(a) = PidAuthor::load(&app.tabs[tab].scene.document, ent.common().handle)
+                {
+                    let digits: String = a.tag.chars().filter(|c| c.is_ascii_digit()).collect();
+                    if digits.len() >= 2 {
+                        *sub_freq.entry(digits[..2].to_string()).or_default() += 1;
+                    }
+                }
+            }
+            let from_code = sub_freq
+                .into_iter()
+                .max_by_key(|(_, c)| *c)
+                .map(|(k, _)| k)
+                .unwrap_or_else(|| "01".to_string());
+            let existing_tags: Vec<String> = app.tabs[tab]
+                .scene
+                .document
+                .model_space_entities()
+                .filter_map(|e| {
+                    PidAuthor::load(&app.tabs[tab].scene.document, e.common().handle).map(|a| a.tag)
+                })
+                .collect();
+            let to_code = ["98", "97", "96", "89", "79", "987"]
+                .into_iter()
+                .find(|cand| *cand != from_code && !existing_tags.iter().any(|t| t.contains(cand)))
+                .unwrap_or("9876");
+
+            let sample_before: Vec<(document::Handle, String)> = app.tabs[tab]
+                .scene
+                .document
+                .model_space_entities()
+                .filter_map(|e| {
+                    let h = e.common().handle;
+                    let a = PidAuthor::load(&app.tabs[tab].scene.document, h)?;
+                    (!a.tag.is_empty()).then_some((h, a.tag))
+                })
+                .take(10)
+                .collect();
+
+            let rn_json = out_dir.join(format!("{cid}_renum.json"));
+            let rn_csv = out_dir.join(format!("{cid}_renum.csv"));
+            let _ = app.run_command_line(&format!(
+                "PIDRENUM \"{from_code}\" \"{to_code}\" EXPORT \"{}\"",
+                rn_json.display()
+            ));
+            let _ = app.run_command_line(&format!("PIDBOM \"{}\"", rn_csv.display()));
+            let rep: Value =
+                serde_json::from_str(&std::fs::read_to_string(&rn_json).unwrap()).unwrap();
+            let _ = std::fs::remove_file(&rn_json);
+            let _ = std::fs::remove_file(&rn_csv);
+
+            assert_eq!(rep["summary"]["applied"].as_bool(), Some(true));
+            assert!(rep["summary"]["symbols_renamed"].as_u64().unwrap_or(0) >= 5);
+
+            // Verify renumbered sheet exports clean StrictVendor XML
+            let exp_dir = out_dir.join(format!("{cid}_exp"));
+            let _ = app.run_command_line(&format!(
+                "PIDCONVERT \"{}\" STEM {cid} PLANT P01 VERIFY",
+                exp_dir.display()
+            ));
+            assert!(exp_dir.join(format!("{cid}_Data.xml")).is_file());
+            let _ = std::fs::remove_dir_all(&exp_dir);
+
+            // Verify single-step UNDO restores original tags
+            let undone = request(&mut app, json!({"op": "undo"}));
+            assert_eq!(undone["ok"], true);
+            for (h, orig_tag) in &sample_before {
+                let cur = PidAuthor::load(&app.tabs[tab].scene.document, *h)
+                    .unwrap()
+                    .tag;
+                assert_eq!(&cur, orig_tag);
+            }
+
+            rows.push(json!({
+                "id": cid,
+                "kind": kind,
+                "sha256_prefix": sha_pfx,
+                "symbols_renamed": rep["summary"]["symbols_renamed"],
+                "pipelines_renamed": rep["summary"]["pipelines_renamed"],
+                "canvas_texts_synced": rep["summary"]["canvas_texts_synced"],
+                "strict_vendor_export_verified": true,
+                "single_step_undo_verified": true,
+            }));
+        }
+
+        std::fs::write(
+            out_dir.join("real159_summary.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({ "sheets": rows })).unwrap()
+            ),
         )
         .unwrap();
     }

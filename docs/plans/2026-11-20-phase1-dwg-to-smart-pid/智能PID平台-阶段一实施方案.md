@@ -381,15 +381,15 @@ flowchart LR
 - **资料**：RES-12 ⚠（缺则按"属性按接口分组"自设计并注明未对照实物）。
 - **解决记录（2026-11-21）**：点选或经 `PIDREVIEW` 筛选选中带 `PID_AUTHOR` 的图元后，属性面板自动呈现可编辑 `P&ID 属性` 与只读 `P&ID 来源证据` 两组完整字段（因缺 `RES-12` 实物截图，按本平台标准双分组自设计并注明未对照实物）；`#139` 进一步补齐炸散多图元符号 `_member_handles` 整组画布高亮与点选任意成员散线自动归并主句柄执行 `ACCEPT / REJECT`，选中与编辑均支持单步撤销/重做；`#152` 新增 `src/io/pid_convert/find.rs` 与应用内命令 `PIDFIND <关键字> [ALLTABS] [NEXT]`，支持跨多标签页按位号/线号秒级跳转、整组选中符号或整条连通管线全部管段并自动聚焦相机，详见 `readings.md` §25、§28、§41。
 
-#### L2-3 属性面板读写（M）— **已完成（[#136](https://github.com/happyrust/pid-cad/issues/136)）**
+#### L2-3 属性面板读写（M）— **已完成（[#136](https://github.com/happyrust/pid-cad/issues/136) / [#159](https://github.com/happyrust/pid-cad/issues/159)）**
 - **做法**：按接口分页签；写入走既有 `set_entity_xdata` 路径；改位号走位号引擎。
 - **验收**：改一个属性后保存、重开，值不变；位号重复时给出提示且不写入。
 - **解决记录（2026-11-21）**：在 `src/app/commands/pidprops.rs` 过滤内部 `_` 保留键，业务属性（`公称直径`、`对端图号`、`说明` 及 `>2048B` 溢出属性）通过 `PidAuthor::store`（底层走 `set_entity_xdata` + XRecord 分片）写回并透传至 `save_author_document_to_dual`；存在重复位号时标 `tag_status=duplicated` 并由 `PIDSAVEPID` 前置 `gate_save`（`TAG_DUPLICATED_BLOCKS_SAVE`）阻断写盘，详见 `readings.md` §25。
 
-#### L2-4 属性改动联动（M）— **已完成（[#136](https://github.com/happyrust/pid-cad/issues/136)）**
+#### L2-4 属性改动联动（M）— **已完成（[#136](https://github.com/happyrust/pid-cad/issues/136) / [#159](https://github.com/happyrust/pid-cad/issues/159)）**
 - **做法**：属性改动后刷新图上标注；位号唯一性校验。
 - **验收**：改位号后图面标注跟着变；重复位号被拒并提示。
-- **解决记录（2026-11-21）**：在 `recognize.rs` 与 `promote.rs` 追踪符号配对的图面 `TEXT` / `MTEXT` 句柄（`_tag_handles`，支持单行设备/阀门位号及圈内上下双行仪表位号），在 `commit_pid_author_property` 中同步刷新 `Insert.attributes["PID_TAG"]` 与配对图面 `TEXT`/`MTEXT`（冲突显示 `？`，`UNDO`/`REDO` 原子回滚），详见 `readings.md` §25。
+- **解决记录（2026-11-21）**：在 `recognize.rs` 与 `promote.rs` 追踪符号配对的图面 `TEXT` / `MTEXT` 句柄（`_tag_handles`，支持单行设备/阀门位号及圈内上下双行仪表位号），在 `commit_pid_author_property` 中同步刷新 `Insert.attributes["PID_TAG"]` 与配对图面 `TEXT`/`MTEXT`（冲突显示 `？`，`UNDO`/`REDO` 原子回滚）；`#159` 进一步落地 `src/io/pid_convert/renumber.rs` 与应用内批量智能重编号命令 `PIDRENUM`（支持 `DRYRUN` 预演、前置重号冲突拦截、单/双行位号及管线线号批量联动、单步 `UNDO` 与 `.json/.csv/.tsv` 新旧映射对照表导出），详见 `readings.md` §25、§48。
 
 #### L2-5 几何改动联动（M）— **引擎层已完成（[#134](https://github.com/happyrust/pid-cad/issues/134)）**
 - **做法**：移动、删除符号后，更新端口位置、连通关系、管线端点。

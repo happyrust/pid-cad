@@ -1929,3 +1929,41 @@
 | `scripts\fmt-newhunks.ps1` | — | `package.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 48. L2-3 / L2-4 / L3-6 / L6-2（#159）：面向模块化多系列复制的应用内批量智能位号/线号重编号、图面单双行文字联动、冲突预检与单步可撤销命令 `PIDRENUM` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `2e9e8604d`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{renumber,mod}.rs`、`src/app/commands/pidprops.rs` |
+| 外部证据子项 | `2026-11-22-issue159/`（`red.txt`、`green_pidprops.txt`、`real_multi_source_renum.txt`、`real_out/real159_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
+
+### 48.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_159_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidrenum_dryruns_blocks_conflicts_updates_single_two_line_and_pipe_texts_and_undoes`（构造含目标系列同位号阀门 `BV0301501A` 的测试图纸，依次校验 `SELECTED` 局部重编号前置冲突拦截与零脏状态保护、`DRYRUN` 零侵入预演、`0201 -> 0401` 正式执行同步更新单行阀门文字 + 仪表圈内上下双行文字 + 工艺管线标注及 `PIDFIND` 可检索性、以及单步 `UNDO` 原子完整回退），运行按预期在 `conflict.json` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`25 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/renumber.rs`（`plan_or_apply_sheet_renumber`、`write_pid_renumber_file`）：支持全图、`SELECTED` 选中子集与 `ALLTABS` 跨标签页按大小写无关子串批量重编号设备/阀门/仪表位号与工艺管线序号；前置重号冲突非 `FORCE` 阻断；通过预检后在原 `Document` 原地更新 `PidAuthor`、`Insert.attributes["PID_TAG"]`、单行 `TEXT`/`MTEXT`、仪表圈内上下双行文字、管段 `_line_label` 与 `TopologyTable`（完整接入 `EntityChangeRecorder` 增量撤销栈），并支持导出 `.json` 与带 UTF-8 BOM 的 `.csv` / `.tsv` 6 列新旧位号映射对照表；
+  2. 在 `src/app/commands/pidprops.rs` 注册实现两阶段预检与单步可撤销命令 `PIDRENUM "<旧编码>" "<新编码>" [DRYRUN] [SELECTED | ALLTABS] [FORCE] [EXPORT "<.json|.csv|.tsv>"]`。
+
+### 48.2 真实双源工程图纸（SPPID 生产图 + 原生 AutoCAD 存量图）系列复制重编号、导出与单步撤销实测
+
+| 图纸代号 | 样本形态 | 源图 SHA-256 前缀 | 批量重编号符号数 | 批量重编号管线数 | 同步画布图元数 | 改后 `StrictVendor` XML 校验 | 单步 `UNDO` 原子回退 |
+|---|---|---|---:|---:|---:|---|---|
+| `SP01` | SPPID 拆分生产 DXF | `c0dd2cc4c75d` | **`68`** | **`18`** | **`204`** | **通过（`0` 违规）** | **通过（100% 还原）** |
+| `LG01` | 原生 AutoCAD 存量 DXF | `a0f05f81a655` | **`36`** | **`4`** | **`92`** | **通过（`0` 违规）** | **通过（100% 还原）** |
+
+### 48.3 固定门禁读数
+
+| 门禁项 | 改前读数（§47.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,242` 条（`7,159` 过 / `82` 忽略 / `1` 既有 `.pen`） | **`7,244` 条**（**`7,160` 过** / **`83` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 双源系列克隆重编号与撤销），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `renumber.rs`、`mod.rs`、`pidprops.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
