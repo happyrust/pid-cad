@@ -70,6 +70,11 @@ pub struct HandoverManifest {
     pub duplicate_equipment_tags: usize,
     pub relief_devices_count: usize,
     pub unsealed_relief_valve_violations: usize,
+    pub sis_interlocks_count: usize,
+    pub incomplete_sis_interlocks: usize,
+    pub dcs_total_hw_io: usize,
+    pub sis_total_hw_io: usize,
+    pub unconnected_field_instruments: usize,
     pub opc_reciprocal_pairs: usize,
     pub opc_one_way_open: usize,
     pub drc_total_errors: usize,
@@ -168,11 +173,13 @@ pub fn export_handover_package_from_sheets(
     use sha2::{Digest, Sha256};
 
     use super::bom::{extract_bom_from_batch_dir, write_bom_schedule_file};
+    use super::cause_effect::{analyze_pid_cause_effect, write_pid_cause_effect_file};
     use super::drawing_index::{analyze_pid_drawing_index, write_pid_drawing_index_file};
     use super::drc::audit_sheet_drc;
     use super::equipment::{analyze_pid_equipment_schedule, write_pid_equipment_file};
     use super::export::{export_author_document_to_dir, export_document_to_dir};
     use super::hazop::{analyze_pid_hazop_nodes, write_pid_hazop_file};
+    use super::io_list::{analyze_pid_io_list, write_pid_io_list_file};
     use super::line_list::{analyze_pid_line_list, write_pid_line_list_file};
     use super::loops::{analyze_pid_loops, write_pid_loops_file};
     use super::nozzle::{analyze_pid_equipment_nozzles, write_pid_nozzle_file};
@@ -294,6 +301,16 @@ pub fn export_handover_package_from_sheets(
     write_pid_relief_file(&relief_rep, &schedules_dir.join("09_relief_devices.csv"))?;
     write_pid_relief_file(&relief_rep, &schedules_dir.join("09_relief_devices.json"))?;
 
+    let io_rep = analyze_pid_io_list(&opc_inputs);
+    write_pid_io_list_file(
+        &io_rep,
+        &schedules_dir.join("10_instrument_io_schedule.csv"),
+    )?;
+    write_pid_io_list_file(
+        &io_rep,
+        &schedules_dir.join("10_instrument_io_schedule.json"),
+    )?;
+
     let opc_rep = analyze_open_sheets_opc(&opc_inputs);
     let opc_json = serde_json::to_string_pretty(&opc_rep).map_err(|e| e.to_string())?;
     std::fs::write(
@@ -333,6 +350,13 @@ pub fn export_handover_package_from_sheets(
     write_pid_hazop_file(&hazop_rep, &audits_dir.join("05_hazop_worksheet.csv"))?;
     write_pid_hazop_file(&hazop_rep, &audits_dir.join("05_hazop_worksheet.json"))?;
 
+    let sis_rep = analyze_pid_cause_effect(&opc_inputs);
+    write_pid_cause_effect_file(&sis_rep, &audits_dir.join("06_sis_cause_effect_matrix.csv"))?;
+    write_pid_cause_effect_file(
+        &sis_rep,
+        &audits_dir.join("06_sis_cause_effect_matrix.json"),
+    )?;
+
     // 4. Cryptographic inventory & handover_manifest.json
     let mut files = Vec::new();
     collect_package_files_recursive(out_dir, out_dir, &mut files)?;
@@ -344,13 +368,16 @@ pub fn export_handover_package_from_sheets(
     }
     let manifest_sha256 = format!("{:x}", digest_acc.finalize());
 
+    let incomplete_sis_interlocks =
+        sis_rep.summary.missing_actuator_count + sis_rep.summary.orphan_actuator_count;
     let handover_ready = strict_vendor_passed
         && drc_total_errors == 0
         && relief_rep.summary.unsealed_valve_violations == 0
+        && incomplete_sis_interlocks == 0
         && conversion_errors.is_empty();
 
     let manifest = HandoverManifest {
-        schema_version: 4,
+        schema_version: 5,
         plant: pkg_opts.convert.plant.clone(),
         handover_ready,
         strict_vendor_passed,
@@ -376,6 +403,11 @@ pub fn export_handover_package_from_sheets(
         duplicate_equipment_tags: equip_rep.summary.duplicate_tag_count,
         relief_devices_count: relief_rep.summary.total_devices,
         unsealed_relief_valve_violations: relief_rep.summary.unsealed_valve_violations,
+        sis_interlocks_count: sis_rep.summary.total_interlocks,
+        incomplete_sis_interlocks,
+        dcs_total_hw_io: io_rep.summary.dcs_total_hw,
+        sis_total_hw_io: io_rep.summary.sis_total_hw,
+        unconnected_field_instruments: io_rep.summary.unconnected_field_count,
         opc_reciprocal_pairs: opc_rep.reciprocal_pairs,
         opc_one_way_open: opc_rep.one_way_open,
         drc_total_errors,
@@ -395,9 +427,10 @@ pub fn export_handover_package_from_sheets(
 
     if pkg_opts.strict_gate && !manifest.handover_ready {
         return Err(format!(
-            "STRICT 交付门禁未通过（handover_ready=false：drc_errors={}，unsealed_relief_valves={}，strict_vendor_passed={}，errors={:?}）。",
+            "STRICT 交付门禁未通过（handover_ready=false：drc_errors={}，unsealed_relief_valves={}，incomplete_sis={}，strict_vendor_passed={}，errors={:?}）。",
             manifest.drc_total_errors,
             manifest.unsealed_relief_valve_violations,
+            manifest.incomplete_sis_interlocks,
             manifest.strict_vendor_passed,
             manifest.conversion_errors
         ));

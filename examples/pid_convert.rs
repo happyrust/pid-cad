@@ -704,7 +704,7 @@ fn main() {
         match export_handover_package_from_path(&effective_input, pkg_dir, &pkg_opts) {
             Ok(man) => {
                 println!(
-                    "pid_package: schema=v{} handover_ready={} sheets={} pid={} pdf={} equip={} lines={} nozzles={} valves={} relief={} sp={} bl={} hazop={} files={} manifest_sha256={}",
+                    "pid_package: schema=v{} handover_ready={} sheets={} pid={} pdf={} equip={} lines={} nozzles={} valves={} relief={} sis={} io_hw={} sp={} bl={} hazop={} files={} manifest_sha256={}",
                     man.schema_version,
                     man.handover_ready,
                     man.sheets_exported,
@@ -715,6 +715,8 @@ fn main() {
                     man.equipment_nozzles_count,
                     man.total_valves,
                     man.relief_devices_count,
+                    man.sis_interlocks_count,
+                    man.dcs_total_hw_io + man.sis_total_hw_io,
                     man.piping_specialties_count,
                     man.battery_limit_interfaces,
                     man.hazop_nodes_count,
