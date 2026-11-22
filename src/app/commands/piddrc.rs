@@ -713,7 +713,7 @@ impl OpenCADStudio {
     /// [`Waiver::new`] 查。写进图是一个撤销步，这张图上同一（规则号, 对象键）已有豁免就换成这条；
     /// 写完就地改留着的结果，不重新检查。成了得有没有换掉原来的；不成什么也不写，得错误码和命令行
     /// 上命令词后面说的话。
-    fn pidcheck_add_waiver(
+    pub(super) fn pidcheck_add_waiver(
         &mut self,
         i: usize,
         rules: &RuleSet,
@@ -790,7 +790,7 @@ impl OpenCADStudio {
     /// 去掉第 `i` 个标签页的图上的一条豁免（§3.7），命令和操作共用：一个撤销步，写完就地改留着的
     /// 结果。对不上结果的老豁免、规则包里已经没有的规则的豁免也去得掉，所以不查规则号、不要检查
     /// 结果；图里没有这条是 `WAIVER_TARGET_NOT_FOUND`，连同命令行上命令词后面说的话。
-    fn pidcheck_remove_waiver(
+    pub(super) fn pidcheck_remove_waiver(
         &mut self,
         i: usize,
         rule_id: &str,
@@ -851,7 +851,7 @@ impl OpenCADStudio {
 
     /// 第 `i` 个标签页最近一次的检查结果（`SPEC-pid-verify-deliver-panel.md` §3.1）：标签页上查这张
     /// 图的，和它项目目录查项目、查节点的，两份都有取较新的。
-    fn pidcheck_latest(&self, i: usize) -> Option<&Checked> {
+    pub(super) fn pidcheck_latest(&self, i: usize) -> Option<&Checked> {
         self.pidcheck_kept(i).max_by_key(|checked| checked.serial)
     }
 
@@ -871,7 +871,7 @@ impl OpenCADStudio {
     }
 
     /// 第 `i` 个标签页的图在检查结果里的图号（[`drc::drawing_of`]）。
-    fn pidcheck_drawing_id(&self, i: usize) -> String {
+    pub(super) fn pidcheck_drawing_id(&self, i: usize) -> String {
         let path = self.tabs[i]
             .scene
             .document

@@ -20,15 +20,20 @@
 //! and the export `PIDCHECK EXPORT` writes. What stops them is said in the
 //! panel's message bar rather than on the command line, so an `action`
 //! pressing them is not answered as failed for it (§3.7).
+//!
+//! A row clicked finds its object the way `PIDLOCATE` does, on whichever
+//! drawing it is (`pidindex.rs`), and the waive buttons call what
+//! `PIDCHECK WAIVE` and `PIDCHECK UNWAIVE` call; they too say in the
+//! message bar what came of it.
 
 use super::piddrc::Checked;
-use super::pidindex::same_file;
+use super::pidindex::{same_file, Landed, LOCATE_NOT_FOUND};
 use crate::app::{Message, OpenCADStudio};
-use crate::pid::drc;
+use crate::pid::drc::{self, CheckResult};
 use crate::ui::dock::{DockMsg, PanelId};
 use crate::ui::window::pid_verify_deliver::{
-    self, Context, DrawingResults, KeptCheck, Notice, PidVerifyMsg, ProjectResults, Tab,
-    ROWS_PER_PAGE,
+    self, Context, DrawingResults, KeptCheck, Notice, PidVerifyMsg, ProjectResults, Tab, Waiving,
+    GONE, REASON_ID, ROWS_PER_PAGE,
 };
 use iced::Task;
 use serde_json::{json, Value};
@@ -108,8 +113,8 @@ impl OpenCADStudio {
     /// The program's state the panel shows: whether it is on screen, the
     /// drawing tab in front and that drawing's number as the rule check
     /// gives it ([`drc::drawing_of`]), none on the Start page, whether the
-    /// session may change that drawing, whether it was saved, and whether a
-    /// scan runs.
+    /// session may change that drawing, whether it was saved, whether a
+    /// scan runs, and the waivers that drawing keeps.
     fn pid_verify_context(&self) -> Context {
         let drawing = self.tabs.get(self.active_tab).filter(|tab| !tab.is_start);
         Context {
@@ -126,6 +131,14 @@ impl OpenCADStudio {
             saved: drawing.is_some_and(|tab| crate::io::drawing_dir(&tab.scene.document).is_some()),
             // One scan runs at a time, and the project check starts one.
             busy: self.pid_index.scanning(),
+            waivers: drawing
+                .map(|tab| {
+                    let kept = drc::waivers(&tab.scene.document);
+                    kept.into_iter()
+                        .map(|waiver| (waiver.rule_id, waiver.object_key))
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -291,6 +304,45 @@ impl OpenCADStudio {
                 self.pid_verify_export(&name);
                 Task::none()
             }
+            PidVerifyMsg::Locate(index) => self.pid_verify_locate(index),
+            PidVerifyMsg::AskWaiver(index) => {
+                let shown = self.pid_verify_view.check.shown.as_ref();
+                ui.waiving = shown.map(|shown| Waiving {
+                    serial: shown.serial,
+                    index,
+                    reason: String::new(),
+                });
+                iced::widget::operation::focus(iced::widget::Id::new(REASON_ID))
+            }
+            PidVerifyMsg::WaiverReason(typed) => {
+                if let Some(waiving) = ui.waiving.as_mut() {
+                    waiving.reason = typed;
+                }
+                Task::none()
+            }
+            PidVerifyMsg::Waive(index, reason) => {
+                self.pid_verify_waive(index, reason);
+                Task::none()
+            }
+            PidVerifyMsg::CancelWaiver => {
+                ui.waiving = None;
+                Task::none()
+            }
+            PidVerifyMsg::Unwaive(index) => {
+                self.pid_verify_unwaive(index);
+                Task::none()
+            }
+            PidVerifyMsg::StaleWaivers => {
+                ui.stale_open = !ui.stale_open;
+                Task::none()
+            }
+            PidVerifyMsg::DropWaiver {
+                rule_id,
+                object_key,
+            } => {
+                self.pid_verify_drop_waiver(&rule_id, &object_key);
+                Task::none()
+            }
         };
         self.refresh_pid_verify_view();
         task
@@ -387,6 +439,111 @@ impl OpenCADStudio {
             Err(why) => Notice::error(None, why),
         });
     }
+
+    /// The result at `index` of the check the panel shows for the drawing in
+    /// front — the newer of its own and its folder's (§3.1) — and that
+    /// check's serial.
+    fn pid_verify_result(&self, index: usize) -> Option<(u64, CheckResult)> {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return None;
+        }
+        let checked = self.pidcheck_latest(i)?;
+        let result = checked.report.results.get(index)?;
+        Some((checked.serial, result.clone()))
+    }
+
+    /// A row clicked (§4.3): its object found on the drawing it is on — the
+    /// one in front, the tab open on it, or opened — the way `PIDLOCATE`
+    /// finds it, without a word on the command line. What came of it is
+    /// said in the message bar ([`Self::pid_verify_landed`]).
+    fn pid_verify_locate(&mut self, index: usize) -> Task<Message> {
+        let Some((serial, result)) = self.pid_verify_result(index) else {
+            return Task::none();
+        };
+        self.pid_verify_ui.located = Some((serial, index));
+        let i = self.active_tab;
+        if result.object.drawing_id == self.pidcheck_drawing_id(i) {
+            let landed = self.pidlocate_result(i, &result);
+            self.pid_verify_landed(landed);
+            return Task::none();
+        }
+        let Some(dir) = crate::io::drawing_dir(&self.tabs[i].scene.document) else {
+            return Task::none();
+        };
+        let dir = dir.to_path_buf();
+        self.pidlocate_result_elsewhere(&dir, result)
+    }
+
+    /// What came of finding a row's object, in the message bar: nothing when
+    /// it was found or has no tag of its own to find it by, [`GONE`] when
+    /// its tag is no longer on its drawing.
+    pub(super) fn pid_verify_landed(&mut self, landed: Landed) {
+        self.pid_verify_ui.notice = match landed {
+            Landed::Gone => Some(Notice::error(Some(LOCATE_NOT_FOUND.to_owned()), GONE)),
+            Landed::Found | Landed::Spot => None,
+        };
+        self.refresh_pid_verify_view();
+    }
+
+    /// Why a row's object was not found — its drawing gone from the folder,
+    /// or not opened — in the message bar.
+    pub(super) fn pid_verify_not_located(&mut self, code: Option<&str>, why: String) {
+        self.pid_verify_ui.notice = Some(Notice::error(code.map(str::to_owned), why));
+        self.refresh_pid_verify_view();
+    }
+
+    /// 【确认】 under a row's reason box (§4.4): the row waived for `reason`
+    /// by the entry `PIDCHECK WAIVE` calls, which follows the result in
+    /// place without checking again. What the entry refuses is said in the
+    /// message bar and the box stays open with what was typed; waived, the
+    /// box closes.
+    fn pid_verify_waive(&mut self, index: usize, reason: String) {
+        let Some((serial, result)) = self.pid_verify_result(index) else {
+            return;
+        };
+        let i = self.active_tab;
+        let added = self.pidcheck_load_rules(i).and_then(|rules| {
+            self.pidcheck_add_waiver(i, &rules, &result.rule_id, &result.object_key, &reason)
+        });
+        let ui = &mut self.pid_verify_ui;
+        match added {
+            Ok(_) => {
+                ui.waiving = None;
+                ui.notice = None;
+            }
+            Err((code, said)) => {
+                ui.waiving = Some(Waiving {
+                    serial,
+                    index,
+                    reason,
+                });
+                ui.notice = Some(Notice::error(Some(code.to_owned()), said));
+            }
+        }
+    }
+
+    /// 【取消豁免】 (§4.4): the row's waiver taken off the drawing in front.
+    fn pid_verify_unwaive(&mut self, index: usize) {
+        if let Some((_, result)) = self.pid_verify_result(index) {
+            self.pid_verify_drop_waiver(&result.rule_id, &result.object_key);
+        }
+    }
+
+    /// The waiver of `rule_id` on `key` taken off the drawing in front by
+    /// the entry `PIDCHECK UNWAIVE` calls — one undo step, the results kept
+    /// followed in place — for 【取消豁免】 and for 【删除】 beside a waiver no
+    /// result matches. What the entry refuses is said in the message bar.
+    fn pid_verify_drop_waiver(&mut self, rule_id: &str, key: &str) {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return;
+        }
+        let dropped = self.pidcheck_remove_waiver(i, rule_id, key);
+        self.pid_verify_ui.notice = dropped
+            .err()
+            .map(|(code, said)| Notice::error(Some(code.to_owned()), said));
+    }
 }
 
 /// Switch `item` in `list`: off when it is on, on when it is off.
@@ -436,7 +593,7 @@ mod tests {
     use crate::pid::drc::builtin_rules::PROJECT_PACK_FILE;
     use crate::ui::dock::{DockMsg, PanelId};
     use crate::ui::window::pid_verify_deliver::{
-        PidVerifyMsg, RowView, Tab, BOUNDS_PREFIX, CHECK_DRAWING_ID, CHECK_PROJECT_ID,
+        Group, PidVerifyMsg, RowView, Tab, BOUNDS_PREFIX, CHECK_DRAWING_ID, CHECK_PROJECT_ID,
         NEVER_CHECKED, PANEL_BOUNDS_ID,
     };
     use serde_json::{json, Value};
@@ -1073,6 +1230,87 @@ mod tests {
         shown.expect("a check drawn").stale
     }
 
+    /// [`sheet`], with PID-1102.dwg beside it holding a pump of its own:
+    /// checked as a project, each pump has a warning (DR-202).
+    fn two_sheets(scratch: &Scratch) -> OpenCADStudio {
+        let mut other = fresh();
+        draw(&mut other, "PIDINSERT pump", &[[0.0, 0.0]]);
+        let bytes = crate::io::save_to_bytes(
+            other.active_document_for_test(),
+            "dwg",
+            document::DxfVersion::AC1032,
+        )
+        .expect("the drawing as DWG");
+        fs::write(scratch.path("PID-1102.dwg"), bytes).expect("the drawing");
+        sheet(scratch)
+    }
+
+    /// The index and the label of the row of rule `rule` on drawing
+    /// `drawing` in the panel state.
+    fn row_of(state: &Value, rule: &str, drawing: &str) -> (usize, String) {
+        let rows = state["check"]["rows"].as_array().expect("the rows");
+        let row = rows
+            .iter()
+            .find(|row| row["rule_id"] == rule && row["drawing_id"] == drawing)
+            .unwrap_or_else(|| panic!("{rule} on {drawing}: {state}"));
+        let index = row["index"].as_u64().expect("the index");
+        (
+            usize::try_from(index).expect("an index"),
+            row["label"].as_str().unwrap_or_default().to_owned(),
+        )
+    }
+
+    /// The handles `get_selection` reads off the drawing in front.
+    fn selection(app: &mut OpenCADStudio) -> Vec<String> {
+        let answer = app.automation_op(r#"{"protocol":1,"op":"get_selection"}"#);
+        let entities = answer["result"]["entities"].as_array();
+        entities
+            .expect("the selection")
+            .iter()
+            .map(|entity| entity["handle"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    /// Where the view of the drawing in front looks.
+    fn looking_at(app: &OpenCADStudio) -> glam::DVec3 {
+        app.tabs[app.active_tab].scene.camera.borrow().target
+    }
+
+    /// Select nothing on the drawing in front and look far away from it.
+    fn look_away(app: &mut OpenCADStudio) {
+        let i = app.active_tab;
+        app.tabs[i].scene.deselect_all();
+        app.tabs[i].scene.camera.borrow_mut().target = glam::DVec3::new(5000.0, 5000.0, 0.0);
+    }
+
+    /// What the command line said since it was last cleared mentions
+    /// `PIDLOCATE`.
+    fn pidlocate_said(app: &OpenCADStudio) -> bool {
+        let history = &app.command_line.history;
+        history.iter().any(|entry| entry.text.contains("PIDLOCATE"))
+    }
+
+    /// The rows of the waived group the panel draws now.
+    fn drawn_waived(app: &OpenCADStudio) -> Vec<usize> {
+        let shown = app.pid_verify_view.check.shown.as_ref();
+        let shown = shown.expect("a check drawn");
+        let groups = shown.groups.iter();
+        groups
+            .filter(|group| group.group == Group::Waived)
+            .flat_map(|group| &shown.rows[group.first..group.first + group.count])
+            .map(|row| row.index)
+            .collect()
+    }
+
+    /// What is typed in the reason box under the row of `index`, while it
+    /// is open.
+    fn drawn_reason(app: &OpenCADStudio, index: usize) -> Option<String> {
+        let shown = app.pid_verify_view.check.shown.as_ref();
+        let mut rows = shown.expect("a check drawn").rows.iter();
+        rows.find(|row| row.index == index)
+            .and_then(|row| row.reason.clone())
+    }
+
     #[test]
     fn the_rule_check_tab_counts_as_pid_check_does_and_filters_its_list() {
         let scratch = Scratch::new();
@@ -1264,6 +1502,254 @@ mod tests {
         fs::write(scratch.path(PROJECT_PACK_FILE), pack().to_string()).expect("the pack");
         let _ = act(&mut app, "check=drawing");
         assert_eq!(panel(&mut app, "")["notice"], Value::Null);
+    }
+
+    #[test]
+    fn locating_a_row_selects_and_frames_its_object_as_pidlocate_does() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        typed(&mut app, "PIDCHECK");
+        let (pump, tag) = row_of(&panel(&mut app, ""), "DR-202", "PID-1101");
+        assert!(!tag.is_empty());
+        let ran = run(&mut app, &format!("PIDLOCATE {tag}"));
+        assert_eq!(ran.error, None, "{}", ran.said);
+        let (selected, framed) = (selection(&mut app), looking_at(&app));
+        assert_eq!(selected.len(), 1, "{}", ran.said);
+        look_away(&mut app);
+        app.command_line.history.clear();
+        let answer = act(&mut app, &format!("locate={pump}"));
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(selection(&mut app), selected);
+        let looking = looking_at(&app);
+        assert!(looking.distance(framed) < 1e-6, "{looking} ≠ {framed}");
+        let state = panel(&mut app, "");
+        assert_eq!(state["check"]["located"], pump, "{state}");
+        assert_eq!(state["notice"], Value::Null, "{state}");
+        // The panel finds it without a word on the command line.
+        assert!(!pidlocate_said(&app));
+        let answer = act(&mut app, "locate=99");
+        assert_eq!(answer["code"], "PANEL_ROW_NOT_FOUND", "{answer}");
+    }
+
+    #[test]
+    fn locating_a_row_on_another_drawing_opens_it_and_keeps_the_project_check_shown() {
+        let scratch = Scratch::new();
+        let mut app = two_sheets(&scratch);
+        let first = app.active_tab;
+        let tabs = app.tabs.len();
+        let answer = act(&mut app, "check=project");
+        assert_eq!(answer["ok"], true, "{answer}");
+        let state = panel(&mut app, "");
+        let total = state["check"]["total"].clone();
+        let (pump, tag) = row_of(&state, "DR-202", "PID-1102");
+        let answer = act(&mut app, &format!("locate={pump}"));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let other = scratch.path("PID-1102.dwg");
+        assert_eq!(app.tabs.len(), tabs + 1);
+        assert_eq!(app.tab_showing(&other), Some(app.active_tab));
+        let selected = selection(&mut app);
+        assert_eq!(selected.len(), 1, "{selected:?}");
+        let framed = looking_at(&app);
+        // The project's check is still the one shown, the row clicked
+        // located in it.
+        let state = panel(&mut app, "");
+        assert_eq!(state["drawing_id"], "PID-1102", "{state}");
+        assert_eq!(state["check"]["scope"], "project", "{state}");
+        assert_eq!(state["check"]["total"], total, "{state}");
+        assert_eq!(state["check"]["located"], pump, "{state}");
+        assert_eq!(state["notice"], Value::Null, "{state}");
+        // What PIDLOCATE finds there.
+        look_away(&mut app);
+        let ran = run(&mut app, &format!("PIDLOCATE {tag} PID-1102"));
+        assert_eq!(ran.error, None, "{}", ran.said);
+        assert_eq!(selection(&mut app), selected, "{}", ran.said);
+        assert!(looking_at(&app).distance(framed) < 1e-6, "{}", ran.said);
+        // From PID-1101 again: the tab open on it is brought forward, no
+        // second one opened.
+        let _ = app.update(Message::TabSwitch(first));
+        let i = app.tab_showing(&other).expect("the tab on PID-1102");
+        app.tabs[i].scene.deselect_all();
+        let answer = act(&mut app, &format!("locate={pump}"));
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(app.tabs.len(), tabs + 1);
+        assert_eq!(app.active_tab, i);
+        assert_eq!(selection(&mut app), selected);
+    }
+
+    #[test]
+    fn waiving_a_row_in_the_panel_moves_it_to_the_waived_group_without_checking_again() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        typed(&mut app, "PIDCHECK");
+        let checks = app.pid_checks.last_serial();
+        let (note, _) = row_of(&panel(&mut app, ""), "DR-203", "PID-1101");
+        // No reason: the waiver's entry refuses it, said in the message bar,
+        // and the reason box stays open.
+        let answer = act(&mut app, &format!("waive={note}:"));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let state = panel(&mut app, "");
+        assert_eq!(state["notice"]["level"], "error", "{state}");
+        assert_eq!(state["notice"]["code"], "WAIVER_REASON_REQUIRED", "{state}");
+        assert_eq!(
+            state["check"]["counts"],
+            json!({"错误": 1, "警告": 1, "提示": 1, "已豁免": 0}),
+            "{state}"
+        );
+        assert_eq!(drawn_reason(&app, note), Some(String::new()));
+        // With one: waived at once, counted, nothing checked again.
+        let answer = act(&mut app, &format!("waive={note}:放空管"));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let state = panel(&mut app, "");
+        assert_eq!(state["notice"], Value::Null, "{state}");
+        assert_eq!(
+            state["check"]["counts"],
+            json!({"错误": 1, "警告": 1, "提示": 0, "已豁免": 1}),
+            "{state}"
+        );
+        assert_eq!(state["check"]["stale"], false, "{state}");
+        assert_eq!(rows(&state), ["DR-201", "DR-202"]);
+        assert_eq!(app.pid_checks.last_serial(), checks);
+        assert_eq!(drawn_reason(&app, note), None);
+        let _ = act(&mut app, "show_waived=1");
+        assert_eq!(drawn_waived(&app), [note]);
+        // One undo step takes the waiver off the drawing.
+        let i = app.active_tab;
+        assert_eq!(drc::waivers(&app.tabs[i].scene.document).len(), 1);
+        let _ = app.automation_op(r#"{"op":"undo"}"#);
+        assert!(drc::waivers(&app.tabs[i].scene.document).is_empty());
+    }
+
+    #[test]
+    fn unwaiving_a_row_in_the_panel_takes_the_waiver_off_the_drawing() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        typed(&mut app, "PIDCHECK");
+        waive_the_note(&mut app);
+        let _ = act(&mut app, "show_waived=1");
+        let (note, _) = row_of(&panel(&mut app, ""), "DR-203", "PID-1101");
+        let answer = act(&mut app, &format!("unwaive={note}"));
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert!(drc::waivers(&app.tabs[app.active_tab].scene.document).is_empty());
+        let state = panel(&mut app, "");
+        assert_eq!(
+            state["check"]["counts"],
+            json!({"错误": 1, "警告": 1, "提示": 1, "已豁免": 0}),
+            "{state}"
+        );
+        assert_eq!(state["check"]["stale"], false, "{state}");
+        let answer = act(&mut app, &format!("unwaive={note}"));
+        assert_eq!(answer["reason"], "not_waived", "{answer}");
+    }
+
+    #[test]
+    fn the_panel_refuses_a_grey_waive_button_with_the_reason() {
+        let scratch = Scratch::new();
+        let mut app = two_sheets(&scratch);
+        typed(&mut app, "PIDCHECK");
+        waive_the_note(&mut app);
+        let _ = act(&mut app, "show_waived=1");
+        let (note, _) = row_of(&panel(&mut app, ""), "DR-203", "PID-1101");
+        let answer = act(&mut app, &format!("waive={note}:放空管"));
+        assert_eq!(answer["code"], "PANEL_ACTION_UNAVAILABLE", "{answer}");
+        assert_eq!(answer["reason"], "already_waived", "{answer}");
+        let _ = act(&mut app, "check=project");
+        let (pump, _) = row_of(&panel(&mut app, ""), "DR-202", "PID-1102");
+        let answer = act(&mut app, &format!("waive={pump}:备用泵"));
+        assert_eq!(answer["reason"], "not_on_this_drawing", "{answer}");
+        // A session that may not write waives nothing.
+        app.collab.readonly = true;
+        let state = panel(&mut app, "");
+        let listed = state["check"]["rows"].as_array().expect("the rows");
+        assert!(
+            listed.iter().all(|row| row["can_waive"] == false),
+            "{state}"
+        );
+        let (line, _) = row_of(&state, "DR-201", "PID-1101");
+        let answer = act(&mut app, &format!("waive={line}:临时线"));
+        assert_eq!(answer["code"], "PANEL_ACTION_UNAVAILABLE", "{answer}");
+        assert_eq!(answer["reason"], "readonly", "{answer}");
+        let i = app.active_tab;
+        assert_eq!(drc::waivers(&app.tabs[i].scene.document).len(), 1);
+    }
+
+    #[test]
+    fn a_waiver_no_result_matches_is_listed_and_dropped_from_the_panel() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        let i = app.active_tab;
+        let gone = drc::Waiver {
+            rule_id: "DR-203".to_owned(),
+            object_key: "管线|L-0999".to_owned(),
+            reason: "已拆除".to_owned(),
+            by: "张工".to_owned(),
+            at: 1_794_700_000,
+        };
+        drc::set_waivers(&mut app.tabs[i].scene.document, std::slice::from_ref(&gone));
+        typed(&mut app, "PIDCHECK");
+        assert_eq!(panel(&mut app, "")["check"]["stale_waivers"], 1);
+        let _ = app.update(Message::PidVerify(PidVerifyMsg::StaleWaivers));
+        let shown = app.pid_verify_view.check.shown.clone();
+        let shown = shown.expect("the check drawn");
+        assert!(shown.stale_open);
+        let listed: Vec<(&str, bool)> = shown
+            .stale_waivers
+            .iter()
+            .map(|waiver| (waiver.object_key.as_str(), waiver.can_drop))
+            .collect();
+        assert_eq!(listed, [("管线|L-0999", true)]);
+        let steps = undo_steps(&app);
+        let _ = app.update(Message::PidVerify(PidVerifyMsg::DropWaiver {
+            rule_id: gone.rule_id.clone(),
+            object_key: gone.object_key.clone(),
+        }));
+        assert!(drc::waivers(&app.tabs[i].scene.document).is_empty());
+        assert_eq!(undo_steps(&app), steps + 1);
+        let state = panel(&mut app, "");
+        assert_eq!(state["check"]["stale_waivers"], 0, "{state}");
+        assert_eq!(state["notice"], Value::Null, "{state}");
+    }
+
+    #[test]
+    fn the_drawn_rule_check_tab_draws_the_reason_box_and_the_stale_waivers() {
+        let _one = crate::headless_ui_lock();
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let scratch = Scratch::new();
+                let mut app = sheet(&scratch);
+                app.win_size = (1600.0, 900.0);
+                let i = app.active_tab;
+                let gone = drc::Waiver {
+                    rule_id: "DR-203".to_owned(),
+                    object_key: "管线|L-0999".to_owned(),
+                    reason: "已拆除".to_owned(),
+                    by: "张工".to_owned(),
+                    at: 1_794_700_000,
+                };
+                drc::set_waivers(&mut app.tabs[i].scene.document, &[gone]);
+                typed(&mut app, "PIDCHECK");
+                let (note, _) = row_of(&panel(&mut app, ""), "DR-203", "PID-1101");
+                for msg in [
+                    PidVerifyMsg::StaleWaivers,
+                    PidVerifyMsg::Locate(note),
+                    PidVerifyMsg::AskWaiver(note),
+                    PidVerifyMsg::WaiverReason("放空".to_owned()),
+                ] {
+                    let task = app.update(Message::PidVerify(msg));
+                    app.drive_headless_task(task).expect("the press's task");
+                }
+                assert_eq!(drawn_reason(&app, note), Some("放空".to_owned()));
+                let drawn = drawn_ids(&app);
+                let shown = app.pid_verify_view.check.shown.clone();
+                let shown = shown.expect("the check drawn");
+                assert!(shown.stale_open);
+                for row in &shown.rows {
+                    assert!(drawn.contains(&row.bounds_id()), "{drawn:?}");
+                }
+            })
+            .expect("spawn test thread")
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
     }
 
     #[test]

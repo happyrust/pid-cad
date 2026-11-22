@@ -38,6 +38,8 @@
 //! 去一张图：有标签页开着它就切过去，没有就打开，打开以后接着找。在哪张图上都按
 //! （类型编码, 位号）照图现在的样子现找，不用摘要里记的句柄（§5.2）；位号不分大小写，
 //! 与 `PIDTAG` 一样。找到的只选中它们、缩放到它们；画不出样子的按外框和定位点缩放。
+//! 「校验与交付」面板点一条检查结果也走这里（`pidlocate_result`）：同样去那张图、现找、选中、
+//! 缩放，不在命令行上说话，定位成什么样说在面板的消息栏里。
 //!
 //! 自动化操作（§5.3）：`pid_summary` 是当前图的摘要；`pid_index` 是项目索引，带 `tag`
 //! 时加上这个位号的各处（`places`）；`pid_locate` 同 `PIDLOCATE`，结果（图号、标签页、
@@ -51,7 +53,7 @@ use super::pidbom::BomJob;
 use super::piddrc::Check;
 use super::pidpublish::PublishJob;
 use super::*;
-use crate::pid::drc::Waiver;
+use crate::pid::drc::{CheckResult, Waiver};
 use crate::pid::project_index::{
     build_index, compare_places, list_drawings, summarize, DrawingFile, DrawingSummary,
     FailedDrawing, Fingerprint, IndexError, LinkEnd, LinkFamily, LinkStatus, Place, ProjectIndex,
@@ -308,12 +310,29 @@ struct Wanted {
 }
 
 /// 为定位打开的一张图：编号是 `open_id` 的那次打开（`OpenProgress::id`）做完了，就在
-/// 它上面找 `wanted`；`reply` 是 `pid_locate` 在等这次打开，找到了把结果交给它。
+/// 它上面接着做 `then`。
 struct Opening {
     open_id: u64,
     drawing_id: String,
-    wanted: Wanted,
-    reply: bool,
+    then: Opened,
+}
+
+/// 为定位打开一张图以后接着做的。
+enum Opened {
+    /// 找 `wanted`；`reply` 是 `pid_locate` 在等这次打开，找到了把结果交给它。
+    Find { wanted: Wanted, reply: bool },
+    /// 定位「校验与交付」面板点的这条检查结果（[`OpenCADStudio::pidlocate_result`]）。
+    Result(Box<CheckResult>),
+}
+
+/// 面板点的一条检查结果定位成了什么样（`SPEC-pid-verify-deliver-panel.md` §4.3）。
+pub(super) enum Landed {
+    /// 按（类型编码，位号）现找到了，选中了。
+    Found,
+    /// 有自己的位号，图上却现找不到了：缩放到了结果里记的位置。
+    Gone,
+    /// 没有自己的位号：缩放到了结果里记的位置。
+    Spot,
 }
 
 /// 自动化操作扫出的项目索引：项目目录、索引、读得出来的各图的摘要。
@@ -1155,23 +1174,12 @@ impl OpenCADStudio {
             wanted.tag
         ));
         let task = self.update(Message::OpenRecent(path.clone()));
-        // 打开可能没起来（文件刚被删、一次只开一张图而当前图没存），那时没有这次打开。
-        let open_id = self
-            .opening
-            .as_ref()
-            .filter(|open| {
-                open.source_path
-                    .as_deref()
-                    .is_some_and(|source| same_file(source) == same_file(&path))
-            })
-            .map(|open| open.id);
-        match open_id {
+        match self.pidlocate_open_id(&path) {
             Some(open_id) => {
                 self.pid_index.opening = Some(Opening {
                     open_id,
                     drawing_id: drawing_id.to_string(),
-                    wanted,
-                    reply,
+                    then: Opened::Find { wanted, reply },
                 });
             }
             None => self.pidlocate_not_opened(drawing_id, &wanted.tag),
@@ -1179,8 +1187,22 @@ impl OpenCADStudio {
         task
     }
 
+    /// 刚起的那次打开 `path` 的编号。打开可能没起来（文件刚被删、一次只开一张图而当前图
+    /// 没存），那时没有这次打开。
+    fn pidlocate_open_id(&self, path: &Path) -> Option<u64> {
+        self.opening
+            .as_ref()
+            .filter(|open| {
+                open.source_path
+                    .as_deref()
+                    .is_some_and(|source| same_file(source) == same_file(path))
+            })
+            .map(|open| open.id)
+    }
+
     /// 编号是 `open_id` 的那次打开做完了，打开的是 `path`：是为定位打开的，就在它的
-    /// 标签页上接着找；`pid_locate` 在等就把结果交给它。
+    /// 标签页上接着找，`pid_locate` 在等就把结果交给它；是面板为一条检查结果打开的，就在
+    /// 上面定位那条结果。
     pub(in crate::app) fn on_pid_locate_opened(&mut self, open_id: u64, path: &Path) {
         let Some(opening) = self
             .pid_index
@@ -1190,25 +1212,42 @@ impl OpenCADStudio {
             return;
         };
         let tab = self.pidlocate_tab(path).unwrap_or(self.active_tab);
+        let (wanted, reply) = match opening.then {
+            Opened::Find { wanted, reply } => (wanted, reply),
+            Opened::Result(result) => {
+                let landed = self.pidlocate_result(tab, &result);
+                self.pid_verify_landed(landed);
+                return;
+            }
+        };
         let place = format!("{} 上", opening.drawing_id);
-        match self.pidlocate_in(tab, &opening.wanted, &place) {
-            Some(handles) if opening.reply => {
+        match self.pidlocate_in(tab, &wanted, &place) {
+            Some(handles) if reply => {
                 let result = located(&opening.drawing_id, self.tabs[tab].id, &handles);
                 self.set_control_result(result);
             }
             Some(_) => {}
-            None => self.pidlocate_gone(&opening.drawing_id, &opening.wanted.tag),
+            None => self.pidlocate_gone(&opening.drawing_id, &wanted.tag),
         }
     }
 
     /// 编号是 `open_id` 的那次打开失败了：是为定位打开的，就不再等它，说没定位。
     pub(in crate::app) fn on_pid_locate_open_failed(&mut self, open_id: u64) {
-        if let Some(opening) = self
+        let Some(opening) = self
             .pid_index
             .opening
             .take_if(|opening| opening.open_id == open_id)
-        {
-            self.pidlocate_not_opened(&opening.drawing_id, &opening.wanted.tag);
+        else {
+            return;
+        };
+        match opening.then {
+            Opened::Find { wanted, .. } => {
+                self.pidlocate_not_opened(&opening.drawing_id, &wanted.tag);
+            }
+            Opened::Result(_) => self.pid_verify_not_located(
+                None,
+                format!("{} 没打开，没定位到这条结果。", opening.drawing_id),
+            ),
         }
     }
 
@@ -1284,6 +1323,120 @@ impl OpenCADStudio {
             return None;
         }
         Some(self.pidlocate_select(i, &picks, place))
+    }
+
+    /// 「校验与交付」面板点的一条检查结果，在第 `i` 个标签页的图上定位
+    /// （`SPEC-pid-verify-deliver-panel.md` §4.3）。有自己位号的，按（类型编码，位号）照图现在
+    /// 的样子现找（[`Self::pick_on`]，不用结果里的句柄），找到了只选中它们、缩放到它们，同
+    /// `PIDLOCATE`；结果记了几个位置的，缩放到这些位置的外包范围。现找不到的、没有自己
+    /// 位号的，什么也不选，缩放到结果里记的位置（没记就是对象的定位点）。命令行上什么也
+    /// 不说。
+    pub(super) fn pidlocate_result(&mut self, i: usize, result: &CheckResult) -> Landed {
+        let object = &result.object;
+        let places = if result.points.is_empty() {
+            std::slice::from_ref(&object.at)
+        } else {
+            result.points.as_slice()
+        };
+        let spots: Vec<Pick> = places
+            .iter()
+            .map(|&place| {
+                let place = glam::DVec2::from(place);
+                Pick {
+                    handle: String::new(),
+                    said: String::new(),
+                    low: place,
+                    high: place,
+                }
+            })
+            .collect();
+        let tag = object.tag.as_deref().filter(|tag| !tag.is_empty());
+        let picks = tag
+            .map(|tag| {
+                let wanted = Wanted {
+                    tag: tag.to_owned(),
+                    type_code: Some(object.type_code.clone()),
+                    at: None,
+                };
+                self.pick_on(i, &wanted)
+            })
+            .unwrap_or_default();
+        let handles: Vec<document::Handle> = picks
+            .iter()
+            .filter_map(|pick| parse_handle(&pick.handle))
+            .collect();
+        let scene = &mut self.tabs[i].scene;
+        scene.deselect_all();
+        scene.select_entities(&handles);
+        scene.remember_current_view();
+        if picks.is_empty() || spots.len() > 1 {
+            let (min, max) = frame(&spots);
+            scene.zoom_to_window(min, max);
+        } else if !scene.zoom_to_entities(&handles) {
+            let (min, max) = frame(&picks);
+            scene.zoom_to_window(min, max);
+        }
+        self.refresh_properties();
+        match (tag, picks.is_empty()) {
+            (None, _) => Landed::Spot,
+            (Some(_), true) => Landed::Gone,
+            (Some(_), false) => Landed::Found,
+        }
+    }
+
+    /// 面板点的检查结果在项目目录 `project_dir` 里的另一张图上（§4.3）：有标签页开着它就切
+    /// 过去当场定位（[`Self::pidlocate_result`]），没有就打开它、打开以后接着定位
+    /// （`on_pid_locate_opened`），同 `PIDLOCATE` 去一张图。定位成什么样、图不在目录里、没打开
+    /// 成，都在面板的消息栏里说。
+    pub(super) fn pidlocate_result_elsewhere(
+        &mut self,
+        project_dir: &Path,
+        result: CheckResult,
+    ) -> Task<Message> {
+        let drawing_id = result.object.drawing_id.clone();
+        let path = match list_drawings(project_dir) {
+            Ok(drawings) => drawings
+                .into_iter()
+                .find(|drawing| drawing.drawing_id == drawing_id)
+                .map(|drawing| drawing.path),
+            Err(error) => {
+                self.pid_verify_not_located(
+                    None,
+                    format!("项目目录读不了，没定位到这条结果：{error}"),
+                );
+                return Task::none();
+            }
+        };
+        let Some(path) = path else {
+            self.pid_verify_not_located(
+                Some(LOCATE_NOT_FOUND),
+                format!("项目目录里已经没有 {drawing_id} 这张图，定位不到这条结果。"),
+            );
+            return Task::none();
+        };
+        if let Some(tab) = self.pidlocate_tab(&path) {
+            let switched = if tab == self.active_tab {
+                Task::none()
+            } else {
+                self.update(Message::TabSwitch(tab))
+            };
+            let landed = self.pidlocate_result(tab, &result);
+            self.pid_verify_landed(landed);
+            return switched;
+        }
+        let task = self.update(Message::OpenRecent(path.clone()));
+        match self.pidlocate_open_id(&path) {
+            Some(open_id) => {
+                self.pid_index.opening = Some(Opening {
+                    open_id,
+                    drawing_id,
+                    then: Opened::Result(Box::new(result)),
+                });
+            }
+            None => self
+                .pid_verify_not_located(None, format!("{drawing_id} 没打开，没定位到这条结果。")),
+        }
+        task
     }
 
     // ── 自动化操作（§5.3） ──

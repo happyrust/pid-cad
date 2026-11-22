@@ -15,10 +15,13 @@
 //! The texts are Chinese literals, as in the collaboration panel (§9 V2).
 
 use crate::app::Message;
-use crate::pid::drc::{self, CheckReport, CheckResult, Scope, ScopeKind, Severity, Summary};
+use crate::pid::drc::{
+    self, CheckReport, CheckResult, Scope, ScopeKind, Severity, Summary, Waiver,
+    WAIVER_REASON_LIMIT,
+};
 use crate::ui::dock::{Chrome, PanelId};
 use crate::ui::wrap_bar::PosReport;
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Element, Fill, Theme};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -90,6 +93,14 @@ pub const ALL_FILTERED: &str = "没有符合筛选条件的结果。";
 /// (§3.1).
 pub const STALE: &str = "图纸已改动，结果可能过期";
 
+/// What the message bar says when a result clicked names an object with a
+/// tag of its own that is no longer on its drawing (§4.3).
+pub const GONE: &str = "对象已不在图上，结果可能过期";
+
+/// Widget id of the reason box under a row (§4.4): 【豁免】 puts the cursor
+/// in it.
+pub const REASON_ID: &str = "pid-verify-waiver-reason";
+
 /// What the user did in the panel: one message per button, tag and list
 /// header.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +129,24 @@ pub enum PidVerifyMsg {
     PickExport,
     /// Write the check result to this file, as `PIDCHECK EXPORT` does.
     Export(String),
+    /// A row of the rule-check list clicked: find its object (§4.3).
+    Locate(usize),
+    /// 【豁免】 at the end of a row: open the reason box under it (§4.4).
+    AskWaiver(usize),
+    /// What is typed in the reason box.
+    WaiverReason(String),
+    /// 【确认】 under the reason box: waive the row of this index for this
+    /// reason.
+    Waive(usize, String),
+    /// 【取消】 under the reason box.
+    CancelWaiver,
+    /// 【取消豁免】 at the end of a waived row.
+    Unwaive(usize),
+    /// 「有 N 条豁免已经对不上」: list those waivers, or fold the list.
+    StaleWaivers,
+    /// 【删除】 beside a waiver no result matches: take it off the drawing
+    /// in front.
+    DropWaiver { rule_id: String, object_key: String },
 }
 
 impl PidVerifyMsg {
@@ -207,6 +236,13 @@ pub struct VerifyUi {
     pub more: usize,
     /// The last message (§3.1): what came of the last thing pressed.
     pub notice: Option<Notice>,
+    /// The row last clicked (§3.2 `check.located`): the serial of the check
+    /// it is a row of, and its index in that check's results.
+    pub located: Option<(u64, usize)>,
+    /// The reason box open under a row (§4.4), at most one.
+    pub waiving: Option<Waiving>,
+    /// Whether the waivers no result matches are listed.
+    pub stale_open: bool,
 }
 
 impl Default for VerifyUi {
@@ -219,8 +255,21 @@ impl Default for VerifyUi {
             folded: Vec::new(),
             more: 0,
             notice: None,
+            located: None,
+            waiving: None,
+            stale_open: false,
         }
     }
+}
+
+/// A reason box open under a row (§4.4): the serial of the check the row
+/// is of, the row's index in its results, and what is typed in the box.
+/// Another check shown closes it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Waiving {
+    pub serial: u64,
+    pub index: usize,
+    pub reason: String,
 }
 
 /// The panel's message bar (§3.2 `notice`).
@@ -280,6 +329,9 @@ pub struct Context {
     /// Whether something runs in the background (§4.7): the buttons that
     /// would start more are grey meanwhile.
     pub busy: bool,
+    /// The waivers that drawing keeps, as (rule, object key): of the
+    /// waivers no result matches, only these can be taken off from here.
+    pub waivers: Vec<(String, String)>,
 }
 
 /// A rule check the program keeps (§3.1), lent to [`build_view`].
@@ -359,13 +411,33 @@ pub struct Shown {
     /// The kinds of object it found results on, for the kind tags.
     pub kinds: Vec<String>,
     pub notices: Vec<drc::Notice>,
-    /// How many waivers no longer match a result.
-    pub stale_waivers: usize,
+    /// The waivers no result matches any more.
+    pub stale_waivers: Vec<StaleWaiver>,
+    /// Whether they are listed.
+    pub stale_open: bool,
     /// The groups with rows the filters leave, in order.
     pub groups: Vec<GroupView>,
     /// Every row the filters leave, group after group, folded groups'
     /// included.
     pub rows: Vec<RowView>,
+    /// Which check of the program's it is ([`KeptCheck::serial`]).
+    pub serial: u64,
+    /// The index of the row last clicked, while this check is shown.
+    pub located: Option<usize>,
+}
+
+/// A waiver no result of the check shown matches (§4.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleWaiver {
+    pub rule_id: String,
+    pub object_key: String,
+    pub reason: String,
+    pub by: String,
+    /// Unix seconds.
+    pub at: i64,
+    /// Whether 【删除】 can be pressed: the drawing in front keeps it and
+    /// the session may change that drawing.
+    pub can_drop: bool,
 }
 
 /// One group of the rule-check list.
@@ -411,6 +483,13 @@ pub struct RowView {
     /// first line names the drawing it is on.
     pub here: bool,
     pub can_waive: bool,
+    /// Whether 【取消豁免】 can be pressed: on a waived row, on the terms
+    /// of `can_waive` (§4.4).
+    pub can_unwaive: bool,
+    /// Whether it is the row last clicked.
+    pub located: bool,
+    /// What is typed in its reason box, while that is open.
+    pub reason: Option<String>,
 }
 
 impl RowView {
@@ -551,6 +630,14 @@ fn check_view(ui: &VerifyUi, kept: Option<KeptCheck<'_>>, context: &Context) -> 
         .cloned()
         .collect();
     let drawn = ROWS_PER_PAGE.saturating_mul(ui.more.saturating_add(1));
+    let located = ui
+        .located
+        .filter(|(serial, _)| *serial == kept.serial)
+        .map(|(_, index)| index);
+    let waiving = ui
+        .waiving
+        .as_ref()
+        .filter(|waiving| waiving.serial == kept.serial);
     let mut groups = Vec::new();
     let mut rows = Vec::new();
     for group in Group::ALL.into_iter().filter(|group| group.listed(ui)) {
@@ -564,7 +651,14 @@ fn check_view(ui: &VerifyUi, kept: Option<KeptCheck<'_>>, context: &Context) -> 
                     Group::of(result) == group
                         && (kinds_on.is_empty() || kinds_on.contains(&result.object.kind))
                 })
-                .map(|(index, result)| row_view(index, result, context)),
+                .map(|(index, result)| {
+                    let mut row = row_view(index, result, context);
+                    row.located = located == Some(index);
+                    row.reason = waiving
+                        .filter(|waiving| waiving.index == index && row.can_waive)
+                        .map(|waiving| waiving.reason.clone());
+                    row
+                }),
         );
         let count = rows.len() - first;
         if count == 0 {
@@ -591,9 +685,16 @@ fn check_view(ui: &VerifyUi, kept: Option<KeptCheck<'_>>, context: &Context) -> 
             found: report.results.len(),
             kinds,
             notices: report.notices.clone(),
-            stale_waivers: report.stale_waivers.len(),
+            stale_waivers: report
+                .stale_waivers
+                .iter()
+                .map(|waiver| stale_waiver(waiver, context))
+                .collect(),
+            stale_open: ui.stale_open,
             groups,
             rows,
+            serial: kept.serial,
+            located,
         }),
         severities,
         kinds_on,
@@ -613,7 +714,7 @@ fn check_empty(check: &CheckView) -> Option<&'static str> {
 
 /// The row of the result at `index`. It can be waived where the session may
 /// write, the object is on the drawing in front and it is not waived
-/// already (§4.8).
+/// already, and unwaived on the same terms once it is (§4.8).
 fn row_view(index: usize, result: &CheckResult, context: &Context) -> RowView {
     let here = context.drawing_id.as_deref() == Some(result.object.drawing_id.as_str());
     RowView {
@@ -633,6 +734,26 @@ fn row_view(index: usize, result: &CheckResult, context: &Context) -> RowView {
             .map(|waiver| (waiver.reason.clone(), waiver.by.clone(), waiver.at)),
         here,
         can_waive: context.writable && here && !result.waived,
+        can_unwaive: context.writable && here && result.waived,
+        located: false,
+        reason: None,
+    }
+}
+
+/// A waiver no result matches, as listed. 【删除】 takes it off the drawing
+/// in front, so only one that drawing keeps can be (§4.4).
+fn stale_waiver(waiver: &Waiver, context: &Context) -> StaleWaiver {
+    let kept = context
+        .waivers
+        .iter()
+        .any(|(rule_id, key)| *rule_id == waiver.rule_id && *key == waiver.object_key);
+    StaleWaiver {
+        rule_id: waiver.rule_id.clone(),
+        object_key: waiver.object_key.clone(),
+        reason: waiver.reason.clone(),
+        by: waiver.by.clone(),
+        at: waiver.at,
+        can_drop: context.writable && kept,
     }
 }
 
@@ -746,10 +867,10 @@ fn check_state(check: &CheckView) -> Value {
         "filters": filters,
         "kinds": shown.kinds,
         "notices": shown.notices,
-        "stale_waivers": shown.stale_waivers,
+        "stale_waivers": shown.stale_waivers.len(),
         "total": shown.rows.len(),
         "rows": shown.rows.iter().map(row_state).collect::<Vec<_>>(),
-        "located": null
+        "located": shown.located
     })
 }
 
@@ -848,7 +969,11 @@ impl std::fmt::Display for PanelError {
 /// `view` is what the panel draws now, so a key whose button is grey
 /// there, or whose row is not in its list, is refused rather than pressed.
 /// A value is read in this order: how it is written, then whether its
-/// button is grey, then whether what it names is in the panel's lists.
+/// button is grey, then whether what it names is in the panel's lists. A
+/// row's own buttons are grey or not by the row, so for `waive` and
+/// `unwaive` that comes last: a session that may not write is refused
+/// first, then a row the list does not have, then a row whose button is
+/// grey.
 pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, PanelError> {
     let (key, written) = match value.split_once('=') {
         Some((key, written)) => (key, Some(written)),
@@ -938,6 +1063,42 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
             }
             checked()?;
             Ok(PidVerifyMsg::MoreChecks)
+        }
+        "locate" | "waive" | "unwaive" => {
+            let form = match key {
+                "locate" => "成 locate=<下标>",
+                "waive" => "成 waive=<下标>:<理由>",
+                _ => "成 unwaive=<下标>",
+            };
+            let written = written.unwrap_or_default();
+            let (number, reason) = match written.split_once(':') {
+                Some((number, reason)) if key == "waive" => (number, reason),
+                _ if key == "waive" => return Err(invalid(form)),
+                _ => (written, ""),
+            };
+            let index = number.trim().parse::<usize>().map_err(|_| invalid(form))?;
+            let shown = checked()?;
+            if key != "locate" && !view.writable {
+                return Err(PanelError::Unavailable { reason: "readonly" });
+            }
+            let row = shown
+                .rows
+                .iter()
+                .find(|row| row.index == index)
+                .ok_or_else(|| {
+                    PanelError::RowNotFound(format!(
+                        "规则检查的列表里现在没有下标 {index} 的一行（筛掉的和没显示的已豁免结果不在列表里）"
+                    ))
+                })?;
+            let grey = match key {
+                "locate" => return Ok(PidVerifyMsg::Locate(index)),
+                _ if !row.here => "not_on_this_drawing",
+                "waive" if row.waived => "already_waived",
+                "waive" => return Ok(PidVerifyMsg::Waive(index, reason.to_owned())),
+                _ if !row.waived => "not_waived",
+                _ => return Ok(PidVerifyMsg::Unwaive(index)),
+            };
+            Err(PanelError::Unavailable { reason: grey })
         }
         _ => Err(PanelError::InvalidValue(format!(
             "面板没有 \"{key}\" 这个键"
@@ -1078,17 +1239,57 @@ fn check_tab(view: &VerifyView) -> Element<'_, Message> {
     for notice in &shown.notices {
         tab = tab.push(text(notice.message.as_str()).size(11).style(muted));
     }
-    if shown.stale_waivers > 0 {
-        tab = tab.push(
-            text(format!("有 {} 条豁免已经对不上", shown.stale_waivers))
-                .size(11)
-                .style(warning),
-        );
+    if !shown.stale_waivers.is_empty() {
+        tab = tab.push(stale_waivers(shown));
     }
     match view.empty {
         Some(said) => tab.push(empty_text(said)).into(),
         None => tab.push(scrollable(check_list(shown)).height(Fill)).into(),
     }
+}
+
+/// 「有 N 条豁免已经对不上」, which lists them or folds the list, and each
+/// listed with 【删除】.
+fn stale_waivers(shown: &Shown) -> Element<'_, Message> {
+    let arrow = if shown.stale_open { "▼" } else { "▶" };
+    let header = button(
+        text(format!(
+            "{arrow} 有 {} 条豁免已经对不上",
+            shown.stale_waivers.len()
+        ))
+        .size(11)
+        .style(warning),
+    )
+    .on_press(PidVerifyMsg::StaleWaivers.message())
+    .padding([2, 4])
+    .style(button::text);
+    let mut list = column![header].spacing(2);
+    if !shown.stale_open {
+        return list.into();
+    }
+    for waiver in &shown.stale_waivers {
+        let drop = waiver.can_drop.then(|| PidVerifyMsg::DropWaiver {
+            rule_id: waiver.rule_id.clone(),
+            object_key: waiver.object_key.clone(),
+        });
+        let said = format!(
+            "{} {} · {}（{}，{}）",
+            waiver.rule_id,
+            waiver.object_key,
+            waiver.reason,
+            waiver.by,
+            utc_said(waiver.at)
+        );
+        list = list.push(
+            row![
+                text(said).size(11).style(muted).width(Fill),
+                small_button("删除", drop)
+            ]
+            .spacing(4)
+            .align_y(iced::Center),
+        );
+    }
+    list.into()
 }
 
 /// The status line (§4.2): scope, when, rule version, how long.
@@ -1170,7 +1371,9 @@ fn check_list(shown: &Shown) -> Element<'_, Message> {
 }
 
 /// One result (§4.2): rule and object, the message, the fix in a lighter
-/// colour, and on a waived row why, by whom and when.
+/// colour, and on a waived row why, by whom and when. Clicking it finds its
+/// object (§4.3); at its end 【豁免】 or 【取消豁免】, and under it the reason
+/// box while that is open (§4.4).
 fn result_row(row: &RowView) -> Element<'_, Message> {
     let mut lines = column![
         text(row.headline()).size(12),
@@ -1187,7 +1390,47 @@ fn result_row(row: &RowView) -> Element<'_, Message> {
                 .style(muted),
         );
     }
-    container(lines).padding([2, 8]).width(Fill).into()
+    let located = row.located;
+    let body = button(lines)
+        .on_press(PidVerifyMsg::Locate(row.index).message())
+        .padding([2, 8])
+        .width(Fill)
+        .style(move |theme: &Theme, status| {
+            if located {
+                button::secondary(theme, status)
+            } else {
+                button::text(theme, status)
+            }
+        });
+    let end = if row.waived {
+        let press = row.can_unwaive.then_some(PidVerifyMsg::Unwaive(row.index));
+        small_button("取消豁免", press)
+    } else {
+        let asking = row.can_waive && row.reason.is_none();
+        small_button("豁免", asking.then_some(PidVerifyMsg::AskWaiver(row.index)))
+    };
+    let line = row![body, end].spacing(4).align_y(iced::Center);
+    let Some(reason) = &row.reason else {
+        return line.into();
+    };
+    let confirm = PidVerifyMsg::Waive(row.index, reason.clone());
+    let hint = format!("豁免理由（必填，最多 {WAIVER_REASON_LIMIT} 字）");
+    let reason_box = row![
+        text_input(&hint, reason)
+            .id(iced::widget::Id::new(REASON_ID))
+            .on_input(|typed| PidVerifyMsg::WaiverReason(typed).message())
+            .on_submit(confirm.clone().message())
+            .size(12)
+            .padding([3, 6])
+            .width(Fill),
+        small_button("确认", Some(confirm)),
+        small_button("取消", Some(PidVerifyMsg::CancelWaiver))
+    ]
+    .spacing(4)
+    .align_y(iced::Center);
+    column![line, container(reason_box).padding([0, 8])]
+        .spacing(2)
+        .into()
 }
 
 #[cfg(test)]
@@ -1267,6 +1510,7 @@ mod tests {
             writable: false,
             saved: false,
             busy: false,
+            waivers: Vec::new(),
         }
     }
 
@@ -1567,6 +1811,7 @@ mod tests {
             writable: true,
             saved: true,
             busy: false,
+            waivers: Vec::new(),
         }
     }
 
@@ -2187,6 +2432,342 @@ mod tests {
         assert_eq!(
             parse_action("kind=换热器", &view).map_err(|refused| refused.to_string()),
             Err("这次检查的结果里没有种类「换热器」；有的是：仪表、管线、设备、阀门".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_row_last_clicked_is_located_while_its_check_is_shown() {
+        let five = five();
+        let ui = VerifyUi {
+            located: Some((1, 2)),
+            ..VerifyUi::default()
+        };
+        let view = viewed(&ui, &five);
+        let shown = view.check.shown.as_ref().expect("a result shown");
+        assert_eq!(shown.located, Some(2));
+        let located: Vec<usize> = shown
+            .rows
+            .iter()
+            .filter(|row| row.located)
+            .map(|row| row.index)
+            .collect();
+        assert_eq!(located, [2]);
+        assert_eq!(panel_state(&view, ROWS_PER_PAGE, 0)["check"]["located"], 2);
+        // A row of another check: nothing is located in this one.
+        let other = VerifyUi {
+            located: Some((0, 2)),
+            ..VerifyUi::default()
+        };
+        let view = viewed(&other, &five);
+        let shown = view.check.shown.as_ref().expect("a result shown");
+        assert_eq!(shown.located, None);
+        assert!(shown.rows.iter().all(|row| !row.located));
+        assert_eq!(
+            panel_state(&view, ROWS_PER_PAGE, 0)["check"]["located"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn the_reason_box_is_open_under_a_row_that_can_be_waived_while_its_check_is_shown() {
+        let five = five();
+        let kept = DrawingResults {
+            check: Some(KeptCheck {
+                report: &five,
+                serial: 1,
+                stale: false,
+            }),
+        };
+        let open = |serial: u64, index: usize, context: &Context| -> Vec<(usize, String)> {
+            let ui = VerifyUi {
+                show_waived: true,
+                waiving: Some(Waiving {
+                    serial,
+                    index,
+                    reason: "另有联锁".to_owned(),
+                }),
+                ..VerifyUi::default()
+            };
+            let view = build_view(&ui, Some(&kept), None, context);
+            let shown = view.check.shown.expect("a result shown");
+            shown
+                .rows
+                .into_iter()
+                .filter_map(|row| Some((row.index, row.reason?)))
+                .collect()
+        };
+        assert_eq!(open(1, 1, &in_front()), [(1, "另有联锁".to_owned())]);
+        // Not under a row of another check, a waived row, or in a session
+        // that may not write.
+        assert!(open(2, 1, &in_front()).is_empty());
+        assert!(open(1, 3, &in_front()).is_empty());
+        let read_only = Context {
+            writable: false,
+            ..in_front()
+        };
+        assert!(open(1, 1, &read_only).is_empty());
+    }
+
+    #[test]
+    fn a_waived_row_can_be_unwaived_on_this_drawing_by_a_session_that_may_write() {
+        let project = report(
+            ScopeKind::Project,
+            vec![
+                found("DR-001", Severity::Error, "管线", "L-1001", "PID-1101"),
+                waived(found(
+                    "DR-102",
+                    Severity::Error,
+                    "设备",
+                    "P-1001",
+                    "PID-1102",
+                )),
+                waived(found(
+                    "DR-008",
+                    Severity::Warning,
+                    "阀门",
+                    "V-1001",
+                    "PID-1101",
+                )),
+            ],
+        );
+        let kept = ProjectResults {
+            check: Some(KeptCheck {
+                report: &project,
+                serial: 1,
+                stale: false,
+            }),
+        };
+        let ui = VerifyUi {
+            show_waived: true,
+            ..VerifyUi::default()
+        };
+        let unwaivable = |context: &Context| -> Vec<(usize, bool)> {
+            let view = build_view(&ui, None, Some(&kept), context);
+            let shown = view.check.shown.expect("a result shown");
+            shown
+                .rows
+                .iter()
+                .map(|row| (row.index, row.can_unwaive))
+                .collect()
+        };
+        assert_eq!(unwaivable(&in_front()), [(0, false), (1, false), (2, true)]);
+        let read_only = Context {
+            writable: false,
+            ..in_front()
+        };
+        assert_eq!(unwaivable(&read_only), [(0, false), (1, false), (2, false)]);
+    }
+
+    #[test]
+    fn the_waivers_no_result_matches_are_listed_and_only_those_the_drawing_keeps_can_be_dropped() {
+        let mut five = five();
+        for (key, reason) in [("管线|L-0999", "已拆除"), ("管线|L-0998", "改走地下")] {
+            five.stale_waivers.push(drc::Waiver {
+                rule_id: "DR-003".to_owned(),
+                object_key: key.to_owned(),
+                reason: reason.to_owned(),
+                by: "张工".to_owned(),
+                at: 1_794_700_000,
+            });
+        }
+        let kept = DrawingResults {
+            check: Some(KeptCheck {
+                report: &five,
+                serial: 1,
+                stale: false,
+            }),
+        };
+        // The drawing in front keeps only the first.
+        let keeps = Context {
+            waivers: vec![("DR-003".to_owned(), "管线|L-0999".to_owned())],
+            ..in_front()
+        };
+        let listed = |ui: &VerifyUi, context: &Context| -> (bool, Vec<(String, bool)>) {
+            let view = build_view(ui, Some(&kept), None, context);
+            let shown = view.check.shown.expect("a result shown");
+            let waivers = shown
+                .stale_waivers
+                .iter()
+                .map(|waiver| (waiver.object_key.clone(), waiver.can_drop))
+                .collect();
+            (shown.stale_open, waivers)
+        };
+        let open = VerifyUi {
+            stale_open: true,
+            ..VerifyUi::default()
+        };
+        assert_eq!(
+            listed(&open, &keeps),
+            (
+                true,
+                vec![
+                    ("管线|L-0999".to_owned(), true),
+                    ("管线|L-0998".to_owned(), false)
+                ]
+            )
+        );
+        assert!(!listed(&VerifyUi::default(), &keeps).0);
+        let read_only = Context {
+            writable: false,
+            ..keeps.clone()
+        };
+        assert_eq!(
+            listed(&open, &read_only).1,
+            [
+                ("管线|L-0999".to_owned(), false),
+                ("管线|L-0998".to_owned(), false)
+            ]
+        );
+        // The panel state counts them all.
+        let view = build_view(&open, Some(&kept), None, &keeps);
+        assert_eq!(
+            panel_state(&view, ROWS_PER_PAGE, 0)["check"]["stale_waivers"],
+            2
+        );
+    }
+
+    #[test]
+    fn pid_verify_action_reads_the_row_keys() {
+        let five = five();
+        let ui = VerifyUi {
+            show_waived: true,
+            ..VerifyUi::default()
+        };
+        let view = viewed(&ui, &five);
+        for (value, pressed) in [
+            ("locate=0", PidVerifyMsg::Locate(0)),
+            ("locate=3", PidVerifyMsg::Locate(3)),
+            (
+                "waive=0:放空管",
+                PidVerifyMsg::Waive(0, "放空管".to_owned()),
+            ),
+            // The waiver's entry refuses an empty reason, in the message bar.
+            ("waive=4:", PidVerifyMsg::Waive(4, String::new())),
+            (
+                "waive=1:见联锁表:第 3 行=甲",
+                PidVerifyMsg::Waive(1, "见联锁表:第 3 行=甲".to_owned()),
+            ),
+            ("unwaive=3", PidVerifyMsg::Unwaive(3)),
+        ] {
+            assert_eq!(parse_action(value, &view), Ok(pressed), "{value}");
+        }
+    }
+
+    #[test]
+    fn pid_verify_action_refuses_a_grey_row_button_with_the_reason() {
+        let five = five();
+        let ui = VerifyUi {
+            show_waived: true,
+            ..VerifyUi::default()
+        };
+        let kept = DrawingResults {
+            check: Some(KeptCheck {
+                report: &five,
+                serial: 1,
+                stale: false,
+            }),
+        };
+        let writable = build_view(&ui, Some(&kept), None, &in_front());
+        let read_only_context = Context {
+            writable: false,
+            ..in_front()
+        };
+        let read_only = build_view(&ui, Some(&kept), None, &read_only_context);
+        let unchecked = build_view(&ui, None, None, &in_front());
+        let project = report(
+            ScopeKind::Project,
+            vec![
+                found("DR-102", Severity::Error, "设备", "P-1001", "PID-1102"),
+                waived(found(
+                    "DR-008",
+                    Severity::Warning,
+                    "阀门",
+                    "V-1001",
+                    "PID-1102",
+                )),
+            ],
+        );
+        let kept_elsewhere = ProjectResults {
+            check: Some(KeptCheck {
+                report: &project,
+                serial: 2,
+                stale: false,
+            }),
+        };
+        let elsewhere = build_view(&ui, None, Some(&kept_elsewhere), &in_front());
+        for (view, value, reason) in [
+            (&unchecked, "locate=0", "no_result"),
+            (&unchecked, "waive=0:放空管", "no_result"),
+            (&unchecked, "unwaive=0", "no_result"),
+            (&read_only, "waive=0:放空管", "readonly"),
+            (&read_only, "unwaive=3", "readonly"),
+            // Grey on every row in a session that may not write.
+            (&read_only, "waive=9:放空管", "readonly"),
+            (&elsewhere, "waive=0:放空管", "not_on_this_drawing"),
+            (&elsewhere, "unwaive=1", "not_on_this_drawing"),
+            (&writable, "waive=3:放空管", "already_waived"),
+            (&writable, "unwaive=0", "not_waived"),
+        ] {
+            let refused = parse_action(value, view).expect_err(value);
+            assert_eq!(
+                (refused.code(), refused.reason()),
+                ("PANEL_ACTION_UNAVAILABLE", Some(reason)),
+                "{value}"
+            );
+        }
+        // Finding an object changes no drawing.
+        assert_eq!(
+            parse_action("locate=0", &read_only),
+            Ok(PidVerifyMsg::Locate(0))
+        );
+        // Rows the list does not have now: no such result, or a waived one
+        // while the waived are not shown.
+        let unshown = viewed(&VerifyUi::default(), &five);
+        for (view, value) in [
+            (&writable, "locate=9"),
+            (&writable, "waive=5:放空管"),
+            (&unshown, "locate=3"),
+            (&unshown, "unwaive=3"),
+        ] {
+            let refused = parse_action(value, view).expect_err(value);
+            assert_eq!(refused.code(), "PANEL_ROW_NOT_FOUND", "{value}");
+            assert_eq!(refused.reason(), None, "{value}");
+        }
+        assert_eq!(
+            parse_action("locate=9", &writable).map_err(|refused| refused.to_string()),
+            Err(
+                "规则检查的列表里现在没有下标 9 的一行（筛掉的和没显示的已豁免结果不在列表里）"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn pid_verify_action_names_a_wrong_row_value_invalid() {
+        let five = five();
+        let view = viewed(&VerifyUi::default(), &five);
+        for value in [
+            "locate",
+            "locate=",
+            "locate=a",
+            "locate=-1",
+            "locate=1.5",
+            "waive",
+            "waive=",
+            "waive=0",
+            "waive=:放空管",
+            "waive=a:放空管",
+            "unwaive",
+            "unwaive=",
+            "unwaive=x",
+        ] {
+            let refused = parse_action(value, &view).expect_err(value);
+            assert_eq!(refused.code(), "invalid_value", "{value}");
+            assert!(!refused.to_string().is_empty(), "{value}");
+        }
+        assert_eq!(
+            parse_action("waive=0", &view).map_err(|refused| refused.to_string()),
+            Err("waive 写成 waive=<下标>:<理由>，实得 \"waive=0\"".to_owned())
         );
     }
 }
