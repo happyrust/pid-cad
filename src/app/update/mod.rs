@@ -1555,12 +1555,7 @@ impl OpenCADStudio {
             }
             Message::CollabClaim { tag, claim } => self.on_collab_claim(&tag, claim),
             Message::PidCollab(m) => self.on_pid_collab(m),
-            Message::PidVerify(crate::ui::window::pid_verify_deliver::PidVerifyMsg::Tab(tab)) => {
-                self.pid_verify_ui.tab = tab;
-                self.pid_verify_view =
-                    crate::ui::window::pid_verify_deliver::build_view(&self.pid_verify_ui);
-                Task::none()
-            }
+            Message::PidVerify(m) => self.on_pid_verify(m),
             Message::PidShell(m) => self.on_pid_shell(m),
             #[cfg(target_arch = "wasm32")]
             Message::PollWebControl => {

@@ -572,3 +572,25 @@ MCP：`pid_verify_panel` 进 `READ_OPS`；`action` 已经在 `EXECUTE_OPS` 里�
 1. **三个页签的空状态文字**：规则检查「还没有检查过。」，材料清单「还没有生成材料清单。」，快照与发布「还没有快照和发布记录。」。§4.2 那句「还没有检查过。点上面的按钮开始。」的后半句等按钮出来（PNL-5）再加；另两句规格没写，先这样写，做那两个页签的任务按页签内容改。
 2. **关面板只是隐藏。** 界面状态整个程序一份（§3.1），关面板不清它，再打开还是关之前的页签。
 3. **测试怎么覆盖两种界面。** 程序级的真实界面测试在 `src/app/dock/tests.rs`（`the_verify_panel_opens_from_the_pallet_menu_and_switches_tabs_in_the_real_view`）：从停靠区的面板开关打开，在经典界面里逐个点三个页签，再切到外壳的编辑屏确认面板还在，最后关掉。外壳里只认空状态文字：外壳的导航里有一个同名的「材料清单」屏，按页签名找会找到那里。
+
+### 11.2 `PNL-2`：命令 `PIDVERIFY` 与控件位置（2026-11-22）
+
+**做了什么**（新文件 `src/app/commands/pidverify.rs`）：
+
+- 程序这一侧的四个函数，名字和分工照「协同」：`show_pid_verify_panel` 先重建要画的内容，再走停靠区面板开关的打开路径（`dock_set_open`：第一次停到右侧最上面，之后在用户放的地方，并把它翻到前面）；`dispatch_pidverify` 是命令；`on_pid_verify` 处理面板消息，切页签从 `update/mod.rs` 挪到这里；`refresh_pid_verify_view` 重建要画的内容。
+- 命令：`PIDVERIFY`、`PIDVERIFY ON`、`PIDVERIFY OFF`、`PIDVERIFY CHECK|BOM|DELIVER`，参数不分大小写。登记了分发链、命令行的自动补全名单、整行命令名单（`utilities.rs`，排在 `PIDPUBLISH` 后面）和只读允许名单（`apply.rs`，名单的说明里补了一句）。`OFF` 和标题栏的关闭按钮走同一条路（`DockMsg::Close`）。
+- 控件位置：面板主体 `pid-verify-panel`（标题栏下面的整块）、三个页签 `pid-verify-tab-check`、`pid-verify-tab-bom`、`pid-verify-tab-deliver`。面板关掉时（不论是命令还是关闭按钮），`dock/update.rs` 的关闭分支清掉所有 `pid-verify-` 开头的记录。
+- 模块里加了两个常量 `PANEL_BOUNDS_ID`、`BOUNDS_PREFIX`，和 `Tab::key`（`check`、`bom`、`deliver`，命令参数、§3.2 的 `tab`、§3.3 的 `tab=…` 共用）、`Tab::from_key`、`Tab::bounds_id`。
+
+**与任务写法不同的：**
+
+1. **多动了两个文件。** `src/ui/window/pid_verify_deliver.rs`：位置要在画面板的地方报，常量和页签名也在这里。`src/app/update/mod.rs`：把面板消息交给 `on_pid_verify`（§11.1 第 3 条预告过）。
+2. **验证多跑了两组**：`pid_verify_deliver`（模块里新加的标识测试）和 PNL-1 的真实界面测试（确认切页签挪到 `on_pid_verify` 后照旧）。
+
+**规格没写到、这里定下的：**
+
+1. **命令每跑一次在命令行报一句**（照 `PIDSCREEN` 切屏时报一句）：显示时「PIDVERIFY: 已显示「校验与交付」面板，当前页签「材料清单」。」，隐藏时「PIDVERIFY: 已隐藏「校验与交付」面板。」。这样「`PIDVERIFY BOM` 只执行一次」才看得出来：不登记整行的话，命令行先拿不带参数的 `PIDVERIFY` 试跑一遍、再跑整行，最后停的页签一样，只是会多报一句。
+2. **参数不认识就报错，不动面板**：「PIDVERIFY: 只接受 ON、OFF、CHECK、BOM、DELIVER 中的一个，实得 "…"。」。多给一个词（`PIDVERIFY BOM CHECK`）也一样。
+3. **不带参数显示时停在原来的页签**，不回到规则检查，与关面板只隐藏一致。
+4. **开始页上不能用。** 开始页不画停靠面板，命令不进 `start_allowed`，和别的要看图的命令一样被拒。
+5. **「显示时读得到位置」这里先用无头渲染验一遍。** 任务把真实窗口里的读法留给 PNL-13；这里另有一条测试用 `iced_test::Simulator` 把真实视图画一遍，确认面板主体和三个页签的标识都在，关掉后不重画也读不到。

@@ -87,6 +87,7 @@ mod pidplot;
 pub(in crate::app) mod pidprops;
 mod pidpublish;
 mod pidsnapshot;
+mod pidverify;
 mod plotvars;
 mod point_cloud;
 mod refedit;
@@ -968,6 +969,9 @@ impl OpenCADStudio {
         if let Some(t) = self.dispatch_pidpublish(cmd, i) {
             return Some(t);
         }
+        if let Some(t) = self.dispatch_pidverify(cmd, i) {
+            return Some(t);
+        }
         None
     }
 
@@ -1696,6 +1700,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDSNAPSHOT",
         "PIDTAG",
         "PIDTOPOLOGY",
+        // The verify-and-deliver panel: shown, hidden or turned to a tab.
+        "PIDVERIFY",
         "PLOT",
         "PRINTERS",
         "PLOTSTYLE",

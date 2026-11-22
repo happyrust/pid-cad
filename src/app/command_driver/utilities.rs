@@ -1429,6 +1429,9 @@ impl OpenCADStudio {
             // likewise: the bare verb would first publish to the default
             // folder.
             || tokens[0].eq_ignore_ascii_case("PIDPUBLISH")
+            // `PIDVERIFY BOM` and the other tabs likewise: the bare verb would
+            // first show the panel on the tab it was left on.
+            || tokens[0].eq_ignore_ascii_case("PIDVERIFY")
         {
             return self.dispatch_command(cmd);
         }

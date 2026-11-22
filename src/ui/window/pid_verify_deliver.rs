@@ -40,6 +40,32 @@ impl Tab {
         }
     }
 
+    /// The tab's name in `PIDVERIFY <tab>`, in the panel state and in the
+    /// panel's actions (§3.2, §3.3).
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Check => "check",
+            Self::Bom => "bom",
+            Self::Deliver => "deliver",
+        }
+    }
+
+    /// The tab `key` names, in any case.
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|tab| tab.key().eq_ignore_ascii_case(key))
+    }
+
+    /// `PosReport` id of the tab (§3.4).
+    pub fn bounds_id(self) -> &'static str {
+        match self {
+            Self::Check => "pid-verify-tab-check",
+            Self::Bom => "pid-verify-tab-bom",
+            Self::Deliver => "pid-verify-tab-deliver",
+        }
+    }
+
     /// What the tab says while it has nothing to show.
     fn empty(self) -> &'static str {
         match self {
@@ -63,6 +89,13 @@ impl PidVerifyMsg {
         Message::PidVerify(self)
     }
 }
+
+/// `PosReport` id of the panel body (§3.4).
+pub const PANEL_BOUNDS_ID: &str = "pid-verify-panel";
+
+/// What every `PosReport` id of the panel starts with: closing the panel
+/// forgets them all.
+pub const BOUNDS_PREFIX: &str = "pid-verify-";
 
 /// The panel's interface state (§3.1): one for the whole program, so the
 /// panel stays as it was left across document switches. Only the tab so
@@ -114,7 +147,8 @@ pub fn view<'a>(view: &'a VerifyView, width: f32, chrome: Chrome) -> Element<'a,
     let mut tabs = row![].spacing(2);
     for tab in Tab::ALL {
         let selected = tab == view.tab;
-        tabs = tabs.push(
+        tabs = tabs.push(crate::ui::wrap_bar::PosReport::new(
+            tab.bounds_id(),
             button(text(tab.label()).size(11))
                 .on_press(PidVerifyMsg::Tab(tab).message())
                 .padding([3, 8])
@@ -125,18 +159,16 @@ pub fn view<'a>(view: &'a VerifyView, width: f32, chrome: Chrome) -> Element<'a,
                         button::secondary(theme, status)
                     }
                 }),
-        );
+        ));
     }
-    let body = container(text(view.empty).size(12).style(muted))
+    let content = container(text(view.empty).size(12).style(muted))
         .center_x(Fill)
         .center_y(Fill)
         .width(Fill)
         .height(Fill);
-    crate::ui::dock::frame(
-        title_bar,
-        column![tabs, body].spacing(6).height(Fill),
-        width,
-    )
+    let body = column![tabs, content].spacing(6).height(Fill);
+    let reported = crate::ui::wrap_bar::PosReport::new(PANEL_BOUNDS_ID, body);
+    crate::ui::dock::frame(title_bar, reported, width)
 }
 
 #[cfg(test)]
@@ -173,5 +205,21 @@ mod tests {
     fn the_tabs_read_as_the_spec_names_them() {
         let labels: Vec<&str> = Tab::ALL.into_iter().map(Tab::label).collect();
         assert_eq!(labels, ["规则检查", "材料清单", "快照与发布"]);
+    }
+
+    #[test]
+    fn the_controls_report_under_the_ids_the_spec_gives_them() {
+        assert!(PANEL_BOUNDS_ID.starts_with(BOUNDS_PREFIX));
+        let keys: Vec<&str> = Tab::ALL.into_iter().map(Tab::key).collect();
+        assert_eq!(keys, ["check", "bom", "deliver"]);
+        let ids: Vec<&str> = Tab::ALL.into_iter().map(Tab::bounds_id).collect();
+        assert_eq!(
+            ids,
+            [
+                "pid-verify-tab-check",
+                "pid-verify-tab-bom",
+                "pid-verify-tab-deliver",
+            ]
+        );
     }
 }

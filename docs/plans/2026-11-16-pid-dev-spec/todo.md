@@ -1082,13 +1082,14 @@
 
 - **做什么**：新建 `src/app/commands/pidverify.rs`：`show_pid_verify_panel`（显示，第一次停在右侧）、`dispatch_pidverify`、`on_pid_verify`（处理面板消息）、`refresh_pid_verify_view`（重建要画的内容），名字和分工照「协同」面板。命令（§5.2）：`PIDVERIFY` 或 `PIDVERIFY ON`、`PIDVERIFY OFF`、`PIDVERIFY CHECK` / `BOM` / `DELIVER`；不改图，进只读允许名单；带参数，登记成整行命令。控件位置标识（§3.4，前缀 `pid-verify-`）：这一步报面板主体和三个页签；面板关掉时清掉所有 `pid-verify-` 开头的位置记录。
 - **验收**：
-  - [ ] `PIDVERIFY` 显示面板，`PIDVERIFY OFF` 隐藏，`PIDVERIFY BOM` 显示并切到材料清单页签；从命令行执行 `PIDVERIFY BOM` 只执行一次。
-  - [ ] 面板关掉后，`pid-verify-` 开头的位置记录全部清掉（真实窗口里「显示时读得到」在 PNL-13 的端到端脚本里验）。
-  - [ ] 只读会话里命令可用。
+  - [x] `PIDVERIFY` 显示面板，`PIDVERIFY OFF` 隐藏，`PIDVERIFY BOM` 显示并切到材料清单页签；从命令行执行 `PIDVERIFY BOM` 只执行一次。
+  - [x] 面板关掉后，`pid-verify-` 开头的位置记录全部清掉（真实窗口里「显示时读得到」在 PNL-13 的端到端脚本里验）。
+  - [x] 只读会话里命令可用。
 - **验证**：`cargo test --offline --locked --lib pidverify`
 - **依赖**：PNL-1
 - **文件**：新建 `src/app/commands/pidverify.rs`；`src/app/commands/mod.rs`、`src/app/command_driver/utilities.rs`、`src/app/collab/apply.rs`、`src/app/dock/update.rs`
 - **规模**：M
+- **补（2026-11-22）**：在 `pid-stage-e` 上接着 PNL-1（`9ff1127f2`）做，一个提交。代码动了「文件」一栏的五个，另多动两个：`src/ui/window/pid_verify_deliver.rs`（位置要在画面板的地方报；加了 `PANEL_BOUNDS_ID`、`BOUNDS_PREFIX` 和 `Tab::key`、`Tab::from_key`、`Tab::bounds_id`）和 `src/app/update/mod.rs`（面板消息交给 `on_pid_verify`，§11.1 预告过）。任务没说、这里定下的：命令每跑一次在命令行报一句（「PIDVERIFY: 已显示「校验与交付」面板，当前页签「材料清单」。」或「PIDVERIFY: 已隐藏「校验与交付」面板。」），「只执行一次」就数这一句；参数不认识（含多给一个词）就报错、不动面板；不带参数时停在原来的页签；开始页上不能用（不进 `start_allowed`）；显示走停靠区面板开关的打开路径（`dock_set_open`），`OFF` 和标题栏的关闭按钮走同一条关闭路径，两条都清位置记录；命令也进了自动补全名单。这些记在面板规格 §11.2。**先红后绿**：先只放测试（`pidverify.rs` 7 条、模块 1 条）、两个常量和两个返回空串的页签函数，都编得过；8 条全败在断言上（命令不认识、只读会话拒了 `PIDVERIFY`、关面板后 `pid-verify-panel` 和 `pid-verify-tab-bom` 还在、真实视图画出来没有 `pid-verify-panel`、页签名是空串）；实现后全过。第一遍门禁里 `--tests` 的 clippy 多 1 条（新测试照抄停靠测试的 `(1600.0, 900.0).into()`，`useless_conversion`），格式检查报新文件 2 处不合 rustfmt（一行 use、一条链），都改了，主程序库、`--tests` 的 clippy 和格式检查重跑。**读数**：`pidverify` 7 条全过；连同 `pid_verify_deliver` 4 条和 PNL-1 的真实界面测试共 12 条全过；主程序库 7637 条，7561 通过、73 默认不跑、3 失败（比对设计稿的三条，与起点相同），多的 8 条是新加的；编译警告 52；clippy 656 / 1051，与起点相同，新代码没有告警（`--tests` 那遍重跑报的重复数是 635、起点 637：按告警内容逐条比对，两条原有告警这回各多印了一次、没算作重复，另一条原有的栈大小告警因 `update_inner` 里切页签那段挪走少了 31 字节，此外完全相同）；格式检查：改动的 7 个 Rust 文件新增 0（脚本另报 1 处，是 `dock/update.rs` 里「协同」那段原有的格式差异，上下文里多了新行，该文件自身的差异数前后相同）；架构检查的输出与起点一字不差；SPPID 脚本测试 185 条全过。这一步面板的样子没变（只是多报位置），没有新截图；真实窗口里读位置按任务留到 PNL-13。红步、绿步和门禁输出在仓库外 `D:\scratch\ocs-pid-dev-20261116\pnl-2\`。**新基线**：主程序库 7637 条（7561 / 73 / 3）。
 
 ### PNL-3 【接线】面板状态操作 `pid_verify_panel`
 

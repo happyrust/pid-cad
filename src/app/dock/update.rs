@@ -744,8 +744,14 @@ impl OpenCADStudio {
                 );
             }
             // The interface state belongs to the program, not the panel, so
-            // reopening it shows the tab it was left on.
-            PanelId::PidVerifyDeliver => self.show_pid_verify = false,
+            // reopening it shows the tab it was left on. Its reported
+            // rectangles go with it, as the collaboration panel's do.
+            PanelId::PidVerifyDeliver => {
+                self.show_pid_verify = false;
+                crate::ui::wrap_bar::forget_bounds(
+                    crate::ui::window::pid_verify_deliver::BOUNDS_PREFIX,
+                );
+            }
             PanelId::AuthoringPalettes => {
                 self.clean_screen_authoring_palettes = false;
                 self.show_authoring_palettes = false;

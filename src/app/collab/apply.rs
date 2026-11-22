@@ -2017,7 +2017,8 @@ fn tried_text(changes: &[broadcast::Change], label: &str) -> String {
 /// (opens find-and-replace), `PIDGROUP` (every one of its forms regroups or
 /// retags) and `AUDIT` (applies its fixes when answered yes). `PIDSNAPSHOT` and
 /// `PIDDIFF` write files on this machine, never the drawing, so every one of
-/// their forms is here.
+/// their forms is here. So are `PIDVERIFY`'s, which only show, hide or turn
+/// the verify-and-deliver panel.
 pub(super) const READONLY_ALLOWED: &[&str] = &[
     "ZOOM",
     "ZO",
@@ -2056,6 +2057,7 @@ pub(super) const READONLY_ALLOWED: &[&str] = &[
     "PIDSNAPSHOT",
     "PIDDIFF",
     "PIDPUBLISH",
+    "PIDVERIFY",
     "PIDLINE",
     "PIDTAG",
     "PIDTOPOLOGY",
