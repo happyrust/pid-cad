@@ -84,6 +84,160 @@ fn the_summary_round_trips_through_its_properties_and_take_removes_them() {
     );
 }
 
+/// The four things that can stand between a drawing and the border template
+/// it links, each with the file names the links end in.
+fn templates_not_drawn() -> [TemplateNotDrawn; 4] {
+    let of = |why: TemplateGap| TemplateNotDrawn {
+        named: "CPE-SQ~2.IGR, CPE-SQ~3.PID".to_string(),
+        why,
+    };
+    [
+        of(TemplateGap::NoFile),
+        of(TemplateGap::Undrawable {
+            files: "CPE-SQ-A1.igr, CPE-SQ-A0.igr".to_string(),
+        }),
+        of(TemplateGap::NoneFits {
+            page: "841.00 x 594.00 mm".to_string(),
+            found: "CPE-SQ-A0.igr (1189.00 x 841.00 mm), CPE-SQ-A2.igr (no strokes)".to_string(),
+        }),
+        of(TemplateGap::NoPage),
+    ]
+}
+
+/// The values the line for `not_drawn` has to name in whatever language.
+fn values_said_of(not_drawn: &TemplateNotDrawn) -> Vec<&str> {
+    let mut values = vec![not_drawn.named.as_str()];
+    match &not_drawn.why {
+        TemplateGap::NoFile => values.push("PID_TEMPLATE_LIBRARY"),
+        TemplateGap::Undrawable { files } => values.push(files),
+        TemplateGap::NoneFits { page, found } => values.extend([page.as_str(), found.as_str()]),
+        TemplateGap::NoPage => {}
+    }
+    values
+}
+
+/// Why a linked border template was not drawn rides the document like the
+/// counts do: each of the four reasons reads back as it was stored, and
+/// `take` leaves the document as it was. A summary with nothing to say of a
+/// template stores no property for one.
+#[test]
+fn the_summary_carries_why_a_linked_template_was_not_drawn() {
+    let mut doc = Document::new();
+    let before = doc.clone();
+    for not_drawn in templates_not_drawn() {
+        let mut summary = ImportSummary::empty();
+        summary.drawn = 12;
+        summary.template_not_drawn = Some(not_drawn.clone());
+        summary.store(&mut doc);
+        assert_eq!(
+            ImportSummary::load(&doc).and_then(|read| read.template_not_drawn),
+            Some(not_drawn),
+            "stored and read back"
+        );
+        assert_eq!(ImportSummary::take(&mut doc), Some(summary));
+        assert_eq!(doc, before, "taken, the document is exactly what it was");
+    }
+
+    // Storing a summary with nothing to say of a template replaces what an
+    // earlier one said, and adds no property of its own.
+    let mut said = ImportSummary::empty();
+    said.template_not_drawn = templates_not_drawn().into_iter().next();
+    said.store(&mut doc);
+    let silent = ImportSummary::empty();
+    silent.store(&mut doc);
+    assert_eq!(ImportSummary::load(&doc), Some(silent.clone()));
+    assert_eq!(
+        doc.summary_info
+            .custom_properties
+            .iter()
+            .filter(|(tag, _)| tag.starts_with(SUMMARY_PROPERTY_PREFIX))
+            .count(),
+        silent.counts().len() + 2,
+        "one property per field: the counts, the failed flag, the unit"
+    );
+
+    // A reason this build does not know reads as none said, not as another.
+    said.store(&mut doc);
+    for (tag, value) in &mut doc.summary_info.custom_properties {
+        if tag.ends_with(".template_gap") {
+            *value = "from-a-later-build".to_string();
+        }
+    }
+    assert_eq!(
+        ImportSummary::load(&doc).and_then(|read| read.template_not_drawn),
+        None
+    );
+}
+
+/// The line the command line gets for a template not drawn: which template
+/// the drawing links, why it is not on the sheet, and what the sheet lacks
+/// for it. Where no file was found it also names the variable that says
+/// where the templates are.
+#[test]
+fn the_line_for_a_template_not_drawn_names_the_template_and_the_reason() {
+    let expected = [
+        "P&ID import: the drawing links the border template(s) CPE-SQ~2.IGR, CPE-SQ~3.PID, but no .igr file of that name was found; the template's frame and title block are not drawn. Set PID_TEMPLATE_LIBRARY to the folder that holds the templates.",
+        "P&ID import: the drawing links the border template(s) CPE-SQ~2.IGR, CPE-SQ~3.PID, but nothing could be drawn from the file(s) found for it: CPE-SQ-A1.igr, CPE-SQ-A0.igr; the template's frame and title block are not drawn.",
+        "P&ID import: the drawing links the border template(s) CPE-SQ~2.IGR, CPE-SQ~3.PID, but none of the files of that name fits its 841.00 x 594.00 mm page: CPE-SQ-A0.igr (1189.00 x 841.00 mm), CPE-SQ-A2.igr (no strokes); the template's frame and title block are not drawn.",
+        "P&ID import: the drawing links the border template(s) CPE-SQ~2.IGR, CPE-SQ~3.PID, but it states no page size and its lines fit no standard sheet, so there is no size to choose a file by; the template's frame and title block are not drawn.",
+    ];
+    for (not_drawn, line) in templates_not_drawn().iter().zip(expected) {
+        assert_eq!(not_drawn.headline(), line, "{not_drawn:?}");
+    }
+}
+
+/// In every language of the interface the line still names the template
+/// and what was found of it -- no catalog drops a value or leaves a
+/// placeholder -- and a Chinese interface is told in Chinese. The language
+/// is one loader for the whole process, so this runs in a child process of
+/// the test binary.
+#[test]
+fn the_line_for_a_template_not_drawn_speaks_the_ui_language() {
+    const CHILD: &str = "OCS_PID_TEMPLATE_LINE_CHILD";
+    const NAME: &str = "io::pid::tests::the_line_for_a_template_not_drawn_speaks_the_ui_language";
+    if std::env::var_os(CHILD).is_none() {
+        let program = std::env::current_exe().expect("the test binary has a path");
+        let output = std::process::Command::new(program)
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .expect("the test binary must start");
+        assert!(
+            output.status.success(),
+            "the child run failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let cases = templates_not_drawn();
+    for language in crate::i18n::Language::ALL {
+        if language == crate::i18n::Language::System {
+            continue;
+        }
+        crate::i18n::set_language(language).expect("Fluent resources must parse");
+        for not_drawn in &cases {
+            let line = not_drawn.headline();
+            for value in values_said_of(not_drawn) {
+                assert!(line.contains(value), "{language:?} drops {value}: {line}");
+            }
+            assert!(!line.contains("__ocs_fmt_"), "{language:?}: {line}");
+        }
+    }
+    crate::i18n::set_language(crate::i18n::Language::ZhCn)
+        .expect("Chinese Fluent resources must parse");
+    let expected = [
+        "P&ID 导入：图纸链接的图框模板 CPE-SQ~2.IGR, CPE-SQ~3.PID 未找到（没有这个名字的 .igr 文件），模板里的图框和标题栏未绘制。可将环境变量 PID_TEMPLATE_LIBRARY 指向存放模板的文件夹。",
+        "P&ID 导入：图纸链接的图框模板 CPE-SQ~2.IGR, CPE-SQ~3.PID 找到了文件，但画不出内容：CPE-SQ-A1.igr, CPE-SQ-A0.igr；模板里的图框和标题栏未绘制。",
+        "P&ID 导入：图纸链接的图框模板 CPE-SQ~2.IGR, CPE-SQ~3.PID 没有尺寸相符的文件：页面为 841.00 x 594.00 mm，找到的是 CPE-SQ-A0.igr (1189.00 x 841.00 mm), CPE-SQ-A2.igr (no strokes)；模板里的图框和标题栏未绘制。",
+        "P&ID 导入：图纸链接了图框模板 CPE-SQ~2.IGR, CPE-SQ~3.PID，但未声明页面尺寸，线条也对不上标准图幅，无法按尺寸选定文件；模板里的图框和标题栏未绘制。",
+    ];
+    for (not_drawn, line) in cases.iter().zip(expected) {
+        assert_eq!(not_drawn.headline(), line, "{not_drawn:?}");
+    }
+}
+
 /// The unit is read off the first decoded record that states one this
 /// importer knows; a drawing whose records state none, or an unknown
 /// label, is scaled as metres and says so.
@@ -2778,7 +2932,7 @@ pub(super) mod placements_as_blocks {
             &tables,
             ImportUnit::AssumedMetre,
             built,
-            None,
+            &LinkedTemplate::Unnamed,
             FramePlacement::NONE,
             &mut doc,
         );
@@ -4420,7 +4574,7 @@ pub(super) mod placements_as_blocks {
             &tables,
             ImportUnit::AssumedMetre,
             built,
-            None,
+            &LinkedTemplate::Unnamed,
             FramePlacement::NONE,
             &mut doc,
         );
@@ -5581,7 +5735,7 @@ pub(super) mod placements_as_blocks {
             &tables,
             ImportUnit::AssumedMetre,
             built,
-            None,
+            &LinkedTemplate::Unnamed,
             FramePlacement::NONE,
             &mut doc,
         );

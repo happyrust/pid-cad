@@ -3176,6 +3176,15 @@ impl OpenCADStudio {
                     .as_ref(),
                 );
             }
+            // Said only when it happened as well: a border template the
+            // drawing links and the import did not draw. The sheet has
+            // opened without its frame and title block, which looks no
+            // different from a drawing that has none. A warning and not
+            // an error: the drawing itself is whole, and automation reads
+            // an error as a failed open.
+            if let Some(not_drawn) = &summary.template_not_drawn {
+                self.command_line.push_warning(&not_drawn.headline());
+            }
         }
         // A drawing the backup panel asked for takes the tags the backup's
         // database gives the items of its symbols: here, before it is
@@ -13468,6 +13477,116 @@ mod minimized_save_tests {
         assert_eq!(
             app.pid_shell.theme,
             crate::ui::style::pid_tokens::PidTheme::Light
+        );
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod pid_import_lines_tests {
+    use crate::app::{Message, OpenCADStudio, OpenProgress};
+    use crate::io::pid::{imported_sheet_summarised, TemplateGap, TemplateNotDrawn};
+    use crate::ui::command_line::EntryKind;
+
+    const SHEET: (f64, f64) = (594.0, 420.0);
+
+    /// What the command line gained when a `.pid` whose import had
+    /// `template_not_drawn` to say finished opening: the kind and the text
+    /// of each entry, in order. The drawing arrives through the message the
+    /// open pipeline ends with, carrying its import's summary the way the
+    /// reader leaves it.
+    fn lines_after_opening(
+        tag: &str,
+        template_not_drawn: Option<TemplateNotDrawn>,
+    ) -> Vec<(EntryKind, String)> {
+        // A real file, as the handler is given one. No "template" in the
+        // folder's name: a folder so named under the temp directory is a
+        // template root for the drawings a backup unpacks there.
+        let folder = std::env::temp_dir().join(format!(
+            "ocs-pid-import-lines-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&folder).expect("scratch dir");
+        let file = folder.join("sheet.pid");
+        std::fs::write(&file, b"bytes enough to be a real file on disk").expect("write");
+
+        let mut app = OpenCADStudio::new_for_test();
+        let before = app.command_line.history.len();
+        let name = "sheet.pid".to_string();
+        let document = imported_sheet_summarised(SHEET, template_not_drawn);
+        let caches = crate::scene::build_derived_caches_with_progress(&document, &|_| {}, None);
+        app.opening = Some(OpenProgress {
+            id: 7,
+            name: name.clone(),
+            source_path: Some(file.clone()),
+            size_bytes: 0,
+            state: std::sync::Arc::new(crate::io::OpenProgressState::new(
+                crate::app::OPEN_PHASE_CACHING,
+            )),
+            started: std::time::Instant::now(),
+            recovery_error: None,
+            recovery_read_stats: None,
+            fingerprint: None,
+        });
+        let _ = app.update(Message::FileOpened(
+            7,
+            Ok((name, file, document, caches, None)),
+        ));
+        let _ = std::fs::remove_dir_all(&folder);
+        app.command_line.history[before..]
+            .iter()
+            .map(|entry| (entry.kind.clone(), entry.text.clone()))
+            .collect()
+    }
+
+    /// A drawing that links a border template the import could not draw is
+    /// told so on the command line once it has opened: one line, a warning,
+    /// after the import's own lines, naming the template.
+    #[test]
+    fn a_template_not_drawn_is_said_on_the_command_line_after_the_import_lines() {
+        let not_drawn = TemplateNotDrawn {
+            named: "CPE-SQ~2.IGR".to_string(),
+            why: TemplateGap::NoFile,
+        };
+        let said = not_drawn.headline();
+        assert!(said.contains("CPE-SQ~2.IGR"), "{said}");
+        let lines = lines_after_opening("said", Some(not_drawn));
+        let about_it: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, text))| text.contains(&said))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(about_it.len(), 1, "said once: {lines:?}");
+        let at = about_it[0];
+        assert_eq!(lines[at].0, EntryKind::Warning, "{lines:?}");
+        let unit_note = lines
+            .iter()
+            .position(|(_, text)| text.contains("the metre was assumed"))
+            .expect("the import's note on the unit");
+        assert!(unit_note < at, "after the import's own lines: {lines:?}");
+    }
+
+    /// A drawing whose import has nothing to say of a border template -- it
+    /// links none, or wears the one it links -- gets the import's lines and
+    /// none about a template.
+    #[test]
+    fn a_drawing_with_nothing_to_say_of_its_template_gets_no_such_line() {
+        let lines = lines_after_opening("silent", None);
+        assert!(
+            lines
+                .iter()
+                .any(|(_, text)| text.contains("decoded records")),
+            "the import's headline is there: {lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|(_, text)| text.contains("border template")),
+            "{lines:?}"
         );
     }
 }

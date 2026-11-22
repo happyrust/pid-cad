@@ -131,7 +131,9 @@ use self::metadata::*;
 use self::page::*;
 use self::styles::*;
 use self::summary::*;
-pub use self::summary::{ImportSummary, ImportUnit, SUMMARY_PROPERTY_PREFIX};
+pub use self::summary::{
+    ImportSummary, ImportUnit, TemplateGap, TemplateNotDrawn, SUMMARY_PROPERTY_PREFIX,
+};
 use self::symbol_blocks::*;
 use self::symbols::*;
 pub(crate) use self::symbols::{symbol_file_document, symbol_file_primitive_entities};
@@ -559,7 +561,7 @@ pub fn load_pid_with(path: &Path, options: &PidImportOptions) -> Result<PidImpor
         &styles,
         unit,
         built,
-        template.as_ref(),
+        &template,
         placement,
         &mut doc,
     );
@@ -627,7 +629,7 @@ fn finish(
     styles: &Styles,
     unit: ImportUnit,
     built: Built,
-    template: Option<&TemplateOverlay>,
+    template: &LinkedTemplate,
     placement: FramePlacement,
     doc: &mut Document,
 ) -> ImportSummary {
@@ -679,7 +681,8 @@ fn finish(
     // The linked template draws the real frame when it overlays; the
     // synthetic rectangle only stands in where it did not -- drawing both
     // would double the border.
-    if !template.is_some_and(|overlay| overlay.page_frame_covered) {
+    let overlay = template.overlay();
+    if !overlay.is_some_and(|overlay| overlay.page_frame_covered) {
         draw_page_border(doc, page_mm, placement.corner_mm);
     }
     frame_drawing(doc, &bounds, page_mm, placement.corner_mm);
@@ -739,15 +742,16 @@ fn finish(
         hidden_strokes_skipped: symbol_bodies.hidden_strokes_skipped,
         label_anchors_undrawn: symbol_bodies.label_anchors,
         lettering_flattened: styles.lettering_flattened,
-        border_template: template.map(|overlay| {
+        border_template: overlay.map(|overlay| {
             overlay
                 .file
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| overlay.file.display().to_string())
         }),
-        template_entities: template.map(|overlay| overlay.drawn).unwrap_or(0),
-        template_missing: template.map(|overlay| overlay.missing).unwrap_or(0),
+        template_entities: overlay.map(|overlay| overlay.drawn).unwrap_or(0),
+        template_missing: overlay.map(|overlay| overlay.missing).unwrap_or(0),
+        template_not_drawn: template.not_drawn().cloned(),
         symbol_blocks,
         symbol_definitions,
         symbol_items,
@@ -789,6 +793,23 @@ pub(crate) fn imported_sheet(page_mm: (f64, f64)) -> Document {
     bounds.add_mm(0.0, 0.0);
     bounds.add_mm(page_mm.0, page_mm.1);
     frame_drawing(&mut doc, &bounds, Some(page_mm), (0.0, 0.0));
+    doc
+}
+
+/// [`imported_sheet`] as the open pipeline hands a drawing over: carrying
+/// the summary of its import, which here drew nothing and has
+/// `template_not_drawn` to say of the border template the drawing links.
+/// For the tests of what the command line says once such a drawing has
+/// opened (`crate::app::update::file`).
+#[cfg(test)]
+pub(crate) fn imported_sheet_summarised(
+    page_mm: (f64, f64),
+    template_not_drawn: Option<TemplateNotDrawn>,
+) -> Document {
+    let mut doc = imported_sheet(page_mm);
+    let mut summary = ImportSummary::empty();
+    summary.template_not_drawn = template_not_drawn;
+    summary.store(&mut doc);
     doc
 }
 
