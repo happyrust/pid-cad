@@ -42,14 +42,21 @@ const RUNS: usize = 3;
 /// branch's was 3,488, from 3,332 to 3,862.
 const BASELINE_MS: u128 = 3_406;
 
-/// What the median import of the sample may take, in milliseconds: a tenth
-/// over the baseline (SPEC-pid-symbol-block §6, 11). It is the number of
-/// one machine at rest. That machine is never quite at rest, and what else
-/// runs on it moves a turn by more than the tenth: of those twelve rounds,
-/// two turns of the branch and one of the baseline itself were over it.
-/// Read a red run against what the machine was doing before reading it
-/// against the code.
-const BUDGET_MS: u128 = (BASELINE_MS * 11).div_ceil(10);
+/// What the median import of the sample may take, in milliseconds: three
+/// tenths over the baseline. It is a coarse screen, and not the tenth that
+/// SPEC-pid-symbol-block §6, 11 allows. What else runs on the machine moves
+/// a turn by more than a tenth -- of those twelve rounds, two turns of the
+/// branch and one of the baseline itself were a tenth over -- so the tenth
+/// is judged by timing two programs turn and turn about, as the baseline
+/// was taken. This number lies above every turn of the twenty rounds timed
+/// that morning, the eight that were not quiet among them: the slowest of
+/// the baseline took 4,176, of the branch 4,273. It is the number of one
+/// machine on one day. A build running beside the test can still put a
+/// turn over it; and where the machine has grown quicker -- the day after,
+/// the branch's turns at rest came to some 2,830 -- an import has to lose
+/// more than three tenths before it shows. Read a red run against what the
+/// machine was doing before reading it against the code.
+const BUDGET_MS: u128 = (BASELINE_MS * 13).div_ceil(10);
 
 /// Where the sample lies -- the sheet of the well sites L and M, in the
 /// plant test data beside this repository -- or `None`, and a line saying
@@ -73,8 +80,9 @@ fn sample_path() -> Option<PathBuf> {
     Some(path)
 }
 
-/// The median of three imports of the sample stays within the budget
-/// (SPEC-pid-symbol-block §6, 11).
+/// The median of three imports of the sample stays within the budget: the
+/// coarse screen kept beside SPEC-pid-symbol-block §6, 11, not the tenth
+/// that criterion allows.
 #[test]
 #[ignore = "times three imports of the sample against a budget taken on one machine; run alone with --ignored --nocapture"]
 fn the_sample_imports_within_its_budget() {
