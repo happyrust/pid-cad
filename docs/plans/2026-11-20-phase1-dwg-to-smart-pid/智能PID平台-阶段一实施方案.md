@@ -421,11 +421,11 @@ flowchart LR
 - **依赖**：L0-9、L3-0。**资料**：RES-02 ✔、RES-03 ✔。
 - **解决记录（2026-11-20..21）**：① `1bb06191e`（`#124`）落地纯 ASCII 外置规则 `assets/pid-sppid-legend-map.json` 与 `src/io/pid_convert/class_map.rs`，90 张有效 SPPID 导出 DXF 净业务图块 **`15,852 / 15,852`（100.00%）** 映射到 `assets/pid-class-map.json` 变体（未映射 `0`，见 `readings.md` §13）；② `#138` 补充 `legacy_ignore_classes` 与 45 类 `legacy_class_map`，并在无 SPPID `.sym` 块图纸上只读融合 `io::pid_legend` 多模态识别（天正图块 + 散圆仪表/容器/泵 + 炸散散线形状指纹），使 `SOURCE_DWG` 全部 `12 / 12` 张原生 AutoCAD 存量图（`L01..L12`）精确变体映射由 `0` 升至 **`1,619`**（`class_default_fallback = 0`）且对 `baseline-90.tsv` 逐行零差异（详见 `readings.md` §27）。
 
-#### L3-2 位号识别增强（M）— **已完成（[#125](https://github.com/happyrust/pid-cad/issues/125)）**
+#### L3-2 位号识别增强（M）— **已完成（[#125](https://github.com/happyrust/pid-cad/issues/125) / [#156](https://github.com/happyrust/pid-cad/issues/156)）**
 - **做法**：多行位号、范围标注（`BUV-3101/3102`、`～`）、仪表圈内文字拼接、位号落在符号外的各种写法。
 - **验收**：每类写法有最小例子（合成 fixture）先红后绿；整批配对准确率不退化。
 - **资料**：RES-17 ⚠。
-- **解决记录（2026-11-20）**：落地 `src/io/pid_convert/recognize.rs`（圈内双行拼接、带空格 7 位阀门位号归一化、二分图最小距离唯一配对、设备包围盒配对与图层 `10` 松散几何容器恢复、页间连接符 `DWG-*` / 走向配对及范围展开）；90 张有效 DXF 两轮复跑 100% 一致，召回率由 `0.000188` 升至 **`0.977941`**、精确率 **`0.998912`**、位号一致率 **`0.895546`**，详见 `readings.md` §14。
+- **解决记录（2026-11-20）**：落地 `src/io/pid_convert/recognize.rs`（圈内双行拼接、带空格 7 位阀门位号归一化、二分图最小距离唯一配对、设备包围盒配对与图层 `10` 松散几何容器恢复、页间连接符 `DWG-*` / 走向配对及范围展开）；90 张有效 DXF 两轮复跑 100% 一致，召回率由 `0.000188` 升至 **`0.977941`**、精确率 **`0.998912`**、位号一致率 **`0.895546`**（见 `readings.md` §14）；此外 `#156` 落地 `src/io/pid_convert/loops.rs`、应用内命令 `PIDLOOP` 与 CLI `--export-loops`，按 ISA-5.1 跨标签页聚合仪表回路、校核缺失变送元件的残缺回路并导出 `.json/.csv/.tsv` 回路索引表（详见 `readings.md` §45）。
 
 #### L3-3 管线识别增强（L）— **已完成（[#133](https://github.com/happyrust/pid-cad/issues/133) / [#152](https://github.com/happyrust/pid-cad/issues/152)）**
 - **做法**：线号（5 位与 4 位序号两种）、管线族、管段与管件断开、流向；补未覆盖的族。

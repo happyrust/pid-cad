@@ -12,6 +12,7 @@ pub mod export;
 pub mod external_props;
 pub mod find;
 pub mod isolate;
+pub mod loops;
 pub mod opc;
 pub mod promote;
 pub mod recognize;
@@ -21,6 +22,14 @@ pub use diff::{
     diff_pid_documents, format_pid_diff_delimited, DiffFieldChange, DiffKind, PidDiffItem,
     PidDiffReport, PidDiffSummary, DIFF_CSV_HEADERS,
 };
+pub use loops::{
+    analyze_pid_loops, format_pid_loops_delimited, loop_matches_query, parse_isa_instrument_tag,
+    IsaLoopRole, LoopStatus, ParsedIsaTag, PidInstrumentLoop, PidLoopMember, PidLoopReport,
+    PidLoopSummary, LOOP_CSV_HEADERS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use loops::{extract_loops_from_batch_dir, write_pid_loops_file};
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use isolate::write_pid_isolation_file;
 pub use isolate::{

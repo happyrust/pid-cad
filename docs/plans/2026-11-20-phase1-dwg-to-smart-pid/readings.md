@@ -1812,3 +1812,41 @@
 | `scripts\fmt-newhunks.ps1` | — | `isolate.rs`、`mod.rs`、`pidprops.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 45. L3-2 / L3-6 / L2-2 / L6-2（#156）：应用内 ISA-5.1 自控仪表回路跨标签页自动聚合、信号链校核与回路索引表导出命令 `PIDLOOP` 及 CLI `--export-loops` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `38b905764`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{loops,mod}.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-22-issue156/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_loops.txt`、`cli_export_loops.txt`、`real_out/real156_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
+
+### 45.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_156_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidloop_aggregates_isa_loops_across_tabs_detects_incomplete_and_steps_camera`（构造跨双标签页的完整闭环回路 `02013` = `PT-02013 + PIC-02013 + PV-02013`、缺主变送元件的残缺回路 `02099` = `LIC-02099 + LV-02099` 以及手动球阀干扰项 `BV0201399`，验证跨图回路聚合、手动阀过滤、`INCOMPLETE` 残缺回路识别、跨标签页 `PIDLOOP NEXT` 视口跳转聚焦及补齐 `LT-02099` + `PIDPROMOTE` 后清零残缺项），运行按预期在 `PIDLOOP EXPORT` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`22 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/loops.rs`（`parse_isa_instrument_tag`、`analyze_pid_loops`、`extract_loops_from_batch_dir`、`write_pid_loops_file`）：统一兼容未升格 `.dxf`/`.dwg`、未升格 `.pid` 原图、已升格 `PID_AUTHOR` 模型与 `_Data.xml` 批处理目录；按 ISA-5.1 拆解被测变量、三类功能角色（`Sensor / Controller / FinalElement`，严格排除手动工艺阀门）与回路号，自动校核信号链完整性（`CompleteClosedLoop / MonitoringLoop / Incomplete`），导出 `.json` 与 UTF-8 BOM `.csv` / `.tsv` 10 列自控仪表回路索引表；
+  2. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDLOOP [<回路号或仪表位号>] [ALLTABS] [SUMMARY | INCOMPLETE | COMPLETE | ALL | NEXT] [EXPORT "<.json|.csv|.tsv>"]`，并在 `examples/pid_convert.rs` 新增 `--export-loops <FILE>`（最小真实 SPPID 图实测导出 `4` 行回路索引表，退出码 `0`）。
+
+### 45.2 真实双标准成对工程图纸（SPPID 生产图对 + 原生 AutoCAD 存量图对）多标签页回路聚合实测
+
+| 图纸组 | 样本形态 | 源图 SHA-256 前缀对 | 归组仪表总数 | 聚合 ISA-5.1 回路数 | 完整闭环回路 / 监测回路 / 残缺误报数 | `.csv` 索引表与 `PIDLOOP NEXT` |
+|---|---|---|---:|---:|---|---|
+| `SP01 + SP02` | 未升格 SPPID 拆分生产图对 | `2164f88bbb57` + `fc2c812dc182` | **`93` 台** | **`17` 个** | `5` 闭环 / `12` 监测 / **`0` 残缺** | **通过** |
+| `LG01 + LG02` | 未升格原生 AutoCAD 存量图对 | `a0f05f81a655` + `28ed389e23cb` | **`84` 台** | **`28` 个** | `0` 闭环 / `28` 监测 / **`0` 残缺** | **通过** |
+
+### 45.3 固定门禁读数
+
+| 门禁项 | 改前读数（§44.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,236` 条（`7,156` 过 / `79` 忽略 / `1` 既有 `.pen`） | **`7,238` 条**（**`7,157` 过** / **`80` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图跨标签页回路聚合），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `loops.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |

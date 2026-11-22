@@ -37,7 +37,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDFIND",
         "PIDTRACE",
         "PIDDIFF",
-        "PIDISOLATE"
+        "PIDISOLATE",
+        "PIDLOOP"
     ]
 });
 
@@ -287,6 +288,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidisolate_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidloop_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -2407,6 +2411,237 @@ impl OpenCADStudio {
             other => {
                 self.command_line.push_error(&format!(
                     "PIDISOLATE: 未知子命令 {other}（支持 SUMMARY / VALVES / ENVELOPE / HAZARDS / ALL / NEXT / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
+
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidloop_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            analyze_pid_loops, loop_matches_query, write_pid_loops_file, LoopStatus, OpcSheetInput,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDLOOP") {
+            return None;
+        }
+
+        let mut all_tabs = false;
+        let mut action: Option<String> = None;
+        let mut export_path: Option<std::path::PathBuf> = None;
+        let mut query_opt: Option<String> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            let up = tok.to_ascii_uppercase();
+            if up == "ALLTABS" {
+                all_tabs = true;
+                idx += 1;
+            } else if up == "EXPORT" {
+                let Some(next_tok) = tokens.get(idx + 1) else {
+                    self.command_line
+                        .push_error("PIDLOOP EXPORT: 缺少输出文件路径（.json/.csv/.tsv）。");
+                    return Some(Task::none());
+                };
+                export_path = Some(std::path::PathBuf::from(next_tok));
+                idx += 2;
+            } else if matches!(
+                up.as_str(),
+                "SUMMARY" | "INCOMPLETE" | "COMPLETE" | "ALL" | "NEXT"
+            ) {
+                action = Some(up);
+                idx += 1;
+            } else if query_opt.is_none() {
+                query_opt = Some(tok.clone());
+                idx += 1;
+            } else {
+                action = Some(up);
+                idx += 1;
+            }
+        }
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<OpcSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+
+        let rep = analyze_pid_loops(&sheet_inputs);
+
+        if let Some(ref out_p) = export_path {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(err) = write_pid_loops_file(&rep, out_p) {
+                self.command_line
+                    .push_error(&format!("PIDLOOP EXPORT: {err}"));
+                return Some(Task::none());
+            }
+        }
+
+        let default_action = if query_opt.is_some() && export_path.is_none() {
+            "ALL"
+        } else {
+            "SUMMARY"
+        };
+        let eff_action = action.as_deref().unwrap_or(default_action);
+
+        let filtered_loops: Vec<_> = rep
+            .loops
+            .iter()
+            .filter(|lp| {
+                let q_ok = query_opt
+                    .as_deref()
+                    .is_none_or(|q| loop_matches_query(lp, q));
+                let st_ok = match eff_action {
+                    "INCOMPLETE" => lp.status == LoopStatus::Incomplete,
+                    "COMPLETE" => lp.status == LoopStatus::CompleteClosedLoop,
+                    _ => true,
+                };
+                q_ok && st_ok
+            })
+            .collect();
+
+        match eff_action {
+            "SUMMARY" => {
+                self.command_line.push_output(&format!(
+                    "PIDLOOP: 扫描图纸={} | 归组仪表={} | 总回路={}（跨图回路={}，完整闭环={}，监测回路={}，残缺异常={}）。",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_instruments_grouped,
+                    rep.summary.total_loops,
+                    rep.summary.multi_sheet_loops,
+                    rep.summary.complete_closed_loops,
+                    rep.summary.monitoring_loops,
+                    rep.summary.incomplete_loops,
+                ));
+            }
+            "ALL" | "INCOMPLETE" | "COMPLETE" => {
+                let mut by_tab: std::collections::BTreeMap<usize, Vec<document::Handle>> =
+                    std::collections::BTreeMap::new();
+                for lp in &filtered_loops {
+                    for mem in &lp.members {
+                        let dst = by_tab.entry(mem.tab_index).or_default();
+                        for &h in &mem.member_handles {
+                            if !dst.contains(&h) {
+                                dst.push(h);
+                            }
+                        }
+                    }
+                }
+                for (ti, _) in &target_tabs {
+                    if *ti < self.tabs.len() {
+                        self.tabs[*ti].scene.deselect_all();
+                    }
+                }
+                let mut sel_cnt = 0usize;
+                for (&ti, hs) in &by_tab {
+                    if ti < self.tabs.len() && !hs.is_empty() {
+                        self.tabs[ti].scene.select_entities(hs);
+                        sel_cnt += hs.len();
+                    }
+                }
+                if let Some(cur_hs) = by_tab.get(&self.active_tab).filter(|h| !h.is_empty()) {
+                    let _ = self.tabs[self.active_tab].scene.zoom_to_entities(cur_hs);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDLOOP {eff_action}: 匹配 {} 个回路，跨打开图纸高亮 {} 个图元。",
+                    filtered_loops.len(),
+                    sel_cnt
+                ));
+            }
+            "NEXT" => {
+                let members: Vec<_> = filtered_loops
+                    .iter()
+                    .flat_map(|lp| lp.members.iter().map(move |m| (lp.loop_number.as_str(), m)))
+                    .filter(|(_, m)| !m.member_handles.is_empty())
+                    .collect();
+                if members.is_empty() {
+                    self.command_line
+                        .push_output("PIDLOOP NEXT: 未找到可巡检的回路仪表图元。");
+                    return Some(self.finish_dispatch(cmd));
+                }
+
+                let cur_tab = self.active_tab;
+                let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[cur_tab]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                let cur_pos = members.iter().position(|(_, m)| {
+                    m.tab_index == cur_tab
+                        && !sel_set.is_empty()
+                        && sel_set.len() == m.member_handles.len()
+                        && m.member_handles.iter().all(|h| sel_set.contains(h))
+                });
+                let next_idx = cur_pos.map(|p| (p + 1) % members.len()).unwrap_or(0);
+                let (lp_no, chosen) = members[next_idx];
+                let dest_tab = chosen.tab_index;
+
+                if dest_tab < self.tabs.len() && dest_tab != self.active_tab {
+                    let _ = self.update(Message::TabSwitch(dest_tab));
+                    self.active_tab = dest_tab;
+                }
+                if dest_tab < self.tabs.len() {
+                    self.tabs[dest_tab].scene.deselect_all();
+                    self.tabs[dest_tab]
+                        .scene
+                        .select_entities(&chosen.member_handles);
+                    let zoomed = self.tabs[dest_tab]
+                        .scene
+                        .zoom_to_entities(&chosen.member_handles);
+                    if !zoomed {
+                        let mut cam = self.tabs[dest_tab].scene.camera.borrow_mut();
+                        let z = cam.target.z;
+                        cam.target = glam::DVec3::new(chosen.x, chosen.y, z);
+                    }
+                    self.refresh_properties();
+                }
+                self.command_line.push_output(&format!(
+                    "PIDLOOP NEXT [{}/{}]: 回路 {lp_no} -> {}（{}）。",
+                    next_idx + 1,
+                    members.len(),
+                    chosen.item_tag,
+                    chosen.drawing_name,
+                ));
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDLOOP: 未知子命令 {other}（支持 SUMMARY / INCOMPLETE / COMPLETE / ALL / NEXT / EXPORT）。"
                 ));
                 return Some(Task::none());
             }
@@ -7373,6 +7608,309 @@ mod tests {
         std::fs::write(
             out_dir.join("real155_summary.json"),
             format!("{}\n", serde_json::to_string_pretty(&sanitized).unwrap()),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidloop_aggregates_isa_loops_across_tabs_detects_incomplete_and_steps_camera() {
+        use document::entities::{Insert, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let mut app = app();
+
+        // Tab 1: DWG-156-01.dxf
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-156-01.dxf".to_string();
+        let (pt_h, pic_h, manual_bv_h, lic_bad_h, lv_bad_h) = {
+            let doc = &mut app.tabs[tab1].scene.document;
+            define_sppid_block(doc, "DCS FUNC ACCESS IN PRIME LOC", 8.0, 8.0);
+            define_sppid_block(doc, "LV-LEVEL CONTROL VALVE", 6.0, 6.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+
+            // Manual ball valve BV0201399 -> MUST NOT enter any instrument loop
+            let mut bv = Insert::new("BALL VALVE TYPE 2", Vector3::new(60.0, 200.0, 0.0));
+            bv.common.layer = "11".to_string();
+            let manual_bv_h = doc.add_entity(document::EntityType::Insert(bv)).unwrap();
+            let mut bvt =
+                Text::with_value("BV0201399", Vector3::new(56.0, 206.0, 0.0)).with_height(2.5);
+            bvt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(bvt)).unwrap();
+
+            // Loop 02013 Sensor: PT-02013 at (110, 200)
+            let mut pt_ins = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(110.0, 200.0, 0.0),
+            );
+            pt_ins.common.layer = "12".to_string();
+            let pt_h = doc
+                .add_entity(document::EntityType::Insert(pt_ins))
+                .unwrap();
+            let mut pt_t1 =
+                Text::with_value("PT", Vector3::new(108.5, 202.0, 0.0)).with_height(2.2);
+            pt_t1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pt_t1)).unwrap();
+            let mut pt_t2 =
+                Text::with_value("02013", Vector3::new(107.0, 197.5, 0.0)).with_height(2.2);
+            pt_t2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pt_t2)).unwrap();
+
+            // Loop 02013 Controller: PIC-02013 at (110, 260)
+            let mut pic_ins = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(110.0, 260.0, 0.0),
+            );
+            pic_ins.common.layer = "12".to_string();
+            let pic_h = doc
+                .add_entity(document::EntityType::Insert(pic_ins))
+                .unwrap();
+            let mut pic_t1 =
+                Text::with_value("PIC", Vector3::new(108.0, 262.0, 0.0)).with_height(2.2);
+            pic_t1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pic_t1)).unwrap();
+            let mut pic_t2 =
+                Text::with_value("02013", Vector3::new(107.0, 257.5, 0.0)).with_height(2.2);
+            pic_t2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pic_t2)).unwrap();
+
+            // Incomplete Loop 02099: LIC-02099 + LV-02099 WITHOUT any LT-02099 primary sensor!
+            let mut lic_ins = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(400.0, 300.0, 0.0),
+            );
+            lic_ins.common.layer = "12".to_string();
+            let lic_bad_h = doc
+                .add_entity(document::EntityType::Insert(lic_ins))
+                .unwrap();
+            let mut lic_t1 =
+                Text::with_value("LIC", Vector3::new(398.0, 302.0, 0.0)).with_height(2.2);
+            lic_t1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(lic_t1)).unwrap();
+            let mut lic_t2 =
+                Text::with_value("02099", Vector3::new(397.0, 297.5, 0.0)).with_height(2.2);
+            lic_t2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(lic_t2)).unwrap();
+
+            let mut lv_ins = Insert::new("LV-LEVEL CONTROL VALVE", Vector3::new(400.0, 220.0, 0.0));
+            lv_ins.common.layer = "12".to_string();
+            let lv_bad_h = doc
+                .add_entity(document::EntityType::Insert(lv_ins))
+                .unwrap();
+            let mut lv_t =
+                Text::with_value("LV-02099", Vector3::new(395.0, 228.0, 0.0)).with_height(2.5);
+            lv_t.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(lv_t)).unwrap();
+
+            (pt_h, pic_h, manual_bv_h, lic_bad_h, lv_bad_h)
+        };
+
+        // Tab 2: DWG-156-02.dxf with Final Element PV-02013 at (620, 480) completing Loop 02013 across tabs!
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-156-02.dxf".to_string();
+        let pv_tab2_h = {
+            let doc = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc, "LV-LEVEL CONTROL VALVE", 6.0, 6.0);
+            let mut pv_ins = Insert::new("LV-LEVEL CONTROL VALVE", Vector3::new(620.0, 480.0, 0.0));
+            pv_ins.common.layer = "12".to_string();
+            let pv_h = doc
+                .add_entity(document::EntityType::Insert(pv_ins))
+                .unwrap();
+            let mut pv_t =
+                Text::with_value("PV-02013", Vector3::new(615.0, 488.0, 0.0)).with_height(2.5);
+            pv_t.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pv_t)).unwrap();
+            pv_h
+        };
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        let tmp = std::env::temp_dir().join(format!("ocs_pidloop_156_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // 1. Export multi-tab Loop Index JSON & CSV
+        let lp_json = tmp.join("loops1.json");
+        let lp_csv = tmp.join("loops1.csv");
+        let _ = app.run_command_line(&format!("PIDLOOP ALLTABS EXPORT \"{}\"", lp_json.display()));
+        assert!(
+            lp_json.is_file(),
+            "PIDLOOP EXPORT must write loop index JSON"
+        );
+        let _ = app.run_command_line(&format!("PIDLOOP ALLTABS EXPORT \"{}\"", lp_csv.display()));
+        let csv_raw = std::fs::read_to_string(&lp_csv).unwrap();
+        assert!(
+            csv_raw.starts_with('\u{feff}')
+                && csv_raw.contains("02013")
+                && csv_raw.contains("02099")
+        );
+
+        let rep1: Value =
+            serde_json::from_str(&std::fs::read_to_string(&lp_json).unwrap()).unwrap();
+        assert_eq!(rep1["summary"]["total_loops"].as_u64(), Some(2));
+        assert_eq!(rep1["summary"]["complete_closed_loops"].as_u64(), Some(1));
+        assert_eq!(rep1["summary"]["incomplete_loops"].as_u64(), Some(1));
+
+        // 2. Highlight specific loop `02013` across tabs & verify manual ball valve excluded
+        let _ = app.run_command_line("PIDLOOP 02013 ALLTABS");
+        assert!(has_sel(&app, tab1, pt_h));
+        assert!(has_sel(&app, tab1, pic_h));
+        assert!(!has_sel(&app, tab1, manual_bv_h));
+        assert!(!has_sel(&app, tab1, lic_bad_h));
+        assert!(has_sel(&app, tab2, pv_tab2_h));
+
+        // 3. Highlight INCOMPLETE loops -> selects LIC-02099 & LV-02099
+        let _ = app.run_command_line("PIDLOOP ALLTABS INCOMPLETE");
+        assert!(has_sel(&app, tab1, lic_bad_h));
+        assert!(has_sel(&app, tab1, lv_bad_h));
+        assert!(!has_sel(&app, tab1, pt_h));
+
+        // 4. Stateless NEXT stepping across Loop 02013 jumps onto Tab 2 PV-02013 at (620, 480)
+        app.tabs[tab1].scene.deselect_all();
+        app.tabs[tab2].scene.deselect_all();
+        let mut reached_tab2_pv = false;
+        for _ in 0..3 {
+            let _ = app.run_command_line("PIDLOOP 02013 ALLTABS NEXT");
+            if app.active_tab == tab2 {
+                let cam = app.tabs[tab2].scene.camera.borrow().target;
+                assert!((cam.x - 620.0).abs() < 30.0 && (cam.y - 480.0).abs() < 30.0);
+                reached_tab2_pv = true;
+            }
+        }
+        assert!(
+            reached_tab2_pv,
+            "PIDLOOP 02013 NEXT must step onto Tab 2 PV-02013"
+        );
+
+        // 5. Add missing LT-02099 sensor on Tab 1, promote both tabs, and verify incomplete_loops == 0
+        let _ = app.update(Message::TabSwitch(tab1));
+        {
+            let doc = &mut app.tabs[tab1].scene.document;
+            let mut lt_ins = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(350.0, 300.0, 0.0),
+            );
+            lt_ins.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Insert(lt_ins))
+                .unwrap();
+            let mut lt_t1 =
+                Text::with_value("LT", Vector3::new(348.5, 302.0, 0.0)).with_height(2.2);
+            lt_t1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(lt_t1)).unwrap();
+            let mut lt_t2 =
+                Text::with_value("02099", Vector3::new(347.0, 297.5, 0.0)).with_height(2.2);
+            lt_t2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(lt_t2)).unwrap();
+        }
+        let _ = app.run_command_line("PIDPROMOTE");
+        let _ = app.update(Message::TabSwitch(tab2));
+        let _ = app.run_command_line("PIDPROMOTE");
+        let _ = app.update(Message::TabSwitch(tab1));
+
+        let lp2_json = tmp.join("loops2.json");
+        let _ = app.run_command_line(&format!(
+            "PIDLOOP ALLTABS EXPORT \"{}\"",
+            lp2_json.display()
+        ));
+        let rep2: Value =
+            serde_json::from_str(&std::fs::read_to_string(&lp2_json).unwrap()).unwrap();
+        assert_eq!(rep2["summary"]["incomplete_loops"].as_u64(), Some(0));
+        assert_eq!(rep2["summary"]["complete_closed_loops"].as_u64(), Some(2));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads 4 real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into OpenCADStudio and verifies PIDLOOP ALLTABS ISA-5.1 loop index aggregation, completeness check, and NEXT stepping"]
+    fn real_multi_tab_pidloop_cross_sheet_isa_aggregation_and_audit() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_raw) = std::env::var("OCS_PID_REAL156_SPPID_PAIR") else {
+            println!("OCS_PID_REAL156_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(legacy_raw) = std::env::var("OCS_PID_REAL156_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL156_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL156_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real156"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sppid_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sppid_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        let legacy_paths: Vec<std::path::PathBuf> = std::env::split_paths(&legacy_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        assert_eq!(sppid_paths.len(), 2);
+        assert_eq!(legacy_paths.len(), 2);
+
+        let run_pair_audit = |label: &str, pair: &[std::path::PathBuf]| -> Value {
+            let mut app = app();
+            let mut shas = Vec::new();
+            for (idx, p) in pair.iter().enumerate() {
+                shas.push(
+                    format!("{:x}", Sha256::digest(std::fs::read(p).unwrap()))[..12].to_string(),
+                );
+                if idx > 0 {
+                    let _ = app.update(Message::TabNew);
+                }
+                let ti = app.active_tab;
+                app.tabs[ti].scene.document = crate::io::load_file(p).expect("load DXF");
+                app.tabs[ti].tab_title = format!("{label}_{idx}.dxf");
+            }
+
+            let jp = out_dir.join(format!("{label}_loops_tmp.json"));
+            let cp = out_dir.join(format!("{label}_loops_tmp.csv"));
+            let _ = app.run_command_line(&format!("PIDLOOP ALLTABS EXPORT \"{}\"", jp.display()));
+            let _ = app.run_command_line(&format!("PIDLOOP ALLTABS EXPORT \"{}\"", cp.display()));
+            let rep: Value = serde_json::from_str(&std::fs::read_to_string(&jp).unwrap()).unwrap();
+            let csv_s = std::fs::read_to_string(&cp).unwrap();
+            let _ = std::fs::remove_file(&jp);
+            let _ = std::fs::remove_file(&cp);
+
+            assert!(csv_s.starts_with('\u{feff}'));
+            assert!(
+                rep["summary"]["total_loops"].as_u64().unwrap_or(0) >= 5,
+                "{label}: expected >=5 instrument loops across paired sheets"
+            );
+
+            let _ = app.run_command_line("PIDLOOP ALLTABS NEXT");
+            assert!(!app.tabs[app.active_tab]
+                .scene
+                .selected_entities()
+                .is_empty());
+
+            json!({
+                "sha256_prefixes": shas,
+                "summary": rep["summary"],
+            })
+        };
+
+        let sp_res = run_pair_audit("SPPID", &sppid_paths);
+        let lg_res = run_pair_audit("LEGACY", &legacy_paths);
+
+        std::fs::write(
+            out_dir.join("real156_summary.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({
+                    "sppid_pair": sp_res,
+                    "legacy_pair": lg_res,
+                }))
+                .unwrap()
+            ),
         )
         .unwrap();
     }

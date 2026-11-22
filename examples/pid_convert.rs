@@ -15,8 +15,9 @@
 use std::path::PathBuf;
 
 use OpenCADStudio::io::pid_convert::{
-    convert_path_to_dir, diff_pid_files, extract_bom_from_batch_dir, save_cad_file_as_binary_dwg,
-    write_bom_schedule_file, write_pid_diff_file, ConvertOptions,
+    convert_path_to_dir, diff_pid_files, extract_bom_from_batch_dir, extract_loops_from_batch_dir,
+    save_cad_file_as_binary_dwg, write_bom_schedule_file, write_pid_diff_file,
+    write_pid_loops_file, ConvertOptions,
 };
 
 struct CliArgs {
@@ -30,6 +31,7 @@ struct CliArgs {
     class_map: Option<String>,
     external_props: Option<String>,
     export_schedule: Option<PathBuf>,
+    export_loops: Option<PathBuf>,
     save_dwg: Option<PathBuf>,
     verify_plot: bool,
     summary_json: Option<PathBuf>,
@@ -44,6 +46,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut class_map: Option<String> = None;
     let mut external_props: Option<String> = None;
     let mut export_schedule: Option<PathBuf> = None;
+    let mut export_loops: Option<PathBuf> = None;
     let mut save_dwg: Option<PathBuf> = None;
     let mut verify_plot = false;
     let mut summary_json: Option<PathBuf> = None;
@@ -79,6 +82,12 @@ fn parse_args() -> Result<CliArgs, String> {
                 export_schedule = Some(PathBuf::from(
                     it.next()
                         .ok_or("--export-schedule requires an output path (.csv/.tsv/.json)")?,
+                ));
+            }
+            "--export-loops" => {
+                export_loops = Some(PathBuf::from(
+                    it.next()
+                        .ok_or("--export-loops requires an output path (.csv/.tsv/.json)")?,
                 ));
             }
             "--save-dwg" => {
@@ -135,6 +144,7 @@ fn parse_args() -> Result<CliArgs, String> {
         class_map,
         external_props,
         export_schedule,
+        export_loops,
         save_dwg,
         verify_plot,
         summary_json,
@@ -218,6 +228,17 @@ fn main() {
                     Ok(()) => {}
                     Err(err) => {
                         eprintln!("error: export-schedule failed: {err}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            if let Some(ref loops_p) = args.export_loops {
+                match extract_loops_from_batch_dir(out_dir)
+                    .and_then(|lp| write_pid_loops_file(&lp, loops_p))
+                {
+                    Ok(()) => {}
+                    Err(err) => {
+                        eprintln!("error: export-loops failed: {err}");
                         std::process::exit(1);
                     }
                 }
