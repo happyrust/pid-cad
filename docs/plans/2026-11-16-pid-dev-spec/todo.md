@@ -1108,13 +1108,14 @@
 
 - **做什么**：用现有的 `action` 操作替人按面板上的东西（§3.3）：在 `control_ui_action`（`src/app/control/actions.rs`）里加 `name` 为 `pid_verify` 的分支；`parse_action(value, view)` 把「键」或「键=值」转成面板消息。这一步先支持 `show`、`hide`、`tab=…`，并把三种失败定好：按钮是灰的 → `PANEL_ACTION_UNAVAILABLE`（带 `reason`）；行下标、快照序号、修订号不在面板当前的列表里 → `PANEL_ROW_NOT_FOUND`；键不认识或值的格式不对 → 现有的 `invalid_value`。两个新码进 `map_status`。后面各页签任务只在 `parse_action` 里加自己的键。
 - **验收**：
-  - [ ] `show`、`hide`、`tab=check|bom|deliver` 生效，`pid_verify_panel` 的 `visible`、`tab` 跟着变；动作的应答只是 `{"ok":true}`。
-  - [ ] 不认识的键、格式不对的值 → `invalid_value`（400）。
-  - [ ] `map_status` 里 `PANEL_ACTION_UNAVAILABLE` 是 409、`PANEL_ROW_NOT_FOUND` 是 404（这两个码到后面的页签任务才真正发出，这里先用 `parse_action` 的单元测试和状态码映射测试盖住）。
+  - [x] `show`、`hide`、`tab=check|bom|deliver` 生效，`pid_verify_panel` 的 `visible`、`tab` 跟着变；动作的应答只是 `{"ok":true}`。
+  - [x] 不认识的键、格式不对的值 → `invalid_value`（400）。
+  - [x] `map_status` 里 `PANEL_ACTION_UNAVAILABLE` 是 409、`PANEL_ROW_NOT_FOUND` 是 404（这两个码到后面的页签任务才真正发出，这里先用 `parse_action` 的单元测试和状态码映射测试盖住）。
 - **验证**：`cargo test --offline --locked --lib pid_verify`
 - **依赖**：PNL-3
 - **文件**：`src/ui/window/pid_verify_deliver.rs`、`src/app/control/actions.rs`、`src/rest.rs`
 - **规模**：M
+- **补（2026-11-22）**：在 `pid-stage-e` 上接着 PNL-3（`231785ee7`）做，一个提交。代码动了「文件」一栏的三个，另多动两个：`src/app/commands/pidverify.rs`（面板消息原来只有切页签，显示、隐藏要在 `on_pid_verify` 里接上）和 `src/mcp.rs`（动作名单也是 MCP 门面 `action` 的 `name` 的取值，多一个名字工具面摘要就变，照例更新并加一条测试）。与任务写法不同或任务没说的：「应答只是 `{"ok":true}`」读作不带面板内容的标准应答（`ok` 为真、`status` 是 `completed`、`result` 是空对象，公共字段照有）；键小写一字不差，页签名不分大小写（同 `PIDVERIFY`）；`show`、`hide` 带了值，`tab` 没值、值为空或再有 `=` 都是 `invalid_value`，说明里写该怎么写；没给 `value` 或给空串是 `invalid_request`（和别的带值的动作一样）；面板隐藏着也能按（隐藏时切的页签，再显示就停在那里）；只读会话也能按（`action` 不过只读关口，这三个键也不改图）；按之前先重建要画的内容；REST 走原有的 `POST /api/v1/action`，请求体要带 `document_id`；MCP 的 `action` 只声明了 `name`，带 `value` 时门面附一条参数没声明的提醒（原有，不改）；两个新码这一步还没有地方发出。这些记在面板规格 §11.4。**先红后绿**：先放 `PanelError`、`Show`/`Hide` 和返回空码、什么都不认的 `parse_action`（`on_pid_verify` 对显示、隐藏什么都不做），新加 8 条测试（模块 3、`pidverify.rs` 3、`rest.rs` 1、`mcp.rs` 1），都编得过，8 条全败在断言上（动作不认识、码是空串、该 409 的是 400、名单里没有 `pid_verify`），原有 15 条照过，工具面摘要那条在红步照过；实现后 8 条全过，工具面摘要照失败输出更新。第一遍格式检查报 `pidverify.rs` 新测试里一处断言不合 rustfmt，改后重跑，主程序库和两遍 clippy 是改完之后跑的。**读数**：`pid_verify` 23 条全过；`pidverify` 16 条、`mcp::tests` 73 条全过（含 `tool_schema_digest_is_pinned`）；主程序库 7656 条，7580 通过、73 默认不跑、3 失败（比对设计稿的三条，与起点相同），多的 8 条是新加的；编译警告 52；clippy 656 / 1051（`--tests` 重复数 637），与起点相同，新代码没有告警（逐条比对的六处差异是 iced 清单的三条弃用提示因输出顺序变了被归到别的位置，内容相同）；格式检查：改动的 5 个 Rust 文件新增 0（`actions.rs`、`rest.rs` 原有的 9 处、5 处不变）；架构检查的输出与起点一字不差；SPPID 脚本测试 185 条全过。**手工**：调试版 `--http` 起来后经 `POST /api/v1/action` 按面板、每步用 `GET /api/v1/pid/verify-panel` 对照，十二项全对：刚起来隐藏、页签 `check`；`show` 后显示；`tab=bom`、`tab=deliver` 跟着切；`hide` 后隐藏、页签不变；隐藏时 `tab=check` 照切；再 `show` 停在 `check`；这六下都是 200、`ok` 为真、`result` 是空对象；`open`、`show=1`、`tab=report` 是 400 `invalid_value`，说明写着该怎么写；不给 `value` 是 400 `invalid_request`；被拒的这几下没动面板。红步、绿步、门禁和手工的输出在仓库外 `D:\scratch\ocs-pid-dev-20261116\pnl-4\`。**新基线**：主程序库 7656 条（7580 / 73 / 3）。
 
 > **检查点 CP-E1**（PNL-1 – PNL-4 之后）：面板能开关、能切页签，能经接口读状态、经接口驱动；还没有业务内容。从这里起，各页签的任务不再碰七个共用文件。
 

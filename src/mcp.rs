@@ -83,8 +83,10 @@ const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 /// the schema under its size limit.
 /// The verify-and-deliver panel's state (`pid_verify_panel`) joined the read
 /// facade, and the read facade's `offset` and `limit` say how it pages.
+/// The verify-and-deliver panel's buttons (`pid_verify`) joined the action
+/// names of execute's `action`.
 #[cfg(test)]
-const TOOL_SCHEMA_DIGEST: &str = "329dc3e797e4e71b3d02f6f3c978f30881dd87b83f135914a8c19198deffedca";
+const TOOL_SCHEMA_DIGEST: &str = "b11922060947dd16ab4e98105695e2a7b46c673a34ec32b8dfdbf0b09a80b0ce";
 const MAX_REQUEST: usize = 1_048_576;
 const MAX_RESPONSE: u64 = 16 * 1024 * 1024;
 const CACHE_TTL_MS: u64 = 3_600_000;
@@ -5816,6 +5818,25 @@ mod tests {
         }
         assert_eq!(parameters["limit"]["minimum"], 1);
         assert_eq!(parameters["offset"]["minimum"], 0);
+    }
+
+    /// The verify-and-deliver panel is pressed through execute's `action`
+    /// with `name` `pid_verify` (panel spec §3.3), so that name is among the
+    /// action names the schema lists and the validator takes.
+    #[test]
+    fn pid_verify_is_an_action_on_the_execute_facade() {
+        assert!(EXECUTE_OPS.contains(&"action"));
+        assert!(crate::app::automation_action_names().contains(&"pid_verify"));
+        let press = json!({
+            "op": "action",
+            "request_id": "pid-verify-1",
+            "name": "pid_verify",
+            "value": "tab=bom"
+        });
+        assert!(
+            crate::mcp_ops::validate_request(&press, false).is_ok(),
+            "{press}"
+        );
     }
 
     #[test]

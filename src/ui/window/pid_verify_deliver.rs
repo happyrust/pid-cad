@@ -77,10 +77,14 @@ impl Tab {
     }
 }
 
-/// What the user did in the panel. Only the tab switch so far; each tab
-/// brings its own buttons.
+/// What the user did in the panel: showing or hiding it, and the tab switch
+/// so far; each tab brings its own buttons.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PidVerifyMsg {
+    /// Put the panel on screen, as its switch among the dock's panels does.
+    Show,
+    /// Take it off screen, as its close button does.
+    Hide,
     /// Bring a tab forward.
     Tab(Tab),
 }
@@ -250,6 +254,78 @@ fn paged(mut block: Value, limit: usize, offset: usize) -> Value {
         *rows = page;
     }
     block
+}
+
+/// Why an action (§3.3) pressed nothing (§3.7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PanelError {
+    /// The button is grey now; `reason` is one of §3.7's (`busy`,
+    /// `readonly`, `no_result` …).
+    Unavailable { reason: &'static str },
+    /// The row index, snapshot number or revision named is not in the
+    /// panel's list now; the text says which.
+    RowNotFound(String),
+    /// The key is not one the panel has, or its value is not written the
+    /// way the key takes it; the text says what to write.
+    InvalidValue(String),
+}
+
+impl PanelError {
+    /// The code the interface answers with.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Unavailable { .. } => "PANEL_ACTION_UNAVAILABLE",
+            Self::RowNotFound(_) => "PANEL_ROW_NOT_FOUND",
+            Self::InvalidValue(_) => "invalid_value",
+        }
+    }
+
+    /// Why the button is grey; only `PANEL_ACTION_UNAVAILABLE` says.
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Unavailable { reason } => Some(*reason),
+            Self::RowNotFound(_) | Self::InvalidValue(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for PanelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable { reason } => write!(f, "按钮现在是灰的，没有按下去（{reason}）"),
+            Self::RowNotFound(said) | Self::InvalidValue(said) => f.write_str(said),
+        }
+    }
+}
+
+/// The `value` of an `action` op named `pid_verify` (§3.3), one key or
+/// key=value, as the message pressing that control in the panel sends:
+/// `show`, `hide` and `tab=check|bom|deliver` so far; each tab adds its own
+/// keys. `view` is what the panel draws now, so a key whose button is grey
+/// there, or whose row is not in its list, is refused rather than pressed.
+pub fn parse_action(value: &str, _view: &VerifyView) -> Result<PidVerifyMsg, PanelError> {
+    let (key, written) = match value.split_once('=') {
+        Some((key, written)) => (key, Some(written)),
+        None => (value, None),
+    };
+    match key {
+        "show" | "hide" if written.is_some() => Err(PanelError::InvalidValue(format!(
+            "{key} 不带值，实得 \"{value}\""
+        ))),
+        "show" => Ok(PidVerifyMsg::Show),
+        "hide" => Ok(PidVerifyMsg::Hide),
+        "tab" => {
+            let name = written.unwrap_or_default();
+            Tab::from_key(name).map(PidVerifyMsg::Tab).ok_or_else(|| {
+                PanelError::InvalidValue(format!(
+                    "tab 写 check、bom、deliver 中的一个，实得 \"{name}\""
+                ))
+            })
+        }
+        _ => Err(PanelError::InvalidValue(format!(
+            "面板没有 \"{key}\" 这个键"
+        ))),
+    }
 }
 
 fn muted(theme: &Theme) -> iced::widget::text::Style {
@@ -478,5 +554,63 @@ mod tests {
         assert_eq!(paged(block.clone(), 3, 9)["rows"], json!([]));
         assert_eq!(paged(block.clone(), ROWS_PER_PAGE, 0), block);
         assert_eq!(ROWS_PER_PAGE, 200);
+    }
+
+    #[test]
+    fn pid_verify_action_reads_show_hide_and_the_tabs() {
+        let view = VerifyView::default();
+        for (value, pressed) in [
+            ("show", PidVerifyMsg::Show),
+            ("hide", PidVerifyMsg::Hide),
+            ("tab=check", PidVerifyMsg::Tab(Tab::Check)),
+            ("tab=bom", PidVerifyMsg::Tab(Tab::Bom)),
+            ("tab=deliver", PidVerifyMsg::Tab(Tab::Deliver)),
+            // The tab is named in any case, as `PIDVERIFY` takes it.
+            ("tab=Deliver", PidVerifyMsg::Tab(Tab::Deliver)),
+        ] {
+            assert_eq!(parse_action(value, &view), Ok(pressed), "{value}");
+        }
+    }
+
+    #[test]
+    fn pid_verify_action_names_a_wrong_key_or_value_invalid() {
+        let view = VerifyView::default();
+        for value in [
+            "",
+            "open",
+            "SHOW",
+            "show=1",
+            "hide=",
+            "tab",
+            "tab=",
+            "tab=report",
+            "tab=bom=1",
+        ] {
+            let refused = parse_action(value, &view).expect_err(value);
+            assert_eq!(refused.code(), "invalid_value", "{value}");
+            assert_eq!(refused.reason(), None, "{value}");
+            assert!(!refused.to_string().is_empty(), "{value}");
+        }
+        // The refusal says what to write.
+        assert_eq!(
+            parse_action("tab=report", &view).map_err(|refused| refused.to_string()),
+            Err("tab 写 check、bom、deliver 中的一个，实得 \"report\"".to_owned())
+        );
+    }
+
+    #[test]
+    fn pid_verify_action_errors_carry_the_codes_of_section_3_7() {
+        let grey = PanelError::Unavailable { reason: "busy" };
+        assert_eq!(
+            (grey.code(), grey.reason()),
+            ("PANEL_ACTION_UNAVAILABLE", Some("busy"))
+        );
+        assert!(grey.to_string().contains("busy"), "{grey}");
+        let gone = PanelError::RowNotFound("规则检查的列表里没有下标 7".to_owned());
+        assert_eq!((gone.code(), gone.reason()), ("PANEL_ROW_NOT_FOUND", None));
+        assert_eq!(gone.to_string(), "规则检查的列表里没有下标 7");
+        let wrong = PanelError::InvalidValue("tab 写 check、bom、deliver 中的一个".to_owned());
+        assert_eq!((wrong.code(), wrong.reason()), ("invalid_value", None));
+        assert_eq!(wrong.to_string(), "tab 写 check、bom、deliver 中的一个");
     }
 }

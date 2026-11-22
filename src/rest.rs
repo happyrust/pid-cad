@@ -1414,6 +1414,8 @@ pub(crate) fn map_status(response: Value, created: bool) -> u16 {
         "SNAPSHOT_NOT_FOUND" => 404,
         // 发布（发布规格 §3.6）：要校验的包不在，或者里面没有发布清单。
         "PACKAGE_NOT_FOUND" => 404,
+        // 面板（面板规格 §3.7）：动作指的行、快照、修订不在面板现在的列表里。
+        "PANEL_ROW_NOT_FOUND" => 404,
         // 同一线号同图第二个流入连接符是「与现有资源冲突」，不是请求格式错。
         // `CONNECTOR_KIND_MISMATCH` 保持 400（契约 A.7 明文）。
         "stale_state"
@@ -1455,7 +1457,9 @@ pub(crate) fn map_status(response: Value, created: bool) -> u16 {
         | "COLLAB_OFFLINE"
         | "PUBLISH_TARGET_EXISTS"
         | "PACKAGE_INCOMPLETE"
-        | "PACKAGE_CORRUPT" => 409,
+        | "PACKAGE_CORRUPT"
+        // 面板（面板规格 §3.7）：动作对应的按钮此刻是灰的，`reason` 说为什么。
+        | "PANEL_ACTION_UNAVAILABLE" => 409,
         // 协同会话不可写：请求本身没有错，是这个会话不被允许做这件事。
         "COLLAB_READONLY" | "PERM_DENIED_ROLE" | "PERM_DENIED_PBS" | "PERM_DENIED_STATE" => 403,
         // 项目文件、项目规则包读写失败，清单文件写不了，快照文件读写失败：请求和图纸都没错，
@@ -2923,6 +2927,49 @@ mod tests {
         );
         assert_eq!(status, 400, "{body}");
         assert_eq!(body["code"], "invalid_request", "{body}");
+    }
+
+    /// The panel is pressed through the generic `POST /api/v1/action`
+    /// passthrough (panel spec §3.3). A grey button conflicts with the panel
+    /// as it is (409), a row not in its list is not found (404), and a key
+    /// it does not have is a bad request (400). Over the wire, the tab an
+    /// action turned is the tab the panel state reads.
+    #[test]
+    fn pid_verify_action_rest_statuses() {
+        for (code, status) in [
+            ("PANEL_ACTION_UNAVAILABLE", 409),
+            ("PANEL_ROW_NOT_FOUND", 404),
+            ("invalid_value", 400),
+        ] {
+            let refused = json!({"ok": false, "status": "failed", "code": code});
+            assert_eq!(map_status(refused, false), status, "{code}");
+        }
+        let mut app = serve_app(false);
+        let mut document_id: Option<u64> = None;
+        let mut counter: u64 = 0;
+        let doc = app.automation_op(r#"{"protocol":1,"op":"state"}"#)["document_id"].clone();
+        let press = |value: &str| {
+            let body = json!({"document_id": doc, "name": "pid_verify", "value": value});
+            request("POST", "/api/v1/action", &body.to_string())
+        };
+        let (status, body) = route(&mut app, &press("tab=bom"), &mut document_id, &mut counter);
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = route(
+            &mut app,
+            &request("GET", "/api/v1/pid/verify-panel", ""),
+            &mut document_id,
+            &mut counter,
+        );
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["tab"], "bom", "{body}");
+        let (status, body) = route(
+            &mut app,
+            &press("tab=report"),
+            &mut document_id,
+            &mut counter,
+        );
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(body["code"], "invalid_value", "{body}");
     }
 
     /// `ready` must not advertise the welcome (Start) tab: that tab answers

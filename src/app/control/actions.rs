@@ -188,6 +188,7 @@ pub(super) const NAMES: &[&str] = &[
     "count_palette",
     "blocks_palette",
     "pid_palette",
+    "pid_verify",
     "pdf_page_select",
     "pc_colormap",
     "pc_section",
@@ -2245,6 +2246,26 @@ impl OpenCADStudio {
                     }
                     _ => return Err(failure("invalid_value", "Unknown P&ID palette edit")),
                 }
+            }
+            // The 「校验与交付」 panel (panel spec §3.3): one key or key=value,
+            // as `parse_action` reads them. The view is rebuilt first, so a key
+            // whose button the panel draws grey now, or whose row is not in its
+            // list, is refused rather than pressed.
+            "pid_verify" => {
+                let value = string(req, "value")?;
+                self.refresh_pid_verify_view();
+                let pressed = crate::ui::window::pid_verify_deliver::parse_action(
+                    value,
+                    &self.pid_verify_view,
+                )
+                .map_err(|refused| {
+                    let mut answer = failure(refused.code(), &refused);
+                    if let Some(reason) = refused.reason() {
+                        answer["reason"] = json!(reason);
+                    }
+                    answer
+                })?;
+                Message::PidVerify(pressed)
             }
             // Attach dialog: choose pages by index ("0,2").
             "pdf_page_select" => {

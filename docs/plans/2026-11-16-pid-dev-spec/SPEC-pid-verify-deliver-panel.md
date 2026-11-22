@@ -620,3 +620,29 @@ MCP：`pid_verify_panel` 进 `READ_OPS`；`action` 已经在 `EXECUTE_OPS` 里�
 5. **自动化停用时也能读**：它在查询名单里，和别的读操作一样（测试里先发 `stop` 再读）。
 6. **画面板的那份内容什么时候重建**：显示面板、切页签、处理面板消息时，以及每次回答这个操作之前。换图纸标签页、只读状态变了不会马上重建：现在画出来的东西还不看这几项，等第一个按图画内容的任务（PNL-5）在换标签页时补上。
 7. **MCP 的 `limit`、`offset`**：§7.6 第 5 处要把参数补进门面的输入说明。`ocs_read` 原来就有这两个参数（别的分页读也在用），只是没有说明；这里各加了一句，说明对 `pid_verify_panel` 是每个列表的行数，没给时 200。
+
+### 11.4 `PNL-4`：动作通道 `action` 的 `pid_verify`（2026-11-22）
+
+**做了什么：**
+
+- 模块里（`pid_verify_deliver.rs`）：`PidVerifyMsg` 多了 `Show`、`Hide`。`PanelError` 是 §3.7 的三种失败：`Unavailable { reason }`（按钮是灰的）、`RowNotFound`（行、快照、修订不在面板现在的列表里）、`InvalidValue`（键不认识或值写得不对）；`code()` 是接口答的码，`reason()` 只有第一种有，`Display` 是给人看的说明。`parse_action(value, view)` 把「键」或「键=值」读成面板消息，现在认 `show`、`hide`、`tab=check|bom|deliver`。
+- 程序这一侧（`pidverify.rs`）：`on_pid_verify` 接上 `Show`、`Hide`。显示走 `show_pid_verify_panel`（停靠区面板开关的打开路径）；隐藏走标题栏关闭按钮那条路径（`DockMsg::Close`，控件位置记录一并清掉），再重建要画的内容。
+- 接线：`actions.rs` 的动作名单加 `pid_verify`；`control_ui_action` 加这个分支：先重建要画的内容，再交给 `parse_action`，读出的消息照别的动作经 `update` 发出；读不出时答 `PanelError` 的码和说明，按钮是灰的再加 `reason`。`rest.rs` 的 `map_status`：`PANEL_ACTION_UNAVAILABLE` 是 409，`PANEL_ROW_NOT_FOUND` 是 404。
+
+**与规格、任务写法不同的：**
+
+1. **多动了两个文件。** `src/app/commands/pidverify.rs`：面板消息原来只有切页签，显示、隐藏要在 `on_pid_verify` 里接上。`src/mcp.rs`：动作名单也是 MCP 门面 `action` 的 `name` 的取值和校验名单，多一个名字工具面摘要就变；照例在摘要上面记一句、更新摘要，另加一条测试验 `ocs_execute` 收得下这个动作。
+2. **「应答只是 `{"ok":true}`」读作不带面板内容的标准应答。** 动作和别的操作一样经控制通道答，`status`（`completed`）、`request_id`、`changes`、`state` 这些公共字段照有，`result` 是空对象。要看面板现在的样子，读 `pid_verify_panel`。
+
+**规格没写到、这里定下的：**
+
+1. **键是小写、一字不差**（`SHOW` 不认）；**页签名不分大小写**，和 `PIDVERIFY` 的参数一样（`tab=Deliver` 可以）。
+2. **`show`、`hide` 不带值**：`show=1`、`hide=` 都是 `invalid_value`；`tab` 不带值、值为空、值里再有 `=`（`tab=bom=1`）也是。
+3. **说明写该怎么写**：「tab 写 check、bom、deliver 中的一个，实得 "report"」「面板没有 "open" 这个键」「show 不带值，实得 "show=1"」。
+4. **没给 `value` 或给了空串是 `invalid_request`**（400），和别的带值的动作一样（控制通道取参数那道检查），不是 `invalid_value`。
+5. **面板隐藏着也能按**：隐藏时 `tab=…` 照切，再 `show` 就停在那个页签。§3.7 的 `reason` 不另加「面板没显示」一种。
+6. **只读会话也能按**：`action` 操作本来不过只读关口（那道关只拦命令），这三个键也都不改图（撤销步数不变）。后面各页签带进会改东西的键时，按 §4.8 由按钮灰不灰（`readonly`）来拦。
+7. **按之前先重建要画的内容**，所以 `parse_action` 看到的就是此刻的面板。现在的三个键还用不着它，`view` 参数留给后面各页签判按钮灰不灰、行在不在。
+8. **REST** 走原有的 `POST /api/v1/action`，请求体要带 `document_id`（这个通用入口不替请求补图纸号，不带是 `document_required`）。
+9. **MCP**：`ocs_execute` 的 `action` 只声明了 `name`，`value` 照样转给程序，但门面会附一条「unknown parameter 'value' ignored for op 'action'」的提醒。别的带值的动作（如 `pid_palette`）原来就这样，这里不改。
+10. **两个新码现在还没有地方发出**，等后面各页签带按钮和行进来才发；这一步用 `PanelError` 的单元测试和 `map_status` 的测试盖住（任务验收第 3 条）。

@@ -7,7 +7,9 @@
 //! the panel draws the plain data `build_view` makes of it
 //! (`pid_verify_view`), so whatever changes that state ends in
 //! [`OpenCADStudio::refresh_pid_verify_view`]. The command never changes
-//! the drawing, so a read-only session may run every form of it.
+//! the drawing, so a read-only session may run every form of it. The
+//! `action` op named `pid_verify` presses the panel with these same
+//! messages (§3.3).
 
 use crate::app::{Message, OpenCADStudio};
 use crate::pid::drc;
@@ -99,15 +101,22 @@ impl OpenCADStudio {
         Some(task)
     }
 
-    /// What the user did in the panel.
+    /// What the user did in the panel. Hiding takes the close button's path,
+    /// so the controls' positions go with the panel.
     pub(in crate::app) fn on_pid_verify(&mut self, msg: PidVerifyMsg) -> Task<Message> {
         match msg {
+            PidVerifyMsg::Show => self.show_pid_verify_panel(),
+            PidVerifyMsg::Hide => {
+                let task = self.on_dock(DockMsg::Close(PanelId::PidVerifyDeliver));
+                self.refresh_pid_verify_view();
+                task
+            }
             PidVerifyMsg::Tab(tab) => {
                 self.pid_verify_ui.tab = tab;
                 self.refresh_pid_verify_view();
+                Task::none()
             }
         }
-        Task::none()
     }
 }
 
@@ -149,6 +158,7 @@ mod tests {
         PidVerifyMsg, Tab, BOUNDS_PREFIX, PANEL_BOUNDS_ID,
     };
     use serde_json::{json, Value};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     const PANEL: PanelId = PanelId::PidVerifyDeliver;
 
@@ -238,6 +248,32 @@ mod tests {
         app.drive_headless_task(task).expect("the switch's task");
         assert_eq!(switched["ok"], true, "{switched}");
         assert_eq!(app.tabs[app.active_tab].id, id);
+    }
+
+    /// Press `value` in the panel through the `action` op (§3.3), as a
+    /// script does, driving whatever it starts to its end.
+    fn act(app: &mut OpenCADStudio, value: &str) -> Value {
+        static PRESSED: AtomicU64 = AtomicU64::new(0);
+        let request_id = format!(
+            "pid-verify-action-{}",
+            PRESSED.fetch_add(1, Ordering::Relaxed)
+        );
+        let state = app.automation_op(r#"{"protocol":1,"op":"state"}"#);
+        let (answer, task) = app.control_request(json!({
+            "protocol": 1,
+            "op": "action",
+            "name": "pid_verify",
+            "value": value,
+            "document_id": state["document_id"],
+            "request_id": request_id,
+        }));
+        app.drive_headless_task(task).expect("the action's task");
+        if matches!(answer["status"].as_str(), Some("accepted" | "running")) {
+            return app
+                .control_request(json!({"op": "operation", "request_id": request_id}))
+                .0;
+        }
+        answer
     }
 
     /// The ids the real view reports once it is drawn.
@@ -496,6 +532,75 @@ mod tests {
         assert_eq!(stopped["ok"], true, "{stopped}");
         let answer = panel(&mut app, "");
         assert_eq!(answer["ok"], true, "{answer}");
+    }
+
+    #[test]
+    fn pid_verify_action_shows_hides_and_turns_the_panel() {
+        let mut app = fresh();
+        for (value, visible, tab) in [
+            ("show", true, "check"),
+            ("tab=bom", true, "bom"),
+            ("tab=deliver", true, "deliver"),
+            ("hide", false, "deliver"),
+            // Hidden, the panel turns all the same, and shows on that tab.
+            ("tab=check", false, "check"),
+            ("show", true, "check"),
+        ] {
+            let answer = act(&mut app, value);
+            assert_eq!(answer["ok"], true, "{value}: {answer}");
+            assert_eq!(answer["status"], "completed", "{value}: {answer}");
+            // The action only presses; what it did is read off the panel.
+            assert_eq!(answer["result"], json!({}), "{value}: {answer}");
+            let state = panel(&mut app, "");
+            assert_eq!(state["visible"], visible, "{value}: {state}");
+            assert_eq!(state["tab"], tab, "{value}: {state}");
+        }
+        // The first time, it docked on the right, as `PIDVERIFY` docks it.
+        assert_eq!(
+            app.dock.location(PANEL).map(|(side, _)| side),
+            Some(DockSide::Right)
+        );
+    }
+
+    #[test]
+    fn pid_verify_action_refuses_what_the_panel_does_not_have() {
+        let mut app = fresh();
+        for value in ["open", "show=1", "tab=report"] {
+            let answer = act(&mut app, value);
+            assert_eq!(answer["ok"], false, "{value}: {answer}");
+            assert_eq!(answer["status"], "failed", "{value}: {answer}");
+            assert_eq!(answer["code"], "invalid_value", "{value}: {answer}");
+            assert!(
+                answer["error"]
+                    .as_str()
+                    .is_some_and(|said| !said.is_empty()),
+                "{value}: {answer}"
+            );
+            assert_eq!(answer.get("reason"), None, "{value}: {answer}");
+        }
+        // With no value there is nothing to press, as for every action.
+        let answer = act(&mut app, "");
+        assert_eq!(answer["code"], "invalid_request", "{answer}");
+        // Nothing was pressed.
+        let state = panel(&mut app, "");
+        assert_eq!(state["visible"], false, "{state}");
+        assert_eq!(state["tab"], "check", "{state}");
+    }
+
+    #[test]
+    fn pid_verify_action_is_open_to_a_read_only_session() {
+        let mut app = fresh();
+        app.collab.readonly = true;
+        let steps = undo_steps(&app);
+        for value in ["show", "tab=bom", "hide"] {
+            let answer = act(&mut app, value);
+            assert_eq!(answer["ok"], true, "{value}: {answer}");
+        }
+        let state = panel(&mut app, "");
+        assert_eq!(state["visible"], false, "{state}");
+        assert_eq!(state["tab"], "bom", "{state}");
+        // Pressing the panel changed nothing in the drawing.
+        assert_eq!(undo_steps(&app), steps);
     }
 
     #[test]
