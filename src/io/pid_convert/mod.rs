@@ -5,6 +5,7 @@
 //! with `src/io/pid/` or `src/io/pid_legend/`.
 
 pub mod bom;
+pub mod cause_effect;
 pub mod class_map;
 pub mod diff;
 pub mod drawing_index;
@@ -30,6 +31,13 @@ pub mod trace;
 pub mod utility;
 pub mod valve_mto;
 
+pub use cause_effect::{
+    analyze_pid_cause_effect, cause_effect_row_matches_query, format_pid_cause_effect_delimited,
+    parse_sis_tag_prefix_and_loop, CauseTriggerKind, InterlockStatus, PidCauseEffectReport,
+    PidCauseEffectRow, PidCauseEffectSummary, CAUSE_EFFECT_CSV_HEADERS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use cause_effect::{extract_cause_effect_from_path, write_pid_cause_effect_file};
 pub use diff::{
     diff_pid_documents, format_pid_diff_delimited, DiffFieldChange, DiffKind, PidDiffItem,
     PidDiffReport, PidDiffSummary, DIFF_CSV_HEADERS,

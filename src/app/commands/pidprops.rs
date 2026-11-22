@@ -50,7 +50,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDSPECIALTY",
         "PIDLINELIST",
         "PIDEQUIP",
-        "PIDRELIEF"
+        "PIDRELIEF",
+        "PIDCAUSE"
     ]
 });
 
@@ -339,6 +340,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidrelief_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidcause_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -5506,6 +5510,245 @@ impl OpenCADStudio {
             other => {
                 self.command_line.push_error(&format!(
                     "PIDRELIEF: 未知子命令 {other}（支持 SUMMARY / ALL / VIOLATIONS / FLARE / ATMOSPHERE / TAG / NEXT / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
+
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidcause_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            analyze_pid_cause_effect, cause_effect_row_matches_query, write_pid_cause_effect_file,
+            InterlockStatus, OpcSheetInput,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDCAUSE") {
+            return None;
+        }
+
+        let mut action: Option<String> = None;
+        let mut tag_query: Option<String> = None;
+        let mut all_tabs = false;
+        let mut export_path: Option<std::path::PathBuf> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            let up = tok.to_ascii_uppercase();
+            match up.as_str() {
+                "ALLTABS" => {
+                    all_tabs = true;
+                    idx += 1;
+                }
+                "SUMMARY" | "ALL" | "COMPLETE" | "INCOMPLETE" | "NEXT" => {
+                    action = Some(up);
+                    idx += 1;
+                }
+                "TAG" => {
+                    let Some(q) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDCAUSE TAG: 缺少联锁测点、逻辑块或切断阀位号关键字。");
+                        return Some(Task::none());
+                    };
+                    action = Some("TAG".to_string());
+                    tag_query = Some(q.clone());
+                    idx += 2;
+                }
+                "EXPORT" => {
+                    let Some(next_tok) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDCAUSE EXPORT: 缺少输出文件路径（.json/.csv/.tsv）。");
+                        return Some(Task::none());
+                    };
+                    export_path = Some(std::path::PathBuf::from(next_tok));
+                    idx += 2;
+                }
+                _ => {
+                    if action.is_none() {
+                        action = Some("TAG".to_string());
+                        tag_query = Some(tok.clone());
+                    }
+                    idx += 1;
+                }
+            }
+        }
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<OpcSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+
+        let rep = analyze_pid_cause_effect(&sheet_inputs);
+
+        if let Some(ref out_p) = export_path {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(err) = write_pid_cause_effect_file(&rep, out_p) {
+                self.command_line
+                    .push_error(&format!("PIDCAUSE EXPORT: {err}"));
+                return Some(Task::none());
+            }
+        }
+
+        let eff_action = action.as_deref().unwrap_or("SUMMARY");
+        let filtered: Vec<_> = rep
+            .interlocks
+            .iter()
+            .filter(|r| match eff_action {
+                "COMPLETE" => r.status == InterlockStatus::CompleteInterlock,
+                "INCOMPLETE" => r.status.is_incomplete(),
+                "TAG" => tag_query
+                    .as_deref()
+                    .is_some_and(|q| cause_effect_row_matches_query(r, q)),
+                _ => true,
+            })
+            .collect();
+
+        match eff_action {
+            "SUMMARY" => {
+                self.command_line.push_output(&format!(
+                    "PIDCAUSE: 扫描图纸={} | 安全联锁={}（跨图={}，完整闭环={}，缺执行元件={}，孤立切断阀={}）| 触发源={}，执行机构={}。",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_interlocks,
+                    rep.summary.multi_sheet_interlocks,
+                    rep.summary.complete_count,
+                    rep.summary.missing_actuator_count,
+                    rep.summary.orphan_actuator_count,
+                    rep.summary.total_cause_sensors,
+                    rep.summary.total_trip_actuators,
+                ));
+            }
+            "ALL" | "COMPLETE" | "INCOMPLETE" | "TAG" => {
+                let mut by_tab: std::collections::BTreeMap<usize, Vec<document::Handle>> =
+                    std::collections::BTreeMap::new();
+                for r in &filtered {
+                    for (&ti, hs) in &r.handles_by_tab {
+                        let dst = by_tab.entry(ti).or_default();
+                        for &h in hs {
+                            if !dst.contains(&h) {
+                                dst.push(h);
+                            }
+                        }
+                    }
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                let mut sel_cnt = 0usize;
+                for (&ti, hs) in &by_tab {
+                    if ti < self.tabs.len() && !hs.is_empty() {
+                        self.tabs[ti].scene.select_entities(hs);
+                        sel_cnt += hs.len();
+                    }
+                }
+                if eff_action == "TAG"
+                    && filtered.len() == 1
+                    && filtered[0].primary_tab < self.tabs.len()
+                    && filtered[0].primary_tab != self.active_tab
+                {
+                    let dt = filtered[0].primary_tab;
+                    let _ = self.update(Message::TabSwitch(dt));
+                    self.active_tab = dt;
+                }
+                if let Some(cur_hs) = by_tab.get(&self.active_tab).filter(|h| !h.is_empty()) {
+                    let _ = self.tabs[self.active_tab].scene.zoom_to_entities(cur_hs);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDCAUSE {eff_action}: 匹配 {} 条安全联锁，跨打开图纸高亮 {sel_cnt} 个图元。",
+                    filtered.len()
+                ));
+            }
+            "NEXT" => {
+                if filtered.is_empty() {
+                    self.command_line
+                        .push_output("PIDCAUSE NEXT: 未找到可巡检的安全联锁行。");
+                    return Some(self.finish_dispatch(cmd));
+                }
+                let cur_tab = self.active_tab;
+                let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[cur_tab]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                let cur_pos = filtered
+                    .iter()
+                    .position(|r| r.primary_tab == cur_tab && sel_set.contains(&r.primary_handle));
+                let next_idx = cur_pos.map(|p| (p + 1) % filtered.len()).unwrap_or(0);
+                let chosen = filtered[next_idx];
+                let dest_tab = chosen.primary_tab;
+
+                if dest_tab < self.tabs.len() && dest_tab != self.active_tab {
+                    let _ = self.update(Message::TabSwitch(dest_tab));
+                    self.active_tab = dest_tab;
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                if dest_tab < self.tabs.len() {
+                    if let Some(hs) = chosen.handles_by_tab.get(&dest_tab) {
+                        self.tabs[dest_tab].scene.select_entities(hs);
+                        let zoomed = self.tabs[dest_tab].scene.zoom_to_entities(hs);
+                        if !zoomed {
+                            let mut cam = self.tabs[dest_tab].scene.camera.borrow_mut();
+                            let z = cam.target.z;
+                            cam.target = glam::DVec3::new(chosen.x, chosen.y, z);
+                        }
+                    }
+                    self.refresh_properties();
+                }
+                self.command_line.push_output(&format!(
+                    "PIDCAUSE NEXT [{}/{}]: {}（触发={:?}，动作={:?}，状态={}）。",
+                    next_idx + 1,
+                    filtered.len(),
+                    chosen.interlock_id,
+                    chosen.cause_tags,
+                    chosen.effect_actions,
+                    chosen.status.as_str(),
+                ));
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDCAUSE: 未知子命令 {other}（支持 SUMMARY / ALL / COMPLETE / INCOMPLETE / TAG / NEXT / EXPORT）。"
                 ));
                 return Some(Task::none());
             }
@@ -16032,6 +16275,413 @@ mod tests {
         std::fs::write(
             out_dir.join("real171_summary.json"),
             format!("{}\n", serde_json::to_string_pretty(&sanitized).unwrap()),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidcause_extracts_sis_esd_matrix_links_signal_wired_cross_loop_trips_flags_incomplete_and_steps_camera(
+    ) {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let tmp = std::env::temp_dir().join("ocs_pidcause_test_172");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let mut app = app();
+
+        // Tab 1:
+        // - V-1721 + P-1721 on 100-PG-17201-CS150 -> OPC to Tab 2
+        // - PZT-1721 wired via signal line (layer 12) -> UZ-1720 -> P-1721 (and paired with ESDV-1721 + ZSC-1721 on Tab 2!)
+        // - LSHH-1798 on V-1721 with no actuator (missing_actuator)
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-172-01.dxf".to_string();
+        let (pzt_h, lshh_h) = {
+            let doc = &mut app.tabs[tab1].scene.document;
+            define_sppid_block(doc, "1TO1PARAMETRIC V DRUM", 12.0, 24.0);
+            define_sppid_block(doc, "CENTRIFUGAL PUMP", 8.0, 8.0);
+            define_sppid_block(doc, "DCS FUNC ACCESS IN PRIME LOC", 8.0, 8.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-172-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut drum = Insert::new("1TO1PARAMETRIC V DRUM", Vector3::new(100.0, 300.0, 0.0));
+            drum.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(drum)).unwrap();
+            let mut dt =
+                Text::with_value("V-1721", Vector3::new(95.0, 280.0, 0.0)).with_height(2.5);
+            dt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(dt)).unwrap();
+
+            let mut p1 = Line::from_points(
+                Vector3::new(106.0, 300.0, 0.0),
+                Vector3::new(176.0, 300.0, 0.0),
+            );
+            p1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p1)).unwrap();
+
+            let mut pump = Insert::new("CENTRIFUGAL PUMP", Vector3::new(180.0, 300.0, 0.0));
+            pump.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(pump)).unwrap();
+            let mut pt =
+                Text::with_value("P-1721", Vector3::new(175.0, 290.0, 0.0)).with_height(2.5);
+            pt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(pt)).unwrap();
+
+            let mut p2 = Line::from_points(
+                Vector3::new(184.0, 300.0, 0.0),
+                Vector3::new(274.0, 300.0, 0.0),
+            );
+            p2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p2)).unwrap();
+            let mut ltxt = Text::with_value("100-PG-17201-CS150", Vector3::new(205.0, 303.0, 0.0))
+                .with_height(2.5);
+            ltxt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(ltxt)).unwrap();
+
+            let mut opc1 = Insert::new("_OFF-UNIT SQ", Vector3::new(280.0, 300.0, 0.0));
+            opc1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc1)).unwrap();
+            let mut oft1 =
+                Text::with_value("DWG-172-02", Vector3::new(270.0, 299.0, 0.0)).with_height(2.5);
+            oft1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(oft1)).unwrap();
+
+            // PZT-1721 at (100, 340) -> signal line -> UZ-1720 at (180, 340) -> signal line -> P-1721 at (180, 300)
+            let mut pzt = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(100.0, 340.0, 0.0),
+            );
+            pzt.common.layer = "12".to_string();
+            let pzt_h = doc.add_entity(document::EntityType::Insert(pzt)).unwrap();
+            let mut pz1 = Text::with_value("PZT", Vector3::new(98.0, 342.0, 0.0)).with_height(2.2);
+            pz1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pz1)).unwrap();
+            let mut pz2 = Text::with_value("1721", Vector3::new(97.5, 337.5, 0.0)).with_height(2.2);
+            pz2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(pz2)).unwrap();
+
+            let mut sig0 = Line::from_points(
+                Vector3::new(100.0, 312.0, 0.0),
+                Vector3::new(100.0, 336.0, 0.0),
+            );
+            sig0.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Line(sig0)).unwrap();
+
+            let mut sig1 = Line::from_points(
+                Vector3::new(104.0, 340.0, 0.0),
+                Vector3::new(176.0, 340.0, 0.0),
+            );
+            sig1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Line(sig1)).unwrap();
+
+            let mut uz = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(180.0, 340.0, 0.0),
+            );
+            uz.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Insert(uz)).unwrap();
+            let mut uz1 = Text::with_value("UZ", Vector3::new(178.5, 342.0, 0.0)).with_height(2.2);
+            uz1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(uz1)).unwrap();
+            let mut uz2 =
+                Text::with_value("1720", Vector3::new(177.5, 337.5, 0.0)).with_height(2.2);
+            uz2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(uz2)).unwrap();
+
+            let mut sig2 = Line::from_points(
+                Vector3::new(180.0, 336.0, 0.0),
+                Vector3::new(180.0, 304.0, 0.0),
+            );
+            sig2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Line(sig2)).unwrap();
+
+            // Incomplete initiator LSHH-1798 at (100, 460) without any actuator
+            let mut lshh = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(100.0, 460.0, 0.0),
+            );
+            lshh.common.layer = "12".to_string();
+            let lshh_h = doc.add_entity(document::EntityType::Insert(lshh)).unwrap();
+            let mut ls1 = Text::with_value("LSHH", Vector3::new(97.5, 462.0, 0.0)).with_height(2.2);
+            ls1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(ls1)).unwrap();
+            let mut ls2 = Text::with_value("1798", Vector3::new(97.5, 457.5, 0.0)).with_height(2.2);
+            ls2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(ls2)).unwrap();
+
+            (pzt_h, lshh_h)
+        };
+
+        // Tab 2:
+        // - Return OPC -> 100-PG-17201-CS150 -> ESDV-1721 + ZSC-1721
+        // - Orphan actuator XV-1799 on 80-PG-17202-CS150 without initiator
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-172-02.dxf".to_string();
+        let (esdv_h, xv_orphan_h) = {
+            let doc = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "DCS FUNC ACCESS IN PRIME LOC", 8.0, 8.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-172-02", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut opc2 = Insert::new("_OFF-UNIT SQ", Vector3::new(100.0, 300.0, 0.0));
+            opc2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc2)).unwrap();
+            let mut oft2 =
+                Text::with_value("DWG-172-01", Vector3::new(90.0, 299.0, 0.0)).with_height(2.5);
+            oft2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(oft2)).unwrap();
+
+            let mut pa = Line::from_points(
+                Vector3::new(106.0, 300.0, 0.0),
+                Vector3::new(177.0, 300.0, 0.0),
+            );
+            pa.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pa)).unwrap();
+            let mut la = Text::with_value("100-PG-17201-CS150", Vector3::new(125.0, 303.0, 0.0))
+                .with_height(2.5);
+            la.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(la)).unwrap();
+
+            let mut esdv = Insert::new("BALL VALVE TYPE 2", Vector3::new(180.0, 300.0, 0.0));
+            esdv.common.layer = "11".to_string();
+            let esdv_h = doc.add_entity(document::EntityType::Insert(esdv)).unwrap();
+            let mut esdvt =
+                Text::with_value("ESDV-1721", Vector3::new(175.0, 292.0, 0.0)).with_height(2.5);
+            esdvt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(esdvt)).unwrap();
+
+            let mut zsc = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(180.0, 325.0, 0.0),
+            );
+            zsc.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Insert(zsc)).unwrap();
+            let mut zs1 = Text::with_value("ZSC", Vector3::new(178.0, 327.0, 0.0)).with_height(2.2);
+            zs1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(zs1)).unwrap();
+            let mut zs2 =
+                Text::with_value("1721", Vector3::new(177.5, 322.5, 0.0)).with_height(2.2);
+            zs2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(zs2)).unwrap();
+
+            let mut pb = Line::from_points(
+                Vector3::new(183.0, 300.0, 0.0),
+                Vector3::new(260.0, 300.0, 0.0),
+            );
+            pb.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pb)).unwrap();
+
+            // Orphan XV-1799 on 80-PG-17202-CS150
+            let mut qa = Line::from_points(
+                Vector3::new(120.0, 480.0, 0.0),
+                Vector3::new(177.0, 480.0, 0.0),
+            );
+            qa.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(qa)).unwrap();
+            let mut qla = Text::with_value("80-PG-17202-CS150", Vector3::new(130.0, 483.0, 0.0))
+                .with_height(2.5);
+            qla.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(qla)).unwrap();
+
+            let mut xvo = Insert::new("BALL VALVE TYPE 2", Vector3::new(180.0, 480.0, 0.0));
+            xvo.common.layer = "11".to_string();
+            let xv_orphan_h = doc.add_entity(document::EntityType::Insert(xvo)).unwrap();
+            let mut xvot =
+                Text::with_value("XV-1799", Vector3::new(175.0, 487.0, 0.0)).with_height(2.5);
+            xvot.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(xvot)).unwrap();
+
+            (esdv_h, xv_orphan_h)
+        };
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        let json_p = tmp.join("cause_effect.json");
+        let csv_p = tmp.join("cause_effect.csv");
+        let _ = app.run_command_line(&format!("PIDCAUSE ALLTABS EXPORT \"{}\"", json_p.display()));
+        assert!(
+            json_p.is_file(),
+            "PIDCAUSE EXPORT must write SIS/ESD Cause & Effect Matrix cause_effect.json"
+        );
+        let _ = app.run_command_line(&format!(
+            "PIDCAUSE SUMMARY ALLTABS EXPORT \"{}\"",
+            csv_p.display()
+        ));
+        assert!(csv_p.is_file());
+        let csv_bytes = std::fs::read(&csv_p).unwrap();
+        assert!(csv_bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
+
+        let rep: Value = serde_json::from_str(&std::fs::read_to_string(&json_p).unwrap()).unwrap();
+        assert_eq!(rep["summary"]["sheets_scanned"].as_u64(), Some(2));
+        assert_eq!(rep["summary"]["total_interlocks"].as_u64(), Some(3));
+        assert_eq!(rep["summary"]["complete_count"].as_u64(), Some(1));
+        assert_eq!(rep["summary"]["missing_actuator_count"].as_u64(), Some(1));
+        assert_eq!(rep["summary"]["orphan_actuator_count"].as_u64(), Some(1));
+
+        let rows = rep["interlocks"].as_array().unwrap();
+        let comp = rows
+            .iter()
+            .find(|r| r["status"].as_str() == Some("complete_interlock"))
+            .expect("complete interlock row");
+        assert!(comp["cause_tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains("1721")));
+        assert!(comp["logic_solvers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains("1720")));
+        let effs = comp["effect_actions"].as_array().unwrap();
+        assert!(effs
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains("ESDV-1721")));
+        assert!(effs
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains("P-1721")));
+        assert!(comp["feedback_tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains("1721")));
+
+        let _ = app.run_command_line("PIDCAUSE COMPLETE ALLTABS");
+        assert!(has_sel(&app, tab1, pzt_h) && has_sel(&app, tab2, esdv_h));
+
+        let _ = app.run_command_line("PIDCAUSE INCOMPLETE ALLTABS");
+        assert!(has_sel(&app, tab1, lshh_h) && has_sel(&app, tab2, xv_orphan_h));
+
+        let _ = app.run_command_line("PIDCAUSE TAG XV-1799 ALLTABS");
+        assert_eq!(app.active_tab, tab2);
+        assert!(has_sel(&app, tab2, xv_orphan_h));
+
+        let mut visited_orphan = false;
+        for _ in 0..5 {
+            let _ = app.run_command_line("PIDCAUSE NEXT ALLTABS");
+            if app.active_tab == tab2 && has_sel(&app, tab2, xv_orphan_h) {
+                visited_orphan = true;
+                break;
+            }
+        }
+        assert!(visited_orphan, "PIDCAUSE NEXT ALLTABS must visit XV-1799");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads 4 real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into OpenCADStudio and verifies PIDCAUSE ALLTABS SIS/ESD Cause & Effect Matrix extraction and NEXT stepping"]
+    fn real_multi_tab_pidcause_sis_esd_matrix_and_next_audit() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_raw) = std::env::var("OCS_PID_REAL172_SPPID_PAIR") else {
+            println!("OCS_PID_REAL172_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(legacy_raw) = std::env::var("OCS_PID_REAL172_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL172_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL172_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real172"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sppid_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sppid_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        let legacy_paths: Vec<std::path::PathBuf> = std::env::split_paths(&legacy_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        assert_eq!(sppid_paths.len(), 2);
+        assert_eq!(legacy_paths.len(), 2);
+
+        let groups = [("SP01_SP02", &sppid_paths), ("LG01_LG02", &legacy_paths)];
+        let mut out_groups = Vec::new();
+
+        for (gname, paths) in groups {
+            let mut app = app();
+            let mut shas = Vec::new();
+            for (idx, p) in paths.iter().enumerate() {
+                let raw_b = std::fs::read(p).unwrap();
+                shas.push(format!("{:x}", Sha256::digest(&raw_b))[..12].to_string());
+                if idx > 0 {
+                    let _ = app.update(Message::TabNew);
+                }
+                let ti = app.active_tab;
+                app.tabs[ti].scene.document = crate::io::load_file(p).expect("load DXF");
+                app.tabs[ti].tab_title = format!("{gname}_{idx}.dxf");
+            }
+
+            let json_p = out_dir.join(format!("{gname}_cause.json"));
+            let csv_p = out_dir.join(format!("{gname}_cause.csv"));
+            let _ =
+                app.run_command_line(&format!("PIDCAUSE ALLTABS EXPORT \"{}\"", json_p.display()));
+            let _ = app.run_command_line(&format!(
+                "PIDCAUSE SUMMARY ALLTABS EXPORT \"{}\"",
+                csv_p.display()
+            ));
+            assert!(json_p.is_file() && csv_p.is_file());
+            let csv_raw = std::fs::read(&csv_p).unwrap();
+            assert!(csv_raw.starts_with(&[0xEF, 0xBB, 0xBF]));
+
+            let rep: Value =
+                serde_json::from_str(&std::fs::read_to_string(&json_p).unwrap()).unwrap();
+            let tot = rep["summary"]["total_interlocks"].as_u64().unwrap_or(0);
+            assert!(
+                tot >= 2,
+                "{gname} must extract >= 2 SIS/ESD interlocks, got {tot}"
+            );
+
+            let _ = app.run_command_line("PIDCAUSE NEXT ALLTABS");
+            let cur_tab = app.active_tab;
+            assert!(
+                !app.tabs[cur_tab].scene.selected_entities().is_empty(),
+                "PIDCAUSE NEXT ALLTABS must select target interlock entities"
+            );
+
+            let _ = std::fs::remove_file(&json_p);
+            let _ = std::fs::remove_file(&csv_p);
+
+            out_groups.push(json!({
+                "group": gname,
+                "sha256_prefixes": shas,
+                "total_interlocks": rep["summary"]["total_interlocks"],
+                "multi_sheet_interlocks": rep["summary"]["multi_sheet_interlocks"],
+                "complete_count": rep["summary"]["complete_count"],
+                "missing_actuator_count": rep["summary"]["missing_actuator_count"],
+                "orphan_actuator_count": rep["summary"]["orphan_actuator_count"],
+                "total_cause_sensors": rep["summary"]["total_cause_sensors"],
+                "total_trip_actuators": rep["summary"]["total_trip_actuators"],
+            }));
+        }
+
+        std::fs::write(
+            out_dir.join("real172_summary.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()
+            ),
         )
         .unwrap();
     }
