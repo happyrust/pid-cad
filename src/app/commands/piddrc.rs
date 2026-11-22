@@ -455,6 +455,23 @@ impl OpenCADStudio {
             .insert(same_file(project_dir), checked);
     }
 
+    /// 发布、发布前的检查在扫好的项目 `scanned` 上做的检查 `report`（查了 `drawings`），记成第 `i`
+    /// 个标签页的图的结果（「校验与交付」面板规格 §4.6）：门禁拦下的是哪些错误，规则检查页签里
+    /// 看得到。
+    pub(super) fn pidcheck_kept_for_publish(
+        &mut self,
+        i: usize,
+        report: CheckReport,
+        drawings: Vec<String>,
+        scanned: &Scanned,
+    ) {
+        let revisions = self.pidcheck_revisions();
+        let checked = self
+            .pid_checks
+            .checked(report, drawings, &scanned.waivers, revisions);
+        self.tabs[i].pid_check = Some(checked);
+    }
+
     /// 说一次检查的结果（§5.2）：一句汇总，再按结果的先后列前 10 条没豁免的，提示逐条说。
     /// 查项目、查节点时 `drawings` 是查了几张图，每条前面带图号。
     fn pidcheck_say(&mut self, verb: &str, report: &CheckReport, drawings: Option<usize>) {

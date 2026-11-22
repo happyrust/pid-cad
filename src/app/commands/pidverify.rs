@@ -42,20 +42,39 @@
 //! there, and after each numbered snapshot, wherever it was saved. An object
 //! of the diff clicked is found the way a place of a repeated tag is, and
 //! the export writes what `PIDDIFF … EXPORT` writes.
+//!
+//! The publish half calls what `PIDPUBLISH CHECK` and `PIDPUBLISH` call, to
+//! the folder typed in its box ([`OpenCADStudio::pidpublish_for_panel`]):
+//! 【检查发布条件】 works out the gates whatever the preconditions, which the
+//! panel works out itself, and 【发布】, asked in the panel first, publishes
+//! as the command does. The gates are kept on the drawing's tab
+//! ([`PanelPublish`]) with each open drawing's edit count then, and the
+//! check they made becomes the drawing's, so the errors that stopped a
+//! publish are on the rule-check tab. What came of it is said in the
+//! message bar; the command line keeps the rest of what the command says.
+//! The records are read from the target folder when the panel is turned or
+//! opened to that tab, when another drawing comes in front there, when the
+//! folder typed changes, after each check or publish, and once the
+//! drawing's file was written or read since; 【校验】 verifies a package as
+//! `PIDPUBLISH VERIFY` does.
 
 use super::pidbom::{unix_now, BomFailure, Sheets};
 use super::piddrc::Checked;
 use super::pidindex::{same_file, Landed, Target, LOCATE_NOT_FOUND};
+use super::pidpublish::{why_of, Publications};
 use super::pidsnapshot::{snapshot_said, Failure, Side};
 use crate::app::{Message, OpenCADStudio};
+use crate::io::edit_lock::FileFingerprint;
 use crate::pid::bom::{self, Bom, BomError, BomScope};
 use crate::pid::drc::{self, CheckResult};
+use crate::pid::publish_pkg;
 use crate::pid::snapshot::store::SnapshotInfo;
 use crate::pid::snapshot::{Diff, CONNECTOR, DEFAULT_MOVE_TOLERANCE};
 use crate::ui::dock::{DockMsg, PanelId};
 use crate::ui::window::pid_verify_deliver::{
-    self, BomFailed, Context, DiffGroup, DrawingResults, KeptBom, KeptCheck, Notice, Pick,
-    PidVerifyMsg, ProjectResults, Tab, Unreadable, Waiving, GONE, REASON_ID, ROWS_PER_PAGE,
+    self, BomFailed, Context, DiffGroup, DrawingResults, GatesFound, KeptBom, KeptCheck,
+    KeptPublish, Notice, Package, Pick, PidVerifyMsg, ProjectResults, Records, Tab, Unreadable,
+    Verified, Waiving, GONE, INTACT_SAID, REASON_ID, ROWS_PER_PAGE,
 };
 use iced::Task;
 use serde_json::{json, Value};
@@ -65,7 +84,8 @@ use std::path::{Path, PathBuf};
 /// What the panel's view was built from besides its interface state: whether
 /// it is on screen, the drawing tab in front and where that drawing was
 /// saved, each open drawing's edit count, the last check and the last bill
-/// the program made, whether the session may write and whether a scan runs.
+/// the program made, whether the session may write, whether a scan runs and
+/// whether the drawing in front has changes not saved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::app) struct Inputs {
     visible: bool,
@@ -76,6 +96,7 @@ pub(in crate::app) struct Inputs {
     last_bom: u64,
     writable: bool,
     busy: bool,
+    dirty: bool,
 }
 
 /// A bill of materials the panel made (§3.1, §4.5), or why it did not come
@@ -154,13 +175,32 @@ pub(in crate::app) struct PanelSnapshots {
     diff: Option<Diff>,
 }
 
+/// What the publish half of 「快照与发布」 keeps of a drawing, on its tab
+/// (§3.1, §4.6): its publish records as last read from the target folder,
+/// or why there are none, with the tab's fingerprint of its file then and
+/// whether the file on disk was that one; the last gates worked out, with
+/// each open drawing's edit count then; what 【校验】 found of each revision;
+/// and the package folder the last publish here made.
+#[derive(Default)]
+pub(in crate::app) struct PanelPublish {
+    records: Option<Result<Records, String>>,
+    read_with: Option<FileFingerprint>,
+    file_unchanged: bool,
+    gates: Option<(GatesFound, Vec<(u64, u64)>)>,
+    verified: Vec<(u32, Verified)>,
+    last_package: Option<String>,
+}
+
 impl OpenCADStudio {
     /// Rebuild what the panel draws from its interface state and the
     /// program's state around it. A check or a bill made since the last
-    /// build starts its list over at its first 200 rows, and another drawing
-    /// in front is followed first ([`Self::pid_verify_follow_front`]).
+    /// build starts its list over at its first 200 rows; another drawing in
+    /// front is followed first ([`Self::pid_verify_follow_front`]), and so is
+    /// the file of the one in front written or read
+    /// ([`Self::pid_verify_follow_disk`]).
     pub(in crate::app) fn refresh_pid_verify_view(&mut self) {
         self.pid_verify_follow_front();
+        self.pid_verify_follow_disk();
         let inputs = self.pid_verify_inputs();
         let built = self.pid_verify_built_from.as_ref();
         if built.is_some_and(|built| built.last_check != inputs.last_check) {
@@ -181,6 +221,7 @@ impl OpenCADStudio {
                     bom: drawing_bom,
                     snapshots,
                     diff,
+                    publish: self.pid_verify_kept_publish(),
                 }),
                 Some(&ProjectResults {
                     check: project,
@@ -195,14 +236,16 @@ impl OpenCADStudio {
 
     /// After a message, rebuild the view if the panel is open and anything
     /// it was built from changed: a check made or followed, a drawing
-    /// edited, another tab in front, a scan started or done. Another drawing
-    /// in front is followed whether the panel is open or not.
+    /// edited, saved or read again, another tab in front, a scan started or
+    /// done. Another drawing in front is followed whether the panel is open
+    /// or not.
     pub(in crate::app) fn sync_pid_verify_view(&mut self) {
         self.pid_verify_follow_front();
         if !self.dock_panel_wanted(PanelId::PidVerifyDeliver) {
             return;
         }
-        if self.pid_verify_built_from.as_ref() != Some(&self.pid_verify_inputs()) {
+        let reread = self.pid_verify_follow_disk();
+        if reread || self.pid_verify_built_from.as_ref() != Some(&self.pid_verify_inputs()) {
             self.refresh_pid_verify_view();
         }
     }
@@ -222,6 +265,7 @@ impl OpenCADStudio {
             last_bom: self.pid_boms.serial,
             writable: !self.readonly_refuses_command("PIDPUBLISH"),
             busy: self.pid_index.scanning(),
+            dirty: front.is_some_and(|tab| tab.dirty),
         }
     }
 
@@ -244,6 +288,7 @@ impl OpenCADStudio {
             // closes.
             writable: !self.readonly_refuses_command("PIDPUBLISH"),
             saved: drawing.is_some_and(|tab| crate::io::drawing_dir(&tab.scene.document).is_some()),
+            dirty: drawing.is_some_and(|tab| tab.dirty),
             // One scan runs at a time, and the project check starts one.
             busy: self.pid_index.scanning(),
             waivers: drawing
@@ -270,7 +315,9 @@ impl OpenCADStudio {
     /// Another drawing in front (§3.1), or the one in front another file now
     /// (saved under another name, replaced in its tab): the snapshot rows
     /// ticked are cleared, and the diff of the drawing left drops with them;
-    /// on 「快照与发布」, open, the list of the drawing now in front is read.
+    /// the question 【发布】 asked goes and the repeated tags fold; on
+    /// 「快照与发布」, open, the list and the publish records of the drawing
+    /// now in front are read.
     fn pid_verify_follow_front(&mut self) {
         let front = self.tabs.get(self.active_tab).filter(|tab| !tab.is_start);
         let followed = match (front, &self.pid_verify_front) {
@@ -291,8 +338,11 @@ impl OpenCADStudio {
         ui.picked.clear();
         ui.diff_more = 0;
         ui.diff_located = None;
+        ui.confirming = false;
+        ui.duplicates_open = false;
         if ui.tab == Tab::Deliver && self.dock_panel_wanted(PanelId::PidVerifyDeliver) {
             self.pid_verify_reread_snapshots(self.active_tab);
+            self.pid_verify_reread_publish(self.active_tab);
         }
     }
 
@@ -328,6 +378,134 @@ impl OpenCADStudio {
         if self.dock_panel_wanted(PanelId::PidVerifyDeliver) {
             self.refresh_pid_verify_view();
         }
+    }
+
+    /// A publish of the drawing on tab `i` made elsewhere than in the panel
+    /// (`PIDPUBLISH`), and the package folder it made if it made one: that
+    /// folder is the last package published (§3.2), the publish records the
+    /// panel read of that drawing are read again, and so is its snapshot list
+    /// ([`Self::pid_verify_snapshots_saved`]).
+    pub(super) fn pid_verify_published(&mut self, i: usize, package: Option<&Path>) {
+        if let (Some(tab), Some(package)) = (self.tabs.get_mut(i), package) {
+            tab.pid_publish.last_package = Some(package.display().to_string());
+        }
+        if self
+            .tabs
+            .get(i)
+            .is_some_and(|tab| tab.pid_publish.records.is_some())
+        {
+            self.pid_verify_reread_publish(i);
+        }
+        self.pid_verify_snapshots_saved(i);
+    }
+
+    /// What a check or a publish pressed in the panel came to (§4.6), for
+    /// the drawing on tab `i`: the gates worked out, kept with each open
+    /// drawing's edit count now; the package folder a publish made; what the
+    /// message bar says. The publish records and the snapshot list are read
+    /// again, and the panel, open, redrawn.
+    pub(super) fn pid_verify_publish_done(
+        &mut self,
+        i: usize,
+        found: Option<GatesFound>,
+        package: Option<&Path>,
+        notice: Option<Notice>,
+    ) {
+        let revisions = self
+            .tabs
+            .iter()
+            .map(|tab| (tab.id, tab.edit_revision))
+            .collect();
+        let kept = &mut self.tabs[i].pid_publish;
+        if let Some(found) = found {
+            kept.gates = Some((found, revisions));
+        }
+        if let Some(package) = package {
+            kept.last_package = Some(package.display().to_string());
+        }
+        self.pid_verify_ui.notice = notice;
+        self.pid_verify_reread_publish(i);
+        self.pid_verify_snapshots_saved(i);
+    }
+
+    /// What the publish half keeps of the drawing in front (§3.1, §4.6), the
+    /// gates stale once a drawing of its folder changed since they were
+    /// worked out; nothing on the Start page.
+    fn pid_verify_kept_publish(&self) -> KeptPublish<'_> {
+        let i = self.active_tab;
+        let Some(tab) = self.tabs.get(i).filter(|tab| !tab.is_start) else {
+            return KeptPublish::default();
+        };
+        let kept = &tab.pid_publish;
+        let dir = crate::io::drawing_dir(&tab.scene.document);
+        KeptPublish {
+            records: kept
+                .records
+                .as_ref()
+                .map(|read| read.as_ref().map_err(String::as_str)),
+            file_unchanged: kept.file_unchanged,
+            gates: kept.gates.as_ref().map(|(found, revisions)| {
+                let revision_at = |id: u64| {
+                    revisions
+                        .iter()
+                        .find(|(tab, _)| *tab == id)
+                        .map_or(0, |&(_, revision)| revision)
+                };
+                (found, self.pid_verify_stale(revision_at, i, dir))
+            }),
+            verified: &kept.verified,
+            last_package: kept.last_package.as_deref(),
+        }
+    }
+
+    /// Read the publish records of the drawing on tab `i` again (§3.1, §4.6)
+    /// from the folder typed in the panel, the default one when none is, and
+    /// whether the file on disk is the one the program last read or wrote,
+    /// with the tab's fingerprint of it now. A drawing never saved has none.
+    /// Another target folder than before drops what 【校验】 found.
+    fn pid_verify_reread_publish(&mut self, i: usize) {
+        if self.tabs.get(i).is_none_or(|tab| tab.is_start) {
+            return;
+        }
+        let dir = Some(self.pid_verify_ui.publish_dir.trim()).filter(|dir| !dir.is_empty());
+        let records = self.tabs[i].current_path.is_some().then(|| {
+            self.pidpublish_listed_on_disk(i, dir)
+                .map(records_of)
+                .map_err(|(_, why)| why)
+        });
+        let file_unchanged = self.tabs[i]
+            .current_path
+            .as_deref()
+            .is_some_and(|path| self.pidpublish_file_unchanged(i, path));
+        let tab = &mut self.tabs[i];
+        let kept = &mut tab.pid_publish;
+        if target_of(kept.records.as_ref()) != target_of(records.as_ref()) {
+            kept.verified.clear();
+        }
+        kept.records = records;
+        kept.read_with = tab.disk_fingerprint.clone();
+        kept.file_unchanged = file_unchanged;
+    }
+
+    /// The file of the drawing in front written or read since its publish
+    /// records were read (saved, saved as, read again): on 「快照与发布」,
+    /// open, they are read again, so 「当前」 and whether the file was changed
+    /// elsewhere follow it. True when they were.
+    fn pid_verify_follow_disk(&mut self) -> bool {
+        let i = self.active_tab;
+        let moved = self
+            .tabs
+            .get(i)
+            .filter(|tab| !tab.is_start)
+            .is_some_and(|tab| tab.pid_publish.read_with != tab.disk_fingerprint);
+        if !moved
+            || self.pid_verify_ui.tab != Tab::Deliver
+            || !self.dock_panel_wanted(PanelId::PidVerifyDeliver)
+        {
+            return false;
+        }
+        self.pid_verify_reread_publish(i);
+        true
     }
 
     /// The checks kept for the drawing in front (§3.1): its own, on its tab,
@@ -415,11 +593,12 @@ impl OpenCADStudio {
 
     /// Show the panel the way its switch among the dock's panels does:
     /// docked on the right the first time, where the user left it after. On
-    /// 「快照与发布」 the snapshot list is read again.
+    /// 「快照与发布」 the snapshot list and the publish records are read again.
     pub(in crate::app) fn show_pid_verify_panel(&mut self) -> Task<Message> {
         let task = self.dock_set_open(PanelId::PidVerifyDeliver, true);
         if self.pid_verify_ui.tab == Tab::Deliver {
             self.pid_verify_reread_snapshots(self.active_tab);
+            self.pid_verify_reread_publish(self.active_tab);
         }
         self.refresh_pid_verify_view();
         task
@@ -475,7 +654,7 @@ impl OpenCADStudio {
     /// so the controls' positions go with the panel. A filter changed or a
     /// check pressed starts the rule-check list over at its first 200 rows,
     /// and a search typed or a bill pressed the material list. Turning to
-    /// 「快照与发布」 reads its snapshot list again.
+    /// 「快照与发布」 reads its snapshot list and publish records again.
     pub(in crate::app) fn on_pid_verify(&mut self, msg: PidVerifyMsg) -> Task<Message> {
         let ui = &mut self.pid_verify_ui;
         let task = match msg {
@@ -488,10 +667,12 @@ impl OpenCADStudio {
             PidVerifyMsg::PickExport => return self.pid_verify_pick_export(),
             PidVerifyMsg::PickBomExport => return self.pid_verify_pick_bom_export(),
             PidVerifyMsg::PickDiffExport => return self.pid_verify_pick_diff_export(),
+            PidVerifyMsg::PickPublishDir => return self.pid_verify_pick_publish_dir(),
             PidVerifyMsg::Tab(tab) => {
                 ui.tab = tab;
                 if tab == Tab::Deliver {
                     self.pid_verify_reread_snapshots(self.active_tab);
+                    self.pid_verify_reread_publish(self.active_tab);
                 }
                 Task::none()
             }
@@ -635,6 +816,57 @@ impl OpenCADStudio {
             }
             PidVerifyMsg::DiffExport(name) => {
                 self.pid_verify_diff_export(&name);
+                Task::none()
+            }
+            PidVerifyMsg::PublishDir(typed) => {
+                ui.publish_dir = typed;
+                ui.confirming = false;
+                self.pid_verify_reread_publish(self.active_tab);
+                Task::none()
+            }
+            PidVerifyMsg::PublishCheck => {
+                ui.confirming = false;
+                self.pid_verify_publish(true)
+            }
+            PidVerifyMsg::AskPublish => {
+                let listed = self
+                    .pid_verify_view
+                    .deliver
+                    .publish
+                    .as_ref()
+                    .is_some_and(|publish| publish.target_dir.is_some());
+                if listed {
+                    ui.confirming = true;
+                    Task::none()
+                } else {
+                    self.pid_verify_publish(false)
+                }
+            }
+            PidVerifyMsg::Publish => {
+                ui.confirming = false;
+                self.pid_verify_publish(false)
+            }
+            PidVerifyMsg::CancelPublish => {
+                ui.confirming = false;
+                Task::none()
+            }
+            PidVerifyMsg::PublishErrors => {
+                ui.tab = Tab::Check;
+                ui.severities = vec![drc::Severity::Error];
+                ui.kinds.clear();
+                ui.show_waived = false;
+                ui.more = 0;
+                Task::none()
+            }
+            PidVerifyMsg::PublishDuplicates => {
+                ui.duplicates_open = !ui.duplicates_open;
+                Task::none()
+            }
+            PidVerifyMsg::PublishDuplicateLocate(repeated, at) => {
+                self.pid_verify_publish_duplicate_locate(repeated, at)
+            }
+            PidVerifyMsg::PackageVerify(revision) => {
+                self.pid_verify_package_verify(revision);
                 Task::none()
             }
         };
@@ -1180,6 +1412,122 @@ impl OpenCADStudio {
         };
         self.pid_verify_ui.notice = Some(notice);
     }
+
+    /// 【检查发布条件】 (`only_check`) and 【确认】 under the question 【发布】
+    /// asks (§4.6): what `PIDPUBLISH CHECK` and `PIDPUBLISH` call, to the
+    /// folder typed in the panel, after `PIDINDEX`'s scan of the drawing's
+    /// folder ([`Self::pidpublish_for_panel`]). What stops it before the scan
+    /// is said in the message bar; the scan says on the command line what it
+    /// says for the command.
+    fn pid_verify_publish(&mut self, only_check: bool) -> Task<Message> {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return Task::none();
+        }
+        let dir = Some(self.pid_verify_ui.publish_dir.trim())
+            .filter(|dir| !dir.is_empty())
+            .map(str::to_owned);
+        // A scan with nothing to read from disk finishes before this returns,
+        // having said in the message bar what came of it.
+        self.pid_verify_ui.notice = None;
+        match self.pidpublish_for_panel(i, only_check, dir) {
+            Ok(task) => task,
+            Err((code, why)) => {
+                self.pid_verify_ui.notice = Some(Notice::error(Some(code.to_owned()), why));
+                Task::none()
+            }
+        }
+    }
+
+    /// 【浏览…】 beside the publish folder (§4.6): ask for a folder, starting
+    /// in the drawing's; the one picked is typed in the box.
+    fn pid_verify_pick_publish_dir(&self) -> Task<Message> {
+        let dir = self
+            .tabs
+            .get(self.active_tab)
+            .filter(|tab| !tab.is_start)
+            .and_then(|tab| crate::io::drawing_dir(&tab.scene.document))
+            .map(Path::to_path_buf);
+        Task::perform(
+            async move {
+                let mut dialog = crate::sys::file_dialog().set_title("发布目录");
+                if let Some(dir) = dir {
+                    dialog = dialog.set_directory(dir);
+                }
+                dialog
+                    .pick_folder()
+                    .await
+                    .map(|picked| crate::sys::handle_path(&picked))
+            },
+            |picked| match picked {
+                Some(path) => {
+                    PidVerifyMsg::PublishDir(path.to_string_lossy().into_owned()).message()
+                }
+                None => Message::Noop,
+            },
+        )
+    }
+
+    /// A place of a tag repeated in the project, clicked under its condition
+    /// (§4.6): looked at as a place of a repeated tag in the material list is.
+    fn pid_verify_publish_duplicate_locate(&mut self, repeated: usize, at: usize) -> Task<Message> {
+        let i = self.active_tab;
+        let Some(target) = self
+            .tabs
+            .get(i)
+            .and_then(|tab| tab.pid_publish.gates.as_ref())
+            .and_then(|(found, _)| found.duplicates.get(repeated))
+            .and_then(|duplicate| {
+                let place = duplicate.places.get(at)?;
+                Some(Target::placed(
+                    &place.drawing_id,
+                    &duplicate.type_code,
+                    &duplicate.tag,
+                    place.at,
+                ))
+            })
+        else {
+            return Task::none();
+        };
+        let here = self.pid_verify_bom_drawing_id(i);
+        self.pid_verify_go(target, &here)
+    }
+
+    /// 【校验】 on the record of `revision` (§4.6): its package verified as
+    /// `PIDPUBLISH VERIFY` verifies one, and what was found kept on the
+    /// drawing's tab: 「完好」, or what is missing or does not match.
+    fn pid_verify_package_verify(&mut self, revision: u32) {
+        let Some(tab) = self
+            .tabs
+            .get_mut(self.active_tab)
+            .filter(|tab| !tab.is_start)
+        else {
+            return;
+        };
+        let kept = &mut tab.pid_publish;
+        let Some(Ok(records)) = &kept.records else {
+            return;
+        };
+        let Some(package) = records
+            .packages
+            .iter()
+            .find(|package| package.revision == revision)
+        else {
+            return;
+        };
+        let verified = match publish_pkg::verify_package(Path::new(&package.path)) {
+            Ok(_) => Verified {
+                intact: true,
+                text: INTACT_SAID.to_owned(),
+            },
+            Err(error) => Verified {
+                intact: false,
+                text: why_of(&error),
+            },
+        };
+        kept.verified.retain(|(listed, _)| *listed != revision);
+        kept.verified.push((revision, verified));
+    }
 }
 
 /// What the panel keeps in a bill's place when it did not come out (§4.5):
@@ -1210,6 +1558,43 @@ fn bom_failed(failure: &BomFailure) -> Option<BomFailed> {
         duplicates,
         unreadable,
     })
+}
+
+/// The records the publish half lists (§4.6) of what `pid_publications`
+/// lists: each package with its folder, and the revision the next publish
+/// makes.
+fn records_of(listed: Publications) -> Records {
+    let next_revision = publish_pkg::next_revision(&listed.target_dir, &listed.drawing_id);
+    let packages = listed
+        .packages
+        .into_iter()
+        .map(|package| Package {
+            path: listed
+                .target_dir
+                .join(&package.package_id)
+                .display()
+                .to_string(),
+            package_id: package.package_id,
+            revision: package.revision,
+            published_at: package.published_at,
+            published_by: package.published_by,
+            current: package.current,
+        })
+        .collect();
+    Records {
+        drawing_id: listed.drawing_id,
+        target_dir: listed.target_dir.display().to_string(),
+        next_revision,
+        packages,
+    }
+}
+
+/// The target folder publish records were read from, if they were.
+fn target_of(records: Option<&Result<Records, String>>) -> Option<&str> {
+    records?
+        .as_ref()
+        .ok()
+        .map(|records| records.target_dir.as_str())
 }
 
 /// Switch `item` in `list`: off when it is on, on when it is off.
@@ -1262,7 +1647,8 @@ mod tests {
         BomRowView, BomTable, DiffGroup, Group, Pick, PidVerifyMsg, RowView, Tab, BOM_DRAWING_ID,
         BOM_EXPORT_ID, BOM_PROJECT_ID, BOM_SEARCH_ID, BOUNDS_PREFIX, CHECK_DRAWING_ID,
         CHECK_PROJECT_ID, DIFF_EXPORT_ID, DIFF_ID, NEVER_CHECKED, PANEL_BOUNDS_ID,
-        SNAPSHOT_REASON_ID, SNAPSHOT_SAVE_ID, UNSAVED_SAID,
+        PUBLISH_CHECK_ID, PUBLISH_CONFIRM_ID, PUBLISH_DIR_ID, PUBLISH_ID, SNAPSHOT_REASON_ID,
+        SNAPSHOT_SAVE_ID, UNSAVED_SAID,
     };
     use serde_json::{json, Value};
     use std::fs;
@@ -1395,6 +1781,24 @@ mod tests {
             .snapshot(&app.active_theme)
             .expect("draw the view");
         reported_ids()
+    }
+
+    /// Click the text `label` in the real view, drawn at 1600 × 900, where
+    /// the pointer would, and press what the view publishes as [`click`]
+    /// does.
+    fn click_drawn(app: &mut OpenCADStudio, label: &str) {
+        let size = iced::Size::new(1600.0, 900.0);
+        let published = {
+            let mut simulator =
+                iced_test::Simulator::with_size(iced::Settings::default(), size, app.view_main());
+            simulator.click(label).expect(label);
+            simulator.into_messages().collect::<Vec<_>>()
+        };
+        assert!(!published.is_empty(), "clicking {label} published nothing");
+        for message in published {
+            let task = app.update(message);
+            app.drive_headless_task(task).expect("the click's task");
+        }
     }
 
     #[test]
@@ -3077,6 +3481,323 @@ mod tests {
                 for id in ids {
                     assert!(drawn.contains(&id), "{id}: {drawn:?}");
                 }
+            })
+            .expect("spawn test thread")
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    }
+
+    /// The project rule pack the publish tests publish under: the built-in
+    /// sets off and `rules` of the panel tests' own set. A drawing with
+    /// errors still saves.
+    fn publish_pack(scratch: &Scratch, rules: Vec<Value>) {
+        let pack = json!({
+            "version": 1,
+            "pack": "发布面板",
+            "rule_set_version": "T2",
+            "save_gate": "warn",
+            "sets": [
+                {"name": "基础规则", "enabled": false},
+                {"name": "工程扩展", "enabled": false},
+                {"name": "面板验收", "enabled": true}
+            ],
+            "rules": rules,
+        });
+        fs::write(scratch.path(PROJECT_PACK_FILE), pack.to_string()).expect("the pack");
+    }
+
+    /// Save the drawing in front as `path` by the save op, as saving in the
+    /// program does: the tab keeps the path and the file's fingerprint, and
+    /// has no change not saved.
+    fn save(app: &mut OpenCADStudio, path: &Path) {
+        app.finish_all_pending_history();
+        let saved = request(app, json!({"op": "save", "path": path, "overwrite": true}));
+        assert_eq!(saved["ok"], true, "{saved}");
+        let tab = &app.tabs[app.active_tab];
+        assert!(!tab.dirty, "{saved}");
+        assert!(tab.disk_fingerprint.is_some(), "{saved}");
+    }
+
+    /// A pump and a pipe line saved as PID-1101.dwg in `scratch`, beside
+    /// [`publish_pack`] of `rules`, the panel open on 「快照与发布」.
+    fn publishable(scratch: &Scratch, rules: Vec<Value>) -> OpenCADStudio {
+        let mut app = fresh();
+        draw(&mut app, "PIDINSERT pump", &[[0.0, 0.0]]);
+        draw(&mut app, "PIDPIPE", &[[0.0, 100.0], [100.0, 100.0]]);
+        publish_pack(scratch, rules);
+        save(&mut app, &scratch.path("PID-1101.dwg"));
+        let ran = run(&mut app, "PIDVERIFY DELIVER");
+        assert_eq!(ran.error, None, "{}", ran.said);
+        app
+    }
+
+    /// The publish block of the panel state now.
+    fn publish_block(app: &mut OpenCADStudio) -> Value {
+        panel(app, "")["deliver"]["publish"].clone()
+    }
+
+    /// The question the publish half asks now, if it asks one.
+    fn asked(app: &OpenCADStudio) -> Option<String> {
+        let publish = app.pid_verify_view.deliver.publish.as_ref();
+        publish.and_then(|publish| publish.asking.clone())
+    }
+
+    #[test]
+    fn a_change_not_saved_greys_publish_and_the_conditions_can_still_be_checked() {
+        let scratch = Scratch::new();
+        let mut app = publishable(&scratch, Vec::new());
+        let state = panel(&mut app, "");
+        let publish = &state["deliver"]["publish"];
+        assert_eq!(publish["state"], "未发布", "{state}");
+        assert_eq!(publish["next_revision"], 1, "{state}");
+        let target = scratch.path("pid-publish").display().to_string();
+        assert_eq!(publish["target_dir"], target.as_str(), "{state}");
+        assert_eq!(publish["checked"], false, "{state}");
+        assert_eq!(state["buttons"]["publish"], true, "{state}");
+        draw(&mut app, "PIDINSERT pump", &[[200.0, 0.0]]);
+        let state = panel(&mut app, "");
+        assert_eq!(state["buttons"]["publish"], false, "{state}");
+        assert_eq!(state["buttons"]["publish_check"], true, "{state}");
+        let preconditions = &state["deliver"]["publish"]["preconditions"];
+        assert_eq!(preconditions["clean"], false, "{state}");
+        refused_for(&mut app, "publish", "precondition");
+        pressed(&mut app, "publish_check");
+        let state = panel(&mut app, "");
+        let publish = &state["deliver"]["publish"];
+        assert_eq!(publish["checked"], true, "{state}");
+        assert_eq!(publish["stale"], false, "{state}");
+        assert_eq!(publish["gates"]["drc_errors"], 0, "{state}");
+        assert_eq!(publish["gates"]["duplicate_tags"], 0, "{state}");
+        assert_eq!(publish["gates"]["index_complete"], true, "{state}");
+        // The gates pass, but the drawing has a change not saved.
+        assert_eq!(publish["can_publish"], false, "{state}");
+        assert_eq!(state["notice"], Value::Null, "{state}");
+        // Checking writes nothing.
+        assert!(!scratch.path("pid-publish").exists());
+        // Edited again, the gates worked out are stale.
+        draw(&mut app, "PIDINSERT pump", &[[300.0, 0.0]]);
+        assert_eq!(publish_block(&mut app)["stale"], true);
+    }
+
+    #[test]
+    fn an_error_not_waived_blocks_the_publish_and_its_condition_leads_to_it() {
+        let scratch = Scratch::new();
+        let error = rule("DR-201", "管线", "错误", "管道等级 = NULL");
+        let mut app = publishable(&scratch, vec![error]);
+        assert_eq!(panel(&mut app, "")["buttons"]["publish"], true);
+        pressed(&mut app, "publish");
+        let state = panel(&mut app, "");
+        assert_eq!(state["notice"]["code"], "PUBLISH_BLOCKED", "{state}");
+        assert_eq!(state["notice"]["level"], "error", "{state}");
+        let publish = &state["deliver"]["publish"];
+        assert_eq!(publish["checked"], true, "{state}");
+        assert_eq!(publish["gates"]["drc_errors"], 1, "{state}");
+        assert_eq!(publish["can_publish"], false, "{state}");
+        assert_eq!(publish["state"], "未发布", "{state}");
+        let shown = app.pid_verify_view.deliver.publish.as_ref();
+        let conditions = shown.expect("a publish half").conditions();
+        let errors = ("没被豁免的错误为 0（1 条）".to_owned(), Some(false));
+        assert_eq!(conditions[4], errors, "{conditions:?}");
+        // Nothing was written: no target folder, no snapshot.
+        assert!(!scratch.path("pid-publish").exists());
+        assert_eq!(listed_seqs(&state), Vec::<u64>::new(), "{state}");
+        // The errors are what the rule-check tab shows, errors only.
+        click(&mut app, PidVerifyMsg::PublishErrors);
+        let state = panel(&mut app, "");
+        assert_eq!(state["tab"], "check", "{state}");
+        let severities = &state["check"]["filters"]["severity"];
+        assert_eq!(*severities, json!(["错误"]), "{state}");
+        assert_eq!(rows(&state), ["DR-201"], "{state}");
+    }
+
+    #[test]
+    fn what_passes_is_published_listed_with_its_snapshot_and_followed_as_the_file_changes() {
+        let scratch = Scratch::new();
+        let mut app = publishable(&scratch, Vec::new());
+        let before = listed_seqs(&panel(&mut app, "")).len();
+        pressed(&mut app, "publish");
+        let state = panel(&mut app, "");
+        let publish = &state["deliver"]["publish"];
+        assert_eq!(publish["state"], "已发布，修订 1", "{state}");
+        assert_eq!(publish["next_revision"], 2, "{state}");
+        let packages = publish["packages"].as_array().cloned().unwrap_or_default();
+        assert_eq!(packages.len(), 1, "{state}");
+        assert_eq!(packages[0]["revision"], 1, "{state}");
+        assert_eq!(packages[0]["current"], true, "{state}");
+        let path = packages[0]["path"].as_str().unwrap_or_default().to_owned();
+        assert!(Path::new(&path).is_dir(), "{path}");
+        assert_eq!(publish["last_package"], path.as_str(), "{state}");
+        assert_eq!(listed_seqs(&state).len(), before + 1, "{state}");
+        assert_eq!(state["notice"]["level"], "info", "{state}");
+        let said = state["notice"]["text"].as_str().unwrap_or_default();
+        assert!(said.starts_with("已发布") && said.contains(&path), "{said}");
+        // The package is the one pid_publications lists.
+        let listed = request(&mut app, json!({"op": "pid_publications"}));
+        assert_eq!(listed["packages"][0]["path"], path.as_str(), "{listed}");
+        pressed(&mut app, "package_verify=1");
+        let verified = publish_block(&mut app)["packages"][0]["verified"].clone();
+        assert_eq!(verified, json!({"intact": true, "text": "完好"}));
+        // Changed, then saved: the drawing is no longer what was published.
+        draw(&mut app, "PIDINSERT pump", &[[200.0, 0.0]]);
+        assert_eq!(publish_block(&mut app)["state"], "修订 1 之后有改动");
+        save(&mut app, &scratch.path("PID-1101.dwg"));
+        let publish = publish_block(&mut app);
+        assert_eq!(publish["state"], "修订 1 之后有改动", "{publish}");
+        assert_eq!(publish["packages"][0]["current"], false, "{publish}");
+        assert_eq!(publish["preconditions"]["clean"], true, "{publish}");
+        assert_eq!(
+            publish["preconditions"]["file_unchanged"], true,
+            "{publish}"
+        );
+        // A file of the package gone: verified again, it says which.
+        fs::remove_file(Path::new(&path).join("PID-1101.pdf")).expect("the package's PDF");
+        pressed(&mut app, "package_verify=1");
+        let verified = publish_block(&mut app)["packages"][0]["verified"].clone();
+        assert_eq!(verified["intact"], false, "{verified}");
+        let text = verified["text"].as_str().unwrap_or_default();
+        assert!(text.contains("PID-1101.pdf"), "{verified}");
+    }
+
+    #[test]
+    fn the_folder_typed_is_where_the_records_are_read_and_the_package_goes() {
+        let scratch = Scratch::new();
+        let mut app = publishable(&scratch, Vec::new());
+        pressed(&mut app, "publish_dir=发布包");
+        let publish = publish_block(&mut app);
+        let typed = scratch.path("发布包");
+        assert_eq!(
+            publish["target_dir"],
+            typed.display().to_string(),
+            "{publish}"
+        );
+        assert_eq!(publish["state"], "未发布", "{publish}");
+        pressed(&mut app, "publish");
+        let publish = publish_block(&mut app);
+        assert_eq!(publish["state"], "已发布，修订 1", "{publish}");
+        let path = publish["packages"][0]["path"].as_str().unwrap_or_default();
+        assert!(Path::new(path).starts_with(&typed), "{publish}");
+        assert!(!scratch.path("pid-publish").exists());
+        // Emptied, the box stands for the default folder again.
+        pressed(&mut app, "publish_dir=");
+        let publish = publish_block(&mut app);
+        let default = scratch.path("pid-publish").display().to_string();
+        assert_eq!(publish["target_dir"], default.as_str(), "{publish}");
+        assert_eq!(publish["state"], "未发布", "{publish}");
+        assert_eq!(publish["packages"], json!([]), "{publish}");
+    }
+
+    #[test]
+    fn a_publish_typed_is_listed_at_once_and_its_folder_is_the_last_package() {
+        let scratch = Scratch::new();
+        let mut app = publishable(&scratch, Vec::new());
+        assert_eq!(publish_block(&mut app)["state"], "未发布");
+        let ran = run(&mut app, "PIDPUBLISH");
+        assert_eq!(ran.error, None, "{}", ran.said);
+        let publish = publish_block(&mut app);
+        assert_eq!(publish["state"], "已发布，修订 1", "{publish}");
+        let path = publish["packages"][0]["path"].as_str().unwrap_or_default();
+        assert!(Path::new(path).is_dir(), "{publish}");
+        assert_eq!(publish["last_package"], path, "{publish}");
+    }
+
+    #[test]
+    fn a_publish_by_the_op_is_listed_at_once_with_its_snapshot_and_its_folder() {
+        let scratch = Scratch::new();
+        let mut app = publishable(&scratch, Vec::new());
+        let before = listed_seqs(&panel(&mut app, "")).len();
+        let ask = json!({"op": "pid_publish"});
+        let mut wrote = request(&mut app, ask.clone());
+        for _ in 0..5 {
+            if wrote["status"] != "scanning" {
+                break;
+            }
+            wrote = request(&mut app, ask.clone());
+        }
+        assert_eq!(wrote["ok"], true, "{wrote}");
+        let path = &wrote["result"]["path"];
+        let state = panel(&mut app, "");
+        let publish = &state["deliver"]["publish"];
+        assert_eq!(publish["state"], "已发布，修订 1", "{state}");
+        assert_eq!(publish["packages"][0]["path"], *path, "{state}");
+        assert_eq!(publish["last_package"], *path, "{state}");
+        assert_eq!(listed_seqs(&state).len(), before + 1, "{state}");
+    }
+
+    #[test]
+    fn a_tag_repeated_in_the_project_is_listed_under_its_condition_and_found_where_it_is() {
+        let scratch = Scratch::new();
+        let mut other = fresh();
+        draw(&mut other, "PIDINSERT pump", &[[40.0, 60.0]]);
+        save_as(&mut other, &scratch.path("PID-1102.dwg"));
+        let mut app = publishable(&scratch, Vec::new());
+        let tabs = app.tabs.len();
+        pressed(&mut app, "publish_check");
+        let publish = publish_block(&mut app);
+        assert_eq!(publish["gates"]["duplicate_tags"], 1, "{publish}");
+        assert_eq!(publish["can_publish"], false, "{publish}");
+        let half = || app.pid_verify_view.deliver.publish.clone();
+        let found = half().and_then(|half| half.gates).expect("the gates");
+        let repeated = found.duplicates[0].clone();
+        let mut drawings: Vec<&str> = repeated
+            .places
+            .iter()
+            .map(|place| place.drawing_id.as_str())
+            .collect();
+        drawings.sort_unstable();
+        assert_eq!(drawings, ["PID-1101", "PID-1102"]);
+        assert!(!half().is_some_and(|half| half.duplicates_open));
+        click(&mut app, PidVerifyMsg::PublishDuplicates);
+        let open = app.pid_verify_view.deliver.publish.as_ref();
+        assert!(open.is_some_and(|half| half.duplicates_open));
+        // The place on PID-1102, clicked, opens it and selects the pump there.
+        let there = repeated
+            .places
+            .iter()
+            .position(|place| place.drawing_id == "PID-1102")
+            .expect("a place on PID-1102");
+        click(&mut app, PidVerifyMsg::PublishDuplicateLocate(0, there));
+        assert_eq!(app.tabs.len(), tabs + 1);
+        let opened = scratch.path("PID-1102.dwg");
+        assert_eq!(app.tab_showing(&opened), Some(app.active_tab));
+        assert_eq!(selection(&mut app), [repeated.places[there].handle.clone()]);
+    }
+
+    #[test]
+    fn the_drawn_publish_half_asks_before_it_publishes_and_reports_its_controls() {
+        // As for the panel's body and tabs above.
+        let _one = crate::headless_ui_lock();
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let scratch = Scratch::new();
+                let mut app = publishable(&scratch, Vec::new());
+                app.win_size = (1600.0, 900.0);
+                click_drawn(&mut app, "发布");
+                let target = scratch.path("pid-publish").display().to_string();
+                let question = format!("把 PID-1101 发布为修订 1 到 {target}？");
+                assert_eq!(asked(&app), Some(question));
+                let drawn = drawn_ids(&app);
+                for id in [
+                    PUBLISH_DIR_ID,
+                    PUBLISH_CHECK_ID,
+                    PUBLISH_ID,
+                    PUBLISH_CONFIRM_ID,
+                ] {
+                    assert!(drawn.iter().any(|drawn| drawn == id), "{id}: {drawn:?}");
+                }
+                // Cancelled, nothing is published.
+                click_drawn(&mut app, "取消");
+                assert_eq!(asked(&app), None);
+                assert!(!scratch.path("pid-publish").exists());
+                // Asked again and confirmed, it is.
+                click_drawn(&mut app, "发布");
+                click_drawn(&mut app, "确认");
+                assert_eq!(asked(&app), None);
+                let publish = publish_block(&mut app);
+                assert_eq!(publish["state"], "已发布，修订 1", "{publish}");
+                let drawn = drawn_ids(&app);
+                let row = "pid-verify-package-1";
+                assert!(drawn.iter().any(|drawn| drawn == row), "{drawn:?}");
             })
             .expect("spawn test thread")
             .join()

@@ -21,12 +21,13 @@ use crate::pid::drc::{
     WAIVER_REASON_LIMIT,
 };
 use crate::pid::project_index::Duplicate;
+use crate::pid::publish_pkg::{Gates, MasterDataState};
 use crate::pid::snapshot::store::{SnapshotInfo, SnapshotStatus};
 use crate::pid::snapshot::{self, Change, Diff, DiffObject, DiffSide, DiffSummary, EdgeChange};
 use crate::ui::dock::{Chrome, PanelId};
 use crate::ui::wrap_bar::PosReport;
 use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input};
-use iced::{Element, Fill, Theme};
+use iced::{Element, Fill, Length, Theme};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -111,11 +112,11 @@ pub const BOM_STALE: &str = "图纸已改动，清单可能过期";
 pub const DUPLICATE_SAID: &str = "有重复位号，清单没有生成";
 pub const UNREADABLE_SAID: &str = "范围内有图读不出来，清单没有生成";
 
-/// What the snapshot half of 「快照与发布」 says in place of its list (§4.6):
-/// with no drawing in front, and while the drawing in front was never
-/// saved, so it has no folder to number snapshots in.
+/// What 「快照与发布」 says in place of its lists (§4.6): with no drawing in
+/// front, and while the drawing in front was never saved, so it has no
+/// folder to number snapshots in and no project to publish from.
 pub const NO_DRAWING_SAID: &str = "当前没有图纸。";
-pub const UNSAVED_SAID: &str = "图纸还没有保存，不能存带序号的快照";
+pub const UNSAVED_SAID: &str = "图纸还没有保存，不能存带序号的快照，也不能发布";
 
 /// The row on top of the snapshot list, the drawing as it is now, and
 /// what a row says when its file is gone (§4.6).
@@ -125,6 +126,25 @@ pub const MISSING_SAID: &str = "文件缺失";
 /// What a diff says in place of its counts when the two sides are the
 /// same (§4.6).
 pub const IDENTICAL_SAID: &str = "无差异";
+
+/// What a condition of the publish half says (§4.6 item 3): held, not
+/// held, and a gate before 【检查发布条件】 is pressed.
+pub const MET_SAID: &str = "满足";
+pub const UNMET_SAID: &str = "不满足";
+pub const UNCHECKED_SAID: &str = "未检查";
+
+/// What 【校验】 says of a package with every file its manifest lists, each
+/// of the size and checksum listed (§4.6 item 6).
+pub const INTACT_SAID: &str = "完好";
+
+/// What the publish half adds under its conditions while a drawing the
+/// gates read changed since they were worked out (§4.6).
+pub const GATES_STALE: &str = "图纸已改动，门禁的结果可能过期";
+
+/// Where the conditions of errors not waived and of repeated tags are among
+/// [`PublishView::conditions`]: what they lead to when they do not hold.
+const ERRORS_CONDITION: usize = 4;
+const DUPLICATES_CONDITION: usize = 5;
 
 /// What the user did in the panel: one message per button, tag and list
 /// header.
@@ -214,6 +234,30 @@ pub enum PidVerifyMsg {
     PickDiffExport,
     /// Write the diff shown to this file, as `PIDDIFF … EXPORT` writes one.
     DiffExport(String),
+    /// What is typed in the publish folder box (§4.6); empty is the
+    /// default folder.
+    PublishDir(String),
+    /// 【浏览…】 beside it: ask for a folder.
+    PickPublishDir,
+    /// 【检查发布条件】.
+    PublishCheck,
+    /// 【发布】: ask in the panel first.
+    AskPublish,
+    /// 【确认】 under the question: publish, as `PIDPUBLISH` does.
+    Publish,
+    /// 【取消】 under the question.
+    CancelPublish,
+    /// The condition of errors not waived clicked: the rule-check tab,
+    /// listing errors only.
+    PublishErrors,
+    /// The condition of repeated tags clicked: list where each is, or fold
+    /// the list.
+    PublishDuplicates,
+    /// One place of a repeated tag under it clicked: the index of the tag
+    /// in the list, and of the place under it.
+    PublishDuplicateLocate(usize, usize),
+    /// 【校验】 on the record of this revision.
+    PackageVerify(u32),
 }
 
 impl PidVerifyMsg {
@@ -380,6 +424,11 @@ pub const SNAPSHOT_REASON_ID: &str = "pid-verify-snapshot-reason";
 pub const SNAPSHOT_SAVE_ID: &str = "pid-verify-snapshot-save";
 pub const DIFF_EXPORT_ID: &str = "pid-verify-diff-export";
 pub const DIFF_ITEM_PREFIX: &str = "pid-verify-diff-item-";
+pub const PUBLISH_DIR_ID: &str = "pid-verify-publish-dir";
+pub const PUBLISH_CHECK_ID: &str = "pid-verify-publish-check";
+pub const PUBLISH_ID: &str = "pid-verify-publish";
+pub const PUBLISH_CONFIRM_ID: &str = "pid-verify-publish-confirm";
+pub const PACKAGE_ROW_PREFIX: &str = "pid-verify-package-";
 
 /// How many rows of each list the panel state returns when the request
 /// does not say (`limit`, §3.2), and how many rows each group of the
@@ -435,6 +484,13 @@ pub struct VerifyUi {
     pub diff_more: usize,
     /// The object of the diff last clicked: its group and its index there.
     pub diff_located: Option<(DiffGroup, usize)>,
+    /// What is typed in the publish folder box (§4.6): empty is the default
+    /// folder.
+    pub publish_dir: String,
+    /// Whether 【发布】 asks its question under the buttons (§4.6 item 4).
+    pub confirming: bool,
+    /// Whether the condition of repeated tags lists where each tag is.
+    pub duplicates_open: bool,
 }
 
 impl Default for VerifyUi {
@@ -460,6 +516,9 @@ impl Default for VerifyUi {
             picked: Vec::new(),
             diff_more: 0,
             diff_located: None,
+            publish_dir: String::new(),
+            confirming: false,
+            duplicates_open: false,
         }
     }
 }
@@ -528,6 +587,9 @@ pub struct Context {
     /// Whether that drawing was saved: only then is it in a project folder
     /// to check.
     pub saved: bool,
+    /// Whether that drawing has changes not saved: it is not published
+    /// then.
+    pub dirty: bool,
     /// Whether something runs in the background (§4.7): the buttons that
     /// would start more are grey meanwhile.
     pub busy: bool,
@@ -588,7 +650,7 @@ pub struct KeptBom<'a> {
 
 /// The results kept with the drawing in front, on its tab (§3.1, §5.1):
 /// its own rule check and bill of materials so far, its numbered snapshots
-/// and the diff of two of them.
+/// and the diff of two of them, and what publishing it found.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DrawingResults<'a> {
     pub check: Option<KeptCheck<'a>>,
@@ -598,6 +660,73 @@ pub struct DrawingResults<'a> {
     pub snapshots: Option<&'a [SnapshotInfo]>,
     /// The diff made last, while the two rows it compared stay ticked.
     pub diff: Option<&'a Diff>,
+    /// What the publish half keeps of it.
+    pub publish: KeptPublish<'a>,
+}
+
+/// The publish records of a drawing as last read from its target folder
+/// (§3.1, `pid_publications`): the drawing's number as publishing names
+/// it, the folder, the revision the next publish makes, and the packages
+/// there, newest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Records {
+    pub drawing_id: String,
+    pub target_dir: String,
+    pub next_revision: u32,
+    pub packages: Vec<Package>,
+}
+
+/// A package of the drawing in its target folder (§4.6 item 6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Package {
+    pub package_id: String,
+    pub revision: u32,
+    /// Its folder.
+    pub path: String,
+    /// When it was published, Unix seconds; `None` when its manifest does
+    /// not read.
+    pub published_at: Option<i64>,
+    pub published_by: Option<String>,
+    /// Whether it was made of the drawing's file as that is on disk: of
+    /// those, the newest only.
+    pub current: bool,
+}
+
+/// What 【校验】 found of a package (§4.6 item 6): whole, or what is missing
+/// or does not match, said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verified {
+    pub intact: bool,
+    pub text: String,
+}
+
+/// The gates the last 【检查发布条件】 worked out, or a publish was stopped
+/// by (§4.6 items 3 and 5), with the tags they found repeated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GatesFound {
+    pub gates: Gates,
+    pub duplicates: Vec<Duplicate>,
+    /// Whether the preconditions held and the gates passed then.
+    pub can_publish: bool,
+}
+
+/// What the publish half keeps of the drawing in front, on its tab (§3.1),
+/// lent to [`build_view`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KeptPublish<'a> {
+    /// The records as last read, or why they could not be; `None` before
+    /// they are read.
+    pub records: Option<Result<&'a Records, &'a str>>,
+    /// Whether the file on disk was the one the program last read or wrote
+    /// when the records were read.
+    pub file_unchanged: bool,
+    /// The last gates worked out, and whether a drawing they read changed
+    /// since.
+    pub gates: Option<(&'a GatesFound, bool)>,
+    /// What 【校验】 found, by revision.
+    pub verified: &'a [(u32, Verified)],
+    /// The package folder the last publish of this run made of it.
+    pub last_package: Option<&'a str>,
 }
 
 /// The results kept for the folder that drawing is in (§3.1, §5.1): the
@@ -899,12 +1028,12 @@ pub struct VerifyView {
     pub check: CheckView,
     /// The material-list tab.
     pub bom: BomView,
-    /// The snapshot half of 「快照与发布」.
+    /// 「快照与发布」.
     pub deliver: DeliverView,
 }
 
-/// The snapshot half of 「快照与发布」 worked out (§4.6), which the
-/// `deliver` block of the panel state reads (§3.2).
+/// 「快照与发布」 worked out (§4.6), which the `deliver` block of the panel
+/// state reads (§3.2).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeliverView {
     /// Whether the drawing in front was saved: only then has it a folder to
@@ -920,6 +1049,8 @@ pub struct DeliverView {
     pub picked: Vec<Pick>,
     /// The diff shown.
     pub diff: Option<DiffView>,
+    /// The publish half; `None` with no drawing in front.
+    pub publish: Option<PublishView>,
 }
 
 impl DeliverView {
@@ -991,6 +1122,115 @@ pub struct DiffItem {
     pub located: bool,
 }
 
+/// The publish half of 「快照与发布」 worked out (§4.6), which
+/// `deliver.publish` reads (§3.2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PublishView {
+    /// 「未发布」「已发布，修订 N」 or 「修订 N 之后有改动」; `None` while the
+    /// records are not read.
+    pub state: Option<String>,
+    /// Why the records could not be read.
+    pub unlisted: Option<String>,
+    pub target_dir: Option<String>,
+    pub next_revision: Option<u32>,
+    /// What is typed in the folder box.
+    pub dir: String,
+    pub preconditions: Preconditions,
+    /// The last gates worked out.
+    pub gates: Option<GatesFound>,
+    /// Whether a drawing they read changed since.
+    pub stale: bool,
+    /// Whether the condition of repeated tags lists where each tag is.
+    pub duplicates_open: bool,
+    /// The records, newest first.
+    pub packages: Vec<PackageRow>,
+    pub last_package: Option<String>,
+    /// The question 【发布】 asks, while it asks it.
+    pub asking: Option<String>,
+}
+
+/// The four preconditions of publishing (§4.6 item 3), worked out again
+/// each time the view is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Preconditions {
+    pub saved: bool,
+    pub clean: bool,
+    pub file_unchanged: bool,
+    pub writable_session: bool,
+}
+
+impl Preconditions {
+    /// All four hold: 【发布】 can be pressed (§4.8).
+    pub fn held(self) -> bool {
+        self.saved && self.clean && self.file_unchanged && self.writable_session
+    }
+}
+
+/// A record of the publish half: the package — current only while the
+/// drawing has no changes unsaved — and what 【校验】 found of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageRow {
+    pub package: Package,
+    pub verified: Option<Verified>,
+}
+
+impl PublishView {
+    /// The eight conditions in the order they are drawn (§4.6 item 3), each
+    /// said and whether it holds; a gate before 【检查发布条件】 is not known.
+    pub fn conditions(&self) -> Vec<(String, Option<bool>)> {
+        let preconditions = self.preconditions;
+        let gates = self.gates.as_ref().map(|found| &found.gates);
+        let counted = |said: &str, count: Option<usize>, unit: &str| match count {
+            Some(count) if count > 0 => format!("{said}（{count} {unit}）"),
+            _ => said.to_owned(),
+        };
+        let master = match gates.map(|gates| gates.master_data) {
+            Some(MasterDataState::NotConfigured) => "主数据读得出来（没有配置）",
+            _ => "主数据读得出来",
+        };
+        vec![
+            ("已保存".to_owned(), Some(preconditions.saved)),
+            ("没有未存的修改".to_owned(), Some(preconditions.clean)),
+            (
+                "文件没有在别处被改过".to_owned(),
+                Some(preconditions.file_unchanged),
+            ),
+            ("会话可写".to_owned(), Some(preconditions.writable_session)),
+            (
+                counted(
+                    "没被豁免的错误为 0",
+                    gates.map(|gates| gates.drc_errors),
+                    "条",
+                ),
+                gates.map(|gates| gates.drc_errors == 0),
+            ),
+            (
+                counted(
+                    "重复位号为 0",
+                    gates.map(|gates| gates.duplicate_tags),
+                    "个",
+                ),
+                gates.map(|gates| gates.duplicate_tags == 0),
+            ),
+            (
+                master.to_owned(),
+                gates.map(|gates| gates.master_data != MasterDataState::Unreadable),
+            ),
+            (
+                "项目里的图都读得出来".to_owned(),
+                gates.map(|gates| gates.index_complete),
+            ),
+        ]
+    }
+}
+
+impl PackageRow {
+    /// The `PosReport` id of its row.
+    pub fn bounds_id(&self) -> String {
+        format!("{PACKAGE_ROW_PREFIX}{}", self.package.revision)
+    }
+}
+
 impl Default for VerifyView {
     fn default() -> Self {
         build_view(&VerifyUi::default(), None, None, &Context::default())
@@ -1023,6 +1263,7 @@ pub fn build_view(
         ui,
         drawing.and_then(|results| results.snapshots),
         drawing.and_then(|results| results.diff),
+        &drawing.map(|results| results.publish).unwrap_or_default(),
         context,
     );
     let empty = match ui.tab {
@@ -1115,13 +1356,18 @@ fn numbers_said(numbers: &[f64]) -> String {
 }
 
 /// Which buttons can be pressed (§4.8). Checking and listing need a drawing
-/// in front, the project's and a numbered snapshot a saved one, and none of
-/// them starts while something runs; exporting needs a result shown,
-/// whatever runs — of a bill, one that came out. 【比对】 needs exactly two
-/// rows ticked.
+/// in front, the project's, a numbered snapshot and 【检查发布条件】 a saved
+/// one, 【发布】 the four preconditions of publishing held, and none of them
+/// starts while something runs; exporting needs a result shown, whatever
+/// runs — of a bill, one that came out. 【比对】 needs exactly two rows
+/// ticked.
 fn buttons(context: &Context, check: &CheckView, bom: &BomView, deliver: &DeliverView) -> Buttons {
     let drawing = context.document_id.is_some() && !context.busy;
     let project = drawing && context.saved;
+    let held = deliver
+        .publish
+        .as_ref()
+        .is_some_and(|publish| publish.preconditions.held());
     Buttons {
         check_drawing: drawing,
         check_project: project,
@@ -1132,7 +1378,8 @@ fn buttons(context: &Context, check: &CheckView, bom: &BomView, deliver: &Delive
         snapshot_save: project,
         diff: deliver.pair().is_some(),
         diff_export: deliver.diff.is_some(),
-        ..Buttons::default()
+        publish_check: project,
+        publish: drawing && held,
     }
 }
 
@@ -1392,6 +1639,7 @@ fn deliver_view(
     ui: &VerifyUi,
     snapshots: Option<&[SnapshotInfo]>,
     diff: Option<&Diff>,
+    publish: &KeptPublish<'_>,
     context: &Context,
 ) -> DeliverView {
     let saved = context.document_id.is_some() && context.saved;
@@ -1418,7 +1666,70 @@ fn deliver_view(
         live_picked: picked.contains(&Pick::Live),
         picked,
         diff: diff.filter(|_| saved).map(|diff| diff_view(ui, diff)),
+        publish: publish_view(ui, publish, context),
     }
+}
+
+/// The publish half (§4.6) of what is kept on the drawing in front: the
+/// records as last read — a drawing never saved has none — each package
+/// current only while the drawing has no changes unsaved; the four
+/// preconditions as they are now; and the question 【发布】 asks, while the
+/// drawing can be published.
+fn publish_view(ui: &VerifyUi, kept: &KeptPublish<'_>, context: &Context) -> Option<PublishView> {
+    context.document_id?;
+    let saved = context.saved;
+    let preconditions = Preconditions {
+        saved,
+        clean: !context.dirty,
+        file_unchanged: saved && kept.file_unchanged,
+        writable_session: context.writable,
+    };
+    let records = kept.records.filter(|_| saved);
+    let listed = records.and_then(Result::ok);
+    let packages: Vec<PackageRow> = listed
+        .map_or(&[][..], |records| records.packages.as_slice())
+        .iter()
+        .map(|package| PackageRow {
+            package: Package {
+                current: package.current && !context.dirty,
+                ..package.clone()
+            },
+            verified: kept
+                .verified
+                .iter()
+                .find(|(revision, _)| *revision == package.revision)
+                .map(|(_, verified)| verified.clone()),
+        })
+        .collect();
+    let state = listed.map(|_| match packages.first() {
+        None => "未发布".to_owned(),
+        Some(latest) if latest.package.current => {
+            format!("已发布，修订 {}", latest.package.revision)
+        }
+        Some(latest) => format!("修订 {} 之后有改动", latest.package.revision),
+    });
+    let asking = listed
+        .filter(|_| ui.confirming && preconditions.held() && !context.busy)
+        .map(|records| {
+            format!(
+                "把 {} 发布为修订 {} 到 {}？",
+                records.drawing_id, records.next_revision, records.target_dir
+            )
+        });
+    Some(PublishView {
+        state,
+        unlisted: records.and_then(Result::err).map(str::to_owned),
+        target_dir: listed.map(|records| records.target_dir.clone()),
+        next_revision: listed.map(|records| records.next_revision),
+        dir: ui.publish_dir.clone(),
+        preconditions,
+        gates: kept.gates.map(|(found, _)| found.clone()),
+        stale: kept.gates.is_some_and(|(_, stale)| stale),
+        duplicates_open: ui.duplicates_open,
+        packages,
+        last_package: kept.last_package.map(str::to_owned),
+        asking,
+    })
 }
 
 /// What the snapshot half says instead of its list (§4.6 item 7).
@@ -1735,7 +2046,8 @@ fn bom_scope_key(kind: bom::ScopeKind) -> &'static str {
 /// The `deliver` block (§3.2), read off the snapshot half as worked out:
 /// the snapshots newest first, each as `pid_snapshots` lists it and
 /// whether it is ticked; the rows ticked, in the order they were; the diff
-/// shown, by its sides and counts.
+/// shown, by its sides and counts; the publish half, as [`publish_state`]
+/// reads it.
 fn deliver_state(deliver: &DeliverView) -> Value {
     let snapshots: Vec<Value> = deliver
         .rows
@@ -1757,7 +2069,54 @@ fn deliver_state(deliver: &DeliverView) -> Value {
             "修改": diff.summary.modified,
         })
     });
-    json!({"snapshots": snapshots, "picked": picked, "diff": diff, "publish": null})
+    json!({
+        "snapshots": snapshots,
+        "picked": picked,
+        "diff": diff,
+        "publish": publish_state(deliver.publish.as_ref()),
+    })
+}
+
+/// The `publish` block of `deliver` (§3.2), read off the publish half as
+/// worked out; `null` with no drawing in front. Before 【检查发布条件】 the
+/// gates, and whether the drawing could be published, are not known.
+fn publish_state(publish: Option<&PublishView>) -> Value {
+    let Some(publish) = publish else {
+        return Value::Null;
+    };
+    let packages: Vec<Value> = publish
+        .packages
+        .iter()
+        .map(|row| {
+            let package = &row.package;
+            let verified = row
+                .verified
+                .as_ref()
+                .map(|verified| json!({ "intact": verified.intact, "text": verified.text }));
+            json!({
+                "package_id": package.package_id,
+                "revision": package.revision,
+                "path": package.path,
+                "published_at": package.published_at,
+                "published_by": package.published_by,
+                "current": package.current,
+                "verified": verified,
+            })
+        })
+        .collect();
+    let found = publish.gates.as_ref();
+    json!({
+        "state": publish.state,
+        "target_dir": publish.target_dir,
+        "next_revision": publish.next_revision,
+        "preconditions": publish.preconditions,
+        "checked": found.is_some(),
+        "stale": publish.stale,
+        "can_publish": found.map(|found| found.can_publish),
+        "gates": found.map(|found| &found.gates),
+        "packages": packages,
+        "last_package": publish.last_package,
+    })
 }
 
 /// `block` with its `rows` cut to `limit` of them from `offset` on.
@@ -1822,7 +2181,8 @@ impl std::fmt::Display for PanelError {
 /// first, then a row the list does not have, then a row whose button is
 /// grey. `pick` the same way: a drawing never saved has no list to tick
 /// in, a number the list does not have is no row of it, and a snapshot
-/// whose file is gone cannot be ticked.
+/// whose file is gone cannot be ticked. `publish` is 【确认】 under the
+/// question 【发布】 asks: it publishes without asking.
 pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, PanelError> {
     let (key, written) = match value.split_once('=') {
         Some((key, written)) => (key, Some(written)),
@@ -1860,10 +2220,18 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
         };
         PanelError::Unavailable { reason }
     };
+    let unsaved = || {
+        let reason = if view.document_id.is_none() {
+            "no_drawing"
+        } else {
+            "no_project_dir"
+        };
+        PanelError::Unavailable { reason }
+    };
     match key {
-        "show" | "hide" | "diff" if written.is_some() => Err(PanelError::InvalidValue(format!(
-            "{key} 不带值，实得 \"{value}\""
-        ))),
+        "show" | "hide" | "diff" | "publish_check" | "publish" if written.is_some() => Err(
+            PanelError::InvalidValue(format!("{key} 不带值，实得 \"{value}\"")),
+        ),
         "show" => Ok(PidVerifyMsg::Show),
         "hide" => Ok(PidVerifyMsg::Hide),
         "tab" => {
@@ -2048,6 +2416,56 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
                 .ok_or_else(|| invalid("成 diff_export=<文件>"))?;
             compared()?;
             Ok(PidVerifyMsg::DiffExport(path.to_owned()))
+        }
+        "publish_dir" => {
+            let dir = written
+                .ok_or_else(|| invalid("成 publish_dir=<目录>，或者 publish_dir= 用默认目录"))?;
+            if !view.deliver.saved {
+                return Err(unsaved());
+            }
+            Ok(PidVerifyMsg::PublishDir(dir.trim().to_owned()))
+        }
+        "publish_check" => {
+            if !view.buttons.publish_check {
+                return Err(grey());
+            }
+            Ok(PidVerifyMsg::PublishCheck)
+        }
+        "publish" => {
+            if view.buttons.publish {
+                return Ok(PidVerifyMsg::Publish);
+            }
+            let reason = if view.document_id.is_none() {
+                "no_drawing"
+            } else if view.busy {
+                "busy"
+            } else if !view.writable {
+                "readonly"
+            } else {
+                "precondition"
+            };
+            Err(PanelError::Unavailable { reason })
+        }
+        "package_verify" => {
+            let revision = written
+                .and_then(|number| number.trim().parse::<u32>().ok())
+                .ok_or_else(|| invalid("成 package_verify=<修订号>"))?;
+            let publish = view
+                .deliver
+                .publish
+                .as_ref()
+                .filter(|_| view.deliver.saved && !view.busy)
+                .ok_or_else(grey)?;
+            if !publish
+                .packages
+                .iter()
+                .any(|row| row.package.revision == revision)
+            {
+                return Err(PanelError::RowNotFound(format!(
+                    "发布记录里现在没有修订 {revision} 的包"
+                )));
+            }
+            Ok(PidVerifyMsg::PackageVerify(revision))
         }
         "locate" | "waive" | "unwaive" => {
             let form = match key {
@@ -2792,7 +3210,198 @@ fn deliver_tab(view: &VerifyView) -> Element<'_, Message> {
     if let Some(diff) = &deliver.diff {
         body = body.push(diff_part(diff));
     }
-    tab.push(actions).push(scrollable(body).height(Fill)).into()
+    let tab = tab.push(actions);
+    let Some(publish) = &deliver.publish else {
+        return tab.push(scrollable(body).height(Fill)).into();
+    };
+    tab.push(scrollable(body).height(Length::FillPortion(2)))
+        .push(publish_part(publish, buttons, view.busy))
+        .into()
+}
+
+/// The publish half (§4.6): the status line, or why the records do not
+/// read; the folder box with 【浏览…】 and the revision the next publish
+/// makes; the eight conditions; 【检查发布条件】 and 【发布】, and the
+/// question 【发布】 asks with 【确认】【取消】 under it; then the records,
+/// newest first.
+fn publish_part(publish: &PublishView, buttons: Buttons, busy: bool) -> Element<'_, Message> {
+    let status = match (&publish.state, &publish.unlisted) {
+        (Some(state), _) => text(format!("发布 · {state}")).size(12),
+        (None, Some(why)) => text(format!("发布 · 发布记录读不出来：{why}"))
+            .size(12)
+            .style(danger),
+        (None, None) => text("发布").size(12),
+    };
+    let mut folder = row![
+        PosReport::new(
+            PUBLISH_DIR_ID,
+            text_input("发布目录（空着就是图纸目录下的 pid-publish）", &publish.dir)
+                .on_input(|typed| PidVerifyMsg::PublishDir(typed).message())
+                .size(12)
+                .padding([3, 6])
+                .width(Fill),
+        ),
+        small_button("浏览…", Some(PidVerifyMsg::PickPublishDir)),
+    ]
+    .spacing(4)
+    .align_y(iced::Center);
+    if let Some(next) = publish.next_revision {
+        folder = folder.push(text(format!("下一个修订号：{next}")).size(11));
+    }
+    let mut part = column![status, folder].spacing(4).width(Fill);
+    if let Some(target) = &publish.target_dir {
+        part = part.push(text(format!("发布到 {target}")).size(11).style(muted));
+    }
+    let actions = row![
+        PosReport::new(
+            PUBLISH_CHECK_ID,
+            small_button(
+                "检查发布条件",
+                buttons.publish_check.then_some(PidVerifyMsg::PublishCheck)
+            ),
+        ),
+        PosReport::new(
+            PUBLISH_ID,
+            small_button("发布", buttons.publish.then_some(PidVerifyMsg::AskPublish)),
+        ),
+    ]
+    .spacing(4);
+    part = part.push(conditions_part(publish)).push(actions);
+    if let Some(question) = &publish.asking {
+        let answers = row![
+            PosReport::new(
+                PUBLISH_CONFIRM_ID,
+                small_button("确认", Some(PidVerifyMsg::Publish)),
+            ),
+            small_button("取消", Some(PidVerifyMsg::CancelPublish)),
+        ]
+        .spacing(4);
+        part = part.push(text(question.as_str()).size(12)).push(answers);
+    }
+    if !publish.packages.is_empty() {
+        part = part.push(text("发布记录").size(11).style(muted));
+    }
+    for row in &publish.packages {
+        part = part.push(package_row(row, busy));
+    }
+    scrollable(part).height(Length::FillPortion(3)).into()
+}
+
+/// The eight conditions of the publish half (§4.6 item 3), two to a line;
+/// under them, while the gates may be out of date, that they may; and while
+/// the condition of repeated tags lists them, where each tag repeated is,
+/// each place clicked to look at it.
+fn conditions_part(publish: &PublishView) -> Element<'_, Message> {
+    let conditions = publish.conditions();
+    let mut part = column![].spacing(2).width(Fill);
+    for (line, pair) in conditions.chunks(2).enumerate() {
+        let mut cells = row![].spacing(8);
+        for (offset, (said, met)) in pair.iter().enumerate() {
+            let at = line * 2 + offset;
+            cells = cells.push(condition_cell(
+                at,
+                said.clone(),
+                *met,
+                publish.duplicates_open,
+            ));
+        }
+        part = part.push(cells);
+    }
+    if publish.stale {
+        part = part.push(text(GATES_STALE).size(11).style(warning));
+    }
+    let listed = publish
+        .gates
+        .as_ref()
+        .filter(|_| publish.duplicates_open)
+        .map_or(&[][..], |found| found.duplicates.as_slice());
+    for (repeated, duplicate) in listed.iter().enumerate() {
+        part = part.push(
+            text(format!(
+                "{} {}（{} 处）",
+                duplicate.type_code,
+                duplicate.tag,
+                duplicate.places.len()
+            ))
+            .size(11),
+        );
+        for (at, place) in duplicate.places.iter().enumerate() {
+            part = part.push(place_button(
+                format!("{} · {}", place.drawing_id, point_said(place.at)),
+                PidVerifyMsg::PublishDuplicateLocate(repeated, at),
+            ));
+        }
+    }
+    part.into()
+}
+
+/// A condition of the publish half (§4.6 item 3), said and whether it
+/// holds. When it does not, that of errors not waived is clicked to list
+/// them on the rule-check tab, and that of repeated tags to list where each
+/// is, or fold the list.
+fn condition_cell<'a>(
+    at: usize,
+    said: String,
+    met: Option<bool>,
+    open: bool,
+) -> Element<'a, Message> {
+    let press = match (at, met) {
+        (ERRORS_CONDITION, Some(false)) => Some(PidVerifyMsg::PublishErrors),
+        (DUPLICATES_CONDITION, Some(false)) => Some(PidVerifyMsg::PublishDuplicates),
+        _ => None,
+    };
+    let said = match press {
+        Some(PidVerifyMsg::PublishDuplicates) => {
+            format!("{} {said}", if open { "▼" } else { "▶" })
+        }
+        _ => said,
+    };
+    let verdict = match met {
+        Some(true) => text(MET_SAID).size(11),
+        Some(false) => text(UNMET_SAID).size(11).style(danger),
+        None => text(UNCHECKED_SAID).size(11).style(muted),
+    };
+    let line = row![text(said).size(11).width(Fill), verdict].spacing(4);
+    let Some(press) = press else {
+        return container(line).padding([1, 4]).width(Fill).into();
+    };
+    button(line)
+        .on_press(press.message())
+        .padding([1, 4])
+        .width(Fill)
+        .style(button::text)
+        .into()
+}
+
+/// A record of the publish half (§4.6 item 6): revision, when and by whom,
+/// 「当前」 on the package made of the file on disk, 【校验】; under them
+/// its folder and what 【校验】 found.
+fn package_row(row: &PackageRow, busy: bool) -> Element<'_, Message> {
+    let package = &row.package;
+    let when = package
+        .published_at
+        .map_or_else(|| "时间不明".to_owned(), utc_said);
+    let by = package.published_by.as_deref().unwrap_or("发布人不明");
+    let mut first = row![text(format!("修订 {} · {when} · {by}", package.revision)).size(12)]
+        .spacing(8)
+        .align_y(iced::Center);
+    if package.current {
+        first = first.push(text("当前").size(11));
+    }
+    first = first.push(small_button(
+        "校验",
+        (!busy).then_some(PidVerifyMsg::PackageVerify(package.revision)),
+    ));
+    let mut lines = column![first, text(package.path.as_str()).size(11).style(muted)].spacing(1);
+    if let Some(verified) = &row.verified {
+        let found = text(verified.text.as_str()).size(11);
+        lines = lines.push(if verified.intact {
+            found
+        } else {
+            found.style(danger)
+        });
+    }
+    PosReport::owned(row.bounds_id(), Element::from(lines)).into()
 }
 
 /// A row of the snapshot list (§4.6): number, time, author and object
@@ -2969,6 +3578,7 @@ mod tests {
             drawing_id: Some("PID-1101".to_owned()),
             writable: false,
             saved: false,
+            dirty: false,
             busy: false,
             waivers: Vec::new(),
         }
@@ -3012,8 +3622,7 @@ mod tests {
         assert_eq!(state["busy"], Value::Null);
         assert_eq!(state["notice"], Value::Null);
         // Only 【检查当前图】 and 【当前图】 can be pressed: the drawing was
-        // never saved, nothing is checked or listed yet and the last tab has
-        // no buttons yet.
+        // never saved, and nothing is checked or listed yet.
         let mut buttons: Vec<(&str, Option<bool>)> = state["buttons"]
             .as_object()
             .map(|named| {
@@ -3079,9 +3688,32 @@ mod tests {
                 "rows": []
             })
         );
+        // A drawing never saved has no records to read and cannot be
+        // published; nothing was checked.
         assert_eq!(
             state["deliver"],
-            json!({ "snapshots": [], "picked": [], "diff": null, "publish": null })
+            json!({
+                "snapshots": [],
+                "picked": [],
+                "diff": null,
+                "publish": {
+                    "state": null,
+                    "target_dir": null,
+                    "next_revision": null,
+                    "preconditions": {
+                        "saved": false,
+                        "clean": true,
+                        "file_unchanged": false,
+                        "writable_session": false
+                    },
+                    "checked": false,
+                    "stale": false,
+                    "can_publish": null,
+                    "gates": null,
+                    "packages": [],
+                    "last_package": null
+                }
+            })
         );
     }
 
@@ -3271,6 +3903,7 @@ mod tests {
             drawing_id: Some("PID-1101".to_owned()),
             writable: true,
             saved: true,
+            dirty: false,
             busy: false,
             waivers: Vec::new(),
         }
@@ -3662,8 +4295,8 @@ mod tests {
         assert_eq!(pressable(&read_only, Some(&kept)), (true, true, true));
         // The Start page has no drawing to check.
         assert_eq!(pressable(&Context::default(), None), (false, false, false));
-        // The material list's buttons and 【存快照】 are tested with their
-        // tabs, and the publishing half brings its own.
+        // The material list's buttons, 【存快照】 and the publish half's are
+        // tested with their tabs.
         let buttons = build_view(&VerifyUi::default(), Some(&kept), None, &in_front()).buttons;
         assert_eq!(
             Buttons {
@@ -3674,6 +4307,8 @@ mod tests {
                 bom_project: false,
                 bom_export: false,
                 snapshot_save: false,
+                publish_check: false,
+                publish: false,
                 ..buttons
             },
             Buttons::default()
@@ -5327,7 +5962,9 @@ mod tests {
             json!({"a": 1, "b": "live", "identical": false, "新增": 1, "删除": 1, "修改": 2}),
             "{state}"
         );
-        assert_eq!(deliver["publish"], Value::Null, "{state}");
+        // Its publish records were not read: no status line.
+        assert!(deliver["publish"].is_object(), "{state}");
+        assert_eq!(deliver["publish"]["state"], Value::Null, "{state}");
         for button in ["snapshot_save", "diff", "diff_export"] {
             assert_eq!(state["buttons"][button], true, "{button}: {state}");
         }
@@ -5475,6 +6112,504 @@ mod tests {
             "diff_export",
             "diff_export=",
             "diff_export= ",
+        ] {
+            let refused = parse_action(value, &view).expect_err(value);
+            assert_eq!(refused.code(), "invalid_value", "{value}");
+            assert!(!refused.to_string().is_empty(), "{value}");
+        }
+    }
+
+    /// The package of PID-1101 of `revision` in its default target folder,
+    /// made of the file on disk or not.
+    fn package(revision: u32, current: bool) -> Package {
+        let package_id = format!("PID-1101-R{revision}");
+        Package {
+            path: format!("D:/proj/pid-publish/{package_id}"),
+            package_id,
+            revision,
+            published_at: Some(1_794_900_000 + i64::from(revision) * 3_600),
+            published_by: Some("设计员".to_owned()),
+            current,
+        }
+    }
+
+    /// The records of PID-1101 in its default target folder: `packages`,
+    /// newest first.
+    fn records(packages: Vec<Package>) -> Records {
+        let next_revision = packages.first().map_or(1, |latest| latest.revision + 1);
+        Records {
+            drawing_id: "PID-1101".to_owned(),
+            target_dir: "D:/proj/pid-publish".to_owned(),
+            next_revision,
+            packages,
+        }
+    }
+
+    /// Gates with `errors` errors not waived and `repeated` tags found more
+    /// than once; the master data not set up, every drawing read.
+    fn gates(errors: usize, repeated: usize) -> Gates {
+        let passed = errors == 0 && repeated == 0;
+        Gates {
+            drc_errors: errors,
+            drc_warnings: 1,
+            drc_hints: 0,
+            waived: 0,
+            duplicate_tags: repeated,
+            master_data: MasterDataState::NotConfigured,
+            index_complete: true,
+            result: if passed {
+                crate::pid::publish_pkg::PASSED
+            } else {
+                crate::pid::publish_pkg::PUBLISH_BLOCKED
+            },
+        }
+    }
+
+    /// `records` read, the file on disk the one the program read or wrote.
+    fn read(records: &Records) -> KeptPublish<'_> {
+        KeptPublish {
+            records: Some(Ok(records)),
+            file_unchanged: true,
+            ..KeptPublish::default()
+        }
+    }
+
+    /// What the panel draws under `ui` with `kept` of publishing on the
+    /// drawing in front, in `context`.
+    fn published(kept: KeptPublish<'_>, ui: &VerifyUi, context: &Context) -> VerifyView {
+        let drawing = DrawingResults {
+            publish: kept,
+            ..DrawingResults::default()
+        };
+        build_view(ui, Some(&drawing), None, context)
+    }
+
+    /// The interface state with 「快照与发布」 in front.
+    fn on_deliver() -> VerifyUi {
+        VerifyUi {
+            tab: Tab::Deliver,
+            ..VerifyUi::default()
+        }
+    }
+
+    /// The publish half of `view`.
+    fn half(view: VerifyView) -> PublishView {
+        view.deliver.publish.expect("a publish half")
+    }
+
+    #[test]
+    fn the_publish_controls_report_under_the_ids_the_spec_gives_them() {
+        assert_eq!(PUBLISH_ID, "pid-verify-publish");
+        let row = PackageRow {
+            package: package(3, false),
+            verified: None,
+        };
+        assert_eq!(row.bounds_id(), "pid-verify-package-3");
+        for id in [
+            PUBLISH_DIR_ID,
+            PUBLISH_CHECK_ID,
+            PUBLISH_CONFIRM_ID,
+            PACKAGE_ROW_PREFIX,
+        ] {
+            assert!(id.starts_with(BOUNDS_PREFIX), "{id}");
+        }
+    }
+
+    #[test]
+    fn the_status_line_follows_the_records_and_the_changes_not_saved() {
+        let ui = on_deliver();
+        let dirty = Context {
+            dirty: true,
+            ..in_front()
+        };
+        let said = |records: &Records, context: &Context| {
+            let publish = half(published(read(records), &ui, context));
+            let current: Vec<bool> = publish
+                .packages
+                .iter()
+                .map(|row| row.package.current)
+                .collect();
+            (publish.state, current)
+        };
+        let none = records(Vec::new());
+        assert_eq!(
+            said(&none, &in_front()),
+            (Some("未发布".to_owned()), vec![])
+        );
+        let two = records(vec![package(2, true), package(1, false)]);
+        assert_eq!(
+            said(&two, &in_front()),
+            (Some("已发布，修订 2".to_owned()), vec![true, false])
+        );
+        assert_eq!(
+            said(&two, &dirty),
+            (Some("修订 2 之后有改动".to_owned()), vec![false, false])
+        );
+        // The file on disk is the one revision 1 was made of: it changed
+        // since revision 2.
+        let back = records(vec![package(2, false), package(1, true)]);
+        assert_eq!(
+            said(&back, &in_front()),
+            (Some("修订 2 之后有改动".to_owned()), vec![false, true])
+        );
+        let publish = half(published(read(&two), &ui, &in_front()));
+        assert_eq!(
+            (publish.target_dir.as_deref(), publish.next_revision),
+            (Some("D:/proj/pid-publish"), Some(3))
+        );
+        // Not read yet, or not readable: no status line, and why.
+        let unread = half(published(KeptPublish::default(), &ui, &in_front()));
+        assert_eq!(
+            (unread.state, unread.target_dir, unread.next_revision),
+            (None, None, None)
+        );
+        let why = "当前图不在项目的图纸里";
+        let kept = KeptPublish {
+            records: Some(Err(why)),
+            ..KeptPublish::default()
+        };
+        let unlisted = half(published(kept, &ui, &in_front()));
+        assert_eq!(
+            (unlisted.state, unlisted.unlisted.as_deref()),
+            (None, Some(why))
+        );
+        // No drawing in front: no publish half.
+        let none_in_front = published(read(&two), &ui, &Context::default());
+        assert_eq!(none_in_front.deliver.publish, None);
+    }
+
+    #[test]
+    fn publish_waits_for_the_four_preconditions_and_the_check_for_a_saved_drawing() {
+        let one = records(vec![package(1, true)]);
+        let ui = on_deliver();
+        let pressable = |kept: KeptPublish<'_>, context: &Context| {
+            let buttons = published(kept, &ui, context).buttons;
+            (buttons.publish_check, buttons.publish)
+        };
+        let changed = KeptPublish {
+            file_unchanged: false,
+            ..read(&one)
+        };
+        let dirty = Context {
+            dirty: true,
+            ..in_front()
+        };
+        let read_only = Context {
+            writable: false,
+            ..in_front()
+        };
+        let busy = Context {
+            busy: true,
+            ..in_front()
+        };
+        let unsaved = Context {
+            saved: false,
+            ..in_front()
+        };
+        assert_eq!(pressable(read(&one), &in_front()), (true, true));
+        assert_eq!(pressable(changed, &in_front()), (true, false));
+        assert_eq!(pressable(read(&one), &dirty), (true, false));
+        assert_eq!(pressable(read(&one), &read_only), (true, false));
+        assert_eq!(pressable(read(&one), &busy), (false, false));
+        assert_eq!(pressable(read(&one), &unsaved), (false, false));
+        assert_eq!(pressable(read(&one), &Context::default()), (false, false));
+        // The gates do not grey it: publishing checks them again.
+        let found = GatesFound {
+            gates: gates(2, 0),
+            duplicates: Vec::new(),
+            can_publish: false,
+        };
+        let blocked = KeptPublish {
+            gates: Some((&found, false)),
+            ..read(&one)
+        };
+        assert_eq!(pressable(blocked, &in_front()), (true, true));
+        // A drawing never saved: no file of it was read or written either,
+        // and it has no records.
+        let publish = half(published(read(&one), &ui, &unsaved));
+        assert_eq!(
+            publish.preconditions,
+            Preconditions {
+                saved: false,
+                clean: true,
+                file_unchanged: false,
+                writable_session: true
+            }
+        );
+        assert_eq!(publish.packages, Vec::new());
+    }
+
+    #[test]
+    fn the_eight_conditions_say_whether_each_holds_and_the_gates_wait_for_a_check() {
+        let one = records(vec![package(1, true)]);
+        let ui = on_deliver();
+        let dirty = Context {
+            dirty: true,
+            ..in_front()
+        };
+        let unchecked = half(published(read(&one), &ui, &dirty));
+        let said = |pairs: &[(&str, Option<bool>)]| -> Vec<(String, Option<bool>)> {
+            pairs
+                .iter()
+                .map(|&(label, met)| (label.to_owned(), met))
+                .collect()
+        };
+        assert_eq!(
+            unchecked.conditions(),
+            said(&[
+                ("已保存", Some(true)),
+                ("没有未存的修改", Some(false)),
+                ("文件没有在别处被改过", Some(true)),
+                ("会话可写", Some(true)),
+                ("没被豁免的错误为 0", None),
+                ("重复位号为 0", None),
+                ("主数据读得出来", None),
+                ("项目里的图都读得出来", None),
+            ])
+        );
+        let mut unreadable = gates(2, 1);
+        unreadable.master_data = MasterDataState::Unreadable;
+        unreadable.index_complete = false;
+        let found = GatesFound {
+            gates: unreadable,
+            duplicates: repeated().duplicates,
+            can_publish: false,
+        };
+        let kept = KeptPublish {
+            gates: Some((&found, false)),
+            ..read(&one)
+        };
+        let blocked = half(published(kept, &ui, &in_front()));
+        assert_eq!(
+            blocked.conditions()[4..],
+            said(&[
+                ("没被豁免的错误为 0（2 条）", Some(false)),
+                ("重复位号为 0（1 个）", Some(false)),
+                ("主数据读得出来", Some(false)),
+                ("项目里的图都读得出来", Some(false)),
+            ])[..]
+        );
+        // Master data not set up does not block on its own.
+        let found = GatesFound {
+            gates: gates(0, 0),
+            duplicates: Vec::new(),
+            can_publish: true,
+        };
+        let kept = KeptPublish {
+            gates: Some((&found, false)),
+            ..read(&one)
+        };
+        let passed = half(published(kept, &ui, &in_front()));
+        assert_eq!(
+            passed.conditions()[4..],
+            said(&[
+                ("没被豁免的错误为 0", Some(true)),
+                ("重复位号为 0", Some(true)),
+                ("主数据读得出来（没有配置）", Some(true)),
+                ("项目里的图都读得出来", Some(true)),
+            ])[..]
+        );
+    }
+
+    #[test]
+    fn the_publish_block_reads_off_the_half_as_worked_out() {
+        let one = records(vec![package(1, true)]);
+        let found = GatesFound {
+            gates: gates(2, 1),
+            duplicates: repeated().duplicates,
+            can_publish: false,
+        };
+        let verified = [(
+            1,
+            Verified {
+                intact: true,
+                text: INTACT_SAID.to_owned(),
+            },
+        )];
+        let kept = KeptPublish {
+            gates: Some((&found, true)),
+            verified: &verified,
+            last_package: Some("D:/proj/pid-publish/PID-1101-R1"),
+            ..read(&one)
+        };
+        let dirty = Context {
+            dirty: true,
+            ..in_front()
+        };
+        let state = panel_state(&published(kept, &on_deliver(), &dirty), ROWS_PER_PAGE, 0);
+        let first = &one.packages[0];
+        assert_eq!(
+            state["deliver"]["publish"],
+            json!({
+                "state": "修订 1 之后有改动",
+                "target_dir": "D:/proj/pid-publish",
+                "next_revision": 2,
+                "preconditions": {
+                    "saved": true,
+                    "clean": false,
+                    "file_unchanged": true,
+                    "writable_session": true
+                },
+                "checked": true,
+                "stale": true,
+                "can_publish": false,
+                "gates": found.gates,
+                "packages": [{
+                    "package_id": first.package_id,
+                    "revision": 1,
+                    "path": first.path,
+                    "published_at": first.published_at,
+                    "published_by": "设计员",
+                    "current": false,
+                    "verified": { "intact": true, "text": "完好" }
+                }],
+                "last_package": "D:/proj/pid-publish/PID-1101-R1"
+            }),
+            "{state}"
+        );
+        assert_eq!(state["buttons"]["publish_check"], true, "{state}");
+        assert_eq!(state["buttons"]["publish"], false, "{state}");
+        // Never checked: the gates, and whether it could be published, are
+        // not known.
+        let unchecked = published(read(&one), &on_deliver(), &in_front());
+        let state = panel_state(&unchecked, ROWS_PER_PAGE, 0);
+        let publish = &state["deliver"]["publish"];
+        assert_eq!(publish["checked"], false, "{state}");
+        assert_eq!(publish["stale"], false, "{state}");
+        assert_eq!(publish["can_publish"], Value::Null, "{state}");
+        assert_eq!(publish["gates"], Value::Null, "{state}");
+        assert_eq!(publish["packages"][0]["verified"], Value::Null, "{state}");
+        assert_eq!(publish["packages"][0]["current"], true, "{state}");
+        assert_eq!(state["buttons"]["publish"], true, "{state}");
+        // No drawing in front.
+        let none = published(read(&one), &on_deliver(), &Context::default());
+        let state = panel_state(&none, ROWS_PER_PAGE, 0);
+        assert_eq!(state["deliver"]["publish"], Value::Null, "{state}");
+    }
+
+    #[test]
+    fn publish_asks_in_the_panel_naming_the_drawing_the_revision_and_the_folder() {
+        let two = records(vec![package(2, true)]);
+        let asking = VerifyUi {
+            confirming: true,
+            ..on_deliver()
+        };
+        let asked =
+            |ui: &VerifyUi, context: &Context| half(published(read(&two), ui, context)).asking;
+        assert_eq!(
+            asked(&asking, &in_front()).as_deref(),
+            Some("把 PID-1101 发布为修订 3 到 D:/proj/pid-publish？")
+        );
+        assert_eq!(asked(&on_deliver(), &in_front()), None);
+        // Asked of a drawing that cannot be published now: no question.
+        let dirty = Context {
+            dirty: true,
+            ..in_front()
+        };
+        let busy = Context {
+            busy: true,
+            ..in_front()
+        };
+        assert_eq!(asked(&asking, &dirty), None);
+        assert_eq!(asked(&asking, &busy), None);
+    }
+
+    #[test]
+    fn pid_verify_action_reads_the_publish_keys() {
+        let two = records(vec![package(2, true), package(1, false)]);
+        let view = published(read(&two), &on_deliver(), &in_front());
+        for (value, pressed) in [
+            (
+                "publish_dir=D:/out",
+                PidVerifyMsg::PublishDir("D:/out".to_owned()),
+            ),
+            (
+                "publish_dir= 发布包 ",
+                PidVerifyMsg::PublishDir("发布包".to_owned()),
+            ),
+            ("publish_dir=", PidVerifyMsg::PublishDir(String::new())),
+            ("publish_check", PidVerifyMsg::PublishCheck),
+            ("publish", PidVerifyMsg::Publish),
+            ("package_verify=1", PidVerifyMsg::PackageVerify(1)),
+            ("package_verify= 2", PidVerifyMsg::PackageVerify(2)),
+        ] {
+            assert_eq!(parse_action(value, &view), Ok(pressed), "{value}");
+        }
+    }
+
+    #[test]
+    fn pid_verify_action_refuses_a_grey_publish_button_with_the_reason() {
+        let one = records(vec![package(1, true)]);
+        let ui = on_deliver();
+        let busy = Context {
+            busy: true,
+            ..in_front()
+        };
+        let unsaved = Context {
+            saved: false,
+            ..in_front()
+        };
+        let dirty = Context {
+            dirty: true,
+            ..in_front()
+        };
+        let read_only = Context {
+            writable: false,
+            dirty: true,
+            ..in_front()
+        };
+        let changed = KeptPublish {
+            file_unchanged: false,
+            ..read(&one)
+        };
+        let none = Context::default();
+        for (kept, context, value, reason) in [
+            (read(&one), &none, "publish_dir=D:/out", "no_drawing"),
+            (read(&one), &none, "publish_check", "no_drawing"),
+            (read(&one), &none, "publish", "no_drawing"),
+            (read(&one), &none, "package_verify=1", "no_drawing"),
+            (read(&one), &busy, "publish_check", "busy"),
+            (read(&one), &busy, "publish", "busy"),
+            (read(&one), &busy, "package_verify=1", "busy"),
+            (read(&one), &unsaved, "publish_check", "no_project_dir"),
+            (read(&one), &unsaved, "publish", "precondition"),
+            (read(&one), &dirty, "publish", "precondition"),
+            (changed, &in_front(), "publish", "precondition"),
+            (read(&one), &read_only, "publish", "readonly"),
+        ] {
+            let view = published(kept, &ui, context);
+            let refused = parse_action(value, &view).expect_err(value);
+            assert_eq!(
+                (refused.code(), refused.reason()),
+                ("PANEL_ACTION_UNAVAILABLE", Some(reason)),
+                "{value} {context:?}"
+            );
+        }
+        // A revision the records do not have.
+        let view = published(read(&one), &ui, &in_front());
+        assert_eq!(
+            parse_action("package_verify=3", &view)
+                .map_err(|refused| (refused.code(), refused.to_string())),
+            Err((
+                "PANEL_ROW_NOT_FOUND",
+                "发布记录里现在没有修订 3 的包".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn pid_verify_action_names_a_wrong_publish_value_invalid() {
+        let one = records(vec![package(1, true)]);
+        let view = published(read(&one), &on_deliver(), &in_front());
+        for value in [
+            "publish_dir",
+            "publish_check=1",
+            "publish=now",
+            "package_verify",
+            "package_verify=",
+            "package_verify=x",
+            "package_verify=-1",
+            "more=publish",
         ] {
             let refused = parse_action(value, &view).expect_err(value);
             assert_eq!(refused.code(), "invalid_value", "{value}");

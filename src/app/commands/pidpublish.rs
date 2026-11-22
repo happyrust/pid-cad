@@ -39,6 +39,10 @@
 //! `LIST` 不扫项目，只读目标目录里这张图的包（[`publications`]）：先说发布到哪一版了（§4 末尾的
 //! 表），再新的在前一行一个包，与图纸文件一致的标「当前」。`VERIFY` 校验一个包（§3.5），相对路径从
 //! 图纸所在目录算。两者都不写任何东西，只读会话里也能用。
+//!
+//! 「校验与交付」面板的【检查发布条件】【发布】也走这里（[`OpenCADStudio::pidpublish_for_panel`]，
+//! 面板规格 §4.6）：目标目录是面板目录框里写的；检查不看前提，只算目标和门禁；门禁交给面板，
+//! 这次的检查报告成为这张图的检查结果。结论说在面板的消息栏里，命令行上只留说明。
 
 use super::pidbom::Sheets;
 use super::piddrc::{self, Check};
@@ -54,6 +58,7 @@ use crate::pid::publish_pkg::{
     ProjectRef, PublishError, PUBLISH_BLOCKED, PUBLISH_FAILED, PUBLISH_TARGET_EXISTS,
 };
 use crate::pid::snapshot::{capture, store, Snapshot, SnapshotMeta};
+use crate::ui::window::pid_verify_deliver::{GatesFound, Notice};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -121,6 +126,8 @@ struct Destination {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct PublishJob {
     only_check: bool,
+    /// 是「校验与交付」面板按的（[`OpenCADStudio::pidpublish_for_panel`]）。
+    panel: bool,
     tab: u64,
     asked: Asked,
     rules: RuleSet,
@@ -139,10 +146,11 @@ impl PublishJob {
     }
 }
 
-/// 门禁这一段算出来的：现做的检查报告、重复位号和四项门禁。
+/// 门禁这一段算出来的：现做的检查报告和它查了的图（图号）、重复位号和四项门禁。
 #[derive(Debug)]
 pub(super) struct Gated {
     pub(super) report: CheckReport,
+    pub(super) drawings: Vec<String>,
     pub(super) duplicates: Vec<Duplicate>,
     pub(super) gates: Gates,
 }
@@ -390,6 +398,7 @@ impl OpenCADStudio {
         let master = master_data::resolve(&self.tabs[i].scene.document, Some(&target.project_dir));
         let job = PublishJob {
             only_check,
+            panel: false,
             tab: self.tabs[i].id,
             asked,
             rules,
@@ -398,9 +407,76 @@ impl OpenCADStudio {
         self.pidindex_publish(i, job)
     }
 
+    /// 「校验与交付」面板的【检查发布条件】（`only_check`）和【发布】（面板规格 §4.6），目标目录是
+    /// 面板目录框里写的 `dir`（不写是默认的）。同命令行，只是检查不看前提——前提面板自己逐条看——
+    /// 只算目标；发布照样先过前提。取规则和主数据，扫项目，扫完接着做
+    /// （[`Self::pidpublish_scanned_for_panel`]）。起不了头时是错误码和为什么，由面板说，不碰命令行。
+    pub(super) fn pidpublish_for_panel(
+        &mut self,
+        i: usize,
+        only_check: bool,
+        dir: Option<String>,
+    ) -> Result<Task<Message>, (&'static str, String)> {
+        let asked = Asked {
+            dir,
+            ..Asked::default()
+        };
+        let target = self.pidpublish_panel_target(i, only_check, &asked)?;
+        let rules = self.pidcheck_load_rules(i)?;
+        let master = master_data::resolve(&self.tabs[i].scene.document, Some(&target.project_dir));
+        let job = PublishJob {
+            only_check,
+            panel: true,
+            tab: self.tabs[i].id,
+            asked,
+            rules,
+            master,
+        };
+        Ok(self.pidindex_publish(i, job))
+    }
+
+    /// 面板按的检查、发布要发到哪里：发布过前提（[`Self::pidpublish_preconditions`]）；检查只算目标
+    /// （[`destination`]），协同前提照实记下。
+    fn pidpublish_panel_target(
+        &self,
+        i: usize,
+        only_check: bool,
+        asked: &Asked,
+    ) -> Result<Target, (&'static str, String)> {
+        if !only_check {
+            return self.pidpublish_preconditions(i, asked);
+        }
+        let Some(path) = self.tabs[i].current_path.clone() else {
+            return Err((PUBLISH_UNSAVED, "图还没保存过；存盘后再发布".to_owned()));
+        };
+        let Destination {
+            project_dir,
+            drawing_id,
+            dir,
+            revision,
+        } = destination(&path, asked)?;
+        let collab = CollabInput {
+            allow_offline: asked.allow_offline,
+            ..self.publish_collab_input(i)
+        };
+        Ok(Target {
+            source: path,
+            project_dir,
+            drawing_id,
+            dir,
+            revision,
+            collab: publish_pkg::collab_preconditions(collab),
+        })
+    }
+
     /// 扫完项目接着做（§4）：前提再过一遍，在扫好的项目上算门禁（[`publish_gates`]），说出来；是发布
-    /// 而门禁都过了，接着出包（[`Self::pidpublish_package`]）。
+    /// 而门禁都过了，接着出包（[`Self::pidpublish_package`]）。面板按的另走
+    /// [`Self::pidpublish_scanned_for_panel`]。
     pub(super) fn pidpublish_scanned(&mut self, scanned: &Scanned, job: PublishJob) {
+        if job.panel {
+            self.pidpublish_scanned_for_panel(scanned, job);
+            return;
+        }
         let verb = job.verb();
         let Some(i) = self.tabs.iter().position(|tab| tab.id == job.tab) else {
             self.command_line
@@ -433,6 +509,86 @@ impl OpenCADStudio {
                 plot: &Value::Null,
             });
         }
+    }
+
+    /// 面板按的检查、发布扫完项目接着做（面板规格 §4.6、§3.7）：检查重算目标，发布再过一遍前提；在
+    /// 扫好的项目上算门禁，同命令行说出来；门禁交给面板，这次的检查报告成为这张图的检查结果——门禁
+    /// 拦下的是哪些错误，规则检查页签里看得到。是发布而门禁都过了、会话也不只读，接着出包
+    /// （[`Self::pidpublish_pack_for_panel`]）。结论说在面板的消息栏里，命令行上只当说明：按面板的
+    /// 操作不因结论算失败。要发布的图扫的时候关掉了就什么都不做。
+    fn pidpublish_scanned_for_panel(&mut self, scanned: &Scanned, job: PublishJob) {
+        let verb = job.verb();
+        let Some(i) = self.tabs.iter().position(|tab| tab.id == job.tab) else {
+            return;
+        };
+        let target = match self.pidpublish_panel_target(i, job.only_check, &job.asked) {
+            Ok(target) => target,
+            Err((code, why)) => {
+                self.command_line
+                    .push_info(&format!("{verb}: {code}: {why}。"));
+                let notice = Notice::error(Some(code.to_owned()), why);
+                self.pid_verify_publish_done(i, None, None, Some(notice));
+                return;
+            }
+        };
+        let gated = match publish_gates(scanned, &target.drawing_id, job.rules, &job.master) {
+            Ok(gated) => gated,
+            Err(why) => {
+                self.command_line.push_info(&format!("{verb}: {why}。"));
+                self.pid_verify_publish_done(i, None, None, Some(Notice::error(None, why)));
+                return;
+            }
+        };
+        self.pidpublish_say(verb, scanned, &target, &gated);
+        let held = self.pidpublish_each(i, &job.asked).1;
+        let passed = gated.gates.passed();
+        let readonly = self
+            .readonly_refuses_command("PIDPUBLISH")
+            .then(|| self.collab.refusal().0);
+        let (notice, package) = if !passed {
+            let end = if job.only_check {
+                "不能发布"
+            } else {
+                "没有发布"
+            };
+            let why = format!("{}，{end}", blocked_said(&gated.gates));
+            self.command_line
+                .push_info(&format!("{verb}: {PUBLISH_BLOCKED}: {why}。"));
+            let notice =
+                (!job.only_check).then(|| Notice::error(Some(PUBLISH_BLOCKED.to_owned()), why));
+            (notice, None)
+        } else if job.only_check {
+            let said = if held {
+                "前提和门禁都过了，可以发布"
+            } else {
+                "门禁都过了，但前提没有都满足，现在发布不了"
+            };
+            self.command_line.push_output(&format!("{verb}: {said}。"));
+            (None, None)
+        } else if let Some(code) = readonly {
+            let why = "前提和门禁都过了，但这个会话只读，不能发布".to_owned();
+            self.command_line
+                .push_info(&format!("{verb}: {code}: {why}。"));
+            (Some(Notice::error(Some(code), why)), None)
+        } else {
+            let (notice, package) = self.pidpublish_pack_for_panel(&Packing {
+                i,
+                scanned,
+                target: &target,
+                master: &job.master,
+                gated: &gated,
+                now: unix_now(),
+                plot: &Value::Null,
+            });
+            (Some(notice), package)
+        };
+        let found = GatesFound {
+            gates: gated.gates,
+            duplicates: gated.duplicates,
+            can_publish: held && passed,
+        };
+        self.pidcheck_kept_for_publish(i, gated.report, gated.drawings, scanned);
+        self.pid_verify_publish_done(i, Some(found), package.as_deref(), notice);
     }
 
     /// 发布的前提（§3.4，离线规格 §5.7），按先后查第 `i` 个标签页的图：先不满足的那条是错误码
@@ -487,7 +643,7 @@ impl OpenCADStudio {
     /// 磁盘上的 `path` 是不是第 `i` 个标签页上次读写的那一份：现取的指纹与标签页记的相同。标签页
     /// 没记到指纹、指纹取不到都不算。
     #[cfg(not(target_arch = "wasm32"))]
-    fn pidpublish_file_unchanged(&self, i: usize, path: &Path) -> bool {
+    pub(super) fn pidpublish_file_unchanged(&self, i: usize, path: &Path) -> bool {
         self.tabs[i]
             .disk_fingerprint
             .as_ref()
@@ -499,7 +655,7 @@ impl OpenCADStudio {
 
     /// 网页版没有本机文件，认不出来。
     #[cfg(target_arch = "wasm32")]
-    fn pidpublish_file_unchanged(&self, _i: usize, _path: &Path) -> bool {
+    pub(super) fn pidpublish_file_unchanged(&self, _i: usize, _path: &Path) -> bool {
         false
     }
 
@@ -625,28 +781,66 @@ impl OpenCADStudio {
 
     /// 出包（§4，[`Self::pidpublish_pack`]）并说出来：包在哪里、几个文件、多大、发布前的快照是第
     /// 几份和各步用时；没成时连同错误码和是哪一步说为什么、留下了什么。发布前的快照出包没成也留着，
-    /// 成没成「校验与交付」面板都重读这张图的快照列表。
+    /// 成没成「校验与交付」面板都重读这张图的快照列表，和它读过的发布记录；成了的包目录是它的
+    /// 「最近一次发布出的包」。
     fn pidpublish_package(&mut self, packing: &Packing<'_>) {
+        let verb = verb_of(false);
+        let mut timings = Timings::default();
+        let package = match self.pidpublish_pack(packing, &mut timings) {
+            Ok(published) => {
+                self.pidpublish_say_published(packing, &published, &timings);
+                Some(published.dir)
+            }
+            Err(Unpublished { failed, kept }) => {
+                self.pidpublish_failed(verb, &timings, &failed, &kept);
+                None
+            }
+        };
+        self.pid_verify_published(packing.i, package.as_deref());
+    }
+
+    /// 面板按的发布出包（[`Self::pidpublish_pack`]）：成了同命令行说包在哪里、几个文件、多大和各步
+    /// 用时，交给面板的是「已发布：<包目录>」和包的目录；没成时命令行上说用时和为什么，只当说明，
+    /// 交给面板的是错误码——`PUBLISH_FAILED` 带是哪一步——和为什么、留下了什么。
+    fn pidpublish_pack_for_panel(&mut self, packing: &Packing<'_>) -> (Notice, Option<PathBuf>) {
         let verb = verb_of(false);
         let mut timings = Timings::default();
         match self.pidpublish_pack(packing, &mut timings) {
             Ok(published) => {
-                self.command_line.push_output(&format!(
-                    "{verb}: 已发布第 {} 版：{}，{} 个文件，共 {} 字节；发布前的快照是第 {} 份。",
-                    packing.target.revision,
-                    published.dir.display(),
-                    published.files,
-                    published.bytes,
-                    published.seq
-                ));
-                self.command_line
-                    .push_output(&format!("{verb}: 用时：{}。", timings.said()));
+                self.pidpublish_say_published(packing, &published, &timings);
+                let notice = Notice::info(format!("已发布：{}", published.dir.display()));
+                (notice, Some(published.dir))
             }
             Err(Unpublished { failed, kept }) => {
-                self.pidpublish_failed(verb, &timings, &failed, &kept);
+                self.command_line
+                    .push_output(&format!("{verb}: 用时：{}。", timings.said()));
+                let code = failed.code;
+                let why = format!("{}；{kept}", failed.said());
+                self.command_line
+                    .push_info(&format!("{verb}: {code}: {why}。"));
+                (Notice::error(Some(code.to_owned()), why), None)
             }
         }
-        self.pid_verify_snapshots_saved(packing.i);
+    }
+
+    /// 出包成了，说出来：包在哪里、几个文件、多大、发布前的快照是第几份，和各步用时。
+    fn pidpublish_say_published(
+        &mut self,
+        packing: &Packing<'_>,
+        published: &Published,
+        timings: &Timings,
+    ) {
+        let verb = verb_of(false);
+        self.command_line.push_output(&format!(
+            "{verb}: 已发布第 {} 版：{}，{} 个文件，共 {} 字节；发布前的快照是第 {} 份。",
+            packing.target.revision,
+            published.dir.display(),
+            published.files,
+            published.bytes,
+            published.seq
+        ));
+        self.command_line
+            .push_output(&format!("{verb}: 用时：{}。", timings.said()));
     }
 
     /// 出包（§4）：存发布前的快照，在目标目录里建临时目录，出图、算材料清单、写包、自检后落位
@@ -904,6 +1098,20 @@ impl OpenCADStudio {
         Ok(publications(&target_dir, &drawing_id, path, tab.dirty))
     }
 
+    /// 同 [`Self::pidpublish_listed`]，只是「当前」只看磁盘上的文件，不看有没有没保存的修改：
+    /// 「校验与交付」面板自己看（面板规格 §4.6），改了又撤回时不用重读。
+    pub(super) fn pidpublish_listed_on_disk(
+        &self,
+        i: usize,
+        dir: Option<&str>,
+    ) -> Result<Publications, (&'static str, String)> {
+        let Some(path) = self.tabs[i].current_path.as_deref() else {
+            return Err((PUBLISH_UNSAVED, "图还没保存过，没有发布记录".to_owned()));
+        };
+        let (_, drawing_id, target_dir) = placed(path, dir)?;
+        Ok(publications(&target_dir, &drawing_id, path, false))
+    }
+
     /// `PIDPUBLISH VERIFY <包目录>`：校验一个包（§3.5），相对路径从图纸所在目录算，图没保存过时从
     /// 当前目录算。不写任何东西。
     fn pidpublish_verify(&mut self, i: usize, rest: &str) {
@@ -1067,7 +1275,8 @@ impl OpenCADStudio {
     /// `allow_offline` 是命令行上的目标目录、`REV`、`ALLOW_OFFLINE`，`plot` 交给出图。扫描前面
     /// [`Self::control_pid_publish_waits`] 等过了，这里不读盘。门禁没过是 `PUBLISH_BLOCKED`，带四项
     /// 门禁、重复位号的各处和检查报告；出包没成是它的错误码，`PUBLISH_FAILED` 带是哪一步（`step`）。
-    /// 结果是包名、包的目录、修订号、发布前快照的序号、文件数、字节数和门禁。不改图。
+    /// 结果是包名、包的目录、修订号、发布前快照的序号、文件数、字节数和门禁。不改图。走到出包这一步，
+    /// 成没成都同命令行告诉「校验与交付」面板（[`Self::pid_verify_published`]）。
     pub(in crate::app) fn control_pid_publish(
         &mut self,
         req: &Value,
@@ -1103,15 +1312,19 @@ impl OpenCADStudio {
             plot: &plot,
         };
         let mut timings = Timings::default();
-        let published = self.pidpublish_pack(&packing, &mut timings).map_err(
-            |Unpublished { failed, kept }| {
-                let mut refusal = refuse(failed.code, format!("{}；{kept}", failed.said()));
-                if let Some(step) = failed.step {
-                    refusal["step"] = json!(step);
-                }
-                refusal
-            },
-        )?;
+        let packed = self.pidpublish_pack(&packing, &mut timings);
+        let package = packed
+            .as_ref()
+            .ok()
+            .map(|published| published.dir.as_path());
+        self.pid_verify_published(i, package);
+        let published = packed.map_err(|Unpublished { failed, kept }| {
+            let mut refusal = refuse(failed.code, format!("{}；{kept}", failed.said()));
+            if let Some(step) = failed.step {
+                refusal["step"] = json!(step);
+            }
+            refusal
+        })?;
         self.set_control_result(json!({
             "package_id": publish_pkg::package_name(&target.drawing_id, target.revision),
             "path": published.dir.display().to_string(),
@@ -1230,10 +1443,11 @@ pub(super) fn publish_gates(
         .ok_or_else(|| format!("扫出来的项目里没有图 {drawing_id}"))?;
     let duplicates = publish_pkg::duplicate_tags(current, &scanned.index, &scanned.summaries);
     let check = Check::before_publish(drawing_id.to_owned(), rules, master.clone());
-    let (report, _) = piddrc::check_project(scanned, check);
+    let (report, drawings) = piddrc::check_project(scanned, check);
     let gates = publish_pkg::gates(&report, duplicates.len(), master, scanned.index.complete);
     Ok(Gated {
         report,
+        drawings,
         duplicates,
         gates,
     })
@@ -1450,7 +1664,7 @@ fn no_task(answer: Value) -> (Value, Task<Message>) {
 }
 
 /// 发布错误说的为什么，去掉打头的错误码。
-fn why_of(error: &PublishError) -> String {
+pub(super) fn why_of(error: &PublishError) -> String {
     let code = error.code();
     let said = error.to_string();
     said.strip_prefix(code)

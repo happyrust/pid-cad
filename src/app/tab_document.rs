@@ -426,6 +426,10 @@ pub(super) struct DocumentTab {
     /// This drawing's numbered snapshots as the verify panel last read them,
     /// and the diff it made last (`commands::pidverify`). In memory only.
     pub(super) pid_snapshots: super::commands::pidverify::PanelSnapshots,
+    /// Its publish records, the gates and the packages verified, as the
+    /// verify panel last worked them out (`commands::pidverify`). In memory
+    /// only.
+    pub(super) pid_publish: super::commands::pidverify::PanelPublish,
     /// Model-space corners of the last crossing window drawn with no command
     /// running: STRETCH on that selection stretches through it (#1068).
     pub(super) last_crossing_window: Option<([f64; 2], [f64; 2])>,
@@ -979,6 +983,7 @@ impl DocumentTab {
             pid_check: None,
             pid_bom: None,
             pid_snapshots: Default::default(),
+            pid_publish: Default::default(),
             last_crossing_window: None,
             recent_colors: Vec::new(),
             layer_walk: None,
