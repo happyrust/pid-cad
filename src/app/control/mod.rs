@@ -682,7 +682,7 @@ impl OpenCADStudio {
             "mtext_editor":self.mtext_editor.as_ref().map(|e|json!({"text":e.content.text(),"height":e.height,"style":e.style})),
             "text_editor":self.text_inline.is_some(),"event_cursor":self.control.serial,
             "operation":self.control.pending.as_ref().map(|p| &p.id),
-            "capabilities":["commands","command_manifest","step_input","batch","compact_results","entity_pick","structure_pick","selection","user_select","properties","records","record_schemas","record_filters","atomic_record_updates","layers","history","documents","events","capture","viewport_capture","measure","spatial_query","pid_legend","pid_master_data","pid_project_index","pid_check","pid_bom","pid_snapshot","pid_publish","audit","verified_save","explicit_save_version"]
+            "capabilities":["commands","command_manifest","step_input","batch","compact_results","entity_pick","structure_pick","selection","user_select","properties","records","record_schemas","record_filters","atomic_record_updates","layers","history","documents","events","capture","viewport_capture","measure","spatial_query","pid_legend","pid_master_data","pid_project_index","pid_check","pid_bom","pid_snapshot","pid_publish","pid_verify_panel","audit","verified_save","explicit_save_version"]
         })
     }
 
@@ -722,6 +722,7 @@ impl OpenCADStudio {
                 | "pid_publish_check"
                 | "pid_publications"
                 | "pid_publish_verify"
+                | "pid_verify_panel"
                 | "snap"
                 | "grips"
                 | "query"
@@ -1066,6 +1067,7 @@ impl OpenCADStudio {
                 "pid_diff" => self.control_pid_diff(&req),
                 "pid_publications" => self.control_pid_publications(&req),
                 "pid_publish_verify" => self.control_pid_publish_verify(&req),
+                "pid_verify_panel" => self.control_pid_verify_panel(&req),
                 // The object snap a cursor over `point` (world) would get;
                 // `from` is the base for perpendicular and tangent.
                 "snap" => 'snap: {

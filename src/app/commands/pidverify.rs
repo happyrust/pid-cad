@@ -1,6 +1,7 @@
 //! `PIDVERIFY` — shows, hides and turns the 「校验与交付」 panel
 //! (`SPEC-pid-verify-deliver-panel.md` §5.2), and the program's side of the
-//! panel: its messages and the view it draws.
+//! panel: its messages, the view it draws and the panel state the
+//! `pid_verify_panel` op reads off that view (§3.2).
 //!
 //! The panel's interface state lives on the program (`pid_verify_ui`) and
 //! the panel draws the plain data `build_view` makes of it
@@ -9,21 +10,60 @@
 //! the drawing, so a read-only session may run every form of it.
 
 use crate::app::{Message, OpenCADStudio};
+use crate::pid::drc;
 use crate::ui::dock::{DockMsg, PanelId};
-use crate::ui::window::pid_verify_deliver::{self, PidVerifyMsg, Tab};
+use crate::ui::window::pid_verify_deliver::{self, Context, PidVerifyMsg, Tab, ROWS_PER_PAGE};
 use iced::Task;
+use serde_json::{json, Value};
+use std::path::Path;
 
 impl OpenCADStudio {
-    /// Rebuild what the panel draws from its interface state.
+    /// Rebuild what the panel draws from its interface state and the
+    /// program's state around it.
     pub(in crate::app) fn refresh_pid_verify_view(&mut self) {
-        self.pid_verify_view = pid_verify_deliver::build_view(&self.pid_verify_ui);
+        let context = self.pid_verify_context();
+        self.pid_verify_view = pid_verify_deliver::build_view(&self.pid_verify_ui, &context);
+    }
+
+    /// The program's state the panel shows: whether it is on screen, the
+    /// drawing tab in front and that drawing's number as the rule check
+    /// gives it ([`drc::drawing_of`]), none on the Start page, and whether
+    /// the session may change that drawing.
+    fn pid_verify_context(&self) -> Context {
+        let drawing = self.tabs.get(self.active_tab).filter(|tab| !tab.is_start);
+        Context {
+            visible: self.dock_panel_visible(PanelId::PidVerifyDeliver),
+            document_id: drawing.map(|tab| tab.id),
+            drawing_id: drawing.map(|tab| {
+                let path = tab.scene.document.source_path.as_deref().map(Path::new);
+                drc::drawing_of(path).0
+            }),
+            // The panel has no permissions of its own (§5.4): publishing and
+            // waiving pass this gate, which only the session's own drawing
+            // closes.
+            writable: !self.readonly_refuses_command("PIDPUBLISH"),
+        }
     }
 
     /// Show the panel the way its switch among the dock's panels does:
     /// docked on the right the first time, where the user left it after.
     pub(in crate::app) fn show_pid_verify_panel(&mut self) -> Task<Message> {
+        let task = self.dock_set_open(PanelId::PidVerifyDeliver, true);
         self.refresh_pid_verify_view();
-        self.dock_set_open(PanelId::PidVerifyDeliver, true)
+        task
+    }
+
+    /// `pid_verify_panel` (§3.2): what the panel shows, shown or hidden. The
+    /// view is rebuilt first, so it answers for the drawing in front now;
+    /// `limit` (200 when omitted, [`ROWS_PER_PAGE`]) and `offset` page each
+    /// list.
+    pub(in crate::app) fn control_pid_verify_panel(&mut self, req: &Value) -> Value {
+        let (limit, offset) = match paging(req) {
+            Ok(paging) => paging,
+            Err(refused) => return refused,
+        };
+        self.refresh_pid_verify_view();
+        pid_verify_deliver::panel_state(&self.pid_verify_view, limit, offset)
     }
 
     /// `PIDVERIFY` (§5.2): bare or `ON` shows the panel, `OFF` hides it, and
@@ -71,6 +111,35 @@ impl OpenCADStudio {
     }
 }
 
+/// `limit` and `offset` of a `pid_verify_panel` request: rows per list, at
+/// least one, and rows skipped in each. Anything but such whole numbers is
+/// `invalid_request`.
+fn paging(req: &Value) -> Result<(usize, usize), Value> {
+    let limit = count(req, "limit", 1, "正整数（每个列表最多给几行）")?;
+    let offset = count(req, "offset", 0, "不小于 0 的整数（每个列表跳过几行）")?;
+    Ok((limit.unwrap_or(ROWS_PER_PAGE), offset.unwrap_or(0)))
+}
+
+/// A whole number of at least `least` that the request may leave out; the
+/// refusal says what to `write`.
+fn count(req: &Value, key: &str, least: u64, write: &str) -> Result<Option<usize>, Value> {
+    match &req[key] {
+        Value::Null => Ok(None),
+        asked => match asked.as_u64() {
+            Some(n) if n >= least => Ok(Some(usize::try_from(n).unwrap_or(usize::MAX))),
+            _ => Err(refuse(
+                "invalid_request",
+                format!("{key} 写{write}，实得 {asked}"),
+            )),
+        },
+    }
+}
+
+/// The control channel's refusal.
+fn refuse(code: &str, error: impl Into<String>) -> Value {
+    json!({ "ok": false, "status": "failed", "code": code, "error": error.into() })
+}
+
 #[cfg(test)]
 mod tests {
     use crate::app::config::DockSide;
@@ -79,6 +148,7 @@ mod tests {
     use crate::ui::window::pid_verify_deliver::{
         PidVerifyMsg, Tab, BOUNDS_PREFIX, PANEL_BOUNDS_ID,
     };
+    use serde_json::{json, Value};
 
     const PANEL: PanelId = PanelId::PidVerifyDeliver;
 
@@ -146,6 +216,28 @@ mod tests {
         for id in [PANEL_BOUNDS_ID, "pid-verify-tab-bom", "pid-collab-panel"] {
             crate::ui::wrap_bar::set_drawn_bounds(id, drawn);
         }
+    }
+
+    /// What `pid_verify_panel` answers over the control channel, with the
+    /// request's other fields `more` (`,"limit":5` and the like).
+    fn panel(app: &mut OpenCADStudio, more: &str) -> Value {
+        app.automation_op(&format!(
+            r#"{{"protocol":1,"op":"pid_verify_panel"{more}}}"#
+        ))
+    }
+
+    /// Bring drawing `id` to the front through the control channel, driving
+    /// the switch to its end.
+    fn activate(app: &mut OpenCADStudio, id: u64, request_id: &str) {
+        let (switched, task) = app.control_request(json!({
+            "protocol": 1,
+            "op": "activate",
+            "document_id": id,
+            "request_id": request_id,
+        }));
+        app.drive_headless_task(task).expect("the switch's task");
+        assert_eq!(switched["ok"], true, "{switched}");
+        assert_eq!(app.tabs[app.active_tab].id, id);
     }
 
     /// The ids the real view reports once it is drawn.
@@ -276,6 +368,134 @@ mod tests {
         let ran = run(&mut app, "PIDVERIFY");
         assert_eq!(shown(&app), (true, Tab::Deliver));
         assert!(ran.said.contains("当前页签「快照与发布」"), "{}", ran.said);
+    }
+
+    #[test]
+    fn pid_verify_panel_reads_the_panel_shown_or_hidden() {
+        let mut app = fresh();
+        let state = app.automation_op(r#"{"protocol":1,"op":"state"}"#);
+        // Never shown, it answers all the same.
+        let answer = panel(&mut app, "");
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["visible"], false, "{answer}");
+        assert_eq!(answer["tab"], "check", "{answer}");
+        assert_eq!(answer["document_id"], state["document_id"], "{answer}");
+        // A drawing never saved has no number yet, as the rule check says.
+        assert_eq!(answer["drawing_id"], "", "{answer}");
+        assert_eq!(answer["writable"], true, "{answer}");
+        for block in ["check", "bom", "deliver"] {
+            assert!(answer[block].is_object(), "{block}: {answer}");
+        }
+        for (line, visible, tab) in [
+            ("PIDVERIFY BOM", true, "bom"),
+            ("PIDVERIFY OFF", false, "bom"),
+            ("PIDVERIFY DELIVER", true, "deliver"),
+        ] {
+            let _ = run(&mut app, line);
+            let answer = panel(&mut app, "");
+            assert_eq!(answer["visible"], visible, "{line}: {answer}");
+            assert_eq!(answer["tab"], tab, "{line}: {answer}");
+        }
+    }
+
+    #[test]
+    fn pid_verify_panel_follows_the_drawing_tab_in_front() {
+        let mut app = fresh();
+        let first = app.tabs[app.active_tab].id;
+        let second = app.push_test_document();
+        // Where the files came from, as opening them leaves it. With no
+        // project file beside them, each is numbered by its file name.
+        let folder =
+            std::env::temp_dir().join(format!("ocs-pid-verify-panel-{}", std::process::id()));
+        for (id, file) in [(first, "PID-1101.dwg"), (second, "PID-1102.dwg")] {
+            let tab = app
+                .tabs
+                .iter_mut()
+                .find(|tab| tab.id == id)
+                .expect("the tab");
+            tab.scene.document.source_path = Some(folder.join(file).to_string_lossy().into_owned());
+        }
+        for (request_id, id, number) in [
+            ("pid-verify-first", first, "PID-1101"),
+            ("pid-verify-second", second, "PID-1102"),
+            ("pid-verify-first-again", first, "PID-1101"),
+        ] {
+            activate(&mut app, id, request_id);
+            let answer = panel(&mut app, "");
+            assert_eq!(answer["document_id"], id, "{answer}");
+            assert_eq!(answer["drawing_id"], number, "{answer}");
+        }
+    }
+
+    #[test]
+    fn pid_verify_panel_says_whether_the_session_may_write() {
+        let mut app = fresh();
+        for (readonly, writable) in [(false, true), (true, false), (false, true)] {
+            app.collab.readonly = readonly;
+            let answer = panel(&mut app, "");
+            assert_eq!(
+                answer["writable"], writable,
+                "read-only {readonly}: {answer}"
+            );
+        }
+    }
+
+    #[test]
+    fn pid_verify_panel_answers_on_the_start_page() {
+        let mut app = OpenCADStudio::new_for_test();
+        assert!(app.tabs[app.active_tab].is_start);
+        let answer = panel(&mut app, "");
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["visible"], false, "{answer}");
+        assert_eq!(answer["document_id"], Value::Null, "{answer}");
+        assert_eq!(answer["drawing_id"], Value::Null, "{answer}");
+    }
+
+    #[test]
+    fn pid_verify_panel_pages_by_whole_numbers_only() {
+        let mut app = fresh();
+        for more in [
+            r#","limit":5"#,
+            r#","offset":3"#,
+            r#","limit":1,"offset":0"#,
+        ] {
+            let answer = panel(&mut app, more);
+            assert_eq!(answer["ok"], true, "{more}: {answer}");
+        }
+        for more in [
+            r#","limit":0"#,
+            r#","limit":-1"#,
+            r#","limit":2.5"#,
+            r#","limit":"many""#,
+            r#","offset":-1"#,
+            r#","offset":"next""#,
+        ] {
+            let answer = panel(&mut app, more);
+            assert_eq!(answer["code"], "invalid_request", "{more}: {answer}");
+        }
+    }
+
+    #[test]
+    fn pid_verify_panel_is_a_query_listed_among_the_capabilities() {
+        let mut app = fresh();
+        let state = app.automation_op(r#"{"protocol":1,"op":"state"}"#);
+        let listed = state["capabilities"]
+            .as_array()
+            .is_some_and(|names| names.iter().any(|name| name == "pid_verify_panel"));
+        assert!(listed, "{}", state["capabilities"]);
+        // A query answers while automation is stopped.
+        let stop = json!({
+            "protocol": 1,
+            "op": "stop",
+            "document_id": state["document_id"],
+            "revision": state["revision"],
+            "client_id": "test",
+            "request_id": "pid-verify-stop",
+        });
+        let stopped = app.automation_op(&stop.to_string());
+        assert_eq!(stopped["ok"], true, "{stopped}");
+        let answer = panel(&mut app, "");
+        assert_eq!(answer["ok"], true, "{answer}");
     }
 
     #[test]

@@ -594,3 +594,29 @@ MCP：`pid_verify_panel` 进 `READ_OPS`；`action` 已经在 `EXECUTE_OPS` 里�
 3. **不带参数显示时停在原来的页签**，不回到规则检查，与关面板只隐藏一致。
 4. **开始页上不能用。** 开始页不画停靠面板，命令不进 `start_allowed`，和别的要看图的命令一样被拒。
 5. **「显示时读得到位置」这里先用无头渲染验一遍。** 任务把真实窗口里的读法留给 PNL-13；这里另有一条测试用 `iced_test::Simulator` 把真实视图画一遍，确认面板主体和三个页签的标识都在，关掉后不重画也读不到。
+
+### 11.3 `PNL-3`：面板状态操作 `pid_verify_panel`（2026-11-22）
+
+**做了什么：**
+
+- 模块里（`pid_verify_deliver.rs`）：`Context`（面板显示着没有、当前图纸标签页的 `document_id` 和图号、会话可不可写）、`Buttons`（§3.2 的十一个按钮能不能点）、`ROWS_PER_PAGE`（200）。`VerifyView` 多了 `visible`、`document_id`、`drawing_id`、`writable`、`buttons`，`build_view(ui, ctx)` 从 `Context` 抄进来。`panel_state(view, limit, offset)` 把要画的内容转成 §3.2 的 JSON：公共字段，`check`、`bom` 两块「还没有结果」时的样子，`deliver` 一块的骨架；每块的 `rows` 从第 `offset` 行起留 `limit` 行，`total` 照旧数全部。
+- 程序这一侧（`pidverify.rs`）：`refresh_pid_verify_view` 先从程序的状态取 `Context`（`pid_verify_context`）再重建；`show_pid_verify_panel` 改成先打开再重建，重建出来的 `visible` 才是真；`control_pid_verify_panel` 是接口的入口，先重建再答，所以读到的总是此刻的状态。
+- 接线（共用约定 §7.6 第 3–5 处）：控制通道的查询名单、分发和能力清单（`control/mod.rs`）；REST 的 `GET /api/v1/pid/verify-panel`（`rest.rs`）和 OpenAPI 里这条路径；MCP 的 `READ_OPS`，`ocs_read` 的 `limit`、`offset` 加了说明，工具面摘要随之更新。
+
+**与规格、任务写法不同的：**
+
+1. **多动了一个文件** `src/app/commands/pidverify.rs`。图号、会话可不可写、面板显示着没有都要从程序这一侧取；接口的入口函数也照各模块的 `control_pid_*`，放在面板自己的命令文件里。
+2. **`build_view` 现在收两个参数** `(ui, ctx)`。§5.1 的 `drawing`、`project` 和两个结果类型仍由第一个要用结果的任务加（§11.1 第 2 条）。
+3. **`Context` 没有生命周期参数，内容也和 §5.1 不同**：现在是 `visible`、`document_id`、`drawing_id`、`writable` 四项。§5.1 的图纸目录、改动计数、图保存过没有由要用的任务加；`visible`、`document_id` 是 §3.2 要答的，也放在这里。
+4. **`buttons` 现在全是假。** 按钮一个都还没画，都按不了；各页签带按钮进来时按 §4.8 算自己的那几个。
+5. **`deliver.publish` 现在是 `null`。** §3.2 里那一块（状态、目标目录、下一修订、四个前提……）要读磁盘上的发布记录，没有「什么都没有」的样子，由发布那半页的任务（PNL-9）填。`check`、`bom` 两块和 `deliver` 的另三项都有空的样子，照 §3.2 给全。
+
+**规格没写到、这里定下的：**
+
+1. **开始页上也能读**：没有图，`document_id`、`drawing_id` 是 `null`，其余照常。
+2. **图号照规则检查的取法**（`drc::drawing_of`：项目文件里登记的图号，项目文件读不出来时用文件名）。没存过的图没有文件，`drawing_id` 是空串，和检查结果里的图号一致。
+3. **`writable` 用发布命令那道只读关口判**（`readonly_refuses_command("PIDPUBLISH")`）。§5.4 说面板不单独鉴权，豁免和发布走的都是这道关；它只关会话自己的那张图，旁边另开的、不在会话里的图照样可写。
+4. **翻页**：`limit` 是正整数、`offset` 是不小于 0 的整数，没给时是 200 和 0，对每个列表各自生效；写得不对（0、负数、小数、文字）是 `invalid_request`（400），说明里写该怎么写。REST 的查询参数是数字就按数字传，不是就原样传，让操作去拒。
+5. **自动化停用时也能读**：它在查询名单里，和别的读操作一样（测试里先发 `stop` 再读）。
+6. **画面板的那份内容什么时候重建**：显示面板、切页签、处理面板消息时，以及每次回答这个操作之前。换图纸标签页、只读状态变了不会马上重建：现在画出来的东西还不看这几项，等第一个按图画内容的任务（PNL-5）在换标签页时补上。
+7. **MCP 的 `limit`、`offset`**：§7.6 第 5 处要把参数补进门面的输入说明。`ocs_read` 原来就有这两个参数（别的分页读也在用），只是没有说明；这里各加了一句，说明对 `pid_verify_panel` 是每个列表的行数，没给时 200。

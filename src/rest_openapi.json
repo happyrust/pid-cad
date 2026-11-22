@@ -346,6 +346,16 @@
         "responses": {"200": {"description": "package_id, revision, files, and missing, mismatched and extra (only extra may be non-empty: it does not fail)"}, "400": {"description": "Malformed request: no path"}, "404": {"description": "PACKAGE_NOT_FOUND: no such folder, or no manifest in it"}, "409": {"description": "PACKAGE_INCOMPLETE or PACKAGE_CORRUPT, with the report"}}
       }
     },
+    "/api/v1/pid/verify-panel": {
+      "get": {
+        "summary": "What the P&ID verify-and-deliver panel shows now, on screen or not: the content the panel draws; writes nothing",
+        "parameters": [
+          {"name": "limit", "in": "query", "description": "Most rows each list returns (check.rows, bom.rows); 200 when omitted", "schema": {"type": "integer", "minimum": 1}},
+          {"name": "offset", "in": "query", "description": "Rows each list skips before the first it returns; 0 when omitted", "schema": {"type": "integer", "minimum": 0}}
+        ],
+        "responses": {"200": {"description": "visible, tab (check, bom or deliver), document_id and drawing_id of the drawing tab in front (null on the Start page; drawing_id is empty for a drawing never saved), writable, busy, notice, buttons (which buttons can be pressed now), and the check, bom and deliver blocks; total counts every row of a list, rows holds the page asked for"}, "400": {"description": "Malformed request: limit not a positive integer, or offset not a non-negative integer"}}
+      }
+    },
     "/api/v1/entities": {
       "get": {
         "summary": "Query entities (type, layer, detail, offset, limit, fields, handles, bounds, near, contains_point, intersections)",

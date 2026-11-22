@@ -796,6 +796,20 @@ pub(crate) fn plan(method: &str, rest: &[&str], request: &HttpRequest) -> Plan {
                 created: 200,
             }
         }
+        // `limit` and `offset` page the panel's lists; a number goes on as a
+        // number and anything else as written, for the op to refuse.
+        ("GET", ["pid", "verify-panel"]) => {
+            let mut panel = json!({"protocol": 1, "op": "pid_verify_panel"});
+            for key in ["limit", "offset"] {
+                if let Some(value) = request.param(key) {
+                    panel[key] = seq_segment(value);
+                }
+            }
+            Plan::Run {
+                request: panel,
+                created: 200,
+            }
+        }
         // Same state read, plus `documents[].document_id` — the spelling the
         // REST contract (and every validator) reads.
         ("GET", ["documents"]) => Plan::Aliased {
@@ -2840,6 +2854,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The verify-and-deliver panel's state is a read: `GET
+    /// /api/v1/pid/verify-panel`, with `limit` and `offset` passed on as
+    /// numbers when they are numbers and as written otherwise, for the op to
+    /// refuse with a 400. It is in the OpenAPI document, and over the wire it
+    /// answers for a drawing whose panel was never shown.
+    #[test]
+    fn pid_verify_panel_rest_route_and_status_codes() {
+        let get = |query: &[(&str, &str)]| {
+            let mut asked = request("GET", "/api/v1/pid/verify-panel", "");
+            asked.query = query
+                .iter()
+                .map(|&(key, value)| (key.into(), value.into()))
+                .collect();
+            asked
+        };
+        let read = |query: &[(&str, &str)]| {
+            let planned = plan("GET", &["pid", "verify-panel"], &get(query));
+            match planned {
+                Plan::Run { request, created } => {
+                    assert_eq!(created, 200);
+                    request
+                }
+                _ => panic!("GET /api/v1/pid/verify-panel is not a read"),
+            }
+        };
+        assert_eq!(read(&[]), json!({"protocol": 1, "op": "pid_verify_panel"}));
+        assert_eq!(
+            read(&[("limit", "50"), ("offset", "100")]),
+            json!({"protocol": 1, "op": "pid_verify_panel", "limit": 50, "offset": 100})
+        );
+        assert_eq!(
+            read(&[("limit", "many")]),
+            json!({"protocol": 1, "op": "pid_verify_panel", "limit": "many"})
+        );
+        let document: Value = serde_json::from_str(include_str!("rest_openapi.json"))
+            .expect("REST OpenAPI document parses");
+        let described = &document["paths"]["/api/v1/pid/verify-panel"]["get"];
+        for status in ["200", "400"] {
+            assert!(
+                described["responses"][status].is_object(),
+                "missing {status} response for GET /api/v1/pid/verify-panel"
+            );
+        }
+        let named: Vec<&str> = described["parameters"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|parameter| parameter["name"].as_str())
+            .collect();
+        assert_eq!(named, ["limit", "offset"]);
+
+        let mut app = serve_app(false);
+        let mut document_id: Option<u64> = None;
+        let mut counter: u64 = 0;
+        let (status, body) = route(&mut app, &get(&[]), &mut document_id, &mut counter);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["visible"], false, "{body}");
+        assert_eq!(body["tab"], "check", "{body}");
+        assert_eq!(body["check"]["rows"], json!([]), "{body}");
+        let (status, body) = route(
+            &mut app,
+            &get(&[("limit", "0")]),
+            &mut document_id,
+            &mut counter,
+        );
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(body["code"], "invalid_request", "{body}");
     }
 
     /// `ready` must not advertise the welcome (Start) tab: that tab answers

@@ -1095,13 +1095,14 @@
 
 - **做什么**：`panel_state(view, limit, offset)` 把要画的内容转成 §3.2 的 JSON；操作 `pid_verify_panel`（`GET /api/v1/pid/verify-panel`，可选 `limit`、`offset`，`rows` 默认最多 200 行）。画面板和回答这个操作用的是同一份 `VerifyView`，所以接口读到的就是人看到的。这一步先有公共字段和三个页签的骨架，各页签的内容由后面的任务填，那时不用再动接口文件。按共用约定 §7.6 的第 3–5 处接线。
 - **验收**：
-  - [ ] 应答有 §3.2 的公共字段（`visible`、`tab`、`document_id`、`drawing_id`、`writable`、`busy`、`notice`、`buttons`）和 `check`、`bom`、`deliver` 三块的骨架；面板没显示时也能读。
-  - [ ] `PIDVERIFY BOM` 之后应答里 `tab` 是 `bom`；切换图纸标签页后 `document_id`、`drawing_id` 跟着变。
-  - [ ] `rest_openapi.json` 里有这条路径；`tool_schema_digest_is_pinned` 通过。
+  - [x] 应答有 §3.2 的公共字段（`visible`、`tab`、`document_id`、`drawing_id`、`writable`、`busy`、`notice`、`buttons`）和 `check`、`bom`、`deliver` 三块的骨架；面板没显示时也能读。
+  - [x] `PIDVERIFY BOM` 之后应答里 `tab` 是 `bom`；切换图纸标签页后 `document_id`、`drawing_id` 跟着变。
+  - [x] `rest_openapi.json` 里有这条路径；`tool_schema_digest_is_pinned` 通过。
 - **验证**：`cargo test --offline --locked --lib pid_verify_panel`；`cargo test --offline --locked --lib tool_schema_digest_is_pinned`；手工：`--http` 启动后请求 `GET /api/v1/pid/verify-panel`
 - **依赖**：PNL-2
 - **文件**：`src/ui/window/pid_verify_deliver.rs`、`src/app/control/mod.rs`、`src/rest.rs`、`src/rest_openapi.json`、`src/mcp.rs`
 - **规模**：M
+- **补（2026-11-22）**：在 `pid-stage-e` 上接着 PNL-2（`6a9daacb7`）做，一个提交。代码动了「文件」一栏的五个，另多动一个 `src/app/commands/pidverify.rs`（图号、会话可不可写、面板显示着没有要从程序这一侧取；接口的入口 `control_pid_verify_panel` 照各模块放在面板自己的命令文件里）。与任务、规格写法不同或任务没说的：`build_view` 现在收 `(ui, ctx)`，`Context` 没有生命周期参数，现在是 `visible`、`document_id`、`drawing_id`、`writable` 四项；`buttons` 全是假（按钮还没画）；`deliver.publish` 先是 `null`（要读磁盘上的发布记录，没有空的样子，PNL-9 填），`check`、`bom` 两块给 §3.2 里还没有结果时的样子；开始页上 `document_id`、`drawing_id` 是 `null`，没存过的图 `drawing_id` 是空串（图号照规则检查的取法）；`writable` 用发布命令的只读关口判（§5.4 面板不单独鉴权）；`limit` 要正整数、`offset` 要不小于 0 的整数，没给是 200 和 0，写错是 `invalid_request`（400）；接口回答之前先重建要画的内容；照 §7.6 第 5 处给 `ocs_read` 原有的 `limit`、`offset` 加了说明。这些记在面板规格 §11.3。**先红后绿**：先放类型、常量和什么都不做的 `panel_state`、`paged`（`build_view` 不看 `Context`），新加 11 条测试（模块 3、`pidverify.rs` 6、`rest.rs` 1、`mcp.rs` 1），都编得过，11 条全败在断言上（操作不认识而要 `request_id`、应答只有 `ok`、不翻页、没有路由、`READ_OPS` 里没有），工具面摘要那条在红步照过；实现后第一遍 10 条过，换图纸标签页那条没过：测试照另一条测试发的 `activate` 没带协议号，切换没发生（那条测试没验切换），改成经控制通道发、驱动它的任务并先断言切过去了；工具面摘要照失败输出更新。格式：`pidverify.rs` 的新测试直接用 rustfmt 排过，第一遍格式检查另报 `mcp.rs`、`rest.rs` 新测试里各一处，改后重跑。**读数**：`pid_verify_panel` 11 条全过，`tool_schema_digest_is_pinned` 过；`pidverify` 13 条、`pid_verify_deliver` 7 条全过；主程序库 7648 条，7572 通过、73 默认不跑、3 失败（比对设计稿的三条，与起点相同），多的 11 条是新加的；编译警告 52；clippy 656 / 1051，与起点相同，新代码没有告警（`--tests` 那遍报的重复数是 637，PNL-2 重跑那回是 635：那回两条原有告警多印了一次；另有三条原有的栈大小告警各多 480 字节，是程序状态里的面板内容多了几项）；格式检查：改动的 5 个 Rust 文件新增 0；架构检查的输出与起点一字不差；SPPID 脚本测试 185 条全过。**手工**：调试版 `--http` 起来后请求 `GET /api/v1/pid/verify-panel`，脚本六步全对：刚起来时面板没显示、页签规则检查、图号是空的（没存过）；存成 `PID-1101.dwg` 后图号 `PID-1101`；`PIDVERIFY BOM` 后显示着、页签 `bom`、§3.2 的字段和三块都在；`limit=5&offset=2` 是 200；`limit=0` 是 400 `invalid_request`；`PIDVERIFY OFF` 后隐藏、页签不变（脚本第一遍把 HTTP 层给每个应答加的 `http_status` 当成了多出的字段，改脚本后重跑）。红步、绿步、门禁和手工的输出在仓库外 `D:\scratch\ocs-pid-dev-20261116\pnl-3\`。**新基线**：主程序库 7648 条（7572 / 73 / 3）。
 
 ### PNL-4 【接线】动作通道：`action` 操作的 `pid_verify`
 
