@@ -547,3 +547,28 @@ MCP：`pid_verify_panel` 进 `READ_OPS`；`action` 已经在 `EXECUTE_OPS` 里�
 | 计划 T3.4「快照与发布」页签 | 覆盖 | 存快照、勾两份看差异、点击定位变更位号、填发布目录并执行带门禁的发布 |
 | 计划 T3.4 测试 | 部分 | `dock::tests` 与 `--http` 端到端照做；`tests/pid_panel_localization.rs` 是否更新取决于 V2 |
 | 计划决议 D5「顶层面板数仅 +1 至 22」 | 覆盖 | 一个面板，三个页签 |
+
+## 11. 实现记录
+
+实现与本规格、任务文字有出入的地方，以及规格没写到、实现时定下的读法，记在这里（`todo.md` §1 第 7 条）。
+
+### 11.1 `PNL-1`：面板登记与空壳（2026-11-22）
+
+**做了什么**（新文件 `src/ui/window/pid_verify_deliver.rs`、`assets/icons/ui/verify.svg`）：
+
+- 停靠面板 `PanelId::PidVerifyDeliver`：标题「校验与交付」，默认宽度 360，图标 `verify.svg`（一张纸，右下角压一个蓝色对勾）。`ALL` 里排在「协同」后面，共 22 项；停靠布局存盘时它的名字是 `pid_verify_deliver`。
+- 程序这一侧：显示开关 `show_pid_verify`、界面状态 `pid_verify_ui`、要画的内容 `pid_verify_view`，消息 `Message::PidVerify`。从停靠区的面板开关打开时，还没停过的停到右侧最上面（照「协同」）。
+- 模块里：`Tab`（三个页签和页签名）、`PidVerifyMsg::Tab`、`VerifyUi`、`VerifyView`、纯函数 `build_view`、`view`。三个页签现在都只有一句空状态文字。
+
+**与规格写法不同的**（都是分步做的过渡，后面的任务补齐）：
+
+1. **`VerifyUi` 现在只有当前页签。** §3.1 的其余各项（筛选、输入框、勾选、进行中的事、最近一条消息）由用到它们的任务加。
+2. **`build_view` 现在只收界面状态**：`build_view(ui)`。§5.1 的另三个参数 `drawing`、`project`、`ctx`，以及 `DrawingResults`、`ProjectResults`、`Context` 三个类型，由第一个要用结果的任务加。
+3. **切页签的消息先在 `src/app/update/mod.rs` 里就地处理**：改界面状态，再用 `build_view` 重建要画的内容。PNL-2 建 `on_pid_verify`、`refresh_pid_verify_view` 时挪过去。
+4. **这一步不报控件位置。** §3.4 的位置标识，和关面板时清掉 `pid-verify-` 开头的记录，都在 PNL-2。
+
+**规格没写到、这里定下的：**
+
+1. **三个页签的空状态文字**：规则检查「还没有检查过。」，材料清单「还没有生成材料清单。」，快照与发布「还没有快照和发布记录。」。§4.2 那句「还没有检查过。点上面的按钮开始。」的后半句等按钮出来（PNL-5）再加；另两句规格没写，先这样写，做那两个页签的任务按页签内容改。
+2. **关面板只是隐藏。** 界面状态整个程序一份（§3.1），关面板不清它，再打开还是关之前的页签。
+3. **测试怎么覆盖两种界面。** 程序级的真实界面测试在 `src/app/dock/tests.rs`（`the_verify_panel_opens_from_the_pallet_menu_and_switches_tabs_in_the_real_view`）：从停靠区的面板开关打开，在经典界面里逐个点三个页签，再切到外壳的编辑屏确认面板还在，最后关掉。外壳里只认空状态文字：外壳的导航里有一个同名的「材料清单」屏，按页签名找会找到那里。

@@ -58,6 +58,7 @@ pub mod pid_backup_browser;
 pub mod pid_collab;
 pub mod pid_legend_list;
 pub mod pid_palette;
+pub mod pid_verify_deliver;
 pub mod pdf_shx_dialog;
 pub mod plot;
 pub mod plugin_dialog;

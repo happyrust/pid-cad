@@ -1069,13 +1069,14 @@
 
 - **做什么**：登记停靠面板 `PanelId::PidVerifyDeliver`（`SPEC-pid-verify-deliver-panel.md` §5.1、§7 的接入点清单，照「协同」面板）：标题「校验与交付」、新画一个图标、默认宽度 360、`ALL` 由 21 项变 22 项。新建 `src/ui/window/pid_verify_deliver.rs`：`Tab`、`PidVerifyMsg`（先只有切页签）、`VerifyUi`（§3.1 的界面状态）、`VerifyView`、纯函数 `build_view`、`view`（画三个页签，内容先是「还没有……」的空状态文字）。文字直接写中文，不动 `tests/pid_panel_localization.rs`。
 - **验收**：
-  - [ ] `PanelId::ALL` 有 22 项且包含 `PidVerifyDeliver`；标题、图标、默认宽度正确。
-  - [ ] 面板能从停靠区通用的面板开关打开和关闭；三个页签能切；经典界面和外壳的编辑屏里都能显示（人工看一眼并截图留证）。
-  - [ ] `build_view` 的单元测试：切页签后要画的内容跟着变；`tests/pid_panel_localization.rs` 没有改动且通过。
+  - [x] `PanelId::ALL` 有 22 项且包含 `PidVerifyDeliver`；标题、图标、默认宽度正确。
+  - [x] 面板能从停靠区通用的面板开关打开和关闭；三个页签能切；经典界面和外壳的编辑屏里都能显示（人工看一眼并截图留证）。
+  - [x] `build_view` 的单元测试：切页签后要画的内容跟着变；`tests/pid_panel_localization.rs` 没有改动且通过。
 - **验证**：`cargo test --offline --locked --lib dock::tests`；`cargo test --offline --locked --lib pid_verify_deliver`；`cargo test --offline --locked --test pid_panel_localization`
 - **依赖**：无（不依赖前面的模块，可以提前做）
 - **文件**：`src/ui/dock.rs`、`src/ui/window/mod.rs`、新建 `src/ui/window/pid_verify_deliver.rs`、新建 `assets/icons/ui/verify.svg`、`src/app/mod.rs`、`src/app/dock/update.rs`、`src/app/dock/view.rs`、`src/app/update/mod.rs`、`src/app/dock/tests.rs`
 - **规模**：L。拆不开：面板枚举加一项，所有按面板分支的地方都要补上，否则编译不过。每个文件的改动都很小。
+- **补（2026-11-22）**：在 `pid-stage-e` 分支上做（从记 CP-D 结果的 `1df759eec` 开），一个提交，代码只动了「文件」一栏的九个（另有面板规格和本文件）。与任务写法不同、或任务没有说的：`VerifyUi` 现在只有当前页签，`build_view` 现在只收界面状态（§5.1 的另三个参数和三个类型由第一个要用结果的任务加）；切页签的消息先在 `update/mod.rs` 里就地处理，PNL-2 建 `on_pid_verify` 时挪过去；这一步不报控件位置（§3.4 和关面板时清位置记录都在 PNL-2）；三个页签的空状态文字是「还没有检查过。」「还没有生成材料清单。」「还没有快照和发布记录。」，§4.2 那句的后半句「点上面的按钮开始。」等按钮出来再加；关面板只隐藏，再打开还是原来的页签；`ALL` 里新面板排在「协同」后面，存盘名 `pid_verify_deliver`；停靠区的面板开关第一次打开时停到右侧最上面（照「协同」）。这些记在面板规格新加的 §11.1。**先红后绿**：先放类型和空壳（`build_view` 不看页签，标题和宽度是占位值，`ALL` 不收，开面板和切页签什么都不做），新加 5 条测试、改了 1 条（原有的 21 改 22），都编得过；4 条败在断言上（21 ≠ 22、`ALL` 里没有、三个页签画的都是规则检查、菜单勾上后面板不显示），另 2 条（初值、页签名）在红步就过；实现后全过。第一遍格式检查发现新测试里一行断言不合 rustfmt，改后重跑。**读数**：`dock::tests` 104 条、`pid_verify_deliver` 3 条、`pid_panel_localization` 1 条全过（该文件没动）；主程序库 7629 条，7553 通过、73 默认不跑、3 失败（比对设计稿的三条，与起点相同），多的 5 条是新加的；编译警告 52；clippy 656 / 1051（重复数 637），与起点相同，新代码没有告警；格式检查：改动的 8 个 Rust 文件新增 0（脚本另报 3 处，是 `dock/update.rs`、`dock/view.rs`、`ui/window/mod.rs` 原有的格式差异，上下文里多了新行，三个文件自身的差异数前后相同）；架构检查的输出与起点一字不差；SPPID 脚本测试 185 条全过。**截图**：没在真窗口里点（`PIDVERIFY` 命令在 PNL-2，现在打开面板只能右键停靠区点菜单）；照 `OCS_AUTHORING_PALETTE_CAPTURES` 的做法，新的真实界面测试在设了 `OCS_PID_VERIFY_CAPTURES` 时把每一步画成图（1600 × 900，无头渲染），四张逐张看过：经典界面三个页签各一张，页签高亮和空状态文字跟着变；外壳的「P&ID 编辑器」屏一张，面板停在右侧，标题、三个页签和「还没有检查过。」都在。图在仓库外 `D:\scratch\ocs-pid-dev-20261116\pnl-1\captures\`，红步输出是同目录的 `red.txt`。真窗口里看一眼放到 CP-E1（那时有命令，能经接口打开再整窗截图）。**新基线**：主程序库 7629 条（7553 / 73 / 3）。
 
 ### PNL-2 【接线】命令 `PIDVERIFY` 与控件位置
 

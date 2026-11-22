@@ -720,6 +720,9 @@ impl OpenCADStudio {
                 width,
                 chrome,
             ),
+            crate::ui::dock::PanelId::PidVerifyDeliver => {
+                crate::ui::window::pid_verify_deliver::view(&self.pid_verify_view, width, chrome)
+            }
             crate::ui::dock::PanelId::ToolPalettes => crate::ui::window::tool_palettes::view(
                 &self.tool_palettes,
                 &tab.scene.document,

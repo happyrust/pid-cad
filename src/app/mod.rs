@@ -1632,6 +1632,14 @@ pub(super) struct OpenCADStudio {
     /// Whether the first live session has already brought the panel out. One
     /// shot, so closing it by hand is not undone by the next reconnect.
     pub(crate) pid_collab_auto_shown: bool,
+    /// Docked verify-and-deliver panel visibility (PIDVERIFY).
+    pub(crate) show_pid_verify: bool,
+    /// The verify-and-deliver panel's interface state: one for the whole
+    /// program, so the panel stays as it was left across document switches.
+    pub(crate) pid_verify_ui: crate::ui::window::pid_verify_deliver::VerifyUi,
+    /// What the verify-and-deliver panel draws, rebuilt from its interface
+    /// state whenever that changes.
+    pub(crate) pid_verify_view: crate::ui::window::pid_verify_deliver::VerifyView,
     /// Set while a remote `op_applied` is being folded into the document. The
     /// undo step that fold opens must not be broadcast back to the room
     /// (`src/app/collab/apply.rs`).
@@ -3628,6 +3636,8 @@ pub enum Message {
     },
     /// An interaction inside the docked collaboration panel.
     PidCollab(crate::ui::window::pid_collab::PidCollabMsg),
+    /// An interaction inside the docked verify-and-deliver panel.
+    PidVerify(crate::ui::window::pid_verify_deliver::PidVerifyMsg),
     /// The P&ID module: a switch of screens, or a screen's own message.
     PidShell(pid_shell::Message),
     PollWebControl,
@@ -6771,6 +6781,9 @@ impl OpenCADStudio {
             pid_collab_view: Default::default(),
             pid_collab_claims_open: true,
             pid_collab_auto_shown: false,
+            show_pid_verify: false,
+            pid_verify_ui: Default::default(),
+            pid_verify_view: Default::default(),
             applying_remote: false,
             #[cfg(not(target_arch = "wasm32"))]
             pid_backup_browser: Default::default(),
