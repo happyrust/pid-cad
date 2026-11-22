@@ -46,7 +46,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDUTILITY",
         "PIDVALVE",
         "PIDNOZZLE",
-        "PIDINDEX"
+        "PIDINDEX",
+        "PIDSPECIALTY"
     ]
 });
 
@@ -323,6 +324,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidindex_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidspecialty_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -4508,6 +4512,238 @@ impl OpenCADStudio {
             other => {
                 self.command_line.push_error(&format!(
                     "PIDINDEX: 未知子命令 {other}（支持 SUMMARY / ALL / ISSUES / JUMP / NEXT / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
+
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidspecialty_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            analyze_pid_specialty_items, write_pid_specialty_file, OpcSheetInput, SpecialtyCategory,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDSPECIALTY") {
+            return None;
+        }
+
+        let mut action: Option<String> = None;
+        let mut type_query: Option<String> = None;
+        let mut all_tabs = false;
+        let mut export_path: Option<std::path::PathBuf> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            let up = tok.to_ascii_uppercase();
+            match up.as_str() {
+                "ALLTABS" => {
+                    all_tabs = true;
+                    idx += 1;
+                }
+                "SUMMARY" | "ALL" | "SPECIALTIES" | "REDUCERS" | "FITTINGS" | "NEXT" => {
+                    action = Some(up);
+                    idx += 1;
+                }
+                "TYPE" => {
+                    let Some(q) = tokens.get(idx + 1) else {
+                        self.command_line.push_error(
+                            "PIDSPECIALTY TYPE: 缺少子型关键字（如 STRAINER、REDUCER、HOSE）。",
+                        );
+                        return Some(Task::none());
+                    };
+                    action = Some("TYPE".to_string());
+                    type_query = Some(q.to_ascii_lowercase());
+                    idx += 2;
+                }
+                "EXPORT" => {
+                    let Some(next_tok) = tokens.get(idx + 1) else {
+                        self.command_line.push_error(
+                            "PIDSPECIALTY EXPORT: 缺少输出文件路径（.json/.csv/.tsv）。",
+                        );
+                        return Some(Task::none());
+                    };
+                    export_path = Some(std::path::PathBuf::from(next_tok));
+                    idx += 2;
+                }
+                _ => {
+                    if action.is_none() {
+                        action = Some("TYPE".to_string());
+                        type_query = Some(tok.to_ascii_lowercase());
+                    }
+                    idx += 1;
+                }
+            }
+        }
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<OpcSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+
+        let rep = analyze_pid_specialty_items(&sheet_inputs);
+
+        if let Some(ref out_p) = export_path {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(err) = write_pid_specialty_file(&rep, out_p) {
+                self.command_line
+                    .push_error(&format!("PIDSPECIALTY EXPORT: {err}"));
+                return Some(Task::none());
+            }
+        }
+
+        let eff_action = action.as_deref().unwrap_or("SUMMARY");
+        let filtered: Vec<_> = rep
+            .items
+            .iter()
+            .filter(|it| match eff_action {
+                "SPECIALTIES" => it.category == SpecialtyCategory::SpecialtyItem,
+                "REDUCERS" => it.category == SpecialtyCategory::ReducerFitting,
+                "FITTINGS" => it.category != SpecialtyCategory::SpecialtyItem,
+                "TYPE" => type_query
+                    .as_deref()
+                    .is_some_and(|q| it.subtype.as_str().contains(q)),
+                _ => true,
+            })
+            .collect();
+
+        match eff_action {
+            "SUMMARY" => {
+                self.command_line.push_output(&format!(
+                    "PIDSPECIALTY: 扫描图纸={} | 非阀组件={}（管道特殊件={}，异径大小头={}，法兰/管帽={}）| 已继承规格={} | 汇总行={}。",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_items,
+                    rep.summary.specialty_items_count,
+                    rep.summary.reducers_count,
+                    rep.summary.flanges_or_caps_count,
+                    rep.summary.spec_resolved_count,
+                    rep.summary.rollup_groups_count,
+                ));
+            }
+            "ALL" | "SPECIALTIES" | "REDUCERS" | "FITTINGS" | "TYPE" => {
+                let mut by_tab: std::collections::BTreeMap<usize, Vec<document::Handle>> =
+                    std::collections::BTreeMap::new();
+                for it in &filtered {
+                    let dst = by_tab.entry(it.tab_index).or_default();
+                    for &h in &it.member_handles {
+                        if !dst.contains(&h) {
+                            dst.push(h);
+                        }
+                    }
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                let mut sel_cnt = 0usize;
+                for (&ti, hs) in &by_tab {
+                    if ti < self.tabs.len() && !hs.is_empty() {
+                        self.tabs[ti].scene.select_entities(hs);
+                        sel_cnt += hs.len();
+                    }
+                }
+                if let Some(cur_hs) = by_tab.get(&self.active_tab).filter(|h| !h.is_empty()) {
+                    let _ = self.tabs[self.active_tab].scene.zoom_to_entities(cur_hs);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDSPECIALTY {eff_action}: 匹配 {} 件特殊件/管件，跨打开图纸高亮 {sel_cnt} 个图元。",
+                    filtered.len()
+                ));
+            }
+            "NEXT" => {
+                if filtered.is_empty() {
+                    self.command_line
+                        .push_output("PIDSPECIALTY NEXT: 未找到可巡检的特殊件或管件图元。");
+                    return Some(self.finish_dispatch(cmd));
+                }
+                let cur_tab = self.active_tab;
+                let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[cur_tab]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                let cur_pos = filtered
+                    .iter()
+                    .position(|it| it.tab_index == cur_tab && sel_set.contains(&it.primary_handle));
+                let next_idx = cur_pos.map(|p| (p + 1) % filtered.len()).unwrap_or(0);
+                let chosen = filtered[next_idx];
+                let dest_tab = chosen.tab_index;
+
+                if dest_tab < self.tabs.len() && dest_tab != self.active_tab {
+                    let _ = self.update(Message::TabSwitch(dest_tab));
+                    self.active_tab = dest_tab;
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                if dest_tab < self.tabs.len() {
+                    self.tabs[dest_tab]
+                        .scene
+                        .select_entities(&chosen.member_handles);
+                    let zoomed = self.tabs[dest_tab]
+                        .scene
+                        .zoom_to_entities(&chosen.member_handles);
+                    if !zoomed {
+                        let mut cam = self.tabs[dest_tab].scene.camera.borrow_mut();
+                        let z = cam.target.z;
+                        cam.target = glam::DVec3::new(chosen.x, chosen.y, z);
+                    }
+                    self.refresh_properties();
+                }
+                self.command_line.push_output(&format!(
+                    "PIDSPECIALTY NEXT [{}/{}]: {}（{}，{}，规格={} / {}）。",
+                    next_idx + 1,
+                    filtered.len(),
+                    chosen.item_tag,
+                    chosen.subtype.as_str(),
+                    chosen.drawing_code,
+                    chosen.size_spec,
+                    chosen.piping_spec,
+                ));
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDSPECIALTY: 未知子命令 {other}（支持 SUMMARY / ALL / SPECIALTIES / REDUCERS / FITTINGS / TYPE / NEXT / EXPORT）。"
                 ));
                 return Some(Task::none());
             }
@@ -12755,6 +12991,286 @@ mod tests {
                     "sheets": sanitized_rows,
                 }))
                 .unwrap()
+            ),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidspecialty_extracts_strainers_dual_size_reducers_and_spectacle_blinds_excluding_valves_and_steps_camera(
+    ) {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let mut app = app();
+
+        // Tab 1: Y-STRAINER SR-16601 on 100 mm line + CONCENTRIC REDUCER bridging 100 mm -> 50 mm + BALL VALVE (excluded)
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-166-01.dxf".to_string();
+        let (strainer_h, red_h, bv_h) = {
+            let doc = &mut app.tabs[tab1].scene.document;
+            define_sppid_block(doc, "Y-STRAINER", 6.0, 4.0);
+            define_sppid_block(doc, "CONCENTRIC REDUCER", 5.0, 4.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+
+            let mut tb =
+                Text::with_value("DWG-166-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut p1 = Line::from_points(
+                Vector3::new(40.0, 200.0, 0.0),
+                Vector3::new(97.0, 200.0, 0.0),
+            );
+            p1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p1)).unwrap();
+
+            let mut st = Insert::new("Y-STRAINER", Vector3::new(100.0, 200.0, 0.0));
+            st.common.layer = "11".to_string();
+            let strainer_h = doc.add_entity(document::EntityType::Insert(st)).unwrap();
+            let mut stt =
+                Text::with_value("SR-16601", Vector3::new(95.0, 206.0, 0.0)).with_height(2.5);
+            stt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(stt)).unwrap();
+
+            let mut p2 = Line::from_points(
+                Vector3::new(103.0, 200.0, 0.0),
+                Vector3::new(177.0, 200.0, 0.0),
+            );
+            p2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p2)).unwrap();
+            let mut l100 = Text::with_value("100-PG-16601-CS150", Vector3::new(125.0, 203.0, 0.0))
+                .with_height(2.5);
+            l100.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(l100)).unwrap();
+
+            let mut red = Insert::new("CONCENTRIC REDUCER", Vector3::new(180.0, 200.0, 0.0));
+            red.common.layer = "11".to_string();
+            let red_h = doc.add_entity(document::EntityType::Insert(red)).unwrap();
+
+            let mut p3 = Line::from_points(
+                Vector3::new(183.0, 200.0, 0.0),
+                Vector3::new(267.0, 200.0, 0.0),
+            );
+            p3.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p3)).unwrap();
+            let mut l50 = Text::with_value("50-PG-16602-CS150", Vector3::new(205.0, 203.0, 0.0))
+                .with_height(2.5);
+            l50.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(l50)).unwrap();
+
+            let mut bv = Insert::new("BALL VALVE TYPE 2", Vector3::new(270.0, 200.0, 0.0));
+            bv.common.layer = "11".to_string();
+            let bv_h = doc.add_entity(document::EntityType::Insert(bv)).unwrap();
+
+            (strainer_h, red_h, bv_h)
+        };
+
+        // Tab 2: BLANK OPEN SPECTACLE on 80-N2-16603-CS150
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-166-02.dxf".to_string();
+        let spec_blind_h = {
+            let doc = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc, "BLANK OPEN SPECTACLE", 4.0, 6.0);
+
+            let mut tb =
+                Text::with_value("DWG-166-02", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut pa = Line::from_points(
+                Vector3::new(80.0, 260.0, 0.0),
+                Vector3::new(138.0, 260.0, 0.0),
+            );
+            pa.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pa)).unwrap();
+            let mut la = Text::with_value("80-N2-16603-CS150", Vector3::new(95.0, 263.0, 0.0))
+                .with_height(2.5);
+            la.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(la)).unwrap();
+
+            let mut sb = Insert::new("BLANK OPEN SPECTACLE", Vector3::new(140.0, 260.0, 0.0));
+            sb.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(sb)).unwrap()
+        };
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        app.active_tab = tab1;
+
+        let tmp = std::env::temp_dir().join(format!("ocs_pidspec_item_166_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let sp_json = tmp.join("specialties.json");
+        let sp_csv = tmp.join("specialties.csv");
+        let _ = app.run_command_line(&format!(
+            "PIDSPECIALTY ALLTABS EXPORT \"{}\"",
+            sp_json.display()
+        ));
+        assert!(
+            sp_json.is_file(),
+            "PIDSPECIALTY EXPORT must write specialties.json"
+        );
+        let _ = app.run_command_line(&format!(
+            "PIDSPECIALTY SUMMARY ALLTABS EXPORT \"{}\"",
+            sp_csv.display()
+        ));
+        let csv_raw = std::fs::read_to_string(&sp_csv).unwrap();
+        assert!(
+            csv_raw.starts_with('\u{feff}')
+                && csv_raw.contains("SPECIALTY_ITEM")
+                && csv_raw.contains("100 mm x 50 mm")
+        );
+
+        let rep: Value = serde_json::from_str(&std::fs::read_to_string(&sp_json).unwrap()).unwrap();
+        assert_eq!(rep["summary"]["total_items"].as_u64(), Some(3));
+        assert_eq!(rep["summary"]["specialty_items_count"].as_u64(), Some(2));
+        assert_eq!(rep["summary"]["reducers_count"].as_u64(), Some(1));
+
+        let items = rep["items"].as_array().unwrap();
+        let red_item = items
+            .iter()
+            .find(|it| it["subtype"].as_str() == Some("reducer"))
+            .expect("must have reducer item");
+        assert_eq!(red_item["size_spec"].as_str(), Some("100 mm x 50 mm"));
+        assert_eq!(red_item["piping_spec"].as_str(), Some("CS150"));
+
+        // Filter REDUCERS selects red_h only; SPECIALTIES selects strainer + spectacle blind and excludes red_h & bv_h
+        let _ = app.run_command_line("PIDSPECIALTY REDUCERS ALLTABS");
+        assert!(has_sel(&app, tab1, red_h));
+        assert!(!has_sel(&app, tab1, strainer_h));
+        assert!(!has_sel(&app, tab1, bv_h));
+
+        let _ = app.run_command_line("PIDSPECIALTY SPECIALTIES ALLTABS");
+        assert!(has_sel(&app, tab1, strainer_h));
+        assert!(has_sel(&app, tab2, spec_blind_h));
+        assert!(!has_sel(&app, tab1, red_h));
+
+        // Stateless NEXT steps across all 3 items including Tab 2 spectacle blind
+        let mut visited_tab2 = false;
+        for _ in 0..3 {
+            let _ = app.run_command_line("PIDSPECIALTY NEXT ALLTABS");
+            if app.active_tab == tab2 && has_sel(&app, tab2, spec_blind_h) {
+                visited_tab2 = true;
+            }
+        }
+        assert!(
+            visited_tab2,
+            "PIDSPECIALTY NEXT ALLTABS must visit Tab 2 spectacle blind"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads 4 real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into OpenCADStudio and verifies PIDSPECIALTY ALLTABS specialty item & reducer dual-size extraction and NEXT stepping"]
+    fn real_multi_tab_pidspecialty_items_and_reducers_schedule_audit() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sp_raw) = std::env::var("OCS_PID_REAL166_SPPID_PAIR") else {
+            println!("OCS_PID_REAL166_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(lg_raw) = std::env::var("OCS_PID_REAL166_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL166_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL166_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real166"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sp_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sp_raw).collect();
+        let lg_paths: Vec<std::path::PathBuf> = std::env::split_paths(&lg_raw).collect();
+        assert_eq!(sp_paths.len(), 2);
+        assert_eq!(lg_paths.len(), 2);
+
+        let groups = [
+            ("SP01_SP02", "sppid_pair", &sp_paths),
+            ("LG01_LG02", "legacy_autocad_pair", &lg_paths),
+        ];
+
+        let mut out_groups = Vec::new();
+        for (gid, kind, pair) in &groups {
+            let mut sha_pair = Vec::new();
+            let mut app = app();
+            for (pi, p) in pair.iter().enumerate() {
+                let sha_pfx =
+                    format!("{:x}", Sha256::digest(std::fs::read(p).unwrap()))[..12].to_string();
+                sha_pair.push(sha_pfx);
+                let ti = if pi == 0 {
+                    app.active_tab
+                } else {
+                    let _ = app.update(Message::TabNew);
+                    app.active_tab
+                };
+                app.tabs[ti].scene.document = crate::io::load_file(p).unwrap();
+                app.tabs[ti].tab_title = format!("{gid}_{}.dxf", pi + 1);
+            }
+
+            let sp_json = out_dir.join(format!("{gid}_specialties.json"));
+            let sp_csv = out_dir.join(format!("{gid}_specialties.csv"));
+            let _ = app.run_command_line(&format!(
+                "PIDSPECIALTY ALLTABS EXPORT \"{}\"",
+                sp_json.display()
+            ));
+            let _ = app.run_command_line(&format!(
+                "PIDSPECIALTY SUMMARY ALLTABS EXPORT \"{}\"",
+                sp_csv.display()
+            ));
+            let csv_txt = std::fs::read_to_string(&sp_csv).unwrap();
+            assert!(
+                csv_txt.starts_with('\u{feff}') && csv_txt.contains("RecordKind,TagOrRollupKey")
+            );
+            let rep: Value =
+                serde_json::from_str(&std::fs::read_to_string(&sp_json).unwrap()).unwrap();
+            let _ = std::fs::remove_file(&sp_json);
+            let _ = std::fs::remove_file(&sp_csv);
+
+            assert!(
+                rep["summary"]["total_items"].as_u64().unwrap_or(0) >= 1,
+                "{gid} must extract >= 1 piping specialty or inline fitting"
+            );
+
+            let _ = app.run_command_line("PIDSPECIALTY NEXT ALLTABS");
+            assert!(
+                !app.tabs[app.active_tab]
+                    .scene
+                    .selected_entities()
+                    .is_empty(),
+                "PIDSPECIALTY NEXT ALLTABS must select target specialty item"
+            );
+
+            out_groups.push(json!({
+                "group": gid,
+                "kind": kind,
+                "sha256_prefixes": sha_pair,
+                "sheets_scanned": rep["summary"]["sheets_scanned"],
+                "total_items": rep["summary"]["total_items"],
+                "specialty_items_count": rep["summary"]["specialty_items_count"],
+                "reducers_count": rep["summary"]["reducers_count"],
+                "flanges_or_caps_count": rep["summary"]["flanges_or_caps_count"],
+                "spec_resolved_count": rep["summary"]["spec_resolved_count"],
+                "rollup_groups_count": rep["summary"]["rollup_groups_count"],
+            }));
+        }
+
+        std::fs::write(
+            out_dir.join("real166_summary.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()
             ),
         )
         .unwrap();

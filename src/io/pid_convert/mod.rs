@@ -22,6 +22,7 @@ pub mod promote;
 pub mod recognize;
 pub mod renumber;
 pub mod spec_check;
+pub mod specialty;
 pub mod trace;
 pub mod utility;
 pub mod valve_mto;
@@ -35,6 +36,14 @@ pub use drawing_index::{
     DrawingIndexStatus, PidDrawingIndexReport, PidDrawingIndexRow, PidDrawingIndexSummary,
     DRAWING_INDEX_CSV_HEADERS,
 };
+pub use specialty::{
+    analyze_pid_specialty_items, classify_specialty_component, format_pid_specialty_delimited,
+    PidSpecialtyItem, PidSpecialtyReport, PidSpecialtyRollupRow, PidSpecialtySummary,
+    SpecialtyCategory, SpecialtySubtype, SPECIALTY_CSV_HEADERS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use specialty::{extract_specialties_from_path, write_pid_specialty_file};
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use drawing_index::{extract_drawing_index_from_path, write_pid_drawing_index_file};
 pub use hazop::{

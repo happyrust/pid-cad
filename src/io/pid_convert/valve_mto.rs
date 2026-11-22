@@ -291,7 +291,7 @@ fn span_touches_bbox(s: Span2, bb: BBox2, margin: f64) -> bool {
 }
 
 fn is_non_valve_fitting(blk_upper: &str) -> bool {
-    const NON_VALVE_TOKENS: [&str; 25] = [
+    const NON_VALVE_TOKENS: [&str; 35] = [
         "REDUCER",
         "FLANGE",
         "PIPE-CAP",
@@ -305,6 +305,7 @@ fn is_non_valve_fitting(blk_upper: &str) -> bool {
         "HOSE",
         "SIGHT",
         "ARRESTER",
+        "ARRESTOR",
         "TRAP",
         "COUPLING",
         "ORIFICE",
@@ -317,6 +318,15 @@ fn is_non_valve_fitting(blk_upper: &str) -> bool {
         "CORIOLIS",
         "RESTRICTION",
         "SILENCER",
+        "SPECIALTY COMPONENTS",
+        "HYDRANT",
+        "FOAM-PORT",
+        "LOADING-ARM",
+        "BUFFER VESSEL",
+        "CLEANING TEE",
+        "EXPANSION JOINT",
+        "INSULATION JOINT",
+        "PIPE-UNKNOWN",
     ];
     NON_VALVE_TOKENS.iter().any(|tok| blk_upper.contains(tok))
 }
@@ -690,12 +700,12 @@ fn extract_authored_vm_nodes(
                 .to_string(),
         };
         let tag_opt = (!auth.tag.trim().is_empty()).then(|| auth.tag.trim().to_string());
-        let kind = classify_vm_kind(
-            cls,
-            &auth.type_code,
-            &src_blk.to_ascii_uppercase(),
-            tag_opt.as_deref(),
-        );
+        let sym_path = pmap
+            .get("_symbol_path")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let desc_up = format!("{src_blk} {sym_path}").to_ascii_uppercase();
+        let kind = classify_vm_kind(cls, &auth.type_code, &desc_up, tag_opt.as_deref());
         let mut ports = Vec::new();
         if let Some(ps) = pmap.get("_ports").and_then(Value::as_str) {
             for item in ps.split(';').filter(|s| !s.trim().is_empty()) {
@@ -834,12 +844,14 @@ fn extract_unpromoted_vm_nodes(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        let kind = classify_vm_kind(
-            &sym.sppid_class,
-            "",
-            &sym.source_block.to_ascii_uppercase(),
-            tag_opt.as_deref(),
-        );
+        let desc_up = format!(
+            "{} {} {}",
+            sym.source_block,
+            sym.layer,
+            sym.symbol_path.as_deref().unwrap_or("")
+        )
+        .to_ascii_uppercase();
+        let kind = classify_vm_kind(&sym.sppid_class, "", &desc_up, tag_opt.as_deref());
 
         nodes.push(VmNode {
             tab_index,

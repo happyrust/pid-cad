@@ -17,11 +17,11 @@ use std::path::PathBuf;
 use OpenCADStudio::io::pid_convert::{
     convert_path_to_dir, diff_pid_files, export_handover_package_from_path,
     extract_bom_from_batch_dir, extract_drawing_index_from_path, extract_hazop_from_path,
-    extract_loops_from_batch_dir, extract_nozzles_from_path, extract_utilities_from_path,
-    extract_valves_from_path, save_cad_file_as_binary_dwg, write_bom_schedule_file,
-    write_pid_diff_file, write_pid_drawing_index_file, write_pid_hazop_file, write_pid_loops_file,
-    write_pid_nozzle_file, write_pid_utility_file, write_pid_valve_file, ConvertOptions,
-    PackageOptions,
+    extract_loops_from_batch_dir, extract_nozzles_from_path, extract_specialties_from_path,
+    extract_utilities_from_path, extract_valves_from_path, save_cad_file_as_binary_dwg,
+    write_bom_schedule_file, write_pid_diff_file, write_pid_drawing_index_file,
+    write_pid_hazop_file, write_pid_loops_file, write_pid_nozzle_file, write_pid_specialty_file,
+    write_pid_utility_file, write_pid_valve_file, ConvertOptions, PackageOptions,
 };
 
 struct CliArgs {
@@ -41,6 +41,7 @@ struct CliArgs {
     export_valves: Option<PathBuf>,
     export_nozzles: Option<PathBuf>,
     export_index: Option<PathBuf>,
+    export_specialties: Option<PathBuf>,
     export_package: Option<PathBuf>,
     strict_gate: bool,
     save_dwg: Option<PathBuf>,
@@ -63,6 +64,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut export_valves: Option<PathBuf> = None;
     let mut export_nozzles: Option<PathBuf> = None;
     let mut export_index: Option<PathBuf> = None;
+    let mut export_specialties: Option<PathBuf> = None;
     let mut export_package: Option<PathBuf> = None;
     let mut strict_gate = false;
     let mut save_dwg: Option<PathBuf> = None;
@@ -138,6 +140,12 @@ fn parse_args() -> Result<CliArgs, String> {
                         .ok_or("--export-index requires an output path (.csv/.tsv/.json)")?,
                 ));
             }
+            "--export-specialties" => {
+                export_specialties = Some(PathBuf::from(
+                    it.next()
+                        .ok_or("--export-specialties requires an output path (.csv/.tsv/.json)")?,
+                ));
+            }
             "--export-package" => {
                 export_package = Some(PathBuf::from(
                     it.next()
@@ -195,6 +203,7 @@ fn parse_args() -> Result<CliArgs, String> {
         && export_valves.is_none()
         && export_nozzles.is_none()
         && export_index.is_none()
+        && export_specialties.is_none()
     {
         return Err(
             "--out <dir> (or --diff-with <baseline> or --export-package <dir>) is required"
@@ -218,6 +227,7 @@ fn parse_args() -> Result<CliArgs, String> {
         export_valves,
         export_nozzles,
         export_index,
+        export_specialties,
         export_package,
         strict_gate,
         save_dwg,
@@ -254,6 +264,39 @@ fn main() {
         verify_plot_pdf: args.verify_plot,
         ..Default::default()
     };
+
+    if let Some(ref sp_out) = args.export_specialties {
+        match extract_specialties_from_path(&effective_input)
+            .and_then(|rep| write_pid_specialty_file(&rep, sp_out).map(|()| rep))
+        {
+            Ok(rep) => {
+                println!(
+                    "pid_specialty: sheets={} total_items={} specialties={} reducers={} flanges={} rollup_groups={}",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_items,
+                    rep.summary.specialty_items_count,
+                    rep.summary.reducers_count,
+                    rep.summary.flanges_or_caps_count,
+                    rep.summary.rollup_groups_count,
+                );
+                if args.out_dir.is_none()
+                    && args.diff_with.is_none()
+                    && args.export_package.is_none()
+                    && args.export_hazop.is_none()
+                    && args.export_utilities.is_none()
+                    && args.export_valves.is_none()
+                    && args.export_nozzles.is_none()
+                    && args.export_index.is_none()
+                {
+                    return;
+                }
+            }
+            Err(err) => {
+                eprintln!("error: export-specialties failed: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if let Some(ref idx_out) = args.export_index {
         match extract_drawing_index_from_path(&effective_input)

@@ -2200,3 +2200,41 @@
 | `scripts\fmt-newhunks.ps1` | — | `drawing_index.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 55. L3-3 / L3-4 / L3-6 / L6-2（#166）：应用内 P&ID 管道特殊件与异径管件统计清册、大小头双管径自动提取及巡检命令 `PIDSPECIALTY` 与 CLI `--export-specialties` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `0abc0f41e`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{specialty,valve_mto,mod}.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-22-issue166/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_specialty.txt`、`cli_export_specialties.txt`、`real_out/real166_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
+
+### 55.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_166_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidspecialty_extracts_strainers_dual_size_reducers_and_spectacle_blinds_excluding_valves_and_steps_camera`（构造跨双标签页的 Y 型过滤器 `SR-16601`、跨 `100 mm -> 50 mm` 管段的同心大小头 `CONCENTRIC REDUCER`、8 字盲板 `BLANK OPEN SPECTACLE` 与对照球阀 `BALL VALVE TYPE 2`，验证阀门正交剔除、大小头双管径 `100 mm x 50 mm` 降序合成、`REDUCERS / SPECIALTIES` 分类高亮与 `PIDSPECIALTY NEXT ALLTABS` 跨标签页巡检），运行按预期在 `specialties.json` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`32 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/specialty.rs`（`analyze_pid_specialty_items`、`extract_specialties_from_path`、`write_pid_specialty_file`）并同步增强 `valve_mto.rs` 原生存量炸散符号 `layer + symbol_path` 联合描述符分流：统一兼容未升格 `.dxf`/`.dwg`/`.pid` 与已升格 `PID_AUTHOR` 模型，与 `#162` `PIDVALVE` 严格正交互补，细分三大请购类别与八类子型（过滤器、阻火器、软管/膨胀节/接头、盲板/孔板/垫环、疏水阀/视镜、杂项特殊件、异径大小头、法兰/管帽），在大小头处阻断跨径线号传播以独立采集两侧管径并合成 `LargeDN x SmallDN` 规格，导出 `.json` 与带 UTF-8 BOM 的 `.csv` / `.tsv` 10 列管道特殊件清册；
+  2. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDSPECIALTY [SUMMARY | ALL | SPECIALTIES | REDUCERS | FITTINGS | TYPE "<子型>" | NEXT] [ALLTABS] [EXPORT "<.json|.csv|.tsv>"]`，并在 `examples/pid_convert.rs` 新增 `--export-specialties <PATH>`（真实中位规模 SPPID 图 CLI 独立提取 `9` 件非阀行内组件，退出码 `0`）。
+
+### 55.2 真实双标准四图成对跨标签页管道特殊件与异径管件清册实测
+
+| 图纸组 | 样本形态 | 源图 SHA-256 前缀对 | 非阀组件总数 | 管道特殊件 / 异径大小头 / 法兰管帽 | 已继承管径规格数 | 采购汇总行数 | `.csv` 清册与 `NEXT` 巡检 |
+|---|---|---|---:|---|---:|---:|---|
+| `SP01 + SP02` | 未升格 SPPID 拆分生产图对 | `2164f88bbb57` + `fc2c812dc182` | **`17`** | `12` / `5` / `0` | **`17`** | **`7`** | **通过** |
+| `LG01 + LG02` | 未升格原生 AutoCAD 存量图对 | `a0f05f81a655` + `28ed389e23cb` | **`32`** | `32` / `0` / `0` | **`32`** | **`5`** | **通过** |
+
+### 55.3 固定门禁读数
+
+| 门禁项 | 改前读数（§54.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,256` 条（`7,166` 过 / `89` 忽略 / `1` 既有 `.pen`） | **`7,258` 条**（**`7,167` 过** / **`90` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图跨标签页管道特殊件与大小头清册对账），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `specialty.rs`、`valve_mto.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
