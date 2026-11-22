@@ -562,7 +562,7 @@ flowchart LR
 
 ### 7.7 L6 整合与总验收
 
-- **L6-1 批量转换命令（M）— 已完成（[#130](https://github.com/happyrust/pid-cad/issues/130) / [#141](https://github.com/happyrust/pid-cad/issues/141) / [#158](https://github.com/happyrust/pid-cad/issues/158)）**：`examples/pid_convert.rs` 与应用内 `PIDCONVERT` / `PIDPACKAGE`（及 `--export-package` / `--strict-gate`）支持单图、多标签页与整批目录导出双产物、综合 BOM 清册、ISA-5.1 回路索引、OPC 配对台账、DRC/Spec 联合体检与 SHA-256 `handover_manifest.json`，退出码严格反映成败（见 `readings.md` §19、§30、§47）。
+- **L6-1 批量转换命令（M）— 已完成（[#130](https://github.com/happyrust/pid-cad/issues/130) / [#141](https://github.com/happyrust/pid-cad/issues/141) / [#158](https://github.com/happyrust/pid-cad/issues/158) / [#163](https://github.com/happyrust/pid-cad/issues/163)）**：`examples/pid_convert.rs` 与应用内 `PIDCONVERT` / `PIDPACKAGE`（及 `--export-package` / `--strict-gate`，`schema_version = 2`）支持单图、多标签页与整批目录一站式导出双产物、综合 BOM 清册、ISA-5.1 回路索引、阀门采购 MTO 料表、公用工程与界区接口条件表、OPC 配对台账、DRC/Spec 联合体检、自动 HAZOP 审查底稿与 SHA-256 `handover_manifest.json`，退出码严格反映成败（见 `readings.md` §19、§30、§47、§52）。
 - **L6-2 交互编辑后保存回 `.pid`（M）— 本地 `a/b` 级全链路已完成（[#134](https://github.com/happyrust/pid-cad/issues/134)）**：在合成与真实生产图上完整跑通「升格 `PID_AUTHOR` → 改一个位号属性 + 加一个阀门符号 + 删符号清拓扑 → 保存回 `.pid` + XML → `pid-parse` 重读与 Q9 索引自检零故障 + CAD 重载 + `plot_pdf` 出图验证」（`c1` SPPID 打开待 `RES-06`，见 `readings.md` §24）。
 - **L6-3 总验收（M）— 本地闭环报告已完成（[#135](https://github.com/happyrust/pid-cad/issues/135)）**：整批 90 图双产物转换与 94 图显示对比全部跑通，已落盘对照第 3 节五条总口径的 `05-phase1-acceptance-report.md`（外部回执槽位待 `RES-15` 回填，见 `readings.md` §23）。
 

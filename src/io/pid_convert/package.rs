@@ -55,6 +55,12 @@ pub struct HandoverManifest {
     pub bom_unique_rows: usize,
     pub instrument_loops_count: usize,
     pub incomplete_loops_count: usize,
+    pub total_valves: usize,
+    pub valve_mto_groups: usize,
+    pub utility_services_count: usize,
+    pub battery_limit_interfaces: usize,
+    pub hazop_nodes_count: usize,
+    pub unprotected_hazop_nodes: usize,
     pub opc_reciprocal_pairs: usize,
     pub opc_one_way_open: usize,
     pub drc_total_errors: usize,
@@ -155,10 +161,13 @@ pub fn export_handover_package_from_sheets(
     use super::bom::{extract_bom_from_batch_dir, write_bom_schedule_file};
     use super::drc::audit_sheet_drc;
     use super::export::{export_author_document_to_dir, export_document_to_dir};
+    use super::hazop::{analyze_pid_hazop_nodes, write_pid_hazop_file};
     use super::loops::{analyze_pid_loops, write_pid_loops_file};
     use super::opc::{analyze_open_sheets_opc, OpcSheetInput};
     use super::promote::summarize_author_review;
     use super::spec_check::audit_pid_spec_consistency;
+    use super::utility::{analyze_pid_utilities_and_interfaces, write_pid_utility_file};
+    use super::valve_mto::{analyze_pid_valve_mto, write_pid_valve_file};
 
     if sheets.is_empty() {
         return Err("没有可打包导出的有效图纸。".to_string());
@@ -229,6 +238,20 @@ pub fn export_handover_package_from_sheets(
     write_pid_loops_file(&loops_rep, &schedules_dir.join("02_instrument_loops.csv"))?;
     write_pid_loops_file(&loops_rep, &schedules_dir.join("02_instrument_loops.json"))?;
 
+    let valve_rep = analyze_pid_valve_mto(&opc_inputs);
+    write_pid_valve_file(&valve_rep, &schedules_dir.join("03_valve_mto.csv"))?;
+    write_pid_valve_file(&valve_rep, &schedules_dir.join("03_valve_mto.json"))?;
+
+    let util_rep = analyze_pid_utilities_and_interfaces(&opc_inputs);
+    write_pid_utility_file(
+        &util_rep,
+        &schedules_dir.join("04_utility_and_battery_limits.csv"),
+    )?;
+    write_pid_utility_file(
+        &util_rep,
+        &schedules_dir.join("04_utility_and_battery_limits.json"),
+    )?;
+
     let opc_rep = analyze_open_sheets_opc(&opc_inputs);
     let opc_json = serde_json::to_string_pretty(&opc_rep).map_err(|e| e.to_string())?;
     std::fs::write(
@@ -264,6 +287,10 @@ pub fn export_handover_package_from_sheets(
     )
     .map_err(|e| e.to_string())?;
 
+    let hazop_rep = analyze_pid_hazop_nodes(&opc_inputs);
+    write_pid_hazop_file(&hazop_rep, &audits_dir.join("05_hazop_worksheet.csv"))?;
+    write_pid_hazop_file(&hazop_rep, &audits_dir.join("05_hazop_worksheet.json"))?;
+
     // 4. Cryptographic inventory & handover_manifest.json
     let mut files = Vec::new();
     collect_package_files_recursive(out_dir, out_dir, &mut files)?;
@@ -279,7 +306,7 @@ pub fn export_handover_package_from_sheets(
         strict_vendor_passed && drc_total_errors == 0 && conversion_errors.is_empty();
 
     let manifest = HandoverManifest {
-        schema_version: 1,
+        schema_version: 2,
         plant: pkg_opts.convert.plant.clone(),
         handover_ready,
         strict_vendor_passed,
@@ -289,6 +316,12 @@ pub fn export_handover_package_from_sheets(
         bom_unique_rows: bom_rep.summary.total_unique_rows,
         instrument_loops_count: loops_rep.summary.total_loops,
         incomplete_loops_count: loops_rep.summary.incomplete_loops,
+        total_valves: valve_rep.summary.total_valves,
+        valve_mto_groups: valve_rep.summary.mto_groups_count,
+        utility_services_count: util_rep.summary.utility_services_count,
+        battery_limit_interfaces: util_rep.summary.battery_limit_count,
+        hazop_nodes_count: hazop_rep.summary.total_nodes,
+        unprotected_hazop_nodes: hazop_rep.summary.unprotected_nodes,
         opc_reciprocal_pairs: opc_rep.reciprocal_pairs,
         opc_one_way_open: opc_rep.one_way_open,
         drc_total_errors,

@@ -3065,7 +3065,7 @@ impl OpenCADStudio {
         match export_handover_package_from_sheets(&sheet_inputs, &out_dir, &pkg_opts) {
             Ok(man) => {
                 self.command_line.push_output(&format!(
-                    "PIDPACKAGE: 交付包已生成 -> {}（就绪={}，图纸={}，.pid={}，PDF={}，清册={}，回路={}，互逆OPC={}，文件数={}）。",
+                    "PIDPACKAGE: 交付包已生成 -> {}（就绪={}，图纸={}，.pid={}，PDF={}，清册={}，回路={}，阀门={}，界区接口={}，HAZOP节点={}，互逆OPC={}，文件数={}）。",
                     out_dir.display(),
                     man.handover_ready,
                     man.sheets_exported,
@@ -3073,6 +3073,9 @@ impl OpenCADStudio {
                     man.pdf_files_plotted,
                     man.bom_unique_rows,
                     man.instrument_loops_count,
+                    man.total_valves,
+                    man.battery_limit_interfaces,
+                    man.hazop_nodes_count,
                     man.opc_reciprocal_pairs,
                     man.files.len(),
                 ));
@@ -11349,6 +11352,391 @@ mod tests {
                 "{}\n",
                 serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()
             ),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidpackage_v2_emits_valve_mto_utility_and_hazop_artifacts_and_verifies_all_sha256_entries() {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+        use sha2::{Digest, Sha256};
+
+        let mut app = app();
+
+        // Tab 1: DWG-163-01.dxf with OSBL N2 utility tie-in + Pump P-1631 discharging via paired OPC to Tab 2
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-163-01.dxf".to_string();
+        {
+            let doc = &mut app.tabs[tab1].scene.document;
+            define_sppid_block(doc, "CENTRIFUGAL PUMP", 8.0, 8.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "DCS FUNC ACCESS IN PRIME LOC", 8.0, 8.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-163-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            // OSBL N2 utility header
+            let mut bl = Insert::new("_OFF-UNIT SQ", Vector3::new(40.0, 180.0, 0.0));
+            bl.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bl)).unwrap();
+            let mut blt =
+                Text::with_value("DWG-OSBL-901", Vector3::new(30.0, 179.0, 0.0)).with_height(2.5);
+            blt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(blt)).unwrap();
+
+            let mut up1 = Line::from_points(
+                Vector3::new(46.0, 180.0, 0.0),
+                Vector3::new(97.0, 180.0, 0.0),
+            );
+            up1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(up1)).unwrap();
+
+            let mut bv1 = Insert::new("BALL VALVE TYPE 2", Vector3::new(100.0, 180.0, 0.0));
+            bv1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bv1)).unwrap();
+            let mut bvt1 =
+                Text::with_value("BV16301", Vector3::new(96.0, 186.0, 0.0)).with_height(2.5);
+            bvt1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(bvt1)).unwrap();
+
+            let mut up2 = Line::from_points(
+                Vector3::new(103.0, 180.0, 0.0),
+                Vector3::new(175.0, 180.0, 0.0),
+            );
+            up2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(up2)).unwrap();
+            let mut ulbl = Text::with_value("50-N2-16301-CS150", Vector3::new(125.0, 183.0, 0.0))
+                .with_height(2.5);
+            ulbl.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(ulbl)).unwrap();
+
+            // Pump P-1631 + process line 100-PG-16302-CS150 + BV16302 + PT-1632 -> paired OPC
+            let mut pump = Insert::new("CENTRIFUGAL PUMP", Vector3::new(100.0, 320.0, 0.0));
+            pump.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(pump)).unwrap();
+            let mut pt =
+                Text::with_value("P-1631", Vector3::new(95.0, 328.0, 0.0)).with_height(2.5);
+            pt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(pt)).unwrap();
+
+            let mut pp1 = Line::from_points(
+                Vector3::new(104.0, 320.0, 0.0),
+                Vector3::new(147.0, 320.0, 0.0),
+            );
+            pp1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pp1)).unwrap();
+
+            let mut bv2 = Insert::new("BALL VALVE TYPE 2", Vector3::new(150.0, 320.0, 0.0));
+            bv2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bv2)).unwrap();
+            let mut bvt2 =
+                Text::with_value("BV16302", Vector3::new(146.0, 326.0, 0.0)).with_height(2.5);
+            bvt2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(bvt2)).unwrap();
+
+            let mut pp2 = Line::from_points(
+                Vector3::new(153.0, 320.0, 0.0),
+                Vector3::new(254.0, 320.0, 0.0),
+            );
+            pp2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pp2)).unwrap();
+            let mut plbl = Text::with_value("100-PG-16302-CS150", Vector3::new(190.0, 323.0, 0.0))
+                .with_height(2.5);
+            plbl.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(plbl)).unwrap();
+
+            let mut inst = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(185.0, 328.0, 0.0),
+            );
+            inst.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Insert(inst)).unwrap();
+            let mut it1 = Text::with_value("PT", Vector3::new(183.5, 330.0, 0.0)).with_height(2.2);
+            it1.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(it1)).unwrap();
+            let mut it2 =
+                Text::with_value("1632", Vector3::new(182.5, 325.5, 0.0)).with_height(2.2);
+            it2.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(it2)).unwrap();
+
+            let mut opc1 = Insert::new("_OFF-UNIT SQ", Vector3::new(260.0, 320.0, 0.0));
+            opc1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc1)).unwrap();
+            let mut oft1 =
+                Text::with_value("DWG-163-02", Vector3::new(250.0, 319.0, 0.0)).with_height(2.5);
+            oft1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(oft1)).unwrap();
+        }
+
+        // Tab 2: DWG-163-02.dxf with return OPC -> BV16303 -> Drum V-1632 + LT-1632
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-163-02.dxf".to_string();
+        {
+            let doc = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "DCS FUNC ACCESS IN PRIME LOC", 8.0, 8.0);
+            define_sppid_block(doc, "1TO1PARAMETRIC V DRUM", 12.0, 24.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-163-02", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut opc2 = Insert::new("_OFF-UNIT SQ", Vector3::new(100.0, 320.0, 0.0));
+            opc2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc2)).unwrap();
+            let mut oft2 =
+                Text::with_value("DWG-163-01", Vector3::new(90.0, 319.0, 0.0)).with_height(2.5);
+            oft2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(oft2)).unwrap();
+
+            let mut pa = Line::from_points(
+                Vector3::new(106.0, 320.0, 0.0),
+                Vector3::new(177.0, 320.0, 0.0),
+            );
+            pa.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pa)).unwrap();
+            let mut la = Text::with_value("100-PG-16302-CS150", Vector3::new(125.0, 323.0, 0.0))
+                .with_height(2.5);
+            la.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(la)).unwrap();
+
+            let mut bv3 = Insert::new("BALL VALVE TYPE 2", Vector3::new(180.0, 320.0, 0.0));
+            bv3.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bv3)).unwrap();
+            let mut bvt3 =
+                Text::with_value("BV16303", Vector3::new(176.0, 326.0, 0.0)).with_height(2.5);
+            bvt3.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(bvt3)).unwrap();
+
+            let mut pb = Line::from_points(
+                Vector3::new(183.0, 320.0, 0.0),
+                Vector3::new(240.0, 320.0, 0.0),
+            );
+            pb.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pb)).unwrap();
+
+            let mut drum = Insert::new("1TO1PARAMETRIC V DRUM", Vector3::new(248.0, 320.0, 0.0));
+            drum.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(drum)).unwrap();
+            let mut dt =
+                Text::with_value("V-1632", Vector3::new(244.0, 336.0, 0.0)).with_height(2.5);
+            dt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(dt)).unwrap();
+
+            let mut lt = Insert::new(
+                "DCS FUNC ACCESS IN PRIME LOC",
+                Vector3::new(260.0, 320.0, 0.0),
+            );
+            lt.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Insert(lt)).unwrap();
+            let mut ltop = Text::with_value("LT", Vector3::new(258.5, 322.0, 0.0)).with_height(2.2);
+            ltop.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(ltop)).unwrap();
+            let mut lbot =
+                Text::with_value("1632", Vector3::new(257.5, 317.5, 0.0)).with_height(2.2);
+            lbot.common.layer = "12".to_string();
+            doc.add_entity(document::EntityType::Text(lbot)).unwrap();
+        }
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        let tmp = std::env::temp_dir().join(format!("ocs_pidpackage_163_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let pkg_dir = tmp.join("pkg_v2");
+        let _ = app.run_command_line(&format!(
+            "PIDPACKAGE \"{}\" ALLTABS VERIFY",
+            pkg_dir.display()
+        ));
+        let man_p = pkg_dir.join("handover_manifest.json");
+        assert!(man_p.is_file());
+        let man: Value = serde_json::from_str(&std::fs::read_to_string(&man_p).unwrap()).unwrap();
+
+        assert_eq!(
+            man["schema_version"].as_u64(),
+            Some(2),
+            "PIDPACKAGE v2 must emit schema_version = 2 with Valve MTO, Utility, and HAZOP schedules"
+        );
+        assert_eq!(man["total_valves"].as_u64(), Some(3));
+        assert_eq!(man["utility_services_count"].as_u64(), Some(1));
+        assert_eq!(man["battery_limit_interfaces"].as_u64(), Some(1));
+        assert_eq!(man["hazop_nodes_count"].as_u64(), Some(2));
+        assert_eq!(man["unprotected_hazop_nodes"].as_u64(), Some(0));
+
+        for rel in [
+            "schedules/03_valve_mto.csv",
+            "schedules/03_valve_mto.json",
+            "schedules/04_utility_and_battery_limits.csv",
+            "schedules/04_utility_and_battery_limits.json",
+            "audits/05_hazop_worksheet.csv",
+            "audits/05_hazop_worksheet.json",
+        ] {
+            assert!(pkg_dir.join(rel).is_file(), "missing v2 artifact {rel}");
+        }
+
+        let files_arr = man["files"].as_array().unwrap();
+        assert_eq!(files_arr.len(), 18);
+        let mut digest_acc = Sha256::new();
+        for entry in files_arr {
+            let rel = entry["rel_path"].as_str().unwrap();
+            assert!(!rel.contains(':') && !rel.contains('\\'));
+            let raw = std::fs::read(pkg_dir.join(rel)).unwrap();
+            let b = raw.len() as u64;
+            let sha = format!("{:x}", Sha256::digest(&raw));
+            assert_eq!(entry["bytes"].as_u64(), Some(b));
+            assert_eq!(entry["sha256"].as_str(), Some(sha.as_str()));
+            digest_acc.update(format!("{rel}:{b}:{sha}\n").as_bytes());
+        }
+        let expected_man_sha = format!("{:x}", digest_acc.finalize());
+        assert_eq!(
+            man["manifest_sha256"].as_str(),
+            Some(expected_man_sha.as_str())
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads 4 real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into OpenCADStudio and builds the v2 32-file five-discipline Digital Handover Package via PIDPACKAGE ALLTABS SEED VERIFY STRICT"]
+    fn real_multi_tab_pidpackage_v2_five_discipline_handover_bundle_and_sha256_audit() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_raw) = std::env::var("OCS_PID_REAL163_SPPID_PAIR") else {
+            println!("OCS_PID_REAL163_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(legacy_raw) = std::env::var("OCS_PID_REAL163_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL163_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(seed_spec) = std::env::var("OCS_PID_REAL163_SEED") else {
+            println!("OCS_PID_REAL163_SEED unset, skipping.");
+            return;
+        };
+        let sym_dir = std::env::var("OCS_PID_REAL163_SYMDIR").unwrap_or_default();
+        let out_dir = std::env::var("OCS_PID_REAL163_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real163"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sppid_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sppid_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        let legacy_paths: Vec<std::path::PathBuf> = std::env::split_paths(&legacy_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        assert_eq!(sppid_paths.len(), 2);
+        assert_eq!(legacy_paths.len(), 2);
+
+        let all_files = [
+            ("SP01", &sppid_paths[0]),
+            ("SP02", &sppid_paths[1]),
+            ("LG01", &legacy_paths[0]),
+            ("LG02", &legacy_paths[1]),
+        ];
+
+        let mut app = app();
+        let mut tab_indices = Vec::new();
+        let mut sha_prefixes = Vec::new();
+        for (idx, (cid, p)) in all_files.iter().enumerate() {
+            let raw_b = std::fs::read(p).unwrap();
+            sha_prefixes.push(format!("{:x}", Sha256::digest(&raw_b))[..12].to_string());
+            if idx > 0 {
+                let _ = app.update(Message::TabNew);
+            }
+            let ti = app.active_tab;
+            app.tabs[ti].scene.document = crate::io::load_file(p).expect("load DXF");
+            app.tabs[ti].tab_title = format!("{cid}.dxf");
+            tab_indices.push(ti);
+        }
+
+        for &ti in &tab_indices {
+            let _ = app.update(Message::TabSwitch(ti));
+            let _ = app.run_command_line("PIDPROMOTE");
+            let _ = app.run_command_line("PIDREVIEW DEDUP");
+        }
+        let _ = app.update(Message::TabSwitch(tab_indices[0]));
+
+        let pkg_dir = out_dir.join("pkg_v2_tmp");
+        let sym_arg = if sym_dir.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" SYMDIR \"{sym_dir}\"")
+        };
+        let _ = app.run_command_line(&format!(
+            "PIDPACKAGE \"{}\" ALLTABS PLANT P01 SEED \"{seed_spec}\"{sym_arg} VERIFY STRICT",
+            pkg_dir.display()
+        ));
+
+        let man_p = pkg_dir.join("handover_manifest.json");
+        assert!(man_p.is_file());
+        let man: Value = serde_json::from_str(&std::fs::read_to_string(&man_p).unwrap()).unwrap();
+        assert_eq!(man["schema_version"].as_u64(), Some(2));
+        assert_eq!(man["handover_ready"].as_bool(), Some(true));
+        assert_eq!(man["strict_vendor_passed"].as_bool(), Some(true));
+        assert_eq!(man["drc_total_errors"].as_u64(), Some(0));
+        assert_eq!(man["sheets_exported"].as_u64(), Some(4));
+        assert_eq!(man["pid_files_written"].as_u64(), Some(4));
+        assert_eq!(man["pdf_files_plotted"].as_u64(), Some(4));
+        assert!(man["total_valves"].as_u64().unwrap_or(0) >= 100);
+        assert!(man["battery_limit_interfaces"].as_u64().unwrap_or(0) >= 10);
+        assert!(man["hazop_nodes_count"].as_u64().unwrap_or(0) >= 10);
+
+        let files_arr = man["files"].as_array().unwrap();
+        assert_eq!(files_arr.len(), 32);
+        let mut total_bytes = 0u64;
+        let mut digest_acc = Sha256::new();
+        for entry in files_arr {
+            let rel = entry["rel_path"].as_str().unwrap();
+            assert!(!rel.contains(':') && !rel.contains('\\'));
+            let raw = std::fs::read(pkg_dir.join(rel)).unwrap();
+            let b = raw.len() as u64;
+            total_bytes += b;
+            let sha = format!("{:x}", Sha256::digest(&raw));
+            assert_eq!(entry["bytes"].as_u64(), Some(b));
+            assert_eq!(entry["sha256"].as_str(), Some(sha.as_str()));
+            digest_acc.update(format!("{rel}:{b}:{sha}\n").as_bytes());
+        }
+        let expected_man_sha = format!("{:x}", digest_acc.finalize());
+        assert_eq!(
+            man["manifest_sha256"].as_str(),
+            Some(expected_man_sha.as_str())
+        );
+
+        let sanitized = json!({
+            "source_sha256_prefixes": sha_prefixes,
+            "schema_version": man["schema_version"],
+            "handover_ready": man["handover_ready"],
+            "strict_vendor_passed": man["strict_vendor_passed"],
+            "sheets_exported": man["sheets_exported"],
+            "pid_files_written": man["pid_files_written"],
+            "pdf_files_plotted": man["pdf_files_plotted"],
+            "bom_unique_rows": man["bom_unique_rows"],
+            "instrument_loops_count": man["instrument_loops_count"],
+            "total_valves": man["total_valves"],
+            "valve_mto_groups": man["valve_mto_groups"],
+            "utility_services_count": man["utility_services_count"],
+            "battery_limit_interfaces": man["battery_limit_interfaces"],
+            "hazop_nodes_count": man["hazop_nodes_count"],
+            "unprotected_hazop_nodes": man["unprotected_hazop_nodes"],
+            "opc_reciprocal_pairs": man["opc_reciprocal_pairs"],
+            "total_files": files_arr.len(),
+            "total_bytes": total_bytes,
+            "manifest_sha256_prefix": &expected_man_sha[..12],
+        });
+        let _ = std::fs::remove_dir_all(&pkg_dir);
+        std::fs::write(
+            out_dir.join("real163_summary.json"),
+            format!("{}\n", serde_json::to_string_pretty(&sanitized).unwrap()),
         )
         .unwrap();
     }

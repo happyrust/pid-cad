@@ -11,7 +11,7 @@
 | 文件名 | 定位与职责 | 当前状态 |
 |---|---|---|
 | `智能PID平台-阶段一实施方案.md` | 阶段一主执行方案（L0–L6 + LX 逐任务做法、门禁、验收与逐项解决记录） | **已确认并执行中**（已对齐 `main @ 6377fe233` 与 `pid-parse @ a85fa10`） |
-| `智能PID平台-阶段一Issue清单.md` | 阶段一拆单说明、线上 GitHub Issue 映射与逐单解决日志 | **已同步线上 `#106`–`#162`** |
+| `智能PID平台-阶段一Issue清单.md` | 阶段一拆单说明、线上 GitHub Issue 映射与逐单解决日志 | **已同步线上 `#106`–`#163`** |
 | `智能PID平台-阶段一路线图-DWG转智能PID与pid导出.md` | 阶段一总体路线、取舍依据、预检三关与减法送测设计 | **已对齐当前仓库进度并脱敏** |
 | `智能PID平台-样本分析-XML规格与pid结构.md` | 110 对真实 SPPID 样本格式/结构实测规格与 Q1–Q13 答案回填 | **已完成全批 220 份复核与 Q1–Q13 回填** |
 | `03-parse-answers.md` | `L0-8`（[#118](https://github.com/happyrust/pid-cad/issues/118)）对照 `pid-parse @ a85fa10` 源码逐条回答 Q1–Q13（含精确源码路径与行号） | **已完成** |
@@ -20,7 +20,7 @@
 | `06-lx-compliance-and-codelist-audit.md` | `LX-6 / LX-7 / #117`（[#137](https://github.com/happyrust/pid-cad/issues/137)）备份包分级来源全包实查、`.pid` 保留流够用性台账与书面合规边界确认 | **已完成** |
 | `智能PID平台-内部模型合一分析.md` | `PID_SEMANTICS` 与 `PID_AUTHOR` 升格合一方案及与并行分支 `pid-symbol-identity` 的衔接边界 | **已完成引擎与属性面板双分组落地（见 `promote.rs`、`pidprops.rs`）** |
 | `智能PID平台-资料清单.md` | `RES-01`–`RES-17` 资料清点、环境变量约定与缺口降级策略（`L0-1`） | **已完成清点登记** |
-| `readings.md` | 阶段一门禁基线与各单先红后绿、真实样本实测读数账本 | **持续更新（已记 §1–§51）** |
+| `readings.md` | 阶段一门禁基线与各单先红后绿、真实样本实测读数账本 | **持续更新（已记 §1–§52）** |
 
 ---
 
@@ -81,5 +81,6 @@
 | `L2-3 / L2-4 / L3-6 / L6-2` 应用内模块化多系列复制批量智能位号/线号重编号、图面单双行标注联动、冲突预检与单步可撤销命令 `PIDRENUM` 闭环 | [#159](https://github.com/happyrust/pid-cad/issues/159) | **已完成 · 多系列复制批量智能重编号与撤销闭环**（2026-11-22） | 提交 **`522066c87`**：新增 `src/io/pid_convert/renumber.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDRENUM`）；支持 `DRYRUN` 预演、前置重号冲突阻断、单/双行位号与管线线号联动、单步 `UNDO` 及 `.json`/`.csv`/`.tsv` 新旧映射对照表导出，真实双源图纸重编号 `68 + 36` 个符号全过 `StrictVendor` 零违规与单步撤销校验，见 `readings.md` §48 |
 | `L3-3 / L3-4 / L3-5 / L3-6 / L6-2` 应用内 P&ID 自动 HAZOP 审查节点划界、设备-管线-自控保护层关联聚合与审查工作底稿导出命令 `PIDHAZOP` 及 CLI `--export-hazop` 闭环 | [#160](https://github.com/happyrust/pid-cad/issues/160) | **已完成 · 自动 HAZOP 节点划界与保护层底稿闭环**（2026-11-22） | 提交 **`4d759eca2`**：新增 `src/io/pid_convert/hazop.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDHAZOP`）与 `examples/pid_convert.rs`（`--export-hazop`）；跨互逆 `PIDOPC` 自动划定设备审查节点、聚合工艺管线/阀门/ISA-5.1 保护回路并预警盲区节点，4 张真实成对图纸划定 `22` 个节点、关联 `147` 台保护仪表全过，见 `readings.md` §49 |
 | `L3-3 / L3-4 / L3-6 / L6-2` 应用内 P&ID 公用工程介质分类汇总与装置界区外接接口条件表提取及巡检命令 `PIDUTILITY` 与 CLI `--export-utilities` 闭环 | [#161](https://github.com/happyrust/pid-cad/issues/161) | **已完成 · 公用工程分类统计与界区接口条件表闭环**（2026-11-22） | 提交 **`2b7b92b81`**：新增 `src/io/pid_convert/utility.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDUTILITY`）与 `examples/pid_convert.rs`（`--export-utilities`）；自动归类四大公用工程子系统与主工艺介质，回溯外接界区接口规格与首道切断阀并导出 10 列条件表，4 张真实成对图纸识别 `7` 类介质与 `27` 个界区外接接口全过，见 `readings.md` §50 |
-| `L3-3 / L3-4 / L3-6 / L6-2` 应用内 P&ID 阀门专业材料统计表 Valve MTO、连接管线规格自动继承、大宗采购汇总与缺规格阀巡检命令 `PIDVALVE` 及 CLI `--export-valves` 闭环 | [#162](https://github.com/happyrust/pid-cad/issues/162) | **已完成 · 阀门规格自动继承与采购料表汇总闭环**（2026-11-22） | 新增 `src/io/pid_convert/valve_mto.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDVALVE`）与 `examples/pid_convert.rs`（`--export-valves`）；自动剔除非阀门管件、细分八类阀型并沿相连管段继承公称直径与管道等级聚合 MTO 采购料表，4 张真实成对图纸提取 `210` 台阀门（自动继承规格 `210` 台）全过，见 `readings.md` §51 |
+| `L3-3 / L3-4 / L3-6 / L6-2` 应用内 P&ID 阀门专业材料统计表 Valve MTO、连接管线规格自动继承、大宗采购汇总与缺规格阀巡检命令 `PIDVALVE` 及 CLI `--export-valves` 闭环 | [#162](https://github.com/happyrust/pid-cad/issues/162) | **已完成 · 阀门规格自动继承与采购料表汇总闭环**（2026-11-22） | 提交 **`ed334c4ea`**：新增 `src/io/pid_convert/valve_mto.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDVALVE`）与 `examples/pid_convert.rs`（`--export-valves`）；自动剔除非阀门管件、细分八类阀型并沿相连管段继承公称直径与管道等级聚合 MTO 采购料表，4 张真实成对图纸提取 `210` 台阀门（自动继承规格 `210` 台）全过，见 `readings.md` §51 |
+| `L6-1 / L6-2 / L6-3 / L3-6 / L4-6` 升级一站式数字化交付打包命令 `PIDPACKAGE` 及 CLI `--export-package` 全专业五维清册/审计集成与密码学门禁闭环 | [#163](https://github.com/happyrust/pid-cad/issues/163) | **已完成 · 五维全专业 32 文件数字化移交包闭环**（2026-11-22） | 扩展 `src/io/pid_convert/package.rs`、`src/app/commands/pidprops.rs` 与 `examples/pid_convert.rs`（`schema_version = 2`），将 `03_valve_mto`、`04_utility_and_battery_limits` 与 `05_hazop_worksheet` 统一纳入一站式交付包与 SHA-256 门禁；4 张真实成对图纸一次产出 `32` 个交付文件（`4,266,407` B）全过密码学自检，见 `readings.md` §52 |
 | `.sym` 参考数据预览（关联） | [#116](https://github.com/happyrust/pid-cad/issues/116) | **由并行分支推进中** | 正在 `pid-symbol-on-main` 工作树推进 `pid_backup_browser/symbol_preview.rs`，严格避让 |
