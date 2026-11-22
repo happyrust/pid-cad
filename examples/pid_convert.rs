@@ -17,9 +17,9 @@ use std::path::PathBuf;
 use OpenCADStudio::io::pid_convert::{
     convert_path_to_dir, diff_pid_files, export_handover_package_from_path,
     extract_bom_from_batch_dir, extract_hazop_from_path, extract_loops_from_batch_dir,
-    extract_utilities_from_path, save_cad_file_as_binary_dwg, write_bom_schedule_file,
-    write_pid_diff_file, write_pid_hazop_file, write_pid_loops_file, write_pid_utility_file,
-    ConvertOptions, PackageOptions,
+    extract_utilities_from_path, extract_valves_from_path, save_cad_file_as_binary_dwg,
+    write_bom_schedule_file, write_pid_diff_file, write_pid_hazop_file, write_pid_loops_file,
+    write_pid_utility_file, write_pid_valve_file, ConvertOptions, PackageOptions,
 };
 
 struct CliArgs {
@@ -36,6 +36,7 @@ struct CliArgs {
     export_loops: Option<PathBuf>,
     export_hazop: Option<PathBuf>,
     export_utilities: Option<PathBuf>,
+    export_valves: Option<PathBuf>,
     export_package: Option<PathBuf>,
     strict_gate: bool,
     save_dwg: Option<PathBuf>,
@@ -55,6 +56,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut export_loops: Option<PathBuf> = None;
     let mut export_hazop: Option<PathBuf> = None;
     let mut export_utilities: Option<PathBuf> = None;
+    let mut export_valves: Option<PathBuf> = None;
     let mut export_package: Option<PathBuf> = None;
     let mut strict_gate = false;
     let mut save_dwg: Option<PathBuf> = None;
@@ -112,6 +114,12 @@ fn parse_args() -> Result<CliArgs, String> {
                         .ok_or("--export-utilities requires an output path (.csv/.tsv/.json)")?,
                 ));
             }
+            "--export-valves" => {
+                export_valves = Some(PathBuf::from(
+                    it.next()
+                        .ok_or("--export-valves requires an output path (.csv/.tsv/.json)")?,
+                ));
+            }
             "--export-package" => {
                 export_package = Some(PathBuf::from(
                     it.next()
@@ -166,6 +174,7 @@ fn parse_args() -> Result<CliArgs, String> {
         && export_package.is_none()
         && export_hazop.is_none()
         && export_utilities.is_none()
+        && export_valves.is_none()
     {
         return Err(
             "--out <dir> (or --diff-with <baseline> or --export-package <dir>) is required"
@@ -186,6 +195,7 @@ fn parse_args() -> Result<CliArgs, String> {
         export_loops,
         export_hazop,
         export_utilities,
+        export_valves,
         export_package,
         strict_gate,
         save_dwg,
@@ -222,6 +232,35 @@ fn main() {
         verify_plot_pdf: args.verify_plot,
         ..Default::default()
     };
+
+    if let Some(ref vm_out) = args.export_valves {
+        match extract_valves_from_path(&effective_input)
+            .and_then(|rep| write_pid_valve_file(&rep, vm_out).map(|()| rep))
+        {
+            Ok(rep) => {
+                println!(
+                    "pid_valve: sheets={} total_valves={} resolved={} unresolved={} mto_groups={}",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_valves,
+                    rep.summary.spec_resolved_valves,
+                    rep.summary.unresolved_valves,
+                    rep.summary.mto_groups_count,
+                );
+                if args.out_dir.is_none()
+                    && args.diff_with.is_none()
+                    && args.export_package.is_none()
+                    && args.export_hazop.is_none()
+                    && args.export_utilities.is_none()
+                {
+                    return;
+                }
+            }
+            Err(err) => {
+                eprintln!("error: export-valves failed: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if let Some(ref ut_out) = args.export_utilities {
         match extract_utilities_from_path(&effective_input)

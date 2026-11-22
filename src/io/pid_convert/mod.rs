@@ -22,6 +22,7 @@ pub mod renumber;
 pub mod spec_check;
 pub mod trace;
 pub mod utility;
+pub mod valve_mto;
 
 pub use diff::{
     diff_pid_documents, format_pid_diff_delimited, DiffFieldChange, DiffKind, PidDiffItem,
@@ -36,6 +37,14 @@ pub use utility::{
     FluidCategory, PidBatteryLimitInterface, PidServiceSummaryRow, PidUtilityReport,
     PidUtilitySummary, UTILITY_CSV_HEADERS,
 };
+pub use valve_mto::{
+    analyze_pid_valve_mto, classify_valve_role_and_subtype, format_pid_valve_delimited,
+    PidValveItem, PidValveMtoRow, PidValveReport, PidValveSummary, ValveCategory, ValveSubtype,
+    VALVE_CSV_HEADERS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use valve_mto::{extract_valves_from_path, write_pid_valve_file};
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use utility::{extract_utilities_from_path, write_pid_utility_file};
 

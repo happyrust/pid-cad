@@ -2043,3 +2043,41 @@
 | `scripts\fmt-newhunks.ps1` | — | `utility.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 51. L3-3 / L3-4 / L3-6 / L6-2（#162）：应用内 P&ID 阀门专业材料统计表 Valve MTO、连接管线规格自动继承、大宗采购汇总与缺规格阀巡检命令 `PIDVALVE` 及 CLI `--export-valves` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `2b7b92b81`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{valve_mto,mod}.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-22-issue162/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_valve.txt`、`cli_export_valves.txt`、`real_out/real162_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
+
+### 51.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_162_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidvalve_inherits_pipe_specs_rolls_up_mto_flags_unresolved_and_steps_camera`（构造跨双标签页的同规格球阀 `BV16201A + BV16202A`、自控阀 `FV16201`、非阀门同心大小头 `CONCENTRIC REDUCER` 与无标线号支管上的孤立闸阀 `GV16299`，验证非阀门管件精确剔除、沿相连管段自动继承 `100 mm / CS150`、跨标签页大宗采购汇总 `quantity = 2`、`UNRESOLVED / ACTUATED` 分类高亮与 `PIDVALVE NEXT ALLTABS` 跨标签页聚焦巡检），运行按预期在 `valves.json` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`28 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/valve_mto.rs`（`analyze_pid_valve_mto`、`extract_valves_from_path`、`write_pid_valve_file`）：统一兼容未升格 `.dxf`/`.dwg`/`.pid` 与已升格 `PID_AUTHOR` 模型，自动排除大小头/法兰/过滤器/管帽/流量计等非阀门管件，细分八类阀型与三大请购类别（`manual_bulk`、`actuated_control`、`safety_relief`），沿相连管段自动继承所在管线号、公称直径、介质代号与管道材质等级，聚合产出 `(请购类别 × 阀型 × 公称直径 × 管道等级)` 采购汇总料表（`mto_rollup`）并标记缺规格阀门，导出 `.json` 与带 UTF-8 BOM 的 `.csv` / `.tsv` 10 列料表；
+  2. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDVALVE [SUMMARY | ALL | MANUAL | ACTUATED | RELIEF | UNRESOLVED | TYPE "<阀型>" | NEXT] [ALLTABS] [EXPORT "<.json|.csv|.tsv>"]`，并在 `examples/pid_convert.rs` 新增 `--export-valves <PATH>`（真实中位规模 SPPID 图 CLI 独立提取 `39` 台阀门、聚合 `12` 行 MTO 采购项，退出码 `0`）。
+
+### 51.2 真实双标准四图成对跨标签页阀门规格自动继承与采购料表汇总实测
+
+| 图纸组 | 样本形态 | 源图 SHA-256 前缀对 | 提取总阀门数 | 手动大宗阀 / 自控阀 / 安全阀 | 已自动继承规格数 | 待补规格数 | MTO 采购汇总行数 | `.csv` 料表与 `NEXT` 巡检 |
+|---|---|---|---:|---|---:|---:|---:|---|
+| `SP01 + SP02` | 未升格 SPPID 拆分生产图对 | `2164f88bbb57` + `fc2c812dc182` | **`84`** | `74` / `4` / `6` | **`84`** | `0` | **`23`** | **通过** |
+| `LG01 + LG02` | 未升格原生 AutoCAD 存量图对 | `a0f05f81a655` + `28ed389e23cb` | **`126`** | `112` / `14` / `0` | **`126`** | `0` | **`10`** | **通过** |
+
+### 51.3 固定门禁读数
+
+| 门禁项 | 改前读数（§50.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,248` 条（`7,162` 过 / `85` 忽略 / `1` 既有 `.pen`） | **`7,250` 条**（**`7,163` 过** / **`86` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图跨标签页阀门规格继承与 MTO 汇总），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `valve_mto.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |

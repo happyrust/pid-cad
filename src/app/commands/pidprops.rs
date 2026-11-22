@@ -43,7 +43,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDPACKAGE",
         "PIDRENUM",
         "PIDHAZOP",
-        "PIDUTILITY"
+        "PIDUTILITY",
+        "PIDVALVE"
     ]
 });
 
@@ -311,6 +312,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidutility_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidvalve_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -3822,6 +3826,238 @@ impl OpenCADStudio {
             other => {
                 self.command_line.push_error(&format!(
                     "PIDUTILITY: 未知子命令 {other}（支持 SUMMARY / ALL / UTILITIES / BATTERYLIMIT / SERVICE / NEXT / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
+
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidvalve_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            analyze_pid_valve_mto, write_pid_valve_file, OpcSheetInput, ValveCategory,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDVALVE") {
+            return None;
+        }
+
+        let mut action: Option<String> = None;
+        let mut type_query: Option<String> = None;
+        let mut all_tabs = false;
+        let mut export_path: Option<std::path::PathBuf> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            let up = tok.to_ascii_uppercase();
+            match up.as_str() {
+                "ALLTABS" => {
+                    all_tabs = true;
+                    idx += 1;
+                }
+                "SUMMARY" | "ALL" | "MANUAL" | "ACTUATED" | "RELIEF" | "UNRESOLVED" | "NEXT" => {
+                    action = Some(up);
+                    idx += 1;
+                }
+                "TYPE" => {
+                    let Some(q) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDVALVE TYPE: 缺少阀型关键字（如 BALL、GATE、CHECK）。");
+                        return Some(Task::none());
+                    };
+                    action = Some("TYPE".to_string());
+                    type_query = Some(q.to_ascii_lowercase());
+                    idx += 2;
+                }
+                "EXPORT" => {
+                    let Some(next_tok) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDVALVE EXPORT: 缺少输出文件路径（.json/.csv/.tsv）。");
+                        return Some(Task::none());
+                    };
+                    export_path = Some(std::path::PathBuf::from(next_tok));
+                    idx += 2;
+                }
+                _ => {
+                    if action.is_none() {
+                        action = Some("TYPE".to_string());
+                        type_query = Some(tok.to_ascii_lowercase());
+                    }
+                    idx += 1;
+                }
+            }
+        }
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<OpcSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+
+        let rep = analyze_pid_valve_mto(&sheet_inputs);
+
+        if let Some(ref out_p) = export_path {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(err) = write_pid_valve_file(&rep, out_p) {
+                self.command_line
+                    .push_error(&format!("PIDVALVE EXPORT: {err}"));
+                return Some(Task::none());
+            }
+        }
+
+        let eff_action = action.as_deref().unwrap_or("SUMMARY");
+        let filtered: Vec<_> = rep
+            .valves
+            .iter()
+            .filter(|v| match eff_action {
+                "MANUAL" => v.category == ValveCategory::ManualBulk,
+                "ACTUATED" => v.category == ValveCategory::ActuatedControl,
+                "RELIEF" => v.category == ValveCategory::SafetyRelief,
+                "UNRESOLVED" => !v.spec_resolved,
+                "TYPE" => type_query
+                    .as_deref()
+                    .is_some_and(|q| v.valve_subtype.as_str().contains(q)),
+                _ => true,
+            })
+            .collect();
+
+        match eff_action {
+            "SUMMARY" => {
+                self.command_line.push_output(&format!(
+                    "PIDVALVE: 扫描图纸={} | 总阀门={}（手动大宗阀={}，自控阀={}，安全阀={}）| 已继承规格={} | 待补规格={} | MTO汇总行={}。",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_valves,
+                    rep.summary.manual_bulk_valves,
+                    rep.summary.actuated_control_valves,
+                    rep.summary.safety_relief_valves,
+                    rep.summary.spec_resolved_valves,
+                    rep.summary.unresolved_valves,
+                    rep.summary.mto_groups_count,
+                ));
+            }
+            "ALL" | "MANUAL" | "ACTUATED" | "RELIEF" | "UNRESOLVED" | "TYPE" => {
+                let mut by_tab: std::collections::BTreeMap<usize, Vec<document::Handle>> =
+                    std::collections::BTreeMap::new();
+                for v in &filtered {
+                    let dst = by_tab.entry(v.tab_index).or_default();
+                    for &h in &v.member_handles {
+                        if !dst.contains(&h) {
+                            dst.push(h);
+                        }
+                    }
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                let mut sel_cnt = 0usize;
+                for (&ti, hs) in &by_tab {
+                    if ti < self.tabs.len() && !hs.is_empty() {
+                        self.tabs[ti].scene.select_entities(hs);
+                        sel_cnt += hs.len();
+                    }
+                }
+                if let Some(cur_hs) = by_tab.get(&self.active_tab).filter(|h| !h.is_empty()) {
+                    let _ = self.tabs[self.active_tab].scene.zoom_to_entities(cur_hs);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDVALVE {eff_action}: 匹配 {} 台阀门，跨打开图纸高亮 {sel_cnt} 个图元。",
+                    filtered.len()
+                ));
+            }
+            "NEXT" => {
+                if filtered.is_empty() {
+                    self.command_line
+                        .push_output("PIDVALVE NEXT: 未找到可巡检的阀门图元。");
+                    return Some(self.finish_dispatch(cmd));
+                }
+                let cur_tab = self.active_tab;
+                let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[cur_tab]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                let cur_pos = filtered
+                    .iter()
+                    .position(|v| v.tab_index == cur_tab && sel_set.contains(&v.primary_handle));
+                let next_idx = cur_pos.map(|p| (p + 1) % filtered.len()).unwrap_or(0);
+                let chosen = filtered[next_idx];
+                let dest_tab = chosen.tab_index;
+
+                if dest_tab < self.tabs.len() && dest_tab != self.active_tab {
+                    let _ = self.update(Message::TabSwitch(dest_tab));
+                    self.active_tab = dest_tab;
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                if dest_tab < self.tabs.len() {
+                    self.tabs[dest_tab]
+                        .scene
+                        .select_entities(&chosen.member_handles);
+                    let zoomed = self.tabs[dest_tab]
+                        .scene
+                        .zoom_to_entities(&chosen.member_handles);
+                    if !zoomed {
+                        let mut cam = self.tabs[dest_tab].scene.camera.borrow_mut();
+                        let z = cam.target.z;
+                        cam.target = glam::DVec3::new(chosen.x, chosen.y, z);
+                    }
+                    self.refresh_properties();
+                }
+                self.command_line.push_output(&format!(
+                    "PIDVALVE NEXT [{}/{}]: {}（{}，{}，规格={} / {}）。",
+                    next_idx + 1,
+                    filtered.len(),
+                    chosen.valve_tag,
+                    chosen.valve_subtype.as_str(),
+                    chosen.drawing_code,
+                    chosen.nominal_diameter,
+                    chosen.piping_spec,
+                ));
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDVALVE: 未知子命令 {other}（支持 SUMMARY / ALL / MANUAL / ACTUATED / RELIEF / UNRESOLVED / TYPE / NEXT / EXPORT）。"
                 ));
                 return Some(Task::none());
             }
@@ -10803,6 +11039,312 @@ mod tests {
 
         std::fs::write(
             out_dir.join("real161_summary.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()
+            ),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidvalve_inherits_pipe_specs_rolls_up_mto_flags_unresolved_and_steps_camera() {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let mut app = app();
+
+        // Tab 1: DWG-162-01.dxf with BV16201A + FV16201 on 100-PG-16201-CS150, a non-valve reducer, and unresolved GV16299
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-162-01.dxf".to_string();
+        let (bv1_h, fv_h, gv_unres_h) = {
+            let doc = &mut app.tabs[tab1].scene.document;
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "GATE VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "CONCENTRIC REDUCER", 5.0, 4.0);
+
+            let mut tb =
+                Text::with_value("DWG-162-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut p1 = Line::from_points(
+                Vector3::new(40.0, 200.0, 0.0),
+                Vector3::new(97.0, 200.0, 0.0),
+            );
+            p1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p1)).unwrap();
+
+            let mut bv1 = Insert::new("BALL VALVE TYPE 2", Vector3::new(100.0, 200.0, 0.0));
+            bv1.common.layer = "11".to_string();
+            let bv1_h = doc.add_entity(document::EntityType::Insert(bv1)).unwrap();
+            let mut bvt1 =
+                Text::with_value("BV16201A", Vector3::new(95.0, 206.0, 0.0)).with_height(2.5);
+            bvt1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(bvt1)).unwrap();
+
+            let mut p2 = Line::from_points(
+                Vector3::new(103.0, 200.0, 0.0),
+                Vector3::new(177.0, 200.0, 0.0),
+            );
+            p2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p2)).unwrap();
+            let mut ltxt = Text::with_value("100-PG-16201-CS150", Vector3::new(125.0, 203.0, 0.0))
+                .with_height(2.5);
+            ltxt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(ltxt)).unwrap();
+
+            let mut fv = Insert::new("BALL VALVE TYPE 2", Vector3::new(180.0, 200.0, 0.0));
+            fv.common.layer = "11".to_string();
+            let fv_h = doc.add_entity(document::EntityType::Insert(fv)).unwrap();
+            let mut fvt =
+                Text::with_value("FV16201", Vector3::new(176.0, 206.0, 0.0)).with_height(2.5);
+            fvt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(fvt)).unwrap();
+
+            let mut p3 = Line::from_points(
+                Vector3::new(183.0, 200.0, 0.0),
+                Vector3::new(247.0, 200.0, 0.0),
+            );
+            p3.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p3)).unwrap();
+
+            // Non-valve fitting must be excluded from Valve MTO
+            let mut red = Insert::new("CONCENTRIC REDUCER", Vector3::new(250.0, 200.0, 0.0));
+            red.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(red)).unwrap();
+
+            // Unlabeled branch with Gate Valve GV16299 -> unresolved spec
+            let mut up = Line::from_points(
+                Vector3::new(60.0, 360.0, 0.0),
+                Vector3::new(117.0, 360.0, 0.0),
+            );
+            up.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(up)).unwrap();
+            let mut gv = Insert::new("GATE VALVE TYPE 2", Vector3::new(120.0, 360.0, 0.0));
+            gv.common.layer = "11".to_string();
+            let gv_unres_h = doc.add_entity(document::EntityType::Insert(gv)).unwrap();
+            let mut gvt =
+                Text::with_value("GV16299", Vector3::new(116.0, 366.0, 0.0)).with_height(2.5);
+            gvt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(gvt)).unwrap();
+
+            (bv1_h, fv_h, gv_unres_h)
+        };
+
+        // Tab 2: DWG-162-02.dxf with matching 100 mm CS150 Ball Valve BV16202A (rolls up to Qty=2!)
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-162-02.dxf".to_string();
+        let bv2_h = {
+            let doc = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+
+            let mut tb =
+                Text::with_value("DWG-162-02", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut pa = Line::from_points(
+                Vector3::new(80.0, 260.0, 0.0),
+                Vector3::new(137.0, 260.0, 0.0),
+            );
+            pa.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pa)).unwrap();
+            let mut la = Text::with_value("100-PG-16202-CS150", Vector3::new(95.0, 263.0, 0.0))
+                .with_height(2.5);
+            la.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(la)).unwrap();
+
+            let mut bv2 = Insert::new("BALL VALVE TYPE 2", Vector3::new(140.0, 260.0, 0.0));
+            bv2.common.layer = "11".to_string();
+            let bv2_h = doc.add_entity(document::EntityType::Insert(bv2)).unwrap();
+            let mut bvt2 =
+                Text::with_value("BV16202A", Vector3::new(135.0, 266.0, 0.0)).with_height(2.5);
+            bvt2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(bvt2)).unwrap();
+
+            bv2_h
+        };
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        app.active_tab = tab1;
+
+        let tmp = std::env::temp_dir().join(format!("ocs_pidvalve_162_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let v_json = tmp.join("valves.json");
+        let v_csv = tmp.join("valves.csv");
+        let _ = app.run_command_line(&format!("PIDVALVE ALLTABS EXPORT \"{}\"", v_json.display()));
+        assert!(v_json.is_file(), "PIDVALVE EXPORT must write valves.json");
+        let _ = app.run_command_line(&format!(
+            "PIDVALVE SUMMARY ALLTABS EXPORT \"{}\"",
+            v_csv.display()
+        ));
+        let csv_raw = std::fs::read_to_string(&v_csv).unwrap();
+        assert!(
+            csv_raw.starts_with('\u{feff}')
+                && csv_raw.contains("VALVE_ITEM")
+                && csv_raw.contains("MTO_ROLLUP")
+        );
+
+        let rep: Value = serde_json::from_str(&std::fs::read_to_string(&v_json).unwrap()).unwrap();
+        assert_eq!(rep["summary"]["total_valves"].as_u64(), Some(4));
+        assert_eq!(rep["summary"]["manual_bulk_valves"].as_u64(), Some(3));
+        assert_eq!(rep["summary"]["actuated_control_valves"].as_u64(), Some(1));
+        assert_eq!(rep["summary"]["spec_resolved_valves"].as_u64(), Some(3));
+        assert_eq!(rep["summary"]["unresolved_valves"].as_u64(), Some(1));
+
+        let rollup = rep["mto_rollup"].as_array().unwrap();
+        let ball_row = rollup
+            .iter()
+            .find(|r| {
+                r["valve_subtype"].as_str() == Some("ball_valve")
+                    && r["nominal_diameter"].as_str() == Some("100 mm")
+                    && r["piping_spec"].as_str() == Some("CS150")
+            })
+            .expect("must roll up 2x 100 mm CS150 ball valves across Tab 1 & Tab 2");
+        assert_eq!(ball_row["quantity"].as_u64(), Some(2));
+
+        // Filter UNRESOLVED selects GV16299 only
+        let _ = app.run_command_line("PIDVALVE UNRESOLVED ALLTABS");
+        assert!(has_sel(&app, tab1, gv_unres_h));
+        assert!(!has_sel(&app, tab1, bv1_h));
+
+        // Filter ACTUATED selects FV16201 only
+        let _ = app.run_command_line("PIDVALVE ACTUATED ALLTABS");
+        assert!(has_sel(&app, tab1, fv_h));
+        assert!(!has_sel(&app, tab1, bv1_h));
+
+        // Stateless NEXT steps across all 4 valves including BV16202A on Tab 2
+        let mut visited_tab2 = false;
+        for _ in 0..4 {
+            let _ = app.run_command_line("PIDVALVE NEXT ALLTABS");
+            if app.active_tab == tab2 && has_sel(&app, tab2, bv2_h) {
+                visited_tab2 = true;
+            }
+        }
+        assert!(
+            visited_tab2,
+            "PIDVALVE NEXT ALLTABS must visit BV16202A on Tab 2"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads 4 real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into OpenCADStudio and verifies PIDVALVE ALLTABS connected-pipeline spec inheritance, bulk MTO rollup, and NEXT stepping"]
+    fn real_multi_tab_pidvalve_spec_inheritance_and_mto_rollup_audit() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sp_raw) = std::env::var("OCS_PID_REAL162_SPPID_PAIR") else {
+            println!("OCS_PID_REAL162_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(lg_raw) = std::env::var("OCS_PID_REAL162_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL162_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL162_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real162"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sp_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sp_raw).collect();
+        let lg_paths: Vec<std::path::PathBuf> = std::env::split_paths(&lg_raw).collect();
+        assert_eq!(sp_paths.len(), 2);
+        assert_eq!(lg_paths.len(), 2);
+
+        let groups = [
+            ("SP01_SP02", "sppid_pair", &sp_paths),
+            ("LG01_LG02", "legacy_autocad_pair", &lg_paths),
+        ];
+
+        let mut out_groups = Vec::new();
+        for (gid, kind, pair) in &groups {
+            let mut sha_pair = Vec::new();
+            let mut app = app();
+            for (pi, p) in pair.iter().enumerate() {
+                let sha_pfx =
+                    format!("{:x}", Sha256::digest(std::fs::read(p).unwrap()))[..12].to_string();
+                sha_pair.push(sha_pfx);
+                let ti = if pi == 0 {
+                    app.active_tab
+                } else {
+                    let _ = app.update(Message::TabNew);
+                    app.active_tab
+                };
+                app.tabs[ti].scene.document = crate::io::load_file(p).unwrap();
+                app.tabs[ti].tab_title = format!("{gid}_{}.dxf", pi + 1);
+            }
+
+            let v_json = out_dir.join(format!("{gid}_valves.json"));
+            let v_csv = out_dir.join(format!("{gid}_valves.csv"));
+            let _ =
+                app.run_command_line(&format!("PIDVALVE ALLTABS EXPORT \"{}\"", v_json.display()));
+            let _ = app.run_command_line(&format!(
+                "PIDVALVE SUMMARY ALLTABS EXPORT \"{}\"",
+                v_csv.display()
+            ));
+            let csv_txt = std::fs::read_to_string(&v_csv).unwrap();
+            assert!(
+                csv_txt.starts_with('\u{feff}') && csv_txt.contains("RecordKind,TagOrRollupKey")
+            );
+            let rep: Value =
+                serde_json::from_str(&std::fs::read_to_string(&v_json).unwrap()).unwrap();
+            let _ = std::fs::remove_file(&v_json);
+            let _ = std::fs::remove_file(&v_csv);
+
+            assert!(
+                rep["summary"]["total_valves"].as_u64().unwrap_or(0) >= 5,
+                "{gid} must extract >= 5 valves"
+            );
+            assert!(
+                rep["summary"]["spec_resolved_valves"].as_u64().unwrap_or(0) >= 1,
+                "{gid} must inherit pipeline specs on >= 1 valve"
+            );
+            assert!(
+                rep["summary"]["mto_groups_count"].as_u64().unwrap_or(0) >= 1,
+                "{gid} must aggregate >= 1 Valve MTO procurement row"
+            );
+
+            let _ = app.run_command_line("PIDVALVE NEXT ALLTABS");
+            assert!(
+                !app.tabs[app.active_tab]
+                    .scene
+                    .selected_entities()
+                    .is_empty(),
+                "PIDVALVE NEXT ALLTABS must select target valve entity"
+            );
+
+            out_groups.push(json!({
+                "group": gid,
+                "kind": kind,
+                "sha256_prefixes": sha_pair,
+                "sheets_scanned": rep["summary"]["sheets_scanned"],
+                "total_valves": rep["summary"]["total_valves"],
+                "manual_bulk_valves": rep["summary"]["manual_bulk_valves"],
+                "actuated_control_valves": rep["summary"]["actuated_control_valves"],
+                "safety_relief_valves": rep["summary"]["safety_relief_valves"],
+                "spec_resolved_valves": rep["summary"]["spec_resolved_valves"],
+                "unresolved_valves": rep["summary"]["unresolved_valves"],
+                "mto_groups_count": rep["summary"]["mto_groups_count"],
+            }));
+        }
+
+        std::fs::write(
+            out_dir.join("real162_summary.json"),
             format!(
                 "{}\n",
                 serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()
