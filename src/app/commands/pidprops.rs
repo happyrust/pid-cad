@@ -35,7 +35,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDBOM",
         "PIDDRC",
         "PIDFIND",
-        "PIDTRACE"
+        "PIDTRACE",
+        "PIDDIFF"
     ]
 });
 
@@ -279,6 +280,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidtrace_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_piddiff_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -1885,6 +1889,254 @@ impl OpenCADStudio {
         } else {
             self.command_line
                 .push_output("PIDTRACE: 起点与终点之间不存在连通工艺路径（reachable=false）。");
+        }
+
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_piddiff_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            diff_pid_documents, write_pid_diff_file, ConvertOptions, DiffKind,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDDIFF") {
+            return None;
+        }
+
+        let mut base_spec: Option<String> = None;
+        let mut action: Option<String> = None;
+        let mut export_path: Option<std::path::PathBuf> = None;
+        let mut plant = "P01".to_string();
+        let mut classmap: Option<String> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            if tok.eq_ignore_ascii_case("EXPORT") {
+                let Some(next_tok) = tokens.get(idx + 1) else {
+                    self.command_line
+                        .push_error("PIDDIFF EXPORT: 缺少输出文件路径（.json/.csv/.tsv）。");
+                    return Some(Task::none());
+                };
+                export_path = Some(std::path::PathBuf::from(next_tok));
+                idx += 2;
+            } else if tok.eq_ignore_ascii_case("PLANT") {
+                if let Some(p) = tokens.get(idx + 1) {
+                    plant = p.clone();
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            } else if tok.eq_ignore_ascii_case("CLASSMAP") {
+                if let Some(cm) = tokens.get(idx + 1) {
+                    classmap = Some(cm.clone());
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            } else if matches!(
+                tok.to_ascii_uppercase().as_str(),
+                "SUMMARY" | "ALL" | "ADDED" | "MODIFIED" | "NEXT"
+            ) && base_spec.is_some()
+            {
+                action = Some(tok.to_ascii_uppercase());
+                idx += 1;
+            } else if base_spec.is_none() {
+                base_spec = Some(tok.clone());
+                idx += 1;
+            } else {
+                action = Some(tok.to_ascii_uppercase());
+                idx += 1;
+            }
+        }
+
+        let Some(base_raw) = base_spec.filter(|s| !s.trim().is_empty()) else {
+            self.command_line.push_error(
+                "PIDDIFF: 用法 PIDDIFF \"<基准图纸路径或已打开标签页>\" [SUMMARY | ALL | ADDED | MODIFIED | NEXT] [EXPORT \"<.json|.csv|.tsv>\"]。",
+            );
+            return Some(Task::none());
+        };
+
+        let curr_name = self.tabs[i]
+            .current_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+
+        let matched_tab = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|&(ti, t)| ti != i && !t.is_start)
+            .find_map(|(ti, t)| {
+                let file_nm = t
+                    .current_path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                let title_match = t.tab_title.eq_ignore_ascii_case(&base_raw)
+                    || file_nm.eq_ignore_ascii_case(&base_raw);
+                title_match.then_some((
+                    ti,
+                    if !file_nm.is_empty() {
+                        file_nm.to_string()
+                    } else {
+                        t.tab_title.clone()
+                    },
+                ))
+            });
+
+        let opts = ConvertOptions {
+            plant,
+            class_map_path: classmap,
+            ..Default::default()
+        };
+
+        let rep_res = if let Some((bi, b_nm)) = matched_tab {
+            diff_pid_documents(
+                &b_nm,
+                &self.tabs[bi].scene.document,
+                &curr_name,
+                &self.tabs[i].scene.document,
+                &opts,
+            )
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let bp = std::path::Path::new(&base_raw);
+                match crate::io::load_file(bp) {
+                    Ok(b_doc) => {
+                        let b_nm = bp.file_name().and_then(|s| s.to_str()).unwrap_or(&base_raw);
+                        diff_pid_documents(
+                            b_nm,
+                            &b_doc,
+                            &curr_name,
+                            &self.tabs[i].scene.document,
+                            &opts,
+                        )
+                    }
+                    Err(err) => Err(format!("无法加载基准图纸 {base_raw}：{err}")),
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                Err(format!("未找到已打开的基准标签页 {base_raw}。"))
+            }
+        };
+
+        let rep = match rep_res {
+            Ok(r) => r,
+            Err(err) => {
+                self.command_line.push_error(&format!("PIDDIFF: {err}"));
+                return Some(Task::none());
+            }
+        };
+
+        if let Some(ref out_p) = export_path {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(err) = write_pid_diff_file(&rep, out_p) {
+                self.command_line
+                    .push_error(&format!("PIDDIFF EXPORT: {err}"));
+                return Some(Task::none());
+            }
+        }
+
+        let eff_action = action.as_deref().unwrap_or("SUMMARY");
+        match eff_action {
+            "SUMMARY" => {
+                self.command_line.push_output(&format!(
+                    "PIDDIFF: 基准={} vs 当前={} | 总变更={}（新增={}，修改={}，删除={}，未变={}）。",
+                    rep.summary.baseline_drawing,
+                    rep.summary.current_drawing,
+                    rep.summary.total_changes,
+                    rep.summary.added_count,
+                    rep.summary.modified_count,
+                    rep.summary.removed_count,
+                    rep.summary.unchanged_count,
+                ));
+            }
+            "ALL" | "ADDED" | "MODIFIED" => {
+                let mut handles = Vec::new();
+                for it in &rep.items {
+                    let keep = match eff_action {
+                        "ADDED" => it.kind == DiffKind::Added,
+                        "MODIFIED" => it.kind == DiffKind::Modified,
+                        _ => it.kind != DiffKind::Removed,
+                    };
+                    if keep {
+                        for &mh in &it.member_handles {
+                            if !handles.contains(&mh) {
+                                handles.push(mh);
+                            }
+                        }
+                    }
+                }
+                self.tabs[i].scene.deselect_all();
+                if !handles.is_empty() {
+                    self.tabs[i].scene.select_entities(&handles);
+                    let _ = self.tabs[i].scene.zoom_to_entities(&handles);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDDIFF {eff_action}: 已高亮选中当前图纸 {} 个变更图元。",
+                    handles.len()
+                ));
+            }
+            "NEXT" => {
+                let candidates: Vec<_> = rep
+                    .items
+                    .iter()
+                    .filter(|it| !it.member_handles.is_empty())
+                    .collect();
+                if candidates.is_empty() {
+                    self.command_line
+                        .push_output("PIDDIFF NEXT: 当前图纸上没有可定位的新增或修改图元。");
+                    return Some(self.finish_dispatch(cmd));
+                }
+                let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[i]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                let cur_pos = candidates.iter().position(|it| {
+                    !sel_set.is_empty()
+                        && sel_set.len() == it.member_handles.len()
+                        && it.member_handles.iter().all(|mh| sel_set.contains(mh))
+                });
+                let next_idx = cur_pos.map(|p| (p + 1) % candidates.len()).unwrap_or(0);
+                let chosen = candidates[next_idx];
+                self.tabs[i].scene.deselect_all();
+                self.tabs[i].scene.select_entities(&chosen.member_handles);
+                let zoomed = self.tabs[i].scene.zoom_to_entities(&chosen.member_handles);
+                if !zoomed {
+                    if let (Some(dx), Some(dy)) = (chosen.x, chosen.y) {
+                        let mut cam = self.tabs[i].scene.camera.borrow_mut();
+                        let z = cam.target.z;
+                        cam.target = glam::DVec3::new(dx, dy, z);
+                    }
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDDIFF NEXT [{}/{}]: {} {}（{}）。",
+                    next_idx + 1,
+                    candidates.len(),
+                    chosen.kind.as_str(),
+                    chosen.item_tag,
+                    chosen.category,
+                ));
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDDIFF: 未知子命令 {other}（支持 SUMMARY / ALL / ADDED / MODIFIED / NEXT / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
         }
 
         Some(self.finish_dispatch(cmd))
@@ -5970,6 +6222,416 @@ mod tests {
         std::fs::write(
             out_dir.join("real153_summary.json"),
             format!("{}\n", serde_json::to_string_pretty(&sanitized).unwrap()),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn piddiff_ignores_layout_shifts_detects_added_removed_modified_and_steps_camera() {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let mut app = app();
+
+        // Tab 1: Baseline Rev 0 ("DWG-154-R0.dxf")
+        let tab_r0 = app.active_tab;
+        app.tabs[tab_r0].tab_title = "DWG-154-R0.dxf".to_string();
+        {
+            let doc = &mut app.tabs[tab_r0].scene.document;
+            define_sppid_block(doc, "CENTRIFUGAL PUMP", 8.0, 8.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-154-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut p0 = Insert::new("CENTRIFUGAL PUMP", Vector3::new(80.0, 200.0, 0.0));
+            p0.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(p0)).unwrap();
+            let mut pt0 =
+                Text::with_value("P-1541", Vector3::new(76.0, 208.0, 0.0)).with_height(2.5);
+            pt0.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(pt0)).unwrap();
+
+            let mut v1 = Insert::new("BALL VALVE TYPE 2", Vector3::new(160.0, 200.0, 0.0));
+            v1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(v1)).unwrap();
+            let mut vt1 =
+                Text::with_value("BV154101", Vector3::new(156.0, 206.0, 0.0)).with_height(2.5);
+            vt1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(vt1)).unwrap();
+
+            // Valve BV154102 -> will be REMOVED in Rev A
+            let mut v2 = Insert::new("BALL VALVE TYPE 2", Vector3::new(240.0, 200.0, 0.0));
+            v2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(v2)).unwrap();
+            let mut vt2 =
+                Text::with_value("BV154102", Vector3::new(236.0, 206.0, 0.0)).with_height(2.5);
+            vt2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(vt2)).unwrap();
+
+            // Pipeline 100-PW-1541-CS150 -> spec will change to SS300 in Rev A
+            let mut ln = Line::from_points(
+                Vector3::new(84.0, 200.0, 0.0),
+                Vector3::new(304.0, 200.0, 0.0),
+            );
+            ln.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(ln)).unwrap();
+            let mut lt = Text::with_value("100-PW-1541-CS150", Vector3::new(180.0, 203.0, 0.0))
+                .with_height(2.5);
+            lt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(lt)).unwrap();
+
+            // OPC targeting DWG-154-02 -> will change target to DWG-154-05 in Rev A
+            let mut opc = Insert::new("_OFF-UNIT SQ", Vector3::new(310.0, 200.0, 0.0));
+            opc.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc)).unwrap();
+            let mut oft =
+                Text::with_value("DWG-154-02", Vector3::new(300.0, 199.0, 0.0)).with_height(2.5);
+            oft.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(oft)).unwrap();
+        }
+
+        // Tab 2: Current Rev A ("DWG-154-RA.dxf")
+        let _ = app.update(Message::TabNew);
+        let tab_ra = app.active_tab;
+        app.tabs[tab_ra].tab_title = "DWG-154-RA.dxf".to_string();
+        let (pump_ra_h, seg1_h, seg2_h, opc_ra_h, drum_ra_h) = {
+            let doc = &mut app.tabs[tab_ra].scene.document;
+            define_sppid_block(doc, "CENTRIFUGAL PUMP", 8.0, 8.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+            define_sppid_block(doc, "1TO1PARAMETRIC V DRUM", 12.0, 24.0);
+
+            let mut tb =
+                Text::with_value("DWG-154-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            // Pump P-1541 shifted purely graphically (+8, +4) -> MUST NOT trigger false diff
+            let mut p0 = Insert::new("CENTRIFUGAL PUMP", Vector3::new(88.0, 204.0, 0.0));
+            p0.common.layer = "10".to_string();
+            let pump_ra_h = doc.add_entity(document::EntityType::Insert(p0)).unwrap();
+            let mut pt0 =
+                Text::with_value("P-1541", Vector3::new(84.0, 212.0, 0.0)).with_height(2.5);
+            pt0.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(pt0)).unwrap();
+
+            // Valve BV154101 unchanged
+            let mut v1 = Insert::new("BALL VALVE TYPE 2", Vector3::new(160.0, 200.0, 0.0));
+            v1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(v1)).unwrap();
+            let mut vt1 =
+                Text::with_value("BV154101", Vector3::new(156.0, 206.0, 0.0)).with_height(2.5);
+            vt1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(vt1)).unwrap();
+
+            // Pipeline 100-PW-1541 upgraded from CS150 -> SS300 across 2 connected segments
+            let mut s1 = Line::from_points(
+                Vector3::new(92.0, 200.0, 0.0),
+                Vector3::new(220.0, 200.0, 0.0),
+            );
+            s1.common.layer = "1".to_string();
+            let seg1_h = doc.add_entity(document::EntityType::Line(s1)).unwrap();
+
+            let mut s2 = Line::from_points(
+                Vector3::new(220.0, 200.0, 0.0),
+                Vector3::new(304.0, 200.0, 0.0),
+            );
+            s2.common.layer = "1".to_string();
+            let seg2_h = doc.add_entity(document::EntityType::Line(s2)).unwrap();
+
+            let mut lt = Text::with_value("100-PW-1541-SS300", Vector3::new(180.0, 203.0, 0.0))
+                .with_height(2.5);
+            lt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(lt)).unwrap();
+
+            // OPC retargeted to DWG-154-05 -> Modified
+            let mut opc = Insert::new("_OFF-UNIT SQ", Vector3::new(310.0, 200.0, 0.0));
+            opc.common.layer = "11".to_string();
+            let opc_ra_h = doc.add_entity(document::EntityType::Insert(opc)).unwrap();
+            let mut oft =
+                Text::with_value("DWG-154-05", Vector3::new(300.0, 199.0, 0.0)).with_height(2.5);
+            oft.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(oft)).unwrap();
+
+            // Newly added Vessel V-1549 at (520, 460) -> Added
+            let mut drum = Insert::new("1TO1PARAMETRIC V DRUM", Vector3::new(520.0, 460.0, 0.0));
+            drum.common.layer = "10".to_string();
+            let drum_ra_h = doc.add_entity(document::EntityType::Insert(drum)).unwrap();
+            let mut dt =
+                Text::with_value("V-1549", Vector3::new(516.0, 475.0, 0.0)).with_height(2.5);
+            dt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(dt)).unwrap();
+
+            (pump_ra_h, seg1_h, seg2_h, opc_ra_h, drum_ra_h)
+        };
+
+        let tmp = std::env::temp_dir().join(format!("ocs_piddiff_154_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let json_p = tmp.join("diff.json");
+        let csv_p = tmp.join("diff.csv");
+        let _ = app.run_command_line(&format!(
+            "PIDDIFF \"DWG-154-R0.dxf\" EXPORT \"{}\"",
+            json_p.display()
+        ));
+        assert!(
+            json_p.is_file(),
+            "PIDDIFF EXPORT must write diff JSON report"
+        );
+        let _ = app.run_command_line(&format!(
+            "PIDDIFF \"DWG-154-R0.dxf\" EXPORT \"{}\"",
+            csv_p.display()
+        ));
+        let csv_raw = std::fs::read_to_string(&csv_p).unwrap();
+        assert!(csv_raw.starts_with('\u{feff}') && csv_raw.contains("V-1549"));
+
+        let rep: Value = serde_json::from_str(&std::fs::read_to_string(&json_p).unwrap()).unwrap();
+        assert_eq!(rep["summary"]["added_count"].as_u64(), Some(1));
+        assert_eq!(rep["summary"]["removed_count"].as_u64(), Some(1));
+        assert_eq!(rep["summary"]["modified_count"].as_u64(), Some(2));
+        assert!(rep["summary"]["unchanged_count"].as_u64().unwrap_or(0) >= 2);
+
+        // Category canvas selection filters
+        let _ = app.run_command_line("PIDDIFF \"DWG-154-R0.dxf\" ADDED");
+        assert!(has_sel(&app, tab_ra, drum_ra_h));
+        assert!(!has_sel(&app, tab_ra, pump_ra_h));
+
+        let _ = app.run_command_line("PIDDIFF \"DWG-154-R0.dxf\" MODIFIED");
+        assert!(has_sel(&app, tab_ra, seg1_h));
+        assert!(has_sel(&app, tab_ra, seg2_h));
+        assert!(has_sel(&app, tab_ra, opc_ra_h));
+        assert!(!has_sel(&app, tab_ra, pump_ra_h));
+
+        // Stateless NEXT stepping moves viewport camera onto first active change (V-1549 at 520, 460)
+        app.tabs[tab_ra].scene.deselect_all();
+        let _ = app.run_command_line("PIDDIFF \"DWG-154-R0.dxf\" NEXT");
+        assert!(has_sel(&app, tab_ra, drum_ra_h));
+        let cam = app.tabs[tab_ra].scene.camera.borrow().target;
+        assert!(
+            (cam.x - 520.0).abs() < 30.0 && (cam.y - 460.0).abs() < 30.0,
+            "camera must focus on added vessel V-1549 at (520, 460), got {cam:?}"
+        );
+
+        // Cross-representation parity: promote Rev A to PID_AUTHOR and diff against unpromoted Rev 0
+        let _ = app.run_command_line("PIDPROMOTE");
+        let prom_json = tmp.join("diff_promoted.json");
+        let _ = app.run_command_line(&format!(
+            "PIDDIFF \"DWG-154-R0.dxf\" EXPORT \"{}\"",
+            prom_json.display()
+        ));
+        let prom_rep: Value =
+            serde_json::from_str(&std::fs::read_to_string(&prom_json).unwrap()).unwrap();
+        assert_eq!(prom_rep["summary"]["added_count"].as_u64(), Some(1));
+        assert_eq!(prom_rep["summary"]["removed_count"].as_u64(), Some(1));
+        assert_eq!(prom_rep["summary"]["modified_count"].as_u64(), Some(2));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "runs real SPPID and native AutoCAD sheets inside OpenCADStudio through layout-shift zero-false-positive verification, simulated revision edits, PIDDIFF EXPORT, and PIDDIFF NEXT"]
+    fn real_multi_source_piddiff_revision_audit_and_next_step_focus() {
+        use document::entities::Insert;
+        use document::types::Vector3;
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_raw) = std::env::var("OCS_PID_REAL154_SPPID_DXF") else {
+            println!("OCS_PID_REAL154_SPPID_DXF unset, skipping.");
+            return;
+        };
+        let Ok(legacy_raw) = std::env::var("OCS_PID_REAL154_LEGACY_DXF") else {
+            println!("OCS_PID_REAL154_LEGACY_DXF unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL154_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real154"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let cases = [
+            ("SP01", "sppid_dxf", std::path::PathBuf::from(&sppid_raw)),
+            (
+                "LG01",
+                "legacy_autocad_dxf",
+                std::path::PathBuf::from(&legacy_raw),
+            ),
+        ];
+
+        let mut rows = Vec::new();
+        for (cid, kind, path) in &cases {
+            let sha_pfx =
+                format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))[..12].to_string();
+            let mut app = app();
+
+            let tab_r0 = app.active_tab;
+            app.tabs[tab_r0].scene.document = crate::io::load_file(path).unwrap();
+            app.tabs[tab_r0].tab_title = format!("{cid}-R0.dxf");
+
+            let _ = app.update(Message::TabNew);
+            let tab_ra = app.active_tab;
+            app.tabs[tab_ra].scene.document = crate::io::load_file(path).unwrap();
+            app.tabs[tab_ra].tab_title = format!("{cid}-RA.dxf");
+
+            // 1. Verify zero false positives on pure layout coordinate nudge
+            let first_ins_h = app.tabs[tab_ra]
+                .scene
+                .document
+                .model_space_entities()
+                .find_map(|e| match e {
+                    document::EntityType::Insert(ins) => Some(ins.common.handle),
+                    _ => None,
+                });
+            if let Some(ih) = first_ins_h {
+                if let Some(document::EntityType::Insert(ins)) =
+                    app.tabs[tab_ra].scene.document.get_entity_mut(ih)
+                {
+                    ins.insert_point.x += 0.05;
+                    ins.insert_point.y += 0.05;
+                }
+            }
+
+            let nudge_p = out_dir.join(format!("{cid}_nudge.json"));
+            let _ = app.run_command_line(&format!(
+                "PIDDIFF \"{cid}-R0.dxf\" EXPORT \"{}\"",
+                nudge_p.display()
+            ));
+            let nudge_rep: Value =
+                serde_json::from_str(&std::fs::read_to_string(&nudge_p).unwrap()).unwrap();
+            let _ = std::fs::remove_file(&nudge_p);
+            assert_eq!(
+                nudge_rep["summary"]["total_changes"].as_u64(),
+                Some(0),
+                "{cid}: pure graphical layout nudge must produce 0 semantic diffs"
+            );
+            let baseline_unchanged = nudge_rep["summary"]["unchanged_count"]
+                .as_u64()
+                .unwrap_or(0);
+            assert!(baseline_unchanged >= 15);
+
+            // 2. Promote Rev A and apply 3 real engineering changes (1 Modified, 1 Removed, 1 Added)
+            app.tabs[tab_ra].scene.document = crate::io::load_file(path).unwrap();
+            let _ = app.run_command_line("PIDPROMOTE");
+
+            let authored_tagged: Vec<document::Handle> = app.tabs[tab_ra]
+                .scene
+                .document
+                .model_space_entities()
+                .filter_map(|e| {
+                    let h = e.common().handle;
+                    let a = PidAuthor::load(&app.tabs[tab_ra].scene.document, h)?;
+                    (!a.tag.trim().is_empty() && a.type_code != "pipe_segment").then_some(h)
+                })
+                .collect();
+            assert!(authored_tagged.len() >= 2);
+
+            // Modify first tagged item's Description via PIDSETPROP
+            app.tabs[tab_ra].scene.deselect_all();
+            app.tabs[tab_ra]
+                .scene
+                .select_entities(&[authored_tagged[0]]);
+            let _ = app.run_command_line("PIDSETPROP 说明 REV_A_UPGRADE");
+
+            // Reject/remove second unique-tag item
+            let mod_tag = PidAuthor::load(&app.tabs[tab_ra].scene.document, authored_tagged[0])
+                .unwrap()
+                .tag;
+            let rem_cand = authored_tagged
+                .iter()
+                .copied()
+                .find(|&h| {
+                    let a = PidAuthor::load(&app.tabs[tab_ra].scene.document, h).unwrap();
+                    a.tag != mod_tag && a.tag_status == "ok"
+                })
+                .unwrap_or(authored_tagged[1]);
+            app.tabs[tab_ra].scene.deselect_all();
+            app.tabs[tab_ra].scene.select_entities(&[rem_cand]);
+            let _ = app.run_command_line("PIDREVIEW REJECT");
+
+            // Add a new authored vessel V-9954
+            {
+                let doc = &mut app.tabs[tab_ra].scene.document;
+                define_sppid_block(doc, "1TO1PARAMETRIC V DRUM", 12.0, 24.0);
+                let mut drum =
+                    Insert::new("1TO1PARAMETRIC V DRUM", Vector3::new(450.0, 380.0, 0.0));
+                drum.common.layer = "10".to_string();
+                let dh = doc.add_entity(document::EntityType::Insert(drum)).unwrap();
+                let mut auth = PidAuthor::load(doc, authored_tagged[0]).unwrap();
+                auth.type_code = "equipment".to_string();
+                auth.tag = "V-9954".to_string();
+                auth.tag_source = "manual".to_string();
+                auth.tag_status = "ok".to_string();
+                auth.props = json!({
+                    "_sppid_class": "PIDProcessVessel",
+                    "_variant_id": "PIDProcessVessel#01",
+                    "_at": "450.0,380.0",
+                    "_confidence_tier": "confirmed",
+                })
+                .to_string();
+                auth.store(doc, dh);
+            }
+
+            let rev_json_p = out_dir.join(format!("{cid}_rev.json"));
+            let rev_csv_p = out_dir.join(format!("{cid}_rev.csv"));
+            let _ = app.run_command_line(&format!(
+                "PIDDIFF \"{cid}-R0.dxf\" EXPORT \"{}\"",
+                rev_json_p.display()
+            ));
+            let _ = app.run_command_line(&format!(
+                "PIDDIFF \"{cid}-R0.dxf\" EXPORT \"{}\"",
+                rev_csv_p.display()
+            ));
+            let rev_rep: Value =
+                serde_json::from_str(&std::fs::read_to_string(&rev_json_p).unwrap()).unwrap();
+            let rev_csv = std::fs::read_to_string(&rev_csv_p).unwrap();
+            let _ = std::fs::remove_file(&rev_json_p);
+            let _ = std::fs::remove_file(&rev_csv_p);
+
+            assert!(rev_csv.starts_with('\u{feff}') && rev_csv.contains("V-9954"));
+            assert!(rev_rep["summary"]["added_count"].as_u64().unwrap_or(0) >= 1);
+            assert!(rev_rep["summary"]["removed_count"].as_u64().unwrap_or(0) >= 1);
+            assert!(rev_rep["summary"]["modified_count"].as_u64().unwrap_or(0) >= 1);
+
+            app.tabs[tab_ra].scene.deselect_all();
+            let _ = app.run_command_line(&format!("PIDDIFF \"{cid}-R0.dxf\" NEXT"));
+            assert!(!app.tabs[tab_ra].scene.selected_entities().is_empty());
+
+            rows.push(json!({
+                "id": cid,
+                "kind": kind,
+                "sha256_prefix": sha_pfx,
+                "layout_nudge_false_positives": nudge_rep["summary"]["total_changes"],
+                "baseline_unchanged_items": baseline_unchanged,
+                "revision_diff_summary": {
+                    "total_changes": rev_rep["summary"]["total_changes"],
+                    "added_count": rev_rep["summary"]["added_count"],
+                    "modified_count": rev_rep["summary"]["modified_count"],
+                    "removed_count": rev_rep["summary"]["removed_count"],
+                    "unchanged_count": rev_rep["summary"]["unchanged_count"],
+                }
+            }));
+        }
+
+        std::fs::write(
+            out_dir.join("real154_summary.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({ "sheets": rows })).unwrap()
+            ),
         )
         .unwrap();
     }

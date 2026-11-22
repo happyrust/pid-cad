@@ -453,10 +453,10 @@ flowchart LR
 - **验收**：三档阈值可配置；报告数字自洽；人工确认后结果进入模型。
 - **解决记录（2026-11-20..21）**：① 引擎层可配置阈值 `ConfidenceThresholds` 与 `ConfidenceSummary` 在 `recognize.rs` 落地并校验三档守恒（90 张 DXF `high=12,174`、`medium=3,736`、`low=0`，见 `readings.md` §14）；② 应用内交互命令 `PIDPROMOTE` 与 `PIDREVIEW [SUMMARY | HIGH | MEDIUM | LOW | DUPLICATES | ACCEPT | REJECT | DEDUP]` 在 `pidprops.rs`（`#136` / `#139`）落地，支持按档位一键画布选中、人工确认与驳回剔除且单步可撤销（见 `readings.md` §25）；③ `#151` 进一步落地 `src/io/pid_convert/drc.rs` 与一站式交付前体检命令 `PIDDRC [SUMMARY | ERRORS | DEADENDS | ORPHANNOZZLES | UNTAGGED | NEXT | EXPORT]`，串联重号、单向断链连接符、孤立管口、悬空管端与无位号组件五维规则及 `NEXT` 视口逐项巡检聚焦（详见 `readings.md` §40）。
 
-#### L3-8 回归门禁（S）— **已完成（[#133](https://github.com/happyrust/pid-cad/issues/133)）**
+#### L3-8 回归门禁（S）— **已完成（[#133](https://github.com/happyrust/pid-cad/issues/133) / [#154](https://github.com/happyrust/pid-cad/issues/154)）**
 - **做法**：每改一次规则，整批报告逐行 diff；差异只允许出现在预期行。
 - **验收**：一条命令出 diff 与退出码。
-- **解决记录（2026-11-21）**：落地纯标准库 `scripts/sppid/{regression_gate,test_regression_gate}.py`（先红后绿），支持 `snapshot` 生成严格脱敏的逐图 13 列确定性指纹 TSV（含 `TOTAL` 守恒汇总行）与 `diff` 逐行/逐列比对守门（支持 `--allow-sheet` / `--allow-col` 预期改动过滤，任何非预期行变化即打印 `UNEXPECTED_DIFF` 并返回退出码 `1`）；已在全批 90 张真实 DXF 上产出 `baseline-90.tsv` 并验证自比 `0` 与旧版异动拦截 `1`，详见 `readings.md` §22。
+- **解决记录（2026-11-21）**：落地纯标准库 `scripts/sppid/{regression_gate,test_regression_gate}.py`（先红后绿），支持 `snapshot` 生成严格脱敏的逐图 13 列确定性指纹 TSV（含 `TOTAL` 守恒汇总行）与 `diff` 逐行/逐列比对守门（支持 `--allow-sheet` / `--allow-col` 预期改动过滤，任何非预期行变化即打印 `UNEXPECTED_DIFF` 并返回退出码 `1`）；已在全批 90 张真实 DXF 上产出 `baseline-90.tsv` 并验证自比 `0` 与旧版异动拦截 `1`，详见 `readings.md` §22；此外 `#154` 落地 `src/io/pid_convert/diff.rs`、应用内命令 `PIDDIFF` 与 CLI `--diff-with`，支持跨版次图纸工程语义级差异比对（过滤排版微移噪声、导出 `.json/.csv/.tsv` 变更单并支持 `NEXT` 聚焦巡检），详见 `readings.md` §43。
 
 ### 7.5 L4 publish XML
 

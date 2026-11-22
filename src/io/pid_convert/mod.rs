@@ -6,6 +6,7 @@
 
 pub mod bom;
 pub mod class_map;
+pub mod diff;
 pub mod drc;
 pub mod export;
 pub mod external_props;
@@ -14,6 +15,13 @@ pub mod opc;
 pub mod promote;
 pub mod recognize;
 pub mod trace;
+
+pub use diff::{
+    diff_pid_documents, format_pid_diff_delimited, DiffFieldChange, DiffKind, PidDiffItem,
+    PidDiffReport, PidDiffSummary, DIFF_CSV_HEADERS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use diff::{diff_pid_files, write_pid_diff_file};
 
 pub use trace::{
     trace_shortest_path_by_query, trace_subnet_by_query, trace_subnet_from_handles, TraceMode,

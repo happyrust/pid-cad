@@ -15,13 +15,15 @@
 use std::path::PathBuf;
 
 use OpenCADStudio::io::pid_convert::{
-    convert_path_to_dir, extract_bom_from_batch_dir, save_cad_file_as_binary_dwg,
-    write_bom_schedule_file, ConvertOptions,
+    convert_path_to_dir, diff_pid_files, extract_bom_from_batch_dir, save_cad_file_as_binary_dwg,
+    write_bom_schedule_file, write_pid_diff_file, ConvertOptions,
 };
 
 struct CliArgs {
     input: PathBuf,
-    out_dir: PathBuf,
+    out_dir: Option<PathBuf>,
+    diff_with: Option<PathBuf>,
+    diff_out: Option<PathBuf>,
     plant: String,
     seed_pid: Option<String>,
     sym_dir: Option<String>,
@@ -45,6 +47,8 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut save_dwg: Option<PathBuf> = None;
     let mut verify_plot = false;
     let mut summary_json: Option<PathBuf> = None;
+    let mut diff_with: Option<PathBuf> = None;
+    let mut diff_out: Option<PathBuf> = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -90,6 +94,18 @@ fn parse_args() -> Result<CliArgs, String> {
                     it.next().ok_or("--summary-json requires a file path")?,
                 ));
             }
+            "--diff-with" => {
+                diff_with = Some(PathBuf::from(
+                    it.next()
+                        .ok_or("--diff-with requires a baseline CAD/PID file path")?,
+                ));
+            }
+            "--diff-out" => {
+                diff_out = Some(PathBuf::from(
+                    it.next()
+                        .ok_or("--diff-out requires an output .json/.csv/.tsv path")?,
+                ));
+            }
             other if other.starts_with("--") => {
                 return Err(format!("unknown option '{other}'"));
             }
@@ -105,10 +121,14 @@ fn parse_args() -> Result<CliArgs, String> {
     let input = input.ok_or(
         "usage: pid_convert <input.dxf|input.dwg|dir> --out <dir> [--plant NAME] [--seed-pid PATH_OR_ZIP] [--sym-dir DIR] [--verify-plot] [--summary-json FILE]",
     )?;
-    let out_dir = out_dir.ok_or("--out <dir> is required")?;
+    if out_dir.is_none() && diff_with.is_none() {
+        return Err("--out <dir> (or --diff-with <baseline>) is required".to_string());
+    }
     Ok(CliArgs {
         input,
         out_dir,
+        diff_with,
+        diff_out,
         plant,
         seed_pid,
         sym_dir,
@@ -150,7 +170,38 @@ fn main() {
         ..Default::default()
     };
 
-    match convert_path_to_dir(&effective_input, &args.out_dir, &opts) {
+    if let Some(ref base_p) = args.diff_with {
+        let rep = match diff_pid_files(base_p, &effective_input, &opts) {
+            Ok(r) => r,
+            Err(err) => {
+                eprintln!("error: diff-with failed: {err}");
+                std::process::exit(1);
+            }
+        };
+        if let Some(ref do_p) = args.diff_out {
+            if let Err(err) = write_pid_diff_file(&rep, do_p) {
+                eprintln!("error: diff-out failed: {err}");
+                std::process::exit(1);
+            }
+        }
+        println!(
+            "pid_diff: total_changes={} added={} modified={} removed={} unchanged={}",
+            rep.summary.total_changes,
+            rep.summary.added_count,
+            rep.summary.modified_count,
+            rep.summary.removed_count,
+            rep.summary.unchanged_count,
+        );
+        if args.out_dir.is_none() {
+            return;
+        }
+    }
+
+    let Some(ref out_dir) = args.out_dir else {
+        return;
+    };
+
+    match convert_path_to_dir(&effective_input, out_dir, &opts) {
         Ok(summary) => {
             if let Some(ref sjson) = args.summary_json {
                 if let Some(parent) = sjson.parent() {
@@ -161,7 +212,7 @@ fn main() {
                 }
             }
             if let Some(ref sched_p) = args.export_schedule {
-                match extract_bom_from_batch_dir(&args.out_dir)
+                match extract_bom_from_batch_dir(out_dir)
                     .and_then(|bom| write_bom_schedule_file(&bom, sched_p))
                 {
                     Ok(()) => {}

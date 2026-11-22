@@ -1735,3 +1735,41 @@
 | `scripts\fmt-newhunks.ps1` | — | `trace.rs`、`mod.rs`、`pidprops.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 43. L3-8 / L2-2 / L3-6 / L6-2（#154）：应用内 P&ID 新旧版次图纸语义级差异比对、分类巡检聚焦与变更清册导出命令 `PIDDIFF` 及 CLI `--diff-with` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `ea4d276ea`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{diff,mod}.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-22-issue154/`（`red.txt`、`green_pidprops.txt`、`real_multi_source_diff.txt`、`cli_diff_with.txt`、`real_out/real154_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
+
+### 43.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_154_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `piddiff_ignores_layout_shifts_detects_added_removed_modified_and_steps_camera`（构造 `R0` 基准版与 `RA` 当前版双标签页：验证泵符号纯排版平移零误报、删除阀门 `BV154102`、新增容器 `V-1549`、同序号管线等级由 `CS150` 升级至 `SS300`、页间连接符目标图号变更、`PIDDIFF ADDED / MODIFIED / NEXT` 视口聚焦以及 `PIDPROMOTE` 跨形态一致性），运行按预期在 `PIDDIFF EXPORT` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`20 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/diff.rs`（`diff_pid_documents`、`diff_pid_files`、`write_pid_diff_file`）：统一兼容未升格 `.dxf`/`.dwg`、未升格 `.pid` 原图与已升格 `PID_AUTHOR` 模型（含 `PidAuthor` 面板属性叠加），统一抽取主干名消除版次文件名后缀假差异，按精确规范化位号 + 同 `(fluid_code, seq_no)` 管线主干 + 同槽位页间连接符三级配对，精准归类 `Added`、`Modified`（逐字段 `old -> new` 明细）与 `Removed`，支持导出 `.json` 与 UTF-8 BOM `.csv` / `.tsv` 设计变更清册；
+  2. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDDIFF "<基准图纸路径或已打开标签页>" [SUMMARY | ALL | ADDED | MODIFIED | NEXT] [EXPORT "<.json|.csv|.tsv>"]`，并在 `examples/pid_convert.rs` 新增 `--diff-with` 与 `--diff-out`（最小真实 SPPID 图自比对校验 `total_changes = 0`、`unchanged = 38`，退出码 `0`）。
+
+### 43.2 真实双源工程图纸纯排版平移零误报与模拟升版校审实测
+
+| 代号 | 样本类别 | 源图 SHA-256 前缀 | 纯排版微移误报数（基线未变对象数） | 模拟升版 `Added / Modified / Removed` | `.csv` 变更单与 `PIDDIFF NEXT` 巡检 |
+|---|---|---|---:|---|---|
+| `SP01` | `EXPORT_DXF`（SPPID 中位规模生产图） | `c0dd2cc4c75d` | **`0`**（`101` 项未变） | `1` 新增 / `1` 修改 / `14` 删除（`86` 未变） | **通过** |
+| `LG01` | `SOURCE_DWG`（原生 AutoCAD 存量图） | `a0f05f81a655` | **`0`**（`47` 项未变） | `4` 新增 / `8` 修改 / `7` 删除（`32` 未变） | **通过** |
+
+### 43.3 固定门禁读数
+
+| 门禁项 | 改前读数（§42.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,232` 条（`7,154` 过 / `77` 忽略 / `1` 既有 `.pen`） | **`7,234` 条**（**`7,155` 过** / **`78` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 真实双源升版差异比对），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `diff.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
