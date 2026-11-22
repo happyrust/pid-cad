@@ -4359,6 +4359,88 @@ mod tests {
         assert_eq!(state["check"]["rows"][0]["index"], 400);
     }
 
+    /// 成功标准第 14 条：2,000 条结果时重建要画的内容（[`build_view`]）不超过 50 ms，每组只画前
+    /// 200 行。结果是全项目检查的，落在 20 张图上，错误、警告、提示、已豁免四组都有，有的对象没有
+    /// 位号；开着「显示已豁免」，四组都列出来。跑 3 次取中位数。
+    #[test]
+    #[ignore]
+    fn pid_verify_build_view_2000_results_within_50_ms() {
+        use std::time::{Duration, Instant};
+        const RESULTS: usize = 2000;
+        const RUNS: usize = 3;
+        const BUDGET: Duration = Duration::from_millis(50);
+        let found_by = [
+            ("DR-001", Severity::Error, "管线"),
+            ("DR-005", Severity::Error, "仪表"),
+            ("DR-007", Severity::Warning, "管线"),
+            ("DR-008", Severity::Warning, "阀门"),
+            ("DR-010", Severity::Info, "设备"),
+        ];
+        let many = report(
+            ScopeKind::Project,
+            (0..RESULTS)
+                .map(|n| {
+                    let (rule, severity, kind) = found_by[n % found_by.len()];
+                    let tag = if n % 7 == 0 {
+                        String::new()
+                    } else {
+                        format!("X-{n:04}")
+                    };
+                    let drawing = format!("PID-{}", 1101 + n % 20);
+                    let result = found(rule, severity, kind, &tag, &drawing);
+                    if n % 10 == 3 {
+                        waived(result)
+                    } else {
+                        result
+                    }
+                })
+                .collect(),
+        );
+        let ui = VerifyUi {
+            show_waived: true,
+            ..VerifyUi::default()
+        };
+        let ms = |duration: Duration| duration.as_secs_f64() * 1e3;
+        let mut samples = Vec::with_capacity(RUNS);
+        for run in 1..=RUNS {
+            let started = Instant::now();
+            let view = viewed(&ui, &many);
+            let elapsed = started.elapsed();
+            let shown = view.check.shown.expect("a result shown");
+            let groups: Vec<(Group, usize, usize)> = shown
+                .groups
+                .iter()
+                .map(|group| (group.group, group.count, group.drawn))
+                .collect();
+            println!(
+                "PNL-13 build_view run {run}/{RUNS}: {:.2} ms, {} rows, groups {groups:?}",
+                ms(elapsed),
+                shown.rows.len()
+            );
+            assert_eq!(shown.rows.len(), RESULTS, "run {run}");
+            assert_eq!(groups.len(), 4, "run {run}: {groups:?}");
+            assert!(
+                groups
+                    .iter()
+                    .all(|&(_, count, drawn)| drawn == count.min(ROWS_PER_PAGE)),
+                "run {run}: {groups:?}"
+            );
+            samples.push(elapsed);
+        }
+        samples.sort();
+        let median = samples[samples.len() / 2];
+        println!(
+            "PNL-13 build_view median {:.2} ms, budget {} ms",
+            ms(median),
+            BUDGET.as_millis()
+        );
+        assert!(
+            median <= BUDGET,
+            "PNL-13 重建要画的内容超预算：中位数 {:.2} ms",
+            ms(median)
+        );
+    }
+
     #[test]
     fn the_rule_check_tab_says_why_it_has_no_list() {
         let ui = VerifyUi::default();
