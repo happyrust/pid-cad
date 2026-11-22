@@ -11,7 +11,7 @@
 | 文件名 | 定位与职责 | 当前状态 |
 |---|---|---|
 | `智能PID平台-阶段一实施方案.md` | 阶段一主执行方案（L0–L6 + LX 逐任务做法、门禁、验收与逐项解决记录） | **已确认并执行中**（已对齐 `main @ 6377fe233` 与 `pid-parse @ a85fa10`） |
-| `智能PID平台-阶段一Issue清单.md` | 阶段一拆单说明、线上 GitHub Issue 映射与逐单解决日志 | **已同步线上 `#106`–`#154`** |
+| `智能PID平台-阶段一Issue清单.md` | 阶段一拆单说明、线上 GitHub Issue 映射与逐单解决日志 | **已同步线上 `#106`–`#155`** |
 | `智能PID平台-阶段一路线图-DWG转智能PID与pid导出.md` | 阶段一总体路线、取舍依据、预检三关与减法送测设计 | **已对齐当前仓库进度并脱敏** |
 | `智能PID平台-样本分析-XML规格与pid结构.md` | 110 对真实 SPPID 样本格式/结构实测规格与 Q1–Q13 答案回填 | **已完成全批 220 份复核与 Q1–Q13 回填** |
 | `03-parse-answers.md` | `L0-8`（[#118](https://github.com/happyrust/pid-cad/issues/118)）对照 `pid-parse @ a85fa10` 源码逐条回答 Q1–Q13（含精确源码路径与行号） | **已完成** |
@@ -20,7 +20,7 @@
 | `06-lx-compliance-and-codelist-audit.md` | `LX-6 / LX-7 / #117`（[#137](https://github.com/happyrust/pid-cad/issues/137)）备份包分级来源全包实查、`.pid` 保留流够用性台账与书面合规边界确认 | **已完成** |
 | `智能PID平台-内部模型合一分析.md` | `PID_SEMANTICS` 与 `PID_AUTHOR` 升格合一方案及与并行分支 `pid-symbol-identity` 的衔接边界 | **已完成引擎与属性面板双分组落地（见 `promote.rs`、`pidprops.rs`）** |
 | `智能PID平台-资料清单.md` | `RES-01`–`RES-17` 资料清点、环境变量约定与缺口降级策略（`L0-1`） | **已完成清点登记** |
-| `readings.md` | 阶段一门禁基线与各单先红后绿、真实样本实测读数账本 | **持续更新（已记 §1–§43）** |
+| `readings.md` | 阶段一门禁基线与各单先红后绿、真实样本实测读数账本 | **持续更新（已记 §1–§44）** |
 
 ---
 
@@ -73,5 +73,6 @@
 | `L3-3 / L3-5 / L3-7 / L6-2` 应用内 P&ID 交付前设计规则一键体检、分类高亮与逐项巡检聚焦命令 `PIDDRC` 闭环 | [#151](https://github.com/happyrust/pid-cad/issues/151) | **已完成 · 五维规则一键体检与逐项巡检闭环**（2026-11-21） | 提交 **`7ac42d319`**：新增 `src/io/pid_convert/drc.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDDRC`）；串联重复位号、单向断链连接符、孤立管口、开放悬空管端与无位号组件五大体检规则，支持分类高亮与 `PIDDRC NEXT` 视口逐项巡检聚焦，真实双源图纸与消重/人工确认修复归零全过，见 `readings.md` §40 |
 | `L2-2 / L3-2 / L3-3 / L6-2` 应用内跨标签页按位号/线号智能检索、整条管线全段高亮与视口秒级定位命令 `PIDFIND` 闭环 | [#152](https://github.com/happyrust/pid-cad/issues/152) | **已完成 · 跨标签页位号与整条管线检索闭环**（2026-11-21） | 提交 **`c12f5e348`**：新增 `src/io/pid_convert/find.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDFIND`）；兼容未升格 `.dxf`/`.dwg`/`.pid` 与已升格 `PID_AUTHOR` 模型，支持英制/公制规范化管线号双向匹配与连通管段 BFS 全段聚拢高亮；3 张真实异构图纸（SPPID DXF、原生 AutoCAD DXF、`5,576` 实体 `.pid`）多标签页跨图跳转与相机聚焦全过，见 `readings.md` §41 |
 | `L3-3 / L3-4 / L2-2 / L6-2` 应用内跨符号/跨标签页工艺流路拓扑连通追踪与起止点路径溯源命令 `PIDTRACE` 闭环 | [#153](https://github.com/happyrust/pid-cad/issues/153) | **已完成 · 跨图流路连通子网与最短寻径闭环**（2026-11-21） | 提交 **`ea4d276ea`**：新增 `src/io/pid_convert/trace.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDTRACE`）；串联管段、行内阀门/仪表、设备管口与多标签页互逆 `PIDOPC` 构建统一无向拓扑图，支持单起点连通子网隔离审查与双位号跨图最短流路寻径；4 张真实成对图纸（SPPID 生产图对 `966` 节点 + 原生 AutoCAD 存量图对 `508` 节点）多标签页跨图追踪与寻径全过，见 `readings.md` §42 |
-| `L3-8 / L2-2 / L3-6 / L6-2` 应用内 P&ID 新旧版次图纸语义级差异比对、分类巡检聚焦与变更清册导出命令 `PIDDIFF` 及 CLI `--diff-with` 闭环 | [#154](https://github.com/happyrust/pid-cad/issues/154) | **已完成 · 新旧版次语义级比对与变更清册闭环**（2026-11-22） | 新增 `src/io/pid_convert/diff.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDDIFF`）与 `examples/pid_convert.rs`（`--diff-with` / `--diff-out`）；过滤纯排版平移噪声，精准归类 `Added / Modified / Removed` 并支持 `.json`/`.csv`/`.tsv` 变更单导出与 `NEXT` 聚焦巡检，真实双源工程图零误报与升版校审全过，见 `readings.md` §43 |
+| `L3-8 / L2-2 / L3-6 / L6-2` 应用内 P&ID 新旧版次图纸语义级差异比对、分类巡检聚焦与变更清册导出命令 `PIDDIFF` 及 CLI `--diff-with` 闭环 | [#154](https://github.com/happyrust/pid-cad/issues/154) | **已完成 · 新旧版次语义级比对与变更清册闭环**（2026-11-22） | 提交 **`f1c34a0d5`**：新增 `src/io/pid_convert/diff.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDDIFF`）与 `examples/pid_convert.rs`（`--diff-with` / `--diff-out`）；过滤纯排版平移噪声，精准归类 `Added / Modified / Removed` 并支持 `.json`/`.csv`/`.tsv` 变更单导出与 `NEXT` 聚焦巡检，真实双源工程图零误报与升版校审全过，见 `readings.md` §43 |
+| `L3-3 / L3-4 / L2-2 / L6-2` 应用内 P&ID 设备检修能量隔离边界（LOTO 首道关断阀清单与无阀直连预警）求解与隔离单导出命令 `PIDISOLATE` 闭环 | [#155](https://github.com/happyrust/pid-cad/issues/155) | **已完成 · 跨图能量隔离边界与 LOTO 清册闭环**（2026-11-22） | 新增 `src/io/pid_convert/isolate.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDISOLATE`）；沿连通管段与互逆 `PIDOPC` 搜索首道可关断阀门自动截断并识别三类无阀直连/敞口风险，导出 `.json`/`.csv`/`.tsv` 隔离挂牌单，4 张真实成对图纸跨标签页实测全过，见 `readings.md` §44 |
 | `.sym` 参考数据预览（关联） | [#116](https://github.com/happyrust/pid-cad/issues/116) | **由并行分支推进中** | 正在 `pid-symbol-on-main` 工作树推进 `pid_backup_browser/symbol_preview.rs`，严格避让 |

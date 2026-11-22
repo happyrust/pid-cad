@@ -11,6 +11,7 @@ pub mod drc;
 pub mod export;
 pub mod external_props;
 pub mod find;
+pub mod isolate;
 pub mod opc;
 pub mod promote;
 pub mod recognize;
@@ -20,6 +21,14 @@ pub use diff::{
     diff_pid_documents, format_pid_diff_delimited, DiffFieldChange, DiffKind, PidDiffItem,
     PidDiffReport, PidDiffSummary, DIFF_CSV_HEADERS,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use isolate::write_pid_isolation_file;
+pub use isolate::{
+    format_pid_isolation_delimited, solve_pid_isolation_by_query, solve_pid_isolation_from_handles,
+    IsolationHazardKind, PidIsolationHazard, PidIsolationReport, PidIsolationSummary,
+    PidIsolationValve, ISOLATION_CSV_HEADERS,
+};
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use diff::{diff_pid_files, write_pid_diff_file};
 

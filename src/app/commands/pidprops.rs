@@ -36,7 +36,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDDRC",
         "PIDFIND",
         "PIDTRACE",
-        "PIDDIFF"
+        "PIDDIFF",
+        "PIDISOLATE"
     ]
 });
 
@@ -283,6 +284,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_piddiff_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidisolate_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -2134,6 +2138,275 @@ impl OpenCADStudio {
             other => {
                 self.command_line.push_error(&format!(
                     "PIDDIFF: 未知子命令 {other}（支持 SUMMARY / ALL / ADDED / MODIFIED / NEXT / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
+
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidisolate_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            solve_pid_isolation_by_query, solve_pid_isolation_from_handles,
+            write_pid_isolation_file, OpcSheetInput,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDISOLATE") {
+            return None;
+        }
+
+        let mut all_tabs = false;
+        let mut action: Option<String> = None;
+        let mut export_path: Option<std::path::PathBuf> = None;
+        let mut query_opt: Option<String> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            let up = tok.to_ascii_uppercase();
+            if up == "ALLTABS" {
+                all_tabs = true;
+                idx += 1;
+            } else if up == "EXPORT" {
+                let Some(next_tok) = tokens.get(idx + 1) else {
+                    self.command_line
+                        .push_error("PIDISOLATE EXPORT: 缺少输出文件路径（.json/.csv/.tsv）。");
+                    return Some(Task::none());
+                };
+                export_path = Some(std::path::PathBuf::from(next_tok));
+                idx += 2;
+            } else if matches!(
+                up.as_str(),
+                "SUMMARY" | "VALVES" | "ENVELOPE" | "HAZARDS" | "ALL" | "NEXT"
+            ) {
+                action = Some(up);
+                idx += 1;
+            } else if query_opt.is_none() {
+                query_opt = Some(tok.clone());
+                idx += 1;
+            } else {
+                action = Some(up);
+                idx += 1;
+            }
+        }
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<OpcSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+
+        let iso_res = if let Some(ref q) = query_opt {
+            solve_pid_isolation_by_query(q, i, all_tabs, &sheet_inputs)
+        } else {
+            let sel_handles: Vec<document::Handle> = self.tabs[i]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .map(|(h, _)| h)
+                .collect();
+            solve_pid_isolation_from_handles(i, &sel_handles, all_tabs, &sheet_inputs)
+        };
+
+        let rep = match iso_res {
+            Ok(r) => r,
+            Err(err) => {
+                self.command_line.push_error(&format!("PIDISOLATE: {err}"));
+                return Some(Task::none());
+            }
+        };
+
+        if let Some(ref out_p) = export_path {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(err) = write_pid_isolation_file(&rep, out_p) {
+                self.command_line
+                    .push_error(&format!("PIDISOLATE EXPORT: {err}"));
+                return Some(Task::none());
+            }
+        }
+
+        let eff_action = action.as_deref().unwrap_or("SUMMARY");
+        match eff_action {
+            "SUMMARY" => {
+                self.command_line.push_output(&format!(
+                    "PIDISOLATE: 目标={} | 可完全隔离={} | 跨图纸={} | 首道隔离阀={} | 包络管段={} | 无阀风险={}（直连设备={}，未配对OPC={}，敞口端={}）。",
+                    rep.summary.target_tag,
+                    rep.summary.fully_isolatable,
+                    rep.summary.crossed_tabs,
+                    rep.summary.boundary_valves_count,
+                    rep.summary.envelope_pipe_segments,
+                    rep.summary.hazard_count,
+                    rep.summary.unvalved_peer_equipment,
+                    rep.summary.unvalved_external_opcs,
+                    rep.summary.unvalved_open_dead_ends,
+                ));
+            }
+            "VALVES" | "HAZARDS" | "ENVELOPE" | "ALL" => {
+                let mut by_tab: std::collections::BTreeMap<usize, Vec<document::Handle>> =
+                    std::collections::BTreeMap::new();
+                if matches!(eff_action, "ENVELOPE" | "ALL") {
+                    for (&ti, hs) in &rep.envelope_handles_by_tab {
+                        let dst = by_tab.entry(ti).or_default();
+                        for &h in hs {
+                            if !dst.contains(&h) {
+                                dst.push(h);
+                            }
+                        }
+                    }
+                }
+                if matches!(eff_action, "VALVES" | "ALL") {
+                    for v in &rep.boundary_valves {
+                        let dst = by_tab.entry(v.tab_index).or_default();
+                        for &h in &v.member_handles {
+                            if !dst.contains(&h) {
+                                dst.push(h);
+                            }
+                        }
+                    }
+                }
+                if matches!(eff_action, "HAZARDS" | "ALL") {
+                    for hz in &rep.hazards {
+                        let dst = by_tab.entry(hz.tab_index).or_default();
+                        for &h in &hz.member_handles {
+                            if !dst.contains(&h) {
+                                dst.push(h);
+                            }
+                        }
+                    }
+                }
+
+                for (ti, _) in &target_tabs {
+                    if *ti < self.tabs.len() {
+                        self.tabs[*ti].scene.deselect_all();
+                    }
+                }
+                let mut total_sel = 0usize;
+                for (&ti, hs) in &by_tab {
+                    if ti < self.tabs.len() && !hs.is_empty() {
+                        self.tabs[ti].scene.select_entities(hs);
+                        total_sel += hs.len();
+                    }
+                }
+                if let Some(cur_hs) = by_tab.get(&self.active_tab).filter(|h| !h.is_empty()) {
+                    let _ = self.tabs[self.active_tab].scene.zoom_to_entities(cur_hs);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDISOLATE {eff_action}: 已跨打开图纸高亮选中 {total_sel} 个图元。"
+                ));
+            }
+            "NEXT" => {
+                struct StepTarget {
+                    tab_index: usize,
+                    handles: Vec<document::Handle>,
+                    x: f64,
+                    y: f64,
+                    desc: String,
+                }
+                let mut steps = Vec::new();
+                for v in &rep.boundary_valves {
+                    if !v.member_handles.is_empty() {
+                        steps.push(StepTarget {
+                            tab_index: v.tab_index,
+                            handles: v.member_handles.clone(),
+                            x: v.x,
+                            y: v.y,
+                            desc: format!("valve {} ({})", v.valve_tag, v.drawing_name),
+                        });
+                    }
+                }
+                for hz in &rep.hazards {
+                    if !hz.member_handles.is_empty() {
+                        steps.push(StepTarget {
+                            tab_index: hz.tab_index,
+                            handles: hz.member_handles.clone(),
+                            x: hz.x,
+                            y: hz.y,
+                            desc: format!("hazard {} ({})", hz.kind.as_str(), hz.drawing_name),
+                        });
+                    }
+                }
+                if steps.is_empty() {
+                    self.command_line
+                        .push_output("PIDISOLATE NEXT: 没有可巡检的隔离阀或风险点。");
+                    return Some(self.finish_dispatch(cmd));
+                }
+
+                let cur_tab = self.active_tab;
+                let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[cur_tab]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                let cur_pos = steps.iter().position(|st| {
+                    st.tab_index == cur_tab
+                        && !sel_set.is_empty()
+                        && sel_set.len() == st.handles.len()
+                        && st.handles.iter().all(|h| sel_set.contains(h))
+                });
+                let next_idx = cur_pos.map(|p| (p + 1) % steps.len()).unwrap_or(0);
+                let chosen = &steps[next_idx];
+                let dest_tab = chosen.tab_index;
+
+                if dest_tab < self.tabs.len() && dest_tab != self.active_tab {
+                    let _ = self.update(Message::TabSwitch(dest_tab));
+                    self.active_tab = dest_tab;
+                }
+                if dest_tab < self.tabs.len() {
+                    self.tabs[dest_tab].scene.deselect_all();
+                    self.tabs[dest_tab].scene.select_entities(&chosen.handles);
+                    let zoomed = self.tabs[dest_tab].scene.zoom_to_entities(&chosen.handles);
+                    if !zoomed {
+                        let mut cam = self.tabs[dest_tab].scene.camera.borrow_mut();
+                        let z = cam.target.z;
+                        cam.target = glam::DVec3::new(chosen.x, chosen.y, z);
+                    }
+                    self.refresh_properties();
+                }
+                self.command_line.push_output(&format!(
+                    "PIDISOLATE NEXT [{}/{}]: {}。",
+                    next_idx + 1,
+                    steps.len(),
+                    chosen.desc,
+                ));
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDISOLATE: 未知子命令 {other}（支持 SUMMARY / VALVES / ENVELOPE / HAZARDS / ALL / NEXT / EXPORT）。"
                 ));
                 return Some(Task::none());
             }
@@ -6632,6 +6905,474 @@ mod tests {
                 "{}\n",
                 serde_json::to_string_pretty(&json!({ "sheets": rows })).unwrap()
             ),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidisolate_solves_loto_boundary_valves_across_tabs_and_flags_unvalved_hazards() {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let mut app = app();
+
+        // Tab 1: DWG-155-01.dxf with target Pump P-1551 at (100, 300)
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-155-01.dxf".to_string();
+        let (v_suction_h, v_secondary_h, unvalved_pipe_h, hazard_drum_h) = {
+            let doc = &mut app.tabs[tab1].scene.document;
+            define_sppid_block(doc, "CENTRIFUGAL PUMP", 8.0, 8.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+            define_sppid_block(doc, "1TO1PARAMETRIC V DRUM", 12.0, 24.0);
+
+            let mut tb =
+                Text::with_value("DWG-155-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            // Target Pump P-1551 at (100, 300)
+            let mut pump = Insert::new("CENTRIFUGAL PUMP", Vector3::new(100.0, 300.0, 0.0));
+            pump.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(pump)).unwrap();
+            let mut pt =
+                Text::with_value("P-1551", Vector3::new(95.0, 308.0, 0.0)).with_height(2.5);
+            pt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(pt)).unwrap();
+
+            // Branch A (Suction): (50, 300)..(96, 300) -> First Valve BV155101 at (47, 300) -> (10, 300)..(44, 300) -> Secondary Valve BV155100 at (7, 300)
+            let mut ps1 = Line::from_points(
+                Vector3::new(50.0, 300.0, 0.0),
+                Vector3::new(96.0, 300.0, 0.0),
+            );
+            ps1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(ps1)).unwrap();
+
+            let mut vs1 = Insert::new("BALL VALVE TYPE 2", Vector3::new(47.0, 300.0, 0.0));
+            vs1.common.layer = "11".to_string();
+            let v_suction_h = doc.add_entity(document::EntityType::Insert(vs1)).unwrap();
+            let mut vst1 =
+                Text::with_value("BV155101", Vector3::new(43.0, 306.0, 0.0)).with_height(2.5);
+            vst1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(vst1)).unwrap();
+
+            let mut ps0 = Line::from_points(
+                Vector3::new(10.0, 300.0, 0.0),
+                Vector3::new(44.0, 300.0, 0.0),
+            );
+            ps0.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(ps0)).unwrap();
+
+            let mut vs0 = Insert::new("BALL VALVE TYPE 2", Vector3::new(7.0, 300.0, 0.0));
+            vs0.common.layer = "11".to_string();
+            let v_secondary_h = doc.add_entity(document::EntityType::Insert(vs0)).unwrap();
+            let mut vst0 =
+                Text::with_value("BV155100", Vector3::new(3.0, 306.0, 0.0)).with_height(2.5);
+            vst0.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(vst0)).unwrap();
+
+            // Branch B (Discharge): (104, 300)..(254, 300) -> Paired OPC at (260, 300) -> DWG-155-02
+            let mut pd = Line::from_points(
+                Vector3::new(104.0, 300.0, 0.0),
+                Vector3::new(254.0, 300.0, 0.0),
+            );
+            pd.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pd)).unwrap();
+            let mut ltxt = Text::with_value("100-PW-1551-CS150", Vector3::new(160.0, 303.0, 0.0))
+                .with_height(2.5);
+            ltxt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(ltxt)).unwrap();
+
+            let mut opc1 = Insert::new("_OFF-UNIT SQ", Vector3::new(260.0, 300.0, 0.0));
+            opc1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc1)).unwrap();
+            let mut tf1 =
+                Text::with_value("DWG-155-02", Vector3::new(250.0, 299.0, 0.0)).with_height(2.5);
+            tf1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(tf1)).unwrap();
+
+            // Branch C (Unvalved Hazard): (100, 304)..(100, 440) directly into Drum V-1559 at (100, 452)
+            let mut ph = Line::from_points(
+                Vector3::new(100.0, 304.0, 0.0),
+                Vector3::new(100.0, 440.0, 0.0),
+            );
+            ph.common.layer = "1".to_string();
+            let unvalved_pipe_h = doc.add_entity(document::EntityType::Line(ph)).unwrap();
+
+            let mut hd = Insert::new("1TO1PARAMETRIC V DRUM", Vector3::new(100.0, 452.0, 0.0));
+            hd.common.layer = "10".to_string();
+            let hazard_drum_h = doc.add_entity(document::EntityType::Insert(hd)).unwrap();
+            let mut hdt =
+                Text::with_value("V-1559", Vector3::new(96.0, 468.0, 0.0)).with_height(2.5);
+            hdt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(hdt)).unwrap();
+
+            (v_suction_h, v_secondary_h, unvalved_pipe_h, hazard_drum_h)
+        };
+
+        // Tab 2: DWG-155-02.dxf with return OPC -> First Discharge Valve BV155201 -> Downstream Drum V-1552
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-155-02.dxf".to_string();
+        let v_disch_tab2_h = {
+            let doc = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "1TO1PARAMETRIC V DRUM", 12.0, 24.0);
+
+            let mut tb =
+                Text::with_value("DWG-155-02", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut opc2 = Insert::new("_OFF-UNIT SQ", Vector3::new(120.0, 420.0, 0.0));
+            opc2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc2)).unwrap();
+            let mut tf2 =
+                Text::with_value("DWG-155-01", Vector3::new(110.0, 419.0, 0.0)).with_height(2.5);
+            tf2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(tf2)).unwrap();
+
+            let mut pa = Line::from_points(
+                Vector3::new(126.0, 420.0, 0.0),
+                Vector3::new(220.0, 420.0, 0.0),
+            );
+            pa.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pa)).unwrap();
+            let mut la = Text::with_value("100-PW-1551-CS150", Vector3::new(160.0, 423.0, 0.0))
+                .with_height(2.5);
+            la.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(la)).unwrap();
+
+            let mut vd = Insert::new("BALL VALVE TYPE 2", Vector3::new(223.0, 420.0, 0.0));
+            vd.common.layer = "11".to_string();
+            let v_disch_tab2_h = doc.add_entity(document::EntityType::Insert(vd)).unwrap();
+            let mut vdt =
+                Text::with_value("BV155201", Vector3::new(219.0, 426.0, 0.0)).with_height(2.5);
+            vdt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(vdt)).unwrap();
+
+            let mut pb = Line::from_points(
+                Vector3::new(226.0, 420.0, 0.0),
+                Vector3::new(340.0, 420.0, 0.0),
+            );
+            pb.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pb)).unwrap();
+
+            let mut d2 = Insert::new("1TO1PARAMETRIC V DRUM", Vector3::new(346.0, 420.0, 0.0));
+            d2.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(d2)).unwrap();
+            let mut dt2 =
+                Text::with_value("V-1552", Vector3::new(342.0, 435.0, 0.0)).with_height(2.5);
+            dt2.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(dt2)).unwrap();
+
+            v_disch_tab2_h
+        };
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        let tmp = std::env::temp_dir().join(format!("ocs_pidisolate_155_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // 1. Solve LOTO isolation boundary for P-1551 across tabs (before adding valve on Branch C)
+        let iso1_json = tmp.join("iso1.json");
+        let iso1_csv = tmp.join("iso1.csv");
+        let _ = app.run_command_line(&format!(
+            "PIDISOLATE P-1551 ALLTABS EXPORT \"{}\"",
+            iso1_json.display()
+        ));
+        assert!(
+            iso1_json.is_file(),
+            "PIDISOLATE EXPORT must write LOTO JSON report"
+        );
+        let _ = app.run_command_line(&format!(
+            "PIDISOLATE P-1551 ALLTABS EXPORT \"{}\"",
+            iso1_csv.display()
+        ));
+        let csv_txt = std::fs::read_to_string(&iso1_csv).unwrap();
+        assert!(
+            csv_txt.starts_with('\u{feff}')
+                && csv_txt.contains("BV155101")
+                && csv_txt.contains("BV155201")
+        );
+
+        let rep1: Value =
+            serde_json::from_str(&std::fs::read_to_string(&iso1_json).unwrap()).unwrap();
+        assert_eq!(rep1["summary"]["fully_isolatable"].as_bool(), Some(false));
+        assert_eq!(rep1["summary"]["crossed_tabs"].as_u64(), Some(2));
+        assert_eq!(rep1["summary"]["boundary_valves_count"].as_u64(), Some(2));
+        assert_eq!(rep1["summary"]["unvalved_peer_equipment"].as_u64(), Some(1));
+
+        let v_tags: Vec<&str> = rep1["boundary_valves"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v["valve_tag"].as_str())
+            .collect();
+        assert!(v_tags.contains(&"BV155101") && v_tags.contains(&"BV155201"));
+        assert!(!v_tags.contains(&"BV155100"));
+
+        // 2. Canvas category filters (VALVES & HAZARDS)
+        let _ = app.run_command_line("PIDISOLATE P-1551 ALLTABS VALVES");
+        assert!(has_sel(&app, tab1, v_suction_h));
+        assert!(!has_sel(&app, tab1, v_secondary_h));
+        assert!(has_sel(&app, tab2, v_disch_tab2_h));
+
+        let _ = app.run_command_line("PIDISOLATE P-1551 ALLTABS HAZARDS");
+        assert!(has_sel(&app, tab1, hazard_drum_h));
+
+        // 3. Remediate Branch C by splitting pipe and inserting isolation valve BV155103, promote both tabs, and verify fully_isolatable == true
+        {
+            let doc = &mut app.tabs[tab1].scene.document;
+            let _ = doc.remove_entity(unvalved_pipe_h);
+            let mut pc1 = Line::from_points(
+                Vector3::new(100.0, 304.0, 0.0),
+                Vector3::new(100.0, 367.0, 0.0),
+            );
+            pc1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pc1)).unwrap();
+
+            let mut vc = Insert::new("BALL VALVE TYPE 2", Vector3::new(100.0, 370.0, 0.0));
+            vc.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(vc)).unwrap();
+            let mut vct =
+                Text::with_value("BV155103", Vector3::new(105.0, 370.0, 0.0)).with_height(2.5);
+            vct.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(vct)).unwrap();
+
+            let mut pc2 = Line::from_points(
+                Vector3::new(100.0, 373.0, 0.0),
+                Vector3::new(100.0, 440.0, 0.0),
+            );
+            pc2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(pc2)).unwrap();
+        }
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        let _ = app.run_command_line("PIDPROMOTE");
+        let _ = app.update(Message::TabSwitch(tab2));
+        let _ = app.run_command_line("PIDPROMOTE");
+        let _ = app.update(Message::TabSwitch(tab1));
+
+        let iso2_json = tmp.join("iso2.json");
+        let _ = app.run_command_line(&format!(
+            "PIDISOLATE P-1551 ALLTABS EXPORT \"{}\"",
+            iso2_json.display()
+        ));
+        let rep2: Value =
+            serde_json::from_str(&std::fs::read_to_string(&iso2_json).unwrap()).unwrap();
+        assert_eq!(rep2["summary"]["fully_isolatable"].as_bool(), Some(true));
+        assert_eq!(rep2["summary"]["hazard_count"].as_u64(), Some(0));
+        assert_eq!(rep2["summary"]["boundary_valves_count"].as_u64(), Some(3));
+
+        // Verify NEXT steps across tabs (switching from Tab 1 to Tab 2 when stepping to BV155201)
+        app.tabs[tab1].scene.deselect_all();
+        app.tabs[tab2].scene.deselect_all();
+        let mut visited_tab2 = false;
+        for _ in 0..4 {
+            let _ = app.run_command_line("PIDISOLATE P-1551 ALLTABS NEXT");
+            if app.active_tab == tab2 {
+                visited_tab2 = true;
+            }
+        }
+        assert!(
+            visited_tab2,
+            "PIDISOLATE NEXT must cycle across tabs onto Tab 2 valve BV155201"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads 4 real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into OpenCADStudio and verifies PIDISOLATE ALLTABS equipment LOTO boundary & hazard analysis"]
+    fn real_multi_tab_pidisolate_cross_sheet_equipment_loto_audit() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_raw) = std::env::var("OCS_PID_REAL155_SPPID_PAIR") else {
+            println!("OCS_PID_REAL155_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(legacy_raw) = std::env::var("OCS_PID_REAL155_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL155_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL155_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real155"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sppid_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sppid_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        let legacy_paths: Vec<std::path::PathBuf> = std::env::split_paths(&legacy_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        assert_eq!(sppid_paths.len(), 2);
+        assert_eq!(legacy_paths.len(), 2);
+
+        let all_files = [
+            &sppid_paths[0],
+            &sppid_paths[1],
+            &legacy_paths[0],
+            &legacy_paths[1],
+        ];
+
+        let mut app = app();
+        let mut tab_indices = Vec::new();
+        let mut sha_prefixes = Vec::new();
+        for (idx, p) in all_files.iter().enumerate() {
+            let raw_b = std::fs::read(p).unwrap();
+            sha_prefixes.push(format!("{:x}", Sha256::digest(&raw_b))[..12].to_string());
+            if idx > 0 {
+                let _ = app.update(Message::TabNew);
+            }
+            let ti = app.active_tab;
+            app.tabs[ti].scene.document = crate::io::load_file(p).expect("load DXF");
+            app.tabs[ti].current_path = Some((*p).clone());
+            app.tabs[ti].tab_title = p
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("sheet.dxf")
+                .to_string();
+            tab_indices.push(ti);
+        }
+
+        let pick_best_equip = |app_ref: &OpenCADStudio, tabs: &[usize]| -> (usize, String) {
+            for &ti in tabs {
+                let bom = crate::io::pid_convert::extract_bom_from_documents(
+                    &[crate::io::pid_convert::BomSheetInput {
+                        drawing_name: "S",
+                        document: &app_ref.tabs[ti].scene.document,
+                    }],
+                    &crate::io::pid_convert::ConvertOptions::default(),
+                )
+                .unwrap();
+                let mut best: Option<(usize, String)> = None;
+                for r in bom.rows.iter().filter(|r| r.category == "Equipment") {
+                    let inputs: Vec<_> = tabs
+                        .iter()
+                        .map(|&t| crate::io::pid_convert::OpcSheetInput {
+                            tab_index: t,
+                            fallback_name: app_ref.tabs[t].tab_title.as_str(),
+                            document: &app_ref.tabs[t].scene.document,
+                        })
+                        .collect();
+                    if let Ok(iso) = crate::io::pid_convert::solve_pid_isolation_by_query(
+                        &r.item_tag,
+                        ti,
+                        true,
+                        &inputs,
+                    ) {
+                        let score = iso.summary.boundary_valves_count * 10
+                            + iso.summary.envelope_pipe_segments;
+                        if best.as_ref().is_none_or(|(bs, _)| score > *bs) {
+                            best = Some((score, r.item_tag.clone()));
+                        }
+                    }
+                }
+                if let Some((sc, tag)) = best {
+                    if sc > 0 {
+                        return (ti, tag);
+                    }
+                }
+                if let Some(first_eq) = bom.rows.iter().find(|r| r.category == "Equipment") {
+                    return (ti, first_eq.item_tag.clone());
+                }
+            }
+            panic!("expected at least one equipment item across paired sheets");
+        };
+
+        // 1. SPPID paired sheets (Tab 0 / Tab 1)
+        let (sp_tab, sp_eq) = pick_best_equip(&app, &[tab_indices[0], tab_indices[1]]);
+        let _ = app.update(Message::TabSwitch(sp_tab));
+        let sp_json_p = out_dir.join("sp_iso_tmp.json");
+        let sp_csv_p = out_dir.join("sp_iso_tmp.csv");
+        let _ = app.run_command_line(&format!(
+            "PIDISOLATE \"{sp_eq}\" ALLTABS EXPORT \"{}\"",
+            sp_json_p.display()
+        ));
+        let _ = app.run_command_line(&format!(
+            "PIDISOLATE \"{sp_eq}\" ALLTABS EXPORT \"{}\"",
+            sp_csv_p.display()
+        ));
+        let sp_rep: Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp_json_p).unwrap()).unwrap();
+        let sp_csv = std::fs::read_to_string(&sp_csv_p).unwrap();
+        let _ = std::fs::remove_file(&sp_json_p);
+        let _ = std::fs::remove_file(&sp_csv_p);
+        assert!(sp_csv.starts_with('\u{feff}'));
+        assert!(
+            sp_rep["summary"]["boundary_valves_count"]
+                .as_u64()
+                .unwrap_or(0)
+                + sp_rep["summary"]["envelope_pipe_segments"]
+                    .as_u64()
+                    .unwrap_or(0)
+                >= 1
+        );
+        let _ = app.run_command_line(&format!("PIDISOLATE \"{sp_eq}\" ALLTABS NEXT"));
+
+        // 2. Native AutoCAD legacy paired sheets (Tab 2 / Tab 3)
+        let (lg_tab, lg_eq) = pick_best_equip(&app, &[tab_indices[2], tab_indices[3]]);
+        let _ = app.update(Message::TabSwitch(lg_tab));
+        let lg_json_p = out_dir.join("lg_iso_tmp.json");
+        let _ = app.run_command_line(&format!(
+            "PIDISOLATE \"{lg_eq}\" ALLTABS EXPORT \"{}\"",
+            lg_json_p.display()
+        ));
+        let lg_rep: Value =
+            serde_json::from_str(&std::fs::read_to_string(&lg_json_p).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&lg_json_p);
+        assert!(
+            lg_rep["summary"]["boundary_valves_count"]
+                .as_u64()
+                .unwrap_or(0)
+                + lg_rep["summary"]["envelope_pipe_segments"]
+                    .as_u64()
+                    .unwrap_or(0)
+                + lg_rep["summary"]["hazard_count"].as_u64().unwrap_or(0)
+                >= 1
+        );
+
+        let sanitized = json!({
+            "tabs_loaded": 4,
+            "sppid_sha256_prefixes": [&sha_prefixes[0], &sha_prefixes[1]],
+            "legacy_sha256_prefixes": [&sha_prefixes[2], &sha_prefixes[3]],
+            "sppid_equipment_isolation": {
+                "fully_isolatable": sp_rep["summary"]["fully_isolatable"],
+                "crossed_tabs": sp_rep["summary"]["crossed_tabs"],
+                "boundary_valves_count": sp_rep["summary"]["boundary_valves_count"],
+                "envelope_pipe_segments": sp_rep["summary"]["envelope_pipe_segments"],
+                "hazard_count": sp_rep["summary"]["hazard_count"],
+                "unvalved_peer_equipment": sp_rep["summary"]["unvalved_peer_equipment"],
+                "unvalved_external_opcs": sp_rep["summary"]["unvalved_external_opcs"],
+                "unvalved_open_dead_ends": sp_rep["summary"]["unvalved_open_dead_ends"],
+            },
+            "legacy_equipment_isolation": {
+                "fully_isolatable": lg_rep["summary"]["fully_isolatable"],
+                "crossed_tabs": lg_rep["summary"]["crossed_tabs"],
+                "boundary_valves_count": lg_rep["summary"]["boundary_valves_count"],
+                "envelope_pipe_segments": lg_rep["summary"]["envelope_pipe_segments"],
+                "hazard_count": lg_rep["summary"]["hazard_count"],
+                "unvalved_peer_equipment": lg_rep["summary"]["unvalved_peer_equipment"],
+                "unvalved_external_opcs": lg_rep["summary"]["unvalved_external_opcs"],
+                "unvalved_open_dead_ends": lg_rep["summary"]["unvalved_open_dead_ends"],
+            },
+        });
+        std::fs::write(
+            out_dir.join("real155_summary.json"),
+            format!("{}\n", serde_json::to_string_pretty(&sanitized).unwrap()),
         )
         .unwrap();
     }

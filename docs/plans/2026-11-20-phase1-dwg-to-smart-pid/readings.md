@@ -1773,3 +1773,42 @@
 | `scripts\fmt-newhunks.ps1` | — | `diff.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 44. L3-3 / L3-4 / L2-2 / L6-2（#155）：应用内 P&ID 设备检修能量隔离边界（LOTO 首道关断阀清单与无阀直连预警）求解与隔离单导出命令 `PIDISOLATE` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `f1c34a0d5`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{isolate,mod}.rs`、`src/app/commands/pidprops.rs` |
+| 外部证据子项 | `2026-11-22-issue155/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_isolate.txt`、`real_out/real155_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
+
+### 44.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_155_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidisolate_solves_loto_boundary_valves_across_tabs_and_flags_unvalved_hazards`（构造含本图入口阀 + 二级阀、跨标签页互逆 `OPC` 对端出口阀及无阀直连相邻容器的三支路泵系统，验证首道关断阀精准截断不误纳二级阀、无阀直连风险预警、补加切断阀并 `PIDPROMOTE` 后 `fully_isolatable = true` 收敛及跨标签页 `PIDISOLATE NEXT` 聚焦），运行按预期在 `PIDISOLATE EXPORT` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`21 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/isolate.rs`（`solve_pid_isolation_from_handles`、`solve_pid_isolation_by_query`、`write_pid_isolation_file`）：统一兼容未升格 `.dxf`/`.dwg`、未升格 `.pid` 原图与已升格 `PID_AUTHOR` 模型；自动区分可关断在线阀门（`IsoKind::Valve`）与被动导通管件/纯检测变送器（`REDUCER / FLANGE / STRAINER / PT` 等），沿相连管段及跨标签页互逆 `PIDOPC` 向外传播并在首道隔离阀处精准截断（同步支持 AutoCAD 未裁剪直通管段上骑跨阀门截断）；
+  2. 自动检测三类隔离失效风险：`UnvalvedPeerEquipment`（无阀直连相邻设备）、`UnvalvedExternalOpc`（无阀直通外部未配对页间连接符）与 `UnvalvedOpenDeadEnd`（包络内无阀敞口管端），支持导出 `.json` 与 UTF-8 BOM `.csv` / `.tsv` 9 列 LOTO 检修能量隔离挂牌清册；
+  3. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDISOLATE [<设备位号>] [ALLTABS] [SUMMARY | VALVES | ENVELOPE | HAZARDS | ALL | NEXT] [EXPORT "<.json|.csv|.tsv>"]`。
+
+### 44.2 真实双标准成对工程图纸（SPPID 生产图对 + 原生 AutoCAD 存量图对）多标签页设备隔离审查实测
+
+| 图纸组 | 样本形态 | 源图 SHA-256 前缀对 | 跨标签页数 | 首道关断阀数（`boundary_valves`） | 包络管段数 | 无阀风险（相邻设备 / 外部 OPC / 敞口） |
+|---|---|---|---:|---:|---:|---|
+| `SP01 <-> SP02` | 未升格 SPPID 拆分生产图对 | `2164f88bbb57` + `fc2c812dc182` | `2` 图 | **`80` 台** | `568` 段 | `13` 处（设备 `5` / 外部 OPC `8` / 敞口 `0`） |
+| `LG01 <-> LG02` | 未升格原生 AutoCAD 存量图对 | `a0f05f81a655` + `28ed389e23cb` | `1` 图 | **`8` 台** | `8` 段 | `2` 处（设备 `2` / 外部 OPC `0` / 敞口 `0`） |
+
+### 44.3 固定门禁读数
+
+| 门禁项 | 改前读数（§43.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,234` 条（`7,155` 过 / `78` 忽略 / `1` 既有 `.pen`） | **`7,236` 条**（**`7,156` 过** / **`79` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图跨标签页设备隔离审查），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `isolate.rs`、`mod.rs`、`pidprops.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
