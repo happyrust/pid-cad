@@ -2356,3 +2356,41 @@
 | `scripts\fmt-newhunks.ps1` | — | `equipment.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 59. L3-2 / L3-3 / L3-6 / L6-2（#170）：应用内 P&ID 超压泄放保护装置清册（API 520/521 安全阀/爆破片/呼吸阀条件表）、泄放去向与铅封开 CSO/LO 合规校核及巡检命令 `PIDRELIEF` 与 CLI `--export-relief` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `083905fb6`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{relief,mod}.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-22-issue170/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_relief.txt`、`cli_export_relief.txt`、`real_out/real170_summary.json`、`fmt_newhunks.txt`、`rust_gates_status.json`） |
+
+### 59.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_170_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidrelief_traces_protected_equipment_flare_and_atm_destinations_audits_cso_vs_unsealed_block_valves_and_steps_camera`（构造跨双标签页的：① 容器 `V-1701 -> 80-PG-17001 -> BV1701(CSO) -> PSV-1701 -> 100-FL-17002 -> 互逆 OPC 火炬总管` 合规泄放链；② 换热器 `E-1702 -> 50-PG-17003 -> BV1702(无铅封手阀!) -> PSV-1702 -> 80-ATM-17004` 未铅封截断阀违例链；③ 储罐 `TK-1703 -> PVSV-1703 -> TO ATM` 呼吸阀大气放空链；④ 孤立悬空爆破片 `PSE-1799`），运行按预期在 `relief.json` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`36 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/relief.rs`（`analyze_pid_relief_devices`、`extract_relief_from_path`、`write_pid_relief_file`）：同时支持未升格 `.dxf`/`.dwg`/`.pid` 与已升格 `PID_AUTHOR` 混合态图纸，细分 `safety_relief_valve`、`rupture_disc`、`breather_valve`、`emergency_blowdown` 四类超压泄放装置，沿串联泄放支管跨互逆 `PIDOPC` 双向追踪识别被保护设备、入口/出口管径与等级、最终泄放去向（`flare_header / atmosphere / closed_system / unknown`），并对串联截断手阀执行 `CSO / LO / 铅封开` 强制合规校核（标记 `compliant / unsealed_block_valve / unconnected_relief`），导出 `.json` 与 14 列 UTF-8 BOM `.csv` / `.tsv` 清册；
+  2. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDRELIEF [SUMMARY | ALL | VIOLATIONS | FLARE | ATMOSPHERE | TAG "<位号>" | NEXT] [ALLTABS] [EXPORT "<.json|.csv|.tsv>"]`，并在 `examples/pid_convert.rs` 新增 `--export-relief <PATH>`（真实 SPPID 图单图 CLI 独立提取 `3` 台泄放装置，退出码 `0`）。
+
+### 59.2 真实双标准生产图跨标签页超压泄放装置与 CSO 合规对账实测
+
+| 图纸组 | 样本形态 | 源图 SHA-256 前缀对 | 总泄放装置 | 安全阀 | 呼吸/爆破/泄放 | 火炬 / 大气 / 闭式去向 | `compliant` 合规 | 未铅封阀违例 / 悬空 | `.csv` 导出与 `NEXT` 巡检 |
+|---|---|---|---:|---:|---:|---|---:|---|---:|
+| `SP01 + SP02` | 未升格 SPPID 拆分生产图对 | `2164f88bbb57` + `fc2c812dc182` | **`6`** | `6` | `0` | `0 / 0 / 6` | **`6`** | `0 / 0` | **通过** |
+| `LG_PSV_SET` | 未升格原生 AutoCAD 存量图组 | `4f2200b7c055` + `a0f05f81a655` | **`10`** | `10` | `0` | `0 / 0 / 0` | **`10`** | `0 / 0` | **通过** |
+
+### 59.3 固定门禁读数
+
+| 门禁项 | 改前读数（§58.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,264` 条（`7,170` 过 / `93` 忽略 / `1` 既有 `.pen`） | **`7,266` 条**（**`7,171` 过** / **`94` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 双标准真实安全阀泄放与合规对账），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `relief.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |

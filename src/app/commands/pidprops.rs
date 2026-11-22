@@ -49,7 +49,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDINDEX",
         "PIDSPECIALTY",
         "PIDLINELIST",
-        "PIDEQUIP"
+        "PIDEQUIP",
+        "PIDRELIEF"
     ]
 });
 
@@ -335,6 +336,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidequip_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidrelief_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -5254,6 +5258,252 @@ impl OpenCADStudio {
             other => {
                 self.command_line.push_error(&format!(
                     "PIDEQUIP: 未知子命令 {other}（支持 SUMMARY / ALL / VESSELS / ROTATING / EXCHANGERS / TANKS / UNTAGGED / DUPLICATES / TAG / NEXT / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
+
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidrelief_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            analyze_pid_relief_devices, relief_row_matches_query, write_pid_relief_file,
+            OpcSheetInput, ReliefDestinationKind,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDRELIEF") {
+            return None;
+        }
+
+        let mut action: Option<String> = None;
+        let mut tag_query: Option<String> = None;
+        let mut all_tabs = false;
+        let mut export_path: Option<std::path::PathBuf> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            let up = tok.to_ascii_uppercase();
+            match up.as_str() {
+                "ALLTABS" => {
+                    all_tabs = true;
+                    idx += 1;
+                }
+                "SUMMARY" | "ALL" | "VIOLATIONS" | "FLARE" | "ATMOSPHERE" | "NEXT" => {
+                    action = Some(up);
+                    idx += 1;
+                }
+                "TAG" => {
+                    let Some(q) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDRELIEF TAG: 缺少泄放装置位号或被保护设备位号关键字。");
+                        return Some(Task::none());
+                    };
+                    action = Some("TAG".to_string());
+                    tag_query = Some(q.clone());
+                    idx += 2;
+                }
+                "EXPORT" => {
+                    let Some(next_tok) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDRELIEF EXPORT: 缺少输出文件路径（.json/.csv/.tsv）。");
+                        return Some(Task::none());
+                    };
+                    export_path = Some(std::path::PathBuf::from(next_tok));
+                    idx += 2;
+                }
+                _ => {
+                    if action.is_none() {
+                        action = Some("TAG".to_string());
+                        tag_query = Some(tok.clone());
+                    }
+                    idx += 1;
+                }
+            }
+        }
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<OpcSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+
+        let rep = analyze_pid_relief_devices(&sheet_inputs);
+
+        if let Some(ref out_p) = export_path {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(err) = write_pid_relief_file(&rep, out_p) {
+                self.command_line
+                    .push_error(&format!("PIDRELIEF EXPORT: {err}"));
+                return Some(Task::none());
+            }
+        }
+
+        let eff_action = action.as_deref().unwrap_or("SUMMARY");
+        let filtered: Vec<_> = rep
+            .devices
+            .iter()
+            .filter(|d| match eff_action {
+                "VIOLATIONS" => d.compliance_status.is_violation(),
+                "FLARE" => d.destination == ReliefDestinationKind::FlareHeader,
+                "ATMOSPHERE" => d.destination == ReliefDestinationKind::Atmosphere,
+                "TAG" => tag_query
+                    .as_deref()
+                    .is_some_and(|q| relief_row_matches_query(d, q)),
+                _ => true,
+            })
+            .collect();
+
+        match eff_action {
+            "SUMMARY" => {
+                self.command_line.push_output(&format!(
+                    "PIDRELIEF: 扫描图纸={} | 泄放装置={}（安全阀={}，爆破片={}，呼吸阀={}，紧急泄放={}）| 去向[火炬={}，大气={}，闭式={}] | 合规={}，未铅封截断阀违例={}，悬空={}。",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_devices,
+                    rep.summary.safety_valves_count,
+                    rep.summary.rupture_discs_count,
+                    rep.summary.breather_valves_count,
+                    rep.summary.blowdown_valves_count,
+                    rep.summary.flare_discharges,
+                    rep.summary.atmosphere_discharges,
+                    rep.summary.closed_discharges,
+                    rep.summary.compliant_count,
+                    rep.summary.unsealed_valve_violations,
+                    rep.summary.unconnected_count,
+                ));
+            }
+            "ALL" | "VIOLATIONS" | "FLARE" | "ATMOSPHERE" | "TAG" => {
+                let mut by_tab: std::collections::BTreeMap<usize, Vec<document::Handle>> =
+                    std::collections::BTreeMap::new();
+                for d in &filtered {
+                    let hs = d
+                        .handles_by_tab
+                        .get(&d.tab_index)
+                        .cloned()
+                        .unwrap_or_else(|| vec![d.primary_handle]);
+                    let dst = by_tab.entry(d.tab_index).or_default();
+                    for h in [d.primary_handle].into_iter().chain(hs.into_iter().take(0)) {
+                        if !dst.contains(&h) {
+                            dst.push(h);
+                        }
+                    }
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                let mut sel_cnt = 0usize;
+                for (&ti, hs) in &by_tab {
+                    if ti < self.tabs.len() && !hs.is_empty() {
+                        self.tabs[ti].scene.select_entities(hs);
+                        sel_cnt += hs.len();
+                    }
+                }
+                if eff_action == "TAG"
+                    && filtered.len() == 1
+                    && filtered[0].tab_index < self.tabs.len()
+                    && filtered[0].tab_index != self.active_tab
+                {
+                    let dt = filtered[0].tab_index;
+                    let _ = self.update(Message::TabSwitch(dt));
+                    self.active_tab = dt;
+                }
+                if let Some(cur_hs) = by_tab.get(&self.active_tab).filter(|h| !h.is_empty()) {
+                    let _ = self.tabs[self.active_tab].scene.zoom_to_entities(cur_hs);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDRELIEF {eff_action}: 匹配 {} 台泄放装置，高亮 {sel_cnt} 个符号图元。",
+                    filtered.len()
+                ));
+            }
+            "NEXT" => {
+                if filtered.is_empty() {
+                    self.command_line
+                        .push_output("PIDRELIEF NEXT: 未找到可巡检的泄放保护装置。");
+                    return Some(self.finish_dispatch(cmd));
+                }
+                let cur_tab = self.active_tab;
+                let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[cur_tab]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                let cur_pos = filtered
+                    .iter()
+                    .position(|d| d.tab_index == cur_tab && sel_set.contains(&d.primary_handle));
+                let next_idx = cur_pos.map(|p| (p + 1) % filtered.len()).unwrap_or(0);
+                let chosen = filtered[next_idx];
+                let dest_tab = chosen.tab_index;
+
+                if dest_tab < self.tabs.len() && dest_tab != self.active_tab {
+                    let _ = self.update(Message::TabSwitch(dest_tab));
+                    self.active_tab = dest_tab;
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                if dest_tab < self.tabs.len() {
+                    let hs = vec![chosen.primary_handle];
+                    self.tabs[dest_tab].scene.select_entities(&hs);
+                    let zoomed = self.tabs[dest_tab].scene.zoom_to_entities(&hs);
+                    if !zoomed {
+                        let mut cam = self.tabs[dest_tab].scene.camera.borrow_mut();
+                        let z = cam.target.z;
+                        cam.target = glam::DVec3::new(chosen.x, chosen.y, z);
+                    }
+                    self.refresh_properties();
+                }
+                self.command_line.push_output(&format!(
+                    "PIDRELIEF NEXT [{}/{}]: {}（保护={}，去向={}，合规={}）。",
+                    next_idx + 1,
+                    filtered.len(),
+                    chosen.device_tag,
+                    chosen.protected_equipment,
+                    chosen.destination.as_str(),
+                    chosen.compliance_status.as_str(),
+                ));
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDRELIEF: 未知子命令 {other}（支持 SUMMARY / ALL / VIOLATIONS / FLARE / ATMOSPHERE / TAG / NEXT / EXPORT）。"
                 ));
                 return Some(Task::none());
             }
@@ -14900,6 +15150,448 @@ mod tests {
 
         std::fs::write(
             out_dir.join("real169_summary.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()
+            ),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidrelief_traces_protected_equipment_flare_and_atm_destinations_audits_cso_vs_unsealed_block_valves_and_steps_camera(
+    ) {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let tmp = std::env::temp_dir().join("ocs_pidrelief_test_170");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let mut app = app();
+
+        // Tab 1:
+        // 1) V-1701 -> 80-PG-17001-CS300 -> BV1701 ("CSO") -> PSV-1701 -> 100-FL-17002-CS150 -> OPC to Tab 2 (Compliant, Flare)
+        // 2) E-1702 -> 50-PG-17003-CS300 -> BV1702 (unsealed!) -> PSV-1702 -> 80-ATM-17004-CS150 (UnsealedBlockValve, Atmosphere)
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-170-01.dxf".to_string();
+        let (psv1_h, psv2_h) = {
+            let doc = &mut app.tabs[tab1].scene.document;
+            define_sppid_block(doc, "1TO1PARAMETRIC V DRUM", 12.0, 24.0);
+            define_sppid_block(doc, "HEAT EXCHANGER", 12.0, 12.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "SAFETY VALVE TYPE 1", 6.0, 8.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-170-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            // V-1701 at (100, 300)
+            let mut drum = Insert::new("1TO1PARAMETRIC V DRUM", Vector3::new(100.0, 300.0, 0.0));
+            drum.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(drum)).unwrap();
+            let mut dt =
+                Text::with_value("V-1701", Vector3::new(95.0, 316.0, 0.0)).with_height(2.5);
+            dt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(dt)).unwrap();
+
+            let mut p1 = Line::from_points(
+                Vector3::new(106.0, 300.0, 0.0),
+                Vector3::new(157.0, 300.0, 0.0),
+            );
+            p1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p1)).unwrap();
+            let mut l1 = Text::with_value("80-PG-17001-CS300", Vector3::new(115.0, 303.0, 0.0))
+                .with_height(2.5);
+            l1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(l1)).unwrap();
+
+            let mut bv1 = Insert::new("BALL VALVE TYPE 2", Vector3::new(160.0, 300.0, 0.0));
+            bv1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bv1)).unwrap();
+            let mut bvt1 =
+                Text::with_value("BV1701", Vector3::new(156.0, 306.0, 0.0)).with_height(2.5);
+            bvt1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(bvt1)).unwrap();
+            let mut cso_txt =
+                Text::with_value("CSO", Vector3::new(158.0, 294.0, 0.0)).with_height(2.2);
+            cso_txt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(cso_txt)).unwrap();
+
+            let mut p2 = Line::from_points(
+                Vector3::new(163.0, 300.0, 0.0),
+                Vector3::new(197.0, 300.0, 0.0),
+            );
+            p2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p2)).unwrap();
+
+            let mut psv1 = Insert::new("SAFETY VALVE TYPE 1", Vector3::new(200.0, 300.0, 0.0));
+            psv1.common.layer = "11".to_string();
+            let psv1_h = doc.add_entity(document::EntityType::Insert(psv1)).unwrap();
+            let mut psvt1 =
+                Text::with_value("PSV-1701", Vector3::new(195.0, 308.0, 0.0)).with_height(2.5);
+            psvt1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(psvt1)).unwrap();
+
+            let mut p3 = Line::from_points(
+                Vector3::new(203.0, 300.0, 0.0),
+                Vector3::new(274.0, 300.0, 0.0),
+            );
+            p3.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p3)).unwrap();
+            let mut l2 = Text::with_value("100-FL-17002-CS150", Vector3::new(220.0, 303.0, 0.0))
+                .with_height(2.5);
+            l2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(l2)).unwrap();
+
+            let mut opc1 = Insert::new("_OFF-UNIT SQ", Vector3::new(280.0, 300.0, 0.0));
+            opc1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc1)).unwrap();
+            let mut oft1 =
+                Text::with_value("DWG-170-02", Vector3::new(270.0, 299.0, 0.0)).with_height(2.5);
+            oft1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(oft1)).unwrap();
+
+            // Second train: E-1702 -> 50-PG-17003-CS300 -> BV1702 (NO CSO!) -> PSV-1702 -> 80-ATM-17004-CS150
+            let mut ex = Insert::new("HEAT EXCHANGER", Vector3::new(100.0, 480.0, 0.0));
+            ex.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(ex)).unwrap();
+            let mut ext =
+                Text::with_value("E-1702", Vector3::new(95.0, 490.0, 0.0)).with_height(2.5);
+            ext.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(ext)).unwrap();
+
+            let mut q1 = Line::from_points(
+                Vector3::new(106.0, 480.0, 0.0),
+                Vector3::new(157.0, 480.0, 0.0),
+            );
+            q1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(q1)).unwrap();
+            let mut ql1 = Text::with_value("50-PG-17003-CS300", Vector3::new(115.0, 483.0, 0.0))
+                .with_height(2.5);
+            ql1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(ql1)).unwrap();
+
+            let mut bv2 = Insert::new("BALL VALVE TYPE 2", Vector3::new(160.0, 480.0, 0.0));
+            bv2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bv2)).unwrap();
+            let mut bvt2 =
+                Text::with_value("BV1702", Vector3::new(156.0, 486.0, 0.0)).with_height(2.5);
+            bvt2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(bvt2)).unwrap();
+
+            let mut q2 = Line::from_points(
+                Vector3::new(163.0, 480.0, 0.0),
+                Vector3::new(197.0, 480.0, 0.0),
+            );
+            q2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(q2)).unwrap();
+
+            let mut psv2 = Insert::new("SAFETY VALVE TYPE 1", Vector3::new(200.0, 480.0, 0.0));
+            psv2.common.layer = "11".to_string();
+            let psv2_h = doc.add_entity(document::EntityType::Insert(psv2)).unwrap();
+            let mut psvt2 =
+                Text::with_value("PSV-1702", Vector3::new(195.0, 488.0, 0.0)).with_height(2.5);
+            psvt2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(psvt2)).unwrap();
+
+            let mut q3 = Line::from_points(
+                Vector3::new(203.0, 480.0, 0.0),
+                Vector3::new(270.0, 480.0, 0.0),
+            );
+            q3.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(q3)).unwrap();
+            let mut ql2 = Text::with_value("80-ATM-17004-CS150", Vector3::new(215.0, 483.0, 0.0))
+                .with_height(2.5);
+            ql2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(ql2)).unwrap();
+
+            (psv1_h, psv2_h)
+        };
+
+        // Tab 2: return flare OPC + TK-1703 with Breather Valve PVSV-1703 to ATM + orphan PSE-1799
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-170-02.dxf".to_string();
+        let (pvsv_h, pse_h) = {
+            let doc = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc, "1TO1PARAMETRIC V DRUM", 16.0, 24.0);
+            define_sppid_block(doc, "BREATHER VALVE TYPE 1", 6.0, 8.0);
+            define_sppid_block(doc, "SAFETY VALVE TYPE 1", 6.0, 8.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-170-02", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut opc2 = Insert::new("_OFF-UNIT SQ", Vector3::new(100.0, 300.0, 0.0));
+            opc2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc2)).unwrap();
+            let mut oft2 =
+                Text::with_value("DWG-170-01", Vector3::new(90.0, 299.0, 0.0)).with_height(2.5);
+            oft2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(oft2)).unwrap();
+
+            let mut fl_ln = Line::from_points(
+                Vector3::new(106.0, 300.0, 0.0),
+                Vector3::new(220.0, 300.0, 0.0),
+            );
+            fl_ln.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(fl_ln)).unwrap();
+            let mut fl_lbl =
+                Text::with_value("100-FL-17002-CS150", Vector3::new(135.0, 303.0, 0.0))
+                    .with_height(2.5);
+            fl_lbl.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(fl_lbl)).unwrap();
+
+            // Storage tank TK-1703 -> 100-PG-17005-CS150 -> PVSV-1703 ("TO ATM")
+            let mut tk = Insert::new("1TO1PARAMETRIC V DRUM", Vector3::new(340.0, 300.0, 0.0));
+            tk.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(tk)).unwrap();
+            let mut tkt =
+                Text::with_value("TK-1703", Vector3::new(334.0, 316.0, 0.0)).with_height(2.5);
+            tkt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(tkt)).unwrap();
+
+            let mut tk_ln = Line::from_points(
+                Vector3::new(340.0, 312.0, 0.0),
+                Vector3::new(340.0, 356.0, 0.0),
+            );
+            tk_ln.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(tk_ln)).unwrap();
+            let mut tk_lbl =
+                Text::with_value("100-PG-17005-CS150", Vector3::new(344.0, 330.0, 0.0))
+                    .with_height(2.5);
+            tk_lbl.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(tk_lbl)).unwrap();
+
+            let mut pvsv = Insert::new("BREATHER VALVE TYPE 1", Vector3::new(340.0, 360.0, 0.0));
+            pvsv.common.layer = "11".to_string();
+            let pvsv_h = doc.add_entity(document::EntityType::Insert(pvsv)).unwrap();
+            let mut pvsv_t =
+                Text::with_value("PVSV-1703", Vector3::new(346.0, 360.0, 0.0)).with_height(2.5);
+            pvsv_t.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(pvsv_t)).unwrap();
+            let mut atm_t =
+                Text::with_value("TO ATM", Vector3::new(336.0, 370.0, 0.0)).with_height(2.2);
+            atm_t.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(atm_t)).unwrap();
+
+            // Unconnected rupture disc PSE-1799
+            let mut pse = Insert::new("SAFETY VALVE TYPE 1", Vector3::new(520.0, 480.0, 0.0));
+            pse.common.layer = "11".to_string();
+            let pse_h = doc.add_entity(document::EntityType::Insert(pse)).unwrap();
+            let mut pset =
+                Text::with_value("PSE-1799", Vector3::new(515.0, 488.0, 0.0)).with_height(2.5);
+            pset.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(pset)).unwrap();
+
+            (pvsv_h, pse_h)
+        };
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        let json_p = tmp.join("relief.json");
+        let csv_p = tmp.join("relief.csv");
+        let _ = app.run_command_line(&format!(
+            "PIDRELIEF ALLTABS EXPORT \"{}\"",
+            json_p.display()
+        ));
+        assert!(
+            json_p.is_file(),
+            "PIDRELIEF EXPORT must write Pressure Relief Device Schedule relief.json"
+        );
+        let _ = app.run_command_line(&format!(
+            "PIDRELIEF SUMMARY ALLTABS EXPORT \"{}\"",
+            csv_p.display()
+        ));
+        assert!(csv_p.is_file());
+        let csv_bytes = std::fs::read(&csv_p).unwrap();
+        assert!(csv_bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
+
+        let rep: Value = serde_json::from_str(&std::fs::read_to_string(&json_p).unwrap()).unwrap();
+        assert_eq!(rep["summary"]["sheets_scanned"].as_u64(), Some(2));
+        assert_eq!(rep["summary"]["total_devices"].as_u64(), Some(4));
+        assert_eq!(rep["summary"]["compliant_count"].as_u64(), Some(2));
+        assert_eq!(
+            rep["summary"]["unsealed_valve_violations"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(rep["summary"]["unconnected_count"].as_u64(), Some(1));
+        assert_eq!(rep["summary"]["flare_discharges"].as_u64(), Some(1));
+        assert_eq!(rep["summary"]["atmosphere_discharges"].as_u64(), Some(2));
+
+        let devs = rep["devices"].as_array().unwrap();
+        let r1 = devs
+            .iter()
+            .find(|d| d["device_tag"].as_str() == Some("PSV-1701"))
+            .expect("PSV-1701");
+        assert_eq!(r1["device_type"].as_str(), Some("safety_relief_valve"));
+        assert_eq!(r1["protected_equipment"].as_str(), Some("V-1701"));
+        assert_eq!(r1["inlet_dn"].as_str(), Some("80 mm"));
+        assert_eq!(r1["outlet_dn"].as_str(), Some("100 mm"));
+        assert_eq!(r1["destination"].as_str(), Some("flare_header"));
+        assert_eq!(r1["compliance_status"].as_str(), Some("compliant"));
+
+        let r2 = devs
+            .iter()
+            .find(|d| d["device_tag"].as_str() == Some("PSV-1702"))
+            .expect("PSV-1702");
+        assert_eq!(r2["protected_equipment"].as_str(), Some("E-1702"));
+        assert_eq!(r2["destination"].as_str(), Some("atmosphere"));
+        assert_eq!(
+            r2["compliance_status"].as_str(),
+            Some("unsealed_block_valve")
+        );
+
+        let r3 = devs
+            .iter()
+            .find(|d| d["device_tag"].as_str() == Some("PVSV-1703"))
+            .expect("PVSV-1703");
+        assert_eq!(r3["device_type"].as_str(), Some("breather_valve"));
+        assert_eq!(r3["protected_equipment"].as_str(), Some("TK-1703"));
+        assert_eq!(r3["destination"].as_str(), Some("atmosphere"));
+        assert_eq!(r3["compliance_status"].as_str(), Some("compliant"));
+
+        let r4 = devs
+            .iter()
+            .find(|d| d["device_tag"].as_str() == Some("PSE-1799"))
+            .expect("PSE-1799");
+        assert_eq!(r4["device_type"].as_str(), Some("rupture_disc"));
+        assert_eq!(r4["compliance_status"].as_str(), Some("unconnected_relief"));
+
+        let _ = app.run_command_line("PIDRELIEF FLARE ALLTABS");
+        assert!(has_sel(&app, tab1, psv1_h) && !has_sel(&app, tab1, psv2_h));
+
+        let _ = app.run_command_line("PIDRELIEF VIOLATIONS ALLTABS");
+        assert!(has_sel(&app, tab1, psv2_h) && has_sel(&app, tab2, pse_h));
+
+        let _ = app.run_command_line("PIDRELIEF TAG PVSV-1703 ALLTABS");
+        assert_eq!(app.active_tab, tab2);
+        assert!(has_sel(&app, tab2, pvsv_h));
+
+        let mut visited_pse = false;
+        for _ in 0..5 {
+            let _ = app.run_command_line("PIDRELIEF NEXT ALLTABS");
+            if app.active_tab == tab2 && has_sel(&app, tab2, pse_h) {
+                visited_pse = true;
+                break;
+            }
+        }
+        assert!(
+            visited_pse,
+            "PIDRELIEF NEXT ALLTABS must visit PSE-1799 on Tab 2"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads real SPPID production sheets and native AutoCAD legacy sheets with PSV safety relief valves into OpenCADStudio and verifies PIDRELIEF ALLTABS schedule and NEXT stepping"]
+    fn real_multi_tab_pidrelief_schedule_destination_and_cso_audit() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_raw) = std::env::var("OCS_PID_REAL170_SPPID_PAIR") else {
+            println!("OCS_PID_REAL170_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(legacy_raw) = std::env::var("OCS_PID_REAL170_LEGACY_SHEETS") else {
+            println!("OCS_PID_REAL170_LEGACY_SHEETS unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL170_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real170"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sppid_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sppid_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        let legacy_paths: Vec<std::path::PathBuf> = std::env::split_paths(&legacy_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        assert!(!sppid_paths.is_empty() && !legacy_paths.is_empty());
+
+        let groups = [("SP01_SP02", &sppid_paths), ("LG_PSV_SET", &legacy_paths)];
+        let mut out_groups = Vec::new();
+
+        for (gname, paths) in groups {
+            let mut app = app();
+            let mut shas = Vec::new();
+            for (idx, p) in paths.iter().enumerate() {
+                let raw_b = std::fs::read(p).unwrap();
+                shas.push(format!("{:x}", Sha256::digest(&raw_b))[..12].to_string());
+                if idx > 0 {
+                    let _ = app.update(Message::TabNew);
+                }
+                let ti = app.active_tab;
+                app.tabs[ti].scene.document = crate::io::load_file(p).expect("load DXF");
+                app.tabs[ti].tab_title = format!("{gname}_{idx}.dxf");
+            }
+
+            let json_p = out_dir.join(format!("{gname}_relief.json"));
+            let csv_p = out_dir.join(format!("{gname}_relief.csv"));
+            let _ = app.run_command_line(&format!(
+                "PIDRELIEF ALLTABS EXPORT \"{}\"",
+                json_p.display()
+            ));
+            let _ = app.run_command_line(&format!(
+                "PIDRELIEF SUMMARY ALLTABS EXPORT \"{}\"",
+                csv_p.display()
+            ));
+            assert!(json_p.is_file() && csv_p.is_file());
+            let csv_raw = std::fs::read(&csv_p).unwrap();
+            assert!(csv_raw.starts_with(&[0xEF, 0xBB, 0xBF]));
+
+            let rep: Value =
+                serde_json::from_str(&std::fs::read_to_string(&json_p).unwrap()).unwrap();
+            let tot = rep["summary"]["total_devices"].as_u64().unwrap_or(0);
+            assert!(
+                tot >= 2,
+                "{gname} must extract >= 2 relief devices, got {tot}"
+            );
+
+            let _ = app.run_command_line("PIDRELIEF NEXT ALLTABS");
+            let cur_tab = app.active_tab;
+            assert!(
+                !app.tabs[cur_tab].scene.selected_entities().is_empty(),
+                "PIDRELIEF NEXT ALLTABS must select target relief device"
+            );
+
+            let _ = std::fs::remove_file(&json_p);
+            let _ = std::fs::remove_file(&csv_p);
+
+            out_groups.push(json!({
+                "group": gname,
+                "sha256_prefixes": shas,
+                "total_devices": rep["summary"]["total_devices"],
+                "safety_valves_count": rep["summary"]["safety_valves_count"],
+                "rupture_discs_count": rep["summary"]["rupture_discs_count"],
+                "breather_valves_count": rep["summary"]["breather_valves_count"],
+                "blowdown_valves_count": rep["summary"]["blowdown_valves_count"],
+                "flare_discharges": rep["summary"]["flare_discharges"],
+                "atmosphere_discharges": rep["summary"]["atmosphere_discharges"],
+                "closed_discharges": rep["summary"]["closed_discharges"],
+                "compliant_count": rep["summary"]["compliant_count"],
+                "unsealed_valve_violations": rep["summary"]["unsealed_valve_violations"],
+                "unconnected_count": rep["summary"]["unconnected_count"],
+            }));
+        }
+
+        std::fs::write(
+            out_dir.join("real170_summary.json"),
             format!(
                 "{}\n",
                 serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()

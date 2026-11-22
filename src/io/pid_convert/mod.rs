@@ -22,6 +22,7 @@ pub mod opc;
 pub mod package;
 pub mod promote;
 pub mod recognize;
+pub mod relief;
 pub mod renumber;
 pub mod spec_check;
 pub mod specialty;
@@ -52,6 +53,13 @@ pub use line_list::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use line_list::{extract_lines_from_path, write_pid_line_list_file};
+pub use relief::{
+    analyze_pid_relief_devices, classify_relief_device_type, format_pid_relief_delimited,
+    relief_row_matches_query, PidReliefDeviceRow, PidReliefReport, PidReliefSummary,
+    ReliefComplianceStatus, ReliefDestinationKind, ReliefDeviceType, RELIEF_CSV_HEADERS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use relief::{extract_relief_from_path, write_pid_relief_file};
 pub use specialty::{
     analyze_pid_specialty_items, classify_specialty_component, format_pid_specialty_delimited,
     PidSpecialtyItem, PidSpecialtyReport, PidSpecialtyRollupRow, PidSpecialtySummary,

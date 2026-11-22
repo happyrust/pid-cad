@@ -18,12 +18,12 @@ use OpenCADStudio::io::pid_convert::{
     convert_path_to_dir, diff_pid_files, export_handover_package_from_path,
     extract_bom_from_batch_dir, extract_drawing_index_from_path, extract_equipment_from_path,
     extract_hazop_from_path, extract_lines_from_path, extract_loops_from_batch_dir,
-    extract_nozzles_from_path, extract_specialties_from_path, extract_utilities_from_path,
-    extract_valves_from_path, save_cad_file_as_binary_dwg, write_bom_schedule_file,
-    write_pid_diff_file, write_pid_drawing_index_file, write_pid_equipment_file,
-    write_pid_hazop_file, write_pid_line_list_file, write_pid_loops_file, write_pid_nozzle_file,
-    write_pid_specialty_file, write_pid_utility_file, write_pid_valve_file, ConvertOptions,
-    PackageOptions,
+    extract_nozzles_from_path, extract_relief_from_path, extract_specialties_from_path,
+    extract_utilities_from_path, extract_valves_from_path, save_cad_file_as_binary_dwg,
+    write_bom_schedule_file, write_pid_diff_file, write_pid_drawing_index_file,
+    write_pid_equipment_file, write_pid_hazop_file, write_pid_line_list_file, write_pid_loops_file,
+    write_pid_nozzle_file, write_pid_relief_file, write_pid_specialty_file, write_pid_utility_file,
+    write_pid_valve_file, ConvertOptions, PackageOptions,
 };
 
 struct CliArgs {
@@ -46,6 +46,7 @@ struct CliArgs {
     export_specialties: Option<PathBuf>,
     export_lines: Option<PathBuf>,
     export_equipment: Option<PathBuf>,
+    export_relief: Option<PathBuf>,
     export_package: Option<PathBuf>,
     strict_gate: bool,
     save_dwg: Option<PathBuf>,
@@ -71,6 +72,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut export_specialties: Option<PathBuf> = None;
     let mut export_lines: Option<PathBuf> = None;
     let mut export_equipment: Option<PathBuf> = None;
+    let mut export_relief: Option<PathBuf> = None;
     let mut export_package: Option<PathBuf> = None;
     let mut strict_gate = false;
     let mut save_dwg: Option<PathBuf> = None;
@@ -164,6 +166,12 @@ fn parse_args() -> Result<CliArgs, String> {
                         .ok_or("--export-equipment requires an output path (.csv/.tsv/.json)")?,
                 ));
             }
+            "--export-relief" => {
+                export_relief = Some(PathBuf::from(
+                    it.next()
+                        .ok_or("--export-relief requires an output path (.csv/.tsv/.json)")?,
+                ));
+            }
             "--export-package" => {
                 export_package = Some(PathBuf::from(
                     it.next()
@@ -224,6 +232,7 @@ fn parse_args() -> Result<CliArgs, String> {
         && export_specialties.is_none()
         && export_lines.is_none()
         && export_equipment.is_none()
+        && export_relief.is_none()
     {
         return Err(
             "--out <dir> (or --diff-with <baseline> or --export-package <dir>) is required"
@@ -250,6 +259,7 @@ fn parse_args() -> Result<CliArgs, String> {
         export_specialties,
         export_lines,
         export_equipment,
+        export_relief,
         export_package,
         strict_gate,
         save_dwg,
@@ -286,6 +296,46 @@ fn main() {
         verify_plot_pdf: args.verify_plot,
         ..Default::default()
     };
+
+    if let Some(ref rl_out) = args.export_relief {
+        match extract_relief_from_path(&effective_input)
+            .and_then(|rep| write_pid_relief_file(&rep, rl_out).map(|()| rep))
+        {
+            Ok(rep) => {
+                println!(
+                    "pid_relief: sheets={} total={} psv={} pse={} breather={} bdv={} flare={} atm={} compliant={} unsealed_violations={}",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_devices,
+                    rep.summary.safety_valves_count,
+                    rep.summary.rupture_discs_count,
+                    rep.summary.breather_valves_count,
+                    rep.summary.blowdown_valves_count,
+                    rep.summary.flare_discharges,
+                    rep.summary.atmosphere_discharges,
+                    rep.summary.compliant_count,
+                    rep.summary.unsealed_valve_violations,
+                );
+                if args.out_dir.is_none()
+                    && args.diff_with.is_none()
+                    && args.export_package.is_none()
+                    && args.export_hazop.is_none()
+                    && args.export_utilities.is_none()
+                    && args.export_valves.is_none()
+                    && args.export_nozzles.is_none()
+                    && args.export_index.is_none()
+                    && args.export_specialties.is_none()
+                    && args.export_lines.is_none()
+                    && args.export_equipment.is_none()
+                {
+                    return;
+                }
+            }
+            Err(err) => {
+                eprintln!("error: export-relief failed: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if let Some(ref eq_out) = args.export_equipment {
         match extract_equipment_from_path(&effective_input)
