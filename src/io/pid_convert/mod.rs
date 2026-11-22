@@ -7,6 +7,7 @@
 pub mod bom;
 pub mod class_map;
 pub mod diff;
+pub mod drawing_index;
 pub mod drc;
 pub mod export;
 pub mod external_props;
@@ -29,6 +30,13 @@ pub use diff::{
     diff_pid_documents, format_pid_diff_delimited, DiffFieldChange, DiffKind, PidDiffItem,
     PidDiffReport, PidDiffSummary, DIFF_CSV_HEADERS,
 };
+pub use drawing_index::{
+    analyze_pid_drawing_index, drawing_index_matches_query, format_pid_drawing_index_delimited,
+    DrawingIndexStatus, PidDrawingIndexReport, PidDrawingIndexRow, PidDrawingIndexSummary,
+    DRAWING_INDEX_CSV_HEADERS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use drawing_index::{extract_drawing_index_from_path, write_pid_drawing_index_file};
 pub use hazop::{
     analyze_pid_hazop_nodes, format_pid_hazop_delimited, hazop_node_matches_query,
     HazopSafeguardStatus, PidHazopNode, PidHazopReport, PidHazopSummary, HAZOP_CSV_HEADERS,
@@ -38,6 +46,7 @@ pub use nozzle::{
     NozzleOrientation, NozzleStatus, PidNozzleItem, PidNozzleReport, PidNozzleSummary,
     NOZZLE_CSV_HEADERS,
 };
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use nozzle::{extract_nozzles_from_path, write_pid_nozzle_file};
 pub use utility::{

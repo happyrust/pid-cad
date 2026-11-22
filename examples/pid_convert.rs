@@ -16,11 +16,12 @@ use std::path::PathBuf;
 
 use OpenCADStudio::io::pid_convert::{
     convert_path_to_dir, diff_pid_files, export_handover_package_from_path,
-    extract_bom_from_batch_dir, extract_hazop_from_path, extract_loops_from_batch_dir,
-    extract_nozzles_from_path, extract_utilities_from_path, extract_valves_from_path,
-    save_cad_file_as_binary_dwg, write_bom_schedule_file, write_pid_diff_file,
-    write_pid_hazop_file, write_pid_loops_file, write_pid_nozzle_file, write_pid_utility_file,
-    write_pid_valve_file, ConvertOptions, PackageOptions,
+    extract_bom_from_batch_dir, extract_drawing_index_from_path, extract_hazop_from_path,
+    extract_loops_from_batch_dir, extract_nozzles_from_path, extract_utilities_from_path,
+    extract_valves_from_path, save_cad_file_as_binary_dwg, write_bom_schedule_file,
+    write_pid_diff_file, write_pid_drawing_index_file, write_pid_hazop_file, write_pid_loops_file,
+    write_pid_nozzle_file, write_pid_utility_file, write_pid_valve_file, ConvertOptions,
+    PackageOptions,
 };
 
 struct CliArgs {
@@ -39,6 +40,7 @@ struct CliArgs {
     export_utilities: Option<PathBuf>,
     export_valves: Option<PathBuf>,
     export_nozzles: Option<PathBuf>,
+    export_index: Option<PathBuf>,
     export_package: Option<PathBuf>,
     strict_gate: bool,
     save_dwg: Option<PathBuf>,
@@ -60,6 +62,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut export_utilities: Option<PathBuf> = None;
     let mut export_valves: Option<PathBuf> = None;
     let mut export_nozzles: Option<PathBuf> = None;
+    let mut export_index: Option<PathBuf> = None;
     let mut export_package: Option<PathBuf> = None;
     let mut strict_gate = false;
     let mut save_dwg: Option<PathBuf> = None;
@@ -129,6 +132,12 @@ fn parse_args() -> Result<CliArgs, String> {
                         .ok_or("--export-nozzles requires an output path (.csv/.tsv/.json)")?,
                 ));
             }
+            "--export-index" => {
+                export_index = Some(PathBuf::from(
+                    it.next()
+                        .ok_or("--export-index requires an output path (.csv/.tsv/.json)")?,
+                ));
+            }
             "--export-package" => {
                 export_package = Some(PathBuf::from(
                     it.next()
@@ -185,6 +194,7 @@ fn parse_args() -> Result<CliArgs, String> {
         && export_utilities.is_none()
         && export_valves.is_none()
         && export_nozzles.is_none()
+        && export_index.is_none()
     {
         return Err(
             "--out <dir> (or --diff-with <baseline> or --export-package <dir>) is required"
@@ -207,6 +217,7 @@ fn parse_args() -> Result<CliArgs, String> {
         export_utilities,
         export_valves,
         export_nozzles,
+        export_index,
         export_package,
         strict_gate,
         save_dwg,
@@ -243,6 +254,40 @@ fn main() {
         verify_plot_pdf: args.verify_plot,
         ..Default::default()
     };
+
+    if let Some(ref idx_out) = args.export_index {
+        match extract_drawing_index_from_path(&effective_input)
+            .and_then(|rep| write_pid_drawing_index_file(&rep, idx_out).map(|()| rep))
+        {
+            Ok(rep) => {
+                println!(
+                    "pid_index: sheets={} ok={} missing_num={} dup_num={} equip={} valves={} inst={} lines={}",
+                    rep.summary.total_sheets,
+                    rep.summary.ok_sheets,
+                    rep.summary.missing_number_sheets,
+                    rep.summary.duplicate_number_sheets,
+                    rep.summary.total_equipment,
+                    rep.summary.total_valves,
+                    rep.summary.total_instruments,
+                    rep.summary.total_pipelines,
+                );
+                if args.out_dir.is_none()
+                    && args.diff_with.is_none()
+                    && args.export_package.is_none()
+                    && args.export_hazop.is_none()
+                    && args.export_utilities.is_none()
+                    && args.export_valves.is_none()
+                    && args.export_nozzles.is_none()
+                {
+                    return;
+                }
+            }
+            Err(err) => {
+                eprintln!("error: export-index failed: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if let Some(ref nz_out) = args.export_nozzles {
         match extract_nozzles_from_path(&effective_input)

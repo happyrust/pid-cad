@@ -45,7 +45,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDHAZOP",
         "PIDUTILITY",
         "PIDVALVE",
-        "PIDNOZZLE"
+        "PIDNOZZLE",
+        "PIDINDEX"
     ]
 });
 
@@ -319,6 +320,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidnozzle_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidindex_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -4306,6 +4310,204 @@ impl OpenCADStudio {
             other => {
                 self.command_line.push_error(&format!(
                     "PIDNOZZLE: 未知子命令 {other}（支持 SUMMARY / ALL / CONNECTED / SPARE / ORPHAN / EQUIPMENT / NEXT / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
+
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidindex_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            analyze_pid_drawing_index, drawing_index_matches_query, write_pid_drawing_index_file,
+            DrawingIndexStatus, OpcSheetInput,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDINDEX") {
+            return None;
+        }
+
+        let mut action: Option<String> = None;
+        let mut issues_only = false;
+        let mut jump_query: Option<String> = None;
+        let mut all_tabs = false;
+        let mut export_path: Option<std::path::PathBuf> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            let up = tok.to_ascii_uppercase();
+            match up.as_str() {
+                "ALLTABS" => {
+                    all_tabs = true;
+                    idx += 1;
+                }
+                "SUMMARY" | "ALL" => {
+                    action = Some(up);
+                    idx += 1;
+                }
+                "ISSUES" => {
+                    issues_only = true;
+                    if action.is_none() {
+                        action = Some("ISSUES".to_string());
+                    }
+                    idx += 1;
+                }
+                "NEXT" => {
+                    action = Some("NEXT".to_string());
+                    idx += 1;
+                }
+                "JUMP" => {
+                    let Some(q) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDINDEX JUMP: 缺少图号、图名或序号关键字。");
+                        return Some(Task::none());
+                    };
+                    action = Some("JUMP".to_string());
+                    jump_query = Some(q.clone());
+                    all_tabs = true;
+                    idx += 2;
+                }
+                "EXPORT" => {
+                    let Some(next_tok) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDINDEX EXPORT: 缺少输出文件路径（.json/.csv/.tsv）。");
+                        return Some(Task::none());
+                    };
+                    export_path = Some(std::path::PathBuf::from(next_tok));
+                    idx += 2;
+                }
+                _ => {
+                    if action.is_none() {
+                        action = Some("JUMP".to_string());
+                        jump_query = Some(tok.clone());
+                        all_tabs = true;
+                    }
+                    idx += 1;
+                }
+            }
+        }
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<OpcSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+
+        let rep = analyze_pid_drawing_index(&sheet_inputs);
+
+        if let Some(ref out_p) = export_path {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(err) = write_pid_drawing_index_file(&rep, out_p) {
+                self.command_line
+                    .push_error(&format!("PIDINDEX EXPORT: {err}"));
+                return Some(Task::none());
+            }
+        }
+
+        let eff_action = action.as_deref().unwrap_or("SUMMARY");
+        let filtered: Vec<_> = rep
+            .sheets
+            .iter()
+            .filter(|r| !issues_only || r.status != DrawingIndexStatus::Ok)
+            .collect();
+
+        match eff_action {
+            "SUMMARY" | "ALL" | "ISSUES" => {
+                self.command_line.push_output(&format!(
+                    "PIDINDEX: 图纸={}（正常={}，缺图号={}，重图号={}）| 设备={} | 阀门={} | 仪表={} | 管线={} | 连接符={}。",
+                    rep.summary.total_sheets,
+                    rep.summary.ok_sheets,
+                    rep.summary.missing_number_sheets,
+                    rep.summary.duplicate_number_sheets,
+                    rep.summary.total_equipment,
+                    rep.summary.total_valves,
+                    rep.summary.total_instruments,
+                    rep.summary.total_pipelines,
+                    rep.summary.total_opcs,
+                ));
+            }
+            "JUMP" => {
+                let q = jump_query.as_deref().unwrap_or("");
+                let Some(chosen) = rep
+                    .sheets
+                    .iter()
+                    .find(|r| drawing_index_matches_query(r, q))
+                else {
+                    self.command_line
+                        .push_error(&format!("PIDINDEX JUMP: 未找到匹配 \"{q}\" 的图纸。"));
+                    return Some(Task::none());
+                };
+                if chosen.tab_index < self.tabs.len() && chosen.tab_index != self.active_tab {
+                    let _ = self.update(Message::TabSwitch(chosen.tab_index));
+                    self.active_tab = chosen.tab_index;
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDINDEX JUMP: 已切换至图纸 #{} {} {}（{}）。",
+                    chosen.seq_no, chosen.drawing_number, chosen.drawing_title, chosen.file_label
+                ));
+            }
+            "NEXT" => {
+                if filtered.is_empty() {
+                    self.command_line
+                        .push_output("PIDINDEX NEXT: 未检出待巡检的图纸目录条目。");
+                    return Some(self.finish_dispatch(cmd));
+                }
+                let cur_tab = self.active_tab;
+                let cur_pos = filtered.iter().position(|r| r.tab_index == cur_tab);
+                let next_idx = cur_pos.map(|p| (p + 1) % filtered.len()).unwrap_or(0);
+                let chosen = filtered[next_idx];
+                if chosen.tab_index < self.tabs.len() && chosen.tab_index != self.active_tab {
+                    let _ = self.update(Message::TabSwitch(chosen.tab_index));
+                    self.active_tab = chosen.tab_index;
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDINDEX NEXT [{}/{}]: {}（{}，状态={}）。",
+                    next_idx + 1,
+                    filtered.len(),
+                    chosen.drawing_number,
+                    chosen.file_label,
+                    chosen.status.as_str(),
+                ));
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDINDEX: 未知子命令 {other}（支持 SUMMARY / ALL / ISSUES / JUMP / NEXT / EXPORT）。"
                 ));
                 return Some(Task::none());
             }
@@ -12295,6 +12497,264 @@ mod tests {
             format!(
                 "{}\n",
                 serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()
+            ),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidindex_extracts_title_blocks_detects_missing_and_duplicate_numbers_and_jumps_tabs() {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn add_a1_frame(doc: &mut document::Document) {
+            let mut f1 = Line::from_points(
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(1189.0, 841.0, 0.0),
+            );
+            f1.common.layer = "DrawingBorder".to_string();
+            doc.add_entity(document::EntityType::Line(f1)).unwrap();
+        }
+
+        let mut app = app();
+
+        // Tab 1: valid sheet DWG-165-01 ("反应工段管道及仪表流程图", rev 0A)
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "sheet_01.dxf".to_string();
+        {
+            let doc = &mut app.tabs[tab1].scene.document;
+            add_a1_frame(doc);
+            define_sppid_block(doc, "CENTRIFUGAL PUMP", 8.0, 8.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+
+            for (val, x, y) in [
+                ("DWG-165-01", 1100.0, 24.0),
+                ("反应工段管道及仪表流程图", 1040.0, 42.0),
+                ("版次", 1080.0, 14.0),
+                ("0A", 1094.0, 14.0),
+            ] {
+                let mut t = Text::with_value(val, Vector3::new(x, y, 0.0)).with_height(3.5);
+                t.common.layer = "Labels".to_string();
+                doc.add_entity(document::EntityType::Text(t)).unwrap();
+            }
+
+            let mut pump = Insert::new("CENTRIFUGAL PUMP", Vector3::new(150.0, 300.0, 0.0));
+            pump.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(pump)).unwrap();
+            let mut pt =
+                Text::with_value("P-1651", Vector3::new(145.0, 308.0, 0.0)).with_height(2.5);
+            pt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(pt)).unwrap();
+
+            let mut bv = Insert::new("BALL VALVE TYPE 2", Vector3::new(200.0, 300.0, 0.0));
+            bv.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bv)).unwrap();
+        }
+
+        // Tab 2: duplicate DWG-165-DUP #1
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "sheet_02.dxf".to_string();
+        {
+            let doc = &mut app.tabs[tab2].scene.document;
+            add_a1_frame(doc);
+            for (val, x, y) in [
+                ("DWG-165-DUP", 1100.0, 24.0),
+                ("精馏工段管道及仪表流程图", 1040.0, 42.0),
+            ] {
+                let mut t = Text::with_value(val, Vector3::new(x, y, 0.0)).with_height(3.5);
+                t.common.layer = "Labels".to_string();
+                doc.add_entity(document::EntityType::Text(t)).unwrap();
+            }
+        }
+
+        // Tab 3: duplicate DWG-165-DUP #2
+        let _ = app.update(Message::TabNew);
+        let tab3 = app.active_tab;
+        app.tabs[tab3].tab_title = "sheet_03.dxf".to_string();
+        {
+            let doc = &mut app.tabs[tab3].scene.document;
+            add_a1_frame(doc);
+            let mut t =
+                Text::with_value("DWG-165-DUP", Vector3::new(1100.0, 24.0, 0.0)).with_height(3.5);
+            t.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(t)).unwrap();
+        }
+
+        // Tab 4: missing drawing number in title block
+        let _ = app.update(Message::TabNew);
+        let tab4 = app.active_tab;
+        app.tabs[tab4].tab_title = "sheet_04.dxf".to_string();
+        {
+            let doc = &mut app.tabs[tab4].scene.document;
+            add_a1_frame(doc);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            let mut bv = Insert::new("BALL VALVE TYPE 2", Vector3::new(200.0, 400.0, 0.0));
+            bv.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bv)).unwrap();
+        }
+
+        let tmp = std::env::temp_dir().join(format!("ocs_pidindex_165_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let idx_json = tmp.join("index.json");
+        let idx_csv = tmp.join("index.csv");
+        let _ = app.run_command_line(&format!(
+            "PIDINDEX ALLTABS EXPORT \"{}\"",
+            idx_json.display()
+        ));
+        assert!(idx_json.is_file(), "PIDINDEX EXPORT must write index.json");
+        let _ = app.run_command_line(&format!(
+            "PIDINDEX SUMMARY ALLTABS EXPORT \"{}\"",
+            idx_csv.display()
+        ));
+        let csv_raw = std::fs::read_to_string(&idx_csv).unwrap();
+        assert!(
+            csv_raw.starts_with('\u{feff}')
+                && csv_raw.contains("DWG-165-01")
+                && csv_raw.contains("反应工段管道及仪表流程图")
+        );
+
+        let rep: Value =
+            serde_json::from_str(&std::fs::read_to_string(&idx_json).unwrap()).unwrap();
+        assert_eq!(rep["summary"]["total_sheets"].as_u64(), Some(4));
+        assert_eq!(rep["summary"]["ok_sheets"].as_u64(), Some(1));
+        assert_eq!(rep["summary"]["duplicate_number_sheets"].as_u64(), Some(2));
+        assert_eq!(rep["summary"]["missing_number_sheets"].as_u64(), Some(1));
+
+        let rows = rep["sheets"].as_array().unwrap();
+        assert_eq!(rows[0]["drawing_number"].as_str(), Some("DWG-165-01"));
+        assert_eq!(
+            rows[0]["drawing_title"].as_str(),
+            Some("反应工段管道及仪表流程图")
+        );
+        assert_eq!(rows[0]["revision"].as_str(), Some("0A"));
+        assert_eq!(rows[0]["equipment_count"].as_u64(), Some(1));
+        assert_eq!(rows[0]["valve_count"].as_u64(), Some(1));
+
+        // From Tab 4, JUMP by Chinese title keyword switches immediately to Tab 1
+        assert_eq!(app.active_tab, tab4);
+        let _ = app.run_command_line("PIDINDEX JUMP 反应工段 ALLTABS");
+        assert_eq!(app.active_tab, tab1);
+
+        // ISSUES NEXT steps through the 3 issue tabs (tab2, tab3, tab4)
+        let mut visited = std::collections::BTreeSet::new();
+        for _ in 0..3 {
+            let _ = app.run_command_line("PIDINDEX ISSUES NEXT ALLTABS");
+            visited.insert(app.active_tab);
+        }
+        assert!(visited.contains(&tab2) && visited.contains(&tab3) && visited.contains(&tab4));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads 4 real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into OpenCADStudio and verifies PIDINDEX ALLTABS title-block Master Drawing Index extraction and cross-tab JUMP"]
+    fn real_multi_tab_pidindex_master_drawing_index_and_jump_audit() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sp_raw) = std::env::var("OCS_PID_REAL165_SPPID_PAIR") else {
+            println!("OCS_PID_REAL165_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(lg_raw) = std::env::var("OCS_PID_REAL165_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL165_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL165_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real165"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sp_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sp_raw).collect();
+        let lg_paths: Vec<std::path::PathBuf> = std::env::split_paths(&lg_raw).collect();
+        assert_eq!(sp_paths.len(), 2);
+        assert_eq!(lg_paths.len(), 2);
+
+        let all_files = [
+            ("SP01", &sp_paths[0]),
+            ("SP02", &sp_paths[1]),
+            ("LG01", &lg_paths[0]),
+            ("LG02", &lg_paths[1]),
+        ];
+
+        let mut app = app();
+        let mut tab_indices = Vec::new();
+        let mut sha_prefixes = Vec::new();
+        for (idx, (cid, p)) in all_files.iter().enumerate() {
+            let raw_b = std::fs::read(p).unwrap();
+            sha_prefixes.push(format!("{:x}", Sha256::digest(&raw_b))[..12].to_string());
+            if idx > 0 {
+                let _ = app.update(Message::TabNew);
+            }
+            let ti = app.active_tab;
+            app.tabs[ti].scene.document = crate::io::load_file(p).expect("load DXF");
+            app.tabs[ti].tab_title = format!("{cid}.dxf");
+            tab_indices.push(ti);
+        }
+
+        let idx_json = out_dir.join("master_index.json");
+        let idx_csv = out_dir.join("master_index.csv");
+        let _ = app.run_command_line(&format!(
+            "PIDINDEX ALLTABS EXPORT \"{}\"",
+            idx_json.display()
+        ));
+        let _ = app.run_command_line(&format!(
+            "PIDINDEX SUMMARY ALLTABS EXPORT \"{}\"",
+            idx_csv.display()
+        ));
+        let csv_txt = std::fs::read_to_string(&idx_csv).unwrap();
+        assert!(
+            csv_txt.starts_with('\u{feff}') && csv_txt.contains("SeqNo,FileLabel,DrawingNumber")
+        );
+        let rep: Value =
+            serde_json::from_str(&std::fs::read_to_string(&idx_json).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&idx_json);
+        let _ = std::fs::remove_file(&idx_csv);
+
+        assert_eq!(rep["summary"]["total_sheets"].as_u64(), Some(4));
+        assert!(rep["summary"]["ok_sheets"].as_u64().unwrap_or(0) >= 2);
+        assert!(rep["summary"]["total_equipment"].as_u64().unwrap_or(0) >= 15);
+        assert!(rep["summary"]["total_valves"].as_u64().unwrap_or(0) >= 100);
+
+        // Verify PIDINDEX JUMP switches active tab to SP01 (sequence 1 / SP01.dxf)
+        let _ = app.update(Message::TabSwitch(tab_indices[3]));
+        let _ = app.run_command_line("PIDINDEX JUMP SP01.dxf ALLTABS");
+        assert_eq!(app.active_tab, tab_indices[0]);
+
+        let sanitized_rows: Vec<Value> = rep["sheets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                json!({
+                    "id": all_files[i].0,
+                    "sha256_prefix": sha_prefixes[i],
+                    "has_drawing_number": !r["drawing_number"].as_str().unwrap_or("").is_empty(),
+                    "has_drawing_title": !r["drawing_title"].as_str().unwrap_or("").is_empty(),
+                    "status": r["status"],
+                    "equipment_count": r["equipment_count"],
+                    "valve_count": r["valve_count"],
+                    "instrument_count": r["instrument_count"],
+                    "pipeline_count": r["pipeline_count"],
+                    "opc_count": r["opc_count"],
+                })
+            })
+            .collect();
+
+        std::fs::write(
+            out_dir.join("real165_summary.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({
+                    "summary": rep["summary"],
+                    "sheets": sanitized_rows,
+                }))
+                .unwrap()
             ),
         )
         .unwrap();

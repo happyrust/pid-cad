@@ -2160,3 +2160,43 @@
 | `scripts\fmt-newhunks.ps1` | — | `nozzle.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 54. L3-6 / L4-6 / L6-1 / L6-2（#165）：应用内 P&ID 多图纸总目录与标题栏元数据对账、缺号/重号校核及跨图跳转命令 `PIDINDEX` 与 CLI `--export-index` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `0f503a30a`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{drawing_index,mod}.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-22-issue165/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_index.txt`、`cli_export_index.txt`、`real_out/real165_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
+
+### 54.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_165_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidindex_extracts_title_blocks_detects_missing_and_duplicate_numbers_and_jumps_tabs`（构造 4 标签页图纸集：正常图纸 `DWG-165-01` + 中文图名 + 版次 `0A`、两张重图号 `DWG-165-DUP` 图纸与一张标题栏漏填图号图纸，验证三态文控校核、按中文图名关键字 `PIDINDEX JUMP` 秒级切换标签页与 `PIDINDEX ISSUES NEXT` 逐异常巡检），运行按预期在 `index.json` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`31 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/drawing_index.rs`（`analyze_pid_drawing_index`、`extract_drawing_index_from_path`、`write_pid_drawing_index_file`）：统一兼容未升格 `.dxf`/`.dwg`/`.pid` 与已升格 `PID_AUTHOR` 模型，自动提取右下角标题栏图号、图名、版次以及单图设备/阀门/仪表/管线/页间连接符数量，自动核查 `ok`、`missing_drawing_number` 与 `duplicate_drawing_number` 三态文控状态，导出 `.json` 与带 UTF-8 BOM 的 `.csv` / `.tsv` 11 列 P&ID 图纸总目录；
+  2. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDINDEX [SUMMARY | ALL | ISSUES | JUMP "<图号或图名关键字>" | NEXT] [ALLTABS] [EXPORT "<.json|.csv|.tsv>"]`，并在 `examples/pid_convert.rs` 新增 `--export-index <PATH>`（真实中位规模 SPPID 图 CLI 独立统计 `1` 张图 `39` 台阀门，退出码 `0`）。
+
+### 54.2 真实双标准四图成对跨标签页总目录提取与 `JUMP` 跳转实测
+
+| 图纸代号 | 源图 SHA-256 前缀 | 文控状态 | 检出图号 / 图名 | 设备数 | 阀门数 | 仪表数 | 标记管线数 | 连接符数 |
+|---|---|---|---|---:|---:|---:|---:|---:|
+| `SP01` | `2164f88bbb57` | `duplicate_drawing_number` | `True` / `True` | `4` | `42` | `57` | `22` | `14` |
+| `SP02` | `fc2c812dc182` | `duplicate_drawing_number` | `True` / `True` | `4` | `42` | `57` | `20` | `13` |
+| `LG01` | `a0f05f81a655` | `ok` | `True` / `True` | `6` | `62` | `18` | `7` | `10` |
+| `LG02` | `28ed389e23cb` | `ok` | `True` / `True` | `8` | `64` | `24` | `5` | `6` |
+
+### 54.3 固定门禁读数
+
+| 门禁项 | 改前读数（§53.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,254` 条（`7,165` 过 / `88` 忽略 / `1` 既有 `.pen`） | **`7,256` 条**（**`7,166` 过** / **`89` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图跨标签页总目录对账与跳转），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `drawing_index.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
