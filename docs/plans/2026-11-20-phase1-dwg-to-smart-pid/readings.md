@@ -2318,3 +2318,41 @@
 | `scripts\fmt-newhunks.ps1` | — | `package.rs`、`nozzle.rs`、`line_list.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 58. L3-5 / L3-6 / L2-2 / L6-2（#169）：应用内 P&ID 核心静/动/换热设备数据一览表 Master Equipment Schedule、跨图重号校核与巡检命令 `PIDEQUIP` 及 CLI `--export-equipment` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `daf6dcbe8`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{equipment,mod}.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-22-issue169/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_equip.txt`、`cli_export_equipment.txt`、`real_out/real169_summary.json`、`fmt_newhunks.txt`、`rust_gates_status.json`） |
+
+### 58.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_169_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidequip_builds_master_equipment_schedule_links_nozzles_lines_utilities_safeguards_flags_duplicates_and_untagged_and_steps_camera`（构造跨双标签页的机泵 `P-1691`、接有循环水 `80-CW-16902-CS150` 且跨图重复出现的换热器 `E-1692`、无位号成套设备、带显式管口与 `PT-1693` 联锁测点的缓冲罐 `V-1693` 及储罐 `TK-1694`，验证五大设备类别分拣、管口/管线/公用工程/安全保护自动聚合、`untagged / duplicate_across_sheets` 校核及 `PIDEQUIP NEXT ALLTABS` 跨标签页相机聚焦），运行按预期在 `equip.json` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`35 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/equipment.rs`（`analyze_pid_equipment_schedule`、`extract_equipment_from_path`、`write_pid_equipment_file`）：统一兼容未升格 `.dxf`/`.dwg`/`.pid` 与已升格 `PID_AUTHOR` 混合态图纸，按 `vessel_or_column`、`rotating_machinery`、`heat_transfer`、`storage_tank`、`package_or_misc` 五大 EPC 设备专业类别自动归类，联动 `nozzle`、`line_list`、`utility` 与 `hazop` 拓扑引擎自动聚合单台设备的接管口总数、关联管线列表、公用工程介质代号与安全联锁保护测点，核查 `ok / untagged / duplicate_across_sheets` 三态位号状态并导出 `.json` 与 13 列 UTF-8 BOM `.csv` / `.tsv` 标准设备一览表；
+  2. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDEQUIP [SUMMARY | ALL | VESSELS | ROTATING | EXCHANGERS | TANKS | UNTAGGED | DUPLICATES | TAG "<位号>" | NEXT] [ALLTABS] [EXPORT "<.json|.csv|.tsv>"]`，并在 `examples/pid_convert.rs` 新增 `--export-equipment <PATH>`（真实 SPPID 图单图 CLI 独立提取 `4` 台核心设备，退出码 `0`）。
+
+### 58.2 真实双标准四图成对跨标签页设备一览表实测
+
+| 图纸组 | 样本形态 | 源图 SHA-256 前缀对 | 总设备数 | 塔/容器 | 机泵/动设备 | 换热设备 | 储罐/其他 | 缺位号 / 跨图重号 | 关联管口累计 | `.csv` 导出与 `NEXT` 巡检 |
+|---|---|---|---:|---:|---:|---:|---:|---|---:|---|
+| `SP01 + SP02` | 未升格 SPPID 拆分生产图对 | `2164f88bbb57` + `fc2c812dc182` | **`8`** | `2` | `4` | `2` | `0` | `0 / 0` | **`80`** | **通过** |
+| `LG01 + LG02` | 未升格原生 AutoCAD 存量图对 | `a0f05f81a655` + `28ed389e23cb` | **`14`** | `14` | `0` | `0` | `0` | `0 / 0` | **`56`** | **通过** |
+
+### 58.3 固定门禁读数
+
+| 门禁项 | 改前读数（§57.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,262` 条（`7,169` 过 / `92` 忽略 / `1` 既有 `.pen`） | **`7,264` 条**（**`7,170` 过** / **`93` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图跨标签页设备一览表对账），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `equipment.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |

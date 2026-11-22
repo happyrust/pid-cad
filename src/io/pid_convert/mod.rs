@@ -9,6 +9,7 @@ pub mod class_map;
 pub mod diff;
 pub mod drawing_index;
 pub mod drc;
+pub mod equipment;
 pub mod export;
 pub mod external_props;
 pub mod find;
@@ -37,6 +38,13 @@ pub use drawing_index::{
     DrawingIndexStatus, PidDrawingIndexReport, PidDrawingIndexRow, PidDrawingIndexSummary,
     DRAWING_INDEX_CSV_HEADERS,
 };
+pub use equipment::{
+    analyze_pid_equipment_schedule, classify_equipment_category, equipment_row_matches_query,
+    format_pid_equipment_delimited, EquipmentCategory, EquipmentTagStatus, PidEquipmentReport,
+    PidEquipmentRow, PidEquipmentSummary, EQUIPMENT_CSV_HEADERS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use equipment::{extract_equipment_from_path, write_pid_equipment_file};
 pub use line_list::{
     analyze_pid_line_list, format_pid_line_list_delimited, pipeline_row_matches_query,
     LineTerminationStatus, PidLineListReport, PidLineListSummary, PidPipelineRow,
