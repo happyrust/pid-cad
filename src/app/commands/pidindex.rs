@@ -223,6 +223,13 @@ impl Default for PidIndex {
     }
 }
 
+impl PidIndex {
+    /// 有没有正在后台读文件的扫描：校验与交付面板这时不再起检查（面板规格 §4.7）。
+    pub(in crate::app) fn scanning(&self) -> bool {
+        self.scan.is_some()
+    }
+}
+
 /// 读不出来的一个文件：读它时的大小和修改时间，和原因。
 struct Unreadable {
     size: u64,

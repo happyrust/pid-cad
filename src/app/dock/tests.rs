@@ -1130,7 +1130,7 @@ fn the_verify_panel_opens_from_the_pallet_menu_and_switches_tabs_in_the_real_vie
         let i = app.active_tab;
         app.tabs[i].is_start = false;
         assert!(!app.dock_panel_visible(id));
-        assert!(try_find_in_view(&app, "还没有检查过。").is_none());
+        assert!(try_find_in_view(&app, "还没有检查过。点上面的按钮开始。").is_none());
 
         // Checking it in the pallet menu docks it on that edge and shows it,
         // on the rule check tab.
@@ -1138,7 +1138,7 @@ fn the_verify_panel_opens_from_the_pallet_menu_and_switches_tabs_in_the_real_vie
         assert!(app.dock_panel_visible(id), "the menu shows the panel");
         assert!(matches!(app.dock.location(id), Some((DockSide::Right, _))));
         assert_eq!(app.pid_verify_view.tab, Tab::Check);
-        assert!(try_find_in_view(&app, "还没有检查过。").is_some());
+        assert!(try_find_in_view(&app, "还没有检查过。点上面的按钮开始。").is_some());
 
         // A click on a tab brings it forward.
         let press =
@@ -1149,7 +1149,7 @@ fn the_verify_panel_opens_from_the_pallet_menu_and_switches_tabs_in_the_real_vie
         for (tab, says) in [
             (Tab::Bom, "还没有生成材料清单。"),
             (Tab::Deliver, "还没有快照和发布记录。"),
-            (Tab::Check, "还没有检查过。"),
+            (Tab::Check, "还没有检查过。点上面的按钮开始。"),
         ] {
             let at = find_in_view(&app, tab.label());
             drive_view(&mut app, at, &[press.clone(), release.clone()]);
@@ -1168,13 +1168,13 @@ fn the_verify_panel_opens_from_the_pallet_menu_and_switches_tabs_in_the_real_vie
             app.dock_panel_visible(id),
             "the editor screen shows the panel"
         );
-        assert!(try_find_in_view(&app, "还没有检查过。").is_some());
+        assert!(try_find_in_view(&app, "还没有检查过。点上面的按钮开始。").is_some());
         verify_capture(&app, "shell-editor");
 
         // Unchecking it in the pallet menu hides it.
         let _ = app.on_dock(DockMsg::EdgeMenuToggle(DockSide::Right, id));
         assert!(!app.dock_panel_visible(id), "the menu hides the panel");
-        assert!(try_find_in_view(&app, "还没有检查过。").is_none());
+        assert!(try_find_in_view(&app, "还没有检查过。点上面的按钮开始。").is_none());
     });
 }
 

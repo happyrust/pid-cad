@@ -87,9 +87,32 @@ pub(in crate::app) struct Checked {
     /// `stale_waivers` 里的每条是哪张图上的（`None` 是认不出来的）：图上的豁免改了以后，
     /// `stale_waivers` 照它重算（[`Checked::follow`]）。
     stale: Vec<(Option<String>, Waiver)>,
+    /// 检查时打开着的图各自的改动计数（标签页编号，`edit_revision`）：校验与交付面板拿它对照现在的，
+    /// 看结果过期没有（`SPEC-pid-verify-deliver-panel.md` §3.1）。
+    revisions: Vec<(u64, u64)>,
 }
 
 impl Checked {
+    /// 编号 `tab` 的标签页上的图检查时的改动计数；检查之后才打开的图从打开时的 0 算起。
+    pub(in crate::app) fn revision_at_check(&self, tab: u64) -> u64 {
+        self.revisions
+            .iter()
+            .find(|(id, _)| *id == tab)
+            .map_or(0, |&(_, revision)| revision)
+    }
+
+    /// 豁免把编号 `tab` 的标签页上的图从改动计数 `before` 改到了 `after`，这份结果已就地跟上
+    /// （§3.7）：原先跟得上这张图的，记的计数跟到 `after`，面板不把它算过期（面板规格 §4.4）。
+    /// 原先就跟不上的照旧过期。
+    fn restamp(&mut self, tab: u64, before: u64, after: u64) {
+        if self.revision_at_check(tab) != before {
+            return;
+        }
+        match self.revisions.iter_mut().find(|(id, _)| *id == tab) {
+            Some((_, revision)) => *revision = after,
+            None => self.revisions.push((tab, after)),
+        }
+    }
     /// 图 `drawing` 上记的豁免改成 `now` 以后就地改这份结果（§3.7），不重新检查：这张图上的结果
     /// 按（规则号, 对象键）重挂豁免，各严重度和已豁免的条数、`blocked` 跟着重算；`stale_waivers`
     /// 里这张图的只留 `now` 里还有的。没查过这张图的结果不动。
@@ -157,12 +180,13 @@ pub(in crate::app) struct PidChecks {
 
 impl PidChecks {
     /// 给新的一份结果编上序号。`drawings` 是查了的图，`recorded` 是交给检查器的豁免（图号和图里
-    /// 记的）。
+    /// 记的），`revisions` 是这时打开着的图各自的改动计数（[`OpenCADStudio::pidcheck_revisions`]）。
     fn checked(
         &mut self,
         report: CheckReport,
         drawings: Vec<String>,
         recorded: &[(String, Vec<Waiver>)],
+        revisions: Vec<(u64, u64)>,
     ) -> Checked {
         self.serial += 1;
         Checked {
@@ -170,7 +194,18 @@ impl PidChecks {
             stale: stale_by_drawing(&report, &drawings, recorded),
             drawings,
             report,
+            revisions,
         }
+    }
+
+    /// 项目目录 `dir` 留着的查项目、查节点的结果。
+    pub(in crate::app) fn of_project(&self, dir: &Path) -> Option<&Checked> {
+        self.projects.get(&same_file(dir))
+    }
+
+    /// 程序里最近一次检查的序号，还没查过是 0：变了就是又查了一次，不管留在哪里。
+    pub(in crate::app) fn last_serial(&self) -> u64 {
+        self.serial
     }
 }
 
@@ -313,13 +348,24 @@ impl OpenCADStudio {
 
     /// 只查第 `i` 个标签页的图，用保存门禁的同一个函数（[`drc::check_drawing`]），项目级规则不跑。
     /// 不碰命令行，结果由调用的记下。
-    fn pidcheck_this_drawing(&mut self, i: usize, rules: &RuleSet) -> Checked {
+    pub(super) fn pidcheck_this_drawing(&mut self, i: usize, rules: &RuleSet) -> Checked {
+        let revisions = self.pidcheck_revisions();
         let document = &self.tabs[i].scene.document;
         let path = document.source_path.as_deref().map(Path::new);
         let report = drc::check_drawing(document, path, rules, Trigger::OnDemand);
         let drawing = report.scope.drawing_id.clone().unwrap_or_default();
         let recorded = [(drawing.clone(), drc::waivers(document))];
-        self.pid_checks.checked(report, vec![drawing], &recorded)
+        self.pid_checks
+            .checked(report, vec![drawing], &recorded, revisions)
+    }
+
+    /// 这时打开着的图各自的改动计数（标签页编号，`edit_revision`），跟着检查结果记下。
+    fn pidcheck_revisions(&self) -> Vec<(u64, u64)> {
+        self.tabs
+            .iter()
+            .filter(|tab| !tab.is_start)
+            .map(|tab| (tab.id, tab.edit_revision))
+            .collect()
     }
 
     /// 生效的规则（[`Self::pidcheck_load_rules`]）。读不出来就连同错误码说出来，得 `None`。
@@ -351,41 +397,48 @@ impl OpenCADStudio {
     /// 第 `i` 个标签页的图所在的项目目录，扫完接着查（[`Self::pidcheck_scanned`]）。要从磁盘读的图
     /// 在后台读，这里先交差。
     fn pidcheck_start(&mut self, i: usize, pbs: Option<String>) -> Task<Message> {
-        let range = pbs.map_or(Range::Project, Range::Pbs);
-        let verb = verb_of(&range);
-        let Some(project_dir) =
-            crate::io::drawing_dir(&self.tabs[i].scene.document).map(Path::to_path_buf)
-        else {
-            self.command_line.push_error_coded(
-                INDEX_NO_PROJECT_DIR,
-                &format!(
-                    "{verb}: {INDEX_NO_PROJECT_DIR}: 当前图没保存过，不属于哪个项目；存盘后再查。"
-                ),
-            );
-            return Task::none();
+        let verb = if pbs.is_some() {
+            "PIDCHECK PBS"
+        } else {
+            "PIDCHECK PROJECT"
         };
-        let Some(rules) = self.pidcheck_rule_set(i, verb) else {
-            return Task::none();
-        };
-        let master = master_data::resolve(&self.tabs[i].scene.document, Some(&project_dir));
-        if let Range::Pbs(node) = &range {
-            if let Err(why) = pbs_known(&master, node) {
-                self.command_line.push_error_coded(
-                    PBS_NODE_UNKNOWN,
-                    &format!("{verb}: {PBS_NODE_UNKNOWN}: {why}。"),
-                );
-                return Task::none();
+        match self.pidcheck_prepare(i, pbs) {
+            Ok(check) => self.pidindex_check(i, check),
+            Err((code, why)) => {
+                self.command_line
+                    .push_error_coded(code, &format!("{verb}: {why}"));
+                Task::none()
             }
         }
-        self.pidindex_check(
-            i,
-            Check {
-                range,
-                rules,
-                master,
-                trigger: Trigger::OnDemand,
-            },
-        )
+    }
+
+    /// 查项目、查节点在扫项目之前要备齐的（§4.1）：第 `i` 个标签页的图得有项目目录，取生效的
+    /// 规则和主数据，`pbs` 是节点号时它得在主数据里。不碰命令行：不成时是错误码和为什么，
+    /// 命令和校验与交付面板各自说。
+    pub(super) fn pidcheck_prepare(
+        &self,
+        i: usize,
+        pbs: Option<String>,
+    ) -> Result<Check, (&'static str, String)> {
+        let range = pbs.map_or(Range::Project, Range::Pbs);
+        let Some(project_dir) = crate::io::drawing_dir(&self.tabs[i].scene.document) else {
+            return Err((
+                INDEX_NO_PROJECT_DIR,
+                format!("{INDEX_NO_PROJECT_DIR}: 当前图没保存过，不属于哪个项目；存盘后再查。"),
+            ));
+        };
+        let rules = self.pidcheck_load_rules(i)?;
+        let master = master_data::resolve(&self.tabs[i].scene.document, Some(project_dir));
+        if let Range::Pbs(node) = &range {
+            pbs_known(&master, node)
+                .map_err(|why| (PBS_NODE_UNKNOWN, format!("{PBS_NODE_UNKNOWN}: {why}。")))?;
+        }
+        Ok(Check {
+            range,
+            rules,
+            master,
+            trigger: Trigger::OnDemand,
+        })
     }
 
     /// 扫完项目接着查（[`check_project`]），说一句汇总、列前 10 条，结果按项目目录记下。
@@ -393,7 +446,10 @@ impl OpenCADStudio {
         let verb = verb_of(&check.range);
         let (report, drawings) = check_project(scanned, check);
         self.pidcheck_say(verb, &report, Some(drawings.len()));
-        let checked = self.pid_checks.checked(report, drawings, &scanned.waivers);
+        let revisions = self.pidcheck_revisions();
+        let checked = self
+            .pid_checks
+            .checked(report, drawings, &scanned.waivers, revisions);
         self.pid_checks
             .projects
             .insert(same_file(project_dir), checked);
@@ -488,9 +544,8 @@ impl OpenCADStudio {
         }
     }
 
-    /// `PIDCHECK EXPORT <文件>`：把最近一次的检查结果（[`Self::pidcheck_latest`]）写成
-    /// §3.6 的 JSON，带 `ok`。文件名不是完整路径时从图纸所在目录算起，没存过的图从当前目录
-    /// 算起。只写 `.json`，不写项目文件；已有的覆盖。
+    /// `PIDCHECK EXPORT <文件>`：把最近一次的检查结果写成文件（[`Self::pidcheck_write_export`]），
+    /// 说一句写到了哪里。
     fn pidcheck_export(&mut self, i: usize, rest: &str) {
         let name = unquoted(rest);
         if name.is_empty() {
@@ -498,6 +553,21 @@ impl OpenCADStudio {
                 .push_error("PIDCHECK EXPORT: 写成 PIDCHECK EXPORT <文件>。");
             return;
         }
+        match self.pidcheck_write_export(i, name) {
+            Ok(said) => self
+                .command_line
+                .push_output(&format!("PIDCHECK EXPORT: {said}")),
+            Err(why) => self
+                .command_line
+                .push_error(&format!("PIDCHECK EXPORT: {why}")),
+        }
+    }
+
+    /// 把第 `i` 个标签页最近一次的检查结果（[`Self::pidcheck_latest`]）写到文件 `name`：§3.6 的
+    /// JSON，带 `ok`。文件名不是完整路径时从图纸所在目录算起，没存过的图从当前目录算起。只写
+    /// `.json`，不写项目文件；已有的覆盖。不碰命令行：成了是写了什么、写到哪里，不成是为什么，
+    /// 命令和校验与交付面板各自说。
+    pub(super) fn pidcheck_write_export(&self, i: usize, name: &str) -> Result<String, String> {
         let path = match crate::io::drawing_dir(&self.tabs[i].scene.document) {
             Some(dir) if Path::new(name).is_relative() => dir.join(name),
             _ => PathBuf::from(name),
@@ -506,47 +576,37 @@ impl OpenCADStudio {
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
         if !json {
-            self.command_line.push_error(&format!(
-                "PIDCHECK EXPORT: 只写 .json 文件，{} 不是。",
-                path.display()
-            ));
-            return;
+            return Err(format!("只写 .json 文件，{} 不是。", path.display()));
         }
         if path
             .file_name()
             .is_some_and(|file| file.eq_ignore_ascii_case(PROJECT_FILE))
         {
-            self.command_line.push_error(&format!(
-                "PIDCHECK EXPORT: {} 是项目文件，不拿检查结果盖掉它。",
+            return Err(format!(
+                "{} 是项目文件，不拿检查结果盖掉它。",
                 path.display()
             ));
-            return;
         }
         let Some(checked) = self.pidcheck_latest(i) else {
-            self.command_line.push_error(
-                "PIDCHECK EXPORT: 还没有检查结果；先用 PIDCHECK、PIDCHECK PROJECT 或 PIDCHECK PBS <节点号> 查一次。",
+            return Err(
+                "还没有检查结果；先用 PIDCHECK、PIDCHECK PROJECT 或 PIDCHECK PBS <节点号> 查一次。"
+                    .to_owned(),
             );
-            return;
         };
         let report = &checked.report;
         let counts = report.summary;
         let scope = scope_said(&report.scope);
-        let written = serde_json::to_string_pretty(&Exported { ok: true, report })
+        serde_json::to_string_pretty(&Exported { ok: true, report })
             .map_err(|error| error.to_string())
-            .and_then(|text| std::fs::write(&path, text + "\n").map_err(|error| error.to_string()));
-        match written {
-            Ok(()) => self.command_line.push_output(&format!(
-                "PIDCHECK EXPORT: 已把{scope}的检查结果（错误 {} 条，警告 {} 条，提示 {} 条）写到 {}。",
-                counts.errors,
-                counts.warnings,
-                counts.infos,
-                path.display()
-            )),
-            Err(error) => self.command_line.push_error(&format!(
-                "PIDCHECK EXPORT: 写不了 {}：{error}",
-                path.display()
-            )),
-        }
+            .and_then(|text| std::fs::write(&path, text + "\n").map_err(|error| error.to_string()))
+            .map_err(|error| format!("写不了 {}：{error}", path.display()))?;
+        Ok(format!(
+            "已把{scope}的检查结果（错误 {} 条，警告 {} 条，提示 {} 条）写到 {}。",
+            counts.errors,
+            counts.warnings,
+            counts.infos,
+            path.display()
+        ))
     }
 
     /// `PIDCHECK ENABLE <规则号>`、`PIDCHECK DISABLE <规则号>`（§3.2、§5.2）：在第 `i` 个标签页的图
@@ -750,11 +810,23 @@ impl OpenCADStudio {
     }
 
     /// 把第 `i` 个标签页的图上的豁免整个换成 `waivers`：先记撤销快照（§3.7），写完就地改留着的结果。
+    /// 这一步当场收口：改动计数要到收口时才加一，结果记的计数跟到那以后，原先没过期的就还不算
+    /// 过期（[`Checked::restamp`]）。
     fn pidcheck_write_waivers(&mut self, i: usize, waivers: &[Waiver]) {
+        let before = self.tabs[i].edit_revision;
         self.push_undo_snapshot(i, "PIDCHECK");
         drc::set_waivers(&mut self.tabs[i].scene.document, waivers);
         self.tabs[i].dirty = true;
+        self.finish_pending_history(i);
         self.pidcheck_follow_waivers(i);
+        let (tab, after) = (self.tabs[i].id, self.tabs[i].edit_revision);
+        let project = crate::io::drawing_dir(&self.tabs[i].scene.document).map(same_file);
+        if let Some(checked) = self.tabs[i].pid_check.as_mut() {
+            checked.restamp(tab, before, after);
+        }
+        if let Some(checked) = project.and_then(|dir| self.pid_checks.projects.get_mut(&dir)) {
+            checked.restamp(tab, before, after);
+        }
     }
 
     /// 第 `i` 个标签页的图上的豁免改了以后（豁免、取消豁免、撤销、重做），就地改留着的、查过这张图
@@ -912,7 +984,10 @@ impl OpenCADStudio {
             },
         );
         let answer = answer_of(&report, include_waived);
-        let checked = self.pid_checks.checked(report, drawings, &scanned.waivers);
+        let revisions = self.pidcheck_revisions();
+        let checked = self
+            .pid_checks
+            .checked(report, drawings, &scanned.waivers, revisions);
         if on_tab {
             self.tabs[i].pid_check = Some(checked);
         } else {

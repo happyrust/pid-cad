@@ -1302,6 +1302,7 @@ impl OpenCADStudio {
         if self.tabs[i].active_cmd.is_none() {
             self.block_palette.placing = None;
         }
+        self.sync_pid_verify_view();
         self.control_settle();
         self.sync_spacemouse();
         task

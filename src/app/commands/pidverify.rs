@@ -6,31 +6,110 @@
 //! The panel's interface state lives on the program (`pid_verify_ui`) and
 //! the panel draws the plain data `build_view` makes of it
 //! (`pid_verify_view`), so whatever changes that state ends in
-//! [`OpenCADStudio::refresh_pid_verify_view`]. The command never changes
-//! the drawing, so a read-only session may run every form of it. The
-//! `action` op named `pid_verify` presses the panel with these same
-//! messages (§3.3).
+//! [`OpenCADStudio::refresh_pid_verify_view`]. What the view shows besides
+//! — the checks kept for the drawing in front and whether a drawing they
+//! read changed since, whether a scan runs — changes under other messages
+//! too: while the panel is open, every message ends by rebuilding the view
+//! when any of that changed ([`OpenCADStudio::sync_pid_verify_view`]). The
+//! command never changes the drawing, so a read-only session may run every
+//! form of it. The `action` op named `pid_verify` presses the panel with
+//! these same messages (§3.3).
+//!
+//! The rule-check tab's buttons call what `pid_check` calls: the check of
+//! the drawing in front, the check of its project after `PIDINDEX`'s scan,
+//! and the export `PIDCHECK EXPORT` writes. What stops them is said in the
+//! panel's message bar rather than on the command line, so an `action`
+//! pressing them is not answered as failed for it (§3.7).
 
+use super::piddrc::Checked;
+use super::pidindex::same_file;
 use crate::app::{Message, OpenCADStudio};
 use crate::pid::drc;
 use crate::ui::dock::{DockMsg, PanelId};
-use crate::ui::window::pid_verify_deliver::{self, Context, PidVerifyMsg, Tab, ROWS_PER_PAGE};
+use crate::ui::window::pid_verify_deliver::{
+    self, Context, DrawingResults, KeptCheck, Notice, PidVerifyMsg, ProjectResults, Tab,
+    ROWS_PER_PAGE,
+};
 use iced::Task;
 use serde_json::{json, Value};
 use std::path::Path;
 
+/// What the panel's view was built from besides its interface state: whether
+/// it is on screen, the drawing tab in front and where that drawing was
+/// saved, each open drawing's edit count, the last check the program made,
+/// whether the session may write and whether a scan runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::app) struct Inputs {
+    visible: bool,
+    front: Option<u64>,
+    source: Option<String>,
+    revisions: Vec<(u64, u64)>,
+    last_check: u64,
+    writable: bool,
+    busy: bool,
+}
+
 impl OpenCADStudio {
     /// Rebuild what the panel draws from its interface state and the
-    /// program's state around it.
+    /// program's state around it. A check made since the last build starts
+    /// the list over at its first 200 rows.
     pub(in crate::app) fn refresh_pid_verify_view(&mut self) {
+        let inputs = self.pid_verify_inputs();
+        if self
+            .pid_verify_built_from
+            .as_ref()
+            .is_some_and(|built| built.last_check != inputs.last_check)
+        {
+            self.pid_verify_ui.more = 0;
+        }
         let context = self.pid_verify_context();
-        self.pid_verify_view = pid_verify_deliver::build_view(&self.pid_verify_ui, &context);
+        let view = {
+            let (drawing, project) = self.pid_verify_kept();
+            pid_verify_deliver::build_view(
+                &self.pid_verify_ui,
+                Some(&DrawingResults { check: drawing }),
+                Some(&ProjectResults { check: project }),
+                &context,
+            )
+        };
+        self.pid_verify_view = view;
+        self.pid_verify_built_from = Some(inputs);
+    }
+
+    /// After a message, rebuild the view if the panel is open and anything
+    /// it was built from changed: a check made or followed, a drawing
+    /// edited, another tab in front, a scan started or done.
+    pub(in crate::app) fn sync_pid_verify_view(&mut self) {
+        if !self.dock_panel_wanted(PanelId::PidVerifyDeliver) {
+            return;
+        }
+        if self.pid_verify_built_from.as_ref() != Some(&self.pid_verify_inputs()) {
+            self.refresh_pid_verify_view();
+        }
+    }
+
+    fn pid_verify_inputs(&self) -> Inputs {
+        let front = self.tabs.get(self.active_tab).filter(|tab| !tab.is_start);
+        Inputs {
+            visible: self.dock_panel_visible(PanelId::PidVerifyDeliver),
+            front: front.map(|tab| tab.id),
+            source: front.and_then(|tab| tab.scene.document.source_path.clone()),
+            revisions: self
+                .tabs
+                .iter()
+                .map(|tab| (tab.id, tab.edit_revision))
+                .collect(),
+            last_check: self.pid_checks.last_serial(),
+            writable: !self.readonly_refuses_command("PIDPUBLISH"),
+            busy: self.pid_index.scanning(),
+        }
     }
 
     /// The program's state the panel shows: whether it is on screen, the
     /// drawing tab in front and that drawing's number as the rule check
-    /// gives it ([`drc::drawing_of`]), none on the Start page, and whether
-    /// the session may change that drawing.
+    /// gives it ([`drc::drawing_of`]), none on the Start page, whether the
+    /// session may change that drawing, whether it was saved, and whether a
+    /// scan runs.
     fn pid_verify_context(&self) -> Context {
         let drawing = self.tabs.get(self.active_tab).filter(|tab| !tab.is_start);
         Context {
@@ -44,7 +123,62 @@ impl OpenCADStudio {
             // waiving pass this gate, which only the session's own drawing
             // closes.
             writable: !self.readonly_refuses_command("PIDPUBLISH"),
+            saved: drawing.is_some_and(|tab| crate::io::drawing_dir(&tab.scene.document).is_some()),
+            // One scan runs at a time, and the project check starts one.
+            busy: self.pid_index.scanning(),
         }
+    }
+
+    /// The checks kept for the drawing in front (§3.1): its own, on its tab,
+    /// and its project folder's; none on the Start page.
+    fn pid_verify_kept(&self) -> (Option<KeptCheck<'_>>, Option<KeptCheck<'_>>) {
+        let i = self.active_tab;
+        let Some(tab) = self.tabs.get(i).filter(|tab| !tab.is_start) else {
+            return (None, None);
+        };
+        let dir = crate::io::drawing_dir(&tab.scene.document);
+        let project = dir.and_then(|dir| self.pid_checks.of_project(dir));
+        (
+            tab.pid_check
+                .as_ref()
+                .map(|checked| self.pid_verify_kept_check(checked, i, dir)),
+            project.map(|checked| self.pid_verify_kept_check(checked, i, dir)),
+        )
+    }
+
+    fn pid_verify_kept_check<'a>(
+        &self,
+        checked: &'a Checked,
+        i: usize,
+        dir: Option<&Path>,
+    ) -> KeptCheck<'a> {
+        KeptCheck {
+            report: &checked.report,
+            serial: checked.serial,
+            stale: self.pid_check_stale(checked, i, dir),
+        }
+    }
+
+    /// Whether a drawing `checked` read changed since (§3.1). A check of the
+    /// drawing on tab `i` alone goes stale when that drawing changes; one
+    /// that read its project folder `dir`, when any drawing open in that
+    /// folder does, one opened after the check counting from its opening.
+    /// Waiving follows the result in place and leaves it fresh; undoing that
+    /// does not (§4.4).
+    fn pid_check_stale(&self, checked: &Checked, i: usize, dir: Option<&Path>) -> bool {
+        let changed = |id: u64, revision: u64| checked.revision_at_check(id) != revision;
+        let Some(dir) = dir.filter(|_| checked.report.scope.cross_drawing) else {
+            return changed(self.tabs[i].id, self.tabs[i].edit_revision);
+        };
+        let dir = same_file(dir);
+        self.tabs
+            .iter()
+            .filter(|tab| !tab.is_start)
+            .filter(|tab| {
+                crate::io::drawing_dir(&tab.scene.document)
+                    .is_some_and(|other| same_file(other) == dir)
+            })
+            .any(|tab| changed(tab.id, tab.edit_revision))
     }
 
     /// Show the panel the way its switch among the dock's panels does:
@@ -102,21 +236,166 @@ impl OpenCADStudio {
     }
 
     /// What the user did in the panel. Hiding takes the close button's path,
-    /// so the controls' positions go with the panel.
+    /// so the controls' positions go with the panel. A filter changed or a
+    /// check pressed starts the list over at its first 200 rows.
     pub(in crate::app) fn on_pid_verify(&mut self, msg: PidVerifyMsg) -> Task<Message> {
-        match msg {
-            PidVerifyMsg::Show => self.show_pid_verify_panel(),
+        let ui = &mut self.pid_verify_ui;
+        let task = match msg {
+            PidVerifyMsg::Show => return self.show_pid_verify_panel(),
             PidVerifyMsg::Hide => {
                 let task = self.on_dock(DockMsg::Close(PanelId::PidVerifyDeliver));
                 self.refresh_pid_verify_view();
-                task
+                return task;
             }
+            PidVerifyMsg::PickExport => return self.pid_verify_pick_export(),
             PidVerifyMsg::Tab(tab) => {
-                self.pid_verify_ui.tab = tab;
-                self.refresh_pid_verify_view();
+                ui.tab = tab;
+                Task::none()
+            }
+            PidVerifyMsg::CheckDrawing => {
+                ui.more = 0;
+                self.pid_verify_check_drawing();
+                Task::none()
+            }
+            PidVerifyMsg::CheckProject => {
+                ui.more = 0;
+                self.pid_verify_check_project()
+            }
+            PidVerifyMsg::Severity(severity) => {
+                toggle(&mut ui.severities, severity);
+                ui.more = 0;
+                Task::none()
+            }
+            PidVerifyMsg::Kind(kind) => {
+                match kind {
+                    Some(kind) => toggle(&mut ui.kinds, kind),
+                    None => ui.kinds.clear(),
+                }
+                ui.more = 0;
+                Task::none()
+            }
+            PidVerifyMsg::ShowWaived(on) => {
+                ui.show_waived = on;
+                ui.more = 0;
+                Task::none()
+            }
+            PidVerifyMsg::Fold(group) => {
+                toggle(&mut ui.folded, group);
+                Task::none()
+            }
+            PidVerifyMsg::MoreChecks => {
+                ui.more = ui.more.saturating_add(1);
+                Task::none()
+            }
+            PidVerifyMsg::Export(name) => {
+                self.pid_verify_export(&name);
+                Task::none()
+            }
+        };
+        self.refresh_pid_verify_view();
+        task
+    }
+
+    /// 【检查当前图】 (§4.2): what `pid_check` does with `scope: drawing`, the
+    /// result kept on the drawing's tab. A rule pack that does not read is
+    /// said in the message bar, under its code, and the result there was
+    /// stays (§4.1).
+    fn pid_verify_check_drawing(&mut self) {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return;
+        }
+        match self.pidcheck_load_rules(i) {
+            Ok(rules) => {
+                let checked = self.pidcheck_this_drawing(i, &rules);
+                self.tabs[i].pid_check = Some(checked);
+                self.pid_verify_ui.notice = None;
+            }
+            Err((code, why)) => {
+                self.pid_verify_ui.notice = Some(Notice::error(Some(code.to_owned()), why));
+            }
+        }
+    }
+
+    /// 【检查全项目】 (§4.2): `PIDCHECK PROJECT` — `PIDINDEX`'s scan of the
+    /// drawing's folder, then the check, kept for the folder. What stops it
+    /// before the scan is said in the message bar; the scan and the check
+    /// say on the command line what they say for the command.
+    fn pid_verify_check_project(&mut self) -> Task<Message> {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return Task::none();
+        }
+        match self.pidcheck_prepare(i, None) {
+            Ok(check) => {
+                self.pid_verify_ui.notice = None;
+                self.pidindex_check(i, check)
+            }
+            Err((code, why)) => {
+                self.pid_verify_ui.notice = Some(Notice::error(Some(code.to_owned()), why));
                 Task::none()
             }
         }
+    }
+
+    /// 【导出…】: ask where to write the result shown, offering
+    /// `<drawing>-drc.json` beside the drawing.
+    fn pid_verify_pick_export(&self) -> Task<Message> {
+        let dir = self
+            .tabs
+            .get(self.active_tab)
+            .filter(|tab| !tab.is_start)
+            .and_then(|tab| crate::io::drawing_dir(&tab.scene.document))
+            .map(Path::to_path_buf);
+        let drawing = self
+            .pid_verify_view
+            .drawing_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or("PID");
+        let name = format!("{drawing}-drc.json");
+        Task::perform(
+            async move {
+                let mut dialog = crate::sys::file_dialog()
+                    .set_title("导出检查结果")
+                    .set_file_name(&name)
+                    .add_filter("JSON", &["json"]);
+                if let Some(dir) = dir {
+                    dialog = dialog.set_directory(dir);
+                }
+                dialog
+                    .save_file()
+                    .await
+                    .map(|picked| crate::sys::handle_path(&picked))
+            },
+            |picked| match picked {
+                Some(path) => PidVerifyMsg::Export(path.to_string_lossy().into_owned()).message(),
+                None => Message::Noop,
+            },
+        )
+    }
+
+    /// Write the result shown to `name` as `PIDCHECK EXPORT` writes it, and
+    /// say in the message bar where it went or why it did not.
+    fn pid_verify_export(&mut self, name: &str) {
+        let i = self.active_tab;
+        if self.tabs[i].is_start {
+            return;
+        }
+        self.pid_verify_ui.notice = Some(match self.pidcheck_write_export(i, name) {
+            Ok(said) => Notice::info(said),
+            Err(why) => Notice::error(None, why),
+        });
+    }
+}
+
+/// Switch `item` in `list`: off when it is on, on when it is off.
+fn toggle<T: PartialEq>(list: &mut Vec<T>, item: T) {
+    match list.iter().position(|on| *on == item) {
+        Some(at) => {
+            list.remove(at);
+        }
+        None => list.push(item),
     }
 }
 
@@ -153,11 +432,16 @@ fn refuse(code: &str, error: impl Into<String>) -> Value {
 mod tests {
     use crate::app::config::DockSide;
     use crate::app::{Message, OpenCADStudio};
+    use crate::pid::drc;
+    use crate::pid::drc::builtin_rules::PROJECT_PACK_FILE;
     use crate::ui::dock::{DockMsg, PanelId};
     use crate::ui::window::pid_verify_deliver::{
-        PidVerifyMsg, Tab, BOUNDS_PREFIX, PANEL_BOUNDS_ID,
+        PidVerifyMsg, RowView, Tab, BOUNDS_PREFIX, CHECK_DRAWING_ID, CHECK_PROJECT_ID,
+        NEVER_CHECKED, PANEL_BOUNDS_ID,
     };
     use serde_json::{json, Value};
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const PANEL: PanelId = PanelId::PidVerifyDeliver;
@@ -631,6 +915,381 @@ mod tests {
                     !left.iter().any(|id| id.starts_with(BOUNDS_PREFIX)),
                     "{left:?}"
                 );
+            })
+            .expect("spawn test thread")
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    }
+
+    /// A folder of one test's own, removed after it.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            // Tests run in parallel: a count tells apart those of one process.
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "ocs-pid-verify-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("the scratch folder");
+            Self(path)
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A control request of protocol 1 to the drawing in front.
+    fn request(app: &mut OpenCADStudio, mut req: Value) -> Value {
+        static SERIAL: AtomicU64 = AtomicU64::new(0);
+        let state = app.automation_op(r#"{"protocol":1,"op":"state"}"#);
+        req["protocol"] = json!(1);
+        req["document_id"] = state["document_id"].clone();
+        req["revision"] = state["revision"].clone();
+        req["client_id"] = json!("test");
+        req["request_id"] = json!(format!(
+            "pid-verify-request-{}",
+            SERIAL.fetch_add(1, Ordering::Relaxed)
+        ));
+        app.automation_op(&req.to_string())
+    }
+
+    /// Start `cmd`, feed it `points`, then press Enter.
+    fn draw(app: &mut OpenCADStudio, cmd: &str, points: &[[f64; 2]]) {
+        let started = request(app, json!({"op": "run", "cmd": cmd}));
+        assert_eq!(started["ok"], true, "{cmd}: {started}");
+        for [x, y] in points {
+            let point =
+                json!({"op": "input", "kind": "point", "point": [x, y, 0.0], "space": "wcs"});
+            let fed = request(app, point);
+            assert_eq!(fed["ok"], true, "{cmd}: {fed}");
+        }
+        request(app, json!({"op": "input", "kind": "enter"}));
+    }
+
+    /// Type `line` at the command line and press Enter, as a person does:
+    /// both are messages the program handles.
+    fn typed(app: &mut OpenCADStudio, line: &str) {
+        let _ = app.update(Message::CommandInput(line.to_owned()));
+        let task = app.update(Message::CommandSubmit);
+        app.drive_headless_task(task).expect("the command's task");
+    }
+
+    /// A rule of the panel tests' own set: `expr` on each object of kind
+    /// `target`.
+    fn rule(id: &str, target: &str, severity: &str, expr: &str) -> Value {
+        json!({
+            "id": id, "name": format!("面板验收 {id}"), "set": "面板验收",
+            "category": "设计类", "target": target, "severity": severity,
+            "expr": expr, "scope": "项目", "source": "新建"
+        })
+    }
+
+    /// The project rule pack the panel tests check with: the built-in sets
+    /// off and three rules of a set of its own, so that a pump and a pipe
+    /// line make one error, one warning and one note.
+    fn pack() -> Value {
+        json!({
+            "version": 1,
+            "pack": "面板验收",
+            "rule_set_version": "T1",
+            "sets": [
+                {"name": "基础规则", "enabled": false},
+                {"name": "工程扩展", "enabled": false},
+                {"name": "面板验收", "enabled": true}
+            ],
+            "rules": [
+                rule("DR-201", "管线", "错误", "管道等级 = NULL"),
+                rule("DR-202", "设备", "警告", "流量 = NULL"),
+                rule("DR-203", "管线", "提示", "设计压力 = NULL")
+            ]
+        })
+    }
+
+    /// A pump and a pipe line saved as PID-1101.dwg in `scratch`, beside
+    /// [`pack`]: checked, the line has an error (DR-201) and a note (DR-203)
+    /// and the pump a warning (DR-202). The panel is open.
+    fn sheet(scratch: &Scratch) -> OpenCADStudio {
+        let mut app = fresh();
+        draw(&mut app, "PIDINSERT pump", &[[0.0, 0.0]]);
+        draw(&mut app, "PIDPIPE", &[[0.0, 100.0], [100.0, 100.0]]);
+        fs::write(scratch.path(PROJECT_PACK_FILE), pack().to_string()).expect("the pack");
+        let path = scratch.path("PID-1101.dwg");
+        let bytes = crate::io::save_to_bytes(
+            app.active_document_for_test(),
+            "dwg",
+            document::DxfVersion::AC1032,
+        )
+        .expect("the drawing as DWG");
+        fs::write(&path, bytes).expect("the drawing");
+        let i = app.active_tab;
+        app.tabs[i].scene.document.source_path = Some(path.to_string_lossy().into_owned());
+        let _ = run(&mut app, "PIDVERIFY");
+        app
+    }
+
+    /// Waive the note on the line at the command line, keyed as the check
+    /// kept on the drawing's tab found it.
+    fn waive_the_note(app: &mut OpenCADStudio) {
+        let i = app.active_tab;
+        let key = app.tabs[i]
+            .pid_check
+            .as_ref()
+            .and_then(|checked| {
+                let mut found = checked.report.results.iter();
+                found.find(|result| result.rule_id == "DR-203")
+            })
+            .map(|result| result.object_key.clone())
+            .expect("the note in the check kept on the tab");
+        let ran = run(app, &format!("PIDCHECK WAIVE DR-203 \"{key}\" 放空管"));
+        assert_eq!(ran.error, None, "{}", ran.said);
+    }
+
+    /// The rules of the rows the panel state lists, in order.
+    fn rows(state: &Value) -> Vec<String> {
+        state["check"]["rows"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| row["rule_id"].as_str().unwrap_or_default().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether the check the panel draws now is marked stale.
+    fn drawn_stale(app: &OpenCADStudio) -> bool {
+        let shown = app.pid_verify_view.check.shown.as_ref();
+        shown.expect("a check drawn").stale
+    }
+
+    #[test]
+    fn the_rule_check_tab_counts_as_pid_check_does_and_filters_its_list() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        typed(&mut app, "PIDCHECK");
+        waive_the_note(&mut app);
+        let answer = act(&mut app, "check=drawing");
+        assert_eq!(answer["ok"], true, "{answer}");
+        let state = panel(&mut app, "");
+        let summary = app.automation_op(r#"{"protocol":1,"op":"pid_check"}"#)["summary"].clone();
+        for count in ["错误", "警告", "提示", "已豁免"] {
+            assert_eq!(
+                state["check"]["counts"][count], summary[count],
+                "{count}: {state}"
+            );
+        }
+        assert_eq!(
+            state["check"]["counts"],
+            json!({"错误": 1, "警告": 1, "提示": 0, "已豁免": 1}),
+            "{state}"
+        );
+        assert_eq!(rows(&state), ["DR-201", "DR-202"]);
+        for (value, listed) in [
+            ("severity=警告", vec!["DR-201"]),
+            ("severity=警告", vec!["DR-201", "DR-202"]),
+            ("show_waived=1", vec!["DR-201", "DR-202", "DR-203"]),
+        ] {
+            let answer = act(&mut app, value);
+            assert_eq!(answer["ok"], true, "{value}: {answer}");
+            assert_eq!(rows(&panel(&mut app, "")), listed, "{value}");
+        }
+    }
+
+    #[test]
+    fn a_check_typed_at_the_command_line_shows_unpressed_and_goes_stale_with_an_edit() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        assert_eq!(app.pid_verify_view.empty, Some(NEVER_CHECKED));
+        typed(&mut app, "PIDCHECK");
+        // What the panel draws shows it already: nothing pressed, nothing
+        // asked of the panel.
+        let shown = app
+            .pid_verify_view
+            .check
+            .shown
+            .clone()
+            .expect("the check drawn");
+        let counts = shown.summary;
+        assert_eq!((counts.errors, counts.warnings, counts.infos), (1, 1, 1));
+        assert!(!shown.stale);
+        // Another pump: the check is stale in the view drawn after the next
+        // message, and in the panel state.
+        draw(&mut app, "PIDINSERT pump", &[[0.0, -60.0]]);
+        let _ = app.update(Message::Noop);
+        assert!(drawn_stale(&app));
+        assert_eq!(panel(&mut app, "")["check"]["stale"], true);
+        // Checked again, it is fresh, and has found that pump.
+        let answer = act(&mut app, "check=drawing");
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert!(!drawn_stale(&app));
+        let state = panel(&mut app, "");
+        assert_eq!(state["check"]["stale"], false, "{state}");
+        assert_eq!(state["check"]["counts"]["警告"], 2, "{state}");
+    }
+
+    #[test]
+    fn waiving_leaves_the_check_fresh_and_undoing_the_waiver_does_not() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        typed(&mut app, "PIDCHECK");
+        waive_the_note(&mut app);
+        let state = panel(&mut app, "");
+        assert_eq!(state["check"]["counts"]["已豁免"], 1, "{state}");
+        assert_eq!(state["check"]["stale"], false, "{state}");
+        // The result follows the undo in place, but the panel cannot tell
+        // what was undone.
+        let _ = app.automation_op(r#"{"op":"undo"}"#);
+        let state = panel(&mut app, "");
+        assert_eq!(state["check"]["counts"]["已豁免"], 0, "{state}");
+        assert_eq!(state["check"]["stale"], true, "{state}");
+    }
+
+    #[test]
+    fn the_project_check_pressed_in_the_panel_is_shown_until_a_drawing_of_the_folder_changes() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        typed(&mut app, "PIDCHECK");
+        let answer = act(&mut app, "check=project");
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert!(app.pid_checks.of_project(&scratch.0).is_some());
+        // Newer than the drawing's own, the folder's check is shown.
+        let state = panel(&mut app, "");
+        assert_eq!(state["check"]["scope"], "project", "{state}");
+        assert_eq!(state["check"]["stale"], false, "{state}");
+        assert_eq!(
+            state["check"]["counts"],
+            json!({"错误": 1, "警告": 1, "提示": 1, "已豁免": 0}),
+            "{state}"
+        );
+        // The scan done, the button is pressable again.
+        assert_eq!(state["buttons"]["check_project"], true, "{state}");
+        // Waiving keeps it fresh; editing a drawing of the folder does not.
+        waive_the_note(&mut app);
+        let state = panel(&mut app, "");
+        assert_eq!(state["check"]["counts"]["已豁免"], 1, "{state}");
+        assert_eq!(state["check"]["stale"], false, "{state}");
+        draw(&mut app, "PIDINSERT pump", &[[0.0, -60.0]]);
+        let state = panel(&mut app, "");
+        assert_eq!(state["check"]["scope"], "project", "{state}");
+        assert_eq!(state["check"]["stale"], true, "{state}");
+    }
+
+    #[test]
+    fn the_panel_refuses_a_grey_rule_check_button_with_the_reason() {
+        // Never saved, the drawing is in no project folder.
+        let mut app = fresh();
+        let _ = run(&mut app, "PIDVERIFY");
+        for (value, reason) in [
+            ("check=project", "no_project_dir"),
+            ("check_export=drc.json", "no_result"),
+            ("severity=警告", "no_result"),
+        ] {
+            let answer = act(&mut app, value);
+            assert_eq!(
+                answer["code"], "PANEL_ACTION_UNAVAILABLE",
+                "{value}: {answer}"
+            );
+            assert_eq!(answer["reason"], reason, "{value}: {answer}");
+        }
+        // The drawing itself checks all the same.
+        let answer = act(&mut app, "check=drawing");
+        assert_eq!(answer["ok"], true, "{answer}");
+        let state = panel(&mut app, "");
+        assert_eq!(state["check"]["has_result"], true, "{state}");
+        assert_eq!(state["buttons"]["check_project"], false, "{state}");
+        assert_eq!(state["buttons"]["check_export"], true, "{state}");
+    }
+
+    #[test]
+    fn the_panel_exports_the_check_shown_as_pidcheck_export_writes_it() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        let _ = act(&mut app, "check=drawing");
+        let answer = act(&mut app, "check_export=panel.json");
+        assert_eq!(answer["ok"], true, "{answer}");
+        let state = panel(&mut app, "");
+        assert_eq!(state["notice"]["level"], "info", "{state}");
+        let said = state["notice"]["text"].as_str().unwrap_or_default();
+        assert!(said.contains("panel.json"), "{state}");
+        let ran = run(&mut app, "PIDCHECK EXPORT command.json");
+        assert_eq!(ran.error, None, "{}", ran.said);
+        let written = |name: &str| fs::read(scratch.path(name)).expect("the file written");
+        assert_eq!(written("panel.json"), written("command.json"));
+        // What the export refuses is said in the message bar; the press was
+        // made all the same.
+        app.command_line.last_error = None;
+        let answer = act(&mut app, "check_export=panel.txt");
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(app.command_line.last_error, None);
+        let state = panel(&mut app, "");
+        assert_eq!(state["notice"]["level"], "error", "{state}");
+        assert!(!scratch.path("panel.txt").exists());
+    }
+
+    #[test]
+    fn a_rule_pack_that_does_not_read_is_said_in_the_message_bar_and_the_check_stays() {
+        let scratch = Scratch::new();
+        let mut app = sheet(&scratch);
+        let _ = act(&mut app, "check=drawing");
+        let kept = panel(&mut app, "")["check"].clone();
+        let mut broken = pack();
+        broken["rules"][0]["expr"] = json!("管道等级 =");
+        fs::write(scratch.path(PROJECT_PACK_FILE), broken.to_string()).expect("the pack");
+        for value in ["check=drawing", "check=project"] {
+            app.command_line.last_error = None;
+            let answer = act(&mut app, value);
+            assert_eq!(answer["ok"], true, "{value}: {answer}");
+            assert_eq!(app.command_line.last_error, None, "{value}");
+            let state = panel(&mut app, "");
+            assert_eq!(state["notice"]["level"], "error", "{value}: {state}");
+            assert_eq!(
+                state["notice"]["code"],
+                drc::DSL_PARSE_ERROR,
+                "{value}: {state}"
+            );
+            assert_eq!(state["check"], kept, "{value}: {state}");
+        }
+        // Mended, the next check clears the message.
+        fs::write(scratch.path(PROJECT_PACK_FILE), pack().to_string()).expect("the pack");
+        let _ = act(&mut app, "check=drawing");
+        assert_eq!(panel(&mut app, "")["notice"], Value::Null);
+    }
+
+    #[test]
+    fn the_drawn_rule_check_tab_reports_its_buttons_and_rows() {
+        // As for the panel's body and tabs above.
+        let _one = crate::headless_ui_lock();
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let scratch = Scratch::new();
+                let mut app = sheet(&scratch);
+                app.win_size = (1600.0, 900.0);
+                typed(&mut app, "PIDCHECK");
+                let drawn = drawn_ids(&app);
+                let shown = app
+                    .pid_verify_view
+                    .check
+                    .shown
+                    .clone()
+                    .expect("the check drawn");
+                assert_eq!(shown.rows.len(), 3);
+                let mut ids = vec![CHECK_DRAWING_ID.to_owned(), CHECK_PROJECT_ID.to_owned()];
+                ids.extend(shown.rows.iter().map(RowView::bounds_id));
+                for id in ids {
+                    assert!(drawn.contains(&id), "{id}: {drawn:?}");
+                }
             })
             .expect("spawn test thread")
             .join()

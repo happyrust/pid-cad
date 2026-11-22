@@ -87,7 +87,7 @@ mod pidplot;
 pub(in crate::app) mod pidprops;
 mod pidpublish;
 mod pidsnapshot;
-mod pidverify;
+pub(in crate::app) mod pidverify;
 mod plotvars;
 mod point_cloud;
 mod refedit;

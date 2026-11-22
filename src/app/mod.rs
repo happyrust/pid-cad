@@ -1640,6 +1640,10 @@ pub(super) struct OpenCADStudio {
     /// What the verify-and-deliver panel draws, rebuilt from its interface
     /// state whenever that changes.
     pub(crate) pid_verify_view: crate::ui::window::pid_verify_deliver::VerifyView,
+    /// What that view was last built from besides the interface state: while
+    /// the panel is open, the view is rebuilt after any message that changes
+    /// it (`commands::pidverify`). `None` before the first build.
+    pub(in crate::app) pid_verify_built_from: Option<commands::pidverify::Inputs>,
     /// Set while a remote `op_applied` is being folded into the document. The
     /// undo step that fold opens must not be broadcast back to the room
     /// (`src/app/collab/apply.rs`).
@@ -6784,6 +6788,7 @@ impl OpenCADStudio {
             show_pid_verify: false,
             pid_verify_ui: Default::default(),
             pid_verify_view: Default::default(),
+            pid_verify_built_from: None,
             applying_remote: false,
             #[cfg(not(target_arch = "wasm32"))]
             pid_backup_browser: Default::default(),
