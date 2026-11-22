@@ -503,13 +503,16 @@ fn main() {
         match export_handover_package_from_path(&effective_input, pkg_dir, &pkg_opts) {
             Ok(man) => {
                 println!(
-                    "pid_package: schema=v{} handover_ready={} sheets={} pid={} pdf={} valves={} bl={} hazop={} files={} manifest_sha256={}",
+                    "pid_package: schema=v{} handover_ready={} sheets={} pid={} pdf={} lines={} nozzles={} valves={} sp={} bl={} hazop={} files={} manifest_sha256={}",
                     man.schema_version,
                     man.handover_ready,
                     man.sheets_exported,
                     man.pid_files_written,
                     man.pdf_files_plotted,
+                    man.master_pipelines_count,
+                    man.equipment_nozzles_count,
                     man.total_valves,
+                    man.piping_specialties_count,
                     man.battery_limit_interfaces,
                     man.hazop_nodes_count,
                     man.files.len(),

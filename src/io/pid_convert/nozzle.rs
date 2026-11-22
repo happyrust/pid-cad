@@ -441,12 +441,68 @@ fn spans_bbox_and_center(spans: &[Span2]) -> (Pt2, BBox2) {
 
 fn extract_authored_nz_nodes(
     tab_index: usize,
-    drawing_code: &str,
+    fallback_code: &str,
     doc: &Document,
     nodes: &mut Vec<NzNode>,
 ) {
     let upm = crate::io::pid_legend::guess_units_per_mm(doc).max(1e-6);
-    let mut pipe_by_handle: BTreeMap<Handle, usize> = BTreeMap::new();
+    let rec_opt = (!has_native_pid_semantics(doc)).then(|| {
+        recognise_sppid_sheet(
+            doc,
+            default_legend_class_map(),
+            ConfidenceThresholds::default(),
+        )
+    });
+    let drawing_code = rec_opt
+        .as_ref()
+        .and_then(|r| r.title_block.drawing_number.as_deref())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(fallback_code)
+        .to_string();
+    let default_auto_lbl = rec_opt
+        .as_ref()
+        .and_then(|r| r.pipe_labels.first())
+        .map(|l| l.raw_text.trim().trim_end_matches('-').to_string());
+    let mut rec_sym_by_h: BTreeMap<Handle, &super::recognize::ConvertedSymbol> = BTreeMap::new();
+    if let Some(ref rec) = rec_opt {
+        for sym in &rec.symbols {
+            if let Some(rh) = sym.entity_handle {
+                rec_sym_by_h.insert(Handle::new(rh), sym);
+            }
+        }
+    }
+
+    let resolve_span_lbl = |sp: Span2, cand: Option<&str>| -> Option<String> {
+        let Some(ref rec) = rec_opt else {
+            return cand.map(str::to_string);
+        };
+        if rec.pipe_labels.is_empty() {
+            return cand.map(str::to_string);
+        }
+        let mut near_lbl: Option<(f64, &str)> = None;
+        for pl in &rec.pipe_labels {
+            let d = point_to_span_dist(pl.at, sp);
+            if d <= 36.0 * upm && near_lbl.is_none_or(|(bd, _)| d < bd) {
+                near_lbl = Some((d, pl.raw_text.as_str()));
+            }
+        }
+        if let Some(c) = cand {
+            if default_auto_lbl.as_deref() == Some(c) {
+                let near_default = rec.pipe_labels.iter().any(|pl| {
+                    pl.raw_text.trim().trim_end_matches('-') == c
+                        && point_to_span_dist(pl.at, sp) <= 40.0 * upm
+                });
+                if !near_default {
+                    return near_lbl.map(|(_, t)| t.trim().trim_end_matches('-').to_string());
+                }
+            }
+            return Some(c.to_string());
+        }
+        near_lbl.map(|(_, t)| t.trim().trim_end_matches('-').to_string())
+    };
+
+    let mut pipe_indices_by_h: BTreeMap<Handle, Vec<usize>> = BTreeMap::new();
+    let mut promoted_sym_handles: BTreeSet<Handle> = BTreeSet::new();
 
     for ent in doc.model_space_entities() {
         let h = ent.common().handle;
@@ -457,58 +513,71 @@ fn extract_authored_nz_nodes(
             serde_json::from_str(&auth.props).unwrap_or_default();
 
         if auth.topology == ROLE_PIPE_SEGMENT || auth.type_code == TYPE_PIPE_SEGMENT {
-            let lbl = pmap
+            let base_lbl = pmap
                 .get("_line_label")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(|s| s.trim_end_matches('-').to_string());
-            let mut spans = Vec::new();
+            let mut span_items: Vec<(Span2, Option<String>)> = Vec::new();
             if let Some(raw_segs) = pmap.get("_segments").and_then(Value::as_str) {
                 for entry in raw_segs.split(';').filter(|s| !s.trim().is_empty()) {
-                    let c_str = entry.split('|').next().unwrap_or(entry);
+                    let (c_str, sub_lbl) = match entry.split_once('|') {
+                        Some((a, b)) => (a, Some(b.trim().trim_end_matches('-').to_string())),
+                        None => (entry, base_lbl.clone()),
+                    };
                     if let Some(bb) = parse_bbox_str(c_str) {
-                        spans.push(Span2 {
-                            a: (bb.min_x, bb.min_y),
-                            b: (bb.max_x, bb.max_y),
-                        });
+                        span_items.push((
+                            Span2 {
+                                a: (bb.min_x, bb.min_y),
+                                b: (bb.max_x, bb.max_y),
+                            },
+                            sub_lbl.filter(|s| !s.is_empty()),
+                        ));
                     }
                 }
             }
-            if spans.is_empty() {
+            if span_items.is_empty() {
                 if let EntityType::Line(ln) = ent {
-                    spans.push(Span2 {
-                        a: (ln.start.x, ln.start.y),
-                        b: (ln.end.x, ln.end.y),
-                    });
+                    span_items.push((
+                        Span2 {
+                            a: (ln.start.x, ln.start.y),
+                            b: (ln.end.x, ln.end.y),
+                        },
+                        base_lbl.clone(),
+                    ));
                 } else if let EntityType::LwPolyline(pl) = ent {
                     for w in pl.vertices.windows(2) {
-                        spans.push(Span2 {
-                            a: (w[0].location.x, w[0].location.y),
-                            b: (w[1].location.x, w[1].location.y),
-                        });
+                        span_items.push((
+                            Span2 {
+                                a: (w[0].location.x, w[0].location.y),
+                                b: (w[1].location.x, w[1].location.y),
+                            },
+                            base_lbl.clone(),
+                        ));
                     }
                 }
             }
-            if !spans.is_empty() {
-                let (center, bbox) = spans_bbox_and_center(&spans);
+            for (sp, slbl) in span_items {
+                let resolved = resolve_span_lbl(sp, slbl.as_deref());
+                let (center, bbox) = spans_bbox_and_center(&[sp]);
                 let idx = nodes.len();
                 nodes.push(NzNode {
                     tab_index,
-                    drawing_code: drawing_code.to_string(),
+                    drawing_code: drawing_code.clone(),
                     kind: NzKind::PipeSegment,
                     sppid_class: "PIDPipingNetworkSegment".to_string(),
-                    tag_or_label: lbl,
+                    tag_or_label: resolved,
                     own_dn: None,
                     primary_handle: h,
                     member_handles: vec![h],
                     center,
                     bbox,
                     ports: Vec::new(),
-                    spans,
+                    spans: vec![sp],
                     upm,
                 });
-                pipe_by_handle.insert(h, idx);
+                pipe_indices_by_h.entry(h).or_default().push(idx);
             }
             continue;
         }
@@ -523,17 +592,34 @@ fn extract_authored_nz_nodes(
                 }
             }
         }
+        for &mh in &members {
+            promoted_sym_handles.insert(mh);
+        }
+        let rec_sym = rec_sym_by_h.get(&h).copied();
         let fallback_cb = entity_center_and_bbox(doc, h, upm);
         let center = pmap
             .get("_at")
             .and_then(Value::as_str)
             .and_then(parse_pair_f64)
+            .or_else(|| rec_sym.map(|s| s.at))
             .or_else(|| fallback_cb.map(|(c, _)| c))
             .unwrap_or((0.0, 0.0));
         let bbox = pmap
             .get("_bbox")
             .and_then(Value::as_str)
             .and_then(parse_bbox_str)
+            .filter(|b| (b.max_x - b.min_x).abs() > 1e-9 || (b.max_y - b.min_y).abs() > 1e-9)
+            .or_else(|| {
+                rec_sym.and_then(|s| {
+                    let (x0, y0, x1, y1) = s.bbox;
+                    ((x1 - x0).abs() > 1e-9 || (y1 - y0).abs() > 1e-9).then_some(BBox2 {
+                        min_x: x0.min(x1),
+                        min_y: y0.min(y1),
+                        max_x: x0.max(x1),
+                        max_y: y0.max(y1),
+                    })
+                })
+            })
             .or_else(|| fallback_cb.map(|(_, b)| b))
             .unwrap_or(BBox2 {
                 min_x: center.0 - 5.0 * upm,
@@ -559,6 +645,7 @@ fn extract_authored_nz_nodes(
         let own_dn = pmap
             .get("NominalDiameter")
             .or_else(|| pmap.get("nominal_diameter"))
+            .or_else(|| pmap.get("_nominal_diameter"))
             .and_then(Value::as_str)
             .and_then(format_nominal_diameter_attr);
         let kind = classify_nz_kind(&cls, &auth.type_code, &blk_upper, tag_opt.as_deref());
@@ -570,10 +657,15 @@ fn extract_authored_nz_nodes(
                 }
             }
         }
+        if ports.is_empty() {
+            if let Some(s) = rec_sym {
+                ports.extend_from_slice(&s.ports);
+            }
+        }
 
         nodes.push(NzNode {
             tab_index,
-            drawing_code: drawing_code.to_string(),
+            drawing_code: drawing_code.clone(),
             kind,
             sppid_class: cls,
             tag_or_label: tag_opt,
@@ -602,23 +694,27 @@ fn extract_authored_nz_nodes(
             .get(&seg.run_tag)
             .map(|s| s.trim_end_matches('-').to_string())
             .filter(|s| !s.is_empty());
-        if let Some(&idx) = pipe_by_handle.get(&sh) {
-            if nodes[idx].tag_or_label.is_none() {
-                nodes[idx].tag_or_label = lt;
+        if let Some(indices) = pipe_indices_by_h.get(&sh) {
+            for &idx in indices {
+                if nodes[idx].tag_or_label.is_none() {
+                    let sp = nodes[idx].spans[0];
+                    nodes[idx].tag_or_label = resolve_span_lbl(sp, lt.as_deref());
+                }
             }
         } else {
             let sp = Span2 {
                 a: (seg.start.point[0], seg.start.point[1]),
                 b: (seg.end.point[0], seg.end.point[1]),
             };
+            let resolved = resolve_span_lbl(sp, lt.as_deref());
             let (center, bbox) = spans_bbox_and_center(&[sp]);
             let idx = nodes.len();
             nodes.push(NzNode {
                 tab_index,
-                drawing_code: drawing_code.to_string(),
+                drawing_code: drawing_code.clone(),
                 kind: NzKind::PipeSegment,
                 sppid_class: "PIDPipingNetworkSegment".to_string(),
-                tag_or_label: lt,
+                tag_or_label: resolved,
                 own_dn: None,
                 primary_handle: sh,
                 member_handles: vec![sh],
@@ -628,7 +724,115 @@ fn extract_authored_nz_nodes(
                 spans: vec![sp],
                 upm,
             });
-            pipe_by_handle.insert(sh, idx);
+            pipe_indices_by_h.entry(sh).or_default().push(idx);
+        }
+    }
+
+    if let Some(ref rec) = rec_opt {
+        for sym in &rec.symbols {
+            let Some(raw_h) = sym
+                .entity_handle
+                .or_else(|| sym.member_handles.first().copied())
+            else {
+                continue;
+            };
+            let primary_h = Handle::new(raw_h);
+            if promoted_sym_handles.contains(&primary_h)
+                || pipe_indices_by_h.contains_key(&primary_h)
+                || sym
+                    .member_handles
+                    .iter()
+                    .any(|&mr| promoted_sym_handles.contains(&Handle::new(mr)))
+            {
+                continue;
+            }
+            let mut members = vec![primary_h];
+            for &mr in sym.member_handles.iter().chain(sym.tag_handles.iter()) {
+                let mh = Handle::new(mr);
+                if !members.contains(&mh) {
+                    members.push(mh);
+                }
+            }
+            let (x0, y0, x1, y1) = sym.bbox;
+            let bbox = if (x1 - x0).abs() > 1e-9 || (y1 - y0).abs() > 1e-9 {
+                BBox2 {
+                    min_x: x0.min(x1),
+                    min_y: y0.min(y1),
+                    max_x: x0.max(x1),
+                    max_y: y0.max(y1),
+                }
+            } else {
+                entity_center_and_bbox(doc, primary_h, upm)
+                    .map(|(_, b)| b)
+                    .unwrap_or(BBox2 {
+                        min_x: sym.at.0 - 5.0 * upm,
+                        min_y: sym.at.1 - 5.0 * upm,
+                        max_x: sym.at.0 + 5.0 * upm,
+                        max_y: sym.at.1 + 5.0 * upm,
+                    })
+            };
+            let tag_opt = sym
+                .tag
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let own_dn = sym
+                .nominal_diameter
+                .as_deref()
+                .and_then(format_nominal_diameter_attr);
+            let kind = classify_nz_kind(
+                &sym.sppid_class,
+                "",
+                &sym.source_block.to_ascii_uppercase(),
+                tag_opt.as_deref(),
+            );
+            nodes.push(NzNode {
+                tab_index,
+                drawing_code: drawing_code.clone(),
+                kind,
+                sppid_class: sym.sppid_class.clone(),
+                tag_or_label: tag_opt,
+                own_dn,
+                primary_handle: primary_h,
+                member_handles: members,
+                center: sym.at,
+                bbox,
+                ports: sym.ports.clone(),
+                spans: Vec::new(),
+                upm,
+            });
+        }
+
+        for ps in &rec.pipe_segments {
+            let Some(rh) = ps.entity_handle else {
+                continue;
+            };
+            let h = Handle::new(rh);
+            if promoted_sym_handles.contains(&h) || pipe_indices_by_h.contains_key(&h) {
+                continue;
+            }
+            let sp = Span2 {
+                a: ps.start,
+                b: ps.end,
+            };
+            let lbl_opt = resolve_span_lbl(sp, None);
+            let (center, bbox) = spans_bbox_and_center(&[sp]);
+            nodes.push(NzNode {
+                tab_index,
+                drawing_code: drawing_code.clone(),
+                kind: NzKind::PipeSegment,
+                sppid_class: "PIDPipingNetworkSegment".to_string(),
+                tag_or_label: lbl_opt,
+                own_dn: None,
+                primary_handle: h,
+                member_handles: vec![h],
+                center,
+                bbox,
+                ports: Vec::new(),
+                spans: vec![sp],
+                upm,
+            });
         }
     }
 }

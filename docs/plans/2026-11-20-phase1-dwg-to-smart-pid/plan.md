@@ -11,7 +11,7 @@
 | 文件名 | 定位与职责 | 当前状态 |
 |---|---|---|
 | `智能PID平台-阶段一实施方案.md` | 阶段一主执行方案（L0–L6 + LX 逐任务做法、门禁、验收与逐项解决记录） | **已确认并执行中**（已对齐 `main @ 6377fe233` 与 `pid-parse @ a85fa10`） |
-| `智能PID平台-阶段一Issue清单.md` | 阶段一拆单说明、线上 GitHub Issue 映射与逐单解决日志 | **已同步线上 `#106`–`#167`** |
+| `智能PID平台-阶段一Issue清单.md` | 阶段一拆单说明、线上 GitHub Issue 映射与逐单解决日志 | **已同步线上 `#106`–`#168`** |
 | `智能PID平台-阶段一路线图-DWG转智能PID与pid导出.md` | 阶段一总体路线、取舍依据、预检三关与减法送测设计 | **已对齐当前仓库进度并脱敏** |
 | `智能PID平台-样本分析-XML规格与pid结构.md` | 110 对真实 SPPID 样本格式/结构实测规格与 Q1–Q13 答案回填 | **已完成全批 220 份复核与 Q1–Q13 回填** |
 | `03-parse-answers.md` | `L0-8`（[#118](https://github.com/happyrust/pid-cad/issues/118)）对照 `pid-parse @ a85fa10` 源码逐条回答 Q1–Q13（含精确源码路径与行号） | **已完成** |
@@ -20,7 +20,7 @@
 | `06-lx-compliance-and-codelist-audit.md` | `LX-6 / LX-7 / #117`（[#137](https://github.com/happyrust/pid-cad/issues/137)）备份包分级来源全包实查、`.pid` 保留流够用性台账与书面合规边界确认 | **已完成** |
 | `智能PID平台-内部模型合一分析.md` | `PID_SEMANTICS` 与 `PID_AUTHOR` 升格合一方案及与并行分支 `pid-symbol-identity` 的衔接边界 | **已完成引擎与属性面板双分组落地（见 `promote.rs`、`pidprops.rs`）** |
 | `智能PID平台-资料清单.md` | `RES-01`–`RES-17` 资料清点、环境变量约定与缺口降级策略（`L0-1`） | **已完成清点登记** |
-| `readings.md` | 阶段一门禁基线与各单先红后绿、真实样本实测读数账本 | **持续更新（已记 §1–§56）** |
+| `readings.md` | 阶段一门禁基线与各单先红后绿、真实样本实测读数账本 | **持续更新（已记 §1–§57）** |
 
 ---
 
@@ -86,5 +86,6 @@
 | `L3-5 / L3-6 / L2-2 / L6-2` 应用内 P&ID 设备管口条件表提取、接管规格自动继承与备用口/孤立管口巡检命令 `PIDNOZZLE` 及 CLI `--export-nozzles` 闭环 | [#164](https://github.com/happyrust/pid-cad/issues/164) | **已完成 · 显隐式设备管口方位与规格条件表闭环**（2026-11-22） | 提交 **`0f503a30a`**：新增 `src/io/pid_convert/nozzle.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDNOZZLE`）与 `examples/pid_convert.rs`（`--export-nozzles`）；支持显式 `PIDNozzle` 与壳体隐式接管口合成、四向方位判定、管线规格/根部阀回溯与备用/孤立口筛选，4 张真实成对图纸提取 `136` 个管口（已接管 `136` 个）全过，见 `readings.md` §53 |
 | `L3-6 / L4-6 / L6-1 / L6-2` 应用内 P&ID 多图纸总目录与标题栏元数据对账、缺号/重号校核及跨图跳转命令 `PIDINDEX` 与 CLI `--export-index` 闭环 | [#165](https://github.com/happyrust/pid-cad/issues/165) | **已完成 · 多图纸标题栏总目录与文控校核闭环**（2026-11-22） | 提交 **`0abc0f41e`**：新增 `src/io/pid_convert/drawing_index.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDINDEX`）与 `examples/pid_convert.rs`（`--export-index`）；自动提取标题栏图号/图名/版次与单图五类业务规模，核查缺图号与跨图重号并支持 `JUMP` 秒级切换，4 张真实成对图纸统计 `22` 台设备 / `210` 台阀门全过，见 `readings.md` §54 |
 | `L3-3 / L3-4 / L3-6 / L6-2` 应用内 P&ID 管道特殊件与异径管件统计清册、大小头双管径提取及巡检命令 `PIDSPECIALTY` 与 CLI `--export-specialties` 闭环 | [#166](https://github.com/happyrust/pid-cad/issues/166) | **已完成 · 管道特殊件与异径大小头双管径清册闭环**（2026-11-22） | 提交 **`64bb06648`**：新增 `src/io/pid_convert/specialty.rs` 并扩展 `valve_mto.rs`、`mod.rs`、`src/app/commands/pidprops.rs`（`PIDSPECIALTY`）与 `examples/pid_convert.rs`（`--export-specialties`）；与 `PIDVALVE` 正交互补提取过滤器/阻火器/软管/盲板/异径大小头（自动合成大端×小端双管径），4 张真实成对图纸提取 `49` 件非阀组件（自动继承规格 `49` 件）全过，见 `readings.md` §55 |
-| `L3-3 / L3-4 / L3-6 / L6-2` 应用内 P&ID 工艺与公用工程管线一览表 Master Line List、跨图 `From → To` 起止端追踪与巡检命令 `PIDLINELIST` 及 CLI `--export-lines` 闭环 | [#167](https://github.com/happyrust/pid-cad/issues/167) | **已完成 · 跨图管线一览表与起止端自动追踪闭环**（2026-11-22） | 新增 `src/io/pid_convert/line_list.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDLINELIST`）与 `examples/pid_convert.rs`（`--export-lines`）；跨互逆 `PIDOPC` 聚拢管段并追踪 `From -> To` 设备/母线/界区端点，4 张真实成对图纸提取 `48` 条管线（双端闭环 `48` 条）全过，见 `readings.md` §56 |
+| `L3-3 / L3-4 / L3-6 / L6-2` 应用内 P&ID 工艺与公用工程管线一览表 Master Line List、跨图 `From → To` 起止端追踪与巡检命令 `PIDLINELIST` 及 CLI `--export-lines` 闭环 | [#167](https://github.com/happyrust/pid-cad/issues/167) | **已完成 · 跨图管线一览表与起止端自动追踪闭环**（2026-11-22） | 提交 **`af5aedf9d`**：新增 `src/io/pid_convert/line_list.rs` 并扩展 `src/io/pid_convert/mod.rs`、`src/app/commands/pidprops.rs`（`PIDLINELIST`）与 `examples/pid_convert.rs`（`--export-lines`）；跨互逆 `PIDOPC` 聚拢管段并追踪 `From -> To` 设备/母线/界区端点，4 张真实成对图纸提取 `48` 条管线（双端闭环 `48` 条）全过，见 `readings.md` §56 |
+| `L6-1 / L6-2 / L6-3 / L3-6 / L4-6` 升级一站式数字化移交总打包命令 `PIDPACKAGE v3` 及 CLI `--export-package` 八表三审 40 文件全套 EPC 交付与 SHA-256 密码学门禁闭环 | [#168](https://github.com/happyrust/pid-cad/issues/168) | **已完成 · 八表三审 40 文件全套 EPC 数字化移交包闭环**（2026-11-22） | 升级 `src/io/pid_convert/{package,nozzle,line_list}.rs`、`src/app/commands/pidprops.rs` 与 `examples/pid_convert.rs`（`schema_version = 3`），齐备 `00..07` 八大清册 + 三项校审底稿并补强 `PID_AUTHOR` 混合态管口/管线提取；4 张真实成对图纸一次产出 `40` 个交付文件（`4,382,335` B）全过 SHA-256 密码学门禁，见 `readings.md` §57 |
 | `.sym` 参考数据预览（关联） | [#116](https://github.com/happyrust/pid-cad/issues/116) | **由并行分支推进中** | 正在 `pid-symbol-on-main` 工作树推进 `pid_backup_browser/symbol_preview.rs`，严格避让 |

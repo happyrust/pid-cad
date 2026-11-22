@@ -2276,3 +2276,45 @@
 | `scripts\fmt-newhunks.ps1` | — | `line_list.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 57. L6-1 / L6-2 / L6-3 / L3-6 / L4-6（#168）：升级一站式数字化交付总打包命令 `PIDPACKAGE v3` 及 CLI `--export-package` 八表三审 40 文件全套 EPC 移交与密码学门禁闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `af5aedf9d`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 修改文件 | `src/io/pid_convert/{package,nozzle,line_list}.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-22-issue168/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_package_v3.txt`、`cli_export_package_v3.txt`、`real_out/real168_summary.json`、`fmt_newhunks.txt`、`rust_gates_status.json`） |
+
+### 57.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_168_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidpackage_v3_emits_all_eight_epc_schedules_and_verifies_26_file_sha256_manifest`（构造跨双标签页的机泵 `P-1681 -> BV16801 -> 互逆 OPC -> 异径大小头 100 x 80 -> 过滤器 Y-1681 -> 容器 V-1682` 及带 `PT/PC/CV` 仪表闭环与 `N-1/N-2` 显式管口的完整工艺单元，校验 `PIDPACKAGE` 输出 `schema_version = 3`、`00..07` 全套八大工程清册及 `26` 文件 SHA-256 密码学自检），运行按预期在 `schema_version == Some(3)` 断言处变红（旧版返回 `Some(2)`）。
+- **转绿阶段**（`green_pidprops.txt`，`34 passed; 0 failed`）：
+  1. 升级 `src/io/pid_convert/package.rs` 至 `schema_version = 3`：在原有 `01_master_bom`、`02_instrument_loops`、`03_valve_mto`、`04_utility_and_battery_limits` 与 `audits/` 三审基础上，集成 `#164`–`#167` 新增的四大专业引擎，同步产出 `schedules/00_drawing_index.csv/.json`、`05_line_list.csv/.json`、`06_equipment_nozzles.csv/.json` 与 `07_piping_specialties.csv/.json`（形成 **八套工程清册 16 文件 + 三项校审/安全底稿 4 文件 + 逐图双产物与矢量 PDF**），并在 `HandoverManifest` 新增 `drawing_index_issues`、`master_pipelines_count`、`unterminated_pipelines`、`equipment_nozzles_count` 与 `piping_specialties_count`；
+  2. 同步补强 `src/io/pid_convert/nozzle.rs` 与 `src/io/pid_convert/line_list.rs` 对已升格 `PID_AUTHOR` 图纸的混合态提取精度：过滤 `Insert` 退化 `0×0` `_bbox` 并回退真实块包围盒与端口坐标，逐子段拆分多折线 `_segments`、剔除远距离默认兜底线号并补收未升格低置信度显式 `PIDNozzle` 图块与 `LwPolyline` 管段，使 `PIDPROMOTE + PIDREVIEW DEDUP` 前后的管线与管口提取规模严格一致；
+  3. 同步升级 `src/app/commands/pidprops.rs`（`PIDPACKAGE`）与 `examples/pid_convert.rs`（`--export-package` / `--strict-gate`，真实 SPPID 图单图 CLI 产出 `23` 个文件、`schema_version = 3`、`handover_ready = true`）。
+
+### 57.2 真实双标准四图成对跨标签页 `PIDPACKAGE v3` 40 文件全套 EPC 数字化移交包实测
+
+| 交付维度 | 实测读数（`real168_summary.json`） |
+|---|---|
+| 源图 SHA-256 前缀（4 张：2 张 SPPID 生产图 + 2 张原生 AutoCAD 存量图） | ``2164f88bbb57`, `fc2c812dc182`, `a0f05f81a655`, `28ed389e23cb`` |
+| 清单架构与准入门禁 | `schema_version = 3`，`handover_ready = true`，`strict_vendor_passed = true` |
+| 双产物与版式图纸产出 | `sheets = 4`，`.pid = 4`，`PDF = 4`，互逆 `OPC = 8` 对 |
+| 八大 EPC 工程清册汇总规模 | 综合清册 `249` 项 · 管线 `48` 条 · 设备管口 `136` 个 · 阀门 `158` 台 · 特殊件 `49` 件 · 回路 `49` 个 · 界区接口 `27` 个 · HAZOP 节点 `22` 个 |
+| 全包受控文件与 SHA-256 总指纹 | **`40` 个文件**（总计 **`4,382,335` B**，零绝对路径泄漏，`manifest_sha256` 前缀 `4f85550f4769` 逐文件 100% 吻合） |
+
+### 57.3 固定门禁读数
+
+| 门禁项 | 改前读数（§56.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,260` 条（`7,168` 过 / `91` 忽略 / `1` 既有 `.pen`） | **`7,262` 条**（**`7,169` 过** / **`92` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图 40 文件全套 EPC 移交包对账），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `package.rs`、`nozzle.rs`、`line_list.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
