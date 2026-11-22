@@ -72,9 +72,9 @@ use crate::pid::snapshot::store::SnapshotInfo;
 use crate::pid::snapshot::{Diff, CONNECTOR, DEFAULT_MOVE_TOLERANCE};
 use crate::ui::dock::{DockMsg, PanelId};
 use crate::ui::window::pid_verify_deliver::{
-    self, BomFailed, Context, DiffGroup, DrawingResults, GatesFound, KeptBom, KeptCheck,
+    self, BomFailed, Busy, Context, DiffGroup, DrawingResults, GatesFound, KeptBom, KeptCheck,
     KeptPublish, Notice, Package, Pick, PidVerifyMsg, ProjectResults, Records, Tab, Unreadable,
-    Verified, Waiving, GONE, INTACT_SAID, REASON_ID, ROWS_PER_PAGE,
+    Verified, Waiving, CANCELLED_SAID, GONE, INTACT_SAID, REASON_ID, ROWS_PER_PAGE,
 };
 use iced::Task;
 use serde_json::{json, Value};
@@ -84,8 +84,9 @@ use std::path::{Path, PathBuf};
 /// What the panel's view was built from besides its interface state: whether
 /// it is on screen, the drawing tab in front and where that drawing was
 /// saved, each open drawing's edit count, the last check and the last bill
-/// the program made, whether the session may write, whether a scan runs and
-/// whether the drawing in front has changes not saved.
+/// the program made, whether the session may write, what runs in the
+/// background and how far it is, and whether the drawing in front has
+/// changes not saved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::app) struct Inputs {
     visible: bool,
@@ -95,7 +96,7 @@ pub(in crate::app) struct Inputs {
     last_check: u64,
     last_bom: u64,
     writable: bool,
-    busy: bool,
+    busy: Option<Busy>,
     dirty: bool,
 }
 
@@ -264,7 +265,7 @@ impl OpenCADStudio {
             last_check: self.pid_checks.last_serial(),
             last_bom: self.pid_boms.serial,
             writable: !self.readonly_refuses_command("PIDPUBLISH"),
-            busy: self.pid_index.scanning(),
+            busy: self.pid_verify_busy(),
             dirty: front.is_some_and(|tab| tab.dirty),
         }
     }
@@ -290,7 +291,7 @@ impl OpenCADStudio {
             saved: drawing.is_some_and(|tab| crate::io::drawing_dir(&tab.scene.document).is_some()),
             dirty: drawing.is_some_and(|tab| tab.dirty),
             // One scan runs at a time, and the project check starts one.
-            busy: self.pid_index.scanning(),
+            busy: self.pid_verify_busy(),
             waivers: drawing
                 .map(|tab| {
                     let kept = drc::waivers(&tab.scene.document);
@@ -300,6 +301,12 @@ impl OpenCADStudio {
                 })
                 .unwrap_or_default(),
         }
+    }
+
+    /// What runs in the background, as the panel shows it (§4.7).
+    fn pid_verify_busy(&self) -> Option<Busy> {
+        let (then, done, total) = self.pid_index.progress()?;
+        Some(Busy { then, done, total })
     }
 
     /// The snapshots and the diff kept with the drawing in front (§3.1);
@@ -869,6 +876,10 @@ impl OpenCADStudio {
                 self.pid_verify_package_verify(revision);
                 Task::none()
             }
+            PidVerifyMsg::Cancel => {
+                self.pid_verify_cancel();
+                Task::none()
+            }
         };
         self.refresh_pid_verify_view();
         task
@@ -898,21 +909,33 @@ impl OpenCADStudio {
     /// 【检查全项目】 (§4.2): `PIDCHECK PROJECT` — `PIDINDEX`'s scan of the
     /// drawing's folder, then the check, kept for the folder. What stops it
     /// before the scan is said in the message bar; the scan and the check
-    /// say on the command line what they say for the command.
+    /// say on the command line what they say for the command. Closed while
+    /// its folder is read, the drawing gets no check (§4.7).
     fn pid_verify_check_project(&mut self) -> Task<Message> {
         let i = self.active_tab;
         if self.tabs[i].is_start {
             return Task::none();
         }
         match self.pidcheck_prepare(i, None) {
-            Ok(check) => {
+            Ok(mut check) => {
                 self.pid_verify_ui.notice = None;
+                check.panel = Some(self.tabs[i].id);
                 self.pidindex_check(i, check)
             }
             Err((code, why)) => {
                 self.pid_verify_ui.notice = Some(Notice::error(Some(code.to_owned()), why));
                 Task::none()
             }
+        }
+    }
+
+    /// 【取消】 on the progress line (§4.7): `PIDINDEX CANCEL`. The scan
+    /// stops and what it was read for is not done; the results there were
+    /// stay, and the message bar says it was cancelled.
+    fn pid_verify_cancel(&mut self) {
+        if self.pid_index.scanning() {
+            self.pidindex_cancel();
+            self.pid_verify_ui.notice = Some(Notice::info(CANCELLED_SAID));
         }
     }
 
@@ -1645,10 +1668,10 @@ mod tests {
     use crate::ui::dock::{DockMsg, PanelId};
     use crate::ui::window::pid_verify_deliver::{
         BomRowView, BomTable, DiffGroup, Group, Pick, PidVerifyMsg, RowView, Tab, BOM_DRAWING_ID,
-        BOM_EXPORT_ID, BOM_PROJECT_ID, BOM_SEARCH_ID, BOUNDS_PREFIX, CHECK_DRAWING_ID,
-        CHECK_PROJECT_ID, DIFF_EXPORT_ID, DIFF_ID, NEVER_CHECKED, PANEL_BOUNDS_ID,
-        PUBLISH_CHECK_ID, PUBLISH_CONFIRM_ID, PUBLISH_DIR_ID, PUBLISH_ID, SNAPSHOT_REASON_ID,
-        SNAPSHOT_SAVE_ID, UNSAVED_SAID,
+        BOM_EXPORT_ID, BOM_PROJECT_ID, BOM_SEARCH_ID, BOUNDS_PREFIX, BUSY_ID, CANCEL_ID,
+        CHECK_DRAWING_ID, CHECK_PROJECT_ID, DIFF_EXPORT_ID, DIFF_ID, NEVER_CHECKED,
+        PANEL_BOUNDS_ID, PUBLISH_CHECK_ID, PUBLISH_CONFIRM_ID, PUBLISH_DIR_ID, PUBLISH_ID,
+        SNAPSHOT_REASON_ID, SNAPSHOT_SAVE_ID, UNSAVED_SAID,
     };
     use serde_json::{json, Value};
     use std::fs;
@@ -3802,5 +3825,243 @@ mod tests {
             .expect("spawn test thread")
             .join()
             .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    }
+
+    /// Copies of PID-1102.dwg under `names` in `scratch`.
+    fn copy_pump(scratch: &Scratch, names: &[&str]) {
+        let pump = fs::read(scratch.path("PID-1102.dwg")).expect("PID-1102.dwg");
+        for name in names {
+            fs::write(scratch.path(name), &pump).expect("a copy of PID-1102.dwg");
+        }
+    }
+
+    /// [`two_sheets`], with PID-1103.dwg and PID-1104.dwg beside them, each
+    /// a copy of PID-1102: PID-1101 being open, a project scan reads three
+    /// drawings from disk.
+    fn sheets(scratch: &Scratch) -> OpenCADStudio {
+        let app = two_sheets(scratch);
+        copy_pump(scratch, &["PID-1103.dwg", "PID-1104.dwg"]);
+        app
+    }
+
+    /// Press `value` in the panel through the `action` op, as [`act`] does,
+    /// and hold on to the reads of the scan it starts: the test hands them
+    /// over one at a time ([`deliver`]). The press answers at once (§3.3).
+    fn press_and_hold(
+        app: &mut OpenCADStudio,
+        value: &str,
+    ) -> impl iced::futures::Stream<Item = iced_runtime::Action<Message>> + Unpin {
+        static HELD: AtomicU64 = AtomicU64::new(0);
+        let state = app.automation_op(r#"{"protocol":1,"op":"state"}"#);
+        let (answer, task) = app.control_request(json!({
+            "protocol": 1,
+            "op": "action",
+            "name": "pid_verify",
+            "value": value,
+            "document_id": state["document_id"],
+            "request_id": format!("pid-verify-held-{}", HELD.fetch_add(1, Ordering::Relaxed)),
+        }));
+        assert_eq!(answer["status"], "completed", "{value}: {answer}");
+        iced_runtime::task::into_stream(task).expect("the reads of the scan")
+    }
+
+    /// Hand the next read of `reads` to the program, as the interface thread
+    /// gets it; `false` once the scan handed back all it had.
+    fn deliver(
+        app: &mut OpenCADStudio,
+        reads: &mut (impl iced::futures::Stream<Item = iced_runtime::Action<Message>> + Unpin),
+    ) -> bool {
+        let next = iced::futures::StreamExt::next(reads);
+        match iced::futures::executor::block_on(next) {
+            Some(iced_runtime::Action::Output(message)) => {
+                let task = app.update(message);
+                app.drive_headless_task(task)
+                    .expect("what the read started");
+                true
+            }
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    /// Whether the real view, drawn at 1600 × 900, shows the text `said`.
+    fn drawn_text(app: &OpenCADStudio, said: &str) -> bool {
+        let size = iced::Size::new(1600.0, 900.0);
+        let mut simulator =
+            iced_test::Simulator::with_size(iced::Settings::default(), size, app.view_main());
+        simulator.find(said).is_ok()
+    }
+
+    /// What the command line said since its history was last cleared.
+    fn said(app: &OpenCADStudio) -> String {
+        let history = app.command_line.history.iter();
+        let lines: Vec<&str> = history.map(|entry| entry.text.as_str()).collect();
+        lines.join("\n")
+    }
+
+    /// §4.7: while a project check reads the drawings, the panel state and
+    /// the progress line say how far it is; what would start more is refused
+    /// as busy while the filters and locating work. The last drawing back,
+    /// the check is shown and the line is gone.
+    #[test]
+    fn a_project_check_under_way_shows_how_far_it_is_and_greys_what_would_start_more() {
+        let _one = crate::headless_ui_lock();
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let scratch = Scratch::new();
+                let mut app = sheets(&scratch);
+                app.win_size = (1600.0, 900.0);
+                typed(&mut app, "PIDCHECK");
+                let mut reads = press_and_hold(&mut app, "check=project");
+                let state = panel(&mut app, "");
+                let reading = json!({
+                    "what": "scan",
+                    "then": "check",
+                    "text": "正在读项目图纸",
+                    "done": 0,
+                    "total": 3,
+                    "cancellable": true
+                });
+                assert_eq!(state["busy"], reading, "{state}");
+                for flag in [
+                    "check_drawing",
+                    "check_project",
+                    "bom_drawing",
+                    "bom_project",
+                    "snapshot_save",
+                    "publish_check",
+                    "publish",
+                ] {
+                    assert_eq!(state["buttons"][flag], false, "{flag}: {state}");
+                }
+                for value in [
+                    "check=drawing",
+                    "check=project",
+                    "bom=drawing",
+                    "bom=project",
+                    "snapshot_save=",
+                    "publish_check",
+                    "publish",
+                    "package_verify=1",
+                ] {
+                    let answer = act(&mut app, value);
+                    assert_eq!(
+                        answer["code"], "PANEL_ACTION_UNAVAILABLE",
+                        "{value}: {answer}"
+                    );
+                    assert_eq!(answer["reason"], "busy", "{value}: {answer}");
+                }
+                // Filtering and locating start nothing.
+                let filtered = act(&mut app, "severity=错误");
+                assert_eq!(filtered["ok"], true, "{filtered}");
+                let (index, _) = row_of(&panel(&mut app, ""), "DR-202", "PID-1101");
+                let located = act(&mut app, &format!("locate={index}"));
+                assert_eq!(located["ok"], true, "{located}");
+                assert!(drawn_text(&app, "正在读项目图纸 0 / 3"));
+                let drawn = drawn_ids(&app);
+                for id in [BUSY_ID, CANCEL_ID] {
+                    assert!(drawn.iter().any(|seen| seen == id), "{id}: {drawn:?}");
+                }
+                assert!(deliver(&mut app, &mut reads));
+                assert_eq!(panel(&mut app, "")["busy"]["done"], 1);
+                assert!(drawn_text(&app, "正在读项目图纸 1 / 3"));
+                while deliver(&mut app, &mut reads) {}
+                let state = panel(&mut app, "");
+                assert_eq!(state["busy"], Value::Null, "{state}");
+                assert_eq!(state["check"]["scope"], "project", "{state}");
+                assert_eq!(state["buttons"]["check_project"], true, "{state}");
+                assert!(app.pid_checks.of_project(&scratch.0).is_some());
+                let drawn = drawn_ids(&app);
+                assert!(!drawn.iter().any(|seen| seen == BUSY_ID), "{drawn:?}");
+            })
+            .expect("spawn test thread")
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    }
+
+    /// §4.7: 【取消】 stops reading. Nothing runs, the results there were
+    /// stay, the message bar says 「已取消」, and what is read back after is
+    /// not kept as a check. Sent as the action `cancel`, refused while
+    /// nothing runs, or clicked on the progress line.
+    #[test]
+    fn cancelling_a_project_check_keeps_the_results_there_were() {
+        let _one = crate::headless_ui_lock();
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let scratch = Scratch::new();
+                let mut app = sheets(&scratch);
+                app.win_size = (1600.0, 900.0);
+                typed(&mut app, "PIDCHECK");
+                let before = panel(&mut app, "")["check"].clone();
+                let mut reads = press_and_hold(&mut app, "check=project");
+                assert!(deliver(&mut app, &mut reads));
+                app.command_line.history.clear();
+                let answer = act(&mut app, "cancel");
+                assert_eq!(answer["ok"], true, "{answer}");
+                let state = panel(&mut app, "");
+                assert_eq!(state["busy"], Value::Null, "{state}");
+                let cancelled = json!({"level": "info", "code": null, "text": "已取消"});
+                assert_eq!(state["notice"], cancelled, "{state}");
+                assert_eq!(state["check"], before, "{state}");
+                assert!(said(&app).contains("取消了"), "{}", said(&app));
+                while deliver(&mut app, &mut reads) {}
+                assert!(app.pid_checks.of_project(&scratch.0).is_none());
+                assert_eq!(panel(&mut app, "")["check"], before);
+                let again = act(&mut app, "cancel");
+                assert_eq!(again["code"], "PANEL_ACTION_UNAVAILABLE", "{again}");
+                assert_eq!(again["reason"], "not_busy", "{again}");
+                // Two drawings more to read, and 【取消】 clicked where it is
+                // drawn.
+                copy_pump(&scratch, &["PID-1105.dwg", "PID-1106.dwg"]);
+                let mut reads = press_and_hold(&mut app, "check=project");
+                assert_ne!(panel(&mut app, "")["busy"], Value::Null);
+                click_drawn(&mut app, "取消");
+                let state = panel(&mut app, "");
+                assert_eq!(state["busy"], Value::Null, "{state}");
+                assert_eq!(state["notice"], cancelled, "{state}");
+                while deliver(&mut app, &mut reads) {}
+                assert!(app.pid_checks.of_project(&scratch.0).is_none());
+            })
+            .expect("spawn test thread")
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    }
+
+    /// [`sheets`] with a new drawing open beside PID-1101: `value` pressed in
+    /// the panel on PID-1101, PID-1101 closed while the project is read, then
+    /// the rest read back.
+    fn closed_meanwhile(scratch: &Scratch, value: &str) -> OpenCADStudio {
+        let mut app = sheets(scratch);
+        let origin = app.tabs[app.active_tab].id;
+        let _ = app.update(Message::TabNew);
+        assert_ne!(app.tabs[app.active_tab].id, origin);
+        activate(&mut app, origin, "pid-verify-origin");
+        let mut reads = press_and_hold(&mut app, value);
+        let (closed, task) = app.control_request(json!({
+            "protocol": 1,
+            "op": "close",
+            "request_id": "pid-verify-close-origin",
+            "document_id": origin,
+            "discard": true,
+        }));
+        app.drive_headless_task(task).expect("the close's task");
+        assert_eq!(closed["ok"], true, "{closed}");
+        assert!(app.tabs.iter().all(|tab| tab.id != origin));
+        while deliver(&mut app, &mut reads) {}
+        app
+    }
+
+    /// §4.7: a project check or bill whose drawing was closed while the
+    /// project was read is dropped, not kept for the folder.
+    #[test]
+    fn a_project_job_whose_drawing_closed_meanwhile_is_dropped() {
+        let scratch = Scratch::new();
+        let app = closed_meanwhile(&scratch, "check=project");
+        assert!(app.pid_checks.of_project(&scratch.0).is_none());
+        let scratch = Scratch::new();
+        let app = closed_meanwhile(&scratch, "bom=project");
+        assert!(app.pid_boms.projects.is_empty());
     }
 }

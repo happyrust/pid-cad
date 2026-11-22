@@ -2250,7 +2250,8 @@ impl OpenCADStudio {
             // The 「校验与交付」 panel (panel spec §3.3): one key or key=value,
             // as `parse_action` reads them. The view is rebuilt first, so a key
             // whose button the panel draws grey now, or whose row is not in its
-            // list, is refused rather than pressed.
+            // list, is refused rather than pressed. Pressing is all the action
+            // does: a project scan the press starts is not waited for.
             "pid_verify" => {
                 let value = string(req, "value")?;
                 self.refresh_pid_verify_view();
@@ -2265,7 +2266,10 @@ impl OpenCADStudio {
                     }
                     answer
                 })?;
-                Message::PidVerify(pressed)
+                let scanning = self.pid_index.scanning();
+                let task = self.update(Message::PidVerify(pressed));
+                self.control.untracked = !scanning && self.pid_index.scanning();
+                return Ok(task);
             }
             // Attach dialog: choose pages by index ("0,2").
             "pdf_page_select" => {

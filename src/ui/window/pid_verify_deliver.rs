@@ -25,8 +25,11 @@ use crate::pid::publish_pkg::{Gates, MasterDataState};
 use crate::pid::snapshot::store::{SnapshotInfo, SnapshotStatus};
 use crate::pid::snapshot::{self, Change, Diff, DiffObject, DiffSide, DiffSummary, EdgeChange};
 use crate::ui::dock::{Chrome, PanelId};
+use crate::ui::kit::{tooltip, TipPosition};
 use crate::ui::wrap_bar::PosReport;
-use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input};
+use iced::widget::{
+    button, checkbox, column, container, progress_bar, row, scrollable, text, text_input,
+};
 use iced::{Element, Fill, Length, Theme};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -140,6 +143,11 @@ pub const INTACT_SAID: &str = "完好";
 /// What the publish half adds under its conditions while a drawing the
 /// gates read changed since they were worked out (§4.6).
 pub const GATES_STALE: &str = "图纸已改动，门禁的结果可能过期";
+
+/// What the progress line says while the project is read, before how far
+/// it is, and what the message bar says once 【取消】 stopped it (§4.7).
+pub const BUSY_SAID: &str = "正在读项目图纸";
+pub const CANCELLED_SAID: &str = "已取消";
 
 /// Where the conditions of errors not waived and of repeated tags are among
 /// [`PublishView::conditions`]: what they lead to when they do not hold.
@@ -258,6 +266,8 @@ pub enum PidVerifyMsg {
     PublishDuplicateLocate(usize, usize),
     /// 【校验】 on the record of this revision.
     PackageVerify(u32),
+    /// 【取消】 on the progress line: stop reading the project (§4.7).
+    Cancel,
 }
 
 impl PidVerifyMsg {
@@ -430,6 +440,11 @@ pub const PUBLISH_ID: &str = "pid-verify-publish";
 pub const PUBLISH_CONFIRM_ID: &str = "pid-verify-publish-confirm";
 pub const PACKAGE_ROW_PREFIX: &str = "pid-verify-package-";
 
+/// `PosReport` ids of the progress bar, drawn only while something runs
+/// (§3.4), and of 【取消】 beside it.
+pub const BUSY_ID: &str = "pid-verify-busy";
+pub const CANCEL_ID: &str = "pid-verify-cancel";
+
 /// How many rows of each list the panel state returns when the request
 /// does not say (`limit`, §3.2), and how many rows each group of the
 /// rule-check list draws before 【再显示 200 条】 (§4.2).
@@ -590,12 +605,23 @@ pub struct Context {
     /// Whether that drawing has changes not saved: it is not published
     /// then.
     pub dirty: bool,
-    /// Whether something runs in the background (§4.7): the buttons that
-    /// would start more are grey meanwhile.
-    pub busy: bool,
+    /// What runs in the background (§4.7); `None` while nothing does. The
+    /// buttons that would start more are grey meanwhile.
+    pub busy: Option<Busy>,
     /// The waivers that drawing keeps, as (rule, object key): of the
     /// waivers no result matches, only these can be taken off from here.
     pub waivers: Vec<(String, String)>,
+}
+
+/// A scan of a project folder running in the background (§4.7): what is to
+/// be done once it is read — `check`, `bom`, `publish_check`, `publish`, or
+/// a command's `index` and `locate`; `None` when only an automation op
+/// reads — and how many of the drawings it reads are back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Busy {
+    pub then: Option<&'static str>,
+    pub done: usize,
+    pub total: usize,
 }
 
 /// A rule check the program keeps (§3.1), lent to [`build_view`].
@@ -754,6 +780,64 @@ pub struct Buttons {
     pub publish: bool,
 }
 
+/// The panel's buttons that start something, export or publish (§4.8), as
+/// [`VerifyView::grey`] names them. Those on a row of the rule-check list
+/// are the row's ([`RowView::grey`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Button {
+    CheckDrawing,
+    CheckProject,
+    CheckExport,
+    BomDrawing,
+    BomProject,
+    BomExport,
+    SnapshotSave,
+    Diff,
+    DiffExport,
+    PublishCheck,
+    Publish,
+    /// 【校验】 on a package's row.
+    PackageVerify,
+}
+
+impl Button {
+    pub const ALL: [Self; 12] = [
+        Self::CheckDrawing,
+        Self::CheckProject,
+        Self::CheckExport,
+        Self::BomDrawing,
+        Self::BomProject,
+        Self::BomExport,
+        Self::SnapshotSave,
+        Self::Diff,
+        Self::DiffExport,
+        Self::PublishCheck,
+        Self::Publish,
+        Self::PackageVerify,
+    ];
+}
+
+impl Buttons {
+    /// The flags of `view`'s buttons: each can be pressed while it is not
+    /// grey ([`VerifyView::grey`]).
+    fn of(view: &VerifyView) -> Self {
+        let up = |button| view.grey(button).is_none();
+        Self {
+            check_drawing: up(Button::CheckDrawing),
+            check_project: up(Button::CheckProject),
+            check_export: up(Button::CheckExport),
+            bom_drawing: up(Button::BomDrawing),
+            bom_project: up(Button::BomProject),
+            bom_export: up(Button::BomExport),
+            snapshot_save: up(Button::SnapshotSave),
+            diff: up(Button::Diff),
+            diff_export: up(Button::DiffExport),
+            publish_check: up(Button::PublishCheck),
+            publish: up(Button::Publish),
+        }
+    }
+}
+
 /// The rule-check tab worked out (§4.2), which its block of the panel state
 /// reads (§3.2 `check`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -884,6 +968,22 @@ impl RowView {
     /// The row's `PosReport` id (§3.4).
     pub fn bounds_id(&self) -> String {
         format!("{CHECK_ROW_PREFIX}{}", self.index)
+    }
+
+    /// Why 【豁免】 on the row is grey, or with `unwaive` 【取消豁免】, in a
+    /// session that may write or not (§4.8); `None` while it can be pressed.
+    pub fn grey(&self, writable: bool, unwaive: bool) -> Option<&'static str> {
+        if !writable {
+            Some("readonly")
+        } else if !self.here {
+            Some("not_on_this_drawing")
+        } else if unwaive && !self.waived {
+            Some("not_waived")
+        } else if !unwaive && self.waived {
+            Some("already_waived")
+        } else {
+            None
+        }
     }
 }
 
@@ -1018,8 +1118,8 @@ pub struct VerifyView {
     pub drawing_id: Option<String>,
     /// Whether the session may change that drawing.
     pub writable: bool,
-    /// Whether something runs in the background.
-    pub busy: bool,
+    /// What runs in the background ([`Context::busy`]).
+    pub busy: Option<Busy>,
     /// Which buttons can be pressed.
     pub buttons: Buttons,
     /// The message bar.
@@ -1237,6 +1337,76 @@ impl Default for VerifyView {
     }
 }
 
+impl VerifyView {
+    /// Why `button` is grey now (§4.8), as the action pressing it is
+    /// refused (§3.7); `None` while it can be pressed. Checking, listing
+    /// and 【校验】 need a drawing in front, and the project's, a snapshot
+    /// and 【检查发布条件】 a saved one; none of them while something runs.
+    /// 【发布】 needs the four preconditions of publishing held. Exporting
+    /// needs a result shown, whatever runs — of a bill, one that came out —
+    /// and 【比对】 exactly two rows ticked.
+    pub fn grey(&self, button: Button) -> Option<&'static str> {
+        let drawing = if self.document_id.is_none() {
+            Some("no_drawing")
+        } else if self.busy.is_some() {
+            Some("busy")
+        } else {
+            None
+        };
+        let project = drawing.or((!self.deliver.saved).then_some("no_project_dir"));
+        let result = |shown: bool| (!shown).then_some("no_result");
+        match button {
+            Button::CheckDrawing | Button::BomDrawing | Button::PackageVerify => drawing,
+            Button::CheckProject
+            | Button::BomProject
+            | Button::SnapshotSave
+            | Button::PublishCheck => project,
+            Button::CheckExport => result(self.check.shown.is_some()),
+            Button::BomExport => result(
+                self.bom
+                    .shown
+                    .as_ref()
+                    .is_some_and(|shown| shown.table.is_ok()),
+            ),
+            Button::Diff => self.deliver.pair().is_none().then_some("not_two_picked"),
+            Button::DiffExport => result(self.deliver.diff.is_some()),
+            Button::Publish => {
+                let held = self
+                    .deliver
+                    .publish
+                    .as_ref()
+                    .is_some_and(|publish| publish.preconditions.held());
+                let why = if self.writable {
+                    "precondition"
+                } else {
+                    "readonly"
+                };
+                drawing.or((!held).then_some(why))
+            }
+        }
+    }
+}
+
+/// What the tip of a grey button says, for the `reason` it is grey for.
+pub fn grey_said(reason: &str) -> &'static str {
+    match reason {
+        "no_drawing" => "当前没有图纸",
+        "busy" => "正在读项目图纸；读完或者取消以后再按",
+        "no_project_dir" => "图还没保存过，不属于哪个项目；存盘以后再按",
+        "no_result" => "还没有可以导出的结果",
+        "not_two_picked" => "要恰好勾两项才能比对",
+        "readonly" => "这个会话只读",
+        "precondition" => "四个发布前提没有都满足，见上面的条件",
+        "not_on_this_drawing" => "这条不在当前图上；到它所在的图上再改",
+        "already_waived" => "已经豁免了",
+        "not_waived" => "没有豁免",
+        _ => "现在按不了",
+    }
+}
+
+/// The tip of 【豁免】 while its row's reason box is open (§4.4).
+const WAIVING_SAID: &str = "理由填在下面，按【确认】豁免";
+
 /// Interface state, the results kept with the drawing in front and with its
 /// project folder, and the program's state around them → what to draw
 /// (§4.1): which check is shown, what the filters leave of it and how it is
@@ -1271,7 +1441,7 @@ pub fn build_view(
         Tab::Bom => bom_empty(&bom),
         Tab::Deliver => deliver_empty(&deliver, context),
     };
-    VerifyView {
+    let mut view = VerifyView {
         tab: ui.tab,
         empty,
         visible: context.visible,
@@ -1279,12 +1449,14 @@ pub fn build_view(
         drawing_id: context.drawing_id.clone(),
         writable: context.writable,
         busy: context.busy,
-        buttons: buttons(context, &check, &bom, &deliver),
+        buttons: Buttons::default(),
         notice: ui.notice.clone(),
         check,
         bom,
         deliver,
-    }
+    };
+    view.buttons = Buttons::of(&view);
+    view
 }
 
 /// Of the drawing's result and its project's, the newer by `serial`
@@ -1353,34 +1525,6 @@ fn number_said(number: f64) -> String {
 fn numbers_said(numbers: &[f64]) -> String {
     let said: Vec<String> = numbers.iter().copied().map(number_said).collect();
     format!("({})", said.join(", "))
-}
-
-/// Which buttons can be pressed (§4.8). Checking and listing need a drawing
-/// in front, the project's, a numbered snapshot and 【检查发布条件】 a saved
-/// one, 【发布】 the four preconditions of publishing held, and none of them
-/// starts while something runs; exporting needs a result shown, whatever
-/// runs — of a bill, one that came out. 【比对】 needs exactly two rows
-/// ticked.
-fn buttons(context: &Context, check: &CheckView, bom: &BomView, deliver: &DeliverView) -> Buttons {
-    let drawing = context.document_id.is_some() && !context.busy;
-    let project = drawing && context.saved;
-    let held = deliver
-        .publish
-        .as_ref()
-        .is_some_and(|publish| publish.preconditions.held());
-    Buttons {
-        check_drawing: drawing,
-        check_project: project,
-        check_export: check.shown.is_some(),
-        bom_drawing: drawing,
-        bom_project: project,
-        bom_export: bom.shown.as_ref().is_some_and(|shown| shown.table.is_ok()),
-        snapshot_save: project,
-        diff: deliver.pair().is_some(),
-        diff_export: deliver.diff.is_some(),
-        publish_check: project,
-        publish: drawing && held,
-    }
 }
 
 /// The rule-check tab of `kept` under the filters of `ui` (§4.2). Kind tags
@@ -1709,7 +1853,7 @@ fn publish_view(ui: &VerifyUi, kept: &KeptPublish<'_>, context: &Context) -> Opt
         Some(latest) => format!("修订 {} 之后有改动", latest.package.revision),
     });
     let asking = listed
-        .filter(|_| ui.confirming && preconditions.held() && !context.busy)
+        .filter(|_| ui.confirming && preconditions.held() && context.busy.is_none())
         .map(|records| {
             format!(
                 "把 {} 发布为修订 {} 到 {}？",
@@ -1886,9 +2030,10 @@ fn utc_said(seconds: i64) -> String {
 
 /// The panel state (§3.2) the `pid_verify_panel` op answers, read off the
 /// same view the panel draws, shown or hidden. Each list gives `limit` rows
-/// from `offset` on, while its `total` counts them all. Nothing reports its
-/// progress yet (`busy`). `deliver.publish` stays `null` until the publish
-/// half is drawn: it is read from disk and has no empty form.
+/// from `offset` on, while its `total` counts them all. `busy` is what runs
+/// in the background and how far it is (§4.7), `null` while nothing does.
+/// `deliver.publish` stays `null` until the publish half is drawn: it is
+/// read from disk and has no empty form.
 pub fn panel_state(view: &VerifyView, limit: usize, offset: usize) -> Value {
     json!({
         "ok": true,
@@ -1897,12 +2042,25 @@ pub fn panel_state(view: &VerifyView, limit: usize, offset: usize) -> Value {
         "document_id": view.document_id,
         "drawing_id": view.drawing_id,
         "writable": view.writable,
-        "busy": null,
+        "busy": view.busy.map(busy_state),
         "notice": view.notice.as_ref().map(Notice::state),
         "buttons": view.buttons,
         "check": paged(check_state(&view.check), limit, offset),
         "bom": paged(bom_state(&view.bom), limit, offset),
         "deliver": deliver_state(&view.deliver)
+    })
+}
+
+/// `busy` (§3.2): a scan of the project folder, what is to be done once it
+/// is read, and how far it is; it can always be cancelled.
+fn busy_state(busy: Busy) -> Value {
+    json!({
+        "what": "scan",
+        "then": busy.then,
+        "text": BUSY_SAID,
+        "done": busy.done,
+        "total": busy.total,
+        "cancellable": true,
     })
 }
 
@@ -2170,6 +2328,9 @@ impl std::fmt::Display for PanelError {
     }
 }
 
+/// The keys of [`parse_action`] that take no value.
+const BARE_KEYS: [&str; 6] = ["show", "hide", "diff", "publish_check", "publish", "cancel"];
+
 /// The `value` of an `action` op named `pid_verify` (§3.3), one key or
 /// key=value, as the message pressing that control in the panel sends.
 /// `view` is what the panel draws now, so a key whose button is grey
@@ -2182,7 +2343,8 @@ impl std::fmt::Display for PanelError {
 /// grey. `pick` the same way: a drawing never saved has no list to tick
 /// in, a number the list does not have is no row of it, and a snapshot
 /// whose file is gone cannot be ticked. `publish` is 【确认】 under the
-/// question 【发布】 asks: it publishes without asking.
+/// question 【发布】 asks: it publishes without asking. `cancel` is 【取消】
+/// on the progress line, refused (`not_busy`) while nothing runs.
 pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, PanelError> {
     let (key, written) = match value.split_once('=') {
         Some((key, written)) => (key, Some(written)),
@@ -2210,15 +2372,9 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
             reason: "no_result",
         })
     };
-    let grey = || {
-        let reason = if view.document_id.is_none() {
-            "no_drawing"
-        } else if view.busy {
-            "busy"
-        } else {
-            "no_project_dir"
-        };
-        PanelError::Unavailable { reason }
+    let pressable = |button: Button| match view.grey(button) {
+        Some(reason) => Err(PanelError::Unavailable { reason }),
+        None => Ok(()),
     };
     let unsaved = || {
         let reason = if view.document_id.is_none() {
@@ -2228,10 +2384,12 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
         };
         PanelError::Unavailable { reason }
     };
+    if written.is_some() && BARE_KEYS.contains(&key) {
+        return Err(PanelError::InvalidValue(format!(
+            "{key} 不带值，实得 \"{value}\""
+        )));
+    }
     match key {
-        "show" | "hide" | "diff" | "publish_check" | "publish" if written.is_some() => Err(
-            PanelError::InvalidValue(format!("{key} 不带值，实得 \"{value}\"")),
-        ),
         "show" => Ok(PidVerifyMsg::Show),
         "hide" => Ok(PidVerifyMsg::Hide),
         "tab" => {
@@ -2243,18 +2401,14 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
             })
         }
         "check" | "bom" => {
-            let buttons = view.buttons;
-            let (pressed, pressable) = match (key, written) {
-                ("check", Some("drawing")) => (PidVerifyMsg::CheckDrawing, buttons.check_drawing),
-                ("check", Some("project")) => (PidVerifyMsg::CheckProject, buttons.check_project),
-                (_, Some("drawing")) => (PidVerifyMsg::BomDrawing, buttons.bom_drawing),
-                (_, Some("project")) => (PidVerifyMsg::BomProject, buttons.bom_project),
+            let (pressed, button) = match (key, written) {
+                ("check", Some("drawing")) => (PidVerifyMsg::CheckDrawing, Button::CheckDrawing),
+                ("check", Some("project")) => (PidVerifyMsg::CheckProject, Button::CheckProject),
+                (_, Some("drawing")) => (PidVerifyMsg::BomDrawing, Button::BomDrawing),
+                (_, Some("project")) => (PidVerifyMsg::BomProject, Button::BomProject),
                 _ => return Err(invalid(" drawing 或 project")),
             };
-            if pressable {
-                return Ok(pressed);
-            }
-            Err(grey())
+            pressable(button).map(|()| pressed)
         }
         "severity" => {
             let severity = written
@@ -2291,7 +2445,7 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
                 .map(str::trim)
                 .filter(|path| !path.is_empty())
                 .ok_or_else(|| invalid("成 check_export=<文件>"))?;
-            checked()?;
+            pressable(Button::CheckExport)?;
             Ok(PidVerifyMsg::Export(path.to_owned()))
         }
         "more" => match written {
@@ -2335,15 +2489,13 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
                 .map(str::trim)
                 .filter(|path| !path.is_empty())
                 .ok_or_else(|| invalid("成 bom_export=<文件>"))?;
-            listed()?;
+            pressable(Button::BomExport)?;
             Ok(PidVerifyMsg::BomExport(path.to_owned()))
         }
         "snapshot_save" => {
             let reason = written
                 .ok_or_else(|| invalid("成 snapshot_save=<原因>，或者 snapshot_save= 不填原因"))?;
-            if !view.buttons.snapshot_save {
-                return Err(grey());
-            }
+            pressable(Button::SnapshotSave)?;
             Ok(PidVerifyMsg::SnapshotSave(reason.to_owned()))
         }
         "pick" => {
@@ -2414,7 +2566,7 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
                 .map(str::trim)
                 .filter(|path| !path.is_empty())
                 .ok_or_else(|| invalid("成 diff_export=<文件>"))?;
-            compared()?;
+            pressable(Button::DiffExport)?;
             Ok(PidVerifyMsg::DiffExport(path.to_owned()))
         }
         "publish_dir" => {
@@ -2425,42 +2577,20 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
             }
             Ok(PidVerifyMsg::PublishDir(dir.trim().to_owned()))
         }
-        "publish_check" => {
-            if !view.buttons.publish_check {
-                return Err(grey());
-            }
-            Ok(PidVerifyMsg::PublishCheck)
-        }
-        "publish" => {
-            if view.buttons.publish {
-                return Ok(PidVerifyMsg::Publish);
-            }
-            let reason = if view.document_id.is_none() {
-                "no_drawing"
-            } else if view.busy {
-                "busy"
-            } else if !view.writable {
-                "readonly"
-            } else {
-                "precondition"
-            };
-            Err(PanelError::Unavailable { reason })
-        }
+        "publish_check" => pressable(Button::PublishCheck).map(|()| PidVerifyMsg::PublishCheck),
+        "publish" => pressable(Button::Publish).map(|()| PidVerifyMsg::Publish),
         "package_verify" => {
             let revision = written
                 .and_then(|number| number.trim().parse::<u32>().ok())
                 .ok_or_else(|| invalid("成 package_verify=<修订号>"))?;
-            let publish = view
+            pressable(Button::PackageVerify)?;
+            let packages = view
                 .deliver
                 .publish
                 .as_ref()
-                .filter(|_| view.deliver.saved && !view.busy)
-                .ok_or_else(grey)?;
-            if !publish
-                .packages
-                .iter()
-                .any(|row| row.package.revision == revision)
-            {
+                .map(|publish| publish.packages.as_slice())
+                .unwrap_or_default();
+            if !packages.iter().any(|row| row.package.revision == revision) {
                 return Err(PanelError::RowNotFound(format!(
                     "发布记录里现在没有修订 {revision} 的包"
                 )));
@@ -2493,16 +2623,19 @@ pub fn parse_action(value: &str, view: &VerifyView) -> Result<PidVerifyMsg, Pane
                         "规则检查的列表里现在没有下标 {index} 的一行（筛掉的和没显示的已豁免结果不在列表里）"
                     ))
                 })?;
-            let grey = match key {
-                "locate" => return Ok(PidVerifyMsg::Locate(index)),
-                _ if !row.here => "not_on_this_drawing",
-                "waive" if row.waived => "already_waived",
-                "waive" => return Ok(PidVerifyMsg::Waive(index, reason.to_owned())),
-                _ if !row.waived => "not_waived",
-                _ => return Ok(PidVerifyMsg::Unwaive(index)),
-            };
-            Err(PanelError::Unavailable { reason: grey })
+            if key == "locate" {
+                return Ok(PidVerifyMsg::Locate(index));
+            }
+            match row.grey(view.writable, key == "unwaive") {
+                Some(grey) => Err(PanelError::Unavailable { reason: grey }),
+                None if key == "waive" => Ok(PidVerifyMsg::Waive(index, reason.to_owned())),
+                None => Ok(PidVerifyMsg::Unwaive(index)),
+            }
         }
+        "cancel" => view
+            .busy
+            .map(|_| PidVerifyMsg::Cancel)
+            .ok_or(PanelError::Unavailable { reason: "not_busy" }),
         _ => Err(PanelError::InvalidValue(format!(
             "面板没有 \"{key}\" 这个键"
         ))),
@@ -2556,9 +2689,28 @@ pub fn view<'a>(view: &'a VerifyView, width: f32, chrome: Chrome) -> Element<'a,
         Tab::Bom => bom_tab(view),
         Tab::Deliver => deliver_tab(view),
     };
-    let body = column![tabs, content].spacing(6).height(Fill);
-    let reported = PosReport::new(PANEL_BOUNDS_ID, body);
+    let mut body = column![tabs].spacing(6).height(Fill);
+    if let Some(busy) = view.busy {
+        body = body.push(busy_line(busy));
+    }
+    let reported = PosReport::new(PANEL_BOUNDS_ID, body.push(content));
     crate::ui::dock::frame(title_bar, reported, width)
+}
+
+/// The progress line (§4.7): what is read and how far, the bar, and
+/// 【取消】.
+fn busy_line<'a>(busy: Busy) -> Element<'a, Message> {
+    let said = format!("{BUSY_SAID} {} / {}", busy.done, busy.total);
+    let range = 0.0..=busy.total.max(1) as f32;
+    let bar = progress_bar(range, busy.done as f32).girth(6.0);
+    row![
+        text(said).size(11),
+        PosReport::new(BUSY_ID, bar),
+        PosReport::new(CANCEL_ID, small_button("取消", Some(PidVerifyMsg::Cancel))),
+    ]
+    .spacing(6)
+    .align_y(iced::Center)
+    .into()
 }
 
 /// What a tab says instead of a list, in the middle of it.
@@ -2574,25 +2726,28 @@ fn empty_text(said: &str) -> Element<'_, Message> {
 /// The rule-check tab (§4.2): its buttons and the message bar, then what
 /// the check shown found — or what the tab says instead.
 fn check_tab(view: &VerifyView) -> Element<'_, Message> {
-    let buttons = view.buttons;
+    let grey = |button| view.grey(button).map(grey_said);
     let actions = row![
         PosReport::new(
             CHECK_DRAWING_ID,
-            small_button(
+            greyable(
                 "检查当前图",
-                buttons.check_drawing.then_some(PidVerifyMsg::CheckDrawing)
+                Some(PidVerifyMsg::CheckDrawing),
+                grey(Button::CheckDrawing)
             ),
         ),
         PosReport::new(
             CHECK_PROJECT_ID,
-            small_button(
+            greyable(
                 "检查全项目",
-                buttons.check_project.then_some(PidVerifyMsg::CheckProject)
+                Some(PidVerifyMsg::CheckProject),
+                grey(Button::CheckProject)
             ),
         ),
-        small_button(
+        greyable(
             "导出…",
-            buttons.check_export.then_some(PidVerifyMsg::PickExport)
+            Some(PidVerifyMsg::PickExport),
+            grey(Button::CheckExport)
         ),
     ]
     .spacing(4);
@@ -2644,17 +2799,20 @@ fn check_tab(view: &VerifyView) -> Element<'_, Message> {
         tab = tab.push(text(notice.message.as_str()).size(11).style(muted));
     }
     if !shown.stale_waivers.is_empty() {
-        tab = tab.push(stale_waivers(shown));
+        tab = tab.push(stale_waivers(shown, view.writable));
     }
     match view.empty {
         Some(said) => tab.push(empty_text(said)).into(),
-        None => tab.push(scrollable(check_list(shown)).height(Fill)).into(),
+        None => tab
+            .push(scrollable(check_list(shown, view.writable)).height(Fill))
+            .into(),
     }
 }
 
 /// 「有 N 条豁免已经对不上」, which lists them or folds the list, and each
-/// listed with 【删除】.
-fn stale_waivers(shown: &Shown) -> Element<'_, Message> {
+/// listed with 【删除】: grey, saying why, in a session that may not write
+/// or on a waiver another drawing keeps.
+fn stale_waivers(shown: &Shown, writable: bool) -> Element<'_, Message> {
     let arrow = if shown.stale_open { "▼" } else { "▶" };
     let header = button(
         text(format!(
@@ -2672,10 +2830,15 @@ fn stale_waivers(shown: &Shown) -> Element<'_, Message> {
         return list.into();
     }
     for waiver in &shown.stale_waivers {
-        let drop = waiver.can_drop.then(|| PidVerifyMsg::DropWaiver {
+        let drop = PidVerifyMsg::DropWaiver {
             rule_id: waiver.rule_id.clone(),
             object_key: waiver.object_key.clone(),
-        });
+        };
+        let tip = match (waiver.can_drop, writable) {
+            (true, _) => None,
+            (false, true) => Some("这条豁免记在别的图上；到那张图上再删"),
+            (false, false) => Some(grey_said("readonly")),
+        };
         let said = format!(
             "{} {} · {}（{}，{}）",
             waiver.rule_id,
@@ -2687,7 +2850,7 @@ fn stale_waivers(shown: &Shown) -> Element<'_, Message> {
         list = list.push(
             row![
                 text(said).size(11).style(muted).width(Fill),
-                small_button("删除", drop)
+                greyable("删除", Some(drop), tip)
             ]
             .spacing(4)
             .align_y(iced::Center),
@@ -2742,9 +2905,22 @@ fn small_button(label: &str, press: Option<PidVerifyMsg>) -> Element<'_, Message
         .into()
 }
 
+/// [`small_button`] sending `press`, grey with a tip saying why while `tip`
+/// says something (§4.8).
+fn greyable<'a>(
+    label: &'a str,
+    press: Option<PidVerifyMsg>,
+    tip: Option<&'static str>,
+) -> Element<'a, Message> {
+    match tip {
+        Some(tip) => tooltip(small_button(label, None), tip, TipPosition::Bottom),
+        None => small_button(label, press),
+    }
+}
+
 /// The list (§4.2): each group's header, which folds it, its rows drawn,
 /// and 【再显示 200 条】 while it has more.
-fn check_list(shown: &Shown) -> Element<'_, Message> {
+fn check_list(shown: &Shown, writable: bool) -> Element<'_, Message> {
     let mut list = column![].spacing(4).width(Fill);
     for group in &shown.groups {
         let arrow = if group.folded { "▶" } else { "▼" };
@@ -2762,7 +2938,7 @@ fn check_list(shown: &Shown) -> Element<'_, Message> {
             .style(button::text),
         );
         for row in &shown.rows[group.first..group.first + group.drawn] {
-            list = list.push(PosReport::owned(row.bounds_id(), result_row(row)));
+            list = list.push(PosReport::owned(row.bounds_id(), result_row(row, writable)));
         }
         if group.has_more() {
             list = list.push(small_button(
@@ -2778,7 +2954,7 @@ fn check_list(shown: &Shown) -> Element<'_, Message> {
 /// colour, and on a waived row why, by whom and when. Clicking it finds its
 /// object (§4.3); at its end 【豁免】 or 【取消豁免】, and under it the reason
 /// box while that is open (§4.4).
-fn result_row(row: &RowView) -> Element<'_, Message> {
+fn result_row(row: &RowView, writable: bool) -> Element<'_, Message> {
     let mut lines = column![
         text(row.headline()).size(12),
         text(row.message.as_str()).size(12)
@@ -2807,11 +2983,14 @@ fn result_row(row: &RowView) -> Element<'_, Message> {
             }
         });
     let end = if row.waived {
-        let press = row.can_unwaive.then_some(PidVerifyMsg::Unwaive(row.index));
-        small_button("取消豁免", press)
+        let tip = row.grey(writable, true).map(grey_said);
+        greyable("取消豁免", Some(PidVerifyMsg::Unwaive(row.index)), tip)
     } else {
-        let asking = row.can_waive && row.reason.is_none();
-        small_button("豁免", asking.then_some(PidVerifyMsg::AskWaiver(row.index)))
+        let tip = match row.grey(writable, false) {
+            Some(reason) => Some(grey_said(reason)),
+            None => row.reason.is_some().then_some(WAIVING_SAID),
+        };
+        greyable("豁免", Some(PidVerifyMsg::AskWaiver(row.index)), tip)
     };
     let line = row![body, end].spacing(4).align_y(iced::Center);
     let Some(reason) = &row.reason else {
@@ -2842,20 +3021,22 @@ fn result_row(row: &RowView) -> Element<'_, Message> {
 /// and 「管道汇总」, with the totals and 【导出…】 under them — or what
 /// stopped it, or what the tab says instead.
 fn bom_tab(view: &VerifyView) -> Element<'_, Message> {
-    let buttons = view.buttons;
+    let grey = |button| view.grey(button).map(grey_said);
     let actions = row![
         PosReport::new(
             BOM_DRAWING_ID,
-            small_button(
+            greyable(
                 "当前图",
-                buttons.bom_drawing.then_some(PidVerifyMsg::BomDrawing)
+                Some(PidVerifyMsg::BomDrawing),
+                grey(Button::BomDrawing)
             ),
         ),
         PosReport::new(
             BOM_PROJECT_ID,
-            small_button(
+            greyable(
                 "全项目",
-                buttons.bom_project.then_some(PidVerifyMsg::BomProject)
+                Some(PidVerifyMsg::BomProject),
+                grey(Button::BomProject)
             ),
         ),
     ]
@@ -2907,9 +3088,10 @@ fn bom_tab(view: &VerifyView) -> Element<'_, Message> {
         text(bom_totals(table)).size(11).style(muted).width(Fill),
         PosReport::new(
             BOM_EXPORT_ID,
-            small_button(
+            greyable(
                 "导出…",
-                buttons.bom_export.then_some(PidVerifyMsg::PickBomExport)
+                Some(PidVerifyMsg::PickBomExport),
+                grey(Button::BomExport)
             ),
         ),
     ]
@@ -3149,7 +3331,7 @@ fn bom_totals(table: &BomTable) -> String {
 /// the list — the drawing as it is on top, the snapshots newest first —
 /// and the diff shown under it; or what the half says instead.
 fn deliver_tab(view: &VerifyView) -> Element<'_, Message> {
-    let buttons = view.buttons;
+    let grey = |button| view.grey(button).map(grey_said);
     let deliver = &view.deliver;
     let saving = row![
         PosReport::new(
@@ -3162,11 +3344,10 @@ fn deliver_tab(view: &VerifyView) -> Element<'_, Message> {
         ),
         PosReport::new(
             SNAPSHOT_SAVE_ID,
-            small_button(
+            greyable(
                 "存快照",
-                buttons
-                    .snapshot_save
-                    .then(|| PidVerifyMsg::SnapshotSave(deliver.reason.clone()))
+                Some(PidVerifyMsg::SnapshotSave(deliver.reason.clone())),
+                grey(Button::SnapshotSave)
             ),
         ),
     ]
@@ -3179,19 +3360,15 @@ fn deliver_tab(view: &VerifyView) -> Element<'_, Message> {
     if let Some(said) = view.empty {
         return tab.push(empty_text(said)).into();
     }
+    let compare = deliver.pair().map(|(a, b)| PidVerifyMsg::Diff(a, b));
     let actions = row![
-        PosReport::new(
-            DIFF_ID,
-            small_button(
-                "比对",
-                deliver.pair().map(|(a, b)| PidVerifyMsg::Diff(a, b))
-            ),
-        ),
+        PosReport::new(DIFF_ID, greyable("比对", compare, grey(Button::Diff))),
         PosReport::new(
             DIFF_EXPORT_ID,
-            small_button(
+            greyable(
                 "导出比对结果",
-                buttons.diff_export.then_some(PidVerifyMsg::PickDiffExport)
+                Some(PidVerifyMsg::PickDiffExport),
+                grey(Button::DiffExport)
             ),
         ),
     ]
@@ -3215,7 +3392,7 @@ fn deliver_tab(view: &VerifyView) -> Element<'_, Message> {
         return tab.push(scrollable(body).height(Fill)).into();
     };
     tab.push(scrollable(body).height(Length::FillPortion(2)))
-        .push(publish_part(publish, buttons, view.busy))
+        .push(publish_part(view, publish))
         .into()
 }
 
@@ -3224,7 +3401,7 @@ fn deliver_tab(view: &VerifyView) -> Element<'_, Message> {
 /// makes; the eight conditions; 【检查发布条件】 and 【发布】, and the
 /// question 【发布】 asks with 【确认】【取消】 under it; then the records,
 /// newest first.
-fn publish_part(publish: &PublishView, buttons: Buttons, busy: bool) -> Element<'_, Message> {
+fn publish_part<'a>(view: &VerifyView, publish: &'a PublishView) -> Element<'a, Message> {
     let status = match (&publish.state, &publish.unlisted) {
         (Some(state), _) => text(format!("发布 · {state}")).size(12),
         (None, Some(why)) => text(format!("发布 · 发布记录读不出来：{why}"))
@@ -3252,17 +3429,23 @@ fn publish_part(publish: &PublishView, buttons: Buttons, busy: bool) -> Element<
     if let Some(target) = &publish.target_dir {
         part = part.push(text(format!("发布到 {target}")).size(11).style(muted));
     }
+    let grey = |button| view.grey(button).map(grey_said);
     let actions = row![
         PosReport::new(
             PUBLISH_CHECK_ID,
-            small_button(
+            greyable(
                 "检查发布条件",
-                buttons.publish_check.then_some(PidVerifyMsg::PublishCheck)
+                Some(PidVerifyMsg::PublishCheck),
+                grey(Button::PublishCheck)
             ),
         ),
         PosReport::new(
             PUBLISH_ID,
-            small_button("发布", buttons.publish.then_some(PidVerifyMsg::AskPublish)),
+            greyable(
+                "发布",
+                Some(PidVerifyMsg::AskPublish),
+                grey(Button::Publish)
+            ),
         ),
     ]
     .spacing(4);
@@ -3282,7 +3465,7 @@ fn publish_part(publish: &PublishView, buttons: Buttons, busy: bool) -> Element<
         part = part.push(text("发布记录").size(11).style(muted));
     }
     for row in &publish.packages {
-        part = part.push(package_row(row, busy));
+        part = part.push(package_row(row, grey(Button::PackageVerify)));
     }
     scrollable(part).height(Length::FillPortion(3)).into()
 }
@@ -3374,9 +3557,9 @@ fn condition_cell<'a>(
 }
 
 /// A record of the publish half (§4.6 item 6): revision, when and by whom,
-/// 「当前」 on the package made of the file on disk, 【校验】; under them
-/// its folder and what 【校验】 found.
-fn package_row(row: &PackageRow, busy: bool) -> Element<'_, Message> {
+/// 「当前」 on the package made of the file on disk, 【校验】 — grey while
+/// `grey` says why; under them its folder and what 【校验】 found.
+fn package_row<'a>(row: &'a PackageRow, grey: Option<&'static str>) -> Element<'a, Message> {
     let package = &row.package;
     let when = package
         .published_at
@@ -3388,10 +3571,8 @@ fn package_row(row: &PackageRow, busy: bool) -> Element<'_, Message> {
     if package.current {
         first = first.push(text("当前").size(11));
     }
-    first = first.push(small_button(
-        "校验",
-        (!busy).then_some(PidVerifyMsg::PackageVerify(package.revision)),
-    ));
+    let verify = PidVerifyMsg::PackageVerify(package.revision);
+    first = first.push(greyable("校验", Some(verify), grey));
     let mut lines = column![first, text(package.path.as_str()).size(11).style(muted)].spacing(1);
     if let Some(verified) = &row.verified {
         let found = text(verified.text.as_str()).size(11);
@@ -3579,7 +3760,7 @@ mod tests {
             writable: false,
             saved: false,
             dirty: false,
-            busy: false,
+            busy: None,
             waivers: Vec::new(),
         }
     }
@@ -3904,7 +4085,7 @@ mod tests {
             writable: true,
             saved: true,
             dirty: false,
-            busy: false,
+            busy: None,
             waivers: Vec::new(),
         }
     }
@@ -4277,7 +4458,7 @@ mod tests {
         assert_eq!(pressable(&in_front(), None), (true, true, false));
         // Busy: no new check, but the result can be exported.
         let busy = Context {
-            busy: true,
+            busy: SCANNING,
             ..in_front()
         };
         assert_eq!(pressable(&busy, Some(&kept)), (false, false, true));
@@ -4471,7 +4652,7 @@ mod tests {
         };
         let ui = VerifyUi::default();
         let busy_context = Context {
-            busy: true,
+            busy: SCANNING,
             ..in_front()
         };
         let busy = build_view(&ui, Some(&kept), None, &busy_context);
@@ -5250,7 +5431,7 @@ mod tests {
             ..in_front()
         };
         let busy = Context {
-            busy: true,
+            busy: SCANNING,
             ..in_front()
         };
         let read_only = Context {
@@ -5471,7 +5652,7 @@ mod tests {
             (Context::default(), "bom=project", "no_drawing"),
             (
                 Context {
-                    busy: true,
+                    busy: SCANNING,
                     ..in_front()
                 },
                 "bom=drawing",
@@ -5755,7 +5936,7 @@ mod tests {
             ..in_front()
         }));
         assert!(!saving(&Context {
-            busy: true,
+            busy: SCANNING,
             ..in_front()
         }));
         assert!(!saving(&Context {
@@ -6013,7 +6194,7 @@ mod tests {
             ..in_front()
         };
         let busy = Context {
-            busy: true,
+            busy: SCANNING,
             ..in_front()
         };
         for (context, value, reason) in [
@@ -6299,7 +6480,7 @@ mod tests {
             ..in_front()
         };
         let busy = Context {
-            busy: true,
+            busy: SCANNING,
             ..in_front()
         };
         let unsaved = Context {
@@ -6507,7 +6688,7 @@ mod tests {
             ..in_front()
         };
         let busy = Context {
-            busy: true,
+            busy: SCANNING,
             ..in_front()
         };
         assert_eq!(asked(&asking, &dirty), None);
@@ -6542,7 +6723,7 @@ mod tests {
         let one = records(vec![package(1, true)]);
         let ui = on_deliver();
         let busy = Context {
-            busy: true,
+            busy: SCANNING,
             ..in_front()
         };
         let unsaved = Context {
@@ -6615,5 +6796,364 @@ mod tests {
             assert_eq!(refused.code(), "invalid_value", "{value}");
             assert!(!refused.to_string().is_empty(), "{value}");
         }
+    }
+
+    /// Something running in the background: a project check with 12 of the
+    /// 40 drawings it reads back.
+    const SCANNING: Option<Busy> = Some(Busy {
+        then: Some("check"),
+        done: 12,
+        total: 40,
+    });
+
+    /// What the panel draws with nothing kept while `busy` runs.
+    fn running(busy: Option<Busy>) -> VerifyView {
+        let context = Context { busy, ..in_front() };
+        build_view(&VerifyUi::default(), None, None, &context)
+    }
+
+    #[test]
+    fn busy_says_what_runs_how_far_it_is_and_what_waits_for_it() {
+        let busy = |view: &VerifyView| panel_state(view, ROWS_PER_PAGE, 0)["busy"].clone();
+        assert_eq!(
+            busy(&running(SCANNING)),
+            json!({
+                "what": "scan",
+                "then": "check",
+                "text": "正在读项目图纸",
+                "done": 12,
+                "total": 40,
+                "cancellable": true
+            })
+        );
+        // An automation op reads with nothing waiting for the scan.
+        let read = busy(&running(Some(Busy {
+            then: None,
+            done: 0,
+            total: 3,
+        })));
+        assert_eq!(
+            (&read["then"], &read["total"]),
+            (&Value::Null, &json!(3)),
+            "{read}"
+        );
+        assert_eq!(busy(&running(None)), Value::Null);
+        assert_eq!(
+            (BUSY_ID, CANCEL_ID),
+            ("pid-verify-busy", "pid-verify-cancel")
+        );
+    }
+
+    #[test]
+    fn pid_verify_action_cancels_only_while_something_runs() {
+        let busy = running(SCANNING);
+        assert_eq!(parse_action("cancel", &busy), Ok(PidVerifyMsg::Cancel));
+        let written = parse_action("cancel=1", &busy).expect_err("cancel=1");
+        assert_eq!(written.code(), "invalid_value", "{written}");
+        let idle = parse_action("cancel", &running(None)).expect_err("cancel");
+        assert_eq!(
+            (idle.code(), idle.reason()),
+            ("PANEL_ACTION_UNAVAILABLE", Some("not_busy"))
+        );
+    }
+
+    /// What the panel draws on 「快照与发布」 in `context` with something of
+    /// each kind kept on the drawing in front — the five results, a bill,
+    /// the three snapshots with `picked` ticked and a diff, a package
+    /// published — so that only `context` and `picked` grey its buttons.
+    fn everything(context: &Context, picked: &[Pick]) -> VerifyView {
+        let (checked, bill, snapshots, diff) = (five(), plant(), three(), compared());
+        let one = records(vec![package(1, true)]);
+        let drawing = DrawingResults {
+            check: Some(KeptCheck {
+                report: &checked,
+                serial: 1,
+                stale: false,
+            }),
+            bom: Some(kept_bill(&bill, 2)),
+            snapshots: Some(&snapshots),
+            diff: Some(&diff),
+            publish: read(&one),
+        };
+        let ui = VerifyUi {
+            tab: Tab::Deliver,
+            picked: picked.to_vec(),
+            ..VerifyUi::default()
+        };
+        build_view(&ui, Some(&drawing), None, context)
+    }
+
+    /// The action that presses `button`, and whether [`Buttons`] has it
+    /// pressable: 【校验】 is on each package's row, with no flag there.
+    fn pressing(button: Button, buttons: Buttons) -> (&'static str, Option<bool>) {
+        match button {
+            Button::CheckDrawing => ("check=drawing", Some(buttons.check_drawing)),
+            Button::CheckProject => ("check=project", Some(buttons.check_project)),
+            Button::CheckExport => ("check_export=drc.json", Some(buttons.check_export)),
+            Button::BomDrawing => ("bom=drawing", Some(buttons.bom_drawing)),
+            Button::BomProject => ("bom=project", Some(buttons.bom_project)),
+            Button::BomExport => ("bom_export=bom.csv", Some(buttons.bom_export)),
+            Button::SnapshotSave => ("snapshot_save=", Some(buttons.snapshot_save)),
+            Button::Diff => ("diff", Some(buttons.diff)),
+            Button::DiffExport => ("diff_export=diff.json", Some(buttons.diff_export)),
+            Button::PublishCheck => ("publish_check", Some(buttons.publish_check)),
+            Button::Publish => ("publish", Some(buttons.publish)),
+            Button::PackageVerify => ("package_verify=1", None),
+        }
+    }
+
+    /// §4.8 row by row: each button grey for each of its conditions, for the
+    /// reason the action pressing it is refused with; with none of them every
+    /// button can be pressed.
+    #[test]
+    fn each_button_is_grey_for_each_of_its_conditions_and_says_why() {
+        let two = [Pick::Seq(1), Pick::Live];
+        let ready = everything(&in_front(), &two);
+        let none = everything(&Context::default(), &two);
+        let busy = everything(
+            &Context {
+                busy: SCANNING,
+                ..in_front()
+            },
+            &two,
+        );
+        let unsaved = everything(
+            &Context {
+                saved: false,
+                ..in_front()
+            },
+            &two,
+        );
+        let dirty = everything(
+            &Context {
+                dirty: true,
+                ..in_front()
+            },
+            &two,
+        );
+        let read_only = everything(
+            &Context {
+                writable: false,
+                ..in_front()
+            },
+            &two,
+        );
+        let one_ticked = everything(&in_front(), &[Pick::Seq(1)]);
+        let bare = build_view(&VerifyUi::default(), None, None, &in_front());
+        let (failed, scope) = (repeated(), BomScope::drawing("PID-1101"));
+        let failure = DrawingResults {
+            bom: Some(kept_failure(&failed, &scope)),
+            ..DrawingResults::default()
+        };
+        let unlisted = build_view(&VerifyUi::default(), Some(&failure), None, &in_front());
+        for button in Button::ALL {
+            let (value, pressable) = pressing(button, ready.buttons);
+            assert_eq!(ready.grey(button), None, "{button:?}");
+            assert_ne!(pressable, Some(false), "{button:?}");
+            assert!(parse_action(value, &ready).is_ok(), "{value}");
+        }
+        let cases = [
+            (&none, Button::CheckDrawing, "no_drawing"),
+            (&busy, Button::CheckDrawing, "busy"),
+            (&none, Button::BomDrawing, "no_drawing"),
+            (&busy, Button::BomDrawing, "busy"),
+            (&none, Button::CheckProject, "no_drawing"),
+            (&busy, Button::CheckProject, "busy"),
+            (&unsaved, Button::CheckProject, "no_project_dir"),
+            (&none, Button::BomProject, "no_drawing"),
+            (&busy, Button::BomProject, "busy"),
+            (&unsaved, Button::BomProject, "no_project_dir"),
+            (&bare, Button::CheckExport, "no_result"),
+            (&bare, Button::BomExport, "no_result"),
+            (&unlisted, Button::BomExport, "no_result"),
+            (&bare, Button::DiffExport, "no_result"),
+            (&none, Button::SnapshotSave, "no_drawing"),
+            (&busy, Button::SnapshotSave, "busy"),
+            (&unsaved, Button::SnapshotSave, "no_project_dir"),
+            (&one_ticked, Button::Diff, "not_two_picked"),
+            (&none, Button::PublishCheck, "no_drawing"),
+            (&busy, Button::PublishCheck, "busy"),
+            (&unsaved, Button::PublishCheck, "no_project_dir"),
+            (&none, Button::Publish, "no_drawing"),
+            (&busy, Button::Publish, "busy"),
+            (&read_only, Button::Publish, "readonly"),
+            (&dirty, Button::Publish, "precondition"),
+            (&unsaved, Button::Publish, "precondition"),
+            (&none, Button::PackageVerify, "no_drawing"),
+            (&busy, Button::PackageVerify, "busy"),
+        ];
+        for (view, button, reason) in cases {
+            let (value, pressable) = pressing(button, view.buttons);
+            assert_eq!(view.grey(button), Some(reason), "{button:?}");
+            assert_ne!(pressable, Some(true), "{button:?} {reason}");
+            let refused = parse_action(value, view).expect_err(value);
+            assert_eq!(
+                (refused.code(), refused.reason()),
+                ("PANEL_ACTION_UNAVAILABLE", Some(reason)),
+                "{value}"
+            );
+        }
+        for button in Button::ALL {
+            assert!(
+                cases.iter().any(|(_, case, _)| *case == button),
+                "{button:?} has no case"
+            );
+        }
+        // What runs greys neither exporting nor 【比对】, a session that may
+        // not write checks the conditions and verifies all the same, and
+        // 【校验】 does not ask for a saved drawing (§4.8).
+        for (view, button) in [
+            (&busy, Button::CheckExport),
+            (&busy, Button::BomExport),
+            (&busy, Button::Diff),
+            (&busy, Button::DiffExport),
+            (&read_only, Button::PublishCheck),
+            (&read_only, Button::PackageVerify),
+            (&unsaved, Button::PackageVerify),
+        ] {
+            assert_eq!(view.grey(button), None, "{button:?}");
+        }
+        // The flags of the panel state say what the reasons say.
+        for view in [
+            &ready,
+            &none,
+            &busy,
+            &unsaved,
+            &dirty,
+            &read_only,
+            &one_ticked,
+            &bare,
+            &unlisted,
+        ] {
+            for button in Button::ALL {
+                if let (_, Some(pressable)) = pressing(button, view.buttons) {
+                    assert_eq!(pressable, view.grey(button).is_none(), "{button:?}");
+                }
+            }
+        }
+    }
+
+    /// §4.8's rows for 【豁免】 and 【取消豁免】: grey in a session that may
+    /// not write, on a result not on the drawing in front and — waiving —
+    /// on one already waived, for the reason the action is refused with.
+    #[test]
+    fn the_buttons_on_a_row_are_grey_for_each_of_their_conditions_and_say_why() {
+        let project = report(
+            ScopeKind::Project,
+            vec![
+                found("DR-001", Severity::Error, "管线", "L-1001", "PID-1101"),
+                waived(found(
+                    "DR-008",
+                    Severity::Warning,
+                    "阀门",
+                    "V-1001",
+                    "PID-1101",
+                )),
+                found("DR-005", Severity::Error, "仪表", "FT-2001", "PID-1102"),
+                waived(found(
+                    "DR-007",
+                    Severity::Warning,
+                    "管线",
+                    "L-2002",
+                    "PID-1102",
+                )),
+            ],
+        );
+        let kept = DrawingResults {
+            check: Some(KeptCheck {
+                report: &project,
+                serial: 1,
+                stale: false,
+            }),
+            ..DrawingResults::default()
+        };
+        let ui = VerifyUi {
+            show_waived: true,
+            ..VerifyUi::default()
+        };
+        let viewed_in = |writable: bool| {
+            let context = Context {
+                writable,
+                ..in_front()
+            };
+            build_view(&ui, Some(&kept), None, &context)
+        };
+        let greys = |view: &VerifyView| {
+            let shown = view.check.shown.as_ref().expect("the rows");
+            let mut greys: Vec<(usize, Option<&str>, Option<&str>)> = shown
+                .rows
+                .iter()
+                .map(|row| {
+                    let writable = view.writable;
+                    (
+                        row.index,
+                        row.grey(writable, false),
+                        row.grey(writable, true),
+                    )
+                })
+                .collect();
+            greys.sort_unstable();
+            greys
+        };
+        let away = Some("not_on_this_drawing");
+        assert_eq!(
+            greys(&viewed_in(true)),
+            [
+                (0, None, Some("not_waived")),
+                (1, Some("already_waived"), None),
+                (2, away, away),
+                (3, away, away),
+            ]
+        );
+        let readonly = Some("readonly");
+        assert_eq!(
+            greys(&viewed_in(false)),
+            [
+                (0, readonly, readonly),
+                (1, readonly, readonly),
+                (2, readonly, readonly),
+                (3, readonly, readonly),
+            ]
+        );
+        for view in [viewed_in(true), viewed_in(false)] {
+            let shown = view.check.shown.as_ref().expect("the rows");
+            for row in &shown.rows {
+                let grey = |unwaive: bool| row.grey(view.writable, unwaive);
+                assert_eq!(row.can_waive, grey(false).is_none(), "{}", row.index);
+                assert_eq!(row.can_unwaive, grey(true).is_none(), "{}", row.index);
+                for (value, unwaive) in [
+                    (format!("waive={}:放空管", row.index), false),
+                    (format!("unwaive={}", row.index), true),
+                ] {
+                    let refused = parse_action(&value, &view).err();
+                    assert_eq!(
+                        refused.map(|refused| refused.reason()),
+                        grey(unwaive).map(Some),
+                        "{value}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_grey_button_says_why_in_its_tip() {
+        let reasons = [
+            "no_drawing",
+            "busy",
+            "no_project_dir",
+            "no_result",
+            "not_two_picked",
+            "readonly",
+            "precondition",
+            "not_on_this_drawing",
+            "already_waived",
+            "not_waived",
+        ];
+        let said: BTreeSet<&str> = reasons.into_iter().map(grey_said).collect();
+        assert_eq!(said.len(), reasons.len(), "{said:?}");
+        assert!(!said.contains(""), "{said:?}");
+        let busy = grey_said("busy");
+        assert!(busy.starts_with(BUSY_SAID), "{busy}");
     }
 }

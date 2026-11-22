@@ -140,6 +140,15 @@ impl PublishJob {
         verb_of(self.only_check)
     }
 
+    /// 校验与交付面板的进度里这件事的名字（面板规格 §3.2 `busy.then`）。
+    pub(super) fn key(&self) -> &'static str {
+        if self.only_check {
+            "publish_check"
+        } else {
+            "publish"
+        }
+    }
+
     /// 做摘要用的连接容差：规则包的。
     pub(super) fn tolerance(&self) -> f64 {
         self.rules.connect_tolerance

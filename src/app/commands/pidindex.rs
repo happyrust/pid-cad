@@ -231,6 +231,13 @@ impl PidIndex {
     pub(in crate::app) fn scanning(&self) -> bool {
         self.scan.is_some()
     }
+
+    /// 正在后台读文件的扫描读到哪了：扫完先做什么（[`Then::key`]；自动化操作起的扫描没有）、
+    /// 读回来几个、一共要读几个。校验与交付面板照这个画进度（面板规格 §4.7）。
+    pub(in crate::app) fn progress(&self) -> Option<(Option<&'static str>, usize, usize)> {
+        let scan = self.scan.as_ref()?;
+        Some((scan.then.first().map(Then::key), scan.done, scan.total))
+    }
 }
 
 /// 读不出来的一个文件：读它时的大小和修改时间，和原因。
@@ -278,6 +285,17 @@ impl Then {
             Self::Check(_) => "PIDCHECK",
             Self::Bom(_) => "PIDBOM",
             Self::Publish(job) => job.verb(),
+        }
+    }
+
+    /// 校验与交付面板的进度里扫完要做的事的名字（面板规格 §3.2 `busy.then`）。
+    fn key(&self) -> &'static str {
+        match self {
+            Self::Overview | Self::Duplicates | Self::Links => "index",
+            Self::Locate(_) => "locate",
+            Self::Check(_) => "check",
+            Self::Bom(_) => "bom",
+            Self::Publish(job) => job.key(),
         }
     }
 
@@ -431,8 +449,8 @@ struct Pick {
 /// 后台读回来的一条（`Message::PidIndexRead`）。
 #[derive(Debug, Clone)]
 pub enum Read {
-    /// 读了一个文件。
-    File(Box<FileRead>),
+    /// 读了的几个文件，按读的先后。
+    Files(Vec<FileRead>),
     /// 这次扫描的文件读完了，或者取消以后不再读了。
     Done,
 }
@@ -553,8 +571,11 @@ pub(super) fn same_file(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// 在后台线程里依次读 `files`、做成摘要，读一个交回一个（§4）。`cancel` 立起来就不再读
-/// 下一个；最后交回 [`Read::Done`]，线程意外退出了也交。
+/// 在后台线程里依次读 `files`、做成摘要（§4）。读到的第一个马上交回，之后的攒着，离上次
+/// 交回满 100 毫秒一起交回：一个一个交时界面线程收不过来，Windows 的消息队列一直不空，
+/// 窗口等不到重画（面板规格 §11.10）。攒和交在另一个线程里：某个文件读得再久，前面读好的
+/// 也不多等。`cancel` 立起来就不再读下一个，读好的照样交回；最后交回 [`Read::Done`]，
+/// 线程意外退出了也交。
 fn read_in_background(
     files: Vec<PathBuf>,
     library: SymbolLibrary,
@@ -564,16 +585,54 @@ fn read_in_background(
 ) -> impl iced::futures::Stream<Item = Read> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::{Duration, Instant};
+
+        const BATCH: Duration = Duration::from_millis(100);
+
+        let (read_tx, read_rx) = mpsc::channel();
         std::thread::spawn(move || {
             for path in files {
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
-                let read = Read::File(Box::new(read_one(path, &library, tolerance, &*load)));
-                if tx.unbounded_send(read).is_err() {
+                if read_tx
+                    .send(read_one(path, &library, tolerance, &*load))
+                    .is_err()
+                {
                     return;
                 }
+            }
+        });
+        let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            let mut sent: Option<Instant> = None;
+            loop {
+                let next = match sent {
+                    Some(at) if !held.is_empty() => {
+                        let left = (at + BATCH).saturating_duration_since(Instant::now());
+                        read_rx.recv_timeout(left)
+                    }
+                    _ => read_rx.recv().map_err(RecvTimeoutError::from),
+                };
+                match next {
+                    Ok(read) => held.push(read),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+                if sent.is_none_or(|at| at.elapsed() >= BATCH) {
+                    if tx
+                        .unbounded_send(Read::Files(std::mem::take(&mut held)))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    sent = Some(Instant::now());
+                }
+            }
+            if !held.is_empty() {
+                let _ = tx.unbounded_send(Read::Files(held));
             }
         });
         iced::futures::StreamExt::chain(rx, iced::futures::stream::iter([Read::Done]))
@@ -583,7 +642,7 @@ fn read_in_background(
         drop(cancel);
         let reads: Vec<Read> = files
             .into_iter()
-            .map(|path| Read::File(Box::new(read_one(path, &library, tolerance, &*load))))
+            .map(|path| Read::Files(vec![read_one(path, &library, tolerance, &*load)]))
             .chain([Read::Done])
             .collect();
         iced::futures::stream::iter(reads)
@@ -839,8 +898,7 @@ impl OpenCADStudio {
         Task::run(reads, move |read| Message::PidIndexRead(id, read))
     }
 
-    /// 后台读回来的一条。读到的摘要记进缓存，读不出来的记下原因（[`Unreadable`]），取消了
-    /// 的扫描读回来的也记；是这次扫描的就数上，有排着的命令时约每读完十分之一报一次进度，
+    /// 后台读回来的一批（[`Read`]）：每个文件照 [`Self::pidindex_file_read`] 记下、数上；
     /// 读完了建索引、接着说；接着做的要打开图（`PIDLOCATE`）就交出打开它的任务。
     pub(in crate::app) fn on_pid_index_read(&mut self, scan: u64, read: Read) -> Task<Message> {
         let current = self
@@ -848,20 +906,30 @@ impl OpenCADStudio {
             .scan
             .as_ref()
             .is_some_and(|running| running.id == scan);
-        let Read::File(file) = read else {
+        let Read::Files(files) = read else {
             return if current {
                 self.pidindex_finish()
             } else {
                 Task::none()
             };
         };
+        for file in files {
+            self.pidindex_file_read(file, current);
+        }
+        Task::none()
+    }
+
+    /// 后台读回来的一个文件。读到的摘要记进缓存，读不出来的记下原因（[`Unreadable`]），
+    /// 取消了的扫描读回来的也记；是这次扫描的（`current`）就数上，有排着的命令时约每读完
+    /// 十分之一报一次进度。
+    fn pidindex_file_read(&mut self, file: FileRead, current: bool) {
         let FileRead {
             path,
             size,
             modified,
             tolerance,
             summary,
-        } = *file;
+        } = file;
         let failed = match summary {
             Ok(summarized) => {
                 self.pid_index.unreadable.remove(&path);
@@ -888,19 +956,18 @@ impl OpenCADStudio {
             }
         };
         let Some(running) = self.pid_index.scan.as_mut().filter(|_| current) else {
-            return Task::none();
+            return;
         };
         running.done += 1;
         running.failed.extend(failed);
         let (done, total) = (running.done, running.total);
         let Some(verb) = running.then.first().map(Then::verb) else {
-            return Task::none();
+            return;
         };
         if done < total && done % (total / 10).max(1) == 0 {
             self.command_line
                 .push_info(&format!("{verb}: 读了 {done}/{total} 个文件。"));
         }
-        Task::none()
     }
 
     /// 这次扫描要读的都读回来了：用缓存建索引，后台读不出来的照它说的原因记，再按先后做
@@ -971,8 +1038,8 @@ impl OpenCADStudio {
     }
 
     /// `PIDINDEX CANCEL`：后台不再读下一个文件，排着的不做了。正读着的那个读回来照样记进
-    /// 缓存，下次扫接着用。
-    fn pidindex_cancel(&mut self) {
+    /// 缓存，下次扫接着用。校验与交付面板的【取消】也是它（面板规格 §4.7）。
+    pub(super) fn pidindex_cancel(&mut self) {
         let Some(scan) = self.pid_index.scan.take() else {
             self.command_line.push_info("PIDINDEX CANCEL: 没有在扫。");
             return;
@@ -3466,5 +3533,37 @@ mod tests {
             );
             assert_eq!(selected(&app, i), [handle.as_str()], "{at}: {answer}");
         }
+    }
+
+    /// 后台读回来的不一个一个交（§4）：一个一个交时界面线程收不过来，Windows 的消息队列
+    /// 一直不空，窗口等不到重画，进度条不动（面板规格 §11.10）。读到的第一个马上交回，
+    /// 之后的攒着一起交，每个文件交回一次、按读的先后，最后是 `Done`。
+    #[test]
+    fn background_reads_come_back_together_once_the_first_is_in() {
+        let files: Vec<PathBuf> = (0..50)
+            .map(|n| PathBuf::from(format!("没有这个文件-{n}.dwg")))
+            .collect();
+        let loader: Loader = Arc::new(|_: &Path| Err(String::new()));
+        let reads = read_in_background(
+            files.clone(),
+            SymbolLibrary::builtin(),
+            0.5,
+            loader,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let mut batches: Vec<Vec<PathBuf>> = Vec::new();
+        let mut done = false;
+        for read in iced::futures::executor::block_on(reads.collect::<Vec<_>>()) {
+            assert!(!done, "Done 以后还有");
+            match read {
+                Read::Files(got) => batches.push(got.into_iter().map(|file| file.path).collect()),
+                Read::Done => done = true,
+            }
+        }
+        assert!(done, "最后要交回 Done");
+        assert_eq!(batches.first().map(Vec::len), Some(1), "第一个马上交回");
+        assert_eq!(batches.concat(), files, "每个文件交回一次，按读的先后");
+        let times = batches.len();
+        assert!(times < files.len(), "一个一个交的：{times} 次");
     }
 }

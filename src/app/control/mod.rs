@@ -116,6 +116,11 @@ pub(super) struct State {
     /// can detect highlight changes without polling the full selection.
     selection_revision: u64,
     pub(super) routing: bool,
+    /// Set by a `pid_verify` action whose press started a project scan: the
+    /// scan runs on in the background with its progress in the panel's
+    /// `busy`, and the request is answered without waiting for it (panel
+    /// spec §3.3), so `cancel` can still be sent. `control_track` takes it.
+    pub(super) untracked: bool,
     /// Session-scoped named handle sets for selection_set_save/load.
     selection_sets: std::collections::BTreeMap<String, Vec<document::Handle>>,
     /// Live `user_select` request — the client asked the person at the screen
@@ -1840,6 +1845,9 @@ impl OpenCADStudio {
     }
 
     pub(super) fn control_track(&mut self, task: Task<Message>) -> Task<Message> {
+        if std::mem::take(&mut self.control.untracked) {
+            return task;
+        }
         let track_zero_unit = self.control.pending.as_ref().is_some_and(|p| {
             p.request["op"] == "run"
                 && p.request["cmd"].as_str().is_some_and(|cmd| {

@@ -96,7 +96,9 @@ pub(super) struct BomJob {
     range: Range,
     master: Resolved,
     export: Option<Export>,
-    panel: bool,
+    /// 面板要的是按的时候前面那张图的标签页 `id`：扫的时候它关掉了，算出来的不要（面板规格
+    /// §4.7）。命令起的是 `None`。
+    panel: Option<u64>,
 }
 
 /// 清单范围里的图从哪来。
@@ -405,7 +407,7 @@ impl OpenCADStudio {
                 range,
                 master,
                 export,
-                panel: false,
+                panel: None,
             },
         )
     }
@@ -422,14 +424,15 @@ impl OpenCADStudio {
             range: Range::Project,
             master,
             export: None,
-            panel: true,
+            panel: Some(self.tabs[i].id),
         };
         Some(self.pidindex_bom(i, job))
     }
 
     /// 扫完项目接着算（`commands::pidindex`）：在扫好的项目 `project_dir` 上算 `job` 的范围，说出来，
     /// 要导出的写成文件；面板要的再交给面板（[`Self::pid_verify_bom_scanned`]），算不出来的原因
-    /// 写成提示——命令行上有错误，控制通道就把面板的动作答成失败。
+    /// 写成提示——命令行上有错误，控制通道就把面板的动作答成失败。面板要的而按的那张图扫的
+    /// 时候关掉了，什么都不做（面板规格 §4.7）。
     pub(super) fn pidbom_scanned(&mut self, project_dir: &Path, scanned: &Scanned, job: BomJob) {
         let BomJob {
             range,
@@ -437,6 +440,9 @@ impl OpenCADStudio {
             export,
             panel,
         } = job;
+        if panel.is_some_and(|tab| self.tabs.iter().all(|open| open.id != tab)) {
+            return;
+        }
         let sheets = Sheets::Scanned {
             scanned,
             range: &range,
@@ -444,7 +450,7 @@ impl OpenCADStudio {
         };
         let outcome = self.pidbom_compute(sheets);
         let verb = verb_of(Some(&range), export.is_some());
-        if !panel {
+        if panel.is_none() {
             self.pidbom_done(verb, outcome, export.as_ref());
             return;
         }

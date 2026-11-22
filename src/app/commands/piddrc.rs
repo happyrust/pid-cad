@@ -249,6 +249,9 @@ pub(super) struct Check {
     master: Resolved,
     /// `PIDCHECK`、`pid_check` 是「按需」，发布前现做的那次是「发布前」。
     trigger: Trigger,
+    /// 「校验与交付」面板按的检查是按的时候前面那张图的标签页 `id`：扫的时候它关掉了，查出来的
+    /// 不要（面板规格 §4.7）。命令、操作起的是 `None`。
+    pub(super) panel: Option<u64>,
 }
 
 impl Check {
@@ -260,6 +263,7 @@ impl Check {
             rules,
             master,
             trigger: Trigger::BeforePublish,
+            panel: None,
         }
     }
 }
@@ -438,11 +442,19 @@ impl OpenCADStudio {
             rules,
             master,
             trigger: Trigger::OnDemand,
+            panel: None,
         })
     }
 
-    /// 扫完项目接着查（[`check_project`]），说一句汇总、列前 10 条，结果按项目目录记下。
+    /// 扫完项目接着查（[`check_project`]），说一句汇总、列前 10 条，结果按项目目录记下。面板按的
+    /// 检查，按的那张图扫的时候关掉了就什么都不做（面板规格 §4.7）。
     pub(super) fn pidcheck_scanned(&mut self, project_dir: &Path, scanned: &Scanned, check: Check) {
+        if check
+            .panel
+            .is_some_and(|tab| self.tabs.iter().all(|open| open.id != tab))
+        {
+            return;
+        }
         let verb = verb_of(&check.range);
         let (report, drawings) = check_project(scanned, check);
         self.pidcheck_say(verb, &report, Some(drawings.len()));
@@ -998,6 +1010,7 @@ impl OpenCADStudio {
                 rules,
                 master,
                 trigger: Trigger::OnDemand,
+                panel: None,
             },
         );
         let answer = answer_of(&report, include_waived);
@@ -1186,6 +1199,7 @@ pub(super) fn check_project(scanned: &Scanned, check: Check) -> (CheckReport, Ve
         rules,
         master,
         trigger,
+        panel: _,
     } = check;
     let nodes: HashSet<&str> = match (&range, &master) {
         (Range::Pbs(node), Resolved::Configured { data, .. }) => {
