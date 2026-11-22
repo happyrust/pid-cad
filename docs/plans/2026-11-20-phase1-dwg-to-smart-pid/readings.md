@@ -2394,3 +2394,44 @@
 | `scripts\fmt-newhunks.ps1` | — | `relief.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 60. L6-1 / L6-2 / L6-3 / L3-6 / L4-6（#171）：升级一站式数字化移交总打包命令 `PIDPACKAGE v4` 及 CLI `--export-package` 十表三审 44 文件全套 EPC 交付与 `API 520` 安全红线门禁闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `53ad02bce`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 修改文件 | `src/io/pid_convert/package.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-22-issue171/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_package_v4.txt`、`cli_export_package_v4.txt`、`real_out/real171_summary.json`、`fmt_newhunks.txt`、`rust_gates_status.json`） |
+
+### 60.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_171_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidpackage_v4_emits_all_ten_epc_schedules_blocks_unsealed_psv_strict_gate_and_verifies_30_file_sha256`（先构造安全阀 `PSV-1711` 串联支路装有未标 `CSO` 的普通截断阀 `BV1711` 验证 `PIDPACKAGE ... STRICT` 一票否决阻断，再补标 `CSO` 验证 `schema_version = 4`、`00..09` 十套清册与 `30` 文件 SHA-256 自检），运行按预期在 `schema_version == Some(4)` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`37 passed; 0 failed`）：
+  1. 升级 `src/io/pid_convert/package.rs` 至 `schema_version = 4`：在 `schedules/` 下新增产出 `08_equipment_schedule.csv/.json` 与 `09_relief_devices.csv/.json`，完整齐备 **`00..09` 十套 EPC 专业工程清册（20 文件）+ 三项校审/安全底稿（4 文件）+ 逐图双产物与矢量 PDF**；在 `HandoverManifest` 新增 `master_equipment_count`、`duplicate_equipment_tags`、`relief_devices_count` 与 `unsealed_relief_valve_violations`，并将 `unsealed_relief_valve_violations == 0` 正式纳入 `handover_ready` 与 `strict_gate` 强制移交准入红线；
+  2. 同步升级 `src/app/commands/pidprops.rs`（`PIDPACKAGE`）与 `examples/pid_convert.rs`（`--export-package` / `--strict-gate`，真实 SPPID 图单图 CLI 产出 `27` 个文件、`schema_version = 4`、`handover_ready = true`）。
+
+### 60.2 真实双标准四图成对跨标签页 `PIDPACKAGE v4` 44 文件十表三审 EPC 数字化移交包实测
+
+| 交付维度 | 实测读数（`real171_summary.json`） |
+|---|---|
+| 源图 SHA-256 前缀（4 张：2 张 SPPID 生产图 + 2 张原生 AutoCAD 存量图） | ``2164f88bbb57`, `fc2c812dc182`, `a0f05f81a655`, `28ed389e23cb`` |
+| 清单架构与安全准入门禁 | `schema_version = 4`，`handover_ready = true`，`strict_vendor_passed = true`，`unsealed_relief_valve_violations = 0` |
+| 双产物与版式图纸产出 | `sheets = 4`，`.pid = 4`，`PDF = 4`，互逆 `OPC = 8` 对 |
+| 十套 EPC 工程清册汇总规模 | 设备 `22` 台 · 综合清册 `249` 项 · 管线 `48` 条 · 设备管口 `136` 个 · 阀门 `158` 台 · 泄压装置 `6` 台 · 特殊件 `49` 件 · 回路 `49` 个 · 界区接口 `27` 个 · HAZOP 节点 `22` 个 |
+| 全包受控文件与 SHA-256 总指纹 | **`44` 个文件**（总计 **`4,408,764` B**，零绝对路径泄漏，`manifest_sha256` 前缀 `ce3375b8507a` 逐文件 100% 吻合） |
+
+### 60.3 固定门禁读数
+
+| 门禁项 | 改前读数（§59.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,266` 条（`7,171` 过 / `94` 忽略 / `1` 既有 `.pen`） | **`7,268` 条**（**`7,172` 过** / **`95` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图 44 文件十表三审 EPC 移交包对账），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `package.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
