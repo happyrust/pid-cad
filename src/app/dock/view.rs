@@ -637,7 +637,16 @@ impl OpenCADStudio {
             title_hovered: self.dock_title_hover == Some(id),
         };
         match id {
-            crate::ui::dock::PanelId::Properties => tab.properties.view(width, chrome),
+            crate::ui::dock::PanelId::Properties => {
+                // The rows a clicked rule-check result names, looked up as
+                // they are drawn: the panel is not built again when the
+                // highlight moves to another drawing's object.
+                let i = self.active_tab;
+                tab.properties.view(width, chrome, &|prop| {
+                    self.pid_verify_highlight.is_some()
+                        && self.pid_verify_row_highlighted(i, &crate::app::control::row_id(prop))
+                })
+            }
             crate::ui::dock::PanelId::GraphicAttributes => {
                 crate::ui::window::graphic_attributes::view(
                     &self.graphic_attributes,

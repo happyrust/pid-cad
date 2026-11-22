@@ -3046,6 +3046,245 @@ mod tests {
         assert_eq!(app.pid_verify_highlight, None);
     }
 
+    /// The real view drawn at 1600 × 900 as pixels, how many of them make a
+    /// logical one, and where each of `labels` is drawn in it: `None` for one
+    /// it does not show.
+    fn drawn_pixels(
+        app: &OpenCADStudio,
+        labels: &[&str],
+    ) -> (image::RgbaImage, f32, Vec<Option<iced::Rectangle>>) {
+        let size = iced::Size::new(1600.0, 900.0);
+        let mut simulator =
+            iced_test::Simulator::with_size(iced::Settings::default(), size, app.view_main());
+        let found = labels
+            .iter()
+            .map(|label| {
+                let text = simulator.find(*label).ok();
+                text.and_then(|text| text.visible_bounds())
+            })
+            .collect();
+        // With no picture to compare with, `matches_image` writes it, under a
+        // name of its own.
+        let scratch = Scratch::new();
+        simulator
+            .snapshot(&app.active_theme)
+            .expect("draw the view")
+            .matches_image(scratch.path("view.png"))
+            .expect("the picture is written");
+        let written = fs::read_dir(&scratch.0)
+            .expect("the picture's folder")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "png"))
+            .expect("one picture");
+        let image = image::open(written).expect("the picture reads back");
+        let image = image.to_rgba8();
+        let scale = image.width() as f32 / size.width;
+        (image, scale, found)
+    }
+
+    fn pixel(image: &image::RgbaImage, scale: f32, x: f32, y: f32) -> [u8; 4] {
+        image.get_pixel((x * scale) as u32, (y * scale) as u32).0
+    }
+
+    /// The colour of the classic panel's row whose name is drawn at `name`:
+    /// its name cell's, just before the name.
+    fn row_ground(image: &image::RgbaImage, scale: f32, name: iced::Rectangle) -> [u8; 4] {
+        pixel(image, scale, name.x - 2.0, name.center_y())
+    }
+
+    /// The colour of the box of the shell editor's row whose label is drawn
+    /// at `label`. The box is 6 below the label and its text 10 in from its
+    /// edge, which the label starts at.
+    fn field_ground(image: &image::RgbaImage, scale: f32, label: iced::Rectangle) -> [u8; 4] {
+        let top = label.y + label.height + 6.0;
+        pixel(image, scale, label.x + 4.0, top + 8.0)
+    }
+
+    /// How far `color` is from `to`, summed over red, green and blue.
+    fn distance(color: [u8; 4], to: iced::Color) -> u32 {
+        let to = to.into_rgba8();
+        (0..3).map(|c| u32::from(color[c].abs_diff(to[c]))).sum()
+    }
+
+    /// §3.6: the classic Properties panel draws the rows a clicked result
+    /// names on the warning colour, each until it is filled in, and the
+    /// others as before; for a rule reading the tag, the tag's row.
+    #[test]
+    fn pid_verify_highlight_is_drawn_on_the_classic_properties_panel() {
+        // Building and drawing the real view is deeper than a default test
+        // thread's stack, and two headless renderers made at once crash the
+        // process.
+        let _one = crate::headless_ui_lock();
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let scratch = Scratch::new();
+                let mut app = highlight_sheet(&scratch);
+                app.win_size = (1600.0, 900.0);
+                let warning = app.active_theme.palette().warning.base.color;
+                let state = panel(&mut app, "");
+                let (missing, ..) = row_naming(&state, "DR-010", "EQUIPMENT|");
+                let (tag, ..) = row_naming(&state, "DR-204", "EQUIPMENT|");
+                let answer = act(&mut app, &format!("locate={missing}"));
+                assert_eq!(answer["ok"], true, "{answer}");
+                // The Properties panel gets the edge to itself.
+                let _ = run(&mut app, "PIDVERIFY OFF");
+                assert!(app.dock_panel_visible(PanelId::Properties));
+                let source = crate::t!("Tag source");
+                let rows = ["铭牌号", "出厂编号", source.as_ref()];
+                let (image, scale, at) = drawn_pixels(&app, &rows);
+                let ground = |at: Option<iced::Rectangle>| {
+                    row_ground(&image, scale, at.expect("the row is drawn"))
+                };
+                let (plate, serial, plain) = (ground(at[0]), ground(at[1]), ground(at[2]));
+                assert_eq!(plate, serial);
+                assert!(
+                    distance(plate, warning) + 30 < distance(plain, warning),
+                    "{plate:?} is not on the warning colour beside {plain:?}"
+                );
+
+                let answer = fill(&mut app, "pid_props_铭牌号", "NP-0001");
+                assert_eq!(answer["ok"], true, "{answer}");
+                let (image, scale, at) = drawn_pixels(&app, &rows);
+                let ground = |at: Option<iced::Rectangle>| {
+                    row_ground(&image, scale, at.expect("the row is drawn"))
+                };
+                let drawn = [ground(at[0]), ground(at[1]), ground(at[2])];
+                assert_eq!(drawn, [plain, plate, plain]);
+
+                let _ = run(&mut app, "PIDVERIFY");
+                let answer = act(&mut app, &format!("locate={tag}"));
+                assert_eq!(answer["ok"], true, "{answer}");
+                let _ = run(&mut app, "PIDVERIFY OFF");
+                let item_tag = crate::t!("Item tag");
+                let rows = [item_tag.as_ref(), "铭牌号", source.as_ref()];
+                let (image, scale, at) = drawn_pixels(&app, &rows);
+                let ground = |at: Option<iced::Rectangle>| {
+                    row_ground(&image, scale, at.expect("the row is drawn"))
+                };
+                let drawn = [ground(at[0]), ground(at[1]), ground(at[2])];
+                assert_eq!(drawn, [plate, plain, plain]);
+            })
+            .expect("spawn test thread")
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    }
+
+    /// §3.6: the shell's property editor gives each property a clicked
+    /// result names that its object has no value for an empty row, and draws
+    /// the box of each row the result names on the warning colours, until it
+    /// is filled in; for a rule reading the tag, the tag's box.
+    #[test]
+    fn pid_verify_highlight_is_drawn_in_the_shells_property_editor() {
+        let _one = crate::headless_ui_lock();
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                use crate::app::pid_shell::PidScreen;
+                use crate::ui::style::pid_tokens::ColorToken;
+                let scratch = Scratch::new();
+                let mut app = highlight_sheet(&scratch);
+                app.win_size = (1600.0, 900.0);
+                assert!(app.show_pid_screen(PidScreen::Editor));
+                let amber = ColorToken::Amber.color(app.pid_shell.theme);
+                let state = panel(&mut app, "");
+                let (missing, ..) = row_naming(&state, "DR-010", "EQUIPMENT|");
+                let (tag, ..) = row_naming(&state, "DR-204", "EQUIPMENT|");
+                let answer = act(&mut app, &format!("locate={missing}"));
+                assert_eq!(answer["ok"], true, "{answer}");
+                let rows = ["铭牌号", "出厂编号", "名称"];
+                let (image, scale, at) = drawn_pixels(&app, &rows);
+                assert!(
+                    at.iter().all(Option::is_some),
+                    "the editor has a row for each property the result names: {at:?}"
+                );
+                let ground = |at: Option<iced::Rectangle>| {
+                    field_ground(&image, scale, at.expect("the row is drawn"))
+                };
+                let (plate, serial, plain) = (ground(at[0]), ground(at[1]), ground(at[2]));
+                assert_eq!(plate, serial);
+                assert!(
+                    distance(plate, amber) + 30 < distance(plain, amber),
+                    "{plate:?} is not on the warning colours beside {plain:?}"
+                );
+
+                let answer = fill(&mut app, "pid_props_铭牌号", "NP-0001");
+                assert_eq!(answer["ok"], true, "{answer}");
+                let (image, scale, at) = drawn_pixels(&app, &rows);
+                let ground = |at: Option<iced::Rectangle>| {
+                    field_ground(&image, scale, at.expect("the row is drawn"))
+                };
+                let drawn = [ground(at[0]), ground(at[1]), ground(at[2])];
+                assert_eq!(drawn, [plain, plate, plain]);
+
+                let answer = act(&mut app, &format!("locate={tag}"));
+                assert_eq!(answer["ok"], true, "{answer}");
+                let rows = ["位号", "铭牌号", "名称"];
+                let (image, scale, at) = drawn_pixels(&app, &rows);
+                let ground = |at: Option<iced::Rectangle>| {
+                    field_ground(&image, scale, at.expect("the row is drawn"))
+                };
+                let drawn = [ground(at[0]), ground(at[1]), ground(at[2])];
+                assert_eq!(drawn, [plate, plain, plain]);
+            })
+            .expect("spawn test thread")
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    }
+
+    /// §3.6: the property table looks the highlight up as it draws. Moved to
+    /// an object on another drawing, the rows it lit on the first are drawn
+    /// as any other once that drawing is in front again, though its table
+    /// was not built again.
+    #[test]
+    fn pid_verify_highlight_is_not_drawn_on_a_drawing_it_has_left() {
+        let _one = crate::headless_ui_lock();
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let scratch = Scratch::new();
+                let mut app = two_sheets(&scratch);
+                app.win_size = (1600.0, 900.0);
+                let first = app.active_tab;
+                let warning = app.active_theme.palette().warning.base.color;
+                let answer = act(&mut app, "check=project");
+                assert_eq!(answer["ok"], true, "{answer}");
+                let state = panel(&mut app, "");
+                let (there, _) = row_of(&state, "DR-202", "PID-1102");
+                let (here, _) = row_of(&state, "DR-202", "PID-1101");
+                let answer = act(&mut app, &format!("locate={there}"));
+                assert_eq!(answer["ok"], true, "{answer}");
+                let other = app.active_tab;
+                assert_ne!(other, first);
+                let _ = run(&mut app, "PIDVERIFY OFF");
+                let source = crate::t!("Tag source");
+                let rows = ["流量", source.as_ref()];
+                let (image, scale, at) = drawn_pixels(&app, &rows);
+                let flow = row_ground(&image, scale, at[0].expect("the row of 流量"));
+                let plain = row_ground(&image, scale, at[1].expect("the tag source's row"));
+                assert!(
+                    distance(flow, warning) + 30 < distance(plain, warning),
+                    "{flow:?} is not on the warning colour beside {plain:?}"
+                );
+
+                let _ = app.update(Message::TabSwitch(first));
+                let _ = run(&mut app, "PIDVERIFY");
+                let answer = act(&mut app, &format!("locate={here}"));
+                assert_eq!(answer["ok"], true, "{answer}");
+                assert_eq!(app.active_tab, first);
+                let _ = run(&mut app, "PIDVERIFY OFF");
+                let _ = app.update(Message::TabSwitch(other));
+                let (image, scale, at) = drawn_pixels(&app, &rows);
+                let flow = at[0].expect("the row of 流量, as the table was built");
+                let plain = row_ground(&image, scale, at[1].expect("the tag source's row"));
+                assert_eq!(row_ground(&image, scale, flow), plain);
+            })
+            .expect("spawn test thread")
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    }
+
     #[test]
     fn waiving_a_row_in_the_panel_moves_it_to_the_waived_group_without_checking_again() {
         let scratch = Scratch::new();

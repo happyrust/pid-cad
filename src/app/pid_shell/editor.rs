@@ -43,6 +43,7 @@ use iced::widget::{button, column, container, row, scrollable, text, text_input,
 use iced::{alignment, font, Background, Border, Color, Element, Fill, Length, Task};
 
 use super::{chrome, Message as ShellMessage, ViewFn};
+use crate::app::commands::pidverify::TAG_NAME;
 use crate::app::{Message as AppMessage, OpenCADStudio};
 use crate::pid::persist::PidAuthor;
 use crate::pid::propagate::{split_props, LINE_FIELDS};
@@ -353,7 +354,9 @@ pub(crate) struct Object {
     /// The run it is on, for a segment and a fitting.
     pub run: Option<String>,
     /// Its fields, `(key, value)`: the ones its kind has, in their order,
-    /// then whatever else its record carries.
+    /// then whatever else its record carries, then an empty one for each
+    /// other property a clicked rule-check result names (P&ID panel spec
+    /// §3.6).
     pub fields: Vec<(String, String)>,
     /// Scale and rotation in degrees, for a block reference.
     pub placement: Option<(f64, f64)>,
@@ -453,6 +456,11 @@ pub(crate) fn inspected(app: &OpenCADStudio) -> Inspected {
         })
         .collect();
     fields.extend(values);
+    for name in app.pid_verify_highlighted(app.active_tab, handle) {
+        if name != TAG_NAME && !fields.iter().any(|(key, _)| key == name) {
+            fields.push((name.clone(), String::new()));
+        }
+    }
 
     Inspected::Object(Object {
         handle,
@@ -1127,7 +1135,8 @@ pub(in crate::app) fn zoom_control(app: &OpenCADStudio) -> Element<'_, AppMessag
 }
 
 /// One row of the inspector: a label over a box. `field` is the row's id
-/// when the value can be typed over.
+/// when the value can be typed over. The box is on the warning colours
+/// while a clicked rule-check result names the row (P&ID panel spec §3.6).
 fn field<'a>(
     app: &'a OpenCADStudio,
     handle: document::Handle,
@@ -1150,6 +1159,14 @@ fn field<'a>(
                 .color(ColorToken::Danger.color(theme)),
         );
     }
+    let lit = field
+        .as_deref()
+        .is_some_and(|id| app.pid_verify_row_highlighted(app.active_tab, id));
+    let (ground, edge) = if lit {
+        (ColorToken::AmberSoft, ColorToken::Amber)
+    } else {
+        (ColorToken::BgInput, ColorToken::BorderControl)
+    };
     let boxed = |inside: Element<'a, AppMessage>| {
         container(inside)
             .width(Fill)
@@ -1157,8 +1174,8 @@ fn field<'a>(
             .style(move |_| {
                 filled(
                     theme,
-                    ColorToken::BgInput,
-                    Some(ColorToken::BorderControl),
+                    ground,
+                    Some(edge),
                     NumberToken::RadiusSm.value(theme),
                 )
             })
