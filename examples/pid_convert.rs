@@ -17,9 +17,10 @@ use std::path::PathBuf;
 use OpenCADStudio::io::pid_convert::{
     convert_path_to_dir, diff_pid_files, export_handover_package_from_path,
     extract_bom_from_batch_dir, extract_hazop_from_path, extract_loops_from_batch_dir,
-    extract_utilities_from_path, extract_valves_from_path, save_cad_file_as_binary_dwg,
-    write_bom_schedule_file, write_pid_diff_file, write_pid_hazop_file, write_pid_loops_file,
-    write_pid_utility_file, write_pid_valve_file, ConvertOptions, PackageOptions,
+    extract_nozzles_from_path, extract_utilities_from_path, extract_valves_from_path,
+    save_cad_file_as_binary_dwg, write_bom_schedule_file, write_pid_diff_file,
+    write_pid_hazop_file, write_pid_loops_file, write_pid_nozzle_file, write_pid_utility_file,
+    write_pid_valve_file, ConvertOptions, PackageOptions,
 };
 
 struct CliArgs {
@@ -37,6 +38,7 @@ struct CliArgs {
     export_hazop: Option<PathBuf>,
     export_utilities: Option<PathBuf>,
     export_valves: Option<PathBuf>,
+    export_nozzles: Option<PathBuf>,
     export_package: Option<PathBuf>,
     strict_gate: bool,
     save_dwg: Option<PathBuf>,
@@ -57,6 +59,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut export_hazop: Option<PathBuf> = None;
     let mut export_utilities: Option<PathBuf> = None;
     let mut export_valves: Option<PathBuf> = None;
+    let mut export_nozzles: Option<PathBuf> = None;
     let mut export_package: Option<PathBuf> = None;
     let mut strict_gate = false;
     let mut save_dwg: Option<PathBuf> = None;
@@ -120,6 +123,12 @@ fn parse_args() -> Result<CliArgs, String> {
                         .ok_or("--export-valves requires an output path (.csv/.tsv/.json)")?,
                 ));
             }
+            "--export-nozzles" => {
+                export_nozzles = Some(PathBuf::from(
+                    it.next()
+                        .ok_or("--export-nozzles requires an output path (.csv/.tsv/.json)")?,
+                ));
+            }
             "--export-package" => {
                 export_package = Some(PathBuf::from(
                     it.next()
@@ -175,6 +184,7 @@ fn parse_args() -> Result<CliArgs, String> {
         && export_hazop.is_none()
         && export_utilities.is_none()
         && export_valves.is_none()
+        && export_nozzles.is_none()
     {
         return Err(
             "--out <dir> (or --diff-with <baseline> or --export-package <dir>) is required"
@@ -196,6 +206,7 @@ fn parse_args() -> Result<CliArgs, String> {
         export_hazop,
         export_utilities,
         export_valves,
+        export_nozzles,
         export_package,
         strict_gate,
         save_dwg,
@@ -232,6 +243,37 @@ fn main() {
         verify_plot_pdf: args.verify_plot,
         ..Default::default()
     };
+
+    if let Some(ref nz_out) = args.export_nozzles {
+        match extract_nozzles_from_path(&effective_input)
+            .and_then(|rep| write_pid_nozzle_file(&rep, nz_out).map(|()| rep))
+        {
+            Ok(rep) => {
+                println!(
+                    "pid_nozzle: sheets={} equipment={} total_nozzles={} connected={} spare={} orphan={}",
+                    rep.summary.sheets_scanned,
+                    rep.summary.equipment_with_nozzles,
+                    rep.summary.total_nozzles,
+                    rep.summary.connected_nozzles,
+                    rep.summary.spare_nozzles,
+                    rep.summary.orphan_nozzles,
+                );
+                if args.out_dir.is_none()
+                    && args.diff_with.is_none()
+                    && args.export_package.is_none()
+                    && args.export_hazop.is_none()
+                    && args.export_utilities.is_none()
+                    && args.export_valves.is_none()
+                {
+                    return;
+                }
+            }
+            Err(err) => {
+                eprintln!("error: export-nozzles failed: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if let Some(ref vm_out) = args.export_valves {
         match extract_valves_from_path(&effective_input)

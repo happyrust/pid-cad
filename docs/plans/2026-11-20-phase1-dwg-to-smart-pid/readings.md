@@ -2122,3 +2122,41 @@
 | `scripts\fmt-newhunks.ps1` | — | `package.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 53. L3-5 / L3-6 / L2-2 / L6-2（#164）：应用内 P&ID 设备管口条件表提取、接管规格自动继承与备用口/孤立管口巡检命令 `PIDNOZZLE` 及 CLI `--export-nozzles` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `962a34c5c`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{nozzle,mod}.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-22-issue164/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_nozzle.txt`、`cli_export_nozzles.txt`、`real_out/real164_summary.json`、`fmt_arch_pytest.txt`、`rust_gates_status.json`） |
+
+### 53.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_164_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidnozzle_extracts_explicit_and_implicit_nozzles_orientations_specs_spare_and_orphans_and_steps_camera`（构造跨双标签页的立式罐 `V-1641` 右侧接管口 + 顶部备用盲口 + 孤立管口，以及无显式管口图块的离心泵 `P-1642` 左侧隐式接管口，验证等比包围盒方位判定 `right/top/left`、相连管线 `100 mm / CS150` 与根部阀 `BV16401` 回溯、`SPARE / ORPHAN / EQUIPMENT` 筛选高亮与 `PIDNOZZLE NEXT ALLTABS` 跨标签页巡检），运行按预期在 `nozzles.json` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`30 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/nozzle.rs`（`analyze_pid_equipment_nozzles`、`extract_nozzles_from_path`、`write_pid_nozzle_file`）：统一兼容未升格 `.dxf`/`.dwg`/`.pid` 与已升格 `PID_AUTHOR` 模型，联合提取显式 `PIDNozzle` 图块与直触设备壳体的无块隐式接管点（按半宽/半高归一化向量计算 `top/bottom/left/right` 壳体方位），沿无歧义相连管段回溯管线号、公称直径、管道等级与近端根部阀，精准区分 `connected`、`spare_or_manway` 与 `orphan_nozzle`，导出 `.json` 与带 UTF-8 BOM 的 `.csv` / `.tsv` 10 列设备管口条件表；
+  2. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDNOZZLE [SUMMARY | ALL | CONNECTED | SPARE | ORPHAN | EQUIPMENT "<设备位号>" | NEXT] [ALLTABS] [EXPORT "<.json|.csv|.tsv>"]`，并在 `examples/pid_convert.rs` 新增 `--export-nozzles <PATH>`（真实中位规模 SPPID 图 CLI 独立提取 `2` 台设备的 `18` 个管口，退出码 `0`）。
+
+### 53.2 真实双标准四图成对跨标签页设备管口条件表提取与巡检实测
+
+| 图纸组 | 样本形态 | 源图 SHA-256 前缀对 | 带管口设备数 | 总管口数（显式 / 隐式合成） | `connected` 已接管 | `spare_or_manway` 备用口 | `orphan_nozzle` 孤立口 | `.csv` 条件表与 `NEXT` 巡检 |
+|---|---|---|---:|---:|---:|---:|---:|---|
+| `SP01 + SP02` | 未升格 SPPID 拆分生产图对 | `2164f88bbb57` + `fc2c812dc182` | **`8`** | **`80`**（`12` / `68`） | **`80`** | `0` | `0` | **通过** |
+| `LG01 + LG02` | 未升格原生 AutoCAD 存量图对 | `a0f05f81a655` + `28ed389e23cb` | **`14`** | **`56`**（`0` / `56`） | **`56`** | `0` | `0` | **通过** |
+
+### 53.3 固定门禁读数
+
+| 门禁项 | 改前读数（§52.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,252` 条（`7,164` 过 / `87` 忽略 / `1` 既有 `.pen`） | **`7,254` 条**（**`7,165` 过** / **`88` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图跨标签页显隐式设备管口对账），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `nozzle.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |

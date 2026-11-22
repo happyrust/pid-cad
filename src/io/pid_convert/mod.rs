@@ -14,6 +14,7 @@ pub mod find;
 pub mod hazop;
 pub mod isolate;
 pub mod loops;
+pub mod nozzle;
 pub mod opc;
 pub mod package;
 pub mod promote;
@@ -32,6 +33,13 @@ pub use hazop::{
     analyze_pid_hazop_nodes, format_pid_hazop_delimited, hazop_node_matches_query,
     HazopSafeguardStatus, PidHazopNode, PidHazopReport, PidHazopSummary, HAZOP_CSV_HEADERS,
 };
+pub use nozzle::{
+    analyze_pid_equipment_nozzles, format_pid_nozzle_delimited, nozzle_matches_equipment,
+    NozzleOrientation, NozzleStatus, PidNozzleItem, PidNozzleReport, PidNozzleSummary,
+    NOZZLE_CSV_HEADERS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use nozzle::{extract_nozzles_from_path, write_pid_nozzle_file};
 pub use utility::{
     analyze_pid_utilities_and_interfaces, classify_fluid_service, format_pid_utility_delimited,
     FluidCategory, PidBatteryLimitInterface, PidServiceSummaryRow, PidUtilityReport,
@@ -42,6 +50,7 @@ pub use valve_mto::{
     PidValveItem, PidValveMtoRow, PidValveReport, PidValveSummary, ValveCategory, ValveSubtype,
     VALVE_CSV_HEADERS,
 };
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use valve_mto::{extract_valves_from_path, write_pid_valve_file};
 

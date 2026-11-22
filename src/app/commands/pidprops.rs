@@ -44,7 +44,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDRENUM",
         "PIDHAZOP",
         "PIDUTILITY",
-        "PIDVALVE"
+        "PIDVALVE",
+        "PIDNOZZLE"
     ]
 });
 
@@ -315,6 +316,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidvalve_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidnozzle_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -4061,6 +4065,247 @@ impl OpenCADStudio {
             other => {
                 self.command_line.push_error(&format!(
                     "PIDVALVE: 未知子命令 {other}（支持 SUMMARY / ALL / MANUAL / ACTUATED / RELIEF / UNRESOLVED / TYPE / NEXT / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
+
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidnozzle_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            analyze_pid_equipment_nozzles, nozzle_matches_equipment, write_pid_nozzle_file,
+            NozzleStatus, OpcSheetInput,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDNOZZLE") {
+            return None;
+        }
+
+        let mut action: Option<String> = None;
+        let mut equip_query: Option<String> = None;
+        let mut all_tabs = false;
+        let mut export_path: Option<std::path::PathBuf> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            let up = tok.to_ascii_uppercase();
+            match up.as_str() {
+                "ALLTABS" => {
+                    all_tabs = true;
+                    idx += 1;
+                }
+                "SUMMARY" | "ALL" | "CONNECTED" | "SPARE" | "ORPHAN" | "NEXT" => {
+                    action = Some(up);
+                    idx += 1;
+                }
+                "EQUIPMENT" | "EQUIP" => {
+                    let Some(q) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDNOZZLE EQUIPMENT: 缺少设备位号关键字。");
+                        return Some(Task::none());
+                    };
+                    action = Some("EQUIPMENT".to_string());
+                    equip_query = Some(q.clone());
+                    idx += 2;
+                }
+                "EXPORT" => {
+                    let Some(next_tok) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDNOZZLE EXPORT: 缺少输出文件路径（.json/.csv/.tsv）。");
+                        return Some(Task::none());
+                    };
+                    export_path = Some(std::path::PathBuf::from(next_tok));
+                    idx += 2;
+                }
+                _ => {
+                    if action.is_none() {
+                        action = Some("EQUIPMENT".to_string());
+                        equip_query = Some(tok.clone());
+                    }
+                    idx += 1;
+                }
+            }
+        }
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<OpcSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+
+        let rep = analyze_pid_equipment_nozzles(&sheet_inputs);
+
+        if let Some(ref out_p) = export_path {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(err) = write_pid_nozzle_file(&rep, out_p) {
+                self.command_line
+                    .push_error(&format!("PIDNOZZLE EXPORT: {err}"));
+                return Some(Task::none());
+            }
+        }
+
+        let eff_action = action.as_deref().unwrap_or("SUMMARY");
+        let filtered: Vec<_> = rep
+            .nozzles
+            .iter()
+            .filter(|nz| match eff_action {
+                "CONNECTED" => nz.status == NozzleStatus::Connected,
+                "SPARE" => nz.status == NozzleStatus::SpareOrManway,
+                "ORPHAN" => nz.status == NozzleStatus::OrphanNozzle,
+                "EQUIPMENT" => equip_query
+                    .as_deref()
+                    .is_some_and(|q| nozzle_matches_equipment(nz, q)),
+                _ => true,
+            })
+            .collect();
+
+        match eff_action {
+            "SUMMARY" => {
+                self.command_line.push_output(&format!(
+                    "PIDNOZZLE: 扫描图纸={} | 带管口设备={} | 总管口={}（显式={}，隐式合成={}，已接管={}，备用盲口={}，孤立管口={}）。",
+                    rep.summary.sheets_scanned,
+                    rep.summary.equipment_with_nozzles,
+                    rep.summary.total_nozzles,
+                    rep.summary.explicit_nozzles,
+                    rep.summary.implicit_nozzles,
+                    rep.summary.connected_nozzles,
+                    rep.summary.spare_nozzles,
+                    rep.summary.orphan_nozzles,
+                ));
+            }
+            "ALL" | "CONNECTED" | "SPARE" | "ORPHAN" | "EQUIPMENT" => {
+                let mut by_tab: std::collections::BTreeMap<usize, Vec<document::Handle>> =
+                    std::collections::BTreeMap::new();
+                for nz in &filtered {
+                    let dst = by_tab.entry(nz.tab_index).or_default();
+                    for &h in &nz.member_handles {
+                        if !dst.contains(&h) {
+                            dst.push(h);
+                        }
+                    }
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                let mut sel_cnt = 0usize;
+                for (&ti, hs) in &by_tab {
+                    if ti < self.tabs.len() && !hs.is_empty() {
+                        self.tabs[ti].scene.select_entities(hs);
+                        sel_cnt += hs.len();
+                    }
+                }
+                if eff_action == "EQUIPMENT"
+                    && !filtered.is_empty()
+                    && filtered[0].tab_index < self.tabs.len()
+                    && filtered[0].tab_index != self.active_tab
+                {
+                    let dt = filtered[0].tab_index;
+                    let _ = self.update(Message::TabSwitch(dt));
+                    self.active_tab = dt;
+                }
+                if let Some(cur_hs) = by_tab.get(&self.active_tab).filter(|h| !h.is_empty()) {
+                    let _ = self.tabs[self.active_tab].scene.zoom_to_entities(cur_hs);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDNOZZLE {eff_action}: 匹配 {} 个管口，跨打开图纸高亮 {sel_cnt} 个图元。",
+                    filtered.len()
+                ));
+            }
+            "NEXT" => {
+                if filtered.is_empty() {
+                    self.command_line
+                        .push_output("PIDNOZZLE NEXT: 未找到可巡检的管口图元。");
+                    return Some(self.finish_dispatch(cmd));
+                }
+                let cur_tab = self.active_tab;
+                let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[cur_tab]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                let cur_pos = filtered
+                    .iter()
+                    .position(|nz| nz.tab_index == cur_tab && sel_set.contains(&nz.primary_handle));
+                let next_idx = cur_pos.map(|p| (p + 1) % filtered.len()).unwrap_or(0);
+                let chosen = filtered[next_idx];
+                let dest_tab = chosen.tab_index;
+
+                if dest_tab < self.tabs.len() && dest_tab != self.active_tab {
+                    let _ = self.update(Message::TabSwitch(dest_tab));
+                    self.active_tab = dest_tab;
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                if dest_tab < self.tabs.len() {
+                    self.tabs[dest_tab]
+                        .scene
+                        .select_entities(&chosen.member_handles);
+                    let zoomed = self.tabs[dest_tab]
+                        .scene
+                        .zoom_to_entities(&chosen.member_handles);
+                    if !zoomed {
+                        let mut cam = self.tabs[dest_tab].scene.camera.borrow_mut();
+                        let z = cam.target.z;
+                        cam.target = glam::DVec3::new(chosen.x, chosen.y, z);
+                    }
+                    self.refresh_properties();
+                }
+                self.command_line.push_output(&format!(
+                    "PIDNOZZLE NEXT [{}/{}]: {} {}（{}，方位={}，状态={}）。",
+                    next_idx + 1,
+                    filtered.len(),
+                    chosen.equipment_tag,
+                    chosen.nozzle_id,
+                    chosen.drawing_code,
+                    chosen.orientation.as_str(),
+                    chosen.status.as_str(),
+                ));
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDNOZZLE: 未知子命令 {other}（支持 SUMMARY / ALL / CONNECTED / SPARE / ORPHAN / EQUIPMENT / NEXT / EXPORT）。"
                 ));
                 return Some(Task::none());
             }
@@ -11737,6 +11982,320 @@ mod tests {
         std::fs::write(
             out_dir.join("real163_summary.json"),
             format!("{}\n", serde_json::to_string_pretty(&sanitized).unwrap()),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidnozzle_extracts_explicit_and_implicit_nozzles_orientations_specs_spare_and_orphans_and_steps_camera(
+    ) {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let mut app = app();
+
+        // Tab 1: DWG-164-01.dxf with Drum V-1641 (right connected nozzle + top spare nozzle) and an orphan nozzle
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-164-01.dxf".to_string();
+        let (nz_right_h, nz_top_spare_h, nz_orphan_h) = {
+            let doc = &mut app.tabs[tab1].scene.document;
+            define_sppid_block(doc, "1TO1PARAMETRIC V DRUM", 12.0, 24.0);
+            define_sppid_block(doc, "FLANGED NOZZLE WITH BLIND", 4.0, 4.0);
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+
+            let mut tb =
+                Text::with_value("DWG-164-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            // Drum V-1641 at (200, 300)
+            let mut drum = Insert::new("1TO1PARAMETRIC V DRUM", Vector3::new(200.0, 300.0, 0.0));
+            drum.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(drum)).unwrap();
+            let mut dt =
+                Text::with_value("V-1641", Vector3::new(196.0, 322.0, 0.0)).with_height(2.5);
+            dt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(dt)).unwrap();
+
+            // Right Connected Nozzle at (208, 300) -> pipe -> BV16401 -> 100-PG-16401-CS150
+            let mut nzr = Insert::new("FLANGED NOZZLE WITH BLIND", Vector3::new(208.0, 300.0, 0.0));
+            nzr.common.layer = "10".to_string();
+            let nz_right_h = doc.add_entity(document::EntityType::Insert(nzr)).unwrap();
+
+            let mut p1 = Line::from_points(
+                Vector3::new(210.0, 300.0, 0.0),
+                Vector3::new(267.0, 300.0, 0.0),
+            );
+            p1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p1)).unwrap();
+
+            let mut bv = Insert::new("BALL VALVE TYPE 2", Vector3::new(270.0, 300.0, 0.0));
+            bv.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bv)).unwrap();
+            let mut bvt =
+                Text::with_value("BV16401", Vector3::new(266.0, 306.0, 0.0)).with_height(2.5);
+            bvt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(bvt)).unwrap();
+
+            let mut p2 = Line::from_points(
+                Vector3::new(273.0, 300.0, 0.0),
+                Vector3::new(340.0, 300.0, 0.0),
+            );
+            p2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(p2)).unwrap();
+            let mut ltxt = Text::with_value("100-PG-16401-CS150", Vector3::new(290.0, 303.0, 0.0))
+                .with_height(2.5);
+            ltxt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(ltxt)).unwrap();
+
+            // Top Spare Nozzle at (200, 314) without pipe
+            let mut nzt = Insert::new("FLANGED NOZZLE WITH BLIND", Vector3::new(200.0, 314.0, 0.0));
+            nzt.common.layer = "10".to_string();
+            let nz_top_spare_h = doc.add_entity(document::EntityType::Insert(nzt)).unwrap();
+
+            // Orphan Nozzle at (500, 500) far from any equipment
+            let mut nzo = Insert::new("FLANGED NOZZLE WITH BLIND", Vector3::new(500.0, 500.0, 0.0));
+            nzo.common.layer = "10".to_string();
+            let nz_orphan_h = doc.add_entity(document::EntityType::Insert(nzo)).unwrap();
+
+            (nz_right_h, nz_top_spare_h, nz_orphan_h)
+        };
+
+        // Tab 2: DWG-164-02.dxf with legacy-style implicit suction connection onto Pump P-1642
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-164-02.dxf".to_string();
+        let imp_pipe_h = {
+            let doc = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc, "CENTRIFUGAL PUMP", 8.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-164-02", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut pump = Insert::new("CENTRIFUGAL PUMP", Vector3::new(150.0, 260.0, 0.0));
+            pump.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Insert(pump)).unwrap();
+            let mut pt =
+                Text::with_value("P-1642", Vector3::new(146.0, 268.0, 0.0)).with_height(2.5);
+            pt.common.layer = "10".to_string();
+            doc.add_entity(document::EntityType::Text(pt)).unwrap();
+
+            let mut sp = Line::from_points(
+                Vector3::new(80.0, 260.0, 0.0),
+                Vector3::new(145.0, 260.0, 0.0),
+            );
+            sp.common.layer = "1".to_string();
+            let imp_pipe_h = doc.add_entity(document::EntityType::Line(sp)).unwrap();
+            let mut slbl = Text::with_value("80-CW-16402-CS150", Vector3::new(95.0, 263.0, 0.0))
+                .with_height(2.5);
+            slbl.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(slbl)).unwrap();
+
+            imp_pipe_h
+        };
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        app.active_tab = tab1;
+
+        let tmp = std::env::temp_dir().join(format!("ocs_pidnozzle_164_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let nz_json = tmp.join("nozzles.json");
+        let nz_csv = tmp.join("nozzles.csv");
+        let _ = app.run_command_line(&format!(
+            "PIDNOZZLE ALLTABS EXPORT \"{}\"",
+            nz_json.display()
+        ));
+        assert!(
+            nz_json.is_file(),
+            "PIDNOZZLE EXPORT must write nozzles.json"
+        );
+        let _ = app.run_command_line(&format!(
+            "PIDNOZZLE SUMMARY ALLTABS EXPORT \"{}\"",
+            nz_csv.display()
+        ));
+        let csv_raw = std::fs::read_to_string(&nz_csv).unwrap();
+        assert!(
+            csv_raw.starts_with('\u{feff}')
+                && csv_raw.contains("V-1641")
+                && csv_raw.contains("P-1642")
+        );
+
+        let rep: Value = serde_json::from_str(&std::fs::read_to_string(&nz_json).unwrap()).unwrap();
+        assert_eq!(rep["summary"]["total_nozzles"].as_u64(), Some(4));
+        assert_eq!(rep["summary"]["connected_nozzles"].as_u64(), Some(2));
+        assert_eq!(rep["summary"]["spare_nozzles"].as_u64(), Some(1));
+        assert_eq!(rep["summary"]["orphan_nozzles"].as_u64(), Some(1));
+        assert_eq!(rep["summary"]["implicit_nozzles"].as_u64(), Some(1));
+
+        let rows = rep["nozzles"].as_array().unwrap();
+        let v_right = rows
+            .iter()
+            .find(|r| {
+                r["equipment_tag"].as_str() == Some("V-1641")
+                    && r["status"].as_str() == Some("connected")
+            })
+            .expect("must have V-1641 connected right nozzle");
+        assert_eq!(v_right["orientation"].as_str(), Some("right"));
+        assert_eq!(v_right["nominal_diameter"].as_str(), Some("100 mm"));
+        assert_eq!(v_right["piping_spec"].as_str(), Some("CS150"));
+        assert_eq!(v_right["root_valve"].as_str(), Some("BV16401"));
+
+        let p_left = rows
+            .iter()
+            .find(|r| r["equipment_tag"].as_str() == Some("P-1642"))
+            .expect("must have P-1642 implicit left nozzle");
+        assert_eq!(p_left["orientation"].as_str(), Some("left"));
+        assert_eq!(p_left["nominal_diameter"].as_str(), Some("80 mm"));
+
+        // Filter SPARE, ORPHAN, and EQUIPMENT V-1641
+        let _ = app.run_command_line("PIDNOZZLE SPARE ALLTABS");
+        assert!(has_sel(&app, tab1, nz_top_spare_h));
+        assert!(!has_sel(&app, tab1, nz_right_h));
+
+        let _ = app.run_command_line("PIDNOZZLE ORPHAN ALLTABS");
+        assert!(has_sel(&app, tab1, nz_orphan_h));
+        assert!(!has_sel(&app, tab1, nz_top_spare_h));
+
+        let _ = app.run_command_line("PIDNOZZLE EQUIPMENT V-1641 ALLTABS");
+        assert!(has_sel(&app, tab1, nz_right_h));
+        assert!(has_sel(&app, tab1, nz_top_spare_h));
+        assert!(!has_sel(&app, tab1, nz_orphan_h));
+
+        // Stateless NEXT steps across all 4 nozzles including Tab 2 implicit nozzle
+        let mut visited_tab2 = false;
+        for _ in 0..4 {
+            let _ = app.run_command_line("PIDNOZZLE NEXT ALLTABS");
+            if app.active_tab == tab2 && has_sel(&app, tab2, imp_pipe_h) {
+                visited_tab2 = true;
+            }
+        }
+        assert!(
+            visited_tab2,
+            "PIDNOZZLE NEXT ALLTABS must visit Tab 2 implicit nozzle"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads 4 real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into OpenCADStudio and verifies PIDNOZZLE ALLTABS explicit & implicit nozzle extraction, orientation & spec resolution, and NEXT stepping"]
+    fn real_multi_tab_pidnozzle_explicit_and_implicit_schedule_audit() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sp_raw) = std::env::var("OCS_PID_REAL164_SPPID_PAIR") else {
+            println!("OCS_PID_REAL164_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(lg_raw) = std::env::var("OCS_PID_REAL164_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL164_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL164_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real164"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sp_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sp_raw).collect();
+        let lg_paths: Vec<std::path::PathBuf> = std::env::split_paths(&lg_raw).collect();
+        assert_eq!(sp_paths.len(), 2);
+        assert_eq!(lg_paths.len(), 2);
+
+        let groups = [
+            ("SP01_SP02", "sppid_pair", &sp_paths),
+            ("LG01_LG02", "legacy_autocad_pair", &lg_paths),
+        ];
+
+        let mut out_groups = Vec::new();
+        for (gid, kind, pair) in &groups {
+            let mut sha_pair = Vec::new();
+            let mut app = app();
+            for (pi, p) in pair.iter().enumerate() {
+                let sha_pfx =
+                    format!("{:x}", Sha256::digest(std::fs::read(p).unwrap()))[..12].to_string();
+                sha_pair.push(sha_pfx);
+                let ti = if pi == 0 {
+                    app.active_tab
+                } else {
+                    let _ = app.update(Message::TabNew);
+                    app.active_tab
+                };
+                app.tabs[ti].scene.document = crate::io::load_file(p).unwrap();
+                app.tabs[ti].tab_title = format!("{gid}_{}.dxf", pi + 1);
+            }
+
+            let nz_json = out_dir.join(format!("{gid}_nozzles.json"));
+            let nz_csv = out_dir.join(format!("{gid}_nozzles.csv"));
+            let _ = app.run_command_line(&format!(
+                "PIDNOZZLE ALLTABS EXPORT \"{}\"",
+                nz_json.display()
+            ));
+            let _ = app.run_command_line(&format!(
+                "PIDNOZZLE SUMMARY ALLTABS EXPORT \"{}\"",
+                nz_csv.display()
+            ));
+            let csv_txt = std::fs::read_to_string(&nz_csv).unwrap();
+            assert!(
+                csv_txt.starts_with('\u{feff}')
+                    && csv_txt.contains("DrawingCode,EquipmentTag,NozzleId")
+            );
+            let rep: Value =
+                serde_json::from_str(&std::fs::read_to_string(&nz_json).unwrap()).unwrap();
+            let _ = std::fs::remove_file(&nz_json);
+            let _ = std::fs::remove_file(&nz_csv);
+
+            assert!(
+                rep["summary"]["total_nozzles"].as_u64().unwrap_or(0) >= 4,
+                "{gid} must extract >= 4 equipment nozzles"
+            );
+            assert!(
+                rep["summary"]["connected_nozzles"].as_u64().unwrap_or(0) >= 1,
+                "{gid} must resolve >= 1 connected nozzle"
+            );
+
+            let _ = app.run_command_line("PIDNOZZLE NEXT ALLTABS");
+            assert!(
+                !app.tabs[app.active_tab]
+                    .scene
+                    .selected_entities()
+                    .is_empty(),
+                "PIDNOZZLE NEXT ALLTABS must select target nozzle entity"
+            );
+
+            out_groups.push(json!({
+                "group": gid,
+                "kind": kind,
+                "sha256_prefixes": sha_pair,
+                "sheets_scanned": rep["summary"]["sheets_scanned"],
+                "equipment_with_nozzles": rep["summary"]["equipment_with_nozzles"],
+                "total_nozzles": rep["summary"]["total_nozzles"],
+                "explicit_nozzles": rep["summary"]["explicit_nozzles"],
+                "implicit_nozzles": rep["summary"]["implicit_nozzles"],
+                "connected_nozzles": rep["summary"]["connected_nozzles"],
+                "spare_nozzles": rep["summary"]["spare_nozzles"],
+                "orphan_nozzles": rep["summary"]["orphan_nozzles"],
+            }));
+        }
+
+        std::fs::write(
+            out_dir.join("real164_summary.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()
+            ),
         )
         .unwrap();
     }
