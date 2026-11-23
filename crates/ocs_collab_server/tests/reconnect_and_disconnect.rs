@@ -307,19 +307,38 @@ async fn reconnect_with_resume_transfers_claim_and_distinguishes_disconnected_vs
             other => panic!("expected OpApplied(1) on resumed session A2, got {other:?}"),
         }
     }
-    assert!(matches!(
-        b.recv_msg().await,
-        ServerMessage::OpApplied { revision: 1, .. }
-    ));
+    // The edit renews the held claim (#87), so ClaimGranted can sit ahead of
+    // the disconnect on B's socket.
+    let mut saw_applied = false;
+    let mut saw_disconnected = false;
+    for _ in 0..4 {
+        match b.recv_msg().await {
+            ServerMessage::OpApplied { revision: 1, .. } => saw_applied = true,
+            ServerMessage::ClaimGranted { tag, .. } if tag == "P-1001" => {}
+            other if !saw_applied => panic!("expected OpApplied(1) on B, got {other:?}"),
+            other => panic!("expected PeerDisconnected after the resumed edit, got {other:?}"),
+        }
+        if saw_applied {
+            break;
+        }
+    }
+    assert!(saw_applied, "B must hear the resumed edit");
 
     // #37 part 2: Now cut A2 and do NOT reconnect -> after heartbeat_timeout (2s),
     // B receives PeerDisconnected first, then ClaimReleased(expired) + PeerLeft(s2)!
     proxy_a.cut_all();
     drop(a2);
-    assert!(matches!(
-        b.recv_msg().await,
-        ServerMessage::PeerDisconnected(ref p) if p.session_id == s2
-    ));
+    for _ in 0..4 {
+        match b.recv_msg().await {
+            ServerMessage::ClaimGranted { tag, .. } if tag == "P-1001" => {}
+            ServerMessage::PeerDisconnected(peer) if peer.session_id == s2 => {
+                saw_disconnected = true;
+                break;
+            }
+            other => panic!("expected PeerDisconnected on second cut, got {other:?}"),
+        }
+    }
+    assert!(saw_disconnected, "B must hear PeerDisconnected for the resumed session");
     let mut saw_released = false;
     let mut saw_left_s2 = false;
     for _ in 0..2 {
