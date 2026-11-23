@@ -340,6 +340,9 @@ impl OpenCADStudio {
         if idx == self.active_tab {
             self.close_document_tools(None);
         }
+        if let Some(closing_id) = closing_tab_id {
+            self.end_collab_if_drawing_closed(closing_id);
+        }
         // Only-tab case: when the lone non-start tab closes, fall
         // back to the Start tab if it exists; otherwise spawn a
         // fresh blank drawing (legacy behaviour).

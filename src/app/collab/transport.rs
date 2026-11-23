@@ -124,6 +124,10 @@ pub(super) struct Link {
     /// session loop to close politely and redial immediately using the
     /// supplied file claim (or `None` to join fresh).
     realign: Arc<RealignSlot>,
+    /// The session's drawing was closed (#96). The thread says goodbye, so
+    /// the server retires the session, and does not dial again until this
+    /// is cleared.
+    hold: Arc<AtomicBool>,
     heartbeat: Duration,
     /// How long a session that is left to join again stays on the line for
     /// the server to take its goodbye ([`leave`]).
@@ -152,6 +156,7 @@ impl Link {
             outbox: Arc::clone(app_outbox()),
             stop: Arc::new(AtomicBool::new(false)),
             realign: Arc::clone(app_realign()),
+            hold: Arc::clone(app_hold()),
             heartbeat: HEARTBEAT_INTERVAL,
             leave_wait: LEAVE_WAIT,
             tags: Some(TagsLine {
@@ -169,6 +174,7 @@ impl Link {
             outbox: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             stop: Arc::new(AtomicBool::new(false)),
             realign: Arc::new(Mutex::new(None)),
+            hold: Arc::new(AtomicBool::new(false)),
             heartbeat: HEARTBEAT_INTERVAL,
             leave_wait: LEAVE_WAIT,
             tags: None,
@@ -185,6 +191,7 @@ impl Link {
             outbox: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             stop: Arc::new(AtomicBool::new(false)),
             realign: Arc::new(Mutex::new(None)),
+            hold: Arc::new(AtomicBool::new(false)),
             heartbeat: HEARTBEAT_INTERVAL,
             leave_wait: LEAVE_WAIT,
             tags: Some(TagsLine {
@@ -250,6 +257,20 @@ impl Link {
         if let Ok(mut slot) = self.realign.lock() {
             *slot = Some(claim);
         }
+    }
+
+    /// The session's drawing was closed: say goodbye and stay down (#96).
+    pub(super) fn request_hold(&self) {
+        self.hold.store(true, Ordering::Relaxed);
+    }
+
+    /// A drawing is open again: the next pass of the thread may join (#96).
+    pub(super) fn release_hold(&self) {
+        self.hold.store(false, Ordering::Relaxed);
+    }
+
+    pub(super) fn held(&self) -> bool {
+        self.hold.load(Ordering::Relaxed)
     }
 
     /// Ask this link's transport thread to say goodbye and exit.
@@ -360,6 +381,22 @@ fn publish_config(slot: &Mutex<ClientConfig>, config: ClientConfig) {
     if let Ok(mut slot) = slot.lock() {
         *slot = config;
     }
+}
+
+/// Whether the app client's drawing is closed, so its thread stays down (#96).
+fn app_hold() -> &'static Arc<AtomicBool> {
+    static SLOT: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+    SLOT.get_or_init(|| Arc::new(AtomicBool::new(false)))
+}
+
+/// Ask the app's transport thread to end the session and stay down (#96).
+pub(super) fn request_hold() {
+    app_hold().store(true, Ordering::Relaxed);
+}
+
+/// A drawing is open again: the app's transport thread may join (#96).
+pub(super) fn release_hold() {
+    app_hold().store(false, Ordering::Relaxed);
 }
 
 /// Pending realignment slot of the app's client.
@@ -693,6 +730,9 @@ enum Ended {
     Realign(String),
     /// The app is quitting: the socket was closed on purpose.
     Quit,
+    /// The drawing was closed. The session was retired; do not dial until
+    /// a drawing is open again (#96).
+    Held,
     /// The subscription is gone; nothing may reconnect.
     SubscriptionGone,
 }
@@ -977,6 +1017,15 @@ pub(super) fn run_client(
         if link.stop_requested() || sender.is_closed() {
             return Ok(());
         }
+        if link.held() {
+            while link.held() {
+                if link.stop_requested() || sender.is_closed() {
+                    return Ok(());
+                }
+                std::thread::sleep(BACKOFF_SLICE);
+            }
+            continue;
+        }
         let config = link.config();
         if config.server_url.trim().is_empty() {
             // The subscription is gated on a configured address, so this is
@@ -1026,6 +1075,27 @@ pub(super) fn run_client(
         let (reason, immediate) = match session {
             Ok(Ended::SubscriptionGone) => return Ok(()),
             Ok(Ended::Quit) => return Ok(()),
+            Ok(Ended::Held) => {
+                if emit(
+                    sender,
+                    link,
+                    CollabEvent::Disconnected {
+                        reason: "图纸已关闭，编辑会话已结束".to_owned(),
+                        will_retry: false,
+                    },
+                )
+                .is_err()
+                {
+                    return Ok(());
+                }
+                while link.held() {
+                    if link.stop_requested() || sender.is_closed() {
+                        return Ok(());
+                    }
+                    std::thread::sleep(BACKOFF_SLICE);
+                }
+                continue;
+            }
             Ok(Ended::Realign(reason)) => (reason, true),
             Ok(Ended::Closed(reason)) => (reason, false),
             Err(error) => (error, false),
@@ -1208,6 +1278,13 @@ fn run_session(
         if sender.is_closed() {
             close(&mut ws);
             return Ok(Ended::SubscriptionGone);
+        }
+        if link.held() {
+            log("图纸已关闭：发送 close 帧并结束编辑会话");
+            leave(&mut ws, link.leave_wait, || {
+                link.stop_requested() || sender.is_closed()
+            });
+            return Ok(Ended::Held);
         }
         if let Some(target_claim) = link.take_realign() {
             *seen = target_claim.map(|c| Seen {
@@ -1715,6 +1792,88 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Closing the drawing sends a close frame and stays down; releasing the
+    /// hold joins again (#96).
+    #[test]
+    fn closing_the_drawing_sends_close_and_reopening_joins_again() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let url = format!("ws://{addr}/ws");
+        let hellos = std::sync::Arc::new(Mutex::new(0u32));
+        let closes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hellos_writer = std::sync::Arc::clone(&hellos);
+        let closes_writer = std::sync::Arc::clone(&closes);
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((stream, _)) = listener.accept() else {
+                    return;
+                };
+                let Ok(mut ws) = tungstenite::accept(stream) else {
+                    continue;
+                };
+                let welcome = r#"{"type":"welcome","session_id":"s-test","base_revision":0,"peers":[],"claims":[]}"#;
+                loop {
+                    match ws.read() {
+                        Ok(Message::Text(text)) => {
+                            if text.contains("\"type\":\"hello\"") {
+                                if let Ok(mut count) = hellos_writer.lock() {
+                                    *count += 1;
+                                }
+                                if ws.send(Message::text(welcome)).is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Ok(Message::Close(_)) => {
+                            closes_writer.fetch_add(1, Ordering::Relaxed);
+                            let _ = ws.close(None);
+                            let _ = ws.flush();
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(_) => return,
+                    }
+                }
+            }
+        });
+
+        let link = Link::detached(config_for(url));
+        let (mut receiver, worker) = start_client(&link);
+        assert!(session_came_up(&mut receiver), "the first join never came up");
+
+        link.request_hold();
+        let deadline = Instant::now() + SESSION_WAIT;
+        let mut told = false;
+        while Instant::now() < deadline {
+            match receiver.try_recv() {
+                Ok(CollabEvent::Disconnected { will_retry, .. }) if !will_retry => {
+                    told = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(mpsc::TryRecvError::Closed) => break,
+                Err(mpsc::TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(told, "closing the drawing must report the session ended");
+        assert!(
+            closes.load(Ordering::Relaxed) >= 1,
+            "the server must see a close frame"
+        );
+
+        link.release_hold();
+        assert!(
+            session_came_up(&mut receiver),
+            "opening the drawing must join again"
+        );
+        let hello_count = hellos.lock().expect("hello count").clone();
+        assert!(hello_count >= 2, "a new session says hello again, saw {hello_count}");
+
+        link.request_stop();
+        let _ = worker.join();
+        let _ = server.join();
     }
 
     /// VAL-CLI-002: the read loop really emits `heartbeat` frames on its

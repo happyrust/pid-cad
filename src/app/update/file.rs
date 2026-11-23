@@ -3406,6 +3406,7 @@ impl OpenCADStudio {
         // boundary announces `DocumentOpened` to native plugins exactly once
         // for this load (API v9).
         self.tabs[i].note_document_loaded(ifccad_session);
+        self.resume_collab_after_drawing_opened();
         // The tab list just changed (and the active tab with it): remember
         // it for the next boot's restore flow (web session memory).
         #[cfg(target_arch = "wasm32")]

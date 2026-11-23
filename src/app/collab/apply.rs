@@ -144,6 +144,60 @@ impl OpenCADStudio {
         false
     }
 
+    /// The drawing of this session was closed: retire it. The transport
+    /// sends `close`, the server ends the session and releases its claims,
+    /// and this client stays disconnected until a drawing is opened (#96).
+    pub(in crate::app) fn end_collab_if_drawing_closed(&mut self, tab: u64) {
+        let session_drawing = match self.collab.document {
+            Some(open) => open == tab,
+            None => {
+                self.collab.had_session
+                    && self.tabs.iter().filter(|open| !open.is_start).count() == 1
+                    && self.tabs.iter().any(|open| open.id == tab && !open.is_start)
+            }
+        };
+        if !session_drawing {
+            return;
+        }
+        if !self.collab.had_session && self.collab.session_id.is_none() && !self.collab.connected
+        {
+            return;
+        }
+        self.collab.document = None;
+        self.collab.held_closed = true;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(link) = &self.collab.link {
+                link.request_hold();
+            } else {
+                super::transport::request_hold();
+            }
+        }
+        if self.collab.connected || self.collab.session_id.is_some() {
+            self.collab.apply(super::CollabEvent::Disconnected {
+                reason: "图纸已关闭，编辑会话已结束".to_owned(),
+                will_retry: false,
+            });
+        }
+    }
+
+    /// A drawing was opened after its session had been ended by a close.
+    /// The transport may join again (#96).
+    pub(in crate::app) fn resume_collab_after_drawing_opened(&mut self) {
+        if !self.collab.held_closed {
+            return;
+        }
+        self.collab.held_closed = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(link) = &self.collab.link {
+                link.release_hold();
+            } else {
+                super::transport::release_hold();
+            }
+        }
+    }
+
     /// Whether tab `i` holds the session's drawing, settling it on `i` when
     /// the session has no document yet and `i` is the drawing in front.
     pub(in crate::app) fn is_collab_tab(&mut self, i: usize) -> bool {

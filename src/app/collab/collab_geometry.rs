@@ -424,6 +424,33 @@ fn moving_turning_and_scaling_a_symbol_reaches_the_peer() {
 }
 
 #[test]
+fn closing_the_session_drawing_ends_the_local_session_until_reopened() {
+    let mut app = drawing();
+    let link = app.collab.attach_detached_link();
+    app.collab.server_url = "ws://127.0.0.1:9/ws".to_owned();
+    app.collab.had_session = true;
+    app.collab.connected = true;
+    app.collab.session_id = Some("s-1".to_owned());
+    app.collab.claims.insert("P-1001".to_owned(), "u1".to_owned());
+    let tab = app.tabs[app.active_tab].id;
+    app.collab.document = Some(tab);
+
+    app.end_collab_if_drawing_closed(tab);
+
+    assert!(link.held(), "the transport is asked to say goodbye and stay down");
+    assert!(!app.collab.connected);
+    assert!(app.collab.session_id.is_none());
+    assert!(app.collab.claims.is_empty(), "the local claim list is cleared");
+    assert!(app.collab.document.is_none());
+    assert!(app.collab.held_closed);
+
+    app.resume_collab_after_drawing_opened();
+
+    assert!(!link.held(), "opening a drawing lets the transport join again");
+    assert!(!app.collab.held_closed);
+}
+
+#[test]
 fn a_claimed_symbol_cannot_be_moved() {
     let mut author = drawing();
     session_dropped(&mut author);

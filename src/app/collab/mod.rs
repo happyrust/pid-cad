@@ -694,6 +694,9 @@ pub(crate) struct State {
     pub last_query_error: Option<String>,
     /// True while a `PIDCOLLAB REALIGN` reconnect is in progress (#78).
     pub pending_realign: bool,
+    /// The session's drawing was closed. The transport stays down until a
+    /// drawing is opened again (#96).
+    pub held_closed: bool,
     /// Tags this session owned before an unexpected disconnect/session reset,
     /// so reconnect can inform the user they were released (#58).
     lost_own_claims: Vec<String>,
