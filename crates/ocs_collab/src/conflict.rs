@@ -676,7 +676,15 @@ impl DrawingModel {
                 change.subject()
             };
             let run_tag = change.text("run_tag").unwrap_or_default();
-            if !tag.is_empty() && tag != run_tag && self.is_taken(&tag) {
+            // A step put on again carries the account the run already has.
+            // That fitting already owns the tag; renaming it would invent a
+            // second valve. A different fitting that asks for the same tag
+            // (another place, or a tag only a joining copy has) still moves.
+            if !tag.is_empty()
+                && tag != run_tag
+                && self.is_taken(&tag)
+                && !self.account_already_on_run(&change)
+            {
                 let free = self.free_tag_after(&tag);
                 change.raw["reassigned_from"] = Value::String(tag.clone());
                 change.raw["tag"] = Value::String(free.clone());
@@ -785,6 +793,21 @@ impl DrawingModel {
     /// it, or one in a client's own copy does.
     fn is_taken(&self, tag: &str) -> bool {
         self.objects.contains_key(tag) || self.reported.contains(tag)
+    }
+
+    /// The change's account of the run is the one the run already has, so
+    /// the step is being put on again rather than placing another fitting.
+    fn account_already_on_run(&self, change: &Change) -> bool {
+        let run_tag = change.text("run_tag").unwrap_or_default();
+        let Some(run) = self.runs.get(&run_tag) else {
+            return false;
+        };
+        change
+            .raw
+            .get("run")
+            .and_then(|run| run.get("fittings"))
+            .and_then(Value::as_array)
+            .is_some_and(|fittings| fittings == &run.fittings)
     }
 
     /// The pipe topology, for the read-back endpoint.
@@ -1551,21 +1574,22 @@ mod tests {
     #[test]
     fn a_fitting_placed_under_a_taken_tag_is_given_the_next_free_one() {
         let mut model = DrawingModel::default();
-        let place = |tag: &str| {
+        let place = |tag: &str, at: i64| {
             one(json!({
                 "kind": KIND_INSERT_FITTING,
                 "line_tag": "L-1001",
                 "run_tag": "L-1001-01",
                 "fitting_type": "gate_valve",
                 "tag": tag,
-                "at": [50, 0],
-                "run": {"fittings": [{"tag": tag, "fitting_type": "gate_valve"}]}
+                "at": [at, 0],
+                "run": {"fittings": [{"tag": tag, "fitting_type": "gate_valve", "at": [at, 0]}]}
             }))
         };
-        let first = model.completed(&place("V-1001"));
+        let first = model.completed(&place("V-1001", 50));
         assert_eq!(first.text("tag").as_deref(), Some("V-1001"));
         assert!(applies(&take(&mut model, &first, 0, 1, "s1")));
-        let second = model.completed(&place("V-1001"));
+        // Another place, not the same step put on again: the account differs.
+        let second = model.completed(&place("V-1001", 80));
         assert_eq!(second.text("tag").as_deref(), Some("V-1002"));
         assert_eq!(second.raw["reassigned_from"], "V-1001");
         assert_eq!(second.raw["run"]["fittings"][0]["tag"], "V-1002");
@@ -1573,7 +1597,7 @@ mod tests {
         assert!(model.object("V-1001").is_some() && model.object("V-1002").is_some());
 
         model.report_tags(["V-2001"], 2);
-        let avoided = model.completed(&place("V-2001"));
+        let avoided = model.completed(&place("V-2001", 120));
         assert_eq!(avoided.text("tag").as_deref(), Some("V-2002"));
         assert_eq!(avoided.raw["reassigned_from"], "V-2001");
     }
