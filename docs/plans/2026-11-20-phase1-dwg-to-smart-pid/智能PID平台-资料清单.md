@@ -1,6 +1,6 @@
 # 智能PID平台 · 资料清单与到位状态（RES-01 … RES-17）
 
-> 日期：2026-11-19 初拟；**2026-11-20 对齐仓库现状与阶段一进展更新**
+> 日期：2026-11-19 初拟；**2026-11-23 对齐最新 `main` 与线上 Issue 状态更新**
 > 所属目录：`docs/plans/2026-11-20-phase1-dwg-to-smart-pid/`（跟踪总单：[happyrust/pid-cad#106](https://github.com/happyrust/pid-cad/issues/106)）
 > 说明：**优先级** A = 没有它主线停；B = 没有它某一步做不了；C = 有了更好。可得性：**✔ 已就位** / **⚠ 部分或待核实** / **✖ 暂缺（阻塞对应项）**。
 > 安全与路径约定：样本与受控环境均放在仓库外，统一通过环境变量（`$OCS_PID_CORPUS_DIR`、`$OCS_PID_EVIDENCE_DIR`、`$OCS_PID_PARSE_SRC`、`$OCS_PID_SPPID_RUNNER`）与 `corpus.manifest.json` 相对路径引用；客户数据、数据库连接信息与凭据严禁入库。
@@ -11,13 +11,13 @@
 
 | 编号 | 对应 RES | 状态 | 到位情况与解决记录 |
 |---|---|---|---|
-| 01 | RES-01 | **✔ 已就位并核实完毕** | 本仓库 `Cargo.toml` 已升级钉定 `pid-parse @ a85fa10`（`EXP-0` 已完成），`$OCS_PID_PARSE_SRC` 源码检出与离线命令行工具链均已就绪；样本分析第 6 节的 Q1–Q13 已逐条对照源码与测试答完，详见同目录 `03-parse-answers.md`（任务 `L0-8`） |
+| 01 | RES-01 | **✔ 已就位并核实完毕** | 本仓库 `Cargo.toml` 初始钉定 `pid-parse @ a85fa10` 并已随 `#117` 升级至 `7cb03e48a`（含备份包码表缺口三计数）；样本分析第 6 节的 Q1–Q13 已逐条对照源码与测试答完，详见同目录 `03-parse-answers.md`（任务 `L0-8`） |
 | 02 | RES-02 | **✔ 主体已就位** | 94 对 SPPID 导出 `.pid` + `_Data.xml` + `_Meta.xml`（分 `01`/`02`/`03` 三批：`56`/`28`/`10`）、同批 94 个 DXF 与 94 个 PDF、以及 11 套厂商参考样本均已就位；已由 `scripts/sppid/corpus_index.py`（[#107](https://github.com/happyrust/pid-cad/issues/107)，提交 `538ec0112`，见 `readings.md` §2）完成只读 SHA-256 清单绑定。**仍待补**：原始合并 DWG 及拆分对照表（RES-16）、两套图例标准说明 |
 | 03 | RES-03 | **✔ 已就位** | 已核实两套备份包符号库：53 图全厂包 `Ref/Symbols` 含 `644` 个 `.sym`（加 `CatalogIndex.xml` 共 `645` 个文件），94 图备份包 `RefData~4~681.zip` / `~682.zip` 含 `728` 个 `.sym`、12 个空白模板 `.pid` 与 12 个图框模板 `.igr` |
 | 04 | RES-04 | **✔ 已就位** | 53 图全厂包、7 图小包、12 图 SQL Server 包及 94 图备份包（含数据库表文本导出包）均已就位；备份包导出引擎、命令与新界面（`EXP-1..3`、`UI-1..9`、`6377fe233`）已全部收官 |
 | 05 | RES-05 | **⚠ 部分到位** | 已从 110 对样本 XML 容器核实 `SoftwareVersion=10.00.31.0023`、`SchemaVersion=04.02.17.01`、默认 `Plant=P01`；位号与线号正式命名规则文档（RES-17）仍缺 |
 | 06 | RES-06 | **⚠ 待就绪** | 受控 SPPID 验收环境在建快照、专用本地账号与运行器脚本（`$OCS_PID_SPPID_RUNNER`）前暂不执行自动操作；在此之前 `LX` 运行类任务按约定标「未执行」 |
-| 07 | RES-07 | **✔ 已对齐** | `main @ 6377fe233` 已完成 `EXP-0..3`、显示修正五项与总验收（[#112](https://github.com/happyrust/pid-cad/issues/112)）及新界面检查点 C（[#115](https://github.com/happyrust/pid-cad/issues/115)）；本机并行分支 `pid-symbol-identity`（图块类型/位号与标注配对）与 `pid-stage-b`（协同离线收口）改动范围已核清，阶段一前期任务与之零文件冲突 |
+| 07 | RES-07 | **✔ 已全部合入对齐** | 截至 `2026-11-23`，阶段一全部子单（`#107`–`#176`）及关联单 `#112`、`#115`、`#116`（`32ac241dd` `.sym` 预览与图块化）、`#117`（`7a43bf4bf` 码表缺口计数）均已合入 `main` 并推送至 `pid-cad/main` 关单 |
 | 08 | RES-08 | **✔ 已完成** | [#109](https://github.com/happyrust/pid-cad/issues/109)（提交 `9b5faf294`，详见同目录 `readings.md` §1）：`main @ 6377fe233`、`rustc 1.102.0-nightly (65ce8611f 2026-11-18)` 下，库测试 `7,145` 条（`7,089` 过 / `55` 忽略 / `1` 本地未提交 `.pen` 字重测试），`clippy --lib` `656` 条、`--profile test` `1,051` 条 |
 | 09 | RES-09 | **⚠ 待补** | 过往「原地替换 `.pid` 再打开」实验记录未归档；若无历史记录，将在 `LX-4` 直接从 E1 做起 |
 | 10 | RES-10 | **⚠ 待确认** | 最终验收分母范围与图例套数待拍板，现阶段以 94 对导出样本全集作为度量基线分母 |

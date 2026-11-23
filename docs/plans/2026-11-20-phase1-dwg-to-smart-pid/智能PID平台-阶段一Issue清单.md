@@ -1,9 +1,9 @@
 # 智能 PID 平台 · 阶段一 Issue 清单
 
-> 日期：2026-11-20（同日完成线上 [happyrust/pid-cad](https://github.com/happyrust/pid-cad/issues) 对账、防重标识接入与首批任务解决日志回填）
+> 日期：2026-11-20（**2026-11-23 对账更新**：`#107`–`#176` 及关联单 `#115`–`#117` 均已合入 `main` 并推送至 `pid-cad/main` 关单；仅跟踪总单 `#106` 保持打开等待 `RES-06` 与 `RES-15`）
 > 所属目录：`docs/plans/2026-11-20-phase1-dwg-to-smart-pid/`（跟踪总单：[happyrust/pid-cad#106](https://github.com/happyrust/pid-cad/issues/106)）
 > 用途：把《智能PID平台-阶段一实施方案》按计划顺序拆成一张张问题单，并与线上 GitHub Issue 一一绑定。进行中与已完成的单子均在对应小节下维护**「状态与解决记录」**，实现全链路可回溯。
-> 依据：本仓库 `main @ 6377fe233` 的代码、计划与读数；SPPID 样本（94 对 `.pid` + XML、11 对厂商参考样本、备份包、`.sym`）；解析库钉定提交 `pid-parse @ a85fa10`（见 `Cargo.toml`）。
+> 依据：本仓库基线 `main @ 6377fe233` 演进至 `2026-11-23` 最新 `main` 的代码、计划与读数；SPPID 样本（94 对 `.pid` + XML、11 对厂商参考样本、备份包、`.sym`）；解析库由初始 `pid-parse @ a85fa10` 同步升级至 `7cb03e48a`（见 `Cargo.toml`）。
 > 编号规则：`ISSUE-<工作线><序号>`，与实施方案任务编号及线上 GitHub Issue 对应。
 > 缺资料标记：**✖ 阻塞**（没有就做不了）／**⚠ 降级**（没有可先做，但要写"未验证"）／**✔ 已有**。
 
@@ -1173,11 +1173,11 @@
 
 ---
 
-## J. 线上 GitHub（`happyrust/pid-cad`）Issue 对应与状态总表（2026-11-20 更新）
+## J. 线上 GitHub（`happyrust/pid-cad`）Issue 对应与状态总表（2026-11-23 对账更新）
 
 | 本清单编号 | 线上 Issue | 当前状态与防重标记 | 解决记录 / 下一步说明 |
 |---|---|---|---|
-| 总跟踪单 | [#106](https://github.com/happyrust/pid-cad/issues/106) | `phase1`（进行中） | 已绑定本目录 `docs/plans/2026-11-20-phase1-dwg-to-smart-pid/` 作为唯一权威台账 |
+| 总跟踪单 | [#106](https://github.com/happyrust/pid-cad/issues/106) | `OPEN`（`phase1`，待外部实测收口） | 本地开发与离线验证已 100% 完工并推送至 `pid-cad/main`；因仍缺 `RES-06`（SPPID 真机验收环境）与 `RES-15`（外部平台送测回执），本单保持打开 |
 | `ISSUE-L0-6` | [#109](https://github.com/happyrust/pid-cad/issues/109) | `done-local`（本地已完成） | 提交 `9b5faf294`，读数见 `readings.md` §1 |
 | `ISSUE-L0-2` | [#107](https://github.com/happyrust/pid-cad/issues/107) | `done-local`（本地已完成） | 提交 `538ec0112`，`corpus_index.py` 1,115 文件索引校验通过，见 `readings.md` §2 |
 | `ISSUE-L4-0` | [#111](https://github.com/happyrust/pid-cad/issues/111) | `done-local`（本地已完成） | 提交 `6fd58799c`：`pid-publish-spec.json` + `pid_publish_check.rs` + `xml_spec_check.py`，220 份真实样本零违规，见 `readings.md` §3 |
@@ -1244,6 +1244,6 @@
 | `ISSUE-L3-2 / L3-6 / L6-2`（应用内自控仪表索引与 DCS/SIS 硬件 I/O 点数统计清册、20% 裕量核算与巡检命令 `PIDIO` 及 CLI `--export-io`） | [#173](https://github.com/happyrust/pid-cad/issues/173) | `done-local`（本地已完成 · 仪表索引与 DCS/SIS I/O 点数核算闭环） | 提交 `0d2ac68a4`：新增 `src/io/pid_convert/io_list.rs`、应用内 `PIDIO`（`SUMMARY/ALL/DCS/SIS/LOCAL/UNCONNECTED/CHANNEL/TAG/NEXT/EXPORT`）及 CLI `--export-io`；4 张真实成对图纸索引 `177` 台仪表/执行元件（净硬点 `95` 点）全过，见 `readings.md` §62 |
 | `ISSUE-L6-1 / L6-2 / L6-3 / L3-6 / L4-6`（升级一站式数字化移交总打包命令 `PIDPACKAGE v5` 十一表四审 48 文件全套 EPC 交付与 `IEC 61511` 安全联锁门禁闭环） | [#174](https://github.com/happyrust/pid-cad/issues/174) | `done-local`（本地已完成 · 十一表四审 48 文件 EPC 移交包闭环） | 提交 `f3f867945`：升级 `src/io/pid_convert/package.rs`（`schema_version = 5`）齐备 `00..10` 十一套清册、四项校审安全底稿与 SIS 残缺阻断门禁；4 张真实成对图纸一次产出 `48` 文件 `4,528,922` B 全过 SHA-256 自检，见 `readings.md` §63 |
 | `ISSUE-L3-3 / L3-4 / L3-6 / L6-2`（应用内改扩建碰头接点与装置界区交接清册 Tie-In Schedule、正隔离分级与巡检命令 `PIDTIEIN` 及 CLI `--export-tieins`） | [#175](https://github.com/happyrust/pid-cad/issues/175) | `done-local`（本地已完成 · 碰头接点与正隔离分级闭环） | 提交 `d1df0e35c`：新增 `src/io/pid_convert/tie_in.rs`、应用内 `PIDTIEIN`（`SUMMARY/ALL/READY/SINGLE/HAZARDS/SERVICE/TAG/NEXT/EXPORT`）及 CLI `--export-tieins`；4 张真实成对图纸提取 `27` 个交接点（带阀/盲板隔离 `19` 个）全过，见 `readings.md` §64 |
-| `ISSUE-L3-3 / L3-6 / L6-2`（应用内绝热与伴热管线分级统计清册 SH/T 3022、厚度拆解与材料汇总及巡检命令 `PIDINSUL` 与 CLI `--export-insulation`） | [#176](https://github.com/happyrust/pid-cad/issues/176) | `done-local`（本地已完成 · 绝热与伴热材料统计闭环） | 新增 `src/io/pid_convert/insulation.rs`、应用内 `PIDINSUL`（`SUMMARY/ALL/TRACED/HOT/COLD/PERSONAL/ANOMALIES/CODE/NEXT/EXPORT`）及 CLI `--export-insulation`；4 张真实成对图纸提取 `29` 条绝热/伴热管线全过，见 `readings.md` §65 |
-| `.sym` 预览（关联） | [#116](https://github.com/happyrust/pid-cad/issues/116) | 并行分支推进中 | 由 `pid-symbol-on-main` 工作树正在推进，严格避让 |
-| 分级表可观测性（关联） | [#117](https://github.com/happyrust/pid-cad/issues/117) | 已完成第 2 步实查与阶段一侧落地 | 已在 `06-lx-compliance-and-codelist-audit.md` 完成备份包全量实查（证实目标 `EFSchema` 6 层树不在包内），并在阶段一导出侧落地 `VariantResolutionSummary` 与 `--class-map` 热替换；备份包导出侧留待后续升级 `pid-parse` 时同步 |
+| `ISSUE-L3-3 / L3-6 / L6-2`（应用内绝热与伴热管线分级统计清册 SH/T 3022、厚度拆解与材料汇总及巡检命令 `PIDINSUL` 与 CLI `--export-insulation`） | [#176](https://github.com/happyrust/pid-cad/issues/176) | `CLOSED` / `done-local`（已合入 `main`） | 提交 `71d0d24d6`：新增 `src/io/pid_convert/insulation.rs`、应用内 `PIDINSUL`（`SUMMARY/ALL/TRACED/HOT/COLD/PERSONAL/ANOMALIES/CODE/NEXT/EXPORT`）及 CLI `--export-insulation`；4 张真实成对图纸提取 `29` 条绝热/伴热管线全过，见 `readings.md` §65 |
+| `.sym` 预览（关联） | [#116](https://github.com/happyrust/pid-cad/issues/116) | `CLOSED` / `done-local`（已合入 `main`） | 合并提交 `32ac241dd`（2026-11-23 推送 `pid-cad/main`）：`pid-symbol-on-main` 已完整合入，支持备份面板单击 `.sym` 缩略图、双击只读标签页及搜索框查找参考数据 |
+| 分级表可观测性（关联） | [#117](https://github.com/happyrust/pid-cad/issues/117) | `CLOSED`（第 1 步与第 2 步均已闭环） | 2026-11-23 提交 `7a43bf4bf` + `pid-parse @ 7cb03e48a` 完成备份包导出侧三项缺口计数恒定展示（含全零）；阶段一导出侧已落地 `VariantResolutionSummary` 与 `--class-map` 热替换；第 2 步全包实查归档于 `06-lx-compliance-and-codelist-audit.md` |
