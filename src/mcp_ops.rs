@@ -293,13 +293,13 @@ pub static PROPERTY: OpDef = OpDef {
 
 pub static GRIP_DRAG: OpDef = OpDef {
     name: "grip_drag",
-    doc: "Drag one grip to a world point the way a grip pick-and-place in the viewport does. Built-ins: supply handle (read grips for the ids); object snaps, ortho and polar are off for the move. Plugin-declared custom grips (API v11): supply plugin (the owner id from the grips read's plugin_grips) instead of a handle — the drag routes to the owning plugin (begin, move, settle), whose settle writes are its own single undo step.",
+    doc: "Drag one grip to a world point as a viewport grip pick-and-place does; object snaps, ortho and polar are off. Built-in grips: give handle (grip ids from the grips read). Plugin custom grips: give plugin (owner id from plugin_grips) instead; the owning plugin gets begin, move, settle, and its settle writes are one undo step.",
     batchable: true,
     params: &[
         opt("handle", Ty::Handle, "Entity whose grip moves (built-in grips)."),
-        req("grip_id", Ty::Int, "Grip id from the grips read (entity grip id, or the plugin grip's id for custom grips)."),
+        req("grip_id", Ty::Int, "Grip id from the grips read (the plugin grip's id for custom grips)."),
         req("point", Ty::Point, "World point [x, y, z] the grip moves to."),
-        opt("plugin", Ty::Str, "Owner plugin id when dragging a plugin-declared custom grip (from the grips read's plugin_grips); omit for built-in entity grips."),
+        opt("plugin", Ty::Str, "Owner plugin id of a custom grip (plugin_grips of the grips read); omit for built-in grips."),
     ],
     rules: &[],
     example: r#"{"op":"grip_drag","plugin":"opencad.civil_ifc","grip_id":7,"point":[10,0,0]}"#,
@@ -307,7 +307,7 @@ pub static GRIP_DRAG: OpDef = OpDef {
 
 pub static CLICK: OpDef = OpDef {
     name: "click",
-    doc: "Left-click the viewport where a world point shows, as the mouse would. modifiers holds ctrl and/or shift (e.g. Ctrl+click picks the solid of a composite under the cursor).",
+    doc: "Left-click the viewport where a world point shows, as the mouse would; modifiers: ctrl and/or shift (Ctrl+click picks the solid of a composite).",
     batchable: true,
     params: &[
         req("point", Ty::Point, "World point [x, y, z] to click on."),
@@ -319,7 +319,7 @@ pub static CLICK: OpDef = OpDef {
 
 pub static POINTER: OpDef = OpDef {
     name: "pointer",
-    doc: "Replay mouse events on the drawing canvas in order, as the mouse sends them: move to canvas pixels or to a world point (projected through the camera the cursor edits with), press and release a button, turn the wheel. A grip press-move-release goes through the same cursor path as a hand drag. Each step reports the cursor's world point.",
+    doc: "Replay mouse events on the drawing canvas in order: move to canvas pixels or a world point (projected through the editing camera), press and release a button, turn the wheel. A grip press-move-release takes the hand-drag path. Each step reports the cursor's world point.",
     batchable: true,
     params: &[
         req(
@@ -928,23 +928,23 @@ pub static PAGE_SETUP_SET: OpDef = OpDef {
 
 pub static PID_MASTERDATA_SET: OpDef = OpDef {
     name: "pid_masterdata_set",
-    doc: "Replace the whole P&ID project master data, validated first, in the project file or the drawing record. Read it back with ocs_read op pid_masterdata.",
+    doc: "Replace the whole P&ID project master data, validated first, in the project file or the drawing record; ocs_read pid_masterdata reads it.",
     batchable: true,
     params: &[
         opt(
             "target",
             Ty::Enum(&["project", "drawing"]),
-            "project: pid-project.json in the saved drawing's folder; drawing: the drawing record, one undo step. Defaults to project for a saved drawing, drawing otherwise.",
+            "project: pid-project.json beside the saved drawing (default when saved); drawing: the drawing record, one undo step.",
         ),
         req(
             "master_data",
             Ty::Raw(r#"{"type":"object","description":"The whole master data: version, revision, updated_at, legend_standard, nominal_diameters, pipe_classes, insulation_classes, fluid_codes, pbs."}"#),
-            "The whole master data object; it replaces what the target holds.",
+            "The whole master data; it replaces the target's.",
         ),
         opt(
             "expected_revision",
             Ty::Int,
-            "The revision last read; when the target holds another, MASTERDATA_CONFLICT and nothing is written.",
+            "The revision last read; if the target holds another: MASTERDATA_CONFLICT, nothing written.",
         ),
     ],
     rules: &[Rule::RejectUnknown],
@@ -953,7 +953,7 @@ pub static PID_MASTERDATA_SET: OpDef = OpDef {
 
 pub static PID_LOCATE: OpDef = OpDef {
     name: "pid_locate",
-    doc: "Go to a P&ID object by tag: select it and zoom to it, switching to or opening the project drawing it is on. Answers status scanning (done, total) while the project's files are still being read: send it again later. result: drawing_id, document_id, handle, handles.",
+    doc: "Go to a P&ID object by tag: select and zoom to it, switching to or opening its project drawing. Answers status scanning while the project is read: send it again. result: drawing_id, document_id, handle, handles.",
     batchable: false,
     params: &[
         req(
@@ -965,7 +965,7 @@ pub static PID_LOCATE: OpDef = OpDef {
         opt(
             "drawing_id",
             Ty::Str,
-            "Drawing of the project to look on; needed when the tag is on several (LOCATE_AMBIGUOUS lists them).",
+            "Project drawing to look on; needed when the tag is on several (LOCATE_AMBIGUOUS lists them).",
         ),
         opt(
             "at",
@@ -975,6 +975,121 @@ pub static PID_LOCATE: OpDef = OpDef {
     ],
     rules: &[Rule::RejectUnknown],
     example: r#"{"op":"pid_locate","tag":"P-1001","drawing_id":"PID-1102"}"#,
+};
+
+pub static PID_CHECK_RULES_SET: OpDef = OpDef {
+    name: "pid_check_rules_set",
+    doc: "Replace the whole P&ID project rule pack (pid-drc-rules.json beside the saved drawing); nothing is written unless every rule validates. Applies from the next check; ocs_read pid_check_rules reads it. result: rule_set_version, rule_set_digest.",
+    batchable: true,
+    params: &[req(
+        "pack",
+        Ty::Raw(r#"{"type":"object"}"#),
+        "The whole pack (version, pack, rule_set_version, save_gate, sets, rules). A built-in id carries only id, enabled, params; new rules use ids outside DR-001 to DR-199.",
+    )],
+    rules: &[Rule::RejectUnknown],
+    example: r#"{"op":"pid_check_rules_set","pack":{"version":1,"rule_set_version":"P1","rules":[{"id":"DR-014","enabled":false}]}}"#,
+};
+
+pub static PID_CHECK_WAIVE: OpDef = OpDef {
+    name: "pid_check_waive",
+    doc: "Waive one result of the drawing's latest P&ID rule check (ocs_read pid_check) by rule id and object key, with a reason; one undo step. Waiving it again replaces the reason. result: waivers (the drawing's count).",
+    batchable: true,
+    params: &[
+        req("rule_id", Ty::Str, "Rule id such as DR-014; case-insensitive."),
+        req("object_key", Ty::Str, "object_key of the result, as pid_check lists it."),
+        req("reason", Ty::Str, "Why it is accepted; 1 to 200 characters."),
+    ],
+    rules: &[Rule::RejectUnknown],
+    example: r#"{"op":"pid_check_waive","rule_id":"DR-014","object_key":"PIPE_LINE|L-1","reason":"Vent to atmosphere"}"#,
+};
+
+pub static PID_CHECK_UNWAIVE: OpDef = OpDef {
+    name: "pid_check_unwaive",
+    doc: "Remove one waiver of the drawing by rule id and object key, even one no result matches any more; one undo step. result: waivers (the drawing's count).",
+    batchable: true,
+    params: &[
+        req("rule_id", Ty::Str, "Rule id such as DR-014; case-insensitive."),
+        req("object_key", Ty::Str, "object_key of the waiver."),
+    ],
+    rules: &[Rule::RejectUnknown],
+    example: r#"{"op":"pid_check_unwaive","rule_id":"DR-014","object_key":"PIPE_LINE|L-1"}"#,
+};
+
+pub static PID_BOM_EXPORT: OpDef = OpDef {
+    name: "pid_bom_export",
+    doc: "Write the P&ID bill of materials (drawing, project or PBS node) to a file; the extension picks .csv, .xlsx or .json. CSV/XLSX get the pipe summary beside it (<name>-pipe-summary.<ext>), JSON inside. Answers status scanning while the project is read: send it again. result: path, format, rows, bytes, pipe_summary_path.",
+    batchable: false,
+    params: &[
+        req(
+            "path",
+            Ty::Str,
+            "File to write, relative to the saved drawing's folder; an existing file is replaced.",
+        ),
+        opt(
+            "scope",
+            Ty::EnumCi(&["drawing", "pbs", "project"]),
+            "drawing (default), project (every drawing of its folder) or pbs (the drawings under node pbs).",
+        ),
+        opt("pbs", Ty::Str, "PBS node id; needed with scope pbs, and only then."),
+        opt(
+            "snapshot",
+            Ty::Int,
+            "Count this numbered snapshot of the drawing instead; scope drawing only.",
+        ),
+        opt(
+            "columns",
+            Ty::ArrayOf(&Ty::Str),
+            "Main-table columns by header, in order (CSV, XLSX); all nine when omitted.",
+        ),
+    ],
+    rules: &[Rule::RejectUnknown],
+    example: r#"{"op":"pid_bom_export","path":"bom.xlsx","scope":"project"}"#,
+};
+
+pub static PID_SNAPSHOT_SAVE: OpDef = OpDef {
+    name: "pid_snapshot_save",
+    doc: "Snapshot the P&ID drawing, unsaved changes included, as the next number in pid-snapshots/<drawing id>/ beside the saved drawing, or into path. Never replaces a file. result: seq (null with path), path, objects, bytes, sha256.",
+    batchable: true,
+    params: &[
+        opt("reason", Ty::Str, "Why; up to 200 characters."),
+        opt(
+            "path",
+            Ty::Str,
+            "Write into this file instead; relative to the saved drawing's folder.",
+        ),
+    ],
+    rules: &[Rule::RejectUnknown],
+    example: r#"{"op":"pid_snapshot_save","reason":"Before review"}"#,
+};
+
+pub static PID_SNAPSHOT_EXPORT: OpDef = OpDef {
+    name: "pid_snapshot_export",
+    doc: "Copy a numbered snapshot of the drawing to a file, byte for byte; never replaces a file. result: path, bytes.",
+    batchable: true,
+    params: &[
+        req("seq", Ty::Int, "Sequence number from pid_snapshots."),
+        req("path", Ty::Str, "File to write; relative to the saved drawing's folder."),
+    ],
+    rules: &[Rule::RejectUnknown],
+    example: r#"{"op":"pid_snapshot_export","seq":3,"path":"PID-1101-3.json"}"#,
+};
+
+pub static PID_PUBLISH: OpDef = OpDef {
+    name: "pid_publish",
+    doc: "Publish the saved P&ID drawing as a revision package (drawing, PDF, SVG, BOM, snapshot, check report, manifest) if the gates pass (ocs_read pid_publish_check). Answers status scanning while the project is read: send it again. result: package_id, path, revision, snapshot_seq, files, bytes, gates.",
+    batchable: false,
+    params: &[
+        opt("dir", Ty::Str, "Target folder, relative to the drawing's; default pid-publish."),
+        opt("rev", Ty::Int, "Revision above every published one; default the next."),
+        opt(
+            "plot",
+            Ty::Raw(r#"{"type":"object"}"#),
+            "PDF and SVG settings as op plot takes them, without path.",
+        ),
+        opt("allow_offline", Ty::Bool, "Publish a synced drawing while offline."),
+    ],
+    rules: &[Rule::RejectUnknown],
+    example: r#"{"op":"pid_publish","rev":3}"#,
 };
 
 pub static XREF_RELOAD: OpDef = OpDef {
@@ -1297,7 +1412,7 @@ pub static MEASURE: OpDef = OpDef {
 
 pub static NODE_GRAPH: OpDef = OpDef {
     name: "node_graph",
-    doc: "Drive the node graph of the active drawing: list node types (action library), read nodes with their ports, values and links (state), and edit it — add, remove, connect, disconnect, set an input, fold a section or coordinate group (toggle), show/hide the panel, clear, run, save/load an .ocg file. Every action answers with the graph state; edits are one undo step each.",
+    doc: "Drive the active drawing's node graph: list node types (library), read nodes, ports, values and links (state), add, remove, connect, disconnect, set an input, fold a section or coordinate group (toggle), show/hide the panel, clear, run, save/load an .ocg file. Every action answers the graph state; each edit is one undo step.",
     batchable: true,
     params: &[
         opt(
@@ -1389,6 +1504,13 @@ pub static OPS: &[&OpDef] = &[
     &PAGE_SETUP_SET,
     &PID_MASTERDATA_SET,
     &PID_LOCATE,
+    &PID_CHECK_RULES_SET,
+    &PID_CHECK_WAIVE,
+    &PID_CHECK_UNWAIVE,
+    &PID_BOM_EXPORT,
+    &PID_SNAPSHOT_SAVE,
+    &PID_SNAPSHOT_EXPORT,
+    &PID_PUBLISH,
     &XREF_RELOAD,
     &XREF_UNLOAD,
     &XREF_DETACH,

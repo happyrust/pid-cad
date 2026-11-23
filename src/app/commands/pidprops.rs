@@ -3,8 +3,9 @@
 //!
 //! Row ids are fixed by the architecture: `pid_type`, `pid_tag`,
 //! `pid_tag_source`, `pid_tag_status`, then one `pid_props_<key>` row per
-//! `props` key. Only the tag and the props rows are editable; a tag edit makes
-//! the tag `manual`. Every commit is one undo step that also re-runs the
+//! `props` key, and an empty one for each property a clicked rule-check result
+//! highlights that the record lacks (panel spec §3.6). Only the tag and the
+//! props rows are editable; a tag edit makes the tag `manual`. Every commit is one undo step that also re-runs the
 //! uniqueness check and redraws the canvas tag labels
 //! ([`OpenCADStudio::refresh_pid_tags`]), so a conflict mark (`？`) and the
 //! label follow the edit and roll back with it.
@@ -32,11 +33,9 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDSAVEPID",
         "PIDCONVERT",
         "PIDOPC",
-        "PIDBOM",
         "PIDDRC",
         "PIDFIND",
         "PIDTRACE",
-        "PIDDIFF",
         "PIDISOLATE",
         "PIDLOOP",
         "PIDSPEC",
@@ -46,7 +45,6 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDUTILITY",
         "PIDVALVE",
         "PIDNOZZLE",
-        "PIDINDEX",
         "PIDSPECIALTY",
         "PIDLINELIST",
         "PIDEQUIP",
@@ -58,8 +56,8 @@ inventory::submit!(crate::command::CommandRegistration {
     ]
 });
 
-const TAG_FIELD: &str = "pid_tag";
-const PROPS_FIELD_PREFIX: &str = "pid_props_";
+pub(in crate::app) const TAG_FIELD: &str = "pid_tag";
+pub(in crate::app) const PROPS_FIELD_PREFIX: &str = "pid_props_";
 
 /// `Property::field` is `&'static str`, but props keys are data. Each distinct
 /// row id is leaked once and reused, so repeated refreshes do not grow memory.
@@ -82,9 +80,13 @@ fn props_field(key: &str) -> &'static str {
 
 /// The `P&ID 属性` group (plus read-only `P&ID 来源证据` when promoted/imported)
 /// for `handle`, or empty when it carries no `PID_AUTHOR` record (`L2-1 M4` / `#136`).
+/// Each property of `highlighted` the record has no value for gets an empty row
+/// after the record's own, so its highlight shows and filling it in adds the
+/// property; the tag has its row already.
 pub(in crate::app) fn pid_author_section(
     document: &document::Document,
     handle: document::Handle,
+    highlighted: &[String],
 ) -> Vec<PropSection> {
     let resolved_owner = PidAuthor::load(document, handle).or_else(|| {
         crate::io::pid_convert::resolve_owning_author_handles(document, &[handle])
@@ -119,6 +121,15 @@ pub(in crate::app) fn pid_author_section(
         ),
     ];
     let (values, _) = split_props(&author.props);
+    let mut missing: Vec<&str> = Vec::new();
+    for name in highlighted {
+        if name != super::pidverify::TAG_NAME
+            && !values.contains_key(name.as_str())
+            && !missing.contains(&name.as_str())
+        {
+            missing.push(name);
+        }
+    }
     for (key, value) in &values {
         if key.starts_with('_') {
             continue;
@@ -129,6 +140,11 @@ pub(in crate::app) fn pid_author_section(
             value: PropValue::PlainText(value.clone()),
         });
     }
+    props.extend(missing.into_iter().map(|name| Property {
+        field: props_field(name),
+        label: name.to_owned(),
+        value: PropValue::PlainText(String::new()),
+    }));
     let mut sections = vec![PropSection {
         title: PID_AUTHOR_SECTION.to_string(),
         props,
@@ -209,8 +225,14 @@ impl OpenCADStudio {
                     .display;
                     value != author.tag && value != shown
                 }
+                // A property the record lacks entered empty, as its
+                // highlighted row shows it, is left out.
                 Some(key) => {
-                    split_props(&author.props).0.get(key).map(String::as_str) != Some(value)
+                    split_props(&author.props)
+                        .0
+                        .get(key)
+                        .map_or("", String::as_str)
+                        != value
                 }
             })
             .collect();
@@ -241,6 +263,8 @@ impl OpenCADStudio {
             }
         }
         let edited: Vec<document::Handle> = changed.iter().map(|(handle, _)| *handle).collect();
+        let name = key.as_deref().unwrap_or(super::pidverify::TAG_NAME);
+        self.pid_verify_highlight_filled(i, &edited, name, value);
         self.refresh_pid_tags(i, &edited);
         let synced_texts =
             crate::io::pid_convert::sync_paired_canvas_tag_texts(&mut self.tabs[i].scene.document);
@@ -1361,6 +1385,38 @@ impl OpenCADStudio {
         if !first.eq_ignore_ascii_case("PIDBOM") {
             return None;
         }
+        // Let Stage-3 `commands::pidbom` handle bare `PIDBOM` and its
+        // `PROJECT` / `PBS` / `SNAPSHOT` / `EXPORT` subcommands; handle
+        // Phase-1 `#150` schedule extraction (`PIDBOM <out> [ALLTABS]`,
+        // `PIDBOM ALLTABS|SUMMARY|PLANT|CLASSMAP ...`) here.
+        if tokens.len() <= 1 {
+            return None;
+        }
+        let second = tokens[1].as_str();
+        if second.eq_ignore_ascii_case("PROJECT")
+            || second.eq_ignore_ascii_case("PBS")
+            || second.eq_ignore_ascii_case("SNAPSHOT")
+            || second.eq_ignore_ascii_case("EXPORT")
+        {
+            return None;
+        }
+        let looks_like_schedule = tokens[1..].iter().any(|t| {
+            t.eq_ignore_ascii_case("ALLTABS")
+                || t.eq_ignore_ascii_case("ALL")
+                || t.eq_ignore_ascii_case("SUMMARY")
+                || t.eq_ignore_ascii_case("PLANT")
+                || t.eq_ignore_ascii_case("CLASSMAP")
+        }) || {
+            let lower = second.to_ascii_lowercase();
+            lower.ends_with(".csv")
+                || lower.ends_with(".tsv")
+                || lower.ends_with(".json")
+                || second.contains('/')
+                || second.contains('\\')
+        };
+        if !looks_like_schedule {
+            return None;
+        }
 
         let mut all_tabs = false;
         let mut plant = "P01".to_string();
@@ -1974,6 +2030,44 @@ impl OpenCADStudio {
         let tokens = tokenize_command_words(cmd);
         let first = tokens.first()?;
         if !first.eq_ignore_ascii_case("PIDDIFF") {
+            return None;
+        }
+        // Let Stage-3 `commands::pidsnapshot` handle snapshot diffs (`PIDDIFF 1`,
+        // `PIDDIFF 1 2`, `PIDDIFF LIVE`, `PIDDIFF <snap.json>`, and its usage errors).
+        // Handle Phase-1 `#154` semantic drawing diff when the baseline argument is
+        // a CAD drawing (`.dxf`/`.dwg`/`.pid`), matches an open tab title/path, or
+        // uses `#154` subcommands (`SUMMARY`/`ALL`/`ADDED`/`MODIFIED`/`NEXT`/`PLANT`/`CLASSMAP`).
+        if tokens.len() < 2 {
+            return None;
+        }
+        let base_tok = tokens[1].as_str();
+        let base_lower = base_tok.to_ascii_lowercase();
+        let is_cad_file = base_lower.ends_with(".dxf")
+            || base_lower.ends_with(".dwg")
+            || base_lower.ends_with(".pid");
+        let is_snapshot_side = base_tok.eq_ignore_ascii_case("LIVE")
+            || base_tok.chars().all(|c| c.is_ascii_digit())
+            || base_lower.ends_with(".json");
+        let has_phase1_subcmd = tokens[2..].iter().any(|t| {
+            matches!(
+                t.to_ascii_uppercase().as_str(),
+                "SUMMARY" | "ALL" | "ADDED" | "MODIFIED" | "NEXT" | "PLANT" | "CLASSMAP"
+            )
+        });
+        let matches_open_tab = !is_snapshot_side
+            && self.tabs.iter().any(|t| {
+                !t.is_start
+                    && (t.tab_title.eq_ignore_ascii_case(base_tok)
+                        || t.current_path.as_ref().is_some_and(|p| {
+                            p.file_name()
+                                .and_then(|s| s.to_str())
+                                .is_some_and(|s| s.eq_ignore_ascii_case(base_tok))
+                                || p.file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .is_some_and(|s| s.eq_ignore_ascii_case(base_tok))
+                        }))
+            });
+        if !(is_cad_file || has_phase1_subcmd || matches_open_tab) {
             return None;
         }
 
@@ -4362,6 +4456,20 @@ impl OpenCADStudio {
         let tokens = tokenize_command_words(cmd);
         let first = tokens.first()?;
         if !first.eq_ignore_ascii_case("PIDINDEX") {
+            return None;
+        }
+        // Let Stage-3 `commands::pidindex` handle bare `PIDINDEX` and its
+        // `DUPLICATES` / `LINKS` / `CANCEL` project-index subcommands; handle
+        // Phase-1 `#165` Master Drawing Index (`ALLTABS`, `SUMMARY`, `ALL`,
+        // `ISSUES`, `JUMP`, `NEXT`, `EXPORT`) here.
+        let is_master_index = tokens.len() > 1
+            && tokens[1..].iter().any(|t| {
+                matches!(
+                    t.to_ascii_uppercase().as_str(),
+                    "ALLTABS" | "SUMMARY" | "ALL" | "ISSUES" | "JUMP" | "NEXT" | "EXPORT"
+                )
+            });
+        if !is_master_index {
             return None;
         }
 

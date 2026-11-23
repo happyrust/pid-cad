@@ -22,12 +22,25 @@
 //! （`INDEX_DRAWING_ID_DUPLICATED`、项目文件的 `MASTERDATA_...`、`INDEX_IO_ERROR`），
 //! 命令行的错误码也设上。几个命令都不改图，只读会话里照常能用。
 //!
+//! `PIDCHECK PROJECT`、`PIDCHECK PBS`（`commands::piddrc`）也用这里的扫描，扫完接着查。它们的
+//! 摘要按规则包的连接容差做，这里的命令和自动化操作用默认的：缓存记着做摘要用的容差，
+//! 容差不同就重读。读图时顺带读出图里记着的豁免，一起记着。
+//!
+//! `PIDBOM PROJECT`、`PIDBOM PBS` 和带范围的 `PIDBOM EXPORT`（`commands::pidbom`）也用这里的
+//! 扫描，按默认的连接容差，扫完接着算清单。
+//!
+//! `PIDPUBLISH`、`PIDPUBLISH CHECK`（`commands::pidpublish`）也用这里的扫描，摘要同 `PIDCHECK`
+//! 按规则包的连接容差做，扫完接着现做发布前的检查、算门禁。
+//!
 //! `PIDLOCATE` 不给图号时先在当前图上找，有就不扫项目；没有就扫项目（同上，要读盘就
 //! 在后台读，读完接着找）：只有一张图上有就去那一张，几张图上都有就逐处列出来
 //! （`LOCATE_AMBIGUOUS`），哪张都没有是 `LOCATE_NOT_FOUND`。给了图号就扫项目、只看那一张。
 //! 去一张图：有标签页开着它就切过去，没有就打开，打开以后接着找。在哪张图上都按
 //! （类型编码, 位号）照图现在的样子现找，不用摘要里记的句柄（§5.2）；位号不分大小写，
 //! 与 `PIDTAG` 一样。找到的只选中它们、缩放到它们；画不出样子的按外框和定位点缩放。
+//! 「校验与交付」面板点的一条检查结果、清单的一行、一个没位号的对象、重复位号的一处也走这里
+//! （`pidlocate_target`）：同样去那张图、现找、选中、缩放，不在命令行上说话，定位成什么样
+//! 说在面板的消息栏里。
 //!
 //! 自动化操作（§5.3）：`pid_summary` 是当前图的摘要；`pid_index` 是项目索引，带 `tag`
 //! 时加上这个位号的各处（`places`）；`pid_locate` 同 `PIDLOCATE`，结果（图号、标签页、
@@ -37,7 +50,11 @@
 //! 「路径 + 大小 + 修改时间」记着原因，文件没变就照这个原因算，轮询时不反复读；命令照旧
 //! 每次重读。
 
+use super::pidbom::BomJob;
+use super::piddrc::Check;
+use super::pidpublish::PublishJob;
 use super::*;
+use crate::pid::drc::{CheckResult, Waiver};
 use crate::pid::project_index::{
     build_index, compare_places, list_drawings, summarize, DrawingFile, DrawingSummary,
     FailedDrawing, Fingerprint, IndexError, LinkEnd, LinkFamily, LinkStatus, Place, ProjectIndex,
@@ -75,33 +92,46 @@ pub(in crate::app) struct SummaryCache {
     entries: HashMap<PathBuf, Cached>,
 }
 
-/// 缓存里的一张图：读它时文件的大小和修改时间，和做出来的摘要。
+/// 缓存里的一张图：读它时文件的大小和修改时间，做摘要用的连接容差，和读出来的。
 struct Cached {
     size: u64,
     /// 文件系统给的修改时间，不截到秒：同一秒里存了两次也认得出来。
     modified: SystemTime,
+    tolerance: f64,
+    summarized: Summarized,
+}
+
+/// 读一张图得出的：摘要，和图里记着的豁免（`PIDCHECK` 查项目时套用）。
+#[derive(Debug, Clone)]
+struct Summarized {
     summary: DrawingSummary,
+    waivers: Vec<Waiver>,
 }
 
 impl SummaryCache {
-    /// 磁盘上一张图的摘要：文件没变就用记着的，否则用 `load` 读来现做并记下。读不出来
-    /// 的不记，下次再读——文件可能只是一时被别的程序占着。
+    /// 磁盘上一张图的摘要和豁免：文件没变、上次也按连接容差 `tolerance` 做的摘要就用记着的，
+    /// 否则用 `load` 读来现做并记下。读不出来的不记，下次再读——文件可能只是一时被别的程序占着。
     fn summary(
         &mut self,
         drawing: &DrawingFile,
         library: &SymbolLibrary,
+        tolerance: f64,
         load: &mut dyn FnMut(&Path) -> Result<Document, String>,
-    ) -> Result<DrawingSummary, String> {
+    ) -> Result<Summarized, String> {
         let metadata = std::fs::metadata(&drawing.path).map_err(|error| error.to_string())?;
         let size = metadata.len();
         let modified = metadata.modified().ok();
         if let Some(cached) = self.entries.get(&drawing.path) {
-            if cached.size == size && Some(cached.modified) == modified {
+            if cached.size == size
+                && Some(cached.modified) == modified
+                && cached.tolerance == tolerance
+            {
                 // 图号和 PBS 节点取项目文件现在写的：项目文件改了，图本身可以没变。
-                let mut summary = cached.summary.clone();
+                let mut summarized = cached.summarized.clone();
+                let summary = &mut summarized.summary;
                 summary.drawing_id.clone_from(&drawing.drawing_id);
                 summary.pbs.clone_from(&drawing.pbs);
-                return Ok(summary);
+                return Ok(summarized);
             }
         }
         let document = load(&drawing.path).inspect_err(|_| {
@@ -111,30 +141,36 @@ impl SummaryCache {
             size,
             modified_at: unix_seconds(modified),
         });
-        let summary = summarize(
-            &document,
-            library,
-            meta(drawing, SummarySource::File, fingerprint),
-            DEFAULT_TOLERANCE,
-        );
-        self.remember(drawing.path.clone(), size, modified, summary.clone());
-        Ok(summary)
+        let summarized = Summarized {
+            summary: summarize(
+                &document,
+                library,
+                meta(drawing, SummarySource::File, fingerprint),
+                tolerance,
+            ),
+            waivers: crate::pid::drc::waivers(&document),
+        };
+        let path = drawing.path.clone();
+        self.remember(path, size, modified, tolerance, summarized.clone());
+        Ok(summarized)
     }
 
-    /// 记下一张图的摘要。取不到修改时间的不记：认不出文件变没变，下次照样重读。
+    /// 记下一张图读出来的。取不到修改时间的不记：认不出文件变没变，下次照样重读。
     fn remember(
         &mut self,
         path: PathBuf,
         size: u64,
         modified: Option<SystemTime>,
-        summary: DrawingSummary,
+        tolerance: f64,
+        summarized: Summarized,
     ) {
         match modified {
             Some(modified) => {
                 let cached = Cached {
                     size,
                     modified,
-                    summary,
+                    tolerance,
+                    summarized,
                 };
                 self.entries.insert(path, cached);
             }
@@ -190,6 +226,20 @@ impl Default for PidIndex {
     }
 }
 
+impl PidIndex {
+    /// 有没有正在后台读文件的扫描：校验与交付面板这时不再起检查（面板规格 §4.7）。
+    pub(in crate::app) fn scanning(&self) -> bool {
+        self.scan.is_some()
+    }
+
+    /// 正在后台读文件的扫描读到哪了：扫完先做什么（[`Then::key`]；自动化操作起的扫描没有）、
+    /// 读回来几个、一共要读几个。校验与交付面板照这个画进度（面板规格 §4.7）。
+    pub(in crate::app) fn progress(&self) -> Option<(Option<&'static str>, usize, usize)> {
+        let scan = self.scan.as_ref()?;
+        Some((scan.then.first().map(Then::key), scan.done, scan.total))
+    }
+}
+
 /// 读不出来的一个文件：读它时的大小和修改时间，和原因。
 struct Unreadable {
     size: u64,
@@ -209,15 +259,21 @@ struct Scan {
     failed: HashMap<PathBuf, String>,
     /// 扫完接着做的，按命令的先后；自动化操作起的扫描没有，读完就完。
     then: Vec<Then>,
+    /// 做摘要用的连接容差：排在后面的要的也得是它（[`Then::tolerance`]）。
+    tolerance: f64,
 }
 
-/// 扫完接着做的事：`PIDINDEX` 的三种说法，或者 `PIDLOCATE` 接着找。
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// 扫完接着做的事：`PIDINDEX` 的三种说法，`PIDLOCATE` 接着找，`PIDCHECK` 接着查，
+/// `PIDBOM` 接着算清单，或者 `PIDPUBLISH` 接着算门禁。
+#[derive(Clone, Debug, PartialEq)]
 enum Then {
     Overview,
     Duplicates,
     Links,
     Locate(Locate),
+    Check(Box<Check>),
+    Bom(Box<BomJob>),
+    Publish(Box<PublishJob>),
 }
 
 impl Then {
@@ -226,6 +282,32 @@ impl Then {
         match self {
             Self::Overview | Self::Duplicates | Self::Links => "PIDINDEX",
             Self::Locate(_) => "PIDLOCATE",
+            Self::Check(_) => "PIDCHECK",
+            Self::Bom(_) => "PIDBOM",
+            Self::Publish(job) => job.verb(),
+        }
+    }
+
+    /// 校验与交付面板的进度里扫完要做的事的名字（面板规格 §3.2 `busy.then`）。
+    fn key(&self) -> &'static str {
+        match self {
+            Self::Overview | Self::Duplicates | Self::Links => "index",
+            Self::Locate(_) => "locate",
+            Self::Check(_) => "check",
+            Self::Bom(_) => "bom",
+            Self::Publish(job) => job.key(),
+        }
+    }
+
+    /// 做摘要用的连接容差：`PIDCHECK` 和发布前的检查用它们的规则包的（`SPEC-pid-drc.md` §4.1），
+    /// 其余用默认的。
+    fn tolerance(&self) -> f64 {
+        match self {
+            Self::Check(check) => check.rules.connect_tolerance,
+            Self::Publish(job) => job.tolerance(),
+            Self::Overview | Self::Duplicates | Self::Links | Self::Locate(_) | Self::Bom(_) => {
+                DEFAULT_TOLERANCE
+            }
         }
     }
 }
@@ -247,12 +329,113 @@ struct Wanted {
 }
 
 /// 为定位打开的一张图：编号是 `open_id` 的那次打开（`OpenProgress::id`）做完了，就在
-/// 它上面找 `wanted`；`reply` 是 `pid_locate` 在等这次打开，找到了把结果交给它。
+/// 它上面接着做 `then`。
 struct Opening {
     open_id: u64,
     drawing_id: String,
-    wanted: Wanted,
-    reply: bool,
+    then: Opened,
+}
+
+/// 为定位打开一张图以后接着做的。
+enum Opened {
+    /// 找 `wanted`；`reply` 是 `pid_locate` 在等这次打开，找到了把结果交给它。
+    Find { wanted: Wanted, reply: bool },
+    /// 定位「校验与交付」面板点的这样东西（[`OpenCADStudio::pidlocate_target`]）。
+    Target(Box<Target>),
+}
+
+/// 面板点的东西定位成了什么样（`SPEC-pid-verify-deliver-panel.md` §4.3）。
+pub(super) enum Landed {
+    /// 现找到了，选中了。
+    Found,
+    /// 有得找，图上却现找不到了：缩放到了记着的位置，没记着位置就什么也没动。
+    Gone,
+    /// 没得找（没有自己的位号）：缩放到了记着的位置。
+    Spot,
+}
+
+/// 「校验与交付」面板点的一样要定位的东西（`SPEC-pid-verify-deliver-panel.md` §4.3、§4.5）：
+/// 在哪张图上，按什么现找（没得找的只看位置），和记着的位置——现找不到、没得找、
+/// 记了几处时缩放到这些位置的外包范围。
+pub(super) struct Target {
+    drawing_id: String,
+    wanted: Option<Wanted>,
+    spots: Vec<[f64; 2]>,
+    /// 检查结果涉及的属性（结果的 `fields`）：现找到一个对象时属性表高亮这几行（面板规格
+    /// §3.6）。别的东西没有。
+    fields: Vec<String>,
+}
+
+impl Target {
+    /// 一条检查结果：有自己位号的按（类型编码，位号）现找；位置是结果记的几处，没记就是
+    /// 对象的定位点。
+    pub(super) fn of_result(result: &CheckResult) -> Self {
+        let object = &result.object;
+        let wanted = object
+            .tag
+            .as_deref()
+            .filter(|tag| !tag.is_empty())
+            .map(|tag| Wanted {
+                tag: tag.to_owned(),
+                type_code: Some(object.type_code.clone()),
+                at: None,
+            });
+        let spots = if result.points.is_empty() {
+            vec![object.at]
+        } else {
+            result.points.clone()
+        };
+        Self {
+            drawing_id: object.drawing_id.clone(),
+            wanted,
+            spots,
+            fields: result.fields.clone(),
+        }
+    }
+
+    /// 清单的一行：按位号现找有自己位号的对象，给了类型编码就只找这个类型的，同
+    /// `PIDLOCATE`；不记位置。
+    pub(super) fn tagged(drawing_id: &str, tag: &str, type_code: Option<&str>) -> Self {
+        Self {
+            drawing_id: drawing_id.to_owned(),
+            wanted: Some(Wanted {
+                tag: tag.to_owned(),
+                type_code: type_code.map(str::to_owned),
+                at: None,
+            }),
+            spots: Vec::new(),
+            fields: Vec::new(),
+        }
+    }
+
+    /// 重复位号的一处：同类型同位号的对象里离 `at` 最近的那个；现找不到就缩放到 `at`。
+    pub(super) fn placed(drawing_id: &str, type_code: &str, tag: &str, at: [f64; 2]) -> Self {
+        Self {
+            drawing_id: drawing_id.to_owned(),
+            wanted: Some(Wanted {
+                tag: tag.to_owned(),
+                type_code: Some(type_code.to_owned()),
+                at: Some(at),
+            }),
+            spots: vec![at],
+            fields: Vec::new(),
+        }
+    }
+
+    /// 只看一个位置：没有位号、没得找的对象。
+    pub(super) fn spot(drawing_id: &str, at: [f64; 2]) -> Self {
+        Self {
+            drawing_id: drawing_id.to_owned(),
+            wanted: None,
+            spots: vec![at],
+            fields: Vec::new(),
+        }
+    }
+
+    /// 在哪张图上（图号）。
+    pub(super) fn drawing_id(&self) -> &str {
+        &self.drawing_id
+    }
 }
 
 /// 自动化操作扫出的项目索引：项目目录、索引、读得出来的各图的摘要。
@@ -273,22 +456,33 @@ struct Pick {
 /// 后台读回来的一条（`Message::PidIndexRead`）。
 #[derive(Debug, Clone)]
 pub enum Read {
-    /// 读了一个文件。
-    File(Box<FileRead>),
+    /// 读了的几个文件，按读的先后。
+    Files(Vec<FileRead>),
     /// 这次扫描的文件读完了，或者取消以后不再读了。
     Done,
 }
 
-/// 读一个文件读到的：读之前文件的大小和修改时间，读成的摘要或读不出来的原因。
+/// 读一个文件读到的：读之前文件的大小和修改时间，做摘要用的连接容差，读出来的或读不出来
+/// 的原因。
 #[derive(Debug, Clone)]
 pub struct FileRead {
     path: PathBuf,
     size: u64,
     modified: Option<SystemTime>,
-    summary: Result<DrawingSummary, String>,
+    tolerance: f64,
+    summary: Result<Summarized, String>,
 }
 
-/// 扫一遍项目目录（§3.7、§4），得出项目索引和读得出来的各图的摘要。
+/// 扫一遍项目目录得出的（[`scan`]）：项目索引，读得出来的各图的摘要，和这些图里记着的
+/// 豁免（图号 → 豁免）。
+pub(in crate::app) struct Scanned {
+    pub(super) index: ProjectIndex,
+    pub(super) summaries: Vec<DrawingSummary>,
+    pub(super) waivers: Vec<(String, Vec<Waiver>)>,
+}
+
+/// 扫一遍项目目录（§3.7、§4），得出项目索引、读得出来的各图的摘要和它们记着的豁免。摘要
+/// 按连接容差 `tolerance` 做。
 ///
 /// `open` 是正在程序里打开着的图和它们的文件：目录里的图在其中的，摘要这一份（含没保存
 /// 的修改），不读文件，也不进缓存。其余的经 `cache` 读磁盘，`load` 是读一个文件的办法
@@ -298,15 +492,17 @@ pub(in crate::app) fn scan(
     project_dir: &Path,
     open: &[(&Path, &Document)],
     library: &SymbolLibrary,
+    tolerance: f64,
     cache: &mut SummaryCache,
     load: &mut dyn FnMut(&Path) -> Result<Document, String>,
-) -> Result<(ProjectIndex, Vec<DrawingSummary>), IndexError> {
+) -> Result<Scanned, IndexError> {
     let drawings = list_drawings(project_dir)?;
     let open: Vec<(PathBuf, &Document)> = open
         .iter()
         .map(|&(path, document)| (same_file(path), document))
         .collect();
     let mut summaries = Vec::with_capacity(drawings.len());
+    let mut waivers = Vec::with_capacity(drawings.len());
     let mut failed = Vec::new();
     for drawing in &drawings {
         let shown = if open.is_empty() {
@@ -317,18 +513,27 @@ pub(in crate::app) fn scan(
                 .find(|(open_path, _)| *open_path == path)
                 .map(|&(_, document)| document)
         };
-        let summary = if let Some(document) = shown {
-            Ok(summarize(
-                document,
-                library,
-                meta(drawing, SummarySource::Open, None),
-                DEFAULT_TOLERANCE,
-            ))
+        let summarized = if let Some(document) = shown {
+            Ok(Summarized {
+                summary: summarize(
+                    document,
+                    library,
+                    meta(drawing, SummarySource::Open, None),
+                    tolerance,
+                ),
+                waivers: crate::pid::drc::waivers(document),
+            })
         } else {
-            cache.summary(drawing, library, load)
+            cache.summary(drawing, library, tolerance, load)
         };
-        match summary {
-            Ok(summary) => summaries.push(summary),
+        match summarized {
+            Ok(Summarized {
+                summary,
+                waivers: recorded,
+            }) => {
+                waivers.push((summary.drawing_id.clone(), recorded));
+                summaries.push(summary);
+            }
             Err(error) => failed.push(FailedDrawing {
                 drawing_id: drawing.drawing_id.clone(),
                 file: drawing.file.clone(),
@@ -339,7 +544,11 @@ pub(in crate::app) fn scan(
     }
     cache.forget_unlisted(project_dir, &drawings);
     let index = build_index(project_dir, &summaries, &failed)?;
-    Ok((index, summaries))
+    Ok(Scanned {
+        index,
+        summaries,
+        waivers,
+    })
 }
 
 fn meta(
@@ -365,30 +574,72 @@ fn unix_seconds(time: SystemTime) -> i64 {
 
 /// 认同一个文件用的路径：解析得了就用解析后的（大小写、`..`、斜杠方向都归一），否则
 /// 原样。
-fn same_file(path: &Path) -> PathBuf {
+pub(super) fn same_file(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// 在后台线程里依次读 `files`、做成摘要，读一个交回一个（§4）。`cancel` 立起来就不再读
-/// 下一个；最后交回 [`Read::Done`]，线程意外退出了也交。
+/// 在后台线程里依次读 `files`、做成摘要（§4）。读到的第一个马上交回，之后的攒着，离上次
+/// 交回满 100 毫秒一起交回：一个一个交时界面线程收不过来，Windows 的消息队列一直不空，
+/// 窗口等不到重画（面板规格 §11.10）。攒和交在另一个线程里：某个文件读得再久，前面读好的
+/// 也不多等。`cancel` 立起来就不再读下一个，读好的照样交回；最后交回 [`Read::Done`]，
+/// 线程意外退出了也交。
 fn read_in_background(
     files: Vec<PathBuf>,
     library: SymbolLibrary,
+    tolerance: f64,
     load: Loader,
     cancel: Arc<AtomicBool>,
 ) -> impl iced::futures::Stream<Item = Read> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::{Duration, Instant};
+
+        const BATCH: Duration = Duration::from_millis(100);
+
+        let (read_tx, read_rx) = mpsc::channel();
         std::thread::spawn(move || {
             for path in files {
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
-                let read = Read::File(Box::new(read_one(path, &library, &*load)));
-                if tx.unbounded_send(read).is_err() {
+                if read_tx
+                    .send(read_one(path, &library, tolerance, &*load))
+                    .is_err()
+                {
                     return;
                 }
+            }
+        });
+        let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            let mut sent: Option<Instant> = None;
+            loop {
+                let next = match sent {
+                    Some(at) if !held.is_empty() => {
+                        let left = (at + BATCH).saturating_duration_since(Instant::now());
+                        read_rx.recv_timeout(left)
+                    }
+                    _ => read_rx.recv().map_err(RecvTimeoutError::from),
+                };
+                match next {
+                    Ok(read) => held.push(read),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+                if sent.is_none_or(|at| at.elapsed() >= BATCH) {
+                    if tx
+                        .unbounded_send(Read::Files(std::mem::take(&mut held)))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    sent = Some(Instant::now());
+                }
+            }
+            if !held.is_empty() {
+                let _ = tx.unbounded_send(Read::Files(held));
             }
         });
         iced::futures::StreamExt::chain(rx, iced::futures::stream::iter([Read::Done]))
@@ -398,18 +649,20 @@ fn read_in_background(
         drop(cancel);
         let reads: Vec<Read> = files
             .into_iter()
-            .map(|path| Read::File(Box::new(read_one(path, &library, &*load))))
+            .map(|path| Read::Files(vec![read_one(path, &library, tolerance, &*load)]))
             .chain([Read::Done])
             .collect();
         iced::futures::stream::iter(reads)
     }
 }
 
-/// 读一个文件、做成摘要。图号先按文件名填、PBS 节点先空着，从缓存取用时换成项目文件
-/// 现在写的（[`SummaryCache::summary`]）。读文件或做摘要时崩了，只算这个文件读不出来。
+/// 读一个文件、按连接容差 `tolerance` 做成摘要，读出图里记着的豁免。图号先按文件名填、PBS
+/// 节点先空着，从缓存取用时换成项目文件现在写的（[`SummaryCache::summary`]）。读文件或做摘要
+/// 时崩了，只算这个文件读不出来。
 fn read_one(
     path: PathBuf,
     library: &SymbolLibrary,
+    tolerance: f64,
     load: &dyn Fn(&Path) -> Result<Document, String>,
 ) -> FileRead {
     let metadata = match std::fs::metadata(&path) {
@@ -419,6 +672,7 @@ fn read_one(
                 path,
                 size: 0,
                 modified: None,
+                tolerance,
                 summary: Err(error.to_string()),
             };
         }
@@ -440,14 +694,17 @@ fn read_one(
         modified_at: unix_seconds(modified),
     });
     let summary = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-        || -> Result<DrawingSummary, String> {
+        || -> Result<Summarized, String> {
             let document = load(&drawing.path)?;
-            Ok(summarize(
-                &document,
-                library,
-                meta(&drawing, SummarySource::File, fingerprint),
-                DEFAULT_TOLERANCE,
-            ))
+            Ok(Summarized {
+                summary: summarize(
+                    &document,
+                    library,
+                    meta(&drawing, SummarySource::File, fingerprint),
+                    tolerance,
+                ),
+                waivers: crate::pid::drc::waivers(&document),
+            })
         },
     ))
     .unwrap_or_else(|payload| Err(panicked(payload.as_ref())));
@@ -455,6 +712,7 @@ fn read_one(
         path: drawing.path,
         size,
         modified,
+        tolerance,
         summary,
     }
 }
@@ -508,6 +766,24 @@ impl OpenCADStudio {
         Some(self.pidindex_start(i, then))
     }
 
+    /// `PIDCHECK PROJECT`、`PIDCHECK PBS`（`commands::piddrc`）：扫第 `i` 个标签页的图所在的
+    /// 项目目录，扫完接着查。
+    pub(super) fn pidindex_check(&mut self, i: usize, check: Check) -> Task<Message> {
+        self.pidindex_start(i, Then::Check(Box::new(check)))
+    }
+
+    /// `PIDBOM PROJECT`、`PIDBOM PBS`、带范围的 `PIDBOM EXPORT`（`commands::pidbom`）：扫第 `i`
+    /// 个标签页的图所在的项目目录，扫完接着算清单。
+    pub(super) fn pidindex_bom(&mut self, i: usize, job: BomJob) -> Task<Message> {
+        self.pidindex_start(i, Then::Bom(Box::new(job)))
+    }
+
+    /// `PIDPUBLISH`、`PIDPUBLISH CHECK`（`commands::pidpublish`）：扫第 `i` 个标签页的图所在的
+    /// 项目目录，扫完接着算门禁。
+    pub(super) fn pidindex_publish(&mut self, i: usize, job: PublishJob) -> Task<Message> {
+        self.pidindex_start(i, Then::Publish(Box::new(job)))
+    }
+
     /// 扫当前图所在的项目目录，扫完做 `then`。缓存里的都没变就当场扫完、当场说；有要从
     /// 磁盘读的挪到后台读（§4），这里先交差，读完接着说。已经在扫同一个目录就排在它后面。
     /// 没有项目目录、列图或建索引出错时在命令行连同错误码说。
@@ -524,14 +800,21 @@ impl OpenCADStudio {
             );
             return Task::none();
         };
+        let tolerance = then.tolerance();
         if let Some(scan) = &mut self.pid_index.scan {
-            if same_file(&scan.project_dir) == same_file(&project_dir) {
+            let here = same_file(&scan.project_dir) == same_file(&project_dir);
+            if here && scan.tolerance == tolerance {
                 scan.then.push(then);
                 let said = format!(
                     "{verb}: 还在读，{}/{} 个文件；读完接着说。",
                     scan.done, scan.total
                 );
                 self.command_line.push_info(&said);
+            } else if here {
+                let said = format!(
+                    "{verb}: 正在按另一个连接容差扫这个目录；等它扫完，或者 PIDINDEX CANCEL 以后再扫。"
+                );
+                self.command_line.push_error(&said);
             } else {
                 let said = format!(
                     "{verb}: 正在扫 {}；等它扫完，或者 PIDINDEX CANCEL 以后再扫这里。",
@@ -542,15 +825,13 @@ impl OpenCADStudio {
             return Task::none();
         }
         let mut unread = Vec::new();
-        let scanned = self.pidindex_scan(&project_dir, &mut |path| {
+        let scanned = self.pidindex_scan(&project_dir, tolerance, &mut |path| {
             unread.push(path.to_path_buf());
             Err(String::new())
         });
         match scanned {
-            Ok((index, summaries)) if unread.is_empty() => {
-                self.pidindex_report(&project_dir, &index, &summaries, then)
-            }
-            Ok(_) => self.pidindex_read(project_dir, unread, Some(then)),
+            Ok(scanned) if unread.is_empty() => self.pidindex_report(&project_dir, &scanned, then),
+            Ok(_) => self.pidindex_read(project_dir, unread, tolerance, Some(then)),
             Err(error) => {
                 self.command_line
                     .push_error_coded(error.code(), &format!("{verb}: {error}"));
@@ -559,13 +840,14 @@ impl OpenCADStudio {
         }
     }
 
-    /// 用 `load` 读缓存里没有、或者变了的图，扫一遍 `project_dir`，得出索引和读得出来的
-    /// 各图的摘要。打开着的图以标签页图纸的 `source_path` 认，与定项目目录用的是同一个。
+    /// 用 `load` 读缓存里没有、或者变了的图，按连接容差 `tolerance` 扫一遍 `project_dir`
+    /// （[`scan`]）。打开着的图以标签页图纸的 `source_path` 认，与定项目目录用的是同一个。
     fn pidindex_scan(
         &mut self,
         project_dir: &Path,
+        tolerance: f64,
         load: &mut dyn FnMut(&Path) -> Result<Document, String>,
-    ) -> Result<(ProjectIndex, Vec<DrawingSummary>), IndexError> {
+    ) -> Result<Scanned, IndexError> {
         let open: Vec<(&Path, &Document)> = self
             .tabs
             .iter()
@@ -578,6 +860,7 @@ impl OpenCADStudio {
             project_dir,
             &open,
             &self.pid_symbols,
+            tolerance,
             &mut self.pid_index.cache,
             load,
         )
@@ -589,6 +872,7 @@ impl OpenCADStudio {
         &mut self,
         project_dir: PathBuf,
         files: Vec<PathBuf>,
+        tolerance: f64,
         then: Option<Then>,
     ) -> Task<Message> {
         let id = self.pid_index.next_scan;
@@ -609,18 +893,19 @@ impl OpenCADStudio {
             cancel: Arc::clone(&cancel),
             failed: HashMap::new(),
             then: then.into_iter().collect(),
+            tolerance,
         });
         let reads = read_in_background(
             files,
             self.pid_symbols.clone(),
+            tolerance,
             Arc::clone(&self.pid_index.loader),
             cancel,
         );
         Task::run(reads, move |read| Message::PidIndexRead(id, read))
     }
 
-    /// 后台读回来的一条。读到的摘要记进缓存，读不出来的记下原因（[`Unreadable`]），取消了
-    /// 的扫描读回来的也记；是这次扫描的就数上，有排着的命令时约每读完十分之一报一次进度，
+    /// 后台读回来的一批（[`Read`]）：每个文件照 [`Self::pidindex_file_read`] 记下、数上；
     /// 读完了建索引、接着说；接着做的要打开图（`PIDLOCATE`）就交出打开它的任务。
     pub(in crate::app) fn on_pid_index_read(&mut self, scan: u64, read: Read) -> Task<Message> {
         let current = self
@@ -628,23 +913,35 @@ impl OpenCADStudio {
             .scan
             .as_ref()
             .is_some_and(|running| running.id == scan);
-        let Read::File(file) = read else {
+        let Read::Files(files) = read else {
             return if current {
                 self.pidindex_finish()
             } else {
                 Task::none()
             };
         };
+        for file in files {
+            self.pidindex_file_read(file, current);
+        }
+        Task::none()
+    }
+
+    /// 后台读回来的一个文件。读到的摘要记进缓存，读不出来的记下原因（[`Unreadable`]），
+    /// 取消了的扫描读回来的也记；是这次扫描的（`current`）就数上，有排着的命令时约每读完
+    /// 十分之一报一次进度。
+    fn pidindex_file_read(&mut self, file: FileRead, current: bool) {
         let FileRead {
             path,
             size,
             modified,
+            tolerance,
             summary,
-        } = *file;
+        } = file;
         let failed = match summary {
-            Ok(summary) => {
+            Ok(summarized) => {
                 self.pid_index.unreadable.remove(&path);
-                self.pid_index.cache.remember(path, size, modified, summary);
+                let cache = &mut self.pid_index.cache;
+                cache.remember(path, size, modified, tolerance, summarized);
                 None
             }
             Err(why) => {
@@ -666,19 +963,18 @@ impl OpenCADStudio {
             }
         };
         let Some(running) = self.pid_index.scan.as_mut().filter(|_| current) else {
-            return Task::none();
+            return;
         };
         running.done += 1;
         running.failed.extend(failed);
         let (done, total) = (running.done, running.total);
         let Some(verb) = running.then.first().map(Then::verb) else {
-            return Task::none();
+            return;
         };
         if done < total && done % (total / 10).max(1) == 0 {
             self.command_line
                 .push_info(&format!("{verb}: 读了 {done}/{total} 个文件。"));
         }
-        Task::none()
     }
 
     /// 这次扫描要读的都读回来了：用缓存建索引，后台读不出来的照它说的原因记，再按先后做
@@ -689,6 +985,7 @@ impl OpenCADStudio {
             project_dir,
             failed,
             then,
+            tolerance,
             ..
         }) = self.pid_index.scan.take()
         else {
@@ -697,17 +994,17 @@ impl OpenCADStudio {
         if then.is_empty() {
             return Task::none();
         }
-        let scanned = self.pidindex_scan(&project_dir, &mut |path| {
+        let scanned = self.pidindex_scan(&project_dir, tolerance, &mut |path| {
             Err(failed
                 .get(path)
                 .cloned()
                 .unwrap_or_else(|| CHANGED_SINCE_READ.to_string()))
         });
         match scanned {
-            Ok((index, summaries)) => {
+            Ok(scanned) => {
                 let mut tasks = Vec::with_capacity(then.len());
                 for then in then {
-                    tasks.push(self.pidindex_report(&project_dir, &index, &summaries, then));
+                    tasks.push(self.pidindex_report(&project_dir, &scanned, then));
                 }
                 Task::batch(tasks)
             }
@@ -729,24 +1026,27 @@ impl OpenCADStudio {
     fn pidindex_report(
         &mut self,
         project_dir: &Path,
-        index: &ProjectIndex,
-        summaries: &[DrawingSummary],
+        scanned: &Scanned,
         then: Then,
     ) -> Task<Message> {
+        let index = &scanned.index;
         match then {
             Then::Overview => self.pidindex_overview(index),
             Then::Duplicates => self.pidindex_duplicates(index),
             Then::Links => self.pidindex_links(index),
             Then::Locate(locate) => {
-                return self.pidlocate_found(project_dir, index, summaries, locate);
+                return self.pidlocate_found(project_dir, index, &scanned.summaries, locate);
             }
+            Then::Check(check) => self.pidcheck_scanned(project_dir, scanned, *check),
+            Then::Bom(job) => self.pidbom_scanned(project_dir, scanned, *job),
+            Then::Publish(job) => self.pidpublish_scanned(scanned, *job),
         }
         Task::none()
     }
 
     /// `PIDINDEX CANCEL`：后台不再读下一个文件，排着的不做了。正读着的那个读回来照样记进
-    /// 缓存，下次扫接着用。
-    fn pidindex_cancel(&mut self) {
+    /// 缓存，下次扫接着用。校验与交付面板的【取消】也是它（面板规格 §4.7）。
+    pub(super) fn pidindex_cancel(&mut self) {
         let Some(scan) = self.pid_index.scan.take() else {
             self.command_line.push_info("PIDINDEX CANCEL: 没有在扫。");
             return;
@@ -1026,23 +1326,12 @@ impl OpenCADStudio {
             wanted.tag
         ));
         let task = self.update(Message::OpenRecent(path.clone()));
-        // 打开可能没起来（文件刚被删、一次只开一张图而当前图没存），那时没有这次打开。
-        let open_id = self
-            .opening
-            .as_ref()
-            .filter(|open| {
-                open.source_path
-                    .as_deref()
-                    .is_some_and(|source| same_file(source) == same_file(&path))
-            })
-            .map(|open| open.id);
-        match open_id {
+        match self.pidlocate_open_id(&path) {
             Some(open_id) => {
                 self.pid_index.opening = Some(Opening {
                     open_id,
                     drawing_id: drawing_id.to_string(),
-                    wanted,
-                    reply,
+                    then: Opened::Find { wanted, reply },
                 });
             }
             None => self.pidlocate_not_opened(drawing_id, &wanted.tag),
@@ -1050,8 +1339,22 @@ impl OpenCADStudio {
         task
     }
 
+    /// 刚起的那次打开 `path` 的编号。打开可能没起来（文件刚被删、一次只开一张图而当前图
+    /// 没存），那时没有这次打开。
+    fn pidlocate_open_id(&self, path: &Path) -> Option<u64> {
+        self.opening
+            .as_ref()
+            .filter(|open| {
+                open.source_path
+                    .as_deref()
+                    .is_some_and(|source| same_file(source) == same_file(path))
+            })
+            .map(|open| open.id)
+    }
+
     /// 编号是 `open_id` 的那次打开做完了，打开的是 `path`：是为定位打开的，就在它的
-    /// 标签页上接着找；`pid_locate` 在等就把结果交给它。
+    /// 标签页上接着找，`pid_locate` 在等就把结果交给它；是面板为要定位的东西打开的，就在
+    /// 上面定位它。
     pub(in crate::app) fn on_pid_locate_opened(&mut self, open_id: u64, path: &Path) {
         let Some(opening) = self
             .pid_index
@@ -1061,25 +1364,42 @@ impl OpenCADStudio {
             return;
         };
         let tab = self.pidlocate_tab(path).unwrap_or(self.active_tab);
+        let (wanted, reply) = match opening.then {
+            Opened::Find { wanted, reply } => (wanted, reply),
+            Opened::Target(target) => {
+                let landed = self.pidlocate_target(tab, &target);
+                self.pid_verify_landed(landed);
+                return;
+            }
+        };
         let place = format!("{} 上", opening.drawing_id);
-        match self.pidlocate_in(tab, &opening.wanted, &place) {
-            Some(handles) if opening.reply => {
+        match self.pidlocate_in(tab, &wanted, &place) {
+            Some(handles) if reply => {
                 let result = located(&opening.drawing_id, self.tabs[tab].id, &handles);
                 self.set_control_result(result);
             }
             Some(_) => {}
-            None => self.pidlocate_gone(&opening.drawing_id, &opening.wanted.tag),
+            None => self.pidlocate_gone(&opening.drawing_id, &wanted.tag),
         }
     }
 
     /// 编号是 `open_id` 的那次打开失败了：是为定位打开的，就不再等它，说没定位。
     pub(in crate::app) fn on_pid_locate_open_failed(&mut self, open_id: u64) {
-        if let Some(opening) = self
+        let Some(opening) = self
             .pid_index
             .opening
             .take_if(|opening| opening.open_id == open_id)
-        {
-            self.pidlocate_not_opened(&opening.drawing_id, &opening.wanted.tag);
+        else {
+            return;
+        };
+        match opening.then {
+            Opened::Find { wanted, .. } => {
+                self.pidlocate_not_opened(&opening.drawing_id, &wanted.tag);
+            }
+            Opened::Target(_) => self.pid_verify_not_located(
+                None,
+                format!("{} 没打开，没定位到这条结果。", opening.drawing_id),
+            ),
         }
     }
 
@@ -1157,12 +1477,120 @@ impl OpenCADStudio {
         Some(self.pidlocate_select(i, &picks, place))
     }
 
+    /// 「校验与交付」面板点的 `target`，在第 `i` 个标签页的图上定位
+    /// （`SPEC-pid-verify-deliver-panel.md` §4.3、§4.5）。有得找的照图现在的样子现找
+    /// （[`Self::pick_on`]，不用记着的句柄），找到了只选中它们、缩放到它们，同 `PIDLOCATE`；
+    /// 记了几处位置的，缩放到这些位置的外包范围。现找不到的、没得找的，什么也不选，缩放到
+    /// 记着的位置；连位置也没记着的什么也不动。命令行上什么也不说。现找到的是一个对象、`target`
+    /// 又记着属性的，属性表高亮这几行（[`Self::pid_verify_highlight_found`]）。
+    pub(super) fn pidlocate_target(&mut self, i: usize, target: &Target) -> Landed {
+        let picks = target
+            .wanted
+            .as_ref()
+            .map(|wanted| self.pick_on(i, wanted))
+            .unwrap_or_default();
+        let landed = match (&target.wanted, picks.is_empty()) {
+            (None, _) => Landed::Spot,
+            (Some(_), true) => Landed::Gone,
+            (Some(_), false) => Landed::Found,
+        };
+        if picks.is_empty() && target.spots.is_empty() {
+            return landed;
+        }
+        let spots: Vec<Pick> = target
+            .spots
+            .iter()
+            .map(|&place| {
+                let place = glam::DVec2::from(place);
+                Pick {
+                    handle: String::new(),
+                    said: String::new(),
+                    low: place,
+                    high: place,
+                }
+            })
+            .collect();
+        let handles: Vec<document::Handle> = picks
+            .iter()
+            .filter_map(|pick| parse_handle(&pick.handle))
+            .collect();
+        let scene = &mut self.tabs[i].scene;
+        scene.deselect_all();
+        scene.select_entities(&handles);
+        scene.remember_current_view();
+        if picks.is_empty() || spots.len() > 1 {
+            let (min, max) = frame(&spots);
+            scene.zoom_to_window(min, max);
+        } else if !scene.zoom_to_entities(&handles) {
+            let (min, max) = frame(&picks);
+            scene.zoom_to_window(min, max);
+        }
+        self.pid_verify_highlight_found(i, &handles, &target.fields);
+        self.refresh_properties();
+        landed
+    }
+
+    /// 面板点的东西在项目目录 `project_dir` 里的另一张图上（§4.3、§4.5）：有标签页开着它就
+    /// 切过去当场定位（[`Self::pidlocate_target`]），没有就打开它、打开以后接着定位
+    /// （`on_pid_locate_opened`），同 `PIDLOCATE` 去一张图。定位成什么样、图不在目录里、没打开
+    /// 成，都在面板的消息栏里说。
+    pub(super) fn pidlocate_elsewhere(
+        &mut self,
+        project_dir: &Path,
+        target: Target,
+    ) -> Task<Message> {
+        let drawing_id = target.drawing_id.clone();
+        let path = match list_drawings(project_dir) {
+            Ok(drawings) => drawings
+                .into_iter()
+                .find(|drawing| drawing.drawing_id == drawing_id)
+                .map(|drawing| drawing.path),
+            Err(error) => {
+                self.pid_verify_not_located(
+                    None,
+                    format!("项目目录读不了，没定位到这条结果：{error}"),
+                );
+                return Task::none();
+            }
+        };
+        let Some(path) = path else {
+            self.pid_verify_not_located(
+                Some(LOCATE_NOT_FOUND),
+                format!("项目目录里已经没有 {drawing_id} 这张图，定位不到这条结果。"),
+            );
+            return Task::none();
+        };
+        if let Some(tab) = self.pidlocate_tab(&path) {
+            let switched = if tab == self.active_tab {
+                Task::none()
+            } else {
+                self.update(Message::TabSwitch(tab))
+            };
+            let landed = self.pidlocate_target(tab, &target);
+            self.pid_verify_landed(landed);
+            return switched;
+        }
+        let task = self.update(Message::OpenRecent(path.clone()));
+        match self.pidlocate_open_id(&path) {
+            Some(open_id) => {
+                self.pid_index.opening = Some(Opening {
+                    open_id,
+                    drawing_id,
+                    then: Opened::Target(Box::new(target)),
+                });
+            }
+            None => self
+                .pid_verify_not_located(None, format!("{drawing_id} 没打开，没定位到这条结果。")),
+        }
+        task
+    }
+
     // ── 自动化操作（§5.3） ──
 
     /// 第 `i` 个标签页的图在项目里叫什么（§3.1、§3.7）：存过盘的照项目文件 `drawings[]`，
     /// 没写的取文件名去掉扩展名；没存过的图号是空的、没有文件。项目文件读不出来、两个
     /// 文件同号时报错。
-    fn drawing_meta(&self, i: usize) -> Result<SummaryMeta, IndexError> {
+    pub(super) fn drawing_meta(&self, i: usize) -> Result<SummaryMeta, IndexError> {
         let document = &self.tabs[i].scene.document;
         let (Some(project_dir), Some(source)) = (
             crate::io::drawing_dir(document),
@@ -1187,11 +1615,26 @@ impl OpenCADStudio {
         Ok(meta(&drawing, SummarySource::Open, None))
     }
 
-    /// 操作要的项目索引，项目目录是第 `i` 个标签页的图所在的目录。要读的文件缓存里都有
-    /// 就当场建好；要读盘时 `read` 为真就起后台扫描、应答 `scanning` 并交出后台读的任务，
-    /// 为假就把要读的算作读不出来。正在扫（哪个目录都算）也应答 `scanning`。以前读不出来、
-    /// 到现在没变的文件照上次的原因算，不再读。
+    /// 操作要的项目索引（[`Self::op_scan`]，默认的连接容差）。
     fn op_index(&mut self, i: usize, read: bool) -> Result<Indexed, (Value, Task<Message>)> {
+        let (project_dir, scanned) = self.op_scan(i, DEFAULT_TOLERANCE, read)?;
+        Ok(Indexed {
+            project_dir,
+            index: scanned.index,
+            summaries: scanned.summaries,
+        })
+    }
+
+    /// 操作要扫的项目：第 `i` 个标签页的图所在的目录和扫出来的，摘要按连接容差
+    /// `tolerance` 做。要读的文件缓存里都有就当场扫完；要读盘时 `read` 为真就起后台扫描、
+    /// 应答 `scanning` 并交出后台读的任务，为假就把要读的算作读不出来。正在扫（哪个目录都
+    /// 算）也应答 `scanning`。以前读不出来、到现在没变的文件照上次的原因算，不再读。
+    pub(super) fn op_scan(
+        &mut self,
+        i: usize,
+        tolerance: f64,
+        read: bool,
+    ) -> Result<(PathBuf, Scanned), (Value, Task<Message>)> {
         let Some(project_dir) =
             crate::io::drawing_dir(&self.tabs[i].scene.document).map(Path::to_path_buf)
         else {
@@ -1206,7 +1649,7 @@ impl OpenCADStudio {
         }
         let unreadable = std::mem::take(&mut self.pid_index.unreadable);
         let mut unread = Vec::new();
-        let scanned = self.pidindex_scan(&project_dir, &mut |path| {
+        let scanned = self.pidindex_scan(&project_dir, tolerance, &mut |path| {
             if let Some(why) = recall(&unreadable, path) {
                 return Err(why);
             }
@@ -1220,14 +1663,10 @@ impl OpenCADStudio {
             Err(error) => Err((index_refusal(&error), Task::none())),
             Ok(_) if !unread.is_empty() => {
                 let total = unread.len();
-                let task = self.pidindex_read(project_dir, unread, None);
+                let task = self.pidindex_read(project_dir, unread, tolerance, None);
                 Err((scanning(0, total), task))
             }
-            Ok((index, summaries)) => Ok(Indexed {
-                project_dir,
-                index,
-                summaries,
-            }),
+            Ok(scanned) => Ok((project_dir, scanned)),
         }
     }
 
@@ -1401,7 +1840,7 @@ fn refuse(code: &str, error: impl Into<String>) -> Value {
 }
 
 /// 列图、建索引出错时的失败应答，错误码是 [`IndexError::code`]。
-fn index_refusal(error: &IndexError) -> Value {
+pub(super) fn index_refusal(error: &IndexError) -> Value {
     refuse(error.code(), error.to_string())
 }
 
@@ -1641,11 +2080,12 @@ fn link_end(end: &LinkEnd) -> String {
 }
 
 /// `(x, y)`，最多三位小数，去掉末尾的 0。
-fn point([x, y]: [f64; 2]) -> String {
+pub(super) fn point([x, y]: [f64; 2]) -> String {
     format!("({}, {})", number(x), number(y))
 }
 
-fn number(value: f64) -> String {
+/// 一个数，写法同 [`point`]。快照比对的长度（`commands::pidsnapshot`）也这样写。
+pub(super) fn number(value: f64) -> String {
     let text = format!("{value:.3}");
     let text = text.trim_end_matches('0').trim_end_matches('.');
     if text == "-0" {
@@ -1910,8 +2350,8 @@ mod tests {
             );
             crate::io::load_file(path)
         };
-        let (index, _) = scan(dir, open, library, cache, &mut load).expect("扫描");
-        (index, read)
+        let scanned = scan(dir, open, library, DEFAULT_TOLERANCE, cache, &mut load).expect("扫描");
+        (scanned.index, read)
     }
 
     fn objects(index: &ProjectIndex, drawing_id: &str) -> Option<usize> {
@@ -3102,5 +3542,37 @@ mod tests {
             );
             assert_eq!(selected(&app, i), [handle.as_str()], "{at}: {answer}");
         }
+    }
+
+    /// 后台读回来的不一个一个交（§4）：一个一个交时界面线程收不过来，Windows 的消息队列
+    /// 一直不空，窗口等不到重画，进度条不动（面板规格 §11.10）。读到的第一个马上交回，
+    /// 之后的攒着一起交，每个文件交回一次、按读的先后，最后是 `Done`。
+    #[test]
+    fn background_reads_come_back_together_once_the_first_is_in() {
+        let files: Vec<PathBuf> = (0..50)
+            .map(|n| PathBuf::from(format!("没有这个文件-{n}.dwg")))
+            .collect();
+        let loader: Loader = Arc::new(|_: &Path| Err(String::new()));
+        let reads = read_in_background(
+            files.clone(),
+            SymbolLibrary::builtin(),
+            0.5,
+            loader,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let mut batches: Vec<Vec<PathBuf>> = Vec::new();
+        let mut done = false;
+        for read in iced::futures::executor::block_on(reads.collect::<Vec<_>>()) {
+            assert!(!done, "Done 以后还有");
+            match read {
+                Read::Files(got) => batches.push(got.into_iter().map(|file| file.path).collect()),
+                Read::Done => done = true,
+            }
+        }
+        assert!(done, "最后要交回 Done");
+        assert_eq!(batches.first().map(Vec::len), Some(1), "第一个马上交回");
+        assert_eq!(batches.concat(), files, "每个文件交回一次，按读的先后");
+        let times = batches.len();
+        assert!(times < files.len(), "一个一个交的：{times} 次");
     }
 }

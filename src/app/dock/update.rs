@@ -638,6 +638,16 @@ impl OpenCADStudio {
                         }
                         self.show_pid_collab = true;
                     }
+                    PanelId::PidVerifyDeliver => {
+                        if self.dock.location(PanelId::PidVerifyDeliver).is_none() {
+                            self.dock.dock(
+                                PanelId::PidVerifyDeliver,
+                                crate::app::config::DockSide::Right,
+                                0,
+                            );
+                        }
+                        self.show_pid_verify = true;
+                    }
                     PanelId::ParametersManager => {
                         self.show_parameters_manager = true;
                         self.dock_open_above_palettes(id);
@@ -731,6 +741,15 @@ impl OpenCADStudio {
                 );
                 crate::ui::wrap_bar::forget_bounds(
                     crate::ui::window::pid_collab::PANEL_BOUNDS_ID,
+                );
+            }
+            // The interface state belongs to the program, not the panel, so
+            // reopening it shows the tab it was left on. Its reported
+            // rectangles go with it, as the collaboration panel's do.
+            PanelId::PidVerifyDeliver => {
+                self.show_pid_verify = false;
+                crate::ui::wrap_bar::forget_bounds(
+                    crate::ui::window::pid_verify_deliver::BOUNDS_PREFIX,
                 );
             }
             PanelId::AuthoringPalettes => {
@@ -922,6 +941,7 @@ impl OpenCADStudio {
             PanelId::PidPalette => self.show_pid_palette,
             PanelId::PidBackup => self.show_pid_backup,
             PanelId::PidCollab => self.show_pid_collab,
+            PanelId::PidVerifyDeliver => self.show_pid_verify,
             PanelId::ToolPalettes => self.show_tool_palettes,
             PanelId::ParametersManager => {
                 self.show_parameters_manager

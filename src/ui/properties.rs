@@ -833,7 +833,14 @@ impl PropertiesPanel {
             .unwrap_or_default()
     }
 
-    pub fn view(&self, width: f32, chrome: crate::ui::dock::Chrome) -> Element<'_, Message> {
+    /// The docked panel. `lit` tells the rows drawn on the warning colour
+    /// ([`lit_row`]), asked as they are drawn.
+    pub fn view(
+        &self,
+        width: f32,
+        chrome: crate::ui::dock::Chrome,
+        lit: &dyn Fn(&crate::scene::model::object::Property) -> bool,
+    ) -> Element<'_, Message> {
         use crate::ui::dock::PanelId;
         self.rendering_width.set(width);
         // ── Header ──────────────────────────────────────────────────────────
@@ -888,7 +895,7 @@ impl PropertiesPanel {
         } else {
             let mut col = column![].spacing(0);
             for section in &self.sections {
-                col = col.push(self.render_section(section, width));
+                col = col.push(self.render_section(section, width, lit));
             }
             crate::ui::kit::scroll_area(col.width(Length::Fill))
                 .map(|message| tag_picker(false, message))
@@ -933,7 +940,7 @@ impl PropertiesPanel {
         self.rendering_quick.set(true);
         self.rendering_width.set(QUICK_W);
         for section in &self.sections {
-            sections = sections.push(self.render_section(section, QUICK_W));
+            sections = sections.push(self.render_section(section, QUICK_W, &|_| false));
         }
         self.rendering_quick.set(false);
 
@@ -975,11 +982,13 @@ impl PropertiesPanel {
 
     /// `panel_width` is the width the section is laid out in (the dock width,
     /// or `QUICK_VIEW_W`): the read-only rows use it to tell whether a value
-    /// fits its column or needs a tooltip carrying the whole of it.
+    /// fits its column or needs a tooltip carrying the whole of it. `lit`
+    /// tells the rows drawn on the warning colour.
     fn render_section<'a>(
         &'a self,
         section: &'a PropSection,
         panel_width: f32,
+        lit: &dyn Fn(&crate::scene::model::object::Property) -> bool,
     ) -> Element<'a, Message> {
         let collapsed = self.collapsed_sections.contains(&section.title);
         let hdr = crate::ui::kit::category_bar(
@@ -1015,14 +1024,15 @@ impl PropertiesPanel {
                 if expanded {
                     for prop in &section.props[idx..idx + group_len] {
                         self.building_row(&section.title, &prop.label);
-                        col = col.push(self.render_prop_row(prop, coord_component(&prop.label)));
+                        let drawn = self.render_prop_row(prop, coord_component(&prop.label));
+                        col = col.push(lit_row(drawn, lit(prop)));
                     }
                 }
                 idx += group_len;
             } else {
                 let prop = &section.props[idx];
                 self.building_row(&section.title, &prop.label);
-                col = col.push(self.render_prop_row(prop, &prop.label));
+                col = col.push(lit_row(self.render_prop_row(prop, &prop.label), lit(prop)));
                 idx += 1;
             }
         }
@@ -2205,6 +2215,27 @@ fn prop_text_value(prop: &crate::scene::model::object::Property) -> String {
         | PropValue::ReadOnlyWithTooltip { value: s, .. } => s.clone(),
         _ => String::new(),
     }
+}
+
+/// `drawn` as it is, or under the warning colour when `lit`: the row of a
+/// property a clicked rule-check result names (P&ID panel spec §3.6). The
+/// cells paint their own ground, so the colour goes over them, translucent,
+/// from the grid's indent on; it takes no input, which reaches the row.
+fn lit_row(drawn: Element<'_, Message>, lit: bool) -> Element<'_, Message> {
+    if !lit {
+        return drawn;
+    }
+    let tint = container(iced::widget::Space::new())
+        .width(Length::Fill)
+        .height(Length::Fixed(ROW_H))
+        .style(|theme: &Theme| container::Style {
+            background: Some(Background::Color(
+                theme.palette().warning.base.color.scale_alpha(0.3),
+            )),
+            ..Default::default()
+        });
+    let indent = iced::widget::Space::new().width(crate::ui::style::kit_metrics::INDENT);
+    iced::widget::stack![drawn, row![indent, tint]].into()
 }
 
 /// The collapsed summary row of a coordinate group. The expand arrow leads

@@ -9,7 +9,7 @@ pub(crate) mod config;
 pub use automation::{export_headless, run_batch, serve};
 #[cfg(not(target_arch = "wasm32"))]
 pub use automation::{list_layouts_headless, plot_svg_headless, PlotSvgRequest};
-mod annotation_data;
+pub(crate) mod annotation_data;
 mod array_grips;
 mod block_action_bars;
 mod block_actions;
@@ -1638,6 +1638,29 @@ pub(super) struct OpenCADStudio {
     /// Whether the first live session has already brought the panel out. One
     /// shot, so closing it by hand is not undone by the next reconnect.
     pub(crate) pid_collab_auto_shown: bool,
+    /// Docked verify-and-deliver panel visibility (PIDVERIFY).
+    pub(crate) show_pid_verify: bool,
+    /// The verify-and-deliver panel's interface state: one for the whole
+    /// program, so the panel stays as it was left across document switches.
+    pub(crate) pid_verify_ui: crate::ui::window::pid_verify_deliver::VerifyUi,
+    /// What the verify-and-deliver panel draws, rebuilt from its interface
+    /// state whenever that changes.
+    pub(crate) pid_verify_view: crate::ui::window::pid_verify_deliver::VerifyView,
+    /// What that view was last built from besides the interface state: while
+    /// the panel is open, the view is rebuilt after any message that changes
+    /// it (`commands::pidverify`). `None` before the first build.
+    pub(in crate::app) pid_verify_built_from: Option<commands::pidverify::Inputs>,
+    /// The drawing the panel last followed, by its tab and the file it is
+    /// saved to: when another comes in front, or the one in front becomes
+    /// another file, the rows ticked in the snapshot list go
+    /// (`commands::pidverify`).
+    pub(in crate::app) pid_verify_front: Option<(u64, Option<String>)>,
+    /// The properties of one object a rule-check result clicked in the panel
+    /// names, which the property table highlights (`commands::pidverify`):
+    /// at most one, set when such a result is clicked and its object found,
+    /// dropped when another is set, when something else is selected on its
+    /// drawing or that drawing closes; a property drops out once filled in.
+    pub(in crate::app) pid_verify_highlight: Option<commands::pidverify::Highlight>,
     /// Set while a remote `op_applied` is being folded into the document. The
     /// undo step that fold opens must not be broadcast back to the room
     /// (`src/app/collab/apply.rs`).
@@ -1665,6 +1688,13 @@ pub(super) struct OpenCADStudio {
     /// project drawings on disk, kept while the file is unchanged, and the
     /// scan reading them in the background.
     pub(in crate::app) pid_index: commands::pidindex::PidIndex,
+    /// What PIDCHECK PROJECT and PIDCHECK PBS last found, per project folder
+    /// (`commands::piddrc`); a drawing's own check is kept on its tab.
+    pub(in crate::app) pid_checks: commands::piddrc::PidChecks,
+    /// The bills of materials the verify panel made of whole projects, per
+    /// project folder (`commands::pidverify`); a drawing's own is kept on
+    /// its tab.
+    pub(in crate::app) pid_boms: commands::pidverify::PanelBoms,
     /// Which group of symbols the P&ID legend list shows (its filter row).
     pub(crate) pid_legend_filter: crate::ui::window::pid_legend_list::PidLegendFilter,
     /// Whether the P&ID panel's five exception summaries are expanded.
@@ -3636,6 +3666,8 @@ pub enum Message {
     },
     /// An interaction inside the docked collaboration panel.
     PidCollab(crate::ui::window::pid_collab::PidCollabMsg),
+    /// An interaction inside the docked verify-and-deliver panel.
+    PidVerify(crate::ui::window::pid_verify_deliver::PidVerifyMsg),
     /// The P&ID module: a switch of screens, or a screen's own message.
     PidShell(pid_shell::Message),
     PollWebControl,
@@ -6779,6 +6811,12 @@ impl OpenCADStudio {
             pid_collab_view: Default::default(),
             pid_collab_claims_open: true,
             pid_collab_auto_shown: false,
+            show_pid_verify: false,
+            pid_verify_ui: Default::default(),
+            pid_verify_view: Default::default(),
+            pid_verify_built_from: None,
+            pid_verify_front: None,
+            pid_verify_highlight: None,
             applying_remote: false,
             #[cfg(not(target_arch = "wasm32"))]
             pid_backup_browser: Default::default(),
@@ -6790,6 +6828,8 @@ impl OpenCADStudio {
             pid_backup_tags: Default::default(),
             pid_symbols: crate::pid::symbols::SymbolLibrary::load_from_env(),
             pid_index: Default::default(),
+            pid_checks: Default::default(),
+            pid_boms: Default::default(),
             pid_legend_filter: Default::default(),
             pid_legend_exceptions_open: false,
             show_tool_palettes: false,

@@ -308,7 +308,7 @@ impl SequenceIndex {
 ///    （[`default_tag_rule`]）。`VALVE` / `INSTRUMENT` 走这条：它们由符号库
 ///    的 `symbol_type_map` 作为作者类型写进 `PID_AUTHOR`，但类型库因 D4 /
 ///    D16 不能收它们。默认表里也没有的类型仍是 [`TagError::UnknownType`]。
-fn resolve_rule(lib: &TypeLib, type_code: &str) -> Result<TagRule, TagError> {
+pub(crate) fn resolve_rule(lib: &TypeLib, type_code: &str) -> Result<TagRule, TagError> {
     if lib.contains(type_code) {
         return lib
             .resolve_tag_rule(type_code)

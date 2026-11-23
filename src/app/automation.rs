@@ -2877,21 +2877,25 @@ impl OpenCADStudio {
             ocs_save::prune_omitted_dxf_records(&mut baked_view);
         }
         let before = document_manifest(&baked_view);
-        // The verified-save path is a real save path too, so the P&ID gate must
-        // fire here with its contract code before the checksum/audit work. The
-        // wrapper below refuses the same documents, but it flattens the failure
-        // into a string, so the code is taken here where it is still typed.
-        crate::pid::propagate::gate_save(&snapshot).map_err(|error| {
-            json!({
-                "ok":false,"status":"failed","code":error.code(),"error":error.to_string(),
-            })
-        })?;
+        // The verified-save path is a real save path too, so the P&ID gates must
+        // fire here with their contract codes before the checksum/audit work.
+        // The wrapper below refuses duplicated tags as well, but it flattens the
+        // failure into a string, so the code is taken here where it is still
+        // typed. It runs no rule check: the rule gate's one call is this one.
+        crate::pid::propagate::gate_save(&snapshot)
+            .and_then(|()| crate::pid::drc::gate_save(&snapshot, Some(&path)))
+            .map_err(|error| {
+                json!({
+                    "ok":false,"status":"failed","code":error.code(),"error":error.to_string(),
+                })
+            })?;
         crate::io::save_as_version(&snapshot, &path, version).map_err(|error| {
             json!({
                 "ok":false,"status":"failed","code":"save_failed","error":error,
             })
         })?;
         self.tabs[i].scene.note_tables_saved();
+        self.report_rule_check_after_save(i, &path);
         // The bytes are now ours even if a later hash/audit/reopen check fails.
         // Refresh the guard immediately so a diagnostic failure cannot make the
         // next ordinary save look like an external edit of the same path.

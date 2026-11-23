@@ -128,6 +128,9 @@ pub enum PanelId {
     /// The collaboration panel (PIDCOLLAB): who is on the drawing and which
     /// tags they hold, with the claim/release buttons.
     PidCollab,
+    /// The verify-and-deliver panel (PIDVERIFY): the rule check, the bill of
+    /// materials, and snapshots and publishing, one tab each.
+    PidVerifyDeliver,
     /// Block Editor authoring tools.
     AuthoringPalettes,
     /// Reusable block tools (TOOLPALETTES / TP).
@@ -161,7 +164,7 @@ pub enum PanelId {
 
 impl PanelId {
     /// Every panel, in the order the pallet menu lists them.
-    pub const ALL: [PanelId; 21] = [
+    pub const ALL: [PanelId; 22] = [
         PanelId::Properties,
         PanelId::GraphicAttributes,
         PanelId::BlockPalette,
@@ -169,6 +172,7 @@ impl PanelId {
         PanelId::PidPalette,
         PanelId::PidBackup,
         PanelId::PidCollab,
+        PanelId::PidVerifyDeliver,
         PanelId::ToolPalettes,
         PanelId::AuthoringPalettes,
         PanelId::ParametersManager,
@@ -195,6 +199,7 @@ impl PanelId {
             PanelId::PidPalette => "P&ID 符号",
             PanelId::PidBackup => "P&ID Backup",
             PanelId::PidCollab => "协同",
+            PanelId::PidVerifyDeliver => "校验与交付",
             PanelId::ToolPalettes => "Tool Palettes",
             PanelId::AuthoringPalettes => "Authoring Palettes",
             PanelId::ParametersManager => "Parameters Manager",
@@ -230,6 +235,9 @@ impl PanelId {
             // Two overlapping figures: "who else is on this drawing". No other
             // panel uses the people shape.
             PanelId::PidCollab => include_bytes!("../../assets/icons/ui/collab.svg"),
+            // A sheet with a tick over its corner: "checked, ready to hand
+            // over". No other panel uses it.
+            PanelId::PidVerifyDeliver => include_bytes!("../../assets/icons/ui/verify.svg"),
             PanelId::ToolPalettes => include_bytes!("../../assets/icons/tool_palettes.svg"),
             PanelId::AuthoringPalettes => crate::ui::icons::AUTHORING_PALETTES,
             PanelId::ParametersManager => include_bytes!("../../assets/icons/table.svg"),
@@ -258,6 +266,7 @@ impl PanelId {
             PanelId::PidPalette => 300.0,
             PanelId::PidBackup => 340.0,
             PanelId::PidCollab => 260.0,
+            PanelId::PidVerifyDeliver => 360.0,
             PanelId::ToolPalettes => 260.0,
             PanelId::AuthoringPalettes => 260.0,
             PanelId::ParametersManager => 420.0,
@@ -2209,7 +2218,7 @@ mod tests {
 
     #[test]
     fn the_backup_browser_is_a_panel_of_its_own() {
-        assert_eq!(PanelId::ALL.len(), 21);
+        assert_eq!(PanelId::ALL.len(), 22);
         assert!(PanelId::ALL.contains(&PanelId::PidBackup));
         assert!(PanelId::ALL.contains(&PanelId::PidCollab));
         // The persisted layout names the panel, so the id has to round trip.
@@ -2221,5 +2230,21 @@ mod tests {
         );
         assert_eq!(PanelId::PidBackup.title(), "P&ID Backup");
         assert_eq!(PanelId::PidBackup.default_width(), 340.0);
+    }
+
+    #[test]
+    fn the_verify_and_deliver_panel_is_a_panel_of_its_own() {
+        let id = PanelId::PidVerifyDeliver;
+        assert!(PanelId::ALL.contains(&id));
+        // The persisted layout names the panel, so the id has to round trip.
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "\"pid_verify_deliver\"");
+        assert_eq!(serde_json::from_str::<PanelId>(&json).unwrap(), id);
+        assert_eq!(id.title(), "校验与交付");
+        assert_eq!(id.default_width(), 360.0);
+        assert_eq!(
+            id.icon(),
+            include_bytes!("../../assets/icons/ui/verify.svg").as_slice()
+        );
     }
 }

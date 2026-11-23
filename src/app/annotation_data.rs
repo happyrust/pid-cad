@@ -1293,7 +1293,7 @@ fn csv_escape(value: &str) -> String {
     }
 }
 
-fn rows_to_csv(rows: &[Vec<String>]) -> String {
+pub(crate) fn rows_to_csv(rows: &[Vec<String>]) -> String {
     let mut csv = String::new();
     for row in rows {
         csv.push_str(

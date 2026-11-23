@@ -2250,8 +2250,9 @@ pub struct SaveFailure {
     pub file_in_use: bool,
     pub externally_modified: bool,
     /// Structured error code for failures that carry one. Today only the P&ID
-    /// save gate (`TAG_DUPLICATED_BLOCKS_SAVE`) sets it; every other failure
-    /// leaves it `None` so callers keep matching on the boolean categories.
+    /// save gates (`TAG_DUPLICATED_BLOCKS_SAVE`, `RULE_BLOCKED`) set it; every
+    /// other failure leaves it `None` so callers keep matching on the boolean
+    /// categories.
     pub code: Option<&'static str>,
 }
 
@@ -2265,7 +2266,8 @@ impl SaveFailure {
         }
     }
 
-    /// A failure with a contract error code (`TAG_DUPLICATED_BLOCKS_SAVE`).
+    /// A failure with a contract error code (`TAG_DUPLICATED_BLOCKS_SAVE`,
+    /// `RULE_BLOCKED`).
     pub fn tagged(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -2304,9 +2306,10 @@ impl SaveFailure {
     }
 }
 
-/// P&ID save gate failure (`propagate::gate_save`) → structured save failure.
+/// P&ID save gate failure (`propagate::gate_save`, `drc::gate_save`) →
+/// structured save failure.
 ///
-/// The gate runs before any byte is written, so a duplicated tag leaves the
+/// The gates run before any byte is written, so a refused save leaves the
 /// destination absent and any sibling `.bak` untouched.
 fn pid_gate_failure(error: crate::pid::propagate::PidError) -> SaveFailure {
     SaveFailure::tagged(error.code(), error.to_string())
@@ -2426,6 +2429,7 @@ mod save_failure_tests {
             false,
             None,
             None,
+            true,
         )
         .unwrap_err();
 
@@ -2464,6 +2468,7 @@ mod save_failure_tests {
             false,
             None,
             None,
+            true,
         )
         .unwrap_err();
 
@@ -2498,6 +2503,7 @@ mod save_failure_tests {
             true,
             None,
             None,
+            true,
         )
         .unwrap_err();
         assert!(error.externally_modified);
@@ -2754,6 +2760,7 @@ pub fn save_as_version(
         clone_ms,
         false,
         None,
+        false,
         |_| Ok(()),
     )
     .map_err(|error| error.to_string())
@@ -2763,6 +2770,8 @@ pub fn save_as_version(
 /// disk I/O can therefore run on a worker without borrowing live editor state.
 /// Output is written beside the destination and atomically renamed only after a
 /// complete file exists, so a failed save cannot truncate the previous drawing.
+/// `rule_gate` runs the P&ID rule check's `block` save gate: saves a person
+/// started pass `true`, autosave copies `false`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_owned_as_version_atomic(
     doc: Document,
@@ -2775,6 +2784,7 @@ pub fn save_owned_as_version_atomic(
     require_new_destination: bool,
     logical_path: Option<&Path>,
     ifccad_session: Option<&ocs_save::IfccadSession>,
+    rule_gate: bool,
 ) -> Result<(), SaveFailure> {
     if let Some(logical) = logical_path {
         verify_save_destination(logical, path)?;
@@ -2788,6 +2798,7 @@ pub fn save_owned_as_version_atomic(
         0.0,
         require_new_destination,
         ifccad_session,
+        rule_gate,
         move |path| {
             if let Some(logical) = logical_path {
                 verify_save_destination(logical, path)?;
@@ -2841,6 +2852,7 @@ fn save_owned_as_version_inner<F>(
     clone_ms: f64,
     require_new_destination: bool,
     ifccad_session: Option<&ocs_save::IfccadSession>,
+    rule_gate: bool,
     before_replace: F,
 ) -> Result<(), SaveFailure>
 where
@@ -2863,6 +2875,11 @@ where
     // refused save produces no new file and leaves an existing `.bak` byte for
     // byte unchanged (`VAL-SEM-039`).
     crate::pid::propagate::gate_save(&doc).map_err(pid_gate_failure)?;
+    // The rule check's `block` gate refuses at the same point, so the same
+    // no-write guarantee holds; it stops only saves a person started.
+    if rule_gate {
+        crate::pid::drc::gate_save(&doc, Some(path)).map_err(pid_gate_failure)?;
+    }
     let perf = crate::perf::enabled();
     let total_started = iced::time::Instant::now();
     doc.version = version;
@@ -3087,6 +3104,7 @@ pub(crate) fn save_wblock_snapshot(
         0.0,
         false,
         ifccad_session,
+        false,
         |_| Ok(()),
     )
     .map_err(|error| error.to_string())

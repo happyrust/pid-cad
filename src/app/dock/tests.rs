@@ -1118,6 +1118,87 @@ fn docked_title_bar_double_click_floats_the_pallet_in_the_real_view() {
 }
 
 #[test]
+fn the_verify_panel_opens_from_the_pallet_menu_and_switches_tabs_in_the_real_view() {
+    // Building the real view is deeper than a default test thread's stack.
+    with_stack(|| {
+        use crate::app::config::DockSide;
+        use crate::app::pid_shell::PidScreen;
+        use crate::ui::dock::{DockMsg, PanelId};
+        use crate::ui::window::pid_verify_deliver::Tab;
+        let id = PanelId::PidVerifyDeliver;
+        let mut app = dock_app();
+        let i = app.active_tab;
+        app.tabs[i].is_start = false;
+        assert!(!app.dock_panel_visible(id));
+        assert!(try_find_in_view(&app, "还没有检查过。点上面的按钮开始。").is_none());
+
+        // Checking it in the pallet menu docks it on that edge and shows it,
+        // on the rule check tab.
+        let _ = app.on_dock(DockMsg::EdgeMenuToggle(DockSide::Right, id));
+        assert!(app.dock_panel_visible(id), "the menu shows the panel");
+        assert!(matches!(app.dock.location(id), Some((DockSide::Right, _))));
+        assert_eq!(app.pid_verify_view.tab, Tab::Check);
+        assert!(try_find_in_view(&app, "还没有检查过。点上面的按钮开始。").is_some());
+
+        // A click on a tab brings it forward.
+        let press =
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left));
+        let release = iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+            iced::mouse::Button::Left,
+        ));
+        for (tab, says) in [
+            (Tab::Bom, "还没有生成材料清单。点上面的按钮开始。"),
+            (
+                Tab::Deliver,
+                "图纸还没有保存，不能存带序号的快照，也不能发布",
+            ),
+            (Tab::Check, "还没有检查过。点上面的按钮开始。"),
+        ] {
+            let at = find_in_view(&app, tab.label());
+            drive_view(&mut app, at, &[press.clone(), release.clone()]);
+            assert_eq!(app.pid_verify_view.tab, tab, "clicked {}", tab.label());
+            assert!(
+                try_find_in_view(&app, says).is_some(),
+                "{} says {says}",
+                tab.label()
+            );
+            verify_capture(&app, &format!("classic-{tab:?}"));
+        }
+
+        // The P&ID shell's editor screen shows it as well.
+        assert!(app.show_pid_screen(PidScreen::Editor));
+        assert!(
+            app.dock_panel_visible(id),
+            "the editor screen shows the panel"
+        );
+        assert!(try_find_in_view(&app, "还没有检查过。点上面的按钮开始。").is_some());
+        verify_capture(&app, "shell-editor");
+
+        // Unchecking it in the pallet menu hides it.
+        let _ = app.on_dock(DockMsg::EdgeMenuToggle(DockSide::Right, id));
+        assert!(!app.dock_panel_visible(id), "the menu hides the panel");
+        assert!(try_find_in_view(&app, "还没有检查过。点上面的按钮开始。").is_none());
+    });
+}
+
+/// Optional rendered evidence of the verify-and-deliver panel: with
+/// `OCS_PID_VERIFY_CAPTURES` naming an empty folder, the test above writes
+/// what the real view shows at each step there.
+fn verify_capture(app: &OpenCADStudio, name: &str) {
+    let Some(directory) = std::env::var_os("OCS_PID_VERIFY_CAPTURES") else {
+        return;
+    };
+    let mut simulator =
+        iced_test::Simulator::with_size(iced::Settings::default(), VIEW_SIZE, app.view_main());
+    let path = std::path::PathBuf::from(directory).join(format!("{name}.png"));
+    assert!(simulator
+        .snapshot(&app.active_theme)
+        .expect("render the panel")
+        .matches_image(path)
+        .expect("write the panel evidence"));
+}
+
+#[test]
 fn dragging_a_floating_pallet_moves_the_real_window_in_the_real_view() {
     // Building the real view is deeper than a default test thread's stack.
     with_stack(|| {

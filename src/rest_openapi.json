@@ -195,6 +195,167 @@
         "responses": {"200": {"description": "result: drawing_id, document_id, handle and handles; or status scanning with done and total while the project's files are still being read: send it again later"}, "400": {"description": "Malformed request"}, "404": {"description": "LOCATE_NOT_FOUND"}, "409": {"description": "LOCATE_AMBIGUOUS (with places), INDEX_NO_PROJECT_DIR or INDEX_DRAWING_ID_DUPLICATED"}, "500": {"description": "INDEX_IO_ERROR"}}
       }
     },
+    "/api/v1/pid/check": {
+      "post": {
+        "summary": "P&ID rule check of the current drawing, of a PBS node or of the whole project in the drawing's folder; changes nothing",
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": {
+          "scope": {"type": "string", "enum": ["drawing", "pbs", "project"], "description": "Case-insensitive; defaults to drawing"},
+          "pbs": {"type": "string", "description": "Required with scope pbs, and only there: the PBS node whose drawings are checked, its subtree included"},
+          "cross_drawing": {"type": "boolean", "description": "With scope drawing: also run the project rules, reporting this drawing's results only; defaults to false"},
+          "include_waived": {"type": "boolean", "description": "false leaves waived results out of results; the counts still include them. Defaults to true"}
+        }}}}},
+        "responses": {"200": {"description": "The check result: version, rule_set_version, rule_set_digest, checked_at, trigger, scope, elapsed_ms, summary, blocked, results, notices, stale_waivers; or status scanning with done and total while the project's files are still being read: send it again later"}, "400": {"description": "Malformed request, or a malformed project rule pack (RULESET_SCHEMA_ERROR, DSL_PARSE_ERROR and the like)"}, "404": {"description": "PBS_NODE_UNKNOWN"}, "409": {"description": "INDEX_NO_PROJECT_DIR (the drawing was never saved; with cross_drawing, it is not one of the .dwg files of its folder), INDEX_DRAWING_ID_DUPLICATED, or RULE_BUILTIN_READONLY, RULE_ID_RESERVED or RULE_ID_DUPLICATED in the project rule pack"}, "500": {"description": "INDEX_IO_ERROR"}}
+      }
+    },
+    "/api/v1/pid/check/rules": {
+      "get": {
+        "summary": "P&ID rules in effect: the built-in pack with the project pack of the drawing's folder laid over it",
+        "responses": {"200": {"description": "rule_set_version, rule_set_digest, project_pack (its path, or null), save_gate, sets and rules, written as in a rule pack"}, "400": {"description": "Malformed project rule pack"}, "409": {"description": "RULE_BUILTIN_READONLY, RULE_ID_RESERVED or RULE_ID_DUPLICATED in the project rule pack"}}
+      },
+      "put": {
+        "summary": "Replace the whole P&ID project rule pack (pid-drc-rules.json in the saved drawing's folder); validated first and written only when every rule passes",
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "required": ["pack"], "properties": {
+          "pack": {"type": "object", "description": "The whole project pack: version, pack, rule_set_version, save_gate, sets, rules"}
+        }}}}},
+        "responses": {"200": {"description": "rule_set_version and rule_set_digest of the rules now in effect"}, "400": {"description": "Malformed request or pack (RULESET_SCHEMA_ERROR, DSL_PARSE_ERROR, REQUIRED_FIELD_EMPTY and the like)"}, "403": {"description": "Read-only collaboration session (COLLAB_READONLY, PERM_DENIED_*)"}, "409": {"description": "RULE_BUILTIN_READONLY, RULE_ID_RESERVED or RULE_ID_DUPLICATED; INDEX_NO_PROJECT_DIR when the drawing was never saved"}, "500": {"description": "RULESET_IO_ERROR: the pack could not be written"}}
+      }
+    },
+    "/api/v1/pid/check/waivers": {
+      "post": {
+        "summary": "Waive one result of the current drawing's latest P&ID rule check; one undo step",
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "required": ["rule_id", "object_key", "reason"], "properties": {
+          "rule_id": {"type": "string", "description": "Case-insensitive"},
+          "object_key": {"type": "string", "description": "object_key of the result"},
+          "reason": {"type": "string", "description": "1 to 200 characters"}
+        }}}}},
+        "responses": {"200": {"description": "waivers: how many the drawing records"}, "400": {"description": "Malformed request, WAIVER_REASON_REQUIRED or WAIVER_REASON_TOO_LONG"}, "403": {"description": "Read-only collaboration session (COLLAB_READONLY, PERM_DENIED_*)"}, "404": {"description": "RULE_NOT_FOUND, or WAIVER_TARGET_NOT_FOUND: no such result on this drawing in its latest check"}}
+      },
+      "delete": {
+        "summary": "Remove one waiver recorded on the current drawing; one undo step",
+        "parameters": [
+          {"name": "rule_id", "in": "query", "description": "Or in the body; case-insensitive", "schema": {"type": "string"}},
+          {"name": "object_key", "in": "query", "description": "Or in the body", "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "waivers: how many the drawing records"}, "400": {"description": "Malformed request"}, "403": {"description": "Read-only collaboration session (COLLAB_READONLY, PERM_DENIED_*)"}, "404": {"description": "WAIVER_TARGET_NOT_FOUND: the drawing records no such waiver"}}
+      }
+    },
+    "/api/v1/pid/bom": {
+      "get": {
+        "summary": "P&ID bill of materials of the current drawing, of one of its numbered snapshots, of a PBS node or of the whole project in the drawing's folder; changes nothing",
+        "parameters": [
+          {"name": "scope", "in": "query", "description": "drawing, pbs or project; case-insensitive; defaults to drawing", "schema": {"type": "string", "enum": ["drawing", "pbs", "project"]}},
+          {"name": "pbs", "in": "query", "description": "Required with scope pbs, and only there: the PBS node whose drawings are counted, its subtree included", "schema": {"type": "string"}},
+          {"name": "snapshot", "in": "query", "description": "Count this numbered snapshot of the current drawing (see GET /api/v1/pid/snapshots) instead of the drawing as it is now; only with scope drawing. The list then has source snapshot and snapshot_seq", "schema": {"type": "integer", "minimum": 1}}
+        ],
+        "responses": {"200": {"description": "The bill of materials: version, generated_at, scope, source, snapshot_seq, length_unit_assumed, rows, pipe_summary, skipped, totals, notices; or status scanning with done and total while the project's files are still being read: ask again later"}, "400": {"description": "Malformed request (also snapshot that is not a whole number, or with scope pbs or project), SCOPE_NOT_SELECTED: scope pbs without pbs, SNAPSHOT_FORMAT_INVALID or SNAPSHOT_VERSION_UNSUPPORTED"}, "404": {"description": "PBS_NODE_UNKNOWN or SNAPSHOT_NOT_FOUND"}, "409": {"description": "BOM_DUPLICATE_TAG (with duplicates: each key and where it is), BOM_SCOPE_INCOMPLETE (with drawings: those that could not be read), INDEX_NO_PROJECT_DIR (the drawing was never saved, so it has no snapshots either), INDEX_DRAWING_ID_DUPLICATED or SNAPSHOT_CORRUPT (the snapshot fails its checksum)"}, "500": {"description": "INDEX_IO_ERROR or SNAPSHOT_IO_ERROR"}}
+      }
+    },
+    "/api/v1/pid/bom/export": {
+      "post": {
+        "summary": "Write the P&ID bill of materials to a file on this machine; the extension picks the format (.csv, .xlsx, .json). CSV and XLSX also get the pipe summary beside it, <name>-pipe-summary.<ext>; JSON carries it inside. Changes no drawing, so it also works in a read-only collaboration session",
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "required": ["path"], "properties": {
+          "path": {"type": "string", "description": "File to write; a relative path starts from the saved drawing's folder. An existing file is replaced"},
+          "scope": {"type": "string", "enum": ["drawing", "pbs", "project"], "description": "Case-insensitive; defaults to drawing"},
+          "pbs": {"type": "string", "description": "Required with scope pbs, and only there"},
+          "snapshot": {"type": "integer", "minimum": 1, "description": "Count this numbered snapshot of the current drawing instead of the drawing as it is now; only with scope drawing"},
+          "columns": {"type": "array", "items": {"type": "string"}, "description": "Main-table columns by header name, in order (CSV and XLSX); defaults to all nine"}
+        }}}}},
+        "responses": {"200": {"description": "result: path, format (csv, xlsx or json), rows, bytes (size of the main file) and pipe_summary_path (null for JSON); or status scanning with done and total while the project's files are still being read: send it again later. Nothing is written when the list cannot be made"}, "400": {"description": "Malformed request (no path, the project file as path, snapshot that is not a whole number or with scope pbs or project), SCOPE_NOT_SELECTED, BOM_COLUMN_UNKNOWN, BOM_FORMAT_UNSUPPORTED, SNAPSHOT_FORMAT_INVALID or SNAPSHOT_VERSION_UNSUPPORTED"}, "404": {"description": "PBS_NODE_UNKNOWN or SNAPSHOT_NOT_FOUND"}, "409": {"description": "BOM_DUPLICATE_TAG, BOM_SCOPE_INCOMPLETE, INDEX_NO_PROJECT_DIR, INDEX_DRAWING_ID_DUPLICATED or SNAPSHOT_CORRUPT"}, "500": {"description": "BOM_IO_ERROR: the file could not be written; INDEX_IO_ERROR or SNAPSHOT_IO_ERROR"}}
+      }
+    },
+    "/api/v1/pid/snapshots": {
+      "get": {
+        "summary": "The current drawing's numbered P&ID snapshots, kept in pid-snapshots/<drawing id>/ beside the saved drawing; changes nothing",
+        "responses": {"200": {"description": "drawing_id, dir (the snapshot folder) and snapshots, oldest first: seq, file, created_at (Unix seconds), created_by, reason, objects, bytes, sha256 (of the whole file) and status (ok, or missing when the file is gone)"}, "400": {"description": "No drawing open (no_document)"}, "409": {"description": "INDEX_NO_PROJECT_DIR: the drawing was never saved, so it has no snapshot folder"}, "500": {"description": "SNAPSHOT_IO_ERROR: the snapshot folder could not be read"}}
+      },
+      "post": {
+        "summary": "Take a snapshot of the current drawing, unsaved changes included, and keep it numbered in its snapshot folder; with path, write it as that file without a number instead. Writes a file on this machine and changes no drawing, so it also works in a read-only collaboration session",
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": {
+          "reason": {"type": "string", "description": "Why it is taken; at most 200 characters"},
+          "path": {"type": "string", "description": "Write the snapshot as this file, without a sequence number; a relative path starts from the saved drawing's folder. An existing file is never replaced"}
+        }}}}},
+        "responses": {"201": {"description": "result: seq (null when written as path), path, objects, bytes and sha256 (of the whole file)"}, "400": {"description": "Malformed request, or SNAPSHOT_REASON_TOO_LONG"}, "409": {"description": "INDEX_NO_PROJECT_DIR (the drawing was never saved: give path), or SNAPSHOT_IMMUTABLE (the file at path is already there)"}, "500": {"description": "SNAPSHOT_IO_ERROR: the file could not be written"}}
+      }
+    },
+    "/api/v1/pid/snapshots/{seq}": {
+      "get": {
+        "summary": "One numbered P&ID snapshot of the current drawing, whole, checked as it is read; changes nothing",
+        "parameters": [{"name": "seq", "in": "path", "required": true, "schema": {"type": "integer", "minimum": 1}}],
+        "responses": {"200": {"description": "The snapshot as kept in its file: version, kind, seq, drawing_id, created_at, created_by, reason, generator, dirty, counts, body_sha256, summary and graph"}, "400": {"description": "seq is not a number, SNAPSHOT_FORMAT_INVALID or SNAPSHOT_VERSION_UNSUPPORTED"}, "404": {"description": "SNAPSHOT_NOT_FOUND"}, "409": {"description": "SNAPSHOT_CORRUPT (the file fails its checksum), or INDEX_NO_PROJECT_DIR (the drawing was never saved)"}, "500": {"description": "SNAPSHOT_IO_ERROR"}}
+      }
+    },
+    "/api/v1/pid/snapshots/{seq}/export": {
+      "post": {
+        "summary": "Copy one numbered P&ID snapshot of the current drawing to a file on this machine, byte for byte; changes no drawing",
+        "parameters": [{"name": "seq", "in": "path", "required": true, "schema": {"type": "integer", "minimum": 1}}],
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "required": ["path"], "properties": {
+          "path": {"type": "string", "description": "File to write; a relative path starts from the saved drawing's folder. An existing file is never replaced"}
+        }}}}},
+        "responses": {"200": {"description": "result: path and bytes"}, "400": {"description": "Malformed request: no path, or seq is not a number"}, "404": {"description": "SNAPSHOT_NOT_FOUND"}, "409": {"description": "SNAPSHOT_IMMUTABLE (the file at path is already there), or INDEX_NO_PROJECT_DIR (the drawing was never saved)"}, "500": {"description": "SNAPSHOT_IO_ERROR"}}
+      }
+    },
+    "/api/v1/pid/diff": {
+      "get": {
+        "summary": "Compare two P&ID snapshots, or one with the current drawing as it is now; changes nothing",
+        "parameters": [
+          {"name": "a", "in": "query", "required": true, "description": "The old side: a sequence number of the current drawing's snapshots, a snapshot file (a relative path starts from the saved drawing's folder) or live (the drawing as it is now)", "schema": {"type": "string"}},
+          {"name": "b", "in": "query", "description": "The new side, written like a; defaults to live", "schema": {"type": "string"}},
+          {"name": "move_tolerance", "in": "query", "description": "A position change no larger than this is not a change; defaults to 0.001", "schema": {"type": "number", "minimum": 0}}
+        ],
+        "responses": {"200": {"description": "The comparison: version, a and b (ref as asked, seq, drawing_id, created_at, objects), identical, summary, added, removed, modified, edges and notices"}, "400": {"description": "Malformed request (no a, or move_tolerance is not a number of at least 0), DIFF_SAME_SNAPSHOT (both sides are the same), SNAPSHOT_FORMAT_INVALID or SNAPSHOT_VERSION_UNSUPPORTED"}, "404": {"description": "SNAPSHOT_NOT_FOUND"}, "409": {"description": "SNAPSHOT_CORRUPT, or INDEX_NO_PROJECT_DIR (a sequence number on a drawing never saved)"}, "500": {"description": "SNAPSHOT_IO_ERROR"}}
+      }
+    },
+    "/api/v1/pid/publish/check": {
+      "get": {
+        "summary": "Whether the current P&ID drawing can be published: each precondition, the publish gates (a fresh rule check across the project, duplicate tags, master data, every drawing read), the target folder and the revision it would get; writes nothing",
+        "parameters": [
+          {"name": "dir", "in": "query", "description": "Target folder; a relative path starts from the saved drawing's folder. Defaults to pid-publish", "schema": {"type": "string"}},
+          {"name": "rev", "in": "query", "description": "Revision to check, above every published one; defaults to the next", "schema": {"type": "integer", "minimum": 1}},
+          {"name": "allow_offline", "in": "query", "description": "true lets a drawing with a sync record publish while not connected and caught up", "schema": {"type": "boolean"}}
+        ],
+        "responses": {"200": {"description": "can_publish (every precondition and gate holds), preconditions (saved, clean, file_unchanged, writable_session, collab_synced, collab_consistent, collab_online), gates (drc_errors, drc_warnings, drc_hints, waived, duplicate_tags, master_data, index_complete, result), target_dir and next_revision; gates, target_dir and next_revision are null for a drawing never saved. Or status scanning with done and total while the project's files are still being read: send it again later"}, "400": {"description": "Malformed request (no drawing open, dir empty, allow_offline not true or false), PUBLISH_TARGET_INVALID or PUBLISH_REVISION_INVALID"}, "409": {"description": "INDEX_NO_PROJECT_DIR or INDEX_DRAWING_ID_DUPLICATED"}, "500": {"description": "INDEX_IO_ERROR or RULESET_IO_ERROR"}}
+      }
+    },
+    "/api/v1/pid/publish": {
+      "post": {
+        "summary": "Publish the saved current P&ID drawing as a revision package (the drawing, PDF, SVG, bill of materials, snapshot, rule-check report and manifest) in the target folder when every precondition and gate holds. Writes a folder on this machine and changes no drawing",
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": {
+          "dir": {"type": "string", "description": "Target folder; a relative path starts from the saved drawing's folder. Defaults to pid-publish"},
+          "rev": {"type": "integer", "minimum": 1, "description": "Revision, above every published one; defaults to the next"},
+          "plot": {"type": "object", "description": "PDF and SVG settings as the plot operation takes them (layout, paper, orientation, scale and so on), without path; one layout, not all. Defaults to model space, extents, fit to paper"},
+          "allow_offline": {"type": "boolean", "description": "Publish a drawing with a sync record while not connected and caught up; the manifest records it as not reconciled"}
+        }}}}},
+        "responses": {"200": {"description": "status scanning with done and total while the project's files are still being read: send it again later; nothing is written yet"}, "201": {"description": "result: package_id, path, revision, snapshot_seq (the snapshot taken before publishing), files, bytes and gates"}, "400": {"description": "Malformed request (no drawing open, dir empty, plot not an object, with path or with layout all, allow_offline not true or false), PUBLISH_TARGET_INVALID or PUBLISH_REVISION_INVALID"}, "403": {"description": "COLLAB_READONLY or PERM_DENIED_*: the collaboration session may not publish; level says why"}, "409": {"description": "PUBLISH_BLOCKED (with gates, duplicates and report), PUBLISH_UNSAVED, PUBLISH_FILE_CHANGED, COLLAB_UNSYNCED, COLLAB_DIVERGED, COLLAB_OFFLINE, PUBLISH_TARGET_EXISTS, INDEX_NO_PROJECT_DIR or INDEX_DRAWING_ID_DUPLICATED; nothing is written"}, "500": {"description": "PUBLISH_FAILED with step (snapshot, plot, bom, write or commit): no package is left, a snapshot already taken stays; INDEX_IO_ERROR or RULESET_IO_ERROR"}}
+      }
+    },
+    "/api/v1/pid/publications": {
+      "get": {
+        "summary": "The current P&ID drawing's packages in the target folder, newest first, and the revision it is published at; writes nothing",
+        "parameters": [
+          {"name": "dir", "in": "query", "description": "Target folder; a relative path starts from the saved drawing's folder. Defaults to pid-publish", "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "drawing_id, target_dir, state (未发布, 已发布，修订 N, or 修订 N 之后有改动) and packages: package_id, revision, path, published_at (Unix seconds; null when the manifest cannot be read), published_by and current (the newest one matching the drawing file)"}, "400": {"description": "Malformed request (no drawing open, dir empty)"}, "409": {"description": "PUBLISH_UNSAVED (the drawing was never saved), INDEX_NO_PROJECT_DIR or INDEX_DRAWING_ID_DUPLICATED"}, "500": {"description": "INDEX_IO_ERROR: the project folder could not be read"}}
+      }
+    },
+    "/api/v1/pid/publish/verify": {
+      "post": {
+        "summary": "Check a published package against its manifest: every listed file there, with its size and checksum; writes nothing",
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "required": ["path"], "properties": {
+          "path": {"type": "string", "description": "The package folder; a relative path starts from the saved drawing's folder"}
+        }}}}},
+        "responses": {"200": {"description": "package_id, revision, files, and missing, mismatched and extra (only extra may be non-empty: it does not fail)"}, "400": {"description": "Malformed request: no path"}, "404": {"description": "PACKAGE_NOT_FOUND: no such folder, or no manifest in it"}, "409": {"description": "PACKAGE_INCOMPLETE or PACKAGE_CORRUPT, with the report"}}
+      }
+    },
+    "/api/v1/pid/verify-panel": {
+      "get": {
+        "summary": "What the P&ID verify-and-deliver panel shows now, on screen or not: the content the panel draws; writes nothing",
+        "parameters": [
+          {"name": "limit", "in": "query", "description": "Most rows each list returns (check.rows, bom.rows); 200 when omitted", "schema": {"type": "integer", "minimum": 1}},
+          {"name": "offset", "in": "query", "description": "Rows each list skips before the first it returns; 0 when omitted", "schema": {"type": "integer", "minimum": 0}}
+        ],
+        "responses": {"200": {"description": "visible, tab (check, bom or deliver), document_id and drawing_id of the drawing tab in front (null on the Start page; drawing_id is empty for a drawing never saved), writable, busy, notice, buttons (which buttons can be pressed now), and the check, bom and deliver blocks; total counts every row of a list, rows holds the page asked for"}, "400": {"description": "Malformed request: limit not a positive integer, or offset not a non-negative integer"}}
+      }
+    },
     "/api/v1/entities": {
       "get": {
         "summary": "Query entities (type, layer, detail, offset, limit, fields, handles, bounds, near, contains_point, intersections)",

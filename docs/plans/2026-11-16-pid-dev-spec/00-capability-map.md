@@ -26,14 +26,14 @@
 | `pid-author-store` | 图纸内的 P&ID 语义数据：每个实体的 `PID_AUTHOR` 记录、属性与覆盖标记、超 2 KB 溢出到 XRecord、四个图级表（类型库 / 位号规则 / 拓扑 / 连接符）、位号来源、属性下传链 | —（绘图内核） | 已完成（P1：`VAL-SEM` 39、`VAL-DRAW` 31、`VAL-PIPE` 32 全过） |
 | `collab-protocol` | 线上契约：客户端 6 种帧、服务器 10 种帧、`op` 载荷与 11 种变更的报文体、错误码、三步裁决、三级权限、位号占用、跨图连接符跟随（`crates/ocs_collab`） | — | 已完成；最近新增三个可选键：`hello.existing_tags`（`1682b84c3`）、`set_property.overrides` 与 `set_tag.tag_source`（`9b5327f96`） |
 | `collab-server` | 协同服务器：HTTP 控制面（10 条路由）、WebSocket 数据面、SQLite 10 张表、`op` 受理管线、冲突条目与裁决、审计、重连补发、跨图派生 `op`（`crates/ocs_collab_server`） | `collab-protocol` | 已完成 |
-| `collab-client` | 桌面端：同步传输线程、会话状态、发件队列（一次一个 `op` 在途）、离线排队与重连对账、被拒撤回、只读闸、占用；本地一步 → 变更 → `op`；`op_applied` → 定位对象 → 写入 → 派生重算（`src/app/collab/`） | `pid-author-store`、`collab-protocol` | 已完成，差两项：大属性符号新建（T2.4 ③）、全量复验与结项（T2.4 ④） |
-| `pid-master-data` | 项目主数据：图例标准锁定、公称直径表、管道等级（含允许的直径范围）、绝热等级、介质代码、装置分区节点；图内一份，项目目录可共享一份 | `pid-author-store` | 未开始（T3.1 前半） |
-| `pid-project-index` | 图纸摘要与脱机项目索引：把一张图读成一份不依赖句柄的摘要（对象、线段、连接符、端口），连通关系由坐标推出；扫描图纸目录里的各张图，给出全项目的重复位号与跨图连接；按位号定位；`PIDINDEX` / `PIDLOCATE` | `pid-author-store`、`pid-master-data`（项目文件里的图号与 PBS 节点） | 未开始（T3.1 后半） |
-| `pid-drc` | 设计规则检查：规则模型与规则包文件、内置 41 条规则（需求的 25 条加计划多出的 16 条）、执行器、结果模型、豁免、三种触发（按需 / 保存前 / 发布前）、`PIDCHECK`、REST 与 MCP | `pid-author-store`、`pid-master-data`、`pid-project-index` | 未开始（T3.2） |
-| `pid-bom` | 材料清单：按「类型编码 + 位号」唯一聚合、数量公式、CSV / XLSX / JSON 导出、`PIDBOM` | `pid-project-index`、`pid-master-data`（PBS 节点）；「按快照出清单」这一个入口另依赖 `pid-snapshot` | 未开始（T3.3 之一） |
-| `pid-snapshot` | 版本快照与比对：快照文件（存在图纸目录下，不写进图）、比对结果（新增 / 删除 / 修改三组，修改再分属性、位置、长度、管件、连接、对端；计划要的五类差异都在内）、`PIDSNAPSHOT` / `PIDDIFF` | `pid-project-index`（图纸摘要、连通图） | 未开始（T3.3 之二） |
-| `pid-publish` | 发布包：发布前提（已保存、无未存修改、文件没被别人改、不是只读会话、目标目录可用）与四项门禁（未豁免的错误为 0、重复位号为 0、主数据读得出、项目里的图都读得出）、包内十一个文件与校验和清单、原子生成、`PIDPUBLISH` | `pid-drc`、`pid-bom`、`pid-snapshot`、`pid-project-index`、`pid-master-data` | 未开始（T3.3 之三） |
-| `pid-verify-deliver-panel` | 「校验与交付」停靠面板：规则检查 / 材料清单 / 快照与发布三个页签；面板状态可读（`pid_verify_panel`），按钮可由自动化接口驱动（现有的 `action` 操作）；点一条结果定位到对象并在属性表标出相关字段；`PIDVERIFY` | `pid-drc`、`pid-bom`、`pid-snapshot`、`pid-publish`、`pid-project-index`（定位） | 未开始（T3.4） |
+| `collab-client` | 桌面端：同步传输线程、会话状态、发件队列（一次一个 `op` 在途）、离线排队与重连对账、被拒撤回、只读闸、占用；本地一步 → 变更 → `op`；`op_applied` → 定位对象 → 写入 → 派生重算（`src/app/collab/`） | `pid-author-store`、`collab-protocol` | 已完成。T2.4 ③、④ 两项收口已做（`CC-1`、`CC-2`、`CC-7`、`CC-8`，2026-11-20）；另加了离线使用与上线后同步（`OFF-1` – `OFF-13`，`SPEC-collab-offline-sync.md`） |
+| `pid-master-data` | 项目主数据：图例标准锁定、公称直径表、管道等级（含允许的直径范围）、绝热等级、介质代码、装置分区节点；图内一份，项目目录可共享一份 | `pid-author-store` | 已完成（T3.1 前半，`MD-1` – `MD-4`，2026-11-20） |
+| `pid-project-index` | 图纸摘要与脱机项目索引：把一张图读成一份不依赖句柄的摘要（对象、线段、连接符、端口），连通关系由坐标推出；扫描图纸目录里的各张图，给出全项目的重复位号与跨图连接；按位号定位；`PIDINDEX` / `PIDLOCATE` | `pid-author-store`、`pid-master-data`（项目文件里的图号与 PBS 节点） | 已完成（T3.1 后半，`IX-1` – `IX-8`，2026-11-20 至 21） |
+| `pid-drc` | 设计规则检查：规则模型与规则包文件、内置 41 条规则（需求的 25 条加计划多出的 16 条）、执行器、结果模型、豁免、三种触发（按需 / 保存前 / 发布前）、`PIDCHECK`、REST 与 MCP | `pid-author-store`、`pid-master-data`、`pid-project-index` | 已完成（T3.2，`DRC-1` – `DRC-14`，2026-11-21） |
+| `pid-bom` | 材料清单：按「类型编码 + 位号」唯一聚合、数量公式、CSV / XLSX / JSON 导出、`PIDBOM` | `pid-project-index`、`pid-master-data`（PBS 节点）；「按快照出清单」这一个入口另依赖 `pid-snapshot` | 已完成（T3.3 之一，`BOM-1` – `BOM-6`，2026-11-21 至 22） |
+| `pid-snapshot` | 版本快照与比对：快照文件（存在图纸目录下，不写进图）、比对结果（新增 / 删除 / 修改三组，修改再分属性、位置、长度、管件、连接、对端；计划要的五类差异都在内）、`PIDSNAPSHOT` / `PIDDIFF` | `pid-project-index`（图纸摘要、连通图） | 已完成（T3.3 之二，`SNAP-1` – `SNAP-6`，2026-11-21） |
+| `pid-publish` | 发布包：发布前提（已保存、无未存修改、文件没被别人改、不是只读会话、目标目录可用）与四项门禁（未豁免的错误为 0、重复位号为 0、主数据读得出、项目里的图都读得出）、包内十一个文件与校验和清单、原子生成、`PIDPUBLISH` | `pid-drc`、`pid-bom`、`pid-snapshot`、`pid-project-index`、`pid-master-data` | 已完成（T3.3 之三，`PUB-1` – `PUB-7`，2026-11-22） |
+| `pid-verify-deliver-panel` | 「校验与交付」停靠面板：规则检查 / 材料清单 / 快照与发布三个页签；面板状态可读（`pid_verify_panel`），按钮可由自动化接口驱动（现有的 `action` 操作）；点一条结果定位到对象并在属性表标出相关字段；`PIDVERIFY` | `pid-drc`、`pid-bom`、`pid-snapshot`、`pid-publish`、`pid-project-index`（定位） | 已完成（T3.4，`PNL-1` – `PNL-13`，2026-11-22 至 23） |
 
 依赖没有环。每个模块对外的数据契约写在它自己的规格里，用它的模块只引用、不重写。
 
@@ -111,7 +111,7 @@ flowchart LR
 | 第 0 步 | `00-capability-map.md`（本文） | 已确认 |
 | 规格 | `01-shared-conventions.md`（各模块共用：技术栈、命令、目录、代码风格、测试策略、边界），以及每个模块一份 `SPEC-<模块 id>.md`（目标、数据格式、数据怎么传、成功标准、不在范围、待决问题） | 已确认（2026-11-16）：39 条待决问题都按各规格的「建议」定，汇总见 `plan.md` §3 |
 | 计划与任务 | `plan.md`（阶段、依赖图、风险、可并行项、检查点）与 `todo.md`（逐个任务：做什么、验收、验证命令、依赖、改哪些文件、规模） | 已确认（2026-11-16）：5 个阶段、67 个任务、18 个检查点；串行做，可选任务不加，见 `plan.md` §11。2026-11-17 加了离线同步，变成 80 个任务、20 个检查点，这一部分也已确认（2026-11-17）：六件事都按建议定，见 `plan.md` §12 |
-| 实现 | 按 `todo.md` 逐个做，每个任务先红后绿、独立提交 | **现在**：从 `CC-1` 开始。每个检查点汇报；推送前确认 |
+| 实现 | 按 `todo.md` 逐个做，每个任务先红后绿、独立提交 | 80 个任务都已做完（2026-11-23，最后一个是 `END-1`）。阶段 3 结项报告是 `report-phase3.md`，等检查点 CP-E 你确认；推送前确认 |
 
 ## 6. 不在本方案范围（先记下，不做）
 
@@ -152,3 +152,11 @@ flowchart LR
 - `SPEC-collab-client.md`、`SPEC-collab-protocol.md`、`SPEC-collab-server.md`、`SPEC-pid-publish.md` 各加了指向新规格的句子，原文没有删改。
 - §1 第 3 条的「桌面脱机优先」补了一句说明；§5 的任务数和检查点数同步。
 - 这次修订的确认（答复「都按建议定，那批改动交给你接着做」）：`plan.md` §12 的六件事都按建议定，各文档里这一部分的状态改为已确认；主目录里那批没提交的离线改动交给我接着做，从 `OFF-1` 开始。改状态的这几份文档在动代码之前单独提交一次，不推送。
+
+2026-11-23，阶段 3 结项（`END-1`）：
+
+- §2 的「现状」：七个新模块由「未开始」改为「已完成」，各写上任务号和日期；`collab-client` 去掉「差两项」，写上收口的任务和后加的离线同步。
+- §5 的「实现」一行改为 80 个任务都已做完。
+- 七个新模块规格开头的状态由「待建」改为「已建成」，`SPEC-collab-offline-sync.md` 的状态加上「已建成」，`SPEC-collab-client.md` 的「另有两项收尾任务」改为已做完。各规格只改了这一行，正文和「实现记录」没有改。
+- 新加 `report-phase3.md`：做了什么、各项读数、实现与规格的出入、已知限制、阶段 4 从哪里接。
+- 模块的切法、依赖和构建顺序没有变。

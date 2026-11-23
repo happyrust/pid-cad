@@ -1541,15 +1541,7 @@ pub fn list_drawings(project_dir: &Path) -> Result<Vec<DrawingFile>, IndexError>
         if !is_dwg || file.starts_with('.') || file.starts_with("~$") || !path.is_file() {
             continue;
         }
-        let given = listed.get(&file.to_lowercase());
-        let drawing_id = given
-            .and_then(|given| given.drawing_id.clone())
-            .or_else(|| {
-                path.file_stem()
-                    .map(|stem| stem.to_string_lossy().into_owned())
-            })
-            .unwrap_or_default();
-        let pbs = given.and_then(|given| given.pbs.clone());
+        let (drawing_id, pbs) = identify(&listed, &file);
         drawings.push(DrawingFile {
             file,
             path,
@@ -1564,6 +1556,27 @@ pub fn list_drawings(project_dir: &Path) -> Result<Vec<DrawingFile>, IndexError>
             .map(|drawing| (drawing.drawing_id.as_str(), drawing.file.as_str())),
     )?;
     Ok(drawings)
+}
+
+/// 项目目录 `project_dir` 里文件名是 `file` 的图在项目里的图号和 PBS 节点，规则与
+/// [`list_drawings`] 相同。文件可以还不存在（另存为）。项目文件读不出来或写错时报错。
+pub fn drawing_of(project_dir: &Path, file: &str) -> Result<(String, Option<String>), IndexError> {
+    Ok(identify(&listed_drawings(project_dir)?, file))
+}
+
+/// 文件名是 `file` 的图的图号和 PBS 节点：项目文件 `drawings[]` 给它写的（文件名不分大小写），
+/// 没写图号的取文件名去掉扩展名。
+fn identify(listed: &HashMap<String, Listed>, file: &str) -> (String, Option<String>) {
+    let given = listed.get(&file.to_lowercase());
+    let drawing_id = given
+        .and_then(|given| given.drawing_id.clone())
+        .or_else(|| {
+            Path::new(file)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default();
+    (drawing_id, given.and_then(|given| given.pbs.clone()))
 }
 
 /// 项目文件 `drawings[]` 给一个文件写的图号和 PBS 节点；空的算没写。

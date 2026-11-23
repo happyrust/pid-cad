@@ -1749,23 +1749,29 @@ impl OpenCADStudio {
     /// explicit: a new drawing command defaults to refused, which is the safe
     /// direction for a write gate.
     ///
-    /// Three verbs read or write by what follows them, and are let through
+    /// Five verbs read or write by what follows them, and are let through
     /// only in the forms that read: `PIDTAG` with one word jumps to a tag
     /// (two rename it -- unless all that follows the verb is the tag of an
     /// imported symbol on the sheet, which may hold spaces, and naming it is
     /// a jump as well), `PIDLEGEND` reports, lists and exports (`ON`
     /// draws the legend, `OFF` and `PURGE` erase it — and the bare verb
-    /// defaults to `ON`), and `PIDMASTERDATA` reports, bare or as `STATUS`,
-    /// and exports (`INIT`, `IMPORT` and `EMBED` write master data).
+    /// defaults to `ON`), `PIDMASTERDATA` reports, bare or as `STATUS`,
+    /// and exports (`INIT`, `IMPORT` and `EMBED` write master data),
+    /// `PIDCHECK` checks, lists its rules and exports (`ENABLE` and
+    /// `DISABLE` rewrite the project rule pack, `WAIVE` and `UNWAIVE` the
+    /// drawing's waivers), and `PIDPUBLISH` checks, lists packages and
+    /// verifies one (`CHECK`, `LIST`, `VERIFY`); any other form publishes
+    /// (`SPEC-pid-publish.md` §5.2).
     ///
     /// This list is a courtesy, not the lock: a command that does write is
     /// better turned away before it prompts for anything than after. What
     /// keeps a read-only session from changing its drawing is
     /// [`Self::refuses_step`], at the one place every edit passes through;
-    /// a verb wrongly let through here still changes nothing. The one thing
-    /// written outside the drawing is the project file `PIDMASTERDATA`
-    /// writes beside it; no step carries that, so for it this gate is the
-    /// only one.
+    /// a verb wrongly let through here still changes nothing. Three things
+    /// are written outside the drawing: the project file `PIDMASTERDATA`
+    /// writes beside it, the project rule pack `PIDCHECK ENABLE` and
+    /// `DISABLE` rewrite, and the package `PIDPUBLISH` publishes; no step
+    /// carries any of them, so for them this gate is the only one.
     ///
     /// The gate is on the session's drawing. Another drawing open beside it
     /// is not in the session, and its commands are its own; while the session
@@ -1792,6 +1798,8 @@ impl OpenCADStudio {
             }
             "PIDLEGEND" => !matches!(option.as_str(), "REPORT" | "LIST" | "EXPORT"),
             "PIDMASTERDATA" => !matches!(option.as_str(), "" | "STATUS" | "EXPORT"),
+            "PIDCHECK" => matches!(option.as_str(), "ENABLE" | "DISABLE" | "WAIVE" | "UNWAIVE"),
+            "PIDPUBLISH" => !matches!(option.as_str(), "CHECK" | "LIST" | "VERIFY"),
             _ => !READONLY_ALLOWED.contains(&verb.as_str()),
         }
     }
@@ -2012,11 +2020,14 @@ fn tried_text(changes: &[broadcast::Change], label: &str) -> String {
 /// Commands a read-only session may still run: looking around, inspecting, and
 /// the collaboration panel itself. Everything else is a write.
 ///
-/// `PIDLEGEND` and `PIDMASTERDATA` are here for their reading forms only
-/// (see `readonly_refuses_command`). Not here, though they once were: `MEASURE`
-/// (places points along an object), `FIND` (opens find-and-replace),
-/// `PIDGROUP` (every one of its forms regroups or retags) and `AUDIT`
-/// (applies its fixes when answered yes).
+/// `PIDLEGEND`, `PIDMASTERDATA`, `PIDCHECK` and `PIDPUBLISH` are here for
+/// their reading forms only (see `readonly_refuses_command`). Not here,
+/// though they once were: `MEASURE` (places points along an object), `FIND`
+/// (opens find-and-replace), `PIDGROUP` (every one of its forms regroups or
+/// retags) and `AUDIT` (applies its fixes when answered yes). `PIDSNAPSHOT` and
+/// `PIDDIFF` write files on this machine, never the drawing, so every one of
+/// their forms is here. So are `PIDVERIFY`'s, which only show, hide or turn
+/// the verify-and-deliver panel.
 pub(super) const READONLY_ALLOWED: &[&str] = &[
     "ZOOM",
     "ZO",
@@ -2050,6 +2061,12 @@ pub(super) const READONLY_ALLOWED: &[&str] = &[
     "PIDMASTERDATA",
     "PIDINDEX",
     "PIDLOCATE",
+    "PIDCHECK",
+    "PIDBOM",
+    "PIDSNAPSHOT",
+    "PIDDIFF",
+    "PIDPUBLISH",
+    "PIDVERIFY",
     "PIDLINE",
     "PIDTAG",
     "PIDTOPOLOGY",
@@ -2886,6 +2903,14 @@ mod tests {
             "PIDMASTERDATA INIT DRAWING",
             "PIDMASTERDATA IMPORT md.json",
             "pidmasterdata embed",
+            "PIDCHECK ENABLE DR-014",
+            "pidcheck disable DR-014",
+            "PIDCHECK WAIVE DR-014 PIPE_LINE|L-1 放空管",
+            "PIDCHECK UNWAIVE DR-014 PIPE_LINE|L-1",
+            "PIDPUBLISH",
+            "PIDPUBLISH D:/out",
+            "pidpublish REV 3",
+            "PIDPUBLISH ALLOW_OFFLINE",
         ] {
             assert!(app.readonly_refuses_command(cmd), "{cmd} must be refused");
         }
@@ -2902,6 +2927,27 @@ mod tests {
             "PIDINDEX CANCEL",
             "PIDLOCATE P-1001",
             "pidlocate P-1002 PID-1102",
+            "PIDCHECK",
+            "PIDCHECK PROJECT",
+            "pidcheck pbs U-100",
+            "PIDCHECK RULES",
+            "PIDCHECK EXPORT drc.json",
+            "PIDBOM",
+            "PIDBOM PROJECT",
+            "pidbom pbs U-100",
+            "PIDBOM EXPORT bom.csv",
+            "PIDBOM EXPORT bom.xlsx PBS U-100",
+            "PIDSNAPSHOT",
+            "PIDSNAPSHOT SAVE before review",
+            "pidsnapshot list",
+            "PIDSNAPSHOT EXPORT 1 snap.json",
+            "PIDSNAPSHOT FILE snap.json",
+            "PIDDIFF 1",
+            "piddiff 1 LIVE EXPORT diff.json",
+            "PIDPUBLISH CHECK",
+            "pidpublish check D:/out REV 3",
+            "PIDPUBLISH LIST",
+            "pidpublish verify D:/out/PID-1101-r001",
             "PIDLINE",
             "PIDTAG P-1001",
             "MEASUREGEOM",
@@ -2996,6 +3042,7 @@ mod tests {
                 "PIDLEGEND" => "PIDLEGEND REPORT".to_owned(),
                 "PIDTAG" => "PIDTAG P-1001".to_owned(),
                 "PIDLOCATE" => "PIDLOCATE P-1001".to_owned(),
+                "PIDPUBLISH" => "PIDPUBLISH CHECK".to_owned(),
                 other => other.to_owned(),
             };
             assert!(!app.readonly_refuses_command(&cmd), "{cmd} is on the list");

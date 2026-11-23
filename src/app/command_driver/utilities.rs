@@ -1415,6 +1415,25 @@ impl OpenCADStudio {
             // `PIDLOCATE <tag> [<drawing>]` likewise: the bare verb only says
             // how it is written.
             || tokens[0].eq_ignore_ascii_case("PIDLOCATE")
+            // `PIDCHECK PROJECT`, `PIDCHECK PBS <node>` and the rest likewise:
+            // the bare verb would first check the current drawing.
+            || tokens[0].eq_ignore_ascii_case("PIDCHECK")
+            // `PIDBOM PROJECT`, `PIDBOM EXPORT <file> PBS <node>` and the rest
+            // likewise: the bare verb would first total the current drawing.
+            || tokens[0].eq_ignore_ascii_case("PIDBOM")
+            // `PIDSNAPSHOT SAVE <reason>` and the rest likewise: the bare verb
+            // would first save a snapshot of its own, and the line two.
+            || tokens[0].eq_ignore_ascii_case("PIDSNAPSHOT")
+            // `PIDDIFF <a> [<b>] [EXPORT <file>]` likewise: the bare verb only
+            // says how it is written.
+            || tokens[0].eq_ignore_ascii_case("PIDDIFF")
+            // `PIDPUBLISH CHECK`, `PIDPUBLISH <folder> REV <n>` and the rest
+            // likewise: the bare verb would first publish to the default
+            // folder.
+            || tokens[0].eq_ignore_ascii_case("PIDPUBLISH")
+            // `PIDVERIFY BOM` and the other tabs likewise: the bare verb would
+            // first show the panel on the tab it was left on.
+            || tokens[0].eq_ignore_ascii_case("PIDVERIFY")
         {
             return self.dispatch_command(cmd);
         }

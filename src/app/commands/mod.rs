@@ -73,16 +73,21 @@ mod pdf_underlay;
 pub(in crate::app) mod pidbackup;
 pub(in crate::app) mod pidbackupexport;
 pub(in crate::app) mod pidbackuppdf;
+pub(in crate::app) mod pidbom;
 mod pidbulk;
 mod pidconnector;
+pub(in crate::app) mod piddrc;
 pub(in crate::app) mod pidindex;
 mod pidlegend;
 pub(in crate::app) mod pidmasterdata;
 pub(in crate::app) mod pidmove;
 pub(in crate::app) mod pidpalette;
 mod pidpipe;
-pub(in crate::app) mod pidprops;
 mod pidplot;
+pub(in crate::app) mod pidprops;
+mod pidpublish;
+mod pidsnapshot;
+pub(in crate::app) mod pidverify;
 mod plotvars;
 mod point_cloud;
 mod refedit;
@@ -949,6 +954,24 @@ impl OpenCADStudio {
         if let Some(t) = self.dispatch_pidlocate(cmd, i) {
             return Some(t);
         }
+        if let Some(t) = self.dispatch_piddrc(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidbom(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidsnapshot(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_piddiff(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidpublish(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidverify(cmd, i) {
+            return Some(t);
+        }
         None
     }
 
@@ -1630,10 +1653,21 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDBACKUPEXPORT",
         "PIDBACKUPOPEN",
         "PIDBACKUPPDF",
+        // The P&ID bill of materials (`pid::bom`): the current drawing, the
+        // project or one PBS node totalled by kind, and the list written out
+        // as CSV, XLSX or JSON.
+        "PIDBOM",
         "PIDBREAK",
+        // The P&ID design rule check (`pid::drc`): the current drawing, the
+        // project or one PBS node checked against the rules, the rules in
+        // effect listed, and the latest result written out as JSON.
+        "PIDCHECK",
         "PIDCLAIM",
         "PIDCOLLAB",
         "PIDCONNECTOR",
+        // Comparing two snapshots of a drawing, or one with the drawing as it
+        // is now (`pid::snapshot`), and writing the result out as JSON.
+        "PIDDIFF",
         "PIDFITTING",
         "PIDGROUP",
         // The P&ID project index (`pid::project_index`): the drawings in the
@@ -1653,12 +1687,21 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDPALETTE",
         "PIDPIPE",
         "PIDPLOT",
+        // Publishing the current drawing as a numbered package
+        // (`pid::publish_pkg`), or only checking whether it may be.
+        "PIDPUBLISH",
         "PIDRELEASE",
         // Which screen of the P&ID module is showing (`app::pid_shell`).
         "PIDSCREEN",
         "PIDSETPROP",
+        // Snapshots of the current drawing (`pid::snapshot`): taking a
+        // numbered one, listing them, copying one out, or writing one
+        // straight to a file.
+        "PIDSNAPSHOT",
         "PIDTAG",
         "PIDTOPOLOGY",
+        // The verify-and-deliver panel: shown, hidden or turned to a tab.
+        "PIDVERIFY",
         "PLOT",
         "PRINTERS",
         "PLOTSTYLE",

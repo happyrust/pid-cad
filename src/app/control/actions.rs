@@ -188,6 +188,7 @@ pub(super) const NAMES: &[&str] = &[
     "count_palette",
     "blocks_palette",
     "pid_palette",
+    "pid_verify",
     "pdf_page_select",
     "pc_colormap",
     "pc_section",
@@ -263,6 +264,19 @@ fn parse_point_2d(val: &Value) -> Result<[f64; 2], Value> {
         .filter(|v| v.is_finite())
         .ok_or_else(|| failure("invalid_point", "Expected finite coordinates"))?;
     Ok([x, y])
+}
+
+/// The file a `plot` request writes, and whether it is an SVG (else a PDF).
+#[cfg(not(target_arch = "wasm32"))]
+fn plot_target(req: &Value) -> Result<(&str, bool), Value> {
+    let path = string(req, "path")?;
+    let lower = path.to_ascii_lowercase();
+    // SVG shares the plot page with PDF: the writer follows the extension.
+    let is_svg = lower.ends_with(".svg");
+    if !is_svg && !lower.ends_with(".pdf") {
+        return Err(failure("invalid_path", "plot writes .pdf or .svg files"));
+    }
+    Ok((path, is_svg))
 }
 
 fn parse_calibrate(
@@ -606,16 +620,24 @@ impl OpenCADStudio {
     /// the stored setup (layouts) or the app's plot defaults (Model).
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn control_plot(&mut self, req: &Value) -> Result<Task<Message>, Value> {
+        plot_target(req)?;
+        self.stamp_plot_fields();
+        let result = self.plot_current(req)?;
+        self.set_control_result(result);
+        Ok(Task::none())
+    }
+
+    /// The body of `plot`, without touching the session: renders the active
+    /// tab's drawing as the request asks and returns the result object the
+    /// operation answers with, instead of storing it as the control result,
+    /// and leaves PlotDate fields as they are. Publishing plots through this,
+    /// so the drawing stays unmodified and a pending control answer is not
+    /// overwritten.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn plot_current(&mut self, req: &Value) -> Result<Value, Value> {
         use crate::io::pdf_export::PdfPageInput;
 
-        let path = string(req, "path")?;
-        let lower = path.to_ascii_lowercase();
-        // SVG shares the plot page with PDF: the writer follows the extension.
-        let is_svg = lower.ends_with(".svg");
-        if !is_svg && !lower.ends_with(".pdf") {
-            return Err(failure("invalid_path", "plot writes .pdf or .svg files"));
-        }
-        self.stamp_plot_fields();
+        let (path, is_svg) = plot_target(req)?;
         let i = self.active_tab;
         let names = self.tabs[i].scene.layout_names();
         let requested = req["layout"].as_str().unwrap_or("Model").to_owned();
@@ -986,8 +1008,7 @@ impl OpenCADStudio {
                 }
                 files.push(json!({"layout": name, "path": file}));
             }
-            self.set_control_result(json!({ "files": files, "pages": pages.len() }));
-            return Ok(Task::none());
+            return Ok(json!({ "files": files, "pages": pages.len() }));
         }
         // Pages may drop the style when a stored page setup overwrites the
         // dialog's style fields, so the explicit request style rides along as
@@ -1016,20 +1037,42 @@ impl OpenCADStudio {
             )
             .map_err(|e| failure("plot_failed", e))?;
         }
-        self.set_control_result(json!({
+        Ok(json!({
             "path": path,
             "pages": pages.len(),
             "page_sizes": pages
                 .iter()
                 .map(|page| json!([page.paper_w, page.paper_h]))
                 .collect::<Vec<_>>(),
-        }));
-        Ok(Task::none())
+        }))
     }
 
+    /// The Properties panel's rows (`property_json`); a row a clicked
+    /// rule-check result highlights also has `"highlighted": true` (panel
+    /// spec §3.6).
     pub(super) fn control_properties(&mut self) -> Value {
         self.refresh_properties();
-        json!({"ok":true,"sections":self.tabs[self.active_tab].properties.sections.iter().map(|s|json!({"title":s.title,"properties":s.props.iter().map(property_json).collect::<Vec<_>>()})).collect::<Vec<_>>()})
+        let i = self.active_tab;
+        let sections: Vec<Value> = self.tabs[i]
+            .properties
+            .sections
+            .iter()
+            .map(|section| {
+                let rows: Vec<Value> = section
+                    .props
+                    .iter()
+                    .map(|property| {
+                        let mut row = property_json(property);
+                        if self.pid_verify_row_highlighted(i, &row_id(property)) {
+                            row["highlighted"] = json!(true);
+                        }
+                        row
+                    })
+                    .collect();
+                json!({"title": section.title, "properties": rows})
+            })
+            .collect();
+        json!({"ok": true, "sections": sections})
     }
     /// Where the drawn UI widgets are on screen, as `[x, y, width, height]`
     /// per `PosReport` id, optionally filtered by id `prefix`.
@@ -2226,6 +2269,30 @@ impl OpenCADStudio {
                     }
                     _ => return Err(failure("invalid_value", "Unknown P&ID palette edit")),
                 }
+            }
+            // The 「校验与交付」 panel (panel spec §3.3): one key or key=value,
+            // as `parse_action` reads them. The view is rebuilt first, so a key
+            // whose button the panel draws grey now, or whose row is not in its
+            // list, is refused rather than pressed. Pressing is all the action
+            // does: a project scan the press starts is not waited for.
+            "pid_verify" => {
+                let value = string(req, "value")?;
+                self.refresh_pid_verify_view();
+                let pressed = crate::ui::window::pid_verify_deliver::parse_action(
+                    value,
+                    &self.pid_verify_view,
+                )
+                .map_err(|refused| {
+                    let mut answer = failure(refused.code(), &refused);
+                    if let Some(reason) = refused.reason() {
+                        answer["reason"] = json!(reason);
+                    }
+                    answer
+                })?;
+                let scanning = self.pid_index.scanning();
+                let task = self.update(Message::PidVerify(pressed));
+                self.control.untracked = !scanning && self.pid_index.scanning();
+                return Ok(task);
             }
             // Attach dialog: choose pages by index ("0,2").
             "pdf_page_select" => {

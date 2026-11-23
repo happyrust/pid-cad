@@ -116,6 +116,11 @@ pub(super) struct State {
     /// can detect highlight changes without polling the full selection.
     selection_revision: u64,
     pub(super) routing: bool,
+    /// Set by a `pid_verify` action whose press started a project scan: the
+    /// scan runs on in the background with its progress in the panel's
+    /// `busy`, and the request is answered without waiting for it (panel
+    /// spec §3.3), so `cancel` can still be sent. `control_track` takes it.
+    pub(super) untracked: bool,
     /// Session-scoped named handle sets for selection_set_save/load.
     selection_sets: std::collections::BTreeMap<String, Vec<document::Handle>>,
     /// Live `user_select` request — the client asked the person at the screen
@@ -241,6 +246,9 @@ fn background_mutation(op: &str) -> bool {
             | "entities_transform"
             | "pid_insert_batch"
             | "pid_masterdata_set"
+            | "pid_check_rules_set"
+            | "pid_check_waive"
+            | "pid_check_unwaive"
             | "text_replace"
             | "xdata_set"
             | "block_define"
@@ -679,7 +687,7 @@ impl OpenCADStudio {
             "mtext_editor":self.mtext_editor.as_ref().map(|e|json!({"text":e.content.text(),"height":e.height,"style":e.style})),
             "text_editor":self.text_inline.is_some(),"event_cursor":self.control.serial,
             "operation":self.control.pending.as_ref().map(|p| &p.id),
-            "capabilities":["commands","command_manifest","step_input","batch","compact_results","entity_pick","structure_pick","selection","user_select","properties","records","record_schemas","record_filters","atomic_record_updates","layers","history","documents","events","capture","viewport_capture","measure","spatial_query","pid_legend","pid_master_data","pid_project_index","audit","verified_save","explicit_save_version"]
+            "capabilities":["commands","command_manifest","step_input","batch","compact_results","entity_pick","structure_pick","selection","user_select","properties","records","record_schemas","record_filters","atomic_record_updates","layers","history","documents","events","capture","viewport_capture","measure","spatial_query","pid_legend","pid_master_data","pid_project_index","pid_check","pid_bom","pid_snapshot","pid_publish","pid_verify_panel","audit","verified_save","explicit_save_version"]
         })
     }
 
@@ -710,6 +718,16 @@ impl OpenCADStudio {
                 | "pid_masterdata"
                 | "pid_summary"
                 | "pid_index"
+                | "pid_check"
+                | "pid_check_rules"
+                | "pid_bom"
+                | "pid_snapshots"
+                | "pid_snapshot"
+                | "pid_diff"
+                | "pid_publish_check"
+                | "pid_publications"
+                | "pid_publish_verify"
+                | "pid_verify_panel"
                 | "snap"
                 | "grips"
                 | "query"
@@ -1034,11 +1052,27 @@ impl OpenCADStudio {
             if op == "pid_index" {
                 return self.control_pid_index(&req);
             }
+            if op == "pid_check" {
+                return self.control_pid_check(&req);
+            }
+            if op == "pid_bom" {
+                return self.control_pid_bom(&req);
+            }
+            if op == "pid_publish_check" {
+                return self.control_pid_publish_check(&req);
+            }
             let response = match op {
                 "properties" => self.control_properties(),
                 "measure" => self.control_measure(&req),
                 "pid_masterdata" => self.control_pid_masterdata(&req),
                 "pid_summary" => self.control_pid_summary(),
+                "pid_check_rules" => self.control_pid_check_rules(),
+                "pid_snapshots" => self.control_pid_snapshots(),
+                "pid_snapshot" => self.control_pid_snapshot(&req),
+                "pid_diff" => self.control_pid_diff(&req),
+                "pid_publications" => self.control_pid_publications(&req),
+                "pid_publish_verify" => self.control_pid_publish_verify(&req),
+                "pid_verify_panel" => self.control_pid_verify_panel(&req),
                 // The object snap a cursor over `point` (world) would get;
                 // `from` is the base for perpendicular and tangent.
                 "snap" => 'snap: {
@@ -1196,6 +1230,16 @@ impl OpenCADStudio {
         }
         if op == "pid_locate" {
             if let Some(answer) = self.control_pid_locate_waits(&req) {
+                return answer;
+            }
+        }
+        if op == "pid_bom_export" {
+            if let Some(answer) = self.control_pid_bom_export_waits(&req) {
+                return answer;
+            }
+        }
+        if op == "pid_publish" {
+            if let Some(answer) = self.control_pid_publish_waits(&req) {
                 return answer;
             }
         }
@@ -1510,6 +1554,13 @@ impl OpenCADStudio {
             "pid_insert_batch" => self.control_pid_insert_batch(req)?,
             "pid_masterdata_set" => self.control_pid_masterdata_set(req)?,
             "pid_locate" => self.control_pid_locate(req)?,
+            "pid_check_rules_set" => self.control_pid_check_rules_set(req)?,
+            "pid_check_waive" => self.control_pid_check_waive(req)?,
+            "pid_check_unwaive" => self.control_pid_check_unwaive(req)?,
+            "pid_bom_export" => self.control_pid_bom_export(req)?,
+            "pid_snapshot_save" => self.control_pid_snapshot_save(req)?,
+            "pid_snapshot_export" => self.control_pid_snapshot_export(req)?,
+            "pid_publish" => self.control_pid_publish(req)?,
             "entities_set" => self.control_entities_set(req)?,
             "xref_reload" => self.control_xref_reload(req)?,
             "xref_unload" => self.control_xref_unload(req)?,
@@ -1794,6 +1845,9 @@ impl OpenCADStudio {
     }
 
     pub(super) fn control_track(&mut self, task: Task<Message>) -> Task<Message> {
+        if std::mem::take(&mut self.control.untracked) {
+            return task;
+        }
         let track_zero_unit = self.control.pending.as_ref().is_some_and(|p| {
             p.request["op"] == "run"
                 && p.request["cmd"].as_str().is_some_and(|cmd| {

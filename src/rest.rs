@@ -633,6 +633,183 @@ pub(crate) fn plan(method: &str, rest: &[&str], request: &HttpRequest) -> Plan {
             fields: body,
             created: 200,
         },
+        // A rule check of the current drawing, its project or a PBS node; the
+        // body is the request. It changes no drawing, so it runs as a read.
+        ("POST", ["pid", "check"]) => {
+            let mut check = body;
+            check["protocol"] = json!(1);
+            check["op"] = json!("pid_check");
+            Plan::Run {
+                request: check,
+                created: 200,
+            }
+        }
+        ("GET", ["pid", "check", "rules"]) => Plan::Run {
+            request: json!({"protocol": 1, "op": "pid_check_rules"}),
+            created: 200,
+        },
+        ("PUT", ["pid", "check", "rules"]) => Plan::Mutate {
+            op: "pid_check_rules_set".into(),
+            fields: body,
+            created: 200,
+        },
+        ("POST", ["pid", "check", "waivers"]) => Plan::Mutate {
+            op: "pid_check_waive".into(),
+            fields: body,
+            created: 200,
+        },
+        // The waiver may also be named in the query, which wins over the body.
+        ("DELETE", ["pid", "check", "waivers"]) => {
+            let mut fields = body;
+            for key in ["rule_id", "object_key"] {
+                if let Some(value) = request.param(key) {
+                    fields[key] = json!(value);
+                }
+            }
+            Plan::Mutate {
+                op: "pid_check_unwaive".into(),
+                fields,
+                created: 200,
+            }
+        }
+        // P&ID bill of materials (SPEC-pid-bom §5.3): the list of the current
+        // drawing, its project or a PBS node, which answers `status: scanning`
+        // while the project's files are still being read, and writing it to a
+        // file on this machine. The export changes no drawing. A snapshot
+        // number in the query reaches the op as a number when it is one, else
+        // as written, for the op to refuse.
+        ("GET", ["pid", "bom"]) => {
+            let mut bom = json!({"protocol": 1, "op": "pid_bom"});
+            for key in ["scope", "pbs"] {
+                if let Some(value) = request.param(key) {
+                    bom[key] = json!(value);
+                }
+            }
+            if let Some(seq) = request.param("snapshot") {
+                bom["snapshot"] = seq_segment(seq);
+            }
+            Plan::Run {
+                request: bom,
+                created: 200,
+            }
+        }
+        ("POST", ["pid", "bom", "export"]) => Plan::Mutate {
+            op: "pid_bom_export".into(),
+            fields: body,
+            created: 200,
+        },
+        // P&ID snapshots (SPEC-pid-snapshot §5.3): the current drawing's list,
+        // one snapshot whole, saving one (201; with `path`, as that file rather
+        // than a numbered one), copying one out, and comparing two (`b` is the
+        // drawing as it is now when left out). Saving and copying write files
+        // on this machine and change no drawing. A sequence number or a
+        // tolerance that is not a number reaches the op as written, which
+        // refuses it.
+        ("GET", ["pid", "snapshots"]) => Plan::Run {
+            request: json!({"protocol": 1, "op": "pid_snapshots"}),
+            created: 200,
+        },
+        ("POST", ["pid", "snapshots"]) => Plan::Mutate {
+            op: "pid_snapshot_save".into(),
+            fields: body,
+            created: 201,
+        },
+        ("GET", ["pid", "snapshots", seq]) => Plan::Run {
+            request: json!({"protocol": 1, "op": "pid_snapshot", "seq": seq_segment(seq)}),
+            created: 200,
+        },
+        ("POST", ["pid", "snapshots", seq, "export"]) => {
+            let mut fields = body;
+            fields["seq"] = seq_segment(seq);
+            Plan::Mutate {
+                op: "pid_snapshot_export".into(),
+                fields,
+                created: 200,
+            }
+        }
+        ("GET", ["pid", "diff"]) => {
+            let mut diff = json!({"protocol": 1, "op": "pid_diff"});
+            for key in ["a", "b"] {
+                if let Some(value) = request.param(key) {
+                    diff[key] = json!(value);
+                }
+            }
+            if let Some(tolerance) = request.param("move_tolerance") {
+                diff["move_tolerance"] = match tolerance.parse::<f64>() {
+                    Ok(number) if number.is_finite() => json!(number),
+                    _ => json!(tolerance),
+                };
+            }
+            Plan::Run {
+                request: diff,
+                created: 200,
+            }
+        }
+        // P&ID publishing (SPEC-pid-publish §5.3): whether the current drawing
+        // can be published (each precondition, the gates, the target folder and
+        // the revision it would get), publishing it (201; the body is the
+        // request), its packages, and checking one against its manifest.
+        // Publishing writes a package folder on this machine and changes no
+        // drawing. A revision or a flag in the query that is not one reaches
+        // the op as written, which refuses it.
+        ("GET", ["pid", "publish", "check"]) => {
+            let mut check = json!({"protocol": 1, "op": "pid_publish_check"});
+            if let Some(dir) = request.param("dir") {
+                check["dir"] = json!(dir);
+            }
+            if let Some(revision) = request.param("rev") {
+                check["rev"] = seq_segment(revision);
+            }
+            if let Some(allow) = request.param("allow_offline") {
+                check["allow_offline"] = match allow {
+                    "true" | "1" => json!(true),
+                    "false" | "0" => json!(false),
+                    _ => json!(allow),
+                };
+            }
+            Plan::Run {
+                request: check,
+                created: 200,
+            }
+        }
+        ("POST", ["pid", "publish"]) => Plan::Mutate {
+            op: "pid_publish".into(),
+            fields: body,
+            created: 201,
+        },
+        ("GET", ["pid", "publications"]) => {
+            let mut listed = json!({"protocol": 1, "op": "pid_publications"});
+            if let Some(dir) = request.param("dir") {
+                listed["dir"] = json!(dir);
+            }
+            Plan::Run {
+                request: listed,
+                created: 200,
+            }
+        }
+        ("POST", ["pid", "publish", "verify"]) => {
+            let mut verify = body;
+            verify["protocol"] = json!(1);
+            verify["op"] = json!("pid_publish_verify");
+            Plan::Run {
+                request: verify,
+                created: 200,
+            }
+        }
+        // `limit` and `offset` page the panel's lists; a number goes on as a
+        // number and anything else as written, for the op to refuse.
+        ("GET", ["pid", "verify-panel"]) => {
+            let mut panel = json!({"protocol": 1, "op": "pid_verify_panel"});
+            for key in ["limit", "offset"] {
+                if let Some(value) = request.param(key) {
+                    panel[key] = seq_segment(value);
+                }
+            }
+            Plan::Run {
+                request: panel,
+                created: 200,
+            }
+        }
         // Same state read, plus `documents[].document_id` — the spelling the
         // REST contract (and every validator) reads.
         ("GET", ["documents"]) => Plan::Aliased {
@@ -1047,6 +1224,14 @@ pub(crate) fn plan(method: &str, rest: &[&str], request: &HttpRequest) -> Plan {
     }
 }
 
+/// A snapshot sequence number from the path or the query: a number when it is
+/// one, else as written.
+fn seq_segment(segment: &str) -> Value {
+    segment
+        .parse::<u64>()
+        .map_or_else(|_| json!(segment), |seq| json!(seq))
+}
+
 /// The headless executor: run a resolved plan against this server's private
 /// app. The GUI-hosted bridge runs the same plans over its envelope queue.
 fn route(
@@ -1185,8 +1370,7 @@ fn run_mutation(
         }
         response = attempt(app, id, document_id);
     }
-    let status = map_status(response.clone(), created == 201);
-    (if status == 200 { created } else { status }, response)
+    (map_status(response.clone(), created == 201), response)
 }
 
 /// Drop the bulky `state` snapshot from settle responses; REST clients read
@@ -1208,17 +1392,30 @@ fn fetch_state(app: &mut OpenCADStudio) -> Option<u64> {
     state["document_id"].as_u64()
 }
 
-/// ok:true → 200 (the caller may upgrade to 201 for resource creation);
+/// ok:true → 200, or 201 when `created` (the request creates a resource)
+/// unless the answer is `status: scanning`, which created nothing yet;
 /// failures map to the closest HTTP status so ordinary clients can branch
 /// on the status code, with the symbolic `code` preserved in the body.
 pub(crate) fn map_status(response: Value, created: bool) -> u16 {
     if response["ok"] == true {
-        return if created { 201 } else { 200 };
+        return if created && response["status"] != "scanning" {
+            201
+        } else {
+            200
+        };
     }
     match response["code"].as_str().unwrap_or("") {
         "entity_absent" | "layout_missing" | "xref_missing" | "unknown_route" => 404,
         // 要定位的位号哪张图上都没有（项目索引规格 §5.3）。
         "LOCATE_NOT_FOUND" => 404,
+        // 规则检查（规则检查规格 §3.8）：指的规则号、要豁免或取消的条目、PBS 节点不存在。
+        "RULE_NOT_FOUND" | "WAIVER_TARGET_NOT_FOUND" | "PBS_NODE_UNKNOWN" => 404,
+        // 快照（快照规格 §3.8）：要读、要比、要导出的那一份不在。
+        "SNAPSHOT_NOT_FOUND" => 404,
+        // 发布（发布规格 §3.6）：要校验的包不在，或者里面没有发布清单。
+        "PACKAGE_NOT_FOUND" => 404,
+        // 面板（面板规格 §3.7）：动作指的行、快照、修订不在面板现在的列表里。
+        "PANEL_ROW_NOT_FOUND" => 404,
         // 同一线号同图第二个流入连接符是「与现有资源冲突」，不是请求格式错。
         // `CONNECTOR_KIND_MISMATCH` 保持 400（契约 A.7 明文）。
         "stale_state"
@@ -1237,11 +1434,43 @@ pub(crate) fn map_status(response: Value, created: bool) -> u16 {
         // 都是与现在的图纸和项目对不上。
         | "INDEX_NO_PROJECT_DIR"
         | "INDEX_DRAWING_ID_DUPLICATED"
-        | "LOCATE_AMBIGUOUS" => 409,
+        | "LOCATE_AMBIGUOUS"
+        // 规则检查（规则检查规格 §3.8）：项目包想改内置规则、新规则号落在内置号段或者重复，
+        // 保存门禁拦下了有错误的图。
+        | "RULE_BUILTIN_READONLY"
+        | "RULE_ID_RESERVED"
+        | "RULE_ID_DUPLICATED"
+        | "RULE_BLOCKED"
+        // 材料清单（材料清单规格 §3.5）：范围里有重复的位号、有图读不出来，清单不产出。
+        | "BOM_DUPLICATE_TAG"
+        | "BOM_SCOPE_INCOMPLETE"
+        // 快照（快照规格 §3.8）：要写的文件已在（快照只新建），快照文件对不上校验和。
+        | "SNAPSHOT_IMMUTABLE"
+        | "SNAPSHOT_CORRUPT"
+        // 发布（发布规格 §3.6，离线规格 §5.7）：门禁没过，图没存或磁盘上的文件对不上，协同前提没过，
+        // 这一版已经有了，要校验的包缺文件或对不上清单——都是与现在的图纸和目标目录对不上。
+        | "PUBLISH_BLOCKED"
+        | "PUBLISH_UNSAVED"
+        | "PUBLISH_FILE_CHANGED"
+        | "COLLAB_UNSYNCED"
+        | "COLLAB_DIVERGED"
+        | "COLLAB_OFFLINE"
+        | "PUBLISH_TARGET_EXISTS"
+        | "PACKAGE_INCOMPLETE"
+        | "PACKAGE_CORRUPT"
+        // 面板（面板规格 §3.7）：动作对应的按钮此刻是灰的，`reason` 说为什么。
+        | "PANEL_ACTION_UNAVAILABLE" => 409,
         // 协同会话不可写：请求本身没有错，是这个会话不被允许做这件事。
         "COLLAB_READONLY" | "PERM_DENIED_ROLE" | "PERM_DENIED_PBS" | "PERM_DENIED_STATE" => 403,
-        // 项目文件读写失败：请求和图纸都没错，是桌面端这台机器的文件系统报了错。
-        "MASTERDATA_IO_ERROR" | "INDEX_IO_ERROR" => 500,
+        // 项目文件、项目规则包读写失败，清单文件写不了，快照文件读写失败：请求和图纸都没错，
+        // 是桌面端这台机器的文件系统报了错。
+        "MASTERDATA_IO_ERROR"
+        | "INDEX_IO_ERROR"
+        | "RULESET_IO_ERROR"
+        | "BOM_IO_ERROR"
+        | "SNAPSHOT_IO_ERROR"
+        // 出包在某一步失败（发布规格 §3.6）：应答的 `step` 说是哪一步。
+        | "PUBLISH_FAILED" => 500,
         "busy" => 503,
         _ => 400,
     }
@@ -1378,6 +1607,16 @@ mod tests {
             ("/api/v1/pid/summary", "get"),
             ("/api/v1/pid/index", "get"),
             ("/api/v1/pid/locate", "post"),
+            ("/api/v1/pid/check", "post"),
+            ("/api/v1/pid/check/rules", "get"),
+            ("/api/v1/pid/check/rules", "put"),
+            ("/api/v1/pid/check/waivers", "post"),
+            ("/api/v1/pid/check/waivers", "delete"),
+            ("/api/v1/pid/snapshots", "get"),
+            ("/api/v1/pid/snapshots", "post"),
+            ("/api/v1/pid/snapshots/{seq}", "get"),
+            ("/api/v1/pid/snapshots/{seq}/export", "post"),
+            ("/api/v1/pid/diff", "get"),
         ] {
             assert!(
                 document["paths"][path][method].is_object(),
@@ -1395,6 +1634,20 @@ mod tests {
             assert!(
                 document["paths"]["/api/v1/pid/locate"]["post"]["responses"][status].is_object(),
                 "missing {status} response for post /api/v1/pid/locate"
+            );
+        }
+        for (path, method, status) in [
+            ("/api/v1/pid/check", "post", "404"),
+            ("/api/v1/pid/check", "post", "409"),
+            ("/api/v1/pid/check/rules", "put", "403"),
+            ("/api/v1/pid/check/rules", "put", "409"),
+            ("/api/v1/pid/check/rules", "put", "500"),
+            ("/api/v1/pid/check/waivers", "post", "404"),
+            ("/api/v1/pid/check/waivers", "delete", "404"),
+        ] {
+            assert!(
+                document["paths"][path][method]["responses"][status].is_object(),
+                "missing {status} response for {method} {path}"
             );
         }
         for (path, method) in [
@@ -1754,6 +2007,969 @@ mod tests {
                 "{code}"
             );
         }
+    }
+
+    /// SPEC-pid-drc §5.3 over HTTP: POST /pid/check runs a check with the
+    /// body as its request, GET /pid/check/rules lists the rules in effect,
+    /// PUT /pid/check/rules replaces the project pack, POST and DELETE
+    /// /pid/check/waivers add and take away a waiver (DELETE may carry
+    /// `rule_id` and `object_key` in the query). Status codes follow §3.8:
+    /// a pack the rules refuse and a blocked save are 409, a rule, waiver
+    /// target or PBS node that is not there 404, a malformed pack 400.
+    #[test]
+    fn pid_check_rest_routes_and_status_codes() {
+        let check = request(
+            "POST",
+            "/api/v1/pid/check",
+            r#"{"scope":"pbs","pbs":"U-100","include_waived":false}"#,
+        );
+        let Plan::Run {
+            request: asked,
+            created,
+        } = plan("POST", &["pid", "check"], &check)
+        else {
+            panic!("POST /pid/check is not a read");
+        };
+        assert_eq!(created, 200);
+        assert_eq!(
+            asked,
+            json!({"protocol": 1, "op": "pid_check", "scope": "pbs", "pbs": "U-100", "include_waived": false})
+        );
+        let rules = request("GET", "/api/v1/pid/check/rules", "");
+        let Plan::Run { request: asked, .. } = plan("GET", &["pid", "check", "rules"], &rules)
+        else {
+            panic!("GET /pid/check/rules is not a read");
+        };
+        assert_eq!(asked, json!({"protocol": 1, "op": "pid_check_rules"}));
+        for (method, rest, body, expected) in [
+            (
+                "PUT",
+                ["pid", "check", "rules"],
+                r#"{"pack":{"version":1}}"#,
+                "pid_check_rules_set",
+            ),
+            (
+                "POST",
+                ["pid", "check", "waivers"],
+                r#"{"rule_id":"DR-014","object_key":"K","reason":"r"}"#,
+                "pid_check_waive",
+            ),
+            (
+                "DELETE",
+                ["pid", "check", "waivers"],
+                r#"{"rule_id":"DR-014","object_key":"K"}"#,
+                "pid_check_unwaive",
+            ),
+        ] {
+            let path = format!("/api/v1/{}", rest.join("/"));
+            let Plan::Mutate {
+                op,
+                fields,
+                created,
+            } = plan(method, &rest, &request(method, &path, body))
+            else {
+                panic!("{method} {path} is not a write");
+            };
+            assert_eq!((op.as_str(), created), (expected, 200), "{method} {path}");
+            let sent: Value = serde_json::from_str(body).expect("JSON");
+            assert_eq!(fields, sent, "{method} {path}");
+        }
+        let mut unwaive = request("DELETE", "/api/v1/pid/check/waivers", "");
+        unwaive.query = vec![
+            ("rule_id".into(), "DR-014".into()),
+            ("object_key".into(), "PUMP|P 1".into()),
+        ];
+        let Plan::Mutate { op, fields, .. } =
+            plan("DELETE", &["pid", "check", "waivers"], &unwaive)
+        else {
+            panic!("DELETE /pid/check/waivers is not a write");
+        };
+        assert_eq!(op, "pid_check_unwaive");
+        assert_eq!(
+            fields,
+            json!({"rule_id": "DR-014", "object_key": "PUMP|P 1"})
+        );
+
+        let mut document_id: Option<u64> = None;
+        let mut counter: u64 = 0;
+        let mut app = serve_app(true);
+        let bare = request("POST", "/api/v1/pid/check", "");
+        let (status, body) = route(&mut app, &bare, &mut document_id, &mut counter);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["version"], 1, "{body}");
+        assert_eq!(body["scope"]["kind"], "drawing", "{body}");
+        let (status, body) = route(&mut app, &rules, &mut document_id, &mut counter);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["rules"].as_array().map(Vec::len),
+            Some(crate::pid::drc::builtin_rules::builtin().rules.len()),
+            "{body}"
+        );
+        for (asked, expected_status, code) in [
+            (
+                request("POST", "/api/v1/pid/check", r#"{"scope":"project"}"#),
+                409,
+                "INDEX_NO_PROJECT_DIR",
+            ),
+            (
+                request("POST", "/api/v1/pid/check", r#"{"scope":"pbs"}"#),
+                400,
+                "invalid_request",
+            ),
+            (
+                request(
+                    "PUT",
+                    "/api/v1/pid/check/rules",
+                    r#"{"pack":{"version":1}}"#,
+                ),
+                409,
+                "INDEX_NO_PROJECT_DIR",
+            ),
+            (
+                request(
+                    "POST",
+                    "/api/v1/pid/check/waivers",
+                    r#"{"rule_id":"DR-999","object_key":"K","reason":"r"}"#,
+                ),
+                404,
+                "RULE_NOT_FOUND",
+            ),
+            (
+                request(
+                    "POST",
+                    "/api/v1/pid/check/waivers",
+                    r#"{"rule_id":"DR-014","object_key":"K","reason":"r"}"#,
+                ),
+                404,
+                "WAIVER_TARGET_NOT_FOUND",
+            ),
+            (unwaive, 404, "WAIVER_TARGET_NOT_FOUND"),
+            (
+                request("POST", "/api/v1/pid/check/waivers", "{}"),
+                400,
+                "invalid_request",
+            ),
+        ] {
+            let (status, body) = route(&mut app, &asked, &mut document_id, &mut counter);
+            let what = format!("{} {}?{:?} {body}", asked.method, asked.path, asked.query);
+            assert_eq!(status, expected_status, "{what}");
+            assert_eq!(body["code"], code, "{what}");
+        }
+
+        for (code, expected_status) in [
+            ("RULE_BUILTIN_READONLY", 409),
+            ("RULE_ID_RESERVED", 409),
+            ("RULE_ID_DUPLICATED", 409),
+            ("RULE_BLOCKED", 409),
+            ("RULE_NOT_FOUND", 404),
+            ("WAIVER_TARGET_NOT_FOUND", 404),
+            ("PBS_NODE_UNKNOWN", 404),
+            ("DSL_PARSE_ERROR", 400),
+            ("RULESET_SCHEMA_ERROR", 400),
+            ("WAIVER_REASON_REQUIRED", 400),
+            ("RULESET_IO_ERROR", 500),
+        ] {
+            assert_eq!(
+                map_status(json!({"ok": false, "code": code}), false),
+                expected_status,
+                "{code}"
+            );
+        }
+    }
+
+    /// The bill of materials (SPEC-pid-bom §5.3): GET /pid/bom runs the
+    /// `pid_bom` read with `scope`, `pbs` and `snapshot` from the query, the
+    /// snapshot as a number when it is one (otherwise as written, for the op
+    /// to refuse); POST /pid/bom/export writes the file through the mutation
+    /// wrapper with the body as its fields. Status codes follow §3.5: a
+    /// duplicate tag, a scope with drawings that cannot be read, a snapshot
+    /// that fails its checksum and a drawing never saved are 409, a PBS node
+    /// or a snapshot that is not there 404, an unknown column, an unsupported
+    /// extension and a PBS scope without a node 400, a file that cannot be
+    /// written 500. Both routes, and `snapshot` on both, are in the OpenAPI
+    /// document.
+    #[test]
+    fn pid_bom_rest_routes_and_status_codes() {
+        let planned = |query: &[(&str, &str)]| {
+            let mut bom = request("GET", "/api/v1/pid/bom", "");
+            bom.query = query
+                .iter()
+                .map(|&(key, value)| (key.into(), value.into()))
+                .collect();
+            let Plan::Run {
+                request: asked,
+                created,
+            } = plan("GET", &["pid", "bom"], &bom)
+            else {
+                panic!("GET /pid/bom is not a read");
+            };
+            assert_eq!(created, 200);
+            asked
+        };
+        assert_eq!(
+            planned(&[("scope", "pbs"), ("pbs", "U-100"), ("snapshot", "3")]),
+            json!({"protocol": 1, "op": "pid_bom", "scope": "pbs", "pbs": "U-100", "snapshot": 3})
+        );
+        assert_eq!(
+            planned(&[("snapshot", "third")]),
+            json!({"protocol": 1, "op": "pid_bom", "snapshot": "third"})
+        );
+        let body = r#"{"path":"bom.csv","scope":"project","columns":["位号"]}"#;
+        let export = request("POST", "/api/v1/pid/bom/export", body);
+        let Plan::Mutate {
+            op,
+            fields,
+            created,
+        } = plan("POST", &["pid", "bom", "export"], &export)
+        else {
+            panic!("POST /pid/bom/export is not a write");
+        };
+        assert_eq!((op.as_str(), created), ("pid_bom_export", 200));
+        let sent: Value = serde_json::from_str(body).expect("JSON");
+        assert_eq!(fields, sent);
+
+        let mut document_id: Option<u64> = None;
+        let mut counter: u64 = 0;
+        let mut app = serve_app(true);
+        let bare = request("GET", "/api/v1/pid/bom", "");
+        let (status, body) = route(&mut app, &bare, &mut document_id, &mut counter);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["version"], 1, "{body}");
+        assert_eq!(body["scope"]["kind"], "drawing", "{body}");
+        let read = |key: &str, value: &str| {
+            let mut asked = request("GET", "/api/v1/pid/bom", "");
+            asked.query = vec![(key.into(), value.into())];
+            asked
+        };
+        let export = |body: &str| request("POST", "/api/v1/pid/bom/export", body);
+        for (asked, expected_status, code) in [
+            (read("scope", "project"), 409, "INDEX_NO_PROJECT_DIR"),
+            (read("scope", "pbs"), 400, "SCOPE_NOT_SELECTED"),
+            (read("scope", "nowhere"), 400, "invalid_request"),
+            (read("snapshot", "3"), 409, "INDEX_NO_PROJECT_DIR"),
+            (read("snapshot", "third"), 400, "invalid_request"),
+            (
+                export(r#"{"path":"bom.txt"}"#),
+                400,
+                "BOM_FORMAT_UNSUPPORTED",
+            ),
+            (export("{}"), 400, "invalid_request"),
+            (
+                export(r#"{"path":"bom.csv","scope":"pbs"}"#),
+                400,
+                "SCOPE_NOT_SELECTED",
+            ),
+        ] {
+            let (status, body) = route(&mut app, &asked, &mut document_id, &mut counter);
+            let what = format!("{} {}?{:?} {body}", asked.method, asked.path, asked.query);
+            assert_eq!(status, expected_status, "{what}");
+            assert_eq!(body["code"], code, "{what}");
+        }
+
+        for (code, expected_status) in [
+            ("BOM_DUPLICATE_TAG", 409),
+            ("BOM_SCOPE_INCOMPLETE", 409),
+            ("INDEX_NO_PROJECT_DIR", 409),
+            ("SNAPSHOT_CORRUPT", 409),
+            ("PBS_NODE_UNKNOWN", 404),
+            ("SNAPSHOT_NOT_FOUND", 404),
+            ("SCOPE_NOT_SELECTED", 400),
+            ("BOM_COLUMN_UNKNOWN", 400),
+            ("BOM_FORMAT_UNSUPPORTED", 400),
+            ("BOM_IO_ERROR", 500),
+        ] {
+            assert_eq!(
+                map_status(json!({"ok": false, "code": code}), false),
+                expected_status,
+                "{code}"
+            );
+        }
+
+        let document: Value = serde_json::from_str(include_str!("rest_openapi.json"))
+            .expect("REST OpenAPI document parses");
+        for (path, method, status) in [
+            ("/api/v1/pid/bom", "get", "200"),
+            ("/api/v1/pid/bom", "get", "400"),
+            ("/api/v1/pid/bom", "get", "404"),
+            ("/api/v1/pid/bom", "get", "409"),
+            ("/api/v1/pid/bom/export", "post", "200"),
+            ("/api/v1/pid/bom/export", "post", "400"),
+            ("/api/v1/pid/bom/export", "post", "404"),
+            ("/api/v1/pid/bom/export", "post", "409"),
+            ("/api/v1/pid/bom/export", "post", "500"),
+        ] {
+            assert!(
+                document["paths"][path][method]["responses"][status].is_object(),
+                "missing {status} response for {method} {path}"
+            );
+        }
+        let snapshot = json!({"type": "integer", "minimum": 1});
+        let parameters = document["paths"]["/api/v1/pid/bom"]["get"]["parameters"]
+            .as_array()
+            .expect("GET /pid/bom parameters");
+        let asked = parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "snapshot")
+            .expect("GET /pid/bom takes snapshot");
+        assert_eq!(asked["schema"], snapshot, "{asked}");
+        let body = &document["paths"]["/api/v1/pid/bom/export"]["post"]["requestBody"]["content"]
+            ["application/json"]["schema"]["properties"];
+        assert_eq!(body["snapshot"]["type"], snapshot["type"], "{body}");
+        assert_eq!(body["snapshot"]["minimum"], snapshot["minimum"], "{body}");
+    }
+
+    /// The P&ID publish routes (SPEC-pid-publish §5.3): GET /pid/publish/check
+    /// answers whether the current drawing can be published (`dir`, `rev` and
+    /// `allow_offline` from the query), POST /pid/publish publishes it (201;
+    /// the body is the request), GET /pid/publications lists its packages and
+    /// POST /pid/publish/verify checks one against its manifest. A revision or
+    /// a flag that is not one reaches the op as written, and the op refuses it.
+    /// A publish still reading the project answers `scanning` with 200, not
+    /// 201: nothing is created yet. Status codes follow §3.6: a gate or a
+    /// precondition that does not hold, a package already there and one that
+    /// fails its manifest are 409, a package that is not there is 404, one that
+    /// could not be written is 500, the rest 400. Every route is in the OpenAPI
+    /// document.
+    #[test]
+    fn pid_publish_rest_routes_and_status_codes() {
+        let read = |method: &str, segments: &[&str], query: &[(&str, &str)], body: &str| {
+            let path = format!("/api/v1/{}", segments.join("/"));
+            let mut asked = request(method, &path, body);
+            asked.query = query
+                .iter()
+                .map(|&(key, value)| (key.into(), value.into()))
+                .collect();
+            let Plan::Run {
+                request: asked,
+                created,
+            } = plan(method, segments, &asked)
+            else {
+                panic!("{method} {path} is not a read");
+            };
+            assert_eq!(created, 200, "{method} {path}");
+            asked
+        };
+        let check = ["pid", "publish", "check"];
+        assert_eq!(
+            read("GET", &check, &[], ""),
+            json!({"protocol": 1, "op": "pid_publish_check"})
+        );
+        assert_eq!(
+            read(
+                "GET",
+                &check,
+                &[("dir", "out dir"), ("rev", "3"), ("allow_offline", "true")],
+                ""
+            ),
+            json!({"protocol": 1, "op": "pid_publish_check", "dir": "out dir", "rev": 3, "allow_offline": true})
+        );
+        assert_eq!(
+            read(
+                "GET",
+                &check,
+                &[("rev", "third"), ("allow_offline", "0")],
+                ""
+            ),
+            json!({"protocol": 1, "op": "pid_publish_check", "rev": "third", "allow_offline": false})
+        );
+        assert_eq!(
+            read("GET", &check, &[("allow_offline", "maybe")], ""),
+            json!({"protocol": 1, "op": "pid_publish_check", "allow_offline": "maybe"})
+        );
+        assert_eq!(
+            read("GET", &["pid", "publications"], &[("dir", "out")], ""),
+            json!({"protocol": 1, "op": "pid_publications", "dir": "out"})
+        );
+        assert_eq!(
+            read(
+                "POST",
+                &["pid", "publish", "verify"],
+                &[],
+                r#"{"path":"pid-publish/PID-1101-r002","op":"stop"}"#
+            ),
+            json!({"protocol": 1, "op": "pid_publish_verify", "path": "pid-publish/PID-1101-r002"})
+        );
+        let body = r#"{"rev":3,"plot":{"paper":"A3"}}"#;
+        let Plan::Mutate {
+            op,
+            fields,
+            created,
+        } = plan(
+            "POST",
+            &["pid", "publish"],
+            &request("POST", "/api/v1/pid/publish", body),
+        )
+        else {
+            panic!("POST /api/v1/pid/publish is not a write");
+        };
+        assert_eq!(op, "pid_publish");
+        assert_eq!(fields, json!({"rev": 3, "plot": {"paper": "A3"}}));
+        assert_eq!(created, 201);
+        let scanning = json!({"ok": true, "status": "scanning", "done": 0, "total": 1});
+        assert_eq!(map_status(scanning, true), 200);
+        assert_eq!(map_status(json!({"ok": true, "result": {}}), true), 201);
+        for (code, expected_status) in [
+            ("PUBLISH_BLOCKED", 409),
+            ("PUBLISH_UNSAVED", 409),
+            ("PUBLISH_FILE_CHANGED", 409),
+            ("COLLAB_UNSYNCED", 409),
+            ("COLLAB_DIVERGED", 409),
+            ("COLLAB_OFFLINE", 409),
+            ("PUBLISH_TARGET_EXISTS", 409),
+            ("PACKAGE_INCOMPLETE", 409),
+            ("PACKAGE_CORRUPT", 409),
+            ("PACKAGE_NOT_FOUND", 404),
+            ("PUBLISH_FAILED", 500),
+            ("PUBLISH_TARGET_INVALID", 400),
+            ("PUBLISH_REVISION_INVALID", 400),
+            ("COLLAB_READONLY", 403),
+        ] {
+            assert_eq!(
+                map_status(json!({"ok": false, "code": code}), true),
+                expected_status,
+                "{code}"
+            );
+        }
+
+        // Over the wire: a drawing never saved has nothing to publish; saved
+        // with a pump next to an empty drawing, it is published once the
+        // project is read.
+        struct Gone(std::path::PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        let dir = Gone(std::env::temp_dir().join(format!(
+            "ocs-rest-pid-publish-{}-{nanos}",
+            std::process::id()
+        )));
+        std::fs::create_dir_all(&dir.0).expect("a project folder");
+        let off: Vec<Value> = crate::pid::drc::builtin_rules::builtin()
+            .rules
+            .iter()
+            .filter(|rule| rule.severity == crate::pid::drc::Severity::Error && rule.id != "DR-001")
+            .map(|rule| json!({"id": rule.id, "enabled": false}))
+            .collect();
+        let pack = json!({
+            "version": 1,
+            "pack": "DR-001 only",
+            "rule_set_version": "P1",
+            "save_gate": "warn",
+            "rules": off,
+        });
+        let pack_file = dir
+            .0
+            .join(crate::pid::drc::builtin_rules::PROJECT_PACK_FILE);
+        std::fs::write(pack_file, pack.to_string()).expect("the project pack");
+        let mut app = serve_app(false);
+        let empty = crate::io::save_to_bytes(
+            app.active_document_for_test(),
+            "dwg",
+            document::DxfVersion::AC1032,
+        )
+        .expect("an empty drawing");
+        let mut document_id: Option<u64> = None;
+        let mut counter: u64 = 0;
+        let mut call = |app: &mut OpenCADStudio,
+                        method: &str,
+                        path: &str,
+                        query: &[(&str, &str)],
+                        body: &str| {
+            let mut asked = request(method, path, body);
+            asked.query = query
+                .iter()
+                .map(|&(key, value)| (key.into(), value.into()))
+                .collect();
+            route(app, &asked, &mut document_id, &mut counter)
+        };
+        let check = "/api/v1/pid/publish/check";
+        let publish = "/api/v1/pid/publish";
+        let publications = "/api/v1/pid/publications";
+        let verify = "/api/v1/pid/publish/verify";
+        let (status, body) = call(&mut app, "GET", check, &[], "");
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["can_publish"], false, "{body}");
+        assert_eq!(body["preconditions"]["saved"], false, "{body}");
+        for (method, path, body, expected_status, code) in [
+            ("POST", publish, "{}", 409, "PUBLISH_UNSAVED"),
+            ("GET", publications, "", 409, "PUBLISH_UNSAVED"),
+            ("POST", verify, "{}", 400, "invalid_request"),
+        ] {
+            let (status, answer) = call(&mut app, method, path, &[], body);
+            assert_eq!(status, expected_status, "{method} {path} {answer}");
+            assert_eq!(answer["code"], code, "{method} {path} {answer}");
+        }
+
+        let state = app.automation_op(r#"{"protocol":1,"op":"state"}"#);
+        for (n, mut step) in [
+            json!({"op": "run", "cmd": "PIDINSERT pump"}),
+            json!({"op": "input", "kind": "point", "point": [0.0, 0.0, 0.0], "space": "wcs"}),
+            json!({"op": "input", "kind": "enter"}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            step["protocol"] = json!(1);
+            step["document_id"] = state["document_id"].clone();
+            step["client_id"] = json!("rest-test");
+            step["request_id"] = json!(format!("pump-{n}"));
+            let answer = app.automation_op(&step.to_string());
+            assert_eq!(answer["ok"], true, "{step}: {answer}");
+        }
+        let drawing = dir.0.join("PID-1101.dwg").display().to_string();
+        let saving = json!({"path": drawing}).to_string();
+        let (status, body) = call(&mut app, "POST", "/api/v1/save", &[], &saving);
+        assert_eq!(status, 200, "{body}");
+        std::fs::write(dir.0.join("PID-1102.dwg"), empty).expect("the other drawing");
+
+        let (status, body) = call(&mut app, "POST", publish, &[], r#"{"rev":2}"#);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["status"], "scanning", "{body}");
+        let (status, body) = call(&mut app, "POST", publish, &[], r#"{"rev":2}"#);
+        assert_eq!(status, 201, "{body}");
+        assert_eq!(body["result"]["package_id"], "PID-1101-r002", "{body}");
+        let (status, body) = call(&mut app, "GET", check, &[], "");
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["can_publish"], true, "{body}");
+        assert_eq!(body["next_revision"], 3, "{body}");
+        let (status, body) = call(&mut app, "GET", publications, &[], "");
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["state"], "已发布，修订 2", "{body}");
+        let package = r#"{"path":"pid-publish/PID-1101-r002"}"#;
+        let (status, body) = call(&mut app, "POST", verify, &[], package);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["files"], 11, "{body}");
+
+        let in_the_way = dir.0.join("pid-publish").join("PID-1101-r003");
+        std::fs::write(in_the_way, b"in the way").expect("a file where r003 goes");
+        let missing = r#"{"path":"pid-publish/PID-1101-r009"}"#;
+        for (method, path, query, body, expected_status, code) in [
+            ("POST", publish, vec![], "{}", 409, "PUBLISH_TARGET_EXISTS"),
+            (
+                "POST",
+                publish,
+                vec![],
+                r#"{"rev":2}"#,
+                400,
+                "PUBLISH_REVISION_INVALID",
+            ),
+            (
+                "GET",
+                check,
+                vec![("rev", "third")],
+                "",
+                400,
+                "PUBLISH_REVISION_INVALID",
+            ),
+            ("POST", verify, vec![], missing, 404, "PACKAGE_NOT_FOUND"),
+        ] {
+            let (status, answer) = call(&mut app, method, path, &query, body);
+            let what = format!("{method} {path}?{query:?} {answer}");
+            assert_eq!(status, expected_status, "{what}");
+            assert_eq!(answer["code"], code, "{what}");
+        }
+
+        let document: Value = serde_json::from_str(include_str!("rest_openapi.json"))
+            .expect("REST OpenAPI document parses");
+        for (path, method, statuses) in [
+            (
+                "/api/v1/pid/publish/check",
+                "get",
+                &["200", "400", "409", "500"][..],
+            ),
+            (
+                "/api/v1/pid/publish",
+                "post",
+                &["200", "201", "400", "403", "409", "500"],
+            ),
+            ("/api/v1/pid/publications", "get", &["200", "400", "409"]),
+            (
+                "/api/v1/pid/publish/verify",
+                "post",
+                &["200", "400", "404", "409"],
+            ),
+        ] {
+            for status in statuses {
+                assert!(
+                    document["paths"][path][method]["responses"][status].is_object(),
+                    "missing {status} response for {method} {path}"
+                );
+            }
+        }
+    }
+
+    /// The P&ID snapshots (SPEC-pid-snapshot §5.3): GET /pid/snapshots lists
+    /// the current drawing's, GET /pid/snapshots/{seq} reads one whole, POST
+    /// /pid/snapshots saves one (201; with `path`, as that file rather than a
+    /// numbered one), POST /pid/snapshots/{seq}/export copies one out byte for
+    /// byte, and GET /pid/diff compares `a` with `b` (the drawing when left
+    /// out). A sequence number or a tolerance that is not a number reaches the
+    /// op as written, and the op refuses it. Status codes follow §3.8: a
+    /// snapshot that is not there is 404; one that is there already, one that
+    /// fails its checksum and a drawing never saved (no folder for numbered
+    /// snapshots) are 409; a file that cannot be read or written is 500; the
+    /// rest 400. Every route is in the OpenAPI document.
+    #[test]
+    fn pid_snapshot_and_pid_diff_rest_routes_and_status_codes() {
+        let read = |segments: &[&str], query: &[(&str, &str)]| {
+            let path = format!("/api/v1/{}", segments.join("/"));
+            let mut asked = request("GET", &path, "");
+            asked.query = query
+                .iter()
+                .map(|&(key, value)| (key.into(), value.into()))
+                .collect();
+            let Plan::Run {
+                request: asked,
+                created,
+            } = plan("GET", segments, &asked)
+            else {
+                panic!("GET {path} is not a read");
+            };
+            assert_eq!(created, 200, "GET {path}");
+            asked
+        };
+        assert_eq!(
+            read(&["pid", "snapshots"], &[]),
+            json!({"protocol": 1, "op": "pid_snapshots"})
+        );
+        assert_eq!(
+            read(&["pid", "snapshots", "3"], &[]),
+            json!({"protocol": 1, "op": "pid_snapshot", "seq": 3})
+        );
+        assert_eq!(
+            read(&["pid", "snapshots", "third"], &[]),
+            json!({"protocol": 1, "op": "pid_snapshot", "seq": "third"})
+        );
+        assert_eq!(
+            read(
+                &["pid", "diff"],
+                &[("a", "2"), ("b", "live"), ("move_tolerance", "0.5")]
+            ),
+            json!({"protocol": 1, "op": "pid_diff", "a": "2", "b": "live", "move_tolerance": 0.5})
+        );
+        assert_eq!(
+            read(
+                &["pid", "diff"],
+                &[("a", "D:\\p\\1.json"), ("move_tolerance", "far")]
+            ),
+            json!({"protocol": 1, "op": "pid_diff", "a": "D:\\p\\1.json", "move_tolerance": "far"})
+        );
+        let write = |segments: &[&str], body: &str| {
+            let path = format!("/api/v1/{}", segments.join("/"));
+            let Plan::Mutate {
+                op,
+                fields,
+                created,
+            } = plan("POST", segments, &request("POST", &path, body))
+            else {
+                panic!("POST {path} is not a write");
+            };
+            (op, fields, created)
+        };
+        assert_eq!(
+            write(
+                &["pid", "snapshots"],
+                r#"{"reason":"送审前","path":"a.json"}"#
+            ),
+            (
+                "pid_snapshot_save".to_owned(),
+                json!({"reason": "送审前", "path": "a.json"}),
+                201
+            )
+        );
+        assert_eq!(
+            write(
+                &["pid", "snapshots", "2", "export"],
+                r#"{"path":"copy.json","seq":7}"#
+            ),
+            (
+                "pid_snapshot_export".to_owned(),
+                json!({"path": "copy.json", "seq": 2}),
+                200
+            )
+        );
+
+        // Over the wire, on a drawing never saved: numbered snapshots have no
+        // folder to go in, the file form works.
+        struct Gone(std::path::PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        let dir = Gone(std::env::temp_dir().join(format!(
+            "ocs-rest-pid-snapshot-{}-{nanos}",
+            std::process::id()
+        )));
+        std::fs::create_dir_all(&dir.0).expect("a folder for the snapshot files");
+        let file = dir.0.join("a.json").display().to_string();
+        let mut document_id: Option<u64> = None;
+        let mut counter: u64 = 0;
+        let mut app = serve_app(true);
+        let mut call = |method: &str, path: &str, query: &[(&str, &str)], body: &str| {
+            let mut asked = request(method, path, body);
+            asked.query = query
+                .iter()
+                .map(|&(key, value)| (key.into(), value.into()))
+                .collect();
+            route(&mut app, &asked, &mut document_id, &mut counter)
+        };
+        let saving = json!({"path": file, "reason": "送审前"}).to_string();
+        let (status, body) = call("POST", "/api/v1/pid/snapshots", &[], &saving);
+        assert_eq!(status, 201, "{body}");
+        assert_eq!(body["result"]["seq"], Value::Null, "{body}");
+        assert_eq!(body["result"]["path"], file, "{body}");
+        let (status, body) = call("GET", "/api/v1/pid/diff", &[("a", file.as_str())], "");
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["identical"], true, "{body}");
+        assert_eq!(body["b"]["ref"], "live", "{body}");
+
+        let written = std::fs::read(&file).expect("the snapshot file");
+        let mut tampered: Value = serde_json::from_slice(&written).expect("JSON");
+        tampered["body_sha256"] = json!("0".repeat(64));
+        let bad = dir.0.join("bad.json").display().to_string();
+        std::fs::write(&bad, tampered.to_string()).expect("a snapshot failing its checksum");
+        let missing = dir.0.join("missing.json").display().to_string();
+        let snapshots = "/api/v1/pid/snapshots";
+        let diff = "/api/v1/pid/diff";
+        for (method, path, query, body, expected_status, code) in [
+            (
+                "POST",
+                snapshots,
+                vec![],
+                saving.as_str(),
+                409,
+                "SNAPSHOT_IMMUTABLE",
+            ),
+            ("POST", snapshots, vec![], "{}", 409, "INDEX_NO_PROJECT_DIR"),
+            ("GET", snapshots, vec![], "", 409, "INDEX_NO_PROJECT_DIR"),
+            (
+                "GET",
+                "/api/v1/pid/snapshots/1",
+                vec![],
+                "",
+                409,
+                "INDEX_NO_PROJECT_DIR",
+            ),
+            (
+                "GET",
+                "/api/v1/pid/snapshots/first",
+                vec![],
+                "",
+                400,
+                "invalid_request",
+            ),
+            (
+                "POST",
+                "/api/v1/pid/snapshots/1/export",
+                vec![],
+                "{}",
+                400,
+                "invalid_request",
+            ),
+            (
+                "GET",
+                diff,
+                vec![("a", file.as_str()), ("b", file.as_str())],
+                "",
+                400,
+                "DIFF_SAME_SNAPSHOT",
+            ),
+            (
+                "GET",
+                diff,
+                vec![("a", missing.as_str())],
+                "",
+                404,
+                "SNAPSHOT_NOT_FOUND",
+            ),
+            (
+                "GET",
+                diff,
+                vec![("a", bad.as_str())],
+                "",
+                409,
+                "SNAPSHOT_CORRUPT",
+            ),
+            (
+                "GET",
+                diff,
+                vec![("a", file.as_str()), ("move_tolerance", "far")],
+                "",
+                400,
+                "invalid_request",
+            ),
+            ("GET", diff, vec![], "", 400, "invalid_request"),
+        ] {
+            let (status, answer) = call(method, path, &query, body);
+            let what = format!("{method} {path}?{query:?} {answer}");
+            assert_eq!(status, expected_status, "{what}");
+            assert_eq!(answer["code"], code, "{what}");
+        }
+        assert!(!std::path::Path::new(&missing).exists());
+
+        for (code, expected_status) in [
+            ("SNAPSHOT_NOT_FOUND", 404),
+            ("SNAPSHOT_IMMUTABLE", 409),
+            ("SNAPSHOT_CORRUPT", 409),
+            ("INDEX_NO_PROJECT_DIR", 409),
+            ("SNAPSHOT_FORMAT_INVALID", 400),
+            ("SNAPSHOT_VERSION_UNSUPPORTED", 400),
+            ("SNAPSHOT_REASON_TOO_LONG", 400),
+            ("DIFF_SAME_SNAPSHOT", 400),
+            ("SNAPSHOT_IO_ERROR", 500),
+        ] {
+            assert_eq!(
+                map_status(json!({"ok": false, "code": code}), false),
+                expected_status,
+                "{code}"
+            );
+        }
+
+        let document: Value = serde_json::from_str(include_str!("rest_openapi.json"))
+            .expect("REST OpenAPI document parses");
+        let answered = ["200", "400", "404", "409", "500"];
+        for (path, method, statuses) in [
+            (
+                "/api/v1/pid/snapshots",
+                "get",
+                &["200", "400", "409", "500"][..],
+            ),
+            (
+                "/api/v1/pid/snapshots",
+                "post",
+                &["201", "400", "409", "500"],
+            ),
+            ("/api/v1/pid/snapshots/{seq}", "get", &answered),
+            ("/api/v1/pid/snapshots/{seq}/export", "post", &answered),
+            ("/api/v1/pid/diff", "get", &answered),
+        ] {
+            for status in statuses {
+                assert!(
+                    document["paths"][path][method]["responses"][status].is_object(),
+                    "missing {status} response for {method} {path}"
+                );
+            }
+        }
+    }
+
+    /// The verify-and-deliver panel's state is a read: `GET
+    /// /api/v1/pid/verify-panel`, with `limit` and `offset` passed on as
+    /// numbers when they are numbers and as written otherwise, for the op to
+    /// refuse with a 400. It is in the OpenAPI document, and over the wire it
+    /// answers for a drawing whose panel was never shown.
+    #[test]
+    fn pid_verify_panel_rest_route_and_status_codes() {
+        let get = |query: &[(&str, &str)]| {
+            let mut asked = request("GET", "/api/v1/pid/verify-panel", "");
+            asked.query = query
+                .iter()
+                .map(|&(key, value)| (key.into(), value.into()))
+                .collect();
+            asked
+        };
+        let read = |query: &[(&str, &str)]| {
+            let planned = plan("GET", &["pid", "verify-panel"], &get(query));
+            match planned {
+                Plan::Run { request, created } => {
+                    assert_eq!(created, 200);
+                    request
+                }
+                _ => panic!("GET /api/v1/pid/verify-panel is not a read"),
+            }
+        };
+        assert_eq!(read(&[]), json!({"protocol": 1, "op": "pid_verify_panel"}));
+        assert_eq!(
+            read(&[("limit", "50"), ("offset", "100")]),
+            json!({"protocol": 1, "op": "pid_verify_panel", "limit": 50, "offset": 100})
+        );
+        assert_eq!(
+            read(&[("limit", "many")]),
+            json!({"protocol": 1, "op": "pid_verify_panel", "limit": "many"})
+        );
+        let document: Value = serde_json::from_str(include_str!("rest_openapi.json"))
+            .expect("REST OpenAPI document parses");
+        let described = &document["paths"]["/api/v1/pid/verify-panel"]["get"];
+        for status in ["200", "400"] {
+            assert!(
+                described["responses"][status].is_object(),
+                "missing {status} response for GET /api/v1/pid/verify-panel"
+            );
+        }
+        let named: Vec<&str> = described["parameters"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|parameter| parameter["name"].as_str())
+            .collect();
+        assert_eq!(named, ["limit", "offset"]);
+
+        let mut app = serve_app(false);
+        let mut document_id: Option<u64> = None;
+        let mut counter: u64 = 0;
+        let (status, body) = route(&mut app, &get(&[]), &mut document_id, &mut counter);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["visible"], false, "{body}");
+        assert_eq!(body["tab"], "check", "{body}");
+        assert_eq!(body["check"]["rows"], json!([]), "{body}");
+        let (status, body) = route(
+            &mut app,
+            &get(&[("limit", "0")]),
+            &mut document_id,
+            &mut counter,
+        );
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(body["code"], "invalid_request", "{body}");
+    }
+
+    /// The panel is pressed through the generic `POST /api/v1/action`
+    /// passthrough (panel spec §3.3). A grey button conflicts with the panel
+    /// as it is (409), a row not in its list is not found (404), and a key
+    /// it does not have is a bad request (400). Over the wire, the tab an
+    /// action turned is the tab the panel state reads.
+    #[test]
+    fn pid_verify_action_rest_statuses() {
+        for (code, status) in [
+            ("PANEL_ACTION_UNAVAILABLE", 409),
+            ("PANEL_ROW_NOT_FOUND", 404),
+            ("invalid_value", 400),
+        ] {
+            let refused = json!({"ok": false, "status": "failed", "code": code});
+            assert_eq!(map_status(refused, false), status, "{code}");
+        }
+        let mut app = serve_app(false);
+        let mut document_id: Option<u64> = None;
+        let mut counter: u64 = 0;
+        let doc = app.automation_op(r#"{"protocol":1,"op":"state"}"#)["document_id"].clone();
+        let press = |value: &str| {
+            let body = json!({"document_id": doc, "name": "pid_verify", "value": value});
+            request("POST", "/api/v1/action", &body.to_string())
+        };
+        let (status, body) = route(&mut app, &press("tab=bom"), &mut document_id, &mut counter);
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = route(
+            &mut app,
+            &request("GET", "/api/v1/pid/verify-panel", ""),
+            &mut document_id,
+            &mut counter,
+        );
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["tab"], "bom", "{body}");
+        let (status, body) = route(
+            &mut app,
+            &press("tab=report"),
+            &mut document_id,
+            &mut counter,
+        );
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(body["code"], "invalid_value", "{body}");
     }
 
     /// `ready` must not advertise the welcome (Start) tab: that tab answers

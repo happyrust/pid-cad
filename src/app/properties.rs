@@ -2261,6 +2261,7 @@ impl OpenCADStudio {
         sections.extend(crate::app::commands::pidprops::pid_author_section(
             &self.tabs[i].scene.document,
             handle,
+            self.pid_verify_highlighted(i, handle),
         ));
         if let document::EntityType::Ole2Frame(ole) = entity {
             self.fill_ole_rows(i, handle, ole, &mut sections);
@@ -2435,6 +2436,8 @@ impl OpenCADStudio {
         // The P&ID editor's inspector keeps what is typed in a row only for
         // the object that stays selected.
         super::pid_shell::editor::selection_refreshed(self);
+        // So do the rows a clicked rule-check result highlights.
+        self.pid_verify_highlight_follow();
         if !crate::entities::object_data::cache_is_prepared(&self.tabs[i].scene.object_data_cache) {
             self.tabs[i].scene.object_data_cache =
                 crate::entities::object_data::build_cache(&self.tabs[i].scene.document);

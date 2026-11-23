@@ -1310,6 +1310,7 @@ impl OpenCADStudio {
         if self.tabs[i].active_cmd.is_none() {
             self.block_palette.placing = None;
         }
+        self.sync_pid_verify_view();
         self.control_settle();
         self.sync_spacemouse();
         task
@@ -1563,6 +1564,7 @@ impl OpenCADStudio {
             }
             Message::CollabClaim { tag, claim } => self.on_collab_claim(&tag, claim),
             Message::PidCollab(m) => self.on_pid_collab(m),
+            Message::PidVerify(m) => self.on_pid_verify(m),
             Message::PidShell(m) => self.on_pid_shell(m),
             #[cfg(target_arch = "wasm32")]
             Message::PollWebControl => {

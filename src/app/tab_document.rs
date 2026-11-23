@@ -423,6 +423,20 @@ pub(super) struct DocumentTab {
     /// under a name of its own.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) pid_symbol: Option<super::commands::pidbackup::symbol_tab::SymbolTab>,
+    /// What PIDCHECK last found on this drawing (`commands::piddrc`). Kept in
+    /// memory only, never written into the drawing (`SPEC-pid-drc.md` §4.1).
+    pub(super) pid_check: Option<super::commands::piddrc::Checked>,
+    /// The bill of materials the verify panel last made of this drawing
+    /// (`commands::pidverify`), or why it did not come out. Kept in memory
+    /// only, as the check is.
+    pub(super) pid_bom: Option<super::commands::pidverify::PanelBom>,
+    /// This drawing's numbered snapshots as the verify panel last read them,
+    /// and the diff it made last (`commands::pidverify`). In memory only.
+    pub(super) pid_snapshots: super::commands::pidverify::PanelSnapshots,
+    /// Its publish records, the gates and the packages verified, as the
+    /// verify panel last worked them out (`commands::pidverify`). In memory
+    /// only.
+    pub(super) pid_publish: super::commands::pidverify::PanelPublish,
     /// Model-space corners of the last crossing window drawn with no command
     /// running: STRETCH on that selection stretches through it (#1068).
     pub(super) last_crossing_window: Option<([f64; 2], [f64; 2])>,
@@ -975,6 +989,10 @@ impl DocumentTab {
             pid_legend: None,
             #[cfg(not(target_arch = "wasm32"))]
             pid_symbol: None,
+            pid_check: None,
+            pid_bom: None,
+            pid_snapshots: Default::default(),
+            pid_publish: Default::default(),
             last_crossing_window: None,
             recent_colors: Vec::new(),
             layer_walk: None,

@@ -64,8 +64,29 @@ const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 /// facade and its whole-replacement write (`pid_masterdata_set`) execute.
 /// The P&ID project-index reads (`pid_summary`, and `pid_index` with `tag`
 /// and `type_code`) joined the read facade and `pid_locate` execute.
+/// The P&ID rule-check reads (`pid_check` with `scope`, `pbs`, `cross_drawing`
+/// and `include_waived`, and `pid_check_rules`) joined the read facade and
+/// the pack and waiver writes (`pid_check_rules_set`, `pid_check_waive`,
+/// `pid_check_unwaive`) execute.
+/// The P&ID bill of materials (`pid_bom` with `scope` and `pbs`) joined the
+/// read facade and writing it to a file (`pid_bom_export`) execute.
+/// The P&ID snapshot reads (`pid_snapshots`, `pid_snapshot` with `seq`, and
+/// `pid_diff` with `a`, `b` and `move_tolerance`) joined the read facade and
+/// saving and copying snapshots (`pid_snapshot_save`, `pid_snapshot_export`)
+/// execute.
+/// The bill of materials of a numbered snapshot (`snapshot` on `pid_bom` and
+/// `pid_bom_export`) joined both facades.
+/// The P&ID publishing reads (`pid_publish_check` with `dir`, `rev` and
+/// `allow_offline`, `pid_publications` with `dir`, and `pid_publish_verify`
+/// with `path`) joined the read facade and publishing a revision package
+/// (`pid_publish`) execute; execute op descriptions were shortened to keep
+/// the schema under its size limit.
+/// The verify-and-deliver panel's state (`pid_verify_panel`) joined the read
+/// facade, and the read facade's `offset` and `limit` say how it pages.
+/// The verify-and-deliver panel's buttons (`pid_verify`) joined the action
+/// names of execute's `action`.
 #[cfg(test)]
-const TOOL_SCHEMA_DIGEST: &str = "d5a85cb18f22d881ed5e4153cf53008d11160f23456122ab53e294eb0aa3954b";
+const TOOL_SCHEMA_DIGEST: &str = "b11922060947dd16ab4e98105695e2a7b46c673a34ec32b8dfdbf0b09a80b0ce";
 const MAX_REQUEST: usize = 1_048_576;
 const MAX_RESPONSE: u64 = 16 * 1024 * 1024;
 const CACHE_TTL_MS: u64 = 3_600_000;
@@ -95,6 +116,16 @@ const READ_OPS: &[&str] = &[
     "pid_masterdata",
     "pid_summary",
     "pid_index",
+    "pid_check",
+    "pid_check_rules",
+    "pid_bom",
+    "pid_snapshots",
+    "pid_snapshot",
+    "pid_diff",
+    "pid_publish_check",
+    "pid_publications",
+    "pid_publish_verify",
+    "pid_verify_panel",
     "snap",
     "grips",
     "history",
@@ -168,6 +199,13 @@ const EXECUTE_OPS: &[&str] = &[
     "page_setup_set",
     "pid_masterdata_set",
     "pid_locate",
+    "pid_check_rules_set",
+    "pid_check_waive",
+    "pid_check_unwaive",
+    "pid_bom_export",
+    "pid_snapshot_save",
+    "pid_snapshot_export",
+    "pid_publish",
     "file_identity",
     "save",
     "save_verified",
@@ -2579,7 +2617,7 @@ pub(crate) fn tool_definitions() -> Value {
         {
             "name":"ocs_read",
             "description":"Use entity_schema with parameters.type for creation fields/examples; omit type to list. Use validate with parameters.request to check an execute request without running it (no live document checks). Use guide with parameters.name to read workflow, architecture, capture or batch-bindings guidance (omit name to list). Discover capabilities and record schemas, or read state, P&ID recognition, complete database records, command manifests, entities, blocks (semantic block instances with attributes, definition tags and dynamic properties), properties, kernel measurements and spatial relationships, history, events or operation status from a live OCS session. Use batch_result with parameters.request_id to retrieve retained batch details without executing steps; available only in the originating MCP connection, for up to 64 retained batches per session.",
-            "inputSchema":{"type":"object","properties":{"ocs_session_id":{"type":"string","minLength":1,"description":"Value of session_id returned by ocs_sessions."},"op":{"type":"string","enum":READ_OPS,"default":"state"},"parameters":{"type":"object","description":"Operation-specific filters.","properties":{"layout":{"type":"string","minLength":1,"description":"Layout name for op: page_setup_get."},"request":{"type":"object","description":"Execute request to preflight without dispatch. request_id may be omitted. Batch bindings are checked structurally; result-dependent values require execution."},"name":{"type":"string","description":"Command name, block name/glob, or record name."},"names":{"type":"array","items":{"type":"string"},"description":"Block name or wildcard glob filters (e.g. ['*'], ['DOOR*']) for op: blocks."},"extract_attributes":{"type":"boolean","default":true,"description":"Extract ATTRIB values, ATTDEF defaults, and visible definition text tags (e.g. TAG, DIMS) for op: blocks."},"extract_dynamic_properties":{"type":"boolean","default":true,"description":"Extract dynamic block parameters, visibility states, and lookup values for op: blocks."},"include_anonymous":{"type":"boolean","default":false,"description":"Include unlinked internal anonymous blocks (*U..., *D..., *T...) in op: blocks."},"search":{"type":"string","description":"Case-insensitive command or record-type search."},"what":{"type":"string","enum":["recognise","report"],"description":"For pid_legend: return structured recognition, optionally with report lines."},"usage":{"type":"boolean","default":false,"description":"For pid_masterdata: also count, per master-data entry, the objects on the drawing that use it."},"tag":{"type":"string","minLength":1,"description":"For pid_index: also list every place in the project this tag is on (places); case-insensitive."},"type_code":{"type":"string","minLength":1,"description":"For pid_index with tag: only objects of this type code."},"find":{"type":"string","description":"Text query string for text_search."},"match_case":{"type":"boolean","default":false,"description":"Case-sensitive text search."},"whole_word":{"type":"boolean","default":false,"description":"Match only whole words."},"ignore_accents":{"type":"boolean","description":"Ignore accents/diacritics in text (defaults to true when match_case is false)."},"scope":{"type":"string","enum":["all","active_space","blocks"],"default":"all","description":"Text search scope."},"system_spellcheck":{"type":"boolean","default":false,"description":"Use native OS spell-checker (Windows, macOS, Linux)."},"language":{"type":"string","description":"Language tag for spell-checker (e.g. 'fr-FR', 'en-US', 'de-DE', 'es-ES')."},"suggest":{"type":"boolean","default":true,"description":"Include suggested corrections for misspelled words."},"check_terms":{"type":"array","items":{"type":"string"},"description":"List of terms or suspect misspellings to flag in text_audit."},"dictionary":{"type":"array","items":{"type":"string"},"description":"Known valid words for text_audit dictionary check."},"pairs":{"type":"array","description":"Find/replace pairs for dry-run simulation in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"dry_run_pairs":{"type":"array","description":"Alias for pairs in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"document_id":{"type":"integer","minimum":0},"path":{"type":"string","description":"Optional intended output path for audit; extension determines target format."},"target_format":{"type":"string","enum":["dwg","dxf"],"description":"Intended output format for audit."},"target_version":{"type":"string","enum":["R14","2000","2004","2007","2010","2013","2018","AC1014","AC1015","AC1018","AC1021","AC1024","AC1027","AC1032"],"description":"Intended CAD output version for audit."},"collection":{"type":"string","description":"Record collection, all for records, or omit to discover collections and schema types."},"handle":{"type":"string"},"handles":{"type":"array","items":{"type":"string"},"description":"Exact entity or record handles."},"type":{"type":"string","description":"Entity or record type filter; for record_schema, returns its complete type graph and writable field paths."},"layer":{"type":"string","description":"Layer name filter for query; * and ? are wildcards."},"xdata_app":{"type":"string","description":"Only entities carrying XDATA of this application (query)."},"detail":{"type":"string","enum":["summary","geometry","full"],"default":"geometry","description":"Entity detail returned by query."},"fields":{"type":"array","items":{"type":"string"},"description":"Return only these entity fields plus handle."},"paths":{"type":"array","items":{"type":"string"},"description":"Project RFC 6901 JSON Pointer paths relative to record.properties."},"where":{"type":"array","description":"All property filters must match.","items":{"type":"object","properties":{"path":{"type":"string"},"op":{"type":"string","enum":["eq","ne","lt","lte","gt","gte","contains","starts_with","ends_with","in","exists","not_exists"],"default":"eq"},"value":{}},"required":["path"],"additionalProperties":false}},"near":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Rank planar curves by exact kernel distance to this world XY point."},"point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"World point whose object snap the snap op reports."},"from":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Base point for perpendicular and tangent snaps (snap op)."},"contains_point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Return closed planar curves containing this world XY point."},"bounds":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Filter entities whose world XY bounds overlap [min_x,min_y,max_x,max_y]."},"intersections":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":2,"description":"Return exact kernel intersections between two planar curve handles."},"after":{"type":"integer","minimum":0,"description":"Event cursor."},"request_id":{"type":"string","description":"Operation id to query."},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":10000}},"additionalProperties":false}},"anyOf":[{"required":["ocs_session_id"]},{"required":["op"],"properties":{"op":{"enum":["guide","entity_schema","validate"]}}}],"additionalProperties":false},
+            "inputSchema":{"type":"object","properties":{"ocs_session_id":{"type":"string","minLength":1,"description":"Value of session_id returned by ocs_sessions."},"op":{"type":"string","enum":READ_OPS,"default":"state"},"parameters":{"type":"object","description":"Operation-specific filters.","properties":{"layout":{"type":"string","minLength":1,"description":"Layout name for op: page_setup_get."},"request":{"type":"object","description":"Execute request to preflight without dispatch. request_id may be omitted. Batch bindings are checked structurally; result-dependent values require execution."},"name":{"type":"string","description":"Command name, block name/glob, or record name."},"names":{"type":"array","items":{"type":"string"},"description":"Block name or wildcard glob filters (e.g. ['*'], ['DOOR*']) for op: blocks."},"extract_attributes":{"type":"boolean","default":true,"description":"Extract ATTRIB values, ATTDEF defaults, and visible definition text tags (e.g. TAG, DIMS) for op: blocks."},"extract_dynamic_properties":{"type":"boolean","default":true,"description":"Extract dynamic block parameters, visibility states, and lookup values for op: blocks."},"include_anonymous":{"type":"boolean","default":false,"description":"Include unlinked internal anonymous blocks (*U..., *D..., *T...) in op: blocks."},"search":{"type":"string","description":"Case-insensitive command or record-type search."},"what":{"type":"string","enum":["recognise","report"],"description":"For pid_legend: return structured recognition, optionally with report lines."},"usage":{"type":"boolean","default":false,"description":"For pid_masterdata: also count, per master-data entry, the objects on the drawing that use it."},"tag":{"type":"string","minLength":1,"description":"For pid_index: also list every place in the project this tag is on (places); case-insensitive."},"type_code":{"type":"string","minLength":1,"description":"For pid_index with tag: only objects of this type code."},"pbs":{"type":"string","minLength":1,"description":"For pid_check and pid_bom with scope pbs: the PBS node whose drawings are checked or counted, its subtree included."},"snapshot":{"type":"integer","minimum":1,"description":"For pid_bom: count this numbered snapshot of the current drawing instead; scope drawing only."},"cross_drawing":{"type":"boolean","default":false,"description":"For pid_check of the drawing: also run the project rules, reporting this drawing's results only."},"include_waived":{"type":"boolean","default":true,"description":"For pid_check: false leaves waived results out of results; the counts still include them."},"seq":{"type":"integer","minimum":1,"description":"For pid_snapshot: which numbered snapshot of the current drawing to read whole."},"a":{"anyOf":[{"type":"integer","minimum":1},{"type":"string","minLength":1}],"description":"For pid_diff: the old side, a snapshot sequence number, a snapshot file (a relative path starts from the saved drawing's folder) or live (the drawing as it is now)."},"b":{"anyOf":[{"type":"integer","minimum":1},{"type":"string","minLength":1}],"description":"For pid_diff: the new side, written like a; live when omitted."},"move_tolerance":{"type":"number","minimum":0,"description":"For pid_diff: a position change no larger than this is not a change; 0.001 when omitted."},"dir":{"type":"string","minLength":1,"description":"For pid_publish_check and pid_publications: the target folder (a relative path starts from the saved drawing's folder); pid-publish when omitted."},"rev":{"type":"integer","minimum":1,"description":"For pid_publish_check: the revision to check; the next when omitted."},"allow_offline":{"type":"boolean","default":false,"description":"For pid_publish_check: let a drawing with a sync record publish while not connected and caught up."},"find":{"type":"string","description":"Text query string for text_search."},"match_case":{"type":"boolean","default":false,"description":"Case-sensitive text search."},"whole_word":{"type":"boolean","default":false,"description":"Match only whole words."},"ignore_accents":{"type":"boolean","description":"Ignore accents/diacritics in text (defaults to true when match_case is false)."},"scope":{"type":"string","enum":["all","active_space","blocks","drawing","pbs","project"],"description":"text_search: all (the default), active_space or blocks. pid_check and pid_bom: drawing (the default), pbs with pbs, or project."},"system_spellcheck":{"type":"boolean","default":false,"description":"Use native OS spell-checker (Windows, macOS, Linux)."},"language":{"type":"string","description":"Language tag for spell-checker (e.g. 'fr-FR', 'en-US', 'de-DE', 'es-ES')."},"suggest":{"type":"boolean","default":true,"description":"Include suggested corrections for misspelled words."},"check_terms":{"type":"array","items":{"type":"string"},"description":"List of terms or suspect misspellings to flag in text_audit."},"dictionary":{"type":"array","items":{"type":"string"},"description":"Known valid words for text_audit dictionary check."},"pairs":{"type":"array","description":"Find/replace pairs for dry-run simulation in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"dry_run_pairs":{"type":"array","description":"Alias for pairs in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"document_id":{"type":"integer","minimum":0},"path":{"type":"string","description":"For pid_publish_verify: the package folder (a relative path starts from the saved drawing's folder). For audit: optional intended output path; extension determines target format."},"target_format":{"type":"string","enum":["dwg","dxf"],"description":"Intended output format for audit."},"target_version":{"type":"string","enum":["R14","2000","2004","2007","2010","2013","2018","AC1014","AC1015","AC1018","AC1021","AC1024","AC1027","AC1032"],"description":"Intended CAD output version for audit."},"collection":{"type":"string","description":"Record collection, all for records, or omit to discover collections and schema types."},"handle":{"type":"string"},"handles":{"type":"array","items":{"type":"string"},"description":"Exact entity or record handles."},"type":{"type":"string","description":"Entity or record type filter; for record_schema, returns its complete type graph and writable field paths."},"layer":{"type":"string","description":"Layer name filter for query; * and ? are wildcards."},"xdata_app":{"type":"string","description":"Only entities carrying XDATA of this application (query)."},"detail":{"type":"string","enum":["summary","geometry","full"],"default":"geometry","description":"Entity detail returned by query."},"fields":{"type":"array","items":{"type":"string"},"description":"Return only these entity fields plus handle."},"paths":{"type":"array","items":{"type":"string"},"description":"Project RFC 6901 JSON Pointer paths relative to record.properties."},"where":{"type":"array","description":"All property filters must match.","items":{"type":"object","properties":{"path":{"type":"string"},"op":{"type":"string","enum":["eq","ne","lt","lte","gt","gte","contains","starts_with","ends_with","in","exists","not_exists"],"default":"eq"},"value":{}},"required":["path"],"additionalProperties":false}},"near":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Rank planar curves by exact kernel distance to this world XY point."},"point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"World point whose object snap the snap op reports."},"from":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Base point for perpendicular and tangent snaps (snap op)."},"contains_point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Return closed planar curves containing this world XY point."},"bounds":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Filter entities whose world XY bounds overlap [min_x,min_y,max_x,max_y]."},"intersections":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":2,"description":"Return exact kernel intersections between two planar curve handles."},"after":{"type":"integer","minimum":0,"description":"Event cursor."},"request_id":{"type":"string","description":"Operation id to query."},"offset":{"type":"integer","minimum":0,"description":"Items to skip in a paged read; for pid_verify_panel, rows skipped in each list."},"limit":{"type":"integer","minimum":1,"maximum":10000,"description":"Most items in a paged read; for pid_verify_panel, rows per list, 200 when omitted."}},"additionalProperties":false}},"anyOf":[{"required":["ocs_session_id"]},{"required":["op"],"properties":{"op":{"enum":["guide","entity_schema","validate"]}}}],"additionalProperties":false},
             "outputSchema":read_output_schema(),
             "title":"Read OCS state","annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
         },
@@ -5317,9 +5355,9 @@ mod tests {
         assert!(schema["$defs"]["window"].is_object());
         assert!(schema["$defs"]["batch_step"].is_object());
         let json_str = schema.to_string();
-        // Generates cleanly without exponential blowup: compact ~15KB to 45KB
+        // Generates cleanly without exponential blowup: compact ~15KB to 50KB
         assert!(
-            json_str.len() < 45_000,
+            json_str.len() < 50_000,
             "schema size is {} bytes",
             json_str.len()
         );
@@ -5468,6 +5506,336 @@ mod tests {
         assert!(
             crate::mcp_ops::validate_request(&step, true).is_err(),
             "{step}"
+        );
+    }
+
+    /// The P&ID rule-check reads (`pid_check` with `scope`, `pbs`,
+    /// `cross_drawing` and `include_waived`, and `pid_check_rules`) are on
+    /// the read facade; replacing the project pack and adding or taking away
+    /// a waiver are on the execute facade, whose parameters are checked
+    /// before dispatch. A waiver is a batch step like any other edit.
+    #[test]
+    fn pid_check_ops_are_on_the_facades() {
+        assert!(READ_OPS.contains(&"pid_check"));
+        assert!(READ_OPS.contains(&"pid_check_rules"));
+        for op in [
+            "pid_check_rules_set",
+            "pid_check_waive",
+            "pid_check_unwaive",
+        ] {
+            assert!(EXECUTE_OPS.contains(&op), "{op}");
+        }
+        let tools = tool_definitions();
+        let parameters = &tools[1]["inputSchema"]["properties"]["parameters"]["properties"];
+        let scopes = parameters["scope"]["enum"].as_array().expect("scope enum");
+        for scope in ["drawing", "pbs", "project", "all", "active_space", "blocks"] {
+            assert!(scopes.contains(&json!(scope)), "{scope}");
+        }
+        assert_eq!(parameters["pbs"]["type"], "string");
+        assert_eq!(parameters["cross_drawing"]["type"], "boolean");
+        assert_eq!(parameters["include_waived"]["type"], "boolean");
+        for valid in [
+            json!({
+                "op": "pid_check_rules_set",
+                "request_id": "drc-1",
+                "pack": { "version": 1, "rule_set_version": "P1" }
+            }),
+            json!({
+                "op": "pid_check_waive",
+                "request_id": "drc-2",
+                "rule_id": "DR-014",
+                "object_key": "K",
+                "reason": "放空管"
+            }),
+            json!({
+                "op": "pid_check_unwaive",
+                "request_id": "drc-3",
+                "rule_id": "DR-014",
+                "object_key": "K"
+            }),
+        ] {
+            assert!(
+                crate::mcp_ops::validate_request(&valid, false).is_ok(),
+                "{valid}"
+            );
+        }
+        for refused in [
+            json!({ "op": "pid_check_rules_set", "request_id": "drc-4" }),
+            json!({ "op": "pid_check_rules_set", "request_id": "drc-5", "pack": "P1" }),
+            json!({
+                "op": "pid_check_waive",
+                "request_id": "drc-6",
+                "rule_id": "DR-014",
+                "object_key": "K"
+            }),
+            json!({
+                "op": "pid_check_waive",
+                "request_id": "drc-7",
+                "rule_id": 14,
+                "object_key": "K",
+                "reason": "r"
+            }),
+            json!({
+                "op": "pid_check_unwaive",
+                "request_id": "drc-8",
+                "rule_id": "DR-014",
+                "object_key": "K",
+                "reason": "r"
+            }),
+        ] {
+            assert!(
+                crate::mcp_ops::validate_request(&refused, false).is_err(),
+                "{refused}"
+            );
+        }
+        let step = json!({
+            "op": "pid_check_waive",
+            "rule_id": "DR-014",
+            "object_key": "K",
+            "reason": "r"
+        });
+        assert!(
+            crate::mcp_ops::validate_request(&step, true).is_ok(),
+            "{step}"
+        );
+    }
+
+    /// The P&ID bill of materials (`pid_bom`, with `scope`, `pbs` and
+    /// `snapshot`) is on the read facade; writing it to a file on this machine
+    /// (`pid_bom_export`, from a snapshot too) is on the execute facade, whose
+    /// parameters are checked before dispatch.
+    #[test]
+    fn pid_bom_ops_are_on_the_facades() {
+        assert!(READ_OPS.contains(&"pid_bom"));
+        assert!(EXECUTE_OPS.contains(&"pid_bom_export"));
+        let tools = tool_definitions();
+        let parameters = &tools[1]["inputSchema"]["properties"]["parameters"]["properties"];
+        assert_eq!(parameters["snapshot"]["type"], "integer");
+        assert_eq!(parameters["snapshot"]["minimum"], 1);
+        for valid in [
+            json!({ "op": "pid_bom_export", "request_id": "bom-1", "path": "bom.csv" }),
+            json!({
+                "op": "pid_bom_export",
+                "request_id": "bom-2",
+                "path": "bom.xlsx",
+                "scope": "PBS",
+                "pbs": "U-100",
+                "columns": ["位号", "数量"]
+            }),
+            json!({
+                "op": "pid_bom_export",
+                "request_id": "bom-8",
+                "path": "bom.json",
+                "snapshot": 1
+            }),
+        ] {
+            assert!(
+                crate::mcp_ops::validate_request(&valid, false).is_ok(),
+                "{valid}"
+            );
+        }
+        for refused in [
+            json!({ "op": "pid_bom_export", "request_id": "bom-3" }),
+            json!({ "op": "pid_bom_export", "request_id": "bom-4", "path": 7 }),
+            json!({
+                "op": "pid_bom_export",
+                "request_id": "bom-5",
+                "path": "bom.csv",
+                "scope": "everything"
+            }),
+            json!({
+                "op": "pid_bom_export",
+                "request_id": "bom-6",
+                "path": "bom.csv",
+                "columns": "位号"
+            }),
+            json!({
+                "op": "pid_bom_export",
+                "request_id": "bom-7",
+                "path": "bom.csv",
+                "colour": "red"
+            }),
+            json!({
+                "op": "pid_bom_export",
+                "request_id": "bom-9",
+                "path": "bom.csv",
+                "snapshot": "1"
+            }),
+        ] {
+            assert!(
+                crate::mcp_ops::validate_request(&refused, false).is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    /// The P&ID snapshot reads (`pid_snapshots`, `pid_snapshot` with `seq`,
+    /// and `pid_diff` with `a`, `b` and `move_tolerance`) are on the read
+    /// facade; saving a snapshot and copying one out to a file on this machine
+    /// are on the execute facade, whose parameters are checked before
+    /// dispatch. Neither changes the drawing, so both may be batch steps.
+    #[test]
+    fn pid_snapshot_and_pid_diff_ops_are_on_the_facades() {
+        for op in ["pid_snapshots", "pid_snapshot", "pid_diff"] {
+            assert!(READ_OPS.contains(&op), "{op}");
+        }
+        for op in ["pid_snapshot_save", "pid_snapshot_export"] {
+            assert!(EXECUTE_OPS.contains(&op), "{op}");
+        }
+        let tools = tool_definitions();
+        let parameters = &tools[1]["inputSchema"]["properties"]["parameters"]["properties"];
+        assert_eq!(parameters["seq"]["type"], "integer");
+        assert_eq!(parameters["seq"]["minimum"], 1);
+        for side in ["a", "b"] {
+            let kinds: Vec<&Value> = parameters[side]["anyOf"]
+                .as_array()
+                .expect("a sequence number or a file")
+                .iter()
+                .map(|kind| &kind["type"])
+                .collect();
+            assert_eq!(kinds, [&json!("integer"), &json!("string")], "{side}");
+        }
+        assert_eq!(parameters["move_tolerance"]["type"], "number");
+        assert_eq!(parameters["move_tolerance"]["minimum"], 0);
+        for valid in [
+            json!({ "op": "pid_snapshot_save", "request_id": "snap-1" }),
+            json!({
+                "op": "pid_snapshot_save",
+                "request_id": "snap-2",
+                "reason": "送审前",
+                "path": "spare.json"
+            }),
+            json!({
+                "op": "pid_snapshot_export",
+                "request_id": "snap-3",
+                "seq": 1,
+                "path": "copy.json"
+            }),
+        ] {
+            assert!(
+                crate::mcp_ops::validate_request(&valid, false).is_ok(),
+                "{valid}"
+            );
+        }
+        for refused in [
+            json!({ "op": "pid_snapshot_save", "request_id": "snap-4", "reason": 7 }),
+            json!({ "op": "pid_snapshot_save", "request_id": "snap-5", "seq": 1 }),
+            json!({ "op": "pid_snapshot_export", "request_id": "snap-6", "path": "copy.json" }),
+            json!({ "op": "pid_snapshot_export", "request_id": "snap-7", "seq": 1 }),
+            json!({
+                "op": "pid_snapshot_export",
+                "request_id": "snap-8",
+                "seq": "1",
+                "path": "copy.json"
+            }),
+        ] {
+            assert!(
+                crate::mcp_ops::validate_request(&refused, false).is_err(),
+                "{refused}"
+            );
+        }
+        for step in [
+            json!({ "op": "pid_snapshot_save", "reason": "r" }),
+            json!({ "op": "pid_snapshot_export", "seq": 1, "path": "copy.json" }),
+        ] {
+            assert!(
+                crate::mcp_ops::validate_request(&step, true).is_ok(),
+                "{step}"
+            );
+        }
+    }
+
+    /// The P&ID publish reads (`pid_publish_check` with `dir`, `rev` and
+    /// `allow_offline`, `pid_publications` with `dir`, `pid_publish_verify`
+    /// with `path`) are on the read facade; publishing (`pid_publish`) is on
+    /// the execute facade, whose parameters are checked before dispatch. It
+    /// may answer `scanning`, so it is not a batch step. Its revision is
+    /// `rev`: `revision` is the envelope's.
+    #[test]
+    fn pid_publish_ops_are_on_the_facades() {
+        for op in [
+            "pid_publish_check",
+            "pid_publications",
+            "pid_publish_verify",
+        ] {
+            assert!(READ_OPS.contains(&op), "{op}");
+        }
+        assert!(EXECUTE_OPS.contains(&"pid_publish"));
+        let publish = crate::mcp_ops::find_op("pid_publish").expect("pid_publish");
+        assert!(!publish.batchable);
+        let tools = tool_definitions();
+        let parameters = &tools[1]["inputSchema"]["properties"]["parameters"]["properties"];
+        assert_eq!(parameters["dir"]["type"], "string");
+        assert_eq!(parameters["rev"]["type"], "integer");
+        assert_eq!(parameters["rev"]["minimum"], 1);
+        assert_eq!(parameters["allow_offline"]["type"], "boolean");
+        let path = parameters["path"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(path.contains("pid_publish_verify"), "{path}");
+        for valid in [
+            json!({ "op": "pid_publish", "request_id": "pub-1" }),
+            json!({
+                "op": "pid_publish",
+                "request_id": "pub-2",
+                "dir": "out",
+                "rev": 3,
+                "allow_offline": true,
+                "plot": { "paper": "A3", "orientation": "Portrait" }
+            }),
+        ] {
+            assert!(
+                crate::mcp_ops::validate_request(&valid, false).is_ok(),
+                "{valid}"
+            );
+        }
+        for refused in [
+            json!({ "op": "pid_publish", "request_id": "pub-3", "rev": "3" }),
+            json!({ "op": "pid_publish", "request_id": "pub-4", "dir": 7 }),
+            json!({ "op": "pid_publish", "request_id": "pub-5", "plot": "A3" }),
+            json!({ "op": "pid_publish", "request_id": "pub-6", "allow_offline": "yes" }),
+            json!({ "op": "pid_publish", "request_id": "pub-7", "colour": "red" }),
+        ] {
+            assert!(
+                crate::mcp_ops::validate_request(&refused, false).is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    /// The verify-and-deliver panel's state (`pid_verify_panel`) is on the
+    /// read facade. It pages its lists by the facade's `limit` and `offset`,
+    /// whose descriptions say so.
+    #[test]
+    fn pid_verify_panel_is_on_the_read_facade() {
+        assert!(READ_OPS.contains(&"pid_verify_panel"));
+        assert!(!EXECUTE_OPS.contains(&"pid_verify_panel"));
+        let tools = tool_definitions();
+        let parameters = &tools[1]["inputSchema"]["properties"]["parameters"]["properties"];
+        for key in ["limit", "offset"] {
+            let said = parameters[key]["description"].as_str().unwrap_or_default();
+            assert!(said.contains("pid_verify_panel"), "{key}: {said}");
+        }
+        assert_eq!(parameters["limit"]["minimum"], 1);
+        assert_eq!(parameters["offset"]["minimum"], 0);
+    }
+
+    /// The verify-and-deliver panel is pressed through execute's `action`
+    /// with `name` `pid_verify` (panel spec §3.3), so that name is among the
+    /// action names the schema lists and the validator takes.
+    #[test]
+    fn pid_verify_is_an_action_on_the_execute_facade() {
+        assert!(EXECUTE_OPS.contains(&"action"));
+        assert!(crate::app::automation_action_names().contains(&"pid_verify"));
+        let press = json!({
+            "op": "action",
+            "request_id": "pid-verify-1",
+            "name": "pid_verify",
+            "value": "tab=bom"
+        });
+        assert!(
+            crate::mcp_ops::validate_request(&press, false).is_ok(),
+            "{press}"
         );
     }
 

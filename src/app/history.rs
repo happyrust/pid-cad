@@ -1749,6 +1749,9 @@ impl OpenCADStudio {
         // bits and the stored record, neither of which is a layer-table
         // change; the sheet-layer view re-reads the document either way.
         self.sync_pid_view(i);
+        // Rule-check waivers are a drawing record too; the check results kept
+        // beside the drawing are patched to match, not re-run.
+        self.pidcheck_follow_waivers(i);
         // Layer groups live in the drawing's objects, outside the table.
         let groups = self.layer_group_names(i);
         self.tabs[i].layers.set_groups(groups);
