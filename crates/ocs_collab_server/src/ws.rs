@@ -2852,6 +2852,14 @@ mod tests {
                 holder_display_name: None,
             }]
         );
+        assert_eq!(
+            store_of(&state)
+                .claims_on_drawing("PID-1101")
+                .expect("claims")
+                .len(),
+            1,
+            "a refused claim does not enter a queue (#88)"
+        );
     }
 
     #[tokio::test]
