@@ -141,12 +141,16 @@ fn relay(room: &mut Room, from: &mut OpenCADStudio, to: &mut OpenCADStudio, seen
             op_id: own[first + index].clone(),
             revision,
             changes: changes.clone(),
+            user_id: None,
+            display_name: None,
         });
         from.apply_remote_changes();
         to.collab.apply(CollabEvent::OpApplied {
             op_id: format!("op-of-{session}-{revision}"),
             revision,
             changes,
+            user_id: None,
+            display_name: None,
         });
         to.apply_remote_changes();
     }

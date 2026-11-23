@@ -732,9 +732,16 @@ fn describe_event(event: &CollabEvent) -> String {
         CollabEvent::AlignRefused { code, message } => {
             format!("welcome.align_refused code={code} reason={message}")
         }
+        CollabEvent::SelfDisplayName(name) => format!("welcome.display_name name={name}"),
         CollabEvent::PeerJoined(peer) => format!(
             "peer_joined session={} user={}",
             peer.session_id, peer.user_id
+        ),
+        CollabEvent::PeerDisconnected(peer) => format!(
+            "peer_disconnected session={} user={} hold_until={}",
+            peer.session_id,
+            peer.user_id,
+            peer.hold_until.unwrap_or(0)
         ),
         CollabEvent::PeerLeft { session_id } => format!("peer_left session={session_id}"),
         CollabEvent::ClaimGranted { tag } => format!("claim_granted tag={tag}"),
@@ -766,6 +773,7 @@ fn describe_event(event: &CollabEvent) -> String {
             op_id,
             revision,
             changes,
+            ..
         } => format!(
             "op_applied op_id={op_id} revision={revision} changes={}",
             changes.len()
@@ -2227,6 +2235,8 @@ mod tests {
             op_id: "op-peer".to_owned(),
             revision: 1,
             changes: Vec::new(),
+            user_id: None,
+            display_name: None,
         };
         let waiting = std::thread::spawn(move || emit(&mut sender, &link, change));
         std::thread::sleep(Duration::from_millis(60));
@@ -2260,6 +2270,8 @@ mod tests {
             op_id: "op-peer".to_owned(),
             revision: 1,
             changes: Vec::new(),
+            user_id: None,
+            display_name: None,
         };
         let waiting = std::thread::spawn(move || emit(&mut sender, &link, change));
         std::thread::sleep(Duration::from_millis(30));
@@ -2319,6 +2331,8 @@ mod tests {
             op_id: "op-peer".to_owned(),
             revision: 1,
             changes: Vec::new(),
+            user_id: None,
+            display_name: None,
         };
         let waiting = {
             let link = link.clone();

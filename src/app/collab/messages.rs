@@ -71,8 +71,12 @@ pub(super) fn read(text: &str) -> Reading {
             repo_id,
             replay_from,
             align_refused,
+            display_name,
             ..
         } => {
+            if !display_name.is_empty() {
+                before.push(CollabEvent::SelfDisplayName(display_name));
+            }
             // Said first: the session is then taken as not aligned, or at
             // the revision its drawing has with what it missed still to
             // come, before anything of the queue goes out.
@@ -88,6 +92,13 @@ pub(super) fn read(text: &str) -> Reading {
                     .map(|claim| (claim.tag.clone(), claim.expires_at))
                     .collect(),
             ));
+            if let Some(node) = raw_json["effective_node"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+            {
+                after.push(CollabEvent::ReadonlyEffectiveNode { node });
+            }
             Frame::Event(CollabEvent::Connected {
                 session_id,
                 base_revision,
@@ -101,7 +112,9 @@ pub(super) fn read(text: &str) -> Reading {
         }
         ServerMessage::PeerJoined(peer) => Frame::Event(CollabEvent::PeerJoined(peer_info(&peer))),
         ServerMessage::PeerDisconnected(peer) => {
-            Frame::Event(CollabEvent::PeerJoined(peer_info(&peer)))
+            let mut info = peer_info(&peer);
+            info.disconnected = true;
+            Frame::Event(CollabEvent::PeerDisconnected(info))
         }
         ServerMessage::PeerLeft(peer) => Frame::Event(CollabEvent::PeerLeft {
             session_id: peer.session_id,
@@ -110,8 +123,8 @@ pub(super) fn read(text: &str) -> Reading {
             tag,
             session_id,
             user_id,
+            display_name,
             expires_at,
-            ..
         } => {
             let user_id = user_id.filter(|s| !s.is_empty()).or_else(|| {
                 raw_json["user_id"]
@@ -119,14 +132,25 @@ pub(super) fn read(text: &str) -> Reading {
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned)
             });
+            let display_name = display_name.filter(|s| !s.is_empty()).or_else(|| {
+                raw_json["display_name"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            });
             let expires_at = expires_at
                 .filter(|t| *t > 0)
                 .or_else(|| raw_json["expires_at"].as_i64().filter(|t| *t > 0));
-            if !session_id.is_empty() || user_id.is_some() || expires_at.is_some() {
+            if !session_id.is_empty()
+                || user_id.is_some()
+                || display_name.is_some()
+                || expires_at.is_some()
+            {
                 after.push(CollabEvent::ClaimMeta {
                     tag: tag.clone(),
                     session_id,
                     user_id,
+                    display_name,
                     expires_at,
                 });
             }
@@ -149,23 +173,46 @@ pub(super) fn read(text: &str) -> Reading {
             op_id,
             revision,
             changes,
-        } => Frame::Event(CollabEvent::OpApplied {
-            op_id,
-            revision,
-            changes,
-        }),
+            user_id,
+            display_name,
+        } => {
+            let user_id = user_id.filter(|s| !s.is_empty()).or_else(|| {
+                raw_json["user_id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            });
+            let display_name = display_name.filter(|s| !s.is_empty()).or_else(|| {
+                raw_json["display_name"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            });
+            Frame::Event(CollabEvent::OpApplied {
+                op_id,
+                revision,
+                changes,
+                user_id,
+                display_name,
+            })
+        }
         ServerMessage::ReadonlyDowngrade {
             reason,
             holder,
             level,
             code,
+            effective_node,
         } => {
-            if let Some(node) = raw_json["effective_node"]
-                .as_str()
+            if let Some(node) = effective_node
                 .filter(|s| !s.is_empty())
-                .map(str::to_owned)
+                .or_else(|| {
+                    raw_json["effective_node"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                })
             {
-                after.push(CollabEvent::ReadonlyEffectiveNode { node });
+                before.push(CollabEvent::ReadonlyEffectiveNode { node });
             }
             Frame::Event(CollabEvent::ReadonlyDowngrade {
                 reason,
@@ -184,6 +231,7 @@ pub(super) fn read(text: &str) -> Reading {
             level,
             code,
             holder,
+            effective_node,
         } => {
             if writable {
                 Frame::Event(CollabEvent::ServerError {
@@ -191,12 +239,16 @@ pub(super) fn read(text: &str) -> Reading {
                     message: reason,
                 })
             } else {
-                if let Some(node) = raw_json["effective_node"]
-                    .as_str()
+                if let Some(node) = effective_node
                     .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
+                    .or_else(|| {
+                        raw_json["effective_node"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)
+                    })
                 {
-                    after.push(CollabEvent::ReadonlyEffectiveNode { node });
+                    before.push(CollabEvent::ReadonlyEffectiveNode { node });
                 }
                 Frame::Event(CollabEvent::ReadonlyDowngrade {
                     reason,
@@ -300,6 +352,8 @@ fn peer_info(peer: &Peer) -> PeerInfo {
         } else {
             peer.display_name.clone()
         },
+        disconnected: peer.status.as_deref() == Some("disconnected"),
+        hold_until: peer.hold_until,
     }
 }
 
@@ -385,6 +439,7 @@ mod tests {
                 op_id,
                 revision,
                 changes,
+                ..
             }) => {
                 assert_eq!(op_id, "op-1");
                 assert_eq!(revision, 4);
@@ -438,5 +493,69 @@ mod tests {
             Frame::Unreadable(_)
         ));
         assert!(matches!(classify("not json"), Frame::Unreadable(_)));
+    }
+
+    #[test]
+    fn server_client_hook_fields_decode_into_typed_events() {
+        // Welcome.display_name -> SelfDisplayName before Connected.
+        let r = read(
+            r#"{"type":"welcome","session_id":"s-1","base_revision":0,"peers":[],"claims":[],"display_name":"设计甲"}"#,
+        );
+        assert!(matches!(
+            r.before.as_slice(),
+            [CollabEvent::SelfDisplayName(name)] if name == "设计甲"
+        ));
+
+        // PeerDisconnected -> PeerDisconnected with disconnected=true & hold_until.
+        let r = read(
+            r#"{"type":"peer_disconnected","session_id":"s-2","user_id":"u2","display_name":"设计乙","status":"disconnected","hold_until":1700000999}"#,
+        );
+        match r.frame {
+            Frame::Event(CollabEvent::PeerDisconnected(p)) => {
+                assert!(p.disconnected);
+                assert_eq!(p.hold_until, Some(1_700_000_999));
+                assert_eq!(p.display_name, "设计乙");
+            }
+            _ => panic!("peer_disconnected must map to PeerDisconnected"),
+        }
+
+        // ClaimGranted typed user_id/display_name/expires_at -> ClaimMeta.
+        let r = read(
+            r#"{"type":"claim_granted","tag":"P-1001","session_id":"s-2","user_id":"u2","display_name":"设计乙","expires_at":1700000500}"#,
+        );
+        assert!(r.after.iter().any(|ev| matches!(
+            ev,
+            CollabEvent::ClaimMeta {
+                tag,
+                session_id,
+                user_id: Some(uid),
+                display_name: Some(dn),
+                expires_at: Some(1_700_000_500),
+            } if tag == "P-1001" && session_id == "s-2" && uid == "u2" && dn == "设计乙"
+        )));
+
+        // OpApplied typed user_id/display_name.
+        match classify(
+            r#"{"type":"op_applied","op_id":"op-9","revision":2,"changes":[],"user_id":"u1","display_name":"设计甲"}"#,
+        ) {
+            Frame::Event(CollabEvent::OpApplied {
+                user_id,
+                display_name,
+                ..
+            }) => {
+                assert_eq!(user_id.as_deref(), Some("u1"));
+                assert_eq!(display_name.as_deref(), Some("设计甲"));
+            }
+            _ => panic!("op_applied must carry author metadata"),
+        }
+
+        // ReadonlyDowngrade typed effective_node -> ReadonlyEffectiveNode ahead of ReadonlyDowngrade.
+        let r = read(
+            r#"{"type":"readonly_downgrade","reason":"节点拒绝","holder":null,"level":"pbs","code":"PERM_DENIED_PBS","effective_node":"n-area"}"#,
+        );
+        assert!(r.before.iter().any(|ev| matches!(
+            ev,
+            CollabEvent::ReadonlyEffectiveNode { node } if node == "n-area"
+        )));
     }
 }

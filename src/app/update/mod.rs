@@ -1474,18 +1474,19 @@ impl OpenCADStudio {
                         if let Some(apart) = &self.collab.not_aligned {
                             self.command_line.push_warning(&apart.said());
                         }
-                        // Fetch pending conflicts for this drawing on join and
-                        // reconnect (#40), without blocking the UI.
+                        // Fetch pending conflicts & unpaired connector reasons for
+                        // this drawing on join and reconnect (#40, #65), without blocking the UI.
                         let fetch_task = self.fetch_collab_conflicts();
+                        let unpaired_task = self.fetch_collab_unpaired_connectors();
                         // The first live session brings the panel out where the
                         // layout has it (classic mode only; in the P&ID shell
                         // #48 collaboration lives in the Inspector's lower half).
                         if !self.pid_collab_auto_shown {
                             self.pid_collab_auto_shown = true;
                             let panel_task = self.show_pid_collab_panel();
-                            return Task::batch([fetch_task, panel_task]);
+                            return Task::batch([fetch_task, unpaired_task, panel_task]);
                         }
-                        return fetch_task;
+                        return Task::batch([fetch_task, unpaired_task]);
                     }
                     super::collab::CollabEvent::Disconnected { reason, will_retry } => {
                         if was_connected || !*will_retry {
@@ -1507,11 +1508,31 @@ impl OpenCADStudio {
                     }
                     // Not said on a connection held apart: the drawing did
                     // not move.
-                    super::collab::CollabEvent::OpApplied { revision, .. }
-                        if self.collab.not_aligned.is_none() =>
-                    {
+                    super::collab::CollabEvent::OpApplied {
+                        revision, changes, ..
+                    } if self.collab.not_aligned.is_none() => {
                         self.command_line
                             .push_info(&format!("协同：修订已推进到 {revision}"));
+                        let touches_connector = changes.iter().any(|c| {
+                            let is_conn = |v: &serde_json::Value| {
+                                matches!(
+                                    v["kind"].as_str(),
+                                    Some(
+                                        super::collab::connectors::KIND_CREATE_CONNECTOR
+                                            | super::collab::connectors::KIND_DELETE_CONNECTOR
+                                            | super::collab::connectors::KIND_PAIR_CONNECTOR
+                                            | super::collab::broadcast::KIND_DELETE_OBJECT
+                                    )
+                                )
+                            };
+                            is_conn(c)
+                                || c.get("changes")
+                                    .and_then(|arr| arr.as_array())
+                                    .is_some_and(|arr| arr.iter().any(is_conn))
+                        });
+                        if touches_connector {
+                            return self.fetch_collab_unpaired_connectors();
+                        }
                     }
                     // The room neither took the step nor judged it: it stays
                     // queued, and the person is told why.

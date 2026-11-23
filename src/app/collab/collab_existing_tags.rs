@@ -128,6 +128,8 @@ fn a_peers_retag() -> CollabEvent {
         changes: vec![json!({
             "kind": "set_tag", "object_ref": "P-1001", "field": "tag", "value": "P-1009",
         })],
+        user_id: None,
+        display_name: None,
     }
 }
 
@@ -276,6 +278,8 @@ fn a_blank_drawing_that_takes_a_peers_symbol_has_nothing_of_its_own_to_tell() {
             op_id: "op-peer-1".to_owned(),
             revision: 1,
             changes: vec![peers_valve("V-1001")],
+            user_id: None,
+            display_name: None,
         },
     );
     assert_eq!(app.collab.last_apply_error, None);
@@ -673,6 +677,8 @@ fn a_symbol_placed_while_away_keeps_its_tag_when_the_session_is_back() {
             op_id: waiting.op_id.clone(),
             revision: 1,
             changes: vec![taken.broadcast_form(&valve)],
+            user_id: None,
+            display_name: None,
         },
     );
     assert!(app.collab.outbox.is_empty(), "the step is still unanswered");

@@ -24,11 +24,16 @@ impl OpenCADStudio {
         // welcomes), so the row for this session is the panel's own.
         let own = state.session_id.as_ref().map(|_| PeerRow {
             user_id: state.user_id.clone(),
-            display_name: state.user_id.clone(),
+            display_name: if state.display_name.is_empty() {
+                state.user_id.clone()
+            } else {
+                state.display_name.clone()
+            },
             is_self: true,
             // The marker is drawn for a session that lost the edit right,
             // on the row of whoever kept it; that is never its own row.
             is_holder: false,
+            disconnected: false,
         });
         let others = state.peers.iter().map(|peer| PeerRow {
             user_id: peer.user_id.clone(),
@@ -41,6 +46,7 @@ impl OpenCADStudio {
                     .readonly_holder
                     .as_deref()
                     .is_some_and(|holder| holder == peer.session_id),
+            disconnected: peer.disconnected,
         });
         let peers: Vec<PeerRow> = own.into_iter().chain(others).collect();
         let claims: Vec<ClaimRow> = state
@@ -510,7 +516,38 @@ impl OpenCADStudio {
         Task::none()
     }
 
-    /// Apply a finished collaboration query reply on the UI thread (#40, #42, #66).
+    /// Non-blocking fetch of unpaired off-page connectors (`GET /drawing/{id}/unpaired-connectors`, #32/#65).
+    pub(in crate::app) fn fetch_collab_unpaired_connectors(&mut self) -> Task<Message> {
+        let Ok(base_url) = super::query::http_base_from_ws(&self.collab.server_url) else {
+            return Task::none();
+        };
+        let drawing_id = self.collab.drawing_id.trim().to_owned();
+        if drawing_id.is_empty() {
+            return Task::none();
+        }
+        let client = self.collab.query_client();
+        if self.collab.query_client.is_some() {
+            let result = client.fetch_unpaired_connectors(&base_url, &drawing_id);
+            self.on_collab_query_done(super::query::CollabQueryReply::UnpairedConnectors(result));
+            return Task::none();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (tx, rx) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let result = client.fetch_unpaired_connectors(&base_url, &drawing_id);
+                let _ = tx.send(super::query::CollabQueryReply::UnpairedConnectors(result));
+            });
+            Task::future(rx).then(|res| match res {
+                Ok(reply) => Task::done(Message::CollabQueryDone(reply)),
+                Err(_) => Task::none(),
+            })
+        }
+        #[cfg(target_arch = "wasm32")]
+        Task::none()
+    }
+
+    /// Apply a finished collaboration query reply on the UI thread (#40, #42, #65, #66).
     pub(in crate::app) fn on_collab_query_done(
         &mut self,
         reply: super::query::CollabQueryReply,
@@ -535,6 +572,12 @@ impl OpenCADStudio {
                 self.collab.last_query_error = None;
             }
             super::query::CollabQueryReply::AuditHistory { result: Err(err), .. } => {
+                self.collab.last_query_error = Some(err.describe());
+            }
+            super::query::CollabQueryReply::UnpairedConnectors(Ok(items)) => {
+                self.collab.sync_unpaired_connectors(items);
+            }
+            super::query::CollabQueryReply::UnpairedConnectors(Err(err)) => {
                 self.collab.last_query_error = Some(err.describe());
             }
         }
@@ -1008,6 +1051,8 @@ mod tests {
                 session_id: "s-2".to_owned(),
                 user_id: "u2".to_owned(),
                 display_name: "工艺乙".to_owned(),
+                disconnected: false,
+                hold_until: None,
             }],
             claims: vec![("P-1001".to_owned(), "u2".to_owned())],
         });
@@ -1045,6 +1090,8 @@ mod tests {
             session_id: session.to_owned(),
             user_id: user.to_owned(),
             display_name: user.to_owned(),
+            disconnected: false,
+            hold_until: None,
         };
         app.collab.apply(CollabEvent::Connected {
             session_id: "s-2".to_owned(),
@@ -1124,6 +1171,8 @@ mod tests {
                 session_id: "s-9".to_owned(),
                 user_id: "u2".to_owned(),
                 display_name: "u2".to_owned(),
+                disconnected: false,
+                hold_until: None,
             }],
             claims: Vec::new(),
         });

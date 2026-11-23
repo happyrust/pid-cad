@@ -25,6 +25,8 @@ pub struct Denied {
     pub reason: String,
     /// The session holding the edit right, when the refusal is about one.
     pub holder: Option<String>,
+    /// Effective PBS node whose ACL denied write access when `level == Pbs` (#52).
+    pub effective_node: Option<String>,
 }
 
 impl Denied {
@@ -40,6 +42,7 @@ impl Denied {
             holder: self.holder.clone(),
             level: Some(self.level.as_str().to_owned()),
             code: Some(self.code().to_owned()),
+            effective_node: self.effective_node.clone(),
         }
     }
 
@@ -178,10 +181,20 @@ pub async fn write_access(state: &AppState, session: &Session) -> Option<Denied>
             None => "图纸状态为只读".to_owned(),
         },
     };
+    let effective_node = if level == DenialLevel::Pbs {
+        outcome
+            .decision
+            .effective_node_id
+            .clone()
+            .or_else(|| outcome.decision.effective_node_path.last().cloned())
+    } else {
+        None
+    };
     Some(Denied {
         level,
         reason,
         holder,
+        effective_node,
     })
 }
 
@@ -192,5 +205,6 @@ fn viewer(session: &Session) -> Option<Denied> {
         level: DenialLevel::Role,
         reason: "只读会话不能修改图纸".to_owned(),
         holder: None,
+        effective_node: None,
     })
 }

@@ -1695,6 +1695,8 @@ mod tests {
                 "field": "公称直径",
                 "value": "DN80",
             })],
+            user_id: None,
+            display_name: None,
         });
         app.apply_remote_changes();
 
@@ -1750,6 +1752,8 @@ mod tests {
                 "field": "公称直径",
                 "value": "DN80",
             })],
+            user_id: None,
+            display_name: None,
         });
         app.apply_remote_changes();
 
@@ -1814,6 +1818,8 @@ mod tests {
                 "field": "公称直径",
                 "value": "DN80",
             })],
+            user_id: None,
+            display_name: None,
         });
         app.apply_remote_changes();
         assert_eq!(value(&app, run, "公称直径"), "DN80");

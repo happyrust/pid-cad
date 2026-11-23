@@ -466,7 +466,7 @@ pub(crate) struct Object {
     /// how many.
     pub ports: Option<(usize, usize)>,
     /// Page connector metadata if the selected entity is a page connector (#63).
-    pub connector: Option<super::collab_ui::ConnectorInspectorInfo>,
+    pub connector: Option<Box<super::collab_ui::ConnectorInspectorInfo>>,
 }
 
 /// A symbol a `.pid` import placed, as its block reference states it and as
@@ -748,7 +748,8 @@ pub(crate) fn inspected(app: &OpenCADStudio) -> Inspected {
         )
     });
 
-    let connector = super::collab_ui::inspect_connector(app, document, handle, &author);
+    let connector =
+        super::collab_ui::inspect_connector(app, document, handle, &author).map(Box::new);
     let (mut values, _): (BTreeMap<String, String>, _) = split_props(&author.props);
     let mut fields: Vec<(String, String)> = fields_of_kind(&author.type_code)
         .into_iter()

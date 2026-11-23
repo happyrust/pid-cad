@@ -274,6 +274,17 @@ impl PermissionDecision {
         }
     }
 
+    fn deny_pbs(node_id: &str, path: Vec<String>, inherited: bool) -> Self {
+        PermissionDecision {
+            allowed: false,
+            denied_level: Some(DenialLevel::Pbs),
+            code: Some(DenialLevel::Pbs.code().to_owned()),
+            effective_node_id: Some(node_id.to_owned()),
+            effective_node_path: path,
+            inherited,
+        }
+    }
+
     fn deny(level: DenialLevel) -> Self {
         PermissionDecision {
             allowed: false,
@@ -406,8 +417,8 @@ pub fn decide_without_state(request: &PermissionRequest<'_>) -> PermissionDecisi
     match lookup_acl(request) {
         AclLookup { decision: None } => PermissionDecision::deny(DenialLevel::Pbs),
         AclLookup {
-            decision: Some((false, _, _, _)),
-        } => PermissionDecision::deny(DenialLevel::Pbs),
+            decision: Some((false, node_id, path, inherited)),
+        } => PermissionDecision::deny_pbs(&node_id, path, inherited),
         AclLookup {
             decision: Some((true, node_id, path, inherited)),
         } => PermissionDecision::allow(&node_id, path, inherited),

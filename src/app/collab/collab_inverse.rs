@@ -487,6 +487,8 @@ fn taken_back_by_its_inverse(app: &mut OpenCADStudio) -> Vec<Value> {
         op_id: "op-inverse".to_owned(),
         revision,
         changes: inverse.clone(),
+        user_id: None,
+        display_name: None,
     });
     app.apply_remote_changes();
     assert_eq!(
@@ -936,6 +938,8 @@ fn an_op_on_the_wire_is_left_alone_and_what_goes_out_is_as_it_was() {
         op_id: first,
         revision: 1,
         changes: Vec::new(),
+        user_id: None,
+        display_name: None,
     });
     assert_eq!(app.collab.outbox.len(), 1);
     assert!(app.collab.outbox[0].sent, "the one behind went out");

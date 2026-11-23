@@ -261,10 +261,15 @@ fn taken_before(state: &AppState, session: &Session, op_id: &str) -> Option<Vec<
             revert_local: Some(true),
         })
         .collect();
-    said.extend(logged.map(|op| ServerMessage::OpApplied {
-        op_id: op.op_id,
-        revision: op.revision,
-        changes: op.changes,
+    said.extend(logged.map(|op| {
+        let dn = state.display_name_of(&op.user_id);
+        ServerMessage::OpApplied {
+            op_id: op.op_id,
+            revision: op.revision,
+            changes: op.changes,
+            user_id: (!op.user_id.is_empty()).then_some(op.user_id),
+            display_name: (!dn.is_empty()).then_some(dn),
+        }
     }));
     (!said.is_empty()).then_some(said)
 }
@@ -971,18 +976,21 @@ pub fn resolve(
         row.object_ref, row.field
     );
     let resolved_dn = state.display_name_of(resolved_by);
+    let resolved_dn_opt = (!resolved_dn.is_empty()).then_some(resolved_dn);
     let row = ConflictRow {
         status: STATUS_RESOLVED.to_owned(),
         resolution: Some(resolution.to_owned()),
         resolved_value: custom_value.map(str::to_owned),
         resolved_by: Some(resolved_by.to_owned()),
-        resolved_by_display_name: (!resolved_dn.is_empty()).then_some(resolved_dn),
+        resolved_by_display_name: resolved_dn_opt.clone(),
         ..row
     };
     let message = ServerMessage::OpApplied {
         op_id,
         revision,
         changes: broadcast.clone(),
+        user_id: (!resolved_by.is_empty()).then(|| resolved_by.to_owned()),
+        display_name: resolved_dn_opt,
     };
     // A ruling is an op like any other, and is told to the room in its turn.
     announce(state, &row.drawing_id, &message);
@@ -1474,6 +1482,8 @@ fn commit(
         op_id: incoming.op_id.to_owned(),
         revision,
         changes,
+        user_id: (!session.user_id.is_empty()).then(|| session.user_id.clone()),
+        display_name: (!session.display_name.is_empty()).then(|| session.display_name.clone()),
     };
     announce(state, &session.drawing_id, &message);
     Ok((revision, message))
@@ -1877,6 +1887,7 @@ mod tests {
                         op_id,
                         revision,
                         changes,
+                        ..
                     },
                 ..
             } => Some((op_id.clone(), *revision, changes.clone())),
@@ -2596,7 +2607,7 @@ mod tests {
                     assert!(replayed.is_empty(), "the replay comes behind the welcome");
                     told = Some((*base_revision, *replay_from));
                 }
-                Reaction::Send(ServerMessage::OpApplied { op_id, revision, changes }) => {
+                Reaction::Send(ServerMessage::OpApplied { op_id, revision, changes, .. }) => {
                     replayed.push((op_id.clone(), *revision, changes.clone()));
                 }
                 _ => {}
@@ -2866,6 +2877,7 @@ mod tests {
                             op_id,
                             revision,
                             changes,
+                            ..
                         },
                 } => Some((
                     drawing_id.clone(),
@@ -3347,6 +3359,8 @@ mod tests {
                     op_id: "op-r-1-1".into(),
                     revision: 1,
                     changes,
+                    user_id: Some("u1".into()),
+                    display_name: None,
                 },
             }],
             "its sender alone, told what it was told the first time"
@@ -3476,6 +3490,8 @@ mod tests {
                 op_id: "op-r-1-1".into(),
                 revision: 1,
                 changes,
+                user_id: Some("u1".into()),
+                display_name: None,
             }],
             "{again:?}"
         );
@@ -3520,6 +3536,8 @@ mod tests {
                 op_id: "op-r-1-1".into(),
                 revision: 1,
                 changes,
+                user_id: Some("u1".into()),
+                display_name: None,
             }],
             "{reactions:?}"
         );
@@ -3556,6 +3574,8 @@ mod tests {
                 op_id: "op-r-1-1".into(),
                 revision: 1,
                 changes,
+                user_id: Some("u1".into()),
+                display_name: None,
             }]
         );
     }

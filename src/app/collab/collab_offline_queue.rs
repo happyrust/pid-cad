@@ -324,6 +324,8 @@ fn replay_one(app: &mut OpenCADStudio, room: &Room) -> bool {
                     op_id,
                     revision,
                     changes,
+                    user_id: None,
+                    display_name: None,
                 },
             );
             true
@@ -377,6 +379,8 @@ fn exchange(
                 op_id: op_id.clone(),
                 revision,
                 changes: changes.clone(),
+                user_id: None,
+                display_name: None,
             },
         );
         for other in others.iter_mut().filter(|other| other.collab.connected) {
@@ -386,6 +390,8 @@ fn exchange(
                     op_id: op_id.clone(),
                     revision,
                     changes: changes.clone(),
+                    user_id: None,
+                    display_name: None,
                 },
             );
             assert_eq!(other.collab.diverged, None, "a peer could not follow");
@@ -541,6 +547,8 @@ fn an_op_the_room_took_before_the_socket_dropped_is_not_sent_again() {
             op_id: op_id.clone(),
             revision,
             changes,
+            user_id: None,
+            display_name: None,
         },
     );
     drop_session(&mut a);
@@ -640,6 +648,8 @@ fn the_queue_waits_for_the_rooms_changes_to_be_written_not_just_heard() {
         op_id,
         revision,
         changes,
+        user_id: None,
+        display_name: None,
     });
     assert_eq!(a.collab.catching_up, None, "the replay is through");
     assert_eq!(prop(&a, VESSEL, PRESSURE), "", "and not written yet");

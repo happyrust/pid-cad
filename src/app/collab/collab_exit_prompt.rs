@@ -528,6 +528,8 @@ mod pid_collab {
                 op_id,
                 revision,
                 changes: Vec::new(),
+                user_id: None,
+                display_name: None,
             }));
         }
         assert_eq!(status(&mut app)["queued_ops"], 0);

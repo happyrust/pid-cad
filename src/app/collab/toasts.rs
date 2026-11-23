@@ -120,6 +120,13 @@ impl ToastQueue {
         self.items.len() != before
     }
 
+    /// Remove the most recent toast matching `message` verbatim, if present.
+    pub fn remove_last_matching(&mut self, message: &str) {
+        if let Some(pos) = self.items.iter().rposition(|t| t.message == message) {
+            self.items.remove(pos);
+        }
+    }
+
     /// Remove expired toasts as of the current clock.
     pub fn prune(&mut self) -> bool {
         self.prune_at(now_ms())
@@ -133,6 +140,7 @@ impl ToastQueue {
     }
 
     /// Clear all toasts.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn clear(&mut self) {
         self.items.clear();
     }

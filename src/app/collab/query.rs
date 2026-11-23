@@ -12,7 +12,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::PendingConflict;
+use super::{PendingConflict, UnpairedConnectorInfo, UnpairedReason};
 
 /// Convert a WebSocket server URL (`ws://host:port/ws`) to its HTTP control
 /// plane base URL (`http://host:port`), stripping any userinfo credentials.
@@ -253,6 +253,15 @@ pub trait CollabQueryClient: Send + Sync + fmt::Debug {
         drawing_id: &str,
         object_ref: Option<&str>,
     ) -> Result<DrawingObjectsPage, QueryError>;
+
+    /// Query unpaired off-page connectors for `drawing_id` (`GET /drawing/{id}/unpaired-connectors`, #32/#65).
+    fn fetch_unpaired_connectors(
+        &self,
+        _base_url: &str,
+        _drawing_id: &str,
+    ) -> Result<Vec<UnpairedConnectorInfo>, QueryError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Wrapper so `State` can keep deriving `Clone` and `Debug`.
@@ -497,6 +506,61 @@ impl CollabQueryClient for HttpQueryClient {
             })
         }
     }
+
+    fn fetch_unpaired_connectors(
+        &self,
+        base_url: &str,
+        drawing_id: &str,
+    ) -> Result<Vec<UnpairedConnectorInfo>, QueryError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (base_url, drawing_id);
+            Err(QueryError::transport("网页版不支持查询未配对页间连接符"))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let url = format!(
+                "{base_url}/drawing/{}/unpaired-connectors",
+                encode_query_component(drawing_id)
+            );
+            let resp = http_agent()
+                .get(&url)
+                .call()
+                .map_err(|e| QueryError::transport(format!("查询未配对页间连接符失败：{e}")))?;
+            let (status, body) = read_json_response(resp)?;
+            if !(200..300).contains(&status) {
+                return Err(QueryError::from_json(status, &body));
+            }
+            let items = body["items"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|row| {
+                            let line_tag = row["line_tag"].as_str()?.to_owned();
+                            let connector = row["connector"].as_str()?.to_owned();
+                            let target_drawing = row["target_drawing"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_owned();
+                            let reason = row["reason_code"]
+                                .as_str()
+                                .and_then(UnpairedReason::parse)
+                                .or_else(|| {
+                                    row["reason"].as_str().and_then(UnpairedReason::parse)
+                                })?;
+                            Some(UnpairedConnectorInfo {
+                                line_tag,
+                                connector,
+                                target_drawing,
+                                reason,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(items)
+        }
+    }
 }
 
 /// Reply from a background query thread delivered back to `OpenCADStudio::update`.
@@ -511,6 +575,7 @@ pub enum CollabQueryReply {
         tag: String,
         result: Result<Vec<AuditItem>, QueryError>,
     },
+    UnpairedConnectors(Result<Vec<UnpairedConnectorInfo>, QueryError>),
 }
 
 #[cfg(test)]

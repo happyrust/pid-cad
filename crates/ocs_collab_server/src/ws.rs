@@ -724,6 +724,7 @@ async fn request_write(state: &AppState, session: &Session) -> Vec<Reaction> {
             level: None,
             code: None,
             holder: None,
+            effective_node: None,
         },
         Some(denied) => ServerMessage::WriteStatus {
             writable: false,
@@ -731,6 +732,7 @@ async fn request_write(state: &AppState, session: &Session) -> Vec<Reaction> {
             level: Some(denied.level.as_str().to_owned()),
             code: Some(denied.code().to_owned()),
             holder: denied.holder,
+            effective_node: denied.effective_node,
         },
     };
     vec![Reaction::Send(status)]
@@ -1274,10 +1276,13 @@ async fn hello(
             // What the session missed, each op as the room first heard it,
             // before anything else reaches this socket.
             reactions.extend(missed.unwrap_or_default().into_iter().map(|op| {
+                let dn = state.display_name_of(&op.user_id);
                 Reaction::Send(ServerMessage::OpApplied {
                     op_id: op.op_id,
                     revision: op.revision,
                     changes: op.changes,
+                    user_id: (!op.user_id.is_empty()).then_some(op.user_id),
+                    display_name: (!dn.is_empty()).then_some(dn),
                 })
             }));
             reactions.push(Reaction::Publish {
@@ -1846,6 +1851,7 @@ async fn attempt(
                 level: ocs_collab::DenialLevel::State,
                 reason: "客户端处于只读，自行拒绝（服务器此刻判定该会话可写）".to_owned(),
                 holder: None,
+                effective_node: None,
             },
             now,
         ),
@@ -2856,6 +2862,7 @@ mod tests {
                     op_id,
                     revision,
                     changes,
+                    ..
                 } => {
                     assert_eq!(op_id, &format!("op-{index}"));
                     assert_eq!(*revision, expected);
@@ -3334,6 +3341,8 @@ mod tests {
                 op_id: "op-1".into(),
                 revision: 1,
                 changes: vec![],
+                user_id: None,
+                display_name: None,
             }
         ));
         assert!(should_forward(
@@ -3357,6 +3366,8 @@ mod tests {
             op_id: format!("op-r-1-{revision}"),
             revision,
             changes: vec![],
+            user_id: None,
+            display_name: None,
         };
         let me = Peer {
             session_id: "s-1".into(),

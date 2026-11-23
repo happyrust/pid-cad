@@ -94,6 +94,7 @@ pub(crate) struct OnlineAvatar {
     pub label: String,
     pub glyph: String,
     pub is_self: bool,
+    pub disconnected: bool,
 }
 
 /// Avatars to show in the editor toolbar: empty unless at least 2 sessions
@@ -109,6 +110,7 @@ pub(crate) fn online_avatars(app: &OpenCADStudio) -> Vec<OnlineAvatar> {
         label: format_user_label(&state.user_id, &state.display_name),
         glyph: avatar_glyph(&state.user_id, &state.display_name),
         is_self: true,
+        disconnected: false,
     });
     for peer in &state.peers {
         out.push(OnlineAvatar {
@@ -116,6 +118,7 @@ pub(crate) fn online_avatars(app: &OpenCADStudio) -> Vec<OnlineAvatar> {
             label: format_user_label(&peer.user_id, &peer.display_name),
             glyph: avatar_glyph(&peer.user_id, &peer.display_name),
             is_self: false,
+            disconnected: peer.disconnected,
         });
     }
     out
@@ -133,20 +136,29 @@ pub(crate) fn toolbar_online_group(app: &OpenCADStudio) -> Option<Element<'_, Ap
     for avatar in avatars.into_iter().take(5) {
         let fill = if avatar.is_self {
             ColorToken::AccentSoft
+        } else if avatar.disconnected {
+            ColorToken::AmberSoft
         } else {
             ColorToken::BgRaised
         };
         let stroke = if avatar.is_self {
             ColorToken::Accent
+        } else if avatar.disconnected {
+            ColorToken::Amber
         } else {
             ColorToken::BorderStrong
+        };
+        let ink = if avatar.disconnected {
+            ColorToken::TextMuted
+        } else {
+            ColorToken::TextPrimary
         };
         circles = circles.push(
             container(
                 text(avatar.glyph)
                     .size(11)
                     .font(ui(theme, font::Weight::Semibold))
-                    .color(ColorToken::TextPrimary.color(theme)),
+                    .color(ink.color(theme)),
             )
             .width(24)
             .height(24)
@@ -872,14 +884,33 @@ pub(crate) fn inspector_collab_section<'a>(
                     .readonly_holder
                     .as_deref()
                     .is_some_and(|h| h == peer.session_id);
+            let name_color = if peer.disconnected {
+                ColorToken::TextMuted
+            } else {
+                ColorToken::TextPrimary
+            };
             let mut peer_line = row![
                 text(label)
                     .size(11.5)
                     .font(ui(theme, font::Weight::Normal))
-                    .color(ColorToken::TextPrimary.color(theme)),
+                    .color(name_color.color(theme)),
                 Space::new().width(Fill),
             ]
+            .spacing(6)
             .align_y(alignment::Vertical::Center);
+            if peer.disconnected {
+                let badge = match peer.hold_until {
+                    Some(ts) if ts > 0 => format!("连接中断 · 至 {}", format_hhmm(ts)),
+                    _ => "连接中断".to_owned(),
+                };
+                peer_line = peer_line.push(PosReport::owned(
+                    part(&format!("collab-peer-disconnected-{}", peer.session_id)),
+                    text(badge)
+                        .size(10)
+                        .font(ui(theme, font::Weight::Medium))
+                        .color(ColorToken::Amber.color(theme)),
+                ));
+            }
             if is_holder {
                 peer_line = peer_line.push(
                     text("编辑权")
@@ -1514,6 +1545,8 @@ mod tests {
             session_id: "s-2".into(),
             user_id: "wang".into(),
             display_name: String::new(),
+            disconnected: false,
+            hold_until: None,
         }));
         let avatars = online_avatars(&app);
         assert_eq!(avatars.len(), 2);
@@ -1528,6 +1561,8 @@ mod tests {
             session_id: "s-2".into(),
             user_id: "u2".into(),
             display_name: "李工".into(),
+            disconnected: false,
+            hold_until: None,
         }));
         app.collab.apply(CollabEvent::PeerLeft {
             session_id: "s-2".into(),
@@ -1552,6 +1587,8 @@ mod tests {
                 session_id: "s-1".into(),
                 user_id: "u1".into(),
                 display_name: "张工".into(),
+                disconnected: false,
+                hold_until: None,
             }],
             claims: Vec::new(),
         });
@@ -1630,6 +1667,8 @@ mod tests {
                 session_id: "s-2".into(),
                 user_id: "u2".into(),
                 display_name: "李工".into(),
+                disconnected: false,
+                hold_until: None,
             }],
             claims: vec![("V-1001".into(), "u2".into())],
         });
@@ -1855,6 +1894,8 @@ mod tests {
             session_id: "s-2".into(),
             user_id: "u2".into(),
             display_name: "李工".into(),
+            disconnected: false,
+            hold_until: None,
         }));
         crate::ui::wrap_bar::forget_bounds("");
         {
@@ -1938,6 +1979,8 @@ mod tests {
                 session_id: "s-2".into(),
                 user_id: "u2".into(),
                 display_name: "李工".into(),
+                disconnected: false,
+                hold_until: None,
             }],
             claims: Vec::new(),
         });
@@ -1948,6 +1991,7 @@ mod tests {
             tag: "P-1001".into(),
             session_id: "s-2".into(),
             user_id: Some("u2".into()),
+            display_name: Some("李工".into()),
             expires_at: Some(15 * 3600 + 45 * 60),
         });
         let badges = canvas_claim_badges(&app);
@@ -2009,9 +2053,9 @@ mod tests {
                 "object_ref": "P-1001",
                 "field": "设计压力",
                 "value": "2.0MPa",
-                "user_id": "u2",
-                "display_name": "李工"
             })],
+            user_id: Some("u2".into()),
+            display_name: Some("李工".into()),
         });
         app.apply_remote_changes();
         assert!(
@@ -2034,6 +2078,8 @@ mod tests {
                 serde_json::json!({"kind": "set_property", "object_ref": "P-1001", "field": "设计压力", "value": "2.5MPa"}),
                 serde_json::json!({"kind": "set_property", "object_ref": "P-1001", "field": "设计温度", "value": "90℃"}),
             ],
+            user_id: Some("u2".into()),
+            display_name: Some("李工".into()),
         });
         app.apply_remote_changes();
         assert_eq!(app.collab.toasts.items().len(), 1);
@@ -2052,6 +2098,8 @@ mod tests {
                 "value": "3.0MPa",
                 "source_drawing": "PID-1101"
             })],
+            user_id: None,
+            display_name: None,
         });
         app.apply_remote_changes();
         assert!(

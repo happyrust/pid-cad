@@ -592,6 +592,7 @@ async fn settle_state_change(
                 level: ocs_collab::DenialLevel::State,
                 reason: "图纸已切换为只读".to_owned(),
                 holder: None,
+                effective_node: None,
             }
             .downgrade();
             println!(
@@ -1993,6 +1994,7 @@ mod tests {
                     holder: named,
                     level,
                     code,
+                    ..
                 }) => {
                     assert!(!reason.is_empty(), "{who}: the reason is stated");
                     assert_eq!(named, None, "{who}: readonly has no holder (#73)");

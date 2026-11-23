@@ -209,6 +209,12 @@ pub enum ServerMessage {
         op_id: String,
         revision: i64,
         changes: Vec<Value>,
+        /// User who authored the operation (#59). Absent from older servers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
+        /// Registered display name of `user_id`, when available (#59).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
     },
     /// A peer joined this drawing.
     PeerJoined(Peer),
@@ -236,6 +242,9 @@ pub enum ServerMessage {
         level: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         code: Option<String>,
+        /// Effective PBS node whose ACL denied write access when `level == Some("pbs")` (#52).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effective_node: Option<String>,
     },
     /// Automatic notification that this session's write permission has been
     /// restored without needing to reconnect (#71).
@@ -250,6 +259,8 @@ pub enum ServerMessage {
         code: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         holder: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effective_node: Option<String>,
     },
     /// A conflict entry was created and awaits adjudication.
     Conflict {
@@ -753,16 +764,21 @@ mod tests {
                 holder: Some("s-1".into()),
                 level: None,
                 code: None,
+                effective_node: None,
             }
         );
         let text = serde_json::to_string(&plain).expect("serialize");
-        assert!(!text.contains("level") && !text.contains("code"), "{text}");
+        assert!(
+            !text.contains("level") && !text.contains("code") && !text.contains("effective_node"),
+            "{text}"
+        );
 
         let by_role = ServerMessage::ReadonlyDowngrade {
             reason: "角色不允许编辑图纸".into(),
             holder: None,
             level: Some("role".into()),
             code: Some(codes::PERM_DENIED_ROLE.into()),
+            effective_node: None,
         };
         let value: Value = serde_json::to_value(&by_role).expect("serialize");
         assert_eq!(value["level"], "role");

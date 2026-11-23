@@ -1218,7 +1218,14 @@ impl OpenCADStudio {
                     applied.unresolved.join("、")
                 ));
             }
-            self.emit_remote_change_toasts(&remote.op_id, &remote.changes, &parsed, &pre_values);
+            self.emit_remote_change_toasts(
+                &remote.op_id,
+                remote.user_id.as_deref(),
+                remote.display_name.as_deref(),
+                &remote.changes,
+                &parsed,
+                &pre_values,
+            );
             total += applied.handles.len() + applied.erased.len();
         }
         self.applying_remote = false;
@@ -1260,6 +1267,8 @@ impl OpenCADStudio {
     fn emit_remote_change_toasts(
         &mut self,
         op_id: &str,
+        author_user_id: Option<&str>,
+        author_display_name: Option<&str>,
         raw_changes: &[serde_json::Value],
         parsed: &[broadcast::Change],
         pre_values: &[Option<String>],
@@ -1319,16 +1328,29 @@ impl OpenCADStudio {
                     .then(|| "上游图纸".to_owned())
             });
 
-        // Resolve author label from raw payload if present (ready for Subagent 2's author field).
-        let author_raw = raw_changes.iter().find_map(|v| {
-            let uid = v["user_id"].as_str().unwrap_or("");
-            let name = v["display_name"].as_str().unwrap_or("");
-            if !uid.is_empty() || !name.is_empty() {
-                Some(super::toasts::format_user_label(uid, name))
+        // Resolve author label from typed OpApplied metadata (#59), falling
+        // back to per-change JSON fields, then `"同事"`.
+        let author_raw = {
+            let uid = author_user_id.unwrap_or("").trim();
+            let dn = author_display_name.unwrap_or("").trim();
+            if !dn.is_empty() && !uid.is_empty() {
+                Some(super::toasts::format_user_label(uid, dn))
+            } else if !uid.is_empty() {
+                Some(self.collab.format_user(uid))
+            } else if !dn.is_empty() {
+                Some(dn.to_owned())
             } else {
-                None
+                raw_changes.iter().find_map(|v| {
+                    let uid = v["user_id"].as_str().unwrap_or("");
+                    let name = v["display_name"].as_str().unwrap_or("");
+                    if !uid.is_empty() || !name.is_empty() {
+                        Some(super::toasts::format_user_label(uid, name))
+                    } else {
+                        None
+                    }
+                })
             }
-        });
+        };
 
         // Collect property & tag edits.
         let mut edits: Vec<(String, String, String, String)> = Vec::new();
@@ -2314,6 +2336,8 @@ mod tests {
                 "value": "P-1009",
                 "old_value": "P-1001",
             })],
+            user_id: None,
+            display_name: None,
         });
         app.apply_remote_changes();
 
@@ -2341,6 +2365,8 @@ mod tests {
                 "field": "设计压力",
                 "value": "2.5MPa",
             })],
+            user_id: None,
+            display_name: None,
         });
         assert_eq!(app.collab.base_revision, 2);
         app.apply_remote_changes();
@@ -2368,6 +2394,8 @@ mod tests {
                 "field": "tag",
                 "value": "P-1009",
             })],
+            user_id: None,
+            display_name: None,
         });
         assert!(app.collab.pending_remote.is_empty(), "自己的 op 不该重放");
         assert_eq!(app.collab.base_revision, 1, "基线仍要跟着走");
@@ -2394,6 +2422,8 @@ mod tests {
                 "field": "tag",
                 "value": "P-1009",
             })],
+            user_id: None,
+            display_name: None,
         });
         app.apply_remote_changes();
         assert!(
@@ -2518,6 +2548,8 @@ mod tests {
                 "field": "设计压力",
                 "value": "2.5MPa",
             })],
+            user_id: None,
+            display_name: None,
         });
         app.apply_remote_changes();
 
@@ -2597,6 +2629,8 @@ mod tests {
                 "field": "tag",
                 "value": new,
             })],
+            user_id: None,
+            display_name: None,
         });
         app.apply_remote_changes();
     }
@@ -2702,6 +2736,8 @@ mod tests {
             changes: vec![serde_json::json!({
                 "kind": "set_tag", "object_ref": "P-1001", "field": "tag", "value": "P-1009",
             })],
+            user_id: None,
+            display_name: None,
         });
         app.apply_remote_changes();
         assert_eq!(app.collab.pending_remote.len(), 1, "kept, not dropped");
@@ -2801,6 +2837,8 @@ mod tests {
             op_id: format!("op-peer-{revision}"),
             revision,
             changes,
+            user_id: None,
+            display_name: None,
         });
         app.apply_remote_changes();
     }
@@ -3442,6 +3480,8 @@ mod tests {
             changes: vec![serde_json::json!({
                 "kind": "set_property", "object_ref": "P-1001", "field": "设计压力", "value": "2.5MPa",
             })],
+            user_id: None,
+            display_name: None,
         }));
         assert_eq!(prop(&app, pump, "设计压力"), "2.5MPa");
         assert_eq!(panel_row(&app, "设计压力"), PropValue::ReadOnly("2.5MPa".to_owned()));
@@ -3507,6 +3547,8 @@ mod tests {
                 "kind": "set_property", "object_ref": "P-1001", "field": "设计压力",
                 "value": "2.5MPa", "old_value": "1.0MPa",
             })],
+            user_id: None,
+            display_name: None,
         }));
         assert_eq!(prop(&app, pump, "设计压力"), "2.5MPa");
         assert!(app.pid_collab_view.conflicts.is_empty(), "the entry is still listed");
@@ -3731,6 +3773,8 @@ mod tests {
             op_id,
             revision: 2,
             changes: vec![echoed],
+            user_id: None,
+            display_name: None,
         }));
         assert_eq!(author(&app, own).tag, "V-9002", "this session's symbol was not renamed");
         assert_eq!(author(&app, own).tag_source, "auto", "nobody typed that tag");
@@ -3910,6 +3954,8 @@ mod tests {
             changes: vec![serde_json::json!({
                 "kind": "set_property", "object_ref": "P-9001", "field": "设计压力", "value": "2.5MPa",
             })],
+            user_id: None,
+            display_name: None,
         });
         app.apply_remote_changes();
         assert_eq!(app.collab.base_revision, 1, "the baseline is the server's count");
@@ -3950,6 +3996,8 @@ mod tests {
                 }),
                 serde_json::json!({"kind": "insert_symbol", "object_ref": "V-1001"}),
             ],
+            user_id: None,
+            display_name: None,
         });
         app.apply_remote_changes();
         assert_eq!(
@@ -3973,6 +4021,8 @@ mod tests {
             op_id: "op-peer".to_owned(),
             revision: 1,
             changes: vec![serde_json::json!({"kind": "something_new", "object_ref": "P-1001"})],
+            user_id: None,
+            display_name: None,
         });
         app.apply_remote_changes();
         assert!(app.collab.diverged.is_some());

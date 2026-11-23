@@ -332,12 +332,16 @@ fn relay(room: &mut Room, from: &mut OpenCADStudio, to: &mut OpenCADStudio, seen
             op_id: own[first + index].clone(),
             revision,
             changes: changes.clone(),
+            user_id: None,
+            display_name: None,
         });
         from.apply_remote_changes();
         to.collab.apply(CollabEvent::OpApplied {
             op_id: format!("op-of-{session}-{revision}"),
             revision,
             changes,
+            user_id: None,
+            display_name: None,
         });
         to.apply_remote_changes();
     }
@@ -454,6 +458,8 @@ fn collab_large_props_a_peer_s_symbol_is_written_with_every_one_and_kept_the_sam
         op_id: "op-of-s-a-1".to_owned(),
         revision: 1,
         changes: vec![placement.to_json()],
+        user_id: None,
+        display_name: None,
     });
     b.apply_remote_changes();
     assert_eq!(b.collab.last_apply_error, None);

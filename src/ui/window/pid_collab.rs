@@ -114,6 +114,9 @@ pub struct PeerRow {
     /// This session holds the edit right of a drawing that went read-only for
     /// the others.
     pub is_holder: bool,
+    /// True while the peer's network socket dropped and its session/claims are
+    /// temporarily retained (#37).
+    pub disconnected: bool,
 }
 
 /// One claim row.
@@ -316,6 +319,9 @@ fn peer_rows<'a>(view: &'a CollabView) -> Element<'a, Message> {
         let mut line = row![text(name).size(11), Space::new().width(Fill)]
             .spacing(6)
             .align_y(iced::Center);
+        if peer.disconnected {
+            line = line.push(text("连接中断").size(10).style(notice));
+        }
         if peer.is_holder {
             line = line.push(crate::ui::wrap_bar::PosReport::owned(
                 holder_bounds_id(&peer.user_id),
@@ -617,6 +623,7 @@ mod tests {
             display_name: user.to_owned(),
             is_self,
             is_holder,
+            disconnected: false,
         }
     }
 

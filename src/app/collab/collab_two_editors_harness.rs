@@ -386,7 +386,8 @@ pub(crate) fn standard_seed() -> Value {
         ],
         "drawings": [
             {"drawing_id": "PID-1101", "file_name": "PID-1101.dwg", "pbs_node_id": "n-area", "state": "协同编辑"},
-            {"drawing_id": "PID-1102", "file_name": "PID-1102.dwg", "pbs_node_id": "n-area", "state": "协同编辑"}
+            {"drawing_id": "PID-1102", "file_name": "PID-1102.dwg", "pbs_node_id": "n-area", "state": "协同编辑"},
+            {"drawing_id": "PID-1103", "file_name": "PID-1103.dwg", "pbs_node_id": "n-area", "state": "协同编辑"}
         ]
     })
 }
@@ -542,6 +543,20 @@ fn harness_20_t4_pbs_denied_user_joins_as_readonly() {
     assert_eq!(
         denied.app.collab.readonly_code.as_deref(),
         Some("PERM_DENIED_PBS")
+    );
+    // #52: Typed effective_node flows from server ReadonlyDowngrade into client state & 3-tier UI.
+    assert_eq!(
+        denied.app.collab.readonly_effective_node.as_deref(),
+        Some("n-area")
+    );
+    let tiers = crate::app::pid_shell::collab_ui::readonly_tiers(&denied.app.collab);
+    assert!(
+        tiers[1]
+            .detail
+            .as_deref()
+            .is_some_and(|d| d.contains("n-area")),
+        "PBS tier detail must cite effective node n-area; got {:?}",
+        tiers
     );
 }
 
@@ -915,6 +930,249 @@ fn harness_78_realign_refused_reports_clear_reason_and_next_step() {
             .iter()
             .any(|t| t.message.contains("重新对齐失败") && t.message.contains("取得最新图纸")),
         "failed realign must explain reason and next step; got {toasts:?}"
+    );
+}
+
+// ── End-to-end server↔client integration hooks (#37, #48, #49, #52, #55, #59, #65) ──
+
+#[test]
+fn harness_hooks_display_name_peer_author_toast_room_claim_and_peer_disconnected() {
+    let server = RealServer::start(standard_seed(), 0, 300);
+    let mut a = HeadlessClient::connect(&server.ws_url(), "u1", "PID-1101");
+    let mut b = HeadlessClient::connect(&server.ws_url(), "u2", "PID-1101");
+    assert!(
+        wait_both(&mut a, &mut b, Duration::from_secs(5), |a, b| {
+            a.collab.connected && b.collab.connected && a.collab.peers.len() == 1
+        }),
+        "both editors must connect"
+    );
+
+    // #48/#49: Welcome populates local user display_name on both editors.
+    assert_eq!(a.app.collab.display_name, "设计甲");
+    assert_eq!(b.app.collab.display_name, "设计乙");
+
+    // #59: A places pump and edits property -> B's remote-edit toast names 设计甲（u1）, not 同事.
+    let tag = place_pump(&mut a);
+    assert!(wait_both(&mut a, &mut b, Duration::from_secs(5), |a, b| {
+        a.collab.base_revision >= 1 && b.collab.base_revision >= 1
+    }));
+    b.app.collab.toasts.clear();
+    let res = a.run_cmd(&format!("PIDSETPROP {tag} 设计压力 3.6MPa"));
+    assert_eq!(res["ok"], true, "{res}");
+    assert!(
+        wait_both(&mut a, &mut b, Duration::from_secs(5), |a, b| {
+            a.collab.base_revision >= 2 && b.collab.base_revision >= 2
+        }),
+        "property write must reach B"
+    );
+    let b_toasts = b.app.collab.toasts.items();
+    assert!(
+        b_toasts.iter().any(|t| {
+            t.message.contains("设计甲（u1）")
+                && t.message.contains("设计压力")
+                && t.message.contains("3.6MPa")
+        }),
+        "B's peer-edit toast must display real author 设计甲（u1）; got {b_toasts:?}"
+    );
+
+    // #55: A claims the tag -> room-wide ClaimGranted immediately updates B's claims,
+    // claim_expiry, and canvas claim badge with 设计甲（u1）, without a spurious own-claim toast.
+    b.app.collab.toasts.clear();
+    let _ = a.run_cmd(&format!("PIDCLAIM {tag}"));
+    assert!(
+        wait_both(&mut a, &mut b, Duration::from_secs(5), |a, b| {
+            a.collab.claims.get(&tag).map(String::as_str) == Some("u1")
+                && b.collab.claims.get(&tag).map(String::as_str) == Some("u1")
+                && b.collab.claim_expiry.get(&tag).copied().unwrap_or(0) > 0
+        }),
+        "B must immediately receive A's room-wide claim and expiry"
+    );
+    assert!(
+        !b.app
+            .collab
+            .toasts
+            .items()
+            .iter()
+            .any(|t| t.message == format!("已占用位号 {tag}")),
+        "B must not get a spurious own-claim toast; got {:?}",
+        b.app.collab.toasts.items()
+    );
+    assert!(
+        b.app
+            .collab
+            .toasts
+            .items()
+            .iter()
+            .any(|t| t.message.contains("设计甲（u1）") && t.message.contains(&tag)),
+        "B must get peer-claim toast naming 设计甲（u1）; got {:?}",
+        b.app.collab.toasts.items()
+    );
+    let badges = crate::app::pid_shell::collab_ui::canvas_claim_badges(&b.app);
+    assert!(
+        badges
+            .iter()
+            .any(|badge| badge.tag == tag && badge.label.contains("设计甲（u1）") && badge.label.contains("到期")),
+        "B's canvas claim marker must show holder and expiry; got {badges:?}"
+    );
+
+    // #37: A third raw WebSocket peer (u4) drops TCP abruptly without a Close frame ->
+    // real server broadcasts PeerDisconnected with hold_until, and A marks peer disconnected.
+    let (mut raw_ws, _) = tungstenite::connect(server.ws_url()).expect("raw ws connect");
+    let hello = serde_json::to_string(&ocs_collab::ClientMessage::Hello {
+        user_id: "u4".into(),
+        drawing_id: "PID-1101".into(),
+        mode: "协同编辑".into(),
+        client_version: "test".into(),
+        workspace: String::new(),
+        since: None,
+        repo_id: None,
+        existing_tags: Vec::new(),
+        protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+        resume_session_id: None,
+        credential: None,
+    })
+    .unwrap();
+    raw_ws
+        .send(tungstenite::Message::Text(hello.into()))
+        .expect("send hello");
+    let _ = raw_ws.read();
+    assert!(
+        a.wait_until(Duration::from_secs(5), |app| {
+            app.collab.peers.iter().any(|p| p.user_id == "u4" && !p.disconnected)
+        }),
+        "A must see u4 join"
+    );
+    // Drop TCP socket without Close frame to simulate network drop.
+    drop(raw_ws);
+    assert!(
+        a.wait_until(Duration::from_secs(5), |app| {
+            app.collab
+                .peers
+                .iter()
+                .any(|p| p.user_id == "u4" && p.disconnected && p.hold_until.is_some())
+        }),
+        "A must mark u4 disconnected with hold_until; peers={:?}",
+        a.app.collab.peers
+    );
+    assert!(
+        a.app
+            .collab
+            .toasts
+            .items()
+            .iter()
+            .any(|t| t.message.contains("管理丁（u4）") && t.message.contains("连接中断")),
+        "A must emit disconnected toast for u4; got {:?}",
+        a.app.collab.toasts.items()
+    );
+}
+
+#[test]
+fn harness_65_all_three_unpaired_connector_reasons_flow_from_server_to_client_toasts() {
+    use crate::app::collab::UnpairedReason;
+
+    let server = RealServer::start(standard_seed(), 0, 300);
+    let mut a = HeadlessClient::connect(&server.ws_url(), "u1", "PID-1101");
+    let mut b = HeadlessClient::connect(&server.ws_url(), "u2", "PID-1102");
+    let mut c = HeadlessClient::connect(&server.ws_url(), "u4", "PID-1103");
+    assert!(
+        wait_both(&mut a, &mut b, Duration::from_secs(5), |a, b| {
+            a.collab.connected && b.collab.connected
+        }) && c.wait_until(Duration::from_secs(5), |c| c.collab.connected),
+        "all three drawing editors must connect"
+    );
+
+    // Reason 1: Target drawing is not registered (PID-9999).
+    a.draw_points("PIDPIPE signal S-UNREG", &[[0.0, 0.0], [100.0, 0.0]]);
+    a.draw_points("PIDCONNECTOR signal_out PID-9999", &[[100.0, 0.0]]);
+    assert!(
+        a.wait_until(Duration::from_secs(5), |app| {
+            app.collab.unpaired_connectors.iter().any(|u| {
+                u.line_tag == "S-UNREG" && u.reason == UnpairedReason::TargetDrawingNotRegistered
+            })
+        }),
+        "must detect TargetDrawingNotRegistered; got {:?}",
+        a.app.collab.unpaired_connectors
+    );
+    assert!(
+        a.app
+            .collab
+            .toasts
+            .items()
+            .iter()
+            .any(|t| t.message.contains("S-UNREG") && t.message.contains("目标图纸没有登记")),
+        "toast must report unregistered target drawing; got {:?}",
+        a.app.collab.toasts.items()
+    );
+
+    // Reason 2: Target drawing PID-1102 is registered, but has no matching inflow connector.
+    a.draw_points("PIDPIPE signal S-NOMATCH", &[[0.0, 50.0], [100.0, 50.0]]);
+    a.draw_points("PIDCONNECTOR signal_out PID-1102", &[[100.0, 50.0]]);
+    assert!(
+        a.wait_until(Duration::from_secs(5), |app| {
+            app.collab.unpaired_connectors.iter().any(|u| {
+                u.line_tag == "S-NOMATCH" && u.reason == UnpairedReason::NoMatchingPeerConnector
+            })
+        }),
+        "must detect NoMatchingPeerConnector; got {:?}",
+        a.app.collab.unpaired_connectors
+    );
+    assert!(
+        a.app
+            .collab
+            .toasts
+            .items()
+            .iter()
+            .any(|t| t.message.contains("S-NOMATCH") && t.message.contains("没有同一线号的流入页间连接符")),
+        "toast must report missing matching connector; got {:?}",
+        a.app.collab.toasts.items()
+    );
+
+    // Reason 3: Pair S-TAKEN between PID-1103 -> PID-1102, then A targets PID-1102 on S-TAKEN.
+    c.draw_points("PIDPIPE signal S-TAKEN", &[[0.0, 0.0], [100.0, 0.0]]);
+    c.draw_points("PIDCONNECTOR signal_out PID-1102", &[[100.0, 0.0]]);
+    b.draw_points("PIDPIPE signal S-TAKEN", &[[0.0, 0.0], [100.0, 0.0]]);
+    b.draw_points("PIDCONNECTOR signal_in PID-1103", &[[0.0, 0.0]]);
+    assert!(
+        wait_both(&mut c, &mut b, Duration::from_secs(5), |c, b| {
+            c.collab.base_revision >= 3 && b.collab.base_revision >= 3
+        }),
+        "PID-1103 <-> PID-1102 S-TAKEN must pair first"
+    );
+
+    a.draw_points("PIDPIPE signal S-TAKEN", &[[0.0, 100.0], [100.0, 100.0]]);
+    a.draw_points("PIDCONNECTOR signal_out PID-1102", &[[100.0, 100.0]]);
+    assert!(
+        a.wait_until(Duration::from_secs(5), |app| {
+            app.collab.unpaired_connectors.iter().any(|u| {
+                u.line_tag == "S-TAKEN" && u.reason == UnpairedReason::PeerAlreadyPaired
+            })
+        }),
+        "must detect PeerAlreadyPaired; got {:?}",
+        a.app.collab.unpaired_connectors
+    );
+    assert!(
+        a.app
+            .collab
+            .toasts
+            .items()
+            .iter()
+            .any(|t| t.message.contains("S-TAKEN") && t.message.contains("对方已经另有配对")),
+        "toast must report peer already paired; got {:?}",
+        a.app.collab.toasts.items()
+    );
+
+    // Pairing S-NOMATCH clears it from A's unpaired list automatically!
+    b.draw_points("PIDPIPE signal S-NOMATCH", &[[0.0, 50.0], [100.0, 50.0]]);
+    b.draw_points("PIDCONNECTOR signal_in PID-1101", &[[0.0, 50.0]]);
+    assert!(
+        wait_both(&mut a, &mut b, Duration::from_secs(5), |a, _| {
+            !a.collab
+                .unpaired_connectors
+                .iter()
+                .any(|u| u.line_tag == "S-NOMATCH")
+        }),
+        "once paired, S-NOMATCH must clear from A's unpaired_connectors; got {:?}",
+        a.app.collab.unpaired_connectors
     );
 }
 

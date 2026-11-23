@@ -208,6 +208,8 @@ fn listen(desk: &Desk, seats: &mut [&mut Seat]) {
                 op_id,
                 revision,
                 changes,
+                user_id: None,
+                display_name: None,
             });
             seat.app.apply_remote_changes();
         }
@@ -467,6 +469,8 @@ fn a_peer_on_the_same_drawing_follows_a_connector_made_and_taken_away() {
         op_id: "op-again".to_owned(),
         revision: again.2 + 1,
         changes: again.3,
+        user_id: None,
+        display_name: None,
     });
     b.app.apply_remote_changes();
     assert_eq!(markers(&b.app), 1);

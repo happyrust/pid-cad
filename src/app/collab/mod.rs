@@ -91,6 +91,11 @@ pub struct PeerInfo {
     pub session_id: String,
     pub user_id: String,
     pub display_name: String,
+    /// True while a peer's socket dropped and its session/claims are retained
+    /// until `hold_until` (#37).
+    pub disconnected: bool,
+    /// Unix timestamp until which a disconnected peer's session/claims are held (#37).
+    pub hold_until: Option<i64>,
 }
 
 /// What the transport thread reports to the UI thread.
@@ -127,16 +132,22 @@ pub enum CollabEvent {
     /// The socket ended. `reason` names the branch that ended it (`read error:
     /// ConnectionReset` vs `close frame`), which is what `VAL-CLI-020` reads.
     Disconnected { reason: String, will_retry: bool },
+    /// Local user's registered display name reported in `welcome.display_name` (#48/#49).
+    SelfDisplayName(String),
     PeerJoined(PeerInfo),
+    /// A peer's network connection dropped without closing; its session and
+    /// claims are retained until `hold_until` (#37).
+    PeerDisconnected(PeerInfo),
     PeerLeft { session_id: String },
     ClaimGranted { tag: String },
-    /// Companion metadata for `claim_granted`: holder session/user and expiry
-    /// timestamp when the server provides them (e.g., room-wide claim grant
-    /// broadcasts from #24/#55).
+    /// Companion metadata for `claim_granted`: holder session/user, display name
+    /// and expiry timestamp when the server provides them (e.g., room-wide claim
+    /// grant broadcasts from #25/#55).
     ClaimMeta {
         tag: String,
         session_id: String,
         user_id: Option<String>,
+        display_name: Option<String>,
         expires_at: Option<i64>,
     },
     /// Companion metadata for `readonly_downgrade` when the server identifies
@@ -165,6 +176,10 @@ pub enum CollabEvent {
         op_id: String,
         revision: i64,
         changes: Vec<Value>,
+        /// Author user id reported by the server (#59).
+        user_id: Option<String>,
+        /// Author registered display name reported by the server (#59).
+        display_name: Option<String>,
     },
     /// `conflict`: two people wrote one field differently from one baseline,
     /// neither write took effect, and the entry waits for a ruling
@@ -563,11 +578,20 @@ impl UnpairedReason {
 
     pub fn parse(raw: &str) -> Option<Self> {
         let s = raw.trim();
-        if s.contains("没有登记") || s.eq_ignore_ascii_case("target_not_registered") {
+        if s.contains("没有登记")
+            || s.eq_ignore_ascii_case("target_not_registered")
+            || s.eq_ignore_ascii_case("target_drawing_unregistered")
+        {
             Some(Self::TargetDrawingNotRegistered)
-        } else if s.contains("另有配对") || s.eq_ignore_ascii_case("peer_already_paired") {
+        } else if s.contains("另有配对")
+            || s.eq_ignore_ascii_case("peer_already_paired")
+            || s.eq_ignore_ascii_case("target_already_paired")
+        {
             Some(Self::PeerAlreadyPaired)
-        } else if s.contains("没有") || s.eq_ignore_ascii_case("no_matching_peer") {
+        } else if s.contains("没有")
+            || s.eq_ignore_ascii_case("no_matching_peer")
+            || s.eq_ignore_ascii_case("no_matching_connector")
+        {
             Some(Self::NoMatchingPeerConnector)
         } else {
             None
@@ -639,6 +663,9 @@ pub(crate) struct State {
     /// Effective PBS node whose ACL denied write access when `readonly_level`
     /// is `"pbs"` (#52). Populated when the server provides `effective_node`.
     pub readonly_effective_node: Option<String>,
+    /// Cached display names learned from `claim_granted`, `op_applied`, and peers
+    /// so `format_user` shows real names even for users not currently in `peers` (#55, #59).
+    pub known_display_names: BTreeMap<String, String>,
     /// Shared transient toast notification queue (#50, #58–#61, #65).
     pub toasts: toasts::ToastQueue,
     /// Unpaired outgoing page connectors with explicit reasons (#63, #65).
@@ -664,7 +691,7 @@ pub(crate) struct State {
     /// Per-instance transport link for isolated multi-editor tests (#20);
     /// `None` uses the app's process-wide transport slots.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) link: Option<transport::Link>,
+    link: Option<transport::Link>,
     /// Last transport-level failure, for the command line and diagnostics.
     pub last_error: Option<String>,
     /// How many reconnect attempts have failed since the last live session.
@@ -885,7 +912,7 @@ pub(crate) struct State {
     rejoining: bool,
     /// The transport's question about the drawing's tags, while the UI has
     /// yet to answer it with them (`OpenCADStudio::answer_collab_tags`).
-    pub tags_wanted: Option<TagsAsked>,
+    pub(super) tags_wanted: Option<TagsAsked>,
     /// The launch is through with the drawings it was started on: each has
     /// been opened or given up on. A session started on a file that still
     /// has no drawing then will not get it from the launch.
@@ -923,6 +950,8 @@ pub struct AppliedRemote {
 pub struct RemoteChange {
     pub op_id: String,
     pub changes: Vec<Value>,
+    pub user_id: Option<String>,
+    pub display_name: Option<String>,
 }
 
 impl State {
@@ -1228,6 +1257,9 @@ impl State {
         if let Some(peer) = self.peers.iter().find(|p| p.user_id == user_id) {
             return toasts::format_user_label(&peer.user_id, &peer.display_name);
         }
+        if let Some(name) = self.known_display_names.get(user_id) {
+            return toasts::format_user_label(user_id, name);
+        }
         toasts::format_user_label(user_id, "")
     }
 
@@ -1303,6 +1335,24 @@ impl State {
     pub(crate) fn clear_unpaired_connector(&mut self, line_tag: &str, connector: &str) {
         self.unpaired_connectors
             .retain(|u| !(u.line_tag == line_tag && (connector.is_empty() || u.connector == connector)));
+    }
+
+    /// Reconcile the authoritative server list of unpaired connectors (#32, #65):
+    /// newly discovered or changed entries go through `record_unpaired_connector`
+    /// (emitting user-visible toasts), while entries that paired or vanished are removed.
+    pub(crate) fn sync_unpaired_connectors(&mut self, items: Vec<UnpairedConnectorInfo>) {
+        // Drop any entries no longer reported as unpaired by the server.
+        self.unpaired_connectors.retain(|old| {
+            items
+                .iter()
+                .any(|cur| cur.line_tag == old.line_tag && cur.connector == old.connector)
+        });
+        for item in items {
+            let unchanged = self.unpaired_connectors.iter().any(|old| old == &item);
+            if !unchanged {
+                self.record_unpaired_connector(item);
+            }
+        }
     }
 
     /// Push a collaboration toast notification.
@@ -1459,6 +1509,19 @@ impl State {
                 // The others on the drawing. `welcome.peers` does not list
                 // the session it welcomes; a server that still does (it
                 // used to) is read the same way.
+                if self.display_name.is_empty() {
+                    if let Some(me) = peers.iter().find(|p| p.session_id == session_id) {
+                        if !me.display_name.is_empty() && me.display_name != self.user_id {
+                            self.display_name = me.display_name.clone();
+                        }
+                    }
+                }
+                for peer in &peers {
+                    if !peer.display_name.is_empty() && peer.display_name != peer.user_id {
+                        self.known_display_names
+                            .insert(peer.user_id.clone(), peer.display_name.clone());
+                    }
+                }
                 self.peers = peers
                     .into_iter()
                     .filter(|peer| peer.session_id != session_id)
@@ -1577,9 +1640,24 @@ impl State {
                     reason
                 });
             }
-            CollabEvent::PeerJoined(peer) => {
+            CollabEvent::SelfDisplayName(name) => {
+                if !name.trim().is_empty() {
+                    self.display_name = name;
+                }
+            }
+            CollabEvent::PeerJoined(mut peer) => {
+                peer.disconnected = false;
+                peer.hold_until = None;
+                if !peer.display_name.is_empty() && peer.display_name != peer.user_id {
+                    self.known_display_names
+                        .insert(peer.user_id.clone(), peer.display_name.clone());
+                }
                 let who = toasts::format_user_label(&peer.user_id, &peer.display_name);
-                let is_new = !self.peers.iter().any(|p| p.session_id == peer.session_id);
+                let prev_disconnected = self
+                    .peers
+                    .iter()
+                    .find(|p| p.session_id == peer.session_id)
+                    .map(|p| p.disconnected);
                 if let Some(existing) = self
                     .peers
                     .iter_mut()
@@ -1589,10 +1667,42 @@ impl State {
                 } else {
                     self.peers.push(peer);
                 }
-                if is_new {
-                    self.toasts
-                        .push(toasts::ToastKind::Info, format!("{who} 加入了图纸"));
+                match prev_disconnected {
+                    None => {
+                        self.toasts
+                            .push(toasts::ToastKind::Info, format!("{who} 加入了图纸"));
+                    }
+                    Some(true) => {
+                        self.toasts
+                            .push(toasts::ToastKind::Info, format!("{who} 已重新连接"));
+                    }
+                    Some(false) => {}
                 }
+            }
+            CollabEvent::PeerDisconnected(mut peer) => {
+                peer.disconnected = true;
+                if !peer.display_name.is_empty() && peer.display_name != peer.user_id {
+                    self.known_display_names
+                        .insert(peer.user_id.clone(), peer.display_name.clone());
+                }
+                let who = toasts::format_user_label(&peer.user_id, &peer.display_name);
+                let hold_until = peer.hold_until;
+                if let Some(existing) = self
+                    .peers
+                    .iter_mut()
+                    .find(|p| p.session_id == peer.session_id)
+                {
+                    *existing = peer;
+                } else {
+                    self.peers.push(peer);
+                }
+                let msg = match hold_until {
+                    Some(ts) if ts > 0 => {
+                        format!("{who} 连接中断（占用保留至 {}）", toasts::format_hhmm(ts))
+                    }
+                    _ => format!("{who} 连接中断"),
+                };
+                self.toasts.push(toasts::ToastKind::Warning, msg);
             }
             CollabEvent::PeerLeft { session_id } => {
                 let who = self
@@ -1622,25 +1732,38 @@ impl State {
                 tag,
                 session_id,
                 user_id,
+                display_name,
                 expires_at,
             } => {
                 if let Some(exp) = expires_at {
                     self.claim_expiry.insert(tag.clone(), exp);
                 }
-                // Room-wide broadcast of another peer's claim grant (#55):
-                // update holder & own_claims so it is recognised as remote.
+                let holder_uid = user_id
+                    .filter(|u| !u.is_empty())
+                    .unwrap_or_else(|| self.resolve_holder(&session_id));
+                if let Some(dn) = display_name.as_deref().filter(|s| !s.is_empty()) {
+                    if !holder_uid.is_empty() && dn != holder_uid {
+                        self.known_display_names
+                            .insert(holder_uid.clone(), dn.to_owned());
+                    }
+                }
+                // Room-wide broadcast of another peer's claim grant (#25/#55):
+                // update holder & own_claims so it is recognised as remote and
+                // replace the provisional own-claim toast emitted by ClaimGranted.
                 let is_other_session = !session_id.is_empty()
                     && self
                         .session_id
                         .as_deref()
                         .is_some_and(|mine| mine != session_id);
                 if is_other_session {
-                    let holder_uid = user_id
-                        .filter(|u| !u.is_empty())
-                        .unwrap_or_else(|| self.resolve_holder(&session_id));
                     self.own_claims.remove(&tag);
                     self.claims.insert(tag.clone(), holder_uid.clone());
-                    let who = self.format_user(&holder_uid);
+                    self.toasts
+                        .remove_last_matching(&format!("已占用位号 {tag}"));
+                    let who = match display_name.as_deref().filter(|s| !s.is_empty()) {
+                        Some(dn) => toasts::format_user_label(&holder_uid, dn),
+                        None => self.format_user(&holder_uid),
+                    };
                     let msg = match expires_at {
                         Some(exp) => {
                             format!("{who} 占用了位号 {tag}（到期 {}）", toasts::format_hhmm(exp))
@@ -1708,12 +1831,13 @@ impl State {
                 let holds = holder
                     .as_deref()
                     .is_some_and(|holder| self.session_id.as_deref() == Some(holder));
+                let is_pbs = level.as_deref() == Some("pbs");
                 self.readonly = !holds;
                 self.readonly_holder = holder;
                 self.readonly_level = if holds { None } else { level };
                 self.readonly_code = if holds { None } else { code };
                 self.readonly_reason = if holds { None } else { Some(reason.clone()) };
-                if holds {
+                if holds || !is_pbs {
                     self.readonly_effective_node = None;
                 }
                 self.last_error = if holds {
@@ -1726,7 +1850,18 @@ impl State {
                 op_id,
                 revision,
                 changes,
+                user_id,
+                display_name,
             } => {
+                if let (Some(uid), Some(dn)) = (
+                    user_id.as_deref().filter(|s| !s.is_empty()),
+                    display_name.as_deref().filter(|s| !s.is_empty()),
+                ) {
+                    if dn != uid {
+                        self.known_display_names
+                            .insert(uid.to_owned(), dn.to_owned());
+                    }
+                }
                 // What the room does is not written into a drawing whose
                 // connection is held apart, and its baseline stays where
                 // the drawing is.
@@ -1815,11 +1950,18 @@ impl State {
                         self.pending_remote.push(RemoteChange {
                             op_id,
                             changes: renames,
+                            user_id,
+                            display_name,
                         });
                     }
                 } else {
                     self.applied_ops = self.applied_ops.saturating_add(1);
-                    self.pending_remote.push(RemoteChange { op_id, changes });
+                    self.pending_remote.push(RemoteChange {
+                        op_id,
+                        changes,
+                        user_id,
+                        display_name,
+                    });
                 }
                 if !self.revision_gap {
                     self.base_revision = revision;
@@ -2044,6 +2186,8 @@ impl State {
                     "session_id": p.session_id,
                     "user_id": p.user_id,
                     "display_name": p.display_name,
+                    "disconnected": p.disconnected,
+                    "hold_until": p.hold_until,
                 }))
                 .collect::<Vec<_>>(),
             "claims": self
@@ -2345,6 +2489,8 @@ mod tests {
             session_id: id.to_owned(),
             user_id: user.to_owned(),
             display_name: user.to_owned(),
+            disconnected: false,
+            hold_until: None,
         }
     }
 
@@ -2455,6 +2601,8 @@ mod tests {
             op_id: "op-s-2-1".to_owned(),
             revision: 1,
             changes: Vec::new(),
+            user_id: None,
+            display_name: None,
         });
         state.apply(CollabEvent::Disconnected {
             reason: "read error: ConnectionReset".to_owned(),
@@ -2476,6 +2624,8 @@ mod tests {
             changes: vec![json!({
                 "kind": "set_property", "object_ref": "P-1001", "field": "设计压力", "value": "2.5MPa",
             })],
+            user_id: None,
+            display_name: None,
         });
         let left: Vec<&str> = state
             .conflicts
@@ -2916,6 +3066,8 @@ mod tests {
             changes: vec![serde_json::json!({
                 "kind": "set_property", "object_ref": "P-1001", "field": "设计压力", "value": "2.5MPa",
             })],
+            user_id: None,
+            display_name: None,
         }
     }
 
