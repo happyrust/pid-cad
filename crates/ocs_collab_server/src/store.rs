@@ -219,6 +219,16 @@ pub struct ConflictRow {
     pub resolved_by_display_name: Option<String>,
 }
 
+/// Metadata returned by [`Store::backup_to`] / [`Store::backup_into_dir`] (#105).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupInfo {
+    pub path: String,
+    pub size_bytes: u64,
+    pub created_at: i64,
+    pub max_op_at: Option<i64>,
+    pub total_ops: i64,
+}
+
 /// The connection handle. One `Mutex<Connection>` is enough for a single
 /// process: WAL lets readers proceed while a write is in flight, and SQLite
 /// serializes writers itself.
@@ -978,6 +988,52 @@ impl Store {
             .filter_map(|suffix| std::fs::metadata(format!("{base}{suffix}")).ok())
             .map(|m| m.len())
             .sum()
+    }
+
+    /// Creates an atomic online snapshot of this SQLite database at `dest_path`
+    /// using SQLite's `VACUUM INTO` (safe while WAL readers/writers are live,
+    /// #105).
+    pub fn backup_to(&self, dest_path: impl AsRef<Path>) -> Result<BackupInfo, String> {
+        let dest = dest_path.as_ref();
+        if let Some(parent) = dest.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|err| format!("create backup dir {}: {err}", parent.display()))?;
+            }
+        }
+        if dest.exists() {
+            std::fs::remove_file(dest)
+                .map_err(|err| format!("remove existing backup {}: {err}", dest.display()))?;
+        }
+        let dest_str = dest.to_string_lossy().into_owned();
+        let (max_op_at, total_ops) = {
+            let conn = self.lock()?;
+            let (max_at, count): (Option<i64>, i64) = conn
+                .query_row("SELECT MAX(at), COUNT(*) FROM ops", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .map_err(|err| format!("query ops stats before backup: {err}"))?;
+            conn.execute("VACUUM INTO ?1", params![dest_str])
+                .map_err(|err| format!("online backup VACUUM INTO {dest_str}: {err}"))?;
+            (max_at, count)
+        };
+        let size_bytes = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+        Ok(BackupInfo {
+            path: dest_str,
+            size_bytes,
+            created_at: ocs_collab::now_unix(),
+            max_op_at,
+            total_ops,
+        })
+    }
+
+    /// Writes a timestamped online backup file into `dir` (#105).
+    pub fn backup_into_dir(&self, dir: impl AsRef<Path>, seq: u64) -> Result<BackupInfo, String> {
+        let ts = ocs_collab::now_unix();
+        let file = dir
+            .as_ref()
+            .join(format!("collab-backup-{ts}-{seq:04}.db"));
+        self.backup_to(file)
     }
 
     /// Inserts a conflict entry awaiting adjudication.

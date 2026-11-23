@@ -65,6 +65,10 @@ struct Cli {
     tls_key: Option<String>,
     /// Optional structured JSON-lines log file path (#39).
     log_file: Option<String>,
+    /// Directory for periodic/on-demand online SQLite backups (#105).
+    backup_dir: Option<String>,
+    /// Periodic online backup interval in seconds (0 = disabled, #105).
+    backup_interval: u64,
 }
 
 fn default_db_path() -> String {
@@ -82,7 +86,8 @@ fn usage() -> &'static str {
     "ocs_collab_server --port <port> --db <path> [--bind <IP 地址>] \
      [--heartbeat-timeout <seconds>] [--claim-ttl <seconds>] [--seed <json>] \
      [--tie-window-ms <milliseconds>] [--new-repo-id] [--open-mode] [--require-auth] \
-     [--tls-cert <pem> --tls-key <pem>] [--log-file <path>]\n\
+     [--tls-cert <pem> --tls-key <pem>] [--log-file <path>] \
+     [--backup-dir <dir>] [--backup-interval <seconds>]\n\
      --bind 默认 127.0.0.1，只有本机能连。监听非本机回环地址时必须同时启用 --require-auth 与 TLS（--tls-cert/--tls-key）。\n\
      --open-mode 打开开放模式（允许未登记用户与图纸入会，仅用于演示与测试；缺省为严格模式）。\n\
      --require-auth 强制所有入会与管理接口核对用户凭据（凭据在库中仅存散列）。\n\
@@ -106,6 +111,8 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
         tls_cert: None,
         tls_key: None,
         log_file: None,
+        backup_dir: None,
+        backup_interval: 0,
     };
 
     let mut iter = args.into_iter();
@@ -159,6 +166,13 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
             "--tls-cert" => cli.tls_cert = Some(value("--tls-cert")?),
             "--tls-key" => cli.tls_key = Some(value("--tls-key")?),
             "--log-file" => cli.log_file = Some(value("--log-file")?),
+            "--backup-dir" => cli.backup_dir = Some(value("--backup-dir")?),
+            "--backup-interval" => {
+                let raw = value("--backup-interval")?;
+                cli.backup_interval = raw.parse().map_err(|_| {
+                    format!("--backup-interval 需要非负整数秒数，收到 {raw}")
+                })?;
+            }
             "--help" | "-h" => return Err(usage().to_owned()),
             other => return Err(format!("未知参数 {other}；用法：{}", usage())),
         }
@@ -334,6 +348,7 @@ async fn main() -> ExitCode {
     let mut state = build_state(&cli);
     state.tie_window = std::time::Duration::from_millis(cli.tie_window_ms);
     state.tls_enabled = tls_config.is_some();
+    state.backup_dir = cli.backup_dir.as_ref().map(std::path::PathBuf::from);
     if let Some(log_path) = &cli.log_file {
         if let Err(err) = state.logger.set_file(log_path) {
             eprintln!("[ocs_collab_server] {err}");
@@ -351,6 +366,46 @@ async fn main() -> ExitCode {
         }),
     );
     let state = Arc::new(state);
+    // #105: Periodic online SQLite backup task when `--backup-dir` and
+    // `--backup-interval > 0` are configured.
+    if let (Some(backup_dir), Some(store)) = (state.backup_dir.clone(), state.store.clone()) {
+        if cli.backup_interval > 0 {
+            let logger = state.logger.clone();
+            let interval_secs = cli.backup_interval;
+            tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                tick.tick().await; // skip immediate tick at t=0
+                let mut seq = 1u64;
+                loop {
+                    tick.tick().await;
+                    match store.backup_into_dir(&backup_dir, seq) {
+                        Ok(info) => {
+                            println!(
+                                "[ocs_collab_server] 在线备份完成 path={} size={} ops={}",
+                                info.path, info.size_bytes, info.total_ops
+                            );
+                            logger.emit(
+                                "info",
+                                "backup_completed",
+                                serde_json::json!({
+                                    "path": info.path,
+                                    "size_bytes": info.size_bytes,
+                                    "total_ops": info.total_ops,
+                                    "max_op_at": info.max_op_at,
+                                }),
+                            );
+                            seq += 1;
+                        }
+                        Err(err) => {
+                            eprintln!("[ocs_collab_server] 在线备份失败：{err}");
+                        }
+                    }
+                }
+            });
+        }
+    }
     // With a tie window, ops made against the current revision wait it out
     // before they commit; this is what commits them.
     if !state.tie_window.is_zero() {
@@ -610,6 +665,8 @@ mod tests {
             tls_cert: None,
             tls_key: None,
             log_file: None,
+            backup_dir: None,
+            backup_interval: 0,
         };
         let state = build_state(&cli);
         assert!(state.store.is_none());
@@ -635,6 +692,8 @@ mod tests {
             tls_cert: None,
             tls_key: None,
             log_file: None,
+            backup_dir: None,
+            backup_interval: 0,
         };
         let state = build_state(&cli);
         assert!(state.db_healthy());

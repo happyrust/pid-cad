@@ -55,6 +55,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/conflicts", get(conflict_list))
         .route("/conflicts/{id}/resolve", post(conflict_resolve))
+        .route("/admin/backup", post(admin_backup))
         .with_state(state)
 }
 
@@ -1102,6 +1103,84 @@ async fn metrics_snapshot(State(state): State<Arc<AppState>>) -> Response {
         })),
     )
         .into_response()
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BackupBody {
+    user_id: Option<String>,
+    credential: Option<String>,
+    dest_dir: Option<String>,
+}
+
+/// `POST /admin/backup` → 200 `BackupInfo` (#105): triggers an immediate
+/// online SQLite snapshot into `dest_dir` or the configured `--backup-dir`.
+async fn admin_backup(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Option<Json<BackupBody>>,
+) -> Response {
+    let Some(store) = state.store.clone() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            codes::INVALID_MESSAGE,
+            "数据库不可用",
+        );
+    };
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    if state.require_auth || body.user_id.is_some() || headers.contains_key(axum::http::header::AUTHORIZATION) {
+        let actor = match authenticate_http_actor(
+            &state,
+            &store,
+            &headers,
+            body.user_id,
+            body.credential,
+            "缺少 user_id",
+        ) {
+            Ok(uid) => uid,
+            Err(resp) => return resp,
+        };
+        if let Ok(Some((role, _))) = store.user_role(&actor) {
+            if !matches!(
+                ocs_collab::Role::parse(&role),
+                Some(ocs_collab::Role::SystemAdmin | ocs_collab::Role::ProjectAdmin)
+            ) {
+                return error_response(
+                    StatusCode::FORBIDDEN,
+                    codes::PERM_DENIED_ROLE,
+                    "只有系统管理员或项目管理员可以触发在线备份",
+                );
+            }
+        }
+    }
+    let dir = body
+        .dest_dir
+        .map(std::path::PathBuf::from)
+        .or_else(|| state.backup_dir.clone());
+    let Some(dir) = dir else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            codes::INVALID_MESSAGE,
+            "未配置 --backup-dir 且请求未提供 dest_dir",
+        );
+    };
+    static BACKUP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let seq = BACKUP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    match store.backup_into_dir(&dir, seq) {
+        Ok(info) => {
+            state.logger.emit(
+                "info",
+                "backup_completed",
+                json!({
+                    "path": info.path,
+                    "size_bytes": info.size_bytes,
+                    "total_ops": info.total_ops,
+                    "max_op_at": info.max_op_at,
+                }),
+            );
+            (StatusCode::OK, Json(info)).into_response()
+        }
+        Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, codes::INVALID_MESSAGE, &err),
+    }
 }
 
 async fn readonly_endpoint() -> Response {

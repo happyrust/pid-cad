@@ -93,6 +93,8 @@ pub struct AppState {
     pub metrics: Arc<metrics::Metrics>,
     /// Structured single-line JSON logger with optional file sink (#39).
     pub logger: Arc<metrics::StructuredLogger>,
+    /// Optional directory where periodic/on-demand online backups are written (#105).
+    pub backup_dir: Option<std::path::PathBuf>,
     pub version: &'static str,
 }
 
@@ -129,6 +131,7 @@ impl AppState {
             tls_enabled: false,
             metrics: Arc::new(metrics::Metrics::default()),
             logger: Arc::new(metrics::StructuredLogger::default()),
+            backup_dir: None,
             version: env!("CARGO_PKG_VERSION"),
         }
     }
