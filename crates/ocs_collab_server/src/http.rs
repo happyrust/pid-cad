@@ -27,6 +27,14 @@ use crate::AppState;
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route(
+            "/metrics",
+            get(metrics_snapshot)
+                .post(readonly_endpoint)
+                .put(readonly_endpoint)
+                .patch(readonly_endpoint)
+                .delete(readonly_endpoint),
+        )
         .route("/session", post(create_session))
         .route("/ws", get(ws::upgrade))
         .route(
@@ -982,6 +990,126 @@ async fn conflict_resolve(
             "field": resolved.row.field,
             "value": resolved.final_value,
             "revision": resolved.revision,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /metrics` → 200 read-only runtime observability snapshot (#39):
+/// per-drawing & total active editing sessions, claims, ops/min, denied writes,
+/// pending conflicts, op-log rows, and database size on disk.
+async fn metrics_snapshot(State(state): State<Arc<AppState>>) -> Response {
+    let now = ocs_collab::now_unix();
+    let mut drawing_ids = std::collections::BTreeSet::<String>::new();
+
+    // Active sessions per drawing.
+    let mut sessions_by_drawing: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
+    {
+        let registry = state.sessions.lock().await;
+        for s in registry.all() {
+            if s.is_active() {
+                drawing_ids.insert(s.drawing_id.clone());
+                *sessions_by_drawing.entry(s.drawing_id.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Active claims per drawing.
+    let mut claims_by_drawing: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
+    {
+        let mut occ = state.occupancy.lock().await;
+        for c in occ.entries(now) {
+            drawing_ids.insert(c.drawing_id.clone());
+            *claims_by_drawing.entry(c.drawing_id.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let ops_per_min = state.metrics.ops_per_minute_by_drawing(now);
+    let denied_by_drawing = state.metrics.denied_writes_by_drawing();
+    for did in ops_per_min.keys().chain(denied_by_drawing.keys()) {
+        drawing_ids.insert(did.clone());
+    }
+
+    let (ops_rows_by_drawing, conflicts_by_drawing, db_size_bytes) = match &state.store {
+        Some(store) => {
+            if let Ok(ids) = store.drawing_ids() {
+                for id in ids {
+                    drawing_ids.insert(id);
+                }
+            }
+            (
+                store.ops_count_by_drawing().unwrap_or_default(),
+                store.pending_conflicts_by_drawing().unwrap_or_default(),
+                store.db_size_bytes(),
+            )
+        }
+        None => (Default::default(), Default::default(), 0),
+    };
+
+    let mut total_sessions = 0u64;
+    let mut total_claims = 0u64;
+    let mut total_ops_per_min = 0u64;
+    let mut total_pending_conflicts = 0i64;
+    let mut total_ops_rows = 0i64;
+
+    let drawings: Vec<serde_json::Value> = drawing_ids
+        .into_iter()
+        .map(|did| {
+            let active_sessions = sessions_by_drawing.get(&did).copied().unwrap_or(0);
+            let claims = claims_by_drawing.get(&did).copied().unwrap_or(0);
+            let opm = ops_per_min.get(&did).copied().unwrap_or(0);
+            let denied = denied_by_drawing.get(&did).copied().unwrap_or(0);
+            let pending_conflicts = conflicts_by_drawing.get(&did).copied().unwrap_or(0);
+            let ops_log_rows = ops_rows_by_drawing.get(&did).copied().unwrap_or(0);
+            total_sessions += active_sessions;
+            total_claims += claims;
+            total_ops_per_min += opm;
+            total_pending_conflicts += pending_conflicts;
+            total_ops_rows += ops_log_rows;
+            json!({
+                "drawing_id": did,
+                "active_sessions": active_sessions,
+                "claims": claims,
+                "ops_per_minute": opm,
+                "denied_writes": denied,
+                "pending_conflicts": pending_conflicts,
+                "ops_log_rows": ops_log_rows,
+            })
+        })
+        .collect();
+
+    let uptime_seconds = (now - state.metrics.started_at()).max(0);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "open_mode": state.open_mode,
+            "auth_enabled": state.require_auth,
+            "tls_enabled": state.tls_enabled,
+            "uptime_seconds": uptime_seconds,
+            "totals": {
+                "active_sessions": total_sessions,
+                "claims": total_claims,
+                "applied_ops_total": state.metrics.applied_ops_total(),
+                "ops_per_minute": total_ops_per_min,
+                "denied_writes_total": state.metrics.denied_writes_total(),
+                "pending_conflicts": total_pending_conflicts,
+                "ops_log_rows": total_ops_rows,
+                "db_size_bytes": db_size_bytes,
+            },
+            "drawings": drawings,
+        })),
+    )
+        .into_response()
+}
+
+async fn readonly_endpoint() -> Response {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        Json(json!({
+            "code": "READONLY_ENDPOINT",
+            "message": "该接口为只读接口",
         })),
     )
         .into_response()
@@ -4054,5 +4182,64 @@ mod tests {
         )
         .await;
         assert_eq!(unauth_resolve.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// #39: Read-only `GET /metrics` reports per-drawing & total sessions,
+    /// claims, ops/min, denied writes, pending conflicts, op-log rows, and DB
+    /// size; 1 edit + 1 denied write increments each by 1; structured log file
+    /// writes one JSON object per line without secrets.
+    #[tokio::test]
+    async fn metrics_endpoint_and_structured_log_file_track_ops_and_denials() {
+        let state = seeded_state();
+        let log_path = std::env::temp_dir().join(format!("ocs-log-{}.jsonl", uuid::Uuid::new_v4()));
+        state.logger.set_file(&log_path).expect("attach log file");
+        let port = serve(&state).await;
+        let now = ocs_collab::now_unix();
+
+        // Read-only check: POST /metrics -> 405.
+        let (method_status, _) = http_exchange(port, "POST", "/metrics").await;
+        assert_eq!(method_status, 405);
+
+        let (mut editor, _) = live_conn(&state, "u-proc", now).await;
+        let (mut viewer, _) = live_conn(&state, "u-view", now).await;
+        let _ = claim_frame(&state, &mut editor, "P-1001", true).await;
+
+        let (status0, m0) = http_exchange(port, "GET", "/metrics").await;
+        assert_eq!(status0, 200, "{m0}");
+        let applied_before = m0["totals"]["applied_ops_total"].as_u64().unwrap();
+        let denied_before = m0["totals"]["denied_writes_total"].as_u64().unwrap();
+        assert_eq!(m0["totals"]["active_sessions"], 2);
+        assert_eq!(m0["totals"]["claims"], 1);
+
+        // 1 successful property edit + 1 denied write.
+        assert!(applied_in(&write(&state, &mut editor, "op-m1", "1.6MPa").await));
+        assert!(refusal_in(&write(&state, &mut viewer, "op-m2", "9.9MPa").await).is_some());
+
+        let (status1, m1) = http_exchange(port, "GET", "/metrics").await;
+        assert_eq!(status1, 200, "{m1}");
+        assert_eq!(m1["totals"]["applied_ops_total"], applied_before + 1);
+        assert_eq!(m1["totals"]["denied_writes_total"], denied_before + 1);
+        assert_eq!(m1["totals"]["ops_log_rows"], 1);
+        assert!(m1["totals"]["db_size_bytes"].is_number());
+        let d_entry = m1["drawings"]
+            .as_array()
+            .expect("drawings")
+            .iter()
+            .find(|d| d["drawing_id"] == "d-a1-coop")
+            .expect("d-a1-coop row");
+        assert_eq!(d_entry["ops_per_minute"], 1);
+        assert_eq!(d_entry["denied_writes"], 1);
+        assert_eq!(d_entry["ops_log_rows"], 1);
+        assert_eq!(d_entry["pending_conflicts"], 0);
+
+        // Structured log file has one JSON line per event.
+        let log_content = std::fs::read_to_string(&log_path).expect("read log file");
+        let lines: Vec<serde_json::Value> = log_content
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("valid JSON line"))
+            .collect();
+        assert!(lines.iter().any(|l| l["event"] == "op_applied"), "{lines:?}");
+        assert!(lines.iter().any(|l| l["event"] == "write_denied"), "{lines:?}");
+        let _ = std::fs::remove_file(&log_path);
     }
 }

@@ -1575,11 +1575,25 @@ async fn op(
     // believes: the client's own gate is a courtesy, and is not there at all
     // in a client that reconnected before it heard, or is another program.
     if let Some(denied) = crate::access::write_access(state, session).await {
+        state.metrics.record_denied_write(&session.drawing_id);
         let first = op_changes(&payload).into_iter().next().unwrap_or(Value::Null);
         let kind = first["kind"].as_str().unwrap_or("op").to_owned();
         let object_ref = first["object_ref"].as_str().unwrap_or_default().to_owned();
         let tried = describe_change(&kind, &object_ref, &first);
         record_denied_write(state, session, peer_addr, &object_ref, &tried, &denied, now);
+        state.logger.emit(
+            "warn",
+            "write_denied",
+            serde_json::json!({
+                "drawing_id": session.drawing_id,
+                "session_id": session.session_id,
+                "user_id": session.user_id,
+                "op_id": op_id,
+                "object_ref": object_ref,
+                "code": denied.code(),
+                "level": denied.level.as_str(),
+            }),
+        );
         println!(
             "[ocs_collab_server] 入站 op session={} user={} op_id={op_id} base_revision={base_revision} object_ref={object_ref} -> error {} level={} at={now}",
             session.session_id,
@@ -1598,7 +1612,20 @@ async fn op(
     // other refusal: an op is one step of somebody's, and half a step is
     // not something they made.
     if let Some((change, held)) = held_by_another(state, session, &payload, now).await {
+        state.metrics.record_denied_write(&session.drawing_id);
         let holder_dn = state.display_name_of(&held.user_id);
+        state.logger.emit(
+            "warn",
+            "claim_held",
+            serde_json::json!({
+                "drawing_id": session.drawing_id,
+                "session_id": session.session_id,
+                "user_id": session.user_id,
+                "op_id": op_id,
+                "tag": held.tag,
+                "holder": held.session_id,
+            }),
+        );
         let holder_label = ocs_collab::protocol::format_user_label(&holder_dn, &held.user_id);
         let tried = describe_change(&change.kind, &change.subject(), &change.raw);
         let text = format!(

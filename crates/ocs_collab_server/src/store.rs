@@ -930,6 +930,56 @@ impl Store {
             .map_err(|err| format!("count audit: {err}"))
     }
 
+    /// Number of `ops` log rows per drawing (#39).
+    pub fn ops_count_by_drawing(&self) -> Result<std::collections::HashMap<String, i64>, String> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT drawing_id, COUNT(*) FROM ops GROUP BY drawing_id")
+            .map_err(|err| format!("prepare ops count: {err}"))?;
+        let mut map = std::collections::HashMap::new();
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .map_err(|err| format!("query ops count: {err}"))?;
+        for row in rows {
+            let (did, cnt) = row.map_err(|err| format!("read ops count: {err}"))?;
+            map.insert(did, cnt);
+        }
+        Ok(map)
+    }
+
+    /// Number of pending conflicts per drawing (#39).
+    pub fn pending_conflicts_by_drawing(
+        &self,
+    ) -> Result<std::collections::HashMap<String, i64>, String> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT drawing_id, COUNT(*) FROM conflicts WHERE status = '待裁决' GROUP BY drawing_id")
+            .map_err(|err| format!("prepare pending conflicts count: {err}"))?;
+        let mut map = std::collections::HashMap::new();
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .map_err(|err| format!("query pending conflicts count: {err}"))?;
+        for row in rows {
+            let (did, cnt) = row.map_err(|err| format!("read pending conflicts count: {err}"))?;
+            map.insert(did, cnt);
+        }
+        Ok(map)
+    }
+
+    /// Total on-disk size in bytes of the database file plus `-wal` / `-shm`
+    /// sidecars (`0` for `:memory:`, #39).
+    pub fn db_size_bytes(&self) -> u64 {
+        if self.path == Path::new(":memory:") {
+            return 0;
+        }
+        let base = self.path.display().to_string();
+        ["", "-wal", "-shm"]
+            .iter()
+            .filter_map(|suffix| std::fs::metadata(format!("{base}{suffix}")).ok())
+            .map(|m| m.len())
+            .sum()
+    }
+
     /// Inserts a conflict entry awaiting adjudication.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_conflict(&self, conflict: &ConflictRow) -> Result<(), String> {

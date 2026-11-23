@@ -945,6 +945,18 @@ pub fn resolve(
             .commit(change, name, revision, &session_id, resolved_by);
     }
     drawing.model.set_revision(revision);
+    state.metrics.record_applied_op(&row.drawing_id, now);
+    state.logger.emit(
+        "info",
+        "conflict_resolved",
+        serde_json::json!({
+            "drawing_id": row.drawing_id,
+            "conflict_id": conflict_id,
+            "resolved_by": resolved_by,
+            "resolution": resolution,
+            "revision": revision,
+        }),
+    );
 
     let custom_value = (resolution == RESOLUTION_MANUAL).then_some(final_value.as_str());
     match store.resolve_conflict(conflict_id, resolution, custom_value, resolved_by) {
@@ -1445,6 +1457,19 @@ fn commit(
         }
     };
     drawing.model.set_revision(revision);
+    state.metrics.record_applied_op(&session.drawing_id, incoming.now);
+    state.logger.emit(
+        "info",
+        "op_applied",
+        serde_json::json!({
+            "drawing_id": session.drawing_id,
+            "session_id": session.session_id,
+            "user_id": session.user_id,
+            "op_id": incoming.op_id,
+            "revision": revision,
+            "changes_count": changes.len(),
+        }),
+    );
     let message = ServerMessage::OpApplied {
         op_id: incoming.op_id.to_owned(),
         revision,
@@ -1505,6 +1530,19 @@ fn refused_with_actor(
     actor_display_name: Option<String>,
 ) -> Reaction {
     let session = incoming.session;
+    state.metrics.record_denied_write(&session.drawing_id);
+    state.logger.emit(
+        "warn",
+        action,
+        serde_json::json!({
+            "drawing_id": session.drawing_id,
+            "session_id": session.session_id,
+            "user_id": session.user_id,
+            "op_id": incoming.op_id,
+            "object_ref": object_ref,
+            "code": code,
+        }),
+    );
     if let Some(store) = &state.store {
         let row = ws::audit_row(
             Some(store),
@@ -1543,6 +1581,7 @@ fn yielded(
     (winner, winner_revision, winner_user): (String, i64, String),
 ) -> Reaction {
     let session = incoming.session;
+    state.metrics.record_denied_write(&session.drawing_id);
     let winner_dn = state.display_name_of(&winner_user);
     let winner_label = ocs_collab::protocol::format_user_label(&winner_dn, &winner_user);
     let what = format!("{}.{}", object_ref, change.field);

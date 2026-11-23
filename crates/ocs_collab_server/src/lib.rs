@@ -7,6 +7,7 @@ pub mod access;
 pub mod auth;
 pub mod bus;
 pub mod http;
+pub mod metrics;
 pub mod ops;
 pub mod perm;
 pub mod proxy;
@@ -88,6 +89,10 @@ pub struct AppState {
     pub require_auth: bool,
     /// Whether TLS is active on the server listener (#69).
     pub tls_enabled: bool,
+    /// Runtime metrics counters (#39).
+    pub metrics: Arc<metrics::Metrics>,
+    /// Structured single-line JSON logger with optional file sink (#39).
+    pub logger: Arc<metrics::StructuredLogger>,
     pub version: &'static str,
 }
 
@@ -122,6 +127,8 @@ impl AppState {
             open_mode: false,
             require_auth: false,
             tls_enabled: false,
+            metrics: Arc::new(metrics::Metrics::default()),
+            logger: Arc::new(metrics::StructuredLogger::default()),
             version: env!("CARGO_PKG_VERSION"),
         }
     }

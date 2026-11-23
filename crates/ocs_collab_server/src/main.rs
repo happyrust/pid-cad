@@ -63,6 +63,8 @@ struct Cli {
     tls_cert: Option<String>,
     /// PEM private key for HTTPS/WSS transport encryption (#69).
     tls_key: Option<String>,
+    /// Optional structured JSON-lines log file path (#39).
+    log_file: Option<String>,
 }
 
 fn default_db_path() -> String {
@@ -80,7 +82,7 @@ fn usage() -> &'static str {
     "ocs_collab_server --port <port> --db <path> [--bind <IP 地址>] \
      [--heartbeat-timeout <seconds>] [--claim-ttl <seconds>] [--seed <json>] \
      [--tie-window-ms <milliseconds>] [--new-repo-id] [--open-mode] [--require-auth] \
-     [--tls-cert <pem> --tls-key <pem>]\n\
+     [--tls-cert <pem> --tls-key <pem>] [--log-file <path>]\n\
      --bind 默认 127.0.0.1，只有本机能连。监听非本机回环地址时必须同时启用 --require-auth 与 TLS（--tls-cert/--tls-key）。\n\
      --open-mode 打开开放模式（允许未登记用户与图纸入会，仅用于演示与测试；缺省为严格模式）。\n\
      --require-auth 强制所有入会与管理接口核对用户凭据（凭据在库中仅存散列）。\n\
@@ -103,6 +105,7 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
         require_auth: false,
         tls_cert: None,
         tls_key: None,
+        log_file: None,
     };
 
     let mut iter = args.into_iter();
@@ -155,6 +158,7 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
             "--require-auth" => cli.require_auth = true,
             "--tls-cert" => cli.tls_cert = Some(value("--tls-cert")?),
             "--tls-key" => cli.tls_key = Some(value("--tls-key")?),
+            "--log-file" => cli.log_file = Some(value("--log-file")?),
             "--help" | "-h" => return Err(usage().to_owned()),
             other => return Err(format!("未知参数 {other}；用法：{}", usage())),
         }
@@ -330,6 +334,22 @@ async fn main() -> ExitCode {
     let mut state = build_state(&cli);
     state.tie_window = std::time::Duration::from_millis(cli.tie_window_ms);
     state.tls_enabled = tls_config.is_some();
+    if let Some(log_path) = &cli.log_file {
+        if let Err(err) = state.logger.set_file(log_path) {
+            eprintln!("[ocs_collab_server] {err}");
+            return ExitCode::FAILURE;
+        }
+    }
+    state.logger.emit(
+        "info",
+        "server_started",
+        serde_json::json!({
+            "bind": bound.to_string(),
+            "tls_enabled": state.tls_enabled,
+            "open_mode": state.open_mode,
+            "auth_enabled": state.require_auth,
+        }),
+    );
     let state = Arc::new(state);
     // With a tie window, ops made against the current revision wait it out
     // before they commit; this is what commits them.
@@ -589,6 +609,7 @@ mod tests {
             require_auth: false,
             tls_cert: None,
             tls_key: None,
+            log_file: None,
         };
         let state = build_state(&cli);
         assert!(state.store.is_none());
@@ -613,6 +634,7 @@ mod tests {
             require_auth: false,
             tls_cert: None,
             tls_key: None,
+            log_file: None,
         };
         let state = build_state(&cli);
         assert!(state.db_healthy());
