@@ -217,6 +217,15 @@ pub struct ConflictRow {
     pub display_name_b: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_by_display_name: Option<String>,
+    /// Unix seconds when party A wrote `value_a` (#80).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written_at_a: Option<i64>,
+    /// Unix seconds when party B wrote `value_b` (#80).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written_at_b: Option<i64>,
+    /// Unix seconds when the entry was ruled (#80).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<i64>,
 }
 
 /// Metadata returned by [`Store::backup_to`] / [`Store::backup_into_dir`] (#105).
@@ -1156,8 +1165,9 @@ impl Store {
             conn.execute(
                 "INSERT INTO conflicts
                    (conflict_id, drawing_id, object_ref, field, value_a, value_b,
-                    base_revision, status, resolution, resolved_value, resolved_by, user_a, user_b)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    base_revision, status, resolution, resolved_value, resolved_by, user_a, user_b,
+                    written_at_a, written_at_b, resolved_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     conflict.conflict_id,
                     conflict.drawing_id,
@@ -1171,7 +1181,10 @@ impl Store {
                     conflict.resolved_value,
                     conflict.resolved_by,
                     conflict.user_a,
-                    conflict.user_b
+                    conflict.user_b,
+                    conflict.written_at_a,
+                    conflict.written_at_b,
+                    conflict.resolved_at
                 ],
             )
             .map_err(|err| format!("insert conflict: {err}"))?;
@@ -1209,7 +1222,8 @@ impl Store {
             .prepare(
                 "SELECT c.conflict_id, c.drawing_id, c.object_ref, c.field, c.value_a, c.value_b,
                         c.base_revision, c.status, c.resolution, c.resolved_value, c.resolved_by,
-                        c.user_a, ua.display_name, c.user_b, ub.display_name, ur.display_name
+                        c.user_a, ua.display_name, c.user_b, ub.display_name, ur.display_name,
+                        c.written_at_a, c.written_at_b, c.resolved_at
                  FROM conflicts c
                  JOIN conflict_ops o ON o.conflict_id = c.conflict_id
                  LEFT JOIN users ua ON ua.user_id = c.user_a
@@ -1260,7 +1274,8 @@ impl Store {
             .prepare(&format!(
                 "SELECT c.conflict_id, c.drawing_id, c.object_ref, c.field, c.value_a, c.value_b,
                         c.base_revision, c.status, c.resolution, c.resolved_value, c.resolved_by,
-                        c.user_a, ua.display_name, c.user_b, ub.display_name, ur.display_name
+                        c.user_a, ua.display_name, c.user_b, ub.display_name, ur.display_name,
+                        c.written_at_a, c.written_at_b, c.resolved_at
                  FROM conflicts c
                  LEFT JOIN users ua ON ua.user_id = c.user_a
                  LEFT JOIN users ub ON ub.user_id = c.user_b
@@ -1292,14 +1307,16 @@ impl Store {
         resolution: &str,
         resolved_value: Option<&str>,
         resolved_by: &str,
+        resolved_at: i64,
     ) -> Result<bool, String> {
         let conn = self.lock()?;
         let changed = conn
             .execute(
                 "UPDATE conflicts
-                 SET status = '已裁决', resolution = ?2, resolved_value = ?3, resolved_by = ?4
+                 SET status = '已裁决', resolution = ?2, resolved_value = ?3,
+                     resolved_by = ?4, resolved_at = ?5
                  WHERE conflict_id = ?1 AND status = '待裁决'",
-                params![conflict_id, resolution, resolved_value, resolved_by],
+                params![conflict_id, resolution, resolved_value, resolved_by, resolved_at],
             )
             .map_err(|err| format!("resolve conflict {conflict_id}: {err}"))?;
         Ok(changed > 0)
@@ -1620,6 +1637,9 @@ fn conflict_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConflictRow> {
         user_b: row.get(13)?,
         display_name_b: non_empty(row.get(14)?),
         resolved_by_display_name: non_empty(row.get(15)?),
+        written_at_a: row.get(16)?,
+        written_at_b: row.get(17)?,
+        resolved_at: row.get(18)?,
     })
 }
 
@@ -1692,7 +1712,10 @@ CREATE TABLE IF NOT EXISTS conflicts (
   resolved_value TEXT,
   resolved_by   TEXT,
   user_a        TEXT,
-  user_b        TEXT
+  user_b        TEXT,
+  written_at_a  INTEGER,
+  written_at_b  INTEGER,
+  resolved_at   INTEGER
 );
 
 -- The ops each conflict entry holds, in the order `conflict.op_ids` names
@@ -1781,6 +1804,9 @@ END;
     for ddl in [
         "ALTER TABLE conflicts ADD COLUMN user_a TEXT",
         "ALTER TABLE conflicts ADD COLUMN user_b TEXT",
+        "ALTER TABLE conflicts ADD COLUMN written_at_a INTEGER",
+        "ALTER TABLE conflicts ADD COLUMN written_at_b INTEGER",
+        "ALTER TABLE conflicts ADD COLUMN resolved_at INTEGER",
         "ALTER TABLE users ADD COLUMN credential_hash TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
     ] {
@@ -2198,6 +2224,9 @@ mod tests {
                 user_b: None,
                 display_name_b: None,
                 resolved_by_display_name: None,
+                written_at_a: None,
+                written_at_b: None,
+                resolved_at: None,
             })
             .expect("insert conflict");
 
@@ -2207,11 +2236,11 @@ mod tests {
         assert_eq!(pending.len(), 1);
 
         assert!(store
-            .resolve_conflict("c-1", "采用甲方", None, "u-admin")
+            .resolve_conflict("c-1", "采用甲方", None, "u-admin", 1_700_000_100)
             .expect("resolve"));
         assert!(
             !store
-                .resolve_conflict("c-1", "采用乙方", None, "u-admin")
+                .resolve_conflict("c-1", "采用乙方", None, "u-admin", 1_700_000_200)
                 .expect("second resolve"),
             "a conflict is adjudicated exactly once"
         );
@@ -2222,6 +2251,99 @@ mod tests {
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].resolution.as_deref(), Some("采用甲方"));
         assert_eq!(resolved[0].resolved_by.as_deref(), Some("u-admin"));
+        assert_eq!(resolved[0].resolved_at, Some(1_700_000_100));
+    }
+
+    /// #80: who/when columns survive a restart, and a database from before
+    /// those columns still opens.
+    #[test]
+    fn conflict_who_and_when_survive_reopen_and_old_tables_upgrade() {
+        let path = temp_db_path("old-conflict");
+        {
+            let conn = rusqlite::Connection::open(&path).expect("create");
+            conn.execute_batch(
+                "CREATE TABLE users (
+                   user_id TEXT PRIMARY KEY,
+                   display_name TEXT NOT NULL,
+                   role TEXT NOT NULL,
+                   company TEXT NOT NULL DEFAULT ''
+                 );
+                 INSERT INTO users (user_id, display_name, role) VALUES
+                   ('u-a', '甲', '工艺设计人员'),
+                   ('u-b', '乙', '工艺设计人员');
+                 CREATE TABLE conflicts (
+                   conflict_id TEXT PRIMARY KEY,
+                   drawing_id TEXT NOT NULL,
+                   object_ref TEXT NOT NULL,
+                   field TEXT NOT NULL,
+                   value_a TEXT NOT NULL,
+                   value_b TEXT NOT NULL,
+                   base_revision INTEGER NOT NULL,
+                   status TEXT NOT NULL,
+                   resolution TEXT,
+                   resolved_value TEXT,
+                   resolved_by TEXT,
+                   user_a TEXT,
+                   user_b TEXT
+                 );
+                 INSERT INTO conflicts (
+                   conflict_id, drawing_id, object_ref, field, value_a, value_b,
+                   base_revision, status, user_a, user_b
+                 ) VALUES (
+                   'c-old', 'PID-1', 'V-1', '设计压力', '1.0MPa', '2.0MPa', 0, '待裁决', 'u-a', 'u-b'
+                 );",
+            )
+            .expect("old schema");
+        }
+        let store = Store::open(&path).expect("old database upgrades");
+        let old = store.conflict("c-old").expect("read").expect("row");
+        assert_eq!(old.user_a.as_deref(), Some("u-a"));
+        assert_eq!(old.display_name_a.as_deref(), Some("甲"));
+        assert_eq!(old.user_b.as_deref(), Some("u-b"));
+        assert_eq!(old.display_name_b.as_deref(), Some("乙"));
+        assert_eq!(old.written_at_a, None);
+        store
+            .insert_conflict(&ConflictRow {
+                conflict_id: "c-new".into(),
+                drawing_id: "PID-1".into(),
+                object_ref: "V-2".into(),
+                field: "设计压力".into(),
+                value_a: "1.6MPa".into(),
+                value_b: "2.5MPa".into(),
+                base_revision: 3,
+                status: "待裁决".into(),
+                resolution: None,
+                resolved_value: None,
+                resolved_by: None,
+                user_a: Some("u-a".into()),
+                display_name_a: None,
+                user_b: Some("u-b".into()),
+                display_name_b: None,
+                resolved_by_display_name: None,
+                written_at_a: Some(11),
+                written_at_b: Some(22),
+                resolved_at: None,
+            })
+            .expect("insert");
+        drop(store);
+        let store = Store::open(&path).expect("reopen");
+        let row = store.conflict("c-new").expect("read").expect("row");
+        assert_eq!(row.written_at_a, Some(11));
+        assert_eq!(row.written_at_b, Some(22));
+        assert_eq!(row.display_name_a.as_deref(), Some("甲"));
+        assert_eq!(row.display_name_b.as_deref(), Some("乙"));
+        assert!(store
+            .resolve_conflict("c-new", "采用乙方", None, "u-b", 33)
+            .expect("resolve"));
+        drop(store);
+        let store = Store::open(&path).expect("reopen after ruling");
+        let row = store.conflict("c-new").expect("read").expect("row");
+        assert_eq!(row.status, "已裁决");
+        assert_eq!(row.resolved_by.as_deref(), Some("u-b"));
+        assert_eq!(row.resolved_by_display_name.as_deref(), Some("乙"));
+        assert_eq!(row.resolved_at, Some(33));
+        drop(store);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -2245,10 +2367,13 @@ mod tests {
                 user_b: None,
                 display_name_b: None,
                 resolved_by_display_name: None,
+                written_at_a: None,
+                written_at_b: None,
+                resolved_at: None,
             })
             .expect("insert");
         store
-            .resolve_conflict("c-2", "人工改值", Some("DN65"), "u-admin")
+            .resolve_conflict("c-2", "人工改值", Some("DN65"), "u-admin", 1_700_000_300)
             .expect("resolve");
         let rows = store.list_conflicts(None, None).expect("list");
         assert_eq!(rows[0].resolved_value.as_deref(), Some("DN65"));
@@ -2805,6 +2930,9 @@ mod tests {
             user_b: None,
             display_name_b: None,
             resolved_by_display_name: None,
+                written_at_a: None,
+                written_at_b: None,
+                resolved_at: None,
         };
         let held = vec!["op-r-2-1".to_owned(), "op-r-1-1".to_owned()];
         store.insert_conflict_holding(&row, &held).expect("entry");
@@ -2823,7 +2951,7 @@ mod tests {
         assert!(elsewhere.is_empty(), "another drawing: {elsewhere:?}");
 
         assert!(store
-            .resolve_conflict("c-1", "采用甲方", None, "u-admin")
+            .resolve_conflict("c-1", "采用甲方", None, "u-admin", 1_700_000_100)
             .expect("ruled"));
         let ruled = store
             .pending_conflicts_holding("PID-1101", "op-r-1-1")

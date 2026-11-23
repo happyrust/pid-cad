@@ -282,6 +282,15 @@ pub enum ServerMessage {
         user_b: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display_name_b: Option<String>,
+        /// Unix seconds when party A wrote `value_a` (#80).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        written_at_a: Option<i64>,
+        /// Unix seconds when party B wrote `value_b` (#80).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        written_at_b: Option<i64>,
+        /// Unix seconds when the entry was ruled (#80). Absent while it waits.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_at: Option<i64>,
         /// Value the field held before the two tying writes (#79).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         previous_value: Option<String>,
@@ -642,6 +651,9 @@ mod tests {
             display_name_a: None,
             user_b: None,
             display_name_b: None,
+            written_at_a: None,
+            written_at_b: None,
+            resolved_at: None,
             previous_value: None,
             revert_local: None,
         };

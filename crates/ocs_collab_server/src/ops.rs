@@ -257,6 +257,9 @@ fn taken_before(state: &AppState, session: &Session, op_id: &str) -> Option<Vec<
             display_name_a: row.display_name_a,
             user_b: row.user_b,
             display_name_b: row.display_name_b,
+            written_at_a: row.written_at_a,
+            written_at_b: row.written_at_b,
+            resolved_at: row.resolved_at,
             previous_value: None,
             revert_local: Some(true),
         })
@@ -964,7 +967,7 @@ pub fn resolve(
     );
 
     let custom_value = (resolution == RESOLUTION_MANUAL).then_some(final_value.as_str());
-    match store.resolve_conflict(conflict_id, resolution, custom_value, resolved_by) {
+    match store.resolve_conflict(conflict_id, resolution, custom_value, resolved_by, now) {
         Ok(true) => {}
         Ok(false) => {
             eprintln!("[ocs_collab_server] 冲突 {conflict_id} 写回之后标记失败：条目已不是待裁决")
@@ -983,6 +986,7 @@ pub fn resolve(
         resolved_value: custom_value.map(str::to_owned),
         resolved_by: Some(resolved_by.to_owned()),
         resolved_by_display_name: resolved_dn_opt.clone(),
+        resolved_at: Some(now),
         ..row
     };
     let message = ServerMessage::OpApplied {
@@ -1708,6 +1712,9 @@ fn tie(
                 user_b: Some(user_b.clone()),
                 display_name_b: display_name_b.clone(),
                 resolved_by_display_name: None,
+                written_at_a: Some(first.received_at),
+                written_at_b: Some(second.now),
+                resolved_at: None,
             };
             let held = [first.op_id.clone(), second.op_id.to_owned()];
             if let Err(err) = store.insert_conflict_holding(&row, &held) {
@@ -1769,6 +1776,9 @@ fn tie(
                 display_name_a,
                 user_b: Some(user_b),
                 display_name_b,
+                written_at_a: Some(first.received_at),
+                written_at_b: Some(second.now),
+                resolved_at: None,
                 previous_value,
                 revert_local: Some(true),
             },
