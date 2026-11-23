@@ -64,7 +64,23 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/conflicts", get(conflict_list))
         .route("/conflicts/{id}/resolve", post(conflict_resolve))
         .route("/admin/backup", post(admin_backup))
+        .route("/claims/force-release", post(force_release_not_this_round))
+        .route("/sessions/{id}/end", post(end_other_session_not_this_round))
         .with_state(state)
+}
+
+/// #89: force-releasing a claim or ending someone else's editing session is
+/// not in this round. Idle claims expire on their own.
+async fn force_release_not_this_round() -> Response {
+    error_response(
+        StatusCode::FORBIDDEN,
+        codes::INVALID_MESSAGE,
+        "这一轮不提供强制释放占用或结束别人的编辑会话；不活动的占用在有效期后自行到期",
+    )
+}
+
+async fn end_other_session_not_this_round(Path(_session_id): Path<String>) -> Response {
+    force_release_not_this_round().await
 }
 
 /// `GET /health` → 200 `{"ok":true,"db":"ok","version":"...","open_mode":...,"auth_enabled":...,"tls_enabled":...}`,
@@ -2158,6 +2174,57 @@ mod tests {
         assert!(actions.contains(&"acl_upsert"), "{actions:?}");
         assert!(actions.contains(&"acl_delete"), "{actions:?}");
         assert!(actions.contains(&"role_changed"), "{actions:?}");
+    }
+
+    /// #89: force-release and ending another session are refused, and the
+    /// claim that was already held is still held.
+    #[tokio::test]
+    async fn force_release_and_ending_another_session_are_refused() {
+        let state = seeded_state();
+        let store = state.store.clone().expect("store");
+        store
+            .upsert_session(&crate::store::SessionRow {
+                session_id: "s-held".into(),
+                drawing_id: "d-a1-coop".into(),
+                user_id: "u-proc".into(),
+                mode: "协同编辑".into(),
+                status: "活跃".into(),
+                base_revision: 0,
+                last_heartbeat: 1_000,
+                created_at: 1_000,
+                workspace: String::new(),
+            })
+            .expect("session");
+        store
+            .insert_claim(&crate::store::ClaimRow {
+                tag: "P-1001".into(),
+                drawing_id: "d-a1-coop".into(),
+                session_id: "s-held".into(),
+                user_id: "u-proc".into(),
+                expires_at: 2_000,
+            })
+            .expect("claim");
+
+        for response in [
+            force_release_not_this_round().await,
+            end_other_session_not_this_round(Path("s-held".into())).await,
+        ] {
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("body");
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+            assert_eq!(body["code"], codes::INVALID_MESSAGE);
+            assert!(
+                body["message"].as_str().unwrap_or("").contains("不提供强制释放"),
+                "{body}"
+            );
+        }
+        let claims = store.claims_on_drawing("d-a1-coop").expect("claims");
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].tag, "P-1001");
+        assert_eq!(claims[0].session_id, "s-held");
+        assert!(store.session_row("s-held").expect("lookup").is_some());
     }
 
     #[tokio::test]
