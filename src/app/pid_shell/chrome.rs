@@ -60,10 +60,24 @@ pub enum SyncStatus {
         /// Reconnect attempts that have failed since the last live session.
         failed: u32,
     },
+    /// The connection is down with local edits queued to send on reconnect (#53).
+    RetryingQueued {
+        failed: u32,
+        queued: usize,
+    },
+    /// Connected and replaying missed room operations up to `target` (#53).
+    CatchingUp {
+        target: i64,
+    },
     /// Connected, and the drawing is at `revision` of the room.
     Connected {
         /// The room's revision this session has applied.
         revision: i64,
+    },
+    /// Connected with local edits still queued behind in-flight ops (#53).
+    ConnectedQueued {
+        revision: i64,
+        queued: usize,
     },
     /// Connected, and this session may not write to the drawing.
     ReadOnly {
@@ -80,18 +94,31 @@ impl SyncStatus {
     /// anything else, since nothing else is current then.
     pub(crate) fn of(app: &OpenCADStudio) -> Self {
         let session = &app.collab;
+        let queued = session.outbox.len();
         if !session.wanted() {
             SyncStatus::Off
         } else if !session.connected {
-            match session.reconnect_attempts {
-                0 => SyncStatus::Connecting,
-                failed => SyncStatus::Retrying { failed },
+            match (session.reconnect_attempts, queued) {
+                (0, 0) => SyncStatus::Connecting,
+                (0, q) => SyncStatus::RetryingQueued {
+                    failed: 1,
+                    queued: q,
+                },
+                (failed, 0) => SyncStatus::Retrying { failed },
+                (failed, q) => SyncStatus::RetryingQueued { failed, queued: q },
             }
         } else if session.mismatch().is_some() {
             SyncStatus::Diverged
+        } else if let Some(target) = session.catching_up {
+            SyncStatus::CatchingUp { target }
         } else if session.readonly {
             SyncStatus::ReadOnly {
                 revision: session.base_revision,
+            }
+        } else if queued > 0 {
+            SyncStatus::ConnectedQueued {
+                revision: session.base_revision,
+                queued,
             }
         } else {
             SyncStatus::Connected {
@@ -106,7 +133,14 @@ impl SyncStatus {
             SyncStatus::Off => "未连接协同服务器".to_owned(),
             SyncStatus::Connecting => "正在连接协同服务器…".to_owned(),
             SyncStatus::Retrying { failed } => format!("连接已断开，重试第 {failed} 次"),
+            SyncStatus::RetryingQueued { failed, queued } => {
+                format!("连接已断开，重试第 {failed} 次 · 已排队 {queued} 步")
+            }
+            SyncStatus::CatchingUp { target } => format!("正在补发（至修订 {target}）…"),
             SyncStatus::Connected { revision } => format!("已连接 · 修订 {revision}"),
+            SyncStatus::ConnectedQueued { revision, queued } => {
+                format!("已连接 · 修订 {revision} · 已排队 {queued} 步")
+            }
             SyncStatus::ReadOnly { revision } => format!("已连接 · 只读 · 修订 {revision}"),
             SyncStatus::Diverged => "与房间不一致，已停止同步".to_owned(),
         }
@@ -116,8 +150,13 @@ impl SyncStatus {
     pub fn dot(&self) -> ColorToken {
         match self {
             SyncStatus::Off => ColorToken::TextMuted,
-            SyncStatus::Connecting | SyncStatus::ReadOnly { .. } => ColorToken::Amber,
-            SyncStatus::Retrying { .. } | SyncStatus::Diverged => ColorToken::Danger,
+            SyncStatus::Connecting
+            | SyncStatus::ReadOnly { .. }
+            | SyncStatus::CatchingUp { .. }
+            | SyncStatus::ConnectedQueued { .. } => ColorToken::Amber,
+            SyncStatus::Retrying { .. }
+            | SyncStatus::RetryingQueued { .. }
+            | SyncStatus::Diverged => ColorToken::Danger,
             SyncStatus::Connected { .. } => ColorToken::Success,
         }
     }

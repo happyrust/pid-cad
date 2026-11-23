@@ -3657,6 +3657,9 @@ pub enum Message {
     ControlRequest(control::Envelope),
     /// One event from the collaboration transport thread (`src/app/collab`).
     CollabEvent(collab::CollabEvent),
+    /// Result from a non-blocking HTTP query to the collaboration server
+    /// (`#40`, `#42`, `#66`).
+    CollabQueryDone(collab::query::CollabQueryReply),
     /// The collaboration panel asked to claim (`claim: true`) or release a
     /// tag. The app checks it is in a session, queues the frame, and narrates
     /// the outcome when the server answers.

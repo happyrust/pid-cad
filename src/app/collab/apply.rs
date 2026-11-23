@@ -1187,6 +1187,29 @@ impl OpenCADStudio {
             if parsed.is_empty() {
                 continue;
             }
+            // Capture pre-apply values so we can emit clear toasts (#59, #60, #61).
+            let pre_values: Vec<Option<String>> = parsed
+                .iter()
+                .map(|c| {
+                    let doc = &self.tabs[i].scene.document;
+                    if c.kind == broadcast::KIND_SET_PROPERTY {
+                        doc.entities().find_map(|e| {
+                            let a = crate::pid::persist::PidAuthor::load(doc, e.common().handle)?;
+                            if a.tag != c.object_ref {
+                                return None;
+                            }
+                            let (props, _) = crate::pid::propagate::split_props(&a.props);
+                            Some(props.get(&c.field).cloned().unwrap_or_default())
+                        })
+                    } else if c.kind == broadcast::KIND_SET_TAG
+                        || c.kind == broadcast::KIND_REASSIGN_TAG
+                    {
+                        Some(c.object_ref.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             let applied = self.write_as_received(i, &parsed);
             if !applied.unresolved.is_empty() {
                 failure.get_or_insert(format!(
@@ -1195,6 +1218,7 @@ impl OpenCADStudio {
                     applied.unresolved.join("、")
                 ));
             }
+            self.emit_remote_change_toasts(&remote.op_id, &remote.changes, &parsed, &pre_values);
             total += applied.handles.len() + applied.erased.len();
         }
         self.applying_remote = false;
@@ -1226,6 +1250,143 @@ impl OpenCADStudio {
         // The queue waited for these to be written (`State::pump`): it
         // moves now, unless one could not be and the drawing is marked.
         self.collab.pump();
+    }
+
+    /// Emit user-facing toasts for applied remote changes:
+    /// - `#59`: peer edited property or tag (multiple edits in one op merged)
+    /// - `#60`: own newly placed symbol had its tag reassigned by the server
+    /// - `#61`: upstream connector property arrived from another drawing
+    /// - `#65`: clear unpaired connector entry when `pair_connector` succeeds
+    fn emit_remote_change_toasts(
+        &mut self,
+        op_id: &str,
+        raw_changes: &[serde_json::Value],
+        parsed: &[broadcast::Change],
+        pre_values: &[Option<String>],
+    ) {
+        use super::connectors::KIND_PAIR_CONNECTOR;
+        use super::pipes::Pipe;
+        use super::toasts::ToastKind;
+
+        // Clear unpaired connector notifications as soon as pairing succeeds (#65).
+        for change in parsed {
+            if change.kind == KIND_PAIR_CONNECTOR {
+                if let Some(Pipe::Connector(said)) = &change.pipe {
+                    if said.peer.is_some() {
+                        self.collab
+                            .clear_unpaired_connector(&change.object_ref, &said.connector);
+                    }
+                }
+            }
+        }
+
+        // Tag reassignments on our own op (#60).
+        for change in parsed {
+            if change.kind == broadcast::KIND_REASSIGN_TAG {
+                self.collab.push_toast(
+                    ToastKind::Warning,
+                    format!(
+                        "位号冲突，服务器已将 {} 改派为 {}",
+                        change.object_ref, change.value
+                    ),
+                );
+            }
+        }
+
+        // Upstream connector propagation (`link-<source_drawing>-...` or `source_drawing` field) (#61).
+        let link_prefix = ocs_collab::link::LINK_SESSION_PREFIX;
+        let source_drawing = raw_changes
+            .iter()
+            .find_map(|v| {
+                v["source_drawing"]
+                    .as_str()
+                    .or_else(|| v["from_drawing"].as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            })
+            .or_else(|| {
+                op_id.strip_prefix("link-").and_then(|rest| {
+                    // Server formats propagated op_ids as `link-<from>-r<rev>-<n>` or `link:<from>:...`
+                    rest.split("-r")
+                        .next()
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                })
+            })
+            .or_else(|| {
+                op_id
+                    .starts_with(link_prefix)
+                    .then(|| "上游图纸".to_owned())
+            });
+
+        // Resolve author label from raw payload if present (ready for Subagent 2's author field).
+        let author_raw = raw_changes.iter().find_map(|v| {
+            let uid = v["user_id"].as_str().unwrap_or("");
+            let name = v["display_name"].as_str().unwrap_or("");
+            if !uid.is_empty() || !name.is_empty() {
+                Some(super::toasts::format_user_label(uid, name))
+            } else {
+                None
+            }
+        });
+
+        // Collect property & tag edits.
+        let mut edits: Vec<(String, String, String, String)> = Vec::new();
+        for (idx, change) in parsed.iter().enumerate() {
+            if change.kind == broadcast::KIND_SET_PROPERTY {
+                let old = pre_values
+                    .get(idx)
+                    .and_then(|o| o.clone())
+                    .unwrap_or_default();
+                edits.push((
+                    change.object_ref.clone(),
+                    change.field.clone(),
+                    if old.is_empty() { "（空）".to_owned() } else { old },
+                    if change.value.is_empty() {
+                        "（空）".to_owned()
+                    } else {
+                        change.value.clone()
+                    },
+                ));
+            } else if change.kind == broadcast::KIND_SET_TAG {
+                edits.push((
+                    change.object_ref.clone(),
+                    "位号".to_owned(),
+                    change.object_ref.clone(),
+                    change.value.clone(),
+                ));
+            }
+        }
+        if edits.is_empty() {
+            return;
+        }
+        // Ruling ops already emitted their own conflict-resolved toast (#62).
+        if op_id.starts_with("resolve-") {
+            return;
+        }
+        let (first_obj, first_field, first_old, first_new) = &edits[0];
+        if let Some(src) = source_drawing {
+            let msg = if edits.len() == 1 {
+                format!("来自上游图纸 {src}：{first_obj} 的 {first_field}：{first_old} → {first_new}")
+            } else {
+                format!(
+                    "来自上游图纸 {src}：已更新 {first_obj} 等 {} 项属性（{first_field}：{first_old} → {first_new}）",
+                    edits.len()
+                )
+            };
+            self.collab.push_toast(ToastKind::Info, msg);
+            return;
+        }
+        let who = author_raw.unwrap_or_else(|| "同事".to_owned());
+        let msg = if edits.len() == 1 {
+            format!("{who} 修改了 {first_obj} 的 {first_field}：{first_old} → {first_new}")
+        } else {
+            format!(
+                "{who} 修改了 {first_obj} 等 {} 处属性/位号（首项 {first_field}：{first_old} → {first_new}）",
+                edits.len()
+            )
+        };
+        self.collab.push_toast(ToastKind::Info, msg);
     }
 
     /// Write `changes` onto tab `i` the way a peer's change is written:
@@ -1814,11 +1975,15 @@ impl OpenCADStudio {
         if !self.readonly_refuses_command(cmd) {
             return false;
         }
-        let (code, _level) = self.collab.refusal();
-        self.command_line.push_error_coded(
-            &code,
-            &format!("协同：当前会话只读，拒绝执行 {cmd}"),
-        );
+        let (code, level) = self.collab.refusal();
+        let level_zh = match level.as_str() {
+            "role" => "角色权限",
+            "pbs" => "PBS 节点 ACL",
+            _ => "图纸状态",
+        };
+        let msg = format!("协同：当前会话只读（{level_zh}），拒绝执行 {cmd}");
+        self.command_line.push_error_coded(&code, &msg);
+        self.collab.push_toast(super::toasts::ToastKind::Error, msg);
         let object_ref = self.attempted_object(cmd);
         self.collab.report_attempt(&object_ref, cmd.trim());
         true
@@ -1942,10 +2107,12 @@ impl OpenCADStudio {
         tag: &str,
         holder: &str,
     ) {
-        self.command_line.push_error_coded(
-            ocs_collab::protocol::codes::CLAIM_HELD,
-            &format!("协同：位号 {tag} 已被 {holder} 占用，这一步修改（{label}）已撤回"),
-        );
+        let holder_shown = self.collab.format_user(holder);
+        let msg = format!("位号 {tag} 已被 {holder_shown} 占用，这一步修改（{label}）已撤回");
+        self.command_line
+            .push_error_coded(ocs_collab::protocol::codes::CLAIM_HELD, &format!("协同：{msg}"));
+        self.collab
+            .push_toast(super::toasts::ToastKind::Warning, msg);
         self.collab.report_attempt(tag, &tried_text(changes, label));
     }
 
@@ -1985,11 +2152,17 @@ impl OpenCADStudio {
         changes: &[broadcast::Change],
         label: &str,
     ) {
-        let (code, _level) = self.collab.refusal();
-        self.command_line.push_error_coded(
-            &code,
-            &format!("协同：当前会话只读，这一步修改（{label}）已撤回"),
-        );
+        let (code, level) = self.collab.refusal();
+        let level_zh = match level.as_str() {
+            "role" => "角色权限",
+            "pbs" => "PBS 节点 ACL",
+            _ => "图纸状态",
+        };
+        let msg = format!("当前会话只读（{level_zh}），这一步修改（{label}）已撤回");
+        self.command_line
+            .push_error_coded(&code, &format!("协同：{msg}"));
+        self.collab
+            .push_toast(super::toasts::ToastKind::Error, msg);
         let object_ref = changes
             .first()
             .map(|first| first.object_ref.clone())

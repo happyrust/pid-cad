@@ -1831,6 +1831,7 @@ impl OpenCADStudio {
             self.sync_claim_colors();
             self.refresh_collab_view();
         }
+        self.collab.toasts.prune();
         let i = self.active_tab;
         self.tabs[i].scene.update(t - self.start);
         // Dynamic dimensions keep their screen size across zoom bands.

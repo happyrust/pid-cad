@@ -188,6 +188,9 @@ pub struct State {
     /// the first time the inspector asks ([`imported`]) and kept here until
     /// the selection is refreshed ([`selection_refreshed`]).
     paired: RefCell<Option<((u64, document::Handle), Paired)>>,
+    /// Whether the inline modification history panel is currently open inside
+    /// the Inspector (#66).
+    pub history_open: bool,
 }
 
 /// What the screen's widgets send.
@@ -210,6 +213,26 @@ pub enum Message {
     },
     /// Enter in the row being typed in.
     FieldSubmit,
+    /// Dismiss one collaboration toast notification (#50).
+    DismissToast(u64),
+    /// Jump from a page connector to its paired peer drawing/line (#64).
+    JumpConnector(document::Handle),
+    /// Open inline modification history for `tag` (#66).
+    OpenHistory(String),
+    /// Close the inline modification history view (#66).
+    CloseHistory,
+    /// Re-query the server with the current user/time filters (#66).
+    RefreshHistory,
+    /// Update history user filter text (#66).
+    HistoryFilterUser(String),
+    /// Update history start-time filter text (#66).
+    HistoryFilterFrom(String),
+    /// Update history end-time filter text (#66).
+    HistoryFilterTo(String),
+    /// Update history client-side field filter (#66).
+    HistoryFilterField(String),
+    /// Update history client-side action filter (#66).
+    HistoryFilterAction(String),
 }
 
 fn send(message: Message) -> AppMessage {
@@ -258,6 +281,65 @@ pub(crate) fn update(app: &mut OpenCADStudio, message: Message) -> Task<AppMessa
             if app.commit_pid_author_property(i, &[handle], &field, &text) {
                 app.refresh_properties();
             }
+            Task::none()
+        }
+        Message::DismissToast(id) => {
+            app.collab.toasts.dismiss(id);
+            Task::none()
+        }
+        Message::JumpConnector(handle) => {
+            let i = app.active_tab;
+            let _ = app.jump_to_connector_peer(i, Some(handle));
+            Task::none()
+        }
+        Message::OpenHistory(tag) => {
+            app.pid_shell.editor.history_open = true;
+            app.collab.history_target = Some(tag.clone());
+            let filter = crate::app::collab::query::AuditFilter {
+                object_ref: Some(tag.clone()),
+                limit: Some(50),
+                ..Default::default()
+            };
+            let t_hist = app.fetch_collab_history(&tag, filter);
+            let t_writers = app.fetch_collab_field_writers(&tag);
+            Task::batch([t_hist, t_writers])
+        }
+        Message::CloseHistory => {
+            app.pid_shell.editor.history_open = false;
+            Task::none()
+        }
+        Message::RefreshHistory => {
+            let Some(tag) = app.collab.history_target.clone() else {
+                return Task::none();
+            };
+            let f = &app.collab.history_filter;
+            let filter = crate::app::collab::query::AuditFilter {
+                object_ref: Some(tag.clone()),
+                user_id: (!f.user_id.trim().is_empty()).then(|| f.user_id.trim().to_owned()),
+                from: f.from_text.trim().parse::<i64>().ok(),
+                to: f.to_text.trim().parse::<i64>().ok(),
+                limit: Some(50),
+            };
+            app.fetch_collab_history(&tag, filter)
+        }
+        Message::HistoryFilterUser(s) => {
+            app.collab.history_filter.user_id = s;
+            Task::none()
+        }
+        Message::HistoryFilterFrom(s) => {
+            app.collab.history_filter.from_text = s;
+            Task::none()
+        }
+        Message::HistoryFilterTo(s) => {
+            app.collab.history_filter.to_text = s;
+            Task::none()
+        }
+        Message::HistoryFilterField(s) => {
+            app.collab.history_filter.field_query = s;
+            Task::none()
+        }
+        Message::HistoryFilterAction(s) => {
+            app.collab.history_filter.action_kind = s;
             Task::none()
         }
     }
@@ -383,6 +465,8 @@ pub(crate) struct Object {
     /// For a fitting: how many of its ports are joined to a segment, of
     /// how many.
     pub ports: Option<(usize, usize)>,
+    /// Page connector metadata if the selected entity is a page connector (#63).
+    pub connector: Option<super::collab_ui::ConnectorInspectorInfo>,
 }
 
 /// A symbol a `.pid` import placed, as its block reference states it and as
@@ -664,6 +748,7 @@ pub(crate) fn inspected(app: &OpenCADStudio) -> Inspected {
         )
     });
 
+    let connector = super::collab_ui::inspect_connector(app, document, handle, &author);
     let (mut values, _): (BTreeMap<String, String>, _) = split_props(&author.props);
     let mut fields: Vec<(String, String)> = fields_of_kind(&author.type_code)
         .into_iter()
@@ -689,6 +774,7 @@ pub(crate) fn inspected(app: &OpenCADStudio) -> Inspected {
         fields,
         placement,
         ports,
+        connector,
     })
 }
 
@@ -896,23 +982,25 @@ fn toolbar(app: &OpenCADStudio) -> Element<'_, AppMessage> {
         .on_press_maybe(usable.then(|| AppMessage::Command("QSAVE".to_owned()))),
     );
 
-    container(
-        row![
-            tool_group(theme, vec![select]),
-            tool_group(theme, lines),
-            tool_group(theme, objects),
-            Space::new().width(Fill),
-            save,
-        ]
-        .spacing(6)
-        .align_y(alignment::Vertical::Center),
-    )
-    .width(Fill)
-    .height(TOOLBAR_HEIGHT)
-    .padding([0, 12])
-    .align_y(alignment::Vertical::Center)
-    .style(move |_| panel(theme))
-    .into()
+    let mut bar = row![
+        tool_group(theme, vec![select]),
+        tool_group(theme, lines),
+        tool_group(theme, objects),
+        Space::new().width(Fill),
+    ]
+    .spacing(6)
+    .align_y(alignment::Vertical::Center);
+    if let Some(online_group) = super::collab_ui::toolbar_online_group(app) {
+        bar = bar.push(online_group);
+    }
+    bar = bar.push(save);
+    container(bar)
+        .width(Fill)
+        .height(TOOLBAR_HEIGHT)
+        .padding([0, 12])
+        .align_y(alignment::Vertical::Center)
+        .style(move |_| panel(theme))
+        .into()
 }
 
 /// 页间连接: the tool, and under it while it is open the four kinds a
@@ -1354,6 +1442,7 @@ pub(in crate::app) fn zoom_control(app: &OpenCADStudio) -> Element<'_, AppMessag
 /// One row of the inspector: a label over a box. `field` is the row's id
 /// when the value can be typed over. The box is on the warning colours
 /// while a clicked rule-check result names the row (P&ID panel spec §3.6).
+#[allow(clippy::too_many_arguments)]
 fn field<'a>(
     app: &'a OpenCADStudio,
     handle: document::Handle,
@@ -1361,13 +1450,16 @@ fn field<'a>(
     value: String,
     field: Option<String>,
     required: bool,
+    editable: bool,
+    writer_caption: Option<String>,
 ) -> Element<'a, AppMessage> {
     let theme = app.pid_shell.theme;
     let mut heading = row![text(label.clone())
         .size(11)
         .font(ui(theme, font::Weight::Normal))
         .color(ColorToken::TextSecondary.color(theme))]
-    .spacing(4);
+    .spacing(4)
+    .align_y(alignment::Vertical::Center);
     if required {
         heading = heading.push(
             text("*")
@@ -1375,6 +1467,16 @@ fn field<'a>(
                 .font(ui(theme, font::Weight::Normal))
                 .color(ColorToken::Danger.color(theme)),
         );
+    }
+    if let Some(caption) = writer_caption {
+        heading = heading.push(Space::new().width(Fill));
+        heading = heading.push(PosReport::owned(
+            part(&format!("field-writer-{label}")),
+            text(caption)
+                .size(10)
+                .font(mono(theme, font::Weight::Normal))
+                .color(ColorToken::TextMuted.color(theme)),
+        ));
     }
     let lit = field
         .as_deref()
@@ -1397,7 +1499,7 @@ fn field<'a>(
                 )
             })
     };
-    let body: Element<'a, AppMessage> = match field.filter(|_| writable(app)) {
+    let body: Element<'a, AppMessage> = match field.filter(|_| editable) {
         Some(field) => {
             let typed = app
                 .pid_shell
@@ -1514,8 +1616,9 @@ fn imported_symbol<'a>(app: &'a OpenCADStudio, symbol: ImportedSymbol) -> Elemen
         Some(tag) => (tag, ColorToken::TextPrimary),
         None => (NO_TAG.to_owned(), ColorToken::TextMuted),
     };
-    let stated =
-        |label: &str, value: String| field(app, handle, label.to_owned(), value, None, false);
+    let stated = |label: &str, value: String| {
+        field(app, handle, label.to_owned(), value, None, false, false, None)
+    };
     let mut fields = column![stated("类型", symbol.kind)].spacing(14);
     for (label, value) in [
         ("符号", symbol.symbol),
@@ -1591,13 +1694,27 @@ fn imported_label<'a>(theme: PidTheme, label: ImportedLabel) -> Element<'a, AppM
 
 fn inspector(app: &OpenCADStudio) -> Element<'_, AppMessage> {
     let theme = app.pid_shell.theme;
-    let body: Element<'_, AppMessage> = match inspected(app) {
+    if app.pid_shell.editor.history_open {
+        return container(super::collab_ui::history_panel(app))
+            .width(INSPECTOR_WIDTH)
+            .height(Fill)
+            .style(move |_| panel(theme))
+            .into();
+    }
+    let inspected_now = inspected(app);
+    let selected_tag: Option<String> = match &inspected_now {
+        Inspected::Object(obj) => Some(obj.tag.clone()),
+        _ => None,
+    };
+    let body: Element<'_, AppMessage> = match inspected_now {
         Inspected::Nothing => note(theme, "没有选中对象".to_owned()),
         Inspected::Several(count) => note(theme, format!("选中了 {count} 个对象")),
         Inspected::Plain(kind) => note(theme, format!("{kind} · 不是 P&ID 对象")),
         Inspected::Symbol(symbol) => imported_symbol(app, symbol),
         Inspected::Label(label) => imported_label(theme, label),
         Inspected::Object(object) => {
+            let remote_claim = super::collab_ui::remote_claim_on_tag(app, &object.tag);
+            let row_editable = writable(app) && remote_claim.is_none();
             let mut title = row![
                 icon(
                     include_bytes!("../../../assets/icons/pid_palette.svg"),
@@ -1613,6 +1730,26 @@ fn inspector(app: &OpenCADStudio) -> Element<'_, AppMessage> {
             ]
             .spacing(8)
             .align_y(alignment::Vertical::Center);
+            if app.collab.wanted() && !object.tag.is_empty() && object.tag != "？" {
+                title = title.push(PosReport::owned(
+                    part("inspector-history-btn"),
+                    button(
+                        container(
+                            text("修改历史")
+                                .size(10.5)
+                                .font(ui(theme, font::Weight::Medium))
+                                .color(ColorToken::Accent.color(theme)),
+                        )
+                        .padding([2, 6])
+                        .style(move |_| {
+                            filled(theme, ColorToken::AccentSoft, Some(ColorToken::Accent), 3.0)
+                        }),
+                    )
+                    .padding(0)
+                    .style(bare)
+                    .on_press(send(Message::OpenHistory(object.tag.clone()))),
+                ));
+            }
             // The design's badge, for the one kind whose joins are recorded.
             if let Some((joined, total)) = object.ports {
                 if total > 0 && joined == total {
@@ -1655,6 +1792,11 @@ fn inspector(app: &OpenCADStudio) -> Element<'_, AppMessage> {
                         .color(ColorToken::TextSecondary.color(theme)),
                 );
             }
+            if let Some((holder, exp)) = &remote_claim {
+                head = head.push(super::collab_ui::inspector_remote_claim_notice(
+                    theme, holder, *exp,
+                ));
+            }
 
             let mut fields = column![field(
                 app,
@@ -1663,6 +1805,8 @@ fn inspector(app: &OpenCADStudio) -> Element<'_, AppMessage> {
                 object.tag.clone(),
                 Some(TAG_FIELD.to_owned()),
                 true,
+                row_editable,
+                super::collab_ui::field_writer_caption(app, &object.tag, "tag"),
             )]
             .spacing(14);
             for (key, value) in &object.fields {
@@ -1673,6 +1817,8 @@ fn inspector(app: &OpenCADStudio) -> Element<'_, AppMessage> {
                     value.clone(),
                     Some(format!("{PROPS_FIELD_PREFIX}{key}")),
                     false,
+                    row_editable,
+                    super::collab_ui::field_writer_caption(app, &object.tag, key),
                 ));
             }
             if let Some((scale, rotation)) = object.placement {
@@ -1684,7 +1830,9 @@ fn inspector(app: &OpenCADStudio) -> Element<'_, AppMessage> {
                             "缩放比例".to_owned(),
                             format!("{scale:.2}"),
                             None,
-                            false
+                            false,
+                            false,
+                            None,
                         ),
                         field(
                             app,
@@ -1692,7 +1840,9 @@ fn inspector(app: &OpenCADStudio) -> Element<'_, AppMessage> {
                             "旋转".to_owned(),
                             format!("{rotation:.0}°"),
                             None,
-                            false
+                            false,
+                            false,
+                            None,
                         ),
                     ]
                     .spacing(10),
@@ -1701,19 +1851,15 @@ fn inspector(app: &OpenCADStudio) -> Element<'_, AppMessage> {
 
             let mut blocks = column![
                 container(head).width(Fill).padding(16),
-                container(Space::new())
-                    .width(Fill)
-                    .height(1)
-                    .style(move |_| {
-                        container::Style {
-                            background: Some(Background::Color(
-                                ColorToken::Border.color(theme).scale_alpha(0.5),
-                            )),
-                            ..container::Style::default()
-                        }
-                    }),
+                hairline(theme),
                 container(fields).width(Fill).padding(16),
             ];
+            if let Some(connector) = &object.connector {
+                blocks = blocks.push(hairline(theme));
+                blocks = blocks.push(super::collab_ui::connector_inspector_section(
+                    theme, connector,
+                ));
+            }
             // 拓扑: only what the topology table records.
             let mut topology = column![text("拓扑")
                 .size(11)
@@ -1734,20 +1880,27 @@ fn inspector(app: &OpenCADStudio) -> Element<'_, AppMessage> {
                 recorded = true;
             }
             if recorded {
-                blocks = blocks.push(container(Space::new()).width(Fill).height(1).style(
-                    move |_| container::Style {
-                        background: Some(Background::Color(
-                            ColorToken::Border.color(theme).scale_alpha(0.5),
-                        )),
-                        ..container::Style::default()
-                    },
-                ));
+                blocks = blocks.push(hairline(theme));
                 blocks = blocks.push(container(topology).width(Fill).padding(16));
             }
             scrollable(blocks).height(Fill).into()
         }
     };
-    container(body)
+    let panel_body: Element<'_, AppMessage> = match super::collab_ui::inspector_collab_section(
+        app,
+        selected_tag.as_deref(),
+    ) {
+        Some(collab_section) => column![
+            container(body).width(Fill).height(Length::FillPortion(3)),
+            hairline(theme),
+            collab_section,
+        ]
+        .width(Fill)
+        .height(Fill)
+        .into(),
+        None => body,
+    };
+    container(panel_body)
         .width(INSPECTOR_WIDTH)
         .height(Fill)
         .style(move |_| panel(theme))
@@ -1760,16 +1913,16 @@ pub(crate) fn view(app: &OpenCADStudio) -> Element<'_, AppMessage> {
         part("drawing"),
         super::rebase::Rebase::new(app.view_classic()),
     );
+    let mut center = column![PosReport::owned(part("tabs"), chrome::shielded(app, tabs(app)))];
+    if let Some(banner) = super::collab_ui::readonly_banner(app) {
+        center = center.push(chrome::shielded(app, banner));
+    }
+    center = center.push(drawing);
     column![
         PosReport::owned(part("toolbar"), chrome::shielded(app, toolbar(app))),
         row![
             PosReport::owned(part("palette"), chrome::shielded(app, palette(app))),
-            column![
-                PosReport::owned(part("tabs"), chrome::shielded(app, tabs(app))),
-                drawing,
-            ]
-            .width(Fill)
-            .height(Fill),
+            center.width(Fill).height(Fill),
             PosReport::owned(part("inspector"), chrome::shielded(app, inspector(app))),
         ]
         .width(Fill)

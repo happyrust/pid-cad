@@ -38,6 +38,8 @@ pub enum PidCollabMsg {
     Release(String),
     /// Show or hide the claims list.
     ToggleClaims,
+    /// Realign this session with the room after divergence (#78).
+    Realign,
 }
 
 impl PidCollabMsg {
@@ -291,12 +293,12 @@ fn status_dot<'a>(connected: bool) -> Element<'a, Message> {
 }
 
 /// The colour of what the panel wants noticed: the read-only badge and the
-/// edit-right marker. The amber the drawing tints an occupied tag with, so
-/// "somebody else has this" reads the same in both places.
-fn notice(_: &Theme) -> iced::widget::text::Style {
-    let [r, g, b, a] = crate::scene::CLAIM_COLOR;
+/// edit-right marker. Taken from the design token table (`CLAIM_COLOR_TOKEN`)
+/// so the drawing and panel share one theme-aware colour (#56).
+fn notice(theme: &Theme) -> iced::widget::text::Style {
+    let pid_theme = crate::ui::style::pid_tokens::PidTheme::from_iced(theme);
     iced::widget::text::Style {
-        color: Some(iced::Color::from_rgba(r, g, b, a)),
+        color: Some(crate::ui::style::pid_tokens::CLAIM_COLOR_TOKEN.color(pid_theme)),
     }
 }
 

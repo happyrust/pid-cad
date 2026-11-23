@@ -143,6 +143,7 @@
 
 pub mod canvas;
 pub mod chrome;
+pub mod collab_ui;
 pub(crate) mod rebase;
 
 pub mod backup;

@@ -1474,15 +1474,18 @@ impl OpenCADStudio {
                         if let Some(apart) = &self.collab.not_aligned {
                             self.command_line.push_warning(&apart.said());
                         }
+                        // Fetch pending conflicts for this drawing on join and
+                        // reconnect (#40), without blocking the UI.
+                        let fetch_task = self.fetch_collab_conflicts();
                         // The first live session brings the panel out where the
-                        // layout has it: a claim is only useful if the roster
-                        // and the held tags are on screen. Once only, so a
-                        // person who closes it keeps it closed across
-                        // reconnects.
+                        // layout has it (classic mode only; in the P&ID shell
+                        // #48 collaboration lives in the Inspector's lower half).
                         if !self.pid_collab_auto_shown {
                             self.pid_collab_auto_shown = true;
-                            return self.show_pid_collab_panel();
+                            let panel_task = self.show_pid_collab_panel();
+                            return Task::batch([fetch_task, panel_task]);
                         }
+                        return fetch_task;
                     }
                     super::collab::CollabEvent::Disconnected { reason, will_retry } => {
                         if was_connected || !*will_retry {
@@ -1560,6 +1563,10 @@ impl OpenCADStudio {
                     }
                     _ => {}
                 }
+                Task::none()
+            }
+            Message::CollabQueryDone(reply) => {
+                self.on_collab_query_done(reply);
                 Task::none()
             }
             Message::CollabClaim { tag, claim } => self.on_collab_claim(&tag, claim),

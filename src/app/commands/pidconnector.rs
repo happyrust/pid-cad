@@ -206,13 +206,16 @@ impl OpenCADStudio {
             } else {
                 "信号线"
             };
-            self.command_line.push_error_coded(
-                CONNECTOR_KIND_MISMATCH,
-                &format!(
-                    "PIDCONNECTOR {}: 该连接符只能插在{wanted}上，落点命中 {}。",
-                    request.kind.as_str(),
-                    hit.tag
-                ),
+            let msg = format!(
+                "PIDCONNECTOR {}: 该连接符只能插在{wanted}上，落点命中 {}。",
+                request.kind.as_str(),
+                hit.tag
+            );
+            self.command_line
+                .push_error_coded(CONNECTOR_KIND_MISMATCH, &msg);
+            self.collab.push_toast(
+                crate::app::collab::toasts::ToastKind::Error,
+                format!("页间连接符种类与线不符：{msg}"),
             );
             return None;
         }
@@ -220,13 +223,16 @@ impl OpenCADStudio {
         let mut table = TopologyTable::load(document);
         table.prune(document);
         if request.kind.is_inflow() && table.has_inflow_connector(&hit.tag) {
-            self.command_line.push_error_coded(
-                DUPLICATE_INFLOW_CONNECTOR,
-                &format!(
-                    "PIDCONNECTOR {}: {} 上已有流入连接符，同一线号同图至多一个。",
-                    request.kind.as_str(),
-                    hit.tag
-                ),
+            let msg = format!(
+                "PIDCONNECTOR {}: {} 上已有流入连接符，同一线号同图至多一个。",
+                request.kind.as_str(),
+                hit.tag
+            );
+            self.command_line
+                .push_error_coded(DUPLICATE_INFLOW_CONNECTOR, &msg);
+            self.collab.push_toast(
+                crate::app::collab::toasts::ToastKind::Error,
+                format!("页间连接符重复流入：{msg}"),
             );
             return None;
         }
@@ -671,10 +677,15 @@ impl OpenCADStudio {
         }
         let Some(kind_text) = words.next() else {
             self.command_line.push_info(
-                "PIDCONNECTOR  <pipe_in|pipe_out|signal_in|signal_out> [<drawing_id>:<handle>]:",
+                "PIDCONNECTOR  <pipe_in|pipe_out|signal_in|signal_out|JUMP> [<drawing_id>:<handle>]:",
             );
             return Some(Task::none());
         };
+        if kind_text.eq_ignore_ascii_case("JUMP") {
+            let handle = words.next().and_then(parse_handle);
+            let _ = self.jump_to_connector_peer(i, handle);
+            return Some(Task::none());
+        }
         let Some(kind) = ConnectorKind::parse(kind_text) else {
             self.command_line.push_error_coded(
                 "invalid_connector_kind",
@@ -690,6 +701,149 @@ impl OpenCADStudio {
         self.command_line.push_info(&prompt);
         self.tabs[i].active_cmd = Some(Box::new(command));
         Some(self.finish_dispatch(cmd))
+    }
+
+    /// Jump from a page connector on tab `i` to its paired peer drawing and
+    /// line (#64). Used by both `PIDCONNECTOR JUMP` and the Inspector's
+    /// 【跳转】 button.
+    pub(crate) fn jump_to_connector_peer(
+        &mut self,
+        i: usize,
+        explicit_handle: Option<document::Handle>,
+    ) -> Result<String, String> {
+        let handle = explicit_handle.or_else(|| {
+            self.tabs
+                .get(i)?
+                .scene
+                .selected_handles_in_order()
+                .first()
+                .copied()
+        });
+        let Some(handle) = handle else {
+            let msg = "PIDCONNECTOR JUMP: 请先选中一个页间连接符，或指定其 handle。".to_owned();
+            self.command_line.push_info(&msg);
+            return Err(msg);
+        };
+        let doc = &self.tabs[i].scene.document;
+        let table = TopologyTable::load(doc);
+        let htext = handle_text(handle);
+        let Some(record) = table
+            .connectors
+            .iter()
+            .find(|c| c.handle.eq_ignore_ascii_case(&htext))
+            .cloned()
+        else {
+            let msg = format!("PIDCONNECTOR JUMP: 实体 {htext} 不是页间连接符。");
+            self.command_line.push_info(&msg);
+            return Err(msg);
+        };
+
+        let peer_drawing = record.peer_drawing.clone().or_else(|| {
+            record
+                .peer
+                .as_deref()
+                .and_then(|p| p.split_once(':'))
+                .map(|(d, _)| d.to_owned())
+        });
+        let Some(peer_drawing) = peer_drawing.filter(|d| !d.trim().is_empty()) else {
+            let msg = format!(
+                "页间连接符（线号 {}）尚未配对，没有可跳转的对端。",
+                record.line_tag
+            );
+            self.command_line.push_info(&msg);
+            self.collab
+                .push_toast(crate::app::collab::toasts::ToastKind::Info, msg.clone());
+            return Err(msg);
+        };
+
+        // Parse optional `<drawing>:<handle_or_line>` suffix.
+        let peer_suffix = record
+            .peer
+            .as_deref()
+            .and_then(|p| p.split_once(':'))
+            .map(|(_, rhs)| rhs.to_owned());
+
+        // Find the open tab matching `peer_drawing` (by numeric tab id, file
+        // stem, display title, or collab_state drawing_id).
+        let target_tab = self.tabs.iter().enumerate().find_map(|(idx, tab)| {
+            if tab.is_start {
+                return None;
+            }
+            if tab.id.to_string() == peer_drawing {
+                return Some(idx);
+            }
+            if let Some(stem) = tab
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_stem())
+                .map(|s| s.to_string_lossy())
+            {
+                if stem.eq_ignore_ascii_case(&peer_drawing) {
+                    return Some(idx);
+                }
+            }
+            if tab.tab_display_name().eq_ignore_ascii_case(&peer_drawing) {
+                return Some(idx);
+            }
+            if let Some(state) = crate::pid::collab_state::load_state(&tab.scene.document) {
+                if state.drawing_id.eq_ignore_ascii_case(&peer_drawing) {
+                    return Some(idx);
+                }
+            }
+            None
+        });
+
+        let Some(target_idx) = target_tab else {
+            let msg = format!(
+                "对端图纸「{peer_drawing}」未在本机打开；请先通过「打开」或 OPEN 打开该图纸文件后再跳转。"
+            );
+            self.command_line.push_info(&msg);
+            self.collab
+                .push_toast(crate::app::collab::toasts::ToastKind::Warning, msg.clone());
+            return Err(msg);
+        };
+
+        // Switch to target tab and focus the peer connector or host line.
+        self.active_tab = target_idx;
+        let peer_handles: Vec<document::Handle> = {
+            let dest_doc = &self.tabs[target_idx].scene.document;
+            let mut found = Vec::new();
+            if let Some(rhs) = peer_suffix.as_deref() {
+                if let Some(peer_h) = parse_handle(rhs) {
+                    if dest_doc.get_entity(peer_h).is_some() {
+                        found.push(peer_h);
+                    }
+                }
+            }
+            if found.is_empty() {
+                for entity in dest_doc.entities() {
+                    let h = entity.common().handle;
+                    if let Some(author) = PidAuthor::load(dest_doc, h) {
+                        if author.tag.eq_ignore_ascii_case(&record.line_tag) {
+                            found.push(h);
+                        }
+                    }
+                }
+            }
+            found
+        };
+
+        if let Some((&first, rest)) = peer_handles.split_first() {
+            self.tabs[target_idx].scene.select_entity(first, true);
+            if !rest.is_empty() {
+                self.tabs[target_idx].scene.select_entities(rest);
+            }
+            let _ = self.tabs[target_idx].scene.zoom_to_entities(&peer_handles);
+        }
+        self.refresh_properties();
+        let msg = format!(
+            "已跳转到对端图纸「{peer_drawing}」的线号 {}。",
+            record.line_tag
+        );
+        self.command_line.push_info(&msg);
+        self.collab
+            .push_toast(crate::app::collab::toasts::ToastKind::Success, msg.clone());
+        Ok(msg)
     }
 }
 

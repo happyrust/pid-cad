@@ -28,11 +28,15 @@ mod claims;
 pub(super) mod connectors;
 mod leaving;
 pub(super) mod pipes;
+pub(crate) mod query;
+pub(crate) mod toasts;
 mod unsynced;
 #[cfg(not(target_arch = "wasm32"))]
 mod messages;
 #[cfg(not(target_arch = "wasm32"))]
 mod transport;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod collab_two_editors_harness;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod collab_align_refused;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -126,6 +130,18 @@ pub enum CollabEvent {
     PeerJoined(PeerInfo),
     PeerLeft { session_id: String },
     ClaimGranted { tag: String },
+    /// Companion metadata for `claim_granted`: holder session/user and expiry
+    /// timestamp when the server provides them (e.g., room-wide claim grant
+    /// broadcasts from #24/#55).
+    ClaimMeta {
+        tag: String,
+        session_id: String,
+        user_id: Option<String>,
+        expires_at: Option<i64>,
+    },
+    /// Companion metadata for `readonly_downgrade` when the server identifies
+    /// the effective PBS node whose ACL denied write access (#52).
+    ReadonlyEffectiveNode { node: String },
     ClaimDenied {
         tag: String,
         holder: String,
@@ -525,9 +541,62 @@ pub(super) struct TagsAsked {
     pub looked: Option<u64>,
 }
 
+/// Why an outgoing page connector is not paired yet (#32, #63, #65).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnpairedReason {
+    /// Target drawing is not registered on the server.
+    TargetDrawingNotRegistered,
+    /// Target drawing has no matching inflow connector for the same line tag.
+    NoMatchingPeerConnector,
+    /// Matching connector on the target drawing is already paired elsewhere.
+    PeerAlreadyPaired,
+}
+
+impl UnpairedReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TargetDrawingNotRegistered => "目标图纸没有登记",
+            Self::NoMatchingPeerConnector => "目标图纸上没有同一线号的流入页间连接符",
+            Self::PeerAlreadyPaired => "对方已经另有配对",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        let s = raw.trim();
+        if s.contains("没有登记") || s.eq_ignore_ascii_case("target_not_registered") {
+            Some(Self::TargetDrawingNotRegistered)
+        } else if s.contains("另有配对") || s.eq_ignore_ascii_case("peer_already_paired") {
+            Some(Self::PeerAlreadyPaired)
+        } else if s.contains("没有") || s.eq_ignore_ascii_case("no_matching_peer") {
+            Some(Self::NoMatchingPeerConnector)
+        } else {
+            None
+        }
+    }
+}
+
+/// One unpaired page connector tracked in collaboration state (#63, #65).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnpairedConnectorInfo {
+    pub line_tag: String,
+    pub connector: String,
+    pub target_drawing: String,
+    pub reason: UnpairedReason,
+}
+
+/// Client-side filter state for the modification history UI (#66).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HistoryFilter {
+    pub user_id: String,
+    pub from_text: String,
+    pub to_text: String,
+    pub field_query: String,
+    pub action_kind: String,
+}
+
 /// The GUI's view of the collaboration session.
 #[derive(Clone, Debug, Default)]
-pub(super) struct State {
+pub(crate) struct State {
     /// Server URL in effect (CLI wins over the saved config). Empty means the
     /// user never configured collaboration, and nothing connects at all.
     pub server_url: String,
@@ -537,6 +606,8 @@ pub(super) struct State {
     /// run used.
     pub configured_server_url: String,
     pub user_id: String,
+    /// Display name for the local user (falls back to `user_id` when empty).
+    pub display_name: String,
     /// User id as persisted in `settings.json` (same reasoning as above).
     pub configured_user_id: String,
     pub drawing_id: String,
@@ -563,6 +634,37 @@ pub(super) struct State {
     pub readonly_level: Option<String>,
     /// The `PERM_DENIED_*` code of that tier.
     pub readonly_code: Option<String>,
+    /// The server's verbatim read-only reason text (#51).
+    pub readonly_reason: Option<String>,
+    /// Effective PBS node whose ACL denied write access when `readonly_level`
+    /// is `"pbs"` (#52). Populated when the server provides `effective_node`.
+    pub readonly_effective_node: Option<String>,
+    /// Shared transient toast notification queue (#50, #58–#61, #65).
+    pub toasts: toasts::ToastQueue,
+    /// Unpaired outgoing page connectors with explicit reasons (#63, #65).
+    pub unpaired_connectors: Vec<UnpairedConnectorInfo>,
+    /// Cached per-`(object_ref, field)` last writer metadata (#42, #66).
+    pub field_writers: BTreeMap<(String, String), query::FieldLastWriter>,
+    /// Tag currently shown in the inline modification history panel (#66).
+    pub history_target: Option<String>,
+    /// Audit rows fetched for `history_target` (#42, #66).
+    pub history_rows: Vec<query::AuditItem>,
+    /// Active filter values in the modification history panel (#66).
+    pub history_filter: HistoryFilter,
+    /// Optional pluggable HTTP query client (tests inject a mock; `None` uses
+    /// [`query::HttpQueryClient`]) (#40).
+    pub query_client: Option<query::QueryClientSlot>,
+    /// Last non-blocking query error, never blocks editing (#40).
+    pub last_query_error: Option<String>,
+    /// True while a `PIDCOLLAB REALIGN` reconnect is in progress (#78).
+    pub pending_realign: bool,
+    /// Tags this session owned before an unexpected disconnect/session reset,
+    /// so reconnect can inform the user they were released (#58).
+    lost_own_claims: Vec<String>,
+    /// Per-instance transport link for isolated multi-editor tests (#20);
+    /// `None` uses the app's process-wide transport slots.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) link: Option<transport::Link>,
     /// Last transport-level failure, for the command line and diagnostics.
     pub last_error: Option<String>,
     /// How many reconnect attempts have failed since the last live session.
@@ -1117,11 +1219,132 @@ impl State {
         }
     }
 
-    /// Publish the current config to the process-global the subscription
-    /// worker reads when it starts its thread.
+    /// Format a user id as `"显示名（user_id）"` using known peer metadata or
+    /// the local user's display name, falling back to `user_id` (#48, #50, #51).
+    pub(crate) fn format_user(&self, user_id: &str) -> String {
+        if user_id == self.user_id {
+            return toasts::format_user_label(&self.user_id, &self.display_name);
+        }
+        if let Some(peer) = self.peers.iter().find(|p| p.user_id == user_id) {
+            return toasts::format_user_label(&peer.user_id, &peer.display_name);
+        }
+        toasts::format_user_label(user_id, "")
+    }
+
+    /// Resolve a session id (e.g. `readonly_holder` or `claim_denied.holder`)
+    /// to `"显示名（user_id）"` (#51, #54, #58).
+    pub(crate) fn format_session_user(&self, session_id: &str) -> String {
+        if let Some(peer) = self.peers.iter().find(|p| p.session_id == session_id) {
+            return toasts::format_user_label(&peer.user_id, &peer.display_name);
+        }
+        if self.session_id.as_deref() == Some(session_id) && !self.user_id.is_empty() {
+            return toasts::format_user_label(&self.user_id, &self.display_name);
+        }
+        self.format_user(session_id)
+    }
+
+    /// Return the configured query client (injectable stub or live HTTP).
+    pub(crate) fn query_client(&self) -> std::sync::Arc<dyn query::CollabQueryClient> {
+        match &self.query_client {
+            Some(slot) => std::sync::Arc::clone(&slot.0),
+            None => std::sync::Arc::new(query::HttpQueryClient),
+        }
+    }
+
+    /// Install a custom query client (used by unit tests for #40–#42, #66).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn set_query_client(
+        &mut self,
+        client: std::sync::Arc<dyn query::CollabQueryClient>,
+    ) {
+        self.query_client = Some(query::QueryClientSlot(client));
+    }
+
+    /// Replace the pending conflicts list with the authoritative server query
+    /// result (#40).
+    pub(crate) fn replace_pending_conflicts(&mut self, items: Vec<PendingConflict>) {
+        self.conflicts = items;
+        self.last_query_error = None;
+    }
+
+    /// Cache per-field last writer metadata from `GET /drawing/{id}/objects`
+    /// (#42, #66).
+    pub(crate) fn record_field_writers(&mut self, page: &query::DrawingObjectsPage) {
+        for obj in &page.items {
+            for (field, writer) in &obj.fields {
+                self.field_writers
+                    .insert((obj.object_ref.clone(), field.clone()), writer.clone());
+            }
+        }
+        self.last_query_error = None;
+    }
+
+    /// Record or update an unpaired outgoing connector with its reason (#63, #65).
+    pub(crate) fn record_unpaired_connector(&mut self, info: UnpairedConnectorInfo) {
+        let toast_msg = format!(
+            "页间连接符未配对（{} → {}）：{}",
+            info.line_tag,
+            info.target_drawing,
+            info.reason.as_str()
+        );
+        if let Some(existing) = self
+            .unpaired_connectors
+            .iter_mut()
+            .find(|u| u.line_tag == info.line_tag && u.connector == info.connector)
+        {
+            *existing = info;
+        } else {
+            self.unpaired_connectors.push(info);
+        }
+        self.toasts.push(toasts::ToastKind::Warning, toast_msg);
+    }
+
+    /// Remove an unpaired connector entry once paired or deleted (#63, #65).
+    pub(crate) fn clear_unpaired_connector(&mut self, line_tag: &str, connector: &str) {
+        self.unpaired_connectors
+            .retain(|u| !(u.line_tag == line_tag && (connector.is_empty() || u.connector == connector)));
+    }
+
+    /// Push a collaboration toast notification.
+    pub(crate) fn push_toast(&mut self, kind: toasts::ToastKind, message: impl Into<String>) {
+        self.toasts.push(kind, message);
+    }
+
+    /// Publish the current config to the transport thread (instance link if
+    /// attached, otherwise process-wide app slot).
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn sync_client_config(&self) {
-        transport::set_client_config(self.client_config());
+        let cfg = self.client_config();
+        if let Some(link) = &self.link {
+            link.set_config(cfg);
+        } else {
+            transport::set_client_config(cfg);
+        }
+    }
+
+    /// Attach a detached per-instance transport link for in-process multi-editor
+    /// tests (#20, #33).
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(super) fn attach_detached_link(&mut self) -> transport::Link {
+        let link = transport::Link::detached_with_tags(self.client_config());
+        self.link = Some(link.clone());
+        link
+    }
+
+    /// Request immediate reconnection and realignment against `claim` (#78).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn request_realign(&mut self, claim: Option<FileClaim>) {
+        self.pending_realign = true;
+        if let Some(link) = &self.link {
+            link.request_realign(claim);
+        } else {
+            transport::request_realign(claim);
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn request_realign(&mut self, _claim: Option<FileClaim>) {
+        self.pending_realign = true;
     }
 
     /// Answer question `ask` of the transport's about the drawing's tags.
@@ -1151,7 +1374,11 @@ impl State {
         #[cfg(test)]
         self.tags_said.push((ask, said.clone()));
         #[cfg(not(target_arch = "wasm32"))]
-        transport::answer_tags(ask, said);
+        if let Some(link) = &self.link {
+            link.answer_tags(ask, said);
+        } else {
+            transport::answer_tags(ask, said);
+        }
         // (Unused on the web build, which has no socket to say them on.)
         #[cfg(target_arch = "wasm32")]
         let _ = (ask, said);
@@ -1245,8 +1472,30 @@ impl State {
                 self.readonly_holder = None;
                 self.readonly_level = None;
                 self.readonly_code = None;
+                self.readonly_reason = None;
+                self.readonly_effective_node = None;
                 self.reconnect_attempts = 0;
                 self.last_error = None;
+                // Inform the user if previous claims were lost across a
+                // session reset / server restart (#58).
+                if !self.lost_own_claims.is_empty() {
+                    let lost = std::mem::take(&mut self.lost_own_claims);
+                    let remaining_lost: Vec<String> = lost
+                        .into_iter()
+                        .filter(|tag| {
+                            self.claims.get(tag).map(String::as_str) != Some(self.user_id.as_str())
+                        })
+                        .collect();
+                    if !remaining_lost.is_empty() {
+                        self.toasts.push(
+                            toasts::ToastKind::Warning,
+                            format!(
+                                "会话已重新建立，原有位号占用已释放：{}",
+                                remaining_lost.join("、")
+                            ),
+                        );
+                    }
+                }
                 // The ops the old session left unanswered are still this
                 // person's steps: none is on this session's wire yet, and
                 // they go out again from the first — unless the replay
@@ -1257,7 +1506,24 @@ impl State {
                     entry.sent = false;
                 }
                 if let Some(apart) = apart {
-                    self.hold_apart(apart);
+                    self.hold_apart(apart.clone());
+                    if std::mem::take(&mut self.pending_realign) {
+                        self.toasts.push(
+                            toasts::ToastKind::Error,
+                            format!(
+                                "重新对齐失败（{}）：请取得最新图纸后重新打开",
+                                apart.reason()
+                            ),
+                        );
+                    }
+                } else if std::mem::take(&mut self.pending_realign) {
+                    self.toasts.push(
+                        toasts::ToastKind::Success,
+                        format!(
+                            "已与服务器重新对齐（修订 {}），可以继续提交",
+                            self.base_revision
+                        ),
+                    );
                 }
                 self.pump();
                 // The session before this one was left to tell the drawing's
@@ -1285,6 +1551,9 @@ impl State {
                 let left_to_tell = self.rejoining && self.session_id.is_some() && will_retry;
                 if !left_to_tell {
                     self.rejoining = false;
+                    if !self.own_claims.is_empty() && will_retry {
+                        self.lost_own_claims = self.own_claims.iter().cloned().collect();
+                    }
                     self.own_claims.clear();
                 }
                 self.connected = false;
@@ -1309,6 +1578,8 @@ impl State {
                 });
             }
             CollabEvent::PeerJoined(peer) => {
+                let who = toasts::format_user_label(&peer.user_id, &peer.display_name);
+                let is_new = !self.peers.iter().any(|p| p.session_id == peer.session_id);
                 if let Some(existing) = self
                     .peers
                     .iter_mut()
@@ -1318,17 +1589,70 @@ impl State {
                 } else {
                     self.peers.push(peer);
                 }
+                if is_new {
+                    self.toasts
+                        .push(toasts::ToastKind::Info, format!("{who} 加入了图纸"));
+                }
             }
             CollabEvent::PeerLeft { session_id } => {
+                let who = self
+                    .peers
+                    .iter()
+                    .find(|p| p.session_id == session_id)
+                    .map(|p| toasts::format_user_label(&p.user_id, &p.display_name));
                 self.peers.retain(|p| p.session_id != session_id);
+                if let Some(who) = who {
+                    self.toasts
+                        .push(toasts::ToastKind::Info, format!("{who} 离开了图纸"));
+                }
             }
             CollabEvent::ClaimGranted { tag } => {
                 let holder = self.user_id.clone();
-                self.last_claim_message = Some(format!("已占用位号 {tag}"));
-                // Whatever was known of an earlier claim on it is over.
-                self.claim_expiry.remove(&tag);
+                let msg = format!("已占用位号 {tag}");
+                self.last_claim_message = Some(msg.clone());
+                self.toasts.push(toasts::ToastKind::Success, msg);
+                // Default 300 s expiry fallback until `ClaimMeta` supplies the
+                // server's authoritative timestamp (#55).
+                let fallback_exp = ocs_collab::ids::now_unix().saturating_add(300);
+                self.claim_expiry.insert(tag.clone(), fallback_exp);
                 self.own_claims.insert(tag.clone());
                 self.claims.insert(tag, holder);
+            }
+            CollabEvent::ClaimMeta {
+                tag,
+                session_id,
+                user_id,
+                expires_at,
+            } => {
+                if let Some(exp) = expires_at {
+                    self.claim_expiry.insert(tag.clone(), exp);
+                }
+                // Room-wide broadcast of another peer's claim grant (#55):
+                // update holder & own_claims so it is recognised as remote.
+                let is_other_session = !session_id.is_empty()
+                    && self
+                        .session_id
+                        .as_deref()
+                        .is_some_and(|mine| mine != session_id);
+                if is_other_session {
+                    let holder_uid = user_id
+                        .filter(|u| !u.is_empty())
+                        .unwrap_or_else(|| self.resolve_holder(&session_id));
+                    self.own_claims.remove(&tag);
+                    self.claims.insert(tag.clone(), holder_uid.clone());
+                    let who = self.format_user(&holder_uid);
+                    let msg = match expires_at {
+                        Some(exp) => {
+                            format!("{who} 占用了位号 {tag}（到期 {}）", toasts::format_hhmm(exp))
+                        }
+                        None => format!("{who} 占用了位号 {tag}"),
+                    };
+                    self.last_claim_message = Some(msg.clone());
+                    self.toasts.push(toasts::ToastKind::Info, msg);
+                }
+            }
+            CollabEvent::ReadonlyEffectiveNode { node } => {
+                self.readonly_effective_node = Some(node);
             }
             CollabEvent::ClaimDenied {
                 tag,
@@ -1339,15 +1663,35 @@ impl State {
                 self.own_claims.remove(&tag);
                 // The claim stays with its holder; record who it is so the
                 // panel can grey the row out and say until when.
-                let holder = self.resolve_holder(&holder);
-                self.last_claim_message =
-                    Some(format!("位号 {tag} 已被 {holder} 占用，到期时间 {expires_at}"));
+                let holder_uid = self.resolve_holder(&holder);
+                let holder_shown = self.format_session_user(&holder);
+                let hhmm = toasts::format_hhmm(expires_at);
+                self.last_claim_message = Some(format!(
+                    "位号 {tag} 已被 {holder_uid} 占用，到期时间 {expires_at}"
+                ));
+                self.toasts.push(
+                    toasts::ToastKind::Warning,
+                    format!("位号 {tag} 已被 {holder_shown} 占用，到期时间 {hhmm}"),
+                );
                 self.last_error = Some(format!("位号 {tag} 已被占用，到期时间 {expires_at}"));
                 self.claim_expiry.insert(tag.clone(), expires_at);
-                self.claims.insert(tag, holder);
+                self.claims.insert(tag, holder_uid);
             }
             CollabEvent::ClaimReleased { tag, reason } => {
+                let (kind, toast_msg) =
+                    if reason == ocs_collab::protocol::release_reasons::EXPIRED {
+                        (
+                            toasts::ToastKind::Warning,
+                            format!("位号 {tag} 占用已到期自动释放"),
+                        )
+                    } else {
+                        (
+                            toasts::ToastKind::Info,
+                            format!("位号 {tag} 占用已释放（{reason}）"),
+                        )
+                    };
                 self.last_claim_message = Some(format!("位号 {tag} 占用已释放（{reason}）"));
+                self.toasts.push(kind, toast_msg);
                 self.own_claims.remove(&tag);
                 self.claims.remove(&tag);
                 self.claim_expiry.remove(&tag);
@@ -1368,6 +1712,10 @@ impl State {
                 self.readonly_holder = holder;
                 self.readonly_level = if holds { None } else { level };
                 self.readonly_code = if holds { None } else { code };
+                self.readonly_reason = if holds { None } else { Some(reason.clone()) };
+                if holds {
+                    self.readonly_effective_node = None;
+                }
                 self.last_error = if holds {
                     None
                 } else {
@@ -1411,7 +1759,24 @@ impl State {
                 // peer's like any other — the ruling was made on the server
                 // — and reach the drawing below.
                 if let Some(ruled) = op_id.strip_prefix(RULING_OP_PREFIX) {
+                    let removed = self
+                        .conflicts
+                        .iter()
+                        .find(|entry| entry.conflict_id == ruled)
+                        .cloned();
                     self.conflicts.retain(|entry| entry.conflict_id != ruled);
+                    let final_val = changes
+                        .first()
+                        .and_then(|c| c["value"].as_str())
+                        .unwrap_or("");
+                    let msg = match removed {
+                        Some(entry) => format!(
+                            "冲突已裁决：{} · {} → {}",
+                            entry.object_ref, entry.field, final_val
+                        ),
+                        None => format!("冲突 {ruled} 已裁决，本地已更新为最终值"),
+                    };
+                    self.toasts.push(toasts::ToastKind::Success, msg);
                 }
                 // The room broadcast reaches the originator too; its own op is
                 // already in the local document, so only the baseline moves.
@@ -1494,12 +1859,59 @@ impl State {
                 };
                 match refused {
                     Some(entry) => {
+                        let label = entry.label.clone();
+                        let toast = match code.as_str() {
+                            ocs_collab::protocol::codes::CLAIM_HELD => (
+                                toasts::ToastKind::Warning,
+                                format!("位号被占用，已撤回「{label}」：{message}"),
+                            ),
+                            ocs_collab::protocol::codes::OBJECT_DELETED => (
+                                toasts::ToastKind::Error,
+                                format!("对象已被删除，已撤回「{label}」：{message}"),
+                            ),
+                            ocs_collab::protocol::codes::DUPLICATE_INFLOW_CONNECTOR => (
+                                toasts::ToastKind::Error,
+                                format!("页间连接符被拒（重复流入），已撤回：{message}"),
+                            ),
+                            ocs_collab::protocol::codes::PERM_DENIED_ROLE
+                            | ocs_collab::protocol::codes::PERM_DENIED_PBS
+                            | ocs_collab::protocol::codes::PERM_DENIED_STATE => (
+                                toasts::ToastKind::Error,
+                                format!("只读限制（{code}），已撤回「{label}」：{message}"),
+                            ),
+                            _ if code == crate::pid::topology::CONNECTOR_KIND_MISMATCH => (
+                                toasts::ToastKind::Error,
+                                format!("页间连接符被拒（种类与线不符），已撤回：{message}"),
+                            ),
+                            _ => (
+                                toasts::ToastKind::Warning,
+                                format!("修改未生效，已撤回「{label}」：{message}"),
+                            ),
+                        };
+                        self.toasts.push(toast.0, toast.1);
                         self.rejections.push(Rejection { entry, code, message });
                         self.hold = true;
                     }
                     // Word only — or the refusal of an op this state no
                     // longer has, which leaves it nothing to take back.
-                    None => self.refusals_to_say.push((code, message)),
+                    None => {
+                        let toast = match code.as_str() {
+                            ocs_collab::protocol::codes::OP_SUPERSEDED => (
+                                toasts::ToastKind::Warning,
+                                format!("字段让位（本地已恢复为生效值）：{message}"),
+                            ),
+                            ocs_collab::protocol::codes::OBJECT_DELETED => (
+                                toasts::ToastKind::Error,
+                                format!("对象已被删除：{message}"),
+                            ),
+                            _ => (
+                                toasts::ToastKind::Warning,
+                                format!("部分修改未生效（{code}）：{message}"),
+                            ),
+                        };
+                        self.toasts.push(toast.0, toast.1);
+                        self.refusals_to_say.push((code, message));
+                    }
                 }
             }
             CollabEvent::OpsInConflict { op_ids } => {
@@ -1576,6 +1988,7 @@ impl State {
         {
             if self.hold
                 || !self.connected
+                || self.pending_realign
                 || self.catching_up.is_some()
                 || !self.pending_remote.is_empty()
                 || self.diverged.is_some()
@@ -1597,7 +2010,12 @@ impl State {
             // when that is lower: a server that started over counts from
             // nought again, and refuses a baseline it has not reached.
             let base = entry.base_revision.min(room);
-            if transport::request_op(&session_id, base, &entry.op_id, entry.payload.clone()).is_ok() {
+            let sent = if let Some(link) = &self.link {
+                link.request_op(&session_id, base, &entry.op_id, entry.payload.clone())
+            } else {
+                transport::request_op(&session_id, base, &entry.op_id, entry.payload.clone())
+            };
+            if sent.is_ok() {
                 entry.base_revision = base;
                 entry.sent = true;
             }
@@ -1638,8 +2056,21 @@ impl State {
             "online": if self.session_id.is_some() { self.peers.len() + 1 } else { 0 },
             "readonly": self.readonly,
             "readonly_level": self.readonly_level,
+            "readonly_reason": self.readonly_reason,
+            "readonly_effective_node": self.readonly_effective_node,
             "readonly_holder": self.readonly_holder,
             "readonly_holder_user": self.readonly_holder_user(),
+            "toasts": self.toasts.to_json(),
+            "unpaired_connectors": self
+                .unpaired_connectors
+                .iter()
+                .map(|u| json!({
+                    "line_tag": u.line_tag,
+                    "connector": u.connector,
+                    "target_drawing": u.target_drawing,
+                    "reason": u.reason.as_str(),
+                }))
+                .collect::<Vec<_>>(),
             "reconnect_attempts": self.reconnect_attempts,
             "last_error": self.last_error,
             "last_claim_message": self.last_claim_message,
@@ -1797,7 +2228,11 @@ impl State {
                 apart.reason()
             ));
         }
-        transport::request_claim(&session_id, tag)?;
+        if let Some(link) = &self.link {
+            link.request_claim(tag)?;
+        } else {
+            transport::request_claim(&session_id, tag)?;
+        }
         #[cfg(test)]
         self.claims_asked.push((session_id, tag.trim().to_owned()));
         self.own_claims.insert(tag.trim().to_owned());
@@ -1809,7 +2244,11 @@ impl State {
         let Some(session_id) = self.session_id.clone() else {
             return Err("未连接协同服务器".to_owned());
         };
-        transport::request_release(&session_id, tag)?;
+        if let Some(link) = &self.link {
+            link.request_release(tag)?;
+        } else {
+            transport::request_release(&session_id, tag)?;
+        }
         self.own_claims.remove(tag.trim());
         Ok(())
     }
@@ -1825,7 +2264,11 @@ impl State {
         self.attempts.push((object_ref.to_owned(), text.to_owned()));
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(session_id) = self.session_id.clone() {
-            transport::request_attempt(&session_id, object_ref, text);
+            if let Some(link) = &self.link {
+                link.request_attempt(object_ref, text);
+            } else {
+                transport::request_attempt(&session_id, object_ref, text);
+            }
         }
     }
 

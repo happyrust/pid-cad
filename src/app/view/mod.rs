@@ -2512,6 +2512,11 @@ bg={bg_ms:.1}ms n={view_count}"
                     ))
                     .position(iced::Point::new(16.0, 16.0)),
                 );
+                // Collaboration canvas overlays: claim markers (#55), page
+                // connector pairing badges (#63), and stacked toasts (#50).
+                for layer in super::pid_shell::collab_ui::canvas_collab_overlays(self) {
+                    viewport_stack = viewport_stack.push(layer);
+                }
             } else if !is_paper && !tab.is_start && self.show_viewport_controls {
                 let (vw, vh) = tab.scene.selection.borrow().view.vp_size;
                 let rect = tab.scene.active_model_tile_bounds(vw, vh);

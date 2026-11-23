@@ -50,6 +50,7 @@ pub(super) fn classify(text: &str) -> Frame {
 
 /// Read one inbound text frame.
 pub(super) fn read(text: &str) -> Reading {
+    let raw_json: serde_json::Value = serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
     let message: ServerMessage = match serde_json::from_str(text) {
         Ok(message) => message,
         Err(error) => {
@@ -105,7 +106,32 @@ pub(super) fn read(text: &str) -> Reading {
         ServerMessage::PeerLeft(peer) => Frame::Event(CollabEvent::PeerLeft {
             session_id: peer.session_id,
         }),
-        ServerMessage::ClaimGranted { tag, .. } => Frame::Event(CollabEvent::ClaimGranted { tag }),
+        ServerMessage::ClaimGranted {
+            tag,
+            session_id,
+            user_id,
+            expires_at,
+            ..
+        } => {
+            let user_id = user_id.filter(|s| !s.is_empty()).or_else(|| {
+                raw_json["user_id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            });
+            let expires_at = expires_at
+                .filter(|t| *t > 0)
+                .or_else(|| raw_json["expires_at"].as_i64().filter(|t| *t > 0));
+            if !session_id.is_empty() || user_id.is_some() || expires_at.is_some() {
+                after.push(CollabEvent::ClaimMeta {
+                    tag: tag.clone(),
+                    session_id,
+                    user_id,
+                    expires_at,
+                });
+            }
+            Frame::Event(CollabEvent::ClaimGranted { tag })
+        }
         ServerMessage::ClaimDenied {
             tag,
             holder,
@@ -133,12 +159,21 @@ pub(super) fn read(text: &str) -> Reading {
             holder,
             level,
             code,
-        } => Frame::Event(CollabEvent::ReadonlyDowngrade {
-            reason,
-            holder,
-            level,
-            code,
-        }),
+        } => {
+            if let Some(node) = raw_json["effective_node"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+            {
+                after.push(CollabEvent::ReadonlyEffectiveNode { node });
+            }
+            Frame::Event(CollabEvent::ReadonlyDowngrade {
+                reason,
+                holder,
+                level,
+                code,
+            })
+        }
         ServerMessage::WriteRestored { reason } => Frame::Event(CollabEvent::ServerError {
             code: "WRITE_RESTORED".to_owned(),
             message: reason,
@@ -156,6 +191,13 @@ pub(super) fn read(text: &str) -> Reading {
                     message: reason,
                 })
             } else {
+                if let Some(node) = raw_json["effective_node"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                {
+                    after.push(CollabEvent::ReadonlyEffectiveNode { node });
+                }
                 Frame::Event(CollabEvent::ReadonlyDowngrade {
                     reason,
                     holder,
