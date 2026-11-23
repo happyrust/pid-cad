@@ -41,6 +41,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/drawing/{id}/state", post(drawing_state))
         .route("/drawing/{id}/objects", get(drawing_objects))
         .route("/drawing/{id}/topology", get(drawing_topology))
+        .route(
+            "/drawing/{id}/unpaired-connectors",
+            get(drawing_unpaired_connectors),
+        )
         .route("/conflicts", get(conflict_list))
         .route("/conflicts/{id}/resolve", post(conflict_resolve))
         .with_state(state)
@@ -592,9 +596,31 @@ async fn drawing_topology(
     Path(drawing_id): Path<String>,
 ) -> Response {
     let (revision, mut topology) = crate::ops::topology(&state, &drawing_id);
+    let (_, unpaired) = crate::ops::unpaired_connectors(&state, &drawing_id);
     topology["drawing_id"] = json!(drawing_id);
     topology["revision"] = json!(revision);
+    topology["unpaired_connectors"] = json!(unpaired);
     (StatusCode::OK, Json(topology)).into_response()
+}
+
+/// `GET /drawing/{id}/unpaired-connectors` → 200
+/// `{"drawing_id","revision","items":[…],"total":N}` (#32).
+async fn drawing_unpaired_connectors(
+    State(state): State<Arc<AppState>>,
+    Path(drawing_id): Path<String>,
+) -> Response {
+    let (revision, items) = crate::ops::unpaired_connectors(&state, &drawing_id);
+    let total = items.len();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "drawing_id": drawing_id,
+            "revision": revision,
+            "items": items,
+            "total": total,
+        })),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -3249,5 +3275,151 @@ mod tests {
         assert!(switched.change_text.contains("管理员（u-admin）"));
         assert!(switched.change_text.contains("协同编辑"));
         assert!(switched.change_text.contains("只读"));
+    }
+
+    /// #31 + #32 over HTTP: deleting a pipe line unpairs the downstream
+    /// connector, and `GET /drawing/{id}/unpaired-connectors` reports all 3
+    /// reasons and clears paired connectors.
+    #[tokio::test]
+    async fn http_unpaired_connectors_endpoint_and_line_deletion_unpair() {
+        let state = audited_state();
+        let extra: crate::store::SeedDoc = serde_json::from_value(json!({
+            "drawings": [
+                {"drawing_id": "d-a2", "file_name": "d-a2.dwg", "pbs_node_id": "n-cell-a1", "state": "协同编辑"},
+                {"drawing_id": "d-a3", "file_name": "d-a3.dwg", "pbs_node_id": "n-cell-a1", "state": "协同编辑"}
+            ]
+        }))
+        .expect("extra seed");
+        state.store.as_ref().expect("store").seed(&extra).expect("seed");
+        let port = serve(&state).await;
+        let now = ocs_collab::now_unix();
+
+        let join_drawing = |drawing_id: &'static str, user_id: &'static str| {
+            let state = state.clone();
+            async move {
+                let mut conn = crate::ws::Connection::new("127.0.0.1");
+                let h = off_the_wire(json!({
+                    "type": "hello", "user_id": user_id, "drawing_id": drawing_id, "mode": "协同编辑"
+                }));
+                crate::ws::handle_message(&state, &mut conn, h, now).await;
+                conn
+            }
+        };
+
+        let mut c1 = join_drawing("d-a1-coop", "u-proc").await;
+        let mut c2 = join_drawing("d-a2", "u-admin").await;
+        let mut c3 = join_drawing("d-a3", "u-proc").await;
+
+        async fn send_op(
+            state: &AppState,
+            conn: &mut crate::ws::Connection,
+            op_id: &str,
+            payload: serde_json::Value,
+            now: i64,
+        ) {
+            let sid = conn.session.as_ref().expect("s").session_id.clone();
+            let did = conn.session.as_ref().expect("s").drawing_id.clone();
+            let rev = crate::ws::current_revision(state, &did);
+            let _ = crate::ws::handle_message(
+                state,
+                conn,
+                ocs_collab::ClientMessage::Op {
+                    session_id: sid,
+                    base_revision: rev,
+                    op_id: op_id.into(),
+                    payload,
+                },
+                now + 1,
+            )
+            .await;
+        }
+
+        // 1. Unregistered target drawing
+        send_op(
+            &state,
+            &mut c1,
+            "op-u1",
+            json!({"kind": "create_connector", "line_tag": "L-UNREG", "connector": "pipe_out", "at": [10, 0], "target_drawing": "d-ghost"}),
+            now,
+        )
+        .await;
+        // 2. Registered target drawing d-a2, no matching inflow yet
+        send_op(
+            &state,
+            &mut c1,
+            "op-u2",
+            json!({"kind": "create_connector", "line_tag": "L-MISS", "connector": "pipe_out", "at": [20, 0], "target_drawing": "d-a2"}),
+            now,
+        )
+        .await;
+        // 3. Registered target drawing d-a2 already paired with d-a3 on L-TAKEN
+        send_op(
+            &state,
+            &mut c3,
+            "op-u3",
+            json!({"kind": "create_connector", "line_tag": "L-TAKEN", "connector": "pipe_out", "at": [30, 0], "target_drawing": "d-a2"}),
+            now,
+        )
+        .await;
+        send_op(
+            &state,
+            &mut c2,
+            "op-u4",
+            json!({"kind": "create_connector", "line_tag": "L-TAKEN", "connector": "pipe_in", "at": [5, 0]}),
+            now,
+        )
+        .await;
+        send_op(
+            &state,
+            &mut c1,
+            "op-u5",
+            json!({"kind": "create_connector", "line_tag": "L-TAKEN", "connector": "pipe_out", "at": [40, 0], "target_drawing": "d-a2"}),
+            now,
+        )
+        .await;
+
+        let (status, body) = http_exchange(port, "GET", "/drawing/d-a1-coop/unpaired-connectors").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["total"], 3, "{body}");
+        let items = body["items"].as_array().expect("items array");
+        let reason_of = |tag: &str| {
+            items
+                .iter()
+                .find(|i| i["line_tag"] == tag)
+                .and_then(|i| i["reason_code"].as_str())
+        };
+        assert_eq!(reason_of("L-UNREG"), Some("target_drawing_unregistered"));
+        assert_eq!(reason_of("L-MISS"), Some("no_matching_connector"));
+        assert_eq!(reason_of("L-TAKEN"), Some("target_already_paired"));
+
+        // Pair L-MISS -> disappears from unpaired-connectors.
+        send_op(
+            &state,
+            &mut c2,
+            "op-u6",
+            json!({"kind": "create_connector", "line_tag": "L-MISS", "connector": "pipe_in", "at": [15, 0]}),
+            now,
+        )
+        .await;
+        let (_, body_after) = http_exchange(port, "GET", "/drawing/d-a1-coop/unpaired-connectors").await;
+        assert_eq!(body_after["total"], 2, "{body_after}");
+
+        // Delete entire line L-MISS on d-a1-coop -> d-a2's inflow returns to unpaired (#31)!
+        send_op(
+            &state,
+            &mut c1,
+            "op-u7",
+            json!({"kind": "delete_object", "object_ref": "L-MISS"}),
+            now,
+        )
+        .await;
+        let (_, topo_b) = http_exchange(port, "GET", "/drawing/d-a2/topology").await;
+        let miss_in = topo_b["connectors"]
+            .as_array()
+            .expect("connectors")
+            .iter()
+            .find(|c| c["line_tag"] == "L-MISS")
+            .expect("L-MISS inflow on d-a2");
+        assert!(miss_in["peer_drawing"].is_null(), "peer must be cleared: {miss_in}");
     }
 }

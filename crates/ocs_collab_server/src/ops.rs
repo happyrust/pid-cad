@@ -982,6 +982,42 @@ pub fn topology(state: &AppState, drawing_id: &str) -> (i64, Value) {
     (drawing.model.revision(), drawing.model.topology())
 }
 
+/// #32: Unpaired off-page connectors on `drawing_id` with exact reason codes.
+pub fn unpaired_connectors(
+    state: &AppState,
+    drawing_id: &str,
+) -> (i64, Vec<ocs_collab::link::UnpairedConnector>) {
+    let mut drawings = state.drawings.lock().expect("drawings mutex poisoned");
+    let revision = drawings
+        .entry(drawing_id.to_owned())
+        .or_insert_with(|| DrawingOps::load(state, drawing_id))
+        .model
+        .revision();
+    let dummy_session = Session {
+        session_id: String::new(),
+        drawing_id: drawing_id.to_owned(),
+        user_id: String::new(),
+        display_name: String::new(),
+        mode: String::new(),
+        workspace: String::new(),
+        status: ocs_collab::SessionStatus::Active,
+        base_revision: revision,
+        last_heartbeat: 0,
+        created_at: 0,
+        disconnected_at: None,
+    };
+    let mut rooms = LinkedRooms {
+        state,
+        drawings: &mut drawings,
+        by: &dummy_session,
+        peer_addr: "127.0.0.1",
+        now: 0,
+        told: Vec::new(),
+    };
+    let items = ocs_collab::link::unpaired_connectors(&mut rooms, drawing_id);
+    (revision, items)
+}
+
 /// How often the flush loop looks, for a given window: often enough that an
 /// op is not held noticeably longer than asked.
 pub fn flush_interval(window: Duration) -> Duration {

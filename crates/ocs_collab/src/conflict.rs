@@ -779,6 +779,11 @@ impl DrawingModel {
                         fitting.get("tag").and_then(Value::as_str) != Some(object_ref)
                     });
                 }
+                // #31: Connectors standing on a deleted pipe/signal line go with it.
+                self.connectors.retain(|known| {
+                    crate::link::Connector::read(known)
+                        .is_none_or(|c| c.line_tag != object_ref)
+                });
             }
             KIND_INSERT_SYMBOL | KIND_CREATE_PIPE_LINE => {
                 self.deleted.remove(object_ref);
