@@ -125,7 +125,14 @@ pub(super) fn read(text: &str) -> Reading {
             user_id,
             display_name,
             expires_at,
+            notice,
         } => {
+            if let Some(notice) = notice.filter(|text| !text.is_empty()) {
+                before.push(CollabEvent::ServerError {
+                    code: "CLAIM_EXPIRING".to_owned(),
+                    message: notice,
+                });
+            }
             let user_id = user_id.filter(|s| !s.is_empty()).or_else(|| {
                 raw_json["user_id"]
                     .as_str()

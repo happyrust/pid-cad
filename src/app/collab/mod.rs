@@ -2076,10 +2076,11 @@ impl State {
                 }
             }
             CollabEvent::ServerError { code, message } => {
-                // `WriteRestored` / a writable `WriteStatus` arrive as this
-                // code (#71, #75). The session may write again without
-                // reconnecting.
-                if code == "WRITE_RESTORED" {
+                if code == "CLAIM_EXPIRING" {
+                    self.last_claim_message = Some(message.clone());
+                    self.toasts
+                        .push(toasts::ToastKind::Info, message);
+                } else if code == "WRITE_RESTORED" {
                     self.readonly = false;
                     self.readonly_holder = None;
                     self.readonly_level = None;

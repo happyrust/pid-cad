@@ -4,6 +4,8 @@
 //! (unix seconds); expiry is evaluated lazily against a caller-supplied `now`,
 //! which keeps the machine deterministic and testable without a clock.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::release_reasons;
@@ -43,11 +45,17 @@ pub enum ReleaseOutcome {
 #[derive(Debug, Clone, Default)]
 pub struct OccupancyTable {
     claims: Vec<Occupancy>,
+    /// Claims already given the "about to expire" notice, keyed by drawing and tag.
+    warned: HashSet<String>,
 }
 
 impl OccupancyTable {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn warn_key(drawing_id: &str, tag: &str) -> String {
+        format!("{drawing_id}\n{tag}")
     }
 
     /// All live claims (expired ones are pruned first).
@@ -165,6 +173,44 @@ impl OccupancyTable {
         (ClaimOutcome::Granted(claim), expired)
     }
 
+    /// Extends a claim this session still holds. Editing the object does this
+    /// so the claim does not run out in the middle of the edit (#87).
+    pub fn renew_held(
+        &mut self,
+        tag: &str,
+        drawing_id: &str,
+        session_id: &str,
+        now: i64,
+        ttl: i64,
+    ) -> Option<Occupancy> {
+        let slot = self.claims.iter_mut().find(|claim| {
+            claim.tag == tag
+                && claim.drawing_id == drawing_id
+                && claim.session_id == session_id
+                && claim.expires_at > now
+        })?;
+        slot.expires_at = now + ttl;
+        self.warned.remove(&Self::warn_key(drawing_id, tag));
+        Some(slot.clone())
+    }
+
+    /// Claims that will run out within `window` seconds and have not been
+    /// mentioned yet. Each is returned once until it is renewed or released.
+    pub fn take_expiry_warnings(&mut self, now: i64, window: i64) -> Vec<Occupancy> {
+        let mut due = Vec::new();
+        for claim in &self.claims {
+            let left = claim.expires_at - now;
+            if left <= 0 || left > window {
+                continue;
+            }
+            let key = Self::warn_key(&claim.drawing_id, &claim.tag);
+            if self.warned.insert(key) {
+                due.push(claim.clone());
+            }
+        }
+        due
+    }
+
     /// Drops a claim the session owns.
     pub fn release(&mut self, tag: &str, session_id: &str) -> ReleaseOutcome {
         match self
@@ -173,7 +219,9 @@ impl OccupancyTable {
             .position(|claim| claim.tag == tag && claim.session_id == session_id)
         {
             Some(index) => {
-                self.claims.remove(index);
+                let claim = self.claims.remove(index);
+                self.warned
+                    .remove(&Self::warn_key(&claim.drawing_id, &claim.tag));
                 ReleaseOutcome::Released
             }
             None => ReleaseOutcome::NotHeld,
@@ -203,14 +251,17 @@ impl OccupancyTable {
     /// Drops every claim held by a session (used when it becomes stale).
     pub fn release_session(&mut self, session_id: &str) -> Vec<Occupancy> {
         let mut removed = Vec::new();
-        self.claims.retain(|claim| {
+        let mut keep = Vec::new();
+        for claim in self.claims.drain(..) {
             if claim.session_id == session_id {
-                removed.push(claim.clone());
-                false
+                self.warned
+                    .remove(&Self::warn_key(&claim.drawing_id, &claim.tag));
+                removed.push(claim);
             } else {
-                true
+                keep.push(claim);
             }
-        });
+        }
+        self.claims = keep;
         removed
     }
 
@@ -218,14 +269,17 @@ impl OccupancyTable {
     /// `claim_released` with reason `expired`.
     pub fn expire(&mut self, now: i64) -> Vec<Occupancy> {
         let mut expired = Vec::new();
-        self.claims.retain(|claim| {
+        let mut keep = Vec::new();
+        for claim in self.claims.drain(..) {
             if claim.expires_at <= now {
-                expired.push(claim.clone());
-                false
+                self.warned
+                    .remove(&Self::warn_key(&claim.drawing_id, &claim.tag));
+                expired.push(claim);
             } else {
-                true
+                keep.push(claim);
             }
-        });
+        }
+        self.claims = keep;
         expired
     }
 
@@ -381,6 +435,33 @@ mod tests {
         assert_eq!(dropped.len(), 2);
         assert_eq!(table.len(), 1);
         assert!(table.get("PID-1101", "V-1003").is_some());
+    }
+
+    #[test]
+    fn editing_renews_a_held_claim_and_the_warning_is_said_once() {
+        let mut table = OccupancyTable::new();
+        let _ = table.claim("V-1001", "PID-1101", "s-1", "u1", 1_000, 10);
+        assert!(table.take_expiry_warnings(1_007, 2).is_empty(), "not yet inside the window");
+        let first = table.take_expiry_warnings(1_009, 2);
+        assert_eq!(first.len(), 1);
+        assert!(table.take_expiry_warnings(1_009, 2).is_empty(), "once");
+        let renewed = table
+            .renew_held("V-1001", "PID-1101", "s-1", 1_009, 10)
+            .expect("still held");
+        assert_eq!(renewed.expires_at, 1_019);
+        assert_eq!(
+            table.renew_held("V-1001", "PID-1101", "s-1", 1_012, 10).unwrap().expires_at,
+            1_022
+        );
+        assert_eq!(
+            table.renew_held("V-1001", "PID-1101", "s-1", 1_016, 10).unwrap().expires_at,
+            1_026,
+            "three edits carry the claim past the original ttl"
+        );
+        assert!(table.expire(1_020).is_empty(), "still held after the original expiry");
+        let again = table.take_expiry_warnings(1_025, 2);
+        assert_eq!(again.len(), 1, "a renewed claim can be warned again");
+        assert_eq!(table.expire(1_026).len(), 1);
     }
 
     #[test]

@@ -191,6 +191,9 @@ pub enum ServerMessage {
         display_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at: Option<i64>,
+        /// Set when this grant is the "about to expire" notice for the holder (#87).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notice: Option<String>,
     },
     /// Tag ownership refused; `holder` still owns it until `expires_at`.
     ClaimDenied {

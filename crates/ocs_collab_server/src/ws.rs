@@ -1195,6 +1195,7 @@ async fn hello(
                             user_id: Some(claim.user_id),
                             display_name: dn,
                             expires_at: Some(claim.expires_at),
+                            notice: None,
                         },
                     });
                 }
@@ -1394,6 +1395,7 @@ async fn claim(state: &AppState, session: &Session, tag: String, now: i64) -> Ve
                     user_id: Some(session.user_id.clone()),
                     display_name,
                     expires_at: Some(occupancy.expires_at),
+                    notice: None,
                 },
             });
             reactions
@@ -1664,6 +1666,7 @@ async fn op(
 
     // The judgment, the commit and the record of it are one synchronous
     // critical section inside `ops::receive`.
+    let renew_tags = tags_touched(&payload);
     let outcome = crate::ops::receive(
         state,
         session,
@@ -1697,7 +1700,84 @@ async fn op(
             .await
             .advance_base_revision(&drawing_id, revision);
     }
-    outcome.reactions
+    let mut reactions = outcome.reactions;
+    if outcome.revision.is_some() {
+        reactions.extend(renew_held_claims(state, session, &renew_tags, now).await);
+    }
+    reactions
+}
+
+fn tags_touched(payload: &Value) -> Vec<String> {
+    let mut tags = Vec::new();
+    for change in ocs_collab::conflict::Change::list(payload) {
+        let subject = change.subject();
+        if !subject.is_empty() {
+            tags.push(subject);
+        }
+        if change.changes_topology() {
+            tags.extend(change.text("line_tag"));
+            tags.extend(change.text("run_tag"));
+        }
+        if change.kind == ocs_collab::conflict::KIND_SET_TAG && !change.value.is_empty() {
+            tags.push(change.value);
+        }
+    }
+    tags.sort();
+    tags.dedup();
+    tags
+}
+
+/// #87: an edit of a tag this session holds pushes that claim's expiry out
+/// by a full ttl and tells the drawing.
+async fn renew_held_claims(
+    state: &AppState,
+    session: &Session,
+    tags: &[String],
+    now: i64,
+) -> Vec<Reaction> {
+    let ttl = state.session_config.claim_ttl;
+    let mut renewed = Vec::new();
+    {
+        let mut occupancy = state.occupancy.lock().await;
+        for tag in tags {
+            if let Some(claim) = occupancy.renew_held(
+                tag,
+                &session.drawing_id,
+                &session.session_id,
+                now,
+                ttl,
+            ) {
+                renewed.push(claim);
+            }
+        }
+    }
+    let mut reactions = Vec::new();
+    for claim in renewed {
+        if let Some(store) = &state.store {
+            if let Err(err) = store.insert_claim(&ClaimRow {
+                tag: claim.tag.clone(),
+                drawing_id: claim.drawing_id.clone(),
+                session_id: claim.session_id.clone(),
+                user_id: claim.user_id.clone(),
+                expires_at: claim.expires_at,
+            }) {
+                eprintln!("[ocs_collab_server] 续期占用失败：{err}");
+            }
+        }
+        let display_name = (!session.display_name.is_empty()).then(|| session.display_name.clone());
+        reactions.push(Reaction::Publish {
+            drawing_id: claim.drawing_id,
+            message: ServerMessage::ClaimGranted {
+                tag: claim.tag,
+                session_id: claim.session_id,
+                user_id: Some(session.user_id.clone()),
+                display_name,
+                expires_at: Some(claim.expires_at),
+                notice: None,
+            },
+        });
+    }
+    reactions
 }
 
 /// The first change of `payload` that touches a tag another session holds
@@ -1920,6 +2000,30 @@ pub async fn sweep_expired(state: &AppState, now: i64) -> Vec<Reaction> {
                 });
             }
         }
+    }
+
+    let warn_window = (state.session_config.claim_ttl / 5).clamp(1, 60);
+    let due = state
+        .occupancy
+        .lock()
+        .await
+        .take_expiry_warnings(now, warn_window);
+    for claim in due {
+        let notice = format!(
+            "位号 {} 的占用将在 {} 到期，继续编辑会自动续期",
+            claim.tag, claim.expires_at
+        );
+        reactions.push(Reaction::SendTo {
+            session_id: claim.session_id.clone(),
+            message: ServerMessage::ClaimGranted {
+                tag: claim.tag,
+                session_id: claim.session_id,
+                user_id: Some(claim.user_id),
+                display_name: None,
+                expires_at: Some(claim.expires_at),
+                notice: Some(notice),
+            },
+        });
     }
 
     let expired = state.occupancy.lock().await.expire(now);
@@ -2699,6 +2803,7 @@ mod tests {
                 user_id: Some("u1".into()),
                 display_name: None,
                 expires_at: Some(T0 + 300),
+                notice: None,
             }]
         );
         let rows = store_of(&state)
@@ -3201,6 +3306,73 @@ mod tests {
             .claims_on_drawing("PID-1101")
             .expect("claims query")
             .is_empty());
+    }
+
+    /// #87: edits of a held tag push its expiry out; stopping lets it expire,
+    /// and the holder is told once before that.
+    #[tokio::test]
+    async fn editing_renews_a_claim_past_one_ttl_and_idleness_expires_it() {
+        let mut state = state();
+        state.session_config.claim_ttl = 10;
+        let mut conn = opened_conn(&state, "u1", 1_000).await;
+        let session_id = session_id(&conn);
+        handle_message(
+            &state,
+            &mut conn,
+            ClientMessage::Claim {
+                session_id: session_id.clone(),
+                tag: "V-1001".into(),
+            },
+            1_000,
+        )
+        .await;
+        for (index, now) in [(0_i64, 1_004_i64), (1, 1_008), (2, 1_016)] {
+            let reactions = handle_message(
+                &state,
+                &mut conn,
+                ClientMessage::Op {
+                    session_id: session_id.clone(),
+                    base_revision: index,
+                    op_id: format!("op-renew-{index}"),
+                    payload: json!({
+                        "kind": "set_property",
+                        "object_ref": "V-1001",
+                        "field": "设计压力",
+                        "value": format!("{index}"),
+                    }),
+                },
+                now,
+            )
+            .await;
+            assert!(
+                publishes(&reactions).iter().any(|message| matches!(
+                    message,
+                    ServerMessage::ClaimGranted { tag, expires_at, notice: None, .. }
+                        if tag == "V-1001" && expires_at == &Some(now + 10)
+                )),
+                "edit {index} renews the claim: {reactions:?}"
+            );
+        }
+        let rows = store_of(&state).claims_on_drawing("PID-1101").expect("claims");
+        assert_eq!(rows[0].expires_at, 1_026);
+        let warned = sweep_expired(&state, 1_025).await;
+        let notice = warned.iter().find_map(|reaction| match reaction {
+            Reaction::SendTo { session_id: sid, message } if sid == &session_id => Some(message),
+            _ => None,
+        });
+        match notice {
+            Some(ServerMessage::ClaimGranted { tag, notice: Some(text), .. }) => {
+                assert_eq!(tag, "V-1001");
+                assert!(text.contains("到期"), "{text}");
+            }
+            other => panic!("expected one expiry notice, got {other:?}"),
+        }
+        let released = sweep_expired(&state, 1_026).await;
+        assert!(publishes(&released).iter().any(|message| matches!(
+            message,
+            ServerMessage::ClaimReleased { tag, reason } if tag == "V-1001" && reason == "expired"
+        )));
+        assert!(store_of(&state).claims_on_drawing("PID-1101").expect("claims").is_empty());
     }
 
     #[tokio::test]
