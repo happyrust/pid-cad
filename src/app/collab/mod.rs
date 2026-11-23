@@ -2379,6 +2379,14 @@ impl State {
         })
     }
 
+    /// Queue one semantic op without a local drawing step. Tests use it when
+    /// the op is the thing under test and the drawing is updated by the
+    /// room's answer (#85).
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn enqueue_semantic(&mut self, payload: Value) -> Result<Queued, String> {
+        self.queue_op(payload, Vec::new(), true, "semantic")
+    }
+
     #[cfg(target_arch = "wasm32")]
     pub(super) fn queue_op(
         &mut self,

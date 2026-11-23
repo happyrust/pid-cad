@@ -21,6 +21,7 @@ use crate::app::collab::{transport, CollabEvent};
 use crate::app::OpenCADStudio;
 use crate::pid::persist::PidAuthor;
 use crate::pid::propagate::split_props;
+use crate::pid::topology::TopologyTable;
 
 static SERIAL: AtomicU64 = AtomicU64::new(1);
 
@@ -137,6 +138,14 @@ impl RealServer {
 
     pub(crate) fn http_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /// `GET /drawing/{id}/topology` as the server knows the drawing.
+    pub(crate) fn topology(&self, drawing_id: &str) -> Value {
+        let url = format!("{}/drawing/{drawing_id}/topology", self.http_url());
+        let mut resp = ureq::get(&url).call().expect("GET topology");
+        let text = resp.body_mut().read_to_string().expect("read topology");
+        serde_json::from_str(&text).expect("parse topology")
     }
 
     fn wait_healthy(&self, timeout: Duration) {
@@ -803,6 +812,151 @@ fn harness_40_41_conflict_tie_late_joiner_fetches_and_admin_resolves_from_client
         d_tail.contains("CONFLICT_ALREADY_RESOLVED") || d_tail.contains("已经裁决"),
         "second resolve must report already resolved; got: {d_tail}"
     );
+}
+
+/// #85: two headless editors (the graphical clients, without a window)
+/// change one pipe line's connections against one baseline. The tie window
+/// makes one topology entry. Adopting 乙方 writes that side onto both
+/// drawings and onto the server's topology record.
+#[test]
+fn harness_85_two_editors_tie_on_a_line_and_the_ruling_lands_on_both() {
+    let server = RealServer::start(standard_seed(), 3_000, 300);
+    let mut a = HeadlessClient::connect(&server.ws_url(), "u1", "PID-1101");
+    let mut b = HeadlessClient::connect(&server.ws_url(), "u2", "PID-1101");
+    assert!(wait_both(&mut a, &mut b, Duration::from_secs(5), |a, b| {
+        a.collab.connected && b.collab.connected
+    }));
+
+    a.draw_points("PIDPIPE", &[[0.0, 0.0], [200.0, 0.0]]);
+    assert!(
+        wait_both(&mut a, &mut b, Duration::from_secs(6), |a, b| {
+            pipe_line_tag(a).is_some() && pipe_line_tag(a) == pipe_line_tag(b)
+        }),
+        "B must receive the pipe line A drew; A={:?} B={:?}",
+        pipe_line_tag(&a.app),
+        pipe_line_tag(&b.app)
+    );
+    let line = pipe_line_tag(&a.app).expect("the line");
+    let revision = a.app.collab.base_revision;
+    assert_eq!(b.app.collab.base_revision, revision);
+
+    let party_a = json!({
+        "kind": "add_pipe_run",
+        "line_tag": line,
+        "tag": format!("{line}-01"),
+        "points": [[0, 0], [100, 0]],
+    });
+    let party_b = json!({
+        "kind": "add_pipe_run",
+        "line_tag": line,
+        "tag": format!("{line}-01"),
+        "points": [[0, 0], [40, 70]],
+    });
+    a.app
+        .collab
+        .enqueue_semantic(party_a)
+        .expect("A queues a run");
+    b.app
+        .collab
+        .enqueue_semantic(party_b)
+        .expect("B queues a run");
+
+    assert!(
+        wait_both(&mut a, &mut b, Duration::from_secs(6), |a, b| {
+            a.collab.conflicts.iter().any(|c| c.field == "topology")
+                && b.collab.conflicts.iter().any(|c| c.field == "topology")
+        }),
+        "both editors must list one topology entry; A={:?} B={:?}",
+        a.app.collab.conflicts,
+        b.app.collab.conflicts
+    );
+    let entry = a
+        .app
+        .collab
+        .conflicts
+        .iter()
+        .find(|c| c.field == "topology")
+        .expect("the entry")
+        .clone();
+    assert_eq!(entry.object_ref, line);
+    let chosen: Value = serde_json::from_str(&entry.value_b).expect("乙方's change is json");
+    assert_eq!(chosen["kind"], "add_pipe_run");
+
+    let mut d = HeadlessClient::connect(&server.ws_url(), "u4", "PID-1101");
+    assert!(d.wait_until(Duration::from_secs(5), |app| app.collab.connected));
+    d.run_cmd(&format!("PIDCOLLAB RESOLVE {} 采用乙方", entry.conflict_id));
+
+    let want = chosen["points"].clone();
+    assert!(
+        wait_both(&mut a, &mut b, Duration::from_secs(6), |a, b| {
+            segment_matches(a, &want) && segment_matches(b, &want)
+        }),
+        "both drawings must show 乙方's run; A={:?} B={:?} want={want}",
+        segment_points(&a.app),
+        segment_points(&b.app)
+    );
+    let record = server.topology("PID-1101");
+    let runs = record["pipe_runs"].as_array().cloned().unwrap_or_default();
+    assert!(
+        runs.iter()
+            .any(|run| run["points"] == want && run["line_tag"] == line),
+        "the server topology record must be 乙方's run; got {record}"
+    );
+    assert!(
+        a.app
+            .collab
+            .conflicts
+            .iter()
+            .all(|c| c.conflict_id != entry.conflict_id)
+            && b.app
+                .collab
+                .conflicts
+                .iter()
+                .all(|c| c.conflict_id != entry.conflict_id),
+        "the topology entry leaves both lists"
+    );
+}
+
+fn pipe_line_tag(app: &OpenCADStudio) -> Option<String> {
+    let doc = &app.tabs[app.active_tab].scene.document;
+    TopologyTable::load(doc)
+        .pipe_lines
+        .first()
+        .map(|line| line.tag.clone())
+}
+
+fn segment_points(app: &OpenCADStudio) -> Vec<([f64; 2], [f64; 2])> {
+    let doc = &app.tabs[app.active_tab].scene.document;
+    TopologyTable::load(doc)
+        .pipe_segments
+        .iter()
+        .map(|segment| (segment.start.point, segment.end.point))
+        .collect()
+}
+
+fn segment_matches(app: &OpenCADStudio, points: &Value) -> bool {
+    let Some(points) = points.as_array() else {
+        return false;
+    };
+    if points.len() < 2 {
+        return false;
+    }
+    let start = json_point(&points[0]);
+    let end = json_point(&points[1]);
+    segment_points(app)
+        .into_iter()
+        .any(|(have_start, have_end)| near(have_start, start) && near(have_end, end))
+}
+
+fn json_point(value: &Value) -> [f64; 2] {
+    [
+        value[0].as_f64().unwrap_or(f64::NAN),
+        value[1].as_f64().unwrap_or(f64::NAN),
+    ]
+}
+
+fn near(have: [f64; 2], want: [f64; 2]) -> bool {
+    (have[0] - want[0]).abs() < 0.01 && (have[1] - want[1]).abs() < 0.01
 }
 
 // ── #42: Client history & field last-writer queries ──────────────────────
