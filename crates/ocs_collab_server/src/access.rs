@@ -152,17 +152,21 @@ pub async fn write_access(state: &AppState, session: &Session) -> Option<Denied>
             return viewer(session);
         }
     }
+    // #73: Read-only drawings never retain an edit holder; only 单人编辑
+    // carries a holder (`first_editor`).
     let holder = if level != DenialLevel::State {
         None
     } else if outcome.holder.is_some() {
         // 单人编辑, and somebody else is editing too. The chain says that
         // of every one of them; the one that may write is the one that was
         // there first.
-        first_editor(state, &session.drawing_id).await
+        first_editor(state, &session.drawing_id)
+            .await
+            .or(outcome.holder)
     } else {
-        holder_of(state, &session.drawing_id)
+        None
     };
-    // The drawing's one writer is this session.
+    // The 单人编辑 drawing's one writer is this session.
     if level == DenialLevel::State && holder.as_deref() == Some(session.session_id.as_str()) {
         return None;
     }

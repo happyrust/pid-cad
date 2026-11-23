@@ -356,16 +356,8 @@ async fn drawing_state(
         }
     }
 
-    if next_state == DrawingState::ReadOnly {
-        settle_readonly(&state, &drawing_id, &user_id).await;
-    } else {
-        // No longer 只读: there is no edit right to hold.
-        state
-            .holders
-            .lock()
-            .expect("holders mutex poisoned")
-            .remove(&drawing_id);
-    }
+    let prev_state = DrawingState::parse(&current_text);
+    settle_state_change(&state, &drawing_id, prev_state, next_state, &user_id).await;
 
     (
         StatusCode::OK,
@@ -374,78 +366,102 @@ async fn drawing_state(
         .into_response()
 }
 
-/// Settles who writes on a drawing that just became 只读, and tells every
-/// live session on it (`VAL-CLI-011`).
-///
-/// One session keeps the edit right and goes on writing: the editing session
-/// that has been on the drawing longest (`access::first_editor` — join
-/// order, live, editing, and with a socket to be told on). It is named by
-/// its session id, so the same user's second session is not mistaken for it.
-/// With nobody editing there is no holder, and nobody writes.
-///
-/// 契约未规定，待用户确认：`VAL-CLI-011` 只说「`u1`（编辑权持有者）」，没有
-/// 说以「把图纸状态改成只读」触发降级时谁算持有者。上面这条规则（切换那
-/// 一刻在图上时间最长的活跃编辑会话）是实现方的选择，见状态文档 §13.4 之 2
-/// 与 §14.3。
-///
-/// Choosing the holder, recording it and telling the sessions are one step,
-/// under the registry's lock. They used to be read at two moments — the
-/// editors before the permission check, the sessions to tell after the
-/// write — and a holder that left in between was still named, with nobody
-/// able to write.
-///
-/// Every session is told, the holder too: the message names the holder, and
-/// a session that finds its own id there knows the edit right is its own.
-/// (It used to be told nothing — and a session downgraded once, then made
-/// holder by a later switch, went on believing it could not write.) The
-/// message is about one session's access, so it goes out on each session's
-/// own channel rather than to the room.
-///
-/// The record of the holder is what the op gate reads (`access::write_access`)
-/// and what a session joining later is told.
-async fn settle_readonly(state: &AppState, drawing_id: &str, changed_by: &str) {
-    let registry = state.sessions.lock().await;
-    let direct = state.direct.lock().expect("direct mutex poisoned");
-    let holder = registry
-        .all()
-        .iter()
-        .find(|session| {
-            session.drawing_id == drawing_id
-                && session.is_active()
-                && session.is_editing()
-                && direct.contains_key(&session.session_id)
-        })
-        .map(|session| session.session_id.clone());
-    {
-        let mut holders = state.holders.lock().expect("holders mutex poisoned");
-        match &holder {
-            Some(holder) => holders.insert(drawing_id.to_owned(), holder.clone()),
-            None => holders.remove(drawing_id),
-        };
-    }
-    let message = crate::access::Denied {
-        level: ocs_collab::DenialLevel::State,
-        reason: "图纸已切换为只读".to_owned(),
-        holder: holder.clone(),
-    }
-    .downgrade();
-    let holder_text = holder.as_deref().unwrap_or("(无)");
-    let told = registry.active_peers(drawing_id);
-    println!(
-        "[ocs_collab_server] 图纸切只读 drawing={drawing_id} by={changed_by} holder={holder_text} -> 通知 {} 个会话 at={}",
-        told.len(),
-        chrono::Utc::now().timestamp()
-    );
-    for session in &told {
-        // A session with no socket (opened over HTTP, or just disconnected)
-        // has nobody to tell; it learns its access the next time it asks.
-        let delivered = direct
-            .get(&session.session_id)
-            .is_some_and(|sender| sender.send(message.clone()).is_ok());
-        println!(
-            "[ocs_collab_server] 单播 readonly_downgrade session={} user={} holder={holder_text} delivered={delivered}",
-            session.session_id, session.user_id
-        );
+/// Settles session write permissions whenever a drawing changes state (#70, #71, #73):
+/// - Switching to `只读` clears any holder (`#73`) and sends `ReadonlyDowngrade { holder: None }`
+///   to every active session on the drawing (nobody can write).
+/// - Switching to `单人编辑` keeps only the earliest active editor writable and
+///   downgrades all other active sessions naming that holder; if leaving `只读`,
+///   notifies the writable editor with `WriteRestored` (`#71`).
+/// - Switching to `协同编辑` notifies every active session that now has write
+///   access with `WriteRestored` (`#71`) so clients recover without reconnecting.
+async fn settle_state_change(
+    state: &AppState,
+    drawing_id: &str,
+    prev_state: Option<DrawingState>,
+    next_state: DrawingState,
+    changed_by: &str,
+) {
+    // #73: Read-only drawings never retain an edit holder.
+    state
+        .holders
+        .lock()
+        .expect("holders mutex poisoned")
+        .remove(drawing_id);
+
+    let active_sessions: Vec<ocs_collab::Session> = {
+        let registry = state.sessions.lock().await;
+        registry.active_peers(drawing_id)
+    };
+
+    match next_state {
+        DrawingState::ReadOnly => {
+            let message = crate::access::Denied {
+                level: ocs_collab::DenialLevel::State,
+                reason: "图纸已切换为只读".to_owned(),
+                holder: None,
+            }
+            .downgrade();
+            println!(
+                "[ocs_collab_server] 图纸切只读 drawing={drawing_id} by={changed_by} holder=(无) -> 通知 {} 个会话 at={}",
+                active_sessions.len(),
+                chrono::Utc::now().timestamp()
+            );
+            let direct = state.direct.lock().expect("direct mutex poisoned");
+            for session in &active_sessions {
+                let delivered = direct
+                    .get(&session.session_id)
+                    .is_some_and(|sender| sender.send(message.clone()).is_ok());
+                println!(
+                    "[ocs_collab_server] 单播 readonly_downgrade session={} user={} holder=(无) delivered={delivered}",
+                    session.session_id, session.user_id
+                );
+            }
+        }
+        DrawingState::SingleEditor => {
+            for session in &active_sessions {
+                let msg = match crate::access::write_access(state, session).await {
+                    Some(denied) => Some(denied.downgrade()),
+                    None if prev_state == Some(DrawingState::ReadOnly) => {
+                        Some(ocs_collab::ServerMessage::WriteRestored {
+                            reason: "图纸已切换为单人编辑，您已获得编辑权，写权限已恢复"
+                                .to_owned(),
+                        })
+                    }
+                    None => None,
+                };
+                if let Some(msg) = msg {
+                    let tx = state
+                        .direct
+                        .lock()
+                        .expect("direct mutex poisoned")
+                        .get(&session.session_id)
+                        .cloned();
+                    if let Some(tx) = tx {
+                        let _ = tx.send(msg);
+                    }
+                }
+            }
+        }
+        DrawingState::Collaborative => {
+            if prev_state == Some(DrawingState::Collaborative) {
+                return;
+            }
+            for session in &active_sessions {
+                if crate::access::write_access(state, session).await.is_none() {
+                    let tx = state
+                        .direct
+                        .lock()
+                        .expect("direct mutex poisoned")
+                        .get(&session.session_id)
+                        .cloned();
+                    if let Some(tx) = tx {
+                        let _ = tx.send(ocs_collab::ServerMessage::WriteRestored {
+                            reason: "图纸已切换为协同编辑，写权限已恢复".to_owned(),
+                        });
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1534,16 +1550,14 @@ mod tests {
         .status()
     }
 
-    /// VAL-CLI-011: a drawing switched to 只读 downgrades every live session on
-    /// it except the one holding the edit right — the editing session that
-    /// has been on it longest — which goes on writing. Every session is told
-    /// who that is, the holder too: finding its own id there is how it knows.
+    /// #73: Switching a drawing to 只读 downgrades EVERY live session with
+    /// `holder = None` (read-only drawings no longer retain an edit holder).
     #[tokio::test]
-    async fn switching_to_readonly_downgrades_everyone_but_the_holder() {
+    async fn switching_to_readonly_downgrades_everyone_with_no_holder() {
         let state = seeded_state();
         let now = ocs_collab::now_unix();
         let (_viewer, mut viewer_rx) = live_session(&state, "u-view", "只读", now - 30).await;
-        let (holder, mut holder_rx) = live_session(&state, "u-proc", "协同编辑", now - 20).await;
+        let (_first, mut first_rx) = live_session(&state, "u-proc", "协同编辑", now - 20).await;
         let (_second, mut second_rx) =
             live_session(&state, "u-admin", "协同编辑", now - 10).await;
         let mut room = state.bus.subscribe("d-a1-coop");
@@ -1553,7 +1567,7 @@ mod tests {
         for (who, receiver) in [
             ("the second editor", &mut second_rx),
             ("the session that was read-only already", &mut viewer_rx),
-            ("the holder itself", &mut holder_rx),
+            ("the first editor", &mut first_rx),
         ] {
             match receiver.try_recv() {
                 Ok(ocs_collab::ServerMessage::ReadonlyDowngrade {
@@ -1563,7 +1577,7 @@ mod tests {
                     code,
                 }) => {
                     assert!(!reason.is_empty(), "{who}: the reason is stated");
-                    assert_eq!(named.as_deref(), Some(holder.as_str()), "{who}");
+                    assert_eq!(named, None, "{who}: readonly has no holder (#73)");
                     assert_eq!(level.as_deref(), Some("state"), "{who}");
                     assert_eq!(code.as_deref(), Some(codes::PERM_DENIED_STATE), "{who}");
                 }
@@ -1572,9 +1586,9 @@ mod tests {
             assert!(receiver.try_recv().is_err(), "{who} is told once");
         }
         assert_eq!(
-            crate::access::holder_of(&state, "d-a1-coop").as_deref(),
-            Some(holder.as_str()),
-            "and the server remembers who holds it"
+            crate::access::holder_of(&state, "d-a1-coop"),
+            None,
+            "readonly drawing retains no edit holder (#73)"
         );
         assert!(
             room.try_recv().is_none(),
@@ -2042,33 +2056,33 @@ mod tests {
     }
 
     /// 只读 has one writer: the holder goes on writing, everybody else is
-    /// refused at the state tier and told who holds it. A session that joins
-    /// afterwards is told the same as it comes in (it used to be told
-    /// nothing, and to write). Out of 只读 again, everybody writes.
+    /// #73: On a 只读 drawing NOBODY may write (including the editor who was
+    /// active at the moment of the switch), and `holder` is always `None`.
     #[tokio::test]
-    async fn on_a_readonly_drawing_only_the_holder_writes() {
+    async fn on_a_readonly_drawing_nobody_writes_and_no_holder_is_retained() {
         let state = seeded_state();
         let now = ocs_collab::now_unix();
-        let (mut holder, _) = live_conn(&state, "u-proc", now - 20).await;
+        let (mut first, _) = live_conn(&state, "u-proc", now - 20).await;
         let (mut second, _) = live_conn(&state, "u-admin", now - 10).await;
-        let holder_id = holder.session.as_ref().expect("session").session_id.clone();
         assert_eq!(switch_state(&state, "只读").await, StatusCode::OK);
 
-        assert!(applied_in(&write(&state, &mut holder, "op-h", "1.6MPa").await));
-        let refused = write(&state, &mut second, "op-s", "2.5MPa").await;
-        assert_eq!(
-            refusal_in(&refused),
-            Some((codes::PERM_DENIED_STATE.to_owned(), Some("state".to_owned()))),
-            "{refused:?}"
-        );
+        for (who, conn) in [("first", &mut first), ("second", &mut second)] {
+            let refused = write(&state, conn, &format!("op-{who}"), "1.6MPa").await;
+            assert_eq!(
+                refusal_in(&refused),
+                Some((codes::PERM_DENIED_STATE.to_owned(), Some("state".to_owned()))),
+                "{who}: {refused:?}"
+            );
+        }
+        assert_eq!(denied_rows(&state, "u-proc").len(), 1);
         assert_eq!(denied_rows(&state, "u-admin").len(), 1);
 
-        // A second session of a user who does edit, joining afterwards.
+        // A session joining afterwards gets ReadonlyDowngrade with holder = None.
         let (mut late, reactions) = live_conn(&state, "u-admin", now).await;
         assert_eq!(
             downgrade_in(&reactions),
             Some((
-                Some(holder_id),
+                None,
                 Some("state".to_owned()),
                 Some(codes::PERM_DENIED_STATE.to_owned())
             )),
@@ -2077,12 +2091,10 @@ mod tests {
         assert!(refusal_in(&write(&state, &mut late, "op-l", "4.0MPa").await).is_some());
     }
 
-    /// The holder is a session somebody is behind: one opened over HTTP has
-    /// no socket and is passed over, however early it was. And among those
-    /// with a socket it is the one that joined first — two sessions opened
-    /// in the same second used to be told apart by their random ids.
+    /// #73: On a 单人编辑 drawing, the edit holder is the earliest active
+    /// editing session with a socket (skipping HTTP-only sessions).
     #[tokio::test]
-    async fn the_holder_is_the_first_to_have_joined_among_sessions_with_a_socket() {
+    async fn single_editor_holder_is_first_editor_with_a_socket() {
         let state = seeded_state();
         let now = ocs_collab::now_unix();
         // An editing session with no socket, earlier than everybody.
@@ -2100,15 +2112,17 @@ mod tests {
             });
         }
         // Two with a socket, in the same second.
-        let (first, _) = live_conn(&state, "u-proc", now).await;
-        let (_second, _) = live_conn(&state, "u-admin", now).await;
+        let (mut first, _) = live_conn(&state, "u-proc", now).await;
+        let (mut second, _) = live_conn(&state, "u-admin", now).await;
         let first_id = first.session.as_ref().expect("session").session_id.clone();
 
-        assert_eq!(switch_state(&state, "只读").await, StatusCode::OK);
+        assert_eq!(switch_state(&state, "单人编辑").await, StatusCode::OK);
         assert_eq!(
-            crate::access::holder_of(&state, "d-a1-coop").as_deref(),
+            crate::access::first_editor(&state, "d-a1-coop").await.as_deref(),
             Some(first_id.as_str())
         );
+        assert!(applied_in(&write(&state, &mut first, "op-s1", "1.6MPa").await));
+        assert!(refusal_in(&write(&state, &mut second, "op-s2", "2.5MPa").await).is_some());
     }
 
     /// An `attempt` is a client saying it turned a write away itself. Nothing
@@ -2214,20 +2228,26 @@ mod tests {
         }
     }
 
-    /// Only 只读 takes write access away; any other state leaves every session
-    /// as it was.
+    /// #73: Switching to 单人编辑 leaves the earliest editor writable and
+    /// downgrades the second editor naming the first as holder.
     #[tokio::test]
-    async fn a_state_other_than_readonly_downgrades_nobody() {
+    async fn switching_to_single_editor_downgrades_second_editor_naming_first_holder() {
         let state = seeded_state();
         let now = ocs_collab::now_unix();
-        let (_first, mut first_rx) = live_session(&state, "u-proc", "协同编辑", now - 20).await;
+        let (first, mut first_rx) = live_session(&state, "u-proc", "协同编辑", now - 20).await;
         let (_second, mut second_rx) =
             live_session(&state, "u-admin", "协同编辑", now - 10).await;
 
         assert_eq!(switch_state(&state, "单人编辑").await, StatusCode::OK);
 
-        assert!(first_rx.try_recv().is_err());
-        assert!(second_rx.try_recv().is_err());
+        assert!(first_rx.try_recv().is_err(), "first editor remains writable");
+        match second_rx.try_recv() {
+            Ok(ocs_collab::ServerMessage::ReadonlyDowngrade { holder, code, .. }) => {
+                assert_eq!(holder.as_deref(), Some(first.as_str()));
+                assert_eq!(code.as_deref(), Some(codes::PERM_DENIED_STATE));
+            }
+            other => panic!("second editor must be downgraded naming first holder: {other:?}"),
+        }
     }
 
     // ── Conflict adjudication (`VAL-CONF-010` … `016`) ──────────────────
@@ -3424,5 +3444,132 @@ mod tests {
             .find(|c| c["line_tag"] == "L-MISS")
             .expect("L-MISS inflow on d-a2");
         assert!(miss_in["peer_drawing"].is_null(), "peer must be cleared: {miss_in}");
+    }
+
+    /// #70 + #71 + #72: Read-only drawing switches back to 协同编辑, downgraded
+    /// sessions automatically receive `WriteRestored` without reconnecting,
+    /// `RequestWrite` answers immediately with `WriteStatus`, and single-editor
+    /// handoff restores write access when the prior holder expires.
+    #[tokio::test]
+    async fn readonly_restore_request_write_and_single_editor_handoff() {
+        let state = seeded_state();
+        let now = ocs_collab::now_unix();
+
+        let (mut editor_a, _) = live_conn(&state, "u-proc", now - 20).await;
+        let a_sid = editor_a.session.as_ref().expect("a").session_id.clone();
+        let (a_tx, mut a_rx) = tokio::sync::mpsc::unbounded_channel();
+        state.direct.lock().expect("direct").insert(a_sid.clone(), a_tx);
+
+        let (_viewer, mut viewer_rx) = live_session(&state, "u-view", "只读", now - 15).await;
+
+        // Switch to 只读 -> editor_a gets ReadonlyDowngrade(holder=None), write refused, RequestWrite -> writable=false.
+        assert_eq!(switch_state(&state, "只读").await, StatusCode::OK);
+        assert!(matches!(
+            a_rx.try_recv(),
+            Ok(ocs_collab::ServerMessage::ReadonlyDowngrade { holder: None, .. })
+        ));
+        let _ = viewer_rx.try_recv();
+        assert!(refusal_in(&write(&state, &mut editor_a, "op-ro", "1.0MPa").await).is_some());
+
+        // #72: RequestWrite while 只读 -> writable: false with state tier reason.
+        let req_denied = crate::ws::handle_message(
+            &state,
+            &mut editor_a,
+            ocs_collab::ClientMessage::RequestWrite {
+                session_id: a_sid.clone(),
+            },
+            now,
+        )
+        .await;
+        assert!(
+            req_denied.iter().any(|r| matches!(
+                r,
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::WriteStatus {
+                    writable: false,
+                    level: Some(lvl),
+                    code: Some(code),
+                    ..
+                }) if lvl == "state" && code == codes::PERM_DENIED_STATE
+            )),
+            "{req_denied:?}"
+        );
+
+        // #70: Designer cannot switch state back (role tier), admin can!
+        let denied_switch = drawing_state(
+            State(state.clone()),
+            Path("d-a1-coop".into()),
+            Json(DrawingStateBody {
+                user_id: Some("u-proc".into()),
+                state: Some("协同编辑".into()),
+            }),
+        )
+        .await;
+        assert_eq!(denied_switch.status(), StatusCode::FORBIDDEN);
+        assert_eq!(switch_state(&state, "协同编辑").await, StatusCode::OK);
+
+        // #71: editor_a automatically receives WriteRestored; viewer does NOT.
+        assert!(matches!(
+            a_rx.try_recv(),
+            Ok(ocs_collab::ServerMessage::WriteRestored { .. })
+        ));
+        assert!(viewer_rx.try_recv().is_err(), "viewer must not get WriteRestored");
+
+        // #72: RequestWrite now returns writable: true immediately!
+        let req_ok = crate::ws::handle_message(
+            &state,
+            &mut editor_a,
+            ocs_collab::ClientMessage::RequestWrite {
+                session_id: a_sid.clone(),
+            },
+            now + 1,
+        )
+        .await;
+        assert!(
+            req_ok.iter().any(|r| matches!(
+                r,
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::WriteStatus {
+                    writable: true,
+                    ..
+                })
+            )),
+            "{req_ok:?}"
+        );
+        // And editor_a can write immediately without reconnecting!
+        assert!(applied_in(&write(&state, &mut editor_a, "op-back", "1.6MPa").await));
+
+        // #71 part 2: Single-editor handoff on holder expiry!
+        let (mut editor_b, _) = live_conn(&state, "u-admin", now + 2).await;
+        let b_sid = editor_b.session.as_ref().expect("b").session_id.clone();
+        let (b_tx, mut b_rx) = tokio::sync::mpsc::unbounded_channel();
+        state.direct.lock().expect("direct").insert(b_sid.clone(), b_tx);
+
+        assert_eq!(switch_state(&state, "单人编辑").await, StatusCode::OK);
+        assert!(matches!(
+            b_rx.try_recv(),
+            Ok(ocs_collab::ServerMessage::ReadonlyDowngrade { holder: Some(ref h), .. }) if h == &a_sid
+        ));
+
+        // Keep b alive with heartbeat, let a expire -> sweep emits SendTo(b, WriteRestored)!
+        let _ = crate::ws::handle_message(
+            &state,
+            &mut editor_b,
+            ocs_collab::ClientMessage::Heartbeat {
+                session_id: b_sid.clone(),
+            },
+            now + 50,
+        )
+        .await;
+        let swept = crate::ws::sweep_expired(&state, now + 100).await;
+        assert!(
+            swept.iter().any(|r| matches!(
+                r,
+                crate::ws::Reaction::SendTo {
+                    session_id,
+                    message: ocs_collab::ServerMessage::WriteRestored { .. }
+                } if session_id == &b_sid
+            )),
+            "second editor must receive WriteRestored when first holder expires: {swept:?}"
+        );
+        assert!(applied_in(&write(&state, &mut editor_b, "op-handoff", "2.0MPa").await));
     }
 }

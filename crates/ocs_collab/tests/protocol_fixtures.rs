@@ -39,7 +39,7 @@ fn client_frame_fixtures_round_trip_and_cover_all_types() {
         }
     }
 
-    for required in ["hello", "heartbeat", "claim", "release", "op", "attempt"] {
+    for required in ["hello", "heartbeat", "claim", "release", "op", "attempt", "request_write"] {
         assert!(
             seen_types.contains(required),
             "client fixtures missing message type `{required}`"
@@ -104,6 +104,8 @@ fn server_frame_fixtures_round_trip_and_cover_all_types_and_error_codes() {
         "peer_disconnected",
         "peer_left",
         "readonly_downgrade",
+        "write_restored",
+        "write_status",
         "conflict",
     ] {
         assert!(

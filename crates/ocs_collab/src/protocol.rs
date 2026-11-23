@@ -105,6 +105,9 @@ pub enum ClientMessage {
         #[serde(default)]
         text: String,
     },
+    /// Asks the server to re-evaluate whether this session may write now (#72).
+    /// Answered immediately with [`ServerMessage::WriteStatus`].
+    RequestWrite { session_id: String },
 }
 
 /// A message sent by the server to a client.
@@ -226,6 +229,20 @@ pub enum ServerMessage {
         level: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         code: Option<String>,
+    },
+    /// Automatic notification that this session's write permission has been
+    /// restored without needing to reconnect (#71).
+    WriteRestored { reason: String },
+    /// Immediate answer to [`ClientMessage::RequestWrite`] (#72).
+    WriteStatus {
+        writable: bool,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder: Option<String>,
     },
     /// A conflict entry was created and awaits adjudication.
     Conflict {

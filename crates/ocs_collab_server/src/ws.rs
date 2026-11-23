@@ -373,7 +373,50 @@ async fn close_session(state: &AppState, conn: &Connection) -> bool {
         "[ocs_collab_server] 广播 peer_left session={} user={} drawing={} reason=close-frame",
         retired.session_id, retired.user_id, retired.drawing_id
     );
+    // #71: If the retired session was editing a 单人编辑 drawing, the next
+    // earliest active editing session immediately receives write restoration.
+    if retired.is_editing() {
+        if let Some((next_sid, msg)) =
+            single_editor_handoff_notification(state, &retired.drawing_id).await
+        {
+            let tx = state
+                .direct
+                .lock()
+                .expect("direct mutex poisoned")
+                .get(&next_sid)
+                .cloned();
+            if let Some(tx) = tx {
+                let _ = tx.send(msg);
+            }
+        }
+    }
     true
+}
+
+/// #71: When a 单人编辑 drawing's current editor exits or expires, checks
+/// whether the next earliest active editor can now write and returns the
+/// `(session_id, WriteRestored)` notification to unicast.
+async fn single_editor_handoff_notification(
+    state: &AppState,
+    drawing_id: &str,
+) -> Option<(String, ServerMessage)> {
+    let store = state.store.as_ref()?;
+    let (_, state_text, _) = store.drawing(drawing_id).ok().flatten()?;
+    if ocs_collab::DrawingState::parse(&state_text) != Some(ocs_collab::DrawingState::SingleEditor) {
+        return None;
+    }
+    let next_sid = crate::access::first_editor(state, drawing_id).await?;
+    let next_session = state.sessions.lock().await.get(&next_sid).cloned()?;
+    if crate::access::write_access(state, &next_session).await.is_none() {
+        Some((
+            next_sid,
+            ServerMessage::WriteRestored {
+                reason: "原编辑权持有者已离开，您已获得单人编辑权，写权限已恢复".to_owned(),
+            },
+        ))
+    } else {
+        None
+    }
 }
 
 /// Reads frames until `hello` establishes a session. Returns `false` when the
@@ -653,8 +696,34 @@ pub async fn handle_message(
         ClientMessage::Attempt {
             object_ref, text, ..
         } => attempt(state, &session, &conn.peer_addr, &object_ref, &text, now).await,
+        ClientMessage::RequestWrite { .. } => request_write(state, &session).await,
         ClientMessage::Hello { .. } => unreachable!("hello is handled before the session check"),
     }
+}
+
+/// #72: Re-evaluates whether `session` may write right now and answers
+/// immediately with `WriteStatus` (no approval queue).
+async fn request_write(state: &AppState, session: &Session) -> Vec<Reaction> {
+    if let Some(code) = session_unavailable(state, &session.session_id).await {
+        return vec![Reaction::Send(error_message(&code, "会话已失效，无法申请写权限"))];
+    }
+    let status = match crate::access::write_access(state, session).await {
+        None => ServerMessage::WriteStatus {
+            writable: true,
+            reason: "写权限已恢复，当前可以编辑".to_owned(),
+            level: None,
+            code: None,
+            holder: None,
+        },
+        Some(denied) => ServerMessage::WriteStatus {
+            writable: false,
+            reason: denied.reason.clone(),
+            level: Some(denied.level.as_str().to_owned()),
+            code: Some(denied.code().to_owned()),
+            holder: denied.holder,
+        },
+    };
+    vec![Reaction::Send(status)]
 }
 
 /// Answers an `op` from a connection whose `welcome` refused its alignment.
@@ -1706,6 +1775,17 @@ pub async fn sweep_expired(state: &AppState, now: i64) -> Vec<Reaction> {
             "[ocs_collab_server] 广播 peer_left session={} user={} drawing={} reason=heartbeat-timeout",
             session.session_id, session.user_id, session.drawing_id
         );
+        // #71: Single-editor handoff when the previous holder expires.
+        if session.is_editing() {
+            if let Some((next_sid, msg)) =
+                single_editor_handoff_notification(state, &session.drawing_id).await
+            {
+                reactions.push(Reaction::SendTo {
+                    session_id: next_sid,
+                    message: msg,
+                });
+            }
+        }
     }
 
     let expired = state.occupancy.lock().await.expire(now);
@@ -1828,7 +1908,8 @@ fn message_session_id(message: &ClientMessage) -> &str {
         | ClientMessage::Claim { session_id, .. }
         | ClientMessage::Release { session_id, .. }
         | ClientMessage::Op { session_id, .. }
-        | ClientMessage::Attempt { session_id, .. } => session_id,
+        | ClientMessage::Attempt { session_id, .. }
+        | ClientMessage::RequestWrite { session_id } => session_id,
         ClientMessage::Hello { .. } => "",
     }
 }

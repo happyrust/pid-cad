@@ -139,6 +139,31 @@ pub(super) fn read(text: &str) -> Reading {
             level,
             code,
         }),
+        ServerMessage::WriteRestored { reason } => Frame::Event(CollabEvent::ServerError {
+            code: "WRITE_RESTORED".to_owned(),
+            message: reason,
+        }),
+        ServerMessage::WriteStatus {
+            writable,
+            reason,
+            level,
+            code,
+            holder,
+        } => {
+            if writable {
+                Frame::Event(CollabEvent::ServerError {
+                    code: "WRITE_RESTORED".to_owned(),
+                    message: reason,
+                })
+            } else {
+                Frame::Event(CollabEvent::ReadonlyDowngrade {
+                    reason,
+                    holder,
+                    level,
+                    code,
+                })
+            }
+        }
         ServerMessage::Error {
             code,
             message,

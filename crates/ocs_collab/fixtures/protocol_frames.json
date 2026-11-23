@@ -64,6 +64,13 @@
         "object_ref": "P-1001",
         "text": "PIDPROP P-1001 设计压力 2.5MPa"
       }
+    },
+    {
+      "name": "request_write",
+      "frame": {
+        "type": "request_write",
+        "session_id": "s-00000000-0000-4000-8000-000000000001"
+      }
     }
   ],
   "server": [
@@ -232,6 +239,31 @@
         "type": "readonly_downgrade",
         "reason": "图纸已切换为只读",
         "holder": null,
+        "level": "state",
+        "code": "PERM_DENIED_STATE"
+      }
+    },
+    {
+      "name": "write_restored",
+      "frame": {
+        "type": "write_restored",
+        "reason": "图纸已切换为协同编辑，写权限已恢复"
+      }
+    },
+    {
+      "name": "write_status_restored",
+      "frame": {
+        "type": "write_status",
+        "writable": true,
+        "reason": "写权限已恢复，当前可以编辑"
+      }
+    },
+    {
+      "name": "write_status_denied",
+      "frame": {
+        "type": "write_status",
+        "writable": false,
+        "reason": "图纸状态为只读",
         "level": "state",
         "code": "PERM_DENIED_STATE"
       }
