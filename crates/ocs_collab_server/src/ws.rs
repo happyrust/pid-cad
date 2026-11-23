@@ -866,6 +866,28 @@ async fn hello(
                     if let Err(err) = store.upsert_session(&session_row(old)) {
                         eprintln!("[ocs_collab_server] 更新被接管会话失败：{err}");
                     }
+                    // #26: Audit entry for session takeover.
+                    let new_label = ocs_collab::protocol::format_user_label(
+                        &session.display_name,
+                        &session.user_id,
+                    );
+                    let old_dn = state.display_name_of(&old.user_id);
+                    let old_label = ocs_collab::protocol::format_user_label(&old_dn, &old.user_id);
+                    let row = audit_row(
+                        Some(store),
+                        &session,
+                        "session_taken_over",
+                        drawing_id,
+                        format!(
+                            "会话接管：{new_label}（会话 {}）接管了原会话 {old_session_id}（原持有者 {old_label}）",
+                            session.session_id
+                        ),
+                        &conn.peer_addr,
+                        now,
+                    );
+                    if let Err(err) = store.audit_append(&row) {
+                        eprintln!("[ocs_collab_server] 写入会话接管审计失败：{err}");
+                    }
                 }
                 // The displaced connection learns it was taken over; actually
                 // dropping that socket is driven by its own heartbeat failure.
@@ -912,7 +934,7 @@ async fn hello(
             // A listing request may be the first thing to notice an expired
             // claim; the room still owes a `claim_released` for it, exactly as
             // `sweep_expired` would have sent.
-            reactions.extend(expired_release_reactions(state, expired));
+            reactions.extend(expired_release_reactions(state, expired, now));
             let claims: Vec<ClaimInfo> = claims
                 .iter()
                 .map(|c| claim_info_of(state, c))
@@ -1051,7 +1073,7 @@ async fn claim(state: &AppState, session: &Session, tag: String, now: i64) -> Ve
     // Serving this request reclaimed whatever had already timed out; announce
     // each of them so a claim request cannot silently swallow an expiry that
     // the housekeeping sweep would have broadcast.
-    let mut reactions = expired_release_reactions(state, expired);
+    let mut reactions = expired_release_reactions(state, expired, now);
     match outcome {
         ClaimOutcome::Granted(occupancy) => {
             if let Some(store) = &state.store {
@@ -1114,13 +1136,14 @@ async fn claim(state: &AppState, session: &Session, tag: String, now: i64) -> Ve
 /// owes them, mirroring the store first. Shared by every path that can notice
 /// an expiry (`claim`, `welcome`'s listing) so the reason string and the mirror
 /// write cannot drift apart.
-fn expired_release_reactions(state: &AppState, expired: Vec<Occupancy>) -> Vec<Reaction> {
+fn expired_release_reactions(state: &AppState, expired: Vec<Occupancy>, now: i64) -> Vec<Reaction> {
     let mut reactions = Vec::with_capacity(expired.len());
     for occupancy in expired {
         if let Some(store) = &state.store {
             if let Err(err) = store.delete_claim(&occupancy.tag) {
                 eprintln!("[ocs_collab_server] 清理过期占用失败：{err}");
             }
+            record_claim_expired_audit(state, store, &occupancy, now);
         }
         log_claim_expired(&occupancy);
         reactions.push(Reaction::Publish {
@@ -1132,6 +1155,41 @@ fn expired_release_reactions(state: &AppState, expired: Vec<Occupancy>) -> Vec<R
         });
     }
     reactions
+}
+
+/// #26: Append an audit row when a tag claim expires so querying by tag explains
+/// why the claim disappeared (includes claimant + expiry time).
+fn record_claim_expired_audit(state: &AppState, store: &Store, occupancy: &Occupancy, now: i64) {
+    let dn = state.display_name_of(&occupancy.user_id);
+    let label = ocs_collab::protocol::format_user_label(&dn, &occupancy.user_id);
+    let company = store
+        .user_role(&occupancy.user_id)
+        .ok()
+        .flatten()
+        .map(|(_, company)| company)
+        .filter(|company| !company.is_empty())
+        .unwrap_or_else(|| "未知".to_owned());
+    let row = NewAuditRow {
+        module: "协同编辑".to_owned(),
+        action: "claim_expired".to_owned(),
+        at: now,
+        object_ref: occupancy.tag.clone(),
+        user_id: if occupancy.user_id.is_empty() {
+            "未知用户".to_owned()
+        } else {
+            occupancy.user_id.clone()
+        },
+        company,
+        ip: "127.0.0.1".to_owned(),
+        workspace: "默认工作区".to_owned(),
+        change_text: format!(
+            "占用到期释放：位号 {}，原占用者 {label}（会话 {}），到期时间 {}",
+            occupancy.tag, occupancy.session_id, occupancy.expires_at
+        ),
+    };
+    if let Err(err) = store.audit_append(&row) {
+        eprintln!("[ocs_collab_server] 写入占用到期审计失败：{err}");
+    }
 }
 
 /// The line a claim's TTL running out leaves in the log, whichever path
@@ -1509,6 +1567,7 @@ pub async fn sweep_expired(state: &AppState, now: i64) -> Vec<Reaction> {
                 if let Err(err) = store.delete_claim(&occupancy.tag) {
                     eprintln!("[ocs_collab_server] 清理失效会话的占用失败：{err}");
                 }
+                record_claim_expired_audit(state, store, &occupancy, now);
             }
             reactions.push(Reaction::Publish {
                 drawing_id: occupancy.drawing_id.clone(),
@@ -1534,6 +1593,7 @@ pub async fn sweep_expired(state: &AppState, now: i64) -> Vec<Reaction> {
             if let Err(err) = store.delete_claim(&occupancy.tag) {
                 eprintln!("[ocs_collab_server] 清理过期占用失败：{err}");
             }
+            record_claim_expired_audit(state, store, &occupancy, now);
         }
         log_claim_expired(&occupancy);
         reactions.push(Reaction::Publish {

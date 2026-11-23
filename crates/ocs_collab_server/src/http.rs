@@ -323,6 +323,35 @@ async fn drawing_state(
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, codes::INVALID_MESSAGE, &err);
     }
 
+    // #26: Audit entry for drawing state switch (who, from -> to, object = drawing_id).
+    {
+        let actor_dn = state.display_name_of(&user_id);
+        let actor_label = ocs_collab::protocol::format_user_label(&actor_dn, &user_id);
+        let company = store
+            .user_role(&user_id)
+            .ok()
+            .flatten()
+            .map(|(_, company)| company)
+            .filter(|company| !company.is_empty())
+            .unwrap_or_else(|| "未知".to_owned());
+        let audit_entry = crate::store::NewAuditRow {
+            module: "协同编辑".to_owned(),
+            action: "drawing_state_changed".to_owned(),
+            at: ocs_collab::now_unix(),
+            object_ref: drawing_id.clone(),
+            user_id: user_id.clone(),
+            company,
+            ip: "127.0.0.1".to_owned(),
+            workspace: "默认工作区".to_owned(),
+            change_text: format!(
+                "图纸状态切换：{actor_label} 将 {drawing_id} 从 {current_text} 切换为 {state_text}"
+            ),
+        };
+        if let Err(err) = store.audit_append(&audit_entry) {
+            eprintln!("[ocs_collab_server] 写入图纸状态切换审计失败：{err}");
+        }
+    }
+
     if next_state == DrawingState::ReadOnly {
         settle_readonly(&state, &drawing_id, &user_id).await;
     } else {
@@ -3134,5 +3163,86 @@ mod tests {
         assert_eq!(unreg_dn, "");
         assert_eq!(unreg.session.as_ref().expect("s").display_name, "");
         assert_eq!(ocs_collab::protocol::format_user_label(&unreg_dn, "u-unregistered"), "u-unregistered");
+    }
+
+    /// #26: Audit entries are written for claim expiry, session takeover, and
+    /// drawing state switch; HTTP `/audit` and direct store reads match 100%.
+    #[tokio::test]
+    async fn audit_records_claim_expiry_session_takeover_and_drawing_state_switch() {
+        let state = audited_state();
+        let port = serve(&state).await;
+        let t0 = 1_700_000_000_i64;
+
+        // 1. Claim expiry audit row (object_ref = P-9001).
+        let (mut editor, _) = live_conn(&state, "u-proc", t0).await;
+        let sid = editor.session.as_ref().expect("session").session_id.clone();
+        let _ = crate::ws::handle_message(
+            &state,
+            &mut editor,
+            ocs_collab::ClientMessage::Claim {
+                session_id: sid.clone(),
+                tag: "P-9001".into(),
+            },
+            t0,
+        )
+        .await;
+        // Sweep after claim TTL (300s) -> claim expires and writes `claim_expired` audit.
+        let _ = crate::ws::sweep_expired(&state, t0 + 301).await;
+
+        let store_claim_rows = state
+            .store
+            .as_ref()
+            .expect("store")
+            .audit_query(&AuditQuery {
+                object_ref: Some("P-9001".into()),
+                ..AuditQuery::default()
+            })
+            .expect("store audit query");
+        let http_claim_rows = audit_rows(port, "tag=P-9001").await;
+        assert_eq!(store_claim_rows.items.len(), 1);
+        assert_eq!(http_claim_rows.len(), 1);
+        assert_eq!(store_claim_rows.items[0].action, "claim_expired");
+        assert_eq!(http_claim_rows[0]["action"], "claim_expired");
+        assert!(store_claim_rows.items[0].change_text.contains("工艺甲（u-proc）"));
+        assert!(store_claim_rows.items[0]
+            .change_text
+            .contains(&(t0 + 300).to_string()));
+
+        // 2. Session takeover audit row (object_ref = d-a1-coop): `editor` became stale above;
+        // a new session on `d-a1-coop` takes it over.
+        let (_new_editor, _) = live_conn(&state, "u-admin", t0 + 302).await;
+
+        // 3. Drawing state switch audit row (object_ref = d-a1-coop).
+        assert_eq!(switch_state(&state, "只读").await, StatusCode::OK);
+
+        let store_drawing_rows = state
+            .store
+            .as_ref()
+            .expect("store")
+            .audit_query(&AuditQuery {
+                object_ref: Some("d-a1-coop".into()),
+                ..AuditQuery::default()
+            })
+            .expect("store drawing audit");
+        let http_drawing_rows = audit_rows(port, "object_ref=d-a1-coop").await;
+        assert_eq!(store_drawing_rows.items.len(), http_drawing_rows.len());
+
+        let takeover = store_drawing_rows
+            .items
+            .iter()
+            .find(|r| r.action == "session_taken_over")
+            .expect("session_taken_over audit row must exist");
+        assert!(takeover.change_text.contains(&sid));
+        assert!(takeover.change_text.contains("工艺甲（u-proc）"));
+
+        let switched = store_drawing_rows
+            .items
+            .iter()
+            .find(|r| r.action == "drawing_state_changed")
+            .expect("drawing_state_changed audit row must exist");
+        assert_eq!(switched.user_id, "u-admin");
+        assert!(switched.change_text.contains("管理员（u-admin）"));
+        assert!(switched.change_text.contains("协同编辑"));
+        assert!(switched.change_text.contains("只读"));
     }
 }
