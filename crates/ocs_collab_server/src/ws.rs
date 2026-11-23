@@ -361,7 +361,7 @@ async fn close_session(state: &AppState, conn: &Connection) -> bool {
         .release_session(&retired.session_id)
     {
         if let Some(store) = &state.store {
-            if let Err(err) = store.delete_claim(&occupancy.tag) {
+            if let Err(err) = store.delete_claim(&occupancy.drawing_id, &occupancy.tag) {
                 eprintln!("[ocs_collab_server] 清理已退出会话的占用失败：{err}");
             }
         }
@@ -1059,7 +1059,7 @@ async fn hello(
                 let old_session = state.sessions.lock().await.get(old_session_id).cloned();
                 for occupancy in released {
                     if let Some(store) = &state.store {
-                        if let Err(err) = store.delete_claim(&occupancy.tag) {
+                        if let Err(err) = store.delete_claim(&occupancy.drawing_id, &occupancy.tag) {
                             eprintln!("[ocs_collab_server] 清理被接管会话的占用失败：{err}");
                         }
                     }
@@ -1403,7 +1403,7 @@ async fn claim(state: &AppState, session: &Session, tag: String, now: i64) -> Ve
                 .occupancy
                 .lock()
                 .await
-                .get(&tag)
+                .get(&session.drawing_id, &tag)
                 .map(|c| c.user_id.clone());
             let holder_display_name = holder_user_id
                 .as_deref()
@@ -1433,7 +1433,7 @@ fn expired_release_reactions(state: &AppState, expired: Vec<Occupancy>, now: i64
     let mut reactions = Vec::with_capacity(expired.len());
     for occupancy in expired {
         if let Some(store) = &state.store {
-            if let Err(err) = store.delete_claim(&occupancy.tag) {
+            if let Err(err) = store.delete_claim(&occupancy.drawing_id, &occupancy.tag) {
                 eprintln!("[ocs_collab_server] 清理过期占用失败：{err}");
             }
             record_claim_expired_audit(state, store, &occupancy, now);
@@ -1509,7 +1509,7 @@ async fn release(state: &AppState, session: &Session, tag: String) -> Vec<Reacti
     match state.occupancy.lock().await.release(&tag, &session.session_id) {
         ReleaseOutcome::Released => {
             if let Some(store) = &state.store {
-                if let Err(err) = store.delete_claim(&tag) {
+                if let Err(err) = store.delete_claim(&session.drawing_id, &tag) {
                     eprintln!("[ocs_collab_server] 删除占用失败：{err}");
                 }
             }
@@ -1885,7 +1885,7 @@ pub async fn sweep_expired(state: &AppState, now: i64) -> Vec<Reaction> {
         let released = state.occupancy.lock().await.release_session(session_id);
         for occupancy in released {
             if let Some(store) = &state.store {
-                if let Err(err) = store.delete_claim(&occupancy.tag) {
+                if let Err(err) = store.delete_claim(&occupancy.drawing_id, &occupancy.tag) {
                     eprintln!("[ocs_collab_server] 清理失效会话的占用失败：{err}");
                 }
                 record_claim_expired_audit(state, store, &occupancy, now);
@@ -1925,7 +1925,7 @@ pub async fn sweep_expired(state: &AppState, now: i64) -> Vec<Reaction> {
     let expired = state.occupancy.lock().await.expire(now);
     for occupancy in expired {
         if let Some(store) = &state.store {
-            if let Err(err) = store.delete_claim(&occupancy.tag) {
+            if let Err(err) = store.delete_claim(&occupancy.drawing_id, &occupancy.tag) {
                 eprintln!("[ocs_collab_server] 清理过期占用失败：{err}");
             }
             record_claim_expired_audit(state, store, &occupancy, now);

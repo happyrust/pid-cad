@@ -1438,8 +1438,7 @@ impl Store {
         conn.execute(
             "INSERT INTO claims (tag, drawing_id, session_id, user_id, expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(tag) DO UPDATE SET
-               drawing_id = excluded.drawing_id,
+             ON CONFLICT(drawing_id, tag) DO UPDATE SET
                session_id = excluded.session_id,
                user_id = excluded.user_id,
                expires_at = excluded.expires_at",
@@ -1455,10 +1454,13 @@ impl Store {
         Ok(())
     }
 
-    pub fn delete_claim(&self, tag: &str) -> Result<(), String> {
+    pub fn delete_claim(&self, drawing_id: &str, tag: &str) -> Result<(), String> {
         let conn = self.lock()?;
-        conn.execute("DELETE FROM claims WHERE tag = ?1", params![tag])
-            .map_err(|err| format!("delete claim {tag}: {err}"))?;
+        conn.execute(
+            "DELETE FROM claims WHERE drawing_id = ?1 AND tag = ?2",
+            params![drawing_id, tag],
+        )
+        .map_err(|err| format!("delete claim {drawing_id}/{tag}: {err}"))?;
         Ok(())
     }
 
@@ -1692,11 +1694,12 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE TABLE IF NOT EXISTS claims (
-  tag        TEXT PRIMARY KEY,
+  tag        TEXT NOT NULL,
   drawing_id TEXT NOT NULL REFERENCES drawings(drawing_id),
   session_id TEXT NOT NULL REFERENCES sessions(session_id),
   user_id    TEXT NOT NULL,
-  expires_at INTEGER NOT NULL
+  expires_at INTEGER NOT NULL,
+  PRIMARY KEY (drawing_id, tag)
 );
 
 CREATE TABLE IF NOT EXISTS conflicts (
@@ -1812,6 +1815,44 @@ END;
     ] {
         let _ = conn.execute(ddl, []);
     }
+    migrate_claims_per_drawing(conn)?;
+    Ok(())
+}
+
+/// #86: claim identity is `(drawing_id, tag)`. Databases created when `tag`
+/// was the primary key are rebuilt in place.
+fn migrate_claims_per_drawing(conn: &Connection) -> Result<(), String> {
+    let sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'claims'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_default();
+    if sql.contains("PRIMARY KEY (drawing_id, tag)") {
+        return Ok(());
+    }
+    conn.execute_batch("PRAGMA foreign_keys = OFF")
+        .map_err(|err| format!("claims migration foreign_keys off: {err}"))?;
+    conn.execute_batch(
+        "BEGIN;
+         CREATE TABLE claims_per_drawing (
+           tag        TEXT NOT NULL,
+           drawing_id TEXT NOT NULL,
+           session_id TEXT NOT NULL,
+           user_id    TEXT NOT NULL,
+           expires_at INTEGER NOT NULL,
+           PRIMARY KEY (drawing_id, tag)
+         );
+         INSERT INTO claims_per_drawing (tag, drawing_id, session_id, user_id, expires_at)
+           SELECT tag, drawing_id, session_id, user_id, expires_at FROM claims;
+         DROP TABLE claims;
+         ALTER TABLE claims_per_drawing RENAME TO claims;
+         COMMIT;",
+    )
+    .map_err(|err| format!("claims migration: {err}"))?;
+    conn.execute_batch("PRAGMA foreign_keys = ON")
+        .map_err(|err| format!("claims migration foreign_keys on: {err}"))?;
     Ok(())
 }
 
@@ -2166,8 +2207,43 @@ mod tests {
                 .expect("claim");
         }
         let claims = store.claims_on_drawing("PID-1101").expect("claims");
-        assert_eq!(claims.len(), 1, "one row per tag");
+        assert_eq!(claims.len(), 1, "one row per tag on one drawing");
         assert_eq!(claims[0].session_id, "s-2", "the later claim replaces");
+
+        store.ensure_drawing("PID-1102").expect("second drawing");
+        store
+            .upsert_session(&SessionRow {
+                session_id: "s-3".into(),
+                drawing_id: "PID-1102".into(),
+                user_id: "u2".into(),
+                mode: "协同编辑".into(),
+                status: "活跃".into(),
+                base_revision: 0,
+                last_heartbeat: 1_000,
+                created_at: 1_000,
+                workspace: String::new(),
+            })
+            .expect("session on the other drawing");
+        store
+            .insert_claim(&ClaimRow {
+                tag: "V-1001".into(),
+                drawing_id: "PID-1102".into(),
+                session_id: "s-3".into(),
+                user_id: "u2".into(),
+                expires_at: 1_300,
+            })
+            .expect("same tag on the other drawing");
+        assert_eq!(store.claims_on_drawing("PID-1101").expect("a").len(), 1);
+        let other = store.claims_on_drawing("PID-1102").expect("b");
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].session_id, "s-3");
+        store.delete_claim("PID-1102", "V-1001").expect("delete other");
+        assert!(store.claims_on_drawing("PID-1102").expect("b").is_empty());
+        assert_eq!(
+            store.claims_on_drawing("PID-1101").expect("a")[0].session_id,
+            "s-2",
+            "deleting the other drawing's claim leaves this one"
+        );
     }
 
     #[test]

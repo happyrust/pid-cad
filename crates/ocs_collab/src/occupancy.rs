@@ -83,8 +83,10 @@ impl OccupancyTable {
         (active, expired)
     }
 
-    pub fn get(&self, tag: &str) -> Option<&Occupancy> {
-        self.claims.iter().find(|claim| claim.tag == tag)
+    pub fn get(&self, drawing_id: &str, tag: &str) -> Option<&Occupancy> {
+        self.claims.iter().find(|claim| {
+            claim.drawing_id == drawing_id && claim.tag == tag
+        })
     }
 
     /// The claim that keeps `session_id` from writing to `tag` on
@@ -131,7 +133,11 @@ impl OccupancyTable {
     ) -> (ClaimOutcome, Vec<Occupancy>) {
         let expired = self.expire(now);
 
-        if let Some(existing) = self.claims.iter().find(|claim| claim.tag == tag) {
+        // Uniqueness is per drawing (#86): the same tag on another drawing
+        // is a different object and does not block this request.
+        if let Some(existing) = self.claims.iter().find(|claim| {
+            claim.tag == tag && claim.drawing_id == drawing_id
+        }) {
             if existing.session_id != session_id {
                 return (
                     ClaimOutcome::Denied {
@@ -150,7 +156,9 @@ impl OccupancyTable {
             user_id: user_id.to_owned(),
             expires_at: now + ttl,
         };
-        match self.claims.iter_mut().find(|claim| claim.tag == tag) {
+        match self.claims.iter_mut().find(|claim| {
+            claim.tag == tag && claim.drawing_id == drawing_id
+        }) {
             Some(slot) => *slot = claim.clone(),
             None => self.claims.push(claim.clone()),
         }
@@ -255,7 +263,10 @@ mod tests {
             }
             other => panic!("expected granted, got {other:?}"),
         }
-        assert_eq!(table.get("V-1001").map(|c| c.session_id.as_str()), Some("s-1"));
+        assert_eq!(
+            table.get("PID-1101", "V-1001").map(|c| c.session_id.as_str()),
+            Some("s-1")
+        );
     }
 
     /// Who a claim keeps out: every other session on that drawing, while it
@@ -296,7 +307,7 @@ mod tests {
             }
         );
         assert_eq!(
-            table.get("V-1001").map(|c| c.session_id.as_str()),
+            table.get("PID-1101", "V-1001").map(|c| c.session_id.as_str()),
             Some("s-1"),
             "the original owner must be untouched"
         );
@@ -331,7 +342,7 @@ mod tests {
         let _ = table.claim("V-1001", "PID-1101", "s-1", "u1", 1_000, 300);
         assert_eq!(table.release("V-1001", "s-2"), ReleaseOutcome::NotHeld);
         assert_eq!(
-            table.get("V-1001").map(|c| c.session_id.as_str()),
+            table.get("PID-1101", "V-1001").map(|c| c.session_id.as_str()),
             Some("s-1")
         );
     }
@@ -369,7 +380,33 @@ mod tests {
         let dropped = table.release_session("s-1");
         assert_eq!(dropped.len(), 2);
         assert_eq!(table.len(), 1);
-        assert!(table.get("V-1003").is_some());
+        assert!(table.get("PID-1101", "V-1003").is_some());
+    }
+
+    #[test]
+    fn the_same_tag_on_two_drawings_can_be_claimed_independently() {
+        let mut table = OccupancyTable::new();
+        assert!(matches!(
+            table.claim("V-1001", "PID-1101", "s-1", "u1", 1_000, 300).0,
+            ClaimOutcome::Granted(_)
+        ));
+        assert!(matches!(
+            table.claim("V-1001", "PID-1102", "s-2", "u2", 1_000, 300).0,
+            ClaimOutcome::Granted(_)
+        ));
+        assert_eq!(table.len(), 2);
+        assert_eq!(
+            table.held_by_another("V-1001", "PID-1101", "s-2", 1_010).map(|c| c.session_id.as_str()),
+            Some("s-1")
+        );
+        assert_eq!(
+            table.held_by_another("V-1001", "PID-1102", "s-1", 1_010).map(|c| c.session_id.as_str()),
+            Some("s-2")
+        );
+        assert!(matches!(
+            table.claim("V-1001", "PID-1101", "s-3", "u3", 1_010, 300).0,
+            ClaimOutcome::Denied { .. }
+        ));
     }
 
     #[test]
