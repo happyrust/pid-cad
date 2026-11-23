@@ -155,7 +155,8 @@ impl OpenCADStudio {
                 .collect();
             let display = (!handles.is_empty()).then_some(crate::scene::ClaimDisplay {
                 handles,
-                color: crate::scene::CLAIM_COLOR,
+                color: crate::ui::style::pid_tokens::CLAIM_COLOR_TOKEN
+                    .rgba_f32(self.pid_shell.theme),
             });
             tab.scene.set_claim_display(display);
         }
@@ -163,14 +164,18 @@ impl OpenCADStudio {
 
     /// Show the collaboration panel where the layout has it, docking it on the
     /// right the first time. `PIDCOLLAB` uses this to show; the panel's own
-    /// close button hides it.
+    /// close button hides it. In the P&ID shell (#48), collaboration lives in
+    /// the Inspector's lower half, so the legacy docked panel is not opened.
     pub(in crate::app) fn show_pid_collab_panel(&mut self) -> Task<Message> {
+        self.refresh_collab_view();
+        if self.pid_shell.current().is_some() {
+            return Task::none();
+        }
         if self.dock.location(PanelId::PidCollab).is_none() {
             self.dock
                 .dock(PanelId::PidCollab, crate::app::config::DockSide::Right, 0);
         }
         self.show_pid_collab = true;
-        self.refresh_collab_view();
         self.dock_reveal(PanelId::PidCollab);
         Task::none()
     }
@@ -235,13 +240,30 @@ impl OpenCADStudio {
                 self.detach(!value.is_empty());
                 Some(Task::none())
             }
+            ("RESOLVE", value) => {
+                self.resolve_conflict_cmd(value);
+                Some(Task::none())
+            }
+            ("HISTORY", value) => {
+                self.query_history_cmd(value);
+                Some(Task::none())
+            }
+            ("LASTWRITER" | "FIELD", value) => {
+                self.query_last_writer_cmd(value);
+                Some(Task::none())
+            }
+            ("REALIGN", "") => {
+                self.realign_collab_session();
+                Some(Task::none())
+            }
             _ => {
                 // The word only: what follows it may be an address, and an
                 // address is not echoed as typed (`shown_address`).
                 self.command_line.push_error(&format!(
                     "PIDCOLLAB: 只接受 ON、OFF、SERVER <ws://主机:端口/ws>、USER <用户>、\
                      DRAWING <图号>、UNSYNCED、UNSYNCED CLEAR、EXPORT <路径>、\
-                     DETACH [FORCE]，实得 \"{word}\"。"
+                     DETACH [FORCE]、RESOLVE <冲突ID> <采用甲方|采用乙方|人工改值> [值]、\
+                     HISTORY <位号> [条数]、LASTWRITER <位号> [字段]、REALIGN，实得 \"{word}\"。"
                 ));
                 Some(Task::none())
             }
@@ -378,7 +400,402 @@ impl OpenCADStudio {
             }
             PidCollabMsg::Claim(tag) => self.on_collab_claim(&tag, true),
             PidCollabMsg::Release(tag) => self.on_collab_claim(&tag, false),
+            PidCollabMsg::Realign => {
+                self.realign_collab_session();
+                Task::none()
+            }
         }
+    }
+
+    /// Fetch pending conflicts for the active drawing from the server (#40).
+    /// Uses a custom injected client synchronously in unit tests, and a
+    /// background thread + `Task::future` for live HTTP so the UI never blocks.
+    pub(in crate::app) fn fetch_collab_conflicts(&mut self) -> Task<Message> {
+        let Ok(base_url) = super::query::http_base_from_ws(&self.collab.server_url) else {
+            return Task::none();
+        };
+        let drawing_id = self.collab.drawing_id.trim().to_owned();
+        if drawing_id.is_empty() {
+            return Task::none();
+        }
+        let client = self.collab.query_client();
+        if self.collab.query_client.is_some() {
+            let result = client.fetch_pending_conflicts(&base_url, &drawing_id);
+            self.on_collab_query_done(super::query::CollabQueryReply::PendingConflicts(result));
+            return Task::none();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (tx, rx) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let result = client.fetch_pending_conflicts(&base_url, &drawing_id);
+                let _ = tx.send(super::query::CollabQueryReply::PendingConflicts(result));
+            });
+            Task::future(rx).then(|res| match res {
+                Ok(reply) => Task::done(Message::CollabQueryDone(reply)),
+                Err(_) => Task::none(),
+            })
+        }
+        #[cfg(target_arch = "wasm32")]
+        Task::none()
+    }
+
+    /// Non-blocking fetch of field last-writers for `tag` (`#42`, `#66`).
+    pub(in crate::app) fn fetch_collab_field_writers(&mut self, tag: &str) -> Task<Message> {
+        let tag = tag.trim().to_owned();
+        if tag.is_empty() || !self.collab.connected {
+            return Task::none();
+        }
+        let Ok(base_url) = super::query::http_base_from_ws(&self.collab.server_url) else {
+            return Task::none();
+        };
+        let drawing_id = self.collab.drawing_id.trim().to_owned();
+        if drawing_id.is_empty() {
+            return Task::none();
+        }
+        let client = self.collab.query_client();
+        if self.collab.query_client.is_some() {
+            let result = client.fetch_drawing_objects(&base_url, &drawing_id, Some(&tag));
+            self.on_collab_query_done(super::query::CollabQueryReply::FieldWriters { tag, result });
+            return Task::none();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (tx, rx) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let result = client.fetch_drawing_objects(&base_url, &drawing_id, Some(&tag));
+                let _ = tx.send(super::query::CollabQueryReply::FieldWriters { tag, result });
+            });
+            Task::future(rx).then(|res| match res {
+                Ok(reply) => Task::done(Message::CollabQueryDone(reply)),
+                Err(_) => Task::none(),
+            })
+        }
+        #[cfg(target_arch = "wasm32")]
+        Task::none()
+    }
+
+    /// Non-blocking fetch of audit modification history for `tag` (`#42`, `#66`).
+    pub(in crate::app) fn fetch_collab_history(
+        &mut self,
+        tag: &str,
+        filter: super::query::AuditFilter,
+    ) -> Task<Message> {
+        let tag = tag.trim().to_owned();
+        if tag.is_empty() || !self.collab.connected {
+            return Task::none();
+        }
+        let Ok(base_url) = super::query::http_base_from_ws(&self.collab.server_url) else {
+            return Task::none();
+        };
+        let client = self.collab.query_client();
+        if self.collab.query_client.is_some() {
+            let result = client.fetch_audit(&base_url, &filter);
+            self.on_collab_query_done(super::query::CollabQueryReply::AuditHistory { tag, result });
+            return Task::none();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (tx, rx) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let result = client.fetch_audit(&base_url, &filter);
+                let _ = tx.send(super::query::CollabQueryReply::AuditHistory { tag, result });
+            });
+            Task::future(rx).then(|res| match res {
+                Ok(reply) => Task::done(Message::CollabQueryDone(reply)),
+                Err(_) => Task::none(),
+            })
+        }
+        #[cfg(target_arch = "wasm32")]
+        Task::none()
+    }
+
+    /// Apply a finished collaboration query reply on the UI thread (#40, #42, #66).
+    pub(in crate::app) fn on_collab_query_done(
+        &mut self,
+        reply: super::query::CollabQueryReply,
+    ) {
+        match reply {
+            super::query::CollabQueryReply::PendingConflicts(Ok(items)) => {
+                self.collab.replace_pending_conflicts(items);
+                self.refresh_collab_view();
+            }
+            super::query::CollabQueryReply::PendingConflicts(Err(err)) => {
+                self.collab.last_query_error = Some(err.describe());
+            }
+            super::query::CollabQueryReply::FieldWriters { result: Ok(page), .. } => {
+                self.collab.record_field_writers(&page);
+            }
+            super::query::CollabQueryReply::FieldWriters { result: Err(err), .. } => {
+                self.collab.last_query_error = Some(err.describe());
+            }
+            super::query::CollabQueryReply::AuditHistory { tag, result: Ok(rows) } => {
+                self.collab.history_target = Some(tag);
+                self.collab.history_rows = rows;
+                self.collab.last_query_error = None;
+            }
+            super::query::CollabQueryReply::AuditHistory { result: Err(err), .. } => {
+                self.collab.last_query_error = Some(err.describe());
+            }
+        }
+    }
+
+    /// `PIDCOLLAB RESOLVE <conflict_id> <采用甲方|采用乙方|人工改值> [<value>]` (#41).
+    pub(in crate::app) fn resolve_conflict_cmd(&mut self, arg: &str) {
+        let mut parts = arg.split_whitespace();
+        let Some(conflict_id) = parts.next() else {
+            self.command_line.push_error(
+                "PIDCOLLAB RESOLVE: 用法 PIDCOLLAB RESOLVE <冲突ID> <采用甲方|采用乙方|人工改值> [新值]",
+            );
+            return;
+        };
+        let Some(raw_resolution) = parts.next() else {
+            self.command_line.push_error(
+                "PIDCOLLAB RESOLVE: 缺少裁决结果（采用甲方 / 采用乙方 / 人工改值）",
+            );
+            return;
+        };
+        let resolution = match raw_resolution.to_ascii_uppercase().as_str() {
+            "A" | "采用甲方" => "采用甲方",
+            "B" | "采用乙方" => "采用乙方",
+            "CUSTOM" | "人工改值" => "人工改值",
+            _ => raw_resolution,
+        };
+        let rest: String = parts.collect::<Vec<_>>().join(" ");
+        let custom_value = (!rest.is_empty()).then_some(rest.as_str());
+        if resolution == "人工改值" && custom_value.is_none() {
+            self.command_line
+                .push_error("PIDCOLLAB RESOLVE: 选择「人工改值」时必须提供最终值。");
+            return;
+        }
+        if !self.collab.connected && self.collab.query_client.is_none() {
+            self.command_line
+                .push_error("协同：未连接协同服务器，无法提交冲突裁决。");
+            return;
+        }
+        let base_url = match super::query::http_base_from_ws(&self.collab.server_url) {
+            Ok(u) => u,
+            Err(why) => {
+                self.command_line
+                    .push_error(&format!("协同：无法提交冲突裁决（{why}）。"));
+                return;
+            }
+        };
+        let resolved_by = self.collab.user_id.clone();
+        let client = self.collab.query_client();
+        match client.resolve_conflict(&base_url, conflict_id, resolution, &resolved_by, custom_value)
+        {
+            Ok(outcome) => {
+                self.collab
+                    .conflicts
+                    .retain(|c| c.conflict_id != outcome.conflict_id);
+                let msg = format!(
+                    "冲突 {} 已裁决（{} → {}，修订 {}）",
+                    outcome.conflict_id, outcome.resolution, outcome.value, outcome.revision
+                );
+                self.command_line.push_info(&format!("协同：{msg}"));
+                self.collab
+                    .push_toast(super::toasts::ToastKind::Success, msg);
+                self.refresh_collab_view();
+            }
+            Err(err) => {
+                let desc = err.describe();
+                self.command_line
+                    .push_error_coded(&err.code, &format!("协同：裁决失败：{desc}"));
+                self.collab
+                    .push_toast(super::toasts::ToastKind::Error, format!("裁决失败：{desc}"));
+            }
+        }
+    }
+
+    /// `PIDCOLLAB HISTORY <位号> [条数]` (#42).
+    pub(in crate::app) fn query_history_cmd(&mut self, arg: &str) {
+        let mut parts = arg.split_whitespace();
+        let Some(raw_tag) = parts.next() else {
+            self.command_line
+                .push_error("PIDCOLLAB HISTORY: 用法 PIDCOLLAB HISTORY <位号> [条数]");
+            return;
+        };
+        let limit = parts
+            .next()
+            .and_then(|s| s.parse::<i64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(20);
+        let tag = self.canonical_tag(raw_tag);
+        if !self.collab.connected && self.collab.query_client.is_none() {
+            self.command_line
+                .push_error("协同：未连接协同服务器，无法查询修改历史。");
+            return;
+        }
+        let base_url = match super::query::http_base_from_ws(&self.collab.server_url) {
+            Ok(u) => u,
+            Err(why) => {
+                self.command_line
+                    .push_error(&format!("协同：无法查询修改历史（{why}）。"));
+                return;
+            }
+        };
+        let filter = super::query::AuditFilter {
+            object_ref: Some(tag.clone()),
+            limit: Some(limit),
+            ..Default::default()
+        };
+        let client = self.collab.query_client();
+        match client.fetch_audit(&base_url, &filter) {
+            Ok(rows) => {
+                self.collab.history_target = Some(tag.clone());
+                self.collab.history_rows = rows.clone();
+                if rows.is_empty() {
+                    self.command_line
+                        .push_info(&format!("协同：{tag} 暂无修改历史记录。"));
+                } else {
+                    self.command_line.push_info(&format!(
+                        "协同：{tag} 最近 {} 条修改历史：",
+                        rows.len()
+                    ));
+                    for row in &rows {
+                        let who = super::toasts::format_user_label(&row.user_id, &row.display_name);
+                        let when = super::toasts::format_timestamp(row.at);
+                        self.command_line.push_info(&format!(
+                            "  #{seq} [{when}] {who} · {act} · {text}",
+                            seq = row.seq,
+                            act = row.action_label(),
+                            text = row.change_text
+                        ));
+                    }
+                }
+            }
+            Err(err) => {
+                self.command_line
+                    .push_error(&format!("协同：查询 {tag} 修改历史失败：{}", err.describe()));
+            }
+        }
+    }
+
+    /// `PIDCOLLAB LASTWRITER <位号> [字段]` (#42).
+    pub(in crate::app) fn query_last_writer_cmd(&mut self, arg: &str) {
+        let mut parts = arg.split_whitespace();
+        let Some(raw_tag) = parts.next() else {
+            self.command_line
+                .push_error("PIDCOLLAB LASTWRITER: 用法 PIDCOLLAB LASTWRITER <位号> [字段]");
+            return;
+        };
+        let field_filter = parts.next().map(str::to_owned);
+        let tag = self.canonical_tag(raw_tag);
+        if !self.collab.connected && self.collab.query_client.is_none() {
+            self.command_line
+                .push_error("协同：未连接协同服务器，无法查询字段最后写入者。");
+            return;
+        }
+        let base_url = match super::query::http_base_from_ws(&self.collab.server_url) {
+            Ok(u) => u,
+            Err(why) => {
+                self.command_line
+                    .push_error(&format!("协同：无法查询字段最后写入者（{why}）。"));
+                return;
+            }
+        };
+        let drawing_id = self.collab.drawing_id.clone();
+        let client = self.collab.query_client();
+        match client.fetch_drawing_objects(&base_url, &drawing_id, Some(&tag)) {
+            Ok(page) => {
+                self.collab.record_field_writers(&page);
+                let Some(obj) = page.items.iter().find(|item| item.object_ref == tag) else {
+                    self.command_line
+                        .push_info(&format!("协同：服务器上暂无 {tag} 的写入记录。"));
+                    return;
+                };
+                if let Some(field) = field_filter {
+                    match obj.fields.get(&field) {
+                        Some(w) => {
+                            let who =
+                                super::toasts::format_user_label(&w.user_id, &w.display_name);
+                            self.command_line.push_info(&format!(
+                                "协同：{tag}.{field} = \"{}\"（最后写入：{who}，修订 {}）",
+                                w.value, w.revision
+                            ));
+                        }
+                        None => {
+                            self.command_line.push_info(&format!(
+                                "协同：{tag} 暂无字段 {field} 的写入记录。"
+                            ));
+                        }
+                    }
+                } else {
+                    self.command_line.push_info(&format!(
+                        "协同：{tag} 各字段最后写入者（图纸修订 {}）：",
+                        page.revision
+                    ));
+                    for (field, w) in &obj.fields {
+                        let who = super::toasts::format_user_label(&w.user_id, &w.display_name);
+                        self.command_line.push_info(&format!(
+                            "  {field} = \"{}\"（{who}，修订 {}）",
+                            w.value, w.revision
+                        ));
+                    }
+                }
+            }
+            Err(err) => {
+                self.command_line.push_error(&format!(
+                    "协同：查询 {tag} 最后写入者失败：{}",
+                    err.describe()
+                ));
+            }
+        }
+    }
+
+    /// `PIDCOLLAB REALIGN` (#78): recover a diverged or unaligned session by
+    /// clearing the local divergence flag and rejoining at the drawing's last
+    /// aligned revision so the server replays everything missed since.
+    pub(in crate::app) fn realign_collab_session(&mut self) {
+        if !self.collab.wanted() {
+            self.command_line
+                .push_error("协同：未配置协同服务器，无法重新对齐。");
+            return;
+        }
+        // Determine the last aligned (repo_id, revision) from the drawing file
+        // first, falling back to the live session's last aligned baseline.
+        let file_claim = self.collab_tab().and_then(|i| {
+            let doc = &mut self.tabs[i].scene.document;
+            let state = crate::pid::collab_state::load_state(doc)?;
+            // Clear any saved diverged marker while keeping the file's
+            // aligned repo_id & revision so the server can replay from it.
+            crate::pid::collab_state::store_state(doc, Some(&state));
+            Some(super::FileClaim {
+                drawing_id: state.drawing_id,
+                repo_id: state.repo_id,
+                revision: state.revision,
+            })
+        });
+        let claim = file_claim.or_else(|| {
+            let repo_id = self.collab.repo_id.clone()?;
+            Some(super::FileClaim {
+                drawing_id: self.collab.drawing_id.clone(),
+                repo_id,
+                revision: self.collab.base_revision,
+            })
+        });
+        let target_rev = claim
+            .as_ref()
+            .map(|c| c.revision)
+            .unwrap_or(self.collab.base_revision);
+        // Reset local divergence / alignment flags so the incoming welcome &
+        // replay are judged cleanly from `target_rev`.
+        self.collab.diverged = None;
+        self.collab.diverged_as = None;
+        self.collab.saved_diverged = None;
+        self.collab.revision_gap = false;
+        self.collab.not_aligned = None;
+        self.collab.opened_late = None;
+        self.collab.apart_before_hello = None;
+        self.collab.last_apply_error = None;
+        self.collab.base_revision = target_rev;
+        self.collab.had_session = true;
+        self.collab.request_realign(claim);
+        self.command_line.push_info(&format!(
+            "协同：正在按修订 {target_rev} 向服务器重新对齐…"
+        ));
+        self.refresh_collab_view();
     }
 
     /// Queue one `claim` / `release` frame for `tag`, or say why it cannot go.
@@ -728,7 +1145,6 @@ mod tests {
         use crate::app::collab::CollabEvent;
         use crate::app::OpenCADStudio;
         use crate::pid::persist::PidAuthor;
-        use crate::scene::CLAIM_COLOR;
         use document::entities::Insert;
         use document::types::Vector3;
 
@@ -782,7 +1198,10 @@ mod tests {
             .claim_display
             .as_ref()
             .expect("占用必须着色");
-        assert_eq!(display.color, CLAIM_COLOR);
+        assert_eq!(
+            display.color,
+            crate::ui::style::pid_tokens::CLAIM_COLOR_TOKEN.rgba_f32(app.pid_shell.theme)
+        );
         assert!(display.handles.contains(&claimed));
         assert!(!display.handles.contains(&other));
 

@@ -95,6 +95,10 @@ impl TagsLine {
     }
 }
 
+/// A pending realignment request: replaces the transport's `seen` state
+/// (what `hello` claims as `since`/`repo_id`) and immediately reconnects.
+type RealignSlot = Mutex<Option<Option<crate::app::collab::FileClaim>>>;
+
 /// What one transport thread works with: where its session parameters come
 /// from, the requests waiting to go out, the signal that tells it to quit, and
 /// its heartbeat cadence.
@@ -116,6 +120,10 @@ pub(super) struct Link {
     /// cleared, which read as "the app is quitting" to every client started
     /// after the first quit.
     stop: Arc<AtomicBool>,
+    /// Pending realignment request (`PIDCOLLAB REALIGN`, #78): asks the
+    /// session loop to close politely and redial immediately using the
+    /// supplied file claim (or `None` to join fresh).
+    realign: Arc<RealignSlot>,
     heartbeat: Duration,
     /// How long a session that is left to join again stays on the line for
     /// the server to take its goodbye ([`leave`]).
@@ -126,6 +134,15 @@ pub(super) struct Link {
     tags: Option<TagsLine>,
 }
 
+impl std::fmt::Debug for Link {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Link")
+            .field("stop", &self.stop.load(Ordering::Relaxed))
+            .field("has_tags", &self.tags.is_some())
+            .finish()
+    }
+}
+
 impl Link {
     /// The link of the app's own client: the published config, the queue the
     /// UI fills, and a quit signal of its own.
@@ -134,6 +151,7 @@ impl Link {
             config: Arc::clone(app_config()),
             outbox: Arc::clone(app_outbox()),
             stop: Arc::new(AtomicBool::new(false)),
+            realign: Arc::clone(app_realign()),
             heartbeat: HEARTBEAT_INTERVAL,
             leave_wait: LEAVE_WAIT,
             tags: Some(TagsLine {
@@ -150,10 +168,99 @@ impl Link {
             config: Arc::new(Mutex::new(config)),
             outbox: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             stop: Arc::new(AtomicBool::new(false)),
+            realign: Arc::new(Mutex::new(None)),
             heartbeat: HEARTBEAT_INTERVAL,
             leave_wait: LEAVE_WAIT,
             tags: None,
         }
+    }
+
+    /// A detached link wired with its own tag-answer channel so a headless
+    /// test editor can run a real transport thread isolated from other
+    /// editors in the same process (#20).
+    #[cfg(test)]
+    pub(super) fn detached_with_tags(config: ClientConfig) -> Self {
+        Self {
+            config: Arc::new(Mutex::new(config)),
+            outbox: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            stop: Arc::new(AtomicBool::new(false)),
+            realign: Arc::new(Mutex::new(None)),
+            heartbeat: HEARTBEAT_INTERVAL,
+            leave_wait: LEAVE_WAIT,
+            tags: Some(TagsLine {
+                said: Arc::new(Mutex::new(None)),
+                wait: TAGS_WAIT,
+            }),
+        }
+    }
+
+    /// Update this link's published session config.
+    pub(super) fn set_config(&self, config: ClientConfig) {
+        publish_config(&self.config, config);
+    }
+
+    /// Answer a `TagsWanted` question on this link.
+    pub(super) fn answer_tags(&self, ask: u64, said: TagsSaid) {
+        if let Some(line) = &self.tags {
+            leave_answer(&line.said, ask, said);
+        }
+    }
+
+    /// Queue a `claim` on this link.
+    pub(super) fn request_claim(&self, tag: &str) -> Result<(), String> {
+        queue_claim(&self.outbox, tag)
+    }
+
+    /// Queue a `release` on this link.
+    pub(super) fn request_release(&self, tag: &str) -> Result<(), String> {
+        queue_release(&self.outbox, tag)
+    }
+
+    /// Queue an `op` on this link.
+    pub(super) fn request_op(
+        &self,
+        session_id: &str,
+        base_revision: i64,
+        op_id: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), String> {
+        queue_op(
+            &self.outbox,
+            Some(session_id),
+            base_revision,
+            op_id,
+            payload,
+        )
+    }
+
+    /// Queue an `attempt` on this link.
+    pub(super) fn request_attempt(&self, object_ref: &str, text: &str) {
+        push_outbound(
+            &self.outbox,
+            Outbound::Attempt {
+                object_ref: object_ref.to_owned(),
+                text: text.to_owned(),
+            },
+        );
+    }
+
+    /// Ask this link's transport thread to leave and immediately rejoin using
+    /// `claim` (or fresh if `None`) to realign after divergence (#78).
+    pub(super) fn request_realign(&self, claim: Option<crate::app::collab::FileClaim>) {
+        if let Ok(mut slot) = self.realign.lock() {
+            *slot = Some(claim);
+        }
+    }
+
+    /// Ask this link's transport thread to say goodbye and exit.
+    #[cfg(test)]
+    pub(super) fn request_stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Take a pending realignment request, if any.
+    fn take_realign(&self) -> Option<Option<crate::app::collab::FileClaim>> {
+        self.realign.lock().ok().and_then(|mut slot| slot.take())
     }
 
     /// The session parameters in effect right now.
@@ -252,6 +359,20 @@ pub(super) fn set_client_config(config: ClientConfig) {
 fn publish_config(slot: &Mutex<ClientConfig>, config: ClientConfig) {
     if let Ok(mut slot) = slot.lock() {
         *slot = config;
+    }
+}
+
+/// Pending realignment slot of the app's client.
+fn app_realign() -> &'static Arc<RealignSlot> {
+    static SLOT: OnceLock<Arc<RealignSlot>> = OnceLock::new();
+    SLOT.get_or_init(|| Arc::new(Mutex::new(None)))
+}
+
+/// Ask the app's transport thread to leave and immediately rejoin using
+/// `claim` (or fresh if `None`) to realign after divergence (#78).
+pub(super) fn request_realign(claim: Option<crate::app::collab::FileClaim>) {
+    if let Ok(mut slot) = app_realign().lock() {
+        *slot = Some(claim);
     }
 }
 
@@ -568,6 +689,8 @@ fn outbound_message(request: &Outbound, session_id: &str) -> ClientMessage {
 enum Ended {
     /// The server closed the conversation cleanly.
     Closed(String),
+    /// The UI asked to realign immediately without waiting for backoff (#78).
+    Realign(String),
     /// The app is quitting: the socket was closed on purpose.
     Quit,
     /// The subscription is gone; nothing may reconnect.
@@ -615,6 +738,18 @@ fn describe_event(event: &CollabEvent) -> String {
         ),
         CollabEvent::PeerLeft { session_id } => format!("peer_left session={session_id}"),
         CollabEvent::ClaimGranted { tag } => format!("claim_granted tag={tag}"),
+        CollabEvent::ClaimMeta {
+            tag,
+            session_id,
+            expires_at,
+            ..
+        } => format!(
+            "claim_meta tag={tag} session={session_id} expires_at={}",
+            expires_at.unwrap_or(0)
+        ),
+        CollabEvent::ReadonlyEffectiveNode { node } => {
+            format!("readonly_effective_node node={node}")
+        }
         CollabEvent::ClaimDenied {
             tag,
             holder,
@@ -861,6 +996,13 @@ pub(super) fn run_client(
         if told.as_ref().is_some_and(|told| told.forget) {
             seen = None;
         }
+        if let Some(target_claim) = link.take_realign() {
+            seen = target_claim.map(|c| Seen {
+                repo_id: c.repo_id,
+                drawing_id: c.drawing_id,
+                revision: c.revision,
+            });
+        }
         // The answer may have settled the drawing number: the one the
         // drawing's sync record names, when none was given for this run.
         let config = link.config();
@@ -873,19 +1015,24 @@ pub(super) fn run_client(
             &mut seen,
             told.as_ref(),
         );
-        let reason = match session {
+        let (reason, immediate) = match session {
             Ok(Ended::SubscriptionGone) => return Ok(()),
             Ok(Ended::Quit) => return Ok(()),
-            Ok(Ended::Closed(reason)) => reason,
-            Err(error) => error,
+            Ok(Ended::Realign(reason)) => (reason, true),
+            Ok(Ended::Closed(reason)) => (reason, false),
+            Err(error) => (error, false),
         };
         // The ladder counts failures in a row. A session that came up ends
         // the row: the next drop starts from the first rung again, instead
         // of every drop after the fifth waiting out the full five seconds.
-        if came_up {
+        if came_up || immediate {
             attempt = 0;
         }
-        let delay = backoff_delay(attempt);
+        let delay = if immediate {
+            Duration::ZERO
+        } else {
+            backoff_delay(attempt)
+        };
         log(&format!("断开：{reason}；{} 毫秒后重连", delay.as_millis()));
         if emit(
             sender,
@@ -899,10 +1046,12 @@ pub(super) fn run_client(
         {
             return Ok(());
         }
-        if wait_before_retry(sender, delay, link).is_err() {
-            return Ok(());
+        if !immediate {
+            if wait_before_retry(sender, delay, link).is_err() {
+                return Ok(());
+            }
+            attempt = attempt.saturating_add(1);
         }
-        attempt = attempt.saturating_add(1);
     }
 }
 
@@ -1048,6 +1197,18 @@ fn run_session(
         if sender.is_closed() {
             close(&mut ws);
             return Ok(Ended::SubscriptionGone);
+        }
+        if let Some(target_claim) = link.take_realign() {
+            *seen = target_claim.map(|c| Seen {
+                repo_id: c.repo_id,
+                drawing_id: c.drawing_id,
+                revision: c.revision,
+            });
+            log("界面请求重新对齐：断开当前会话并立即按目标修订重新加入");
+            leave(&mut ws, link.leave_wait, || {
+                link.stop_requested() || sender.is_closed()
+            });
+            return Ok(Ended::Realign("正在与服务器重新对齐…".to_owned()));
         }
         match owed.and_then(|(ask, line)| line.answer(ask)) {
             Some(TagsSaid::Tags(tags, _)) => {

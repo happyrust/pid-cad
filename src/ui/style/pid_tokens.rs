@@ -85,11 +85,35 @@ pub fn by_name(name: &str, theme: PidTheme) -> Option<TokenValue> {
     generated::lookup(name, theme)
 }
 
+/// Theme token used to tint claimed tags on canvas and claim markers (#56).
+/// Distinct from [`CONNECTOR_PIPE_COLOR_TOKEN`] and
+/// [`CONNECTOR_SIGNAL_COLOR_TOKEN`]. When #47 adds a dedicated `claim` token
+/// to `pid-platform.pen`, swap this constant alone.
+pub const CLAIM_COLOR_TOKEN: ColorToken = ColorToken::Amber;
+
+/// Theme token used for process-pipe page connector lines/badges (#56).
+pub const CONNECTOR_PIPE_COLOR_TOKEN: ColorToken = ColorToken::LineProcess;
+
+/// Theme token used for signal-line page connector lines/badges (#56).
+pub const CONNECTOR_SIGNAL_COLOR_TOKEN: ColorToken = ColorToken::LineSignal;
+
 impl ColorToken {
     /// The colour as iced draws it.
     pub fn color(self, theme: PidTheme) -> iced::Color {
         let [r, g, b, a] = self.rgba(theme);
         iced::Color::from_rgba8(r, g, b, f32::from(a) / 255.0)
+    }
+
+    /// The colour as normalised linear-style `[r, g, b, a]` floats in `0..=1`,
+    /// for GPU scene overlays (`Scene::set_claim_display`, #56).
+    pub fn rgba_f32(self, theme: PidTheme) -> [f32; 4] {
+        let [r, g, b, a] = self.rgba(theme);
+        [
+            f32::from(r) / 255.0,
+            f32::from(g) / 255.0,
+            f32::from(b) / 255.0,
+            f32::from(a) / 255.0,
+        ]
     }
 }
 
