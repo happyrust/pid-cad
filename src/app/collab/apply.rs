@@ -682,8 +682,9 @@ impl OpenCADStudio {
     /// a save writes them there and marks the drawing `UNQUEUED_EDITS`
     /// (`SPEC-collab-offline-sync.md` §4.1, §5.1). The room will never see
     /// them, and the drawing is no longer what it has. A drawing with no
-    /// record was never in a room, and changes that say nothing of the
-    /// drawing's objects (a move) are none of the room's: neither is kept.
+    /// record was never in a room, and changes that name no tagged object
+    /// are none of the room's: neither is kept. A standalone symbol's
+    /// position is a tagged field (`#95`) and is kept.
     /// The command line says so the first time for each drawing.
     fn keep_unqueued(&mut self, i: usize, changes: &[broadcast::Change], label: &str, why: &str) {
         let Some(payload) = broadcast::payload_for(changes) else {

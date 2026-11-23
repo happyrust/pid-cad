@@ -8,7 +8,8 @@
 //!   objects, and that no queue took — the drawing is not the session's,
 //!   no collaboration is configured, the session may not write — goes on
 //!   the drawing's unsynced list, and the drawing is saved marked
-//!   `UNQUEUED_EDITS`. One that only moved something is no such edit.
+//!   `UNQUEUED_EDITS`. Moving a standalone symbol writes its position
+//!   (`#95`) and is such an edit; a step that names no tagged object is not.
 //! * The session takes its drawing number from the drawing's record unless
 //!   it was given one for this run; a drawing whose record names another
 //!   than the one given is not the session's, and its record is left as
@@ -445,20 +446,33 @@ fn an_edit_with_no_collaboration_configured_is_kept_and_marks_the_drawing() {
     assert_eq!(queue(&back), [FILE_OP]);
 }
 
-/// A step that only moves something says nothing of the drawing's objects:
-/// nothing is kept, and the drawing is not marked.
+/// Moving the pump writes its position (`#95`). With a sync record and no
+/// collaboration configured, that edit is kept and the drawing is marked,
+/// the same way a property edit is.
 #[test]
-fn a_move_with_no_collaboration_configured_marks_nothing() {
+fn a_symbol_move_with_no_collaboration_configured_is_kept_and_marks_the_drawing() {
     let scratch = Scratch::new();
     let mut app = editor();
     file_says(&mut app, &record_of(DRAWING), None, &[]);
     moved(&mut app);
-    assert!(!said(&app).contains(NO_LONGER_SYNCED), "{}", said(&app));
+    assert_eq!(
+        said(&app).matches(NO_LONGER_SYNCED).count(),
+        1,
+        "{}",
+        said(&app)
+    );
 
     let back = saved(&mut app, &scratch);
-    assert!(unsynced(&back).is_empty());
-    assert_eq!(collab_state::load_diverged(&back), None);
+    assert_eq!(unsynced(&back), [UNQUEUED]);
+    let first = &collab_state::read_unsynced(&back)[0];
+    assert!(
+        first["payload"].to_string().contains("position"),
+        "{first}"
+    );
+    let marked = collab_state::load_diverged(&back).expect("saved marked");
+    assert_eq!(marked.code, UNQUEUED_EDITS);
     assert_eq!(collab_state::load_state(&back), Some(record_of(DRAWING)));
+    assert!(queue(&back).is_empty());
 }
 
 /// An edit to a drawing with a sync record that is not the session's — the
