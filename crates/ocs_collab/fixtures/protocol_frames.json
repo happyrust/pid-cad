@@ -84,12 +84,14 @@
             "tag": "V-1001",
             "session_id": "s-00000000-0000-4000-8000-000000000002",
             "user_id": "u2",
+            "display_name": "李工",
             "expires_at": 1700000300
           }
         ],
         "repo_id": "r-00000000-0000-4000-8000-000000000001",
         "replay_from": 3,
-        "protocol_version": 2
+        "protocol_version": 2,
+        "display_name": "张工"
       }
     },
     {
@@ -157,7 +159,9 @@
         "type": "claim_denied",
         "tag": "P-1001",
         "holder": "s-00000000-0000-4000-8000-000000000002",
-        "expires_at": 1700000300
+        "expires_at": 1700000300,
+        "holder_user_id": "u2",
+        "holder_display_name": "李工"
       }
     },
     {
@@ -229,7 +233,11 @@
         "field": "设计压力",
         "value_a": "1.6MPa",
         "value_b": "2.5MPa",
-        "op_ids": ["op-r1-1", "op-r2-1"]
+        "op_ids": ["op-r1-1", "op-r2-1"],
+        "user_a": "u1",
+        "display_name_a": "张工",
+        "user_b": "u2",
+        "display_name_b": "李工"
       }
     }
   ],

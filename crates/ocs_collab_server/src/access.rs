@@ -52,6 +52,8 @@ impl Denied {
             holder: self.holder.clone(),
             op_id: None,
             rejected: None,
+            actor_user_id: None,
+            actor_display_name: None,
         }
     }
 }

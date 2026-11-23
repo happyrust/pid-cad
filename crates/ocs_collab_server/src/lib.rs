@@ -115,6 +115,17 @@ impl AppState {
     pub fn db_healthy(&self) -> bool {
         self.store.as_ref().is_some_and(|store| store.health_check())
     }
+
+    /// Registered display name of `user_id` from `users`, or empty when not
+    /// registered (or no database is attached). Never falls back to `user_id`
+    /// so callers can render plain `user_id` without empty parentheses (#27).
+    pub fn display_name_of(&self, user_id: &str) -> String {
+        self.store
+            .as_ref()
+            .and_then(|store| store.user_display_name(user_id).ok().flatten())
+            .map(|name| name.trim().to_owned())
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

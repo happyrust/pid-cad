@@ -78,7 +78,8 @@ fn default_lifecycle() -> String {
     "设计中".to_owned()
 }
 
-/// One audit row, in the 9-field shape the contract asserts.
+/// One audit row, in the 9-field shape the contract asserts, plus the
+/// registered `display_name` of `user_id` when available (#28).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditRow {
     pub seq: i64,
@@ -87,6 +88,8 @@ pub struct AuditRow {
     pub at: i64,
     pub object_ref: String,
     pub user_id: String,
+    #[serde(default)]
+    pub display_name: String,
     pub company: String,
     pub ip: String,
     pub workspace: String,
@@ -179,6 +182,16 @@ pub struct ConflictRow {
     pub resolution: Option<String>,
     pub resolved_value: Option<String>,
     pub resolved_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_a: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name_a: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_b: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name_b: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by_display_name: Option<String>,
 }
 
 /// The connection handle. One `Mutex<Connection>` is enough for a single
@@ -380,6 +393,18 @@ impl Store {
         )
         .optional()
         .map_err(|err| format!("lookup user {user_id}: {err}"))
+    }
+
+    /// Registered `display_name` of `user_id`, when the user exists in `users`.
+    pub fn user_display_name(&self, user_id: &str) -> Result<Option<String>, String> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT display_name FROM users WHERE user_id = ?1",
+            params![user_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|err| format!("lookup user display_name {user_id}: {err}"))
     }
 
     /// `(pbs_node_id, state, revision)` for a drawing.
@@ -765,19 +790,19 @@ impl Store {
         let mut where_sql = String::from(" WHERE 1 = 1");
         let mut args: Vec<rusqlite::types::Value> = Vec::new();
         if let Some(object_ref) = &query.object_ref {
-            where_sql.push_str(" AND object_ref = ?");
+            where_sql.push_str(" AND a.object_ref = ?");
             args.push(rusqlite::types::Value::Text(object_ref.clone()));
         }
         if let Some(user_id) = &query.user_id {
-            where_sql.push_str(" AND user_id = ?");
+            where_sql.push_str(" AND a.user_id = ?");
             args.push(rusqlite::types::Value::Text(user_id.clone()));
         }
         if let Some(from) = query.from {
-            where_sql.push_str(" AND at >= ?");
+            where_sql.push_str(" AND a.at >= ?");
             args.push(rusqlite::types::Value::Integer(from));
         }
         if let Some(to) = query.to {
-            where_sql.push_str(" AND at <= ?");
+            where_sql.push_str(" AND a.at <= ?");
             args.push(rusqlite::types::Value::Integer(to));
         }
 
@@ -785,7 +810,7 @@ impl Store {
 
         let total: i64 = conn
             .query_row(
-                &format!("SELECT COUNT(*) FROM audit_log{where_sql}"),
+                &format!("SELECT COUNT(*) FROM audit_log a{where_sql}"),
                 params_ref.as_slice(),
                 |row| row.get(0),
             )
@@ -794,9 +819,11 @@ impl Store {
         let limit = query.limit.unwrap_or(100).clamp(1, 1000);
         let offset = query.offset.unwrap_or(0).max(0);
         let sql = format!(
-            "SELECT seq, module, action, at, object_ref, user_id, company, ip, workspace, change_text
-             FROM audit_log{where_sql}
-             ORDER BY at DESC, seq DESC
+            "SELECT a.seq, a.module, a.action, a.at, a.object_ref, a.user_id, a.company, a.ip, a.workspace, a.change_text, COALESCE(u.display_name, '')
+             FROM audit_log a
+             LEFT JOIN users u ON u.user_id = a.user_id
+             {where_sql}
+             ORDER BY a.at DESC, a.seq DESC
              LIMIT ? OFFSET ?"
         );
         let mut with_page: Vec<rusqlite::types::Value> = args.clone();
@@ -821,6 +848,7 @@ impl Store {
                     ip: row.get(7)?,
                     workspace: row.get(8)?,
                     change_text: row.get(9)?,
+                    display_name: row.get(10)?,
                 })
             })
             .map_err(|err| format!("query audit: {err}"))?
@@ -860,8 +888,8 @@ impl Store {
             conn.execute(
                 "INSERT INTO conflicts
                    (conflict_id, drawing_id, object_ref, field, value_a, value_b,
-                    base_revision, status, resolution, resolved_value, resolved_by)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    base_revision, status, resolution, resolved_value, resolved_by, user_a, user_b)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     conflict.conflict_id,
                     conflict.drawing_id,
@@ -873,7 +901,9 @@ impl Store {
                     conflict.status,
                     conflict.resolution,
                     conflict.resolved_value,
-                    conflict.resolved_by
+                    conflict.resolved_by,
+                    conflict.user_a,
+                    conflict.user_b
                 ],
             )
             .map_err(|err| format!("insert conflict: {err}"))?;
@@ -910,8 +940,13 @@ impl Store {
         let mut entries = conn
             .prepare(
                 "SELECT c.conflict_id, c.drawing_id, c.object_ref, c.field, c.value_a, c.value_b,
-                        c.base_revision, c.status, c.resolution, c.resolved_value, c.resolved_by
-                 FROM conflicts c JOIN conflict_ops o ON o.conflict_id = c.conflict_id
+                        c.base_revision, c.status, c.resolution, c.resolved_value, c.resolved_by,
+                        c.user_a, ua.display_name, c.user_b, ub.display_name, ur.display_name
+                 FROM conflicts c
+                 JOIN conflict_ops o ON o.conflict_id = c.conflict_id
+                 LEFT JOIN users ua ON ua.user_id = c.user_a
+                 LEFT JOIN users ub ON ub.user_id = c.user_b
+                 LEFT JOIN users ur ON ur.user_id = c.resolved_by
                  WHERE o.op_id = ?1 AND c.drawing_id = ?2 AND c.status = '待裁决'
                  ORDER BY c.conflict_id",
             )
@@ -944,20 +979,25 @@ impl Store {
         let mut where_sql = String::from(" WHERE 1 = 1");
         let mut args: Vec<rusqlite::types::Value> = Vec::new();
         if let Some(drawing_id) = drawing_id {
-            where_sql.push_str(" AND drawing_id = ?");
+            where_sql.push_str(" AND c.drawing_id = ?");
             args.push(rusqlite::types::Value::Text(drawing_id.to_owned()));
         }
         if let Some(status) = status {
-            where_sql.push_str(" AND status = ?");
+            where_sql.push_str(" AND c.status = ?");
             args.push(rusqlite::types::Value::Text(status.to_owned()));
         }
         let args_ref: Vec<&dyn rusqlite::ToSql> =
             args.iter().map(|arg| arg as &dyn rusqlite::ToSql).collect();
         let mut stmt = conn
             .prepare(&format!(
-                "SELECT conflict_id, drawing_id, object_ref, field, value_a, value_b,
-                        base_revision, status, resolution, resolved_value, resolved_by
-                 FROM conflicts{where_sql} ORDER BY conflict_id"
+                "SELECT c.conflict_id, c.drawing_id, c.object_ref, c.field, c.value_a, c.value_b,
+                        c.base_revision, c.status, c.resolution, c.resolved_value, c.resolved_by,
+                        c.user_a, ua.display_name, c.user_b, ub.display_name, ur.display_name
+                 FROM conflicts c
+                 LEFT JOIN users ua ON ua.user_id = c.user_a
+                 LEFT JOIN users ub ON ub.user_id = c.user_b
+                 LEFT JOIN users ur ON ur.user_id = c.resolved_by
+                 {where_sql} ORDER BY c.conflict_id"
             ))
             .map_err(|err| format!("prepare conflicts: {err}"))?;
         let rows = stmt
@@ -1284,6 +1324,7 @@ fn stored_op(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredOp> {
 
 /// A row of `conflicts`, its columns in the order the table names them.
 fn conflict_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConflictRow> {
+    let non_empty = |v: Option<String>| v.filter(|s| !s.is_empty());
     Ok(ConflictRow {
         conflict_id: row.get(0)?,
         drawing_id: row.get(1)?,
@@ -1296,6 +1337,11 @@ fn conflict_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConflictRow> {
         resolution: row.get(8)?,
         resolved_value: row.get(9)?,
         resolved_by: row.get(10)?,
+        user_a: row.get(11)?,
+        display_name_a: non_empty(row.get(12)?),
+        user_b: row.get(13)?,
+        display_name_b: non_empty(row.get(14)?),
+        resolved_by_display_name: non_empty(row.get(15)?),
     })
 }
 
@@ -1364,7 +1410,9 @@ CREATE TABLE IF NOT EXISTS conflicts (
   status        TEXT NOT NULL,
   resolution    TEXT,
   resolved_value TEXT,
-  resolved_by   TEXT
+  resolved_by   TEXT,
+  user_a        TEXT,
+  user_b        TEXT
 );
 
 -- The ops each conflict entry holds, in the order `conflict.op_ids` names
@@ -1449,6 +1497,13 @@ END;
 "#,
     )
     .map_err(|err| format!("create schema: {err}"))?;
+    // Backward-compatible schema migrations for databases created by earlier builds.
+    for ddl in [
+        "ALTER TABLE conflicts ADD COLUMN user_a TEXT",
+        "ALTER TABLE conflicts ADD COLUMN user_b TEXT",
+    ] {
+        let _ = conn.execute(ddl, []);
+    }
     Ok(())
 }
 
@@ -1856,6 +1911,11 @@ mod tests {
                 resolution: None,
                 resolved_value: None,
                 resolved_by: None,
+                user_a: None,
+                display_name_a: None,
+                user_b: None,
+                display_name_b: None,
+                resolved_by_display_name: None,
             })
             .expect("insert conflict");
 
@@ -1898,6 +1958,11 @@ mod tests {
                 resolution: None,
                 resolved_value: None,
                 resolved_by: None,
+                user_a: None,
+                display_name_a: None,
+                user_b: None,
+                display_name_b: None,
+                resolved_by_display_name: None,
             })
             .expect("insert");
         store
@@ -2453,6 +2518,11 @@ mod tests {
             resolution: None,
             resolved_value: None,
             resolved_by: None,
+            user_a: None,
+            display_name_a: None,
+            user_b: None,
+            display_name_b: None,
+            resolved_by_display_name: None,
         };
         let held = vec!["op-r-2-1".to_owned(), "op-r-1-1".to_owned()];
         store.insert_conflict_holding(&row, &held).expect("entry");

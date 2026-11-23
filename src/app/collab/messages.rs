@@ -107,6 +107,7 @@ pub(super) fn read(text: &str) -> Reading {
             tag,
             holder,
             expires_at,
+            ..
         } => Frame::Event(CollabEvent::ClaimDenied {
             tag,
             holder,
@@ -197,6 +198,7 @@ pub(super) fn read(text: &str) -> Reading {
             value_a,
             value_b,
             op_ids,
+            ..
         } => {
             // The ops that tied get no other answer.
             if !op_ids.is_empty() {

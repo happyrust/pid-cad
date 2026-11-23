@@ -18,6 +18,17 @@ pub fn is_protocol_compatible(version: u32) -> bool {
     (MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&version)
 }
 
+/// Formats a user as `显示名（user_id）` when a distinct display name is
+/// registered, or plain `user_id` when no display name is registered (#27).
+pub fn format_user_label(display_name: &str, user_id: &str) -> String {
+    let name = display_name.trim();
+    if name.is_empty() || name == user_id {
+        user_id.to_owned()
+    } else {
+        format!("{name}（{user_id}）")
+    }
+}
+
 /// A message sent by a client to the server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -125,6 +136,9 @@ pub enum ServerMessage {
         /// Wire protocol version spoken by the server. Absent from older servers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         protocol_version: Option<u32>,
+        /// Registered display name of the joining user (empty when unregistered, #27).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        display_name: String,
     },
     /// Structured failure. `level` names the first denying tier when the
     /// failure came out of the permission chain.
@@ -144,6 +158,13 @@ pub enum ServerMessage {
         /// `op_applied`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rejected: Option<bool>,
+        /// The user who caused this refusal (e.g., prior writer in `OP_SUPERSEDED`,
+        /// deleter in `OBJECT_DELETED`, claim holder in `CLAIM_HELD`, #28).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor_user_id: Option<String>,
+        /// Registered display name of `actor_user_id`, when available (#28).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor_display_name: Option<String>,
     },
     /// Tag ownership granted. Broadcast to every session on the drawing (#25).
     ClaimGranted {
@@ -161,6 +182,10 @@ pub enum ServerMessage {
         tag: String,
         holder: String,
         expires_at: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder_user_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder_display_name: Option<String>,
     },
     /// Tag ownership ended. `reason` is `released` or `expired`.
     ClaimReleased { tag: String, reason: String },
@@ -206,6 +231,14 @@ pub enum ServerMessage {
         /// knows its op went into the entry.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         op_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_a: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name_a: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_b: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name_b: Option<String>,
     },
 }
 
@@ -224,6 +257,8 @@ pub struct ClaimInfo {
     pub tag: String,
     pub session_id: String,
     pub user_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub display_name: String,
     pub expires_at: i64,
 }
 
@@ -428,12 +463,14 @@ mod tests {
                 tag: "V-1001".into(),
                 session_id: "s-1".into(),
                 user_id: "u1".into(),
+                display_name: "工艺甲".into(),
                 expires_at: 1_700_000_000,
             }],
             repo_id: "r-test".into(),
             replay_from: None,
             align_refused: None,
             protocol_version: Some(PROTOCOL_VERSION),
+            display_name: "工艺甲".into(),
         };
         let value: Value = serde_json::to_value(&msg).expect("welcome must serialize");
         assert_eq!(value["type"], "welcome");
@@ -451,6 +488,8 @@ mod tests {
             holder: None,
             op_id: None,
             rejected: None,
+            actor_user_id: None,
+            actor_display_name: None,
         };
         let text = serde_json::to_string(&msg).expect("error must serialize");
         assert!(!text.contains("level"));
@@ -493,6 +532,7 @@ mod tests {
             replay_from: Some(6),
             align_refused: None,
             protocol_version: None,
+            display_name: String::new(),
         };
         let value: Value = serde_json::to_value(&replaying).expect("serialize");
         assert_eq!(value["replay_from"], 6);
@@ -505,6 +545,8 @@ mod tests {
             holder: None,
             op_id: Some("op-s1-12".into()),
             rejected: Some(true),
+            actor_user_id: None,
+            actor_display_name: None,
         };
         let value: Value = serde_json::to_value(&refused).expect("serialize");
         assert_eq!((&value["op_id"], &value["rejected"]), (&Value::from("op-s1-12"), &Value::from(true)));
@@ -528,6 +570,10 @@ mod tests {
             value_a: "1.6MPa".into(),
             value_b: "2.5MPa".into(),
             op_ids: vec!["op-a".into(), "op-b".into()],
+            user_a: None,
+            display_name_a: None,
+            user_b: None,
+            display_name_b: None,
         };
         assert_eq!(
             serde_json::to_value(&tied).expect("serialize")["op_ids"],
@@ -690,11 +736,22 @@ mod tests {
             tag: "V-1001".into(),
             holder: "s-1".into(),
             expires_at: 1_700_000_300,
+            holder_user_id: Some("u1".into()),
+            holder_display_name: Some("张工".into()),
         };
         let value: Value = serde_json::to_value(&msg).expect("claim_denied must serialize");
         assert_eq!(value["type"], "claim_denied");
         assert_eq!(value["holder"], "s-1");
         assert_eq!(value["expires_at"], 1_700_000_300_i64);
+        assert_eq!(value["holder_display_name"], "张工");
+    }
+
+    #[test]
+    fn format_user_label_omits_empty_parens_when_unregistered() {
+        assert_eq!(format_user_label("张工", "u1"), "张工（u1）");
+        assert_eq!(format_user_label("", "u1"), "u1");
+        assert_eq!(format_user_label("   ", "u1"), "u1");
+        assert_eq!(format_user_label("u1", "u1"), "u1");
     }
 
     #[test]

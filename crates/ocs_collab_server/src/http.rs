@@ -707,6 +707,7 @@ async fn conflict_resolve(
             "status": resolved.row.status,
             "resolution": resolved.row.resolution,
             "resolved_by": resolved.row.resolved_by,
+            "resolved_by_display_name": resolved.row.resolved_by_display_name,
             "resolved_value": resolved.row.resolved_value,
             "object_ref": resolved.row.object_ref,
             "field": resolved.row.field,
@@ -2948,5 +2949,190 @@ mod tests {
             )),
             "designer must succeed claiming P-1001: {granted:?}"
         );
+    }
+
+    /// #27 + #28: `display_name` is resolved from `users` and carried across
+    /// welcome, peers, claims, yield/delete errors, conflicts, audit, and objects.
+    #[tokio::test]
+    async fn display_name_flows_through_members_claims_errors_conflicts_audit_and_objects() {
+        let state = audited_state();
+        let port = serve(&state).await;
+        let now = ocs_collab::now_unix();
+
+        // 1. u-proc ("工艺甲") joins and claims P-1001.
+        let (mut a, a_reactions) = live_conn(&state, "u-proc", now).await;
+        let a_welcome = a_reactions
+            .iter()
+            .find_map(|r| match r {
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::Welcome { display_name, .. }) => {
+                    Some(display_name.clone())
+                }
+                _ => None,
+            })
+            .expect("a welcome");
+        assert_eq!(a_welcome, "工艺甲");
+
+        let claim_a = claim_frame(&state, &mut a, "P-1001", true).await;
+        assert!(claim_a.iter().any(|r| matches!(
+            r,
+            crate::ws::Reaction::Publish {
+                message: ocs_collab::ServerMessage::ClaimGranted { display_name: Some(dn), .. },
+                ..
+            } if dn == "工艺甲"
+        )));
+
+        // 2. u-admin ("管理员") joins and sees u-proc's display_name in peers & claims, and own display_name in welcome.
+        let (mut b, b_reactions) = live_conn(&state, "u-admin", now + 1).await;
+        let (b_dn, b_peers, b_claims) = b_reactions
+            .iter()
+            .find_map(|r| match r {
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::Welcome {
+                    display_name,
+                    peers,
+                    claims,
+                    ..
+                }) => Some((display_name.clone(), peers.clone(), claims.clone())),
+                _ => None,
+            })
+            .expect("b welcome");
+        assert_eq!(b_dn, "管理员");
+        assert_eq!(b_peers.len(), 1);
+        assert_eq!(b_peers[0].display_name, "工艺甲");
+        assert_eq!(b_claims.len(), 1);
+        assert_eq!(b_claims[0].display_name, "工艺甲");
+
+        // 3. u-admin tries to claim P-1001 -> ClaimDenied includes holder_display_name = "工艺甲".
+        let denied_claim = claim_frame(&state, &mut b, "P-1001", true).await;
+        assert!(denied_claim.iter().any(|r| matches!(
+            r,
+            crate::ws::Reaction::Send(ocs_collab::ServerMessage::ClaimDenied {
+                holder_user_id: Some(uid),
+                holder_display_name: Some(dn),
+                ..
+            }) if uid == "u-proc" && dn == "工艺甲"
+        )));
+
+        // Release P-1001 so both can write.
+        let _ = claim_frame(&state, &mut a, "P-1001", false).await;
+
+        // 4. u-proc writes P-1001.设计压力 = 1.6MPa (rev 0 -> 1); u-admin writes stale rev 0 -> OP_SUPERSEDED carries "工艺甲（u-proc）".
+        let a_sid = a.session.as_ref().expect("a").session_id.clone();
+        let b_sid = b.session.as_ref().expect("b").session_id.clone();
+        let _ = crate::ws::handle_message(
+            &state,
+            &mut a,
+            ocs_collab::ClientMessage::Op {
+                session_id: a_sid.clone(),
+                base_revision: 0,
+                op_id: "op-dn-1".into(),
+                payload: json!({"kind": "set_property", "object_ref": "P-1001", "field": "设计压力", "value": "1.6MPa"}),
+            },
+            now + 2,
+        )
+        .await;
+        let yielded = crate::ws::handle_message(
+            &state,
+            &mut b,
+            ocs_collab::ClientMessage::Op {
+                session_id: b_sid.clone(),
+                base_revision: 0,
+                op_id: "op-dn-2".into(),
+                payload: json!({"kind": "set_property", "object_ref": "P-1001", "field": "设计压力", "value": "2.5MPa"}),
+            },
+            now + 3,
+        )
+        .await;
+        assert!(
+            yielded.iter().any(|r| matches!(
+                r,
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error {
+                    code,
+                    message,
+                    actor_user_id: Some(uid),
+                    actor_display_name: Some(dn),
+                    ..
+                }) if code == codes::OP_SUPERSEDED
+                    && uid == "u-proc"
+                    && dn == "工艺甲"
+                    && message.contains("工艺甲（u-proc）")
+            )),
+            "yield error must include display_name: {yielded:?}"
+        );
+
+        // 5. u-proc deletes P-1001 (rev 1 -> 2); u-admin writes stale rev 1 -> OBJECT_DELETED carries "工艺甲（u-proc）".
+        let _ = crate::ws::handle_message(
+            &state,
+            &mut a,
+            ocs_collab::ClientMessage::Op {
+                session_id: a_sid.clone(),
+                base_revision: 1,
+                op_id: "op-dn-3".into(),
+                payload: json!({"kind": "delete_object", "object_ref": "P-1001"}),
+            },
+            now + 4,
+        )
+        .await;
+        let deleted_err = crate::ws::handle_message(
+            &state,
+            &mut b,
+            ocs_collab::ClientMessage::Op {
+                session_id: b_sid.clone(),
+                base_revision: 1,
+                op_id: "op-dn-4".into(),
+                payload: json!({"kind": "set_property", "object_ref": "P-1001", "field": "公称直径", "value": "DN80"}),
+            },
+            now + 5,
+        )
+        .await;
+        assert!(
+            deleted_err.iter().any(|r| matches!(
+                r,
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error {
+                    code,
+                    message,
+                    actor_user_id: Some(uid),
+                    actor_display_name: Some(dn),
+                    ..
+                }) if code == codes::OBJECT_DELETED
+                    && uid == "u-proc"
+                    && dn == "工艺甲"
+                    && message.contains("工艺甲（u-proc）")
+            )),
+            "deleted error must include display_name: {deleted_err:?}"
+        );
+
+        // 6. u-proc writes P-2001 -> GET /drawing/{id}/objects & GET /audit both include display_name = "工艺甲".
+        let _ = crate::ws::handle_message(
+            &state,
+            &mut a,
+            ocs_collab::ClientMessage::Op {
+                session_id: a_sid,
+                base_revision: 2,
+                op_id: "op-dn-5".into(),
+                payload: json!({"kind": "set_property", "object_ref": "P-2001", "field": "公称直径", "value": "DN50"}),
+            },
+            now + 6,
+        )
+        .await;
+        let objs = objects_listing(&state, "d-a1-coop", Some("P-2001")).await;
+        assert_eq!(objs["items"][0]["fields"]["公称直径"]["display_name"], "工艺甲");
+
+        let rows = audit_rows(port, "tag=P-2001").await;
+        assert_eq!(rows[0]["display_name"], "工艺甲");
+
+        // 7. Unregistered user gets empty display_name (never empty parentheses).
+        let (unreg, unreg_reactions) = live_conn(&state, "u-unregistered", now + 7).await;
+        let unreg_dn = unreg_reactions
+            .iter()
+            .find_map(|r| match r {
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::Welcome { display_name, .. }) => {
+                    Some(display_name.clone())
+                }
+                _ => None,
+            })
+            .expect("unreg welcome");
+        assert_eq!(unreg_dn, "");
+        assert_eq!(unreg.session.as_ref().expect("s").display_name, "");
+        assert_eq!(ocs_collab::protocol::format_user_label(&unreg_dn, "u-unregistered"), "u-unregistered");
     }
 }

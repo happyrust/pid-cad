@@ -253,6 +253,10 @@ fn taken_before(state: &AppState, session: &Session, op_id: &str) -> Option<Vec<
             value_a: row.value_a,
             value_b: row.value_b,
             op_ids,
+            user_a: row.user_a,
+            display_name_a: row.display_name_a,
+            user_b: row.user_b,
+            display_name_b: row.display_name_b,
         })
         .collect();
     said.extend(logged.map(|op| ServerMessage::OpApplied {
@@ -684,13 +688,15 @@ pub fn objects(
             let fields: serde_json::Map<String, Value> = object
                 .fields
                 .iter()
-                .map(|(field, state)| {
+                .map(|(field, field_state)| {
+                    let display_name = state.display_name_of(&field_state.user_id);
                     (
                         field.clone(),
                         serde_json::json!({
-                            "value": state.value,
-                            "revision": state.revision,
-                            "user_id": state.user_id,
+                            "value": field_state.value,
+                            "revision": field_state.revision,
+                            "user_id": field_state.user_id,
+                            "display_name": display_name,
                         }),
                     )
                 })
@@ -940,11 +946,13 @@ pub fn resolve(
         "[ocs_collab_server] 裁决 conflict={conflict_id} by={resolved_by} resolution={resolution} object_ref={} field={} -> 广播 op_applied revision={revision} at={now}",
         row.object_ref, row.field
     );
+    let resolved_dn = state.display_name_of(resolved_by);
     let row = ConflictRow {
         status: STATUS_RESOLVED.to_owned(),
         resolution: Some(resolution.to_owned()),
         resolved_value: custom_value.map(str::to_owned),
         resolved_by: Some(resolved_by.to_owned()),
+        resolved_by_display_name: (!resolved_dn.is_empty()).then_some(resolved_dn),
         ..row
     };
     let message = ServerMessage::OpApplied {
@@ -1010,6 +1018,17 @@ fn stale(incoming: &Incoming<'_>, current: i64) -> Outcome {
 /// whose other changes may still take effect is not `rejected`; the caller
 /// that finds nothing took effect after all says so with [`reject_whole`].
 fn answer(incoming: &Incoming<'_>, code: &str, message: String, rejected: bool) -> ServerMessage {
+    answer_with_actor(incoming, code, message, rejected, None, None)
+}
+
+fn answer_with_actor(
+    incoming: &Incoming<'_>,
+    code: &str,
+    message: String,
+    rejected: bool,
+    actor_user_id: Option<String>,
+    actor_display_name: Option<String>,
+) -> ServerMessage {
     ServerMessage::Error {
         code: code.to_owned(),
         message,
@@ -1017,6 +1036,8 @@ fn answer(incoming: &Incoming<'_>, code: &str, message: String, rejected: bool) 
         holder: None,
         op_id: Some(incoming.op_id.to_owned()),
         rejected: rejected.then_some(true),
+        actor_user_id,
+        actor_display_name,
     }
 }
 
@@ -1135,20 +1156,27 @@ fn judge_and_commit(
                 deleted_revision,
                 deleted_by,
                 last_value,
-            } => reactions.push(refused(
-                state,
-                incoming,
-                codes::OBJECT_DELETED,
-                "change_rejected_deleted",
-                &object_ref,
-                format!(
-                    "{} {object_ref}.{}: 提交 {} 未生效，对象已在修订 {deleted_revision} 被 {deleted_by} 删除；删除前的值 {}",
-                    change.kind,
-                    change.field,
-                    change.value,
-                    last_value.as_deref().unwrap_or("(未知)")
-                ),
-            )),
+            } => {
+                let deleted_dn = state.display_name_of(&deleted_by);
+                let deleted_label =
+                    ocs_collab::protocol::format_user_label(&deleted_dn, &deleted_by);
+                reactions.push(refused_with_actor(
+                    state,
+                    incoming,
+                    codes::OBJECT_DELETED,
+                    "change_rejected_deleted",
+                    &object_ref,
+                    format!(
+                        "{} {object_ref}.{}: 提交 {} 未生效，对象已在修订 {deleted_revision} 被 {deleted_label} 删除；删除前的值 {}",
+                        change.kind,
+                        change.field,
+                        change.value,
+                        last_value.as_deref().unwrap_or("(未知)")
+                    ),
+                    Some(deleted_by),
+                    (!deleted_dn.is_empty()).then_some(deleted_dn),
+                ));
+            }
             Verdict::Referenced { object_ref, by } => reactions.push(refused(
                 state,
                 incoming,
@@ -1386,6 +1414,20 @@ fn refused(
     object_ref: &str,
     text: String,
 ) -> Reaction {
+    refused_with_actor(state, incoming, code, action, object_ref, text, None, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refused_with_actor(
+    state: &AppState,
+    incoming: &Incoming<'_>,
+    code: &str,
+    action: &str,
+    object_ref: &str,
+    text: String,
+    actor_user_id: Option<String>,
+    actor_display_name: Option<String>,
+) -> Reaction {
     let session = incoming.session;
     if let Some(store) = &state.store {
         let row = ws::audit_row(
@@ -1405,11 +1447,13 @@ fn refused(
         "[ocs_collab_server] 入站 op session={} user={} op_id={} base_revision={} object_ref={object_ref} -> error {code} at={}",
         session.session_id, session.user_id, incoming.op_id, incoming.base_revision, incoming.now
     );
-    Reaction::Send(answer(
+    Reaction::Send(answer_with_actor(
         incoming,
         code,
         format!("操作 {}：{text}", incoming.op_id),
         false,
+        actor_user_id,
+        actor_display_name,
     ))
 }
 
@@ -1423,9 +1467,11 @@ fn yielded(
     (winner, winner_revision, winner_user): (String, i64, String),
 ) -> Reaction {
     let session = incoming.session;
+    let winner_dn = state.display_name_of(&winner_user);
+    let winner_label = ocs_collab::protocol::format_user_label(&winner_dn, &winner_user);
     let what = format!("{}.{}", object_ref, change.field);
     let text = format!(
-        "{} {what}: {} 让位于 {winner}（基线 {} 落后于修订 {winner_revision}，{winner_user} 先写入）",
+        "{} {what}: {} 让位于 {winner}（基线 {} 落后于修订 {winner_revision}，{winner_label} 先写入）",
         change.kind, change.value, incoming.base_revision
     );
     if let Some(store) = &state.store {
@@ -1458,14 +1504,16 @@ fn yielded(
         codes::OP_SUPERSEDED,
         incoming.now
     );
-    Reaction::Send(answer(
+    Reaction::Send(answer_with_actor(
         incoming,
         codes::OP_SUPERSEDED,
         format!(
-            "操作 {} 的基线 {} 落后：{what} 已在修订 {winner_revision} 被 {winner_user} 改为 {winner}，本次提交的 {} 未生效",
+            "操作 {} 的基线 {} 落后：{what} 已在修订 {winner_revision} 被 {winner_label} 改为 {winner}，本次提交的 {} 未生效",
             incoming.op_id, incoming.base_revision, change.value
         ),
         false,
+        Some(winner_user),
+        (!winner_dn.is_empty()).then_some(winner_dn),
     ))
 }
 
@@ -1508,6 +1556,12 @@ fn tie(
             continue;
         };
         let conflict_id = new_conflict_id();
+        let user_a = first.session.user_id.clone();
+        let dn_a = state.display_name_of(&user_a);
+        let display_name_a = (!dn_a.is_empty()).then_some(dn_a);
+        let user_b = second.session.user_id.clone();
+        let dn_b = state.display_name_of(&user_b);
+        let display_name_b = (!dn_b.is_empty()).then_some(dn_b);
         if let Some(store) = &state.store {
             let row = ConflictRow {
                 conflict_id: conflict_id.clone(),
@@ -1521,6 +1575,11 @@ fn tie(
                 resolution: None,
                 resolved_value: None,
                 resolved_by: None,
+                user_a: Some(user_a.clone()),
+                display_name_a: display_name_a.clone(),
+                user_b: Some(user_b.clone()),
+                display_name_b: display_name_b.clone(),
+                resolved_by_display_name: None,
             };
             let held = [first.op_id.clone(), second.op_id.to_owned()];
             if let Err(err) = store.insert_conflict_holding(&row, &held) {
@@ -1572,6 +1631,10 @@ fn tie(
                 value_b,
                 // Neither op gets any other answer for this change.
                 op_ids: vec![first.op_id.clone(), second.op_id.to_owned()],
+                user_a: Some(user_a),
+                display_name_a,
+                user_b: Some(user_b),
+                display_name_b,
             },
         });
     }

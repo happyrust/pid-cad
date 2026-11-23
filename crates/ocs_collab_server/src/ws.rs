@@ -648,6 +648,8 @@ fn not_aligned(session: &Session, op_id: String) -> Vec<Reaction> {
         holder: None,
         op_id: Some(op_id),
         rejected: None,
+        actor_user_id: None,
+        actor_display_name: None,
     })]
 }
 
@@ -800,13 +802,14 @@ async fn hello(
     } else {
         mode
     };
+    let display_name = state.display_name_of(user_id);
     let outcome = {
         let mut sessions = state.sessions.lock().await;
         sessions.open(OpenRequest {
             session_id: &session_id,
             drawing_id,
             user_id,
-            display_name: user_id,
+            display_name: &display_name,
             mode,
             workspace,
             base_revision,
@@ -827,6 +830,8 @@ async fn hello(
                     holder: Some(holder),
                     op_id: None,
                     rejected: None,
+                    actor_user_id: None,
+                    actor_display_name: None,
                 }),
                 Reaction::Close,
             ]
@@ -875,6 +880,8 @@ async fn hello(
                         holder: None,
                         op_id: None,
                         rejected: None,
+                        actor_user_id: None,
+                        actor_display_name: None,
                     },
                 });
             }
@@ -906,7 +913,10 @@ async fn hello(
             // claim; the room still owes a `claim_released` for it, exactly as
             // `sweep_expired` would have sent.
             reactions.extend(expired_release_reactions(state, expired));
-            let claims: Vec<ClaimInfo> = claims.iter().map(claim_info_of).collect();
+            let claims: Vec<ClaimInfo> = claims
+                .iter()
+                .map(|c| claim_info_of(state, c))
+                .collect();
             println!(
                 "[ocs_collab_server] 入站 hello user={user_id} drawing={drawing_id} mode={mode} -> welcome session={session_id} base_revision={base_revision} peers={} claims={} at={now}",
                 peers.len(),
@@ -951,6 +961,7 @@ async fn hello(
                         message,
                     }),
                     protocol_version: Some(state.protocol_version),
+                    display_name: session.display_name.clone(),
                 }),
             ]);
             // What the session missed, each op as the room first heard it,
@@ -1073,6 +1084,16 @@ async fn claim(state: &AppState, session: &Session, tag: String, now: i64) -> Ve
             reactions
         }
         ClaimOutcome::Denied { holder, expires_at } => {
+            let holder_user_id = state
+                .occupancy
+                .lock()
+                .await
+                .get(&tag)
+                .map(|c| c.user_id.clone());
+            let holder_display_name = holder_user_id
+                .as_deref()
+                .map(|uid| state.display_name_of(uid))
+                .filter(|name| !name.is_empty());
             println!(
                 "[ocs_collab_server] 入站 claim session={} user={} tag={tag} -> claim_denied holder={holder} expires_at={expires_at} at={now}",
                 session.session_id, session.user_id
@@ -1081,6 +1102,8 @@ async fn claim(state: &AppState, session: &Session, tag: String, now: i64) -> Ve
                 tag,
                 holder,
                 expires_at,
+                holder_user_id,
+                holder_display_name,
             }));
             reactions
         }
@@ -1229,10 +1252,12 @@ async fn op(
     // other refusal: an op is one step of somebody's, and half a step is
     // not something they made.
     if let Some((change, held)) = held_by_another(state, session, &payload, now).await {
+        let holder_dn = state.display_name_of(&held.user_id);
+        let holder_label = ocs_collab::protocol::format_user_label(&holder_dn, &held.user_id);
         let tried = describe_change(&change.kind, &change.subject(), &change.raw);
         let text = format!(
-            "{tried} 被拒绝（位号 {} 由 {} 占用，到期 {}）",
-            held.tag, held.user_id, held.expires_at
+            "{tried} 被拒绝（位号 {} 由 {holder_label} 占用，到期 {}）",
+            held.tag, held.expires_at
         );
         record_refused_write(state, session, peer_addr, &held.tag, text, now);
         println!(
@@ -1247,13 +1272,15 @@ async fn op(
         return vec![Reaction::Send(ServerMessage::Error {
             code: codes::CLAIM_HELD.to_owned(),
             message: format!(
-                "操作 {op_id}：位号 {} 已被 {} 占用，到期 {}",
-                held.tag, held.user_id, held.expires_at
+                "操作 {op_id}：位号 {} 已被 {holder_label} 占用，到期 {}",
+                held.tag, held.expires_at
             ),
             level: None,
             holder: Some(held.session_id),
             op_id: Some(op_id),
             rejected: Some(true),
+            actor_user_id: Some(held.user_id),
+            actor_display_name: (!holder_dn.is_empty()).then_some(holder_dn),
         })];
     }
 
@@ -1578,6 +1605,8 @@ fn error_message(code: &str, message: &str) -> ServerMessage {
         holder: None,
         op_id: None,
         rejected: None,
+        actor_user_id: None,
+        actor_display_name: None,
     }
 }
 
@@ -1590,6 +1619,8 @@ fn refusing(error: ServerMessage, op_id: &str) -> ServerMessage {
             message,
             level,
             holder,
+            actor_user_id,
+            actor_display_name,
             ..
         } => ServerMessage::Error {
             code,
@@ -1598,6 +1629,8 @@ fn refusing(error: ServerMessage, op_id: &str) -> ServerMessage {
             holder,
             op_id: Some(op_id.to_owned()),
             rejected: Some(true),
+            actor_user_id,
+            actor_display_name,
         },
         other => other,
     }
@@ -1627,11 +1660,12 @@ fn peer_of(session: &Session) -> Peer {
     }
 }
 
-fn claim_info_of(occupancy: &Occupancy) -> ClaimInfo {
+fn claim_info_of(state: &AppState, occupancy: &Occupancy) -> ClaimInfo {
     ClaimInfo {
         tag: occupancy.tag.clone(),
         session_id: occupancy.session_id.clone(),
         user_id: occupancy.user_id.clone(),
+        display_name: state.display_name_of(&occupancy.user_id),
         expires_at: occupancy.expires_at,
     }
 }
@@ -2185,6 +2219,8 @@ mod tests {
                     holder: Some(a_id),
                     op_id: None,
                     rejected: None,
+                    actor_user_id: None,
+                    actor_display_name: None,
                 }),
                 Reaction::Close,
             ],
@@ -2252,7 +2288,7 @@ mod tests {
                 tag: "V-1001".into(),
                 session_id: session_id.clone(),
                 user_id: Some("u1".into()),
-                display_name: Some("u1".into()),
+                display_name: None,
                 expires_at: Some(T0 + 300),
             }]
         );
@@ -2298,6 +2334,8 @@ mod tests {
                 tag: "V-1001".into(),
                 holder: a_id,
                 expires_at: T0 + 300,
+                holder_user_id: Some("u1".into()),
+                holder_display_name: None,
             }]
         );
     }
