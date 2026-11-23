@@ -815,6 +815,102 @@ impl Store {
         Ok(rows)
     }
 
+    /// `(node_id, name, node_type, parent_id)` for every PBS node.
+    pub fn list_pbs_node_details(
+        &self,
+    ) -> Result<Vec<(String, String, String, Option<String>)>, String> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT node_id, name, node_type, parent_id FROM pbs_nodes ORDER BY node_id")
+            .map_err(|err| format!("prepare pbs node details: {err}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .map_err(|err| format!("query pbs node details: {err}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("read pbs node details: {err}"))?;
+        Ok(rows)
+    }
+
+    /// `(user_id, display_name, role, active)`.
+    pub fn list_users(&self) -> Result<Vec<(String, String, String, bool)>, String> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT user_id, display_name, role, active FROM users ORDER BY user_id",
+            )
+            .map_err(|err| format!("prepare users: {err}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, bool>(3)?,
+                ))
+            })
+            .map_err(|err| format!("query users: {err}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("read users: {err}"))?;
+        Ok(rows)
+    }
+
+    /// Changes one user's role. `false` when that user is not registered.
+    pub fn set_user_role(&self, user_id: &str, role: &str) -> Result<bool, String> {
+        let conn = self.lock()?;
+        let changed = conn
+            .execute(
+                "UPDATE users SET role = ?1 WHERE user_id = ?2",
+                params![role, user_id],
+            )
+            .map_err(|err| format!("set role of {user_id}: {err}"))?;
+        Ok(changed > 0)
+    }
+
+    /// Inserts or replaces one PBS ACL row.
+    pub fn upsert_pbs_acl(
+        &self,
+        node_id: &str,
+        subject: &str,
+        permission: &str,
+        allowed: bool,
+    ) -> Result<(), String> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO pbs_acl (node_id, subject, permission, allowed)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(node_id, subject, permission) DO UPDATE SET
+               allowed = excluded.allowed",
+            params![node_id, subject, permission, i64::from(allowed)],
+        )
+        .map_err(|err| format!("upsert acl {node_id}/{subject}: {err}"))?;
+        Ok(())
+    }
+
+    /// Deletes one PBS ACL row. `false` when it was not there.
+    pub fn delete_pbs_acl(
+        &self,
+        node_id: &str,
+        subject: &str,
+        permission: &str,
+    ) -> Result<bool, String> {
+        let conn = self.lock()?;
+        let changed = conn
+            .execute(
+                "DELETE FROM pbs_acl
+                 WHERE node_id = ?1 AND subject = ?2 AND permission = ?3",
+                params![node_id, subject, permission],
+            )
+            .map_err(|err| format!("delete acl {node_id}/{subject}: {err}"))?;
+        Ok(changed > 0)
+    }
+
     /// `(node_id, subject, permission, allowed)` for every ACL row.
     pub fn list_pbs_acl(&self) -> Result<Vec<(String, String, String, bool)>, String> {
         let conn = self.lock()?;

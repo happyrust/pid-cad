@@ -46,6 +46,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/audit/{seq}", any(audit_immutable))
         .route("/permission/check", post(permission_check))
+        .route("/users", get(user_list))
+        .route("/users/{id}/role", post(user_role_set))
+        .route("/roles", get(role_list))
+        .route("/pbs/nodes", get(pbs_node_list))
+        .route(
+            "/pbs/acl",
+            get(pbs_acl_list).put(pbs_acl_put).delete(pbs_acl_delete),
+        )
         .route("/drawing/{id}/state", post(drawing_state))
         .route("/drawing/{id}/objects", get(drawing_objects))
         .route("/drawing/{id}/topology", get(drawing_topology))
@@ -839,6 +847,482 @@ struct ConflictParams {
     status: Option<String>,
 }
 
+/// `GET /users` → the registered users (#75).
+async fn user_list(State(state): State<Arc<AppState>>) -> Response {
+    let Some(store) = state.store.clone() else {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, codes::INVALID_MESSAGE, "数据库不可用");
+    };
+    match store.list_users() {
+        Ok(rows) => {
+            let items: Vec<_> = rows
+                .into_iter()
+                .map(|(user_id, display_name, role, active)| {
+                    json!({
+                        "user_id": user_id,
+                        "display_name": display_name,
+                        "role": role,
+                        "active": active,
+                    })
+                })
+                .collect();
+            let total = items.len();
+            (StatusCode::OK, Json(json!({ "items": items, "total": total }))).into_response()
+        }
+        Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, codes::INVALID_MESSAGE, &err),
+    }
+}
+
+/// `GET /roles` → the five roles and the 5×8 matrix (#75).
+async fn role_list() -> Response {
+    let items: Vec<_> = ocs_collab::Role::ALL
+        .into_iter()
+        .map(|role| {
+            let operations: Vec<_> = ocs_collab::Operation::ALL
+                .into_iter()
+                .map(|operation| {
+                    json!({
+                        "operation": operation.as_str(),
+                        "allowed": ocs_collab::permission::role_allows(role, operation),
+                    })
+                })
+                .collect();
+            json!({ "role": role.as_str(), "operations": operations })
+        })
+        .collect();
+    (StatusCode::OK, Json(json!({ "items": items, "total": items.len() }))).into_response()
+}
+
+/// `GET /pbs/nodes`.
+async fn pbs_node_list(State(state): State<Arc<AppState>>) -> Response {
+    let Some(store) = state.store.clone() else {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, codes::INVALID_MESSAGE, "数据库不可用");
+    };
+    match store.list_pbs_node_details() {
+        Ok(rows) => {
+            let items: Vec<_> = rows
+                .into_iter()
+                .map(|(node_id, name, node_type, parent_id)| {
+                    json!({
+                        "node_id": node_id,
+                        "name": name,
+                        "node_type": node_type,
+                        "parent_id": parent_id,
+                    })
+                })
+                .collect();
+            let total = items.len();
+            (StatusCode::OK, Json(json!({ "items": items, "total": total }))).into_response()
+        }
+        Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, codes::INVALID_MESSAGE, &err),
+    }
+}
+
+/// `GET /pbs/acl`.
+async fn pbs_acl_list(State(state): State<Arc<AppState>>) -> Response {
+    let Some(store) = state.store.clone() else {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, codes::INVALID_MESSAGE, "数据库不可用");
+    };
+    match store.list_pbs_acl() {
+        Ok(rows) => {
+            let items: Vec<_> = rows
+                .into_iter()
+                .map(|(node_id, subject, permission, allowed)| {
+                    json!({
+                        "node_id": node_id,
+                        "subject": subject,
+                        "permission": permission,
+                        "allowed": allowed,
+                    })
+                })
+                .collect();
+            let total = items.len();
+            (StatusCode::OK, Json(json!({ "items": items, "total": total }))).into_response()
+        }
+        Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, codes::INVALID_MESSAGE, &err),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AclWriteBody {
+    user_id: Option<String>,
+    node_id: Option<String>,
+    subject: Option<String>,
+    permission: Option<String>,
+    allowed: Option<bool>,
+    #[serde(default)]
+    credential: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RoleWriteBody {
+    user_id: Option<String>,
+    role: Option<String>,
+    node_id: Option<String>,
+    #[serde(default)]
+    credential: Option<String>,
+}
+
+fn acl_permission_known(text: &str) -> bool {
+    matches!(text, "查看" | "编辑" | "导出" | "删除")
+}
+
+/// 授权配置 on `node_id`, skipping the drawing-state tier (#75).
+fn require_configure(store: &crate::store::Store, actor: &str, node_id: &str) -> Result<(), Response> {
+    let role_text = match store.user_role(actor) {
+        Ok(Some((role, _))) => role,
+        Ok(None) => {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                codes::PERM_UNKNOWN_SUBJECT,
+                "用户不存在",
+            ))
+        }
+        Err(err) => {
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                codes::INVALID_MESSAGE,
+                &err,
+            ))
+        }
+    };
+    let Some(role) = ocs_collab::Role::parse(&role_text) else {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            codes::PERM_UNKNOWN_SUBJECT,
+            "用户角色非法",
+        ));
+    };
+    let nodes = match perm::load_acl_tree(store) {
+        Ok(nodes) => nodes,
+        Err(err) => {
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                codes::INVALID_MESSAGE,
+                &err,
+            ))
+        }
+    };
+    if !nodes.iter().any(|node| node.node_id == node_id) {
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            codes::INVALID_MESSAGE,
+            "节点不存在",
+        ));
+    }
+    let decision = ocs_collab::decide_without_state(&ocs_collab::PermissionRequest {
+        user_id: actor,
+        role,
+        operation: Operation::ConfigureAuthorization,
+        drawing_state: DrawingState::Collaborative,
+        node_id,
+        nodes: &nodes,
+    });
+    if decision.allowed {
+        Ok(())
+    } else {
+        let outcome = perm::EvalOutcome {
+            decision,
+            status: StatusCode::FORBIDDEN,
+            holder: None,
+        };
+        Err((outcome.status, Json(decision_json(&outcome))).into_response())
+    }
+}
+
+fn audit_admin_change(
+    store: &crate::store::Store,
+    actor: &str,
+    action: &str,
+    object_ref: &str,
+    change_text: String,
+) {
+    let company = store
+        .user_role(actor)
+        .ok()
+        .flatten()
+        .map(|(_, company)| company)
+        .filter(|company| !company.is_empty())
+        .unwrap_or_else(|| "未知".to_owned());
+    let row = crate::store::NewAuditRow {
+        module: "协同编辑".to_owned(),
+        action: action.to_owned(),
+        at: ocs_collab::now_unix(),
+        object_ref: object_ref.to_owned(),
+        user_id: actor.to_owned(),
+        company,
+        ip: "127.0.0.1".to_owned(),
+        workspace: "默认工作区".to_owned(),
+        change_text,
+    };
+    if let Err(err) = store.audit_append(&row) {
+        eprintln!("[ocs_collab_server] 写入授权变更审计失败：{err}");
+    }
+}
+
+async fn writable_snapshot(state: &AppState) -> Vec<(ocs_collab::Session, bool)> {
+    let sessions: Vec<ocs_collab::Session> = {
+        let registry = state.sessions.lock().await;
+        registry
+            .all()
+            .iter()
+            .filter(|session| session.is_active())
+            .cloned()
+            .collect()
+    };
+    let mut rows = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        let writable = crate::access::write_access(state, &session).await.is_none();
+        rows.push((session, writable));
+    }
+    rows
+}
+
+async fn notify_write_changes(
+    state: &AppState,
+    before: Vec<(ocs_collab::Session, bool)>,
+    restored_reason: &str,
+) -> usize {
+    let mut pending = Vec::new();
+    for (session, was_writable) in before {
+        let denied = crate::access::write_access(state, &session).await;
+        let now_writable = denied.is_none();
+        if was_writable == now_writable {
+            continue;
+        }
+        let message = match denied {
+            Some(denied) => denied.downgrade(),
+            None => ocs_collab::ServerMessage::WriteRestored {
+                reason: restored_reason.to_owned(),
+            },
+        };
+        pending.push((session.session_id, message));
+    }
+    let direct = state.direct.lock().expect("direct mutex poisoned");
+    let mut notified = 0usize;
+    for (session_id, message) in pending {
+        if direct
+            .get(&session_id)
+            .is_some_and(|sender| sender.send(message).is_ok())
+        {
+            notified += 1;
+        }
+    }
+    notified
+}
+
+fn root_node_id(store: &crate::store::Store) -> Result<Option<String>, String> {
+    Ok(store
+        .list_pbs_nodes()?
+        .into_iter()
+        .find(|(_, parent)| parent.is_none())
+        .map(|(node_id, _)| node_id))
+}
+
+/// `PUT /pbs/acl` — add or replace one row. Online sessions recompute (#75).
+async fn pbs_acl_put(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<AclWriteBody>,
+) -> Response {
+    let Some(store) = state.store.clone() else {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, codes::INVALID_MESSAGE, "数据库不可用");
+    };
+    let actor = match authenticate_http_actor(
+        &state,
+        &store,
+        &headers,
+        body.user_id,
+        body.credential,
+        "缺少 user_id",
+    ) {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
+    let (Some(node_id), Some(subject), Some(permission), Some(allowed)) =
+        (body.node_id, body.subject, body.permission, body.allowed)
+    else {
+        return error_response(StatusCode::BAD_REQUEST, codes::INVALID_MESSAGE, "缺少必填字段");
+    };
+    if subject.trim().is_empty() || !acl_permission_known(&permission) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            codes::INVALID_MESSAGE,
+            "subject 或 permission 非法",
+        );
+    }
+    if let Err(response) = require_configure(&store, &actor, &node_id) {
+        return response;
+    }
+    let before = writable_snapshot(&state).await;
+    if let Err(err) = store.upsert_pbs_acl(&node_id, &subject, &permission, allowed) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, codes::INVALID_MESSAGE, &err);
+    }
+    let verb = if allowed { "允许" } else { "拒绝" };
+    audit_admin_change(
+        &store,
+        &actor,
+        "acl_upsert",
+        &node_id,
+        format!("{actor} 将节点 {node_id} 上 {subject} 的{permission}设为{verb}"),
+    );
+    let notified = notify_write_changes(
+        &state,
+        before,
+        &format!("节点 {node_id} 的授权行已变更"),
+    )
+    .await;
+    (
+        StatusCode::OK,
+        Json(json!({
+            "node_id": node_id,
+            "subject": subject,
+            "permission": permission,
+            "allowed": allowed,
+            "notified": notified,
+        })),
+    )
+        .into_response()
+}
+
+/// `DELETE /pbs/acl` — remove one row. Online sessions recompute (#75).
+async fn pbs_acl_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<AclWriteBody>,
+) -> Response {
+    let Some(store) = state.store.clone() else {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, codes::INVALID_MESSAGE, "数据库不可用");
+    };
+    let actor = match authenticate_http_actor(
+        &state,
+        &store,
+        &headers,
+        body.user_id,
+        body.credential,
+        "缺少 user_id",
+    ) {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
+    let (Some(node_id), Some(subject), Some(permission)) =
+        (body.node_id, body.subject, body.permission)
+    else {
+        return error_response(StatusCode::BAD_REQUEST, codes::INVALID_MESSAGE, "缺少必填字段");
+    };
+    if let Err(response) = require_configure(&store, &actor, &node_id) {
+        return response;
+    }
+    let before = writable_snapshot(&state).await;
+    let removed = match store.delete_pbs_acl(&node_id, &subject, &permission) {
+        Ok(removed) => removed,
+        Err(err) => {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, codes::INVALID_MESSAGE, &err)
+        }
+    };
+    if !removed {
+        return error_response(StatusCode::NOT_FOUND, codes::INVALID_MESSAGE, "授权行不存在");
+    }
+    audit_admin_change(
+        &store,
+        &actor,
+        "acl_delete",
+        &node_id,
+        format!("{actor} 删除节点 {node_id} 上 {subject} 的{permission}授权行"),
+    );
+    let notified = notify_write_changes(
+        &state,
+        before,
+        &format!("节点 {node_id} 的授权行已删除"),
+    )
+    .await;
+    (
+        StatusCode::OK,
+        Json(json!({
+            "node_id": node_id,
+            "subject": subject,
+            "permission": permission,
+            "notified": notified,
+        })),
+    )
+        .into_response()
+}
+
+/// `POST /users/{id}/role` — change a user's role. Online sessions recompute (#75).
+async fn user_role_set(
+    State(state): State<Arc<AppState>>,
+    Path(target): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<RoleWriteBody>,
+) -> Response {
+    let Some(store) = state.store.clone() else {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, codes::INVALID_MESSAGE, "数据库不可用");
+    };
+    let actor = match authenticate_http_actor(
+        &state,
+        &store,
+        &headers,
+        body.user_id,
+        body.credential,
+        "缺少 user_id",
+    ) {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
+    let Some(role) = body.role else {
+        return error_response(StatusCode::BAD_REQUEST, codes::INVALID_MESSAGE, "缺少 role");
+    };
+    if ocs_collab::Role::parse(&role).is_none() {
+        return error_response(StatusCode::BAD_REQUEST, codes::INVALID_MESSAGE, "role 非法");
+    }
+    let node_id = match body.node_id {
+        Some(node_id) => node_id,
+        None => match root_node_id(&store) {
+            Ok(Some(node_id)) => node_id,
+            Ok(None) => {
+                return error_response(StatusCode::BAD_REQUEST, codes::INVALID_MESSAGE, "没有 PBS 节点可用来判定授权配置")
+            }
+            Err(err) => {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, codes::INVALID_MESSAGE, &err)
+            }
+        },
+    };
+    if let Err(response) = require_configure(&store, &actor, &node_id) {
+        return response;
+    }
+    let before = writable_snapshot(&state).await;
+    let updated = match store.set_user_role(&target, &role) {
+        Ok(updated) => updated,
+        Err(err) => {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, codes::INVALID_MESSAGE, &err)
+        }
+    };
+    if !updated {
+        return error_response(StatusCode::NOT_FOUND, codes::PERM_UNKNOWN_SUBJECT, "用户不存在");
+    }
+    audit_admin_change(
+        &store,
+        &actor,
+        "role_changed",
+        &target,
+        format!("{actor} 将 {target} 的角色改为 {role}"),
+    );
+    let notified = notify_write_changes(
+        &state,
+        before,
+        &format!("{target} 的角色已改为 {role}"),
+    )
+    .await;
+    (
+        StatusCode::OK,
+        Json(json!({
+            "user_id": target,
+            "role": role,
+            "notified": notified,
+        })),
+    )
+        .into_response()
+}
+
 /// `GET /conflicts[?drawing_id=…&status=…]` → 200 `{"items":[…],"total":N}`
 /// (appendix A.1), each item a `conflicts` row.
 async fn conflict_list(
@@ -1539,6 +2023,141 @@ mod tests {
         );
         let revision = store.drawing("d-a1-coop").expect("drawing").expect("row").2;
         assert_eq!(revision, 1);
+    }
+
+    /// #75: an admin adds a deny row, the designer becomes read-only without
+    /// reconnecting; deleting the row restores the write. A role change does
+    /// the same, and each change is one audit row.
+    #[tokio::test]
+    async fn acl_and_role_changes_take_effect_on_the_live_session() {
+        let state = seeded_state();
+        let now = ocs_collab::now_unix();
+        let (session_id, mut rx) = live_session(&state, "u-proc", "协同编辑", now).await;
+
+        let refused = pbs_acl_put(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(AclWriteBody {
+                user_id: Some("u-proc".into()),
+                node_id: Some("n-cell-a1".into()),
+                subject: Some("u-proc".into()),
+                permission: Some("编辑".into()),
+                allowed: Some(false),
+                credential: None,
+            }),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+
+        let put = pbs_acl_put(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(AclWriteBody {
+                user_id: Some("u-admin".into()),
+                node_id: Some("n-cell-a1".into()),
+                subject: Some("u-proc".into()),
+                permission: Some("编辑".into()),
+                allowed: Some(false),
+                credential: None,
+            }),
+        )
+        .await;
+        assert_eq!(put.status(), StatusCode::OK);
+        match rx.try_recv().expect("designer is told at once") {
+            ocs_collab::ServerMessage::ReadonlyDowngrade { level, code, .. } => {
+                assert_eq!(level.as_deref(), Some("pbs"));
+                assert_eq!(code.as_deref(), Some(codes::PERM_DENIED_PBS));
+            }
+            other => panic!("expected a downgrade, got {other:?}"),
+        }
+
+        let session = {
+            let registry = state.sessions.lock().await;
+            registry.get(&session_id).cloned().expect("session")
+        };
+        let mut conn = crate::ws::Connection::new("127.0.0.1");
+        conn.session = Some(session);
+        let denied = submit_property(&state, &mut conn, "op-after-deny", "1.0MPa", now + 1).await;
+        let (code, _) = refusal_in(&denied).expect("the live write is refused");
+        assert_eq!(code, codes::PERM_DENIED_PBS);
+
+        let listed = pbs_acl_list(State(state.clone())).await;
+        assert_eq!(listed.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(listed.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert!(body["items"].as_array().unwrap().iter().any(|row| {
+            row["node_id"] == "n-cell-a1"
+                && row["subject"] == "u-proc"
+                && row["permission"] == "编辑"
+                && row["allowed"] == false
+        }));
+
+        let deleted = pbs_acl_delete(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(AclWriteBody {
+                user_id: Some("u-admin".into()),
+                node_id: Some("n-cell-a1".into()),
+                subject: Some("u-proc".into()),
+                permission: Some("编辑".into()),
+                allowed: None,
+                credential: None,
+            }),
+        )
+        .await;
+        assert_eq!(deleted.status(), StatusCode::OK);
+        match rx.try_recv().expect("write comes back") {
+            ocs_collab::ServerMessage::WriteRestored { .. } => {}
+            other => panic!("expected write restored, got {other:?}"),
+        }
+        let applied = submit_property(&state, &mut conn, "op-after-delete", "1.6MPa", now + 2).await;
+        assert!(applied_in(&applied), "deleting the row restores the write: {applied:?}");
+
+        let role = user_role_set(
+            State(state.clone()),
+            Path("u-proc".into()),
+            HeaderMap::new(),
+            Json(RoleWriteBody {
+                user_id: Some("u-admin".into()),
+                role: Some("校对人员".into()),
+                node_id: Some("n-plant".into()),
+                credential: None,
+            }),
+        )
+        .await;
+        assert_eq!(role.status(), StatusCode::OK);
+        match rx.try_recv().expect("role change downgrades") {
+            ocs_collab::ServerMessage::ReadonlyDowngrade { level, .. } => {
+                assert_eq!(level.as_deref(), Some("role"));
+            }
+            other => panic!("expected a role downgrade, got {other:?}"),
+        }
+        let users = user_list(State(state.clone())).await;
+        let bytes = axum::body::to_bytes(users.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert!(body["items"].as_array().unwrap().iter().any(|row| {
+            row["user_id"] == "u-proc" && row["role"] == "校对人员"
+        }));
+        let roles = role_list().await;
+        assert_eq!(roles.status(), StatusCode::OK);
+        let nodes = pbs_node_list(State(state.clone())).await;
+        assert_eq!(nodes.status(), StatusCode::OK);
+
+        let store = state.store.clone().expect("store");
+        let page = store
+            .audit_query(&AuditQuery {
+                user_id: Some("u-admin".into()),
+                ..AuditQuery::default()
+            })
+            .expect("audit");
+        let actions: Vec<_> = page.items.iter().map(|row| row.action.as_str()).collect();
+        assert!(actions.contains(&"acl_upsert"), "{actions:?}");
+        assert!(actions.contains(&"acl_delete"), "{actions:?}");
+        assert!(actions.contains(&"role_changed"), "{actions:?}");
     }
 
     #[tokio::test]

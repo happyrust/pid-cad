@@ -2076,6 +2076,20 @@ impl State {
                 }
             }
             CollabEvent::ServerError { code, message } => {
+                // `WriteRestored` / a writable `WriteStatus` arrive as this
+                // code (#71, #75). The session may write again without
+                // reconnecting.
+                if code == "WRITE_RESTORED" {
+                    self.readonly = false;
+                    self.readonly_holder = None;
+                    self.readonly_level = None;
+                    self.readonly_code = None;
+                    self.readonly_reason = None;
+                    self.readonly_effective_node = None;
+                    self.last_error = None;
+                    self.toasts
+                        .push(toasts::ToastKind::Info, format!("写权限已恢复：{message}"));
+                } else {
                 self.last_error = Some(format!("{code}: {message}"));
                 // A server that does not say which op it refuses (one from
                 // before `error.op_id`): with one op on the wire it can
@@ -2088,6 +2102,7 @@ impl State {
                         }
                     }
                     self.pump();
+                }
                 }
             }
         }
@@ -2743,6 +2758,26 @@ mod tests {
         });
         assert!(state.readonly);
         assert_eq!(state.readonly_holder.as_deref(), Some("s-9"));
+    }
+
+    #[test]
+    fn write_restored_clears_a_readonly_session() {
+        let mut state = State::new();
+        state.apply(CollabEvent::ReadonlyDowngrade {
+            reason: "节点授权拒绝".to_owned(),
+            holder: None,
+            level: Some("pbs".to_owned()),
+            code: Some("PERM_DENIED_PBS".to_owned()),
+        });
+        assert!(state.readonly);
+        state.apply(CollabEvent::ServerError {
+            code: "WRITE_RESTORED".to_owned(),
+            message: "授权行已删除".to_owned(),
+        });
+        assert!(!state.readonly);
+        assert!(state.readonly_level.is_none());
+        assert!(state.readonly_reason.is_none());
+        assert!(state.last_error.is_none());
     }
 
     /// VAL-CLI-012: the server names the holding *session*; whoever reads the
