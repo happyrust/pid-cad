@@ -104,6 +104,10 @@ pub struct AppState {
     pub max_editing_sessions_per_drawing: usize,
     /// Active editing sessions allowed on this server. Same default.
     pub max_editing_sessions: usize,
+    /// Write a snapshot of what the server knows of a drawing every this
+    /// many applied ops, then drop the ops the snapshot already contains
+    /// (#103). 20 is an unmeasured default; #38 did not report a size.
+    pub snapshot_every: i64,
     pub version: &'static str,
 }
 
@@ -143,6 +147,7 @@ impl AppState {
             backup_dir: None,
             max_editing_sessions_per_drawing: DEFAULT_MAX_EDITING_SESSIONS,
             max_editing_sessions: DEFAULT_MAX_EDITING_SESSIONS,
+            snapshot_every: 20,
             version: env!("CARGO_PKG_VERSION"),
         }
     }

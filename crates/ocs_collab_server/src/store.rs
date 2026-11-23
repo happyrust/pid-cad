@@ -734,6 +734,47 @@ impl Store {
         Ok(rows)
     }
 
+    /// Writes what the server knows of `drawing_id` at `revision` (#103).
+    pub fn save_snapshot(
+        &self,
+        drawing_id: &str,
+        revision: i64,
+        model_json: &str,
+    ) -> Result<(), String> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO drawing_snapshots (drawing_id, revision, model_json) VALUES (?1, ?2, ?3)
+             ON CONFLICT(drawing_id, revision) DO UPDATE SET model_json = excluded.model_json",
+            params![drawing_id, revision, model_json],
+        )
+        .map_err(|err| format!("save snapshot {drawing_id}@{revision}: {err}"))?;
+        Ok(())
+    }
+
+    /// The newest snapshot of `drawing_id`: `(revision, model_json)`.
+    pub fn latest_snapshot(&self, drawing_id: &str) -> Result<Option<(i64, String)>, String> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT revision, model_json FROM drawing_snapshots
+             WHERE drawing_id = ?1 ORDER BY revision DESC LIMIT 1",
+            params![drawing_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|err| format!("read snapshot of {drawing_id}: {err}"))
+    }
+
+    /// Drops ops at or before `revision`. The snapshot at that revision
+    /// already contains them (#103).
+    pub fn truncate_ops_through(&self, drawing_id: &str, revision: i64) -> Result<usize, String> {
+        let conn = self.lock()?;
+        conn.execute(
+            "DELETE FROM ops WHERE drawing_id = ?1 AND revision <= ?2",
+            params![drawing_id, revision],
+        )
+        .map_err(|err| format!("truncate ops of {drawing_id}: {err}"))
+    }
+
     /// The row of the op log that op `op_id` went in as on `drawing_id`:
     /// the op took effect, and this is what came of it (`OFF-4`). `None`
     /// for one the log does not have — it never came, or was refused.
@@ -1755,6 +1796,16 @@ CREATE TABLE IF NOT EXISTS ops (
   base_revision INTEGER NOT NULL,
   at            INTEGER NOT NULL,
   changes       TEXT NOT NULL,
+  PRIMARY KEY (drawing_id, revision)
+);
+
+-- What the server knows of a drawing at one revision (#103). Startup
+-- rebuilds from the newest snapshot and the ops after it; the ops at or
+-- before that revision are removed.
+CREATE TABLE IF NOT EXISTS drawing_snapshots (
+  drawing_id TEXT NOT NULL,
+  revision   INTEGER NOT NULL,
+  model_json TEXT NOT NULL,
   PRIMARY KEY (drawing_id, revision)
 );
 

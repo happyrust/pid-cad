@@ -17,6 +17,7 @@
 //!
 //! Everything here is a pure function over that state: no clock, no I/O.
 
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
@@ -204,7 +205,7 @@ fn value_text(value: &Value) -> String {
 }
 
 /// The value a field holds and the op that put it there.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldState {
     pub value: String,
     /// Revision at which it became current.
@@ -215,7 +216,7 @@ pub struct FieldState {
 
 /// Every field the server has seen written on one object, plus its manual
 /// property override markers and `tag_source` (#35).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectState {
     pub fields: BTreeMap<String, FieldState>,
     pub overrides: BTreeSet<String>,
@@ -263,7 +264,7 @@ pub enum Verdict {
 
 /// An object that was deleted, kept so that a change still on its way to it
 /// can be told what it missed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Deleted {
     pub revision: i64,
     pub session_id: String,
@@ -273,7 +274,7 @@ pub struct Deleted {
 }
 
 /// One pipe run as the server knows it.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Run {
     pub line_tag: String,
     pub points: Value,
@@ -298,7 +299,7 @@ pub struct Run {
 /// let a change made against an older baseline still find its object, what
 /// was deleted, how the pipe lines are connected up, and the tags in use in
 /// a client's own copy of it that no op told of.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DrawingModel {
     revision: i64,
     objects: BTreeMap<String, ObjectState>,

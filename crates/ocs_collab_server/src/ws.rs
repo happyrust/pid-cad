@@ -989,10 +989,19 @@ async fn hello(
             missed_ops(state, drawing_id, since, base_revision)
         };
         if claims_align && refused.is_none() && since.is_some() && missed.is_none() {
-            refused = Some((
-                codes::REPLAY_GAP,
-                "操作日志不完整，无法补发该修订之后的全部提交".to_owned(),
-            ));
+            let cut = state.store.as_ref().and_then(|store| {
+                store
+                    .latest_snapshot(drawing_id)
+                    .ok()
+                    .flatten()
+                    .map(|(revision, _)| revision)
+            });
+            let message = if since.is_some_and(|since| cut.is_some_and(|cut| since < cut)) {
+                "不补发，需要取得最新图纸".to_owned()
+            } else {
+                "操作日志不完整，无法补发该修订之后的全部提交".to_owned()
+            };
+            refused = Some((codes::REPLAY_GAP, message));
         }
         // A copy that is sent a replay is at `since` until it has applied
         // it: what the replay deletes or retags, it lists and will not keep.

@@ -78,8 +78,9 @@ pub struct Outcome {
 }
 
 impl DrawingOps {
-    /// The drawing as the op log has it: every applied change replayed in
-    /// order, then the revision the `drawings` row says.
+    /// The drawing as the server last knew it: the newest snapshot, then
+    /// every applied change after that snapshot, then the revision the
+    /// `drawings` row says (#103).
     ///
     /// The tags clients listed as in their own copies ([`report_tags`]) go
     /// in between the ops, each where it was heard: behind the op that took
@@ -87,13 +88,25 @@ impl DrawingOps {
     /// which may be the one that takes it away again.
     fn load(state: &AppState, drawing_id: &str) -> Self {
         let mut model = DrawingModel::default();
+        let mut after = 0i64;
         if let Some(store) = &state.store {
+            if let Ok(Some((revision, json))) = store.latest_snapshot(drawing_id) {
+                match serde_json::from_str::<DrawingModel>(&json) {
+                    Ok(saved) => {
+                        after = revision;
+                        model = saved;
+                    }
+                    Err(err) => {
+                        eprintln!("[ocs_collab_server] 读取 {drawing_id} 的快照失败：{err}");
+                    }
+                }
+            }
             let reported = store.reported_tags(drawing_id).unwrap_or_else(|err| {
                 eprintln!("[ocs_collab_server] 读取 {drawing_id} 上报的位号失败：{err}");
                 Vec::new()
             });
             let mut reported = reported.into_iter().peekable();
-            match store.load_ops(drawing_id, 0) {
+            match store.load_ops(drawing_id, after) {
                 Ok(ops) => {
                     for op in ops {
                         while let Some((tag, at)) = reported.next_if(|(_, at)| *at < op.revision) {
@@ -1399,6 +1412,7 @@ fn judge_and_commit(
                     &session.user_id,
                 );
             }
+            snapshot_if_due(state, &session.drawing_id, &drawing.model);
             log_applied(incoming, &applied[0].0.raw, revision);
             reactions.push(Reaction::Published {
                 drawing_id: session.drawing_id.clone(),
@@ -1419,6 +1433,36 @@ fn judge_and_commit(
                 revision: None,
             }
         }
+    }
+}
+
+/// Every `snapshot_every` applied ops, keep what the server knows of the
+/// drawing and drop the ops that snapshot already contains (#103).
+fn snapshot_if_due(state: &AppState, drawing_id: &str, model: &DrawingModel) {
+    let every = state.snapshot_every;
+    if every <= 0 {
+        return;
+    }
+    let revision = model.revision();
+    if revision <= 0 || revision % every != 0 {
+        return;
+    }
+    let Some(store) = &state.store else {
+        return;
+    };
+    let json = match serde_json::to_string(model) {
+        Ok(json) => json,
+        Err(err) => {
+            eprintln!("[ocs_collab_server] 序列化 {drawing_id} 的快照失败：{err}");
+            return;
+        }
+    };
+    if let Err(err) = store.save_snapshot(drawing_id, revision, &json) {
+        eprintln!("[ocs_collab_server] 写入 {drawing_id} 的快照失败：{err}");
+        return;
+    }
+    if let Err(err) = store.truncate_ops_through(drawing_id, revision) {
+        eprintln!("[ocs_collab_server] 截断 {drawing_id} 的操作日志失败：{err}");
     }
 }
 
@@ -1852,6 +1896,100 @@ mod tests {
         let mut state = state();
         state.tie_window = Duration::from_millis(500);
         state
+    }
+
+    /// #103: every two applied ops the server keeps what it knows and drops
+    /// the ops that snapshot already contains. Startup rebuilds from the
+    /// snapshot plus the ops after it. A copy from before the cut is told
+    /// it will not be caught up. #38 has no before/after sizes; this test
+    /// records the bytes it measures.
+    #[tokio::test]
+    async fn a_snapshot_is_what_startup_replays_from_and_an_older_copy_is_not_caught_up() {
+        let mut state = state();
+        state.snapshot_every = 2;
+        let mut conn = join(&state, "u1").await;
+        let steps = [
+            ("op-1", "设计压力", "1.6MPa"),
+            ("op-2", "公称直径", "DN50"),
+            ("op-3", "绝热等级", "H"),
+        ];
+        for (index, (op_id, field, value)) in steps.iter().enumerate() {
+            let reactions = submit(&state, &mut conn, index as i64, op_id, set(field, value)).await;
+            assert!(applied(&reactions).is_some(), "{op_id} {reactions:?}");
+        }
+
+        let store = state.store.as_ref().expect("store");
+        let (cut, snapshot) = store
+            .latest_snapshot(DRAWING)
+            .expect("read snapshot")
+            .expect("a snapshot");
+        assert_eq!(cut, 2, "the second applied op is the cut");
+        let ops = store.load_ops(DRAWING, 0).expect("ops");
+        assert_eq!(
+            ops.iter().map(|op| op.revision).collect::<Vec<_>>(),
+            vec![3],
+            "ops at or before the snapshot are gone"
+        );
+        let snapshot_bytes = snapshot.len();
+        let remaining_op_bytes: usize = ops
+            .iter()
+            .map(|op| {
+                serde_json::to_string(&op.changes)
+                    .map(|text| text.len())
+                    .unwrap_or(0)
+            })
+            .sum();
+        // #38 did not measure startup time or database size. These are the
+        // sizes this test itself measured: the snapshot body, and the one
+        // op still in the log after the cut.
+        assert_eq!(snapshot_bytes, 406);
+        assert_eq!((ops.len(), remaining_op_bytes), (1, 82));
+
+        state.drawings.lock().expect("drawings").clear();
+        let loaded = DrawingOps::load(&state, DRAWING);
+        assert_eq!(loaded.model.revision(), 3);
+        assert_eq!(
+            loaded
+                .model
+                .field("P-1001", "设计压力")
+                .map(|field| field.value.as_str()),
+            Some("1.6MPa"),
+            "the field written before the cut comes from the snapshot"
+        );
+        assert_eq!(
+            loaded
+                .model
+                .field("P-1001", "公称直径")
+                .map(|field| field.value.as_str()),
+            Some("DN50")
+        );
+        assert_eq!(
+            loaded
+                .model
+                .field("P-1001", "绝热等级")
+                .map(|field| field.value.as_str()),
+            Some("H"),
+            "the op after the cut is replayed onto the snapshot"
+        );
+
+        let old = come_back(&state, "u-old", Some(0)).await;
+        let refusal = old.iter().find_map(|reaction| match reaction {
+            Reaction::Send(ServerMessage::Welcome { align_refused, .. }) => align_refused.clone(),
+            _ => None,
+        });
+        let refusal = refusal.expect("an older copy is refused");
+        assert_eq!(refusal.code, codes::REPLAY_GAP);
+        assert_eq!(refusal.message, "不补发，需要取得最新图纸");
+
+        let (base, from, replayed) = welcomed(&come_back(&state, "u-cut", Some(2)).await);
+        assert_eq!((base, from), (3, Some(2)));
+        assert_eq!(
+            replayed
+                .iter()
+                .map(|(op_id, ..)| op_id.as_str())
+                .collect::<Vec<_>>(),
+            ["op-3"]
+        );
     }
 
     async fn join(state: &AppState, user_id: &str) -> Connection {
