@@ -3081,7 +3081,10 @@ mod tests {
         assert!(
             reactions.iter().any(|reaction| matches!(
                 reaction,
-                Reaction::Send(ServerMessage::ClaimGranted { .. })
+                Reaction::Publish {
+                    message: ServerMessage::ClaimGranted { .. },
+                    ..
+                }
             )),
             "{reactions:?}"
         );

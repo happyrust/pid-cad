@@ -145,7 +145,10 @@
       "frame": {
         "type": "claim_granted",
         "tag": "P-1001",
-        "session_id": "s-00000000-0000-4000-8000-000000000001"
+        "session_id": "s-00000000-0000-4000-8000-000000000001",
+        "user_id": "u1",
+        "display_name": "张工",
+        "expires_at": 1700000300
       }
     },
     {

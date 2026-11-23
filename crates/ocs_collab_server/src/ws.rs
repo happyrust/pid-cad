@@ -1016,6 +1016,18 @@ async fn claim(state: &AppState, session: &Session, tag: String, now: i64) -> Ve
     if let Some(code) = session_unavailable(state, &session.session_id).await {
         return vec![Reaction::Send(error_message(&code, "会话已失效，无法占用位号"))];
     }
+    // #29: A session that may not write (denied at role, PBS, or state tier)
+    // cannot claim a tag; otherwise a read-only viewer could block designers.
+    if let Some(denied) = crate::access::write_access(state, session).await {
+        println!(
+            "[ocs_collab_server] 入站 claim session={} user={} tag={tag} -> 拒绝 {} level={} at={now}",
+            session.session_id,
+            session.user_id,
+            denied.code(),
+            denied.level.as_str()
+        );
+        return vec![Reaction::Send(denied.error(&format!("占用位号 {tag} ")))];
+    }
     let ttl = state.session_config.claim_ttl;
     let (outcome, expired) = state.occupancy.lock().await.claim(
         &tag,
@@ -1043,13 +1055,21 @@ async fn claim(state: &AppState, session: &Session, tag: String, now: i64) -> Ve
                 }
             }
             println!(
-                "[ocs_collab_server] 入站 claim session={} user={} tag={tag} -> claim_granted expires_at={} at={now}",
+                "[ocs_collab_server] 入站 claim session={} user={} tag={tag} -> 广播 claim_granted expires_at={} at={now}",
                 session.session_id, session.user_id, occupancy.expires_at
             );
-            reactions.push(Reaction::Send(ServerMessage::ClaimGranted {
-                tag,
-                session_id: session.session_id.clone(),
-            }));
+            let display_name = (!session.display_name.is_empty()).then(|| session.display_name.clone());
+            // #25: Broadcast ClaimGranted to every editing session on the drawing with expiry.
+            reactions.push(Reaction::Publish {
+                drawing_id: session.drawing_id.clone(),
+                message: ServerMessage::ClaimGranted {
+                    tag,
+                    session_id: session.session_id.clone(),
+                    user_id: Some(session.user_id.clone()),
+                    display_name,
+                    expires_at: Some(occupancy.expires_at),
+                },
+            });
             reactions
         }
         ClaimOutcome::Denied { holder, expires_at } => {
@@ -2227,10 +2247,13 @@ mod tests {
         )
         .await;
         assert_eq!(
-            sends(&reactions),
+            publishes(&reactions),
             vec![ServerMessage::ClaimGranted {
                 tag: "V-1001".into(),
                 session_id: session_id.clone(),
+                user_id: Some("u1".into()),
+                display_name: Some("u1".into()),
+                expires_at: Some(T0 + 300),
             }]
         );
         let rows = store_of(&state)

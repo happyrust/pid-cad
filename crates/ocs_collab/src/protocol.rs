@@ -145,8 +145,17 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rejected: Option<bool>,
     },
-    /// Tag ownership granted.
-    ClaimGranted { tag: String, session_id: String },
+    /// Tag ownership granted. Broadcast to every session on the drawing (#25).
+    ClaimGranted {
+        tag: String,
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_at: Option<i64>,
+    },
     /// Tag ownership refused; `holder` still owns it until `expires_at`.
     ClaimDenied {
         tag: String,

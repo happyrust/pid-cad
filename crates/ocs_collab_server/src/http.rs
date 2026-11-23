@@ -1726,7 +1726,10 @@ mod tests {
         assert!(
             granted.iter().any(|reaction| matches!(
                 reaction,
-                crate::ws::Reaction::Send(ocs_collab::ServerMessage::ClaimGranted { .. })
+                crate::ws::Reaction::Publish {
+                    message: ocs_collab::ServerMessage::ClaimGranted { .. },
+                    ..
+                }
             )),
             "{granted:?}"
         );
@@ -2816,5 +2819,134 @@ mod tests {
         assert_eq!(row["ip"], "10.0.0.7", "{row}");
         assert_eq!(row["company"], COMPANY, "{row}");
         assert_eq!(row["workspace"], "默认工作区", "{row}");
+    }
+
+    /// #25: ClaimGranted is broadcast to all editing sessions on the drawing with `expires_at`.
+    #[tokio::test]
+    async fn claim_granted_broadcasts_to_all_sessions_with_expiry() {
+        let state = seeded_state();
+        let now = ocs_collab::now_unix();
+        let (mut editor_a, _) = live_conn(&state, "u-proc", now).await;
+        let (mut editor_b, _) = live_conn(&state, "u-admin", now + 1).await;
+        let mut sub_b = editor_b.joined.take().expect("b subscribed");
+        let a_sid = editor_a.session.as_ref().expect("a session").session_id.clone();
+
+        let reactions = claim_frame(&state, &mut editor_a, "P-1001", true).await;
+        // Apply publish reactions to the bus as the WS loop does.
+        for reaction in &reactions {
+            if let crate::ws::Reaction::Publish { drawing_id, message } = reaction {
+                state.bus.publish(drawing_id, message);
+            }
+        }
+        // Peer B receives ClaimGranted with holder and expires_at.
+        let mut heard_grant = None;
+        while let Some(msg) = sub_b.try_recv() {
+            if let ocs_collab::ServerMessage::ClaimGranted { .. } = msg {
+                heard_grant = Some(msg);
+            }
+        }
+        match heard_grant.expect("peer B must receive ClaimGranted broadcast") {
+            ocs_collab::ServerMessage::ClaimGranted {
+                tag,
+                session_id,
+                user_id,
+                expires_at,
+                ..
+            } => {
+                assert_eq!(tag, "P-1001");
+                assert_eq!(session_id, a_sid);
+                assert_eq!(user_id.as_deref(), Some("u-proc"));
+                assert!(expires_at.expect("expires_at must be present") > now);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// #29: Read-only sessions (denied at role, PBS, or state tier) cannot claim a tag;
+    /// an editable designer can then claim the same tag.
+    #[tokio::test]
+    async fn readonly_sessions_cannot_claim_tag_at_any_tier() {
+        let state = audited_state();
+        // Add a designer with no PBS ACL (`u-nobody`) and a read-only drawing (`d-b1-ro`).
+        let extra: crate::store::SeedDoc = serde_json::from_value(json!({
+            "users": [
+                {"user_id": "u-nobody", "display_name": "无节点权限甲", "role": "工艺设计人员"}
+            ],
+            "drawings": [
+                {"drawing_id": "d-b1-ro", "file_name": "d-b1-ro.dwg", "pbs_node_id": "n-cell-a1", "state": "只读"}
+            ]
+        }))
+        .expect("extra seed");
+        state.store.as_ref().expect("store").seed(&extra).expect("seed extra");
+        let now = ocs_collab::now_unix();
+
+        // 1. Role tier denial: proofreader (`u-check`) joins and tries to claim P-1001.
+        let (mut proofreader, _) = live_conn(&state, "u-check", now).await;
+        let reactions = claim_frame(&state, &mut proofreader, "P-1001", true).await;
+        let err = reactions
+            .iter()
+            .find_map(|r| match r {
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error { code, level, .. }) => {
+                    Some((code.clone(), level.clone()))
+                }
+                _ => None,
+            })
+            .expect("proofreader claim must be denied");
+        assert_eq!(err.0, codes::PERM_DENIED_ROLE);
+        assert_eq!(err.1.as_deref(), Some("role"));
+        assert!(
+            state.occupancy.lock().await.is_empty(),
+            "occupancy must remain empty after denied claim"
+        );
+
+        // 2. PBS tier denial: `u-nobody` (ProcessDesigner with no PBS ACL) tries to claim P-1001.
+        let (mut no_pbs, _) = live_conn(&state, "u-nobody", now + 1).await;
+        let reactions = claim_frame(&state, &mut no_pbs, "P-1001", true).await;
+        let err = reactions
+            .iter()
+            .find_map(|r| match r {
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error { code, level, .. }) => {
+                    Some((code.clone(), level.clone()))
+                }
+                _ => None,
+            })
+            .expect("no-PBS user claim must be denied");
+        assert_eq!(err.0, codes::PERM_DENIED_PBS);
+        assert_eq!(err.1.as_deref(), Some("pbs"));
+        assert!(state.occupancy.lock().await.is_empty());
+
+        // 3. State tier denial: designer joins read-only drawing `d-b1-ro` and tries to claim.
+        let mut ro_conn = crate::ws::Connection::new("127.0.0.1");
+        let ro_hello = off_the_wire(json!({
+            "type": "hello", "user_id": "u-proc", "drawing_id": "d-b1-ro", "mode": "协同编辑"
+        }));
+        crate::ws::handle_message(&state, &mut ro_conn, ro_hello, now + 2).await;
+        let reactions = claim_frame(&state, &mut ro_conn, "P-1001", true).await;
+        let err = reactions
+            .iter()
+            .find_map(|r| match r {
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error { code, level, .. }) => {
+                    Some((code.clone(), level.clone()))
+                }
+                _ => None,
+            })
+            .expect("readonly drawing claim must be denied");
+        assert_eq!(err.0, codes::PERM_DENIED_STATE);
+        assert_eq!(err.1.as_deref(), Some("state"));
+        assert!(state.occupancy.lock().await.is_empty());
+
+        // 4. Designer with write access claims P-1001 cleanly.
+        let (mut designer, _) = live_conn(&state, "u-proc", now + 3).await;
+        let granted = claim_frame(&state, &mut designer, "P-1001", true).await;
+        assert!(
+            granted.iter().any(|r| matches!(
+                r,
+                crate::ws::Reaction::Publish {
+                    message: ocs_collab::ServerMessage::ClaimGranted { tag, .. },
+                    ..
+                } if tag == "P-1001"
+            )),
+            "designer must succeed claiming P-1001: {granted:?}"
+        );
     }
 }
