@@ -15,6 +15,7 @@ pub mod export;
 pub mod external_props;
 pub mod find;
 pub mod hazop;
+pub mod insulation;
 pub mod io_list;
 pub mod isolate;
 pub mod line_list;
@@ -56,6 +57,14 @@ pub use equipment::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use equipment::{extract_equipment_from_path, write_pid_equipment_file};
+pub use insulation::{
+    analyze_pid_insulation, format_pid_insulation_delimited, insulated_line_matches_query,
+    parse_insulation_spec, InsulationAuditStatus, InsulationCategory, ParsedInsulationSpec,
+    PidInsulatedLineRow, PidInsulationReport, PidInsulationRollupRow, PidInsulationSummary,
+    INSULATION_CSV_HEADERS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use insulation::{extract_insulation_from_path, write_pid_insulation_file};
 pub use io_list::{
     analyze_pid_io_list, format_pid_io_list_delimited, io_item_matches_query, ControlSystemKind,
     IoChannelKind, MountStatus, PidIoItemRow, PidIoListReport, PidIoSummary, IO_LIST_CSV_HEADERS,

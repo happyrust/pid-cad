@@ -2590,3 +2590,41 @@
 | `scripts\fmt-newhunks.ps1` | — | `tie_in.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 65. L3-3 / L3-6 / L6-2（#176）：应用内 P&ID 绝热与伴热管线分级统计清册（Insulation & Heat-Tracing Schedule `SH/T 3022 / GB/T 8175`）、保温/保冷/电伴热/防烫厚度拆解与材料汇总及巡检命令 `PIDINSUL` 与 CLI `--export-insulation` 闭环（2026-11-22）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-22` |
+| 基线提交 | `d1df0e35c`（`main`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| 语料清单摘要 | `manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038` |
+| 新增 / 修改文件 | `src/io/pid_convert/{insulation,mod}.rs`、`src/app/commands/pidprops.rs`、`examples/pid_convert.rs` |
+| 外部证据子项 | `2026-11-22-issue176/`（`red.txt`、`green_pidprops.txt`、`real_multi_tab_insul.txt`、`cli_export_insul.txt`、`real_out/real176_summary.json`、`fmt_newhunks.txt`、`rust_gates_status.json`） |
+
+### 65.1 先红后绿与设计摘要
+
+- **先红阶段**（`red.txt`，`RED_176_RC=101`）：在 `src/app/commands/pidprops.rs` 新增 `pidinsul_parses_hot_cold_eht_pp_thickness_rolls_up_mto_flags_missing_and_mismatched_insulation_and_steps_camera`（构造跨双标签页的：① 电伴热管线 `100-WO-17601-CS150-EH50` 含阀门保温盒 `BV1761`；② 保冷管线 `150-PG-17602-CS150-C40`；③ 漏标厚度保温管线 `80-LS-17603-CS300-IH`；④ 跨互逆 `OPC` 一端标 `-H40` 一端漏标的 `100-PG-17604-CS150`；⑤ 防烫管线 `50-HS-17605-CS300-PP25`；⑥ 无绝热循环水管线 `80-CW-17699-CS150`），运行按预期在 `insul.json` 断言处变红。
+- **转绿阶段**（`green_pidprops.txt`，`42 passed; 0 failed`）：
+  1. 新增 `src/io/pid_convert/insulation.rs`（`analyze_pid_insulation`、`parse_insulation_spec`、`extract_insulation_from_path`、`write_pid_insulation_file`）：按核心 4 段管线标识 `(管径, 介质, 序号, 等级)` 跨图归并同序号管路，自动拆解六大绝热/伴热类别（`hot_insulation / cold_insulation / electric_heat_tracing / steam_or_fluid_tracing / personnel_protection / acoustic_or_jacket`）与数值厚度（`thickness_mm`），生成带阀门保温盒统计的 MTO 分组汇总表，校核 `ok_with_thickness / missing_thickness / inconsistent_across_run`，导出 `.json` 与 13 列 UTF-8 BOM `.csv` / `.tsv` 清册；
+  2. 在 `src/app/commands/pidprops.rs` 注册实现 `PIDINSUL [SUMMARY | ALL | TRACED | HOT | COLD | PERSONAL | ANOMALIES | CODE "<代号>" | NEXT] [ALLTABS] [EXPORT "<.json|.csv|.tsv>"]`，并在 `examples/pid_convert.rs` 新增 `--export-insulation <PATH>`（真实 SPPID 图单图 CLI 独立提取 `15` 条绝热/伴热管线，退出码 `0`）。
+
+### 65.2 真实双标准四图成对跨标签页绝热与伴热清册实测
+
+| 图纸组 | 样本形态 | 源图 SHA-256 前缀对 | 总扫描管线 | 绝热/伴热管线 | 电伴热 / 保温 / 保冷 | 阀门保温盒累计 | MTO 采购分组 | `.csv` 导出与 `NEXT` 巡检 |
+|---|---|---|---:|---:|---|---:|---:|---|
+| `SP01 + SP02` | 未升格 SPPID 拆分生产图对 | `2164f88bbb57` + `fc2c812dc182` | `37` | **`29`** | `2 / 25 / 2` | **`188`** | **`10`** | **通过** |
+| `LG01 + LG02` | 常温消防冷却水存量图对 | `a0f05f81a655` + `28ed389e23cb` | `11` | **`0`**（零误报） | `0 / 0 / 0` | `0` | `0` | **通过** |
+
+### 65.3 固定门禁读数
+
+| 门禁项 | 改前读数（§64.3） | 改后实测 | 结论 |
+|---|---|---|---|
+| `cargo test --offline --locked --lib` | `7,276` 条（`7,176` 过 / `99` 忽略 / `1` 既有 `.pen`） | **`7,278` 条**（**`7,177` 过** / **`100` 忽略** / **`1` 同一既有 `.pen` 字重失败**） | `+2` 条 Rust 测试（`+1` 常规 + `+1` 四图跨标签页绝热与伴热清册对账），**0 新增失败** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
+| `scripts\fmt-newhunks.ps1` | — | `insulation.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |

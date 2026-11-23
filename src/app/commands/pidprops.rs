@@ -53,7 +53,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDRELIEF",
         "PIDCAUSE",
         "PIDIO",
-        "PIDTIEIN"
+        "PIDTIEIN",
+        "PIDINSUL"
     ]
 });
 
@@ -351,6 +352,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pidtiein_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidinsul_cmd(cmd, i) {
             return Some(t);
         }
         let mut words = cmd.split_whitespace();
@@ -6272,6 +6276,253 @@ impl OpenCADStudio {
             other => {
                 self.command_line.push_error(&format!(
                     "PIDTIEIN: 未知子命令 {other}（支持 SUMMARY / ALL / READY / SINGLE / HAZARDS / SERVICE / TAG / NEXT / EXPORT）。"
+                ));
+                return Some(Task::none());
+            }
+        }
+
+        Some(self.finish_dispatch(cmd))
+    }
+
+    fn dispatch_pidinsul_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        use crate::io::pid_convert::{
+            analyze_pid_insulation, insulated_line_matches_query, write_pid_insulation_file,
+            InsulationCategory, OpcSheetInput,
+        };
+
+        let tokens = tokenize_command_words(cmd);
+        let first = tokens.first()?;
+        if !first.eq_ignore_ascii_case("PIDINSUL") {
+            return None;
+        }
+
+        let mut action: Option<String> = None;
+        let mut code_query: Option<String> = None;
+        let mut all_tabs = false;
+        let mut export_path: Option<std::path::PathBuf> = None;
+
+        let mut idx = 1usize;
+        while idx < tokens.len() {
+            let tok = &tokens[idx];
+            let up = tok.to_ascii_uppercase();
+            match up.as_str() {
+                "ALLTABS" => {
+                    all_tabs = true;
+                    idx += 1;
+                }
+                "SUMMARY" | "ALL" | "TRACED" | "HOT" | "COLD" | "PERSONAL" | "ANOMALIES"
+                | "NEXT" => {
+                    action = Some(up);
+                    idx += 1;
+                }
+                "CODE" => {
+                    let Some(q) = tokens.get(idx + 1) else {
+                        self.command_line.push_error(
+                            "PIDINSUL CODE: 缺少绝热/伴热代号或线号关键字（如 EH50、H40、C40）。",
+                        );
+                        return Some(Task::none());
+                    };
+                    action = Some("CODE".to_string());
+                    code_query = Some(q.clone());
+                    idx += 2;
+                }
+                "EXPORT" => {
+                    let Some(next_tok) = tokens.get(idx + 1) else {
+                        self.command_line
+                            .push_error("PIDINSUL EXPORT: 缺少输出文件路径（.json/.csv/.tsv）。");
+                        return Some(Task::none());
+                    };
+                    export_path = Some(std::path::PathBuf::from(next_tok));
+                    idx += 2;
+                }
+                _ => {
+                    if action.is_none() {
+                        action = Some("CODE".to_string());
+                        code_query = Some(tok.clone());
+                    }
+                    idx += 1;
+                }
+            }
+        }
+
+        let target_tabs: Vec<(usize, String)> = if all_tabs {
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_start)
+                .map(|(ti, t)| {
+                    let nm = t
+                        .current_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| t.tab_title.clone());
+                    (ti, nm)
+                })
+                .collect()
+        } else {
+            let nm = self.tabs[i]
+                .current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| self.tabs[i].tab_title.clone());
+            vec![(i, nm)]
+        };
+
+        let sheet_inputs: Vec<OpcSheetInput<'_>> = target_tabs
+            .iter()
+            .map(|(ti, nm)| OpcSheetInput {
+                tab_index: *ti,
+                fallback_name: nm.as_str(),
+                document: &self.tabs[*ti].scene.document,
+            })
+            .collect();
+
+        let rep = analyze_pid_insulation(&sheet_inputs);
+
+        if let Some(ref out_p) = export_path {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(err) = write_pid_insulation_file(&rep, out_p) {
+                self.command_line
+                    .push_error(&format!("PIDINSUL EXPORT: {err}"));
+                return Some(Task::none());
+            }
+        }
+
+        let eff_action = action.as_deref().unwrap_or("SUMMARY");
+        let filtered: Vec<_> = rep
+            .insulated_lines
+            .iter()
+            .filter(|r| match eff_action {
+                "TRACED" => r.is_heat_traced,
+                "HOT" => r.category == InsulationCategory::HotInsulation,
+                "COLD" => r.category == InsulationCategory::ColdInsulation,
+                "PERSONAL" => r.category == InsulationCategory::PersonnelProtection,
+                "ANOMALIES" => r.status.is_anomaly(),
+                "CODE" => code_query
+                    .as_deref()
+                    .is_some_and(|q| insulated_line_matches_query(r, q)),
+                _ => true,
+            })
+            .collect();
+
+        match eff_action {
+            "SUMMARY" => {
+                self.command_line.push_output(&format!(
+                    "PIDINSUL: 扫描图纸={} | 总管线={}，绝热/伴热管线={}（伴热={}，保温={}，保冷={}，防烫={}）| 阀门保温盒={}，MTO分组={} | 缺厚度={}，跨段不一致={}。",
+                    rep.summary.sheets_scanned,
+                    rep.summary.total_pipelines_scanned,
+                    rep.summary.insulated_pipelines_count,
+                    rep.summary.heat_traced_pipelines_count,
+                    rep.summary.hot_insulation_count,
+                    rep.summary.cold_insulation_count,
+                    rep.summary.personnel_protection_count,
+                    rep.summary.total_insulated_valve_boxes,
+                    rep.summary.mto_groups_count,
+                    rep.summary.missing_thickness_count,
+                    rep.summary.inconsistent_run_count,
+                ));
+            }
+            "ALL" | "TRACED" | "HOT" | "COLD" | "PERSONAL" | "ANOMALIES" | "CODE" => {
+                let mut by_tab: std::collections::BTreeMap<usize, Vec<document::Handle>> =
+                    std::collections::BTreeMap::new();
+                for r in &filtered {
+                    for (&ti, hs) in &r.handles_by_tab {
+                        let dst = by_tab.entry(ti).or_default();
+                        for &h in hs {
+                            if !dst.contains(&h) {
+                                dst.push(h);
+                            }
+                        }
+                    }
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                let mut sel_cnt = 0usize;
+                for (&ti, hs) in &by_tab {
+                    if ti < self.tabs.len() && !hs.is_empty() {
+                        self.tabs[ti].scene.select_entities(hs);
+                        sel_cnt += hs.len();
+                    }
+                }
+                if eff_action == "CODE"
+                    && filtered.len() == 1
+                    && filtered[0].primary_tab < self.tabs.len()
+                    && filtered[0].primary_tab != self.active_tab
+                {
+                    let dt = filtered[0].primary_tab;
+                    let _ = self.update(Message::TabSwitch(dt));
+                    self.active_tab = dt;
+                }
+                if let Some(cur_hs) = by_tab.get(&self.active_tab).filter(|h| !h.is_empty()) {
+                    let _ = self.tabs[self.active_tab].scene.zoom_to_entities(cur_hs);
+                }
+                self.refresh_properties();
+                self.command_line.push_output(&format!(
+                    "PIDINSUL {eff_action}: 匹配 {} 条绝热/伴热管线，跨打开图纸高亮 {sel_cnt} 个图元。",
+                    filtered.len()
+                ));
+            }
+            "NEXT" => {
+                if filtered.is_empty() {
+                    self.command_line
+                        .push_output("PIDINSUL NEXT: 未找到可巡检的绝热/伴热管线。");
+                    return Some(self.finish_dispatch(cmd));
+                }
+                let cur_tab = self.active_tab;
+                let sel_set: std::collections::BTreeSet<document::Handle> = self.tabs[cur_tab]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                let cur_pos = filtered
+                    .iter()
+                    .position(|r| r.primary_tab == cur_tab && sel_set.contains(&r.primary_handle));
+                let next_idx = cur_pos.map(|p| (p + 1) % filtered.len()).unwrap_or(0);
+                let chosen = filtered[next_idx];
+                let dest_tab = chosen.primary_tab;
+
+                if dest_tab < self.tabs.len() && dest_tab != self.active_tab {
+                    let _ = self.update(Message::TabSwitch(dest_tab));
+                    self.active_tab = dest_tab;
+                }
+                for &(ti, _) in &target_tabs {
+                    if ti < self.tabs.len() {
+                        self.tabs[ti].scene.deselect_all();
+                    }
+                }
+                if dest_tab < self.tabs.len() {
+                    if let Some(hs) = chosen.handles_by_tab.get(&dest_tab) {
+                        self.tabs[dest_tab].scene.select_entities(hs);
+                        let zoomed = self.tabs[dest_tab].scene.zoom_to_entities(hs);
+                        if !zoomed {
+                            let mut cam = self.tabs[dest_tab].scene.camera.borrow_mut();
+                            let z = cam.target.z;
+                            cam.target = glam::DVec3::new(chosen.x, chosen.y, z);
+                        }
+                    }
+                    self.refresh_properties();
+                }
+                self.command_line.push_output(&format!(
+                    "PIDINSUL NEXT [{}/{}]: {}（绝热={}，类别={}，状态={}）。",
+                    next_idx + 1,
+                    filtered.len(),
+                    chosen.line_number,
+                    chosen.raw_insulation,
+                    chosen.category.as_str(),
+                    chosen.status.as_str(),
+                ));
+            }
+            other => {
+                self.command_line.push_error(&format!(
+                    "PIDINSUL: 未知子命令 {other}（支持 SUMMARY / ALL / TRACED / HOT / COLD / PERSONAL / ANOMALIES / CODE / NEXT / EXPORT）。"
                 ));
                 return Some(Task::none());
             }
@@ -18370,6 +18621,349 @@ mod tests {
 
         std::fs::write(
             out_dir.join("real175_summary.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()
+            ),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pidinsul_parses_hot_cold_eht_pp_thickness_rolls_up_mto_flags_missing_and_mismatched_insulation_and_steps_camera(
+    ) {
+        use document::entities::{Insert, Line, Text};
+        use document::types::Vector3;
+
+        fn has_sel(app: &OpenCADStudio, tab: usize, h: document::Handle) -> bool {
+            app.tabs[tab]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .any(|(sh, _)| sh == h)
+        }
+
+        let tmp = std::env::temp_dir().join("ocs_pidinsul_test_176");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let mut app = app();
+
+        // Tab 1:
+        // 1) 100-WO-17601-CS150-EH50 + BV1761 (ElectricHeatTracing, 50mm, ok_with_thickness)
+        // 2) 150-PG-17602-CS150-C40 (ColdInsulation, 40mm, ok_with_thickness)
+        // 3) 80-LS-17603-CS300-IH (HotInsulation, None, missing_thickness)
+        // 4) 100-PG-17604-CS150-H40 -> paired OPC to Tab 2 where label drops -H40 (inconsistent_across_run)
+        let tab1 = app.active_tab;
+        app.tabs[tab1].tab_title = "DWG-176-01.dxf".to_string();
+        let (eh_ln_h, c_ln_h, ih_ln_h) = {
+            let doc = &mut app.tabs[tab1].scene.document;
+            define_sppid_block(doc, "BALL VALVE TYPE 2", 6.0, 4.0);
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-176-01", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            // 1) EH50 line with BV1761
+            let mut e1 = Line::from_points(
+                Vector3::new(80.0, 200.0, 0.0),
+                Vector3::new(147.0, 200.0, 0.0),
+            );
+            e1.common.layer = "1".to_string();
+            let eh_ln_h = doc.add_entity(document::EntityType::Line(e1)).unwrap();
+            let mut el1 =
+                Text::with_value("100-WO-17601-CS150-EH50", Vector3::new(92.0, 203.0, 0.0))
+                    .with_height(2.5);
+            el1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(el1)).unwrap();
+            let mut bv = Insert::new("BALL VALVE TYPE 2", Vector3::new(150.0, 200.0, 0.0));
+            bv.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(bv)).unwrap();
+            let mut bvt =
+                Text::with_value("BV1761", Vector3::new(146.0, 206.0, 0.0)).with_height(2.5);
+            bvt.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(bvt)).unwrap();
+            let mut e2 = Line::from_points(
+                Vector3::new(153.0, 200.0, 0.0),
+                Vector3::new(220.0, 200.0, 0.0),
+            );
+            e2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(e2)).unwrap();
+
+            // 2) C40 cold line
+            let mut c1 = Line::from_points(
+                Vector3::new(80.0, 280.0, 0.0),
+                Vector3::new(220.0, 280.0, 0.0),
+            );
+            c1.common.layer = "1".to_string();
+            let c_ln_h = doc.add_entity(document::EntityType::Line(c1)).unwrap();
+            let mut cl1 =
+                Text::with_value("150-PG-17602-CS150-C40", Vector3::new(110.0, 283.0, 0.0))
+                    .with_height(2.5);
+            cl1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(cl1)).unwrap();
+
+            // 3) IH line without thickness
+            let mut h1 = Line::from_points(
+                Vector3::new(80.0, 360.0, 0.0),
+                Vector3::new(220.0, 360.0, 0.0),
+            );
+            h1.common.layer = "1".to_string();
+            let ih_ln_h = doc.add_entity(document::EntityType::Line(h1)).unwrap();
+            let mut hl1 = Text::with_value("80-LS-17603-CS300-IH", Vector3::new(110.0, 363.0, 0.0))
+                .with_height(2.5);
+            hl1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(hl1)).unwrap();
+
+            // 4) H40 line -> OPC to Tab 2
+            let mut m1 = Line::from_points(
+                Vector3::new(80.0, 440.0, 0.0),
+                Vector3::new(254.0, 440.0, 0.0),
+            );
+            m1.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(m1)).unwrap();
+            let mut ml1 =
+                Text::with_value("100-PG-17604-CS150-H40", Vector3::new(120.0, 443.0, 0.0))
+                    .with_height(2.5);
+            ml1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(ml1)).unwrap();
+            let mut opc1 = Insert::new("_OFF-UNIT SQ", Vector3::new(260.0, 440.0, 0.0));
+            opc1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc1)).unwrap();
+            let mut oft1 =
+                Text::with_value("DWG-176-02", Vector3::new(250.0, 439.0, 0.0)).with_height(2.5);
+            oft1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(oft1)).unwrap();
+
+            (eh_ln_h, c_ln_h, ih_ln_h)
+        };
+
+        // Tab 2:
+        // - Return OPC labeled 100-PG-17604-CS150 (dropped -H40!)
+        // - 50-HS-17605-CS300-PP25 (PersonnelProtection, 25mm)
+        // - Uninsulated 80-CW-17699-CS150 (excluded)
+        let _ = app.update(Message::TabNew);
+        let tab2 = app.active_tab;
+        app.tabs[tab2].tab_title = "DWG-176-02.dxf".to_string();
+        let pp_ln_h = {
+            let doc = &mut app.tabs[tab2].scene.document;
+            define_sppid_block(doc, "_OFF-UNIT SQ", 12.0, 8.0);
+
+            let mut tb =
+                Text::with_value("DWG-176-02", Vector3::new(1120.0, 24.0, 0.0)).with_height(3.5);
+            tb.common.layer = "Labels".to_string();
+            doc.add_entity(document::EntityType::Text(tb)).unwrap();
+
+            let mut opc2 = Insert::new("_OFF-UNIT SQ", Vector3::new(100.0, 440.0, 0.0));
+            opc2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Insert(opc2)).unwrap();
+            let mut oft2 =
+                Text::with_value("DWG-176-01", Vector3::new(90.0, 439.0, 0.0)).with_height(2.5);
+            oft2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(oft2)).unwrap();
+
+            let mut m2 = Line::from_points(
+                Vector3::new(106.0, 440.0, 0.0),
+                Vector3::new(220.0, 440.0, 0.0),
+            );
+            m2.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(m2)).unwrap();
+            let mut ml2 = Text::with_value("100-PG-17604-CS150", Vector3::new(130.0, 443.0, 0.0))
+                .with_height(2.5);
+            ml2.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(ml2)).unwrap();
+
+            // PP25 personnel protection
+            let mut p_ln = Line::from_points(
+                Vector3::new(100.0, 260.0, 0.0),
+                Vector3::new(220.0, 260.0, 0.0),
+            );
+            p_ln.common.layer = "1".to_string();
+            let pp_ln_h = doc.add_entity(document::EntityType::Line(p_ln)).unwrap();
+            let mut pl1 =
+                Text::with_value("50-HS-17605-CS300-PP25", Vector3::new(125.0, 263.0, 0.0))
+                    .with_height(2.5);
+            pl1.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(pl1)).unwrap();
+
+            // Uninsulated CW line
+            let mut cw_ln = Line::from_points(
+                Vector3::new(100.0, 180.0, 0.0),
+                Vector3::new(220.0, 180.0, 0.0),
+            );
+            cw_ln.common.layer = "1".to_string();
+            doc.add_entity(document::EntityType::Line(cw_ln)).unwrap();
+            let mut cwl = Text::with_value("80-CW-17699-CS150", Vector3::new(125.0, 183.0, 0.0))
+                .with_height(2.5);
+            cwl.common.layer = "11".to_string();
+            doc.add_entity(document::EntityType::Text(cwl)).unwrap();
+
+            pp_ln_h
+        };
+
+        let _ = app.update(Message::TabSwitch(tab1));
+        let json_p = tmp.join("insul.json");
+        let csv_p = tmp.join("insul.csv");
+        let _ = app.run_command_line(&format!("PIDINSUL ALLTABS EXPORT \"{}\"", json_p.display()));
+        assert!(
+            json_p.is_file(),
+            "PIDINSUL EXPORT must write Insulation & Heat-Tracing Schedule insul.json"
+        );
+        let _ = app.run_command_line(&format!(
+            "PIDINSUL SUMMARY ALLTABS EXPORT \"{}\"",
+            csv_p.display()
+        ));
+        assert!(csv_p.is_file());
+        let csv_bytes = std::fs::read(&csv_p).unwrap();
+        assert!(csv_bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
+
+        let rep: Value = serde_json::from_str(&std::fs::read_to_string(&json_p).unwrap()).unwrap();
+        let s = &rep["summary"];
+        assert_eq!(s["sheets_scanned"].as_u64(), Some(2));
+        assert_eq!(s["total_pipelines_scanned"].as_u64(), Some(6));
+        assert_eq!(s["insulated_pipelines_count"].as_u64(), Some(5));
+        assert_eq!(s["heat_traced_pipelines_count"].as_u64(), Some(1));
+        assert_eq!(s["hot_insulation_count"].as_u64(), Some(2));
+        assert_eq!(s["cold_insulation_count"].as_u64(), Some(1));
+        assert_eq!(s["personnel_protection_count"].as_u64(), Some(1));
+        assert_eq!(s["missing_thickness_count"].as_u64(), Some(1));
+        assert_eq!(s["inconsistent_run_count"].as_u64(), Some(1));
+        assert_eq!(s["total_insulated_valve_boxes"].as_u64(), Some(1));
+
+        let _ = app.run_command_line("PIDINSUL TRACED ALLTABS");
+        assert!(has_sel(&app, tab1, eh_ln_h) && !has_sel(&app, tab1, c_ln_h));
+
+        let _ = app.run_command_line("PIDINSUL COLD ALLTABS");
+        assert!(has_sel(&app, tab1, c_ln_h));
+
+        let _ = app.run_command_line("PIDINSUL PERSONAL ALLTABS");
+        assert!(has_sel(&app, tab2, pp_ln_h));
+
+        let _ = app.run_command_line("PIDINSUL ANOMALIES ALLTABS");
+        assert!(has_sel(&app, tab1, ih_ln_h));
+
+        let _ = app.run_command_line("PIDINSUL CODE PP25 ALLTABS");
+        assert_eq!(app.active_tab, tab2);
+        assert!(has_sel(&app, tab2, pp_ln_h));
+
+        let mut visited_pp = false;
+        for _ in 0..7 {
+            let _ = app.run_command_line("PIDINSUL NEXT ALLTABS");
+            if app.active_tab == tab2 && has_sel(&app, tab2, pp_ln_h) {
+                visited_pp = true;
+                break;
+            }
+        }
+        assert!(visited_pp, "PIDINSUL NEXT ALLTABS must visit PP25 line");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "loads 4 real cross-sheet paired SPPID DXFs and native AutoCAD legacy DXFs into OpenCADStudio and verifies PIDINSUL ALLTABS Insulation & Heat-Tracing Schedule, MTO rollup, and NEXT stepping"]
+    fn real_multi_tab_pidinsul_schedule_mto_and_next_audit() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(sppid_raw) = std::env::var("OCS_PID_REAL176_SPPID_PAIR") else {
+            println!("OCS_PID_REAL176_SPPID_PAIR unset, skipping.");
+            return;
+        };
+        let Ok(legacy_raw) = std::env::var("OCS_PID_REAL176_LEGACY_PAIR") else {
+            println!("OCS_PID_REAL176_LEGACY_PAIR unset, skipping.");
+            return;
+        };
+        let out_dir = std::env::var("OCS_PID_REAL176_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("ocs_real176"));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let sppid_paths: Vec<std::path::PathBuf> = std::env::split_paths(&sppid_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        let legacy_paths: Vec<std::path::PathBuf> = std::env::split_paths(&legacy_raw)
+            .filter(|p| p.is_file())
+            .collect();
+        assert_eq!(sppid_paths.len(), 2);
+        assert_eq!(legacy_paths.len(), 2);
+
+        let groups = [
+            ("SP01_SP02", &sppid_paths, true),
+            ("LG01_LG02", &legacy_paths, false),
+        ];
+        let mut out_groups = Vec::new();
+
+        for (gname, paths, expect_insul) in groups {
+            let mut app = app();
+            let mut shas = Vec::new();
+            for (idx, p) in paths.iter().enumerate() {
+                let raw_b = std::fs::read(p).unwrap();
+                shas.push(format!("{:x}", Sha256::digest(&raw_b))[..12].to_string());
+                if idx > 0 {
+                    let _ = app.update(Message::TabNew);
+                }
+                let ti = app.active_tab;
+                app.tabs[ti].scene.document = crate::io::load_file(p).expect("load DXF");
+                app.tabs[ti].tab_title = format!("{gname}_{idx}.dxf");
+            }
+
+            let json_p = out_dir.join(format!("{gname}_insul.json"));
+            let csv_p = out_dir.join(format!("{gname}_insul.csv"));
+            let _ =
+                app.run_command_line(&format!("PIDINSUL ALLTABS EXPORT \"{}\"", json_p.display()));
+            let _ = app.run_command_line(&format!(
+                "PIDINSUL SUMMARY ALLTABS EXPORT \"{}\"",
+                csv_p.display()
+            ));
+            assert!(json_p.is_file() && csv_p.is_file());
+            let csv_raw = std::fs::read(&csv_p).unwrap();
+            assert!(csv_raw.starts_with(&[0xEF, 0xBB, 0xBF]));
+
+            let rep: Value =
+                serde_json::from_str(&std::fs::read_to_string(&json_p).unwrap()).unwrap();
+            let ins_cnt = rep["summary"]["insulated_pipelines_count"]
+                .as_u64()
+                .unwrap_or(0);
+            if expect_insul {
+                assert!(
+                    ins_cnt >= 15,
+                    "{gname} must extract >= 15 insulated/traced pipelines, got {ins_cnt}"
+                );
+                let _ = app.run_command_line("PIDINSUL NEXT ALLTABS");
+                let cur_tab = app.active_tab;
+                assert!(
+                    !app.tabs[cur_tab].scene.selected_entities().is_empty(),
+                    "PIDINSUL NEXT ALLTABS must select target insulated pipeline"
+                );
+            } else {
+                assert_eq!(
+                    ins_cnt, 0,
+                    "ambient firewater {gname} must have 0 false-positive insulated lines"
+                );
+            }
+
+            let _ = std::fs::remove_file(&json_p);
+            let _ = std::fs::remove_file(&csv_p);
+
+            out_groups.push(json!({
+                "group": gname,
+                "sha256_prefixes": shas,
+                "total_pipelines_scanned": rep["summary"]["total_pipelines_scanned"],
+                "insulated_pipelines_count": rep["summary"]["insulated_pipelines_count"],
+                "heat_traced_pipelines_count": rep["summary"]["heat_traced_pipelines_count"],
+                "hot_insulation_count": rep["summary"]["hot_insulation_count"],
+                "cold_insulation_count": rep["summary"]["cold_insulation_count"],
+                "electric_tracing_count": rep["summary"]["electric_tracing_count"],
+                "total_insulated_valve_boxes": rep["summary"]["total_insulated_valve_boxes"],
+                "mto_groups_count": rep["summary"]["mto_groups_count"],
+            }));
+        }
+
+        std::fs::write(
+            out_dir.join("real176_summary.json"),
             format!(
                 "{}\n",
                 serde_json::to_string_pretty(&json!({ "groups": out_groups })).unwrap()
