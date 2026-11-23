@@ -1,6 +1,6 @@
 # SPEC：设计规则检查（`pid-drc`）
 
-> 状态：**待建；规格已确认**（2026-11-16，§9 的待决问题都按「建议」定）。§4.3 里拆任务时补的一条（不含 P&ID 对象的图保存时不检查）也已确认。基线 `main @ 9b5327f96`。
+> 状态：**已建成；规格已确认**（2026-11-16，§9 的待决问题都按「建议」定；2026-11-21 由 `DRC-1` – `DRC-14` 建成，实现与本文的出入记在 §11）。§4.3 里拆任务时补的一条（不含 P&ID 对象的图保存时不检查）也已确认。基线 `main @ 9b5327f96`。
 > 依据：已批准计划 T3.2；需求 `REQ-DATA-007`、`010`–`016`（`docs/pid-platform/requirements/50-data-and-rule-engine.md`）。
 > 共用约定见 `01-shared-conventions.md`；输入数据见 `SPEC-pid-project-index.md`（图纸摘要、项目索引）与 `SPEC-pid-master-data.md`。
 

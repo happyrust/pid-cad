@@ -1,6 +1,6 @@
 # SPEC：校验与交付面板（`pid-verify-deliver-panel`）
 
-> 状态：**待建；规格已确认**（2026-11-16，§9 的待决问题都按「建议」定）。基线 `main @ 9b5327f96`。
+> 状态：**已建成；规格已确认**（2026-11-16，§9 的待决问题都按「建议」定；2026-11-22 至 23 由 `PNL-1` – `PNL-13` 建成，实现与本文的出入记在 §11）。基线 `main @ 9b5327f96`。
 > 依据：已批准计划 T3.4、计划决议 D5（校验与交付合成一个多页签停靠面板，面板数 21 → 22）；需求 `REQ-DATA-015`、`REQ-DATA-007`（`docs/pid-platform/requirements/50-data-and-rule-engine.md`）、`REQ-DRW-010`（`40-drawing-and-drafting.md`）、`REQ-DELV-008`、`REQ-DELV-009`（`60-deliverables-and-publish.md`）。
 > 共用约定见 `01-shared-conventions.md`。面板显示的数据全部来自 `SPEC-pid-drc.md`、`SPEC-pid-bom.md`、`SPEC-pid-snapshot.md`、`SPEC-pid-publish.md`、`SPEC-pid-project-index.md`，本文不重复它们的格式。
 

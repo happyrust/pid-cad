@@ -1,6 +1,6 @@
 # SPEC：材料清单（`pid-bom`）
 
-> 状态：**待建；规格已确认**（2026-11-16，§9 的待决问题都按「建议」定）。基线 `main @ 9b5327f96`。
+> 状态：**已建成；规格已确认**（2026-11-16，§9 的待决问题都按「建议」定；2026-11-21 至 22 由 `BOM-1` – `BOM-6` 建成，实现与本文的出入记在 §11）。基线 `main @ 9b5327f96`。
 > 依据：已批准计划 T3.3 第 1 项；需求 `REQ-DELV-001`–`005`（`docs/pid-platform/requirements/60-deliverables-and-publish.md`）。
 > 共用约定见 `01-shared-conventions.md`；输入数据见 `SPEC-pid-project-index.md`（图纸摘要）。
 

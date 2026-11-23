@@ -165,6 +165,7 @@ flowchart LR
   - `ProjectMasterData`：定义图例标准锁定标识、公称直径标准表（`DN15–DN600`）、管道等级表（如 `A1A`、`B1B` 等及允许公称直径范围）、绝热等级表、流体介质代码表与 PBS 装置分区节点树；单图存 `PID_AUTHOR_MASTERDATA` XRecord，多图项目目录可选共享 `pid-project.json`；
   - `ProjectIndex`：纯脱机扫描当前打开图纸及同项目目录 `.dwg` 文件，提取每张图的位号主数据摘要、管线拓扑摘要与页间连接符记录，构建全项目位号唯一性索引与跨图纸连通图，支撑跨图重号检测与一键开图定位。
 - **验证**：多图扫描单测（跨图重复位号检出、页间连接符配对悬空检出、往返序列化无损）。
+- **状态（2026-11-23）**：已完成。主数据 `MD-1` – `MD-4`（`4ea92764d`、`008a42065`、`a6d0e9d32`、`a16e6b9ca`），项目索引 `IX-1` – `IX-8`（`49165eb85`、`317ad28e2`、`58f01abf2`、`353b4e838`、`70f64414f`、`0a9111e05`、`ed68b00a0`、`8c278d2d1`，另有一处修正 `2ddf8990e`）；检查点 CP-B（`d0c6514f6`），之后把本地 `main` 合进来（`4853657fd`）、复验（`b4231a09e`）并推到 `fork/main`。新模块就是本节写的两个文件；命令 `PIDMASTERDATA`、`PIDINDEX`、`PIDLOCATE`，REST `/api/v1/pid/master-data`、`/api/v1/pid/summary`、`/api/v1/pid/index`、`/api/v1/pid/locate`，另有对应的 MCP 工具。与本节写法不同、写规格时已定的（`docs/plans/2026-11-16-pid-dev-spec/plan.md` §3）：默认只预置 19 个公称直径，管道等级、绝热等级、流体介质留空（M4）；跨图重号只查设备、阀门、仪表（I1）；图纸摘要的缓存只放内存（I4）。性能预算（`END-1` 实测，三次取中位数）：2,000 条管道等级的主数据读入并校验 14.43 ms（预算 50 ms），2,000 个对象的图纸摘要 62.38 ms（150 ms），100 张图都没变时重扫 90.31 ms（1 秒）。逐个任务的实现记录在 `SPEC-pid-master-data.md`、`SPEC-pid-project-index.md` 的 §11，结项报告是 `docs/plans/2026-11-16-pid-dev-spec/report-phase3.md`。
 
 #### T3.2 可配置设计规则检查引擎 DRC 与 ≥ 24 条内置规则（`PIDCHECK`）
 
@@ -180,6 +181,7 @@ flowchart LR
     6. **图例与图形规范（2 条）**：P&ID 对象散落在非受控图层、覆盖属性未标记来源；
   - **双触发点门禁**：保存时自动运行快速检查并在状态栏汇总告警（可配置是否阻断保存）；执行发布（`PIDPUBLISH`）时强制运行全量检查，存在任何 `Blocker` 级严重违规即返回结构化拦截报告（拦截率 100%）；同步暴露 REST `/api/v1/pid/check` 与 MCP 工具。
 - **验证**：24 条规则逐条正反例单测 + 2,000 对象合成工厂图性能基准测试（断言耗时 < 500 ms）。
+- **状态（2026-11-23）**：已完成。`DRC-1` – `DRC-14`（`64c12d178`、`7cd7cfaa5`、`9ab173b9d`、`c717533fb`、`1433504ca`、`caf07b7d2`、`750df1da3`、`d4f2b5eae`、`e0ccdea2e`、`6ff18aafd`、`bdb9e4448`、`dc7ccc382`、`64745d864`、`b23d2ba97`），检查点 CP-C 在材料清单与快照之后（`b4adcf16a`）。文件照本节：`src/pid/drc/{mod,model,dsl,builtin_rules,runner}.rs`，另加 `facts.rs`；规则包 `assets/pid-drc-rules.json`；命令 `src/app/commands/piddrc.rs`（`PIDCHECK`）；REST `/api/v1/pid/check`，另有 `/api/v1/pid/check/rules`、`/api/v1/pid/check/waivers` 和对应的 MCP 工具。与本节写法不同、写规格时已定的（`docs/plans/2026-11-16-pid-dev-spec/plan.md` §3）：严重度分错误、警告、提示三级，「错误」就是本节的 `Blocker`（D1）；内置 41 条，需求的 25 条作「基础规则」、本节多出的 16 条作「工程扩展」，其中错误 20 条、警告 15 条、提示 6 条（D2），`DR-114`（对象不在受控图层）因为还没有约定 P&ID 图层而默认停用，`DR-016`、`DR-020`、`DR-109` 本期没有对应的对象、不出结果（D8）；保存时默认只提示不拦（`save_gate: warn`），项目可以改成拦，图里没有 P&ID 对象时保存不检查（D3）；加了记在图里、必须填理由的豁免（D4）。性能预算（`END-1` 实测）：2,000 个对象全量检查中位数 140.37 ms（预算 500 ms），执行 40 条规则、出 1,801 条结果。严重违规的拦截率在 T3.3 的 `PUB-7` 里验。实现记录在 `SPEC-pid-drc.md` §11。
 
 #### T3.3 P&ID 语义材料清单（BOM）、版本快照比对与发布包组装（`PIDBOM` / `PIDPUBLISH`）
 
@@ -189,6 +191,7 @@ flowchart LR
   2. **图纸版本快照与差异比对（`PIDSNAPSHOT` / `PIDDIFF`）**：将当前图纸的位号集合、属性键值、拓扑边与几何包围盒固化为轻量快照文件，支持任选两份快照按位号输出「新增对象 / 删除对象 / 属性修改（旧值→新值）/ 位置移动 / 拓扑变更」清单；
   3. **发布交付包（`PIDPUBLISH`）**：前置执行 `DRC Blocker == 0` 与 `重复位号 == 0` 硬门禁；通过后在目标目录原子生成标准发布包（冻结 DWG 副本、PDF 与 SVG 出图文件、`bom.csv` / `bom.json`、`topology.json`、`drc-report.json` 与 `manifest.json` 校验和清单）。
 - **验证**：单测覆盖跨多段同位号管线聚合为 1 行、重复位号 0 行不变量、严重违规时 `PIDPUBLISH` 100% 拒绝写出发布包、整改清零后完整产出发布包。
+- **状态（2026-11-23）**：已完成。材料清单 `BOM-1` – `BOM-6`（`a1726f1d3`、`71b4354d2`、`dde7a2e63`、`59754907f`、`5ac8a6925`、`4d595479c`），快照与比对 `SNAP-1` – `SNAP-6`（`e905da655`、`1b24967a9`、`1c5abc83a`、`e94306f38`、`fdcf7fb32`、`a907bcc7c`），检查点 CP-C（`b4adcf16a`）；发布 `PUB-1` – `PUB-7`（`fc9cf6d90`、`90098d1c2`、`fc08e0ae5`、`136e3e04d`、`917bfe737`、`3f71c49a4`、`1e24ef697`），检查点 CP-D（`1df759eec`）。本节写的四个文件都在，另外快照拆出 `src/pid/snapshot/{store,compare}.rs`，命令另有 `src/app/commands/pidbom.rs`、`pidsnapshot.rs`，拦截率的验收测试在 `pidpublish_acceptance.rs`。命令 `PIDBOM`、`PIDSNAPSHOT`、`PIDDIFF`、`PIDPUBLISH`（含 `CHECK`、`LIST`、`VERIFY`）；REST `/api/v1/pid/bom`、`/api/v1/pid/bom/export`、`/api/v1/pid/snapshots`、`/api/v1/pid/diff`、`/api/v1/pid/publish/check`、`/api/v1/pid/publish`、`/api/v1/pid/publications`、`/api/v1/pid/publish/verify` 等，另有对应的 MCP 工具。与本节写法不同、写规格时已定的（`docs/plans/2026-11-16-pid-dev-spec/plan.md` §3）：清单主表每条管线一行，按「管道等级 + 公称直径 + 绝热等级」累加的做成副表「管道汇总」（B2）；管长是图面长度，清单里注明（B1）；不做报表模板，用选列代替（B3）；发布门禁是四项，比本节的两道多「主数据读得出」「项目里的图都读得出」（P3）；发布前必须先保存，包里的图纸文件是磁盘文件的原样复制（P4）；包里比本节多管道汇总、发布时的快照、主数据三个文件（P5）。性能预算（`END-1` 实测，三次取中位数）：2,000 个对象出清单 69.69 ms（预算 300 ms），存快照 184.48 ms（300 ms），比对两份快照 13.47 ms（200 ms），发布门禁 64.89 ms（1 秒）。拦截率：`PUB-7` 给错误级规则里本期出结果的 18 条各造一张违规图，发布全部被拦；错误级规则全部停用、检查没有错误时，重复位号这一道门禁照样拦（它不经规则）。实现记录在 `SPEC-pid-bom.md`、`SPEC-pid-snapshot.md`、`SPEC-pid-publish.md` 的 §11。
 
 #### T3.4 统一多页签「P&ID 校验与交付（`PidVerifyDeliver`）」Dock 面板
 
@@ -199,6 +202,7 @@ flowchart LR
     2. **「材料清单」页签**（对应原型 `bom` 屏）：按设备 / 管线 / 阀门 / 仪表 / 管件分组汇总表、关键词搜索、一键导出 CSV / JSON；
     3. **「快照与发布」页签**（对应原型 `drawings` 发布区）：保存快照、选择两快照查看差异摘要并点击定位变更位号、填写发布目录并执行门禁发布。
 - **验证**：更新 `dock::tests`、`tests/pid_panel_localization.rs` 以及通过 `--http` REST 通道驱动面板页签切换、触发检查、读取违规列表与导出 BOM 的端到端测试。
+- **状态（2026-11-23）**：已完成。`PNL-1` – `PNL-13`（`9ff1127f2`、`6a9daacb7`、`231785ee7`、`63172e43b`、`71ee17d8f`、`f45ef02ce`、`514c83f93`、`1f916e517`、`b22b3940d`、`46bb8e40c`、`6f74bff2e`、`a2a00d7f9`、`b18ba05d3`），检查点 CP-E1（`e7382e4d2`）、CP-E2（`37efdd310`）、CP-E3（`069ab8459`），收尾 `END-1`。面板就是本节写的 `src/ui/window/pid_verify_deliver.rs`，`PanelId::PidVerifyDeliver` 已登记（`PanelId::ALL` 22 个）；命令 `PIDVERIFY`（`src/app/commands/pidverify.rs`）；面板状态经操作 `pid_verify_panel`（REST `/api/v1/pid/verify-panel`）读，按钮经现有的 `action` 操作（`pid_verify`）驱动；点一条结果，定位并选中对象，在经典界面和外壳两处属性表里标出相关字段。与本节写法不同、写规格时已定的（`docs/plans/2026-11-16-pid-dev-spec/plan.md` §3）：面板文字用中文字面量，与「协同」面板一致，不走语言包，`tests/pid_panel_localization.rs` 没有改（V2）；做成停靠面板，外壳里的三个占位屏不动（V1）；功能区不加按钮，入口是 `PIDVERIFY` 和停靠区的面板开关（V4）。端到端：`scripts/pid-verify-e2e/run.py` 只经 `--http` 驱动面板，外壳和经典界面各跑一遍，`END-1` 复跑 25 项全过；面板重建要画的内容（2,000 条结果）中位数 1.21 ms（预算 50 ms）。CP-C 起的提交都还在本地，没有推送（`fork/main` 停在 `b4231a09e`），等 CP-E 你决定。实现记录在 `SPEC-pid-verify-deliver-panel.md` §11，阶段 3 的结项报告是 `docs/plans/2026-11-16-pid-dev-spec/report-phase3.md`。
 
 ---
 

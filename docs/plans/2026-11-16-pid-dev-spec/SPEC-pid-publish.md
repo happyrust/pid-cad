@@ -1,6 +1,6 @@
 # SPEC：发布包（`pid-publish`）
 
-> 状态：**待建；规格已确认**（2026-11-16，§9 的待决问题都按「建议」定）。基线 `main @ 9b5327f96`。
+> 状态：**已建成；规格已确认**（2026-11-16，§9 的待决问题都按「建议」定；2026-11-22 由 `PUB-1` – `PUB-7` 建成，实现与本文的出入记在 §11）。基线 `main @ 9b5327f96`。
 > 依据：已批准计划 T3.3 第 3 项；需求 `REQ-DELV-008`、`009`，参考 `006`、`010`、`011`（`docs/pid-platform/requirements/60-deliverables-and-publish.md`）。
 > 共用约定见 `01-shared-conventions.md`；用到 `SPEC-pid-project-index.md`、`SPEC-pid-drc.md`、`SPEC-pid-bom.md`、`SPEC-pid-snapshot.md`、`SPEC-pid-master-data.md`。
 > 2026-11-17：发布加三项协同前提（队列里有没提交的修改、标着不一致、没对过账），清单加一段 `collab`，写在 `SPEC-collab-offline-sync.md` §5.7，**已确认**（2026-11-17；定为默认拒绝，明确带上「允许未对账」才放行，见该规格 §10 第 3 条）。受影响的地方各加了一句指向它（都以「2026-11-17」开头）。

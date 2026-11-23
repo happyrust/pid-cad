@@ -1,6 +1,6 @@
 # SPEC：图纸摘要与项目索引（`pid-project-index`）
 
-> 状态：**待建；规格已确认**（2026-11-16，§9 的待决问题都按「建议」定）。基线 `main @ 9b5327f96`。
+> 状态：**已建成；规格已确认**（2026-11-16，§9 的待决问题都按「建议」定；2026-11-20 至 21 由 `IX-1` – `IX-8` 建成，实现与本文的出入记在 §11）。基线 `main @ 9b5327f96`。
 > 依据：已批准计划 T3.1；需求 `REQ-DATA-001`、`002`、`008`（`docs/pid-platform/requirements/50-data-and-rule-engine.md`）。
 > 共用约定见 `01-shared-conventions.md`；图内数据见 `SPEC-pid-author-store.md`。
 

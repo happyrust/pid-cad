@@ -1,6 +1,6 @@
 # SPEC：快照与比对（`pid-snapshot`）
 
-> 状态：**待建；规格已确认**（2026-11-16，§9 的待决问题都按「建议」定）。基线 `main @ 9b5327f96`。
+> 状态：**已建成；规格已确认**（2026-11-16，§9 的待决问题都按「建议」定；2026-11-21 由 `SNAP-1` – `SNAP-6` 建成，实现与本文的出入记在 §11）。基线 `main @ 9b5327f96`。
 > 依据：已批准计划 T3.3 第 2 项；需求 `REQ-DRW-009`、`REQ-DRW-010`（`docs/pid-platform/requirements/40-drawing-and-drafting.md`）。
 > 共用约定见 `01-shared-conventions.md`；输入数据见 `SPEC-pid-project-index.md`（图纸摘要、连通图）。
 
