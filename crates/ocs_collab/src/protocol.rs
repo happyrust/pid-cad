@@ -264,6 +264,13 @@ pub enum ServerMessage {
         user_b: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display_name_b: Option<String>,
+        /// Value the field held before the two tying writes (#79).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_value: Option<String>,
+        /// Instructs tying senders to revert their local value back to
+        /// `previous_value` until adjudication arrives (#79).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revert_local: Option<bool>,
     },
 }
 
@@ -609,6 +616,8 @@ mod tests {
             display_name_a: None,
             user_b: None,
             display_name_b: None,
+            previous_value: None,
+            revert_local: None,
         };
         assert_eq!(
             serde_json::to_value(&tied).expect("serialize")["op_ids"],

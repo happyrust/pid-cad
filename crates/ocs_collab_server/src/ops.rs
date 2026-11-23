@@ -257,6 +257,8 @@ fn taken_before(state: &AppState, session: &Session, op_id: &str) -> Option<Vec<
             display_name_a: row.display_name_a,
             user_b: row.user_b,
             display_name_b: row.display_name_b,
+            previous_value: None,
+            revert_local: Some(true),
         })
         .collect();
     said.extend(logged.map(|op| ServerMessage::OpApplied {
@@ -1698,6 +1700,12 @@ fn tie(
             first.op_id,
             second.now
         );
+        let previous_value = drawing
+            .model
+            .field(&object_ref, &field)
+            .map(|f| f.value.clone())
+            .or_else(|| ours.old_value.clone())
+            .or_else(|| theirs.old_value.clone());
         reactions.push(Reaction::Publish {
             drawing_id: drawing_id.clone(),
             message: ServerMessage::Conflict {
@@ -1712,6 +1720,8 @@ fn tie(
                 display_name_a,
                 user_b: Some(user_b),
                 display_name_b,
+                previous_value,
+                revert_local: Some(true),
             },
         });
     }
@@ -3684,5 +3694,63 @@ mod tests {
         assert_eq!(objs[0]["tag_source"], "auto");
         let (_, run_objs) = objects(&state, DRAWING, Some("L-1001-01"));
         assert_eq!(run_objs[0]["overrides"], json!(["公称直径"]));
+    }
+
+    /// #79: Parallel tie window defaults to off (0) where concurrent writes
+    /// resolve by arrival (`OP_SUPERSEDED`); when explicitly enabled, a tie
+    /// carries `previous_value` + `revert_local: true` and keeps the server
+    /// value at the pre-write value until adjudication.
+    #[tokio::test]
+    async fn tie_window_defaults_off_and_explicit_window_signals_local_revert() {
+        // 1. Default tie_window = 0 -> arrival order wins, no conflict entry.
+        let default_state = state();
+        assert!(default_state.tie_window.is_zero(), "tie_window must default to 0");
+        let mut a = join(&default_state, "u1").await;
+        let mut b = join(&default_state, "u2").await;
+        let r1 = submit(&default_state, &mut a, 0, "op-def-1", set("设计压力", "1.6MPa")).await;
+        assert!(applied(&r1).is_some());
+        let r2 = submit(&default_state, &mut b, 0, "op-def-2", set("设计压力", "2.5MPa")).await;
+        assert_eq!(errors(&r2).len(), 1);
+        assert_eq!(errors(&r2)[0].0, codes::OP_SUPERSEDED);
+        assert!(default_state
+            .store
+            .as_ref()
+            .expect("store")
+            .list_conflicts(Some(DRAWING), None)
+            .expect("list")
+            .is_empty());
+
+        // 2. Explicit tie_window > 0 -> Conflict carries previous_value & revert_local: true,
+        // and server keeps pre-write value ("1.0MPa") until resolution.
+        let mut win_state = state();
+        let mut wa = join(&win_state, "u1").await;
+        let mut wb = join(&win_state, "u2").await;
+        let _ = submit(&win_state, &mut wa, 0, "op-init", set("设计压力", "1.0MPa")).await;
+        win_state.tie_window = Duration::from_secs(10);
+
+        let _ = submit(&win_state, &mut wa, 1, "op-t1", set("设计压力", "1.6MPa")).await;
+        let tied = submit(&win_state, &mut wb, 1, "op-t2", set("设计压力", "2.5MPa")).await;
+        let (prev, revert) = tied
+            .iter()
+            .find_map(|r| match r {
+                Reaction::Publish {
+                    message:
+                        ServerMessage::Conflict {
+                            previous_value,
+                            revert_local,
+                            ..
+                        },
+                    ..
+                } => Some((previous_value.clone(), *revert_local)),
+                _ => None,
+            })
+            .expect("conflict frame");
+        assert_eq!(prev.as_deref(), Some("1.0MPa"));
+        assert_eq!(revert, Some(true));
+        assert_eq!(
+            value_of(&win_state, "设计压力").as_deref(),
+            Some("1.0MPa"),
+            "server keeps pre-write value before adjudication"
+        );
     }
 }

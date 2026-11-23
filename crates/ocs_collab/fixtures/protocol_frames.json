@@ -281,7 +281,9 @@
         "user_a": "u1",
         "display_name_a": "张工",
         "user_b": "u2",
-        "display_name_b": "李工"
+        "display_name_b": "李工",
+        "previous_value": "1.0MPa",
+        "revert_local": true
       }
     }
   ],
