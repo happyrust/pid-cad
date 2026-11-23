@@ -45,6 +45,12 @@ pub enum PidCollabMsg {
     OpenConflictList,
     /// Leave that list.
     CloseConflictList,
+    /// Open the ruling dialog for one list row (#82).
+    OpenRuling(String),
+    /// Pick 采用甲方 or 采用乙方.
+    ChooseRuling(String),
+    /// Confirm the pick. Same action as `PIDCOLLAB RESOLVE`.
+    ConfirmRuling,
 }
 
 impl PidCollabMsg {
@@ -182,6 +188,18 @@ pub fn conflict_list_bounds_id(conflict_id: &str) -> String {
     format!("pid-collab-conflict-list-{conflict_id}")
 }
 
+/// The two picks the ruling dialog offers (#82).
+pub const ADOPT_A: &str = "采用甲方";
+pub const ADOPT_B: &str = "采用乙方";
+pub const CONFIRM_RULING: &str = "确认";
+
+/// The dialog for one conflict: the query row, and which side is picked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RulingDialog {
+    pub item: ConflictListItem,
+    pub choice: Option<String>,
+}
+
 /// `PosReport` id of the line under the banner that says what has not
 /// reached the room. Reported only while there is something to say, so its
 /// presence is the state.
@@ -258,6 +276,8 @@ pub struct CollabView {
     /// The list opened from 去裁决. `None` until it is opened; `Some` empty
     /// is the list with nothing pending (#81).
     pub conflict_list: Option<Vec<ConflictListItem>>,
+    /// The ruling dialog, while one list row is being ruled (#82).
+    pub ruling: Option<RulingDialog>,
     pub claims: Vec<ClaimRow>,
     pub last_message: Option<String>,
     /// The claims section is expanded.
@@ -391,6 +411,12 @@ fn conflict_list_body<'a>(items: &'a [ConflictListItem]) -> Element<'a, Message>
         for line in item.lines() {
             lines = lines.push(text(line).size(10));
         }
+        lines = lines.push(
+            button(text("裁决").size(10))
+                .on_press(PidCollabMsg::OpenRuling(item.conflict_id.clone()).message())
+                .style(button::secondary)
+                .padding([2, 6]),
+        );
         rows = rows.push(crate::ui::wrap_bar::PosReport::owned(
             conflict_list_bounds_id(&item.conflict_id),
             lines,
@@ -403,6 +429,36 @@ fn conflict_list_body<'a>(items: &'a [ConflictListItem]) -> Element<'a, Message>
             .padding([2, 0]),
     );
     rows.into()
+}
+
+/// 采用甲方 / 采用乙方. The values and the baseline are the query row's.
+fn ruling_dialog<'a>(dialog: &'a RulingDialog) -> Element<'a, Message> {
+    let item = &dialog.item;
+    let mut body = column![
+        text(format!("甲方的值 {}", item.value_a)).size(11),
+        text(format!("乙方的值 {}", item.value_b)).size(11),
+        text(format!("这条的基线修订号 {}", item.base_revision))
+            .size(10)
+            .style(muted),
+        button(text(ADOPT_A).size(10))
+            .on_press(PidCollabMsg::ChooseRuling(ADOPT_A.to_owned()).message())
+            .style(button::secondary)
+            .padding([2, 6]),
+        button(text(ADOPT_B).size(10))
+            .on_press(PidCollabMsg::ChooseRuling(ADOPT_B.to_owned()).message())
+            .style(button::secondary)
+            .padding([2, 6]),
+    ]
+    .spacing(2);
+    if dialog.choice.is_some() {
+        body = body.push(
+            button(text(CONFIRM_RULING).size(10))
+                .on_press(PidCollabMsg::ConfirmRuling.message())
+                .style(button::secondary)
+                .padding([2, 6]),
+        );
+    }
+    container(body).width(Fill).padding([4, 2]).into()
 }
 
 /// One claim row: the tag, its holder, and the claim/release button.
@@ -550,6 +606,9 @@ pub fn view<'a>(view: &'a CollabView, width: f32, chrome: Chrome) -> Element<'a,
     if let Some(items) = &view.conflict_list {
         body = body.push(section_header("冲突列表", items.len()));
         body = body.push(conflict_list_body(items));
+    }
+    if let Some(dialog) = &view.ruling {
+        body = body.push(ruling_dialog(dialog));
     }
 
     // ── Claims ───────────────────────────────────────────────────────────

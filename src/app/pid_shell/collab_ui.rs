@@ -35,8 +35,8 @@ use crate::ui::style::pid_tokens::{
     CONNECTOR_SIGNAL_COLOR_TOKEN,
 };
 use crate::ui::window::pid_collab::{
-    PidCollabMsg, NO_OTHERS_LABEL, NO_PENDING_CONFLICTS, NO_PENDING_CONFLICTS_WHY,
-    OPEN_CONFLICT_LIST,
+    PidCollabMsg, ADOPT_A, ADOPT_B, CONFIRM_RULING, NO_OTHERS_LABEL, NO_PENDING_CONFLICTS,
+    NO_PENDING_CONFLICTS_WHY, OPEN_CONFLICT_LIST,
 };
 use crate::ui::wrap_bar::PosReport;
 
@@ -1037,6 +1037,50 @@ pub(crate) fn inspector_collab_section<'a>(
         );
         content = content.push(PosReport::owned(part("collab-conflict-list"), list));
     }
+    if let Some(dialog) = &app.pid_collab_ruling {
+        let item = &dialog.item;
+        let mut dialog_col = column![
+            text(format!("甲方的值 {}", item.value_a))
+                .size(11)
+                .color(ColorToken::TextPrimary.color(theme)),
+            text(format!("乙方的值 {}", item.value_b))
+                .size(11)
+                .color(ColorToken::TextPrimary.color(theme)),
+            text(format!("这条的基线修订号 {}", item.base_revision))
+                .size(10.5)
+                .color(ColorToken::TextMuted.color(theme)),
+            button(
+                text(ADOPT_A)
+                    .size(10.5)
+                    .color(ColorToken::Accent.color(theme)),
+            )
+            .padding([2, 8])
+            .style(bare)
+            .on_press(PidCollabMsg::ChooseRuling(ADOPT_A.to_owned()).message()),
+            button(
+                text(ADOPT_B)
+                    .size(10.5)
+                    .color(ColorToken::Accent.color(theme)),
+            )
+            .padding([2, 8])
+            .style(bare)
+            .on_press(PidCollabMsg::ChooseRuling(ADOPT_B.to_owned()).message()),
+        ]
+        .spacing(2);
+        if dialog.choice.is_some() {
+            dialog_col = dialog_col.push(
+                button(
+                    text(CONFIRM_RULING)
+                        .size(10.5)
+                        .color(ColorToken::Accent.color(theme)),
+                )
+                .padding([2, 8])
+                .style(bare)
+                .on_press(PidCollabMsg::ConfirmRuling.message()),
+            );
+        }
+        content = content.push(PosReport::owned(part("collab-ruling"), dialog_col));
+    }
 
     // Tag claims list + Claim / Release action for selected object (#54, #55)
     let mut claims_col = column![].spacing(6);
@@ -1981,6 +2025,137 @@ mod tests {
         assert!(first.y < next.y, "{first:?} {next:?}");
         assert!(find(&mut ui, "基线修订号 4").is_some());
         assert!(find(&mut ui, "状态 待裁决").is_some());
+    }
+
+    /// #82: the dialog shows both values and the baseline. Confirming 采用乙方
+    /// sends the same resolve call as `PIDCOLLAB RESOLVE`, and the list loses
+    /// that row.
+    #[test]
+    fn confirming_adopt_b_sends_the_same_resolve_as_the_command() {
+        use crate::app::collab::query::{
+            CollabQueryClient, ConflictListItem, QueryError, ResolveOutcome,
+        };
+        use crate::ui::window::pid_collab::{PidCollabMsg, ADOPT_B};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Debug)]
+        struct Rec {
+            item: ConflictListItem,
+            calls: Mutex<Vec<(String, String, Option<String>)>>,
+        }
+
+        impl CollabQueryClient for Rec {
+            fn fetch_pending_conflicts(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Vec<PendingConflict>, QueryError> {
+                Ok(Vec::new())
+            }
+            fn fetch_conflict_list(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Vec<ConflictListItem>, QueryError> {
+                Ok(vec![self.item.clone()])
+            }
+            fn resolve_conflict(
+                &self,
+                _: &str,
+                conflict_id: &str,
+                resolution: &str,
+                _: &str,
+                value: Option<&str>,
+            ) -> Result<ResolveOutcome, QueryError> {
+                self.calls.lock().expect("calls").push((
+                    conflict_id.to_owned(),
+                    resolution.to_owned(),
+                    value.map(str::to_owned),
+                ));
+                Ok(ResolveOutcome {
+                    conflict_id: conflict_id.to_owned(),
+                    status: "已裁决".to_owned(),
+                    resolution: resolution.to_owned(),
+                    resolved_by: "u4".to_owned(),
+                    object_ref: self.item.object_ref.clone(),
+                    field: self.item.field.clone(),
+                    value: self.item.value_b.clone(),
+                    revision: 5,
+                })
+            }
+            fn fetch_audit(
+                &self,
+                _: &str,
+                _: &crate::app::collab::query::AuditFilter,
+            ) -> Result<Vec<crate::app::collab::query::AuditItem>, QueryError> {
+                Ok(Vec::new())
+            }
+            fn fetch_drawing_objects(
+                &self,
+                _: &str,
+                drawing_id: &str,
+                _: Option<&str>,
+            ) -> Result<crate::app::collab::query::DrawingObjectsPage, QueryError> {
+                Ok(crate::app::collab::query::DrawingObjectsPage {
+                    drawing_id: drawing_id.to_owned(),
+                    revision: 0,
+                    items: Vec::new(),
+                })
+            }
+        }
+
+        let item = ConflictListItem {
+            conflict_id: "c-7f3a".to_owned(),
+            object_ref: "P-1001".to_owned(),
+            field: "设计压力".to_owned(),
+            value_a: "1.6MPa".to_owned(),
+            value_b: "2.5MPa".to_owned(),
+            base_revision: 4,
+            status: "待裁决".to_owned(),
+        };
+        let rec = Arc::new(Rec {
+            item: item.clone(),
+            calls: Mutex::new(Vec::new()),
+        });
+        let mut app = pid_app();
+        app.collab.server_url = "ws://127.0.0.1:3240/ws".into();
+        app.collab.drawing_id = "PID-1101".into();
+        app.collab.user_id = "u4".into();
+        app.collab.set_query_client(rec.clone());
+        let _ = app.on_pid_collab(PidCollabMsg::OpenConflictList);
+        let _ = app.on_pid_collab(PidCollabMsg::OpenRuling(item.conflict_id.clone()));
+        let _ = app.on_pid_collab(PidCollabMsg::ChooseRuling(ADOPT_B.to_owned()));
+
+        let element = inspector_collab_section(&app, None).expect("the collab zone");
+        let mut ui = iced_test::simulator::Simulator::with_size(
+            iced::Settings::default(),
+            (280.0, 900.0),
+            element,
+        );
+        let find = |ui: &mut iced_test::simulator::Simulator<'_, AppMessage>, label: &str| {
+            ui.find(label).ok().and_then(|found| found.visible_bounds())
+        };
+        let party_a = find(&mut ui, "甲方的值 1.6MPa").expect("party A");
+        let party_b = find(&mut ui, "乙方的值 2.5MPa").expect("party B");
+        let baseline = find(&mut ui, "这条的基线修订号 4").expect("baseline");
+        assert!(party_a.y < party_b.y && party_b.y < baseline.y);
+        drop(ui);
+
+        let _ = app.on_pid_collab(PidCollabMsg::ConfirmRuling);
+        app.resolve_conflict_cmd("c-7f3a 采用乙方");
+        let calls = rec.calls.lock().expect("calls");
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(
+            calls[0], calls[1],
+            "the dialog and the command send one action"
+        );
+        assert_eq!(calls[0].1, ADOPT_B);
+        assert!(
+            app.pid_collab_conflict_list
+                .as_ref()
+                .is_some_and(|list| list.iter().all(|row| row.conflict_id != "c-7f3a")),
+            "the ruled row leaves the list"
+        );
     }
 
     #[test]

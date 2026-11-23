@@ -123,6 +123,7 @@ impl OpenCADStudio {
             last_message: state.last_claim_message.clone(),
             claims_open: self.pid_collab_claims_open,
             conflict_list: self.pid_collab_conflict_list.clone(),
+            ruling: self.pid_collab_ruling.clone(),
         };
     }
 
@@ -414,7 +415,34 @@ impl OpenCADStudio {
             PidCollabMsg::OpenConflictList => self.fetch_conflict_list(),
             PidCollabMsg::CloseConflictList => {
                 self.pid_collab_conflict_list = None;
+                self.pid_collab_ruling = None;
                 self.refresh_collab_view();
+                Task::none()
+            }
+            PidCollabMsg::OpenRuling(id) => {
+                self.pid_collab_ruling = self
+                    .pid_collab_conflict_list
+                    .as_ref()
+                    .and_then(|list| list.iter().find(|item| item.conflict_id == id).cloned())
+                    .map(|item| crate::ui::window::pid_collab::RulingDialog { item, choice: None });
+                self.refresh_collab_view();
+                Task::none()
+            }
+            PidCollabMsg::ChooseRuling(choice) => {
+                if let Some(dialog) = &mut self.pid_collab_ruling {
+                    dialog.choice = Some(choice);
+                }
+                self.refresh_collab_view();
+                Task::none()
+            }
+            PidCollabMsg::ConfirmRuling => {
+                if let Some(dialog) = self.pid_collab_ruling.clone() {
+                    if let Some(choice) = dialog.choice {
+                        self.resolve_conflict_cmd(&format!("{} {choice}", dialog.item.conflict_id));
+                    } else {
+                        self.command_line.push_error("请先选择采用甲方或采用乙方");
+                    }
+                }
                 Task::none()
             }
         }
@@ -682,6 +710,16 @@ impl OpenCADStudio {
                 self.collab
                     .conflicts
                     .retain(|c| c.conflict_id != outcome.conflict_id);
+                if let Some(list) = &mut self.pid_collab_conflict_list {
+                    list.retain(|item| item.conflict_id != outcome.conflict_id);
+                }
+                if self
+                    .pid_collab_ruling
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.item.conflict_id == outcome.conflict_id)
+                {
+                    self.pid_collab_ruling = None;
+                }
                 let msg = format!(
                     "冲突 {} 已裁决（{} → {}，修订 {}）",
                     outcome.conflict_id, outcome.resolution, outcome.value, outcome.revision
