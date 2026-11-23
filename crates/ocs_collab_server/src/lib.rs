@@ -4,6 +4,7 @@
 //! lives here so integration tests can build the same router the binary serves.
 
 pub mod access;
+pub mod auth;
 pub mod bus;
 pub mod http;
 pub mod ops;
@@ -77,6 +78,15 @@ pub struct AppState {
     pub min_protocol_version: u32,
     /// Current wire protocol version spoken by this server.
     pub protocol_version: u32,
+    /// When `false` (default, #67), unregistered users get `UNKNOWN_USER` and
+    /// unregistered drawings get `UNKNOWN_DRAWING`. Pass `--open-mode` to
+    /// enable the legacy open demo/test behavior.
+    pub open_mode: bool,
+    /// When `true` (#68), every session join and privileged HTTP mutation must
+    /// present valid credentials verified against `users.credential_hash`.
+    pub require_auth: bool,
+    /// Whether TLS is active on the server listener (#69).
+    pub tls_enabled: bool,
     pub version: &'static str,
 }
 
@@ -108,8 +118,23 @@ impl AppState {
             repo_id,
             min_protocol_version: ocs_collab::protocol::MIN_PROTOCOL_VERSION,
             protocol_version: ocs_collab::protocol::PROTOCOL_VERSION,
+            open_mode: false,
+            require_auth: false,
+            tls_enabled: false,
             version: env!("CARGO_PKG_VERSION"),
         }
+    }
+
+    /// Builder helper to explicitly enable or disable `--open-mode` (#67).
+    pub fn with_open_mode(mut self, open_mode: bool) -> Self {
+        self.open_mode = open_mode;
+        self
+    }
+
+    /// Builder helper to explicitly enable or disable `--require-auth` (#68).
+    pub fn with_require_auth(mut self, require_auth: bool) -> Self {
+        self.require_auth = require_auth;
+        self
     }
 
     /// Whether the database answered a trivial query just now.

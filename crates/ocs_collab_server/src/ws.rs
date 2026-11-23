@@ -611,6 +611,7 @@ pub async fn handle_message(
         repo_id,
         protocol_version,
         resume_session_id,
+        credential,
         ..
     } = &message
     {
@@ -660,6 +661,7 @@ pub async fn handle_message(
             *since,
             existing_tags,
             resume_session_id.as_deref(),
+            credential.as_deref(),
             now,
         )
         .await;
@@ -797,13 +799,103 @@ async fn hello(
     since: Option<i64>,
     existing_tags: &[String],
     resume_session_id: Option<&str>,
+    credential: Option<&str>,
     now: i64,
 ) -> Vec<Reaction> {
     if let Some(store) = &state.store {
-        // A failed ensure must not block the handshake (appendix A.1); only
-        // the audit writer truly needs the row.
-        if let Err(err) = store.ensure_drawing(drawing_id) {
-            eprintln!("[ocs_collab_server] ensure_drawing({drawing_id}) 失败：{err}");
+        // #67 + #68: Strict registration check (default) and credential check.
+        // Credentials are never logged.
+        let user_record = match store.user_auth(user_id) {
+            Ok(rec) => rec,
+            Err(err) => {
+                eprintln!("[ocs_collab_server] 查询用户 {user_id} 失败：{err}");
+                return vec![
+                    Reaction::Send(error_message(codes::INVALID_MESSAGE, "查询用户登记失败")),
+                    Reaction::Close,
+                ];
+            }
+        };
+        if let Some(ref user) = user_record {
+            if !user.active {
+                println!(
+                    "[ocs_collab_server] 拒绝 hello user={user_id} drawing={drawing_id}：账号已停用"
+                );
+                return vec![
+                    Reaction::Send(error_message(
+                        codes::USER_DISABLED,
+                        "账号已停用，拒绝建立会话",
+                    )),
+                    Reaction::Close,
+                ];
+            }
+            if state.require_auth || !user.credential_hash.is_empty() {
+                let ok = credential
+                    .is_some_and(|secret| crate::auth::verify_credential(secret, &user.credential_hash));
+                if !ok {
+                    println!(
+                        "[ocs_collab_server] 拒绝 hello user={user_id} drawing={drawing_id}：身份核对失败"
+                    );
+                    return vec![
+                        Reaction::Send(error_message(
+                            codes::AUTH_FAILED,
+                            "身份核对失败，请检查凭据",
+                        )),
+                        Reaction::Close,
+                    ];
+                }
+            }
+        } else if !state.open_mode {
+            println!(
+                "[ocs_collab_server] 拒绝 hello user={user_id} drawing={drawing_id}：用户未登记"
+            );
+            return vec![
+                Reaction::Send(error_message(
+                    codes::UNKNOWN_USER,
+                    "用户未登记，拒绝建立会话",
+                )),
+                Reaction::Close,
+            ];
+        } else if state.require_auth {
+            println!(
+                "[ocs_collab_server] 拒绝 hello user={user_id} drawing={drawing_id}：启用了身份核对，未登记用户无法核对凭据"
+            );
+            return vec![
+                Reaction::Send(error_message(
+                    codes::AUTH_FAILED,
+                    "身份核对失败：用户未登记",
+                )),
+                Reaction::Close,
+            ];
+        }
+
+        if !state.open_mode {
+            match store.drawing(drawing_id) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    println!(
+                        "[ocs_collab_server] 拒绝 hello user={user_id} drawing={drawing_id}：图纸未登记"
+                    );
+                    return vec![
+                        Reaction::Send(error_message(
+                            codes::UNKNOWN_DRAWING,
+                            "图纸未登记，拒绝建立会话",
+                        )),
+                        Reaction::Close,
+                    ];
+                }
+                Err(err) => {
+                    eprintln!("[ocs_collab_server] 查询图纸 {drawing_id} 失败：{err}");
+                    return vec![
+                        Reaction::Send(error_message(codes::UNKNOWN_DRAWING, "查询图纸登记失败")),
+                        Reaction::Close,
+                    ];
+                }
+            }
+        } else {
+            // Open mode: auto-register unknown drawings on demand.
+            if let Err(err) = store.ensure_drawing(drawing_id) {
+                eprintln!("[ocs_collab_server] ensure_drawing({drawing_id}) 失败：{err}");
+            }
         }
     }
     // Join the room and read its revision as one step, with the drawing
@@ -1168,6 +1260,7 @@ async fn hello(
                     }),
                     protocol_version: Some(state.protocol_version),
                     display_name: session.display_name.clone(),
+                    open_mode: Some(state.open_mode),
                 }),
             ]);
             // What the session missed, each op as the room first heard it,
@@ -2087,6 +2180,7 @@ mod tests {
             ":memory:",
             SessionConfig::default(),
         )
+        .with_open_mode(true)
     }
 
     fn storeless_state() -> AppState {
@@ -2118,6 +2212,7 @@ mod tests {
             repo_id: None,
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
+            credential: None,
         }
     }
 
@@ -2842,6 +2937,7 @@ mod tests {
                 repo_id: None,
                 protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
                 resume_session_id: None,
+                credential: None,
             },
             T0 + 2,
         )
@@ -3531,7 +3627,8 @@ mod tests {
         let store = Store::open_in_memory().expect("memory store");
         let old = store.repo_id().expect("repo id");
         let renewed = store.renew_repo_id().expect("renewed");
-        let state = AppState::new(Some(store), None, ":memory:", SessionConfig::default());
+        let state = AppState::new(Some(store), None, ":memory:", SessionConfig::default())
+            .with_open_mode(true);
         assert_eq!(state.repo_id, renewed);
 
         let mut first = conn();

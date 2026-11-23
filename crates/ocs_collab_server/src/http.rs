@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
@@ -50,19 +50,33 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// `GET /health` → 200 `{"ok":true,"db":"ok","version":"..."}`, or 503 when the
-/// database is unusable (appendix A.1).
+/// `GET /health` → 200 `{"ok":true,"db":"ok","version":"...","open_mode":...,"auth_enabled":...,"tls_enabled":...}`,
+/// or 503 when the database is unusable (appendix A.1, #67, #68, #69).
 async fn health(State(state): State<Arc<AppState>>) -> Response {
     if state.db_healthy() {
         (
             StatusCode::OK,
-            Json(json!({ "ok": true, "db": "ok", "version": state.version })),
+            Json(json!({
+                "ok": true,
+                "db": "ok",
+                "version": state.version,
+                "open_mode": state.open_mode,
+                "auth_enabled": state.require_auth,
+                "tls_enabled": state.tls_enabled,
+            })),
         )
             .into_response()
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "ok": false, "db": "error", "version": state.version })),
+            Json(json!({
+                "ok": false,
+                "db": "error",
+                "version": state.version,
+                "open_mode": state.open_mode,
+                "auth_enabled": state.require_auth,
+                "tls_enabled": state.tls_enabled,
+            })),
         )
             .into_response()
     }
@@ -104,7 +118,46 @@ async fn create_session(
         return error_response(StatusCode::SERVICE_UNAVAILABLE, codes::SESSION_UNKNOWN, "数据库不可用");
     };
 
-    if let Err(err) = store.ensure_drawing(&body.drawing_id) {
+    // #67: In strict mode (default), reject unregistered users and drawings.
+    if !state.open_mode {
+        match store.user_auth(&body.user_id) {
+            Ok(Some(user)) if !user.active => {
+                return error_response(StatusCode::FORBIDDEN, codes::USER_DISABLED, "账号已停用");
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    codes::UNKNOWN_USER,
+                    "用户未登记",
+                );
+            }
+            Err(err) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    codes::INVALID_MESSAGE,
+                    &err,
+                );
+            }
+        }
+        match store.drawing(&body.drawing_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return error_response(
+                    StatusCode::NOT_FOUND,
+                    codes::UNKNOWN_DRAWING,
+                    "图纸未登记",
+                );
+            }
+            Err(err) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    codes::UNKNOWN_DRAWING,
+                    &err,
+                );
+            }
+        }
+    } else if let Err(err) = store.ensure_drawing(&body.drawing_id) {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, codes::UNKNOWN_DRAWING, &err);
     }
 
@@ -247,6 +300,132 @@ async fn permission_check(
 struct DrawingStateBody {
     user_id: Option<String>,
     state: Option<String>,
+    #[serde(default)]
+    credential: Option<String>,
+}
+
+/// Extracts and verifies the HTTP caller's identity for privileged mutations
+/// (`POST /drawing/{id}/state`, `POST /conflicts/{id}/resolve`, #68).
+///
+/// Accepts credentials via:
+/// - `Authorization: Bearer <user_id>:<credential>`
+/// - `Authorization: Basic <base64(user_id:credential)>`
+/// - `X-Collab-User` + `X-Collab-Credential` headers
+/// - JSON body `credential` field alongside `user_id` / `resolved_by`
+///
+/// Returns the verified `user_id` so the operation actor always comes from the
+/// authenticated identity. Never logs credentials.
+#[allow(clippy::result_large_err)]
+fn authenticate_http_actor(
+    state: &AppState,
+    store: &crate::store::Store,
+    headers: &HeaderMap,
+    body_user: Option<String>,
+    body_credential: Option<String>,
+    missing_user_msg: &str,
+) -> Result<String, Response> {
+    let mut header_user: Option<String> = None;
+    let mut header_secret: Option<String> = None;
+
+    if let Some(auth_val) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(token) = auth_val.strip_prefix("Bearer ").map(str::trim) {
+            if let Some((u, s)) = token.split_once(':') {
+                header_user = Some(u.to_owned());
+                header_secret = Some(s.to_owned());
+            } else if !token.is_empty() {
+                header_secret = Some(token.to_owned());
+            }
+        } else if let Some(b64) = auth_val.strip_prefix("Basic ").map(str::trim) {
+            if let Some(raw) = crate::auth::base64_decode(b64) {
+                if let Ok(text) = String::from_utf8(raw) {
+                    if let Some((u, s)) = text.split_once(':') {
+                        header_user = Some(u.to_owned());
+                        header_secret = Some(s.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    if header_user.is_none() {
+        header_user = headers
+            .get("x-collab-user")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+    }
+    if header_secret.is_none() {
+        header_secret = headers
+            .get("x-collab-credential")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+    }
+
+    // If both header and body name a user and they disagree, reject as AUTH_FAILED.
+    if let (Some(hu), Some(bu)) = (&header_user, &body_user) {
+        if hu != bu {
+            return Err(error_response(
+                StatusCode::UNAUTHORIZED,
+                codes::AUTH_FAILED,
+                "身份核对失败：请求头身份与正文操作人不一致",
+            ));
+        }
+    }
+
+    let actor = match header_user.or(body_user) {
+        Some(u) if !u.is_empty() => u,
+        _ => {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                codes::INVALID_MESSAGE,
+                missing_user_msg,
+            ))
+        }
+    };
+    let secret = header_secret.or(body_credential);
+
+    match store.user_auth(&actor) {
+        Ok(Some(user)) => {
+            if !user.active {
+                return Err(error_response(
+                    StatusCode::FORBIDDEN,
+                    codes::USER_DISABLED,
+                    "账号已停用",
+                ));
+            }
+            if state.require_auth || !user.credential_hash.is_empty() {
+                let ok = secret
+                    .as_deref()
+                    .is_some_and(|s| crate::auth::verify_credential(s, &user.credential_hash));
+                if !ok {
+                    return Err(error_response(
+                        StatusCode::UNAUTHORIZED,
+                        codes::AUTH_FAILED,
+                        "身份核对失败",
+                    ));
+                }
+            }
+            Ok(user.user_id)
+        }
+        Ok(None) => {
+            if state.require_auth {
+                Err(error_response(
+                    StatusCode::UNAUTHORIZED,
+                    codes::AUTH_FAILED,
+                    "身份核对失败：用户未登记",
+                ))
+            } else {
+                // Let downstream perm::evaluate return its contract 400 PERM_UNKNOWN_SUBJECT.
+                Ok(actor)
+            }
+        }
+        Err(err) => Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            codes::INVALID_MESSAGE,
+            &err,
+        )),
+    }
 }
 
 /// `POST /drawing/{id}/state` — gated on 授权配置. The requested state value
@@ -255,6 +434,7 @@ struct DrawingStateBody {
 async fn drawing_state(
     State(state): State<Arc<AppState>>,
     Path(drawing_id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<DrawingStateBody>,
 ) -> Response {
     let Some(store) = state.store.clone() else {
@@ -264,12 +444,16 @@ async fn drawing_state(
             "数据库不可用",
         );
     };
-    let Some(user_id) = body.user_id else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            codes::INVALID_MESSAGE,
-            "缺少 user_id",
-        );
+    let user_id = match authenticate_http_actor(
+        &state,
+        &store,
+        &headers,
+        body.user_id,
+        body.credential,
+        "缺少 user_id",
+    ) {
+        Ok(uid) => uid,
+        Err(resp) => return resp,
     };
 
     // Switching state is 授权配置, judged without the state tier: a 只读
@@ -674,6 +858,8 @@ struct ResolveBody {
     /// payload, `resolved_value` as appendix A.1 does.
     value: Option<String>,
     resolved_value: Option<String>,
+    #[serde(default)]
+    credential: Option<String>,
 }
 
 /// `POST /conflicts/{id}/resolve` — body `{resolution, resolved_by, value?}`
@@ -687,13 +873,22 @@ struct ResolveBody {
 async fn conflict_resolve(
     State(state): State<Arc<AppState>>,
     Path(conflict_id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<ResolveBody>,
 ) -> Response {
     let Some(store) = state.store.clone() else {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, codes::INVALID_MESSAGE, "数据库不可用");
     };
-    let Some(resolved_by) = body.resolved_by.or(body.user_id) else {
-        return error_response(StatusCode::BAD_REQUEST, codes::INVALID_MESSAGE, "缺少 resolved_by");
+    let resolved_by = match authenticate_http_actor(
+        &state,
+        &store,
+        &headers,
+        body.resolved_by.or(body.user_id),
+        body.credential,
+        "缺少 resolved_by",
+    ) {
+        Ok(uid) => uid,
+        Err(resp) => return resp,
     };
     let Some(resolution) = body.resolution else {
         return error_response(StatusCode::BAD_REQUEST, codes::INVALID_MESSAGE, "缺少 resolution");
@@ -820,12 +1015,15 @@ mod tests {
 
     fn state_with_memory_store() -> Arc<AppState> {
         let store = Store::open_in_memory().expect("memory store");
-        Arc::new(AppState::new(
-            Some(store),
-            None,
-            ":memory:",
-            SessionConfig::default(),
-        ))
+        Arc::new(
+            AppState::new(
+                Some(store),
+                None,
+                ":memory:",
+                SessionConfig::default(),
+            )
+            .with_open_mode(true),
+        )
     }
 
     fn state_without_store() -> Arc<AppState> {
@@ -1369,9 +1567,11 @@ mod tests {
         let response = drawing_state(
             State(state.clone()),
             Path("d-a1-coop".into()),
+            HeaderMap::new(),
             Json(DrawingStateBody {
                 user_id: Some("u-admin".into()),
                 state: Some("只读".into()),
+                credential: None,
             }),
         )
         .await;
@@ -1390,9 +1590,11 @@ mod tests {
         let response = drawing_state(
             State(state.clone()),
             Path("d-a1-coop".into()),
+            HeaderMap::new(),
             Json(DrawingStateBody {
                 user_id: Some("u-admin".into()),
                 state: Some("四态".into()),
+                credential: None,
             }),
         )
         .await;
@@ -1413,9 +1615,11 @@ mod tests {
         let response = drawing_state(
             State(state),
             Path("d-a1-coop".into()),
+            HeaderMap::new(),
             Json(DrawingStateBody {
                 user_id: None,
                 state: Some("只读".into()),
+                credential: None,
             }),
         )
         .await;
@@ -1429,9 +1633,11 @@ mod tests {
         let response = drawing_state(
             State(state),
             Path("d-a1-coop".into()),
+            HeaderMap::new(),
             Json(DrawingStateBody {
                 user_id: Some("u-view".into()),
                 state: Some("只读".into()),
+                credential: None,
             }),
         )
         .await;
@@ -1486,9 +1692,11 @@ mod tests {
         let response = drawing_state(
             State(state),
             Path("d-missing".into()),
+            HeaderMap::new(),
             Json(DrawingStateBody {
                 user_id: Some("u-admin".into()),
                 state: Some("只读".into()),
+                credential: None,
             }),
         )
         .await;
@@ -1523,6 +1731,7 @@ mod tests {
                 repo_id: None,
                 protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
                 resume_session_id: None,
+                credential: None,
             },
             now,
         )
@@ -1541,9 +1750,11 @@ mod tests {
         drawing_state(
             State(state.clone()),
             Path("d-a1-coop".into()),
+            HeaderMap::new(),
             Json(DrawingStateBody {
                 user_id: Some("u-admin".into()),
                 state: Some(next.into()),
+                credential: None,
             }),
         )
         .await
@@ -1619,6 +1830,7 @@ mod tests {
                 repo_id: None,
                 protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
                 resume_session_id: None,
+                credential: None,
             },
             now,
         )
@@ -2022,6 +2234,7 @@ mod tests {
             repo_id: None,
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
+            credential: None,
         };
         crate::ws::handle_message(&state, &mut conn, hello, ocs_collab::now_unix()).await;
 
@@ -2298,6 +2511,7 @@ mod tests {
                 repo_id: None,
                 protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
                 resume_session_id: None,
+                credential: None,
             };
             ws::handle_message(&state, &mut conn, hello, 1_700_000_000).await;
             sessions.push(conn);
@@ -2361,12 +2575,14 @@ mod tests {
         let response = conflict_resolve(
             State(state.clone()),
             Path(conflict_id.to_owned()),
+            HeaderMap::new(),
             Json(ResolveBody {
                 resolution: Some(resolution.into()),
                 resolved_by: Some(by.into()),
                 user_id: None,
                 value: value.map(str::to_owned),
                 resolved_value: None,
+                credential: None,
             }),
         )
         .await;
@@ -2640,6 +2856,7 @@ mod tests {
             repo_id: None,
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
+            credential: None,
         };
         crate::ws::handle_message(state, &mut conn, hello, now).await;
         assert!(conn.session.is_some(), "{user_id} is let in");
@@ -3203,8 +3420,15 @@ mod tests {
         let rows = audit_rows(port, "tag=P-2001").await;
         assert_eq!(rows[0]["display_name"], "工艺甲");
 
-        // 7. Unregistered user gets empty display_name (never empty parentheses).
-        let (unreg, unreg_reactions) = live_conn(&state, "u-unregistered", now + 7).await;
+        // 7. Unregistered user in open mode gets empty display_name (never empty parentheses).
+        let open_state = AppState::new(
+            Some(Store::open_in_memory().expect("store")),
+            None,
+            ":memory:",
+            SessionConfig::default(),
+        )
+        .with_open_mode(true);
+        let (unreg, unreg_reactions) = live_conn(&open_state, "u-unregistered", now + 7).await;
         let unreg_dn = unreg_reactions
             .iter()
             .find_map(|r| match r {
@@ -3498,9 +3722,11 @@ mod tests {
         let denied_switch = drawing_state(
             State(state.clone()),
             Path("d-a1-coop".into()),
+            HeaderMap::new(),
             Json(DrawingStateBody {
                 user_id: Some("u-proc".into()),
                 state: Some("协同编辑".into()),
+                credential: None,
             }),
         )
         .await;
@@ -3571,5 +3797,262 @@ mod tests {
             "second editor must receive WriteRestored when first holder expires: {swept:?}"
         );
         assert!(applied_in(&write(&state, &mut editor_b, "op-handoff", "2.0MPa").await));
+    }
+
+    /// #67: Strict mode is default: unregistered users get `UNKNOWN_USER` and
+    /// unregistered drawings get `UNKNOWN_DRAWING`, with no session or drawing
+    /// row created. `--open-mode` explicitly enables open access and is
+    /// reported in both `Welcome.open_mode` and `GET /health`.
+    #[tokio::test]
+    async fn strict_mode_rejects_unregistered_users_and_drawings_and_open_mode_reports_status() {
+        let state = seeded_state();
+        assert!(!state.open_mode, "strict mode must be default");
+        let port = serve(&state).await;
+        let now = ocs_collab::now_unix();
+
+        let (status, health) = http_exchange(port, "GET", "/health").await;
+        assert_eq!(status, 200);
+        assert_eq!(health["open_mode"], false);
+
+        let before_drawings = state
+            .store
+            .as_ref()
+            .expect("store")
+            .drawing_ids()
+            .expect("ids")
+            .len();
+
+        // Unregistered user -> UNKNOWN_USER + Close, no session.
+        let mut c1 = crate::ws::Connection::new("127.0.0.1");
+        let r1 = crate::ws::handle_message(
+            &state,
+            &mut c1,
+            off_the_wire(json!({
+                "type": "hello", "user_id": "u-stranger", "drawing_id": "d-a1-coop", "mode": "协同编辑"
+            })),
+            now,
+        )
+        .await;
+        assert!(c1.session.is_none());
+        assert!(r1.iter().any(|r| matches!(
+            r,
+            crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error { code, .. })
+                if code == codes::UNKNOWN_USER
+        )));
+        assert!(r1.iter().any(|r| matches!(r, crate::ws::Reaction::Close)));
+
+        // Registered user + unregistered drawing -> UNKNOWN_DRAWING + Close, no drawing auto-created.
+        let mut c2 = crate::ws::Connection::new("127.0.0.1");
+        let r2 = crate::ws::handle_message(
+            &state,
+            &mut c2,
+            off_the_wire(json!({
+                "type": "hello", "user_id": "u-proc", "drawing_id": "d-unregistered", "mode": "协同编辑"
+            })),
+            now,
+        )
+        .await;
+        assert!(c2.session.is_none());
+        assert!(r2.iter().any(|r| matches!(
+            r,
+            crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error { code, .. })
+                if code == codes::UNKNOWN_DRAWING
+        )));
+        assert_eq!(
+            state
+                .store
+                .as_ref()
+                .expect("store")
+                .drawing_ids()
+                .expect("ids")
+                .len(),
+            before_drawings,
+            "strict mode must not insert unregistered drawing rows"
+        );
+
+        // Registered user + registered drawing -> Welcome with open_mode = Some(false).
+        let (c3, r3) = live_conn(&state, "u-proc", now).await;
+        assert!(c3.session.is_some());
+        assert!(r3.iter().any(|r| matches!(
+            r,
+            crate::ws::Reaction::Send(ocs_collab::ServerMessage::Welcome {
+                open_mode: Some(false),
+                ..
+            })
+        )));
+
+        // Explicit open_mode -> Welcome & /health report open_mode = true.
+        let open = Arc::new(
+            AppState::new(
+                Some(Store::open_in_memory().expect("store")),
+                None,
+                ":memory:",
+                SessionConfig::default(),
+            )
+            .with_open_mode(true),
+        );
+        let open_port = serve(&open).await;
+        let (_, open_health) = http_exchange(open_port, "GET", "/health").await;
+        assert_eq!(open_health["open_mode"], true);
+        let (c4, r4) = live_conn(&open, "u-anyone", now).await;
+        assert!(c4.session.is_some());
+        assert!(r4.iter().any(|r| matches!(
+            r,
+            crate::ws::Reaction::Send(ocs_collab::ServerMessage::Welcome {
+                open_mode: Some(true),
+                ..
+            })
+        )));
+    }
+
+    /// #68: Credential authentication on WS join and HTTP privileged endpoints
+    /// (`/drawing/{id}/state`, `/conflicts/{id}/resolve`), disabled account
+    /// rejection, hash-only SQLite storage, and verified identity derivation.
+    #[tokio::test]
+    async fn credential_authentication_guards_ws_and_privileged_http_endpoints() {
+        let store = Store::open_in_memory().expect("store");
+        let seed: crate::store::SeedDoc = serde_json::from_value(json!({
+            "users": [
+                {"user_id": "u-admin", "display_name": "管理员", "role": "系统管理员", "credential": "admin-secret-42", "active": true},
+                {"user_id": "u-proc", "display_name": "工艺甲", "role": "工艺设计人员", "credential": "proc-secret-99", "active": true},
+                {"user_id": "u-disabled", "display_name": "离职员工", "role": "工艺设计人员", "credential": "old-secret", "active": false}
+            ],
+            "pbs_nodes": [{"node_id": "n-plant", "name": "全厂", "node_type": "项目"}],
+            "pbs_acl": [
+                {"node_id": "n-plant", "subject": "u-admin", "permission": "编辑", "allowed": true},
+                {"node_id": "n-plant", "subject": "u-proc", "permission": "编辑", "allowed": true}
+            ],
+            "drawings": [
+                {"drawing_id": "d-a1-coop", "file_name": "d-a1-coop.dwg", "pbs_node_id": "n-plant", "state": "协同编辑"}
+            ]
+        }))
+        .expect("seed");
+        store.seed(&seed).expect("apply seed");
+
+        // Verify SQLite stores ONLY hash, never plaintext secret!
+        let rec = store.user_auth("u-admin").expect("auth").expect("exists");
+        assert!(rec.credential_hash.starts_with("pbkdf2_sha256$"));
+        assert!(!rec.credential_hash.contains("admin-secret-42"));
+
+        let state = Arc::new(
+            AppState::new(Some(store), None, ":memory:", SessionConfig::default())
+                .with_require_auth(true),
+        );
+        let now = ocs_collab::now_unix();
+
+        // 1. Wrong credential -> AUTH_FAILED + Close.
+        let mut bad = crate::ws::Connection::new("127.0.0.1");
+        let r_bad = crate::ws::handle_message(
+            &state,
+            &mut bad,
+            off_the_wire(json!({
+                "type": "hello", "user_id": "u-proc", "drawing_id": "d-a1-coop",
+                "mode": "协同编辑", "credential": "wrong-pass"
+            })),
+            now,
+        )
+        .await;
+        assert!(bad.session.is_none());
+        assert!(r_bad.iter().any(|r| matches!(
+            r,
+            crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error { code, .. })
+                if code == codes::AUTH_FAILED
+        )));
+        assert!(r_bad.iter().any(|r| matches!(r, crate::ws::Reaction::Close)));
+
+        // 2. Disabled account -> USER_DISABLED + Close (even with valid credential!).
+        let mut dis = crate::ws::Connection::new("127.0.0.1");
+        let r_dis = crate::ws::handle_message(
+            &state,
+            &mut dis,
+            off_the_wire(json!({
+                "type": "hello", "user_id": "u-disabled", "drawing_id": "d-a1-coop",
+                "mode": "协同编辑", "credential": "old-secret"
+            })),
+            now,
+        )
+        .await;
+        assert!(dis.session.is_none());
+        assert!(r_dis.iter().any(|r| matches!(
+            r,
+            crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error { code, .. })
+                if code == codes::USER_DISABLED
+        )));
+
+        // 3. Valid credential -> Welcome!
+        let mut ok_conn = crate::ws::Connection::new("127.0.0.1");
+        let r_ok = crate::ws::handle_message(
+            &state,
+            &mut ok_conn,
+            off_the_wire(json!({
+                "type": "hello", "user_id": "u-proc", "drawing_id": "d-a1-coop",
+                "mode": "协同编辑", "credential": "proc-secret-99"
+            })),
+            now,
+        )
+        .await;
+        assert!(ok_conn.session.is_some(), "{r_ok:?}");
+
+        // 4. HTTP /drawing/{id}/state without credential -> 401 AUTH_FAILED.
+        let unauth = drawing_state(
+            State(state.clone()),
+            Path("d-a1-coop".into()),
+            HeaderMap::new(),
+            Json(DrawingStateBody {
+                user_id: Some("u-admin".into()),
+                state: Some("只读".into()),
+                credential: None,
+            }),
+        )
+        .await;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // 5. HTTP /drawing/{id}/state with Bearer <user>:<secret> (no user_id in body!) -> 200,
+        // and audit actor is derived from verified Bearer identity ("u-admin")!
+        let mut auth_headers = HeaderMap::new();
+        auth_headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer u-admin:admin-secret-42".parse().expect("hdr"),
+        );
+        let authed = drawing_state(
+            State(state.clone()),
+            Path("d-a1-coop".into()),
+            auth_headers.clone(),
+            Json(DrawingStateBody {
+                user_id: None,
+                state: Some("只读".into()),
+                credential: None,
+            }),
+        )
+        .await;
+        assert_eq!(authed.status(), StatusCode::OK);
+        let audit = state
+            .store
+            .as_ref()
+            .expect("store")
+            .audit_query(&AuditQuery {
+                object_ref: Some("d-a1-coop".into()),
+                ..AuditQuery::default()
+            })
+            .expect("audit");
+        assert_eq!(audit.items[0].user_id, "u-admin");
+        assert!(!audit.items[0].change_text.contains("admin-secret-42"));
+
+        // 6. HTTP /conflicts/{id}/resolve without credential -> 401 AUTH_FAILED.
+        let unauth_resolve = conflict_resolve(
+            State(state.clone()),
+            Path("c-nonexistent".into()),
+            HeaderMap::new(),
+            Json(ResolveBody {
+                resolution: Some("采用甲方".into()),
+                resolved_by: Some("u-admin".into()),
+                user_id: None,
+                value: None,
+                resolved_value: None,
+                credential: None,
+            }),
+        )
+        .await;
+        assert_eq!(unauth_resolve.status(), StatusCode::UNAUTHORIZED);
     }
 }

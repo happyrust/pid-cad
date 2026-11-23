@@ -54,6 +54,11 @@ struct Cli {
     /// Give the database a new repository id before serving it: the start
     /// after a backup has been restored.
     new_repo_id: bool,
+    /// Open mode (#67): accept unregistered users and drawings (for demos/tests).
+    /// Default is strict mode (`false`).
+    open_mode: bool,
+    /// Require credentials verified against `users.credential_hash` (#68).
+    require_auth: bool,
 }
 
 fn default_db_path() -> String {
@@ -70,9 +75,10 @@ fn default_db_path() -> String {
 fn usage() -> &'static str {
     "ocs_collab_server --port <port> --db <path> [--bind <IP 地址>] \
      [--heartbeat-timeout <seconds>] [--claim-ttl <seconds>] [--seed <json>] \
-     [--tie-window-ms <milliseconds>] [--new-repo-id]\n\
-     --bind 默认 127.0.0.1，只有本机能连。服务器没有登录验证、不加密，\
-     监听别的地址（如 0.0.0.0）只适合可信内网。\n\
+     [--tie-window-ms <milliseconds>] [--new-repo-id] [--open-mode] [--require-auth]\n\
+     --bind 默认 127.0.0.1，只有本机能连。未启用身份核对/加密时仅适合可信内网。\n\
+     --open-mode 打开开放模式（允许未登记用户与图纸入会，仅用于演示与测试；缺省为严格模式）。\n\
+     --require-auth 强制所有入会与管理接口核对用户凭据（凭据在库中仅存散列）。\n\
      --new-repo-id 给库换一个新的库标识后照常启动。从备份恢复库文件之后用它启动一次，\
      记着旧库标识的图纸加入时得到 REPO_MISMATCH；每次带它启动都会再换一次。"
 }
@@ -87,6 +93,8 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
         seed: None,
         tie_window_ms: 0,
         new_repo_id: false,
+        open_mode: false,
+        require_auth: false,
     };
 
     let mut iter = args.into_iter();
@@ -135,6 +143,8 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
                     .map_err(|_| format!("--tie-window-ms 需要非负整数毫秒数，收到 {raw}"))?;
             }
             "--new-repo-id" => cli.new_repo_id = true,
+            "--open-mode" => cli.open_mode = true,
+            "--require-auth" => cli.require_auth = true,
             "--help" | "-h" => return Err(usage().to_owned()),
             other => return Err(format!("未知参数 {other}；用法：{}", usage())),
         }
@@ -178,6 +188,8 @@ fn build_state(cli: &Cli) -> AppState {
             }
             println!("[ocs_collab_server] 数据库 {}", cli.db);
             AppState::new(Some(store), None, cli.db.clone(), session_config)
+                .with_open_mode(cli.open_mode)
+                .with_require_auth(cli.require_auth)
         }
         Err(err) => {
             eprintln!("[ocs_collab_server] 数据库初始化失败：{err}");
@@ -414,8 +426,8 @@ mod tests {
         for said in [
             "--bind <IP 地址>",
             "默认 127.0.0.1",
-            "没有登录验证",
-            "不加密",
+            "--open-mode",
+            "--require-auth",
             "可信内网",
         ] {
             assert!(usage.contains(said), "{said} is not in {usage}");
@@ -501,6 +513,8 @@ mod tests {
             seed: None,
             tie_window_ms: 0,
             new_repo_id: false,
+            open_mode: false,
+            require_auth: false,
         };
         let state = build_state(&cli);
         assert!(state.store.is_none());
@@ -521,6 +535,8 @@ mod tests {
             seed: None,
             tie_window_ms: 0,
             new_repo_id: false,
+            open_mode: false,
+            require_auth: false,
         };
         let state = build_state(&cli);
         assert!(state.db_healthy());
@@ -553,6 +569,7 @@ mod tests {
     fn cli_on(db: &str, new_repo_id: bool) -> Cli {
         Cli {
             new_repo_id,
+            open_mode: true,
             ..parse_args(args(&["--db", db])).expect("flags parse")
         }
     }
@@ -583,6 +600,7 @@ mod tests {
             repo_id: repo_id.map(str::to_owned),
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
+            credential: None,
         }
     }
 

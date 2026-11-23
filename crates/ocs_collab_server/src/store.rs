@@ -45,6 +45,31 @@ pub struct SeedUser {
     pub role: String,
     #[serde(default)]
     pub company: String,
+    /// Pre-hashed credential (`pbkdf2_sha256$...`, #68).
+    #[serde(default)]
+    pub credential_hash: Option<String>,
+    /// Plaintext credential in seed files — immediately hashed before storage,
+    /// NEVER persisted in plaintext (#68).
+    #[serde(default)]
+    pub credential: Option<String>,
+    /// Whether this account is active (`false` = disabled account rejected on join, #68).
+    #[serde(default = "default_active")]
+    pub active: bool,
+}
+
+fn default_active() -> bool {
+    true
+}
+
+/// User authentication record read from `users` (#67, #68).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserAuthRecord {
+    pub user_id: String,
+    pub display_name: String,
+    pub role: String,
+    pub company: String,
+    pub credential_hash: String,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -316,14 +341,33 @@ impl Store {
             .map_err(|err| format!("begin seed: {err}"))?;
 
         for user in &doc.users {
+            let hash = if let Some(h) = &user.credential_hash {
+                h.clone()
+            } else if let Some(secret) = &user.credential {
+                crate::auth::hash_credential(secret)
+            } else {
+                String::new()
+            };
             tx.execute(
-                "INSERT INTO users (user_id, display_name, role, company)
-                 VALUES (?1, ?2, ?3, ?4)
+                "INSERT INTO users (user_id, display_name, role, company, credential_hash, active)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(user_id) DO UPDATE SET
                    display_name = excluded.display_name,
                    role = excluded.role,
-                   company = excluded.company",
-                params![user.user_id, user.display_name, user.role, user.company],
+                   company = excluded.company,
+                   credential_hash = CASE
+                     WHEN excluded.credential_hash != '' THEN excluded.credential_hash
+                     ELSE users.credential_hash
+                   END,
+                   active = excluded.active",
+                params![
+                    user.user_id,
+                    user.display_name,
+                    user.role,
+                    user.company,
+                    hash,
+                    i64::from(user.active)
+                ],
             )
             .map_err(|err| format!("seed user {}: {err}", user.user_id))?;
         }
@@ -405,6 +449,28 @@ impl Store {
         )
         .optional()
         .map_err(|err| format!("lookup user display_name {user_id}: {err}"))
+    }
+
+    /// Full authentication & profile record for `user_id` (#67, #68).
+    pub fn user_auth(&self, user_id: &str) -> Result<Option<UserAuthRecord>, String> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT user_id, display_name, role, company, credential_hash, active
+             FROM users WHERE user_id = ?1",
+            params![user_id],
+            |row| {
+                Ok(UserAuthRecord {
+                    user_id: row.get(0)?,
+                    display_name: row.get(1)?,
+                    role: row.get(2)?,
+                    company: row.get(3)?,
+                    credential_hash: row.get(4)?,
+                    active: row.get::<_, i64>(5)? != 0,
+                })
+            },
+        )
+        .optional()
+        .map_err(|err| format!("lookup user auth {user_id}: {err}"))
     }
 
     /// `(pbs_node_id, state, revision)` for a drawing.
@@ -1359,10 +1425,12 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         r#"
 CREATE TABLE IF NOT EXISTS users (
-  user_id      TEXT PRIMARY KEY,
-  display_name TEXT NOT NULL,
-  role         TEXT NOT NULL,
-  company      TEXT NOT NULL DEFAULT ''
+  user_id         TEXT PRIMARY KEY,
+  display_name    TEXT NOT NULL,
+  role            TEXT NOT NULL,
+  company         TEXT NOT NULL DEFAULT '',
+  credential_hash TEXT NOT NULL DEFAULT '',
+  active          INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS pbs_nodes (
@@ -1511,6 +1579,8 @@ END;
     for ddl in [
         "ALTER TABLE conflicts ADD COLUMN user_a TEXT",
         "ALTER TABLE conflicts ADD COLUMN user_b TEXT",
+        "ALTER TABLE users ADD COLUMN credential_hash TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
     ] {
         let _ = conn.execute(ddl, []);
     }

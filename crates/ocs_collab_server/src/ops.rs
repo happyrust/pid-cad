@@ -1778,6 +1778,7 @@ mod tests {
             ":memory:",
             SessionConfig::default(),
         )
+        .with_open_mode(true)
     }
 
     /// A server started with `--tie-window-ms`.
@@ -1800,6 +1801,7 @@ mod tests {
             repo_id: None,
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
+            credential: None,
         };
         handle_message(state, &mut conn, hello, T0).await;
         assert!(conn.session.is_some(), "hello must open a session");
@@ -1953,6 +1955,7 @@ mod tests {
             repo_id: None,
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
+            credential: None,
         };
         let welcome = handle_message(&state, &mut late, hello, T0).await;
         let told = welcome
@@ -2538,6 +2541,7 @@ mod tests {
             repo_id: Some(state.repo_id.clone()),
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
+            credential: None,
         };
         handle_message(state, &mut conn, hello, T0 + 5).await
     }
@@ -2633,6 +2637,7 @@ mod tests {
             repo_id: Some(state.repo_id.clone()),
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
+            credential: None,
         };
         let reactions = handle_message(&state, &mut late, hello, T0 + 5).await;
         let (_, _, replayed) = welcomed(&reactions);
@@ -2789,6 +2794,7 @@ mod tests {
             repo_id: None,
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
+            credential: None,
         };
         handle_message(state, &mut conn, hello, T0).await;
         assert!(conn.session.is_some(), "hello must open a session");
@@ -3079,6 +3085,7 @@ mod tests {
             repo_id: Some(state.repo_id.clone()),
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
+            credential: None,
         };
         handle_message(state, &mut conn, hello, T0).await;
         assert!(conn.session.is_some(), "hello must open a session");
@@ -3411,6 +3418,7 @@ mod tests {
                 path.display().to_string(),
                 SessionConfig::default(),
             )
+            .with_open_mode(true)
         };
 
         let before = started();
@@ -3620,7 +3628,8 @@ mod tests {
     #[tokio::test]
     async fn pipe_run_overrides_and_tag_source_survive_op_log_replay() {
         let store = Store::open_in_memory().expect("memory store");
-        let state = AppState::new(Some(store), None, ":memory:", SessionConfig::default());
+        let state = AppState::new(Some(store), None, ":memory:", SessionConfig::default())
+            .with_open_mode(true);
         let mut a = join(&state, "u1").await;
 
         let _ = submit(

@@ -78,6 +78,9 @@ pub enum ClientMessage {
         /// user and drawing; transfers its live claims to the new session.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume_session_id: Option<String>,
+        /// Authentication credential/token for `user_id` (#68). Never logged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential: Option<String>,
     },
     /// Keep-alive, expected every 15 s.
     Heartbeat { session_id: String },
@@ -147,6 +150,10 @@ pub enum ServerMessage {
         /// Registered display name of the joining user (empty when unregistered, #27).
         #[serde(default, skip_serializing_if = "String::is_empty")]
         display_name: String,
+        /// Whether the server is running in `--open-mode` (accepting
+        /// unregistered users/drawings, #67).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open_mode: Option<bool>,
     },
     /// Structured failure. `level` names the first denying tier when the
     /// failure came out of the permission chain.
@@ -375,6 +382,10 @@ pub mod codes {
     /// The client's `hello.protocol_version` is outside the range this server
     /// supports; no editing session is established.
     pub const PROTOCOL_VERSION_UNSUPPORTED: &str = "PROTOCOL_VERSION_UNSUPPORTED";
+    /// Credential/token verification failed (#68).
+    pub const AUTH_FAILED: &str = "AUTH_FAILED";
+    /// The user account is disabled (`active = 0`, #68).
+    pub const USER_DISABLED: &str = "USER_DISABLED";
 
     /// Every error/reason code registered in this protocol crate.
     /// Shared fixture tests assert that each one has a frame example.
@@ -408,6 +419,8 @@ pub mod codes {
         CLAIM_HELD,
         DUPLICATE_INFLOW_CONNECTOR,
         PROTOCOL_VERSION_UNSUPPORTED,
+        AUTH_FAILED,
+        USER_DISABLED,
     ];
 }
 
@@ -513,6 +526,7 @@ mod tests {
             align_refused: None,
             protocol_version: Some(PROTOCOL_VERSION),
             display_name: "工艺甲".into(),
+            open_mode: Some(false),
         };
         let value: Value = serde_json::to_value(&msg).expect("welcome must serialize");
         assert_eq!(value["type"], "welcome");
@@ -575,6 +589,7 @@ mod tests {
             align_refused: None,
             protocol_version: None,
             display_name: String::new(),
+            open_mode: None,
         };
         let value: Value = serde_json::to_value(&replaying).expect("serialize");
         assert_eq!(value["replay_from"], 6);

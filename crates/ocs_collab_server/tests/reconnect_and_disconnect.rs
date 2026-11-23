@@ -95,7 +95,7 @@ impl RawWs {
 
 async fn start_server(config: SessionConfig) -> (SocketAddr, Arc<AppState>, tokio::task::JoinHandle<()>) {
     let store = Store::open_in_memory().expect("memory store");
-    let state = Arc::new(AppState::new(Some(store), None, ":memory:", config));
+    let state = Arc::new(AppState::new(Some(store), None, ":memory:", config).with_open_mode(true));
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .expect("bind");
@@ -123,6 +123,7 @@ fn hello_msg(user_id: &str, resume: Option<String>) -> ClientMessage {
         existing_tags: Vec::new(),
         protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
         resume_session_id: resume,
+        credential: None,
     }
 }
 

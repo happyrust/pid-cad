@@ -23,7 +23,8 @@ fn fixture_client(name: &str) -> Value {
 #[tokio::test]
 async fn server_scenario_drives_session_from_shared_protocol_fixtures() {
     let store = Store::open_in_memory().expect("memory store");
-    let state = AppState::new(Some(store), None, ":memory:", SessionConfig::default());
+    let state = AppState::new(Some(store), None, ":memory:", SessionConfig::default())
+        .with_open_mode(true);
     let mut conn = Connection::new("127.0.0.1");
 
     // 1. Hello from legacy fixture (no repo_id, no since -> first join).
