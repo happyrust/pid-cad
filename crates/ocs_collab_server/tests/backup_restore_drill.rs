@@ -34,6 +34,7 @@ fn hello(user_id: &str, repo_id: Option<String>, since: Option<i64>) -> ClientMe
         protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
         resume_session_id: None,
         credential: None,
+        libraries: None,
     }
 }
 

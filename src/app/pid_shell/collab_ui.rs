@@ -1555,6 +1555,19 @@ mod tests {
     }
 
     #[test]
+    fn a_library_mismatch_is_named_in_the_collab_zone() {
+        let mut app = pid_app();
+        app.collab.apply(CollabEvent::ReadonlyDowngrade {
+            reason: "内置库与这张图上已有的编辑会话不一致：符号库".into(),
+            holder: None,
+            level: Some("state".into()),
+            code: Some("PERM_DENIED_STATE".into()),
+        });
+        let info = readonly_banner_info(&app).expect("the zone says why it is read-only");
+        assert!(info.reason.contains("符号库"), "{}", info.reason);
+    }
+
+    #[test]
     fn ui_50_peer_join_and_leave_emit_stacked_toasts() {
         let mut app = pid_app();
         app.collab.apply(CollabEvent::PeerJoined(PeerInfo {

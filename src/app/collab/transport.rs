@@ -1249,6 +1249,7 @@ fn run_session(
         protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
         resume_session_id: None,
         credential: None,
+        libraries: Some(crate::pid::builtin_libraries()),
     };
     let wire = send_json(&mut ws, &hello)?;
     log_frame(false, &wire, None);

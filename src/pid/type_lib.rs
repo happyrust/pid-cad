@@ -31,6 +31,12 @@ pub const XRECORD_KEY: &str = "PID_AUTHOR_TYPE_LIB";
 /// 编译内置的默认类型库（`assets/pid-types.json`）。
 const DEFAULT_TYPE_LIB_JSON: &str = include_str!("../../assets/pid-types.json");
 
+/// The built-in type library as it was compiled in, for the collaboration
+/// fingerprint (#97).
+pub(crate) fn builtin_source() -> &'static str {
+    DEFAULT_TYPE_LIB_JSON
+}
+
 /// 一条数据条目正文承载的最大字节数，与 `graph_data::split_text` 的分片
 /// 阈值同口径。统一布局后仅供测试断言引用。
 #[cfg(test)]

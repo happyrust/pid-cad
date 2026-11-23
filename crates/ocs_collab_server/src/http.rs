@@ -2715,6 +2715,7 @@ mod tests {
                 protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
                 resume_session_id: None,
                 credential: None,
+                libraries: None,
             },
             now,
         )
@@ -2815,6 +2816,7 @@ mod tests {
                 protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
                 resume_session_id: None,
                 credential: None,
+                libraries: None,
             },
             now,
         )
@@ -3242,6 +3244,7 @@ mod tests {
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
             credential: None,
+            libraries: None,
         };
         crate::ws::handle_message(&state, &mut conn, hello, ocs_collab::now_unix()).await;
 
@@ -3519,6 +3522,7 @@ mod tests {
                 protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
                 resume_session_id: None,
                 credential: None,
+                libraries: None,
             };
             ws::handle_message(&state, &mut conn, hello, 1_700_000_000).await;
             sessions.push(conn);
@@ -3864,6 +3868,7 @@ mod tests {
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
             credential: None,
+            libraries: None,
         };
         crate::ws::handle_message(state, &mut conn, hello, now).await;
         assert!(conn.session.is_some(), "{user_id} is let in");

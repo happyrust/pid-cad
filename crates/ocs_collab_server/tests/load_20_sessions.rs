@@ -175,6 +175,7 @@ async fn load_20_editing_sessions_and_200_ops_measures_latencies_and_db_size() {
                 protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
                 resume_session_id: None,
                 credential: None,
+                libraries: None,
             },
         )
         .await;

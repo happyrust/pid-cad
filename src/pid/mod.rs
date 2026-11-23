@@ -36,3 +36,38 @@ pub use tag_rule::{HierarchyMode, TagRule};
 pub use type_lib::{
     DataElement, PropertyGroup, TypeLib, TypeLibError, TypeNode, ValueType, XRECORD_KEY,
 };
+
+/// FNV-1a 64, written as hex. Stable across compilers, unlike `DefaultHasher`.
+fn fingerprint(bytes: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// Fingerprints of the three built-in libraries this program was compiled
+/// with (#97). Sent on `hello` and compared with the editing sessions
+/// already on the drawing.
+pub(crate) fn builtin_libraries() -> ocs_collab::protocol::Libraries {
+    ocs_collab::protocol::Libraries {
+        type_library: fingerprint(type_lib::builtin_source().as_bytes()),
+        symbol_library: fingerprint(symbols::builtin_source().as_bytes()),
+        tag_rules: fingerprint(tag_rule::builtin_source().as_bytes()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn builtin_libraries_name_three_distinct_fingerprints() {
+        let libraries = super::builtin_libraries();
+        assert_eq!(libraries.type_library.len(), 16);
+        assert_eq!(libraries.symbol_library.len(), 16);
+        assert_eq!(libraries.tag_rules.len(), 16);
+        assert_ne!(libraries.type_library, libraries.symbol_library);
+        assert_ne!(libraries.symbol_library, libraries.tag_rules);
+        assert_eq!(libraries, super::builtin_libraries(), "stable for one build");
+    }
+}

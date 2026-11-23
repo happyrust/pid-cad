@@ -279,6 +279,7 @@ async fn tls_https_and_wss_non_loopback_collaboration_with_self_signed_cert() {
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
             credential: Some("pass-u1".into()),
+            libraries: None,
         });
         let s1 = match c1.recv_msg() {
             ServerMessage::Welcome {
@@ -305,6 +306,7 @@ async fn tls_https_and_wss_non_loopback_collaboration_with_self_signed_cert() {
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
             credential: Some("pass-u2".into()),
+            libraries: None,
         });
         let _s2 = match c2.recv_msg() {
             ServerMessage::Welcome {

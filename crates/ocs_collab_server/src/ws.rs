@@ -620,6 +620,7 @@ pub async fn handle_message(
         protocol_version,
         resume_session_id,
         credential,
+        libraries,
         ..
     } = &message
     {
@@ -670,6 +671,7 @@ pub async fn handle_message(
             existing_tags,
             resume_session_id.as_deref(),
             credential.as_deref(),
+            libraries.as_ref(),
             now,
         )
         .await;
@@ -798,6 +800,32 @@ fn missed_ops(
 /// them registered, so that no symbol placed by anybody is given one of
 /// them.
 #[allow(clippy::too_many_arguments)]
+/// Names of the built-in libraries whose fingerprints differ from an editing
+/// session already on `drawing_id` (#97). Empty when this client sent none,
+/// or when nobody already on the drawing sent any.
+async fn library_mismatch(
+    state: &AppState,
+    drawing_id: &str,
+    mine: Option<&ocs_collab::protocol::Libraries>,
+) -> Vec<String> {
+    let Some(mine) = mine else {
+        return Vec::new();
+    };
+    let registry = state.sessions.lock().await;
+    let Some(baseline) = registry.all().iter().find(|session| {
+        session.drawing_id == drawing_id && session.is_active() && session.libraries.is_some()
+    }) else {
+        return Vec::new();
+    };
+    let Some(theirs) = baseline.libraries.as_ref() else {
+        return Vec::new();
+    };
+    mine.mismatch_with(theirs)
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
 async fn hello(
     state: &AppState,
     conn: &mut Connection,
@@ -810,6 +838,7 @@ async fn hello(
     existing_tags: &[String],
     resume_session_id: Option<&str>,
     credential: Option<&str>,
+    libraries: Option<&ocs_collab::protocol::Libraries>,
     now: i64,
 ) -> Vec<Reaction> {
     if let Some(store) = &state.store {
@@ -993,7 +1022,10 @@ async fn hello(
     // mode the client asked for. The session then counts as no editor
     // anywhere: it takes no 单人编辑 slot, and is never the one left
     // holding the edit right of a drawing that goes 只读.
-    let mode = if crate::access::role_edits(state, user_id) == Some(false) {
+    let library_mismatch = library_mismatch(state, drawing_id, libraries).await;
+    let mode = if !library_mismatch.is_empty()
+        || crate::access::role_edits(state, user_id) == Some(false)
+    {
         "只读"
     } else {
         mode
@@ -1046,9 +1078,18 @@ async fn hello(
             ]
         }
         OpenOutcome::Opened {
-            session,
+            mut session,
             taken_over,
         } => {
+            session.libraries = libraries.cloned();
+            session.library_mismatch = library_mismatch.clone();
+            {
+                let mut registry = state.sessions.lock().await;
+                if let Some(stored) = registry.get_mut(&session.session_id) {
+                    stored.libraries = session.libraries.clone();
+                    stored.library_mismatch = session.library_mismatch.clone();
+                }
+            }
             let mut reactions = Vec::new();
             for old_session_id in &taken_over {
                 let released = state
@@ -2346,7 +2387,50 @@ mod tests {
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
             credential: None,
+            libraries: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_different_symbol_library_joins_read_only_and_names_it() {
+        let state = state();
+        let libraries = |symbol: &str| {
+            ocs_collab::protocol::Libraries {
+                type_library: "type-a".into(),
+                symbol_library: symbol.into(),
+                tag_rules: "tag-a".into(),
+            }
+        };
+        let mut first = hello("u1", "协同编辑", "plant-a");
+        if let ClientMessage::Hello { libraries: slot, .. } = &mut first {
+            *slot = Some(libraries("sym-a"));
+        }
+        let mut conn_a = conn();
+        let welcomed = handle_message(&state, &mut conn_a, first, T0).await;
+        assert!(
+            sends(&welcomed)
+                .iter()
+                .any(|message| matches!(message, ServerMessage::Welcome { .. })),
+            "{welcomed:?}"
+        );
+
+        let mut second = hello("u2", "协同编辑", "plant-b");
+        if let ClientMessage::Hello { libraries: slot, .. } = &mut second {
+            *slot = Some(libraries("sym-edited"));
+        }
+        let mut conn_b = conn();
+        let reactions = handle_message(&state, &mut conn_b, second, T0 + 1).await;
+        let reason = sends(&reactions).iter().find_map(|message| match message {
+            ServerMessage::ReadonlyDowngrade { reason, .. } => Some(reason.clone()),
+            _ => None,
+        });
+        let reason = reason.expect("the edited build is downgraded");
+        assert!(reason.contains("符号库"), "{reason}");
+        assert!(!reason.contains("类型库"), "{reason}");
+        assert!(!reason.contains("位号规则"), "{reason}");
+        let session = conn_b.session.expect("joined");
+        assert_eq!(session.mode, "只读");
+        assert!(crate::access::write_access(&state, &session).await.is_some());
     }
 
     /// [`hello`], from a client whose copy was aligned against this
@@ -3081,6 +3165,7 @@ mod tests {
                 protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
                 resume_session_id: None,
                 credential: None,
+                libraries: None,
             },
             T0 + 2,
         )

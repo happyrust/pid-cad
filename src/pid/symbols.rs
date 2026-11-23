@@ -31,6 +31,12 @@ pub const SYMBOLS_ENV: &str = "OCS_PID_SYMBOLS";
 /// 编译内置的默认符号库（`assets/pid-symbols.json`）。
 const DEFAULT_SYMBOLS_JSON: &str = include_str!("../../assets/pid-symbols.json");
 
+/// The built-in symbol library as it was compiled in, for the collaboration
+/// fingerprint (#97).
+pub(crate) fn builtin_source() -> &'static str {
+    DEFAULT_SYMBOLS_JSON
+}
+
 /// 符号块名的固定前缀（`VAL-SEM-030` 钉死）。
 pub const BLOCK_PREFIX: &str = "PID_SYM_";
 

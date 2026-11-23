@@ -113,6 +113,17 @@ pub fn role_edits(state: &AppState, user_id: &str) -> Option<bool> {
 /// installation fills in to restrict, and an unseeded server restricts
 /// nothing.
 pub async fn write_access(state: &AppState, session: &Session) -> Option<Denied> {
+    if !session.library_mismatch.is_empty() {
+        return Some(Denied {
+            level: DenialLevel::State,
+            reason: format!(
+                "内置库与这张图上已有的编辑会话不一致：{}",
+                session.library_mismatch.join("、")
+            ),
+            holder: None,
+            effective_node: None,
+        });
+    }
     let store = state.store.as_ref()?;
     // The live editing sessions on the drawing: the single-editor half of
     // the state tier needs them.

@@ -29,6 +29,35 @@ pub fn format_user_label(display_name: &str, user_id: &str) -> String {
     }
 }
 
+/// Fingerprints of the three built-in libraries a client was built with (#97).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Libraries {
+    #[serde(default)]
+    pub type_library: String,
+    #[serde(default)]
+    pub symbol_library: String,
+    #[serde(default)]
+    pub tag_rules: String,
+}
+
+impl Libraries {
+    /// The libraries whose fingerprints differ, in a stable order: 类型库,
+    /// 符号库, 位号规则. Empty when the two builds match.
+    pub fn mismatch_with(&self, other: &Self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.type_library != other.type_library {
+            names.push("类型库");
+        }
+        if self.symbol_library != other.symbol_library {
+            names.push("符号库");
+        }
+        if self.tag_rules != other.tag_rules {
+            names.push("位号规则");
+        }
+        names
+    }
+}
+
 /// A message sent by a client to the server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -81,6 +110,10 @@ pub enum ClientMessage {
         /// Authentication credential/token for `user_id` (#68). Never logged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credential: Option<String>,
+        /// Fingerprints of the built-in type library, symbol library and tag
+        /// rules this client was built with (#97). Absent on an older client.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        libraries: Option<Libraries>,
     },
     /// Keep-alive, expected every 15 s.
     Heartbeat { session_id: String },
@@ -463,6 +496,19 @@ pub mod release_reasons {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_changed_symbol_library_is_named_and_the_others_are_not() {
+        let stock = Libraries {
+            type_library: "t".into(),
+            symbol_library: "s".into(),
+            tag_rules: "r".into(),
+        };
+        let mut edited = stock.clone();
+        edited.symbol_library = "s-edited".into();
+        assert_eq!(edited.mismatch_with(&stock), vec!["符号库"]);
+        assert!(stock.mismatch_with(&stock).is_empty());
+    }
 
     #[test]
     fn hello_round_trips_through_json_with_workspace() {

@@ -124,6 +124,7 @@ fn hello_msg(user_id: &str, resume: Option<String>) -> ClientMessage {
         protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
         resume_session_id: resume,
         credential: None,
+        libraries: None,
     }
 }
 

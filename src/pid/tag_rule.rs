@@ -105,6 +105,19 @@ impl TagRule {
 ///
 /// 每条都是 `unique = true`：唯一键是 `(类型编码, 位号)` 复合键，同类型同
 /// 位号即冲突。
+/// The built-in tag rules as one text, for the collaboration fingerprint (#97).
+/// A change to a prefix, a start number or a join changes the text.
+pub(crate) fn builtin_source() -> String {
+    [
+        "EQUIPMENT\tP-{序号}\t1001",
+        "VALVE\tV-{序号}\t1001",
+        "INSTRUMENT\t{仪表功能}-{序号}\t1001\tjoin=仪表功能",
+        "PIPE_LINE\tL-{序号}\t1001",
+        "PIPE_RUN\t{管线号}-{后缀}\t1\tjoin=管线号\tsuffix",
+    ]
+    .join("\n")
+}
+
 pub fn default_tag_rule(type_code: &str) -> Option<TagRule> {
     let code = type_code.trim().to_ascii_uppercase();
     let rule = match code.as_str() {

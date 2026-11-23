@@ -1030,6 +1030,7 @@ fn harness_hooks_display_name_peer_author_toast_room_claim_and_peer_disconnected
         protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
         resume_session_id: None,
         credential: None,
+        libraries: None,
     })
     .unwrap();
     raw_ws

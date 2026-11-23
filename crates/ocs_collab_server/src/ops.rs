@@ -1016,6 +1016,8 @@ pub fn resolve(
         last_heartbeat: now,
         created_at: now,
         disconnected_at: None,
+        libraries: None,
+        library_mismatch: Vec::new(),
     };
     let mut rooms = LinkedRooms {
         state,
@@ -1072,6 +1074,8 @@ pub fn unpaired_connectors(
         last_heartbeat: 0,
         created_at: 0,
         disconnected_at: None,
+        libraries: None,
+        library_mismatch: Vec::new(),
     };
     let mut rooms = LinkedRooms {
         state,
@@ -1864,6 +1868,7 @@ mod tests {
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
             credential: None,
+            libraries: None,
         };
         handle_message(state, &mut conn, hello, T0).await;
         assert!(conn.session.is_some(), "hello must open a session");
@@ -2019,6 +2024,7 @@ mod tests {
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
             credential: None,
+            libraries: None,
         };
         let welcome = handle_message(&state, &mut late, hello, T0).await;
         let told = welcome
@@ -2605,6 +2611,7 @@ mod tests {
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
             credential: None,
+            libraries: None,
         };
         handle_message(state, &mut conn, hello, T0 + 5).await
     }
@@ -2701,6 +2708,7 @@ mod tests {
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
             credential: None,
+            libraries: None,
         };
         let reactions = handle_message(&state, &mut late, hello, T0 + 5).await;
         let (_, _, replayed) = welcomed(&reactions);
@@ -2858,6 +2866,7 @@ mod tests {
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
             credential: None,
+            libraries: None,
         };
         handle_message(state, &mut conn, hello, T0).await;
         assert!(conn.session.is_some(), "hello must open a session");
@@ -3237,6 +3246,7 @@ mod tests {
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
             credential: None,
+            libraries: None,
         };
         handle_message(state, &mut conn, hello, T0).await;
         assert!(conn.session.is_some(), "hello must open a session");

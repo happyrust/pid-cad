@@ -758,6 +758,7 @@ mod tests {
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             resume_session_id: None,
             credential: None,
+            libraries: None,
         }
     }
 

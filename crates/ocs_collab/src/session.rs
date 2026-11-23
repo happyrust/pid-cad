@@ -65,6 +65,13 @@ pub struct Session {
     /// explicit close frame (#37). `None` while connected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disconnected_at: Option<i64>,
+    /// Built-in library fingerprints this session joined with (#97).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub libraries: Option<crate::protocol::Libraries>,
+    /// Which of those differ from an editing session already on the drawing.
+    /// A non-empty list means this session joined read-only for that reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub library_mismatch: Vec<String>,
 }
 
 impl Session {
@@ -214,6 +221,8 @@ impl SessionRegistry {
             last_heartbeat: now,
             created_at: now,
             disconnected_at: None,
+            libraries: None,
+            library_mismatch: Vec::new(),
         };
         self.sessions.push(session.clone());
         OpenOutcome::Opened {
