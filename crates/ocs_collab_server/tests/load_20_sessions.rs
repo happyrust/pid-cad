@@ -191,19 +191,19 @@ async fn load_20_editing_sessions_and_200_ops_measures_latencies_and_db_size() {
 
     // 2. Claim 20 distinct tags across the 20 editors and measure claim latency.
     let mut claim_latencies_ms = Vec::with_capacity(EDITORS);
-    for i in 0..EDITORS {
+    for (i, client) in clients.iter_mut().enumerate().take(EDITORS) {
         let tag = format!("P-{:04}", 1001 + i);
         let t_start = Instant::now();
-        let sid = clients[i].session_id.clone();
+        let sid = client.session_id.clone();
         WsClient::send_frame(
-            &mut clients[i].stream,
+            &mut client.stream,
             &ClientMessage::Claim {
                 session_id: sid,
                 tag: tag.clone(),
             },
         )
         .await;
-        clients[i].recv_until_claim(&tag).await;
+        client.recv_until_claim(&tag).await;
         claim_latencies_ms.push(t_start.elapsed().as_secs_f64() * 1000.0);
     }
 

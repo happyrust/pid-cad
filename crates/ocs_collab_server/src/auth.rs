@@ -90,7 +90,7 @@ fn hex_decode(hex: &str) -> Option<Vec<u8>> {
         _ => None,
     };
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for chunk in bytes.chunks_exact(2) {
+    for chunk in bytes.as_chunks::<2>().0 {
         let hi = nibble(chunk[0])?;
         let lo = nibble(chunk[1])?;
         out.push((hi << 4) | lo);
@@ -118,7 +118,7 @@ pub fn base64_decode(input: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut out = Vec::with_capacity((cleaned.len() / 4) * 3);
-    for chunk in cleaned.chunks_exact(4) {
+    for chunk in cleaned.as_chunks::<4>().0 {
         let a = val(chunk[0])?;
         let b = val(chunk[1])?;
         out.push((a << 2) | (b >> 4));
@@ -204,7 +204,7 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     }
     padded.extend_from_slice(&bit_len.to_be_bytes());
 
-    for block in padded.chunks_exact(64) {
+    for block in padded.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
         for i in 0..16 {
             w[i] = u32::from_be_bytes([

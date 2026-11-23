@@ -188,7 +188,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, peer_addr: S
                         match classify(&message) {
                             Incoming::Message(client_message) => {
                                 let reactions =
-                                    handle_message(&state, &mut conn, client_message, now_unix())
+                                    handle_message(&state, &mut conn, *client_message, now_unix())
                                         .await;
                                 if let Some(joined) = conn.joined.take() {
                                     subscription = Some(joined);
@@ -445,7 +445,7 @@ async fn wait_for_hello(
         }
         match classify(&message) {
             Incoming::Message(client_message) => {
-                let reactions = handle_message(state, conn, client_message, now_unix()).await;
+                let reactions = handle_message(state, conn, *client_message, now_unix()).await;
                 let opened = conn.session.is_some();
                 if let Some(joined) = conn.joined.take() {
                     *subscription = Some(joined);
@@ -471,7 +471,7 @@ async fn wait_for_hello(
 
 /// One inbound frame, classified for the two read loops.
 enum Incoming {
-    Message(ClientMessage),
+    Message(Box<ClientMessage>),
     /// A text/binary frame that is not a `ClientMessage`.
     Bad,
     Close,
@@ -482,11 +482,11 @@ enum Incoming {
 fn classify(message: &Message) -> Incoming {
     match message {
         Message::Text(text) => match serde_json::from_str::<ClientMessage>(text) {
-            Ok(client_message) => Incoming::Message(client_message),
+            Ok(client_message) => Incoming::Message(Box::new(client_message)),
             Err(_) => Incoming::Bad,
         },
         Message::Binary(bytes) => match serde_json::from_slice::<ClientMessage>(bytes) {
-            Ok(client_message) => Incoming::Message(client_message),
+            Ok(client_message) => Incoming::Message(Box::new(client_message)),
             Err(_) => Incoming::Bad,
         },
         Message::Close(_) => Incoming::Close,

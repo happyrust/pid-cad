@@ -122,7 +122,7 @@ impl TlsWsClient {
         let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).expect("tcp connect");
         tcp.set_read_timeout(Some(Duration::from_secs(5)))
             .expect("read timeout");
-        let server_name = ServerName::try_from(IpAddr::V4(Ipv4Addr::LOCALHOST)).expect("sni");
+        let server_name = ServerName::from(IpAddr::V4(Ipv4Addr::LOCALHOST));
         let conn = ClientConnection::new(client_cfg, server_name).expect("tls client conn");
         let mut tls = StreamOwned::new(conn, tcp);
 
@@ -194,7 +194,7 @@ fn https_get(addr: SocketAddr, path: &str, client_cfg: Arc<ClientConfig>) -> Str
     let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).expect("tcp connect");
     tcp.set_read_timeout(Some(Duration::from_secs(5)))
         .expect("read timeout");
-    let server_name = ServerName::try_from(IpAddr::V4(Ipv4Addr::LOCALHOST)).expect("sni");
+    let server_name = ServerName::from(IpAddr::V4(Ipv4Addr::LOCALHOST));
     let conn = ClientConnection::new(client_cfg, server_name).expect("tls conn");
     let mut tls = StreamOwned::new(conn, tcp);
     write!(
