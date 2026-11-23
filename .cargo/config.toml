@@ -27,8 +27,16 @@ rustflags = [
 
 # Large stack for deep DWG/scene recursion on Windows debug builds (the
 # upstream default of 16 MiB overflows on the deepest sheets).
+#
+# `+crt-static` links the MSVC C/C++ runtime into the binary. Without it the
+# exe imports VCRUNTIME140(_1).dll / MSVCP140.dll and silently fails to start
+# on any machine without the VC++ 2015-2022 Redistributable, and neither the
+# bare exe nor the MSI ships that redistributable.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "link-arg=/STACK:67108864"]
+rustflags = ["-C", "link-arg=/STACK:67108864", "-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
 
 # Thread stacks for everything cargo runs: the test harness's per-test threads
 # overflow the 2 MiB default, and rustc reads the same variable for its own
