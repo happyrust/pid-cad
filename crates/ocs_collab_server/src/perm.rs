@@ -537,14 +537,20 @@ mod tests {
     }
 
     #[test]
-    fn a_user_allow_row_wins_over_a_role_deny_row_on_the_same_node() {
+    fn a_role_deny_row_wins_over_a_user_allow_row_on_the_same_node() {
         let mut doc = seed_doc();
         doc.pbs_acl.push(acl("n-cell-a1", "u-proc", "编辑", true));
         doc.pbs_acl
             .push(acl("n-cell-a1", "工艺设计人员", "编辑", false));
         let store = store_with(doc);
+        // #74: on one node, a deny row wins over an allow row.
         let outcome = check(&store, "u-proc", "d-a1-coop", "编辑图纸");
-        assert!(outcome.decision.allowed, "the user row beats the role row");
+        assert!(!outcome.decision.allowed, "the deny row beats the allow row");
+        assert_eq!(outcome.decision.denied_level, Some(DenialLevel::Pbs));
+        assert_eq!(
+            outcome.decision.code.as_deref(),
+            Some(codes::PERM_DENIED_PBS)
+        );
         assert_eq!(
             outcome.decision.effective_node_id.as_deref(),
             Some("n-cell-a1")
